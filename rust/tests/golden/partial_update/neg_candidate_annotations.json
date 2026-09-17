@@ -1,0 +1,8 @@
+{
+  "accept": false,
+  "blake3": "dac175b4b1e1e559a39c53ffd20da5f6237019adfa60737b5961294b0f25b9e2",
+  "bytes": 4684,
+  "expected_error": "commit_mismatch",
+  "name": "neg_candidate_annotations",
+  "reason": "unsigned Commit annotations must remain absent"
+}

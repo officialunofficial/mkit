@@ -1,0 +1,8 @@
+{
+  "accept": true,
+  "blake3": "a193b40a9505eba5079c3866ed3daa41f9da2ff2e1aa36eab54b46f091fe4a78",
+  "bytes": 4684,
+  "expected_error": null,
+  "name": "ordinary_update",
+  "reason": "canonical ordinary signed partial update"
+}

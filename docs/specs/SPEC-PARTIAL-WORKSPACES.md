@@ -2,14 +2,15 @@
 spec: SPEC-PARTIAL-WORKSPACES
 version: 1
 status: draft-normative
-audience: implementers of portable mkit selected-file snapshot producers and verifiers
+audience: implementers of portable mkit selected-file snapshot, overlay, signing, and update tooling
 ---
 
-# SPEC-PARTIAL-WORKSPACES — portable selected-file snapshots
+# SPEC-PARTIAL-WORKSPACES &mdash; portable selected-file snapshots and updates
 
-Status: **Draft, normative.** This revision specifies only `MKWB` v1 partial
-snapshot bundles and selected-only verification. Replacement overlays, local
-workspace state, update export, and publication are outside this revision.
+Status: **Draft, normative.** This revision specifies `MKWB` v1 partial
+snapshot bundles, authenticated replacement overlays, ordinary Commit signing
+handoff, and `MKWU` v1 explicit update export. Local workspace state, complete
+base recipient admission, and publication are outside this revision.
 
 ## 1. Trust and coverage
 
@@ -103,6 +104,11 @@ MUST NOT raise it while claiming v1 profile conformance.
 | complete bundle | 56 MiB |
 | object records | 65,536 |
 | one canonical object | 16 MiB |
+| changed paths in one update | 256 |
+| Commit message in the partial-update workflow | 4 KiB |
+| raw update pack | 48 MiB |
+| object records in one update pack | 65,536 |
+| complete encoded update | 56 MiB |
 
 All additions and integer conversions MUST be checked. A producer's generic
 object source returns already allocated bytes; source implementations MUST
@@ -194,7 +200,183 @@ A proof-only disclosure that lacks the complete Tree/file materialization
 required here MUST fail as an insufficient witness. There is no metadata-proof
 fallback.
 
-## 8. Errors and security cases
+## 8. Authenticated replacement overlay
+
+An overlay accepts a non-empty batch of replacements against a
+`VerifiedPartialSnapshot`. Each replacement MUST name an exact selected path
+and provide either:
+
+- complete caller-supplied file bytes; or
+- an explicit reference to the complete representation of another file in the
+  same verified snapshot.
+
+The overlay MUST NOT accept a bare caller-supplied object id. It MUST reject the
+whole batch when a destination is duplicated, absent, unselected, a directory,
+or a symlink. New paths, deletions, renames, mode changes, subtree replacement,
+and chunk-only edits are unsupported. A destination's authenticated Blob or
+Executable mode MUST remain unchanged.
+
+Implementations MUST compare validated file content, not only representation
+ids. If supplied bytes or a reused verified representation have the same
+content as the destination, the overlay MUST retain the destination's original
+mode and representation id. It MUST omit that path from the change set. If all
+requested replacements are content no-ops, the operation MUST fail with
+`NoChanges`. This helper rule does not change ordinary mkit's empty-Commit
+rules.
+
+New byte content of at most 1 MiB MUST use one Blob. Larger content MUST use a
+ChunkedBlob with `chunk_size = 0` and the v1 boundaries from SPEC-FASTCDC. A
+valid selected representation reused from another path keeps its existing
+representation and chunk ids. Callers cannot edit or choose individual chunks.
+
+The overlay MUST preserve every untouched `(name, mode, object_id)` Tree entry
+triple exactly, including hidden siblings, symlinks, subtrees, and empty Trees.
+It MUST rebuild changed ancestors bottom-up and apply all sibling changes before
+serializing their common parent. Rewrite contexts are keyed by path occurrence,
+not by original Tree id: if `a/` and `b/` point to the same Tree, editing
+`a/x` MUST NOT alter `b/x`, and independent edits below both paths MUST survive.
+Produced object bytes MAY deduplicate by id.
+
+Overlay construction uses only the verified base object, authenticated complete
+ancestor Trees, and complete selected file representations. It MUST NOT read a
+hidden payload, hidden subtree, parent Commit, network service, or unrelated
+object store. Any failure returns no usable prepared value. The prepared type
+MUST have private construction and private mutable state.
+
+## 9. Ordinary Commit preparation and signing
+
+Commit preparation produces an ordinary unannotated SPEC-OBJECTS Commit with:
+
+- `tree_hash` equal to the prepared overlay root;
+- exactly one parent, equal to the verified base id, whether that base is a
+  Commit or Remix;
+- caller-supplied author, signer public key, message, and timestamp;
+- zero `message_hash` and `content_digest`; and
+- a zero signature for the signing handoff.
+
+The message MUST fit the active limit, at most 4 KiB for the v1 profile.
+Preparation does not require `author` to equal `signer`. Identity binding,
+signer trust, key custody, owner policy, permissions, clocks, grants, and remote
+services remain application concerns.
+
+The caller signs the prepared Commit through the existing SPEC-SIGNING Commit
+domain and interface. No new signing domain or signature field exists. Before
+export, an implementation MUST receive the expected unsigned Commit explicitly
+alongside the verified base, prepared overlay, and signed Commit. It MUST:
+
+1. require the unsigned root and sole parent to equal the prepared root and
+   verified base;
+2. require its annotations and signature to be zero;
+3. require the signed Commit to equal every unsigned field exactly after only
+   its signature is zeroed; and
+4. strictly verify the signed Commit under its embedded signer.
+
+The exporter MUST reject author, signer, message, timestamp, root, parent,
+annotation, or signature substitution. It MUST NOT infer those fields from the
+tree-only prepared edit.
+
+## 10. Update container format
+
+`MKWU` is a bounded portable carrier, not an mkit object kind, closure format,
+authorization token, or publication request. Its change manifest is unsigned
+contextual metadata. The signed candidate Commit authenticates its parent,
+root, authorship fields, and signer under SPEC-SIGNING.
+
+As with `MKWB`, fixed-width integers are **big-endian**, vector and byte-string
+lengths use minimal unsigned LEB128 varints, and fixed arrays are raw. The
+`pack_length` field is followed by the ordinary byte-vector encoding of
+`pack_bytes`, so the wire contains both the fixed-width length and a minimal
+LEB128 vector length. Both lengths MUST equal the actual remaining pack bytes.
+
+```text
+magic: [u8; 4] = "MKWU"
+version: u8 = 1
+base_id: [u8; 32]
+candidate_id: [u8; 32]
+changes: Vec<Change>
+  Change {
+    path: Vec<Component>
+    Component: Vec<u8>
+    old_mode: u8
+    old_id: [u8; 32]
+    new_id: [u8; 32]
+  }
+pack_hash: [u8; 32]
+pack_length: u64 BE
+pack_bytes: Vec<u8>
+```
+
+`old_mode` uses the exact SPEC-OBJECTS §4.2 values and MUST be `0x01` Blob
+or `0x04` Executable. No second mode mapping is defined. `old_id` and `new_id`
+MUST differ. Paths obey §3 and MUST be strictly increasing by joined raw path
+bytes. Duplicates are invalid. A conforming encoder emits at least one and at
+most 256 changes.
+
+`pack_hash` is the SPEC-PACKFILE transport identity: BLAKE3 over the complete
+pack bytes, including the pack trailer. It is distinct from that trailer. A
+decoder MUST reject wrong magic/version, non-minimal or overflowing varints,
+invalid paths or modes, duplicate/unsorted changes, length mismatch,
+pack-identity mismatch, truncation, and bytes after the declared pack.
+
+## 11. Exact raw-object inventory
+
+The embedded pack MUST be a SPEC-PACKFILE v1 raw-only pack. Every entry type is
+`0x00`; compressed and delta entries are invalid. Entries MUST be strictly
+increasing by their recomputed type-dependent object id, with no duplicates.
+Each payload MUST be a canonical storable SPEC-OBJECTS object whose recomputed
+id matches its inventory position. A Tree or ChunkedBlob id uses
+SPEC-MERKLE-OBJECTS, not flat BLAKE3 of canonical bytes.
+
+The inventory is exactly the deduplicated union of:
+
+1. the ordinary signed candidate Commit;
+2. every rebuilt Tree on a changed path from the candidate root; and
+3. every changed file's complete Blob or ChunkedBlob representation and, for a
+   ChunkedBlob, every referenced Blob chunk.
+
+Rule 3 applies even when the representation or chunks were present in the
+selected input, were reused from another selected path, already exist in a
+recipient or global store, or appear under another changed path. Deduplication
+is only within the output pack. An exporter MUST NOT omit retained ids based on
+external store membership.
+
+The pack MUST NOT add the base object, parent history, hidden payloads, hidden
+subtree closure, unchanged selected representations, or unrelated objects merely
+to make an ordinary closure walk complete. Exporters MUST NOT use full
+closure-difference push planning. A decoded update alone therefore makes no
+snapshot-closure or history-closure claim.
+
+The candidate MUST be a strictly valid Commit with exactly one parent equal to
+`base_id`; `candidate_id` MUST equal its type-dependent id. Walking each changed
+path through packed rebuilt Trees MUST end at an entry whose mode equals
+`old_mode` and whose object id equals `new_id`. The complete new representation
+and chunks MUST be present. The derived inventory MUST equal the pack inventory
+exactly; missing and extra objects are invalid.
+
+These checks do not authenticate each `old_id` against a complete retained base
+or decide whether a ref may move. A later complete-base recipient validates the
+actual old-to-new diff and resulting closure before any publication. That
+separation does not weaken the exporter's requirement to derive `old_id` from
+the verified selected base.
+
+## 12. Resource accounting
+
+The §4 limits apply independently to snapshot and update operations. Overlay
+code MUST validate caller byte lengths before avoidable copies or chunking and
+count replacement lengths per occurrence, even when representations deduplicate.
+Generated objects, canonical bytes, metadata, object count, raw-pack entry
+framing, pack header/trailer, update manifest, both pack lengths, and complete
+update framing MUST be charged with checked arithmetic as soon as each cost is
+known. Implementations MUST stop at the first detectable resource failure; they
+MUST NOT build an oversized object set or pack and reject only afterward.
+
+The raw pack is limited to 48 MiB and 65,536 objects. The complete `MKWU` bytes
+are limited to 56 MiB. Each canonical object retains §4's 16 MiB cap. A caller
+MAY lower these limits but MUST NOT raise them while claiming v1 profile
+conformance. These bounds do not change the larger ordinary SPEC-PACKFILE limits
+or guarantee exact process RSS.
+
+## 13. Errors and security cases
 
 Implementations expose typed failures including unsupported version,
 non-canonical bytes, base/selection mismatch, insufficient witness, wrong
@@ -206,15 +388,31 @@ missing, or mode-substituted Trees; missing/wrong chunks and lengths; duplicate,
 trailing, and non-minimal bytes; unsolicited payload/history; shared ids with
 per-edge checks; over-limit counts/lengths; valid alternative fixed/CDC
 representations; and a source proving hidden subtrees/payloads were not read.
+Overlay/update cases cover batch convergence and repeated Tree ids at distinct
+path occurrences, untouched hidden triples, alternative-representation no-ops,
+canonical chunking, signed-field substitution, raw inventory completeness,
+wrong update lengths/hash, duplicate/extra entries, trailing bytes, and
+compressed/delta pack entries. A malformed fixture MUST otherwise be complete
+and valid so its intended defect determines rejection.
 
 Ordinary snapshot closure verification over a valid partial object set MUST
 still report hidden reachable objects as missing. Selected verification never
 changes or weakens the meaning of complete closure.
 
-## 9. Golden vectors
+Protocol validity is independent of permission. No result in this document is a
+grant, owner claim, trusted timestamp, service admission, ref publication, or
+makechain-specific authorization.
+
+## 14. Golden vectors
 
 `rust/tests/golden/partial_workspace/` contains `plain_file`, `chunked_file`,
 and `shared_ancestor` accepts plus independently encoded malformed/contextual
 rejects. Each `.bin` has a `.json` sidecar and is pinned by `MANIFEST.txt`.
 `golden_partial_workspace.rs` consumes committed files without running the
 producer.
+
+`rust/tests/golden/partial_update/` contains deterministic accepts plus
+independently formed rejects for length/hash, duplicate/extra inventory,
+trailing bytes, and compressed/delta entries. Each `.bin` has a `.json`
+sidecar and is pinned by `MANIFEST.txt`. `golden_partial_update.rs` consumes
+only committed artifacts when `MKIT_WRITE_GOLDEN` is unset.

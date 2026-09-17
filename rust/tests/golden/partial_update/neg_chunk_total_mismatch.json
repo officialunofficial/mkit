@@ -1,0 +1,8 @@
+{
+  "accept": false,
+  "blake3": "5f02b0f34dd229b5a9c5447c4e7dbc1c93d453e058520ed59fbbd0be1258966c",
+  "bytes": 262936,
+  "expected_error": "invalid_chunk_layout",
+  "name": "neg_chunk_total_mismatch",
+  "reason": "canonical signed graph has a ChunkedBlob size mismatch"
+}

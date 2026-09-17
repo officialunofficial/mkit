@@ -4,13 +4,18 @@
 //! does not establish signer identity trust, host permission, or full closure.
 
 mod bundle;
+mod collector;
 mod limits;
+mod overlay;
+mod update;
 mod verify;
 
 use crate::object::TreeEntry;
 
 pub use bundle::{PartialObject, PartialSnapshotBundle};
 pub use limits::PartialLimits;
+pub use overlay::{FileReplacement, PreparedPartialEdit, prepare_partial_commit, replace_files};
+pub use update::{PartialUpdate, export_partial_update};
 pub use verify::{
     PartialCoverage, SelectedFile, VerifiedPartialSnapshot, VerifiedTree, build_partial_snapshot,
     verify_partial_snapshot,
@@ -48,6 +53,14 @@ pub enum PartialError {
     WorkspaceTooLarge,
     #[error("validation count/depth budget exceeded")]
     ValidationBudgetExceeded,
+    #[error("the replacement batch does not change any selected file")]
+    NoChanges,
+    #[error("the signed commit does not exactly match the prepared unsigned commit")]
+    CommitMismatch,
+    #[error("the partial update exceeds its configured bound")]
+    SubmissionTooLarge,
+    #[error("the partial update pack is malformed or not raw-only")]
+    InvalidUpdatePack,
     #[error("selected path does not satisfy the partial-workspace profile")]
     InvalidPath,
     #[error(transparent)]

@@ -1,0 +1,8 @@
+{
+  "accept": false,
+  "blake3": "4dd82a99a32f779a94dd8c83502e3a60bfb21007625887e3d9af4820c0cff812",
+  "bytes": 4704,
+  "expected_error": "invalid_update_pack",
+  "name": "neg_extra_object",
+  "reason": "object outside exact inventory"
+}

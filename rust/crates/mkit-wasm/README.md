@@ -65,6 +65,22 @@ Content-addressing and objects:
 - `commit_encode_and_sign(...)` &mdash; encode and sign a commit object.
 - `commit_verify(commit_bytes) -> bool` &mdash; verify a signed commit.
 
+Portable selected-file editing:
+- `partial_edit_and_export(...) -> PartialEditResultJs` &mdash; verify an `MKWB`
+  bundle against an independently supplied base and exact selection, replace
+  selected regular/executable files, sign an ordinary one-parent Commit, and
+  export the explicit raw-only `MKWU` update. Paths are JSON arrays of
+  hex-encoded components. Each replacement supplies `bytes_hex` or names a
+  `reuse_selected` path; there is no bare object-id graft API.
+- The result exposes `root_hex`, `candidate_hex`, `signed_commit_bytes`,
+  `update_bytes`, and `coverage` (`"selected-only"`). Failures throw a
+  JavaScript error whose message is JSON `{ "code", "message" }`.
+- A Rust-owned copy of the 32-byte Ed25519 seed is held in zeroizing storage
+  only for the signing call. The binding cannot clear its immutable transport
+  view, so the caller remains responsible for clearing the JavaScript
+  `ArrayBuffer`. `author_kind`/`author_bytes` are independent of the signer,
+  matching the ordinary Commit protocol.
+
 Signing primitives:
 - `keypair_from_seed(seed_hex)` / `keypair_generate()` &mdash; Ed25519 keys.
 - `sign_bytes_commit_domain(seed_hex, bytes) -> sig_hex`.

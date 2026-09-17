@@ -1,0 +1,8 @@
+{
+  "accept": false,
+  "blake3": "36ce07da66acb79fb9d969c812cb529b9c481ad324927775329bd36b25840d0a",
+  "bytes": 8795,
+  "expected_error": "invalid_update_pack",
+  "name": "neg_duplicate_object",
+  "reason": "duplicate raw object id"
+}

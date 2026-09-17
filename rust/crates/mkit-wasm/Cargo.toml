@@ -36,9 +36,10 @@ workspace = true
 # `default-features = false`: mkit-core's default feature set includes
 # `pack-zstd` (SPEC-PACKFILE v2 per-entry compression, issue #646),
 # which pulls `zstd-sys` — a C lib that cannot target
-# wasm32-unknown-unknown. mkit-wasm's bindings never call into
-# `pack.rs` (see `src/`), so opting out costs nothing here and keeps
-# this crate's wasm32 build zstd-sys-free, matching the same
+# wasm32-unknown-unknown. The partial-update binding calls only the
+# explicitly raw-only v1 pack writer, while the other bindings do not
+# construct packs. Opting out therefore preserves the required wire bytes and
+# keeps this crate's wasm32 build zstd-sys-free, matching the same
 # wasm-avoidance rationale already documented on mkit-core's
 # `commonware-storage` dependency.
 [dependencies]

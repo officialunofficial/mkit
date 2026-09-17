@@ -193,3 +193,11 @@ test = false
 doc = false
 bench = false
 required-features = ["libfuzzer"]
+
+[[bin]]
+name = "partial_overlay"
+path = "fuzz_targets/partial_overlay.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]

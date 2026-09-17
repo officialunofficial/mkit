@@ -1,0 +1,8 @@
+{
+  "accept": false,
+  "blake3": "e24d028b5c49ae7f1be2850d7df09abf7a3cca64d91187cb9d4ad81366cc7c64",
+  "bytes": 4684,
+  "expected_error": "invalid_update_pack",
+  "name": "neg_v2_raw_pack",
+  "reason": "v2 pack forbidden even when every entry is raw"
+}

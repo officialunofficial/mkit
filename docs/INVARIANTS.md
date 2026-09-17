@@ -27,6 +27,34 @@ exact inventory, hidden-source reads and incomplete ordinary closure;
 `rust/crates/mkit-core/tests/golden_partial_workspace.rs`; and the bounded
 `partial_workspace` fuzz target.
 
+## Partial edits preserve untouched commitments and export explicit bytes
+
+**Always:** a replacement overlay changes only authenticated selected
+regular/executable file content, preserves every untouched Tree entry triple and
+destination mode, and rebuilds ancestors by path occurrence. Its `MKWU` export
+contains exactly the signed ordinary Commit, rebuilt Trees, and every changed
+file representation and chunk in an id-sorted raw-only pack. Reused or
+previously present changed-file bytes are never omitted because another store
+already has their ids.
+
+**Because:** a selected-only client can preserve hidden commitments but cannot
+inspect hidden data or run a full closure-difference plan. Tree ids reused at
+different paths are distinct edit contexts, and global-store dedup would turn an
+explicit update into an unauthenticated dependency on hidden recipient state.
+
+**If violated:** one edit can mutate another path that shared its old Tree,
+omitted data can be mistaken for deletion, modes or hidden siblings can change,
+or a recipient can accept an update whose changed content was never supplied.
+
+**Enforced by:** `rust/crates/mkit-core/tests/partial_edit.rs` tests
+`occurrence_rebuild_preserves_hidden_triples_and_exports_complete_raw_inventory`,
+`one_sided_edit_of_shared_tree_keeps_other_occurrence_unchanged`,
+`sibling_and_nested_edits_converge_without_overwriting`,
+`selected_representation_reuse_exports_even_when_already_in_base`, and
+`large_replacement_uses_canonical_writer_and_substitution_rejects`; plus the
+bounded `partial_overlay` fuzz target's deterministic replay, canonical-object,
+mode, and untouched-triple oracles.
+
 ## Git audit establishes correspondence without a signing key
 
 **Always:** imported graph edges and translated unsigned fields are derived
