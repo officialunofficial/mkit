@@ -243,6 +243,14 @@ hidden payload, hidden subtree, parent Commit, network service, or unrelated
 object store. Any failure returns no usable prepared value. The prepared type
 MUST have private construction and private mutable state.
 
+For export inventory, dependencies are retained once per unique object id, and
+a reused representation's chunk occurrences are traversed at most once no
+matter how many destinations use it. Repeated chunk occurrences remain part of
+that representation's validated layout and per-destination content accounting;
+inventory deduplication does not collapse those semantic occurrences. A
+semantic no-op MUST NOT retain or traverse export dependencies after equality
+is established.
+
 ## 9. Ordinary Commit preparation and signing
 
 Commit preparation produces an ordinary unannotated SPEC-OBJECTS Commit with:
@@ -375,6 +383,27 @@ are limited to 56 MiB. Each canonical object retains §4's 16 MiB cap. A caller
 MAY lower these limits but MUST NOT raise them while claiming v1 profile
 conformance. These bounds do not change the larger ordinary SPEC-PACKFILE limits
 or guarantee exact process RSS.
+
+Every operation MUST apply the limits supplied to that operation; provenance
+from a verified snapshot or prepared edit does not establish compliance with a
+later caller's stricter bounds. Commit preparation MUST check the candidate's
+canonical object size. Before allocating the raw pack, export MUST recheck the
+candidate, rebuilt Trees, reused and generated file representations/chunks,
+changed-file occurrence totals, path/change counts, object count, raw-pack
+framing, and complete update framing. Consequently, an update successfully
+exported and encoded with one limit set MUST be accepted by the `MKWU` decoder
+with that same set, absent mutation.
+
+The base-object, witness-byte, Tree-visit, bundle-byte, and snapshot object-count
+limits apply only while producing or verifying `MKWB`; they are not hidden
+second caps on `MKWU`. The path profile, changed-file per-file and aggregate
+bytes, Tree object/entry bounds, canonical object size, Commit message, update
+object count, raw pack, and complete update limits apply to update production
+and decoding. Unique retained dependency identities and generated objects share
+one incrementally enforced update-object and exact raw-entry-framing budget;
+the two sources MUST NOT each consume an independent full allowance before
+their union is checked. Collection-node allocator overhead is not an exact RSS
+measurement.
 
 ## 13. Errors and security cases
 

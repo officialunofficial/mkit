@@ -1,5 +1,7 @@
 //! Bounded, local-only object collection for partial edits.
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
@@ -12,9 +14,15 @@ use super::{PartialError, PartialLimits};
 const PACK_FIXED_BYTES: usize = 12 + 32;
 const PACK_ENTRY_FRAMING: usize = 1 + 4;
 
+#[cfg(test)]
+thread_local! {
+    static COLLECTED_OBJECTS: Cell<usize> = const { Cell::new(0) };
+}
+
 #[derive(Default)]
 struct State {
     objects: BTreeMap<Hash, Vec<u8>>,
+    inventory_sizes: BTreeMap<Hash, usize>,
     pack_bytes: usize,
     failure: Option<CollectorFailure>,
 }
@@ -42,6 +50,7 @@ impl BoundedCollector {
         Ok(Self {
             state: Mutex::new(State {
                 objects: BTreeMap::new(),
+                inventory_sizes: BTreeMap::new(),
                 pack_bytes: PACK_FIXED_BYTES,
                 failure: None,
             }),
@@ -55,13 +64,34 @@ impl BoundedCollector {
         self.state.into_inner().expect("collector mutex").objects
     }
 
-    pub(crate) fn object_bytes(&self, id: &Hash) -> Option<Vec<u8>> {
-        self.state
-            .lock()
-            .expect("collector mutex")
-            .objects
-            .get(id)
-            .cloned()
+    /// Reserve a borrowed verified object in the same output budget used by
+    /// subsequently generated objects, without copying its canonical bytes.
+    pub(crate) fn reserve(&self, id: Hash, bytes: &[u8]) -> Result<(), PartialError> {
+        if bytes.len() > self.max_object_bytes {
+            return Err(PartialError::SubmissionTooLarge);
+        }
+        let mut state = self.state.lock().expect("collector mutex");
+        if let Some(existing_len) = state.inventory_sizes.get(&id) {
+            return if *existing_len == bytes.len() {
+                Ok(())
+            } else {
+                Err(PartialError::NonCanonical)
+            };
+        }
+        if state.inventory_sizes.len() >= self.max_objects {
+            return Err(PartialError::ValidationBudgetExceeded);
+        }
+        let next = state
+            .pack_bytes
+            .checked_add(PACK_ENTRY_FRAMING)
+            .and_then(|n| n.checked_add(bytes.len()))
+            .ok_or(PartialError::SubmissionTooLarge)?;
+        if next > self.max_pack_bytes {
+            return Err(PartialError::SubmissionTooLarge);
+        }
+        state.pack_bytes = next;
+        state.inventory_sizes.insert(id, bytes.len());
+        Ok(())
     }
 
     pub(crate) fn translate_error(&self, error: StoreError) -> PartialError {
@@ -99,25 +129,35 @@ impl ObjectSink for BoundedCollector {
             }
             return Ok(id);
         }
-        if state.objects.len() >= self.max_objects {
-            state.failure = Some(CollectorFailure::Count);
-            return Err(StoreError::ObjectTooLarge);
-        }
-        let next = state
-            .pack_bytes
-            .checked_add(PACK_ENTRY_FRAMING)
-            .and_then(|n| n.checked_add(total))
-            .ok_or(StoreError::ObjectTooLarge)?;
-        if next > self.max_pack_bytes {
-            state.failure = Some(CollectorFailure::Size);
-            return Err(StoreError::ObjectTooLarge);
+        if let Some(existing_len) = state.inventory_sizes.get(&id) {
+            if *existing_len != total {
+                state.failure = Some(CollectorFailure::Size);
+                return Err(StoreError::ObjectTooLarge);
+            }
+        } else {
+            if state.inventory_sizes.len() >= self.max_objects {
+                state.failure = Some(CollectorFailure::Count);
+                return Err(StoreError::ObjectTooLarge);
+            }
+            let next = state
+                .pack_bytes
+                .checked_add(PACK_ENTRY_FRAMING)
+                .and_then(|n| n.checked_add(total))
+                .ok_or(StoreError::ObjectTooLarge)?;
+            if next > self.max_pack_bytes {
+                state.failure = Some(CollectorFailure::Size);
+                return Err(StoreError::ObjectTooLarge);
+            }
+            state.pack_bytes = next;
+            state.inventory_sizes.insert(id, total);
         }
         let mut bytes = Vec::with_capacity(total);
         for part in parts {
             bytes.extend_from_slice(part);
         }
-        state.pack_bytes = next;
         state.objects.insert(id, bytes);
+        #[cfg(test)]
+        COLLECTED_OBJECTS.with(|count| count.set(count.get() + 1));
         Ok(id)
     }
 
@@ -128,6 +168,16 @@ impl ObjectSink for BoundedCollector {
             .objects
             .contains_key(id)
     }
+}
+
+#[cfg(test)]
+pub(super) fn reset_collected_object_count() {
+    COLLECTED_OBJECTS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(super) fn collected_object_count() -> usize {
+    COLLECTED_OBJECTS.with(Cell::get)
 }
 
 fn parts_equal(existing: &[u8], parts: &[&[u8]], total: usize) -> bool {

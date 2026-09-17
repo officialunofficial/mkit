@@ -1,5 +1,7 @@
 //! `MKWU` v1 explicit raw-object partial update carrier.
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::hash::Hash;
@@ -8,7 +10,7 @@ use crate::pack::{PackEntries, PackEntry, PackWriter, pack_key};
 use crate::serialize::{deserialize, serialize};
 use crate::sign::verify_commit;
 
-use super::overlay::{PreparedChange, PreparedPartialEdit};
+use super::overlay::{PreparedChange, PreparedPartialEdit, validate_prepared_output};
 use super::verify::{
     add_chunk_len, preflight_file, preflight_tree, validate_chunk_occurrence,
     validate_manifest_size,
@@ -18,6 +20,12 @@ use super::{PartialError, PartialLimits, PartialPath, VerifiedPartialSnapshot, v
 const MAGIC: &[u8; 4] = b"MKWU";
 const VERSION: u8 = 1;
 const FIXED_WITHOUT_CHANGES_OR_PACK: usize = 5 + 32 + 32 + 32 + 8;
+
+#[cfg(test)]
+thread_local! {
+    static PACK_BUILDS: Cell<usize> = const { Cell::new(0) };
+    static DECODE_CHUNK_OCCURRENCES: Cell<usize> = const { Cell::new(0) };
+}
 
 /// Portable explicit raw-object update. It is a carrier, not an mkit object,
 /// a closure claim, or publication authorization.
@@ -202,6 +210,7 @@ pub fn export_partial_update(
     if !limits.is_v1_subset() {
         return Err(PartialError::ValidationBudgetExceeded);
     }
+    validate_prepared_output(verified, prepared, limits)?;
     if prepared.base_id != *verified.base_id()
         || expected_unsigned.tree_hash != prepared.root_id
         || expected_unsigned.parents != [*verified.base_id()]
@@ -220,62 +229,39 @@ pub fn export_partial_update(
 
     let candidate_bytes =
         serialize(&Object::Commit(signed.clone())).map_err(|_| PartialError::NonCanonical)?;
+    if candidate_bytes.len() > limits.max_object_bytes {
+        return Err(PartialError::SubmissionTooLarge);
+    }
+    preflight_candidate(&candidate_bytes, limits)?;
     let candidate_id = id_from_object(&Object::Commit(signed.clone()), &candidate_bytes);
-    let mut predicted_pack_len = prepared
-        .produced
-        .values()
-        .try_fold(12usize + 32, |total, bytes| {
-            charge_raw_entry(total, bytes.len(), limits)
-        })?;
-    let mut predicted_objects = prepared.produced.len();
-    if !prepared.produced.contains_key(&candidate_id) {
-        predicted_pack_len = charge_raw_entry(predicted_pack_len, candidate_bytes.len(), limits)?;
-        predicted_objects += 1;
-    }
-    if predicted_objects > limits.max_update_objects {
-        return Err(PartialError::ValidationBudgetExceeded);
-    }
-    let mut inventory = prepared.produced.clone();
-    insert_exact(&mut inventory, candidate_id, candidate_bytes)?;
-    for change in &prepared.changes {
-        for id in &change.dependency_ids {
-            if let Some(bytes) = verified.object_bytes(id) {
-                if let Some(existing) = inventory.get(id) {
-                    if existing.as_slice() != bytes {
-                        return Err(PartialError::NonCanonical);
-                    }
-                } else {
-                    predicted_pack_len = charge_raw_entry(predicted_pack_len, bytes.len(), limits)?;
-                    predicted_objects += 1;
-                    if predicted_objects > limits.max_update_objects {
-                        return Err(PartialError::ValidationBudgetExceeded);
-                    }
-                    inventory.insert(*id, bytes.to_vec());
-                }
-            } else if !inventory.contains_key(id) {
-                return Err(PartialError::InsufficientWitness);
-            }
-        }
-    }
-
     let changes = prepared
         .changes
         .iter()
         .map(update_change)
         .collect::<Vec<_>>();
+    let mut predicted_pack_len = 12usize + 32;
+    let mut inventory = BTreeMap::new();
+    for (id, bytes) in &prepared.produced {
+        insert_borrowed(&mut inventory, *id, bytes, &mut predicted_pack_len, limits)?;
+    }
+    for id in &prepared.dependency_ids {
+        let bytes = verified
+            .object_bytes(id)
+            .ok_or(PartialError::InsufficientWitness)?;
+        insert_borrowed(&mut inventory, *id, bytes, &mut predicted_pack_len, limits)?;
+    }
+    insert_borrowed(
+        &mut inventory,
+        candidate_id,
+        &candidate_bytes,
+        &mut predicted_pack_len,
+        limits,
+    )?;
     if encoded_len(&changes, predicted_pack_len)? > limits.max_update_bytes {
         return Err(PartialError::SubmissionTooLarge);
     }
 
-    let mut writer = PackWriter::new_raw_only();
-    for (id, bytes) in &inventory {
-        writer
-            .push_raw(*id, bytes)
-            .map_err(|_| PartialError::InvalidUpdatePack)?;
-    }
-    let pack_bytes = writer
-        .finish()
-        .map_err(|_| PartialError::InvalidUpdatePack)?;
+    let pack_bytes = write_pack(&inventory)?;
     if pack_bytes.len() != predicted_pack_len {
         return Err(PartialError::InvalidUpdatePack);
     }
@@ -289,6 +275,28 @@ pub fn export_partial_update(
     // Encoding is the final exact framing check; no oversized output escapes.
     update.encode(limits)?;
     Ok(update)
+}
+
+fn write_pack(inventory: &BTreeMap<Hash, &[u8]>) -> Result<Vec<u8>, PartialError> {
+    #[cfg(test)]
+    PACK_BUILDS.with(|builds| builds.set(builds.get() + 1));
+    let mut writer = PackWriter::new_raw_only();
+    for (id, bytes) in inventory {
+        writer
+            .push_raw(*id, bytes)
+            .map_err(|_| PartialError::InvalidUpdatePack)?;
+    }
+    writer.finish().map_err(|_| PartialError::InvalidUpdatePack)
+}
+
+#[cfg(test)]
+pub(super) fn reset_pack_build_count() {
+    PACK_BUILDS.with(|builds| builds.set(0));
+}
+
+#[cfg(test)]
+pub(super) fn pack_build_count() -> usize {
+    PACK_BUILDS.with(Cell::get)
 }
 
 fn inspect_inventory(
@@ -497,9 +505,6 @@ fn validate_changed_representation(
     limits: &PartialLimits,
 ) -> Result<usize, PartialError> {
     if let Some(len) = cache.get(&id) {
-        if let Some(Object::ChunkedBlob(manifest)) = objects.get(&id) {
-            expected.extend(manifest.chunks.iter().copied());
-        }
         return Ok(*len);
     }
     let len = match objects.get(&id) {
@@ -508,6 +513,7 @@ fn validate_changed_representation(
             validate_manifest_size(manifest, limits)?;
             let mut sum = 0u64;
             for (index, chunk_id) in manifest.chunks.iter().enumerate() {
+                note_decode_chunk_occurrences(1);
                 expected.insert(*chunk_id);
                 let Some(Object::Blob(chunk)) = objects.get(chunk_id) else {
                     return Err(PartialError::InvalidUpdatePack);
@@ -527,6 +533,24 @@ fn validate_changed_representation(
     }
     cache.insert(id, len);
     Ok(len)
+}
+
+#[cfg(test)]
+fn note_decode_chunk_occurrences(count: usize) {
+    DECODE_CHUNK_OCCURRENCES.with(|occurrences| occurrences.set(occurrences.get() + count));
+}
+
+#[cfg(not(test))]
+fn note_decode_chunk_occurrences(_count: usize) {}
+
+#[cfg(test)]
+pub(super) fn reset_decode_chunk_occurrences() {
+    DECODE_CHUNK_OCCURRENCES.with(|occurrences| occurrences.set(0));
+}
+
+#[cfg(test)]
+pub(super) fn decode_chunk_occurrences() -> usize {
+    DECODE_CHUNK_OCCURRENCES.with(Cell::get)
 }
 
 fn validate_update_shape(
@@ -558,16 +582,22 @@ fn update_change(change: &PreparedChange) -> UpdateChange {
     }
 }
 
-fn insert_exact(
-    objects: &mut BTreeMap<Hash, Vec<u8>>,
+fn insert_borrowed<'a>(
+    objects: &mut BTreeMap<Hash, &'a [u8]>,
     id: Hash,
-    bytes: Vec<u8>,
+    bytes: &'a [u8],
+    predicted_pack_len: &mut usize,
+    limits: &PartialLimits,
 ) -> Result<(), PartialError> {
     if let Some(existing) = objects.get(&id) {
-        if existing != &bytes {
+        if *existing != bytes {
             return Err(PartialError::NonCanonical);
         }
     } else {
+        if objects.len() >= limits.max_update_objects {
+            return Err(PartialError::ValidationBudgetExceeded);
+        }
+        *predicted_pack_len = charge_raw_entry(*predicted_pack_len, bytes.len(), limits)?;
         objects.insert(id, bytes);
     }
     Ok(())

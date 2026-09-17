@@ -35,7 +35,12 @@ destination mode, and rebuilds ancestors by path occurrence. Its `MKWU` export
 contains exactly the signed ordinary Commit, rebuilt Trees, and every changed
 file representation and chunk in an id-sorted raw-only pack. Reused or
 previously present changed-file bytes are never omitted because another store
-already has their ids.
+already has their ids. Reused dependency identities are retained and traversed
+once per distinct representation rather than once per destination, and share a
+single incremental output budget with generated objects, while file lengths
+remain occurrence-counted. Export revalidates every output-applicable
+active limit before pack construction, so its encoded result decodes under the
+same limits.
 
 **Because:** a selected-only client can preserve hidden commitments but cannot
 inspect hidden data or run a full closure-difference plan. Tree ids reused at
@@ -51,9 +56,13 @@ or a recipient can accept an update whose changed content was never supplied.
 `one_sided_edit_of_shared_tree_keeps_other_occurrence_unchanged`,
 `sibling_and_nested_edits_converge_without_overwriting`,
 `selected_representation_reuse_exports_even_when_already_in_base`, and
-`large_replacement_uses_canonical_writer_and_substitution_rejects`; plus the
+`large_replacement_uses_canonical_writer_and_substitution_rejects`,
+`export_revalidates_stricter_file_and_tree_limits`, and
+`candidate_object_and_framing_limits_round_trip_at_exact_bounds`; the private
+`dependency_retention_is_unique_across_reused_destinations` structural oracle;
+plus the
 bounded `partial_overlay` fuzz target's deterministic replay, canonical-object,
-mode, and untouched-triple oracles.
+mode, untouched-triple, and exact/over aggregate-content boundary oracles.
 
 ## Git audit establishes correspondence without a signing key
 

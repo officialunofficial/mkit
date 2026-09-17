@@ -657,22 +657,27 @@ pub fn partial_overlay_one_iteration(input: &[u8]) {
 }
 
 pub fn partial_overlay_one_iteration_with(input: &[u8], fixture: &PartialOverlayFixture) {
-    use mkit_core::object::{EntryMode, Object, id_from_object};
-    use mkit_core::{PartialLimits, replace_files};
-
-    let input = &input[..input.len().min(MAX_INPUT)];
-    let replacements = overlay_replacements(input);
-    let limits = PartialLimits {
+    let limits = mkit_core::PartialLimits {
         max_selected_file_bytes: 4 * 1024,
         max_total_selected_bytes: 8 * 1024,
         max_changed_paths: 4,
-        ..PartialLimits::default()
+        ..mkit_core::PartialLimits::default()
     };
+    let _ = partial_overlay_one_iteration_with_limits(input, fixture, &limits);
+}
 
-    let Ok(prepared) = replace_files(&fixture.verified, &replacements, &limits) else {
-        return;
-    };
-    let replay = replace_files(&fixture.verified, &replacements, &limits)
+fn partial_overlay_one_iteration_with_limits(
+    input: &[u8],
+    fixture: &PartialOverlayFixture,
+    limits: &mkit_core::PartialLimits,
+) -> Result<(), mkit_core::PartialError> {
+    use mkit_core::object::{EntryMode, Object, id_from_object};
+    use mkit_core::replace_files;
+
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let replacements = overlay_replacements(input);
+    let prepared = replace_files(&fixture.verified, &replacements, limits)?;
+    let replay = replace_files(&fixture.verified, &replacements, limits)
         .expect("a successful overlay must replay successfully");
     assert_eq!(prepared.root_id(), replay.root_id());
     assert_eq!(
@@ -712,6 +717,7 @@ pub fn partial_overlay_one_iteration_with(input: &[u8], fixture: &PartialOverlay
             assert_eq!(entry.mode, EntryMode::Executable);
         }
     }
+    Ok(())
 }
 
 fn overlay_replacements(input: &[u8]) -> Vec<mkit_core::FileReplacement> {
@@ -1252,6 +1258,31 @@ mod tests {
             partial_overlay_one_iteration_with(case, &fixture);
             assert!(start.elapsed() <= PER_ITER, "iteration exceeded PER_ITER");
         }
+    }
+
+    #[test]
+    fn partial_overlay_fixed_case_reaches_aggregate_content_bound() {
+        let fixture = build_partial_overlay_fixture();
+        let payload = vec![0xA5; 4 * 1024];
+        let mut input = vec![2, 0, 0, 0, 16];
+        input.extend_from_slice(&payload);
+        input.extend_from_slice(&[1, 0, 0, 16]);
+        input.extend_from_slice(&payload);
+        let exact = mkit_core::PartialLimits {
+            max_selected_file_bytes: 4 * 1024,
+            max_total_selected_bytes: 8 * 1024,
+            max_changed_paths: 2,
+            ..mkit_core::PartialLimits::V1
+        };
+        assert!(partial_overlay_one_iteration_with_limits(&input, &fixture, &exact).is_ok());
+        let one_short = mkit_core::PartialLimits {
+            max_total_selected_bytes: exact.max_total_selected_bytes - 1,
+            ..exact
+        };
+        assert!(matches!(
+            partial_overlay_one_iteration_with_limits(&input, &fixture, &one_short),
+            Err(mkit_core::PartialError::WorkspaceTooLarge)
+        ));
     }
 
     #[test]

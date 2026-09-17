@@ -821,3 +821,293 @@ fn lowered_limits_fail_incrementally_and_exact_update_limit_passes() {
         Err(PartialError::SubmissionTooLarge)
     ));
 }
+
+#[test]
+fn export_revalidates_stricter_file_and_tree_limits() {
+    let fixture = fixture();
+    let verified = verified(&fixture);
+    let prepared = replace_files(
+        &verified,
+        &[FileReplacement::bytes(
+            fixture.paths[0].clone(),
+            b"changed".to_vec(),
+        )],
+        &PartialLimits::V1,
+    )
+    .unwrap();
+    let signer = mkit_core::KeyPair::from_seed([18; 32]);
+    let unsigned = prepare_partial_commit(
+        &verified,
+        &prepared,
+        Identity::opaque(vec![9]),
+        signer.public.0,
+        b"limits".to_vec(),
+        9,
+        &PartialLimits::V1,
+    )
+    .unwrap();
+    let mut signed = unsigned.clone();
+    signed.signature = sign_commit(&signed, &signer).unwrap().0;
+
+    let smaller_file = PartialLimits {
+        max_selected_file_bytes: b"changed".len() - 1,
+        ..PartialLimits::V1
+    };
+    assert!(matches!(
+        export_partial_update(&verified, &prepared, &unsigned, &signed, &smaller_file),
+        Err(PartialError::WorkspaceTooLarge)
+    ));
+    let exact_file = PartialLimits {
+        max_selected_file_bytes: b"changed".len(),
+        max_total_selected_bytes: b"changed".len(),
+        ..PartialLimits::V1
+    };
+    assert!(export_partial_update(&verified, &prepared, &unsigned, &signed, &exact_file).is_ok());
+    assert!(matches!(
+        prepare_partial_commit(
+            &verified,
+            &prepared,
+            Identity::opaque(vec![9]),
+            signer.public.0,
+            b"limits".to_vec(),
+            9,
+            &smaller_file,
+        ),
+        Err(PartialError::WorkspaceTooLarge)
+    ));
+
+    let no_tree_entries = PartialLimits {
+        max_tree_entries: 0,
+        ..PartialLimits::V1
+    };
+    assert!(matches!(
+        export_partial_update(&verified, &prepared, &unsigned, &signed, &no_tree_entries),
+        Err(PartialError::ValidationBudgetExceeded)
+    ));
+    let (largest_tree_bytes, largest_tree_entries) = prepared
+        .produced_objects()
+        .filter_map(|(_, bytes)| match mkit_core::deserialize(bytes).unwrap() {
+            Object::Tree(tree) => Some((bytes.len(), tree.entries.len())),
+            _ => None,
+        })
+        .fold((0, 0), |(max_bytes, max_entries), (bytes, entries)| {
+            (max_bytes.max(bytes), max_entries.max(entries))
+        });
+    let exact_tree = PartialLimits {
+        max_tree_object_bytes: largest_tree_bytes,
+        max_tree_entries: largest_tree_entries,
+        ..PartialLimits::V1
+    };
+    assert!(export_partial_update(&verified, &prepared, &unsigned, &signed, &exact_tree).is_ok());
+    let tree_bytes_one_short = PartialLimits {
+        max_tree_object_bytes: largest_tree_bytes - 1,
+        ..PartialLimits::V1
+    };
+    assert!(matches!(
+        export_partial_update(
+            &verified,
+            &prepared,
+            &unsigned,
+            &signed,
+            &tree_bytes_one_short,
+        ),
+        Err(PartialError::WitnessTooLarge)
+    ));
+    let tree_entries_one_short = PartialLimits {
+        max_tree_entries: largest_tree_entries - 1,
+        ..PartialLimits::V1
+    };
+    assert!(matches!(
+        export_partial_update(
+            &verified,
+            &prepared,
+            &unsigned,
+            &signed,
+            &tree_entries_one_short,
+        ),
+        Err(PartialError::ValidationBudgetExceeded)
+    ));
+    assert!(matches!(
+        prepare_partial_commit(
+            &verified,
+            &prepared,
+            Identity::opaque(vec![9]),
+            signer.public.0,
+            b"limits".to_vec(),
+            9,
+            &no_tree_entries,
+        ),
+        Err(PartialError::ValidationBudgetExceeded)
+    ));
+
+    let two_prepared = replace_files(
+        &verified,
+        &[
+            FileReplacement::bytes(fixture.paths[0].clone(), b"changed".to_vec()),
+            FileReplacement::bytes(fixture.paths[1].clone(), b"changed".to_vec()),
+        ],
+        &PartialLimits::V1,
+    )
+    .unwrap();
+    let two_unsigned = prepare_partial_commit(
+        &verified,
+        &two_prepared,
+        Identity::opaque(vec![9]),
+        signer.public.0,
+        b"aggregate".to_vec(),
+        10,
+        &PartialLimits::V1,
+    )
+    .unwrap();
+    let mut two_signed = two_unsigned.clone();
+    two_signed.signature = sign_commit(&two_signed, &signer).unwrap().0;
+    let aggregate_one_short = PartialLimits {
+        max_total_selected_bytes: 2 * b"changed".len() - 1,
+        ..PartialLimits::V1
+    };
+    assert!(matches!(
+        export_partial_update(
+            &verified,
+            &two_prepared,
+            &two_unsigned,
+            &two_signed,
+            &aggregate_one_short,
+        ),
+        Err(PartialError::WorkspaceTooLarge)
+    ));
+    let aggregate_exact = PartialLimits {
+        max_selected_file_bytes: b"changed".len(),
+        max_total_selected_bytes: 2 * b"changed".len(),
+        ..PartialLimits::V1
+    };
+    let exact_update = export_partial_update(
+        &verified,
+        &two_prepared,
+        &two_unsigned,
+        &two_signed,
+        &aggregate_exact,
+    )
+    .unwrap();
+    let exact_bytes = exact_update.encode(&aggregate_exact).unwrap();
+    assert!(PartialUpdate::decode(&exact_bytes, &aggregate_exact).is_ok());
+}
+
+#[test]
+fn candidate_object_and_framing_limits_round_trip_at_exact_bounds() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
+    let old = mkit_core::store_file_object(&store, b"old").unwrap();
+    let root = tree(
+        &store,
+        vec![TreeEntry {
+            name: b"f".to_vec(),
+            mode: EntryMode::Blob,
+            object_hash: old,
+        }],
+    );
+    let base_key = mkit_core::KeyPair::from_seed([19; 32]);
+    let mut base_commit = Commit::new_unannotated(
+        root,
+        Vec::new(),
+        Identity::ed25519(base_key.public.0),
+        base_key.public.0,
+        b"base".to_vec(),
+        1,
+        [0; 64],
+    );
+    base_commit.signature = sign_commit(&base_commit, &base_key).unwrap().0;
+    let base = put(&store, &Object::Commit(base_commit));
+    let paths = vec![vec![b"f".to_vec()]];
+    let bundle = build_partial_snapshot(&store, base, &paths, &PartialLimits::V1).unwrap();
+    let verified = verify_partial_snapshot(
+        base,
+        &paths,
+        &bundle.encode(&PartialLimits::V1).unwrap(),
+        &PartialLimits::V1,
+    )
+    .unwrap();
+    let signer = mkit_core::KeyPair::from_seed([20; 32]);
+    let replacement = [FileReplacement::bytes(paths[0].clone(), b"new".to_vec())];
+    let prepared = replace_files(&verified, &replacement, &PartialLimits::V1).unwrap();
+    let unsigned = prepare_partial_commit(
+        &verified,
+        &prepared,
+        Identity::opaque(b"author".to_vec()),
+        signer.public.0,
+        b"candidate cap".to_vec(),
+        2,
+        &PartialLimits::V1,
+    )
+    .unwrap();
+    let mut signed = unsigned.clone();
+    signed.signature = sign_commit(&signed, &signer).unwrap().0;
+    let candidate_len = serialize(&Object::Commit(signed.clone())).unwrap().len();
+    assert!(
+        prepared
+            .produced_objects()
+            .all(|(_, bytes)| bytes.len() < candidate_len)
+    );
+
+    let candidate_too_small = PartialLimits {
+        max_object_bytes: candidate_len - 1,
+        ..PartialLimits::V1
+    };
+    assert!(replace_files(&verified, &replacement, &candidate_too_small).is_ok());
+    assert!(matches!(
+        prepare_partial_commit(
+            &verified,
+            &prepared,
+            Identity::opaque(b"author".to_vec()),
+            signer.public.0,
+            b"candidate cap".to_vec(),
+            2,
+            &candidate_too_small,
+        ),
+        Err(PartialError::SubmissionTooLarge)
+    ));
+    assert!(matches!(
+        export_partial_update(
+            &verified,
+            &prepared,
+            &unsigned,
+            &signed,
+            &candidate_too_small,
+        ),
+        Err(PartialError::SubmissionTooLarge)
+    ));
+
+    let exact_object = PartialLimits {
+        max_object_bytes: candidate_len,
+        ..PartialLimits::V1
+    };
+    let initial =
+        export_partial_update(&verified, &prepared, &unsigned, &signed, &exact_object).unwrap();
+    let initial_bytes = initial.encode(&exact_object).unwrap();
+    let exact = PartialLimits {
+        max_raw_pack_bytes: initial.pack_bytes().len(),
+        max_update_bytes: initial_bytes.len(),
+        ..exact_object
+    };
+    let update = export_partial_update(&verified, &prepared, &unsigned, &signed, &exact).unwrap();
+    let encoded = update.encode(&exact).unwrap();
+    assert_eq!(encoded.len(), exact.max_update_bytes);
+    assert_eq!(update.pack_bytes().len(), exact.max_raw_pack_bytes);
+    assert!(PartialUpdate::decode(&encoded, &exact).is_ok());
+
+    let pack_one_short = PartialLimits {
+        max_raw_pack_bytes: exact.max_raw_pack_bytes - 1,
+        ..exact
+    };
+    assert!(matches!(
+        export_partial_update(&verified, &prepared, &unsigned, &signed, &pack_one_short,),
+        Err(PartialError::SubmissionTooLarge)
+    ));
+    let update_one_short = PartialLimits {
+        max_update_bytes: exact.max_update_bytes - 1,
+        ..exact
+    };
+    assert!(matches!(
+        export_partial_update(&verified, &prepared, &unsigned, &signed, &update_one_short,),
+        Err(PartialError::SubmissionTooLarge)
+    ));
+}

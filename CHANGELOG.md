@@ -49,7 +49,9 @@ train).
   snapshot can replace existing regular/executable file contents, preserve
   hidden Tree commitments and modes, prepare an ordinary one-parent Commit for
   the existing signer interface, and export deterministic `MKWU` v1 bytes with
-  an exact raw-only object inventory. Export has no grant, owner, clock,
+  an exact raw-only object inventory. Reused representation dependencies are
+  retained once per unique id, and every operation rechecks its active resource
+  limits so exported bytes decode under the same bounds. Export has no grant, owner, clock,
   hosting-service, remote-ref publication, or complete-closure meaning.
   Existing object, signing, pack, ref formats and full-clone defaults are
   unchanged. **SemVer:** additive.
