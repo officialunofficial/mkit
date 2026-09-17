@@ -970,7 +970,47 @@ fn edit_script(old: &[DiffLine<'_>], new: &[DiffLine<'_>], mode: WhitespaceMode)
 /// Run the greedy Myers diff and mark which old lines are deletions and which
 /// new lines are insertions. Lines left unmarked are the matched (equal)
 /// lines that pair up in order.
-//
+///
+/// Elides any common leading/trailing run of identical lines before running
+/// the O(ND) core on the (usually much smaller) middle region that actually
+/// differs — the same "diff only the changed region" step git's `xdiff` and
+/// every other practical diff engine apply before their own O(ND) search.
+/// Real edits (an appended log entry, one changed line in a large file) leave
+/// most of the file as a shared prefix/suffix; eliding it up front shrinks
+/// both `n` and `m` for the quadratic core below without changing its
+/// result, since a greedy Myers walk would match that same run first/last
+/// anyway (`compact_changes`/`script_from_flags` pair unflagged lines in
+/// order, so leaving the elided run unmarked is exactly equivalent to the
+/// core algorithm discovering it itself).
+fn myers_changed(
+    old: &[DiffLine<'_>],
+    new: &[DiffLine<'_>],
+    mode: WhitespaceMode,
+) -> (Vec<bool>, Vec<bool>) {
+    let n = old.len();
+    let m = new.len();
+    let mut old_changed = vec![false; n];
+    let mut new_changed = vec![false; m];
+
+    let max_affix = n.min(m);
+    let mut prefix = 0;
+    while prefix < max_affix && lines_equal(&old[prefix], &new[prefix], mode) {
+        prefix += 1;
+    }
+    let mut suffix = 0;
+    while suffix < max_affix - prefix
+        && lines_equal(&old[n - 1 - suffix], &new[m - 1 - suffix], mode)
+    {
+        suffix += 1;
+    }
+
+    let (mid_old_changed, mid_new_changed) =
+        myers_changed_core(&old[prefix..n - suffix], &new[prefix..m - suffix], mode);
+    old_changed[prefix..n - suffix].copy_from_slice(&mid_old_changed);
+    new_changed[prefix..m - suffix].copy_from_slice(&mid_new_changed);
+    (old_changed, new_changed)
+}
+
 // Myers indexes paths by signed diagonal `k = x - y`, so the V array and
 // backtrack inherently convert between `isize` (diagonals, offsets) and
 // `usize` (line indices). The values are bounded by `n + m`, well within
@@ -981,7 +1021,7 @@ fn edit_script(old: &[DiffLine<'_>], new: &[DiffLine<'_>], mode: WhitespaceMode)
     clippy::cast_possible_wrap,
     clippy::many_single_char_names
 )]
-fn myers_changed(
+fn myers_changed_core(
     old: &[DiffLine<'_>],
     new: &[DiffLine<'_>],
     mode: WhitespaceMode,
@@ -2266,6 +2306,38 @@ mod tests {
         let hunks = enumerate_hunks(old, new).unwrap();
         let staged = apply_hunks_subset(old, &hunks, &[0]);
         assert_eq!(staged, new, "no trailing newline must be preserved");
+    }
+
+    proptest::proptest! {
+        /// Patch round-trip on lines built from a random shared prefix/suffix
+        /// (the run `myers_changed` now elides before its O(ND) core) plus a
+        /// random differing middle: applying every hunk reproduces `new`
+        /// from `old`, and applying none reproduces `old`. Small line-index
+        /// alphabet (0..6) lets the generator produce shared runs, exact
+        /// duplicates, and fully disjoint content all in the same search
+        /// space, so this exercises the trim path (long shared affix),
+        /// the untrimmed path (no shared affix), and everything between.
+        #[test]
+        fn proptest_hunks_roundtrip_with_shared_affix(
+            prefix in proptest::collection::vec(0u8..6, 0..8),
+            suffix in proptest::collection::vec(0u8..6, 0..8),
+            old_mid in proptest::collection::vec(0u8..6, 0..8),
+            new_mid in proptest::collection::vec(0u8..6, 0..8),
+        ) {
+            fn build(prefix: &[u8], mid: &[u8], suffix: &[u8]) -> Vec<u8> {
+                let mut out = Vec::new();
+                for &n in prefix.iter().chain(mid).chain(suffix) {
+                    out.extend_from_slice(format!("l{n}\n").as_bytes());
+                }
+                out
+            }
+            let old = build(&prefix, &old_mid, &suffix);
+            let new = build(&prefix, &new_mid, &suffix);
+            let hunks = enumerate_hunks(&old, &new).unwrap();
+            let all: Vec<usize> = (0..hunks.len()).collect();
+            proptest::prop_assert_eq!(apply_hunks_subset(&old, &hunks, &all), new);
+            proptest::prop_assert_eq!(apply_hunks_subset(&old, &hunks, &[]), old);
+        }
     }
 
     // ---- merge_blob_3way (#298) ----
