@@ -3,14 +3,18 @@ import type {
     AgentGrant,
     SignedAgentGrant,
     WorkspaceChange,
+    WorkspaceCoverage,
     WorkspaceMessage,
     WorkspaceSummary,
     WorkspaceTask,
     WorkspaceVersion,
     WorkspaceView,
 } from "./contracts";
+import { PENDING_SUBMISSION, type PartialCandidate } from "./partial-candidate";
 import { HttpError, json } from "./http";
+import { mkit } from "./mkit";
 import { makeVersion, type FileManifest } from "./objects";
+import { createPartialCandidate } from "./partial-candidate";
 
 type ReadStorage = Pick<DurableObjectStorage, "get" | "list">;
 export type Mutation = {
@@ -27,6 +31,14 @@ type Receipt = {
     headers?: Record<string, string>;
 };
 type ReceiptResponse = { body: WorkspaceView; headers?: Record<string, string> };
+export type PartialState = {
+    mode: "public-partial-v1";
+    baseCommit: string;
+    bundleDigest: string;
+    selectedPaths: string[][];
+    bundleKey: string;
+    original: FileManifest;
+};
 // SQLite's key/value row limit is 2 MB. Owner views can exceed it once a
 // conversation, version list and long file paths are combined. Persist the exact
 // replay response in bounded rows, all under the mutation's transaction.
@@ -72,10 +84,70 @@ export class WorkspaceState {
     }
 
     async files(versionHash?: string, storage: ReadStorage = this.storage): Promise<FileManifest> {
+        if (versionHash && (await this.isPartial(storage)))
+            throw new HttpError(400, "This selected workspace does not expose complete version history.");
         const key = versionHash ? `manifest:${versionHash}` : "files";
         const files = await storage.get<FileManifest>(key);
         if (!files) throw new HttpError(404, "Version not found.");
         return files;
+    }
+
+    async isPartial(storage: ReadStorage = this.storage): Promise<boolean> {
+        return !!(await storage.get<PartialState>("partial"));
+    }
+
+    async partialState(storage: ReadStorage = this.storage): Promise<PartialState> {
+        const partial = await storage.get<PartialState>("partial");
+        if (!partial) throw new HttpError(400, "This workspace is not a public partial workspace.");
+        return partial;
+    }
+
+    async candidate(storage: ReadStorage = this.storage): Promise<PartialCandidate | null> {
+        return (await storage.get<PartialCandidate>("candidate")) ?? null;
+    }
+
+    async requireNotPending(): Promise<void> {
+        if (await this.candidate()) throw new HttpError(409, PENDING_SUBMISSION);
+    }
+
+    async loadBundle(): Promise<Uint8Array> {
+        const partial = await this.partialState();
+        const object = await this.objects.get(partial.bundleKey);
+        if (!object) throw new HttpError(500, "The public bundle is missing.");
+        const bytes = new Uint8Array(await object.arrayBuffer());
+        if (mkit.blake3_hex(bytes) !== partial.bundleDigest)
+            throw new HttpError(500, "Stored bundle digest mismatch.");
+        return bytes;
+    }
+
+    async completePartial(
+        files: FileManifest,
+        message: string,
+    ): Promise<{ writes: Record<string, unknown>; versionHash?: string; noChanges: boolean }> {
+        await this.requireAgent();
+        await this.requireNotPending();
+        const meta = await this.summary();
+        const partial = await this.partialState();
+        const seedHex = await this.storage.get<string>("seed");
+        if (!seedHex) throw new Error("Missing workspace signer");
+        const result = await createPartialCandidate({
+            workspaceId: meta.id,
+            objects: this.objects,
+            bundle: await this.loadBundle(),
+            baseCommit: partial.baseCommit,
+            selectedPaths: partial.selectedPaths,
+            original: partial.original,
+            current: files,
+            seedHex,
+            agentPublicKey: meta.agentPublicKey,
+            message,
+        });
+        if (result.status === "no_changes") return { writes: { files }, noChanges: true };
+        return {
+            writes: { files, candidate: result.candidate },
+            versionHash: result.candidate.id,
+            noChanges: false,
+        };
     }
 
     async requireActive(storage: ReadStorage = this.storage): Promise<void> {
@@ -98,14 +170,23 @@ export class WorkspaceState {
         storage: ReadStorage = this.storage,
     ): Promise<WorkspaceView> {
         const workspace = await this.summary(storage);
+        const partial = await storage.get<PartialState>("partial");
         const files = await this.files(versionHash, storage);
         const working = versionHash ? await this.files(undefined, storage) : files;
-        const saved = workspace.head ? await this.files(workspace.head, storage) : {};
+        const saved = partial
+            ? partial.original
+            : workspace.head
+              ? await this.files(workspace.head, storage)
+              : {};
         const changes: WorkspaceChange[] = [];
-        for (const path of new Set([...Object.keys(saved), ...Object.keys(working)])) {
+        const changePaths = partial
+            ? Object.keys(partial.original)
+            : [...Object.keys(saved), ...Object.keys(working)];
+        for (const path of new Set(changePaths)) {
             const before = Object.hasOwn(saved, path) ? saved[path] : undefined;
             const after = Object.hasOwn(working, path) ? working[path] : undefined;
             if (before?.hash === after?.hash && before?.mode === after?.mode) continue;
+            if (partial && (!before || !after)) continue;
             changes.push({
                 path,
                 status: !before ? "added" : !after ? "deleted" : "modified",
@@ -114,15 +195,21 @@ export class WorkspaceState {
             });
         }
         changes.sort((a, b) => a.path.localeCompare(b.path));
-        const versions = [
-            ...(
-                await storage.list<WorkspaceVersion>({
-                    prefix: "history:",
-                    reverse: true,
-                    limit: 50,
-                })
-            ).values(),
-        ];
+        const versions = partial
+            ? []
+            : [
+                  ...(
+                      await storage.list<WorkspaceVersion>({
+                          prefix: "history:",
+                          reverse: true,
+                          limit: 50,
+                      })
+                  ).values(),
+              ];
+        const coverage: WorkspaceCoverage | undefined = partial
+            ? { content: "selected-files", history: "partial", verification: "selected-only" }
+            : undefined;
+        const storedCandidate = await storage.get<PartialCandidate>("candidate");
         const grant = (await storage.get<SignedAgentGrant>("grant")) ?? null;
         const messages = isOwner
             ? [
@@ -149,6 +236,8 @@ export class WorkspaceState {
             grant,
             agentEnabled:
                 !!grant && grant.grant.expiresAt > Date.now() && !(await storage.get("revoked")),
+            ...(coverage ? { coverage } : {}),
+            ...(partial ? { candidateStatus: storedCandidate ? "ready" : "none" } : {}),
         };
     }
 

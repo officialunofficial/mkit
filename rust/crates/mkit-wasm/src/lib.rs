@@ -18,8 +18,8 @@
 //!   signing lifecycle.
 //! * `chunking` — `FastCDC` chunker, chunked-blob manifest, delta, and
 //!   Bao verified streaming.
-//! * `partial` — authenticated selected-file replacement, ordinary Commit
-//!   signing, and explicit raw-only update export.
+//! * `partial` — read-only selected-file verification, authenticated
+//!   replacement, ordinary Commit signing, and explicit raw-only update export.
 //! * `verify` — disclosure bundles, closure packs, Merkle proofs, and
 //!   canonical-blob Bao (`blob_bao_*`).
 //! * `common` — shared private helpers (hex / JSON parsing, count /
@@ -58,7 +58,10 @@ pub use objects::{
     blob_encode, commit_decode, commit_encode_and_sign, commit_verify, object_id, object_kind,
     remix_decode, remix_encode_and_sign, remix_verify, tree_decode, tree_encode,
 };
-pub use partial::{PartialEditResultJs, partial_edit_and_export};
+pub use partial::{
+    PartialEditResultJs, PartialSelectedFileJs, PartialSnapshotJs, partial_edit_and_export,
+    partial_edit_and_export_with_limits, partial_verify_snapshot,
+};
 pub use verify::{
     blob_bao_encode, blob_bao_slice, blob_bao_verify_slice, chunked_blob_decode,
     disclosure_payload_bytes, verify_chunk, verify_closure_manifest, verify_closure_packs,

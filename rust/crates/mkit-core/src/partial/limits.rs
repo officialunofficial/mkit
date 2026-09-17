@@ -53,7 +53,9 @@ impl PartialLimits {
         max_changed_paths: 256,
     };
 
-    pub(crate) fn is_v1_subset(&self) -> bool {
+    /// True when every field is at most the v1 interoperability profile.
+    #[must_use]
+    pub fn is_v1_subset(&self) -> bool {
         self.max_selected_paths <= Self::V1.max_selected_paths
             && self.max_path_depth <= Self::V1.max_path_depth
             && self.max_component_bytes <= Self::V1.max_component_bytes

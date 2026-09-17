@@ -56,6 +56,18 @@ train).
   Existing object, signing, pack, ref formats and full-clone defaults are
   unchanged. **SemVer:** additive.
 
+- *(wasm)* `partial_verify_snapshot` materializes selected file bytes from a
+  verified `MKWB` without signing. `partial_edit_and_export_with_limits` shares
+  the existing edit/export pipeline with a caller-lowered `PartialLimits` JSON
+  descriptor; `partial_edit_and_export` keeps v1 defaults. Unknown, non-integer,
+  negative, overflowing, or above-v1 fields are rejected. **SemVer:** additive.
+
+- *(workspace-worker)* Opt-in `public-partial-v1` consumes a trusted static
+  `MKWB` origin, verifies selected files in wasm, and exports one ordinary
+  candidate as `MKWU`. AgentGrant remains execution consent, not proof
+  validity. No full-source fetch, HostGrant, or remote publication.
+  **SemVer:** additive.
+
 - *(core)* Closure verification now has a pull-based
   `ObjectSource`/`verify_closure_streaming` API and a native
   `verify_closure_store` helper. `ClosureReport` gains the additive

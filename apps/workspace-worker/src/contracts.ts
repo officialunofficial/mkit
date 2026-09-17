@@ -2,16 +2,32 @@
 export const WORKSPACE_API = "/api/workspaces";
 
 export type WorkspaceSource = {
-    kind: "demo" | "workspace";
+    kind: "demo" | "workspace" | "partial-bundle";
     repository: string;
     commitHash: string;
     ref?: string;
     workspaceId?: string;
+    /** Exact hex-encoded UTF-8 path components. Bound by prepared-grant JSON equality, not grantMessage. */
+    selectedPaths?: string[][];
+    bundleDigest?: string;
+    mode?: "public-partial-v1";
 };
 
 export type RemixRequest =
     | { kind: "demo"; ref?: string; commitHash?: string }
-    | { kind: "workspace"; workspaceId: string; commitHash?: string };
+    | { kind: "workspace"; workspaceId: string; commitHash?: string }
+    | {
+          kind: "partial-bundle";
+          baseCommit: string;
+          selectedPaths: string[][];
+          bundleDigest: string;
+      };
+
+export type WorkspaceCoverage = {
+    content: "selected-files";
+    history: "partial";
+    verification: "selected-only";
+};
 
 export type AgentGrant = {
     version: 1;
@@ -90,6 +106,8 @@ export type WorkspaceView = {
     isOwner: boolean;
     grant: SignedAgentGrant | null;
     agentEnabled: boolean;
+    coverage?: WorkspaceCoverage;
+    candidateStatus?: "none" | "ready";
 };
 
 export type WorkspaceFileContent = {
@@ -100,7 +118,9 @@ export type WorkspaceFileContent = {
     editable: boolean;
 };
 
-/** Domain-separated, deterministic delegation bytes signed by the browser owner. */
+/** Domain-separated, deterministic delegation bytes signed by the browser owner.
+ * selectedPaths, bundleDigest, and mode are not in this message; activation binds
+ * them by exact prepared-grant JSON equality. */
 export function grantMessage(grant: AgentGrant): string {
     return [
         "mkit-workspace-grant:v1",

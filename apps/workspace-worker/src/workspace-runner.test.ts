@@ -45,6 +45,7 @@ function harness() {
         requireAgent: vi.fn(async () => {
             if (data.get("revoked")) throw new Error("Agent revoked");
         }),
+        isPartial: vi.fn(async () => false),
         publishedVersion: vi.fn(async () => ({
             writes: { meta: { head: "new", updatedAt: 4 }, "manifest:new": data.get("files") },
         })),

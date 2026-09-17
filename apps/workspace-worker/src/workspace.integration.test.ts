@@ -907,4 +907,103 @@ describe("workspace HTTP coordinator with real auth and storage", () => {
         expect(directory.workspaces[0]?.id).toBe(newest.id);
         expect(directory.workspaces).toHaveLength(50);
     });
+
+    it("rejects partial-bundle prepare when the trusted origin is unset", async () => {
+        const owner = identity();
+        const response = await signed(owner, "workspaces", "/api/workspaces/prepare", {
+            kind: "partial-bundle",
+            baseCommit: "17".repeat(32),
+            selectedPaths: [["61"]],
+            bundleDigest: "ab".repeat(32),
+        });
+        expect(response.status).toBe(400);
+        expect(await response.json()).toMatchObject({
+            error: expect.stringMatching(/not enabled|Invalid/),
+        });
+    });
+
+    it("activates a public partial workspace without remix and blocks pending edits", async () => {
+        const owner = identity();
+        const id = "ab".repeat(16);
+        const seed = "11".repeat(32);
+        const agentPublicKey = hex(mkit.ed25519_pubkey_from_seed(fromHex(seed)));
+        const source = {
+            kind: "partial-bundle" as const,
+            repository: "bb".repeat(32),
+            commitHash: "cc".repeat(32),
+            selectedPaths: [["7368616c6c6f772e747874"]],
+            bundleDigest: "bb".repeat(32),
+            mode: "public-partial-v1" as const,
+        };
+        const grant = {
+            version: 1 as const,
+            workspaceId: id,
+            ownerPublicKey: owner.publicKey,
+            agentPublicKey,
+            source,
+            permissions: ["files", "commands", "versions"] as ["files", "commands", "versions"],
+            createdAt: Date.now(),
+            expiresAt: Date.now() + 86_400_000,
+        };
+        const files = { "shallow.txt": { hash: "dd".repeat(32), size: 1, mode: "blob" as const } };
+        await fixture(id, {
+            meta: {
+                id,
+                title: "Untitled remix",
+                ownerPublicKey: owner.publicKey,
+                agentPublicKey,
+                source,
+                head: null,
+                createdAt: 1,
+                updatedAt: 1,
+                public: true,
+            },
+            seed,
+            preparedGrant: grant,
+            files,
+            generation: "ee".repeat(32),
+            partial: {
+                mode: "public-partial-v1",
+                baseCommit: source.commitHash,
+                bundleDigest: source.bundleDigest,
+                selectedPaths: source.selectedPaths,
+                bundleKey: "partial/ab/bundle",
+                original: files,
+            },
+        });
+        const { cookie } = await activate(owner, { id, grant });
+        const state = await inspect(id);
+        expect(state.activated).toBe(true);
+        expect((state.meta as { head: string | null }).head).toBeNull();
+        expect(
+            Object.keys(state).some((key) => key.startsWith("version:") || key.startsWith("history:")),
+        ).toBe(false);
+        const notReady = await mf.dispatchFetch(`${AUDIENCE}/api/workspaces/${id}/partial-update`, {
+            headers: { Cookie: cookie },
+        });
+        expect(notReady.status).toBe(404);
+        expect(await notReady.json()).toMatchObject({ code: "not_ready" });
+        await fixture(id, {
+            candidate: {
+                id: "ff".repeat(32),
+                digest: "aa".repeat(32),
+                key: "partial/ab/update",
+                rootHex: "11".repeat(32),
+                baseCommit: source.commitHash,
+                coverage: "selected-only",
+            },
+        });
+        const blocked = await signed(owner, id, `/api/workspaces/${id}/file`, {
+            path: "shallow.txt",
+            content: "x",
+            expectedHash: files["shallow.txt"].hash,
+        });
+        expect(blocked.status).toBe(409);
+        expect((await blocked.json() as { error: string }).error).toMatch(/PendingSubmission/);
+        const remix = await signed(owner, "workspaces", "/api/workspaces/prepare", {
+            kind: "workspace",
+            workspaceId: id,
+        });
+        expect(remix.status).toBe(400);
+    });
 });

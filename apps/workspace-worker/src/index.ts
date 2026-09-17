@@ -1,6 +1,7 @@
 import { authenticate } from "./auth";
 import { browserSessionCookie, requestBrowserSession } from "./browser-session";
 import type { RemixRequest } from "./contracts";
+import { validatePartialPrepare } from "./partial-source";
 import { errorResponse, HttpError, json, record, text } from "./http";
 import { assertHash } from "./objects";
 export { Workspace } from "./workspace";
@@ -40,7 +41,8 @@ export default {
             if (path === "/api/workspaces/prepare" && request.method === "POST") {
                 const auth = await authenticate(request, env.AUTH_AUDIENCE, "workspaces"),
                     body = record(auth.body);
-                if (body.kind !== "demo" && body.kind !== "workspace")
+                if (body.kind === "partial-bundle") validatePartialPrepare(body);
+                else if (body.kind !== "demo" && body.kind !== "workspace")
                     throw new HttpError(400, "Choose a project to remix.");
                 if (body.commitHash !== undefined) assertHash(text(body.commitHash, 64, "commit"));
                 if (body.kind === "workspace" && !/^[0-9a-f]{32}$/.test(String(body.workspaceId)))
@@ -54,7 +56,7 @@ export default {
                 );
             }
             const match =
-                /^\/api\/workspaces\/([0-9a-f]{32})(?:\/(file|session|activate|tasks|cancel|revoke|restore|versions|terminal|conversation))?$/.exec(
+                /^\/api\/workspaces\/([0-9a-f]{32})(?:\/(file|session|activate|tasks|cancel|revoke|restore|versions|terminal|conversation|partial-update))?$/.exec(
                     path,
                 );
             if (!match) throw new HttpError(404, "Workspace route not found.");
