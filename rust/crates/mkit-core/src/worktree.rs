@@ -840,13 +840,49 @@ fn checked_hash_chunks<S: ObjectSink + ?Sized>(
 /// manifest's chunk list, and therefore the file's content address,
 /// depends on that order.
 ///
+/// Cutting chunk boundaries is otherwise strictly sequential (each cut's
+/// start is the previous cut's end), but cutting *batch N+1* has no data
+/// dependency on *hashing batch N* — only on the reader position, which
+/// the cutter alone advances. Native builds (see
+/// `store_large_file_streaming_pipelined`) overlap the two phases
+/// across a scoped worker thread instead of running them strictly one
+/// after the other; wasm32 (no threads) falls back to
+/// `store_large_file_streaming_batched`, the original phase-serial
+/// loop. (Both are private, cfg-gated to exactly one of the two
+/// targets, so neither is a valid intra-doc link here — a native `cargo
+/// doc` build never sees `store_large_file_streaming_batched` at all,
+/// and vice versa on wasm32.)
+///
 /// # Errors
 /// See [`WorktreeError`].
-pub fn store_large_file_streaming_with<S: ObjectSink + ?Sized, R: Read>(
+pub fn store_large_file_streaming_with<S: ObjectSink + ?Sized, R: Read + Send>(
     sink: &S,
     reader: R,
     path: &Path,
     mut hash_chunks: impl FnMut(&S, &[Vec<u8>]) -> WorktreeResult<Vec<Hash>>,
+) -> WorktreeResult<Hash> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        store_large_file_streaming_pipelined(sink, reader, path, &mut hash_chunks)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        store_large_file_streaming_batched(sink, reader, path, &mut hash_chunks)
+    }
+}
+
+/// Original phase-serial implementation of
+/// [`store_large_file_streaming_with`]: cut one batch, then hash it via
+/// `hash_chunks`, then cut the next. wasm32 (no threads to pipeline
+/// across) uses this directly; native builds use
+/// `store_large_file_streaming_pipelined` instead (native-only; not a
+/// valid intra-doc link from a wasm32 doc build).
+#[cfg(target_arch = "wasm32")]
+fn store_large_file_streaming_batched<S: ObjectSink + ?Sized, R: Read>(
+    sink: &S,
+    reader: R,
+    path: &Path,
+    hash_chunks: &mut impl FnMut(&S, &[Vec<u8>]) -> WorktreeResult<Vec<Hash>>,
 ) -> WorktreeResult<Hash> {
     let mut chunker = ChunkReader::new(FastCdc::v1(), reader);
     let mut chunks = Vec::new();
@@ -859,13 +895,131 @@ pub fn store_large_file_streaming_with<S: ObjectSink + ?Sized, R: Read>(
             .ok_or_else(|| WorktreeError::FileTooLarge(path.to_path_buf()))?;
         batch.push(chunk);
         if batch.len() == STREAM_HASH_BATCH {
-            chunks.extend(checked_hash_chunks(&mut hash_chunks, sink, &batch)?);
+            chunks.extend(checked_hash_chunks(hash_chunks, sink, &batch)?);
             batch.clear();
         }
     }
     if !batch.is_empty() {
-        chunks.extend(checked_hash_chunks(&mut hash_chunks, sink, &batch)?);
+        chunks.extend(checked_hash_chunks(hash_chunks, sink, &batch)?);
     }
+
+    store_chunk_manifest(sink, total_size, chunks)
+}
+
+/// Pipelined implementation of [`store_large_file_streaming_with`]: a
+/// scoped worker thread runs `reader` through the `FastCdc` cutter and
+/// hands off each full [`STREAM_HASH_BATCH`]-sized batch (plus the final
+/// partial one) over a rendezvous (zero-capacity) channel, while this
+/// (the calling) thread receives batches and runs `hash_chunks` on them
+/// — so cutting batch N+1 overlaps hashing batch N instead of waiting
+/// for it. A zero-capacity channel's `send` blocks until the matching
+/// `recv`, so the cutter can have at most one batch *fully built* ahead
+/// of the one currently being hashed (held on its own stack, blocked on
+/// send) — never two, the way a buffered channel would allow by letting
+/// it dequeue immediately and start a third batch. That caps the extra
+/// memory this adds at one more `STREAM_HASH_BATCH` (matching this
+/// module's existing "independent of file size" bound) while still
+/// overlapping the two phases fully: the blocked send/recv handshake
+/// itself is a single unblocked pair of syscalls, not a wait for work.
+///
+/// The cutter thread performs the exact same running-total overflow
+/// check `store_large_file_streaming_batched` (wasm32-only; not a valid
+/// intra-doc link here) does, so an oversized
+/// file is still rejected as soon as the cutter itself detects it
+/// (before hashing catches up) rather than only once every chunk has
+/// been received; the receiving thread separately sums each received
+/// chunk's length into `total_size` for the final manifest, which is
+/// always consistent with the cutter's own total since it receives
+/// every chunk the cutter decided to keep.
+///
+/// If `hash_chunks` (or the overflow check) errors, this thread returns
+/// early and drops its end of the channel; the cutter's next blocked
+/// [`std::sync::mpsc::SyncSender::send`] then fails and it exits — no
+/// deadlock, no unjoined thread (`std::thread::scope` joins it before
+/// returning). If the cutter itself panics, `std::thread::scope`
+/// resumes that panic here once joined, the same behavior
+/// [`crate::pack::PackReader::read`]'s own scoped fan-out relies on.
+#[cfg(not(target_arch = "wasm32"))]
+fn store_large_file_streaming_pipelined<S: ObjectSink + ?Sized, R: Read + Send>(
+    sink: &S,
+    reader: R,
+    path: &Path,
+    hash_chunks: &mut impl FnMut(&S, &[Vec<u8>]) -> WorktreeResult<Vec<Hash>>,
+) -> WorktreeResult<Hash> {
+    use std::sync::mpsc;
+
+    let (tx, rx) = mpsc::sync_channel::<WorktreeResult<Vec<Vec<u8>>>>(0);
+
+    let (chunks, total_size) = std::thread::scope(|scope| -> WorktreeResult<(Vec<Hash>, u64)> {
+        scope.spawn(move || {
+            let mut chunker = ChunkReader::new(FastCdc::v1(), reader);
+            let mut batch: Vec<Vec<u8>> = Vec::with_capacity(STREAM_HASH_BATCH);
+            let mut running_total: u64 = 0;
+            loop {
+                let chunk = match chunker.next_chunk() {
+                    Ok(Some(chunk)) => chunk,
+                    Ok(None) => {
+                        if !batch.is_empty() {
+                            let _ = tx.send(Ok(batch));
+                        }
+                        return;
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(WorktreeError::from(e)));
+                        return;
+                    }
+                };
+                running_total = if let Some(t) = running_total
+                    .checked_add(chunk.len() as u64)
+                    .filter(|&t| t <= MAX_FILE_BYTES)
+                {
+                    t
+                } else {
+                    let _ = tx.send(Err(WorktreeError::FileTooLarge(path.to_path_buf())));
+                    return;
+                };
+                batch.push(chunk);
+                if batch.len() == STREAM_HASH_BATCH {
+                    let full = std::mem::replace(&mut batch, Vec::with_capacity(STREAM_HASH_BATCH));
+                    if tx.send(Ok(full)).is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+
+        // On any error, keep draining (discarding) the channel instead of
+        // returning immediately: with a rendezvous channel the cutter's
+        // *next* `send` — for a batch already cut, or one it hasn't
+        // finished cutting yet — has no buffer to land in and blocks
+        // until a matching `recv`, so an early return here that stops
+        // calling `recv` would deadlock `thread::scope`'s join waiting
+        // for a cutter that is itself waiting for a `recv` that will
+        // never come. Draining lets every future send succeed (or the
+        // cutter hits its own error/EOF and exits on its own), so the
+        // channel always disconnects and this loop always terminates.
+        let mut chunks = Vec::new();
+        let mut total_size: u64 = 0;
+        let mut first_err: Option<WorktreeError> = None;
+        while let Ok(received) = rx.recv() {
+            if first_err.is_some() {
+                continue;
+            }
+            match received.and_then(|batch| {
+                for chunk in &batch {
+                    total_size += chunk.len() as u64;
+                }
+                checked_hash_chunks(hash_chunks, sink, &batch)
+            }) {
+                Ok(hashes) => chunks.extend(hashes),
+                Err(e) => first_err = Some(e),
+            }
+        }
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok((chunks, total_size)),
+        }
+    })?;
 
     store_chunk_manifest(sink, total_size, chunks)
 }
@@ -1414,6 +1568,44 @@ mod tests {
                 expected: n, actual: 0
             } if n == expected));
         }
+    }
+
+    #[test]
+    fn streaming_pipeline_errors_promptly_when_hash_chunks_fails_on_an_early_batch() {
+        // Regression test for a real deadlock in the native pipelined
+        // path (`store_large_file_streaming_pipelined`): on a rendezvous
+        // channel, if the receiving side stops calling `recv` as soon as
+        // it sees an error, the cutter thread's *next* `send` — for a
+        // batch it already cut, or is about to — has no buffer to land
+        // in and blocks forever waiting for a `recv` that will never
+        // come, hanging `thread::scope`'s join on that thread. Three
+        // full batches (well beyond `STREAM_HASH_BATCH`) ensures the
+        // cutter still has more batches to send after the one that
+        // triggers the very first error. Runs the call on its own
+        // thread with a bounded `recv_timeout` so a regression fails
+        // this test instead of hanging the whole suite.
+        let size = 3 * STREAM_HASH_BATCH * crate::chunker::MAX_SIZE;
+        let (_dir, sink) = fresh_store();
+        let data = vec![0u8; size];
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = store_large_file_streaming_with(
+                &sink,
+                io::Cursor::new(data),
+                Path::new("batch.bin"),
+                |_sink, _batch| Err(WorktreeError::InvalidUtf8),
+            );
+            let _ = done_tx.send(matches!(result, Err(WorktreeError::InvalidUtf8)));
+        });
+
+        let errored_correctly = done_rx
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect(
+                "store_large_file_streaming_with deadlocked instead of \
+                 returning promptly after an early hash_chunks error",
+            );
+        assert!(errored_correctly);
     }
 
     #[test]
