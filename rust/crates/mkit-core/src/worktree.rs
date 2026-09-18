@@ -844,11 +844,14 @@ fn checked_hash_chunks<S: ObjectSink + ?Sized>(
 /// start is the previous cut's end), but cutting *batch N+1* has no data
 /// dependency on *hashing batch N* — only on the reader position, which
 /// the cutter alone advances. Native builds (see
-/// [`store_large_file_streaming_pipelined`]) overlap the two phases
+/// `store_large_file_streaming_pipelined`) overlap the two phases
 /// across a scoped worker thread instead of running them strictly one
 /// after the other; wasm32 (no threads) falls back to
-/// [`store_large_file_streaming_batched`], the original phase-serial
-/// loop.
+/// `store_large_file_streaming_batched`, the original phase-serial
+/// loop. (Both are private, cfg-gated to exactly one of the two
+/// targets, so neither is a valid intra-doc link here — a native `cargo
+/// doc` build never sees `store_large_file_streaming_batched` at all,
+/// and vice versa on wasm32.)
 ///
 /// # Errors
 /// See [`WorktreeError`].
@@ -872,7 +875,8 @@ pub fn store_large_file_streaming_with<S: ObjectSink + ?Sized, R: Read + Send>(
 /// [`store_large_file_streaming_with`]: cut one batch, then hash it via
 /// `hash_chunks`, then cut the next. wasm32 (no threads to pipeline
 /// across) uses this directly; native builds use
-/// [`store_large_file_streaming_pipelined`] instead.
+/// `store_large_file_streaming_pipelined` instead (native-only; not a
+/// valid intra-doc link from a wasm32 doc build).
 #[cfg(target_arch = "wasm32")]
 fn store_large_file_streaming_batched<S: ObjectSink + ?Sized, R: Read>(
     sink: &S,
@@ -919,7 +923,8 @@ fn store_large_file_streaming_batched<S: ObjectSink + ?Sized, R: Read>(
 /// itself is a single unblocked pair of syscalls, not a wait for work.
 ///
 /// The cutter thread performs the exact same running-total overflow
-/// check [`store_large_file_streaming_batched`] does, so an oversized
+/// check `store_large_file_streaming_batched` (wasm32-only; not a valid
+/// intra-doc link here) does, so an oversized
 /// file is still rejected as soon as the cutter itself detects it
 /// (before hashing catches up) rather than only once every chunk has
 /// been received; the receiving thread separately sums each received
