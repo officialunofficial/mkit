@@ -12,7 +12,7 @@ use mkit_core::hash::Hash;
 use mkit_core::index::EntryStatus;
 use mkit_core::layout::RepoLayout;
 use mkit_core::object::Object;
-use mkit_core::ops::restore::{RestoreOptions, restore_tree_to_worktree};
+use mkit_core::ops::restore::{RestoreOptions, restore_tree_to_worktree_with};
 use mkit_core::refs;
 use mkit_core::store::ObjectStore;
 
@@ -293,7 +293,13 @@ pub fn run(args: &[String]) -> u8 {
     // directories that became empty — git removes those on a branch
     // switch; `fs::remove_dir` only succeeds on EMPTY dirs, so a dir
     // still holding untracked files survives.
-    let report = match restore_tree_to_worktree(&store, &tree_hash, &cwd, &sparse_opts) {
+    let report = match restore_tree_to_worktree_with(
+        &store,
+        &tree_hash,
+        &cwd,
+        &sparse_opts,
+        &crate::restore_fanout::read_chunks_fanout,
+    ) {
         Ok(r) => r,
         Err(e) => return emit_err(&format!("restore: {e}"), exit::CANTCREAT),
     };

@@ -30,6 +30,7 @@ mod fanout;
 pub mod format;
 pub mod progress;
 pub mod remote_dispatch;
+mod restore_fanout;
 pub mod signal;
 #[cfg(feature = "sparse-checkout")]
 pub mod sparse_cache;

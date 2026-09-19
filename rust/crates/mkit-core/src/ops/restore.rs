@@ -42,6 +42,13 @@ use crate::worktree;
 
 const MAX_SPARSE_BYTES: u64 = 1024 * 1024;
 
+/// Chunk-count bound per `read_chunks` batch when materialising a
+/// [`Object::ChunkedBlob`] — mirrors `worktree::STREAM_HASH_BATCH` (16
+/// MiB at the current 256 KiB max chunk size) so the read side of a
+/// large-file checkout bounds in-flight memory the same way the write
+/// side already does.
+const RESTORE_CHUNK_BATCH: usize = 64;
+
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Errors raised by this module.
@@ -65,6 +72,13 @@ pub enum RestoreError {
     Store(#[from] crate::store::StoreError),
     #[error(transparent)]
     Io(#[from] io::Error),
+    /// A `read_chunks` callback passed to
+    /// [`restore_tree_to_worktree_with`] returned a different number of
+    /// chunk buffers than the batch it was given — a contract violation
+    /// by the caller (mirrors [`crate::worktree::WorktreeError::ChunkBatchLengthMismatch`]
+    /// on the ingest side), never a normal runtime condition.
+    #[error("read_chunks callback returned {actual} buffers for a {expected}-chunk batch")]
+    ChunkBatchLengthMismatch { expected: usize, actual: usize },
 }
 
 /// Result alias.
@@ -279,6 +293,40 @@ pub fn restore_tree_to_worktree(
     root: &Path,
     opts: &RestoreOptions,
 ) -> RestoreResult<RestoreReport> {
+    restore_tree_to_worktree_with(store, tree, root, opts, &sequential_read_chunks)
+}
+
+/// [`restore_tree_to_worktree`], parameterised over how a
+/// [`Object::ChunkedBlob`]'s chunk objects are read back during
+/// materialisation.
+///
+/// `read_chunks` receives up to [`RESTORE_CHUNK_BATCH`] chunk hashes at a
+/// time, in file order, and MUST return exactly one chunk's raw bytes per
+/// input hash, in the same order. This mirrors
+/// [`worktree::store_large_file_streaming_with`]'s `hash_chunks`
+/// callback shape on the write side, for the same reason: `mkit-core`
+/// has no thread-pool dependency of its own — it stays usable from wasm
+/// targets, which have no OS threads — so the fan-out decision lives
+/// with the caller instead of living in this function. Reading each
+/// chunk (open + integrity-verify + decode) is independent of every
+/// other chunk in a batch, so `mkit-cli`'s native checkout/clone/reset/
+/// restore paths pass a rayon-backed `read_chunks`, the read-side
+/// counterpart of `add`'s ingest-side chunk-hashing fan-out.
+///
+/// # Errors
+/// Same variants as [`restore_tree_to_worktree`], plus
+/// [`RestoreError::ChunkBatchLengthMismatch`] if `read_chunks` violates
+/// its contract.
+pub fn restore_tree_to_worktree_with<F>(
+    store: &ObjectStore,
+    tree: &Hash,
+    root: &Path,
+    opts: &RestoreOptions,
+    read_chunks: &F,
+) -> RestoreResult<RestoreReport>
+where
+    F: Fn(&ObjectStore, &[Hash]) -> RestoreResult<Vec<Vec<u8>>> + Sync,
+{
     // Load the root-level ignore list. Missing = empty list.
     let ignore_list = match ignore::load(root) {
         Ok(il) => il,
@@ -286,12 +334,22 @@ pub fn restore_tree_to_worktree(
     };
     fs::create_dir_all(root)?;
     let mut report = RestoreReport::default();
-    restore_tree_to_worktree_inner(store, *tree, root, opts, "", &ignore_list, &mut report, 0)?;
+    restore_tree_to_worktree_inner(
+        store,
+        *tree,
+        root,
+        opts,
+        "",
+        &ignore_list,
+        &mut report,
+        0,
+        read_chunks,
+    )?;
     Ok(report)
 }
 
 #[allow(clippy::too_many_arguments)]
-fn restore_tree_to_worktree_inner(
+fn restore_tree_to_worktree_inner<F>(
     store: &ObjectStore,
     tree_hash: Hash,
     target_dir: &Path,
@@ -300,7 +358,11 @@ fn restore_tree_to_worktree_inner(
     ignore: &IgnoreList,
     report: &mut RestoreReport,
     depth: usize,
-) -> RestoreResult<()> {
+    read_chunks: &F,
+) -> RestoreResult<()>
+where
+    F: Fn(&ObjectStore, &[Hash]) -> RestoreResult<Vec<Vec<u8>>> + Sync,
+{
     if depth > MAX_TREE_DEPTH {
         return Err(RestoreError::TreeTooDeep);
     }
@@ -341,12 +403,13 @@ fn restore_tree_to_worktree_inner(
                 {
                     continue;
                 }
-                restore_blob(
+                restore_blob_with(
                     store,
                     target_dir,
                     name,
                     entry.object_hash,
                     entry.mode == EntryMode::Executable,
+                    read_chunks,
                 )?;
                 report.files_written += 1;
             }
@@ -372,6 +435,7 @@ fn restore_tree_to_worktree_inner(
                     ignore,
                     report,
                     depth + 1,
+                    read_chunks,
                 )?;
             }
             EntryMode::Symlink => {
@@ -480,6 +544,10 @@ fn restore_tree_inner(
     Ok(())
 }
 
+/// Sequential [`restore_blob_with`]: reads each chunk of a
+/// [`Object::ChunkedBlob`] one at a time on the calling thread. Used by
+/// [`restore_tree`] (the non-worktree, `stash`-facing path) and by
+/// [`restore_tree_to_worktree`]'s default `read_chunks`.
 fn restore_blob(
     store: &ObjectStore,
     dir: &Path,
@@ -487,23 +555,57 @@ fn restore_blob(
     blob_hash: Hash,
     executable: bool,
 ) -> RestoreResult<()> {
+    restore_blob_with(
+        store,
+        dir,
+        name,
+        blob_hash,
+        executable,
+        &sequential_read_chunks,
+    )
+}
+
+/// Materialise `blob_hash` (a [`Object::Blob`] or [`Object::ChunkedBlob`])
+/// as `dir/name`. For a `ChunkedBlob`, `read_chunks` reads back each
+/// batch of up to [`RESTORE_CHUNK_BATCH`] chunk hashes — see
+/// [`restore_tree_to_worktree_with`]'s doc for the callback contract.
+fn restore_blob_with<F>(
+    store: &ObjectStore,
+    dir: &Path,
+    name: &str,
+    blob_hash: Hash,
+    executable: bool,
+    read_chunks: &F,
+) -> RestoreResult<()>
+where
+    F: Fn(&ObjectStore, &[Hash]) -> RestoreResult<Vec<Vec<u8>>> + Sync,
+{
     let obj = store.read_object(&blob_hash)?;
     match obj {
         Object::Blob(b) => write_file_atomic(dir, name, &b.data, executable)?,
         Object::ChunkedBlob(cb) => {
-            // Stream each chunk straight to the open tmp file instead of
+            // Stream each batch straight to the open tmp file instead of
             // concatenating the whole reassembled file into memory first
-            // (issue #828): peak memory is one chunk (≤256 KiB), not the
-            // file's total size.
+            // (issue #828): peak memory is one `RESTORE_CHUNK_BATCH`
+            // batch (bounded, see its doc), not the file's total size.
+            // Batching (rather than one chunk at a time) lets
+            // `read_chunks` fan a batch's independent reads out across
+            // threads — see this function's and
+            // `restore_tree_to_worktree_with`'s docs.
             let (tmp_path, final_path, mut tmp) = create_tmp_for_write(dir, name)?;
             let mut written: u64 = 0;
-            for ch in &cb.chunks {
-                let chunk_obj = store.read_object(ch)?;
-                let Object::Blob(b) = chunk_obj else {
-                    return Err(RestoreError::NotABlob);
-                };
-                tmp.write_all(&b.data)?;
-                written += b.data.len() as u64;
+            for batch in cb.chunks.chunks(RESTORE_CHUNK_BATCH) {
+                let bufs = read_chunks(store, batch)?;
+                if bufs.len() != batch.len() {
+                    return Err(RestoreError::ChunkBatchLengthMismatch {
+                        expected: batch.len(),
+                        actual: bufs.len(),
+                    });
+                }
+                for buf in &bufs {
+                    tmp.write_all(buf)?;
+                    written += buf.len() as u64;
+                }
             }
             cb.check_reassembled_size(usize::try_from(written).unwrap_or(usize::MAX))?;
             drop(tmp);
@@ -512,6 +614,20 @@ fn restore_blob(
         _ => return Err(RestoreError::NotABlob),
     }
     Ok(())
+}
+
+/// Default `read_chunks`: reads and type-checks each chunk hash in
+/// `hashes` one at a time via [`ObjectStore::read_object`] (which
+/// integrity-verifies the bytes against the hash).
+fn sequential_read_chunks(store: &ObjectStore, hashes: &[Hash]) -> RestoreResult<Vec<Vec<u8>>> {
+    hashes.iter().map(|h| read_chunk_bytes(store, h)).collect()
+}
+
+fn read_chunk_bytes(store: &ObjectStore, h: &Hash) -> RestoreResult<Vec<u8>> {
+    match store.read_object(h)? {
+        Object::Blob(b) => Ok(b.data),
+        _ => Err(RestoreError::NotABlob),
+    }
 }
 
 fn restore_symlink(

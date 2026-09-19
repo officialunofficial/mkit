@@ -40,5 +40,7 @@ pub use graph::{
 };
 pub use merge::{Conflict, ConflictKind, MergeResult, find_merge_base, is_ancestor, merge_trees};
 pub use recovery::{RecoveryEntry, RecoveryError, RetentionPolicy};
-pub use restore::{RestoreOptions, RestoreReport, restore_tree_to_worktree};
+pub use restore::{
+    RestoreOptions, RestoreReport, restore_tree_to_worktree, restore_tree_to_worktree_with,
+};
 pub use revert::{RevertError, RevertResult, revert};

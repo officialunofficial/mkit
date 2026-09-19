@@ -30,7 +30,7 @@ use mkit_core::hash::Hash;
 use mkit_core::index::EntryStatus;
 use mkit_core::layout::RepoLayout;
 use mkit_core::object::Object;
-use mkit_core::ops::restore::{RestoreOptions, restore_tree_to_worktree};
+use mkit_core::ops::restore::{RestoreOptions, restore_tree_to_worktree_with};
 use mkit_core::refs::{self, Head, RefWriteCondition};
 use mkit_core::store::ObjectStore;
 
@@ -220,7 +220,13 @@ pub fn run(args: &[String]) -> u8 {
     // tracked files, keeping untracked ones), then delete the tracked
     // files the target dropped.
     if opts.hard {
-        if let Err(e) = restore_tree_to_worktree(&store, &tree_hash, &cwd, &restore_opts) {
+        if let Err(e) = restore_tree_to_worktree_with(
+            &store,
+            &tree_hash,
+            &cwd,
+            &restore_opts,
+            &crate::restore_fanout::read_chunks_fanout,
+        ) {
             return emit_err(&format!("reset worktree: {e}"), exit::CANTCREAT);
         }
         for (path, _, _) in &hard_removed {
