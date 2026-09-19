@@ -86,7 +86,7 @@ use mkit_core::layout::RepoLayout;
 use mkit_core::object::Object;
 use mkit_core::ops::diff::{DiffKind, diff_trees};
 use mkit_core::ops::recovery::{self, RecoveryEntry};
-use mkit_core::ops::restore::{RestoreOptions, matches_sparse, restore_tree_to_worktree};
+use mkit_core::ops::restore::{RestoreOptions, matches_sparse, restore_tree_to_worktree_with};
 use mkit_core::refs::{self, Head, RefError, RefWriteCondition};
 use mkit_core::store::ObjectStore;
 use mkit_core::worktree as core_worktree;
@@ -901,11 +901,12 @@ pub fn restore_worktree_and_index(
     store: &ObjectStore,
     tree_hash: Hash,
 ) -> Result<(), String> {
-    restore_tree_to_worktree(
+    restore_tree_to_worktree_with(
         store,
         &tree_hash,
         layout.worktree_root(),
         &RestoreOptions::default(),
+        &crate::restore_fanout::read_chunks_fanout,
     )
     .map_err(|e| format!("restore worktree: {e}"))?;
     sync_index_to_tree(layout, store, tree_hash)

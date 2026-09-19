@@ -116,6 +116,15 @@ export const timingBenchmarks: TimingBenchmark[] = [
     git: { mean: 0.0023, stddev: 0.0002 },
     note: 'Both timings are below hyperfine’s roughly 5 ms shell calibration threshold. Both tools check cached file metadata with one stat call, without reading or hashing file contents.',
   },
+  {
+    id: 'checkout-100m',
+    theme: 'large-files',
+    name: 'Checkout a branch that changed a 100 MiB file',
+    description: 'main holds a committed 100 MiB file; branch v2 appends 1 MiB to it. Time checking out v2 from main.',
+    mkit: { mean: 0.2932, stddev: 0.0493 },
+    git: { mean: 0.3113, stddev: 0.0293 },
+    note: 'Measured separately from the rest of this page’s rows: 2026-09-19, mkit commit d7afae5938972f1b21410d19080cf3720aa33001, same 4-core container and hyperfine version as `methodology` — added alongside a fix that fans a restored file’s independent chunk reads out across threads (mkit-cli’s add already did this on the write side; checkout/clone/reset/restore had no read-side counterpart). mkit is faster here, but only by about 6% — within this run’s noise (stddevs overlap) rather than a clear win. Materialising a ChunkedBlob writes every chunk to one shared file sequentially regardless, so the fan-out only parallelizes each chunk’s read-and-verify step, not the write; `cargo bench -p mkit-benches --bench restore_chunk_fanout` isolates that step directly and shows a clearer gain (a 128 MiB restore’s chunk-read phase alone: 115.3ms → 83.2ms, ~28%) than the full add/commit/checkout/git-process-spawn round trip this row measures end to end.',
+  },
 ]
 
 export const sizeBenchmarks: SizeBenchmark[] = [
