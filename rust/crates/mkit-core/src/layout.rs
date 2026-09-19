@@ -139,6 +139,14 @@ pub const BACKPOINTER_FILE_NAME: &str = "mkitdir";
 /// cannot balloon discovery.
 pub const MAX_POINTER_FILE_BYTES: u64 = 4096;
 
+/// Exact bytes of the `.mkit` marker file at a scoped-workspace root
+/// (SPEC-PARTIAL-WORKSPACES local state): `mkit-scoped: 1\n`.
+pub(crate) const SCOPED_MARKER: &[u8] = b"mkit-scoped: 1\n";
+/// Prefix that any malformed scoped marker still starts with.
+pub(crate) const SCOPED_MARKER_PREFIX: &[u8] = b"mkit-scoped:";
+/// Metadata directory name of a scoped workspace.
+pub(crate) const SCOPED_STATE_DIR: &str = ".mkit-scoped";
+
 /// Resolved repository layout: worktree root plus the two state
 /// directories (see the module docs for the classification table).
 ///
@@ -456,6 +464,19 @@ pub enum DiscoverError {
     CommonDirUnreadable(PathBuf, std::io::Error),
     #[error("worktree common dir {0} is missing or not a directory")]
     CommonDirMissing(PathBuf),
+    #[error("{0} is a scoped mkit workspace; ordinary repository commands do not apply here")]
+    ScopedWorkspace(PathBuf),
+    #[error("{0} has a malformed scoped-workspace marker (.mkit)")]
+    ScopedMarkerCorrupt(PathBuf),
+    #[error(
+        "{0} contains recognizable scoped-workspace metadata but no complete install — \
+         the scoped root is incomplete or torn"
+    )]
+    ScopedInstallIncomplete(PathBuf),
+    #[error("{0} mixes ordinary repository state with scoped-workspace authority")]
+    ScopedLayoutConflict(PathBuf),
+    #[error("filesystem error while checking {0} for scoped-workspace authority: {1}")]
+    Io(PathBuf, std::io::Error),
 }
 
 /// Validate a linked-worktree id (the `worktrees/<id>` directory name).
@@ -538,6 +559,7 @@ pub fn write_pointer_file(tree_root: &Path, state_dir: &Path) -> std::io::Result
 /// # Errors
 /// See [`DiscoverError`].
 pub fn discover(worktree_root: &Path) -> Result<RepoLayout, DiscoverError> {
+    check_scoped_boundary(worktree_root)?;
     let dot_mkit = worktree_root.join(MKIT_DIR);
     let Ok(meta) = std::fs::symlink_metadata(&dot_mkit) else {
         return Ok(RepoLayout::single(worktree_root));
@@ -596,6 +618,204 @@ pub fn discover(worktree_root: &Path) -> Result<RepoLayout, DiscoverError> {
     }
 
     Ok(RepoLayout::linked(worktree_root, state_dir, common_dir))
+}
+
+/// Scoped-workspace authority found at one directory — shared by
+/// [`discover`], the [`crate::store::ObjectStore`] open/init guards, and
+/// scoped-workspace creation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ScopedAuthority {
+    /// No scoped marker or recognizable scoped metadata.
+    None,
+    /// `.mkit` is a regular file with the exact scoped marker bytes.
+    Scoped,
+    /// `.mkit` is a regular file beginning `mkit-scoped:` but is not the
+    /// exact marker.
+    CorruptMarker,
+    /// Recognizable scoped metadata exists with no scoped marker and no
+    /// ordinary `.mkit` authority.
+    Incomplete,
+    /// Ordinary `.mkit` authority (directory or linked pointer) overlaps
+    /// recognizable scoped metadata.
+    Conflict,
+}
+
+/// Read at most `cap` bytes of `path`; `Ok(None)` when absent. The leaf
+/// must be a verified regular file — a symlink or other non-regular entry
+/// is a fail-closed `InvalidData` error, never a silently followed link
+/// to outside-root content.
+fn read_prefix(path: &Path, cap: usize) -> std::io::Result<Option<Vec<u8>>> {
+    use std::io::Read;
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    if !meta.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "scoped-state entry is not a regular file",
+        ));
+    }
+    let mut file = std::fs::File::open(path)?;
+    let mut buf = vec![0u8; cap];
+    let n = file.read(&mut buf)?;
+    buf.truncate(n);
+    Ok(Some(buf))
+}
+
+/// True when `root`'s `.mkit-scoped` carries recognizable scoped
+/// metadata: a `CURRENT` file beginning `MKCR`, or a lowercase-64-hex
+/// `generations/<digest>/` containing `manifest.bin` beginning `MKGM`.
+/// A bare `.mkit-scoped` directory, `workspace.lock`, or unrelated
+/// contents are NOT authority.
+fn scoped_state_recognized(root: &Path) -> std::io::Result<bool> {
+    let dir = root.join(SCOPED_STATE_DIR);
+    match std::fs::symlink_metadata(&dir) {
+        Ok(meta) => {
+            if !meta.is_dir() {
+                return Ok(false);
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    }
+    if let Some(prefix) = read_prefix(&dir.join("CURRENT"), 4)?
+        && prefix == b"MKCR"
+    {
+        return Ok(true);
+    }
+    let generations = dir.join("generations");
+    let entries = match std::fs::read_dir(&generations) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name.len() != crate::hash::HEX_LEN
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            || !entry.file_type()?.is_dir()
+        {
+            continue;
+        }
+        if let Some(prefix) = read_prefix(&entry.path().join("manifest.bin"), 4)?
+            && prefix == b"MKGM"
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Classify the scoped-workspace authority at exactly `root`.
+pub(crate) fn classify_scoped_root(root: &Path) -> std::io::Result<ScopedAuthority> {
+    let scoped_state = scoped_state_recognized(root)?;
+    let dot_mkit = root.join(MKIT_DIR);
+    let meta = match std::fs::symlink_metadata(&dot_mkit) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(if scoped_state {
+                ScopedAuthority::Incomplete
+            } else {
+                ScopedAuthority::None
+            });
+        }
+        Err(e) => return Err(e),
+    };
+    if meta.is_dir() {
+        return Ok(if scoped_state {
+            ScopedAuthority::Conflict
+        } else {
+            ScopedAuthority::None
+        });
+    }
+    if !meta.is_file() {
+        // A `.mkit` that exists but is not a regular file (symlink, FIFO,
+        // device) can never be the scoped marker — and the classifier
+        // must not follow it to find out what it names. Recognized
+        // scoped state without its regular-file marker is an
+        // incomplete-install boundary, not "no authority": refusing here
+        // is what stops the ancestor walk from reaching a parent repo.
+        return Ok(if scoped_state {
+            ScopedAuthority::Incomplete
+        } else {
+            ScopedAuthority::None
+        });
+    }
+    let cap = usize::try_from(MAX_POINTER_FILE_BYTES).unwrap_or(usize::MAX);
+    let bytes = read_prefix(&dot_mkit, cap)?.unwrap_or_default();
+    if bytes == SCOPED_MARKER {
+        return Ok(ScopedAuthority::Scoped);
+    }
+    if bytes.starts_with(SCOPED_MARKER_PREFIX) {
+        return Ok(ScopedAuthority::CorruptMarker);
+    }
+    if scoped_state {
+        return Ok(if bytes.starts_with(POINTER_PREFIX.as_bytes()) {
+            ScopedAuthority::Conflict
+        } else {
+            ScopedAuthority::Incomplete
+        });
+    }
+    Ok(ScopedAuthority::None)
+}
+
+/// Refuse any scoped-workspace authority at `start` or above it, so
+/// ordinary operations invoked inside a scoped root fail before they can
+/// reach an ancestor repository or create files. Shared by [`discover`],
+/// `ObjectStore` open/init, and callers that walk ancestors themselves.
+pub fn check_scoped_boundary(start: &Path) -> Result<(), DiscoverError> {
+    // Resolve to an absolute real path before walking: a relative `start`
+    // would stop at its textual top and never see an enclosing scoped
+    // root, and a symlinked prefix must resolve to the directory it
+    // actually names. `canonicalize` needs the path to exist; otherwise
+    // fall back to an absolute textual path so the ancestor walk still
+    // covers the invocation directory's parents.
+    let resolved = match start.canonicalize() {
+        Ok(path) => path,
+        Err(_) if start.is_absolute() => start.to_path_buf(),
+        Err(_) => match std::env::current_dir() {
+            Ok(cwd) => cwd.join(start),
+            Err(_) => start.to_path_buf(),
+        },
+    };
+    for dir in resolved.ancestors() {
+        match classify_scoped_root(dir).map_err(|e| DiscoverError::Io(dir.to_path_buf(), e))? {
+            ScopedAuthority::None => {}
+            ScopedAuthority::Scoped => {
+                return Err(DiscoverError::ScopedWorkspace(dir.to_path_buf()));
+            }
+            ScopedAuthority::CorruptMarker => {
+                return Err(DiscoverError::ScopedMarkerCorrupt(dir.to_path_buf()));
+            }
+            ScopedAuthority::Incomplete => {
+                return Err(DiscoverError::ScopedInstallIncomplete(dir.to_path_buf()));
+            }
+            ScopedAuthority::Conflict => {
+                return Err(DiscoverError::ScopedLayoutConflict(dir.to_path_buf()));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// True when `root` carries ordinary `.mkit` authority — a directory or
+/// any regular file — used by scoped-workspace creation to reject
+/// nesting inside an ordinary or linked repository.
+#[cfg(all(unix, not(target_arch = "wasm32")))]
+pub(crate) fn has_ordinary_authority(root: &Path) -> std::io::Result<bool> {
+    match std::fs::symlink_metadata(root.join(MKIT_DIR)) {
+        Ok(meta) => Ok(meta.is_dir() || meta.is_file() || meta.file_type().is_symlink()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
 }
 
 /// One entry of the linked-worktree registry (`<common>/worktrees/*`),
@@ -1190,5 +1410,160 @@ mod tests {
         write_pointer_file(tmp.path(), Path::new("/main/.mkit/worktrees/w1")).unwrap();
         let bytes = std::fs::read(tmp.path().join(MKIT_DIR)).unwrap();
         assert_eq!(bytes, b"mkitdir: /main/.mkit/worktrees/w1\n");
+    }
+
+    /// A directory carrying recognizable scoped metadata without the
+    /// exact marker: `.mkit-scoped/CURRENT` beginning `MKCR`.
+    fn scaffold_incomplete(root: &Path) {
+        let scoped = root.join(SCOPED_STATE_DIR);
+        std::fs::create_dir_all(&scoped).unwrap();
+        std::fs::write(scoped.join("CURRENT"), b"MKCR\x01rest").unwrap();
+    }
+
+    #[test]
+    fn scoped_boundary_refuses_every_authority_shape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("ws");
+        std::fs::create_dir(&root).unwrap();
+
+        // Exact marker → scoped workspace.
+        std::fs::write(root.join(MKIT_DIR), SCOPED_MARKER).unwrap();
+        assert!(matches!(
+            check_scoped_boundary(&root),
+            Err(DiscoverError::ScopedWorkspace(_))
+        ));
+        assert!(matches!(
+            check_scoped_boundary(&root.join("nested/deep")),
+            Err(DiscoverError::ScopedWorkspace(_))
+        ));
+
+        // Marker that begins like a scoped marker but is not exact.
+        std::fs::write(root.join(MKIT_DIR), b"mkit-scoped: 2\n").unwrap();
+        assert!(matches!(
+            check_scoped_boundary(&root),
+            Err(DiscoverError::ScopedMarkerCorrupt(_))
+        ));
+
+        // Recognizable scoped metadata without a marker → incomplete.
+        std::fs::remove_file(root.join(MKIT_DIR)).unwrap();
+        scaffold_incomplete(&root);
+        assert!(matches!(
+            check_scoped_boundary(&root),
+            Err(DiscoverError::ScopedInstallIncomplete(_))
+        ));
+
+        // Ordinary `.mkit` directory overlapping scoped metadata → conflict.
+        std::fs::create_dir(root.join(MKIT_DIR)).unwrap();
+        assert!(matches!(
+            check_scoped_boundary(&root),
+            Err(DiscoverError::ScopedLayoutConflict(_))
+        ));
+
+        // A generation dir with an MKGM manifest alone also counts as
+        // recognizable scoped metadata.
+        let orphan = tmp.path().join("orphan");
+        let gen_dir = orphan.join(format!(
+            "{SCOPED_STATE_DIR}/generations/{}",
+            "a".repeat(crate::hash::HEX_LEN)
+        ));
+        std::fs::create_dir_all(&gen_dir).unwrap();
+        std::fs::write(gen_dir.join("manifest.bin"), b"MKGM\x01rest").unwrap();
+        assert!(matches!(
+            check_scoped_boundary(&orphan),
+            Err(DiscoverError::ScopedInstallIncomplete(_))
+        ));
+    }
+
+    #[test]
+    fn unrelated_scoped_named_directory_is_not_authority() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("plain");
+        std::fs::create_dir(&root).unwrap();
+        // A bare `.mkit-scoped` dir, a lock file, and junk content are
+        // all unrelated state — none establish scoped authority.
+        let scoped = root.join(SCOPED_STATE_DIR);
+        std::fs::create_dir(&scoped).unwrap();
+        std::fs::write(scoped.join("workspace.lock"), b"").unwrap();
+        std::fs::write(scoped.join("service-junk"), b"x").unwrap();
+        check_scoped_boundary(&root).unwrap();
+        assert!(discover(&root).unwrap().is_single());
+    }
+
+    /// A symlinked `.mkit-scoped/CURRENT` pointing outside the root is
+    /// never followed into a classification and never treated as absent —
+    /// the boundary check fails closed instead.
+    #[test]
+    #[cfg(unix)]
+    fn symlinked_scoped_metadata_refuses_discovery() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("ws");
+        let scoped = root.join(SCOPED_STATE_DIR);
+        std::fs::create_dir_all(&scoped).unwrap();
+        let outside = tmp.path().join("outside-current");
+        std::fs::write(&outside, b"MKCR\x01rest").unwrap();
+        std::os::unix::fs::symlink(&outside, scoped.join("CURRENT")).unwrap();
+        assert!(
+            check_scoped_boundary(&root).is_err(),
+            "symlinked CURRENT must fail closed, not classify or pass"
+        );
+        assert!(discover(&root).is_err());
+        // A symlinked generation member must not be inspected either:
+        // manifest.bin linked to outside content beginning MKGM.
+        let orphan = tmp.path().join("orphan");
+        let gen_dir = orphan.join(format!(
+            "{SCOPED_STATE_DIR}/generations/{}",
+            "b".repeat(crate::hash::HEX_LEN)
+        ));
+        std::fs::create_dir_all(&gen_dir).unwrap();
+        let outside_manifest = tmp.path().join("outside-manifest");
+        std::fs::write(&outside_manifest, b"MKGM\x01rest").unwrap();
+        std::os::unix::fs::symlink(&outside_manifest, gen_dir.join("manifest.bin")).unwrap();
+        assert!(check_scoped_boundary(&orphan).is_err());
+        // Neither refusal fabricated any scoped marker or state.
+        assert!(!root.join(MKIT_DIR).exists());
+        assert!(!orphan.join(MKIT_DIR).exists());
+    }
+
+    /// A `.mkit` that exists but is not a regular file (symlink, FIFO,
+    /// device) can never be the scoped marker. Recognized scoped
+    /// metadata beneath it is still an incomplete-install boundary —
+    /// never "no authority" that lets the ancestor walk reach a parent
+    /// repository.
+    #[test]
+    #[cfg(unix)]
+    fn nonregular_marker_over_scoped_state_is_incomplete() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join(MKIT_DIR)).unwrap();
+        let root = repo.join("ws");
+        std::fs::create_dir(&root).unwrap();
+        scaffold_incomplete(&root);
+        // `.mkit` as a symlink (pointing anywhere — the classifier must
+        // not follow it) overlapping scoped metadata.
+        std::os::unix::fs::symlink(repo.join(MKIT_DIR), root.join(MKIT_DIR)).unwrap();
+        assert!(matches!(
+            check_scoped_boundary(&root),
+            Err(DiscoverError::ScopedInstallIncomplete(_))
+        ));
+        assert!(matches!(
+            discover(&root.join("deep")),
+            Err(DiscoverError::ScopedInstallIncomplete(_))
+        ));
+    }
+
+    #[test]
+    fn scoped_boundary_precedes_ancestor_repo_discovery() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join(MKIT_DIR)).unwrap();
+        // A scoped root nested inside an ordinary repository: discovery
+        // from below must refuse, not walk up into `repo`.
+        let ws = repo.join("sub/ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join(MKIT_DIR), SCOPED_MARKER).unwrap();
+        assert!(matches!(
+            discover(&ws.join("deep")),
+            Err(DiscoverError::ScopedWorkspace(_))
+        ));
     }
 }

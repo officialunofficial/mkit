@@ -1,0 +1,9 @@
+{
+  "blake3": "14c57435511d5f7bc5c6f6f5bc5af8975c109d08eb7489f2fa8263d37bcb299b",
+  "description": "MKCR pointing at the pending generation's manifest digest.",
+  "error": null,
+  "expect": "accept",
+  "magic": "MKCR",
+  "name": "current_v1",
+  "size": 77
+}

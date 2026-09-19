@@ -1,0 +1,9 @@
+{
+  "blake3": "257e4dfb66a7bcc6326fd78bbadf61bee69fe6fd6dd80a412fbe9f5dee53b6a4",
+  "description": "MKWS from the pending generation: selection, limits, target present.",
+  "error": null,
+  "expect": "accept",
+  "magic": "MKWS",
+  "name": "workspace_v1",
+  "size": 509
+}

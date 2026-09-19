@@ -1,0 +1,9 @@
+{
+  "blake3": "009791ce6cc30e02a9230c50effedbf448739f7abc3db9740aa158fbdbd12a57",
+  "description": "MKPN in Prepared status with an operation id/fingerprint pair.",
+  "error": null,
+  "expect": "accept",
+  "magic": "MKPN",
+  "name": "pending_v1",
+  "size": 255
+}

@@ -10,6 +10,18 @@ mod overlay;
 mod update;
 mod verify;
 
+// Durable scoped-workspace local state: descriptor-anchored Unix
+// filesystem access, canonical state codecs, and the immutable-generation
+// store. Native-only — excluded from wasm builds.
+#[cfg(all(unix, not(target_arch = "wasm32")))]
+mod layout;
+#[cfg(all(unix, not(target_arch = "wasm32")))]
+mod local_codec;
+#[cfg(all(unix, not(target_arch = "wasm32")))]
+mod state;
+#[cfg(all(unix, not(target_arch = "wasm32")))]
+mod sys;
+
 use crate::object::TreeEntry;
 
 pub use bundle::{PartialObject, PartialSnapshotBundle};
@@ -19,6 +31,15 @@ pub use update::{PartialUpdate, export_partial_update};
 pub use verify::{
     PartialCoverage, SelectedFile, VerifiedPartialSnapshot, VerifiedTree, build_partial_snapshot,
     verify_partial_snapshot,
+};
+
+#[cfg(all(unix, not(target_arch = "wasm32")))]
+pub use layout::ScopedWorkspaceLayout;
+#[cfg(all(unix, not(target_arch = "wasm32")))]
+pub use state::{
+    AcceptedStateV1, PartialStateError, PendingIdentityV1, PendingOperationV1, PendingOutcomeV1,
+    PendingStateV1, PendingStatusV1, RemotePublicationTargetV1, ScopedWorkspaceState, StageEntryV1,
+    StageStateV1, WorkspaceSelectionV1, WorkspaceStateV1,
 };
 
 /// A repository-relative path represented by exact UTF-8 component bytes.

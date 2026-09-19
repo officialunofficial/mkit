@@ -56,6 +56,25 @@ train).
   Existing object, signing, pack, ref formats and full-clone defaults are
   unchanged. **SemVer:** additive.
 
+- *(core)* `ScopedWorkspaceLayout` adds native durable scoped-workspace
+  local state (SPEC-PARTIAL-WORKSPACES §16): `create`/`open` of a root whose
+  `.mkit` is the exact `mkit-scoped: 1\n` marker file, immutable
+  `.mkit-scoped/generations/<manifest-digest>` state selected solely by an
+  atomically replaced `CURRENT` pointer, and `read_state`/`replace_stage`/
+  `save_pending`/`record_outcome` transitions serialized by an isolated
+  `workspace.lock`. The `MKWS`/`MKST`/`MKPN`/`MKAC`/`MKGM`/`MKCR` envelopes
+  are checksum-bounded and strictly decoded; staged and pending state is
+  authoritative over working files, and acceptance advances the base and
+  resets the stage to the accepted representation without overwriting
+  divergent working files. Ordinary commands, `ObjectStore::open`,
+  and `ObjectStore::init` refuse scoped roots, corrupt markers, incomplete
+  installs, and layout conflicts before touching ancestor repositories or
+  the filesystem. Existing object, bundle, update, signing, pack, and ref
+  formats and ordinary repository defaults are unchanged. **SemVer:**
+  additive in this pre-release, but `StoreError` gains the
+  `ScopedBoundary` variant &mdash; a break for downstream exhaustive
+  matches.
+
 - *(wasm)* `partial_verify_snapshot` materializes selected file bytes from a
   verified `MKWB` without signing. `partial_edit_and_export_with_limits` shares
   the existing edit/export pipeline with a caller-lowered `PartialLimits` JSON

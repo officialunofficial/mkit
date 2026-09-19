@@ -1,0 +1,9 @@
+{
+  "blake3": "bca787c668dbaf5838c4379b643d1dbc97b4f7629e45b196bda6fb3829323f5c",
+  "description": "MKPN status byte set to 9 (only 0..=3 are defined).",
+  "error": "NonCanonical",
+  "expect": "reject",
+  "magic": "MKPN",
+  "name": "neg_unknown_status",
+  "size": 255
+}

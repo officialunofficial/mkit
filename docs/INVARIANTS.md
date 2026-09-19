@@ -682,3 +682,30 @@ incompatible carriers.
 `mkit_core::verify::closure::tests::delta_pack_is_profile_violation`,
 and `rust/tests/golden/closure/neg_delta_entry.*` /
 `neg_compressed_entry.*`.
+
+## Scoped-workspace CURRENT selects one coherent state; stage/pending are authoritative
+
+**Always:** a scoped workspace's `.mkit-scoped/CURRENT` names exactly one
+manifest-digest-keyed immutable generation, and readers decode only the
+records that generation binds &mdash; never the highest surviving generation, and
+never working-tree contents. The staged file map and pending operation come
+from the selected generation alone; the working tree is materialized only at
+create and is never consulted or rewritten by transitions.
+
+**Because:** torn writes and crashes are expected. Reading anything but the
+CURRENT-selected generation can pair a new workspace record with an old
+stage or a foreign pending update, and treating the working tree as
+authoritative would silently discard staged-but-unmaterialized edits.
+
+**If violated:** a crash mid-transition can resurrect a stale stage, an
+adversarial or torn generation can be mistaken for committed state, or a
+user's divergent working file can overwrite staged content &mdash; each
+misrepresenting what the next export would sign.
+
+**Enforced by:** `rust/crates/mkit-core/tests/partial_local.rs`
+(`missing_or_corrupt_current_fails_closed`,
+`corrupt_manifest_member_bundle_object_update_all_fail_closed`,
+`no_highest_generation_or_worktree_fallback`,
+`stage_persists_across_restart_and_workfile_is_ignored`) and
+`mkit_core::partial::state::tests` fault-seam cases covering every
+commit-sequence injection point.

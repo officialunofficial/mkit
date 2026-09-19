@@ -1,0 +1,9 @@
+{
+  "blake3": "3a0703fa38d9e48b48af3aa837b4c85b9857f39d456bf898391e4e5c1f5f1f69",
+  "description": "MKWS selection count encoded as a two-byte non-minimal varint.",
+  "error": "NonCanonical",
+  "expect": "reject",
+  "magic": "MKWS",
+  "name": "neg_nonminimal_varint",
+  "size": 510
+}
