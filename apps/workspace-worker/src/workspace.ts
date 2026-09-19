@@ -24,7 +24,8 @@ import {
     type FileManifest,
 } from "./objects";
 import { SandboxWorkspace } from "./sandbox-files";
-import { WorkspaceState, type Mutation } from "./workspace-state";
+import { captureSelected } from "./partial-capture";
+import { WorkspaceState, type Mutation, type PartialState } from "./workspace-state";
 import { runWorkspaceTask } from "./workspace-runner";
 import { applyVersionEdits, versionRequest } from "./version-edits";
 
@@ -55,6 +56,7 @@ export class Workspace extends DurableObject<Env> {
         ownerPublicKey: string,
         source: WorkspaceSource,
         files: FileManifest,
+        bundleKey?: string,
     ): Promise<PreparedWorkspace> {
         return this.serial(async () => {
             const existing = await this.ctx.storage.get<AgentGrant>("preparedGrant");
@@ -84,13 +86,32 @@ export class Workspace extends DurableObject<Env> {
                 updatedAt: now,
                 public: true,
             };
-            await this.ctx.storage.put({
+            const writes: Record<string, unknown> = {
                 meta,
                 seed,
                 preparedGrant: grant,
                 files,
                 generation: randomToken(),
-            });
+            };
+            if (source.kind === "partial-bundle") {
+                if (
+                    !bundleKey ||
+                    !source.selectedPaths ||
+                    !source.bundleDigest ||
+                    source.mode !== "public-partial-v1"
+                )
+                    throw new Error("Incomplete public partial source");
+                const partial: PartialState = {
+                    mode: "public-partial-v1",
+                    baseCommit: source.commitHash,
+                    bundleDigest: source.bundleDigest,
+                    selectedPaths: source.selectedPaths,
+                    bundleKey,
+                    original: JSON.parse(JSON.stringify(files)) as FileManifest,
+                };
+                writes.partial = partial;
+            }
+            await this.ctx.storage.put(writes);
             return { id, grant };
         });
     }
@@ -98,6 +119,11 @@ export class Workspace extends DurableObject<Env> {
         commitHash?: string,
     ): Promise<{ source: WorkspaceSource; files: FileManifest }> {
         await this.state.requireActive();
+        if (await this.state.isPartial())
+            throw new HttpError(
+                400,
+                "This selected workspace does not support clone, fork, or remix.",
+            );
         const meta = await this.state.summary(),
             hash = commitHash ?? meta.head!;
         assertHash(hash);
@@ -147,7 +173,9 @@ export class Workspace extends DurableObject<Env> {
             const box = await this.box();
             await box.stopTerminal();
             const generation = (await this.ctx.storage.get<string>("generation"))!;
-            const files = await box.capture(generation);
+            const files = (await this.state.isPartial())
+                ? await captureSelected(box, generation, await this.state.files())
+                : await box.capture(generation);
             if ((await this.ctx.storage.get("generation")) === generation)
                 await this.ctx.storage.put("files", files);
             await this.ctx.storage.delete("terminalOpen");
@@ -179,6 +207,38 @@ export class Workspace extends DurableObject<Env> {
                 await this.state.requireActive();
                 const version = url.searchParams.get("version") ?? undefined;
                 if (version) assertHash(version);
+                if (action === "partial-update") {
+                    if (!(await this.owner(request)))
+                        throw new HttpError(403, "Unlock your passkey to download this update.");
+                    const candidate = await this.state.candidate();
+                    if (!candidate)
+                        return json(
+                            {
+                                error: "Candidate is not ready.",
+                                code: "not_ready",
+                                coverage: "selected-only",
+                            },
+                            404,
+                        );
+                    const object = await this.env.OBJECTS.get(candidate.key);
+                    if (!object) throw new HttpError(404, "Candidate is not ready.");
+                    const bytes = new Uint8Array(await object.arrayBuffer());
+                    if (mkit.blake3_hex(bytes) !== candidate.digest)
+                        throw new HttpError(500, "Stored candidate digest mismatch.");
+                    return new Response(bytes, {
+                        status: 200,
+                        headers: {
+                            "Content-Type": "application/octet-stream",
+                            "Content-Disposition": `attachment; filename="${candidate.id}.mkwu"`,
+                            "Cache-Control": "no-store",
+                            "X-Content-Type-Options": "nosniff",
+                            "Referrer-Policy": "no-referrer",
+                            "X-Mkit-Coverage": candidate.coverage,
+                            "X-Mkit-Candidate": candidate.id,
+                            "X-Mkit-Base": candidate.baseCommit,
+                        },
+                    });
+                }
                 if (!action) return json(await this.state.view(await this.owner(request), version));
                 if (action === "file") {
                     const path = text(url.searchParams.get("path"), 1024, "path");
@@ -245,12 +305,16 @@ export class Workspace extends DurableObject<Env> {
                     if (await this.ctx.storage.get("activated"))
                         throw new HttpError(409, "Workspace is already active.");
                     const grant = verifyGrant(body, await this.state.preparedGrant());
-                    mutation = await this.state.publishedVersion(
-                        await this.state.files(),
-                        "Remix project",
-                        true,
-                    );
-                    mutation.writes = { ...mutation.writes, activated: true, grant };
+                    if (await this.state.isPartial()) {
+                        mutation = { writes: { activated: true, grant } };
+                    } else {
+                        mutation = await this.state.publishedVersion(
+                            await this.state.files(),
+                            "Remix project",
+                            true,
+                        );
+                        mutation.writes = { ...mutation.writes, activated: true, grant };
+                    }
                 } else {
                     await this.state.requireActive();
                     mutation = { writes: {} };
@@ -269,12 +333,29 @@ export class Workspace extends DurableObject<Env> {
                                 409,
                                 "Wait for the agent to finish or cancel its task before editing.",
                             );
+                        const partial = await this.state.isPartial();
+                        if (partial) await this.state.requireNotPending();
                         const checkpoint = action === "versions" ? versionRequest(body) : undefined;
                         await this.stopTerminals();
                         let files: FileManifest;
                         if (checkpoint) {
+                            if (partial) {
+                                const original = (await this.state.partialState()).original;
+                                for (const edit of checkpoint.edits) {
+                                    if (!original[edit.path] || edit.expectedHash === null)
+                                        throw new HttpError(
+                                            400,
+                                            "Partial workspaces can only replace selected files.",
+                                        );
+                                }
+                            }
                             files = await applyVersionEdits(await this.state.files(), checkpoint.edits, this.env.OBJECTS);
                         } else if (action === "restore") {
+                            if (partial)
+                                throw new HttpError(
+                                    400,
+                                    "This selected workspace does not support restore.",
+                                );
                             const hash = text(body.versionHash, 64, "version");
                             assertHash(hash);
                             files = await this.state.files(hash);
@@ -284,6 +365,11 @@ export class Workspace extends DurableObject<Env> {
                             if (typeof body.content !== "string")
                                 throw new HttpError(400, "Invalid file content.");
                             files = { ...(await this.state.files()) };
+                            if (partial && !files[path])
+                                throw new HttpError(
+                                    400,
+                                    "Partial workspaces can only replace selected files.",
+                                );
                             if (body.expectedHash !== (files[path]?.hash ?? null))
                                 throw new HttpError(
                                     409,
@@ -298,13 +384,25 @@ export class Workspace extends DurableObject<Env> {
                             files[path] = entry;
                             validateManifest(files);
                         }
-                        mutation = await this.state.publishedVersion(
-                            files,
-                            checkpoint?.message ?? (action === "restore" ? "Restore saved version" : `Save ${body.path}`),
-                        );
-                        mutation.writes = { ...mutation.writes, generation: randomToken() };
+                        const message =
+                            checkpoint?.message ??
+                            (action === "restore" ? "Restore saved version" : `Save ${body.path}`);
+                        if (partial) {
+                            const completed = await this.state.completePartial(files, message);
+                            mutation = {
+                                writes: {
+                                    ...completed.writes,
+                                    generation: randomToken(),
+                                },
+                                requireAgent: true,
+                            };
+                        } else {
+                            mutation = await this.state.publishedVersion(files, message);
+                            mutation.writes = { ...mutation.writes, generation: randomToken() };
+                        }
                     } else if (action === "tasks") {
                         if (busy) throw new HttpError(409, "An agent task is already running.");
+                        if (await this.state.isPartial()) await this.state.requireNotPending();
                         const prompt = text(body.prompt, 8000, "task");
                         if (encoder.encode(prompt).length > 8000)
                             throw new HttpError(400, "Keep the task under 8,000 bytes.");
@@ -370,7 +468,9 @@ export class Workspace extends DurableObject<Env> {
     private async captureTerminalDraft(): Promise<void> {
         if (!this.terminals.size || !this.sandbox) return;
         const generation = (await this.ctx.storage.get<string>("generation"))!;
-        const files = await this.sandbox.capture(generation);
+        const files = (await this.state.isPartial())
+            ? await captureSelected(this.sandbox, generation, await this.state.files())
+            : await this.sandbox.capture(generation);
         if ((await this.ctx.storage.get("generation")) === generation)
             await this.ctx.storage.put("files", files);
     }
@@ -378,6 +478,7 @@ export class Workspace extends DurableObject<Env> {
         return this.serial(async () => {
             await this.state.requireActive();
             await this.state.requireAgent();
+            if (await this.state.isPartial()) await this.state.requireNotPending();
             if (
                 request.headers.get("Origin") !== this.env.AUTH_AUDIENCE ||
                 !(await this.owner(request))

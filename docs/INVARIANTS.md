@@ -402,6 +402,34 @@ crate manifests, `install.sh`, or the web app's installer-staging scripts.
 (`crates/mkit-keystore/src/lib.rs`) pins that `"windows-credential"` is an
 unrecognized `BackendKind`/`KeyRef` backend string, not a fail-closed one.
 
+## Public partial workspaces prove selected files, not confidentiality or publication
+
+**Always:** `public-partial-v1` fetches a digest-addressed bundle only from a
+configured HTTPS origin after resource validation is explicitly enabled,
+verifies independently supplied base and selection in portable wasm, materializes
+selected regular/executable files, and signs at most one ordinary candidate
+whose parent is that base. AgentGrant is rechecked after asynchronous public
+reads (including the revocation read), immediately before signing, and inside the durable admission
+transaction. Export is `candidate_ready`, never remotely accepted. Omitted paths
+are not deletions. Selected capture does not silently drop legacy-ignored names.
+
+**Because:** a public static bundle is not a private host, and a signed
+candidate is not a published ref. Conflating those lets omitted files look
+deleted or treats a downloadable `MKWU` as admission.
+
+**If violated:** the service can fetch hidden objects, invent a Remix import,
+claim remote acceptance, or leak owner credentials to the bundle origin.
+
+**Enforced by:** `apps/workspace-worker/src/partial-source.test.ts`,
+`apps/workspace-worker/src/partial-candidate.test.ts`,
+`apps/workspace-worker/src/partial-wasm.test.ts`,
+`apps/workspace-worker/src/partial.lifecycle.test.ts`,
+`apps/workspace-worker/src/partial-runner.integration.test.ts`,
+`apps/workspace-worker/src/workspace-state.test.ts`,
+the opt-in `rust/crates/mkit-core/tests/partial_consumer_oracle.rs` recipient check,
+`apps/workspace-worker/src/workspace.integration.test.ts`, and
+`apps/workspace-worker/src/auth.test.ts`.
+
 ## Hosted workspaces separate public projects from owner execution
 
 **Always:** workspace files and signed versions are public; conversation messages,

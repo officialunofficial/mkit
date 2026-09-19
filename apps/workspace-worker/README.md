@@ -35,10 +35,60 @@ The terminal uses a real Sandbox PTY in `/workspace/project`. It is unavailable 
 | Saved model history | 24,000 bytes |
 | Shared model allowance | 900 requests and 180,000 tokens/day by default |
 | Minute admission | Continuously refills 25 requests and 7,500 reserved tokens/minute; bounded waits |
+| Public partial bundle | Opt-in; 4 MiB bundle; 1 MiB witnesses; 1 MiB selected bytes (256 KiB/file) |
 
 Daily limits use UTC day boundaries. Model reservations tokenize the serialized request with the model’s ordinary o200k vocabulary and add a 512-token framing reserve before a request and are adjusted when actual usage arrives. Requests with unknown usage keep their reservation. Groq may enforce additional provider limits; a short provider rate-limit response receives one quota-admitted retry. The model's free allowance does not include Cloudflare container hosting costs.
 
 Oversized source files fail capture; they are not silently omitted. File reads and listings are paginated to keep tool results within model limits. Binary blobs and executable modes survive capture and recovery. Dependency and cache directories are not durable; recreate them after a cold start when needed. When conversation context fills up, select **New conversation** while the agent is idle. This clears model history, chat messages, and the last task while preserving files and saved versions.
+
+## Public partial bundles
+
+`public-partial-v1` stays unavailable unless both `PUBLIC_PARTIAL_BUNDLE_ORIGIN`
+is a trusted HTTPS origin (no credentials, query, fragment, or path) and
+`PUBLIC_PARTIAL_RESOURCE_OK` is the exact value `1`. Origin alone does not
+enable the path. Local Workerd measurements led to the lower consumer-only
+4 MiB bundle / 1 MiB witness / 1 MiB selected-byte profile; the portable v1
+limits and legacy full-source limits are unchanged. See
+[partial-resource.md](partial-resource.md) for measurements, reproduction,
+and limitations. Leave `PUBLIC_PARTIAL_RESOURCE_OK` unset until the operator
+has validated the profile with that deployment's runtime and concurrency.
+
+When both are set, the service accepts owner-signed `POST /api/workspaces/prepare` bodies:
+
+```json
+{
+  "kind": "partial-bundle",
+  "baseCommit": "<64 lowercase hex>",
+  "selectedPaths": [["7368616c6c6f772e747874"]],
+  "bundleDigest": "<64 lowercase hex>"
+}
+```
+
+`selectedPaths` are arrays of hex-encoded UTF-8 components in caller order. The
+worker does not normalize or reorder them. Digest, base, and selection are in
+the signed request body. Existing daily remix quotas and replay identity apply
+after that validation.
+
+The worker fetches only `<origin>/<digest>.mkwb` with `redirect: error`, no
+cookies, and no owner credentials. It hashes delivered bytes with
+`mkit.blake3_hex`, then verifies base and selection through wasm. This mode
+never loads the demo repository or unselected object URLs.
+
+Activation stores the verified base and AgentGrant. It does not create a Remix
+or a candidate. The first explicit save or successful task that changes
+selected files signs an ordinary Commit whose sole parent is the supplied base
+and stores `MKWU` as `candidate_ready`. Unchanged files are a typed no-op.
+One pending candidate blocks further edits, tasks, restore, and terminal
+capture. Partial capture does not apply the legacy `node_modules` / `target`
+ignore list: selected paths under those names are read, and extras there fail
+the exact-selection check. `GET /api/workspaces/<id>/partial-update` returns those bytes to the
+current owner session only (`Cache-Control: no-store`). Owner-only download is
+not a confidentiality guarantee: selected files stay public.
+
+Clone, fork, remix, and complete history routes that need hidden closure return
+an explicit error. Produce a test bundle with the PR01 producer
+(`build_partial_snapshot`) or use `rust/tests/golden/partial_workspace/plain_file.bin`.
+Do not upload bundles or change live origins in this change.
 
 ## Setup and verification
 

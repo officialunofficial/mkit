@@ -38,7 +38,7 @@ ROOT=P.get('root','/workspace/project')
 MARKER=P.get('marker','/tmp/mkit-generation')
 NOFOLLOW=os.O_NOFOLLOW
 DIRECTORY=os.O_DIRECTORY
-IGNORE={'node_modules','.git','.mkit','.venv','__pycache__','target','.DS_Store'}
+IGNORE=set(P['ignore']) if 'ignore' in P else {'node_modules','.git','.mkit','.venv','__pycache__','target','.DS_Store'}
 MAX_FILE=262144
 MAX_TOTAL=4194304
 MAX_FILES=256
@@ -260,9 +260,21 @@ export class SandboxWorkspace {
     }
 
     async capture(generation: string): Promise<FileManifest> {
+        return this.captureWith(generation);
+    }
+
+    async captureExact(generation: string): Promise<FileManifest> {
+        return this.captureWith(generation, { ignore: [] });
+    }
+
+    private async captureWith(
+        generation: string,
+        extra: Record<string, unknown> = {},
+    ): Promise<FileManifest> {
         const captured = await this.helper<Record<string, CapturedFile>>({
             action: "capture",
             generation,
+            ...extra,
         });
         if (!captured || typeof captured !== "object" || Array.isArray(captured))
             throw new Error("Invalid workspace capture");

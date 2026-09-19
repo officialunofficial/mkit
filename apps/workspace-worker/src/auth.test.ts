@@ -188,6 +188,29 @@ describe("delegated agent authorization", () => {
         },
     );
 
+    it("binds unsigned partial source fields by prepared-grant equality", () => {
+        const expected: AgentGrant = {
+            ...grant(),
+            source: {
+                kind: "partial-bundle",
+                repository: "aa".repeat(32),
+                commitHash: "bb".repeat(32),
+                selectedPaths: [["7368616c6c6f772e747874"]],
+                bundleDigest: "aa".repeat(32),
+                mode: "public-partial-v1",
+            },
+        };
+        const candidate = signedGrant(expected);
+        expect(verifyGrant(candidate, expected, NOW)).toEqual(candidate);
+        const tampered = structuredClone(candidate);
+        tampered.grant.source.selectedPaths = [["00"]];
+        expect(() => verifyGrant(tampered, expected, NOW)).toThrow("expired or changed");
+        tampered.grant = structuredClone(expected);
+        tampered.grant.source.commitHash = "cc".repeat(32);
+        expect(() => verifyGrant(tampered, expected, NOW)).toThrow("expired or changed");
+        expect(grantMessage(expected).split("\n")).not.toContain("7368616c6c6f772e747874");
+    });
+
     it("rejects expired or missing authorizations", () => {
         const expected = grant();
         expect(() => verifyGrant(signedGrant(expected), expected, expected.expiresAt)).toThrow(

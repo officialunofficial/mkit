@@ -2,6 +2,7 @@ import type { WorkspaceTask } from "./contracts";
 import { record, text } from "./http";
 import { runAgent, GroqError, type SessionSnapshot, type ToolMap } from "./nanocodex";
 import { MAX_FILE_BYTES, validatePath } from "./objects";
+import { captureSelected } from "./partial-capture";
 import type { SandboxWorkspace } from "./sandbox-files";
 import type { WorkspaceState } from "./workspace-state";
 
@@ -37,7 +38,9 @@ export async function runWorkspaceTask({
     async function checkpoint(): Promise<void> {
         if (!generation || (await state.storage.get<string>("generation")) !== generation)
             throw new Error("Workspace changed during this task.");
-        const files = await sandbox.capture(generation);
+        const files = (await state.isPartial())
+            ? await captureSelected(sandbox, generation, await state.files())
+            : await sandbox.capture(generation);
         if ((await state.storage.get<string>("generation")) !== generation)
             throw new Error("Workspace changed during capture.");
         const meta = await state.summary();
@@ -227,32 +230,42 @@ export async function runWorkspaceTask({
         await serial(async () => {
             await requireRunning();
             await checkpoint();
-            const publication = await state.publishedVersion(
-                await state.files(),
-                "Complete agent task",
-            );
+            const files = await state.files();
+            const partial = await state.isPartial();
+            const publication = partial
+                ? await state.completePartial(files, "Complete agent task")
+                : {
+                      writes: (await state.publishedVersion(files, "Complete agent task")).writes,
+                      versionHash: undefined as string | undefined,
+                      noChanges: false,
+                  };
             await requireRunning();
-            const meta = publication.writes?.meta as { head: string };
+            const versionHash =
+                publication.versionHash ??
+                (publication.writes?.meta as { head?: string } | undefined)?.head;
             await state.storage.transaction(async (storage) => {
                 const current = await storage.get<WorkspaceTask>("task");
                 if (current?.id !== task.id || current.status !== "running")
                     throw new Error("Task is no longer running.");
+                if (partial) await state.requireAgent(storage);
                 await storage.put({
                     ...publication.writes,
                     task: {
                         ...current,
                         status: "completed",
                         finishedAt: Date.now(),
-                        versionHash: meta.head,
+                        ...(versionHash ? { versionHash } : {}),
                     },
                     snapshot: result.snapshot,
                     ...state.message(
                         "assistant",
-                        result.finalMessage || "Task completed. A version was saved.",
+                        publication.noChanges
+                            ? result.finalMessage || "Task completed. Selected files were unchanged."
+                            : result.finalMessage || "Task completed. A version was saved.",
                     ),
                 });
             });
-            await directory.publish(await state.summary());
+            if (!partial) await directory.publish(await state.summary());
         });
     } catch (error) {
         // Failed provider calls retain their conservative reservation because token

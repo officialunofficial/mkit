@@ -2,6 +2,11 @@ import { INPUT_TOKEN_RESERVE, refill, waitForCapacity, type ModelBucket } from "
 import { DurableObject } from "cloudflare:workers";
 import type { AuthenticatedOperation } from "./auth";
 import { type PreparedWorkspace, type RemixRequest, type WorkspaceSummary } from "./contracts";
+import {
+    importPartialBundle,
+    publicPartialOrigin,
+    validatePartialPrepare,
+} from "./partial-source";
 import { HttpError, errorResponse, json } from "./http";
 import { encoder, mkit } from "./mkit";
 import { importDemo } from "./source";
@@ -69,10 +74,31 @@ export class WorkspaceDirectory extends DurableObject<Env> {
         });
     }
 
+    private async remixWorkspace(workspaceId: string, commitHash: string | undefined) {
+        try {
+            return await this.env.WORKSPACES.getByName(workspaceId).remixSource(commitHash);
+        } catch (error) {
+            if (error instanceof HttpError) throw error;
+            const message = error instanceof Error ? error.message : "";
+            if (message.includes("does not support clone, fork, or remix"))
+                throw new HttpError(400, message);
+            throw error;
+        }
+    }
+
     async prepare(
         auth: AuthenticatedOperation,
         sourceRequest: RemixRequest,
     ): Promise<PreparedWorkspace> {
+        if (sourceRequest.kind === "partial-bundle") {
+            validatePartialPrepare({
+                kind: "partial-bundle",
+                baseCommit: sourceRequest.baseCommit,
+                selectedPaths: sourceRequest.selectedPaths,
+                bundleDigest: sourceRequest.bundleDigest,
+            });
+            publicPartialOrigin(this.env);
+        }
         const key = `prepare:${auth.publicKey}:${auth.nonce}`;
         const id = mkit.blake3_hex(encoder.encode(`${auth.publicKey}:${auth.nonce}`)).slice(0, 32);
         const existing = await this.ctx.storage.transaction(async (storage) => {
@@ -112,14 +138,25 @@ export class WorkspaceDirectory extends DurableObject<Env> {
             const source =
                 sourceRequest.kind === "demo"
                     ? await importDemo(this.env.REPOSITORY, this.env.OBJECTS, sourceRequest)
-                    : await this.env.WORKSPACES.getByName(sourceRequest.workspaceId).remixSource(
-                          sourceRequest.commitHash,
-                      );
+                    : sourceRequest.kind === "workspace"
+                      ? await this.remixWorkspace(
+                            sourceRequest.workspaceId,
+                            sourceRequest.commitHash,
+                        )
+                      : await importPartialBundle(
+                            publicPartialOrigin(this.env),
+                            this.env.OBJECTS,
+                            id,
+                            sourceRequest,
+                        );
             const received = await this.env.WORKSPACES.getByName(id).prepare(
                 id,
                 auth.publicKey,
                 source.source,
                 JSON.parse(JSON.stringify(source.files)),
+                "bundleKey" in source && typeof source.bundleKey === "string"
+                    ? source.bundleKey
+                    : undefined,
             );
             const result: PreparedWorkspace = {
                 ...received,

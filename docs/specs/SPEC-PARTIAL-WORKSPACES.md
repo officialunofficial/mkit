@@ -445,3 +445,15 @@ independently formed rejects for length/hash, duplicate/extra inventory,
 trailing bytes, and compressed/delta entries. Each `.bin` has a `.json`
 sidecar and is pinned by `MANIFEST.txt`. `golden_partial_update.rs` consumes
 only committed artifacts when `MKIT_WRITE_GOLDEN` is unset.
+
+## 15. Caller-lowered limits
+
+A consumer MAY pass a `PartialLimits` value that is a subset of the v1 profile
+in §4. It MUST NOT raise any field while claiming v1 interoperability. Generic
+wasm bindings accept an optional JSON object whose keys are those field names;
+omitted keys keep the v1 default. Unknown keys, non-integers, negatives,
+overflows, and values above v1 are invalid. Host-specific caps belong in the
+consumer, not in a named profile inside generic wasm.
+
+A public selected-file consumer is not a confidential host and MUST NOT treat
+`MKWU` export as remote publication or complete closure.

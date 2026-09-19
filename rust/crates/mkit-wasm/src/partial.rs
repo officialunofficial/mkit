@@ -1,21 +1,24 @@
-//! Portable partial-snapshot replacement, signing, and update export.
+//! Portable partial-snapshot verification, replacement, signing, and update export.
 //!
 //! This module is deliberately an adapter: `mkit-core` verifies `MKWB`,
-//! rebuilds authenticated trees, prepares/signs the ordinary Commit, and
-//! encodes `MKWU`. JavaScript only supplies public inputs and a short-lived
-//! Ed25519 seed; it does not implement either wire format.
+//! materializes selected file bytes from verified representations, rebuilds
+//! authenticated trees, prepares/signs the ordinary Commit, and encodes
+//! `MKWU`. JavaScript only supplies public inputs and a short-lived Ed25519
+//! seed; it does not implement either wire format.
 
 use wasm_bindgen::prelude::*;
 
 use mkit_core::hash::{from_hex, to_hex};
+use mkit_core::object::EntryMode;
 use mkit_core::{
     FileReplacement, Identity, IdentityKind, KeyPair, Object, PartialCoverage, PartialError,
-    PartialLimits, PartialPath, export_partial_update, prepare_partial_commit, replace_files,
-    serialize, sign_commit, verify_partial_snapshot,
+    PartialLimits, PartialPath, VerifiedPartialSnapshot, deserialize, export_partial_update,
+    prepare_partial_commit, replace_files, serialize, sign_commit, verify_partial_snapshot,
 };
 use zeroize::Zeroizing;
 
 const MAX_PATHS_JSON_BYTES: usize = 1024 * 1024;
+const MAX_LIMITS_JSON_BYTES: usize = 16 * 1024;
 // V1 permits 16 MiB of replacement occurrences. Hex doubles that, with room
 // for at most 256 bounded path descriptors and JSON punctuation.
 const MAX_REPLACEMENTS_JSON_BYTES: usize = 40 * 1024 * 1024;
@@ -67,8 +70,73 @@ pub fn partial_edit_and_export(
         message,
         timestamp,
         seed,
+        PartialLimits::V1,
     )
     .map(PartialEditResultJs::from)
+    .map_err(BindingError::into_js)
+}
+
+/// Same pipeline as [`partial_edit_and_export`], with caller-lowered
+/// [`PartialLimits`].
+///
+/// `limits_json` is a JSON object whose keys are the generic `PartialLimits`
+/// field names. Omitted, empty, or null input uses the v1 profile. Present
+/// fields replace v1 defaults. Unknown fields, non-integers, negatives,
+/// overflows, values above v1, and input larger than 16 KiB are rejected.
+#[wasm_bindgen]
+#[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
+pub fn partial_edit_and_export_with_limits(
+    bundle: &[u8],
+    expected_base_hex: &str,
+    selected_paths_json: &str,
+    replacements_json: &str,
+    author_kind: &str,
+    author_bytes: &[u8],
+    message: &[u8],
+    timestamp: u64,
+    seed: &[u8],
+    limits_json: Option<String>,
+) -> Result<PartialEditResultJs, JsValue> {
+    match parse_limits_json(limits_json.as_deref()) {
+        Ok(limits) => partial_edit_and_export_inner(
+            bundle,
+            expected_base_hex,
+            selected_paths_json,
+            replacements_json,
+            author_kind,
+            author_bytes,
+            message,
+            timestamp,
+            seed,
+            limits,
+        )
+        .map(PartialEditResultJs::from)
+        .map_err(BindingError::into_js),
+        Err(error) => Err(error.into_js()),
+    }
+}
+
+/// Read-only verification of an `MKWB` snapshot.
+///
+/// Materializes only complete selected regular/executable file bytes from
+/// verified representations. It does not take a signer, seed, network,
+/// grant, or host profile. `limits_json` follows
+/// [`partial_edit_and_export_with_limits`].
+#[wasm_bindgen]
+#[allow(clippy::needless_pass_by_value)]
+pub fn partial_verify_snapshot(
+    bundle: &[u8],
+    expected_base_hex: &str,
+    selected_paths_json: &str,
+    limits_json: Option<String>,
+) -> Result<PartialSnapshotJs, JsValue> {
+    partial_verify_snapshot_inner(
+        bundle,
+        expected_base_hex,
+        selected_paths_json,
+        limits_json.as_deref(),
+    )
+    .map(PartialSnapshotJs::from)
     .map_err(BindingError::into_js)
 }
 
@@ -79,6 +147,20 @@ struct PartialEditOutput {
     signed_commit_bytes: Vec<u8>,
     update_bytes: Vec<u8>,
     coverage: &'static str,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct PartialFileOutput {
+    path_json: String,
+    mode: &'static str,
+    representation_id_hex: String,
+    bytes: Vec<u8>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct PartialSnapshotOutput {
+    coverage: &'static str,
+    files: Vec<PartialFileOutput>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -92,17 +174,17 @@ fn partial_edit_and_export_inner(
     message: &[u8],
     timestamp: u64,
     seed: &[u8],
+    limits: PartialLimits,
 ) -> Result<PartialEditOutput, BindingError> {
-    let limits = PartialLimits::V1;
     let expected_base = from_hex(expected_base_hex)
         .map_err(|_| BindingError::new("invalid_base", "expected 64 hexadecimal characters"))?;
     if message.len() > limits.max_commit_message_bytes {
         return Err(BindingError::new(
             "validation_budget_exceeded",
-            "commit message exceeds the 4 KiB partial-update limit",
+            "commit message exceeds the partial-update limit",
         ));
     }
-    let selected_paths = parse_paths_json(selected_paths_json, "selected paths")?;
+    let selected_paths = parse_paths_json(selected_paths_json, "selected paths", &limits)?;
     let replacements = parse_replacements_json(replacements_json, &limits)?;
     let author = parse_author(author_kind, author_bytes)?;
     validate_seed(seed)?;
@@ -138,16 +220,265 @@ fn partial_edit_and_export_inner(
         .map_err(|error| BindingError::from_partial(&error))?;
     let signed_commit_bytes = serialize(&Object::Commit(signed))
         .map_err(|error| BindingError::new("serialization_failed", error.to_string()))?;
-    let coverage = match verified.coverage() {
-        PartialCoverage::SelectedOnly => "selected-only",
-    };
 
     Ok(PartialEditOutput {
         root_hex: to_hex(prepared.root_id()),
         candidate_hex: to_hex(update.candidate_id()),
         signed_commit_bytes,
         update_bytes,
-        coverage,
+        coverage: coverage_label(verified.coverage()),
+    })
+}
+
+fn partial_verify_snapshot_inner(
+    bundle: &[u8],
+    expected_base_hex: &str,
+    selected_paths_json: &str,
+    limits_json: Option<&str>,
+) -> Result<PartialSnapshotOutput, BindingError> {
+    let limits = parse_limits_json(limits_json)?;
+    let expected_base = from_hex(expected_base_hex)
+        .map_err(|_| BindingError::new("invalid_base", "expected 64 hexadecimal characters"))?;
+    let selected_paths = parse_paths_json(selected_paths_json, "selected paths", &limits)?;
+    let verified = verify_partial_snapshot(expected_base, &selected_paths, bundle, &limits)
+        .map_err(|error| BindingError::from_partial(&error))?;
+    let files = materialize_selected_files(&verified, &limits)?;
+    Ok(PartialSnapshotOutput {
+        coverage: coverage_label(verified.coverage()),
+        files,
+    })
+}
+
+fn materialize_selected_files(
+    verified: &VerifiedPartialSnapshot,
+    limits: &PartialLimits,
+) -> Result<Vec<PartialFileOutput>, BindingError> {
+    let mut files: Vec<PartialFileOutput> = Vec::with_capacity(verified.files().len());
+    // Cache indices into the required per-path output, not another copy of the
+    // bytes. Shared manifests must not multiply traversal by selected paths.
+    let mut materialized: std::collections::BTreeMap<mkit_core::Hash, usize> =
+        std::collections::BTreeMap::new();
+    let mut total = 0usize;
+    for file in verified.files() {
+        let bytes = if let Some(&index) = materialized.get(file.object_id()) {
+            files[index].bytes.clone()
+        } else {
+            let bytes = materialize_selected_file(verified, file, limits)?;
+            materialized.insert(*file.object_id(), files.len());
+            bytes
+        };
+        total = total.checked_add(bytes.len()).ok_or_else(|| {
+            BindingError::new("workspace_too_large", "selected file size overflow")
+        })?;
+        if total > limits.max_total_selected_bytes {
+            return Err(BindingError::new(
+                "workspace_too_large",
+                "selected bytes exceed the aggregate selected-file limit",
+            ));
+        }
+        files.push(PartialFileOutput {
+            path_json: path_to_json(file.path())?,
+            mode: match file.mode() {
+                EntryMode::Blob => "blob",
+                EntryMode::Executable => "exec",
+                EntryMode::Tree | EntryMode::Symlink => {
+                    return Err(BindingError::new(
+                        "unsupported_partial_operation",
+                        "selected path is not a regular or executable file",
+                    ));
+                }
+            },
+            representation_id_hex: to_hex(file.object_id()),
+            bytes,
+        });
+    }
+    Ok(files)
+}
+
+fn materialize_selected_file(
+    verified: &VerifiedPartialSnapshot,
+    file: &mkit_core::SelectedFile,
+    limits: &PartialLimits,
+) -> Result<Vec<u8>, BindingError> {
+    #[cfg(test)]
+    tests::MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
+    let expected = usize::try_from(file.content_len()).map_err(|_| {
+        BindingError::new(
+            "workspace_too_large",
+            "selected file exceeds the addressable size",
+        )
+    })?;
+    if expected > limits.max_selected_file_bytes {
+        return Err(BindingError::new(
+            "workspace_too_large",
+            "selected file exceeds the selected-file limit",
+        ));
+    }
+    let object_bytes = verified.object_bytes(file.object_id()).ok_or_else(|| {
+        BindingError::new(
+            "insufficient_witness",
+            "verified snapshot lacks selected representation bytes",
+        )
+    })?;
+    match deserialize(object_bytes)
+        .map_err(|error| BindingError::new("wrong_object_type", error.to_string()))?
+    {
+        Object::Blob(blob) => {
+            if blob.data.len() != expected {
+                return Err(BindingError::new(
+                    "workspace_too_large",
+                    "blob payload does not match the verified file length",
+                ));
+            }
+            Ok(blob.data)
+        }
+        Object::ChunkedBlob(manifest) => {
+            if manifest.chunks.is_empty() {
+                if expected != 0 || manifest.total_size != 0 {
+                    return Err(BindingError::new(
+                        "invalid_chunk_layout",
+                        "empty chunked representation is only valid at length zero",
+                    ));
+                }
+                return Ok(Vec::new());
+            }
+            let mut bytes = Vec::new();
+            for chunk_id in file.chunk_ids() {
+                let chunk = blob_payload(verified, chunk_id, usize::MAX)?;
+                let next = bytes.len().checked_add(chunk.len()).ok_or_else(|| {
+                    BindingError::new("workspace_too_large", "chunk concatenation overflow")
+                })?;
+                if next > expected {
+                    return Err(BindingError::new(
+                        "invalid_chunk_layout",
+                        "chunk bytes exceed the verified file length",
+                    ));
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            if bytes.len() != expected {
+                return Err(BindingError::new(
+                    "invalid_chunk_layout",
+                    "chunk bytes do not equal the verified file length",
+                ));
+            }
+            Ok(bytes)
+        }
+        _ => Err(BindingError::new(
+            "wrong_object_type",
+            "selected representation is not a Blob or ChunkedBlob",
+        )),
+    }
+}
+
+fn blob_payload(
+    verified: &VerifiedPartialSnapshot,
+    id: &mkit_core::Hash,
+    max_len: usize,
+) -> Result<Vec<u8>, BindingError> {
+    let object_bytes = verified.object_bytes(id).ok_or_else(|| {
+        BindingError::new(
+            "insufficient_witness",
+            "verified snapshot lacks selected representation bytes",
+        )
+    })?;
+    let Object::Blob(blob) = deserialize(object_bytes)
+        .map_err(|error| BindingError::new("wrong_object_type", error.to_string()))?
+    else {
+        return Err(BindingError::new(
+            "wrong_object_type",
+            "selected representation is not a Blob",
+        ));
+    };
+    if blob.data.len() > max_len {
+        return Err(BindingError::new(
+            "workspace_too_large",
+            "blob payload exceeds the selected-file limit",
+        ));
+    }
+    Ok(blob.data)
+}
+
+fn coverage_label(coverage: PartialCoverage) -> &'static str {
+    match coverage {
+        PartialCoverage::SelectedOnly => "selected-only",
+    }
+}
+
+fn path_to_json(path: &PartialPath) -> Result<String, BindingError> {
+    let encoded: Vec<String> = path.iter().map(hex::encode).collect();
+    serde_json::to_string(&encoded)
+        .map_err(|error| BindingError::new("invalid_selected_paths", error.to_string()))
+}
+
+fn parse_limits_json(input: Option<&str>) -> Result<PartialLimits, BindingError> {
+    let Some(input) = input.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(PartialLimits::V1);
+    };
+    if input.len() > MAX_LIMITS_JSON_BYTES {
+        return Err(BindingError::new(
+            "invalid_limits",
+            "limits JSON exceeds 16 KiB",
+        ));
+    }
+    let value: serde_json::Value = serde_json::from_str(input)
+        .map_err(|error| BindingError::new("invalid_limits", format!("limits JSON: {error}")))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| BindingError::new("invalid_limits", "limits JSON must be an object"))?;
+    let mut limits = PartialLimits::V1;
+    for (key, value) in object {
+        let slot = match key.as_str() {
+            "max_selected_paths" => &mut limits.max_selected_paths,
+            "max_path_depth" => &mut limits.max_path_depth,
+            "max_component_bytes" => &mut limits.max_component_bytes,
+            "max_path_bytes" => &mut limits.max_path_bytes,
+            "max_total_path_bytes" => &mut limits.max_total_path_bytes,
+            "max_selected_file_bytes" => &mut limits.max_selected_file_bytes,
+            "max_total_selected_bytes" => &mut limits.max_total_selected_bytes,
+            "max_base_object_bytes" => &mut limits.max_base_object_bytes,
+            "max_tree_object_bytes" => &mut limits.max_tree_object_bytes,
+            "max_tree_entries" => &mut limits.max_tree_entries,
+            "max_witness_bytes" => &mut limits.max_witness_bytes,
+            "max_tree_visits" => &mut limits.max_tree_visits,
+            "max_bundle_bytes" => &mut limits.max_bundle_bytes,
+            "max_objects" => &mut limits.max_objects,
+            "max_object_bytes" => &mut limits.max_object_bytes,
+            "max_update_bytes" => &mut limits.max_update_bytes,
+            "max_raw_pack_bytes" => &mut limits.max_raw_pack_bytes,
+            "max_update_objects" => &mut limits.max_update_objects,
+            "max_commit_message_bytes" => &mut limits.max_commit_message_bytes,
+            "max_changed_paths" => &mut limits.max_changed_paths,
+            _ => {
+                return Err(BindingError::new(
+                    "invalid_limits",
+                    format!("unknown limits field {key}"),
+                ));
+            }
+        };
+        *slot = parse_limit_usize(value, key)?;
+    }
+    if !limits.is_v1_subset() {
+        return Err(BindingError::new(
+            "invalid_limits",
+            "limits may lower the v1 profile but must not exceed it",
+        ));
+    }
+    Ok(limits)
+}
+
+fn parse_limit_usize(value: &serde_json::Value, key: &str) -> Result<usize, BindingError> {
+    let Some(number) = value.as_u64() else {
+        return Err(BindingError::new(
+            "invalid_limits",
+            format!("{key} must be a non-negative integer"),
+        ));
+    };
+    usize::try_from(number).map_err(|_| {
+        BindingError::new(
+            "invalid_limits",
+            format!("{key} exceeds the addressable size"),
+        )
     })
 }
 
@@ -199,7 +530,11 @@ fn parse_author(kind: &str, bytes: &[u8]) -> Result<Identity, BindingError> {
     Ok(author)
 }
 
-fn parse_paths_json(input: &str, label: &str) -> Result<Vec<PartialPath>, BindingError> {
+fn parse_paths_json(
+    input: &str,
+    label: &str,
+    limits: &PartialLimits,
+) -> Result<Vec<PartialPath>, BindingError> {
     if input.len() > MAX_PATHS_JSON_BYTES {
         return Err(BindingError::new(
             "invalid_selected_paths",
@@ -215,7 +550,7 @@ fn parse_paths_json(input: &str, label: &str) -> Result<Vec<PartialPath>, Bindin
             format!("{label} JSON must be an array"),
         )
     })?;
-    if paths.len() > PartialLimits::V1.max_selected_paths {
+    if paths.len() > limits.max_selected_paths {
         return Err(BindingError::new(
             "invalid_selected_paths",
             format!("{label} contains too many paths"),
@@ -224,7 +559,7 @@ fn parse_paths_json(input: &str, label: &str) -> Result<Vec<PartialPath>, Bindin
     paths
         .iter()
         .enumerate()
-        .map(|(index, path)| parse_path(path, label, index, "invalid_selected_paths"))
+        .map(|(index, path)| parse_path(path, label, index, "invalid_selected_paths", limits))
         .collect()
 }
 
@@ -233,11 +568,12 @@ fn parse_path(
     label: &str,
     index: usize,
     code: &'static str,
+    limits: &PartialLimits,
 ) -> Result<PartialPath, BindingError> {
     let components = value
         .as_array()
         .ok_or_else(|| BindingError::new(code, format!("{label}[{index}] must be an array")))?;
-    if components.len() > PartialLimits::V1.max_path_depth {
+    if components.len() > limits.max_path_depth {
         return Err(BindingError::new(
             code,
             format!("{label}[{index}] has too many components"),
@@ -253,10 +589,10 @@ fn parse_path(
                     format!("{label}[{index}][{component_index}] must be a hex string"),
                 )
             })?;
-            if encoded.len() > PartialLimits::V1.max_component_bytes * 2 {
+            if encoded.len() > limits.max_component_bytes.saturating_mul(2) {
                 return Err(BindingError::new(
                     code,
-                    format!("{label}[{index}][{component_index}] exceeds 255 bytes"),
+                    format!("{label}[{index}][{component_index}] exceeds the component limit"),
                 ));
             }
             hex::decode(encoded).map_err(|_| {
@@ -315,6 +651,7 @@ fn parse_replacements_json(
             "replacement path",
             index,
             "invalid_replacements",
+            limits,
         )?;
         let bytes_hex = object.get("bytes_hex");
         let reuse_selected = object.get("reuse_selected");
@@ -362,6 +699,7 @@ fn parse_replacements_json(
                 "replacement reuse_selected",
                 index,
                 "invalid_replacements",
+                limits,
             )?;
             replacements.push(FileReplacement::reuse_selected(path, source));
         }
@@ -474,14 +812,184 @@ impl PartialEditResultJs {
     }
 }
 
+/// Read-only selected-file snapshot. Witness objects are not retained.
+#[wasm_bindgen]
+#[derive(Debug)]
+pub struct PartialSnapshotJs {
+    coverage: String,
+    files: Vec<PartialSelectedFileJs>,
+}
+
+impl From<PartialSnapshotOutput> for PartialSnapshotJs {
+    fn from(output: PartialSnapshotOutput) -> Self {
+        Self {
+            coverage: output.coverage.to_string(),
+            files: output
+                .files
+                .into_iter()
+                .map(PartialSelectedFileJs::from)
+                .collect(),
+        }
+    }
+}
+
+#[wasm_bindgen]
+impl PartialSnapshotJs {
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn coverage(&self) -> String {
+        self.coverage.clone()
+    }
+
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn file_count(&self) -> u32 {
+        crate::common::js_vec_count(&self.files)
+    }
+
+    #[wasm_bindgen]
+    #[must_use]
+    pub fn file(&self, index: u32) -> Option<PartialSelectedFileJs> {
+        crate::common::js_vec_get(&self.files, index)
+    }
+}
+
+/// One verified selected regular or executable file.
+#[wasm_bindgen]
+#[derive(Debug, Clone)]
+pub struct PartialSelectedFileJs {
+    path_json: String,
+    mode: String,
+    representation_id_hex: String,
+    bytes: Vec<u8>,
+}
+
+impl From<PartialFileOutput> for PartialSelectedFileJs {
+    fn from(output: PartialFileOutput) -> Self {
+        Self {
+            path_json: output.path_json,
+            mode: output.mode.to_string(),
+            representation_id_hex: output.representation_id_hex,
+            bytes: output.bytes,
+        }
+    }
+}
+
+#[wasm_bindgen]
+impl PartialSelectedFileJs {
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn path_json(&self) -> String {
+        self.path_json.clone()
+    }
+
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn mode(&self) -> String {
+        self.mode.clone()
+    }
+
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn representation_id_hex(&self) -> String {
+        self.representation_id_hex.clone()
+    }
+
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn bytes(&self) -> Box<[u8]> {
+        self.bytes.clone().into_boxed_slice()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    std::thread_local! {
+        pub(super) static MATERIALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    #[test]
+    fn shared_chunk_metadata_is_materialized_once_with_per_path_accounting() {
+        use mkit_core::{Blob, ChunkedBlob, Commit, Tree, TreeEntry, build_partial_snapshot};
+        let mut objects = std::collections::BTreeMap::new();
+        let empty = insert(&mut objects, &Object::Blob(Blob { data: vec![] }));
+        let byte = insert(&mut objects, &Object::Blob(Blob { data: vec![7] }));
+        let mut chunks = vec![empty; 512];
+        chunks.push(byte);
+        let file_id = insert(
+            &mut objects,
+            &Object::ChunkedBlob(ChunkedBlob {
+                total_size: 1,
+                chunk_size: 0,
+                chunks,
+            }),
+        );
+        let paths: Vec<_> = (0..16)
+            .map(|i| vec![format!("file-{i:02}").into_bytes()])
+            .collect();
+        let entries = paths
+            .iter()
+            .enumerate()
+            .map(|(index, path)| TreeEntry {
+                name: path[0].clone(),
+                mode: if index == 0 {
+                    EntryMode::Executable
+                } else {
+                    EntryMode::Blob
+                },
+                object_hash: file_id,
+            })
+            .collect();
+        let root = insert(&mut objects, &Object::Tree(Tree { entries }));
+        let key = KeyPair::from_seed([19; 32]);
+        let mut commit = Commit::new_unannotated(
+            root,
+            vec![],
+            Identity::ed25519(key.public.0),
+            key.public.0,
+            vec![],
+            1,
+            [0; 64],
+        );
+        commit.signature = sign_commit(&commit, &key).unwrap().0;
+        let base = insert(&mut objects, &Object::Commit(commit));
+        let bundle = build_partial_snapshot(&MapSource(objects), base, &paths, &PartialLimits::V1)
+            .unwrap()
+            .encode(&PartialLimits::V1)
+            .unwrap();
+        let verified = verify_partial_snapshot(base, &paths, &bundle, &PartialLimits::V1).unwrap();
+        MATERIALIZATIONS.with(|count| count.set(0));
+        let exact = PartialLimits {
+            max_total_selected_bytes: 16,
+            ..PartialLimits::V1
+        };
+        let files = materialize_selected_files(&verified, &exact).unwrap();
+        assert_eq!(files.len(), 16);
+        assert!(files.iter().all(|file| file.bytes == [7]));
+        assert_eq!(files[0].mode, "exec");
+        assert!(files[1..].iter().all(|file| file.mode == "blob"));
+        assert_eq!(MATERIALIZATIONS.with(std::cell::Cell::get), 1);
+        let over = PartialLimits {
+            max_total_selected_bytes: 15,
+            ..exact
+        };
+        assert_eq!(
+            materialize_selected_files(&verified, &over)
+                .unwrap_err()
+                .code,
+            "workspace_too_large"
+        );
+    }
+
     const PLAIN_BUNDLE: &[u8] =
         include_bytes!("../../../tests/golden/partial_workspace/plain_file.bin");
+    const CHUNKED_BUNDLE: &[u8] =
+        include_bytes!("../../../tests/golden/partial_workspace/chunked_file.bin");
     const BASE: &str = "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90";
     const PATHS: &str = r#"[["7368616c6c6f772e747874"]]"#;
+    const CHUNKED_PATHS: &str = r#"[["6368756e6b65642e62696e"]]"#;
     const REPLACEMENTS: &str =
         r#"[{"path":["7368616c6c6f772e747874"],"bytes_hex":"7761736d20706172697479"}]"#;
 
@@ -500,6 +1008,7 @@ mod tests {
             message,
             1_750_000_000,
             &seed,
+            PartialLimits::V1,
         )
         .unwrap();
 
@@ -540,6 +1049,97 @@ mod tests {
     }
 
     #[test]
+    fn omitted_limits_match_default_edit_export() {
+        let seed = [0x41; 32];
+        let author = b"browser-agent";
+        let message = b"partial edit";
+        let defaulted = partial_edit_and_export_inner(
+            PLAIN_BUNDLE,
+            BASE,
+            PATHS,
+            REPLACEMENTS,
+            "opaque",
+            author,
+            message,
+            1_750_000_000,
+            &seed,
+            parse_limits_json(None).unwrap(),
+        )
+        .unwrap();
+        let explicit = partial_edit_and_export_inner(
+            PLAIN_BUNDLE,
+            BASE,
+            PATHS,
+            REPLACEMENTS,
+            "opaque",
+            author,
+            message,
+            1_750_000_000,
+            &seed,
+            parse_limits_json(Some("{}")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(defaulted, explicit);
+    }
+
+    #[test]
+    fn read_only_verify_materializes_plain_file_without_signing() {
+        let snapshot = partial_verify_snapshot_inner(PLAIN_BUNDLE, BASE, PATHS, None).unwrap();
+        assert_eq!(snapshot.coverage, "selected-only");
+        assert_eq!(snapshot.files.len(), 1);
+        assert_eq!(snapshot.files[0].path_json, r#"["7368616c6c6f772e747874"]"#);
+        assert_eq!(snapshot.files[0].mode, "blob");
+        assert!(!snapshot.files[0].representation_id_hex.is_empty());
+        assert!(!snapshot.files[0].bytes.is_empty());
+    }
+
+    #[test]
+    fn read_only_verify_materializes_chunked_selected_file() {
+        let snapshot =
+            partial_verify_snapshot_inner(CHUNKED_BUNDLE, BASE, CHUNKED_PATHS, None).unwrap();
+        assert_eq!(snapshot.coverage, "selected-only");
+        assert_eq!(snapshot.files.len(), 1);
+        assert_eq!(snapshot.files[0].path_json, r#"["6368756e6b65642e62696e"]"#);
+        assert!(snapshot.files[0].bytes.len() > 1024);
+        let verified = verify_partial_snapshot(
+            from_hex(BASE).unwrap(),
+            &[vec![b"chunked.bin".to_vec()]],
+            CHUNKED_BUNDLE,
+            &PartialLimits::V1,
+        )
+        .unwrap();
+        assert_eq!(
+            snapshot.files[0].bytes.len() as u64,
+            verified.files()[0].content_len()
+        );
+        assert!(!verified.files()[0].chunk_ids().is_empty());
+    }
+
+    #[test]
+    fn stricter_limits_and_malformed_options_are_rejected() {
+        let error = partial_verify_snapshot_inner(
+            PLAIN_BUNDLE,
+            BASE,
+            PATHS,
+            Some(r#"{"max_bundle_bytes":100}"#),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "workspace_too_large");
+
+        let error = parse_limits_json(Some(r#"{"unknown":1}"#)).unwrap_err();
+        assert_eq!(error.code, "invalid_limits");
+        let error = parse_limits_json(Some(r#"{"max_bundle_bytes":-1}"#)).unwrap_err();
+        assert_eq!(error.code, "invalid_limits");
+        let error = parse_limits_json(Some(r#"{"max_bundle_bytes":1.5}"#)).unwrap_err();
+        assert_eq!(error.code, "invalid_limits");
+        let error = parse_limits_json(Some(r#"{"max_bundle_bytes":999999999999}"#)).unwrap_err();
+        assert_eq!(error.code, "invalid_limits");
+        let oversized = format!("{{\"max_bundle_bytes\":1{}}}", " ".repeat(16 * 1024));
+        let error = parse_limits_json(Some(&oversized)).unwrap_err();
+        assert_eq!(error.code, "invalid_limits");
+    }
+
+    #[test]
     fn partial_pipeline_reports_typed_core_and_adapter_errors() {
         let wrong_base = "a5".repeat(32);
         let error = partial_edit_and_export_inner(
@@ -552,6 +1152,7 @@ mod tests {
             b"partial edit",
             1,
             &[0x41; 32],
+            PartialLimits::V1,
         )
         .unwrap_err();
         assert_eq!(error.code, "base_mismatch");
@@ -562,5 +1163,134 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.code, "invalid_replacements");
+    }
+
+    fn insert(
+        objects: &mut std::collections::BTreeMap<mkit_core::Hash, Vec<u8>>,
+        object: &Object,
+    ) -> mkit_core::Hash {
+        let bytes = serialize(object).unwrap();
+        let id = mkit_core::object::id_from_object(object, &bytes);
+        objects.insert(id, bytes);
+        id
+    }
+
+    struct MapSource(std::collections::BTreeMap<mkit_core::Hash, Vec<u8>>);
+    impl mkit_core::store::ObjectSource for MapSource {
+        fn read(&self, id: &mkit_core::Hash) -> mkit_core::StoreResult<Vec<u8>> {
+            self.0
+                .get(id)
+                .cloned()
+                .ok_or_else(|| mkit_core::StoreError::ObjectNotFound(to_hex(id)))
+        }
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn empty_file_bundle(
+        file: Object,
+        name: &[u8],
+        mode: EntryMode,
+    ) -> Result<(String, String, Vec<u8>, String), PartialError> {
+        use mkit_core::{Commit, Identity, Tree, TreeEntry, build_partial_snapshot};
+        let limits = PartialLimits::V1;
+        let mut objects = std::collections::BTreeMap::new();
+        let file_id = insert(&mut objects, &file);
+        let representation = to_hex(&file_id);
+        let root = insert(
+            &mut objects,
+            &Object::Tree(Tree {
+                entries: vec![TreeEntry {
+                    name: name.to_vec(),
+                    mode,
+                    object_hash: file_id,
+                }],
+            }),
+        );
+        let key_pair = KeyPair::from_seed([19; 32]);
+        let mut commit = Commit::new_unannotated(
+            root,
+            Vec::new(),
+            Identity::ed25519(key_pair.public.0),
+            key_pair.public.0,
+            b"empty file fixture".to_vec(),
+            1_700_000_001,
+            [0; 64],
+        );
+        commit.signature = sign_commit(&commit, &key_pair).unwrap().0;
+        let base_id = insert(&mut objects, &Object::Commit(commit));
+        let paths = vec![vec![name.to_vec()]];
+        let bundle = build_partial_snapshot(&MapSource(objects), base_id, &paths, &limits)?
+            .encode(&limits)?;
+        Ok((
+            to_hex(&base_id),
+            serde_json::to_string(&vec![vec![hex::encode(name)]]).unwrap(),
+            bundle,
+            representation,
+        ))
+    }
+
+    #[test]
+    fn read_only_verify_materializes_empty_blob_and_empty_chunked_blob() {
+        use mkit_core::{Blob, ChunkedBlob};
+        for mode in [EntryMode::Blob, EntryMode::Executable] {
+            let (base, paths, bundle, representation) =
+                empty_file_bundle(Object::Blob(Blob { data: Vec::new() }), b"empty.txt", mode)
+                    .unwrap();
+            let snapshot = partial_verify_snapshot_inner(&bundle, &base, &paths, None).unwrap();
+            assert_eq!(snapshot.coverage, "selected-only");
+            assert_eq!(snapshot.files.len(), 1);
+            assert_eq!(snapshot.files[0].bytes, Vec::<u8>::new());
+            assert_eq!(snapshot.files[0].representation_id_hex, representation);
+            assert_eq!(
+                snapshot.files[0].mode,
+                if mode == EntryMode::Blob {
+                    "blob"
+                } else {
+                    "exec"
+                }
+            );
+
+            let (base, paths, bundle, representation) = empty_file_bundle(
+                Object::ChunkedBlob(ChunkedBlob {
+                    total_size: 0,
+                    chunk_size: 0,
+                    chunks: Vec::new(),
+                }),
+                b"empty.bin",
+                mode,
+            )
+            .unwrap();
+            let snapshot = partial_verify_snapshot_inner(&bundle, &base, &paths, None).unwrap();
+            assert_eq!(snapshot.files[0].bytes, Vec::<u8>::new());
+            assert_eq!(snapshot.files[0].representation_id_hex, representation);
+            assert!(
+                verify_partial_snapshot(
+                    from_hex(&base).unwrap(),
+                    &[vec![b"empty.bin".to_vec()]],
+                    &bundle,
+                    &PartialLimits::V1,
+                )
+                .unwrap()
+                .files()[0]
+                    .chunk_ids()
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn empty_chunked_layout_mismatch_fails_verification() {
+        use mkit_core::ChunkedBlob;
+        let error = empty_file_bundle(
+            Object::ChunkedBlob(ChunkedBlob {
+                total_size: 1,
+                chunk_size: 0,
+                chunks: Vec::new(),
+            }),
+            b"bad.bin",
+            EntryMode::Blob,
+        )
+        .unwrap_err();
+        assert!(matches!(error, PartialError::InvalidChunkLayout));
     }
 }
