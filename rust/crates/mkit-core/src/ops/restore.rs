@@ -46,8 +46,12 @@ const MAX_SPARSE_BYTES: u64 = 1024 * 1024;
 /// [`Object::ChunkedBlob`] — mirrors `worktree::STREAM_HASH_BATCH` (16
 /// MiB at the current 256 KiB max chunk size) so the read side of a
 /// large-file checkout bounds in-flight memory the same way the write
-/// side already does.
-const RESTORE_CHUNK_BATCH: usize = 64;
+/// side already does. Public so a caller-supplied `read_chunks`'s own
+/// fan-out threshold (e.g. `mkit-cli`'s `restore_fanout`) can be capped
+/// against the same number: a threshold above this value could never be
+/// reached by any batch this module ever hands `read_chunks`, silently
+/// disabling that caller's parallel path on a high-core-count host.
+pub const RESTORE_CHUNK_BATCH: usize = 64;
 
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -293,7 +297,13 @@ pub fn restore_tree_to_worktree(
     root: &Path,
     opts: &RestoreOptions,
 ) -> RestoreResult<RestoreReport> {
-    restore_tree_to_worktree_with(store, tree, root, opts, &sequential_read_chunks)
+    // Batch size 1, not `RESTORE_CHUNK_BATCH`: `sequential_read_chunks`
+    // never fans anything out, so batching it would only raise peak
+    // memory from one chunk to a full batch for zero benefit — the same
+    // regression `restore_blob` (the `restore_tree`/stash path) avoids
+    // by not batching at all. `restore_tree_to_worktree_with` below is
+    // the path real (parallel-capable) `read_chunks` callers want.
+    restore_tree_to_worktree_impl(store, tree, root, opts, 1, &sequential_read_chunks)
 }
 
 /// [`restore_tree_to_worktree`], parameterised over how a
@@ -302,26 +312,70 @@ pub fn restore_tree_to_worktree(
 ///
 /// `read_chunks` receives up to [`RESTORE_CHUNK_BATCH`] chunk hashes at a
 /// time, in file order, and MUST return exactly one chunk's raw bytes per
-/// input hash, in the same order. This mirrors
-/// [`worktree::store_large_file_streaming_with`]'s `hash_chunks`
-/// callback shape on the write side, for the same reason: `mkit-core`
-/// has no thread-pool dependency of its own — it stays usable from wasm
-/// targets, which have no OS threads — so the fan-out decision lives
-/// with the caller instead of living in this function. Reading each
-/// chunk (open + integrity-verify + decode) is independent of every
-/// other chunk in a batch, so `mkit-cli`'s native checkout/clone/reset/
-/// restore paths pass a rayon-backed `read_chunks`, the read-side
-/// counterpart of `add`'s ingest-side chunk-hashing fan-out.
+/// input hash, **in the same order** — this function only verifies the
+/// returned count against the input batch's length (surfacing a
+/// mismatch as [`RestoreError::ChunkBatchLengthMismatch`]); a same-length
+/// but reordered result is undetectable here (each chunk's *content* is
+/// separately BLAKE3-verified against its own hash inside
+/// [`ObjectStore::read_object`], but nothing at this layer ties a
+/// returned buffer back to *which* input hash it answered, so a
+/// transposed pair of same-length chunks would silently produce a
+/// byte-swapped file instead of an error). This is the exact same trust
+/// boundary [`worktree::store_large_file_streaming_with`]'s `hash_chunks`
+/// callback already documents on the write side (also length-checked
+/// only, via its own `ChunkBatchLengthMismatch`) — order is a documented
+/// caller contract on both sides, not a runtime-verified one, because
+/// verifying it here would mean re-hashing every chunk a second time
+/// after `read_chunks` already did the real, expensive read; that would
+/// undo most of the point of fanning the read out in the first place.
+/// Both of this crate's own `read_chunks` implementations satisfy the
+/// contract by construction: `sequential_read_chunks`'s plain
+/// `iter().map().collect()` and `mkit-cli`'s `rayon::par_iter().map().collect()`
+/// (the latter relies on rayon's `IndexedParallelIterator` guarantee that
+/// collecting into a `Vec` preserves input order regardless of which
+/// worker finishes a given index first) are both order-preserving, so
+/// this gap has no live exploit through any code path this crate or
+/// `mkit-cli` ships — it is a contract a *hand-written, buggy or hostile*
+/// third-party `read_chunks` could violate, same as an equally
+/// third-party `hash_chunks` already could on the write side.
+/// `mkit-core` has no thread-pool dependency of its own — it stays
+/// usable from wasm targets, which have no OS threads — so the fan-out
+/// decision lives with the caller instead of living in this function.
+/// Reading each chunk (open + integrity-verify + decode) is independent
+/// of every other chunk in a batch, so `mkit-cli`'s native
+/// checkout/clone/reset/restore paths pass a rayon-backed `read_chunks`,
+/// the read-side counterpart of `add`'s ingest-side chunk-hashing
+/// fan-out.
 ///
 /// # Errors
 /// Same variants as [`restore_tree_to_worktree`], plus
-/// [`RestoreError::ChunkBatchLengthMismatch`] if `read_chunks` violates
-/// its contract.
+/// [`RestoreError::ChunkBatchLengthMismatch`] if `read_chunks` returns a
+/// different number of buffers than the batch it was given (see above
+/// for what this check does and does not catch).
 pub fn restore_tree_to_worktree_with<F>(
     store: &ObjectStore,
     tree: &Hash,
     root: &Path,
     opts: &RestoreOptions,
+    read_chunks: &F,
+) -> RestoreResult<RestoreReport>
+where
+    F: Fn(&ObjectStore, &[Hash]) -> RestoreResult<Vec<Vec<u8>>> + Sync,
+{
+    restore_tree_to_worktree_impl(store, tree, root, opts, RESTORE_CHUNK_BATCH, read_chunks)
+}
+
+/// Shared implementation behind [`restore_tree_to_worktree`] and
+/// [`restore_tree_to_worktree_with`]. `batch_size` is not part of either
+/// public signature — it is 1 for the sequential default (see
+/// [`restore_tree_to_worktree`]'s doc) and [`RESTORE_CHUNK_BATCH`] for a
+/// caller-supplied `read_chunks`.
+fn restore_tree_to_worktree_impl<F>(
+    store: &ObjectStore,
+    tree: &Hash,
+    root: &Path,
+    opts: &RestoreOptions,
+    batch_size: usize,
     read_chunks: &F,
 ) -> RestoreResult<RestoreReport>
 where
@@ -343,6 +397,7 @@ where
         &ignore_list,
         &mut report,
         0,
+        batch_size,
         read_chunks,
     )?;
     Ok(report)
@@ -358,6 +413,7 @@ fn restore_tree_to_worktree_inner<F>(
     ignore: &IgnoreList,
     report: &mut RestoreReport,
     depth: usize,
+    batch_size: usize,
     read_chunks: &F,
 ) -> RestoreResult<()>
 where
@@ -409,6 +465,7 @@ where
                     name,
                     entry.object_hash,
                     entry.mode == EntryMode::Executable,
+                    batch_size,
                     read_chunks,
                 )?;
                 report.files_written += 1;
@@ -435,6 +492,7 @@ where
                     ignore,
                     report,
                     depth + 1,
+                    batch_size,
                     read_chunks,
                 )?;
             }
@@ -454,6 +512,17 @@ where
 
 /// Materialise `tree_hash` into `target_dir`. See module docs for the
 /// invariants.
+///
+/// Unlike [`restore_tree_to_worktree`]/[`restore_tree_to_worktree_with`],
+/// this has no `_with` counterpart — `stash` (this function's only
+/// caller) restores a snapshot on `push`/`pop`/`apply`, not the
+/// large-file checkout/clone/reset/restore path the perf work behind
+/// `restore_tree_to_worktree_with` targeted, so its `ChunkedBlob` chunks
+/// are always read sequentially via the plain [`restore_blob`]. Giving
+/// `stash` the same rayon fan-out would mean threading a `read_chunks`
+/// callback through `ops::stash`'s own public API (`save`/`pop`/`apply`)
+/// and `mkit-cli`'s stash command — a separate, larger change, not a
+/// side effect of this one.
 ///
 /// # Errors
 /// - [`RestoreError::NotATree`] if `tree_hash` is not a tree object.
@@ -544,10 +613,18 @@ fn restore_tree_inner(
     Ok(())
 }
 
-/// Sequential [`restore_blob_with`]: reads each chunk of a
-/// [`Object::ChunkedBlob`] one at a time on the calling thread. Used by
-/// [`restore_tree`] (the non-worktree, `stash`-facing path) and by
-/// [`restore_tree_to_worktree`]'s default `read_chunks`.
+/// Sequential blob restore: reads each chunk of a [`Object::ChunkedBlob`]
+/// one at a time on the calling thread, straight into the open tmp file.
+/// Used by [`restore_tree`] (the non-worktree, `stash`-facing path,
+/// which has no parallel-capable `read_chunks` to offer). Kept as its
+/// own true one-chunk-at-a-time loop rather than delegating to
+/// [`restore_blob_with`] with [`sequential_read_chunks`]: batching
+/// chunks before writing them (as `restore_blob_with` does, to give a
+/// parallel `read_chunks` something to fan out) would raise this path's
+/// peak memory from one chunk (≤256 KiB) to a full [`RESTORE_CHUNK_BATCH`]
+/// batch (≤16 MiB) for no benefit, regressing issue #828's original
+/// "reassemble without ever holding more than one chunk" guarantee on a
+/// path that can never use the extra batch size for anything.
 fn restore_blob(
     store: &ObjectStore,
     dir: &Path,
@@ -555,26 +632,45 @@ fn restore_blob(
     blob_hash: Hash,
     executable: bool,
 ) -> RestoreResult<()> {
-    restore_blob_with(
-        store,
-        dir,
-        name,
-        blob_hash,
-        executable,
-        &sequential_read_chunks,
-    )
+    let obj = store.read_object(&blob_hash)?;
+    match obj {
+        Object::Blob(b) => write_file_atomic(dir, name, &b.data, executable)?,
+        Object::ChunkedBlob(cb) => {
+            let (tmp_path, final_path, mut tmp) = create_tmp_for_write(dir, name)?;
+            let mut written: u64 = 0;
+            for ch in &cb.chunks {
+                let buf = read_chunk_bytes(store, ch)?;
+                tmp.write_all(&buf)?;
+                written += buf.len() as u64;
+            }
+            cb.check_reassembled_size(usize::try_from(written).unwrap_or(usize::MAX))?;
+            drop(tmp);
+            finish_atomic_write(&tmp_path, &final_path, executable)?;
+        }
+        _ => return Err(RestoreError::NotABlob),
+    }
+    Ok(())
 }
 
 /// Materialise `blob_hash` (a [`Object::Blob`] or [`Object::ChunkedBlob`])
 /// as `dir/name`. For a `ChunkedBlob`, `read_chunks` reads back each
-/// batch of up to [`RESTORE_CHUNK_BATCH`] chunk hashes — see
-/// [`restore_tree_to_worktree_with`]'s doc for the callback contract.
+/// batch of up to `batch_size` chunk hashes (at most [`RESTORE_CHUNK_BATCH`]
+/// — see [`restore_tree_to_worktree_with`]'s doc for the callback
+/// contract; `batch_size` itself is `restore_tree_to_worktree_impl`'s
+/// internal knob, 1 for the sequential default or `RESTORE_CHUNK_BATCH`
+/// for a caller-supplied `read_chunks`, never part of either public
+/// entry point's own signature).
+///
+/// # Panics
+/// If `batch_size` is 0 (`[T]::chunks` itself panics on that) — never
+/// true for either internal caller.
 fn restore_blob_with<F>(
     store: &ObjectStore,
     dir: &Path,
     name: &str,
     blob_hash: Hash,
     executable: bool,
+    batch_size: usize,
     read_chunks: &F,
 ) -> RestoreResult<()>
 where
@@ -586,15 +682,15 @@ where
         Object::ChunkedBlob(cb) => {
             // Stream each batch straight to the open tmp file instead of
             // concatenating the whole reassembled file into memory first
-            // (issue #828): peak memory is one `RESTORE_CHUNK_BATCH`
-            // batch (bounded, see its doc), not the file's total size.
-            // Batching (rather than one chunk at a time) lets
-            // `read_chunks` fan a batch's independent reads out across
-            // threads — see this function's and
+            // (issue #828): peak memory is one `batch_size`-chunk batch
+            // (bounded, see this function's doc), not the file's total
+            // size. Batching (rather than one chunk at a time) lets a
+            // parallel-capable `read_chunks` fan a batch's independent
+            // reads out across threads — see this function's and
             // `restore_tree_to_worktree_with`'s docs.
             let (tmp_path, final_path, mut tmp) = create_tmp_for_write(dir, name)?;
             let mut written: u64 = 0;
-            for batch in cb.chunks.chunks(RESTORE_CHUNK_BATCH) {
+            for batch in cb.chunks.chunks(batch_size) {
                 let bufs = read_chunks(store, batch)?;
                 if bufs.len() != batch.len() {
                     return Err(RestoreError::ChunkBatchLengthMismatch {
@@ -1199,6 +1295,123 @@ mod tests {
         restore_tree(&store, tree, target.path(), &RestoreOptions::default()).unwrap();
         let content = fs::read(target.path().join("out.txt")).unwrap();
         assert_eq!(content, b"Hello, chunked world!");
+    }
+
+    /// Mirrors `worktree`'s
+    /// `streaming_rejects_miscounted_hashes_in_full_and_partial_batches`
+    /// on the read side: a `read_chunks` callback that returns fewer
+    /// buffers than its input batch must surface as
+    /// [`RestoreError::ChunkBatchLengthMismatch`], not a panic or a
+    /// silently short/garbled restored file.
+    #[test]
+    fn restore_tree_to_worktree_with_rejects_miscounted_chunks() {
+        let (_d, store) = fresh_store();
+        let target = TempDir::new().unwrap();
+        let c0 = put_blob(&store, b"Hello, ");
+        let c1 = put_blob(&store, b"chunked ");
+        let c2 = put_blob(&store, b"world!");
+        let cb = Object::ChunkedBlob(crate::object::ChunkedBlob {
+            total_size: 7 + 8 + 6,
+            chunk_size: 0,
+            chunks: vec![c0, c1, c2],
+        });
+        let cb_h = store.write(&serialize::serialize(&cb).unwrap()).unwrap();
+        let tree = put_tree_with(
+            &store,
+            vec![TreeEntry {
+                name: b"out.txt".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: cb_h,
+            }],
+        );
+        let err = restore_tree_to_worktree_with(
+            &store,
+            &tree,
+            target.path(),
+            &RestoreOptions::default(),
+            &|_store, batch| Ok(vec![Vec::new(); batch.len() - 1]),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                RestoreError::ChunkBatchLengthMismatch {
+                    expected: 3,
+                    actual: 2
+                }
+            ),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    /// Mirrors `worktree`'s
+    /// `hash_file_with_metadata_with_batch_fanout_matches_sequential`: a
+    /// `read_chunks` callback that processes a batch out of order
+    /// internally (simulating a rayon fan-out) but returns results in
+    /// input order — the documented contract — must still reassemble the
+    /// exact same bytes as the sequential default. Pins the `_with`
+    /// contract `mkit-cli`'s `restore_fanout::read_chunks_fanout` relies
+    /// on.
+    #[test]
+    fn restore_tree_to_worktree_with_out_of_order_processing_matches_sequential() {
+        let (_d, store) = fresh_store();
+        let chunk_data: Vec<Vec<u8>> = (0..10)
+            .map(|i| format!("chunk-{i:02}-").into_bytes())
+            .collect();
+        let total_size: u64 = chunk_data.iter().map(|c| c.len() as u64).sum();
+        let chunks: Vec<Hash> = chunk_data.iter().map(|c| put_blob(&store, c)).collect();
+        let cb = Object::ChunkedBlob(crate::object::ChunkedBlob {
+            total_size,
+            chunk_size: 0,
+            chunks: chunks.clone(),
+        });
+        let cb_h = store.write(&serialize::serialize(&cb).unwrap()).unwrap();
+        let tree = put_tree_with(
+            &store,
+            vec![TreeEntry {
+                name: b"out.txt".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: cb_h,
+            }],
+        );
+
+        let sequential_target = TempDir::new().unwrap();
+        restore_tree_to_worktree(
+            &store,
+            &tree,
+            sequential_target.path(),
+            &RestoreOptions::default(),
+        )
+        .unwrap();
+        let sequential_content = fs::read(sequential_target.path().join("out.txt")).unwrap();
+
+        let fanout_target = TempDir::new().unwrap();
+        restore_tree_to_worktree_with(
+            &store,
+            &tree,
+            fanout_target.path(),
+            &RestoreOptions::default(),
+            &|store, batch| {
+                // Read in reverse, then un-reverse before returning —
+                // proves the contract cares about the *returned* order,
+                // not the order chunks are actually processed in.
+                let mut out: Vec<Vec<u8>> = batch
+                    .iter()
+                    .rev()
+                    .map(|h| read_chunk_bytes(store, h))
+                    .collect::<RestoreResult<_>>()?;
+                out.reverse();
+                Ok(out)
+            },
+        )
+        .unwrap();
+        let fanout_content = fs::read(fanout_target.path().join("out.txt")).unwrap();
+
+        assert_eq!(
+            sequential_content, fanout_content,
+            "an out-of-order-processing read_chunks callback must still match \
+             the sequential default when it returns results in input order"
+        );
     }
 
     /// SPEC-OBJECTS §7: "The concatenated length MUST equal `total_size`."

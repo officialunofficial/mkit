@@ -15,7 +15,7 @@
 
 use mkit_core::hash::Hash;
 use mkit_core::object::Object;
-use mkit_core::ops::restore::{RestoreError, RestoreResult};
+use mkit_core::ops::restore::{RESTORE_CHUNK_BATCH, RestoreError, RestoreResult};
 use mkit_core::store::ObjectStore;
 
 /// Chunks-per-thread budget below which [`read_chunks_fanout`] reads a
@@ -44,8 +44,22 @@ use mkit_core::store::ObjectStore;
 /// the write.
 const RESTORE_FANOUT_CHUNKS_PER_THREAD: usize = 4;
 
+/// [`crate::fanout::threshold`]'s raw `entries_per_thread *
+/// current_num_threads()` grows without bound as the host's core count
+/// grows, but [`read_chunks_fanout`] is never handed a batch larger than
+/// [`RESTORE_CHUNK_BATCH`] (`restore_tree_to_worktree_with` chunks the
+/// full chunk list into batches of at most that size before calling
+/// `read_chunks`). Past `RESTORE_CHUNK_BATCH / RESTORE_FANOUT_CHUNKS_PER_THREAD`
+/// threads (16, at the current constants), an uncapped threshold would
+/// exceed every batch `restore_blob_with` ever produces — on any
+/// 16+-thread host (unremarkable on cloud CI/build servers), the
+/// sequential fallback would run forever regardless of file size, a
+/// failure `try_map_seq_or_par`'s own `items.len() < threshold` check
+/// can't catch since it has no way to know a batch's length is itself
+/// bounded upstream. Capping at `RESTORE_CHUNK_BATCH` guarantees a full
+/// batch always clears the threshold, on any core count.
 fn restore_fanout_threshold() -> usize {
-    crate::fanout::threshold(RESTORE_FANOUT_CHUNKS_PER_THREAD)
+    crate::fanout::threshold(RESTORE_FANOUT_CHUNKS_PER_THREAD).min(RESTORE_CHUNK_BATCH)
 }
 
 /// `read_chunks` callback for `restore_tree_to_worktree_with`: reads
