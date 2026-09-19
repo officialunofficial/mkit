@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { build } from "esbuild";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath, URL as NodeURL } from "node:url";
 import { encoder, fromHex, hex, mkit } from "./mkit";
 import { grantMessage, type PreparedWorkspace, type WorkspaceView } from "./contracts";
@@ -53,6 +54,28 @@ beforeAll(async () => {
       import worker from './index';
       import { Workspace } from './workspace';
       export class TestWorkspace extends Workspace {
+        constructor(ctx, env) {
+          const objects = new Proxy(env.OBJECTS, {
+            get(target, key) {
+              if (key === 'put') return async (...args) => {
+                const result = await target.put(...args);
+                if (String(args[0]).includes('/update/')) {
+                  const fault = await ctx.storage.get('persistFault');
+                  if (fault === 'revoke') await ctx.storage.put('revoked', true);
+                  if (fault === 'expire') {
+                    const signed = await ctx.storage.get('grant');
+                    signed.grant.expiresAt = Date.now() - 1;
+                    await ctx.storage.put('grant', signed);
+                  }
+                }
+                return result;
+              };
+              const value = target[key];
+              return typeof value === 'function' ? value.bind(target) : value;
+            },
+          });
+          super(ctx, { ...env, OBJECTS: objects });
+        }
         async fixture(writes) { await this.ctx.storage.put(writes); }
         async inspect() { return Object.fromEntries(await this.ctx.storage.list()); }
       }
@@ -197,16 +220,20 @@ async function signed(
 }
 
 describe("public partial lifecycle with real wasm import", () => {
-    it("prepares, activates without remix, saves an ordinary candidate, and downloads MKWU", async () => {
+    it.each(["none", "expire", "revoke"] as const)("admits a manual candidate only with fresh consent (%s)", async (fault) => {
         const owner = identity();
-        const preparedResponse = await signed(owner, "workspaces", "/api/workspaces/prepare", {
+        const prepareRequest = envelope(owner, "workspaces", "/api/workspaces/prepare", {
             kind: "partial-bundle",
             baseCommit: BASE,
             selectedPaths: PATHS,
             bundleDigest: DIGEST,
         });
+        const preparedResponse = await mf.dispatchFetch(`${AUDIENCE}/api/workspaces/prepare`, prepareRequest);
         expect(preparedResponse.status).toBe(200);
         const prepared = (await preparedResponse.json()) as PreparedWorkspace;
+        const replay = await mf.dispatchFetch(`${AUDIENCE}/api/workspaces/prepare`, prepareRequest);
+        expect(replay.status).toBe(200);
+        expect(await replay.json()).toEqual(prepared);
         expect(prepared.grant.source.kind).toBe("partial-bundle");
         const cookie = (await signed(owner, "identity", "/api/workspaces/session", {})).headers
             .get("Set-Cookie")!
@@ -235,11 +262,32 @@ describe("public partial lifecycle with real wasm import", () => {
         expect(view.workspace.head).toBeNull();
         expect(view.coverage?.verification).toBe("selected-only");
         expect(view.candidateStatus).toBe("none");
+        if (fault !== "none") {
+            await mf.dispatchFetch(`${AUDIENCE}/__test/fixture`, {
+                method: "POST",
+                body: JSON.stringify({ id: prepared.id, writes: { persistFault: fault } }),
+            });
+        }
         const saved = await signed(owner, prepared.id, `/api/workspaces/${prepared.id}/file`, {
             path: "shallow.txt",
             content: "wasm parity",
             expectedHash: view.files[0]!.hash,
         });
+        if (fault !== "none") {
+            expect(saved.status).toBe(403);
+            const inspected = await (await mf.dispatchFetch(`${AUDIENCE}/__test/inspect`, {
+                method: "POST", body: JSON.stringify({ id: prepared.id }),
+            })).json() as { candidate?: unknown; files: Record<string, { hash: string }> };
+            expect(inspected.candidate).toBeUndefined();
+            expect(inspected.files["shallow.txt"]!.hash).toBe(view.files[0]!.hash);
+            const denied = await mf.dispatchFetch(`${AUDIENCE}/api/workspaces/${prepared.id}/partial-update`, {
+                headers: { Cookie: cookie },
+            });
+            expect(denied.status).toBe(404); // No admitted candidate exists.
+            const bucket = await mf.getR2Bucket("OBJECTS");
+            expect((await bucket.list({ prefix: `partial/${prepared.id}/update/` })).objects).toHaveLength(1);
+            return;
+        }
         expect(saved.status).toBe(200);
         const savedView = (await saved.json()) as WorkspaceView;
         expect(savedView.candidateStatus).toBe("ready");
@@ -251,6 +299,9 @@ describe("public partial lifecycle with real wasm import", () => {
         expect(download.headers.get("X-Mkit-Coverage")).toBe("selected-only");
         const mkwu = new Uint8Array(await download.arrayBuffer());
         expect(mkwu.byteLength).toBeGreaterThan(32);
+        // Optional bridge to the Rust recipient oracle; no second wire decoder.
+        if (process.env.MKIT_PARTIAL_ORACLE_DIR)
+            writeFileSync(join(process.env.MKIT_PARTIAL_ORACLE_DIR, "download.mkwu"), mkwu);
         const inspect = (await (
             await mf.dispatchFetch(`${AUDIENCE}/__test/inspect`, {
                 method: "POST",
@@ -265,6 +316,7 @@ describe("public partial lifecycle with real wasm import", () => {
         expect(mkit.commit_verify(commitBytes)).toBe(true);
         const decoded = mkit.commit_decode(commitBytes);
         try {
+            expect(decoded.parent_count).toBe(1);
             expect(decoded.parent(0)).toBe(BASE);
         } finally {
             decoded.free();
@@ -273,6 +325,12 @@ describe("public partial lifecycle with real wasm import", () => {
             `${AUDIENCE}/api/workspaces/${prepared.id}/partial-update`,
         );
         expect(denied.status).toBe(403);
+        const otherCookie = (await signed(identity(), "identity", "/api/workspaces/session", {}))
+            .headers.get("Set-Cookie")!.split(";")[0]!;
+        const nonOwner = await mf.dispatchFetch(`${AUDIENCE}/api/workspaces/${prepared.id}/partial-update`, {
+            headers: { Cookie: otherCookie },
+        });
+        expect(nonOwner.status).toBe(403);
         const pending = await signed(owner, prepared.id, `/api/workspaces/${prepared.id}/file`, {
             path: "shallow.txt",
             content: "again",

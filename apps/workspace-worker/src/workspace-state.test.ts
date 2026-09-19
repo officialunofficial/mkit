@@ -28,6 +28,18 @@ beforeAll(async () => {
             if (input.op === 'replay') return await this.state.replay(input.auth) ?? Response.json({ missing: true }, { status: 404 });
             if (input.op === 'view') return Response.json(await this.state.view(input.owner, input.version));
             if (input.op === 'files') return Response.json(await this.state.files(input.version));
+            if (input.op === 'consent-after-revocation-read') {
+              let now = input.expiresAt - 1;
+              const state = new WorkspaceState(this.ctx.storage, this.env.OBJECTS, () => now);
+              await state.requireAgent({
+                get: async (key) => {
+                  const value = await this.ctx.storage.get(key);
+                  if (key === 'revoked') now = input.expiresAt;
+                  return value;
+                },
+              });
+              return Response.json({ authorized: true });
+            }
             if (input.op === 'inspect') {
               const entries = await this.ctx.storage.list();
               return Response.json({ values: Object.fromEntries(entries), alarm: await this.ctx.storage.getAlarm() });
@@ -456,6 +468,13 @@ describe("WorkspaceState on transactional SQLite Durable Object storage", () => 
         expect(replay.status).toBe(200);
         expect(replay.headers.get("x-operation")).toBe("legacy");
         expect(await replay.json()).toEqual(body);
+    });
+
+    it("checks expiration after the asynchronous revocation read", async () => {
+        const expiresAt = Date.now() + 60_000;
+        const { id } = await setup({ grant: { grant: { expiresAt } } });
+        const response = await request(id, { op: "consent-after-revocation-read", expiresAt });
+        expect(response.status).toBe(403);
     });
 
     it("does not advertise a candidate when agent consent is invalid at admission", async () => {

@@ -409,7 +409,7 @@ configured HTTPS origin after resource validation is explicitly enabled,
 verifies independently supplied base and selection in portable wasm, materializes
 selected regular/executable files, and signs at most one ordinary candidate
 whose parent is that base. AgentGrant is rechecked after asynchronous public
-reads, immediately before signing, and inside the durable admission
+reads (including the revocation read), immediately before signing, and inside the durable admission
 transaction. Export is `candidate_ready`, never remotely accepted. Omitted paths
 are not deletions. Selected capture does not silently drop legacy-ignored names.
 
@@ -423,6 +423,10 @@ claim remote acceptance, or leak owner credentials to the bundle origin.
 **Enforced by:** `apps/workspace-worker/src/partial-source.test.ts`,
 `apps/workspace-worker/src/partial-candidate.test.ts`,
 `apps/workspace-worker/src/partial-wasm.test.ts`,
+`apps/workspace-worker/src/partial.lifecycle.test.ts`,
+`apps/workspace-worker/src/partial-runner.integration.test.ts`,
+`apps/workspace-worker/src/workspace-state.test.ts`,
+the opt-in `rust/crates/mkit-core/tests/partial_consumer_oracle.rs` recipient check,
 `apps/workspace-worker/src/workspace.integration.test.ts`, and
 `apps/workspace-worker/src/auth.test.ts`.
 

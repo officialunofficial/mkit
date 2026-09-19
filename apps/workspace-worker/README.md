@@ -35,7 +35,7 @@ The terminal uses a real Sandbox PTY in `/workspace/project`. It is unavailable 
 | Saved model history | 24,000 bytes |
 | Shared model allowance | 900 requests and 180,000 tokens/day by default |
 | Minute admission | Continuously refills 25 requests and 7,500 reserved tokens/minute; bounded waits |
-| Public partial bundle | Optional `PUBLIC_PARTIAL_BUNDLE_ORIGIN`; 12 MiB bundle; 6 MiB witnesses |
+| Public partial bundle | Opt-in; 4 MiB bundle; 1 MiB witnesses; 1 MiB selected bytes (256 KiB/file) |
 
 Daily limits use UTC day boundaries. Model reservations tokenize the serialized request with the model’s ordinary o200k vocabulary and add a 512-token framing reserve before a request and are adjusted when actual usage arrives. Requests with unknown usage keep their reservation. Groq may enforce additional provider limits; a short provider rate-limit response receives one quota-admitted retry. The model's free allowance does not include Cloudflare container hosting costs.
 
@@ -46,10 +46,12 @@ Oversized source files fail capture; they are not silently omitted. File reads a
 `public-partial-v1` stays unavailable unless both `PUBLIC_PARTIAL_BUNDLE_ORIGIN`
 is a trusted HTTPS origin (no credentials, query, fragment, or path) and
 `PUBLIC_PARTIAL_RESOURCE_OK` is the exact value `1`. Origin alone does not
-enable the path. Resource validation for the 12 MiB bundle / 6 MiB witness
-caps is documented in
-[partial-resource.md](partial-resource.md); until that report records a
-passing workerd measurement, leave `PUBLIC_PARTIAL_RESOURCE_OK` unset.
+enable the path. Local Workerd measurements led to the lower consumer-only
+4 MiB bundle / 1 MiB witness / 1 MiB selected-byte profile; the portable v1
+limits and legacy full-source limits are unchanged. See
+[partial-resource.md](partial-resource.md) for measurements, reproduction,
+and limitations. Leave `PUBLIC_PARTIAL_RESOURCE_OK` unset until the operator
+has validated the profile with that deployment's runtime and concurrency.
 
 When both are set, the service accepts owner-signed `POST /api/workspaces/prepare` bodies:
 

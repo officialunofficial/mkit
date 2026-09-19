@@ -253,10 +253,20 @@ fn materialize_selected_files(
     verified: &VerifiedPartialSnapshot,
     limits: &PartialLimits,
 ) -> Result<Vec<PartialFileOutput>, BindingError> {
-    let mut files = Vec::with_capacity(verified.files().len());
+    let mut files: Vec<PartialFileOutput> = Vec::with_capacity(verified.files().len());
+    // Cache indices into the required per-path output, not another copy of the
+    // bytes. Shared manifests must not multiply traversal by selected paths.
+    let mut materialized: std::collections::BTreeMap<mkit_core::Hash, usize> =
+        std::collections::BTreeMap::new();
     let mut total = 0usize;
     for file in verified.files() {
-        let bytes = materialize_selected_file(verified, file, limits)?;
+        let bytes = if let Some(&index) = materialized.get(file.object_id()) {
+            files[index].bytes.clone()
+        } else {
+            let bytes = materialize_selected_file(verified, file, limits)?;
+            materialized.insert(*file.object_id(), files.len());
+            bytes
+        };
         total = total.checked_add(bytes.len()).ok_or_else(|| {
             BindingError::new("workspace_too_large", "selected file size overflow")
         })?;
@@ -290,6 +300,8 @@ fn materialize_selected_file(
     file: &mkit_core::SelectedFile,
     limits: &PartialLimits,
 ) -> Result<Vec<u8>, BindingError> {
+    #[cfg(test)]
+    tests::MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
     let expected = usize::try_from(file.content_len()).map_err(|_| {
         BindingError::new(
             "workspace_too_large",
@@ -893,6 +905,83 @@ impl PartialSelectedFileJs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    std::thread_local! {
+        pub(super) static MATERIALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    #[test]
+    fn shared_chunk_metadata_is_materialized_once_with_per_path_accounting() {
+        use mkit_core::{Blob, ChunkedBlob, Commit, Tree, TreeEntry, build_partial_snapshot};
+        let mut objects = std::collections::BTreeMap::new();
+        let empty = insert(&mut objects, &Object::Blob(Blob { data: vec![] }));
+        let byte = insert(&mut objects, &Object::Blob(Blob { data: vec![7] }));
+        let mut chunks = vec![empty; 512];
+        chunks.push(byte);
+        let file_id = insert(
+            &mut objects,
+            &Object::ChunkedBlob(ChunkedBlob {
+                total_size: 1,
+                chunk_size: 0,
+                chunks,
+            }),
+        );
+        let paths: Vec<_> = (0..16)
+            .map(|i| vec![format!("file-{i:02}").into_bytes()])
+            .collect();
+        let entries = paths
+            .iter()
+            .enumerate()
+            .map(|(index, path)| TreeEntry {
+                name: path[0].clone(),
+                mode: if index == 0 {
+                    EntryMode::Executable
+                } else {
+                    EntryMode::Blob
+                },
+                object_hash: file_id,
+            })
+            .collect();
+        let root = insert(&mut objects, &Object::Tree(Tree { entries }));
+        let key = KeyPair::from_seed([19; 32]);
+        let mut commit = Commit::new_unannotated(
+            root,
+            vec![],
+            Identity::ed25519(key.public.0),
+            key.public.0,
+            vec![],
+            1,
+            [0; 64],
+        );
+        commit.signature = sign_commit(&commit, &key).unwrap().0;
+        let base = insert(&mut objects, &Object::Commit(commit));
+        let bundle = build_partial_snapshot(&MapSource(objects), base, &paths, &PartialLimits::V1)
+            .unwrap()
+            .encode(&PartialLimits::V1)
+            .unwrap();
+        let verified = verify_partial_snapshot(base, &paths, &bundle, &PartialLimits::V1).unwrap();
+        MATERIALIZATIONS.with(|count| count.set(0));
+        let exact = PartialLimits {
+            max_total_selected_bytes: 16,
+            ..PartialLimits::V1
+        };
+        let files = materialize_selected_files(&verified, &exact).unwrap();
+        assert_eq!(files.len(), 16);
+        assert!(files.iter().all(|file| file.bytes == [7]));
+        assert_eq!(files[0].mode, "exec");
+        assert!(files[1..].iter().all(|file| file.mode == "blob"));
+        assert_eq!(MATERIALIZATIONS.with(std::cell::Cell::get), 1);
+        let over = PartialLimits {
+            max_total_selected_bytes: 15,
+            ..exact
+        };
+        assert_eq!(
+            materialize_selected_files(&verified, &over)
+                .unwrap_err()
+                .code,
+            "workspace_too_large"
+        );
+    }
 
     const PLAIN_BUNDLE: &[u8] =
         include_bytes!("../../../tests/golden/partial_workspace/plain_file.bin");

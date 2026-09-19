@@ -6,7 +6,7 @@ use crate::hash::{Hash, to_hex};
 use crate::object::{Commit, EntryMode, Identity, Object, ObjectType, Tree};
 use crate::serialize::serialize;
 use crate::store::{ObjectSink, ObjectSource, StoreError, StoreResult};
-use crate::worktree::{WorktreeError, content_eq, content_eq_bytes, store_file_object};
+use crate::worktree::{WorktreeError, content_eq, read_blob, store_file_object};
 
 use super::collector::BoundedCollector;
 use super::verify::{preflight_file, preflight_tree};
@@ -77,6 +77,7 @@ pub struct PreparedPartialEdit {
 struct OverlayAccounting {
     dependency_occurrences_scanned: usize,
     reuse_comparisons: usize,
+    byte_representations_loaded: usize,
 }
 
 struct DependencyInventory {
@@ -246,6 +247,10 @@ fn collect_replacements(
     preflight_replacements(&files, replacements, limits)?;
     let source = SnapshotSource(verified);
     let mut comparison_cache = BTreeMap::new();
+    // Distinct authenticated content is bounded by the verified snapshot's
+    // selected-byte total. Cache it once even when replacements differ, so
+    // repeated path occurrences cannot multiply shared manifest traversal.
+    let mut original_content = BTreeMap::new();
     let mut accounting = OverlayAccounting::default();
     let mut pending = Vec::new();
 
@@ -257,8 +262,23 @@ fn collect_replacements(
 
         let (content_len, equal, content) = match &replacement.content {
             ReplacementContent::Bytes(bytes) => {
-                let equal = content_eq_bytes(&source, destination.object_id(), bytes)
-                    .map_err(PartialError::Source)?;
+                let original = match original_content.entry(*destination.object_id()) {
+                    std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        accounting.byte_representations_loaded = accounting
+                            .byte_representations_loaded
+                            .checked_add(1)
+                            .ok_or(PartialError::ValidationBudgetExceeded)?;
+                        let content = read_blob(&source, destination.object_id()).map_err(
+                            |error| match error {
+                                WorktreeError::Store(error) => PartialError::Source(error),
+                                _ => PartialError::InvalidChunkLayout,
+                            },
+                        )?;
+                        entry.insert(content)
+                    }
+                };
+                let equal = original.as_slice() == bytes.as_slice();
                 (bytes.len(), equal, PendingContent::Bytes(bytes))
             }
             ReplacementContent::ReuseSelected(source_path) => {
@@ -718,6 +738,24 @@ mod tests {
         let verified =
             verify_partial_snapshot(base, &paths, &bundle.encode(&limits).unwrap(), &limits)
                 .unwrap();
+
+        let supplied = replace_files(
+            &verified,
+            &[
+                FileReplacement::bytes(paths[0].clone(), vec![2]),
+                FileReplacement::bytes(paths[1].clone(), vec![2]),
+                FileReplacement::bytes(paths[2].clone(), vec![3]),
+                FileReplacement::bytes(paths[4].clone(), vec![2]),
+                FileReplacement::bytes(paths[5].clone(), vec![2]),
+            ],
+            &limits,
+        )
+        .unwrap();
+        // Different replacement bytes must still share one authenticated load.
+        assert_eq!(supplied.accounting.byte_representations_loaded, 3);
+        assert_eq!(supplied.changes.len(), 5);
+        assert_eq!(supplied.changes[0].new_id, supplied.changes[1].new_id);
+        assert_ne!(supplied.changes[1].new_id, supplied.changes[2].new_id);
 
         let prepared = replace_files(
             &verified,

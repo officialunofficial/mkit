@@ -1,18 +1,23 @@
 import { HttpError } from "./http";
 import { hex, mkit } from "./mkit";
-import { MAX_FILE_BYTES, MAX_TOTAL_BYTES } from "./objects";
+import { MAX_FILE_BYTES } from "./objects";
 
-export const CONSUMER_BUNDLE_BYTES = 12 * 1024 * 1024;
-export const CONSUMER_WITNESS_BYTES = 6 * 1024 * 1024;
+export const CONSUMER_BUNDLE_BYTES = 4 * 1024 * 1024;
+export const CONSUMER_WITNESS_BYTES = 1024 * 1024;
+export const CONSUMER_SELECTED_BYTES = 1024 * 1024;
+export const CONSUMER_RAW_PACK_BYTES = 3 * 1024 * 1024;
+export const CONSUMER_UPDATE_BYTES = 4 * 1024 * 1024;
 export const MAX_LIMITS_JSON_BYTES = 16 * 1024;
-export const MAX_REPLACEMENTS_JSON_BYTES = 12 * 1024 * 1024;
+export const MAX_REPLACEMENTS_JSON_BYTES = 3 * 1024 * 1024;
 
 export function consumerLimitsJson(): string {
     return JSON.stringify({
         max_selected_file_bytes: MAX_FILE_BYTES,
-        max_total_selected_bytes: MAX_TOTAL_BYTES,
+        max_total_selected_bytes: CONSUMER_SELECTED_BYTES,
         max_bundle_bytes: CONSUMER_BUNDLE_BYTES,
         max_witness_bytes: CONSUMER_WITNESS_BYTES,
+        max_raw_pack_bytes: CONSUMER_RAW_PACK_BYTES,
+        max_update_bytes: CONSUMER_UPDATE_BYTES,
     });
 }
 

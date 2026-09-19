@@ -164,7 +164,9 @@ export class WorkspaceState {
 
     async requireAgent(storage: ReadStorage = this.storage): Promise<SignedAgentGrant> {
         const grant = await storage.get<SignedAgentGrant>("grant");
-        if (!grant || grant.grant.expiresAt <= this.now() || (await storage.get("revoked")))
+        const revoked = await storage.get("revoked");
+        // Check the clock after all asynchronous reads, including revocation.
+        if (!grant || revoked || grant.grant.expiresAt <= this.now())
             throw new HttpError(
                 403,
                 "Agent access is disabled or expired. Remix this project to start a new authorized workspace.",
