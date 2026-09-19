@@ -9,8 +9,9 @@ audience: implementers of portable mkit selected-file snapshot, overlay, signing
 
 Status: **Draft, normative.** This revision specifies `MKWB` v1 partial
 snapshot bundles, authenticated replacement overlays, ordinary Commit signing
-handoff, and `MKWU` v1 explicit update export. Local workspace state, complete
-base recipient admission, and publication are outside this revision.
+handoff, `MKWU` v1 explicit update export, and the durable scoped-workspace
+local-state format (§16). Complete base recipient admission and remote
+publication are outside this revision.
 
 ## 1. Trust and coverage
 
@@ -446,6 +447,14 @@ trailing bytes, and compressed/delta entries. Each `.bin` has a `.json`
 sidecar and is pinned by `MANIFEST.txt`. `golden_partial_update.rs` consumes
 only committed artifacts when `MKIT_WRITE_GOLDEN` is unset.
 
+`rust/tests/golden/partial_local/` contains accepted `MKWS`, `MKST`, `MKPN`,
+`MKAC`, `MKGM`, and `MKCR` envelopes captured from real workspace
+transitions, plus independently byte-constructed rejects for bad checksum,
+unsupported version, trailing bytes, non-minimal varint, and unknown
+option/status tags. Each `.bin` has a `.json` sidecar and is pinned by
+`MANIFEST.txt`. `golden_partial_local.rs` consumes only committed artifacts
+when `MKIT_WRITE_GOLDEN` is unset.
+
 ## 15. Caller-lowered limits
 
 A consumer MAY pass a `PartialLimits` value that is a subset of the v1 profile
@@ -457,3 +466,154 @@ consumer, not in a named profile inside generic wasm.
 
 A public selected-file consumer is not a confidential host and MUST NOT treat
 `MKWU` export as remote publication or complete closure.
+
+## 16. Durable scoped-workspace local state
+
+A **scoped workspace** is a directory that materializes exactly the verified
+selected files of a base Commit/Remix plus durable local state under a private
+metadata directory. It is not an ordinary repository: it has no object store,
+index, refs, config, or key state, and ordinary commands MUST refuse to run
+inside it. This section specifies the on-disk format only; admission,
+publication, and fetch are out of scope.
+
+### 16.1 Physical layout
+
+```text
+<root>/.mkit                       regular file, exact bytes "mkit-scoped: 1\n"
+<root>/.mkit-scoped/workspace.lock stable-inode lock file, never unlinked
+<root>/.mkit-scoped/CURRENT        MKCR envelope selecting one generation
+<root>/.mkit-scoped/generations/<manifest-digest>/
+    manifest.bin                   MKGM envelope
+    workspace.bin                  MKWS envelope
+    stage.bin                      MKST envelope
+    pending.bin                    MKPN envelope, iff the manifest names it
+    accepted.bin                   MKAC envelope, iff the manifest names it
+<root>/.mkit-scoped/bundles/<digest>.mkwb    verified base bundle
+<root>/.mkit-scoped/objects/<object-id>      stage-produced canonical objects
+<root>/.mkit-scoped/updates/<digest>.mkwu    pending update artifact
+```
+
+Generation directory names are the lowercase 64-hex flat BLAKE3 of the
+complete `MKGM` envelope. Member file names are fixed by code and never
+decoded from disk. Artifact names are digest-derived. The pending update path
+is canonically `.mkit-scoped/updates/<lowercase update_digest hex>.mkwu`; that
+digest/path pair is the exact pending artifact and is never caller-controlled
+or encoded. A `service/` name is reserved and never created by this revision.
+
+### 16.2 Envelope grammar
+
+Every durable-state envelope is `[magic:4][version:1][payload][checksum:32]`
+with `version = 1` and `checksum` the flat BLAKE3 of `magic ‖ version ‖
+payload`. A complete envelope is at most 1 MiB. Fixed-width integers are
+big-endian; counts and byte strings use minimal unsigned LEB128; fixed arrays
+carry no length; option tags are exactly `0` or `1`. Paths are component
+vectors as in `MKWB`, strictly sorted by joined raw bytes; modes are exactly
+`0x01` (regular) or `0x04` (executable). Decoders MUST reject unknown
+versions, unknown tags or statuses, non-minimal varints, out-of-bound counts,
+trailing bytes, and checksum mismatches. The checksum detects corruption and
+torn writes; it is not a signature and confers no authority.
+
+Payload orders, in field order:
+
+```text
+MKWS WorkspaceStateV1:
+    workspace_id[32]
+    transaction_generation u64
+    base_revision u64
+    base_id[32]
+    base_bundle_digest[32]
+    selection_count varint
+        repeated path, mode u8, base_file_id[32]
+    20 PartialLimits u64 fields in declaration order
+    target_tag u8
+        if 1: endpoint bytes, repository bytes, exact_ref bytes
+
+MKST StageStateV1:
+    workspace_id[32]
+    base_id[32]
+    base_revision u64
+    entry_count varint
+        repeated path, mode u8, staged_id[32]
+    required_object_count varint
+        repeated object_id[32]
+
+MKPN PendingStateV1:
+    workspace_id[32]
+    base_id[32]
+    base_revision u64
+    created_generation u64
+    candidate_id[32]
+    update_digest[32]
+    update_length u64
+    status u8        (0 prepared, 1 exported, 2 conflict, 3 unknown)
+    operation_tag u8
+        if 1: operation_id[32], request_fingerprint[32]
+
+MKAC AcceptedStateV1:
+    workspace_id[32]
+    prior_base_id[32]
+    accepted_base_revision u64
+    candidate_id[32]
+    update_digest[32]
+    operation_tag u8
+        if 1: operation_id[32], request_fingerprint[32]
+
+MKGM generation manifest:
+    transaction_generation u64
+    workspace_digest[32]
+    stage_digest[32]
+    pending_digest_tag u8 + digest[32] iff 1
+    accepted_digest_tag u8 + digest[32] iff 1
+
+MKCR CURRENT:
+    transaction_generation u64
+    manifest_digest[32]
+```
+
+Member digests in `MKGM` are flat BLAKE3 of complete member envelopes. The
+initial transaction generation and base revision are `0`. Every non-idempotent
+successful transition increments the transaction generation (overflow is
+rejected); accepted advancement alone increments the base revision. The
+workspace `transaction_generation` MUST equal the manifest/CURRENT generation.
+Stage and pending records bind the workspace id, base id, and base revision;
+the accepted record binds the prior base id and the new base revision. Readers
+MUST verify all redundant bindings.
+
+### 16.3 Commit algorithm and crash recovery
+
+`CURRENT` is the sole authority: readers decode exactly the generation it
+names and MUST NOT scan `generations/` or pick a highest generation, and MUST
+NOT fall back to working-tree contents. A transition commits by:
+
+1. validating and precomputing under the exclusive `workspace.lock`;
+2. writing and fsyncing immutable artifacts (bundle/object/update) create-new &mdash;
+   identical existing bytes are reused, differing bytes are an error;
+3. writing and fsyncing the new immutable generation directory: members first,
+   then `manifest.bin`, then fsync of the generation and `generations` dirs;
+4. writing and fsyncing a sibling `CURRENT` temp file, then atomically
+   replacing `CURRENT`;
+5. fsyncing `.mkit-scoped`.
+
+The `CURRENT` replacement is the linearization point. A fault before it
+leaves the prior generation authoritative; a fault after it but before the
+final directory fsync reports durability uncertainty rather than rolling back
+or claiming success. Orphaned generations and temp files MAY remain; there is
+no garbage collection of scoped state in this revision.
+
+### 16.4 Threat and authority limits
+
+Scoped local state is a host-local durability mechanism. The workspace id is
+random per create, `RemotePublicationTargetV1` is descriptive only, and a
+recorded `Accepted` outcome is a caller assertion &mdash; none of them establish
+signer trust, permission, ownership, receipt, or publication authority.
+`workspace.lock` is an isolated scoped-root lock domain and is never composed
+with ordinary repository lock ordering (SPEC-CONCURRENCY).
+
+Filesystem-facing rules: all state access is descriptor-anchored with
+no-follow opens; symlink ancestors and leaves, non-regular authoritative
+files, multi-linked files, path-prefix/case/normalization aliases, and
+reserved names are rejected; creation installs the complete workspace with the
+marker last, by an atomic no-replace directory rename; `init`/`open`/ordinary
+commands at or below a scoped root, a corrupt marker, an incomplete recognized
+install, or an ordinary/scoped layout conflict MUST refuse before touching
+filesystem state.

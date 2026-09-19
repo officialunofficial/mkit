@@ -63,11 +63,13 @@ pub fn run(args: &[String]) -> u8 {
     // `--show-toplevel` only needs to find the repo root (walking up from a
     // subdirectory), so handle it before opening the object store.
     if opts.show_toplevel {
-        let Some(root) = find_repo_root(&cwd) else {
-            return emit_err("not inside a mkit repository", exit::GENERAL_ERROR);
-        };
-        let _ = writeln!(stdout, "{}", root.display());
-        return exit::OK;
+        match find_repo_root(&cwd) {
+            Ok(root) => {
+                let _ = writeln!(stdout, "{}", root.display());
+                return exit::OK;
+            }
+            Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
+        }
     }
 
     let layout = match super::resolve_layout(&cwd) {
@@ -131,13 +133,21 @@ fn abbrev_ref(layout: &RepoLayout, spec: &str) -> Result<String, u8> {
 }
 
 /// Walk up from `start` to the directory that contains `.mkit`.
-fn find_repo_root(start: &Path) -> Option<PathBuf> {
+///
+/// Refuses scoped-workspace authority at `start` or any ancestor before
+/// the ordinary `.mkit` search — a scoped root is not an mkit repository
+/// and must never resolve upward into one.
+fn find_repo_root(start: &Path) -> Result<PathBuf, String> {
+    mkit_core::layout::check_scoped_boundary(start).map_err(|e| e.to_string())?;
     let mut cur = start;
     loop {
         if cur.join(mkit_core::MKIT_DIR).is_dir() {
-            return Some(cur.to_path_buf());
+            return Ok(cur.to_path_buf());
         }
-        cur = cur.parent()?;
+        match cur.parent() {
+            Some(parent) => cur = parent,
+            None => return Err("not inside a mkit repository".to_owned()),
+        }
     }
 }
 

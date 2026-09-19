@@ -1,0 +1,9 @@
+{
+  "blake3": "88b73878a4d45550ca002e18b8101a7b77a2c17a0620812904e0f2f441d7e1f4",
+  "description": "MKWS envelope declaring version 2.",
+  "error": "UnsupportedVersion",
+  "expect": "reject",
+  "magic": "MKWS",
+  "name": "neg_unsupported_version",
+  "size": 509
+}

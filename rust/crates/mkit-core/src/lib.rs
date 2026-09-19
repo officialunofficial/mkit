@@ -19,12 +19,14 @@
 //! no `anyhow`, no panics on unchecked input.
 
 // `deny(unsafe_code)` rather than `forbid` so a small, justified set of
-// `#[allow(unsafe_code)]` callsites can call into libc. There are two
-// today: `sign::load_key` uses `libc::geteuid()` for the POSIX uid check,
-// and `batch::RealSyncer::file_barrier` uses `libc::fcntl(.., F_BARRIERFSYNC)`
-// on macOS/iOS. Every other module remains under the same prohibition; a
-// code-review gate (CONTRIBUTING) requires SAFETY notes on any new
-// `unsafe` block.
+// `#[allow(unsafe_code)]` callsites can call into libc. They are:
+// `sign::load_key` uses `libc::geteuid()` for the POSIX uid check;
+// `batch::RealSyncer::file_barrier` uses `libc::fcntl(.., F_BARRIERFSYNC)`
+// on macOS/iOS; and `partial::sys` holds the descriptor-anchored
+// filesystem primitives (`openat`/`mkdirat`/`renameat2`/`flock`/…) that
+// back scoped-workspace state on unix. Every other module remains under
+// the same prohibition; a code-review gate (CONTRIBUTING) requires
+// SAFETY notes on any new `unsafe` block.
 #![deny(unsafe_code)]
 // `ed25519-dalek` v2.2 still pulls in older sha2/cpufeatures (and
 // rand_core 0.6 which transitively wants getrandom 0.2). These are
@@ -113,6 +115,14 @@ pub use partial::{
     PartialSnapshotBundle, PartialUpdate, PreparedPartialEdit, SelectedFile,
     VerifiedPartialSnapshot, VerifiedTree, build_partial_snapshot, export_partial_update,
     prepare_partial_commit, replace_files, verify_partial_snapshot,
+};
+// Durable scoped-workspace local state — native Unix only; excluded from
+// wasm builds.
+#[cfg(all(unix, not(target_arch = "wasm32")))]
+pub use partial::{
+    AcceptedStateV1, PartialStateError, PendingIdentityV1, PendingOperationV1, PendingOutcomeV1,
+    PendingStateV1, PendingStatusV1, RemotePublicationTargetV1, ScopedWorkspaceLayout,
+    ScopedWorkspaceState, StageEntryV1, StageStateV1, WorkspaceSelectionV1, WorkspaceStateV1,
 };
 pub use serialize::{deserialize, serialize};
 pub use sign::{

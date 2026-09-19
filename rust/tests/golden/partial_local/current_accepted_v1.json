@@ -1,0 +1,9 @@
+{
+  "blake3": "a6f4da923e5bb848bd3b0c218e08c87fc79fdf728869748857085f36d14ca635",
+  "description": "MKCR pointing at the accepted generation's manifest digest.",
+  "error": null,
+  "expect": "accept",
+  "magic": "MKCR",
+  "name": "current_accepted_v1",
+  "size": 77
+}

@@ -1,0 +1,9 @@
+{
+  "blake3": "61b40021c35179202988c44d60e56a43e56bd122c530a1b2255ee0104d139b20",
+  "description": "MKGM from the accepted generation: accepted member present, pending gone.",
+  "error": null,
+  "expect": "accept",
+  "magic": "MKGM",
+  "name": "manifest_accepted_v1",
+  "size": 143
+}

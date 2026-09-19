@@ -1,0 +1,9 @@
+{
+  "blake3": "1caab3c4673e9d6f67d25dde838039f73fade39910a49315f1ea933bfebfb97c",
+  "description": "MKST from the pending generation: one staged edit plus required objects.",
+  "error": null,
+  "expect": "accept",
+  "magic": "MKST",
+  "name": "stage_v1",
+  "size": 315
+}

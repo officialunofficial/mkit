@@ -1,0 +1,9 @@
+{
+  "blake3": "c95b8ace5e5064d8c43e1f8339563bd574ca76a64e84133c6e879c247a426a55",
+  "description": "MKWS payload with one byte after the declared fields.",
+  "error": "NonCanonical",
+  "expect": "reject",
+  "magic": "MKWS",
+  "name": "neg_trailing_byte",
+  "size": 510
+}
