@@ -51,10 +51,10 @@ impl FileReplacement {
     }
 
     /// The caller-carried payload size — `Bytes` length, zero for a
-    /// `ReuseSelected` reference. Used to apply the per-file byte cap
-    /// before cloning a replacement into an overlay feed; the
-    /// authoritative per-path checks still run inside `replace_files`.
-    #[cfg(all(unix, not(target_arch = "wasm32")))]
+    /// `ReuseSelected` reference. Test-only instrumentation proving a
+    /// rejected batch was never cloned into an overlay feed; the
+    /// authoritative per-path checks run inside `preflight_replacements`.
+    #[cfg(all(test, unix, not(target_arch = "wasm32")))]
     pub(crate) fn payload_len(&self) -> usize {
         match &self.content {
             ReplacementContent::Bytes(bytes) => bytes.len(),
@@ -357,7 +357,13 @@ fn collect_replacements(
     Ok((collector, changes, dependencies))
 }
 
-fn preflight_replacements(
+/// The borrowed-input bound `collect_replacements` applies before any
+/// replacement payload is cloned — destination/duplicate coverage, the
+/// per-file cap, and the checked aggregate over caller bytes plus
+/// valid reuse-source lengths. `replace_stage` runs the same pass while
+/// still borrowing the caller's batch, so an over-budget batch never
+/// becomes an allocation.
+pub(crate) fn preflight_replacements(
     files: &BTreeMap<&PartialPath, &SelectedFile>,
     replacements: &[FileReplacement],
     limits: &PartialLimits,

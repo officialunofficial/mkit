@@ -698,7 +698,9 @@ representations, and aggregate limits &mdash; before `CURRENT` can select it, so
 artifacts and generation members install by sibling-temporary write, fsync,
 and no-replace rename, so an interrupted write can never occupy a canonical
 digest name. The lock is held by a fresh inode-verified per-operation
-descriptor, so same-handle callers serialize and a panic cannot strand it.
+descriptor that re-verifies the sentinel identity after the blocking flock
+returns, so same-handle callers serialize, a sentinel replaced while a writer
+waits refuses the stale acquisition, and a panic cannot strand it.
 
 **Because:** torn writes and crashes are expected. Reading anything but the
 CURRENT-selected generation can pair a new workspace record with an old
@@ -726,7 +728,11 @@ could fork the generation sequence.
 `staged_alternate_reuse_survives_replay_and_pending`) and
 `mkit_core::partial::state::tests` fault-seam cases covering every
 commit-sequence injection point plus pre-publication validation, staged
-chunk-bound, and retained-inventory cases
+chunk-bound, retained-inventory, deterministic lock-contention, and
+stale-sentinel cases
 (`over_budget_complete_stage_is_rejected_before_publish`,
 `staged_chunked_declared_total_stops_at_first_overrun`,
-`required_inventory_bound_check_precedes_read`).
+`required_inventory_bound_check_precedes_read`,
+`bytes_copy_of_selected_content_survives_reopen_and_pending`,
+`lock_serializes_competing_writers_deterministically`,
+`replaced_lock_sentinel_refuses_stale_waiter`).

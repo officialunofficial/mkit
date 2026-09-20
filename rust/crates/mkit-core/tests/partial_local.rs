@@ -899,16 +899,21 @@ fn assert_exactly_one_committed(
     assert_eq!(staged, winner.len());
 }
 
-/// Drive the overlapping two-generation-0 pattern: the fast contender is
-/// spawned only once the slow contender is provably inside its
-/// transition (a staged-object artifact exists), so a lock that lets the
-/// second flock no-op through produces two committed generation-1
-/// states rather than a serialized `GenerationMismatch`.
+/// Drive the overlapping two-generation-0 pattern deterministically:
+/// both contenders are spawned while the test holds the kernel lock, so
+/// a correct implementation cannot let either finish — ANY completion
+/// during the hold window proves acquisition was bypassed (e.g. a
+/// second flock no-op through a shared open-file description). After
+/// release the kernel serializes them: exactly one commits generation
+/// 1, the loser observes `GenerationMismatch`, and the reopened state
+/// matches the winner.
 fn contention_pair(
     first: &std::sync::Arc<ScopedWorkspaceLayout>,
     second: &std::sync::Arc<ScopedWorkspaceLayout>,
     root: &Path,
 ) {
+    const EXCLUDE_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
+    const COMMIT_BOUND: std::time::Duration = std::time::Duration::from_mins(1);
     let every_path: Vec<PartialPath> = snap(first)
         .workspace()
         .selection()
@@ -934,41 +939,54 @@ fn contention_pair(
     )]
     .into_iter()
     .collect();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
     let ta = {
-        let first = first.clone();
-        std::thread::spawn(move || first.replace_stage(0, &slow_edit))
+        let (first, done_tx) = (first.clone(), done_tx.clone());
+        std::thread::spawn(move || {
+            let _ = done_tx.send((0, first.replace_stage(0, &slow_edit)));
+        })
     };
-    // Let the slow contender park at the kernel lock, then release it.
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    let tb = {
+        let (second, done_tx) = (second.clone(), done_tx.clone());
+        std::thread::spawn(move || {
+            let _ = done_tx.send((1, second.replace_stage(0, &fast_edit)));
+        })
+    };
+    // While the external hold stands, neither contender may complete —
+    // this is a correctness assertion, not a scheduling assumption: a
+    // contender that returns here did not wait for the lock.
+    match done_rx.recv_timeout(EXCLUDE_WINDOW) {
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("contender threads dropped their result channel")
+        }
+        Ok((which, result)) => {
+            panic!("contender {which} completed while the kernel lock was held: {result:?}")
+        }
+    }
     flock_release(&held);
     drop(held);
-    // Wait until the winner is provably inside: the first staged-object
-    // artifact only appears mid-commit, well before CURRENT is replaced.
-    let objects_dir = root.join(".mkit-scoped/objects");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    while std::time::Instant::now() < deadline {
-        if objects_dir.read_dir().is_ok_and(|mut d| d.next().is_some()) {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(2));
+    // After release the kernel admits exactly one; collect both results
+    // with bounded waits and order them by contender.
+    let mut results: [Option<Result<ScopedWorkspaceState, PartialStateError>>; 2] = [None, None];
+    for _ in 0..2 {
+        let (which, result) = done_rx
+            .recv_timeout(COMMIT_BOUND)
+            .expect("a contender never finished after the lock was released");
+        results[which] = Some(result);
     }
-    let tb = {
-        let second = second.clone();
-        std::thread::spawn(move || second.replace_stage(0, &fast_edit))
-    };
-    assert_exactly_one_committed(
-        &[ta.join().unwrap(), tb.join().unwrap()],
-        [&slow_expect, &fast_expect],
-        root,
-    );
+    let results = [results[0].take().unwrap(), results[1].take().unwrap()];
+    assert_exactly_one_committed(&results, [&slow_expect, &fast_expect], root);
+    ta.join().unwrap();
+    tb.join().unwrap();
 }
 
 /// Two threads share ONE `Arc<ScopedWorkspaceLayout>` and both attempt
-/// generation 0. flock ownership belongs to the open-file description:
-/// a second flock arriving while the shared descriptor already holds the
-/// lock is a no-op, so both threads would enter the critical section and
-/// publish two different generation-1 states. Per-operation descriptors
-/// must serialize them.
+/// generation 0 while an external flock holds the sentinel: flock
+/// ownership belongs to the open-file description, so a second flock
+/// arriving through a shared descriptor would no-op through and finish
+/// during the hold window. Per-operation descriptors must park both
+/// contenders until the hold is released.
 #[test]
 fn contention_same_handle_serializes() {
     let (_dir, layout) = wide_workspace();

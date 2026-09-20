@@ -1451,6 +1451,82 @@ pub(crate) fn commit(
     Ok(())
 }
 
+/// `#[cfg(test)]` instrumentation probes for bounds and ordering the
+/// type system cannot express: how many caller bytes were cloned into a
+/// `replace_stage` feed, and the cap each retained-object read was
+/// actually given. Compiled out of non-test builds.
+#[cfg(test)]
+mod test_instrument {
+    use std::cell::{Cell, RefCell};
+    use std::path::Path;
+
+    // Thread-local so parallel tests never observe each other's
+    // instrumentation: each thread records only its own clones, caps,
+    // and growth hooks.
+    /// A one-shot file-growth hook keyed by object file name.
+    type MutateHook = (String, fn(&Path));
+
+    thread_local! {
+        /// Total caller payload bytes cloned into a `replace_stage`
+        /// feed on THIS thread — a batch rejected by borrowed preflight
+        /// must leave it at zero.
+        static FEED_CLONE_BYTES: Cell<usize> = const { Cell::new(0) };
+        /// The cap each retained-object read in `load_full` received on
+        /// THIS thread.
+        static OBJECT_READ_CAPS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+        /// One-shot hook fired between a retained object's
+        /// descriptor-length check and its bounded read, only for the
+        /// object whose file name matches — the seam where a test can
+        /// grow the backing file.
+        static OBJECT_READ_MUTATE: RefCell<Option<MutateHook>> = const { RefCell::new(None) };
+    }
+
+    pub(crate) fn reset() {
+        FEED_CLONE_BYTES.with(|c| c.set(0));
+        OBJECT_READ_CAPS.with(|c| c.borrow_mut().clear());
+        OBJECT_READ_MUTATE.with(|m| *m.borrow_mut() = None);
+    }
+
+    pub(crate) fn note_feed_clone(replacements: &[super::FileReplacement]) {
+        let bytes: usize = replacements
+            .iter()
+            .map(super::FileReplacement::payload_len)
+            .sum();
+        FEED_CLONE_BYTES.with(|c| c.set(c.get() + bytes));
+    }
+
+    pub(crate) fn feed_clone_bytes() -> usize {
+        FEED_CLONE_BYTES.with(Cell::get)
+    }
+
+    /// `path` is the absolute filesystem path of the retained object —
+    /// the hook receives it so a test can grow the file in place.
+    pub(crate) fn object_read_probe(path: &Path, cap: usize) {
+        OBJECT_READ_CAPS.with(|c| c.borrow_mut().push(cap));
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+        let mutate = OBJECT_READ_MUTATE.with(|m| {
+            let mut slot = m.borrow_mut();
+            match slot.as_ref() {
+                Some((target, _)) if Some(target) == name.as_ref() => slot.take(),
+                _ => None,
+            }
+        });
+        if let Some((_, mutate)) = mutate {
+            mutate(path);
+        }
+    }
+
+    pub(crate) fn read_caps() -> Vec<usize> {
+        OBJECT_READ_CAPS.with(|c| c.borrow().clone())
+    }
+
+    /// Fire `hook` once, on the next retained-object read whose file
+    /// name equals `object_name` on this thread.
+    pub(crate) fn on_object_read(object_name: String, hook: fn(&Path)) {
+        OBJECT_READ_MUTATE.with(|m| *m.borrow_mut() = Some((object_name, hook)));
+    }
+}
+
 /// Commit `plan` and reload the freshly selected state.
 ///
 /// The complete proposed next state is validated BEFORE `commit` can
@@ -1511,6 +1587,86 @@ fn check_required_inventory(
     Ok(())
 }
 
+/// The deterministic local retained-inventory rule, shared by producer
+/// persistence and reopen verification: the produced-object set of the
+/// representation-preserving overlay MINUS any id that already names a
+/// verified selected-file representation. `stage_feed` resolves a
+/// persisted staged id that equals a selected representation through
+/// `reuse_selected` — without reading a retained copy — so the caller's
+/// `Bytes` versus `ReuseSelected` form never changes what the stage must
+/// retain. This is a LOCAL storage contract only: the exported MKWU
+/// update still lists every changed representation and chunk.
+fn retained_inventory(
+    verified: &VerifiedPartialSnapshot,
+    produced: &BTreeMap<Hash, Vec<u8>>,
+) -> BTreeSet<Hash> {
+    let selected: BTreeSet<Hash> = verified
+        .files()
+        .iter()
+        .map(|file| *file.object_id())
+        .collect();
+    produced
+        .keys()
+        .filter(|id| !selected.contains(*id))
+        .copied()
+        .collect()
+}
+
+/// Replay `stage` through the representation-preserving feed and return
+/// the retained inventory it must declare — the same derivation
+/// `replace_stage` applies when persisting it. A clean stage retains
+/// nothing.
+fn staged_inventory(
+    workspace: &WorkspaceStateV1,
+    stage: &StageStateV1,
+    verified: &VerifiedPartialSnapshot,
+    local: &BTreeMap<Hash, Vec<u8>>,
+) -> Result<BTreeSet<Hash>, PartialStateError> {
+    if stage_is_clean(workspace, stage) {
+        return Ok(BTreeSet::new());
+    }
+    let selection: BTreeMap<&PartialPath, &WorkspaceSelectionV1> = workspace
+        .selection
+        .iter()
+        .map(|entry| (&entry.path, entry))
+        .collect();
+    let mut feed = Vec::new();
+    for entry in &stage.entries {
+        if let Some(feed_entry) = stage_feed(&selection, verified, local, &workspace.limits, entry)?
+        {
+            feed.push(feed_entry);
+        }
+    }
+    let prepared =
+        replace_files(verified, &feed, &workspace.limits).map_err(PartialStateError::Partial)?;
+    Ok(retained_inventory(verified, &prepared.produced))
+}
+
+/// The persisted required inventory must equal what the staged overlay
+/// retains — not a superset padded with unrelated objects and not a
+/// subset missing produced ancestor trees or staged blobs. Shared by
+/// `preflight_next` and `load_full` so no reachable rejection is first
+/// discovered after `CURRENT` has switched.
+fn check_stage_inventory(
+    workspace: &WorkspaceStateV1,
+    stage: &StageStateV1,
+    verified: &VerifiedPartialSnapshot,
+    local: &BTreeMap<Hash, Vec<u8>>,
+) -> Result<(), PartialStateError> {
+    if stage
+        .required_object_ids
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>()
+        != staged_inventory(workspace, stage, verified, local)?
+    {
+        return Err(PartialStateError::NonCanonical(
+            "required objects do not match the staged overlay",
+        ));
+    }
+    Ok(())
+}
+
 /// The pre-publication validation every transition shares — a subset of
 /// `load_full`'s checks applied to the proposed records before they can
 /// become authoritative. Member/envelope digests are not re-checked: the
@@ -1566,7 +1722,11 @@ pub(crate) fn preflight_next(
     // within the raw-pack budget the producing overlay was held to —
     // before any artifact is written.
     check_required_inventory(&stage.required_object_ids, &workspace.limits, local)?;
-    validate_stage_representations(workspace, stage, verified, local)
+    validate_stage_representations(workspace, stage, verified, local)?;
+    // …and it must equal the deterministic replay inventory `load_full`
+    // will require on reopen — an inventory mismatch is caught here,
+    // while the old generation is still authoritative.
+    check_stage_inventory(workspace, stage, verified, local)
 }
 
 /// Read the raw file bytes a verified base object carries — used to
@@ -1787,12 +1947,22 @@ pub(crate) fn load_full(
         let (file, file_len) = open_artifact_file(dir, OBJECTS_DIR, &to_hex(id))?;
         let file_len = usize::try_from(file_len)
             .map_err(|_| PartialStateError::NonCanonical("artifact length"))?;
-        if file_len > headroom.min(workspace.limits.max_object_bytes) {
+        // The actual read is bounded by the SAME cap the descriptor
+        // length was checked against — remaining raw-pack headroom,
+        // never more — so a file grown after metadata inspection still
+        // cannot exceed the aggregate budget.
+        let read_cap = headroom.min(workspace.limits.max_object_bytes);
+        if file_len > read_cap {
             return Err(PartialStateError::Partial(PartialError::SubmissionTooLarge));
         }
-        let bytes = file
-            .read_all(workspace.limits.max_object_bytes)
-            .map_err(|e| sys_err(object_path.clone(), e))?;
+        #[cfg(test)]
+        test_instrument::object_read_probe(&layout.root().join(&object_path), read_cap);
+        let bytes = file.read_all(read_cap).map_err(|e| match e {
+            SysError::Io(e) if e.kind() == io::ErrorKind::InvalidData => {
+                PartialStateError::Partial(PartialError::SubmissionTooLarge)
+            }
+            other => sys_err(object_path.clone(), other),
+        })?;
         pack_bytes = super::overlay::charge_raw_bytes(pack_bytes, bytes.len(), &workspace.limits)
             .map_err(PartialStateError::Partial)?;
         let object =
@@ -1819,46 +1989,10 @@ pub(crate) fn load_full(
     // authenticated sources before the state is handed out.
     validate_stage_representations(&workspace, &stage, &verified, &local_objects)?;
 
-    // The required inventory must be EXACTLY what the staged overlay
-    // produces — not a superset padded with unrelated objects and not a
-    // subset missing produced ancestor trees. Replaying the persisted
-    // stage through the representation-preserving feed reconstructs the
-    // intended inventory; a clean stage must retain nothing.
-    let expected_required: BTreeSet<Hash> = if stage_is_clean(&workspace, &stage) {
-        BTreeSet::new()
-    } else {
-        let selection: BTreeMap<&PartialPath, &WorkspaceSelectionV1> = workspace
-            .selection
-            .iter()
-            .map(|entry| (&entry.path, entry))
-            .collect();
-        let mut feed = Vec::new();
-        for entry in &stage.entries {
-            if let Some(feed_entry) = stage_feed(
-                &selection,
-                &verified,
-                &local_objects,
-                &workspace.limits,
-                entry,
-            )? {
-                feed.push(feed_entry);
-            }
-        }
-        let prepared = replace_files(&verified, &feed, &workspace.limits)
-            .map_err(PartialStateError::Partial)?;
-        prepared.produced.keys().copied().collect()
-    };
-    if stage
-        .required_object_ids
-        .iter()
-        .copied()
-        .collect::<BTreeSet<_>>()
-        != expected_required
-    {
-        return Err(PartialStateError::NonCanonical(
-            "required objects do not match the staged overlay",
-        ));
-    }
+    // The required inventory must equal EXACTLY what the staged overlay
+    // retains — the same deterministic rule `replace_stage` persists by
+    // and `preflight_next` verifies. A clean stage retains nothing.
+    check_stage_inventory(&workspace, &stage, &verified, &local_objects)?;
 
     let pending_update_bytes = match &pending {
         Some(pending) => {
@@ -1916,6 +2050,7 @@ impl ScopedWorkspaceLayout {
         self.with_lock(|_| self.replace_stage_locked(expected_generation, replacements))
     }
 
+    #[allow(clippy::too_many_lines)] // validate-borrowed → clone → merge feed → publish is one pipeline
     fn replace_stage_locked(
         &self,
         expected_generation: u64,
@@ -1928,28 +2063,36 @@ impl ScopedWorkspaceLayout {
         }
         let limits = *state.workspace.limits();
         let selection = selection_map(&state);
-        // Bound the caller's batch before cloning it into the feed: the
-        // path/mode/changed-path checks and the per-occurrence byte cap
-        // all hold before any allocation the clone would make.
+        // Bound the caller's batch on BORROWED data before any of it is
+        // cloned into the feed — the same changed-path, destination,
+        // duplicate, per-payload, and aggregate-byte checks
+        // `replace_files` itself applies. An over-budget batch is refused
+        // without ever becoming an allocation; retained staged entries
+        // join the feed one bounded entry at a time from the already
+        // validated persisted stage.
         if replacements.len() > limits.max_changed_paths {
             return Err(PartialStateError::Partial(
                 PartialError::ValidationBudgetExceeded,
             ));
         }
-        for replacement in replacements {
-            selection
-                .get(replacement.path())
-                .ok_or(PartialError::UnsupportedPartialOperation)?;
-            if replacement.payload_len() > limits.max_selected_file_bytes {
-                return Err(PartialStateError::Partial(PartialError::WorkspaceTooLarge));
-            }
-        }
+        let files: BTreeMap<_, _> = state
+            .verified
+            .files()
+            .iter()
+            .map(|file| (file.path(), file))
+            .collect();
+        super::overlay::preflight_replacements(&files, replacements, &limits)
+            .map_err(PartialStateError::Partial)?;
         // `reuse_selected` names a verified BASE representation, never a
         // staged one — caller replacements pass through unchanged.
         // Unrelated staged entries are re-fed through `stage_feed`, which
         // preserves a persisted staged id that names a verified selected
         // representation instead of silently re-canonicalizing it.
-        let mut feed: Vec<FileReplacement> = replacements.to_vec();
+        let mut feed: Vec<FileReplacement> = {
+            #[cfg(test)]
+            test_instrument::note_feed_clone(replacements);
+            replacements.to_vec()
+        };
         let mut replaced: BTreeSet<&PartialPath> = BTreeSet::new();
         for replacement in replacements {
             replaced.insert(replacement.path());
@@ -1976,38 +2119,50 @@ impl ScopedWorkspaceLayout {
             Err(PartialError::NoChanges) => None,
             Err(error) => return Err(PartialStateError::Partial(error)),
         };
-        let next_stage = match &prepared {
-            None => clean_stage(&state),
+        let (next_stage, objects) = match prepared {
+            None => (clean_stage(&state), BTreeMap::new()),
             Some(prepared) => {
                 let changes: BTreeMap<&PartialPath, Hash> = prepared
                     .changes
                     .iter()
                     .map(|change| (&change.path, change.new_id))
                     .collect();
-                StageStateV1 {
-                    workspace_id: state.workspace.workspace_id,
-                    base_id: state.workspace.base_id,
-                    base_revision: state.workspace.base_revision,
-                    entries: state
-                        .workspace
-                        .selection
-                        .iter()
-                        .map(|selection| StageEntryV1 {
-                            path: selection.path.clone(),
-                            mode: selection.mode,
-                            staged_id: changes
-                                .get(&selection.path)
-                                .copied()
-                                .unwrap_or(selection.base_file_id),
-                        })
-                        .collect(),
-                    required_object_ids: prepared.produced.keys().copied().collect(),
-                }
+                // The retained inventory is the deterministic rule
+                // `staged_inventory` derives on reopen — produced objects
+                // minus ids the verified base already authenticates, so
+                // a `Bytes` replacement equal to a selected file's
+                // representation persists exactly what its
+                // `reuse_selected` equivalent would.
+                let retained = retained_inventory(&state.verified, &prepared.produced);
+                let objects: BTreeMap<Hash, Vec<u8>> = prepared
+                    .produced
+                    .into_iter()
+                    .filter(|(id, _)| retained.contains(id))
+                    .collect();
+                (
+                    StageStateV1 {
+                        workspace_id: state.workspace.workspace_id,
+                        base_id: state.workspace.base_id,
+                        base_revision: state.workspace.base_revision,
+                        entries: state
+                            .workspace
+                            .selection
+                            .iter()
+                            .map(|selection| StageEntryV1 {
+                                path: selection.path.clone(),
+                                mode: selection.mode,
+                                staged_id: changes
+                                    .get(&selection.path)
+                                    .copied()
+                                    .unwrap_or(selection.base_file_id),
+                            })
+                            .collect(),
+                        required_object_ids: retained.into_iter().collect(),
+                    },
+                    objects,
+                )
             }
         };
-        let objects = prepared
-            .map(|prepared| prepared.produced)
-            .unwrap_or_default();
         // The staged-object resolution domain for the next stage: the
         // verified base objects plus every retained local object —
         // pre-existing required objects and this transition's produced
@@ -2380,24 +2535,31 @@ mod tests {
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::io::AsRawFd;
     use std::path::PathBuf;
+    use std::sync::Arc;
     use std::sync::atomic::Ordering;
+    use std::sync::mpsc;
+    use std::time::Duration;
 
     use tempfile::tempdir;
 
     use crate::hash::to_hex;
     use crate::object::{EntryMode, Object, Tree, TreeEntry, id_from_object, object_id_from_bytes};
-    use crate::partial::layout::{Fault, Faults};
+    use crate::partial::layout::{Fault, Faults, LOCK_FILE, STATE_DIR, lock_gate};
     use crate::partial::overlay::FileReplacement;
+    use crate::partial::sys::{self, OpenMode};
     use crate::partial::verify::build_partial_snapshot;
-    use crate::partial::{PartialError, PartialLimits};
+    use crate::partial::{
+        PartialError, PartialLimits, PendingOutcomeV1, export_partial_update,
+        prepare_partial_commit, replace_files,
+    };
     use crate::serialize;
-    use crate::sign::{KeyPair, sign_remix};
+    use crate::sign::{KeyPair, sign_commit, sign_remix};
     use crate::store::ObjectStore;
     use crate::{Identity, Remix, RepoLayout};
 
     use super::{
         AcceptedStateV1, CURRENT_TMP_COUNTER, PartialStateError, PendingStateV1, PendingStatusV1,
-        ScopedWorkspaceLayout, StatePlan, commit,
+        ScopedWorkspaceLayout, StatePlan, commit, test_instrument,
     };
 
     /// One-file base remix, verified bundle, and a created workspace — the
@@ -2459,17 +2621,16 @@ mod tests {
         FileReplacement::bytes(vec![b"file.txt".to_vec()], b"edited".to_vec())
     }
 
-    /// Two selected root files `a.txt`/`b.txt` with caller-chosen base
-    /// contents — the fixture the complete-stage total checks need.
-    fn two_file_fixture(
-        a: &[u8],
-        b: &[u8],
+    /// Selected root files with caller-chosen base contents — the
+    /// fixture the complete-stage and inventory checks need.
+    fn named_fixture(
+        files: &[(&[u8], &[u8])],
         limits: PartialLimits,
     ) -> (tempfile::TempDir, ScopedWorkspaceLayout) {
         let repo = tempdir().unwrap();
         let store = ObjectStore::init(&RepoLayout::single(repo.path())).unwrap();
         let mut entries = Vec::new();
-        for (name, data) in [(b"a.txt", a), (b"b.txt", b)] {
+        for (name, data) in files {
             let blob_bytes = serialize(&Object::Blob(crate::object::Blob {
                 data: data.to_vec(),
             }))
@@ -2501,7 +2662,7 @@ mod tests {
         let remix_bytes = serialize(&remix_object).unwrap();
         let base_id = id_from_object(&remix_object, &remix_bytes);
         assert_eq!(store.write(&remix_bytes).unwrap(), base_id);
-        let paths = vec![vec![b"a.txt".to_vec()], vec![b"b.txt".to_vec()]];
+        let paths: Vec<Vec<Vec<u8>>> = files.iter().map(|(name, _)| vec![name.to_vec()]).collect();
         let bundle = build_partial_snapshot(&store, base_id, &paths, &limits).unwrap();
         let dir = tempdir().unwrap();
         let layout = ScopedWorkspaceLayout::create(
@@ -2514,6 +2675,16 @@ mod tests {
         )
         .unwrap();
         (dir, layout)
+    }
+
+    /// Two selected root files `a.txt`/`b.txt` with caller-chosen base
+    /// contents — the fixture the complete-stage total checks need.
+    fn two_file_fixture(
+        a: &[u8],
+        b: &[u8],
+        limits: PartialLimits,
+    ) -> (tempfile::TempDir, ScopedWorkspaceLayout) {
+        named_fixture(&[(b"a.txt", a), (b"b.txt", b)], limits)
     }
 
     fn current_bytes(layout: &ScopedWorkspaceLayout) -> Vec<u8> {
@@ -3494,5 +3665,443 @@ mod tests {
         );
         let reopened = ScopedWorkspaceLayout::open(layout2.root()).unwrap();
         reopened.read_state().unwrap();
+    }
+
+    // -- R1: normalized retained inventory --------------------------------
+
+    /// The selected base representation id for `path`.
+    fn selected_id(layout: &ScopedWorkspaceLayout, path: &[u8]) -> crate::hash::Hash {
+        let state = layout.read_state().unwrap();
+        *state
+            .verified
+            .files()
+            .iter()
+            .find(|file| file.path() == &vec![path.to_vec()])
+            .unwrap()
+            .object_id()
+    }
+
+    /// R1: a `Bytes` replacement whose content equals ANOTHER selected
+    /// file's representation must persist an inventory derived by the
+    /// same rule reopen verifies — otherwise `CURRENT` selects a state
+    /// the loader rejects.
+    #[test]
+    fn bytes_copy_of_selected_content_survives_reopen_and_pending() {
+        let (dir, layout) = two_file_fixture(b"aaa", b"bbb", PartialLimits::V1);
+        let b_id = selected_id(&layout, b"b.txt");
+        let state = layout
+            .replace_stage(
+                0,
+                &[FileReplacement::bytes(
+                    vec![b"a.txt".to_vec()],
+                    b"bbb".to_vec(),
+                )],
+            )
+            .unwrap();
+        // The staged id IS b's verified representation, and the retained
+        // inventory must not list it — the base already authenticates it.
+        assert_eq!(staged_id(&state, b"a.txt"), b_id);
+        assert!(
+            !state.stage().required_object_ids().contains(&b_id),
+            "the selected representation needs no retained copy: {:?}",
+            state.stage().required_object_ids()
+        );
+        assert!(state.local_object(&b_id).is_none());
+        // The CURRENT-selected state must still load after reopen.
+        let reopened = ScopedWorkspaceLayout::open(&dir.path().join("ws")).unwrap();
+        let reloaded = reopened.read_state().unwrap();
+        assert_eq!(reloaded.workspace().transaction_generation(), 1);
+        // And the stage must carry a pending candidate through accept:
+        // the representation-preserving replay `reuse_selected` is the
+        // exact operation the loader itself used to validate it.
+        let signer = KeyPair::from_seed([9; 32]);
+        let verified = reloaded.verified().clone();
+        let limits = *reloaded.workspace().limits();
+        let prepared = replace_files(
+            &verified,
+            &[FileReplacement::reuse_selected(
+                vec![b"a.txt".to_vec()],
+                vec![b"b.txt".to_vec()],
+            )],
+            &limits,
+        )
+        .unwrap();
+        let unsigned = prepare_partial_commit(
+            &verified,
+            &prepared,
+            Identity::opaque(b"op".to_vec()),
+            signer.public.0,
+            b"op".to_vec(),
+            2,
+            &limits,
+        )
+        .unwrap();
+        let mut signed_commit = unsigned.clone();
+        signed_commit.signature = sign_commit(&signed_commit, &signer).unwrap().0;
+        let update =
+            export_partial_update(&verified, &prepared, &unsigned, &signed_commit, &limits)
+                .unwrap();
+        let update_bytes = update.encode(&limits).unwrap();
+        let pending = reopened
+            .save_pending(1, &unsigned, &signed_commit, &update_bytes, None)
+            .unwrap();
+        let identity = pending.pending().unwrap().identity();
+        reopened
+            .record_outcome(2, &identity, PendingOutcomeV1::Accepted)
+            .unwrap();
+        let after = ScopedWorkspaceLayout::open(&dir.path().join("ws")).unwrap();
+        assert!(after.read_state().unwrap().accepted().is_some());
+    }
+
+    /// Equivalent caller forms persist identical stage records: the
+    /// caller's `Bytes` versus `ReuseSelected` spelling never changes the
+    /// durable inventory.
+    #[test]
+    fn bytes_copy_and_reuse_persist_identical_stage_records() {
+        let (_d1, via_bytes) = two_file_fixture(b"aaa", b"bbb", PartialLimits::V1);
+        let (_d2, via_reuse) = two_file_fixture(b"aaa", b"bbb", PartialLimits::V1);
+        let a_path = vec![b"a.txt".to_vec()];
+        let b_path = vec![b"b.txt".to_vec()];
+        let bytes_state = via_bytes
+            .replace_stage(
+                0,
+                &[FileReplacement::bytes(a_path.clone(), b"bbb".to_vec())],
+            )
+            .unwrap();
+        let reuse_state = via_reuse
+            .replace_stage(0, &[FileReplacement::reuse_selected(a_path, b_path)])
+            .unwrap();
+        assert_eq!(
+            bytes_state.stage().entries(),
+            reuse_state.stage().entries(),
+            "same staged ids for the same representation"
+        );
+        assert_eq!(
+            bytes_state.stage().required_object_ids(),
+            reuse_state.stage().required_object_ids(),
+            "one inventory rule regardless of caller form"
+        );
+    }
+
+    /// A mixed batch where a `Bytes` entry and a `ReuseSelected` entry
+    /// resolve to the same selected representation shares the deduped
+    /// inventory, and a later unrelated stage plus restart still works.
+    #[test]
+    fn mixed_batch_sharing_selected_id_survives_reopen_and_restaging() {
+        let (dir, layout) = named_fixture(
+            &[(b"a.txt", b"aaa"), (b"b.txt", b"bbb"), (b"c.txt", b"ccc")],
+            PartialLimits::V1,
+        );
+        let b_id = selected_id(&layout, b"b.txt");
+        let state = layout
+            .replace_stage(
+                0,
+                &[
+                    FileReplacement::bytes(vec![b"a.txt".to_vec()], b"bbb".to_vec()),
+                    FileReplacement::reuse_selected(
+                        vec![b"c.txt".to_vec()],
+                        vec![b"b.txt".to_vec()],
+                    ),
+                ],
+            )
+            .unwrap();
+        assert_eq!(staged_id(&state, b"a.txt"), b_id);
+        assert_eq!(staged_id(&state, b"c.txt"), b_id);
+        assert!(!state.stage().required_object_ids().contains(&b_id));
+        let reopened = ScopedWorkspaceLayout::open(&dir.path().join("ws")).unwrap();
+        // An unrelated further stage and another restart still load.
+        reopened
+            .replace_stage(
+                1,
+                &[FileReplacement::bytes(
+                    vec![b"a.txt".to_vec()],
+                    b"zzz".to_vec(),
+                )],
+            )
+            .unwrap();
+        let again = ScopedWorkspaceLayout::open(&dir.path().join("ws")).unwrap();
+        let final_state = again.read_state().unwrap();
+        assert_eq!(staged_id(&final_state, b"a.txt"), {
+            let canonical = crate::object::Blob {
+                data: b"zzz".to_vec(),
+            };
+            let bytes = serialize(&Object::Blob(canonical)).unwrap();
+            id_from_object(
+                &Object::Blob(crate::object::Blob {
+                    data: b"zzz".to_vec(),
+                }),
+                &bytes,
+            )
+        });
+        assert_eq!(staged_id(&final_state, b"c.txt"), b_id);
+    }
+
+    // -- R2: borrowed preflight and bounded retained reads ----------------
+
+    /// The aggregate batch bound must reject while the caller's
+    /// replacements are still borrowed — never after cloning them into
+    /// the feed. `FEED_CLONE_BYTES` is the observable seam: it counts
+    /// payload bytes copied into the feed, and must stay zero.
+    #[test]
+    fn replace_stage_rejects_over_budget_batch_before_cloning() {
+        let limits = PartialLimits {
+            max_selected_file_bytes: 32,
+            max_total_selected_bytes: 40,
+            ..PartialLimits::V1
+        };
+        let (_dir, layout) = two_file_fixture(b"aaa", b"bbb", limits);
+        test_instrument::reset();
+        let err = layout
+            .replace_stage(
+                0,
+                &[
+                    FileReplacement::bytes(vec![b"a.txt".to_vec()], vec![b'x'; 32]),
+                    FileReplacement::bytes(vec![b"b.txt".to_vec()], vec![b'y'; 32]),
+                ],
+            )
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PartialStateError::Partial(PartialError::WorkspaceTooLarge)
+            ),
+            "got {err:?}"
+        );
+        assert_eq!(
+            test_instrument::feed_clone_bytes(),
+            0,
+            "an over-budget batch must be refused before its bytes are cloned"
+        );
+        // Control: an exact-aggregate batch does reach the clone — the
+        // counter is live, not just always zero.
+        test_instrument::reset();
+        layout
+            .replace_stage(
+                0,
+                &[
+                    FileReplacement::bytes(vec![b"a.txt".to_vec()], vec![b'x'; 20]),
+                    FileReplacement::bytes(vec![b"b.txt".to_vec()], vec![b'y'; 20]),
+                ],
+            )
+            .unwrap();
+        assert_eq!(test_instrument::feed_clone_bytes(), 40);
+    }
+
+    /// The bounded read of a retained object must be capped by the
+    /// REMAINING raw-pack headroom, not the per-object bound alone — the
+    /// recorded cap is the oracle.
+    #[test]
+    fn retained_object_read_is_capped_by_remaining_headroom() {
+        let (_dir, layout) = fixture();
+        let staged = layout.replace_stage(0, &[edit()]).unwrap();
+        let ids = staged.stage().required_object_ids().to_vec();
+        let exact = inventory_pack_bytes(&layout, &ids);
+        // Tighten the budget so the LAST required object's remaining
+        // headroom falls below `max_object_bytes` — the recorded cap
+        // must be that headroom, not the per-object bound.
+        let last_len = usize::try_from(
+            std::fs::metadata(layout.root().join(format!(
+                ".mkit-scoped/objects/{}",
+                to_hex(ids.last().unwrap())
+            )))
+            .unwrap()
+            .len(),
+        )
+        .unwrap();
+        republish_from(&staged, &layout, |plan| {
+            plan.workspace.limits.max_raw_pack_bytes = exact;
+        });
+        test_instrument::reset();
+        layout.read_state().unwrap();
+        let caps = test_instrument::read_caps();
+        assert_eq!(caps.len(), ids.len());
+        // The last read's cap is the headroom left after the earlier
+        // objects — strictly below `max_object_bytes` and equal to the
+        // object's own length under the exact budget.
+        assert_eq!(
+            *caps.last().unwrap(),
+            last_len,
+            "final retained read cap must be the remaining headroom: {caps:?}"
+        );
+    }
+
+    /// A retained object grown between its descriptor-length check and
+    /// the bounded read must still fail closed — as a budget violation,
+    /// not a mid-read corruption or an unbounded allocation.
+    #[test]
+    fn grown_retained_object_fails_at_bounded_read() {
+        let (_dir, layout) = fixture();
+        let staged = layout.replace_stage(0, &[edit()]).unwrap();
+        let ids = staged.stage().required_object_ids().to_vec();
+        let exact = inventory_pack_bytes(&layout, &ids);
+        republish_from(&staged, &layout, |plan| {
+            plan.workspace.limits.max_raw_pack_bytes = exact;
+        });
+        test_instrument::reset();
+        // Grow the LAST required object — the one whose read cap equals
+        // exactly its recorded length — AFTER its fstat. The bounded
+        // read, not the metadata check, is what must catch it.
+        test_instrument::on_object_read(to_hex(ids.last().unwrap()), |path| {
+            let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+            file.write_all(&[0xAB; 16]).unwrap();
+        });
+        let result = layout.read_state();
+        assert!(
+            matches!(
+                result,
+                Err(PartialStateError::Partial(PartialError::SubmissionTooLarge))
+            ),
+            "grown object must fail at the bounded read: {result:?}"
+        );
+    }
+
+    // -- R5/R6: deterministic lock contention and stale-waiter refusal ----
+
+    const LOCK_TEST_TIMEOUT: Duration = Duration::from_secs(15);
+
+    /// Drive one writer through `replace_stage` on `handle`; the result
+    /// arrives on a bounded channel so a wedged lock fails the test
+    /// instead of hanging it.
+    fn spawn_writer(
+        handle: Arc<ScopedWorkspaceLayout>,
+        bytes: &'static [u8],
+    ) -> mpsc::Receiver<Result<(), PartialStateError>> {
+        let (done, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = handle
+                .replace_stage(
+                    0,
+                    &[FileReplacement::bytes(
+                        vec![b"file.txt".to_vec()],
+                        bytes.to_vec(),
+                    )],
+                )
+                .map(|_| ());
+            let _ = done.send(result);
+        });
+        done_rx
+    }
+
+    /// R5: two writers racing one generation — exactly one commits, the
+    /// other observes `GenerationMismatch`. Deterministic: writer A is
+    /// provably inside the critical section (armed `Acquired` gate) and
+    /// writer B is provably at the acquisition boundary (armed
+    /// `BeforeFlock` gate) before A releases. Covered for a shared
+    /// `Arc` handle and for independent handles.
+    #[test]
+    fn lock_serializes_competing_writers_deterministically() {
+        for separate_handles in [false, true] {
+            let (dir, layout) = fixture();
+            let identity = layout.lock_identity();
+            let first = Arc::new(layout);
+            let second = if separate_handles {
+                Arc::new(ScopedWorkspaceLayout::open(&dir.path().join("ws")).unwrap())
+            } else {
+                Arc::clone(&first)
+            };
+            // A enters the critical section and parks there.
+            let (a_in, a_in_rx) = mpsc::channel();
+            let (a_go, a_go_rx) = mpsc::channel();
+            lock_gate::arm(lock_gate::Phase::Acquired, identity, a_in, a_go_rx);
+            let a_done = spawn_writer(Arc::clone(&first), b"writer A");
+            a_in_rx
+                .recv_timeout(LOCK_TEST_TIMEOUT)
+                .expect("writer A never reached the critical section");
+            // B opens + verifies the sentinel, then parks at flock —
+            // provably waiting on the lock while A is inside.
+            let (b_at, b_at_rx) = mpsc::channel();
+            let (b_go, b_go_rx) = mpsc::channel();
+            lock_gate::arm(lock_gate::Phase::BeforeFlock, identity, b_at, b_go_rx);
+            let b_done = spawn_writer(second, b"writer B");
+            b_at_rx
+                .recv_timeout(LOCK_TEST_TIMEOUT)
+                .expect("writer B never reached the acquisition boundary");
+            // Release B's acquisition attempt FIRST, while A still
+            // holds the critical section: a correct implementation
+            // blocks B inside flock; a shared-descriptor implementation
+            // would no-op B through while A is provably inside.
+            b_go.send(()).unwrap();
+            a_go.send(()).unwrap();
+            let a_result = a_done
+                .recv_timeout(LOCK_TEST_TIMEOUT)
+                .expect("writer A never finished after release");
+            let b_result = b_done
+                .recv_timeout(LOCK_TEST_TIMEOUT)
+                .expect("writer B never finished after A released");
+            assert!(
+                a_result.is_ok(),
+                "the writer inside the section commits: {a_result:?}"
+            );
+            assert!(
+                matches!(
+                    b_result,
+                    Err(PartialStateError::GenerationMismatch {
+                        expected: 0,
+                        actual: 1
+                    })
+                ),
+                "the waiting writer must observe the new generation: {b_result:?}"
+            );
+            // The committed state is coherent: generation 1 with A's
+            // bytes staged and B's never written.
+            let state = first.read_state().unwrap();
+            assert_eq!(state.workspace().transaction_generation(), 1);
+            assert_eq!(
+                staged_id(&state, b"file.txt"),
+                {
+                    let object = Object::Blob(crate::object::Blob {
+                        data: b"writer A".to_vec(),
+                    });
+                    let bytes = serialize(&object).unwrap();
+                    id_from_object(&object, &bytes)
+                },
+                "separate_handles={separate_handles}"
+            );
+        }
+    }
+
+    /// R6: a writer parked at the flock boundary holds a descriptor for
+    /// the CURRENT sentinel inode; if the sentinel is atomically
+    /// replaced while it waits, acquisition lands on the detached old
+    /// inode — the post-acquisition recheck must refuse before `f` runs.
+    #[test]
+    fn replaced_lock_sentinel_refuses_stale_waiter() {
+        let (dir, layout) = fixture();
+        let lock_path = dir.path().join("ws").join(STATE_DIR).join(LOCK_FILE);
+        // An external flock holds the sentinel so the writer genuinely
+        // blocks mid-acquisition.
+        let state_fd = sys::open_dir_path(&dir.path().join("ws").join(STATE_DIR)).unwrap();
+        let hold = sys::open_file(&state_fd, LOCK_FILE.as_bytes(), OpenMode::ReadWrite).unwrap();
+        hold.lock_exclusive().unwrap();
+        // Writer opens + verifies the sentinel, then parks at flock.
+        let identity = layout.lock_identity();
+        let (at_flock, at_flock_rx) = mpsc::channel();
+        let (go, go_rx) = mpsc::channel();
+        lock_gate::arm(lock_gate::Phase::BeforeFlock, identity, at_flock, go_rx);
+        let done = spawn_writer(Arc::new(layout), b"stale waiter");
+        at_flock_rx
+            .recv_timeout(LOCK_TEST_TIMEOUT)
+            .expect("writer never reached the acquisition boundary");
+        // Replace the sentinel while the writer is provably waiting.
+        let replacement = lock_path.with_file_name("workspace.lock.replacement");
+        std::fs::write(&replacement, b"replacement sentinel").unwrap();
+        std::fs::rename(&replacement, &lock_path).unwrap();
+        // Release the writer into flock; it still blocks on the OLD
+        // inode until the external hold is dropped.
+        go.send(()).unwrap();
+        drop(hold);
+        let result = done
+            .recv_timeout(LOCK_TEST_TIMEOUT)
+            .expect("stale waiter never finished");
+        assert!(
+            matches!(result, Err(PartialStateError::UnsafeFilesystemEntry { .. })),
+            "the stale waiter must refuse on the replaced sentinel: {result:?}"
+        );
+        // No mutation happened: generation 0 still loads cleanly.
+        let state = ScopedWorkspaceLayout::open(&dir.path().join("ws"))
+            .unwrap()
+            .read_state()
+            .unwrap();
+        assert_eq!(state.workspace().transaction_generation(), 0);
     }
 }

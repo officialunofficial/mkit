@@ -633,6 +633,13 @@ impl ScopedWorkspaceLayout {
         &self.state_dir
     }
 
+    /// The `(dev, ino)` pair this handle pinned for `workspace.lock` at
+    /// open — the key `lock_gate::arm` scopes a test gate to.
+    #[cfg(test)]
+    pub(crate) fn lock_identity(&self) -> (u64, u64) {
+        self.lock_identity
+    }
+
     /// Run `f` under the exclusive workspace lock.
     ///
     /// Every operation opens a FRESH descriptor of `workspace.lock`:
@@ -642,9 +649,10 @@ impl ScopedWorkspaceLayout {
     /// through the same already-locked descriptor. The descriptor is the
     /// guard: closing it, including during panic unwind, releases this
     /// operation's kernel lock, so a panic inside `f` cannot strand the
-    /// lock or let a later invocation skip synchronization. There is no
-    /// poisoning state — a failed or panicked operation leaves the lock
-    /// free and the state authority untouched.
+    /// lock or let a later invocation skip synchronization. A panic is
+    /// NOT a rollback — if it lands after `CURRENT` switched, the
+    /// complete new generation stays published; the guarantee is a
+    /// coherent readable state plus a released lock.
     pub(crate) fn with_lock<T>(
         &self,
         f: impl FnOnce(&DirFd) -> Result<T, PartialStateError>,
@@ -674,6 +682,8 @@ impl ScopedWorkspaceLayout {
         if (meta.dev(), meta.ino()) != self.lock_identity {
             return Err(unsafe_entry(lock_path, "workspace.lock inode was replaced"));
         }
+        #[cfg(test)]
+        lock_gate::signal(lock_gate::Phase::BeforeFlock, self.lock_identity);
         operation_lock
             .lock_exclusive()
             .map_err(|e| PartialStateError::LockFailed {
@@ -683,8 +693,103 @@ impl ScopedWorkspaceLayout {
                     _ => std::io::Error::other("workspace lock"),
                 },
             })?;
+        // The flock can park this operation while the named sentinel is
+        // atomically replaced — the descriptor it acquired then belongs
+        // to a detached inode while new opens land on the replacement.
+        // Re-resolve the name and re-verify identity AFTER acquisition;
+        // on mismatch the acquired descriptor drops here, releasing the
+        // stale inode's lock without ever entering `f`.
+        let recheck = sys::open_file(&self.state_dir, LOCK_FILE.as_bytes(), OpenMode::ReadWrite)
+            .map_err(|e| PartialStateError::LockFailed {
+                path: lock_path.clone(),
+                source: match e {
+                    SysError::Io(source) => source,
+                    _ => std::io::Error::other("workspace lock"),
+                },
+            })?;
+        let meta = recheck
+            .metadata()
+            .map_err(|e| sys_err(lock_path.clone(), e))?;
+        if !meta.is_file() || meta.nlink() != 1 {
+            return Err(unsafe_entry(
+                lock_path,
+                "workspace.lock must be a regular file with one link",
+            ));
+        }
+        if (meta.dev(), meta.ino()) != self.lock_identity {
+            return Err(unsafe_entry(lock_path, "workspace.lock inode was replaced"));
+        }
+        drop(recheck);
+        #[cfg(test)]
+        lock_gate::signal(lock_gate::Phase::Acquired, self.lock_identity);
         let result = f(&self.state_dir);
         drop(operation_lock);
         result
+    }
+}
+
+/// Deterministic lock-observation seam for tests: `arm` parks the next
+/// `with_lock` reaching `phase` until released, proving a writer is
+/// inside the critical section (`Acquired`) or parked at the flock
+/// boundary with the sentinel already opened and verified
+/// (`BeforeFlock`). Compiled out of non-test builds.
+#[cfg(test)]
+pub(crate) mod lock_gate {
+    use std::sync::Mutex;
+    use std::sync::mpsc::{Receiver, Sender};
+
+    /// The `with_lock` position a gate may fire at.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum Phase {
+        /// Sentinel opened and identity-verified, immediately before the
+        /// blocking flock — a writer proven to be waiting on the lock.
+        BeforeFlock,
+        /// Lock acquired and the sentinel re-verified — the operation is
+        /// provably inside the critical section.
+        Acquired,
+    }
+
+    struct Gate {
+        phase: Phase,
+        /// The `with_lock` handle's pinned sentinel `(dev, ino)` — gates
+        /// are scoped to one workspace so a parallel test's `with_lock`
+        /// can never consume this gate.
+        identity: (u64, u64),
+        signal: Sender<()>,
+        release: Receiver<()>,
+    }
+
+    static GATE: Mutex<Option<Gate>> = Mutex::new(None);
+
+    /// Arm a one-shot gate: the next `with_lock` on a handle pinned to
+    /// `identity` reaching `phase` sends on `signal` then blocks on
+    /// `release`, still holding whatever lock state it has at that
+    /// point. Fires exactly once.
+    pub(crate) fn arm(
+        phase: Phase,
+        identity: (u64, u64),
+        signal: Sender<()>,
+        release: Receiver<()>,
+    ) {
+        *GATE.lock().unwrap() = Some(Gate {
+            phase,
+            identity,
+            signal,
+            release,
+        });
+    }
+
+    pub(super) fn signal(phase: Phase, identity: (u64, u64)) {
+        let gate = {
+            let mut slot = GATE.lock().unwrap();
+            match slot.as_ref() {
+                Some(gate) if gate.phase == phase && gate.identity == identity => slot.take(),
+                _ => None,
+            }
+        };
+        if let Some(gate) = gate {
+            let _ = gate.signal.send(());
+            let _ = gate.release.recv();
+        }
     }
 }

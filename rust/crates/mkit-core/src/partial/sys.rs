@@ -320,13 +320,33 @@ impl Drop for ReadDir {
 }
 
 /// Open an absolute or relative `path` as a directory descriptor.
+/// Interior symlink components resolve normally (the path may name a
+/// directory through an alias); `O_NOFOLLOW` still refuses a symlink at
+/// the LEAF — macOS reports that refusal as `ENOTDIR` rather than
+/// `ELOOP`, so a leaf that `lstat` proves is a symlink is normalized to
+/// `ELOOP` the same way [`open_dir`] does. A genuine non-directory
+/// component keeps its `ENOTDIR`.
 pub(crate) fn open_dir_path(path: &Path) -> Result<DirFd, SysError> {
     let c = c_path(path)?;
     // SAFETY: `open(2)` on a CString we built; returns a fresh fd or -1.
     #[allow(unsafe_code)]
     let fd = unsafe { libc::open(c.as_ptr(), DIR_FLAGS) };
     if fd < 0 {
-        return Err(io::Error::last_os_error().into());
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ENOTDIR) {
+            // SAFETY: `lstat(2)` on a CString we built; inspects the leaf
+            // itself without following it.
+            #[allow(unsafe_code)]
+            let is_link = unsafe {
+                let mut stat: libc::stat = std::mem::zeroed();
+                libc::lstat(c.as_ptr(), &raw mut stat) == 0
+                    && (stat.st_mode & libc::S_IFMT) == libc::S_IFLNK
+            };
+            if is_link {
+                return Err(io::Error::from_raw_os_error(libc::ELOOP).into());
+            }
+        }
+        return Err(error.into());
     }
     Ok(DirFd::from_fd(fd))
 }

@@ -18,10 +18,13 @@
 #   mkit-core  — `partial::sys`, the scoped-workspace POSIX descriptor
 #                boundary (openat/`O_NOFOLLOW`/`O_DIRECTORY` opens,
 #                `flock`, `fchmod`, `fdopendir`, `renameat2`-family
-#                calls): the no-follow descriptor discipline cannot be
-#                expressed through safe `std::fs` APIs, so the module
-#                concentrates all of it behind reviewed safe wrappers —
-#                callers never write `unsafe` themselves. Plus two
+#                calls, and `lstat`/`fstatat(AT_SYMLINK_NOFOLLOW)` checks
+#                that normalize macOS's `ENOTDIR` result for symlinked
+#                directory components to `ELOOP`): the no-follow
+#                descriptor discipline cannot be expressed through safe
+#                `std::fs` APIs, so the module concentrates all of it
+#                behind reviewed safe wrappers — callers never write
+#                `unsafe` themselves. Plus two
 #                `#[allow(unsafe_code)]` callsites documented in
 #                lib.rs's own header comment: `sign::load_key`'s
 #                `libc::geteuid()` POSIX uid check, and
@@ -45,7 +48,7 @@ set -euo pipefail
 ceiling_for() {
     case "$1" in
         mkit-cli)               echo 23 ;;
-        mkit-core)              echo 97 ;;
+        mkit-core)              echo 107 ;;
         mkit-keystore)          echo 0  ;;
         mkit-attest)            echo 0  ;;
         mkit-rpc)               echo 0  ;;

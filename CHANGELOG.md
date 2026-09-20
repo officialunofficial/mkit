@@ -76,10 +76,24 @@ train).
   raw-pack accounting, validates persisted chunked representations per
   occurrence before materializing, and replays staged reuse through the
   authenticated selected representations instead of re-canonicalizing
-  them. Scoped-root discovery is descriptor-anchored and never follows
-  metadata symlinks; unrelated `.mkit-scoped`-named entries do not become
-  scoped authority and do not break ordinary repositories. Ordinary
-  commands, `ObjectStore::open`,
+  them. The retained-object inventory follows one deterministic rule
+  regardless of the caller's `Bytes` versus `ReuseSelected` form &mdash;
+  produced objects minus ids the verified selection already authenticates
+  &mdash; so a byte-copy of selected content persists what its reuse
+  equivalent would, and the same rule is checked before `CURRENT` moves
+  and on reopen. Replacement batches are aggregate-validated on borrowed
+  input before any payload is cloned, and retained-object reads are
+  bounded by remaining raw-pack headroom. The lock sentinel's identity
+  is re-verified after the blocking flock returns, so a sentinel
+  replaced while a writer waits refuses the stale acquisition instead
+  of mutating on a detached inode. Scoped-root discovery is
+  descriptor-anchored and never follows metadata symlinks; unrelated
+  `.mkit-scoped`-named entries &mdash; including nonregular `CURRENT`,
+  `generations`, or `manifest.bin` shapes &mdash; do not become scoped
+  authority, do not hide genuine authority, and do not break ordinary
+  repositories, and the ancestor walk resolves a directory alias naming
+  a scoped root even when the probed descendant does not exist.
+  Ordinary commands, `ObjectStore::open`,
   and `ObjectStore::init` refuse scoped roots, corrupt markers, incomplete
   installs, and layout conflicts before touching ancestor repositories or
   the filesystem. Existing object, bundle, update, signing, pack, and ref

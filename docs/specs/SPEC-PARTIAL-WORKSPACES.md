@@ -588,13 +588,19 @@ NOT fall back to working-tree contents. A transition commits by:
 1. validating and precomputing under the exclusive `workspace.lock`, held by a
    fresh per-operation descriptor that is inode-verified against the stable
    `workspace.lock` sentinel and released by descriptor close, so threads
-   sharing one workspace handle serialize and a panic cannot strand the lock;
+   sharing one workspace handle serialize and a panic cannot strand the lock.
+   After the blocking flock returns, the sentinel name is re-opened no-follow
+   and its type, link count, and inode identity MUST be re-verified against
+   the pinned identity before the mutation runs &mdash; a sentinel replaced
+   while the operation waited leaves the acquired lock on a detached inode,
+   and the operation MUST refuse without invoking its mutation;
 2. validating the complete proposed next state BEFORE any publication effect:
    workspace/stage/pending/accepted bindings, selection coverage, the
    pending/accepted no-duplication rule, the required-object inventory against
    the same `max_update_objects`/`max_raw_pack_bytes` accounting the producing
    overlay was charged, every staged representation resolving through the
-   authenticated sources, and the complete selected-file aggregate limit &mdash;
+   authenticated sources, the complete selected-file aggregate limit, and the
+   deterministic retained-inventory equality reopen enforces &mdash;
    a state the reopen checks would reject MUST NOT reach `CURRENT`;
 3. writing each immutable artifact (bundle/object/update) and each generation
    member to a fresh sibling temporary, fsyncing it, installing it under its
@@ -619,12 +625,22 @@ collection of scoped state in this revision.
 A persisted stage replays through the same authenticated replacement overlay
 that produced it, preserving representation identity: a `staged_id` naming a
 verified selected file's representation replays as that reuse &mdash; never
-re-canonicalized to fresh bytes &mdash; and `required_object_ids` MUST equal
-exactly the produced-object set of that replay, including rebuilt ancestor
-Trees, with no unrelated objects admitted. Persisted chunked representations
-are validated per occurrence against their declared totals BEFORE any content
-is materialized, and retained objects are charged incrementally against the
-raw-pack budget by descriptor-reported length before each read.
+re-canonicalized to fresh bytes. The retained `required_object_ids` inventory
+follows ONE deterministic rule, independent of the caller's `Bytes` versus
+`ReuseSelected` operation form: exactly the produced-object set of the
+representation-preserving overlay MINUS any id the verified base selection
+already authenticates, including rebuilt ancestor Trees and no unrelated
+objects. Producer persistence, pre-publication validation, and reopen
+verification all apply that same rule, so a `Bytes` replacement equal to
+another selected file persists exactly what its `reuse_selected` equivalent
+would. This is a LOCAL storage contract only &mdash; the exported update
+inventory still lists every changed representation and chunk per &sect;11.
+Persisted chunked representations are validated per occurrence against their
+declared totals BEFORE any content is materialized, retained objects are
+charged incrementally against the raw-pack budget by descriptor-reported
+length before each read, and each object's actual read is bounded by the
+REMAINING headroom so a file grown after metadata inspection still cannot
+exceed the aggregate.
 
 ### 16.4 Threat and authority limits
 
@@ -650,8 +666,20 @@ no-follow root descriptor and inspect the actual opened object &mdash; a
 symlink or non-regular leaf is never followed or blocked on, so a
 `.mkit-scoped/generations` link to outside content cannot redirect the
 classification read, and a leaf swapped for a FIFO cannot stall it. An entry
-named `.mkit-scoped` or `generations` that carries no recognizable scoped
-authority is an unrelated user file, not an incomplete install: ordinary
-repositories MUST continue to discover and open past it. Once genuine scoped
-authority is recognized, missing or corrupt marker/state fails closed and
-ordinary permission or I/O errors propagate.
+named `.mkit-scoped` or `generations` &mdash; or a `CURRENT`/`manifest.bin`
+that is a directory, FIFO, symlink, or other non-regular shape &mdash;
+carrying no recognizable scoped authority is an unrelated user file, not an
+incomplete install, and cannot hide genuine authority found elsewhere
+beneath `.mkit-scoped`: ordinary repositories MUST continue to discover and
+open past it. Once genuine scoped authority is recognized, missing or
+corrupt marker/state fails closed and ordinary permission or I/O errors
+propagate.
+
+The ancestor walk resolves the longest EXISTING prefix of the probed path
+before classifying textual ancestors, so a directory alias naming a scoped
+root cannot smuggle a missing descendant past the boundary: a symlinked
+directory component surfaced as `ENOTDIR` is normalized to the alias case
+and resolved, while a genuine non-directory component is not authority.
+Resolving an external alias only pins where the ancestor walk examines
+`.mkit-scoped` &mdash; it never authorizes following the state entries
+themselves.

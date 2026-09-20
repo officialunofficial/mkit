@@ -745,29 +745,21 @@ mod scoped_classify {
             Ok(buf)
         }
 
-        /// Read the prefix of `dir/name`; `Ok(None)` when absent. The
-        /// leaf is opened `O_RDONLY|O_NONBLOCK|O_NOFOLLOW` and metadata
-        /// is validated on the descriptor — a symlink, FIFO, or other
-        /// non-regular leaf is a fail-closed `InvalidData`, never a
-        /// followed link or a blocked open.
+        /// Read the prefix of `dir/name`; `Ok(None)` when the leaf is
+        /// absent OR cannot be scoped evidence — a symlink, FIFO,
+        /// directory, or other non-regular entry is simply not an
+        /// authority leaf: it is never followed and never blocks, but it
+        /// also cannot hide genuine authority found elsewhere beneath
+        /// `.mkit-scoped`. Genuine I/O errors still propagate.
         fn read_leaf(dir: &sys::DirFd, name: &[u8], cap: usize) -> io::Result<Option<Vec<u8>>> {
             let file = match sys::open_file(dir, name, OpenMode::Read) {
                 Ok(file) => file,
-                Err(e) if e.is_not_found() => return Ok(None),
-                Err(e) if e.is_symlink() => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "scoped-state entry is a symlink",
-                    ));
-                }
+                Err(e) if e.is_not_found() || e.is_symlink() => return Ok(None),
                 Err(e) => return Err(sys_io(e)),
             };
             let meta = file.metadata().map_err(sys_io)?;
             if !meta.is_file() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "scoped-state entry is not a regular file",
-                ));
+                return Ok(None);
             }
             Ok(Some(read_prefix(&file, cap)?))
         }
@@ -883,9 +875,10 @@ mod scoped_classify {
         use std::io;
         use std::path::Path;
 
-        /// Read at most `cap` bytes of `path`; `Ok(None)` when absent.
-        /// The leaf must be a verified regular file — a symlink or other
-        /// non-regular entry is a fail-closed `InvalidData` error.
+        /// Read at most `cap` bytes of `path`; `Ok(None)` when the leaf
+        /// is absent OR cannot be scoped evidence — a symlink or other
+        /// non-regular entry is never authority, mirroring the
+        /// descriptor classifier's `read_leaf`.
         fn read_prefix(path: &Path, cap: usize) -> io::Result<Option<Vec<u8>>> {
             use std::io::Read;
             let meta = match std::fs::symlink_metadata(path) {
@@ -894,10 +887,7 @@ mod scoped_classify {
                 Err(e) => return Err(e),
             };
             if !meta.is_file() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "scoped-state entry is not a regular file",
-                ));
+                return Ok(None);
             }
             let mut file = std::fs::File::open(path)?;
             let mut buf = vec![0u8; cap];
@@ -1728,39 +1718,85 @@ mod tests {
         assert!(discover(&root).unwrap().is_single());
     }
 
-    /// A symlinked `.mkit-scoped/CURRENT` pointing outside the root is
-    /// never followed into a classification and never treated as absent —
-    /// the boundary check fails closed instead.
+    /// A `CURRENT` DIRECTORY inside an otherwise ordinary repository —
+    /// e.g. a tracked `.mkit-scoped/CURRENT/user-file.txt` — is not
+    /// scoped authority: the name alone creates none. Ordinary
+    /// discover/open must keep working.
+    #[test]
+    fn unrelated_current_directory_keeps_ordinary_repository_usable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join(MKIT_DIR).join("objects")).unwrap();
+        std::fs::write(
+            root.join(MKIT_DIR).join("format"),
+            format!("{}\n", crate::store::FORMAT_VALUE),
+        )
+        .unwrap();
+        let current_dir = root.join(SCOPED_STATE_DIR).join("CURRENT");
+        std::fs::create_dir_all(&current_dir).unwrap();
+        std::fs::write(current_dir.join("user-file.txt"), b"tracked").unwrap();
+        check_scoped_boundary(&root).unwrap();
+        assert!(discover(&root).is_ok());
+        assert!(crate::store::ObjectStore::open(&RepoLayout::single(&root)).is_ok());
+        assert!(discover(&root.join("deep/nested")).is_ok());
+    }
+
+    /// A symlinked `CURRENT` or `manifest.bin` is never followed and
+    /// never evidence: the name alone does not create authority, and the
+    /// outside file's `MKCR`/`MKGM` bytes are never even read.
     #[test]
     #[cfg(unix)]
-    fn symlinked_scoped_metadata_refuses_discovery() {
+    fn symlinked_scoped_metadata_is_unrelated_never_authority() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("ws");
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join(MKIT_DIR)).unwrap();
         let scoped = root.join(SCOPED_STATE_DIR);
-        std::fs::create_dir_all(&scoped).unwrap();
+        std::fs::create_dir(&scoped).unwrap();
         let outside = tmp.path().join("outside-current");
         std::fs::write(&outside, b"MKCR\x01rest").unwrap();
         std::os::unix::fs::symlink(&outside, scoped.join("CURRENT")).unwrap();
+        check_scoped_boundary(&root).unwrap();
         assert!(
-            check_scoped_boundary(&root).is_err(),
-            "symlinked CURRENT must fail closed, not classify or pass"
+            discover(&root).is_ok(),
+            "a symlinked CURRENT is unrelated, not authority"
         );
-        assert!(discover(&root).is_err());
-        // A symlinked generation member must not be inspected either:
-        // manifest.bin linked to outside content beginning MKGM.
-        let orphan = tmp.path().join("orphan");
-        let gen_dir = orphan.join(format!(
-            "{SCOPED_STATE_DIR}/generations/{}",
-            "b".repeat(crate::hash::HEX_LEN)
-        ));
+        // A symlinked manifest.bin inside a real generations dir is the
+        // same: skipped, not followed, not evidence.
+        std::fs::remove_file(scoped.join("CURRENT")).unwrap();
+        let gen_dir = scoped.join(format!("generations/{}", "b".repeat(crate::hash::HEX_LEN)));
         std::fs::create_dir_all(&gen_dir).unwrap();
         let outside_manifest = tmp.path().join("outside-manifest");
         std::fs::write(&outside_manifest, b"MKGM\x01rest").unwrap();
         std::os::unix::fs::symlink(&outside_manifest, gen_dir.join("manifest.bin")).unwrap();
-        assert!(check_scoped_boundary(&orphan).is_err());
-        // Neither refusal fabricated any scoped marker or state.
-        assert!(!root.join(MKIT_DIR).exists());
-        assert!(!orphan.join(MKIT_DIR).exists());
+        check_scoped_boundary(&root).unwrap();
+        assert!(discover(&root).is_ok());
+    }
+
+    /// A nonregular `CURRENT` cannot hide genuine scoped authority: a
+    /// real `MKGM` generation manifest still classifies the root as an
+    /// incomplete install when no valid marker exists, and the exact
+    /// marker is authority regardless.
+    #[test]
+    #[cfg(unix)]
+    fn nonregular_current_does_not_hide_genuine_authority() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("ws");
+        let scoped = root.join(SCOPED_STATE_DIR);
+        // CURRENT as a directory + genuine MKGM manifest + no marker.
+        std::fs::create_dir_all(scoped.join("CURRENT")).unwrap();
+        let gen_dir = scoped.join(format!("generations/{}", "d".repeat(crate::hash::HEX_LEN)));
+        std::fs::create_dir_all(&gen_dir).unwrap();
+        std::fs::write(gen_dir.join("manifest.bin"), b"MKGM\x01rest").unwrap();
+        assert!(matches!(
+            check_scoped_boundary(&root),
+            Err(DiscoverError::ScopedInstallIncomplete(_))
+        ));
+        // The exact scoped marker is authority on its own.
+        std::fs::write(root.join(MKIT_DIR), SCOPED_MARKER).unwrap();
+        assert!(matches!(
+            check_scoped_boundary(&root),
+            Err(DiscoverError::ScopedWorkspace(_))
+        ));
     }
 
     /// A `.mkit` that exists but is not a regular file (symlink, FIFO,
@@ -1876,17 +1912,19 @@ mod tests {
         assert!(discover(&root).is_ok());
     }
 
-    /// A FIFO substituted for `CURRENT` or `manifest.bin` fails closed
-    /// and bounded — the nonblocking descriptor open refuses by type,
-    /// never stalls reading the pipe.
+    /// A FIFO substituted for `CURRENT` or `manifest.bin` is unrelated,
+    /// not authority — the nonblocking descriptor open never stalls on
+    /// the pipe, and a nonregular leaf cannot hide a genuine `MKGM`
+    /// manifest beside it.
     #[test]
     #[cfg(unix)]
-    fn fifo_state_leaves_fail_closed_without_blocking() {
+    fn fifo_state_leaves_are_unrelated_not_authority() {
         use std::os::unix::ffi::OsStrExt;
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("ws");
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join(MKIT_DIR)).unwrap();
         let scoped = root.join(SCOPED_STATE_DIR);
-        std::fs::create_dir_all(&scoped).unwrap();
+        std::fs::create_dir(&scoped).unwrap();
         let mkfifo = |path: &Path| {
             let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
             // SAFETY: mkfifo(2) on a CString path inside our own tempdir.
@@ -1894,13 +1932,81 @@ mod tests {
             let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
             assert_eq!(rc, 0);
         };
+        // Alone, a FIFO `CURRENT` or `manifest.bin` is unrelated — the
+        // classifier never blocks on it and finds no authority.
         mkfifo(&scoped.join("CURRENT"));
-        assert!(check_scoped_boundary(&root).is_err());
+        check_scoped_boundary(&root).unwrap();
+        assert!(discover(&root).is_ok());
         let gen_dir = scoped.join(format!("generations/{}", "c".repeat(crate::hash::HEX_LEN)));
-        std::fs::remove_file(scoped.join("CURRENT")).unwrap();
         std::fs::create_dir_all(&gen_dir).unwrap();
         mkfifo(&gen_dir.join("manifest.bin"));
-        assert!(check_scoped_boundary(&root).is_err());
+        check_scoped_boundary(&root).unwrap();
+        // But a REAL manifest beside the nonregular `CURRENT` is genuine
+        // authority — with no marker the root is an incomplete install.
+        std::fs::remove_dir_all(root.join(MKIT_DIR)).unwrap();
+        std::fs::remove_file(gen_dir.join("manifest.bin")).unwrap();
+        std::fs::write(gen_dir.join("manifest.bin"), b"MKGM\x01rest").unwrap();
+        assert!(matches!(
+            check_scoped_boundary(&root),
+            Err(DiscoverError::ScopedInstallIncomplete(_))
+        ));
+    }
+
+    /// A scoped workspace reached only through a directory alias must
+    /// still bound ordinary operations: `alias/missing-descendant` has a
+    /// canonicalizable-prefix symlink the ancestor walk must resolve —
+    /// `ObjectStore::init` past it must refuse and create nothing.
+    #[test]
+    #[cfg(unix)]
+    fn scoped_boundary_through_alias_with_missing_descendant() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A recognized scoped install: exact marker + MKCR CURRENT.
+        let real = tmp.path().join("real-scoped");
+        std::fs::create_dir_all(real.join(SCOPED_STATE_DIR)).unwrap();
+        std::fs::write(real.join(MKIT_DIR), SCOPED_MARKER).unwrap();
+        std::fs::write(real.join(SCOPED_STATE_DIR).join("CURRENT"), b"MKCR\x01rest").unwrap();
+        // The alias names the scoped root; the descendant is missing.
+        let alias = tmp.path().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let missing = alias.join("new-missing-directory");
+        // The boundary check must find the scoped root through the
+        // alias — on macOS `O_NOFOLLOW|O_DIRECTORY` on the leaf symlink
+        // surfaces as ENOTDIR, which must be distinguished from a
+        // genuine non-directory.
+        assert!(matches!(
+            check_scoped_boundary(&missing),
+            Err(DiscoverError::ScopedWorkspace(_))
+        ));
+        // A textual form exercising the non-canonicalized ancestor walk.
+        assert!(matches!(
+            check_scoped_boundary(&alias.join("sub/../new-missing-directory")),
+            Err(DiscoverError::ScopedWorkspace(_))
+        ));
+        // The real mutation seam: init must refuse BEFORE creating
+        // anything beneath the scoped root.
+        assert!(matches!(
+            crate::store::ObjectStore::init(&RepoLayout::single(&missing)),
+            Err(crate::StoreError::ScopedBoundary(
+                DiscoverError::ScopedWorkspace(_)
+            ))
+        ));
+        assert!(!missing.exists() && !real.join("new-missing-directory").exists());
+        assert!(!real.join(MKIT_DIR).join("objects").exists());
+        // An aliased NON-scoped parent still works — the alias itself is
+        // not the refusal, the authority beneath it is.
+        let ordinary = tmp.path().join("ordinary");
+        std::fs::create_dir(&ordinary).unwrap();
+        let ordinary_alias = tmp.path().join("ordinary-alias");
+        std::os::unix::fs::symlink(&ordinary, &ordinary_alias).unwrap();
+        let fresh = ordinary_alias.join("fresh");
+        crate::store::ObjectStore::init(&RepoLayout::single(&fresh)).unwrap();
+        assert!(
+            ordinary
+                .join("fresh")
+                .join(MKIT_DIR)
+                .join("objects")
+                .is_dir()
+        );
     }
 
     /// Recognizable scoped authority still refuses once a same-named
