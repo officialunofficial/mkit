@@ -585,20 +585,46 @@ MUST verify all redundant bindings.
 names and MUST NOT scan `generations/` or pick a highest generation, and MUST
 NOT fall back to working-tree contents. A transition commits by:
 
-1. validating and precomputing under the exclusive `workspace.lock`;
-2. writing and fsyncing immutable artifacts (bundle/object/update) create-new &mdash;
-   identical existing bytes are reused, differing bytes are an error;
-3. writing and fsyncing the new immutable generation directory: members first,
-   then `manifest.bin`, then fsync of the generation and `generations` dirs;
-4. writing and fsyncing a sibling `CURRENT` temp file, then atomically
+1. validating and precomputing under the exclusive `workspace.lock`, held by a
+   fresh per-operation descriptor that is inode-verified against the stable
+   `workspace.lock` sentinel and released by descriptor close, so threads
+   sharing one workspace handle serialize and a panic cannot strand the lock;
+2. validating the complete proposed next state BEFORE any publication effect:
+   workspace/stage/pending/accepted bindings, selection coverage, the
+   pending/accepted no-duplication rule, the required-object inventory against
+   the same `max_update_objects`/`max_raw_pack_bytes` accounting the producing
+   overlay was charged, every staged representation resolving through the
+   authenticated sources, and the complete selected-file aggregate limit &mdash;
+   a state the reopen checks would reject MUST NOT reach `CURRENT`;
+3. writing each immutable artifact (bundle/object/update) and each generation
+   member to a fresh sibling temporary, fsyncing it, installing it under its
+   canonical digest name with an atomic no-replace rename, then fsyncing the
+   containing directory &mdash; a pre-existing canonical name with identical
+   bytes is an idempotent retry whose file and directory durability MUST be
+   established before the new authority relies on it, and differing bytes are
+   an error; an interrupted temporary never occupies the canonical name;
+4. ordering members before `manifest.bin` within the generation, then fsyncing
+   the generation and `generations` dirs;
+5. writing and fsyncing a sibling `CURRENT` temp file, then atomically
    replacing `CURRENT`;
-5. fsyncing `.mkit-scoped`.
+6. fsyncing `.mkit-scoped`.
 
 The `CURRENT` replacement is the linearization point. A fault before it
 leaves the prior generation authoritative; a fault after it but before the
 final directory fsync reports durability uncertainty rather than rolling back
-or claiming success. Orphaned generations and temp files MAY remain; there is
-no garbage collection of scoped state in this revision.
+or claiming success. Orphaned generations, stale sibling temporaries, and temp
+files MAY remain and MUST be skipped on later runs; there is no garbage
+collection of scoped state in this revision.
+
+A persisted stage replays through the same authenticated replacement overlay
+that produced it, preserving representation identity: a `staged_id` naming a
+verified selected file's representation replays as that reuse &mdash; never
+re-canonicalized to fresh bytes &mdash; and `required_object_ids` MUST equal
+exactly the produced-object set of that replay, including rebuilt ancestor
+Trees, with no unrelated objects admitted. Persisted chunked representations
+are validated per occurrence against their declared totals BEFORE any content
+is materialized, and retained objects are charged incrementally against the
+raw-pack budget by descriptor-reported length before each read.
 
 ### 16.4 Threat and authority limits
 
@@ -617,3 +643,15 @@ marker last, by an atomic no-replace directory rename; `init`/`open`/ordinary
 commands at or below a scoped root, a corrupt marker, an incomplete recognized
 install, or an ordinary/scoped layout conflict MUST refuse before touching
 filesystem state.
+
+Scoped-root classification obeys the same anchoring: on descriptor-capable
+targets the marker, `CURRENT`, and `generations` lookups open beneath a
+no-follow root descriptor and inspect the actual opened object &mdash; a
+symlink or non-regular leaf is never followed or blocked on, so a
+`.mkit-scoped/generations` link to outside content cannot redirect the
+classification read, and a leaf swapped for a FIFO cannot stall it. An entry
+named `.mkit-scoped` or `generations` that carries no recognizable scoped
+authority is an unrelated user file, not an incomplete install: ordinary
+repositories MUST continue to discover and open past it. Once genuine scoped
+authority is recognized, missing or corrupt marker/state fails closed and
+ordinary permission or I/O errors propagate.

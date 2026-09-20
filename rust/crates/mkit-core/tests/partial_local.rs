@@ -494,6 +494,244 @@ fn reuse_selected_uses_the_base_representation() {
     );
 }
 
+/// A base whose selected source `s.txt` carries a valid alternate
+/// `ChunkedBlob` representation of short content — the representation
+/// identity a staged reuse must retain. `d.txt` differs from `s.txt`;
+/// `u.txt` is unrelated; `hidden.txt` is never selected.
+fn chunked_fixture() -> (Fixture, Hash) {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
+    let c1 = put(
+        &store,
+        &Object::Blob(mkit_core::object::Blob {
+            data: b"shared-".to_vec(),
+        }),
+    );
+    let c2 = put(
+        &store,
+        &Object::Blob(mkit_core::object::Blob {
+            data: b"content".to_vec(),
+        }),
+    );
+    let manifest = Object::ChunkedBlob(mkit_core::object::ChunkedBlob {
+        total_size: 14,
+        chunk_size: 0,
+        chunks: vec![c1, c2],
+    });
+    let manifest_id = put(&store, &manifest);
+    let dest = mkit_core::store_file_object(&store, b"dest-content").unwrap();
+    let other = mkit_core::store_file_object(&store, b"unrelated").unwrap();
+    let hidden = mkit_core::store_file_object(&store, b"hidden").unwrap();
+    let root = tree(
+        &store,
+        vec![
+            TreeEntry {
+                name: b"d.txt".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: dest,
+            },
+            TreeEntry {
+                name: b"hidden.txt".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: hidden,
+            },
+            TreeEntry {
+                name: b"s.txt".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: manifest_id,
+            },
+            TreeEntry {
+                name: b"u.txt".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: other,
+            },
+        ],
+    );
+    let base_key = mkit_core::KeyPair::from_seed([7; 32]);
+    let mut remix = Remix {
+        tree_hash: root,
+        parents: Vec::new(),
+        sources: Vec::new(),
+        author: Identity::opaque(b"base author".to_vec()),
+        signer: base_key.public.0,
+        message: b"base".to_vec(),
+        timestamp: 1_700_000_000,
+        signature: [0; 64],
+    };
+    remix.signature = sign_remix(&remix, &base_key).unwrap().0;
+    let base_id = put(&store, &Object::Remix(remix));
+    let mut paths: Vec<PartialPath> = vec![
+        vec![b"d.txt".to_vec()],
+        vec![b"s.txt".to_vec()],
+        vec![b"u.txt".to_vec()],
+    ];
+    paths.sort();
+    let bundle = build_partial_snapshot(&store, base_id, &paths, &LIMITS).unwrap();
+    (
+        Fixture {
+            base_id,
+            paths,
+            bundle_bytes: bundle.encode(&LIMITS).unwrap(),
+        },
+        manifest_id,
+    )
+}
+
+/// The representation-preserving counterpart of `pending`: each staged
+/// entry that differs from base replays through `reuse_selected` when
+/// its persisted id names a verified SELECTED representation — exactly
+/// what the authoritative stage recorded — instead of re-canonicalizing
+/// it to bytes.
+fn pending_preserving(
+    layout: &ScopedWorkspaceLayout,
+    state: &ScopedWorkspaceState,
+) -> ScopedWorkspaceState {
+    let fixture_signer = mkit_core::KeyPair::from_seed([9; 32]);
+    let limits = LIMITS;
+    let verified = state.verified();
+    let base: std::collections::BTreeMap<&PartialPath, &Hash> = state
+        .workspace()
+        .selection()
+        .iter()
+        .map(|entry| (entry.path(), entry.base_file_id()))
+        .collect();
+    let mut feed = Vec::new();
+    for entry in state.stage().entries() {
+        if entry.staged_id() == base[entry.path()] {
+            continue;
+        }
+        if let Some(source) = verified
+            .files()
+            .iter()
+            .find(|file| file.object_id() == entry.staged_id())
+        {
+            feed.push(FileReplacement::reuse_selected(
+                entry.path().clone(),
+                source.path().clone(),
+            ));
+        } else {
+            let bytes = read_staged(state, entry.staged_id());
+            feed.push(FileReplacement::bytes(entry.path().clone(), bytes));
+        }
+    }
+    let prepared = replace_files(verified, &feed, &limits).unwrap();
+    let unsigned = prepare_partial_commit(
+        verified,
+        &prepared,
+        Identity::opaque(b"op author".to_vec()),
+        fixture_signer.public.0,
+        b"pending op".to_vec(),
+        1_700_000_100,
+        &limits,
+    )
+    .unwrap();
+    let mut signed = unsigned.clone();
+    signed.signature = sign_commit(&signed, &fixture_signer).unwrap().0;
+    let update = export_partial_update(verified, &prepared, &unsigned, &signed, &limits).unwrap();
+    let bytes = update.encode(&limits).unwrap();
+    layout
+        .save_pending(
+            generation(state),
+            &unsigned,
+            &signed,
+            &bytes,
+            Some(PendingOperationV1 {
+                operation_id: [1; 32],
+                request_fingerprint: [2; 32],
+            }),
+        )
+        .unwrap()
+}
+
+/// An alternate-layout selected representation reused onto another path
+/// must keep its persisted id through unrelated staging, restart, and
+/// the pending/accept cycle — never silently re-canonicalized.
+#[test]
+fn staged_alternate_reuse_survives_replay_and_pending() {
+    let (fixture, manifest_id) = chunked_fixture();
+    let dir = tempfile::tempdir().unwrap();
+    let layout = create_workspace(&fixture, &dir.path().join("ws")).unwrap();
+    let d_path: PartialPath = vec![b"d.txt".to_vec()];
+    let s_path: PartialPath = vec![b"s.txt".to_vec()];
+    let u_path: PartialPath = vec![b"u.txt".to_vec()];
+    let staged_id = |state: &ScopedWorkspaceState, path: &PartialPath| {
+        *state
+            .stage()
+            .entries()
+            .iter()
+            .find(|e| e.path() == path)
+            .unwrap()
+            .staged_id()
+    };
+    // Stage D := S's chunked representation.
+    let state = layout
+        .replace_stage(
+            0,
+            &[FileReplacement::reuse_selected(
+                d_path.clone(),
+                s_path.clone(),
+            )],
+        )
+        .unwrap();
+    assert_eq!(staged_id(&state, &d_path), manifest_id);
+    // Unrelated staging must not rewrite D's persisted representation.
+    let state = layout
+        .replace_stage(
+            generation(&state),
+            &[FileReplacement::bytes(u_path.clone(), b"U2".to_vec())],
+        )
+        .unwrap();
+    assert_eq!(
+        staged_id(&state, &d_path),
+        manifest_id,
+        "unrelated staging must preserve the reused representation id"
+    );
+    // Restart: the persisted id survives a cold load.
+    let reopened = ScopedWorkspaceLayout::open(layout.root()).unwrap();
+    let state = reopened.read_state().unwrap();
+    assert_eq!(staged_id(&state, &d_path), manifest_id);
+    // The candidate built from the ORIGINAL reuse representation is the
+    // one the authoritative stage describes: it pends and accepts.
+    let state = pending_preserving(&reopened, &state);
+    assert!(state.pending().is_some());
+    let identity = state.pending().unwrap().identity();
+    let state = reopened
+        .record_outcome(generation(&state), &identity, PendingOutcomeV1::Accepted)
+        .unwrap();
+    // After acceptance D's base representation is S's manifest — the
+    // reused id survives the whole cycle — while diverged working bytes
+    // and the hidden entry are untouched.
+    let d_base = state
+        .workspace()
+        .selection()
+        .iter()
+        .find(|entry| entry.path() == &d_path)
+        .unwrap()
+        .base_file_id();
+    assert_eq!(d_base, &manifest_id);
+    assert_eq!(read_staged(&state, &manifest_id), b"shared-content");
+    // Accepted advancement never rewrites working files: the materialized
+    // bytes are the pre-accept content, and the hidden entry was never
+    // materialized at all.
+    assert_eq!(
+        std::fs::read(layout.root().join("d.txt")).unwrap(),
+        b"dest-content"
+    );
+    assert!(!layout.root().join("hidden.txt").exists());
+    // Semantic no-op: reusing D's own (now base) representation changes
+    // nothing.
+    let state = reopened
+        .replace_stage(
+            generation(&state),
+            &[FileReplacement::reuse_selected(
+                d_path.clone(),
+                d_path.clone(),
+            )],
+        )
+        .unwrap();
+    assert!(state.stage_is_clean());
+}
+
 // -- 6. stale / concurrent generations ----------------------------------------
 
 #[test]
@@ -516,8 +754,12 @@ fn stale_generation_is_rejected() {
     ));
 }
 
+/// Two handles run sequentially: the second's view of generation 0 is
+/// stale after the first commits. This proves generation rejection
+/// across handles, NOT lock contention — real contention coverage is
+/// `contention_*` below.
 #[test]
-fn concurrent_writers_serialize_on_the_lock() {
+fn stale_generation_rejected_across_handles() {
     let (_dir, layout) = workspace();
     let other = ScopedWorkspaceLayout::open(layout.root()).unwrap();
     let first = stage_a(&layout, b"from first");
@@ -536,6 +778,219 @@ fn concurrent_writers_serialize_on_the_lock() {
         })
     ));
     assert_eq!(generation(&first), 1);
+}
+
+/// Hold the kernel lock on an independently opened descriptor so both
+/// contenders park at acquisition; release it after both are spawned.
+/// The kernel decides which thread proceeds first — the serialized
+/// loser must then observe the winner's generation, not publish a
+/// second generation-1 state over the top.
+fn flock_hold(path: &Path) -> std::fs::File {
+    use std::os::unix::io::AsRawFd;
+    let held = std::fs::File::options()
+        .read(true)
+        .write(true)
+        .open(path)
+        .unwrap();
+    // SAFETY: flock(2) on a valid fd we own for the test's duration.
+    #[allow(unsafe_code)]
+    let rc = unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX) };
+    assert_eq!(rc, 0);
+    held
+}
+
+fn flock_release(held: &std::fs::File) {
+    use std::os::unix::io::AsRawFd;
+    // SAFETY: releasing the test's own flock.
+    #[allow(unsafe_code)]
+    unsafe {
+        libc::flock(held.as_raw_fd(), libc::LOCK_UN);
+    }
+}
+
+/// A workspace over a wider selection: staging every file produces
+/// dozens of artifacts and fsyncs, so a same-handle contender that
+/// skips real serialization reliably overlaps inside the transition.
+fn wide_workspace() -> (tempfile::TempDir, ScopedWorkspaceLayout) {
+    const EXTRAS: &[&[&str]] = &[
+        &["f00"],
+        &["f01"],
+        &["f02"],
+        &["f03"],
+        &["f04"],
+        &["f05"],
+        &["f06"],
+        &["f07"],
+        &["f08"],
+        &["f09"],
+        &["f10"],
+        &["f11"],
+        &["f12"],
+        &["f13"],
+        &["f14"],
+        &["f15"],
+        &["f16"],
+        &["f17"],
+        &["f18"],
+        &["f19"],
+        &["f20"],
+        &["f21"],
+        &["f22"],
+        &["f23"],
+    ];
+    let fixture = fixture(EXTRAS);
+    let dir = tempfile::tempdir().unwrap();
+    let layout = create_workspace(&fixture, &dir.path().join("ws")).unwrap();
+    (dir, layout)
+}
+
+/// The losing contender must observe the winner's generation; the
+/// reopened state must contain exactly the winner's stage at
+/// generation 1 — never two generation-1 states and never a torn mix.
+fn assert_exactly_one_committed(
+    results: &[Result<ScopedWorkspaceState, PartialStateError>; 2],
+    edits: [&std::collections::BTreeMap<PartialPath, Vec<u8>>; 2],
+    root: &Path,
+) {
+    let wins: Vec<usize> = results
+        .iter()
+        .enumerate()
+        .filter_map(|(i, r)| r.is_ok().then_some(i))
+        .collect();
+    assert_eq!(
+        wins.len(),
+        1,
+        "exactly one overlapping mutation may commit: {results:?}"
+    );
+    for result in results {
+        if let Err(error) = result {
+            assert!(
+                matches!(
+                    error,
+                    PartialStateError::GenerationMismatch {
+                        expected: 0,
+                        actual: 1
+                    }
+                ),
+                "the loser must observe the winner's generation, not a torn publish: {error:?}"
+            );
+        }
+    }
+    let reopened = ScopedWorkspaceLayout::open(root).unwrap();
+    let state = snap(&reopened);
+    assert_eq!(generation(&state), 1);
+    let base: std::collections::BTreeMap<&PartialPath, &Hash> = state
+        .workspace()
+        .selection()
+        .iter()
+        .map(|entry| (entry.path(), entry.base_file_id()))
+        .collect();
+    let winner = edits[wins[0]];
+    let mut staged = 0;
+    for entry in state.stage().entries() {
+        match winner.get(entry.path()) {
+            Some(bytes) => {
+                staged += 1;
+                assert_eq!(read_staged(&state, entry.staged_id()), *bytes);
+            }
+            None => assert_eq!(entry.staged_id(), base[entry.path()]),
+        }
+    }
+    assert_eq!(staged, winner.len());
+}
+
+/// Drive the overlapping two-generation-0 pattern: the fast contender is
+/// spawned only once the slow contender is provably inside its
+/// transition (a staged-object artifact exists), so a lock that lets the
+/// second flock no-op through produces two committed generation-1
+/// states rather than a serialized `GenerationMismatch`.
+fn contention_pair(
+    first: &std::sync::Arc<ScopedWorkspaceLayout>,
+    second: &std::sync::Arc<ScopedWorkspaceLayout>,
+    root: &Path,
+) {
+    let every_path: Vec<PartialPath> = snap(first)
+        .workspace()
+        .selection()
+        .iter()
+        .map(|entry| entry.path().clone())
+        .collect();
+    let held = flock_hold(&root.join(".mkit-scoped/workspace.lock"));
+    let slow_edit: Vec<FileReplacement> = every_path
+        .iter()
+        .map(|path| FileReplacement::bytes(path.clone(), vec![b'W'; 4096]))
+        .collect();
+    let fast_edit = [FileReplacement::bytes(
+        vec![b"a".to_vec(), b"x.txt".to_vec()],
+        b"from fast".to_vec(),
+    )];
+    let slow_expect: std::collections::BTreeMap<PartialPath, Vec<u8>> = every_path
+        .iter()
+        .map(|path| (path.clone(), vec![b'W'; 4096]))
+        .collect();
+    let fast_expect: std::collections::BTreeMap<PartialPath, Vec<u8>> = [(
+        PartialPath::from(vec![b"a".to_vec(), b"x.txt".to_vec()]),
+        b"from fast".to_vec(),
+    )]
+    .into_iter()
+    .collect();
+    let ta = {
+        let first = first.clone();
+        std::thread::spawn(move || first.replace_stage(0, &slow_edit))
+    };
+    // Let the slow contender park at the kernel lock, then release it.
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    flock_release(&held);
+    drop(held);
+    // Wait until the winner is provably inside: the first staged-object
+    // artifact only appears mid-commit, well before CURRENT is replaced.
+    let objects_dir = root.join(".mkit-scoped/objects");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while std::time::Instant::now() < deadline {
+        if objects_dir.read_dir().is_ok_and(|mut d| d.next().is_some()) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    let tb = {
+        let second = second.clone();
+        std::thread::spawn(move || second.replace_stage(0, &fast_edit))
+    };
+    assert_exactly_one_committed(
+        &[ta.join().unwrap(), tb.join().unwrap()],
+        [&slow_expect, &fast_expect],
+        root,
+    );
+}
+
+/// Two threads share ONE `Arc<ScopedWorkspaceLayout>` and both attempt
+/// generation 0. flock ownership belongs to the open-file description:
+/// a second flock arriving while the shared descriptor already holds the
+/// lock is a no-op, so both threads would enter the critical section and
+/// publish two different generation-1 states. Per-operation descriptors
+/// must serialize them.
+#[test]
+fn contention_same_handle_serializes() {
+    let (_dir, layout) = wide_workspace();
+    let root = layout.root().to_path_buf();
+    // One Arc, cloned for the second thread — the same stored handle.
+    let shared = std::sync::Arc::new(layout);
+    contention_pair(&shared, &shared, &root);
+}
+
+/// The same overlapping pattern across two separately opened handles:
+/// independent open-file descriptions must still serialize the
+/// transitions, so this held green even before same-handle handling.
+#[test]
+fn contention_separate_handles_serializes() {
+    let (_dir, layout) = wide_workspace();
+    let root = layout.root().to_path_buf();
+    let other = ScopedWorkspaceLayout::open(&root).unwrap();
+    contention_pair(
+        &std::sync::Arc::new(layout),
+        &std::sync::Arc::new(other),
+        &root,
+    );
 }
 
 #[test]

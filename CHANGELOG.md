@@ -66,7 +66,20 @@ train).
   are checksum-bounded and strictly decoded; staged and pending state is
   authoritative over working files, and acceptance advances the base and
   resets the stage to the accepted representation without overwriting
-  divergent working files. Ordinary commands, `ObjectStore::open`,
+  divergent working files. Transitions serialize on a fresh inode-verified
+  per-operation lock descriptor (same-handle callers serialize; panic
+  release is automatic), validate the complete proposed state before
+  `CURRENT` moves, and publish immutable artifacts and generation members
+  by sibling-temporary write, fsync, and no-replace rename so a torn write
+  can never occupy a canonical digest name. Reopen re-verifies the exact
+  produced-object inventory against the staged overlay under incremental
+  raw-pack accounting, validates persisted chunked representations per
+  occurrence before materializing, and replays staged reuse through the
+  authenticated selected representations instead of re-canonicalizing
+  them. Scoped-root discovery is descriptor-anchored and never follows
+  metadata symlinks; unrelated `.mkit-scoped`-named entries do not become
+  scoped authority and do not break ordinary repositories. Ordinary
+  commands, `ObjectStore::open`,
   and `ObjectStore::init` refuse scoped roots, corrupt markers, incomplete
   installs, and layout conflicts before touching ancestor repositories or
   the filesystem. Existing object, bundle, update, signing, pack, and ref

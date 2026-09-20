@@ -19,8 +19,11 @@ mod layout;
 mod local_codec;
 #[cfg(all(unix, not(target_arch = "wasm32")))]
 mod state;
+// `pub(crate)` so the ordinary-layout discovery classifier
+// (`crate::layout`) can anchor scoped-metadata probes under no-follow
+// directory descriptors instead of path opens.
 #[cfg(all(unix, not(target_arch = "wasm32")))]
-mod sys;
+pub(crate) mod sys;
 
 use crate::object::TreeEntry;
 

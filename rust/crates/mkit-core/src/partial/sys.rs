@@ -46,6 +46,13 @@ impl SysError {
     pub(crate) fn is_symlink(&self) -> bool {
         matches!(self, Self::Io(e) if e.raw_os_error() == Some(libc::ELOOP))
     }
+
+    /// `ENOTDIR`: a component opened as a directory is a different entry
+    /// type. Note `open_dir` maps symlink components to `ELOOP` first, so
+    /// this is only reachable for genuinely non-directory entries.
+    pub(crate) fn is_not_dir(&self) -> bool {
+        matches!(self, Self::Io(e) if e.raw_os_error() == Some(libc::ENOTDIR))
+    }
 }
 
 fn c_name(name: &[u8]) -> Result<CString, SysError> {
@@ -120,6 +127,13 @@ impl File {
         Ok(buf)
     }
 
+    /// Read up to `buf.len()` bytes at the current offset — callers loop
+    /// so one short read cannot underfill a requested prefix.
+    pub(crate) fn read(&self, buf: &mut [u8]) -> Result<usize, SysError> {
+        use std::io::Read;
+        Ok((&self.0).read(buf)?)
+    }
+
     pub(crate) fn write_all(&self, bytes: &[u8]) -> Result<(), SysError> {
         use std::io::Write;
         (&self.0).write_all(bytes)?;
@@ -148,22 +162,16 @@ impl File {
     }
 
     /// Exclusive `flock(2)` — the scoped `workspace.lock` domain, never
-    /// composed with the ordinary repository lock order.
+    /// composed with the ordinary repository lock order. The lock is
+    /// released by closing this descriptor, including under panic unwind;
+    /// there is deliberately no `unlock` — an explicit release on a
+    /// shared descriptor could free the lock while another operation is
+    /// still inside the critical section.
     pub(crate) fn lock_exclusive(&self) -> Result<(), SysError> {
         // SAFETY: `flock(2)` on a valid borrowed fd; advisory lock on this
         // descriptor only.
         #[allow(unsafe_code)]
         let rc = unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_EX) };
-        if rc < 0 {
-            return Err(io::Error::last_os_error().into());
-        }
-        Ok(())
-    }
-
-    pub(crate) fn unlock(&self) -> Result<(), SysError> {
-        // SAFETY: `flock(2)` on a valid borrowed fd.
-        #[allow(unsafe_code)]
-        let rc = unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
         if rc < 0 {
             return Err(io::Error::last_os_error().into());
         }

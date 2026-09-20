@@ -29,7 +29,7 @@ use super::local_codec::{
 };
 use super::sys::{self, DirFd, OpenMode, SysError};
 use super::{
-    FileReplacement, PartialError, PartialLimits, PartialPath, PartialUpdate,
+    FileReplacement, PartialError, PartialLimits, PartialPath, PartialUpdate, PreparedPartialEdit,
     VerifiedPartialSnapshot, build_partial_snapshot, export_partial_update, replace_files,
     verify_partial_snapshot,
 };
@@ -682,27 +682,170 @@ fn selection_map(state: &ScopedWorkspaceState) -> BTreeMap<&PartialPath, &Worksp
         .collect()
 }
 
-fn staged_bytes(
-    state: &ScopedWorkspaceState,
-    staged_id: &Hash,
-) -> Result<Vec<u8>, PartialStateError> {
-    let source = StageSource {
-        verified: &state.verified,
-        local: &state.local_objects,
+/// Read one staged object from the authenticated sources, bounding the
+/// returned bytes by the persisted per-object limit BEFORE decode. A
+/// stage id outside the verified base objects and the stage's required
+/// local objects is a missing artifact, never a store fallback.
+fn read_staged_object(
+    source: &StageSource<'_>,
+    id: &Hash,
+    limits: &PartialLimits,
+) -> Result<Object, PartialStateError> {
+    let path = PathBuf::from(STATE_DIR).join(OBJECTS_DIR).join(to_hex(id));
+    let raw = source.read(id).map_err(|error| match error {
+        StoreError::ObjectNotFound(_) => missing(path.clone(), "staged object"),
+        other => PartialStateError::Store(other),
+    })?;
+    if raw.is_empty() || raw.len() > limits.max_object_bytes {
+        return Err(PartialStateError::CorruptArtifact {
+            path,
+            reason: "staged object exceeds the per-object bound".to_owned(),
+        });
+    }
+    crate::deserialize(&raw).map_err(|_| PartialStateError::CorruptArtifact {
+        path,
+        reason: "staged object does not decode".to_owned(),
+    })
+}
+
+/// The chunk byte length one manifest occurrence carries: the chunk must
+/// resolve to a `Blob` through the authenticated sources, with results
+/// cached per chunk id so repeated occurrences and shared chunks never
+/// multiply decode work.
+fn staged_chunk_len(
+    source: &StageSource<'_>,
+    chunk_id: &Hash,
+    limits: &PartialLimits,
+    cache: &mut BTreeMap<Hash, usize>,
+) -> Result<usize, PartialStateError> {
+    if let Some(len) = cache.get(chunk_id) {
+        return Ok(*len);
+    }
+    let path = PathBuf::from(STATE_DIR)
+        .join(OBJECTS_DIR)
+        .join(to_hex(chunk_id));
+    let Object::Blob(chunk) = read_staged_object(source, chunk_id, limits)? else {
+        return Err(PartialStateError::CorruptArtifact {
+            path,
+            reason: "manifest chunk is not a Blob".to_owned(),
+        });
     };
-    read_blob(&source, staged_id).map_err(map_worktree)
+    cache.insert(*chunk_id, chunk.data.len());
+    Ok(chunk.data.len())
+}
+
+/// Validate one staged representation's chunk layout and return its
+/// declared content length. Manifest bounds, each occurrence's type and
+/// fixed/CDC length rules, and the running sum against the declared total
+/// are all enforced BEFORE any content is concatenated — the first
+/// detectable overrun stops the walk rather than assembling an
+/// over-declared buffer. Results are cached per representation id so
+/// many stage entries sharing one representation never re-verify it.
+fn staged_declared_len(
+    source: &StageSource<'_>,
+    staged_id: &Hash,
+    limits: &PartialLimits,
+    file_cache: &mut BTreeMap<Hash, u64>,
+    chunk_cache: &mut BTreeMap<Hash, usize>,
+) -> Result<u64, PartialStateError> {
+    if let Some(declared) = file_cache.get(staged_id) {
+        return Ok(*declared);
+    }
+    let path = PathBuf::from(STATE_DIR)
+        .join(OBJECTS_DIR)
+        .join(to_hex(staged_id));
+    let declared = match read_staged_object(source, staged_id, limits)? {
+        Object::Blob(blob) => u64::try_from(blob.data.len())
+            .map_err(|_| PartialStateError::Partial(PartialError::WorkspaceTooLarge))?,
+        Object::ChunkedBlob(manifest) => {
+            super::verify::validate_manifest_size(&manifest, limits)?;
+            let mut sum = 0u64;
+            for (index, chunk_id) in manifest.chunks.iter().enumerate() {
+                let chunk_len = staged_chunk_len(source, chunk_id, limits, chunk_cache)?;
+                super::verify::validate_chunk_occurrence(&manifest, index, chunk_len)?;
+                sum = super::verify::add_chunk_len(sum, chunk_len, manifest.total_size)?;
+            }
+            if sum != manifest.total_size {
+                return Err(PartialStateError::CorruptArtifact {
+                    path,
+                    reason: "chunk lengths disagree with the declared total".to_owned(),
+                });
+            }
+            manifest.total_size
+        }
+        _ => {
+            return Err(PartialStateError::BindingMismatch(
+                "staged object is not file content",
+            ));
+        }
+    };
+    if declared > u64::try_from(limits.max_selected_file_bytes).unwrap_or(u64::MAX) {
+        return Err(PartialStateError::Partial(PartialError::WorkspaceTooLarge));
+    }
+    file_cache.insert(*staged_id, declared);
+    Ok(declared)
+}
+
+/// Reassemble one staged representation's content as an incrementally
+/// bounded materializer: each chunk occurrence is type-checked, rule-
+/// checked, and charged against the declared total BEFORE its bytes are
+/// appended, so the buffer can never exceed `manifest.total_size` — which
+/// `validate_manifest_size` has already bounded by the per-file limit.
+fn staged_content(
+    source: &StageSource<'_>,
+    staged_id: &Hash,
+    limits: &PartialLimits,
+) -> Result<Vec<u8>, PartialStateError> {
+    let path = PathBuf::from(STATE_DIR)
+        .join(OBJECTS_DIR)
+        .join(to_hex(staged_id));
+    match read_staged_object(source, staged_id, limits)? {
+        Object::Blob(blob) => {
+            if blob.data.len() > limits.max_selected_file_bytes {
+                return Err(PartialStateError::Partial(PartialError::WorkspaceTooLarge));
+            }
+            Ok(blob.data)
+        }
+        Object::ChunkedBlob(manifest) => {
+            super::verify::validate_manifest_size(&manifest, limits)?;
+            let declared = usize::try_from(manifest.total_size)
+                .map_err(|_| PartialStateError::Partial(PartialError::WorkspaceTooLarge))?;
+            let mut out = Vec::with_capacity(declared);
+            let mut sum = 0u64;
+            for (index, chunk_id) in manifest.chunks.iter().enumerate() {
+                let Object::Blob(chunk) = read_staged_object(source, chunk_id, limits)? else {
+                    return Err(PartialStateError::CorruptArtifact {
+                        path: path.clone(),
+                        reason: "manifest chunk is not a Blob".to_owned(),
+                    });
+                };
+                super::verify::validate_chunk_occurrence(&manifest, index, chunk.data.len())?;
+                sum = super::verify::add_chunk_len(sum, chunk.data.len(), manifest.total_size)?;
+                out.extend_from_slice(&chunk.data);
+            }
+            if sum != manifest.total_size {
+                return Err(PartialStateError::CorruptArtifact {
+                    path,
+                    reason: "chunk lengths disagree with the declared total".to_owned(),
+                });
+            }
+            Ok(out)
+        }
+        _ => Err(PartialStateError::BindingMismatch(
+            "staged object is not file content",
+        )),
+    }
 }
 
 /// Verify every stage entry's persisted representation against the
 /// authenticated sources — never working files. Entries equal to their
 /// base id reuse the verified selected file's already checked
 /// `content_len`; differing entries must resolve through the verified
-/// base objects or the stage's required local objects to a canonical
-/// `Blob`/`ChunkedBlob`, whose declared length is bounded by the
-/// persisted limits BEFORE materialization and whose full content
-/// `read_blob` then re-verifies chunk-by-chunk. A stage id outside the
-/// authenticated sources, a non-file object, a bad chunk layout, or an
-/// over-limit file/aggregate fails the load.
+/// base objects or the stage's required local objects to a `Blob`/
+/// `ChunkedBlob` whose chunk layout is validated per-occurrence BEFORE
+/// materialization. A stage id outside the authenticated sources, a
+/// non-file object, a bad chunk layout, or an over-limit file/aggregate
+/// fails the load.
 fn validate_stage_representations(
     workspace: &WorkspaceStateV1,
     stage: &StageStateV1,
@@ -713,10 +856,10 @@ fn validate_stage_representations(
         verified,
         local: local_objects,
     };
-    let max_file = u64::try_from(workspace.limits.max_selected_file_bytes)
-        .map_err(|_| PartialStateError::NonCanonical("limits"))?;
     let max_total = u64::try_from(workspace.limits.max_total_selected_bytes)
         .map_err(|_| PartialStateError::NonCanonical("limits"))?;
+    let mut file_cache = BTreeMap::new();
+    let mut chunk_cache = BTreeMap::new();
     let mut total = 0u64;
     for ((entry, selection), file) in stage
         .entries
@@ -727,41 +870,13 @@ fn validate_stage_representations(
         let declared = if entry.staged_id == selection.base_file_id {
             file.content_len()
         } else {
-            let path = PathBuf::from(STATE_DIR)
-                .join(OBJECTS_DIR)
-                .join(to_hex(&entry.staged_id));
-            let raw = source.read(&entry.staged_id).map_err(|error| match error {
-                StoreError::ObjectNotFound(_) => missing(path.clone(), "staged object"),
-                other => PartialStateError::Store(other),
-            })?;
-            let object =
-                crate::deserialize(&raw).map_err(|_| PartialStateError::CorruptArtifact {
-                    path: path.clone(),
-                    reason: "staged object does not decode".to_owned(),
-                })?;
-            let declared = match &object {
-                Object::Blob(blob) => u64::try_from(blob.data.len())
-                    .map_err(|_| PartialStateError::Partial(PartialError::WorkspaceTooLarge))?,
-                Object::ChunkedBlob(manifest) => manifest.total_size,
-                _ => {
-                    return Err(PartialStateError::BindingMismatch(
-                        "staged object is not file content",
-                    ));
-                }
-            };
-            if declared > max_file {
-                return Err(PartialStateError::Partial(PartialError::WorkspaceTooLarge));
-            }
-            let content = read_blob(&source, &entry.staged_id).map_err(map_worktree)?;
-            let content_len = u64::try_from(content.len())
-                .map_err(|_| PartialStateError::NonCanonical("staged length"))?;
-            if content_len != declared {
-                return Err(PartialStateError::CorruptArtifact {
-                    path,
-                    reason: "staged content length disagrees with its declaration".to_owned(),
-                });
-            }
-            declared
+            staged_declared_len(
+                &source,
+                &entry.staged_id,
+                &workspace.limits,
+                &mut file_cache,
+                &mut chunk_cache,
+            )?
         };
         total = total
             .checked_add(declared)
@@ -773,26 +888,97 @@ fn validate_stage_representations(
     Ok(())
 }
 
-/// Rebuild the overlay that produced the current stage: one bytes
-/// replacement per staged entry that differs from base.
+/// The overlay feed entry that replays one persisted stage entry without
+/// losing its representation: a staged id naming a verified SELECTED
+/// file's representation is replayed through [`FileReplacement::reuse_selected`]
+/// so the persisted id — possibly a valid alternate `ChunkedBlob` layout
+/// — is retained instead of silently re-canonicalized. Any other staged
+/// id is generated canonical content, where re-feeding the materialized
+/// bytes reproduces the same id; those bytes come from the incrementally
+/// bounded [`staged_content`], never a working file.
+fn stage_feed(
+    selection: &BTreeMap<&PartialPath, &WorkspaceSelectionV1>,
+    verified: &VerifiedPartialSnapshot,
+    local_objects: &BTreeMap<Hash, Vec<u8>>,
+    limits: &PartialLimits,
+    entry: &StageEntryV1,
+) -> Result<Option<FileReplacement>, PartialStateError> {
+    let base = selection
+        .get(&entry.path)
+        .ok_or(PartialStateError::BindingMismatch(
+            "stage path outside selection",
+        ))?;
+    if entry.staged_id == base.base_file_id {
+        return Ok(None);
+    }
+    if let Some(source_file) = verified
+        .files()
+        .iter()
+        .find(|file| *file.object_id() == entry.staged_id)
+    {
+        return Ok(Some(FileReplacement::reuse_selected(
+            entry.path.clone(),
+            source_file.path().clone(),
+        )));
+    }
+    let source = StageSource {
+        verified,
+        local: local_objects,
+    };
+    let bytes = staged_content(&source, &entry.staged_id, limits)?;
+    Ok(Some(FileReplacement::bytes(entry.path.clone(), bytes)))
+}
+
+/// Rebuild the overlay that produced a stage: one
+/// representation-preserving feed entry per staged entry that differs
+/// from base. Shared by `save_pending`'s candidate reconstruction,
+/// `replace_stage`'s unrelated-entry preservation, and `load_full`'s
+/// required-inventory replay.
 fn stage_replacements(
     state: &ScopedWorkspaceState,
 ) -> Result<Vec<FileReplacement>, PartialStateError> {
     let selection = selection_map(state);
     let mut replacements = Vec::new();
     for entry in &state.stage.entries {
-        let base = selection
-            .get(&entry.path)
-            .ok_or(PartialStateError::BindingMismatch(
-                "stage path outside selection",
-            ))?;
-        if entry.staged_id == base.base_file_id {
-            continue;
+        if let Some(feed) = stage_feed(
+            &selection,
+            &state.verified,
+            &state.local_objects,
+            &state.workspace.limits,
+            entry,
+        )? {
+            replacements.push(feed);
         }
-        let bytes = staged_bytes(state, &entry.staged_id)?;
-        replacements.push(FileReplacement::bytes(entry.path.clone(), bytes));
     }
     Ok(replacements)
+}
+
+/// The replayed overlay's changed ids must equal the authoritative
+/// stage's recorded ids exactly — same paths, same `staged_id` values.
+/// A candidate produced from content that merely compares equal but
+/// carries a different representation id is a mismatch, not a
+/// substitute.
+fn check_prepared_matches_stage(
+    state: &ScopedWorkspaceState,
+    prepared: &PreparedPartialEdit,
+) -> Result<(), PartialStateError> {
+    let expected: BTreeMap<&PartialPath, &Hash> = state
+        .stage
+        .entries
+        .iter()
+        .zip(&state.workspace.selection)
+        .filter(|(entry, selection)| entry.staged_id != selection.base_file_id)
+        .map(|(entry, _)| (&entry.path, &entry.staged_id))
+        .collect();
+    if prepared.changes.len() != expected.len()
+        || !prepared
+            .changes
+            .iter()
+            .all(|change| expected.get(&change.path).copied() == Some(&change.new_id))
+    {
+        return Err(PartialStateError::CandidateMismatch);
+    }
+    Ok(())
 }
 
 fn clean_stage(state: &ScopedWorkspaceState) -> StageStateV1 {
@@ -907,13 +1093,14 @@ fn read_member(dir: &DirFd, name: &str, cap: usize) -> Result<Vec<u8>, PartialSt
     file.read_all(cap).map_err(|e| sys_err(path, e))
 }
 
-/// Read one digest-named artifact beneath `dir/<subdir>`.
-fn read_artifact(
+/// Open one digest-named artifact beneath `dir/<subdir>` no-follow and
+/// return the validated descriptor with its length, so callers can bound
+/// a read by the descriptor's own size before allocating.
+fn open_artifact_file(
     dir: &DirFd,
     subdir: &str,
     name: &str,
-    cap: usize,
-) -> Result<Vec<u8>, PartialStateError> {
+) -> Result<(sys::File, u64), PartialStateError> {
     let path = PathBuf::from(STATE_DIR).join(subdir).join(name);
     let sub = sys::open_dir(dir, subdir.as_bytes()).map_err(|error| {
         if error.is_not_found() {
@@ -936,63 +1123,164 @@ fn read_artifact(
             "artifact must be a regular file with exactly one link",
         ));
     }
+    Ok((file, meta.len()))
+}
+
+/// Read one digest-named artifact beneath `dir/<subdir>`, bounded by
+/// `cap` bytes.
+fn read_artifact(
+    dir: &DirFd,
+    subdir: &str,
+    name: &str,
+    cap: usize,
+) -> Result<Vec<u8>, PartialStateError> {
+    let path = PathBuf::from(STATE_DIR).join(subdir).join(name);
+    let (file, _len) = open_artifact_file(dir, subdir, name)?;
     file.read_all(cap).map_err(|e| sys_err(path, e))
 }
 
-/// Write `bytes` to a fixed name beneath `dir` create-new and fsynced; an
-/// existing file with identical bytes is a completed retry and is left in
-/// place, different bytes are corruption.
-fn write_new(dir: &DirFd, name: &str, bytes: &[u8]) -> Result<(), PartialStateError> {
-    let path = PathBuf::from(STATE_DIR).join(name);
-    match sys::open_file(dir, name.as_bytes(), OpenMode::CreateExclusive) {
-        Ok(file) => {
-            file.write_all(bytes)
-                .map_err(|e| sys_err(path.clone(), e))?;
-            file.fsync().map_err(|e| sys_err(path, e))
-        }
-        Err(SysError::AlreadyExists) => {
-            let existing = read_member(dir, name, bytes.len().max(MAX_ENVELOPE_BYTES))?;
-            if existing != bytes {
-                return Err(PartialStateError::CorruptArtifact {
-                    path,
-                    reason: "existing file bytes differ".to_owned(),
-                });
-            }
-            Ok(())
-        }
-        Err(error) => Err(sys_err(path, error)),
+/// Fresh-name counter for immutable-file temporaries — a stale leftover
+/// collides at most once per counter value, never in a fixed-name loop.
+static IMMUTABLE_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Deterministic operation trace for durability-ordering tests.
+#[cfg(test)]
+pub(crate) mod commit_trace {
+    use std::cell::RefCell;
+    use std::path::Path;
+
+    thread_local! {
+        static EVENTS: RefCell<Vec<(&'static str, String)>> =
+            const { RefCell::new(Vec::new()) };
+    }
+
+    pub(crate) fn record(kind: &'static str, path: &Path) {
+        EVENTS.with(|events| {
+            events.borrow_mut().push((kind, path.display().to_string()));
+        });
+    }
+
+    pub(crate) fn take() -> Vec<(&'static str, String)> {
+        EVENTS.with(|events| std::mem::take(&mut *events.borrow_mut()))
     }
 }
 
-/// Persist one immutable artifact beneath `dir/<subdir>` create-new with
-/// the same retry semantics as [`write_new`].
+/// Install `bytes` as the immutable file `name` beneath `dir`.
+///
+/// Content lands in a fresh private sibling temporary, is fully written
+/// and fsynced, then installed under the canonical name by an atomic
+/// NO-REPLACE rename; the containing directory is fsynced before
+/// returning. An interrupted write can therefore never leave a torn file
+/// at the canonical name — only an ignorable `.name.tmp-*` orphan.
+///
+/// A pre-existing file at `name` is a completed retry: it is opened
+/// no-follow, metadata-checked, byte-verified, and its file + directory
+/// durability is (re)established — identical page-cache bytes are not
+/// proof the earlier attempt synced. Different bytes are corruption and
+/// are never overwritten.
+fn write_immutable(
+    dir: &DirFd,
+    name: &str,
+    bytes: &[u8],
+    display: PathBuf,
+    faults: &super::layout::Faults,
+) -> Result<(), PartialStateError> {
+    let (tmp_name, tmp) = loop {
+        let tmp_name = format!(
+            ".{name}.tmp-{}-{}",
+            std::process::id(),
+            IMMUTABLE_TMP_COUNTER.fetch_add(1, Ordering::Relaxed),
+        );
+        match sys::open_file(dir, tmp_name.as_bytes(), OpenMode::CreateExclusive) {
+            Ok(file) => break (tmp_name, file),
+            Err(SysError::AlreadyExists) => {}
+            Err(error) => return Err(sys_err(display.clone(), error)),
+        }
+    };
+    if faults.hit(Fault::ImmutablePartialWrite) {
+        // Torn write: only a prefix reaches the temporary — nothing is
+        // installed at the canonical name.
+        tmp.write_all(&bytes[..bytes.len() / 2])
+            .map_err(|e| sys_err(display.clone(), e))?;
+        return Err(injected("immutable-partial-write"));
+    }
+    tmp.write_all(bytes)
+        .map_err(|e| sys_err(display.clone(), e))?;
+    #[cfg(test)]
+    commit_trace::record("temp-write", &display);
+    if faults.hit(Fault::ImmutableBeforeFileSync) {
+        return Err(injected("immutable-before-file-sync"));
+    }
+    tmp.fsync().map_err(|e| sys_err(display.clone(), e))?;
+    #[cfg(test)]
+    commit_trace::record("file-fsync", &display);
+    match sys::rename_no_replace(dir, tmp_name.as_bytes(), dir, name.as_bytes()) {
+        Ok(()) => {
+            #[cfg(test)]
+            commit_trace::record("install", &display);
+        }
+        Err(SysError::AlreadyExists) => {
+            let existing = sys::open_file(dir, name.as_bytes(), OpenMode::Read)
+                .map_err(|e| sys_err(display.clone(), e))?;
+            let meta = existing
+                .metadata()
+                .map_err(|e| sys_err(display.clone(), e))?;
+            if !meta.is_file() || meta.nlink() != 1 {
+                return Err(unsafe_entry(
+                    display,
+                    "immutable file must be a regular file with exactly one link",
+                ));
+            }
+            let stored = existing
+                .read_all(bytes.len().max(MAX_ENVELOPE_BYTES))
+                .map_err(|e| sys_err(display.clone(), e))?;
+            if stored != bytes {
+                return Err(PartialStateError::CorruptArtifact {
+                    path: display,
+                    reason: "existing immutable bytes differ".to_owned(),
+                });
+            }
+            #[cfg(test)]
+            commit_trace::record("reuse-verify", &display);
+            existing.fsync().map_err(|e| sys_err(display.clone(), e))?;
+            #[cfg(test)]
+            commit_trace::record("reuse-file-fsync", &display);
+        }
+        Err(error) => return Err(sys_err(display, error)),
+    }
+    if faults.hit(Fault::ImmutableBeforeDirSync) {
+        return Err(injected("immutable-before-dir-sync"));
+    }
+    dir.fsync().map_err(|e| sys_err(display.clone(), e))?;
+    #[cfg(test)]
+    commit_trace::record("dir-fsync", &display);
+    Ok(())
+}
+
+/// Write `bytes` to fixed member `name` beneath the generation `dir` via
+/// [`write_immutable`]'s temporary + no-replace install.
+fn write_new(
+    dir: &DirFd,
+    name: &str,
+    bytes: &[u8],
+    display: PathBuf,
+    faults: &super::layout::Faults,
+) -> Result<(), PartialStateError> {
+    write_immutable(dir, name, bytes, display, faults)
+}
+
+/// Persist one immutable artifact beneath `dir/<subdir>` with the same
+/// temporary + no-replace semantics as [`write_new`].
 pub(crate) fn write_artifact(
     dir: &DirFd,
     subdir: &str,
     name: &str,
     bytes: &[u8],
+    faults: &super::layout::Faults,
 ) -> Result<(), PartialStateError> {
     let path = PathBuf::from(STATE_DIR).join(subdir).join(name);
     let sub = sys::open_dir(dir, subdir.as_bytes()).map_err(|e| sys_err(path.clone(), e))?;
-    match sys::open_file(&sub, name.as_bytes(), OpenMode::CreateExclusive) {
-        Ok(file) => {
-            file.write_all(bytes)
-                .map_err(|e| sys_err(path.clone(), e))?;
-            file.fsync().map_err(|e| sys_err(path.clone(), e))?;
-            sub.fsync().map_err(|e| sys_err(path, e))
-        }
-        Err(SysError::AlreadyExists) => {
-            let existing = read_artifact(dir, subdir, name, bytes.len().max(MAX_ENVELOPE_BYTES))?;
-            if existing != bytes {
-                return Err(PartialStateError::CorruptArtifact {
-                    path,
-                    reason: "existing artifact bytes differ".to_owned(),
-                });
-            }
-            Ok(())
-        }
-        Err(error) => Err(sys_err(path, error)),
-    }
+    write_immutable(&sub, name, bytes, path, faults)
 }
 
 /// Publish `plan` as one transaction generation: immutable artifacts and
@@ -1006,19 +1294,9 @@ pub(crate) fn commit(
     faults: &super::layout::Faults,
     plan: &StatePlan,
 ) -> Result<(), PartialStateError> {
-    if faults.hit(Fault::BeforeData) {
-        return Err(injected("data"));
-    }
-    for (id, bytes) in &plan.objects {
-        write_artifact(dir, OBJECTS_DIR, &to_hex(id), bytes)?;
-    }
-    for (digest, bytes) in &plan.bundles {
-        write_artifact(dir, BUNDLES_DIR, &bundle_file_name(digest), bytes)?;
-    }
-    for (digest, bytes) in &plan.updates {
-        write_artifact(dir, UPDATES_DIR, &update_file_name(digest), bytes)?;
-    }
-
+    // Encode every member and the manifest FIRST: a plan that cannot
+    // produce bounded canonical envelopes must fail before any
+    // persistence effect, not after artifacts are already on disk.
     let workspace_bytes = plan.workspace.encode()?;
     let stage_bytes = plan.stage.encode()?;
     let pending_bytes = plan
@@ -1041,6 +1319,22 @@ pub(crate) fn commit(
     let manifest_bytes = manifest.encode()?;
     let manifest_digest = envelope_digest(&manifest_bytes);
     let generation_name = to_hex(&manifest_digest);
+    let generation_display = PathBuf::from(STATE_DIR)
+        .join(GENERATIONS_DIR)
+        .join(&generation_name);
+
+    if faults.hit(Fault::BeforeData) {
+        return Err(injected("data"));
+    }
+    for (id, bytes) in &plan.objects {
+        write_artifact(dir, OBJECTS_DIR, &to_hex(id), bytes, faults)?;
+    }
+    for (digest, bytes) in &plan.bundles {
+        write_artifact(dir, BUNDLES_DIR, &bundle_file_name(digest), bytes, faults)?;
+    }
+    for (digest, bytes) in &plan.updates {
+        write_artifact(dir, UPDATES_DIR, &update_file_name(digest), bytes, faults)?;
+    }
 
     if faults.hit(Fault::BeforeMembers) {
         return Err(injected("members"));
@@ -1050,26 +1344,53 @@ pub(crate) fn commit(
     match sys::mkdir(&generations, generation_name.as_bytes(), 0o700) {
         Ok(()) | Err(SysError::AlreadyExists) => {}
         Err(error) => {
-            return Err(sys_err(
-                PathBuf::from(GENERATIONS_DIR).join(&generation_name),
-                error,
-            ));
+            return Err(sys_err(generation_display.clone(), error));
         }
     }
     let generation = sys::open_dir(&generations, generation_name.as_bytes())
-        .map_err(|e| sys_err(PathBuf::from(GENERATIONS_DIR).join(&generation_name), e))?;
-    write_new(&generation, WORKSPACE_FILE, &workspace_bytes)?;
-    write_new(&generation, STAGE_FILE, &stage_bytes)?;
+        .map_err(|e| sys_err(generation_display.clone(), e))?;
+    write_new(
+        &generation,
+        WORKSPACE_FILE,
+        &workspace_bytes,
+        generation_display.join(WORKSPACE_FILE),
+        faults,
+    )?;
+    write_new(
+        &generation,
+        STAGE_FILE,
+        &stage_bytes,
+        generation_display.join(STAGE_FILE),
+        faults,
+    )?;
     if let Some(bytes) = &pending_bytes {
-        write_new(&generation, PENDING_FILE, bytes)?;
+        write_new(
+            &generation,
+            PENDING_FILE,
+            bytes,
+            generation_display.join(PENDING_FILE),
+            faults,
+        )?;
     }
     if let Some(bytes) = &accepted_bytes {
-        write_new(&generation, ACCEPTED_FILE, bytes)?;
+        write_new(
+            &generation,
+            ACCEPTED_FILE,
+            bytes,
+            generation_display.join(ACCEPTED_FILE),
+            faults,
+        )?;
     }
     if faults.hit(Fault::BeforeManifest) {
         return Err(injected("manifest"));
     }
-    write_new(&generation, MANIFEST_FILE, &manifest_bytes)?;
+    write_new(
+        &generation,
+        MANIFEST_FILE,
+        &manifest_bytes,
+        generation_display.join(MANIFEST_FILE),
+        faults,
+    )?;
     generation
         .fsync()
         .map_err(|e| sys_err(PathBuf::from(GENERATIONS_DIR).join(&generation_name), e))?;
@@ -1108,6 +1429,8 @@ pub(crate) fn commit(
         .map_err(|e| sys_err(PathBuf::from(CURRENT_FILE), e))?;
     sys::rename_replace(dir, tmp_name.as_bytes(), CURRENT_FILE.as_bytes())
         .map_err(|e| sys_err(PathBuf::from(CURRENT_FILE), e))?;
+    #[cfg(test)]
+    commit_trace::record("current-rename", &PathBuf::from(CURRENT_FILE));
 
     if faults.hit(Fault::AfterCurrentSwitch) {
         return Err(PartialStateError::DurabilityUncertain(io::Error::other(
@@ -1129,12 +1452,121 @@ pub(crate) fn commit(
 }
 
 /// Commit `plan` and reload the freshly selected state.
+///
+/// The complete proposed next state is validated BEFORE `commit` can
+/// switch `CURRENT`: bindings, selection coverage, the retained
+/// inventory bound, and every staged representation must satisfy the
+/// same checks `load_full` enforces on reopen. A transition that would
+/// publish a state the reopen validator rejects is refused while the
+/// old generation is still authoritative — `CURRENT` never selects an
+/// unusable workspace. `local` is the staged-object resolution domain:
+/// the stage's retained objects plus any newly produced ones.
 pub(crate) fn publish(
     layout: &ScopedWorkspaceLayout,
     plan: &StatePlan,
+    verified: &VerifiedPartialSnapshot,
+    local: &BTreeMap<Hash, Vec<u8>>,
 ) -> Result<ScopedWorkspaceState, PartialStateError> {
+    preflight_next(plan, verified, local)?;
     commit(layout.state_dir(), &layout.faults, plan)?;
     load_full(layout)
+}
+
+/// The retained stage inventory bound shared by pre-publication
+/// preflight and reopen: the required set is the canonical object list an
+/// update pack would carry, so it is held to the same raw-pack framing
+/// budget (`max_raw_pack_bytes`) and object count (`max_update_objects`)
+/// `validate_prepared_output` enforces on the producing side — `12 + 32`
+/// header/trailer plus `charge_raw_bytes`'s `5 + len` per distinct
+/// object. Every required id must resolve inside the stage's retained
+/// objects and appear once; a missing, duplicated, or over-budget entry
+/// is corruption, not authority.
+fn check_required_inventory(
+    required: &[Hash],
+    limits: &PartialLimits,
+    local: &BTreeMap<Hash, Vec<u8>>,
+) -> Result<(), PartialStateError> {
+    if required.len() > limits.max_update_objects {
+        return Err(PartialStateError::NonCanonical("required object count"));
+    }
+    let mut pack_bytes = 12usize
+        .checked_add(32)
+        .ok_or(PartialStateError::Partial(PartialError::SubmissionTooLarge))?;
+    let mut seen = BTreeSet::new();
+    for id in required {
+        if !seen.insert(*id) {
+            return Err(PartialStateError::NonCanonical(
+                "duplicate required object id",
+            ));
+        }
+        let Some(bytes) = local.get(id) else {
+            return Err(missing(
+                PathBuf::from(STATE_DIR).join(OBJECTS_DIR).join(to_hex(id)),
+                "required object",
+            ));
+        };
+        pack_bytes = super::overlay::charge_raw_bytes(pack_bytes, bytes.len(), limits)
+            .map_err(PartialStateError::Partial)?;
+    }
+    Ok(())
+}
+
+/// The pre-publication validation every transition shares — a subset of
+/// `load_full`'s checks applied to the proposed records before they can
+/// become authoritative. Member/envelope digests are not re-checked: the
+/// commit encodes them itself moments later.
+pub(crate) fn preflight_next(
+    plan: &StatePlan,
+    verified: &VerifiedPartialSnapshot,
+    local: &BTreeMap<Hash, Vec<u8>>,
+) -> Result<(), PartialStateError> {
+    let workspace = &plan.workspace;
+    let stage = &plan.stage;
+    if stage.workspace_id != workspace.workspace_id
+        || stage.base_id != workspace.base_id
+        || stage.base_revision != workspace.base_revision
+    {
+        return Err(PartialStateError::BindingMismatch("stage binding"));
+    }
+    if stage.entries.len() != workspace.selection.len()
+        || !stage
+            .entries
+            .iter()
+            .zip(&workspace.selection)
+            .all(|(entry, selection)| entry.path == selection.path && entry.mode == selection.mode)
+    {
+        return Err(PartialStateError::BindingMismatch(
+            "stage entries do not cover the selection",
+        ));
+    }
+    if let Some(pending) = &plan.pending
+        && (pending.workspace_id != workspace.workspace_id
+            || pending.base_id != workspace.base_id
+            || pending.base_revision != workspace.base_revision
+            || pending.created_generation > workspace.transaction_generation)
+    {
+        return Err(PartialStateError::BindingMismatch("pending binding"));
+    }
+    if let Some(accepted) = &plan.accepted
+        && (accepted.workspace_id != workspace.workspace_id
+            || accepted.candidate_id != workspace.base_id
+            || accepted.accepted_base_revision != workspace.base_revision)
+    {
+        return Err(PartialStateError::BindingMismatch("accepted binding"));
+    }
+    if let (Some(pending), Some(accepted)) = (&plan.pending, &plan.accepted)
+        && pending.candidate_id == accepted.candidate_id
+        && pending.update_digest == accepted.update_digest
+    {
+        return Err(PartialStateError::BindingMismatch(
+            "pending duplicates the accepted outcome",
+        ));
+    }
+    // The retained stage inventory must be internally consistent AND
+    // within the raw-pack budget the producing overlay was held to —
+    // before any artifact is written.
+    check_required_inventory(&stage.required_object_ids, &workspace.limits, local)?;
+    validate_stage_representations(workspace, stage, verified, local)
 }
 
 /// Read the raw file bytes a verified base object carries — used to
@@ -1327,19 +1759,42 @@ pub(crate) fn load_full(
 
     // Every stage-required object must exist at its canonical path and be
     // the canonical serialization of an object whose id is the recorded
-    // one — a byte-hash match alone never authenticates content.
+    // one — a byte-hash match alone never authenticates content. The
+    // inventory is held to the raw-pack budget the producing overlay was
+    // charged against: the descriptor's own length must fit the
+    // REMAINING allowance before the object is read or retained, so an
+    // over-budget file is refused without an over-budget read.
     if stage.required_object_ids.len() > workspace.limits.max_update_objects {
         return Err(PartialStateError::NonCanonical("required object count"));
     }
     let mut local_objects = BTreeMap::new();
+    let mut seen = BTreeSet::new();
+    let mut pack_bytes = 12usize
+        .checked_add(32)
+        .ok_or(PartialStateError::Partial(PartialError::SubmissionTooLarge))?;
     for id in &stage.required_object_ids {
+        if !seen.insert(*id) {
+            return Err(PartialStateError::NonCanonical(
+                "duplicate required object id",
+            ));
+        }
         let object_path = PathBuf::from(STATE_DIR).join(OBJECTS_DIR).join(to_hex(id));
-        let bytes = read_artifact(
-            dir,
-            OBJECTS_DIR,
-            &to_hex(id),
-            workspace.limits.max_object_bytes,
-        )?;
+        let headroom = workspace
+            .limits
+            .max_raw_pack_bytes
+            .checked_sub(pack_bytes + 5)
+            .ok_or(PartialStateError::Partial(PartialError::SubmissionTooLarge))?;
+        let (file, file_len) = open_artifact_file(dir, OBJECTS_DIR, &to_hex(id))?;
+        let file_len = usize::try_from(file_len)
+            .map_err(|_| PartialStateError::NonCanonical("artifact length"))?;
+        if file_len > headroom.min(workspace.limits.max_object_bytes) {
+            return Err(PartialStateError::Partial(PartialError::SubmissionTooLarge));
+        }
+        let bytes = file
+            .read_all(workspace.limits.max_object_bytes)
+            .map_err(|e| sys_err(object_path.clone(), e))?;
+        pack_bytes = super::overlay::charge_raw_bytes(pack_bytes, bytes.len(), &workspace.limits)
+            .map_err(PartialStateError::Partial)?;
         let object =
             crate::deserialize(&bytes).map_err(|_| PartialStateError::CorruptArtifact {
                 path: object_path.clone(),
@@ -1363,6 +1818,47 @@ pub(crate) fn load_full(
     // every staged representation must resolve and re-verify through the
     // authenticated sources before the state is handed out.
     validate_stage_representations(&workspace, &stage, &verified, &local_objects)?;
+
+    // The required inventory must be EXACTLY what the staged overlay
+    // produces — not a superset padded with unrelated objects and not a
+    // subset missing produced ancestor trees. Replaying the persisted
+    // stage through the representation-preserving feed reconstructs the
+    // intended inventory; a clean stage must retain nothing.
+    let expected_required: BTreeSet<Hash> = if stage_is_clean(&workspace, &stage) {
+        BTreeSet::new()
+    } else {
+        let selection: BTreeMap<&PartialPath, &WorkspaceSelectionV1> = workspace
+            .selection
+            .iter()
+            .map(|entry| (&entry.path, entry))
+            .collect();
+        let mut feed = Vec::new();
+        for entry in &stage.entries {
+            if let Some(feed_entry) = stage_feed(
+                &selection,
+                &verified,
+                &local_objects,
+                &workspace.limits,
+                entry,
+            )? {
+                feed.push(feed_entry);
+            }
+        }
+        let prepared = replace_files(&verified, &feed, &workspace.limits)
+            .map_err(PartialStateError::Partial)?;
+        prepared.produced.keys().copied().collect()
+    };
+    if stage
+        .required_object_ids
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>()
+        != expected_required
+    {
+        return Err(PartialStateError::NonCanonical(
+            "required objects do not match the staged overlay",
+        ));
+    }
 
     let pending_update_bytes = match &pending {
         Some(pending) => {
@@ -1432,30 +1928,45 @@ impl ScopedWorkspaceLayout {
         }
         let limits = *state.workspace.limits();
         let selection = selection_map(&state);
+        // Bound the caller's batch before cloning it into the feed: the
+        // path/mode/changed-path checks and the per-occurrence byte cap
+        // all hold before any allocation the clone would make.
+        if replacements.len() > limits.max_changed_paths {
+            return Err(PartialStateError::Partial(
+                PartialError::ValidationBudgetExceeded,
+            ));
+        }
         for replacement in replacements {
             selection
                 .get(replacement.path())
                 .ok_or(PartialError::UnsupportedPartialOperation)?;
+            if replacement.payload_len() > limits.max_selected_file_bytes {
+                return Err(PartialStateError::Partial(PartialError::WorkspaceTooLarge));
+            }
         }
         // `reuse_selected` names a verified BASE representation, never a
-        // staged one — caller replacements pass through unchanged. Only
-        // unrelated staged entries are re-fed from authoritative state.
+        // staged one — caller replacements pass through unchanged.
+        // Unrelated staged entries are re-fed through `stage_feed`, which
+        // preserves a persisted staged id that names a verified selected
+        // representation instead of silently re-canonicalizing it.
         let mut feed: Vec<FileReplacement> = replacements.to_vec();
         let mut replaced: BTreeSet<&PartialPath> = BTreeSet::new();
         for replacement in replacements {
             replaced.insert(replacement.path());
         }
         for entry in &state.stage.entries {
-            let base = selection
-                .get(&entry.path)
-                .ok_or(PartialStateError::BindingMismatch(
-                    "stage path outside selection",
-                ))?;
-            if entry.staged_id == base.base_file_id || replaced.contains(&entry.path) {
+            if replaced.contains(&entry.path) {
                 continue;
             }
-            let bytes = staged_bytes(&state, &entry.staged_id)?;
-            feed.push(FileReplacement::bytes(entry.path.clone(), bytes));
+            if let Some(preserved) = stage_feed(
+                &selection,
+                &state.verified,
+                &state.local_objects,
+                &limits,
+                entry,
+            )? {
+                feed.push(preserved);
+            }
         }
         if feed.is_empty() {
             return Ok(state);
@@ -1497,6 +2008,12 @@ impl ScopedWorkspaceLayout {
         let objects = prepared
             .map(|prepared| prepared.produced)
             .unwrap_or_default();
+        // The staged-object resolution domain for the next stage: the
+        // verified base objects plus every retained local object —
+        // pre-existing required objects and this transition's produced
+        // set alike.
+        let mut local = state.local_objects.clone();
+        local.extend(objects.iter().map(|(id, bytes)| (*id, bytes.clone())));
         let plan = StatePlan {
             workspace: next_workspace(&state, next_generation),
             stage: next_stage,
@@ -1506,7 +2023,7 @@ impl ScopedWorkspaceLayout {
             bundles: Vec::new(),
             updates: Vec::new(),
         };
-        publish(self, &plan)
+        publish(self, &plan, &state.verified, &local)
     }
 
     /// Record the signed candidate and its exact deterministic `MKWU`
@@ -1574,6 +2091,7 @@ impl ScopedWorkspaceLayout {
             }
             let feed = stage_replacements(&state)?;
             let prepared = replace_files(&state.verified, &feed, &limits)?;
+            check_prepared_matches_stage(&state, &prepared)?;
             let update = export_partial_update(
                 &state.verified,
                 &prepared,
@@ -1602,6 +2120,7 @@ impl ScopedWorkspaceLayout {
         }
         let feed = stage_replacements(&state)?;
         let prepared = replace_files(&state.verified, &feed, &limits)?;
+        check_prepared_matches_stage(&state, &prepared)?;
         let update = export_partial_update(
             &state.verified,
             &prepared,
@@ -1638,7 +2157,7 @@ impl ScopedWorkspaceLayout {
             bundles: Vec::new(),
             updates: vec![(update_digest, exact_update_bytes.to_vec())],
         };
-        publish(self, &plan)
+        publish(self, &plan, &state.verified, &state.local_objects)
     }
 
     /// Record the asserted outcome of the recorded pending operation.
@@ -1694,7 +2213,7 @@ impl ScopedWorkspaceLayout {
             bundles: Vec::new(),
             updates: Vec::new(),
         };
-        publish(self, &plan)
+        publish(self, &plan, &state.verified, &state.local_objects)
     }
 
     /// Idempotent replay of a completed acceptance, or a typed refusal when
@@ -1848,7 +2367,9 @@ impl ScopedWorkspaceLayout {
             bundles: vec![(bundle_digest, bundle_bytes)],
             updates: Vec::new(),
         };
-        publish(self, &plan)
+        // The accepted stage is clean on the candidate's freshly verified
+        // snapshot — no retained objects are required.
+        publish(self, &plan, &new_verified, &BTreeMap::new())
     }
 }
 
@@ -1865,10 +2386,10 @@ mod tests {
 
     use crate::hash::to_hex;
     use crate::object::{EntryMode, Object, Tree, TreeEntry, id_from_object, object_id_from_bytes};
-    use crate::partial::PartialLimits;
     use crate::partial::layout::{Fault, Faults};
     use crate::partial::overlay::FileReplacement;
     use crate::partial::verify::build_partial_snapshot;
+    use crate::partial::{PartialError, PartialLimits};
     use crate::serialize;
     use crate::sign::{KeyPair, sign_remix};
     use crate::store::ObjectStore;
@@ -1936,6 +2457,77 @@ mod tests {
 
     fn edit() -> FileReplacement {
         FileReplacement::bytes(vec![b"file.txt".to_vec()], b"edited".to_vec())
+    }
+
+    /// Two selected root files `a.txt`/`b.txt` with caller-chosen base
+    /// contents — the fixture the complete-stage total checks need.
+    fn two_file_fixture(
+        a: &[u8],
+        b: &[u8],
+        limits: PartialLimits,
+    ) -> (tempfile::TempDir, ScopedWorkspaceLayout) {
+        let repo = tempdir().unwrap();
+        let store = ObjectStore::init(&RepoLayout::single(repo.path())).unwrap();
+        let mut entries = Vec::new();
+        for (name, data) in [(b"a.txt", a), (b"b.txt", b)] {
+            let blob_bytes = serialize(&Object::Blob(crate::object::Blob {
+                data: data.to_vec(),
+            }))
+            .unwrap();
+            let blob = store.write(&blob_bytes).unwrap();
+            entries.push(TreeEntry {
+                name: name.to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: blob,
+            });
+        }
+        let tree = Object::Tree(Tree { entries });
+        let tree_bytes = serialize(&tree).unwrap();
+        let tree_id = id_from_object(&tree, &tree_bytes);
+        assert_eq!(store.write(&tree_bytes).unwrap(), tree_id);
+        let key = KeyPair::from_seed([1; 32]);
+        let mut remix = Remix {
+            tree_hash: tree_id,
+            parents: Vec::new(),
+            sources: Vec::new(),
+            author: Identity::opaque(b"author".to_vec()),
+            signer: key.public.0,
+            message: b"base".to_vec(),
+            timestamp: 1,
+            signature: [0; 64],
+        };
+        remix.signature = sign_remix(&remix, &key).unwrap().0;
+        let remix_object = Object::Remix(remix);
+        let remix_bytes = serialize(&remix_object).unwrap();
+        let base_id = id_from_object(&remix_object, &remix_bytes);
+        assert_eq!(store.write(&remix_bytes).unwrap(), base_id);
+        let paths = vec![vec![b"a.txt".to_vec()], vec![b"b.txt".to_vec()]];
+        let bundle = build_partial_snapshot(&store, base_id, &paths, &limits).unwrap();
+        let dir = tempdir().unwrap();
+        let layout = ScopedWorkspaceLayout::create(
+            &dir.path().join("ws"),
+            base_id,
+            &paths,
+            &bundle.encode(&limits).unwrap(),
+            limits,
+            None,
+        )
+        .unwrap();
+        (dir, layout)
+    }
+
+    fn current_bytes(layout: &ScopedWorkspaceLayout) -> Vec<u8> {
+        std::fs::read(layout.root().join(".mkit-scoped/CURRENT")).unwrap()
+    }
+
+    fn staged_id(state: &super::ScopedWorkspaceState, path: &[u8]) -> crate::hash::Hash {
+        *state
+            .stage()
+            .entries()
+            .iter()
+            .find(|entry| entry.path() == &vec![path.to_vec()])
+            .unwrap()
+            .staged_id()
     }
 
     #[test]
@@ -2017,6 +2609,33 @@ mod tests {
         layout.replace_stage(0, &[edit()]).unwrap();
     }
 
+    /// A panic inside the critical section must release the kernel lock:
+    /// the operation descriptor is closed by unwind, so an independently
+    /// opened handle proceeds instead of blocking on a stranded flock.
+    #[test]
+    fn panic_inside_critical_section_releases_the_operation_lock() {
+        let (_dir, layout) = fixture();
+        let root = layout.root().to_path_buf();
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = layout.with_lock(|_| -> Result<(), PartialStateError> {
+                panic!("critical section panic");
+            });
+        }));
+        assert!(panicked.is_err());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let other = ScopedWorkspaceLayout::open(&root).unwrap();
+            tx.send(other.replace_stage(0, &[edit()]).is_ok()).unwrap();
+        });
+        assert!(
+            matches!(
+                rx.recv_timeout(std::time::Duration::from_secs(10)),
+                Ok(true)
+            ),
+            "panic inside the critical section left the workspace lock held"
+        );
+    }
+
     /// Occupy the next predicted CURRENT tmp names and prove a transition
     /// completes under a FRESH name — a fixed-name retry would spin or
     /// clobber a leftover.
@@ -2091,11 +2710,213 @@ mod tests {
         ));
     }
 
+    /// An armed partial-write abort must leave only a `.tmp` orphan —
+    /// never torn bytes at the canonical object name — so a retry of the
+    /// SAME transition installs cleanly instead of wedging on
+    /// `CorruptArtifact`.
+    #[test]
+    fn immutable_partial_write_fault_leaves_only_tmp_orphans() {
+        let (_dir, layout) = fixture();
+        let objects = layout.root().join(".mkit-scoped/objects");
+        layout.faults.arm(Fault::ImmutablePartialWrite);
+        assert!(layout.replace_stage(0, &[edit()]).is_err());
+        let state = layout.read_state().unwrap();
+        assert_eq!(state.workspace().transaction_generation(), 0);
+        assert!(state.stage_is_clean());
+        let orphans: Vec<_> = objects
+            .read_dir()
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert!(
+            !orphans.is_empty(),
+            "the torn temporary must be retained as an orphan"
+        );
+        assert!(
+            orphans
+                .iter()
+                .all(|name| name.to_string_lossy().starts_with('.')),
+            "no canonical artifact name may appear from a torn write: {orphans:?}"
+        );
+        // Retry of the same transition succeeds and publishes gen 1.
+        layout.replace_stage(0, &[edit()]).unwrap();
+        assert_eq!(
+            layout
+                .read_state()
+                .unwrap()
+                .workspace()
+                .transaction_generation(),
+            1
+        );
+    }
+
+    /// The same torn-write coverage for a generation MEMBER: a plan with
+    /// no artifacts makes workspace.bin the first immutable write — the
+    /// abort must leave every canonical member name untouched.
+    #[test]
+    fn immutable_member_partial_write_fault_retries_cleanly() {
+        let (_dir, layout) = fixture();
+        let state = layout.read_state().unwrap();
+        let mut workspace = state.workspace.clone();
+        workspace.transaction_generation += 1;
+        let plan = StatePlan {
+            workspace,
+            stage: state.stage.clone(),
+            pending: state.pending.clone(),
+            accepted: state.accepted.clone(),
+            objects: BTreeMap::new(),
+            bundles: Vec::new(),
+            updates: Vec::new(),
+        };
+        let faults = Faults::new();
+        faults.arm(Fault::ImmutablePartialWrite);
+        assert!(commit(layout.state_dir(), &faults, &plan).is_err());
+        assert_eq!(
+            layout
+                .read_state()
+                .unwrap()
+                .workspace()
+                .transaction_generation(),
+            0
+        );
+        commit(layout.state_dir(), &Faults::new(), &plan).unwrap();
+        assert_eq!(
+            layout
+                .read_state()
+                .unwrap()
+                .workspace()
+                .transaction_generation(),
+            1
+        );
+    }
+
+    /// A pre-existing identical immutable file (a completed earlier
+    /// attempt whose directory sync never happened) must have its file
+    /// and directory durability established on retry BEFORE the new
+    /// CURRENT may rely on it — identical bytes are not proof of sync.
+    #[test]
+    fn immutable_dir_sync_fault_retry_establishes_durability() {
+        let (_dir, layout) = fixture();
+        layout.faults.arm(Fault::ImmutableBeforeDirSync);
+        assert!(layout.replace_stage(0, &[edit()]).is_err());
+        // The rename already landed: exactly one canonical artifact
+        // exists while CURRENT still selects generation 0.
+        let objects = layout.root().join(".mkit-scoped/objects");
+        let installed: Vec<_> = objects
+            .read_dir()
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| !name.to_string_lossy().starts_with('.'))
+            .collect();
+        assert_eq!(
+            installed.len(),
+            1,
+            "exactly one artifact may be installed before the dir-sync fault: {installed:?}"
+        );
+        assert_eq!(
+            layout
+                .read_state()
+                .unwrap()
+                .workspace()
+                .transaction_generation(),
+            0
+        );
+        super::commit_trace::take();
+        layout.replace_stage(0, &[edit()]).unwrap();
+        let trace = super::commit_trace::take();
+        let object_path = format!(".mkit-scoped/objects/{}", installed[0].to_string_lossy());
+        let position = |kind: &'static str| {
+            trace
+                .iter()
+                .position(|(k, path)| *k == kind && *path == object_path)
+                .unwrap_or_else(|| panic!("{kind} for {object_path} not in {trace:?}"))
+        };
+        let reuse_verify = position("reuse-verify");
+        let reuse_file_fsync = position("reuse-file-fsync");
+        let dir_fsync = position("dir-fsync");
+        let current = trace
+            .iter()
+            .position(|(k, _)| *k == "current-rename")
+            .expect("current rename must be traced");
+        assert!(
+            reuse_verify < reuse_file_fsync && reuse_file_fsync < dir_fsync && dir_fsync < current,
+            "reused artifact durability must be established before CURRENT: {trace:?}"
+        );
+    }
+
+    /// Abort after the temporary's full bytes are written but before its
+    /// file sync: the canonical name must not exist, and the retry must
+    /// run the complete write→fsync→install→dir-fsync sequence.
+    #[test]
+    fn immutable_file_sync_fault_retry_runs_full_sequence() {
+        let (_dir, layout) = fixture();
+        layout.faults.arm(Fault::ImmutableBeforeFileSync);
+        assert!(layout.replace_stage(0, &[edit()]).is_err());
+        let objects = layout.root().join(".mkit-scoped/objects");
+        let names: Vec<_> = objects
+            .read_dir()
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert!(
+            names
+                .iter()
+                .all(|name| name.to_string_lossy().starts_with('.')),
+            "no canonical name may appear before the rename: {names:?}"
+        );
+        super::commit_trace::take();
+        layout.replace_stage(0, &[edit()]).unwrap();
+        let trace = super::commit_trace::take();
+        let object_path = ".mkit-scoped/objects/";
+        let kinds: Vec<&'static str> = trace
+            .iter()
+            .filter(|(_, path)| path.starts_with(object_path))
+            .map(|(kind, _)| *kind)
+            .collect();
+        assert_eq!(
+            kinds[..4],
+            ["temp-write", "file-fsync", "install", "dir-fsync"],
+            "retry must run the complete immutable sequence: {trace:?}"
+        );
+    }
+
+    /// Genuinely different bytes at a canonical artifact name remain
+    /// corruption — the atomic install never overwrites or "repairs".
+    #[test]
+    fn conflicting_immutable_file_is_refused() {
+        let (_dir, layout) = fixture();
+        let blob = Object::Blob(crate::object::Blob {
+            data: b"edited".to_vec(),
+        });
+        let id = id_from_object(&blob, &serialize(&blob).unwrap());
+        let canonical = layout
+            .root()
+            .join(format!(".mkit-scoped/objects/{}", to_hex(&id)));
+        std::fs::write(&canonical, b"poison").unwrap();
+        assert!(matches!(
+            layout.replace_stage(0, &[edit()]),
+            Err(PartialStateError::CorruptArtifact { .. })
+        ));
+        // The conflicting bytes are preserved for inspection, never
+        // overwritten by the transition.
+        assert_eq!(std::fs::read(&canonical).unwrap(), b"poison");
+    }
+
     /// Republish a crafted generation through the real `commit` path:
     /// clone the current state into a plan, bump the generation, mutate,
     /// and commit. Used to build states no honest transition produces.
     fn republish(layout: &ScopedWorkspaceLayout, mutate: impl FnOnce(&mut StatePlan)) {
         let state = layout.read_state().unwrap();
+        republish_from(&state, layout, mutate);
+    }
+
+    /// Republish derived from a captured state — for cases where the
+    /// CURRENT-selected state is intentionally no longer loadable.
+    fn republish_from(
+        state: &super::ScopedWorkspaceState,
+        layout: &ScopedWorkspaceLayout,
+        mutate: impl FnOnce(&mut StatePlan),
+    ) {
         let mut workspace = state.workspace.clone();
         workspace.transaction_generation += 1;
         let mut plan = StatePlan {
@@ -2281,5 +3102,397 @@ mod tests {
         assert!(gen_dir.join("workspace.bin").is_file());
         assert!(gen_dir.join("stage.bin").is_file());
         assert!(!gen_dir.join("pending.bin").exists());
+    }
+
+    // -- pre-publication validation of the COMPLETE next state ----------
+
+    /// The reviewed failure: a stage whose REPLACEMENT bytes fit but
+    /// whose complete selected total exceeds the limit must be rejected
+    /// before CURRENT moves — never published and then discovered
+    /// unloadable.
+    #[test]
+    fn over_budget_complete_stage_is_rejected_before_publish() {
+        let limits = PartialLimits {
+            max_total_selected_bytes: 10,
+            ..PartialLimits::V1
+        };
+        // 4 + 4 selected bytes fit; staging a 7-byte replacement would
+        // make the selected total 11.
+        let (_dir, layout) = two_file_fixture(b"aaaa", b"bbbb", limits);
+        let before = current_bytes(&layout);
+        let result = layout.replace_stage(
+            0,
+            &[FileReplacement::bytes(
+                vec![b"a.txt".to_vec()],
+                b"1234567".to_vec(),
+            )],
+        );
+        assert!(
+            matches!(
+                result,
+                Err(PartialStateError::Partial(PartialError::WorkspaceTooLarge))
+            ),
+            "expected WorkspaceTooLarge, got {result:?}"
+        );
+        // The failed call changed nothing: identical CURRENT bytes,
+        // generation, base, clean stage, no pending — and the prior
+        // state still reopens.
+        assert_eq!(current_bytes(&layout), before);
+        let reopened = ScopedWorkspaceLayout::open(layout.root()).unwrap();
+        let state = reopened.read_state().unwrap();
+        assert_eq!(state.workspace().transaction_generation(), 0);
+        assert!(state.stage_is_clean());
+        assert!(state.pending().is_none());
+        assert!(state.accepted().is_none());
+    }
+
+    /// The boundary case: a complete stage totaling exactly
+    /// `max_total_selected_bytes` must publish.
+    #[test]
+    fn exact_budget_complete_stage_publishes() {
+        let limits = PartialLimits {
+            max_total_selected_bytes: 10,
+            ..PartialLimits::V1
+        };
+        let (_dir, layout) = two_file_fixture(b"aaaa", b"bbbb", limits);
+        // 6 + 4 = 10 == the limit.
+        let state = layout
+            .replace_stage(
+                0,
+                &[FileReplacement::bytes(
+                    vec![b"a.txt".to_vec()],
+                    b"123456".to_vec(),
+                )],
+            )
+            .unwrap();
+        assert_eq!(state.workspace().transaction_generation(), 1);
+        let reopened = ScopedWorkspaceLayout::open(layout.root()).unwrap();
+        assert_eq!(
+            reopened
+                .read_state()
+                .unwrap()
+                .workspace()
+                .transaction_generation(),
+            1
+        );
+    }
+
+    /// A rejected later stage leaves earlier unrelated staged entries —
+    /// and the generation — exactly as the last good publish left them.
+    #[test]
+    fn rejected_second_stage_preserves_unrelated_entries() {
+        let limits = PartialLimits {
+            max_total_selected_bytes: 10,
+            ..PartialLimits::V1
+        };
+        let (_dir, layout) = two_file_fixture(b"aaaa", b"bbbb", limits);
+        let staged_a = layout
+            .replace_stage(
+                0,
+                &[FileReplacement::bytes(
+                    vec![b"a.txt".to_vec()],
+                    b"aa".to_vec(),
+                )],
+            )
+            .unwrap();
+        let a_id = staged_id(&staged_a, b"a.txt");
+        let before = current_bytes(&layout);
+        // Staged total would become 2 + 9 = 11 — rejected.
+        let result = layout.replace_stage(
+            1,
+            &[FileReplacement::bytes(
+                vec![b"b.txt".to_vec()],
+                b"123456789".to_vec(),
+            )],
+        );
+        assert!(matches!(
+            result,
+            Err(PartialStateError::Partial(PartialError::WorkspaceTooLarge))
+        ));
+        assert_eq!(current_bytes(&layout), before);
+        let state = layout.read_state().unwrap();
+        assert_eq!(state.workspace().transaction_generation(), 1);
+        assert_eq!(staged_id(&state, b"a.txt"), a_id);
+        // And the in-budget retry of the second file still works.
+        let state = layout
+            .replace_stage(
+                1,
+                &[FileReplacement::bytes(
+                    vec![b"b.txt".to_vec()],
+                    b"12345678".to_vec(),
+                )],
+            )
+            .unwrap();
+        assert_eq!(state.workspace().transaction_generation(), 2);
+        assert_eq!(staged_id(&state, b"a.txt"), a_id);
+    }
+
+    // -- staged representation validation BEFORE materialization --------
+
+    /// Write `objects` as stage artifacts and point the stage's single
+    /// entry at `staged`, retaining `required` as the inventory. This is
+    /// the malformed-but-checksummed local state a hostile `.mkit-scoped`
+    /// write can produce.
+    fn craft_stage(
+        layout: &ScopedWorkspaceLayout,
+        staged: crate::hash::Hash,
+        mut required: Vec<crate::hash::Hash>,
+        objects: Vec<(crate::hash::Hash, Vec<u8>)>,
+    ) {
+        required.sort_unstable();
+        republish(layout, |plan| {
+            plan.stage.entries[0].staged_id = staged;
+            plan.stage.required_object_ids = required;
+            plan.objects = objects.into_iter().collect();
+        });
+    }
+
+    fn put_object(object: &Object) -> (crate::hash::Hash, Vec<u8>) {
+        let bytes = serialize(object).unwrap();
+        (id_from_object(object, &bytes), bytes)
+    }
+
+    /// A `ChunkedBlob` declaring `total_size = 1` whose first occurrence
+    /// already overflows must fail at occurrence zero — the SECOND chunk
+    /// id does not exist at all, so any read of it (a concatenate-first
+    /// validator) would surface a missing-object error instead of the
+    /// layout error.
+    #[test]
+    fn staged_chunked_declared_total_stops_at_first_overrun() {
+        let (_dir, layout) = fixture();
+        let (chunk_id, chunk_bytes) = put_object(&Object::Blob(crate::object::Blob {
+            data: b"1234".to_vec(),
+        }));
+        let manifest = Object::ChunkedBlob(crate::object::ChunkedBlob {
+            total_size: 1,
+            chunk_size: 0,
+            chunks: vec![chunk_id, [0xEE; 32]],
+        });
+        let (manifest_id, manifest_bytes) = put_object(&manifest);
+        craft_stage(
+            &layout,
+            manifest_id,
+            vec![manifest_id, chunk_id],
+            vec![(manifest_id, manifest_bytes), (chunk_id, chunk_bytes)],
+        );
+        let result = layout.read_state();
+        assert!(
+            matches!(
+                result,
+                Err(PartialStateError::Partial(PartialError::InvalidChunkLayout))
+            ),
+            "occurrence 0 overflows the declared total; a late validator \
+             would instead fail reading the nonexistent second chunk — got {result:?}"
+        );
+    }
+
+    /// A fixed-size manifest whose occurrences sum to the declared total
+    /// but violate the per-occurrence fixed rule is rejected — the
+    /// matching aggregate cannot launder an invalid layout.
+    #[test]
+    fn staged_chunked_fixed_layout_rejects_despite_matching_aggregate() {
+        let (_dir, layout) = fixture();
+        let (short_id, short_bytes) = put_object(&Object::Blob(crate::object::Blob {
+            data: b"12".to_vec(),
+        }));
+        let (long_id, long_bytes) = put_object(&Object::Blob(crate::object::Blob {
+            data: b"123456".to_vec(),
+        }));
+        // Fixed size 4: occurrence 0 is non-final with actual 2 — the
+        // aggregate 2 + 6 = 8 matches the declared total exactly.
+        let manifest = Object::ChunkedBlob(crate::object::ChunkedBlob {
+            total_size: 8,
+            chunk_size: 4,
+            chunks: vec![short_id, long_id],
+        });
+        let (manifest_id, manifest_bytes) = put_object(&manifest);
+        craft_stage(
+            &layout,
+            manifest_id,
+            vec![manifest_id, short_id, long_id],
+            vec![
+                (manifest_id, manifest_bytes),
+                (short_id, short_bytes),
+                (long_id, long_bytes),
+            ],
+        );
+        let result = layout.read_state();
+        assert!(
+            matches!(
+                result,
+                Err(PartialStateError::Partial(PartialError::InvalidChunkLayout))
+            ),
+            "got {result:?}"
+        );
+    }
+
+    // -- retained-inventory accounting ----------------------------------
+
+    /// Raw-pack cost of a stage's persisted inventory: 12-byte header +
+    /// 32-byte trailer + (5-byte entry header + object bytes) per id —
+    /// the same accounting `charge_raw_bytes` applies.
+    fn inventory_pack_bytes(layout: &ScopedWorkspaceLayout, ids: &[crate::hash::Hash]) -> usize {
+        let mut total = 12 + 32;
+        for id in ids {
+            let len = std::fs::metadata(
+                layout
+                    .root()
+                    .join(format!(".mkit-scoped/objects/{}", to_hex(id))),
+            )
+            .unwrap()
+            .len();
+            total += 5 + usize::try_from(len).unwrap();
+        }
+        total
+    }
+
+    /// The aggregate retained-inventory budget is enforced at the
+    /// descriptor-length check BEFORE the object is read: one byte under
+    /// the real aggregate is `SubmissionTooLarge`, exactly at it is fine.
+    #[test]
+    fn required_inventory_aggregate_budget_is_exact() {
+        let (_dir, layout) = fixture();
+        let staged = layout.replace_stage(0, &[edit()]).unwrap();
+        let ids = staged.stage().required_object_ids().to_vec();
+        let exact = inventory_pack_bytes(&layout, &ids);
+        republish(&layout, |plan| {
+            plan.workspace.limits.max_raw_pack_bytes = exact;
+        });
+        layout.read_state().unwrap();
+        republish(&layout, |plan| {
+            plan.workspace.limits.max_raw_pack_bytes = exact - 1;
+        });
+        assert!(matches!(
+            layout.read_state(),
+            Err(PartialStateError::Partial(PartialError::SubmissionTooLarge))
+        ));
+    }
+
+    /// The remaining-allowance check runs BEFORE the artifact is read:
+    /// corrupting a required object's bytes (same length) still yields
+    /// `SubmissionTooLarge` under the tight budget — never the read-time
+    /// `CorruptArtifact` — while the headroom case reads and rejects the
+    /// same corrupt bytes. The error pair proves the read never happened
+    /// in the over-budget path.
+    #[test]
+    fn required_inventory_bound_check_precedes_read() {
+        let (_dir, layout) = fixture();
+        let staged = layout.replace_stage(0, &[edit()]).unwrap();
+        let ids = staged.stage().required_object_ids().to_vec();
+        let exact = inventory_pack_bytes(&layout, &ids);
+        // Corrupt the LAST required object's bytes in place — the object
+        // whose headroom check will fail under the one-under budget.
+        let last = ids.last().unwrap();
+        let object_path = layout
+            .root()
+            .join(format!(".mkit-scoped/objects/{}", to_hex(last)));
+        let len = std::fs::metadata(&object_path).unwrap().len();
+        std::fs::write(&object_path, vec![0xAB; usize::try_from(len).unwrap()]).unwrap();
+        republish_from(&staged, &layout, |plan| {
+            plan.workspace.limits.max_raw_pack_bytes = exact - 1;
+        });
+        assert!(
+            matches!(
+                layout.read_state(),
+                Err(PartialStateError::Partial(PartialError::SubmissionTooLarge))
+            ),
+            "the pre-read headroom check must fire before the corrupt bytes are read"
+        );
+        republish_from(&staged, &layout, |plan| {
+            plan.workspace.limits.max_raw_pack_bytes = exact;
+        });
+        assert!(
+            matches!(
+                layout.read_state(),
+                Err(PartialStateError::CorruptArtifact { .. })
+            ),
+            "with headroom the same corrupt object IS read and rejected"
+        );
+    }
+
+    /// An inventory padded with a valid but unrelated object — one the
+    /// staged overlay never produced — is not required state.
+    #[test]
+    fn required_inventory_rejects_unrelated_extra() {
+        let (_dir, layout) = fixture();
+        let staged = layout.replace_stage(0, &[edit()]).unwrap();
+        let mut ids = staged.stage().required_object_ids().to_vec();
+        let (extra_id, extra_bytes) = put_object(&Object::Blob(crate::object::Blob {
+            data: b"unrelated".to_vec(),
+        }));
+        ids.push(extra_id);
+        ids.sort_unstable();
+        republish(&layout, |plan| {
+            plan.stage.required_object_ids = ids.clone();
+            plan.objects.insert(extra_id, extra_bytes.clone());
+        });
+        assert!(matches!(
+            layout.read_state(),
+            Err(PartialStateError::NonCanonical(_))
+        ));
+    }
+
+    /// Required inventories legitimately hold non-file objects: a staged
+    /// edit retains the rebuilt ancestor TREE alongside the produced
+    /// file object, and a pure reuse stage retains ONLY trees — the
+    /// reused representation is a verified base object, never produced.
+    /// A file-closure-only check would wrongly reject both.
+    #[test]
+    fn required_inventory_retains_produced_trees() {
+        let inventory_objects =
+            |layout: &ScopedWorkspaceLayout, state: &super::ScopedWorkspaceState| {
+                state
+                    .stage()
+                    .required_object_ids()
+                    .iter()
+                    .map(|id| {
+                        let bytes = std::fs::read(
+                            layout
+                                .root()
+                                .join(format!(".mkit-scoped/objects/{}", to_hex(id))),
+                        )
+                        .unwrap();
+                        crate::deserialize(&bytes).unwrap()
+                    })
+                    .collect::<Vec<Object>>()
+            };
+        let (_dir, layout) = two_file_fixture(b"aaaa", b"bbbb", PartialLimits::V1);
+        let staged = layout
+            .replace_stage(
+                0,
+                &[FileReplacement::bytes(
+                    vec![b"a.txt".to_vec()],
+                    b"new".to_vec(),
+                )],
+            )
+            .unwrap();
+        let kinds = inventory_objects(&layout, &staged);
+        assert!(
+            kinds.iter().any(|object| matches!(object, Object::Tree(_)))
+                && kinds.iter().any(|object| matches!(object, Object::Blob(_))),
+            "a staged edit retains the produced file object AND the rebuilt \
+             ancestor tree: {kinds:?}"
+        );
+        // A stage consisting solely of a reuse produces no file object —
+        // the reused representation is a verified base object — so its
+        // entire inventory is produced trees, and it must still load.
+        let (_dir2, layout2) = two_file_fixture(b"aaaa", b"bbbb", PartialLimits::V1);
+        let reused = layout2
+            .replace_stage(
+                0,
+                &[FileReplacement::reuse_selected(
+                    vec![b"b.txt".to_vec()],
+                    vec![b"a.txt".to_vec()],
+                )],
+            )
+            .unwrap();
+        let kinds = inventory_objects(&layout2, &reused);
+        assert!(!kinds.is_empty(), "a real reuse still produces trees");
+        assert!(
+            kinds.iter().all(|object| matches!(object, Object::Tree(_))),
+            "a pure reuse stage's inventory is produced trees only: {kinds:?}"
+        );
+        let reopened = ScopedWorkspaceLayout::open(layout2.root()).unwrap();
+        reopened.read_state().unwrap();
     }
 }

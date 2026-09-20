@@ -49,6 +49,18 @@ impl FileReplacement {
     pub fn path(&self) -> &PartialPath {
         &self.path
     }
+
+    /// The caller-carried payload size — `Bytes` length, zero for a
+    /// `ReuseSelected` reference. Used to apply the per-file byte cap
+    /// before cloning a replacement into an overlay feed; the
+    /// authoritative per-path checks still run inside `replace_files`.
+    #[cfg(all(unix, not(target_arch = "wasm32")))]
+    pub(crate) fn payload_len(&self) -> usize {
+        match &self.content {
+            ReplacementContent::Bytes(bytes) => bytes.len(),
+            ReplacementContent::ReuseSelected(_) => 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -624,7 +636,12 @@ pub(crate) fn validate_output_object(
     }
 }
 
-fn charge_raw_bytes(
+/// The raw-pack framing charge one carried object adds: 5 framing bytes
+/// plus the object's encoded length, checked against
+/// `limits.max_raw_pack_bytes`. Shared by the producing overlay and the
+/// scoped-workspace retained-inventory accounting, which holds the same
+/// object set to the same budget.
+pub(crate) fn charge_raw_bytes(
     current: usize,
     bytes_len: usize,
     limits: &PartialLimits,

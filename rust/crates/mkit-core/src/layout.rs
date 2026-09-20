@@ -640,132 +640,371 @@ pub(crate) enum ScopedAuthority {
     Conflict,
 }
 
-/// Read at most `cap` bytes of `path`; `Ok(None)` when absent. The leaf
-/// must be a verified regular file — a symlink or other non-regular entry
-/// is a fail-closed `InvalidData` error, never a silently followed link
-/// to outside-root content.
-fn read_prefix(path: &Path, cap: usize) -> std::io::Result<Option<Vec<u8>>> {
-    use std::io::Read;
-    let meta = match std::fs::symlink_metadata(path) {
-        Ok(meta) => meta,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e),
+/// The scoped-authority classifier. On the supported native targets it
+/// is anchored under safely opened directory descriptors so no component
+/// or leaf of the scoped metadata can be a followed symlink, swapped
+/// FIFO, or outside-root read. The fallback keeps the lstat+open shape
+/// for targets without the descriptor primitives (discovery there is
+/// inert — `mkit` is not supported on them).
+mod scoped_classify {
+    use super::{
+        MAX_POINTER_FILE_BYTES, MKIT_DIR, POINTER_PREFIX, SCOPED_MARKER, SCOPED_MARKER_PREFIX,
+        SCOPED_STATE_DIR, ScopedAuthority,
     };
-    if !meta.is_file() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "scoped-state entry is not a regular file",
-        ));
-    }
-    let mut file = std::fs::File::open(path)?;
-    let mut buf = vec![0u8; cap];
-    let n = file.read(&mut buf)?;
-    buf.truncate(n);
-    Ok(Some(buf))
-}
 
-/// True when `root`'s `.mkit-scoped` carries recognizable scoped
-/// metadata: a `CURRENT` file beginning `MKCR`, or a lowercase-64-hex
-/// `generations/<digest>/` containing `manifest.bin` beginning `MKGM`.
-/// A bare `.mkit-scoped` directory, `workspace.lock`, or unrelated
-/// contents are NOT authority.
-fn scoped_state_recognized(root: &Path) -> std::io::Result<bool> {
-    let dir = root.join(SCOPED_STATE_DIR);
-    match std::fs::symlink_metadata(&dir) {
-        Ok(meta) => {
-            if !meta.is_dir() {
-                return Ok(false);
+    /// The shared decision: marker bytes (or absence) against whether
+    /// recognizable scoped metadata was found. `marker` is the opened
+    /// regular file's content prefix; `marker_dir` means `.mkit` is a
+    /// directory; `marker_nonregular` means it exists but can never be
+    /// the marker (symlink, FIFO, device).
+    fn decide(marker: Marker, scoped_state: bool) -> ScopedAuthority {
+        match marker {
+            // A `.mkit` that exists but is not a regular file (symlink,
+            // FIFO, device) can never be the scoped marker — and the
+            // classifier must not follow it to find out what it names.
+            // Recognized scoped state without its regular-file marker is
+            // an incomplete-install boundary, not "no authority":
+            // refusing here is what stops the ancestor walk from
+            // reaching a parent repository. Absence decides identically.
+            Marker::Absent | Marker::NonRegular => {
+                if scoped_state {
+                    ScopedAuthority::Incomplete
+                } else {
+                    ScopedAuthority::None
+                }
+            }
+            Marker::Directory => {
+                if scoped_state {
+                    ScopedAuthority::Conflict
+                } else {
+                    ScopedAuthority::None
+                }
+            }
+            Marker::Regular(bytes) => {
+                if bytes == SCOPED_MARKER {
+                    return ScopedAuthority::Scoped;
+                }
+                if bytes.starts_with(SCOPED_MARKER_PREFIX) {
+                    return ScopedAuthority::CorruptMarker;
+                }
+                if scoped_state {
+                    return if bytes.starts_with(POINTER_PREFIX.as_bytes()) {
+                        ScopedAuthority::Conflict
+                    } else {
+                        ScopedAuthority::Incomplete
+                    };
+                }
+                ScopedAuthority::None
             }
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(e) => return Err(e),
     }
-    if let Some(prefix) = read_prefix(&dir.join("CURRENT"), 4)?
-        && prefix == b"MKCR"
-    {
-        return Ok(true);
+
+    /// What the `.mkit` name at a classified root turned out to be.
+    enum Marker {
+        Absent,
+        Directory,
+        NonRegular,
+        Regular(Vec<u8>),
     }
-    let generations = dir.join("generations");
-    let entries = match std::fs::read_dir(&generations) {
-        Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(e) => return Err(e),
-    };
-    for entry in entries {
-        let entry = entry?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
+
+    /// Descriptor-anchored classifier: every probe opens components
+    /// `O_NOFOLLOW` beneath the parent directory descriptor, validates
+    /// the opened descriptor's metadata, and reads bounded prefixes.
+    #[cfg(all(unix, not(target_arch = "wasm32")))]
+    mod descriptor {
+        use super::{
+            MAX_POINTER_FILE_BYTES, MKIT_DIR, Marker, SCOPED_STATE_DIR, ScopedAuthority, decide,
         };
-        if name.len() != crate::hash::HEX_LEN
-            || !name
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-            || !entry.file_type()?.is_dir()
-        {
-            continue;
+        use crate::partial::sys::{self, OpenMode, SysError};
+        use std::io;
+        use std::path::Path;
+
+        fn sys_io(error: SysError) -> io::Error {
+            match error {
+                SysError::Io(e) => e,
+                SysError::AlreadyExists => {
+                    io::Error::new(io::ErrorKind::AlreadyExists, "name exists")
+                }
+                SysError::Unsupported => io::Error::new(io::ErrorKind::Unsupported, "unsupported"),
+            }
         }
-        if let Some(prefix) = read_prefix(&entry.path().join("manifest.bin"), 4)?
-            && prefix == b"MKGM"
-        {
-            return Ok(true);
+
+        /// Read up to `cap` bytes of the opened file — looped so one
+        /// short read cannot underfill the requested prefix.
+        fn read_prefix(file: &sys::File, cap: usize) -> io::Result<Vec<u8>> {
+            let mut buf = vec![0u8; cap];
+            let mut filled = 0usize;
+            while filled < cap {
+                match file.read(&mut buf[filled..]) {
+                    Ok(0) => break,
+                    Ok(n) => filled += n,
+                    Err(e) => return Err(sys_io(e)),
+                }
+            }
+            buf.truncate(filled);
+            Ok(buf)
+        }
+
+        /// Read the prefix of `dir/name`; `Ok(None)` when absent. The
+        /// leaf is opened `O_RDONLY|O_NONBLOCK|O_NOFOLLOW` and metadata
+        /// is validated on the descriptor — a symlink, FIFO, or other
+        /// non-regular leaf is a fail-closed `InvalidData`, never a
+        /// followed link or a blocked open.
+        fn read_leaf(dir: &sys::DirFd, name: &[u8], cap: usize) -> io::Result<Option<Vec<u8>>> {
+            let file = match sys::open_file(dir, name, OpenMode::Read) {
+                Ok(file) => file,
+                Err(e) if e.is_not_found() => return Ok(None),
+                Err(e) if e.is_symlink() => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "scoped-state entry is a symlink",
+                    ));
+                }
+                Err(e) => return Err(sys_io(e)),
+            };
+            let meta = file.metadata().map_err(sys_io)?;
+            if !meta.is_file() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "scoped-state entry is not a regular file",
+                ));
+            }
+            Ok(Some(read_prefix(&file, cap)?))
+        }
+
+        /// True when `root_fd`'s `.mkit-scoped` carries recognizable
+        /// scoped metadata: a `CURRENT` file beginning `MKCR`, or a
+        /// lowercase-64-hex `generations/<digest>/` containing
+        /// `manifest.bin` beginning `MKGM`. A bare `.mkit-scoped`
+        /// directory, `workspace.lock`, or unrelated contents —
+        /// including a same-named `generations` regular file or FIFO —
+        /// are NOT authority and must not fail the walk.
+        fn scoped_state_recognized(root_fd: &sys::DirFd) -> io::Result<bool> {
+            let state = match sys::open_dir(root_fd, SCOPED_STATE_DIR.as_bytes()) {
+                Ok(fd) => fd,
+                Err(e) if e.is_not_found() || e.is_symlink() || e.is_not_dir() => {
+                    return Ok(false);
+                }
+                Err(e) => return Err(sys_io(e)),
+            };
+            if let Some(prefix) = read_leaf(&state, b"CURRENT", 4)?
+                && prefix == b"MKCR"
+            {
+                return Ok(true);
+            }
+            let generations = match sys::open_dir(&state, b"generations") {
+                Ok(fd) => fd,
+                Err(e) if e.is_not_found() || e.is_symlink() || e.is_not_dir() => {
+                    return Ok(false);
+                }
+                Err(e) => return Err(sys_io(e)),
+            };
+            let mut entries = generations.read_dir().map_err(sys_io)?;
+            while let Some((name, _is_dir)) = entries.next_entry().map_err(sys_io)? {
+                if name.len() != crate::hash::HEX_LEN
+                    || !name
+                        .iter()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
+                {
+                    continue;
+                }
+                // The name alone is not authority — open the component
+                // no-follow and validate what it actually is.
+                let generation = match sys::open_dir(&generations, &name) {
+                    Ok(fd) => fd,
+                    Err(e) if e.is_not_found() || e.is_symlink() || e.is_not_dir() => {
+                        continue;
+                    }
+                    Err(e) => return Err(sys_io(e)),
+                };
+                if let Some(prefix) = read_leaf(&generation, b"manifest.bin", 4)?
+                    && prefix == b"MKGM"
+                {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+
+        /// Classify the scoped-workspace authority at exactly `root`.
+        pub(crate) fn classify_scoped_root(root: &Path) -> io::Result<ScopedAuthority> {
+            let root_fd = match sys::open_dir_path(root) {
+                Ok(fd) => fd,
+                // A textual ancestor that does not exist or is not a
+                // directory carries no authority itself.
+                Err(e) if e.is_not_found() || e.is_not_dir() => {
+                    return Ok(ScopedAuthority::None);
+                }
+                Err(e) if e.is_symlink() => {
+                    // A symlinked directory ancestor — reachable only
+                    // through the textual fallback, since `start` is
+                    // canonicalized — names a real directory that may
+                    // itself hold authority. Resolve the DIRECTORY once,
+                    // then keep every metadata probe no-follow beneath
+                    // it; the metadata path itself is never canonicalized.
+                    match std::fs::canonicalize(root)
+                        .ok()
+                        .and_then(|real| sys::open_dir_path(&real).ok())
+                    {
+                        Some(fd) => fd,
+                        None => return Ok(ScopedAuthority::None),
+                    }
+                }
+                Err(e) => return Err(sys_io(e)),
+            };
+            let scoped_state = scoped_state_recognized(&root_fd)?;
+            let marker = match sys::open_file(&root_fd, MKIT_DIR.as_bytes(), OpenMode::Read) {
+                Ok(file) => {
+                    let meta = file.metadata().map_err(sys_io)?;
+                    if meta.is_dir() {
+                        Marker::Directory
+                    } else if !meta.is_file() {
+                        Marker::NonRegular
+                    } else {
+                        let cap = usize::try_from(MAX_POINTER_FILE_BYTES).unwrap_or(usize::MAX);
+                        Marker::Regular(read_prefix(&file, cap)?)
+                    }
+                }
+                Err(e) if e.is_not_found() => Marker::Absent,
+                Err(e) if e.is_symlink() => Marker::NonRegular,
+                Err(e) => return Err(sys_io(e)),
+            };
+            Ok(decide(marker, scoped_state))
         }
     }
-    Ok(false)
+
+    /// Path-based fallback for targets without the descriptor
+    /// primitives; discovery is not exercised there.
+    #[cfg(not(all(unix, not(target_arch = "wasm32"))))]
+    mod paths {
+        use super::{
+            MAX_POINTER_FILE_BYTES, MKIT_DIR, Marker, SCOPED_STATE_DIR, ScopedAuthority, decide,
+        };
+        use std::io;
+        use std::path::Path;
+
+        /// Read at most `cap` bytes of `path`; `Ok(None)` when absent.
+        /// The leaf must be a verified regular file — a symlink or other
+        /// non-regular entry is a fail-closed `InvalidData` error.
+        fn read_prefix(path: &Path, cap: usize) -> io::Result<Option<Vec<u8>>> {
+            use std::io::Read;
+            let meta = match std::fs::symlink_metadata(path) {
+                Ok(meta) => meta,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+                Err(e) => return Err(e),
+            };
+            if !meta.is_file() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "scoped-state entry is not a regular file",
+                ));
+            }
+            let mut file = std::fs::File::open(path)?;
+            let mut buf = vec![0u8; cap];
+            let mut filled = 0usize;
+            while filled < cap {
+                match file.read(&mut buf[filled..]) {
+                    Ok(0) => break,
+                    Ok(n) => filled += n,
+                    Err(e) => return Err(e),
+                }
+            }
+            buf.truncate(filled);
+            Ok(Some(buf))
+        }
+
+        fn scoped_state_recognized(root: &Path) -> io::Result<bool> {
+            let dir = root.join(SCOPED_STATE_DIR);
+            match std::fs::symlink_metadata(&dir) {
+                Ok(meta) => {
+                    if !meta.is_dir() {
+                        return Ok(false);
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+                Err(e) => return Err(e),
+            }
+            if let Some(prefix) = read_prefix(&dir.join("CURRENT"), 4)?
+                && prefix == b"MKCR"
+            {
+                return Ok(true);
+            }
+            let generations = dir.join("generations");
+            // A same-named regular file, symlink, or FIFO is unrelated —
+            // never authority and never an error.
+            match std::fs::symlink_metadata(&generations) {
+                Ok(meta) => {
+                    if !meta.is_dir() {
+                        return Ok(false);
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+                Err(e) => return Err(e),
+            }
+            let entries = match std::fs::read_dir(&generations) {
+                Ok(e) => e,
+                // Swapped to a non-directory between the metadata check
+                // and open: still an unrelated shape, not an I/O failure.
+                Err(e)
+                    if e.kind() == io::ErrorKind::NotFound
+                        || e.kind() == io::ErrorKind::NotADirectory =>
+                {
+                    return Ok(false);
+                }
+                Err(e) => return Err(e),
+            };
+            for entry in entries {
+                let entry = entry?;
+                let name = entry.file_name();
+                let Some(name) = name.to_str() else {
+                    continue;
+                };
+                if name.len() != crate::hash::HEX_LEN
+                    || !name
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                    || !entry.file_type()?.is_dir()
+                {
+                    continue;
+                }
+                if let Some(prefix) = read_prefix(&entry.path().join("manifest.bin"), 4)?
+                    && prefix == b"MKGM"
+                {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+
+        pub(crate) fn classify_scoped_root(root: &Path) -> io::Result<ScopedAuthority> {
+            let scoped_state = scoped_state_recognized(root)?;
+            let dot_mkit = root.join(MKIT_DIR);
+            let meta = match std::fs::symlink_metadata(&dot_mkit) {
+                Ok(m) => m,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    return Ok(decide(Marker::Absent, scoped_state));
+                }
+                Err(e) => return Err(e),
+            };
+            if meta.is_dir() {
+                return Ok(decide(Marker::Directory, scoped_state));
+            }
+            if !meta.is_file() {
+                return Ok(decide(Marker::NonRegular, scoped_state));
+            }
+            let cap = usize::try_from(MAX_POINTER_FILE_BYTES).unwrap_or(usize::MAX);
+            let bytes = read_prefix(&dot_mkit, cap)?.unwrap_or_default();
+            Ok(decide(Marker::Regular(bytes), scoped_state))
+        }
+    }
+
+    #[cfg(all(unix, not(target_arch = "wasm32")))]
+    pub(crate) use descriptor::classify_scoped_root;
+    #[cfg(not(all(unix, not(target_arch = "wasm32"))))]
+    pub(crate) use paths::classify_scoped_root;
 }
 
-/// Classify the scoped-workspace authority at exactly `root`.
-pub(crate) fn classify_scoped_root(root: &Path) -> std::io::Result<ScopedAuthority> {
-    let scoped_state = scoped_state_recognized(root)?;
-    let dot_mkit = root.join(MKIT_DIR);
-    let meta = match std::fs::symlink_metadata(&dot_mkit) {
-        Ok(m) => m,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(if scoped_state {
-                ScopedAuthority::Incomplete
-            } else {
-                ScopedAuthority::None
-            });
-        }
-        Err(e) => return Err(e),
-    };
-    if meta.is_dir() {
-        return Ok(if scoped_state {
-            ScopedAuthority::Conflict
-        } else {
-            ScopedAuthority::None
-        });
-    }
-    if !meta.is_file() {
-        // A `.mkit` that exists but is not a regular file (symlink, FIFO,
-        // device) can never be the scoped marker — and the classifier
-        // must not follow it to find out what it names. Recognized
-        // scoped state without its regular-file marker is an
-        // incomplete-install boundary, not "no authority": refusing here
-        // is what stops the ancestor walk from reaching a parent repo.
-        return Ok(if scoped_state {
-            ScopedAuthority::Incomplete
-        } else {
-            ScopedAuthority::None
-        });
-    }
-    let cap = usize::try_from(MAX_POINTER_FILE_BYTES).unwrap_or(usize::MAX);
-    let bytes = read_prefix(&dot_mkit, cap)?.unwrap_or_default();
-    if bytes == SCOPED_MARKER {
-        return Ok(ScopedAuthority::Scoped);
-    }
-    if bytes.starts_with(SCOPED_MARKER_PREFIX) {
-        return Ok(ScopedAuthority::CorruptMarker);
-    }
-    if scoped_state {
-        return Ok(if bytes.starts_with(POINTER_PREFIX.as_bytes()) {
-            ScopedAuthority::Conflict
-        } else {
-            ScopedAuthority::Incomplete
-        });
-    }
-    Ok(ScopedAuthority::None)
-}
+pub(crate) use scoped_classify::classify_scoped_root;
 
 /// Refuse any scoped-workspace authority at `start` or above it, so
 /// ordinary operations invoked inside a scoped root fail before they can
@@ -1541,6 +1780,146 @@ mod tests {
         // `.mkit` as a symlink (pointing anywhere — the classifier must
         // not follow it) overlapping scoped metadata.
         std::os::unix::fs::symlink(repo.join(MKIT_DIR), root.join(MKIT_DIR)).unwrap();
+        assert!(matches!(
+            check_scoped_boundary(&root),
+            Err(DiscoverError::ScopedInstallIncomplete(_))
+        ));
+        assert!(matches!(
+            discover(&root.join("deep")),
+            Err(DiscoverError::ScopedInstallIncomplete(_))
+        ));
+    }
+
+    /// A `generations` symlink to an external directory must never be
+    /// followed: the outside MKGM manifest is not scoped authority and
+    /// must not even be read. The descriptor-anchored classifier opens
+    /// the component no-follow, so this unrelated shape leaves ordinary
+    /// discovery working.
+    #[test]
+    #[cfg(unix)]
+    fn generations_symlink_is_never_followed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        // Ordinary repository with a scoped-named dir whose `generations`
+        // component is a symlink to external manifest content.
+        std::fs::create_dir_all(root.join(MKIT_DIR)).unwrap();
+        std::fs::create_dir(root.join(SCOPED_STATE_DIR)).unwrap();
+        let outside = tmp.path().join("outside");
+        let gen_dir = outside.join("a".repeat(crate::hash::HEX_LEN));
+        std::fs::create_dir_all(&gen_dir).unwrap();
+        std::fs::write(gen_dir.join("manifest.bin"), b"MKGM\x01rest").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join(SCOPED_STATE_DIR).join("generations"))
+            .unwrap();
+        check_scoped_boundary(&root).unwrap();
+        assert!(discover(&root).is_ok());
+        assert!(discover(&root.join("nested")).is_ok());
+    }
+
+    /// An unrelated `.mkit-scoped/generations` REGULAR FILE inside an
+    /// ordinary repository is a name collision, not scoped authority —
+    /// ordinary discovery, open, and status must keep working.
+    #[test]
+    fn unrelated_mkit_scoped_entries_do_not_break_ordinary_repos() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join(MKIT_DIR).join("objects")).unwrap();
+        std::fs::write(
+            root.join(MKIT_DIR).join("format"),
+            format!("{}\n", crate::store::FORMAT_VALUE),
+        )
+        .unwrap();
+        let scoped = root.join(SCOPED_STATE_DIR);
+        std::fs::create_dir(&scoped).unwrap();
+        // A same-named regular file where a scoped directory could be:
+        // nothing recognizable, so it must not become authority — and
+        // must not error the walk either.
+        std::fs::write(scoped.join("generations"), b"unrelated").unwrap();
+        check_scoped_boundary(&root).unwrap();
+        assert!(discover(&root).is_ok());
+        assert!(crate::store::ObjectStore::open(&RepoLayout::single(&root)).is_ok());
+        // The same shape nested below the invocation directory.
+        assert!(discover(&root.join("deep/nested")).is_ok());
+        // `.mkit-scoped` as a regular file or symlink is likewise
+        // unrelated.
+        let other = tmp.path().join("other");
+        std::fs::create_dir_all(other.join(MKIT_DIR)).unwrap();
+        std::fs::write(other.join(SCOPED_STATE_DIR), b"unrelated").unwrap();
+        check_scoped_boundary(&other).unwrap();
+        #[cfg(unix)]
+        {
+            let linked = tmp.path().join("linked");
+            std::fs::create_dir_all(linked.join(MKIT_DIR)).unwrap();
+            std::os::unix::fs::symlink(scoped.as_path(), linked.join(SCOPED_STATE_DIR)).unwrap();
+            check_scoped_boundary(&linked).unwrap();
+        }
+    }
+
+    /// A FIFO named `generations` is unrelated, not authority — the
+    /// classifier must reject-by-shape without blocking and without
+    /// converting the type mismatch into an I/O failure.
+    #[test]
+    #[cfg(unix)]
+    fn generations_fifo_is_unrelated_not_authority() {
+        use std::os::unix::ffi::OsStrExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join(MKIT_DIR)).unwrap();
+        let scoped = root.join(SCOPED_STATE_DIR);
+        std::fs::create_dir(&scoped).unwrap();
+        let fifo = scoped.join("generations");
+        let c_path = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: mkfifo(2) on a CString path inside our own tempdir.
+        #[allow(unsafe_code)]
+        let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
+        assert_eq!(rc, 0);
+        check_scoped_boundary(&root).unwrap();
+        assert!(discover(&root).is_ok());
+    }
+
+    /// A FIFO substituted for `CURRENT` or `manifest.bin` fails closed
+    /// and bounded — the nonblocking descriptor open refuses by type,
+    /// never stalls reading the pipe.
+    #[test]
+    #[cfg(unix)]
+    fn fifo_state_leaves_fail_closed_without_blocking() {
+        use std::os::unix::ffi::OsStrExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("ws");
+        let scoped = root.join(SCOPED_STATE_DIR);
+        std::fs::create_dir_all(&scoped).unwrap();
+        let mkfifo = |path: &Path| {
+            let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+            // SAFETY: mkfifo(2) on a CString path inside our own tempdir.
+            #[allow(unsafe_code)]
+            let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
+            assert_eq!(rc, 0);
+        };
+        mkfifo(&scoped.join("CURRENT"));
+        assert!(check_scoped_boundary(&root).is_err());
+        let gen_dir = scoped.join(format!("generations/{}", "c".repeat(crate::hash::HEX_LEN)));
+        std::fs::remove_file(scoped.join("CURRENT")).unwrap();
+        std::fs::create_dir_all(&gen_dir).unwrap();
+        mkfifo(&gen_dir.join("manifest.bin"));
+        assert!(check_scoped_boundary(&root).is_err());
+    }
+
+    /// Recognizable scoped authority still refuses once a same-named
+    /// unrelated entry is ruled out: real `MKCR`/`MKGM` content beneath
+    /// `.mkit-scoped` with no valid marker.
+    #[test]
+    #[cfg(unix)]
+    fn real_scoped_authority_still_refuses_after_unrelated_filtering() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join(MKIT_DIR)).unwrap();
+        let root = repo.join("ws");
+        std::fs::create_dir(&root).unwrap();
+        // Real MKCR bytes plus unrelated junk in the same directory:
+        // the junk does not weaken the recognized authority.
+        let scoped = root.join(SCOPED_STATE_DIR);
+        std::fs::create_dir(&scoped).unwrap();
+        std::fs::write(scoped.join("CURRENT"), b"MKCR\x01rest").unwrap();
+        std::fs::write(scoped.join("generations"), b"unrelated").unwrap();
         assert!(matches!(
             check_scoped_boundary(&root),
             Err(DiscoverError::ScopedInstallIncomplete(_))

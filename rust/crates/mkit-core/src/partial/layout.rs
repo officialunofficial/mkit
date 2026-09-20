@@ -89,6 +89,14 @@ pub(crate) enum Fault {
     AfterCurrentSwitch = 5,
     /// After all fsyncs (transition otherwise succeeded).
     AfterSync = 6,
+    /// Mid-write inside an immutable-file temporary: only a prefix is
+    /// written before the abort — the canonical name is never touched.
+    ImmutablePartialWrite = 7,
+    /// Immutable temporary fully written, before its file fsync.
+    ImmutableBeforeFileSync = 8,
+    /// Immutable name installed by the no-replace rename, before the
+    /// containing directory is fsynced.
+    ImmutableBeforeDirSync = 9,
 }
 
 impl Faults {
@@ -114,13 +122,13 @@ impl Faults {
 
 /// A scoped workspace opened (or just installed) at `root`. The layout
 /// owns the canonicalized root path, the `.mkit-scoped` directory
-/// descriptor, and the stable lock file descriptor — every state read and
-/// transition is descriptor-anchored through them.
+/// descriptor, and the recorded `workspace.lock` inode — every state read
+/// and transition is descriptor-anchored through them, and every
+/// transition opens a fresh inode-verified lock descriptor of its own.
 #[derive(Debug)]
 pub struct ScopedWorkspaceLayout {
     root: PathBuf,
     state_dir: DirFd,
-    lock_file: sys::File,
     /// `(dev, ino)` of `workspace.lock` at open: a transition that sees a
     /// different inode under the lock path fails closed.
     lock_identity: (u64, u64),
@@ -435,6 +443,7 @@ impl ScopedWorkspaceLayout {
             BUNDLES_DIR,
             &bundle_file_name(&bundle_digest),
             bundle_bytes,
+            &Faults::new(),
         )?;
 
         // Initial transaction generation 0 / base revision 0: clean stage
@@ -474,19 +483,20 @@ impl ScopedWorkspaceLayout {
                 .collect(),
             required_object_ids: Vec::new(),
         };
-        state::commit(
-            &state_fd,
-            &Faults::new(),
-            &StatePlan {
-                workspace,
-                stage,
-                pending: None,
-                accepted: None,
-                objects: std::collections::BTreeMap::new(),
-                bundles: Vec::new(),
-                updates: Vec::new(),
-            },
-        )?;
+        // The initial state is clean by construction, but it goes through
+        // the same pre-publication validation every transition shares —
+        // CURRENT never selects a state the reopen validator rejects.
+        let plan = StatePlan {
+            workspace,
+            stage,
+            pending: None,
+            accepted: None,
+            objects: std::collections::BTreeMap::new(),
+            bundles: Vec::new(),
+            updates: Vec::new(),
+        };
+        state::preflight_next(&plan, snapshot, &std::collections::BTreeMap::new())?;
+        state::commit(&state_fd, &Faults::new(), &plan)?;
 
         // Materialize only verified selected files, preserving modes and
         // zero-byte files.
@@ -599,7 +609,6 @@ impl ScopedWorkspaceLayout {
         let layout = Self {
             root: canonical,
             state_dir,
-            lock_file,
             lock_identity,
             faults: Faults::new(),
         };
@@ -624,13 +633,48 @@ impl ScopedWorkspaceLayout {
         &self.state_dir
     }
 
-    /// Kernel-lock `workspace.lock` exclusively and re-verify its inode —
-    /// a lock file unlinked and recreated would silently split the lock
-    /// domain, so the path is re-opened fresh (no-follow) and its inode
-    /// compared against the one this handle was opened with.
-    fn lock(&self) -> Result<(), PartialStateError> {
+    /// Run `f` under the exclusive workspace lock.
+    ///
+    /// Every operation opens a FRESH descriptor of `workspace.lock`:
+    /// flock ownership belongs to the open-file description, so a second
+    /// flock arriving on a descriptor that already holds the lock would
+    /// be a no-op — two threads sharing this handle must never proceed
+    /// through the same already-locked descriptor. The descriptor is the
+    /// guard: closing it, including during panic unwind, releases this
+    /// operation's kernel lock, so a panic inside `f` cannot strand the
+    /// lock or let a later invocation skip synchronization. There is no
+    /// poisoning state — a failed or panicked operation leaves the lock
+    /// free and the state authority untouched.
+    pub(crate) fn with_lock<T>(
+        &self,
+        f: impl FnOnce(&DirFd) -> Result<T, PartialStateError>,
+    ) -> Result<T, PartialStateError> {
         let lock_path = self.root.join(STATE_DIR).join(LOCK_FILE);
-        self.lock_file
+        // Open fresh and verify the inode BEFORE flocking — never take a
+        // kernel lock on an inode this handle did not pin at open.
+        let operation_lock =
+            sys::open_file(&self.state_dir, LOCK_FILE.as_bytes(), OpenMode::ReadWrite).map_err(
+                |e| PartialStateError::LockFailed {
+                    path: lock_path.clone(),
+                    source: match e {
+                        SysError::Io(source) => source,
+                        _ => std::io::Error::other("workspace lock"),
+                    },
+                },
+            )?;
+        let meta = operation_lock
+            .metadata()
+            .map_err(|e| sys_err(lock_path.clone(), e))?;
+        if !meta.is_file() || meta.nlink() != 1 {
+            return Err(unsafe_entry(
+                lock_path,
+                "workspace.lock must be a regular file with one link",
+            ));
+        }
+        if (meta.dev(), meta.ino()) != self.lock_identity {
+            return Err(unsafe_entry(lock_path, "workspace.lock inode was replaced"));
+        }
+        operation_lock
             .lock_exclusive()
             .map_err(|e| PartialStateError::LockFailed {
                 path: lock_path.clone(),
@@ -639,36 +683,8 @@ impl ScopedWorkspaceLayout {
                     _ => std::io::Error::other("workspace lock"),
                 },
             })?;
-        // Any failure after the kernel lock is taken must release it —
-        // a stranded lock would deadlock every later transition.
-        let verify = || -> Result<(), PartialStateError> {
-            let fresh = sys::open_file(&self.state_dir, LOCK_FILE.as_bytes(), OpenMode::ReadWrite)
-                .map_err(|e| sys_err(lock_path.clone(), e))?;
-            let meta = fresh
-                .metadata()
-                .map_err(|e| sys_err(lock_path.clone(), e))?;
-            if (meta.dev(), meta.ino()) != self.lock_identity {
-                return Err(unsafe_entry(lock_path, "workspace.lock inode was replaced"));
-            }
-            Ok(())
-        };
-        match verify() {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                let _ = self.lock_file.unlock();
-                Err(error)
-            }
-        }
-    }
-
-    /// Run `f` under the exclusive workspace lock, always unlocking.
-    pub(crate) fn with_lock<T>(
-        &self,
-        f: impl FnOnce(&DirFd) -> Result<T, PartialStateError>,
-    ) -> Result<T, PartialStateError> {
-        self.lock()?;
         let result = f(&self.state_dir);
-        let _ = self.lock_file.unlock();
+        drop(operation_lock);
         result
     }
 }
