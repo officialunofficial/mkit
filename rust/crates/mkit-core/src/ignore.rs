@@ -62,6 +62,65 @@ enum Segment {
     Glob(String),
 }
 
+/// Fast-path classification for a non-anchored, single-glob-segment
+/// pattern — the overwhelmingly common shape in real `.gitignore` files
+/// (`*.log`, `node_modules`, `.DS_Store`, `build`, …). Precomputed once at
+/// parse time (see `classify_basename_glob`) so [`Pattern::matches`] can
+/// test the path's *basename* directly instead of going through
+/// [`match_segments`]'s any-depth backtracking, which for this pattern
+/// shape (`[DoubleStar, Glob(g)]`) always fails at every split point
+/// except the last — a lone trailing `Glob` requires the remainder to be
+/// empty. `Literal`/`Suffix`/`Prefix` additionally skip `segment_match`'s
+/// own byte-by-byte backtracking in favor of a direct string op.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BasenameKind {
+    /// No metacharacters (`* ? [ \`): exact basename match.
+    Literal(String),
+    /// `*literal` (and no other metacharacters): `basename.ends_with`.
+    Suffix(String),
+    /// `literal*` (and no other metacharacters): `basename.starts_with`.
+    Prefix(String),
+    /// Any other non-anchored single-segment glob: run the general
+    /// single-segment matcher against the basename only.
+    Glob(String),
+}
+
+impl BasenameKind {
+    fn matches(&self, base: &str) -> bool {
+        match self {
+            Self::Literal(s) => base == s,
+            Self::Suffix(s) => base.ends_with(s.as_str()),
+            Self::Prefix(s) => base.starts_with(s.as_str()),
+            Self::Glob(g) => segment_match(g.as_bytes(), base.as_bytes()),
+        }
+    }
+}
+
+/// Classify a non-anchored single-segment glob body (`core`, already
+/// known not to be `**`) for [`BasenameKind`]. Only ever falls back to
+/// [`BasenameKind::Glob`] — never incorrect, just unclassified — so this
+/// is always safe to extend with more cases later.
+fn classify_basename_glob(g: &str) -> BasenameKind {
+    fn has_special(s: &str) -> bool {
+        s.bytes().any(|b| matches!(b, b'*' | b'?' | b'[' | b'\\'))
+    }
+    if !has_special(g) {
+        return BasenameKind::Literal(g.to_string());
+    }
+    if let Some(rest) = g.strip_prefix('*')
+        && !has_special(rest)
+    {
+        return BasenameKind::Suffix(rest.to_string());
+    }
+    if let Some(prefix) = g.strip_suffix('*')
+        && !prefix.is_empty()
+        && !has_special(prefix)
+    {
+        return BasenameKind::Prefix(prefix.to_string());
+    }
+    BasenameKind::Glob(g.to_string())
+}
+
 /// A single ignore pattern with its modifiers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pattern {
@@ -78,11 +137,25 @@ pub struct Pattern {
     /// Effective match segments. Non-anchored patterns carry a leading
     /// [`Segment::DoubleStar`] so they match at any depth.
     segments: Vec<Segment>,
+    /// `Some` for the common non-anchored single-segment shape — see
+    /// [`BasenameKind`]. `None` (anchored, or a pattern with an internal
+    /// `/` or `**`) falls back to the general [`match_segments`] engine.
+    ///
+    /// Boxed so this field stays pointer-sized (niche-optimized, since
+    /// `Box` is never null) regardless of `BasenameKind`'s payload —
+    /// `IgnoreList::is_ignored` linearly scans `self.patterns`, so an
+    /// inline `String`-bearing variant here would grow every `Pattern` by
+    /// ~50%, hurting cache density for the (unaffected) general-engine
+    /// scan even on repos with few or no basename-fast-path patterns.
+    basename_kind: Option<Box<BasenameKind>>,
 }
 
 impl Pattern {
     /// Match this pattern against a slice of path segments.
     fn matches(&self, path: &[&str]) -> bool {
+        if let Some(kind) = &self.basename_kind {
+            return path.last().is_some_and(|base| kind.matches(base));
+        }
         match_segments(&self.segments, path)
     }
 }
@@ -129,17 +202,20 @@ impl IgnoreList {
         if path.is_empty() {
             return false;
         }
-        // Walk patterns in order; last match wins.
-        let mut ignored = false;
-        for p in &self.patterns {
+        // Last match wins, so walk in reverse and return the first
+        // (highest-index) match — equivalent to scanning forward and
+        // keeping the last, but skips every earlier pattern once a
+        // deciding match is found instead of always paying for the full
+        // list.
+        for p in self.patterns.iter().rev() {
             if p.dir_only && !is_dir {
                 continue;
             }
             if p.matches(&path) {
-                ignored = !p.negated;
+                return !p.negated;
             }
         }
-        ignored
+        false
     }
 
     /// Like [`is_ignored`](Self::is_ignored), but also returns `true` when any
@@ -257,6 +333,13 @@ fn finish_pattern(body: &str, negated: bool) -> Option<Pattern> {
         return None;
     }
 
+    // `!anchored` means `core` has no `/` at all, i.e. it is already a
+    // single segment — the shape `BasenameKind` fast-paths. `"**"` is
+    // excluded: it becomes two `DoubleStar` segments (matches one-or-more
+    // of *any* remaining segments), not a basename-only glob.
+    let basename_kind =
+        (!anchored && core != "**").then(|| Box::new(classify_basename_glob(core)));
+
     let mut segments: Vec<Segment> = core
         .split('/')
         .filter(|s| !s.is_empty())
@@ -282,6 +365,7 @@ fn finish_pattern(body: &str, negated: bool) -> Option<Pattern> {
         dir_only,
         anchored,
         segments,
+        basename_kind,
     })
 }
 
@@ -640,5 +724,71 @@ mod tests {
         assert!(glob_match("*", "anything"));
         // Single-level: `*` never crosses `/`.
         assert!(!glob_match("*", "a/b"));
+    }
+
+    // --- BasenameKind fast path ----------------------------------------
+
+    #[test]
+    fn basename_kind_classifies_common_shapes() {
+        assert_eq!(
+            classify_basename_glob("node_modules"),
+            BasenameKind::Literal("node_modules".to_string())
+        );
+        assert_eq!(
+            classify_basename_glob("*.log"),
+            BasenameKind::Suffix(".log".to_string())
+        );
+        assert_eq!(
+            classify_basename_glob("build*"),
+            BasenameKind::Prefix("build".to_string())
+        );
+        // Bare `*` is a degenerate suffix: matches every basename.
+        assert_eq!(classify_basename_glob("*"), BasenameKind::Suffix(String::new()));
+        // Multiple/mixed metacharacters fall back to the general glob.
+        assert_eq!(
+            classify_basename_glob("*foo*"),
+            BasenameKind::Glob("*foo*".to_string())
+        );
+        assert_eq!(
+            classify_basename_glob("file?.txt"),
+            BasenameKind::Glob("file?.txt".to_string())
+        );
+        assert_eq!(
+            classify_basename_glob("file[0-9].txt"),
+            BasenameKind::Glob("file[0-9].txt".to_string())
+        );
+    }
+
+    #[test]
+    fn basename_kind_fast_path_is_used_for_non_anchored_single_segment() {
+        let il = parse("node_modules\n*.log\nbuild*\nsrc/gen\n");
+        assert!(il.patterns()[0].basename_kind.is_some());
+        assert!(il.patterns()[1].basename_kind.is_some());
+        assert!(il.patterns()[2].basename_kind.is_some());
+        // Anchored (contains `/`) — must fall back to the general engine.
+        assert!(il.patterns()[3].basename_kind.is_none());
+    }
+
+    proptest::proptest! {
+        /// `Pattern::matches`' `BasenameKind` fast path must always agree
+        /// with the general `match_segments` engine it is short-circuiting
+        /// — for arbitrary non-anchored single-segment glob bodies against
+        /// arbitrary multi-segment paths. Guards the classification in
+        /// `classify_basename_glob` (and the algebraic fact it relies on:
+        /// `[DoubleStar, Glob(g)]` can only ever match a path's last
+        /// segment) against a future edge case being misclassified.
+        #[test]
+        fn proptest_basename_fast_path_matches_general_engine(
+            glob in "[a-zA-Z0-9_.*?-]{0,8}",
+            path_segs in proptest::collection::vec("[a-zA-Z0-9_.-]{0,6}", 1..4),
+        ) {
+            proptest::prop_assume!(!glob.is_empty() && glob != "**");
+            if let Some(pat) = finish_pattern(&glob, false) {
+                let path: Vec<&str> = path_segs.iter().map(String::as_str).collect();
+                let fast = pat.matches(&path);
+                let general = match_segments(&pat.segments, &path);
+                proptest::prop_assert_eq!(fast, general, "glob={:?} path={:?}", glob, path);
+            }
+        }
     }
 }
