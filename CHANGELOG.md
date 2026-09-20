@@ -78,10 +78,15 @@ train).
   authenticated selected representations instead of re-canonicalizing
   them. The retained-object inventory follows one deterministic rule
   regardless of the caller's `Bytes` versus `ReuseSelected` form &mdash;
-  produced objects minus ids the verified selection already authenticates
-  &mdash; so a byte-copy of selected content persists what its reuse
-  equivalent would, and the same rule is checked before `CURRENT` moves
-  and on reopen. Replacement batches are aggregate-validated on borrowed
+  produced objects minus ids the verified selection already authenticates,
+  where the base-authenticated set covers each selected representation id
+  AND its declared chunk dependencies &mdash; so a byte-copy of selected
+  content persists what its reuse equivalent would for plain and chunked
+  representations alike, a chunk shared between a reused base
+  representation and new content is deduplicated while genuinely new
+  manifests and chunks stay retained, and the same rule is checked
+  before `CURRENT` moves and on reopen. Replacement batches are
+  aggregate-validated on borrowed
   input before any payload is cloned, and retained-object reads are
   bounded by remaining raw-pack headroom. The lock sentinel's identity
   is re-verified after the blocking flock returns, so a sentinel
@@ -91,8 +96,10 @@ train).
   `.mkit-scoped`-named entries &mdash; including nonregular `CURRENT`,
   `generations`, or `manifest.bin` shapes &mdash; do not become scoped
   authority, do not hide genuine authority, and do not break ordinary
-  repositories, and the ancestor walk resolves a directory alias naming
-  a scoped root even when the probed descendant does not exist.
+  repositories, and the ancestor walk resolves the longest existing
+  caller prefix and continues on its REAL ancestors, so a directory
+  alias naming a scoped root or a directory inside it is refused even
+  when the probed descendant does not exist.
   Ordinary commands, `ObjectStore::open`,
   and `ObjectStore::init` refuse scoped roots, corrupt markers, incomplete
   installs, and layout conflicts before touching ancestor repositories or

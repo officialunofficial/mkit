@@ -18,9 +18,11 @@
 #   mkit-core  — `partial::sys`, the scoped-workspace POSIX descriptor
 #                boundary (openat/`O_NOFOLLOW`/`O_DIRECTORY` opens,
 #                `flock`, `fchmod`, `fdopendir`, `renameat2`-family
-#                calls, and `lstat`/`fstatat(AT_SYMLINK_NOFOLLOW)` checks
+#                calls, `lstat`/`fstatat(AT_SYMLINK_NOFOLLOW)` checks
 #                that normalize macOS's `ENOTDIR` result for symlinked
-#                directory components to `ELOOP`): the no-follow
+#                directory components to `ELOOP`, and the cfg(test)-only
+#                `flock(LOCK_EX|LOCK_NB)` probe the deterministic
+#                lock-contention regression uses): the no-follow
 #                descriptor discipline cannot be expressed through safe
 #                `std::fs` APIs, so the module concentrates all of it
 #                behind reviewed safe wrappers — callers never write
@@ -48,7 +50,7 @@ set -euo pipefail
 ceiling_for() {
     case "$1" in
         mkit-cli)               echo 23 ;;
-        mkit-core)              echo 107 ;;
+        mkit-core)              echo 111 ;;
         mkit-keystore)          echo 0  ;;
         mkit-attest)            echo 0  ;;
         mkit-rpc)               echo 0  ;;

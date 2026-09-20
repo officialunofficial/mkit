@@ -692,8 +692,10 @@ never working-tree contents. The staged file map and pending operation come
 from the selected generation alone; the working tree is materialized only at
 create and is never consulted or rewritten by transitions. A transition
 validates the complete proposed state &mdash; bindings, selection coverage,
-pending/accepted consistency, the exact produced-object inventory, staged
-representations, and aggregate limits &mdash; before `CURRENT` can select it, so
+pending/accepted consistency, the exact produced-object inventory minus the
+base-authenticated set (each selected representation id AND its declared
+chunk dependencies), staged representations, and aggregate limits &mdash;
+before `CURRENT` can select it, so
 `CURRENT` never names a generation the reopen checks would reject. Immutable
 artifacts and generation members install by sibling-temporary write, fsync,
 and no-replace rename, so an interrupted write can never occupy a canonical
@@ -728,11 +730,15 @@ could fork the generation sequence.
 `staged_alternate_reuse_survives_replay_and_pending`) and
 `mkit_core::partial::state::tests` fault-seam cases covering every
 commit-sequence injection point plus pre-publication validation, staged
-chunk-bound, retained-inventory, deterministic lock-contention, and
-stale-sentinel cases
+chunk-bound, retained-inventory, chunked-inventory, deterministic
+lock-contention, lock-gate-isolation, and stale-sentinel cases
 (`over_budget_complete_stage_is_rejected_before_publish`,
 `staged_chunked_declared_total_stops_at_first_overrun`,
 `required_inventory_bound_check_precedes_read`,
 `bytes_copy_of_selected_content_survives_reopen_and_pending`,
+`bytes_copy_of_chunked_selected_content_survives_reopen_and_pending`,
+`chunked_bytes_copy_and_reuse_persist_identical_stage_records`,
+`mixed_chunked_batch_shares_base_chunks_and_retains_new_ones`,
 `lock_serializes_competing_writers_deterministically`,
+`lock_gates_are_isolated_per_workspace_and_phase`,
 `replaced_lock_sentinel_refuses_stale_waiter`).

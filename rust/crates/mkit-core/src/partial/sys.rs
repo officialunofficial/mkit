@@ -177,6 +177,30 @@ impl File {
         }
         Ok(())
     }
+
+    /// Test-only nonblocking acquisition probe on THIS descriptor:
+    /// `Ok(true)` acquired, `Ok(false)` would block (`EWOULDBLOCK`) —
+    /// proof a foreign open-file description holds the lock. A
+    /// `true` result on an operation's own descriptor while another
+    /// operation believes it holds the lock exposes the shared
+    /// open-file-description defect: a redundant `LOCK_EX` on an
+    /// already-locked description is a no-op success, so it must never
+    /// be unlocked from the probe side.
+    #[cfg(test)]
+    pub(crate) fn try_lock_exclusive(&self) -> Result<bool, SysError> {
+        // SAFETY: `flock(2)` on a valid borrowed fd; LOCK_NB makes it a
+        // pure query — failure leaves lock state untouched.
+        #[allow(unsafe_code)]
+        let rc = unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if rc == 0 {
+            return Ok(true);
+        }
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::EWOULDBLOCK) {
+            return Ok(false);
+        }
+        Err(error.into())
+    }
 }
 
 /// An open `O_RDONLY | O_DIRECTORY | O_NOFOLLOW` directory descriptor.

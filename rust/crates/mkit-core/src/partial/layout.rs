@@ -683,7 +683,11 @@ impl ScopedWorkspaceLayout {
             return Err(unsafe_entry(lock_path, "workspace.lock inode was replaced"));
         }
         #[cfg(test)]
-        lock_gate::signal(lock_gate::Phase::BeforeFlock, self.lock_identity);
+        lock_gate::signal(
+            lock_gate::Phase::BeforeFlock,
+            self.lock_identity,
+            Some(&operation_lock),
+        );
         operation_lock
             .lock_exclusive()
             .map_err(|e| PartialStateError::LockFailed {
@@ -721,7 +725,7 @@ impl ScopedWorkspaceLayout {
         }
         drop(recheck);
         #[cfg(test)]
-        lock_gate::signal(lock_gate::Phase::Acquired, self.lock_identity);
+        lock_gate::signal(lock_gate::Phase::Acquired, self.lock_identity, None);
         let result = f(&self.state_dir);
         drop(operation_lock);
         result
@@ -735,11 +739,14 @@ impl ScopedWorkspaceLayout {
 /// (`BeforeFlock`). Compiled out of non-test builds.
 #[cfg(test)]
 pub(crate) mod lock_gate {
-    use std::sync::Mutex;
+    use std::collections::BTreeMap;
     use std::sync::mpsc::{Receiver, Sender};
+    use std::sync::{Mutex, PoisonError};
+
+    use super::sys;
 
     /// The `with_lock` position a gate may fire at.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
     pub(crate) enum Phase {
         /// Sentinel opened and identity-verified, immediately before the
         /// blocking flock — a writer proven to be waiting on the lock.
@@ -749,47 +756,91 @@ pub(crate) mod lock_gate {
         Acquired,
     }
 
+    /// What a fired gate observed, reported on the signal channel.
+    pub(crate) struct Observation {
+        /// `Some(acquired)` when the gate was armed with `probe`: the
+        /// result of a nonblocking `flock` attempt on the operation's
+        /// OWN descriptor, taken while the writer is parked at
+        /// `BeforeFlock`. `false` proves a foreign open-file description
+        /// already holds the lock — real cross-descriptor contention.
+        /// `true` means the probe acquired, which for the historical
+        /// shared-descriptor defect is a no-op success on the
+        /// already-locked shared description — the observable signature
+        /// that B never actually had to wait. `None` for unprobed gates.
+        pub(crate) probe_acquired: Option<bool>,
+    }
+
     struct Gate {
-        phase: Phase,
-        /// The `with_lock` handle's pinned sentinel `(dev, ino)` — gates
-        /// are scoped to one workspace so a parallel test's `with_lock`
-        /// can never consume this gate.
-        identity: (u64, u64),
-        signal: Sender<()>,
+        probe: bool,
+        signal: Sender<Observation>,
         release: Receiver<()>,
     }
 
-    static GATE: Mutex<Option<Gate>> = Mutex::new(None);
+    /// Keyed by the handle's pinned sentinel `(dev, ino)` AND the phase,
+    /// so concurrently running tests holding gates on different
+    /// workspaces — or different phases of one workspace — can never
+    /// overwrite or consume one another's registrations.
+    type Registry = BTreeMap<((u64, u64), Phase), Gate>;
+    static GATES: Mutex<Registry> = Mutex::new(BTreeMap::new());
+
+    /// RAII handle for one armed gate: dropping it removes a never-fired
+    /// registration, so a failed or aborted test cannot leave a stale
+    /// gate for a later test to trip over.
+    pub(crate) struct Registration((u64, u64), Phase);
+
+    impl Drop for Registration {
+        fn drop(&mut self) {
+            GATES
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(&(self.0, self.1));
+        }
+    }
 
     /// Arm a one-shot gate: the next `with_lock` on a handle pinned to
-    /// `identity` reaching `phase` sends on `signal` then blocks on
-    /// `release`, still holding whatever lock state it has at that
-    /// point. Fires exactly once.
+    /// `identity` reaching `phase` sends an [`Observation`] on `signal`
+    /// then blocks on `release`, still holding whatever lock state it
+    /// has at that point. Fires exactly once. Returns `None` — refusing
+    /// outright, without touching the existing registration — when a
+    /// gate for the same `(identity, phase)` is already armed.
     pub(crate) fn arm(
         phase: Phase,
         identity: (u64, u64),
-        signal: Sender<()>,
+        signal: Sender<Observation>,
         release: Receiver<()>,
-    ) {
-        *GATE.lock().unwrap() = Some(Gate {
-            phase,
-            identity,
-            signal,
-            release,
-        });
+        probe: bool,
+    ) -> Option<Registration> {
+        let key = (identity, phase);
+        let mut gates = GATES.lock().unwrap_or_else(PoisonError::into_inner);
+        if gates.contains_key(&key) {
+            return None;
+        }
+        gates.insert(
+            key,
+            Gate {
+                probe,
+                signal,
+                release,
+            },
+        );
+        drop(gates);
+        Some(Registration(identity, phase))
     }
 
-    pub(super) fn signal(phase: Phase, identity: (u64, u64)) {
+    /// Remove and fire the gate registered for `(identity, phase)`. The
+    /// registry mutex is released BEFORE any channel wait — a parked
+    /// writer never blocks another workspace's signal or registration.
+    pub(super) fn signal(phase: Phase, identity: (u64, u64), operation: Option<&sys::File>) {
         let gate = {
-            let mut slot = GATE.lock().unwrap();
-            match slot.as_ref() {
-                Some(gate) if gate.phase == phase && gate.identity == identity => slot.take(),
-                _ => None,
-            }
+            let mut gates = GATES.lock().unwrap_or_else(PoisonError::into_inner);
+            gates.remove(&(identity, phase))
         };
-        if let Some(gate) = gate {
-            let _ = gate.signal.send(());
-            let _ = gate.release.recv();
-        }
+        let Some(gate) = gate else { return };
+        let probe_acquired = match (gate.probe, operation) {
+            (true, Some(file)) => Some(file.try_lock_exclusive().unwrap_or(false)),
+            _ => None,
+        };
+        let _ = gate.signal.send(Observation { probe_acquired });
+        let _ = gate.release.recv();
     }
 }

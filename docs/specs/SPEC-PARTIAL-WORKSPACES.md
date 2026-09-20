@@ -629,11 +629,19 @@ re-canonicalized to fresh bytes. The retained `required_object_ids` inventory
 follows ONE deterministic rule, independent of the caller's `Bytes` versus
 `ReuseSelected` operation form: exactly the produced-object set of the
 representation-preserving overlay MINUS any id the verified base selection
-already authenticates, including rebuilt ancestor Trees and no unrelated
-objects. Producer persistence, pre-publication validation, and reopen
+already authenticates &mdash; where the base-authenticated set is each
+selected file's representation id AND the complete dependency closure that
+representation declares (every chunk of a selected ChunkedBlob), plus any
+other object the verified snapshot retains &mdash; including rebuilt
+ancestor Trees and no unrelated objects. The same dedup applies when a
+chunk is shared between a reused base representation and newly generated
+content: the shared chunk is base-authenticated and not retained, while
+the new representation's manifest and its genuinely new chunks are.
+Producer persistence, pre-publication validation, and reopen
 verification all apply that same rule, so a `Bytes` replacement equal to
 another selected file persists exactly what its `reuse_selected` equivalent
-would. This is a LOCAL storage contract only &mdash; the exported update
+would, for plain and chunked representations alike. This is a LOCAL
+storage contract only &mdash; the exported update
 inventory still lists every changed representation and chunk per &sect;11.
 Persisted chunked representations are validated per occurrence against their
 declared totals BEFORE any content is materialized, retained objects are
@@ -676,10 +684,13 @@ corrupt marker/state fails closed and ordinary permission or I/O errors
 propagate.
 
 The ancestor walk resolves the longest EXISTING prefix of the probed path
-before classifying textual ancestors, so a directory alias naming a scoped
-root cannot smuggle a missing descendant past the boundary: a symlinked
-directory component surfaced as `ENOTDIR` is normalized to the alias case
-and resolved, while a genuine non-directory component is not authority.
-Resolving an external alias only pins where the ancestor walk examines
-`.mkit-scoped` &mdash; it never authorizes following the state entries
-themselves.
+and continues classification on that resolved directory's REAL ancestors,
+so a directory alias cannot smuggle a missing descendant past the boundary
+&mdash; whether the alias names the scoped root itself or a directory
+INSIDE it, where the probed path's textual ancestors never spell the
+enclosing root. Missing suffix components cannot contain authority and are
+skipped; a symlinked directory component surfaced as `ENOTDIR` is
+normalized to the alias case and resolved, while a genuine non-directory
+component is not authority. Resolving an external alias only pins where
+the ancestor walk examines `.mkit-scoped` &mdash; it never authorizes
+following the state entries themselves.

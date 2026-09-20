@@ -1001,19 +1001,48 @@ pub(crate) use scoped_classify::classify_scoped_root;
 /// reach an ancestor repository or create files. Shared by [`discover`],
 /// `ObjectStore` open/init, and callers that walk ancestors themselves.
 pub fn check_scoped_boundary(start: &Path) -> Result<(), DiscoverError> {
-    // Resolve to an absolute real path before walking: a relative `start`
-    // would stop at its textual top and never see an enclosing scoped
-    // root, and a symlinked prefix must resolve to the directory it
-    // actually names. `canonicalize` needs the path to exist; otherwise
-    // fall back to an absolute textual path so the ancestor walk still
-    // covers the invocation directory's parents.
-    let resolved = match start.canonicalize() {
-        Ok(path) => path,
-        Err(_) if start.is_absolute() => start.to_path_buf(),
-        Err(_) => match std::env::current_dir() {
+    // Resolve the longest EXISTING prefix of `start` before walking: a
+    // relative `start` would stop at its textual top and never see an
+    // enclosing scoped root, and a symlinked prefix must resolve to the
+    // directory it actually names. `canonicalize` needs the path to
+    // exist, so when `start` (or a deeper probe) is missing, walk the
+    // probe upward until a prefix resolves — its canonical form follows
+    // a caller's directory alias to the REAL directory, whose real
+    // ancestors may carry scoped authority the textual chain never
+    // reaches (an alias can name a directory INSIDE a scoped root, not
+    // just the root itself). Missing suffix components cannot contain
+    // authority, so nothing between `start` and the resolved prefix is
+    // lost. A start with no canonicalizable prefix falls back to its
+    // absolute textual form, where per-ancestor probes still surface
+    // genuine permission and I/O errors.
+    let absolute = if start.is_absolute() {
+        start.to_path_buf()
+    } else {
+        match std::env::current_dir() {
             Ok(cwd) => cwd.join(start),
             Err(_) => start.to_path_buf(),
-        },
+        }
+    };
+    let mut probe = absolute.as_path();
+    let resolved = loop {
+        match probe.canonicalize() {
+            Ok(real) => break real,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                match probe.parent() {
+                    Some(parent) if parent != probe => probe = parent,
+                    _ => break absolute.clone(),
+                }
+            }
+            // Permission/other resolution failures keep the textual
+            // chain: `classify_scoped_root` surfaces the real error
+            // from the first ancestor its no-follow probes can read.
+            Err(_) => break absolute.clone(),
+        }
     };
     for dir in resolved.ancestors() {
         match classify_scoped_root(dir).map_err(|e| DiscoverError::Io(dir.to_path_buf(), e))? {
@@ -2007,6 +2036,69 @@ mod tests {
                 .join("objects")
                 .is_dir()
         );
+    }
+
+    /// The alias may name a directory INSIDE the scoped root, not only
+    /// the root itself: `alias -> scoped-root/subdir`, with a missing
+    /// descendant beneath it. The textual ancestors of
+    /// `alias/new-dir` never spell the scoped root, so the boundary
+    /// walk must resolve the alias to the real directory and continue
+    /// on ITS ancestors — where the marker actually lives.
+    #[test]
+    #[cfg(unix)]
+    fn scoped_boundary_through_alias_into_scoped_subdir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real-scoped");
+        let subdir = real.join("existing-subdir");
+        std::fs::create_dir_all(&subdir).unwrap();
+        std::fs::create_dir_all(real.join(SCOPED_STATE_DIR)).unwrap();
+        std::fs::write(real.join(MKIT_DIR), SCOPED_MARKER).unwrap();
+        std::fs::write(real.join(SCOPED_STATE_DIR).join("CURRENT"), b"MKCR\x01rest").unwrap();
+        // The alias names an interior directory of the scoped root.
+        let external = tmp.path().join("external-parent");
+        std::fs::create_dir(&external).unwrap();
+        let alias = external.join("alias");
+        std::os::unix::fs::symlink(&subdir, &alias).unwrap();
+        // One missing component and several: neither can hide the real
+        // enclosing root.
+        for missing in [
+            alias.join("new-directory"),
+            alias.join("new-directory").join("deeper"),
+        ] {
+            assert!(
+                matches!(
+                    check_scoped_boundary(&missing),
+                    Err(DiscoverError::ScopedWorkspace(_)),
+                ),
+                "missing path through interior alias must refuse: {missing:?}"
+            );
+            assert!(
+                matches!(
+                    crate::store::ObjectStore::init(&RepoLayout::single(&missing)),
+                    Err(crate::StoreError::ScopedBoundary(
+                        DiscoverError::ScopedWorkspace(_)
+                    )),
+                ),
+                "init through interior alias must refuse: {missing:?}"
+            );
+            assert!(!missing.exists());
+        }
+        assert!(!subdir.join("new-directory").exists());
+        assert!(!real.join(MKIT_DIR).join("objects").exists());
+        // The alias did not corrupt the workspace's own authority.
+        assert!(matches!(
+            check_scoped_boundary(&real),
+            Err(DiscoverError::ScopedWorkspace(_))
+        ));
+        // A missing destination beneath an ordinary aliased directory
+        // remains supported — the alias is not the refusal.
+        let plain = tmp.path().join("plain");
+        std::fs::create_dir(&plain).unwrap();
+        let plain_alias = tmp.path().join("plain-alias");
+        std::os::unix::fs::symlink(&plain, &plain_alias).unwrap();
+        let init = plain_alias.join("repo");
+        crate::store::ObjectStore::init(&RepoLayout::single(&init)).unwrap();
+        assert!(plain.join("repo").join(MKIT_DIR).join("objects").is_dir());
     }
 
     /// Recognizable scoped authority still refuses once a same-named

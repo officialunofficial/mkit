@@ -1589,25 +1589,26 @@ fn check_required_inventory(
 
 /// The deterministic local retained-inventory rule, shared by producer
 /// persistence and reopen verification: the produced-object set of the
-/// representation-preserving overlay MINUS any id that already names a
-/// verified selected-file representation. `stage_feed` resolves a
-/// persisted staged id that equals a selected representation through
-/// `reuse_selected` — without reading a retained copy — so the caller's
-/// `Bytes` versus `ReuseSelected` form never changes what the stage must
-/// retain. This is a LOCAL storage contract only: the exported MKWU
-/// update still lists every changed representation and chunk.
+/// representation-preserving overlay MINUS any id whose bytes the
+/// verified base snapshot already authenticates — selected-file
+/// representations, their complete chunk dependency closure, base Trees,
+/// and the base object itself. `stage_feed` resolves a persisted staged
+/// id that equals a selected representation through `reuse_selected` —
+/// without reading a retained copy — so the caller's `Bytes` versus
+/// `ReuseSelected` form never changes what the stage must retain, and a
+/// `Bytes` copy of a CHUNKED selected file drops its reproduced chunks
+/// exactly like the manifest. A chunk a produced representation shares
+/// with a selected one is already base-authenticated and stays
+/// resolvable; a chunk only new content needs remains retained. This is
+/// a LOCAL storage contract only: the exported MKWU update still lists
+/// every changed representation and chunk.
 fn retained_inventory(
     verified: &VerifiedPartialSnapshot,
     produced: &BTreeMap<Hash, Vec<u8>>,
 ) -> BTreeSet<Hash> {
-    let selected: BTreeSet<Hash> = verified
-        .files()
-        .iter()
-        .map(|file| *file.object_id())
-        .collect();
     produced
         .keys()
-        .filter(|id| !selected.contains(*id))
+        .filter(|id| verified.object_bytes(id).is_none())
         .copied()
         .collect()
 }
@@ -2685,6 +2686,76 @@ mod tests {
         limits: PartialLimits,
     ) -> (tempfile::TempDir, ScopedWorkspaceLayout) {
         named_fixture(&[(b"a.txt", a), (b"b.txt", b)], limits)
+    }
+
+    /// Deterministic non-constant bytes so `FastCDC` sees real boundary
+    /// candidates instead of one max-sized chunk.
+    fn splitmix_bytes(n: usize, seed: u64) -> Vec<u8> {
+        let mut state = seed;
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            out.push((z & 0xFF) as u8);
+        }
+        out
+    }
+
+    /// Like [`named_fixture`] but stores each file through the canonical
+    /// worktree writer — content above `CHUNK_THRESHOLD` becomes a real
+    /// `ChunkedBlob` manifest plus chunk Blobs exactly as a checked-in
+    /// file would be stored.
+    fn canonical_named_fixture(
+        files: &[(&[u8], &[u8])],
+        limits: PartialLimits,
+    ) -> (tempfile::TempDir, ScopedWorkspaceLayout) {
+        let repo = tempdir().unwrap();
+        let store = ObjectStore::init(&RepoLayout::single(repo.path())).unwrap();
+        let mut entries = Vec::new();
+        for (name, data) in files {
+            let id = crate::worktree::store_file_object(&store, data).unwrap();
+            entries.push(TreeEntry {
+                name: name.to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: id,
+            });
+        }
+        let tree = Object::Tree(Tree { entries });
+        let tree_bytes = serialize(&tree).unwrap();
+        let tree_id = id_from_object(&tree, &tree_bytes);
+        assert_eq!(store.write(&tree_bytes).unwrap(), tree_id);
+        let key = KeyPair::from_seed([1; 32]);
+        let mut remix = Remix {
+            tree_hash: tree_id,
+            parents: Vec::new(),
+            sources: Vec::new(),
+            author: Identity::opaque(b"author".to_vec()),
+            signer: key.public.0,
+            message: b"base".to_vec(),
+            timestamp: 1,
+            signature: [0; 64],
+        };
+        remix.signature = sign_remix(&remix, &key).unwrap().0;
+        let remix_object = Object::Remix(remix);
+        let remix_bytes = serialize(&remix_object).unwrap();
+        let base_id = id_from_object(&remix_object, &remix_bytes);
+        assert_eq!(store.write(&remix_bytes).unwrap(), base_id);
+        let paths: Vec<Vec<Vec<u8>>> = files.iter().map(|(name, _)| vec![name.to_vec()]).collect();
+        let bundle = build_partial_snapshot(&store, base_id, &paths, &limits).unwrap();
+        let dir = tempdir().unwrap();
+        let layout = ScopedWorkspaceLayout::create(
+            &dir.path().join("ws"),
+            base_id,
+            &paths,
+            &bundle.encode(&limits).unwrap(),
+            limits,
+            None,
+        )
+        .unwrap();
+        (dir, layout)
     }
 
     fn current_bytes(layout: &ScopedWorkspaceLayout) -> Vec<u8> {
@@ -3836,6 +3907,263 @@ mod tests {
         assert_eq!(staged_id(&final_state, b"c.txt"), b_id);
     }
 
+    // -- F4: retained inventory covers the chunked dependency closure -----
+
+    /// The chunk ids a selected file's representation declares — the
+    /// base-authenticated dependency closure `retained_inventory` must
+    /// dedup against, not just the manifest id.
+    fn selected_chunk_ids(layout: &ScopedWorkspaceLayout, path: &[u8]) -> Vec<crate::hash::Hash> {
+        let state = layout.read_state().unwrap();
+        state
+            .verified
+            .files()
+            .iter()
+            .find(|file| file.path() == &vec![path.to_vec()])
+            .unwrap()
+            .chunk_ids()
+            .to_vec()
+    }
+
+    /// F4: a `Bytes` copy of a CHUNKED selected file reproduces its
+    /// manifest AND chunks in `produced`; the retained inventory must
+    /// drop the whole base-authenticated closure — otherwise the
+    /// replay's reuse-derived inventory mismatches and a valid
+    /// replacement is refused.
+    #[test]
+    fn bytes_copy_of_chunked_selected_content_survives_reopen_and_pending() {
+        let big = splitmix_bytes(
+            usize::try_from(crate::worktree::CHUNK_THRESHOLD).unwrap() + 256 * 1024,
+            0xB16,
+        );
+        let (dir, layout) =
+            canonical_named_fixture(&[(b"a.txt", b"aaa"), (b"b.bin", &big)], PartialLimits::V1);
+        // B really is a ChunkedBlob — this test must exercise the
+        // chunked representation shape, not a plain Blob.
+        let b_id = selected_id(&layout, b"b.bin");
+        let b_chunks = selected_chunk_ids(&layout, b"b.bin");
+        assert!(b_chunks.len() > 1, "B must be chunked: {b_chunks:?}");
+        let b_object = layout
+            .read_state()
+            .unwrap()
+            .verified
+            .object_bytes(&b_id)
+            .unwrap()
+            .to_vec();
+        assert!(matches!(
+            crate::serialize::deserialize(&b_object),
+            Ok(Object::ChunkedBlob(_))
+        ));
+
+        let state = layout
+            .replace_stage(
+                0,
+                &[FileReplacement::bytes(vec![b"a.txt".to_vec()], big.clone())],
+            )
+            .expect("a byte-copy of chunked selected content is valid and must succeed");
+        // A's staged id IS B's manifest id, and neither it nor any of
+        // its chunks is retained — the base authenticates all of them.
+        assert_eq!(staged_id(&state, b"a.txt"), b_id);
+        let required = state.stage().required_object_ids();
+        assert!(!required.contains(&b_id));
+        for chunk in &b_chunks {
+            assert!(
+                !required.contains(chunk),
+                "base-authenticated chunk must not be retained: {chunk:?}"
+            );
+        }
+        // Reopen loads the CURRENT-selected state…
+        let reopened = ScopedWorkspaceLayout::open(&dir.path().join("ws")).unwrap();
+        let reloaded = reopened.read_state().unwrap();
+        assert_eq!(reloaded.workspace().transaction_generation(), 1);
+        // …and carries a pending candidate through accept.
+        let signer = KeyPair::from_seed([9; 32]);
+        let verified = reloaded.verified().clone();
+        let limits = *reloaded.workspace().limits();
+        let prepared = replace_files(
+            &verified,
+            &[FileReplacement::reuse_selected(
+                vec![b"a.txt".to_vec()],
+                vec![b"b.bin".to_vec()],
+            )],
+            &limits,
+        )
+        .unwrap();
+        let unsigned = prepare_partial_commit(
+            &verified,
+            &prepared,
+            Identity::opaque(b"op".to_vec()),
+            signer.public.0,
+            b"op".to_vec(),
+            2,
+            &limits,
+        )
+        .unwrap();
+        let mut signed_commit = unsigned.clone();
+        signed_commit.signature = sign_commit(&signed_commit, &signer).unwrap().0;
+        let update =
+            export_partial_update(&verified, &prepared, &unsigned, &signed_commit, &limits)
+                .unwrap();
+        let update_bytes = update.encode(&limits).unwrap();
+        let pending = reopened
+            .save_pending(1, &unsigned, &signed_commit, &update_bytes, None)
+            .unwrap();
+        let identity = pending.pending().unwrap().identity();
+        reopened
+            .record_outcome(2, &identity, PendingOutcomeV1::Accepted)
+            .unwrap();
+        let after = ScopedWorkspaceLayout::open(&dir.path().join("ws")).unwrap();
+        assert!(after.read_state().unwrap().accepted().is_some());
+    }
+
+    /// Equivalent `Bytes` and `ReuseSelected` operations on a chunked
+    /// selected representation persist identical stage ids and identical
+    /// retained inventories.
+    #[test]
+    fn chunked_bytes_copy_and_reuse_persist_identical_stage_records() {
+        let big = splitmix_bytes(
+            usize::try_from(crate::worktree::CHUNK_THRESHOLD).unwrap() + 128 * 1024,
+            0xC4E,
+        );
+        let files: &[(&[u8], &[u8])] = &[(b"a.txt", b"aaa"), (b"b.bin", &big)];
+        let (_d1, via_bytes) = canonical_named_fixture(files, PartialLimits::V1);
+        let (_d2, via_reuse) = canonical_named_fixture(files, PartialLimits::V1);
+        let a_path = vec![b"a.txt".to_vec()];
+        let b_path = vec![b"b.bin".to_vec()];
+        let bytes_state = via_bytes
+            .replace_stage(0, &[FileReplacement::bytes(a_path.clone(), big.clone())])
+            .unwrap();
+        let reuse_state = via_reuse
+            .replace_stage(0, &[FileReplacement::reuse_selected(a_path, b_path)])
+            .unwrap();
+        assert_eq!(bytes_state.stage().entries(), reuse_state.stage().entries());
+        assert_eq!(
+            bytes_state.stage().required_object_ids(),
+            reuse_state.stage().required_object_ids(),
+            "one inventory rule regardless of caller form, chunked included"
+        );
+    }
+
+    /// A mixed batch: A byte-copies chunked B while C gets genuinely new
+    /// chunked content sharing a whole leading chunk with B. The shared
+    /// chunk is base-authenticated (not retained); C's new chunks and
+    /// manifest are retained; reopen and the exported update inventory
+    /// stay complete.
+    #[test]
+    fn mixed_chunked_batch_shares_base_chunks_and_retains_new_ones() {
+        let big = splitmix_bytes(
+            usize::try_from(crate::worktree::CHUNK_THRESHOLD).unwrap() + 256 * 1024,
+            0xF00D,
+        );
+        // C's new content shares all of B's chunks but the last (the
+        // split point is a real FastCDC boundary of `big`, and CDC cuts
+        // are prefix-stable so every boundary inside the shared prefix
+        // is reproduced), then diverges with a tail producing genuinely
+        // new chunks. The last boundary keeps C above CHUNK_THRESHOLD.
+        let last_boundary = crate::chunker::ChunkIterator::new(crate::chunker::FastCdc::v1(), &big)
+            .map(|b| b.offset + b.length)
+            .take_while(|end| *end < big.len())
+            .last()
+            .expect("chunked content has interior boundaries");
+        let mut c_data = big[..last_boundary].to_vec();
+        c_data.extend_from_slice(&splitmix_bytes(96 * 1024, 0xCA7));
+        let (dir, layout) = canonical_named_fixture(
+            &[(b"a.txt", b"aaa"), (b"b.bin", &big), (b"c.bin", b"ccc")],
+            PartialLimits::V1,
+        );
+        let b_id = selected_id(&layout, b"b.bin");
+        let b_chunk_list = selected_chunk_ids(&layout, b"b.bin");
+        let b_chunks: std::collections::BTreeSet<_> = b_chunk_list.iter().copied().collect();
+        // B's FIRST chunk is inside the shared prefix — the same bytes
+        // `store_file_object` hashed into `b.bin`'s manifest.
+        let shared_chunk = b_chunk_list[0];
+
+        let state = layout
+            .replace_stage(
+                0,
+                &[
+                    FileReplacement::bytes(vec![b"a.txt".to_vec()], big.clone()),
+                    FileReplacement::bytes(vec![b"c.bin".to_vec()], c_data.clone()),
+                ],
+            )
+            .unwrap();
+        // A copies B wholesale; C's new manifest is its own id.
+        assert_eq!(staged_id(&state, b"a.txt"), b_id);
+        let c_id = staged_id(&state, b"c.bin");
+        assert_ne!(c_id, b_id);
+        let c_object = state.local_object(&c_id).unwrap().to_vec();
+        let Object::ChunkedBlob(c_manifest) = crate::serialize::deserialize(&c_object).unwrap()
+        else {
+            panic!("C's staged representation must be a ChunkedBlob");
+        };
+        let c_chunks: std::collections::BTreeSet<_> = c_manifest.chunks.iter().copied().collect();
+        // The shared prefix chunk is a real shared chunk.
+        assert!(c_chunks.contains(&shared_chunk));
+        let new_chunks: Vec<_> = c_chunks.difference(&b_chunks).copied().collect();
+        assert!(!new_chunks.is_empty(), "C must contribute new chunks");
+        let required = state.stage().required_object_ids();
+        // Shared chunk and B's whole closure: base-authenticated, not retained.
+        assert!(!required.contains(&shared_chunk));
+        assert!(!required.contains(&b_id));
+        // C's manifest and its genuinely new chunks: retained.
+        assert!(required.contains(&c_id));
+        for chunk in &new_chunks {
+            assert!(
+                required.contains(chunk),
+                "new chunk must be retained: {chunk:?}"
+            );
+        }
+        // Reopen loads, and the exported update carries the complete
+        // changed inventory — local dedup never shrinks the MKWU.
+        let reopened = ScopedWorkspaceLayout::open(&dir.path().join("ws")).unwrap();
+        let reloaded = reopened.read_state().unwrap();
+        let verified = reloaded.verified().clone();
+        let limits = *reloaded.workspace().limits();
+        let prepared = replace_files(
+            &verified,
+            &[
+                FileReplacement::reuse_selected(vec![b"a.txt".to_vec()], vec![b"b.bin".to_vec()]),
+                FileReplacement::bytes(vec![b"c.bin".to_vec()], c_data),
+            ],
+            &limits,
+        )
+        .unwrap();
+        let signer = KeyPair::from_seed([3; 32]);
+        let unsigned = prepare_partial_commit(
+            &verified,
+            &prepared,
+            Identity::opaque(b"op".to_vec()),
+            signer.public.0,
+            b"op".to_vec(),
+            2,
+            &limits,
+        )
+        .unwrap();
+        let mut signed_commit = unsigned.clone();
+        signed_commit.signature = sign_commit(&signed_commit, &signer).unwrap().0;
+        let update =
+            export_partial_update(&verified, &prepared, &unsigned, &signed_commit, &limits)
+                .unwrap();
+        let pack = update.pack_bytes();
+        // Every changed representation id and every chunk — shared or
+        // new — must appear in the exported pack bytes.
+        for id in c_chunks
+            .iter()
+            .chain(std::iter::once(&c_id))
+            .chain(std::iter::once(&b_id))
+            .chain(b_chunks.iter())
+        {
+            let raw = verified
+                .object_bytes(id)
+                .or_else(|| reloaded.local_object(id))
+                .unwrap_or_else(|| panic!("export inventory must include {id:?}"))
+                .to_vec();
+            assert!(
+                pack.windows(raw.len()).any(|w| w == raw.as_slice()),
+                "exported pack must carry object {id:?}"
+            );
+        }
+    }
+
     // -- R2: borrowed preflight and bounded retained reads ----------------
 
     /// The aggregate batch bound must reject while the caller's
@@ -4002,24 +4330,43 @@ mod tests {
             // A enters the critical section and parks there.
             let (a_in, a_in_rx) = mpsc::channel();
             let (a_go, a_go_rx) = mpsc::channel();
-            lock_gate::arm(lock_gate::Phase::Acquired, identity, a_in, a_go_rx);
+            let _a_gate =
+                lock_gate::arm(lock_gate::Phase::Acquired, identity, a_in, a_go_rx, false)
+                    .expect("gate registration");
             let a_done = spawn_writer(Arc::clone(&first), b"writer A");
             a_in_rx
                 .recv_timeout(LOCK_TEST_TIMEOUT)
                 .expect("writer A never reached the critical section");
-            // B opens + verifies the sentinel, then parks at flock —
-            // provably waiting on the lock while A is inside.
+            // B opens + verifies the sentinel, then parks at flock. The
+            // gate first probes B's OWN operation descriptor with a
+            // nonblocking flock while A is still parked inside: the
+            // attempt MUST report would-block — proof the loser
+            // descriptor genuinely contends for the lock BEFORE the
+            // winner is released. A probe that acquires means B's
+            // descriptor already shares the locked open-file
+            // description (the shared-descriptor defect: flock on the
+            // same OFD is a no-op success) and nothing ever serialized
+            // the writers.
             let (b_at, b_at_rx) = mpsc::channel();
             let (b_go, b_go_rx) = mpsc::channel();
-            lock_gate::arm(lock_gate::Phase::BeforeFlock, identity, b_at, b_go_rx);
+            let _b_gate =
+                lock_gate::arm(lock_gate::Phase::BeforeFlock, identity, b_at, b_go_rx, true)
+                    .expect("gate registration");
             let b_done = spawn_writer(second, b"writer B");
-            b_at_rx
+            let b_observation = b_at_rx
                 .recv_timeout(LOCK_TEST_TIMEOUT)
                 .expect("writer B never reached the acquisition boundary");
-            // Release B's acquisition attempt FIRST, while A still
-            // holds the critical section: a correct implementation
-            // blocks B inside flock; a shared-descriptor implementation
-            // would no-op B through while A is provably inside.
+            assert_eq!(
+                b_observation.probe_acquired,
+                Some(false),
+                "B's own operation descriptor must fail to acquire while \
+                 A holds the lock — a successful probe means the \
+                 descriptor already shared the locked open-file \
+                 description, so B never contended for the lock at all"
+            );
+            // Only now release B's acquisition attempt and A's critical
+            // section: B blocks inside flock until A's descriptor
+            // closes, then must observe generation 1.
             b_go.send(()).unwrap();
             a_go.send(()).unwrap();
             let a_result = a_done
@@ -4077,7 +4424,14 @@ mod tests {
         let identity = layout.lock_identity();
         let (at_flock, at_flock_rx) = mpsc::channel();
         let (go, go_rx) = mpsc::channel();
-        lock_gate::arm(lock_gate::Phase::BeforeFlock, identity, at_flock, go_rx);
+        let _gate = lock_gate::arm(
+            lock_gate::Phase::BeforeFlock,
+            identity,
+            at_flock,
+            go_rx,
+            false,
+        )
+        .expect("gate registration");
         let done = spawn_writer(Arc::new(layout), b"stale waiter");
         at_flock_rx
             .recv_timeout(LOCK_TEST_TIMEOUT)
@@ -4103,5 +4457,78 @@ mod tests {
             .read_state()
             .unwrap();
         assert_eq!(state.workspace().transaction_generation(), 0);
+    }
+
+    /// F2: gate registrations are keyed by `(workspace identity, phase)`
+    /// — two workspaces holding `BeforeFlock` gates simultaneously must
+    /// not overwrite or consume each other's registration, and a
+    /// duplicate registration for an armed key is rejected. Without
+    /// keying, a second `arm` replaced the first gate and dropped its
+    /// channels, silently disarming the first test's synchronization.
+    #[test]
+    fn lock_gates_are_isolated_per_workspace_and_phase() {
+        let (_dir_a, layout_a) = fixture();
+        let (_dir_b, layout_b) = fixture();
+        let id_a = layout_a.lock_identity();
+        let id_b = layout_b.lock_identity();
+        assert_ne!(id_a, id_b, "two workspaces need distinct sentinels");
+
+        // Arm both workspaces at BeforeFlock while BOTH stay armed.
+        let (a_tx, a_rx) = mpsc::channel();
+        let (a_release, a_release_rx) = mpsc::channel();
+        let _gate_a = lock_gate::arm(
+            lock_gate::Phase::BeforeFlock,
+            id_a,
+            a_tx,
+            a_release_rx,
+            false,
+        )
+        .expect("workspace A gate registration");
+        let (b_tx, b_rx) = mpsc::channel();
+        let (b_release, b_release_rx) = mpsc::channel();
+        let _gate_b = lock_gate::arm(
+            lock_gate::Phase::BeforeFlock,
+            id_b,
+            b_tx,
+            b_release_rx,
+            false,
+        )
+        .expect("workspace B gate registration — must not evict A's");
+
+        // A second registration for an already-armed key is rejected.
+        let (dup_tx, _dup_rx) = mpsc::channel();
+        let (_dup_release, dup_release_rx) = mpsc::channel();
+        assert!(
+            lock_gate::arm(
+                lock_gate::Phase::BeforeFlock,
+                id_a,
+                dup_tx,
+                dup_release_rx,
+                false,
+            )
+            .is_none(),
+            "a duplicate gate for an armed (identity, phase) is refused"
+        );
+
+        // A's writer fires A's gate — and only A's.
+        let a_done = spawn_writer(Arc::new(layout_a), b"via A");
+        a_rx.recv_timeout(LOCK_TEST_TIMEOUT)
+            .expect("workspace A's gate never fired");
+        a_release.send(()).unwrap();
+        a_done
+            .recv_timeout(LOCK_TEST_TIMEOUT)
+            .expect("workspace A writer never finished")
+            .unwrap();
+
+        // B's registration survived untouched: B's writer still parks
+        // on B's own gate.
+        let b_done = spawn_writer(Arc::new(layout_b), b"via B");
+        b_rx.recv_timeout(LOCK_TEST_TIMEOUT)
+            .expect("workspace B's gate was lost to A's registration");
+        b_release.send(()).unwrap();
+        b_done
+            .recv_timeout(LOCK_TEST_TIMEOUT)
+            .expect("workspace B writer never finished")
+            .unwrap();
     }
 }
