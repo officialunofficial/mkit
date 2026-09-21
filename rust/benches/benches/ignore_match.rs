@@ -47,10 +47,22 @@ services/*/target\n/out\n/.next\nweb/**/dist\ncli/**/*.o\nlibs/*/build\n\
 /// match nothing — repo walks are mostly the latter.
 fn synthetic_paths(n: usize) -> Vec<(String, bool)> {
     let leaf_names = [
-        "main.rs", "lib.rs", "mod.rs", "index.ts", "app.tsx", "utils.py", "README.md",
-        "Cargo.toml", "package.json", "config.yaml", "test.rs", "handler.go",
+        "main.rs",
+        "lib.rs",
+        "mod.rs",
+        "index.ts",
+        "app.tsx",
+        "utils.py",
+        "README.md",
+        "Cargo.toml",
+        "package.json",
+        "config.yaml",
+        "test.rs",
+        "handler.go",
     ];
-    let mid_dirs = ["src", "crates", "apps", "lib", "internal", "cmd", "pkg", "web"];
+    let mid_dirs = [
+        "src", "crates", "apps", "lib", "internal", "cmd", "pkg", "web",
+    ];
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
         let depth = 2 + (i % 4);
@@ -82,7 +94,10 @@ fn bench_is_ignored(c: &mut Criterion) {
     ] {
         let list: IgnoreList = ignore::parse(patterns_src);
         let pattern_count = list.patterns().len();
-        assert!(pattern_count >= 15, "fixture should have a real pattern count");
+        assert!(
+            pattern_count >= 15,
+            "fixture should have a real pattern count"
+        );
 
         let mut group = c.benchmark_group(format!("ignore_match/{axis}"));
         group.bench_function("is_ignored", |b| {

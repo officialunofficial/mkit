@@ -337,8 +337,7 @@ fn finish_pattern(body: &str, negated: bool) -> Option<Pattern> {
     // single segment — the shape `BasenameKind` fast-paths. `"**"` is
     // excluded: it becomes two `DoubleStar` segments (matches one-or-more
     // of *any* remaining segments), not a basename-only glob.
-    let basename_kind =
-        (!anchored && core != "**").then(|| Box::new(classify_basename_glob(core)));
+    let basename_kind = (!anchored && core != "**").then(|| Box::new(classify_basename_glob(core)));
 
     let mut segments: Vec<Segment> = core
         .split('/')
@@ -743,7 +742,10 @@ mod tests {
             BasenameKind::Prefix("build".to_string())
         );
         // Bare `*` is a degenerate suffix: matches every basename.
-        assert_eq!(classify_basename_glob("*"), BasenameKind::Suffix(String::new()));
+        assert_eq!(
+            classify_basename_glob("*"),
+            BasenameKind::Suffix(String::new())
+        );
         // Multiple/mixed metacharacters fall back to the general glob.
         assert_eq!(
             classify_basename_glob("*foo*"),
