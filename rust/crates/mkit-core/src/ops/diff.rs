@@ -970,7 +970,64 @@ fn edit_script(old: &[DiffLine<'_>], new: &[DiffLine<'_>], mode: WhitespaceMode)
 /// Run the greedy Myers diff and mark which old lines are deletions and which
 /// new lines are insertions. Lines left unmarked are the matched (equal)
 /// lines that pair up in order.
-//
+///
+/// Elides any common **leading** run of identical lines before running the
+/// O(ND) core on the (usually much smaller) remainder — the same "diff only
+/// the changed region" step git's `xdiff` and every other practical diff
+/// engine apply before their own O(ND) search. Real edits (an appended log
+/// entry, one changed line in a large file) leave most of the file as a
+/// shared prefix; eliding it shrinks both `n` and `m` for the quadratic core
+/// below without changing its result — the core's own very first step, at
+/// `d = 0` (the only diagonal `k = 0` there, so no tie-break choice is
+/// involved), greedily extends exactly this same leading run before doing
+/// anything else, so skipping straight to the post-prefix subproblem is
+/// provably identical to letting the core discover it itself.
+///
+/// Deliberately **not** symmetric on the trailing side: an earlier version
+/// of this function also elided a common trailing run (matching from the
+/// end backward), which is unsound in general. Unlike the prefix, the
+/// *trailing* snake the core's backtrack actually lands on depends on
+/// tie-breaks made throughout the whole search (`v[idx(k-1)] < v[idx(k+1)]`
+/// in [`myers_changed_core`]) whenever repeated/colliding lines near the
+/// tail admit more than one minimal alignment — greedily matching from the
+/// end backward can commit to a different (also minimal, but not
+/// byte-identical) alignment than the real backtrack would have chosen.
+/// Caught by review with a concrete counterexample (`old = ["a"]`,
+/// `new = ["b", "a", "a"]`: the core matches `old[0]` to the *first* `new`
+/// "a", but backward-suffix-matching commits to the *second*), confirmed by
+/// exhaustive brute-force diffing of small alphabets. See
+/// `proptest_myers_changed_matches_unelided_core` for the regression test.
+fn myers_changed(
+    old: &[DiffLine<'_>],
+    new: &[DiffLine<'_>],
+    mode: WhitespaceMode,
+) -> (Vec<bool>, Vec<bool>) {
+    let n = old.len();
+    let m = new.len();
+
+    let max_prefix = n.min(m);
+    let mut prefix = 0;
+    while prefix < max_prefix && lines_equal(&old[prefix], &new[prefix], mode) {
+        prefix += 1;
+    }
+
+    let (mid_old_changed, mid_new_changed) =
+        myers_changed_core(&old[prefix..], &new[prefix..], mode);
+
+    // Build the full-length result directly instead of zero-filling `n`/`m`
+    // elements up front and then overwriting the post-prefix half via
+    // `copy_from_slice` — the leading `resize` only zero-inits the elided
+    // run, and reserving `n`/`m` capacity up front means `extend` never
+    // reallocates.
+    let mut old_changed = Vec::with_capacity(n);
+    old_changed.resize(prefix, false);
+    old_changed.extend(mid_old_changed);
+    let mut new_changed = Vec::with_capacity(m);
+    new_changed.resize(prefix, false);
+    new_changed.extend(mid_new_changed);
+    (old_changed, new_changed)
+}
+
 // Myers indexes paths by signed diagonal `k = x - y`, so the V array and
 // backtrack inherently convert between `isize` (diagonals, offsets) and
 // `usize` (line indices). The values are bounded by `n + m`, well within
@@ -981,7 +1038,7 @@ fn edit_script(old: &[DiffLine<'_>], new: &[DiffLine<'_>], mode: WhitespaceMode)
     clippy::cast_possible_wrap,
     clippy::many_single_char_names
 )]
-fn myers_changed(
+fn myers_changed_core(
     old: &[DiffLine<'_>],
     new: &[DiffLine<'_>],
     mode: WhitespaceMode,
@@ -2266,6 +2323,65 @@ mod tests {
         let hunks = enumerate_hunks(old, new).unwrap();
         let staged = apply_hunks_subset(old, &hunks, &[0]);
         assert_eq!(staged, new, "no trailing newline must be preserved");
+    }
+
+    proptest::proptest! {
+        /// `myers_changed` (prefix-elided) must produce byte-identical
+        /// change-flags to `myers_changed_core` (the unmodified original
+        /// algorithm) run directly on the same, un-elided `old`/`new` — not
+        /// just an equally-minimal edit script. Regression test for the
+        /// suffix-elision bug caught in review (see `myers_changed`'s doc
+        /// comment for the full counterexample and why it's unsound). A
+        /// tiny 3-symbol alphabet maximizes repeat/collision near a change
+        /// boundary in a short random sequence — exactly what that bug
+        /// needed to surface.
+        #[test]
+        fn proptest_myers_changed_matches_unelided_core(
+            old in proptest::collection::vec(0u8..3, 0..10),
+            new in proptest::collection::vec(0u8..3, 0..10),
+        ) {
+            fn to_lines(v: &[u8]) -> Vec<DiffLine<'_>> {
+                const SYMBOLS: [&[u8]; 3] = [b"0", b"1", b"2"];
+                v.iter().map(|&n| DiffLine { text: SYMBOLS[n as usize], has_newline: true }).collect()
+            }
+            let old_lines = to_lines(&old);
+            let new_lines = to_lines(&new);
+            let elided = myers_changed(&old_lines, &new_lines, WhitespaceMode::Exact);
+            let ground_truth = myers_changed_core(&old_lines, &new_lines, WhitespaceMode::Exact);
+            proptest::prop_assert_eq!(elided, ground_truth);
+        }
+
+        /// Patch round-trip on lines built from a random shared prefix/suffix
+        /// plus a random differing middle: applying every hunk reproduces
+        /// `new` from `old`, and applying none reproduces `old`. Small
+        /// line-index alphabet (0..6) lets the generator produce shared
+        /// runs, exact duplicates, and fully disjoint content all in the
+        /// same search space, so this exercises the trim path (long shared
+        /// prefix), the untrimmed path (no shared prefix), and everything
+        /// between — including a trailing run shared for reasons other than
+        /// elision (`myers_changed` no longer elides one, but the O(ND) core
+        /// must still handle it correctly on its own).
+        #[test]
+        fn proptest_hunks_roundtrip_with_shared_affix(
+            prefix in proptest::collection::vec(0u8..6, 0..8),
+            suffix in proptest::collection::vec(0u8..6, 0..8),
+            old_mid in proptest::collection::vec(0u8..6, 0..8),
+            new_mid in proptest::collection::vec(0u8..6, 0..8),
+        ) {
+            fn build(prefix: &[u8], mid: &[u8], suffix: &[u8]) -> Vec<u8> {
+                let mut out = Vec::new();
+                for &n in prefix.iter().chain(mid).chain(suffix) {
+                    out.extend_from_slice(format!("l{n}\n").as_bytes());
+                }
+                out
+            }
+            let old = build(&prefix, &old_mid, &suffix);
+            let new = build(&prefix, &new_mid, &suffix);
+            let hunks = enumerate_hunks(&old, &new).unwrap();
+            let all: Vec<usize> = (0..hunks.len()).collect();
+            proptest::prop_assert_eq!(apply_hunks_subset(&old, &hunks, &all), new);
+            proptest::prop_assert_eq!(apply_hunks_subset(&old, &hunks, &[]), old);
+        }
     }
 
     // ---- merge_blob_3way (#298) ----

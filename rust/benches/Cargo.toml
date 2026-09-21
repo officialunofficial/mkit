@@ -214,6 +214,13 @@ name = "history_mmr"
 harness = false
 required-features = ["history-mmr"]
 
+# `ops::unified_hunks`'s Myers edit script (diff/show/add -p/3-way merge)
+# at increasing file sizes — regression guard for the common-prefix
+# elision in `myers_changed`. No feature gate: diff is always compiled.
+[[bench]]
+name = "diff_edit_script"
+harness = false
+
 # `IgnoreList::is_ignored` throughput — no prior coverage (`add_staging.rs`'s
 # fixtures carry no `.gitignore`, so an empty ignore list never exercised
 # this path). Regression guard for the `BasenameKind` fast path added to
