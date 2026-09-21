@@ -518,7 +518,7 @@ where
 /// caller) restores a snapshot on `push`/`pop`/`apply`, not the
 /// large-file checkout/clone/reset/restore path the perf work behind
 /// `restore_tree_to_worktree_with` targeted, so its `ChunkedBlob` chunks
-/// are always read sequentially via the plain [`restore_blob`]. Giving
+/// are always read sequentially via the plain `restore_blob`. Giving
 /// `stash` the same rayon fan-out would mean threading a `read_chunks`
 /// callback through `ops::stash`'s own public API (`save`/`pop`/`apply`)
 /// and `mkit-cli`'s stash command — a separate, larger change, not a
