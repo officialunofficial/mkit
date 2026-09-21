@@ -156,6 +156,16 @@ harness = false
 name = "chunk_hash_fanout"
 harness = false
 
+# Read-side counterpart of `chunk_hash_fanout` above: intra-file
+# chunk-*read* fan-out for a `ChunkedBlob` materialised during
+# checkout/clone/reset/restore (`ops::restore::restore_tree_to_worktree_with`'s
+# `read_chunks` batch callback, wired to rayon by `mkit-cli`'s
+# `restore_fanout::read_chunks_fanout`). No feature gate: restore is
+# always compiled.
+[[bench]]
+name = "restore_chunk_fanout"
+harness = false
+
 # Push planning's per-candidate delta encoding
 # (`transfer::encode_delta_candidate`, fanned out via `mkit-cli`'s
 # `remote_dispatch::encode_delta_candidates_batch`) — per-candidate
