@@ -91,7 +91,7 @@ jobs:
         run: cargo install cargo-mutants --locked
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@9534c84618278caac52cb373bb164ed464dbd8af  # v2
+        uses: taiki-e/install-action@4076c08d76dba979c11a7285295b0716c1d67908  # v2
         with:
           tool: cargo-nextest
 
@@ -152,7 +152,7 @@ jobs:
         run: cargo install cargo-mutants --locked
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@9534c84618278caac52cb373bb164ed464dbd8af  # v2
+        uses: taiki-e/install-action@4076c08d76dba979c11a7285295b0716c1d67908  # v2
         with:
           tool: cargo-nextest
 
