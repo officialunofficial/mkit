@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer } from "ws";
-import { Agent, type SessionSnapshot } from "nanocodex/browser";
+import { Agent, Transport, type SessionSnapshot } from "nanocodex/host";
 import { GroqBridge } from "./bridge";
 import { type JsonObject } from "./protocol";
 
@@ -78,7 +78,7 @@ async function peer(fetcher: typeof fetch) {
     };
 }
 
-describe("unchanged nanocodex 0.5.0 browser binary", () => {
+describe("unchanged nanocodex 0.6.1 host binary", () => {
     it("streams, dispatches a direct tool, and resumes a saved session with full history", async () => {
         const inputs: JsonObject[][] = [];
         const broker = await peer(async (_url, init) => {
@@ -113,8 +113,11 @@ describe("unchanged nanocodex 0.5.0 browser binary", () => {
         async function run(snapshot?: SessionSnapshot) {
             const agent = await Agent.create({
                 module,
-                hostAuth: true,
-                websocketUrl: broker.url,
+                transport: Transport.hostManaged({
+                    websocketUrl: broker.url,
+                    createWebSocket: (endpoint) => new WebSocket(endpoint),
+                    websocketPreconnect: false,
+                }),
                 resume: snapshot,
                 toolMode: "direct",
                 thinking: "low",
@@ -152,11 +155,13 @@ describe("unchanged nanocodex 0.5.0 browser binary", () => {
         expect(first.finalMessage).toContain("hello.txt");
         expect(written).toEqual([{ path: "hello.txt", content: "Hello" }]);
         expect(events.some((event) => event.includes("delta"))).toBe(true);
-        const second = await run(first.snapshot);
+        const second = await run(await first.snapshot());
+        first.dispose();
         expect(second.finalMessage).toContain("hello.txt");
         expect(JSON.stringify(inputs.at(-1))).toContain("Wrote hello.txt");
         expect(JSON.stringify(inputs.at(-1))).toContain("Which file did you create?");
         expect(broker.bridge.usage.totalTokens).toBe(41);
+        second.dispose();
         broker.check();
     });
 
@@ -169,11 +174,15 @@ describe("unchanged nanocodex 0.5.0 browser binary", () => {
             [one, two].map((broker) =>
                 Agent.create({
                     module,
-                    hostAuth: true,
-                    websocketUrl: broker.url,
+                    transport: Transport.hostManaged({
+                        websocketUrl: broker.url,
+                        createWebSocket: (endpoint) => new WebSocket(endpoint),
+                        websocketPreconnect: false,
+                    }),
                     toolMode: "direct",
                     tools: {},
                     thinking: "low",
+                    instructions: "Reply with the project name only.",
                 }),
             ),
         );
