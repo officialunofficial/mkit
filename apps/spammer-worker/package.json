@@ -22,19 +22,19 @@
     "wasm:build:repo-client": "rm -rf ../web/vendor/mkit-repo-client/pkg && cd ../../rust/crates/mkit-repo-client && wasm-pack build --target web --out-dir ../../../apps/web/vendor/mkit-repo-client/pkg --release"
   },
   "dependencies": {
-    "@bufbuild/protobuf": "^2.14.1",
+    "@bufbuild/protobuf": "^2.15.0",
     "mkit-repo-client": "workspace:*",
     "mkit-repo-proto": "workspace:*",
     "mkit-wasm": "workspace:*"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^5.20260911.1",
-    "@types/node": "^26.5.1",
+    "@cloudflare/workers-types": "^5.20260918.1",
+    "@types/node": "^26.6.1",
     "@vitest/coverage-v8": "^4.1.11",
     "typescript": "^7.0.2",
     "vitest": "^4.1.11",
-    "wrangler": "^4.131.0",
-    "@cloudflare/vitest-plugin": "^1.1.7"
+    "wrangler": "^4.134.0",
+    "@cloudflare/vitest-plugin": "^1.1.12"
   },
   "overrides": {
     "sharp": "^0.35.4"

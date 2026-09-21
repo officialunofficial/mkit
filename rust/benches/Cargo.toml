@@ -55,6 +55,16 @@ harness = false
 name = "object_read"
 harness = false
 
+# `status`/`diff`'s ephemeral index-tree snapshot
+# (`worktree::build_tree_from_index_with(.., verify = false)`) at
+# increasing tracked-file counts — regression guard for the batched
+# object-type probe (`worktree::probe_staged_object_types`), which
+# replaced a per-entry serialized `open`+`read`+`close` loop that
+# dominated `status`/`diff` wall time on many-file repos.
+[[bench]]
+name = "status_snapshot"
+harness = false
+
 # Issue #646 — SPEC-PACKFILE v2 zstd compression: pack-byte comparison
 # ({v1 uncompressed, v2 compressed}) for a small multi-commit text-file
 # corpus. Not gated on any feature — `pack-zstd` is a default feature
@@ -209,6 +219,16 @@ required-features = ["history-mmr"]
 # elision in `myers_changed`. No feature gate: diff is always compiled.
 [[bench]]
 name = "diff_edit_script"
+harness = false
+
+# `IgnoreList::is_ignored` throughput — no prior coverage (`add_staging.rs`'s
+# fixtures carry no `.gitignore`, so an empty ignore list never exercised
+# this path). Regression guard for the `BasenameKind` fast path added to
+# skip `match_segments`'s any-depth backtracking for non-anchored
+# single-segment patterns. No feature gate: the ignore matcher is always
+# compiled.
+[[bench]]
+name = "ignore_match"
 harness = false
 
 [features]
