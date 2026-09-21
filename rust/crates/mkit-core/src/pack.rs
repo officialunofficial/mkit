@@ -65,6 +65,8 @@ use crate::hash::{self, Hash};
 use crate::object::{MkitError, Object};
 use crate::store::{MAX_RAW_OBJECT_SIZE, ObjectStore};
 use std::borrow::Cow;
+#[cfg(feature = "pack-zstd")]
+use std::cell::RefCell;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -609,12 +611,47 @@ fn maybe_compress(data: &[u8]) -> Option<Vec<u8>> {
     if data.len() < MIN_COMPRESS_LEN {
         return None;
     }
-    let compressed = zstd::bulk::compress(data, ZSTD_LEVEL).ok()?;
+    let compressed = compress_with_reused_context(data)?;
     if ZSTD_LEN_PREFIX + compressed.len() < data.len() {
         Some(compressed)
     } else {
         None
     }
+}
+
+/// Runs zstd compression through a thread-local, lazily-created
+/// [`zstd::bulk::Compressor`] instead of the one-shot `zstd::bulk::
+/// compress` free function that `maybe_compress` used before. That
+/// free function is `Compressor::new(level)?.compress(data)` under the
+/// hood (see the `zstd` crate's own `bulk` module source) — a fresh
+/// `ZSTD_CCtx` allocated and torn down on every single call.
+/// `PackWriter` runs this once per pushed entry, and caller fan-outs
+/// (`prepare_raw`/`prepare_delta`) run it per-object across a thread
+/// pool, so a commit or pack touching many small objects was paying a
+/// full context allocation per object for no reason — the `zstd`
+/// crate's own `bulk` module doc names exactly this as `Compressor`'s
+/// reason to exist: reusing one context "between jobs to avoid
+/// re-allocations". Every call here shares the same fixed
+/// `ZSTD_LEVEL` and no dictionary, so there is no per-call parameter
+/// change to reset. One `Compressor` lives per OS thread — including
+/// each rayon worker thread, which persists for the pool's lifetime —
+/// so the context is built at most once per thread rather than once
+/// per object. Falls back to `None` (never panics) if the one-time
+/// context creation fails, matching `maybe_compress`'s existing
+/// "compression failure just skips compressing this entry" contract.
+#[cfg(feature = "pack-zstd")]
+fn compress_with_reused_context(data: &[u8]) -> Option<Vec<u8>> {
+    thread_local! {
+        static COMPRESSOR: RefCell<Option<zstd::bulk::Compressor<'static>>> =
+            const { RefCell::new(None) };
+    }
+    COMPRESSOR.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(zstd::bulk::Compressor::new(ZSTD_LEVEL).ok()?);
+        }
+        slot.as_mut()?.compress(data).ok()
+    })
 }
 
 #[cfg(not(feature = "pack-zstd"))]
