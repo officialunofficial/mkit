@@ -532,9 +532,16 @@ pub fn verify_closure<'a>(
     mode: ClosureMode,
     objects: impl IntoIterator<Item = &'a [u8]>,
 ) -> Result<ClosureReport, VerifyError> {
-    let items: Vec<&'a [u8]> = objects.into_iter().collect();
-    if items.len() > pack::MAX_ENTRIES as usize {
-        return Err(VerifyError::TooManyClosureObjects);
+    // Bail as soon as the cap is exceeded rather than draining `objects`
+    // first: it's a caller-supplied `IntoIterator`, so for an adversarial
+    // or merely huge lazy source this keeps the old per-item fail-fast
+    // bound instead of paying to produce every item before rejecting.
+    let mut items: Vec<&'a [u8]> = Vec::new();
+    for (supplied, bytes) in objects.into_iter().enumerate() {
+        if supplied >= pack::MAX_ENTRIES as usize {
+            return Err(VerifyError::TooManyClosureObjects);
+        }
+        items.push(bytes);
     }
     let (by_id, mut corrupt) = index_supplied_objects(&items);
     corrupt.sort_by_key(|a| a.0);
@@ -1373,34 +1380,42 @@ mod tests {
     }
 
     #[test]
-    fn large_object_set_reports_corrupt_entry_through_parallel_path() {
-        let (_d, store, commit_id, total) = large_fixture();
-        let mut objects: Vec<Vec<u8>> = Vec::new();
-        let mut flipped_id = None;
-        for (i, id) in store.iter_object_hashes().unwrap().into_iter().enumerate() {
-            let mut bytes = store.read(&id).unwrap();
-            // Corrupt one blob partway through the set so it lands in
-            // whichever thread-chunk the parallel split puts it in.
-            if i == total / 2 {
-                let last = bytes.len() - 1;
-                bytes[last] ^= 0x01;
-                flipped_id = Some(id);
-            }
-            objects.push(bytes);
-        }
-        let flipped_id = flipped_id.expect("fixture has enough objects to corrupt one");
+    fn large_object_set_parallel_path_classifies_corrupt_entry_correctly() {
+        // A bit-flipped (but still parsable) object doesn't exercise
+        // `classify_object`'s error arm at all — it just derives a
+        // different id — so it wouldn't touch `index_supplied_objects_*`'s
+        // `corrupt` bookkeeping. Replace one entry with bytes that fail to
+        // deserialize entirely instead, and call the parallel indexer
+        // directly (`large_fixture`'s object count stays under the live
+        // dispatch threshold — see its doc) so this actually runs the
+        // parallel branch's per-chunk corrupt handling, whichever
+        // thread-chunk the corrupt entry lands in.
+        let (_d, store, _commit_id, total) = large_fixture();
+        let mut objects: Vec<Vec<u8>> = store
+            .iter_object_hashes()
+            .unwrap()
+            .into_iter()
+            .map(|id| store.read(&id).unwrap())
+            .collect();
+        let corrupt_index = total / 2;
+        objects[corrupt_index] = b"not an object".to_vec();
+        let expected_corrupt_id = hash(&objects[corrupt_index]);
 
-        let report = verify_closure(
-            &commit_id,
-            ClosureMode::Snapshot,
-            objects.iter().map(Vec::as_slice),
-        )
-        .unwrap();
-        assert!(!report.is_complete(), "{report:?}");
-        assert!(
-            report.missing.contains(&flipped_id)
-                || report.corrupt.iter().any(|(id, _)| *id == flipped_id),
-            "corrupted object must surface as missing or corrupt: {report:?}"
+        let refs: Vec<&[u8]> = objects.iter().map(Vec::as_slice).collect();
+        let threads = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        let (seq_by_id, mut seq_corrupt) = index_supplied_objects_sequential(&refs);
+        let (par_by_id, mut par_corrupt) = index_supplied_objects_parallel(&refs, threads.max(2));
+        seq_corrupt.sort_by_key(|a| a.0);
+        par_corrupt.sort_by_key(|a| a.0);
+
+        assert_eq!(par_by_id, seq_by_id);
+        assert_eq!(par_corrupt, seq_corrupt);
+        assert_eq!(seq_corrupt.len(), 1, "{seq_corrupt:?}");
+        assert_eq!(seq_corrupt[0].0, expected_corrupt_id);
+        assert_eq!(
+            seq_by_id.len(),
+            total - 1,
+            "the corrupt entry must not be indexed"
         );
     }
 }
