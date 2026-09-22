@@ -145,6 +145,19 @@ harness = false
 name = "verify_fanout"
 harness = false
 
+# Closure (full-disclosure) verification's pre-pass: `verify_closure`/
+# `verify_closure_packs` deserialize + BLAKE3/BMT-derive-id every
+# supplied object once to build a lookup index, before
+# `walk_closure`'s own (deliberately separate, security-critical)
+# re-derivation. That pre-pass is a pure independent map per object —
+# same sequential-vs-fan-out crossover shape as `verify_fanout` above,
+# gated by `index_supplied_objects`/`index_pack_entries`'s threshold in
+# `mkit-core/src/verify/closure.rs`. No feature gate: closure
+# verification is always compiled.
+[[bench]]
+name = "closure_verify_fanout"
+harness = false
+
 # Intra-file chunk-hashing fan-out for a single large file's `add`
 # (`worktree::store_large_file_streaming_with`'s `hash_chunks` batch
 # callback, wired to rayon by `mkit-cli`'s `commands::add::hash_pending`)
