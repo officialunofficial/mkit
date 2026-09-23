@@ -28,6 +28,32 @@ continues to cover authority-only bootstrap and SQLite fault cases; its old
 seven-route-closure assertions apply only to the PR08a baseline and are
 superseded by the complete managed data matrix here.
 
+For native-client interoperability, keep that server running after
+`managed_data.py` and run the ignored `mkit-transport-connect` test from
+`rust/` with `MKIT_MANAGED_TEST_URL=http://localhost:8791`:
+
+```sh
+cargo test -p mkit-transport-connect --test signed_reads \
+  native_reads_match_managed_workerd_roles_and_revocation -- --ignored
+```
+
+It exercises all four native signed reads as reader and owner, and verifies
+reader write denial, revoked-writer denial, mismatched repository, and unsigned
+read denial against real workerd. It also reaches the same fixture at
+`127.0.0.1:8791` to check a wrong signed audience; the fixture pins
+`http://localhost:8791`. Denials must map to `AccessDenied`, and the owner
+checks that the denied reader write created no ref. To exercise an active
+native writer, restore
+the fixture's reader and writer collaborators with an owner-signed policy
+replacement, then run `native_writer_reads_and_writes_when_live -- --ignored`;
+it writes only a throwaway ref in this isolated local state. To test reader
+revocation, use the fixture's
+owner identity to replace the disposable policy with no collaborators, then
+run `native_revoked_reader_has_no_read_fallback -- --ignored` with the same
+environment variable. The latter checks fresh attempts of all four methods.
+An owner read proves the server is still healthy after revocation.
+Do not run either ignored test against a live service or reuse local state.
+
 For managed replay and concurrency evidence, keep the managed test-faults
 server running with an initialized state and run
 `PYTHONDONTWRITEBYTECODE=1 python3 tests/managed_faults.py <state>` and

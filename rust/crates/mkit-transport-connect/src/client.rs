@@ -20,7 +20,7 @@ use mkit_core::protocol::{
 use mkit_core::refs::Ref;
 use url::{Host, Url};
 
-use crate::envelope::{EnvelopeSigner, EnvelopeTransport, RetryIdentity};
+use crate::envelope::{EnvelopeSigner, EnvelopeTransport, RetryIdentity, SignedReadContext};
 use crate::error::{ErrorContext, map_connect_error};
 use crate::executor::TokioExecutor;
 use crate::proto::mkit::transport::v1::__buffa::oneof::download_pack_response::Body as DownloadBody;
@@ -83,6 +83,7 @@ const CHUNK_SIZE: usize = 800 * 1024;
 /// retrying that is caller-level policy.
 pub struct ConnectTransport {
     client: TransportServiceClient<EnvelopeTransport<HttpClient>>,
+    signed_reads: Option<SignedReadContext>,
     executor: TokioExecutor,
     /// See [`Self::with_atomic_advance`].
     atomic_advance: bool,
@@ -222,6 +223,24 @@ impl ConnectTransport {
         url: &str,
         signer: Option<Arc<dyn EnvelopeSigner>>,
     ) -> TransportResult<Self> {
+        Self::connect_internal(url, signer, false)
+    }
+
+    /// Sign the four Connect read RPCs as well as the existing writes.
+    /// The caller must establish exact endpoint trust before invoking this
+    /// low-level constructor; the CLI enforces that in `open_with_config`.
+    pub fn connect_with_signed_reads(
+        url: &str,
+        signer: Arc<dyn EnvelopeSigner>,
+    ) -> TransportResult<Self> {
+        Self::connect_internal(url, Some(signer), true)
+    }
+
+    fn connect_internal(
+        url: &str,
+        signer: Option<Arc<dyn EnvelopeSigner>>,
+        sign_reads: bool,
+    ) -> TransportResult<Self> {
         let stripped = url
             .strip_prefix("mkit+")
             .ok_or(TransportError::InvalidResponse)?;
@@ -257,6 +276,15 @@ impl ConnectTransport {
         } else {
             repository
         };
+        let signed_reads = if sign_reads {
+            signer.as_ref().map(|signer| SignedReadContext {
+                signer: Arc::clone(signer),
+                audience: parsed.origin().ascii_serialization(),
+                repository: repository.to_owned(),
+            })
+        } else {
+            None
+        };
         let transport = EnvelopeTransport::new(
             transport,
             signer,
@@ -282,6 +310,7 @@ impl ConnectTransport {
         let executor = TokioExecutor::new().map_err(|_| TransportError::ConnectionFailed)?;
         Ok(Self {
             client: TransportServiceClient::new(transport, config),
+            signed_reads,
             executor,
             atomic_advance: false,
             unary_timeout: UNARY_TIMEOUT,
@@ -313,17 +342,45 @@ impl ConnectTransport {
         base_uri: Uri,
         signer: Option<Arc<dyn EnvelopeSigner>>,
     ) -> Self {
+        Self::connect_for_test_internal(base_uri, signer, false)
+    }
+
+    /// Exercise the signed read path against a local capture or service.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn connect_for_test_with_signed_reads(
+        base_uri: Uri,
+        signer: Arc<dyn EnvelopeSigner>,
+    ) -> Self {
+        Self::connect_for_test_internal(base_uri, Some(signer), true)
+    }
+
+    fn connect_for_test_internal(
+        base_uri: Uri,
+        signer: Option<Arc<dyn EnvelopeSigner>>,
+        sign_reads: bool,
+    ) -> Self {
         let audience = format!(
             "{}://{}",
             base_uri.scheme_str().unwrap_or("http"),
             base_uri.authority().expect("test authority")
         );
         let config = ClientConfig::new(base_uri).with_default_timeout(Duration::from_secs(10));
+        let signed_reads = if sign_reads {
+            signer.as_ref().map(|signer| SignedReadContext {
+                signer: Arc::clone(signer),
+                audience: audience.clone(),
+                repository: "default".into(),
+            })
+        } else {
+            None
+        };
         Self {
             client: TransportServiceClient::new(
                 EnvelopeTransport::new(HttpClient::plaintext(), signer, audience, "default".into()),
                 config,
             ),
+            signed_reads,
             executor: TokioExecutor::new().expect("tokio runtime for test transport"),
             atomic_advance: false,
             unary_timeout: UNARY_TIMEOUT,
@@ -405,6 +462,23 @@ impl ConnectTransport {
     /// `Response`.
     fn retrying<T>(&self, op: impl FnMut() -> TransportResult<T>) -> TransportResult<T> {
         mkit_core::protocol::retrying(op, self.backoff, self.sleep)
+    }
+
+    fn read_options<M: buffa::Message>(
+        &self,
+        procedure: &'static str,
+        message: &M,
+        timeout: Duration,
+    ) -> TransportResult<CallOptions> {
+        let options = CallOptions::default()
+            .with_timeout(timeout)
+            .with_compress(false);
+        match &self.signed_reads {
+            Some(context) => context
+                .options(procedure, &message.encode_to_vec(), options)
+                .map_err(TransportError::RemoteError),
+            None => Ok(options),
+        }
     }
 }
 
@@ -529,16 +603,18 @@ impl Transport for ConnectTransport {
         // failed prior attempt is never resumed.
         self.retrying(|| {
             self.executor.block_on_local(async {
-                let options = CallOptions::default().with_timeout(self.pack_transfer_timeout);
+                let request = DownloadPackRequest {
+                    pack_id: Some(key.as_bytes().to_vec()),
+                    ..Default::default()
+                };
+                let options = self.read_options(
+                    "/mkit.transport.v1.TransportService/DownloadPack",
+                    &request,
+                    self.pack_transfer_timeout,
+                )?;
                 let mut stream = self
                     .client
-                    .download_pack_with_options(
-                        DownloadPackRequest {
-                            pack_id: Some(key.as_bytes().to_vec()),
-                            ..Default::default()
-                        },
-                        options,
-                    )
+                    .download_pack_with_options(request, options)
                     .await
                     .map_err(|e| map_connect_error(e, ErrorContext::Ref))?;
 
@@ -597,16 +673,18 @@ impl Transport for ConnectTransport {
     fn pack_exists(&self, key: &PackKey) -> TransportResult<bool> {
         self.retrying(|| {
             self.executor.block_on(async {
-                let options = CallOptions::default().with_timeout(self.unary_timeout);
+                let request = PackExistsRequest {
+                    pack_id: Some(key.as_bytes().to_vec()),
+                    ..Default::default()
+                };
+                let options = self.read_options(
+                    "/mkit.transport.v1.TransportService/PackExists",
+                    &request,
+                    self.unary_timeout,
+                )?;
                 let resp = self
                     .client
-                    .pack_exists_with_options(
-                        PackExistsRequest {
-                            pack_id: Some(key.as_bytes().to_vec()),
-                            ..Default::default()
-                        },
-                        options,
-                    )
+                    .pack_exists_with_options(request, options)
                     .await
                     .map_err(|e| map_connect_error(e, ErrorContext::Ref))?
                     .into_owned();
@@ -648,16 +726,18 @@ impl Transport for ConnectTransport {
     fn read_ref(&self, name: &str) -> TransportResult<Option<Hash>> {
         self.retrying(|| {
             self.executor.block_on(async {
-                let options = CallOptions::default().with_timeout(self.unary_timeout);
+                let request = ReadRefRequest {
+                    name: Some(name.to_owned()),
+                    ..Default::default()
+                };
+                let options = self.read_options(
+                    "/mkit.transport.v1.TransportService/ReadRef",
+                    &request,
+                    self.unary_timeout,
+                )?;
                 let resp = self
                     .client
-                    .read_ref_with_options(
-                        ReadRefRequest {
-                            name: Some(name.to_owned()),
-                            ..Default::default()
-                        },
-                        options,
-                    )
+                    .read_ref_with_options(request, options)
                     .await
                     .map_err(|e| map_connect_error(e, ErrorContext::Ref))?
                     .into_owned();
@@ -674,16 +754,18 @@ impl Transport for ConnectTransport {
     fn list_refs(&self, prefix: &str) -> TransportResult<Vec<Ref>> {
         self.retrying(|| {
             self.executor.block_on(async {
-                let options = CallOptions::default().with_timeout(self.unary_timeout);
+                let request = ListRefsRequest {
+                    prefix: Some(prefix.to_owned()),
+                    ..Default::default()
+                };
+                let options = self.read_options(
+                    "/mkit.transport.v1.TransportService/ListRefs",
+                    &request,
+                    self.unary_timeout,
+                )?;
                 let resp = self
                     .client
-                    .list_refs_with_options(
-                        ListRefsRequest {
-                            prefix: Some(prefix.to_owned()),
-                            ..Default::default()
-                        },
-                        options,
-                    )
+                    .list_refs_with_options(request, options)
                     .await
                     .map_err(|e| map_connect_error(e, ErrorContext::Ref))?
                     .into_owned();

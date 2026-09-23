@@ -5,6 +5,24 @@ single crate or spec. Each entry states the invariant, why it matters, and
 what breaks when it is violated. A regression test enforces each one; find
 it by the file path listed under "Enforced by".
 
+## Native signed reads require user authority and exact destination trust
+
+**Always:** the CLI signs Connect reads only when a user-scoped literal
+`transport_signed_reads = true` accompanies envelope mode and an exact
+user-trusted endpoint. A read attempt binds its typed protobuf message,
+procedure, audience and repository with a fresh nonce; redirects cannot
+forward signing headers.
+
+**Because:** a cloned repository can choose an endpoint and request content,
+but cannot authorize use of the user's ambient signing key or redirect it.
+
+**If violated:** a hostile repository or redirect can obtain signatures for
+an unintended service, or a framed DownloadPack hash can disagree with the
+server's decoded message commitment.
+
+**Enforced by:** CLI config provenance and remote-dispatch tests, and native
+HTTP capture/framing/redirect tests in `mkit-transport-connect`.
+
 ## Managed authority gates every data effect with live policy
 
 **Always:** the optional managed Worker admits exactly the seven specified

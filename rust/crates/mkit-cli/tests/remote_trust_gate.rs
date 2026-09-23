@@ -7,6 +7,52 @@ fn mkit_bin() -> &'static str {
     env!("CARGO_BIN_EXE_mkit")
 }
 
+#[test]
+fn config_set_rejects_nonliteral_signed_reads_values() {
+    let td = tempfile::tempdir().unwrap();
+    assert!(
+        run_in_with_env(td.path(), &["init"], &[], None)
+            .status
+            .success()
+    );
+    for invalid in ["", "TRUE", "False", "1", "yes"] {
+        let out = run_in_with_env(
+            td.path(),
+            &["config", "transport_signed_reads", invalid],
+            &[],
+            None,
+        );
+        assert!(!out.status.success(), "accepted `{invalid}`");
+        assert!(String::from_utf8_lossy(&out.stderr).contains("expected `true` or `false`"));
+    }
+    for valid in ["true", "false"] {
+        let out = run_in_with_env(
+            td.path(),
+            &["config", "transport_signed_reads", valid],
+            &[],
+            None,
+        );
+        assert!(out.status.success(), "rejected `{valid}`: {out:?}");
+    }
+}
+
+#[test]
+fn clone_and_fetch_reject_signed_reads_before_network() {
+    let td = tempfile::tempdir().unwrap();
+    let root = td.path();
+    let endpoint = "mkit+https://example.invalid/repo";
+    let user_cfg = "transport_auth = envelope\ntransport_signed_reads = true\n";
+    let clone = run_in_with_env(root, &["clone", endpoint, "copy"], &[], Some(user_cfg));
+    assert!(!clone.status.success());
+    assert!(String::from_utf8_lossy(&clone.stderr).contains("untrusted destination"));
+    assert!(run_in_with_env(root, &["init"], &[], None).status.success());
+    let add = run_in_with_env(root, &["remote", "add", endpoint], &[], None);
+    assert!(add.status.success(), "remote add failed: {add:?}");
+    let fetch = run_in_with_env(root, &["fetch"], &[], Some(user_cfg));
+    assert!(!fetch.status.success());
+    assert!(String::from_utf8_lossy(&fetch.stderr).contains("untrusted destination"));
+}
+
 fn run_in_with_env(
     cwd: &Path,
     args: &[&str],

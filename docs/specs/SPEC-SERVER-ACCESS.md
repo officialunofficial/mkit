@@ -101,6 +101,12 @@ MUST reject before repository access. A signature alone does not grant access:
 every operation checks live durable policy. Policy corruption, identity
 mismatch, missing policy or storage failure fails closed.
 
+The native Connect client opts into authenticated reads only through the
+user-scoped `transport_signed_reads = true` setting with envelope mode and an
+exact user-trusted endpoint (SPEC-TRANSPORT-CONNECT §7). The public client's
+unsigned-read default is unchanged. Client signing authenticates an identity;
+this service's live role check independently decides whether it may read.
+
 The outer Worker MUST authenticate and check writer membership before
 collecting an UploadPack body. This precheck creates no reservation. The
 service repeats authorization before reservation, before R2 publication and

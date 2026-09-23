@@ -1602,7 +1602,7 @@ Stored in `.mkit/config` as `key = value` lines &mdash; **except** security-sens
 keys, which are **user-scoped only** and ignored if set in a repo's
 `.mkit/config` (a hostile repo must not be able to redirect signing or trust).
 Those keys &mdash; `user.identity`, `signing_key`, `signer`, `key.*`, `attest.*`,
-`ssh.*`, and `trusted_remote_endpoint` &mdash; live in the user config
+`ssh.*`, `transport_auth`, `transport_signed_reads`, and `trusted_remote_endpoint` &mdash; live in the user config
 (`$XDG_CONFIG_HOME/mkit/config`); set them with `mkit config <key> <value>`,
 which routes them to the user scope automatically.
 
@@ -1615,6 +1615,7 @@ which routes them to the user scope automatically.
 | `remote_bucket` | name | empty | For s3 remotes |
 | `remote_type` | `file` / `http` / `s3` / `ssh` / `memory` | auto | |
 | `transport_auth` | `bearer` / `envelope` | `bearer` | Write-auth mode for `mkit+https://`/`mkit+http://`; `envelope` additionally Ed25519-signs writes with the commit-signing key (see `signer`/`signing_key`/`key.ed25519_ref`) |
+| `transport_signed_reads` | `true` / `false` | `false` | User-only opt-in; requires `transport_auth = envelope` and an exact `trusted_remote_endpoint`. Signs ListRefs, ReadRef, PackExists and DownloadPack. Invalid values fail before connecting. |
 | `ssh.strict_host_key_checking` | `yes` / `no` / `accept-new` | inherit | User-scoped only |
 | `ssh.user_known_hosts_file` | path | inherit | User-scoped only |
 | `ssh.identity_file` | path | inherit | User-scoped only |
