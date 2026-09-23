@@ -170,6 +170,47 @@ uses near-2 MiB random objects and a tiny editable file; it is not a dense
 4 MiB-pack worst-case or proof that all independent ceilings are jointly
 attainable.
 
+For PR10c2 disclosure, use the same managed build and a fresh per-fixture
+`--persist-to` state. After `managed_snapshots.py` reaches `ready`, run
+`managed_disclosure.py <small-fixture> --hold`: it registers a signed live
+grant, reads raw MKWB, then checks subject/path/context/JSON/auth denials. The
+`--renew` option derives the next generation from the registry; `--revoke`
+checks a final denial. With `--var C2_TEST_PAUSE_MS:1000` and
+`MKIT_C2_TEST_STATE=<state>`, run `managed_disclosure_race.py <small-fixture>`
+after `--hold`: it observes the first test-only R2 range, revokes the grant
+while the read awaits, asserts owner-admin responsiveness, and requires a
+409/no-MKWB result. The pause and range spy are compiled out without
+`test-faults`.
+
+For the large hidden corpus, generate `65 2097142`, then use
+`MKIT_SNAPSHOT_R2_BUCKET=mkit-vcs-managed-local-test` with
+`managed_snapshots.py <large-fixture> --large --local-r2-seed`. In that same
+state, `MKIT_C2_TEST_STATE=<state> managed_disclosure_large.py
+<large-fixture>` reads only `selected.txt`. A local workerd run enrolled
+136,318,176 reachable canonical bytes and returned a 3,450-byte MKWB with
+three range GETs (Commit, Tree, selected Blob), all from the small root pack;
+none of the 65 hidden large packs were read. This is a local-R2 seeded
+large-base proof, not an ordinary-upload-window or deployed isolate result.
+
+For the post-cleanup dependency check, stop Wrangler on a ready small-fixture
+state and run `managed_disclosure_cleanup.py --age <state>`; this test-only
+patch ages the private checksummed job row. Restart Wrangler with that state,
+then run `managed_disclosure_cleanup.py --cleanup <state> <small-fixture>`.
+The real owner `CleanupSnapshots` route removes ready-summary and seen rows
+while retaining the certified catalog/index, and a renewed live grant still
+reads MKWB. One local run removed six rows and returned 1,520 MKWB bytes.
+Never point these patch modes at a real repository.
+
+For the file-cap edge, enroll separate `snapshot_fixture` states with one
+file of 262144 and 262145 bytes. `managed_disclosure_boundary.py <fixture>
+200` accepts the exact 256 KiB case (262,641-byte MKWB); the `429` variant
+requires typed `resource_exhausted` and no bundle for the one-byte-over case.
+The C2 witness/bundle/visit ceilings are independent; these cases do not
+measure every joint maximum, dense Tree or ChunkedBlob positions. Native
+`hosted_workerd.rs` separately performs an actual signed Connect client read
+against the local managed Worker, while `signed_reads.rs` tests single-attempt
+redirect and oversized-response refusal.
+
 For isolated state tests, give Wrangler `--persist-to` an empty directory made
 with `mktemp -d /tmp/mkit-managed-test.XXXXXX`. The `--probe-uninitialized`
 mode performs Get and Replace before bootstrap; inspect the exact RefStore

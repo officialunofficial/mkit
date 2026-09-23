@@ -145,7 +145,131 @@ fn valid_wire(wire: &AdminWire, configured: &Identity) -> bool {
         && mkit_core::write_auth::is_hex(&wire.proof.fingerprint, 32)
 }
 
+pub(super) enum DisclosureGrant {
+    Allowed(String, String),
+    Denied,
+    Conflict,
+}
+
 impl RefStore {
+    /// Live subject authority for a single exact selection. The signed MKHG
+    /// is rechecked from the current registry row; a proof or structural
+    /// certificate alone is never a read capability.
+    pub(super) fn disclosure_grant(
+        &self,
+        identity: &Identity,
+        proof: &mkit_worker_common::replay::Proof,
+        request: &crate::snapshot_wire::GetWorkspace,
+    ) -> Result<DisclosureGrant> {
+        let Some(policy) = self.read_policy(identity)? else {
+            return Ok(DisclosureGrant::Denied);
+        };
+        let authority = policy
+            .validate(identity)
+            .map_err(|_| worker::Error::RustError("invalid policy".into()))?;
+        let Some(workspace) = self.workspace(&identity.repository, &request.workspace_id)? else {
+            return Ok(DisclosureGrant::Denied);
+        };
+        if workspace.audience != identity.audience
+            || workspace.issuer != identity.owner
+            || workspace.subject != proof.author
+            || Date::now().as_millis() as i64 > proof.expires_at
+        {
+            return Ok(DisclosureGrant::Denied);
+        }
+        let row = self.incarnation(
+            &identity.repository,
+            &request.workspace_id,
+            &workspace.current_generation,
+            &workspace,
+        )?;
+        if row.status != "active"
+            || row.grant_id != request.grant_id
+            || !decimal(&row.not_before).is_some_and(|start| start <= now())
+            || !decimal(&row.expires).is_some_and(|end| now() < end)
+        {
+            return Ok(DisclosureGrant::Denied);
+        }
+        let raw = URL_SAFE_NO_PAD
+            .decode(&row.envelope)
+            .map_err(|_| worker::Error::RustError("corrupt grant".into()))?;
+        let grant =
+            verify_signature(&raw).map_err(|_| worker::Error::RustError("corrupt grant".into()))?;
+        for path in &request.paths {
+            if !grant
+                .fields
+                .entries
+                .iter()
+                .any(|entry| entry.mask & 1 == 1 && entry.components == *path)
+            {
+                return Ok(DisclosureGrant::Denied);
+            }
+        }
+        // Only a live subject with exact READ path authority may learn that
+        // its own registered context assertion is stale.
+        if workspace.current_generation != request.grant_generation
+            || workspace.exact_ref != request.expected_ref
+            || workspace.workspace_head != request.expected_base
+            || decimal(&row.authority_generation) != Some(authority)
+        {
+            return Ok(DisclosureGrant::Conflict);
+        }
+        Ok(DisclosureGrant::Allowed(
+            workspace.exact_ref,
+            workspace.workspace_head,
+        ))
+    }
+
+    /// Recheck mutable authority fields after an R2 await. The signed
+    /// envelope and exact selected paths were authenticated before the first
+    /// locator; an incarnation's envelope is immutable across a generation.
+    pub(super) fn disclosure_grant_current(
+        &self,
+        identity: &Identity,
+        proof: &mkit_worker_common::replay::Proof,
+        request: &crate::snapshot_wire::GetWorkspace,
+    ) -> Result<bool> {
+        let Some(policy) = self.read_policy(identity)? else {
+            return Ok(false);
+        };
+        let authority = policy
+            .validate(identity)
+            .map_err(|_| worker::Error::RustError("invalid policy".into()))?;
+        let Some(workspace) = self.workspace(&identity.repository, &request.workspace_id)? else {
+            return Ok(false);
+        };
+        if workspace.current_generation != request.grant_generation
+            || workspace.exact_ref != request.expected_ref
+            || workspace.workspace_head != request.expected_base
+            || workspace.audience != identity.audience
+            || workspace.issuer != identity.owner
+            || workspace.subject != proof.author
+            || now() as i64 > proof.expires_at
+        {
+            return Ok(false);
+        }
+        #[derive(Deserialize)]
+        struct Live {
+            grant_id: String,
+            authority_generation: String,
+            not_before: String,
+            expires: String,
+            status: String,
+        }
+        let rows: Vec<Live> = self.state.storage().sql().exec(
+            "SELECT grant_id,authority_generation,not_before,expires,status FROM host_grant_incarnations WHERE repository=? AND workspace_id=? AND grant_generation=?",
+            vec![identity.repository.clone().into(), request.workspace_id.clone().into(), request.grant_generation.clone().into()],
+        )?.to_array()?;
+        let Some(row) = rows.first() else {
+            return Ok(false);
+        };
+        Ok(rows.len() == 1
+            && row.grant_id == request.grant_id
+            && row.status == "active"
+            && decimal(&row.authority_generation) == Some(authority)
+            && decimal(&row.not_before).is_some_and(|start| start <= now())
+            && decimal(&row.expires).is_some_and(|end| now() < end))
+    }
     fn grant_limits(&self) -> Result<Limits> {
         let limits = Limits::default_profile();
         #[cfg(feature = "test-faults")]

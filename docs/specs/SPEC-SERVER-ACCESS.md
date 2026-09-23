@@ -90,9 +90,11 @@ The only data procedures are POST
 | ListRefs, ReadRef, PackExists, DownloadPack | yes | yes | yes |
 | UploadPack, UpdateRef, AdvanceRefs | no | yes | yes |
 
-Anonymous, nonmembers, and grant-only subjects have no data access. Unknown
-methods fail closed. Policy management remains owner-only. The optional
-owner-controlled MKHG registry in
+Anonymous and nonmembers have no data access. Grant-only subjects have no
+access through these seven methods; the separate grant-scoped Snapshot route
+below is not a role or a TransportService method. Unknown methods fail closed.
+Policy management remains owner-only. The optional owner-controlled MKHG
+registry in
 [SPEC-HOSTED-WORKSPACE-GRANTS](SPEC-HOSTED-WORKSPACE-GRANTS.md) does not add a
 role or unlock a data method. Every data request
 MUST carry auth v2 bound to the configured audience, repository, exact
@@ -140,6 +142,44 @@ take this permit. The cap does not establish an exact isolate peak-memory
 bound, and already materialized SDK chunks may briefly exceed the retained
 buffer length.
 
+### Grant-scoped Snapshot disclosure
+
+`POST /mkit/partial/v1/GetWorkspace` is a dedicated subject route, separate
+from the role matrix and the seven data methods. It authenticates auth v2 over
+the exact raw JSON body, configured audience/repository and exact path. The
+uncompressed UTF-8 JSON body is capped at 256 KiB and rejects duplicate or
+unknown fields. Its request names a registered workspace and grant, exact
+grant generation, expected registered ref and base, plus 1..256 sorted unique
+paths. It accepts no object IDs, pack keys, URLs or MKHG envelopes.
+
+The service requires the active registered grant, exact subject and current
+authority generation, valid grant and request times, current policy, exact
+READ permission for every path, and a ready C1 certificate matching the
+workspace head, ref and packmap. It authorizes the complete path set before
+resolving object locators, then rechecks mutable authority after each R2 wait
+and before releasing bytes. Enrollment or a historical `ready` result alone
+does not authorize disclosure. The Worker shares the C1 per-isolate heavy
+permit and uses a five-minute structural read lease (64 physical rows per
+repository, 16 per certificate); the lease pins storage, not authority.
+
+Per request, the route admits at most 2,048 range GETs and 4 MiB reserved
+range bytes with a cooperative 20-second deadline (not a hard wall-clock
+bound). The encoded MKWB cap is 4 MiB; witness and selected-content caps are
+1 MiB each, each selected file is at most 256 KiB, at most 256 paths and 2,048
+objects/Tree visits are admitted, and each object is at most 2 MiB. These
+ceilings are independent, do not promise every combination of maxima, and a
+resource refusal does not invalidate the portable bundle.
+
+Success is the unchanged raw MKWB v1 body with `application/octet-stream`,
+exact `Content-Length`, and `Cache-Control: private, no-store`; there is no
+JSON/base64 wrapper, redirect, public/legacy fetch or unsigned fallback. The
+bundle contains complete ancestor Trees, so sibling names, modes and hashes
+are visible. Its complete signed base Commit/Remix also discloses message,
+identities, parents and opaque source fields. The service cannot hide embedded
+metadata, prevent low-entropy hash guessing, or prevent recipients from
+exfiltrating bytes already delivered. This host permission is separate from
+core verification of the portable bundle.
+
 ## 5. Failure mapping
 
 Responses are JSON `{"code":"<code>"}` with no internal storage detail.
@@ -156,6 +196,17 @@ Responses are JSON `{"code":"<code>"}` with no internal storage detail.
 | Managed data method forbidden to an authenticated nonmember or role | 403 | `permission_denied` |
 | Managed inbound HTTP body or signed upload declaration above its cap | 413 | `resource_exhausted` |
 | Managed large-transfer permit unavailable, oversized R2 object, or bounded list over limit | 429 | `resource_exhausted` |
+| Subject route body above 256 KiB | 413 | `resource_exhausted` |
+| Subject route malformed JSON/fields | 400 | `invalid_argument` |
+| Subject route missing, foreign, or unauthorized workspace/grant/path | 403 | `permission_denied` |
+| Subject route stale head, visible current-grant generation/ref/policy, or certificate | 409 | `conflict` |
+| Subject route unsupported profile or per-request resource budget | 422 / 429 | `unsupported_profile` / `resource_exhausted` |
+
+The current subject route does not emit 404: after valid authentication,
+missing or foreign workspaces, grants and paths are denied as 403 to avoid an
+existence oracle; a revoked or superseded grant is also denied as 403. The
+404 entry above is for authenticated non-sensitive
+resources in profiles that use it; it is not a current GetWorkspace result.
 
 For data RPCs, Connect errors carry the corresponding Connect code;
 server-streaming errors may appear in a 200 HTTP response end-stream frame.

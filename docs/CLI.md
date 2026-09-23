@@ -207,6 +207,24 @@ Working-tree commands:
   authenticated selection. Confirmation through `--accept-bundle-selection`
   accepts precisely the listed bundle paths. Verification precedes destination
   installation. No remote, credential, or host permission is consulted.
+- `mkit workspace create --hosted URL --base ID --path PATH --ref REF
+  --workspace-id ID --grant-id ID --grant-generation DECIMAL DIR` (repeat
+  `--path` for multiple selected files) retrieves a grant-scoped hosted
+  Snapshot. `--hosted` and `--bundle` are mutually exclusive; `--base` and
+  explicit paths are required. Before any signer is opened, hosted mode
+  requires user-only `transport_signed_reads = true`, envelope auth, and an
+  exact user-trusted endpoint matching `URL`. `mkit+https` is supported;
+  plain `mkit+http` is loopback-only. The legacy file-key signer requires an
+  explicit absolute user-configured `signing_key`; a keystore signer must
+  resolve an existing key through its configured or user-default reference.
+  Hosted mode never falls back to repository or destination settings and
+  never creates a key. The client verifies the returned raw MKWB against the
+  supplied base and exact paths before installing the workspace; there is no
+  fallback to public or unsigned reads. Offline `--bundle` behavior is
+  unchanged. As with any partial bundle, complete ancestor Trees reveal
+  sibling names, modes and hashes, and the signed base Commit/Remix reveals
+  its metadata (including messages, identities, parents and opaque source
+  fields); a grant cannot prevent exfiltration of bytes already received.
 - `mkit workspace status|diff|add|log` &mdash; inspect and stage only the selected
   files. `status` compares base to stage and stage to working files, reports
   outside-selection names as untracked, and states when its 4096-entry name

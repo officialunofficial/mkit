@@ -35,6 +35,60 @@ struct Certificate {
 }
 
 impl RefStore {
+    /// A lease pins storage only. Recheck the current certificate/ref tuple
+    /// separately from the caller's live grant decision on every disclosure.
+    pub(super) fn snapshot_lease_current(
+        &self,
+        identity: &Identity,
+        exact_ref: &str,
+        head: &str,
+        packmap: &str,
+        lease: &SnapshotReadLease,
+    ) -> Result<bool> {
+        if Date::now().as_millis() as i64 >= lease.deadline
+            || self.snapshot_meta(identity)?.is_none()
+            || self.read_policy(identity)?.is_none()
+            || self.read_ref(exact_ref)?.as_deref() != Some(head)
+        {
+            return Ok(false);
+        }
+        let Some(branch) = exact_ref.strip_prefix("refs/heads/") else {
+            return Ok(false);
+        };
+        if self
+            .read_ref(&format!("refs/mkit/packmap/{branch}"))?
+            .as_deref()
+            != Some(packmap)
+        {
+            return Ok(false);
+        }
+        let rows: Vec<Certificate> = self.state.storage().sql().exec(
+            "SELECT job_id,generation,head,packmap,catalog_digest,profile_version,validator_version FROM host_snapshot_certificates WHERE exact_ref=?",
+            vec![exact_ref.into()],
+        )?.to_array()?;
+        let Some(cert) = rows.first() else {
+            return Ok(false);
+        };
+        if cert.job_id != lease.job_id
+            || cert.generation != lease.generation
+            || cert.catalog_digest != lease.catalog_digest
+            || cert.head != head
+            || cert.packmap != packmap
+            || cert.profile_version != 1
+            || cert.validator_version != 1
+        {
+            return Ok(false);
+        }
+        let live = self.snapshot_exists(
+            "SELECT 1 AS found FROM host_snapshot_leases WHERE lease_id=? AND job_id=? AND generation=? AND deadline>? LIMIT 1",
+            vec![lease.lease_id.clone().into(), lease.job_id.clone().into(), lease.generation.clone().into(), (Date::now().as_millis() as i64).into()],
+        )?;
+        let index = self.snapshot_exists(
+            "SELECT 1 AS found FROM host_snapshot_indexes WHERE job_id=? AND generation=? AND exact_ref=? AND head=? AND packmap=? AND catalog_digest=? AND retired=0 LIMIT 1",
+            vec![lease.job_id.clone().into(), lease.generation.clone().into(), exact_ref.into(), head.into(), packmap.into(), lease.catalog_digest.clone().into()],
+        )?;
+        Ok(live && index)
+    }
     /// Pins an exact currently live structural index. A caller must separately
     /// authorize every private read against the current grant and policy.
     #[allow(dead_code)]
@@ -85,7 +139,9 @@ impl RefStore {
             // reclaimed by owner Cleanup, never silently accumulated here.
             let total = owned.snapshot_count("SELECT COUNT(*) AS n FROM host_snapshot_leases", vec![])?;
             let per_cert = owned.snapshot_count("SELECT COUNT(*) AS n FROM host_snapshot_leases WHERE job_id=?", vec![cert.job_id.clone().into()])?;
-            if total >= 64 || per_cert >= 16 { return Err(unavailable()); }
+            if total >= 64 || per_cert >= 16 {
+                return Err(Error::RustError("snapshot lease capacity".into()));
+            }
             let deadline = timestamp.checked_add(duration_ms).ok_or_else(unavailable)?;
             owned.state.storage().sql().exec(
                 "INSERT INTO host_snapshot_leases(lease_id,job_id,generation,deadline) VALUES(?,?,?,?)",

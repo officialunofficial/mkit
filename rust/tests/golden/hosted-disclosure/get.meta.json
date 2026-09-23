@@ -1,0 +1,1 @@
+{"method":"POST","path":"/mkit/partial/v1/GetWorkspace","content_type":"application/json","status":200,"response_content_type":"application/octet-stream","response_length":698,"response_digest":"4b7b06c1b84dd9a09d100e394a61e88d0c704218bf1288149f4b1907ce414f97","response_ref":"../partial_workspace/plain_file.bin","cache_control":"private, no-store"}

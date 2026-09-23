@@ -87,6 +87,9 @@ impl DurableObject for RefStore {
             if req.path() == "/managed-snapshot" {
                 return self.managed_snapshot(&mut req).await;
             }
+            if req.path() == "/managed-disclosure" {
+                return self.managed_disclosure(&mut req).await;
+            }
             if req.path() == "/authorize" {
                 return self.managed_access(&mut req).await;
             }

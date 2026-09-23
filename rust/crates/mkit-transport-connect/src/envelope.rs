@@ -63,6 +63,23 @@ pub(crate) struct SignedReadContext {
 }
 
 impl SignedReadContext {
+    /// Host-only JSON procedure. The four generated Connect read call sites
+    /// keep their separate fixed allowlist; no generic signed URL is exposed.
+    pub(crate) fn hosted_headers(&self, body: &[u8]) -> Result<HeaderMap, String> {
+        let mut headers = HeaderMap::new();
+        RetryIdentity::new()?.insert_into(&mut headers)?;
+        let digest = to_hex(&hash(body));
+        sign_headers(
+            &mut headers,
+            &*self.signer,
+            &self.audience,
+            &self.repository,
+            "/mkit/partial/v1/GetWorkspace",
+            &format!("body:{digest}"),
+        )?;
+        insert_header(&mut headers, header::DIGEST, &digest)?;
+        Ok(headers)
+    }
     pub(crate) fn options(
         &self,
         procedure: &'static str,

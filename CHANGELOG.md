@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- *(transport/cli)* Optional authenticated `GetWorkspace` disclosure of a
+  ready hosted Snapshot to the exact registered grant subject and selected
+  paths, plus native verified-bundle retrieval and explicit hosted workspace
+  creation. Offline bundle creation, ordinary transport methods, public Worker
+  behavior and MKWB v1 bytes are unchanged. **SemVer:** additive managed-host
+  route and native/CLI opt-in; no portable format or default behavior change.
+
 - *(transport)* Optional owner-only BeginSnapshot, ContinueSnapshot,
   GetSnapshotJob, CancelSnapshot and CleanupSnapshots enroll a complete
   raw-v1 Snapshot into a durable, bounded structural certificate index.
