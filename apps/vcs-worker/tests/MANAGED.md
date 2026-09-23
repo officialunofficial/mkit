@@ -3,7 +3,10 @@
 These tests run against real local workerd, R2 emulation, and the RefStore
 SQLite Durable Object. They use the public auth-v2 test seed `07` repeated 32
 times. Install local tools `worker-build`, Node/npm (for Wrangler), and Python
-packages `blake3` and `PyNaCl`. No cloud account or deployment is involved.
+packages `blake3` and `PyNaCl` (`python3 -m pip install blake3 pynacl`
+in a local environment). This run used `worker-build` 0.8.6, Wrangler
+4.137.0, Python `blake3` 1.0.9 and PyNaCl 1.6.2. No cloud account or
+deployment is involved.
 
 From `apps/vcs-worker`:
 

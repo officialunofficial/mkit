@@ -60,20 +60,20 @@ fn reply(status: u16, message: &str) -> Result<Response> {
     Ok(response)
 }
 
-fn headers(req: &Request) -> EnvelopeHeaders {
-    let get = |key| req.headers().get(key).ok().flatten();
-    EnvelopeHeaders {
-        version: get("x-envelope-version"),
-        audience: get("x-audience"),
-        repository: get("x-repository"),
-        commitment: get("x-content-commitment"),
-        expires_at: get("x-expires-at"),
-        public_key: get("x-public-key"),
-        signature: get("x-signature"),
-        digest: get("x-digest"),
-        created_at: get("x-created-at"),
-        idempotency_key: get("idempotency-key"),
-    }
+fn headers(req: &Request) -> Result<EnvelopeHeaders> {
+    let get = |key| req.headers().get(key);
+    Ok(EnvelopeHeaders {
+        version: get("x-envelope-version")?,
+        audience: get("x-audience")?,
+        repository: get("x-repository")?,
+        commitment: get("x-content-commitment")?,
+        expires_at: get("x-expires-at")?,
+        public_key: get("x-public-key")?,
+        signature: get("x-signature")?,
+        digest: get("x-digest")?,
+        created_at: get("x-created-at")?,
+        idempotency_key: get("idempotency-key")?,
+    })
 }
 
 pub async fn dispatch(req: Request, env: Env) -> Result<Response> {
@@ -91,8 +91,8 @@ async fn dispatch_inner(mut req: Request, env: Env) -> Result<Response> {
         "/mkit/host/v1/ReplacePolicy" => "replace",
         _ => {
             #[cfg(feature = "test-faults")]
-            if let Some(internal_path) = path.strip_prefix("/__test/refstore") {
-                if [
+            if let Some(internal_path) = path.strip_prefix("/__test/refstore")
+                && [
                     "/get",
                     "/list",
                     "/update",
@@ -101,22 +101,21 @@ async fn dispatch_inner(mut req: Request, env: Env) -> Result<Response> {
                     "/managed-policy",
                 ]
                 .contains(&internal_path)
-                {
-                    let ns = env.durable_object("REFSTORE")?;
-                    let stub = ns.id_from_name("root")?.get_stub()?;
-                    let mut init = RequestInit::new();
-                    let payload = if internal_path == "/managed-policy" {
-                        req.text().await?
-                    } else {
-                        "{}".into()
-                    };
-                    init.with_method(Method::Post)
-                        .with_body(Some(payload.into()));
-                    let internal =
-                        Request::new_with_init(&format!("https://refstore{internal_path}"), &init)?;
-                    let response = stub.fetch_with_request(internal).await?;
-                    return reply(response.status_code(), "{\"code\":\"unavailable\"}");
-                }
+            {
+                let ns = env.durable_object("REFSTORE")?;
+                let stub = ns.id_from_name("root")?.get_stub()?;
+                let mut init = RequestInit::new();
+                let payload = if internal_path == "/managed-policy" {
+                    req.text().await?
+                } else {
+                    "{}".into()
+                };
+                init.with_method(Method::Post)
+                    .with_body(Some(payload.into()));
+                let internal =
+                    Request::new_with_init(&format!("https://refstore{internal_path}"), &init)?;
+                let response = stub.fetch_with_request(internal).await?;
+                return reply(response.status_code(), "{\"code\":\"unavailable\"}");
             }
             return reply(503, "{\"code\":\"unavailable\"}");
         }
@@ -154,7 +153,7 @@ async fn dispatch_inner(mut req: Request, env: Env) -> Result<Response> {
         &path,
         &blake3_hex(&body),
         Date::now().as_millis() as i64,
-        &headers(&req),
+        &headers(&req)?,
     );
     let authorization = match verified {
         VerifyEnvelope::Ok { authorization, .. } if authorization.public_key == identity.owner => {
@@ -191,6 +190,6 @@ async fn dispatch_inner(mut req: Request, env: Env) -> Result<Response> {
         Err(_) => return reply(503, "{\"code\":\"unavailable\"}"),
     };
     let status = response.status_code();
-    let body = response.text().await.unwrap_or_default();
+    let body = response.text().await?;
     reply(status, &body)
 }

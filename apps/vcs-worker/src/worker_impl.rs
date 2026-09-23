@@ -15,34 +15,47 @@
 // or server-streaming RPC, unlike repo-worker's WatchRefs, so it collects
 // the response body whole rather than streaming it).
 
+#[cfg(not(feature = "managed-access"))]
 use std::sync::Arc;
 
+#[cfg(not(feature = "managed-access"))]
 use connectrpc::{ConnectRpcService, Router};
+use mkit_worker_common::cors::{cors_preflight_response, is_options_preflight};
+#[cfg(not(feature = "managed-access"))]
 use mkit_worker_common::{
     adapter::{
         copy_response_headers, dispatch_oneshot, http_request_from_worker, is_deadline_header,
         respond_buffered,
     },
     body_cap::{CappedBody, read_capped_body},
-    cors::{cors_preflight_response, is_options_preflight, with_cors},
+    cors::with_cors,
 };
 use worker::{Context, Env, Request, Response, Result, event};
 
 #[cfg(feature = "managed-access")]
 pub mod access_store;
+#[cfg(not(feature = "managed-access"))]
 pub mod auth;
+#[cfg(not(feature = "managed-access"))]
 pub mod health;
 #[cfg(feature = "managed-access")]
 pub mod managed;
 pub mod refstore;
+#[cfg(not(feature = "managed-access"))]
 pub mod service;
+#[cfg_attr(feature = "managed-access", allow(dead_code))]
 pub mod wire;
 
+#[cfg(not(feature = "managed-access"))]
 use auth::AuthInterceptor;
+#[cfg(not(feature = "managed-access"))]
 use health::HealthServer;
+#[cfg(not(feature = "managed-access"))]
 use service::{MAX_PACK_BYTES, TransportServer};
 
+#[cfg(not(feature = "managed-access"))]
 use crate::proto::grpc::health::v1::HealthExt;
+#[cfg(not(feature = "managed-access"))]
 use crate::proto::mkit::transport::v1::TransportServiceExt;
 
 /// The RefStore Durable Object, re-exported so worker-build/wrangler find it.
@@ -52,6 +65,7 @@ pub use refstore::RefStore;
 /// whole HTTP request bodies in memory (see service.rs module docs), so the
 /// cap here IS the effective pack-size ceiling for `UploadPack` — kept equal
 /// to `MAX_PACK_BYTES` so the two limits can't silently drift apart.
+#[cfg(not(feature = "managed-access"))]
 const MAX_BODY_BYTES: usize = MAX_PACK_BYTES;
 
 /// Headers we expose for cross-origin clients (mirrors apps/repo-worker's
@@ -84,6 +98,7 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     serve_connect(req, env).await
 }
 
+#[cfg(not(feature = "managed-access"))]
 fn body_too_large() -> Result<Response> {
     let payload = format!(
         "{{\"code\":\"resource_exhausted\",\"message\":\"request body exceeds {MAX_BODY_BYTES} bytes\"}}"
@@ -97,6 +112,7 @@ fn body_too_large() -> Result<Response> {
 /// apps/repo-worker's identical function for the full request/response
 /// bridge rationale (the `Full<Bytes>` body, the `SendFuture` wrapping, the
 /// header copy loop) — now shared via `mkit_worker_common::adapter`.
+#[cfg(not(feature = "managed-access"))]
 async fn serve_connect(mut req: Request, env: Env) -> Result<Response> {
     let body = match read_capped_body(&mut req, MAX_BODY_BYTES).await? {
         CappedBody::Ok(body) => body,

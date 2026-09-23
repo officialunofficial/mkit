@@ -54,8 +54,10 @@ MUST stop accumulating body bytes once the limit would be exceeded.
 Every object rejects duplicate and unknown fields. A JSON document MUST end
 after the sole value; surrounding whitespace is accepted. `version` is the
 JSON integer `1`. Key order and whitespace need not be canonical because the
-signature binds exact bytes. A same-nonce Initialize or Replace request with
-different signed bytes conflicts even if the JSON meaning is identical.
+signature binds exact bytes. After a successfully committed Initialize or
+Replace, a same-nonce request with different signed bytes conflicts even if
+the JSON meaning is identical. A request rejected before admission creates no
+replay row; retry reevaluates current authority and generation.
 
 Every management reply is one JSON value followed by one LF byte. The policy
 response is

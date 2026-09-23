@@ -198,7 +198,7 @@ def main():
         code, _, _, _, _ = send("/__test/refstore/" + route, b"{}")
         assert code == 503, (route, code)
     expect(401, send("/__test/refstore/managed-policy", expired))
-    original = send("/mkit/host/v1/InitializePolicy", init)
+    original = send("/mkit/host/v1/InitializePolicy", init, nonce=invalid[3]["Idempotency-Key"])
     policy = expect(200, original)
     assert policy["generation"] == "1" and policy["owner"] == OWNER
     assert_vector("initialize.json", original)
