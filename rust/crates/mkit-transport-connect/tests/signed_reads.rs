@@ -6,7 +6,7 @@ use std::thread;
 
 use ed25519_dalek::{Signer as _, SigningKey, VerifyingKey};
 use mkit_core::hash::{hash, to_hex, to_hex_bytes};
-use mkit_core::protocol::{PackKey, Transport};
+use mkit_core::protocol::{PackKey, Transport, TransportError};
 use mkit_transport_connect::{ConnectTransport, EnvelopeSigner};
 
 struct TestSigner(SigningKey);
@@ -262,28 +262,40 @@ fn native_reads_match_managed_workerd_roles_and_revocation() {
         );
     }
 
+    let denied_ref = "refs/heads/native-reader-denied";
     let reader = connect(8, &url);
-    assert!(
-        reader
-            .update_ref(
-                "refs/heads/native-reader-denied",
-                mkit_core::protocol::RefWriteCondition::Any,
-                &[1; 32],
-            )
-            .is_err()
-    );
-    assert!(connect(9, &url).list_refs("refs/heads/").is_err());
-    assert!(
-        connect(8, &format!("mkit+{endpoint}/wrong-repository"))
-            .list_refs("refs/heads/")
-            .is_err()
-    );
-    assert!(
+    assert!(matches!(
+        reader.update_ref(
+            denied_ref,
+            mkit_core::protocol::RefWriteCondition::Any,
+            &[1; 32],
+        ),
+        Err(TransportError::AccessDenied)
+    ));
+    assert_eq!(connect(7, &url).read_ref(denied_ref).unwrap(), None);
+    assert!(matches!(
+        connect(9, &url).list_refs("refs/heads/"),
+        Err(TransportError::AccessDenied)
+    ));
+    assert!(matches!(
+        connect(8, &format!("mkit+{endpoint}/wrong-repository")).list_refs("refs/heads/"),
+        Err(TransportError::AccessDenied)
+    ));
+    // The local workerd fixture listens on both loopback spellings but pins
+    // localhost in AUTH_AUDIENCE. This reaches the same server with a bad
+    // audience, so a connection failure cannot satisfy the assertion.
+    let wrong_audience = url.replace("localhost:8791", "127.0.0.1:8791");
+    assert_ne!(wrong_audience, url, "fixture must use localhost:8791");
+    assert!(matches!(
+        connect(8, &wrong_audience).list_refs("refs/heads/"),
+        Err(TransportError::AccessDenied)
+    ));
+    assert!(matches!(
         ConnectTransport::connect(&url)
             .unwrap()
-            .list_refs("refs/heads/")
-            .is_err()
-    );
+            .list_refs("refs/heads/"),
+        Err(TransportError::AccessDenied)
+    ));
 }
 
 /// Run with writer still present in the disposable managed policy. The
@@ -325,8 +337,28 @@ fn native_revoked_reader_has_no_read_fallback() {
     )
     .unwrap();
     let pack = PackKey::new(hash(b"managed-pack-matrix"));
-    assert!(tx.list_refs("refs/heads/").is_err());
-    assert!(tx.read_ref("refs/heads/main").is_err());
-    assert!(tx.pack_exists(&pack).is_err());
-    assert!(tx.download_pack(&pack).is_err());
+    assert!(matches!(
+        tx.list_refs("refs/heads/"),
+        Err(TransportError::AccessDenied)
+    ));
+    assert!(matches!(
+        tx.read_ref("refs/heads/main"),
+        Err(TransportError::AccessDenied)
+    ));
+    assert!(matches!(
+        tx.pack_exists(&pack),
+        Err(TransportError::AccessDenied)
+    ));
+    assert!(matches!(
+        tx.download_pack(&pack),
+        Err(TransportError::AccessDenied)
+    ));
+    let owner = ConnectTransport::connect_with_signed_reads(
+        &format!("mkit+{endpoint}/managed-test"),
+        Arc::new(TestSigner(SigningKey::from_bytes(&[7; 32]))),
+    )
+    .unwrap();
+    owner
+        .list_refs("refs/heads/")
+        .expect("server remains healthy");
 }
