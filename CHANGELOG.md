@@ -36,9 +36,17 @@ train).
   status and diff expose only selected content, add stages a bounded complete
   batch through the durable generation transition, and log states the partial
   history boundary. JSON and human output label coverage explicitly. Scoped
-  commit, export, push and history surgery remain unavailable until later
-  phases. Ordinary full repositories and clone defaults are unchanged.
+  history surgery remains unavailable. Ordinary full repositories and clone defaults are unchanged.
   **SemVer:** additive CLI and native core APIs; no format change.
+
+- *(cli/core)* Scoped `workspace commit/export/push/abandon` signs the durable
+  selected stage offline, exports exact pending MKWU bytes to a new external
+  file, and publishes explicit objects through single-attempt file transport.
+  Late target and operation binding plus a durable Unknown write-ahead state
+  prevent automatic retry after uncertain publication. File transport has no
+  durable result ledger. **SemVer:** additive CLI/core APIs and a newly defined
+  fingerprint grammar in existing optional MKWS/MKPN fields; existing object,
+  MKWU and default full-clone formats remain unchanged.
 
 - *(core/transport)* Full-data recipient validation of MKWU changes now
   returns a typed complete Snapshot and exact replacement facts under a

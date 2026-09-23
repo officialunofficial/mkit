@@ -777,6 +777,39 @@ pub(super) fn load_commit_signer(
     }
 }
 
+/// The ordinary CommitSigner for a scoped workspace. There is deliberately
+/// no RepoLayout: its `.mkit` is a marker, never a key/config directory.
+pub(super) fn load_scoped_commit_signer(cfg: &Config) -> Result<CommitSigner, (String, u8)> {
+    match cfg.signer.as_str() {
+        "" | "legacy" => {
+            crate::config::validate_key_path(&cfg.signing_key)
+                .map_err(|e| (e.to_string(), exit::CONFIG_ERROR))?;
+            let path = std::path::Path::new(&cfg.signing_key);
+            let home = crate::config::home_dir_for_euid();
+            if !path.is_absolute() || !home.as_ref().is_some_and(|home| path.starts_with(home)) {
+                return Err((
+                    "scoped commits need an explicitly configured absolute signing_key under the effective user's home (set it in your user config)".to_owned(),
+                    exit::CONFIG_ERROR,
+                ));
+            }
+            if !path.exists() {
+                return Err((
+                    format!("no signing key at {}", path.display()),
+                    exit::NOINPUT,
+                ));
+            }
+            sign::load_key(path)
+                .map(CommitSigner::Legacy)
+                .map_err(|e| (format!("load key: {e}"), exit::NOPERM))
+        }
+        "keystore" => load_keystore_commit_signer(cfg),
+        other => Err((
+            format!("unknown signer `{other}` — expected `legacy` or `keystore`"),
+            exit::CONFIG_ERROR,
+        )),
+    }
+}
+
 fn load_keystore_commit_signer(cfg: &Config) -> Result<CommitSigner, (String, u8)> {
     let key_ref = cfg
         .key

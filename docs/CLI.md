@@ -217,8 +217,33 @@ Working-tree commands:
   and new paths are unsupported. `log` lists the authenticated base and any
   authoritative local pending/accepted identifiers, then stops at an
   unavailable-history boundary. These local identifiers do not prove remote
-  publication. `workspace commit/export/push/merge/rebase/checkout/gc` are
-  unavailable in this phase. Every JSON command includes `workspace_mode`,
+  publication. `mkit workspace commit` signs exactly the authoritative staged
+  selection with the ordinary configured user signer; it does not consult a
+  remote or permission service, reset the stage, or publish. The syntax is
+  `mkit workspace commit -m MESSAGE [--author IDENTITY] [--format human|json]`;
+  it saves one pending candidate and reports it as not published. The syntax
+  for export is `mkit workspace export --output FILE [--format human|json]`;
+  it writes the exact saved update bytes without overwriting an existing destination. The output
+  must be outside every scoped root and its metadata (for example, an existing
+  directory such as `/tmp` or a sibling directory), and export does not
+  advance the base. An unknown candidate cannot be made safe by re-export.
+  `mkit workspace push [--endpoint URL --repository NAME --ref refs/heads/NAME]
+  [--format human|json]` publishes only through an explicit `mkit+file://`
+  endpoint. The first push requires all three target options; later pushes may
+  omit all three or repeat the exact pinned target. Other transports, force,
+  branch creation, and automatic rebase are unavailable. Publication has no
+  durable remote-result ledger: an uncertain result remains Unknown and is
+  never retried automatically or inferred from the current head. If the remote
+  head has moved, start from a newly trusted snapshot in a new workspace before
+  publishing again; abandon is not rollback or rebase. Only a
+  definite successful response advances the authenticated base, and working
+  files are preserved. `mkit workspace abandon --candidate ID --acknowledge-possible-publication
+  [--format human|json]` explicitly releases that exact local pending candidate;
+  it preserves staged data and artifacts and cannot undo a remote effect.
+  `merge`, `rebase`, `checkout`, and `gc` remain unavailable in scoped
+  workspaces.
+  These commands retain selected-only coverage labels. Every JSON command
+  includes `workspace_mode`,
   `base_commit`, `selected_paths`, and `coverage` (`content=selected-files`,
   `history=partial`, `verification=selected-only`). A scoped workspace is a
   distinct format, not an ordinary or sparse mkit repository.

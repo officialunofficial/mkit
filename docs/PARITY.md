@@ -42,6 +42,15 @@ parity. Its selected-file coverage and partial-history boundary must not be
 interpreted as `git sparse-checkout` or a complete shallow clone. The ordinary
 `mkit clone` and `worktree` behavior stays unchanged.
 
+Scoped workspaces now support offline signed `workspace commit`, exact-byte
+`workspace export`, explicit single-attempt file-transport `workspace push`,
+and explicit local `workspace abandon`. These are native scoped-workspace
+operations, not Git parity claims; they do not change ordinary repository
+commands or transport behavior. Publication uncertainty remains Unknown, with
+no automatic retry or current-head inference. If the remote head has moved,
+publication requires a newly trusted snapshot in a new workspace; local abandon
+does not undo a remote effect.
+
 These are out of scope for v1 parity. Listing them here keeps scope from
 creeping; revisit post-v1 if demand warrants.
 

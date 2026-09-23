@@ -456,6 +456,9 @@ option/status tags. Each `.bin` has a `.json` sidecar and is pinned by
 `MANIFEST.txt`. `golden_partial_local.rs` consumes only committed artifacts
 when `MKIT_WRITE_GOLDEN` is unset.
 
+`rust/tests/golden/partial_publication/request_v1.bin` is an independently
+encoded §18 fingerprint preimage; its JSON sidecar and manifest pin the digest.
+
 ## 15. Caller-lowered limits
 
 A consumer MAY pass a `PartialLimits` value that is a subset of the v1 profile
@@ -760,3 +763,53 @@ append-only superset packmap after a head conflict. A lost response after the
 advance call begins is publication-unknown even if a later head read matches
 the candidate. This profile defines no durable operation-result ledger or
 managed admission.
+
+## 18. Offline pending publication state
+
+An offline signed candidate is recorded as Prepared with no required target or
+operation. Export copies its exact persisted MKWU bytes to a new external file
+and does not alter its publication state. An export after Unknown MUST retain
+Unknown. Export does not advance the base or prove recipient acceptance.
+
+Before the first publication attempt, one local transaction binds the pending
+candidate to an exact descriptive endpoint, repository identity, branch ref,
+and random 32-byte operation ID. The endpoint/repository/ref are stored in the
+existing MKWS optional target; the operation and request fingerprint use the
+existing MKPN optional operation. The binding MUST work for an already saved
+offline pending candidate. A target already present MUST match exactly. The
+fingerprint is the flat BLAKE3 of these canonical bytes in this order:
+
+```text
+ASCII "mkit.scoped-publication-request.v1\0"
+endpoint UTF-8 length u32 BE, then endpoint bytes
+repository UTF-8 length u32 BE, then repository bytes
+exact_ref UTF-8 length u32 BE, then exact_ref bytes
+base_id[32]
+candidate_id[32]
+update_digest[32] (flat BLAKE3 of exact persisted MKWU bytes)
+update_length u64 BE
+operation_id[32]
+```
+
+The field limits in §16.2 make every u32 length representable. The fingerprint
+is local request identity, not an authorization credential, signature or
+receipt. It contains no secret or service credential. The in-memory exchange
+context uses the same target/base/operation and exact MKWU digest/length.
+
+Before calling any mutable recipient path, the client MUST durably commit a
+new local generation changing Prepared or Exported to Unknown. An error or
+durability uncertainty in that write-ahead step MUST prevent the remote call.
+Unknown MUST NOT be changed back to Prepared or Exported by export, an exact
+save retry, or a repeated status call. A restarted generic client MUST NOT
+automatically retry Unknown, infer historical acceptance from the current
+head, substitute the pinned target, or reuse an operation identity for a
+different request. Every permission to begin an attempt requires the exact
+current generation, even when a status update would otherwise be idempotent.
+Only a definite successful attempt response lets the caller assert Accepted;
+a definite head conflict preserves the candidate. File transport offers no
+durable result ledger; a lost reply leaves Unknown.
+
+Explicit local abandonment requires the exact pending candidate ID and an
+acknowledgement that remote publication may already have occurred. It clears
+the active pending slot while preserving stage and immutable historical
+artifacts. It cannot undo a remote effect.

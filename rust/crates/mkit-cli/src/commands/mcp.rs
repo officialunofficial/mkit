@@ -388,6 +388,72 @@ pub(crate) const TOOLS: &[ToolSpec] = &[
         schema: || schema(vec![workspace_prop()], &["repo_path"]),
     },
     ToolSpec {
+        name: "mkit_workspace_commit",
+        description: "Sign the exact selected stage as an offline pending candidate.",
+        hints: (false, false, false),
+        schema: || {
+            schema(
+                vec![
+                    workspace_prop(),
+                    ("message", prop("Commit message")),
+                    ("author", prop("Optional author identity")),
+                ],
+                &["repo_path", "message"],
+            )
+        },
+    },
+    ToolSpec {
+        name: "mkit_workspace_export",
+        description: "Export exact pending update to a new file outside scoped workspaces; no remote acceptance.",
+        hints: (false, false, false),
+        schema: || {
+            schema(
+                vec![
+                    workspace_prop(),
+                    ("output", prop("New external output file")),
+                ],
+                &["repo_path", "output"],
+            )
+        },
+    },
+    ToolSpec {
+        name: "mkit_workspace_push",
+        description: "Publish pending explicit objects to an existing file recipient with strict base CAS.",
+        hints: (false, false, false),
+        schema: || {
+            schema(
+                vec![
+                    workspace_prop(),
+                    (
+                        "endpoint",
+                        prop("mkit+file:/// recipient URL; all target fields together"),
+                    ),
+                    ("repository", prop("Descriptive repository identity")),
+                    ("ref", prop("Exact refs/heads/ branch")),
+                ],
+                &["repo_path"],
+            )
+        },
+    },
+    ToolSpec {
+        name: "mkit_workspace_abandon",
+        description: "Explicitly release a pending candidate locally; possible remote publication is not undone.",
+        hints: (false, false, false),
+        schema: || {
+            schema(
+                vec![
+                    workspace_prop(),
+                    ("candidate", prop("Exact pending candidate ID")),
+                    (
+                        "acknowledge_possible_publication",
+                        json!({"type":"boolean"}),
+                    ),
+                ],
+                &["repo_path", "candidate", "acknowledge_possible_publication"],
+            )
+        },
+    },
+    ToolSpec {
         name: "mkit_status",
         description: "Show staged and working-tree changes (porcelain v2; empty means clean).",
         hints: (true, false, true),
@@ -885,6 +951,10 @@ fn validate_workspace_tool_root(name: &str, repo: &Path) -> Result<(), String> {
             | "mkit_workspace_diff"
             | "mkit_workspace_add"
             | "mkit_workspace_log"
+            | "mkit_workspace_commit"
+            | "mkit_workspace_export"
+            | "mkit_workspace_push"
+            | "mkit_workspace_abandon"
     ) {
         return Ok(());
     }
@@ -1131,6 +1201,65 @@ fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
         }
         "mkit_workspace_log" => {
             out.extend(["workspace".into(), "log".into(), "--format=json".into()]);
+        }
+        "mkit_workspace_commit" => {
+            out.extend([
+                "workspace".into(),
+                "commit".into(),
+                "--format=json".into(),
+                "-m".into(),
+                req_str(args, "message")?,
+            ]);
+            if let Some(author) = opt_str(args, "author") {
+                out.extend(["--author".into(), author]);
+            }
+        }
+        "mkit_workspace_export" => {
+            out.extend([
+                "workspace".into(),
+                "export".into(),
+                "--format=json".into(),
+                "--output".into(),
+                req_str(args, "output")?,
+            ]);
+        }
+        "mkit_workspace_push" => {
+            out.extend(["workspace".into(), "push".into(), "--format=json".into()]);
+            let target = [
+                opt_str(args, "endpoint"),
+                opt_str(args, "repository"),
+                opt_str(args, "ref"),
+            ];
+            if target.iter().any(Option::is_some) {
+                let [Some(endpoint), Some(repository), Some(exact_ref)] = target else {
+                    return Err("endpoint, repository and ref must be supplied together".into());
+                };
+                out.extend([
+                    "--endpoint".into(),
+                    endpoint,
+                    "--repository".into(),
+                    repository,
+                    "--ref".into(),
+                    exact_ref,
+                ]);
+            }
+        }
+        "mkit_workspace_abandon" => {
+            if args
+                .get("acknowledge_possible_publication")
+                .and_then(Value::as_bool)
+                != Some(true)
+            {
+                return Err("acknowledge_possible_publication must be true".into());
+            }
+            out.extend([
+                "workspace".into(),
+                "abandon".into(),
+                "--format=json".into(),
+                "--candidate".into(),
+                req_str(args, "candidate")?,
+                "--acknowledge-possible-publication".into(),
+            ]);
         }
         "mkit_status" => out.extend(["status".into(), "--porcelain=v2".into()]),
         "mkit_diff_unstaged" => out.push("diff".into()),
@@ -1521,6 +1650,61 @@ mod tests {
         assert!(build_argv("mkit_workspace_create", &json!({"bundle":"bundle.bin","base":"00","destination":"new","accept_bundle_selection":true,"paths":["a"]})).is_err());
         assert!(build_argv("mkit_workspace_add", &json!({"all":true,"paths":["a"]})).is_err());
         assert!(build_argv("mkit_workspace_add", &json!({"all":true})).is_ok());
+    }
+
+    #[test]
+    fn workspace_publication_mcp_argv_and_target_are_explicit() {
+        assert_eq!(
+            build_argv(
+                "mkit_workspace_commit",
+                &json!({"message":"offline","author":"opaque:writer"})
+            )
+            .unwrap(),
+            [
+                "workspace",
+                "commit",
+                "--format=json",
+                "-m",
+                "offline",
+                "--author",
+                "opaque:writer"
+            ],
+        );
+        assert_eq!(
+            build_argv("mkit_workspace_export", &json!({"output":"/tmp/new.mkwu"})).unwrap(),
+            [
+                "workspace",
+                "export",
+                "--format=json",
+                "--output",
+                "/tmp/new.mkwu"
+            ],
+        );
+        assert!(
+            build_argv(
+                "mkit_workspace_push",
+                &json!({"endpoint":"mkit+file:///tmp/repo"})
+            )
+            .is_err()
+        );
+        assert_eq!(
+            build_argv("mkit_workspace_push", &json!({"endpoint":"mkit+file:///tmp/repo","repository":"repo","ref":"refs/heads/main"})).unwrap(),
+            ["workspace", "push", "--format=json", "--endpoint", "mkit+file:///tmp/repo", "--repository", "repo", "--ref", "refs/heads/main"],
+        );
+        assert!(
+            build_argv(
+                "mkit_workspace_abandon",
+                &json!({"candidate":"abc","acknowledge_possible_publication":false})
+            )
+            .is_err()
+        );
+        assert!(
+            build_argv(
+                "mkit_workspace_abandon",
+                &json!({"candidate":"abc","acknowledge_possible_publication":true})
+            )
+            .is_ok()
+        );
     }
 
     #[test]
