@@ -751,10 +751,3 @@ append-only superset packmap after a head conflict. A lost response after the
 advance call begins is publication-unknown even if a later head read matches
 the candidate. This profile defines no durable operation-result ledger or
 managed admission.
-
-Informative Rust API mapping: `mkit_core::partial::verify_partial_update`
-uses `verify::ObjectSource`, `PartialLimits` and `RecipientLimits` and returns
-`VerifiedPartialUpdate`. `publish_explicit_update` requires
-`protocol::SingleAttemptAdvance`; currently FileTransport and MemoryTransport
-opt in. HTTP/Connect/SSH/enc adapters do not. The FileTransport implementation
-uses the ordered packmap-first advance.
