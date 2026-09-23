@@ -16,9 +16,8 @@ pub(super) struct AbandonArgs {
 }
 
 pub(super) fn run(args: &AbandonArgs) -> u8 {
-    let candidate = match from_hex(&args.candidate) {
-        Ok(v) => v,
-        Err(_) => return err("candidate must be a 64-character object ID", exit::USAGE),
+    let Ok(candidate) = from_hex(&args.candidate) else {
+        return err("candidate must be a 64-character object ID", exit::USAGE);
     };
     let layout = match open_here() {
         Ok(v) => v,

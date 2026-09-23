@@ -43,7 +43,7 @@ fn parse_file_endpoint(endpoint: &str) -> Result<PathBuf, &'static str> {
             if i + 2 >= raw.len() {
                 return Err("invalid file endpoint escape");
             }
-            let digit = |b: u8| (b as char).to_digit(16).map(|v| v as u8);
+            let digit = |b: u8| (b as char).to_digit(16).and_then(|v| u8::try_from(v).ok());
             let (Some(a), Some(b)) = (digit(raw[i + 1]), digit(raw[i + 2])) else {
                 return Err("invalid file endpoint escape");
             };
@@ -65,33 +65,6 @@ fn parse_file_endpoint(endpoint: &str) -> Result<PathBuf, &'static str> {
         return Err("file endpoint contains parent traversal");
     }
     Ok(parsed)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::parse_file_endpoint;
-
-    #[test]
-    fn file_endpoint_requires_local_absolute_path_without_traversal() {
-        assert_eq!(
-            parse_file_endpoint("mkit+file:///tmp/with%20space")
-                .unwrap()
-                .to_str(),
-            Some("/tmp/with space")
-        );
-        for invalid in [
-            "https://example.test/repo",
-            "mkit+file://example.test/repo",
-            "mkit+file:///tmp/../repo",
-            "mkit+file:///tmp/%2e%2e/repo",
-            "mkit+file:///tmp/repo?branch=main",
-            "mkit+file:///tmp/repo#fragment",
-            "mkit+file:///tmp/%00repo",
-            "mkit+file:///tmp/%xx",
-        ] {
-            assert!(parse_file_endpoint(invalid).is_err(), "{invalid}");
-        }
-    }
 }
 
 fn recipient_path(endpoint: &str) -> Result<PathBuf, String> {
@@ -142,6 +115,10 @@ fn selected_target(
     Ok(target)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "keep the single-attempt publication state sequence visible in one place"
+)]
 pub(super) fn run(args: &PushArgs) -> u8 {
     let layout = match open_here() {
         Ok(v) => v,
@@ -159,9 +136,8 @@ pub(super) fn run(args: &PushArgs) -> u8 {
         Ok(v) => v,
         Err(e) => return err(&e, exit::UNAVAILABLE),
     };
-    let pending = match state.pending() {
-        Some(v) => v,
-        None => return err("no pending candidate to publish", exit::USAGE),
+    let Some(pending) = state.pending() else {
+        return err("no pending candidate to publish", exit::USAGE);
     };
     if !matches!(
         pending.status(),
@@ -334,5 +310,32 @@ pub(super) fn run(args: &PushArgs) -> u8 {
         exit::OK
     } else {
         exit::GENERAL_ERROR
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_file_endpoint;
+
+    #[test]
+    fn file_endpoint_requires_local_absolute_path_without_traversal() {
+        assert_eq!(
+            parse_file_endpoint("mkit+file:///tmp/with%20space")
+                .unwrap()
+                .to_str(),
+            Some("/tmp/with space")
+        );
+        for invalid in [
+            "https://example.test/repo",
+            "mkit+file://example.test/repo",
+            "mkit+file:///tmp/../repo",
+            "mkit+file:///tmp/%2e%2e/repo",
+            "mkit+file:///tmp/repo?branch=main",
+            "mkit+file:///tmp/repo#fragment",
+            "mkit+file:///tmp/%00repo",
+            "mkit+file:///tmp/%xx",
+        ] {
+            assert!(parse_file_endpoint(invalid).is_err(), "{invalid}");
+        }
     }
 }

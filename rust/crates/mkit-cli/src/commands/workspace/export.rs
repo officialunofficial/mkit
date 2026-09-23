@@ -24,9 +24,8 @@ pub(super) fn run(args: &ExportArgs) -> u8 {
         Ok(v) => v,
         Err(c) => return c,
     };
-    let pending = match state.pending() {
-        Some(v) => v,
-        None => return err("no pending candidate to export", exit::USAGE),
+    let Some(pending) = state.pending() else {
+        return err("no pending candidate to export", exit::USAGE);
     };
     let size = match layout.export_pending_to(
         state.workspace().transaction_generation(),

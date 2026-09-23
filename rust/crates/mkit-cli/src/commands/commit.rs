@@ -777,8 +777,8 @@ pub(super) fn load_commit_signer(
     }
 }
 
-/// The ordinary CommitSigner for a scoped workspace. There is deliberately
-/// no RepoLayout: its `.mkit` is a marker, never a key/config directory.
+/// The ordinary `CommitSigner` for a scoped workspace. There is deliberately
+/// no `RepoLayout`: its `.mkit` is a marker, never a key/config directory.
 pub(super) fn load_scoped_commit_signer(cfg: &Config) -> Result<CommitSigner, (String, u8)> {
     match cfg.signer.as_str() {
         "" | "legacy" => {

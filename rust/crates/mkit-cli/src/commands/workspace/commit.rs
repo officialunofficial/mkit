@@ -35,11 +35,11 @@ pub(super) fn run(args: &CommitArgs) -> u8 {
         Ok(v) => v,
         Err(e) => return err(&format!("user config: {e}"), exit::CONFIG_ERROR),
     };
-    let mut signer = match load_scoped_commit_signer(&cfg) {
+    let mut signing_provider = match load_scoped_commit_signer(&cfg) {
         Ok(v) => v,
         Err((message, code)) => return err(&message, code),
     };
-    let public = match signer.public_key() {
+    let public = match signing_provider.public_key() {
         Ok(v) => v,
         Err((message, code)) => return err(&message, code),
     };
@@ -67,7 +67,7 @@ pub(super) fn run(args: &CommitArgs) -> u8 {
         Err(e) => return err(&format!("prepare commit: {e}"), exit::DATAERR),
     };
     let mut signed = unsigned.clone();
-    signed.signature = match signer.sign_commit(&unsigned) {
+    signed.signature = match signing_provider.sign_commit(&unsigned) {
         Ok(v) => v,
         Err((message, code)) => return err(&message, code),
     };

@@ -1069,7 +1069,8 @@ fn publication_fingerprint(
 ) -> Hash {
     let mut request = b"mkit.scoped-publication-request.v1\0".to_vec();
     for field in [target.endpoint(), target.repository(), target.exact_ref()] {
-        request.extend_from_slice(&(field.len() as u32).to_be_bytes());
+        let length = u32::try_from(field.len()).expect("validated target field byte cap");
+        request.extend_from_slice(&length.to_be_bytes());
         request.extend_from_slice(field.as_bytes());
     }
     request.extend_from_slice(&pending.base_id);

@@ -11,10 +11,14 @@ fn golden_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/golden/partial_publication")
 }
 
+fn writing_golden() -> bool {
+    std::env::var("MKIT_WRITE_GOLDEN").is_ok_and(|value| value == "1")
+}
+
 fn independent_preimage() -> Vec<u8> {
     let mut bytes = b"mkit.scoped-publication-request.v1\0".to_vec();
     for field in ["mkit+file:///tmp/recipient", "repo", "refs/heads/main"] {
-        bytes.extend_from_slice(&(field.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(&u32::try_from(field.len()).unwrap().to_be_bytes());
         bytes.extend_from_slice(field.as_bytes());
     }
     bytes.extend_from_slice(&[1; 32]);
@@ -27,7 +31,7 @@ fn independent_preimage() -> Vec<u8> {
 
 #[test]
 fn write_fingerprint_golden_if_requested() {
-    if std::env::var_os("MKIT_WRITE_GOLDEN").is_none() {
+    if !writing_golden() {
         return;
     }
     let dir = golden_dir();
@@ -62,7 +66,7 @@ fn write_fingerprint_golden_if_requested() {
 
 #[test]
 fn committed_fingerprint_preimage_matches_grammar_and_digest() {
-    if std::env::var_os("MKIT_WRITE_GOLDEN").is_some() {
+    if writing_golden() {
         return;
     }
     let dir = golden_dir();
