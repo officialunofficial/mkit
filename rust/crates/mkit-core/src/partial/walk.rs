@@ -290,6 +290,28 @@ fn checked_page(
     Ok((start, count))
 }
 
+// Detect locally impossible trusted cursor metadata before a child fetch.
+// This does not authenticate an arbitrary resumed cursor or its prior work.
+fn check_manifest_cursor(
+    parent: &InspectedObject,
+    next_index: u32,
+    sum: u64,
+) -> Result<(), SnapshotWalkError> {
+    let (total_size, fixed_size, _) = parent.manifest().ok_or(SnapshotWalkError::WrongRole)?;
+    if sum > total_size || (next_index == 0 && sum != 0) {
+        return Err(SnapshotWalkError::InvalidPage);
+    }
+    if fixed_size != 0 && next_index != 0 {
+        let required = u64::from(next_index)
+            .checked_mul(u64::from(fixed_size))
+            .ok_or(SnapshotWalkError::InvalidPage)?;
+        if sum != required {
+            return Err(SnapshotWalkError::InvalidPage);
+        }
+    }
+    Ok(())
+}
+
 fn fact_matches(fact: &InspectedObject, id: Hash, role: SnapshotRole) -> bool {
     if fact.id() != id {
         return false;
@@ -319,6 +341,8 @@ fn observation(fact: &InspectedObject) -> Result<WalkObjectObservation, Snapshot
 
 /// Borrow the exact next manifest IDs needed before fetching their Blob facts.
 /// The same parent fact and record must be passed to `advance_snapshot_walk`.
+/// An impossible initial or fixed-size prefix sum is refused before fetching;
+/// this necessary check does not authenticate arbitrary persisted cursors.
 ///
 /// # Errors
 /// Rejects mismatched IDs/kinds/roles, malformed or exhausted cursors, and
@@ -344,10 +368,8 @@ pub fn next_manifest_ids<'a>(
     {
         return Err(SnapshotWalkError::WrongRole);
     }
-    let (total_size, _, total) = parent.manifest().ok_or(SnapshotWalkError::WrongRole)?;
-    if *sum > total_size {
-        return Err(SnapshotWalkError::InvalidPage);
-    }
+    let (_, _, total) = parent.manifest().ok_or(SnapshotWalkError::WrongRole)?;
+    check_manifest_cursor(parent, *next_index, *sum)?;
     let (start, count) = checked_page(*next_index, total, width(page_width)?)?;
     parent
         .chunk_page(start, count)
@@ -495,9 +517,7 @@ pub fn advance_snapshot_walk(
             next_index,
             sum,
         } => {
-            if *sum > parent.manifest().ok_or(SnapshotWalkError::WrongRole)?.0 {
-                return Err(SnapshotWalkError::InvalidPage);
-            }
+            check_manifest_cursor(parent, *next_index, *sum)?;
             let (total_size, fixed_size, total) =
                 parent.manifest().ok_or(SnapshotWalkError::WrongRole)?;
             let (start, count) = checked_page(*next_index, total, width)?;
@@ -639,13 +659,14 @@ mod tests {
 
     use super::*;
     use crate::object::{
-        Blob, ChunkedBlob, Commit, Identity, Object, Tree, TreeEntry, id_from_object,
+        Blob, ChunkedBlob, Commit, Identity, Object, Remix, RemixSource, Tree, TreeEntry,
+        id_from_object,
     };
     use crate::partial::inspect::{ObjectInspectionLimits, inspect_snapshot_object};
     use crate::partial::recipient::{RecipientLimits, RecipientUsage};
     use crate::partial::recipient_graph::RecipientGraph;
     use crate::serialize::serialize;
-    use crate::sign::{KeyPair, sign_commit};
+    use crate::sign::{KeyPair, sign_commit, sign_remix};
     use crate::verify::{ObjectSource, VerifyError};
 
     fn inspection_limits() -> ObjectInspectionLimits {
@@ -748,6 +769,104 @@ mod tests {
         Ok((usage, seen))
     }
 
+    // Protocol model only. PR10c must implement and test actual durable SQL.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct ModelJob {
+        pending: VecDeque<SnapshotWalkRecord>,
+        usage: SnapshotWalkUsage,
+        seen: BTreeMap<Hash, u64>,
+        generation: u64,
+    }
+
+    impl ModelJob {
+        fn new(root: Hash) -> Self {
+            Self {
+                pending: VecDeque::from([
+                    start_snapshot_walk(root, SnapshotRole::BaseRoot).unwrap()
+                ]),
+                usage: SnapshotWalkUsage::default(),
+                seen: BTreeMap::new(),
+                generation: 1,
+            }
+        }
+
+        fn commit(
+            &mut self,
+            record: SnapshotWalkRecord,
+            step: &SnapshotWalkStep,
+            enqueued: &[SnapshotWalkRecord],
+            generation: u64,
+        ) -> Result<(), SnapshotWalkError> {
+            if generation != self.generation
+                || self.pending.front() != Some(&record)
+                || enqueued != step.successors()
+            {
+                return Err(SnapshotWalkError::InconsistentAccounting);
+            }
+            let mut new = Vec::new();
+            for item in step.observations() {
+                if let Some(old) = self.seen.get(&item.id()) {
+                    if *old != item.canonical_len() {
+                        return Err(SnapshotWalkError::InconsistentAccounting);
+                    }
+                } else if !new.contains(&item.id()) {
+                    new.push(item.id());
+                }
+            }
+            let next_usage = apply_walk_accounting(self.usage, step, &new, walk_limits())?;
+            let mut next = self.clone();
+            next.pending.pop_front();
+            next.pending.extend(enqueued.iter().copied());
+            for item in step.observations() {
+                next.seen.insert(item.id(), item.canonical_len());
+            }
+            next.usage = next_usage;
+            *self = next;
+            Ok(())
+        }
+
+        fn finish(&self, catalog: &BTreeSet<Hash>) -> Result<SnapshotWalkUsage, SnapshotWalkError> {
+            if !self.pending.is_empty()
+                || self.seen.keys().copied().collect::<BTreeSet<_>>() != *catalog
+            {
+                return Err(SnapshotWalkError::InconsistentAccounting);
+            }
+            Ok(self.usage)
+        }
+    }
+
+    fn model_step(
+        objects: &BTreeMap<Hash, Vec<u8>>,
+        record: SnapshotWalkRecord,
+    ) -> SnapshotWalkStep {
+        let width = NonZeroUsize::new(1).unwrap();
+        let parent = inspect_snapshot_object(
+            record.id(),
+            &objects[&record.id()],
+            record.role(),
+            inspection_limits(),
+        )
+        .unwrap();
+        let chunks = if matches!(record, SnapshotWalkRecord::ManifestPage { .. }) {
+            next_manifest_ids(&record, &parent, width)
+                .unwrap()
+                .iter()
+                .map(|id| {
+                    inspect_snapshot_object(
+                        *id,
+                        &objects[id],
+                        SnapshotRole::Chunk,
+                        inspection_limits(),
+                    )
+                    .unwrap()
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        advance_snapshot_walk(&record, &parent, &chunks, width, &walk_limits()).unwrap()
+    }
+
     fn old_usage(objects: &BTreeMap<Hash, Vec<u8>>, root: Hash) -> RecipientUsage {
         let mut source = MapSource(objects.clone());
         let mut graph = RecipientGraph::new(&mut source, RecipientLimits::default());
@@ -829,6 +948,107 @@ mod tests {
             );
             assert_eq!(usize::try_from(actual.work).unwrap(), old.occurrences);
             assert_eq!(seen.len(), old.objects);
+        }
+    }
+
+    #[test]
+    fn root_roles_and_empty_objects_walk_without_history() {
+        let mut objects = BTreeMap::new();
+        let empty_tree = insert(
+            &mut objects,
+            &Object::Tree(Tree {
+                entries: Vec::new(),
+            }),
+        );
+        let empty_blob = insert(&mut objects, &Object::Blob(Blob { data: Vec::new() }));
+        let empty_manifest = insert(
+            &mut objects,
+            &Object::ChunkedBlob(ChunkedBlob {
+                total_size: 0,
+                chunk_size: 0,
+                chunks: Vec::new(),
+            }),
+        );
+        let key = KeyPair::from_seed([74; 32]);
+        let mut remix = Remix {
+            tree_hash: empty_tree,
+            parents: vec![[93; 32]],
+            sources: vec![RemixSource {
+                upstream_id: [94; 32],
+                commit_hash: [95; 32],
+            }],
+            author: Identity::ed25519(key.public.0),
+            signer: key.public.0,
+            message: b"walk root".to_vec(),
+            timestamp: 1,
+            signature: [0; 64],
+        };
+        remix.signature = sign_remix(&remix, &key).unwrap().0;
+        let remix_id = insert(&mut objects, &Object::Remix(remix));
+        let (usage, reached) = drive(&objects, remix_id, 1, walk_limits()).unwrap();
+        assert_eq!(usage.objects, 2); // Remix and its Tree, not parents/sources.
+        assert_eq!(reached.len(), 2);
+        let remix_fact = inspect_snapshot_object(
+            remix_id,
+            &objects[&remix_id],
+            SnapshotRole::BaseRoot,
+            inspection_limits(),
+        )
+        .unwrap();
+        let candidate = start_snapshot_walk(remix_id, SnapshotRole::CandidateRoot).unwrap();
+        assert_eq!(
+            advance_snapshot_walk(
+                &candidate,
+                &remix_fact,
+                &[],
+                NonZeroUsize::new(1).unwrap(),
+                &walk_limits()
+            )
+            .map(|_| ()),
+            Err(SnapshotWalkError::WrongRole)
+        );
+        let commit_id = signed_root(&mut objects, empty_tree);
+        let commit_fact = inspect_snapshot_object(
+            commit_id,
+            &objects[&commit_id],
+            SnapshotRole::CandidateRoot,
+            inspection_limits(),
+        )
+        .unwrap();
+        let candidate = start_snapshot_walk(commit_id, SnapshotRole::CandidateRoot).unwrap();
+        assert_eq!(
+            advance_snapshot_walk(
+                &candidate,
+                &commit_fact,
+                &[],
+                NonZeroUsize::new(1).unwrap(),
+                &walk_limits()
+            )
+            .unwrap()
+            .successors()
+            .len(),
+            1
+        );
+        for (id, role) in [
+            (empty_blob, SnapshotRole::File),
+            (empty_manifest, SnapshotRole::File),
+        ] {
+            let fact =
+                inspect_snapshot_object(id, &objects[&id], role, inspection_limits()).unwrap();
+            let step = advance_snapshot_walk(
+                &SnapshotWalkRecord::Visit {
+                    id,
+                    role,
+                    tree_depth: 0,
+                },
+                &fact,
+                &[],
+                NonZeroUsize::new(1).unwrap(),
+                &walk_limits(),
+            )
+            .unwrap();
+            assert!(step.successors().is_empty());
+            assert_eq!(step.work_delta(), 1);
         }
     }
 
@@ -987,6 +1207,251 @@ mod tests {
     }
 
     #[test]
+    fn manifest_cursor_rejects_impossible_initial_and_fixed_prefix_sums() {
+        let mut objects = BTreeMap::new();
+        let chunk = insert(&mut objects, &Object::Blob(Blob { data: vec![1; 3] }));
+        let manifest = insert(
+            &mut objects,
+            &Object::ChunkedBlob(ChunkedBlob {
+                total_size: 6,
+                chunk_size: 3,
+                chunks: vec![chunk, chunk],
+            }),
+        );
+        let parent = inspect_snapshot_object(
+            manifest,
+            &objects[&manifest],
+            SnapshotRole::File,
+            inspection_limits(),
+        )
+        .unwrap();
+        let fact = inspect_snapshot_object(
+            chunk,
+            &objects[&chunk],
+            SnapshotRole::Chunk,
+            inspection_limits(),
+        )
+        .unwrap();
+        let width = NonZeroUsize::new(1).unwrap();
+        for (next_index, sum) in [(0, 1), (1, 2), (1, 4)] {
+            let record = SnapshotWalkRecord::ManifestPage {
+                id: manifest,
+                tree_depth: 0,
+                next_index,
+                sum,
+            };
+            assert_eq!(
+                next_manifest_ids(&record, &parent, width),
+                Err(SnapshotWalkError::InvalidPage)
+            );
+            assert_eq!(
+                advance_snapshot_walk(
+                    &record,
+                    &parent,
+                    std::slice::from_ref(&fact),
+                    width,
+                    &walk_limits()
+                )
+                .map(|_| ()),
+                Err(SnapshotWalkError::InvalidPage)
+            );
+        }
+    }
+
+    #[test]
+    fn manifest_positions_and_cursors_reject_bad_facts_and_layouts() {
+        let mut objects = BTreeMap::new();
+        let ids: Vec<_> = [0usize, 1, 2, 3, 4]
+            .into_iter()
+            .map(|length| {
+                insert(
+                    &mut objects,
+                    &Object::Blob(Blob {
+                        data: vec![1; length],
+                    }),
+                )
+            })
+            .collect();
+        let width = NonZeroUsize::new(2).unwrap();
+        let inspect = |id, role| {
+            inspect_snapshot_object(id, &objects[&id], role, inspection_limits()).unwrap()
+        };
+        for (total, fixed, chunks, expected) in [
+            (6, 3, vec![ids[3], ids[3]], Ok(())),
+            (
+                5,
+                3,
+                vec![ids[2], ids[3]],
+                Err(SnapshotWalkError::InvalidChunkLayout),
+            ),
+            (
+                7,
+                3,
+                vec![ids[3], ids[4]],
+                Err(SnapshotWalkError::InvalidChunkLayout),
+            ),
+            (
+                3,
+                3,
+                vec![ids[3], ids[0]],
+                Err(SnapshotWalkError::InvalidChunkLayout),
+            ),
+            (
+                5,
+                0,
+                vec![ids[2], ids[2]],
+                Err(SnapshotWalkError::InvalidChunkLayout),
+            ),
+            (
+                3,
+                0,
+                vec![ids[2], ids[2]],
+                Err(SnapshotWalkError::InvalidChunkLayout),
+            ),
+        ] {
+            let manifest = Object::ChunkedBlob(ChunkedBlob {
+                total_size: total,
+                chunk_size: fixed,
+                chunks: chunks.clone(),
+            });
+            let bytes = serialize(&manifest).unwrap();
+            let id = id_from_object(&manifest, &bytes);
+            let parent =
+                inspect_snapshot_object(id, &bytes, SnapshotRole::File, inspection_limits())
+                    .unwrap();
+            let record = SnapshotWalkRecord::ManifestPage {
+                id,
+                tree_depth: 0,
+                next_index: 0,
+                sum: 0,
+            };
+            let facts: Vec<_> = chunks
+                .iter()
+                .map(|child| inspect(*child, SnapshotRole::Chunk))
+                .collect();
+            assert_eq!(
+                advance_snapshot_walk(&record, &parent, &facts, width, &walk_limits()).map(|_| ()),
+                expected
+            );
+        }
+        let manifest = Object::ChunkedBlob(ChunkedBlob {
+            total_size: 6,
+            chunk_size: 3,
+            chunks: vec![ids[3], ids[3]],
+        });
+        let bytes = serialize(&manifest).unwrap();
+        let id = id_from_object(&manifest, &bytes);
+        let parent =
+            inspect_snapshot_object(id, &bytes, SnapshotRole::File, inspection_limits()).unwrap();
+        let record = SnapshotWalkRecord::ManifestPage {
+            id,
+            tree_depth: 0,
+            next_index: 0,
+            sum: 0,
+        };
+        let wrong = [
+            inspect(ids[3], SnapshotRole::Chunk),
+            inspect(ids[2], SnapshotRole::Chunk),
+        ];
+        assert_eq!(
+            advance_snapshot_walk(&record, &parent, &wrong, width, &walk_limits()).map(|_| ()),
+            Err(SnapshotWalkError::WrongId)
+        );
+        let distinct = Object::ChunkedBlob(ChunkedBlob {
+            total_size: 5,
+            chunk_size: 0,
+            chunks: vec![ids[2], ids[3]],
+        });
+        let bytes = serialize(&distinct).unwrap();
+        let distinct_id = id_from_object(&distinct, &bytes);
+        let distinct_fact =
+            inspect_snapshot_object(distinct_id, &bytes, SnapshotRole::File, inspection_limits())
+                .unwrap();
+        let distinct_record = SnapshotWalkRecord::ManifestPage {
+            id: distinct_id,
+            tree_depth: 0,
+            next_index: 0,
+            sum: 0,
+        };
+        let reordered = [
+            inspect(ids[3], SnapshotRole::Chunk),
+            inspect(ids[2], SnapshotRole::Chunk),
+        ];
+        assert_eq!(
+            advance_snapshot_walk(
+                &distinct_record,
+                &distinct_fact,
+                &reordered,
+                width,
+                &walk_limits()
+            )
+            .map(|_| ()),
+            Err(SnapshotWalkError::WrongId)
+        );
+        let record = SnapshotWalkRecord::ManifestPage {
+            id,
+            tree_depth: 0,
+            next_index: u32::MAX,
+            sum: 0,
+        };
+        assert_eq!(
+            next_manifest_ids(&record, &parent, width),
+            Err(SnapshotWalkError::InvalidPage)
+        );
+        let record = SnapshotWalkRecord::ManifestPage {
+            id: [99; 32],
+            tree_depth: 0,
+            next_index: 0,
+            sum: 0,
+        };
+        assert_eq!(
+            next_manifest_ids(&record, &parent, width),
+            Err(SnapshotWalkError::WrongId)
+        );
+        assert_eq!(
+            advance_snapshot_walk(&record, &parent, &[], width, &walk_limits()).map(|_| ()),
+            Err(SnapshotWalkError::WrongId)
+        );
+        let wrong_role = SnapshotWalkRecord::Visit {
+            id,
+            role: SnapshotRole::Tree,
+            tree_depth: 0,
+        };
+        assert_eq!(
+            advance_snapshot_walk(&wrong_role, &parent, &[], width, &walk_limits()).map(|_| ()),
+            Err(SnapshotWalkError::WrongRole)
+        );
+
+        let huge = Object::ChunkedBlob(ChunkedBlob {
+            total_size: u64::MAX,
+            chunk_size: 0,
+            chunks: vec![ids[1], ids[1]],
+        });
+        let bytes = serialize(&huge).unwrap();
+        let huge_id = id_from_object(&huge, &bytes);
+        let parent =
+            inspect_snapshot_object(huge_id, &bytes, SnapshotRole::File, inspection_limits())
+                .unwrap();
+        let record = SnapshotWalkRecord::ManifestPage {
+            id: huge_id,
+            tree_depth: 0,
+            next_index: 1,
+            sum: u64::MAX,
+        };
+        assert_eq!(
+            advance_snapshot_walk(
+                &record,
+                &parent,
+                &[inspect(ids[1], SnapshotRole::Chunk)],
+                width,
+                &walk_limits()
+            )
+            .map(|_| ()),
+            Err(SnapshotWalkError::InvalidChunkLayout)
+        );
+    }
+
+    #[test]
     fn page_and_depth_bounds_are_independent_of_full_tree_width() {
         let mut objects = BTreeMap::new();
         let blob = insert(&mut objects, &Object::Blob(Blob { data: vec![1] }));
@@ -1070,17 +1535,79 @@ mod tests {
     }
 
     #[test]
+    fn shared_tree_at_two_actual_depths_rechecks_limit() {
+        let mut objects = BTreeMap::new();
+        let shared = insert(
+            &mut objects,
+            &Object::Tree(Tree {
+                entries: Vec::new(),
+            }),
+        );
+        let middle = insert(
+            &mut objects,
+            &Object::Tree(Tree {
+                entries: vec![TreeEntry {
+                    name: b"child".to_vec(),
+                    mode: EntryMode::Tree,
+                    object_hash: shared,
+                }],
+            }),
+        );
+        let tree = insert(
+            &mut objects,
+            &Object::Tree(Tree {
+                entries: vec![
+                    TreeEntry {
+                        name: b"a".to_vec(),
+                        mode: EntryMode::Tree,
+                        object_hash: shared,
+                    },
+                    TreeEntry {
+                        name: b"b".to_vec(),
+                        mode: EntryMode::Tree,
+                        object_hash: middle,
+                    },
+                ],
+            }),
+        );
+        let root = signed_root(&mut objects, tree);
+        let mut limits = walk_limits();
+        limits.max_tree_depth = 1;
+        assert_eq!(
+            drive(&objects, root, 1, limits),
+            Err(SnapshotWalkError::BudgetExceeded)
+        );
+        let mut source = MapSource(objects.clone());
+        let old_limits = RecipientLimits {
+            max_tree_depth: 1,
+            ..RecipientLimits::default()
+        };
+        assert!(
+            RecipientGraph::new(&mut source, old_limits)
+                .validate_base(root)
+                .is_err()
+        );
+        limits.max_tree_depth = 2;
+        assert_eq!(
+            drive(&objects, root, 2, limits).unwrap().0.max_tree_depth,
+            2
+        );
+    }
+
+    #[test]
     fn native_large_distinct_bytes_use_bounded_live_facts() {
         // Descriptor-only source: never retain the complete 129 MiB graph.
         const FILES: u8 = 129;
         const CONTENT: usize = 1024 * 1024;
         let mut descriptors = BTreeMap::new();
         let mut entries = Vec::new();
+        let mut expected_blob_bytes = 0u64;
         for seed in 0..FILES {
             let object = Object::Blob(Blob {
                 data: vec![seed; CONTENT],
             });
             let bytes = serialize(&object).unwrap();
+            expected_blob_bytes += u64::try_from(bytes.len()).unwrap();
             let id = id_from_object(&object, &bytes);
             descriptors.insert(id, seed);
             entries.push(TreeEntry {
@@ -1092,11 +1619,16 @@ mod tests {
         let mut roots = BTreeMap::new();
         let tree = insert(&mut roots, &Object::Tree(Tree { entries }));
         let root = signed_root(&mut roots, tree);
+        let expected_total =
+            expected_blob_bytes + roots.values().map(|bytes| bytes.len() as u64).sum::<u64>();
+        assert_eq!(descriptors.len() + roots.len(), usize::from(FILES) + 2);
+        assert!(roots.values().map(Vec::len).sum::<usize>() < 64 * 1024);
         let mut pending =
             VecDeque::from([start_snapshot_walk(root, SnapshotRole::BaseRoot).unwrap()]);
         let mut seen = BTreeMap::new();
         let mut usage = SnapshotWalkUsage::default();
         let mut max_live_input = 0usize;
+        let mut max_decoded_fact = 0usize;
         while let Some(record) = pending.pop_front() {
             let bytes = if let Some(bytes) = roots.get(&record.id()) {
                 bytes.clone()
@@ -1111,6 +1643,10 @@ mod tests {
             let fact =
                 inspect_snapshot_object(record.id(), &bytes, record.role(), inspection_limits())
                     .unwrap();
+            // InspectedObject retains scalar/Tree metadata, not Blob payloads.
+            // Serialization and inspection still use transient scratch, so
+            // this structural bound is not a claim about total process RSS.
+            max_decoded_fact = max_decoded_fact.max(std::mem::size_of_val(&fact));
             let step = advance_snapshot_walk(
                 &record,
                 &fact,
@@ -1132,71 +1668,129 @@ mod tests {
             pending.extend(step.successors().iter().copied());
         }
         assert_eq!(usage.objects, u64::from(FILES) + 2);
-        assert!(usage.canonical_bytes > 128 * 1024 * 1024);
+        assert_eq!(usage.canonical_bytes, expected_total);
+        assert!(expected_total > 128 * 1024 * 1024);
         assert!(max_live_input < 2 * 1024 * 1024);
+        assert!(max_decoded_fact < 1024);
         assert_eq!(seen.len(), usize::from(FILES) + 2);
     }
 
     #[test]
-    fn discarded_step_can_repeat_and_stale_generation_cannot_apply() {
+    fn model_job_retries_every_task_kind_and_refuses_partial_transactions() {
         // Protocol example only: this is not evidence of SQL durability.
         let mut objects = BTreeMap::new();
+        let chunk = insert(&mut objects, &Object::Blob(Blob { data: vec![7; 3] }));
+        let manifest = insert(
+            &mut objects,
+            &Object::ChunkedBlob(ChunkedBlob {
+                total_size: 6,
+                chunk_size: 3,
+                chunks: vec![chunk, chunk],
+            }),
+        );
+        let shared = insert(
+            &mut objects,
+            &Object::Tree(Tree {
+                entries: vec![TreeEntry {
+                    name: b"file".to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: manifest,
+                }],
+            }),
+        );
         let tree = insert(
             &mut objects,
             &Object::Tree(Tree {
-                entries: Vec::new(),
+                entries: vec![
+                    TreeEntry {
+                        name: b"a".to_vec(),
+                        mode: EntryMode::Tree,
+                        object_hash: shared,
+                    },
+                    TreeEntry {
+                        name: b"b".to_vec(),
+                        mode: EntryMode::Tree,
+                        object_hash: shared,
+                    },
+                ],
             }),
         );
         let root = signed_root(&mut objects, tree);
-        let record = start_snapshot_walk(root, SnapshotRole::BaseRoot).unwrap();
-        let parent = inspect_snapshot_object(
-            root,
-            &objects[&root],
-            SnapshotRole::BaseRoot,
-            inspection_limits(),
-        )
-        .unwrap();
-        let width = NonZeroUsize::new(1).unwrap();
-        let discarded =
-            advance_snapshot_walk(&record, &parent, &[], width, &walk_limits()).unwrap();
-        let replayed = advance_snapshot_walk(&record, &parent, &[], width, &walk_limits()).unwrap();
-        assert_eq!(discarded.successors(), replayed.successors());
-        assert_eq!(discarded.observations(), replayed.observations());
-        let mut generation = 2u64;
-        let mut usage = SnapshotWalkUsage::default();
-        let mut seen = BTreeMap::new();
-        let apply = |expected_generation: u64,
-                     generation: u64,
-                     current: SnapshotWalkUsage,
-                     ledger: &BTreeMap<Hash, u64>,
-                     step: &SnapshotWalkStep| {
-            if expected_generation != generation {
-                return Err(SnapshotWalkError::InconsistentAccounting);
-            }
-            let new: Vec<_> = step
-                .observations()
-                .iter()
-                .map(WalkObjectObservation::id)
-                .filter(|id| !ledger.contains_key(id))
-                .collect();
-            apply_walk_accounting(current, step, &new, walk_limits())
-        };
-        assert_eq!(
-            apply(1, generation, usage, &seen, &replayed),
-            Err(SnapshotWalkError::InconsistentAccounting)
-        );
-        assert_eq!(usage, SnapshotWalkUsage::default());
-        usage = apply(2, generation, usage, &seen, &replayed).unwrap();
-        for item in replayed.observations() {
-            seen.insert(item.id(), item.canonical_len());
+        let catalog = objects.keys().copied().collect::<BTreeSet<_>>();
+        let old = old_usage(&objects, root);
+        let mut baseline = ModelJob::new(root);
+        while let Some(record) = baseline.pending.front().copied() {
+            let step = model_step(&objects, record);
+            baseline
+                .commit(record, &step, step.successors(), 1)
+                .unwrap();
         }
-        generation += 1; // a new job fences the old transition.
         assert_eq!(
-            apply(2, generation, usage, &seen, &replayed),
+            baseline.finish(&catalog).unwrap().objects as usize,
+            old.objects
+        );
+        assert_eq!(baseline.usage.canonical_bytes as usize, old.canonical_bytes);
+        assert_eq!(baseline.usage.max_tree_depth as usize, old.max_tree_depth);
+        assert_eq!(baseline.usage.work as usize, old.occurrences);
+
+        let mut replay = ModelJob::new(root);
+        let mut interrupted = [false; 3];
+        while let Some(record) = replay.pending.front().copied() {
+            let kind = match record {
+                SnapshotWalkRecord::Visit { .. } => 0,
+                SnapshotWalkRecord::TreePage { .. } => 1,
+                SnapshotWalkRecord::ManifestPage { .. } => 2,
+            };
+            let step = model_step(&objects, record);
+            if !interrupted[kind] {
+                let before = replay.clone();
+                let discarded = model_step(&objects, record);
+                assert_eq!(step.successors(), discarded.successors());
+                assert_eq!(step.observations(), discarded.observations());
+                assert_eq!(replay, before);
+                interrupted[kind] = true;
+            }
+            let before = replay.clone();
+            assert_eq!(
+                replay.commit(record, &step, step.successors(), 2),
+                Err(SnapshotWalkError::InconsistentAccounting)
+            );
+            assert_eq!(replay, before);
+            if step.successors().len() > 1 {
+                assert_eq!(
+                    replay.commit(record, &step, &step.successors()[..1], 1),
+                    Err(SnapshotWalkError::InconsistentAccounting)
+                );
+                assert_eq!(replay, before);
+            }
+            replay.commit(record, &step, step.successors(), 1).unwrap();
+        }
+        assert_eq!(interrupted, [true; 3]);
+        assert_eq!(replay, baseline);
+        assert_eq!(replay.finish(&catalog), Ok(baseline.usage));
+        let mut extra = catalog.clone();
+        extra.insert([255; 32]);
+        assert_eq!(
+            replay.finish(&extra),
             Err(SnapshotWalkError::InconsistentAccounting)
         );
-        assert_eq!(usage.objects, 1);
-        assert_eq!(usage.work, 1);
+        let mut missing = catalog;
+        missing.remove(&chunk);
+        assert_eq!(
+            replay.finish(&missing),
+            Err(SnapshotWalkError::InconsistentAccounting)
+        );
+
+        let mut corrupt = ModelJob::new(root);
+        corrupt.seen.insert(root, u64::MAX);
+        let record = corrupt.pending.front().copied().unwrap();
+        let step = model_step(&objects, record);
+        let before = corrupt.clone();
+        assert_eq!(
+            corrupt.commit(record, &step, step.successors(), 1),
+            Err(SnapshotWalkError::InconsistentAccounting)
+        );
+        assert_eq!(corrupt, before);
     }
 
     #[test]
@@ -1232,25 +1826,9 @@ mod tests {
         let (actual, seen) = drive(&objects, root, 1, walk_limits()).unwrap();
         assert_eq!(usize::try_from(actual.work).unwrap(), old.occurrences);
         assert_eq!(seen.len(), objects.len());
-        let mut selected_catalog = objects
-            .keys()
-            .copied()
-            .collect::<std::collections::BTreeSet<_>>();
-        let reached = seen
-            .keys()
-            .copied()
-            .collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(selected_catalog, reached);
-        selected_catalog.insert([255; 32]);
-        assert_ne!(
-            selected_catalog, reached,
-            "extra selected-pack object is not Snapshot membership"
-        );
-        selected_catalog.remove(&[255; 32]);
-        selected_catalog.remove(&empty);
-        assert_ne!(
-            selected_catalog, reached,
-            "missing selected-pack object is not repaired"
+        assert_eq!(
+            seen.keys().copied().collect::<BTreeSet<_>>(),
+            objects.keys().copied().collect()
         );
     }
 
@@ -1295,87 +1873,5 @@ mod tests {
                 .validate_base(root)
                 .is_err()
         );
-    }
-
-    #[test]
-    fn trusted_driver_must_enqueue_all_successors_and_reconcile_old_lengths() {
-        // Test-driver protocol example; the real SQL transaction belongs to PR10c.
-        let mut objects = BTreeMap::new();
-        let blob = insert(&mut objects, &Object::Blob(Blob { data: vec![1] }));
-        let tree = insert(
-            &mut objects,
-            &Object::Tree(Tree {
-                entries: vec![
-                    TreeEntry {
-                        name: b"a".to_vec(),
-                        mode: EntryMode::Blob,
-                        object_hash: blob,
-                    },
-                    TreeEntry {
-                        name: b"b".to_vec(),
-                        mode: EntryMode::Blob,
-                        object_hash: blob,
-                    },
-                ],
-            }),
-        );
-        let parent = inspect_snapshot_object(
-            tree,
-            &objects[&tree],
-            SnapshotRole::Tree,
-            inspection_limits(),
-        )
-        .unwrap();
-        let record = SnapshotWalkRecord::TreePage {
-            id: tree,
-            tree_depth: 0,
-            next_index: 0,
-        };
-        let step = advance_snapshot_walk(
-            &record,
-            &parent,
-            &[],
-            NonZeroUsize::new(1).unwrap(),
-            &walk_limits(),
-        )
-        .unwrap();
-        assert_eq!(step.successors().len(), 2); // child and continuation
-        let omitted_continuation = &step.successors()[..1];
-        assert_ne!(omitted_continuation, step.successors());
-        // A maliciously incomplete catalog could match the reduced reached
-        // set; exact successor enqueue is an independent completion invariant.
-        let committed = omitted_continuation.to_vec();
-        assert!(committed != step.successors());
-
-        let blob_fact = inspect_snapshot_object(
-            blob,
-            &objects[&blob],
-            SnapshotRole::File,
-            inspection_limits(),
-        )
-        .unwrap();
-        let visit = SnapshotWalkRecord::Visit {
-            id: blob,
-            role: SnapshotRole::File,
-            tree_depth: 0,
-        };
-        let observed = advance_snapshot_walk(
-            &visit,
-            &blob_fact,
-            &[],
-            NonZeroUsize::new(1).unwrap(),
-            &walk_limits(),
-        )
-        .unwrap();
-        let stale_length = blob_fact.canonical_len() as u64 + 1;
-        let old_ledger = BTreeMap::from([(blob, stale_length)]);
-        assert!(
-            observed
-                .observations()
-                .iter()
-                .any(|item| old_ledger.get(&item.id()) != Some(&item.canonical_len()))
-        );
-        // `apply_walk_accounting` cannot verify a prior SQL row: the trusted
-        // transaction must refuse this mismatch before applying counters.
     }
 }

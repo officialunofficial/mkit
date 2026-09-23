@@ -765,7 +765,10 @@ child request follows an authenticated root Tree, Tree entry, or manifest
 chunk position. The recipient MUST recheck every incoming role and Tree depth
 per occurrence, even for an ID whose canonical bytes were checked earlier.
 It MUST validate each chunk position's type, fixed-size rule and checked
-running sum, including repeated IDs. Distinct reachable IDs and their
+running sum, including repeated IDs. A local cursor preflight rejects a
+nonzero initial sum or an impossible fixed-size prefix sum, but cannot prove
+that an arbitrary persisted cursor has completed its prior positions.
+Distinct reachable IDs and their
 canonical lengths count once; each visited occurrence and expanded Tree entry
 counts one work unit, and each manifest chunk position counts two units
 (expansion plus the chunk occurrence). Page width changes scheduling, not

@@ -50,7 +50,7 @@ pub fn snapshot_walk_one_iteration(input: &[u8]) {
         Blob, ChunkedBlob, EntryMode, Object, Tree, TreeEntry, id_from_object,
     };
     use mkit_core::partial::{
-        MAX_WALK_PAGE, ObjectInspectionLimits, SnapshotRole, SnapshotWalkLimits,
+        MAX_WALK_PAGE, ObjectInspectionLimits, SnapshotRole, SnapshotWalkError, SnapshotWalkLimits,
         SnapshotWalkRecord, SnapshotWalkUsage, advance_snapshot_walk, apply_walk_accounting,
         inspect_snapshot_object, next_manifest_ids,
     };
@@ -59,7 +59,7 @@ pub fn snapshot_walk_one_iteration(input: &[u8]) {
 
     let input = &input[..input.len().min(MAX_INPUT)];
     let seed = input.first().copied().unwrap_or(0);
-    let length = usize::from(seed % 17);
+    let length = usize::from(seed % 16) + 1;
     let blob = Object::Blob(Blob {
         data: vec![seed; length],
     });
@@ -94,11 +94,67 @@ pub fn snapshot_walk_one_iteration(input: &[u8]) {
         max_work: 16,
     };
     let width = NonZeroUsize::new(usize::from(input.get(1).copied().unwrap_or(1)) + 1).unwrap();
-    let index = u32::from(input.get(2).copied().unwrap_or(0));
-    let depth = u64::from(input.get(3).copied().unwrap_or(0));
-    let sum = u64::from(input.get(4).copied().unwrap_or(0));
+    let mut index_bytes = [0; 4];
+    let mut depth_bytes = [0; 8];
+    let mut sum_bytes = [0; 8];
+    for (target, start) in [
+        (&mut index_bytes[..], 2),
+        (&mut depth_bytes[..], 6),
+        (&mut sum_bytes[..], 14),
+    ] {
+        for (offset, byte) in target.iter_mut().enumerate() {
+            *byte = input
+                .get(start + offset)
+                .copied()
+                .unwrap_or(seed.wrapping_add(offset as u8));
+        }
+    }
+    let index = u32::from_le_bytes(index_bytes);
+    let depth = u64::from_le_bytes(depth_bytes);
+    let sum = u64::from_le_bytes(sum_bytes);
     let tree_fact =
         inspect_snapshot_object(tree_id, &tree_bytes, SnapshotRole::Tree, inspect_limits).unwrap();
+    // Known-valid lane: rejecting every input cannot satisfy this harness.
+    let valid_tree = SnapshotWalkRecord::TreePage {
+        id: tree_id,
+        tree_depth: 0,
+        next_index: 0,
+    };
+    let one = NonZeroUsize::new(1).unwrap();
+    let tree_step = advance_snapshot_walk(&valid_tree, &tree_fact, &[], one, &limits).unwrap();
+    assert_eq!(tree_step.successors().len(), 1);
+    assert_eq!(tree_step.successors()[0].id(), blob_id);
+    assert_eq!(tree_step.work_delta(), 1);
+    assert_eq!(
+        apply_walk_accounting(SnapshotWalkUsage::default(), &tree_step, &[], limits)
+            .unwrap()
+            .work,
+        1
+    );
+    assert!(matches!(
+        advance_snapshot_walk(
+            &valid_tree,
+            &tree_fact,
+            &[],
+            NonZeroUsize::new(MAX_WALK_PAGE + 1).unwrap(),
+            &limits
+        ),
+        Err(SnapshotWalkError::InvalidPage)
+    ));
+    assert!(matches!(
+        advance_snapshot_walk(
+            &SnapshotWalkRecord::TreePage {
+                id: tree_id,
+                tree_depth: 0,
+                next_index: u32::MAX
+            },
+            &tree_fact,
+            &[],
+            one,
+            &limits
+        ),
+        Err(SnapshotWalkError::InvalidPage)
+    ));
     let tree_record = SnapshotWalkRecord::TreePage {
         id: tree_id,
         tree_depth: depth,
@@ -116,6 +172,60 @@ pub fn snapshot_walk_one_iteration(input: &[u8]) {
         inspect_limits,
     )
     .unwrap();
+    let valid_manifest = Object::ChunkedBlob(ChunkedBlob {
+        total_size: (length * 2) as u64,
+        chunk_size: 0,
+        chunks: vec![blob_id, blob_id],
+    });
+    let valid_bytes = serialize(&valid_manifest).unwrap();
+    let valid_id = id_from_object(&valid_manifest, &valid_bytes);
+    let valid_fact =
+        inspect_snapshot_object(valid_id, &valid_bytes, SnapshotRole::File, inspect_limits)
+            .unwrap();
+    let valid_record = SnapshotWalkRecord::ManifestPage {
+        id: valid_id,
+        tree_depth: 0,
+        next_index: 0,
+        sum: 0,
+    };
+    let two = NonZeroUsize::new(2).unwrap();
+    assert_eq!(
+        next_manifest_ids(&valid_record, &valid_fact, two).unwrap(),
+        &[blob_id, blob_id]
+    );
+    let facts = [
+        inspect_snapshot_object(blob_id, &blob_bytes, SnapshotRole::Chunk, inspect_limits).unwrap(),
+        inspect_snapshot_object(blob_id, &blob_bytes, SnapshotRole::Chunk, inspect_limits).unwrap(),
+    ];
+    let manifest_step =
+        advance_snapshot_walk(&valid_record, &valid_fact, &facts, two, &limits).unwrap();
+    assert!(manifest_step.successors().is_empty());
+    assert_eq!(manifest_step.observations().len(), 2);
+    assert_eq!(manifest_step.work_delta(), 4);
+    let counted = apply_walk_accounting(
+        SnapshotWalkUsage::default(),
+        &manifest_step,
+        &[blob_id],
+        limits,
+    )
+    .unwrap();
+    assert_eq!(
+        (counted.objects, counted.canonical_bytes, counted.work),
+        (1, blob_bytes.len() as u64, 4)
+    );
+    assert!(matches!(
+        next_manifest_ids(
+            &SnapshotWalkRecord::ManifestPage {
+                id: valid_id,
+                tree_depth: 0,
+                next_index: 0,
+                sum: 1
+            },
+            &valid_fact,
+            one
+        ),
+        Err(SnapshotWalkError::InvalidPage)
+    ));
     let manifest_record = SnapshotWalkRecord::ManifestPage {
         id: manifest_id,
         tree_depth: depth,
