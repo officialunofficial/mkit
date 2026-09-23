@@ -33,10 +33,12 @@ server running with an initialized state and run
 `PYTHONDONTWRITEBYTECODE=1 python3 tests/managed_faults.py <state>` and
 `PYTHONDONTWRITEBYTECODE=1 python3 tests/managed_races.py`. The fault test
 reads SQLite quota and replay rows in that isolated local state; it proves
-revocation denies an exact pending upload retry and that a post-put orphan
-does not become a completed authorized operation. The race test exercises
-both transaction orderings for UpdateRef and AdvanceRefs versus policy
-replacement. To verify listing limits, stop Wrangler, run
+fresh anonymous, nonmember, and reader upload denials leave the entire
+quota/replay/ref tables unchanged and their unique R2 pack IDs absent. It
+also proves revocation denies an exact pending upload retry and that a
+post-put orphan does not become a completed authorized operation. The race
+test exercises both transaction orderings for UpdateRef and AdvanceRefs
+versus policy replacement. To verify listing limits, stop Wrangler, run
 `PYTHONDONTWRITEBYTECODE=1 python3 tests/managed_listing.py --seed <state>`
 against this disposable state, restart Wrangler with the same `--persist-to`,
 then run `PYTHONDONTWRITEBYTECODE=1 python3 tests/managed_listing.py --verify`.

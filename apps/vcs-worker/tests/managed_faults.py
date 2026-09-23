@@ -20,6 +20,13 @@ def snapshot():
         return quota, ledger
 
 
+def write_effects():
+    """Compare full persistent write state, not only one author's counters."""
+    with sqlite3.connect(database) as db:
+        return tuple(tuple(db.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall())
+                     for table in ("write_quota", "authenticated_operations", "refs"))
+
+
 def replace(members):
     current = json.loads(m.admin("GetPolicy", b'{"version":1}')[1])
     result = m.admin("ReplacePolicy", m.policy(members, int(current["generation"])))
@@ -52,6 +59,24 @@ def exists(pack_id):
 
 def main():
     replace([(m.READER, "reader"), (m.WRITER, "writer")])
+    for label, signer, denied in [
+        ("anonymous", None, "unauthenticated"),
+        ("stranger", m.STRANGER, "permission_denied"),
+        ("reader", m.READER, "permission_denied"),
+    ]:
+        candidate = label.encode() + b"-fresh-denied-" + secrets.token_bytes(16)
+        pack_id, body, _ = upload(candidate)
+        assert not exists(pack_id), label
+        before = write_effects()
+        headers = ({"Content-Type": "application/connect+proto"} if signer is None else
+                   m.signed_headers(m.SERVICE + "UploadPack", b"", signer,
+                                    "pack:" + pack_id.hex() + ":" + str(len(candidate)),
+                                    "application/connect+proto"))
+        assert send(body, headers) == denied, label
+        assert not exists(pack_id), label
+        assert write_effects() == before, (label, before, write_effects())
+        print(label, "fresh upload denied without R2/quota/replay/ref effect")
+
     pack_id, body, headers = upload(b"valid-identical-resume" + secrets.token_bytes(8))
     before = snapshot()
     assert send(body, headers) == "ok"
