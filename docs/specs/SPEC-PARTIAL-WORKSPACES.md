@@ -759,6 +759,29 @@ untouched files in the full recipient's snapshot. The source remains responsible
 for bounding its initial fetch allocation; verification bounds returned bytes
 before retaining or decoding.
 
+An incremental complete-Snapshot walk MAY keep its frontier and unique-ID
+ledger in trusted recipient storage. Its root is independently pinned; each
+child request follows an authenticated root Tree, Tree entry, or manifest
+chunk position. The recipient MUST recheck every incoming role and Tree depth
+per occurrence, even for an ID whose canonical bytes were checked earlier.
+It MUST validate each chunk position's type, fixed-size rule and checked
+running sum, including repeated IDs. A local cursor preflight rejects a
+nonzero initial sum or an impossible fixed-size prefix sum, but cannot prove
+that an arbitrary persisted cursor has completed its prior positions.
+Distinct reachable IDs and their
+canonical lengths count once; each visited occurrence and expanded Tree entry
+counts one work unit, and each manifest chunk position counts two units
+(expansion plus the chunk occurrence). Page width changes scheduling, not
+these semantic totals. A bounded local step never establishes whole-graph
+completion. For each committed step, a service MUST consume its prior record
+and enqueue every exact successor, including a page continuation, in the same
+transaction as counters and unique-ID decisions. It MUST exhaust that frontier
+and compare the reached logical ID set with its independently selected catalog
+before claiming completion. Persisted work records are service bookkeeping,
+not portable cryptographic proofs or authorization. Physical packs may retain
+objects outside a later successor's
+logical Snapshot; a successor catalog check concerns its logical membership.
+
 The separate generic publisher takes exact MKWU bytes and in-memory exchange
 context: repository identity, exact branch ref, 32-byte operation id, expected
 base, and digest/length of those exact bytes. This metadata grants no access

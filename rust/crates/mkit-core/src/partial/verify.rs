@@ -421,7 +421,7 @@ pub enum PartialObjectRole {
     Base,
     /// Authenticated selected ancestor Tree.
     Tree,
-    /// Selected Blob or ChunkedBlob representation.
+    /// Selected Blob or `ChunkedBlob` representation.
     File,
     /// Chunk Blob named by a selected manifest.
     Chunk,

@@ -91,6 +91,14 @@ bench = false
 required-features = ["libfuzzer"]
 
 [[bin]]
+name = "snapshot_walk"
+path = "fuzz_targets/snapshot_walk.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
 name = "tree"
 path = "fuzz_targets/tree.rs"
 test = false

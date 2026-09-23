@@ -18,7 +18,7 @@ pub enum SnapshotRole {
     CandidateRoot,
     /// Tree reached through an authenticated Tree-mode edge.
     Tree,
-    /// Blob or ChunkedBlob reached through a regular/executable edge.
+    /// Blob or `ChunkedBlob` reached through a regular/executable edge.
     File,
     /// Blob reached through a symlink edge.
     Symlink,
@@ -36,7 +36,7 @@ pub struct ObjectInspectionLimits {
     pub max_tree_bytes: usize,
     /// Maximum declared Tree entries, checked before decoding.
     pub max_tree_entries: usize,
-    /// Maximum declared ChunkedBlob chunk IDs, checked before decoding.
+    /// Maximum declared `ChunkedBlob` chunk IDs, checked before decoding.
     pub max_manifest_chunks: usize,
 }
 
@@ -76,7 +76,7 @@ pub enum InspectedKind {
     Tree,
     /// Canonical Blob.
     Blob,
-    /// Canonical ChunkedBlob; its referenced chunks remain unchecked.
+    /// Canonical `ChunkedBlob`; its referenced chunks remain unchecked.
     ChunkedBlob,
 }
 
@@ -125,22 +125,21 @@ impl InspectedObject {
     /// Incoming role checked by inspection, absent for identification only.
     /// `None` means only canonical Snapshot-kind identification was checked;
     /// no incoming role was asserted.
-    /// Canonical snapshot object kind.
     #[must_use]
     pub fn role(&self) -> Option<SnapshotRole> {
         self.role
     }
-    /// Length of the canonical input bytes, which are not retained.
+    /// Canonical Snapshot object kind.
     #[must_use]
     pub fn kind(&self) -> InspectedKind {
         self.kind
     }
-    /// Signed root Tree ID and embedded signer, if this is a root.
+    /// Length of the canonical input bytes, which are not retained.
     #[must_use]
     pub fn canonical_len(&self) -> usize {
         self.canonical_len
     }
-    /// Blob content length, if this is a Blob.
+    /// Signed root Tree ID and embedded signer, if this is a root.
     #[must_use]
     pub fn root(&self) -> Option<(Hash, [u8; 32])> {
         match self.facts {
@@ -148,7 +147,7 @@ impl InspectedObject {
             _ => None,
         }
     }
-    /// Entry count, if this is a Tree.
+    /// Blob content length, if this is a Blob.
     #[must_use]
     pub fn blob_len(&self) -> Option<usize> {
         match self.facts {
@@ -156,8 +155,7 @@ impl InspectedObject {
             _ => None,
         }
     }
-    /// Intrinsic total, chunk-size field and ID count for a manifest.
-    /// This does not validate referenced chunk lengths or their sum.
+    /// Entry count, if this is a Tree.
     #[must_use]
     pub fn tree_entries_len(&self) -> Option<usize> {
         match &self.facts {
@@ -165,6 +163,8 @@ impl InspectedObject {
             _ => None,
         }
     }
+    /// Intrinsic total, chunk-size field and ID count for a manifest.
+    /// This does not validate referenced chunk lengths or their sum.
     #[must_use]
     pub fn manifest(&self) -> Option<(u64, u32, usize)> {
         match &self.facts {
