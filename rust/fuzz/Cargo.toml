@@ -99,6 +99,14 @@ bench = false
 required-features = ["libfuzzer"]
 
 [[bin]]
+name = "staged_update"
+path = "fuzz_targets/staged_update.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
 name = "tree"
 path = "fuzz_targets/tree.rs"
 test = false

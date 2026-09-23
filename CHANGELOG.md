@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   behavior and MKWB v1 bytes are unchanged. **SemVer:** additive managed-host
   route and native/CLI opt-in; no portable format or default behavior change.
 
+- *(core)* Borrowed MKWU v1 carrier and ordered inventory facts, bounded
+  changed-frontier/required-file transitions, and separate staged accounting
+  for a trusted complete-Snapshot driver. Existing full decoder, recipient
+  APIs/defaults and wire bytes remain unchanged. **SemVer:** additive public
+  APIs and error type; no format change or hosting authority.
+
 - *(transport)* Optional owner-only BeginSnapshot, ContinueSnapshot,
   GetSnapshotJob, CancelSnapshot and CleanupSnapshots enroll a complete
   raw-v1 Snapshot into a durable, bounded structural certificate index.
