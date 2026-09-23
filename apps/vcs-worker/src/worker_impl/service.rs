@@ -68,7 +68,33 @@ const REFSTORE_INSTANCE: &str = "root";
 /// Cap on a pack's declared/observed size. This reference server buffers the
 /// whole pack in memory (no incremental streaming to/from R2 — see module
 /// docs), so this cap bounds worst-case isolate memory, not just wire size.
+#[cfg(not(feature = "managed-access"))]
 pub(crate) const MAX_PACK_BYTES: usize = 64 * 1024 * 1024; // 64 MiB
+#[cfg(feature = "managed-access")]
+pub(crate) const MAX_PACK_BYTES: usize = 4 * 1024 * 1024;
+
+#[cfg(feature = "managed-access")]
+pub(crate) async fn managed_authorize(
+    env: &Env,
+    proof: mkit_worker_common::replay::Proof,
+    procedure: &str,
+) -> Result<(), ConnectError> {
+    use super::wire::{AccessReq, AccessResp};
+    let decision: AccessResp = do_call(
+        env,
+        "/authorize",
+        &AccessReq {
+            proof,
+            procedure: procedure.to_owned(),
+        },
+    )
+    .await?;
+    if decision.allowed {
+        Ok(())
+    } else {
+        Err(ConnectError::permission_denied("managed access denied"))
+    }
+}
 
 fn ce_invalid(msg: impl Into<String>) -> ConnectError {
     ConnectError::invalid_argument(msg)
@@ -147,6 +173,16 @@ pub(crate) async fn do_call<Req: Serialize, Resp: serde::de::DeserializeOwned>(
         if status == 429 {
             return Err(ConnectError::resource_exhausted(msg));
         }
+        #[cfg(feature = "managed-access")]
+        {
+            return Err(match status {
+                401 => ConnectError::unauthenticated("managed authentication expired"),
+                403 => ConnectError::permission_denied("managed access denied"),
+                503 => ConnectError::unavailable("managed authority unavailable"),
+                _ => ce_invalid("managed request invalid"),
+            });
+        }
+        #[cfg(not(feature = "managed-access"))]
         return Err(ce_invalid(format!("refstore {op}: {msg}")));
     }
     resp.json::<Resp>()
@@ -166,6 +202,22 @@ fn expected_hex(expected_id: &[u8]) -> Option<String> {
     } else {
         Some(hex::encode(expected_id))
     }
+}
+
+#[cfg(feature = "managed-access")]
+fn managed_ref_bound(name: &str) -> Result<(), ConnectError> {
+    if name.len() > 1024 {
+        Err(ConnectError::resource_exhausted(
+            "managed ref name exceeds limit",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(feature = "managed-access"))]
+fn managed_ref_bound(_name: &str) -> Result<(), ConnectError> {
+    Ok(())
 }
 
 pub struct TransportServer {
@@ -190,6 +242,7 @@ impl crate::proto::mkit::transport::v1::TransportService for TransportServer {
         if !is_valid_ref_prefix(&prefix) {
             return Err(ce_invalid("prefix is invalid (SPEC-REFS §3)"));
         }
+        managed_ref_bound(&prefix)?;
 
         let env = self.env.clone();
         SendFuture::new(async move {
@@ -209,7 +262,16 @@ impl crate::proto::mkit::transport::v1::TransportService for TransportServer {
             // reconstruct it" on `mkit clone`/`fetch`/`pull`, not as an
             // auth or wire-shape error.
             let prefix_for_strip = prefix.clone();
-            let resp: ListResp = do_call(&env, "/list", &ListReq { prefix }).await?;
+            let resp: ListResp = do_call(
+                &env,
+                "/list",
+                &ListReq {
+                    prefix,
+                    #[cfg(feature = "managed-access")]
+                    proof: proof(&_ctx)?,
+                },
+            )
+            .await?;
             let refs = resp
                 .refs
                 .into_iter()
@@ -242,10 +304,20 @@ impl crate::proto::mkit::transport::v1::TransportService for TransportServer {
         if !is_valid_ref_name(&name) {
             return Err(ce_invalid("ref name is invalid (SPEC-REFS §3)"));
         }
+        managed_ref_bound(&name)?;
 
         let env = self.env.clone();
         SendFuture::new(async move {
-            let resp: GetResp = do_call(&env, "/get", &GetReq { name }).await?;
+            let resp: GetResp = do_call(
+                &env,
+                "/get",
+                &GetReq {
+                    name,
+                    #[cfg(feature = "managed-access")]
+                    proof: proof(&_ctx)?,
+                },
+            )
+            .await?;
             let object_id = hex_to_bytes_opt(&resp.value).unwrap_or_default();
             Ok(Response::new(ReadRefResponse {
                 exists: Some(resp.exists),
@@ -270,6 +342,7 @@ impl crate::proto::mkit::transport::v1::TransportService for TransportServer {
         if !is_valid_ref_name(&name) {
             return Err(ce_invalid("ref name is invalid (SPEC-REFS §3)"));
         }
+        managed_ref_bound(&name)?;
         if expectation == ProtoRefExpectation::REF_EXPECTATION_UNSPECIFIED as i32 {
             return Err(ce_invalid("expectation is UNSPECIFIED (protocol error)"));
         }
@@ -316,6 +389,7 @@ impl crate::proto::mkit::transport::v1::TransportService for TransportServer {
             if !is_valid_ref_name(name) {
                 return Err(ce_invalid("ref name is invalid (SPEC-REFS §3)"));
             }
+            managed_ref_bound(name)?;
         }
         let unspecified = ProtoRefExpectation::REF_EXPECTATION_UNSPECIFIED as i32;
         if head_expectation == unspecified || packmap_expectation == unspecified {
@@ -371,6 +445,13 @@ impl crate::proto::mkit::transport::v1::TransportService for TransportServer {
 
         let env = self.env.clone();
         SendFuture::new(async move {
+            #[cfg(feature = "managed-access")]
+            managed_authorize(
+                &env,
+                proof(&_ctx)?,
+                "/mkit.transport.v1.TransportService/PackExists",
+            )
+            .await?;
             let bucket = env
                 .bucket(STORAGE_BUCKET)
                 .map_err(|e| ce_storage(StorageOp::StorageBinding, e))?;
@@ -379,6 +460,13 @@ impl crate::proto::mkit::transport::v1::TransportService for TransportServer {
                 .await
                 .map_err(|e| ce_storage(StorageOp::R2Head, e))?
                 .is_some();
+            #[cfg(feature = "managed-access")]
+            managed_authorize(
+                &env,
+                proof(&_ctx)?,
+                "/mkit.transport.v1.TransportService/PackExists",
+            )
+            .await?;
             Ok(Response::new(PackExistsResponse {
                 exists: Some(exists),
                 ..Default::default()
@@ -479,6 +567,10 @@ impl crate::proto::mkit::transport::v1::TransportService for TransportServer {
                 "UploadPack stream ended without a `last = true` chunk",
             ));
         }
+        #[cfg(feature = "managed-access")]
+        if requests.next().await.is_some() {
+            return Err(ce_invalid("messages after final UploadPack chunk"));
+        }
 
         // 3) Verify the declared shape against what was actually received.
         if received.len() as u64 != total_bytes {
@@ -494,6 +586,15 @@ impl crate::proto::mkit::transport::v1::TransportService for TransportServer {
 
         let env = self.env.clone();
         SendFuture::new(async move {
+            #[cfg(feature = "test-faults")]
+            test_fault("before-put", &fault, &object_proof.scope)?;
+            #[cfg(feature = "managed-access")]
+            managed_authorize(
+                &env,
+                object_proof.clone(),
+                "/mkit.transport.v1.TransportService/UploadPack",
+            )
+            .await?;
             put_addressed(&env, &pack_key(&pack_id), received).await?;
             #[cfg(feature = "test-faults")]
             test_fault("after-put", &fault, &object_proof.scope)?;
@@ -522,17 +623,63 @@ impl crate::proto::mkit::transport::v1::TransportService for TransportServer {
         let env = self.env.clone();
         let key = pack_key(&pack_id);
         let bytes = SendFuture::new(async move {
+            #[cfg(feature = "managed-access")]
+            managed_authorize(
+                &env,
+                proof(&_ctx)?,
+                "/mkit.transport.v1.TransportService/DownloadPack",
+            )
+            .await?;
             let bucket = env
                 .bucket(STORAGE_BUCKET)
                 .map_err(|e| ce_storage(StorageOp::StorageBinding, e))?;
             match bucket.get(key).execute().await {
                 Ok(Some(obj)) => {
-                    let bytes = obj
+                    #[cfg(feature = "managed-access")]
+                    if obj.size() > MAX_PACK_BYTES as u64 {
+                        return Err(ConnectError::resource_exhausted(
+                            "managed pack exceeds limit",
+                        ));
+                    }
+                    let body = obj
                         .body()
-                        .ok_or_else(|| ce_storage(StorageOp::R2Read, "missing body"))?
+                        .ok_or_else(|| ce_storage(StorageOp::R2Read, "missing body"))?;
+                    #[cfg(feature = "managed-access")]
+                    let bytes = {
+                        let mut stream = body
+                            .stream()
+                            .map_err(|e| ce_storage(StorageOp::R2Read, e))?;
+                        let mut received = Vec::new();
+                        while let Some(chunk) = stream.next().await {
+                            let chunk = chunk.map_err(|e| ce_storage(StorageOp::R2Read, e))?;
+                            if chunk.len() > MAX_PACK_BYTES - received.len() {
+                                return Err(ConnectError::resource_exhausted(
+                                    "managed pack exceeds limit",
+                                ));
+                            }
+                            received.extend_from_slice(&chunk);
+                        }
+                        received
+                    };
+                    #[cfg(not(feature = "managed-access"))]
+                    let bytes = body
                         .bytes()
                         .await
                         .map_err(|e| ce_storage(StorageOp::R2Read, e))?;
+                    #[cfg(feature = "managed-access")]
+                    {
+                        if bytes.len() > MAX_PACK_BYTES {
+                            return Err(ConnectError::resource_exhausted(
+                                "managed pack exceeds limit",
+                            ));
+                        }
+                        managed_authorize(
+                            &env,
+                            proof(&_ctx)?,
+                            "/mkit.transport.v1.TransportService/DownloadPack",
+                        )
+                        .await?;
+                    }
                     Ok(bytes)
                 }
                 Ok(None) => Err(ConnectError::not_found("pack not found")),
@@ -578,11 +725,20 @@ fn proof(ctx: &RequestContext) -> Result<mkit_worker_common::replay::Proof, Conn
 
 #[cfg(feature = "test-faults")]
 fn test_fault(stage: &str, requested: &str, scope: &str) -> Result<(), ConnectError> {
-    thread_local! { static FAILED: std::cell::RefCell<std::collections::HashSet<String>> = std::cell::RefCell::default(); }
-    if stage == requested
-        && FAILED.with(|failed| failed.borrow_mut().insert(format!("{stage}:{scope}")))
-    {
+    #[cfg(feature = "managed-access")]
+    if stage == requested {
         return Err(ConnectError::internal(format!("injected {stage} failure")));
     }
+    #[cfg(not(feature = "managed-access"))]
+    {
+        thread_local! { static FAILED: std::cell::RefCell<std::collections::HashSet<String>> = std::cell::RefCell::default(); }
+        if stage == requested
+            && FAILED.with(|failed| failed.borrow_mut().insert(format!("{stage}:{scope}")))
+        {
+            return Err(ConnectError::internal(format!("injected {stage} failure")));
+        }
+    }
+    #[cfg(feature = "managed-access")]
+    let _ = scope;
     Ok(())
 }

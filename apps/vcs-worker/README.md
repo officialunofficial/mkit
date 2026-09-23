@@ -11,16 +11,21 @@ Durable Object resources; never point it at this reference public service's
 bindings. The default artifact remains the open-read, signed-write service
 described below.
 
-The managed binary currently supports only owner-authenticated policy
-administration. All seven repository data methods and internal RefStore data
-paths return unavailable for every caller, including the owner. It cannot yet
-serve a managed repository. Policy initialization, retrieval, and replacement
-use POST JSON at `/mkit/host/v1/{InitializePolicy,GetPolicy,ReplacePolicy}`;
-see [SPEC-SERVER-ACCESS](../../docs/specs/SPEC-SERVER-ACCESS.md) for the exact
-wire and failure contract. An operator-pinned owner cannot be transferred or
-recovered through this service. Replacing the binary and all bindings with a
-public deployment is outside its software latch, and data formerly exposed by
-a public service gains no retroactive confidentiality.
+The managed binary supports owner-authenticated policy administration and
+the seven TransportService methods under live reader/writer/owner policy.
+Policy initialization, retrieval, and replacement use POST JSON at
+`/mkit/host/v1/{InitializePolicy,GetPolicy,ReplacePolicy}`. A managed read
+requires auth v2 over the exact request message bytes; UploadPack retains
+its signed pack-id/length commitment. The native client's ordinary reads
+remain unsigned until explicit opt-in support is implemented separately;
+signed fixture clients can exercise the service now. See
+[SPEC-SERVER-ACCESS](../../docs/specs/SPEC-SERVER-ACCESS.md) for the route
+matrix, resource profile and failure contract. An operator-pinned owner
+cannot be transferred or recovered through this service. A revocation may
+leave an immutable R2 orphan after an already-issued put, but it cannot
+authorize a later ref update or durable completion. Replacing the binary and
+all bindings with a public deployment is outside its software latch, and
+data formerly exposed by a public service gains no retroactive confidentiality.
 Local workerd and fault-test instructions are in
 [`tests/MANAGED.md`](tests/MANAGED.md).
 

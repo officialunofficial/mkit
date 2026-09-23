@@ -330,6 +330,16 @@ to four reads. Both require exact `trusted_remote_endpoint` equality in
 `open_with_config` before opening the key, including clone's explicit URL.
 Repository config and `-c` overrides cannot set either switch.
 
+The optional managed VCS Worker is a separate deployment profile. A
+signature authenticates a key but does not confer repository access: every
+data method checks a live durable role policy, and internal RefStore requests
+carry post-verification proof only over the private Worker-to-DO binding.
+Revocation blocks new requests, replayed reservations and durable completion;
+an immutable R2 put already in flight may leave an orphan. The managed
+profile also bounds pack/list buffers and permits one large transfer per
+isolate. It does not protect data previously served by the public Worker or
+provide private catalog, grant, snapshot admission or publication workflows.
+
 ---
 
 ## 5. Trust-roots scope

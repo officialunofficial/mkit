@@ -399,6 +399,14 @@ Repo Worker instead obtains the repository identity from the decoded room;
 Keys Worker uses `keys`. Host or forwarded request headers MUST NOT establish
 the server's trusted audience.
 
+An optional, separately built managed VCS Worker profile applies the
+role-gated data contract in SPEC-SERVER-ACCESS. It retains these seven RPC
+shapes and auth-v2 envelope bytes; managed reads sign exact request message
+bytes, with DownloadPack signing its single decoded protobuf message rather
+than the surrounding Connect frame. UploadPack retains the pack commitment.
+The ordinary public reference profile and native unsigned-read default do
+not change. A native opt-in signed-read setting is a separate successor.
+
 #### Auth v2 contract
 
 All producers and verifiers MUST use the following eight newline-separated

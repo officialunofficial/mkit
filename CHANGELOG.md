@@ -40,10 +40,14 @@ train).
 
 - *(transport)* Opt-in, separately configured managed Worker authority with
   immutable owner, owner-authenticated policy initialization and generation
-  updates. Its repository data plane remains closed pending the complete
-  enforcement profile. The default public Worker artifact is unchanged.
-  **SemVer:** additive service profile and management wire; no core or
-  transport protobuf change.
+  updates. Its seven repository data methods now require exact auth-v2
+  authentication and live reader/writer/owner policy, including internal
+  RefStore routes, upload replay and bounded response release. The managed
+  profile has a 4 MiB pack limit, bounded ref listing and one concurrent
+  large transfer per isolate. The default public Worker artifact and native
+  unsigned reads are unchanged. **SemVer:** additive optional service
+  behavior and management wire; no core API, default transport behavior,
+  object format or transport protobuf change.
 
 - *(cli)* Offline `mkit workspace create/status/diff/add/log` for authenticated
   selected-file workspaces. Creation pins a base and exact bundle selection;
