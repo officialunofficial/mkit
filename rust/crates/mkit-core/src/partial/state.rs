@@ -606,6 +606,21 @@ impl ScopedWorkspaceState {
         self.local_objects.get(id).map(Vec::as_slice)
     }
 
+    /// Reassemble a selected base or staged file from authenticated objects.
+    pub fn selected_file_bytes(&self, id: &Hash) -> Result<Vec<u8>, PartialStateError> {
+        struct SelectedSource<'a>(&'a ScopedWorkspaceState);
+        impl ObjectSource for SelectedSource<'_> {
+            fn read(&self, id: &Hash) -> StoreResult<Vec<u8>> {
+                self.0
+                    .local_object(id)
+                    .or_else(|| self.0.verified.object_bytes(id))
+                    .map(<[u8]>::to_vec)
+                    .ok_or_else(|| StoreError::ObjectNotFound(to_hex(id)))
+            }
+        }
+        read_blob(&SelectedSource(self), id).map_err(map_worktree)
+    }
+
     /// True when every staged id equals its base id — nothing to export.
     #[must_use]
     pub fn stage_is_clean(&self) -> bool {

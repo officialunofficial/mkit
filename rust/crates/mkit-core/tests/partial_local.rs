@@ -144,6 +144,24 @@ fn workspace() -> (tempfile::TempDir, ScopedWorkspaceLayout) {
     (dir, layout)
 }
 
+#[test]
+fn extra_name_scan_restarts_from_pinned_root_each_time() {
+    let (_dir, layout) = workspace();
+    std::fs::write(layout.root().join("outside.txt"), b"never read").unwrap();
+    let selected = snap(&layout)
+        .workspace()
+        .selection()
+        .iter()
+        .map(|entry| entry.path().clone())
+        .collect::<Vec<_>>();
+    let first = layout.extra_paths(&selected, 2).unwrap();
+    assert!(!first.1);
+    let second = layout.extra_paths(&selected, 16).unwrap();
+    assert!(second.1);
+    assert_eq!(second.0, ["outside.txt"]);
+    assert_eq!(layout.extra_paths(&selected, 16).unwrap(), second);
+}
+
 fn snap(layout: &ScopedWorkspaceLayout) -> ScopedWorkspaceState {
     layout.read_state().unwrap()
 }

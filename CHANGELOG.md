@@ -31,6 +31,15 @@ train).
 
 ### Added
 
+- *(cli)* Offline `mkit workspace create/status/diff/add/log` for authenticated
+  selected-file workspaces. Creation pins a base and exact bundle selection;
+  status and diff expose only selected content, add stages a bounded complete
+  batch through the durable generation transition, and log states the partial
+  history boundary. JSON and human output label coverage explicitly. Scoped
+  commit, export, push and history surgery remain unavailable until later
+  phases. Ordinary full repositories and clone defaults are unchanged.
+  **SemVer:** additive CLI and native core APIs; no format change.
+
 - *(core/transport)* Full-data recipient validation of MKWU changes now
   returns a typed complete Snapshot and exact replacement facts under a
   separate resource budget. Explicit transfer uploads the existing raw pack

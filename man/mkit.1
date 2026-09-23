@@ -73,6 +73,29 @@ The highlights:
 Create a new
 .Nm
 repository in the current directory.
+.It Cm workspace Cm create Fl Fl bundle Ar file Fl Fl base Ar id Oo Fl Fl path Ar path ... | Fl Fl accept-bundle-selection Oc Ar dir
+Verify an offline selected-file bundle against an independently supplied base
+id and exact selection, then create a scoped workspace atomically.
+.It Cm workspace Cm status | Cm diff | Cm add | Cm log
+Inspect or stage selected regular files only.
+.Cm diff
+compares stage to working files, or base to stage with
+.Fl Fl cached .
+.Cm add
+requires
+.Fl Fl all
+or exact selected paths after
+.Fl Fl .
+JSON output labels content and history as partial. Missing selected files,
+links, mode changes, and new selected paths cannot be staged. Extra names are
+reported with a bounded scan; an incomplete scan is explicitly indicated.
+.Cm log
+shows only the authenticated base and authoritative local identifiers;
+earlier history is unavailable. Scoped
+.Cm commit , export , push , merge , rebase , checkout ,
+and
+.Cm gc
+are unsupported in this version.
 .It Cm add Oo Fl A | Fl Fl all Oc Oo Fl u | Fl Fl update Oc Oo Fl f Oc Oo Fl p Oc Ar path ...
 Stage files for the next commit. Respects
 .Pa .gitignore

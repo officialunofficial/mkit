@@ -37,6 +37,11 @@ remains a permanent non-goal. Safety principles are untouched.
 
 ## v1 non-goals (explicit)
 
+`mkit workspace` is a native partial-workspace command family, outside Git
+parity. Its selected-file coverage and partial-history boundary must not be
+interpreted as `git sparse-checkout` or a complete shallow clone. The ordinary
+`mkit clone` and `worktree` behavior stays unchanged.
+
 These are out of scope for v1 parity. Listing them here keeps scope from
 creeping; revisit post-v1 if demand warrants.
 
