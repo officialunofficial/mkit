@@ -16,6 +16,7 @@ import urllib.request
 
 import blake3
 from nacl.signing import SigningKey
+from managed_data import rpc, field, code, OWNER as OWNER_SIGNER
 
 ORIGIN = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:8791"
 REPO = "managed-test"
@@ -99,10 +100,9 @@ def main():
         policy = expect(200, admin("GetPolicy", b'{"version":1}'))
         assert policy["generation"] == "2" and policy["owner"] == OWNER
         expect(409, admin("InitializePolicy", b'{"version":1,"collaborators":[]}'))
-        for route in ["ListRefs", "ReadRef", "PackExists", "DownloadPack", "UpdateRef", "AdvanceRefs", "UploadPack"]:
-            assert send("/mkit.transport.v1.TransportService/" + route, b"{}")[0] == 503
+        assert code(*rpc("ReadRef", field(1, "refs/heads/main"), OWNER_SIGNER)[:2]) == "ok"
         expect(401, send("/__test/refstore/managed-policy", expired))
-        print("managed workerd: persisted latch survived restart; data plane closed")
+        print("managed workerd: persisted latch and owner data access survived restart")
         return
     if "--verify-mismatch" in sys.argv:
         expect(503, admin("GetPolicy", b'{"version":1}', signer=FOREIGN))
@@ -133,12 +133,13 @@ def main():
     if "--probe-uninitialized" in sys.argv:
         expect(503, admin("GetPolicy", b'{"version":1}'))
         expect(503, admin("ReplacePolicy", b'{"version":1,"expected_generation":"0","collaborators":[]}'))
+        assert code(*rpc("ReadRef", field(1, "refs/heads/main"), OWNER_SIGNER)[:2]) == "unavailable"
         print("managed workerd: pre-initialization reads return unavailable")
         return
     if "--verify-unavailable" in sys.argv:
         expect(503, admin("GetPolicy", b'{"version":1}'))
         expect(503, admin("InitializePolicy", b'{"version":1,"collaborators":[]}'))
-        assert send("/mkit.transport.v1.TransportService/ReadRef", b"{}")[0] == 503
+        assert code(*rpc("ReadRef", field(1, "refs/heads/main"), OWNER_SIGNER)[:2]) == "unavailable"
         print("managed workerd: damaged persisted authority fails closed")
         return
     if "--verify-overflow" in sys.argv:
@@ -191,12 +192,12 @@ def main():
     invalid = admin("InitializePolicy", fixture("invalid-duplicate.json"))
     assert_vector("invalid-duplicate.json", invalid)
     for route in ["ListRefs", "ReadRef", "PackExists", "DownloadPack", "UpdateRef", "AdvanceRefs", "UploadPack"]:
-        code, _, response_headers, _, _ = send("/mkit.transport.v1.TransportService/" + route, b"{}")
-        assert code == 503, (route, code)
+        status, _, response_headers, _, _ = send("/mkit.transport.v1.TransportService/" + route, b"{}")
+        assert status in (400, 401), (route, status)
         assert response_headers.get("Cache-Control") == "private, no-store"
     for route in ["get", "list", "update", "advance", "object"]:
-        code, _, _, _, _ = send("/__test/refstore/" + route, b"{}")
-        assert code == 503, (route, code)
+        status, _, _, _, _ = send("/__test/refstore/" + route, b"{}")
+        assert status in (400, 503), (route, status)
     expect(401, send("/__test/refstore/managed-policy", expired))
     original = send("/mkit/host/v1/InitializePolicy", init, nonce=invalid[3]["Idempotency-Key"])
     policy = expect(200, original)
@@ -219,7 +220,7 @@ def main():
     expect(409, admin("ReplacePolicy", replacement))
     assert expect(200, admin("GetPolicy", fixture("get.json"))) == changed
     assert send("/not-a-route", b"{}")[0] == 503
-    print("managed workerd: owner bootstrap, durable policy/CAS and seven-route closure passed")
+    print("managed workerd: owner bootstrap and durable policy/CAS passed")
 
 
 if __name__ == "__main__":

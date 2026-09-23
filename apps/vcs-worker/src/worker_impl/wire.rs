@@ -22,6 +22,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize)]
 pub struct GetReq {
     pub name: String,
+    #[cfg(feature = "managed-access")]
+    pub proof: mkit_worker_common::replay::Proof,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -49,6 +51,8 @@ pub struct UpdateResp {
 #[derive(Serialize, Deserialize)]
 pub struct ListReq {
     pub prefix: String,
+    #[cfg(feature = "managed-access")]
+    pub proof: mkit_worker_common::replay::Proof,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -108,4 +112,18 @@ pub struct ObjectWriteReq {
     pub proof: mkit_worker_common::replay::Proof,
     pub bytes: u64,
     pub complete: bool,
+}
+
+#[cfg(feature = "managed-access")]
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccessReq {
+    pub proof: mkit_worker_common::replay::Proof,
+    pub procedure: String,
+}
+
+#[cfg(feature = "managed-access")]
+#[derive(Serialize, Deserialize)]
+pub struct AccessResp {
+    pub allowed: bool,
 }

@@ -77,7 +77,10 @@ impl DurableObject for RefStore {
             if req.path() == "/managed-policy" {
                 return self.managed_policy(&mut req).await;
             }
-            Response::error("managed data plane unavailable", 503)
+            if req.path() == "/authorize" {
+                return self.managed_access(&mut req).await;
+            }
+            self.managed_data(&mut req).await
         }
 
         #[cfg(not(feature = "managed-access"))]
@@ -104,7 +107,7 @@ impl DurableObject for RefStore {
                 }
                 "/list" => {
                     let body: ListReq = req.json().await?;
-                    let refs = self.list_refs(&body.prefix);
+                    let refs = self.list_refs(&body.prefix).unwrap_or_default();
                     Response::from_json(&ListResp { refs })
                 }
                 "/advance" => {
@@ -131,6 +134,151 @@ impl DurableObject for RefStore {
 }
 
 impl RefStore {
+    #[cfg(feature = "managed-access")]
+    async fn managed_data(&self, req: &mut Request) -> Result<Response> {
+        use super::wire::ObjectWriteReq;
+        use crate::access_policy::DataRoute;
+        let route = match req.path().as_str() {
+            "/get" => DataRoute::ReadRef,
+            "/list" => DataRoute::ListRefs,
+            "/update" => DataRoute::UpdateRef,
+            "/advance" => DataRoute::AdvanceRefs,
+            "/object" => DataRoute::UploadPack,
+            _ => return Reply::error("{\"code\":\"unavailable\"}", 503)?.response(),
+        };
+        if req.method() != worker::Method::Post {
+            return Reply::error("{\"code\":\"unavailable\"}", 503)?.response();
+        }
+        let result = match route {
+            DataRoute::ReadRef => {
+                let body: GetReq = match req.json().await {
+                    Ok(v) => v,
+                    Err(_) => {
+                        return Reply::error("{\"code\":\"invalid_argument\"}", 400)?.response();
+                    }
+                };
+                if body.name.len() > 1024 || !crate::refs::is_valid_ref_name(&body.name) {
+                    return Reply::error("{\"code\":\"invalid_argument\"}", 400)?.response();
+                }
+                let owned = self.clone();
+                self.ledger.transaction(move || {
+                    if !owned.data_permitted(&body.proof, route)? {
+                        return Reply::error("{\"code\":\"permission_denied\"}", 403);
+                    }
+                    owned.ensure_table()?;
+                    let value = owned.read_ref(&body.name)?;
+                    Reply::json(&GetResp {
+                        exists: value.is_some(),
+                        value,
+                    })
+                })
+            }
+            DataRoute::ListRefs => {
+                let body: ListReq = match req.json().await {
+                    Ok(v) => v,
+                    Err(_) => {
+                        return Reply::error("{\"code\":\"invalid_argument\"}", 400)?.response();
+                    }
+                };
+                if body.prefix.len() > 1024 || !crate::refs::is_valid_ref_prefix(&body.prefix) {
+                    return Reply::error("{\"code\":\"invalid_argument\"}", 400)?.response();
+                }
+                let owned = self.clone();
+                self.ledger.transaction(move || {
+                    if !owned.data_permitted(&body.proof, route)? {
+                        return Reply::error("{\"code\":\"permission_denied\"}", 403);
+                    }
+                    owned.ensure_table()?;
+                    let refs = match owned.list_refs(&body.prefix) {
+                        Ok(refs) => refs,
+                        Err(worker::Error::RustError(reason))
+                            if reason == "managed ref listing exceeds limit" =>
+                        {
+                            return Reply::error("{\"code\":\"resource_exhausted\"}", 429);
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    let reply = Reply::json(&ListResp { refs })?;
+                    if reply.body.len() > 64 * 1024 {
+                        return Reply::error("{\"code\":\"resource_exhausted\"}", 429);
+                    }
+                    Ok(reply)
+                })
+            }
+            DataRoute::UpdateRef => {
+                let body: UpdateReq = match req.json().await {
+                    Ok(v) => v,
+                    Err(_) => {
+                        return Reply::error("{\"code\":\"invalid_argument\"}", 400)?.response();
+                    }
+                };
+                let proof = body.proof.clone();
+                let owned = self.clone();
+                self.managed_mutate(proof, route, 0, true, move || owned.handle_update(body))
+            }
+            DataRoute::AdvanceRefs => {
+                let body: AdvanceReq = match req.json().await {
+                    Ok(v) => v,
+                    Err(_) => {
+                        return Reply::error("{\"code\":\"invalid_argument\"}", 400)?.response();
+                    }
+                };
+                let proof = body.proof.clone();
+                let owned = self.clone();
+                self.managed_mutate(proof, route, 0, true, move || owned.handle_advance(body))
+            }
+            DataRoute::UploadPack => {
+                let body: ObjectWriteReq = match req.json().await {
+                    Ok(v) => v,
+                    Err(_) => {
+                        return Reply::error("{\"code\":\"invalid_argument\"}", 400)?.response();
+                    }
+                };
+                self.managed_mutate(body.proof, route, body.bytes, body.complete, || {
+                    Reply::json(&ObjectWriteResp {
+                        allowed: true,
+                        reason: None,
+                    })
+                })
+            }
+            _ => unreachable!(),
+        };
+        match result {
+            Ok(reply) => reply.response(),
+            Err(_) => Reply::error("{\"code\":\"unavailable\"}", 503)?.response(),
+        }
+    }
+
+    #[cfg(feature = "managed-access")]
+    fn managed_mutate(
+        &self,
+        proof: Proof,
+        route: crate::access_policy::DataRoute,
+        bytes: u64,
+        complete: bool,
+        action: impl FnOnce() -> Result<Reply> + 'static,
+    ) -> Result<Reply> {
+        let owned = self.clone();
+        self.ledger.transaction(move || {
+            if !owned.data_permitted(&proof, route)? {
+                return Reply::error("{\"code\":\"permission_denied\"}", 403);
+            }
+            owned.ensure_table()?;
+            let prior = owned
+                .ledger
+                .reserve(&proof, Date::now().as_millis() as i64, || {
+                    owned.charge_quota(&proof.author, bytes)
+                })?;
+            if let Some(Some(reply)) = prior {
+                return Ok(reply);
+            }
+            let reply = action()?;
+            if complete {
+                owned.ledger.finish(&proof, &reply)?;
+            }
+            Ok(reply)
+        })
+    }
     /// Idempotently create the `refs` table. Called at the top of every fetch
     /// so a transient DDL failure surfaces as a clean error instead of
     /// panicking the isolate.
@@ -292,34 +440,45 @@ impl RefStore {
     /// List refs whose path starts with `prefix` (empty = all). Half-open
     /// range scan over the `path` PRIMARY KEY (see apps/repo-worker's
     /// identical helper for the `LIKE` vs range-scan rationale).
-    fn list_refs(&self, prefix: &str) -> Vec<ListEntry> {
+    fn list_refs(&self, prefix: &str) -> Result<Vec<ListEntry>> {
         #[derive(Deserialize)]
         struct Row {
             path: String,
             value: String,
         }
         let sql = self.state.storage().sql();
+        #[cfg(feature = "managed-access")]
+        let limit = " LIMIT 257";
+        #[cfg(not(feature = "managed-access"))]
+        let limit = "";
         let rows: Vec<Row> = if prefix.is_empty() {
-            sql.exec("SELECT path, value FROM refs ORDER BY path;", None)
+            sql.exec(&format!("SELECT path, value FROM refs ORDER BY path{limit};"), None)
         } else if let Some(hi) = prefix_successor(prefix) {
             sql.exec(
-                "SELECT path, value FROM refs WHERE path >= ? AND path < ? ORDER BY path;",
+                &format!("SELECT path, value FROM refs WHERE path >= ? AND path < ? ORDER BY path{limit};"),
                 vec![prefix.into(), hi.into()],
             )
         } else {
             sql.exec(
-                "SELECT path, value FROM refs WHERE path >= ? ORDER BY path;",
+                &format!("SELECT path, value FROM refs WHERE path >= ? ORDER BY path{limit};"),
                 vec![prefix.into()],
             )
         }
-        .map(|r| r.to_array().unwrap_or_default())
-        .unwrap_or_default();
-        rows.into_iter()
+        ?
+        .to_array()?;
+        #[cfg(feature = "managed-access")]
+        if rows.len() > 256 {
+            return Err(worker::Error::RustError(
+                "managed ref listing exceeds limit".into(),
+            ));
+        }
+        Ok(rows
+            .into_iter()
             .map(|r| ListEntry {
                 name: r.path,
                 value: r.value,
             })
-            .collect()
+            .collect())
     }
 
     /// Idempotently create the `write_quota` table — the per-author

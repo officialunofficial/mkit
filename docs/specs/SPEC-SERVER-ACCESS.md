@@ -9,9 +9,8 @@ audience: implementers of the optional mkit managed hosting profile
 
 This profile applies to one standalone hosting deployment and one repository.
 It does not change object, signature, pack, ref, transport protobuf, or core
-permission semantics. In this version, managed repository data access is
-unavailable: all seven transport methods and every internal data path MUST
-reject before repository effects. A future version may define data access.
+permission semantics. Managed repository data access follows the exact role
+matrix in §4. The public deployment and native client defaults are unchanged.
 
 ## 1. Identity and initialization
 
@@ -81,7 +80,58 @@ profiles. The owner is implicit and MUST NOT appear in this array. Entries
 MUST be strictly sorted by decoded public-key bytes, hence distinct. No
 wildcard, group, chain, or delegation semantics exist.
 
-## 4. Failure mapping
+## 4. Managed data methods
+
+The only data procedures are POST
+`/mkit.transport.v1.TransportService/<Method>`. The allowed roles are:
+
+| Method | Reader | Writer | Owner |
+|---|---:|---:|---:|
+| ListRefs, ReadRef, PackExists, DownloadPack | yes | yes | yes |
+| UploadPack, UpdateRef, AdvanceRefs | no | yes | yes |
+
+Anonymous, nonmembers, and grant-only subjects have no data access. Unknown
+methods fail closed. Policy management remains owner-only. Every data request
+MUST carry auth v2 bound to the configured audience, repository, exact
+procedure and request message bytes; UploadPack instead signs its existing
+pack id and declared length commitment. For DownloadPack, the signed bytes are
+the sole decoded protobuf request message, excluding Connect's five-byte
+frame. Extra frames, trailing bytes, compressed requests and non-POST methods
+MUST reject before repository access. A signature alone does not grant access:
+every operation checks live durable policy. Policy corruption, identity
+mismatch, missing policy or storage failure fails closed.
+
+The outer Worker MUST authenticate and check writer membership before
+collecting an UploadPack body. This precheck creates no reservation. The
+service repeats authorization before reservation, before R2 publication and
+at durable completion. Ref authorization, replay lookup, quota, both CAS
+predicates and effects share one SQL transaction; authorization runs before
+replay lookup, including exact retries. A revoked collaborator cannot resume
+an earlier reservation or record a new completion. R2 and SQL are not atomic:
+a revocation after a pre-put check may leave an immutable orphan. It cannot
+authorize a subsequent ref effect, recall bytes already released, or cancel
+an R2 request already issued.
+
+Read authorization precedes ref/R2 access. After asynchronous storage work,
+the Worker rechecks live policy after buffering and before releasing the
+response. Ref listing materializes at most 257 rows to decide whether the
+256-ref limit is exceeded; an excess fails rather than truncates. Managed
+ref names and prefixes are at most 1024 UTF-8 bytes, and a serialized list
+reply must fit 65,536 bytes. These are service resource limits, not changes
+to the repository's portable ref format.
+
+The managed pack payload cap is 4 MiB. Large request bodies and SDK messages
+are capped at 4 MiB + 64 KiB; small request bodies and SDK messages at
+64 KiB. A full download is one pack-sized protobuf message. Oversized R2
+metadata rejects before body reading, and actual bytes are capped while
+reading. One upload or download at a time per isolate holds a nonblocking
+permit through request and response buffering; competing large transfers
+receive `resource_exhausted`. Administration and control requests do not
+take this permit. The cap does not establish an exact isolate peak-memory
+bound, and already materialized SDK chunks may briefly exceed the retained
+buffer length.
+
+## 5. Failure mapping
 
 Responses are JSON `{"code":"<code>"}` with no internal storage detail.
 
@@ -94,17 +144,22 @@ Responses are JSON `{"code":"<code>"}` with no internal storage detail.
 | Missing, foreign, expired, or invalid signature | 401 | `unauthenticated` |
 | Invalid JSON, fields, generation encoding, key, or membership | 400 | `invalid_argument` |
 | Already initialized, generation mismatch/overflow, or nonce reuse with different bytes | 409 | `conflict` |
+| Managed data method forbidden to an authenticated nonmember or role | 403 | `permission_denied` |
+| Managed inbound HTTP body or signed upload declaration above its cap | 413 | `resource_exhausted` |
+| Managed large-transfer permit unavailable, oversized R2 object, or bounded list over limit | 429 | `resource_exhausted` |
 
-Health and OPTIONS MUST disclose no repository policy or data. The managed
-binary returns `unavailable` for health RPCs while its data plane is closed.
-Unknown paths
-MUST NOT enter the data plane. This release MUST reject ListRefs, ReadRef,
-PackExists, DownloadPack, UpdateRef, AdvanceRefs, UploadPack and internal
-ref/object data routes for every identity, including the owner. A public
+For data RPCs, Connect errors carry the corresponding Connect code;
+server-streaming errors may appear in a 200 HTTP response end-stream frame.
+All managed success and error responses have `Cache-Control: private,
+no-store` and expose no policy, SQL or R2 diagnostics. Health and OPTIONS
+MUST disclose no repository policy or data. Unknown paths MUST NOT enter the
+data plane. Internal DO calls accept only Worker-produced post-verification
+proofs through the private binding and independently check live policy,
+expiry and procedure; no production public proof-forwarding alias exists. A public
 deployment that formerly served the same stored bytes has no retroactive
 confidentiality; binary and binding replacement is outside the latch.
 
-## 5. Committed vectors
+## 6. Committed vectors
 
 `rust/tests/golden/server-access/` holds exact newline-terminated management
 request and response bytes for Initialize, Get, Replace, conflict, unavailable,
@@ -113,3 +168,10 @@ naming its expected status and response file; BLAKE3 digests are pinned in
 `MANIFEST.txt`. Normal consumers read committed files only. The writer requires
 `MKIT_WRITE_GOLDEN=1`, and fixture changes require review with the wire
 contract.
+
+`rust/tests/golden/managed-service/` additionally pins ReadRef and
+DownloadPack request-message bytes, DownloadPack frame bytes and their
+different BLAKE3 digests, plus named negative cases. The local workerd
+consumer checks committed files and the actual responses. Its writer likewise
+requires `MKIT_WRITE_GOLDEN=1`. Existing object, pack, proof and auth-v2
+vectors do not change.
