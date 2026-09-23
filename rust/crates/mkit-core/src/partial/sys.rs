@@ -188,8 +188,9 @@ impl File {
     /// be unlocked from the probe side.
     #[cfg(test)]
     pub(crate) fn try_lock_exclusive(&self) -> Result<bool, SysError> {
-        // SAFETY: `flock(2)` on a valid borrowed fd; LOCK_NB makes it a
-        // pure query — failure leaves lock state untouched.
+        // SAFETY: `flock(2)` on a valid borrowed fd; LOCK_NB avoids
+        // blocking. Success acquires the lock (or confirms ownership on
+        // this open-file description); descriptor close releases it.
         #[allow(unsafe_code)]
         let rc = unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
         if rc == 0 {

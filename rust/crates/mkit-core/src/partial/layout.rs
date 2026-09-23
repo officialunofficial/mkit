@@ -837,7 +837,10 @@ pub(crate) mod lock_gate {
         };
         let Some(gate) = gate else { return };
         let probe_acquired = match (gate.probe, operation) {
-            (true, Some(file)) => Some(file.try_lock_exclusive().unwrap_or(false)),
+            (true, Some(file)) => Some(
+                file.try_lock_exclusive()
+                    .expect("lock contention probe failed unexpectedly"),
+            ),
             _ => None,
         };
         let _ = gate.signal.send(Observation { probe_acquired });
