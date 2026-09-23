@@ -5,6 +5,25 @@ single crate or spec. Each entry states the invariant, why it matters, and
 what breaks when it is violated. A regression test enforces each one; find
 it by the file path listed under "Enforced by".
 
+## Managed authority never opens an incomplete data plane
+
+**Always:** the optional managed Worker denies all seven repository data
+methods and every RefStore data path before reading refs, objects or quota.
+The owner is pinned by deployment configuration; an initialized policy with
+a different audience, repository or owner is unavailable, never reset.
+
+**Because:** a partial permission implementation could disclose a repository
+through an unguarded read or internal binding, while a configuration change
+could silently reinterpret a durable policy.
+
+**If violated:** an owner or collaborator could reach repository data before
+the complete authorization profile exists, or another key could inherit an
+old deployment's authority.
+
+**Enforced by:** `apps/vcs-worker/src/worker_impl/{managed,refstore,access_store}.rs`
+and `apps/vcs-worker/src/access_policy.rs` native validation tests. Runtime
+closure and durable latch tests are in `apps/vcs-worker/tests/managed_access.py`.
+
 ## Scoped workspace reads and staging stay inside authenticated selection
 
 **Always:** scoped CLI operations bind an independently supplied base and exact

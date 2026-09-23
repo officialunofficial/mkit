@@ -15,6 +15,7 @@
 // JSON over HTTP to a `https://refstore/<op>` URL — see wire.rs for the
 // exact request/response shapes. The replay ledger, write quota, and mutable
 // effects share one SQLite transaction; object writes reserve quota once.
+#![cfg_attr(feature = "managed-access", allow(dead_code, unused_imports))]
 
 use mkit_worker_common::replay::{Ledger, Proof, Reply};
 use serde::Deserialize;
@@ -50,8 +51,10 @@ fn prefix_successor(prefix: &str) -> Option<String> {
 #[durable_object]
 #[derive(Clone)]
 pub struct RefStore {
-    state: Rc<State>,
-    ledger: Ledger,
+    pub(super) state: Rc<State>,
+    pub(super) ledger: Ledger,
+    #[cfg(feature = "managed-access")]
+    pub(super) env: Env,
 }
 
 impl DurableObject for RefStore {
@@ -63,53 +66,66 @@ impl DurableObject for RefStore {
         Self {
             state: ledger.state.clone(),
             ledger,
+            #[cfg(feature = "managed-access")]
+            env: _env,
         }
     }
 
     async fn fetch(&self, mut req: Request) -> Result<Response> {
-        if let Err(e) = self.ensure_table() {
-            return Response::error(format!("storage init failed: {e}"), 500);
+        #[cfg(feature = "managed-access")]
+        {
+            if req.path() == "/managed-policy" {
+                return self.managed_policy(&mut req).await;
+            }
+            Response::error("managed data plane unavailable", 503)
         }
 
-        match req.path().as_str() {
-            "/get" => {
-                let body: GetReq = req.json().await?;
-                let value = self.read_ref(&body.name)?;
-                Response::from_json(&GetResp {
-                    exists: value.is_some(),
-                    value,
-                })
+        #[cfg(not(feature = "managed-access"))]
+        {
+            if let Err(e) = self.ensure_table() {
+                return Response::error(format!("storage init failed: {e}"), 500);
             }
-            "/update" => {
-                let body: UpdateReq = req.json().await?;
-                let proof = body.proof.clone();
-                let owned = self.clone();
-                self.mutate(proof, 0, true, move || owned.handle_update(body))?
-                    .response()
-            }
-            "/list" => {
-                let body: ListReq = req.json().await?;
-                let refs = self.list_refs(&body.prefix);
-                Response::from_json(&ListResp { refs })
-            }
-            "/advance" => {
-                let body: AdvanceReq = req.json().await?;
-                let proof = body.proof.clone();
-                let owned = self.clone();
-                self.mutate(proof, 0, true, move || owned.handle_advance(body))?
-                    .response()
-            }
-            "/object" => {
-                let body: super::wire::ObjectWriteReq = req.json().await?;
-                self.mutate(body.proof, body.bytes, body.complete, || {
-                    Reply::json(&ObjectWriteResp {
-                        allowed: true,
-                        reason: None,
+
+            match req.path().as_str() {
+                "/get" => {
+                    let body: GetReq = req.json().await?;
+                    let value = self.read_ref(&body.name)?;
+                    Response::from_json(&GetResp {
+                        exists: value.is_some(),
+                        value,
                     })
-                })?
-                .response()
+                }
+                "/update" => {
+                    let body: UpdateReq = req.json().await?;
+                    let proof = body.proof.clone();
+                    let owned = self.clone();
+                    self.mutate(proof, 0, true, move || owned.handle_update(body))?
+                        .response()
+                }
+                "/list" => {
+                    let body: ListReq = req.json().await?;
+                    let refs = self.list_refs(&body.prefix);
+                    Response::from_json(&ListResp { refs })
+                }
+                "/advance" => {
+                    let body: AdvanceReq = req.json().await?;
+                    let proof = body.proof.clone();
+                    let owned = self.clone();
+                    self.mutate(proof, 0, true, move || owned.handle_advance(body))?
+                        .response()
+                }
+                "/object" => {
+                    let body: super::wire::ObjectWriteReq = req.json().await?;
+                    self.mutate(body.proof, body.bytes, body.complete, || {
+                        Reply::json(&ObjectWriteResp {
+                            allowed: true,
+                            reason: None,
+                        })
+                    })?
+                    .response()
+                }
+                _ => Response::error("not found", 404),
             }
-            _ => Response::error("not found", 404),
         }
     }
 }

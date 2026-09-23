@@ -1,0 +1,18 @@
+// Template only. This profile is not deployed. Replace every placeholder and
+// provision separate resources before any future managed deployment.
+{
+  "name": "mkit-vcs-managed-UNCONFIGURED",
+  "main": "build/worker/shim.mjs",
+  "compatibility_date": "2024-09-23",
+  "build": {
+    "command": "worker-build --release --features managed-access"
+  },
+  "vars": {
+    "AUTH_AUDIENCE": "UNCONFIGURED",
+    "AUTH_REPOSITORY": "UNCONFIGURED",
+    "MANAGED_OWNER_PUBLIC_KEY": "UNCONFIGURED"
+  },
+  "r2_buckets": [{ "binding": "STORAGE", "bucket_name": "mkit-vcs-managed-UNCONFIGURED" }],
+  "durable_objects": { "bindings": [{ "name": "REFSTORE", "class_name": "RefStore" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RefStore"] }]
+}

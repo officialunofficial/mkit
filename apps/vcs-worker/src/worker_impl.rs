@@ -28,8 +28,12 @@ use mkit_worker_common::{
 };
 use worker::{Context, Env, Request, Response, Result, event};
 
+#[cfg(feature = "managed-access")]
+pub mod access_store;
 pub mod auth;
 pub mod health;
+#[cfg(feature = "managed-access")]
+pub mod managed;
 pub mod refstore;
 pub mod service;
 pub mod wire;
@@ -60,9 +64,23 @@ const CORS_ALLOW_METHODS: &str = "POST, GET, OPTIONS";
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     if is_options_preflight(&req) {
-        return cors_preflight_response(CORS_ALLOW_HEADERS, CORS_ALLOW_METHODS);
+        #[cfg(feature = "managed-access")]
+        let mut response = cors_preflight_response(CORS_ALLOW_HEADERS, CORS_ALLOW_METHODS)?;
+        #[cfg(not(feature = "managed-access"))]
+        let response = cors_preflight_response(CORS_ALLOW_HEADERS, CORS_ALLOW_METHODS)?;
+        #[cfg(feature = "managed-access")]
+        response
+            .headers_mut()
+            .set("Cache-Control", "private, no-store")?;
+        return Ok(response);
     }
 
+    #[cfg(feature = "managed-access")]
+    {
+        managed::dispatch(req, env).await
+    }
+
+    #[cfg(not(feature = "managed-access"))]
     serve_connect(req, env).await
 }
 

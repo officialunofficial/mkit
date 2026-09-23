@@ -9,6 +9,8 @@
 
 // Pure, target-independent modules — these carry the conformance contract
 // and run under `cargo test` on the host. Compiled on host *and* wasm.
+#[cfg(feature = "managed-access")]
+pub mod access_policy;
 pub mod envelope;
 pub mod hashing;
 pub mod refs;

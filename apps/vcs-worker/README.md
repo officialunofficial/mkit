@@ -1,6 +1,29 @@
 <!-- SPDX-License-Identifier: MIT OR Apache-2.0 -->
 # mkit vcs worker (reference `mkit.transport.v1` server)
 
+## Optional managed authority (not deployed)
+
+`wrangler.managed.jsonc` is a separate, unconfigured template. Build its
+binary with `managed-access` and set a canonical `AUTH_AUDIENCE`,
+`AUTH_REPOSITORY`, and `MANAGED_OWNER_PUBLIC_KEY` before any use. The template's
+placeholder values deliberately fail validation. It names distinct R2 and
+Durable Object resources; never point it at this reference public service's
+bindings. The default artifact remains the open-read, signed-write service
+described below.
+
+The managed binary currently supports only owner-authenticated policy
+administration. All seven repository data methods and internal RefStore data
+paths return unavailable for every caller, including the owner. It cannot yet
+serve a managed repository. Policy initialization, retrieval, and replacement
+use POST JSON at `/mkit/host/v1/{InitializePolicy,GetPolicy,ReplacePolicy}`;
+see [SPEC-SERVER-ACCESS](../../docs/specs/SPEC-SERVER-ACCESS.md) for the exact
+wire and failure contract. An operator-pinned owner cannot be transferred or
+recovered through this service. Replacing the binary and all bindings with a
+public deployment is outside its software latch, and data formerly exposed by
+a public service gains no retroactive confidentiality.
+Local workerd and fault-test instructions are in
+[`tests/MANAGED.md`](tests/MANAGED.md).
+
 The **reference implementation** of `mkit.transport.v1.TransportService`
 (defined in
 [`proto/mkit/transport/v1/transport.proto`](../../proto/mkit/transport/v1/transport.proto),
