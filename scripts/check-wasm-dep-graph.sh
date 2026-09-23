@@ -31,7 +31,8 @@ fail=0
 check_tree() {
   local label="$1"
   local manifest_dir="$2"
-  shift 2
+  local feature="$3"
+  shift 3
   local forbidden=("$@")
 
   if ! command -v cargo >/dev/null 2>&1; then
@@ -44,7 +45,14 @@ check_tree() {
   fi
 
   local tree
-  if ! tree=$(cd "$manifest_dir" && cargo tree --target wasm32-unknown-unknown -e normal --prefix none 2>&1); then
+  load_tree() {
+    if [ -n "$feature" ]; then
+      (cd "$manifest_dir" && cargo tree --target wasm32-unknown-unknown -e normal --prefix none --features "$feature")
+    else
+      (cd "$manifest_dir" && cargo tree --target wasm32-unknown-unknown -e normal --prefix none)
+    fi
+  }
+  if ! tree=$(load_tree 2>&1); then
     echo "error: 'cargo tree --target wasm32-unknown-unknown' failed for ${label}:"
     echo "$tree"
     fail=1
@@ -61,8 +69,9 @@ check_tree() {
   done
 }
 
-check_tree "mkit-wasm" "rust/crates/mkit-wasm" blst zstd-sys commonware-runtime commonware-storage tokio
-check_tree "apps/repo-worker" "apps/repo-worker" blst zstd-sys commonware-runtime commonware-storage
+check_tree "mkit-wasm" "rust/crates/mkit-wasm" "" blst zstd-sys commonware-runtime commonware-storage tokio
+check_tree "mkit-hosting-policy" "apps/mkit-hosting-policy" "hosting-wasm" blst zstd-sys commonware-runtime commonware-storage tokio
+check_tree "apps/repo-worker" "apps/repo-worker" "" blst zstd-sys commonware-runtime commonware-storage
 
 if [ "$fail" -ne 0 ]; then
   echo
@@ -70,4 +79,4 @@ if [ "$fail" -ne 0 ]; then
   exit 1
 fi
 
-echo "ok: mkit-wasm and apps/repo-worker wasm32 dependency graphs contain no C-toolchain crates"
+echo "ok: mkit-wasm, hosting-policy/hosting-wasm, and apps/repo-worker wasm32 dependency graphs contain no forbidden crates"

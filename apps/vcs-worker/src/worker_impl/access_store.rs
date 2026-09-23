@@ -126,7 +126,10 @@ impl RefStore {
         Ok(())
     }
 
-    fn read_policy(&self, identity: &crate::access_policy::Identity) -> Result<Option<Policy>> {
+    pub(super) fn read_policy(
+        &self,
+        identity: &crate::access_policy::Identity,
+    ) -> Result<Option<Policy>> {
         #[derive(Deserialize)]
         struct Row {
             schema_version: i64,

@@ -1,0 +1,1 @@
+{"source":"valid.bin","mutation":"replace final READ|REPLACE mask 3 with invalid mask 2","expected_error":"Mask"}
