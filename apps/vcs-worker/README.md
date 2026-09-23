@@ -14,8 +14,15 @@ described below.
 The managed binary supports owner-authenticated policy administration and
 the seven TransportService methods under live reader/writer/owner policy.
 Policy initialization, retrieval, and replacement use POST JSON at
-`/mkit/host/v1/{InitializePolicy,GetPolicy,ReplacePolicy}`. A managed read
-requires auth v2 over the exact request message bytes; UploadPack retains
+`/mkit/host/v1/{InitializePolicy,GetPolicy,ReplacePolicy}`.
+The same owner may register, revoke, and inspect signed workspace grants at
+`/mkit/host/v1/{RegisterGrant,RevokeGrant,GetGrant}`. This only records
+credentials and current registry state. It does not make private snapshot
+reads, candidate publication, or receipts available. See
+[SPEC-HOSTED-WORKSPACE-GRANTS](../../docs/specs/SPEC-HOSTED-WORKSPACE-GRANTS.md)
+for the exact request bytes and caps.
+
+A managed read requires auth v2 over the exact request message bytes; UploadPack retains
 its signed pack-id/length commitment. The native client's ordinary reads
 remain unsigned until explicit opt-in support is implemented separately;
 signed fixture clients can exercise the service now. See

@@ -127,6 +127,7 @@ ci-scripts:
       exit 1
     fi
     ( cd rust && cargo check -p mkit-wasm --target wasm32-unknown-unknown )
+    ( cd apps/mkit-hosting-policy && cargo check --target wasm32-unknown-unknown --features hosting-wasm )
 
 # Mirrors cloudbuild/docs.yaml (rustdoc -D warnings).
 ci-docs:

@@ -39,6 +39,7 @@ cargo-fuzz = true
 arbitrary = "1"
 buffa = "0.9.1"
 mkit-core = { path = "../crates/mkit-core", features = ["sparse-checkout"] }
+mkit-hosting-policy = { path = "../../apps/mkit-hosting-policy" }
 mkit-git-bridge = { path = "../crates/mkit-git-bridge" }
 mkit-keystore = { path = "../crates/mkit-keystore", features = ["fuzzing"] }
 mkit-rpc = { path = "../crates/mkit-rpc", features = ["arbitrary"] }
@@ -59,6 +60,11 @@ commonware-invariants = "=2026.9.0"
 [features]
 default = []
 libfuzzer = ["dep:libfuzzer-sys"]
+
+[[bin]]
+name = "hosted_grant"
+path = "fuzz_targets/hosted_grant.rs"
+required-features = ["libfuzzer"]
 
 [[bin]]
 name = "delta"

@@ -47,6 +47,8 @@ bytes = "1"
 tower = { version = "0.5", features = ["util"] }
 hex = "0.4"
 futures = "0.3"
+base64 = { version = "0.22", optional = true }
+mkit-hosting-policy = { path = "../mkit-hosting-policy", optional = true }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 getrandom = { version = "0.4", features = ["wasm_js"] }
@@ -73,4 +75,4 @@ lto = true
 # Local-only crash injection; omitted from production builds.
 test-faults = []
 # Separate, closed managed deployment profile. Never enabled in the public artifact.
-managed-access = []
+managed-access = ["dep:base64", "dep:mkit-hosting-policy"]

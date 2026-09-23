@@ -48,6 +48,28 @@ and `apps/vcs-worker/src/access_policy.rs` native validation tests. Runtime
 role, framing and revocation tests are in `apps/vcs-worker/tests/managed_data.py`;
 durable latch tests remain in `apps/vcs-worker/tests/managed_access.py`.
 
+## Hosted workspace grants require durable live authority
+
+**Always:** an MKHG signature proves only the owner's signed fields. The
+optional managed service records a grant only after owner registration, exact
+repository and workspace identity, current policy generation, live time and
+matching branch head. Revocation and supersession retain historical rows,
+and registration gives a grant-only subject no legacy transport access. The
+standalone codec does not enter mkit-core or default mkit-wasm dependencies.
+
+**Because:** signature-valid but unregistered or revoked bytes must not become
+repository authority. Reusing a workspace ID or an auth nonce after a crash
+must not resurrect a past capability.
+
+**If violated:** a former subject can obtain private content or publish after
+revocation, or a portable Commit's validity changes with host policy.
+
+**Enforced by:** `apps/mkit-hosting-policy/src/lib.rs` bounded signature facts,
+`apps/vcs-worker/src/worker_impl/grant_store.rs` transactional registry and
+`apps/vcs-worker/tests/managed_grants.py` local workerd/SQLite lifecycle.
+Private disclosure and publication remain closed until later phases; their
+separate snapshot-readiness check is not claimed here.
+
 ## Scoped publication records uncertainty before remote effects
 
 **Always:** an offline pending candidate signs the authoritative stage and
