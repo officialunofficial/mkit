@@ -31,6 +31,13 @@ train).
 
 ### Added
 
+- *(transport)* Opt-in, separately configured managed Worker authority with
+  immutable owner, owner-authenticated policy initialization and generation
+  updates. Its repository data plane remains closed pending the complete
+  enforcement profile. The default public Worker artifact is unchanged.
+  **SemVer:** additive service profile and management wire; no core or
+  transport protobuf change.
+
 - *(cli)* Offline `mkit workspace create/status/diff/add/log` for authenticated
   selected-file workspaces. Creation pins a base and exact bundle selection;
   status and diff expose only selected content, add stages a bounded complete

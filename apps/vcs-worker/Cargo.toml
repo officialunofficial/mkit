@@ -72,3 +72,5 @@ lto = true
 [features]
 # Local-only crash injection; omitted from production builds.
 test-faults = []
+# Separate, closed managed deployment profile. Never enabled in the public artifact.
+managed-access = []

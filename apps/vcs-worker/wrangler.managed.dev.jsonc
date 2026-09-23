@@ -1,0 +1,15 @@
+// Deterministic local workerd harness only. Never deploy this test identity.
+{
+  "name": "mkit-vcs-managed-local-test",
+  "main": "build/worker/shim.mjs",
+  "compatibility_date": "2024-09-23",
+  "build": { "command": "true" },
+  "vars": {
+    "AUTH_AUDIENCE": "http://localhost:8791",
+    "AUTH_REPOSITORY": "managed-test",
+    "MANAGED_OWNER_PUBLIC_KEY": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+  },
+  "r2_buckets": [{ "binding": "STORAGE", "bucket_name": "mkit-vcs-managed-local-test" }],
+  "durable_objects": { "bindings": [{ "name": "REFSTORE", "class_name": "RefStore" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RefStore"] }]
+}
