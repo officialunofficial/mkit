@@ -232,3 +232,101 @@ fn retry_re_signs_same_read_with_fresh_nonce() {
     verify(&first, &endpoint, &first.body);
     verify(&second, &endpoint, &second.body);
 }
+
+/// Run after `apps/vcs-worker/tests/managed_data.py` against a fresh local
+/// managed workerd. That fixture leaves reader and owner active and revokes
+/// writer, and uploads `managed-pack-matrix`.
+#[test]
+#[ignore = "requires local managed workerd and the managed_data.py fixture"]
+fn native_reads_match_managed_workerd_roles_and_revocation() {
+    let endpoint = std::env::var("MKIT_MANAGED_TEST_URL").expect("managed workerd URL");
+    let connect = |seed: u8, url: &str| {
+        ConnectTransport::connect_with_signed_reads(
+            url,
+            Arc::new(TestSigner(SigningKey::from_bytes(&[seed; 32]))),
+        )
+        .unwrap()
+    };
+    let url = format!("mkit+{endpoint}/managed-test");
+    let pack_bytes = b"managed-pack-matrix";
+    let pack = PackKey::new(hash(pack_bytes));
+
+    for seed in [7, 8] {
+        let tx = connect(seed, &url);
+        tx.list_refs("refs/heads/").expect("authorized ListRefs");
+        tx.read_ref("refs/heads/main").expect("authorized ReadRef");
+        assert!(tx.pack_exists(&pack).expect("authorized PackExists"));
+        assert_eq!(
+            tx.download_pack(&pack).expect("authorized DownloadPack"),
+            pack_bytes
+        );
+    }
+
+    let reader = connect(8, &url);
+    assert!(
+        reader
+            .update_ref(
+                "refs/heads/native-reader-denied",
+                mkit_core::protocol::RefWriteCondition::Any,
+                &[1; 32],
+            )
+            .is_err()
+    );
+    assert!(connect(9, &url).list_refs("refs/heads/").is_err());
+    assert!(
+        connect(8, &format!("mkit+{endpoint}/wrong-repository"))
+            .list_refs("refs/heads/")
+            .is_err()
+    );
+    assert!(
+        ConnectTransport::connect(&url)
+            .unwrap()
+            .list_refs("refs/heads/")
+            .is_err()
+    );
+}
+
+/// Run with writer still present in the disposable managed policy. The
+/// publication is a throwaway ref in local workerd state, never a live ref.
+#[test]
+#[ignore = "requires local managed workerd with active writer"]
+fn native_writer_reads_and_writes_when_live() {
+    let endpoint = std::env::var("MKIT_MANAGED_TEST_URL").expect("managed workerd URL");
+    let tx = ConnectTransport::connect_with_signed_reads(
+        &format!("mkit+{endpoint}/managed-test"),
+        Arc::new(TestSigner(SigningKey::from_bytes(&[9; 32]))),
+    )
+    .unwrap();
+    let pack = PackKey::new(hash(b"managed-pack-matrix"));
+    tx.list_refs("refs/heads/").expect("writer ListRefs");
+    tx.read_ref("refs/heads/main").expect("writer ReadRef");
+    assert!(tx.pack_exists(&pack).expect("writer PackExists"));
+    assert_eq!(
+        tx.download_pack(&pack).expect("writer DownloadPack"),
+        b"managed-pack-matrix"
+    );
+    tx.update_ref(
+        "refs/heads/native-writer-local-fixture",
+        mkit_core::protocol::RefWriteCondition::Any,
+        &[2; 32],
+    )
+    .expect("writer UpdateRef");
+}
+
+/// Run after removing the reader from the fixture policy. Every method must
+/// fail on a new attempt; the client cannot fall back to an unsigned read.
+#[test]
+#[ignore = "requires local managed workerd after reader revocation"]
+fn native_revoked_reader_has_no_read_fallback() {
+    let endpoint = std::env::var("MKIT_MANAGED_TEST_URL").expect("managed workerd URL");
+    let tx = ConnectTransport::connect_with_signed_reads(
+        &format!("mkit+{endpoint}/managed-test"),
+        Arc::new(TestSigner(SigningKey::from_bytes(&[8; 32]))),
+    )
+    .unwrap();
+    let pack = PackKey::new(hash(b"managed-pack-matrix"));
+    assert!(tx.list_refs("refs/heads/").is_err());
+    assert!(tx.read_ref("refs/heads/main").is_err());
+    assert!(tx.pack_exists(&pack).is_err());
+    assert!(tx.download_pack(&pack).is_err());
+}
