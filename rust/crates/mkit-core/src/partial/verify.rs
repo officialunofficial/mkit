@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::hash::Hash;
-use crate::object::{EntryMode, Object, ObjectType, Tree};
+use crate::object::{ChunkedBlob, EntryMode, Object, ObjectType, Tree};
 use crate::serialize::{deserialize, serialize};
 use crate::sign::{verify_commit, verify_remix};
 use crate::store::{ObjectSource, StoreError};
@@ -153,87 +153,14 @@ pub fn build_partial_snapshot<S: ObjectSource + ?Sized>(
     selected_paths: &[PartialPath],
     limits: &PartialLimits,
 ) -> Result<PartialSnapshotBundle, PartialError> {
-    validate_request(selected_paths, limits)?;
-    let mut objects = ProducerObjects::new(selected_paths, limits)?;
-    objects.ensure(source, base_id, limits.max_base_object_bytes, limits)?;
-    let base = decode_checked(
-        &base_id,
-        objects
-            .get(&base_id)
-            .ok_or(PartialError::InsufficientWitness)?,
-        limits,
-        DecodeRole::Base,
-    )?;
-    let root = verify_base(&base)?;
-
-    let mut witness_ids = BTreeSet::new();
-    let mut witness_bytes = 0usize;
-    let mut visits = 0usize;
-    let mut total_selected = 0usize;
-    let mut tree_cache = BTreeMap::new();
-    let mut representation_cache = ProducerRepresentationCache::default();
-    for path in selected_paths {
-        let mut tree_id = root;
-        for (index, component) in path.iter().enumerate() {
-            visits = visits
-                .checked_add(1)
-                .ok_or(PartialError::ValidationBudgetExceeded)?;
-            if visits > limits.max_tree_visits {
-                return Err(PartialError::ValidationBudgetExceeded);
-            }
-            objects.ensure(source, tree_id, limits.max_tree_object_bytes, limits)?;
-            let tree_bytes = objects
-                .get(&tree_id)
-                .ok_or(PartialError::InsufficientWitness)?;
-            if witness_ids.insert(tree_id) {
-                witness_bytes = checked_add(witness_bytes, tree_bytes.len())?;
-                if witness_bytes > limits.max_witness_bytes {
-                    return Err(PartialError::WitnessTooLarge);
-                }
-            }
-            if let std::collections::btree_map::Entry::Vacant(entry) = tree_cache.entry(tree_id) {
-                let Object::Tree(tree) =
-                    decode_checked(&tree_id, tree_bytes, limits, DecodeRole::Tree)?
-                else {
-                    return Err(PartialError::WrongObjectType);
-                };
-                entry.insert(tree);
-            }
-            let tree = tree_cache
-                .get(&tree_id)
-                .ok_or(PartialError::InsufficientWitness)?;
-            let entry = tree
-                .entries
-                .binary_search_by(|entry| entry.name.as_slice().cmp(component))
-                .ok()
-                .map(|position| &tree.entries[position])
-                .ok_or(PartialError::IncompleteSelection)?;
-            if index + 1 != path.len() {
-                if entry.mode != EntryMode::Tree {
-                    return Err(PartialError::WrongObjectType);
-                }
-                tree_id = entry.object_hash;
-                continue;
-            }
-            if !matches!(entry.mode, EntryMode::Blob | EntryMode::Executable) {
-                return Err(PartialError::UnsupportedPartialOperation);
-            }
-            collect_file(
-                source,
-                &mut objects,
-                entry.object_hash,
-                &mut total_selected,
-                &mut representation_cache,
-                limits,
-            )?;
-        }
+    let mut builder = PartialSnapshotBuilder::new(base_id, selected_paths, limits)?;
+    while let Some(request) = builder.next_request() {
+        // Preserve the old source/missing/role-cap error mapping. The smaller
+        // advisory max_bytes is for hosts that bound allocation before I/O.
+        let bytes = read_source(source, &request.id, request.role_cap)?;
+        builder = builder.supply(bytes)?;
     }
-    let object_vec = objects.into_object_vec();
-    let bundle = PartialSnapshotBundle::new(base_id, selected_paths.to_vec(), object_vec, limits)?;
-    // Self-verify the exact inventory before returning producer output.
-    let encoded = bundle.encode(limits)?;
-    verify_partial_snapshot(base_id, selected_paths, &encoded, limits)?;
-    Ok(bundle)
+    builder.finish()
 }
 
 /// Verify a bundle against an independently supplied trust root and exact
@@ -445,122 +372,456 @@ struct VerifierRepresentationCache {
     chunks: BTreeMap<Hash, usize>,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct ProducerRepresentationCache {
     files: BTreeMap<Hash, usize>,
     chunks: BTreeMap<Hash, usize>,
 }
 
-struct ProducerObjects {
+/// The one selected-only producer traversal, driven either by explicit
+/// request/supply or by `build_partial_snapshot`'s synchronous source loop.
+/// It owns only the selected dependency bytes it has accepted. A host must
+/// bound each fetch before allocating its response `Vec`; dropping this value
+/// cancels the in-memory traversal without a resumable checkpoint.
+pub struct PartialSnapshotBuilder {
+    base_id: Hash,
+    paths: Vec<PartialPath>,
+    limits: PartialLimits,
     objects: BTreeMap<Hash, Vec<u8>>,
     budget: BundleBudget,
+    request: Option<PartialObjectRequest>,
+    phase: ProducerPhase,
+    root: Option<Hash>,
+    path_index: usize,
+    component_index: usize,
+    tree_id: Hash,
+    visits: usize,
+    witness_ids: BTreeSet<Hash>,
+    witness_bytes: usize,
+    total_selected: usize,
+    tree_cache: BTreeMap<Hash, Tree>,
+    representation_cache: ProducerRepresentationCache,
 }
 
-impl ProducerObjects {
-    fn new(paths: &[PartialPath], limits: &PartialLimits) -> Result<Self, PartialError> {
-        Ok(Self {
+impl std::fmt::Debug for PartialSnapshotBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PartialSnapshotBuilder")
+            .field("selected_paths", &self.paths.len())
+            .field("retained_objects", &self.objects.len())
+            .field("outstanding_request", &self.request.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Role expected for one selected producer request. This is a type check,
+/// not authorization to fetch the ID from an untrusted remote service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PartialObjectRole {
+    /// Signed base Commit or Remix.
+    Base,
+    /// Authenticated selected ancestor Tree.
+    Tree,
+    /// Selected Blob or ChunkedBlob representation.
+    File,
+    /// Chunk Blob named by a selected manifest.
+    Chunk,
+}
+
+/// Privately constructed one-at-a-time selected dependency request.
+#[derive(Debug, Clone, Copy)]
+pub struct PartialObjectRequest {
+    id: Hash,
+    role: PartialObjectRole,
+    max_bytes: usize,
+    role_cap: usize,
+}
+
+impl PartialObjectRequest {
+    /// Authenticated ID requested by the builder.
+    #[must_use]
+    pub fn id(&self) -> Hash {
+        self.id
+    }
+    /// Required object type role for this response.
+    #[must_use]
+    pub fn role(&self) -> PartialObjectRole {
+        self.role
+    }
+    /// Minimum of the role cap and remaining encoded-bundle room. Hosts
+    /// should enforce this before I/O allocation. Supply retains the separate
+    /// role cap so over-budget responses keep their historical error class.
+    #[must_use]
+    pub fn max_bytes(&self) -> usize {
+        self.max_bytes
+    }
+}
+
+#[derive(Debug)]
+enum ProducerPhase {
+    Base,
+    Path {
+        visited: bool,
+    },
+    File {
+        id: Hash,
+    },
+    Chunk {
+        id: Hash,
+        manifest: ChunkedBlob,
+        index: usize,
+        sum: u64,
+        next_total: usize,
+    },
+    Done,
+}
+
+impl PartialSnapshotBuilder {
+    /// Start from an independently pinned base and exact selected paths. No
+    /// source reads or path-derived allocations happen before validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns the existing request-validation [`PartialError`] for invalid
+    /// V1 limits, path grammar/count/length or initial bundle framing budget.
+    /// No object source is consulted until the first request is supplied.
+    pub fn new(
+        base_id: Hash,
+        selected_paths: &[PartialPath],
+        limits: &PartialLimits,
+    ) -> Result<Self, PartialError> {
+        validate_request(selected_paths, limits)?;
+        let budget = BundleBudget::new(selected_paths, limits)?;
+        let mut builder = Self {
+            base_id,
+            paths: selected_paths.to_vec(),
+            limits: *limits,
             objects: BTreeMap::new(),
-            budget: BundleBudget::new(paths, limits)?,
-        })
+            budget,
+            request: None,
+            phase: ProducerPhase::Base,
+            root: None,
+            path_index: 0,
+            component_index: 0,
+            tree_id: [0; 32],
+            visits: 0,
+            witness_ids: BTreeSet::new(),
+            witness_bytes: 0,
+            total_selected: 0,
+            tree_cache: BTreeMap::new(),
+            representation_cache: ProducerRepresentationCache::default(),
+        };
+        builder.advance()?;
+        Ok(builder)
     }
 
-    fn ensure<S: ObjectSource + ?Sized>(
+    /// Idempotently observe the sole outstanding request, if any.
+    #[must_use]
+    pub fn next_request(&self) -> Option<&PartialObjectRequest> {
+        self.request.as_ref()
+    }
+
+    /// Consume exactly the requested response. Any error consumes the builder,
+    /// so a caller cannot continue after a rejected response.
+    /// The returned `Vec` belongs to the caller until this call; successful
+    /// supply retains its bytes by authenticated ID and advances cached work.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PartialError::UnsupportedPartialOperation`] when no request
+    /// remains, witness/role or workspace/bundle budget errors before decode,
+    /// then the existing canonical-ID, type, signature and selected-layout
+    /// errors. A rejected response destroys this builder state.
+    pub fn supply(mut self, bytes: Vec<u8>) -> Result<Self, PartialError> {
+        let request = self
+            .request
+            .take()
+            .ok_or(PartialError::UnsupportedPartialOperation)?;
+        if bytes.is_empty() || bytes.len() > request.role_cap {
+            return Err(PartialError::WitnessTooLarge);
+        }
+        // Match the old producer's order: exact bundle/object budget before
+        // canonical decode/re-encoding and before retention.
+        self.budget.charge_object(bytes.len())?;
+        if request.role == PartialObjectRole::Tree && !self.witness_ids.contains(&request.id) {
+            let prospective = checked_add(self.witness_bytes, bytes.len())?;
+            if prospective > self.limits.max_witness_bytes {
+                return Err(PartialError::WitnessTooLarge);
+            }
+        }
+        let role = match request.role {
+            PartialObjectRole::Base => DecodeRole::Base,
+            PartialObjectRole::Tree => DecodeRole::Tree,
+            PartialObjectRole::File => DecodeRole::File,
+            PartialObjectRole::Chunk => DecodeRole::Chunk,
+        };
+        let object = decode_checked(&request.id, &bytes, &self.limits, role)?;
+        if request.role == PartialObjectRole::Base {
+            verify_base(&object)?;
+        }
+        drop(object);
+        self.objects.insert(request.id, bytes);
+        self.advance()?;
+        Ok(self)
+    }
+
+    /// Build the original ID-sorted bundle and self-verify exact inventory.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PartialError::InsufficientWitness`] while a request remains,
+    /// or the existing bundle encoding/selected-verifier error if final
+    /// independent inventory validation fails.
+    pub fn finish(self) -> Result<PartialSnapshotBundle, PartialError> {
+        if self.request.is_some() || !matches!(self.phase, ProducerPhase::Done) {
+            return Err(PartialError::InsufficientWitness);
+        }
+        let bundle = PartialSnapshotBundle::new(
+            self.base_id,
+            self.paths.clone(),
+            self.objects.into_iter().collect(),
+            &self.limits,
+        )?;
+        let encoded = bundle.encode(&self.limits)?;
+        verify_partial_snapshot(self.base_id, &self.paths, &encoded, &self.limits)?;
+        Ok(bundle)
+    }
+
+    fn request_missing(
         &mut self,
-        source: &S,
         id: Hash,
+        role: PartialObjectRole,
         cap: usize,
-        limits: &PartialLimits,
-    ) -> Result<(), PartialError> {
+    ) -> Result<bool, PartialError> {
         if self.objects.contains_key(&id) {
-            return Ok(());
+            return Ok(false);
         }
         self.budget.ensure_object_read_possible()?;
-        let bytes = read_source(source, &id, cap.min(limits.max_object_bytes))?;
-        self.budget.charge_object(bytes.len())?;
-        self.objects.insert(id, bytes);
+        let role_cap = cap.min(self.limits.max_object_bytes);
+        let max_bytes = self.budget.max_next_object_bytes(role_cap)?;
+        self.request = Some(PartialObjectRequest {
+            id,
+            role,
+            max_bytes,
+            role_cap,
+        });
+        Ok(true)
+    }
+
+    fn next_path(&mut self) {
+        self.path_index += 1;
+        self.component_index = 0;
+        if let Some(root) = self.root {
+            self.tree_id = root;
+        }
+        self.phase = ProducerPhase::Path { visited: false };
+    }
+
+    // Keeping the five phases together makes the single outstanding-request
+    // transition and terminal-error rule auditable in one place.
+    #[allow(clippy::too_many_lines)]
+    fn advance(&mut self) -> Result<(), PartialError> {
+        while self.request.is_none() {
+            let phase = std::mem::replace(&mut self.phase, ProducerPhase::Done);
+            match phase {
+                ProducerPhase::Base => {
+                    if self.request_missing(
+                        self.base_id,
+                        PartialObjectRole::Base,
+                        self.limits.max_base_object_bytes,
+                    )? {
+                        self.phase = ProducerPhase::Base;
+                        break;
+                    }
+                    let bytes = self
+                        .objects
+                        .get(&self.base_id)
+                        .ok_or(PartialError::InsufficientWitness)?;
+                    let object =
+                        decode_checked(&self.base_id, bytes, &self.limits, DecodeRole::Base)?;
+                    let root = verify_base(&object)?;
+                    self.root = Some(root);
+                    self.tree_id = root;
+                    self.phase = ProducerPhase::Path { visited: false };
+                }
+                ProducerPhase::Path { visited } => {
+                    if self.path_index == self.paths.len() {
+                        self.phase = ProducerPhase::Done;
+                        break;
+                    }
+                    if !visited {
+                        self.visits = checked_add(self.visits, 1)?;
+                        if self.visits > self.limits.max_tree_visits {
+                            return Err(PartialError::ValidationBudgetExceeded);
+                        }
+                    }
+                    let tree_id = self.tree_id;
+                    if self.request_missing(
+                        tree_id,
+                        PartialObjectRole::Tree,
+                        self.limits.max_tree_object_bytes,
+                    )? {
+                        self.phase = ProducerPhase::Path { visited: true };
+                        break;
+                    }
+                    let tree_bytes = self
+                        .objects
+                        .get(&tree_id)
+                        .ok_or(PartialError::InsufficientWitness)?;
+                    if self.witness_ids.insert(tree_id) {
+                        self.witness_bytes = checked_add(self.witness_bytes, tree_bytes.len())?;
+                        if self.witness_bytes > self.limits.max_witness_bytes {
+                            return Err(PartialError::WitnessTooLarge);
+                        }
+                    }
+                    if let std::collections::btree_map::Entry::Vacant(entry) =
+                        self.tree_cache.entry(tree_id)
+                    {
+                        let Object::Tree(tree) =
+                            decode_checked(&tree_id, tree_bytes, &self.limits, DecodeRole::Tree)?
+                        else {
+                            return Err(PartialError::WrongObjectType);
+                        };
+                        entry.insert(tree);
+                    }
+                    let component = &self.paths[self.path_index][self.component_index];
+                    let tree = self
+                        .tree_cache
+                        .get(&tree_id)
+                        .ok_or(PartialError::InsufficientWitness)?;
+                    let entry = tree
+                        .entries
+                        .binary_search_by(|entry| entry.name.as_slice().cmp(component))
+                        .ok()
+                        .map(|position| &tree.entries[position])
+                        .ok_or(PartialError::IncompleteSelection)?;
+                    let child_id = entry.object_hash;
+                    let mode = entry.mode;
+                    if self.component_index + 1 == self.paths[self.path_index].len() {
+                        if !matches!(mode, EntryMode::Blob | EntryMode::Executable) {
+                            return Err(PartialError::UnsupportedPartialOperation);
+                        }
+                        self.phase = ProducerPhase::File { id: child_id };
+                    } else {
+                        if mode != EntryMode::Tree {
+                            return Err(PartialError::WrongObjectType);
+                        }
+                        self.tree_id = child_id;
+                        self.component_index += 1;
+                        self.phase = ProducerPhase::Path { visited: false };
+                    }
+                }
+                ProducerPhase::File { id } => {
+                    if let Some(len) = self.representation_cache.files.get(&id) {
+                        self.total_selected =
+                            selected_after(self.total_selected, *len, &self.limits)?;
+                        self.next_path();
+                        continue;
+                    }
+                    if self.request_missing(
+                        id,
+                        PartialObjectRole::File,
+                        self.limits.max_object_bytes,
+                    )? {
+                        self.phase = ProducerPhase::File { id };
+                        break;
+                    }
+                    let bytes = self
+                        .objects
+                        .get(&id)
+                        .ok_or(PartialError::InsufficientWitness)?;
+                    match decode_checked(&id, bytes, &self.limits, DecodeRole::File)? {
+                        Object::Blob(blob) => {
+                            let len = blob.data.len();
+                            self.total_selected =
+                                selected_after(self.total_selected, len, &self.limits)?;
+                            self.representation_cache.files.insert(id, len);
+                            self.next_path();
+                        }
+                        Object::ChunkedBlob(manifest) => {
+                            validate_manifest_size(&manifest, &self.limits)?;
+                            let len = usize::try_from(manifest.total_size)
+                                .map_err(|_| PartialError::WorkspaceTooLarge)?;
+                            let next_total =
+                                selected_after(self.total_selected, len, &self.limits)?;
+                            self.phase = ProducerPhase::Chunk {
+                                id,
+                                manifest,
+                                index: 0,
+                                sum: 0,
+                                next_total,
+                            };
+                        }
+                        _ => return Err(PartialError::WrongObjectType),
+                    }
+                }
+                ProducerPhase::Chunk {
+                    id,
+                    manifest,
+                    index,
+                    sum,
+                    next_total,
+                } => {
+                    if index == manifest.chunks.len() {
+                        if sum != manifest.total_size {
+                            return Err(PartialError::InvalidChunkLayout);
+                        }
+                        let len = usize::try_from(manifest.total_size)
+                            .map_err(|_| PartialError::WorkspaceTooLarge)?;
+                        self.representation_cache.files.insert(id, len);
+                        self.total_selected = next_total;
+                        self.next_path();
+                        continue;
+                    }
+                    let chunk_id = manifest.chunks[index];
+                    if self.request_missing(
+                        chunk_id,
+                        PartialObjectRole::Chunk,
+                        self.limits.max_object_bytes,
+                    )? {
+                        self.phase = ProducerPhase::Chunk {
+                            id,
+                            manifest,
+                            index,
+                            sum,
+                            next_total,
+                        };
+                        break;
+                    }
+                    let chunk_len =
+                        if let Some(len) = self.representation_cache.chunks.get(&chunk_id) {
+                            *len
+                        } else {
+                            let bytes = self
+                                .objects
+                                .get(&chunk_id)
+                                .ok_or(PartialError::InsufficientWitness)?;
+                            let Object::Blob(chunk) =
+                                decode_checked(&chunk_id, bytes, &self.limits, DecodeRole::Chunk)?
+                            else {
+                                return Err(PartialError::WrongObjectType);
+                            };
+                            let len = chunk.data.len();
+                            self.representation_cache.chunks.insert(chunk_id, len);
+                            len
+                        };
+                    validate_chunk_occurrence(&manifest, index, chunk_len)?;
+                    let next_sum = add_chunk_len(sum, chunk_len, manifest.total_size)?;
+                    self.phase = ProducerPhase::Chunk {
+                        id,
+                        manifest,
+                        index: index + 1,
+                        sum: next_sum,
+                        next_total,
+                    };
+                }
+                ProducerPhase::Done => {
+                    self.phase = ProducerPhase::Done;
+                    break;
+                }
+            }
+        }
         Ok(())
     }
-
-    fn get(&self, id: &Hash) -> Option<&Vec<u8>> {
-        self.objects.get(id)
-    }
-
-    fn into_object_vec(self) -> Vec<(Hash, Vec<u8>)> {
-        self.objects.into_iter().collect()
-    }
-}
-
-fn collect_file<S: ObjectSource + ?Sized>(
-    source: &S,
-    objects: &mut ProducerObjects,
-    id: Hash,
-    total_selected: &mut usize,
-    cache: &mut ProducerRepresentationCache,
-    limits: &PartialLimits,
-) -> Result<(), PartialError> {
-    if let Some(file_len) = cache.files.get(&id) {
-        return add_selected(total_selected, *file_len, limits);
-    }
-    objects.ensure(source, id, limits.max_object_bytes, limits)?;
-    let object = decode_checked(
-        &id,
-        objects.get(&id).ok_or(PartialError::InsufficientWitness)?,
-        limits,
-        DecodeRole::File,
-    )?;
-    let (file_len, next_total_selected) = match object {
-        Object::Blob(blob) => {
-            let file_len = blob.data.len();
-            (file_len, selected_after(*total_selected, file_len, limits)?)
-        }
-        Object::ChunkedBlob(manifest) => {
-            validate_manifest_size(&manifest, limits)?;
-            let file_len = usize::try_from(manifest.total_size)
-                .map_err(|_| PartialError::WorkspaceTooLarge)?;
-            let next_total_selected = selected_after(*total_selected, file_len, limits)?;
-            let mut sum = 0u64;
-            for (index, chunk_id) in manifest.chunks.iter().copied().enumerate() {
-                objects.ensure(source, chunk_id, limits.max_object_bytes, limits)?;
-                let chunk_len = if let Some(len) = cache.chunks.get(&chunk_id) {
-                    *len
-                } else {
-                    let Object::Blob(chunk) = decode_checked(
-                        &chunk_id,
-                        objects
-                            .get(&chunk_id)
-                            .ok_or(PartialError::InsufficientWitness)?,
-                        limits,
-                        DecodeRole::Chunk,
-                    )?
-                    else {
-                        return Err(PartialError::WrongObjectType);
-                    };
-                    let len = chunk.data.len();
-                    cache.chunks.insert(chunk_id, len);
-                    len
-                };
-                validate_chunk_occurrence(&manifest, index, chunk_len)?;
-                sum = add_chunk_len(sum, chunk_len, manifest.total_size)?;
-            }
-            if sum != manifest.total_size {
-                return Err(PartialError::InvalidChunkLayout);
-            }
-            (file_len, next_total_selected)
-        }
-        _ => return Err(PartialError::WrongObjectType),
-    };
-    cache.files.insert(id, file_len);
-    *total_selected = next_total_selected;
-    Ok(())
-}
-
-fn add_selected(
-    total: &mut usize,
-    file_len: usize,
-    limits: &PartialLimits,
-) -> Result<(), PartialError> {
-    *total = selected_after(*total, file_len, limits)?;
-    Ok(())
 }
 
 fn selected_after(
@@ -1053,6 +1314,361 @@ mod tests {
             "selected coverage is not full closure"
         );
         assert!(report.missing.contains(&fixture.hidden_tree));
+    }
+
+    fn parent_fixture_trace() -> Vec<Hash> {
+        // Captured with the unchanged producer at b41117de in an isolated
+        // parent worktree. The shared ancestor, representation and repeated
+        // chunk each cause only one source read.
+        [
+            "71a68896c1643f940c6f9500a7cb5ff51b3258a6b410879626d617a3f367b541",
+            "14a5ef0f8ffee0e421b6f1883115de47d9f3f1a0795c874c81781c5714fd37f5",
+            "c69ba4e1a9839af815f4c9a661f263aa2e4d42c47c4f6870a7ebe70da246e55d",
+            "714cce97dce09664e3b95b86eeaab079df222881746efb322c14a6b8ac5ae25d",
+            "690963b2b54ca76b5edcb802b6acb67a963213e253f4b920cf08ebb9d0542756",
+            "9c66180ef8da233105d4d5cd0913da3cbc89b1e002c71dd36cdd6649f6eae4e1",
+        ]
+        .iter()
+        .map(|hex| crate::hash::from_hex(hex).unwrap())
+        .collect()
+    }
+
+    #[test]
+    fn consuming_builder_matches_selected_producer_and_fetches_only_selected_ids() {
+        let fixture = fixture();
+        let limits = PartialLimits::default();
+        let parent_trace = parent_fixture_trace();
+        let reference =
+            build_partial_snapshot(&fixture.source, fixture.base_id, &fixture.paths, &limits)
+                .unwrap()
+                .encode(&limits)
+                .unwrap();
+        assert_eq!(*fixture.source.reads.borrow(), parent_trace);
+        assert_eq!(reference.len(), 903, "parent producer bundle length");
+        let mut builder =
+            PartialSnapshotBuilder::new(fixture.base_id, &fixture.paths, &limits).unwrap();
+        let mut requests = Vec::new();
+        while let Some(request) = builder.next_request() {
+            assert_eq!(
+                builder.next_request().unwrap().id(),
+                request.id(),
+                "request is stable until supply"
+            );
+            let id = request.id();
+            assert_ne!(id, fixture.hidden_tree);
+            assert_ne!(id, fixture.hidden_blob);
+            requests.push(id);
+            let bytes = fixture.source.objects.get(&id).unwrap().clone();
+            assert!(bytes.len() <= request.max_bytes());
+            builder = builder.supply(bytes).unwrap();
+        }
+        assert_eq!(
+            requests, parent_trace,
+            "request order matches the captured parent producer trace"
+        );
+        assert!(requests.contains(&fixture.chunked));
+        assert_eq!(
+            requests.iter().filter(|id| **id == fixture.chunk).count(),
+            1,
+            "repeated chunk ID fetched once"
+        );
+        assert_eq!(
+            builder.finish().unwrap().encode(&limits).unwrap(),
+            reference
+        );
+    }
+
+    #[test]
+    fn parent_limit_traces_match_both_producer_drivers() {
+        // Independently captured at b41117de: bundle 902 fails only after
+        // the sixth read; witness 92 fails on the root Tree; base role 263
+        // fails on the first read. Parent exact values: bundle 903 bytes,
+        // root Tree 93 bytes, base Commit 264 bytes. When the same first
+        // response exceeds both its role cap and bundle room, role wins.
+        let trace = parent_fixture_trace();
+        let generic = PartialLimits::default();
+        for (case, limits, read_count) in [
+            (
+                "bundle",
+                PartialLimits {
+                    max_bundle_bytes: 902,
+                    ..generic
+                },
+                6,
+            ),
+            (
+                "witness",
+                PartialLimits {
+                    max_witness_bytes: 92,
+                    ..generic
+                },
+                2,
+            ),
+            (
+                "base role",
+                PartialLimits {
+                    max_base_object_bytes: 263,
+                    ..generic
+                },
+                1,
+            ),
+            (
+                "role before bundle",
+                PartialLimits {
+                    max_base_object_bytes: 263,
+                    max_bundle_bytes: 200,
+                    ..generic
+                },
+                1,
+            ),
+        ] {
+            let fixture = self::fixture();
+            let sync_error =
+                build_partial_snapshot(&fixture.source, fixture.base_id, &fixture.paths, &limits)
+                    .unwrap_err();
+            assert_eq!(
+                *fixture.source.reads.borrow(),
+                trace[..read_count],
+                "{case}"
+            );
+            assert!(
+                matches!(
+                    (&sync_error, case),
+                    (PartialError::WorkspaceTooLarge, "bundle")
+                        | (
+                            PartialError::WitnessTooLarge,
+                            "witness" | "base role" | "role before bundle"
+                        )
+                ),
+                "parent sync error changed for {case}: {sync_error:?}"
+            );
+
+            let fixture = self::fixture();
+            let mut builder =
+                PartialSnapshotBuilder::new(fixture.base_id, &fixture.paths, &limits).unwrap();
+            let mut requests = Vec::new();
+            let supplied_error = loop {
+                let request = builder.next_request().expect("parent trace must reject");
+                let id = request.id();
+                requests.push(id);
+                let bytes = fixture.source.objects.get(&id).unwrap().clone();
+                match builder.supply(bytes) {
+                    Ok(next) => builder = next,
+                    Err(error) => break error,
+                }
+            };
+            assert_eq!(requests, trace[..read_count], "{case}");
+            assert!(
+                matches!(
+                    (&supplied_error, case),
+                    (PartialError::WorkspaceTooLarge, "bundle")
+                        | (
+                            PartialError::WitnessTooLarge,
+                            "witness" | "base role" | "role before bundle"
+                        )
+                ),
+                "parent request/supply error changed for {case}: {supplied_error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn builder_rejects_wrong_supply_and_premature_finish() {
+        let fixture = fixture();
+        let limits = PartialLimits::default();
+        let builder =
+            PartialSnapshotBuilder::new(fixture.base_id, &fixture.paths, &limits).unwrap();
+        assert!(matches!(
+            builder.finish(),
+            Err(PartialError::InsufficientWitness)
+        ));
+        let builder =
+            PartialSnapshotBuilder::new(fixture.base_id, &fixture.paths, &limits).unwrap();
+        assert_eq!(
+            builder.next_request().unwrap().role(),
+            PartialObjectRole::Base
+        );
+        let wrong = fixture.source.objects.get(&fixture.chunk).unwrap().clone();
+        assert!(matches!(
+            builder.supply(wrong),
+            Err(PartialError::NonCanonical)
+        ));
+        let mut builder =
+            PartialSnapshotBuilder::new(fixture.base_id, &fixture.paths, &limits).unwrap();
+        while let Some(request) = builder.next_request() {
+            let id = request.id();
+            builder = builder
+                .supply(fixture.source.objects.get(&id).unwrap().clone())
+                .unwrap();
+        }
+        assert!(matches!(
+            builder.supply(Vec::new()),
+            Err(PartialError::UnsupportedPartialOperation)
+        ));
+    }
+
+    #[test]
+    fn builder_preserves_role_cap_before_remaining_bundle_error() {
+        let fixture = fixture();
+        let base_bytes = fixture
+            .source
+            .objects
+            .get(&fixture.base_id)
+            .unwrap()
+            .clone();
+        let Object::Commit(base) = deserialize(&base_bytes).unwrap() else {
+            panic!("fixture commit")
+        };
+        let tree_bytes = fixture.source.objects.get(&base.tree_hash).unwrap().clone();
+        let mut budget = BundleBudget::new(&fixture.paths, &PartialLimits::default()).unwrap();
+        budget.charge_object(base_bytes.len()).unwrap();
+        budget.charge_object(tree_bytes.len()).unwrap();
+        let limits = PartialLimits {
+            max_bundle_bytes: budget.encoded_bytes() - 1,
+            ..PartialLimits::default()
+        };
+        let builder =
+            PartialSnapshotBuilder::new(fixture.base_id, &fixture.paths, &limits).unwrap();
+        let builder = builder.supply(base_bytes).unwrap();
+        let request = builder.next_request().unwrap();
+        assert_eq!(request.id(), base.tree_hash);
+        assert!(
+            request.max_bytes() < tree_bytes.len(),
+            "remaining-byte cap is advisory to async host"
+        );
+        assert!(matches!(
+            builder.supply(tree_bytes),
+            Err(PartialError::WorkspaceTooLarge)
+        ));
+        assert!(matches!(
+            build_partial_snapshot(&fixture.source, fixture.base_id, &fixture.paths, &limits),
+            Err(PartialError::WorkspaceTooLarge)
+        ));
+    }
+
+    #[test]
+    fn builder_witness_bound_precedes_tree_decode() {
+        let fixture = fixture();
+        let base_bytes = fixture
+            .source
+            .objects
+            .get(&fixture.base_id)
+            .unwrap()
+            .clone();
+        let Object::Commit(base) = deserialize(&base_bytes).unwrap() else {
+            panic!("fixture commit")
+        };
+        let mut tree_bytes = fixture.source.objects.get(&base.tree_hash).unwrap().clone();
+        let limits = PartialLimits {
+            max_witness_bytes: tree_bytes.len() - 1,
+            ..PartialLimits::default()
+        };
+        let builder =
+            PartialSnapshotBuilder::new(fixture.base_id, &fixture.paths, &limits).unwrap();
+        let builder = builder.supply(base_bytes).unwrap();
+        assert_eq!(
+            builder.next_request().unwrap().role(),
+            PartialObjectRole::Tree
+        );
+        tree_bytes[0] ^= 1;
+        assert!(matches!(
+            builder.supply(tree_bytes),
+            Err(PartialError::WitnessTooLarge)
+        ));
+    }
+
+    #[test]
+    fn builder_rejects_authenticated_wrong_role_at_requested_id() {
+        let mut objects = BTreeMap::new();
+        let wrong = insert(
+            &mut objects,
+            Object::Tree(Tree {
+                entries: Vec::new(),
+            }),
+        );
+        let (source, base, paths) = signed_source(
+            objects,
+            vec![TreeEntry {
+                name: b"file".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: wrong,
+            }],
+            BTreeSet::new(),
+        );
+        let limits = PartialLimits::default();
+        let mut builder = PartialSnapshotBuilder::new(base, &paths, &limits).unwrap();
+        while let Some(request) = builder.next_request() {
+            let id = request.id();
+            let role = request.role();
+            let result = builder.supply(source.objects.get(&id).unwrap().clone());
+            if id == wrong {
+                assert_eq!(role, PartialObjectRole::File);
+                assert!(matches!(result, Err(PartialError::WrongObjectType)));
+                return;
+            }
+            builder = result.unwrap();
+        }
+        panic!("wrong-role file was never requested");
+    }
+
+    #[test]
+    fn builder_exact_selected_and_bundle_bounds_match_sync_output() {
+        let fixture = fixture();
+        let generic = PartialLimits::default();
+        let encoded =
+            build_partial_snapshot(&fixture.source, fixture.base_id, &fixture.paths, &generic)
+                .unwrap()
+                .encode(&generic)
+                .unwrap();
+        let selected_len = b"plain selected bytes".len() + 48;
+        let exact = PartialLimits {
+            max_total_selected_bytes: selected_len,
+            max_bundle_bytes: encoded.len(),
+            ..generic
+        };
+        let mut builder =
+            PartialSnapshotBuilder::new(fixture.base_id, &fixture.paths, &exact).unwrap();
+        while let Some(request) = builder.next_request() {
+            let id = request.id();
+            builder = builder
+                .supply(fixture.source.objects.get(&id).unwrap().clone())
+                .unwrap();
+        }
+        assert_eq!(builder.finish().unwrap().encode(&exact).unwrap(), encoded);
+        let one_less = PartialLimits {
+            max_total_selected_bytes: selected_len - 1,
+            ..exact
+        };
+        let mut builder =
+            PartialSnapshotBuilder::new(fixture.base_id, &fixture.paths, &one_less).unwrap();
+        loop {
+            let Some(request) = builder.next_request() else {
+                panic!("selected bound was not enforced")
+            };
+            let id = request.id();
+            match builder.supply(fixture.source.objects.get(&id).unwrap().clone()) {
+                Err(PartialError::WorkspaceTooLarge) => break,
+                Ok(next) => builder = next,
+                Err(error) => panic!("unexpected error: {error}"),
+            }
+        }
+        let one_less = PartialLimits {
+            max_bundle_bytes: encoded.len() - 1,
+            ..exact
+        };
+        let mut builder =
+            PartialSnapshotBuilder::new(fixture.base_id, &fixture.paths, &one_less).unwrap();
+        loop {
+            let Some(request) = builder.next_request() else {
+                panic!("bundle bound was not enforced")
+            };
+            let id = request.id();
+            match builder.supply(fixture.source.objects.get(&id).unwrap().clone()) {
+                Err(PartialError::WorkspaceTooLarge) => break,
+                Ok(next) => builder = next,
+                Err(error) => panic!("unexpected error: {error}"),
+            }
+        }
     }
 
     #[test]

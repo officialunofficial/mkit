@@ -83,6 +83,14 @@ bench = false
 required-features = ["libfuzzer"]
 
 [[bin]]
+name = "bounded_inspection"
+path = "fuzz_targets/bounded_inspection.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
 name = "tree"
 path = "fuzz_targets/tree.rs"
 test = false
