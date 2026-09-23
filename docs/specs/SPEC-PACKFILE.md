@@ -116,6 +116,14 @@ root of SPEC-MERKLE-OBJECTS for `Tree` and `ChunkedBlob`) &mdash; matches the
 expected storage path. It is never simply `BLAKE3(bytes)` for every
 type.
 
+The additive core `CheckedRawPack` view requires an independently expected
+complete-pack key and caller byte/count caps. It uses the ordinary frame
+parser but accepts only version 1 with `0x00` entries, exposing borrowed
+payload ranges in the original pack buffer. A checked range proves only
+pack framing and key equality; it does not identify a canonical object,
+establish an incoming role or prove Snapshot closure. Generic pack readers
+continue to accept their existing v1/v2 profiles.
+
 ### 3.2 `delta` (0x02)
 
 Payload:

@@ -153,6 +153,23 @@ producer MUST:
 No fallback to a full pack/clone is permitted when a selected witness exceeds
 this profile.
 
+The core producer also exposes a consuming, one-request-at-a-time
+`PartialSnapshotBuilder`. It derives each requested id from the pinned base
+or a previously authenticated selected edge, advertises a cap for a source
+to enforce before allocating, and terminally rejects a bad supply. The
+existing synchronous producer drives this same state machine and retains
+the independent final bundle verification. The request is not a grant to
+fetch arbitrary ids; host authorization remains external.
+
+`identify_snapshot_object` derives the type-aware id and intrinsic facts of
+one bounded canonical Snapshot-kind object, while
+`inspect_snapshot_object` also checks an independently expected id and
+incoming role. Neither identifies a complete Snapshot. In particular,
+ChunkedBlob metadata alone does not establish referenced chunk types,
+per-position lengths or the final sum. Complete traversal is a separate
+recipient obligation, and selected-file caps do not constrain untouched
+files inspected for that purpose.
+
 ## 6. Verification
 
 A verifier MUST perform these checks atomically and return no partially usable

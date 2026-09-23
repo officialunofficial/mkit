@@ -31,6 +31,13 @@ train).
 
 ### Added
 
+- *(core)* Bounded keyed raw-v1 pack ranges, one-object Snapshot identification
+  and role inspection, and a consuming selected-dependency producer driver.
+  These expose local facts only; complete validation and host authority are
+  separate. Existing pack readers, selected producer signature and wire bytes
+  are unchanged. **SemVer:** additive public APIs and error types; no format
+  change.
+
 - *(transport/cli)* Explicit user-only `transport_signed_reads = true`
   authenticates the four native Connect read RPCs to an exact trusted
   endpoint with the existing Ed25519 envelope signer. Default reads and

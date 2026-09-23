@@ -806,6 +806,33 @@ pub fn pack_entries_one_iteration(input: &[u8]) {
     }
 }
 
+/// Bound pack inspection and per-object identification independently of any
+/// host catalog. Invalid bytes must reject without panic or unbounded work.
+pub fn bounded_inspection_one_iteration(input: &[u8]) {
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let pack_limits = mkit_core::pack::RawPackLimits {
+        max_pack_bytes: MAX_INPUT,
+        max_entries: 1024,
+        max_entry_bytes: MAX_INPUT,
+        max_payload_bytes: MAX_INPUT as u64,
+    };
+    let object_limits = mkit_core::partial::ObjectInspectionLimits {
+        max_object_bytes: MAX_INPUT,
+        max_tree_bytes: MAX_INPUT,
+        max_tree_entries: 1024,
+        max_manifest_chunks: 1024,
+    };
+    if let Ok(pack) =
+        mkit_core::pack::CheckedRawPack::open(input, mkit_core::pack::pack_key(input), pack_limits)
+    {
+        for entry in pack.entries() {
+            assert_eq!(&input[entry.payload_range()], entry.payload());
+            let _ = mkit_core::partial::identify_snapshot_object(entry.payload(), object_limits);
+        }
+    }
+    let _ = mkit_core::partial::identify_snapshot_object(input, object_limits);
+}
+
 /// A tiny native fixture for [`verify_closure_one_iteration`]: one
 /// committed file, exported as a snapshot closure.
 pub struct ClosureFixture {
@@ -1191,6 +1218,14 @@ mod tests {
             &[0xFF; 64][..],
         ] {
             run_one(case, pack_entries_one_iteration).expect("guardrails held");
+        }
+    }
+
+    #[test]
+    fn bounded_inspection_target_runs_within_caps() {
+        run_iterated_unit(bounded_inspection_one_iteration).expect("guardrails held");
+        for case in [&b""[..], b"MKIT", &[0xFF; 64][..]] {
+            run_one(case, bounded_inspection_one_iteration).expect("guardrails held");
         }
     }
 

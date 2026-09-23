@@ -5,6 +5,7 @@
 
 mod bundle;
 mod collector;
+mod inspect;
 mod limits;
 mod overlay;
 mod publication;
@@ -32,6 +33,10 @@ pub(crate) mod sys;
 use crate::object::TreeEntry;
 
 pub use bundle::{PartialObject, PartialSnapshotBundle};
+pub use inspect::{
+    InspectError, InspectedKind, InspectedObject, ObjectInspectionLimits, SnapshotRole,
+    identify_snapshot_object, inspect_snapshot_object,
+};
 pub use limits::PartialLimits;
 pub use overlay::{FileReplacement, PreparedPartialEdit, prepare_partial_commit, replace_files};
 pub use publication::{
@@ -43,8 +48,8 @@ pub use recipient::{
 };
 pub use update::{PartialUpdate, export_partial_update};
 pub use verify::{
-    PartialCoverage, SelectedFile, VerifiedPartialSnapshot, VerifiedTree, build_partial_snapshot,
-    verify_partial_snapshot,
+    PartialCoverage, PartialObjectRequest, PartialObjectRole, PartialSnapshotBuilder, SelectedFile,
+    VerifiedPartialSnapshot, VerifiedTree, build_partial_snapshot, verify_partial_snapshot,
 };
 
 #[cfg(all(unix, not(target_arch = "wasm32")))]

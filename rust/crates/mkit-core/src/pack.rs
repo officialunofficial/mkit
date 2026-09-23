@@ -1143,6 +1143,381 @@ pub struct PackEntries<'a> {
     done: bool,
 }
 
+/// Caller-lowered bounds for inspecting a raw v1 closure pack. These limits
+/// constrain the supplied buffer; a source must also cap its initial read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RawPackLimits {
+    pub max_pack_bytes: usize,
+    pub max_entries: u32,
+    pub max_entry_bytes: usize,
+    pub max_payload_bytes: u64,
+}
+
+/// A bounded raw-pack inspection failure. This does not report object validity.
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error)]
+pub enum RawPackError {
+    #[error("raw pack exceeds a caller limit: {0}")]
+    Limit(&'static str),
+    #[error("complete pack key differs from the independently expected key")]
+    WrongKey,
+    #[error("pack is not raw-only v1")]
+    WrongProfile,
+    #[error(transparent)]
+    Framing(#[from] PackError),
+}
+
+/// One borrowed raw payload in its original, checked pack buffer.
+pub struct RawEntry<'a> {
+    ordinal: u32,
+    payload: &'a [u8],
+    range: Range<usize>,
+}
+
+impl std::fmt::Debug for RawEntry<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RawEntry")
+            .field("ordinal", &self.ordinal)
+            .field("payload_range", &self.range)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a> RawEntry<'a> {
+    #[must_use]
+    pub fn ordinal(&self) -> u32 {
+        self.ordinal
+    }
+    #[must_use]
+    pub fn payload(&self) -> &'a [u8] {
+        self.payload
+    }
+    #[must_use]
+    pub fn payload_range(&self) -> Range<usize> {
+        self.range.clone()
+    }
+}
+
+/// Framing-and-key-checked raw v1 pack. Its entries are not authenticated
+/// snapshot objects until separately canonical/type-aware-ID inspected.
+pub struct CheckedRawPack<'a> {
+    entries: PackEntries<'a>,
+}
+
+impl std::fmt::Debug for CheckedRawPack<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CheckedRawPack")
+            .field("entries", &self.entries.count)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a> CheckedRawPack<'a> {
+    /// Check the complete pack key, trailer, v1 raw framing and caller bounds.
+    /// Byte-limit refusal precedes hashing; key refusal precedes framing.
+    pub fn open(
+        bytes: &'a [u8],
+        expected_pack_key: Hash,
+        limits: RawPackLimits,
+    ) -> Result<Self, RawPackError> {
+        if bytes.len() > limits.max_pack_bytes {
+            return Err(RawPackError::Limit("pack bytes"));
+        }
+        if pack_key(bytes) != expected_pack_key {
+            return Err(RawPackError::WrongKey);
+        }
+        let entries = PackEntries::new_with_scan_limits(
+            bytes,
+            ScanLimits {
+                entries: limits.max_entries,
+                entry_bytes: limits.max_entry_bytes,
+                payload_bytes: limits.max_payload_bytes.min(MAX_TOTAL_PAYLOAD),
+            },
+        )
+        .map_err(|error| match error {
+            ScanError::Limit(name) => RawPackError::Limit(name),
+            ScanError::Pack(error) => RawPackError::Framing(error),
+        })?;
+        if entries.version != VERSION || !entries.raw_only {
+            return Err(RawPackError::WrongProfile);
+        }
+        Ok(Self { entries })
+    }
+
+    #[must_use]
+    pub fn entry_count(&self) -> u32 {
+        self.entries.count
+    }
+
+    /// Borrow descriptors without materializing an entry table or object bytes.
+    #[must_use]
+    pub fn entries(&self) -> RawEntries<'a> {
+        RawEntries {
+            inner: PackEntries {
+                bytes: self.entries.bytes,
+                version: self.entries.version,
+                split: self.entries.split,
+                count: self.entries.count,
+                pos: HEADER_LEN,
+                yielded: 0,
+                raw_only: true,
+                first_non_raw: None,
+                last_payload_range: None,
+                done: false,
+            },
+        }
+    }
+}
+
+/// Iterator over already preflighted raw-v1 frames.
+pub struct RawEntries<'a> {
+    inner: PackEntries<'a>,
+}
+
+impl std::fmt::Debug for RawEntries<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RawEntries")
+            .field("remaining", &(self.inner.count - self.inner.yielded))
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a> Iterator for RawEntries<'a> {
+    type Item = RawEntry<'a>;
+    fn next(&mut self) -> Option<Self::Item> {
+        let ordinal = self.inner.yielded;
+        let PackEntry::Raw { bytes } = self.inner.next()?.expect("preflighted raw-v1 frame") else {
+            unreachable!("preflighted raw-v1 frame")
+        };
+        let Cow::Borrowed(payload) = bytes else {
+            unreachable!("v1 raw payload is borrowed")
+        };
+        let range = self
+            .inner
+            .last_payload_range()
+            .expect("yielded payload range");
+        Some(RawEntry {
+            ordinal,
+            payload,
+            range,
+        })
+    }
+}
+
+#[cfg(test)]
+mod checked_raw_tests {
+    use super::*;
+
+    fn raw_pack(version: u32, payloads: &[&[u8]]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+        bytes.extend_from_slice(&version.to_le_bytes());
+        bytes.extend_from_slice(&u32::try_from(payloads.len()).unwrap().to_le_bytes());
+        for payload in payloads {
+            bytes.push(0);
+            bytes.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_le_bytes());
+            bytes.extend_from_slice(payload);
+        }
+        let trailer = hash::hash(&bytes);
+        bytes.extend_from_slice(&trailer);
+        bytes
+    }
+
+    fn limits() -> RawPackLimits {
+        RawPackLimits {
+            max_pack_bytes: 1024,
+            max_entries: 3,
+            max_entry_bytes: 16,
+            max_payload_bytes: 32,
+        }
+    }
+
+    fn retrailer(bytes: &mut [u8]) {
+        let split = bytes.len() - TRAILER_LEN;
+        let trailer = hash::hash(&bytes[..split]);
+        bytes[split..].copy_from_slice(&trailer);
+    }
+
+    #[test]
+    fn raw_ranges_match_shared_iterator_without_copy() {
+        for payloads in [
+            vec![],
+            vec![b"one".as_slice()],
+            vec![b"one".as_slice(), b"two".as_slice()],
+        ] {
+            let pack = raw_pack(VERSION, &payloads);
+            let checked = CheckedRawPack::open(&pack, pack_key(&pack), limits()).unwrap();
+            assert_eq!(checked.entry_count() as usize, payloads.len());
+            let mut old = PackEntries::new(&pack).unwrap();
+            for (ordinal, entry) in checked.entries().enumerate() {
+                let PackEntry::Raw { bytes } = old.next().unwrap().unwrap() else {
+                    panic!("expected raw")
+                };
+                assert_eq!(entry.ordinal() as usize, ordinal);
+                assert_eq!(entry.payload(), bytes.as_ref());
+                assert_eq!(&pack[entry.payload_range()], entry.payload());
+                assert_eq!(entry.payload_range(), old.last_payload_range().unwrap());
+                assert!(std::ptr::eq(
+                    entry.payload().as_ptr(),
+                    pack[entry.payload_range()].as_ptr()
+                ));
+            }
+            assert!(old.next().is_none());
+        }
+    }
+
+    #[test]
+    fn raw_profile_and_each_cap_are_independent() {
+        let pack = raw_pack(VERSION, &[b"abc", b"def"]);
+        let key = pack_key(&pack);
+        let exact = RawPackLimits {
+            max_pack_bytes: pack.len(),
+            max_entries: 2,
+            max_entry_bytes: 3,
+            max_payload_bytes: 6,
+        };
+        assert_eq!(
+            CheckedRawPack::open(&pack, key, exact)
+                .unwrap()
+                .entry_count(),
+            2
+        );
+        assert!(matches!(
+            CheckedRawPack::open(&pack, [0; 32], limits()),
+            Err(RawPackError::WrongKey)
+        ));
+        let mut cap = limits();
+        cap.max_pack_bytes = pack.len() - 1;
+        assert!(matches!(
+            CheckedRawPack::open(&pack, key, cap),
+            Err(RawPackError::Limit("pack bytes"))
+        ));
+        cap = limits();
+        cap.max_entries = 1;
+        assert!(matches!(
+            CheckedRawPack::open(&pack, key, cap),
+            Err(RawPackError::Limit("entries"))
+        ));
+        let mut malformed_after_count = pack.clone();
+        malformed_after_count[HEADER_LEN] = 0xFF;
+        retrailer(&mut malformed_after_count);
+        assert!(
+            matches!(
+                CheckedRawPack::open(
+                    &malformed_after_count,
+                    pack_key(&malformed_after_count),
+                    cap
+                ),
+                Err(RawPackError::Limit("entries"))
+            ),
+            "count limit wins before frame scanning"
+        );
+        cap = limits();
+        cap.max_entry_bytes = 2;
+        assert!(matches!(
+            CheckedRawPack::open(&pack, key, cap),
+            Err(RawPackError::Limit("entry bytes"))
+        ));
+        cap = limits();
+        cap.max_payload_bytes = 5;
+        assert!(matches!(
+            CheckedRawPack::open(&pack, key, cap),
+            Err(RawPackError::Limit("payload bytes"))
+        ));
+        let v2 = raw_pack(VERSION_V2, &[b"abc"]);
+        assert!(matches!(
+            CheckedRawPack::open(&v2, pack_key(&v2), limits()),
+            Err(RawPackError::WrongProfile)
+        ));
+        let mut delta = raw_pack(VERSION, &[b"abc"]);
+        delta[HEADER_LEN] = 2;
+        let split = delta.len() - TRAILER_LEN;
+        let trailer = hash::hash(&delta[..split]);
+        delta[split..].copy_from_slice(&trailer);
+        assert!(matches!(
+            CheckedRawPack::open(&delta, pack_key(&delta), limits()),
+            Err(RawPackError::Framing(PackError::DeltaEntryTruncated))
+        ));
+    }
+
+    #[test]
+    fn near_u32_max_length_and_bad_trailer_never_panic() {
+        let mut pack = raw_pack(VERSION, &[b"x"]);
+        pack[HEADER_LEN + 1..HEADER_LEN + 5].copy_from_slice(&u32::MAX.to_le_bytes());
+        let split = pack.len() - TRAILER_LEN;
+        let trailer = hash::hash(&pack[..split]);
+        pack[split..].copy_from_slice(&trailer);
+        let mut cap = limits();
+        cap.max_entry_bytes = usize::MAX;
+        cap.max_payload_bytes = u64::MAX;
+        assert!(matches!(
+            CheckedRawPack::open(&pack, pack_key(&pack), cap),
+            Err(RawPackError::Framing(PackError::UnexpectedEof))
+        ));
+        pack[split] ^= 1;
+        assert!(matches!(
+            CheckedRawPack::open(&pack, pack_key(&pack), cap),
+            Err(RawPackError::Framing(PackError::PackfileCorrupted))
+        ));
+    }
+
+    #[test]
+    fn raw_view_refuses_nonraw_and_malformed_frames() {
+        let mut profile_limits = limits();
+        profile_limits.max_entry_bytes = 64;
+        profile_limits.max_payload_bytes = 64;
+        let mut delta = raw_pack(VERSION, &[&[7; 32]]);
+        delta[HEADER_LEN] = 2;
+        retrailer(&mut delta);
+        assert!(matches!(
+            CheckedRawPack::open(&delta, pack_key(&delta), profile_limits),
+            Err(RawPackError::WrongProfile)
+        ));
+        let mut compressed = raw_pack(VERSION_V2, &[b"x"]);
+        compressed[HEADER_LEN] = 3;
+        retrailer(&mut compressed);
+        assert!(matches!(
+            CheckedRawPack::open(&compressed, pack_key(&compressed), limits()),
+            Err(RawPackError::WrongProfile)
+        ));
+        let mut unknown = raw_pack(VERSION, &[b"x"]);
+        unknown[HEADER_LEN] = 1;
+        retrailer(&mut unknown);
+        assert!(matches!(
+            CheckedRawPack::open(&unknown, pack_key(&unknown), limits()),
+            Err(RawPackError::Framing(PackError::InvalidEntryType(1)))
+        ));
+        let mut truncated = raw_pack(VERSION, &[b"xyz"]);
+        truncated.truncate(truncated.len() - TRAILER_LEN - 1);
+        let trailer = hash::hash(&truncated);
+        truncated.extend_from_slice(&trailer);
+        assert!(matches!(
+            CheckedRawPack::open(&truncated, pack_key(&truncated), limits()),
+            Err(RawPackError::Framing(PackError::UnexpectedEof))
+        ));
+        let mut trailing = raw_pack(VERSION, &[b"x"]);
+        let split = trailing.len() - TRAILER_LEN;
+        trailing.insert(split, 0);
+        retrailer(&mut trailing);
+        assert!(matches!(
+            CheckedRawPack::open(&trailing, pack_key(&trailing), limits()),
+            Err(RawPackError::Framing(PackError::TrailingData))
+        ));
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ScanLimits {
+    entries: u32,
+    entry_bytes: usize,
+    payload_bytes: u64,
+}
+
+enum ScanError {
+    Limit(&'static str),
+    Pack(PackError),
+}
+
 impl<'a> PackEntries<'a> {
     /// Total entry count declared in the pack header — the header
     /// field this iterator validates every position against (`self.pos
@@ -1169,14 +1544,37 @@ impl<'a> PackEntries<'a> {
         bytes: &'a [u8],
         payload_cap: u64,
     ) -> Result<Self, PackError> {
-        let (version, split, count) = validate_pack_header(bytes)?;
+        Self::new_with_scan_limits(
+            bytes,
+            ScanLimits {
+                entries: MAX_ENTRIES,
+                entry_bytes: usize::MAX,
+                payload_bytes: payload_cap,
+            },
+        )
+        .map_err(|error| match error {
+            ScanError::Limit("entries") => PackError::TooManyObjects(u32::from_le_bytes(
+                bytes[ENTRY_COUNT_OFFSET..ENTRY_COUNT_OFFSET + 4]
+                    .try_into()
+                    .expect("validated header"),
+            )),
+            ScanError::Limit(_) => PackError::PackfileTooLarge,
+            ScanError::Pack(error) => error,
+        })
+    }
+
+    fn new_with_scan_limits(bytes: &'a [u8], limits: ScanLimits) -> Result<Self, ScanError> {
+        let (version, split, count) = validate_pack_header(bytes).map_err(ScanError::Pack)?;
+        if count > limits.entries {
+            return Err(ScanError::Limit("entries"));
+        }
         let mut pos = HEADER_LEN;
         let mut total_payload: u64 = 0;
         let mut raw_only = true;
         let mut first_non_raw = None;
         for i in 0..count {
-            if pos + ENTRY_FRAME_LEN > split {
-                return Err(PackError::UnexpectedEof);
+            if split - pos < ENTRY_FRAME_LEN {
+                return Err(ScanError::Pack(PackError::UnexpectedEof));
             }
             let etype = bytes[pos];
             pos += 1;
@@ -1184,17 +1582,20 @@ impl<'a> PackEntries<'a> {
                 u32::from_le_bytes(bytes[pos..pos + 4].try_into().expect("4 bytes")) as usize;
             pos += 4;
             total_payload = total_payload.saturating_add(payload_len as u64);
-            if total_payload > payload_cap {
-                return Err(PackError::PackfileTooLarge);
+            if payload_len > limits.entry_bytes {
+                return Err(ScanError::Limit("entry bytes"));
             }
-            if pos + payload_len > split {
-                return Err(PackError::UnexpectedEof);
+            if total_payload > limits.payload_bytes {
+                return Err(ScanError::Limit("payload bytes"));
+            }
+            if payload_len > split - pos {
+                return Err(ScanError::Pack(PackError::UnexpectedEof));
             }
             match etype {
                 0x00 => {}
                 0x02 => {
                     if payload_len < hash::HASH_LEN {
-                        return Err(PackError::DeltaEntryTruncated);
+                        return Err(ScanError::Pack(PackError::DeltaEntryTruncated));
                     }
                     if first_non_raw.is_none() {
                         first_non_raw = Some(i);
@@ -1209,20 +1610,20 @@ impl<'a> PackEntries<'a> {
                 }
                 0x04 if version == VERSION_V2 => {
                     if payload_len < hash::HASH_LEN {
-                        return Err(PackError::DeltaEntryTruncated);
+                        return Err(ScanError::Pack(PackError::DeltaEntryTruncated));
                     }
                     if first_non_raw.is_none() {
                         first_non_raw = Some(i);
                     }
                     raw_only = false;
                 }
-                0x01 => return Err(PackError::InvalidEntryType(0x01)),
-                other => return Err(PackError::InvalidEntryType(other)),
+                0x01 => return Err(ScanError::Pack(PackError::InvalidEntryType(0x01))),
+                other => return Err(ScanError::Pack(PackError::InvalidEntryType(other))),
             }
             pos += payload_len;
         }
         if pos != split {
-            return Err(PackError::TrailingData);
+            return Err(ScanError::Pack(PackError::TrailingData));
         }
         Ok(Self {
             bytes,
@@ -1264,7 +1665,7 @@ impl<'a> PackEntries<'a> {
     }
 
     fn next_entry(&mut self) -> Result<PackEntry<'a>, PackError> {
-        if self.pos + ENTRY_FRAME_LEN > self.split {
+        if self.split - self.pos < ENTRY_FRAME_LEN {
             return Err(PackError::UnexpectedEof);
         }
         let etype = self.bytes[self.pos];
@@ -1275,7 +1676,7 @@ impl<'a> PackEntries<'a> {
                 .expect("4 bytes"),
         ) as usize;
         self.pos += 4;
-        if self.pos + payload_len > self.split {
+        if payload_len > self.split - self.pos {
             return Err(PackError::UnexpectedEof);
         }
         let payload_start = self.pos;

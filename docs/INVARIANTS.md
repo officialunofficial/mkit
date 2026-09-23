@@ -106,6 +106,27 @@ reported as definitively rejected.
 **Enforced by:** core `tests/partial_edit.rs` recipient cases, file transport
 `tests/partial_publication.rs`, and the `SingleAttemptAdvance` API boundary.
 
+## Bounded inspection never implies graph closure or authority
+
+**Always:** a checked raw-pack descriptor proves only keyed v1 framing, and
+a bounded identified or role-inspected object proves only its own canonical
+type-aware identity, signature where applicable, intrinsic fields and stated
+incoming role. Selected producer requests derive only from the pinned base
+and authenticated selected edges; a rejected supply cannot resume.
+
+**Because:** raw pack frames contain no object IDs, individual objects cannot
+prove graph closure, and asynchronous fetches must not choose hidden IDs or
+turn an error into a partially verified bundle.
+
+**If violated:** a catalog could mislabel payloads, a manifest could be
+treated as fully reassembled without its chunks, or a rejected selected
+response could leak into a returned bundle.
+
+**Enforced by:** `pack::checked_raw_tests`, `partial::inspect::tests`,
+`partial::verify::tests::consuming_builder_matches_selected_producer_and_fetches_only_selected_ids`,
+`partial::verify::tests::builder_rejects_wrong_supply_and_premature_finish`,
+and the bounded-inspection fuzz target.
+
 ## Partial snapshots prove selected coverage, never authority or closure
 
 **Always:** a verified partial snapshot is bound to an independently supplied

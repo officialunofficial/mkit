@@ -18,6 +18,7 @@ pub(crate) type BundleParts = (Hash, Vec<PartialPath>, Vec<(Hash, Vec<u8>)>);
 ///
 /// The object-count prefix is adjusted at each varint boundary. Callers must
 /// charge an object only once, after deduplicating it by id.
+#[derive(Debug)]
 pub(crate) struct BundleBudget {
     encoded_bytes: usize,
     object_count: usize,
@@ -60,6 +61,27 @@ impl BundleBudget {
         self.encoded_bytes = next;
         self.object_count += 1;
         Ok(())
+    }
+
+    /// Largest next payload that can fit exactly, including its variable
+    /// length prefix. Used as an advisory preallocation cap by a request
+    /// driver; the producer still charges the actual response before decode.
+    pub(crate) fn max_next_object_bytes(&self, role_cap: usize) -> Result<usize, PartialError> {
+        self.ensure_object_read_possible()?;
+        if role_cap == 0 {
+            return Ok(0);
+        }
+        let mut low = 1usize;
+        let mut high = role_cap;
+        while low < high {
+            let mid = low + (high - low).div_ceil(2);
+            if self.next_encoded_bytes(mid).is_ok() {
+                low = mid;
+            } else {
+                high = mid - 1;
+            }
+        }
+        Ok(low)
     }
 
     pub(crate) fn encoded_bytes(&self) -> usize {
