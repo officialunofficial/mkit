@@ -225,7 +225,7 @@ fn apply_sparse_after_clone(
     use crate::sparse_cache::{SparseBuildError, SparseOutcome, load_or_build};
     use mkit_core::object::Object as CoreObject;
     use mkit_core::ops::restore::{
-        RestoreOptions, parse_sparse_patterns, restore_tree_to_worktree, write_sparse_checkout,
+        RestoreOptions, parse_sparse_patterns, restore_tree_to_worktree_with, write_sparse_checkout,
     };
     use mkit_core::store::ObjectStore;
     use std::path::PathBuf as StdPathBuf;
@@ -286,8 +286,14 @@ fn apply_sparse_after_clone(
         clean: true,
         sparse_patterns: Some(parse_sparse_patterns(&joined)),
     };
-    restore_tree_to_worktree(&store, &tree_hash, target, &restore_opts)
-        .map_err(|e| (format!("restore: {e}"), exit::CANTCREAT))?;
+    restore_tree_to_worktree_with(
+        &store,
+        &tree_hash,
+        target,
+        &restore_opts,
+        &crate::restore_fanout::read_chunks_fanout,
+    )
+    .map_err(|e| (format!("restore: {e}"), exit::CANTCREAT))?;
     Ok(())
 }
 

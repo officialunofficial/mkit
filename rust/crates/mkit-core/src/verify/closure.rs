@@ -29,6 +29,22 @@ const MANIFEST_VERSION: u8 = 1;
 const MODE_SNAPSHOT: u8 = 0;
 const MODE_HISTORY: u8 = 1;
 
+/// Fan-out threshold (per available thread) for [`index_supplied_objects`]/
+/// [`index_pack_entries`]. Deliberately much higher than
+/// `pack::stage_raw_entries`'s `ENTRIES_PER_THREAD` (8): that fan-out's
+/// per-entry work is a zstd decompression (tens of microseconds), so a
+/// `std::thread::scope` spawn pays for itself almost immediately. Here
+/// each entry is a small canonical-object deserialize plus one
+/// BLAKE3/BMT id derivation — often under a microsecond — so thread
+/// creation itself dominates below a few thousand entries. Measured via
+/// `closure_verify_fanout` (`rust/benches/benches/`) on a 4-core box:
+/// 64-1024 entries lost 2-4x to spawn overhead at `ENTRIES_PER_THREAD =
+/// 8`; only past ~4096 entries did fan-out clearly win (~10%). This
+/// value keeps every closure below that size on the plain sequential
+/// path and only pays thread cost for genuinely large closures.
+#[cfg(not(target_arch = "wasm32"))]
+const CLOSURE_ENTRIES_PER_THREAD: usize = 1024;
+
 /// Provides a pull-based source for canonical object bytes.
 pub trait ObjectSource {
     /// Returns canonical bytes for `id`, or `Ok(None)` when it is absent.
@@ -276,6 +292,171 @@ fn merge_corrupt(report: &mut ClosureReport, extra: Vec<(Hash, String)>) {
     report.corrupt.dedup_by_key(|(id, _)| *id);
 }
 
+/// Result of indexing [`verify_closure`]'s supplied object set:
+/// derived-id → bytes, plus anything that failed to classify.
+type SuppliedIndex<'a> = (BTreeMap<Hash, &'a [u8]>, Vec<(Hash, String)>);
+
+/// Result of indexing [`verify_closure_packs`]'s recorded entries:
+/// derived-id → `(pack_index, payload_range)`, plus anything that
+/// failed to classify.
+type PackIndex = (BTreeMap<Hash, (usize, Range<usize>)>, Vec<(Hash, String)>);
+
+/// Deserialize `bytes` as a canonical object and derive its id, or
+/// classify it as corrupt under the BLAKE3 of the raw bytes. Pure and
+/// independent per call — the per-item step shared by every branch
+/// below, and by [`walk_closure`]'s own (deliberately separate)
+/// re-derivation.
+fn classify_object(bytes: &[u8]) -> Result<Hash, (Hash, String)> {
+    match crate::serialize::deserialize(bytes) {
+        Err(e) => Err((hash(bytes), e.to_string())),
+        Ok(obj) => Ok(crate::object::id_from_object(&obj, bytes)),
+    }
+}
+
+/// Indexes `verify_closure`'s supplied object set by derived id: a
+/// pure map over independent byte slices, same shape as
+/// `pack::stage_raw_entries`'s raw-entry fan-out. Runs a plain
+/// sequential loop below a small-set threshold, and fans out across a
+/// scoped thread pool at or above it (native builds only — wasm32 has
+/// no threads).
+fn index_supplied_objects<'a>(items: &[&'a [u8]]) -> SuppliedIndex<'a> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let threads = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        if threads > 1 && items.len() >= CLOSURE_ENTRIES_PER_THREAD.saturating_mul(threads) {
+            return index_supplied_objects_parallel(items, threads);
+        }
+    }
+    index_supplied_objects_sequential(items)
+}
+
+fn index_supplied_objects_sequential<'a>(items: &[&'a [u8]]) -> SuppliedIndex<'a> {
+    let mut by_id = BTreeMap::new();
+    let mut corrupt = Vec::new();
+    for bytes in items {
+        match classify_object(bytes) {
+            Ok(id) => {
+                by_id.insert(id, *bytes);
+            }
+            Err(e) => corrupt.push(e),
+        }
+    }
+    (by_id, corrupt)
+}
+
+/// Parallel branch of [`index_supplied_objects`]: split `items` into
+/// `threads` contiguous chunks and process each chunk on its own
+/// scoped thread. `std::thread::scope` (not a persistent pool) is
+/// deliberate — `mkit-core` stays dependency-neutral and wasm-clean
+/// (see `pack::stage_raw_entries_parallel`'s doc for the same
+/// reasoning) — and this call is already gated by
+/// [`index_supplied_objects`]'s threshold so the per-call spawn cost is
+/// only paid when there is enough work to amortize it.
+#[cfg(not(target_arch = "wasm32"))]
+fn index_supplied_objects_parallel<'a>(items: &[&'a [u8]], threads: usize) -> SuppliedIndex<'a> {
+    let chunk_size = items.len().div_ceil(threads).max(1);
+    let mut by_id = BTreeMap::new();
+    let mut corrupt = Vec::new();
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = items
+            .chunks(chunk_size)
+            .map(|chunk| {
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .map(|bytes| classify_object(bytes).map(|id| (id, *bytes)))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        for handle in handles {
+            for result in handle
+                .join()
+                .expect("closure object indexing worker thread panicked")
+            {
+                match result {
+                    Ok((id, bytes)) => {
+                        by_id.insert(id, bytes);
+                    }
+                    Err(e) => corrupt.push(e),
+                }
+            }
+        }
+    });
+    (by_id, corrupt)
+}
+
+/// Indexes `verify_closure_packs`'s recorded `(pack_index,
+/// payload_range)` entries by derived id — the pack-backed
+/// counterpart of [`index_supplied_objects`], same threshold and
+/// `std::thread::scope` shape.
+fn index_pack_entries(packs: &[&[u8]], refs: &[(usize, Range<usize>)]) -> PackIndex {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let threads = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        if threads > 1 && refs.len() >= CLOSURE_ENTRIES_PER_THREAD.saturating_mul(threads) {
+            return index_pack_entries_parallel(packs, refs, threads);
+        }
+    }
+    index_pack_entries_sequential(packs, refs)
+}
+
+fn index_pack_entries_sequential(packs: &[&[u8]], refs: &[(usize, Range<usize>)]) -> PackIndex {
+    let mut index = BTreeMap::new();
+    let mut corrupt = Vec::new();
+    for (pack_index, range) in refs {
+        let bytes = &packs[*pack_index][range.clone()];
+        match classify_object(bytes) {
+            Ok(id) => {
+                index.insert(id, (*pack_index, range.clone()));
+            }
+            Err(e) => corrupt.push(e),
+        }
+    }
+    (index, corrupt)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn index_pack_entries_parallel(
+    packs: &[&[u8]],
+    refs: &[(usize, Range<usize>)],
+    threads: usize,
+) -> PackIndex {
+    let chunk_size = refs.len().div_ceil(threads).max(1);
+    let mut index = BTreeMap::new();
+    let mut corrupt = Vec::new();
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = refs
+            .chunks(chunk_size)
+            .map(|chunk| {
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .map(|(pack_index, range)| {
+                            let bytes = &packs[*pack_index][range.clone()];
+                            classify_object(bytes).map(|id| (id, *pack_index, range.clone()))
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        for handle in handles {
+            for result in handle
+                .join()
+                .expect("closure pack indexing worker thread panicked")
+            {
+                match result {
+                    Ok((id, pack_index, range)) => {
+                        index.insert(id, (pack_index, range));
+                    }
+                    Err(e) => corrupt.push(e),
+                }
+            }
+        }
+    });
+    (index, corrupt)
+}
+
 /// Walks a closure by fetching each requested id only when the BFS reaches it.
 /// Bytes are deserialized, re-hashed, and discarded after their child ids are
 /// extracted, so the walk retains object ids rather than the complete object
@@ -351,20 +532,18 @@ pub fn verify_closure<'a>(
     mode: ClosureMode,
     objects: impl IntoIterator<Item = &'a [u8]>,
 ) -> Result<ClosureReport, VerifyError> {
-    let mut by_id: BTreeMap<Hash, &'a [u8]> = BTreeMap::new();
-    let mut corrupt: Vec<(Hash, String)> = Vec::new();
+    // Bail as soon as the cap is exceeded rather than draining `objects`
+    // first: it's a caller-supplied `IntoIterator`, so for an adversarial
+    // or merely huge lazy source this keeps the old per-item fail-fast
+    // bound instead of paying to produce every item before rejecting.
+    let mut items: Vec<&'a [u8]> = Vec::new();
     for (supplied, bytes) in objects.into_iter().enumerate() {
         if supplied >= pack::MAX_ENTRIES as usize {
             return Err(VerifyError::TooManyClosureObjects);
         }
-        match crate::serialize::deserialize(bytes) {
-            Err(e) => corrupt.push((hash(bytes), e.to_string())),
-            Ok(obj) => {
-                let id = crate::object::id_from_object(&obj, bytes);
-                by_id.insert(id, bytes);
-            }
-        }
+        items.push(bytes);
     }
+    let (by_id, mut corrupt) = index_supplied_objects(&items);
     corrupt.sort_by_key(|a| a.0);
 
     let mut source = MapObjectSource { objects: by_id };
@@ -396,11 +575,15 @@ pub fn verify_closure_packs(
     mode: ClosureMode,
     packs: &[&[u8]],
 ) -> Result<ClosureReport, VerifyError> {
-    let mut source = PackObjectSource {
-        packs: packs.to_vec(),
-        index: BTreeMap::new(),
-        corrupt: Vec::new(),
-    };
+    // Phase 1 (sequential, cheap): walk each pack's frames to validate
+    // the raw-only profile and record every entry's `(pack_index,
+    // payload_range)` in encounter order. This never decompresses —
+    // `is_raw_only` (computed by `PackEntries::new`'s header scan) is
+    // required before the loop even starts, so every entry this loop
+    // reaches is already known to be an uncompressed `0x00` frame; the
+    // `PackEntry::Delta` arm below is unreachable in practice and kept
+    // only as defense in depth.
+    let mut refs: Vec<(usize, Range<usize>)> = Vec::new();
     let mut supplied = 0usize;
     for (pack_index, pack) in packs.iter().enumerate() {
         let entries = PackEntries::new(pack)?;
@@ -421,13 +604,7 @@ pub fn verify_closure_packs(
                 .last_payload_range()
                 .ok_or(VerifyError::Pack(pack::PackError::UnexpectedEof))?;
             match entry? {
-                PackEntry::Raw { bytes } => match crate::serialize::deserialize(bytes.as_ref()) {
-                    Err(e) => source.corrupt.push((hash(bytes.as_ref()), e.to_string())),
-                    Ok(obj) => {
-                        let id = crate::object::id_from_object(&obj, bytes.as_ref());
-                        source.index.insert(id, (pack_index, payload_range));
-                    }
-                },
+                PackEntry::Raw { .. } => refs.push((pack_index, payload_range)),
                 PackEntry::Delta { .. } => {
                     return Err(VerifyError::ClosureProfileViolation {
                         pack_index,
@@ -438,7 +615,19 @@ pub fn verify_closure_packs(
             entry_index += 1;
         }
     }
-    source.corrupt.sort_by_key(|a| a.0);
+
+    // Phase 2 (fanned out above a size threshold): deserialize + derive
+    // the id of every recorded entry — the actual CPU-bound work
+    // (canonical decode + a BLAKE3/BMT id derivation per object),
+    // independent per entry since each only reads its own payload
+    // range.
+    let (index, mut corrupt) = index_pack_entries(packs, &refs);
+    corrupt.sort_by_key(|a| a.0);
+    let mut source = PackObjectSource {
+        packs: packs.to_vec(),
+        index,
+        corrupt,
+    };
     let (mut report, visited) = walk_closure(root, mode, &mut source)?;
     merge_corrupt(&mut report, source.corrupt);
     report.unreferenced = source
@@ -1097,5 +1286,136 @@ mod tests {
             };
             crate::pack::PackReader::read(pack, &dest).unwrap();
         }
+    }
+
+    /// A closure with enough objects to be a meaningfully different
+    /// shape from every other (tiny) fixture in this module. With
+    /// `CLOSURE_ENTRIES_PER_THREAD` tuned for real fan-out wins (see
+    /// its doc — only past ~4096 entries per thread), this fixture
+    /// stays below the live dispatch threshold on any real machine, so
+    /// these tests instead call `index_supplied_objects_sequential`/
+    /// `_parallel` directly to exercise and cross-check the parallel
+    /// branch's correctness regardless of threshold.
+    const LARGE_FIXTURE_N: usize = 200;
+
+    fn large_fixture() -> (TempDir, ObjectStore, Hash, usize) {
+        let dir = TempDir::new().unwrap();
+        let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
+        let mut entries = Vec::with_capacity(LARGE_FIXTURE_N);
+        for i in 0..LARGE_FIXTURE_N {
+            let blob =
+                store_file_object(&store, format!("large closure blob #{i}").as_bytes()).unwrap();
+            entries.push(TreeEntry {
+                name: format!("f{i:04}.txt").into_bytes(),
+                mode: EntryMode::Blob,
+                object_hash: blob,
+            });
+        }
+        let tree_hash = store
+            .write(&crate::serialize::serialize(&Object::Tree(Tree { entries })).unwrap())
+            .unwrap();
+        let kp = KeyPair::from_seed([0x22; 32]);
+        let mut commit = Commit {
+            tree_hash,
+            parents: vec![],
+            author: Identity::ed25519(kp.public.0),
+            signer: kp.public.0,
+            message: b"large closure fan-out fixture".to_vec(),
+            timestamp: 1,
+            message_hash: ZERO,
+            content_digest: ZERO,
+            signature: [0u8; 64],
+        };
+        commit.signature = sign_commit(&commit, &kp).unwrap().0;
+        let commit_id = store
+            .write(&crate::serialize::serialize(&Object::Commit(commit)).unwrap())
+            .unwrap();
+        let total = store.iter_object_hashes().unwrap().len();
+        (dir, store, commit_id, total)
+    }
+
+    #[test]
+    fn large_object_set_parallel_path_matches_sequential_map() {
+        let (_d, store, commit_id, total) = large_fixture();
+        let threads = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+
+        let objects: Vec<Vec<u8>> = store
+            .iter_object_hashes()
+            .unwrap()
+            .into_iter()
+            .map(|id| store.read(&id).unwrap())
+            .collect();
+
+        let report = verify_closure(
+            &commit_id,
+            ClosureMode::Snapshot,
+            objects.iter().map(Vec::as_slice),
+        )
+        .unwrap();
+        assert!(report.is_complete(), "{report:?}");
+        assert_eq!(report.verified, total);
+        assert!(report.unreferenced.is_empty());
+
+        let refs: Vec<&[u8]> = objects.iter().map(Vec::as_slice).collect();
+        let (seq_by_id, mut seq_corrupt) = index_supplied_objects_sequential(&refs);
+        let (par_by_id, mut par_corrupt) = index_supplied_objects_parallel(&refs, threads.max(2));
+        seq_corrupt.sort_by_key(|a| a.0);
+        par_corrupt.sort_by_key(|a| a.0);
+        assert_eq!(seq_by_id, par_by_id);
+        assert_eq!(seq_corrupt, par_corrupt);
+        assert!(seq_corrupt.is_empty());
+    }
+
+    #[test]
+    fn large_object_set_parallel_path_matches_sequential_packs() {
+        let (_d, store, commit_id, total) = large_fixture();
+        let export = export_closure(&store, &commit_id, ClosureMode::Snapshot).unwrap();
+        let packs: Vec<&[u8]> = export.packs.iter().map(Vec::as_slice).collect();
+
+        let report = verify_closure_packs(&commit_id, ClosureMode::Snapshot, &packs).unwrap();
+        assert!(report.is_complete(), "{report:?}");
+        assert_eq!(report.verified, total);
+        assert!(report.unreferenced.is_empty());
+        assert!(report.unreferenced_checked);
+    }
+
+    #[test]
+    fn large_object_set_parallel_path_classifies_corrupt_entry_correctly() {
+        // A bit-flipped (but still parsable) object doesn't exercise
+        // `classify_object`'s error arm at all — it just derives a
+        // different id — so it wouldn't touch `index_supplied_objects_*`'s
+        // `corrupt` bookkeeping. Replace one entry with bytes that fail to
+        // deserialize entirely instead, and call the parallel indexer
+        // directly (`large_fixture`'s object count stays under the live
+        // dispatch threshold — see its doc) so this actually runs the
+        // parallel branch's per-chunk corrupt handling, whichever
+        // thread-chunk the corrupt entry lands in.
+        let (_d, store, _commit_id, total) = large_fixture();
+        let mut objects: Vec<Vec<u8>> = store
+            .iter_object_hashes()
+            .unwrap()
+            .into_iter()
+            .map(|id| store.read(&id).unwrap())
+            .collect();
+        let corrupt_index = total / 2;
+        objects[corrupt_index] = b"not an object".to_vec();
+        let expected_corrupt_id = hash(&objects[corrupt_index]);
+
+        let refs: Vec<&[u8]> = objects.iter().map(Vec::as_slice).collect();
+        let threads = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        let (seq_by_id, mut seq_corrupt) = index_supplied_objects_sequential(&refs);
+        let (par_by_id, mut par_corrupt) = index_supplied_objects_parallel(&refs, threads.max(2));
+        seq_corrupt.sort_by_key(|a| a.0);
+        par_corrupt.sort_by_key(|a| a.0);
+
+        assert_eq!(par_by_id, seq_by_id);
+        assert_eq!(par_corrupt, seq_corrupt);
+        assert_eq!(seq_corrupt.len(), 1, "{seq_corrupt:?}");
+        assert_eq!(seq_corrupt[0].0, expected_corrupt_id);
+        assert_eq!(
+            seq_by_id.len(),
+            total - 1,
+            "the corrupt entry must not be indexed"
+        );
     }
 }

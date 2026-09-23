@@ -1540,9 +1540,23 @@ fn pending_lifecycle_and_accepted_advancement() {
         assert_eq!(next.workspace().base_revision(), 0);
         current = next;
     }
-    // Same outcome is idempotent (no generation advance).
+    // A repeated outcome still requires the exact current generation.
+    assert!(matches!(
+        layout.record_outcome(999, &identity, PendingOutcomeV1::Unknown),
+        Err(PartialStateError::GenerationMismatch {
+            expected: 999,
+            actual
+        }) if actual == generation(&current)
+    ));
+    let unchanged = layout.read_state().unwrap();
+    assert_eq!(generation(&unchanged), generation(&current));
+    assert_eq!(
+        unchanged.pending().unwrap().status(),
+        PendingStatusV1::Unknown
+    );
+    // With the current generation, the same outcome is idempotent.
     let again = layout
-        .record_outcome(999, &identity, PendingOutcomeV1::Unknown)
+        .record_outcome(generation(&current), &identity, PendingOutcomeV1::Unknown)
         .unwrap();
     assert_eq!(generation(&again), generation(&current));
     // Accept advances the base.

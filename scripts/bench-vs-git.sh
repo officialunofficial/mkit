@@ -84,7 +84,11 @@ mkit_fresh() { # $1 = files to copy in (glob under fixtures)
   echo "rm -rf work && mkdir work && cd work && $MKIT init >/dev/null 2>&1 && $MKIT keygen >/dev/null 2>&1 && cp -R $1 ."
 }
 git_fresh() {
-  echo "rm -rf work && mkdir work && cd work && git init -q && git config user.email b@b && git config user.name b && cp -R $1 ."
+  # -b main: this container's git has no init.defaultBranch set, so a
+  # plain `git init` lands on `master` — pin it to `main` so it matches
+  # mkit's own default and the `checkout-100m` case below can name a
+  # branch that exists on both sides.
+  echo "rm -rf work && mkdir work && cd work && git init -q -b main && git config user.email b@b && git config user.name b && cp -R $1 ."
 }
 
 run() { # $1 name, then hyperfine args
@@ -142,6 +146,19 @@ prep_status_git="$(git_fresh "$WORK/fixtures/video100m.bin") && git add video100
 run status-unchanged --warmup 1 \
   --prepare "$prep_status_mkit" "cd work && $MKIT status >/dev/null 2>&1" \
   --prepare "$prep_status_git" 'cd work && git status >/dev/null'
+
+# 8. checkout a branch that changed a committed 100 MiB file — exercises
+#    the ChunkedBlob restore path a branch switch takes
+#    (ops::restore::restore_tree_to_worktree[_with]), the read-side
+#    counterpart of the add-side chunk-hashing work `big-100m`/
+#    `append-1m` above already measure. `main` holds v1; `v2` appends the
+#    same 1 MiB fixture the append-1m case uses, so a v2 checkout
+#    rewrites the whole file's tail chunk plus its manifest.
+prep_checkout_mkit="$(mkit_fresh "$WORK/fixtures/video100m.bin") && $MKIT add video100m.bin >/dev/null && $MKIT commit -m v1 >/dev/null 2>&1 && $MKIT branch v2 >/dev/null 2>&1 && $MKIT checkout v2 >/dev/null 2>&1 && cat $WORK/fixtures/append1m.bin >> video100m.bin && $MKIT add video100m.bin >/dev/null && $MKIT commit -m v2 >/dev/null 2>&1 && $MKIT checkout main >/dev/null 2>&1"
+prep_checkout_git="$(git_fresh "$WORK/fixtures/video100m.bin") && git add video100m.bin && git commit -q -m v1 && git branch v2 && git checkout -q v2 && cat $WORK/fixtures/append1m.bin >> video100m.bin && git add video100m.bin && git commit -q -m v2 && git checkout -q main"
+run checkout-100m --warmup 1 \
+  --prepare "$prep_checkout_mkit" "cd work && $MKIT checkout v2 >/dev/null 2>&1" \
+  --prepare "$prep_checkout_git" 'cd work && git checkout -q v2'
 
 # ---- repository sizes (du -k), mirrored from perf-data.ts ------------
 echo "== sizes ==" | tee "$OUT/sizes.txt"

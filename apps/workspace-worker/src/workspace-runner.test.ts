@@ -88,7 +88,13 @@ function harness() {
     };
     return { data, storage, state, sandbox, directory, controller, input };
 }
-const context = { callId: "call", parentCallId: "", sessionId: "session" };
+const context = {
+    callId: "call",
+    parentCallId: "",
+    sessionId: "session",
+    model: "model",
+    signal: new AbortController().signal,
+};
 beforeEach(() => vi.clearAllMocks());
 describe("durable workspace task execution", () => {
     it("saves tool edits and publishes completion, snapshot, and owner answer together", async () => {
