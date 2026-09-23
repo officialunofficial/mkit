@@ -145,7 +145,84 @@ impl PartialUpdate {
         if bytes.len() > limits.max_update_bytes {
             return Err(PartialError::SubmissionTooLarge);
         }
+        let parsed = parse_borrowed_header(bytes, limits, usize::MAX)?;
+        let ParsedUpdateHeader {
+            base_id,
+            candidate_id,
+            changes,
+            declared_pack_hash,
+            declared_pack_len,
+            encoded_pack_len,
+            pack_offset,
+        } = parsed;
         let mut cursor = Cursor::new(bytes);
+        cursor.pos = pack_offset;
+        if declared_pack_len > limits.max_raw_pack_bytes
+            || encoded_pack_len > limits.max_raw_pack_bytes
+            || declared_pack_len != encoded_pack_len
+            || encoded_pack_len != cursor.remaining()
+        {
+            return Err(PartialError::SubmissionTooLarge);
+        }
+        let borrowed_pack = cursor.take(encoded_pack_len)?;
+        if cursor.remaining() != 0 || pack_key(borrowed_pack) != declared_pack_hash {
+            return Err(PartialError::InvalidUpdatePack);
+        }
+        let intake_work = if let Some(caps) = intake {
+            preflight_recipient_intake(borrowed_pack, caps)?
+        } else {
+            0
+        };
+        #[cfg(test)]
+        DECODE_PACK_CLONES.with(|clones| clones.set(clones.get() + 1));
+        let pack_bytes = borrowed_pack.to_vec();
+        inspect_inventory(&pack_bytes, base_id, candidate_id, &changes, limits)?;
+        let update = Self {
+            base_id,
+            candidate_id,
+            changes,
+            pack_hash: declared_pack_hash,
+            pack_bytes,
+        };
+        validate_update_shape(&update, limits)?;
+        Ok((update, intake_work))
+    }
+}
+
+pub(super) struct ParsedUpdateHeader {
+    pub(super) base_id: Hash,
+    pub(super) candidate_id: Hash,
+    pub(super) changes: Vec<UpdateChange>,
+    pub(super) declared_pack_hash: Hash,
+    pub(super) declared_pack_len: usize,
+    pub(super) encoded_pack_len: usize,
+    pub(super) pack_offset: usize,
+}
+
+pub(super) fn parse_borrowed_header(
+    bytes: &[u8],
+    limits: &PartialLimits,
+    max_header_bytes: usize,
+) -> Result<ParsedUpdateHeader, PartialError> {
+    parse_borrowed_header_detailed(bytes, limits, max_header_bytes).map_err(|failure| match failure
+    {
+        HeaderParseFailure::Incomplete => PartialError::NonCanonical,
+        HeaderParseFailure::Invalid(error) => error,
+    })
+}
+
+pub(super) enum HeaderParseFailure {
+    Incomplete,
+    Invalid(PartialError),
+}
+
+pub(super) fn parse_borrowed_header_detailed(
+    bytes: &[u8],
+    limits: &PartialLimits,
+    max_header_bytes: usize,
+) -> Result<ParsedUpdateHeader, HeaderParseFailure> {
+    let mut cursor = Cursor::new(bytes);
+    let result = (|| -> Result<ParsedUpdateHeader, PartialError> {
         if cursor.take(4)? != MAGIC {
             return Err(PartialError::NonCanonical);
         }
@@ -160,6 +237,7 @@ impl PartialUpdate {
             return Err(PartialError::ValidationBudgetExceeded);
         }
         let mut changes = Vec::with_capacity(count);
+        let mut path_data_bytes = 0usize;
         for _ in 0..count {
             let component_count = cursor.varint()?;
             if component_count == 0 || component_count > limits.max_path_depth {
@@ -170,6 +248,16 @@ impl PartialUpdate {
                 let len = cursor.varint()?;
                 if len == 0 || len > limits.max_component_bytes {
                     return Err(PartialError::InvalidPath);
+                }
+                if max_header_bytes != usize::MAX {
+                    path_data_bytes = path_data_bytes
+                        .checked_add(len)
+                        .ok_or(PartialError::WorkspaceTooLarge)?;
+                    if path_data_bytes > limits.max_total_path_bytes
+                        || cursor.pos.saturating_add(len) > max_header_bytes
+                    {
+                        return Err(PartialError::WorkspaceTooLarge);
+                    }
                 }
                 path.push(cursor.take(len)?.to_vec());
             }
@@ -204,32 +292,26 @@ impl PartialUpdate {
         if declared_pack_len > limits.max_raw_pack_bytes
             || encoded_pack_len > limits.max_raw_pack_bytes
             || declared_pack_len != encoded_pack_len
-            || encoded_pack_len != cursor.remaining()
         {
             return Err(PartialError::SubmissionTooLarge);
         }
-        let borrowed_pack = cursor.take(encoded_pack_len)?;
-        if cursor.remaining() != 0 || pack_key(borrowed_pack) != declared_pack_hash {
-            return Err(PartialError::InvalidUpdatePack);
+        if cursor.pos > max_header_bytes {
+            return Err(PartialError::SubmissionTooLarge);
         }
-        let intake_work = if let Some(caps) = intake {
-            preflight_recipient_intake(borrowed_pack, caps)?
-        } else {
-            0
-        };
-        #[cfg(test)]
-        DECODE_PACK_CLONES.with(|clones| clones.set(clones.get() + 1));
-        let pack_bytes = borrowed_pack.to_vec();
-        inspect_inventory(&pack_bytes, base_id, candidate_id, &changes, limits)?;
-        let update = Self {
+        Ok(ParsedUpdateHeader {
             base_id,
             candidate_id,
             changes,
-            pack_hash: declared_pack_hash,
-            pack_bytes,
-        };
-        validate_update_shape(&update, limits)?;
-        Ok((update, intake_work))
+            declared_pack_hash,
+            declared_pack_len,
+            encoded_pack_len,
+            pack_offset: cursor.pos,
+        })
+    })();
+    match result {
+        Ok(header) => Ok(header),
+        Err(_) if cursor.truncated => Err(HeaderParseFailure::Incomplete),
+        Err(error) => Err(HeaderParseFailure::Invalid(error)),
     }
 }
 
@@ -528,7 +610,10 @@ fn inspect_change(
     Ok(total_changed_bytes)
 }
 
-fn preflight_candidate(bytes: &[u8], limits: &PartialLimits) -> Result<(), PartialError> {
+pub(super) fn preflight_candidate(
+    bytes: &[u8],
+    limits: &PartialLimits,
+) -> Result<(), PartialError> {
     const TREE_AND_PARENT_COUNT: usize = 6 + 32 + 4;
     if bytes.first() != Some(&(ObjectType::Commit as u8)) || bytes.len() < TREE_AND_PARENT_COUNT {
         return Err(PartialError::InvalidUpdatePack);
@@ -742,11 +827,16 @@ fn varint_len(mut value: usize) -> usize {
 struct Cursor<'a> {
     bytes: &'a [u8],
     pos: usize,
+    truncated: bool,
 }
 
 impl<'a> Cursor<'a> {
     fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, pos: 0 }
+        Self {
+            bytes,
+            pos: 0,
+            truncated: false,
+        }
     }
 
     fn remaining(&self) -> usize {
@@ -758,10 +848,10 @@ impl<'a> Cursor<'a> {
             .pos
             .checked_add(len)
             .ok_or(PartialError::NonCanonical)?;
-        let bytes = self
-            .bytes
-            .get(self.pos..end)
-            .ok_or(PartialError::NonCanonical)?;
+        let bytes = self.bytes.get(self.pos..end).ok_or_else(|| {
+            self.truncated = true;
+            PartialError::NonCanonical
+        })?;
         self.pos = end;
         Ok(bytes)
     }

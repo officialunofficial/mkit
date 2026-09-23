@@ -12,6 +12,8 @@ mod publication;
 mod recipient;
 mod recipient_diff;
 mod recipient_graph;
+mod staged_diff;
+mod staged_update;
 mod update;
 mod verify;
 mod walk;
@@ -46,6 +48,19 @@ pub use publication::{
 pub use recipient::{
     RecipientError, RecipientLimits, RecipientUsage, VerifiedPartialUpdate, VerifiedReplacement,
     verify_partial_update,
+};
+pub use staged_diff::{
+    ChangedPairRecord, ChangedPairStep, MAX_STAGED_PAGE, RequiredFileRecord, RequiredFileStep,
+    StagedRequiredObservation, advance_changed_pair, advance_required_file,
+    apply_changed_accounting, apply_required_accounting, next_required_chunk_ids,
+    start_changed_pairs,
+};
+pub use staged_update::{
+    CheckedMkwu, HeaderPrefix, ParsedMkwuHeader, StagedCandidateFact, StagedChange,
+    StagedInventoryCursor, StagedInventoryFact, StagedInventoryStep, StagedUpdateError,
+    StagedUpdateLimitsV1, StagedUpdateUsageV1, StagedValidationContext, advance_staged_inventory,
+    apply_inventory_accounting, default_staged_inspection_limits, inspect_staged_candidate,
+    inspect_staged_inventory_object, parse_mkwu_header_prefix,
 };
 pub use update::{PartialUpdate, export_partial_update};
 pub use verify::{

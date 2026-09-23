@@ -43,6 +43,316 @@ pub const MAX_INPUT: usize = 64 * 1024;
 /// hashes.
 pub const RNG_SEED: u64 = 0xDEAD_BEEF_CAFE_F00D;
 
+/// Borrowed MKWU, inventory, actual changed graph, and required file checks.
+/// Every call executes a known-valid committed vector before selectors.
+pub fn staged_update_one_iteration(input: &[u8]) {
+    use mkit_core::KeyPair;
+    use mkit_core::object::{
+        Blob, Commit, EntryMode, Identity, Object, Tree, TreeEntry, id_from_object,
+    };
+    use mkit_core::partial::{
+        ChangedPairRecord, CheckedMkwu, PartialLimits, RequiredFileRecord, SnapshotRole,
+        StagedInventoryCursor, StagedUpdateError, StagedUpdateLimitsV1, StagedValidationContext,
+        advance_changed_pair, advance_required_file, advance_staged_inventory,
+        apply_changed_accounting, apply_inventory_accounting, apply_required_accounting,
+        default_staged_inspection_limits, inspect_snapshot_object, inspect_staged_candidate,
+        inspect_staged_inventory_object, start_changed_pairs,
+    };
+    use mkit_core::serialize::serialize;
+    use mkit_core::sign::sign_commit;
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::num::NonZeroUsize;
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let golden = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../tests/golden/partial_update/ordinary_update.bin"
+    ));
+    let base: [u8; 32] = golden[5..37].try_into().expect("fixed header");
+    let limits = PartialLimits::V1;
+    let staged = StagedUpdateLimitsV1::default();
+    let checked = CheckedMkwu::open(
+        golden,
+        golden.len() as u64,
+        mkit_core::hash::hash(golden),
+        base,
+        limits,
+        staged,
+    )
+    .expect("committed valid carrier");
+    let context = StagedValidationContext::new(
+        checked.header().clone(),
+        limits,
+        staged,
+        default_staged_inspection_limits(),
+    )
+    .expect("valid context");
+    let entry = checked
+        .pack()
+        .entries()
+        .next()
+        .expect("valid nonempty inventory");
+    let fact = inspect_staged_inventory_object(entry.payload(), &context).expect("valid object");
+    let cursor = advance_staged_inventory(
+        &StagedInventoryCursor::default(),
+        u64::from(entry.ordinal()),
+        &fact,
+        &context,
+    )
+    .expect("first valid inventory step")
+    .cursor();
+    assert_eq!(cursor.count, 1);
+    assert!(advance_staged_inventory(&cursor, 1, &fact, &context).is_err());
+    // The full authenticated graph lane is selected deterministically; the
+    // unconditional first-frame lane above still runs for every input.
+    if input.first().copied().unwrap_or(0) & 0x0f == 0 {
+        let mut inventory = BTreeMap::new();
+        let mut all_cursor = StagedInventoryCursor::default();
+        let mut usage = checked.initial_usage();
+        for entry in checked.pack().entries() {
+            let object = inspect_staged_inventory_object(entry.payload(), &context)
+                .expect("valid raw payload");
+            let step = advance_staged_inventory(
+                &all_cursor,
+                u64::from(entry.ordinal()),
+                &object,
+                &context,
+            )
+            .expect("valid ordered frame");
+            usage =
+                apply_inventory_accounting(usage, &step, &context).expect("valid inventory charge");
+            all_cursor = step.cursor();
+            inventory.insert(step.id(), entry.payload());
+        }
+        assert_eq!(all_cursor.count, u64::from(checked.pack().entry_count()));
+        let old_blob = Object::Blob(Blob {
+            data: b"old golden bytes".to_vec(),
+        });
+        let old_blob_bytes = serialize(&old_blob).expect("old Blob");
+        let old_blob_id = id_from_object(&old_blob, &old_blob_bytes);
+        let old_tree = Object::Tree(Tree {
+            entries: vec![TreeEntry {
+                name: b"a.txt".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: old_blob_id,
+            }],
+        });
+        let old_tree_bytes = serialize(&old_tree).expect("old Tree");
+        let old_tree_id = id_from_object(&old_tree, &old_tree_bytes);
+        let key = KeyPair::from_seed([21; 32]);
+        let mut base_commit = Commit::new_unannotated(
+            old_tree_id,
+            vec![],
+            Identity::ed25519(key.public.0),
+            key.public.0,
+            b"golden base".to_vec(),
+            1_700_000_000,
+            [0; 64],
+        );
+        base_commit.signature = sign_commit(&base_commit, &key).expect("base signature").0;
+        let base_object = Object::Commit(base_commit);
+        let base_bytes = serialize(&base_object).expect("base bytes");
+        assert_eq!(id_from_object(&base_object, &base_bytes), base);
+        let base_fact = inspect_snapshot_object(
+            base,
+            &base_bytes,
+            SnapshotRole::BaseRoot,
+            context.inspection(),
+        )
+        .expect("base root");
+        let candidate_bytes = inventory
+            .get(&checked.header().candidate_id())
+            .expect("candidate supplied");
+        let candidate =
+            inspect_staged_candidate(candidate_bytes, &context).expect("strict candidate");
+        let start = start_changed_pairs(&base_fact, &candidate, &context).expect("actual roots");
+        let mut required = BTreeSet::from([candidate.id()]);
+        usage = apply_changed_accounting(usage, &start, &[candidate.id()], &context)
+            .expect("candidate charge");
+        let pair = &start.successors()[0];
+        let old_tree_fact = inspect_snapshot_object(
+            old_tree_id,
+            &old_tree_bytes,
+            SnapshotRole::Tree,
+            context.inspection(),
+        )
+        .unwrap();
+        let new_tree_fact = inspect_snapshot_object(
+            pair.new_id(),
+            inventory.get(&pair.new_id()).expect("new Tree supplied"),
+            SnapshotRole::Tree,
+            context.inspection(),
+        )
+        .unwrap();
+        let width = NonZeroUsize::new(1).unwrap();
+        let visit =
+            advance_changed_pair(pair, &old_tree_fact, &new_tree_fact, &context, width).unwrap();
+        required.insert(pair.new_id());
+        usage = apply_changed_accounting(usage, &visit, &[pair.new_id()], &context).unwrap();
+        let page = advance_changed_pair(
+            &visit.successors()[0],
+            &old_tree_fact,
+            &new_tree_fact,
+            &context,
+            width,
+        )
+        .unwrap();
+        usage = apply_changed_accounting(usage, &page, &[], &context).unwrap();
+        assert_eq!(page.matched_indices(), &[0]);
+        let pair_selector = input.get(1).copied().unwrap_or(0) % 3;
+        let mut wrong_old_id = pair.old_id();
+        wrong_old_id[0] ^= 1;
+        let invalid_pair = ChangedPairRecord::Page {
+            old_id: if pair_selector == 1 {
+                wrong_old_id
+            } else {
+                pair.old_id()
+            },
+            new_id: pair.new_id(),
+            path: if pair_selector == 2 {
+                vec![b"outside".to_vec()]
+            } else {
+                Vec::new()
+            },
+            next_index: if pair_selector == 0 { u32::MAX } else { 0 },
+        };
+        let pair_result = advance_changed_pair(
+            &invalid_pair,
+            &old_tree_fact,
+            &new_tree_fact,
+            &context,
+            width,
+        );
+        if pair_selector == 2 {
+            assert!(matches!(pair_result, Err(StagedUpdateError::Invalid)));
+        } else {
+            assert!(matches!(pair_result, Err(StagedUpdateError::Inconsistent)));
+        }
+        let file_record = &page.files()[0];
+        let file_id = file_record.expected_file_id();
+        let file_fact = inspect_snapshot_object(
+            file_id,
+            inventory.get(&file_id).expect("file supplied"),
+            SnapshotRole::File,
+            context.inspection(),
+        )
+        .unwrap();
+        let mut wrong_file_id = file_id;
+        wrong_file_id[0] ^= 1;
+        let invalid_file = RequiredFileRecord::Visit {
+            change_index: if input.get(2).copied().unwrap_or(0) & 1 == 0 {
+                u32::MAX
+            } else {
+                file_record.change_index()
+            },
+            expected_file_id: if input.get(2).copied().unwrap_or(0) & 1 == 0 {
+                file_id
+            } else {
+                wrong_file_id
+            },
+        };
+        assert!(matches!(
+            advance_required_file(&invalid_file, &file_fact, &[], width, &usage, &context),
+            Err(StagedUpdateError::Inconsistent)
+        ));
+        let file =
+            advance_required_file(file_record, &file_fact, &[], width, &usage, &context).unwrap();
+        required.insert(file_id);
+        usage = apply_required_accounting(usage, &file, &[file_id], &context).unwrap();
+        assert!(file.complete());
+        assert_eq!(usage.changed_total_bytes, 4096);
+        let supplied_ids = inventory.keys().copied().collect::<BTreeSet<_>>();
+        assert_eq!(required, supplied_ids);
+        let mut low_portable = PartialLimits::V1;
+        low_portable.max_object_bytes = entry.payload().len() - 1;
+        let mut low_inspection = default_staged_inspection_limits();
+        low_inspection.max_object_bytes = low_portable.max_object_bytes;
+        let lower = StagedValidationContext::new(
+            checked.header().clone(),
+            low_portable,
+            staged,
+            low_inspection,
+        )
+        .expect("lowered valid profile");
+        let first_step =
+            advance_staged_inventory(&StagedInventoryCursor::default(), 0, &fact, &context)
+                .unwrap();
+        assert!(apply_inventory_accounting(checked.initial_usage(), &first_step, &lower).is_err());
+        let mut other_prefix = golden[..checked.header().pack_offset()].to_vec();
+        other_prefix[5] ^= 1;
+        let mkit_core::partial::HeaderPrefix::Parsed(other_header) =
+            mkit_core::partial::parse_mkwu_header_prefix(&other_prefix, &limits, &staged)
+                .expect("canonical alternate prefix")
+        else {
+            panic!("complete alternate header")
+        };
+        let other = StagedValidationContext::new(
+            other_header,
+            limits,
+            staged,
+            default_staged_inspection_limits(),
+        )
+        .expect("alternate context");
+        assert!(apply_inventory_accounting(checked.initial_usage(), &first_step, &other).is_err());
+        let mut selector = [0u8; 8];
+        for (target, byte) in selector.iter_mut().zip(input.iter()) {
+            *target = *byte;
+        }
+        let selected = u64::from_le_bytes(selector);
+        let corrupt_cursor = StagedInventoryCursor {
+            next_ordinal: selected.saturating_add(2),
+            previous_id: Some([0xff; 32]),
+            count: selected.saturating_add(2),
+            canonical_bytes: selected,
+        };
+        assert!(
+            advance_staged_inventory(&corrupt_cursor, selected.saturating_add(2), &fact, &context)
+                .is_err()
+        );
+    }
+    // The independent digest remains pinned for mutation; no accidental
+    // parser acceptance can turn changed bytes into this checked carrier.
+    let mut changed = golden.to_vec();
+    let index = input
+        .first()
+        .map_or(0, |byte| usize::from(*byte) % changed.len());
+    changed[index] ^= 1;
+    assert!(
+        CheckedMkwu::open(
+            &changed,
+            changed.len() as u64,
+            mkit_core::hash::hash(golden),
+            base,
+            limits,
+            staged
+        )
+        .is_err()
+    );
+    let arbitrary = &input[..input.len().min(4096)];
+    let _ = CheckedMkwu::open(
+        arbitrary,
+        arbitrary.len() as u64,
+        mkit_core::hash::hash(arbitrary),
+        base,
+        limits,
+        staged,
+    );
+    // Recompute the outer digest to reach inner key/trailer validation.
+    let mut altered = golden.to_vec();
+    let last = altered.len() - 1;
+    altered[last] ^= 1;
+    assert!(
+        CheckedMkwu::open(
+            &altered,
+            altered.len() as u64,
+            mkit_core::hash::hash(&altered),
+            base,
+            limits,
+            staged
+        )
+        .is_err()
+    );
+}
+
 /// Exercise bounded Tree and manifest cursors against canonical authenticated
 /// facts, including adversarial index/depth/sum and page-width values.
 pub fn snapshot_walk_one_iteration(input: &[u8]) {
@@ -1450,6 +1760,21 @@ mod tests {
         run_iterated_unit(snapshot_walk_one_iteration).expect("guardrails held");
         for case in [&b""[..], &[0; 5][..], &[255; 5][..]] {
             run_one(case, snapshot_walk_one_iteration).expect("guardrails held");
+        }
+    }
+
+    #[test]
+    fn staged_update_target_runs_within_caps() {
+        run_iterated_unit(staged_update_one_iteration).expect("guardrails held");
+        for case in [
+            &b""[..],
+            b"MKWU",
+            &[255; 64][..],
+            &[0, 0, 0][..],
+            &[0, 1, 1][..],
+            &[0, 2, 0][..],
+        ] {
+            run_one(case, staged_update_one_iteration).expect("guardrails held");
         }
     }
 

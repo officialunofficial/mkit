@@ -782,6 +782,43 @@ not portable cryptographic proofs or authorization. Physical packs may retain
 objects outside a later successor's
 logical Snapshot; a successor catalog check concerns its logical membership.
 
+A staged recipient MAY check the unchanged complete `MKWU` from caller-owned,
+bounded bytes and borrow its embedded raw pack. The independently pinned base,
+exact complete byte length, and flat BLAKE3 digest MUST match before a local
+carrier check is accepted. A checked carrier proves only canonical envelope
+lengths, raw-v1 pack key, trailer and framing. Each supplied payload MUST still
+pass the active portable object, Tree, changed-file and candidate preflights,
+canonical re-encoding, type-aware identification, and strictly increasing raw
+inventory order. The only supplied kinds are Commit, Tree, Blob and ChunkedBlob.
+No complete carrier or individual object fact establishes a valid edit or
+publication authority. The caller may retain the complete bounded carrier;
+this path makes no constant-memory intake claim.
+
+For staged validation, a source-only complete base Snapshot MUST pass before
+uploaded objects can serve the candidate. The actual changed Tree frontier
+MUST be compared by path occurrence, with equal names, modes and entry counts;
+each changed leaf MUST match its declared old mode/id and new id. An
+undeclared differing Tree edge MUST be rejected before queuing its descendants.
+The required raw supply is exactly the candidate Commit, changed-path candidate
+Trees, each changed file representation, and every positional chunk, including
+IDs already present in the base or elsewhere. A missing required upload MUST
+NOT be repaired from hidden storage. The per-file declared length and aggregate
+changed-path-occurrence bytes MUST be reserved when a changed file is visited,
+before requesting its chunks; the checked completed chunk sum MUST equal that
+reservation without charging it again. The recipient MUST exhaust and apply
+every changed-pair, required-file and complete candidate-Snapshot successor,
+then compare required and supplied ID sets in both directions. A local step,
+restored cursor or consistent count alone does not prove that prior steps ran.
+Accounting MUST apply an opaque local step only under the same canonical
+header and active portable, staged and inspection profiles that produced it;
+equivalent reconstructed profiles MAY match. This binding is process-local
+bookkeeping, not a persisted authority claim. A trusted service MUST still
+bind restored records and ledgers to its sealed carrier and fenced generation.
+The staged v1 profile accounts base and candidate complete walks independently,
+then inventory, diff, required unique bytes and origin occurrences; it is not
+numerically equivalent to the older recipient's shared-cache usage profile.
+Tighter host caps MAY lower this profile without changing `MKWU` v1 bytes.
+
 The separate generic publisher takes exact MKWU bytes and in-memory exchange
 context: repository identity, exact branch ref, 32-byte operation id, expected
 base, and digest/length of those exact bytes. This metadata grants no access

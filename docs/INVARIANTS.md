@@ -192,6 +192,34 @@ stale async results can be mistaken for an authorized complete Snapshot.
 against actual local workerd/R2/SQLite. Private subject disclosure remains
 closed until its separate live-grant check is implemented.
 
+## Staged update facts require exact origin and a trusted complete driver
+
+**Always:** a borrowed MKWU carrier is checked against independently pinned
+complete bytes and base before its raw inventory is identified. Actual changed
+Tree occurrences derive the exact required supplied IDs; hidden storage cannot
+repair a missing required object. A changed file reserves its declared bytes
+before chunk lookup, while a completed manifest proves its positional sum
+without a second charge. Local transitions do not certify a durable queue,
+exact required/supplied equality, candidate Snapshot completion or authority.
+Opaque inventory, changed-pair and file steps account only under the exact
+header and active portable, staged and inspection profiles that produced them.
+
+**Because:** a valid raw pack may contain extra or missing objects, a declared
+path may lie about the actual Tree diff, and a restored cursor cannot prove
+that earlier successors were processed. Counting only unique IDs would also
+undercharge repeated changed-file occurrences.
+
+**If violated:** an unrelated hidden object could enter an accepted update,
+an omitted changed subtree could be treated as unchanged, or a job could
+exceed its changed-file budget after requesting unbounded chunks.
+
+**Enforced by:** `partial::staged_update` borrowed carrier and inventory
+checks, `partial::staged_diff` pair/file/accounting transitions, and core
+`tests/staged_update.rs` committed-golden, old-recipient parity, lowered-context
+and early-aggregate regressions, plus its complete test-only driver and valid
+large-base case. Cross-step queue and ledger atomicity remain
+a trusted-service obligation, not a core completion certificate.
+
 ## Partial snapshots prove selected coverage, never authority or closure
 
 **Always:** a verified partial snapshot is bound to an independently supplied
