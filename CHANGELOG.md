@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- *(transport)* Optional owner-only BeginSnapshot, ContinueSnapshot,
+  GetSnapshotJob, CancelSnapshot and CleanupSnapshots enroll a complete
+  raw-v1 Snapshot into a durable, bounded structural certificate index.
+  This does not add private subject reads or grant authority. **SemVer:**
+  additive managed service routes and bounded core MKPL decoder; existing
+  MKPL bytes, default public Worker behavior and portable object rules are
+  unchanged.
+
 - *(transport)* Optional managed-host MKHG v1 signed workspace-grant codec and
   owner-only durable RegisterGrant, RevokeGrant, and GetGrant registry. Grants
   do not yet enable private snapshots or publication. **SemVer:** additive
