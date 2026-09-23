@@ -1,0 +1,1 @@
+{"source":"valid.bin","mutation":"flip final signature byte","expected_error":"Signature"}

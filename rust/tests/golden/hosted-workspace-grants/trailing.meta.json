@@ -1,0 +1,1 @@
+{"source":"valid.bin","mutation":"append one zero byte after signature","expected_error":"Trailing"}

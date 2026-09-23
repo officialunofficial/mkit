@@ -3331,6 +3331,7 @@ dependencies = [
  "libfuzzer-sys",
  "mkit-core",
  "mkit-git-bridge",
+ "mkit-hosting-policy",
  "mkit-keystore",
  "mkit-rpc",
  "tempfile",
@@ -3345,6 +3346,17 @@ dependencies = [
  "mkit-test-util",
  "sha1",
  "tempfile",
+]
+
+[[package]]
+name = "mkit-hosting-policy"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "commonware-codec",
+ "ed25519-dalek",
+ "mkit-core",
+ "serde",
 ]
 
 [[package]]

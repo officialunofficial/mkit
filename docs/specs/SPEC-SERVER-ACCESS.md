@@ -91,7 +91,10 @@ The only data procedures are POST
 | UploadPack, UpdateRef, AdvanceRefs | no | yes | yes |
 
 Anonymous, nonmembers, and grant-only subjects have no data access. Unknown
-methods fail closed. Policy management remains owner-only. Every data request
+methods fail closed. Policy management remains owner-only. The optional
+owner-controlled MKHG registry in
+[SPEC-HOSTED-WORKSPACE-GRANTS](SPEC-HOSTED-WORKSPACE-GRANTS.md) does not add a
+role or unlock a data method. Every data request
 MUST carry auth v2 bound to the configured audience, repository, exact
 procedure and request message bytes; UploadPack instead signs its existing
 pack id and declared length commitment. For DownloadPack, the signed bytes are

@@ -1,0 +1,1 @@
+{"source":"valid.bin","mutation":"first string length encoded as two-byte nonminimal LEB128","expected_error":"Varint"}

@@ -35,6 +35,8 @@ use worker::{Context, Env, Request, Response, Result, event};
 #[cfg(feature = "managed-access")]
 pub mod access_store;
 pub mod auth;
+#[cfg(feature = "managed-access")]
+pub mod grant_store;
 #[cfg(not(feature = "managed-access"))]
 pub mod health;
 #[cfg(feature = "managed-access")]

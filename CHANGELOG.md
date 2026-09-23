@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(transport)* Optional managed-host MKHG v1 signed workspace-grant codec and
+  owner-only durable RegisterGrant, RevokeGrant, and GetGrant registry. Grants
+  do not yet enable private snapshots or publication. **SemVer:** additive
+  service profile; ordinary core objects, transport protobuf and default
+  public Worker behavior are unchanged.
+
 **Verifier kit.** First-class commit-hash verification for an untrusted
 object set or a few-KiB disclosure bundle: CLI `mkit prove`,
 `mkit verify-proof`, `mkit closure export`, and `mkit closure verify`;

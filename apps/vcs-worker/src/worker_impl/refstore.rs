@@ -77,6 +77,9 @@ impl DurableObject for RefStore {
             if req.path() == "/managed-policy" {
                 return self.managed_policy(&mut req).await;
             }
+            if req.path() == "/managed-grant" {
+                return self.managed_grant(&mut req).await;
+            }
             if req.path() == "/authorize" {
                 return self.managed_access(&mut req).await;
             }
@@ -293,7 +296,7 @@ impl RefStore {
     }
 
     /// Read a ref's current hex value, or None if absent.
-    fn read_ref(&self, name: &str) -> Result<Option<String>> {
+    pub(super) fn read_ref(&self, name: &str) -> Result<Option<String>> {
         #[derive(Deserialize)]
         struct Row {
             value: String,

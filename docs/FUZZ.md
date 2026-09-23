@@ -39,6 +39,7 @@ from recurring.
 | `fuzz_targets/verify_closure.rs` | `verify::verify_closure` / `verify::verify_closure_packs` / `verify::verify_closure_manifest` / `verify::export_closure` (never panics; a freshly exported snapshot closure verifies; a mutated manifest rejects cleanly; raw adversarial bytes fed directly as pack buffers — whole and split into two — to `verify_closure_packs`/`verify_closure_manifest` never panic and any `Ok` report is internally consistent) |
 | `fuzz_targets/partial_workspace.rs` | `partial::verify_partial_snapshot` (fresh `MKWB` bundle verifies; a full-range byte mutation plus a guaranteed trailing byte rejects; arbitrary bytes remain bounded and never panic; nested counts and byte lengths are bounded before allocation) |
 | `fuzz_targets/partial_overlay.rs` | `partial::replace_files` (bounded structured replacement/reuse batches may succeed or reject; every success replays deterministically, preserves unselected entry triples and selected modes, and emits canonical objects under their type-dependent ids; a hand-built two-destination case accepts the exact aggregate-content bound and rejects the same input when that bound is lowered by one byte) |
+| `fuzz_targets/hosted_grant.rs` | standalone `mkit-hosting-policy::decode` / `verify_signature` (bounded malformed MKHG input; every accepted envelope re-encodes byte-identically) |
 
 Targets that exercise crate-private parser surfaces should expose a minimal
 `#[cfg(feature = "fuzzing")]` wrapper from that crate and enable the feature in
