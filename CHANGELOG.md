@@ -46,7 +46,10 @@ train).
   and appends to a preexisting packmap with expected-head CAS; file and memory
   transports opt in to a single-attempt advance contract. Lost mutation
   replies remain uncertain. No managed admission or new wire format is
-  introduced. **SemVer:** additive.
+  introduced. Recipient intake checks raw payload budgets before copying the
+  pack or decoding its objects. **SemVer:** additive APIs;
+  `PartialError::RecipientBudgetExceeded` can require downstream exhaustive
+  match updates. Portable wire bytes and public decoder behavior are unchanged.
 
 - *(core)* `mkit_core::partial` adds bounded `MKWB` v1 portable partial
   snapshot production and verification against an independently supplied base
