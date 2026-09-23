@@ -50,7 +50,7 @@ _mkit() {
         'fetch:Download from remote without merging'
         'stash:Stash working-dir changes'
         'worktree:Manage linked working trees'
-        'workspace:Inspect and stage selected files in an offline scoped workspace'
+        'workspace:Inspect, stage, sign, export and publish selected files'
         'clone:Clone a repository'
         'remote:Show, add, remove, or rename remotes'
         'key:Manage user-scoped keystore keys (generate/list/import/export/delete)'
@@ -429,12 +429,45 @@ _mkit() {
                         'prune[delete dead registry entries]'
                     ;;
                 workspace)
-                    _values 'workspace subcommand' \
-                        'create[create from a verified offline bundle]' \
-                        'status[show selected-file state]' \
-                        'diff[compare selected files]' \
-                        'add[stage selected files]' \
-                        'log[show local identifiers and partial-history boundary]'
+                    if (( CURRENT == 2 )); then
+                        _values 'workspace subcommand' \
+                            'create[create from a verified offline bundle]' \
+                            'status[show selected-file state]' \
+                            'diff[compare selected files]' \
+                            'add[stage selected files]' \
+                            'log[show local identifiers and partial-history boundary]' \
+                            'commit[sign selected staged files offline]' \
+                            'export[write exact pending update bytes]' \
+                            'push[publish to pinned file-transport target]' \
+                            'abandon[release exact pending candidate locally]'
+                    else
+                        case $words[2] in
+                            commit)
+                                _arguments '-m[commit message]:message:' '--message[commit message]:message:' '--author[author identity]:identity:' '--format[output format]:format:(human json)' '--help[show help]'
+                                ;;
+                            export)
+                                _arguments '--output[new external file]:file:_files' '--format[output format]:format:(human json)' '--help[show help]'
+                                ;;
+                            push)
+                                _arguments '--endpoint[file recipient URL]:url:' '--repository[repository identity]:name:' '--ref[exact branch ref]:ref:' '--format[output format]:format:(human json)' '--help[show help]'
+                                ;;
+                            abandon)
+                                _arguments '--candidate[exact pending ID]:id:' '--acknowledge-possible-publication[acknowledge possible remote effect]' '--format[output format]:format:(human json)' '--help[show help]'
+                                ;;
+                            create)
+                                _arguments '--bundle[verified bundle]:file:_files' '--base[trusted commit ID]:id:' '*--path[selected path]:path:' '--accept-bundle-selection[use bundle selection]' '--format[output format]:format:(human json)' '*:destination:_files -/'
+                                ;;
+                            status|log)
+                                _arguments '--format[output format]:format:(human json)' '--help[show help]'
+                                ;;
+                            diff)
+                                _arguments '--cached[compare stage to base]' '--format[output format]:format:(human json)' '*:selected path:'
+                                ;;
+                            add)
+                                _arguments '--all[stage every selected file]' '--format[output format]:format:(human json)' '*:selected path:'
+                                ;;
+                        esac
+                    fi
                     ;;
                 stash)
                     _values 'stash subcommand' \

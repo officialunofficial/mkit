@@ -611,6 +611,15 @@ pub fn read_or_default(layout: &RepoLayout) -> Result<Config, ConfigError> {
     Ok(cfg)
 }
 
+/// Scoped workspaces have no repository config. Only the user's identity and
+/// signer settings may influence their offline commits.
+pub fn read_user_or_default() -> Result<Config, ConfigError> {
+    let mut cfg = Config::with_defaults();
+    apply_file(&mut cfg, &user_config_path(), ConfigScope::User)?;
+    apply_cli_overrides(&mut cfg);
+    Ok(cfg)
+}
+
 /// Read both raw layers plus the merged config.
 pub fn read_layered(layout: &RepoLayout) -> Result<LayeredConfig, ConfigError> {
     let mut merged = Config::with_defaults();

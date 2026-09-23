@@ -92,10 +92,52 @@ reported with a bounded scan; an incomplete scan is explicitly indicated.
 .Cm log
 shows only the authenticated base and authoritative local identifiers;
 earlier history is unavailable. Scoped
-.Cm commit , export , push , merge , rebase , checkout ,
+.Cm commit
+signs the authoritative staged selection with the configured user signer,
+without contacting a remote or permission service. It requires
+.Fl m Ar MESSAGE
+and accepts
+.Fl Fl author Ar IDENTITY
+and
+.Fl Fl format Ar human|json ;
+it saves one pending candidate and does not publish or reset the stage.
+.Cm export
+requires
+.Fl Fl output Ar FILE
+and writes the exact saved update without overwriting an existing file or
+advancing the base. The destination must be outside every scoped root and all
+.Pa .mkit
+or
+.Pa .mkit-scoped
+metadata.
+For example, use an existing directory outside the workspace such as
+.Pa /tmp
+or a sibling directory.
+.Cm push
+accepts
+.Fl Fl endpoint Ar URL Fl Fl repository Ar NAME Fl Fl ref Ar refs/heads/NAME
+and
+.Fl Fl format Ar human|json .
+The first push requires all three target options; later pushes may omit all or
+repeat the exact pinned target. Only
+.Cm mkit+file://
+is supported. Publication has no durable remote-result ledger; uncertain
+results remain Unknown and are not retried automatically or inferred from the
+current head. If the remote head has moved, use a newly trusted snapshot in a
+new workspace before publishing again; abandon is not rollback or rebase. Only
+a definite successful response advances the base; working files are preserved.
+No force, branch creation, or automatic rebase is available.
+.Cm abandon
+requires
+.Fl Fl candidate Ar ID Fl Fl acknowledge-possible-publication
+and optionally accepts
+.Fl Fl format Ar human|json .
+It releases only that exact pending candidate locally, preserves stage and
+artifacts, and cannot undo a remote effect. Scoped
+.Cm merge , rebase , checkout ,
 and
 .Cm gc
-are unsupported in this version.
+remain unsupported.
 .It Cm add Oo Fl A | Fl Fl all Oc Oo Fl u | Fl Fl update Oc Oo Fl f Oc Oo Fl p Oc Ar path ...
 Stage files for the next commit. Respects
 .Pa .gitignore

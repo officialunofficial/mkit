@@ -39,6 +39,7 @@ pub(super) fn run(args: &LogArgs) -> u8 {
         }
         OutputFormat::Human => {
             header(&state);
+            super::pending_lines(&state);
             for entry in &entries {
                 println!(
                     "{} {}",

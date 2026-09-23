@@ -1,9 +1,13 @@
 //! Offline commands for authenticated selected-file workspaces.
 
+mod abandon;
 mod add;
+mod commit;
 mod create;
 mod diff;
+mod export;
 mod log;
+mod push;
 mod status;
 
 use std::cell::Cell;
@@ -37,6 +41,10 @@ enum WorkspaceCommand {
     Diff(diff::DiffArgs),
     Add(add::AddArgs),
     Log(log::LogArgs),
+    Commit(commit::CommitArgs),
+    Export(export::ExportArgs),
+    Push(push::PushArgs),
+    Abandon(abandon::AbandonArgs),
 }
 
 #[must_use]
@@ -45,10 +53,7 @@ pub fn run(args: &[String]) -> u8 {
         flag.set(requested_json(args));
     });
     if let Some(first) = args.first()
-        && matches!(
-            first.as_str(),
-            "commit" | "export" | "push" | "merge" | "rebase" | "checkout" | "gc"
-        )
+        && matches!(first.as_str(), "merge" | "rebase" | "checkout" | "gc")
     {
         return err(
             &format!("workspace {first} is unsupported in this version"),
@@ -81,6 +86,10 @@ pub fn run(args: &[String]) -> u8 {
         WorkspaceCommand::Diff(args) => diff::run(&args),
         WorkspaceCommand::Add(args) => add::run(&args),
         WorkspaceCommand::Log(args) => log::run(&args),
+        WorkspaceCommand::Commit(args) => commit::run(&args),
+        WorkspaceCommand::Export(args) => export::run(&args),
+        WorkspaceCommand::Push(args) => push::run(&args),
+        WorkspaceCommand::Abandon(args) => abandon::run(&args),
     }
 }
 
@@ -167,12 +176,25 @@ pub(super) fn exact_paths(
 }
 
 pub(super) fn envelope(state: &ScopedWorkspaceState, command: &str) -> Value {
+    let pending = state.pending().map(|pending| {
+        json!({
+            "candidate": to_hex(pending.candidate_id()),
+            "status": format!("{:?}", pending.status()).to_lowercase(),
+            "operation_pinned": pending.operation().is_some(),
+        })
+    });
+    let target = state.workspace().target().map(|target| json!({
+        "endpoint": target.endpoint(), "repository": target.repository(), "ref": target.exact_ref(),
+    }));
     json!({
         "command": command,
         "workspace_mode": "scoped",
         "base_commit": to_hex(state.workspace().base_id()),
         "selected_paths": state.workspace().selection().iter().map(|s| path_text(s.path())).collect::<Vec<_>>(),
         "coverage": {"content":"selected-files","history":"partial","verification":"selected-only"},
+        "pending": pending,
+        "target": target,
+        "supported_publication_transport": "single-attempt-file-no-durable-results",
     })
 }
 
@@ -181,6 +203,25 @@ pub(super) fn header(state: &ScopedWorkspaceState) {
         "Scoped workspace: {} selected files; repository content and history are partial.",
         state.workspace().selection().len()
     );
+}
+
+pub(super) fn pending_lines(state: &ScopedWorkspaceState) {
+    if let Some(pending) = state.pending() {
+        println!(
+            "Pending candidate {}: {:?}.",
+            to_hex(pending.candidate_id()),
+            pending.status()
+        );
+    }
+    if let Some(target) = state.workspace().target() {
+        println!(
+            "Pinned target: {} {} {}.",
+            target.endpoint(),
+            target.repository(),
+            target.exact_ref()
+        );
+    }
+    println!("Supported file publication: single attempt, no durable result ledger.");
 }
 
 pub(super) fn print_json(value: &Value) {

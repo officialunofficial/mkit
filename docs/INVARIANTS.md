@@ -5,6 +5,25 @@ single crate or spec. Each entry states the invariant, why it matters, and
 what breaks when it is violated. A regression test enforces each one; find
 it by the file path listed under "Enforced by".
 
+## Scoped publication records uncertainty before remote effects
+
+**Always:** an offline pending candidate signs the authoritative stage and
+keeps exact MKWU bytes. Its first file publication pins an exact target and
+operation, then durably records Unknown before any remote mutation. Reopening
+Unknown never grants an automatic retry; exporting it never downgrades it.
+
+**Because:** a lost response or a crash after remote success cannot be
+distinguished from an unattempted candidate without durable recipient results.
+
+**If violated:** the client can publish the same operation twice, replace the
+wrong branch, or erase a possibly accepted candidate.
+
+**Enforced by:** `partial::state::tests::late_bind_begin_unknown_and_abandon_preserve_stage`,
+`begin_durability_fault_never_authorizes_remote_effect`,
+`export_binds_identity_and_never_clobbers_or_downgrades_unknown`, and CLI scoped
+workspace integration tests. File transport offers a single mutable attempt,
+strict base CAS, and no durable result ledger.
+
 ## Scoped workspace reads and staging stay inside authenticated selection
 
 **Always:** scoped CLI operations bind an independently supplied base and exact

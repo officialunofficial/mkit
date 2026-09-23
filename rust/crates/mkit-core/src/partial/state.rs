@@ -107,6 +107,10 @@ pub enum PartialStateError {
     /// The supplied pending identity does not match the recorded operation.
     #[error("pending identity does not match the recorded operation")]
     PendingMismatch,
+    /// Publication was already attempted, or the requested transition would
+    /// make its result appear safely unattempted again.
+    #[error("pending publication cannot make this state transition")]
+    InvalidPublicationTransition,
     /// The supplied commit/update does not reproduce the staged edit.
     #[error("candidate or update does not exactly match the staged edit")]
     CandidateMismatch,
@@ -588,6 +592,31 @@ impl ScopedWorkspaceState {
         self.pending.as_ref()
     }
 
+    /// Exact, verified MKWU bytes loaded through CURRENT and its digest-bound
+    /// artifact. Callers must not read `.mkit-scoped` paths themselves.
+    #[must_use]
+    pub fn pending_update_bytes(&self) -> Option<&[u8]> {
+        self.pending_update_bytes.as_deref()
+    }
+
+    /// Replay the authoritative stage with its selected representation IDs.
+    /// Working files are never read while preparing a commit.
+    pub fn prepare_staged_edit(&self) -> Result<PreparedPartialEdit, PartialStateError> {
+        if self.pending.is_some() {
+            return Err(PartialStateError::PendingConflict);
+        }
+        if self.stage_is_clean() {
+            return Err(PartialStateError::Partial(PartialError::NoChanges));
+        }
+        let prepared = replace_files(
+            &self.verified,
+            &stage_replacements(self)?,
+            &self.workspace.limits,
+        )?;
+        check_prepared_matches_stage(self, &prepared)?;
+        Ok(prepared)
+    }
+
     #[must_use]
     pub fn accepted(&self) -> Option<&AcceptedStateV1> {
         self.accepted.as_ref()
@@ -1029,6 +1058,27 @@ fn check_generation(
     current
         .checked_add(1)
         .ok_or(PartialStateError::GenerationOverflow)
+}
+
+/// Canonical local publication-request fingerprint (SPEC-PARTIAL-WORKSPACES
+/// §18): domain, length-prefixed target fields, fixed identities, and size.
+fn publication_fingerprint(
+    target: &RemotePublicationTargetV1,
+    pending: &PendingStateV1,
+    operation_id: &[u8; 32],
+) -> Hash {
+    let mut request = b"mkit.scoped-publication-request.v1\0".to_vec();
+    for field in [target.endpoint(), target.repository(), target.exact_ref()] {
+        let length = u32::try_from(field.len()).expect("validated target field byte cap");
+        request.extend_from_slice(&length.to_be_bytes());
+        request.extend_from_slice(field.as_bytes());
+    }
+    request.extend_from_slice(&pending.base_id);
+    request.extend_from_slice(&pending.candidate_id);
+    request.extend_from_slice(&pending.update_digest);
+    request.extend_from_slice(&pending.update_length.to_be_bytes());
+    request.extend_from_slice(operation_id);
+    crate::hash::hash(&request)
 }
 
 fn next_workspace(state: &ScopedWorkspaceState, generation: u64) -> WorkspaceStateV1 {
@@ -2331,6 +2381,141 @@ impl ScopedWorkspaceLayout {
         publish(self, &plan, &state.verified, &state.local_objects)
     }
 
+    /// Pin an existing offline candidate to one exact publication target and
+    /// operation. This is a local transaction, before any remote effects.
+    pub fn bind_pending_publication(
+        &self,
+        expected_generation: u64,
+        identity: &PendingIdentityV1,
+        target: RemotePublicationTargetV1,
+        operation_id: [u8; 32],
+    ) -> Result<ScopedWorkspaceState, PartialStateError> {
+        self.with_lock(|_| {
+            let state = load_full(self)?;
+            let next_generation = check_generation(&state, expected_generation)?;
+            let pending = state
+                .pending
+                .as_ref()
+                .ok_or(PartialStateError::PendingMissing)?;
+            if pending.identity() != *identity {
+                return Err(PartialStateError::PendingMismatch);
+            }
+            if !matches!(
+                pending.status,
+                PendingStatusV1::Prepared | PendingStatusV1::Exported
+            ) || pending.operation.is_some()
+                || !target.exact_ref().starts_with("refs/heads/")
+                || state
+                    .workspace
+                    .target
+                    .as_ref()
+                    .is_some_and(|old| old != &target)
+            {
+                return Err(PartialStateError::InvalidPublicationTransition);
+            }
+            let mut pending = pending.clone();
+            pending.operation = Some(PendingOperationV1 {
+                operation_id,
+                request_fingerprint: publication_fingerprint(&target, &pending, &operation_id),
+            });
+            let mut workspace = next_workspace(&state, next_generation);
+            workspace.target = Some(target);
+            let plan = StatePlan {
+                workspace,
+                stage: state.stage.clone(),
+                pending: Some(pending),
+                accepted: state.accepted.clone(),
+                objects: BTreeMap::new(),
+                bundles: Vec::new(),
+                updates: Vec::new(),
+            };
+            publish(self, &plan, &state.verified, &state.local_objects)
+        })
+    }
+
+    /// Durable write-ahead barrier. Only its successful return authorizes a
+    /// caller to invoke one remote publication attempt.
+    pub fn begin_publication(
+        &self,
+        expected_generation: u64,
+        identity: &PendingIdentityV1,
+    ) -> Result<ScopedWorkspaceState, PartialStateError> {
+        self.with_lock(|_| {
+            let state = load_full(self)?;
+            let next_generation = check_generation(&state, expected_generation)?;
+            let pending = state
+                .pending
+                .as_ref()
+                .ok_or(PartialStateError::PendingMissing)?;
+            if pending.identity() != *identity {
+                return Err(PartialStateError::PendingMismatch);
+            }
+            let target = state
+                .workspace
+                .target
+                .as_ref()
+                .ok_or(PartialStateError::InvalidPublicationTransition)?;
+            let operation = pending
+                .operation
+                .ok_or(PartialStateError::InvalidPublicationTransition)?;
+            if !matches!(
+                pending.status,
+                PendingStatusV1::Prepared | PendingStatusV1::Exported
+            ) || publication_fingerprint(target, pending, &operation.operation_id)
+                != operation.request_fingerprint
+            {
+                return Err(PartialStateError::InvalidPublicationTransition);
+            }
+            let mut pending = pending.clone();
+            pending.status = PendingStatusV1::Unknown;
+            let plan = StatePlan {
+                workspace: next_workspace(&state, next_generation),
+                stage: state.stage.clone(),
+                pending: Some(pending),
+                accepted: state.accepted.clone(),
+                objects: BTreeMap::new(),
+                bundles: Vec::new(),
+                updates: Vec::new(),
+            };
+            publish(self, &plan, &state.verified, &state.local_objects)
+        })
+    }
+
+    /// Explicitly release the one-pending slot. This changes no working file,
+    /// stage entry or immutable historical artifact, and cannot undo a remote
+    /// effect that may have occurred.
+    pub fn abandon_pending(
+        &self,
+        expected_generation: u64,
+        candidate_id: &Hash,
+        acknowledge_possible_publication: bool,
+    ) -> Result<ScopedWorkspaceState, PartialStateError> {
+        if !acknowledge_possible_publication {
+            return Err(PartialStateError::InvalidPublicationTransition);
+        }
+        self.with_lock(|_| {
+            let state = load_full(self)?;
+            let next_generation = check_generation(&state, expected_generation)?;
+            let pending = state
+                .pending
+                .as_ref()
+                .ok_or(PartialStateError::PendingMissing)?;
+            if &pending.candidate_id != candidate_id {
+                return Err(PartialStateError::PendingMismatch);
+            }
+            let plan = StatePlan {
+                workspace: next_workspace(&state, next_generation),
+                stage: state.stage.clone(),
+                pending: None,
+                accepted: state.accepted.clone(),
+                objects: BTreeMap::new(),
+                bundles: Vec::new(),
+                updates: Vec::new(),
+            };
+            publish(self, &plan, &state.verified, &state.local_objects)
+        })
+    }
+
     /// Record the asserted outcome of the recorded pending operation.
     /// Non-accepted outcomes update only the pending status; `Accepted`
     /// rebuilds and re-verifies the candidate's selected bundle from local
@@ -2359,6 +2544,18 @@ impl ScopedWorkspaceLayout {
         if pending.identity() != *identity {
             return Err(PartialStateError::PendingMismatch);
         }
+        // Even equal-status calls must observe the caller's generation. An
+        // idempotent response is never permission for a stale sender to act.
+        let next_generation = check_generation(&state, expected_generation)?;
+        if (outcome == PendingOutcomeV1::Prepared && pending.status != PendingStatusV1::Prepared)
+            || (outcome == PendingOutcomeV1::Exported
+                && !matches!(
+                    pending.status,
+                    PendingStatusV1::Prepared | PendingStatusV1::Exported
+                ))
+        {
+            return Err(PartialStateError::InvalidPublicationTransition);
+        }
         let status = match outcome {
             PendingOutcomeV1::Prepared => Some(PendingStatusV1::Prepared),
             PendingOutcomeV1::Exported => Some(PendingStatusV1::Exported),
@@ -2372,7 +2569,6 @@ impl ScopedWorkspaceLayout {
         if pending.status == status {
             return Ok(state);
         }
-        let next_generation = check_generation(&state, expected_generation)?;
         let mut pending = pending.clone();
         pending.status = status;
         let plan = StatePlan {
@@ -2635,6 +2831,370 @@ mod tests {
 
     fn edit() -> FileReplacement {
         FileReplacement::bytes(vec![b"file.txt".to_vec()], b"edited".to_vec())
+    }
+
+    fn offline_pending(
+        layout: &ScopedWorkspaceLayout,
+    ) -> (crate::object::Commit, crate::object::Commit, Vec<u8>) {
+        let staged = layout.replace_stage(0, &[edit()]).unwrap();
+        let prepared = staged.prepare_staged_edit().unwrap();
+        let key = KeyPair::from_seed([9; 32]);
+        let unsigned = prepare_partial_commit(
+            staged.verified(),
+            &prepared,
+            Identity::ed25519(key.public.0),
+            key.public.0,
+            b"offline".to_vec(),
+            2,
+            staged.workspace().limits(),
+        )
+        .unwrap();
+        let mut signed = unsigned.clone();
+        signed.signature = sign_commit(&signed, &key).unwrap().0;
+        let update = export_partial_update(
+            staged.verified(),
+            &prepared,
+            &unsigned,
+            &signed,
+            staged.workspace().limits(),
+        )
+        .unwrap();
+        let bytes = update.encode(staged.workspace().limits()).unwrap();
+        layout
+            .save_pending(1, &unsigned, &signed, &bytes, None)
+            .unwrap();
+        (unsigned, signed, bytes)
+    }
+
+    #[test]
+    fn late_bind_begin_unknown_and_abandon_preserve_stage() {
+        let (dir, layout) = fixture();
+        let (unsigned, signed, bytes) = offline_pending(&layout);
+        let state = layout.read_state().unwrap();
+        assert_eq!(state.pending_update_bytes(), Some(bytes.as_slice()));
+        let old_id = state.pending().unwrap().identity();
+        let target = super::RemotePublicationTargetV1::new(
+            "mkit+file:///tmp/recipient",
+            "repo",
+            "refs/heads/main",
+        )
+        .unwrap();
+        let bound = layout
+            .bind_pending_publication(2, &old_id, target.clone(), [7; 32])
+            .unwrap();
+        assert_eq!(bound.workspace().target(), Some(&target));
+        let identity = bound.pending().unwrap().identity();
+        assert!(identity.operation().is_some());
+        let unknown = layout.begin_publication(3, &identity).unwrap();
+        assert_eq!(
+            unknown.pending().unwrap().status(),
+            PendingStatusV1::Unknown
+        );
+        let reopened = ScopedWorkspaceLayout::open(&dir.path().join("ws")).unwrap();
+        assert!(matches!(
+            reopened.begin_publication(4, &identity),
+            Err(PartialStateError::InvalidPublicationTransition)
+        ));
+        assert!(matches!(
+            reopened.begin_publication(3, &identity),
+            Err(PartialStateError::GenerationMismatch { .. })
+        ));
+        assert!(matches!(
+            reopened.record_outcome(3, &identity, PendingOutcomeV1::Unknown),
+            Err(PartialStateError::GenerationMismatch { .. })
+        ));
+        assert!(matches!(
+            reopened.record_outcome(4, &identity, PendingOutcomeV1::Exported),
+            Err(PartialStateError::InvalidPublicationTransition)
+        ));
+        assert!(matches!(
+            reopened.save_pending(4, &unsigned, &signed, &bytes, None),
+            Err(PartialStateError::PendingConflict)
+        ));
+        let abandoned = reopened
+            .abandon_pending(4, &identity.candidate_id, true)
+            .unwrap();
+        assert!(abandoned.pending().is_none());
+        assert!(!abandoned.stage_is_clean());
+        assert_eq!(abandoned.workspace().base_revision(), 0);
+        assert!(
+            dir.path()
+                .join("ws/.mkit-scoped/updates")
+                .join(format!("{}.mkwu", to_hex(&identity.update_digest)))
+                .exists()
+        );
+    }
+
+    #[test]
+    fn begin_durability_fault_never_authorizes_remote_effect() {
+        let (_dir, layout) = fixture();
+        offline_pending(&layout);
+        let old_id = layout.read_state().unwrap().pending().unwrap().identity();
+        let target = super::RemotePublicationTargetV1::new(
+            "mkit+file:///tmp/recipient",
+            "repo",
+            "refs/heads/main",
+        )
+        .unwrap();
+        let bound = layout
+            .bind_pending_publication(2, &old_id, target, [7; 32])
+            .unwrap();
+        let identity = bound.pending().unwrap().identity();
+        layout.faults.arm(Fault::BeforeCurrentSwitch);
+        assert!(layout.begin_publication(3, &identity).is_err());
+        assert_eq!(
+            layout.read_state().unwrap().pending().unwrap().status(),
+            PendingStatusV1::Prepared
+        );
+        layout.faults.arm(Fault::AfterCurrentSwitch);
+        assert!(matches!(
+            layout.begin_publication(3, &identity),
+            Err(PartialStateError::DurabilityUncertain(_))
+        ));
+        // The CURRENT switch may have happened, but uncertainty blocks the
+        // caller from invoking a transport. Reopen never treats it as safe.
+        assert_eq!(
+            layout.read_state().unwrap().pending().unwrap().status(),
+            PendingStatusV1::Unknown
+        );
+        assert!(layout.begin_publication(4, &identity).is_err());
+    }
+
+    #[test]
+    fn concurrent_begin_allows_one_effect_permission() {
+        let (_dir, layout) = fixture();
+        offline_pending(&layout);
+        let old_id = layout.read_state().unwrap().pending().unwrap().identity();
+        let target = super::RemotePublicationTargetV1::new(
+            "mkit+file:///tmp/recipient",
+            "repo",
+            "refs/heads/main",
+        )
+        .unwrap();
+        let bound = layout
+            .bind_pending_publication(2, &old_id, target, [7; 32])
+            .unwrap();
+        let identity = bound.pending().unwrap().identity();
+        let shared = Arc::new(layout);
+        let start = Arc::new(std::sync::Barrier::new(3));
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let layout = Arc::clone(&shared);
+            let start = Arc::clone(&start);
+            let identity = identity.clone();
+            handles.push(std::thread::spawn(move || {
+                start.wait();
+                layout.begin_publication(3, &identity).is_ok()
+            }));
+        }
+        start.wait();
+        let permissions = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .filter(|allowed| *allowed)
+            .count();
+        assert_eq!(
+            permissions, 1,
+            "only one caller can enter a remote effect path"
+        );
+        assert_eq!(
+            shared.read_state().unwrap().pending().unwrap().status(),
+            PendingStatusV1::Unknown
+        );
+    }
+
+    #[test]
+    fn publication_fingerprint_matches_committed_vector() {
+        let vector: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../tests/golden/partial_publication/request_v1.json"
+        ))
+        .unwrap();
+        let target = super::RemotePublicationTargetV1::new(
+            vector["endpoint"].as_str().unwrap(),
+            vector["repository"].as_str().unwrap(),
+            vector["exact_ref"].as_str().unwrap(),
+        )
+        .unwrap();
+        let pending = PendingStateV1 {
+            workspace_id: [0; 32],
+            base_id: [1; 32],
+            base_revision: 0,
+            created_generation: 1,
+            candidate_id: [2; 32],
+            update_digest: [3; 32],
+            update_length: 7,
+            status: PendingStatusV1::Prepared,
+            operation: None,
+        };
+        assert_eq!(
+            to_hex(&super::publication_fingerprint(&target, &pending, &[4; 32])),
+            vector["fingerprint"].as_str().unwrap(),
+        );
+    }
+
+    #[test]
+    fn export_binds_identity_and_never_clobbers_or_downgrades_unknown() {
+        let (dir, layout) = fixture();
+        let (_unsigned, _signed, bytes) = offline_pending(&layout);
+        let state = layout.read_state().unwrap();
+        let identity = state.pending().unwrap().identity();
+        let outside = tempdir().unwrap();
+        let outside_real = outside.path().canonicalize().unwrap();
+        let target = outside_real.join("update.mkwu");
+        assert_eq!(
+            layout.export_pending_to(2, &identity, &target).unwrap(),
+            bytes.len()
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), bytes);
+        assert!(layout.export_pending_to(2, &identity, &target).is_err());
+        assert!(
+            layout
+                .export_pending_to(2, &identity, &dir.path().join("ws/file.txt"))
+                .is_err()
+        );
+        let ordinary = tempdir().unwrap();
+        let _ordinary_store = ObjectStore::init(&RepoLayout::single(ordinary.path())).unwrap();
+        let ordinary_real = ordinary.path().canonicalize().unwrap();
+        std::fs::create_dir_all(ordinary_real.join(".mkit/refs")).unwrap();
+        let metadata_output = ordinary_real.join(".mkit/refs/update.mkwu");
+        assert!(
+            layout
+                .export_pending_to(2, &identity, &metadata_output)
+                .is_err()
+        );
+        assert!(!metadata_output.exists());
+        let alias_output = ordinary_real.join(".MKIT/refs/alias.mkwu");
+        assert!(
+            layout
+                .export_pending_to(2, &identity, &alias_output)
+                .is_err()
+        );
+        assert!(!ordinary_real.join(".mkit/refs/alias.mkwu").exists());
+        // On normalization-insensitive filesystems this differently spelled
+        // component may resolve to the same metadata directory. The export
+        // guard also compares opened ancestor identities, not just spelling.
+        let normalized_alias = ordinary_real.join(".m\u{212a}it/refs/normalized.mkwu");
+        if normalized_alias.parent().unwrap().is_dir() {
+            assert!(
+                layout
+                    .export_pending_to(2, &identity, &normalized_alias)
+                    .is_err()
+            );
+            assert!(!ordinary_real.join(".mkit/refs/normalized.mkwu").exists());
+        }
+        let reserved_leaf = outside_real.join(".mkit");
+        assert!(
+            layout
+                .export_pending_to(2, &identity, &reserved_leaf)
+                .is_err()
+        );
+        assert!(!reserved_leaf.exists());
+        let mixed_case_leaf = outside_real.join(".MkIt-ScOpEd");
+        assert!(
+            layout
+                .export_pending_to(2, &identity, &mixed_case_leaf)
+                .is_err()
+        );
+        assert!(!mixed_case_leaf.exists());
+        let ordinary_worktree_output = ordinary_real.join("update.mkwu");
+        assert_eq!(
+            layout
+                .export_pending_to(2, &identity, &ordinary_worktree_output)
+                .unwrap(),
+            bytes.len()
+        );
+        assert_eq!(std::fs::read(ordinary_worktree_output).unwrap(), bytes);
+        assert_eq!(
+            layout.read_state().unwrap().pending().unwrap().status(),
+            PendingStatusV1::Prepared
+        );
+        let (other_dir, _other_layout) = fixture();
+        assert!(
+            layout
+                .export_pending_to(2, &identity, &other_dir.path().join("ws/update.mkwu"))
+                .is_err()
+        );
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("alias")).unwrap();
+        assert!(
+            layout
+                .export_pending_to(2, &identity, &dir.path().join("alias/other.mkwu"))
+                .is_err()
+        );
+
+        let target = super::RemotePublicationTargetV1::new(
+            "mkit+file:///tmp/recipient",
+            "repo",
+            "refs/heads/main",
+        )
+        .unwrap();
+        let bound = layout
+            .bind_pending_publication(2, &identity, target, [7; 32])
+            .unwrap();
+        let bound_id = bound.pending().unwrap().identity();
+        layout.begin_publication(3, &bound_id).unwrap();
+        // The old identity/generation cannot export a different candidate or
+        // silently claim the old state. A fresh export is still exact bytes.
+        assert!(matches!(
+            layout.export_pending_to(2, &identity, &outside_real.join("stale.mkwu")),
+            Err(PartialStateError::GenerationMismatch { .. })
+        ));
+        let fresh = outside_real.join("unknown.mkwu");
+        assert_eq!(
+            layout.export_pending_to(4, &bound_id, &fresh).unwrap(),
+            bytes.len()
+        );
+        assert_eq!(std::fs::read(fresh).unwrap(), bytes);
+        let uncertain = outside_real.join("uncertain.mkwu");
+        layout.faults.arm(Fault::ExportBeforeDirSync);
+        assert!(matches!(
+            layout.export_pending_to(4, &bound_id, &uncertain),
+            Err(PartialStateError::DurabilityUncertain(_))
+        ));
+        assert_eq!(std::fs::read(uncertain).unwrap(), bytes);
+        assert_eq!(
+            layout.read_state().unwrap().pending().unwrap().status(),
+            PendingStatusV1::Unknown
+        );
+    }
+
+    #[test]
+    fn acceptance_sync_fault_preserves_replay_identity() {
+        let (_dir, layout) = fixture();
+        offline_pending(&layout);
+        let old = layout.read_state().unwrap().pending().unwrap().identity();
+        let target = super::RemotePublicationTargetV1::new(
+            "mkit+file:///tmp/recipient",
+            "repo",
+            "refs/heads/main",
+        )
+        .unwrap();
+        let bound = layout
+            .bind_pending_publication(2, &old, target, [7; 32])
+            .unwrap();
+        let identity = bound.pending().unwrap().identity();
+        layout.begin_publication(3, &identity).unwrap();
+        // Simulate a definite transport success followed by an interrupted
+        // local acceptance record. Only the same identity may replay.
+        layout.faults.arm(Fault::AfterCurrentSwitch);
+        assert!(matches!(
+            layout.record_outcome(4, &identity, PendingOutcomeV1::Accepted),
+            Err(PartialStateError::DurabilityUncertain(_))
+        ));
+        let reopened = layout.read_state().unwrap();
+        assert!(reopened.pending().is_none());
+        assert_eq!(reopened.workspace().base_revision(), 1);
+        assert!(
+            layout
+                .record_outcome(5, &identity, PendingOutcomeV1::Accepted)
+                .is_ok()
+        );
+        let mut wrong = identity;
+        wrong.candidate_id = [0xff; 32];
+        assert!(
+            layout
+                .record_outcome(5, &wrong, PendingOutcomeV1::Accepted)
+                .is_err()
+        );
     }
 
     /// Selected root files with caller-chosen base contents — the

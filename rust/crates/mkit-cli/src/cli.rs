@@ -20,7 +20,11 @@ commands:
   init              Create a new mkit repository
   workspace create --bundle FILE --base ID (--path PATH... | --accept-bundle-selection) DIR
   workspace status|diff [--cached]|add (--all|-- PATH...)|log
-                    Inspect and stage selected files in an offline scoped workspace
+  workspace commit -m MESSAGE [--author IDENTITY]
+  workspace export --output FILE
+  workspace push [--endpoint URL --repository NAME --ref refs/heads/NAME]
+  workspace abandon --candidate ID --acknowledge-possible-publication
+                    Inspect, stage, sign, export and publish selected files
   add [-A|-u] [-f] <path>...  Stage files for the next commit
   add .             Stage all files under cwd (respects .gitignore/.mkitignore)
   add -A            Stage all changes incl. deletions (no path args)

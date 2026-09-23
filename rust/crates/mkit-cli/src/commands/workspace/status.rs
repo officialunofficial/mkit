@@ -81,6 +81,7 @@ pub(super) fn run(args: &StatusArgs) -> u8 {
         }
         OutputFormat::Human => {
             header(&state);
+            super::pending_lines(&state);
             for file in &files {
                 let raw = file["path"].as_str().unwrap_or("");
                 let path = super::super::c_quote_path(raw).unwrap_or_else(|| raw.to_owned());
