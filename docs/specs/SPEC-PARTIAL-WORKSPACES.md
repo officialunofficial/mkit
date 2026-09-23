@@ -722,13 +722,22 @@ remain caller decisions.
 
 The default recipient budget is 100,000 distinct objects, 256 MiB retained
 canonical bytes, 16 MiB per object, root Tree depth zero through depth 128,
-and 1,000,000 occurrence/work units shared across base, candidate, diff and
-the closure pass. A repeated Tree or chunk occurrence consumes work again even
-when its object bytes are cached once. A Tree reached at multiple depths MUST
-pass the deepest reached depth. The portable selected-file 4 MiB/16 MiB caps
-apply to MKWU changed files, not untouched files in the full recipient's
-snapshot. The source remains responsible for bounding its initial fetch
-allocation; verification bounds returned bytes before retaining or decoding.
+and 1,000,000 occurrence/work units shared across upload intake, base,
+candidate, diff and closure. Before cloning the embedded pack, decoding any
+contained object, or reading the base source, the recipient MUST scan borrowed
+raw pack entries and reject any count, individual canonical payload, or
+aggregate canonical payload that already exceeds its recipient budget. Pack
+framing is excluded from
+canonical-byte accounting. The intake scan reserves two work units per raw
+entry for its own traversal and the subsequent inventory pass; graph traversal
+and edge occurrences consume further units. Work units are bounded traversal
+accounting, not an exact CPU or memory measurement. A repeated Tree or chunk
+occurrence consumes work again even when its object bytes are cached once. A
+Tree reached at multiple depths MUST pass the deepest reached depth. The
+portable selected-file 4 MiB/16 MiB caps apply to MKWU changed files, not
+untouched files in the full recipient's snapshot. The source remains responsible
+for bounding its initial fetch allocation; verification bounds returned bytes
+before retaining or decoding.
 
 The separate generic publisher takes exact MKWU bytes and in-memory exchange
 context: repository identity, exact branch ref, 32-byte operation id, expected

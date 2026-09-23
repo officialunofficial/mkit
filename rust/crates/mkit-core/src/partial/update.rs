@@ -25,6 +25,7 @@ const FIXED_WITHOUT_CHANGES_OR_PACK: usize = 5 + 32 + 32 + 32 + 8;
 thread_local! {
     static PACK_BUILDS: Cell<usize> = const { Cell::new(0) };
     static DECODE_CHUNK_OCCURRENCES: Cell<usize> = const { Cell::new(0) };
+    static DECODE_PACK_CLONES: Cell<usize> = const { Cell::new(0) };
 }
 
 /// Portable explicit raw-object update. It is a carrier, not an mkit object,
@@ -50,6 +51,16 @@ struct DecodedInventory {
     ids: BTreeSet<Hash>,
     objects: BTreeMap<Hash, Object>,
     candidate: Commit,
+}
+
+/// Borrowed-pack intake caps used by the full recipient before MKWU pack
+/// cloning or object decoding. The public portable decoder has no such caps.
+#[derive(Clone, Copy)]
+pub(super) struct RecipientIntakeLimits {
+    pub objects: usize,
+    pub canonical_bytes: usize,
+    pub object_bytes: usize,
+    pub work: usize,
 }
 
 impl PartialUpdate {
@@ -112,6 +123,22 @@ impl PartialUpdate {
     /// candidate signature, and base parent binding. Complete-base semantic
     /// admission remains the later recipient layer.
     pub fn decode(bytes: &[u8], limits: &PartialLimits) -> Result<Self, PartialError> {
+        Self::decode_inner(bytes, limits, None).map(|(update, _)| update)
+    }
+
+    pub(super) fn decode_for_recipient(
+        bytes: &[u8],
+        limits: &PartialLimits,
+        intake: RecipientIntakeLimits,
+    ) -> Result<(Self, usize), PartialError> {
+        Self::decode_inner(bytes, limits, Some(intake))
+    }
+
+    fn decode_inner(
+        bytes: &[u8],
+        limits: &PartialLimits,
+        intake: Option<RecipientIntakeLimits>,
+    ) -> Result<(Self, usize), PartialError> {
         if !limits.is_v1_subset() {
             return Err(PartialError::ValidationBudgetExceeded);
         }
@@ -181,10 +208,18 @@ impl PartialUpdate {
         {
             return Err(PartialError::SubmissionTooLarge);
         }
-        let pack_bytes = cursor.take(encoded_pack_len)?.to_vec();
-        if cursor.remaining() != 0 || pack_key(&pack_bytes) != declared_pack_hash {
+        let borrowed_pack = cursor.take(encoded_pack_len)?;
+        if cursor.remaining() != 0 || pack_key(borrowed_pack) != declared_pack_hash {
             return Err(PartialError::InvalidUpdatePack);
         }
+        let intake_work = if let Some(caps) = intake {
+            preflight_recipient_intake(borrowed_pack, caps)?
+        } else {
+            0
+        };
+        #[cfg(test)]
+        DECODE_PACK_CLONES.with(|clones| clones.set(clones.get() + 1));
+        let pack_bytes = borrowed_pack.to_vec();
         inspect_inventory(&pack_bytes, base_id, candidate_id, &changes, limits)?;
         let update = Self {
             base_id,
@@ -194,8 +229,45 @@ impl PartialUpdate {
             pack_bytes,
         };
         validate_update_shape(&update, limits)?;
-        Ok(update)
+        Ok((update, intake_work))
     }
+}
+
+fn preflight_recipient_intake(
+    pack: &[u8],
+    caps: RecipientIntakeLimits,
+) -> Result<usize, PartialError> {
+    let entries = PackEntries::new(pack).map_err(|_| PartialError::InvalidUpdatePack)?;
+    if !entries.is_raw_only() {
+        return Err(PartialError::InvalidUpdatePack);
+    }
+    let mut count = 0usize;
+    let mut bytes = 0usize;
+    for entry in entries {
+        let PackEntry::Raw { bytes: raw } = entry.map_err(|_| PartialError::InvalidUpdatePack)?
+        else {
+            return Err(PartialError::InvalidUpdatePack);
+        };
+        count = count
+            .checked_add(1)
+            .ok_or(PartialError::RecipientBudgetExceeded)?;
+        bytes = bytes
+            .checked_add(raw.len())
+            .ok_or(PartialError::RecipientBudgetExceeded)?;
+        let work = count
+            .checked_mul(2)
+            .ok_or(PartialError::RecipientBudgetExceeded)?;
+        if count > caps.objects
+            || bytes > caps.canonical_bytes
+            || raw.len() > caps.object_bytes
+            || work > caps.work
+        {
+            return Err(PartialError::RecipientBudgetExceeded);
+        }
+    }
+    count
+        .checked_mul(2)
+        .ok_or(PartialError::RecipientBudgetExceeded)
 }
 
 /// Bind a strict signed Commit to the exact prepared unsigned fields and
@@ -733,5 +805,34 @@ impl<'a> Cursor<'a> {
                 return Err(PartialError::NonCanonical);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod recipient_intake_tests {
+    use super::{
+        DECODE_PACK_CLONES, PartialError, PartialLimits, PartialUpdate, RecipientIntakeLimits,
+    };
+
+    #[test]
+    fn tiny_recipient_budget_rejects_valid_carrier_before_pack_clone() {
+        let bytes = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/golden/partial_update/ordinary_update.bin"
+        ));
+        assert!(PartialUpdate::decode(bytes, &PartialLimits::V1).is_ok());
+        DECODE_PACK_CLONES.with(|clones| clones.set(0));
+        let result = PartialUpdate::decode_for_recipient(
+            bytes,
+            &PartialLimits::V1,
+            RecipientIntakeLimits {
+                objects: 1,
+                canonical_bytes: 1,
+                object_bytes: 1,
+                work: 1,
+            },
+        );
+        assert!(matches!(result, Err(PartialError::RecipientBudgetExceeded)));
+        DECODE_PACK_CLONES.with(|clones| assert_eq!(clones.get(), 0));
     }
 }

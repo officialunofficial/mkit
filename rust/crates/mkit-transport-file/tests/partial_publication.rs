@@ -18,6 +18,8 @@ use mkit_core::{
     Commit, EntryMode, Identity, Object, ObjectStore, RepoLayout, Tree, TreeEntry, serialize,
 };
 use mkit_transport_file::FileTransport;
+use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn update_bytes() -> Vec<u8> {
     std::fs::read(concat!(
@@ -558,5 +560,151 @@ fn missing_packmap_refuses_before_upload() {
     assert!(
         !tx.pack_exists(&PackKey::from_hash(*update.pack_hash()))
             .unwrap()
+    );
+}
+
+#[derive(Clone, Copy)]
+enum PackmapRace {
+    OneConflict,
+    AlwaysConflict,
+    Disappears,
+}
+
+struct RacingPackmap<'a> {
+    inner: &'a FileTransport,
+    root: &'a Path,
+    race: PackmapRace,
+    attempts: AtomicUsize,
+}
+
+impl Transport for RacingPackmap<'_> {
+    fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
+        self.inner.upload_pack(bytes, key)
+    }
+    fn download_pack(&self, _: &PackKey) -> TransportResult<Vec<u8>> {
+        panic!("partial publisher must not download hidden packs or packmap nodes")
+    }
+    fn pack_exists(&self, _: &PackKey) -> TransportResult<bool> {
+        panic!("partial publisher must not inspect recipient pack inventory")
+    }
+    fn update_ref(
+        &self,
+        name: &str,
+        condition: RefWriteCondition,
+        value: &Hash,
+    ) -> TransportResult<()> {
+        self.inner.update_ref(name, condition, value)
+    }
+    fn read_ref(&self, name: &str) -> TransportResult<Option<Hash>> {
+        self.inner.read_ref(name)
+    }
+    fn list_refs(&self, prefix: &str) -> TransportResult<Vec<mkit_core::refs::Ref>> {
+        self.inner.list_refs(prefix)
+    }
+}
+
+impl SingleAttemptAdvance for RacingPackmap<'_> {
+    fn advance_refs_once(
+        &self,
+        head_ref: &str,
+        head_condition: RefWriteCondition,
+        head_value: &Hash,
+        packmap_ref: &str,
+        packmap_condition: RefWriteCondition,
+        packmap_value: &Hash,
+    ) -> TransportResult<AdvanceOutcome> {
+        let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
+        if matches!(self.race, PackmapRace::Disappears) {
+            std::fs::remove_file(self.root.join(packmap_ref)).unwrap();
+            return Ok(AdvanceOutcome::PackmapConflict);
+        }
+        if matches!(self.race, PackmapRace::AlwaysConflict) || attempt == 1 {
+            let prior = self.inner.read_ref(packmap_ref)?.unwrap();
+            let node = mkit_core::transfer::encode_packlist(Some(prior), &[]).unwrap();
+            let node_id = hash(&node);
+            self.inner
+                .upload_blob(&node, &PackKey::from_hash(node_id))?;
+            self.inner
+                .update_ref(packmap_ref, RefWriteCondition::Match(prior), &node_id)?;
+            return Ok(AdvanceOutcome::PackmapConflict);
+        }
+        self.inner.advance_refs_once(
+            head_ref,
+            head_condition,
+            head_value,
+            packmap_ref,
+            packmap_condition,
+            packmap_value,
+        )
+    }
+}
+
+#[test]
+fn packmap_conflict_retries_from_new_tip_without_hidden_download() {
+    let (dir, tx, bytes, update, context) = setup();
+    let race = RacingPackmap {
+        inner: &tx,
+        root: dir.path(),
+        race: PackmapRace::OneConflict,
+        attempts: AtomicUsize::new(0),
+    };
+    assert!(matches!(
+        publish_explicit_update(&race, &bytes, &PartialLimits::V1, &context).unwrap(),
+        PublicationOutcome::Published
+    ));
+    assert_eq!(race.attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        tx.read_ref("refs/heads/main").unwrap(),
+        Some(*update.candidate_id())
+    );
+    let tip = tx.read_ref("refs/mkit/packmap/main").unwrap().unwrap();
+    let appended = decode_packlist(&tx.download_blob(&PackKey::from_hash(tip)).unwrap()).unwrap();
+    assert_eq!(appended.packs, vec![*update.pack_hash()]);
+    let raced = decode_packlist(
+        &tx.download_blob(&PackKey::from_hash(appended.prev.unwrap()))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(raced.packs.is_empty());
+    assert!(raced.prev.is_some());
+}
+
+#[test]
+fn packmap_conflict_exhausts_exactly_three_retries() {
+    let (dir, tx, bytes, update, context) = setup();
+    let race = RacingPackmap {
+        inner: &tx,
+        root: dir.path(),
+        race: PackmapRace::AlwaysConflict,
+        attempts: AtomicUsize::new(0),
+    };
+    assert!(matches!(
+        publish_explicit_update(&race, &bytes, &PartialLimits::V1, &context).unwrap(),
+        PublicationOutcome::PackmapBusy
+    ));
+    assert_eq!(race.attempts.load(Ordering::SeqCst), 4);
+    assert_eq!(
+        tx.read_ref("refs/heads/main").unwrap(),
+        Some(*update.base_id())
+    );
+}
+
+#[test]
+fn missing_packmap_after_conflict_refuses_without_head_change() {
+    let (dir, tx, bytes, update, context) = setup();
+    let race = RacingPackmap {
+        inner: &tx,
+        root: dir.path(),
+        race: PackmapRace::Disappears,
+        attempts: AtomicUsize::new(0),
+    };
+    assert!(matches!(
+        publish_explicit_update(&race, &bytes, &PartialLimits::V1, &context).unwrap(),
+        PublicationOutcome::UnsupportedRecipient
+    ));
+    assert_eq!(race.attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        tx.read_ref("refs/heads/main").unwrap(),
+        Some(*update.base_id())
     );
 }

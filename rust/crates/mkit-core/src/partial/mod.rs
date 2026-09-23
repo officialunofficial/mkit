@@ -88,6 +88,8 @@ pub enum PartialError {
     WorkspaceTooLarge,
     #[error("validation count/depth budget exceeded")]
     ValidationBudgetExceeded,
+    #[error("recipient intake budget exceeded before pack copy or object decoding")]
+    RecipientBudgetExceeded,
     #[error("the replacement batch does not change any selected file")]
     NoChanges,
     #[error("the signed commit does not exactly match the prepared unsigned commit")]

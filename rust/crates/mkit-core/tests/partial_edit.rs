@@ -29,6 +29,27 @@ struct HiddenMissingSource<'a> {
     hidden: Hash,
 }
 
+struct CorruptSource<'a> {
+    store: &'a ObjectStore,
+    corrupted: Hash,
+    bytes: Vec<u8>,
+}
+
+impl mkit_core::verify::ObjectSource for CorruptSource<'_> {
+    fn fetch(
+        &mut self,
+        id: &Hash,
+    ) -> Result<Option<Cow<'_, [u8]>>, mkit_core::verify::VerifyError> {
+        if *id == self.corrupted {
+            return Ok(Some(Cow::Borrowed(&self.bytes)));
+        }
+        self.store
+            .read(id)
+            .map(|bytes| Some(Cow::Owned(bytes)))
+            .map_err(Into::into)
+    }
+}
+
 impl mkit_core::verify::ObjectSource for HiddenMissingSource<'_> {
     fn fetch(
         &mut self,
@@ -49,6 +70,19 @@ impl ObjectSource for CountingSource<'_> {
         assert!(!self.forbidden.contains(id), "hidden object was read");
         self.reads.borrow_mut().push(*id);
         self.store.read(id)
+    }
+}
+
+impl mkit_core::verify::ObjectSource for CountingSource<'_> {
+    fn fetch(
+        &mut self,
+        id: &Hash,
+    ) -> Result<Option<Cow<'_, [u8]>>, mkit_core::verify::VerifyError> {
+        self.reads.borrow_mut().push(*id);
+        self.store
+            .read(id)
+            .map(|bytes| Some(Cow::Owned(bytes)))
+            .map_err(Into::into)
     }
 }
 
@@ -244,6 +278,132 @@ fn export_one_update(fixture: &Fixture) -> Vec<u8> {
         .unwrap()
 }
 
+fn append_varint(out: &mut Vec<u8>, mut value: usize) {
+    while value >= 0x80 {
+        out.push(u8::try_from(value & 0x7f).unwrap() | 0x80);
+        value >>= 7;
+    }
+    out.push(u8::try_from(value).unwrap());
+}
+
+/// Re-sign a candidate after mutating an *unselected* root entry. The
+/// portable decoder still authenticates its exact raw pack and selected path;
+/// only a complete-base recipient can reject the semantic lie.
+fn forge_hidden_candidate(update_bytes: &[u8], change: impl FnOnce(&mut Tree)) -> Vec<u8> {
+    let update = PartialUpdate::decode(update_bytes, &PartialLimits::V1).unwrap();
+    let mut inventory = std::collections::BTreeMap::new();
+    for entry in PackEntries::new(update.pack_bytes()).unwrap() {
+        let PackEntry::Raw { bytes } = entry.unwrap() else {
+            panic!("raw pack")
+        };
+        let object = mkit_core::deserialize(bytes.as_ref()).unwrap();
+        inventory.insert(id_from_object(&object, bytes.as_ref()), bytes.into_owned());
+    }
+    let Object::Commit(mut candidate) =
+        mkit_core::deserialize(inventory.get(update.candidate_id()).unwrap()).unwrap()
+    else {
+        panic!("candidate")
+    };
+    let old_root = candidate.tree_hash;
+    let Object::Tree(mut root) = mkit_core::deserialize(inventory.get(&old_root).unwrap()).unwrap()
+    else {
+        panic!("root")
+    };
+    change(&mut root);
+    let root_object = Object::Tree(root);
+    let root_bytes = serialize(&root_object).unwrap();
+    let new_root = id_from_object(&root_object, &root_bytes);
+    candidate.tree_hash = new_root;
+    let key = mkit_core::KeyPair::from_seed([9; 32]);
+    candidate.signature = sign_commit(&candidate, &key).unwrap().0;
+    let candidate_object = Object::Commit(candidate);
+    let candidate_bytes = serialize(&candidate_object).unwrap();
+    let new_candidate = id_from_object(&candidate_object, &candidate_bytes);
+    inventory.remove(&old_root);
+    inventory.remove(update.candidate_id());
+    inventory.insert(new_root, root_bytes);
+    inventory.insert(new_candidate, candidate_bytes);
+    let mut writer = mkit_core::PackWriter::new_raw_only();
+    for (id, bytes) in &inventory {
+        writer.push_raw(*id, bytes).unwrap();
+    }
+    let pack = writer.finish().unwrap();
+    let pack_hash = mkit_core::pack::pack_key(&pack);
+    let pack_hash_at = update_bytes
+        .windows(32)
+        .position(|window| window == update.pack_hash())
+        .unwrap();
+    let mut forged = update_bytes[..pack_hash_at].to_vec();
+    forged[37..69].copy_from_slice(&new_candidate);
+    forged.extend_from_slice(&pack_hash);
+    forged.extend_from_slice(&(pack.len() as u64).to_be_bytes());
+    append_varint(&mut forged, pack.len());
+    forged.extend_from_slice(&pack);
+    assert!(PartialUpdate::decode(&forged, &PartialLimits::V1).is_ok());
+    forged
+}
+
+type HiddenMutation = Box<dyn FnOnce(&mut Tree)>;
+
+#[test]
+fn recipient_rejects_re_signed_hidden_sibling_subtree_mode_and_symlink_changes() {
+    let fixture = fixture();
+    let valid = export_one_update(&fixture);
+    let new_blob = mkit_core::store_file_object(&fixture.store, b"different hidden bytes").unwrap();
+    let new_tree = tree(
+        &fixture.store,
+        vec![TreeEntry {
+            name: b"grafted.txt".to_vec(),
+            mode: EntryMode::Blob,
+            object_hash: new_blob,
+        }],
+    );
+    let mutations: Vec<HiddenMutation> = vec![
+        Box::new(move |root| {
+            root.entries
+                .iter_mut()
+                .find(|e| e.name == b"hidden.txt")
+                .unwrap()
+                .object_hash = new_blob;
+        }),
+        Box::new(move |root| {
+            root.entries
+                .iter_mut()
+                .find(|e| e.name == b"secret")
+                .unwrap()
+                .object_hash = new_tree;
+        }),
+        Box::new(|root| {
+            root.entries
+                .iter_mut()
+                .find(|e| e.name == b"hidden.txt")
+                .unwrap()
+                .mode = EntryMode::Executable;
+        }),
+        Box::new(move |root| {
+            root.entries
+                .iter_mut()
+                .find(|e| e.name == b"link")
+                .unwrap()
+                .object_hash = new_blob;
+        }),
+    ];
+    for mutate in mutations {
+        let forged = forge_hidden_candidate(&valid, mutate);
+        let mut source = &fixture.store;
+        assert!(matches!(
+            mkit_core::partial::verify_partial_update(
+                fixture.base_id,
+                &forged,
+                &mut source,
+                &PartialLimits::V1,
+                &mkit_core::partial::RecipientLimits::DEFAULT,
+            ),
+            Err(mkit_core::partial::RecipientError::InvalidChange)
+        ));
+    }
+}
+
 #[test]
 fn recipient_checks_hidden_edge_roles_and_chunk_layout() {
     let mut wrong_role = fixture();
@@ -285,6 +445,169 @@ fn recipient_checks_hidden_edge_roles_and_chunk_layout() {
         ),
         Err(mkit_core::partial::RecipientError::InvalidChunkLayout)
     ));
+
+    let mut repeated_chunks = fixture();
+    let chunk = mkit_core::store_file_object(&repeated_chunks.store, b"abc").unwrap();
+    let invalid = put(
+        &repeated_chunks.store,
+        &Object::ChunkedBlob(ChunkedBlob {
+            total_size: 5,
+            chunk_size: 3,
+            chunks: vec![chunk, chunk],
+        }),
+    );
+    replace_hidden_base_entry(&mut repeated_chunks, invalid);
+    let update = export_one_update(&repeated_chunks);
+    let mut source = &repeated_chunks.store;
+    assert!(matches!(
+        mkit_core::partial::verify_partial_update(
+            repeated_chunks.base_id,
+            &update,
+            &mut source,
+            &PartialLimits::V1,
+            &mkit_core::partial::RecipientLimits::DEFAULT,
+        ),
+        Err(mkit_core::partial::RecipientError::InvalidChunkLayout)
+    ));
+}
+
+#[test]
+fn recipient_rechecks_shared_tree_at_its_deepest_occurrence() {
+    let mut fixture = fixture();
+    let nested = tree(
+        &fixture.store,
+        vec![TreeEntry {
+            name: b"again".to_vec(),
+            mode: EntryMode::Tree,
+            object_hash: fixture.shared_tree,
+        }],
+    );
+    let Object::Remix(mut base) = fixture.store.read_object(&fixture.base_id).unwrap() else {
+        panic!("base")
+    };
+    let Object::Tree(mut root) = fixture.store.read_object(&base.tree_hash).unwrap() else {
+        panic!("root")
+    };
+    root.entries
+        .iter_mut()
+        .find(|e| e.name == b"secret")
+        .unwrap()
+        .object_hash = nested;
+    base.tree_hash = put(&fixture.store, &Object::Tree(root));
+    let key = mkit_core::KeyPair::from_seed([7; 32]);
+    base.signature = sign_remix(&base, &key).unwrap().0;
+    fixture.base_id = put(&fixture.store, &Object::Remix(base));
+    fixture.hidden_ids.insert(nested);
+    let update = export_one_update(&fixture);
+    let mut source = &fixture.store;
+    let received = mkit_core::partial::verify_partial_update(
+        fixture.base_id,
+        &update,
+        &mut source,
+        &PartialLimits::V1,
+        &mkit_core::partial::RecipientLimits::DEFAULT,
+    )
+    .unwrap();
+    assert_eq!(received.usage().max_tree_depth, 2);
+    let limits = mkit_core::partial::RecipientLimits {
+        max_tree_depth: 1,
+        ..Default::default()
+    };
+    assert!(matches!(
+        mkit_core::partial::verify_partial_update(
+            fixture.base_id,
+            &update,
+            &mut source,
+            &PartialLimits::V1,
+            &limits,
+        ),
+        Err(mkit_core::partial::RecipientError::BudgetExceeded)
+    ));
+}
+
+#[test]
+fn recipient_rejects_substituted_and_noncanonical_source_bytes() {
+    let fixture = fixture();
+    let update = export_one_update(&fixture);
+    let hidden = *fixture.hidden_ids.iter().next().unwrap();
+    let substitute = serialize(&Object::Blob(Blob {
+        data: b"substitute".to_vec(),
+    }))
+    .unwrap();
+    let mut noncanonical = fixture.store.read(&hidden).unwrap();
+    noncanonical.push(0);
+    for bytes in [substitute, noncanonical] {
+        let mut source = CorruptSource {
+            store: &fixture.store,
+            corrupted: hidden,
+            bytes,
+        };
+        assert!(matches!(
+            mkit_core::partial::verify_partial_update(
+                fixture.base_id, &update, &mut source, &PartialLimits::V1,
+                &mkit_core::partial::RecipientLimits::DEFAULT,
+            ),
+            Err(mkit_core::partial::RecipientError::Corrupt(id)) if id == hidden
+        ));
+    }
+}
+
+#[test]
+fn large_valid_carrier_tiny_recipient_budget_reads_no_source() {
+    let fixture = fixture();
+    let verified = verified(&fixture);
+    let replacements = fixture
+        .paths
+        .iter()
+        .enumerate()
+        .map(|(seed, path)| {
+            let bytes = (0usize..(4 * 1024 * 1024 - 1))
+                .map(|index| u8::try_from((index.wrapping_mul(31) + seed) % 251).unwrap())
+                .collect();
+            FileReplacement::bytes(path.clone(), bytes)
+        })
+        .collect::<Vec<_>>();
+    let limits = PartialLimits::V1;
+    let prepared = replace_files(&verified, &replacements, &limits).unwrap();
+    let signer = mkit_core::KeyPair::from_seed([9; 32]);
+    let unsigned = prepare_partial_commit(
+        &verified,
+        &prepared,
+        Identity::opaque(b"large carrier".to_vec()),
+        signer.public.0,
+        b"large update".to_vec(),
+        1_700_000_101,
+        &limits,
+    )
+    .unwrap();
+    let mut signed = unsigned.clone();
+    signed.signature = sign_commit(&signed, &signer).unwrap().0;
+    let bytes = export_partial_update(&verified, &prepared, &unsigned, &signed, &limits)
+        .unwrap()
+        .encode(&limits)
+        .unwrap();
+    assert!(bytes.len() > 10 * 1024 * 1024);
+    assert!(PartialUpdate::decode(&bytes, &limits).is_ok());
+    let mut source = CountingSource {
+        store: &fixture.store,
+        forbidden: BTreeSet::new(),
+        reads: RefCell::new(Vec::new()),
+    };
+    let recipient = mkit_core::partial::RecipientLimits {
+        max_object_bytes: 1,
+        ..Default::default()
+    };
+    assert!(matches!(
+        mkit_core::partial::verify_partial_update(
+            fixture.base_id,
+            &bytes,
+            &mut source,
+            &limits,
+            &recipient,
+        ),
+        Err(mkit_core::partial::RecipientError::BudgetExceeded)
+    ));
+    assert!(source.reads.borrow().is_empty());
 }
 
 #[test]

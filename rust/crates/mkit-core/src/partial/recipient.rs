@@ -11,6 +11,7 @@ use crate::verify::{ClosureReport, ObjectSource, VerifyError, verify_closure_str
 
 use super::recipient_diff::verify_diff;
 use super::recipient_graph::{CachedSource, RecipientGraph};
+use super::update::RecipientIntakeLimits;
 use super::{PartialError, PartialLimits, PartialPath, PartialUpdate};
 
 /// Independent full-snapshot limits. These never cap untouched files at the
@@ -22,8 +23,9 @@ pub struct RecipientLimits {
     pub max_object_bytes: usize,
     /// Root Tree has depth zero; each Tree-to-Tree edge adds one.
     pub max_tree_depth: usize,
-    /// Shared across base, result, actual diff, and closure verification.
-    /// Repeated path and chunk occurrences count again.
+    /// Shared across upload intake, base, result, actual diff, and closure.
+    /// The intake pass reserves two units per raw inventory entry; repeated
+    /// path and chunk occurrences in graph walks count again.
     pub max_occurrences: usize,
 }
 
@@ -43,7 +45,8 @@ impl Default for RecipientLimits {
     }
 }
 
-/// Resource use across the complete base, candidate, diff and closure pass.
+/// Resource use across upload intake, complete base, candidate, diff and closure.
+/// Work units are traversal accounting, not an exact CPU or memory measure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RecipientUsage {
     pub objects: usize,
@@ -137,11 +140,25 @@ pub fn verify_partial_update<S: ObjectSource + ?Sized>(
     portable: &PartialLimits,
     recipient: &RecipientLimits,
 ) -> Result<VerifiedPartialUpdate, RecipientError> {
-    let update = PartialUpdate::decode(update_bytes, portable)?;
+    let (update, intake_work) = PartialUpdate::decode_for_recipient(
+        update_bytes,
+        portable,
+        RecipientIntakeLimits {
+            objects: recipient.max_objects,
+            canonical_bytes: recipient.max_canonical_bytes,
+            object_bytes: recipient.max_object_bytes,
+            work: recipient.max_occurrences,
+        },
+    )
+    .map_err(|error| match error {
+        PartialError::RecipientBudgetExceeded => RecipientError::BudgetExceeded,
+        other => RecipientError::Portable(other),
+    })?;
     if *update.base_id() != expected_base {
         return Err(RecipientError::BaseMismatch);
     }
     let mut graph = RecipientGraph::new(source, *recipient);
+    graph.charge(intake_work)?;
     // Complete, source-only base traversal precedes access to the upload.
     graph.validate_base(expected_base)?;
     let uploaded = inventory(&update, recipient)?;
