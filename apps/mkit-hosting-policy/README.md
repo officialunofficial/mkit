@@ -12,6 +12,10 @@ decimal strings, so large generations and times never pass through a
 JavaScript Number. Build with `wasm-pack build --target nodejs --features
 hosting-wasm` for local parity testing. The generated `pkg/` and `target/`
 directories are ignored.
+The Rust export rejects encoded input above the rounded-up base64 quantum
+bound before decoding, and decoded bytes above the binary envelope
+cap before re-encoding. JavaScript's caller-owned string and wasm-bindgen's
+inbound copy already exist at that boundary; this is not an exact RSS bound.
 
 This package path-depends on portable `mkit-core` validation primitives.
 Neither mkit-core nor default `mkit-wasm` depends on this package.

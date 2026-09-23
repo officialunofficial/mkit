@@ -165,8 +165,14 @@ policy generation, and an existing branch ref equal to signed `initial_base`.
 It does not create a ref, inspect the object graph, or certify readiness.
 The initial base remains immutable within an incarnation. A separate mutable
 `workspace_head` starts at that base; future accepted updates advance it.
-Renewal reanchors to the then-current owner-reviewed ref. Foreign ref moves
-fail closed; future admission must check registry head and actual ref.
+Renewal reanchors to the then-current owner-reviewed ref: the new signed
+`initial_base` MUST match that live ref, but need not equal the prior
+`workspace_head`. A stale-base renewal conflicts. Explicit owner renewal never
+inherits old snapshot readiness; `GetGrant` still reports `not_checked` and
+later private read/admission must bind readiness to the new incarnation,
+workspace head and catalog. A foreign ref move fails closed for **use of an
+old grant**; owner-authorized reanchoring is allowed. Future admission must
+check registry head and actual ref.
 Revoke requires exact current generation and grant ID and tombstones the
 active row. It may revoke an expired or stale-generation grant under a healthy
 current policy. A fresh new-nonce second revocation conflicts.

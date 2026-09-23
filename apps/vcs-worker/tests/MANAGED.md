@@ -5,8 +5,18 @@ SQLite Durable Object. `tests/managed_grants.py` runs the owner-only MKHG lifecy
 the same local Worker build. It covers registration, exact signed nonce
 replay, concurrent renewal CAS, revocation, policy-generation invalidation
 and live GetGrant; `--verify-existing` checks restart persistence. Set
-`MKIT_GRANT_TEST_STATE` to the isolated Wrangler `--persist-to` directory for
-before/after SQLite table assertions on denied intake. The local-only
+`MKIT_GRANT_TEST_STATE` to the isolated Wrangler `--persist-to` directory;
+the script refuses every mode without it, so no-effect claims always compare
+real SQLite tables. Separate fresh state supports `--verify-expiry-replay`.
+After the lifecycle and a restart, `--verify-capacity workspace|incarnation|bytes`
+tests each independent lowered ceiling, with Wrangler restarted each time
+under limits `1,5,1690`, `2,4,1690` or `2,5,1352` for this fixture.
+`--verify-storage-fault` requires a test-only SQLite `BEFORE UPDATE` abort
+trigger; `--verify-corrupt-schema` requires dropping `host_grant_meta`, both
+only while Wrangler is stopped on disposable state. A separate fresh state
+supports `--seed-overflow`, then (after stopping Wrangler)
+`--patch-overflow-offline`, then (after restart) `--verify-generation-overflow`.
+Never patch a live or non-disposable database. The local-only
 `test-faults` feature may lower registry ceilings with
 `--var GRANT_TEST_LIMITS:<workspace_count>,<incarnation_count>,<envelope_bytes>`;
 each value must be positive and no greater than the production profile.

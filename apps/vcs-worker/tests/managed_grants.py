@@ -21,17 +21,18 @@ from managed_data import OWNER, READER, WRITER, STRANGER, field, rpc, code, vari
 
 WORKSPACE = bytes([11]) * 32
 BASE = bytes([12]) * 32
+REANCHORED = bytes([13]) * 32
 REF = "refs/heads/grant-test"
 
 
 def grant(generation, authority, *, now=None, initial_base=BASE, subject=READER,
-          paths=(("selected.txt", 3),), expires_delta=60_000):
+          paths=(("selected.txt", 3),), expires_delta=60_000, workspace_id=WORKSPACE):
     now = int(time.time() * 1000) if now is None else now
     body = bytearray(b"MKHG\x01")
     for value in ("http://localhost:8791", "managed-test", REF):
         value = value.encode()
         body.extend(varint(len(value)) + value)
-    body.extend(WORKSPACE)
+    body.extend(workspace_id)
     for key in (OWNER, subject, WRITER):
         body.extend(key.verify_key.encode())
     body.extend(struct.pack(">QQ", authority, generation))
@@ -70,7 +71,7 @@ def get():
 def storage_snapshot():
     state = os.environ.get("MKIT_GRANT_TEST_STATE")
     if not state:
-        return None
+        raise RuntimeError("set MKIT_GRANT_TEST_STATE to the isolated Wrangler --persist-to directory")
     files = list(Path(state).glob("v3/do/mkit-vcs-managed-local-test-RefStore/[0-9a-f]*.sqlite"))
     assert len(files) == 1, files
     with sqlite3.connect(files[0]) as db:
@@ -78,33 +79,93 @@ def storage_snapshot():
         return {name: list(db.execute("SELECT * FROM " + name + " ORDER BY 1")) for name in tables}
 
 
+def state_db():
+    state = os.environ["MKIT_GRANT_TEST_STATE"]
+    files = list(Path(state).glob("v3/do/mkit-vcs-managed-local-test-RefStore/[0-9a-f]*.sqlite"))
+    assert len(files) == 1, files
+    return files[0]
+
+
 def main():
+    if not os.environ.get("MKIT_GRANT_TEST_STATE"):
+        raise RuntimeError("MKIT_GRANT_TEST_STATE is required for SQLite no-effect evidence")
+    if "--patch-overflow-offline" in sys.argv:
+        # Run only after stopping Wrangler, in this disposable test database.
+        now = int(time.time() * 1000)
+        signed = grant(2**64 - 1, 1, now=now)
+        raw = base64.urlsafe_b64decode(signed + "==")
+        digest = blake3.blake3(b"mkit.hosted-workspace-grant-id.v1\0" + raw).hexdigest()
+        with sqlite3.connect(state_db()) as db:
+            db.execute("UPDATE host_grant_workspaces SET current_generation=? WHERE workspace_id=?",
+                       (str(2**64 - 1), WORKSPACE.hex()))
+            db.execute("UPDATE host_grant_incarnations SET grant_generation=?,grant_id=?,envelope=?,not_before=?,expires=? WHERE workspace_id=?",
+                       (str(2**64 - 1), digest, signed, str(now - 1000), str(now + 60_000), WORKSPACE.hex()))
+        print("offline disposable state patched to valid signed u64::MAX incarnation")
+        return
+    if "--verify-generation-overflow" in sys.argv:
+        row = expect(200, get())
+        assert row["grant_generation"] == str(2**64 - 1), row
+        before = storage_snapshot()
+        expect(409, register(2**64 - 1, grant(1, 1))[0])
+        assert storage_snapshot() == before
+        print("u64 grant-generation overflow conflicts without SQLite effects")
+        return
+    if "--seed-overflow" in sys.argv:
+        expect(200, admin("InitializePolicy", b'{"version":1,"collaborators":[]}'))
+        assert code(*rpc("UpdateRef", field(1, REF) + field(2, 2) + field(4, BASE), OWNER)[:2]) == "ok"
+        expect(200, register(0, grant(1, 1))[0])
+        print("overflow fixture seeded; stop Wrangler before offline patch")
+        return
+    if "--verify-expiry-replay" in sys.argv:
+        expect(200, admin("InitializePolicy", b'{"version":1,"collaborators":[]}'))
+        assert code(*rpc("UpdateRef", field(1, REF) + field(2, 2) + field(4, BASE), OWNER)[:2]) == "ok"
+        credential = grant(1, 1, expires_delta=3_000)
+        registered, body = register(0, credential)
+        first = expect(200, registered)
+        time.sleep(3.5)
+        assert expect(200, get())["time_valid"] is False
+        before = storage_snapshot()
+        assert send("/mkit/host/v1/RegisterGrant", body, signed_headers=registered[3])[1] == first
+        assert storage_snapshot() == before
+        expect(400, register(1, grant(2, 1, expires_delta=-1))[0])
+        assert storage_snapshot() == before
+        print("exact auth-TTL replay survived credential expiry without SQLite mutation")
+        return
     if "--verify-corrupt-schema" in sys.argv:
         before = storage_snapshot()
         expect(503, get())
-        expect(503, register(3, grant(4, 2))[0])
+        expect(503, register(4, grant(5, 2))[0])
         assert storage_snapshot() == before
         print("partial grant schema failed closed without auto-repair")
         return
     if "--verify-capacity" in sys.argv:
+        kind = sys.argv[sys.argv.index("--verify-capacity") + 1]
+        assert kind in ("workspace", "incarnation", "bytes"), kind
         before = storage_snapshot()
-        expect(429, register(3, grant(4, 2))[0])
+        meta = before["host_grant_meta"][0]
+        assert (meta[2], meta[3]) == ("1", "4"), meta
+        if kind == "workspace":
+            candidate = register(0, grant(1, 2, initial_base=REANCHORED,
+                                          workspace_id=bytes([21]) * 32))[0]
+        else:
+            candidate = register(4, grant(5, 2, initial_base=REANCHORED))[0]
+        expect(429, candidate)
         assert storage_snapshot() == before
-        assert expect(200, get())["grant_generation"] == "3"
-        print("lowered registry capacity denied without any SQLite effect")
+        assert expect(200, get())["grant_generation"] == "4"
+        print("lowered", kind, "registry capacity denied without any SQLite effect")
         return
     if "--verify-storage-fault" in sys.argv:
         before = storage_snapshot()
         row = expect(200, get())
-        expect(503, revoke(3, row["grant_id"])[0])
+        expect(503, revoke(4, row["grant_id"])[0])
         assert storage_snapshot() == before
         assert expect(200, get())["status"] == "active"
         print("injected SQLite write failure rolled back grant and replay")
         return
     if "--verify-existing" in sys.argv:
         row = expect(200, get())
-        assert row["grant_generation"] == "3" and row["status"] == "active", row
-        assert row["workspace_head"] == BASE.hex() and row["snapshot_readiness"] == "not_checked"
+        assert row["grant_generation"] == "4" and row["status"] == "active", row
+        assert row["workspace_head"] == REANCHORED.hex() and row["snapshot_readiness"] == "not_checked"
         print("grant registry survived workerd restart")
         return
 
@@ -161,15 +222,24 @@ def main():
     third = expect(200, register(2, next_grant)[0])
     assert third["grant_generation"] == "3"
     assert expect(200, get())["grant_generation"] == "3"
+    assert code(*rpc("UpdateRef", field(1, REF) + field(2, 1) + field(4, REANCHORED), OWNER)[:2]) == "ok"
+    before = storage_snapshot()
+    expect(409, register(3, grant(4, 1, initial_base=BASE))[0])
+    assert storage_snapshot() == before
+    fourth = expect(200, register(3, grant(4, 1, initial_base=REANCHORED))[0])
+    assert fourth["grant_generation"] == "4"
+    reanchored = expect(200, get())
+    assert reanchored["workspace_head"] == REANCHORED.hex()
+    assert reanchored["snapshot_readiness"] == "not_checked"
     replacement = b'{"version":1,"expected_generation":"1","collaborators":[]}'
     expect(200, admin("ReplacePolicy", replacement))
     stale = expect(200, get())
     assert not stale["authority_generation_matches"]
     assert stale["status"] == "active" and stale["snapshot_readiness"] == "not_checked"
-    expect(400, register(3, grant(4, 1))[0])
-    expect(400, register(3, grant(4, 2, expires_delta=-1))[0])
+    expect(400, register(4, grant(5, 1, initial_base=REANCHORED))[0])
+    expect(400, register(4, grant(5, 2, initial_base=REANCHORED, expires_delta=-1))[0])
     assert send("/mkit/host/v1/RegisterGrant", body, signed_headers=registered[3])[1] == first
-    expect(409, register(3, grant(4, 2, subject=STRANGER))[0])
+    expect(409, register(4, grant(5, 2, initial_base=REANCHORED, subject=STRANGER))[0])
     assert code(*rpc("ReadRef", field(1, REF), READER)[:2]) == "permission_denied"
     print("owner registration, CAS, replay, revocation, renewal, policy invalidation passed")
 

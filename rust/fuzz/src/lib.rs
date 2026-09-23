@@ -1233,6 +1233,10 @@ mod tests {
     fn hosted_grant_target_runs_within_caps() {
         run_iterated_unit(hosted_grant_one_iteration).expect("guardrails held");
         let valid = std::fs::read("../tests/golden/hosted-workspace-grants/valid.bin").unwrap();
+        assert!(
+            mkit_hosting_policy::verify_signature(&valid).is_ok(),
+            "pinned valid seed must verify"
+        );
         hosted_grant_one_iteration(&valid);
         let mut changed = valid;
         changed[0] ^= 1;
