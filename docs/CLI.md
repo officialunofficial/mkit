@@ -224,7 +224,7 @@ Working-tree commands:
   it saves one pending candidate and reports it as not published. The syntax
   for export is `mkit workspace export --output FILE [--format human|json]`;
   it writes the exact saved update bytes without overwriting an existing destination. The output
-  must be outside every scoped root and its metadata (for example, an existing
+  must be outside every scoped root and all `.mkit` / `.mkit-scoped` metadata (for example, an existing
   directory such as `/tmp` or a sibling directory), and export does not
   advance the base. An unknown candidate cannot be made safe by re-export.
   `mkit workspace push [--endpoint URL --repository NAME --ref refs/heads/NAME]

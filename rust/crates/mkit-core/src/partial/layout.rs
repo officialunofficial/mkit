@@ -166,6 +166,40 @@ fn open_dir_chain(path: &Path) -> Result<DirFd, PartialStateError> {
     Ok(fd)
 }
 
+/// Open an external export parent and refuse a component that physically
+/// resolves to a repository metadata directory, including case/normalization
+/// aliases on filesystems that expose the same inode under another spelling.
+fn open_export_parent(path: &Path) -> Result<DirFd, PartialStateError> {
+    debug_assert!(path.is_absolute());
+    let mut dir = sys::open_dir_path(Path::new("/")).map_err(|e| sys_err(PathBuf::from("/"), e))?;
+    for component in path.components().skip(1) {
+        let next = sys::open_dir(&dir, component.as_os_str().as_bytes())
+            .map_err(|e| sys_err(path.to_path_buf(), e))?;
+        let actual = next
+            .metadata()
+            .map_err(|e| sys_err(path.to_path_buf(), e))?;
+        for reserved in [b".mkit".as_slice(), b".mkit-scoped".as_slice()] {
+            match sys::open_dir(&dir, reserved) {
+                Ok(metadata_dir) => {
+                    let metadata = metadata_dir
+                        .metadata()
+                        .map_err(|e| sys_err(path.to_path_buf(), e))?;
+                    if actual.dev() == metadata.dev() && actual.ino() == metadata.ino() {
+                        return Err(unsafe_entry(
+                            path.to_path_buf(),
+                            "export inside repository metadata",
+                        ));
+                    }
+                }
+                Err(error) if error.is_not_found() || error.is_not_dir() => {}
+                Err(error) => return Err(sys_err(path.to_path_buf(), error)),
+            }
+        }
+        dir = next;
+    }
+    Ok(dir)
+}
+
 /// Materialize one verified selected file inside `root_fd`,
 /// `mkdirat`-ing intermediate components and writing the leaf with its
 /// exact mode. `created_dirs` records every directory this creation made
@@ -339,13 +373,23 @@ impl ScopedWorkspaceLayout {
                 "parent traversal is not an export destination",
             ));
         }
+        if absolute.components().any(|component| {
+            matches!(component, std::path::Component::Normal(name)
+                if name.as_bytes().eq_ignore_ascii_case(b".mkit")
+                    || name.as_bytes().eq_ignore_ascii_case(b".mkit-scoped"))
+        }) {
+            return Err(unsafe_entry(
+                output.to_path_buf(),
+                "export into repository metadata is forbidden",
+            ));
+        }
         if check_scoped_boundary(parent).is_err() {
             return Err(unsafe_entry(
                 output.to_path_buf(),
                 "export inside a scoped workspace boundary",
             ));
         }
-        let dir = open_dir_chain(parent)?;
+        let dir = open_export_parent(parent)?;
         let leaf = name.as_bytes();
         if !safe_component(leaf) {
             return Err(unsafe_entry(

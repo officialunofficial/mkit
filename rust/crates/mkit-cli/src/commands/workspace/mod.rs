@@ -194,7 +194,7 @@ pub(super) fn envelope(state: &ScopedWorkspaceState, command: &str) -> Value {
         "coverage": {"content":"selected-files","history":"partial","verification":"selected-only"},
         "pending": pending,
         "target": target,
-        "transport_guarantee": "single-attempt-file-no-durable-results",
+        "supported_publication_transport": "single-attempt-file-no-durable-results",
     })
 }
 
@@ -221,7 +221,7 @@ pub(super) fn pending_lines(state: &ScopedWorkspaceState) {
             target.exact_ref()
         );
     }
-    println!("File publication: single attempt, no durable result ledger.");
+    println!("Supported file publication: single attempt, no durable result ledger.");
 }
 
 pub(super) fn print_json(value: &Value) {

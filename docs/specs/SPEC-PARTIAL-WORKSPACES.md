@@ -769,7 +769,9 @@ managed admission.
 An offline signed candidate is recorded as Prepared with no required target or
 operation. Export copies its exact persisted MKWU bytes to a new external file
 and does not alter its publication state. An export after Unknown MUST retain
-Unknown. Export does not advance the base or prove recipient acceptance.
+Unknown. Its destination MUST be outside scoped roots and repository metadata
+(`.mkit` or `.mkit-scoped`), including filesystem aliases to those metadata
+directories. Export does not advance the base or prove recipient acceptance.
 
 Before the first publication attempt, one local transaction binds the pending
 candidate to an exact descriptive endpoint, repository identity, branch ref,

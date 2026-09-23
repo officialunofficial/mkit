@@ -3052,6 +3052,62 @@ mod tests {
                 .export_pending_to(2, &identity, &dir.path().join("ws/file.txt"))
                 .is_err()
         );
+        let ordinary = tempdir().unwrap();
+        let _ordinary_store = ObjectStore::init(&RepoLayout::single(ordinary.path())).unwrap();
+        let ordinary_real = ordinary.path().canonicalize().unwrap();
+        std::fs::create_dir_all(ordinary_real.join(".mkit/refs")).unwrap();
+        let metadata_output = ordinary_real.join(".mkit/refs/update.mkwu");
+        assert!(
+            layout
+                .export_pending_to(2, &identity, &metadata_output)
+                .is_err()
+        );
+        assert!(!metadata_output.exists());
+        let alias_output = ordinary_real.join(".MKIT/refs/alias.mkwu");
+        assert!(
+            layout
+                .export_pending_to(2, &identity, &alias_output)
+                .is_err()
+        );
+        assert!(!ordinary_real.join(".mkit/refs/alias.mkwu").exists());
+        // On normalization-insensitive filesystems this differently spelled
+        // component may resolve to the same metadata directory. The export
+        // guard also compares opened ancestor identities, not just spelling.
+        let normalized_alias = ordinary_real.join(".m\u{212a}it/refs/normalized.mkwu");
+        if normalized_alias.parent().unwrap().is_dir() {
+            assert!(
+                layout
+                    .export_pending_to(2, &identity, &normalized_alias)
+                    .is_err()
+            );
+            assert!(!ordinary_real.join(".mkit/refs/normalized.mkwu").exists());
+        }
+        let reserved_leaf = outside_real.join(".mkit");
+        assert!(
+            layout
+                .export_pending_to(2, &identity, &reserved_leaf)
+                .is_err()
+        );
+        assert!(!reserved_leaf.exists());
+        let mixed_case_leaf = outside_real.join(".MkIt-ScOpEd");
+        assert!(
+            layout
+                .export_pending_to(2, &identity, &mixed_case_leaf)
+                .is_err()
+        );
+        assert!(!mixed_case_leaf.exists());
+        let ordinary_worktree_output = ordinary_real.join("update.mkwu");
+        assert_eq!(
+            layout
+                .export_pending_to(2, &identity, &ordinary_worktree_output)
+                .unwrap(),
+            bytes.len()
+        );
+        assert_eq!(std::fs::read(ordinary_worktree_output).unwrap(), bytes);
+        assert_eq!(
+            layout.read_state().unwrap().pending().unwrap().status(),
+            PendingStatusV1::Prepared
+        );
         let (other_dir, _other_layout) = fixture();
         assert!(
             layout

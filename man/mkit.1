@@ -105,7 +105,10 @@ it saves one pending candidate and does not publish or reset the stage.
 requires
 .Fl Fl output Ar FILE
 and writes the exact saved update without overwriting an existing file or
-advancing the base. The destination must be outside every scoped root and its
+advancing the base. The destination must be outside every scoped root and all
+.Pa .mkit
+or
+.Pa .mkit-scoped
 metadata.
 For example, use an existing directory outside the workspace such as
 .Pa /tmp

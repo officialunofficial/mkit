@@ -109,6 +109,10 @@ fn user_signer(xdg: &Path) -> tempfile::TempDir {
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "end-to-end stage, signature, export and abandon assertions share one fixture"
+)]
 fn offline_commit_signs_stage_a_exports_exact_bytes_and_keeps_working_b() {
     let (temp, workspace) = setup("plain_file.bin");
     let xdg = temp.path().join("xdg");
@@ -168,12 +172,11 @@ fn offline_commit_signs_stage_a_exports_exact_bytes_and_keeps_working_b() {
     let entries = mkit_core::pack::PackEntries::new(update.pack_bytes()).unwrap();
     let mut candidate = None;
     for entry in entries {
-        if let mkit_core::pack::PackEntry::Raw { bytes } = entry.unwrap() {
-            if let Ok(mkit_core::object::Object::Commit(commit)) =
+        if let mkit_core::pack::PackEntry::Raw { bytes } = entry.unwrap()
+            && let Ok(mkit_core::object::Object::Commit(commit)) =
                 mkit_core::deserialize(bytes.as_ref())
-            {
-                candidate = Some(commit);
-            }
+        {
+            candidate = Some(commit);
         }
     }
     let candidate = candidate.expect("ordinary signed candidate in raw update pack");
@@ -250,6 +253,10 @@ fn missing_scoped_signer_and_noop_leave_no_pending() {
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "end-to-end file publication, conflict and crash cases share a full-clone fixture"
+)]
 fn file_push_keeps_hidden_base_and_full_clone_reads_candidate() {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("source");
