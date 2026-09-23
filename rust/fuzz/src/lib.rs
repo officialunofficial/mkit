@@ -51,11 +51,12 @@ pub fn staged_update_one_iteration(input: &[u8]) {
         Blob, Commit, EntryMode, Identity, Object, Tree, TreeEntry, id_from_object,
     };
     use mkit_core::partial::{
-        CheckedMkwu, PartialLimits, SnapshotRole, StagedInventoryCursor, StagedUpdateLimitsV1,
-        StagedValidationContext, advance_changed_pair, advance_required_file,
-        advance_staged_inventory, apply_changed_accounting, apply_inventory_accounting,
-        apply_required_accounting, default_staged_inspection_limits, inspect_snapshot_object,
-        inspect_staged_candidate, inspect_staged_inventory_object, start_changed_pairs,
+        ChangedPairRecord, CheckedMkwu, PartialLimits, RequiredFileRecord, SnapshotRole,
+        StagedInventoryCursor, StagedUpdateError, StagedUpdateLimitsV1, StagedValidationContext,
+        advance_changed_pair, advance_required_file, advance_staged_inventory,
+        apply_changed_accounting, apply_inventory_accounting, apply_required_accounting,
+        default_staged_inspection_limits, inspect_snapshot_object, inspect_staged_candidate,
+        inspect_staged_inventory_object, start_changed_pairs,
     };
     use mkit_core::serialize::serialize;
     use mkit_core::sign::sign_commit;
@@ -197,6 +198,35 @@ pub fn staged_update_one_iteration(input: &[u8]) {
         .unwrap();
         usage = apply_changed_accounting(usage, &page, &[], &context).unwrap();
         assert_eq!(page.matched_indices(), &[0]);
+        let pair_selector = input.get(1).copied().unwrap_or(0) % 3;
+        let mut wrong_old_id = pair.old_id();
+        wrong_old_id[0] ^= 1;
+        let invalid_pair = ChangedPairRecord::Page {
+            old_id: if pair_selector == 1 {
+                wrong_old_id
+            } else {
+                pair.old_id()
+            },
+            new_id: pair.new_id(),
+            path: if pair_selector == 2 {
+                vec![b"outside".to_vec()]
+            } else {
+                Vec::new()
+            },
+            next_index: if pair_selector == 0 { u32::MAX } else { 0 },
+        };
+        let pair_result = advance_changed_pair(
+            &invalid_pair,
+            &old_tree_fact,
+            &new_tree_fact,
+            &context,
+            width,
+        );
+        if pair_selector == 2 {
+            assert!(matches!(pair_result, Err(StagedUpdateError::Invalid)));
+        } else {
+            assert!(matches!(pair_result, Err(StagedUpdateError::Inconsistent)));
+        }
         let file_record = &page.files()[0];
         let file_id = file_record.expected_file_id();
         let file_fact = inspect_snapshot_object(
@@ -206,6 +236,24 @@ pub fn staged_update_one_iteration(input: &[u8]) {
             context.inspection(),
         )
         .unwrap();
+        let mut wrong_file_id = file_id;
+        wrong_file_id[0] ^= 1;
+        let invalid_file = RequiredFileRecord::Visit {
+            change_index: if input.get(2).copied().unwrap_or(0) & 1 == 0 {
+                u32::MAX
+            } else {
+                file_record.change_index()
+            },
+            expected_file_id: if input.get(2).copied().unwrap_or(0) & 1 == 0 {
+                file_id
+            } else {
+                wrong_file_id
+            },
+        };
+        assert!(matches!(
+            advance_required_file(&invalid_file, &file_fact, &[], width, &usage, &context),
+            Err(StagedUpdateError::Inconsistent)
+        ));
         let file =
             advance_required_file(file_record, &file_fact, &[], width, &usage, &context).unwrap();
         required.insert(file_id);
@@ -214,15 +262,6 @@ pub fn staged_update_one_iteration(input: &[u8]) {
         assert_eq!(usage.changed_total_bytes, 4096);
         let supplied_ids = inventory.keys().copied().collect::<BTreeSet<_>>();
         assert_eq!(required, supplied_ids);
-        let mut missing = supplied_ids.clone();
-        missing.remove(&file_id);
-        assert_ne!(
-            missing, required,
-            "missing origin cannot be repaired by hidden data"
-        );
-        let mut extra = supplied_ids;
-        extra.insert([0xff; 32]);
-        assert_ne!(extra, required, "unrelated raw supply refuses");
         let mut low_portable = PartialLimits::V1;
         low_portable.max_object_bytes = entry.payload().len() - 1;
         let mut low_inspection = default_staged_inspection_limits();
@@ -1727,7 +1766,14 @@ mod tests {
     #[test]
     fn staged_update_target_runs_within_caps() {
         run_iterated_unit(staged_update_one_iteration).expect("guardrails held");
-        for case in [&b""[..], b"MKWU", &[255; 64][..]] {
+        for case in [
+            &b""[..],
+            b"MKWU",
+            &[255; 64][..],
+            &[0, 0, 0][..],
+            &[0, 1, 1][..],
+            &[0, 2, 0][..],
+        ] {
             run_one(case, staged_update_one_iteration).expect("guardrails held");
         }
     }
