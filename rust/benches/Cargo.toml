@@ -244,6 +244,15 @@ required-features = ["history-mmr"]
 name = "diff_edit_script"
 harness = false
 
+# `ops::blame::blame_file` at increasing per-file history length —
+# regression guard for the common-leading-run elision in blame's own
+# LCS matcher (`match_lines`), the DP-table analog of
+# `diff_edit_script`'s Myers prefix elision above. No feature gate:
+# blame is always compiled.
+[[bench]]
+name = "blame_history_walk"
+harness = false
+
 # `IgnoreList::is_ignored` throughput — no prior coverage (`add_staging.rs`'s
 # fixtures carry no `.gitignore`, so an empty ignore list never exercised
 # this path). Regression guard for the `BasenameKind` fast path added to
