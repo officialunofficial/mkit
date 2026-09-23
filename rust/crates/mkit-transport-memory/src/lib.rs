@@ -220,6 +220,28 @@ impl Transport for MemoryTransport {
     }
 }
 
+impl mkit_core::protocol::SingleAttemptAdvance for MemoryTransport {
+    fn advance_refs_once(
+        &self,
+        head_ref: &str,
+        head_condition: mkit_core::protocol::RefWriteCondition,
+        head_value: &mkit_core::Hash,
+        packmap_ref: &str,
+        packmap_condition: mkit_core::protocol::RefWriteCondition,
+        packmap_value: &mkit_core::Hash,
+    ) -> mkit_core::protocol::TransportResult<mkit_core::protocol::AdvanceOutcome> {
+        Transport::advance_refs(
+            self,
+            head_ref,
+            head_condition,
+            head_value,
+            packmap_ref,
+            packmap_condition,
+            packmap_value,
+        )
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

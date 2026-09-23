@@ -111,10 +111,12 @@ pub use object::{
     TreeEntry,
 };
 pub use partial::{
-    FileReplacement, PartialCoverage, PartialError, PartialLimits, PartialObject, PartialPath,
-    PartialSnapshotBundle, PartialUpdate, PreparedPartialEdit, SelectedFile,
-    VerifiedPartialSnapshot, VerifiedTree, build_partial_snapshot, export_partial_update,
-    prepare_partial_commit, replace_files, verify_partial_snapshot,
+    FileReplacement, PartialCoverage, PartialError, PartialExchangeContext, PartialLimits,
+    PartialObject, PartialPath, PartialSnapshotBundle, PartialUpdate, PreparedPartialEdit,
+    PublicationError, PublicationOutcome, RecipientError, RecipientLimits, RecipientUsage,
+    SelectedFile, VerifiedPartialSnapshot, VerifiedPartialUpdate, VerifiedReplacement,
+    VerifiedTree, build_partial_snapshot, export_partial_update, prepare_partial_commit,
+    publish_explicit_update, replace_files, verify_partial_snapshot, verify_partial_update,
 };
 // Durable scoped-workspace local state — native Unix only; excluded from
 // wasm builds.
