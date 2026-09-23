@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- *(core)* Borrowed MKWU v1 carrier and ordered inventory facts, bounded
+  changed-frontier/required-file transitions, and separate staged accounting
+  for a trusted complete-Snapshot driver. Existing full decoder, recipient
+  APIs/defaults and wire bytes remain unchanged. **SemVer:** additive public
+  APIs and error type; no format change or hosting authority.
+
 - *(transport)* Optional managed-host MKHG v1 signed workspace-grant codec and
   owner-only durable RegisterGrant, RevokeGrant, and GetGrant registry. Grants
   do not yet enable private snapshots or publication. **SemVer:** additive

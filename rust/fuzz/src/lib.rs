@@ -43,6 +43,98 @@ pub const MAX_INPUT: usize = 64 * 1024;
 /// hashes.
 pub const RNG_SEED: u64 = 0xDEAD_BEEF_CAFE_F00D;
 
+/// Borrowed MKWU framing and strict one-object inventory checks. Every call
+/// executes a known-valid committed vector before adversarial selectors.
+pub fn staged_update_one_iteration(input: &[u8]) {
+    use mkit_core::partial::{
+        CheckedMkwu, PartialLimits, StagedInventoryCursor, StagedUpdateLimitsV1,
+        StagedValidationContext, advance_staged_inventory, default_staged_inspection_limits,
+        inspect_staged_inventory_object,
+    };
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let golden = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../tests/golden/partial_update/ordinary_update.bin"
+    ));
+    let base: [u8; 32] = golden[5..37].try_into().expect("fixed header");
+    let limits = PartialLimits::V1;
+    let staged = StagedUpdateLimitsV1::default();
+    let checked = CheckedMkwu::open(
+        golden,
+        golden.len() as u64,
+        mkit_core::hash::hash(golden),
+        base,
+        limits,
+        staged,
+    )
+    .expect("committed valid carrier");
+    let context = StagedValidationContext::new(
+        checked.header().clone(),
+        limits,
+        staged,
+        default_staged_inspection_limits(),
+    )
+    .expect("valid context");
+    let entry = checked
+        .pack()
+        .entries()
+        .next()
+        .expect("valid nonempty inventory");
+    let fact = inspect_staged_inventory_object(entry.payload(), &context).expect("valid object");
+    let cursor = advance_staged_inventory(
+        &StagedInventoryCursor::default(),
+        u64::from(entry.ordinal()),
+        &fact,
+        &context,
+    )
+    .expect("first valid inventory step")
+    .cursor();
+    assert_eq!(cursor.count, 1);
+    assert!(advance_staged_inventory(&cursor, 1, &fact, &context).is_err());
+    // The independent digest remains pinned for mutation; no accidental
+    // parser acceptance can turn changed bytes into this checked carrier.
+    let mut changed = golden.to_vec();
+    let index = input
+        .first()
+        .map_or(0, |byte| usize::from(*byte) % changed.len());
+    changed[index] ^= 1;
+    assert!(
+        CheckedMkwu::open(
+            &changed,
+            changed.len() as u64,
+            mkit_core::hash::hash(golden),
+            base,
+            limits,
+            staged
+        )
+        .is_err()
+    );
+    let arbitrary = &input[..input.len().min(4096)];
+    let _ = CheckedMkwu::open(
+        arbitrary,
+        arbitrary.len() as u64,
+        mkit_core::hash::hash(arbitrary),
+        base,
+        limits,
+        staged,
+    );
+    // Recompute the outer digest to reach inner key/trailer validation.
+    let mut altered = golden.to_vec();
+    let last = altered.len() - 1;
+    altered[last] ^= 1;
+    assert!(
+        CheckedMkwu::open(
+            &altered,
+            altered.len() as u64,
+            mkit_core::hash::hash(&altered),
+            base,
+            limits,
+            staged
+        )
+        .is_err()
+    );
+}
+
 /// Exercise bounded Tree and manifest cursors against canonical authenticated
 /// facts, including adversarial index/depth/sum and page-width values.
 pub fn snapshot_walk_one_iteration(input: &[u8]) {
@@ -1450,6 +1542,14 @@ mod tests {
         run_iterated_unit(snapshot_walk_one_iteration).expect("guardrails held");
         for case in [&b""[..], &[0; 5][..], &[255; 5][..]] {
             run_one(case, snapshot_walk_one_iteration).expect("guardrails held");
+        }
+    }
+
+    #[test]
+    fn staged_update_target_runs_within_caps() {
+        run_iterated_unit(staged_update_one_iteration).expect("guardrails held");
+        for case in [&b""[..], b"MKWU", &[255; 64][..]] {
+            run_one(case, staged_update_one_iteration).expect("guardrails held");
         }
     }
 
