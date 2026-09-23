@@ -252,6 +252,55 @@ def verify_corrupt():
     print("corrupt job checksum fails closed without repair")
 
 
+def patch_terminal_127():
+    """After --seed-live, create 127 valid local terminal summary rows."""
+    deadline = int(time.time() * 1000) + 7 * 24 * 60 * 60 * 1000
+    with sqlite3.connect(db_path()) as db:
+        for digit in "12":
+            rewrite_job(db, digit * 64, {"state": "cancelled", "terminal_deadline": deadline})
+        template = json.loads(db.execute("SELECT document FROM host_snapshot_jobs WHERE job_id=?",
+                           ("1" * 64,)).fetchone()[0])
+        for index in range(10, 135):
+            document = {**template, "id": f"{index:064x}"}
+            encoded = json.dumps(document, separators=(",", ":"))
+            checksum = blake3.blake3(b"mkit.host.snapshot.job.v1\0" + encoded.encode()).hexdigest()
+            db.execute("INSERT INTO host_snapshot_jobs(job_id,state,exact_ref,idle_deadline,"
+                       "terminal_deadline,document,checksum) VALUES(?,?,?,?,?,?,?)",
+                       (document["id"], "cancelled", document["exact_ref"],
+                        document["idle_deadline"], deadline, encoded, checksum))
+    print("offline disposable 127 terminal summary rows seeded")
+
+
+def verify_terminal_capacity(ready):
+    f = fixture()
+    with sqlite3.connect(db_path()) as db:
+        assert db.execute("SELECT COUNT(*) FROM host_snapshot_jobs WHERE state='cancelled'").fetchone()[0] == 127
+    job = expect(200, begin(f, "c", "3"))
+    before = saved_rows()
+    expect(429, begin(f, "d", "4"))
+    assert saved_rows() == before, "128th reserved slot must reject second live job"
+    if ready:
+        for _ in range(32):
+            job = expect(200, continue_job("3" * 64, job["job_generation"], job["revision"]))
+            if job["state"] == "ready":
+                break
+        else:
+            raise AssertionError("capacity fixture did not complete")
+    else:
+        job = expect(200, request("CancelSnapshot", {"version": 1, "job_id": "3" * 64,
+            "job_generation": job["job_generation"], "expected_revision": job["revision"]}))
+        assert job["state"] == "cancelled", job
+    with sqlite3.connect(db_path()) as db:
+        terminal = db.execute("SELECT COUNT(*) FROM host_snapshot_jobs WHERE state IN "
+            "('ready','cancelled','expired','failed','cleaning')").fetchone()[0]
+        live = db.execute("SELECT COUNT(*) FROM host_snapshot_jobs WHERE state IN "
+            "('catalog','walk')").fetchone()[0]
+    assert (terminal, live) == (128, 0), (terminal, live)
+    expect(429, begin(f, "d", "4"))
+    print("127 terminal + 1 live admitted, second live 429;",
+          "ready" if ready else "cancel", "terminalized to exactly 128")
+
+
 def patch_ready_expiry():
     with sqlite3.connect(db_path()) as db:
         rewrite_job(db, "1" * 64, {"terminal_deadline": 0})
@@ -291,6 +340,9 @@ MODES = {"--seed-live": seed_live, "--patch-idle-offline": patch_idle,
          "--verify-request-expiry": verify_request_expiry,
          "--patch-corrupt-offline": patch_corrupt,
          "--verify-corrupt": verify_corrupt,
+         "--patch-terminal-127-offline": patch_terminal_127,
+         "--verify-terminal-cancel": lambda: verify_terminal_capacity(False),
+         "--verify-terminal-ready": lambda: verify_terminal_capacity(True),
          "--patch-ready-expiry-offline": patch_ready_expiry,
          "--verify-ready-retention": verify_ready_retention}
 

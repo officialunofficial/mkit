@@ -147,7 +147,10 @@ before/after awaits and before apply; uninterruptible synchronous work may
 overrun it, so this is not a hard wall-clock promise.
 
 Hosted independent ceilings: 2 live jobs/repository and 1/ref; 8 current
-ready refs; 128 retained terminal summaries; 400,000 total catalog locator
+ready refs; 128 retained terminal summaries, with one future terminal slot
+reserved at Begin for each live job (`terminal + live < 128` before a new
+admission), so Cancel, expiry and completion cannot exceed that bound;
+400,000 total catalog locator
 rows; 1 GiB pinned raw pack bytes; 100,000 frontier rows and 32 MiB frontier
 metadata/job; 100,000 distinct reached objects, 256 MiB reached canonical
 bytes, Tree depth 128 and 1,000,000 work units. A Continue reserves at most

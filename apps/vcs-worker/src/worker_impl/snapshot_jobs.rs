@@ -152,7 +152,11 @@ impl RefStore {
                 let live = self.snapshot_count("SELECT COUNT(*) AS n FROM host_snapshot_jobs WHERE state IN ('catalog','walk')", vec![])?;
                 let per_ref = self.snapshot_count("SELECT COUNT(*) AS n FROM host_snapshot_jobs WHERE state IN ('catalog','walk') AND exact_ref=?", vec![request.r#ref.clone().into()])?;
                 let terminal = self.snapshot_count("SELECT COUNT(*) AS n FROM host_snapshot_jobs WHERE state IN ('ready','cancelled','expired','failed','cleaning')", vec![])?;
-                if live >= 2 || per_ref != 0 || terminal >= 128 { return Ok(Some(exhausted()?)); }
+                // Every admitted live job may terminalize without a later
+                // capacity decision. Reserve its terminal-summary slot now.
+                let occupied = live.checked_add(terminal)
+                    .ok_or_else(|| Error::RustError("snapshot capacity overflow".into()))?;
+                if live >= 2 || per_ref != 0 || occupied >= 128 { return Ok(Some(exhausted()?)); }
             }
             let head = self.read_ref(&request.r#ref)?;
             let packmap = self.read_ref(&request.packmap_ref())?;

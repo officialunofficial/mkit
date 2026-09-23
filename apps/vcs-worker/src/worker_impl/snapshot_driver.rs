@@ -70,7 +70,7 @@ enum Plan {
 enum Claim {
     Reply(Reply),
     Pending(String),
-    New { job: Job, plan: Plan },
+    New { job: Box<Job>, plan: Plan },
 }
 
 #[derive(Deserialize)]
@@ -162,7 +162,10 @@ impl RefStore {
                 Plan::Promote => {}
             }
             owned.snapshot_save_job(&job)?;
-            Ok(Claim::New { job, plan })
+            Ok(Claim::New {
+                job: Box::new(job),
+                plan,
+            })
         });
         let claim = match claim {
             Ok(claim) => claim,

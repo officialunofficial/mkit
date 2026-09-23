@@ -136,6 +136,14 @@ job, `--patch-ready-expiry-offline`/`--verify-ready-retention`. The patch
 modes directly alter local SQLite and must never target a real repository.
 `--patch-corrupt-offline`/`--verify-corrupt` demonstrates checksum fail-closed
 behavior on another disposable seeded state.
+For the 128-terminal reservation boundary, seed a fresh state, stop workerd,
+run `--patch-terminal-127-offline`, restart, then run
+`--verify-terminal-cancel` or `--verify-terminal-ready`. Repeat on a second
+fresh state for the other path. The local SQL fixture contains 127 valid
+terminal summaries; Begin admits one live job but rejects another without
+reserving a nonce, and ordinary Cancel or completed validation yields exactly
+128 terminal summaries with no live job. This is deliberately isolated from
+the seven-day cleanup test.
 For asynchronous interleaving, use a fresh state and add
 `--var SNAPSHOT_TEST_R2_PAUSE_MS:3000` with the `test-faults` build. After
 `--seed-live`, run `--verify-interleave`: a charged Continue pauses before
