@@ -20,8 +20,8 @@ use std::sync::Arc;
 
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ErrorData,
-    Implementation, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
-    ToolAnnotations,
+    Implementation, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig,
+    Tool, ToolAnnotations,
 };
 use rmcp::service::RequestContext;
 use rmcp::transport::stdio;
@@ -39,14 +39,14 @@ struct MkitServer {
 }
 
 impl ServerHandler for MkitServer {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         // `Implementation` is `#[non_exhaustive]` in rmcp: build via
         // `Default` and mutate fields rather than a struct literal.
         let mut server_info = Implementation::default();
         server_info.name = "mkit-repo".to_string();
         server_info.version = crate::cli::CLI_VERSION.to_string();
 
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(server_info)
             .with_instructions(INSTRUCTIONS)
     }

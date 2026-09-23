@@ -159,7 +159,13 @@ where
     if let Err((msg, code)) = mutate_config() {
         return emit_err(&msg, code);
     }
-    match restore::restore_tree_to_worktree(&store, &tree_hash, layout.worktree_root(), opts) {
+    match restore::restore_tree_to_worktree_with(
+        &store,
+        &tree_hash,
+        layout.worktree_root(),
+        opts,
+        &crate::restore_fanout::read_chunks_fanout,
+    ) {
         Ok(_) => {
             let mut stderr = std::io::stderr().lock();
             let _ = writeln!(stderr, "sparse-checkout applied");

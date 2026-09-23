@@ -29,7 +29,13 @@ const BUNDLE = new Uint8Array(readFileSync(`${GOLDEN}partial_workspace/plain_fil
 const BASE = "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90";
 const PATHS = [["7368616c6c6f772e747874"]];
 const DIGEST = mkit.blake3_hex(BUNDLE);
-const context = { callId: "call", parentCallId: "", sessionId: "session" };
+const context = {
+    callId: "call",
+    parentCallId: "",
+    sessionId: "session",
+    model: "model",
+    signal: new AbortController().signal,
+};
 const directories: string[] = [];
 afterEach(async () => {
     for (const directory of directories.splice(0)) await rm(directory, { recursive: true });
