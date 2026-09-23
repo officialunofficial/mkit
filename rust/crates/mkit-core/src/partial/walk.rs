@@ -1628,7 +1628,9 @@ mod tests {
         let mut seen = BTreeMap::new();
         let mut usage = SnapshotWalkUsage::default();
         let mut max_live_input = 0usize;
-        let mut max_decoded_fact = 0usize;
+        let mut max_fact_tree_entries = 0usize;
+        let mut max_fact_name_bytes = 0usize;
+        let mut max_fact_manifest_ids = 0usize;
         while let Some(record) = pending.pop_front() {
             let bytes = if let Some(bytes) = roots.get(&record.id()) {
                 bytes.clone()
@@ -1643,10 +1645,25 @@ mod tests {
             let fact =
                 inspect_snapshot_object(record.id(), &bytes, record.role(), inspection_limits())
                     .unwrap();
-            // InspectedObject retains scalar/Tree metadata, not Blob payloads.
-            // Serialization and inspection still use transient scratch, so
-            // this structural bound is not a claim about total process RSS.
-            max_decoded_fact = max_decoded_fact.max(std::mem::size_of_val(&fact));
+            // Measure the variable-length metadata exposed by this fact;
+            // size_of_val would miss the Tree and manifest Vec allocations.
+            // The caller still has transient serialize/inspect scratch, so
+            // these structural counts are not an exact process-RSS claim.
+            if let Some(count) = fact.tree_entries_len() {
+                max_fact_tree_entries = max_fact_tree_entries.max(count);
+                if count != 0 {
+                    let names = fact
+                        .tree_page(0, count)
+                        .unwrap()
+                        .iter()
+                        .map(|entry| entry.name.len())
+                        .sum::<usize>();
+                    max_fact_name_bytes = max_fact_name_bytes.max(names);
+                }
+            }
+            if let Some((_, _, count)) = fact.manifest() {
+                max_fact_manifest_ids = max_fact_manifest_ids.max(count);
+            }
             let step = advance_snapshot_walk(
                 &record,
                 &fact,
@@ -1671,7 +1688,9 @@ mod tests {
         assert_eq!(usage.canonical_bytes, expected_total);
         assert!(expected_total > 128 * 1024 * 1024);
         assert!(max_live_input < 2 * 1024 * 1024);
-        assert!(max_decoded_fact < 1024);
+        assert_eq!(max_fact_tree_entries, usize::from(FILES));
+        assert!(max_fact_name_bytes < 2 * 1024);
+        assert_eq!(max_fact_manifest_ids, 0);
         assert_eq!(seen.len(), usize::from(FILES) + 2);
     }
 
