@@ -18,6 +18,9 @@ usage: mkit <command> [args]
 
 commands:
   init              Create a new mkit repository
+  workspace create --bundle FILE --base ID (--path PATH... | --accept-bundle-selection) DIR
+  workspace status|diff [--cached]|add (--all|-- PATH...)|log
+                    Inspect and stage selected files in an offline scoped workspace
   add [-A|-u] [-f] <path>...  Stage files for the next commit
   add .             Stage all files under cwd (respects .gitignore/.mkitignore)
   add -A            Stage all changes incl. deletions (no path args)
@@ -423,6 +426,7 @@ mod tests {
             "trust",
             "version",
             "worktree",
+            "workspace",
         ];
         for cmd in required {
             assert!(

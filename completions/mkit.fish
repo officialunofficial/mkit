@@ -16,7 +16,7 @@ complete -c mkit -f
 
 set -l __mkit_subcommands \
     init add rm mv restore reset hash cat cat-file show tree ls-tree ls-files rev-parse rev-list merge-base show-ref for-each-ref symbolic-ref update-ref ref commit log reflog status diff branch checkout switch clean \
-    tag config merge push pull fetch stash worktree clone remote key keygen \
+    tag config merge push pull fetch stash worktree workspace clone remote key keygen \
     cherry-pick revert rebase bisect gc sparse-checkout serve mcp pack-shard git blame prove verify \
     verify-proof closure attest verify-attest self version help
 
@@ -286,6 +286,14 @@ complete -c mkit -n "__fish_seen_subcommand_from bisect; \
 complete -c mkit -n "__fish_seen_subcommand_from gc" -l dry-run -s n -d "Preview without deleting"
 complete -c mkit -n "__fish_seen_subcommand_from gc" -l grace-secs -d "Keep objects younger than SECS"
 complete -c mkit -n "__fish_seen_subcommand_from worktree; and not __fish_seen_subcommand_from add list remove prune" -a "add list remove prune"
+complete -c mkit -n "__fish_seen_subcommand_from workspace; and not __fish_seen_subcommand_from create status diff add log" -a "create status diff add log"
+complete -c mkit -n "__fish_seen_subcommand_from workspace; and __fish_seen_subcommand_from create" -l bundle -r -d "Offline bundle file"
+complete -c mkit -n "__fish_seen_subcommand_from workspace; and __fish_seen_subcommand_from create" -l base -r -d "Trusted base object id"
+complete -c mkit -n "__fish_seen_subcommand_from workspace; and __fish_seen_subcommand_from create" -l path -r -d "Exact selected path"
+complete -c mkit -n "__fish_seen_subcommand_from workspace; and __fish_seen_subcommand_from create" -l accept-bundle-selection -d "Confirm bundle selection"
+complete -c mkit -n "__fish_seen_subcommand_from workspace; and __fish_seen_subcommand_from diff" -l cached -d "Compare base to stage"
+complete -c mkit -n "__fish_seen_subcommand_from workspace; and __fish_seen_subcommand_from add" -l all -d "Stage all selected paths"
+complete -c mkit -n "__fish_seen_subcommand_from workspace" -l format -xa "human json"
 complete -c mkit -n "__fish_seen_subcommand_from stash; \
     and not __fish_seen_subcommand_from save list pop apply drop clear show" \
     -a "save list pop apply drop clear show"

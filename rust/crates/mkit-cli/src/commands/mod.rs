@@ -77,6 +77,7 @@ pub mod update_ref;
 pub mod verify;
 pub mod verify_attest;
 pub mod verify_proof;
+pub mod workspace;
 pub mod worktree;
 
 use crate::exit;

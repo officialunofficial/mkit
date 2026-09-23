@@ -200,6 +200,34 @@ Working-tree commands:
   `.mkit/worktrees/<id>/`. Interim limit: `mkit gc` refuses to run while
   linked worktrees exist (cross-tree root collection is a tracked
   follow-up phase of #493) &mdash; remove or prune them first.
+- `mkit workspace create --bundle FILE --base ID (--path PATH ... |
+  --accept-bundle-selection) [--format human|json] DIR` &mdash; create an
+  offline scoped workspace from a bounded partial bundle. The base ID is
+  supplied independently; explicit paths must exactly match the bundle's
+  authenticated selection. Confirmation through `--accept-bundle-selection`
+  accepts precisely the listed bundle paths. Verification precedes destination
+  installation. No remote, credential, or host permission is consulted.
+- `mkit workspace status|diff|add|log` &mdash; inspect and stage only the selected
+  files. `status` compares base to stage and stage to working files, reports
+  outside-selection names as untracked, and states when its 4096-entry name
+  scan was truncated. `diff` compares stage to working by default; `--cached`
+  compares base to stage. `diff [--cached] [-- PATH...]` accepts exact selected
+  paths. `add (--all | -- PATH...)` captures complete selected regular-file
+  bytes and stages the batch atomically; missing files, links, mode changes,
+  and new paths are unsupported. `log` lists the authenticated base and any
+  authoritative local pending/accepted identifiers, then stops at an
+  unavailable-history boundary. These local identifiers do not prove remote
+  publication. `workspace commit/export/push/merge/rebase/checkout/gc` are
+  unavailable in this phase. Every JSON command includes `workspace_mode`,
+  `base_commit`, `selected_paths`, and `coverage` (`content=selected-files`,
+  `history=partial`, `verification=selected-only`). A scoped workspace is a
+  distinct format, not an ordinary or sparse mkit repository.
+  `diff` uses unified text hunks only when both inputs are at most 512 KiB,
+  each has at most 512 newline characters, and the resulting hunk body is at
+  most 512 KiB; larger, binary, or control-bearing content gets byte counts
+  and BLAKE3 digests. Successful JSON includes the coverage fields above;
+  JSON errors contain `ok=false`, `workspace_mode`, and an error string,
+  since discovery failures may have no authenticated base context.
 - `mkit stash [save|list|pop|apply|drop|clear|show] [--format=json]` &mdash;
   save/restore WIP
   changes. `apply` restores an entry without removing it; `clear` drops

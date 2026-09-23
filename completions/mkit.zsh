@@ -50,6 +50,7 @@ _mkit() {
         'fetch:Download from remote without merging'
         'stash:Stash working-dir changes'
         'worktree:Manage linked working trees'
+        'workspace:Inspect and stage selected files in an offline scoped workspace'
         'clone:Clone a repository'
         'remote:Show, add, remove, or rename remotes'
         'key:Manage user-scoped keystore keys (generate/list/import/export/delete)'
@@ -426,6 +427,14 @@ _mkit() {
                         'list[list working trees]' \
                         'remove[remove a linked working tree]' \
                         'prune[delete dead registry entries]'
+                    ;;
+                workspace)
+                    _values 'workspace subcommand' \
+                        'create[create from a verified offline bundle]' \
+                        'status[show selected-file state]' \
+                        'diff[compare selected files]' \
+                        'add[stage selected files]' \
+                        'log[show local identifiers and partial-history boundary]'
                     ;;
                 stash)
                     _values 'stash subcommand' \

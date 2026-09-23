@@ -128,6 +128,7 @@ impl Faults {
 #[derive(Debug)]
 pub struct ScopedWorkspaceLayout {
     root: PathBuf,
+    root_dir: DirFd,
     state_dir: DirFd,
     /// `(dev, ino)` of `workspace.lock` at open: a transition that sees a
     /// different inode under the lock path fails closed.
@@ -608,6 +609,7 @@ impl ScopedWorkspaceLayout {
         let lock_identity = (lock_meta.dev(), lock_meta.ino());
         let layout = Self {
             root: canonical,
+            root_dir: root_fd,
             state_dir,
             lock_identity,
             faults: Faults::new(),
@@ -627,6 +629,149 @@ impl ScopedWorkspaceLayout {
     /// Read and fully verify the `CURRENT`-selected state.
     pub fn read_state(&self) -> Result<ScopedWorkspaceState, PartialStateError> {
         state::load_full(self)
+    }
+
+    /// Capture one caller-identified working file through the pinned root
+    /// descriptor. Callers must first match the path and mode against the
+    /// authenticated workspace selection.
+    /// Refuses links, non-regular files, changed executable mode, and files
+    /// whose metadata changes while the bounded read is in progress.
+    pub fn capture_selected_file(
+        &self,
+        path: &PartialPath,
+        expected_mode: EntryMode,
+        cap: usize,
+    ) -> Result<Vec<u8>, PartialStateError> {
+        let mut dir = self
+            .root_dir
+            .try_clone()
+            .map_err(|e| sys_err(self.root.clone(), e))?;
+        let relative = path
+            .iter()
+            .map(|c| String::from_utf8_lossy(c).into_owned())
+            .collect::<Vec<_>>()
+            .join("/");
+        let display = self.root.join(&relative);
+        if path.is_empty() || path.iter().any(|c| !safe_component(c)) {
+            return Err(unsafe_entry(display, "invalid selected path"));
+        }
+        for component in &path[..path.len() - 1] {
+            dir = sys::open_dir(&dir, component).map_err(|e| sys_err(display.clone(), e))?;
+        }
+        let file = sys::open_file(&dir, &path[path.len() - 1], OpenMode::Read)
+            .map_err(|e| sys_err(display.clone(), e))?;
+        let before = file.metadata().map_err(|e| sys_err(display.clone(), e))?;
+        let executable = before.mode() & 0o111 != 0;
+        if !before.is_file()
+            || before.nlink() != 1
+            || executable != (expected_mode == EntryMode::Executable)
+        {
+            return Err(unsafe_entry(
+                display,
+                "selected file is missing, linked, or has changed mode",
+            ));
+        }
+        if before.len() > cap as u64 {
+            return Err(PartialStateError::Partial(
+                crate::partial::PartialError::WorkspaceTooLarge,
+            ));
+        }
+        let bytes = file
+            .read_all(cap)
+            .map_err(|e| sys_err(display.clone(), e))?;
+        let after = file.metadata().map_err(|e| sys_err(display.clone(), e))?;
+        if before.dev() != after.dev()
+            || before.ino() != after.ino()
+            || before.len() != after.len()
+            || before.modified().ok() != after.modified().ok()
+            || before.mode() != after.mode()
+            || after.nlink() != 1
+            || before.ctime() != after.ctime()
+            || before.ctime_nsec() != after.ctime_nsec()
+            || before.mtime_nsec() != after.mtime_nsec()
+            || bytes.len() as u64 != before.len()
+        {
+            return Err(unsafe_entry(
+                display,
+                "selected file changed during capture",
+            ));
+        }
+        Ok(bytes)
+    }
+
+    /// Enumerate names outside the exact selected-file set without reading
+    /// their contents or following links. `complete=false` means the scan
+    /// reached its entry budget; callers must not report a clean workspace.
+    pub fn extra_paths(
+        &self,
+        selected: &[PartialPath],
+        budget: usize,
+    ) -> Result<(Vec<String>, bool), PartialStateError> {
+        let mut exact = std::collections::HashSet::new();
+        let mut prefixes = std::collections::HashSet::new();
+        for path in selected {
+            let mut joined = Vec::new();
+            for (index, component) in path.iter().enumerate() {
+                if index != 0 {
+                    joined.push(b'/');
+                    prefixes.insert(joined[..joined.len() - 1].to_vec());
+                }
+                joined.extend_from_slice(component);
+            }
+            exact.insert(joined);
+        }
+        // `try_clone` shares a directory offset with the pinned descriptor.
+        // A fresh openat(".") creates an independent open-file description,
+        // so repeated and concurrent scans always begin at the first entry.
+        let root_scan =
+            sys::open_dir(&self.root_dir, b".").map_err(|e| sys_err(self.root.clone(), e))?;
+        let mut stack = vec![(root_scan, Vec::<u8>::new())];
+        let mut extras = Vec::new();
+        let mut examined = 0usize;
+        while let Some((dir, prefix)) = stack.pop() {
+            let entries = dir.read_dir().map_err(|e| sys_err(self.root.clone(), e))?;
+            for entry in entries {
+                let (name, _) = entry.map_err(|e| sys_err(self.root.clone(), e))?;
+                if name == b"."
+                    || name == b".."
+                    || (prefix.is_empty() && (name == b".mkit" || name == b".mkit-scoped"))
+                {
+                    continue;
+                }
+                if examined >= budget {
+                    return Ok((extras, false));
+                }
+                examined += 1;
+                let mut relative = prefix.clone();
+                if !relative.is_empty() {
+                    relative.push(b'/');
+                }
+                relative.extend_from_slice(&name);
+                let selected_exact = exact.contains(&relative);
+                let selected_below = prefixes.contains(&relative);
+                if selected_exact {
+                    continue;
+                }
+                if selected_below {
+                    match sys::open_dir(&dir, &name) {
+                        Ok(child) => stack.push((child, relative)),
+                        Err(error) if error.is_not_dir() || error.is_symlink() => {
+                            extras.push(String::from_utf8_lossy(&relative).into_owned());
+                        }
+                        Err(error) => {
+                            return Err(sys_err(
+                                self.root.join(String::from_utf8_lossy(&relative).as_ref()),
+                                error,
+                            ));
+                        }
+                    }
+                } else {
+                    extras.push(String::from_utf8_lossy(&relative).into_owned());
+                }
+            }
+        }
+        extras.sort();
+        Ok((extras, true))
     }
 
     pub(crate) fn state_dir(&self) -> &DirFd {

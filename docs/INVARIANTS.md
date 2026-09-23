@@ -1,5 +1,26 @@
 # Invariants
 
+## Scoped workspace reads and staging stay inside authenticated selection
+
+**Always:** scoped CLI operations bind an independently supplied base and exact
+selected paths to a verified bundle before installation. Working-file capture
+uses no-follow descriptors rooted at the opened scoped workspace, checks mode,
+link count, size and metadata, and feeds a complete selected-file batch into
+the authoritative generation-CAS stage transition. Extra paths are reported
+by a bounded name scan with an explicit incomplete indicator; no operation
+deletes them or reads their content. Human and JSON output label content and
+history as partial.
+
+**Because:** the durable selection is a coverage boundary, not a full
+repository or a host write permission. A staged A and working B must remain
+distinct after a restart.
+
+**If violated:** a CLI could read hidden files, silently omit unseen extras,
+or overwrite a staged edit from current working bytes.
+
+**Enforced by:** `rust/crates/mkit-cli/tests/scoped_workspace_cli.rs` and
+`rust/crates/mkit-core/src/partial/layout.rs` capture and state tests.
+
 Properties that must always hold across the mkit monorepo, outside any
 single crate or spec. Each entry states the invariant, why it matters, and
 what breaks when it is violated. A regression test enforces each one; find
