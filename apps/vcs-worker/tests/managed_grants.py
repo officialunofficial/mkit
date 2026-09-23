@@ -143,12 +143,30 @@ def main():
         assert kind in ("workspace", "incarnation", "bytes"), kind
         before = storage_snapshot()
         meta = before["host_grant_meta"][0]
-        assert (meta[2], meta[3]) == ("1", "4"), meta
+        current = (int(meta[2]), int(meta[3]), int(meta[4]))
+        assert current == (1, 4, 1352), current
+        observed = expect(200, get())["test_limits"]
+        limits = (observed["workspaces"], observed["incarnations"], observed["bytes"])
+        expected = {
+            "workspace": (1, 5, 1690),
+            "incarnation": (2, 4, 1690),
+            "bytes": (2, 5, 1352),
+        }[kind]
+        assert limits == expected, (kind, limits, expected)
         if kind == "workspace":
-            candidate = register(0, grant(1, 2, initial_base=REANCHORED,
-                                          workspace_id=bytes([21]) * 32))[0]
+            credential = grant(1, 2, initial_base=REANCHORED,
+                               workspace_id=bytes([21]) * 32)
+            expected_generation = 0
         else:
-            candidate = register(4, grant(5, 2, initial_base=REANCHORED))[0]
+            credential = grant(5, 2, initial_base=REANCHORED)
+            expected_generation = 4
+        inserted_bytes = len(base64.urlsafe_b64decode(credential + "=="))
+        prospective = (current[0] + int(kind == "workspace"), current[1] + 1,
+                       current[2] + inserted_bytes)
+        assert tuple(value > cap for value, cap in zip(prospective, limits)) == (
+            kind == "workspace", kind == "incarnation", kind == "bytes"
+        ), (kind, current, prospective, limits)
+        candidate = register(expected_generation, credential)[0]
         expect(429, candidate)
         assert storage_snapshot() == before
         assert expect(200, get())["grant_generation"] == "4"

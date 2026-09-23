@@ -18,6 +18,7 @@ const MAX_INCARNS: u64 = 4096;
 const MAX_BYTES: u64 = 16 * 1024 * 1024;
 
 #[derive(Clone, Copy)]
+#[cfg_attr(feature = "test-faults", derive(Serialize))]
 struct Limits {
     workspaces: u64,
     incarnations: u64,
@@ -76,6 +77,9 @@ struct GetReply<'a> {
     authority_generation_matches: bool,
     time_valid: bool,
     snapshot_readiness: &'static str,
+    // Owner-only test-faults diagnostic. Absent from production type and JSON.
+    #[cfg(feature = "test-faults")]
+    test_limits: Limits,
 }
 #[derive(Deserialize)]
 struct Meta {
@@ -656,6 +660,8 @@ impl RefStore {
             authority_generation_matches: decimal(&row.authority_generation) == Some(authority),
             time_valid,
             snapshot_readiness: "not_checked",
+            #[cfg(feature = "test-faults")]
+            test_limits: self.grant_limits()?,
         })
     }
 }

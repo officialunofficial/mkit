@@ -446,19 +446,43 @@ mod tests {
             if let Some(error) = error {
                 assert_eq!(verify_signature(&raw), Err(error), "{name}");
                 assert_eq!(sidecar["expected_error"], format!("{error:?}"), "{name}");
+                assert_eq!(sidecar["source"], "valid.bin", "{name}");
+                assert!(
+                    sidecar["mutation"].as_str().is_some_and(|v| !v.is_empty()),
+                    "{name}"
+                );
             } else {
                 let grant = verify_signature(&raw).unwrap();
+                let fields = &grant.fields;
+                assert_eq!(&raw[..5], b"MKHG\x01");
+                assert_eq!(sidecar["magic"], "MKHG");
+                assert_eq!(sidecar["version"], 1);
                 assert_eq!(sidecar["grant_id"], hex_for_test(&grant_id(&raw)));
-                assert_eq!(sidecar["authority_generation"], u64::MAX.to_string());
+                assert_eq!(sidecar["audience"], fields.audience);
+                assert_eq!(sidecar["repository"], fields.repository);
+                assert_eq!(sidecar["exact_ref"], fields.exact_ref);
+                for (claim, bytes) in [
+                    ("workspace_id", &fields.workspace_id),
+                    ("issuer", &fields.issuer),
+                    ("subject", &fields.subject),
+                    ("receipt_signer", &fields.receipt_signer),
+                    ("initial_base", &fields.initial_base),
+                ] {
+                    assert_eq!(sidecar[claim], hex_for_test(bytes), "{claim}");
+                }
+                for (claim, number) in [
+                    ("authority_generation", fields.authority_generation),
+                    ("grant_generation", fields.grant_generation),
+                    ("not_before", fields.not_before),
+                    ("expires", fields.expires),
+                ] {
+                    assert_eq!(sidecar[claim], number.to_string(), "{claim}");
+                }
+                assert_eq!(sidecar["max_operations"], fields.max_operations);
                 assert_eq!(
-                    sidecar["workspace_id"],
-                    hex_for_test(&grant.fields.workspace_id)
+                    sidecar["entries"],
+                    serde_json::to_value(&fields.entries).unwrap()
                 );
-                assert_eq!(
-                    sidecar["entries"].as_array().unwrap().len(),
-                    grant.fields.entries.len()
-                );
-                assert_eq!(grant.fields.exact_ref, sidecar["exact_ref"]);
             }
         }
         assert_eq!(manifest, expected_manifest);

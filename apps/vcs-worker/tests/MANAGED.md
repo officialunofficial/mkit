@@ -11,6 +11,10 @@ real SQLite tables. Separate fresh state supports `--verify-expiry-replay`.
 After the lifecycle and a restart, `--verify-capacity workspace|incarnation|bytes`
 tests each independent lowered ceiling, with Wrangler restarted each time
 under limits `1,5,1690`, `2,4,1690` or `2,5,1352` for this fixture.
+Only the `test-faults` build adds owner-only `GetGrant.test_limits`; the test
+asserts this actual parsed tuple, the three current SQLite counters and all
+three prospective counters before claiming one quota caused its 429. A
+deliberately wrong tuple must fail the assertion before attempting mutation.
 `--verify-storage-fault` requires a test-only SQLite `BEFORE UPDATE` abort
 trigger; `--verify-corrupt-schema` requires dropping `host_grant_meta`, both
 only while Wrangler is stopped on disposable state. A separate fresh state
