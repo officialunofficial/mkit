@@ -124,6 +124,11 @@ pub enum StoreError {
     /// `push` cleanly rather than crash the process.
     #[error("encode_deltas callback returned {actual} results for {expected} candidates")]
     DeltaBatchLengthMismatch { expected: usize, actual: usize },
+    /// The path lies inside a scoped workspace — ordinary store
+    /// open/init must refuse before touching the filesystem
+    /// (SPEC-PARTIAL-WORKSPACES local state).
+    #[error("scoped-workspace boundary: {0}")]
+    ScopedBoundary(#[from] crate::layout::DiscoverError),
 }
 
 /// Deferred-fsync writer returned by [`ObjectStore::bulk_writer`].
@@ -249,6 +254,7 @@ impl ObjectStore {
     /// directory does not exist. The object store is common-dir
     /// (shared) state — see [`crate::layout`].
     pub fn open(layout: &RepoLayout) -> StoreResult<Self> {
+        crate::layout::check_scoped_boundary(layout.worktree_root())?;
         let objects_root = layout.objects_dir();
         if !objects_root.is_dir() {
             return Err(StoreError::NotAMkitRepository);
@@ -281,6 +287,9 @@ impl ObjectStore {
     /// `layout`. Returns [`StoreError::AlreadyInitialized`] if the
     /// common dir already exists.
     pub fn init(layout: &RepoLayout) -> StoreResult<Self> {
+        // Refuse scoped-workspace roots (and any dir nested inside one)
+        // before creating the ordinary common dir.
+        crate::layout::check_scoped_boundary(layout.worktree_root())?;
         if layout.common_dir().exists() {
             return Err(StoreError::AlreadyInitialized);
         }
@@ -1135,6 +1144,83 @@ mod tests {
                 "stale temp file must not satisfy the target hash"
             );
         }
+    }
+
+    /// `open`/`init` refuse scoped-workspace roots (and descendants)
+    /// before any ordinary `.mkit` state is read or created — an ordinary
+    /// store must never appear inside a scoped workspace.
+    #[test]
+    fn open_and_init_refuse_scoped_workspace_boundaries() {
+        let dir = TempDir::new().unwrap();
+        let ws = dir.path().join("ws");
+        fs::create_dir_all(&ws).unwrap();
+        fs::write(ws.join(MKIT_DIR), crate::layout::SCOPED_MARKER).unwrap();
+        let nested = ws.join("sub/dir");
+        fs::create_dir_all(&nested).unwrap();
+        for path in [&ws, &nested] {
+            let layout = RepoLayout::single(path);
+            assert!(matches!(
+                ObjectStore::open(&layout),
+                Err(StoreError::ScopedBoundary(
+                    crate::layout::DiscoverError::ScopedWorkspace(_)
+                ))
+            ));
+            assert!(matches!(
+                ObjectStore::init(&layout),
+                Err(StoreError::ScopedBoundary(
+                    crate::layout::DiscoverError::ScopedWorkspace(_)
+                ))
+            ));
+        }
+        // init refused before any filesystem mutation.
+        assert!(!nested.join(MKIT_DIR).exists());
+        // Unscoped paths behave exactly as before: plain open on a
+        // directory without `.mkit` is still NotAMkitRepository.
+        let plain = TempDir::new().unwrap();
+        assert!(matches!(
+            ObjectStore::open(&RepoLayout::single(plain.path())),
+            Err(StoreError::NotAMkitRepository)
+        ));
+    }
+
+    /// A RELATIVE worktree path beneath a scoped root must refuse too —
+    /// the boundary check resolves it against the process cwd, which is
+    /// only deterministic in a child process (parallel tests share cwd).
+    #[test]
+    fn open_and_init_refuse_relative_paths_inside_scoped_roots() {
+        if std::env::var_os("MKIT_SCOPED_REL_CHILD").is_some() {
+            // cwd is `<ws>/inner`; `deeper` is a real subdirectory below it.
+            let layout = RepoLayout::single(std::path::Path::new("deeper"));
+            assert!(matches!(
+                ObjectStore::open(&layout),
+                Err(StoreError::ScopedBoundary(
+                    crate::layout::DiscoverError::ScopedWorkspace(_)
+                ))
+            ));
+            assert!(matches!(
+                ObjectStore::init(&layout),
+                Err(StoreError::ScopedBoundary(
+                    crate::layout::DiscoverError::ScopedWorkspace(_)
+                ))
+            ));
+            return;
+        }
+        let dir = TempDir::new().unwrap();
+        let ws = dir.path().join("ws");
+        fs::create_dir_all(ws.join("inner/deeper")).unwrap();
+        fs::write(ws.join(MKIT_DIR), crate::layout::SCOPED_MARKER).unwrap();
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("store::tests::open_and_init_refuse_relative_paths_inside_scoped_roots")
+            .env("MKIT_SCOPED_REL_CHILD", "1")
+            .current_dir(ws.join("inner"))
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "child relative-path refusal failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 }
 

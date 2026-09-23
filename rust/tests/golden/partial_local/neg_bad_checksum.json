@@ -1,0 +1,9 @@
+{
+  "blake3": "c1bf31fc37e266d1e0721f4c7f96b190c58acd2dd3111d0115cb3f552678449c",
+  "description": "MKWS envelope whose trailing checksum does not match the bytes.",
+  "error": "ChecksumMismatch",
+  "expect": "reject",
+  "magic": "MKWS",
+  "name": "neg_bad_checksum",
+  "size": 509
+}

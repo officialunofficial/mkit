@@ -49,6 +49,18 @@ impl FileReplacement {
     pub fn path(&self) -> &PartialPath {
         &self.path
     }
+
+    /// The caller-carried payload size — `Bytes` length, zero for a
+    /// `ReuseSelected` reference. Test-only instrumentation proving a
+    /// rejected batch was never cloned into an overlay feed; the
+    /// authoritative per-path checks run inside `preflight_replacements`.
+    #[cfg(all(test, unix, not(target_arch = "wasm32")))]
+    pub(crate) fn payload_len(&self) -> usize {
+        match &self.content {
+            ReplacementContent::Bytes(bytes) => bytes.len(),
+            ReplacementContent::ReuseSelected(_) => 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -345,7 +357,13 @@ fn collect_replacements(
     Ok((collector, changes, dependencies))
 }
 
-fn preflight_replacements(
+/// The borrowed-input bound `collect_replacements` applies before any
+/// replacement payload is cloned — destination/duplicate coverage, the
+/// per-file cap, and the checked aggregate over caller bytes plus
+/// valid reuse-source lengths. `replace_stage` runs the same pass while
+/// still borrowing the caller's batch, so an over-budget batch never
+/// becomes an allocation.
+pub(crate) fn preflight_replacements(
     files: &BTreeMap<&PartialPath, &SelectedFile>,
     replacements: &[FileReplacement],
     limits: &PartialLimits,
@@ -624,7 +642,12 @@ pub(crate) fn validate_output_object(
     }
 }
 
-fn charge_raw_bytes(
+/// The raw-pack framing charge one carried object adds: 5 framing bytes
+/// plus the object's encoded length, checked against
+/// `limits.max_raw_pack_bytes`. Shared by the producing overlay and the
+/// scoped-workspace retained-inventory accounting, which holds the same
+/// object set to the same budget.
+pub(crate) fn charge_raw_bytes(
     current: usize,
     bytes_len: usize,
     limits: &PartialLimits,

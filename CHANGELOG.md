@@ -56,6 +56,59 @@ train).
   Existing object, signing, pack, ref formats and full-clone defaults are
   unchanged. **SemVer:** additive.
 
+- *(core)* `ScopedWorkspaceLayout` adds native durable scoped-workspace
+  local state (SPEC-PARTIAL-WORKSPACES §16): `create`/`open` of a root whose
+  `.mkit` is the exact `mkit-scoped: 1\n` marker file, immutable
+  `.mkit-scoped/generations/<manifest-digest>` state selected solely by an
+  atomically replaced `CURRENT` pointer, and `read_state`/`replace_stage`/
+  `save_pending`/`record_outcome` transitions serialized by an isolated
+  `workspace.lock`. The `MKWS`/`MKST`/`MKPN`/`MKAC`/`MKGM`/`MKCR` envelopes
+  are checksum-bounded and strictly decoded; staged and pending state is
+  authoritative over working files, and acceptance advances the base and
+  resets the stage to the accepted representation without overwriting
+  divergent working files. Transitions serialize on a fresh inode-verified
+  per-operation lock descriptor (same-handle callers serialize; panic
+  release is automatic), validate the complete proposed state before
+  `CURRENT` moves, and publish immutable artifacts and generation members
+  by sibling-temporary write, fsync, and no-replace rename so a torn write
+  can never occupy a canonical digest name. Reopen re-verifies the exact
+  produced-object inventory against the staged overlay under incremental
+  raw-pack accounting, validates persisted chunked representations per
+  occurrence before materializing, and replays staged reuse through the
+  authenticated selected representations instead of re-canonicalizing
+  them. The retained-object inventory follows one deterministic rule
+  regardless of the caller's `Bytes` versus `ReuseSelected` form &mdash;
+  produced objects minus ids the verified selection already authenticates,
+  where the base-authenticated set covers each selected representation id
+  AND its declared chunk dependencies &mdash; so a byte-copy of selected
+  content persists what its reuse equivalent would for plain and chunked
+  representations alike, a chunk shared between a reused base
+  representation and new content is deduplicated while genuinely new
+  manifests and chunks stay retained, and the same rule is checked
+  before `CURRENT` moves and on reopen. Replacement batches are
+  aggregate-validated on borrowed
+  input before any payload is cloned, and retained-object reads are
+  bounded by remaining raw-pack headroom. The lock sentinel's identity
+  is re-verified after the blocking flock returns, so a sentinel
+  replaced while a writer waits refuses the stale acquisition instead
+  of mutating on a detached inode. Scoped-root discovery is
+  descriptor-anchored and never follows metadata symlinks; unrelated
+  `.mkit-scoped`-named entries &mdash; including nonregular `CURRENT`,
+  `generations`, or `manifest.bin` shapes &mdash; do not become scoped
+  authority, do not hide genuine authority, and do not break ordinary
+  repositories, and the ancestor walk resolves the longest existing
+  caller prefix and continues on its REAL ancestors, so a directory
+  alias naming a scoped root or a directory inside it is refused even
+  when the probed descendant does not exist.
+  Ordinary commands, `ObjectStore::open`,
+  and `ObjectStore::init` refuse scoped roots, corrupt markers, incomplete
+  installs, and layout conflicts before touching ancestor repositories or
+  the filesystem. Existing object, bundle, update, signing, pack, and ref
+  formats and ordinary repository defaults are unchanged. **SemVer:**
+  additive in this pre-release, but `StoreError` gains the
+  `ScopedBoundary` variant &mdash; a break for downstream exhaustive
+  matches.
+
 - *(wasm)* `partial_verify_snapshot` materializes selected file bytes from a
   verified `MKWB` without signing. `partial_edit_and_export_with_limits` shares
   the existing edit/export pipeline with a caller-lowered `PartialLimits` JSON

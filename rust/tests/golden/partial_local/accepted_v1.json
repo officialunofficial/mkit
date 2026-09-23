@@ -1,0 +1,9 @@
+{
+  "blake3": "e6f130ecd60626656b266cfd527ac4293c93dea7a1b6ec90a76ab3f7170a9044",
+  "description": "MKAC from the accepted generation: prior base, revision 1, candidate.",
+  "error": null,
+  "expect": "accept",
+  "magic": "MKAC",
+  "name": "accepted_v1",
+  "size": 238
+}

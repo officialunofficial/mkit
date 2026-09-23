@@ -41,9 +41,18 @@ document points here.
 | `refs-<ref>.lock` | common dir, keyed on the full ref path | per-ref | every direct on-disk ref mutation: Any, Missing, Match, delete, tags, remote refs and batch writes (`mkit_core::refs::cas_lock_name`) | SPEC-REFS §5.1 |
 | `<root>/.mkit/refs/.lock` | transport root | per-repo, **local to the file transport only** | the file transport's own Any/Missing/Match critical sections (`mkit-transport-file`'s `RefLock`) | SPEC-TRANSPORT, §3.1 (this document) |
 | `serve.lock` | common dir | per-repo, **detection only, not a critical-section lock** | held **shared** by every live `mkit serve` process for its whole lifetime; probed non-blocking-exclusive by `worktree.lock`/`worktrees.lock` acquisition to warn when a root is concurrently served (MKIT-11/#655) | §3.1 (this document) |
+| `workspace.lock` | `<scoped-root>/.mkit-scoped/` | per scoped workspace, **isolated domain** | scoped-workspace state transitions (stage replace, pending save, outcome/acceptance) under `ScopedWorkspaceLayout` | SPEC-PARTIAL-WORKSPACES §16 |
 
 The recovery log (`.mkit/recovery-log`) has **no dedicated lock** &mdash; see
 §3.2.
+
+`workspace.lock` belongs to a scoped workspace's own `.mkit-scoped` state
+directory, which contains no ordinary repository state. It is an isolated
+lock domain: it is acquired only by scoped-workspace transitions, it is never
+held while acquiring any lock in the ordinary chain below, and no ordinary
+command ever acquires it (ordinary commands refuse scoped roots outright).
+It MUST NOT be composed into the ordinary lock order &mdash; there is no ordering
+relationship to specify because the two domains never co-hold.
 
 In the schematic names above, `<ref>` MUST be the lowercase hexadecimal BLAKE3
 digest of the full UTF-8 ref path relative to the common directory, such as

@@ -682,3 +682,63 @@ incompatible carriers.
 `mkit_core::verify::closure::tests::delta_pack_is_profile_violation`,
 and `rust/tests/golden/closure/neg_delta_entry.*` /
 `neg_compressed_entry.*`.
+
+## Scoped-workspace CURRENT selects one coherent state; stage/pending are authoritative
+
+**Always:** a scoped workspace's `.mkit-scoped/CURRENT` names exactly one
+manifest-digest-keyed immutable generation, and readers decode only the
+records that generation binds &mdash; never the highest surviving generation, and
+never working-tree contents. The staged file map and pending operation come
+from the selected generation alone; the working tree is materialized only at
+create and is never consulted or rewritten by transitions. A transition
+validates the complete proposed state &mdash; bindings, selection coverage,
+pending/accepted consistency, the exact produced-object inventory minus the
+base-authenticated set (each selected representation id AND its declared
+chunk dependencies), staged representations, and aggregate limits &mdash;
+before `CURRENT` can select it, so
+`CURRENT` never names a generation the reopen checks would reject. Immutable
+artifacts and generation members install by sibling-temporary write, fsync,
+and no-replace rename, so an interrupted write can never occupy a canonical
+digest name. The lock is held by a fresh inode-verified per-operation
+descriptor that re-verifies the sentinel identity after the blocking flock
+returns, so same-handle callers serialize, a sentinel replaced while a writer
+waits refuses the stale acquisition, and a panic cannot strand it.
+
+**Because:** torn writes and crashes are expected. Reading anything but the
+CURRENT-selected generation can pair a new workspace record with an old
+stage or a foreign pending update, and treating the working tree as
+authoritative would silently discard staged-but-unmaterialized edits.
+Publishing before validating the whole state can strand a workspace on a
+generation no reader accepts, and writing a canonical name directly lets a
+torn write poison every retry of the same operation.
+
+**If violated:** a crash mid-transition can resurrect a stale stage, an
+adversarial or torn generation can be mistaken for committed state, or a
+user's divergent working file can overwrite staged content &mdash; each
+misrepresenting what the next export would sign. A rejected API call could
+still publish an unloadable generation; a torn artifact could make a
+legitimate retry fail on `CorruptArtifact` forever; a shared-handle race
+could fork the generation sequence.
+
+**Enforced by:** `rust/crates/mkit-core/tests/partial_local.rs`
+(`missing_or_corrupt_current_fails_closed`,
+`corrupt_manifest_member_bundle_object_update_all_fail_closed`,
+`no_highest_generation_or_worktree_fallback`,
+`stage_persists_across_restart_and_workfile_is_ignored`,
+`contention_same_handle_serializes`,
+`contention_separate_handles_serializes`,
+`staged_alternate_reuse_survives_replay_and_pending`) and
+`mkit_core::partial::state::tests` fault-seam cases covering every
+commit-sequence injection point plus pre-publication validation, staged
+chunk-bound, retained-inventory, chunked-inventory, deterministic
+lock-contention, lock-gate-isolation, and stale-sentinel cases
+(`over_budget_complete_stage_is_rejected_before_publish`,
+`staged_chunked_declared_total_stops_at_first_overrun`,
+`required_inventory_bound_check_precedes_read`,
+`bytes_copy_of_selected_content_survives_reopen_and_pending`,
+`bytes_copy_of_chunked_selected_content_survives_reopen_and_pending`,
+`chunked_bytes_copy_and_reuse_persist_identical_stage_records`,
+`mixed_chunked_batch_shares_base_chunks_and_retains_new_ones`,
+`lock_serializes_competing_writers_deterministically`,
+`lock_gates_are_isolated_per_workspace_and_phase`,
+`replaced_lock_sentinel_refuses_stale_waiter`).

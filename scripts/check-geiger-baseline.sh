@@ -15,13 +15,25 @@
 # Why first-party crates have non-zero counts today:
 #   mkit-cli   — `getpwuid_r` opt-in in config::home_dir_for_euid
 #                (lib.rs:9-17 documents the exception)
-#   mkit-core  — two `#[allow(unsafe_code)]` callsites, both documented in
+#   mkit-core  — `partial::sys`, the scoped-workspace POSIX descriptor
+#                boundary (openat/`O_NOFOLLOW`/`O_DIRECTORY` opens,
+#                `flock`, `fchmod`, `fdopendir`, `renameat2`-family
+#                calls, `lstat`/`fstatat(AT_SYMLINK_NOFOLLOW)` checks
+#                that normalize macOS's `ENOTDIR` result for symlinked
+#                directory components to `ELOOP`, and the cfg(test)-only
+#                `flock(LOCK_EX|LOCK_NB)` probe the deterministic
+#                lock-contention regression uses): the no-follow
+#                descriptor discipline cannot be expressed through safe
+#                `std::fs` APIs, so the module concentrates all of it
+#                behind reviewed safe wrappers — callers never write
+#                `unsafe` themselves. Plus two
+#                `#[allow(unsafe_code)]` callsites documented in
 #                lib.rs's own header comment: `sign::load_key`'s
 #                `libc::geteuid()` POSIX uid check, and
 #                `batch::RealSyncer::file_barrier`'s
 #                `libc::fcntl(.., F_BARRIERFSYNC)` on macOS/iOS (added by
 #                #587). The ceiling counts unsafe EXPRESSIONS (see above),
-#                not blocks, hence 3 rather than 2.
+#                not blocks.
 #
 # All other first-party crates MUST stay at 0.
 #
@@ -38,7 +50,7 @@ set -euo pipefail
 ceiling_for() {
     case "$1" in
         mkit-cli)               echo 23 ;;
-        mkit-core)              echo 3  ;;
+        mkit-core)              echo 111 ;;
         mkit-keystore)          echo 0  ;;
         mkit-attest)            echo 0  ;;
         mkit-rpc)               echo 0  ;;

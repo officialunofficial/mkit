@@ -1,0 +1,9 @@
+{
+  "blake3": "21522daae2675f7b1c9e76ff7b0ac5c41fe20322c29bc66cd3601f7e00e77c8a",
+  "description": "MKGM selecting workspace+stage+pending members (no accepted member).",
+  "error": null,
+  "expect": "accept",
+  "magic": "MKGM",
+  "name": "manifest_v1",
+  "size": 143
+}

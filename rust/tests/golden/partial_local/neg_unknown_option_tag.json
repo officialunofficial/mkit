@@ -1,0 +1,9 @@
+{
+  "blake3": "7ba0f1ddfddd7f5f03fac2d714ca9d4570143a583b2d4e267fb7c395871f9d8e",
+  "description": "MKPN operation tag set to 2 (only 0/1 are defined).",
+  "error": "NonCanonical",
+  "expect": "reject",
+  "magic": "MKPN",
+  "name": "neg_unknown_option_tag",
+  "size": 255
+}
