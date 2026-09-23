@@ -316,7 +316,77 @@ fn repo_prop() -> (&'static str, Value) {
     )
 }
 
+fn workspace_prop() -> (&'static str, Value) {
+    (
+        "repo_path",
+        prop("Scoped workspace root or, for create, an existing destination parent directory"),
+    )
+}
+
 pub(crate) const TOOLS: &[ToolSpec] = &[
+    ToolSpec {
+        name: "mkit_workspace_create",
+        description: "Create an offline scoped workspace from a bundle in repo_path (an existing parent directory).",
+        hints: (false, false, false),
+        schema: || {
+            schema(
+                vec![
+                    workspace_prop(),
+                    ("bundle", prop("Bundle file inside repo_path")),
+                    ("base", prop("Exact trusted 64-hex base id")),
+                    ("destination", prop("New child directory name")),
+                    (
+                        "paths",
+                        json!({"type":"array","items":{"type":"string"},"description":"Exact selected paths; omit only with accept_bundle_selection"}),
+                    ),
+                    ("accept_bundle_selection", json!({"type":"boolean"})),
+                ],
+                &["repo_path", "bundle", "base", "destination"],
+            )
+        },
+    },
+    ToolSpec {
+        name: "mkit_workspace_status",
+        description: "Report selected staged/working state and bounded extra names.",
+        hints: (true, false, true),
+        schema: || schema(vec![workspace_prop()], &["repo_path"]),
+    },
+    ToolSpec {
+        name: "mkit_workspace_diff",
+        description: "Compare selected stage to working files, or base to stage.",
+        hints: (true, false, true),
+        schema: || {
+            schema(
+                vec![
+                    workspace_prop(),
+                    ("cached", json!({"type":"boolean"})),
+                    ("paths", json!({"type":"array","items":{"type":"string"}})),
+                ],
+                &["repo_path"],
+            )
+        },
+    },
+    ToolSpec {
+        name: "mkit_workspace_add",
+        description: "Atomically stage complete bytes of exact selected paths.",
+        hints: (false, false, false),
+        schema: || {
+            schema(
+                vec![
+                    workspace_prop(),
+                    ("all", json!({"type":"boolean"})),
+                    ("paths", json!({"type":"array","items":{"type":"string"}})),
+                ],
+                &["repo_path"],
+            )
+        },
+    },
+    ToolSpec {
+        name: "mkit_workspace_log",
+        description: "List authenticated base and locally recorded identifiers with partial-history boundary.",
+        hints: (true, false, true),
+        schema: || schema(vec![workspace_prop()], &["repo_path"]),
+    },
     ToolSpec {
         name: "mkit_status",
         description: "Show staged and working-tree changes (porcelain v2; empty means clean).",
@@ -785,6 +855,10 @@ pub(crate) fn call_tool(
         Err(e) => return Ok(CallOutcome::err(e)),
     };
 
+    if let Err(e) = validate_workspace_tool_root(name, &repo) {
+        return Ok(CallOutcome::err(e));
+    }
+
     // Confine path-typed arguments relative to the repo. `--repository`
     // only constrains repo_path; predicate/trust-roots paths reach the
     // child CLI directly, so the MCP must hold the boundary itself.
@@ -798,6 +872,29 @@ pub(crate) fn call_tool(
     };
 
     Ok(run_subprocess(&repo, &command))
+}
+
+/// MCP confines the *actual* scoped root, not merely a cwd beneath it.
+/// CLI commands may discover upward for `-C` convenience; an MCP allowed
+/// root can be narrower, so accepting a child cwd would read siblings that
+/// are outside the tool's allowed subtree.
+fn validate_workspace_tool_root(name: &str, repo: &Path) -> Result<(), String> {
+    if !matches!(
+        name,
+        "mkit_workspace_status"
+            | "mkit_workspace_diff"
+            | "mkit_workspace_add"
+            | "mkit_workspace_log"
+    ) {
+        return Ok(());
+    }
+    match mkit_core::layout::check_scoped_boundary(repo) {
+        Err(mkit_core::layout::DiscoverError::ScopedWorkspace(root)) if root == repo => Ok(()),
+        Err(e) => Err(format!(
+            "repo_path must be the exact scoped workspace root: {e}"
+        )),
+        Ok(()) => Err("repo_path must be the exact scoped workspace root".into()),
+    }
 }
 
 /// Enforce containment of the file-path arguments the child CLI opens
@@ -814,6 +911,14 @@ pub(crate) fn call_tool(
 ///   see docs/THREAT-MODEL.md §"Trust-roots scope").
 fn confine_path_args(name: &str, args: &Value, repo: &Path) -> Result<(), String> {
     match name {
+        "mkit_workspace_create" => {
+            confine_path(
+                repo,
+                &req_str(args, "bundle")?,
+                Containment::Inside,
+                "bundle",
+            )?;
+        }
         "mkit_attest" => {
             if let Some(f) = opt_str(args, "predicate_file") {
                 confine_path(repo, &f, Containment::Inside, "predicate_file")?;
@@ -903,6 +1008,31 @@ fn opt_str(args: &Value, key: &str) -> Option<String> {
     args.get(key).and_then(Value::as_str).map(str::to_owned)
 }
 
+fn required_paths(args: &Value) -> Result<Vec<String>, String> {
+    let values = args
+        .get("paths")
+        .and_then(Value::as_array)
+        .ok_or("missing required paths array")?;
+    if values.is_empty() {
+        return Err("paths must not be empty".into());
+    }
+    values
+        .iter()
+        .map(|value| {
+            let path = value.as_str().ok_or("paths entries must be strings")?;
+            no_dash(path, "selected path")?;
+            if path.starts_with('/')
+                || path
+                    .split('/')
+                    .any(|part| part.is_empty() || part == "." || part == "..")
+            {
+                return Err(format!("invalid selected path '{path}'"));
+            }
+            Ok(path.to_owned())
+        })
+        .collect()
+}
+
 /// Push `--commit <hash>` unless the value is "HEAD" (any case) or
 /// absent — the CLI's `--commit` parses a hex hash and rejects "HEAD",
 /// but defaults to HEAD when the flag is omitted, so map the common
@@ -939,6 +1069,69 @@ fn push_algorithm(out: &mut Vec<String>, args: &Value) -> Result<(), String> {
 fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
     let mut out: Vec<String> = Vec::new();
     match name {
+        "mkit_workspace_create" => {
+            let bundle = req_str(args, "bundle")?;
+            let base = req_str(args, "base")?;
+            let destination = req_str(args, "destination")?;
+            no_dash(&bundle, "bundle")?;
+            no_dash(&base, "base")?;
+            if destination == "."
+                || destination == ".."
+                || destination.contains('/')
+                || destination.contains('\\')
+            {
+                return Err("destination must be one new child directory name".into());
+            }
+            no_dash(&destination, "destination")?;
+            out.extend([
+                "workspace".into(),
+                "create".into(),
+                "--format=json".into(),
+                "--bundle".into(),
+                bundle,
+                "--base".into(),
+                base,
+            ]);
+            if args.get("accept_bundle_selection").and_then(Value::as_bool) == Some(true) {
+                if args.get("paths").is_some() {
+                    return Err("paths and accept_bundle_selection are mutually exclusive".into());
+                }
+                out.push("--accept-bundle-selection".into());
+            } else {
+                for path in required_paths(args)? {
+                    out.extend(["--path".into(), path]);
+                }
+            }
+            out.push(destination);
+        }
+        "mkit_workspace_status" => {
+            out.extend(["workspace".into(), "status".into(), "--format=json".into()]);
+        }
+        "mkit_workspace_diff" => {
+            out.extend(["workspace".into(), "diff".into(), "--format=json".into()]);
+            if args.get("cached").and_then(Value::as_bool) == Some(true) {
+                out.push("--cached".into());
+            }
+            if args.get("paths").is_some() {
+                out.push("--".into());
+                out.extend(required_paths(args)?);
+            }
+        }
+        "mkit_workspace_add" => {
+            out.extend(["workspace".into(), "add".into(), "--format=json".into()]);
+            if args.get("all").and_then(Value::as_bool) == Some(true) {
+                if args.get("paths").is_some() {
+                    return Err("all and paths are mutually exclusive".into());
+                }
+                out.push("--all".into());
+            } else {
+                out.push("--".into());
+                out.extend(required_paths(args)?);
+            }
+        }
+        "mkit_workspace_log" => {
+            out.extend(["workspace".into(), "log".into(), "--format=json".into()]);
+        }
         "mkit_status" => out.extend(["status".into(), "--porcelain=v2".into()]),
         "mkit_diff_unstaged" => out.push("diff".into()),
         "mkit_diff_staged" => out.extend(["diff".into(), "--staged".into()]),
@@ -1249,7 +1442,7 @@ mod tests {
     fn tool_table_is_complete_and_annotated() {
         let tools = tool_descriptors();
         let arr = tools.as_array().unwrap();
-        assert_eq!(arr.len(), 21, "tool count is part of the public surface");
+        assert_eq!(arr.len(), 26, "tool count is part of the public surface");
         for t in arr {
             assert!(t.get("name").is_some());
             assert!(t.get("description").is_some());
@@ -1275,6 +1468,9 @@ mod tests {
             let expect_ro = matches!(
                 name,
                 "mkit_status"
+                    | "mkit_workspace_status"
+                    | "mkit_workspace_diff"
+                    | "mkit_workspace_log"
                     | "mkit_diff_unstaged"
                     | "mkit_diff_staged"
                     | "mkit_diff"
@@ -1292,6 +1488,24 @@ mod tests {
 
     #[test]
     fn argv_construction_basics() {
+        let argv = build_argv("mkit_workspace_add", &json!({"paths":["a.txt"]})).unwrap();
+        assert_eq!(argv, ["workspace", "add", "--format=json", "--", "a.txt"]);
+        let argv = build_argv(
+            "mkit_workspace_diff",
+            &json!({"cached":true,"paths":["a.txt"]}),
+        )
+        .unwrap();
+        assert_eq!(
+            argv,
+            [
+                "workspace",
+                "diff",
+                "--format=json",
+                "--cached",
+                "--",
+                "a.txt"
+            ]
+        );
         let argv = build_argv("mkit_status", &json!({})).unwrap();
         assert_eq!(argv, ["status", "--porcelain=v2"]);
 
@@ -1300,6 +1514,51 @@ mod tests {
 
         let argv = build_argv("mkit_add", &json!({ "files": ["a.txt", "src/b.rs"] })).unwrap();
         assert_eq!(argv, ["add", "a.txt", "src/b.rs"]);
+    }
+
+    #[test]
+    fn workspace_mcp_rejects_conflicting_selection_arguments() {
+        assert!(build_argv("mkit_workspace_create", &json!({"bundle":"bundle.bin","base":"00","destination":"new","accept_bundle_selection":true,"paths":["a"]})).is_err());
+        assert!(build_argv("mkit_workspace_add", &json!({"all":true,"paths":["a"]})).is_err());
+        assert!(build_argv("mkit_workspace_add", &json!({"all":true})).is_ok());
+    }
+
+    #[test]
+    fn workspace_mcp_rejects_child_cwd_as_scoped_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let bundle = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/golden/partial_workspace/plain_file.bin"),
+        )
+        .unwrap();
+        let base = mkit_core::hash::from_hex(
+            "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
+        )
+        .unwrap();
+        let root = temp.path().join("scoped");
+        mkit_core::partial::ScopedWorkspaceLayout::create(
+            &root,
+            base,
+            &[vec![b"shallow.txt".to_vec()]],
+            &bundle,
+            mkit_core::partial::PartialLimits::V1,
+            None,
+        )
+        .unwrap();
+        let child = root.join("child");
+        std::fs::create_dir(&child).unwrap();
+        let root = root.canonicalize().unwrap();
+        let child = child.canonicalize().unwrap();
+        assert!(validate_workspace_tool_root("mkit_workspace_diff", &root).is_ok());
+        assert!(validate_workspace_tool_root("mkit_workspace_diff", &child).is_err());
+        let outcome = call_tool(
+            "mkit_workspace_diff",
+            &json!({"repo_path":child}),
+            Some(&child),
+        )
+        .unwrap();
+        assert!(outcome.is_error);
+        assert!(outcome.text.contains("exact scoped workspace root"));
     }
 
     #[test]
@@ -1313,6 +1572,7 @@ mod tests {
             ("mkit_cat_object", json!({ "object": "--batch" })),
             ("mkit_log", json!({ "rev": "--graph" })),
             ("mkit_attest", json!({ "predicate_file": "--force" })),
+            ("mkit_workspace_add", json!({ "paths": ["--all"] })),
         ] {
             let err = build_argv(tool, &args).unwrap_err();
             assert!(err.contains("must not start with '-'"), "{tool}: {err}");
@@ -1464,7 +1724,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            21
+            26
         );
 
         // Notifications produce no response.
