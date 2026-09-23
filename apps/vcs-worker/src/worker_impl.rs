@@ -43,6 +43,14 @@ pub mod health;
 pub mod managed;
 pub mod refstore;
 pub mod service;
+#[cfg(feature = "managed-access")]
+pub mod snapshot_driver;
+#[cfg(feature = "managed-access")]
+pub mod snapshot_jobs;
+#[cfg(feature = "managed-access")]
+pub mod snapshot_leases;
+#[cfg(feature = "managed-access")]
+pub mod snapshot_store;
 #[cfg_attr(feature = "managed-access", allow(dead_code))]
 pub mod wire;
 

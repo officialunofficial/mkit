@@ -95,6 +95,18 @@ pub enum PackListError {
     Malformed,
 }
 
+/// A caller-lowered bound around the existing MKPL grammar. These limits are
+/// policy for one use, not a new packlist version or generic decode default.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum BoundedPackListError {
+    #[error("packlist byte limit exceeded")]
+    Bytes,
+    #[error("packlist entries exceed the caller cap or the body is malformed")]
+    BoundedBody,
+    #[error(transparent)]
+    Format(#[from] PackListError),
+}
+
 /// Serialise one packlist node: the `MKPL`/version guard header followed by
 /// the `prev`/`packs` body encoded with `commonware-codec` (idiomatic
 /// `Option` + `Vec`).
@@ -150,6 +162,46 @@ pub fn decode_packlist(bytes: &[u8]) -> Result<PackListNode, PackListError> {
     // Trailing bytes after the declared body are a malformed packlist.
     if buf.has_remaining() {
         return Err(PackListError::Malformed);
+    }
+    Ok(PackListNode { prev, packs })
+}
+
+/// Decode the unchanged MKPL v1 bytes with lower byte and entry caps.
+///
+/// The Commonware vector decoder checks the caller's entry bound before
+/// allocating the vector. The generic [`decode_packlist`] remains unchanged.
+///
+/// # Errors
+///
+/// Returns a bound or ordinary MKPL format error before retaining an
+/// over-limit list.
+pub fn decode_packlist_bounded(
+    bytes: &[u8],
+    max_bytes: usize,
+    max_entries: usize,
+) -> Result<PackListNode, BoundedPackListError> {
+    use bytes::Buf as _;
+    use commonware_codec::{ReadExt, ReadRangeExt};
+
+    if bytes.len() > max_bytes {
+        return Err(BoundedPackListError::Bytes);
+    }
+    if bytes.len() < PACKLIST_HEADER_LEN {
+        return Err(PackListError::TooShort.into());
+    }
+    if &bytes[..4] != PACKLIST_MAGIC.as_slice() {
+        return Err(PackListError::InvalidMagic.into());
+    }
+    if bytes[4] != PACKLIST_VERSION {
+        return Err(PackListError::UnsupportedVersion(bytes[4]).into());
+    }
+    let mut buf: &[u8] = &bytes[PACKLIST_HEADER_LEN..];
+    let prev = <Option<Hash>>::read(&mut buf).map_err(|_| PackListError::Malformed)?;
+    let packs =
+        <Vec<Hash>>::read_range(&mut buf, 0..=max_entries.min(PACKLIST_MAX_ENTRIES as usize))
+            .map_err(|_| BoundedPackListError::BoundedBody)?;
+    if buf.has_remaining() {
+        return Err(PackListError::Malformed.into());
     }
     Ok(PackListNode { prev, packs })
 }
@@ -963,6 +1015,47 @@ mod tests {
         vec![[1u8; 32]; over_cap - 1].write(&mut at_cap);
         let decoded = decode_packlist(&at_cap).expect("at-cap list must decode");
         assert_eq!(decoded.packs.len(), PACKLIST_MAX_ENTRIES as usize);
+    }
+
+    #[test]
+    fn hosted_bounded_packlist_checks_bytes_and_entries_before_vector_growth() {
+        let keys = vec![[7u8; 32]; 129];
+        let at_cap = encode_packlist(None, &keys[..128]).unwrap();
+        let one_over = encode_packlist(None, &keys).unwrap();
+        assert_eq!(
+            decode_packlist_bounded(&at_cap, 64 * 1024, 128)
+                .unwrap()
+                .packs
+                .len(),
+            128
+        );
+        assert_eq!(
+            decode_packlist_bounded(&one_over, 64 * 1024, 128),
+            Err(BoundedPackListError::BoundedBody)
+        );
+        assert_eq!(
+            decode_packlist_bounded(&at_cap, at_cap.len() - 1, 128),
+            Err(BoundedPackListError::Bytes)
+        );
+        assert_eq!(
+            decode_packlist(&one_over).unwrap().packs.len(),
+            129,
+            "the generic MKPL decoder retains its portable cap"
+        );
+        let mut version = at_cap.clone();
+        version[4] = 2;
+        assert_eq!(
+            decode_packlist_bounded(&version, 64 * 1024, 128),
+            Err(BoundedPackListError::Format(
+                PackListError::UnsupportedVersion(2)
+            ))
+        );
+        let mut trailing = at_cap;
+        trailing.push(0);
+        assert_eq!(
+            decode_packlist_bounded(&trailing, 64 * 1024, 128),
+            Err(BoundedPackListError::Format(PackListError::Malformed))
+        );
     }
 
     #[test]

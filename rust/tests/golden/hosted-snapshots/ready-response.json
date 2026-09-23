@@ -1,0 +1,1 @@
+{"version":1,"job_id":"1111111111111111111111111111111111111111111111111111111111111111","job_generation":"1","revision":"10","state":"ready","progress":{"catalog_packs":"3","catalog_entries":"4","reached_objects":"4","reached_bytes":"2449","work_units":"6","attempts":"10","reserved_io_bytes":"5253","r2_operations":"13"}}

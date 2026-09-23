@@ -165,7 +165,32 @@ partial frontier can be mistaken for a complete Snapshot.
 
 **Enforced by:** `partial::walk::tests` differential single-walk counters and
 bounds against `RecipientGraph::validate_base`, plus the bounded
-`snapshot_walk` fuzz target. Service persistence remains a later obligation.
+`snapshot_walk` fuzz target. The optional service's separate durable
+completion obligation is below.
+
+## Hosted Snapshot readiness is durable, complete, and never authority
+
+**Always:** only the configured owner can start/advance a hosted Snapshot
+job. Every R2 read is durably charged before it occurs, and every successful
+step atomically consumes its trusted core predecessor, accounts for newly
+seen IDs, and enqueues all successors. Promotion checks the empty frontier,
+indexed reached/catalog equality, current ref/packmap/policy/attempt fences
+and persisted counters. A current certificate retains its locator index even
+after the terminal job summary ages out. `ready` alone never grants a
+subject access to private bytes.
+
+**Because:** replay, crash, cancellation and a moving branch can otherwise
+turn partial or stale validation into a certificate. A long R2 wait cannot
+hold a SQL transaction or block owner administration.
+
+**If violated:** omitted objects, duplicate accounting, uncharged retries or
+stale async results can be mistaken for an authorized complete Snapshot.
+
+**Enforced by:** `apps/vcs-worker/src/worker_impl/snapshot_{store,jobs,driver,leases}.rs`,
+`apps/vcs-worker/src/snapshot_frontier.rs`, the core bounded-MKPL and
+`partial::walk` tests, and `apps/vcs-worker/tests/managed_snapshots.py`
+against actual local workerd/R2/SQLite. Private subject disclosure remains
+closed until its separate live-grant check is implemented.
 
 ## Staged update facts require exact origin and a trusted complete driver
 

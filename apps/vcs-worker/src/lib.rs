@@ -14,6 +14,10 @@ pub mod access_policy;
 pub mod envelope;
 pub mod hashing;
 pub mod refs;
+#[cfg(feature = "managed-access")]
+pub mod snapshot_frontier;
+#[cfg(feature = "managed-access")]
+pub mod snapshot_wire;
 pub mod storage_error;
 pub mod write_quota;
 

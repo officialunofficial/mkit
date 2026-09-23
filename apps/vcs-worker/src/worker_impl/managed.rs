@@ -127,6 +127,11 @@ async fn dispatch_inner(mut req: Request, env: Env) -> Result<Response> {
         "/mkit/host/v1/RegisterGrant" => "register_grant",
         "/mkit/host/v1/RevokeGrant" => "revoke_grant",
         "/mkit/host/v1/GetGrant" => "get_grant",
+        "/mkit/host/v1/BeginSnapshot" => "begin_snapshot",
+        "/mkit/host/v1/ContinueSnapshot" => "continue_snapshot",
+        "/mkit/host/v1/GetSnapshotJob" => "get_snapshot_job",
+        "/mkit/host/v1/CancelSnapshot" => "cancel_snapshot",
+        "/mkit/host/v1/CleanupSnapshots" => "cleanup_snapshots",
         _ => {
             #[cfg(feature = "test-faults")]
             if let Some(internal_path) = path.strip_prefix("/__test/refstore")
@@ -228,7 +233,12 @@ async fn dispatch_inner(mut req: Request, env: Env) -> Result<Response> {
     let mut init = RequestInit::new();
     init.with_method(Method::Post)
         .with_body(Some(payload.into()));
-    let internal_path = if operation.ends_with("_grant") {
+    let internal_path = if operation.ends_with("_snapshot")
+        || operation == "get_snapshot_job"
+        || operation == "cleanup_snapshots"
+    {
+        "/managed-snapshot"
+    } else if operation.ends_with("_grant") {
         "/managed-grant"
     } else {
         "/managed-policy"

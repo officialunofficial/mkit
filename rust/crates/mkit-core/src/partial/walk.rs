@@ -1259,6 +1259,50 @@ mod tests {
     }
 
     #[test]
+    fn repeated_chunk_logical_size_can_exceed_distinct_byte_cap() {
+        let chunk_object = Object::Blob(Blob {
+            data: vec![7; 2 * 1024 * 1024],
+        });
+        let chunk_bytes = serialize(&chunk_object).unwrap();
+        let chunk = id_from_object(&chunk_object, &chunk_bytes);
+        let manifest_object = Object::ChunkedBlob(ChunkedBlob {
+            total_size: 130 * 2 * 1024 * 1024,
+            chunk_size: 2 * 1024 * 1024,
+            chunks: vec![chunk; 130],
+        });
+        let manifest_bytes = serialize(&manifest_object).unwrap();
+        let manifest = id_from_object(&manifest_object, &manifest_bytes);
+        let parent = inspect_snapshot_object(
+            manifest,
+            &manifest_bytes,
+            SnapshotRole::File,
+            inspection_limits(),
+        )
+        .unwrap();
+        let fact = inspect_snapshot_object(
+            chunk,
+            &chunk_bytes,
+            SnapshotRole::Chunk,
+            inspection_limits(),
+        )
+        .unwrap();
+        let record = SnapshotWalkRecord::ManifestPage {
+            id: manifest,
+            tree_depth: 0,
+            next_index: 129,
+            sum: 129 * 2 * 1024 * 1024,
+        };
+        let width = NonZeroUsize::new(1).unwrap();
+        assert_eq!(
+            next_manifest_ids(&record, &parent, width).unwrap(),
+            vec![chunk]
+        );
+        let step = advance_snapshot_walk(&record, &parent, &[fact], width, &walk_limits()).unwrap();
+        assert!(step.successors().is_empty());
+        assert!(chunk_bytes.len() + manifest_bytes.len() < 256 * 1024 * 1024);
+    }
+
+    #[test]
     fn manifest_positions_and_cursors_reject_bad_facts_and_layouts() {
         let mut objects = BTreeMap::new();
         let ids: Vec<_> = [0usize, 1, 2, 3, 4]
