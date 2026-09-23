@@ -1,5 +1,6 @@
 //! Borrowed MKWU and local staged-step evidence against committed v1 bytes.
 #![allow(clippy::unwrap_used)] // each unwrap is a fixture assertion
+#![allow(clippy::too_many_lines, clippy::needless_pass_by_value)] // complete protocol fixtures stay readable as one sequence
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -27,6 +28,9 @@ const GOLDEN: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../tests/golden/partial_update/ordinary_update.bin"
 ));
+
+#[path = "staged_update/driver.rs"]
+mod driver;
 
 struct BaseSource(BTreeMap<Hash, Vec<u8>>);
 
@@ -76,7 +80,7 @@ fn base_source() -> (BaseSource, Hash, Hash) {
     (BaseSource(map), root, tree)
 }
 
-fn context<'a>(checked: &CheckedMkwu<'a>) -> StagedValidationContext {
+fn context(checked: &CheckedMkwu<'_>) -> StagedValidationContext {
     StagedValidationContext::new(
         checked.header().clone(),
         PartialLimits::V1,
@@ -327,6 +331,33 @@ fn corrupt_inventory_and_contexts_refuse_locally() {
             PartialLimits::V1,
             over,
             default_staged_inspection_limits()
+        )
+        .is_err()
+    );
+    let staged = StagedUpdateLimitsV1 {
+        max_update_bytes: u64::try_from(
+            checked.header().pack_offset() + checked.header().pack_len() - 1,
+        )
+        .unwrap(),
+        ..StagedUpdateLimitsV1::default()
+    };
+    assert!(
+        StagedValidationContext::new(
+            checked.header().clone(),
+            PartialLimits::V1,
+            staged,
+            default_staged_inspection_limits(),
+        )
+        .is_err()
+    );
+    let mut portable = PartialLimits::V1;
+    portable.max_total_path_bytes = checked.header().changes()[0].path()[0].len() - 1;
+    assert!(
+        StagedValidationContext::new(
+            checked.header().clone(),
+            portable,
+            StagedUpdateLimitsV1::default(),
+            default_staged_inspection_limits(),
         )
         .is_err()
     );
@@ -685,9 +716,165 @@ fn facts_cannot_cross_into_a_stricter_context() {
     );
 }
 
+#[test]
+fn opaque_steps_cannot_cross_profiles_or_headers_at_accounting() {
+    let (source, base_id, _) = base_source();
+    let checked = CheckedMkwu::open(
+        GOLDEN,
+        GOLDEN.len() as u64,
+        mkit_core::hash::hash(GOLDEN),
+        base_id,
+        PartialLimits::V1,
+        StagedUpdateLimitsV1::default(),
+    )
+    .unwrap();
+    let generous = context(&checked);
+    let first = checked.pack().entries().next().unwrap();
+    let fact = inspect_staged_inventory_object(first.payload(), &generous).unwrap();
+    let inventory =
+        advance_staged_inventory(&StagedInventoryCursor::default(), 0, &fact, &generous).unwrap();
+    let mut portable = PartialLimits::V1;
+    portable.max_object_bytes = first.payload().len() - 1;
+    let mut inspection = default_staged_inspection_limits();
+    inspection.max_object_bytes = portable.max_object_bytes;
+    let lower_object = StagedValidationContext::new(
+        checked.header().clone(),
+        portable,
+        StagedUpdateLimitsV1::default(),
+        inspection,
+    )
+    .unwrap();
+    let usage = checked.initial_usage();
+    assert!(apply_inventory_accounting(usage, &inventory, &lower_object).is_err());
+    let equivalent = context(&checked);
+    assert!(apply_inventory_accounting(usage, &inventory, &equivalent).is_ok());
+
+    let base = inspect_snapshot_object(
+        base_id,
+        source.0.get(&base_id).unwrap(),
+        SnapshotRole::BaseRoot,
+        generous.inspection(),
+    )
+    .unwrap();
+    let candidate_bytes = checked
+        .pack()
+        .entries()
+        .find(|entry| {
+            inspect_staged_inventory_object(entry.payload(), &generous)
+                .unwrap()
+                .object()
+                .id()
+                == checked.header().candidate_id()
+        })
+        .unwrap();
+    let candidate = inspect_staged_candidate(candidate_bytes.payload(), &generous).unwrap();
+    let start = start_changed_pairs(&base, &candidate, &generous).unwrap();
+    let mut portable = PartialLimits::V1;
+    portable.max_commit_message_bytes = 1;
+    let lower_message = StagedValidationContext::new(
+        checked.header().clone(),
+        portable,
+        StagedUpdateLimitsV1::default(),
+        default_staged_inspection_limits(),
+    )
+    .unwrap();
+    assert!(apply_changed_accounting(usage, &start, &[candidate.id()], &lower_message).is_err());
+    assert!(apply_changed_accounting(usage, &start, &[candidate.id()], &equivalent).is_ok());
+
+    let mut prefix = GOLDEN[..checked.header().pack_offset()].to_vec();
+    prefix[5] ^= 1;
+    let mkit_core::partial::HeaderPrefix::Parsed(other_header) = parse_mkwu_header_prefix(
+        &prefix,
+        &PartialLimits::V1,
+        &StagedUpdateLimitsV1::default(),
+    )
+    .unwrap() else {
+        panic!("canonical alternate header")
+    };
+    let other = StagedValidationContext::new(
+        other_header,
+        PartialLimits::V1,
+        StagedUpdateLimitsV1::default(),
+        default_staged_inspection_limits(),
+    )
+    .unwrap();
+    assert!(apply_inventory_accounting(usage, &inventory, &other).is_err());
+    assert!(apply_changed_accounting(usage, &start, &[candidate.id()], &other).is_err());
+
+    let file_bytes = serialize(&Object::Blob(Blob {
+        data: b"abc".to_vec(),
+    }))
+    .unwrap();
+    let file_id = id_from_object(
+        &Object::Blob(Blob {
+            data: b"abc".to_vec(),
+        }),
+        &file_bytes,
+    );
+    let file_context = manifest_context(file_id, PartialLimits::V1);
+    let file = inspect_snapshot_object(
+        file_id,
+        &file_bytes,
+        SnapshotRole::File,
+        file_context.inspection(),
+    )
+    .unwrap();
+    let record = RequiredFileRecord::Visit {
+        change_index: 0,
+        expected_file_id: file_id,
+    };
+    let file_step = advance_required_file(
+        &record,
+        &file,
+        &[],
+        NonZeroUsize::new(1).unwrap(),
+        &StagedUpdateUsageV1::default(),
+        &file_context,
+    )
+    .unwrap();
+    let mut lower = PartialLimits::V1;
+    lower.max_object_bytes = file_bytes.len() - 1;
+    let mut lower_inspection = default_staged_inspection_limits();
+    lower_inspection.max_object_bytes = lower.max_object_bytes;
+    let lower_file = StagedValidationContext::new(
+        file_context.header().clone(),
+        lower,
+        StagedUpdateLimitsV1::default(),
+        lower_inspection,
+    )
+    .unwrap();
+    assert!(
+        apply_required_accounting(
+            StagedUpdateUsageV1::default(),
+            &file_step,
+            &[file_id],
+            &lower_file,
+        )
+        .is_err()
+    );
+    assert!(
+        apply_required_accounting(
+            StagedUpdateUsageV1::default(),
+            &file_step,
+            &[file_id],
+            &manifest_context(file_id, PartialLimits::V1),
+        )
+        .is_ok()
+    );
+    assert!(
+        apply_required_accounting(
+            StagedUpdateUsageV1::default(),
+            &file_step,
+            &[file_id],
+            &manifest_context([9; 32], PartialLimits::V1),
+        )
+        .is_err()
+    );
+}
+
 fn append_varint(out: &mut Vec<u8>, mut value: usize) {
     loop {
-        let mut byte = (value & 0x7f) as u8;
+        let mut byte = u8::try_from(value & 0x7f).unwrap();
         value >>= 7;
         if value != 0 {
             byte |= 0x80;
@@ -794,7 +981,7 @@ fn changed_pair_continuation_is_required_and_undeclared_fanout_refuses() {
         let entry = TreeEntry {
             name: format!("A{number:02}").into_bytes(),
             mode: EntryMode::Blob,
-            object_hash: [number as u8; 32],
+            object_hash: [u8::try_from(number).unwrap(); 32],
         };
         old_entries.push(entry.clone());
         new_entries.push(entry);
@@ -849,9 +1036,8 @@ fn changed_pair_continuation_is_required_and_undeclared_fanout_refuses() {
         context.header().changes().len()
     );
 
-    let mut grafted = match old_object {
-        Object::Tree(tree) => tree,
-        _ => unreachable!(),
+    let Object::Tree(mut grafted) = old_object else {
+        unreachable!()
     };
     grafted.entries[0].mode = EntryMode::Tree;
     let mut other = grafted.clone();

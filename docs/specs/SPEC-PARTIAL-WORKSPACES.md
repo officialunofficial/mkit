@@ -809,6 +809,11 @@ reservation without charging it again. The recipient MUST exhaust and apply
 every changed-pair, required-file and complete candidate-Snapshot successor,
 then compare required and supplied ID sets in both directions. A local step,
 restored cursor or consistent count alone does not prove that prior steps ran.
+Accounting MUST apply an opaque local step only under the same canonical
+header and active portable, staged and inspection profiles that produced it;
+equivalent reconstructed profiles MAY match. This binding is process-local
+bookkeeping, not a persisted authority claim. A trusted service MUST still
+bind restored records and ledgers to its sealed carrier and fenced generation.
 The staged v1 profile accounts base and candidate complete walks independently,
 then inventory, diff, required unique bytes and origin occurrences; it is not
 numerically equivalent to the older recipient's shared-cache usage profile.

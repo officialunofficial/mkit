@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 
 use crate::hash::Hash;
 use crate::object::EntryMode;
@@ -12,7 +13,8 @@ use crate::object::EntryMode;
 use super::PartialPath;
 use super::inspect::{InspectedKind, InspectedObject, SnapshotRole};
 use super::staged_update::{
-    StagedCandidateFact, StagedUpdateError, StagedUpdateUsageV1, StagedValidationContext,
+    ContextBinding, StagedCandidateFact, StagedUpdateError, StagedUpdateUsageV1,
+    StagedValidationContext,
 };
 
 /// Maximum entries compared or chunk positions checked in one step.
@@ -124,6 +126,7 @@ impl StagedRequiredObservation {
 /// One local changed-pair transition, not a complete diff certificate.
 #[derive(Debug)]
 pub struct ChangedPairStep {
+    binding: Arc<ContextBinding>,
     successors: Vec<ChangedPairRecord>,
     files: Vec<RequiredFileRecord>,
     matched_indices: Vec<u32>,
@@ -157,6 +160,7 @@ impl ChangedPairStep {
 /// the file bytes again.
 #[derive(Debug)]
 pub struct RequiredFileStep {
+    binding: Arc<ContextBinding>,
     successors: Vec<RequiredFileRecord>,
     observations: Vec<StagedRequiredObservation>,
     reserve_file_bytes: Option<u64>,
@@ -193,8 +197,9 @@ fn required(
     })
 }
 
-fn empty_step() -> ChangedPairStep {
+fn empty_step(context: &StagedValidationContext) -> ChangedPairStep {
     ChangedPairStep {
+        binding: context.binding(),
         successors: Vec::new(),
         files: Vec::new(),
         matched_indices: Vec::new(),
@@ -231,7 +236,7 @@ pub fn start_changed_pairs(
         .object()
         .root()
         .ok_or(StagedUpdateError::Invalid)?;
-    let mut step = empty_step();
+    let mut step = empty_step(context);
     step.successors.push(ChangedPairRecord::Visit {
         old_id,
         new_id,
@@ -350,7 +355,7 @@ pub fn advance_changed_pair(
         if !matches!(record, ChangedPairRecord::Visit { .. }) {
             return Err(StagedUpdateError::Inconsistent);
         }
-        let mut step = empty_step();
+        let mut step = empty_step(context);
         step.pair_visits = 1;
         return Ok(step);
     }
@@ -359,7 +364,7 @@ pub fn advance_changed_pair(
     if old_count != new_count {
         return Err(StagedUpdateError::Invalid);
     }
-    let mut step = empty_step();
+    let mut step = empty_step(context);
     match record {
         ChangedPairRecord::Visit {
             old_id,
@@ -685,6 +690,7 @@ pub fn advance_required_file(
                 return Err(StagedUpdateError::Budget);
             }
             let mut step = RequiredFileStep {
+                binding: context.binding(),
                 successors: Vec::new(),
                 observations: vec![required(file, SnapshotRole::File, Some(index_u32))?],
                 reserve_file_bytes: Some(length),
@@ -762,6 +768,7 @@ pub fn advance_required_file(
                 });
             }
             Ok(RequiredFileStep {
+                binding: context.binding(),
                 successors,
                 observations,
                 reserve_file_bytes: None,
@@ -823,6 +830,9 @@ pub fn apply_changed_accounting(
     newly_required: &[Hash],
     context: &StagedValidationContext,
 ) -> Result<StagedUpdateUsageV1, StagedUpdateError> {
+    if !context.binds(&step.binding) {
+        return Err(StagedUpdateError::Inconsistent);
+    }
     check_usage(&previous, context)?;
     let mut next = previous;
     next.diff_pair_visits = next
@@ -857,6 +867,9 @@ pub fn apply_required_accounting(
     newly_required: &[Hash],
     context: &StagedValidationContext,
 ) -> Result<StagedUpdateUsageV1, StagedUpdateError> {
+    if !context.binds(&step.binding) {
+        return Err(StagedUpdateError::Inconsistent);
+    }
     check_usage(&previous, context)?;
     let mut next = previous;
     next.origin_work = next

@@ -7,6 +7,7 @@ use crate::hash::{Hash, hash};
 use crate::object::{EntryMode, Object, ObjectType};
 use crate::pack::{CheckedRawPack, RawPackError, RawPackLimits};
 use crate::serialize::deserialize;
+use std::sync::Arc;
 
 use super::inspect::{
     InspectError, InspectedKind, InspectedObject, ObjectInspectionLimits, SnapshotRole,
@@ -24,18 +25,31 @@ use super::{PartialError, PartialLimits, PartialPath};
 /// recipient's shared-cache accounting profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StagedUpdateLimitsV1 {
+    /// Maximum encoded MKWU prefix through the pack length, in bytes.
     pub max_header_bytes: u64,
+    /// Maximum complete caller-owned MKWU carrier, in bytes.
     pub max_update_bytes: u64,
+    /// Maximum embedded raw pack, including its framing, in bytes.
     pub max_pack_bytes: u64,
+    /// Maximum number of supplied raw frames, regardless of reachability.
     pub max_inventory_entries: u64,
+    /// Sum of canonical payload lengths across supplied raw frames, in bytes.
     pub max_inventory_payload_bytes: u64,
+    /// Maximum inventory work: exactly two units per inspected frame.
     pub max_inventory_work: u64,
+    /// Independent complete source-only base Snapshot U/B/D/W limits.
     pub base_walk: SnapshotWalkLimits,
+    /// Independent complete candidate Snapshot U/B/D/W limits.
     pub candidate_walk: SnapshotWalkLimits,
+    /// Maximum changed Tree-pair Visit occurrences, not unique Tree IDs.
     pub max_diff_pair_visits: u64,
+    /// Maximum combined diff work: pair Visits plus compared Tree entries.
     pub max_diff_work: u64,
+    /// Maximum deduplicated required supplied IDs.
     pub max_required_unique_ids: u64,
+    /// Sum of canonical lengths for deduplicated required IDs, in bytes.
     pub max_required_canonical_bytes: u64,
+    /// Candidate observation, changed Tree/file occurrences and chunk positions.
     pub max_origin_work: u64,
 }
 
@@ -94,21 +108,37 @@ impl StagedUpdateLimitsV1 {
 /// persistence, seen-ID decisions, exact queues and completion predicates.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct StagedUpdateUsageV1 {
+    /// Encoded header prefix size from the checked carrier, in bytes.
     pub header_bytes: u64,
+    /// Exact complete MKWU carrier length, in bytes.
     pub update_bytes: u64,
+    /// Exact embedded raw-pack length including framing, in bytes.
     pub pack_bytes: u64,
+    /// Checked raw frames in strict ordinal and ID order.
     pub inventory_entries: u64,
+    /// Sum of their canonical payload bytes; no deduplication by ID.
     pub inventory_payload_bytes: u64,
+    /// Exactly twice `inventory_entries` after committed local steps.
     pub inventory_work: u64,
+    /// Unique U/B, max depth D and occurrence W for source-only base closure.
     pub base_walk: SnapshotWalkUsage,
+    /// Independent U/B/D/W for complete candidate logical closure.
     pub candidate_walk: SnapshotWalkUsage,
+    /// Changed Tree-pair Visit occurrences, even for shared Tree IDs.
     pub diff_pair_visits: u64,
+    /// Compared entry positions across all changed Tree pages.
     pub diff_compared_entries: u64,
+    /// Exactly `diff_pair_visits + diff_compared_entries`, checked on each step.
     pub diff_work: u64,
+    /// Deduplicated required supplied IDs; the caller owns the seen ledger.
     pub required_unique_ids: u64,
+    /// Canonical bytes charged once for each newly required ID.
     pub required_canonical_bytes: u64,
+    /// Candidate, changed Tree/file occurrences and chunk positions checked.
     pub origin_work: u64,
+    /// Largest changed Blob length or manifest declared total reserved at Visit.
     pub max_changed_file_bytes_seen: u64,
+    /// Sum of Visit-time reservations per changed path, including repeated IDs.
     pub changed_total_bytes: u64,
 }
 
@@ -376,6 +406,11 @@ impl<'a> CheckedMkwu<'a> {
 /// context alone does not prove a prior sealed carrier or durable job state.
 #[derive(Debug)]
 pub struct StagedValidationContext {
+    binding: Arc<ContextBinding>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct ContextBinding {
     header: ParsedMkwuHeader,
     portable: PartialLimits,
     staged: StagedUpdateLimitsV1,
@@ -402,11 +437,43 @@ impl StagedValidationContext {
             || inspection.max_manifest_chunks > 100_000
             || header.changes.len() > portable.max_changed_paths
             || header.changes.len() > portable.max_selected_paths
-            || header.pack_offset as u64 > staged.max_header_bytes
+            || u64::try_from(header.pack_offset)
+                .map_or(true, |length| length > staged.max_header_bytes)
             || header.pack_len > portable.max_raw_pack_bytes
-            || header.pack_len as u64 > staged.max_pack_bytes
+            || u64::try_from(header.pack_len).map_or(true, |length| length > staged.max_pack_bytes)
+            || header
+                .pack_offset
+                .checked_add(header.pack_len)
+                .is_none_or(|length| {
+                    length > portable.max_update_bytes
+                        || u64::try_from(length)
+                            .map_or(true, |length| length > staged.max_update_bytes)
+                })
         {
             return Err(StagedUpdateError::Budget);
+        }
+        // Reject lowered shape/aggregate bounds before copying path bytes for
+        // the shared canonical spelling and ordering validator.
+        let mut aggregate = 0usize;
+        for change in &header.changes {
+            if change.path.len() > portable.max_path_depth {
+                return Err(StagedUpdateError::Budget);
+            }
+            let mut joined = 0usize;
+            for (index, component) in change.path.iter().enumerate() {
+                if component.len() > portable.max_component_bytes {
+                    return Err(StagedUpdateError::Budget);
+                }
+                joined = joined
+                    .checked_add(component.len() + usize::from(index != 0))
+                    .ok_or(StagedUpdateError::Budget)?;
+            }
+            aggregate = aggregate
+                .checked_add(joined)
+                .ok_or(StagedUpdateError::Budget)?;
+            if joined > portable.max_path_bytes || aggregate > portable.max_total_path_bytes {
+                return Err(StagedUpdateError::Budget);
+            }
         }
         super::validate_paths(
             &header
@@ -417,27 +484,35 @@ impl StagedValidationContext {
             &portable,
         )?;
         Ok(Self {
-            header,
-            portable,
-            staged,
-            inspection,
+            binding: Arc::new(ContextBinding {
+                header,
+                portable,
+                staged,
+                inspection,
+            }),
         })
     }
     #[must_use]
     pub fn header(&self) -> &ParsedMkwuHeader {
-        &self.header
+        &self.binding.header
     }
     #[must_use]
     pub fn portable(&self) -> &PartialLimits {
-        &self.portable
+        &self.binding.portable
     }
     #[must_use]
     pub fn staged(&self) -> &StagedUpdateLimitsV1 {
-        &self.staged
+        &self.binding.staged
     }
     #[must_use]
     pub fn inspection(&self) -> ObjectInspectionLimits {
-        self.inspection
+        self.binding.inspection
+    }
+    pub(super) fn binds(&self, binding: &Arc<ContextBinding>) -> bool {
+        Arc::ptr_eq(&self.binding, binding) || self.binding == *binding
+    }
+    pub(super) fn binding(&self) -> Arc<ContextBinding> {
+        Arc::clone(&self.binding)
     }
 }
 
@@ -465,37 +540,42 @@ pub fn inspect_staged_inventory_object(
     bytes: &[u8],
     context: &StagedValidationContext,
 ) -> Result<StagedInventoryFact, StagedUpdateError> {
-    if bytes.is_empty() || bytes.len() > context.portable.max_object_bytes {
+    if bytes.is_empty() || bytes.len() > context.portable().max_object_bytes {
         return Err(StagedUpdateError::Budget);
     }
     match bytes[0] {
-        tag if tag == ObjectType::Tree as u8 => preflight_tree(bytes, &context.portable)?,
+        tag if tag == ObjectType::Tree as u8 => preflight_tree(bytes, context.portable())?,
         tag if tag == ObjectType::Blob as u8 || tag == ObjectType::ChunkedBlob as u8 => {
-            preflight_file(bytes, &context.portable)?;
+            preflight_file(bytes, context.portable())?;
         }
-        tag if tag == ObjectType::Commit as u8 => preflight_candidate(bytes, &context.portable)?,
+        tag if tag == ObjectType::Commit as u8 => preflight_candidate(bytes, context.portable())?,
         _ => return Err(StagedUpdateError::Invalid),
     }
-    let object = identify_snapshot_object(bytes, context.inspection)?;
+    let object = identify_snapshot_object(bytes, context.inspection())?;
     Ok(StagedInventoryFact {
         object,
-        portable: context.portable,
-        inspection: context.inspection,
+        portable: *context.portable(),
+        inspection: context.inspection(),
     })
 }
 
 /// Restorable trusted inventory bookkeeping; not proof of prior frames.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct StagedInventoryCursor {
+    /// Next raw frame ordinal; must equal `count` in a consistent checkpoint.
     pub next_ordinal: u64,
+    /// Last checked type-aware ID; the next ID must be strictly greater.
     pub previous_id: Option<Hash>,
+    /// Frames already checked; the trusted caller must prove every prior frame.
     pub count: u64,
+    /// Canonical payload bytes over those frames, matching the usage ledger.
     pub canonical_bytes: u64,
 }
 
 /// One local inventory observation and prospective cursor.
 #[derive(Debug)]
 pub struct StagedInventoryStep {
+    binding: Arc<ContextBinding>,
     cursor: StagedInventoryCursor,
     id: Hash,
     kind: InspectedKind,
@@ -533,8 +613,8 @@ pub fn advance_staged_inventory(
 ) -> Result<StagedInventoryStep, StagedUpdateError> {
     if previous.next_ordinal != previous.count
         || frame_ordinal != previous.next_ordinal
-        || fact.portable != context.portable
-        || fact.inspection != context.inspection
+        || fact.portable != *context.portable()
+        || fact.inspection != context.inspection()
         || previous
             .previous_id
             .is_some_and(|id| id >= fact.object.id())
@@ -556,15 +636,16 @@ pub fn advance_staged_inventory(
     let work = count.checked_mul(2).ok_or(StagedUpdateError::Budget)?;
     if count
         > context
-            .staged
+            .staged()
             .max_inventory_entries
-            .min(context.portable.max_update_objects as u64)
-        || canonical_bytes > context.staged.max_inventory_payload_bytes
-        || work > context.staged.max_inventory_work
+            .min(context.portable().max_update_objects as u64)
+        || canonical_bytes > context.staged().max_inventory_payload_bytes
+        || work > context.staged().max_inventory_work
     {
         return Err(StagedUpdateError::Budget);
     }
     Ok(StagedInventoryStep {
+        binding: context.binding(),
         cursor: StagedInventoryCursor {
             next_ordinal: count,
             previous_id: Some(fact.object.id()),
@@ -587,10 +668,13 @@ pub fn apply_inventory_accounting(
     step: &StagedInventoryStep,
     context: &StagedValidationContext,
 ) -> Result<StagedUpdateUsageV1, StagedUpdateError> {
+    if !context.binds(&step.binding) {
+        return Err(StagedUpdateError::Inconsistent);
+    }
     super::staged_diff::check_usage(&previous, context)?;
-    if previous.inventory_entries > context.staged.max_inventory_entries
-        || previous.inventory_payload_bytes > context.staged.max_inventory_payload_bytes
-        || previous.inventory_work > context.staged.max_inventory_work
+    if previous.inventory_entries > context.staged().max_inventory_entries
+        || previous.inventory_payload_bytes > context.staged().max_inventory_payload_bytes
+        || previous.inventory_work > context.staged().max_inventory_work
         || previous.inventory_work
             != previous
                 .inventory_entries
@@ -616,11 +700,11 @@ pub fn apply_inventory_accounting(
     }
     if count
         > context
-            .staged
+            .staged()
             .max_inventory_entries
-            .min(context.portable.max_update_objects as u64)
-        || bytes > context.staged.max_inventory_payload_bytes
-        || work > context.staged.max_inventory_work
+            .min(context.portable().max_update_objects as u64)
+        || bytes > context.staged().max_inventory_payload_bytes
+        || work > context.staged().max_inventory_work
     {
         return Err(StagedUpdateError::Budget);
     }
@@ -657,7 +741,7 @@ impl StagedCandidateFact {
         self.base_id
     }
     pub(super) fn matches_context(&self, context: &StagedValidationContext) -> bool {
-        self.portable == context.portable && self.inspection == context.inspection
+        self.portable == *context.portable() && self.inspection == context.inspection()
     }
 }
 
@@ -670,28 +754,28 @@ pub fn inspect_staged_candidate(
     bytes: &[u8],
     context: &StagedValidationContext,
 ) -> Result<StagedCandidateFact, StagedUpdateError> {
-    preflight_candidate(bytes, &context.portable)?;
+    preflight_candidate(bytes, context.portable())?;
     let object = inspect_snapshot_object(
-        context.header.candidate_id,
+        context.header().candidate_id,
         bytes,
         SnapshotRole::CandidateRoot,
-        context.inspection,
+        context.inspection(),
     )?;
     let Object::Commit(commit) = deserialize(bytes).map_err(|_| StagedUpdateError::Invalid)? else {
         return Err(StagedUpdateError::Invalid);
     };
-    if commit.parents.as_slice() != [context.header.base_id]
+    if commit.parents.as_slice() != [context.header().base_id]
         || commit.message_hash != [0; 32]
         || commit.content_digest != [0; 32]
-        || commit.message.len() > context.portable.max_commit_message_bytes
+        || commit.message.len() > context.portable().max_commit_message_bytes
     {
         return Err(StagedUpdateError::Invalid);
     }
     Ok(StagedCandidateFact {
         object,
-        base_id: context.header.base_id,
-        portable: context.portable,
-        inspection: context.inspection,
+        base_id: context.header().base_id,
+        portable: *context.portable(),
+        inspection: context.inspection(),
     })
 }
 
