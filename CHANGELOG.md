@@ -31,6 +31,12 @@ train).
 
 ### Added
 
+- *(core)* Bounded complete-Snapshot transition and accounting APIs expose
+  authenticated per-occurrence Tree and chunk walks for a trusted external
+  frontier. Local steps do not certify closure, persistence or host authority.
+  Existing recipient APIs and wire bytes remain unchanged. **SemVer:**
+  additive public APIs.
+
 - *(core)* Bounded keyed raw-v1 pack ranges, one-object Snapshot identification
   and role inspection, and a consuming selected-dependency producer driver.
   These expose local facts only; complete validation and host authority are

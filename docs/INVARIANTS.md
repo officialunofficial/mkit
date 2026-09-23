@@ -127,6 +127,24 @@ response could leak into a returned bundle.
 `partial::verify::tests::builder_rejects_wrong_supply_and_premature_finish`,
 and the bounded-inspection fuzz target.
 
+## Bounded Snapshot steps preserve occurrence checks
+
+**Always:** a local complete-Snapshot transition derives child IDs only from
+an authenticated incoming object. It checks role and Tree depth at every
+occurrence, and validates each manifest chunk position and running sum even
+when IDs repeat. Distinct canonical bytes count once; occurrence work does
+not. A step never claims whole closure or durable job completion.
+
+**Because:** shared IDs can appear under different roles or depths, and a
+manifest's intrinsic fields do not prove its chunks' types or lengths.
+
+**If violated:** a reused object can bypass a depth or layout failure, or a
+partial frontier can be mistaken for a complete Snapshot.
+
+**Enforced by:** `partial::walk::tests` differential single-walk counters and
+bounds against `RecipientGraph::validate_base`, plus the bounded
+`snapshot_walk` fuzz target. Service persistence remains a later obligation.
+
 ## Partial snapshots prove selected coverage, never authority or closure
 
 **Always:** a verified partial snapshot is bound to an independently supplied

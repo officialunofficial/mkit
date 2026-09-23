@@ -18,7 +18,7 @@ pub enum SnapshotRole {
     CandidateRoot,
     /// Tree reached through an authenticated Tree-mode edge.
     Tree,
-    /// Blob or ChunkedBlob reached through a regular/executable edge.
+    /// Blob or `ChunkedBlob` reached through a regular/executable edge.
     File,
     /// Blob reached through a symlink edge.
     Symlink,
@@ -36,7 +36,7 @@ pub struct ObjectInspectionLimits {
     pub max_tree_bytes: usize,
     /// Maximum declared Tree entries, checked before decoding.
     pub max_tree_entries: usize,
-    /// Maximum declared ChunkedBlob chunk IDs, checked before decoding.
+    /// Maximum declared `ChunkedBlob` chunk IDs, checked before decoding.
     pub max_manifest_chunks: usize,
 }
 
@@ -76,7 +76,7 @@ pub enum InspectedKind {
     Tree,
     /// Canonical Blob.
     Blob,
-    /// Canonical ChunkedBlob; its referenced chunks remain unchecked.
+    /// Canonical `ChunkedBlob`; its referenced chunks remain unchecked.
     ChunkedBlob,
 }
 

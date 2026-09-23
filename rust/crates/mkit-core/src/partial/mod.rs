@@ -14,6 +14,7 @@ mod recipient_diff;
 mod recipient_graph;
 mod update;
 mod verify;
+mod walk;
 
 // Durable scoped-workspace local state: descriptor-anchored Unix
 // filesystem access, canonical state codecs, and the immutable-generation
@@ -50,6 +51,11 @@ pub use update::{PartialUpdate, export_partial_update};
 pub use verify::{
     PartialCoverage, PartialObjectRequest, PartialObjectRole, PartialSnapshotBuilder, SelectedFile,
     VerifiedPartialSnapshot, VerifiedTree, build_partial_snapshot, verify_partial_snapshot,
+};
+pub use walk::{
+    MAX_WALK_PAGE, SnapshotWalkError, SnapshotWalkLimits, SnapshotWalkRecord, SnapshotWalkStep,
+    SnapshotWalkUsage, WalkObjectObservation, advance_snapshot_walk, apply_walk_accounting,
+    next_manifest_ids, start_snapshot_walk,
 };
 
 #[cfg(all(unix, not(target_arch = "wasm32")))]
