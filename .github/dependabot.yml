@@ -93,13 +93,33 @@ updates:
           - "minor"
           - "patch"
 
-  # apps/repo-worker, apps/vcs-worker, apps/keys-worker, and
-  # apps/mkit-worker-common are separate Cargo workspaces (own Cargo.lock)
+  # apps/repo-worker, apps/vcs-worker, apps/keys-worker,
+  # apps/mkit-hosting-policy, and apps/mkit-worker-common are separate
+  # Cargo workspaces (own Cargo.lock)
   # that path-depend on rust/crates/mkit-core; a bump in /rust does not
   # touch their locks, so they need their own entries to get security and
   # transitive updates at all. repo-worker and vcs-worker also vendor
   # buffa/connectrpc codegen under generated/ (see /rust's ignore comment
   # above) — the same ignore applies here for the same reason.
+  - package-ecosystem: "cargo"
+    directory: "/apps/mkit-hosting-policy"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "07:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "rust"
+    commit-message:
+      prefix: "deps(workers)"
+    groups:
+      cargo-minor:
+        update-types:
+          - "minor"
+          - "patch"
+
   - package-ecosystem: "cargo"
     directory: "/apps/keys-worker"
     schedule:

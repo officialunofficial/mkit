@@ -43,6 +43,15 @@ pub const MAX_INPUT: usize = 64 * 1024;
 /// hashes.
 pub const RNG_SEED: u64 = 0xDEAD_BEEF_CAFE_F00D;
 
+/// Bounded hostile MKHG bytes; any accepted envelope must be canonical.
+pub fn hosted_grant_one_iteration(input: &[u8]) {
+    let input = &input[..input.len().min(MAX_INPUT)];
+    if let Ok(grant) = mkit_hosting_policy::decode(input) {
+        assert_eq!(mkit_hosting_policy::encode_signed(&grant).unwrap(), input);
+        let _ = mkit_hosting_policy::verify_signature(input);
+    }
+}
+
 /// Errors a fuzz body can return without panicking.
 #[derive(Debug, PartialEq, Eq)]
 pub enum GuardrailError {
@@ -1218,6 +1227,16 @@ mod tests {
             verify_disclosure_one_iteration_with(case, &fixture);
             assert!(start.elapsed() <= PER_ITER, "iteration exceeded PER_ITER");
         }
+    }
+
+    #[test]
+    fn hosted_grant_target_runs_within_caps() {
+        run_iterated_unit(hosted_grant_one_iteration).expect("guardrails held");
+        let valid = std::fs::read("../tests/golden/hosted-workspace-grants/valid.bin").unwrap();
+        hosted_grant_one_iteration(&valid);
+        let mut changed = valid;
+        changed[0] ^= 1;
+        hosted_grant_one_iteration(&changed);
     }
 
     #[test]

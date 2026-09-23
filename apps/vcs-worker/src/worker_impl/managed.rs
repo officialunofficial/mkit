@@ -81,10 +81,6 @@ async fn read_bounded_body(req: &mut Request, cap: usize) -> Result<BoundedBody>
     Ok(BoundedBody::Ok(body))
 }
 
-async fn read_admin_body(req: &mut Request) -> Result<BoundedBody> {
-    read_bounded_body(req, MAX_ADMIN_BODY).await
-}
-
 fn reply(status: u16, message: &str) -> Result<Response> {
     let mut response = Response::ok(format!("{message}\n"))?.with_status(status);
     response
@@ -128,6 +124,9 @@ async fn dispatch_inner(mut req: Request, env: Env) -> Result<Response> {
         "/mkit/host/v1/InitializePolicy" => "initialize",
         "/mkit/host/v1/GetPolicy" => "get",
         "/mkit/host/v1/ReplacePolicy" => "replace",
+        "/mkit/host/v1/RegisterGrant" => "register_grant",
+        "/mkit/host/v1/RevokeGrant" => "revoke_grant",
+        "/mkit/host/v1/GetGrant" => "get_grant",
         _ => {
             #[cfg(feature = "test-faults")]
             if let Some(internal_path) = path.strip_prefix("/__test/refstore")
@@ -169,7 +168,12 @@ async fn dispatch_inner(mut req: Request, env: Env) -> Result<Response> {
     if req.headers().get("content-type")?.as_deref() != Some("application/json") {
         return reply(415, "{\"code\":\"unsupported_media_type\"}");
     }
-    let body = match read_admin_body(&mut req).await? {
+    let cap = if operation == "register_grant" {
+        384 * 1024
+    } else {
+        MAX_ADMIN_BODY
+    };
+    let body = match read_bounded_body(&mut req, cap).await? {
         BoundedBody::Ok(body) => body,
         BoundedBody::TooLarge => return reply(413, "{\"code\":\"resource_exhausted\"}"),
     };
@@ -224,7 +228,12 @@ async fn dispatch_inner(mut req: Request, env: Env) -> Result<Response> {
     let mut init = RequestInit::new();
     init.with_method(Method::Post)
         .with_body(Some(payload.into()));
-    let internal = Request::new_with_init("https://refstore/managed-policy", &init)?;
+    let internal_path = if operation.ends_with("_grant") {
+        "/managed-grant"
+    } else {
+        "/managed-policy"
+    };
+    let internal = Request::new_with_init(&format!("https://refstore{internal_path}"), &init)?;
     let mut response = match stub.fetch_with_request(internal).await {
         Ok(v) => v,
         Err(_) => return reply(503, "{\"code\":\"unavailable\"}"),

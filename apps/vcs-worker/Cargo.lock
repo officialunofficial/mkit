@@ -811,9 +811,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "mkit-hosting-policy"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "commonware-codec",
+ "ed25519-dalek",
+ "mkit-core",
+ "serde",
+]
+
+[[package]]
 name = "mkit-vcs-worker"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "buffa",
  "bytes",
  "connectrpc",
@@ -826,6 +838,7 @@ dependencies = [
  "http",
  "http-body-util",
  "mkit-core",
+ "mkit-hosting-policy",
  "mkit-worker-common",
  "rand_core",
  "serde",
