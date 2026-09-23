@@ -1,0 +1,37 @@
+{
+  "vectors": {
+    "DownloadPack": {
+      "digest": "603d34598123eaaf13601b3131a40525eb8601bc3a186468e5d415f4bd9bf901",
+      "framed_digest": "cd89a6b4f5d3668eae1de5260521b146596b129e6d175520f64e4999c1a275b9",
+      "framed_hex": "00000000220a200000000000000000000000000000000000000000000000000000000000000000",
+      "message_hex": "0a200000000000000000000000000000000000000000000000000000000000000000",
+      "negative": [
+        "missing_signature",
+        "wrong_audience",
+        "wrong_repository",
+        "wrong_procedure",
+        "wrong_message",
+        "extra_frame",
+        "trailing_byte",
+        "compressed_frame",
+        "compressed_body"
+      ],
+      "procedure": "/mkit.transport.v1.TransportService/DownloadPack"
+    },
+    "ReadRef": {
+      "digest": "bcaec51c2ec429dd86984d0ed38849653747a2730565d82443f7cc91986e3bb0",
+      "framed_digest": "fd769b7ecdac2f1987cdb8755028fc62dc6bbcb12dfda56932e34808cfa895ac",
+      "framed_hex": "00000000110a0f726566732f68656164732f6d61696e",
+      "message_hex": "0a0f726566732f68656164732f6d61696e",
+      "negative": [
+        "missing_signature",
+        "wrong_audience",
+        "wrong_repository",
+        "wrong_procedure",
+        "wrong_message"
+      ],
+      "procedure": "/mkit.transport.v1.TransportService/ReadRef"
+    }
+  },
+  "version": 1
+}

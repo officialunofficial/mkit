@@ -14,10 +14,34 @@ From `apps/vcs-worker`:
 worker-build --release --features managed-access,test-faults
 npx --yes wrangler dev -c wrangler.managed.dev.jsonc --port 8791 --local
 # In another terminal, with fresh .wrangler/state:
-PYTHONDONTWRITEBYTECODE=1 python3 tests/managed_access.py
+PYTHONDONTWRITEBYTECODE=1 python3 tests/managed_data.py
 # Stop Wrangler, restart with the same config/state, then:
 PYTHONDONTWRITEBYTECODE=1 python3 tests/managed_access.py http://localhost:8791 --verify-existing
 ```
+
+`managed_data.py` initializes a fresh policy, exercises signed fixture
+requests for all seven routes and five identities, then replaces the policy
+to revoke the writer. Use a fresh `--persist-to` directory for each full run.
+The fixture signs DownloadPack's protobuf message rather than Connect's
+frame; it also sends malformed and compressed frames. `managed_access.py`
+continues to cover authority-only bootstrap and SQLite fault cases; its old
+seven-route-closure assertions apply only to the PR08a baseline and are
+superseded by the complete managed data matrix here.
+
+For managed replay and concurrency evidence, keep the managed test-faults
+server running with an initialized state and run
+`PYTHONDONTWRITEBYTECODE=1 python3 tests/managed_faults.py <state>` and
+`PYTHONDONTWRITEBYTECODE=1 python3 tests/managed_races.py`. The fault test
+reads SQLite quota and replay rows in that isolated local state; it proves
+revocation denies an exact pending upload retry and that a post-put orphan
+does not become a completed authorized operation. The race test exercises
+both transaction orderings for UpdateRef and AdvanceRefs versus policy
+replacement. To verify listing limits, stop Wrangler, run
+`PYTHONDONTWRITEBYTECODE=1 python3 tests/managed_listing.py --seed <state>`
+against this disposable state, restart Wrangler with the same `--persist-to`,
+then run `PYTHONDONTWRITEBYTECODE=1 python3 tests/managed_listing.py --verify`.
+It checks 256 versus 257 refs and a response above 64 KiB. This test-only
+SQLite injection is never applied to a deployed repository.
 
 The default artifact regression uses `worker-build --release`, then
 `npx --yes wrangler dev -c wrangler.dev.jsonc --port 8791 --local
@@ -61,3 +85,15 @@ and 65,537 bytes. It checks the first succeeds and the second returns 413.
 The implementation retains at most the cap in its accumulator; the SDK may
 materialize one incoming chunk before the code can reject it, so this is not
 an exact process-memory bound claim.
+
+Managed transfer memory trace: the outer request accumulator admits at most
+4 MiB plus 64 KiB of envelope headroom; conversion to SDK bytes and Connect
+decoding may temporarily retain copies. `UploadPack` then owns one bounded
+pack before the conditional R2 put. `DownloadPack` checks R2 metadata, caps
+each object-stream accumulation step at 4 MiB, then creates a protobuf chunk
+and a buffered Connect response; those stages can also coexist briefly.
+The single nonblocking transfer permit prevents concurrent large buffered
+transfers in one isolate; admin traffic has its separate 64 KiB cap. Neither
+these tests nor the SDK expose an exact peak-heap measurement or prove safety
+for every Workers memory limit. A single upstream stream chunk may be
+allocated before our incremental cap observes it.

@@ -5,24 +5,30 @@ single crate or spec. Each entry states the invariant, why it matters, and
 what breaks when it is violated. A regression test enforces each one; find
 it by the file path listed under "Enforced by".
 
-## Managed authority never opens an incomplete data plane
+## Managed authority gates every data effect with live policy
 
-**Always:** the optional managed Worker denies all seven repository data
-methods and every RefStore data path before reading refs, objects or quota.
-The owner is pinned by deployment configuration; an initialized policy with
-a different audience, repository or owner is unavailable, never reset.
+**Always:** the optional managed Worker admits exactly the seven specified
+TransportService methods according to their reader/writer/owner matrix.
+Every request is authenticated to exact destination, procedure and bytes;
+every internal RefStore path checks live policy and expiry. Mutations check
+authority inside the replay/quota/CAS transaction, including retries. Upload
+authorization precedes outer body collection and is repeated before R2 put
+and completion; reads recheck before buffered response release. The owner is
+pinned by deployment configuration; an initialized policy with a different
+audience, repository or owner is unavailable, never reset.
 
-**Because:** a partial permission implementation could disclose a repository
-through an unguarded read or internal binding, while a configuration change
-could silently reinterpret a durable policy.
+**Because:** a stale or partial permission decision can disclose hidden
+objects, admit a revoked writer's replay or let a configuration change
+reinterpret a durable policy.
 
-**If violated:** an owner or collaborator could reach repository data before
-the complete authorization profile exists, or another key could inherit an
-old deployment's authority.
+**If violated:** an anonymous or removed caller can reach repository data,
+a revoked writer can finish an earlier reservation, or another key can
+inherit an old deployment's authority.
 
-**Enforced by:** `apps/vcs-worker/src/worker_impl/{managed,refstore,access_store}.rs`
+**Enforced by:** `apps/vcs-worker/src/worker_impl/{managed,auth,service,refstore,access_store}.rs`
 and `apps/vcs-worker/src/access_policy.rs` native validation tests. Runtime
-closure and durable latch tests are in `apps/vcs-worker/tests/managed_access.py`.
+role, framing and revocation tests are in `apps/vcs-worker/tests/managed_data.py`;
+durable latch tests remain in `apps/vcs-worker/tests/managed_access.py`.
 
 ## Scoped publication records uncertainty before remote effects
 

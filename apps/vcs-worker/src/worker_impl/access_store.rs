@@ -3,10 +3,10 @@
 //! the replay ledger's synchronous SQLite transaction.
 use super::{managed::AdminWire, refstore::RefStore};
 use crate::access_policy::{
-    GetRequest, InitializeRequest, Policy, ReplaceRequest, decode, generation,
+    DataRoute, GetRequest, Identity, InitializeRequest, Policy, ReplaceRequest, decode, generation,
     validate_collaborators,
 };
-use mkit_worker_common::replay::Reply;
+use mkit_worker_common::replay::{Proof, Reply};
 use serde::Deserialize;
 use worker::{Date, Request, Response, Result};
 
@@ -26,6 +26,52 @@ fn replay_error(error: worker::Error) -> Result<Reply> {
 }
 
 impl RefStore {
+    pub(super) fn data_permitted(&self, proof: &Proof, route: DataRoute) -> Result<bool> {
+        let identity = match (
+            self.env.var("AUTH_AUDIENCE"),
+            self.env.var("AUTH_REPOSITORY"),
+            self.env.var("MANAGED_OWNER_PUBLIC_KEY"),
+        ) {
+            (Ok(a), Ok(r), Ok(o)) => {
+                Identity::parse(&a.to_string(), &r.to_string(), &o.to_string())
+            }
+            _ => Err("missing managed configuration"),
+        }
+        .map_err(|_| worker::Error::RustError("invalid managed configuration".into()))?;
+        if Date::now().as_millis() as i64 > proof.expires_at
+            || crate::access_policy::validate_key(&proof.author).is_err()
+            || !mkit_core::write_auth::is_hex(&proof.scope, 32)
+            || !mkit_core::write_auth::is_hex(&proof.fingerprint, 32)
+        {
+            return Ok(false);
+        }
+        self.ensure_policy_table()?;
+        let policy = self
+            .read_policy(&identity)?
+            .ok_or_else(|| worker::Error::RustError("managed policy uninitialized".into()))?;
+        Ok(route.permits(&policy, &proof.author))
+    }
+
+    pub(super) async fn managed_access(&self, req: &mut Request) -> Result<Response> {
+        if req.method() != worker::Method::Post {
+            return Reply::error(UNAVAILABLE, 503)?.response();
+        }
+        let wire: super::wire::AccessReq = match req.json().await {
+            Ok(v) => v,
+            Err(_) => return Reply::error(INVALID, 400)?.response(),
+        };
+        let Some(route) = DataRoute::from_path(&wire.procedure) else {
+            return Reply::error(UNAVAILABLE, 503)?.response();
+        };
+        let owned = self.clone();
+        let decision = self
+            .ledger
+            .transaction(move || owned.data_permitted(&wire.proof, route));
+        match decision {
+            Ok(allowed) => Reply::json(&super::wire::AccessResp { allowed })?.response(),
+            Err(_) => Reply::error(UNAVAILABLE, 503)?.response(),
+        }
+    }
     pub(super) async fn managed_policy(&self, req: &mut Request) -> Result<Response> {
         if req.method() != worker::Method::Post {
             return Reply::error(UNAVAILABLE, 503)?.response();

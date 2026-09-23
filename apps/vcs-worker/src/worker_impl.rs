@@ -34,14 +34,12 @@ use worker::{Context, Env, Request, Response, Result, event};
 
 #[cfg(feature = "managed-access")]
 pub mod access_store;
-#[cfg(not(feature = "managed-access"))]
 pub mod auth;
 #[cfg(not(feature = "managed-access"))]
 pub mod health;
 #[cfg(feature = "managed-access")]
 pub mod managed;
 pub mod refstore;
-#[cfg(not(feature = "managed-access"))]
 pub mod service;
 #[cfg_attr(feature = "managed-access", allow(dead_code))]
 pub mod wire;

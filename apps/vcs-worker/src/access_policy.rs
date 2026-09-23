@@ -51,6 +51,47 @@ pub enum Role {
     Writer,
 }
 
+/// The complete managed data-plane surface. Unknown procedure paths have no
+/// authority, including future RPCs added to the generated service.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DataRoute {
+    ListRefs,
+    ReadRef,
+    PackExists,
+    DownloadPack,
+    UploadPack,
+    UpdateRef,
+    AdvanceRefs,
+}
+
+impl DataRoute {
+    pub fn from_path(path: &str) -> Option<Self> {
+        match path {
+            "/mkit.transport.v1.TransportService/ListRefs" => Some(Self::ListRefs),
+            "/mkit.transport.v1.TransportService/ReadRef" => Some(Self::ReadRef),
+            "/mkit.transport.v1.TransportService/PackExists" => Some(Self::PackExists),
+            "/mkit.transport.v1.TransportService/DownloadPack" => Some(Self::DownloadPack),
+            "/mkit.transport.v1.TransportService/UploadPack" => Some(Self::UploadPack),
+            "/mkit.transport.v1.TransportService/UpdateRef" => Some(Self::UpdateRef),
+            "/mkit.transport.v1.TransportService/AdvanceRefs" => Some(Self::AdvanceRefs),
+            _ => None,
+        }
+    }
+
+    pub fn may_write(self) -> bool {
+        matches!(self, Self::UploadPack | Self::UpdateRef | Self::AdvanceRefs)
+    }
+
+    pub fn permits(self, policy: &Policy, author: &str) -> bool {
+        if author == policy.owner {
+            return true;
+        }
+        policy.collaborators.iter().any(|member| {
+            member.public_key == author && (!self.may_write() || member.role == Role::Writer)
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Collaborator {
@@ -157,6 +198,45 @@ impl Policy {
 mod tests {
     use super::*;
     use ed25519_dalek::SigningKey;
+
+    #[test]
+    fn managed_data_routes_are_exact_and_role_gated() {
+        let identity = identity();
+        let reader = key(2);
+        let writer = key(3);
+        let policy = Policy::new(
+            &identity,
+            1,
+            vec![
+                Collaborator {
+                    public_key: reader.clone(),
+                    role: Role::Reader,
+                },
+                Collaborator {
+                    public_key: writer.clone(),
+                    role: Role::Writer,
+                },
+            ],
+        );
+        for method in [
+            "ListRefs",
+            "ReadRef",
+            "PackExists",
+            "DownloadPack",
+            "UploadPack",
+            "UpdateRef",
+            "AdvanceRefs",
+        ] {
+            let path = format!("/mkit.transport.v1.TransportService/{method}");
+            let route = DataRoute::from_path(&path).expect(method);
+            assert!(route.permits(&policy, &identity.owner));
+            assert!(route.permits(&policy, &writer));
+            assert_eq!(route.permits(&policy, &reader), !route.may_write());
+            assert!(!route.permits(&policy, &key(4)));
+        }
+        assert!(DataRoute::from_path("/mkit.transport.v1.TransportService/Future").is_none());
+        assert!(DataRoute::from_path("/mkit.transport.v1.TransportService/ReadRef/").is_none());
+    }
 
     fn key(number: u32) -> String {
         let mut seed = [0; 32];

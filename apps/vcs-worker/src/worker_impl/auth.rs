@@ -9,14 +9,44 @@ use connectrpc::interceptor::{
     NextStream, PayloadStream, StreamRequest, StreamResponse, UnaryRequest, UnaryResponse,
 };
 use connectrpc::{ConnectError, Interceptor, Next, async_trait};
+#[cfg(feature = "managed-access")]
+use futures::StreamExt;
+#[cfg(feature = "managed-access")]
+use std::sync::{Arc, Mutex};
 use worker::Env;
+
+#[cfg(feature = "managed-access")]
+#[derive(Clone)]
+pub enum VerifiedState {
+    Unseen,
+    Rejected,
+    Verified(mkit_worker_common::replay::Proof),
+}
 
 pub struct AuthInterceptor {
     env: Env,
+    #[cfg(feature = "managed-access")]
+    verified: Arc<Mutex<VerifiedState>>,
 }
 impl AuthInterceptor {
     pub fn new(env: Env) -> Self {
-        Self { env }
+        Self {
+            env,
+            #[cfg(feature = "managed-access")]
+            verified: Arc::new(Mutex::new(VerifiedState::Unseen)),
+        }
+    }
+    #[cfg(feature = "managed-access")]
+    pub fn verified(&self) -> Arc<Mutex<VerifiedState>> {
+        self.verified.clone()
+    }
+    #[cfg(feature = "managed-access")]
+    fn save(&self, state: VerifiedState) -> Result<(), ConnectError> {
+        *self
+            .verified
+            .lock()
+            .map_err(|_| ConnectError::unavailable("managed authorization unavailable"))? = state;
+        Ok(())
     }
     fn destination(&self) -> Result<(String, String), ConnectError> {
         Ok((
@@ -53,6 +83,11 @@ impl Interceptor for AuthInterceptor {
         next: Next<'_>,
     ) -> Result<UnaryResponse, ConnectError> {
         let procedure = req.ctx.path().unwrap_or_default().to_owned();
+        #[cfg(feature = "managed-access")]
+        if crate::access_policy::DataRoute::from_path(&procedure).is_none() {
+            return Err(ConnectError::unimplemented("unknown managed procedure"));
+        }
+        #[cfg(not(feature = "managed-access"))]
         if !(procedure.ends_with("/UpdateRef") || procedure.ends_with("/AdvanceRefs")) {
             return next.run(req).await;
         }
@@ -74,10 +109,18 @@ impl Interceptor for AuthInterceptor {
             &headers,
         ) {
             VerifyEnvelope::Ok { authorization, .. } => {
+                #[cfg(feature = "managed-access")]
+                self.save(VerifiedState::Verified(
+                    mkit_worker_common::replay::Proof::from(&authorization),
+                ))?;
                 req.ctx.extensions_mut().insert(authorization);
                 next.run(req).await
             }
-            VerifyEnvelope::Err { error, .. } => Err(ConnectError::unauthenticated(error)),
+            VerifyEnvelope::Err { error, .. } => {
+                #[cfg(feature = "managed-access")]
+                self.save(VerifiedState::Rejected)?;
+                Err(ConnectError::unauthenticated(error))
+            }
         }
     }
     async fn intercept_streaming(
@@ -87,6 +130,11 @@ impl Interceptor for AuthInterceptor {
         next: NextStream<'_>,
     ) -> Result<StreamResponse, ConnectError> {
         let procedure = req.ctx.path().unwrap_or_default().to_owned();
+        #[cfg(feature = "managed-access")]
+        if crate::access_policy::DataRoute::from_path(&procedure).is_none() {
+            return Err(ConnectError::unimplemented("unknown managed procedure"));
+        }
+        #[cfg(not(feature = "managed-access"))]
         if !procedure.ends_with("/UploadPack") {
             return next.run(req, inbound).await;
         }
@@ -97,6 +145,41 @@ impl Interceptor for AuthInterceptor {
                 .and_then(|v| v.to_str().ok())
                 .map(str::to_owned)
         });
+        #[cfg(feature = "managed-access")]
+        if procedure.ends_with("/DownloadPack") {
+            let mut inbound = inbound;
+            let payload = inbound
+                .next()
+                .await
+                .ok_or_else(|| ConnectError::invalid_argument("missing DownloadPack request"))??;
+            if inbound.next().await.is_some() {
+                return Err(ConnectError::invalid_argument("extra DownloadPack request"));
+            }
+            let result = verify_envelope(
+                Context {
+                    audience: &audience,
+                    repository: &repository,
+                },
+                &procedure,
+                &blake3_hex(payload.bytes()),
+                worker::Date::now().as_millis() as i64,
+                &headers,
+            );
+            return match result {
+                VerifyEnvelope::Ok { authorization, .. } => {
+                    self.save(VerifiedState::Verified(
+                        mkit_worker_common::replay::Proof::from(&authorization),
+                    ))?;
+                    req.ctx.extensions_mut().insert(authorization);
+                    next.run(req, Box::pin(futures::stream::iter([Ok(payload)])))
+                        .await
+                }
+                VerifyEnvelope::Err { error, .. } => {
+                    self.save(VerifiedState::Rejected)?;
+                    Err(ConnectError::unauthenticated(error))
+                }
+            };
+        }
         match verify_stream_envelope(
             Context {
                 audience: &audience,
@@ -107,10 +190,18 @@ impl Interceptor for AuthInterceptor {
             &headers,
         ) {
             VerifyEnvelope::Ok { authorization, .. } => {
+                #[cfg(feature = "managed-access")]
+                self.save(VerifiedState::Verified(
+                    mkit_worker_common::replay::Proof::from(&authorization),
+                ))?;
                 req.ctx.extensions_mut().insert(authorization);
                 next.run(req, inbound).await
             }
-            VerifyEnvelope::Err { error, .. } => Err(ConnectError::unauthenticated(error)),
+            VerifyEnvelope::Err { error, .. } => {
+                #[cfg(feature = "managed-access")]
+                self.save(VerifiedState::Rejected)?;
+                Err(ConnectError::unauthenticated(error))
+            }
         }
     }
 }
