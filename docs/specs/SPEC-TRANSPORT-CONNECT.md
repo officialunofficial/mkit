@@ -517,6 +517,15 @@ a deployment can require either, both, or neither:
   `trusted_remote_endpoint` approval before resolving the commit-signing
   Ed25519 identity, independently of bearer-token presence. Domain separation
   alone does not grant a repository permission to invoke ambient signing.
+- **Explicit signed reads**: user-scoped `transport_signed_reads = true`
+  additionally authenticates ListRefs, ReadRef, PackExists and DownloadPack.
+  It requires envelope mode and an exact user-trusted Connect endpoint before
+  opening the signer or transport. Each retry has a fresh nonce and signs the
+  exact uncompressed protobuf request message. For DownloadPack, this is the
+  sole request message inside the Connect stream frame; the frame bytes are
+  excluded from the body commitment. `X-Digest` names the message digest.
+  The native HTTP client does not follow redirects. Existing constructors
+  and configurations keep reads unsigned.
 
 Verified live: real `mkit push`/`clone`/`pull` (envelope auth) against a
 local `wrangler dev` instance of `apps/vcs-worker` &mdash; see

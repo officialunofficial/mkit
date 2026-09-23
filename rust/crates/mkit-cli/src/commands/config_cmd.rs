@@ -116,6 +116,14 @@ pub fn run(args: &[String]) -> u8 {
     } else {
         value.to_owned()
     };
+    if key == "transport_signed_reads" && !matches!(normalized_value.as_str(), "true" | "false") {
+        return emit_err(
+            &format!(
+                "invalid value for transport_signed_reads: `{value}` (expected `true` or `false`)"
+            ),
+            exit::CONFIG_ERROR,
+        );
+    }
     // Path-traversal validation for any key whose value is a filesystem
     // path. Catches `..` even on the user-scoped path.
     if is_path_key(key)
@@ -366,6 +374,17 @@ fn apply(cfg: &mut Config, key: &str, value: &str) -> Result<(), u8> {
                 ));
             }
         },
+        "transport_signed_reads" => match value {
+            "true" | "false" => value.clone_into(&mut cfg.transport_signed_reads),
+            _ => {
+                return Err(emit_err(
+                    &format!(
+                        "invalid value for transport_signed_reads: `{value}` (expected `true` or `false`)"
+                    ),
+                    exit::CONFIG_ERROR,
+                ));
+            }
+        },
         "author_mid" => {
             return Err(emit_err(
                 "config key `author_mid` has been removed; use `user.identity` (mid:<N>)",
@@ -434,6 +453,7 @@ const CONFIG_KEYS: &[&str] = &[
     "ssh.strict_host_key_checking",
     "ssh.user_known_hosts_file",
     "transport_auth",
+    "transport_signed_reads",
     "trusted_remote_endpoint",
     "user.email",
     "user.identity",
@@ -453,6 +473,7 @@ fn lookup<'a>(cfg: &'a Config, key: &str) -> Option<Cow<'a, str>> {
         "remote_bucket" => Some(Cow::Borrowed(&cfg.remote_bucket)),
         "remote_type" => Some(Cow::Borrowed(&cfg.remote_type)),
         "transport_auth" => Some(Cow::Borrowed(&cfg.transport_auth)),
+        "transport_signed_reads" => Some(Cow::Borrowed(&cfg.transport_signed_reads)),
         "ssh.strict_host_key_checking" => Some(Cow::Borrowed(&cfg.ssh_strict_host_key_checking)),
         "ssh.user_known_hosts_file" => Some(Cow::Borrowed(&cfg.ssh_user_known_hosts_file)),
         "ssh.identity_file" => Some(Cow::Borrowed(&cfg.ssh_identity_file)),

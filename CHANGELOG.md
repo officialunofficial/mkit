@@ -31,6 +31,13 @@ train).
 
 ### Added
 
+- *(transport/cli)* Explicit user-only `transport_signed_reads = true`
+  authenticates the four native Connect read RPCs to an exact trusted
+  endpoint with the existing Ed25519 envelope signer. Default reads and
+  write-only envelope mode are unchanged. **SemVer:** additive
+  `ConnectTransport::connect_with_signed_reads`; adding a public `Config`
+  field is source-breaking for downstream exhaustive struct literals.
+
 - *(transport)* Opt-in, separately configured managed Worker authority with
   immutable owner, owner-authenticated policy initialization and generation
   updates. Its repository data plane remains closed pending the complete

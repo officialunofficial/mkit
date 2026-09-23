@@ -145,3 +145,40 @@ impl EnvelopeSigner for KeystoreEnvelopeSigner {
         Ok(to_hex_bytes(&sig))
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)] // test fixture setup and assertions
+mod tests {
+    use super::*;
+    use mkit_keystore::{KeyLabel, Keystore};
+
+    #[test]
+    fn legacy_and_keystore_adapters_sign_the_same_read_digest() {
+        let seed = [0x5a; 32];
+        let legacy = RepoKeyEnvelopeSigner::new(KeyPair::from_seed(seed));
+        let root = tempfile::tempdir().unwrap();
+        let store = mkit_keystore::SoftwareRawKeystore::with_root(root.path().join("keys"));
+        store
+            .importer()
+            .unwrap()
+            .import(
+                &KeyLabel::new("reader").unwrap(),
+                mkit_keystore::SecretKey::new(mkit_keystore::Algorithm::Ed25519, seed),
+                mkit_keystore::KeyAttrs::default(),
+                mkit_keystore::ImportOptions::default(),
+            )
+            .unwrap();
+        let selector = KeySelector::new("reader", Some(mkit_keystore::Algorithm::Ed25519)).unwrap();
+        let signer = store.opener().unwrap().open(&selector).unwrap();
+        let keystore = KeystoreEnvelopeSigner {
+            public_key_hex: to_hex_bytes(signer.public_key().unwrap().as_bytes()),
+            signer: Mutex::new(signer),
+        };
+        let read_digest = mkit_core::hash::hash(b"typed ListRefs auth-v2 message digest");
+        assert_eq!(legacy.public_key_hex(), keystore.public_key_hex());
+        assert_eq!(
+            legacy.sign_hex(&read_digest),
+            keystore.sign_hex(&read_digest)
+        );
+    }
+}

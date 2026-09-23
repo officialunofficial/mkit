@@ -80,6 +80,7 @@ forward-compat slot.
 | `ssh.user_known_hosts_file`          | **UNSAFE** | The source of trust for SSH host-key verification.                                                                                                                                  |
 | `ssh.identity_file`                  | **UNSAFE** | Selects which private key SSH presents. Same shape as `signing_key`.                                                                                                                |
 | `transport_auth` | **UNSAFE** | Selects whether network requests invoke the ambient signing identity. Repository config MUST NOT enable it. User-scoped envelope signing additionally requires exact `trusted_remote_endpoint` approval before signer resolution. |
+| `transport_signed_reads` | **UNSAFE** | Opts the native Connect client into invoking the ambient signer for ListRefs, ReadRef, PackExists, and DownloadPack. Only literal `true` or `false` is valid. Repository config MUST NOT set it; `true` requires envelope mode and exact user-trusted endpoint before signer resolution. |
 | `attest.default_algorithm`           | **UNSAFE** | Selector. Flipping from `ed25519` to `secp256k1` / `p256` routes attestation signing to whichever non-Ed25519 key the user happens to have set up (confused-deputy).               |
 | `attest.signer`                      | **UNSAFE** | Selector. Flipping from `repo-key` to `external` or `keystore` weaponizes a user-scoped binary/keystore against attacker-chosen content.                                          |
 | `attest.external_signer_path`        | **UNSAFE** | Arbitrary executable path → RCE under the user's UID.                                                                                                                              |
@@ -116,6 +117,9 @@ forward-compat slot.
 - **`transport_auth`**: UNSAFE. Signing request authorization is a distinct
   capability from signing repository objects. Cryptographic domain separation
   does not authorize a repository to invoke the user's ambient signer.
+- **`transport_signed_reads`**: UNSAFE for the same reason. A malformed
+  user-scoped value fails before opening a transport; absence defaults to
+  `false`.
 
 ---
 
@@ -196,6 +200,10 @@ HTTP(S) endpoint MUST require exact equality with user-scoped
 This applies whether or not a bearer token is present, and to explicit clone
 URLs as well as configured remotes. Repository and CLI-supplied destination
 selection cannot confer signing trust on that destination.
+Enabling `transport_signed_reads` additionally requires envelope mode and a
+supported Connect scheme. Hand-edited invalid boolean values fail before
+signer resolution or transport construction rather than falling back to
+unsigned reads.
 
 When the gate fires, the command exits with a typed error directing
 the user to `mkit config trusted_remote_endpoint <endpoint>`, which

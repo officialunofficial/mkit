@@ -72,6 +72,7 @@ pub const REPO_FORBIDDEN_KEYS: &[&str] = &[
     "trusted_remote_endpoint",
     "signer",
     "transport_auth",
+    "transport_signed_reads",
     "pull.require_signed",
     "key.backend",
     "key.default_ref",
@@ -104,7 +105,7 @@ pub enum ConfigScope {
 /// defaults). All fields default to empty / documented defaults;
 /// readers that want a known-good default file should call
 /// [`read_or_default`].
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     /// Hex-encoded Identity: `[kind:u8][len:u16 LE][bytes]`. Empty =
     /// derive from the signing key's public key at commit time.
@@ -145,6 +146,9 @@ pub struct Config {
     /// request authorization is a separate use of the ambient identity.
     /// Destination trust is checked before loading a signing key.
     pub transport_auth: String,
+    /// User-only opt-in for auth-v2 signatures on the four Connect reads.
+    /// Literal `true` or `false`; malformed values fail before transport use.
+    pub transport_signed_reads: String,
     /// Commit-signing selector. User-scoped only.
     pub signer: String,
     /// `pull.require_signed` — gates whether `clone`/`pull`/`fetch` verify
@@ -183,6 +187,35 @@ pub struct Config {
     /// per-repo. Dangerous `core.*` keys ([`CORE_DENIED_KEYS`]) are rejected
     /// rather than stored. Keyed by the bare suffix (e.g. `autocrlf`).
     pub core: std::collections::BTreeMap<String, String>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            user_identity: String::new(),
+            user_name: String::new(),
+            user_email: String::new(),
+            trusted_remote_endpoint: String::new(),
+            signing_key: String::new(),
+            default_branch: String::new(),
+            remote_endpoint: String::new(),
+            remote_bucket: String::new(),
+            remote_type: String::new(),
+            ssh_strict_host_key_checking: String::new(),
+            ssh_user_known_hosts_file: String::new(),
+            ssh_identity_file: String::new(),
+            transport_auth: String::new(),
+            transport_signed_reads: "false".into(),
+            signer: String::new(),
+            pull_require_signed: String::new(),
+            key: KeyConfig::default(),
+            attest: AttestConfig::default(),
+            remotes: std::collections::BTreeMap::default(),
+            branch_upstreams: std::collections::BTreeMap::default(),
+            durability_objects: String::new(),
+            core: std::collections::BTreeMap::default(),
+        }
+    }
 }
 
 /// Inert `core.*` keys accepted for git compatibility. They are stored and
@@ -442,6 +475,17 @@ impl Config {
     #[must_use]
     pub fn transport_auth_envelope(&self) -> bool {
         self.transport_auth.trim().eq_ignore_ascii_case("envelope")
+    }
+
+    /// Parse the read-signing opt-in strictly, including hand-edited config.
+    pub fn transport_signed_reads(&self) -> Result<bool, String> {
+        match self.transport_signed_reads.as_str() {
+            "true" => Ok(true),
+            "false" => Ok(false),
+            other => Err(format!(
+                "invalid transport_signed_reads `{other}`; expected `true` or `false`"
+            )),
+        }
     }
 }
 
@@ -793,6 +837,7 @@ fn apply_kv(cfg: &mut Config, key: &str, val: &str) {
         "ssh.user_known_hosts_file" => val.clone_into(&mut cfg.ssh_user_known_hosts_file),
         "ssh.identity_file" => val.clone_into(&mut cfg.ssh_identity_file),
         "transport_auth" => val.clone_into(&mut cfg.transport_auth),
+        "transport_signed_reads" => val.clone_into(&mut cfg.transport_signed_reads),
         "attest.default_algorithm" => val.clone_into(&mut cfg.attest.default_algorithm),
         "attest.signer" => val.clone_into(&mut cfg.attest.signer),
         "attest.external_signer_path" => val.clone_into(&mut cfg.attest.external_signer_path),
@@ -1856,6 +1901,30 @@ mod tests {
     }
 
     #[test]
+    fn signed_reads_are_user_only_and_parse_strictly() {
+        assert_eq!(Config::default().transport_signed_reads(), Ok(false));
+        assert_eq!(
+            layer(Some("transport_signed_reads = true\n"), None).transport_signed_reads(),
+            Ok(false)
+        );
+        assert_eq!(
+            layer(None, Some("transport_signed_reads = true\n")).transport_signed_reads(),
+            Ok(true)
+        );
+        assert_eq!(
+            layer(None, Some("transport_signed_reads = false\n")).transport_signed_reads(),
+            Ok(false)
+        );
+        for invalid in ["", "TRUE", "False", "1", "yes", "garbage"] {
+            let cfg = layer(None, Some(&format!("transport_signed_reads = {invalid}\n")));
+            assert!(
+                cfg.transport_signed_reads().is_err(),
+                "accepted `{invalid}`"
+            );
+        }
+    }
+
+    #[test]
     fn every_forbidden_key_is_actually_dropped_from_repo_scope() {
         // A sentinel value that is syntactically valid for every key
         // (no control bytes, parseable as path / argv / ref / hex). If
@@ -1874,6 +1943,7 @@ mod tests {
                 "trusted_remote_endpoint" => cfg.trusted_remote_endpoint.as_str(),
                 "signer" => cfg.signer.as_str(),
                 "transport_auth" => cfg.transport_auth.as_str(),
+                "transport_signed_reads" => cfg.transport_signed_reads.as_str(),
                 "pull.require_signed" => cfg.pull_require_signed.as_str(),
                 "key.backend" => cfg.key.backend.as_str(),
                 "key.default_ref" => cfg.key.default_ref.as_str(),

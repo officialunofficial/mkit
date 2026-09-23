@@ -102,6 +102,11 @@ fn repo_trusted_remote_endpoint_dropped() {
 }
 
 #[test]
+fn repo_signed_reads_dropped() {
+    assert_forbidden_key_dropped("transport_signed_reads", "true", "false");
+}
+
+#[test]
 fn repo_signer_dropped() {
     assert_forbidden_key_dropped("signer", "keystore", "legacy");
 }

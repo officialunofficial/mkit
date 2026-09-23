@@ -46,9 +46,55 @@ impl RetryIdentity {
             .with_header("x-expires-at", self.expires_at.as_str())
             .with_header(header::IDEMPOTENCY_KEY, self.nonce.as_str())
     }
+    fn insert_into(&self, headers: &mut HeaderMap) -> Result<(), String> {
+        insert_header(headers, header::CREATED_AT, &self.created_at)?;
+        insert_header(headers, "x-expires-at", &self.expires_at)?;
+        insert_header(headers, header::IDEMPOTENCY_KEY, &self.nonce)
+    }
 }
 
-/// A signer able to produce the Ed25519 material a write envelope needs:
+/// Read signatures are prepared at typed generated-client call sites, before
+/// the SDK adds Connect framing to server-streaming DownloadPack requests.
+#[derive(Clone)]
+pub(crate) struct SignedReadContext {
+    pub(crate) signer: Arc<dyn EnvelopeSigner>,
+    pub(crate) audience: String,
+    pub(crate) repository: String,
+}
+
+impl SignedReadContext {
+    pub(crate) fn options(
+        &self,
+        procedure: &'static str,
+        message: &[u8],
+        options: connectrpc::client::CallOptions,
+    ) -> Result<connectrpc::client::CallOptions, String> {
+        const PREFIX: &str = "/mkit.transport.v1.TransportService/";
+        if !["ListRefs", "ReadRef", "PackExists", "DownloadPack"]
+            .iter()
+            .any(|name| procedure == format!("{PREFIX}{name}"))
+        {
+            return Err("unsupported signed read procedure".into());
+        }
+        let mut headers = HeaderMap::new();
+        RetryIdentity::new()?.insert_into(&mut headers)?;
+        let digest = to_hex(&hash(message));
+        sign_headers(
+            &mut headers,
+            &*self.signer,
+            &self.audience,
+            &self.repository,
+            procedure,
+            &format!("body:{digest}"),
+        )?;
+        insert_header(&mut headers, header::DIGEST, &digest)?;
+        Ok(headers.iter().fold(options, |options, (name, value)| {
+            options.with_header(name.clone(), value.clone())
+        }))
+    }
+}
+
+/// A signer able to produce the Ed25519 material an auth envelope needs:
 /// the raw public key (for `X-Public-Key`) and a raw signature over an
 /// arbitrary 32-byte digest (no domain prefix — see module docs).
 ///

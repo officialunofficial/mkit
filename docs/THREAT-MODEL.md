@@ -324,6 +324,12 @@ user's own credentials is never second-guessed. Unauthenticated and
 SSH/file flows carry no ambient HTTP/S3 credentials and pass the gate
 unchanged.
 
+Request signing has a separate user-only gate. `transport_auth = envelope`
+signs Connect writes; `transport_signed_reads = true` explicitly extends it
+to four reads. Both require exact `trusted_remote_endpoint` equality in
+`open_with_config` before opening the key, including clone's explicit URL.
+Repository config and `-c` overrides cannot set either switch.
+
 ---
 
 ## 5. Trust-roots scope

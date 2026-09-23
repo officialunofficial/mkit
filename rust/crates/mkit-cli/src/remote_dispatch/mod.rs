@@ -222,6 +222,34 @@ pub(crate) fn open_with_config(
     cfg: &crate::config::Config,
     layout: &RepoLayout,
 ) -> Result<Arc<dyn Transport>, DispatchError> {
+    let signed_reads = cfg
+        .transport_signed_reads()
+        .map_err(|e| DispatchError::Transport(TransportError::RemoteError(e)))?;
+    if signed_reads {
+        if !cfg.transport_auth_envelope() {
+            return Err(DispatchError::Transport(TransportError::RemoteError(
+                "transport_signed_reads = true requires transport_auth = envelope".into(),
+            )));
+        }
+        if !(url.starts_with("mkit+https://") || url.starts_with("mkit+http://")) {
+            return Err(DispatchError::UnsupportedScheme(
+                "transport_signed_reads = true requires a Connect mkit+http(s):// endpoint".into(),
+            ));
+        }
+        if cfg.trusted_remote_endpoint.trim() != url {
+            return Err(DispatchError::UntrustedRemote(format!(
+                "refusing signed reads for untrusted destination `{url}`; run `mkit config trusted_remote_endpoint {url}`"
+            )));
+        }
+        let signer = envelope_signer_from_config(cfg, layout)?.ok_or_else(|| {
+            DispatchError::Transport(TransportError::RemoteError(
+                "transport_signed_reads = true requires an envelope signer".into(),
+            ))
+        })?;
+        return Ok(Arc::new(ConnectTransport::connect_with_signed_reads(
+            url, signer,
+        )?));
+    }
     let envelope_signer = if url.starts_with("mkit+https://") || url.starts_with("mkit+http://") {
         if cfg.transport_auth_envelope() && cfg.trusted_remote_endpoint.trim() != url {
             return Err(DispatchError::UntrustedRemote(format!(
@@ -1631,6 +1659,55 @@ mod tests {
     use mkit_core::pack::{PreparedDelta, PreparedRaw};
     use mkit_core::store::ObjectStore;
     use mkit_core::transfer;
+
+    #[test]
+    fn signed_read_gate_precedes_key_and_network_for_clone_and_fetch_openers() {
+        let directory = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(directory.path());
+        let endpoint = "mkit+http://127.0.0.1:1/repo";
+        let mut cfg = Config {
+            transport_signed_reads: "true".into(),
+            signer: "legacy".into(),
+            signing_key: ".mkit/keys/missing-signing-key".into(),
+            ..Config::default()
+        };
+        cfg.transport_signed_reads = "garbage".into();
+        let err = super::open_with_config(endpoint, &cfg, &layout)
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("invalid transport_signed_reads"));
+        cfg.transport_signed_reads = "true".into();
+        let err = super::open_with_config(endpoint, &cfg, &layout)
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("transport_auth = envelope"));
+        cfg.transport_auth = "envelope".into();
+        let err = super::open_with_config(endpoint, &cfg, &layout)
+            .err()
+            .unwrap();
+        assert!(matches!(err, super::DispatchError::UntrustedRemote(_)));
+        cfg.trusted_remote_endpoint = endpoint.into();
+        let err = super::open_with_config("mkit+file:///tmp/repo", &cfg, &layout)
+            .err()
+            .unwrap();
+        assert!(matches!(err, super::DispatchError::UnsupportedScheme(_)));
+        let err = super::open_with_config(endpoint, &cfg, &layout)
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("missing-signing-key"));
+
+        let layered = crate::config::LayeredConfig {
+            merged: Config {
+                trusted_remote_endpoint: String::new(),
+                ..cfg
+            },
+            ..Default::default()
+        };
+        let err = super::open_trusted(endpoint, false, &layered, &layout)
+            .err()
+            .unwrap();
+        assert!(matches!(err, super::DispatchError::UntrustedRemote(_)));
+    }
 
     // =================================================================
     // `size_capped_batch_lens` — the batch-boundary arithmetic

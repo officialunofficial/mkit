@@ -81,15 +81,19 @@ crate has no system dependency beyond a working TLS/TCP stack.
 `mkit_core::protocol::async_shim::Executor` &mdash; a dedicated tokio runtime,
 mirroring `mkit-transport-enc`'s `tcp::TokioExecutor`.
 
-## No built-in retry ladder
+## Signed reads and retry
 
-Unlike `mkit-transport-http`, the client does **not** implement its own
-retry/backoff loop. SPEC-TRANSPORT-CONNECT §7.3 defers that to a shared
-Connect interceptor wrapping the generated client (tracked separately) &mdash;
-every call here is a single attempt. Callers that need SPEC-TRANSPORT §7
-retry semantics apply `mkit_core::protocol::is_retryable` /
-`BackoffIterator` to this transport's returned `TransportError` themselves.
-`mkit-transport-http` is NOT removed: its `sparse-checkout`/`pack-shards`
+`ConnectTransport::connect_with_signed_reads` adds read authentication to
+the existing write envelope. The CLI enables it only with user-scoped
+`transport_signed_reads = true`, `transport_auth = envelope`, and exact
+`trusted_remote_endpoint` approval. The low-level constructor relies on its
+caller to establish destination trust. Each read retry signs a fresh typed
+protobuf request; DownloadPack signs the message before Connect framing.
+The native HTTP backend does not follow redirects. Default constructors and
+write-only envelope mode leave reads unsigned. Every call uses the shared
+`BackoffIterator` retry ladder for retryable errors.
+
+`mkit-transport-http` remains available: its `sparse-checkout`/`pack-shards`
 extensions have no `mkit.transport.v1` equivalent yet.
 
 ## Testing
