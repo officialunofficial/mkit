@@ -20,13 +20,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::hash::{self, Hash};
 use crate::layout::{
-    SCOPED_MARKER, SCOPED_MARKER_PREFIX, ScopedAuthority, classify_scoped_root,
-    has_ordinary_authority,
+    SCOPED_MARKER, SCOPED_MARKER_PREFIX, ScopedAuthority, check_scoped_boundary,
+    classify_scoped_root, has_ordinary_authority,
 };
 use crate::object::EntryMode;
 use crate::partial::state::{
-    self, PartialStateError, ScopedWorkspaceState, StageEntryV1, StageStateV1, StatePlan,
-    WorkspaceSelectionV1, WorkspaceStateV1, sys_err, unsafe_entry,
+    self, PartialStateError, PendingIdentityV1, ScopedWorkspaceState, StageEntryV1, StageStateV1,
+    StatePlan, WorkspaceSelectionV1, WorkspaceStateV1, sys_err, unsafe_entry,
 };
 use crate::partial::sys::{self, DirFd, OpenMode, SysError};
 use crate::partial::{
@@ -97,6 +97,8 @@ pub(crate) enum Fault {
     /// Immutable name installed by the no-replace rename, before the
     /// containing directory is fsynced.
     ImmutableBeforeDirSync = 9,
+    /// Export name installed, before the containing directory is fsynced.
+    ExportBeforeDirSync = 10,
 }
 
 impl Faults {
@@ -162,6 +164,40 @@ fn open_dir_chain(path: &Path) -> Result<DirFd, PartialStateError> {
             .map_err(|e| sys_err(path.to_path_buf(), e))?;
     }
     Ok(fd)
+}
+
+/// Open an external export parent and refuse a component that physically
+/// resolves to a repository metadata directory, including case/normalization
+/// aliases on filesystems that expose the same inode under another spelling.
+fn open_export_parent(path: &Path) -> Result<DirFd, PartialStateError> {
+    debug_assert!(path.is_absolute());
+    let mut dir = sys::open_dir_path(Path::new("/")).map_err(|e| sys_err(PathBuf::from("/"), e))?;
+    for component in path.components().skip(1) {
+        let next = sys::open_dir(&dir, component.as_os_str().as_bytes())
+            .map_err(|e| sys_err(path.to_path_buf(), e))?;
+        let actual = next
+            .metadata()
+            .map_err(|e| sys_err(path.to_path_buf(), e))?;
+        for reserved in [b".mkit".as_slice(), b".mkit-scoped".as_slice()] {
+            match sys::open_dir(&dir, reserved) {
+                Ok(metadata_dir) => {
+                    let metadata = metadata_dir
+                        .metadata()
+                        .map_err(|e| sys_err(path.to_path_buf(), e))?;
+                    if actual.dev() == metadata.dev() && actual.ino() == metadata.ino() {
+                        return Err(unsafe_entry(
+                            path.to_path_buf(),
+                            "export inside repository metadata",
+                        ));
+                    }
+                }
+                Err(error) if error.is_not_found() || error.is_not_dir() => {}
+                Err(error) => return Err(sys_err(path.to_path_buf(), error)),
+            }
+        }
+        dir = next;
+    }
+    Ok(dir)
 }
 
 /// Materialize one verified selected file inside `root_fd`,
@@ -279,6 +315,120 @@ fn remove_tree(dir: &DirFd) -> Result<(), SysError> {
 }
 
 impl ScopedWorkspaceLayout {
+    /// Install the already verified pending MKWU at a new external path.
+    /// Parent traversal is rejected and each parent component is opened
+    /// without following links; installation never replaces an entry.
+    pub fn export_pending_to(
+        &self,
+        expected_generation: u64,
+        identity: &PendingIdentityV1,
+        output: &Path,
+    ) -> Result<usize, PartialStateError> {
+        self.with_lock(|_| self.export_pending_to_locked(expected_generation, identity, output))
+    }
+
+    fn export_pending_to_locked(
+        &self,
+        expected_generation: u64,
+        identity: &PendingIdentityV1,
+        output: &Path,
+    ) -> Result<usize, PartialStateError> {
+        let state = state::load_full(self)?;
+        if state.workspace().transaction_generation() != expected_generation {
+            return Err(PartialStateError::GenerationMismatch {
+                expected: expected_generation,
+                actual: state.workspace().transaction_generation(),
+            });
+        }
+        if state
+            .pending()
+            .ok_or(PartialStateError::PendingMissing)?
+            .identity()
+            != *identity
+        {
+            return Err(PartialStateError::PendingMismatch);
+        }
+        let bytes = state
+            .pending_update_bytes()
+            .ok_or(PartialStateError::PendingMissing)?;
+        let absolute = if output.is_absolute() {
+            output.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map_err(|e| io_err(output.to_path_buf(), e))?
+                .join(output)
+        };
+        let parent = absolute
+            .parent()
+            .ok_or_else(|| unsafe_entry(absolute.clone(), "no parent"))?;
+        let name = absolute
+            .file_name()
+            .ok_or_else(|| unsafe_entry(absolute.clone(), "no file name"))?;
+        if absolute
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return Err(unsafe_entry(
+                absolute,
+                "parent traversal is not an export destination",
+            ));
+        }
+        if absolute.components().any(|component| {
+            matches!(component, std::path::Component::Normal(name)
+                if name.as_bytes().eq_ignore_ascii_case(b".mkit")
+                    || name.as_bytes().eq_ignore_ascii_case(b".mkit-scoped"))
+        }) {
+            return Err(unsafe_entry(
+                output.to_path_buf(),
+                "export into repository metadata is forbidden",
+            ));
+        }
+        if check_scoped_boundary(parent).is_err() {
+            return Err(unsafe_entry(
+                output.to_path_buf(),
+                "export inside a scoped workspace boundary",
+            ));
+        }
+        let dir = open_export_parent(parent)?;
+        let leaf = name.as_bytes();
+        if !safe_component(leaf) {
+            return Err(unsafe_entry(
+                output.to_path_buf(),
+                "unsafe export file name",
+            ));
+        }
+        let temp_name = format!(
+            ".mkit-export-{}-{}",
+            std::process::id(),
+            SCRATCH_COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        let temp = sys::open_file(&dir, temp_name.as_bytes(), OpenMode::CreateExclusive)
+            .map_err(|e| sys_err(output.to_path_buf(), e))?;
+        let installed = (|| {
+            temp.fchmod(0o600)
+                .map_err(|e| sys_err(output.to_path_buf(), e))?;
+            temp.write_all(bytes)
+                .map_err(|e| sys_err(output.to_path_buf(), e))?;
+            temp.fsync().map_err(|e| sys_err(output.to_path_buf(), e))?;
+            sys::rename_no_replace(&dir, temp_name.as_bytes(), &dir, leaf)
+                .map_err(|e| sys_err(output.to_path_buf(), e))?;
+            if self.faults.hit(Fault::ExportBeforeDirSync) {
+                return Err(PartialStateError::DurabilityUncertain(
+                    std::io::Error::other("injected export directory sync fault"),
+                ));
+            }
+            dir.fsync().map_err(|e| {
+                PartialStateError::DurabilityUncertain(std::io::Error::other(format!(
+                    "export directory sync: {e:?}"
+                )))
+            })?;
+            Ok(bytes.len())
+        })();
+        if installed.is_err() {
+            let _ = dir.unlink(temp_name.as_bytes());
+        }
+        installed
+    }
     /// Create a new scoped workspace at `destination` (which must not
     /// exist), verifying `bundle_bytes` against the independently pinned
     /// `expected_base`, `expected_paths`, and `limits` FIRST, then

@@ -1,0 +1,14 @@
+{
+  "base_id": "0101010101010101010101010101010101010101010101010101010101010101",
+  "candidate_id": "0202020202020202020202020202020202020202020202020202020202020202",
+  "description": "Domain-separated, length-prefixed scoped publication request preimage",
+  "endpoint": "mkit+file:///tmp/recipient",
+  "exact_ref": "refs/heads/main",
+  "fingerprint": "afbacd1f4bcd1a1b7d0020660de1c8e3164bf256bc3710e4fe21bf40bed9abed",
+  "name": "request_v1",
+  "operation_id": "0404040404040404040404040404040404040404040404040404040404040404",
+  "preimage_blake3": "afbacd1f4bcd1a1b7d0020660de1c8e3164bf256bc3710e4fe21bf40bed9abed",
+  "repository": "repo",
+  "update_digest": "0303030303030303030303030303030303030303030303030303030303030303",
+  "update_length": 7
+}

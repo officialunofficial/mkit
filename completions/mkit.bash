@@ -140,7 +140,7 @@ _mkit_complete() {
             return
             ;;
         workspace)
-            COMPREPLY=( $(compgen -W "create status diff add log --bundle --base --path --accept-bundle-selection --cached --all --format --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "create status diff add log commit export push abandon --bundle --base --path --accept-bundle-selection --cached --all --message -m --author --output --endpoint --repository --ref --candidate --acknowledge-possible-publication --format --help" -- "$cur") )
             return
             ;;
         stash)

@@ -7,12 +7,18 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+use mkit_core::ClosureMode;
 use mkit_core::object::Identity;
 use mkit_core::partial::{
-    FileReplacement, PartialLimits, ScopedWorkspaceLayout, export_partial_update,
-    prepare_partial_commit, replace_files,
+    FileReplacement, PartialLimits, RemotePublicationTargetV1, ScopedWorkspaceLayout,
+    export_partial_update, prepare_partial_commit, replace_files,
 };
-use mkit_core::sign::{KeyPair, sign_commit};
+use mkit_core::protocol::{PackKey, Transport};
+use mkit_core::sign::{KeyPair, save_key, sign_commit, verify_commit};
+use mkit_core::transfer::encode_packlist;
+use mkit_core::verify::export_closure;
+use mkit_core::{Commit, EntryMode, Object, ObjectStore, RepoLayout, Tree, TreeEntry, serialize};
+use mkit_transport_file::FileTransport;
 use serde_json::Value;
 
 const BASE: &str = "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90";
@@ -45,20 +51,620 @@ fn setup(name: &str) -> (tempfile::TempDir, PathBuf) {
     );
     assert!(
         output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+        "stderr: {}; stdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
     );
     (temp, workspace)
+}
+
+#[test]
+fn core_created_non_head_target_is_typed_cli_refusal() {
+    let temp = tempfile::tempdir().unwrap();
+    let scoped = temp.path().join("scoped");
+    let xdg = temp.path().join("xdg");
+    fs::create_dir(&xdg).unwrap();
+    let bundle = fs::read(fixture("plain_file.bin")).unwrap();
+    let base = mkit_core::hash::from_hex(BASE).unwrap();
+    let target =
+        RemotePublicationTargetV1::new("mkit+file:///tmp/recipient", "repo", "refs/tags/release")
+            .unwrap();
+    ScopedWorkspaceLayout::create(
+        &scoped,
+        base,
+        &[vec![b"shallow.txt".to_vec()]],
+        &bundle,
+        PartialLimits::default(),
+        Some(target),
+    )
+    .unwrap();
+    let pushed = common::mkit(&scoped, &xdg, &["workspace", "push"]);
+    assert!(!pushed.status.success());
+    assert!(String::from_utf8_lossy(&pushed.stderr).contains("refs/heads/"));
 }
 
 fn json(cwd: &Path, xdg: &Path, args: &[&str]) -> Value {
     let output = common::mkit(cwd, xdg, args);
     assert!(
         output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+        "stderr: {}; stdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
     );
     serde_json::from_slice(&output.stdout).unwrap()
+}
+
+fn user_signer(xdg: &Path) -> tempfile::TempDir {
+    let home = std::env::var_os("HOME").expect("effective user home");
+    let dir = tempfile::tempdir_in(home).unwrap();
+    let key_path = dir.path().join("scoped.key");
+    save_key(&key_path, &KeyPair::from_seed([29; 32])).unwrap();
+    fs::create_dir_all(xdg.join("mkit")).unwrap();
+    fs::write(
+        xdg.join("mkit/config"),
+        format!("signing_key = {}\n", key_path.display()),
+    )
+    .unwrap();
+    dir
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "end-to-end stage, signature, export and abandon assertions share one fixture"
+)]
+fn offline_commit_signs_stage_a_exports_exact_bytes_and_keeps_working_b() {
+    let (temp, workspace) = setup("plain_file.bin");
+    let xdg = temp.path().join("xdg");
+    let _key_dir = user_signer(&xdg);
+    let file = workspace.join("shallow.txt");
+    fs::write(&file, b"staged A\n").unwrap();
+    json(
+        &workspace,
+        &xdg,
+        &["workspace", "add", "--all", "--format=json"],
+    );
+    fs::write(&file, b"working B\n").unwrap();
+    let committed = json(
+        &workspace,
+        &xdg,
+        &["workspace", "commit", "-m", "offline", "--format=json"],
+    );
+    assert_eq!(committed["pending_status"], "prepared");
+    assert_eq!(committed["coverage"]["verification"], "selected-only");
+    let status = json(&workspace, &xdg, &["workspace", "status", "--format=json"]);
+    assert_eq!(status["pending"]["candidate"], committed["candidate"]);
+    assert_eq!(status["pending"]["status"], "prepared");
+    let log = json(&workspace, &xdg, &["workspace", "log", "--format=json"]);
+    assert_eq!(log["pending"]["candidate"], committed["candidate"]);
+    let duplicate = common::mkit(
+        &workspace,
+        &xdg,
+        &["workspace", "commit", "-m", "again", "--format=json"],
+    );
+    assert!(!duplicate.status.success());
+    let first = temp.path().canonicalize().unwrap().join("update.mkwu");
+    let exported = json(
+        &workspace,
+        &xdg,
+        &[
+            "workspace",
+            "export",
+            "--output",
+            first.to_str().unwrap(),
+            "--format=json",
+        ],
+    );
+    assert_eq!(exported["pending_status"], "prepared");
+    let state = ScopedWorkspaceLayout::open(&workspace)
+        .unwrap()
+        .read_state()
+        .unwrap();
+    let exact = state.pending_update_bytes().unwrap();
+    assert_eq!(fs::read(&first).unwrap(), exact);
+    assert_eq!(fs::read(&file).unwrap(), b"working B\n");
+    let update =
+        mkit_core::partial::PartialUpdate::decode(exact, state.workspace().limits()).unwrap();
+    assert_eq!(
+        mkit_core::hash::to_hex(update.candidate_id()),
+        committed["candidate"]
+    );
+    let entries = mkit_core::pack::PackEntries::new(update.pack_bytes()).unwrap();
+    let mut candidate = None;
+    for entry in entries {
+        if let mkit_core::pack::PackEntry::Raw { bytes } = entry.unwrap()
+            && let Ok(mkit_core::object::Object::Commit(commit)) =
+                mkit_core::deserialize(bytes.as_ref())
+        {
+            candidate = Some(commit);
+        }
+    }
+    let candidate = candidate.expect("ordinary signed candidate in raw update pack");
+    verify_commit(&candidate).unwrap();
+    assert_eq!(
+        candidate.parents,
+        vec![mkit_core::hash::from_hex(BASE).unwrap()]
+    );
+    assert_eq!(candidate.message, b"offline");
+    let repeat = common::mkit(
+        &workspace,
+        &xdg,
+        &["workspace", "export", "--output", first.to_str().unwrap()],
+    );
+    assert!(!repeat.status.success());
+    let inside = common::mkit(
+        &workspace,
+        &xdg,
+        &["workspace", "export", "--output", "inside.mkwu"],
+    );
+    assert!(!inside.status.success());
+    let pending_id = committed["candidate"].as_str().unwrap();
+    let no_ack = common::mkit(
+        &workspace,
+        &xdg,
+        &["workspace", "abandon", "--candidate", pending_id],
+    );
+    assert!(!no_ack.status.success());
+    let abandoned = json(
+        &workspace,
+        &xdg,
+        &[
+            "workspace",
+            "abandon",
+            "--candidate",
+            pending_id,
+            "--acknowledge-possible-publication",
+            "--format=json",
+        ],
+    );
+    assert_eq!(abandoned["remote_undo"], false);
+    let retained = ScopedWorkspaceLayout::open(&workspace)
+        .unwrap()
+        .read_state()
+        .unwrap();
+    assert!(retained.pending().is_none());
+    assert!(!retained.stage_is_clean());
+    assert_eq!(fs::read(&file).unwrap(), b"working B\n");
+}
+
+#[test]
+fn missing_scoped_signer_and_noop_leave_no_pending() {
+    let (temp, workspace) = setup("plain_file.bin");
+    let xdg = temp.path().join("xdg");
+    let clean = common::mkit(&workspace, &xdg, &["workspace", "commit", "-m", "empty"]);
+    assert!(!clean.status.success());
+    fs::write(workspace.join("shallow.txt"), b"edit").unwrap();
+    json(
+        &workspace,
+        &xdg,
+        &["workspace", "add", "--all", "--format=json"],
+    );
+    let missing = common::mkit(&workspace, &xdg, &["workspace", "commit", "-m", "unsigned"]);
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("absolute signing_key"));
+    assert!(
+        ScopedWorkspaceLayout::open(&workspace)
+            .unwrap()
+            .read_state()
+            .unwrap()
+            .pending()
+            .is_none()
+    );
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "end-to-end file publication, conflict and crash cases share a full-clone fixture"
+)]
+fn file_push_keeps_hidden_base_and_full_clone_reads_candidate() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    fs::create_dir(&source).unwrap();
+    let store = ObjectStore::init(&RepoLayout::single(&source)).unwrap();
+    let old = mkit_core::store_file_object(&store, b"old visible").unwrap();
+    let hidden = mkit_core::store_file_object(&store, b"hidden source").unwrap();
+    let root = store
+        .write(
+            &serialize(&Object::Tree(Tree {
+                entries: vec![
+                    TreeEntry {
+                        name: b"a.txt".to_vec(),
+                        mode: EntryMode::Blob,
+                        object_hash: old,
+                    },
+                    TreeEntry {
+                        name: b"hidden.txt".to_vec(),
+                        mode: EntryMode::Blob,
+                        object_hash: hidden,
+                    },
+                ],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    let base_key = KeyPair::from_seed([21; 32]);
+    let mut base_commit = Commit::new_unannotated(
+        root,
+        vec![],
+        Identity::ed25519(base_key.public.0),
+        base_key.public.0,
+        b"base".to_vec(),
+        1,
+        [0; 64],
+    );
+    base_commit.signature = sign_commit(&base_commit, &base_key).unwrap().0;
+    let base = store
+        .write(&serialize(&Object::Commit(base_commit)).unwrap())
+        .unwrap();
+    let selected = vec![vec![b"a.txt".to_vec()]];
+    let bundle =
+        mkit_core::partial::build_partial_snapshot(&store, base, &selected, &PartialLimits::V1)
+            .unwrap();
+    let bundle_file = temp.path().join("selected.mkwb");
+    fs::write(&bundle_file, bundle.encode(&PartialLimits::V1).unwrap()).unwrap();
+
+    let remote = temp.path().join("remote");
+    fs::create_dir(&remote).unwrap();
+    let tx = FileTransport::new(&remote);
+    let closure = export_closure(&store, &base, ClosureMode::Snapshot).unwrap();
+    let packs: Vec<_> = closure
+        .packs
+        .iter()
+        .map(|pack| {
+            let digest = mkit_core::hash::hash(pack);
+            tx.upload_pack(pack, &PackKey::from_hash(digest)).unwrap();
+            digest
+        })
+        .collect();
+    let initial = encode_packlist(None, &packs).unwrap();
+    let initial_id = mkit_core::hash::hash(&initial);
+    tx.upload_blob(&initial, &PackKey::from_hash(initial_id))
+        .unwrap();
+    tx.write_ref("refs/heads/main", &base).unwrap();
+    tx.write_ref("refs/mkit/packmap/main", &initial_id).unwrap();
+    // The transient FileTransport lock directory is not required for reads;
+    // publication may recreate it. Exercise a valid root without `.mkit`.
+    if remote.join(".mkit").exists() {
+        fs::remove_dir_all(remote.join(".mkit")).unwrap();
+    }
+    assert!(!remote.join(".mkit").exists());
+
+    let scoped = temp.path().join("scoped");
+    let xdg = temp.path().join("xdg");
+    fs::create_dir(&xdg).unwrap();
+    let _key = user_signer(&xdg);
+    let created = common::mkit(
+        temp.path(),
+        &xdg,
+        &[
+            "workspace",
+            "create",
+            "--bundle",
+            bundle_file.to_str().unwrap(),
+            "--base",
+            &mkit_core::hash::to_hex(&base),
+            "--accept-bundle-selection",
+            scoped.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    fs::write(scoped.join("a.txt"), b"new visible").unwrap();
+    json(
+        &scoped,
+        &xdg,
+        &["workspace", "add", "--all", "--format=json"],
+    );
+    let committed = json(
+        &scoped,
+        &xdg,
+        &["workspace", "commit", "-m", "edit", "--format=json"],
+    );
+    let unsupported = common::mkit(
+        &scoped,
+        &xdg,
+        &[
+            "workspace",
+            "push",
+            "--endpoint",
+            "mkit+https://host/repo",
+            "--repository",
+            "repo",
+            "--ref",
+            "refs/heads/main",
+            "--format=json",
+        ],
+    );
+    assert!(!unsupported.status.success());
+    assert!(
+        ScopedWorkspaceLayout::open(&scoped)
+            .unwrap()
+            .read_state()
+            .unwrap()
+            .pending()
+            .unwrap()
+            .operation()
+            .is_none()
+    );
+    let partial_target = common::mkit(
+        &scoped,
+        &xdg,
+        &[
+            "workspace",
+            "push",
+            "--endpoint",
+            "mkit+file:///tmp/repo",
+            "--format=json",
+        ],
+    );
+    assert!(!partial_target.status.success());
+    let url = format!("mkit+file://{}", remote.canonicalize().unwrap().display());
+    let missing_branch = common::mkit(
+        &scoped,
+        &xdg,
+        &[
+            "workspace",
+            "push",
+            "--endpoint",
+            &url,
+            "--repository",
+            "repo",
+            "--ref",
+            "refs/heads/missing",
+            "--format=json",
+        ],
+    );
+    assert!(!missing_branch.status.success());
+    tx.write_ref("refs/heads/unmapped", &base).unwrap();
+    let missing_packmap = common::mkit(
+        &scoped,
+        &xdg,
+        &[
+            "workspace",
+            "push",
+            "--endpoint",
+            &url,
+            "--repository",
+            "repo",
+            "--ref",
+            "refs/heads/unmapped",
+            "--format=json",
+        ],
+    );
+    assert!(!missing_packmap.status.success());
+    fs::remove_file(remote.join("refs/heads/unmapped")).unwrap();
+    let still_prepared = ScopedWorkspaceLayout::open(&scoped)
+        .unwrap()
+        .read_state()
+        .unwrap();
+    assert!(still_prepared.pending().unwrap().operation().is_none());
+    assert!(still_prepared.workspace().target().is_none());
+    let published = json(
+        &scoped,
+        &xdg,
+        &[
+            "workspace",
+            "push",
+            "--endpoint",
+            &url,
+            "--repository",
+            "repo",
+            "--ref",
+            "refs/heads/main",
+            "--format=json",
+        ],
+    );
+    assert_eq!(published["publication"], "accepted");
+    let candidate = mkit_core::hash::from_hex(committed["candidate"].as_str().unwrap()).unwrap();
+    assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some(candidate));
+    let next_node = tx.read_ref("refs/mkit/packmap/main").unwrap().unwrap();
+    let chain = mkit_core::transfer::decode_packlist(
+        &tx.download_blob(&PackKey::from_hash(next_node)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(chain.prev, Some(initial_id));
+    let state = ScopedWorkspaceLayout::open(&scoped)
+        .unwrap()
+        .read_state()
+        .unwrap();
+    assert!(state.pending().is_none());
+    assert_eq!(*state.workspace().base_id(), candidate);
+    assert!(!scoped.join("hidden.txt").exists());
+
+    let clone = temp.path().join("clone");
+    let fetched = common::mkit(temp.path(), &xdg, &["clone", &url, clone.to_str().unwrap()]);
+    assert!(
+        fetched.status.success(),
+        "{}",
+        String::from_utf8_lossy(&fetched.stderr)
+    );
+    let full = ObjectStore::open(&RepoLayout::single(&clone)).unwrap();
+    let Object::Commit(full_candidate) = full.read_object(&candidate).unwrap() else {
+        panic!("candidate commit")
+    };
+    let Object::Commit(local_candidate) = state.verified().base_object() else {
+        panic!("accepted local commit")
+    };
+    assert_eq!(full_candidate.tree_hash, local_candidate.tree_hash);
+    assert_eq!(
+        fs::read(clone.join("hidden.txt")).unwrap(),
+        b"hidden source"
+    );
+
+    let sibling = temp.path().join("sibling");
+    let created = common::mkit(
+        temp.path(),
+        &xdg,
+        &[
+            "workspace",
+            "create",
+            "--bundle",
+            bundle_file.to_str().unwrap(),
+            "--base",
+            &mkit_core::hash::to_hex(&base),
+            "--accept-bundle-selection",
+            sibling.to_str().unwrap(),
+        ],
+    );
+    assert!(created.status.success());
+    fs::write(sibling.join("a.txt"), b"sibling edit").unwrap();
+    json(
+        &sibling,
+        &xdg,
+        &["workspace", "add", "--all", "--format=json"],
+    );
+    json(
+        &sibling,
+        &xdg,
+        &["workspace", "commit", "-m", "sibling", "--format=json"],
+    );
+    let conflict = common::mkit(
+        &sibling,
+        &xdg,
+        &[
+            "workspace",
+            "push",
+            "--endpoint",
+            &url,
+            "--repository",
+            "repo",
+            "--ref",
+            "refs/heads/main",
+            "--format=json",
+        ],
+    );
+    assert!(!conflict.status.success());
+    let result: Value = serde_json::from_slice(&conflict.stdout).unwrap();
+    assert_eq!(result["publication"], "conflict");
+    let draft = ScopedWorkspaceLayout::open(&sibling)
+        .unwrap()
+        .read_state()
+        .unwrap();
+    assert_eq!(
+        format!("{:?}", draft.pending().unwrap().status()),
+        "Conflict"
+    );
+    assert_eq!(*draft.workspace().base_id(), base);
+    assert_eq!(fs::read(sibling.join("a.txt")).unwrap(), b"sibling edit");
+    let substitution = common::mkit(
+        &sibling,
+        &xdg,
+        &[
+            "workspace",
+            "push",
+            "--endpoint",
+            &url,
+            "--repository",
+            "other",
+            "--ref",
+            "refs/heads/main",
+            "--format=json",
+        ],
+    );
+    assert!(!substitution.status.success());
+
+    // Simulate a lost reply or process crash after a successful remote CAS:
+    // the local write-ahead Unknown is the only durable client fact.
+    tx.write_ref("refs/heads/uncertain", &base).unwrap();
+    tx.write_ref("refs/mkit/packmap/uncertain", &initial_id)
+        .unwrap();
+    let uncertain = temp.path().join("uncertain");
+    let created = common::mkit(
+        temp.path(),
+        &xdg,
+        &[
+            "workspace",
+            "create",
+            "--bundle",
+            bundle_file.to_str().unwrap(),
+            "--base",
+            &mkit_core::hash::to_hex(&base),
+            "--accept-bundle-selection",
+            uncertain.to_str().unwrap(),
+        ],
+    );
+    assert!(created.status.success());
+    fs::write(uncertain.join("a.txt"), b"uncertain edit").unwrap();
+    json(
+        &uncertain,
+        &xdg,
+        &["workspace", "add", "--all", "--format=json"],
+    );
+    json(
+        &uncertain,
+        &xdg,
+        &["workspace", "commit", "-m", "uncertain", "--format=json"],
+    );
+    let local = ScopedWorkspaceLayout::open(&uncertain).unwrap();
+    let initial_state = local.read_state().unwrap();
+    let initial_id = initial_state.pending().unwrap().identity();
+    let target =
+        mkit_core::partial::RemotePublicationTargetV1::new(&url, "repo", "refs/heads/uncertain")
+            .unwrap();
+    let bound = local
+        .bind_pending_publication(
+            initial_state.workspace().transaction_generation(),
+            &initial_id,
+            target,
+            [9; 32],
+        )
+        .unwrap();
+    let identity = bound.pending().unwrap().identity();
+    let sending = local
+        .begin_publication(bound.workspace().transaction_generation(), &identity)
+        .unwrap();
+    let bytes = sending.pending_update_bytes().unwrap().to_vec();
+    let context = mkit_core::partial::PartialExchangeContext::bind(
+        "repo",
+        "refs/heads/uncertain",
+        [9; 32],
+        base,
+        &bytes,
+    );
+    assert!(matches!(
+        mkit_core::partial::publish_explicit_update(&tx, &bytes, &PartialLimits::V1, &context)
+            .unwrap(),
+        mkit_core::partial::PublicationOutcome::Published
+    ));
+    drop(local);
+    let restarted = ScopedWorkspaceLayout::open(&uncertain).unwrap();
+    let retained = restarted.read_state().unwrap();
+    assert_eq!(
+        format!("{:?}", retained.pending().unwrap().status()),
+        "Unknown"
+    );
+    assert_eq!(*retained.workspace().base_id(), base);
+    assert!(
+        restarted
+            .begin_publication(retained.workspace().transaction_generation(), &identity)
+            .is_err()
+    );
+    let retry = common::mkit(&uncertain, &xdg, &["workspace", "push", "--format=json"]);
+    assert!(!retry.status.success());
+    let swapped = common::mkit(
+        &uncertain,
+        &xdg,
+        &[
+            "workspace",
+            "push",
+            "--endpoint",
+            &url,
+            "--repository",
+            "other",
+            "--ref",
+            "refs/heads/uncertain",
+            "--format=json",
+        ],
+    );
+    assert!(!swapped.status.success());
+    assert_eq!(
+        tx.read_ref("refs/heads/uncertain").unwrap(),
+        Some(*identity.candidate_id())
+    );
 }
 
 #[test]
@@ -203,9 +809,7 @@ fn selected_link_and_missing_file_cannot_stage() {
 fn unsupported_operations_never_fall_back_to_ordinary_repository() {
     let (temp, workspace) = setup("plain_file.bin");
     let xdg = temp.path().join("xdg");
-    for command in [
-        "commit", "export", "push", "merge", "rebase", "checkout", "gc",
-    ] {
+    for command in ["merge", "rebase", "checkout", "gc"] {
         let output = common::mkit(&workspace, &xdg, &["workspace", command]);
         assert!(!output.status.success(), "{command}");
         assert!(String::from_utf8_lossy(&output.stderr).contains("unsupported"));

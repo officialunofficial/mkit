@@ -33,7 +33,7 @@ use mkit_core::hash::Hash;
 use mkit_core::index::{self, EntryStatus, Index, IndexEntry};
 use mkit_core::layout::RepoLayout;
 use mkit_core::object::Object;
-use mkit_core::ops::restore::{RestoreOptions, SparsePattern, restore_tree_to_worktree};
+use mkit_core::ops::restore::{RestoreOptions, SparsePattern, restore_tree_to_worktree_with};
 use mkit_core::store::ObjectStore;
 use mkit_core::worktree;
 
@@ -338,7 +338,13 @@ fn restore_worktree(
         clean: false,
         sparse_patterns: Some(patterns),
     };
-    if let Err(e) = restore_tree_to_worktree(store, &source_tree, cwd, &restore_opts) {
+    if let Err(e) = restore_tree_to_worktree_with(
+        store,
+        &source_tree,
+        cwd,
+        &restore_opts,
+        &crate::restore_fanout::read_chunks_fanout,
+    ) {
         return Err(emit_err(&format!("restore worktree: {e}"), exit::CANTCREAT));
     }
     Ok(())

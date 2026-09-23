@@ -806,7 +806,9 @@ fn ignore_fallthrough(mapping: &[Option<usize>], old_len: usize) -> Vec<Option<u
 
 /// Reject a side whose line count would drive the O(m*n) DP table past
 /// [`BLAME_MAX_LINES`]. Shared by the matcher (and reused for the size-cap
-/// regression tests).
+/// regression tests). Checked against the untrimmed lengths, which only
+/// ever bounds [`match_lines_core`]'s trimmed core tighter — see
+/// [`match_lines`].
 fn check_line_count(lines: usize) -> BlameOutcome<()> {
     if lines > BLAME_MAX_LINES {
         return Err(BlameError::FileTooLarge { lines });
@@ -817,11 +819,64 @@ fn check_line_count(lines: usize) -> BlameOutcome<()> {
 /// LCS line matching. For each line in `new_lines`, returns the index
 /// in `old_lines` it corresponds to, or `None` for inserted/changed.
 ///
-/// NOTE: This function allocates an O(m*n) DP table with no size guard,
-/// so it is kept private; all callers go through the size-checked
-/// [`match_lines_with_options`] entry point.
+/// Trims the common **leading** run before handing the remainder to
+/// [`match_lines_core`]'s O(m*n) DP table. Blame replays a file's
+/// history one step at a time, and adjacent commits usually touch only
+/// a small, localized run near the end of a much larger unchanged file
+/// (the common "append a function", "add a log line" shape) — so this
+/// shrinks the DP table from the *whole file's* dimensions down to just
+/// the post-prefix remainder, often by orders of magnitude. The trim is
+/// exact, not a heuristic: a common prefix is, by construction, part of
+/// *every* LCS of the full sequences (each such line only ever pairs
+/// with its mirror position at the same index, and the DP's own first
+/// diagonal steps — `dp[i][i] = i` for `i` in the shared run — already
+/// force that pairing), so the result is byte-identical to running the
+/// DP over the untrimmed sequences.
+///
+/// Deliberately **not** symmetric on the trailing side. Trimming a
+/// common trailing run too looks equally safe at first glance, but
+/// isn't: this matcher's backtrack has a specific duplicate tie-break
+/// (prefer the *earliest* new line for a repeated key — see
+/// [`match_lines_core`]'s doc), and trailing-run elision can commit to
+/// a *different*, also-minimal alignment that violates it. Concretely,
+/// `old = ["a"]`, `new = ["b", "a", "a"]`: the real DP backtrack matches
+/// `old[0]` to the *first* `new` "a" (index 1); trimming the shared
+/// trailing "a" first and matching it directly instead leaves `old[0]`
+/// unmatched against the remaining `["b"]` and reattributes to the
+/// *second* "a" (index 2). Same failure mode already caught in
+/// `ops::diff`'s `myers_changed` for the analogous (Myers, not DP-table)
+/// case — see that function's doc for the general shape of the bug. See
+/// `proptest_match_lines_matches_unelided_core` below for the regression
+/// test (differential against [`match_lines_core`] run unelided on the
+/// same input).
+///
+/// NOTE: [`match_lines_core`] allocates an O(m*n) DP table over the
+/// trimmed remainder with no size guard, so it is kept private; all
+/// callers go through the size-checked [`match_lines_with_options`]
+/// entry point.
 #[must_use]
 fn match_lines<T: AsRef<[u8]>>(old_lines: &[T], new_lines: &[T]) -> Vec<Option<usize>> {
+    let m = old_lines.len();
+    let n = new_lines.len();
+
+    let max_prefix = m.min(n);
+    let mut prefix = 0;
+    while prefix < max_prefix && old_lines[prefix].as_ref() == new_lines[prefix].as_ref() {
+        prefix += 1;
+    }
+
+    let mid_mapping = match_lines_core(&old_lines[prefix..], &new_lines[prefix..]);
+
+    let mut mapping = Vec::with_capacity(n);
+    mapping.extend((0..prefix).map(Some));
+    mapping.extend(mid_mapping.into_iter().map(|o| o.map(|i| i + prefix)));
+    mapping
+}
+
+/// The O(m*n) DP core behind [`match_lines`]: plain LCS line matching
+/// with no prefix/suffix elision, over whatever slice it's given.
+#[must_use]
+fn match_lines_core<T: AsRef<[u8]>>(old_lines: &[T], new_lines: &[T]) -> Vec<Option<usize>> {
     let m = old_lines.len();
     let n = new_lines.len();
     // dp is (m+1) x (n+1).
@@ -1661,6 +1716,40 @@ mod tests {
         let old: Vec<&[u8]> = vec![b"ab"];
         let new: Vec<&[u8]> = vec![b"ab", b"ab"];
         assert_eq!(match_lines(&old, &new), vec![Some(0), None]);
+    }
+
+    #[test]
+    fn lcs_trailing_run_elision_would_be_unsound() {
+        // Regression test for the counterexample in `match_lines`'s doc:
+        // trimming a common *trailing* run before matching would pair
+        // `old[0]` to the second "a", not the first. `match_lines` must
+        // still get this right since it only elides the leading run.
+        let old: Vec<&[u8]> = vec![b"a"];
+        let new: Vec<&[u8]> = vec![b"b", b"a", b"a"];
+        assert_eq!(match_lines(&old, &new), vec![None, Some(0), None]);
+    }
+
+    proptest::proptest! {
+        /// `match_lines` (leading-run elided) must produce byte-identical
+        /// mappings to `match_lines_core` (the unmodified O(m*n) DP) run
+        /// directly on the same, un-elided `old`/`new` — including which
+        /// occurrence of a duplicated line gets the match. A tiny 3-symbol
+        /// alphabet maximizes duplicate lines in a short random sequence,
+        /// which is exactly what the trailing-elision counterexample
+        /// (`lcs_trailing_run_elision_would_be_unsound`) needed to surface,
+        /// so a broad random sweep at this alphabet size is a meaningful
+        /// check that the leading-only version doesn't have a sibling bug.
+        #[test]
+        fn proptest_match_lines_matches_unelided_core(
+            old in proptest::collection::vec(0u8..3, 0..12),
+            new in proptest::collection::vec(0u8..3, 0..12),
+        ) {
+            let old_lines: Vec<[u8; 1]> = old.iter().map(|b| [*b]).collect();
+            let new_lines: Vec<[u8; 1]> = new.iter().map(|b| [*b]).collect();
+            let elided = match_lines(&old_lines, &new_lines);
+            let reference = match_lines_core(&old_lines, &new_lines);
+            proptest::prop_assert_eq!(elided, reference);
+        }
     }
 
     #[test]

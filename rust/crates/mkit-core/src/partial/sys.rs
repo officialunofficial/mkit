@@ -219,6 +219,10 @@ impl DirFd {
         Ok(Self(self.0.try_clone()?))
     }
 
+    pub(crate) fn metadata(&self) -> Result<std::fs::Metadata, SysError> {
+        Ok(self.0.metadata()?)
+    }
+
     pub(crate) fn fsync(&self) -> Result<(), SysError> {
         Ok(self.0.sync_all()?)
     }

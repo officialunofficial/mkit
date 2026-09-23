@@ -442,12 +442,28 @@ pub fn build_tree_from_index_with<S: ObjectSink + ?Sized>(
     let mut root = Node::default();
     let mut seen_paths = std::collections::HashSet::with_capacity(index.entries.len());
 
+    // Pass 1: validate paths/status and collect the surviving entries'
+    // (path, mode, staged hash) — cheap, pure-CPU work, no store access.
+    // The original single-pass loop bailed on the *first* entry (in
+    // index order) with any problem — duplicate path, reserved status,
+    // or bad staged object — never even looking at later entries. A
+    // path/status problem here defers its error via `deferred_status_err`
+    // and stops collecting instead of returning immediately, so pass 2
+    // below still gets a chance to surface an *earlier* staged-object
+    // problem among the entries collected before the stopping point —
+    // preserving that same index-order precedence across both error
+    // classes. Entries at or after the stopping point are unreachable
+    // either way (the original loop never got there), so excluding them
+    // from `kept` changes nothing observable.
+    let mut kept: Vec<(&str, EntryMode, Hash)> = Vec::with_capacity(index.entries.len());
+    let mut deferred_status_err: Option<WorktreeError> = None;
     for entry in &index.entries {
         if !seen_paths.insert(entry.path.as_str()) {
-            return Err(WorktreeError::Io(io::Error::other(format!(
+            deferred_status_err = Some(WorktreeError::Io(io::Error::other(format!(
                 "duplicate index path: '{}'",
                 entry.path
             ))));
+            break;
         }
         if entry.status == EntryStatus::Removed {
             continue;
@@ -460,44 +476,40 @@ pub fn build_tree_from_index_with<S: ObjectSink + ?Sized>(
                 // Reserved-but-unused per SPEC-INDEX §3. Reject for
                 // now; if a subtree-staging design lands later it
                 // can populate this branch.
-                return Err(WorktreeError::Io(io::Error::other(
+                deferred_status_err = Some(WorktreeError::Io(io::Error::other(
                     "index entry uses reserved Tree status (subtree staging not implemented)",
                 )));
+                break;
             }
             EntryStatus::Removed => unreachable!("filtered above"),
         };
-        // A regular file (Blob/Executable) may be stored as a single
-        // Blob or, for content above CHUNK_THRESHOLD, a ChunkedBlob
-        // manifest — `add`/`hash_file`/`build_tree` all route through
-        // `store_file_object`. A Symlink is always a single Blob (its
-        // target path). Accept both blob shapes for file entries so the
-        // commit/index path agrees with the worktree-hashing path; a
-        // tree/commit/etc. under a file entry is still rejected.
-        // Publishing paths (`verify`) read + re-hash the staged object so
-        // a tree never references a corrupt blob; the read path's hash
-        // check is the same one `add` passed, so this only catches
-        // post-`add` corruption. Ephemeral status/diff snapshots skip it
-        // — re-reading every staged blob on every status dominates large
-        // repos of small files, and they publish nothing durable.
-        let object_type = if verify {
-            store.verify_object_type(&entry.object_hash)?
-        } else {
-            store.object_type(&entry.object_hash)?
-        };
-        match object_type {
-            crate::object::ObjectType::Blob => {}
-            crate::object::ObjectType::ChunkedBlob if mode != EntryMode::Symlink => {}
-            other => {
-                return Err(WorktreeError::Io(io::Error::other(format!(
-                    "index entry '{}' points to a non-blob object (got {})",
-                    entry.path,
-                    other.name()
-                ))));
-            }
-        }
+        kept.push((entry.path.as_str(), mode, entry.object_hash));
+    }
 
+    // Pass 2: one batched staged-object check (fetch the type, then the
+    // same blob-shape check the original loop ran inline right after
+    // its own per-entry fetch) for every entry pass 1 kept, instead of
+    // interleaving it one-at-a-time with the pass-3 tree walk below.
+    // `probe_staged_objects` fans this out across threads once there's
+    // enough work to amortize it (native builds only) — a `status`/
+    // `diff` snapshot over a many-file repo was paying one serialized
+    // `open`+`read`(+`close`) per tracked file here, dominating wall
+    // time well before hashing or tree-materialization cost did. Its
+    // sequential (default) path still short-circuits on the first
+    // failing entry in `kept`'s (index) order, so — combined with pass
+    // 1 stopping at the same point the original loop would have —
+    // whichever of the two errors is earlier in index order is the one
+    // that surfaces, exactly matching the original interleaved loop.
+    probe_staged_objects(store, &kept, verify)?;
+    if let Some(err) = deferred_status_err {
+        return Err(err);
+    }
+
+    // Pass 3: walk each surviving, already-validated entry into the
+    // in-memory node tree.
+    for (path, mode, object_hash) in kept {
         // Split "a/b/c.txt" into ["a", "b"] + "c.txt".
-        let segments: Vec<&str> = entry.path.split('/').collect();
+        let segments: Vec<&str> = path.split('/').collect();
         let Some((leaf, dirs)) = segments.split_last() else {
             return Err(WorktreeError::Io(io::Error::other("empty index path")));
         };
@@ -553,7 +565,7 @@ pub fn build_tree_from_index_with<S: ObjectSink + ?Sized>(
         }
         if node
             .leaves
-            .insert((*leaf).to_string(), (mode, entry.object_hash))
+            .insert((*leaf).to_string(), (mode, object_hash))
             .is_some()
         {
             let duplicate = if walked.is_empty() {
@@ -609,6 +621,129 @@ pub fn build_tree_from_index_with<S: ObjectSink + ?Sized>(
     }
 
     write_node(sink, &root)
+}
+
+/// Staged-object check for every `(path, mode, hash)` triple in
+/// `entries`, in order — [`build_tree_from_index_with`]'s batched pass-2
+/// step. Below a small-batch threshold this runs a plain sequential
+/// loop (short-circuiting on `entries`' first failure, same as a plain
+/// `for` loop would); at or above it (native builds only — wasm32 has
+/// no threads) fans out across a scoped thread pool sized to the
+/// machine, same shape as [`crate::pack`]'s
+/// `stage_raw_entries`/`stage_raw_entries_parallel`: each check is one
+/// `open`+`read`(+`close`) syscall triplet on an independent loose
+/// object file, so the calls parallelize with none of the ordering or
+/// shared-mutable-state concerns a write path has to account for.
+fn probe_staged_objects(
+    store: &ObjectStore,
+    entries: &[(&str, EntryMode, Hash)],
+    verify: bool,
+) -> WorktreeResult<()> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        // Below this many entries per available thread, thread-spawn
+        // overhead isn't worth it — same crossover shape as
+        // `pack::stage_raw_entries`, tuned here by the
+        // `status_snapshot` bench.
+        const ENTRIES_PER_THREAD: usize = 32;
+        let threads = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        if threads > 1 && entries.len() >= ENTRIES_PER_THREAD.saturating_mul(threads) {
+            return probe_staged_objects_parallel(store, entries, verify, threads);
+        }
+    }
+    entries.iter().try_for_each(|&(path, mode, hash)| {
+        check_one_staged_object(store, path, mode, hash, verify)
+    })
+}
+
+/// Parallel branch of [`probe_staged_objects`]: split `entries` into
+/// `threads` contiguous chunks and check each chunk sequentially on its
+/// own scoped thread. `std::thread::scope` (not a persistent pool)
+/// mirrors `pack::stage_raw_entries_parallel`'s choice for the same
+/// reason: `mkit-core` stays dependency-neutral and wasm-clean.
+#[cfg(not(target_arch = "wasm32"))]
+fn probe_staged_objects_parallel(
+    store: &ObjectStore,
+    entries: &[(&str, EntryMode, Hash)],
+    verify: bool,
+    threads: usize,
+) -> WorktreeResult<()> {
+    let chunk_size = entries.len().div_ceil(threads).max(1);
+    // On an index with more than one entry pointing at a missing,
+    // malformed, or wrong-shape object, the specific error surfaced
+    // here depends on chunk/thread scheduling, not index position —
+    // the same accepted nondeterminism as `mkit-cli`'s
+    // `try_map_seq_or_par` fan-outs and `pack::stage_raw_entries_parallel`.
+    // The tree build is rejected either way; only which error is
+    // reported can vary between runs.
+    let mut first_err: Option<WorktreeError> = None;
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = entries
+            .chunks(chunk_size)
+            .map(|chunk| {
+                scope.spawn(move || {
+                    chunk.iter().find_map(|&(path, mode, hash)| {
+                        check_one_staged_object(store, path, mode, hash, verify).err()
+                    })
+                })
+            })
+            .collect();
+        for handle in handles {
+            if let Some(e) = handle
+                .join()
+                .expect("staged-object check worker thread panicked")
+                && first_err.is_none()
+            {
+                first_err = Some(e);
+            }
+        }
+    });
+    match first_err {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
+// Pure per-entry step shared by both branches of
+// `probe_staged_objects`: fetch `hash`'s object-type tag —
+// `verify_object_type` (full read + rehash) when `verify`, else the
+// cheap prologue-only `object_type` — then run the same blob-shape
+// check the original single-pass loop ran inline right after its own
+// per-entry fetch.
+//
+// A regular file (Blob/Executable) may be stored as a single Blob or,
+// for content above CHUNK_THRESHOLD, a ChunkedBlob manifest —
+// `add`/`hash_file`/`build_tree` all route through
+// `store_file_object`. A Symlink is always a single Blob (its target
+// path). Accept both blob shapes for file entries so the commit/index
+// path agrees with the worktree-hashing path; a tree/commit/etc.
+// under a file entry is still rejected. Publishing paths (`verify`)
+// read + re-hash the staged object so a tree never references a
+// corrupt blob; the read path's hash check is the same one `add`
+// passed, so this only catches post-`add` corruption. Ephemeral
+// status/diff snapshots skip it — re-reading every staged blob on
+// every status dominates large repos of small files, and they
+// publish nothing durable.
+fn check_one_staged_object(
+    store: &ObjectStore,
+    path: &str,
+    mode: EntryMode,
+    hash: Hash,
+    verify: bool,
+) -> WorktreeResult<()> {
+    let object_type = if verify {
+        store.verify_object_type(&hash)?
+    } else {
+        store.object_type(&hash)?
+    };
+    match object_type {
+        crate::object::ObjectType::Blob => Ok(()),
+        crate::object::ObjectType::ChunkedBlob if mode != EntryMode::Symlink => Ok(()),
+        other => Err(WorktreeError::Io(io::Error::other(format!(
+            "index entry '{path}' points to a non-blob object (got {})",
+            other.name()
+        )))),
+    }
 }
 
 /// Read a file from disk, hash it, store it, and return the
@@ -840,13 +975,49 @@ fn checked_hash_chunks<S: ObjectSink + ?Sized>(
 /// manifest's chunk list, and therefore the file's content address,
 /// depends on that order.
 ///
+/// Cutting chunk boundaries is otherwise strictly sequential (each cut's
+/// start is the previous cut's end), but cutting *batch N+1* has no data
+/// dependency on *hashing batch N* — only on the reader position, which
+/// the cutter alone advances. Native builds (see
+/// `store_large_file_streaming_pipelined`) overlap the two phases
+/// across a scoped worker thread instead of running them strictly one
+/// after the other; wasm32 (no threads) falls back to
+/// `store_large_file_streaming_batched`, the original phase-serial
+/// loop. (Both are private, cfg-gated to exactly one of the two
+/// targets, so neither is a valid intra-doc link here — a native `cargo
+/// doc` build never sees `store_large_file_streaming_batched` at all,
+/// and vice versa on wasm32.)
+///
 /// # Errors
 /// See [`WorktreeError`].
-pub fn store_large_file_streaming_with<S: ObjectSink + ?Sized, R: Read>(
+pub fn store_large_file_streaming_with<S: ObjectSink + ?Sized, R: Read + Send>(
     sink: &S,
     reader: R,
     path: &Path,
     mut hash_chunks: impl FnMut(&S, &[Vec<u8>]) -> WorktreeResult<Vec<Hash>>,
+) -> WorktreeResult<Hash> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        store_large_file_streaming_pipelined(sink, reader, path, &mut hash_chunks)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        store_large_file_streaming_batched(sink, reader, path, &mut hash_chunks)
+    }
+}
+
+/// Original phase-serial implementation of
+/// [`store_large_file_streaming_with`]: cut one batch, then hash it via
+/// `hash_chunks`, then cut the next. wasm32 (no threads to pipeline
+/// across) uses this directly; native builds use
+/// `store_large_file_streaming_pipelined` instead (native-only; not a
+/// valid intra-doc link from a wasm32 doc build).
+#[cfg(target_arch = "wasm32")]
+fn store_large_file_streaming_batched<S: ObjectSink + ?Sized, R: Read>(
+    sink: &S,
+    reader: R,
+    path: &Path,
+    hash_chunks: &mut impl FnMut(&S, &[Vec<u8>]) -> WorktreeResult<Vec<Hash>>,
 ) -> WorktreeResult<Hash> {
     let mut chunker = ChunkReader::new(FastCdc::v1(), reader);
     let mut chunks = Vec::new();
@@ -859,13 +1030,131 @@ pub fn store_large_file_streaming_with<S: ObjectSink + ?Sized, R: Read>(
             .ok_or_else(|| WorktreeError::FileTooLarge(path.to_path_buf()))?;
         batch.push(chunk);
         if batch.len() == STREAM_HASH_BATCH {
-            chunks.extend(checked_hash_chunks(&mut hash_chunks, sink, &batch)?);
+            chunks.extend(checked_hash_chunks(hash_chunks, sink, &batch)?);
             batch.clear();
         }
     }
     if !batch.is_empty() {
-        chunks.extend(checked_hash_chunks(&mut hash_chunks, sink, &batch)?);
+        chunks.extend(checked_hash_chunks(hash_chunks, sink, &batch)?);
     }
+
+    store_chunk_manifest(sink, total_size, chunks)
+}
+
+/// Pipelined implementation of [`store_large_file_streaming_with`]: a
+/// scoped worker thread runs `reader` through the `FastCdc` cutter and
+/// hands off each full [`STREAM_HASH_BATCH`]-sized batch (plus the final
+/// partial one) over a rendezvous (zero-capacity) channel, while this
+/// (the calling) thread receives batches and runs `hash_chunks` on them
+/// — so cutting batch N+1 overlaps hashing batch N instead of waiting
+/// for it. A zero-capacity channel's `send` blocks until the matching
+/// `recv`, so the cutter can have at most one batch *fully built* ahead
+/// of the one currently being hashed (held on its own stack, blocked on
+/// send) — never two, the way a buffered channel would allow by letting
+/// it dequeue immediately and start a third batch. That caps the extra
+/// memory this adds at one more `STREAM_HASH_BATCH` (matching this
+/// module's existing "independent of file size" bound) while still
+/// overlapping the two phases fully: the blocked send/recv handshake
+/// itself is a single unblocked pair of syscalls, not a wait for work.
+///
+/// The cutter thread performs the exact same running-total overflow
+/// check `store_large_file_streaming_batched` (wasm32-only; not a valid
+/// intra-doc link here) does, so an oversized
+/// file is still rejected as soon as the cutter itself detects it
+/// (before hashing catches up) rather than only once every chunk has
+/// been received; the receiving thread separately sums each received
+/// chunk's length into `total_size` for the final manifest, which is
+/// always consistent with the cutter's own total since it receives
+/// every chunk the cutter decided to keep.
+///
+/// If `hash_chunks` (or the overflow check) errors, this thread returns
+/// early and drops its end of the channel; the cutter's next blocked
+/// [`std::sync::mpsc::SyncSender::send`] then fails and it exits — no
+/// deadlock, no unjoined thread (`std::thread::scope` joins it before
+/// returning). If the cutter itself panics, `std::thread::scope`
+/// resumes that panic here once joined, the same behavior
+/// [`crate::pack::PackReader::read`]'s own scoped fan-out relies on.
+#[cfg(not(target_arch = "wasm32"))]
+fn store_large_file_streaming_pipelined<S: ObjectSink + ?Sized, R: Read + Send>(
+    sink: &S,
+    reader: R,
+    path: &Path,
+    hash_chunks: &mut impl FnMut(&S, &[Vec<u8>]) -> WorktreeResult<Vec<Hash>>,
+) -> WorktreeResult<Hash> {
+    use std::sync::mpsc;
+
+    let (tx, rx) = mpsc::sync_channel::<WorktreeResult<Vec<Vec<u8>>>>(0);
+
+    let (chunks, total_size) = std::thread::scope(|scope| -> WorktreeResult<(Vec<Hash>, u64)> {
+        scope.spawn(move || {
+            let mut chunker = ChunkReader::new(FastCdc::v1(), reader);
+            let mut batch: Vec<Vec<u8>> = Vec::with_capacity(STREAM_HASH_BATCH);
+            let mut running_total: u64 = 0;
+            loop {
+                let chunk = match chunker.next_chunk() {
+                    Ok(Some(chunk)) => chunk,
+                    Ok(None) => {
+                        if !batch.is_empty() {
+                            let _ = tx.send(Ok(batch));
+                        }
+                        return;
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(WorktreeError::from(e)));
+                        return;
+                    }
+                };
+                running_total = if let Some(t) = running_total
+                    .checked_add(chunk.len() as u64)
+                    .filter(|&t| t <= MAX_FILE_BYTES)
+                {
+                    t
+                } else {
+                    let _ = tx.send(Err(WorktreeError::FileTooLarge(path.to_path_buf())));
+                    return;
+                };
+                batch.push(chunk);
+                if batch.len() == STREAM_HASH_BATCH {
+                    let full = std::mem::replace(&mut batch, Vec::with_capacity(STREAM_HASH_BATCH));
+                    if tx.send(Ok(full)).is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+
+        // On any error, keep draining (discarding) the channel instead of
+        // returning immediately: with a rendezvous channel the cutter's
+        // *next* `send` — for a batch already cut, or one it hasn't
+        // finished cutting yet — has no buffer to land in and blocks
+        // until a matching `recv`, so an early return here that stops
+        // calling `recv` would deadlock `thread::scope`'s join waiting
+        // for a cutter that is itself waiting for a `recv` that will
+        // never come. Draining lets every future send succeed (or the
+        // cutter hits its own error/EOF and exits on its own), so the
+        // channel always disconnects and this loop always terminates.
+        let mut chunks = Vec::new();
+        let mut total_size: u64 = 0;
+        let mut first_err: Option<WorktreeError> = None;
+        while let Ok(received) = rx.recv() {
+            if first_err.is_some() {
+                continue;
+            }
+            match received.and_then(|batch| {
+                for chunk in &batch {
+                    total_size += chunk.len() as u64;
+                }
+                checked_hash_chunks(hash_chunks, sink, &batch)
+            }) {
+                Ok(hashes) => chunks.extend(hashes),
+                Err(e) => first_err = Some(e),
+            }
+        }
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok((chunks, total_size)),
+        }
+    })?;
 
     store_chunk_manifest(sink, total_size, chunks)
 }
@@ -1414,6 +1703,44 @@ mod tests {
                 expected: n, actual: 0
             } if n == expected));
         }
+    }
+
+    #[test]
+    fn streaming_pipeline_errors_promptly_when_hash_chunks_fails_on_an_early_batch() {
+        // Regression test for a real deadlock in the native pipelined
+        // path (`store_large_file_streaming_pipelined`): on a rendezvous
+        // channel, if the receiving side stops calling `recv` as soon as
+        // it sees an error, the cutter thread's *next* `send` — for a
+        // batch it already cut, or is about to — has no buffer to land
+        // in and blocks forever waiting for a `recv` that will never
+        // come, hanging `thread::scope`'s join on that thread. Three
+        // full batches (well beyond `STREAM_HASH_BATCH`) ensures the
+        // cutter still has more batches to send after the one that
+        // triggers the very first error. Runs the call on its own
+        // thread with a bounded `recv_timeout` so a regression fails
+        // this test instead of hanging the whole suite.
+        let size = 3 * STREAM_HASH_BATCH * crate::chunker::MAX_SIZE;
+        let (_dir, sink) = fresh_store();
+        let data = vec![0u8; size];
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = store_large_file_streaming_with(
+                &sink,
+                io::Cursor::new(data),
+                Path::new("batch.bin"),
+                |_sink, _batch| Err(WorktreeError::InvalidUtf8),
+            );
+            let _ = done_tx.send(matches!(result, Err(WorktreeError::InvalidUtf8)));
+        });
+
+        let errored_correctly = done_rx
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect(
+                "store_large_file_streaming_with deadlocked instead of \
+                 returning promptly after an early hash_chunks error",
+            );
+        assert!(errored_correctly);
     }
 
     #[test]
@@ -2262,6 +2589,55 @@ mod tests {
         assert!(
             build_tree_from_index_with(&store, &store, &idx, false).is_ok(),
             "status/diff snapshot path keeps the cheap prologue-only check"
+        );
+    }
+
+    /// The batched pass-2 staged-object check (`probe_staged_objects`)
+    /// must not change *which* error an index with more than one kind
+    /// of problem reports — the sequential (default, non-parallel)
+    /// path has to surface the same error the original single
+    /// interleaved loop would have: whichever entry comes first in
+    /// index order, checked dup-path, then status, then staged-object
+    /// shape, in that sub-order. Here entry 0's staged hash was never
+    /// written (fails the staged-object check) while entry 1 uses the
+    /// reserved `Tree` status (fails the pass-1 status check) — entry
+    /// 0 comes first, so its error must win even though pass 1 alone
+    /// would reach entry 1's problem without ever touching the store.
+    #[test]
+    fn build_tree_from_index_earlier_object_error_wins_over_later_status_error() {
+        use crate::index::{EntryStatus, Index, IndexEntry};
+
+        let (_sd, store) = fresh_store();
+        let mut idx = Index::default();
+        idx.entries.push(IndexEntry {
+            status: EntryStatus::Blob,
+            object_hash: [0xAB; 32],
+            path: "a.txt".to_string(),
+            mtime_ns: 0,
+            size: 0,
+            ino: 0,
+            ctime_ns: 0,
+        });
+        idx.entries.push(IndexEntry {
+            status: EntryStatus::Tree,
+            object_hash: [0; 32],
+            path: "b".to_string(),
+            mtime_ns: 0,
+            size: 0,
+            ino: 0,
+            ctime_ns: 0,
+        });
+
+        let err = build_tree_from_index_with(&store, &store, &idx, false)
+            .expect_err("index has no valid entries");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ab") || msg.to_lowercase().contains("not found"),
+            "expected entry 0's missing-object error, got: {msg}"
+        );
+        assert!(
+            !msg.contains("reserved Tree status"),
+            "entry 1's status error must not preempt entry 0's earlier object error, got: {msg}"
         );
     }
 
