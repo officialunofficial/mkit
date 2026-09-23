@@ -1,0 +1,1 @@
+{"method":"POST","path":"/mkit/host/v1/GetSnapshotJob","status":400,"response":"invalid-argument-response.json"}

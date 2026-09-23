@@ -55,6 +55,8 @@ pub struct RefStore {
     pub(super) ledger: Ledger,
     #[cfg(feature = "managed-access")]
     pub(super) env: Env,
+    #[cfg(feature = "managed-access")]
+    pub(super) snapshot_busy: Rc<std::cell::Cell<bool>>,
 }
 
 impl DurableObject for RefStore {
@@ -68,6 +70,8 @@ impl DurableObject for RefStore {
             ledger,
             #[cfg(feature = "managed-access")]
             env: _env,
+            #[cfg(feature = "managed-access")]
+            snapshot_busy: Rc::new(std::cell::Cell::new(false)),
         }
     }
 
@@ -79,6 +83,9 @@ impl DurableObject for RefStore {
             }
             if req.path() == "/managed-grant" {
                 return self.managed_grant(&mut req).await;
+            }
+            if req.path() == "/managed-snapshot" {
+                return self.managed_snapshot(&mut req).await;
             }
             if req.path() == "/authorize" {
                 return self.managed_access(&mut req).await;
@@ -285,7 +292,7 @@ impl RefStore {
     /// Idempotently create the `refs` table. Called at the top of every fetch
     /// so a transient DDL failure surfaces as a clean error instead of
     /// panicking the isolate.
-    fn ensure_table(&self) -> Result<()> {
+    pub(super) fn ensure_table(&self) -> Result<()> {
         self.ledger.initialize()?;
         self.ensure_write_quota_table()?;
         self.state.storage().sql().exec(

@@ -1,0 +1,1 @@
+{"method":"POST","path":"/mkit/host/v1/CancelSnapshot","status":200,"response":"cancel-response.json"}

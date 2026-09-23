@@ -100,6 +100,76 @@ The default artifact regression uses `worker-build --release`, then
 --var AUTH_AUDIENCE:http://localhost:8791 --var AUTH_REPOSITORY:default`, then
 `PYTHONDONTWRITEBYTECODE=1 python3 tests/default_compat.py`.
 
+For owner Snapshot enrollment, build `worker-build --release --features
+managed-access,test-faults`, then run the same local Wrangler config with
+`--port 8791 --persist-to <fresh-mkit-c1-workerd-state>`,
+`--var AUTH_AUDIENCE:http://localhost:8791`,
+`--var AUTH_REPOSITORY:managed-test`, and
+`--var MANAGED_OWNER_PUBLIC_KEY:ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c`.
+Generate a small fixture with `cargo run --release --example snapshot_fixture --
+<fixture-dir> 2 1024` and run `PYTHONDONTWRITEBYTECODE=1 python3
+tests/managed_snapshots.py <fixture-dir>`. For a distinct reachable graph
+above 128 MiB, use `65 2097142` and `--large --local-r2-seed`. The latter
+seeds immutable hash-checked fixture packs through Wrangler's disposable
+local R2 Explorer because the independent managed UploadPack write-window
+quota blocks same-window setup; the enrollment service still reads and
+verifies those R2 bytes normally. No deployment or cloud bucket is used.
+The fixture also contains a small `selected.txt` for later private-reader
+tests. This test checks every Continue saved-nonce replay and exact reached
+bytes/object counts.
+For the deliberate profile exclusion, generate a separate small fixture with
+`--unsupported-pack` and run the same `managed_snapshots.py` command in a
+fresh local state. A correctly framed v2/non-raw selected pack returns
+terminal 422 `unsupported_profile` on its catalog Continue, including exact
+saved-nonce replay.
+
+`managed_snapshot_faults.py` uses only disposable local state. Set
+`MKIT_SNAPSHOT_TEST_STATE` to the Wrangler persistence directory and
+`MKIT_SNAPSHOT_SMALL_FIXTURE` to the small fixture. Run `--seed-live`, stop
+Wrangler, run `--patch-idle-offline`, restart with the **same Worker name and
+state**, and run `--verify-idle`; this proves cleanup alone recovers both
+live slots with `max_rows=1`. The same stop/patch/restart pattern supports
+`--patch-high-offline`/`--verify-high`,
+`--patch-exhaust-offline`/`--verify-exhaust`,
+`--patch-overflow-offline`/`--verify-overflow`, and, on a separate completed
+job, `--patch-ready-expiry-offline`/`--verify-ready-retention`. The patch
+modes directly alter local SQLite and must never target a real repository.
+`--patch-corrupt-offline`/`--verify-corrupt` demonstrates checksum fail-closed
+behavior on another disposable seeded state.
+For the 128-terminal reservation boundary, seed a fresh state, stop workerd,
+run `--patch-terminal-127-offline`, restart, then run
+`--verify-terminal-cancel` or `--verify-terminal-ready`. Repeat on a second
+fresh state for the other path. The local SQL fixture contains 127 valid
+terminal summaries; Begin admits one live job but rejects another without
+reserving a nonce, and ordinary Cancel or completed validation yields exactly
+128 terminal summaries with no live job. This is deliberately isolated from
+the seven-day cleanup test.
+For asynchronous interleaving, use a fresh state and add
+`--var SNAPSHOT_TEST_R2_PAUSE_MS:3000` with the `test-faults` build. After
+`--seed-live`, run `--verify-interleave`: a charged Continue pauses before
+its R2 GET while GetPolicy remains responsive, exact pending replay returns
+202 despite the heavy permit, another new heavy claim returns 429, and
+Cancel fences the late result. The pause variable is compiled out of the
+ordinary managed build. In another fresh seeded state,
+`--verify-request-expiry` signs a one-second request expiry and verifies
+that a three-second R2 pause cannot advance its semantic revision while
+the already charged read reservation remains durable.
+
+One local large-fixture measurement used `snapshot_resource.mjs` against
+the named `core:user:mkit-vcs-managed-local-test` workerd inspector target.
+The ignored generated Worker JS was temporarily instrumented to expose its
+wasm memory and then rebuilt to remove that exposure. Across 215 samples in
+26.7 seconds during enrollment, observed maxima were 43,593,340 bytes JS
+heap used, 12,320,768 bytes wasm memory, and 31,388,636 backing-storage
+bytes; the V8 profiler recorded 2,323 samples. The separate workerd child
+process RSS sampled after completion was 44,016 KiB. These are sampled
+observations, not exact isolate peaks or additive memory quantities. The
+fixture reached 136,318,176 distinct canonical bytes in 66 selected packs,
+68 objects, 138 Continue claims and 204 charged R2 operations. The fixture
+uses near-2 MiB random objects and a tiny editable file; it is not a dense
+4 MiB-pack worst-case or proof that all independent ceilings are jointly
+attainable.
+
 For isolated state tests, give Wrangler `--persist-to` an empty directory made
 with `mktemp -d /tmp/mkit-managed-test.XXXXXX`. The `--probe-uninitialized`
 mode performs Get and Replace before bootstrap; inspect the exact RefStore

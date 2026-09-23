@@ -1,0 +1,1 @@
+{"method":"POST","path":"/mkit/host/v1/CleanupSnapshots","status":200,"response":"cleanup-response.json"}
