@@ -405,6 +405,65 @@ fn recipient_rejects_re_signed_hidden_sibling_subtree_mode_and_symlink_changes()
 }
 
 #[test]
+fn recipient_rejects_portable_valid_undeclared_tree_fanout() {
+    let mut fixture = fixture();
+    let Object::Remix(mut base) = fixture.store.read_object(&fixture.base_id).unwrap() else {
+        panic!("base")
+    };
+    let Object::Tree(mut root) = fixture.store.read_object(&base.tree_hash).unwrap() else {
+        panic!("root")
+    };
+    for index in 0..32 {
+        root.entries.push(TreeEntry {
+            name: format!("h{index:02}").into_bytes(),
+            mode: EntryMode::Tree,
+            object_hash: fixture.shared_tree,
+        });
+    }
+    root.entries.sort_by(|a, b| a.name.cmp(&b.name));
+    base.tree_hash = put(&fixture.store, &Object::Tree(root));
+    let base_key = mkit_core::KeyPair::from_seed([7; 32]);
+    base.signature = sign_remix(&base, &base_key).unwrap().0;
+    fixture.base_id = put(&fixture.store, &Object::Remix(base));
+
+    let valid = export_one_update(&fixture);
+    let forged = forge_hidden_candidate(&valid, |root| {
+        let selected_tree = root
+            .entries
+            .iter()
+            .find(|entry| entry.name == b"a")
+            .unwrap()
+            .object_hash;
+        for entry in &mut root.entries {
+            if entry.name.len() == 3 && entry.name[0] == b'h' {
+                entry.object_hash = selected_tree;
+            }
+        }
+    });
+    let mut source = &fixture.store;
+    assert!(
+        mkit_core::partial::verify_partial_update(
+            fixture.base_id,
+            &valid,
+            &mut source,
+            &PartialLimits::V1,
+            &mkit_core::partial::RecipientLimits::DEFAULT,
+        )
+        .is_ok()
+    );
+    assert!(matches!(
+        mkit_core::partial::verify_partial_update(
+            fixture.base_id,
+            &forged,
+            &mut source,
+            &PartialLimits::V1,
+            &mkit_core::partial::RecipientLimits::DEFAULT,
+        ),
+        Err(mkit_core::partial::RecipientError::InvalidChange)
+    ));
+}
+
+#[test]
 fn recipient_checks_hidden_edge_roles_and_chunk_layout() {
     let mut wrong_role = fixture();
     let wrong_child = wrong_role.shared_tree;
