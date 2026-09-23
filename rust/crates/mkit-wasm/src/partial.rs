@@ -736,6 +736,7 @@ impl BindingError {
             PartialError::WitnessTooLarge => "witness_too_large",
             PartialError::WorkspaceTooLarge => "workspace_too_large",
             PartialError::ValidationBudgetExceeded => "validation_budget_exceeded",
+            PartialError::RecipientBudgetExceeded => "recipient_budget_exceeded",
             PartialError::NoChanges => "no_changes",
             PartialError::CommitMismatch => "commit_mismatch",
             PartialError::SubmissionTooLarge => "submission_too_large",
@@ -1292,5 +1293,11 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(error, PartialError::InvalidChunkLayout));
+    }
+
+    #[test]
+    fn recipient_intake_budget_has_stable_binding_code() {
+        let error = BindingError::from_partial(&PartialError::RecipientBudgetExceeded);
+        assert_eq!(error.code, "recipient_budget_exceeded");
     }
 }
