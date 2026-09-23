@@ -380,6 +380,9 @@ struct ProducerRepresentationCache {
 
 /// The one selected-only producer traversal, driven either by explicit
 /// request/supply or by `build_partial_snapshot`'s synchronous source loop.
+/// It owns only the selected dependency bytes it has accepted. A host must
+/// bound each fetch before allocating its response `Vec`; dropping this value
+/// cancels the in-memory traversal without a resumable checkpoint.
 pub struct PartialSnapshotBuilder {
     base_id: Hash,
     paths: Vec<PartialPath>,
@@ -414,9 +417,13 @@ impl std::fmt::Debug for PartialSnapshotBuilder {
 /// not authorization to fetch the ID from an untrusted remote service.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PartialObjectRole {
+    /// Signed base Commit or Remix.
     Base,
+    /// Authenticated selected ancestor Tree.
     Tree,
+    /// Selected Blob or ChunkedBlob representation.
     File,
+    /// Chunk Blob named by a selected manifest.
     Chunk,
 }
 
@@ -430,15 +437,19 @@ pub struct PartialObjectRequest {
 }
 
 impl PartialObjectRequest {
+    /// Authenticated ID requested by the builder.
     #[must_use]
     pub fn id(&self) -> Hash {
         self.id
     }
+    /// Required object type role for this response.
     #[must_use]
     pub fn role(&self) -> PartialObjectRole {
         self.role
     }
-    /// Advisory upper bound for a host to enforce before initial allocation.
+    /// Minimum of the role cap and remaining encoded-bundle room. Hosts
+    /// should enforce this before I/O allocation. Supply retains the separate
+    /// role cap so over-budget responses keep their historical error class.
     #[must_use]
     pub fn max_bytes(&self) -> usize {
         self.max_bytes
@@ -467,6 +478,12 @@ enum ProducerPhase {
 impl PartialSnapshotBuilder {
     /// Start from an independently pinned base and exact selected paths. No
     /// source reads or path-derived allocations happen before validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns the existing request-validation [`PartialError`] for invalid
+    /// V1 limits, path grammar/count/length or initial bundle framing budget.
+    /// No object source is consulted until the first request is supplied.
     pub fn new(
         base_id: Hash,
         selected_paths: &[PartialPath],
@@ -505,6 +522,15 @@ impl PartialSnapshotBuilder {
 
     /// Consume exactly the requested response. Any error consumes the builder,
     /// so a caller cannot continue after a rejected response.
+    /// The returned `Vec` belongs to the caller until this call; successful
+    /// supply retains its bytes by authenticated ID and advances cached work.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PartialError::UnsupportedPartialOperation`] when no request
+    /// remains, witness/role or workspace/bundle budget errors before decode,
+    /// then the existing canonical-ID, type, signature and selected-layout
+    /// errors. A rejected response destroys this builder state.
     pub fn supply(mut self, bytes: Vec<u8>) -> Result<Self, PartialError> {
         let request = self
             .request
@@ -539,6 +565,12 @@ impl PartialSnapshotBuilder {
     }
 
     /// Build the original ID-sorted bundle and self-verify exact inventory.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PartialError::InsufficientWitness`] while a request remains,
+    /// or the existing bundle encoding/selected-verifier error if final
+    /// independent inventory validation fails.
     pub fn finish(self) -> Result<PartialSnapshotBundle, PartialError> {
         if self.request.is_some() || !matches!(self.phase, ProducerPhase::Done) {
             return Err(PartialError::InsufficientWitness);
@@ -1284,16 +1316,35 @@ mod tests {
         assert!(report.missing.contains(&fixture.hidden_tree));
     }
 
+    fn parent_fixture_trace() -> Vec<Hash> {
+        // Captured with the unchanged producer at b41117de in an isolated
+        // parent worktree. The shared ancestor, representation and repeated
+        // chunk each cause only one source read.
+        [
+            "71a68896c1643f940c6f9500a7cb5ff51b3258a6b410879626d617a3f367b541",
+            "14a5ef0f8ffee0e421b6f1883115de47d9f3f1a0795c874c81781c5714fd37f5",
+            "c69ba4e1a9839af815f4c9a661f263aa2e4d42c47c4f6870a7ebe70da246e55d",
+            "714cce97dce09664e3b95b86eeaab079df222881746efb322c14a6b8ac5ae25d",
+            "690963b2b54ca76b5edcb802b6acb67a963213e253f4b920cf08ebb9d0542756",
+            "9c66180ef8da233105d4d5cd0913da3cbc89b1e002c71dd36cdd6649f6eae4e1",
+        ]
+        .iter()
+        .map(|hex| crate::hash::from_hex(hex).unwrap())
+        .collect()
+    }
+
     #[test]
     fn consuming_builder_matches_selected_producer_and_fetches_only_selected_ids() {
         let fixture = fixture();
         let limits = PartialLimits::default();
+        let parent_trace = parent_fixture_trace();
         let reference =
             build_partial_snapshot(&fixture.source, fixture.base_id, &fixture.paths, &limits)
                 .unwrap()
                 .encode(&limits)
                 .unwrap();
-        let expected_reads = fixture.source.reads.borrow().clone();
+        assert_eq!(*fixture.source.reads.borrow(), parent_trace);
+        assert_eq!(reference.len(), 903, "parent producer bundle length");
         let mut builder =
             PartialSnapshotBuilder::new(fixture.base_id, &fixture.paths, &limits).unwrap();
         let mut requests = Vec::new();
@@ -1312,8 +1363,8 @@ mod tests {
             builder = builder.supply(bytes).unwrap();
         }
         assert_eq!(
-            requests, expected_reads,
-            "request order matches the original producer source trace"
+            requests, parent_trace,
+            "request order matches the captured parent producer trace"
         );
         assert!(requests.contains(&fixture.chunked));
         assert_eq!(
@@ -1325,6 +1376,100 @@ mod tests {
             builder.finish().unwrap().encode(&limits).unwrap(),
             reference
         );
+    }
+
+    #[test]
+    fn parent_limit_traces_match_both_producer_drivers() {
+        // Independently captured at b41117de: bundle 902 fails only after
+        // the sixth read; witness 92 fails on the root Tree; base role 263
+        // fails on the first read. Parent exact values: bundle 903 bytes,
+        // root Tree 93 bytes, base Commit 264 bytes. When the same first
+        // response exceeds both its role cap and bundle room, role wins.
+        let trace = parent_fixture_trace();
+        let generic = PartialLimits::default();
+        for (case, limits, read_count) in [
+            (
+                "bundle",
+                PartialLimits {
+                    max_bundle_bytes: 902,
+                    ..generic
+                },
+                6,
+            ),
+            (
+                "witness",
+                PartialLimits {
+                    max_witness_bytes: 92,
+                    ..generic
+                },
+                2,
+            ),
+            (
+                "base role",
+                PartialLimits {
+                    max_base_object_bytes: 263,
+                    ..generic
+                },
+                1,
+            ),
+            (
+                "role before bundle",
+                PartialLimits {
+                    max_base_object_bytes: 263,
+                    max_bundle_bytes: 200,
+                    ..generic
+                },
+                1,
+            ),
+        ] {
+            let fixture = self::fixture();
+            let sync_error =
+                build_partial_snapshot(&fixture.source, fixture.base_id, &fixture.paths, &limits)
+                    .unwrap_err();
+            assert_eq!(
+                *fixture.source.reads.borrow(),
+                trace[..read_count],
+                "{case}"
+            );
+            assert!(
+                matches!(
+                    (&sync_error, case),
+                    (PartialError::WorkspaceTooLarge, "bundle")
+                        | (
+                            PartialError::WitnessTooLarge,
+                            "witness" | "base role" | "role before bundle"
+                        )
+                ),
+                "parent sync error changed for {case}: {sync_error:?}"
+            );
+
+            let fixture = self::fixture();
+            let mut builder =
+                PartialSnapshotBuilder::new(fixture.base_id, &fixture.paths, &limits).unwrap();
+            let mut requests = Vec::new();
+            let supplied_error = loop {
+                let request = builder.next_request().expect("parent trace must reject");
+                let id = request.id();
+                requests.push(id);
+                let bytes = fixture.source.objects.get(&id).unwrap().clone();
+                match builder.supply(bytes) {
+                    Ok(next) => builder = next,
+                    Err(error) => break error,
+                }
+            };
+            assert_eq!(requests, trace[..read_count], "{case}");
+            assert!(
+                matches!(
+                    (&supplied_error, case),
+                    (PartialError::WorkspaceTooLarge, "bundle")
+                        | (
+                            PartialError::WitnessTooLarge,
+                            "witness" | "base role" | "role before bundle"
+                        )
+                ),
+                "parent request/supply error changed for {case}: {supplied_error:?}"
+            );
+        }
     }
 
     #[test]

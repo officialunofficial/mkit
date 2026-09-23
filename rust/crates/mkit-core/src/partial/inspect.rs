@@ -12,11 +12,17 @@ use crate::sign::{verify_commit, verify_remix};
 /// The role required by an authenticated incoming Snapshot edge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SnapshotRole {
+    /// Signed existing Commit or Remix; signer identity is not authorized here.
     BaseRoot,
+    /// Signed candidate Commit; parent and author are not checked here.
     CandidateRoot,
+    /// Tree reached through an authenticated Tree-mode edge.
     Tree,
+    /// Blob or ChunkedBlob reached through a regular/executable edge.
     File,
+    /// Blob reached through a symlink edge.
     Symlink,
+    /// Blob reached through a manifest chunk position.
     Chunk,
 }
 
@@ -24,9 +30,13 @@ pub enum SnapshotRole {
 /// they are not selected-file limits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ObjectInspectionLimits {
+    /// Maximum canonical input bytes of any object.
     pub max_object_bytes: usize,
+    /// Additional byte cap when the encoded kind is Tree.
     pub max_tree_bytes: usize,
+    /// Maximum declared Tree entries, checked before decoding.
     pub max_tree_entries: usize,
+    /// Maximum declared ChunkedBlob chunk IDs, checked before decoding.
     pub max_manifest_chunks: usize,
 }
 
@@ -34,16 +44,22 @@ pub struct ObjectInspectionLimits {
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum InspectError {
+    /// A caller-lowered byte or declared-count cap was exceeded.
     #[error("object inspection limit exceeded: {0}")]
     Limit(&'static str),
+    /// The bytes, canonical encoding or independently expected ID disagree.
     #[error("object is malformed, noncanonical or has the wrong ID")]
     Corrupt,
+    /// The object kind does not match the incoming role or snapshot profile.
     #[error("object has the wrong type for this Snapshot edge")]
     WrongType,
+    /// A Commit or Remix fails strict signature verification.
     #[error("snapshot root signature is invalid")]
     InvalidSignature,
+    /// A manifest's intrinsic empty-list and total-size fields disagree.
     #[error("manifest has invalid intrinsic empty/total fields")]
     InvalidManifest,
+    /// A page request is empty, overflowing or out of bounds.
     #[error("requested object page is empty, overflowing or out of bounds")]
     InvalidPage,
 }
@@ -52,10 +68,15 @@ pub enum InspectError {
 /// referenced chunks have been fetched or checked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InspectedKind {
+    /// Signed Commit root.
     Commit,
+    /// Signed Remix root.
     Remix,
+    /// Canonical Tree.
     Tree,
+    /// Canonical Blob.
     Blob,
+    /// Canonical ChunkedBlob; its referenced chunks remain unchecked.
     ChunkedBlob,
 }
 
@@ -96,24 +117,30 @@ impl std::fmt::Debug for InspectedObject {
 }
 
 impl InspectedObject {
+    /// Derived type-aware object ID, not an authorization claim.
     #[must_use]
     pub fn id(&self) -> Hash {
         self.id
     }
+    /// Incoming role checked by inspection, absent for identification only.
     /// `None` means only canonical Snapshot-kind identification was checked;
     /// no incoming role was asserted.
+    /// Canonical snapshot object kind.
     #[must_use]
     pub fn role(&self) -> Option<SnapshotRole> {
         self.role
     }
+    /// Length of the canonical input bytes, which are not retained.
     #[must_use]
     pub fn kind(&self) -> InspectedKind {
         self.kind
     }
+    /// Signed root Tree ID and embedded signer, if this is a root.
     #[must_use]
     pub fn canonical_len(&self) -> usize {
         self.canonical_len
     }
+    /// Blob content length, if this is a Blob.
     #[must_use]
     pub fn root(&self) -> Option<(Hash, [u8; 32])> {
         match self.facts {
@@ -121,6 +148,7 @@ impl InspectedObject {
             _ => None,
         }
     }
+    /// Entry count, if this is a Tree.
     #[must_use]
     pub fn blob_len(&self) -> Option<usize> {
         match self.facts {
@@ -128,6 +156,8 @@ impl InspectedObject {
             _ => None,
         }
     }
+    /// Intrinsic total, chunk-size field and ID count for a manifest.
+    /// This does not validate referenced chunk lengths or their sum.
     #[must_use]
     pub fn tree_entries_len(&self) -> Option<usize> {
         match &self.facts {
@@ -147,6 +177,12 @@ impl InspectedObject {
         }
     }
     /// Borrow a nonempty indexed Tree-entry page; no child vector is cloned.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InspectError::WrongType`] for a non-Tree or
+    /// [`InspectError::InvalidPage`] for zero count, overflow or an
+    /// out-of-bounds range.
     pub fn tree_page(&self, start: usize, count: usize) -> Result<&[TreeEntry], InspectError> {
         let Facts::Tree(entries) = &self.facts else {
             return Err(InspectError::WrongType);
@@ -154,6 +190,12 @@ impl InspectedObject {
         page(entries, start, count)
     }
     /// Borrow a nonempty indexed manifest-chunk page; positions are preserved.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InspectError::WrongType`] for a non-manifest or
+    /// [`InspectError::InvalidPage`] for zero count, overflow or an
+    /// out-of-bounds range.
     pub fn chunk_page(&self, start: usize, count: usize) -> Result<&[Hash], InspectError> {
         let Facts::Manifest { chunks, .. } = &self.facts else {
             return Err(InspectError::WrongType);
@@ -174,6 +216,14 @@ fn page<T>(values: &[T], start: usize, count: usize) -> Result<&[T], InspectErro
 /// decoded object, canonical re-encoding and Merkle scratch may coexist during
 /// the call; the returned fact owns only necessary fields from the decoded
 /// object. This bound is not an exact process-RSS or whole-repository bound.
+///
+/// # Errors
+///
+/// Returns [`InspectError::Limit`] before decoding for caller byte/count
+/// limits, [`InspectError::Corrupt`] for malformed, noncanonical or wrong-ID
+/// bytes, [`InspectError::WrongType`] for the incoming role,
+/// [`InspectError::InvalidSignature`] for a bad root signature, or
+/// [`InspectError::InvalidManifest`] for contradictory intrinsic fields.
 pub fn inspect_snapshot_object(
     expected_id: Hash,
     bytes: &[u8],
@@ -186,6 +236,12 @@ pub fn inspect_snapshot_object(
 /// Identify one bounded canonical snapshot-kind payload from a checked raw
 /// pack. The derived type-aware ID is a local object fact, not an incoming
 /// edge, reachability, catalog-completeness or authorization claim.
+///
+/// # Errors
+///
+/// Uses the same limits, canonical, signature and intrinsic checks as
+/// [`inspect_snapshot_object`], and returns [`InspectError::WrongType`] for
+/// Tags, Delta or any other kind outside the snapshot-object profile.
 pub fn identify_snapshot_object(
     bytes: &[u8],
     limits: ObjectInspectionLimits,

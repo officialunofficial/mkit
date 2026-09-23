@@ -1147,9 +1147,13 @@ pub struct PackEntries<'a> {
 /// constrain the supplied buffer; a source must also cap its initial read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RawPackLimits {
+    /// Maximum complete pack length, including header and trailer.
     pub max_pack_bytes: usize,
+    /// Maximum declared frame count, checked before frame scanning.
     pub max_entries: u32,
+    /// Maximum payload length of any one raw frame.
     pub max_entry_bytes: usize,
+    /// Maximum sum of raw frame payload lengths (not framing bytes).
     pub max_payload_bytes: u64,
 }
 
@@ -1157,12 +1161,16 @@ pub struct RawPackLimits {
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum RawPackError {
+    /// A caller-lowered or generic framing cap was exceeded.
     #[error("raw pack exceeds a caller limit: {0}")]
     Limit(&'static str),
+    /// The complete supplied buffer has a different expected pack key.
     #[error("complete pack key differs from the independently expected key")]
     WrongKey,
+    /// Framing is valid but the pack is not raw-only v1.
     #[error("pack is not raw-only v1")]
     WrongProfile,
+    /// Existing generic pack framing or trailer validation failed.
     #[error(transparent)]
     Framing(#[from] PackError),
 }
@@ -1184,14 +1192,17 @@ impl std::fmt::Debug for RawEntry<'_> {
 }
 
 impl<'a> RawEntry<'a> {
+    /// Zero-based position in the checked pack's original frame order.
     #[must_use]
     pub fn ordinal(&self) -> u32 {
         self.ordinal
     }
+    /// Borrow the raw payload; this does not authenticate an object ID.
     #[must_use]
     pub fn payload(&self) -> &'a [u8] {
         self.payload
     }
+    /// Byte range of the payload within the exact buffer passed to `open`.
     #[must_use]
     pub fn payload_range(&self) -> Range<usize> {
         self.range.clone()
@@ -1215,6 +1226,14 @@ impl std::fmt::Debug for CheckedRawPack<'_> {
 impl<'a> CheckedRawPack<'a> {
     /// Check the complete pack key, trailer, v1 raw framing and caller bounds.
     /// Byte-limit refusal precedes hashing; key refusal precedes framing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RawPackError::Limit`] for a caller or generic pack cap,
+    /// [`RawPackError::WrongKey`] for the complete-buffer key mismatch,
+    /// [`RawPackError::Framing`] for malformed framing or trailer, and
+    /// [`RawPackError::WrongProfile`] for a framed non-v1/non-raw pack.
+    /// A malformed frame may fail framing before its entry type is classified.
     pub fn open(
         bytes: &'a [u8],
         expected_pack_key: Hash,
@@ -1362,6 +1381,43 @@ mod checked_raw_tests {
                     pack[entry.payload_range()].as_ptr()
                 ));
             }
+            assert!(old.next().is_none());
+        }
+    }
+
+    #[test]
+    fn committed_closure_raw_vectors_match_shared_iterator() {
+        // Committed SPEC-PACKFILE/closure vectors, not constructed by this
+        // test's frame writer. Keep the generic parser as the byte oracle.
+        for pack in [
+            include_bytes!("../../../tests/golden/closure/snapshot.pack0.bin").as_slice(),
+            include_bytes!("../../../tests/golden/closure/history.pack0.bin").as_slice(),
+            include_bytes!("../../../tests/golden/closure/tag_root.pack0.bin").as_slice(),
+        ] {
+            let checked = CheckedRawPack::open(
+                pack,
+                pack_key(pack),
+                RawPackLimits {
+                    max_pack_bytes: pack.len(),
+                    max_entries: u32::MAX,
+                    max_entry_bytes: pack.len(),
+                    max_payload_bytes: pack.len() as u64,
+                },
+            )
+            .unwrap();
+            let mut old = PackEntries::new(pack).unwrap();
+            let mut count = 0;
+            for entry in checked.entries() {
+                let PackEntry::Raw { bytes } = old.next().unwrap().unwrap() else {
+                    panic!("committed closure vector is not raw")
+                };
+                assert_eq!(entry.ordinal(), count);
+                assert_eq!(entry.payload(), bytes.as_ref());
+                assert_eq!(&pack[entry.payload_range()], entry.payload());
+                assert_eq!(entry.payload_range(), old.last_payload_range().unwrap());
+                count += 1;
+            }
+            assert_eq!(count, checked.entry_count());
             assert!(old.next().is_none());
         }
     }
