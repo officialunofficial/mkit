@@ -7,6 +7,10 @@ mod bundle;
 mod collector;
 mod limits;
 mod overlay;
+mod publication;
+mod recipient;
+mod recipient_diff;
+mod recipient_graph;
 mod update;
 mod verify;
 
@@ -30,6 +34,13 @@ use crate::object::TreeEntry;
 pub use bundle::{PartialObject, PartialSnapshotBundle};
 pub use limits::PartialLimits;
 pub use overlay::{FileReplacement, PreparedPartialEdit, prepare_partial_commit, replace_files};
+pub use publication::{
+    PartialExchangeContext, PublicationError, PublicationOutcome, publish_explicit_update,
+};
+pub use recipient::{
+    RecipientError, RecipientLimits, RecipientUsage, VerifiedPartialUpdate, VerifiedReplacement,
+    verify_partial_update,
+};
 pub use update::{PartialUpdate, export_partial_update};
 pub use verify::{
     PartialCoverage, SelectedFile, VerifiedPartialSnapshot, VerifiedTree, build_partial_snapshot,

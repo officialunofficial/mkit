@@ -2,6 +2,7 @@
 #![allow(clippy::too_many_lines)] // end-to-end cases keep their evidence together
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in integration test helpers
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 
@@ -21,6 +22,26 @@ struct CountingSource<'a> {
     store: &'a ObjectStore,
     forbidden: BTreeSet<Hash>,
     reads: RefCell<Vec<Hash>>,
+}
+
+struct HiddenMissingSource<'a> {
+    store: &'a ObjectStore,
+    hidden: Hash,
+}
+
+impl mkit_core::verify::ObjectSource for HiddenMissingSource<'_> {
+    fn fetch(
+        &mut self,
+        id: &Hash,
+    ) -> Result<Option<Cow<'_, [u8]>>, mkit_core::verify::VerifyError> {
+        if *id == self.hidden {
+            return Ok(None);
+        }
+        self.store
+            .read(id)
+            .map(|bytes| Some(Cow::Owned(bytes)))
+            .map_err(Into::into)
+    }
 }
 
 impl ObjectSource for CountingSource<'_> {
@@ -122,7 +143,8 @@ fn fixture() -> Fixture {
     let base_key = mkit_core::KeyPair::from_seed([7; 32]);
     let mut remix = Remix {
         tree_hash: root,
-        parents: Vec::new(),
+        // Snapshot validation intentionally does not require this history.
+        parents: vec![mkit_core::hash::hash(b"absent parent history")],
         sources: Vec::new(),
         author: Identity::opaque(b"base author".to_vec()),
         signer: base_key.public.0,
@@ -168,6 +190,119 @@ fn verified(fixture: &Fixture) -> mkit_core::VerifiedPartialSnapshot {
         &limits,
     )
     .unwrap()
+}
+
+fn replace_hidden_base_entry(fixture: &mut Fixture, replacement: Hash) {
+    let Object::Remix(mut base) = fixture.store.read_object(&fixture.base_id).unwrap() else {
+        panic!("base remix")
+    };
+    let Object::Tree(mut root) = fixture.store.read_object(&base.tree_hash).unwrap() else {
+        panic!("base tree")
+    };
+    root.entries
+        .iter_mut()
+        .find(|entry| entry.name == b"hidden.txt")
+        .unwrap()
+        .object_hash = replacement;
+    base.tree_hash = put(&fixture.store, &Object::Tree(root));
+    let key = mkit_core::KeyPair::from_seed([7; 32]);
+    base.signature = sign_remix(&base, &key).unwrap().0;
+    fixture.base_id = put(&fixture.store, &Object::Remix(base));
+    if replacement != fixture.shared_tree {
+        fixture.hidden_ids.insert(replacement);
+    }
+}
+
+fn export_one_update(fixture: &Fixture) -> Vec<u8> {
+    let limits = PartialLimits::V1;
+    let verified = verified(fixture);
+    let prepared = replace_files(
+        &verified,
+        &[FileReplacement::bytes(
+            fixture.paths[0].clone(),
+            b"fresh".to_vec(),
+        )],
+        &limits,
+    )
+    .unwrap();
+    let key = mkit_core::KeyPair::from_seed([9; 32]);
+    let unsigned = prepare_partial_commit(
+        &verified,
+        &prepared,
+        Identity::opaque(b"recipient test".to_vec()),
+        key.public.0,
+        b"replace".to_vec(),
+        1_700_000_101,
+        &limits,
+    )
+    .unwrap();
+    let mut signed = unsigned.clone();
+    signed.signature = sign_commit(&signed, &key).unwrap().0;
+    export_partial_update(&verified, &prepared, &unsigned, &signed, &limits)
+        .unwrap()
+        .encode(&limits)
+        .unwrap()
+}
+
+#[test]
+fn recipient_checks_hidden_edge_roles_and_chunk_layout() {
+    let mut wrong_role = fixture();
+    let wrong_child = wrong_role.shared_tree;
+    replace_hidden_base_entry(&mut wrong_role, wrong_child);
+    let update = export_one_update(&wrong_role);
+    let mut source = &wrong_role.store;
+    assert!(matches!(
+        mkit_core::partial::verify_partial_update(
+            wrong_role.base_id,
+            &update,
+            &mut source,
+            &PartialLimits::V1,
+            &mkit_core::partial::RecipientLimits::DEFAULT,
+        ),
+        Err(mkit_core::partial::RecipientError::WrongObjectType(_))
+    ));
+
+    let mut bad_chunks = fixture();
+    let chunk = mkit_core::store_file_object(&bad_chunks.store, b"abc").unwrap();
+    let invalid = put(
+        &bad_chunks.store,
+        &Object::ChunkedBlob(ChunkedBlob {
+            total_size: 4,
+            chunk_size: 3,
+            chunks: vec![chunk],
+        }),
+    );
+    replace_hidden_base_entry(&mut bad_chunks, invalid);
+    let update = export_one_update(&bad_chunks);
+    let mut source = &bad_chunks.store;
+    assert!(matches!(
+        mkit_core::partial::verify_partial_update(
+            bad_chunks.base_id,
+            &update,
+            &mut source,
+            &PartialLimits::V1,
+            &mkit_core::partial::RecipientLimits::DEFAULT,
+        ),
+        Err(mkit_core::partial::RecipientError::InvalidChunkLayout)
+    ));
+}
+
+#[test]
+fn recipient_accepts_large_untouched_file_beyond_selected_caps() {
+    let mut fixture = fixture();
+    let large = mkit_core::store_file_object(&fixture.store, &vec![b'L'; 5 * 1024 * 1024]).unwrap();
+    replace_hidden_base_entry(&mut fixture, large);
+    let update = export_one_update(&fixture);
+    let mut source = &fixture.store;
+    let received = mkit_core::partial::verify_partial_update(
+        fixture.base_id,
+        &update,
+        &mut source,
+        &PartialLimits::V1,
+        &mkit_core::partial::RecipientLimits::DEFAULT,
+    )
+    .unwrap();
+    assert!(received.snapshot_closure().is_complete());
 }
 
 #[test]
@@ -263,6 +398,112 @@ fn occurrence_rebuild_preserves_hidden_triples_and_exports_complete_raw_inventor
     let update = export_partial_update(&verified, &prepared, &unsigned, &signed, &limits).unwrap();
     let encoded = update.encode(&limits).unwrap();
     assert_eq!(PartialUpdate::decode(&encoded, &limits).unwrap(), update);
+    let mut full_source = &recipient;
+    let received = mkit_core::partial::verify_partial_update(
+        fixture.base_id,
+        &encoded,
+        &mut full_source,
+        &limits,
+        &mkit_core::partial::RecipientLimits::DEFAULT,
+    )
+    .unwrap();
+    assert_eq!(received.replacements().len(), 2);
+    assert_eq!(received.snapshot_closure().mode, ClosureMode::Snapshot);
+    assert!(received.snapshot_closure().is_complete());
+    let Object::Remix(base) = recipient.read_object(&fixture.base_id).unwrap() else {
+        panic!("base remix")
+    };
+    assert!(recipient.read_object(&base.parents[0]).is_err());
+    assert_eq!(*received.candidate_id(), *update.candidate_id());
+    let usage = received.usage();
+    let mut exact = mkit_core::partial::RecipientLimits::DEFAULT;
+    exact.max_objects = usage.objects;
+    exact.max_canonical_bytes = usage.canonical_bytes;
+    exact.max_tree_depth = usage.max_tree_depth;
+    exact.max_occurrences = usage.occurrences;
+    assert!(
+        mkit_core::partial::verify_partial_update(
+            fixture.base_id,
+            &encoded,
+            &mut full_source,
+            &limits,
+            &exact,
+        )
+        .is_ok()
+    );
+    for tightened in [
+        mkit_core::partial::RecipientLimits {
+            max_objects: exact.max_objects - 1,
+            ..exact
+        },
+        mkit_core::partial::RecipientLimits {
+            max_canonical_bytes: exact.max_canonical_bytes - 1,
+            ..exact
+        },
+        mkit_core::partial::RecipientLimits {
+            max_tree_depth: exact.max_tree_depth - 1,
+            ..exact
+        },
+        mkit_core::partial::RecipientLimits {
+            max_occurrences: exact.max_occurrences - 1,
+            ..exact
+        },
+    ] {
+        assert!(matches!(
+            mkit_core::partial::verify_partial_update(
+                fixture.base_id,
+                &encoded,
+                &mut full_source,
+                &limits,
+                &tightened,
+            ),
+            Err(mkit_core::partial::RecipientError::BudgetExceeded)
+        ));
+    }
+
+    let mut old_id_lie = encoded.clone();
+    let manifest_old_id = old_id_lie
+        .windows(32)
+        .position(|window| window == fixture.old_file)
+        .unwrap();
+    old_id_lie[manifest_old_id] ^= 1;
+    assert!(PartialUpdate::decode(&old_id_lie, &limits).is_ok());
+    assert!(matches!(
+        mkit_core::partial::verify_partial_update(
+            fixture.base_id,
+            &old_id_lie,
+            &mut full_source,
+            &limits,
+            &mkit_core::partial::RecipientLimits::DEFAULT,
+        ),
+        Err(mkit_core::partial::RecipientError::InvalidChange)
+    ));
+    let mut one_object = mkit_core::partial::RecipientLimits::DEFAULT;
+    one_object.max_objects = 1;
+    assert!(matches!(
+        mkit_core::partial::verify_partial_update(
+            fixture.base_id,
+            &encoded,
+            &mut full_source,
+            &limits,
+            &one_object,
+        ),
+        Err(mkit_core::partial::RecipientError::BudgetExceeded)
+    ));
+    let mut hidden_missing = HiddenMissingSource {
+        store: &recipient,
+        hidden: *fixture.hidden_ids.iter().next().unwrap(),
+    };
+    assert!(matches!(
+        mkit_core::partial::verify_partial_update(
+            fixture.base_id,
+            &encoded,
+            &mut hidden_missing,
+            &limits,
+            &mkit_core::partial::RecipientLimits::DEFAULT,
+        ),
+        Err(mkit_core::partial::RecipientError::Missing(_))
+    ));
     let again = export_partial_update(&verified, &prepared, &unsigned, &signed, &limits).unwrap();
     assert_eq!(again.encode(&limits).unwrap(), encoded);
 

@@ -5,6 +5,24 @@ single crate or spec. Each entry states the invariant, why it matters, and
 what breaks when it is violated. A regression test enforces each one; find
 it by the file path listed under "Enforced by".
 
+## Partial recipient facts precede conditional publication
+
+**Always:** complete-base recipient validation authenticates the source-only
+base, checks the actual path-occurrence diff, typed resulting Snapshot and
+shared resource budget before returning a verified value. Generic explicit
+transfer requires an existing append-only packmap and a truthful single-attempt
+advance; ambiguous mutating replies remain unknown.
+
+**Because:** a valid MKWU only proves its portable inventory, and hidden
+transport retries can turn an earlier success into a later CAS conflict.
+
+**If violated:** a hidden change can be laundered as a selected replacement,
+ordinary history can become undiscoverable, or an accepted update can be
+reported as definitively rejected.
+
+**Enforced by:** core `tests/partial_edit.rs` recipient cases, file transport
+`tests/partial_publication.rs`, and the `SingleAttemptAdvance` API boundary.
+
 ## Partial snapshots prove selected coverage, never authority or closure
 
 **Always:** a verified partial snapshot is bound to an independently supplied

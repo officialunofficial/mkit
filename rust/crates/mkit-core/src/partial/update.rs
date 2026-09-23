@@ -33,17 +33,17 @@ thread_local! {
 pub struct PartialUpdate {
     base_id: Hash,
     candidate_id: Hash,
-    changes: Vec<UpdateChange>,
+    pub(super) changes: Vec<UpdateChange>,
     pack_hash: Hash,
     pack_bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct UpdateChange {
-    path: PartialPath,
-    old_mode: EntryMode,
-    old_id: Hash,
-    new_id: Hash,
+pub(super) struct UpdateChange {
+    pub(super) path: PartialPath,
+    pub(super) old_mode: EntryMode,
+    pub(super) old_id: Hash,
+    pub(super) new_id: Hash,
 }
 
 struct DecodedInventory {

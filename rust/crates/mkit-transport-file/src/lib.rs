@@ -42,7 +42,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use mkit_core::hash::Hash;
-use mkit_core::protocol::{PackKey, RefWriteCondition, Transport, TransportError, TransportResult};
+use mkit_core::protocol::{
+    AdvanceOutcome, PackKey, RefWriteCondition, SingleAttemptAdvance, Transport, TransportError,
+    TransportResult,
+};
 use mkit_core::refs::{
     Ref, decode_ref_wire, encode_ref_wire, validate_ref_name, validate_ref_prefix,
 };
@@ -486,6 +489,28 @@ impl Transport for FileTransport {
         collect_refs(&dir, &dir, &mut out)?;
         out.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(out)
+    }
+}
+
+impl SingleAttemptAdvance for FileTransport {
+    fn advance_refs_once(
+        &self,
+        head_ref: &str,
+        head_condition: RefWriteCondition,
+        head_value: &Hash,
+        packmap_ref: &str,
+        packmap_condition: RefWriteCondition,
+        packmap_value: &Hash,
+    ) -> TransportResult<AdvanceOutcome> {
+        Transport::advance_refs(
+            self,
+            head_ref,
+            head_condition,
+            head_value,
+            packmap_ref,
+            packmap_condition,
+            packmap_value,
+        )
     }
 }
 

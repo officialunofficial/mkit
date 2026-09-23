@@ -639,6 +639,36 @@ pub enum AdvanceOutcome {
     PackmapConflict,
 }
 
+/// Opt-in transport contract for explicit partial publication.
+///
+/// An implementation MUST make exactly one mutable advance attempt and MUST
+/// NOT hide a lost response by retrying that mutation internally. Otherwise
+/// a successful first attempt followed by a conflicting retry could be
+/// reported as definite rejection. This is separate from atomic two-ref
+/// advance and from a durable operation-result ledger. Read-only retries and
+/// immutable uploads do not affect this contract.
+///
+/// A plain [`Transport`] does not qualify. In particular, adapters with
+/// opaque mutating retry loops must not implement this trait until they can
+/// expose a one-attempt path or authoritative saved results.
+///
+/// ```compile_fail
+/// use mkit_core::protocol::{SingleAttemptAdvance, Transport};
+/// fn requires_single_attempt<T: SingleAttemptAdvance>(_: &T) {}
+/// fn generic<T: Transport>(transport: &T) { requires_single_attempt(transport); }
+/// ```
+pub trait SingleAttemptAdvance: Transport {
+    fn advance_refs_once(
+        &self,
+        head_ref: &str,
+        head_condition: RefWriteCondition,
+        head_value: &Hash,
+        packmap_ref: &str,
+        packmap_condition: RefWriteCondition,
+        packmap_value: &Hash,
+    ) -> TransportResult<AdvanceOutcome>;
+}
+
 // ---------------------------------------------------------------------------
 // async_shim — sync/async bridge for transports that wrap an async cipher
 // ---------------------------------------------------------------------------

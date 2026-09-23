@@ -31,6 +31,14 @@ train).
 
 ### Added
 
+- *(core/transport)* Full-data recipient validation of MKWU changes now
+  returns a typed complete Snapshot and exact replacement facts under a
+  separate resource budget. Explicit transfer uploads the existing raw pack
+  and appends to a preexisting packmap with expected-head CAS; file and memory
+  transports opt in to a single-attempt advance contract. Lost mutation
+  replies remain uncertain. No managed admission or new wire format is
+  introduced. **SemVer:** additive.
+
 - *(core)* `mkit_core::partial` adds bounded `MKWB` v1 portable partial
   snapshot production and verification against an independently supplied base
   id and exact path selection. The private verified value retains complete

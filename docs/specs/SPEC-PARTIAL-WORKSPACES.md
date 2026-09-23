@@ -9,9 +9,10 @@ audience: implementers of portable mkit selected-file snapshot, overlay, signing
 
 Status: **Draft, normative.** This revision specifies `MKWB` v1 partial
 snapshot bundles, authenticated replacement overlays, ordinary Commit signing
-handoff, `MKWU` v1 explicit update export, and the durable scoped-workspace
-local-state format (§16). Complete base recipient admission and remote
-publication are outside this revision.
+handoff, `MKWU` v1 explicit update export, the durable scoped-workspace
+local-state format (§16), and factual full-data recipient validation plus
+generic explicit-object transfer (§17). Managed admission remains outside
+this revision.
 
 ## 1. Trust and coverage
 
@@ -694,3 +695,66 @@ normalized to the alias case and resolved, while a genuine non-directory
 component is not authority. Resolving an external alias only pins where
 the ancestor walk examines `.mkit-scoped` &mdash; it never authorizes
 following the state entries themselves.
+
+## 17. Full-data recipient validation and explicit transfer
+
+Full-data recipient validation takes an independently expected base id, MKWU
+bytes, a source of canonical objects keyed by id, portable format limits, and
+separate recipient-wide limits. It is pure: verification MUST NOT update refs
+or mutate the source. MKWU decode
+continues to establish portable carrier structure, candidate signature and
+one-parent binding, and exact raw inventory. It does not establish that the
+manifest describes the actual complete-base change.
+
+A recipient MUST authenticate the expected complete base Commit/Remix and its
+entire retained Snapshot from its own source before uploaded bytes can supply
+the candidate. Each canonical object MUST be re-identified with its object
+kind's ID algorithm, and the base and candidate signatures MUST verify
+strictly. Typed traversal MUST check Commit/Remix-to-Tree,
+Tree-mode-to-child-kind, ChunkedBlob-to-Blob and every chunk occurrence's
+length and layout. The actual base-to-candidate diff MUST match every
+manifest old mode/id and new id by path occurrence and MUST contain only
+existing regular/executable file replacements with preserved modes and
+untouched entry triples. A shared Tree id does not merge two distinct path
+occurrences. Closure verification MUST report a complete resulting Snapshot;
+parent History is outside this result. Signer identity trust and host policy
+remain caller decisions.
+
+The default recipient budget is 100,000 distinct objects, 256 MiB retained
+canonical bytes, 16 MiB per object, root Tree depth zero through depth 128,
+and 1,000,000 occurrence/work units shared across base, candidate, diff and
+the closure pass. A repeated Tree or chunk occurrence consumes work again even
+when its object bytes are cached once. A Tree reached at multiple depths MUST
+pass the deepest reached depth. The portable selected-file 4 MiB/16 MiB caps
+apply to MKWU changed files, not untouched files in the full recipient's
+snapshot. The source remains responsible for bounding its initial fetch
+allocation; verification bounds returned bytes before retaining or decoding.
+
+The separate generic publisher takes exact MKWU bytes and in-memory exchange
+context: repository identity, exact branch ref, 32-byte operation id, expected
+base, and digest/length of those exact bytes. This metadata grants no access
+and defines no new wire format or receipt. The publisher MUST require an
+existing, recipient-owned packmap ref for the pinned base and MUST NOT create
+or reset that chain. It uploads the full raw MKWU pack without a closure
+difference plan or hidden-object download, appends one PackListNode to the
+currently read packmap, and advances head under `Match(base)` and packmap
+under `Match(prior)`. It MAY retry at most three explicit packmap conflicts,
+re-reading and extending the latest chain each time; it MUST NOT change the
+expected head or rebase the candidate. Existing packmap content is assumed to
+cover the retained base; generic transfer does not validate remote closure.
+
+Only a transport that explicitly promises one mutable advance without hidden
+mutating retries may perform generic publication under this profile. Atomic
+two-ref capability says only whether the refs move atomically; it does not
+imply durable results. An ordered packmap-first transport may leave an
+append-only superset packmap after a head conflict. A lost response after the
+advance call begins is publication-unknown even if a later head read matches
+the candidate. This profile defines no durable operation-result ledger or
+managed admission.
+
+Informative Rust API mapping: `mkit_core::partial::verify_partial_update`
+uses `verify::ObjectSource`, `PartialLimits` and `RecipientLimits` and returns
+`VerifiedPartialUpdate`. `publish_explicit_update` requires
+`protocol::SingleAttemptAdvance`; currently FileTransport and MemoryTransport
+opt in. HTTP/Connect/SSH/enc adapters do not. The FileTransport implementation
+uses the ordered packmap-first advance.
