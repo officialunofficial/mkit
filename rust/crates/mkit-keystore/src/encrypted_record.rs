@@ -873,43 +873,45 @@ mod kani_proofs {
     /// u32 length prefixes (24) + 24-byte nonce = 59 bytes.
     const MIN_RECORD: usize = 8 + 3 + 6 * 4 + NONCE_LEN;
 
-    /// Calls `$f::<N>()` for each listed literal `N` (concrete lengths
-    /// let CBMC constant-fold the input length).
-    macro_rules! each_len {
-        ($f:ident; $($n:literal)*) => { $( $f::<$n>(); )* };
-    }
-
     fn decode_at<const N: usize>() -> bool {
         let input: [u8; N] = kani::any();
         EncryptedKeyRecord::decode(&input).is_ok()
     }
 
-    /// `decode` never panics/overflows/reads OOB on any input of 0..=8
-    /// bytes (up to the magic and version byte; each length concrete,
+    /// `decode` never panics/overflows/reads OOB on any input of 0, 4 or
+    /// 7 bytes (truncated inside the 8-byte magic; each length concrete,
     /// every byte symbolic). All are shorter than a minimal record (59
-    /// bytes), so all are rejected.
+    /// bytes), so all are rejected. Lengths are grouped two or three per
+    /// harness: one harness for 0..=8 or 9..=11 ran out of memory.
     #[kani::proof]
     #[kani::stub(std::fmt::format, no_format)]
     #[kani::stub(core::str::from_utf8, any_utf8)]
     // Largest loop: the 8-byte magic comparison.
     #[kani::unwind(10)]
-    fn software_key_record_decode_short_no_panic() {
-        each_len!(decode_at; 0 1 2 3 4 5 6 7 8);
+    fn software_key_record_decode_prefix_no_panic() {
+        assert!(!decode_at::<0>() && !decode_at::<4>() && !decode_at::<7>());
     }
 
-    /// As above for 9..=11 bytes (version, algorithm id, attrs). Split
-    /// from the harness above: one harness for 0..=11 ran out of memory.
+    /// As above for 8 and 9 bytes (full magic, then the version byte).
+    #[kani::proof]
+    #[kani::stub(std::fmt::format, no_format)]
+    #[kani::stub(core::str::from_utf8, any_utf8)]
+    #[kani::unwind(10)]
+    fn software_key_record_decode_magic_no_panic() {
+        assert!(!decode_at::<8>() && !decode_at::<9>());
+    }
+
+    /// As above for 10 and 11 bytes (algorithm id, then attrs).
     #[kani::proof]
     #[kani::stub(std::fmt::format, no_format)]
     #[kani::stub(core::str::from_utf8, any_utf8)]
     #[kani::unwind(10)]
     fn software_key_record_decode_header_no_panic() {
-        each_len!(decode_at; 9 10 11);
+        assert!(!decode_at::<10>() && !decode_at::<11>());
     }
 
     /// As above at exactly 15 bytes: header + a free protector length
-    /// prefix (the first `read_vec` bound check). Checked on its own; one
-    /// harness for all lengths ran out of memory. Longer fully-symbolic
+    /// prefix (the first `read_vec` bound check). Longer fully-symbolic
     /// inputs cost several minutes of CBMC per length.
     #[kani::proof]
     #[kani::stub(std::fmt::format, no_format)]

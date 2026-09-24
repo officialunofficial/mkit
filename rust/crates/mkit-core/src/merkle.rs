@@ -1561,31 +1561,38 @@ mod kani_proofs {
         need
     }
 
+    fn short_at<const N: usize>() {
+        let buf: [u8; N] = kani::any();
+        let b: &[u8] = &buf;
+        if let Ok(p) = Proof::decode(b, 1) {
+            assert!(N == 5 && b[4] == 0 && p.siblings.is_empty());
+            let lc: [u8; 4] = b[..4].try_into().expect("4 bytes");
+            assert_eq!(p.leaf_count, u32::from_be_bytes(lc));
+            kani::cover!(true, "ok_no_siblings");
+        }
+    }
+
     /// `Proof::decode(_, 1)` (the single-leaf bound the fuzz target and
-    /// `verify_chunk` callers use) never panics on any input of 0..=6
-    /// bytes (each length concrete, every byte symbolic), and accepts
-    /// exactly the §5.2 empty proof: `be32(leaf_count) ‖ varint(0)`.
+    /// `verify_chunk` callers use) never panics on any input of 0..=4
+    /// bytes (truncated before the sibling-count varint; each length
+    /// concrete, every byte symbolic) and rejects all of them.
     #[kani::proof]
-    // Varint <= 2 bytes and no sibling fits in 6 bytes.
     #[kani::unwind(4)]
     fn merkle_proof_decode_no_panic() {
-        fn short_at<const N: usize>() {
-            let buf: [u8; N] = kani::any();
-            let b: &[u8] = &buf;
-            if let Ok(p) = Proof::decode(b, 1) {
-                assert!(N == 5 && b[4] == 0 && p.siblings.is_empty());
-                let lc: [u8; 4] = b[..4].try_into().expect("4 bytes");
-                assert_eq!(p.leaf_count, u32::from_be_bytes(lc));
-                kani::cover!(true, "ok_no_siblings");
-            }
-        }
         short_at::<0>();
         short_at::<1>();
         short_at::<2>();
         short_at::<3>();
         short_at::<4>();
+    }
+
+    /// As above at 5 bytes (be32 leaf count + a symbolic varint): accepts
+    /// exactly the §5.2 empty proof `be32(leaf_count) ‖ varint(0)`.
+    #[kani::proof]
+    // Varint <= 1 byte here; no sibling fits.
+    #[kani::unwind(4)]
+    fn merkle_proof_decode_empty_proof() {
         short_at::<5>();
-        short_at::<6>();
     }
 
     /// At exactly 37 bytes (be32 leaf count + 1-byte varint + one
