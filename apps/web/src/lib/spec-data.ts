@@ -162,7 +162,7 @@ export const categories: SpecCategory[] = [
         name: 'SPEC-WRITE-GRANTS',
         status: 'draft-normative',
         description:
-          'Owner-signed grants that let an Ed25519 key write to a namespace\'s repositories, with wallet and passkey owner signatures and one-step epoch revocation.',
+          "Owner-signed grants that let an Ed25519 key write to a namespace's repositories, with wallet and passkey owner signatures and one-step epoch revocation.",
       },
       {
         name: 'SPEC-CONFIG-SECURITY',
