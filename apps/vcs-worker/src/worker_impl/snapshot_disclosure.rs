@@ -4,15 +4,21 @@
 
 use mkit_core::{
     hash::{from_hex, to_hex},
-    partial::{PartialError, PartialLimits, PartialSnapshotBuilder, verify_partial_snapshot},
+    partial::{
+        PartialError, PartialLimits, PartialObjectRole, PartialSnapshotBuilder,
+        verify_partial_snapshot,
+    },
 };
 use mkit_worker_common::replay::Proof;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use worker::{Date, Request, Response, Result};
 
 use super::{
-    grant_store::DisclosureGrant, refstore::RefStore, snapshot_driver::HeavyPermit,
-    snapshot_leases::SnapshotReadLease,
+    grant_store::DisclosureGrant,
+    refstore::RefStore,
+    snapshot_driver::HeavyPermit,
+    snapshot_leases::{SnapshotLeaseAcquire, SnapshotReadLease},
 };
 use crate::{
     access_policy::Identity,
@@ -149,11 +155,12 @@ impl RefStore {
             &lease_id,
             5 * 60 * 1000,
         ) {
-            Ok(lease) => lease,
-            Err(e) if e.to_string().contains("snapshot lease capacity") => {
+            Ok(SnapshotLeaseAcquire::Acquired(lease)) => lease,
+            Ok(SnapshotLeaseAcquire::Capacity) => {
                 return error(429, "resource_exhausted");
             }
-            Err(_) => return error(409, "conflict"),
+            Ok(SnapshotLeaseAcquire::Conflict) => return error(409, "conflict"),
+            Err(_) => return error(503, "unavailable"),
         };
         let _lease = LeaseGuard {
             store: self,
@@ -162,6 +169,8 @@ impl RefStore {
         let deadline = now().saturating_add(DEADLINE_MS);
         let mut io_bytes = 0usize;
         let mut reads = 0usize;
+        let mut witness_bytes = 0usize;
+        let mut witness_ids = BTreeSet::new();
         while let Some(next) = builder.next_request() {
             let current = if deadline_ok(deadline) {
                 self.disclosure_current(
@@ -181,11 +190,29 @@ impl RefStore {
             {
                 return error(status, code);
             }
-            let id = to_hex(&next.id());
+            let requested_id = next.id();
+            let id = to_hex(&requested_id);
             let locator = match self.snapshot_index_locator(&lease.job_id, &id) {
                 Ok(locator) => locator,
                 Err(_) => return error(503, "unavailable"),
             };
+            let Some(length) = usize::try_from(locator.payload_len).ok() else {
+                return error(503, "unavailable");
+            };
+            // The core producer never requests an already supplied ID. Its
+            // advisory max_bytes excludes aggregate witness headroom, which
+            // the host can preflight from this certified locator before R2.
+            let new_witness =
+                next.role() == PartialObjectRole::Tree && !witness_ids.contains(&requested_id);
+            if length > next.max_bytes()
+                || (new_witness && length > profile.max_witness_bytes.saturating_sub(witness_bytes))
+                || length > MAX_IO_BYTES.saturating_sub(io_bytes)
+                || reads >= MAX_IO_READS
+            {
+                return error(429, "resource_exhausted");
+            }
+            io_bytes += length;
+            reads += 1;
             #[cfg(feature = "test-faults")]
             {
                 self.state.storage().sql().exec(
@@ -197,17 +224,6 @@ impl RefStore {
                     vec![id.clone().into(), locator.pack_key.clone().into()],
                 )?;
             }
-            let Some(length) = usize::try_from(locator.payload_len).ok() else {
-                return error(503, "unavailable");
-            };
-            if length > next.max_bytes()
-                || length > MAX_IO_BYTES.saturating_sub(io_bytes)
-                || reads >= MAX_IO_READS
-            {
-                return error(429, "resource_exhausted");
-            }
-            io_bytes += length;
-            reads += 1;
             let bytes = match self.snapshot_read_range(&locator, deadline).await {
                 Ok(bytes) => bytes,
                 Err(_) => return error(503, "unavailable"),
@@ -241,6 +257,10 @@ impl RefStore {
                 Ok(builder) => builder,
                 Err(e) => return builder_error(e),
             };
+            if new_witness {
+                witness_bytes += length;
+                witness_ids.insert(requested_id);
+            }
         }
         let bytes = match builder.finish().and_then(|bundle| bundle.encode(&profile)) {
             Ok(bytes) if bytes.len() <= MAX_RESPONSE => bytes,

@@ -94,7 +94,7 @@ pub struct ConnectTransport {
     unary_timeout: Duration,
     /// Per-call timeout applied to `UploadPack`/`DownloadPack`. See
     /// [`Self::with_pack_transfer_timeout`].
-    pack_transfer_timeout: Duration,
+    pub(crate) pack_transfer_timeout: Duration,
     /// Retry-delay ladder factory. Production uses the spec ladder; tests
     /// inject a shorter ladder so retry assertions stay fast.
     backoff: fn() -> BackoffIterator,

@@ -98,6 +98,7 @@ read, not a `TransportService` method. `HostedWorkspaceRequest` supplies the
 registered workspace/grant identifiers, expected base/ref and exact selected
 paths. The method signs the exact JSON request using the same cloned HTTP
 client, performs one request without redirects or retries, enforces the
+configurable pack-transfer timeout across headers and the complete body,
 `hosted_partial_limits` response-byte cap and strict raw `MKWB` response
 headers, then verifies the bundle against the independently supplied base and
 paths before returning `VerifiedHostedBundle`. Failures are surfaced as

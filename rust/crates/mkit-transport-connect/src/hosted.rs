@@ -179,62 +179,69 @@ impl ConnectTransport {
             .map_err(|_| HostedReadError::InvalidRequest)?;
         request.headers_mut().extend(signed);
         let client = self.host_http.clone();
+        // Raw HttpClient does not inherit Connect CallOptions. One overall
+        // deadline covers the header wait and every response-body frame.
+        let timeout = self.pack_transfer_timeout;
         let bytes = self.executor.block_on(async move {
-            let response = client
-                .send(request)
-                .await
-                .map_err(|_| HostedReadError::Unavailable)?;
-            let status = response.status().as_u16();
-            if status != 200 {
-                return Err(match status {
-                    401 => HostedReadError::AuthRequired,
-                    403 | 404 => HostedReadError::AccessDenied,
-                    409 => HostedReadError::Conflict,
-                    413 | 429 => HostedReadError::ResourceExhausted,
-                    422 => HostedReadError::UnsupportedProfile,
-                    500..=599 => HostedReadError::Unavailable,
-                    _ => HostedReadError::InvalidResponse,
-                });
-            }
-            let headers = response.headers();
-            if headers.get_all(header::CONTENT_TYPE).iter().count() != 1
-                || headers.get_all(header::CONTENT_LENGTH).iter().count() != 1
-            {
-                return Err(HostedReadError::InvalidResponse);
-            }
-            if headers
-                .get(header::CONTENT_TYPE)
-                .and_then(|h| h.to_str().ok())
-                != Some("application/octet-stream")
-                || headers.get(header::CONTENT_ENCODING).is_some()
-            {
-                return Err(HostedReadError::InvalidResponse);
-            }
-            let advertised = headers
-                .get(header::CONTENT_LENGTH)
-                .and_then(|h| h.to_str().ok())
-                .ok_or(HostedReadError::InvalidResponse)?
-                .parse::<usize>()
-                .map_err(|_| HostedReadError::InvalidResponse)?;
-            if advertised > MAX_BODY || advertised > limits.max_bundle_bytes {
-                return Err(HostedReadError::ResourceExhausted);
-            }
-            let mut incoming = response.into_body();
-            let mut bytes = Vec::new();
-            while let Some(frame) = incoming.frame().await {
-                let frame = frame.map_err(|_| HostedReadError::Unavailable)?;
-                let data = frame
-                    .into_data()
-                    .map_err(|_| HostedReadError::InvalidResponse)?;
-                if data.len() > advertised.saturating_sub(bytes.len()) {
+            tokio::time::timeout(timeout, async move {
+                let response = client
+                    .send(request)
+                    .await
+                    .map_err(|_| HostedReadError::Unavailable)?;
+                let status = response.status().as_u16();
+                if status != 200 {
+                    return Err(match status {
+                        401 => HostedReadError::AuthRequired,
+                        403 | 404 => HostedReadError::AccessDenied,
+                        409 => HostedReadError::Conflict,
+                        413 | 429 => HostedReadError::ResourceExhausted,
+                        422 => HostedReadError::UnsupportedProfile,
+                        500..=599 => HostedReadError::Unavailable,
+                        _ => HostedReadError::InvalidResponse,
+                    });
+                }
+                let headers = response.headers();
+                if headers.get_all(header::CONTENT_TYPE).iter().count() != 1
+                    || headers.get_all(header::CONTENT_LENGTH).iter().count() != 1
+                {
                     return Err(HostedReadError::InvalidResponse);
                 }
-                bytes.extend_from_slice(&data);
-            }
-            if bytes.len() != advertised {
-                return Err(HostedReadError::InvalidResponse);
-            }
-            Ok(bytes)
+                if headers
+                    .get(header::CONTENT_TYPE)
+                    .and_then(|h| h.to_str().ok())
+                    != Some("application/octet-stream")
+                    || headers.get(header::CONTENT_ENCODING).is_some()
+                {
+                    return Err(HostedReadError::InvalidResponse);
+                }
+                let advertised = headers
+                    .get(header::CONTENT_LENGTH)
+                    .and_then(|h| h.to_str().ok())
+                    .ok_or(HostedReadError::InvalidResponse)?
+                    .parse::<usize>()
+                    .map_err(|_| HostedReadError::InvalidResponse)?;
+                if advertised > MAX_BODY || advertised > limits.max_bundle_bytes {
+                    return Err(HostedReadError::ResourceExhausted);
+                }
+                let mut incoming = response.into_body();
+                let mut bytes = Vec::new();
+                while let Some(frame) = incoming.frame().await {
+                    let frame = frame.map_err(|_| HostedReadError::Unavailable)?;
+                    let data = frame
+                        .into_data()
+                        .map_err(|_| HostedReadError::InvalidResponse)?;
+                    if data.len() > advertised.saturating_sub(bytes.len()) {
+                        return Err(HostedReadError::InvalidResponse);
+                    }
+                    bytes.extend_from_slice(&data);
+                }
+                if bytes.len() != advertised {
+                    return Err(HostedReadError::InvalidResponse);
+                }
+                Ok(bytes)
+            })
+            .await
+            .map_err(|_| HostedReadError::Unavailable)?
         })?;
         let verified = verify_partial_snapshot(expected_base, expected_paths, &bytes, limits)
             .map_err(HostedReadError::Verification)?;

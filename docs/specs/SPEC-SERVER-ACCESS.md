@@ -204,9 +204,7 @@ Responses are JSON `{"code":"<code>"}` with no internal storage detail.
 
 The current subject route does not emit 404: after valid authentication,
 missing or foreign workspaces, grants and paths are denied as 403 to avoid an
-existence oracle; a revoked or superseded grant is also denied as 403. The
-404 entry above is for authenticated non-sensitive
-resources in profiles that use it; it is not a current GetWorkspace result.
+existence oracle; a revoked or superseded grant is also denied as 403.
 
 For data RPCs, Connect errors carry the corresponding Connect code;
 server-streaming errors may appear in a 200 HTTP response end-stream frame.

@@ -3,6 +3,7 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::Arc;
 use std::thread;
+use std::time::{Duration, Instant};
 
 use ed25519_dalek::{Signer as _, SigningKey, VerifyingKey};
 use mkit_core::hash::{hash, to_hex, to_hex_bytes};
@@ -146,6 +147,53 @@ fn hosted_read_rejects_redirect_and_oversized_length_without_second_fetch() {
     server.join().unwrap();
 }
 
+#[test]
+fn hosted_read_deadline_covers_stalled_headers_and_body_once() {
+    let base = mkit_core::hash::from_hex(BASE).unwrap();
+    let paths = vec![vec![b"shallow.txt".to_vec()]];
+    let request = HostedWorkspaceRequest {
+        workspace_id: "1".repeat(64),
+        grant_id: "2".repeat(64),
+        grant_generation: "1".into(),
+        expected_ref: "refs/heads/main".into(),
+        expected_base: base,
+        paths: paths.clone(),
+    };
+    for stalled_body in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let check = listener.try_clone().unwrap();
+        let endpoint = format!("mkit+http://{}/default", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let capture = read_one(&mut stream);
+            if stalled_body {
+                stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: application/octet-stream\r\ncontent-length: 16\r\n\r\nMKWB").unwrap();
+            }
+            thread::sleep(Duration::from_millis(250));
+            capture
+        });
+        let tx = ConnectTransport::connect_with_signed_reads(
+            &endpoint,
+            Arc::new(TestSigner(SigningKey::from_bytes(&[17; 32]))),
+        )
+        .unwrap()
+        .with_pack_transfer_timeout(Duration::from_millis(50));
+        let started = Instant::now();
+        assert!(matches!(
+            tx.get_hosted_workspace(&request, base, &paths, &hosted_partial_limits()),
+            Err(HostedReadError::Unavailable)
+        ));
+        assert!(started.elapsed() < Duration::from_millis(200));
+        let captured = server.join().unwrap();
+        assert_eq!(captured.path, "/mkit/partial/v1/GetWorkspace");
+        check.set_nonblocking(true).unwrap();
+        assert!(check.accept().is_err(), "timed-out read retried");
+    }
+}
+
 struct TestSigner(SigningKey);
 impl EnvelopeSigner for TestSigner {
     fn public_key_hex(&self) -> String {
@@ -177,6 +225,12 @@ fn capture_one(listener: &TcpListener, response: &[u8]) -> Captured {
     stream
         .set_read_timeout(Some(std::time::Duration::from_secs(5)))
         .unwrap();
+    let captured = read_one(&mut stream);
+    stream.write_all(response).unwrap();
+    captured
+}
+
+fn read_one(stream: &mut std::net::TcpStream) -> Captured {
     let mut bytes = Vec::new();
     let mut buf = [0u8; 4096];
     let header_end = loop {
@@ -206,7 +260,6 @@ fn capture_one(listener: &TcpListener, response: &[u8]) -> Captured {
         assert!(n > 0);
         bytes.extend_from_slice(&buf[..n]);
     }
-    stream.write_all(response).unwrap();
     Captured {
         path,
         headers,

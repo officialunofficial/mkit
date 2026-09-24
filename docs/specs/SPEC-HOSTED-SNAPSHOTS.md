@@ -230,7 +230,9 @@ The initial profile caps the encoded `MKWB` at 4 MiB, ancestor witnesses at
 at 256, and inspected objects and Tree visits at 2,048 each. Each inspected
 object is at most 2 MiB, matching the C1 object profile. The builder also
 preflights each known range length against its role and remaining bundle
-budgets before R2. These independent ceilings do not promise every combination
+budgets before R2; the host separately preflights distinct selected ancestor
+Trees against remaining aggregate witness headroom before their R2 range.
+These independent ceilings do not promise every combination
 of maxima will complete. A profile refusal does not make the portable bundle
 invalid.
 
@@ -245,6 +247,9 @@ base64-wrap the bundle. Errors are bounded JSON with `Cache-Control: private,
 no-store`; no hidden path, object ID or backend detail is returned. The route
 does not use redirects, public or legacy fetch, whole-pack reads, unsigned
 fallback, or a hash lookup endpoint.
+The native raw-HTTP read applies its configured pack-transfer timeout to the
+entire response, including the header wait and all body frames; timeout is a
+single-attempt `Unavailable` result with no bundle installed.
 
 The bundle reveals sibling names, modes and hashes present in each complete
 selected ancestor Tree. The base Commit/Remix bytes also reveal their signed
@@ -276,7 +281,7 @@ producer.
 | Invariant | Enforced by |
 |---|---|
 | An owner nonce replay performs no new I/O or state change. | Live owner/policy check then `Ledger::reserve` before a new Continue claim (§1, §3). |
-| Every R2 call consumes durable pessimistic budget before invocation. | Fenced `Job::charge` transaction before HEAD, GET or range read (§3). |
+| Every enrollment R2 call consumes durable pessimistic budget before invocation; disclosure has separate bounded per-request read and byte ceilings. | Fenced enrollment `Job::charge` transaction before HEAD, GET or range read (§3); disclosure known-range preflight (§5). |
 | A stale async result never promotes. | Final generation/revision/attempt/policy/ref/expiry checks (§2, §3). |
 | Reached and catalog IDs match exactly at promotion. | Indexed two-direction anti-joins plus aggregate counter reconciliation (§2). |
 | A certificate cannot turn a grant into authority. | `GetWorkspace` checks live grant and policy separately from its C1 lease (§4, §5). |

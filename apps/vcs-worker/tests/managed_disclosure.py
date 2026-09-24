@@ -21,7 +21,8 @@ REF = "refs/heads/snapshot-test"
 WORKSPACE = bytes([11]) * 32
 
 
-def credential(base, generation=1, subject=READER, paths=("file0000",), expires_ms=600_000):
+def credential(base, generation=1, subject=READER, paths=("file0000",), expires_ms=600_000,
+               authority_generation=1):
     now = int(time.time() * 1000)
     raw = bytearray(b"MKHG\x01")
     for text in ("http://localhost:8791", "managed-test", REF):
@@ -30,7 +31,7 @@ def credential(base, generation=1, subject=READER, paths=("file0000",), expires_
     raw.extend(WORKSPACE)
     for key in (OWNER, subject, WRITER):
         raw.extend(key.verify_key.encode())
-    raw.extend(struct.pack(">QQ", 1, generation))
+    raw.extend(struct.pack(">QQ", authority_generation, generation))
     raw.extend(bytes.fromhex(base))
     raw.extend(struct.pack(">QQI", now - 1000, now + expires_ms, 64))
     raw.extend(varint(len(paths)))
@@ -61,7 +62,9 @@ def main(directory):
             "version": 1, "workspace_id": WORKSPACE.hex(),
         }).encode()))
         generation = int(current["grant_generation"]) + 1
-    signed, grant_id = credential(base, generation=generation)
+    policy = expect(200, admin("GetPolicy", b'{"version":1}'))
+    signed, grant_id = credential(base, generation=generation,
+                                  authority_generation=int(policy["generation"]))
     if "--revoke" in sys.argv or "--existing" in sys.argv:
         current = expect(200, admin("GetGrant", json.dumps({
             "version": 1, "workspace_id": WORKSPACE.hex(),

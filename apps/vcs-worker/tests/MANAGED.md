@@ -179,7 +179,9 @@ checks a final denial. With `--var C2_TEST_PAUSE_MS:1000` and
 `MKIT_C2_TEST_STATE=<state>`, run `managed_disclosure_race.py <small-fixture>`
 after `--hold`: it observes the first test-only R2 range, revokes the grant
 while the read awaits, asserts owner-admin responsiveness, and requires a
-409/no-MKWB result. The pause and range spy are compiled out without
+409/no-MKWB result with no dangling lease. Its `renew`, `policy`, `head` and
+`packmap` modes exercise the corresponding live-context changes on separate
+or explicitly restored disposable states. The pause and range spy are compiled out without
 `test-faults`.
 
 For the large hidden corpus, generate `65 2097142`, then use
@@ -200,6 +202,22 @@ The real owner `CleanupSnapshots` route removes ready-summary and seen rows
 while retaining the certified catalog/index, and a renewed live grant still
 reads MKWB. One local run removed six rows and returned 1,520 MKWB bytes.
 Never point these patch modes at a real repository.
+`managed_disclosure_leasecap.py` separately seeds expired physical lease rows
+while Wrangler is stopped. In actual workerd, 15 rows admit one transient read
+lease and return 200; 16 rows return typed 429 without a new row. Real owner
+CleanupSnapshots removed the 16 expired rows, after which a read returned 200.
+The same fixture uses unrelated expired bookkeeping rows (not fake enrolled
+certificates) to exercise the repository-global branch: 63 rows admit a
+transient read, 64 return 429, and owner cleanup restores 200.
+For lease-error classification, while Wrangler is stopped on separate
+disposable certified states, `managed_disclosure_leasecap.py --fault <state>
+missing-cert` removes the current certificate and `--fault <state>
+corrupt-schema` removes an index table. Restart each state, then use
+`--probe-fault <state> <fixture> 409 conflict` or `503 unavailable`.
+Both were executed on actual local workerd with renewed live grants, no
+MKWB and no retained lease; this distinguishes healthy absent readiness
+from corrupt storage. These destructive SQL fixtures must never target a
+real repository.
 
 For the file-cap edge, enroll separate `snapshot_fixture` states with one
 file of 262144 and 262145 bytes. `managed_disclosure_boundary.py <fixture>
@@ -209,7 +227,48 @@ The C2 witness/bundle/visit ceilings are independent; these cases do not
 measure every joint maximum, dense Tree or ChunkedBlob positions. Native
 `hosted_workerd.rs` separately performs an actual signed Connect client read
 against the local managed Worker, while `signed_reads.rs` tests single-attempt
-redirect and oversized-response refusal.
+redirect, stalled-header/body timeout and oversized-response refusal.
+`disclosure_resource_fixture` generates ordinary-uploadable raw-v1 fixtures
+for a one-Tree witness at exactly 1 MiB and one byte over, two distinct
+ancestor Trees with those aggregate lengths, four/five selected paths sharing
+one 256 KiB Blob (logical 1 MiB / 1.25 MiB selected content), and a
+ChunkedBlob with 32,768 positions repeating an empty chunk ID plus one
+nonempty final chunk. `managed_disclosure_resources.py` enrolls each through
+the actual C1 routes, registers exact-path MKHG, checks the C2 status and
+test-fault R2 read IDs. The one-Tree witness fixtures each required 3,653
+Continue claims before readiness (respectively 61,906,160 and 61,906,219
+cumulatively charged C1 read bytes, 3,654 C1 R2 operations each). Actual C2
+returned 200 at the exact 1,048,576-byte boundary and 429 at 1,048,577.
+After the witness pre-read
+fix, the over case issued only the base Commit range, not the Tree range.
+The shared-four case returned 200 with one shared Blob range and a 262,785-byte
+MKWB; shared-five returned 429 without a bundle. These are measured local
+profiles, not a promise all independent maxima jointly complete.
+The two-Tree aggregate-witness fixtures both enrolled through 3,655 C1
+attempts (respectively 61,903,365 and 61,903,424 charged C1 bytes, 3,656
+C1 R2 operations). C2 returned a 1,049,306-byte MKWB for the exact 1 MiB
+aggregate witness with four distinct R2 ranges. One byte over returned
+typed 429/no MKWB after only the Commit and parent Tree ranges: the known
+overflowing child Tree was not fetched.
+The 32,768-position ChunkedBlob enrolled through 519 durable C1 attempts
+(65,540 work units, 539,307,925 cumulatively charged read bytes, 33,288 R2
+operations) after one transient local Miniflare connection loss and successful
+saved-job resume. That is C1 enrollment cost, not C2 disclosure cost. The
+subsequent C2 request returned a 1,049,182-byte verified MKWB after five
+distinct R2 ranges. A sampled `ps -axo pid,rss,command` during enrollment
+showed the two local `workerd serve` processes at roughly 22–24 MiB and
+76–78 MiB RSS; this is a point-in-time host-process observation, not a peak
+Worker isolate or wasm heap measurement and not a deployed memory guarantee.
+For C2 itself, the existing `snapshot_resource.mjs` inspector sampler attached
+to the named `core:user:mkit-vcs-managed-local-test` isolate during eight
+repeated nested-exact GetWorkspace reads. Across 367 samples in 45.1 seconds,
+observed maxima were 5,843,480 bytes JS heap used and 4,032,221 backing-
+storage bytes; the V8 profiler recorded 1,000 samples. Local Wrangler reported
+177–1,308 ms wall durations for those eight reads, each returning the same
+1,049,306-byte MKWB after four distinct ranges. The sampler did not expose
+wasm memory in this production glue build, so wasm growth and exact peak
+isolate/process memory remain unmeasured; JS/backing values are not additive.
+Profiler sample count and wall time are not an isolated CPU-time measurement.
 
 For isolated state tests, give Wrangler `--persist-to` an empty directory made
 with `mktemp -d /tmp/mkit-managed-test.XXXXXX`. The `--probe-uninitialized`

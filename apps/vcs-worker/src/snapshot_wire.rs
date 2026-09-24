@@ -2,9 +2,9 @@
 //! Owner-only, raw-body-signed hosted Snapshot job wire.
 //! Parsing accepts ordinary JSON key order while rejecting duplicate fields.
 
-use mkit_core::partial::PartialPath;
 #[cfg(any(test, target_arch = "wasm32"))]
 use mkit_core::partial::PartialError;
+use mkit_core::partial::PartialPath;
 use serde::{Deserialize, Serialize};
 
 use crate::{access_policy::generation, refs::is_valid_ref_name};

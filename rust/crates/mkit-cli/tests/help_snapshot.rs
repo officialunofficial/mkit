@@ -166,6 +166,92 @@ fn completions_cover_every_subcommand() {
 }
 
 #[test]
+fn hosted_workspace_create_flags_appear_on_public_cli_surfaces() {
+    let help = Command::new(mkit_bin())
+        .arg("help")
+        .output()
+        .expect("spawn `mkit help`");
+    assert!(help.status.success(), "`mkit help` must exit 0");
+    let help = String::from_utf8(help.stdout).expect("stdout is utf-8");
+    for flag in [
+        "--hosted",
+        "--base",
+        "--path",
+        "--ref",
+        "--workspace-id",
+        "--grant-id",
+        "--grant-generation",
+    ] {
+        assert!(
+            help.contains(flag),
+            "help is missing hosted-create flag {flag}"
+        );
+    }
+
+    let man = read_repo_file("man/mkit.1");
+    for flag in [
+        "hosted",
+        "base",
+        "path",
+        "ref",
+        "workspace-id",
+        "grant-id",
+        "grant-generation",
+    ] {
+        assert!(
+            man.contains(&format!("Fl Fl {flag}")),
+            "man page is missing hosted-create flag --{flag}"
+        );
+    }
+    for (file, patterns) in [
+        (
+            "completions/mkit.bash",
+            vec![
+                "--hosted",
+                "--base",
+                "--path",
+                "--ref",
+                "--workspace-id",
+                "--grant-id",
+                "--grant-generation",
+            ],
+        ),
+        (
+            "completions/mkit.zsh",
+            vec![
+                "--hosted[",
+                "--base[",
+                "--path[",
+                "--ref[",
+                "--workspace-id[",
+                "--grant-id[",
+                "--grant-generation[",
+            ],
+        ),
+        (
+            "completions/mkit.fish",
+            vec![
+                "-l hosted",
+                "-l base",
+                "-l path",
+                "-l ref",
+                "-l workspace-id",
+                "-l grant-id",
+                "-l grant-generation",
+            ],
+        ),
+    ] {
+        let surface = read_repo_file(file);
+        for pattern in patterns {
+            assert!(
+                surface.contains(pattern),
+                "{file} is missing hosted-create completion pattern {pattern}"
+            );
+        }
+    }
+}
+
+#[test]
 fn dash_dash_help_goes_to_stdout() {
     let output = Command::new(mkit_bin())
         .arg("--help")
