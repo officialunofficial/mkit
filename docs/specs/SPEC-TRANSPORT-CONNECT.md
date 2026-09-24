@@ -393,8 +393,10 @@ single global Durable Object for ref CAS. It is a single-repository
 deployment in §7.4's terms; a multi-repository deployment routes each
 repository to its own ref store instead (§7.4). Unlike `repo-worker`'s
 open-write demo, all mutating procedures require the versioned signed-write
-contract below. This verifies the writer's identity; it does not impose an
-allow-list. The deployment config supplies `AUTH_AUDIENCE` (exact canonical
+contract below. This verifies the writer's identity; on its own it does not
+impose an allow-list. A deployment that restricts writers applies the `owner`
+policy of [SPEC-WRITE-GRANTS](SPEC-WRITE-GRANTS.md): namespace owners sign
+grants that let Ed25519 keys write to their repositories. The deployment config supplies `AUTH_AUDIENCE` (exact canonical
 HTTP(S) origin) and `AUTH_REPOSITORY` (the single repository identity,
 §7.4). Repo Worker instead obtains the repository identity from the decoded room;
 Keys Worker uses `keys`. Host or forwarded request headers MUST NOT establish
@@ -653,7 +655,7 @@ Explicitly deferred to sibling issues:
 
 | Version | Status | Changes |
 |---|---|---|
-| `2` | draft | §7.4 repository addressing: repository grammar, `X-Repository` on every RPC, per-repository isolation, single- and multi-repository modes (mkit#1084). |
+| `2` | draft | §7.4 repository addressing: repository grammar, `X-Repository` on every RPC, per-repository isolation, single- and multi-repository modes (mkit#1084). §7.1 references the SPEC-WRITE-GRANTS `owner` policy (mkit#1085). |
 | `1` | draft | Initial `mkit.transport.v1` proto: 7 wire RPCs covering every `Transport` trait verb (§2), `PackChunk` reused byte-for-byte from `ssh.proto`, `RefExpectation`/`RefEntry` duplicated with pinned wire numbers pending mkit#679's shared-proto extraction. |
 
 ---
