@@ -326,7 +326,7 @@ fn workspace_prop() -> (&'static str, Value) {
 pub(crate) const TOOLS: &[ToolSpec] = &[
     ToolSpec {
         name: "mkit_workspace_create",
-        description: "Create an offline scoped workspace from a bundle in repo_path (an existing parent directory).",
+        description: "Create an offline scoped workspace from a bundle in repo_path (an existing parent directory). This MCP tool deliberately accepts bundle files only; hosted grant reads remain an explicit shell CLI workflow.",
         hints: (false, false, false),
         schema: || {
             schema(
@@ -1140,6 +1140,21 @@ fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
     let mut out: Vec<String> = Vec::new();
     match name {
         "mkit_workspace_create" => {
+            if [
+                "hosted",
+                "ref",
+                "workspace_id",
+                "grant_id",
+                "grant_generation",
+            ]
+            .iter()
+            .any(|field| args.get(field).is_some())
+            {
+                return Err(
+                    "hosted workspace reads are CLI-only; this MCP tool accepts offline bundles only"
+                        .into(),
+                );
+            }
             let bundle = req_str(args, "bundle")?;
             let base = req_str(args, "base")?;
             let destination = req_str(args, "destination")?;
@@ -1650,6 +1665,65 @@ mod tests {
         assert!(build_argv("mkit_workspace_create", &json!({"bundle":"bundle.bin","base":"00","destination":"new","accept_bundle_selection":true,"paths":["a"]})).is_err());
         assert!(build_argv("mkit_workspace_add", &json!({"all":true,"paths":["a"]})).is_err());
         assert!(build_argv("mkit_workspace_add", &json!({"all":true})).is_ok());
+    }
+
+    #[test]
+    fn workspace_create_mcp_documents_and_enforces_offline_only_boundary() {
+        let tool = TOOLS
+            .iter()
+            .find(|tool| tool.name == "mkit_workspace_create")
+            .unwrap();
+        assert!(tool.description.contains("bundle files only"));
+        let schema = (tool.schema)();
+        let properties = schema["properties"].as_object().unwrap();
+        for field in [
+            "hosted",
+            "ref",
+            "workspace_id",
+            "grant_id",
+            "grant_generation",
+        ] {
+            assert!(
+                !properties.contains_key(field),
+                "unexpected MCP field: {field}"
+            );
+        }
+        let error = build_argv(
+            "mkit_workspace_create",
+            &json!({
+                "bundle": "bundle.bin",
+                "base": "00",
+                "destination": "new",
+                "hosted": "mkit+https://host/repo",
+                "ref": "refs/heads/main"
+            }),
+        )
+        .unwrap_err();
+        assert!(error.contains("CLI-only"), "{error}");
+        assert_eq!(
+            build_argv(
+                "mkit_workspace_create",
+                &json!({
+                    "bundle": "bundle.bin",
+                    "base": "00",
+                    "destination": "new",
+                    "paths": ["a"]
+                }),
+            )
+            .unwrap(),
+            [
+                "workspace",
+                "create",
+                "--format=json",
+                "--bundle",
+                "bundle.bin",
+                "--base",
+                "00",
+                "--path",
+                "a",
+                "new"
+            ],
+        );
     }
 
     #[test]

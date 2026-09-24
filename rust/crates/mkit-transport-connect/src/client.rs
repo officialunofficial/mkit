@@ -83,8 +83,10 @@ const CHUNK_SIZE: usize = 800 * 1024;
 /// retrying that is caller-level policy.
 pub struct ConnectTransport {
     client: TransportServiceClient<EnvelopeTransport<HttpClient>>,
-    signed_reads: Option<SignedReadContext>,
-    executor: TokioExecutor,
+    pub(crate) signed_reads: Option<SignedReadContext>,
+    pub(crate) executor: TokioExecutor,
+    pub(crate) host_http: HttpClient,
+    pub(crate) host_uri: Uri,
     /// See [`Self::with_atomic_advance`].
     atomic_advance: bool,
     /// Per-call timeout applied to `ListRefs`/`ReadRef`/`UpdateRef`/
@@ -92,7 +94,7 @@ pub struct ConnectTransport {
     unary_timeout: Duration,
     /// Per-call timeout applied to `UploadPack`/`DownloadPack`. See
     /// [`Self::with_pack_transfer_timeout`].
-    pack_transfer_timeout: Duration,
+    pub(crate) pack_transfer_timeout: Duration,
     /// Retry-delay ladder factory. Production uses the spec ladder; tests
     /// inject a shorter ladder so retry assertions stay fast.
     backoff: fn() -> BackoffIterator,
@@ -285,6 +287,8 @@ impl ConnectTransport {
         } else {
             None
         };
+        let host_http = transport.clone();
+        let host_uri = uri.clone();
         let transport = EnvelopeTransport::new(
             transport,
             signer,
@@ -312,6 +316,8 @@ impl ConnectTransport {
             client: TransportServiceClient::new(transport, config),
             signed_reads,
             executor,
+            host_http,
+            host_uri,
             atomic_advance: false,
             unary_timeout: UNARY_TIMEOUT,
             pack_transfer_timeout: PACK_TRANSFER_TIMEOUT,
@@ -365,7 +371,8 @@ impl ConnectTransport {
             base_uri.scheme_str().unwrap_or("http"),
             base_uri.authority().expect("test authority")
         );
-        let config = ClientConfig::new(base_uri).with_default_timeout(Duration::from_secs(10));
+        let config =
+            ClientConfig::new(base_uri.clone()).with_default_timeout(Duration::from_secs(10));
         let signed_reads = if sign_reads {
             signer.as_ref().map(|signer| SignedReadContext {
                 signer: Arc::clone(signer),
@@ -382,6 +389,8 @@ impl ConnectTransport {
             ),
             signed_reads,
             executor: TokioExecutor::new().expect("tokio runtime for test transport"),
+            host_http: HttpClient::plaintext(),
+            host_uri: base_uri,
             atomic_advance: false,
             unary_timeout: UNARY_TIMEOUT,
             pack_transfer_timeout: PACK_TRANSFER_TIMEOUT,

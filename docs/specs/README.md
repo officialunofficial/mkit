@@ -17,7 +17,7 @@ front matter.
 - [SPEC-GIT-IMPORT](SPEC-GIT-IMPORT.md) &mdash; git→mkit import bridge (one-way fork) and its verifiers.
 - [SPEC-HISTORY-PROOF](SPEC-HISTORY-PROOF.md) &mdash; MMB-based history proofs for light-client verification.
 - [SPEC-HOSTED-WORKSPACE-GRANTS](SPEC-HOSTED-WORKSPACE-GRANTS.md) &mdash; optional service-local signed workspace grants and durable owner registry.
-- [SPEC-HOSTED-SNAPSHOTS](SPEC-HOSTED-SNAPSHOTS.md) &mdash; optional owner-only durable complete-Snapshot enrollment and structural certificate indexes.
+- [SPEC-HOSTED-SNAPSHOTS](SPEC-HOSTED-SNAPSHOTS.md) &mdash; optional owner-only durable complete-Snapshot enrollment and exact grant-scoped Snapshot disclosure.
 - [SPEC-INDEX](SPEC-INDEX.md) &mdash; repo-local staging-area index (advisory, not exchanged).
 - [SPEC-KEYSTORE](SPEC-KEYSTORE.md) &mdash; key vault interface, backends, and `mkit key` CLI surface.
 - [SPEC-MERKLE-OBJECTS](SPEC-MERKLE-OBJECTS.md) &mdash; merkelized ChunkedBlob and Tree object hashing.
@@ -29,7 +29,7 @@ front matter.
 - [SPEC-RELEASE-THRESHOLD](SPEC-RELEASE-THRESHOLD.md) &mdash; BLS threshold signatures for release-party attestation.
 - [SPEC-RPC](SPEC-RPC.md) &mdash; shared stdio protobuf framing for subprocess protocols.
 - [SPEC-SIGNING](SPEC-SIGNING.md) &mdash; commit / remix / tag signing hashes and verification.
-- [SPEC-SERVER-ACCESS](SPEC-SERVER-ACCESS.md) &mdash; optional service-local managed authority and role-gated data methods; grants and owner Snapshot enrollment are separate, while private subject workflows remain unavailable.
+- [SPEC-SERVER-ACCESS](SPEC-SERVER-ACCESS.md) &mdash; optional service-local managed authority, role-gated data methods, and the separate grant-scoped subject disclosure route.
 - [SPEC-SPARSE-CHECKOUT](SPEC-SPARSE-CHECKOUT.md) &mdash; verifiable server-side sparse checkout over HTTP/S3.
 - [SPEC-TRANSPORT](SPEC-TRANSPORT.md) &mdash; seven-verb transport wire protocol (file, SSH, HTTP [legacy, see SPEC-TRANSPORT-CONNECT], S3, memory).
 - [SPEC-TRANSPORT-CONNECT](SPEC-TRANSPORT-CONNECT.md) &mdash; draft `mkit.transport.v1` Connect service, the canonical remote protocol superseding SPEC-TRANSPORT §5.

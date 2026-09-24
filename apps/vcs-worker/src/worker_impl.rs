@@ -44,6 +44,8 @@ pub mod managed;
 pub mod refstore;
 pub mod service;
 #[cfg(feature = "managed-access")]
+pub mod snapshot_disclosure;
+#[cfg(feature = "managed-access")]
 pub mod snapshot_driver;
 #[cfg(feature = "managed-access")]
 pub mod snapshot_jobs;

@@ -4,8 +4,11 @@ mod common;
 
 use std::fmt::Write as _;
 use std::fs;
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::thread;
 
 use mkit_core::ClosureMode;
 use mkit_core::object::Identity;
@@ -56,6 +59,137 @@ fn setup(name: &str) -> (tempfile::TempDir, PathBuf) {
         String::from_utf8_lossy(&output.stdout)
     );
     (temp, workspace)
+}
+
+#[test]
+fn hosted_create_uses_signed_user_trust_and_installs_verified_raw_bundle() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("scoped");
+    let xdg = temp.path().join("xdg");
+    fs::create_dir_all(xdg.join("mkit")).unwrap();
+    let key_dir = tempfile::tempdir_in(std::env::var_os("HOME").unwrap()).unwrap();
+    let key_path = key_dir.path().join("hosted.key");
+    save_key(&key_path, &KeyPair::from_seed([29; 32])).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("mkit+http://{}/default", listener.local_addr().unwrap());
+    fs::write(xdg.join("mkit/config"), format!(
+        "transport_signed_reads = true\ntransport_auth = envelope\ntrusted_remote_endpoint = {endpoint}\nsigning_key = {}\n",
+        key_path.display(),
+    )).unwrap();
+    let bundle = fs::read(fixture("plain_file.bin")).unwrap();
+    let server = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let mut data = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let end = loop {
+            let count = socket.read(&mut chunk).unwrap();
+            assert!(count > 0);
+            data.extend_from_slice(&chunk[..count]);
+            if let Some(index) = data.windows(4).position(|part| part == b"\r\n\r\n") {
+                break index + 4;
+            }
+        };
+        let headers = String::from_utf8_lossy(&data[..end]).to_ascii_lowercase();
+        assert!(headers.starts_with("post /mkit/partial/v1/getworkspace "));
+        assert!(headers.contains("x-signature:"));
+        assert!(headers.contains("x-digest:"));
+        let len: usize = headers
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length: "))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        while data.len() - end < len {
+            let count = socket.read(&mut chunk).unwrap();
+            assert!(count > 0);
+            data.extend_from_slice(&chunk[..count]);
+        }
+        let body: serde_json::Value = serde_json::from_slice(&data[end..end + len]).unwrap();
+        assert_eq!(body["expected_base"], BASE);
+        assert_eq!(body["paths"], serde_json::json!([["shallow.txt"]]));
+        let prefix = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/octet-stream\r\ncontent-length: {}\r\n\r\n",
+            bundle.len()
+        );
+        socket.write_all(prefix.as_bytes()).unwrap();
+        socket.write_all(&bundle).unwrap();
+    });
+    let output = common::mkit(
+        temp.path(),
+        &xdg,
+        &[
+            "workspace",
+            "create",
+            "--hosted",
+            &endpoint,
+            "--base",
+            BASE,
+            "--path",
+            "shallow.txt",
+            "--ref",
+            "refs/heads/main",
+            "--workspace-id",
+            &"1".repeat(64),
+            "--grant-id",
+            &"2".repeat(64),
+            "--grant-generation",
+            "1",
+            "--format=json",
+            workspace.to_str().unwrap(),
+        ],
+    );
+    server.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(workspace.join("shallow.txt").is_file());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["base_commit"], BASE);
+    assert_eq!(json["selected_paths"], serde_json::json!(["shallow.txt"]));
+}
+
+#[test]
+fn hosted_create_denies_untrusted_destination_before_key_resolution() {
+    let temp = tempfile::tempdir().unwrap();
+    let xdg = temp.path().join("xdg");
+    fs::create_dir_all(xdg.join("mkit")).unwrap();
+    fs::write(xdg.join("mkit/config"),
+        "transport_signed_reads = true\ntransport_auth = envelope\ntrusted_remote_endpoint = mkit+http://127.0.0.1:1/default\nsigning_key = /absent/hosted.key\n").unwrap();
+    let destination = temp.path().join("scoped");
+    let result = common::mkit(
+        temp.path(),
+        &xdg,
+        &[
+            "workspace",
+            "create",
+            "--hosted",
+            "mkit+http://127.0.0.1:2/default",
+            "--base",
+            BASE,
+            "--path",
+            "shallow.txt",
+            "--ref",
+            "refs/heads/main",
+            "--workspace-id",
+            &"1".repeat(64),
+            "--grant-id",
+            &"2".repeat(64),
+            "--grant-generation",
+            "1",
+            destination.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(result.status.code(), Some(77));
+    let message = String::from_utf8_lossy(&result.stderr);
+    assert!(message.contains("trusted_remote_endpoint"), "{message}");
+    assert!(!message.contains("signing_key"), "{message}");
+    assert!(!destination.exists());
 }
 
 #[test]

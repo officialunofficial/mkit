@@ -37,6 +37,7 @@ mod executor;
 mod hashutil;
 #[cfg(feature = "server")]
 mod health;
+mod hosted;
 #[cfg(feature = "server")]
 mod pack;
 #[cfg(feature = "server")]
@@ -59,6 +60,9 @@ pub use client::{ConnectTransport, PACK_TRANSFER_TIMEOUT, TOKEN_ENV, UNARY_TIMEO
 pub use envelope::EnvelopeSigner;
 #[cfg(feature = "server")]
 pub use error::map_transport_error;
+pub use hosted::{
+    HostedReadError, HostedWorkspaceRequest, VerifiedHostedBundle, hosted_partial_limits,
+};
 #[cfg(feature = "server")]
 pub use service::TransportServer;
 

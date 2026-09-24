@@ -76,6 +76,13 @@ repository in the current directory.
 .It Cm workspace Cm create Fl Fl bundle Ar file Fl Fl base Ar id Oo Fl Fl path Ar path ... | Fl Fl accept-bundle-selection Oc Ar dir
 Verify an offline selected-file bundle against an independently supplied base
 id and exact selection, then create a scoped workspace atomically.
+.It Cm workspace Cm create Fl Fl hosted Ar url Fl Fl base Ar id Fl Fl path Ar path ... Fl Fl ref Ar ref Fl Fl workspace-id Ar id Fl Fl grant-id Ar id Fl Fl grant-generation Ar decimal Ar dir
+Fetch a grant-scoped hosted Snapshot and verify it against the supplied base
+and exact paths before creating a scoped workspace. Hosted mode requires the
+user's signed-read opt-in, envelope authentication, and exact trusted endpoint.
+Use an explicit absolute user signing key or an existing user keystore key.
+Hosted mode never creates a key or falls back to public or unsigned reads. The
+MCP workspace-create tool remains offline and accepts bundle files only.
 .It Cm workspace Cm status | Cm diff | Cm add | Cm log
 Inspect or stage selected regular files only.
 .Cm diff

@@ -5,19 +5,19 @@ status: draft-normative
 audience: implementers of the optional managed mkit hosting profile
 ---
 
-# SPEC-HOSTED-SNAPSHOTS &mdash; owner-enrolled complete Snapshot indexes
+# SPEC-HOSTED-SNAPSHOTS &mdash; hosted Snapshot enrollment and disclosure
 
 Status: **Draft, normative** for the optional managed hosting profile. This
 service-local protocol adds no generic transport method, portable object rule,
-grant authority, subject read route, or default public Worker behavior. A
-structural certificate says that the selected immutable raw-v1 packs contained
-exactly a complete Snapshot rooted at a signed Commit/Remix at enrollment.
-It is not authorization to disclose objects. The current ref, packmap,
-policy and subject's live grant must be checked separately by a later private
-consumer. A historical `ready` job response is never that current check.
+grant format, or default public Worker behavior. A structural certificate says
+that the selected immutable raw-v1 packs contained exactly a complete Snapshot
+rooted at a signed Commit/Remix at enrollment. It is not authorization to
+disclose objects. The separate subject route checks the current ref, packmap,
+policy, certificate and live grant for every read. A historical `ready` job
+response is never that current check.
 Scope: owner enrollment wire, durable job fences, structural validation,
-certificate indexes, and bounded cleanup. Private subject disclosure and
-publication are outside this version.
+certificate indexes, bounded cleanup, and the grant-scoped subject read route.
+Publication is outside this version.
 Reference implementation: `apps/vcs-worker/src/worker_impl/snapshot_*.rs`
 and `apps/vcs-worker/src/snapshot_wire.rs`.
 
@@ -171,9 +171,9 @@ no unbounded cascade. `has_more` is an indexed existence check, not a full
 remaining count. Global generation never resets after an old ID is purged;
 reuse while a job or index still names it conflicts. Internal structural
 read leases last at most five minutes, at most 64 physical rows in the
-repository and 16 per certificate. A lease grants no subject authority; the
-future consumer must check the live grant and policy before every private
-read. No private read route is introduced here.
+repository and 16 per certificate. A lease grants no subject authority;
+`GetWorkspace` checks the live grant and policy before every private read and
+after each R2 await.
 
 ## 4. Security boundary
 
@@ -185,7 +185,80 @@ certificate is useful only while the current ref and packmap still match its
 captured tuple. Revalidation is mandatory at later private disclosure and
 publication boundaries.
 
-## 5. Test anchors
+## 5. Grant-scoped Snapshot disclosure
+
+The subject-only path is `POST /mkit/partial/v1/GetWorkspace`. It is separate
+from the owner management paths and the seven `TransportService` data methods.
+It uses auth v2 bound to the configured audience, repository, exact procedure
+path and BLAKE3 digest of the exact raw request bytes. The request is
+uncompressed UTF-8 `application/json`, at most 256 KiB, with one complete JSON
+object, no duplicate or unknown fields, and integer `version:1`. Field order
+and whitespace are not canonical; the signature covers the bytes as sent.
+
+The request fields are `workspace_id`, `grant_id`, canonical decimal-string
+`grant_generation`, `expected_ref`, lowercase-hex `expected_base`, and
+`paths`, a nonempty sorted unique list of UTF-8 path-component arrays. There
+are at most 256 paths. `expected_ref` asserts equality with the registered
+workspace ref; it never selects an arbitrary ref. The request carries no
+object ID, pack key, URL, or MKHG envelope. The registry supplies the exact
+ref and signed grant. Authentication precedes content lookup, and every
+requested exact path must have `READ` before the service resolves any locator.
+An owner key or valid but unregistered grant does not bypass this check.
+
+The service requires the active registered grant ID and generation, matching
+subject and authority generation, current policy, valid grant and auth times,
+workspace head equal to `expected_base`, and exact ref/head equality. The
+current packmap and certificate must match the leased C1 index and its profile
+and validator versions. The service rechecks the grant, policy, ref, packmap,
+certificate and lease after each R2 range read and before releasing success.
+Grant registration alone does not establish readiness. A stale grant, head,
+packmap or certificate returns a conflict or denial without a content fallback.
+
+The Worker acquires the same per-isolate heavy-operation permit used by C1 and
+a five-minute structural read lease before R2 work. The shared permit covers
+enrollment and disclosure; ordinary pack transfers retain their separate
+existing limit. At most 2,048 range GETs and 4 MiB of
+reserved range bytes are admitted per request. The cooperative deadline is 20
+seconds and is checked around awaits; it is not a hard wall-clock bound.
+Lease rows are limited to 64 per repository and 16 per certificate. A normal
+exit attempts synchronous lease release; a crash or SQL failure may leave the
+row until its deadline and bounded owner cleanup. The read lease pins storage,
+not authority.
+
+The initial profile caps the encoded `MKWB` at 4 MiB, ancestor witnesses at
+1 MiB, total selected content at 1 MiB, each selected file at 256 KiB, paths
+at 256, and inspected objects and Tree visits at 2,048 each. Each inspected
+object is at most 2 MiB, matching the C1 object profile. The builder also
+preflights each known range length against its role and remaining bundle
+budgets before R2; the host separately preflights distinct selected ancestor
+Trees against remaining aggregate witness headroom before their R2 range.
+These independent ceilings do not promise every combination
+of maxima will complete. A profile refusal does not make the portable bundle
+invalid.
+
+A successful response is the unchanged raw `MKWB` v1 bundle as
+`application/octet-stream`, with exact `Content-Length` and
+`Cache-Control: private, no-store`, and no content encoding. It contains the
+signed base Commit/Remix, complete selected ancestor Trees and selected file
+representations/chunks.
+The service finishes and independently verifies the bundle against the exact
+base and requested paths before sending it. It does not return JSON or
+base64-wrap the bundle. Errors are bounded JSON with `Cache-Control: private,
+no-store`; no hidden path, object ID or backend detail is returned. The route
+does not use redirects, public or legacy fetch, whole-pack reads, unsigned
+fallback, or a hash lookup endpoint.
+The native raw-HTTP read applies its configured pack-transfer timeout to the
+entire response, including the header wait and all body frames; timeout is a
+single-attempt `Unavailable` result with no bundle installed.
+
+The bundle reveals sibling names, modes and hashes present in each complete
+selected ancestor Tree. The base Commit/Remix bytes also reveal their signed
+metadata, including message, identities, parents and any opaque source fields.
+The service does not hide information embedded in those bytes or prevent
+low-entropy hash guessing. A grant cannot prevent a recipient from copying or
+exfiltrating bytes already disclosed.
+
+## 6. Test anchors
 
 The exact owner request/reply vectors under
 `rust/tests/golden/hosted-snapshots/` pin the JSON and HTTP status contract.
@@ -194,12 +267,21 @@ actual local workerd, R2 and SQLite, including a distinct reachable fixture
 above 128 MiB. Core bounded-MKPL, raw-pack and Snapshot-walk tests pin
 portable parsing and local inspected facts.
 
-## 6. Invariants
+`apps/vcs-worker/tests/managed_disclosure.py` exercises the subject route
+against local workerd, R2 and SQLite. The native response path is covered by
+`rust/crates/mkit-transport-connect/tests/hosted_workerd.rs`; the unchanged
+bundle format remains pinned by `rust/tests/golden/partial_workspace/`.
+The committed exact subject JSON and HTTP response descriptors are under
+`rust/tests/golden/hosted-disclosure/`; the normal test reads and verifies
+their manifest, while `write_disclosure_goldens.py` is an explicitly gated
+producer.
+
+## 7. Invariants
 
 | Invariant | Enforced by |
 |---|---|
 | An owner nonce replay performs no new I/O or state change. | Live owner/policy check then `Ledger::reserve` before a new Continue claim (§1, §3). |
-| Every R2 call consumes durable pessimistic budget before invocation. | Fenced `Job::charge` transaction before HEAD, GET or range read (§3). |
+| Every enrollment R2 call consumes durable pessimistic budget before invocation; disclosure has separate bounded per-request read and byte ceilings. | Fenced enrollment `Job::charge` transaction before HEAD, GET or range read (§3); disclosure known-range preflight (§5). |
 | A stale async result never promotes. | Final generation/revision/attempt/policy/ref/expiry checks (§2, §3). |
 | Reached and catalog IDs match exactly at promotion. | Indexed two-direction anti-joins plus aggregate counter reconciliation (§2). |
-| A certificate cannot turn a grant into authority. | No c1 subject route; future private reader rechecks live grant and policy (§4). |
+| A certificate cannot turn a grant into authority. | `GetWorkspace` checks live grant and policy separately from its C1 lease (§4, §5). |

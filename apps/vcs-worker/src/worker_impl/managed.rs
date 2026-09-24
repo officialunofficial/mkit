@@ -117,6 +117,9 @@ pub async fn dispatch(req: Request, env: Env) -> Result<Response> {
 
 async fn dispatch_inner(mut req: Request, env: Env) -> Result<Response> {
     let path = req.path();
+    if path == super::snapshot_disclosure::PATH {
+        return serve_disclosure(req, env, &path).await;
+    }
     if let Some(route) = DataRoute::from_path(&path) {
         return serve_data(req, env, &path, route).await;
     }
@@ -251,6 +254,56 @@ async fn dispatch_inner(mut req: Request, env: Env) -> Result<Response> {
     let status = response.status_code();
     let body = response.text().await?;
     reply(status, &body)
+}
+
+async fn serve_disclosure(mut req: Request, env: Env, path: &str) -> Result<Response> {
+    if req.method() != Method::Post {
+        return reply(405, "{\"code\":\"method_not_allowed\"}");
+    }
+    if req.headers().get("content-encoding")?.is_some()
+        || req.headers().get("content-type")?.as_deref() != Some("application/json")
+    {
+        return reply(415, "{\"code\":\"unsupported_media_type\"}");
+    }
+    let body = match read_bounded_body(&mut req, 256 * 1024).await? {
+        BoundedBody::Ok(body) => body,
+        BoundedBody::TooLarge => return reply(413, "{\"code\":\"resource_exhausted\"}"),
+    };
+    let identity = match configured_identity(&env) {
+        Ok(identity) => identity,
+        Err(_) => return reply(503, "{\"code\":\"unavailable\"}"),
+    };
+    let verified = verify_envelope(
+        AuthContext {
+            audience: &identity.audience,
+            repository: &identity.repository,
+        },
+        path,
+        &blake3_hex(&body),
+        Date::now().as_millis() as i64,
+        &headers(&req)?,
+    );
+    let authorization = match verified {
+        VerifyEnvelope::Ok { authorization, .. } => authorization,
+        VerifyEnvelope::Err { .. } => return reply(401, "{\"code\":\"unauthenticated\"}"),
+    };
+    let body = match String::from_utf8(body) {
+        Ok(body) => body,
+        Err(_) => return reply(400, "{\"code\":\"invalid_argument\"}"),
+    };
+    let payload = serde_json::to_string(&super::snapshot_disclosure::DisclosureWire {
+        identity,
+        proof: Proof::from(&authorization),
+        body,
+    })
+    .map_err(|e| worker::Error::RustError(e.to_string()))?;
+    let ns = env.durable_object("REFSTORE")?;
+    let stub = ns.id_from_name("root")?.get_stub()?;
+    let mut init = RequestInit::new();
+    init.with_method(Method::Post)
+        .with_body(Some(payload.into()));
+    let internal = Request::new_with_init("https://refstore/managed-disclosure", &init)?;
+    stub.fetch_with_request(internal).await
 }
 
 async fn serve_data(mut req: Request, env: Env, path: &str, route: DataRoute) -> Result<Response> {

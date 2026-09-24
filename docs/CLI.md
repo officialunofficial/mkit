@@ -207,6 +207,26 @@ Working-tree commands:
   authenticated selection. Confirmation through `--accept-bundle-selection`
   accepts precisely the listed bundle paths. Verification precedes destination
   installation. No remote, credential, or host permission is consulted.
+- `mkit workspace create --hosted URL --base ID --path PATH --ref REF
+  --workspace-id ID --grant-id ID --grant-generation DECIMAL DIR` (repeat
+  `--path` for multiple selected files) retrieves a grant-scoped hosted
+  Snapshot. `--hosted` and `--bundle` are mutually exclusive; `--base` and
+  explicit paths are required. Before any signer is opened, hosted mode
+  requires user-only `transport_signed_reads = true`, envelope auth, and an
+  exact user-trusted endpoint matching `URL`. `mkit+https` is supported;
+  plain `mkit+http` is loopback-only. The legacy file-key signer requires an
+  explicit absolute user-configured `signing_key`; a keystore signer must
+  resolve an existing key through its configured or user-default reference.
+  Hosted mode never falls back to repository or destination settings and
+  never creates a key. The client verifies the returned raw MKWB against the
+  supplied base and exact paths before installing the workspace; there is no
+  fallback to public or unsigned reads. Offline `--bundle` behavior is
+  unchanged. As with any partial bundle, complete ancestor Trees reveal
+  sibling names, modes and hashes, and the signed base Commit/Remix reveals
+  its metadata (including messages, identities, parents and opaque source
+  fields); a grant cannot prevent exfiltration of bytes already received.
+  The MCP `workspace_create` tool remains deliberately bundle-only; hosted
+  retrieval requires this explicit local CLI opt-in and user-trusted signer.
 - `mkit workspace status|diff|add|log` &mdash; inspect and stage only the selected
   files. `status` compares base to stage and stage to working files, reports
   outside-selection names as untracked, and states when its 4096-entry name
@@ -1615,7 +1635,7 @@ which routes them to the user scope automatically.
 | `remote_bucket` | name | empty | For s3 remotes |
 | `remote_type` | `file` / `http` / `s3` / `ssh` / `memory` | auto | |
 | `transport_auth` | `bearer` / `envelope` | `bearer` | Write-auth mode for `mkit+https://`/`mkit+http://`; `envelope` additionally Ed25519-signs writes with the commit-signing key (see `signer`/`signing_key`/`key.ed25519_ref`) |
-| `transport_signed_reads` | `true` / `false` | `false` | User-only opt-in; requires `transport_auth = envelope` and an exact `trusted_remote_endpoint`. Signs ListRefs, ReadRef, PackExists and DownloadPack. Invalid values fail before connecting. |
+| `transport_signed_reads` | `true` / `false` | `false` | User-only opt-in; requires `transport_auth = envelope` and an exact `trusted_remote_endpoint`. Signs ListRefs, ReadRef, PackExists and DownloadPack; the explicit hosted workspace-create flow also uses this signing/trust gate for GetWorkspace. Invalid values fail before connecting. |
 | `ssh.strict_host_key_checking` | `yes` / `no` / `accept-new` | inherit | User-scoped only |
 | `ssh.user_known_hosts_file` | path | inherit | User-scoped only |
 | `ssh.identity_file` | path | inherit | User-scoped only |

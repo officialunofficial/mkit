@@ -3444,6 +3444,7 @@ dependencies = [
  "mkit-transport-memory",
  "rustls",
  "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "url",

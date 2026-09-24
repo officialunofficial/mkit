@@ -431,7 +431,7 @@ _mkit() {
                 workspace)
                     if (( CURRENT == 2 )); then
                         _values 'workspace subcommand' \
-                            'create[create from a verified offline bundle]' \
+                            'create[create from an offline bundle or trusted hosted Snapshot]' \
                             'status[show selected-file state]' \
                             'diff[compare selected files]' \
                             'add[stage selected files]' \
@@ -455,7 +455,7 @@ _mkit() {
                                 _arguments '--candidate[exact pending ID]:id:' '--acknowledge-possible-publication[acknowledge possible remote effect]' '--format[output format]:format:(human json)' '--help[show help]'
                                 ;;
                             create)
-                                _arguments '--bundle[verified bundle]:file:_files' '--base[trusted commit ID]:id:' '*--path[selected path]:path:' '--accept-bundle-selection[use bundle selection]' '--format[output format]:format:(human json)' '*:destination:_files -/'
+                                _arguments '--bundle[verified offline bundle]:file:_files' '--hosted[user-trusted hosted endpoint]:url:' '--base[trusted commit ID]:id:' '*--path[selected path]:path:' '--accept-bundle-selection[use bundle selection]' '--ref[expected registered branch ref]:ref:' '--workspace-id[registered workspace ID]:id:' '--grant-id[registered grant ID]:id:' '--grant-generation[current grant generation]:decimal:' '--format[output format]:format:(human json)' '*:destination:_files -/'
                                 ;;
                             status|log)
                                 _arguments '--format[output format]:format:(human json)' '--help[show help]'

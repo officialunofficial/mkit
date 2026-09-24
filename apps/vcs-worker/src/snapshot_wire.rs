@@ -2,11 +2,15 @@
 //! Owner-only, raw-body-signed hosted Snapshot job wire.
 //! Parsing accepts ordinary JSON key order while rejecting duplicate fields.
 
+#[cfg(any(test, target_arch = "wasm32"))]
+use mkit_core::partial::PartialError;
+use mkit_core::partial::PartialPath;
 use serde::{Deserialize, Serialize};
 
 use crate::{access_policy::generation, refs::is_valid_ref_name};
 
 pub const MAX_SNAPSHOT_BODY: usize = 64 * 1024;
+pub const MAX_DISCLOSURE_BODY: usize = 256 * 1024;
 pub const MAX_SELECTED_PACKS: usize = 128;
 
 #[derive(Clone, Debug, Deserialize)]
@@ -83,6 +87,42 @@ pub struct PendingReply {
     pub job_id: String,
 }
 
+/// Subject-only private selection; the signed body is parsed again inside RefStore.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GetWorkspace {
+    pub version: u8,
+    pub workspace_id: String,
+    pub grant_id: String,
+    pub grant_generation: String,
+    pub expected_ref: String,
+    pub expected_base: String,
+    pub paths: Vec<Vec<String>>,
+}
+
+impl GetWorkspace {
+    pub fn checked_paths(&self) -> Option<Vec<PartialPath>> {
+        if self.version != 1
+            || !id(&self.workspace_id)
+            || !id(&self.grant_id)
+            || !id(&self.expected_base)
+            || generation(&self.grant_generation).is_err()
+            || !self.expected_ref.starts_with("refs/heads/")
+            || !is_valid_ref_name(&self.expected_ref)
+            || self.paths.is_empty()
+            || self.paths.len() > 256
+        {
+            return None;
+        }
+        Some(
+            self.paths
+                .iter()
+                .map(|path| path.iter().map(|part| part.as_bytes().to_vec()).collect())
+                .collect(),
+        )
+    }
+}
+
 pub fn id(value: &str) -> bool {
     value.len() == 64
         && value
@@ -152,6 +192,45 @@ pub fn decode<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, &'static
     Ok(value)
 }
 
+pub fn decode_disclosure(body: &[u8]) -> Result<GetWorkspace, &'static str> {
+    if body.len() > MAX_DISCLOSURE_BODY {
+        return Err("disclosure body too large");
+    }
+    let mut deserializer = serde_json::Deserializer::from_slice(body);
+    let value =
+        GetWorkspace::deserialize(&mut deserializer).map_err(|_| "invalid disclosure JSON")?;
+    deserializer.end().map_err(|_| "trailing disclosure JSON")?;
+    Ok(value)
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+pub(crate) fn disclosure_builder_failure(error: &PartialError) -> (u16, &'static str) {
+    match error {
+        PartialError::WitnessTooLarge
+        | PartialError::WorkspaceTooLarge
+        | PartialError::ValidationBudgetExceeded => (429, "resource_exhausted"),
+        PartialError::InvalidPath => (400, "invalid_argument"),
+        PartialError::IncompleteSelection | PartialError::UnsupportedPartialOperation => {
+            (422, "unsupported_profile")
+        }
+        _ => (503, "unavailable"),
+    }
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+pub(crate) fn disclosure_fence_failure(
+    expired: bool,
+    current: bool,
+) -> Option<(u16, &'static str)> {
+    if expired {
+        Some((503, "unavailable"))
+    } else if !current {
+        Some((409, "conflict"))
+    } else {
+        None
+    }
+}
+
 /// Buffer no more than the exact durable HEAD reservation, even if the
 /// enclosing hosted profile would permit a larger object.
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -170,6 +249,10 @@ pub(crate) fn append_reserved(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mkit_core::{
+        hash::from_hex,
+        partial::{PartialLimits, PartialSnapshotBuilder, verify_partial_snapshot},
+    };
 
     #[test]
     fn request_rejects_duplicate_unknown_and_noncanonical_fields() {
@@ -205,5 +288,87 @@ mod tests {
         assert_eq!(bytes, b"ab");
         append_reserved(&mut bytes, b"c", 3).unwrap();
         assert_eq!(bytes, b"abc");
+    }
+
+    #[test]
+    fn committed_subject_http_vectors_are_exact_and_strict() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../rust/tests/golden/hosted-disclosure");
+        let manifest = std::fs::read_to_string(root.join("MANIFEST.txt")).unwrap();
+        let mut names = std::collections::BTreeSet::new();
+        for line in manifest.lines().filter(|line| !line.starts_with('#')) {
+            let (digest, name) = line.split_once("  ").unwrap();
+            assert!(names.insert(name));
+            let body = std::fs::read(root.join(name)).unwrap();
+            assert_eq!(crate::hashing::blake3_hex(&body), digest, "{name}");
+            assert!(body.ends_with(b"\n"));
+        }
+        assert_eq!(names.len(), 13);
+        let parse = |name: &str| {
+            let bytes = std::fs::read(root.join(name)).unwrap();
+            decode_disclosure(&bytes).ok()
+        };
+        assert!(parse("get.json").unwrap().checked_paths().is_some());
+        assert!(parse("wrong-base.json").unwrap().checked_paths().is_some());
+        let duplicate_paths = parse("duplicate-path.json")
+            .unwrap()
+            .checked_paths()
+            .unwrap();
+        assert!(parse("duplicate-field.json").is_none());
+        let meta: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("get.meta.json")).unwrap()).unwrap();
+        assert_eq!(meta["path"], "/mkit/partial/v1/GetWorkspace");
+        assert_eq!(meta["status"], 200);
+        let bundle = std::fs::read(root.join(meta["response_ref"].as_str().unwrap())).unwrap();
+        assert_eq!(
+            bundle.len(),
+            meta["response_length"].as_u64().unwrap() as usize
+        );
+        assert_eq!(
+            crate::hashing::blake3_hex(&bundle),
+            meta["response_digest"].as_str().unwrap()
+        );
+        let base =
+            from_hex("17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90").unwrap();
+        let paths = vec![vec![b"shallow.txt".to_vec()]];
+        let limits = PartialLimits {
+            max_bundle_bytes: 4 * 1024 * 1024,
+            max_witness_bytes: 1024 * 1024,
+            max_total_selected_bytes: 1024 * 1024,
+            max_selected_file_bytes: 256 * 1024,
+            max_objects: 2_048,
+            max_tree_visits: 2_048,
+            max_base_object_bytes: 2 * 1024 * 1024,
+            max_tree_object_bytes: 2 * 1024 * 1024,
+            max_object_bytes: 2 * 1024 * 1024,
+            ..PartialLimits::V1
+        };
+        assert!(PartialSnapshotBuilder::new(base, &duplicate_paths, &limits).is_err());
+        assert!(verify_partial_snapshot(base, &paths, &bundle, &limits).is_ok());
+    }
+
+    #[test]
+    fn disclosure_error_mapping_preserves_resource_and_deadline_codes() {
+        assert_eq!(
+            disclosure_fence_failure(true, true),
+            Some((503, "unavailable"))
+        );
+        assert_eq!(
+            disclosure_fence_failure(false, false),
+            Some((409, "conflict"))
+        );
+        assert_eq!(disclosure_fence_failure(false, true), None);
+        assert_eq!(
+            disclosure_builder_failure(&PartialError::WorkspaceTooLarge),
+            (429, "resource_exhausted")
+        );
+        assert_eq!(
+            disclosure_builder_failure(&PartialError::WitnessTooLarge),
+            (429, "resource_exhausted")
+        );
+        assert_eq!(
+            disclosure_builder_failure(&PartialError::UnsupportedPartialOperation),
+            (422, "unsupported_profile")
+        );
     }
 }

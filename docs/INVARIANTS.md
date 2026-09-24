@@ -67,8 +67,8 @@ revocation, or a portable Commit's validity changes with host policy.
 **Enforced by:** `apps/mkit-hosting-policy/src/lib.rs` bounded signature facts,
 `apps/vcs-worker/src/worker_impl/grant_store.rs` transactional registry and
 `apps/vcs-worker/tests/managed_grants.py` local workerd/SQLite lifecycle.
-Private disclosure and publication remain closed until later phases; their
-separate snapshot-readiness check is not claimed here.
+The separate subject-disclosure route is covered below; this registry does
+not grant legacy TransportService access or imply publication authority.
 
 ## Scoped publication records uncertainty before remote effects
 
@@ -189,8 +189,32 @@ stale async results can be mistaken for an authorized complete Snapshot.
 **Enforced by:** `apps/vcs-worker/src/worker_impl/snapshot_{store,jobs,driver,leases}.rs`,
 `apps/vcs-worker/src/snapshot_frontier.rs`, the core bounded-MKPL and
 `partial::walk` tests, and `apps/vcs-worker/tests/managed_snapshots.py`
-against actual local workerd/R2/SQLite. Private subject disclosure remains
-closed until its separate live-grant check is implemented.
+against actual local workerd/R2/SQLite. The separate subject route must perform
+its own live-grant and current-certificate checks.
+
+## Hosted Snapshot disclosure requires exact live authority and leaks bundle context
+
+**Always:** `GetWorkspace` authenticates the exact raw request and requires
+the current registered workspace, grant generation, subject, policy, exact
+READ paths, head/ref/packmap and certificate before and after storage awaits.
+The route returns only a core-verified bounded MKWB, without public/legacy or
+unsigned fallback. Complete ancestor Trees reveal sibling names, modes and
+hashes; the signed base Commit/Remix reveals its metadata. A grant cannot
+prevent recipients from exfiltrating bytes already received.
+
+**Because:** structural readiness is not authorization, mutable host authority
+can change during asynchronous reads, and portable bundle verification does
+not establish service permission or conceal authenticated bytes.
+
+**If violated:** a stale or foreign grant can disclose private content, an
+unauthorized path can be read, or a partial bundle can be mistaken for
+confidential or complete repository data.
+
+**Enforced by:** `apps/vcs-worker/src/worker_impl/snapshot_disclosure.rs`,
+`apps/vcs-worker/src/worker_impl/grant_store.rs`,
+`rust/crates/mkit-transport-connect/src/hosted.rs`,
+`apps/vcs-worker/tests/managed_disclosure.py`, and
+`rust/crates/mkit-transport-connect/tests/hosted_workerd.rs`.
 
 ## Staged update facts require exact origin and a trusted complete driver
 

@@ -48,7 +48,16 @@ fn within_deadline(deadline: i64) -> Result<()> {
     }
 }
 
-struct HeavyPermit(Rc<Cell<bool>>);
+pub(super) struct HeavyPermit(Rc<Cell<bool>>);
+impl HeavyPermit {
+    pub(super) fn acquire(busy: &Rc<Cell<bool>>) -> Option<Self> {
+        if busy.replace(true) {
+            None
+        } else {
+            Some(Self(busy.clone()))
+        }
+    }
+}
 impl Drop for HeavyPermit {
     fn drop(&mut self) {
         self.0.set(false);
@@ -78,14 +87,14 @@ struct Selected {
     pack_key: String,
 }
 #[derive(Clone, Deserialize)]
-struct Locator {
-    pack_key: String,
-    object_id: String,
-    canonical_len: i64,
-    payload_offset: i64,
-    payload_len: i64,
-    pack_size: i64,
-    etag: String,
+pub(super) struct Locator {
+    pub pack_key: String,
+    pub object_id: String,
+    pub canonical_len: i64,
+    pub payload_offset: i64,
+    pub payload_len: i64,
+    pub pack_size: i64,
+    pub etag: String,
 }
 #[derive(Deserialize)]
 struct Queued {
@@ -408,9 +417,15 @@ impl RefStore {
     }
 
     fn snapshot_locator(&self, job: &Job, id: &str) -> Result<Locator> {
+        self.snapshot_index_locator(&job.id, id)
+    }
+
+    /// Lookup only a builder-requested ID under a certified, leased index.
+    /// The caller must authenticate the subject and check the live lease.
+    pub(super) fn snapshot_index_locator(&self, job_id: &str, id: &str) -> Result<Locator> {
         let rows: Vec<Locator> = self.state.storage().sql().exec(
             "SELECT pack_key,object_id,canonical_len,payload_offset,payload_len,pack_size,etag FROM host_snapshot_catalog WHERE job_id=? AND object_id=? ORDER BY pack_key,ordinal LIMIT 1",
-            vec![job.id.clone().into(), id.into()],
+            vec![job_id.into(), id.into()],
         )?.to_array()?;
         let locator = rows.into_iter().next().ok_or_else(storage_error)?;
         let end = locator
@@ -432,7 +447,11 @@ impl RefStore {
         Ok(locator)
     }
 
-    async fn snapshot_read_range(&self, locator: &Locator, deadline: i64) -> Result<Vec<u8>> {
+    pub(super) async fn snapshot_read_range(
+        &self,
+        locator: &Locator,
+        deadline: i64,
+    ) -> Result<Vec<u8>> {
         within_deadline(deadline)?;
         let bucket = self.env.bucket(STORAGE_BUCKET)?;
         let object = bucket

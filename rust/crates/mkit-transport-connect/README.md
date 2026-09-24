@@ -93,6 +93,20 @@ The native HTTP backend does not follow redirects. Default constructors and
 write-only envelope mode leave reads unsigned. Every call uses the shared
 `BackoffIterator` retry ladder for retryable errors.
 
+`ConnectTransport::get_hosted_workspace` is a separate optional managed-host
+read, not a `TransportService` method. `HostedWorkspaceRequest` supplies the
+registered workspace/grant identifiers, expected base/ref and exact selected
+paths. The method signs the exact JSON request using the same cloned HTTP
+client, performs one request without redirects or retries, enforces the
+configurable pack-transfer timeout across headers and the complete body,
+`hosted_partial_limits` response-byte cap and strict raw `MKWB` response
+headers, then verifies the bundle against the independently supplied base and
+paths before returning `VerifiedHostedBundle`. Failures are surfaced as
+`HostedReadError`; no public/legacy or unsigned fallback is attempted. The
+caller remains responsible for establishing endpoint trust and signing
+identity. See [SPEC-HOSTED-SNAPSHOTS](../../../docs/specs/SPEC-HOSTED-SNAPSHOTS.md)
+and [SPEC-SERVER-ACCESS](../../../docs/specs/SPEC-SERVER-ACCESS.md).
+
 `mkit-transport-http` remains available: its `sparse-checkout`/`pack-shards`
 extensions have no `mkit.transport.v1` equivalent yet.
 
