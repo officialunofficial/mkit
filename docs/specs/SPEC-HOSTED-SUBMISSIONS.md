@@ -11,13 +11,13 @@ Status: **Draft, normative** for the optional managed hosting profile. This
 service protocol admits and validates a signed MKWU update against an existing
 certified complete Snapshot without publishing a ref, packmap, or accepted
 receipt. Core Commit, MKWU, MKWB, MKPL and full-clone bytes are unchanged.
-Reference implementation: `apps/vcs-worker/src/{submission_wire,submission_frontier}.rs`
-and `apps/vcs-worker/src/worker_impl/submission_*.rs`.
 
 ## 1. Authentication and routes
 
-All routes use auth-v2 over the exact HTTP method, route, raw body digest,
-audience and repository. Requests are uncompressed. JSON is exactly one object
+All routes require HTTP POST and auth-v2 over the procedure, exact raw-body
+digest commitment, audience, repository, request time and nonce. The method
+is enforced by routing, not signed by auth-v2. Requests are uncompressed.
+JSON is exactly one object
 with no duplicate or unknown fields; field order and whitespace are not
 canonical. IDs are 64 lowercase hexadecimal characters. Full-width u64
 generation/revision/counter fields are canonical decimal strings; leading

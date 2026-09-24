@@ -437,14 +437,12 @@ impl RefStore {
                 .execute()
                 .await?;
             self.cleanup_current(identity, proof, id, seq)?;
-            if put.is_none() {
-                continue;
-            }
+            let Some(put) = put else { continue };
             self.cleanup_charge(identity, proof, id, seq, bytes.len() as u64)?;
             let response = bucket
                 .get(key.clone())
                 .only_if(Conditional {
-                    etag_matches: Some(put.unwrap().etag()),
+                    etag_matches: Some(put.etag()),
                     ..Default::default()
                 })
                 .execute()

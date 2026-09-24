@@ -1233,9 +1233,9 @@ impl RefStore {
         let mut bytes_reserved = 0u64;
         while let Some(next) = builder.next_request() {
             deadline_ok(deadline, proof)?;
-            if !self
+            if self
                 .submission_attempt_current(identity, proof, original)
-                .is_ok()
+                .is_err()
             {
                 return Err(corrupt());
             }

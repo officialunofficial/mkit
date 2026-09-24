@@ -196,8 +196,8 @@ impl RefStore {
         )?;
         if row.status != "active"
             || row.grant_id != request.grant_id
-            || !decimal(&row.not_before).is_some_and(|start| start <= now())
-            || !decimal(&row.expires).is_some_and(|end| now() < end)
+            || decimal(&row.not_before).is_none_or(|start| start > now())
+            || decimal(&row.expires).is_none_or(|end| now() >= end)
         {
             return Ok(SubmissionGrant::Denied);
         }
@@ -341,8 +341,8 @@ impl RefStore {
         )?;
         if row.status != "active"
             || row.grant_id != request.grant_id
-            || !decimal(&row.not_before).is_some_and(|start| start <= now())
-            || !decimal(&row.expires).is_some_and(|end| now() < end)
+            || decimal(&row.not_before).is_none_or(|start| start > now())
+            || decimal(&row.expires).is_none_or(|end| now() >= end)
         {
             return Ok(DisclosureGrant::Denied);
         }

@@ -543,10 +543,10 @@ impl RefStore {
         }
         let pin = &rows[0];
         if pin.expires_at<job.idle_deadline || pin.head!=lifetime.expected_base || pin.packmap!=job.expected_packmap
-            || self.snapshot_exists(
+            || !self.snapshot_exists(
                 "SELECT 1 AS found FROM host_snapshot_indexes WHERE job_id=? AND generation=? AND catalog_digest=? AND exact_ref=? AND head=? AND packmap=? LIMIT 1",
                 vec![pin.index_job_id.clone().into(),pin.index_generation.clone().into(),pin.catalog_digest.clone().into(),lifetime.exact_ref.clone().into(),pin.head.clone().into(),pin.packmap.clone().into()],
-            )? == false
+            )?
         { return Err(corrupt()); }
         if candidate && !self.snapshot_exists(
             "SELECT 1 AS found FROM host_snapshot_catalog WHERE job_id=? AND object_id=? LIMIT 1",
