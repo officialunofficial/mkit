@@ -116,6 +116,13 @@ Exhaustive TLC (tla2tools 2026.09.23, `TLC=1`), no state left on the queue:
 
 Unconstrained, the push instances were OOM-killed at about 40M states.
 
+Apalache 0.47.2 (`APALACHE=1`): `gc`, `gcGrace0`, `gcPushFastFreshen` and
+`gcPushBounded` `Safety` hold to length 10 (`gcPushBounded` took 3.9 h). Every
+canary and mutant listed in `check.sh` is violated at its stated length,
+including `gcPushBounded::CanaryNoPrunedPushPublished` (10),
+`gcPushFastFreshen::CanaryNoPrunedPushPublished` (9) and
+`mutBoundedLax::NoDangling` (8).
+
 ## Commands
 
 ```

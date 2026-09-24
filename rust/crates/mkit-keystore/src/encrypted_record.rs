@@ -878,19 +878,27 @@ mod kani_proofs {
         EncryptedKeyRecord::decode(&input).is_ok()
     }
 
-    /// `decode` never panics/overflows/reads OOB on any input of 0 or 7
-    /// bytes (empty, and truncated one byte short of the 8-byte magic;
-    /// each length concrete, every byte symbolic). All are shorter than a
-    /// minimal record (59 bytes), so all are rejected. Lengths are
-    /// grouped two per harness (one harness for 0..=8, 9..=11 or {0, 4,
-    /// 7} ran out of memory); 1..=6 bytes are the `_len_*` harnesses.
+    /// `decode` never panics/overflows/reads OOB on the empty input or on
+    /// any 7-byte input (one short of the 8-byte magic; every byte
+    /// symbolic). All inputs shorter than a minimal record (59 bytes)
+    /// are rejected. One or two lengths per harness: one harness for
+    /// 0..=8, 9..=11, {0, 4, 7} or {0, 7} ran out of memory.
     #[kani::proof]
     #[kani::stub(std::fmt::format, no_format)]
     #[kani::stub(core::str::from_utf8, any_utf8)]
     // Largest loop: the 8-byte magic comparison.
     #[kani::unwind(10)]
-    fn software_key_record_decode_prefix_no_panic() {
-        assert!(!decode_at::<0>() && !decode_at::<7>());
+    fn software_key_record_decode_len_0() {
+        assert!(!decode_at::<0>());
+    }
+
+    /// As above for 7 bytes.
+    #[kani::proof]
+    #[kani::stub(std::fmt::format, no_format)]
+    #[kani::stub(core::str::from_utf8, any_utf8)]
+    #[kani::unwind(10)]
+    fn software_key_record_decode_len_7() {
+        assert!(!decode_at::<7>());
     }
 
     /// As above for 1 and 2 bytes.
