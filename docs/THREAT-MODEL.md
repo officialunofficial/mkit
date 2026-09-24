@@ -250,6 +250,37 @@ mkit does NOT defend:
 
 ---
 
+### 3.6 Managed hosted staged-update submission
+
+A signed registered grant subject may submit hostile MKSU/MKWU, graph
+objects, selected paths and retries. A valid MKWU signature proves portable
+bytes, not hosting authority or source completeness. The optional managed
+service binds an immutable repository-global operation to exact Begin bytes,
+charges its grant once, and checks current grant/policy/ref/packmap/certificate
+before every effect. The original subject can later recover only bounded
+opaque state, not hidden source content, under a fresh signature. Even a
+validated candidate is not published or accepted by this route.
+
+The service obtains base objects only through a retained exact structural
+certificate index; candidate-only bytes come from the sealed quarantine
+carrier. It checks graph closure, change origin, exact required-versus-supplied
+inventory and the full declared selected-file fit in bounded stages. A
+retention pin is storage bookkeeping, never permission. The status counters
+disclose aggregate progress/graph size to that authenticated original
+subject; they do not expose hidden paths or object bytes.
+
+Interrupted R2 creates are a separate physical threat: an upload PUT may
+finish after its SQL attempt is fenced. Cleanup never unconditionally deletes
+the carrier key. It installs and confirms a small permanent marker at the
+same key with create-only or ETag-matched conditional writes before refunding
+physical quota. A late create-only PUT cannot replace it. Local workerd race
+tests exercise these orderings; deployed-provider R2 race behavior is not
+claimed without a separate authorized test. A local actor who can arbitrarily
+edit the Durable Object SQLite file or R2 bucket remains outside the remote
+subject threat boundary; inconsistent stored facts fail closed where checked.
+
+---
+
 ## 4. Configuration scope split
 
 mkit reads two configuration files. Their scope is partitioned by

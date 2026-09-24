@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- *(transport)* Optional managed Begin/Upload/Continue/Get hosted staged-update
+  admission with durable graph validation, exact grant-operation charge,
+  historical original-subject result recovery, and owner-only bounded
+  one-key quarantine cleanup. Validation does not publish a ref, packmap,
+  acceptance receipt, or native push command. **SemVer:** additive managed
+  service routes; no portable wire, default Worker, or core validity change.
+
 - *(transport/cli)* Optional authenticated `GetWorkspace` disclosure of a
   ready hosted Snapshot to the exact registered grant subject and selected
   paths, plus native verified-bundle retrieval and explicit hosted workspace

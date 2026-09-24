@@ -401,11 +401,21 @@ impl RefStore {
         }
         // A retired index owns its catalog independently of its (possibly
         // already purged) terminal job. An unexpired read lease pins it.
+        // None is permitted only when *every* submission table is absent.
+        // Partial schema, including a missing pins table, fails closed.
+        let submission_pins = self.submission_meta(&meta.identity)?.is_some();
         while affected < u64::from(max_rows) {
-            let rows: Vec<Id> = self.state.storage().sql().exec(
-                "SELECT job_id FROM host_snapshot_indexes WHERE retired=1 AND NOT EXISTS (SELECT 1 FROM host_snapshot_leases WHERE host_snapshot_leases.job_id=host_snapshot_indexes.job_id AND deadline>=? LIMIT 1) ORDER BY job_id LIMIT 1",
-                vec![current.into()],
-            )?.to_array()?;
+            let query = if submission_pins {
+                "SELECT job_id FROM host_snapshot_indexes WHERE retired=1 AND NOT EXISTS (SELECT 1 FROM host_snapshot_leases WHERE host_snapshot_leases.job_id=host_snapshot_indexes.job_id AND deadline>=? LIMIT 1) AND NOT EXISTS (SELECT 1 FROM host_submission_pins WHERE host_submission_pins.index_job_id=host_snapshot_indexes.job_id AND expires_at>=? LIMIT 1) ORDER BY job_id LIMIT 1"
+            } else {
+                "SELECT job_id FROM host_snapshot_indexes WHERE retired=1 AND NOT EXISTS (SELECT 1 FROM host_snapshot_leases WHERE host_snapshot_leases.job_id=host_snapshot_indexes.job_id AND deadline>=? LIMIT 1) ORDER BY job_id LIMIT 1"
+            };
+            let params = if submission_pins {
+                vec![current.into(), current.into()]
+            } else {
+                vec![current.into()]
+            };
+            let rows: Vec<Id> = self.state.storage().sql().exec(query, params)?.to_array()?;
             let Some(id) = rows.first() else {
                 break;
             };
@@ -514,9 +524,17 @@ impl RefStore {
     }
 
     fn snapshot_has_cleanup(&self, current: i64) -> Result<bool> {
+        let submission_pins = self
+            .submission_meta(&self.submission_identity()?)?
+            .is_some();
+        let retired = if submission_pins {
+            self.snapshot_exists("SELECT 1 AS found FROM host_snapshot_indexes WHERE retired=1 AND NOT EXISTS (SELECT 1 FROM host_snapshot_leases WHERE host_snapshot_leases.job_id=host_snapshot_indexes.job_id AND deadline>=? LIMIT 1) AND NOT EXISTS (SELECT 1 FROM host_submission_pins WHERE host_submission_pins.index_job_id=host_snapshot_indexes.job_id AND expires_at>=? LIMIT 1) LIMIT 1", vec![current.into(),current.into()])?
+        } else {
+            self.snapshot_exists("SELECT 1 AS found FROM host_snapshot_indexes WHERE retired=1 AND NOT EXISTS (SELECT 1 FROM host_snapshot_leases WHERE host_snapshot_leases.job_id=host_snapshot_indexes.job_id AND deadline>=? LIMIT 1) LIMIT 1", vec![current.into()])?
+        };
         Ok(self.snapshot_exists("SELECT 1 AS found FROM host_snapshot_jobs WHERE state IN ('catalog','walk') AND idle_deadline < ? LIMIT 1", vec![current.into()])?
             || self.snapshot_exists("SELECT 1 AS found FROM host_snapshot_leases WHERE deadline < ? LIMIT 1", vec![current.into()])?
-            || self.snapshot_exists("SELECT 1 AS found FROM host_snapshot_indexes WHERE retired=1 AND NOT EXISTS (SELECT 1 FROM host_snapshot_leases WHERE host_snapshot_leases.job_id=host_snapshot_indexes.job_id AND deadline>=? LIMIT 1) LIMIT 1", vec![current.into()])?
+            || retired
             || self.snapshot_exists("SELECT 1 AS found FROM host_snapshot_jobs WHERE state IN ('ready','cancelled','expired','failed','cleaning') AND terminal_deadline < ? LIMIT 1", vec![current.into()])?)
     }
 }

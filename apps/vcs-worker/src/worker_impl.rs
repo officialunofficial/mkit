@@ -53,6 +53,14 @@ pub mod snapshot_jobs;
 pub mod snapshot_leases;
 #[cfg(feature = "managed-access")]
 pub mod snapshot_store;
+#[cfg(feature = "managed-access")]
+pub mod submission_cleanup;
+#[cfg(feature = "managed-access")]
+pub mod submission_driver;
+#[cfg(feature = "managed-access")]
+pub mod submission_jobs;
+#[cfg(feature = "managed-access")]
+pub mod submission_store;
 #[cfg_attr(feature = "managed-access", allow(dead_code))]
 pub mod wire;
 

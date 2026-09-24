@@ -151,7 +151,163 @@ pub(super) enum DisclosureGrant {
     Conflict,
 }
 
+pub(super) enum SubmissionGrant {
+    Allowed {
+        consumed: u64,
+        maximum: u64,
+        policy_generation: String,
+    },
+    Denied,
+    Conflict,
+}
+
 impl RefStore {
+    /// Submission effects require the *current* signed incarnation, not a
+    /// previously verified grant or an owner's legacy transport permission.
+    /// Called inside the caller's short SQL transaction, including after a
+    /// nonce replay lookup. The returned counter ceiling is signed MKHG data.
+    pub(super) fn submission_grant(
+        &self,
+        identity: &Identity,
+        proof: &mkit_worker_common::replay::Proof,
+        request: &crate::submission_wire::BeginSubmission,
+    ) -> Result<SubmissionGrant> {
+        let Some(policy) = self.read_policy(identity)? else {
+            return Ok(SubmissionGrant::Denied);
+        };
+        let authority = policy
+            .validate(identity)
+            .map_err(|_| worker::Error::RustError("invalid policy".into()))?;
+        let Some(workspace) = self.workspace(&identity.repository, &request.workspace_id)? else {
+            return Ok(SubmissionGrant::Denied);
+        };
+        if workspace.audience != identity.audience
+            || workspace.issuer != identity.owner
+            || workspace.subject != proof.author
+            || now() as i64 > proof.expires_at
+        {
+            return Ok(SubmissionGrant::Denied);
+        }
+        let row = self.incarnation(
+            &identity.repository,
+            &request.workspace_id,
+            &workspace.current_generation,
+            &workspace,
+        )?;
+        if row.status != "active"
+            || row.grant_id != request.grant_id
+            || decimal(&row.not_before).is_none_or(|start| start > now())
+            || decimal(&row.expires).is_none_or(|end| now() >= end)
+        {
+            return Ok(SubmissionGrant::Denied);
+        }
+        let raw = URL_SAFE_NO_PAD
+            .decode(&row.envelope)
+            .map_err(|_| worker::Error::RustError("corrupt grant".into()))?;
+        let grant =
+            verify_signature(&raw).map_err(|_| worker::Error::RustError("corrupt grant".into()))?;
+        for path in &request.selected_paths {
+            if !grant
+                .fields
+                .entries
+                .iter()
+                .any(|entry| entry.mask & 1 == 1 && entry.components == *path)
+            {
+                return Ok(SubmissionGrant::Denied);
+            }
+        }
+        if workspace.current_generation != request.grant_generation
+            || workspace.exact_ref != request.expected_ref
+            || workspace.workspace_head != request.expected_base
+            || decimal(&row.authority_generation) != Some(authority)
+        {
+            return Ok(SubmissionGrant::Conflict);
+        }
+        let consumed = decimal(&row.consumed_operations)
+            .ok_or_else(|| worker::Error::RustError("corrupt grant counter".into()))?;
+        Ok(SubmissionGrant::Allowed {
+            consumed,
+            maximum: u64::from(grant.fields.max_operations),
+            policy_generation: policy.generation,
+        })
+    }
+
+    /// Must be in the same SQL transaction as a new lifetime identity row.
+    /// An exact replay never invokes this method.
+    pub(super) fn submission_charge_grant(
+        &self,
+        identity: &Identity,
+        request: &crate::submission_wire::BeginSubmission,
+        consumed: u64,
+        maximum: u64,
+    ) -> Result<bool> {
+        let Some(next) = consumed.checked_add(1).filter(|value| *value <= maximum) else {
+            return Ok(false);
+        };
+        #[derive(serde::Deserialize)]
+        struct Charged {
+            consumed_operations: String,
+        }
+        let rows: Vec<Charged> = self.state.storage().sql().exec(
+            "UPDATE host_grant_incarnations SET consumed_operations=? WHERE repository=? AND workspace_id=? AND grant_generation=? AND grant_id=? AND consumed_operations=? AND status='active' RETURNING consumed_operations",
+            vec![next.to_string().into(), identity.repository.clone().into(), request.workspace_id.clone().into(), request.grant_generation.clone().into(), request.grant_id.clone().into(), consumed.to_string().into()],
+        )?.to_array()?;
+        if rows.len() != 1 || rows[0].consumed_operations != next.to_string() {
+            return Err(worker::Error::RustError("grant charge fence failed".into()));
+        }
+        Ok(true)
+    }
+
+    /// All actual changed files must be in the immutable declared selection
+    /// and carry the signed READ|REPLACE bit. READ-only grants never mutate.
+    pub(super) fn submission_changes_allowed(
+        &self,
+        identity: &Identity,
+        proof: &mkit_worker_common::replay::Proof,
+        request: &crate::submission_wire::BeginSubmission,
+        changes: &[Vec<Vec<u8>>],
+    ) -> Result<bool> {
+        if !matches!(
+            self.submission_grant(identity, proof, request)?,
+            SubmissionGrant::Allowed { .. }
+        ) {
+            return Ok(false);
+        }
+        let workspace = self
+            .workspace(&identity.repository, &request.workspace_id)?
+            .ok_or_else(|| worker::Error::RustError("missing workspace".into()))?;
+        let row = self.incarnation(
+            &identity.repository,
+            &request.workspace_id,
+            &workspace.current_generation,
+            &workspace,
+        )?;
+        let raw = URL_SAFE_NO_PAD
+            .decode(&row.envelope)
+            .map_err(|_| worker::Error::RustError("corrupt grant".into()))?;
+        let grant =
+            verify_signature(&raw).map_err(|_| worker::Error::RustError("corrupt grant".into()))?;
+        for changed in changes {
+            let selected = request.selected_paths.iter().any(|path| {
+                path.len() == changed.len()
+                    && path.iter().zip(changed).all(|(a, b)| a.as_bytes() == b)
+            });
+            let replace = grant.fields.entries.iter().any(|entry| {
+                entry.mask == 3
+                    && entry.components.len() == changed.len()
+                    && entry
+                        .components
+                        .iter()
+                        .zip(changed)
+                        .all(|(a, b)| a.as_bytes() == b)
+            });
+            if !selected || !replace {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     /// Live subject authority for a single exact selection. The signed MKHG
     /// is rechecked from the current registry row; a proof or structural
     /// certificate alone is never a read capability.
@@ -185,8 +341,8 @@ impl RefStore {
         )?;
         if row.status != "active"
             || row.grant_id != request.grant_id
-            || !decimal(&row.not_before).is_some_and(|start| start <= now())
-            || !decimal(&row.expires).is_some_and(|end| now() < end)
+            || decimal(&row.not_before).is_none_or(|start| start > now())
+            || decimal(&row.expires).is_none_or(|end| now() >= end)
         {
             return Ok(DisclosureGrant::Denied);
         }

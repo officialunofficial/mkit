@@ -1,3 +1,4 @@
 /target
 /build
 /.wrangler
+/tests/__pycache__/
