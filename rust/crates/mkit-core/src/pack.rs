@@ -2655,8 +2655,11 @@ mod tests {
 /// nondeterministic "fail, or return any <= 2-byte buffer" — a sound
 /// over-approximation for panic-freedom of the surrounding framing code.
 /// `PackReader::read` itself needs an on-disk `ObjectStore`, which Kani
-/// cannot model; `pack_reader_store_free_pipeline` covers its pure
-/// per-entry steps instead.
+/// cannot model. A store-free harness over its per-entry steps (entry
+/// parsing + the storability gate) ran out of memory even for one 5-byte
+/// entry frame: CBMC's symbolic execution of the `PackError` →
+/// `StoreError` → `std::io::Error` drop glue dominates (~13 min), so
+/// that composition is left to the `pack` fuzz target.
 #[cfg(kani)]
 mod kani_proofs {
     use super::*;
@@ -2683,22 +2686,6 @@ mod kani_proofs {
         let buf: [u8; 2] = kani::any();
         let n: usize = kani::any_where(|&n| n <= 2);
         Ok(buf[..n].to_vec())
-    }
-
-    /// Nondeterministic stand-in for `serialize::deserialize` in the
-    /// pipeline harness: `Err`, a storable blob, or a pack-only delta.
-    /// The decoder itself is verified by the `serialize_*` harnesses;
-    /// with a symbolic tree count it exhausts CBMC's memory here.
-    fn any_deserialize(_data: &[u8]) -> Result<Object, MkitError> {
-        match kani::any::<u8>() {
-            0 => Ok(Object::Blob(crate::object::Blob { data: Vec::new() })),
-            1 => Ok(Object::Delta(crate::object::Delta {
-                base_hash: hash::ZERO,
-                result_size: 0,
-                instructions: Vec::new(),
-            })),
-            _ => Err(MkitError::UnexpectedEof),
-        }
     }
 
     /// Symbolic pack with an entry area of exactly `BODY` bytes (header,
@@ -2803,49 +2790,6 @@ mod kani_proofs {
     #[kani::unwind(4)]
     fn pack_entries_two_entries() {
         entries_at::<10>();
-    }
-
-    fn pipeline_at<const BODY: usize>() -> u32 {
-        let bytes = any_pack::<BODY>();
-        let Ok(entries) = PackEntries::new(&bytes) else {
-            return 0;
-        };
-        let mut stored = 0u32;
-        for item in entries {
-            match item {
-                Ok(PackEntry::Raw { bytes: b }) => {
-                    if let Ok(obj) = validate_storable_object(&b) {
-                        assert!(!matches!(obj, Object::Delta(_)));
-                        stored += 1;
-                    }
-                }
-                Ok(PackEntry::Delta { .. }) => {
-                    panic!("a delta entry needs >= 37 bytes of entry area");
-                }
-                Err(_) => break,
-            }
-        }
-        stored
-    }
-
-    /// `pack` target, store-free: the steps `PackReader::read` runs
-    /// before touching the store — frame parsing and the SPEC-OBJECTS
-    /// storability gate on raw entries (§3.1, §12) — never panic for
-    /// packs with an entry area of exactly 5 bytes (one symbolic entry
-    /// frame; 0..=6 bytes ran out of memory). A delta entry needs >= 37
-    /// bytes, which the harness asserts (so the reader's result-size
-    /// guard + SPEC-DELTA decode are out of reach here; decoding is
-    /// covered by the `delta_*` harnesses). `deserialize` is replaced by
-    /// a nondeterministic outcome (`any_deserialize`), so this checks the
-    /// composition; the decoders are proved by their own harnesses.
-    /// Run with `--cbmc-args --unwindset memcmp.0:33` as above.
-    #[kani::proof]
-    #[kani::stub(crate::hash::hash, toy_hash)]
-    #[kani::stub(zstd_decompress_capped, stub_zstd)]
-    #[kani::stub(crate::serialize::deserialize, any_deserialize)]
-    #[kani::unwind(5)]
-    fn pack_reader_store_free_pipeline() {
-        kani::cover!(pipeline_at::<5>() == 1, "stores_a_raw_entry");
     }
 
     fn writer_rt<const R: usize, const S: usize>(with_delta: bool) {
