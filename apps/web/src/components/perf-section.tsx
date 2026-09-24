@@ -147,8 +147,8 @@ const THEMES: Record<Theme, { title: string; blurb: string }> = {
   everyday: {
     title: 'Everyday operations',
     blurb:
-      'Common operations on small files and unchanged repositories. mkit signs commits and synchronizes object writes ' +
-      'for durability. Git does not sign commits or fsync loose objects by default in these benchmarks.',
+      'Common operations on small files and unchanged repositories. mkit signs every commit and flushes object writes ' +
+      'to disk. In these benchmarks Git uses its defaults: unsigned commits and no fsync for loose objects.',
   },
 }
 
@@ -193,7 +193,7 @@ export function PerfSection() {
             {timings.length > 0 ? (
               <MeasureGroup
                 heading='Command duration'
-                hint='Wall-clock time for whole CLI invocations, mean of repeated runs. Lower is better.'
+                hint='Mean wall-clock time over repeated runs of each CLI command, including process startup. Lower is better.'
               >
                 {timings.map((b) => (
                   <TimingBlock key={b.id} b={b} />
@@ -220,9 +220,9 @@ export function PerfSection() {
                 heading='Transfer size'
                 hint={
                   <>
-                    What a <code className='font-mono text-xs'>push</code> sends after a small edit to a large file the
-                    remote already holds. Delta-on-the-wire encodes the changed chunk against the version the remote
-                    has, instead of re-uploading it whole. Lower is better.
+                    Bytes a <code className='font-mono text-xs'>push</code> sends after a small edit to a large file the
+                    remote already has. With delta encoding, mkit sends the changed chunk as a delta against the
+                    remote’s copy instead of the whole chunk. Lower is better.
                   </>
                 }
               >

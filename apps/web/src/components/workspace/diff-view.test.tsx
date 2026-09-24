@@ -209,13 +209,13 @@ it('shows a selected conflict against current content and returns to HEAD compar
   )
   fireEvent.click(screen.getByRole('button', { name: 'Load draft' }))
   expect(
-    await screen.findByRole('region', { name: 'Current workspace file compared with My edits' }),
+    await screen.findByRole('region', { name: 'Current workspace file compared with Your edits' }),
   ).toBeInTheDocument()
   expect(screen.getByText('Current author edits')).toBeInTheDocument()
   expect(screen.getByText('My local edits')).toBeInTheDocument()
-  expect(screen.getByRole('button', { name: 'Use my edits on current file' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: 'Keep my edits' })).toBeDisabled()
   fireEvent.click(screen.getByRole('checkbox', { name: 'I reviewed the current file and want to keep my edits.' }))
-  fireEvent.click(screen.getByRole('button', { name: 'Use my edits on current file' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Keep my edits' }))
   expect(await screen.findByRole('region', { name: 'Latest version compared with Your edits' })).toBeInTheDocument()
   expect(screen.getByText('My local edits')).toBeInTheDocument()
   component.unmount()

@@ -12,7 +12,7 @@ export default function HomePage() {
     <div className='space-y-8'>
       <Seo
         title='mkit — version control that signs every commit'
-        description='Version control that signs every commit. Every commit carries an Ed25519 signature; every file, folder, and commit is named by its BLAKE3 hash; attestations record signed statements about commits. Written in Rust.'
+        description='A content-addressed version control toolkit written in Rust. Every commit carries an Ed25519 signature, every file, folder, and commit is named by its BLAKE3 hash, and attestations record signed statements about commits.'
         path='/'
         card='Version control that signs every commit.'
       />
@@ -25,11 +25,11 @@ export default function HomePage() {
           <h1 className='ds-h1'>Version control with signed commits</h1>
           <p className='ds-note mt-1'>A content-addressed version control toolkit, written in Rust.</p>
           <p className='mt-2 max-w-prose'>
-            Every commit has an Ed25519 signature that you can verify against the signing key. mkit supports{' '}
+            Every commit carries an Ed25519 signature that you can verify against the signing key. mkit supports{' '}
             <Link to='/parity' className='ds-link'>
               familiar Git commands
             </Link>
-            . It uses BLAKE3 object IDs and stores signed attestations about commits.
+            , names every object by its BLAKE3 hash, and stores signed attestations about commits.
           </p>
 
           <h2 className='ds-h2 rule-square mt-8 pb-2'>Get started</h2>
@@ -37,8 +37,8 @@ export default function HomePage() {
             <div>
               <h3 className='ds-h3'>Create in your browser</h3>
               <p className='mt-2 max-w-prose text-xs leading-4'>
-                Remix the public demo repository into your own project. Edit files, use a terminal, and ask nanocodex to
-                help. Unlock your passkey to get started.
+                Remix the public demo repository into your own project. Edit files, use a terminal, and ask nanocodex
+                for help. Requires a passkey.
               </p>
               <Link to='/create' className='ds-link mt-2 inline-block'>
                 Remix the demo
@@ -50,8 +50,8 @@ export default function HomePage() {
                   installer (see src/install-route.ts). */}
               <InstallCommand command='curl mkit.sh | sh' label='Copy CLI install command' />
               <p className='mt-2 max-w-prose text-xs leading-4'>
-                Detects your platform, verifies the cosign signature, and installs <code>mkit</code> into{' '}
-                <code>~/.local/bin</code>.
+                Downloads the release binary for your platform, verifies its cosign signature, and installs{' '}
+                <code>mkit</code> into <code>~/.local/bin</code>.
               </p>
             </div>
             <div>

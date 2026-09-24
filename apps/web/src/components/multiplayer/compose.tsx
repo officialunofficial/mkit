@@ -123,9 +123,8 @@ export function Compose({
           </label>
           <InfoTip label='About the commit message'>
             <p>
-              The text you’re signing. In this demo the commit points at an{' '}
-              <strong className='text-fg'>empty tree</strong> (no files), so a push is really a{' '}
-              <strong className='text-fg'>signed message</strong>.
+              The text you sign. In this demo the commit points at an <strong className='text-fg'>empty tree</strong>{' '}
+              (no files), so each push is a <strong className='text-fg'>signed message</strong>.
             </p>
             <p className='mt-2'>
               The signature verifies which key signed the text. It does not establish the signer’s real-world identity.
@@ -147,12 +146,12 @@ export function Compose({
           </label>
           <InfoTip label='About branches'>
             <p>
-              A branch refers to a commit. Each push checks the current branch value before updating it, preventing
-              concurrent pushes from overwriting one another.
+              A branch points to a commit. Each push checks which commit the branch points to before updating it, so
+              concurrent pushes cannot overwrite each other.
             </p>
             <p className='mt-2'>
-              Pick an existing branch to add onto it, or start a new one. Remixing a commit makes its own branch under{' '}
-              <code className='font-mono'>forks/…</code>; branching off a commit makes one under{' '}
+              Choose a branch to add to, or start a new one. Remixing a commit creates a branch under{' '}
+              <code className='font-mono'>forks/…</code>; branching from a commit creates one under{' '}
               <code className='font-mono'>b/…</code>.
             </p>
           </InfoTip>
@@ -196,7 +195,7 @@ export function Compose({
       {built.ok ? (
         <Collapsible.Root>
           <Collapsible.Trigger className='group flex w-full cursor-pointer items-center gap-1 text-sm text-muted transition-colors select-none hover:text-fg'>
-            <span className='inline-block transition-transform group-data-[state=open]:rotate-90'>›</span> Signed-commit
+            <span className='inline-block transition-transform group-data-[state=open]:rotate-90'>›</span> Signed commit
             details
           </Collapsible.Trigger>
           {/* Fixed-width label column so every row's value lines up; the qualifier
@@ -269,7 +268,7 @@ export function ComposeDisabled() {
         Sign and push
       </button>
       <p className='text-sm text-muted'>
-        Sign in and unlock signing in Account to write commits. You can still browse this repository’s shared history.
+        Sign in and unlock signing in Account to push. You can browse the commit history without signing in.
       </p>
     </section>
   )

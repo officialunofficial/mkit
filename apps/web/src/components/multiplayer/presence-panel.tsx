@@ -43,7 +43,7 @@ export function PresencePanel({ room }: { room: string }) {
       ? `${onlineCount} other${onlineCount === 1 ? '' : 's'} online`
       : otherViewers > 0
         ? `${otherViewers} viewing`
-        : 'only you here'
+        : 'only you'
 
   if (!open) {
     // Collapsed = an emoji circle in the dock row, with a small count badge.
@@ -69,11 +69,11 @@ export function PresencePanel({ room }: { room: string }) {
     <div className='dock-pop-in w-72 max-w-[calc(100vw-2rem)] overflow-hidden rounded-(--rounded-md) border border-hairline bg-bg text-sm shadow-xl'>
       <header className='flex items-center gap-2 border-b border-hairline px-3 py-2'>
         <span aria-hidden>👥</span>
-        <span className='font-semibold'>Online · repo “{room}”</span>
+        <span className='font-semibold'>Online in “{room}”</span>
         <button
           type='button'
           onClick={() => closePanel('presence')}
-          aria-label='Collapse'
+          aria-label='Collapse online list'
           className='ml-auto rounded-md px-1.5 py-0.5 text-xs text-muted transition-colors hover:bg-fg/10 hover:text-fg'
         >
           −

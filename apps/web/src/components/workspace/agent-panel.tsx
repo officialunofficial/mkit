@@ -113,7 +113,7 @@ export function AgentPanel({
         ) : (
           <div className='ws-agent-empty'>
             <RobotIcon size={28} weight='light' aria-hidden />
-            <h3>What are we building?</h3>
+            <h3>Start a task</h3>
             <p>Ask for a change, a fix, or an explanation. Completed tasks save a project version.</p>
             <div className='ws-suggestions'>
               {['Explain this project', 'Find something to improve'].map((suggestion) => (
@@ -146,7 +146,7 @@ export function AgentPanel({
         {draftCount > 0 ? (
           <div className='ws-draft-notice'>
             <span>
-              {draftCount} browser {draftCount === 1 ? 'edit' : 'edits'} to save first
+              Save {draftCount} browser {draftCount === 1 ? 'edit' : 'edits'} before running a task
             </span>
             <button type='button' onClick={onReview}>
               Review edits
@@ -167,7 +167,7 @@ export function AgentPanel({
           }}
         />
         <div className='ws-composer-actions'>
-          <span>{active ? 'Keeps working if you leave' : '⌘ / Ctrl + Enter'}</span>
+          <span>{active ? 'Continues if you leave this page' : '⌘ / Ctrl + Enter'}</span>
           {active ? (
             <button type='button' className='btn btn--outlined btn--small' disabled={busy} onClick={onStop}>
               <StopIcon size={13} aria-hidden />

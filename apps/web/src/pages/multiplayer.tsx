@@ -15,8 +15,7 @@ export default function MultiplayerPage() {
       <header>
         <h1 className='ds-h1'>Multiplayer mkit</h1>
         <p className='ds-note mt-1'>
-          Everyone shares one repository. Contribute alongside others by pushing commits to a branch, or starting a new
-          one.
+          Everyone pushes to one shared repository. Sign a commit and push it to an existing branch or a new one.
         </p>
         <p className='mt-2 text-sm'>
           <Link to='/create' className='ds-link'>

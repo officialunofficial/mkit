@@ -9,7 +9,7 @@ type Algo = 'ed25519' | 'secp256k1' | 'p256'
 
 const ALGOS: ReadonlyArray<{ value: Algo; label: string; note: string }> = [
   { value: 'ed25519', label: 'Ed25519', note: 'The mkit default.' },
-  { value: 'secp256k1', label: 'Secp256k1', note: 'Used by Bitcoin and Ethereum.' },
+  { value: 'secp256k1', label: 'secp256k1', note: 'Used by Bitcoin and Ethereum.' },
   { value: 'p256', label: 'P-256', note: 'Supported by passkeys and Apple Secure Enclave.' },
 ]
 
@@ -139,7 +139,7 @@ export function AttestDemo() {
 
         <p className={`text-sm ${reason ? 'text-(--status-error-fg)' : 'text-muted'}`}>
           {reason ??
-            'The signature covers this exact claim, this commit, and alice’s key. Change any one and it fails.'}
+            'The signature is valid only for this claim, this commit, and alice’s key. Change any of them and verification fails.'}
         </p>
       </div>
 
@@ -200,7 +200,7 @@ export function AttestDemo() {
           )}
 
           <label className='block'>
-            <span className='mb-2 block text-sm text-muted'>alice’s private key (32 bytes, 64 hex)</span>
+            <span className='mb-2 block text-sm text-muted'>alice’s private key (32 bytes, 64 hex characters)</span>
             <input className={INPUT_CLASSES_XS} value={aliceSeed} readOnly />
           </label>
         </Collapsible.Content>

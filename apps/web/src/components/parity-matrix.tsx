@@ -123,9 +123,7 @@ export function ParityMatrix() {
         <section>
           <div className='rule-square pb-2'>
             <h2 className='ds-h2'>Repository format differences</h2>
-            <p className='ds-note mt-1'>
-              mkit uses BLAKE3 object IDs and stores repository state in .mkit/. These differ from Git&rsquo;s formats.
-            </p>
+            <p className='ds-note mt-1'>Permanent differences in object IDs and repository layout.</p>
           </div>
           <div className='data-frame mt-2'>
             {inherentDivergences.map((n) => (
@@ -136,10 +134,10 @@ export function ParityMatrix() {
 
         <section>
           <div className='rule-square pb-2'>
-            <h2 className='ds-h2'>Data protection</h2>
+            <h2 className='ds-h2'>Safety differences</h2>
             <p className='ds-note mt-1'>
-              mkit requires explicit permission before overwriting local changes and records rewritten commits for
-              recovery.
+              Deliberate departures from Git&rsquo;s defaults that protect local changes, rewritten commits, and the
+              signing identity.
             </p>
           </div>
           <div className='data-frame mt-2'>

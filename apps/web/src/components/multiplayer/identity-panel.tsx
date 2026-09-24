@@ -186,8 +186,8 @@ export function UnlockedHeader({
   // "re-create", which would mint a DIFFERENT passkey + seed (a different
   // player), discarding the recovered one. State the limitation plainly instead.
   const attestDisabledReason = id.ephemeral
-    ? "This is a temporary identity with no saved passkey, so there's nothing to link with."
-    : "Linking needs your passkey's own public key, which is captured only when your identity is first created on this device. Identities recovered on another device (or created before this feature) can't be linked here."
+    ? 'This temporary identity has no saved passkey to link.'
+    : "Linking needs your passkey's public key, which is captured only when the identity is created on this device. Identities recovered on another device, or created before linking was available, can't be linked here."
 
   const onLock = () => id.lock()
 
@@ -253,7 +253,7 @@ export function UnlockedHeader({
       {attest.err ? <p className='text-sm text-(--status-warning-fg)'>{attest.err}</p> : null}
       {id.ephemeral ? (
         <p className='text-sm text-(--status-warning-fg)'>
-          This browser can&rsquo;t save your passkey, so this is a temporary identity that won&rsquo;t be here next
+          This browser can&rsquo;t save your passkey, so this identity is temporary and won&rsquo;t be available next
           time.
         </p>
       ) : null}

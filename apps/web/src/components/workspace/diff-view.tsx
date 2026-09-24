@@ -266,7 +266,7 @@ export function ConflictReview({
                 before={current?.content ?? ''}
                 after={draft.content}
                 beforeLabel='Current workspace file'
-                afterLabel='My edits'
+                afterLabel='Your edits'
               />
               {canResolve ? (
                 <div className='diff-conflict-actions'>
@@ -287,7 +287,7 @@ export function ConflictReview({
                       onResolve({ ...draft, hash: current?.hash ?? null, original: current?.content ?? '' })
                     }
                   >
-                    Use my edits on current file
+                    Keep my edits
                   </button>
                   <p>This updates your draft. Review and save a version to publish it.</p>
                 </div>
@@ -353,7 +353,7 @@ export function ChangesPanel({
           >
             <code>{name}</code>
             <span>
-              {draftState.drafts[name] ? 'Edited locally' : view.changes?.find((item) => item.path === name)?.status}
+              {draftState.drafts[name] ? 'Browser edit' : view.changes?.find((item) => item.path === name)?.status}
             </span>
           </button>
         ))}
@@ -367,7 +367,7 @@ export function ChangesPanel({
               <code>{path}</code>
               <span>
                 {status}
-                {draft ? ' · Local edits' : ' · Workspace changes'}
+                {draft ? ' · Browser edits' : ' · Workspace changes'}
               </span>
             </div>
             {conflict && draft ? (

@@ -45,9 +45,9 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
 function DefaultFallback({ reset }: { reset: () => void }) {
   return (
     <div role='alert' className='space-y-3 rounded-md border border-hairline p-4'>
-      <p className='text-sm font-medium text-fg'>This demo couldn&rsquo;t load.</p>
+      <p className='text-sm font-medium text-fg'>This demo failed to load.</p>
       <p className='max-w-prose text-sm text-muted'>
-        Try again. If the demo still does not load, reload the page and check your connection.
+        Check your connection, then try again. If it still fails, reload the page.
       </p>
       <button
         type='button'

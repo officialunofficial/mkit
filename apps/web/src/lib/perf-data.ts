@@ -59,7 +59,7 @@ export const timingBenchmarks: TimingBenchmark[] = [
     description: 'Append 1 MiB to the already-committed 100 MiB file, then add and commit the new version.',
     mkit: { mean: 0.1609, stddev: 0.0162 },
     git: { mean: 3.3673, stddev: 0.2131 },
-    note: 'mkit is about 20.9 times faster in this measurement. Content-defined chunking re-hashes the file but stores only changed chunks, adding about 1 MiB. Git compresses and stores the full 101 MiB blob again. File rewrite costs depend on the storage system.',
+    note: 'Content-defined chunking re-hashes the file but stores only changed chunks, adding about 1 MiB. Git compresses and stores the full 101 MiB blob again. File rewrite costs depend on the storage system.',
   },
   {
     id: 'big-1g',
@@ -68,16 +68,16 @@ export const timingBenchmarks: TimingBenchmark[] = [
     description: 'Add and commit a 1 GiB file of incompressible bytes, with 3 runs per tool.',
     mkit: { mean: 11.5799, stddev: 1.4542 },
     git: { mean: 41.3829, stddev: 1.0715 },
-    note: 'mkit is about 3.6 times faster in this measurement. Initial processing time scales linearly for both tools. mkit spends time on file I/O and BLAKE3 hashing.',
+    note: 'Time scales linearly with file size for both tools. mkit’s time goes to file I/O and BLAKE3 hashing.',
   },
   {
     id: 'big-100m',
     theme: 'large-files',
     name: 'Add and commit one 100 MiB file',
-    description: 'A single 100 MiB file of incompressible bytes (a stand-in for video or other compressed media).',
+    description: 'The file holds incompressible bytes, standing in for video or other compressed media.',
     mkit: { mean: 0.7899, stddev: 0.256 },
     git: { mean: 3.2911, stddev: 0.0715 },
-    note: 'mkit is about 4.2 times faster in this measurement. It divides the file into roughly 1,300 chunks, hashes each with BLAKE3, and synchronizes writes from a thread pool. Git’s SHA-1 hashing and zlib compression are CPU-bound. mkit has high variation between runs: a 256 ms standard deviation on a 790 ms mean. Shared disk I/O affects these timings.',
+    note: 'mkit divides the file into roughly 1,300 chunks, hashes each with BLAKE3, and syncs writes to disk from a thread pool. Git’s SHA-1 hashing and zlib compression are CPU-bound. mkit has high variation between runs: a 256 ms standard deviation on a 790 ms mean. Shared disk I/O affects these timings.',
   },
   {
     id: 'small-files',
@@ -86,7 +86,7 @@ export const timingBenchmarks: TimingBenchmark[] = [
     description: '100 files of 10 KiB random bytes each, staged and committed together.',
     mkit: { mean: 0.0444, stddev: 0.0088 },
     git: { mean: 0.1391, stddev: 0.0187 },
-    note: 'mkit is about 3.1 times faster in this measurement. Each commit is crash-durable; Git does not fsync loose objects by default. mkit uses two full flushes before renaming objects into place, following Git’s core.fsyncMethod=batch design, enabled by default.',
+    note: 'mkit makes each commit crash-durable by default with two full flushes before renaming objects into place, following Git’s core.fsyncMethod=batch design. Git does not fsync loose objects by default.',
   },
   {
     id: 'rehash-unchanged',
@@ -96,7 +96,7 @@ export const timingBenchmarks: TimingBenchmark[] = [
       'Run touch on the committed file to change its modification time without changing its contents, then run add to re-hash it.',
     mkit: { mean: 0.1405, stddev: 0.0074 },
     git: { mean: 0.3034, stddev: 0.0077 },
-    note: 'mkit is about 2.2 times faster in this measurement. The changed modification time invalidates both stat caches, so both tools read and hash the full 100 MiB again. Git’s SHA-1 pass takes longer than mkit’s BLAKE3 pass on this CPU.',
+    note: 'The changed modification time invalidates both stat caches, so both tools read and hash the full 100 MiB again. Git’s SHA-1 pass takes longer than mkit’s BLAKE3 pass on this CPU.',
   },
   {
     id: 'init',
@@ -111,7 +111,8 @@ export const timingBenchmarks: TimingBenchmark[] = [
     id: 'status-unchanged',
     theme: 'everyday',
     name: 'Status with an unchanged 100 MiB file',
-    description: 'mkit status / git status in a clean repo holding the committed 100 MiB file, stat cache warm.',
+    description:
+      'mkit status and git status in a clean repository containing the committed 100 MiB file, with a warm stat cache.',
     mkit: { mean: 0.0026, stddev: 0.0002 },
     git: { mean: 0.0023, stddev: 0.0002 },
     note: 'Both timings are below hyperfine’s roughly 5 ms shell calibration threshold. Both tools check cached file metadata with one stat call, without reading or hashing file contents.',
@@ -120,10 +121,11 @@ export const timingBenchmarks: TimingBenchmark[] = [
     id: 'checkout-100m',
     theme: 'large-files',
     name: 'Checkout a branch that changed a 100 MiB file',
-    description: 'main holds a committed 100 MiB file; branch v2 appends 1 MiB to it. Time checking out v2 from main.',
+    description:
+      'main has a committed 100 MiB file; branch v2 appends 1 MiB to it. Measures checking out v2 from main.',
     mkit: { mean: 0.2932, stddev: 0.0493 },
     git: { mean: 0.3113, stddev: 0.0293 },
-    note: 'Measured separately from the rest of this page’s rows: 2026-09-19, mkit commit d7afae5938972f1b21410d19080cf3720aa33001, same 4-core container and hyperfine version as `methodology` — added alongside a fix that fans a restored file’s independent chunk reads out across threads (mkit-cli’s add already did this on the write side; checkout/clone/reset/restore had no read-side counterpart). mkit is faster here, but only by about 6% — within this run’s noise (stddevs overlap) rather than a clear win. Materialising a ChunkedBlob writes every chunk to one shared file sequentially regardless, so the fan-out only parallelizes each chunk’s read-and-verify step, not the write; `cargo bench -p mkit-benches --bench restore_chunk_fanout` isolates that step directly and shows a clearer gain (a 128 MiB restore’s chunk-read phase alone: 115.3ms → 83.2ms, ~28%) than the full add/commit/checkout/git-process-spawn round trip this row measures end to end.',
+    note: 'Measured separately from the other rows: 2026-09-19, mkit commit d7afae5938972f1b21410d19080cf3720aa33001, with the same 4-core container and hyperfine version as the methodology below. The measurement accompanied a change that reads a restored file’s independent chunks on multiple threads (mkit-cli’s add already parallelized the write side; checkout, clone, reset, and restore had no read-side equivalent). mkit is about 6% faster, which is within this run’s noise: the standard deviations overlap. Restoring a ChunkedBlob still writes every chunk to one shared file sequentially, so only each chunk’s read-and-verify step runs in parallel. cargo bench -p mkit-benches --bench restore_chunk_fanout measures that step alone and shows a clearer gain: a 128 MiB restore’s chunk-read phase drops from 115.3 ms to 83.2 ms (about 28%). This row measures the full add, commit, checkout, and git process-spawn round trip end to end.',
   },
 ]
 
@@ -135,7 +137,7 @@ export const sizeBenchmarks: SizeBenchmark[] = [
     description: 'Repository size after the first commit of the 100 MiB file.',
     mkitKiB: 106160,
     gitKiB: 102604,
-    note: 'Git uses slightly less storage in this measurement. zlib does not reduce the incompressible content. mkit stores roughly 1,300 chunk objects, while Git stores one loose blob. Each file uses a multiple of the filesystem’s 4 KiB block size, increasing mkit’s overhead on ext4 compared with the previous APFS measurement.',
+    note: 'Git uses slightly less storage in this measurement. zlib does not reduce the incompressible content. mkit stores roughly 1,300 chunk objects, while Git stores one loose blob. Each file occupies whole 4 KiB filesystem blocks, so mkit’s chunk files add more overhead on ext4 than in the previous APFS measurement.',
   },
   {
     id: 'size-big-v2',
@@ -207,19 +209,19 @@ export const methodology = {
     'clean state between runs; 3 runs for the 1 GiB case, hyperfine defaults elsewhere; results from --export-json. ' +
     'Sizes via du -k.',
   workload:
-    'Random (incompressible) bytes, representing already-compressed media such as video. Compressible source code ' +
-    'may compress more in Git’s zlib store and is not what these benchmarks measure.',
+    'Random (incompressible) bytes, representing already-compressed media such as video. Compressible content such ' +
+    'as source code may compress better in Git’s zlib store; these benchmarks do not measure it.',
   caveats: [
-    'Signed vs unsigned: every mkit commit is Ed25519-signed; the git side runs unsigned, as git defaults to. ' +
-      'Signing costs mkit well under a millisecond per commit, but the comparison is asymmetric.',
+    'Signing: every mkit commit is Ed25519-signed; Git commits are unsigned, which is Git’s default. ' +
+      'Signing adds well under a millisecond per mkit commit, but the two sides do different work.',
     'Durability: mkit batches each command’s object writes using two fixed full flushes plus per-file barriers ' +
-      '(SPEC-OBJECTS §10.1), so a commit is durable when the command returns; git does not fsync loose objects by ' +
-      'default. Per-object flushing is available via the durability.objects = per-object config key.',
+      '(SPEC-OBJECTS §10.1), so a commit is durable when the command returns; Git does not fsync loose objects by ' +
+      'default. To flush each object individually, set durability.objects = per-object.',
     'Results are from one shared virtualized container. Scheduling and disk contention affect timings. ' +
       'Other hardware, operating systems, and filesystems may produce different ratios. Flush costs and ' +
       'small-file block-size overhead depend on the hardware and filesystem.',
-    'Both tools were run through their CLI end to end (process spawn included), with stock configuration: no git ' +
-      'core.fsmonitor, no mkit tuning.',
+    'Both tools ran as CLI processes end to end, including process startup, with default configuration: no Git ' +
+      'core.fsmonitor and no mkit tuning.',
   ],
   commands: [
     '# the whole suite is reproducible from the repo root:',

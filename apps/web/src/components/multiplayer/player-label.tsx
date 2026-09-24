@@ -174,7 +174,7 @@ export function OwnPlayerName() {
             setEditing(true)
           }}
         >
-          rename
+          Rename
         </button>
       ) : null}
     </span>

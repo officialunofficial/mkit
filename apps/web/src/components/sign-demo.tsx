@@ -85,7 +85,7 @@ export function SignDemo() {
               aria-label='Signed message (locked)'
             />
             <details className='text-xs text-muted'>
-              <summary className='cursor-pointer select-none'>signature</summary>
+              <summary className='cursor-pointer select-none'>Signature</summary>
               <code className='mt-1 block break-all font-mono'>{signed.sig}</code>
             </details>
           </div>
@@ -94,7 +94,7 @@ export function SignDemo() {
           <div className='space-y-2'>
             <div className='flex flex-wrap items-start justify-between gap-2'>
               <div className='space-y-0.5'>
-                <span className='block text-sm font-semibold text-fg'>The message the verifier received</span>
+                <span className='block text-sm font-semibold text-fg'>Message received by the verifier</span>
                 {/* Nudge the user to break it themselves — drops away once they
                     start editing, when the live verdict takes over. */}
                 {!tampered ? (
@@ -104,7 +104,7 @@ export function SignDemo() {
                 ) : null}
               </div>
               <label className='inline-flex items-center gap-1.5 text-sm text-muted'>
-                Check against
+                Verify with
                 <select
                   value={verifyAs}
                   onChange={(e) => setVerifyAs(e.target.value as typeof ALICE | typeof MALLORY)}
@@ -133,7 +133,7 @@ export function SignDemo() {
                   <span aria-hidden>✗</span>
                   {tampered
                     ? 'Verification failed. The message differs from the signed text.'
-                    : `Verification failed. This signature matches ${ALICE}’s key, not ${MALLORY}’s.`}
+                    : `Verification failed. The signature was made with ${ALICE}’s key, not ${MALLORY}’s.`}
                 </p>
                 {tampered && diff ? (
                   <p className='rounded-md border border-hairline px-3 py-2 font-mono text-sm break-all'>
@@ -148,7 +148,7 @@ export function SignDemo() {
                     ) : null}
                     {diff.after}
                     <span className='mt-1 block text-xs text-muted not-italic'>
-                      highlighted text differs from what was signed
+                      Highlighted text differs from the signed message.
                     </span>
                   </p>
                 ) : null}
