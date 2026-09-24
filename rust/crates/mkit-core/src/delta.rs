@@ -1057,7 +1057,8 @@ mod kani_proofs {
         );
     }
 
-    fn spec_at<const S: usize>() -> bool {
+    /// Checks one stream length; returns the first opcode on `Ok`.
+    fn spec_at<const S: usize>() -> Option<u8> {
         let b: [u8; 3] = kani::any();
         let bl: usize = kani::any_where(|&n| n <= 3);
         let s: [u8; S] = kani::any();
@@ -1072,22 +1073,30 @@ mod kani_proofs {
             }
             _ => panic!("decode and SPEC-DELTA §4 model disagree on accept/reject"),
         }
-        got.is_ok() && s.get(HEADER_LEN) == Some(&OP_COPY)
+        got.ok().and_then(|_| s.get(HEADER_LEN).copied())
     }
 
-    /// Spec conformance at a smaller bound (`base` <= 3 B, `stream` <=
-    /// 16 B = header + one COPY; each stream length concrete, as a
-    /// single symbolic length exhausts CBMC's memory): the outcome
+    /// Spec conformance (`base` <= 3 B): for every stream of 0..=11
+    /// bytes (header, then one opcode, then a 1-byte INSERT) the outcome
     /// (bytes, or error class) agrees with the SPEC-DELTA §4 reference
-    /// algorithm.
+    /// algorithm. One harness for 0..=16 ran out of memory; 12..=15-byte
+    /// streams (truncated COPY operands) are left to the fuzz target and
+    /// `delta_decode_no_panic`.
     #[kani::proof]
-    #[kani::unwind(7)] // max(unwind_for(16), 6-byte output memcmp + 1)
+    #[kani::unwind(7)] // max(unwind_for(11), 6-byte output memcmp + 1)
     fn delta_decode_matches_spec() {
         macro_rules! each_len {
-            ($($n:literal)*) => { $( spec_at::<$n>(); )* };
+            ($($n:literal)*) => { $( let _ = spec_at::<$n>(); )* };
         }
-        each_len!(0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15);
-        kani::cover!(spec_at::<16>(), "ok_copy");
+        each_len!(0 1 2 3 4 5 6 7 8 9 10);
+        kani::cover!(spec_at::<11>() == Some(1), "ok_insert");
+    }
+
+    /// As above for a 16-byte stream: header + one COPY instruction.
+    #[kani::proof]
+    #[kani::unwind(7)]
+    fn delta_spec_copy() {
+        kani::cover!(spec_at::<16>() == Some(OP_COPY), "ok_copy");
     }
 
     /// Canary: the checker must falsify a wrong length law (output one
