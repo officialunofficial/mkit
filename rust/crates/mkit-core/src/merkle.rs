@@ -1595,28 +1595,26 @@ mod kani_proofs {
         short_at::<5>();
     }
 
-    /// At exactly 37 bytes (be32 leaf count + 1-byte varint + one
-    /// digest): no panic, and `Ok` iff the varint is 1 — then the proof
-    /// carries exactly the wire leaf count and digest (§5.2). (Comparing
-    /// `encode(decode(b))` against `b` ran out of memory.)
+    /// At exactly 37 bytes with the sibling-count varint pinned to 1
+    /// (be32 leaf count + `0x01` + one digest, the other 36 bytes
+    /// symbolic): no panic, `Ok`, and the proof carries exactly the wire
+    /// leaf count and digest (§5.2). (With the varint symbolic, the
+    /// symbolic-size sibling `Vec` allocation ran out of memory.)
     #[kani::proof]
-    // Largest loop: the <= 5-byte varint.
-    #[kani::unwind(7)]
+    // Largest loop: the 4-word digest comparison.
+    #[kani::unwind(6)]
     fn merkle_proof_decode_one_sibling() {
-        let buf: [u8; 37] = kani::any();
-        let got = Proof::decode(&buf, 1);
-        assert_eq!(got.is_ok(), buf[4] == 1);
-        if let Ok(p) = got {
-            assert_eq!(
-                p.leaf_count,
-                u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]])
-            );
-            assert_eq!(p.siblings.len(), 1);
-            let d = &p.siblings[0];
-            let w = |x: &[u8], i: usize| u64::from_le_bytes(x[i..i + 8].try_into().expect("8"));
-            assert!((0..4).all(|k| w(d, 8 * k) == w(&buf[5..], 8 * k)));
-            kani::cover!(true, "ok_one_sibling");
-        }
+        let mut buf: [u8; 37] = kani::any();
+        buf[4] = 1;
+        let p = Proof::decode(&buf, 1).expect("one-sibling proof decodes");
+        assert_eq!(
+            p.leaf_count,
+            u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]])
+        );
+        assert_eq!(p.siblings.len(), 1);
+        let d = &p.siblings[0];
+        let w = |x: &[u8], i: usize| u64::from_le_bytes(x[i..i + 8].try_into().expect("8"));
+        assert!((0..4).all(|k| w(d, 8 * k) == w(&buf[5..], 8 * k)));
     }
 
     fn verify_with<const S: usize>() -> bool {

@@ -1434,7 +1434,8 @@ mod kani_proofs {
     /// entries ran out of memory; the §4 strict-order rejection is
     /// covered by the unit tests.)
     #[kani::proof]
-    #[kani::unwind(3)]
+    // Largest loop: the 4-word hash comparison.
+    #[kani::unwind(6)]
     fn serialize_tree_roundtrip_one_entry() {
         let name: u8 = kani::any();
         let mode = match kani::any::<u8>() % 4 {
