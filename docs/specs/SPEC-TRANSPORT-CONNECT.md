@@ -257,6 +257,7 @@ maps onto a standard Connect code:
 | `InvalidResponse` | *(not server-raised &mdash; client-observed: malformed frame, wrong message on a streamed oneof, digest mismatch on `DownloadPack`)* | &mdash; |
 | `ProtocolError` | `invalid_argument` | A client-streaming call whose `header` is missing, arrives after a `chunk`, or whose declared/received byte counts disagree (§6). |
 | `PayloadTooLarge` | `resource_exhausted` | `UploadPack` header `total_bytes` (or the observed stream length) exceeds the server's cap. |
+| `AdmissionRequired{scheme, challenge, description}` | `resource_exhausted` carrying an `AdmissionChallenge` error detail (§5.1) | Any RPC the server will not admit until the caller acts, for example a prepaid balance or a verified contact. |
 | `InsecureScheme` | *(not applicable &mdash; URL-scheme concern, handled client-side before any RPC is made; see SPEC-TRANSPORT §3)* | &mdash; |
 | `RemoteError(String)` | `unknown` (server-raised, deployment-specific advisory failure with no more specific code applies) &mdash; also the client-side **default** target for any Connect code this table does not otherwise list (`internal`, `aborted`, `unauthenticated`, …), matching the variant's existing "catch-all" contract in `protocol.rs`. | A deployment-specific backend failure that does not fit any row above. |
 
@@ -266,7 +267,78 @@ fallback arm for any Connect code not otherwise listed &mdash; the mapping
 is total in both directions, never a partial match. `is_retryable`
 (SPEC-TRANSPORT §7) continues to apply unchanged once translated:
 `unavailable` and `resource_exhausted` are retryable, everything else
-is not.
+is not. The one exception is a `resource_exhausted` error that carries
+an `AdmissionChallenge` detail: it maps to `AdmissionRequired`, which
+is never retryable (§5.1).
+
+### 5.1 Admission challenges
+
+A server MAY refuse an RPC until the caller does something outside
+this protocol. Examples are paying for storage, topping up a quota, or
+verifying an email address. A plain `resource_exhausted` cannot express
+this, because clients retry it on a backoff ladder. `permission_denied`
+cannot express it either, because it gives the caller nothing to act on.
+
+**Error.** The server rejects the RPC with Connect code
+`resource_exhausted` and exactly one error detail of type
+`mkit.transport.v1.AdmissionChallenge`:
+
+```proto
+message AdmissionChallenge {
+  string scheme = 1;      // lowercase token: [a-z0-9][a-z0-9.-]{0,63}
+  bytes challenge = 2;    // opaque to mkit; at most 8,192 bytes
+  string description = 3; // text for a person; at most 512 bytes
+}
+```
+
+The proto message lands with the first implementation (§8). `scheme`
+names the external protocol that interprets `challenge`. This document
+registers no schemes. A deployment can carry, for example, an HTTP
+Payment authentication challenge unchanged in `challenge`.
+
+**Ordering.** The server MUST decide admission before any side effect
+and before it returns any response data. For a signed write it decides
+after write authorization (SPEC-WRITE-GRANTS §7) and before
+replay-record insertion (§7.1). A rejection allocates no replay record
+and charges no quota. For `UploadPack`, the server MUST decide from the
+first `header` message and the signed `pack:<id>:<bytes>` commitment,
+before it reads any chunk. The declared byte count is the price basis.
+This holds even though a client-streaming error reaches the client only
+at the end of the stream.
+
+**Credential.** To answer, the client repeats the same logical
+operation with one extra header:
+
+```text
+X-Admission-Credential: <scheme> <unpadded base64url credential>
+```
+
+The header value MUST NOT exceed 8,192 bytes. While the auth v2
+envelope is still valid, the client reuses its nonce and timestamps,
+as §7.1 requires for any retry. After the envelope expires, the client
+signs a new operation. The credential is opaque to mkit and is not
+covered by the auth v2 signature. The scheme binds the credential to
+its challenge. The server MUST verify it under that scheme before it
+admits the operation. An admitted operation is charged once, even when
+the client retries it after admission (§7.1 replay rules).
+
+**Client behavior.** A client MUST NOT retry `AdmissionRequired`
+automatically. It shows the scheme and description to the user. A
+client MAY run a user-configured admission helper:
+
+- The helper is a command in the user-scoped `admission_helper` key.
+  Repository config MUST NOT set it. SPEC-CONFIG-SECURITY classifies it
+  as UNSAFE when the key is implemented.
+- The client runs it only for a remote listed in
+  `trusted_remote_endpoint`.
+- The client passes the scheme, the remote origin, and the repository
+  identity in the `MKIT_ADMISSION_SCHEME`, `MKIT_ADMISSION_ORIGIN`, and
+  `MKIT_ADMISSION_REPOSITORY` environment variables. It writes the raw
+  challenge bytes to the helper's stdin.
+- Exit status 0 with raw credential bytes on stdout means "retry once
+  with this credential". Any other exit status aborts the operation.
+- The client runs the helper at most once per operation. A second
+  challenge for the same operation fails it.
 
 ---
 
@@ -644,6 +716,10 @@ Explicitly deferred to sibling issues:
   a working-server acceptance gate.
 - Generated TypeScript (`connect-es`) clients for this service (M2
   scope, tracked with mkit#706).
+- Implementing §5.1: the `AdmissionChallenge` proto message, the
+  `AdmissionRequired` `TransportError` variant, the CLI admission
+  helper, and server support in `apps/vcs-worker` (mkit#1086
+  follow-ups).
 - Implementing §7.4: multi-repository routing in `apps/vcs-worker` (one
   ref store per repository, `apps/repo-worker`'s per-room pattern) and
   `X-Repository` on read RPCs in `mkit-transport-connect` (mkit#1084
@@ -655,7 +731,7 @@ Explicitly deferred to sibling issues:
 
 | Version | Status | Changes |
 |---|---|---|
-| `2` | draft | §7.4 repository addressing: repository grammar, `X-Repository` on every RPC, per-repository isolation, single- and multi-repository modes (mkit#1084). §7.1 references the SPEC-WRITE-GRANTS `owner` policy (mkit#1085). |
+| `2` | draft | §7.4 repository addressing: repository grammar, `X-Repository` on every RPC, per-repository isolation, single- and multi-repository modes (mkit#1084). §7.1 references the SPEC-WRITE-GRANTS `owner` policy (mkit#1085). §5.1 admission challenges: `AdmissionRequired`, the `X-Admission-Credential` retry, and the client admission helper (mkit#1086). |
 | `1` | draft | Initial `mkit.transport.v1` proto: 7 wire RPCs covering every `Transport` trait verb (§2), `PackChunk` reused byte-for-byte from `ssh.proto`, `RefExpectation`/`RefEntry` duplicated with pinned wire numbers pending mkit#679's shared-proto extraction. |
 
 ---
@@ -689,6 +765,7 @@ reference Worker).
 | A rejected `UploadPack` stream never creates or overwrites the destination pack. | §6.1's server-side rejection checks, mirroring SPEC-TRANSPORT §4.2's SSH requirement. |
 | `DownloadPack` never sends a partial stream silently &mdash; it either completes with `chunk.last = true` or fails the whole call before any message is sent. | §6.2. |
 | Every `TransportError` variant a server can raise has exactly one Connect code it maps to; a client's inverse mapping is mechanical, not heuristic. | §5's table. |
+| An `AdmissionRequired` rejection has no side effect, allocates no replay record, and is never retried automatically. | §5.1. |
 | No RPC on one repository reads or changes another repository's refs, packs, replay records, or quota. | §7.4 isolation; the `X-Repository` carriage rule. |
 | An `AdvanceRefs` conflict is a typed response value, never a Connect error. | §4 &mdash; matches `AdvanceOutcome`'s three-variant, no-error-variant shape in `protocol.rs`. |
 | The `DownloadPack` Workers-streaming design is documented as unverified end-to-end until a sibling issue proves real client-visible delivery. | §6.3's "Known risk" paragraph; mkit#699/#702's re-verification requirement. |

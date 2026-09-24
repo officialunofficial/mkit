@@ -623,7 +623,10 @@ All transports MUST retry the following errors with exponential
 backoff: `ConnectionFailed`, `ServerError{status >= 500}`, and
 `ServerError{status == 429}`. The default ladder is `1s, 2s, 4s,
 8s, 16s` (5 attempts), with subsequent delays doubling and capped
-at 300 s. The ladder is exposed via
+at 300 s. A `resource_exhausted` Connect error that
+carries an admission challenge is not a 429 for this rule: it maps to
+`AdmissionRequired` and is never retried
+([SPEC-TRANSPORT-CONNECT §5.1](SPEC-TRANSPORT-CONNECT.md#51-admission-challenges)). The ladder is exposed via
 [`BackoffIterator`](../../rust/crates/mkit-core/src/protocol.rs), the
 classifier as [`is_retryable`], and the retry loop itself as
 [`retrying`](../../rust/crates/mkit-core/src/protocol.rs) &mdash; a single
