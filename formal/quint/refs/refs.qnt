@@ -19,7 +19,11 @@
 //     is a documented, unresolved gap (witnessed below, not a bug).
 //
 // Each process runs one operation at a time as explicit steps
-//   begin → acquire* → [record] → readRef → commitRef → release      (ref writers)
+//   begin → acquire* → readRef → commitRef → release                 (ref writers)
+//   amend: record right after its worktree.lock, before the remaining
+//          acquires (commit.rs records "BEFORE moving the branch (under the
+//          worktree lock)"; history + ref locks are taken later by
+//          write_ref_recording_history)
 //   begin → acquire* → expireRead → expireWrite → release            (gc)
 // so a read-check-write can be interleaved with other processes' steps.
 // `commitRef` checks Match against the value seen at `readRef` (TOCTOU window
@@ -39,10 +43,12 @@
 //
 // Bounds (explicit): 3 processes (refs3) or 2 (refs2, Apalache), 2 worktrees
 // (0 = main, 1 = linked id), 2 branch refs (0 = refs/heads/a ≺ 1 =
-// refs/heads/b), hash values {1, 2}, 0 = ref absent, lock plans ≤ 3 locks.
+// refs/heads/b), hash values {1, 2}, 0 = ref absent, lock plans ≤ 4 locks.
 // Multi-ref commands (branch -m, batched remote writes) publish one ref at a
 // time (SPEC-CONCURRENCY §4 last sentence of the order paragraph), so each
-// publication is one single-ref op here.
+// publication is one single-ref op here. Tag / fetch / remote-tracking
+// writes take only refs-<ref>.lock; that lock-set shape is covered by two
+// updateRef ops from different trees (sharing only refs-<ref>.lock).
 //
 // Checks (see refs_test.qnt for pinned scenarios):
 //   quint test refs_test.qnt
@@ -51,6 +57,8 @@
 //   quint run refs.qnt --main refs2_noRefLock --invariant NoLostUpdateLocal   # mutant: expect violation
 //   quint compile --target tlaplus --main refs2 --invariant Safety refs.qnt > refs2.tla
 //   apalache-mc check --init=q_init --next=q_step --inv=refs2_refs_Safety --length=8 refs2.tla
+// (quint verify's gRPC server may be flaky under load; running apalache-mc
+// on the compiled TLA+ is equivalent.)
 // Mutant modules (each must violate the invariant named next to it) are at
 // the end of this file.
 module refs {
@@ -74,7 +82,10 @@ module refs {
   //   commit    : worktree.lock(tree) ≺ history(ref) ≺ refs-<ref>   (commit/merge/...)
   //   amend     : as commit, plus recovery::record before moving the ref
   //   updateRef : worktree.lock(tree) ≺ refs-<ref>                  (history-less path)
-  //   branch    : worktrees.lock ≺ history(ref) ≺ refs-<ref>        (branch -d/-m, checkout guard)
+  //   branch    : worktrees.lock ≺ history(ref) ≺ refs-<ref>        (branch -d/-m)
+  //   checkout  : worktrees.lock ≺ worktree.lock(tree) ≺ history(ref) ≺ refs-<ref>
+  //               (checkout -b/-B: checkout.rs takes the registry lock, then
+  //               its tree's lock, then write_ref_recording_history)
   //   gc        : worktrees.lock ≺ worktree.lock(0) ≺ worktree.lock(1), then recovery::expire
   //   file      : file-transport RefLock only (mkit serve / mkit+file:// push)
   //   mem       : memory transport, no lock
@@ -84,6 +95,7 @@ module refs {
 
   type PState = {
     pc: str,            // idle | acquire | record | read | commit | expireRead | expireWrite | release
+    recorded: bool,     // amend: recovery entry already appended
     op: Op,
     plan: List[Lock],   // locks to take, in this process's acquisition order
     nHeld: int,         // plan[0..nHeld) are held
@@ -114,10 +126,10 @@ module refs {
   pure val REFS: Set[int] = Set(0, 1)
   pure val VALUES: Set[int] = Set(1, 2)
   pure val ABSENT: int = 0
-  pure val KINDS: Set[str] = Set("commit", "amend", "updateRef", "branch", "gc", "file", "mem")
+  pure val KINDS: Set[str] = Set("commit", "amend", "updateRef", "branch", "checkout", "gc", "file", "mem")
   pure val LOCKS: Set[Lock] = 0.to(7)
   pure val FREE: Proc = ""
-  pure val PLAN_IDX: Set[int] = 0.to(2)  // every lock plan has at most 3 locks
+  pure val PLAN_IDX: Set[int] = 0.to(3)  // every lock plan has at most 4 locks
 
   pure val WTS: Lock = 0
   pure val FILE_LOCK: Lock = 7
@@ -127,7 +139,7 @@ module refs {
 
   pure val NOP: Op = { kind: "none", tree: 0, ref: 0, cond: Any, value: 0, del: false }
   pure val IDLE: PState = {
-    pc: "idle", op: NOP, plan: [], nHeld: 0, observed: ABSENT,
+    pc: "idle", recorded: false, op: NOP, plan: [], nHeld: 0, observed: ABSENT,
     pending: Set(), snapshot: Set(), outcome: "",
   }
   pure val NO_FAULTS: Faults = {
@@ -153,12 +165,20 @@ module refs {
       (if (f.noRefLock) [wtLock(op.tree)] else [wtLock(op.tree), refLock(op.ref)])
     else if (op.kind == "branch")
       (if (f.noRefLock) [WTS, histLock(op.ref)] else [WTS, histLock(op.ref), refLock(op.ref)])
+    else if (op.kind == "checkout")
+      (if (f.noRefLock) [WTS, wtLock(op.tree), histLock(op.ref)]
+       else [WTS, wtLock(op.tree), histLock(op.ref), refLock(op.ref)])
     else if (op.kind == "gc") (if (f.gcSkipTrees) [WTS] else [WTS, wtLock(0), wtLock(1)])
     else if (op.kind == "file") (if (f.noFileLock) [] else [FILE_LOCK])
     else []
 
-  pure def bodyStart(kind: str): str =
-    if (kind == "gc") "expireRead" else if (kind == "amend") "record" else "read"
+  pure def bodyStart(kind: str): str = if (kind == "gc") "expireRead" else "read"
+
+  // pc after p holds `n` locks of its plan, the last one taken being `l`.
+  pure def afterAcquire(st: PState, l: Lock, n: int): str =
+    if (st.op.kind == "amend" and l == wtLock(st.op.tree) and not(st.recorded)) "record"
+    else if (n == st.plan.length()) bodyStart(st.op.kind)
+    else "acquire"
 
   // The condition evaluated against a given value (what linearizability demands).
   pure def condHolds(c: Cond, v: int): bool = match c {
@@ -173,6 +193,7 @@ module refs {
     op.del implies (op.kind == "branch" and op.cond != Missing),
     // gc and transports ignore tree; gc ignores ref/cond/val (canonicalise for replay)
     (op.kind == "gc" or op.kind == "file" or op.kind == "mem" or op.kind == "branch") implies op.tree == 0,
+    TREES.contains(op.tree), REFS.contains(op.ref),
     op.kind == "gc" implies (op.ref == 0 and op.cond == Any and op.value == 1),
   }
 
@@ -250,14 +271,14 @@ module refs {
       st.pc == "acquire",
       faults.racyAcquire or owner.get(l) == FREE,
       owner' = owner.set(l, p),
-      procs' = procs.set(p, { ...st, nHeld: st.nHeld + 1,
-                              pc: if (st.nHeld + 1 == st.plan.length()) bodyStart(st.op.kind) else "acquire" }),
+      procs' = procs.set(p, { ...st, nHeld: st.nHeld + 1, pc: afterAcquire(st, l, st.nHeld + 1) }),
       unchangedData,
       lastAction' = { name: "acquire", proc: p, op: st.op, rev: false, lock: l, outcome: "" },
     }
   }
 
-  // record(p): recovery::record — single O_APPEND line (SPEC-CONCURRENCY §3.2).
+  // record(p): recovery::record — single O_APPEND line (SPEC-CONCURRENCY §3.2),
+  // taken while holding only (a prefix of the plan including) worktree.lock.
   action record(p: Proc): bool = {
     val st = procs.get(p)
     all {
@@ -265,7 +286,8 @@ module refs {
       recLog' = recLog.union(Set(nextEntry)),
       nextEntry' = nextEntry + 1,
       recordDuringExpire' = (recordDuringExpire or PROCS.exists(q => procs.get(q).pc == "expireWrite")),
-      procs' = procs.set(p, { ...st, pc: "read" }),
+      procs' = procs.set(p, { ...st, recorded: true,
+                              pc: if (st.nHeld == st.plan.length()) "read" else "acquire" }),
       owner' = owner,
       disk' = disk, mem' = mem, faults' = faults, violations' = violations, lostRecords' = lostRecords,
       lastAction' = { name: "record", proc: p, op: st.op, rev: false, lock: -1, outcome: "" },
@@ -367,7 +389,7 @@ module refs {
     if (kind == "gc") { kind: kind, tree: 0, ref: 0, cond: Any, value: 1, del: false }
     else {
       kind: kind,
-      tree: if (kind == "commit" or kind == "amend" or kind == "updateRef") t else 0,
+      tree: if (kind == "commit" or kind == "amend" or kind == "updateRef" or kind == "checkout") t else 0,
       ref: r, cond: c, value: v,
       del: d and kind == "branch" and c != Missing,
     }

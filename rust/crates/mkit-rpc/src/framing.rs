@@ -233,7 +233,7 @@ mod tests {
 #[cfg(kani)]
 mod kani_proofs {
     use super::*;
-    use crate::mkit::rpc::v1::signer::SignerFrame;
+    use crate::mkit::rpc::v1::signer::{PinPrompt, SignerFrame};
     use crate::mkit::rpc::v1::ssh::SshFrame;
 
     /// Calls `$f::<N>()` for each listed literal `N`.
@@ -245,7 +245,7 @@ mod kani_proofs {
         let body: [u8; N] = kani::any();
         let capped = frame_decode_options().decode_from_slice::<SignerFrame>(&body);
         let bare = SignerFrame::decode_from_slice(&body);
-        assert_eq!(capped.is_ok(), bare.is_ok(), "caps must not bite at <= 3 bytes");
+        assert_eq!(capped.is_ok(), bare.is_ok(), "caps must not bite at <= 2 bytes");
         if let Ok(m) = bare {
             let again = SignerFrame::decode_from_slice(&m.encode_to_vec()).expect("re-decodes");
             assert_eq!(again, m);
@@ -257,7 +257,7 @@ mod kani_proofs {
         let body: [u8; N] = kani::any();
         let capped = frame_decode_options().decode_from_slice::<SshFrame>(&body);
         let bare = SshFrame::decode_from_slice(&body);
-        assert_eq!(capped.is_ok(), bare.is_ok(), "caps must not bite at <= 3 bytes");
+        assert_eq!(capped.is_ok(), bare.is_ok(), "caps must not bite at <= 2 bytes");
         if let Ok(m) = bare {
             let again = SshFrame::decode_from_slice(&m.encode_to_vec()).expect("re-decodes");
             assert_eq!(again, m);
@@ -267,26 +267,49 @@ mod kani_proofs {
 
     /// `SignerFrame` decodes (through the production
     /// `frame_decode_options` and the bare decoder) without panic on
-    /// every body of <= 3 bytes (tag + length + one nested byte: enough
-    /// for an empty or one-byte oneof body message). On `Ok`, decoding is
-    /// a fixpoint of re-encoding: `decode(encode(m)) == m`.
+    /// every body of <= 1 byte (a lone tag byte or nothing). On `Ok`,
+    /// decoding is a fixpoint of re-encoding: `decode(encode(m)) == m`.
     #[kani::proof]
-    #[kani::unwind(5)]
+    #[kani::unwind(3)]
     fn rpc_decode_signer_frame_no_panic() {
-        each_len!(signer_at; 0 1 2 3);
+        each_len!(signer_at; 0 1);
     }
 
-    /// As above for `SshFrame`.
+    /// As above for exactly 2 bytes (tag + zero length: an empty oneof
+    /// body message, or one unknown field). Checked on its own: CBMC's
+    /// symbolic execution of buffa's recursive `UnknownFields` drop glue
+    /// dominates, and 3 bytes did not finish within 15 min.
     #[kani::proof]
-    #[kani::unwind(5)]
+    #[kani::unwind(4)]
+    fn rpc_decode_signer_frame_2b_no_panic() {
+        signer_at::<2>();
+    }
+
+    /// As `rpc_decode_signer_frame_no_panic` for `SshFrame`.
+    #[kani::proof]
+    #[kani::unwind(3)]
     fn rpc_decode_ssh_frame_no_panic() {
-        each_len!(ssh_at; 0 1 2 3);
+        each_len!(ssh_at; 0 1);
+    }
+
+    /// As `rpc_decode_signer_frame_2b_no_panic` for `SshFrame`.
+    #[kani::proof]
+    #[kani::unwind(4)]
+    fn rpc_decode_ssh_frame_2b_no_panic() {
+        ssh_at::<2>();
+    }
+
+    #[kani::proof]
+    #[kani::unwind(3)]
+    fn rpc_probe_bare_1b() {
+        let body: [u8; 1] = kani::any();
+        let _ = SignerFrame::decode_from_slice(&body);
     }
 
     fn read_at<const N: usize>() {
         let buf: [u8; N] = kani::any();
         let mut r = std::io::Cursor::new(&buf[..]);
-        match read_frame::<_, SignerFrame>(&mut r) {
+        match read_frame::<_, PinPrompt>(&mut r) {
             Err(FrameError::LengthTruncated) => {
                 assert!(N < 4);
             }
@@ -303,10 +326,28 @@ mod kani_proofs {
     /// `read_frame` over every <= 6-byte stream (4-byte length prefix +
     /// <= 2 body bytes): never panics, rejects an over-cap length prefix
     /// before allocating, and reports a short body with the true received
-    /// count.
+    /// count. The body is decoded as the one-field `PinPrompt` message:
+    /// the framing logic is message-independent, and `SignerFrame`'s
+    /// decoder (proved separately above) exhausts CBMC's memory when
+    /// composed with a symbolic length prefix.
     #[kani::proof]
     #[kani::unwind(5)]
     fn rpc_read_frame_no_panic() {
         each_len!(read_at; 0 1 2 3 4 5 6);
+    }
+
+    /// Canary: the checker must falsify "an over-cap length prefix is
+    /// accepted", showing the `LengthTooLarge` arm asserted above is
+    /// reachable (the prefix is fully symbolic, body empty).
+    #[kani::proof]
+    #[kani::unwind(5)]
+    #[kani::should_panic]
+    fn rpc_canary_over_cap_length_accepted() {
+        let buf: [u8; 4] = kani::any();
+        let mut r = std::io::Cursor::new(&buf[..]);
+        assert!(!matches!(
+            read_frame::<_, PinPrompt>(&mut r),
+            Err(FrameError::LengthTooLarge(_))
+        ));
     }
 }

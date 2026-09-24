@@ -1046,16 +1046,13 @@ mod kani_proofs {
         );
     }
 
-    /// Spec conformance at a smaller bound (`base` <= 3 B, `stream` <=
-    /// 16 B = header + one COPY): the outcome (bytes, or error class)
-    /// agrees with the SPEC-DELTA §4 reference algorithm.
-    #[kani::proof]
-    #[kani::unwind(7)] // max(unwind_for(16), 6-byte output memcmp + 1)
-    fn delta_decode_matches_spec() {
-        let (b, bl, s, sl) = any_input::<3, 16>();
-        let (base, stream) = (&b[..bl], &s[..sl]);
-        let got = decode(base, stream);
-        match (&got, &spec_apply(base, stream)) {
+    fn spec_at<const S: usize>() -> bool {
+        let b: [u8; 3] = kani::any();
+        let bl: usize = kani::any_where(|&n| n <= 3);
+        let s: [u8; S] = kani::any();
+        let base = &b[..bl];
+        let got = decode(base, &s);
+        match (&got, &spec_apply(base, &s)) {
             (Ok(out), Ok(expected)) => {
                 assert_eq!(out, expected);
             }
@@ -1064,7 +1061,22 @@ mod kani_proofs {
             }
             _ => panic!("decode and SPEC-DELTA §4 model disagree on accept/reject"),
         }
-        kani::cover!(got.is_ok() && stream.get(HEADER_LEN) == Some(&OP_COPY), "ok_copy");
+        got.is_ok() && s.get(HEADER_LEN) == Some(&OP_COPY)
+    }
+
+    /// Spec conformance at a smaller bound (`base` <= 3 B, `stream` <=
+    /// 16 B = header + one COPY; each stream length concrete, as a
+    /// single symbolic length exhausts CBMC's memory): the outcome
+    /// (bytes, or error class) agrees with the SPEC-DELTA §4 reference
+    /// algorithm.
+    #[kani::proof]
+    #[kani::unwind(7)] // max(unwind_for(16), 6-byte output memcmp + 1)
+    fn delta_decode_matches_spec() {
+        macro_rules! each_len {
+            ($($n:literal)*) => { $( spec_at::<$n>(); )* };
+        }
+        each_len!(0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15);
+        kani::cover!(spec_at::<16>(), "ok_copy");
     }
 
     /// Canary: the checker must falsify a wrong length law (output one

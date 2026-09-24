@@ -165,7 +165,7 @@ module refs_test {
       .then(beginOp("p2", op("amend", 1, 0, Match(1), 2, false)))
       .expect(not(canMove("p2")))
       .then(expireWrite("p1")).then(release("p1"))
-      .then(acquire("p2")).then(acquire("p2")).then(acquire("p2")).then(record("p2"))
+      .then(acquire("p2")).then(record("p2")).then(acquire("p2")).then(acquire("p2"))
       .expect(and { Safety, recLog == Set(1) })
 
   // MUTANT: gc expiring under worktrees.lock only -> record interleaves and
@@ -175,7 +175,7 @@ module refs_test {
       .then(beginOp("p1", op("gc", 0, 0, Any, 1, false)))
       .then(acquire("p1")).then(expireRead("p1"))
       .then(beginOp("p2", op("amend", 1, 0, Match(1), 2, false)))
-      .then(acquire("p2")).then(acquire("p2")).then(acquire("p2")).then(record("p2"))
+      .then(acquire("p2")).then(record("p2")).then(acquire("p2")).then(acquire("p2"))
       .expect(not(ExpireHoldsSuperset))
       .then(expireWrite("p1"))
       .expect(and { not(NoRecordExpireInterleave), lostRecords == Set(1) })
@@ -212,4 +212,42 @@ module refs_test {
       .then(beginOp("p2", op("updateRef", 0, 1, Any, 2, false)))
       .then(acquire("p1")).then(acquire("p2"))
       .expect(not(LockOwnership))
+
+  // amend records under its worktree.lock alone (commit.rs: "Record it
+  // BEFORE moving the branch (under the worktree lock)"), before it takes the
+  // history and ref locks — so a record can land while another process holds
+  // those, and gc's worktree.lock superset still excludes it.
+  run amendRecordsBeforeRefLocksTest =
+    initFixed(SAFE_INIT, 1, 1, ABSENT)
+      .then(beginOp("p1", op("updateRef", 1, 0, Match(1), 2, false)))
+      .then(acquire("p1")).then(acquire("p1"))  // wt(1), refs-a
+      .then(beginOp("p2", op("amend", 0, 0, Match(1), 2, false)))
+      .then(acquire("p2"))                      // wt(main)
+      .expect(procs.get("p2").pc == "record")
+      .then(record("p2")).then(acquire("p2"))   // history-a
+      .expect(not(canMove("p2")))               // refs-a held by p1
+      .expect(and { Safety, recLog == Set(1) })
+
+  // checkout -b takes all four §4 classes in order; a gc started later
+  // blocks on worktrees.lock, and one started first blocks the checkout.
+  run checkoutFourLockChainTest =
+    initFixed(SAFE_INIT, ABSENT, 1, ABSENT)
+      .then(beginOp("p1", op("checkout", 1, 0, Missing, 2, false)))
+      .then(acquire("p1")).then(acquire("p1")).then(acquire("p1")).then(acquire("p1"))
+      .expect(and { LockOrderRespected, owner.get(0) == "p1", owner.get(2) == "p1",
+                    owner.get(3) == "p1", owner.get(5) == "p1" })
+      .then(beginOp("p2", op("gc", 0, 0, Any, 1, false)))
+      .expect(not(canMove("p2")))
+      .then(readRef("p1")).then(commitRef("p1"))
+      .expect(and { Safety, disk.get(0) == 2, lastAction.outcome == "ok" })
+
+  // MUTANT: a reversed checkout -b (refs-a first) against a canonical commit
+  // holding wt(main) and waiting for refs-a -> 2-cycle via different classes.
+  run mutantCheckoutMisorderDeadlockTest =
+    initFixed({ ...NO_FAULTS, misorder: true }, 1, 1, ABSENT)
+      .then(begin("p1", op("commit", 0, 0, Match(1), 2, false), false))
+      .then(begin("p2", op("checkout", 0, 0, Any, 2, false), true))
+      .then(acquire("p1"))                        // p1: wt(main)
+      .then(acquire("p2")).then(acquire("p2"))    // p2: refs-a, history-a
+      .expect(and { not(NoDeadlock), not(LockOrderRespected) })
 }

@@ -2859,13 +2859,6 @@ mod kani_proofs {
         assert!(it.next().is_none());
     }
 
-    #[kani::proof]
-    #[kani::stub(crate::hash::hash, toy_hash)]
-    #[kani::unwind(2)]
-    fn zz_w() {
-        writer_rt::<0, 0>(false);
-    }
-
     /// Writer → reader round-trip (SPEC-PACKFILE §1–§3): a pack built by
     /// `PackWriter` from one raw entry (0..=2 symbolic bytes) and an
     /// optional delta entry (symbolic base hash, 0..=2-byte stream) is

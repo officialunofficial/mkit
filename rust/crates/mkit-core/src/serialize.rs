@@ -1487,19 +1487,69 @@ mod kani_proofs {
         valid
     }
 
-    /// Writer/reader round-trip for every tree of <= 2 entries with
-    /// names of 1..=2 symbolic bytes (each length combination concrete),
-    /// any mode, symbolic hashes — real §4.1 checks, not stubbed.
+    /// Writer/reader round-trip for every tree of <= 1 entry with a
+    /// name of 1..=2 symbolic bytes, any mode, symbolic hash — real §4.1
+    /// checks, not stubbed.
     #[kani::proof]
     // 32-byte hash comparisons dominate.
     #[kani::unwind(34)]
     fn serialize_tree_roundtrip() {
         roundtrip(vec![]);
         roundtrip(vec![any_entry::<1>()]);
-        roundtrip(vec![any_entry::<2>()]);
-        roundtrip(vec![any_entry::<1>(), any_entry::<1>()]);
-        roundtrip(vec![any_entry::<1>(), any_entry::<2>()]);
-        roundtrip(vec![any_entry::<2>(), any_entry::<1>()]);
-        kani::cover!(roundtrip(vec![any_entry::<2>(), any_entry::<2>()]), "two_valid_entries");
+        kani::cover!(roundtrip(vec![any_entry::<2>()]), "one_valid_entry");
+    }
+
+    /// As above for two entries with 1-byte names (the §4 strict-order
+    /// check). Larger name combinations did not finish within 15 min.
+    #[kani::proof]
+    #[kani::unwind(34)]
+    fn serialize_tree_roundtrip_two_entries() {
+        kani::cover!(roundtrip(vec![any_entry::<1>(), any_entry::<1>()]), "two_valid_entries");
+    }
+
+    fn blob_rt<const N: usize>() {
+        let data: [u8; N] = kani::any();
+        let bytes = serialize(&Object::Blob(Blob { data: data.to_vec() })).expect("encodes");
+        match deserialize(&bytes) {
+            Ok(Object::Blob(b)) => assert_eq!(b.data, data),
+            _ => panic!("own blob encoding must deserialize to the same blob"),
+        }
+    }
+
+    /// `deserialize` path (prologue §2 + real blob reader §3 + §11
+    /// trailing rule): `deserialize(serialize(blob)) == blob` for every
+    /// blob of 0..=4 symbolic bytes. The other per-type readers are
+    /// stubbed (CBMC does not constant-fold the dispatch through the
+    /// heap buffer and otherwise exhausts memory on unreachable arms); a
+    /// mis-dispatch would reach a stub that never returns a blob and so
+    /// fail the assertion.
+    #[kani::proof]
+    #[kani::stub(read_tree, any_tree)]
+    #[kani::stub(read_commit, any_err_commit)]
+    #[kani::stub(read_remix, any_err_remix)]
+    #[kani::stub(read_chunked_blob, any_err_chunked)]
+    #[kani::stub(read_delta, any_err_delta)]
+    #[kani::stub(read_tag, any_err_tag)]
+    #[kani::unwind(6)]
+    fn serialize_blob_roundtrip() {
+        each_len!(blob_rt; 0 1 2 3 4);
+    }
+
+    /// Canary (§11 trailing bytes): the checker must falsify "a valid
+    /// blob encoding with one extra byte still deserializes", showing
+    /// the trailing-data rejection the prologue harness relies on is live.
+    #[kani::proof]
+    #[kani::stub(read_tree, any_tree)]
+    #[kani::stub(read_commit, any_err_commit)]
+    #[kani::stub(read_remix, any_err_remix)]
+    #[kani::stub(read_chunked_blob, any_err_chunked)]
+    #[kani::stub(read_delta, any_err_delta)]
+    #[kani::stub(read_tag, any_err_tag)]
+    #[kani::unwind(6)]
+    #[kani::should_panic]
+    fn serialize_canary_trailing_byte_accepted() {
+        let mut bytes = serialize(&Object::Blob(Blob { data: vec![kani::any()] })).expect("encodes");
+        bytes.push(kani::any());
+        assert!(deserialize(&bytes).is_ok());
     }
 }

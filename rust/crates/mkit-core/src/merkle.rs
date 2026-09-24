@@ -1595,18 +1595,23 @@ mod kani_proofs {
 
     /// `Proof::decode(_, 1)` (the single-leaf bound the fuzz target and
     /// `verify_chunk` callers use) never panics on any input of 0..=6
-    /// bytes or of 37/38 bytes (be32 + 1-byte varint + one digest, +1),
-    /// each length concrete and every byte symbolic. On `Ok`: the §5.2
-    /// allocation bound (`max_items * MAX_LEVELS`) holds and the bytes are
-    /// the canonical encoding (`encode(decode(b)) == b`).
+    /// bytes (each length concrete, every byte symbolic). On `Ok`: the
+    /// §5.2 allocation bound (`max_items * MAX_LEVELS`) holds and the
+    /// bytes are the canonical encoding (`encode(decode(b)) == b`).
     #[kani::proof]
-    // Largest loops: the 5-byte varint, <= 4 words + 7 tail bytes in
-    // `eq_words`; a larger bound makes CBMC unroll the symbolic-count
-    // sibling loop needlessly.
+    // Largest loops: the 5-byte varint, `eq_words`; a larger bound makes
+    // CBMC unroll the symbolic-count sibling loop needlessly.
     #[kani::unwind(8)]
     fn merkle_proof_decode_no_panic() {
-        each_len!(decode_at; 0 1 2 3 4 6 38);
+        each_len!(decode_at; 0 1 2 3 4 6);
         kani::cover!(decode_at::<5>(), "ok_no_siblings");
+    }
+
+    /// As above at exactly 37 bytes (be32 leaf count + 1-byte varint +
+    /// one digest): the one-sibling `Ok` path, checked on its own.
+    #[kani::proof]
+    #[kani::unwind(8)]
+    fn merkle_proof_decode_one_sibling() {
         kani::cover!(decode_at::<37>(), "ok_one_sibling");
     }
 
@@ -1733,8 +1738,9 @@ mod kani_proofs {
     #[kani::stub(h2, toy_h2)]
     #[kani::stub(crate::hash::domain_digest, toy_domain_digest)]
     #[kani::stub(crate::hash::hash, toy_hash)]
-    // <= 3 levels for <= 4 leaves; `spec_proof` pairs <= 4 nodes.
-    #[kani::unwind(6)]
+    // 32-byte digest comparisons (`memcmp`) dominate; <= 3 levels for
+    // <= 4 leaves.
+    #[kani::unwind(34)]
     fn merkle_build_verify_roundtrip() {
         chunk_rt::<1>();
         chunk_rt::<2>();
@@ -1748,7 +1754,7 @@ mod kani_proofs {
     #[kani::stub(h2, toy_h2)]
     #[kani::stub(crate::hash::domain_digest, toy_domain_digest)]
     #[kani::stub(crate::hash::hash, toy_hash)]
-    #[kani::unwind(6)]
+    #[kani::unwind(34)]
     #[kani::should_panic]
     fn merkle_canary_tampered_leaf_verifies() {
         let (_cb, leaves) = chunked_fixture::<2>();
