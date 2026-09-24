@@ -107,9 +107,13 @@ The `secp256k1-eip191` scheme signs the readable statement, not a hash,
 so a wallet shows the owner what it grants.
 
 For `webauthn-p256`, the verifier MUST require the user-presence flag
-in `authenticatorData`. It MUST NOT require a particular relying-party
-id or origin. A passkey works only on its own relying party, so another
-site cannot obtain an assertion from the owner's credential.
+in `authenticatorData`. It MUST verify the signature over the exact
+received `clientDataJSON` bytes, never a reserialization. A deployment
+SHOULD configure the relying-party id hashes and origins it accepts,
+and then MUST reject an assertion outside that set. A passkey works
+only on its own relying party. A relying party that signs challenges
+for other sites, such as a hosted wallet, can still be asked to sign a
+grant it cannot display (§8).
 
 ### 4.1 Address derivation
 
@@ -173,7 +177,11 @@ Under `owner`, a write is authorized when either:
 
 1. the namespace has the `ed25519-` form and `X-Public-Key` equals its
    key; or
-2. `X-Write-Grant` carries a grant that passes every check in §7.
+2. `X-Write-Grant` carries a grant that passes every check in §7; or
+3. a deployment-defined authority source authorizes `X-Public-Key` for
+   the repository. An example is a ledger's delegated-key record,
+   checked against verified state. The deployment MUST document the
+   source and MUST fail closed when it cannot read that source.
 
 `SetGrantEpoch` acts on a namespace, not a repository. The owner
 signature on its statement is its only authorization.
@@ -203,6 +211,11 @@ insertion, or any side effect of SPEC-TRANSPORT-CONNECT §7.1. A
 rejected grant allocates nothing.
 
 ## 8. Security considerations
+
+- A `webauthn-p256` grant signs a digest, not readable text. The
+  authenticator cannot show the owner what it grants. Owners SHOULD
+  issue grants only from an application they trust to build the
+  statement, and deployments SHOULD pin relying parties (§4).
 
 - A grant without the grantee's Ed25519 private key authorizes
   nothing. Its disclosure is harmless.
