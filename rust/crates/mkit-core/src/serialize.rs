@@ -1241,10 +1241,11 @@ mod tests {
 /// nondeterministic stand-ins, and each reader on its own. Monolithic
 /// runs are out of reach: CBMC symbolically executes every `match` arm
 /// (even with a pinned tag), and the count-driven readers'
-/// `Vec::with_capacity(count)` with a symbolic count exhausts 15 GB at
-/// 12-byte inputs. Inputs are checked at every concrete length up to
-/// the stated bound (one call per length), which keeps slice lengths
-/// constant for CBMC.
+/// `Vec::with_capacity(count)` with a symbolic count runs out of memory
+/// even at 0..=4-byte bodies, so `read_tree` is checked with the entry
+/// count pinned to 1 (every other byte symbolic). Inputs are checked at
+/// every concrete length up to the stated bound (one call per length),
+/// which keeps slice lengths constant for CBMC.
 #[cfg(kani)]
 mod kani_proofs {
     use super::*;
@@ -1355,26 +1356,6 @@ mod kani_proofs {
         kani::any()
     }
 
-    fn read_tree_at<const N: usize>() -> bool {
-        let body: [u8; N] = kani::any();
-        let mut r = Reader::new(&body);
-        let got = read_tree(&mut r);
-        assert!(r.pos <= N);
-        got.is_ok()
-    }
-
-    /// `read_tree` (SPEC-OBJECTS §4) on every body of 0..=4 bytes (count
-    /// symbolic): no panic/overflow/OOB, and the reader never runs past
-    /// its input. §4.1 is stubbed (`any_name_ok`). (At 0..=5 and 0..=8
-    /// bytes CBMC ran out of memory: the entry loop is unrolled for a
-    /// symbolic count although the §4 size pre-check rejects it.)
-    #[kani::proof]
-    #[kani::stub(TreeEntry::validate_name, any_name_ok)]
-    #[kani::unwind(3)]
-    fn serialize_read_tree_no_panic() {
-        each_len!(read_tree_at; 0 1 2 3 4);
-    }
-
     /// `read_tree` on a 42-byte body — the exact size of a one-entry tree
     /// with a 1-byte name — with count = 1 and every other byte symbolic
     /// (so `name_len`, mode and hash range freely): no panic/overflow/OOB,
@@ -1445,54 +1426,46 @@ mod kani_proofs {
         kani::cover!(TreeEntry::validate_name(b"com0.x"), "com0_allowed");
     }
 
-    fn any_entry<const L: usize>() -> TreeEntry {
-        let name: [u8; L] = kani::any();
+    /// Writer/reader round-trip for every one-entry tree with a 1-byte
+    /// symbolic name, any mode and a symbolic hash — real §4.1 checks,
+    /// not stubbed: `read_tree(write_tree(t))` succeeds iff the name is
+    /// §4.1-valid, consumes the whole encoding, and returns the same
+    /// name, mode and hash. (Whole-`Tree` equality, 2-byte names or two
+    /// entries ran out of memory; the §4 strict-order rejection is
+    /// covered by the unit tests.)
+    #[kani::proof]
+    #[kani::unwind(3)]
+    fn serialize_tree_roundtrip_one_entry() {
+        let name: u8 = kani::any();
         let mode = match kani::any::<u8>() % 4 {
             0 => EntryMode::Blob,
             1 => EntryMode::Tree,
             2 => EntryMode::Symlink,
             _ => EntryMode::Executable,
         };
-        TreeEntry {
-            name: name.to_vec(),
-            mode,
-            object_hash: kani::any(),
-        }
-    }
-
-    /// `read_tree(write_tree(t))` succeeds iff every name is §4.1-valid
-    /// and names are strictly ascending (§4) — and then returns `t`.
-    fn roundtrip(entries: Vec<TreeEntry>) -> bool {
-        let tree = Tree { entries };
-        let valid = tree
-            .entries
-            .iter()
-            .all(|e| TreeEntry::validate_name(&e.name))
-            && tree.entries.windows(2).all(|w| w[0].name < w[1].name);
+        let hash: Hash = kani::any();
+        let tree = Tree {
+            entries: vec![TreeEntry {
+                name: vec![name],
+                mode,
+                object_hash: hash,
+            }],
+        };
         let mut bytes = Vec::new();
         write_tree(&mut bytes, &tree).expect("small tree encodes");
         let mut r = Reader::new(&bytes);
         let back = read_tree(&mut r);
-        assert_eq!(back.is_ok(), valid);
+        assert_eq!(back.is_ok(), TreeEntry::validate_name(&[name]));
         if let Ok(t) = back {
             assert_eq!(r.remaining(), 0);
-            assert_eq!(t, tree);
+            assert_eq!(t.entries.len(), 1);
+            let e = &t.entries[0];
+            assert!(e.name.len() == 1 && e.name[0] == name && e.mode == mode);
+            let w =
+                |h: &Hash, k: usize| u64::from_le_bytes(h[8 * k..8 * k + 8].try_into().expect("8"));
+            assert!((0..4).all(|k| w(&e.object_hash, k) == w(&hash, k)));
+            kani::cover!(true, "one_valid_entry");
         }
-        valid
-    }
-
-    /// Writer/reader round-trip for every tree of <= 1 entry with a
-    /// name of 1..=2 symbolic bytes, any mode, symbolic hash — real §4.1
-    /// checks, not stubbed. (Two-entry trees ran out of memory; the §4
-    /// strict-order rejection is covered by the unit tests.)
-    #[kani::proof]
-    // Run with `-Z unstable-options --cbmc-args --unwindset memcmp.0:33`
-    // for the 32-byte hash comparisons; every other loop runs <= 2 times.
-    #[kani::unwind(3)]
-    fn serialize_tree_roundtrip_one_entry() {
-        roundtrip(vec![]);
-        roundtrip(vec![any_entry::<1>()]);
-        kani::cover!(roundtrip(vec![any_entry::<2>()]), "one_valid_entry");
     }
 
     fn blob_rt<const N: usize>() {

@@ -1738,7 +1738,6 @@ mod kani_proofs {
         let pos: u32 = kani::any_where(|&p: &u32| p >= 1 && p <= N as u32);
         let (root, siblings) = spec_proof(&leaves, pos as usize);
         let id = wrap_id(ObjectKind::ChunkedBlob, &root);
-        assert_eq!(compute_chunked_id(&cb), id, "§1.1/§2 identity");
         #[allow(clippy::cast_possible_truncation)]
         let proof = Proof {
             leaf_count: leaves.len() as u32,
@@ -1754,13 +1753,14 @@ mod kani_proofs {
         );
     }
 
-    /// Spec conformance (§1.1, §2, §5.3–§5.5): for every `ChunkedBlob`
-    /// of 1 symbolic chunk (any sizes) and every chunk position,
-    /// `compute_chunked_id` equals the §2 wrap of an independently built
-    /// §1.1 root, and the proof an independent §5.3 builder produces has
-    /// the model sibling count and is accepted by `verify_chunk`.
-    /// (`build_chunk_proof` itself goes through a `BTreeSet`, which Kani
-    /// cannot finish within budget; 3 chunks ran out of memory.)
+    /// Spec conformance (§1.1, §5.3–§5.5): for every `ChunkedBlob` of 1
+    /// symbolic chunk (any sizes) and every chunk position, the proof an
+    /// independent §5.3 builder produces for the independently built §1.1
+    /// root (wrapped per §2) has the model sibling count and is accepted
+    /// by `verify_chunk`. (`build_chunk_proof` goes through a `BTreeSet`
+    /// and `compute_chunked_id` through `build_bmt`'s `Vec<Vec<Hash>>`
+    /// levels; both ran out of memory, so the id side is checked for one
+    /// chunk only, in `merkle_chunked_id_matches_spec`.)
     #[kani::proof]
     #[kani::stub(h2, toy_h2)]
     #[kani::stub(crate::hash::domain_digest, toy_domain_digest)]
@@ -1783,6 +1783,24 @@ mod kani_proofs {
     #[kani::unwind(5)]
     fn merkle_roundtrip_two_chunks() {
         chunk_rt::<2>();
+    }
+
+    /// §1.1/§2 identity: `compute_chunked_id` of a 1-chunk blob (symbolic
+    /// chunk and sizes) equals the §2 wrap of the independently built
+    /// §1.1 root over `[meta, chunk]`.
+    #[kani::proof]
+    #[kani::stub(h2, toy_h2)]
+    #[kani::stub(crate::hash::domain_digest, toy_domain_digest)]
+    #[kani::stub(crate::hash::hash, toy_hash)]
+    // As above: `--cbmc-args --unwindset memcmp.0:33`.
+    #[kani::unwind(5)]
+    fn merkle_chunked_id_matches_spec() {
+        let (cb, leaves) = chunked_fixture::<1>();
+        let (root, _) = spec_proof(&leaves, 1);
+        assert_eq!(
+            compute_chunked_id(&cb),
+            wrap_id(ObjectKind::ChunkedBlob, &root)
+        );
     }
 
     /// Canary (§6 "leaf tampered"): the checker must find a forged chunk
