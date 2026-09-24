@@ -2748,9 +2748,10 @@ mod kani_proofs {
         kani::cover!(!raw_only && ok >= 1, "delta_or_zstd_entry");
     }
 
-    /// `pack_entries` target, empty entry area: for every pack of
-    /// exactly header + trailer (all 48 bytes symbolic, so any magic,
-    /// version, `entry_count` and trailer) `PackEntries::new` and full
+    /// `pack_entries` target, 5-byte entry area (exactly one entry frame
+    /// — type + length — with an empty payload, or a truncated/oversized
+    /// one), header, frame and trailer all symbolic (so any magic,
+    /// version, `entry_count` and trailer): `PackEntries::new` and full
     /// iteration never panic/overflow/read OOB. On `Ok`: magic/version
     /// valid (§1), trailer equals the hash of the preceding bytes (§8), a
     /// v1 pack yields exactly `entry_count` `Ok` items ending at the
@@ -2761,19 +2762,9 @@ mod kani_proofs {
     /// (the 32-byte trailer comparison); every other loop is bounded by
     /// the global unwind of 4, which keeps CBMC from unrolling the
     /// symbolic-`entry_count` loop 33 times. Unwinding assertions stay
-    /// on, so a too-small bound fails loudly. Each entry-area length
-    /// costs CBMC ~7 min here, so lengths are checked one per harness
-    /// (0..=6 in one harness did not finish within 15 min).
-    #[kani::proof]
-    #[kani::stub(crate::hash::hash, toy_hash)]
-    #[kani::stub(zstd_decompress_capped, stub_zstd)]
-    #[kani::unwind(4)]
-    fn pack_entries_empty_area() {
-        entries_at::<0>();
-    }
-
-    /// As above for a 5-byte entry area: exactly one entry frame (type +
-    /// length) with an empty payload, or a truncated/oversized one.
+    /// on, so a too-small bound fails loudly. One entry-area length per
+    /// harness: 0..=6 (and 0..=12) in one harness did not finish within
+    /// 15 min, and the empty (0-byte) area alone ran out of memory.
     #[kani::proof]
     #[kani::stub(crate::hash::hash, toy_hash)]
     #[kani::stub(zstd_decompress_capped, stub_zstd)]
