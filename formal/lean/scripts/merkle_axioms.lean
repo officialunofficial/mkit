@@ -1,0 +1,42 @@
+import MkitFormal.Merkle
+-- Axiom audit for the MKIT-24 theorems (run by scripts/difftest-merkle.sh):
+-- only Lean's standard axioms may appear, never `sorryAx` or `ofReduceBool`.
+open MkitFormal.Merkle MkitFormal.Merkle.Canaries
+#print axioms prove_eq_sibsAux
+#print axioms complete
+#print axioms complete_id
+#print axioms complete_chunk
+#print axioms sound
+#print axioms sound_id
+#print axioms unique_proof
+#print axioms cross_kind_rejected
+#print axioms empty_tree_no_proof
+#print axioms chunk_pos0_rejected
+#print axioms accepted_length
+#print axioms extra_sibling_rejected
+#print axioms dropped_sibling_rejected
+#print axioms halvings_eq_levelsInTree
+#print axioms proof_length_le_maxLevels
+#print axioms selPath_bounds
+#print axioms selPath_levels_increasing
+#print axioms selMulti_singleton
+#print axioms reconstructMulti_nil
+#print axioms reconstructMulti_dup
+#print axioms reconstructMulti_oob
+#print axioms verifyChunksMulti_pos0
+#print axioms verifyChunksRange_pos0
+#print axioms foldMulti_single
+#print axioms reconstructMulti_singleton
+#print axioms complete_multi_singleton
+#print axioms sound_multi_singleton
+#print axioms termHasher_inj
+#print axioms sound_nonvacuous
+#print axioms complete_witness
+#print axioms leafInj_needed
+#print axioms nodeInj_needed
+#print axioms finInj_needed
+#print axioms wrapInj_needed
+#print axioms mutant_control
+#print axioms mutant_noSwap_incomplete
+#print axioms mutant_v1Dup_incomplete
+#print axioms mutant_v1_selection_rejected

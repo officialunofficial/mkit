@@ -917,3 +917,247 @@ mod tests {
         }
     }
 }
+
+/// Kani proof harnesses (`cargo kani -p mkit-core --no-default-features
+/// -Z stubbing --harness delta_`; with the default `pack-zstd` feature's
+/// C `zstd` dependency linked in, CBMC ran out of memory on most
+/// harnesses of this crate).
+/// Bounds are stated per harness; `kani::cover!` sites show every
+/// asserted property has a reachable, non-vacuous `Ok` path.
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    /// Stream bound: header (9) + one COPY (7) + one 1-byte INSERT (2)
+    /// + 2 spare bytes, so every opcode kind and every error arm is reachable.
+    const MAX_STREAM: usize = 20;
+    /// Base bound.
+    const MAX_BASE: usize = 4;
+    /// Every instruction consumes >= 2 stream bytes (INSERT) or ends the
+    /// loop, so `decode`'s loop runs <= (S - 9) / 2 + 1 times; +1 for the
+    /// exit test. A tight unwind matters: CBMC cost grows sharply with
+    /// every surplus (infeasible) unrolling.
+    const fn unwind_for(s: usize) -> usize {
+        (s - HEADER_LEN) / 2 + 2
+    }
+    // Keep the literal `#[kani::unwind(..)]` values below in sync.
+    const _: [(); 7] = [(); unwind_for(MAX_STREAM)];
+    const _: [(); 5] = [(); unwind_for(16)];
+
+    /// Coarse outcome class shared by `decode` and the spec model.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Class {
+        Eof,
+        Version,
+        Corrupt,
+    }
+
+    fn class_of(e: &MkitError) -> Class {
+        match e {
+            MkitError::UnexpectedEof => Class::Eof,
+            MkitError::UnsupportedObjectVersion => Class::Version,
+            MkitError::DeltaCorrupt(_) => Class::Corrupt,
+            _ => panic!("decode returned an error kind outside SPEC-DELTA §2/§4"),
+        }
+    }
+
+    /// Direct transcription of the SPEC-DELTA §4 reference pseudo-code
+    /// (streams shorter than the §2 header are truncation → Eof).
+    fn spec_apply(base: &[u8], s: &[u8]) -> Result<Vec<u8>, Class> {
+        if s.len() < 9 {
+            return Err(Class::Eof);
+        }
+        if s[0] != 0x01 {
+            return Err(Class::Version);
+        }
+        let le32 = |p: usize| u32::from_le_bytes([s[p], s[p + 1], s[p + 2], s[p + 3]]) as u64;
+        if base.len() as u64 != le32(1) {
+            return Err(Class::Corrupt);
+        }
+        let result_len = le32(5);
+        let mut out = Vec::new();
+        let mut pos = 9usize;
+        while pos < s.len() {
+            let op = s[pos];
+            pos += 1;
+            if op & 0x80 != 0 {
+                if op & 0x7F != 0 {
+                    return Err(Class::Corrupt);
+                }
+                if pos + 6 > s.len() {
+                    return Err(Class::Eof);
+                }
+                let offset = le32(pos);
+                let length = u64::from(u16::from_le_bytes([s[pos + 4], s[pos + 5]]));
+                pos += 6;
+                if length == 0
+                    || offset + length > base.len() as u64
+                    || out.len() as u64 + length > result_len
+                {
+                    return Err(Class::Corrupt);
+                }
+                out.extend_from_slice(&base[offset as usize..(offset + length) as usize]);
+            } else if op > 0 {
+                let n = op as usize;
+                if pos + n > s.len() {
+                    return Err(Class::Eof);
+                }
+                if out.len() as u64 + n as u64 > result_len {
+                    return Err(Class::Corrupt);
+                }
+                out.extend_from_slice(&s[pos..pos + n]);
+                pos += n;
+            } else {
+                return Err(Class::Corrupt);
+            }
+        }
+        if out.len() as u64 != result_len {
+            return Err(Class::Corrupt);
+        }
+        Ok(out)
+    }
+
+    /// Symbolic `(base, stream)` with `base.len() <= B`, `stream.len() <= S`.
+    fn any_input<const B: usize, const S: usize>() -> ([u8; B], usize, [u8; S], usize) {
+        (
+            kani::any(),
+            kani::any_where(|&n| n <= B),
+            kani::any(),
+            kani::any_where(|&n| n <= S),
+        )
+    }
+
+    /// No panic / overflow / OOB for every `base` (<= 4 B) and `stream`
+    /// (<= 20 B); on `Ok`, output length equals the header `result_len`
+    /// (SPEC-DELTA §2).
+    #[kani::proof]
+    #[kani::unwind(7)] // unwind_for(MAX_STREAM)
+    fn delta_decode_no_panic() {
+        let (b, bl, s, sl) = any_input::<MAX_BASE, MAX_STREAM>();
+        let stream = &s[..sl];
+        let got = decode(&b[..bl], stream);
+        if let Ok(out) = &got {
+            let declared = u32::from_le_bytes([stream[5], stream[6], stream[7], stream[8]]);
+            assert_eq!(out.len(), declared as usize);
+        }
+        // Non-vacuity: success through each opcode kind is reachable.
+        kani::cover!(got.is_ok() && sl > HEADER_LEN, "ok_nonempty");
+        kani::cover!(
+            got.is_ok() && stream.get(HEADER_LEN) == Some(&OP_COPY),
+            "ok_copy"
+        );
+        kani::cover!(
+            matches!(
+                got,
+                Err(MkitError::DeltaCorrupt(
+                    DeltaCorruption::ResultLenOverrun { .. }
+                ))
+            ),
+            "overrun"
+        );
+    }
+
+    /// Checks one stream length; returns the first opcode on `Ok`.
+    fn spec_at<const S: usize>() -> Option<u8> {
+        let b: [u8; 3] = kani::any();
+        let bl: usize = kani::any_where(|&n| n <= 3);
+        let s: [u8; S] = kani::any();
+        let base = &b[..bl];
+        let got = decode(base, &s);
+        match (&got, &spec_apply(base, &s)) {
+            (Ok(out), Ok(expected)) => {
+                assert_eq!(out, expected);
+            }
+            (Err(e), Err(c)) => {
+                assert_eq!(&class_of(e), c);
+            }
+            _ => panic!("decode and SPEC-DELTA §4 model disagree on accept/reject"),
+        }
+        got.ok().and_then(|_| s.get(HEADER_LEN).copied())
+    }
+
+    /// Spec conformance (`base` <= 3 B): for every stream of 8 or 9
+    /// bytes (one short of the §2 header, and the bare header) the
+    /// outcome (bytes, or error class) agrees with the SPEC-DELTA §4
+    /// reference algorithm. Two stream lengths per harness: 0..=16 or
+    /// 0..=11 in one harness ran out of memory, so 0..=7 (truncation,
+    /// like 8) and 12..=15 (truncated COPY operands) are left to
+    /// `delta_decode_no_panic` and the fuzz target.
+    #[kani::proof]
+    #[kani::unwind(7)] // max(unwind_for(16), 6-byte output memcmp + 1)
+    fn delta_spec_header() {
+        let _ = spec_at::<8>();
+        let _ = spec_at::<9>();
+    }
+
+    /// As above for 10 and 11 bytes: one opcode byte, then a 1-byte
+    /// INSERT.
+    #[kani::proof]
+    #[kani::unwind(7)]
+    fn delta_spec_insert() {
+        let _ = spec_at::<10>();
+        kani::cover!(spec_at::<11>() == Some(1), "ok_insert");
+    }
+
+    /// As above for a 16-byte stream: header + one COPY instruction.
+    #[kani::proof]
+    #[kani::unwind(7)]
+    fn delta_spec_copy() {
+        kani::cover!(spec_at::<16>() == Some(OP_COPY), "ok_copy");
+    }
+
+    /// Canary: the checker must falsify a wrong length law (output one
+    /// byte longer than declared). Proves the `Ok` length assertion
+    /// above is not trivially satisfied.
+    #[kani::proof]
+    #[kani::unwind(7)] // unwind_for(MAX_STREAM)
+    #[kani::should_panic]
+    fn delta_decode_canary_wrong_length() {
+        let stream_buf: [u8; MAX_STREAM] = kani::any();
+        let stream_len: usize = kani::any_where(|&n| n <= MAX_STREAM);
+        let stream = &stream_buf[..stream_len];
+        if let Ok(out) = decode(&[], stream) {
+            let declared = u32::from_le_bytes([stream[5], stream[6], stream[7], stream[8]]);
+            assert_eq!(out.len(), declared as usize + 1);
+        }
+    }
+
+    /// Fixed seed for the writer's block index: the seed only chooses
+    /// hash-table buckets, never the emitted stream, and `std`'s
+    /// `RandomState` is expensive to model.
+    fn fixed_seed() -> usize {
+        0
+    }
+
+    /// One round-trip at concrete lengths `B`, `R` (concrete lengths let
+    /// CBMC constant-fold the writer's block-index loop away).
+    fn roundtrip_at<const B: usize, const R: usize>() {
+        let b: [u8; B] = kani::any();
+        let r: [u8; R] = kani::any();
+        let stream = encode(&b, &r).expect("small lengths fit u32");
+        assert_eq!(decode(&b, &stream).expect("own stream decodes"), &r);
+    }
+
+    /// `decode(base, encode(base, result)) == result` for every
+    /// `base`, `result` of <= 3 bytes (each length pair checked at its
+    /// concrete size; below `BLOCK_SIZE`, so the writer emits header +
+    /// INSERTs only — COPY emission is covered by the proptest
+    /// round-trip in `tests`).
+    #[kani::proof]
+    #[kani::stub(random_seed, fixed_seed)]
+    #[kani::unwind(5)]
+    fn delta_encode_decode_roundtrip() {
+        macro_rules! each_r {
+            ($b:literal) => {
+                roundtrip_at::<$b, 0>();
+                roundtrip_at::<$b, 1>();
+                roundtrip_at::<$b, 2>();
+                roundtrip_at::<$b, 3>();
+            };
+        }
+        each_r!(0);
+        each_r!(1);
+        each_r!(2);
+        each_r!(3);
+    }
+}

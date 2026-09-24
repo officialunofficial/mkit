@@ -69,6 +69,10 @@ missing_debug_implementations = "warn"
 # keeps internal APIs honestly scoped (`pub(crate)`) instead of leaking a
 # wider surface than callers can actually use.
 unreachable_pub = "warn"
+# Kani proof harnesses live in `#[cfg(kani)]` modules next to the code
+# they verify (`cargo kani` sets the cfg); declare it so normal builds
+# don't flag it as unexpected.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
