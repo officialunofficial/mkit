@@ -1076,19 +1076,26 @@ mod kani_proofs {
         got.ok().and_then(|_| s.get(HEADER_LEN).copied())
     }
 
-    /// Spec conformance (`base` <= 3 B): for every stream of 0..=11
-    /// bytes (header, then one opcode, then a 1-byte INSERT) the outcome
-    /// (bytes, or error class) agrees with the SPEC-DELTA §4 reference
-    /// algorithm. One harness for 0..=16 ran out of memory; 12..=15-byte
-    /// streams (truncated COPY operands) are left to the fuzz target and
-    /// `delta_decode_no_panic`.
+    /// Spec conformance (`base` <= 3 B): for every stream of 8 or 9
+    /// bytes (one short of the §2 header, and the bare header) the
+    /// outcome (bytes, or error class) agrees with the SPEC-DELTA §4
+    /// reference algorithm. Two stream lengths per harness: 0..=16 or
+    /// 0..=11 in one harness ran out of memory, so 0..=7 (truncation,
+    /// like 8) and 12..=15 (truncated COPY operands) are left to
+    /// `delta_decode_no_panic` and the fuzz target.
     #[kani::proof]
-    #[kani::unwind(7)] // max(unwind_for(11), 6-byte output memcmp + 1)
-    fn delta_decode_matches_spec() {
-        macro_rules! each_len {
-            ($($n:literal)*) => { $( let _ = spec_at::<$n>(); )* };
-        }
-        each_len!(0 1 2 3 4 5 6 7 8 9 10);
+    #[kani::unwind(7)] // max(unwind_for(16), 6-byte output memcmp + 1)
+    fn delta_spec_header() {
+        let _ = spec_at::<8>();
+        let _ = spec_at::<9>();
+    }
+
+    /// As above for 10 and 11 bytes: one opcode byte, then a 1-byte
+    /// INSERT.
+    #[kani::proof]
+    #[kani::unwind(7)]
+    fn delta_spec_insert() {
+        let _ = spec_at::<10>();
         kani::cover!(spec_at::<11>() == Some(1), "ok_insert");
     }
 
