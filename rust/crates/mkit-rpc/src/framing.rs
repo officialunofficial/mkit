@@ -254,7 +254,11 @@ mod kani_proofs {
             0
         }
         fn write_to(&self, _cache: &mut SizeCache, _buf: &mut impl EncodeSink) {}
-        fn merge(&mut self, buf: &mut impl Buf, _ctx: DecodeContext<'_>) -> Result<(), DecodeError> {
+        fn merge(
+            &mut self,
+            buf: &mut impl Buf,
+            _ctx: DecodeContext<'_>,
+        ) -> Result<(), DecodeError> {
             buf.advance(buf.remaining());
             Ok(())
         }
@@ -278,7 +282,9 @@ mod kani_proofs {
     fn read_at<const N: usize>() {
         let buf: [u8; N] = kani::any();
         let b: &[u8] = &buf;
-        let prefix: Option<u32> = b.get(..4).map(|p| u32::from_le_bytes(p.try_into().expect("4")));
+        let prefix: Option<u32> = b
+            .get(..4)
+            .map(|p| u32::from_le_bytes(p.try_into().expect("4")));
         let mut r = std::io::Cursor::new(b);
         let got = read_frame::<_, Opaque>(&mut r);
         // Accepted iff a full prefix, an in-cap length and a full body.

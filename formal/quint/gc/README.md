@@ -100,6 +100,22 @@ frozen during a gc run (producers are excluded, expire precedes mark). The push'
 this only when a dedup hit refreshes mtime. `--grace-secs 0` is never safe
 against a concurrent push.
 
+## Results
+
+`quint test` (8 tests) and all `quint run` checks come out as expected.
+
+Exhaustive TLC (tla2tools 2026.09.23, `TLC=1`), no state left on the queue:
+
+| Check | Result |
+|---|---|
+| `gc::Safety` | ok, 19,621,072 distinct states, depth 44 |
+| `gcGrace0::Safety` | ok, 19,679,216 distinct states, depth 44 |
+| `gcPushBounded::Safety`, ≤ 2 producer rewrites, no corrupt source | ok, 9,525,536 distinct states, depth 42 |
+| `gcPushFastFreshen::Safety`, same constraint | ok, 11,886,758 distinct states, depth 31 |
+| `mutLenient::NoLivePruned`, `mutNoLock::SupersededRetained`, `mutBoundedLax::NoDangling`, `gcPushFast::NoDangling` | violated |
+
+Unconstrained, the push instances were OOM-killed at about 40M states.
+
 ## Commands
 
 ```

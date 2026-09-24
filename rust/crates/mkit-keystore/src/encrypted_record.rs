@@ -921,7 +921,8 @@ mod kani_proofs {
 
     /// Nonce equality without a 24-byte `memcmp` loop.
     fn same_nonce(a: &[u8; NONCE_LEN], b: &[u8; NONCE_LEN]) -> bool {
-        let w = |x: &[u8; NONCE_LEN], i: usize| u64::from_le_bytes(x[i..i + 8].try_into().expect("8"));
+        let w =
+            |x: &[u8; NONCE_LEN], i: usize| u64::from_le_bytes(x[i..i + 8].try_into().expect("8"));
         w(a, 0) == w(b, 0) && w(a, 8) == w(b, 8) && w(a, 16) == w(b, 16)
     }
 

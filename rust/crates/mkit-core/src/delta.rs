@@ -1042,9 +1042,17 @@ mod kani_proofs {
         }
         // Non-vacuity: success through each opcode kind is reachable.
         kani::cover!(got.is_ok() && sl > HEADER_LEN, "ok_nonempty");
-        kani::cover!(got.is_ok() && stream.get(HEADER_LEN) == Some(&OP_COPY), "ok_copy");
         kani::cover!(
-            matches!(got, Err(MkitError::DeltaCorrupt(DeltaCorruption::ResultLenOverrun { .. }))),
+            got.is_ok() && stream.get(HEADER_LEN) == Some(&OP_COPY),
+            "ok_copy"
+        );
+        kani::cover!(
+            matches!(
+                got,
+                Err(MkitError::DeltaCorrupt(
+                    DeltaCorruption::ResultLenOverrun { .. }
+                ))
+            ),
             "overrun"
         );
     }

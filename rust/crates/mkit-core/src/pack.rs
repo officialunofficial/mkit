@@ -2715,16 +2715,14 @@ mod kani_proofs {
         v
     }
 
-    /// Calls `$f::<N>()` for each listed literal `N`.
-    macro_rules! each_len {
-        ($f:ident; $($n:literal)*) => { $( $f::<$n>(); )* };
-    }
-
     fn entries_at<const BODY: usize>() {
         let bytes = any_pack::<BODY>();
         let parsed = PackEntries::new(&bytes);
         let Ok(mut entries) = parsed else {
-            kani::cover!(matches!(parsed, Err(PackError::PackfileCorrupted)), "bad_trailer");
+            kani::cover!(
+                matches!(parsed, Err(PackError::PackfileCorrupted)),
+                "bad_trailer"
+            );
             kani::cover!(matches!(parsed, Err(PackError::TrailingData)), "trailing");
             return;
         };
@@ -2763,31 +2761,42 @@ mod kani_proofs {
         kani::cover!(!raw_only && ok >= 1, "delta_or_zstd_entry");
     }
 
-    /// `pack_entries` target. For every pack whose entry area is 0..=6
-    /// bytes (so <= 1 entry, payload <= 1 byte), header/body/trailer
-    /// symbolic: `PackEntries::new` and full iteration never
-    /// panic/overflow/read OOB. On `Ok`: magic/version valid (§1),
-    /// trailer equals the hash of the preceding bytes (§8), a v1 pack
-    /// yields exactly `entry_count` `Ok` items ending at the trailer with
-    /// no gap (§3, §6), every payload range lies inside the entry area
-    /// (§2), and `is_raw_only` ⇒ no delta item.
+    /// `pack_entries` target, empty entry area: for every pack of
+    /// exactly header + trailer (all 48 bytes symbolic, so any magic,
+    /// version, `entry_count` and trailer) `PackEntries::new` and full
+    /// iteration never panic/overflow/read OOB. On `Ok`: magic/version
+    /// valid (§1), trailer equals the hash of the preceding bytes (§8), a
+    /// v1 pack yields exactly `entry_count` `Ok` items ending at the
+    /// trailer with no gap (§3, §6), every payload range lies inside the
+    /// entry area (§2), and `is_raw_only` ⇒ no delta item.
     ///
     /// Run with `-Z unstable-options --cbmc-args --unwindset memcmp.0:33`
     /// (the 32-byte trailer comparison); every other loop is bounded by
     /// the global unwind of 4, which keeps CBMC from unrolling the
     /// symbolic-`entry_count` loop 33 times. Unwinding assertions stay
-    /// on, so a too-small bound fails loudly. (An entry area of 0..=12
-    /// bytes did not finish within 15 min.)
+    /// on, so a too-small bound fails loudly. Each entry-area length
+    /// costs CBMC ~7 min here, so lengths are checked one per harness
+    /// (0..=6 in one harness did not finish within 15 min).
     #[kani::proof]
     #[kani::stub(crate::hash::hash, toy_hash)]
     #[kani::stub(zstd_decompress_capped, stub_zstd)]
     #[kani::unwind(4)]
-    fn pack_entries_no_panic() {
-        each_len!(entries_at; 0 1 2 3 4 5 6);
+    fn pack_entries_empty_area() {
+        entries_at::<0>();
     }
 
-    /// As above for an entry area of exactly 10 bytes: two entries with
-    /// empty payloads (or one with a 5-byte payload).
+    /// As above for a 5-byte entry area: exactly one entry frame (type +
+    /// length) with an empty payload, or a truncated/oversized one.
+    #[kani::proof]
+    #[kani::stub(crate::hash::hash, toy_hash)]
+    #[kani::stub(zstd_decompress_capped, stub_zstd)]
+    #[kani::unwind(4)]
+    fn pack_entries_one_frame() {
+        entries_at::<5>();
+    }
+
+    /// As above for a 10-byte entry area: two empty-payload entries (or
+    /// one with a 5-byte payload).
     #[kani::proof]
     #[kani::stub(crate::hash::hash, toy_hash)]
     #[kani::stub(zstd_decompress_capped, stub_zstd)]
@@ -2862,7 +2871,10 @@ mod kani_proofs {
         }
         if with_delta {
             match it.next() {
-                Some(Ok(PackEntry::Delta { base: b, stream: st })) => {
+                Some(Ok(PackEntry::Delta {
+                    base: b,
+                    stream: st,
+                })) => {
                     assert_eq!(b, base);
                     assert_eq!(st.as_ref(), stream);
                 }

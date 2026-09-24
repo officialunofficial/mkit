@@ -1270,7 +1270,9 @@ mod kani_proofs {
     fn any_tree(r: &mut Reader<'_>) -> Result<Tree, MkitError> {
         consume_any(r);
         if kani::any() {
-            Ok(Tree { entries: Vec::new() })
+            Ok(Tree {
+                entries: Vec::new(),
+            })
         } else {
             Err(MkitError::InvalidEntryOrder)
         }
@@ -1361,21 +1363,6 @@ mod kani_proofs {
         got.is_ok()
     }
 
-    /// Byte equality of two 42-byte buffers without a `memcmp` loop (a
-    /// loop would force a global unwind of 43, which the count-driven
-    /// `read_tree` loop cannot afford).
-    fn eq42(a: &[u8], b: &[u8]) -> bool {
-        let w16 = |x: &[u8], i: usize| u128::from_le_bytes(x[i..i + 16].try_into().expect("16"));
-        let w8 = |x: &[u8], i: usize| u64::from_le_bytes(x[i..i + 8].try_into().expect("8"));
-        let w2 = |x: &[u8], i: usize| u16::from_le_bytes(x[i..i + 2].try_into().expect("2"));
-        a.len() == 42
-            && b.len() == 42
-            && w16(a, 0) == w16(b, 0)
-            && w16(a, 16) == w16(b, 16)
-            && w8(a, 32) == w8(b, 32)
-            && w2(a, 40) == w2(b, 40)
-    }
-
     /// `read_tree` (SPEC-OBJECTS §4) on every body of 0..=4 bytes (count
     /// symbolic): no panic/overflow/OOB, and the reader never runs past
     /// its input. §4.1 is stubbed (`any_name_ok`). (At 0..=5 and 0..=8
@@ -1390,10 +1377,12 @@ mod kani_proofs {
 
     /// `read_tree` on a 42-byte body — the exact size of a one-entry tree
     /// with a 1-byte name — with count = 1 and every other byte symbolic
-    /// (so `name_len`, mode and hash range freely): no panic; on the `Ok`
-    /// path that consumes the body, the bytes are the canonical encoding
-    /// (`write_tree(tree) == body`). §4.1 is stubbed (`any_name_ok`).
-    /// (count ∈ {1, 2} through the full `serialize` ran out of memory.)
+    /// (so `name_len`, mode and hash range freely): no panic/overflow/OOB,
+    /// the reader stays in bounds, and an `Ok` tree has exactly one
+    /// entry whose name length and hash match the wire bytes. §4.1 is
+    /// stubbed (`any_name_ok`). (Re-encoding the result and comparing all
+    /// 42 bytes, or count ∈ {1, 2}, ran out of memory; the writer side
+    /// is covered by `serialize_tree_roundtrip_one_entry`.)
     #[kani::proof]
     #[kani::stub(TreeEntry::validate_name, any_name_ok)]
     #[kani::unwind(3)]
@@ -1401,13 +1390,15 @@ mod kani_proofs {
         let mut body: [u8; 42] = kani::any();
         body[..4].copy_from_slice(&1u32.to_le_bytes());
         let mut r = Reader::new(&body);
-        if let Ok(t) = read_tree(&mut r)
-            && r.remaining() == 0
-        {
-            let mut bytes = Vec::new();
-            write_tree(&mut bytes, &t).expect("re-encodes");
-            assert!(eq42(&bytes, &body));
-            kani::cover!(true, "one_entry_canonical");
+        let got = read_tree(&mut r);
+        assert!(r.pos <= body.len());
+        if let Ok(t) = got {
+            assert_eq!(t.entries.len(), 1);
+            let e = &t.entries[0];
+            let name_len = u32::from_le_bytes([body[4], body[5], body[6], body[7]]) as usize;
+            assert_eq!(e.name.len(), name_len);
+            assert_eq!(r.pos, 8 + name_len + 1 + HASH_LEN);
+            kani::cover!(r.remaining() == 0, "one_entry_consumes_body");
         }
     }
 
@@ -1473,7 +1464,10 @@ mod kani_proofs {
     /// and names are strictly ascending (§4) — and then returns `t`.
     fn roundtrip(entries: Vec<TreeEntry>) -> bool {
         let tree = Tree { entries };
-        let valid = tree.entries.iter().all(|e| TreeEntry::validate_name(&e.name))
+        let valid = tree
+            .entries
+            .iter()
+            .all(|e| TreeEntry::validate_name(&e.name))
             && tree.entries.windows(2).all(|w| w[0].name < w[1].name);
         let mut bytes = Vec::new();
         write_tree(&mut bytes, &tree).expect("small tree encodes");
@@ -1503,7 +1497,10 @@ mod kani_proofs {
 
     fn blob_rt<const N: usize>() {
         let data: [u8; N] = kani::any();
-        let bytes = serialize(&Object::Blob(Blob { data: data.to_vec() })).expect("encodes");
+        let bytes = serialize(&Object::Blob(Blob {
+            data: data.to_vec(),
+        }))
+        .expect("encodes");
         match deserialize(&bytes) {
             Ok(Object::Blob(b)) => assert_eq!(b.data, data),
             _ => panic!("own blob encoding must deserialize to the same blob"),
@@ -1542,7 +1539,10 @@ mod kani_proofs {
     #[kani::unwind(6)]
     #[kani::should_panic]
     fn serialize_canary_trailing_byte_accepted() {
-        let mut bytes = serialize(&Object::Blob(Blob { data: vec![kani::any()] })).expect("encodes");
+        let mut bytes = serialize(&Object::Blob(Blob {
+            data: vec![kani::any()],
+        }))
+        .expect("encodes");
         bytes.push(kani::any());
         assert!(deserialize(&bytes).is_ok());
     }

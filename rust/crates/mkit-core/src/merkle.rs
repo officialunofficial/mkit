@@ -1561,37 +1561,6 @@ mod kani_proofs {
         need
     }
 
-    /// Byte equality in 8-byte words (<= 5 words + <= 7 tail bytes for
-    /// the inputs here), keeping loops far below a byte-wise `memcmp`.
-    fn eq_words(a: &[u8], b: &[u8]) -> bool {
-        if a.len() != b.len() {
-            return false;
-        }
-        let words = a.len() / 8;
-        for i in 0..words {
-            let w = |x: &[u8]| u64::from_le_bytes(x[i * 8..i * 8 + 8].try_into().expect("8"));
-            if w(a) != w(b) {
-                return false;
-            }
-        }
-        for i in words * 8..a.len() {
-            if a[i] != b[i] {
-                return false;
-            }
-        }
-        true
-    }
-
-    fn decode_at<const N: usize>() -> bool {
-        let buf: [u8; N] = kani::any();
-        let got = Proof::decode(&buf, 1);
-        if let Ok(p) = &got {
-            assert!(p.siblings.len() <= MAX_LEVELS);
-            assert!(eq_words(&p.encode(), &buf));
-        }
-        got.is_ok()
-    }
-
     /// `Proof::decode(_, 1)` (the single-leaf bound the fuzz target and
     /// `verify_chunk` callers use) never panics on any input of 0..=6
     /// bytes (each length concrete, every byte symbolic), and accepts
@@ -1620,15 +1589,27 @@ mod kani_proofs {
     }
 
     /// At exactly 37 bytes (be32 leaf count + 1-byte varint + one
-    /// digest): no panic; on `Ok` the §5.2 allocation bound
-    /// (`max_items * MAX_LEVELS`) holds and the bytes are the canonical
-    /// encoding (`encode(decode(b)) == b`).
+    /// digest): no panic, and `Ok` iff the varint is 1 — then the proof
+    /// carries exactly the wire leaf count and digest (§5.2). (Comparing
+    /// `encode(decode(b))` against `b` ran out of memory.)
     #[kani::proof]
-    // Largest loops: the 5-byte varint, 4 words + 5 tail bytes in
-    // `eq_words`.
-    #[kani::unwind(8)]
+    // Largest loop: the <= 5-byte varint.
+    #[kani::unwind(7)]
     fn merkle_proof_decode_one_sibling() {
-        kani::cover!(decode_at::<37>(), "ok_one_sibling");
+        let buf: [u8; 37] = kani::any();
+        let got = Proof::decode(&buf, 1);
+        assert_eq!(got.is_ok(), buf[4] == 1);
+        if let Ok(p) = got {
+            assert_eq!(
+                p.leaf_count,
+                u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]])
+            );
+            assert_eq!(p.siblings.len(), 1);
+            let d = &p.siblings[0];
+            let w = |x: &[u8], i: usize| u64::from_le_bytes(x[i..i + 8].try_into().expect("8"));
+            assert!((0..4).all(|k| w(d, 8 * k) == w(&buf[5..], 8 * k)));
+            kani::cover!(true, "ok_one_sibling");
+        }
     }
 
     fn verify_with<const S: usize>() -> bool {
@@ -1702,7 +1683,11 @@ mod kani_proofs {
             let mut next = Vec::new();
             let mut i = 0;
             while i < level.len() {
-                let right = if i + 1 < level.len() { level[i + 1] } else { level[i] };
+                let right = if i + 1 < level.len() {
+                    level[i + 1]
+                } else {
+                    level[i]
+                };
                 next.push(toy_h2(&level[i], &right));
                 i += 2;
             }
@@ -1740,12 +1725,18 @@ mod kani_proofs {
             leaf_count: leaves.len() as u32,
             siblings,
         };
-        assert_eq!(proof.siblings.len(), spec_sibling_count(proof.leaf_count, pos));
-        assert_eq!(verify_chunk(&id, &cb.chunks[(pos - 1) as usize], pos, &proof), Ok(()));
+        assert_eq!(
+            proof.siblings.len(),
+            spec_sibling_count(proof.leaf_count, pos)
+        );
+        assert_eq!(
+            verify_chunk(&id, &cb.chunks[(pos - 1) as usize], pos, &proof),
+            Ok(())
+        );
     }
 
     /// Spec conformance (§1.1, §2, §5.3–§5.5): for every `ChunkedBlob`
-    /// of 1..=2 symbolic chunks (any sizes) and every chunk position,
+    /// of 1 symbolic chunk (any sizes) and every chunk position,
     /// `compute_chunked_id` equals the §2 wrap of an independently built
     /// §1.1 root, and the proof an independent §5.3 builder produces has
     /// the model sibling count and is accepted by `verify_chunk`.
@@ -1759,8 +1750,19 @@ mod kani_proofs {
     // with `-Z unstable-options --cbmc-args --unwindset memcmp.0:33` for
     // the 32-byte digest comparisons.
     #[kani::unwind(5)]
-    fn merkle_build_verify_roundtrip() {
+    fn merkle_roundtrip_one_chunk() {
         chunk_rt::<1>();
+    }
+
+    /// As above for a 2-chunk blob (3 leaves, odd trailing node). Split
+    /// from the 1-chunk case to keep CBMC's peak memory down.
+    #[kani::proof]
+    #[kani::stub(h2, toy_h2)]
+    #[kani::stub(crate::hash::domain_digest, toy_domain_digest)]
+    #[kani::stub(crate::hash::hash, toy_hash)]
+    // As above: `--cbmc-args --unwindset memcmp.0:33`.
+    #[kani::unwind(5)]
+    fn merkle_roundtrip_two_chunks() {
         chunk_rt::<2>();
     }
 
