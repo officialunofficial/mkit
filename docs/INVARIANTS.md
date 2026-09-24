@@ -149,6 +149,31 @@ response could leak into a returned bundle.
 `partial::verify::tests::builder_rejects_wrong_supply_and_premature_finish`,
 and the bounded-inspection fuzz target.
 
+## Hosted staged admission keeps identity, authority, and physical retention separate
+
+**Always:** a repository-global hosted operation ID retains its exact Begin
+binding and original-subject result for its lifetime. Grant charge, identity,
+and quota reservation commit atomically once. Every Upload/Continue effect
+rechecks live grant, policy, ref/packmap, certificate, request time and claim;
+a retention pin alone grants no read or publication authority. A refused or
+expired operation cannot resume. Cleanup fences the job and confirms an
+exact conditional one-key marker before refunding carrier quota; a late
+create-only upload cannot resurrect it. Candidate required IDs exactly equal
+the supplied inventory, while the base is sourced only from its certificate.
+
+**Because:** replay, interrupted R2 writes and hidden base objects otherwise
+make acceptance, physical quota and grant consumption disagree.
+
+**If violated:** an old grant or late PUT can revive a staged operation,
+the same ID can be charged or rebound twice, a hidden object can repair an
+incomplete update, or physical bytes can be left unaccounted after cleanup.
+
+**Enforced by:** `apps/vcs-worker/src/worker_impl/{submission_jobs,submission_driver,submission_cleanup,submission_store}.rs`,
+`apps/vcs-worker/src/submission_wire.rs`, committed
+`rust/tests/golden/hosted-submissions/` vectors, and actual local-workerd
+`apps/vcs-worker/tests/managed_submissions_admission.py` plus
+`managed_submissions_cleanup.py` lifecycle/race fixtures.
+
 ## Bounded Snapshot steps preserve occurrence checks
 
 **Always:** a local complete-Snapshot transition derives child IDs only from

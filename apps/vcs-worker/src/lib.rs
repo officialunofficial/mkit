@@ -19,6 +19,14 @@ pub mod snapshot_frontier;
 #[cfg(feature = "managed-access")]
 pub mod snapshot_wire;
 pub mod storage_error;
+#[cfg(feature = "managed-access")]
+mod submission_errors;
+#[cfg(feature = "managed-access")]
+pub mod submission_frontier;
+#[cfg(feature = "managed-access")]
+mod submission_response;
+#[cfg(feature = "managed-access")]
+pub mod submission_wire;
 pub mod write_quota;
 
 /// Generated buffa messages + ConnectRPC TransportService server stubs.

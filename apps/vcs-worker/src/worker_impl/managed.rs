@@ -120,6 +120,18 @@ async fn dispatch_inner(mut req: Request, env: Env) -> Result<Response> {
     if path == super::snapshot_disclosure::PATH {
         return serve_disclosure(req, env, &path).await;
     }
+    if let Some(operation) = match path.as_str() {
+        "/mkit/partial/v1/BeginSubmission" => Some("begin_submission"),
+        "/mkit/partial/v1/UploadSubmission" => Some("upload_submission"),
+        "/mkit/partial/v1/ContinueSubmission" => Some("continue_submission"),
+        "/mkit/partial/v1/GetStagedSubmission" => Some("get_staged_submission"),
+        "/mkit/host/v1/CleanupSubmissions" => Some("cleanup_submissions"),
+        #[cfg(feature = "test-faults")]
+        "/__test/host/SubmissionMarkerCreate" => Some("test_submission_marker_create"),
+        _ => None,
+    } {
+        return serve_submission(req, env, &path, operation).await;
+    }
     if let Some(route) = DataRoute::from_path(&path) {
         return serve_data(req, env, &path, route).await;
     }
@@ -254,6 +266,133 @@ async fn dispatch_inner(mut req: Request, env: Env) -> Result<Response> {
     let status = response.status_code();
     let body = response.text().await?;
     reply(status, &body)
+}
+
+async fn serve_submission(
+    mut req: Request,
+    env: Env,
+    path: &str,
+    operation: &str,
+) -> Result<Response> {
+    if req.method() != Method::Post {
+        return reply(405, "{\"code\":\"method_not_allowed\"}");
+    }
+    if req.headers().get("content-encoding")?.is_some()
+        || req.headers().get("connect-content-encoding")?.is_some()
+    {
+        return reply(415, "{\"code\":\"unsupported_media_type\"}");
+    }
+    let upload = operation == "upload_submission";
+    let expected_type = if upload {
+        "application/octet-stream"
+    } else {
+        "application/json"
+    };
+    if req.headers().get("content-type")?.as_deref() != Some(expected_type) {
+        return reply(415, "{\"code\":\"unsupported_media_type\"}");
+    }
+    let _permit = if upload {
+        match TransferPermit::acquire() {
+            Some(permit) => Some(permit),
+            None => return reply(429, "{\"code\":\"resource_exhausted\"}"),
+        }
+    } else {
+        None
+    };
+    let cap = if upload {
+        crate::submission_wire::MAX_UPDATE_BYTES + crate::submission_wire::MKSU_PREFIX_LEN
+    } else if operation == "begin_submission" {
+        256 * 1024
+    } else {
+        64 * 1024
+    };
+    let body = match read_bounded_body(&mut req, cap).await? {
+        BoundedBody::Ok(v) => v,
+        BoundedBody::TooLarge => return reply(413, "{\"code\":\"resource_exhausted\"}"),
+    };
+    let identity = match configured_identity(&env) {
+        Ok(v) => v,
+        Err(_) => return reply(503, "{\"code\":\"unavailable\"}"),
+    };
+    let verified = verify_envelope(
+        AuthContext {
+            audience: &identity.audience,
+            repository: &identity.repository,
+        },
+        path,
+        &blake3_hex(&body),
+        Date::now().as_millis() as i64,
+        &headers(&req)?,
+    );
+    let authorization = match verified {
+        VerifyEnvelope::Ok { authorization, .. } => authorization,
+        VerifyEnvelope::Err { .. } => return reply(401, "{\"code\":\"unauthenticated\"}"),
+    };
+    if (operation == "cleanup_submissions" || operation == "test_submission_marker_create")
+        && authorization.public_key != identity.owner
+    {
+        return reply(403, "{\"code\":\"permission_denied\"}");
+    }
+    let proof = Proof::from(&authorization);
+    let ns = env.durable_object("REFSTORE")?;
+    let stub = ns.id_from_name("root")?.get_stub()?;
+    let (internal_path, payload) = if upload {
+        match crate::submission_wire::decode_mksu(&body) {
+            Ok(_) => {}
+            Err(crate::submission_wire::SubmissionWireError::Malformed) => {
+                return reply(400, "{\"code\":\"invalid_argument\"}");
+            }
+            Err(crate::submission_wire::SubmissionWireError::ResourceExhausted) => {
+                return reply(413, "{\"code\":\"resource_exhausted\"}");
+            }
+        }
+        let context =
+            serde_json::to_vec(&super::submission_driver::UploadContext { identity, proof })
+                .map_err(|e| worker::Error::RustError(e.to_string()))?;
+        if context.len() > 4096 {
+            return reply(503, "{\"code\":\"unavailable\"}");
+        }
+        let mut framed = Vec::with_capacity(4 + context.len() + body.len());
+        framed.extend_from_slice(&(context.len() as u32).to_le_bytes());
+        framed.extend_from_slice(&context);
+        framed.extend_from_slice(&body);
+        ("/managed-submission-upload", framed)
+    } else {
+        let body = match String::from_utf8(body) {
+            Ok(v) => v,
+            Err(_) => return reply(400, "{\"code\":\"invalid_argument\"}"),
+        };
+        let wire = super::submission_jobs::SubmissionWire {
+            identity,
+            proof,
+            operation: operation.into(),
+            body,
+        };
+        let payload =
+            serde_json::to_vec(&wire).map_err(|e| worker::Error::RustError(e.to_string()))?;
+        ("/managed-submission", payload)
+    };
+    let mut init = RequestInit::new();
+    init.with_method(Method::Post)
+        .with_body(Some(payload.into()));
+    let internal = Request::new_with_init(&format!("https://refstore{internal_path}"), &init)?;
+    // DO fetch responses have immutable headers in local workerd. Rebuild a
+    // bounded mutable public response so every result, including errors,
+    // receives the private cache policy without throwing after the effect.
+    let mut internal_response = stub.fetch_with_request(internal).await?;
+    let status = internal_response.status_code();
+    let body = internal_response.bytes().await?;
+    if body.len() > 64 * 1024 {
+        return reply(503, "{\"code\":\"unavailable\"}");
+    }
+    let mut response = Response::from_bytes(body)?.with_status(status);
+    response
+        .headers_mut()
+        .set("Content-Type", "application/json")?;
+    response
+        .headers_mut()
+        .set("Cache-Control", "private, no-store")?;
+    Ok(response)
 }
 
 async fn serve_disclosure(mut req: Request, env: Env, path: &str) -> Result<Response> {

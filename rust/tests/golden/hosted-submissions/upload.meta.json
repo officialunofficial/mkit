@@ -1,0 +1,1 @@
+{"method":"POST","path":"/mkit/partial/v1/UploadSubmission","content_type":"application/octet-stream","prefix_bytes":85,"offsets":{"magic":[0,4],"version":[4,5],"operation_id":[5,37],"submission_id":[37,69],"generation_le":[69,77],"carrier_len_le":[77,85]},"declared_len":"8","carrier_note":"Opaque carrier bytes; this decoder does not validate MKWU."}

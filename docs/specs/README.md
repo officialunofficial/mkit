@@ -18,6 +18,7 @@ front matter.
 - [SPEC-HISTORY-PROOF](SPEC-HISTORY-PROOF.md) &mdash; MMB-based history proofs for light-client verification.
 - [SPEC-HOSTED-WORKSPACE-GRANTS](SPEC-HOSTED-WORKSPACE-GRANTS.md) &mdash; optional service-local signed workspace grants and durable owner registry.
 - [SPEC-HOSTED-SNAPSHOTS](SPEC-HOSTED-SNAPSHOTS.md) &mdash; optional owner-only durable complete-Snapshot enrollment and exact grant-scoped Snapshot disclosure.
+- [SPEC-HOSTED-SUBMISSIONS](SPEC-HOSTED-SUBMISSIONS.md) &mdash; optional durable private staged-update admission, validation, and bounded quarantine reclamation without publication.
 - [SPEC-INDEX](SPEC-INDEX.md) &mdash; repo-local staging-area index (advisory, not exchanged).
 - [SPEC-KEYSTORE](SPEC-KEYSTORE.md) &mdash; key vault interface, backends, and `mkit key` CLI surface.
 - [SPEC-MERKLE-OBJECTS](SPEC-MERKLE-OBJECTS.md) &mdash; merkelized ChunkedBlob and Tree object hashing.

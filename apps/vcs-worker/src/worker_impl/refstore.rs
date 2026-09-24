@@ -90,6 +90,12 @@ impl DurableObject for RefStore {
             if req.path() == "/managed-disclosure" {
                 return self.managed_disclosure(&mut req).await;
             }
+            if req.path() == "/managed-submission" {
+                return self.managed_submission(&mut req).await;
+            }
+            if req.path() == "/managed-submission-upload" {
+                return self.managed_submission_upload(&mut req).await;
+            }
             if req.path() == "/authorize" {
                 return self.managed_access(&mut req).await;
             }

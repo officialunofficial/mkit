@@ -39,7 +39,7 @@ pub(super) struct DisclosureWire {
     pub body: String,
 }
 
-fn limits() -> PartialLimits {
+pub(super) fn limits() -> PartialLimits {
     PartialLimits {
         max_bundle_bytes: MAX_RESPONSE,
         max_witness_bytes: 1024 * 1024,
