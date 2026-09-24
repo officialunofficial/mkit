@@ -274,7 +274,7 @@ is never retryable (§5.1).
 ### 5.1 Admission challenges
 
 A server MAY refuse an RPC until the caller does something outside
-this protocol. Examples are paying for storage, topping up a quota, or
+this protocol. Examples are a payment, a quota top-up, or
 verifying an email address. A plain `resource_exhausted` cannot express
 this, because clients retry it on a backoff ladder. `permission_denied`
 cannot express it either, because it gives the caller nothing to act on.
@@ -293,8 +293,8 @@ message AdmissionChallenge {
 
 The proto message lands with the first implementation (§8). `scheme`
 names the external protocol that interprets `challenge`. This document
-registers no schemes. A deployment can carry, for example, an HTTP
-Payment authentication challenge unchanged in `challenge`.
+registers no schemes. A challenge defined by another protocol can
+travel unchanged in `challenge`.
 
 **Ordering.** The server MUST decide admission before any side effect
 and before it returns any response data. For a signed write it decides
