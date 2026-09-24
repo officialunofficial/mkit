@@ -1,12 +1,73 @@
-import { ArrowUpRightIcon } from '@phosphor-icons/react/ssr'
+import {
+  ArrowsLeftRightIcon,
+  ArrowUpRightIcon,
+  BookOpenTextIcon,
+  BracketsCurlyIcon,
+  BridgeIcon,
+  BroomIcon,
+  ClockCounterClockwiseIcon,
+  CubeIcon,
+  DownloadSimpleIcon,
+  FileTextIcon,
+  FolderOpenIcon,
+  FunnelIcon,
+  GitBranchIcon,
+  ListChecksIcon,
+  LockIcon,
+  LockKeyIcon,
+  PackageIcon,
+  PlugsConnectedIcon,
+  PlusMinusIcon,
+  ScissorsIcon,
+  SealCheckIcon,
+  ShieldCheckIcon,
+  SignatureIcon,
+  SquaresFourIcon,
+  TreeStructureIcon,
+  UsbIcon,
+  UsersFourIcon,
+  VaultIcon,
+} from '@phosphor-icons/react/ssr'
+import type { Icon } from '@phosphor-icons/react'
 import { categories, specUrl } from '../lib/spec-data'
 import type { SpecCategory, SpecItem } from '../lib/spec-data'
+
+/** One icon per spec, keyed by document name. Unlisted names fall back to a generic document icon. */
+export const SPEC_ICONS: Record<string, Icon> = {
+  'SPEC-OBJECTS': CubeIcon,
+  'SPEC-MERKLE-OBJECTS': TreeStructureIcon,
+  'SPEC-FASTCDC': ScissorsIcon,
+  'SPEC-DELTA': PlusMinusIcon,
+  'SPEC-REFS': GitBranchIcon,
+  'SPEC-INDEX': ListChecksIcon,
+  'SPEC-WORKTREE': FolderOpenIcon,
+  'SPEC-CONCURRENCY': LockIcon,
+  'SPEC-GC': BroomIcon,
+  'SPEC-PACKFILE': PackageIcon,
+  'SPEC-PACK-SHARDS': SquaresFourIcon,
+  'SPEC-TRANSPORT': ArrowsLeftRightIcon,
+  'SPEC-TRANSPORT-CONNECT': PlugsConnectedIcon,
+  'SPEC-TRANSPORT-ENC': LockKeyIcon,
+  'SPEC-SPARSE-CHECKOUT': FunnelIcon,
+  'SPEC-SIGNING': SignatureIcon,
+  'SPEC-KEYSTORE': VaultIcon,
+  'SPEC-CONFIG-SECURITY': ShieldCheckIcon,
+  'SPEC-ATTESTATIONS': SealCheckIcon,
+  'SPEC-RELEASE-THRESHOLD': UsersFourIcon,
+  'SPEC-HISTORY-PROOF': ClockCounterClockwiseIcon,
+  'SPEC-GIT-BRIDGE': BridgeIcon,
+  'SPEC-GIT-IMPORT': DownloadSimpleIcon,
+  'SPEC-EXTERNAL-SIGNER': UsbIcon,
+  'SPEC-RPC': BracketsCurlyIcon,
+  'SPEC-CONVENTIONS': BookOpenTextIcon,
+}
 
 /**
  * One spec row: the document name linked to GitHub, its verbatim status token in mono (§3.2 rule 10), and a one-line
  * description.
  */
 function Row({ item }: { item: SpecItem }) {
+  const SpecIcon = SPEC_ICONS[item.name] ?? FileTextIcon
   return (
     <div className='px-2 py-1.5'>
       <p className='text-xs leading-4'>
@@ -16,6 +77,7 @@ function Row({ item }: { item: SpecItem }) {
           rel='noreferrer'
           className='ds-link font-mono inline-flex items-center gap-0.5'
         >
+          <SpecIcon size={12} aria-hidden className='mr-0.5 shrink-0 text-secondary' />
           {item.name}
           <ArrowUpRightIcon size={12} aria-hidden className='text-secondary' />
           <span className='sr-only'>(opens in a new tab)</span>
