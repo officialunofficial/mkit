@@ -2801,7 +2801,6 @@ mod kani_proofs {
         let Ok(entries) = PackEntries::new(&bytes) else {
             return 0;
         };
-        let mut prev_raw: Vec<u8> = Vec::new();
         let mut stored = 0u32;
         for item in entries {
             match item {
@@ -2810,12 +2809,9 @@ mod kani_proofs {
                         assert!(!matches!(obj, Object::Delta(_)));
                         stored += 1;
                     }
-                    prev_raw = b.into_owned();
                 }
-                Ok(PackEntry::Delta { stream, .. }) => {
-                    if validate_delta_result_size(&stream).is_ok() {
-                        let _ = delta::decode(&prev_raw, &stream);
-                    }
+                Ok(PackEntry::Delta { .. }) => {
+                    panic!("a delta entry needs >= 37 bytes of entry area");
                 }
                 Err(_) => break,
             }
@@ -2823,18 +2819,16 @@ mod kani_proofs {
         stored
     }
 
-    /// `pack` target, store-free: every step `PackReader::read` runs
-    /// before touching the store — frame parsing, the SPEC-OBJECTS
-    /// storability gate on raw entries (§3.1, §12), and the result-size
-    /// guard + SPEC-DELTA decode on delta entries (base = the previous
-    /// raw payload, per the §4 ordering rule) — never panics for packs
-    /// with an entry area of exactly 5 bytes (one symbolic entry frame;
-    /// 0..=6 bytes ran out of memory). A delta entry needs >= 37 bytes,
-    /// so the delta arm is out of reach at this bound; SPEC-DELTA
-    /// decoding is covered by the `delta_*` harnesses.
-    /// `deserialize` is replaced by a nondeterministic outcome
-    /// (`any_deserialize`), so this checks the composition; the decoders
-    /// are proved by their own harnesses.
+    /// `pack` target, store-free: the steps `PackReader::read` runs
+    /// before touching the store — frame parsing and the SPEC-OBJECTS
+    /// storability gate on raw entries (§3.1, §12) — never panic for
+    /// packs with an entry area of exactly 5 bytes (one symbolic entry
+    /// frame; 0..=6 bytes ran out of memory). A delta entry needs >= 37
+    /// bytes, which the harness asserts (so the reader's result-size
+    /// guard + SPEC-DELTA decode are out of reach here; decoding is
+    /// covered by the `delta_*` harnesses). `deserialize` is replaced by
+    /// a nondeterministic outcome (`any_deserialize`), so this checks the
+    /// composition; the decoders are proved by their own harnesses.
     /// Run with `--cbmc-args --unwindset memcmp.0:33` as above.
     #[kani::proof]
     #[kani::stub(crate::hash::hash, toy_hash)]
