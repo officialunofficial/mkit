@@ -609,12 +609,35 @@ fn maybe_compress(data: &[u8]) -> Option<Vec<u8>> {
     if data.len() < MIN_COMPRESS_LEN {
         return None;
     }
-    let compressed = zstd::bulk::compress(data, ZSTD_LEVEL).ok()?;
+    let compressed = ZSTD_COMPRESSOR
+        .with(|c| c.borrow_mut().compress(data))
+        .ok()?;
     if ZSTD_LEN_PREFIX + compressed.len() < data.len() {
         Some(compressed)
     } else {
         None
     }
+}
+
+#[cfg(feature = "pack-zstd")]
+thread_local! {
+    // Per-thread reused `zstd::bulk::Compressor`, keyed off the same
+    // `ZSTD_LEVEL` every call in this build uses. `zstd::bulk::compress`
+    // (the plain free function) allocates and initializes a fresh
+    // `Compressor` — and its underlying `CCtx` — on every single call; on
+    // the push-path's per-entry compression fan-out
+    // (`build_and_upload_packs`'s rayon fan-out over
+    // `prepare_raw`/`prepare_delta`, `pack_build_fanout`) that means one
+    // CCtx alloc/init per object compressed. A one-shot
+    // `Compressor::compress` call carries no state across calls (it is
+    // not a streaming encoder), so reusing the same context across every
+    // object a given thread compresses is behavior-preserving — same
+    // level, same output bytes — and turns that per-object setup cost
+    // into a one-time cost per worker thread.
+    static ZSTD_COMPRESSOR: std::cell::RefCell<zstd::bulk::Compressor<'static>> =
+        std::cell::RefCell::new(
+            zstd::bulk::Compressor::new(ZSTD_LEVEL).expect("ZSTD_LEVEL is a valid zstd level"),
+        );
 }
 
 #[cfg(not(feature = "pack-zstd"))]
