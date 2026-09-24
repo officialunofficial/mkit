@@ -1454,7 +1454,16 @@ mod kani_proofs {
         };
         let mut bytes = Vec::new();
         write_tree(&mut bytes, &tree).expect("small tree encodes");
-        let mut r = Reader::new(&bytes);
+        // Move the encoding into a fixed array and re-pin the (asserted)
+        // entry count as a constant: CBMC does not constant-propagate
+        // through the heap buffer, and a symbolic count makes
+        // `read_tree`'s `Vec::with_capacity(count)` exhaust memory.
+        assert_eq!(bytes.len(), 42);
+        let mut body = [0u8; 42];
+        body.copy_from_slice(&bytes);
+        assert!(body[..4] == 1u32.to_le_bytes());
+        body[..4].copy_from_slice(&1u32.to_le_bytes());
+        let mut r = Reader::new(&body);
         let back = read_tree(&mut r);
         assert_eq!(back.is_ok(), TreeEntry::validate_name(&[name]));
         if let Ok(t) = back {
