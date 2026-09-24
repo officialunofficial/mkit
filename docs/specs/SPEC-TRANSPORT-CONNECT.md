@@ -1,6 +1,6 @@
 ---
 spec: SPEC-TRANSPORT-CONNECT
-version: 1
+version: 2
 status: draft-normative
 audience: implementers of mkit.transport.v1 Connect servers and clients (reference Worker, `mkit serve`, native CLI transport)
 ---
@@ -389,13 +389,14 @@ A `connectrpc` and `workers-rs` service
 `proto/mkit/transport/v1/transport.proto`, no protoc dependency on the
 default build path &mdash; Cloudflare Workers Builds and CI images lack a
 protoc new enough for `edition = "2023"`), R2 for pack storage, and a
-single global Durable Object for ref CAS (one Worker deployment = one
-repository &mdash; no per-project room split). Unlike `repo-worker`'s
+single global Durable Object for ref CAS. It is a single-repository
+deployment in §7.4's terms; a multi-repository deployment routes each
+repository to its own ref store instead (§7.4). Unlike `repo-worker`'s
 open-write demo, all mutating procedures require the versioned signed-write
 contract below. This verifies the writer's identity; it does not impose an
 allow-list. The deployment config supplies `AUTH_AUDIENCE` (exact canonical
-HTTP(S) origin) and `AUTH_REPOSITORY` (the single repository identity).
-Repo Worker instead obtains the repository identity from the decoded room;
+HTTP(S) origin) and `AUTH_REPOSITORY` (the single repository identity,
+§7.4). Repo Worker instead obtains the repository identity from the decoded room;
 Keys Worker uses `keys`. Host or forwarded request headers MUST NOT establish
 the server's trusted audience.
 
@@ -560,6 +561,62 @@ non-retryable-error/ladder-exhaustion pair) &mdash; through a real in-process
 `TransportService` server (memory-backed, not R2/DO), per this issue's
 testing decision: a real server, not a mock standing in for one.
 
+### 7.4 Repository addressing
+
+A deployment serves one repository or many. Every RPC names its
+repository, so one client and one proto serve both.
+
+**Grammar.** A repository identity is ASCII text with this grammar
+(ABNF, RFC 5234):
+
+```abnf
+repository = namespace "/" name / name
+namespace  = lead *127tail
+name       = lead *99tail
+lead       = %x61-7A / DIGIT          ; a-z 0-9
+tail       = lead / "." / "_" / "-"
+```
+
+Identities are lowercase only, so two spellings never name one
+repository. A server MUST reject an identity that does not match this
+grammar with `invalid_argument`. The `namespace "/" name` form is the
+multi-repository form. The bare `name` form is valid only on a
+single-repository deployment. The namespace is an opaque principal
+token for this document. [SPEC-WRITE-GRANTS](SPEC-WRITE-GRANTS.md)
+gives some namespace forms an owner.
+
+**Carriage.** Every RPC, read or write, MUST carry the `X-Repository`
+header. On a signed write (§7.1), `X-Repository` MUST equal the signed
+`<repository>` field byte for byte; a mismatch is `permission_denied`.
+Host, path, or forwarded headers MUST NOT select the repository.
+
+**Isolation.** Refs, packs, packmap chains, nonce and replay records,
+and quota are scoped to one repository. A server MUST NOT let an RPC on
+one repository read or change another repository's state. A server MAY
+store identical immutable bytes once across repositories, but
+`PackExists` and `DownloadPack` MUST answer only for packs published to
+the named repository. Otherwise a caller could learn another
+repository's contents.
+
+**Single-repository mode.** The deployment configures one repository
+identity. It MUST reject any other `X-Repository` value with
+`not_found`. The §7.1 reference Worker is in this mode.
+
+**Multi-repository mode.** The deployment routes each RPC by
+`X-Repository`. A read RPC on a repository that does not exist returns
+`not_found`, the same as a missing pack or ref. Which writes may create
+a repository is a write-authorization policy (§7.1,
+SPEC-WRITE-GRANTS), not a transport verb. This service has no
+create-repository RPC.
+
+**Client.** The path of the remote URL is the repository identity:
+`mkit+https://host/<namespace>/<name>` names `<namespace>/<name>`. An
+empty path names the bare identity `default`, so a single-repository
+deployment reachable with an empty path configures `default`. A client
+MUST send the
+same identity in `X-Repository` on reads and in the signed
+`<repository>` field on writes.
+
 ---
 
 ## 8. Out of scope
@@ -585,6 +642,10 @@ Explicitly deferred to sibling issues:
   a working-server acceptance gate.
 - Generated TypeScript (`connect-es`) clients for this service (M2
   scope, tracked with mkit#706).
+- Implementing §7.4: multi-repository routing in `apps/vcs-worker` (one
+  ref store per repository, `apps/repo-worker`'s per-room pattern) and
+  `X-Repository` on read RPCs in `mkit-transport-connect` (mkit#1084
+  follow-ups).
 
 ---
 
@@ -592,6 +653,7 @@ Explicitly deferred to sibling issues:
 
 | Version | Status | Changes |
 |---|---|---|
+| `2` | draft | §7.4 repository addressing: repository grammar, `X-Repository` on every RPC, per-repository isolation, single- and multi-repository modes (mkit#1084). |
 | `1` | draft | Initial `mkit.transport.v1` proto: 7 wire RPCs covering every `Transport` trait verb (§2), `PackChunk` reused byte-for-byte from `ssh.proto`, `RefExpectation`/`RefEntry` duplicated with pinned wire numbers pending mkit#679's shared-proto extraction. |
 
 ---
@@ -625,5 +687,6 @@ reference Worker).
 | A rejected `UploadPack` stream never creates or overwrites the destination pack. | §6.1's server-side rejection checks, mirroring SPEC-TRANSPORT §4.2's SSH requirement. |
 | `DownloadPack` never sends a partial stream silently &mdash; it either completes with `chunk.last = true` or fails the whole call before any message is sent. | §6.2. |
 | Every `TransportError` variant a server can raise has exactly one Connect code it maps to; a client's inverse mapping is mechanical, not heuristic. | §5's table. |
+| No RPC on one repository reads or changes another repository's refs, packs, replay records, or quota. | §7.4 isolation; the `X-Repository` carriage rule. |
 | An `AdvanceRefs` conflict is a typed response value, never a Connect error. | §4 &mdash; matches `AdvanceOutcome`'s three-variant, no-error-variant shape in `protocol.rs`. |
 | The `DownloadPack` Workers-streaming design is documented as unverified end-to-end until a sibling issue proves real client-visible delivery. | §6.3's "Known risk" paragraph; mkit#699/#702's re-verification requirement. |
