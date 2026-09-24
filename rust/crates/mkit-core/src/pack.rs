@@ -2835,7 +2835,8 @@ mod kani_proofs {
     /// and yields exactly the pushed entry. CBMC's symbolic execution of
     /// the `PackError` → `StoreError` → `std::io::Error` drop glue costs
     /// ~4 min per writer/reader pass here, so the bound is one entry
-    /// shape per harness (0..=2 bytes in one harness ran out of memory).
+    /// shape (0..=2 bytes in one harness, and a raw + delta pack, ran out
+    /// of memory; the delta writer path is covered by the unit tests).
     #[kani::proof]
     #[kani::stub(crate::hash::hash, toy_hash)]
     // Run with `-Z unstable-options --cbmc-args --unwindset memcmp.0:33`
@@ -2843,16 +2844,6 @@ mod kani_proofs {
     #[kani::unwind(4)]
     fn pack_writer_roundtrip_raw() {
         writer_rt::<1, 0>(false);
-    }
-
-    /// As above with a second, delta entry (symbolic base hash, 1-byte
-    /// symbolic stream after an empty raw entry): the entries come back
-    /// in push order with `first_non_raw_index() == Some(1)`.
-    #[kani::proof]
-    #[kani::stub(crate::hash::hash, toy_hash)]
-    #[kani::unwind(4)]
-    fn pack_writer_roundtrip_delta() {
-        writer_rt::<0, 1>(true);
     }
 
     /// Canary: with the trailer check in place, a single flipped body

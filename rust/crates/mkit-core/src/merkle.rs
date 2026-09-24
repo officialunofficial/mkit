@@ -1617,9 +1617,11 @@ mod kani_proofs {
         assert!((0..4).all(|k| w(d, 8 * k) == w(&buf[5..], 8 * k)));
     }
 
-    fn verify_with<const S: usize>() -> bool {
+    /// One adversarial verification with `S` sibling digests and a
+    /// symbolic `leaf_count <= max_leaves`.
+    fn verify_with<const S: usize>(max_leaves: u32) -> bool {
         let proof = Proof {
-            leaf_count: kani::any(),
+            leaf_count: kani::any_where(|&n| n <= max_leaves),
             siblings: kani::any::<[Hash; S]>().to_vec(),
         };
         let position: u32 = kani::any();
@@ -1661,27 +1663,29 @@ mod kani_proofs {
     // <= 32 fold levels (any u32 leaf count).
     #[kani::unwind(34)]
     fn merkle_verify_s0() {
-        verify_with::<0>();
+        verify_with::<0>(u32::MAX);
     }
 
-    /// As above with one arbitrary sibling digest.
+    /// As above with one arbitrary sibling digest and `leaf_count <= 8`
+    /// (<= 3 fold levels; any `u32` leaf count ran out of memory). Run
+    /// with `-Z unstable-options --cbmc-args --unwindset memcmp.0:33`.
     #[kani::proof]
     #[kani::stub(h2, toy_h2)]
     #[kani::stub(crate::hash::domain_digest, toy_domain_digest)]
     #[kani::stub(crate::hash::hash, toy_hash)]
-    #[kani::unwind(34)]
+    #[kani::unwind(5)]
     fn merkle_verify_s1() {
-        kani::cover!(verify_with::<1>(), "accepts_one_sibling_proof");
+        kani::cover!(verify_with::<1>(8), "accepts_one_sibling_proof");
     }
 
-    /// As above with two arbitrary sibling digests.
+    /// As above with two arbitrary sibling digests and `leaf_count <= 8`.
     #[kani::proof]
     #[kani::stub(h2, toy_h2)]
     #[kani::stub(crate::hash::domain_digest, toy_domain_digest)]
     #[kani::stub(crate::hash::hash, toy_hash)]
-    #[kani::unwind(34)]
+    #[kani::unwind(5)]
     fn merkle_verify_s2() {
-        kani::cover!(verify_with::<2>(), "accepts_two_sibling_proof");
+        kani::cover!(verify_with::<2>(8), "accepts_two_sibling_proof");
     }
 
     /// Independent single-leaf proof builder following SPEC-MERKLE-
@@ -1737,10 +1741,10 @@ mod kani_proofs {
         (cb, leaves)
     }
 
-    fn chunk_rt<const N: usize>() {
+    /// Spec-built proof for chunk `pos` (1-based, concrete) of an
+    /// `N`-chunk symbolic blob is accepted.
+    fn chunk_rt<const N: usize>(pos: u32) {
         let (cb, leaves) = chunked_fixture::<N>();
-        #[allow(clippy::cast_possible_truncation)]
-        let pos: u32 = kani::any_where(|&p: &u32| p >= 1 && p <= N as u32);
         let (root, siblings) = spec_proof(&leaves, pos as usize);
         let id = wrap_id(ObjectKind::ChunkedBlob, &root);
         #[allow(clippy::cast_possible_truncation)]
@@ -1775,11 +1779,12 @@ mod kani_proofs {
     // the 32-byte digest comparisons.
     #[kani::unwind(5)]
     fn merkle_roundtrip_one_chunk() {
-        chunk_rt::<1>();
+        chunk_rt::<1>(1);
     }
 
-    /// As above for a 2-chunk blob (3 leaves, odd trailing node). Split
-    /// from the 1-chunk case to keep CBMC's peak memory down.
+    /// As above for a 2-chunk blob (3 leaves, odd trailing node), both
+    /// chunk positions, each concrete (a symbolic position, i.e. a
+    /// symbolic index into the digest vectors, ran out of memory).
     #[kani::proof]
     #[kani::stub(h2, toy_h2)]
     #[kani::stub(crate::hash::domain_digest, toy_domain_digest)]
@@ -1787,7 +1792,8 @@ mod kani_proofs {
     // As above: `--cbmc-args --unwindset memcmp.0:33`.
     #[kani::unwind(5)]
     fn merkle_roundtrip_two_chunks() {
-        chunk_rt::<2>();
+        chunk_rt::<2>(1);
+        chunk_rt::<2>(2);
     }
 
     /// §1.1/§2 identity: `compute_chunked_id` of a 1-chunk blob (symbolic
