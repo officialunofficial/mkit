@@ -159,6 +159,12 @@ export const categories: SpecCategory[] = [
           'Signing-key storage for mkit key: software, OS-native, and hardware-backed implementations, with supported capabilities reported through one interface.',
       },
       {
+        name: 'SPEC-WRITE-GRANTS',
+        status: 'draft-normative',
+        description:
+          "Owner-signed grants that let an Ed25519 key write to a namespace's repositories, with wallet and passkey owner signatures and one-step epoch revocation.",
+      },
+      {
         name: 'SPEC-CONFIG-SECURITY',
         status: 'normative',
         description:
