@@ -5,7 +5,7 @@
 // a documented gap is reachable.
 module refs_test {
   import refs(PROCS = Set("p1", "p2", "p3"),
-              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false }).* from "./refs"
+              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false }).* from "./refs"
 
   pure def op(kind: str, t: int, r: int, c: Cond, v: int, d: bool): Op =
     { kind: kind, tree: t, ref: r, cond: c, value: v, del: d }
@@ -179,4 +179,37 @@ module refs_test {
       .expect(not(ExpireHoldsSuperset))
       .then(expireWrite("p1"))
       .expect(and { not(NoRecordExpireInterleave), lostRecords == Set(1) })
+
+  // SPEC-REFS §5.1 mixed-mutation contract: an unconditional delete
+  // (branch -d, delete_ref) waits for a Match in flight on the same ref.
+  run deleteWaitsForMatchTest =
+    initFixed(SAFE_INIT, 1, 1, ABSENT)
+      .then(beginOp("p1", op("updateRef", 0, 0, Match(1), 2, false)))
+      .then(acquire("p1")).then(acquire("p1")).then(readRef("p1"))
+      .then(beginOp("p2", op("branch", 0, 0, Any, 1, true)))
+      .then(acquire("p2")).then(acquire("p2"))
+      .expect(not(canMove("p2")))            // blocked on refs-<a>.lock
+      .then(commitRef("p1")).then(release("p1"))
+      .then(acquire("p2")).then(readRef("p2")).then(commitRef("p2"))
+      .expect(and { Safety, disk.get(0) == ABSENT, lastAction.outcome == "ok" })
+
+  // MUTANT (pre-#637): the same unconditional delete lands inside the Match
+  // window; the Match then resurrects the deleted ref. NoLostUpdateLocal fails.
+  run mutantNoRefLockDeleteTest =
+    initFixed({ ...NO_FAULTS, noRefLock: true }, 1, 1, ABSENT)
+      .then(beginOp("p1", op("updateRef", 0, 0, Match(1), 2, false)))
+      .then(acquire("p1")).then(readRef("p1"))
+      .then(beginOp("p2", op("branch", 0, 0, Any, 1, true)))
+      .then(acquire("p2")).then(acquire("p2")).then(readRef("p2")).then(commitRef("p2"))
+      .then(commitRef("p1"))
+      .expect(and { not(NoLostUpdateLocal), disk.get(0) == 2 })
+
+  // MUTANT: a broken (non-exclusive) kernel lock lets two processes hold
+  // worktree.lock(main) at once. LockOwnership fails.
+  run mutantRacyAcquireTest =
+    initFixed({ ...NO_FAULTS, racyAcquire: true }, 1, 1, ABSENT)
+      .then(beginOp("p1", op("updateRef", 0, 0, Any, 2, false)))
+      .then(beginOp("p2", op("updateRef", 0, 1, Any, 2, false)))
+      .then(acquire("p1")).then(acquire("p2"))
+      .expect(not(LockOwnership))
 }

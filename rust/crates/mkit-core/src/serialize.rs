@@ -1232,3 +1232,274 @@ mod tests {
         }
     }
 }
+
+/// Kani proof harnesses (`cargo kani -p mkit-core -Z stubbing --harness
+/// serialize_`), the model-checked counterpart of the `tree` fuzz target.
+///
+/// `deserialize` is verified compositionally: the prologue/dispatch/
+/// trailing-byte logic with the per-type readers replaced by
+/// nondeterministic stand-ins, and each reader on its own. Monolithic
+/// runs are out of reach: CBMC symbolically executes every `match` arm
+/// (even with a pinned tag), and the count-driven readers'
+/// `Vec::with_capacity(count)` with a symbolic count exhausts 15 GB at
+/// 12-byte inputs. Inputs are checked at every concrete length up to
+/// the stated bound (one call per length), which keeps slice lengths
+/// constant for CBMC.
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    /// Calls `$f::<N>()` for each listed literal `N`.
+    macro_rules! each_len {
+        ($f:ident; $($n:literal)*) => { $( $f::<$n>(); )* };
+    }
+
+    /// Advance the reader by a nondeterministic amount within bounds.
+    fn consume_any(r: &mut Reader<'_>) {
+        let n: usize = kani::any_where(|&n| n <= r.remaining());
+        r.pos += n;
+    }
+    fn any_blob(r: &mut Reader<'_>) -> Result<Blob, MkitError> {
+        consume_any(r);
+        if kani::any() {
+            Ok(Blob { data: Vec::new() })
+        } else {
+            Err(MkitError::UnexpectedEof)
+        }
+    }
+    fn any_tree(r: &mut Reader<'_>) -> Result<Tree, MkitError> {
+        consume_any(r);
+        if kani::any() {
+            Ok(Tree { entries: Vec::new() })
+        } else {
+            Err(MkitError::InvalidEntryOrder)
+        }
+    }
+    fn any_err_commit(r: &mut Reader<'_>) -> Result<Commit, MkitError> {
+        consume_any(r);
+        Err(MkitError::UnexpectedEof)
+    }
+    fn any_err_remix(r: &mut Reader<'_>) -> Result<Remix, MkitError> {
+        consume_any(r);
+        Err(MkitError::UnexpectedEof)
+    }
+    fn any_err_chunked(r: &mut Reader<'_>) -> Result<ChunkedBlob, MkitError> {
+        consume_any(r);
+        Err(MkitError::UnexpectedEof)
+    }
+    fn any_err_delta(r: &mut Reader<'_>) -> Result<Delta, MkitError> {
+        consume_any(r);
+        Err(MkitError::UnexpectedEof)
+    }
+    fn any_err_tag(r: &mut Reader<'_>) -> Result<Tag, MkitError> {
+        consume_any(r);
+        Err(MkitError::UnexpectedEof)
+    }
+
+    fn prologue_at<const N: usize>() -> bool {
+        let data: [u8; N] = kani::any();
+        deserialize(&data).is_ok()
+    }
+
+    /// Prologue (§2), dispatch, and the §11 trailing-byte rule: for every
+    /// input of <= 12 bytes (tag, magic, version, body symbolic) and any
+    /// behaviour of the per-type readers (each consumes a nondeterministic
+    /// in-bounds prefix and succeeds or fails), `deserialize` never
+    /// panics/overflows/reads OOB.
+    #[kani::proof]
+    #[kani::stub(read_blob, any_blob)]
+    #[kani::stub(read_tree, any_tree)]
+    #[kani::stub(read_commit, any_err_commit)]
+    #[kani::stub(read_remix, any_err_remix)]
+    #[kani::stub(read_chunked_blob, any_err_chunked)]
+    #[kani::stub(read_delta, any_err_delta)]
+    #[kani::stub(read_tag, any_err_tag)]
+    #[kani::unwind(6)]
+    fn serialize_prologue_no_panic() {
+        each_len!(prologue_at; 0 1 2 3 4 5 6 7 8 9 10 11);
+        kani::cover!(prologue_at::<12>(), "ok");
+    }
+
+    fn readers_at<const N: usize>() -> bool {
+        let body: [u8; N] = kani::any();
+        let mut ok = false;
+        let mut r = Reader::new(&body);
+        ok |= read_blob(&mut r).is_ok();
+        assert!(r.pos <= N);
+        ok |= read_commit(&mut Reader::new(&body)).is_ok();
+        ok |= read_remix(&mut Reader::new(&body)).is_ok();
+        ok |= read_tag(&mut Reader::new(&body)).is_ok();
+        ok |= read_chunked_blob(&mut Reader::new(&body)).is_ok();
+        ok |= read_delta(&mut Reader::new(&body)).is_ok();
+        ok
+    }
+
+    /// The non-tree readers (§3, §5–§8) on every body of 0..=12 bytes:
+    /// no panic/overflow/OOB. Only blobs can succeed this short (cover);
+    /// the others need >= 16-byte bodies, so this bound reaches their
+    /// truncation paths only.
+    #[kani::proof]
+    #[kani::unwind(3)]
+    fn serialize_read_other_types_no_panic() {
+        each_len!(readers_at; 0 1 2 3 4 5 6 7 8 9 10 11);
+        kani::cover!(readers_at::<12>(), "ok_blob");
+    }
+
+    /// Nondeterministic stand-in for `TreeEntry::validate_name` in the
+    /// reader harnesses: sound for decoder panic-freedom (the real check
+    /// is pure and returns a `bool`). The real function is verified
+    /// against a §4.1 model by `serialize_validate_name_matches_spec`.
+    fn any_name_ok(_name: &[u8]) -> bool {
+        kani::any()
+    }
+
+    fn read_tree_at<const N: usize>() -> bool {
+        let body: [u8; N] = kani::any();
+        let mut r = Reader::new(&body);
+        let got = read_tree(&mut r);
+        assert!(r.pos <= N);
+        got.is_ok()
+    }
+
+    /// Byte equality of two 42-byte buffers without a `memcmp` loop (a
+    /// loop would force a global unwind of 43, which the count-driven
+    /// `read_tree` loop cannot afford).
+    fn eq42(a: &[u8], b: &[u8]) -> bool {
+        let w16 = |x: &[u8], i: usize| u128::from_le_bytes(x[i..i + 16].try_into().expect("16"));
+        let w8 = |x: &[u8], i: usize| u64::from_le_bytes(x[i..i + 8].try_into().expect("8"));
+        let w2 = |x: &[u8], i: usize| u16::from_le_bytes(x[i..i + 2].try_into().expect("2"));
+        a.len() == 42
+            && b.len() == 42
+            && w16(a, 0) == w16(b, 0)
+            && w16(a, 16) == w16(b, 16)
+            && w8(a, 32) == w8(b, 32)
+            && w2(a, 40) == w2(b, 40)
+    }
+
+    /// `read_tree` (SPEC-OBJECTS §4) on every body of 0..=8 bytes (count
+    /// and all fields symbolic): no panic/overflow/OOB, and the reader
+    /// never runs past its input. §4.1 is stubbed (`any_name_ok`).
+    #[kani::proof]
+    #[kani::stub(TreeEntry::validate_name, any_name_ok)]
+    #[kani::unwind(3)]
+    fn serialize_read_tree_no_panic() {
+        each_len!(read_tree_at; 0 1 2 3 4 5 6 7 8);
+    }
+
+    /// `read_tree` on a 42-byte body — the exact size of a one-entry tree
+    /// with a 1-byte name — with every byte but the count symbolic, count
+    /// ∈ {1, 2} (so `name_len`, mode and hash range freely): no panic; two
+    /// entries never fit; on the one-entry `Ok` path that consumes the
+    /// body, the bytes are the canonical encoding
+    /// (`serialize(tree)[6..] == body`). §4.1 is stubbed (`any_name_ok`).
+    #[kani::proof]
+    #[kani::stub(TreeEntry::validate_name, any_name_ok)]
+    #[kani::unwind(3)]
+    fn serialize_read_tree_one_entry() {
+        for count in [1u32, 2] {
+            let mut body: [u8; 42] = kani::any();
+            body[..4].copy_from_slice(&count.to_le_bytes());
+            let mut r = Reader::new(&body);
+            if let Ok(t) = read_tree(&mut r) {
+                assert_eq!(count, 1, "two entries cannot fit in 42 bytes");
+                if r.remaining() == 0 {
+                    let bytes = serialize(&Object::Tree(t)).expect("re-encodes");
+                    assert!(eq42(&bytes[PROLOGUE_LEN..], &body));
+                    kani::cover!(true, "one_entry_canonical");
+                }
+            }
+        }
+    }
+
+    /// Independent transcription of SPEC-OBJECTS §4.1.
+    fn spec_name_ok(n: &[u8]) -> bool {
+        if n.is_empty() || n.len() > 255 {
+            return false;
+        }
+        if n.iter().any(|&b| b == 0 || b == b'/' || b == b'\\') {
+            return false;
+        }
+        if n == b"." || n == b".." || matches!(n[n.len() - 1], b'.' | b' ') {
+            return false;
+        }
+        let up: Vec<u8> = n.iter().map(u8::to_ascii_uppercase).collect();
+        if up == b".MKIT" || up == b".GIT" {
+            return false;
+        }
+        let stem = match up.iter().position(|&b| b == b'.') {
+            Some(i) => &up[..i],
+            None => &up[..],
+        };
+        let reserved3 = [b"CON", b"PRN", b"AUX", b"NUL"];
+        if reserved3.iter().any(|r| stem == r.as_slice()) {
+            return false;
+        }
+        !(stem.len() == 4
+            && (stem[..3] == *b"COM" || stem[..3] == *b"LPT")
+            && (b'1'..=b'9').contains(&stem[3]))
+    }
+
+    fn name_at<const L: usize>() {
+        let n: [u8; L] = kani::any();
+        assert_eq!(TreeEntry::validate_name(&n), spec_name_ok(&n));
+    }
+
+    /// `TreeEntry::validate_name` agrees with the §4.1 model on every
+    /// name of 0..=6 bytes (enough for `.mkit`, `COM1`, `LPT9.x`,
+    /// `con.txt`-style stems and every trailing-byte rule).
+    #[kani::proof]
+    #[kani::unwind(8)]
+    fn serialize_validate_name_matches_spec() {
+        each_len!(name_at; 0 1 2 3 4 5 6);
+        kani::cover!(TreeEntry::validate_name(b"com0.x"), "com0_allowed");
+    }
+
+    fn any_entry<const L: usize>() -> TreeEntry {
+        let name: [u8; L] = kani::any();
+        let mode = match kani::any::<u8>() % 4 {
+            0 => EntryMode::Blob,
+            1 => EntryMode::Tree,
+            2 => EntryMode::Symlink,
+            _ => EntryMode::Executable,
+        };
+        TreeEntry {
+            name: name.to_vec(),
+            mode,
+            object_hash: kani::any(),
+        }
+    }
+
+    /// `read_tree(write_tree(t))` succeeds iff every name is §4.1-valid
+    /// and names are strictly ascending (§4) — and then returns `t`.
+    fn roundtrip(entries: Vec<TreeEntry>) -> bool {
+        let tree = Tree { entries };
+        let valid = tree.entries.iter().all(|e| TreeEntry::validate_name(&e.name))
+            && tree.entries.windows(2).all(|w| w[0].name < w[1].name);
+        let mut bytes = Vec::new();
+        write_tree(&mut bytes, &tree).expect("small tree encodes");
+        let mut r = Reader::new(&bytes);
+        let back = read_tree(&mut r);
+        assert_eq!(back.is_ok(), valid);
+        if let Ok(t) = back {
+            assert_eq!(r.remaining(), 0);
+            assert_eq!(t, tree);
+        }
+        valid
+    }
+
+    /// Writer/reader round-trip for every tree of <= 2 entries with
+    /// names of 1..=2 symbolic bytes (each length combination concrete),
+    /// any mode, symbolic hashes — real §4.1 checks, not stubbed.
+    #[kani::proof]
+    // 32-byte hash comparisons dominate.
+    #[kani::unwind(34)]
+    fn serialize_tree_roundtrip() {
+        roundtrip(vec![]);
+        roundtrip(vec![any_entry::<1>()]);
+        roundtrip(vec![any_entry::<2>()]);
+        roundtrip(vec![any_entry::<1>(), any_entry::<1>()]);
+        roundtrip(vec![any_entry::<1>(), any_entry::<2>()]);
+        roundtrip(vec![any_entry::<2>(), any_entry::<1>()]);
+        kani::cover!(roundtrip(vec![any_entry::<2>(), any_entry::<2>()]), "two_valid_entries");
+    }
+}

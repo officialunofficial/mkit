@@ -30,8 +30,8 @@
 // - Root sources: refs main/tag/pushed (HEAD, branches, tags, remotes, index,
 //   stash, op state, attestations and history intents all behave like a ref
 //   here) and the recovery log.
-// - MAX_REACHABLE truncation and ObjectNotFound are the same fail-closed abort
-//   as an unreadable source and are not modelled separately.
+// - ObjectNotFound (a root's closure not fully present) aborts at mark like an
+//   unreadable source; MAX_REACHABLE truncation is not modelled (same abort).
 // - gc's `now` is read once after the locks (commands/gc.rs); each object's
 //   mtime is read when the sweep reaches it (gc.rs `store.object_metadata`).
 //
@@ -247,7 +247,7 @@ module gcCore {
   def pushTimingOk: bool =
     if (PUSH_MODE == "fast") clock - pushStart < GRACE
     else if (PUSH_MODE == "bounded")
-      CLOS.get(PUSH_TIP).forall(o => clock - mtime.get(o) < GRACE)
+      CLOS.get(PUSH_TIP).forall(o => present.contains(o) and clock - mtime.get(o) < GRACE)
     else true
   action PushPublish = all {
     pushPhase == "wrote",
@@ -326,7 +326,11 @@ module gcCore {
   def readableSrcs: Set[str] = SOURCES.exclude(corrupt)
   def gcViewRoots: Set[int] =
     refRoots(readableSrcs).union(if (readableSrcs.contains("rlog")) logRoots else Set())
-  def markAborts: bool = corrupt != Set() and not(BUG_LENIENT)
+  // SPEC-GC Fail-closed: a root or referenced object missing from the store
+  // (StoreError::ObjectNotFound from the closure walk) also aborts.
+  def markMissing: bool = not(closure(gcViewRoots).subseteq(present))
+  def markUnsound: bool = corrupt != Set() or markMissing
+  def markAborts: bool = markUnsound and not(BUG_LENIENT)
   action GcMark = all {
     gcPhase == "expired",
     gcPhase' = if (markAborts) "idle" else "sweep",
@@ -334,7 +338,7 @@ module gcCore {
     lockHolder' = if (markAborts) gcRelease else lockHolder,
     gcLive' = closure(gcViewRoots),
     gcTodo' = if (markAborts) Set() else present,
-    markedUnreadable' = corrupt != Set(),
+    markedUnreadable' = markUnsound,
     lastAction' = { name: if (markAborts) "gc abort (collect_roots)" else "gc mark", arg: NONE },
     gcNow' = gcNow, gcKept' = gcKept, gcDropAny' = gcDropAny,
     livePruned' = livePruned, sweptUnreadable' = sweptUnreadable,
@@ -492,6 +496,11 @@ module gcPushFast {         // push publishes within GRACE; store as implemented
       .expect(not(present.contains(5)))
       .then(PushPublish)
       .expect(not(NoDangling) and NoLivePruned)
+      // The next gc fails closed on the dangling ref (ObjectNotFound).
+      .then(GcSweep(0)).then(GcSweep(1)).then(GcSweep(2)).then(GcSweep(3))
+      .then(GcSweep(6)).then(GcDone)
+      .then(GcLock).then(GcExpireRead).then(GcExpireWrite).then(GcMark)
+      .expect(gcPhase == "idle" and aborts == 1 and markedUnreadable)
 }
 module gcPushFastFreshen {  // push publishes within GRACE, dedup refreshes mtime
   import gcCore(PUSH_MODE = "fast", FRESHEN = true, GRACE = 2, BUG_NO_LOCK = false,
@@ -505,6 +514,10 @@ module gcPushBounded {      // exact on-disk-mtime timing assumption
 // ---- mutants (non-vacuity) -------------------------------------------------
 module mutNoLock {          // violates SupersededRetained, LockExclusion
   import gcCore(PUSH_MODE = "none", FRESHEN = false, GRACE = 2, BUG_NO_LOCK = true,
+    BUG_LENIENT = false, BUG_NO_RECORD = false, BUG_NO_KEEP_LAST = false).*
+}
+module mutNoLockGrace0 {    // --grace-secs 0 without gc's lock set: violates NoDangling
+  import gcCore(PUSH_MODE = "none", FRESHEN = false, GRACE = 0, BUG_NO_LOCK = true,
     BUG_LENIENT = false, BUG_NO_RECORD = false, BUG_NO_KEEP_LAST = false).*
 }
 module mutLenient {         // violates UnreadableAborts, NoLivePruned

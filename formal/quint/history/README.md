@@ -46,9 +46,10 @@ A ghost `lineage[g]` records whether every ref value written since generation
 | `CurrentMatchesRef` | with no intent, `current`'s snapshot has the live tip and its canonical whole chain (§3, §4.4) | `mutHealTipOnly` (recovery appends only the tip) |
 | `ServedMatchesRef` | the same property for a served descriptor | holds even under `mutHealTipOnly`, because `load` re-walks the chain; `CanaryNeverServed` shows it is reachable |
 | `GenerationFastForwardOnly`, `ServedGenerationFresh` | a generation is never reused across delete/recreate, reset/rewrite or raw ABA (§1) | `mutRawSkipsInvalidate`, `mutReuseGenOnRewrite` |
-| `FinishOnlyFromRecorded` | recovery proceeds only from the recorded previous or target ref (§4.4) | by construction; see `NeverFailsClosed` |
+| `FastForwardRetainsGeneration` | a fast-forward of the live published tip keeps its generation (§1, §4.4 step 2) | `mutFreshGenOnFF` (every publish mints a fresh generation) |
+| `FinishOnlyFromRecorded` | recovery proceeds only from the recorded previous or target ref (§4.4) | `mutFinishAnyRef` (recovery accepts any ref; needs a raw writer that steps over the intent) |
 | `RecoveryEnabled`, `NeverFailsClosed` | when idle with an intent, recovery's precondition holds and its result satisfies the invariants, so the intent is always recoverable; divergence (fail closed) is unreachable through supported APIs | `mutRawIgnoresTx` (a raw writer steps over the intent, so recovery fails closed and the intent stays) |
-| `IntentRootsRetained` | pending intent refs stay GC roots (§4.3) | `mutGcIgnoresIntent` |
+| `IntentRootsRetained` | pending intent refs stay GC roots (§4.3); the intent's target chain is present (§4.2: missing ancestors fail before publication) | `mutGcIgnoresIntent`, `mutSkipVerify` |
 
 **Reachability canaries (each must be violated):** `CanaryNeverServed`,
 `CanaryNoCrashRecovery`, `CanaryNoMultiCommitFF`, `CanaryNoRecreate`,
@@ -92,14 +93,14 @@ The constants are scaled: `MIN_WINDOW=2`, `LAP_FRACTION=4`, `MAX_AGE=3`
 |---|---|
 | `ActualPublishBound`: no leaf goes more than `LAP_FRACTION+1` publishes unread | holds (TLC, unbounded publishes); falsified by `mutWrapWithoutFull` |
 | `TimeBound`: after a publish, every leaf was read within `MAX_AGE` | holds, including with lost writes; falsified by `mutIgnoreAge` and `scrubClockBack` |
-| `InvalidForcesFull`: invalid scrub state always forces a full walk | holds |
+| `InvalidForcesFull`: invalid scrub state always forces a full walk | holds; falsified by `mutTrustInvalid` |
 | `SpecPublishBound`: "at 64 fast-forward publishes" | **violated** (finding 1) |
 | `WindowOnlyWhenFresh`: window only if "fewer than" 7 days elapsed | **violated** (finding 2) |
 
 ## Commands and outcomes
 
 ```sh
-./check.sh              # quint typecheck/test/run and TLC: "all checks as expected" (~7 min)
+./check.sh              # quint typecheck/test/run and TLC: "all checks as expected" (~6 min)
 APALACHE=1 ./check.sh   # adds Apalache 0.47.2 bounded runs
 ```
 
@@ -115,10 +116,13 @@ quint compile --target tlaplus --main history --invariant Safety history.qnt > h
 java -cp /opt/fv/tla2tools.jar tlc2.TLC -deadlock -config tlc/MC.cfg tlc/MC.tla
   # No error: 9,903,627 states generated, 200,388 distinct (view) states, depth 37
 apalache-mc check --init=q_init --next=q_step --inv=q_inv --length=10 history.tla
-  # Apalache 0.47.2, Safety: "no error up to computation length 10" (25m35s)
-  # CanaryNeverServed violated at depth 6; mutGcIgnoresIntent violated at depth 3
-apalache-mc check ... --length=8 scrub.tla   # ActualPublishBound,TimeBound,InvalidForcesFull: NoError (59s)
+  # Apalache 0.47.2, Safety: "no error up to computation length 10" (25m35s,
+  # before FastForwardRetainsGeneration was added; with it: length 8, 4m06s)
+  # CanaryNeverServed violated at depth 6; mutGcIgnoresIntent violated at depth 3;
+  # mutFreshGenOnFF at 7, mutSkipVerify at 2, mutFinishAnyRef at 5
+apalache-mc check ... --length=8 scrub.tla   # ActualPublishBound,TimeBound,InvalidForcesFull: NoError (49s)
                                              # SpecPublishBound: violated at depth 4
+                                             # mutTrustInvalid InvalidForcesFull: violated at depth 2
 ```
 
 ## Findings
@@ -135,9 +139,9 @@ apalache-mc check ... --length=8 scrub.tla   # ActualPublishBound,TimeBound,Inva
    `now - last_full_verify_unix <= 604800` (`stale` is `> SCRUB_MAX_AGE_SECS`),
    so at exactly 604800 s it takes the window path.
 3. **The publish bound depends on the scrub write landing.**
-   `write_scrub_state`'s result is discarded (`let _ =`), and a crash between
-   `finish` and that write loses the advanced cursor, so the same window is
-   re-read. In that case `ActualPublishBound` fails (`scrubLossy`); only the
+   `write_scrub_state`'s result is discarded (`let _ =`), the write is not
+   synced (`write_atomic(.., false)`), and a crash between `finish` and that
+   write loses the advanced cursor, so the same window is re-read. In that case `ActualPublishBound` fails (`scrubLossy`); only the
    7-day bound holds.
 4. **The time bound assumes a wall clock that never steps back.** With
    `saturating_sub`, a `last_full_verify_unix` in the future counts as 0 s
@@ -158,11 +162,13 @@ no violation.
   checksums and corruption of history metadata are not modelled (the Rust
   tests `tampered_snapshot_and_transaction_fail_closed` cover them).
 - GC is atomic with respect to publication. This assumes every branch-moving
-  command holds a `worktree.lock` that GC also takes, per the
-  SPEC-CONCURRENCY §4 table. GC's grace window is not modelled.
+  command holds a `worktree.lock` or `worktrees.lock` (`branch -d`/`-m`) that
+  GC also takes, per the SPEC-CONCURRENCY §4 table. GC's grace window is not modelled.
 - Ref writes that bypass `RefMutation` (for example the file transport's own
   `refs/` tree, SPEC-CONCURRENCY §3.1) are outside the model.
   `mutRawSkipsInvalidate` shows such a writer could revive a generation
   through ABA if it ever shared a history-enabled common dir.
+- Branch rename (§1: fresh generation) is not modelled separately; with one
+  branch it is a delete of the old name plus a first publication of the new.
 - The scrub model uses scaled constants; the real-constant lap length is
   checked arithmetically only (`realLapTest`).

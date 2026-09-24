@@ -22,7 +22,9 @@ The model is aligned with `rust/crates/mkit-core/src/ops/gc.rs`
   split into a read step and a rewrite step because `expire` reads, filters and
   then atomically rewrites the log. The log is rewritten only when the snapshot
   dropped entries. `GcMark` runs the strict `collect_roots` plus the closure: if
-  any root source is unreadable, gc aborts before deleting anything. Each sweep
+  any root source is unreadable, or an object in the roots' closure is
+  missing from the store (`ObjectNotFound`), gc aborts before deleting
+  anything. Each sweep
   step reads that object's mtime and deletes it if it is unreachable and
   `now - mtime >= GRACE`.
 - **Producer** (amend/reset/rebase on `main`) runs through `ProdBegin`,
@@ -52,11 +54,14 @@ with a gc run are covered only by `quint run`.
 |---|---|---|
 | `NoLivePruned` | gc never deletes an object that is reachable from the true root set when it is deleted (SPEC-GC Invariants, row 1) | `mutLenient` |
 | `NoDangling` | everything reachable from a ref or a recovery entry is present | `gcPushRaw`, `gcPushFast`, `gcPushRawFreshen` |
-| `UnreadableAborts` | nothing is deleted after a mark that saw an unreadable source (fail-closed) | `mutLenient` |
+| `UnreadableAborts` | nothing is deleted after a mark that saw an unreadable source or a missing closure object (fail-closed) | `mutLenient`; the missing-object branch is pinned by `fastPushDedupLossTest` (the next gc after the dangling publish aborts) |
 | `SupersededRetained` | a record inside the policy (age ≤ RETAIN, or the newest) is in the log and its closure is present (Recovery log) | `mutNoRecord`, `mutNoKeepLast`, `mutNoLock` (a `record` append is lost to an `expire` rewrite) |
 | `LockExclusion` | a producer mid-rewrite never overlaps an active gc run (§3.2 lock superset) | `mutNoLock` |
 
-`Safety` is the conjunction of these invariants.
+`Safety` is the conjunction of these invariants. `mutNoLockGrace0`
+(`--grace-secs 0` with gc not excluding the producer) violates `NoDangling`
+and `NoLivePruned`, so the grace-0 result depends on the §3.2/§4 lock set.
+`MAX_REACHABLE` truncation and crash durability of `record` are not modelled.
 
 **Canaries (each must be violated):** `CanaryNoPrune`, `CanaryNoAbort`,
 `CanaryNoExpire`, `CanaryNoPrunedRecord` (an expired record's commit really gets
@@ -69,11 +74,14 @@ pruned), `CanaryNoPushPublished`, `CanaryNoPruneDuringPush`.
 | `gcPushRaw`, `gcPushRawFreshen` | none | `NoDangling` and `NoLivePruned` are violated. The push writes at t, gc runs with `now ≥ t + GRACE`, and the push then publishes. |
 | `gcPushFast` | publish < GRACE after the push's write | Violated, even with a zero-duration push. The object is an old orphan, so the push's write is a dedup hit that keeps mtime 0 (`fastPushDedupLossTest`). |
 | `gcPushFastFreshen` | as above, with mtime refreshed on dedup | Safe |
-| `gcPushBounded` | at publish time T, every object o the tip reaches has `T - mtime(o) < GRACE`, using on-disk mtime | Safe |
+| `gcPushBounded` | at publish time T, every object o the tip reaches is present with `T - mtime(o) < GRACE` (on-disk mtime) | Safe |
 
 **The exact safety condition:** a publish at instant T is safe iff every
 object it makes reachable, and that is not otherwise live, has on-disk mtime
-`> T - GRACE`. This works because gc's `now` is read before its mark, so any
+`> T - GRACE`. `gcPushBounded` checks sufficiency of the slightly stronger
+form over every object the tip reaches. Necessity is shown by the
+`gcPushFast`/`gcPushRaw*` counterexamples; the "not otherwise live" refinement
+is argued by hand. This works because gc's `now` is read before its mark, so any
 gc whose mark precedes the publish has `now ≤ T`. The push's duration bounds
 this only when a dedup hit refreshes mtime. `--grace-secs 0` is never safe
 against a concurrent push.
@@ -82,5 +90,5 @@ against a concurrent push.
 
 ```
 ./check.sh              # quint typecheck/test/run (~5 min)
-APALACHE=1 ./check.sh   # + Apalache 0.47.2 (~40 min)
+APALACHE=1 ./check.sh   # + Apalache 0.47.2 (1.5 to 7.5 h, depending on load)
 ```

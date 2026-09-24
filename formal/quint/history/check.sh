@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Reproduce every MKIT-20 history check: `./check.sh` (quint + TLC, ~7 min),
+# Reproduce every MKIT-20 history check: `./check.sh` (quint + TLC, ~6 min),
 # `APALACHE=1 ./check.sh` adds bounded Apalache runs (history depth
-# ${HISTORY_DEPTH:-10} takes ~26 min). Needs quint 0.32, java and
+# ${HISTORY_DEPTH:-10} takes ~26 min; 8 takes ~4 min). Needs quint 0.32, java and
 # ${TLA2TOOLS:-/opt/fv/tla2tools.jar}; Apalache from ${APALACHE_MC:-/opt/fv/apalache/bin/apalache-mc}.
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -10,6 +10,7 @@ APALACHE_MC=${APALACHE_MC:-/opt/fv/apalache/bin/apalache-mc}
 APA_JAR=$(dirname "$APALACHE_MC")/../lib/apalache.jar
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
+trap 'echo "check.sh: aborted at line $LINENO (unexpected error)" >&2' ERR
 fails=0
 note() { printf '%-58s %s\n' "$1" "$2"; }
 bad() { note "$1" "UNEXPECTED: $2"; fails=$((fails + 1)); }
@@ -54,7 +55,9 @@ done
 for m in mutLoadIgnoresTx:NoProofWhileIntent mutRawIgnoresTx:RecoveryEnabled \
   mutRawIgnoresTx:NeverFailsClosed mutRawSkipsInvalidate:GenerationFastForwardOnly \
   mutRawSkipsInvalidate:ServedGenerationFresh mutGcIgnoresIntent:IntentRootsRetained \
-  mutHealTipOnly:CurrentMatchesRef mutReuseGenOnRewrite:GenerationFastForwardOnly; do
+  mutHealTipOnly:CurrentMatchesRef mutReuseGenOnRewrite:GenerationFastForwardOnly \
+  mutFreshGenOnFF:FastForwardRetainsGeneration mutSkipVerify:IntentRootsRetained \
+  mutFinishAnyRef:FinishOnlyFromRecorded; do
   qrun history.qnt "${m%%:*}" "${m##*:}" violation
 done
 # ---- scrub.qnt ----------------------------------------------------------------
@@ -65,6 +68,7 @@ qrun scrub.qnt scrubClockBack ActualPublishBound ok 14
 for c in CanaryNoWindow CanaryNoLapFull; do qrun scrub.qnt scrub "$c" violation 14; done
 qrun scrub.qnt mutIgnoreAge TimeBound violation 14
 qrun scrub.qnt mutWrapWithoutFull ActualPublishBound violation 14
+qrun scrub.qnt mutTrustInvalid InvalidForcesFull violation 14
 # findings: spec claims the implementation does not meet
 qrun scrub.qnt scrub SpecPublishBound violation 14
 qrun scrub.qnt scrub WindowOnlyWhenFresh violation 14
@@ -73,7 +77,7 @@ qrun scrub.qnt scrubClockBack TimeBound violation 14
 
 # ---- TLC: exhaustive over the finite instances -----------------------------
 for m in history mutLoadIgnoresTx mutRawSkipsInvalidate mutHealTipOnly mutGcIgnoresIntent \
-  mutRawIgnoresTx mutReuseGenOnRewrite; do
+  mutRawIgnoresTx mutReuseGenOnRewrite mutFreshGenOnFF mutSkipVerify mutFinishAnyRef; do
   d="$WORK/tlc-$m"; mkdir -p "$d"
   tla history.qnt "$m" Safety history "$d"
   sed "s/history_historyCore_/${m}_historyCore_/g" tlc/MC.tla > "$d/MC.tla"
@@ -101,7 +105,9 @@ if [[ ${APALACHE:-0} == 1 ]]; then
   apa history.qnt history Safety "${HISTORY_DEPTH:-10}" ok
   apa history.qnt history CanaryNeverServed 7 violation
   apa history.qnt mutGcIgnoresIntent IntentRootsRetained 7 violation
+  apa history.qnt mutFreshGenOnFF FastForwardRetainsGeneration 8 violation
   apa scrub.qnt scrub ActualPublishBound,TimeBound,InvalidForcesFull 8 ok
   apa scrub.qnt scrub SpecPublishBound 8 violation
+  apa scrub.qnt mutTrustInvalid InvalidForcesFull 8 violation
 fi
 [[ $fails == 0 ]] && echo "all checks as expected" || { echo "$fails unexpected"; exit 1; }

@@ -30,6 +30,9 @@ module historyCore {
   const BUG_GC_IGNORES_INTENT: bool     // GC drops pending intent roots
   const BUG_HEAL_TIP_ONLY: bool         // recovery appends only the tip
   const BUG_REUSE_GEN_ON_REWRITE: bool  // non-FF keeps the old generation
+  const BUG_FRESH_GEN_ON_FF: bool       // FF mints a fresh generation
+  const BUG_SKIP_VERIFY: bool           // intent persisted without ancestors
+  const BUG_FINISH_ANY_REF: bool        // recovery accepts any ref value
 
   // ---- commit universe ----------------------------------------------------
   // First-parent forest: 1 <- 2 <- 3 and 1 <- 4 (a fork). 0 is "no ref".
@@ -126,8 +129,9 @@ module historyCore {
     val compatible = cur.present and cur.tip == ref
     val noop = compatible and cur.tip == t
     // Missing ancestors fail before publication (§4.2).
-    val verified = elems(t).subseteq(store)
-    val ff = compatible and fpAncestor(cur.tip, t)
+    val verified = BUG_SKIP_VERIFY or elems(t).subseteq(store)
+    // §1/§4.4 step 2: a fast-forward of the live published tip keeps it.
+    val ff = compatible and fpAncestor(cur.tip, t) and not(BUG_FRESH_GEN_ON_FF)
     val reuse = ff or (BUG_REUSE_GEN_ON_REWRITE and compatible)
     if (not(condOk) or corrupt or noop or not(verified)) opError
     else if (reuse) all {
@@ -155,7 +159,7 @@ module historyCore {
   // Accepts only the recorded previous or target ref and rebuilds the ENTIRE
   // target chain from verified objects; otherwise fails closed (intent kept).
   action startFinish(k: str, t: int, exp: int): bool = {
-    val ok = (ref == tx.prev or ref == tx.target)
+    val ok = (BUG_FINISH_ANY_REF or ref == tx.prev or ref == tx.target)
              and elems(tx.target).subseteq(store)
     val rebuilt =
       if (BUG_HEAL_TIP_ONLY and tx.prevGen != NONE and snaps.get(tx.prevGen).present)
@@ -381,6 +385,11 @@ module historyCore {
   val GenerationFastForwardOnly = (not(tx.present) and current != NONE) implies
     (not(lineage.get(current).empty) and lineage.get(current).ok)
   val ServedGenerationFresh = canServe implies lineage.get(current).ok
+  // §1: "First-parent fast-forwards retain the generation" (the converse of
+  // the above). `prevGen` is recorded only for a compatible published tip.
+  val FastForwardRetainsGeneration =
+    (tx.present and tx.prevGen != NONE and fpAncestor(tx.prev, tx.target))
+      implies tx.gen == tx.prevGen
   // §4.4: finish proceeds only from the recorded previous or target ref.
   val FinishOnlyFromRecorded =
     (Set("f_pending", "f_ref").contains(pc) implies (ref == tx.prev or ref == tx.target))
@@ -402,7 +411,8 @@ module historyCore {
   val NeverFailsClosed = not(ev.failedClosed)
 
   val Safety = NoProofWhileIntent and ServedMatchesRef and CurrentMatchesRef
-    and GenerationFastForwardOnly and ServedGenerationFresh and FinishOnlyFromRecorded
+    and GenerationFastForwardOnly and ServedGenerationFresh and FastForwardRetainsGeneration
+    and FinishOnlyFromRecorded
     and IntentRootsRetained and RecoveryEnabled and NeverFailsClosed
 
   // ---- canaries: each MUST be violated (reachability witnesses) ----------------
@@ -420,7 +430,8 @@ module history {
   import historyCore(
     BUG_LOAD_IGNORES_TX = false, BUG_RAW_IGNORES_TX = false,
     BUG_RAW_SKIPS_INVALIDATE = false, BUG_GC_IGNORES_INTENT = false,
-    BUG_HEAL_TIP_ONLY = false, BUG_REUSE_GEN_ON_REWRITE = false
+    BUG_HEAL_TIP_ONLY = false, BUG_REUSE_GEN_ON_REWRITE = false,
+    BUG_FRESH_GEN_ON_FF = false, BUG_SKIP_VERIFY = false, BUG_FINISH_ANY_REF = false
   ).*
 
   // Scenario tests mirroring ancestry.rs
@@ -467,41 +478,72 @@ module mutLoadIgnoresTx {   // violates NoProofWhileIntent
   import historyCore(
     BUG_LOAD_IGNORES_TX = true, BUG_RAW_IGNORES_TX = false,
     BUG_RAW_SKIPS_INVALIDATE = false, BUG_GC_IGNORES_INTENT = false,
-    BUG_HEAL_TIP_ONLY = false, BUG_REUSE_GEN_ON_REWRITE = false
+    BUG_HEAL_TIP_ONLY = false, BUG_REUSE_GEN_ON_REWRITE = false,
+    BUG_FRESH_GEN_ON_FF = false, BUG_SKIP_VERIFY = false, BUG_FINISH_ANY_REF = false
   ).*
 }
 module mutRawIgnoresTx {    // violates RecoveryEnabled / NeverFailsClosed
   import historyCore(
     BUG_LOAD_IGNORES_TX = false, BUG_RAW_IGNORES_TX = true,
     BUG_RAW_SKIPS_INVALIDATE = false, BUG_GC_IGNORES_INTENT = false,
-    BUG_HEAL_TIP_ONLY = false, BUG_REUSE_GEN_ON_REWRITE = false
+    BUG_HEAL_TIP_ONLY = false, BUG_REUSE_GEN_ON_REWRITE = false,
+    BUG_FRESH_GEN_ON_FF = false, BUG_SKIP_VERIFY = false, BUG_FINISH_ANY_REF = false
   ).*
 }
 module mutRawSkipsInvalidate {  // violates GenerationFastForwardOnly (ABA)
   import historyCore(
     BUG_LOAD_IGNORES_TX = false, BUG_RAW_IGNORES_TX = false,
     BUG_RAW_SKIPS_INVALIDATE = true, BUG_GC_IGNORES_INTENT = false,
-    BUG_HEAL_TIP_ONLY = false, BUG_REUSE_GEN_ON_REWRITE = false
+    BUG_HEAL_TIP_ONLY = false, BUG_REUSE_GEN_ON_REWRITE = false,
+    BUG_FRESH_GEN_ON_FF = false, BUG_SKIP_VERIFY = false, BUG_FINISH_ANY_REF = false
   ).*
 }
 module mutGcIgnoresIntent {  // violates IntentRootsRetained
   import historyCore(
     BUG_LOAD_IGNORES_TX = false, BUG_RAW_IGNORES_TX = false,
     BUG_RAW_SKIPS_INVALIDATE = false, BUG_GC_IGNORES_INTENT = true,
-    BUG_HEAL_TIP_ONLY = false, BUG_REUSE_GEN_ON_REWRITE = false
+    BUG_HEAL_TIP_ONLY = false, BUG_REUSE_GEN_ON_REWRITE = false,
+    BUG_FRESH_GEN_ON_FF = false, BUG_SKIP_VERIFY = false, BUG_FINISH_ANY_REF = false
   ).*
 }
 module mutHealTipOnly {     // violates CurrentMatchesRef
   import historyCore(
     BUG_LOAD_IGNORES_TX = false, BUG_RAW_IGNORES_TX = false,
     BUG_RAW_SKIPS_INVALIDATE = false, BUG_GC_IGNORES_INTENT = false,
-    BUG_HEAL_TIP_ONLY = true, BUG_REUSE_GEN_ON_REWRITE = false
+    BUG_HEAL_TIP_ONLY = true, BUG_REUSE_GEN_ON_REWRITE = false,
+    BUG_FRESH_GEN_ON_FF = false, BUG_SKIP_VERIFY = false, BUG_FINISH_ANY_REF = false
   ).*
 }
 module mutReuseGenOnRewrite {  // violates GenerationFastForwardOnly
   import historyCore(
     BUG_LOAD_IGNORES_TX = false, BUG_RAW_IGNORES_TX = false,
     BUG_RAW_SKIPS_INVALIDATE = false, BUG_GC_IGNORES_INTENT = false,
-    BUG_HEAL_TIP_ONLY = false, BUG_REUSE_GEN_ON_REWRITE = true
+    BUG_HEAL_TIP_ONLY = false, BUG_REUSE_GEN_ON_REWRITE = true,
+    BUG_FRESH_GEN_ON_FF = false, BUG_SKIP_VERIFY = false, BUG_FINISH_ANY_REF = false
+  ).*
+}
+module mutFreshGenOnFF {    // violates FastForwardRetainsGeneration
+  import historyCore(
+    BUG_LOAD_IGNORES_TX = false, BUG_RAW_IGNORES_TX = false,
+    BUG_RAW_SKIPS_INVALIDATE = false, BUG_GC_IGNORES_INTENT = false,
+    BUG_HEAL_TIP_ONLY = false, BUG_REUSE_GEN_ON_REWRITE = false,
+    BUG_FRESH_GEN_ON_FF = true, BUG_SKIP_VERIFY = false, BUG_FINISH_ANY_REF = false
+  ).*
+}
+module mutSkipVerify {      // violates IntentRootsRetained (§4.2 missing ancestors)
+  import historyCore(
+    BUG_LOAD_IGNORES_TX = false, BUG_RAW_IGNORES_TX = false,
+    BUG_RAW_SKIPS_INVALIDATE = false, BUG_GC_IGNORES_INTENT = false,
+    BUG_HEAL_TIP_ONLY = false, BUG_REUSE_GEN_ON_REWRITE = false,
+    BUG_FRESH_GEN_ON_FF = false, BUG_SKIP_VERIFY = true, BUG_FINISH_ANY_REF = false
+  ).*
+}
+// Needs a raw writer that steps over the intent to create the divergence.
+module mutFinishAnyRef {    // violates FinishOnlyFromRecorded
+  import historyCore(
+    BUG_LOAD_IGNORES_TX = false, BUG_RAW_IGNORES_TX = true,
+    BUG_RAW_SKIPS_INVALIDATE = false, BUG_GC_IGNORES_INTENT = false,
+    BUG_HEAL_TIP_ONLY = false, BUG_REUSE_GEN_ON_REWRITE = false,
+    BUG_FRESH_GEN_ON_FF = false, BUG_SKIP_VERIFY = false, BUG_FINISH_ANY_REF = true
   ).*
 }

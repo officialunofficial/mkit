@@ -14,6 +14,7 @@ module scrubCore {
   const CLOCK_STEPS_BACK: bool    // wall clock may step backwards
   const BUG_IGNORE_AGE: bool      // mutant: no 7-day staleness check
   const BUG_WRAP_WITHOUT_FULL: bool  // mutant: lap end wraps without full walk
+  const BUG_TRUST_INVALID: bool   // mutant: corrupt/foreign state read as valid
   const MAXPUB: int               // publish-count bound (simulation)
 
   // ---- scaled parameters (real: 512, 64, 604800) ------------------------------
@@ -67,7 +68,8 @@ module scrubCore {
   action FastForward(k: int, dt: int, skew: int, writeOk: bool): bool = {
     val newLen = chainLen + k
     val elapsed = satSub(wall + dt + skew, scrub.lastFull)
-    val stale = not(scrub.valid) or (not(BUG_IGNORE_AGE) and elapsed > MAX_AGE)
+    val stale = (not(scrub.valid) and not(BUG_TRUST_INVALID))
+                or (not(BUG_IGNORE_AGE) and elapsed > MAX_AGE)
     val w = window(scrub.vt)
     val end = min(scrub.cursor + w, scrub.vt)
     // `end < verified_through` and the rollback guard `end <= prefix.len()`
@@ -160,7 +162,8 @@ module scrubCore {
 
 module scrub {
   import scrubCore(LOSSY_SCRUB_WRITES = false, CLOCK_STEPS_BACK = false,
-                   BUG_IGNORE_AGE = false, BUG_WRAP_WITHOUT_FULL = false, MAXPUB = 12).*
+                   BUG_IGNORE_AGE = false, BUG_WRAP_WITHOUT_FULL = false,
+                   BUG_TRUST_INVALID = false, MAXPUB = 12).*
 
   // Real constants (512, 64): publishes per lap, i.e. the longest gap between
   // two reads of one leaf, is floor((vt - 1) / w) + 1 for vt > w.
@@ -179,23 +182,32 @@ module scrub {
 }
 module scrubLossy {
   import scrubCore(LOSSY_SCRUB_WRITES = true, CLOCK_STEPS_BACK = false,
-                   BUG_IGNORE_AGE = false, BUG_WRAP_WITHOUT_FULL = false, MAXPUB = 12).*
+                   BUG_IGNORE_AGE = false, BUG_WRAP_WITHOUT_FULL = false,
+                   BUG_TRUST_INVALID = false, MAXPUB = 12).*
 }
 module scrubClockBack {
   import scrubCore(LOSSY_SCRUB_WRITES = false, CLOCK_STEPS_BACK = true,
-                   BUG_IGNORE_AGE = false, BUG_WRAP_WITHOUT_FULL = false, MAXPUB = 12).*
+                   BUG_IGNORE_AGE = false, BUG_WRAP_WITHOUT_FULL = false,
+                   BUG_TRUST_INVALID = false, MAXPUB = 12).*
 }
 module mutIgnoreAge {        // violates TimeBound
   import scrubCore(LOSSY_SCRUB_WRITES = false, CLOCK_STEPS_BACK = false,
-                   BUG_IGNORE_AGE = true, BUG_WRAP_WITHOUT_FULL = false, MAXPUB = 12).*
+                   BUG_IGNORE_AGE = true, BUG_WRAP_WITHOUT_FULL = false,
+                   BUG_TRUST_INVALID = false, MAXPUB = 12).*
 }
 module mutWrapWithoutFull {  // violates ActualPublishBound
   import scrubCore(LOSSY_SCRUB_WRITES = false, CLOCK_STEPS_BACK = false,
-                   BUG_IGNORE_AGE = false, BUG_WRAP_WITHOUT_FULL = true, MAXPUB = 12).*
+                   BUG_IGNORE_AGE = false, BUG_WRAP_WITHOUT_FULL = true,
+                   BUG_TRUST_INVALID = false, MAXPUB = 12).*
+}
+module mutTrustInvalid {     // violates InvalidForcesFull
+  import scrubCore(LOSSY_SCRUB_WRITES = false, CLOCK_STEPS_BACK = false,
+                   BUG_IGNORE_AGE = false, BUG_WRAP_WITHOUT_FULL = false,
+                   BUG_TRUST_INVALID = true, MAXPUB = 12).*
 }
 // Unbounded publish count, for TLC with the relative-age VIEW in README.md.
 module scrubUnbounded {
   import scrubCore(LOSSY_SCRUB_WRITES = false, CLOCK_STEPS_BACK = false,
                    BUG_IGNORE_AGE = false, BUG_WRAP_WITHOUT_FULL = false,
-                   MAXPUB = 1000000000).*
+                   BUG_TRUST_INVALID = false, MAXPUB = 1000000000).*
 }

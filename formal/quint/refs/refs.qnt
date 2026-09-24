@@ -33,12 +33,16 @@
 // Every step sets `lastAction` (step label + parameters + outcome) so traces
 // can be replayed against the Rust implementation (ITF conformance).
 //
-// Note: the Rust memory transport actually holds a Mutex across its
-// read-check-write (stronger than §5.1 says); this model follows the spec.
+// Code/spec drift (recorded as findings, not modelled): the Rust memory
+// transport holds a Mutex across its read-check-write, so it is stronger than
+// SPEC-REFS §5.1 says; this model follows the spec.
 //
 // Bounds (explicit): 3 processes (refs3) or 2 (refs2, Apalache), 2 worktrees
 // (0 = main, 1 = linked id), 2 branch refs (0 = refs/heads/a ≺ 1 =
 // refs/heads/b), hash values {1, 2}, 0 = ref absent, lock plans ≤ 3 locks.
+// Multi-ref commands (branch -m, batched remote writes) publish one ref at a
+// time (SPEC-CONCURRENCY §4 last sentence of the order paragraph), so each
+// publication is one single-ref op here.
 //
 // Checks (see refs_test.qnt for pinned scenarios):
 //   quint test refs_test.qnt
@@ -46,7 +50,9 @@
 //   quint run refs.qnt --main refs3 --invariant WitnessCrossDomainGap   # expect violation
 //   quint run refs.qnt --main refs2_noRefLock --invariant NoLostUpdateLocal   # mutant: expect violation
 //   quint compile --target tlaplus --main refs2 --invariant Safety refs.qnt > refs2.tla
-//   apalache-mc check --init=q_init --next=q_step --inv=refs2_refs_Safety --length=10 refs2.tla
+//   apalache-mc check --init=q_init --next=q_step --inv=refs2_refs_Safety --length=8 refs2.tla
+// Mutant modules (each must violate the invariant named next to it) are at
+// the end of this file.
 module refs {
   // ---------------------------------------------------------------- types
   type Proc = str
@@ -93,6 +99,7 @@ module refs {
     noRefLock: bool,    // local writers skip refs-<ref>.lock (pre-#637 behaviour)
     noFileLock: bool,   // file transport skips RefLock
     gcSkipTrees: bool,  // gc expires holding only worktrees.lock (violates §3.2)
+    racyAcquire: bool,  // acquire ignores exclusivity (a broken flock; violates §2)
   }
 
   type Violation = { writer: str, by: str }
@@ -123,7 +130,9 @@ module refs {
     pc: "idle", op: NOP, plan: [], nHeld: 0, observed: ABSENT,
     pending: Set(), snapshot: Set(), outcome: "",
   }
-  pure val NO_FAULTS: Faults = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false }
+  pure val NO_FAULTS: Faults = {
+    misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false,
+  }
 
   // ------------------------------------------------------------- helpers
   pure def rev(l: List[Lock]): List[Lock] = l.foldl([], (acc, x) => [x].concat(acc))
@@ -233,13 +242,13 @@ module refs {
   }
 
   // acquire(p): blocking exclusive kernel lock (repo_lock / RefLock); enabled
-  // only when free.
+  // only when free (unless the racyAcquire mutant breaks exclusivity).
   action acquire(p: Proc): bool = {
     val st = procs.get(p)
     val l = nextLock(st)
     all {
       st.pc == "acquire",
-      owner.get(l) == FREE,
+      faults.racyAcquire or owner.get(l) == FREE,
       owner' = owner.set(l, p),
       procs' = procs.set(p, { ...st, nHeld: st.nHeld + 1,
                               pc: if (st.nHeld + 1 == st.plan.length()) bodyStart(st.op.kind) else "acquire" }),
@@ -366,7 +375,7 @@ module refs {
   // p has an enabled step (only a blocked acquire is disabled).
   def canMove(p: Proc): bool = {
     val st = procs.get(p)
-    st.pc != "acquire" or owner.get(nextLock(st)) == FREE
+    st.pc != "acquire" or faults.racyAcquire or owner.get(nextLock(st)) == FREE
   }
 
   action step = {
@@ -460,36 +469,40 @@ module refs {
 }
 
 // ------------------------------------------------------------ instances
-// FAULTS literal: { misorder, noRefLock, noFileLock, gcSkipTrees }.
+// FAULTS literal: { misorder, noRefLock, noFileLock, gcSkipTrees, racyAcquire }.
 // 3 processes: every wait-for cycle shape (2- and 3-cycles). quint run.
 module refs3 {
   import refs(PROCS = Set("p1", "p2", "p3"),
-              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false }).*
+              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false }).*
 }
 // 2 processes: Apalache instance (lost update, cross-domain gap, 2-cycle
 // deadlock and record/expire interleaving all need only 2 processes).
 module refs2 {
   import refs(PROCS = Set("p1", "p2"),
-              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false }).*
+              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false }).*
 }
 // Mutants (non-vacuity): each must violate the named invariant.
 module refs3_misorder {    // NoDeadlock, LockOrderRespected
   import refs(PROCS = Set("p1", "p2", "p3"),
-              FAULTS = { misorder: true, noRefLock: false, noFileLock: false, gcSkipTrees: false }).*
+              FAULTS = { misorder: true, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false }).*
 }
 module refs2_misorder {    // NoDeadlock, LockOrderRespected
   import refs(PROCS = Set("p1", "p2"),
-              FAULTS = { misorder: true, noRefLock: false, noFileLock: false, gcSkipTrees: false }).*
+              FAULTS = { misorder: true, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false }).*
 }
 module refs2_noRefLock {   // NoLostUpdateLocal
   import refs(PROCS = Set("p1", "p2"),
-              FAULTS = { misorder: false, noRefLock: true, noFileLock: false, gcSkipTrees: false }).*
+              FAULTS = { misorder: false, noRefLock: true, noFileLock: false, gcSkipTrees: false, racyAcquire: false }).*
 }
 module refs2_noFileLock {  // NoLostUpdateFile
   import refs(PROCS = Set("p1", "p2"),
-              FAULTS = { misorder: false, noRefLock: false, noFileLock: true, gcSkipTrees: false }).*
+              FAULTS = { misorder: false, noRefLock: false, noFileLock: true, gcSkipTrees: false, racyAcquire: false }).*
 }
 module refs2_gcSkipTrees { // NoRecordExpireInterleave, ExpireHoldsSuperset
   import refs(PROCS = Set("p1", "p2"),
-              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: true }).*
+              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: true, racyAcquire: false }).*
+}
+module refs2_racyAcquire { // LockOwnership
+  import refs(PROCS = Set("p1", "p2"),
+              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: true }).*
 }

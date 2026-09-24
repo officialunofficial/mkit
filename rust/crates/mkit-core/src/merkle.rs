@@ -1500,3 +1500,265 @@ mod tests {
         }
     }
 }
+
+/// Kani proof harnesses (`cargo kani -p mkit-core -Z stubbing --harness
+/// merkle_`), the model-checked counterpart of the `merkle_proof` fuzz
+/// target.
+///
+/// BLAKE3 (`h2`, `domain_digest`, `hash`) is stubbed with a cheap
+/// deterministic `toy` mixer: the index/level arithmetic, sibling
+/// consumption and wire decoding are what is verified here; collision
+/// resistance is BLAKE3's job and out of scope for a model checker.
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    /// Loop-free deterministic mixer: the first 16 bytes of `a` and of
+    /// `b` land in disjoint halves of the output, and both lengths are
+    /// folded into the last byte (loop-free so it does not interact with
+    /// the global unwind bound).
+    fn toy(a: &[u8], b: &[u8]) -> Hash {
+        let mut out = [0u8; HASH_LEN];
+        let na = a.len().min(16);
+        let nb = b.len().min(16);
+        out[..na].copy_from_slice(&a[..na]);
+        out[16..16 + nb].copy_from_slice(&b[..nb]);
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            out[15] ^= a.len() as u8;
+            out[31] ^= (b.len() as u8).wrapping_mul(3);
+        }
+        out
+    }
+    fn toy_h2(a: &[u8], b: &[u8]) -> Hash {
+        toy(a, b)
+    }
+    fn toy_domain_digest(domain: &[u8], body: &[u8]) -> Hash {
+        toy(body, domain)
+    }
+    fn toy_hash(data: &[u8]) -> Hash {
+        toy(data, &[])
+    }
+
+    /// SPEC-MERKLE-OBJECTS §5.3/§5.4: number of wire siblings a
+    /// single-leaf proof of `position` in a `leaf_count`-leaf tree
+    /// consumes (odd trailing nodes fold with themselves, no sibling).
+    fn spec_sibling_count(leaf_count: u32, mut position: u32) -> usize {
+        let mut level_size = u64::from(leaf_count);
+        let mut need = 0;
+        while level_size > 1 {
+            if !(position % 2 == 0 && u64::from(position) + 1 >= level_size) {
+                need += 1;
+            }
+            position /= 2;
+            level_size = level_size.div_ceil(2);
+        }
+        need
+    }
+
+    /// Calls `$f::<N>()` for each listed literal `N` (concrete lengths
+    /// let CBMC constant-fold slice lengths).
+    macro_rules! each_len {
+        ($f:ident; $($n:literal)*) => { $( $f::<$n>(); )* };
+    }
+
+    /// Byte equality in 8-byte words (<= 5 words + <= 7 tail bytes for
+    /// the inputs here), keeping loops far below a byte-wise `memcmp`.
+    fn eq_words(a: &[u8], b: &[u8]) -> bool {
+        if a.len() != b.len() {
+            return false;
+        }
+        let words = a.len() / 8;
+        for i in 0..words {
+            let w = |x: &[u8]| u64::from_le_bytes(x[i * 8..i * 8 + 8].try_into().expect("8"));
+            if w(a) != w(b) {
+                return false;
+            }
+        }
+        for i in words * 8..a.len() {
+            if a[i] != b[i] {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn decode_at<const N: usize>() -> bool {
+        let buf: [u8; N] = kani::any();
+        let got = Proof::decode(&buf, 1);
+        if let Ok(p) = &got {
+            assert!(p.siblings.len() <= MAX_LEVELS);
+            assert!(eq_words(&p.encode(), &buf));
+        }
+        got.is_ok()
+    }
+
+    /// `Proof::decode(_, 1)` (the single-leaf bound the fuzz target and
+    /// `verify_chunk` callers use) never panics on any input of 0..=6
+    /// bytes or of 37/38 bytes (be32 + 1-byte varint + one digest, +1),
+    /// each length concrete and every byte symbolic. On `Ok`: the §5.2
+    /// allocation bound (`max_items * MAX_LEVELS`) holds and the bytes are
+    /// the canonical encoding (`encode(decode(b)) == b`).
+    #[kani::proof]
+    // Largest loops: the 5-byte varint, <= 4 words + 7 tail bytes in
+    // `eq_words`; a larger bound makes CBMC unroll the symbolic-count
+    // sibling loop needlessly.
+    #[kani::unwind(8)]
+    fn merkle_proof_decode_no_panic() {
+        each_len!(decode_at; 0 1 2 3 4 6 38);
+        kani::cover!(decode_at::<5>(), "ok_no_siblings");
+        kani::cover!(decode_at::<37>(), "ok_one_sibling");
+    }
+
+    fn verify_with<const S: usize>() -> bool {
+        let proof = Proof {
+            leaf_count: kani::any(),
+            siblings: kani::any::<[Hash; S]>().to_vec(),
+        };
+        let position: u32 = kani::any();
+        let leaf: Hash = kani::any();
+        let id: Hash = kani::any();
+
+        let folded = proof.reconstruct_element_root(&leaf, position);
+        let shape_ok = position < proof.leaf_count
+            && proof.siblings.len() == spec_sibling_count(proof.leaf_count, position);
+        assert_eq!(folded.is_ok(), shape_ok);
+
+        let chunk = verify_chunk(&id, &leaf, position, &proof);
+        if position == 0 {
+            assert_eq!(chunk, Err(MerkleError::PositionOutOfRange(0)));
+        }
+        if chunk.is_ok() {
+            assert!(shape_ok);
+        }
+        let entry = TreeEntry {
+            name: vec![b'a'],
+            mode: crate::object::EntryMode::Blob,
+            object_hash: leaf,
+        };
+        let _ = verify_tree_entry(&id, &entry, position, &proof);
+        chunk.is_ok()
+    }
+
+    /// Adversarial single-leaf verification: any `leaf_count`, any
+    /// `position`, 0..=2 arbitrary sibling digests, any claimed id.
+    /// `verify_chunk` / `verify_tree_entry` never panic/overflow, and the
+    /// fold succeeds iff `position < leaf_count` and the proof carries
+    /// exactly the §5.3 sibling count (§5.4 "consumed exactly once").
+    /// Chunk position 0 is always rejected (§5.5).
+    #[kani::proof]
+    #[kani::stub(h2, toy_h2)]
+    #[kani::stub(crate::hash::domain_digest, toy_domain_digest)]
+    #[kani::stub(crate::hash::hash, toy_hash)]
+    // <= 32 fold levels (any u32 leaf count).
+    #[kani::unwind(34)]
+    fn merkle_verify_adversarial_no_panic() {
+        verify_with::<0>();
+        verify_with::<1>();
+        kani::cover!(verify_with::<2>(), "accepts_two_sibling_proof");
+    }
+
+    /// Independent single-leaf proof builder following SPEC-MERKLE-
+    /// OBJECTS §1.1 (position-hashed leaves, odd trailing node paired
+    /// with itself, `H(be32(leaf_count) ‖ top)` finalization) and §5.3
+    /// (level-major siblings, self-duplicates omitted). Returns the
+    /// finalized inner root and the sibling list. `leaves.len() <= 4`.
+    fn spec_proof(leaves: &[Hash], pos: usize) -> (Hash, Vec<Hash>) {
+        #[allow(clippy::cast_possible_truncation)]
+        let mut level: Vec<Hash> = leaves
+            .iter()
+            .enumerate()
+            .map(|(i, l)| toy_h2(&(i as u32).to_be_bytes(), l))
+            .collect();
+        let mut p = pos;
+        let mut siblings = Vec::new();
+        while level.len() > 1 {
+            if p % 2 == 1 {
+                siblings.push(level[p - 1]);
+            } else if p + 1 < level.len() {
+                siblings.push(level[p + 1]);
+            }
+            let mut next = Vec::new();
+            let mut i = 0;
+            while i < level.len() {
+                let right = if i + 1 < level.len() { level[i + 1] } else { level[i] };
+                next.push(toy_h2(&level[i], &right));
+                i += 2;
+            }
+            level = next;
+            p /= 2;
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let root = toy_h2(&(leaves.len() as u32).to_be_bytes(), &level[0]);
+        (root, siblings)
+    }
+
+    /// A `ChunkedBlob` with `N` symbolic chunks and symbolic sizes, its
+    /// §3.1 leaf list `[meta, chunks…]`, and its id computed through the
+    /// §2 domain wrap of the spec-built root.
+    fn chunked_fixture<const N: usize>() -> (ChunkedBlob, Vec<Hash>) {
+        let cb = ChunkedBlob {
+            total_size: kani::any(),
+            chunk_size: kani::any(),
+            chunks: kani::any::<[Hash; N]>().to_vec(),
+        };
+        let mut leaves = vec![chunked_meta_leaf_raw(cb.total_size, cb.chunk_size)];
+        leaves.extend_from_slice(&cb.chunks);
+        (cb, leaves)
+    }
+
+    fn chunk_rt<const N: usize>() {
+        let (cb, leaves) = chunked_fixture::<N>();
+        #[allow(clippy::cast_possible_truncation)]
+        let pos: u32 = kani::any_where(|&p: &u32| p >= 1 && p <= N as u32);
+        let (root, siblings) = spec_proof(&leaves, pos as usize);
+        let id = wrap_id(ObjectKind::ChunkedBlob, &root);
+        assert_eq!(compute_chunked_id(&cb), id, "§1.1/§2 identity");
+        #[allow(clippy::cast_possible_truncation)]
+        let proof = Proof {
+            leaf_count: leaves.len() as u32,
+            siblings,
+        };
+        assert_eq!(proof.siblings.len(), spec_sibling_count(proof.leaf_count, pos));
+        assert_eq!(verify_chunk(&id, &cb.chunks[(pos - 1) as usize], pos, &proof), Ok(()));
+    }
+
+    /// Spec conformance (§1.1, §2, §5.3–§5.5): for every `ChunkedBlob`
+    /// of 1..=3 symbolic chunks (any sizes) and every chunk position,
+    /// `compute_chunked_id` equals the §2 wrap of an independently built
+    /// §1.1 root, and the proof an independent §5.3 builder produces has
+    /// the model sibling count and is accepted by `verify_chunk`. (`build_chunk_proof` itself goes through a
+    /// `BTreeSet`, which Kani cannot finish within budget.)
+    #[kani::proof]
+    #[kani::stub(h2, toy_h2)]
+    #[kani::stub(crate::hash::domain_digest, toy_domain_digest)]
+    #[kani::stub(crate::hash::hash, toy_hash)]
+    // <= 3 levels for <= 4 leaves; `spec_proof` pairs <= 4 nodes.
+    #[kani::unwind(6)]
+    fn merkle_build_verify_roundtrip() {
+        chunk_rt::<1>();
+        chunk_rt::<2>();
+        chunk_rt::<3>();
+    }
+
+    /// Canary (§6 "leaf tampered"): the checker must find a forged chunk
+    /// hash that the verifier rejects under a genuine 2-chunk proof, i.e.
+    /// falsify "any leaf verifies under a genuine proof".
+    #[kani::proof]
+    #[kani::stub(h2, toy_h2)]
+    #[kani::stub(crate::hash::domain_digest, toy_domain_digest)]
+    #[kani::stub(crate::hash::hash, toy_hash)]
+    #[kani::unwind(6)]
+    #[kani::should_panic]
+    fn merkle_canary_tampered_leaf_verifies() {
+        let (_cb, leaves) = chunked_fixture::<2>();
+        let (root, siblings) = spec_proof(&leaves, 1);
+        let id = wrap_id(ObjectKind::ChunkedBlob, &root);
+        let proof = Proof {
+            leaf_count: 3,
+            siblings,
+        };
+        let forged: Hash = kani::any();
+        assert!(verify_chunk(&id, &forged, 1, &proof).is_ok());
+    }
+}

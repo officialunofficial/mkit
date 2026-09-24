@@ -25,6 +25,11 @@ authors.workspace = true
 # own hand-written code in src/ stays under it.
 all = { level = "warn", priority = -1 }
 
+# Kani proof harnesses live in `#[cfg(kani)]` modules (`cargo kani` sets
+# the cfg); declare it so normal builds don't flag it as unexpected.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
+
 [features]
 # Opt-in `arbitrary::Arbitrary` derives on all generated wire types,
 # for fuzzing / property tests (used by the rust/fuzz harness). Off by

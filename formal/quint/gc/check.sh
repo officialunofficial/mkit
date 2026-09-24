@@ -68,6 +68,8 @@ for m in gcPushFastFreshen gcPushBounded; do qrun "$m" NoLivePruned ok; done
 # ---- mutants (non-vacuity) ---------------------------------------------------
 qrun mutNoLock SupersededRetained violation
 qrun mutNoLock LockExclusion violation
+qrun mutNoLockGrace0 NoDangling violation    # grace 0 is safe only because of the locks
+qrun mutNoLockGrace0 NoLivePruned violation
 qrun mutLenient UnreadableAborts violation
 qrun mutLenient NoLivePruned violation
 qrun mutNoRecord SupersededRetained violation
@@ -81,13 +83,14 @@ if [[ ${APALACHE:-0} == 1 ]]; then
   apa gcPushFastFreshen Safety "$D" ok
   apa gcPushBounded Safety "$D" ok
   apa gc CanaryNoPrune 6 violation
-  apa gc CanaryNoExpire 7 violation
+  apa gc CanaryNoExpire 10 violation
   apa gcPushFast NoDangling 8 violation
   apa gcPushRawFreshen NoDangling 8 violation
   apa gcPushFast NoLivePruned 8 violation
   apa gcPushBounded CanaryNoPruneDuringPush 8 violation
   apa mutNoLock LockExclusion 4 violation
   apa mutNoLock SupersededRetained 12 violation
+  apa mutNoLockGrace0 NoDangling 8 violation
   apa mutLenient NoLivePruned 7 violation
   apa mutLenient UnreadableAborts 7 violation
   apa mutNoRecord SupersededRetained 3 violation

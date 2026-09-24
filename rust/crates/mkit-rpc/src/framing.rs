@@ -223,3 +223,90 @@ mod tests {
         }
     }
 }
+
+/// Kani proof harnesses (`cargo kani -p mkit-rpc --harness rpc_`), the
+/// model-checked counterpart of the `rpc_decode` fuzz target's
+/// "decode never panics" property (the fuzz target's
+/// `Arbitrary`-driven encode side is not reproduced here). Each input
+/// length up to the bound is checked concretely (one call per length),
+/// which lets CBMC constant-fold slice lengths.
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+    use crate::mkit::rpc::v1::signer::SignerFrame;
+    use crate::mkit::rpc::v1::ssh::SshFrame;
+
+    /// Calls `$f::<N>()` for each listed literal `N`.
+    macro_rules! each_len {
+        ($f:ident; $($n:literal)*) => { $( $f::<$n>(); )* };
+    }
+
+    fn signer_at<const N: usize>() {
+        let body: [u8; N] = kani::any();
+        let capped = frame_decode_options().decode_from_slice::<SignerFrame>(&body);
+        let bare = SignerFrame::decode_from_slice(&body);
+        assert_eq!(capped.is_ok(), bare.is_ok(), "caps must not bite at <= 3 bytes");
+        if let Ok(m) = bare {
+            let again = SignerFrame::decode_from_slice(&m.encode_to_vec()).expect("re-decodes");
+            assert_eq!(again, m);
+            kani::cover!(m.body.is_some(), "ok_with_body");
+        }
+    }
+
+    fn ssh_at<const N: usize>() {
+        let body: [u8; N] = kani::any();
+        let capped = frame_decode_options().decode_from_slice::<SshFrame>(&body);
+        let bare = SshFrame::decode_from_slice(&body);
+        assert_eq!(capped.is_ok(), bare.is_ok(), "caps must not bite at <= 3 bytes");
+        if let Ok(m) = bare {
+            let again = SshFrame::decode_from_slice(&m.encode_to_vec()).expect("re-decodes");
+            assert_eq!(again, m);
+            kani::cover!(m.body.is_some(), "ok_with_body");
+        }
+    }
+
+    /// `SignerFrame` decodes (through the production
+    /// `frame_decode_options` and the bare decoder) without panic on
+    /// every body of <= 3 bytes (tag + length + one nested byte: enough
+    /// for an empty or one-byte oneof body message). On `Ok`, decoding is
+    /// a fixpoint of re-encoding: `decode(encode(m)) == m`.
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn rpc_decode_signer_frame_no_panic() {
+        each_len!(signer_at; 0 1 2 3);
+    }
+
+    /// As above for `SshFrame`.
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn rpc_decode_ssh_frame_no_panic() {
+        each_len!(ssh_at; 0 1 2 3);
+    }
+
+    fn read_at<const N: usize>() {
+        let buf: [u8; N] = kani::any();
+        let mut r = std::io::Cursor::new(&buf[..]);
+        match read_frame::<_, SignerFrame>(&mut r) {
+            Err(FrameError::LengthTruncated) => {
+                assert!(N < 4);
+            }
+            Err(FrameError::LengthTooLarge(l)) => {
+                assert!(l > MAX_FRAME_BYTES);
+            }
+            Err(FrameError::BodyTruncated { expected, actual }) => {
+                assert!(actual < expected as usize && actual == N - 4);
+            }
+            _ => {}
+        }
+    }
+
+    /// `read_frame` over every <= 6-byte stream (4-byte length prefix +
+    /// <= 2 body bytes): never panics, rejects an over-cap length prefix
+    /// before allocating, and reports a short body with the true received
+    /// count.
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn rpc_read_frame_no_panic() {
+        each_len!(read_at; 0 1 2 3 4 5 6);
+    }
+}
