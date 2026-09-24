@@ -18,10 +18,18 @@ module scrubCore {
   const MAXPUB: int               // publish-count bound (simulation)
 
   // ---- scaled parameters (real: 512, 64, 604800) ------------------------------
+  // The scaling keeps MIN_WINDOW >= LAP_FRACTION - 1 (real: 512 >= 63). That
+  // relation is what caps a lap at LAP_FRACTION + 1 publishes: with
+  // window = vt / LAP_FRACTION = q and vt = LAP_FRACTION * q + r, r < q.
+  // (An earlier 2/4 scaling broke it: vt = 11 gives a 6-publish lap, which
+  // the real constants cannot produce.)
   pure val MIN_WINDOW = 2
-  pure val LAP_FRACTION = 4
+  pure val LAP_FRACTION = 3
   pure val MAX_AGE = 3
-  pure val MAXLEN = 14            // chain-length bound
+  // Chain-length bound. Each fast-forward adds >= 1 leaf, so a lap started
+  // at verified_through = vt needs up to vt + LAP_FRACTION leaves; with 16,
+  // every lap with vt <= 13 (every init/rewrite length) runs to its end.
+  pure val MAXLEN = 16
   pure val LEAVES = 0.to(MAXLEN - 1)
 
   pure def min(a: int, b: int): int = if (a < b) a else b
@@ -141,7 +149,8 @@ module scrubCore {
   def age(i: int): int = pubs - lastPub.get(i)
 
   // §4.5 claim: every leaf is re-read at least once every LAP_FRACTION
-  // (real: 64) fast-forward publishes.
+  // (real: 64) fast-forward publishes. age is sampled after each publish,
+  // so a gap of g publishes between reads shows as age g - 1.
   val SpecPublishBound = leavesOf(chainLen).forall(i => age(i) <= LAP_FRACTION - 1)
   // What the implementation guarantees: a lap is at most LAP_FRACTION + 1
   // publishes (LAP_FRACTION windows, then the full walk).
@@ -167,8 +176,13 @@ module scrub {
 
   // Real constants (512, 64): publishes per lap, i.e. the longest gap between
   // two reads of one leaf, is floor((vt - 1) / w) + 1 for vt > w.
+  // Bound: if w = 512 then vt <= 64*512 + 63, so (vt-1)/512 < 65; if w = q =
+  // vt/64 > 512 then vt - 1 <= 64q + 62 < 65q. Either way realLap <= 65.
   pure def realWindow(vt: int): int = if (vt / 64 > 512) vt / 64 else 512
   pure def realLap(vt: int): int = (vt - 1) / realWindow(vt) + 1
+  // Exhaustive up to the 1,000,000-leaf cap (§4.2).
+  run realLapBoundTest =
+    assert(1.to(1000000).forall(vt => realLap(vt) <= 65))
   run realLapTest = all {
     assert(realLap(64 * 512) == 64),
     assert(realLap(64 * 512 + 1) == 65),      // 32769 leaves: 65 publishes

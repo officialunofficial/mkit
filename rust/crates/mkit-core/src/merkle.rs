@@ -1501,8 +1501,8 @@ mod tests {
     }
 }
 
-/// Kani proof harnesses (`cargo kani -p mkit-core -Z stubbing --harness
-/// merkle_`), the model-checked counterpart of the `merkle_proof` fuzz
+/// Kani proof harnesses (`cargo kani -p mkit-core --no-default-features
+/// -Z stubbing --harness merkle_`, see `delta.rs`), the model-checked counterpart of the `merkle_proof` fuzz
 /// target.
 ///
 /// BLAKE3 (`h2`, `domain_digest`, `hash`) is stubbed with a cheap
@@ -1513,21 +1513,26 @@ mod tests {
 mod kani_proofs {
     use super::*;
 
-    /// Loop-free deterministic mixer: the first 16 bytes of `a` and of
-    /// `b` land in disjoint halves of the output, and both lengths are
-    /// folded into the last byte (loop-free so it does not interact with
-    /// the global unwind bound).
+    /// Loop-free deterministic mixer over the first 16 bytes of `a` and
+    /// of `b` (zero-padded) and both lengths. Each output half depends on
+    /// both inputs, so a change in either input's first 16 bytes
+    /// propagates up the tree (a mixer that merely copied inputs into
+    /// disjoint halves would drop leaf bytes one level up and make the
+    /// tampered-leaf canary unfalsifiable). Loop-free so it does not
+    /// interact with the global unwind bound.
     fn toy(a: &[u8], b: &[u8]) -> Hash {
-        let mut out = [0u8; HASH_LEN];
-        let na = a.len().min(16);
-        let nb = b.len().min(16);
-        out[..na].copy_from_slice(&a[..na]);
-        out[16..16 + nb].copy_from_slice(&b[..nb]);
-        #[allow(clippy::cast_possible_truncation)]
-        {
-            out[15] ^= a.len() as u8;
-            out[31] ^= (b.len() as u8).wrapping_mul(3);
+        fn first16(x: &[u8]) -> u128 {
+            let mut w = [0u8; 16];
+            let n = x.len().min(16);
+            w[..n].copy_from_slice(&x[..n]);
+            u128::from_le_bytes(w)
         }
+        let (ha, hb) = (first16(a), first16(b));
+        let lo = ha ^ hb.rotate_left(8) ^ a.len() as u128;
+        let hi = hb ^ ha.rotate_left(16) ^ ((b.len() as u128) << 64);
+        let mut out = [0u8; HASH_LEN];
+        out[..16].copy_from_slice(&lo.to_le_bytes());
+        out[16..].copy_from_slice(&hi.to_le_bytes());
         out
     }
     fn toy_h2(a: &[u8], b: &[u8]) -> Hash {
@@ -1554,12 +1559,6 @@ mod kani_proofs {
             level_size = level_size.div_ceil(2);
         }
         need
-    }
-
-    /// Calls `$f::<N>()` for each listed literal `N` (concrete lengths
-    /// let CBMC constant-fold slice lengths).
-    macro_rules! each_len {
-        ($f:ident; $($n:literal)*) => { $( $f::<$n>(); )* };
     }
 
     /// Byte equality in 8-byte words (<= 5 words + <= 7 tail bytes for
@@ -1595,21 +1594,38 @@ mod kani_proofs {
 
     /// `Proof::decode(_, 1)` (the single-leaf bound the fuzz target and
     /// `verify_chunk` callers use) never panics on any input of 0..=6
-    /// bytes (each length concrete, every byte symbolic). On `Ok`: the
-    /// §5.2 allocation bound (`max_items * MAX_LEVELS`) holds and the
-    /// bytes are the canonical encoding (`encode(decode(b)) == b`).
+    /// bytes (each length concrete, every byte symbolic), and accepts
+    /// exactly the §5.2 empty proof: `be32(leaf_count) ‖ varint(0)`.
     #[kani::proof]
-    // Largest loops: the 5-byte varint, `eq_words`; a larger bound makes
-    // CBMC unroll the symbolic-count sibling loop needlessly.
-    #[kani::unwind(8)]
+    // Varint <= 2 bytes and no sibling fits in 6 bytes.
+    #[kani::unwind(4)]
     fn merkle_proof_decode_no_panic() {
-        each_len!(decode_at; 0 1 2 3 4 6);
-        kani::cover!(decode_at::<5>(), "ok_no_siblings");
+        fn short_at<const N: usize>() {
+            let buf: [u8; N] = kani::any();
+            let b: &[u8] = &buf;
+            if let Ok(p) = Proof::decode(b, 1) {
+                assert!(N == 5 && b[4] == 0 && p.siblings.is_empty());
+                let lc: [u8; 4] = b[..4].try_into().expect("4 bytes");
+                assert_eq!(p.leaf_count, u32::from_be_bytes(lc));
+                kani::cover!(true, "ok_no_siblings");
+            }
+        }
+        short_at::<0>();
+        short_at::<1>();
+        short_at::<2>();
+        short_at::<3>();
+        short_at::<4>();
+        short_at::<5>();
+        short_at::<6>();
     }
 
-    /// As above at exactly 37 bytes (be32 leaf count + 1-byte varint +
-    /// one digest): the one-sibling `Ok` path, checked on its own.
+    /// At exactly 37 bytes (be32 leaf count + 1-byte varint + one
+    /// digest): no panic; on `Ok` the §5.2 allocation bound
+    /// (`max_items * MAX_LEVELS`) holds and the bytes are the canonical
+    /// encoding (`encode(decode(b)) == b`).
     #[kani::proof]
+    // Largest loops: the 5-byte varint, 4 words + 5 tail bytes in
+    // `eq_words`.
     #[kani::unwind(8)]
     fn merkle_proof_decode_one_sibling() {
         kani::cover!(decode_at::<37>(), "ok_one_sibling");
@@ -1729,22 +1745,23 @@ mod kani_proofs {
     }
 
     /// Spec conformance (§1.1, §2, §5.3–§5.5): for every `ChunkedBlob`
-    /// of 1..=3 symbolic chunks (any sizes) and every chunk position,
+    /// of 1..=2 symbolic chunks (any sizes) and every chunk position,
     /// `compute_chunked_id` equals the §2 wrap of an independently built
     /// §1.1 root, and the proof an independent §5.3 builder produces has
-    /// the model sibling count and is accepted by `verify_chunk`. (`build_chunk_proof` itself goes through a
-    /// `BTreeSet`, which Kani cannot finish within budget.)
+    /// the model sibling count and is accepted by `verify_chunk`.
+    /// (`build_chunk_proof` itself goes through a `BTreeSet`, which Kani
+    /// cannot finish within budget; 3 chunks ran out of memory.)
     #[kani::proof]
     #[kani::stub(h2, toy_h2)]
     #[kani::stub(crate::hash::domain_digest, toy_domain_digest)]
     #[kani::stub(crate::hash::hash, toy_hash)]
-    // 32-byte digest comparisons (`memcmp`) dominate; <= 3 levels for
-    // <= 4 leaves.
-    #[kani::unwind(34)]
+    // <= 2 levels for <= 3 leaves; `spec_proof` pairs <= 3 nodes. Run
+    // with `-Z unstable-options --cbmc-args --unwindset memcmp.0:33` for
+    // the 32-byte digest comparisons.
+    #[kani::unwind(5)]
     fn merkle_build_verify_roundtrip() {
         chunk_rt::<1>();
         chunk_rt::<2>();
-        chunk_rt::<3>();
     }
 
     /// Canary (§6 "leaf tampered"): the checker must find a forged chunk
@@ -1754,7 +1771,8 @@ mod kani_proofs {
     #[kani::stub(h2, toy_h2)]
     #[kani::stub(crate::hash::domain_digest, toy_domain_digest)]
     #[kani::stub(crate::hash::hash, toy_hash)]
-    #[kani::unwind(34)]
+    // As above: `--cbmc-args --unwindset memcmp.0:33`.
+    #[kani::unwind(6)]
     #[kani::should_panic]
     fn merkle_canary_tampered_leaf_verifies() {
         let (_cb, leaves) = chunked_fixture::<2>();

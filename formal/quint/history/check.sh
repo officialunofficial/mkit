@@ -57,27 +57,31 @@ for m in mutLoadIgnoresTx:NoProofWhileIntent mutRawIgnoresTx:RecoveryEnabled \
   mutRawSkipsInvalidate:ServedGenerationFresh mutGcIgnoresIntent:IntentRootsRetained \
   mutHealTipOnly:CurrentMatchesRef mutReuseGenOnRewrite:GenerationFastForwardOnly \
   mutFreshGenOnFF:FastForwardRetainsGeneration mutSkipVerify:IntentRootsRetained \
-  mutFinishAnyRef:FinishOnlyFromRecorded; do
+  mutFinishAnyRef:FinishOnlyFromRecorded mutWriteBeforeInvalidate:CurrentMatchesRef; do
   qrun history.qnt "${m%%:*}" "${m##*:}" violation
 done
+# load's intent check is defence in depth: served descriptors stay correct without it
+qrun history.qnt mutLoadIgnoresTx ServedMatchesRef ok
+qrun history.qnt mutLoadIgnoresTx ServedGenerationFresh ok
 # ---- scrub.qnt ----------------------------------------------------------------
-for i in ActualPublishBound TimeBound InvalidForcesFull; do qrun scrub.qnt scrub "$i" ok 14; done
-qrun scrub.qnt scrubLossy TimeBound ok 14
-qrun scrub.qnt scrubLossy InvalidForcesFull ok 14
-qrun scrub.qnt scrubClockBack ActualPublishBound ok 14
-for c in CanaryNoWindow CanaryNoLapFull; do qrun scrub.qnt scrub "$c" violation 14; done
-qrun scrub.qnt mutIgnoreAge TimeBound violation 14
-qrun scrub.qnt mutWrapWithoutFull ActualPublishBound violation 14
-qrun scrub.qnt mutTrustInvalid InvalidForcesFull violation 14
+for i in ActualPublishBound TimeBound InvalidForcesFull; do qrun scrub.qnt scrub "$i" ok 16; done
+qrun scrub.qnt scrubLossy TimeBound ok 16
+qrun scrub.qnt scrubLossy InvalidForcesFull ok 16
+qrun scrub.qnt scrubClockBack ActualPublishBound ok 16
+for c in CanaryNoWindow CanaryNoLapFull; do qrun scrub.qnt scrub "$c" violation 16; done
+qrun scrub.qnt mutIgnoreAge TimeBound violation 16
+qrun scrub.qnt mutWrapWithoutFull ActualPublishBound violation 16
+qrun scrub.qnt mutTrustInvalid InvalidForcesFull violation 16
 # findings: spec claims the implementation does not meet
-qrun scrub.qnt scrub SpecPublishBound violation 14
-qrun scrub.qnt scrub WindowOnlyWhenFresh violation 14
-qrun scrub.qnt scrubLossy ActualPublishBound violation 14
-qrun scrub.qnt scrubClockBack TimeBound violation 14
+qrun scrub.qnt scrub SpecPublishBound violation 16
+qrun scrub.qnt scrub WindowOnlyWhenFresh violation 16
+qrun scrub.qnt scrubLossy ActualPublishBound violation 16
+qrun scrub.qnt scrubClockBack TimeBound violation 16
 
 # ---- TLC: exhaustive over the finite instances -----------------------------
 for m in history mutLoadIgnoresTx mutRawSkipsInvalidate mutHealTipOnly mutGcIgnoresIntent \
-  mutRawIgnoresTx mutReuseGenOnRewrite mutFreshGenOnFF mutSkipVerify mutFinishAnyRef; do
+  mutRawIgnoresTx mutReuseGenOnRewrite mutFreshGenOnFF mutSkipVerify mutFinishAnyRef \
+  mutWriteBeforeInvalidate; do
   d="$WORK/tlc-$m"; mkdir -p "$d"
   tla history.qnt "$m" Safety history "$d"
   sed "s/history_historyCore_/${m}_historyCore_/g" tlc/MC.tla > "$d/MC.tla"
@@ -106,6 +110,7 @@ if [[ ${APALACHE:-0} == 1 ]]; then
   apa history.qnt history CanaryNeverServed 7 violation
   apa history.qnt mutGcIgnoresIntent IntentRootsRetained 7 violation
   apa history.qnt mutFreshGenOnFF FastForwardRetainsGeneration 8 violation
+  apa history.qnt mutWriteBeforeInvalidate CurrentMatchesRef 7 violation
   apa scrub.qnt scrub ActualPublishBound,TimeBound,InvalidForcesFull 8 ok
   apa scrub.qnt scrub SpecPublishBound 8 violation
   apa scrub.qnt mutTrustInvalid InvalidForcesFull 8 violation

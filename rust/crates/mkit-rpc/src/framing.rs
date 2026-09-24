@@ -224,92 +224,67 @@ mod tests {
     }
 }
 
-/// Kani proof harnesses (`cargo kani -p mkit-rpc --harness rpc_`), the
-/// model-checked counterpart of the `rpc_decode` fuzz target's
-/// "decode never panics" property (the fuzz target's
-/// `Arbitrary`-driven encode side is not reproduced here). Each input
-/// length up to the bound is checked concretely (one call per length),
-/// which lets CBMC constant-fold slice lengths.
+/// Kani proof harnesses (`cargo kani -p mkit-rpc --harness rpc_`) for the
+/// framing layer the `rpc_decode` fuzz target's frames travel through.
+/// Decoding any buffa-generated message (`SignerFrame`, `SshFrame`, even
+/// the one-field `PinPrompt`) is out of reach: buffa's recursive
+/// `UnknownFields` drop glue exhausts CBMC's memory or the 15-min budget
+/// at a single symbolic byte, so that property stays with the fuzz target
+/// and the body is decoded as the opaque `Opaque` message below.
 #[cfg(kani)]
 mod kani_proofs {
     use super::*;
-    use crate::mkit::rpc::v1::signer::{PinPrompt, SignerFrame};
-    use crate::mkit::rpc::v1::ssh::SshFrame;
+    use buffa::bytes::Buf;
+    use buffa::encoding::Tag;
+    use buffa::{DecodeContext, DecodeError, DefaultInstance, EncodeSink, SizeCache};
 
-    /// Calls `$f::<N>()` for each listed literal `N`.
+    /// A message that accepts any body by consuming it whole: the framing
+    /// logic under test is message-independent.
+    #[derive(Clone, Debug, Default, PartialEq)]
+    struct Opaque;
+
+    impl DefaultInstance for Opaque {
+        fn default_instance() -> &'static Self {
+            &Opaque
+        }
+    }
+
+    impl Message for Opaque {
+        fn compute_size(&self, _cache: &mut SizeCache) -> u32 {
+            0
+        }
+        fn write_to(&self, _cache: &mut SizeCache, _buf: &mut impl EncodeSink) {}
+        fn merge(&mut self, buf: &mut impl Buf, _ctx: DecodeContext<'_>) -> Result<(), DecodeError> {
+            buf.advance(buf.remaining());
+            Ok(())
+        }
+        fn merge_field(
+            &mut self,
+            _tag: Tag,
+            _buf: &mut impl Buf,
+            _ctx: DecodeContext<'_>,
+        ) -> Result<(), DecodeError> {
+            Ok(())
+        }
+        fn clear(&mut self) {}
+    }
+
+    /// Calls `$f::<N>()` for each listed literal `N` (concrete lengths
+    /// let CBMC constant-fold slice lengths).
     macro_rules! each_len {
         ($f:ident; $($n:literal)*) => { $( $f::<$n>(); )* };
     }
 
-    fn signer_at<const N: usize>() {
-        let body: [u8; N] = kani::any();
-        let capped = frame_decode_options().decode_from_slice::<SignerFrame>(&body);
-        let bare = SignerFrame::decode_from_slice(&body);
-        assert_eq!(capped.is_ok(), bare.is_ok(), "caps must not bite at <= 2 bytes");
-        if let Ok(m) = bare {
-            let again = SignerFrame::decode_from_slice(&m.encode_to_vec()).expect("re-decodes");
-            assert_eq!(again, m);
-            kani::cover!(m.body.is_some(), "ok_with_body");
-        }
-    }
-
-    fn ssh_at<const N: usize>() {
-        let body: [u8; N] = kani::any();
-        let capped = frame_decode_options().decode_from_slice::<SshFrame>(&body);
-        let bare = SshFrame::decode_from_slice(&body);
-        assert_eq!(capped.is_ok(), bare.is_ok(), "caps must not bite at <= 2 bytes");
-        if let Ok(m) = bare {
-            let again = SshFrame::decode_from_slice(&m.encode_to_vec()).expect("re-decodes");
-            assert_eq!(again, m);
-            kani::cover!(m.body.is_some(), "ok_with_body");
-        }
-    }
-
-    /// `SignerFrame` decodes (through the production
-    /// `frame_decode_options` and the bare decoder) without panic on
-    /// every body of <= 1 byte (a lone tag byte or nothing). On `Ok`,
-    /// decoding is a fixpoint of re-encoding: `decode(encode(m)) == m`.
-    #[kani::proof]
-    #[kani::unwind(3)]
-    fn rpc_decode_signer_frame_no_panic() {
-        each_len!(signer_at; 0 1);
-    }
-
-    /// As above for exactly 2 bytes (tag + zero length: an empty oneof
-    /// body message, or one unknown field). Checked on its own: CBMC's
-    /// symbolic execution of buffa's recursive `UnknownFields` drop glue
-    /// dominates, and 3 bytes did not finish within 15 min.
-    #[kani::proof]
-    #[kani::unwind(4)]
-    fn rpc_decode_signer_frame_2b_no_panic() {
-        signer_at::<2>();
-    }
-
-    /// As `rpc_decode_signer_frame_no_panic` for `SshFrame`.
-    #[kani::proof]
-    #[kani::unwind(3)]
-    fn rpc_decode_ssh_frame_no_panic() {
-        each_len!(ssh_at; 0 1);
-    }
-
-    /// As `rpc_decode_signer_frame_2b_no_panic` for `SshFrame`.
-    #[kani::proof]
-    #[kani::unwind(4)]
-    fn rpc_decode_ssh_frame_2b_no_panic() {
-        ssh_at::<2>();
-    }
-
-    #[kani::proof]
-    #[kani::unwind(3)]
-    fn rpc_probe_bare_1b() {
-        let body: [u8; 1] = kani::any();
-        let _ = SignerFrame::decode_from_slice(&body);
-    }
-
     fn read_at<const N: usize>() {
         let buf: [u8; N] = kani::any();
-        let mut r = std::io::Cursor::new(&buf[..]);
-        match read_frame::<_, PinPrompt>(&mut r) {
+        let b: &[u8] = &buf;
+        let prefix: Option<u32> = b.get(..4).map(|p| u32::from_le_bytes(p.try_into().expect("4")));
+        let mut r = std::io::Cursor::new(b);
+        let got = read_frame::<_, Opaque>(&mut r);
+        // Accepted iff a full prefix, an in-cap length and a full body.
+        let expect_ok = prefix.is_some_and(|l| l <= MAX_FRAME_BYTES && l as usize <= N - 4);
+        assert_eq!(got.is_ok(), expect_ok);
+        match got {
             Err(FrameError::LengthTruncated) => {
                 assert!(N < 4);
             }
@@ -319,17 +294,17 @@ mod kani_proofs {
             Err(FrameError::BodyTruncated { expected, actual }) => {
                 assert!(actual < expected as usize && actual == N - 4);
             }
-            _ => {}
+            Err(FrameError::DecodeFailed | FrameError::Io(_)) => {
+                panic!("an opaque body over an in-memory reader cannot fail to decode");
+            }
+            Ok(_) => {}
         }
     }
 
     /// `read_frame` over every <= 6-byte stream (4-byte length prefix +
     /// <= 2 body bytes): never panics, rejects an over-cap length prefix
     /// before allocating, and reports a short body with the true received
-    /// count. The body is decoded as the one-field `PinPrompt` message:
-    /// the framing logic is message-independent, and `SignerFrame`'s
-    /// decoder (proved separately above) exhausts CBMC's memory when
-    /// composed with a symbolic length prefix.
+    /// count; a complete body is handed to the decoder (`Ok`).
     #[kani::proof]
     #[kani::unwind(5)]
     fn rpc_read_frame_no_panic() {
@@ -346,7 +321,7 @@ mod kani_proofs {
         let buf: [u8; 4] = kani::any();
         let mut r = std::io::Cursor::new(&buf[..]);
         assert!(!matches!(
-            read_frame::<_, PinPrompt>(&mut r),
+            read_frame::<_, Opaque>(&mut r),
             Err(FrameError::LengthTooLarge(_))
         ));
     }

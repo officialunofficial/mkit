@@ -2641,9 +2641,12 @@ mod tests {
     }
 }
 
-/// Kani proof harnesses (`cargo kani -p mkit-core -Z stubbing --harness
-/// pack_`), the model-checked counterparts of the `pack` and
-/// `pack_entries` fuzz targets.
+/// Kani proof harnesses (`cargo kani -p mkit-core --no-default-features
+/// -Z stubbing --harness pack_`, see `delta.rs`; the reader-side zstd
+/// call is stubbed either way and the writer never compresses below
+/// `MIN_COMPRESS_LEN`, so the feature does not change what is checked),
+/// the model-checked counterparts of the `pack` and `pack_entries` fuzz
+/// targets.
 ///
 /// BLAKE3 is stubbed with a cheap deterministic `toy_hash`: the trailer
 /// bytes stay fully symbolic, so both the §8 trailer-match and -mismatch
@@ -2760,21 +2763,37 @@ mod kani_proofs {
         kani::cover!(!raw_only && ok >= 1, "delta_or_zstd_entry");
     }
 
-    /// `pack_entries` target. For every pack whose entry area is 0..=12
-    /// bytes (so <= 2 entries), header/body/trailer symbolic:
-    /// `PackEntries::new` and full iteration never panic/overflow/read
-    /// OOB. On `Ok`: magic/version valid (§1), trailer equals the hash of
-    /// the preceding bytes (§8), a v1 pack yields exactly `entry_count`
-    /// `Ok` items ending at the trailer with no gap (§3, §6), every
-    /// payload range lies inside the entry area (§2), and `is_raw_only`
-    /// ⇒ no delta item.
+    /// `pack_entries` target. For every pack whose entry area is 0..=6
+    /// bytes (so <= 1 entry, payload <= 1 byte), header/body/trailer
+    /// symbolic: `PackEntries::new` and full iteration never
+    /// panic/overflow/read OOB. On `Ok`: magic/version valid (§1),
+    /// trailer equals the hash of the preceding bytes (§8), a v1 pack
+    /// yields exactly `entry_count` `Ok` items ending at the trailer with
+    /// no gap (§3, §6), every payload range lies inside the entry area
+    /// (§2), and `is_raw_only` ⇒ no delta item.
+    ///
+    /// Run with `-Z unstable-options --cbmc-args --unwindset memcmp.0:33`
+    /// (the 32-byte trailer comparison); every other loop is bounded by
+    /// the global unwind of 4, which keeps CBMC from unrolling the
+    /// symbolic-`entry_count` loop 33 times. Unwinding assertions stay
+    /// on, so a too-small bound fails loudly. (An entry area of 0..=12
+    /// bytes did not finish within 15 min.)
     #[kani::proof]
     #[kani::stub(crate::hash::hash, toy_hash)]
     #[kani::stub(zstd_decompress_capped, stub_zstd)]
-    // Largest loop: the 32-byte trailer `memcmp`.
-    #[kani::unwind(34)]
+    #[kani::unwind(4)]
     fn pack_entries_no_panic() {
-        each_len!(entries_at; 0 1 2 3 4 5 6 7 8 9 10 11 12);
+        each_len!(entries_at; 0 1 2 3 4 5 6);
+    }
+
+    /// As above for an entry area of exactly 10 bytes: two entries with
+    /// empty payloads (or one with a 5-byte payload).
+    #[kani::proof]
+    #[kani::stub(crate::hash::hash, toy_hash)]
+    #[kani::stub(zstd_decompress_capped, stub_zstd)]
+    #[kani::unwind(4)]
+    fn pack_entries_two_entries() {
+        entries_at::<10>();
     }
 
     fn pipeline_at<const BODY: usize>() -> u32 {
@@ -2809,20 +2828,21 @@ mod kani_proofs {
     /// storability gate on raw entries (§3.1, §12), and the result-size
     /// guard + SPEC-DELTA decode on delta entries (base = the previous
     /// raw payload, per the §4 ordering rule) — never panics for packs
-    /// with an entry area of 0..=16 bytes. `deserialize` is replaced by
-    /// a nondeterministic outcome (`any_deserialize`), so this checks
-    /// the composition; the decoders are proved by their own harnesses.
+    /// with an entry area of exactly 5 bytes (one symbolic entry frame;
+    /// 0..=6 bytes ran out of memory). A delta entry needs >= 37 bytes,
+    /// so the delta arm is out of reach at this bound; SPEC-DELTA
+    /// decoding is covered by the `delta_*` harnesses.
+    /// `deserialize` is replaced by a nondeterministic outcome
+    /// (`any_deserialize`), so this checks the composition; the decoders
+    /// are proved by their own harnesses.
+    /// Run with `--cbmc-args --unwindset memcmp.0:33` as above.
     #[kani::proof]
     #[kani::stub(crate::hash::hash, toy_hash)]
     #[kani::stub(zstd_decompress_capped, stub_zstd)]
     #[kani::stub(crate::serialize::deserialize, any_deserialize)]
-    #[kani::unwind(34)]
+    #[kani::unwind(5)]
     fn pack_reader_store_free_pipeline() {
-        macro_rules! each_body {
-            ($($n:literal)*) => { $( pipeline_at::<$n>(); )* };
-        }
-        each_body!(0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15);
-        kani::cover!(pipeline_at::<16>() == 1, "stores_a_raw_entry");
+        kani::cover!(pipeline_at::<5>() == 1, "stores_a_raw_entry");
     }
 
     fn writer_rt<const R: usize, const S: usize>(with_delta: bool) {
@@ -2860,27 +2880,30 @@ mod kani_proofs {
     }
 
     /// Writer → reader round-trip (SPEC-PACKFILE §1–§3): a pack built by
-    /// `PackWriter` from one raw entry (0..=2 symbolic bytes) and an
-    /// optional delta entry (symbolic base hash, 0..=2-byte stream) is
-    /// accepted by `PackEntries::new` as v1 (no compression below
-    /// `MIN_COMPRESS_LEN`) and yields exactly the pushed entries in order.
+    /// `PackWriter` from one raw entry of 0..=2 symbolic bytes is accepted
+    /// by `PackEntries::new` as v1 (no compression below
+    /// `MIN_COMPRESS_LEN`) and yields exactly the pushed entry.
     #[kani::proof]
     #[kani::stub(crate::hash::hash, toy_hash)]
-    // Largest loop: the 32-byte trailer `memcmp`.
-    #[kani::unwind(34)]
-    fn pack_writer_roundtrip() {
+    // Run with `-Z unstable-options --cbmc-args --unwindset memcmp.0:33`
+    // (32-byte trailer / base-hash comparisons); <= 2 entries otherwise.
+    #[kani::unwind(4)]
+    fn pack_writer_roundtrip_raw() {
         writer_rt::<0, 0>(false);
         writer_rt::<1, 0>(false);
         writer_rt::<2, 0>(false);
+    }
+
+    /// As above with a second, delta entry (symbolic base hash and
+    /// stream): raw/stream lengths (0, 0) and (1, 2). The entries come
+    /// back in push order with `first_non_raw_index() == Some(1)`. (All
+    /// nine length pairs up to 2 did not finish within 15 min.)
+    #[kani::proof]
+    #[kani::stub(crate::hash::hash, toy_hash)]
+    #[kani::unwind(4)]
+    fn pack_writer_roundtrip_delta() {
         writer_rt::<0, 0>(true);
-        writer_rt::<0, 1>(true);
-        writer_rt::<0, 2>(true);
-        writer_rt::<1, 0>(true);
-        writer_rt::<1, 1>(true);
         writer_rt::<1, 2>(true);
-        writer_rt::<2, 0>(true);
-        writer_rt::<2, 1>(true);
-        writer_rt::<2, 2>(true);
     }
 
     /// Canary: with the trailer check in place, a single flipped body
@@ -2888,7 +2911,8 @@ mod kani_proofs {
     /// single-byte mutation of a valid pack still parses".
     #[kani::proof]
     #[kani::stub(crate::hash::hash, toy_hash)]
-    #[kani::unwind(34)]
+    // As above: `--cbmc-args --unwindset memcmp.0:33`.
+    #[kani::unwind(4)]
     #[kani::should_panic]
     fn pack_canary_mutation_still_parses() {
         let mut w = PackWriter::new_raw_only();

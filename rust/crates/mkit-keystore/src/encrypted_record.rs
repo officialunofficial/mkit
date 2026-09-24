@@ -884,19 +884,39 @@ mod kani_proofs {
         EncryptedKeyRecord::decode(&input).is_ok()
     }
 
-    /// `decode` never panics/overflows/reads OOB on any input of 0..=11
-    /// bytes (magic, version, algorithm id, attrs; each length concrete,
-    /// every byte symbolic) or of exactly 15 bytes (header + a free
-    /// protector length prefix). All are shorter than a minimal record
-    /// (59 bytes), so all are rejected. Longer fully-symbolic inputs cost
-    /// ~3 min of CBMC per length; see the report.
+    /// `decode` never panics/overflows/reads OOB on any input of 0..=8
+    /// bytes (up to the magic and version byte; each length concrete,
+    /// every byte symbolic). All are shorter than a minimal record (59
+    /// bytes), so all are rejected.
     #[kani::proof]
     #[kani::stub(std::fmt::format, no_format)]
     #[kani::stub(core::str::from_utf8, any_utf8)]
     // Largest loop: the 8-byte magic comparison.
     #[kani::unwind(10)]
     fn software_key_record_decode_short_no_panic() {
-        each_len!(decode_at; 0 1 2 3 4 5 6 7 8 9 10 11 15);
+        each_len!(decode_at; 0 1 2 3 4 5 6 7 8);
+    }
+
+    /// As above for 9..=11 bytes (version, algorithm id, attrs). Split
+    /// from the harness above: one harness for 0..=11 ran out of memory.
+    #[kani::proof]
+    #[kani::stub(std::fmt::format, no_format)]
+    #[kani::stub(core::str::from_utf8, any_utf8)]
+    #[kani::unwind(10)]
+    fn software_key_record_decode_header_no_panic() {
+        each_len!(decode_at; 9 10 11);
+    }
+
+    /// As above at exactly 15 bytes: header + a free protector length
+    /// prefix (the first `read_vec` bound check). Checked on its own; one
+    /// harness for all lengths ran out of memory. Longer fully-symbolic
+    /// inputs cost several minutes of CBMC per length.
+    #[kani::proof]
+    #[kani::stub(std::fmt::format, no_format)]
+    #[kani::stub(core::str::from_utf8, any_utf8)]
+    #[kani::unwind(10)]
+    fn software_key_record_decode_15b_no_panic() {
+        assert!(!decode_at::<15>());
     }
 
     /// Nonce equality without a 24-byte `memcmp` loop.

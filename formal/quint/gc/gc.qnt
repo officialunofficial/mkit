@@ -35,7 +35,7 @@
 // - gc's `now` is read once after the locks (commands/gc.rs); each object's
 //   mtime is read when the sweep reaches it (gc.rs `store.object_metadata`).
 //
-// Bounds (explicit): 7 objects, 3 refs + recovery log, 1 producer, 1 push,
+// Bounds (explicit): 8 objects, 3 refs + recovery log, 1 producer, 1 push,
 // clock 0..MAXT = 6, GRACE = 2 (0 in gcGrace0), RETAIN = 2, KEEP_LAST = 1,
 // at most MAXSEQ = 3 recovery records. Commands: see check.sh / README.md.
 
@@ -44,9 +44,11 @@ module gcCore {
   //                      SPEC-CONCURRENCY §3.1)
   //            "raw"     push of arbitrary duration
   //            "fast"    push publishes < GRACE after writing its objects
-  //            "bounded" push publishes only while EVERY object its tip reaches
-  //                      has on-disk mtime > publish time - GRACE
-  //                      (the exact timing assumption, `pushTimingOk`)
+  //            "bounded" push publishes only while every object it makes newly
+  //                      reachable (not already live) is present with on-disk
+  //                      mtime > publish time - GRACE (the timing assumption,
+  //                      `pushTimingOk`)
+  //            "boundedLax" mutant: the same with >= (off by one at the boundary)
   const PUSH_MODE: str
   const FRESHEN: bool          // dedup hit refreshes mtime (store.rs does NOT)
   const GRACE: int             // object grace window (default 14 d; `--grace-secs`)
@@ -64,17 +66,19 @@ module gcCore {
   pure val MAXSEQ = 3
   // Object DAG (SPEC-GC closure walk: commit -> tree + parents, tree -> entries).
   //   0, 1, 5 leaves; 2 = C0 -> {0}; 3 = C1 -> {C0, 1};
-  //   4 = C1' (amend of C1) -> {C0, 1}; 6 = P (push tip) -> {C1, 5}.
-  //   Object 5 starts as an old orphan (mtime 0), 4 and 6 start absent.
-  pure val OBJS = 0.to(6)
+  //   4 = C1' (amend of C1) -> {C0, 1}; 6 = P (push tip) -> {C1, 5};
+  //   7 = an unrelated leaf. Objects 5 and 7 start as old orphans (mtime 0),
+  //   4 and 6 start absent. 7 is prunable garbage no writer references, so a
+  //   gc can delete something mid-push without touching the push's closure.
+  pure val OBJS = 0.to(7)
   pure val EDGES: int -> Set[int] =
     Map(0 -> Set(), 1 -> Set(), 2 -> Set(0), 3 -> Set(2, 1), 4 -> Set(2, 1),
-        5 -> Set(), 6 -> Set(3, 5))
+        5 -> Set(), 6 -> Set(3, 5), 7 -> Set())
   // Reflexive-transitive closure of EDGES per object, tabulated for the SMT
   // backend; `closTableTest` checks it against the EDGES fixpoint.
   pure val CLOS: int -> Set[int] =
     Map(0 -> Set(0), 1 -> Set(1), 2 -> Set(2, 0), 3 -> Set(3, 2, 1, 0),
-        4 -> Set(4, 2, 1, 0), 5 -> Set(5), 6 -> Set(6, 3, 2, 1, 0, 5))
+        4 -> Set(4, 2, 1, 0), 5 -> Set(5), 6 -> Set(6, 3, 2, 1, 0, 5), 7 -> Set(7))
   pure def closure(s: Set[int]): Set[int] = s.fold(Set(), (a, o) => a.union(CLOS.get(o)))
   pure def edgeClosure(s: Set[int]): Set[int] =
     OBJS.fold(s, (acc, _i) => acc.fold(acc, (a, o) => a.union(EDGES.get(o))))
@@ -111,6 +115,7 @@ module gcCore {
   var livePruned: bool         // gc deleted an object reachable from the true roots
   var sweptUnreadable: bool    // gc deleted after marking with an unreadable source
   var markedUnreadable: bool
+  var prunedInPush: bool       // gc deleted something while a push was in flight
   var prunes: int
   var aborts: int
   var expiredAny: bool
@@ -125,7 +130,7 @@ module gcCore {
 
   action init = all {
     clock' = 0,
-    present' = Set(0, 1, 2, 3, 5),
+    present' = Set(0, 1, 2, 3, 5, 7),
     mtime' = OBJS.mapBy(_o => 0),
     refs' = Map("main" -> 3, "tag" -> 2, "pushed" -> NONE),
     corrupt' = Set(),
@@ -146,6 +151,7 @@ module gcCore {
     livePruned' = false,
     sweptUnreadable' = false,
     markedUnreadable' = false,
+    prunedInPush' = false,
     prunes' = 0,
     aborts' = 0,
     expiredAny' = false,
@@ -157,7 +163,7 @@ module gcCore {
     gcPhase' = gcPhase, gcNow' = gcNow, gcKept' = gcKept, gcDropAny' = gcDropAny,
     gcLive' = gcLive, gcTodo' = gcTodo, livePruned' = livePruned,
     sweptUnreadable' = sweptUnreadable, markedUnreadable' = markedUnreadable,
-    prunes' = prunes, aborts' = aborts, expiredAny' = expiredAny,
+    prunes' = prunes, prunedInPush' = prunedInPush, aborts' = aborts, expiredAny' = expiredAny,
   }
   action keepProd = all { prodPhase' = prodPhase, prodTarget' = prodTarget }
   action keepPush = all { pushPhase' = pushPhase, pushStart' = pushStart }
@@ -246,8 +252,15 @@ module gcCore {
   // Timing assumption evaluated at the publish instant `clock`.
   def pushTimingOk: bool =
     if (PUSH_MODE == "fast") clock - pushStart < GRACE
+    // Objects already live need no freshness: roots other than the push are
+    // frozen during a gc run (producers are excluded by the locks, expire
+    // precedes mark), so a gc that marked before the publish marked them too.
     else if (PUSH_MODE == "bounded")
-      CLOS.get(PUSH_TIP).forall(o => present.contains(o) and clock - mtime.get(o) < GRACE)
+      CLOS.get(PUSH_TIP).exclude(live)
+        .forall(o => present.contains(o) and clock - mtime.get(o) < GRACE)
+    else if (PUSH_MODE == "boundedLax")
+      CLOS.get(PUSH_TIP).exclude(live)
+        .forall(o => present.contains(o) and clock - mtime.get(o) <= GRACE)
     else true
   action PushPublish = all {
     pushPhase == "wrote",
@@ -279,7 +292,7 @@ module gcCore {
     gcPhase' = "locked", gcNow' = clock,
     gcKept' = gcKept, gcDropAny' = gcDropAny, gcLive' = gcLive, gcTodo' = gcTodo,
     livePruned' = livePruned, sweptUnreadable' = sweptUnreadable,
-    markedUnreadable' = false, prunes' = prunes, aborts' = aborts,
+    markedUnreadable' = false, prunes' = prunes, prunedInPush' = prunedInPush, aborts' = aborts,
     expiredAny' = expiredAny,
     clock' = clock, keepStore, refs' = refs, corrupt' = corrupt,
     keepLog, keepProd, keepPush,
@@ -301,7 +314,7 @@ module gcCore {
     lastAction' = { name: if (expAborts) "gc abort (expire)" else "gc expire read", arg: NONE },
     gcNow' = gcNow, gcLive' = gcLive, gcTodo' = gcTodo,
     livePruned' = livePruned, sweptUnreadable' = sweptUnreadable,
-    markedUnreadable' = markedUnreadable, prunes' = prunes, expiredAny' = expiredAny,
+    markedUnreadable' = markedUnreadable, prunes' = prunes, prunedInPush' = prunedInPush, expiredAny' = expiredAny,
     clock' = clock, keepStore, refs' = refs, corrupt' = corrupt,
     keepLog, keepProd, keepPush,
   }
@@ -315,7 +328,7 @@ module gcCore {
     nextSeq' = nextSeq, ghostRecs' = ghostRecs,
     gcNow' = gcNow, gcKept' = gcKept, gcDropAny' = gcDropAny, gcLive' = gcLive,
     gcTodo' = gcTodo, livePruned' = livePruned, sweptUnreadable' = sweptUnreadable,
-    markedUnreadable' = markedUnreadable, prunes' = prunes, aborts' = aborts,
+    markedUnreadable' = markedUnreadable, prunes' = prunes, prunedInPush' = prunedInPush, aborts' = aborts,
     clock' = clock, keepStore, refs' = refs, corrupt' = corrupt,
     lockHolder' = lockHolder,
     keepProd, keepPush,
@@ -342,7 +355,7 @@ module gcCore {
     lastAction' = { name: if (markAborts) "gc abort (collect_roots)" else "gc mark", arg: NONE },
     gcNow' = gcNow, gcKept' = gcKept, gcDropAny' = gcDropAny,
     livePruned' = livePruned, sweptUnreadable' = sweptUnreadable,
-    prunes' = prunes, expiredAny' = expiredAny,
+    prunes' = prunes, prunedInPush' = prunedInPush, expiredAny' = expiredAny,
     clock' = clock, keepStore, refs' = refs, corrupt' = corrupt,
     keepLog, keepProd, keepPush,
   }
@@ -356,6 +369,7 @@ module gcCore {
     gcTodo' = gcTodo.exclude(Set(o)),
     present' = if (sweepDel(o)) present.exclude(Set(o)) else present,
     prunes' = if (sweepDel(o)) prunes + 1 else prunes,
+    prunedInPush' = if (sweepDel(o) and pushPhase == "wrote") true else prunedInPush,
     // if-form: Apalache reads `x' := a \/ b` as `(x' := a) \/ b`
     livePruned' = if (sweepDel(o) and live.contains(o)) true else livePruned,
     sweptUnreadable' = if (sweepDel(o) and markedUnreadable) true else sweptUnreadable,
@@ -373,7 +387,7 @@ module gcCore {
     gcPhase' = "idle", lockHolder' = gcRelease,
     gcNow' = gcNow, gcKept' = gcKept, gcDropAny' = gcDropAny, gcLive' = gcLive,
     gcTodo' = gcTodo, livePruned' = livePruned, sweptUnreadable' = sweptUnreadable,
-    markedUnreadable' = markedUnreadable, prunes' = prunes, aborts' = aborts,
+    markedUnreadable' = markedUnreadable, prunes' = prunes, prunedInPush' = prunedInPush, aborts' = aborts,
     expiredAny' = expiredAny,
     clock' = clock, keepStore, refs' = refs, corrupt' = corrupt,
     keepLog, keepProd, keepPush,
@@ -427,6 +441,9 @@ module gcCore {
   val CanaryNoPushPublished = refs.get("pushed") == NONE
   // gc deleted something in a run that overlapped an in-flight push
   val CanaryNoPruneDuringPush = not(pushPhase == "wrote" and prunes > 0)
+  // gc deleted an object while a push was in flight AND that push then
+  // published: the interleaving the timing assumption has to make safe.
+  val CanaryNoPrunedPushPublished = not(prunedInPush and refs.get("pushed") != NONE)
 }
 
 // ---- conforming instances --------------------------------------------------
@@ -438,7 +455,7 @@ module gc {
   run closTableTest = init.expect(OBJS.forall(o => CLOS.get(o) == edgeClosure(Set(o))))
   // reset C1 -> C0 (records C1), amend C0 -> C1' (records C0); after RETAIN the
   // older entry expires (the newer is kept by keep-last) and gc prunes C1 and
-  // the old orphan 5, keeping everything live.
+  // the old orphans 5 and 7, keeping everything live.
   run resetExpirePruneTest =
     init
       .then(ProdBegin(2)).then(ProdRecord).then(ProdMove)
@@ -449,14 +466,14 @@ module gc {
       .expect(rlog.map(e => e.obj) == Set(2))
       .then(GcMark)
       .then(GcSweep(0)).then(GcSweep(1)).then(GcSweep(2)).then(GcSweep(3))
-      .then(GcSweep(4)).then(GcSweep(5)).then(GcDone)
-      .expect(present == Set(0, 1, 2, 4) and prunes == 2 and Safety)
+      .then(GcSweep(4)).then(GcSweep(5)).then(GcSweep(7)).then(GcDone)
+      .expect(present == Set(0, 1, 2, 4) and prunes == 3 and Safety)
   // An unreadable tag makes collect_roots fail: gc aborts, nothing deleted.
   run unreadableAbortsTest =
     init.then(Corrupt("tag")).then(Tick(3))
       .then(GcLock).then(GcExpireRead).then(GcExpireWrite).then(GcMark)
       .expect(gcPhase == "idle" and lockHolder == "none" and aborts == 1
-              and present == Set(0, 1, 2, 3, 5))
+              and present == Set(0, 1, 2, 3, 5, 7))
 }
 // `--grace-secs 0` in the supported deployment: the locks alone keep it safe.
 module gcGrace0 {
@@ -498,23 +515,55 @@ module gcPushFast {         // push publishes within GRACE; store as implemented
       .expect(not(NoDangling) and NoLivePruned)
       // The next gc fails closed on the dangling ref (ObjectNotFound).
       .then(GcSweep(0)).then(GcSweep(1)).then(GcSweep(2)).then(GcSweep(3))
-      .then(GcSweep(6)).then(GcDone)
+      .then(GcSweep(6)).then(GcSweep(7)).then(GcDone)
       .then(GcLock).then(GcExpireRead).then(GcExpireWrite).then(GcMark)
       .expect(gcPhase == "idle" and aborts == 1 and markedUnreadable)
 }
 module gcPushFastFreshen {  // push publishes within GRACE, dedup refreshes mtime
   import gcCore(PUSH_MODE = "fast", FRESHEN = true, GRACE = 2, BUG_NO_LOCK = false,
     BUG_LENIENT = false, BUG_NO_RECORD = false, BUG_NO_KEEP_LAST = false).*
+
+  // gc (now = 2) prunes garbage 7 while the push is in flight; the push's
+  // dedup write of 5 refreshed its mtime, so gc keeps it and the publish is safe.
+  run prunedDuringSafePushTest =
+    init.then(Tick(2)).then(PushWrite)
+      .then(GcLock).then(GcExpireRead).then(GcExpireWrite).then(GcMark)
+      .then(GcSweep(7)).then(GcSweep(5))
+      .then(PushPublish)
+      .expect(not(present.contains(7)) and present.contains(5) and Safety
+              and not(CanaryNoPrunedPushPublished))
 }
-module gcPushBounded {      // exact on-disk-mtime timing assumption
+module gcPushBounded {      // the exact on-disk-mtime timing assumption
   import gcCore(PUSH_MODE = "bounded", FRESHEN = false, GRACE = 2, BUG_NO_LOCK = false,
     BUG_LENIENT = false, BUG_NO_RECORD = false, BUG_NO_KEEP_LAST = false).*
+
+  // gc prunes the old orphan 5; the push then writes 5 afresh (not a dedup
+  // hit any more), gc prunes 7 mid-push, and the publish is safe.
+  run prunedDuringSafePushTest =
+    init.then(Tick(2))
+      .then(GcLock).then(GcExpireRead).then(GcExpireWrite).then(GcMark)
+      .then(GcSweep(5)).then(PushWrite).then(GcSweep(7))
+      .then(PushPublish)
+      .expect(present.contains(5) and not(present.contains(7)) and Safety
+              and not(CanaryNoPrunedPushPublished))
 }
 
 // ---- mutants (non-vacuity) -------------------------------------------------
 module mutNoLock {          // violates SupersededRetained, LockExclusion
   import gcCore(PUSH_MODE = "none", FRESHEN = false, GRACE = 2, BUG_NO_LOCK = true,
     BUG_LENIENT = false, BUG_NO_RECORD = false, BUG_NO_KEEP_LAST = false).*
+}
+module mutBoundedLax {      // mtime >= T - GRACE is not enough: violates NoDangling
+  import gcCore(PUSH_MODE = "boundedLax", FRESHEN = false, GRACE = 2, BUG_NO_LOCK = false,
+    BUG_LENIENT = false, BUG_NO_RECORD = false, BUG_NO_KEEP_LAST = false).*
+
+  // P written at t=0, gc (now = 2) marks without it, the push publishes at
+  // t=2 (age exactly GRACE), then gc's sweep deletes the now-live P.
+  run boundaryLossTest =
+    init.then(PushWrite).then(Tick(2))
+      .then(GcLock).then(GcExpireRead).then(GcExpireWrite).then(GcMark)
+      .then(PushPublish).then(GcSweep(6))
+      .expect(not(NoLivePruned) and not(NoDangling))
 }
 module mutNoLockGrace0 {    // --grace-secs 0 without gc's lock set: violates NoDangling
   import gcCore(PUSH_MODE = "none", FRESHEN = false, GRACE = 0, BUG_NO_LOCK = true,

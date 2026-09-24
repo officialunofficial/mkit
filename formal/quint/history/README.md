@@ -51,6 +51,16 @@ A ghost `lineage[g]` records whether every ref value written since generation
 | `RecoveryEnabled`, `NeverFailsClosed` | when idle with an intent, recovery's precondition holds and its result satisfies the invariants, so the intent is always recoverable; divergence (fail closed) is unreachable through supported APIs | `mutRawIgnoresTx` (a raw writer steps over the intent, so recovery fails closed and the intent stays) |
 | `IntentRootsRetained` | pending intent refs stay GC roots (§4.3); the intent's target chain is present (§4.2: missing ancestors fail before publication) | `mutGcIgnoresIntent`, `mutSkipVerify` |
 
+`mutWriteBeforeInvalidate` (a raw write moves the tip before removing
+`current`) violates `CurrentMatchesRef` through a crash between the two
+steps, so the crash placement exercises write ordering, not just guards.
+
+`NoProofWhileIntent` restates `load`'s own intent check, so only a mutant
+of that check can falsify it. The check is defence in depth here:
+`mutLoadIgnoresTx` still satisfies `ServedMatchesRef` and
+`ServedGenerationFresh`, because every state an intent leaves behind either
+fails the tip/chain checks or already holds the complete target snapshot.
+
 **Reachability canaries (each must be violated):** `CanaryNeverServed`,
 `CanaryNoCrashRecovery`, `CanaryNoMultiCommitFF`, `CanaryNoRecreate`,
 `CanaryNoGcDuringIntent`, `CanaryNoServedFF`.
@@ -85,13 +95,26 @@ last read from the store. It covers:
 - optionally, lost scrub writes (`scrubLossy`) and a wall clock that steps
   backwards (`scrubClockBack`).
 
-The constants are scaled: `MIN_WINDOW=2`, `LAP_FRACTION=4`, `MAX_AGE=3`
-(real values 512, 64 and 604800), with chains of at most 14 leaves.
-`realLapTest` evaluates the lap-length formula with the real constants.
+The constants are scaled: `MIN_WINDOW=2`, `LAP_FRACTION=3`, `MAX_AGE=3`
+(real values 512, 64 and 604800), with chains of at most 16 leaves. The
+scaling keeps `MIN_WINDOW >= LAP_FRACTION - 1`, as the real constants do
+(512 >= 63); that relation is what limits a lap to `LAP_FRACTION + 1`
+publishes. Each fast-forward adds at least one leaf, so a lap started at
+`verified_through = vt` needs `vt + LAP_FRACTION` leaves; with 16, the lap
+of every initial or rewritten chain (at most 13 leaves) runs to the end.
+`realLapBoundTest` checks `lap <= 65` exhaustively for every
+`verified_through` up to the 1,000,000-leaf cap, and `realLapTest` checks
+sample values.
+
+The first version of this model used `LAP_FRACTION=4` with a 14-leaf cap.
+That scaling breaks the relation above: `vt = 11` gives a 6-publish lap, a
+case the real constants cannot produce. `ActualPublishBound` held only
+because the leaf cap cut every such lap short (with a 24-leaf cap, quint
+finds the violation). The current constants hold with a 24-leaf cap too.
 
 | Property | Result |
 |---|---|
-| `ActualPublishBound`: no leaf goes more than `LAP_FRACTION+1` publishes unread | holds (TLC, unbounded publishes); falsified by `mutWrapWithoutFull` |
+| `ActualPublishBound`: no leaf goes more than `LAP_FRACTION+1` publishes unread | holds (TLC over the whole finite instance: any number of publishes, with the fast-forwards per generation bounded by the leaf cap); falsified by `mutWrapWithoutFull` |
 | `TimeBound`: after a publish, every leaf was read within `MAX_AGE` | holds, including with lost writes; falsified by `mutIgnoreAge` and `scrubClockBack` |
 | `InvalidForcesFull`: invalid scrub state always forces a full walk | holds; falsified by `mutTrustInvalid` |
 | `SpecPublishBound`: "at 64 fast-forward publishes" | **violated** (finding 1) |
@@ -100,7 +123,7 @@ The constants are scaled: `MIN_WINDOW=2`, `LAP_FRACTION=4`, `MAX_AGE=3`
 ## Commands and outcomes
 
 ```sh
-./check.sh              # quint typecheck/test/run and TLC: "all checks as expected" (~6 min)
+./check.sh              # quint typecheck/test/run and TLC: "all checks as expected" (~9 min)
 APALACHE=1 ./check.sh   # adds Apalache 0.47.2 bounded runs
 ```
 
@@ -108,7 +131,7 @@ Individual commands (all run for MKIT-20, with the results shown):
 
 ```sh
 quint test history.qnt --main history            # 7 passing
-quint test scrub.qnt --main scrub                # realLapTest passing
+quint test scrub.qnt --main scrub                # realLapBoundTest, realLapTest passing
 quint run history.qnt --main history --invariant Safety \
   --max-steps 30 --max-samples 50000 --backend rust              # [ok]
 quint run history.qnt --main <mutant> --invariant <inv> ...      # [violation], per table
@@ -117,12 +140,17 @@ java -cp /opt/fv/tla2tools.jar tlc2.TLC -deadlock -config tlc/MC.cfg tlc/MC.tla
   # No error: 9,903,627 states generated, 200,388 distinct (view) states, depth 37
 apalache-mc check --init=q_init --next=q_step --inv=q_inv --length=10 history.tla
   # Apalache 0.47.2, Safety: "no error up to computation length 10" (25m35s,
-  # before FastForwardRetainsGeneration was added; with it: length 8, 4m06s)
+  # before FastForwardRetainsGeneration was added; with it: length 8, 4m06s;
+  # re-run after review changes: length 8, NoError, 4m57s)
   # CanaryNeverServed violated at depth 6; mutGcIgnoresIntent violated at depth 3;
   # mutFreshGenOnFF at 7, mutSkipVerify at 2, mutFinishAnyRef at 5
-apalache-mc check ... --length=8 scrub.tla   # ActualPublishBound,TimeBound,InvalidForcesFull: NoError (49s)
-                                             # SpecPublishBound: violated at depth 4
+  # mutWriteBeforeInvalidate CurrentMatchesRef violated at 7 (length 7, 19s)
+apalache-mc check ... --length=8 scrub.tla   # ActualPublishBound,TimeBound,InvalidForcesFull: NoError (79s)
+                                             # SpecPublishBound: violated at depth 3
                                              # mutTrustInvalid InvalidForcesFull: violated at depth 2
+# scrubUnbounded under tlc/MCS VIEW: ActualPublishBound,TimeBound,InvalidForcesFull:
+#   No error, 340,717 states generated, 1,904 distinct, depth 6;
+#   SpecPublishBound violated (init vt=7, three window publishes)
 ```
 
 ## Findings
@@ -131,9 +159,10 @@ apalache-mc check ... --length=8 scrub.tla   # ActualPublishBound,TimeBound,Inva
    window path runs only while `cursor + window < verified_through`, so a lap
    takes `floor((vt-1)/window) + 1` publishes. That is 65 whenever
    `vt >= 32768` and `vt` is not a multiple of 64, e.g. `vt = 32769` or
-   `vt = 999999`. The minimal scaled counterexample (TLC and quint): a full
-   verify with `vt=9` and `w=2`, then 4 window publishes cover `[0,8)`, and
-   leaf 8 is not read again until the 5th publish.
+   `vt = 999999`; `realLapBoundTest` shows 65 is also the maximum. The
+   minimal scaled counterexample (TLC, Apalache and quint): a full verify with
+   `vt=7` and `w=2`, then 3 window publishes cover `[0,6)`, and leaf 6 is not
+   read again until the 4th publish (`LAP_FRACTION + 1`).
 2. **The 7-day boundary is off by one.** §4.5 permits the window path only
    when *fewer than* 604800 s have elapsed. The code uses the window path when
    `now - last_full_verify_unix <= 604800` (`stale` is `> SCRUB_MAX_AGE_SECS`),
@@ -152,6 +181,14 @@ apalache-mc check ... --length=8 scrub.tla   # ActualPublishBound,TimeBound,Inva
    `MKSC\x02 || generation[32] || cursor || verified_through || last_full ||
    BLAKE3` (93 bytes) and discards state whose generation does not match.
    §4.1's layout also omits the `scrub` file.
+6. **The 7-day bound only applies when a publish happens** (spec ambiguity).
+   §4.5 says the scrub bounds the interval before a leaf is re-verified to
+   "64 fast-forward publishes or 7 days of wall-clock time, whichever comes
+   first". The staleness check runs only inside a fast-forward publish, so an
+   idle branch is not re-verified after 7 days; `TimeBound` is therefore
+   stated at publish time. (`AncestrySnapshot::load` re-walks the whole chain
+   from the store on every read, so served proofs do not depend on the
+   scrub.)
 
 The history state machine itself (§4.3–§4.4, deletion and recreate) showed
 no violation.
@@ -170,5 +207,9 @@ no violation.
   through ABA if it ever shared a history-enabled common dir.
 - Branch rename (§1: fresh generation) is not modelled separately; with one
   branch it is a delete of the old name plus a first publication of the new.
-- The scrub model uses scaled constants; the real-constant lap length is
-  checked arithmetically only (`realLapTest`).
+- The scrub model uses scaled constants (see above for why the scaling is
+  faithful); with the real constants, the lap length is checked
+  arithmetically (`realLapBoundTest`, exhaustive up to the 1,000,000-leaf cap).
+- Object loss other than GC (bit rot, a torn write) is not modelled in
+  `history.qnt`, so a published tip's chain stays present; `scrub.qnt` covers
+  the schedule that re-reads it.

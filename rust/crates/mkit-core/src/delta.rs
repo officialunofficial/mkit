@@ -918,7 +918,10 @@ mod tests {
     }
 }
 
-/// Kani proof harnesses (`cargo kani -p mkit-core --harness delta_`).
+/// Kani proof harnesses (`cargo kani -p mkit-core --no-default-features
+/// -Z stubbing --harness delta_`; with the default `pack-zstd` feature's
+/// C `zstd` dependency linked in, CBMC ran out of memory on most
+/// harnesses of this crate).
 /// Bounds are stated per harness; `kani::cover!` sites show every
 /// asserted property has a reachable, non-vacuous `Ok` path.
 #[cfg(kani)]

@@ -1233,8 +1233,8 @@ mod tests {
     }
 }
 
-/// Kani proof harnesses (`cargo kani -p mkit-core -Z stubbing --harness
-/// serialize_`), the model-checked counterpart of the `tree` fuzz target.
+/// Kani proof harnesses (`cargo kani -p mkit-core --no-default-features
+/// -Z stubbing --harness serialize_`, see `delta.rs`), the model-checked counterpart of the `tree` fuzz target.
 ///
 /// `deserialize` is verified compositionally: the prologue/dispatch/
 /// trailing-byte logic with the per-type readers replaced by
@@ -1376,38 +1376,38 @@ mod kani_proofs {
             && w2(a, 40) == w2(b, 40)
     }
 
-    /// `read_tree` (SPEC-OBJECTS §4) on every body of 0..=8 bytes (count
-    /// and all fields symbolic): no panic/overflow/OOB, and the reader
-    /// never runs past its input. §4.1 is stubbed (`any_name_ok`).
+    /// `read_tree` (SPEC-OBJECTS §4) on every body of 0..=4 bytes (count
+    /// symbolic): no panic/overflow/OOB, and the reader never runs past
+    /// its input. §4.1 is stubbed (`any_name_ok`). (At 0..=5 and 0..=8
+    /// bytes CBMC ran out of memory: the entry loop is unrolled for a
+    /// symbolic count although the §4 size pre-check rejects it.)
     #[kani::proof]
     #[kani::stub(TreeEntry::validate_name, any_name_ok)]
     #[kani::unwind(3)]
     fn serialize_read_tree_no_panic() {
-        each_len!(read_tree_at; 0 1 2 3 4 5 6 7 8);
+        each_len!(read_tree_at; 0 1 2 3 4);
     }
 
     /// `read_tree` on a 42-byte body — the exact size of a one-entry tree
-    /// with a 1-byte name — with every byte but the count symbolic, count
-    /// ∈ {1, 2} (so `name_len`, mode and hash range freely): no panic; two
-    /// entries never fit; on the one-entry `Ok` path that consumes the
-    /// body, the bytes are the canonical encoding
-    /// (`serialize(tree)[6..] == body`). §4.1 is stubbed (`any_name_ok`).
+    /// with a 1-byte name — with count = 1 and every other byte symbolic
+    /// (so `name_len`, mode and hash range freely): no panic; on the `Ok`
+    /// path that consumes the body, the bytes are the canonical encoding
+    /// (`write_tree(tree) == body`). §4.1 is stubbed (`any_name_ok`).
+    /// (count ∈ {1, 2} through the full `serialize` ran out of memory.)
     #[kani::proof]
     #[kani::stub(TreeEntry::validate_name, any_name_ok)]
     #[kani::unwind(3)]
     fn serialize_read_tree_one_entry() {
-        for count in [1u32, 2] {
-            let mut body: [u8; 42] = kani::any();
-            body[..4].copy_from_slice(&count.to_le_bytes());
-            let mut r = Reader::new(&body);
-            if let Ok(t) = read_tree(&mut r) {
-                assert_eq!(count, 1, "two entries cannot fit in 42 bytes");
-                if r.remaining() == 0 {
-                    let bytes = serialize(&Object::Tree(t)).expect("re-encodes");
-                    assert!(eq42(&bytes[PROLOGUE_LEN..], &body));
-                    kani::cover!(true, "one_entry_canonical");
-                }
-            }
+        let mut body: [u8; 42] = kani::any();
+        body[..4].copy_from_slice(&1u32.to_le_bytes());
+        let mut r = Reader::new(&body);
+        if let Ok(t) = read_tree(&mut r)
+            && r.remaining() == 0
+        {
+            let mut bytes = Vec::new();
+            write_tree(&mut bytes, &t).expect("re-encodes");
+            assert!(eq42(&bytes, &body));
+            kani::cover!(true, "one_entry_canonical");
         }
     }
 
@@ -1489,22 +1489,16 @@ mod kani_proofs {
 
     /// Writer/reader round-trip for every tree of <= 1 entry with a
     /// name of 1..=2 symbolic bytes, any mode, symbolic hash — real §4.1
-    /// checks, not stubbed.
+    /// checks, not stubbed. (Two-entry trees ran out of memory; the §4
+    /// strict-order rejection is covered by the unit tests.)
     #[kani::proof]
-    // 32-byte hash comparisons dominate.
-    #[kani::unwind(34)]
-    fn serialize_tree_roundtrip() {
+    // Run with `-Z unstable-options --cbmc-args --unwindset memcmp.0:33`
+    // for the 32-byte hash comparisons; every other loop runs <= 2 times.
+    #[kani::unwind(3)]
+    fn serialize_tree_roundtrip_one_entry() {
         roundtrip(vec![]);
         roundtrip(vec![any_entry::<1>()]);
         kani::cover!(roundtrip(vec![any_entry::<2>()]), "one_valid_entry");
-    }
-
-    /// As above for two entries with 1-byte names (the §4 strict-order
-    /// check). Larger name combinations did not finish within 15 min.
-    #[kani::proof]
-    #[kani::unwind(34)]
-    fn serialize_tree_roundtrip_two_entries() {
-        kani::cover!(roundtrip(vec![any_entry::<1>(), any_entry::<1>()]), "two_valid_entries");
     }
 
     fn blob_rt<const N: usize>() {
