@@ -1643,20 +1643,39 @@ mod kani_proofs {
     }
 
     /// Adversarial single-leaf verification: any `leaf_count`, any
-    /// `position`, 0..=2 arbitrary sibling digests, any claimed id.
-    /// `verify_chunk` / `verify_tree_entry` never panic/overflow, and the
-    /// fold succeeds iff `position < leaf_count` and the proof carries
-    /// exactly the §5.3 sibling count (§5.4 "consumed exactly once").
-    /// Chunk position 0 is always rejected (§5.5).
+    /// `position`, no sibling digests, any claimed id. `verify_chunk` /
+    /// `verify_tree_entry` never panic/overflow, and the fold succeeds
+    /// iff `position < leaf_count` and the proof carries exactly the §5.3
+    /// sibling count (§5.4 "consumed exactly once"). Chunk position 0 is
+    /// always rejected (§5.5). One harness per sibling count: 0..=2 in
+    /// one harness did not finish within 15 min.
     #[kani::proof]
     #[kani::stub(h2, toy_h2)]
     #[kani::stub(crate::hash::domain_digest, toy_domain_digest)]
     #[kani::stub(crate::hash::hash, toy_hash)]
     // <= 32 fold levels (any u32 leaf count).
     #[kani::unwind(34)]
-    fn merkle_verify_adversarial_no_panic() {
+    fn merkle_verify_s0() {
         verify_with::<0>();
-        verify_with::<1>();
+    }
+
+    /// As above with one arbitrary sibling digest.
+    #[kani::proof]
+    #[kani::stub(h2, toy_h2)]
+    #[kani::stub(crate::hash::domain_digest, toy_domain_digest)]
+    #[kani::stub(crate::hash::hash, toy_hash)]
+    #[kani::unwind(34)]
+    fn merkle_verify_s1() {
+        kani::cover!(verify_with::<1>(), "accepts_one_sibling_proof");
+    }
+
+    /// As above with two arbitrary sibling digests.
+    #[kani::proof]
+    #[kani::stub(h2, toy_h2)]
+    #[kani::stub(crate::hash::domain_digest, toy_domain_digest)]
+    #[kani::stub(crate::hash::hash, toy_hash)]
+    #[kani::unwind(34)]
+    fn merkle_verify_s2() {
         kani::cover!(verify_with::<2>(), "accepts_two_sibling_proof");
     }
 
