@@ -108,7 +108,7 @@ function LobbyBody({ room }: { room: string }) {
 }
 
 /**
- * Watches the room roster and emits ephemeral "left the chat" / "is now viewing only" notices for departing members.
+ * Watches the room roster and emits ephemeral "left the lobby" / "is now viewing only" notices for departing members.
  *
  * Presence only exposes the current roster (named `members` + an anonymous `viewers` count), so a member dropping is
  * detected by diffing successive rosters. Distinguishing a true disconnect from a lock (which reconnects a beat later
@@ -463,7 +463,7 @@ function SystemNotice({ notice }: { notice: SystemNoticeItem }) {
     <div className='px-4 py-1'>
       <p className='mx-auto flex max-w-full flex-wrap items-center justify-center gap-1.5 text-center text-2xs text-muted'>
         <PlayerLabel pubkey={notice.pubkey} className='font-medium' />
-        {notice.sysKind === 'left' ? 'left the chat' : 'is now viewing only'}
+        {notice.sysKind === 'left' ? 'left the lobby' : 'is now viewing only'}
       </p>
     </div>
   )

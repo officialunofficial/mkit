@@ -15,5 +15,5 @@ export { humanizeError as errMsg } from '../../lib/humanize-error'
 
 // One wording per state, shared by the compose and repo-browser surfaces
 // (style guide: same state, same words).
-export const CAS_CONFLICT_COPY = 'Someone pushed first — try again.'
-export const IDENTITY_LOCKED_COPY = 'Your identity is locked. Unlock it and try again.'
+export const CAS_CONFLICT_COPY = 'Someone else pushed to this branch first. Try again.'
+export const IDENTITY_LOCKED_COPY = 'Signing is locked. Unlock signing and try again.'

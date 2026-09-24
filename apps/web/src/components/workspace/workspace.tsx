@@ -214,7 +214,7 @@ function WorkspaceContent({ workspaceId, sourceId }: { workspaceId: string | nul
           <div>
             <div className='ws-eyebrow'>mkit / create</div>
             <h1>{sourceId ? 'Create a remix' : 'Projects'}</h1>
-            <p className='ws-note'>Public files. A working terminal. An agent that saves its work.</p>
+            <p className='ws-note'>Each project has public files, a terminal, and an agent that saves versions.</p>
           </div>
           <button className='btn btn--solid' disabled={!auth.session || busy} onClick={() => void remix()}>
             <ArrowsSplitIcon size={15} aria-hidden />
@@ -222,9 +222,7 @@ function WorkspaceContent({ workspaceId, sourceId }: { workspaceId: string | nul
           </button>
         </header>
         {!auth.session ? (
-          <p className='ws-note'>
-            Sign in using Account above to create a project. Public projects are open to explore.
-          </p>
+          <p className='ws-note'>Sign in with Account above to create a project. Anyone can browse public projects.</p>
         ) : null}
         {error ? (
           <p className='ws-inline-error' role='alert'>
@@ -254,8 +252,8 @@ function WorkspaceContent({ workspaceId, sourceId }: { workspaceId: string | nul
           ))}
           {!workspaces.length ? (
             <div className='ws-empty'>
-              <h2>{listQuery.isPending ? 'Loading projects…' : 'Your next project starts here'}</h2>
-              <p>Remix the demo to get a workspace with files, a terminal, and version history.</p>
+              <h2>{listQuery.isPending ? 'Loading projects…' : 'No projects yet'}</h2>
+              <p>Remix the demo to create a project with files, a terminal, and version history.</p>
             </div>
           ) : null}
         </div>
@@ -386,7 +384,7 @@ function WorkspaceContent({ workspaceId, sourceId }: { workspaceId: string | nul
                     ? 'The agent is changing files. Editing resumes when it finishes.'
                     : owner
                       ? 'Agent access is disabled or expired. Remix a saved version to keep working.'
-                      : 'You’re viewing a public project. Remix a saved version to make it your own.'}
+                      : 'You’re viewing a public project. Remix a saved version to edit your own copy.'}
                 </p>
               ) : null}
             </Tabs.Content>
@@ -432,7 +430,7 @@ function WorkspaceContent({ workspaceId, sourceId }: { workspaceId: string | nul
                   <TerminalWindowIcon size={14} aria-hidden />
                   Terminal
                 </span>
-                <span>{active ? 'Paused during task' : terminalOpen ? 'Hide terminal' : 'Open a shell'}</span>
+                <span>{active ? 'Paused during task' : terminalOpen ? 'Hide terminal' : 'Show terminal'}</span>
               </button>
               {terminalOpen ? (
                 <div id='workspace-terminal'>
@@ -440,7 +438,7 @@ function WorkspaceContent({ workspaceId, sourceId }: { workspaceId: string | nul
                     <p className='ws-permission-note'>
                       {active
                         ? 'The terminal is paused while nanocodex runs. It opens again when the task finishes.'
-                        : 'Workspace execution is disabled. Remix a saved version to use a terminal again.'}
+                        : 'Agent access is disabled or expired, so the terminal is unavailable. Remix a saved version to use a terminal.'}
                     </p>
                   ) : (
                     <WorkspaceTerminal workspaceId={view.workspace.id} />
@@ -501,7 +499,7 @@ function WorkspaceContent({ workspaceId, sourceId }: { workspaceId: string | nul
           <p>
             {changeCount
               ? `Save all ${changeCount} changed ${changeCount === 1 ? 'file' : 'files'} together as one version.`
-              : 'Capture the current working files as one version.'}
+              : 'Save the current working files as one version.'}
           </p>
           <ul className='ws-save-files'>
             {[...changedPaths].map((path) => (
@@ -522,12 +520,12 @@ function WorkspaceContent({ workspaceId, sourceId }: { workspaceId: string | nul
             />
           </label>
           <p className='ws-note'>
-            Includes browser edits and changes from the terminal. The project signer creates the version after your
-            authorization.
+            Includes browser edits and terminal changes. The version signer creates the version after you authorize the
+            save.
           </p>
           {terminalOpen ? (
             <p className='ws-note'>
-              The terminal is captured when you save. Recent terminal changes may not appear in this list yet.
+              Terminal changes are included when you save, even if they do not appear in this list yet.
             </p>
           ) : null}
           {error ? (
@@ -578,7 +576,11 @@ function WorkspaceContent({ workspaceId, sourceId }: { workspaceId: string | nul
           </p>
           <code className='ws-full-hash'>{dialog.version.hash}</code>
           <p>This creates a new version after the latest one. Your saved history remains available.</p>
-          {changeCount ? <p className='ws-warning-text'>{changeCount} current file changes will be replaced.</p> : null}
+          {changeCount ? (
+            <p className='ws-warning-text'>
+              {changeCount} changed {changeCount === 1 ? 'file' : 'files'} will be replaced.
+            </p>
+          ) : null}
           {drafts.dirty ? <p className='ws-inline-error'>Save or discard browser edits before restoring.</p> : null}
           {error ? (
             <p className='ws-inline-error' role='alert'>
@@ -642,10 +644,7 @@ function WorkspaceContent({ workspaceId, sourceId }: { workspaceId: string | nul
             </>
           }
         >
-          <p>
-            Clear the current conversation and the agent’s conversation context. Files and saved versions stay in this
-            project.
-          </p>
+          <p>Clear this conversation and the agent’s context. Files and saved versions are not affected.</p>
           <p className='ws-note'>Cleared messages cannot be recovered.</p>
           {error ? (
             <p className='ws-inline-error' role='alert'>
@@ -676,9 +675,7 @@ function WorkspaceContent({ workspaceId, sourceId }: { workspaceId: string | nul
           }
         >
           <p>Stop execution and disable the agent, terminal, file saves, and new versions in this workspace.</p>
-          <p>
-            Files and history remain readable. To work again, you’ll need to remix a saved version into a new workspace.
-          </p>
+          <p>Files and history remain readable. To keep working, remix a saved version into a new workspace.</p>
           {error ? (
             <p className='ws-inline-error' role='alert'>
               {error}
@@ -702,7 +699,7 @@ function WorkspaceContent({ workspaceId, sourceId }: { workspaceId: string | nul
                   if (href) location.assign(href)
                 }}
               >
-                {dialog.kind === 'leave' ? 'Discard edits & leave' : 'Discard browser edits'}
+                {dialog.kind === 'leave' ? 'Discard edits and leave' : 'Discard browser edits'}
               </button>
             </>
           }

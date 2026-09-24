@@ -31,7 +31,7 @@ describe('PushDemo', () => {
     await user.click(screen.getByRole('button', { name: /Chunk it/ }))
     expect(await screen.findByText('Split it into chunks')).toBeInTheDocument()
 
-    await user.click(screen.getByRole('button', { name: /Edit a byte/ }))
+    await user.click(screen.getByRole('button', { name: /Change a byte/ }))
     expect(await screen.findByText('Change one byte')).toBeInTheDocument()
     expect(screen.getByLabelText('Byte to flip')).toBeInTheDocument()
 

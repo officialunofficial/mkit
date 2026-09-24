@@ -16,9 +16,8 @@ export default function SpecsPage() {
           <h1 className='ds-h1'>Format and protocol specifications</h1>
           <p className='ds-note mt-1'>Object formats, repository state, and communication protocols.</p>
           <p className='mt-2 max-w-prose'>
-            Use these documents to understand format and protocol requirements. Check each document’s status and
-            implementation notes before relying on it. Each entry links to the full text under <code>docs/specs/</code>{' '}
-            in the repository.
+            Check each document’s status and implementation notes before relying on it. Each entry links to the full
+            text in the repository’s <code>docs/specs/</code> directory.
           </p>
         </header>
         <SpecIndex />

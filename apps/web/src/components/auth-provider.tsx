@@ -98,7 +98,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
   const deleteSession = useCallback(async () => {
     const response = await fetch(`${WORKSPACE_API}/session`, { method: 'DELETE', credentials: 'same-origin' })
-    if (!response.ok) throw new Error('Sign out failed. Try again to close your server session.')
+    if (!response.ok) throw new Error('Could not end your server session. Sign out again.')
     clearPrivate()
     qc.setQueryData(SESSION_KEY, null)
   }, [qc, clearPrivate])
@@ -168,7 +168,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const publicKey = bytesToHex(api.ed25519_pubkey_from_seed(hexToBytes(result.seedHex)))
       if (prior && publicKey !== prior.publicKey)
         throw new Error('That passkey belongs to another identity. Sign out to switch accounts.')
-      if (epoch !== generation.current) throw new Error('Authentication changed. Please try again.')
+      if (epoch !== generation.current) throw new Error('Your sign-in changed during this request. Try again.')
       const candidate: IdentityState = {
         ...current,
         credentialId: result.credentialId ?? current.credentialId,
@@ -181,7 +181,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // Cancelling the observer prevents an earlier anonymous GET overwriting this login.
       await qc.cancelQueries({ queryKey: SESSION_KEY })
       const next = prior ?? (await workspaceWrite<BrowserSession>(api, candidate, 'identity', '/session', {}))
-      if (epoch !== generation.current) throw new Error('Authentication changed. Please try again.')
+      if (epoch !== generation.current) throw new Error('Your sign-in changed during this request. Try again.')
       if (next.publicKey !== publicKey) throw new Error('Server session identity did not match.')
       if (!prior) clearPrivate()
       if (current.credentialId !== candidate.credentialId) {
@@ -202,7 +202,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     retry: false,
   })
   function runCeremony(mode: 'create' | 'unlock'): Promise<void> {
-    if (loggingOut.current) return Promise.reject(new Error('Sign out is still finishing.'))
+    if (loggingOut.current) return Promise.reject(new Error('Sign out is in progress. Try again when it finishes.'))
     if (flight.current) return flight.current
     setStatus(null)
     setBusy(true)

@@ -47,7 +47,7 @@ type Encoded = { root: string; bytesLen: number; chunks: StripChunk[] }
 
 const STEPS = [
   { title: 'Start with a large file', next: 'Chunk it' },
-  { title: 'Split it into chunks', next: 'Edit a byte' },
+  { title: 'Split it into chunks', next: 'Change a byte' },
   { title: 'Change one byte', next: 'Push it' },
   { title: 'Push only what changed', next: 'Start over' },
 ] as const
@@ -144,7 +144,7 @@ export function PushDemo() {
 
           {step === 1 ? (
             <>
-              <ChunkStrip chunks={before.chunks} totalLen={before.bytesLen} ariaLabel='content-defined chunks' />
+              <ChunkStrip chunks={before.chunks} totalLen={before.bytesLen} ariaLabel='Content-defined chunks' />
               <p className='max-w-prose text-sm text-muted'>
                 mkit splits files over 1 MiB into content-defined chunks (~64 KiB), each named by its hash. Identical
                 chunks are stored once.
@@ -157,7 +157,7 @@ export function PushDemo() {
               <ChunkStrip
                 chunks={after.chunks}
                 totalLen={after.bytesLen}
-                ariaLabel='content-defined chunks after an edit'
+                ariaLabel='Content-defined chunks after the edit'
                 highlightIndex={changedIdx[0]}
                 dimSet={dimSet}
                 markerByte={editByte}
@@ -190,12 +190,7 @@ export function PushDemo() {
               {/* Same scale, what each sends. git = one solid whole-file bar (no
                   chunking); mkit = the chunk strip, deduped to the one changed chunk. */}
               <div className='space-y-2'>
-                <CompareBar
-                  name='Whole file'
-                  detail={`${FILE_LABEL} · whole file`}
-                  solid
-                  ariaLabel='Resending the whole file'
-                />
+                <CompareBar name='Whole file' detail={FILE_LABEL} solid ariaLabel='Resending the whole file' />
                 <CompareBar
                   name='mkit'
                   detail={`${formatBytes(deltaBytes)} · delta of 1 chunk · ${savedLabel}`}
@@ -224,7 +219,7 @@ export function PushDemo() {
 
       <div className='flex items-center justify-between border-t border-hairline pt-4'>
         <button type='button' onClick={back} disabled={step === 0} className={`${BTN} disabled:opacity-40`}>
-          ← back
+          ← Back
         </button>
         <button type='button' onClick={next} className={BTN}>
           {STEPS[step]?.next} {step < STEPS.length - 1 ? '→' : '↺'}

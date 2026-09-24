@@ -48,7 +48,7 @@ export function Account() {
               <h2 className='text-lg font-semibold'>{publicKey ? 'Your account' : 'Sign in to mkit'}</h2>
               <button
                 type='button'
-                aria-label='Close account'
+                aria-label='Close account dialog'
                 className='touch-target inline-flex size-8 items-center justify-center'
                 onClick={() => setOpen(false)}
               >
@@ -115,8 +115,8 @@ export function Account() {
                 <>
                   <p className='w-full text-muted'>
                     {state === 'error'
-                      ? 'Account unavailable. Try again.'
-                      : 'Use a passkey to access your projects. New to mkit? Create one to get started.'}
+                      ? 'Could not load your account. Try again.'
+                      : 'Sign in with a passkey to open your projects. New to mkit? Create a passkey first.'}
                   </p>
                   <button
                     className={`btn ${auth.hasPasskey ? 'btn--outlined' : 'btn--solid'} btn--small`}

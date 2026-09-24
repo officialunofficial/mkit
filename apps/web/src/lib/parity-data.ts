@@ -32,17 +32,17 @@ export type ParityNote = {
 }
 
 export const legend: { status: ParityStatus; symbol: string; label: string; meaning: string }[] = [
-  { status: 'parity', symbol: '✅', label: 'parity', meaning: "Behaves like git's in-scope subset today." },
-  { status: 'divergent', symbol: '⚠️', label: 'divergent', meaning: 'Works, with a known, documented difference.' },
-  { status: 'non-goal', symbol: '🚫', label: 'non-goal', meaning: "Deliberately not git's behavior." },
+  { status: 'parity', symbol: '✅', label: 'parity', meaning: 'Matches Git for the flags in scope.' },
+  { status: 'divergent', symbol: '⚠️', label: 'divergent', meaning: 'Works, with documented differences.' },
+  { status: 'non-goal', symbol: '🚫', label: 'non-goal', meaning: 'Intentionally not supported.' },
 ]
 
 export const categories: ParityCategory[] = [
   {
     name: 'Everyday',
-    blurb: 'Stage, commit, and undo your everyday changes.',
+    blurb: 'Stage, commit, inspect, and undo changes.',
     items: [
-      { cmd: 'init', status: 'parity', note: 'Create a repo. The marker is .mkit/, not .git/.' },
+      { cmd: 'init', status: 'parity', note: 'Creates .mkit/ instead of .git/.' },
       {
         cmd: 'add',
         status: 'divergent',
@@ -63,12 +63,12 @@ export const categories: ParityCategory[] = [
       {
         cmd: 'mv',
         status: 'parity',
-        note: "Renames or moves files and directories (including move-into-directory and multi-source moves) with git's `-f` file-clobber guard (a directory destination is never overwritten). Content addressing gives exact rename detection, so `status` and `diff` show `R` like git (`--no-renames` to opt out).",
+        note: "Renames or moves files and directories, including moves into a directory and multi-source moves, with Git's `-f` overwrite guard (a directory destination is never overwritten). Content addressing gives exact rename detection, so `status` and `diff` show `R` like Git (`--no-renames` turns it off).",
       },
       {
         cmd: 'checkout / switch',
         status: 'parity',
-        note: 'Switch branches (checkout -b/-B, switch -c/-C to create) or restore files, guarded against clobbering dirty or colliding files.',
+        note: 'Switch branches (checkout -b/-B, switch -c/-C to create) or restore files. Refuses to overwrite modified or colliding files.',
       },
       { cmd: 'restore / reset', status: 'parity', note: '--staged, --worktree, --soft, --mixed, --hard.' },
     ],
@@ -86,12 +86,12 @@ export const categories: ParityCategory[] = [
       {
         cmd: 'merge / cherry-pick / rebase',
         status: 'parity',
-        note: 'Full conflict workflow. rebase -i reorders, drops, rewords, squashes, and fixups.',
+        note: 'Full conflict workflow. rebase -i supports reorder, drop, reword, squash, and fixup.',
       },
       {
         cmd: 'revert',
         status: 'parity',
-        note: 'Inverse commit, conflict-aware. Reverting a merge commit is not yet supported.',
+        note: 'Creates an inverse commit and handles conflicts. Reverting a merge commit is not yet supported.',
       },
     ],
   },
@@ -112,17 +112,17 @@ export const categories: ParityCategory[] = [
       {
         cmd: 'reflog',
         status: 'divergent',
-        note: "Reconstructs the branch's reachable first-parent chain (@{N}), cross-checked against a tamper-evident commit-history Merkle log — not git's per-operation reflog. Shows each commit's subject but no op labels, and commits superseded by amend/reset aren't listed.",
+        note: "Rebuilds the branch's reachable first-parent chain (@{N}) and checks it against a tamper-evident Merkle log of commit history. Unlike Git's per-operation reflog, it shows each commit's subject without operation labels and omits commits replaced by amend or reset.",
       },
       {
         cmd: 'blame',
         status: 'divergent',
-        note: "Supports -L line ranges, a [<rev>] argument, -w, -M/-C move/copy detection (inline -M<num>/-C<num> thresholds and git's three-level -C -C -C whole-history search), --ignore-rev fall-through, and Git-compatible --porcelain/--line-porcelain. Move/copy and --ignore-rev attribution is merge-aware across every real merge parent, implementing git's per-parent -C candidate mechanism (modified-files vs whole-tree, porigin-keyed) with git's ancestor tie-break, pinned against git 2.50.1. Opt-in --ignore-rev-precise uses content matching instead of git's positional per-hunk guess to resolve --ignore-rev fall-through (documented divergence; the default fall-through remains git-identical). Two differences keep it divergent: --format=json and --porcelain carry an mkit Identity, not Name <email> (the same, accepted difference as log); and blame follows a fixed path, so it does not trace lines across a whole-file rename the way git does (use -C to credit copied blocks).",
+        note: "Supports -L line ranges, a [<rev>] argument, -w, -M/-C move and copy detection (including inline -M<num>/-C<num> thresholds and Git's three-level -C -C -C whole-history search), --ignore-rev fall-through, and Git-compatible --porcelain/--line-porcelain. Move/copy and --ignore-rev attribution follows every real merge parent using Git's per-parent -C candidate mechanism (modified files vs whole tree, porigin-keyed) and Git's ancestor tie-break, pinned against Git 2.50.1. Opt-in --ignore-rev-precise resolves --ignore-rev fall-through by content matching instead of Git's positional per-hunk guess; the default matches Git. Two differences remain: --format=json and --porcelain show an mkit Identity instead of Name <email>, as log does; and blame follows a fixed path, so it does not trace lines across a whole-file rename as Git does (use -C to credit copied blocks).",
       },
       {
         cmd: 'bisect',
         status: 'divergent',
-        note: 'start, good, bad, skip, reset, and run <cmd> (auto-bisect with git’s 0/125/1-127 exit-code contract). Prints the next candidate to stdout rather than auto-checking-out the midpoint (you check it out yourself); run checks out each candidate transiently but still prints the first bad commit rather than leaving that commit checked out.',
+        note: 'start, good, bad, skip, reset, and run <cmd> (automatic bisect using Git’s 0/125/1-127 exit codes). Prints the next candidate to stdout instead of checking it out; you check it out yourself. run checks out each candidate temporarily, then prints the first bad commit instead of leaving it checked out.',
       },
     ],
   },
@@ -133,7 +133,7 @@ export const categories: ParityCategory[] = [
       {
         cmd: 'worktree',
         status: 'divergent',
-        note: 'add, list, remove, and prune linked working trees. Every tree shares the one object store and refs; each keeps its own HEAD, index, in-progress-op state, and stash, and a branch can be checked out in at most one tree. Two documented differences from git: the stash is per-worktree (git shares one stash across trees), and move / lock / repair are not yet implemented.',
+        note: 'add, list, remove, and prune linked working trees. All trees share one object store and one set of refs; each has its own HEAD, index, in-progress operation state, and stash. A branch can be checked out in only one tree at a time. Differences from Git: the stash is per-worktree (Git shares one stash across trees), and move, lock, and repair are not yet implemented.',
       },
       {
         cmd: 'sparse-checkout',
@@ -143,7 +143,7 @@ export const categories: ParityCategory[] = [
       {
         cmd: 'stash',
         status: 'parity',
-        note: 'save, list, pop, apply, drop, clear, show. Per-worktree (git shares one stash across trees).',
+        note: 'save, list, pop, apply, drop, clear, show. Per-worktree (Git shares one stash across trees).',
       },
     ],
   },
@@ -155,26 +155,26 @@ export const categories: ParityCategory[] = [
       {
         cmd: 'gc',
         status: 'parity',
-        note: 'Mark-and-sweep, recovery-aware, and fail-closed. Unions retention roots across every linked worktree.',
+        note: 'Mark-and-sweep, recovery-aware, and fail-closed. Collects retention roots from every linked worktree.',
       },
     ],
   },
   {
     name: 'Plumbing',
-    blurb: 'Low-level commands your scripts and tools build on.',
+    blurb: 'Low-level commands for scripts and tools.',
     items: [
       { cmd: 'rev-parse', status: 'parity', note: '--verify, --short, --abbrev-ref, --show-toplevel.' },
       { cmd: 'cat-file', status: 'parity', note: '-t, -s, -p, --batch. Byte-exact for blobs.' },
       {
         cmd: 'ls-files / ls-tree',
         status: 'parity',
-        note: 'ls-files: -s, -z, --others, --ignored, --exclude-standard. ls-tree: -r, -z. Output matches git modulo hash length.',
+        note: 'ls-files: -s, -z, --others, --ignored, --exclude-standard. ls-tree: -r, -z. Output matches Git except for hash length.',
       },
       { cmd: 'show-ref / for-each-ref', status: 'parity', note: '--heads, --tags, --format.' },
       {
         cmd: 'symbolic-ref / update-ref',
         status: 'parity',
-        note: 'Read or repoint HEAD. CAS via <old>; -d refuses the current branch.',
+        note: 'Read or repoint HEAD. update-ref accepts <old> for compare-and-swap; -d refuses to delete the current branch.',
       },
       {
         cmd: 'merge-base',
@@ -184,54 +184,54 @@ export const categories: ParityCategory[] = [
       {
         cmd: 'rev-list',
         status: 'parity',
-        note: 'Lists commit ids reachable from a revision; --count prints the number.',
+        note: 'Lists commit IDs reachable from a revision; --count prints the number.',
       },
     ],
   },
   {
     name: 'Remotes and Git interop',
-    blurb: "Sync over mkit's own transports, with one-way bridges to and from git.",
+    blurb: "Sync over mkit's own transports, with one-way bridges to and from Git.",
     items: [
       {
         cmd: 'remote',
         status: 'parity',
-        note: "List (-v), add, remove, rename, get-url, set-url. Accepts mkit+file, mkit+https, mkit+s3, mkit+ssh, plus git+https / git+ssh / git+file bridge remotes. With prefix-nested names (a and a/b both configured), rename preserves the sibling's tracking refs — Git renames those refs too.",
+        note: "List (-v), add, remove, rename, get-url, set-url. Accepts mkit+file, mkit+https, mkit+s3, mkit+ssh, plus git+https / git+ssh / git+file bridge remotes. When names nest (a and a/b both configured), rename keeps the other remote's tracking refs; Git renames them as well.",
       },
       {
         cmd: 'push / pull / fetch / clone',
         status: 'parity',
-        note: "Over mkit's own transports, with CAS-safe push and --force-with-lease. fetch/pull support --all (every configured remote); clone supports -b <branch> and -o <name>. They use mkit's protocol, not git's wire protocol.",
+        note: "Use mkit's own transports and protocol, not Git's wire protocol. push is compare-and-swap safe and supports --force-with-lease. fetch/pull support --all (every configured remote); clone supports -b <branch> and -o <name>.",
       },
       {
         cmd: 'git import',
         status: 'divergent',
-        note: 'One-way, importer-signed translation from a git remote (a downstream fork). Experimental and feature-gated.',
+        note: 'One-way, importer-signed translation from a Git remote (a downstream fork). Experimental and feature-gated.',
       },
       {
         cmd: 'git export',
         status: 'divergent',
-        note: 'One-way deterministic mirror to git. Experimental and feature-gated.',
+        note: 'One-way deterministic mirror to Git. Experimental and feature-gated.',
       },
       {
         cmd: 'on-disk / wire interop with .git',
         status: 'non-goal',
-        note: "A BLAKE3 object store can't share bytes with git's SHA-1 store. Native push/pull refuse bridge schemes, and bidirectional sync is a permanent non-goal.",
+        note: "A BLAKE3 object store can't share bytes with Git's SHA-1 store. Native push/pull refuse bridge schemes, and bidirectional sync will not be supported.",
       },
     ],
   },
   {
     name: 'Config and conventions',
-    blurb: 'Git-compatible settings and ignore rules. These do not determine your signing identity.',
+    blurb: 'Git-compatible settings and ignore rules.',
     items: [
       {
         cmd: 'config user.name / user.email',
         status: 'parity',
-        note: 'Accepted and round-tripped, but non-authoritative: they do not determine the signing identity.',
+        note: 'Stored and read back, but they do not determine the signing identity.',
       },
       {
         cmd: 'config --unset / --local / --global',
         status: 'parity',
-        note: 'Removes a key from whichever scope a set of it would use (repo vs. user-scoped), or the scope forced by --local/--global. Idempotent on an already-unset key.',
+        note: 'Removes a key from the scope a set would write to (repository or user), or from the scope --local/--global selects. Unsetting a key that is not set succeeds.',
       },
       {
         cmd: 'config core.*',
@@ -241,7 +241,7 @@ export const categories: ParityCategory[] = [
       {
         cmd: '.gitignore',
         status: 'parity',
-        note: 'Reads .gitignore and .mkitignore. Supports **, anchors, negation, and char classes (root-level; nested ignore files deferred).',
+        note: 'Reads .gitignore and .mkitignore. Supports **, anchors, negation, and char classes (root-level only; nested ignore files are not yet supported).',
       },
       { cmd: 'abbreviated hashes', status: 'parity', note: 'Short-prefix resolution and display, as BLAKE3 prefixes.' },
     ],
@@ -252,27 +252,27 @@ export const categories: ParityCategory[] = [
 export const inherentDivergences: ParityNote[] = [
   {
     label: 'Hash length',
-    body: "mkit object IDs are 64-hex BLAKE3; git's are 40-hex SHA-1. A git SHA pasted into mkit will never resolve. mkit supports short hash prefixes and abbreviated display, with a different hash length.",
+    body: "mkit object IDs are 64 hex characters (BLAKE3); Git's are 40 hex characters (SHA-1). A Git hash never resolves in mkit. Short prefixes and abbreviated display work, as prefixes of the BLAKE3 ID.",
   },
   {
-    label: 'Repo marker',
-    body: "mkit's state lives in .mkit/, not .git/. Detecting a repo by .git/ is not built into the core; an opt-in git alias shim exists, but is never installed by default.",
+    label: 'Repository directory',
+    body: 'mkit stores repository state in .mkit/, not .git/, and does not detect repositories by .git/. An opt-in git alias shim exists but is never installed by default.',
   },
 ]
 
 /** Places mkit deliberately refuses git's defaults. These stay even once a command reaches parity. */
 export const safetyDivergences: ParityNote[] = [
   {
-    label: 'No silent data loss',
+    label: 'Destructive commands require --force',
     body: 'rm, restore, reset --hard, clean, stash pop, mv, checkout, and worktree remove refuse to destroy modified or untracked content without an explicit -f / --force.',
   },
   {
     label: 'Repository-local identity settings are rejected',
-    body: 'user.identity and other security-sensitive keys are forbidden in repo-local config, so a checked-out repo cannot redirect signing or transport trust.',
+    body: 'Repository config cannot set user.identity or other security-sensitive keys, so a cloned repository cannot redirect signing or transport trust.',
   },
   {
     label: 'Rewrites stay recoverable',
-    body: 'commit --amend, reset, and rebase record the superseded commit in a recovery log, so gc keeps it recoverable within the retention window.',
+    body: 'commit --amend, reset, and rebase record each replaced commit in a recovery log, and gc keeps it recoverable for the retention window.',
   },
 ]
 

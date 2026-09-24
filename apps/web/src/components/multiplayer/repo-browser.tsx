@@ -106,7 +106,7 @@ export function RepoLog({
       if (!ref) return
       onSelectRef(ref)
       onSelectCommit(null)
-      setStatus(mode === 'remix' ? `Remixed → ${ref}` : `Branched off → ${ref}`)
+      setStatus(mode === 'remix' ? `Created remix branch ${ref}` : `Created branch ${ref}`)
     } catch (e) {
       setStatus(
         e instanceof CasConflictError
@@ -337,7 +337,7 @@ export function RefsPanel({
                 )
               })}
             </div>
-            {isFetchingNextPage ? <p className='py-2 text-center text-xs text-muted'>loading more…</p> : null}
+            {isFetchingNextPage ? <p className='py-2 text-center text-xs text-muted'>Loading more…</p> : null}
           </ScrollArea.Viewport>
           <ScrollArea.Scrollbar
             orientation='vertical'
@@ -602,7 +602,7 @@ function CommitDetail({
             <code className='font-mono text-sm break-all'>{hash}</code>
           </Field>
           {isRemix ? (
-            <Field label='Remix / fork of'>
+            <Field label='Remixed from'>
               {decoded.sources.length === 0 ? (
                 <span className='text-sm text-muted'>No sources</span>
               ) : (
@@ -610,7 +610,7 @@ function CommitDetail({
                   {decoded.sources.map((s) => (
                     <li key={s.commitHashHex} className='flex items-center gap-2'>
                       <HashChip hash={s.commitHashHex} size={12} />
-                      <Tooltip content='Open the upstream commit this fork derives from'>
+                      <Tooltip content='Open the source commit'>
                         <button
                           type='button'
                           onClick={() => onSelectCommit(s.commitHashHex)}

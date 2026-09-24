@@ -7,19 +7,14 @@ import { Seo } from '../components/seo'
 export default function NotFoundPage() {
   return (
     <div className='space-y-8'>
-      <Seo
-        title='mkit — not found'
-        description='The page you’re looking for doesn’t exist.'
-        path='/404'
-        card='Not found'
-      />
+      <Seo title='mkit — page not found' description='No page exists at this URL.' path='/404' card='Page not found' />
       <header>
         <h1 className='ds-h1'>Page not found</h1>
-        <p className='ds-note mt-1'>This page does not exist. Check the URL or return to the overview.</p>
+        <p className='ds-note mt-1'>No page exists at this URL. Check it for typos, or go to the overview.</p>
       </header>
       <p>
         <Link to='/' className='ds-link'>
-          Back to the overview
+          Go to the overview
         </Link>
       </p>
     </div>

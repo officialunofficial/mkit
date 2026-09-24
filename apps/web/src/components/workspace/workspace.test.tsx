@@ -130,9 +130,7 @@ it.each(['running', 'revoked'] as const)('does not connect the terminal when exe
   })
   mount()
   fireEvent.click(await screen.findByRole('button', { name: /^Terminal/ }))
-  await screen.findByText(
-    state === 'running' ? /terminal is paused while nanocodex runs/ : /Workspace execution is disabled/,
-  )
+  await screen.findByText(state === 'running' ? /terminal is paused while nanocodex runs/ : /terminal is unavailable/)
   expect(screen.queryByText('Owner terminal')).not.toBeInTheDocument()
   if (state === 'running') expect(screen.getByRole('button', { name: 'New conversation' })).toBeDisabled()
 })

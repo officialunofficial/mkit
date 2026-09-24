@@ -114,7 +114,7 @@ export const categories: SpecCategory[] = [
         name: 'SPEC-PACK-SHARDS',
         status: 'stable-normative',
         description:
-          'Reed-Solomon erasure coding over pack delivery: any N of N plus K shards reconstruct the pack, so lossy networks and partial caches still complete a transfer.',
+          'Reed-Solomon erasure coding over pack delivery: any N of the N + K shards reconstruct the pack, so a transfer completes over lossy networks or from partial caches.',
       },
       {
         name: 'SPEC-TRANSPORT',
@@ -162,7 +162,7 @@ export const categories: SpecCategory[] = [
         name: 'SPEC-CONFIG-SECURITY',
         status: 'normative',
         description:
-          'The repo-vs-user config trust split: which keys a cloned repository may set and which stay user-only, so a cloned repository cannot change your signing identity or access your credentials.',
+          'The config trust split between repository and user: which keys a repository may set and which are user-only, so a cloned repository cannot change your signing identity or access your credentials.',
       },
       {
         name: 'SPEC-ATTESTATIONS',

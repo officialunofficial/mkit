@@ -62,7 +62,10 @@ export function WorkspaceTerminal({ workspaceId }: { workspaceId: string }) {
       addon.connect({ sandboxId: workspaceId })
     }
     void open().catch((error: unknown) => {
-      if (!disposed) setStatus(error instanceof Error ? error.message : 'Terminal connection failed.')
+      if (!disposed)
+        setStatus(
+          error instanceof Error ? error.message : 'Could not connect to the terminal. Select Reconnect to try again.',
+        )
     })
     return () => {
       disposed = true

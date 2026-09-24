@@ -34,7 +34,8 @@ const TABS: Tab[] = [
     blurb: 'BLAKE3 computes an object ID from its contents. Changing the contents changes the ID.',
     body: (
       <>
-        mkit computes each object’s ID from its contents using BLAKE3. Edit the input to compare the resulting hashes.
+        mkit computes each object’s ID from its contents using BLAKE3. Edit the text or replace the image to see its
+        hash change.
       </>
     ),
     Demo: HashDemo,
@@ -73,7 +74,7 @@ const TABS: Tab[] = [
     body: (
       <>
         mkit splits large files into content-defined chunks with FastCDC. This demo verifies incoming chunks against a
-        Bao root. Simulate corruption to see verification fail and the affected chunk retry.
+        Bao root. Turn on “Corrupt the connection” to see verification fail and the chunk retry.
       </>
     ),
     Demo: StreamingDemo,
@@ -142,7 +143,7 @@ export function DemosTabs() {
     <div className='space-y-8'>
       <Tabs.Root value={active} onValueChange={onValueChange} className='space-y-8'>
         <Tabs.List
-          aria-label='Demos'
+          aria-label='Concepts'
           className='flex flex-nowrap gap-0.5 overflow-x-auto border-b max-sm:[mask-image:linear-gradient(to_right,black_calc(100%-24px),transparent)]'
           style={{ borderColor: 'var(--border-color-subtle)' }}
         >

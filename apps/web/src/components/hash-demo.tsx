@@ -132,7 +132,7 @@ export function HashDemo() {
         {tooLarge ? (
           <p className='rounded-(--rounded-md) border border-(--status-error-border) bg-(--status-error-bg) p-3 text-xs text-(--status-error-fg)'>
             <span className='font-medium'>{tooLarge.name}</span> is {formatBytes(tooLarge.size)}. The maximum size is{' '}
-            {formatBytes(MAX_IMAGE_BYTES)}. Use the streaming demo for larger files.
+            {formatBytes(MAX_IMAGE_BYTES)}. Choose a smaller image.
           </p>
         ) : null}
         <input

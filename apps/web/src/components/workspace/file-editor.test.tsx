@@ -224,13 +224,13 @@ it('requires explicit conflict review before adopting the current hash while pre
     />,
   )
   expect(state.drafts['README.md']?.hash).toBe('readme-hash')
-  expect(screen.queryByRole('button', { name: 'Use my edits on current file' })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Keep my edits' })).not.toBeInTheDocument()
   fireEvent.click(screen.getByRole('button', { name: 'Review conflict' }))
   await screen.findByText('Other author edits')
-  expect(screen.getByRole('button', { name: 'Use my edits on current file' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: 'Keep my edits' })).toBeDisabled()
   expect(state.drafts['README.md']?.hash).toBe('readme-hash')
   fireEvent.click(screen.getByRole('checkbox', { name: 'I reviewed the current file and want to keep my edits.' }))
-  fireEvent.click(screen.getByRole('button', { name: 'Use my edits on current file' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Keep my edits' }))
   expect(state.drafts['README.md']).toMatchObject({
     hash: 'current-hash',
     original: 'Other author edits\n',
@@ -259,15 +259,15 @@ it('requires a fresh conflict review if the current file changes while confirmat
   fireEvent.click(screen.getByRole('button', { name: 'Review conflict' }))
   await screen.findByText('Second version')
   fireEvent.click(screen.getByRole('checkbox', { name: 'I reviewed the current file and want to keep my edits.' }))
-  expect(screen.getByRole('button', { name: 'Use my edits on current file' })).toBeEnabled()
+  expect(screen.getByRole('button', { name: 'Keep my edits' })).toBeEnabled()
   showVersion('third-hash', 'Third version\n')
-  expect(screen.queryByRole('button', { name: 'Use my edits on current file' })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Keep my edits' })).not.toBeInTheDocument()
   fireEvent.click(screen.getByRole('button', { name: 'Review conflict' }))
   await screen.findByText('Third version')
   expect(
     screen.getByRole('checkbox', { name: 'I reviewed the current file and want to keep my edits.' }),
   ).not.toBeChecked()
-  expect(screen.getByRole('button', { name: 'Use my edits on current file' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: 'Keep my edits' })).toBeDisabled()
   expect(state.drafts['README.md']).toMatchObject({ content: 'My edits\n', hash: 'readme-hash' })
 })
 
@@ -300,7 +300,7 @@ it('keeps a locally edited filename when the server deletes it and explicitly pr
     screen.getByText('The file was deleted in the workspace. Keeping your edits will recreate it.'),
   ).toBeInTheDocument()
   fireEvent.click(screen.getByRole('checkbox', { name: 'I reviewed the current file and want to keep my edits.' }))
-  fireEvent.click(screen.getByRole('button', { name: 'Use my edits on current file' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Keep my edits' }))
   expect(state.drafts['README.md']).toMatchObject({
     path: 'README.md',
     hash: null,

@@ -45,7 +45,7 @@ const ChunkButton = memo(
         disabled={!onClick}
         onClick={onClick ? () => onClick(index) : undefined}
         title={title}
-        aria-label={`chunk ${index}: ${len} bytes`}
+        aria-label={`Chunk ${index}: ${len} bytes`}
         className={`relative h-full shrink-0 border-r border-hairline/40 last:border-r-0 transition-opacity ${opacityClass} ${animateClass} ${ring ? 'outline outline-2 outline-fg z-10' : ''} ${clickable ? 'cursor-pointer' : ''}`}
         style={{
           width: `max(2px, ${widthPct}%)`,

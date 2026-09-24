@@ -325,7 +325,7 @@ function VersionDetail({
         <span
           title={
             !canRestore
-              ? 'Only the owner can restore while workspace execution is enabled and idle.'
+              ? 'Only the owner can restore, with agent access active, no task running, and no unsaved browser edits.'
               : busy
                 ? 'Wait for the current action to finish.'
                 : 'Create a new version containing these saved files.'

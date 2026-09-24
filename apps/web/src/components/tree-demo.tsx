@@ -407,7 +407,9 @@ export function TreeDemo() {
             onChange={(e) => onContentChange(e.target.value)}
             aria-label={`Contents of ${selectedPath}`}
           />
-          <p className='text-xs text-muted'>The affected hashes and Merkle tree update as you edit.</p>
+          <p className='text-xs text-muted'>
+            The file’s hash, its parent folders’ hashes, and the commit hash update as you edit.
+          </p>
         </div>
 
         {'error' in encoded ? (
