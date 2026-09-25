@@ -327,7 +327,7 @@ Entry condition: M1 is merged and S3 (#1086) is merged. M3 runs in parallel with
 ### WP-3.13: Wire conformance: admission and outcome cases (black-box, both adapters, staging)
 - **Depends on:**
   - WP-3.4, WP-3.5, WP-3.12
-  - M1:staging CI conformance job
+  - M1: the staging conformance suite (WP-1.20; during the epic, the orchestrator's local run against staging)
 - **Goal:** Add the cases to the `mkit-server-conformance` wire suite:
   - a 402 has a Connect body, the detail, `no-store`, and passthrough headers
   - a preflight doesn't require payment
@@ -339,7 +339,7 @@ Entry condition: M1 is merged and S3 (#1086) is merged. M3 runs in parallel with
   - **outbox backpressure when the hook is down** (stop the stub hook; drive admitted writes until the backlog
     threshold; new admitted writes get retryable `unavailable`; restart the hook; the backlog drains to zero and
     writes succeed again; every outcome delivered exactly once per reservation id)
-- **Files:** `mkit-server-conformance/src/wire/admission.rs`, `.github/workflows/*` (enable against staging with the stub hook deployed).
+- **Files:** `mkit-server-conformance/src/wire/admission.rs`, `.github/workflows/*` (enable against staging with the stub hook deployed; triggers only on `main`, `schedule` or dispatch against `main`, and first runs on the final PR to `main`). During the epic the orchestrator runs these cases locally against staging.
 - **Size:** M (~700).
 - **Human action:** Deploy the stub hook Worker to staging and bind it to the staging vcs-worker (secrets: hook key).
 
@@ -372,7 +372,7 @@ Entry condition: M1 is merged. The M4 private-serving WPs (4.15) need M2 read au
 - **PRD:** §6.5, §4 "wasm build has no zstd decoder", §5.1.
 - **Files:** `rust/crates/mkit-core/{Cargo.toml, src/pack.rs}`, `scripts/check-wasm-dep-graph.sh`, `docs/INVARIANTS.md` (the wasm dep-graph invariant text).
 - **Tests:**
-  - Differential: every v2 golden pack (`rust/tests/golden/…pack…`) plus a proptest corpus decode identically under `pack-zstd` and `pack-ruzstd` (run the test binary twice via a cfg matrix in CI).
+  - Differential: every v2 golden pack (`rust/tests/golden/…pack…`) plus a proptest corpus decode identically under `pack-zstd` and `pack-ruzstd` (run the test binary twice via a cfg matrix: locally during the epic; a CI matrix triggers only on `main`).
   - Decompression-bomb caps: `ZstdDecompressedTooLarge` fires on ruzstd.
   - A `wasm32` build of mkit-core with `--no-default-features --features pack-ruzstd`.
 - **Size:** S (~300).

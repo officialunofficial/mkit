@@ -59,7 +59,9 @@ The M1 exit criteria:
   waking after a revocation, lease expiry racing an ack), many-ref write throughput in one repo,
   `BeginUpload` with a target ref, ticket caps, ListRefs merge pagination under the RPC limit, and bounded growth.
 - A real `mkit` push and clone works against staging.
-- CI runs conformance against deployed staging (not only `wrangler dev`, whose DO bindings are always local).
+- Conformance runs against deployed staging (not only `wrangler dev`, whose DO bindings are always local). During the
+  epic the orchestrator runs it locally against staging; the `server-staging.yml` workflow triggers only on `main`,
+  `schedule` or dispatch against `main`, and runs for the first time on the final PR to `main`.
 
 Consolidation changes (00-plan.md reconciliation log): WP-1.1 is folded into S1 (Q18). D34 adds WP-1.22 to WP-1.29
 and reshapes 1.7, 1.8, 1.9, 1.10, 1.14 and 1.21. The part-upload shape follows S1 §7.6 (stateless ticket token,
@@ -310,7 +312,7 @@ Folded into WP-S1 §7.6/§7.8/§7.9 (adopted Q18 default). Every former dependen
   `apps/vcs-worker/wrangler.jsonc`, `wrangler.dev.jsonc`.
 - **Tests:** storage suite through each class under `wrangler dev`; multi-namespace isolation over the wire;
   placement option plumbed (config test).
-- **Gates:** worker CI, `scripts/check-wasm-dep-graph.sh`, wrangler-dev conformance.
+- **Gates:** the worker gate (local), `scripts/check-wasm-dep-graph.sh`, wrangler-dev conformance.
 - **Size:** M (~900).
 
 ### WP-1.9 Core: `BeginUpload` (target ref), tickets, stateless ticket token, ticketed `UploadPack`
@@ -498,7 +500,7 @@ Folded into WP-S1 §7.6/§7.8/§7.9 (adopted Q18 default). Every former dependen
 ### WP-1.20 CI: conformance and e2e against staging (M1 exit)
 
 - **Depends on:** WP-1.19, WP-1.27, WP-1.13, WP-1.15.
-- **Goal:** `.github/workflows/server-staging.yml` (schedule, `workflow_dispatch`, and `main` only, per the CI policy; during the epic the orchestrator runs the same suite locally against staging at each milestone boundary):
+- **Goal:** `.github/workflows/server-staging.yml` (`main`, `schedule` or dispatch against `main` only, per the CI policy; it first runs on the final PR to `main`; during the epic the orchestrator runs the same suite locally against staging at each milestone boundary):
   optional deploy (secret-gated), the full wire suite (M0+M1 cases, including throughput and lag windows) against
   the **deployed** staging URL, and `scripts/staging-roundtrip.sh` (real `mkit` init/commit/push/clone/verify),
   unique repo per run.
@@ -855,7 +857,9 @@ capability, `not_found` for unauthorized private reads, `IssueObjectUrl` tokens 
 - **Files:** `apps/vcs-worker/wrangler.jsonc` (`env.staging` vars), `.github/workflows/server-staging.yml`, `scripts/staging-roundtrip.sh`.
 - **HUMAN STEPS:** a GitHub secret for a test owner wallet key (secp256k1) if the eip191 case runs against staging;
   the staging URL-token key as a Wrangler secret (dedicated key, key id published); a redeploy.
-- **Gates:** `actionlint`, the first green staging run.
+- **Gates:** `actionlint`, the first green staging run (the orchestrator's local run of the extended suite against
+  staging; the workflow change triggers only on `main`, `schedule` or dispatch against `main`, and first runs on the
+  final PR to `main`).
 - **Size:** S, about 300 lines.
 
 ---

@@ -1,5 +1,7 @@
 # WP-P1: Create `feat/mkit-server` and land the plan
 
+> Superseded in part by the CI policy in conventions.md: no CI runs on the branch, and the CI-check steps below are dropped.
+
 - **Milestone/track:** Prep
 - **Run by:** the orchestrator (not an executor agent)
 - **Depends on:** WP-P0 merged to `main`, so the new branch inherits the CI trigger changes

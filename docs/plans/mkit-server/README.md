@@ -31,7 +31,7 @@ and one PR per WP. A group is done when all of its WPs have merged.
 
 | Group | Milestone | Title | WPs |
 |---|---|---|---|
-| G01 | Prep & Specs | Prep: enable CI on feat/mkit-server and land the plan | P0, P1 |
+| G01 | Prep & Specs | Prep: land the plan on feat/mkit-server (P0 dropped: no CI on the branch) | P0, P1 |
 | G02 | Prep & Specs | Specs: rebuild #1087 as S1 addressing/uploads, S2 grants/private, S3 admission | S1, S2, S3 |
 | G03 | M0 Foundation | M0: core crate, backend-agnostic storage contract and storage conformance | M0-01, M0-02a, M0-02b, M0-03, M0-04 |
 | G04 | M0 Foundation | M0: request pipeline, Connect binding and wire conformance suite | M0-05a, M0-05b, M0-06, M0-07 |

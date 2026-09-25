@@ -7,9 +7,10 @@ wins. The PRD snapshot is [`prd-snapshot.md`](prd-snapshot.md); Linear is canoni
 ## CI policy (authoritative; supersedes any CI-on-branch wording in this plan)
 
 - **No CI runs for `feat/mkit-server`.** Nothing changes GitHub workflow triggers, Cloud Build triggers or rulesets to cover the branch. WP-P0 (CI enablement) is **dropped**: PR #1094 was closed unmerged.
-- A PR into `feat/mkit-server` merges on two things only: the **executor's local gate run**, whose output goes in the PR body, and a clean **adversarial review**. The orchestrator re-runs the gate after rebasing and before squash-merging.
+- In place of CI, the evidence is the executor's local gate run (output in the PR body) and a clean adversarial review; all other merge rules are unchanged. The orchestrator re-runs the gate after rebasing and before squash-merging.
 - **CI runs once**, on the final PR that merges `feat/mkit-server` into `main` (WP-REL). All normal `main` gates apply there.
-- A WP that adds CI wiring (new jobs, `server-staging.yml`, workflow changes) may add it, but it must trigger only on `main`, `workflow_dispatch` or `schedule`, never on the feature branch. During the epic the same checks run **locally or against staging from the orchestrator's machine**, at the WP and at every milestone boundary, and the results go in the PR or the milestone report.
+- `workflow_dispatch` runs are never dispatched against `feat/mkit-server`.
+- A WP that adds CI wiring (new jobs, `server-staging.yml`, workflow changes) may add it, but it must trigger only on `main`, `schedule` or dispatch against `main`, never on the feature branch; it runs for the first time on the final PR to `main`. During the epic the same checks run **locally or against staging from the orchestrator's machine**, at the WP and at every milestone boundary, and the results go in the PR or the milestone report.
 
 ## Base branch
 
@@ -82,6 +83,8 @@ Don't close or comment on #1087; the user does that once S1–S3 have merged.
 ## Review and merge
 
 An adversarial Opus reviewer checks each diff against the brief, the PRD, the specs and the invariants. Every finding is
-verified against the code before it is applied. The user squash-merges after reviewer approval and green CI. Spec PRs
-(S1–S3, 3.6, 4.4, 4.11, 5.1a–c) also need the user's approval of the normative text. See [`00-plan.md`](00-plan.md) §1
+verified against the code before it is applied. The orchestrator squash-merges into `feat/mkit-server` after the
+reviewer's APPROVE and its own local gate re-run on the rebased branch. There is no CI on the branch; CI runs only on
+the final PR to `main`, which the user merges. Spec PRs (S1–S3, 3.6, 4.4, 4.11, 5.1a–c) also need the user's approval
+of the normative text. See [`00-plan.md`](00-plan.md) §1
 for the full merge rules (proto changes, file-overlap ordering, milestone boundaries).

@@ -8,9 +8,7 @@
     "size": "S",
     "summary": "Dropped: no CI runs on feat/mkit-server (CI policy). PR #1094 closed unmerged.",
     "human_action": false,
-    "area_gates": [
-      "ci-yaml"
-    ],
+    "area_gates": [],
     "status": "dropped"
   },
   {
@@ -20,7 +18,7 @@
     "track": "prep",
     "depends_on": [],
     "size": "S",
-    "summary": "Orchestrator cuts the integration branch from main and commits the plan, registry and briefs (PRD snapshot headed with decisions D1-D36). A throwaway PR confirms the required checks appear.",
+    "summary": "Orchestrator cuts the integration branch from main and commits the plan, registry and briefs (PRD snapshot headed with decisions D1-D36). The throwaway-PR check that the required checks appear is dropped (no CI on the branch).",
     "human_action": true,
     "area_gates": [
       "docs"
@@ -167,7 +165,7 @@
       "M0-04"
     ],
     "size": "L",
-    "summary": "Implements the transport-neutral pipeline for the unary RPCs (ListRefs, ReadRef, UpdateRef, AdvanceRefs, PackExists, health) with PRD \u00a75.4 stages as traits, AuthMode, a ShardMap (SinglePartition in M0), the full AdmissionInput, and pure planners that turn each write into a guarded Batch carrying a NotAfter(plan_time + MAX_APPLY_WINDOW) deadline. Behavior equals today's servers.",
+    "summary": "Implements the transport-neutral pipeline for the unary RPCs (ListRefs, ReadRef, UpdateRef, AdvanceRefs, PackExists, health) with PRD §5.4 stages as traits, AuthMode, a ShardMap (SinglePartition in M0), the full AdmissionInput, and pure planners that turn each write into a guarded Batch carrying a NotAfter(plan_time + MAX_APPLY_WINDOW) deadline. Behavior equals today's servers.",
     "human_action": false,
     "area_gates": [
       "rust",
@@ -1907,7 +1905,7 @@
   },
   {
     "id": "5.3a",
-    "title": "GC mark: roots, pins, grace, gc_pending; mark \u2192 wait \u2192 re-check protocol",
+    "title": "GC mark: roots, pins, grace, gc_pending; mark → wait → re-check protocol",
     "milestone": "M5",
     "track": "core",
     "depends_on": [

@@ -20,7 +20,7 @@ Sizes: S ≲ 400, M 400–900, L 900–1500 changed lines (excluding generated c
 
 | Id | Title | Base | Size |
 |---|---|---|---|
-| WP-P0 | Enable CI on `feat/mkit-server` (PR to **main**) + list console-side Cloud Build changes | main | S |
+| ~~WP-P0~~ | **Dropped** (no CI on the branch; #1094 closed unmerged) | — | — |
 | WP-P1 | Create `feat/mkit-server` from main, land `docs/plans/mkit-server/` (orchestrator-run) | main→new branch | S (docs) |
 
 ### Spec PRs (docs only, rebuilt from #1087, credit @christopherwxyz)
@@ -65,14 +65,14 @@ enc/http code first means the stdio port no longer has to keep enc.rs compiling 
 ## 2. DAG
 
 ```text
-P0 ─▶ P1 ─┬─▶ S1 ─┬─▶ S2
-          │       └─▶ S3
-          └─▶ 01 ─┬─▶ 02a ─┬─▶ 02b ─▶ 03 ─┬──────────────▶ 07 ◀─ 06
-                  │        │              ├─▶ 08 ─┐         │
-                  │        │              ├─▶ 09 ─┼─▶ 16 ─▶ 17 ◀┘(+06,07)
-                  └─▶ 04 ──┼──────────────┘(08,09) │   ▲(05b, 06)
-                           └─▶ 05a ─▶ 05b ─┬─▶ 06 ─┘
-                                           └─▶ 12 ◀─ 08
+P1 ─┬─▶ S1 ─┬─▶ S2
+    │       └─▶ S3
+    └─▶ 01 ─┬─▶ 02a ─┬─▶ 02b ─▶ 03 ─┬──────────────▶ 07 ◀─ 06
+            │        │              ├─▶ 08 ─┐         │
+            │        │              ├─▶ 09 ─┼─▶ 16 ─▶ 17 ◀┘(+06,07)
+            └─▶ 04 ──┼──────────────┘(08,09) │   ▲(05b, 06)
+                     └─▶ 05a ─▶ 05b ─┬─▶ 06 ─┘
+                                     └─▶ 12 ◀─ 08
    10 ◀─ 06,07,08,09          11 ◀─ 10          14 ◀─ 10,12
    15 ◀─ 10,14 (soft S1)      13 ◀─ 08,12,15    18 ◀─ 10   19 ◀─ 18
    20 ◀─ 11,13,17,19
@@ -85,7 +85,7 @@ Critical path: 01 → 02a → 05a → 05b → 06 → 07 → 10 → 14 → 15 →
 
 | Wave | Runnable together | Notes |
 |---|---|---|
-| 0 | P0 | then P1 (needs P0 merged so the new branch inherits the CI triggers) |
+| 0 | P1 | orchestrator-run; lands the plan on `feat/mkit-server` (no P0: no CI on the branch) |
 | 1 | S1, M0-01 | spec and code tracks are independent (M0 has no wire change) |
 | 2 | S2, S3, M0-02a, M0-04 | S2 and S3 both stack on S1 only |
 | 3 | M0-02b, M0-05a | |
@@ -98,7 +98,7 @@ Critical path: 01 → 02a → 05a → 05b → 06 → 07 → 10 → 14 → 15 →
 | 10 | M0-13 | |
 | 11 | M0-20 | |
 
-(Wave numbers here are relative to P0; `00-plan.md` §3 has the global waves.)
+(Wave numbers here match the global waves in `00-plan.md` §3, which also lists the non-M0 WPs of each wave.)
 
 File-overlap hazards between parallel WPs (merge in the listed order or rebase):
 - `rust/Cargo.toml` `members`: 01, 03, 09, 16 each add a member. Trivial rebases.
@@ -106,7 +106,7 @@ File-overlap hazards between parallel WPs (merge in the listed order or rebase):
 - `scripts/regen-transport-proto.sh`: 06 (adds `mkit-server`) and 17 (drops `apps/vcs-worker`).
 - `docs/specs/SPEC-TRANSPORT-CONNECT.md`: S1, S3 (and S2 touches §7.1), and M0-15 (§7.2 rewrite). Land S1 before M0-15.
 - `rust/.config/nextest.toml` ignored-lane filter: 14, 15.
-- `.github/workflows/workers.yml`: P0 and 17.
+- `.github/workflows/workers.yml`: 17 only (P0 is dropped), so no M0 overlap.
 
 ## 4. How the PRD's M0 bullets map to WPs
 
@@ -158,8 +158,9 @@ File-overlap hazards between parallel WPs (merge in the listed order or rebase):
 9. `rust/.config/nextest.toml` `ignored-lane` filter names `listen_enc_*` tests in `mkit-cli`. Moving them (M0-14)
    must keep the names or update the filter.
 10. Cloud Build owns the Linux Rust gate (`cloudbuild/ci.yaml`). Its PR triggers are created with
-    `--pull-request-pattern='^main$'` (`scripts/setup-cloud-build.sh:99-100`). PRs into `feat/mkit-server` get no
-    Linux Rust CI until the triggers are changed in GCP (WP-P0 lists the exact commands).
+    `--pull-request-pattern='^main$'` (`scripts/setup-cloud-build.sh:99-100`), and they stay that way: by policy the
+    branch has no CI (see the CI policy in `conventions.md`). PRs into `feat/mkit-server` are gated by the executor's
+    local gate run and an adversarial review; the Linux Rust gate first runs on the final PR to `main`.
 
 ## 6. Questions raised by the M0 planner (all now decided; see `00-plan.md` → Defaults adopted)
 
@@ -183,7 +184,7 @@ fold #1090 into S1 and #1089 into S2). Q13, Q14, Q16, Q17 and Q20 keep the plann
 | Q12 | Default stdio idle timeout for `mkit serve` (new behavior for idle ssh sessions) | 60 s for the Hello and between frames, `--idle-timeout-secs 0` disables. Mirrors the enc listener defaults (`serve/mod.rs:82-98`). | 13 |
 | Q13 | Durable Object class, binding and instance names | Keep `RefStore` / `REFSTORE` / instance `"root"` for the deployment-default namespace, so there's no wrangler migration in M0. | 16, 17 |
 | Q14 | The default quota in D27 is per (namespace, signer) **and per namespace**. Adding the per-namespace cap in M0 would change behavior. | M0 keeps today's per-signer limits (300 ops/h, 128 MiB/h, `apps/vcs-worker/src/write_quota.rs:31-39`), keyed by (namespace, signer). The per-namespace aggregate lands in M1. | 04, 05 |
-| Q15 | `cloudbuild/codegen.yaml:76-77` hardcodes `buf breaking --against '.git#branch=main'`, and `proto.yml` compares against `origin/main`. | In P0, switch both to the PR base branch (`$_BASE_BRANCH` in Cloud Build, `github.base_ref` in Actions), with `main` as the fallback. M0 has no proto change, so this only matters from M1. | P0 |
+| Q15 | `cloudbuild/codegen.yaml:76-77` hardcodes `buf breaking --against '.git#branch=main'`, and `proto.yml` compares against `origin/main`. | ~~In P0, switch both to the PR base branch (`$_BASE_BRANCH` in Cloud Build, `github.base_ref` in Actions), with `main` as the fallback. M0 has no proto change, so this only matters from M1.~~ N/A (P0 dropped; no CI on the branch). | P0 |
 | Q16 | In M0, is `PackExists` membership (single-repo) answered by blob presence? | Yes (`MembershipMode::StorePresence`), the same as today everywhere. Explicit membership rows start in M1. | 02, 05 |
 | Q17 | Is it OK to unify `vcs-worker`'s single-chunk `DownloadPack` on 800 KiB chunks (valid per SPEC-TRANSPORT-CONNECT §6.2)? | Yes. The wire contract is unchanged, and the conformance suite asserts contiguity rather than chunk count. | 17 |
 | Q18 | Should the spec text for `BeginUpload`, tickets and resumable parts (#1090, M1) go in S1? The PRD says "the M1 spec PR", but the S1–S3 split doesn't assign #1090. | Include it in S1 as §6.x "Upload tickets", without admission rules. S3 references it. If you say no, it becomes a WP-S4 on S1, and S3 then stacks on S4. | S1, S3 |
