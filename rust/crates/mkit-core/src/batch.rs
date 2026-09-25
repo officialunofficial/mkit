@@ -32,14 +32,20 @@
 //! This is git's `core.fsyncMethod=batch` design (bulk-checkin) and
 //! `SQLite`'s macOS sync strategy:
 //!
-//! Every staged file gets a real per-file writeback at commit time —
-//! Apple `fcntl(F_BARRIERFSYNC)`, Linux `fdatasync`, Windows
-//! `FlushFileBuffers` — issued **concurrently** from a scoped-thread
-//! pool so the cost is device latency at queue depth, not
-//! latency×objects. The trailing constant-count full flushes
-//! (`F_FULLFSYNC` on Apple) cover ordering and the dirent updates.
-//! This holds on every filesystem; it does not depend on ext4
-//! ordered-data journaling.
+//! On Apple and Windows, every staged file gets a real per-file
+//! writeback at commit time — `fcntl(F_BARRIERFSYNC)` / `FlushFileBuffers`
+//! — issued **concurrently** from a scoped-thread pool so the cost is
+//! device latency at queue depth, not latency×objects; the trailing
+//! constant-count full flush (`F_FULLFSYNC` on Apple) covers ordering
+//! and the dirent updates. On Linux the per-file step is a cheap,
+//! non-durable `sync_file_range` writeback *hint* (a head start, not a
+//! barrier), and the durability + ordering both come from a single
+//! filesystem-wide `syncfs(2)` per commit — one before the renames
+//! (covering every staged file's data) and one after (covering the
+//! renames' and touched shard dirs' dirent updates) — instead of one
+//! `fdatasync`-class journal commit per staged file. This holds on
+//! every filesystem; it does not depend on ext4 ordered-data
+//! journaling.
 //!
 //! Workloads that prefer the historical schedule can select
 //! [`SyncPolicy::PerObject`] (config key `durability.objects =
@@ -111,6 +117,18 @@ pub(crate) trait Syncer: Send + Sync + fmt::Debug {
     /// store's `objects/` root. Makes everything previously
     /// barrier-ordered (file data and dirents alike) durable.
     fn device_flush(&self, objects_root: &Path) -> io::Result<()>;
+    /// Batch-durability full flush: like [`Syncer::full`], but must also
+    /// cover every other staged file's data that this batch's
+    /// [`Syncer::barrier`] calls ordered ahead of it — not just `file`'s
+    /// own. The default is [`Syncer::full`] itself, which already
+    /// satisfies that (a per-file full flush has no narrower scope on
+    /// platforms without a cheaper filesystem-wide primitive). Linux
+    /// overrides this with one `syncfs(2)` instead of paying an
+    /// `fdatasync`-class journal commit per staged file in `barrier` —
+    /// see [`RealSyncer`]'s Linux impls of `barrier`/`full_batch`.
+    fn full_batch(&self, file: &File, path: &Path) -> io::Result<()> {
+        self.full(file, path)
+    }
 }
 
 /// Production [`Syncer`].
@@ -144,11 +162,54 @@ impl RealSyncer {
         Ok(())
     }
 
-    /// Linux: `fdatasync`. Windows: `FlushFileBuffers` (requires the
-    /// write-capable handle the commit path now opens).
-    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    /// Linux: `sync_file_range(SYNC_FILE_RANGE_WRITE)` — kicks off async
+    /// writeback for this file without waiting for it, and without
+    /// forcing the `fdatasync`-class journal commit a real barrier would.
+    /// This is deliberately NOT durable by itself: the batch's
+    /// `full_batch` (`syncfs(2)`) is what makes it durable, and syncfs
+    /// covers every dirty inode on the filesystem regardless of whether
+    /// this kick ran — so a kick failure just forgoes the head start, it
+    /// never weakens the guarantee. Falls back to a no-op on filesystems
+    /// that reject the call (e.g. tmpfs).
+    #[cfg(target_os = "linux")]
+    #[allow(clippy::unnecessary_wraps)]
+    fn file_barrier(file: &File) -> io::Result<()> {
+        use std::os::unix::io::AsRawFd;
+        // SAFETY: `sync_file_range(2)` takes only the fd, offset/length
+        // (0/0 = "whole file"), and flags — it reads/writes no user
+        // memory, and the fd is valid for the borrow of `file`.
+        #[allow(unsafe_code)]
+        let rc =
+            unsafe { libc::sync_file_range(file.as_raw_fd(), 0, 0, libc::SYNC_FILE_RANGE_WRITE) };
+        let _ = rc; // best-effort hint; errors are not fatal (see above)
+        Ok(())
+    }
+
+    /// Windows: `FlushFileBuffers` (requires the write-capable handle the
+    /// commit path now opens). Other Unix (BSDs etc.): `fdatasync`.
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux")))]
     fn file_barrier(file: &File) -> io::Result<()> {
         file.sync_data()
+    }
+
+    /// One `syncfs(2)` flushes every dirty inode (data and metadata) on
+    /// `file`'s filesystem — every file this batch staged, whether or
+    /// not its `barrier` kick above landed — instead of accepting an
+    /// `fdatasync`-class journal commit per staged file. Falls back to
+    /// the single-file flush if the kernel/filesystem rejects syncfs,
+    /// rather than weaken durability.
+    #[cfg(target_os = "linux")]
+    fn syncfs_or_full(file: &File, path: &Path) -> io::Result<()> {
+        use std::os::unix::io::AsRawFd;
+        // SAFETY: `syncfs(2)` takes only a valid fd — it reads/writes no
+        // user memory, and the fd is valid for the borrow of `file`.
+        #[allow(unsafe_code)]
+        let rc = unsafe { libc::syncfs(file.as_raw_fd()) };
+        if rc == -1 {
+            return file.sync_all();
+        }
+        let _ = path;
+        Ok(())
     }
 }
 
@@ -168,6 +229,14 @@ impl Syncer for RealSyncer {
 
     fn full(&self, file: &File, _path: &Path) -> io::Result<()> {
         file.sync_all()
+    }
+
+    /// Linux: one `syncfs(2)` in place of the (default) per-file full
+    /// flush — see the trait doc and `Self::syncfs_or_full`. Every other
+    /// platform keeps the default (`Syncer::full`).
+    #[cfg(target_os = "linux")]
+    fn full_batch(&self, file: &File, path: &Path) -> io::Result<()> {
+        Self::syncfs_or_full(file, path)
     }
 
     fn rename(&self, tmp: TempPath, final_path: &Path) -> io::Result<()> {
@@ -195,22 +264,31 @@ impl Syncer for RealSyncer {
         }
     }
 
-    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    /// Linux: no-op. The per-dirent fsync this used to be is redundant
+    /// with `device_flush`'s `syncfs(2)` below, which covers every
+    /// touched shard dir's dirents (and everything else on the
+    /// filesystem) in one call — see the module docs' "single flush"
+    /// section. Windows: no directory flush primitive either — same
+    /// no-op, for a different reason (`device_flush` covers what the OS
+    /// exposes there).
+    #[cfg(any(target_os = "linux", not(unix)))]
+    #[allow(clippy::unnecessary_wraps)]
+    fn dir_barrier(&self, _dir: &Path) -> io::Result<()> {
+        Ok(())
+    }
+
+    /// Other Unix (BSDs etc.): keep the real per-dir fsync — no syncfs
+    /// override exists for them here, so the dirent durability still
+    /// has to come from this barrier.
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux", not(unix))))]
     fn dir_barrier(&self, dir: &Path) -> io::Result<()> {
-        // Linux: the directory fsync IS the durability mechanism (the
-        // journal commit orders ordered-mode file data ahead of the
-        // dirents), so the "barrier" must stay a real fsync. Windows:
-        // no directory flush primitive — no-op, the device_flush
-        // covers what the OS exposes.
         sync_parent_dir(dir)
     }
 
-    #[cfg(unix)]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     fn device_flush(&self, objects_root: &Path) -> io::Result<()> {
-        // macOS: sync_all on any fd is F_FULLFSYNC — flushes the whole
-        // device write cache, making every prior barrier durable.
-        // Linux: fsync of the objects root; cheap insurance on top of
-        // the per-dir fsyncs above.
+        // sync_all on any fd is F_FULLFSYNC — flushes the whole device
+        // write cache, making every prior barrier durable.
         match File::open(objects_root) {
             Ok(d) => d.sync_all(),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -218,10 +296,35 @@ impl Syncer for RealSyncer {
         }
     }
 
-    #[cfg(not(unix))]
+    /// Linux: a second `syncfs(2)`, covering the renames' and
+    /// `dir_barrier`'s (now no-op) dirent updates — the terminal flush
+    /// the module docs promise, at one filesystem-wide call instead of
+    /// one fsync per touched shard dir.
+    #[cfg(target_os = "linux")]
+    fn device_flush(&self, objects_root: &Path) -> io::Result<()> {
+        match File::open(objects_root) {
+            Ok(d) => Self::syncfs_or_full(&d, objects_root),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux", unix)))]
     #[allow(clippy::unnecessary_wraps)]
     fn device_flush(&self, _objects_root: &Path) -> io::Result<()> {
         Ok(())
+    }
+
+    #[cfg(all(
+        unix,
+        not(any(target_os = "macos", target_os = "ios", target_os = "linux"))
+    ))]
+    fn device_flush(&self, objects_root: &Path) -> io::Result<()> {
+        match File::open(objects_root) {
+            Ok(d) => d.sync_all(),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -435,7 +538,7 @@ impl<'s> WriteBatch<'s> {
                     // Write-capable handle for the same Windows reason as
                     // the barrier above (`sync_all` → `FlushFileBuffers`).
                     let f = OpenOptions::new().write(true).open(tmp)?;
-                    syncer.full(&f, tmp)?;
+                    syncer.full_batch(&f, tmp)?;
                 }
                 // 3. Renames: objects become visible only now, after
                 //    their bytes are durable — another process's dedup
