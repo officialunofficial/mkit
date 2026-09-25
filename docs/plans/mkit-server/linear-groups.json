@@ -2,7 +2,7 @@
  {
   "key": "G01",
   "ms": "Prep & Specs",
-  "title": "Prep: enable CI on feat/mkit-server and land the plan",
+  "title": "Prep: land the plan on feat/mkit-server (P0 dropped: no CI on the branch)",
   "wps": [
    "P0",
    "P1"

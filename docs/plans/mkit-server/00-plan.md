@@ -20,6 +20,16 @@ optimize for scalability". The `feat/scoped-workspaces` coordination notes were 
 
 ---
 
+
+### CI policy (authoritative; supersedes any CI-on-branch wording in this plan)
+
+- **No CI runs for `feat/mkit-server`.** Nothing changes GitHub workflow triggers, Cloud Build triggers or rulesets to cover the branch. WP-P0 (CI enablement) is **dropped**: PR #1094 was closed unmerged.
+- In place of CI, the evidence is the executor's local gate run (output in the PR body) and a clean adversarial review; all other merge rules are unchanged. The orchestrator re-runs the gate after rebasing and before squash-merging.
+- Three pre-existing workflows (`actionlint`, `docs-lint`, `crypto-stack-version`) have no branch filter and may fire automatically on PRs into the branch. Their results are **ignored**: nothing waits on them, and their triggers are not changed.
+- **CI runs once**, on the final PR that merges `feat/mkit-server` into `main` (WP-REL). All normal `main` gates apply there.
+- `workflow_dispatch` runs are never dispatched against `feat/mkit-server`.
+- A WP that adds CI wiring (new jobs, `server-staging.yml`, workflow changes) may add it, but it must trigger only on `main`, `schedule` or dispatch against `main`, never on the feature branch; it runs for the first time on the final PR to `main`. During the epic the same checks run **locally or against staging from the orchestrator's machine**, at the WP and at every milestone boundary, and the results go in the PR or the milestone report.
+
 ## 1. Pipeline
 
 **Roles and models.** One orchestrator session. Executors and reviewers run on **Opus** (user model policy: never Fable
@@ -28,7 +38,7 @@ to a scratchpad file and hands over the path; executors don't poll CI and don't 
 handles CI checks and comments).
 
 **Worktrees and branches.** Every executor works in its own git worktree (Agent `isolation: "worktree"`), based on
-`feat/mkit-server` (P0 alone targets `main`). Branch: `mkit-server/wp-<id>-<slug>`, id lowercased with dots as dashes
+`feat/mkit-server`. Branch: `mkit-server/wp-<id>-<slug>`, id lowercased with dots as dashes
 (`mkit-server/wp-m0-02-storage-traits`, `mkit-server/wp-1-22-shard-model`, `mkit-server/wp-4-10a-content-index-shards`,
 `mkit-server/wp-rel-0-5-release`). Stacked spec PRs (S2, S3 on S1) retarget to `feat/mkit-server` once the parent merges.
 
@@ -48,7 +58,7 @@ touched wasm crates + `scripts/check-wasm-dep-graph.sh`; `proto` = `buf lint`, `
 `scripts/check-generated-fresh.sh`; `docs` = `just ci-docs`, `scripts/check-spec-status.sh` (+ the web spec-index test when
 `spec-data.ts` changes); `workers` = the `apps/*` worker gate (fmt, clippy host + wasm32, `cargo test --lib`, wasm build);
 `conf-native` = the wire suite in-process on FS+SQLite and S3+SQLite; `conf-wrangler` = `scripts/vcs-worker-conformance.sh`;
-`staging` = the staging workflow run (from M1); `cli` = `scripts/check-cli-baseline.sh` + CLI e2e; `sec` = `just ci-security`;
+`staging` = the staging suite run against staging from the orchestrator's machine (from M1; the workflow is `main`-only); `cli` = `scripts/check-cli-baseline.sh` + CLI e2e; `sec` = `just ci-security`;
 `web` = the `web.yml` gate (the `mkit-wasm` wasm-pack build plus `apps/web` lint, test and build);
 `full` = `just ci`; `ci-yaml` = `actionlint`; `golden` = golden vectors (SPEC-CONVENTIONS §5) and fuzz build where listed.
 
@@ -56,8 +66,9 @@ touched wasm crates + `scripts/check-wasm-dep-graph.sh`; `proto` = `buf lint`, `
 - One PR per WP, one concern, independently green, ≲ 1500 changed lines excluding generated code, goldens and fixtures; a WP
   that would exceed it stops and proposes a split.
 - Review: an adversarial Opus reviewer checks the diff against the brief, PRD, specs and invariants; each finding is verified
-  against the code before it is applied (the user's peer-review practice). The user merges (squash) after reviewer APPROVE
-  and green CI. Spec PRs (S1–S3, 3.6, 4.4, 4.11, 5.1a–c) also need the user's approval of the normative text.
+  against the code before it is applied (the user's peer-review practice). The orchestrator squash-merges into
+  `feat/mkit-server` after the reviewer's APPROVE and its own local gate re-run on the rebased branch. There is no CI on
+  the branch; CI runs only on the final PR to `main`, which the user merges. Spec PRs (S1–S3, 3.6, 4.4, 4.11, 5.1a–c) also need the user's approval of the normative text.
 - M0 changes no proto (`git diff origin/feat/mkit-server -- proto/` empty). Proto changes land only in the proto/spec WPs
   that own them (1.2, 2.2, 3.1, 3.6, 4.4, 5.1a–c), additively (D24), with `buf breaking` green.
 - **`apps/vcs-worker/Cargo.lock` refresh.** `workers.yml` builds the worker without `--locked`, so a stale lock doesn't
@@ -92,8 +103,8 @@ Sizes: S ≲ 400, M 400–900, L 900–1500 changed lines.
 
 | id | title | milestone | track | depends-on | size | area gates | human action? |
 |---|---|---|---|---|---|---|---|
-| P0 | Enable CI on feat/mkit-server (PR to main) | P | prep | — | S | ci-yaml | yes |
-| P1 | Create feat/mkit-server and land docs/plans/mkit-server | P | prep | P0 | S | docs | yes |
+| P0 | ~~Enable CI on feat/mkit-server (PR to main)~~ **dropped** (CI policy; #1094 closed) | P | prep | — | S | — | no |
+| P1 | Create feat/mkit-server and land docs/plans/mkit-server (merged, #1093) | P | prep | — | S | docs | yes |
 | S1 | SPEC-TRANSPORT-CONNECT v2: addressing, policies, GetServerInfo, upload tickets and parts, ref deletion, consistency (#1084, #1090) | S | spec | P1 | L | docs | yes |
 | S2 | SPEC-WRITE-GRANTS v1 with signed reads, private repos, URL tokens and epoch leases (#1085, #1089) | S | spec | S1 | L | docs | yes |
 | S3 | Admission challenges spec: 402, helper headers and allowlist, replay-after-auth, per-RPC lifecycle (#1086) | S | spec | S1 | M | docs | yes |
@@ -224,13 +235,13 @@ Sizes: S ≲ 400, M 400–900, L 900–1500 changed lines.
 **DAG.** The `depends-on` column is the DAG (hard dependencies only). Cross-milestone structure:
 
 ```text
-P0 → P1 ─┬→ S1 ─┬→ S2 (→ crypto 2.3/2.4/2.5 may start early)
-         │      └→ S3
-         ├→ pure mkit-core WPs that may start early: 4.1, 4.2, 4.3, then 1.3 (after S1), 4.8a, 5.7a
-         └→ M0 (M0-01 … M0-20, incl. 02a/02b, 05a/05b) ─→ M1 (1.2 … 1.20; 1.24 and 1.4 start at M0 exit)
-                                   ├→ M2 identity (entry 1.20; 2.2 …)       ─┐
-                                   ├→ M3 money (entry 1.20; 3.6 needs only M0 exit) ─┐
-                                   └→ M4 content (entry 1.20; spec 4.4 after 3.6)    ├→ M5 (entry 4.18 + 2.15) → REL
+P1 ─┬→ S1 ─┬→ S2 (→ crypto 2.3/2.4/2.5 may start early)
+    │      └→ S3
+    ├→ pure mkit-core WPs that may start early: 4.1, 4.2, 4.3, then 1.3 (after S1), 4.8a, 5.7a
+    └→ M0 (M0-01 … M0-20, incl. 02a/02b, 05a/05b) ─→ M1 (1.2 … 1.20; 1.24 and 1.4 start at M0 exit)
+                              ├→ M2 identity (entry 1.20; 2.2 …)       ─┐
+                              ├→ M3 money (entry 1.20; 3.6 needs only M0 exit) ─┐
+                              └→ M4 content (entry 1.20; spec 4.4 after 3.6)    ├→ M5 (entry 4.18 + 2.15) → REL
    Cross-track edges: 4.13 ← 3.3 (paid reads); 4.15 ← 2.9, 2.11; 4.17 ← 2.7; 5.2/5.11a ← 2.15, 4.18; 5.5 ← 3.7; 5.1a ← 3.6
    Review-01 edges (R-70, R-71): M0-16 ← M0-05b, M0-06 (features `test-faults`, `connect`); 1.28 ← 1.8 (DO classes before
    the D34 flip); 5.6 ← 5.10 (CachePurger before takedown); M0-09's `fs` feature moved to M0-10 (no M0-09 ← M0-08 edge)
@@ -244,49 +255,48 @@ its predecessors have merged; in practice cap concurrent executors at ~4 to keep
 
 | wave | runnable together once predecessors merge | milestone(s) |
 |---|---|---|
-| 0 | P0 | P |
-| 1 | P1 | P |
-| 2 | S1, M0-01, 4.1, 4.2, 4.3 | S, M0, M4 |
-| 3 | S2, S3, M0-02a, M0-04, 1.3, 4.8a, 5.7a | S, M0, M1, M4, M5 |
-| 4 | M0-02b, M0-05a, 2.3, 2.4 | M0, M2 |
-| 5 | M0-03, M0-05b, 2.5 | M0, M2 |
-| 6 | M0-06, M0-08, M0-09 | M0 |
-| 7 | M0-07, M0-12, M0-16 | M0 |
-| 8 | M0-10, M0-17 | M0 |
-| 9 | M0-11, M0-14, M0-18 | M0 |
-| 10 | M0-15, M0-19 | M0 |
-| 11 | M0-13 | M0 |
-| 12 | M0-20 | M0 |
-| 13 | 1.2, 1.4, 1.24, 3.6 | M1, M3 |
-| 14 | 1.22, 3.14, 4.4 | M1, M3, M4 |
-| 15 | 1.5, 1.7, 1.25, 1.8, 4.11, 5.1a | M1, M4, M5 |
-| 16 | 1.6, 1.23, 1.26, 1.29, 5.1b, 5.1c | M1, M5 |
-| 17 | 1.28, 1.9, 1.16 | M1 |
-| 18 | 1.10, 1.11 | M1 |
-| 19 | 1.12, 1.13, 1.15, 1.17, 1.21 | M1 |
-| 20 | 1.14, 1.18 | M1 |
-| 21 | 1.27, 1.19 | M1 |
-| 22 | 1.20 | M1 |
-| 23 | 2.2, 2.10, 3.1, 4.5, 4.9, 4.10a | M2, M3, M4 |
-| 24 | 2.6, 2.13, 3.2, 3.10, 4.6, 4.7 | M2, M3, M4 |
-| 25 | 2.7, 2.8, 2.9, 3.3, 3.11, 4.8, 4.10 | M2, M3, M4 |
-| 26 | 2.11, 2.12, 2.14, 3.4, 3.5, 3.7, 4.12, 4.17 | M2, M3, M4 |
-| 27 | 2.15, 3.8, 3.9, 4.13, 4.14, 4.15, 4.16 | M2, M3, M4 |
-| 28 | 3.12, 4.18 | M3, M4 |
-| 29 | 3.13, 5.2, 5.11a | M3, M5 |
-| 30 | 5.3a, 5.4, 5.8, 5.10 | M5 |
-| 31 | 5.3b, 5.6, 5.12 | M5 |
-| 32 | 5.5, 5.7b | M5 |
-| 33 | 5.9a, 5.14 | M5 |
-| 34 | 5.9b, 5.11b | M5 |
-| 35 | 5.13 | M5 |
-| 36 | REL | M5 |
+| 0 | P1 | P |
+| 1 | S1, M0-01, 4.1, 4.2, 4.3 | S, M0, M4 |
+| 2 | S2, S3, M0-02a, M0-04, 1.3, 4.8a, 5.7a | S, M0, M1, M4, M5 |
+| 3 | M0-02b, M0-05a, 2.3, 2.4 | M0, M2 |
+| 4 | M0-03, M0-05b, 2.5 | M0, M2 |
+| 5 | M0-06, M0-08, M0-09 | M0 |
+| 6 | M0-07, M0-12, M0-16 | M0 |
+| 7 | M0-10, M0-17 | M0 |
+| 8 | M0-11, M0-14, M0-18 | M0 |
+| 9 | M0-15, M0-19 | M0 |
+| 10 | M0-13 | M0 |
+| 11 | M0-20 | M0 |
+| 12 | 1.2, 1.4, 1.24, 3.6 | M1, M3 |
+| 13 | 1.22, 3.14, 4.4 | M1, M3, M4 |
+| 14 | 1.5, 1.7, 1.25, 1.8, 4.11, 5.1a | M1, M4, M5 |
+| 15 | 1.6, 1.23, 1.26, 1.29, 5.1b, 5.1c | M1, M5 |
+| 16 | 1.28, 1.9, 1.16 | M1 |
+| 17 | 1.10, 1.11 | M1 |
+| 18 | 1.12, 1.13, 1.15, 1.17, 1.21 | M1 |
+| 19 | 1.14, 1.18 | M1 |
+| 20 | 1.27, 1.19 | M1 |
+| 21 | 1.20 | M1 |
+| 22 | 2.2, 2.10, 3.1, 4.5, 4.9, 4.10a | M2, M3, M4 |
+| 23 | 2.6, 2.13, 3.2, 3.10, 4.6, 4.7 | M2, M3, M4 |
+| 24 | 2.7, 2.8, 2.9, 3.3, 3.11, 4.8, 4.10 | M2, M3, M4 |
+| 25 | 2.11, 2.12, 2.14, 3.4, 3.5, 3.7, 4.12, 4.17 | M2, M3, M4 |
+| 26 | 2.15, 3.8, 3.9, 4.13, 4.14, 4.15, 4.16 | M2, M3, M4 |
+| 27 | 3.12, 4.18 | M3, M4 |
+| 28 | 3.13, 5.2, 5.11a | M3, M5 |
+| 29 | 5.3a, 5.4, 5.8, 5.10 | M5 |
+| 30 | 5.3b, 5.6, 5.12 | M5 |
+| 31 | 5.5, 5.7b | M5 |
+| 32 | 5.9a, 5.14 | M5 |
+| 33 | 5.9b, 5.11b | M5 |
+| 34 | 5.13 | M5 |
+| 35 | REL | M5 |
 
 **Critical paths per milestone.**
 
 | milestone | critical path inside the milestone (size-weighted: S=1, M=2, L=3) | PRs |
 |---|---|---|
-| P | P0 → P1 | 2 (weight 2) |
+| P | P1 | 1 (weight 1) |
 | S | S1 → S2 | 2 (weight 6) |
 | M0 | M0-01 → M0-02a → M0-05a → M0-05b → M0-06 → M0-07 → M0-10 → M0-14 → M0-15 → M0-13 → M0-20 | 11 (weight 25) |
 | M1 | 1.4 → 1.22 → 1.7 → 1.23 → 1.9 → 1.11 → 1.12 → 1.14 → 1.27 → 1.20 | 10 (weight 25) |
@@ -295,14 +305,14 @@ its predecessors have merged; in practice cap concurrent executors at ~4 to keep
 | M4 | 4.4 → 4.5 → 4.7 → 4.10 → 4.12 → 4.14 → 4.18 | 7 (weight 18) |
 | M5 | 5.1a → 5.2 → 5.10 → 5.6 → 5.7b → 5.14 → 5.11b → 5.13 → REL | 9 (weight 21) |
 
-**Overall critical path by PR count** (37 PRs, 37 waves 0–36):
-`P0 → P1 → M0-01 → M0-02a → M0-05a → M0-05b → M0-06 → M0-07 → M0-10 → M0-14 → M0-15 → M0-13 → M0-20 → 1.4 → 1.22 → 1.7 → 1.23 → 1.9 → 1.11 → 1.12 → 1.14 → 1.19 → 1.20 → 4.5 → 4.7 → 4.10 → 4.12 → 4.14 → 4.18 → 5.2 → 5.10 → 5.6 → 5.7b → 5.9a → 5.9b → 5.13 → REL`
+**Overall critical path by PR count** (36 PRs, 36 waves 0–35):
+`P1 → M0-01 → M0-02a → M0-05a → M0-05b → M0-06 → M0-07 → M0-10 → M0-14 → M0-15 → M0-13 → M0-20 → 1.4 → 1.22 → 1.7 → 1.23 → 1.9 → 1.11 → 1.12 → 1.14 → 1.19 → 1.20 → 4.5 → 4.7 → 4.10 → 4.12 → 4.14 → 4.18 → 5.2 → 5.10 → 5.6 → 5.7b → 5.9a → 5.9b → 5.13 → REL`
 
-**Overall critical path by size weight** (weight 87, 37 PRs); it differs only in M1 (1.27 instead of 1.19) and at the M5
+**Overall critical path by size weight** (weight 86, 36 PRs); it differs only in M1 (1.27 instead of 1.19) and at the M5
 tail (5.14 → 5.11b instead of 5.9a → 5.9b):
-`P0 → P1 → M0-01 → M0-02a → M0-05a → M0-05b → M0-06 → M0-07 → M0-10 → M0-14 → M0-15 → M0-13 → M0-20 → 1.4 → 1.22 → 1.7 → 1.23 → 1.9 → 1.11 → 1.12 → 1.14 → 1.27 → 1.20 → 4.5 → 4.7 → 4.10 → 4.12 → 4.14 → 4.18 → 5.2 → 5.10 → 5.6 → 5.7b → 5.14 → 5.11b → 5.13 → REL`
+`P1 → M0-01 → M0-02a → M0-05a → M0-05b → M0-06 → M0-07 → M0-10 → M0-14 → M0-15 → M0-13 → M0-20 → 1.4 → 1.22 → 1.7 → 1.23 → 1.9 → 1.11 → 1.12 → 1.14 → 1.27 → 1.20 → 4.5 → 4.7 → 4.10 → 4.12 → 4.14 → 4.18 → 5.2 → 5.10 → 5.6 → 5.7b → 5.14 → 5.11b → 5.13 → REL`
 
-Review 01 lengthened the chain by two PRs (was 35): the M0-05 split adds one serial step (M0-02b and M0-03 stay off
+Review 01 lengthened the chain by two PRs (was 35 counting the since-dropped P0): the M0-05 split adds one serial step (M0-02b and M0-03 stay off
 the chain because the pipeline needs only M0-02a), and 5.10 now precedes 5.6.
 
 The chain runs through the M0 serial foundation, the M1 D34/ticket core, then the M4 indexed-serving core (M4 is longer than
@@ -330,7 +340,7 @@ as soon as their deps allow (they are off the implementation chain); land the pu
 | Q9/Q10 | Container and targets | ghcr `officialunofficial/mkit-server`, private, **no `latest`**; distroless cc nonroot; same targets as `mkit` (Linux subset for the image) | User | M0-18, M0-19, REL |
 | Q11 | repo-worker dedup | **No**: demo stack unchanged; M0-R dropped | User | M0-R |
 | Q12 | ssh idle timeout | 60 s; `--idle-timeout-secs 0` disables | User | M0-13 |
-| Q15 | buf-breaking base | Fix Cloud Build `codegen.yaml` and `proto.yml` to the PR base in P0 | User | P0 |
+| Q15 | buf-breaking base | ~~Fix Cloud Build `codegen.yaml` and `proto.yml` to the PR base in P0~~ N/A (P0 dropped; no CI on the branch) | User | P0 |
 | Q18 | #1090 wire | BeginUpload/tickets/parts in S1 §7.6 | User | S1, 1.1 dropped |
 | Q19 | #1089 wire | Signed reads, private repos, URL tokens in S2 | User | S2, 2.1 dropped |
 | M1-a | Part-upload shape | **Client-streaming** `UploadPart` (a header message, then data chunks; decided in review 01 so no part is ever buffered whole: connectrpc collects unary bodies in full), explicit `CompleteUpload`, stateless signed ticket token, client-held signed part receipts for resume, no DO on the part path, no presigned R2 uploads | User + Coordinator | S1, 1.2, 1.9, 1.11, 1.12, 1.18 |
@@ -466,7 +476,7 @@ Every change made to the inputs during consolidation. "Briefs" = `docs/plans/mki
 | R-54 | Ref deletion added (S1 §7.8, proto 1.2, server 1.10, grant `d` flag 2.7) so the kept `delete` flag governs something | S1, S2, 1.2, 1.10, 2.7 |
 | R-55 | Spec WPs with proto (3.6, 4.4) depend on M0 exit, not M1 exit, so they leave the implementation critical path; 4.5/4.9/4.10a take the M1 dependency instead | registry |
 | R-56 | 4.13 depends on 3.3 (read outcome), not 3.2 | M3–M5, registry |
-| R-57 | P0 makes the Cloud Build `codegen.yaml` base-branch fix mandatory (Q15) | P0 |
+| R-57 | ~~P0 makes the Cloud Build `codegen.yaml` base-branch fix mandatory (Q15)~~ N/A (P0 dropped; no CI on the branch) | P0 |
 | R-58 | Dropped: M0-R (Q11), WP-1.1 (→ S1), WP-2.1 (→ S2); M0-R brief marked dropped | briefs, M1/M2 |
 | R-59 | S2 grows to L (docs) with #1089 folded in; S1 grows to L with #1090, ref deletion and D34 consistency | S1, S2 |
 
@@ -508,9 +518,9 @@ ContentIndex/export/hooks → M0-02b, unary pipeline → M0-05a, streaming/fault
 
 | When | WP | Action | Who / needs |
 |---|---|---|---|
-| Before P1 | P0 | Update the 5 Cloud Build PR triggers (`mkit-ci-pr`, `mkit-codegen-pr`, `mkit-security-pr`, `mkit-docs-pr`, `mkit-geiger-pr`) to base regex `^(main\|feat/mkit-server)$` (gcloud describe → edit → import, commands in the P0 PR); optionally add `*-feat` push triggers; verify `_BASE_BRANCH` substitution on the first feature-branch PR | GCP project admin |
-| Before P1 | P0 | GitHub ruleset for `feat/mkit-server`: required checks (`ci-gate`, `workers-gate`, `proto-gate`, `web-gate`, `third-party-notices-gate`, buf, Cloud Build), no force-push, squash-only | Repo admin |
-| P1 | P1 | Confirm the checks appear on a throwaway PR | Orchestrator + user |
+| Before P1 | P0 | ~~Cloud Build PR triggers~~: dropped (no CI on the feature branch) | — |
+| Before P1 | P0 | ~~GitHub ruleset for `feat/mkit-server`~~: dropped (no CI on the feature branch) | — |
+| P1 | P1 | ~~Confirm the checks appear on a throwaway PR~~: dropped (no CI on the branch) | — |
 | Specs | S1, S2, S3, 3.6, 4.4, 4.11, 5.1a, 5.1b, 5.1c | Approve the normative text; close #1087 with the credit comment when S1–S3 have merged | User |
 | Before M0-16 | M0-16 | Confirm the Cloudflare account is on **Workers Paid** (10 GB SQLite per Durable Object, CPU configurable to 5 min, 10,000 subrequests per invocation); the plan's limits assume it (Free caps DOs at 1 GB) | Cloudflare account admin |
 | M1 | 1.19 | **Resolved (D35):** `staging-vcs.mkit.sh` on the `mkit.sh` zone, in the same account as the other mkit workers, as `env.staging` of `vcs-worker`. Dedicated staging R2 buckets and DO classes. Data can be reset at any time (no retention promise; CI may wipe it). One dedicated staging CI Ed25519 signer (GitHub secret) whose namespace is the only allowlist entry. Resources are created through the Cloudflare MCP with the user's OK. | Coordinator (with user OK) |

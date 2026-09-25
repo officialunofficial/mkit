@@ -6,26 +6,24 @@
     "track": "prep",
     "depends_on": [],
     "size": "S",
-    "summary": "Add feat/mkit-server to every main-only pull_request filter and make buf/codegen breaking checks compare against the PR base branch. The PR lists the Cloud Build trigger and GitHub ruleset changes the user applies in the consoles.",
-    "human_action": true,
-    "area_gates": [
-      "ci-yaml"
-    ]
+    "summary": "Dropped: no CI runs on feat/mkit-server (CI policy). PR #1094 closed unmerged.",
+    "human_action": false,
+    "area_gates": [],
+    "status": "dropped"
   },
   {
     "id": "P1",
     "title": "Create feat/mkit-server and land docs/plans/mkit-server",
     "milestone": "P",
     "track": "prep",
-    "depends_on": [
-      "P0"
-    ],
+    "depends_on": [],
     "size": "S",
-    "summary": "Orchestrator cuts the integration branch from main and commits the plan, registry and briefs (PRD snapshot headed with decisions D1-D36). A throwaway PR confirms the required checks appear.",
+    "summary": "Orchestrator cuts the integration branch from main and commits the plan, registry and briefs (PRD snapshot headed with decisions D1-D36). The throwaway-PR check that the required checks appear is dropped (no CI on the branch).",
     "human_action": true,
     "area_gates": [
       "docs"
-    ]
+    ],
+    "status": "merged"
   },
   {
     "id": "S1",
