@@ -853,8 +853,8 @@ backend's tag for the part. A part needs no admission decision, because
 admission happened at `BeginUpload`. Sending a part index again is
 idempotent.
 
-**Part path.** `UploadPart` and a ticketed `UploadPack` form the part
-path. They record no replay entry. They are idempotent by content, so
+**Part path.** `UploadPart`, `CompleteUpload` and a ticketed `UploadPack`
+form the part path. They record no replay entry. They are idempotent by content, so
 the server checks only the validity window, the ticket token, and the
 commitment. The part path does not run the Authorizer; authority is
 checked at `BeginUpload` and again inside the `AdvanceRefs` apply, so a
@@ -867,7 +867,8 @@ receipt and merges the subtree hashes into a root. It makes the pack
 visible in storage only if the root equals `pack_id` and the lengths sum
 to `bytes`. Otherwise it aborts the storage session and returns
 `invalid_argument`. Completion does not make the pack a member of the
-repository.
+repository. Completing the same ticket again is idempotent: it returns the
+same result and changes nothing.
 
 **Resume.** Part receipts are the durable record of the parts a server
 received, and the client keeps them. A client that lost receipts sends
