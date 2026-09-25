@@ -26,13 +26,13 @@ its worktree.
 | File | Content |
 |---|---|
 | `README.md` | Index: link to Linear MKIT-29 (canonical PRD), the branch and PR conventions, and a status table of WPs (id, title, PR link, state), with the orchestrator updating it as WPs merge |
-| `prd-snapshot.md` | Verbatim copy of the approved PRD (`docs/plans/mkit-server/prd-snapshot.md`), headed "Snapshot of Linear MKIT-29 taken <date>. Linear is canonical; decisions D1–D36 are settled (D21 superseded by D34; D35 staging; D36 `X-Mkit-Ref`)." |
+| `prd-snapshot.md` | Verbatim copy of the approved PRD (Linear MKIT-29, as held in the orchestrator's working copy), headed "Snapshot of Linear MKIT-29 taken <date>. Linear is canonical; decisions D1–D36 are settled (D21 superseded by D34; D35 staging; D36 `X-Mkit-Ref`)." |
 | `00-plan.md` | `docs/plans/mkit-server/00-plan.md` (pipeline, registry, DAG, defaults, reconciliation log) |
 | `registry.json` | `docs/plans/mkit-server/registry.json` (the WP registry used for Linear sub-issues) |
 | `m0-overview.md` | `docs/plans/mkit-server/m0-overview.md` |
 | `m1-m2-breakdown.md`, `m3-m5-breakdown.md` | the coarse breakdowns for later milestones (rolling wave) |
 | `conventions.md` | The shared executor rules: base branch, branch naming, TMPDIR, commit trailer, no CI polling or comments, size target, per-PR gate (below), pre-production policy, credit rule for spec PRs |
-| `briefs/WP-*.md` | Every brief from `docs/plans/mkit-server/briefs/`, including P0 and P1 for the record |
+| `briefs/WP-*.md` | Every brief from the orchestrator's working copy of the plan, including P0 and P1 for the record |
 
 Per-PR gate text for `conventions.md`:
 
@@ -44,7 +44,7 @@ cargo clippy --all-targets --all-features --workspace -- -D warnings
 cargo nextest run -p <touched crates> -p <their reverse deps>        # reverse deps: cargo tree -i <crate> -e normal --workspace --depth 1
 cargo test --doc -p <touched crates>
 # Area gates when touched:
-#   proto:   buf lint && buf breaking --against '.git#branch=feat/mkit-server'
+#   proto:   buf lint && buf breaking --against '.git#branch=origin/feat/mkit-server'
 #   specs / wasm:  just ci-scripts
 #   apps/* workers: (cd apps/<w> && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test --lib && cargo build --target wasm32-unknown-unknown)
 #   deps (Cargo.toml/Cargo.lock): just ci-security

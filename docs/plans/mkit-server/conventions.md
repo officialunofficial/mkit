@@ -26,52 +26,28 @@ Never run the test suite under macOS `/tmp` or `/var`: they are symlinks, and ab
 the resolved path. Always export a non-symlinked `TMPDIR` first:
 
 ```bash
-export TMPDIR="$HOME/.cache/mkit-test-tmp"; mkdir -p "$TMPDIR"
-```
-
-## Commit trailer
-
-Every commit ends with exactly:
-
-```text
-Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
-```
-
-Spec PRs rebuilt from #1087 add a second trailer (see [Credit rule for spec PRs](#credit-rule-for-spec-prs)).
-
-## No CI polling, no comments
-
-Executors don't poll CI and don't comment on GitHub or Linear. The user handles CI checks, review comments and Linear
-updates. Push the branch and open the PR only when your brief or the orchestrator says to; then report back with the branch,
-commit SHA and gate results.
-
-## Size target
-
-One PR per WP, one concern, independently green, and at most about **1500 changed lines**, not counting generated code,
-golden vectors and fixtures. A WP that would exceed this stops and proposes a split to the orchestrator instead of landing
-an oversized PR.
-
-## Per-PR gate
-
-Run by the executor and pasted into the PR body:
-
-```bash
 export TMPDIR="$HOME/.cache/mkit-test-tmp"; mkdir -p "$TMPDIR"   # never macOS /tmp (symlink breaks sign/attest tests)
-cd rust
-cargo fmt --check
-cargo clippy --all-targets --all-features --workspace -- -D warnings
-cargo nextest run -p <touched crates> -p <their reverse deps>        # reverse deps: cargo tree -i <crate> -e normal --workspace --depth 1
-cargo test --doc -p <touched crates>
-# Area gates when touched:
-#   proto:   buf lint && buf breaking --against '.git#branch=feat/mkit-server'
+# Run from the repo root. Rust steps run in a subshell under rust/, like the justfile recipes.
+( cd rust && cargo fmt --check )
+( cd rust && cargo clippy --all-targets --all-features --workspace -- -D warnings )
+( cd rust && cargo nextest run -p <touched crates> -p <their reverse deps> )   # reverse deps: cargo tree -i <crate> -e normal --workspace --depth 1
+( cd rust && cargo test --doc -p <touched crates> )
+# Area gates when touched (all from the repo root):
+#   proto:   buf lint && buf breaking --against '.git#branch=origin/feat/mkit-server'
 #   specs / wasm:  just ci-scripts
-#   apps/* workers: (cd apps/<w> && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test --lib && cargo build --target wasm32-unknown-unknown)
+#   apps/* workers: (cd apps/<w> && cargo fmt --check && cargo clippy --all-targets -- -D warnings \
+#                    && cargo clippy --target wasm32-unknown-unknown -- -D warnings \
+#                    && cargo test --lib && cargo build --target wasm32-unknown-unknown)
 #   deps (Cargo.toml/Cargo.lock): just ci-security
-#   web (rust/Cargo.lock wasm-bindgen moves, mkit-wasm): (cd apps/web && bun install --frozen-lockfile && bun run wasm:build && bun run test && bun run build)
+#   web (rust/Cargo.lock wasm-bindgen moves, mkit-wasm):
+#       (cd apps/web && bun install --frozen-lockfile && bun run wasm:build) && ./scripts/check-generated-fresh-ts.sh \
+#       && (cd apps/web && bun run typecheck && bun run test && bun run lint && bun run fmt:check && bun run build)
 # Full `just ci` when touching mkit-core public API or rust/Cargo.lock.
 # From M0-17 on: any change to mkit-server*/mkit-worker-common dependencies also refreshes and commits
 # apps/vcs-worker/Cargo.lock (workers.yml builds without --locked): (cd apps/vcs-worker && cargo check --target wasm32-unknown-unknown)
 ```
+
+**Working directory rule:** every gate command in this plan (here, in `00-plan.md`, and in each brief) is run from the **repo root**. A line that starts with `cd rust && …` or `cd apps/<w> && …` means "in a fresh subshell from the repo root", i.e. `( cd rust && … )`. Never chain a bare `cd` into later root-relative commands. `buf` must run from the root, where `buf.yaml` lives.
 
 Each WP's `area_gates` in [`registry.json`](registry.json) name the extra gates it needs; [`00-plan.md`](00-plan.md) §1
 defines the codes.
