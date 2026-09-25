@@ -5,16 +5,22 @@
 //! This crate is runtime-agnostic: it compiles for the host and for
 //! `wasm32-unknown-unknown`, never reads the wall clock directly (see
 //! [`Clock`]) and never spawns on a concrete executor (see [`Spawner`]).
-//! Every public item is re-exported at the crate root; the modules are
-//! private so the surface stays flat while later work packages grow it.
+//! The shared vocabulary is re-exported at the crate root from private
+//! modules. The protocol logic lives in public modules, so call sites name
+//! the protocol they apply (`refs::evaluate_cas`, `quota::evaluate_quota`).
 
+pub mod auth_v2;
+pub mod download;
 mod error;
 mod op;
 mod principal;
-mod quota;
+pub mod quota;
+pub mod refs;
 mod repo;
 mod rt;
+pub mod storage_error;
 mod telemetry;
+pub mod upload;
 
 pub use error::{
     ADMISSION_CHALLENGE_TYPE, Code, ErrorDetail, InvalidHeader, Redacted, ServerError,
@@ -23,7 +29,6 @@ pub use op::{
     AuthzFacts, Commitment, GrantRef, OpKind, Operation, Procedure, RefUpdate, VerifiedAuth,
 };
 pub use principal::Principal;
-pub use quota::{QuotaLimits, QuotaScope, QuotaState};
 pub use repo::{Addressing, NamespaceKey, RepoId, RepoName};
 #[cfg(not(target_arch = "wasm32"))]
 pub use rt::SystemClock;
