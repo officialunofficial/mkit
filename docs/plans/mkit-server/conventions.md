@@ -8,6 +8,7 @@ wins. The PRD snapshot is [`prd-snapshot.md`](prd-snapshot.md); Linear is canoni
 
 - **No CI runs for `feat/mkit-server`.** Nothing changes GitHub workflow triggers, Cloud Build triggers or rulesets to cover the branch. WP-P0 (CI enablement) is **dropped**: PR #1094 was closed unmerged.
 - In place of CI, the evidence is the executor's local gate run (output in the PR body) and a clean adversarial review; all other merge rules are unchanged. The orchestrator re-runs the gate after rebasing and before squash-merging.
+- Three pre-existing workflows (`actionlint`, `docs-lint`, `crypto-stack-version`) have no branch filter and may fire automatically on PRs into the branch. Their results are **ignored**: nothing waits on them, and their triggers are not changed.
 - **CI runs once**, on the final PR that merges `feat/mkit-server` into `main` (WP-REL). All normal `main` gates apply there.
 - `workflow_dispatch` runs are never dispatched against `feat/mkit-server`.
 - A WP that adds CI wiring (new jobs, `server-staging.yml`, workflow changes) may add it, but it must trigger only on `main`, `schedule` or dispatch against `main`, never on the feature branch; it runs for the first time on the final PR to `main`. During the epic the same checks run **locally or against staging from the orchestrator's machine**, at the WP and at every milestone boundary, and the results go in the PR or the milestone report.
