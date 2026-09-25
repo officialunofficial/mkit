@@ -11,7 +11,9 @@ use crate::error::ServerError;
 /// component bound (`mkit_core::write_auth`).
 const MAX_REPO_NAME_BYTES: usize = 255;
 
-/// The namespace a single-repository deployment uses. It matches the
+/// The namespace a single-repository deployment uses: a reserved sentinel.
+/// SPEC-TRANSPORT-CONNECT §7.4 namespaces are always `ed25519-<64 hex>` or
+/// `0x<40 hex>`, so no request can ever select `root`. It matches the
 /// `vcs-worker` `RefStore` instance name, so M0 needs no Durable Object
 /// migration (planner default Q13).
 const DEPLOYMENT_DEFAULT_NAMESPACE: &str = "root";
@@ -54,7 +56,9 @@ impl RepoName {
 pub struct NamespaceKey(String);
 
 impl NamespaceKey {
-    /// The namespace of a single-repository deployment.
+    /// The namespace of a single-repository deployment: the reserved
+    /// sentinel `"root"`, which the SPEC-TRANSPORT-CONNECT §7.4 namespace
+    /// grammar (`ed25519-…` / `0x…`) can never select.
     #[must_use]
     pub fn deployment_default() -> Self {
         Self(DEPLOYMENT_DEFAULT_NAMESPACE.to_owned())

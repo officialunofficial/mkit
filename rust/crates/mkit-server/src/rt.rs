@@ -130,9 +130,12 @@ pub fn send_wrap<F: Future + Send>(f: F) -> F {
 /// connectrpc service traits require. The Workers adapter wraps the whole
 /// handler future once (PRD §5.2).
 ///
-/// `SendWrapper` panics if the wrapped future is polled or dropped on a
-/// thread other than the one that created it. That cannot happen on
-/// single-threaded wasm32, which is the only target this variant builds for.
+/// `SendWrapper` checks the thread on every poll and drop: a poll or drop on
+/// a thread other than the one that created it panics, and is never
+/// undefined behavior. Workers run wasm32 single-threaded, so it cannot
+/// fire there; a wasm32 build with the `atomics` target feature can be
+/// multi-threaded, and there the caller must keep the future on its
+/// creating thread.
 #[cfg(target_arch = "wasm32")]
 #[must_use]
 pub fn send_wrap<F: Future>(f: F) -> send_wrapper::SendWrapper<F> {

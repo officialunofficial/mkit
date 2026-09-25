@@ -30,6 +30,20 @@ pub enum Principal {
 }
 
 impl Principal {
+    /// A stable, key-free label for tracing spans and metrics:
+    /// `anonymous`, `signer`, `bearer`, `transport_peer` or
+    /// `ssh_forced_command`.
+    #[must_use]
+    pub const fn kind(&self) -> &'static str {
+        match self {
+            Self::Anonymous => "anonymous",
+            Self::Signer { .. } => "signer",
+            Self::BearerHolder => "bearer",
+            Self::TransportPeer { .. } => "transport_peer",
+            Self::SshForcedCommand { .. } => "ssh_forced_command",
+        }
+    }
+
     /// The principal's Ed25519 public key, when it has one.
     #[must_use]
     pub fn ed25519(&self) -> Option<&[u8; 32]> {
@@ -60,5 +74,23 @@ mod tests {
         assert_eq!(Principal::SshForcedCommand { key: None }.ed25519(), None);
         assert_eq!(Principal::Anonymous.ed25519(), None);
         assert_eq!(Principal::BearerHolder.ed25519(), None);
+    }
+
+    #[test]
+    fn kind_labels_carry_no_key_material() {
+        let key = [7u8; 32];
+        let cases = [
+            (Principal::Anonymous, "anonymous"),
+            (Principal::Signer { ed25519: key }, "signer"),
+            (Principal::BearerHolder, "bearer"),
+            (Principal::TransportPeer { ed25519: key }, "transport_peer"),
+            (
+                Principal::SshForcedCommand { key: Some(key) },
+                "ssh_forced_command",
+            ),
+        ];
+        for (principal, kind) in cases {
+            assert_eq!(principal.kind(), kind);
+        }
     }
 }

@@ -135,7 +135,11 @@ fn canonical_hash(text: &str) -> Option<Hash> {
 
 /// A verified auth v2 authorization, decoded from
 /// [`mkit_core::write_auth::Authorized`].
+///
+/// Non-exhaustive: later milestones add fields. Build it with
+/// `VerifiedAuth::try_from(&authorized)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct VerifiedAuth {
     /// The signer's raw Ed25519 public key.
     pub signer: [u8; 32],
@@ -255,7 +259,10 @@ pub struct GrantRef {
 /// Facts the Authorizer established, carried into `apply` as
 /// preconditions. Always the default in M0; M2 (WP-2.6) sets `grant` so the
 /// pipeline can require `grant.epoch` when it commits.
+///
+/// Non-exhaustive: start from `AuthzFacts::default()` and set fields.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct AuthzFacts {
     /// The grant that authorized the operation, if any.
     pub grant: Option<GrantRef>,
@@ -264,7 +271,10 @@ pub struct AuthzFacts {
 }
 
 /// A decoded request, ready for policy and storage.
+///
+/// Non-exhaustive: build it with [`Operation::new`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Operation {
     /// Target repository.
     pub repo: RepoId,
@@ -279,6 +289,23 @@ pub struct Operation {
 }
 
 impl Operation {
+    /// An operation with no Authorizer facts yet ([`AuthzFacts::default`]).
+    #[must_use]
+    pub fn new(
+        repo: RepoId,
+        principal: Principal,
+        auth: Option<VerifiedAuth>,
+        kind: OpKind,
+    ) -> Self {
+        Self {
+            repo,
+            principal,
+            auth,
+            kind,
+            authz: AuthzFacts::default(),
+        }
+    }
+
     /// The procedure that carries this operation.
     #[must_use]
     pub const fn procedure(&self) -> Procedure {
@@ -521,18 +548,18 @@ mod tests {
 
     #[test]
     fn operation_authz_defaults_empty() {
-        let op = Operation {
-            repo: RepoId {
+        let op = Operation::new(
+            RepoId {
                 namespace: NamespaceKey::deployment_default(),
                 name: RepoName::new("room-a").unwrap(),
             },
-            principal: Principal::Anonymous,
-            auth: None,
-            kind: OpKind::ReadRef {
+            Principal::Anonymous,
+            None,
+            OpKind::ReadRef {
                 name: "refs/heads/main".into(),
             },
-            authz: AuthzFacts::default(),
-        };
+        );
+        assert_eq!(op.authz, AuthzFacts::default());
         assert_eq!(op.authz.grant, None);
         assert!(!op.authz.owner);
         assert_eq!(op.procedure(), Procedure::ReadRef);

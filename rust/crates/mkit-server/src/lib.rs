@@ -16,7 +16,9 @@ mod repo;
 mod rt;
 mod telemetry;
 
-pub use error::{Code, ErrorDetail, Redacted, ServerError};
+pub use error::{
+    ADMISSION_CHALLENGE_TYPE, Code, ErrorDetail, InvalidHeader, Redacted, ServerError,
+};
 pub use op::{
     AuthzFacts, Commitment, GrantRef, OpKind, Operation, Procedure, RefUpdate, VerifiedAuth,
 };
@@ -27,6 +29,6 @@ pub use repo::{Addressing, NamespaceKey, RepoId, RepoName};
 pub use rt::SystemClock;
 pub use rt::{BoxFuture, BoxStream, Clock, ManualClock, MaybeSend, MaybeSync, Spawner, send_wrap};
 pub use telemetry::{
-    METRIC_LATENCY, METRIC_REQUESTS, METRIC_UPLOAD_BYTES, Metrics, NoopMetrics, SENSITIVE_HEADERS,
-    is_sensitive_header,
+    METRIC_LATENCY, METRIC_REQUESTS, METRIC_UPLOAD_BYTES, Metrics, NEVER_ECHO, NEVER_LOG,
+    NoopMetrics, REDACTED_VALUE, Redactor, is_never_echo, is_never_log,
 };
