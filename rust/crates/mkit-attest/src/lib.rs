@@ -44,6 +44,10 @@
 
 pub mod algorithm;
 pub mod envelope;
+// SPEC-WRITE-GRANTS §4 owner-scheme primitives (Keccak-256, EIP-191,
+// secp256k1 recovery, address derivation). Default-off.
+#[cfg(feature = "grants")]
+pub mod eth;
 pub mod jcs;
 pub mod pin_provider;
 pub mod signer;
