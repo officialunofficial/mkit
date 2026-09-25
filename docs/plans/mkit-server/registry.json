@@ -1015,15 +1015,32 @@
     ]
   },
   {
-    "id": "2.4",
-    "title": "mkit-attest: grant and epoch statement codec plus the ed25519 scheme",
+    "id": "2.4a",
+    "title": "mkit-attest/mkit-core: grant codec, ref scopes, header codec, repository-name grammar",
     "milestone": "M2",
     "track": "crypto",
     "depends_on": [
       "S2"
     ],
     "size": "L",
-    "summary": "Strict parser/encoder for mkit-write-grant:v1 and mkit-write-epoch:v1 with canonical-form rejection, grant ids, header encoding and a stateless GrantVerifier, plus a fuzz target.",
+    "summary": "Grant statement codec (SPEC-WRITE-GRANTS §3), ref scopes and effective flags, the X-Write-Grant header codec, grant id, and the §7.4 identity grammar; fuzz target and codec goldens.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm",
+      "golden"
+    ]
+  },
+  {
+    "id": "2.4b",
+    "title": "mkit-attest: epoch and visibility statements, ed25519 owner scheme, stateless grant verifier",
+    "milestone": "M2",
+    "track": "crypto",
+    "depends_on": [
+      "2.4a"
+    ],
+    "size": "M",
+    "summary": "Epoch statement (§5), visibility statement (§9.1), owner-scheme dispatch with ed25519 (§4), the stateless verifier (§7) and registration check (§10); signed goldens.",
     "human_action": false,
     "area_gates": [
       "rust",
@@ -1038,7 +1055,7 @@
     "track": "crypto",
     "depends_on": [
       "2.3",
-      "2.4"
+      "2.4b"
     ],
     "size": "M",
     "summary": "Adds wallet (EIP-191) and WebAuthn P-256 owner-signature schemes bound to the namespace form, with low-S and user-presence rules and golden vectors.",
@@ -1127,7 +1144,7 @@
     "milestone": "M2",
     "track": "client",
     "depends_on": [
-      "2.4",
+      "2.4b",
       "1.20"
     ],
     "size": "M",
