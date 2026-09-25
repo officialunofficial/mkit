@@ -44,3 +44,4 @@ send_wrapper = { version = "0.6", features = ["futures"] }
 futures-executor = "0.3"
 # Parses the shared auth v2 golden fixture (rust/tests/golden/auth-v2/).
 serde_json = "1"
+proptest = "1"

@@ -5,15 +5,20 @@
 //! This crate is runtime-agnostic: it compiles for the host and for
 //! `wasm32-unknown-unknown`, never reads the wall clock directly (see
 //! [`Clock`]) and never spawns on a concrete executor (see [`Spawner`]).
-//! Every public item is re-exported at the crate root; the modules are
-//! private so the surface stays flat while later work packages grow it.
+//! The shared vocabulary is re-exported at the crate root from private
+//! modules. The protocol logic lives in public modules, so call sites name
+//! the protocol they apply (`refs::evaluate_cas`, `quota::evaluate_quota`);
+//! the quota value types are also at the root.
 
+pub mod download;
 mod error;
 mod op;
 mod principal;
-mod quota;
+pub mod quota;
+pub mod refs;
 mod repo;
 mod rt;
+pub mod storage_error;
 mod telemetry;
 
 pub use error::{

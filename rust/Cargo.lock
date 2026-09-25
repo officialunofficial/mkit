@@ -3415,6 +3415,7 @@ dependencies = [
  "futures-core",
  "futures-executor",
  "mkit-core",
+ "proptest",
  "send_wrapper",
  "serde_json",
  "thiserror 2.0.20",
