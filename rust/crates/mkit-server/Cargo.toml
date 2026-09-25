@@ -1,0 +1,46 @@
+# mkit-server — the runtime-agnostic core of the production mkit server
+# (PRD MKIT-29 §5.1). It owns the vocabulary every adapter shares: repo and
+# namespace identifiers, principals, the typed `Operation` model, the
+# transport-neutral `ServerError`, the async/runtime model (`MaybeSend`,
+# `Clock`, `Spawner`, `send_wrap`) and the metrics facade. Native
+# (`mkit-server-native`) and Workers (`mkit-server-worker`) adapters build on
+# it, so it must compile for both the host and `wasm32-unknown-unknown`
+# (enforced by scripts/check-wasm-dep-graph.sh and `just ci-scripts`).
+#
+# Not `publish = false`: `mkit-cli` depends on it from WP-M0-13 and is
+# published. It is first published at the 0.5 release (WP-REL), not before.
+[package]
+name = "mkit-server"
+description = "Runtime-agnostic core of the mkit server: operation model, errors, runtime and telemetry vocabulary"
+keywords = ["mkit", "vcs", "server", "connectrpc", "wasm"]
+categories = ["network-programming", "web-programming::http-server"]
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# default-features = false keeps `pack-zstd` (zstd-sys, a C library) out of
+# the wasm32 graph. Inter-workspace deps need explicit version + path so
+# `cargo publish` accepts them.
+mkit-core = { version = "0.4", path = "../mkit-core", default-features = false }
+thiserror = "2"
+bytes = "1"
+futures-core = "0.3"
+tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# `send_wrap` on wasm32: lets a `!Send` handler future satisfy the `+ Send`
+# bound the generated connectrpc traits require (PRD §5.2).
+send_wrapper = { version = "0.6", features = ["futures"] }
+
+[dev-dependencies]
+futures-executor = "0.3"
+# Parses the shared auth v2 golden fixture (rust/tests/golden/auth-v2/).
+serde_json = "1"

@@ -31,6 +31,13 @@ train).
 
 ### Added
 
+- *(server)* `mkit-server` crate (internal foundation for the production
+  server, MKIT-29): repo and namespace identifiers, principals, the typed
+  `Operation` model, a transport-neutral `ServerError` with redaction and
+  response shaping, the `MaybeSend`/`Clock`/`Spawner`/`send_wrap` runtime
+  model and a `Metrics` facade. Builds for native and `wasm32`; first
+  published with 0.5.
+
 - *(core)* Closure verification now has a pull-based
   `ObjectSource`/`verify_closure_streaming` API and a native
   `verify_closure_store` helper. `ClosureReport` gains the additive

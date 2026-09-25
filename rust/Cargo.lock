@@ -3408,6 +3408,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "mkit-server"
+version = "0.4.2"
+dependencies = [
+ "bytes",
+ "futures-core",
+ "futures-executor",
+ "mkit-core",
+ "send_wrapper",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tracing",
+]
+
+[[package]]
 name = "mkit-test-util"
 version = "0.4.2"
 
