@@ -84,17 +84,29 @@ pub async fn grant_epoch<S: NamespaceStore>(store: &S, p: &Partition) -> Result<
     value.as_ref().map_or(Ok(0), codec::decode_u64)
 }
 
-/// Up to `limit` replay records that expired before `now_ms`, as
-/// `(index key, record key)` pairs to delete. A record is written once per
-/// scope and never revived after its envelope expired, so the deletes need
-/// no precondition.
+/// How long past its envelope's expiry a replay record is kept. An envelope
+/// verifies while the verifier's clock is at most its expiry, so a record
+/// pruned on a clock that runs ahead could let a replay through on a clock
+/// that runs behind. The grace exceeds any tolerated skew: the commit-
+/// deadline margin (SPEC-WRITE-GRANTS §5.5, 5 s) and the auth v2 clock
+/// lead (`mkit_core::write_auth::MAX_CLOCK_LEAD_MS`, 30 s).
+pub const REPLAY_PRUNE_GRACE_MS: u64 = 60_000;
+
+// The grace covers the largest skew the auth v2 verifier tolerates.
+const _: () =
+    assert!(REPLAY_PRUNE_GRACE_MS >= mkit_core::write_auth::MAX_CLOCK_LEAD_MS.unsigned_abs());
+
+/// Up to `limit` replay records whose envelopes expired before
+/// `now_ms - REPLAY_PRUNE_GRACE_MS`, as `(index key, record key)` pairs to
+/// delete. A record is written once per scope and never revived after its
+/// envelope expired, so the deletes need no precondition.
 pub async fn expired_replay_keys<S: NamespaceStore>(
     store: &S,
     p: &Partition,
     now_ms: u64,
     limit: u32,
 ) -> Result<Vec<(Key, Key)>, StoreError> {
-    let (start, end) = keys::replay_expiry_before(now_ms);
+    let (start, end) = keys::replay_expiry_before(now_ms.saturating_sub(REPLAY_PRUNE_GRACE_MS));
     let page = store.scan(p, &start, &end, None, limit).await?;
     page.entries
         .into_iter()
@@ -190,9 +202,14 @@ mod tests {
             assert_eq!(replay_lookup(&kv, &ns(), &old).await.unwrap(), None);
             assert_eq!(quota_state(&kv, &ns(), &scope).await.unwrap(), None);
             assert_eq!(
-                expired_replay_keys(&kv, &ns(), 200, 10).await.unwrap(),
+                expired_replay_keys(&kv, &ns(), 200 + REPLAY_PRUNE_GRACE_MS, 10)
+                    .await
+                    .unwrap(),
                 vec![(keys::replay_expiry(100, &old.0), keys::replay(&old.0))]
             );
+            // Within the grace window nothing is pruned, even long past expiry.
+            let within = expired_replay_keys(&kv, &ns(), 100 + REPLAY_PRUNE_GRACE_MS, 10).await;
+            assert!(within.unwrap().is_empty());
             assert!(
                 stale_quota_keys(&kv, &ns(), 99, 100, 10)
                     .await

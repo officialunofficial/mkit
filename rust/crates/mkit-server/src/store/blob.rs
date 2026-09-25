@@ -30,11 +30,14 @@ impl ByteRange {
     /// The `start..end` slice this range selects in a blob of `len` bytes.
     ///
     /// # Errors
-    /// [`StoreError::Invalid`] when `start > end_inclusive` or
-    /// `start >= len` (unsatisfiable).
+    /// [`StoreError::Invalid`] when `start > end_inclusive` (malformed);
+    /// [`StoreError::RangeNotSatisfiable`] when `start >= len`.
     pub fn resolve(self, len: u64) -> Result<core::ops::Range<u64>, StoreError> {
-        if self.start > self.end_inclusive || self.start >= len {
-            return Err(StoreError::Invalid("unsatisfiable byte range".into()));
+        if self.start > self.end_inclusive {
+            return Err(StoreError::Invalid("byte range start after its end".into()));
+        }
+        if self.start >= len {
+            return Err(StoreError::RangeNotSatisfiable { len });
         }
         Ok(self.start..self.end_inclusive.min(len - 1) + 1)
     }
@@ -75,6 +78,9 @@ pub enum CommitOutcome {
     /// The blob is new.
     Created,
     /// The blob was already there (identical bytes, by construction).
+    /// Advisory: a concurrent writer of the same key may see `Created` too,
+    /// and a backend that cannot tell cheaply may report `Created`. Nothing
+    /// may depend on it for correctness or accounting.
     AlreadyPresent,
 }
 
@@ -92,7 +98,9 @@ pub trait BlobStore: MaybeSend + MaybeSync {
     ) -> impl Future<Output = Result<Self::Sink, StoreError>> + MaybeSend;
 
     /// The blob's bytes, or `range` of them. Backends SHOULD stream
-    /// anything larger than one chunk and never buffer a whole pack.
+    /// anything larger than one chunk and never buffer a whole pack. A
+    /// range starting at or past the end is
+    /// [`StoreError::RangeNotSatisfiable`].
     fn get(
         &self,
         key: &BlobKey,
@@ -114,6 +122,12 @@ pub trait BlobStore: MaybeSend + MaybeSync {
 }
 
 /// An in-progress blob upload.
+///
+/// Memory is bounded by a backend constant (one part, e.g. an R2 multipart
+/// part or a write buffer), never by the blob. Dropping a sink without
+/// `commit` or `abort` leaves nothing visible; its staged bytes may leak
+/// until the backend reclaims them (a temp-file sweep natively, R2's
+/// abort-incomplete-multipart-upload lifecycle rule).
 pub trait PackSink: MaybeSend {
     /// Append a chunk. Writing past the declared length is
     /// [`StoreError::Invalid`].
@@ -121,9 +135,8 @@ pub trait PackSink: MaybeSend {
 
     /// Make the blob visible, only if `BLAKE3(bytes) == key` and the total
     /// equals the declared length; otherwise [`StoreError::Invalid`] and
-    /// nothing is visible. Memory is bounded by one chunk, not the blob
-    /// (a streaming backend withholds its final part until the hash
-    /// verifies).
+    /// nothing is visible (a streaming backend withholds its final part
+    /// until the hash verifies).
     fn commit(self) -> impl Future<Output = Result<CommitOutcome, StoreError>> + MaybeSend;
 
     /// Discard the upload; nothing becomes visible.

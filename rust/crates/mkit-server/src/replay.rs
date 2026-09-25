@@ -42,8 +42,8 @@ pub enum ReplayState {
 
 /// A final result a retry gets back. There is deliberately no variant for
 /// an admission challenge or `pending_verification`, and a
-/// [`StoredRejection`] cannot hold a retryable code, so neither can ever be
-/// stored.
+/// [`StoredRejection`] holds only final codes and no error detail, so
+/// neither can ever be stored.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoredResult {
     /// `UpdateRef`.
@@ -68,7 +68,8 @@ pub enum UpdateRefResult {
     },
 }
 
-/// A storable rejection: a non-retryable code and its public message.
+/// A storable rejection: a final code and its public message, with no
+/// error detail (so never an admission challenge).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredRejection {
     code: Code,
@@ -76,13 +77,31 @@ pub struct StoredRejection {
 }
 
 impl StoredRejection {
-    /// A rejection a retry of the same nonce gets back forever. `None` for a
-    /// retryable code ([`Code::is_retryable`]: `unavailable`, which covers
-    /// `pending_verification`, `aborted` and `resource_exhausted`): those
-    /// outcomes must be re-run on retry, never replayed.
+    /// Whether a retry of the same nonce may get `code` back forever: only
+    /// outcomes that re-running cannot change. Retryable codes
+    /// (`unavailable`, which covers `pending_verification`, `aborted`,
+    /// `resource_exhausted`), transient or server-side ones (`canceled`,
+    /// `deadline_exceeded`, `internal`, `unknown`, `data_loss`) and
+    /// `unauthenticated` are re-run instead.
+    #[must_use]
+    pub const fn is_storable(code: Code) -> bool {
+        matches!(
+            code,
+            Code::InvalidArgument
+                | Code::NotFound
+                | Code::AlreadyExists
+                | Code::PermissionDenied
+                | Code::FailedPrecondition
+                | Code::OutOfRange
+                | Code::Unimplemented
+        )
+    }
+
+    /// A rejection a retry of the same nonce gets back forever; `None`
+    /// unless [`Self::is_storable`].
     #[must_use]
     pub fn new(code: Code, message: impl Into<String>) -> Option<Self> {
-        (!code.is_retryable()).then(|| Self {
+        Self::is_storable(code).then(|| Self {
             code,
             message: message.into(),
         })
@@ -192,20 +211,56 @@ mod tests {
                 StoredResult::UpdateRef(_)
                 | StoredResult::AdvanceRefs(_)
                 | StoredResult::UploadPack => true,
-                StoredResult::Rejected(r) => !r.code().is_retryable(),
+                StoredResult::Rejected(r) => StoredRejection::is_storable(r.code()),
             }
         }
         // A challenge is `permission_denied` with HTTP 402 and a typed
         // detail; a stored rejection holds neither. `pending_verification`
         // is `unavailable`, which is refused.
-        for code in [Code::Unavailable, Code::Aborted, Code::ResourceExhausted] {
-            assert_eq!(StoredRejection::new(code, "x"), None);
-        }
         let denied = StoredRejection::new(Code::PermissionDenied, "denied").unwrap();
         assert_eq!(
             (denied.code(), denied.message()),
             (Code::PermissionDenied, "denied")
         );
         assert!(is_final(&StoredResult::Rejected(denied)));
+    }
+
+    #[test]
+    fn stored_rejection_admits_only_final_codes() {
+        let final_codes = [
+            Code::InvalidArgument,
+            Code::NotFound,
+            Code::AlreadyExists,
+            Code::PermissionDenied,
+            Code::FailedPrecondition,
+            Code::OutOfRange,
+            Code::Unimplemented,
+        ];
+        for code in final_codes {
+            assert!(StoredRejection::new(code, "m").is_some(), "{code:?}");
+        }
+        let refused = [
+            // Retryable: re-run, never replay (covers pending_verification).
+            Code::Unavailable,
+            Code::Aborted,
+            Code::ResourceExhausted,
+            // Transient or client-side cancellation.
+            Code::Canceled,
+            Code::DeadlineExceeded,
+            // Server-side faults.
+            Code::Internal,
+            Code::Unknown,
+            Code::DataLoss,
+            // Credentials: a retry may present valid ones.
+            Code::Unauthenticated,
+        ];
+        for code in refused {
+            assert_eq!(StoredRejection::new(code, "m"), None, "{code:?}");
+        }
+        assert_eq!(
+            final_codes.len() + refused.len(),
+            16,
+            "every Code is classified"
+        );
     }
 }

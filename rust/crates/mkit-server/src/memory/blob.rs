@@ -56,7 +56,8 @@ impl MemoryBlobStore {
 }
 
 /// The upload handle of [`MemoryBlobStore`]. It hashes incrementally and
-/// buffers the blob, which this backend keeps in memory anyway.
+/// buffers the blob: the one exception to `PackSink`'s one-part memory
+/// bound, since this backend holds every blob in memory anyway.
 #[derive(Debug)]
 pub struct MemoryPackSink {
     shared: Arc<Shared>,
@@ -244,12 +245,14 @@ mod tests {
         assert_eq!(get(&store, &key, range(0, 0)).unwrap(), "0");
         assert_eq!(get(&store, &key, range(3, 5)).unwrap(), "345");
         assert_eq!(get(&store, &key, range(8, 100)).unwrap(), "89");
-        for bad in [range(10, 12), range(5, 4)] {
-            assert!(matches!(
-                block_on(store.get(&key, bad)),
-                Err(StoreError::Invalid(_))
-            ));
-        }
+        assert!(matches!(
+            block_on(store.get(&key, range(10, 12))),
+            Err(StoreError::RangeNotSatisfiable { len: 10 })
+        ));
+        assert!(matches!(
+            block_on(store.get(&key, range(5, 4))),
+            Err(StoreError::Invalid(_))
+        ));
     }
 
     #[test]

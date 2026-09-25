@@ -159,7 +159,7 @@ pub fn decode_replay_record(value: &Value) -> Result<ReplayRecord, StoreError> {
                     .ok_or_else(|| corrupt("unknown code"))?;
                 StoredResult::Rejected(
                     StoredRejection::new(code, message)
-                        .ok_or_else(|| corrupt("stored rejection is retryable"))?,
+                        .ok_or_else(|| corrupt("stored rejection code is not final"))?,
                 )
             }
         }),
@@ -286,6 +286,49 @@ mod tests {
                 1
             );
         }
+    }
+
+    #[test]
+    fn codec_golden_bytes() {
+        let head = format!(
+            "\x01{{\"fingerprint\":\"{}\",\"expires_at_ms\":-5,\"state\":",
+            "09".repeat(32)
+        );
+        let committed = |result: &str| format!("{{\"state\":\"committed\",\"result\":{result}}}");
+        let states = [
+            committed(r#"{"kind":"update_ref_committed"}"#),
+            committed(r#"{"kind":"update_ref_conflict","current":null}"#),
+            committed(&format!(
+                r#"{{"kind":"update_ref_conflict","current":"{}"}}"#,
+                "03".repeat(32)
+            )),
+            committed(r#"{"kind":"advance_committed"}"#),
+            committed(r#"{"kind":"advance_head_conflict"}"#),
+            committed(r#"{"kind":"advance_packmap_conflict"}"#),
+            committed(r#"{"kind":"upload_pack"}"#),
+            committed(r#"{"kind":"rejected","code":"permission_denied","message":"no"}"#),
+            r#"{"state":"in_flight","resumable":true}"#.to_owned(),
+            r#"{"state":"in_flight","resumable":false}"#.to_owned(),
+        ];
+        for (record, state) in records().iter().zip(states) {
+            let golden = format!("{head}{state}}}");
+            assert_eq!(encode_replay_record(record).as_bytes(), golden.as_bytes());
+        }
+        let quota = QuotaState {
+            window_start: 1_700_000_000_000,
+            ops: 3,
+            bytes: u64::MAX,
+        };
+        let golden =
+            b"\x01{\"window_start\":1700000000000,\"ops\":3,\"bytes\":18446744073709551615}";
+        assert_eq!(encode_quota_state(&quota).as_bytes(), golden);
+        assert_eq!(encode_ref_id(&[4; 32]).as_bytes(), [4; 32]);
+        assert_eq!(
+            encode_u64(u64::MAX - 1).as_bytes(),
+            [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe]
+        );
+        assert_eq!(encode_u64(1).as_bytes(), [0, 0, 0, 0, 0, 0, 0, 1]);
+        assert_eq!(encode_u32(1).as_bytes(), [0, 0, 0, 1]);
     }
 
     #[test]
