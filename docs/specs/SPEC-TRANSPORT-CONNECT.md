@@ -525,13 +525,14 @@ and the signature does not bind it.
 
 **Signed reads.** The same contract signs read RPCs
 ([SPEC-WRITE-GRANTS §9.2](SPEC-WRITE-GRANTS.md#92-signed-reads)):
-`ListRefs`, `ReadRef`, `PackExists`, `DownloadPack`, `IssueObjectUrl` and
-`GetGrantEpoch`, each with a `body:` commitment over the exact request
-body. A client that has a signer for a remote MUST sign every read RPC to
-it. A request that carries any auth v2 header MUST verify in full, or it
+`ListRefs`, `ReadRef`, `PackExists`, `DownloadPack` and `IssueObjectUrl`,
+each with a `body:` commitment over the exact request body. A client
+that has a signer for a remote MUST sign every read RPC to it. A request that carries any auth v2 header MUST verify in full, or it
 is `unauthenticated`. A signed read is idempotent: the server checks the
 validity window only, and records and looks up no replay entry, so the
-replay rules below apply to writes only. `GetServerInfo` stays unsigned.
+replay rules below apply to writes only. `GetServerInfo`,
+`GetGrantEpoch` and `SetGrantEpoch` stay unsigned.
+
 The validity interval MUST be positive and at most 300,000 ms; sender clocks
 may lead the server by at most 30,000 ms. Expired requests MUST be rejected,
 including requests whose results remain cached. Missing or unsupported auth
@@ -699,9 +700,11 @@ hexadecimal digits, `/`, and a 100-byte name). That fits within the
 (§7.1).
 
 **Carriage.** A client MUST send the `X-Repository` header on every
-repository RPC, read or write. `GetServerInfo` (§2.1) is the one
-exception: it MAY carry the header. A server treats a request without
-the header as the deployment kind below requires. On a signed write,
+repository RPC, read or write. The exceptions are `GetServerInfo`
+(§2.1), which MAY carry the header, and the namespace RPCs
+`GetGrantEpoch` and `SetGrantEpoch`, which carry none
+([SPEC-WRITE-GRANTS §5.3](SPEC-WRITE-GRANTS.md#53-rpcs)). A server treats a request without
+the header as the deployment kind below requires. On a signed request,
 `X-Repository` MUST equal the signed `<repository>` field byte for
 byte. Envelope verification
 detects a mismatch, so a mismatch is `unauthenticated`. Host, path, and
@@ -710,7 +713,7 @@ forwarded headers MUST NOT select the repository.
 **Single-repository deployments.** The deployment configures exactly
 one repository identity. It MAY be a bare name. A request without
 `X-Repository` resolves to that identity on unsigned RPCs; a signed
-write without `X-Repository` is `unauthenticated` (§7.1). A request that carries any
+request without `X-Repository` is `unauthenticated` (§7.1). A request that carries any
 other well-formed identity is `not_found`. The §7.1 reference Worker is
 a single-repository deployment.
 

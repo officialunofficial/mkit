@@ -65,13 +65,13 @@ parameter** is configured per deployment, within the stated constraint.
 | Parameter | Kind | Value | Constraint | Used in |
 |---|---|---|---|---|
 | `GRANT_MAX_LIFETIME_MS` | protocol constant | 2,592,000,000 (30 days) | &mdash; | §3 |
-| `EPOCH_STATEMENT_MAX_LIFETIME_MS` | protocol constant | 2,592,000,000 (30 days) | &mdash; | §5.1 |
+| `EPOCH_STATEMENT_MAX_LIFETIME_MS` | protocol constant | 2,592,000,000 (30 days) | &mdash; | §5.1, §9.1 |
 | `MAX_EPOCH_STEP` | protocol constant | 1024 | &mdash; | §5.2 |
 | `MAX_CLOCK_LEAD_MS` | protocol constant | 30,000 | Equal to the auth v2 clock lead (SPEC-TRANSPORT-CONNECT §7.1). | §7, §5.2 |
-| `MAX_AUDIENCES` | protocol constant | 8 | &mdash; | §3, §5.1 |
+| `MAX_AUDIENCES` | protocol constant | 8 | &mdash; | §3, §5.1, §9.1 |
 | `MAX_REF_SCOPES` | protocol constant | 16 | &mdash; | §3 |
-| `MAX_STATEMENT_BYTES` | protocol constant | 4,096 | &mdash; | §3, §5.1 |
-| `MAX_GRANT_HEADER_BYTES` | protocol constant | 8,192 | &mdash; | §4.2 |
+| `MAX_STATEMENT_BYTES` | protocol constant | 4,096 | &mdash; | §3, §5.1, §9.1 |
+| `MAX_GRANT_HEADER_BYTES` | protocol constant | 8,192 | &mdash; | §4.2, §5.3, §9.1 |
 | `epoch_lease` | deployment parameter | 30 s | Greater than `margin`. | §5.4 |
 | `margin` | deployment parameter | 5 s | Greater than the worst clock skew between the namespace coordinator and any ref shard's storage backend. | §5.5 |
 | `MAX_APPLY_WINDOW` | deployment parameter | 10 s | Less than the auth v2 validity bound of 300 s. | §5.5 |
@@ -106,7 +106,8 @@ No other namespace form exists
 ### 3.1 Canonical encoding
 
 Every statement in this document (the grant here, the epoch statement of
-§5.1 and the URL token of §9.4) uses the same text rules:
+§5.1, the visibility statement of §9.1 and the URL token of §9.4) uses
+the same text rules:
 
 - The statement is a sequence of ASCII fields joined by a single line
   feed (`0x0A`). There is no final line feed, no carriage return, and no
@@ -147,7 +148,7 @@ mkit-write-grant:v1
 | `repository scope` | Either one repository in `namespace`, written `<namespace>/<name>` with `name` from the §7.4 grammar, or the whole namespace, written `<namespace>/*`. No other wildcard exists. |
 | `grantee` | The grantee's Ed25519 public key as 64 lowercase hexadecimal digits. |
 | `capabilities` | Exactly one of `read`, `read,write`, `write`. |
-| `audiences` | 1 to `MAX_AUDIENCES` (8) deployment origins, joined by `,`, in ascending byte order. Each origin satisfies the auth v2 audience rules of SPEC-TRANSPORT-CONNECT §7.1 exactly: lowercase `http://` or `https://` origin, no userinfo, path, query, fragment, trailing dot or default port. No wildcard exists (D5). |
+| `audiences` | 1 to `MAX_AUDIENCES` (8) deployment origins, joined by `,`, in ascending byte order. Each origin satisfies the auth v2 audience rules of SPEC-TRANSPORT-CONNECT §7.1 exactly: lowercase `http://` or `https://` origin, no userinfo, path, query, fragment, trailing dot or default port. No wildcard exists (D5). A deployment's audience, the value §7 step 5 looks for, MUST be an origin whose host the operator controls, never a loopback address. |
 | `ref scopes` | `-` when `capabilities` is `read`. Otherwise 1 to `MAX_REF_SCOPES` (16) entries `<pattern>=<flags>`, joined by `;`, in ascending byte order of the whole entry, with no two entries sharing a pattern. §3.3 defines patterns and flags. |
 | `epoch` | Decimal epoch (§5). The grant is valid only while this equals the stored epoch. |
 | `created` | Decimal millisecond timestamp. |
@@ -190,7 +191,10 @@ contains only lowercase letters, digits, `.`, `-`, `:`, `/`, `[` and
 
 The **grant id** is the BLAKE3 of the canonical statement bytes, as 64
 lowercase hexadecimal digits. It does not cover the scheme or the
-signature. Servers SHOULD log it with each request it authorizes.
+signature. Servers SHOULD log it with each request it authorizes. The
+logged grant id is not an audit binding: auth v2 does not sign the grant
+(§4.2), so the id records which grant the server accepted, not which
+grant the signer chose.
 
 An example grant (illustrative, not a test vector):
 
@@ -248,9 +252,9 @@ statements (§5.1): read "statement" below as either.
 
 | Scheme | Signed message | Blob | Owner identity |
 |---|---|---|---|
-| `ed25519` | The 32-byte BLAKE3 of the canonical statement. Strict Ed25519 verification: a non-canonical `S`, a non-canonical or small-order public key, or a small-order `R` is rejected. | The 64-byte signature. | The public key. Valid only for an `ed25519-` namespace. |
+| `ed25519` | The 32-byte BLAKE3 of the canonical statement. Verification uses the strict predicate of [SPEC-SIGNING §1](SPEC-SIGNING.md#1-signing-primitives). | The 64-byte signature. | The public key. Valid only for an `ed25519-` namespace. |
 | `secp256k1-eip191` | The EIP-191 version `0x45` personal message: the bytes `"\x19Ethereum Signed Message:\n"`, the statement's byte length in decimal ASCII, then the statement bytes. The digest is the Keccak-256 of that message. | 65 bytes: `r` (32 bytes, big-endian), `s` (32 bytes, big-endian), then `v` in {27, 28}. | The address (§4.1) of the public key recovered from `r`, `s` and recovery id `v - 27`. Valid only for a `0x` namespace. |
-| `webauthn-p256` | A WebAuthn assertion (§4.3). ECDSA P-256 with SHA-256 over `authenticatorData` followed by the SHA-256 of `clientDataJSON`. | Four length-prefixed fields, in order: the 64-byte public key (`x` then `y`, each 32 bytes big-endian), `authenticatorData`, `clientDataJSON`, and the DER signature. Nothing follows the fourth field. | The address (§4.1) of the public key. Valid only for a `0x` namespace. |
+| `webauthn-p256` | A WebAuthn assertion (§4.3). ECDSA P-256 with SHA-256 over `authenticatorData` followed by the SHA-256 of `clientDataJSON`. | Four length-prefixed fields, in order: the public key, exactly 64 bytes (`x` then `y`, each 32 bytes big-endian); `authenticatorData`; `clientDataJSON`; and the 64-byte signature `r‖s`, each 32 bytes big-endian. Nothing follows the fourth field. | The address (§4.1) of the public key. Valid only for a `0x` namespace. |
 
 The `secp256k1-eip191` scheme signs the readable statement, not a hash,
 so a wallet shows the owner what it grants.
@@ -310,22 +314,23 @@ A request that carries `X-Write-Grant` without auth v2 headers is
 
 For `webauthn-p256`, the verifier MUST check all of these:
 
-1. `authenticatorData` is at least 37 bytes. Its flags byte (offset 32)
+1. The public-key field is exactly 64 bytes, and the signature field is
+   exactly 64 bytes. `authenticatorData` is at least 37 bytes. Its flags byte (offset 32)
    has the user-present bit (`0x01`) set. User verification and the
    signature counter are not checked; the verifier is stateless.
 2. `clientDataJSON` is a JSON object
    ([RFC 8259](https://www.rfc-editor.org/rfc/rfc8259)) with no
-   duplicate member names. Its `type` member is the string
+   duplicate member names at any depth. Its `type` member is the string
    `webauthn.get`. Its `challenge` member is exactly the string of 43
    characters that is the unpadded base64url of the 32-byte BLAKE3 of
-   the canonical statement. A `crossOrigin` member whose value is `true`
-   is rejected.
+   the canonical statement. `crossOrigin`, if present, is `false`. A
+   `topOrigin` member is rejected.
 3. The signature is verified over the exact received `clientDataJSON`
    bytes, never a reserialization.
 4. The first 32 bytes of `authenticatorData` equal the SHA-256 of a
    relying-party id the deployment has configured, and the `origin`
-   member of `clientDataJSON` is an origin the deployment has
-   configured for that relying party.
+   member of `clientDataJSON` equals, byte for byte, an origin the
+   deployment has configured for that relying party.
 
 A deployment that has configured no relying party MUST NOT accept, or
 advertise, `webauthn-p256`. A passkey signs only for its own relying
@@ -341,14 +346,13 @@ Both ECDSA schemes therefore fix one form.
   verifier MUST reject a high-`s` signature and MUST NOT normalize it.
   A client that receives a high-`s` signature from a wallet MUST
   replace `s` with `n - s` and flip `v` between 27 and 28 before
-  encoding.
+  encoding. A client that receives `v` in {0, 1} adds 27.
 - For `webauthn-p256`, authenticators return DER signatures that may be
-  high-`s`. A client MUST normalize `s` to at most `n / 2` (the P-256
-  group order `n`) and re-encode the DER before building the blob. A
-  verifier MUST reject a DER signature that is not strict DER (a
-  `SEQUENCE` of exactly two positive, minimally encoded `INTEGER`s with
-  definite, minimal lengths and no trailing bytes), whose `r` or `s` is
-  outside `[1, n - 1]`, or whose `s` exceeds `n / 2`.
+  high-`s`. A client MUST decode the DER into the raw 64-byte `r‖s`
+  form and normalize `s` to at most `n / 2` (the P-256 group order `n`)
+  before building the blob. A verifier MUST reject a signature whose
+  `r` or `s` is outside `[1, n - 1]`, or whose `s` exceeds `n / 2`, and
+  MUST NOT normalize it.
 
 ---
 
@@ -433,15 +437,17 @@ replayed later, or at another deployment.
 Both RPCs act on a namespace, not a repository, and their proto lands
 with the M2 implementation, additively.
 
+`GetGrantEpoch` and `SetGrantEpoch` are namespace RPCs. They carry no
+`X-Repository`, and a client MUST NOT sign them.
+
 - **`GetGrantEpoch(namespace)`** is a unary read. It requires no
   authentication; a server MUST answer it without auth v2 headers. It
   returns the namespace's stored epoch, and 0 for a namespace with no
   stored epoch. The answer does not reveal whether the namespace holds
-  any repository. A client that has a signer for the remote signs it
-  like any read (§9.2), and the server then verifies the envelope; the
-  signer does not change the answer.
+  any repository.
 - **`SetGrantEpoch(statement)`** is a unary call whose request carries
-  the signed epoch statement in the §4.2 encoding. The owner signature
+  the signed epoch statement in the §4.2 encoding, at most
+  `MAX_GRANT_HEADER_BYTES` (8,192) bytes. The owner signature
   is its only authorization; it needs no auth v2 envelope and records
   no replay entry, because a statement is idempotent. It returns the
   stored epoch **only after** the revocation is complete (§5.4). While
@@ -482,6 +488,16 @@ It MUST use epoch leases:
   shards), not O(refs).
 - An idle shard, one with no lease, can never apply under a stale
   epoch, because it renews first.
+- The coordinator MUST durably record a lease before returning it. It
+  MUST serialize lease grants with epoch changes (one lock or a
+  serializable transaction), so the leased-shard set `SetGrantEpoch`
+  waits on includes every lease granted at the old epoch. A coordinator
+  that lost its lease table MUST NOT report completion until
+  `epoch_lease + margin` after it resumes.
+- A shard uses its cached epoch or visibility to authorize a read only
+  until `lease_expires - margin` on its own clock.
+- `SetGrantEpoch` completion also waits until every other cached copy of
+  the epoch has expired or been invalidated.
 
 ### 5.5 Commit deadline
 
@@ -531,7 +547,9 @@ the lease expire.
 
 Reads have no `apply`. A read of a private repository authorized by a
 grant (§9.3) compares the grant's epoch with the leased epoch when the
-read is authorized. After `SetGrantEpoch` reports success, no read that
+read is authorized, and a shard uses that leased epoch only until
+`lease_expires - margin` on its own clock (§5.4). With the completion
+rules of §5.4, after `SetGrantEpoch` reports success, no read that
 begins afterwards is authorized by an old-epoch grant. A read authorized
 earlier, for example a long `DownloadPack` stream, may finish.
 
@@ -560,20 +578,24 @@ A **read** of a private repository (§9) is authorized by the same three
 paths, with the `read` capability in place of `write`. A read of a
 public repository needs no authorization.
 
+A client MUST NOT attach a grant when it signs with the namespace key.
 When a request carries a grant, the grant is the only path the server
 evaluates for it. A write whose grant fails verification is
 `permission_denied` even if the signer's key would have authorized it
 through another path, so a client never mistakes a broken grant for a
 working one. On a read of a private repository, a failing grant is
-`not_found` (§9.3).
+`not_found` (§9.3). On ssh and enc no grant is carried, and any of the
+three paths may authorize (§10).
 
 A grant with `write` does not imply `read`. A client that pushes to a
 private repository reads its refs first, so an issuer SHOULD grant
 `read,write` for a private repository (informative).
 
 `SetGrantEpoch` is authorized only by the owner signature on its
-statement (§5.3). `GetGrantEpoch` and `GetServerInfo` need no
-authorization.
+statement (§5.3). `SetRepoVisibility` is authorized only by the owner
+key, an authority source, or an owner-signed visibility statement
+(§9.1); a grant never authorizes it. `GetGrantEpoch` and
+`GetServerInfo` need no authorization.
 
 **Rollout (informative).** Before the M2 implementation, only the owner
 key and authority-source paths exist, so only `ed25519-` owners, or
@@ -600,7 +622,7 @@ read of a private repository, every failure is `not_found` (§9.3).
    `<namespace>/*`.
 7. The capabilities cover the operation: `write` for the write
    procedures (`UpdateRef`, `AdvanceRefs`, `BeginUpload`, an
-   `UploadPack` without a ticket, `SetRepoVisibility`), `read` for a
+   `UploadPack` without a ticket), `read` for a
    read of a private repository (§9.2 lists the read procedures).
 8. For writes, the ref scopes cover every ref the RPC names (§8).
 9. The `grantee` equals the auth v2 signer (`X-Public-Key`), or, on ssh
@@ -621,9 +643,9 @@ All of this completes after authentication and the replay-record and
 saved-reply check of SPEC-TRANSPORT-CONNECT §7.1, and before any quota,
 admission, reservation, or replay-record allocation
 ([SPEC-TRANSPORT-CONNECT §7.5](SPEC-TRANSPORT-CONNECT.md#75-namespace-and-write-policy),
-"Order"). A rejection allocates nothing. A server MAY cache a verified
-grant for the duration of one request, never across requests past the
-epoch check.
+"Order"). A rejection allocates nothing. A server MAY cache the outcome of steps
+1, 3 and 4 by exact header bytes, and evaluates every other step on each
+request.
 
 ---
 
@@ -705,15 +727,43 @@ Each repository has a visibility, `public` or `private`, stored in the
 namespace coordinator. It is `public` unless changed.
 
 **`SetRepoVisibility(repository, visibility)`** is the only way to
-change it. It is a unary write:
+change it. It is a unary call, authorized only by the owner key (§6
+path 1), an authority source, or an owner-signed visibility statement.
+A grant never authorizes it.
 
-- signed with auth v2 and a `body:` commitment, and replay-protected
-  like any write (SPEC-TRANSPORT-CONNECT §7.1);
-- authorized by the owner key, a grant with `write` whose repository
-  scope covers the repository (ref scopes do not apply), or an
-  authority source (§6);
-- valid on a repository that does not exist yet. It is then an
-  authorized write, so it creates the repository, with no refs. A client
+- Under the owner key or an authority source, the request is signed
+  with auth v2 and a `body:` commitment, and is replay-protected like
+  any write (SPEC-TRANSPORT-CONNECT §7.1).
+- Otherwise the request carries a visibility statement in the §4.2
+  encoding, at most `MAX_GRANT_HEADER_BYTES` (8,192) bytes, signed with
+  any §4 scheme valid for the namespace. It needs no auth v2 envelope,
+  and `X-Repository` MUST equal the statement's repository. The
+  statement is seven fields, encoded by the §3.1 rules:
+
+  ```text
+  mkit-repo-visibility:v1
+  <repository>
+  <visibility>
+  <audiences>
+  <created epoch milliseconds>
+  <expiry epoch milliseconds>
+  <nonce>
+  ```
+
+  `repository` is a full identity `<namespace>/<name>` (§7.4);
+  `visibility` is `public` or `private`; `audiences` follows the grant's
+  audience rules (§3.2); `created < expiry`, with `expiry - created` at
+  most `EPOCH_STATEMENT_MAX_LIFETIME_MS`; `nonce` is 64 lowercase
+  hexadecimal digits. The deployment accepts it only if the scheme is
+  advertised and the signature verifies (§4), the recovered or derived
+  owner equals the repository's namespace, its own audience is in
+  `audiences`, `created <= now + MAX_CLOCK_LEAD_MS` and `now < expiry`.
+  The deployment stores the last accepted `created` per repository and
+  accepts only a greater one; identical bytes are an idempotent retry.
+  Any other failure is `permission_denied`.
+- On a repository that does not exist, `SetRepoVisibility` records the
+  visibility without creating the repository. The repository is created
+  by its first authorized write, with the recorded visibility. A client
   that wants a private repository sets `private` before its first push,
   so no content is ever public.
 
@@ -723,9 +773,10 @@ shard has acknowledged the change or its lease has expired (§5.4), and
 every other cached copy of the visibility the deployment keeps has
 expired or been invalidated. While completion is pending the RPC MAY
 return retryable `unavailable` with a retry-after hint. A retry of the
-same signed operation returns success once complete. A new operation
-that sets the visibility the repository already has changes nothing,
-and succeeds under the same completion rule.
+same signed operation, or of the same statement bytes, returns success
+once complete. A new operation that sets the visibility the repository
+already has changes nothing, and succeeds under the same completion
+rule.
 
 ### 9.2 Signed reads
 
@@ -738,7 +789,7 @@ enveloped request message. The required headers are the same as for a
 unary write.
 
 The read procedures are `ListRefs`, `ReadRef`, `PackExists`,
-`DownloadPack`, `IssueObjectUrl` and `GetGrantEpoch`.
+`DownloadPack` and `IssueObjectUrl`.
 
 - A request that carries any auth v2 header (`X-Envelope-Version`,
   `X-Public-Key`, `X-Signature`) is signed, and the server MUST verify
@@ -751,8 +802,9 @@ The read procedures are `ListRefs`, `ReadRef`, `PackExists`,
 - A request with no auth v2 header is anonymous.
 - `IssueObjectUrl` MUST be signed; an anonymous one is
   `unauthenticated`.
-- `GetServerInfo` stays unsigned. A client MUST NOT sign it, and a
-  server answers it without verifying any auth v2 header on it.
+- `GetServerInfo`, `GetGrantEpoch` and `SetGrantEpoch` stay unsigned
+  (§5.3). A client MUST NOT sign them, and a server answers them without
+  verifying any auth v2 header on them.
 
 A client that has an auth v2 signer for a remote MUST sign every read
 procedure it sends to that remote (D28). Writers need this to be seen as
@@ -813,7 +865,7 @@ mkit-url-token:v1
 <audience>
 <repository>
 <target>
-<view>
+<epoch>
 <issued epoch milliseconds>
 <expiry epoch milliseconds>
 <key id>
@@ -824,14 +876,15 @@ mkit-url-token:v1
 | `audience` | The issuing deployment's auth v2 audience. |
 | `repository` | The full repository identity (§7.4). |
 | `target` | `object:<64 lowercase hex object id>`, or `path:<ref>:<path>` where `<ref>` is a full ref name valid under SPEC-REFS §3 and `<path>` is the unpadded base64url of the UTF-8 path. The path is 1 to 1,024 bytes of tree entry names joined by `/`, with no leading, trailing or repeated `/` and no `.` or `..` entry. Ref names contain no `:`, so the field splits at its first two `:`. |
-| `view` | `writer` if the caller had write access to the repository when the token was issued, else `reader`. Serving resolves the target in that view. |
+| `epoch` | The namespace's stored epoch when the token was issued (§5). |
 | `issued`, `expiry` | Decimal millisecond timestamps, `issued < expiry`, `expiry - issued` at most `url_token_ttl`. |
 | `key id` | The first 16 bytes of the BLAKE3 of the signing key's 32-byte public key, as 32 lowercase hexadecimal digits. |
 
 **Signature and encoding.** The token is
 `<statement>.<signature>`: the unpadded base64url of the statement, a
-`.`, and the unpadded base64url of a 64-byte strict Ed25519 signature
-over the 32-byte BLAKE3 of the statement. `mkit-url-token:v1` is a new
+`.`, and the unpadded base64url of a 64-byte Ed25519 signature over the
+32-byte BLAKE3 of the statement. Verification uses the strict predicate
+of [SPEC-SIGNING §1](SPEC-SIGNING.md#1-signing-primitives). `mkit-url-token:v1` is a new
 domain separator.
 
 **Key.** A token is signed by a **dedicated deployment URL-token key**:
@@ -847,8 +900,10 @@ a token for a request only if it decodes by the §4.2 base64url rules;
 the statement parses; `key id` names a key in the deployment's
 verification set; the signature verifies under that key; `audience` is
 the deployment's own; `repository` and `target` equal the request's,
-byte for byte; and `now < expiry`. Anything else is `not_found` for a
-private repository, as in §9.3.
+byte for byte; `epoch` equals the stored epoch, read as §5.6 requires
+for reads; and `now < expiry`. Anything else is `not_found` for a
+private repository, as in §9.3. Serving always resolves the target in
+the published view.
 
 **Response.** `IssueObjectUrl` returns the token and its expiry. The URL
 form that carries a token, and cache headers, are specified with HTTP
@@ -868,7 +923,10 @@ for their principals are registered server-side instead.
 - The deployment operator registers a signed grant (in the §4.2
   encoding) for a principal (informative: an operator command in M2,
   which the M5 admin API later wraps). Registration verifies §7 steps
-  1 to 5 and rejects a grant whose grantee is not the principal.
+  1, 3, 4 and 5 and rejects a grant whose grantee is not the principal.
+- No grant is carried on ssh and enc, so any of the three §6 paths may
+  authorize a request: the owner key when the principal is the
+  namespace's `ed25519-` key, an authority source, or a registered grant.
 - At identity mapping, the server looks up the registered grants whose
   grantee is the principal. The request is authorized through the grant
   path (§6) if one of them passes every §7 step for it, with the
@@ -880,7 +938,8 @@ for their principals are registered server-side instead.
   as the ref write.
 - A deployment that accepts registered grants MUST have an auth v2
   audience, even if it serves no HTTP, and a registered grant MUST list
-  it (§7 step 5). This keeps a grant issued for one deployment from
+  it (§7 step 5). The audience MUST be an origin whose host the operator
+  controls, never a loopback address. This keeps a grant issued for one deployment from
   being registered at another.
 - The epoch of an ssh-only deployment is raised by applying an epoch
   statement through the operator, with the §5.2 acceptance rules
@@ -896,7 +955,8 @@ for their principals are registered server-side instead.
 | `X-Write-Grant` on a request without auth v2 headers | `unauthenticated` |
 | On a write: a grant that is missing where one is needed, malformed, badly signed, for another owner or audience, expired or not yet valid, out of repository or ref scope, without the needed capability, or at a different epoch | `permission_denied` |
 | An epoch mismatch detected at `apply` (§5.4) or a ref flag that fails at `apply` (§8.2). Nothing is committed and the reservation is aborted. | `permission_denied` |
-| An epoch statement that fails §5.2 | `permission_denied` |
+| An epoch statement that fails §5.2, or a visibility statement that fails §9.1 | `permission_denied` |
+| `SetRepoVisibility` from a principal that is neither the owner key nor authorized by an authority source, without a visibility statement | `permission_denied` |
 | A missed commit deadline (§5.5) | `unavailable` (SPEC-TRANSPORT-CONNECT §5) |
 | `SetGrantEpoch` or `SetRepoVisibility` whose completion is pending | `unavailable`, with a retry-after hint |
 | Any unauthorized read of a private repository, including every grant failure on it | `not_found` |
@@ -931,6 +991,11 @@ client maps both to `AccessDenied`
   revoked grant commits after `SetGrantEpoch` succeeds.
 - Epoch revocation is namespace-wide by design. It keeps per-namespace
   server state to one integer.
+- Epochs are per deployment. To revoke a grant, the owner MUST submit an
+  epoch statement to every deployment in the grant's audience list.
+  Until then the grant stays valid there.
+- Only the owner changes visibility (§9.1). A grant, however narrow its
+  ref scopes, cannot make a private repository public.
 - The namespace wildcard scope covers repositories that do not exist
   yet. Owners SHOULD prefer single-repository scopes for agents.
 - A `webauthn-p256` grant signs a digest, not readable text, so the
@@ -947,14 +1012,15 @@ client maps both to `AccessDenied`
   repositories from being enumerated.
 - A URL token is a bearer credential for one target for at most
   `url_token_ttl`. Its dedicated key limits the damage of a key leak to
-  URL tokens. Raising the epoch does not revoke tokens already issued;
-  their short lifetime bounds that exposure.
+  URL tokens. Raising the epoch invalidates every outstanding token in
+  the namespace. Serving resolves every token in the published view, so
+  a forwarded token never exposes content that only writers see.
 - Signing reads reveals the signer's identity to the server. Clients
   sign reads only to the remote they already sign writes to.
 
 ### 12.1 Domain separators
 
-This document introduces three domain separators
+This document introduces four domain separators
 ([SPEC-CONVENTIONS §4](SPEC-CONVENTIONS.md#4-domain-separator-and-namespace-naming)).
 Each is the literal first field of its statement and is permanent:
 
@@ -962,6 +1028,7 @@ Each is the literal first field of its statement and is permanent:
 |---|---|
 | `mkit-write-grant:v1` | Grant (§3). |
 | `mkit-write-epoch:v1` | Epoch statement (§5.1). |
+| `mkit-repo-visibility:v1` | Visibility statement (§9.1). |
 | `mkit-url-token:v1` | URL token (§9.4). |
 
 They are distinct from the auth v2 separator `mkit-write:v2` and from
@@ -982,8 +1049,8 @@ the workspace grant separator `mkit-workspace-grant:v1`.
   and signing keys of [SPEC-CONFIG-SECURITY](SPEC-CONFIG-SECURITY.md).
 - HTTP object serving: URL forms, target resolution, reachability, cache
   headers, and the publication of the URL-token key set (M4, mkit#1088).
-- The published view and quarantine, which decide what a `reader`
-  caller sees (M5).
+- The published view and quarantine, which decide what the published
+  view contains (M5).
 - Owners that no single key controls, for example multisig or contract
   accounts.
 - The workspace grant (`mkit-workspace-grant:v1`). It grants workspace
@@ -1025,4 +1092,5 @@ wrong namespace form; a URL token; and a signed read.
 | A rejected grant allocates no quota, reservation, or replay record. | §7, final paragraph. |
 | An unauthorized read of a private repository is indistinguishable from a read of a missing repository. | §9.3. |
 | A signed read never creates or consumes a replay record. | §9.2. |
-| A URL token is signed only by the dedicated URL-token key and is valid only for its audience, repository and target until its expiry. | §9.4. |
+| A URL token is signed only by the dedicated URL-token key, is valid only for its audience, repository and target until its expiry and while its epoch equals the stored epoch, and resolves only in the published view. | §9.4. |
+| A repository's visibility changes only through the owner key, an authority source, or an owner-signed visibility statement newer than the last accepted one; never through a grant. | §9.1. |
