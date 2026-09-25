@@ -1,34 +1,36 @@
 ---
 spec: SPEC-TRANSPORT-CONNECT
-version: 1
+version: 2
 status: draft-normative
 audience: implementers of mkit.transport.v1 Connect servers and clients (reference Worker, `mkit serve`, native CLI transport)
 ---
 
 # SPEC-TRANSPORT-CONNECT &mdash; mkit.transport.v1, the canonical Connect remote protocol
 
-Status: **Draft** for mkit v1. This document has not yet had maintainer
-sign-off on the RPC shapes it defines (the acceptance gate for the
-issue that produced it). All three deployment targets §7 describes now
-exist: the native CLI Connect client (§7.3, mkit#701) is implemented
-and tested against a real (in-process, memory-backed) `TransportService`
-server; `mkit serve`'s HTTP mode (§7.2, mkit#700) hosts the same
-generated service over axum/hyper; and the reference Worker (§7.1,
-mkit#699, `apps/vcs-worker`) hosts it over `workers-rs` against R2 +
-a Durable Object. The client and the Worker have now been verified
-talking to each other over a real local `mkit+https://`-equivalent
-deployment (`wrangler dev`, loopback `mkit+http://`) &mdash; including real
-`mkit push`/`clone`/`pull` &mdash; via `ConnectTransport`'s new envelope-signing
-auth mode; see "Reference implementation" below and
-`apps/vcs-worker/README.md` "Known limitations". A real DEPLOYED
-Cloudflare Worker (not just `wrangler dev`) remains unverified.
+Status: **Draft**, version 2. Version 1 defined a single-repository
+service: one deployment served one repository, and a valid auth v2
+signature was enough to write. Version 2 is a semantic revision of the
+same wire package. It adds multi-repository addressing (§7.4), namespace
+and write policy (§7.5), `GetServerInfo` (§2.1), upload tickets and
+resumable parts (§7.6), ref deletion (§7.8), and the consistency and
+paging rules of a sharded server (§7.9). `mkit.transport.v1` evolves
+additively: v2 adds RPCs and fields and never renumbers or removes one,
+so `buf breaking` stays green. The breaks are semantic only. mkit is
+pre-production (CONTRIBUTING, "Pre-production compatibility policy"), so
+v2 has no v1 compatibility machinery: no v1 reader, no negotiation, and
+no fallback mode. The proto messages v2 names land with the M1
+implementation (§8); until then the implementations described under
+"Reference implementation" below implement the v1 surface only. §9
+records the version history.
+
 Scope: the `mkit.transport.v1.TransportService` Connect service &mdash; its
 proto shape, verb-to-trait mapping, CAS semantics, error-code mapping,
-and pack-transfer streaming design &mdash; and how the three planned
-deployment targets (reference Worker, `mkit serve`, native CLI client)
-consume one generated codebase. It does not cover S3 multipart, the
-`WatchRefs` live-feed migration, or any server/client implementation;
-those are separate, later changes (§8).
+pack-transfer streaming design, repository addressing, write
+authorization policy, upload tickets, and read consistency &mdash; and how
+the deployment targets (reference Worker, `mkit serve`, native CLI
+client) consume one generated codebase. It does not cover S3 multipart,
+the `WatchRefs` live-feed migration, write grants, admission challenges,
+or any server/client implementation; those are separate changes (§8).
 
 Supersedes: [SPEC-TRANSPORT](SPEC-TRANSPORT.md) §5 ("HTTP transport") as
 the ACTIVE implementation behind `mkit+https://`/`mkit+http://` in
@@ -128,6 +130,10 @@ same trait `mkit-transport-http`/`-s3`/`-ssh`/`-enc` implement today.
 | `download_pack(key)` | `DownloadPack` | server-streaming |
 | `upload_blob(bytes, key)` (default impl: delegates to `upload_pack`) | *(none &mdash; client calls `UploadPack`)* | &mdash; |
 | `download_blob(key)` (default impl: delegates to `download_pack`) | *(none &mdash; client calls `DownloadPack`)* | &mdash; |
+| *(none &mdash; deployment discovery, M1)* | `GetServerInfo` (§2.1) | unary |
+| *(none &mdash; upload ticket, M1)* | `BeginUpload` (§7.6) | unary |
+| *(none &mdash; one part of a ticketed upload, M1)* | `UploadPart` (§7.6) | client-streaming |
+| *(none &mdash; completes a multipart upload, M1)* | `CompleteUpload` (§7.6) | unary |
 
 `write_ref` and the blob verbs are `Transport`-trait-level default
 methods that delegate to another trait method **before any transport
@@ -138,8 +144,47 @@ Connect server implementing the seven wire RPCs above (§2's table)
 gets every `Transport` trait verb for free through the client-side
 default impls, exactly as every other transport already does.
 
+The four rows marked "M1" are v2 additions. They have no `Transport`
+trait verb: they are deployment discovery and the ticketed upload
+protocol, which a client drives around the seven verb RPCs. Their proto
+messages land with the M1 implementation (§8), additively.
+
 Endpoints follow the standard Connect convention:
 `POST /mkit.transport.v1.TransportService/<Method>`.
+
+### 2.1 `GetServerInfo`
+
+`GetServerInfo` tells a client what a deployment supports before the
+client relies on it. The request is empty. It MAY carry `X-Repository`
+(§7.4). The response MUST NOT depend on whether that repository exists,
+so it is never an existence oracle (§7.4, isolation).
+
+The call is unauthenticated: a server MUST answer it without auth v2
+headers or a bearer token. The response MAY be cached with
+`Cache-Control: private, max-age=<n>` where `n` is at most 60 seconds.
+
+`GetServerInfoResponse` carries these fields:
+
+| Field | Meaning |
+|---|---|
+| `protocol` | The wire package, `mkit.transport.v1`. |
+| `spec_version` | This document's version, `2`. |
+| `max_pack_bytes` | The largest pack the deployment accepts. A deployment MAY advertise a lower value in indexed mode than in opaque mode, for example on a runtime with tight CPU limits. |
+| `part_size` | The part size for resumable uploads (§7.6): a power of two, at least 8 MiB. |
+| `max_parts` | The largest number of parts in one upload (§7.6). |
+| `max_list_refs_page_size` | The largest number of refs one `ListRefs` page returns (§7.9). |
+| `begin_upload_threshold_bytes` | Packs smaller than this MAY skip `BeginUpload` (§7.6). It is `0` on every multi-repository deployment and whenever `admission` is true. On a single-repository deployment without admission, the value is deployment-defined. |
+| `atomic_advance` | Whether `AdvanceRefs` commits the head and packmap atomically (§4). |
+| `indexed_mode` | Whether the deployment decodes and verifies pushed packs before refs move. |
+| `admission` | Whether the deployment runs an admission step that can challenge a write (§5.1, forthcoming). |
+| `receipt_public_key`, `receipt_key_id` | The key that signs storage receipts, and its key id. Empty until storage receipts are specified. |
+| `grant_schemes` | The owner signature schemes the deployment accepts on write grants (SPEC-WRITE-GRANTS, forthcoming). Empty until that document lands. |
+| `namespace_policy` | `allowlist`, `any`, or `single-repository` (§7.5). `single-repository` is advertised, never configured. |
+| `index_fanout` | The fixed object-id-prefix fan-out of the deployment's repository index (§7.9). The default is 4096. |
+
+A client MUST NOT assume atomic advance without `atomic_advance = true`
+from this call. `atomic_advance` replaces the client-side opt-in of v1
+(§7.3): a client reads it here instead of from local configuration.
 
 ---
 
@@ -225,14 +270,10 @@ error) channel.
 Per `Transport::supports_atomic_advance`'s doc comment, a server
 backed by a transactional ref store (a single Durable Object
 transaction, a database transaction) SHOULD commit both writes
-atomically and MUST advertise this out-of-band to the client (the
-Connect service itself carries no `supports_atomic_advance` RPC &mdash; a
-deployment either documents its guarantee or a client configuration
-flag records it, mirroring how `Transport::supports_atomic_advance()`
-is a Rust-level trait method today, not a wire negotiation). A
-non-transactional server MUST fall back to the same
-packmap-then-head ordering the trait's default `advance_refs`
-implementation uses, and MUST NOT advertise atomic support if it
+atomically and MUST advertise this through `GetServerInfo`'s
+`atomic_advance` field (§2.1). A non-transactional server MUST fall
+back to the same packmap-then-head ordering the trait's default
+`advance_refs` implementation uses, and MUST NOT advertise atomic support if it
 uses that fallback.
 
 ---
@@ -249,8 +290,8 @@ maps onto a standard Connect code:
 | `TransportError` | Connect code | Raised by |
 |---|---|---|
 | `PackNotFound` | `not_found` | `DownloadPack` before any chunk is sent; `PackExists` never raises this (it returns `exists = false` instead). |
-| `AccessDenied` | `permission_denied` | Any RPC, when the deployment's auth layer (§7) rejects the caller. |
-| `RefConflict` | `failed_precondition` | `UpdateRef` / the relevant half of `AdvanceRefs` on a CAS mismatch. |
+| `AccessDenied` | `permission_denied`; a client also maps `unauthenticated` to `AccessDenied`. | Any RPC, when the deployment's write or namespace policy (§7.5) rejects an authenticated caller, or a ticket does not bind to the request (§7.6). |
+| `RefConflict` | `failed_precondition` | `UpdateRef` on a CAS mismatch, including deletion of an absent ref (§7.8). `AdvanceRefs` reports its conflicts as typed outcomes (§4), never as this error. |
 | `InvalidRef` | `invalid_argument` | Any RPC taking a ref name that fails SPEC-REFS §3. |
 | `ConnectionFailed` | *(not server-raised &mdash; client-observed transport failure, for example TCP reset, deadline exceeded)* | &mdash; |
 | `ServerError{status}` | `unavailable` (5xx-equivalent) or `resource_exhausted` (429-equivalent) | Deployment-specific overload / backend failure. |
@@ -258,7 +299,7 @@ maps onto a standard Connect code:
 | `ProtocolError` | `invalid_argument` | A client-streaming call whose `header` is missing, arrives after a `chunk`, or whose declared/received byte counts disagree (§6). |
 | `PayloadTooLarge` | `resource_exhausted` | `UploadPack` header `total_bytes` (or the observed stream length) exceeds the server's cap. |
 | `InsecureScheme` | *(not applicable &mdash; URL-scheme concern, handled client-side before any RPC is made; see SPEC-TRANSPORT §3)* | &mdash; |
-| `RemoteError(String)` | `unknown` (server-raised, deployment-specific advisory failure with no more specific code applies) &mdash; also the client-side **default** target for any Connect code this table does not otherwise list (`internal`, `aborted`, `unauthenticated`, …), matching the variant's existing "catch-all" contract in `protocol.rs`. | A deployment-specific backend failure that does not fit any row above. |
+| `RemoteError(String)` | `unknown` (server-raised, deployment-specific advisory failure with no more specific code applies) &mdash; also the client-side **default** target for any Connect code this table does not otherwise list (`internal`, `aborted`, …), matching the variant's existing "catch-all" contract in `protocol.rs`. | A deployment-specific backend failure that does not fit any row above. |
 
 A conforming client's Connect-to-`TransportError` mapping is the
 mechanical inverse of this table, with `RemoteError(String)` as the
@@ -267,6 +308,31 @@ is total in both directions, never a partial match. `is_retryable`
 (SPEC-TRANSPORT §7) continues to apply unchanged once translated:
 `unavailable` and `resource_exhausted` are retryable, everything else
 is not.
+
+Authentication, authorization, addressing, ticket, and storage
+failures map to these codes. The `Condition` column is what the server
+observed. A v2 client maps `failed_precondition` on `BeginUpload`,
+`UploadPart`, `CompleteUpload`, a ticketed `UploadPack`, or an
+`AdvanceRefs` carrying `ticket_ids` to a ticket failure, which it
+resolves by calling `BeginUpload` again, never to `RefConflict`.
+
+| Condition | Connect code |
+|---|---|
+| On an RPC that requires auth v2: a missing, malformed, or expired envelope, a bad signature, a missing `X-Repository`, or an `X-Repository` that differs from the signed `<repository>` (§7.4) | `unauthenticated` |
+| An authenticated principal that the namespace or write policy does not authorize (§7.5) | `permission_denied` |
+| A ticket whose audience, repository, signer, `pack_id`, or byte count differs from the request (§7.6) | `permission_denied` |
+| A malformed repository identity, or a missing `X-Repository` on an unsigned RPC to a multi-repository deployment (§7.4) | `invalid_argument` |
+| A read RPC on a repository that does not exist (§7.4) | `not_found` |
+| An expired, unknown, or missing ticket, or a ticket presented to an advance of a ref it does not name (§7.6) | `failed_precondition` |
+| A part whose subtree hash or length differs from its commitment, or a completion whose merged root or total differs from the ticket (§7.6) | `invalid_argument` |
+| A pack still under verification in indexed mode (§7.6) | `unavailable` |
+| A missed commit deadline (`NotAfter`), a full shard, or outbox backpressure. Nothing commits, and a retry with the same nonce is safe. | `unavailable`, never `resource_exhausted` |
+
+`failed_precondition` is a CAS conflict only on `UpdateRef`. On the
+RPCs above, and on an `UploadPack` that needed a ticket and carried
+none, it is a ticket failure (§7.6), which a client MUST NOT treat as a
+ref conflict. No ticket failure is `resource_exhausted`,
+because clients retry that code on the backoff ladder.
 
 ---
 
@@ -389,15 +455,20 @@ A `connectrpc` and `workers-rs` service
 `proto/mkit/transport/v1/transport.proto`, no protoc dependency on the
 default build path &mdash; Cloudflare Workers Builds and CI images lack a
 protoc new enough for `edition = "2023"`), R2 for pack storage, and a
-single global Durable Object for ref CAS (one Worker deployment = one
-repository &mdash; no per-project room split). Unlike `repo-worker`'s
+single global Durable Object for ref CAS. That is a single-repository
+deployment in §7.4's terms. A multi-repository deployment shards its
+state instead: one namespace coordinator per namespace, one strongly
+consistent ref shard per (repository, ref), and eventually consistent
+repository index shards (§7.9). Unlike `repo-worker`'s
 open-write demo, all mutating procedures require the versioned signed-write
-contract below. This verifies the writer's identity; it does not impose an
-allow-list. The deployment config supplies `AUTH_AUDIENCE` (exact canonical
-HTTP(S) origin) and `AUTH_REPOSITORY` (the single repository identity).
-Repo Worker instead obtains the repository identity from the decoded room;
-Keys Worker uses `keys`. Host or forwarded request headers MUST NOT establish
-the server's trusted audience.
+contract below. This verifies the writer's identity. Write authorization,
+which decides whether that identity may write to the repository, is §7.5.
+The deployment config supplies `AUTH_AUDIENCE` (exact canonical
+HTTP(S) origin) and, on a single-repository deployment, `AUTH_REPOSITORY`
+(the configured repository identity, §7.4). Repo Worker instead obtains
+the repository identity from the decoded room; Keys Worker uses `keys`.
+Host or forwarded request headers MUST NOT establish the server's
+trusted audience.
 
 #### Auth v2 contract
 
@@ -417,11 +488,13 @@ mkit-write:v2
 
 The signature is strict Ed25519 over the 32-byte BLAKE3 of those bytes. The
 origin is the URL's lowercase ASCII HTTP(S) origin with no userinfo, path,
-query, fragment, trailing dot, or default port. Repository and procedure are
-nonempty printable ASCII fields; newlines and whitespace are rejected. The
+query, fragment, trailing dot, or default port. `<repository>` is the full
+repository identity of §7.4, exactly as `X-Repository` carries it.
+Repository and procedure are nonempty printable ASCII fields; newlines and whitespace are rejected. The
 shared `mkit_core::write_auth` validator enforces bounded canonical fields.
 A unary commitment is `body:<64 lowercase hex BLAKE3 of exact request bytes>`.
 An UploadPack commitment is `pack:<64 lowercase hex pack id>:<decimal byte count>`.
+An UploadPart commitment is `part:<ticket>:<index>:<subtree-hash>:<len>` (§7.6).
 The streaming handler MUST compare both fields with the first UploadPack
 header before reserving quota or reading chunks, and verify the actual byte
 count and BLAKE3 before publishing the immutable object.
@@ -438,7 +511,8 @@ including requests whose results remain cached. Missing or unsupported auth
 versions MUST fail closed.
 
 A valid signature alone is insufficient replay protection. Each service MUST
-persist an admitted operation's nonce reservation scoped to
+persist, for every admitted operation except the replay-exempt uploads of
+§7.6 (`UploadPart` and a ticketed `UploadPack`), a nonce reservation scoped to
 audience/repository/signer, together with the full authenticated operation
 fingerprint. Reusing a nonce for a
 different operation MUST fail. Same-operation retries MUST return the saved
@@ -533,8 +607,9 @@ confirm a transactional `AdvanceRefs`, the safe default means pushes over
 do not re-baseline/reset the packmap chain &mdash; `remote_dispatch::
 push_branch`'s re-baseline gate already requires `supports_atomic_advance()
 == true` before resetting (mkit#521), so this is a (temporary) loss of
-the packmap-compaction optimization, not a correctness gap. Revisit once
-mkit#699 ships a confirmed-transactional backend.
+the packmap-compaction optimization, not a correctness gap. v2 closes
+this gap on the wire: a v2 client reads `atomic_advance` from
+`GetServerInfo` (§2.1) and drops the local opt-in.
 
 Every `Transport` method `ConnectTransport` implements is driven through
 the same `mkit_core::protocol::retrying`/`BackoffIterator` ladder
@@ -559,6 +634,388 @@ fails the first N calls with a retryable error class, and a
 non-retryable-error/ladder-exhaustion pair) &mdash; through a real in-process
 `TransportService` server (memory-backed, not R2/DO), per this issue's
 testing decision: a real server, not a mock standing in for one.
+
+### 7.4 Repository addressing
+
+A deployment serves one repository or many. Every repository RPC names
+its repository, so one client and one proto serve both kinds of
+deployment.
+
+**Grammar.** A repository identity is ASCII text with this grammar
+(ABNF, [RFC 5234](https://www.rfc-editor.org/rfc/rfc5234)):
+
+```abnf
+repository = namespace "/" name / name   ; bare name: single-repository deployments only
+namespace  = ed25519-ns / address-ns
+ed25519-ns = "ed25519-" 64HEXLC           ; owner: that Ed25519 public key
+address-ns = "0x" 40HEXLC                 ; owner: a key whose derived address matches
+name       = lead *99tail
+lead       = %x61-7A / DIGIT              ; a-z 0-9
+tail       = lead / "." / "_" / "-"
+HEXLC      = DIGIT / %x61-66              ; 0-9 a-f
+```
+
+Namespaces are self-certifying: the namespace itself names its owner,
+so a verifier needs no registry to find the owner. The `ed25519-` form
+names an Ed25519 public key. The `0x` form names a 20-byte address;
+SPEC-WRITE-GRANTS (forthcoming) defines how an owner key derives it.
+No other namespace form exists, and a deployment MUST NOT resolve
+other forms through a registry of its own.
+
+Identities are lowercase only, so two spellings never name one
+repository. A server MUST reject an identity that does not match the
+grammar, including one with uppercase hexadecimal digits, with
+`invalid_argument`. The longest identity is 173 bytes (`ed25519-`, 64
+hexadecimal digits, `/`, and a 100-byte name). That fits within the
+255 bytes the reference auth v2 validator allows for `<repository>`
+(§7.1).
+
+**Carriage.** A client MUST send the `X-Repository` header on every
+repository RPC, read or write. `GetServerInfo` (§2.1) is the one
+exception: it MAY carry the header. A server treats a request without
+the header as the deployment kind below requires. On a signed write,
+`X-Repository` MUST equal the signed `<repository>` field byte for
+byte. Envelope verification
+detects a mismatch, so a mismatch is `unauthenticated`. Host, path, and
+forwarded headers MUST NOT select the repository.
+
+**Single-repository deployments.** The deployment configures exactly
+one repository identity. It MAY be a bare name. A request without
+`X-Repository` resolves to that identity on unsigned RPCs; a signed
+write without `X-Repository` is `unauthenticated` (§7.1). A request that carries any
+other well-formed identity is `not_found`. The §7.1 reference Worker is
+a single-repository deployment.
+
+**Multi-repository deployments.** The deployment routes each RPC by
+`X-Repository`. A missing header on an unsigned RPC and a bare name
+are both `invalid_argument`, because only the `namespace "/" name` form is
+valid here. A read RPC on a repository that does not exist is
+`not_found`, the same as a missing pack or ref.
+
+**Isolation.** Refs, pack membership, packmap chains, and replay
+records are per repository. Quota and admission scope are set by the
+deployment. They are not required to be per repository. A server MUST
+NOT let an RPC on one repository read or change another repository's
+state. A server MAY store identical immutable bytes once across
+repositories, but `PackExists` and `DownloadPack` MUST answer only for
+packs that are members of the named repository. Otherwise a caller
+could learn another repository's contents. A server MUST NOT answer any
+RPC by consulting another repository's membership: no response may act
+as an existence oracle for content held elsewhere.
+
+**Creation.** A repository comes into existence with its first
+authorized write (§7.5). This service has no create-repository RPC.
+
+**Client.** The path of the remote URL is the repository identity:
+`mkit+https://host/<namespace>/<name>` names `<namespace>/<name>`. The
+client trims leading and trailing `/` from the path. An empty path
+names the bare identity `default`, so a single-repository deployment
+reachable with an empty path configures `default`. A client MUST send
+the same identity in `X-Repository` on every repository RPC, reads
+included, and in the signed `<repository>` field on writes.
+
+**ssh and enc (informative).** The ssh and enc transports carry no
+`X-Repository`. For them the path argument of `mkit serve <path>` is
+the addressing input. The on-disk layout under that path is unchanged,
+and the frozen `mkit.rpc.v1.ssh` protocol is untouched.
+
+### 7.5 Namespace and write policy
+
+A deployment applies a namespace policy and a write policy to every
+signed write except the part path (§7.6). Together they decide whether an authenticated principal
+may write to the repository in `X-Repository`.
+
+**Namespace policy.** `namespace_policy` is one of:
+
+- **`allowlist`**: the deployment lists the owner namespaces it
+  serves. A write to any other namespace is `permission_denied`. This
+  is the default for a stock multi-repository deployment.
+- **`any`**: every self-certifying namespace is served. This is an
+  explicit opt-in. Every new key is a new namespace, and each new
+  namespace starts with a fresh default quota. A deployment under
+  `any` MUST therefore configure a non-default admission step
+  (§5.1, forthcoming). Without one it MUST refuse to start, unless the
+  operator passes an explicit unsafe override (for example, an
+  "unsafe open namespaces" setting; the exact spelling is up to the
+  implementation).
+
+A single-repository deployment advertises `single-repository` in
+`GetServerInfo` (§2.1). `single-repository` is advertised, never
+configured; it tells a client that bare names and a missing
+`X-Repository` are accepted.
+
+**Write policy.** `write_policy` is one of:
+
+- **`open`**: any valid auth v2 signer may write. Only a
+  single-repository deployment MAY run `open`. A stock
+  multi-repository deployment MUST NOT run `open`.
+- **`owner`**: a write needs authorization for the repository in
+  `X-Repository`.
+
+Under `owner`, a write to `<ns>/<name>` is authorized when any of
+these holds:
+
+1. `ns` has the `ed25519-` form and the auth v2 signer is that key.
+2. A valid write grant authorizes the signer (SPEC-WRITE-GRANTS,
+   forthcoming). Until that document lands, only rules 1 and 3 apply.
+3. A deployment-defined authority source authorizes the signer for the
+   repository. An example is a ledger's delegated-key record, checked
+   against verified state. The deployment MUST document the source and
+   MUST fail closed when it cannot read that source.
+
+An `0x` namespace owner cannot sign auth v2, which is Ed25519-only. So
+an `0x` namespace takes writes only through grants or through a
+deployment-defined authority source (informative).
+
+**Order.** The server authorizes a write after authentication and
+after the replay-record and saved-reply check §7.1 requires, and before
+it allocates any quota, reservation, or replay record. A rejection
+allocates nothing.
+
+**Creation signals (informative).** The authorization and admission
+steps see whether the write creates a namespace and whether it creates
+a repository (`creates_namespace` and `creates_repo`). The admission
+specification (§5.1, forthcoming) makes these normative.
+
+### 7.6 Upload tickets and resumable parts
+
+A ticket reserves an upload before the client sends any pack bytes. It
+names the ref the upload will advance, so the ticket lives with that
+ref's strongly consistent state (§7.9). Parts let a client upload a
+large pack in pieces and resume after a failure, without the server
+ever holding a whole part in memory.
+
+**`BeginUpload`.** `BeginUpload(repository, ref, pack_id, bytes)` is a
+unary, signed write with a `body:` commitment (§7.1). It returns one
+of:
+
+- `AlreadyPresent`: the pack is already a member of this repository.
+- `Ticket{id, part_size, expires, token}`: a reservation and an upload
+  session.
+
+For the same signer, ref, and pack before an advance consumes the
+ticket, `BeginUpload` returns the existing ticket: the same id and the
+same upload session, never `AlreadyPresent`. Membership is eventually
+consistent (§7.9), so a server MAY return a ticket for a pack that is
+already a member. That costs only a re-upload.
+
+**Ticket token.** `token` is an opaque, server-authenticated value that
+binds the ticket id, audience, repository, signer, `pack_id`, `bytes`,
+`part_size`, `expires`, and the id of the key that authenticates it.
+The server verifies a token without consulting any strongly consistent
+metadata. A client treats the token as opaque. How the server
+authenticates tokens is deployment-defined (informative: a message
+authentication code under a deployment secret, rotated by key id).
+
+**Parts.** A client uploads a pack of more than `part_size` bytes in
+parts. `UploadPart` is a client-streaming, signed RPC, like
+`UploadPack`:
+
+1. The first message is a header `{ticket_token, index}`.
+2. The following messages carry the part's bytes in order.
+3. The response is a part receipt.
+
+The part's commitment is:
+
+```text
+part:<ticket>:<index>:<subtree-hash>:<len>
+```
+
+`<ticket>` is the ticket id. A ticket id is 64 lowercase hexadecimal
+digits. `<index>` is the zero-based part index in
+decimal. `<subtree-hash>` is the part's BLAKE3 subtree chaining value
+as 64 lowercase hexadecimal digits. `<len>` is the part's byte count in
+decimal. The signed headers commit to the whole part before the client
+sends any byte of it.
+
+Every part except the last is exactly `part_size` bytes, a power of two
+of at least 8 MiB. The last part holds the rest and is not empty. An
+upload has at most `max_parts` parts (§2.1). Part `i` covers pack bytes
+from `i × part_size`. Its subtree hash is the BLAKE3 chaining value of
+those bytes as a non-root subtree at that offset, so the server can
+merge the part hashes into the pack's root hash. Parts merge by
+BLAKE3's left-balanced tree rule.
+
+For `UploadPart`, the header's token ticket id and index MUST equal the
+commitment's `<ticket>` and `<index>`, and `<len>` MUST equal
+`part_size` for every part but the last.
+
+Golden vectors (informative): they land with WP-1.3
+([SPEC-CONVENTIONS §5](SPEC-CONVENTIONS.md#5-golden-vectors-and-conformance-tests)).
+
+The server verifies the ticket token and the commitment before it reads
+any data. It hashes the data as it streams it to storage and MUST NOT
+need to hold a whole part in memory. A subtree hash or length that
+differs from the commitment is `invalid_argument`. On success the
+server returns a **part receipt**: an opaque, server-authenticated value
+that binds the ticket id, index, subtree hash, length, and the storage
+backend's tag for the part. A part needs no admission decision, because
+admission happened at `BeginUpload`. Sending a part index again is
+idempotent.
+
+**Part path.** `UploadPart`, `CompleteUpload` and a ticketed `UploadPack`
+form the part path. They record no replay entry. They are idempotent by content, so
+the server checks only the validity window, the ticket token, and the
+commitment. The part path does not run the Authorizer; authority is
+checked at `BeginUpload` and again inside the `AdvanceRefs` apply, so a
+revocation between them leaves only unreferenced bytes, reclaimed at
+ticket expiry.
+
+**Completion.** `CompleteUpload{ticket_token, receipts[]}` is a unary,
+signed write with a `body:` commitment. The server verifies every
+receipt and merges the subtree hashes into a root. It makes the pack
+visible in storage only if the root equals `pack_id` and the lengths sum
+to `bytes`. Otherwise it aborts the storage session and returns
+`invalid_argument`. Completion does not make the pack a member of the
+repository. Completing the same ticket again is idempotent: it returns the
+same result and changes nothing.
+
+**Resume.** Part receipts are the durable record of the parts a server
+received, and the client keeps them. A client that lost receipts sends
+the missing parts again. A client that calls `BeginUpload` again gets
+the same ticket. The server offers no listing of received parts.
+
+**Single-part packs.** A pack of at most `part_size` bytes uses
+`UploadPack` with the ticket token in its header and the usual `pack:`
+commitment. It sends no `part:` commitment and no `CompleteUpload`.
+
+**Threshold.** A multi-repository deployment MUST advertise
+`begin_upload_threshold_bytes = 0`: every upload needs a ticket, so
+membership is always recorded in a ref shard. On a single-repository
+deployment, packs under the threshold MAY skip `BeginUpload`; a stored
+pack is a member. When the deployment runs admission, the threshold is
+0. An upload that needs a ticket and carries none is
+`failed_precondition`.
+
+**Membership.** On a multi-repository deployment, a pack becomes a
+member of the repository only at the `AdvanceRefs` apply that consumes
+its ticket. `AdvanceRefs` gains a repeated `ticket_ids` field
+naming the tickets it consumes. A ticket can be consumed only by an
+advance of the ref it names; any other advance is `failed_precondition`.
+A head-only `UpdateRef` consumes no tickets. Packlist nodes (`MKPL`) are
+uploads like any other pack, and need tickets too.
+
+**Binding.** The ticket's audience, repository, and signer MUST equal
+the request's, and the ticket's `pack_id` and `bytes` MUST equal the
+request's commitment. Otherwise the request is `permission_denied`.
+
+**Errors.** An expired or unknown ticket, including a token that fails
+verification, is `failed_precondition`. A ticket, signer, or
+commitment mismatch is `permission_denied`. A bad part hash or length
+is `invalid_argument`. No ticket failure is `resource_exhausted`,
+because clients retry that code on the backoff ladder (§5).
+
+**Expiry.** A ticket expires less than 7 days after `BeginUpload`. A
+ticket that expires before an advance consumes it produces an `Expired`
+outcome for its reservation, and its pack becomes eligible for garbage
+collection.
+
+**Retries.** A client that retries a signed request reuses its nonce and
+timestamps while the envelope is valid (at most 300 seconds, §7.1).
+After that it signs a new operation.
+
+**Pending verification.** In indexed mode, an `AdvanceRefs` that
+consumes a pack still under verification fails with `unavailable` and a
+`PendingVerification{retry_after}` detail. The client polls until the
+ticket expires, rather than following its normal backoff ladder, and
+signs a new operation once the envelope lapses. This detail is reserved
+here and becomes normative with indexed mode.
+
+**Storage visibility (informative).** On every backend, the storage
+commit is the point at which a pack becomes visible. On an object store
+with multipart uploads, the server completes the multipart upload only
+after the merged root verifies. Presigned direct-to-storage part
+uploads are not allowed, because they would bypass verification before
+completion.
+
+### 7.7 Reserved
+
+This section number is reserved for the per-RPC lifecycle table of the
+admission specification (§5.1, forthcoming).
+
+### 7.8 Ref deletion
+
+`UpdateRef` and `AdvanceRefs` gain an additive `delete` field.
+
+- On `UpdateRef`, `delete` is valid only with `REF_EXPECTATION_MATCH`
+  and an empty `new_id`. The server removes the ref if its current
+  value equals `expected_id`.
+- On `AdvanceRefs`, `delete` removes the branch head and its packmap
+  together, under the same rules for each: both expectations are
+  `MATCH`, and both new ids are empty. A conflict is a typed outcome
+  (§4), as for any advance.
+- A `delete` with any other expectation or a nonempty new id is
+  `invalid_argument`.
+- Deleting an absent ref is a CAS conflict: `failed_precondition` on
+  `UpdateRef`.
+
+The write policy authorizes deletion (§7.5). Once SPEC-WRITE-GRANTS
+lands, a grant authorizes deletion only through its `delete` flag. A
+deployment MAY refuse deletion entirely with `permission_denied`.
+
+This document requires no client command for deletion (informative: a
+`push --delete` command is a separate change).
+
+### 7.9 Consistency and paging
+
+A multi-repository deployment keeps each ref's state in a strongly
+consistent shard and its repository-wide indexes in eventually
+consistent shards (§7.1). This section states what a client can rely
+on.
+
+**Strong.** `ReadRef` of a specific ref is strongly consistent, and so
+is every write. Push compare-and-swap MUST use `ReadRef`. A deployment
+MUST NOT serve `ReadRef` from a snapshot to a client that may push;
+until signed reads exist it cannot tell writers apart.
+
+**Eventual.** `ListRefs` and pack membership (`PackExists`,
+`DownloadPack`, and `AlreadyPresent` from `BeginUpload`) are eventually
+consistent. They may lag a write by seconds. A lag MUST only cause one
+of these:
+
+- a re-upload, because `AlreadyPresent` was not returned;
+- a retryable `unavailable` ("not yet visible");
+- an older listing; or
+- `not_found` (or `exists = false`) for a pack when the request carried
+  no `X-Mkit-Ref`.
+
+A lag never exposes another repository's data and never acts as an
+existence oracle (§7.4).
+
+**Read-your-writes for packs.** `PackExists` and `DownloadPack` MAY
+carry an optional header naming a ref of the same repository whose
+packmap listed the pack:
+
+```text
+X-Mkit-Ref: <refname>
+```
+
+The server then also resolves membership against that ref's strongly
+consistent shard, which holds the membership additions the ref's
+advances recorded. So a pusher sees its own advance at once, despite
+index lag. The answer is always subject to the caller's view. A caller
+without write access gets the published view, so a pack that an
+advance still in quarantine added stays invisible through the header,
+exactly as without it. The header never reveals another repository's
+packs, or whether a ref exists in another repository. An unknown or
+malformed ref name makes the header a no-op: the answer falls back to
+the index and is never an error, which would act as an existence
+oracle. A client SHOULD send the header when it fetches packs listed by
+a packmap it just read. `X-Mkit-Ref` is not part of the auth v2
+canonical string: changing it can only change which of the caller's
+own permitted answers comes back, never widen the caller's view.
+
+**Paging.** `ListRefs` is paginated through additive fields: the
+request carries `page_size` and `page_token`, and the response carries
+`next_page_token`. An empty `next_page_token` ends the listing. The
+server MAY return fewer refs than `page_size`, and caps it at
+`max_list_refs_page_size` (§2.1). Every encoded response page MUST be
+at most 2 MiB, so a page always fits under the common 4 MiB default
+client message limit. The pages concatenate to a listing in ref-name
+order ([SPEC-REFS §4.1](SPEC-REFS.md#41-ordering-and-duplicates)).
+
+**Advertised values.** `GetServerInfo` advertises `index_fanout` and
+the `ListRefs` page bound (§2.1).
 
 ---
 
@@ -585,6 +1042,13 @@ Explicitly deferred to sibling issues:
   a working-server acceptance gate.
 - Generated TypeScript (`connect-es`) clients for this service (M2
   scope, tracked with mkit#706).
+- Implementing version 2 (M1): multi-repository routing, the namespace
+  and write policies, sharded server metadata, `GetServerInfo`, upload
+  tickets and resumable parts, ref deletion, and `ListRefs` paging, with
+  the proto additions they need (mkit#1084, mkit#1090).
+- Write grants: SPEC-WRITE-GRANTS, forthcoming (mkit#1085).
+- Admission challenges: §5.1 and the §7.7 lifecycle table, forthcoming
+  (mkit#1086).
 
 ---
 
@@ -592,6 +1056,7 @@ Explicitly deferred to sibling issues:
 
 | Version | Status | Changes |
 |---|---|---|
+| `2` | draft | §7.4 repository addressing; §7.5 namespace and write policy (owner key); `GetServerInfo` (§2.1); §7.6 upload tickets and resumable parts; §7.8 ref deletion; §7.9 consistency and `ListRefs` paging; error-code split between `unauthenticated` and `permission_denied` (§5) (mkit#1084, mkit#1090). |
 | `1` | draft | Initial `mkit.transport.v1` proto: 7 wire RPCs covering every `Transport` trait verb (§2), `PackChunk` reused byte-for-byte from `ssh.proto`, `RefExpectation`/`RefEntry` duplicated with pinned wire numbers pending mkit#679's shared-proto extraction. |
 
 ---
@@ -625,5 +1090,8 @@ reference Worker).
 | A rejected `UploadPack` stream never creates or overwrites the destination pack. | §6.1's server-side rejection checks, mirroring SPEC-TRANSPORT §4.2's SSH requirement. |
 | `DownloadPack` never sends a partial stream silently &mdash; it either completes with `chunk.last = true` or fails the whole call before any message is sent. | §6.2. |
 | Every `TransportError` variant a server can raise has exactly one Connect code it maps to; a client's inverse mapping is mechanical, not heuristic. | §5's table. |
+| No RPC on one repository reads or changes another repository's refs, pack membership, or replay records. | §7.4 isolation; the `X-Repository` carriage rule. |
+| A write is authorized, or rejected with nothing allocated, before any quota or replay state is touched. | §7.5 order. |
+| A stock multi-repository deployment never runs `write_policy = open`. | §7.5 write policy. |
 | An `AdvanceRefs` conflict is a typed response value, never a Connect error. | §4 &mdash; matches `AdvanceOutcome`'s three-variant, no-error-variant shape in `protocol.rs`. |
 | The `DownloadPack` Workers-streaming design is documented as unverified end-to-end until a sibling issue proves real client-visible delivery. | §6.3's "Known risk" paragraph; mkit#699/#702's re-verification requirement. |
