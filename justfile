@@ -6,9 +6,9 @@
 #
 # `ci-scripts` is the local stand-in for gates those jobs do not run as
 # these exact commands: docs-lint.yml's check-spec-status.sh,
-# scripts/check-wasm-dep-graph.sh, and `cargo check -p mkit-wasm --target
-# wasm32-unknown-unknown`. It is not a 1:1 extract of web.yml (wasm-pack
-# bundler + bun) or the worker wasm32 builds.
+# scripts/check-wasm-dep-graph.sh, and `cargo check --target
+# wasm32-unknown-unknown` for mkit-wasm and mkit-server. It is not a 1:1
+# extract of web.yml (wasm-pack bundler + bun) or the worker wasm32 builds.
 #
 # Not mirrored (CI-infra-specific, not part of the test surface):
 #   - cloudbuild/ci.yaml's swtpm/TPM harness (mkit-sign-tpm's real-device
@@ -116,7 +116,7 @@ ci-security:
     ( cd contrib/signers && run_audit )
     cargo deny --manifest-path rust/Cargo.toml --all-features check
 
-# Spec-status, wasm dep-graph, and mkit-wasm wasm32 check.
+# Spec-status, wasm dep-graph, and mkit-wasm / mkit-server wasm32 checks.
 ci-scripts:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -127,6 +127,7 @@ ci-scripts:
       exit 1
     fi
     ( cd rust && cargo check -p mkit-wasm --target wasm32-unknown-unknown )
+    ( cd rust && cargo check -p mkit-server --target wasm32-unknown-unknown )
 
 # Mirrors cloudbuild/docs.yaml (rustdoc -D warnings).
 ci-docs:

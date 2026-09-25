@@ -49,6 +49,9 @@ ceiling_for() {
         mkit-transport-enc)     echo 0  ;;
         mkit-transport-connect) echo 0  ;;
         mkit-git-bridge)        echo 0  ;;
+        # Not in EXPECTED_CRATES yet: unreachable from mkit-cli until
+        # WP-M0-13 makes the CLI depend on it.
+        mkit-server)            echo 0  ;;
         *)                      echo "UNKNOWN" ;;
     esac
 }

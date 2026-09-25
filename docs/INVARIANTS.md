@@ -343,6 +343,31 @@ crate manifests, `install.sh`, or the web app's installer-staging scripts.
 (`crates/mkit-keystore/src/lib.rs`) pins that `"windows-credential"` is an
 unrecognized `BackendKind`/`KeyRef` backend string, not a fail-closed one.
 
+## wasm32 dependency graphs contain no C-toolchain crates
+
+**Always:** the `wasm32-unknown-unknown` normal-dependency graphs of
+`mkit-wasm`, `apps/repo-worker` and `mkit-server` contain none of `blst`,
+`zstd-sys`, `commonware-runtime` or `commonware-storage`; `mkit-wasm`'s also
+contains no `tokio`. Each crate depends on `mkit-core` with
+`default-features = false`, which keeps `pack-zstd` (and so `zstd-sys`) out.
+
+**Because:** none of those crates build for `wasm32-unknown-unknown`.
+`mkit-wasm` ships to browsers, `apps/repo-worker` runs on Cloudflare
+Workers, and `mkit-server` is the runtime-agnostic core that the Workers
+server adapter builds on (PRD MKIT-29 §5.1). Cargo unifies features per
+dependency graph, so one manifest line that re-enables a default feature
+silently pulls a C library into every wasm build downstream.
+
+**If violated:** the wasm32 builds fail, often only in a later, slower CI
+job (wasm-pack, `worker-build`), or on a machine without the C toolchain
+the native build happened to have. For `mkit-server`, a Workers deployment
+could no longer build the server at all.
+
+**Enforced by:** `scripts/check-wasm-dep-graph.sh` (a `cargo tree` check
+per crate) and the `cargo check --target wasm32-unknown-unknown` steps for
+`mkit-wasm` and `mkit-server`, all run by `just ci-scripts` (part of
+`just ci`).
+
 ## Hosted workspaces separate public projects from owner execution
 
 **Always:** workspace files and signed versions are public; conversation messages,

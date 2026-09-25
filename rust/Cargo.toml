@@ -22,6 +22,7 @@ members = [
     "crates/mkit-rpc",
     "crates/mkit-wasm",
     "crates/mkit-repo-client",
+    "crates/mkit-server",
     "benches",
     # Dev-only test helpers shared across crates' test suites
     # (publish = false — never a normal dependency, see the crate's
