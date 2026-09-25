@@ -1,5 +1,5 @@
 //! Ref compare-and-swap and ref-name helpers (SPEC-TRANSPORT-CONNECT §3,
-//! SPEC-REFS §3 and §4).
+//! SPEC-TRANSPORT §4.2.1, SPEC-REFS §3 and §4).
 //!
 //! The canonical copy of logic that today lives in `apps/vcs-worker/src/refs.rs`,
 //! `mkit-transport-connect`'s `refs_convert.rs` and `hashutil.rs`, and
@@ -8,11 +8,13 @@
 //! `mkit-transport-connect` in WP-M0-15 and `vcs-worker` in WP-M0-17.
 //! `apps/repo-worker` keeps its own copy (planner decision Q11).
 
+use std::borrow::Cow;
+
 use mkit_core::hash::Hash;
 use mkit_core::refs::RefWriteCondition;
 pub use mkit_core::refs::{validate_ref_name, validate_ref_prefix};
 
-use crate::error::ServerError;
+use crate::error::{Code, ServerError};
 
 /// A CAS expectation as its wire number, aligned with
 /// `mkit.transport.v1.RefExpectation`. The numbers are load-bearing and match
@@ -45,6 +47,7 @@ impl RefExpectationWire {
 
 /// Why a CAS update could not commit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ConflictReason {
     /// `MISSING`, but the ref exists.
     Exists,
@@ -54,10 +57,11 @@ pub enum ConflictReason {
     Mismatch,
 }
 
-/// The outcome of [`evaluate_cas`]. `Invalid` is a malformed request
-/// (`invalid_argument`); `Conflict` is a precondition failure the client can
-/// rebase and retry (`failed_precondition`).
+/// The outcome of [`evaluate_cas`] or [`evaluate_condition`]. `Invalid` is a
+/// malformed request (`invalid_argument`); `Conflict` is a precondition
+/// failure the client can rebase and retry (`failed_precondition`).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CasDecision {
     /// The write may commit.
     Committed,
@@ -67,9 +71,9 @@ pub enum CasDecision {
     Invalid(&'static str),
 }
 
-/// Decide a CAS write. `current` is the ref's value (`None` when absent) and
-/// `expected` the `MATCH` target, which must be `None` for `ANY` and
-/// `MISSING`. Ids are compared as opaque bytes.
+/// Decide a CAS write from its wire form. `current` is the ref's value
+/// (`None` when absent) and `expected` the `MATCH` target, which must be
+/// `None` for `ANY` and `MISSING`. Ids are compared as opaque bytes.
 ///
 /// - `ANY` always commits.
 /// - `MISSING` commits only when `current` is `None`.
@@ -112,43 +116,166 @@ pub fn evaluate_cas(
     }
 }
 
-/// Convert a wire `(expectation, expected_id)` pair into a
-/// [`RefWriteCondition`]. An absent `expected_id` is passed as empty.
-///
-/// # Errors
-/// [`crate::Code::InvalidArgument`] when the expectation is unspecified or
-/// unknown (SPEC-TRANSPORT-CONNECT §3), when `ANY` or `MISSING` carries a
-/// non-empty `expected_id`, or when `MATCH`'s `expected_id` is not 32 bytes.
-pub fn condition_from_wire(
-    expectation: i32,
-    expected_id: &[u8],
-) -> Result<RefWriteCondition, ServerError> {
-    match RefExpectationWire::from_wire(expectation) {
-        RefExpectationWire::Any if expected_id.is_empty() => Ok(RefWriteCondition::Any),
-        RefExpectationWire::Any => Err(ServerError::invalid_argument(
-            "REF_EXPECTATION_ANY MUST carry an empty expected_id",
-        )),
-        RefExpectationWire::Missing if expected_id.is_empty() => Ok(RefWriteCondition::Missing),
-        RefExpectationWire::Missing => Err(ServerError::invalid_argument(
-            "REF_EXPECTATION_MISSING MUST carry an empty expected_id",
-        )),
-        RefExpectationWire::Match => Ok(RefWriteCondition::Match(hash_from_slice(expected_id)?)),
-        RefExpectationWire::Unspecified => Err(ServerError::invalid_argument(
-            "expectation MUST NOT be REF_EXPECTATION_UNSPECIFIED",
-        )),
+/// Decide a CAS write from a decoded [`RefWriteCondition`], the check every
+/// storage backend shares. Same rules as [`evaluate_cas`]; a decoded
+/// condition is never `Invalid`.
+#[must_use]
+pub fn evaluate_condition(current: Option<&Hash>, condition: &RefWriteCondition) -> CasDecision {
+    match (condition, current) {
+        (RefWriteCondition::Missing, Some(_)) => CasDecision::Conflict(ConflictReason::Exists),
+        (RefWriteCondition::Match(_), None) => CasDecision::Conflict(ConflictReason::Missing),
+        (RefWriteCondition::Match(want), Some(cur)) if cur != want => {
+            CasDecision::Conflict(ConflictReason::Mismatch)
+        }
+        (RefWriteCondition::Any | RefWriteCondition::Missing | RefWriteCondition::Match(_), _) => {
+            CasDecision::Committed
+        }
     }
 }
 
-/// Parse a 32-byte digest from a wire `bytes` field.
+/// The wire field a digest came from; the ssh wire names it in its message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DigestField {
+    /// `pack_id` of `PackExists` or `DownloadPack`.
+    PackId,
+    /// `new_id` of `UpdateRef` or `AdvanceRefs`.
+    NewId,
+    /// `expected_id` of a `MATCH` write.
+    ExpectedId,
+}
+
+/// How a binding treats an `expected_id` sent with `ANY` or `MISSING`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnusedExpectedId {
+    /// Reject it, as SPEC-TRANSPORT-CONNECT §3 requires: the Connect servers.
+    Reject,
+    /// Ignore it, as SPEC-TRANSPORT §4.2.1 requires: the ssh and enc wires.
+    /// The result is what an empty `expected_id` would give.
+    Ignore,
+}
+
+/// A malformed ref or digest field. Every variant is
+/// [`Code::InvalidArgument`]; the two message methods keep today's text for
+/// each wire family, as [`crate::upload::UploadError`] does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RefWireError {
+    /// The expectation is unspecified or an unknown number.
+    Unspecified,
+    /// `ANY` or `MISSING` (the payload) carried a non-empty `expected_id`.
+    IdNotEmpty(RefExpectationWire),
+    /// A digest field that is absent (`len: None`) or not 32 bytes long.
+    BadDigest {
+        /// The field.
+        field: DigestField,
+        /// Its length, or `None` when absent.
+        len: Option<usize>,
+    },
+}
+
+impl RefWireError {
+    /// Always [`Code::InvalidArgument`].
+    #[must_use]
+    pub const fn code(self) -> Code {
+        Code::InvalidArgument
+    }
+
+    /// `mkit serve`'s message, verbatim. The ssh wire ignores a non-empty
+    /// `expected_id` for `ANY`/`MISSING`, so `IdNotEmpty` never reaches it and
+    /// borrows `vcs-worker`'s text.
+    #[must_use]
+    pub const fn ssh_message(self) -> &'static str {
+        match self {
+            Self::Unspecified => "UpdateRef.expectation is required",
+            Self::IdNotEmpty(RefExpectationWire::Missing) => {
+                "expected_id must be empty for MISSING"
+            }
+            Self::IdNotEmpty(_) => "expected_id must be empty for ANY",
+            Self::BadDigest {
+                field: DigestField::PackId,
+                len: None,
+            } => "pack_id missing",
+            Self::BadDigest {
+                field: DigestField::PackId,
+                len: Some(_),
+            } => "pack_id must be 32 bytes",
+            Self::BadDigest {
+                field: DigestField::NewId,
+                ..
+            } => "new_id must be 32 bytes",
+            Self::BadDigest {
+                field: DigestField::ExpectedId,
+                ..
+            } => "MATCH expectation requires a 32-byte expected_id",
+        }
+    }
+
+    /// `mkit-transport-connect`'s message, verbatim.
+    #[must_use]
+    pub fn connect_message(self) -> Cow<'static, str> {
+        match self {
+            Self::Unspecified => "expectation MUST NOT be REF_EXPECTATION_UNSPECIFIED".into(),
+            Self::IdNotEmpty(RefExpectationWire::Missing) => {
+                "REF_EXPECTATION_MISSING MUST carry an empty expected_id".into()
+            }
+            Self::IdNotEmpty(_) => "REF_EXPECTATION_ANY MUST carry an empty expected_id".into(),
+            Self::BadDigest { len, .. } => format!(
+                "expected a 32-byte digest, got {} bytes",
+                len.unwrap_or_default()
+            )
+            .into(),
+        }
+    }
+}
+
+impl From<RefWireError> for ServerError {
+    /// The Connect code and message.
+    fn from(err: RefWireError) -> Self {
+        Self::new(err.code(), err.connect_message())
+    }
+}
+
+/// Convert a wire `(expectation, expected_id)` pair into a
+/// [`RefWriteCondition`]. An absent `expected_id` is passed as empty.
+/// `unused` says what an `expected_id` sent with `ANY` or `MISSING` means.
 ///
 /// # Errors
-/// [`crate::Code::InvalidArgument`] unless `bytes` is exactly 32 bytes long.
-pub fn hash_from_slice(bytes: &[u8]) -> Result<Hash, ServerError> {
-    Hash::try_from(bytes).map_err(|_| {
-        ServerError::invalid_argument(format!(
-            "expected a 32-byte digest, got {} bytes",
-            bytes.len()
-        ))
+/// [`RefWireError::Unspecified`] for an unspecified or unknown expectation
+/// (SPEC-TRANSPORT-CONNECT §3), [`RefWireError::IdNotEmpty`] under
+/// [`UnusedExpectedId::Reject`], or [`RefWireError::BadDigest`] when
+/// `MATCH`'s `expected_id` is not 32 bytes.
+pub fn condition_from_wire(
+    expectation: i32,
+    expected_id: &[u8],
+    unused: UnusedExpectedId,
+) -> Result<RefWriteCondition, RefWireError> {
+    let expectation = RefExpectationWire::from_wire(expectation);
+    let reject_id = unused == UnusedExpectedId::Reject && !expected_id.is_empty();
+    match expectation {
+        RefExpectationWire::Any | RefExpectationWire::Missing if reject_id => {
+            Err(RefWireError::IdNotEmpty(expectation))
+        }
+        RefExpectationWire::Any => Ok(RefWriteCondition::Any),
+        RefExpectationWire::Missing => Ok(RefWriteCondition::Missing),
+        RefExpectationWire::Match => Ok(RefWriteCondition::Match(hash_from_slice(
+            DigestField::ExpectedId,
+            Some(expected_id),
+        )?)),
+        RefExpectationWire::Unspecified => Err(RefWireError::Unspecified),
+    }
+}
+
+/// Parse a 32-byte digest from a wire `bytes` field (`None` when absent).
+///
+/// # Errors
+/// [`RefWireError::BadDigest`] unless `bytes` is present and exactly 32
+/// bytes long.
+pub fn hash_from_slice(field: DigestField, bytes: Option<&[u8]>) -> Result<Hash, RefWireError> {
+    let bytes = bytes.ok_or(RefWireError::BadDigest { field, len: None })?;
+    Hash::try_from(bytes).map_err(|_| RefWireError::BadDigest {
+        field,
+        len: Some(bytes.len()),
     })
 }
 
@@ -170,7 +297,6 @@ pub fn strip_listed_prefix<'a>(full: &'a str, prefix: &str) -> &'a str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::Code;
 
     const ID_A: &[u8] = &[0xaa; 32];
     const ID_B: &[u8] = &[0xbb; 32];
@@ -239,6 +365,30 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn evaluate_condition_matches_evaluate_cas() {
+        let (a, b) = ([0xaa; 32], [0xbb; 32]);
+        for current in [None, Some(&a), Some(&b)] {
+            for condition in [
+                RefWriteCondition::Any,
+                RefWriteCondition::Missing,
+                RefWriteCondition::Match(a),
+                RefWriteCondition::Match(b),
+            ] {
+                let (expectation, expected) = match &condition {
+                    RefWriteCondition::Any => (RefExpectationWire::Any, None),
+                    RefWriteCondition::Missing => (RefExpectationWire::Missing, None),
+                    RefWriteCondition::Match(h) => (RefExpectationWire::Match, Some(&h[..])),
+                };
+                assert_eq!(
+                    evaluate_condition(current, &condition),
+                    evaluate_cas(current.map(|h| &h[..]), expectation, expected),
+                    "{current:?} {condition:?}"
+                );
+            }
+        }
+    }
+
     // Ported from apps/vcs-worker/src/refs.rs `from_wire_numbers_match_proto`.
     #[test]
     fn from_wire_numbers_match_proto() {
@@ -259,69 +409,98 @@ mod tests {
     }
 
     // Ported from apps/vcs-worker/src/refs.rs `digest_length` (`is_valid_digest`),
-    // with the message of mkit-transport-connect/src/hashutil.rs.
+    // with the Connect message of mkit-transport-connect/src/hashutil.rs.
     #[test]
     fn digest_length() {
-        assert_eq!(hash_from_slice(&[7; 32]).unwrap(), [7; 32]);
+        let new_id = |b: &[u8]| hash_from_slice(DigestField::NewId, Some(b));
+        assert_eq!(new_id(&[7; 32]).unwrap(), [7; 32]);
         for len in [0, 31, 33] {
-            let err = hash_from_slice(&vec![0; len]).unwrap_err();
+            let err = new_id(&vec![0; len]).unwrap_err();
             assert_eq!(err.code(), Code::InvalidArgument);
             assert_eq!(
-                err.public_message(),
+                err.connect_message(),
                 format!("expected a 32-byte digest, got {len} bytes")
             );
+            assert_eq!(err.ssh_message(), "new_id must be 32 bytes");
         }
     }
 
-    fn rejected(expectation: i32, expected_id: &[u8]) -> String {
-        let err = condition_from_wire(expectation, expected_id).unwrap_err();
+    // Ported from mkit-cli/src/commands/serve/tests.rs
+    // `pack_key_from_id_rejects_bad_length_as_invalid_request`, asserting the
+    // ssh text of `pack_key_from_id`.
+    #[test]
+    fn pack_key_from_id_rejects_bad_length_as_invalid_request() {
+        let pack_id = |b: Option<&[u8]>| hash_from_slice(DigestField::PackId, b);
+        let err = pack_id(Some(&[0; 16])).unwrap_err();
         assert_eq!(err.code(), Code::InvalidArgument);
-        err.public_message().to_owned()
+        assert_eq!(err.ssh_message(), "pack_id must be 32 bytes");
+        assert_eq!(pack_id(None).unwrap_err().ssh_message(), "pack_id missing");
+        assert_eq!(pack_id(Some(&[7; 32])).unwrap(), [7; 32]);
     }
 
-    // Messages from mkit-transport-connect/src/refs_convert.rs.
+    fn rejected(expectation: i32, expected_id: &[u8]) -> RefWireError {
+        condition_from_wire(expectation, expected_id, UnusedExpectedId::Reject).unwrap_err()
+    }
+
+    // Connect messages from mkit-transport-connect/src/refs_convert.rs; ssh
+    // messages from mkit serve's `decode_update_ref`.
     #[test]
     fn condition_from_wire_unspecified_and_unknown() {
         for expectation in [0, 99, -1] {
+            let err = rejected(expectation, &[]);
+            assert_eq!(err, RefWireError::Unspecified);
             assert_eq!(
-                rejected(expectation, &[]),
+                err.connect_message(),
                 "expectation MUST NOT be REF_EXPECTATION_UNSPECIFIED"
             );
+            assert_eq!(err.ssh_message(), "UpdateRef.expectation is required");
         }
     }
 
     #[test]
     fn condition_from_wire_any_or_missing_with_an_id() {
         assert_eq!(
-            rejected(1, ID_A),
+            rejected(1, ID_A).connect_message(),
             "REF_EXPECTATION_ANY MUST carry an empty expected_id"
         );
         assert_eq!(
-            rejected(2, ID_A),
+            rejected(2, ID_A).connect_message(),
             "REF_EXPECTATION_MISSING MUST carry an empty expected_id"
+        );
+        let err: ServerError = rejected(1, ID_A).into();
+        assert_eq!(err.code(), Code::InvalidArgument);
+    }
+
+    #[test]
+    fn condition_from_ssh_wire_ignores_an_unused_id() {
+        let ssh = |e, id| condition_from_wire(e, id, UnusedExpectedId::Ignore);
+        assert_eq!(ssh(1, ID_A), Ok(RefWriteCondition::Any));
+        assert_eq!(ssh(2, &[1, 2, 3]), Ok(RefWriteCondition::Missing));
+        assert_eq!(ssh(0, &[]), Err(RefWireError::Unspecified));
+        assert_eq!(
+            ssh(3, &[0; 31]).unwrap_err().ssh_message(),
+            "MATCH expectation requires a 32-byte expected_id"
         );
     }
 
     #[test]
     fn condition_from_wire_match_needs_32_bytes() {
         assert_eq!(
-            rejected(3, &[0; 31]),
+            rejected(3, &[0; 31]).connect_message(),
             "expected a 32-byte digest, got 31 bytes"
         );
-        assert_eq!(rejected(3, &[]), "expected a 32-byte digest, got 0 bytes");
+        assert_eq!(
+            rejected(3, &[]).connect_message(),
+            "expected a 32-byte digest, got 0 bytes"
+        );
     }
 
     #[test]
     fn condition_from_wire_ok() {
-        assert_eq!(condition_from_wire(1, &[]).unwrap(), RefWriteCondition::Any);
-        assert_eq!(
-            condition_from_wire(2, &[]).unwrap(),
-            RefWriteCondition::Missing
-        );
-        assert_eq!(
-            condition_from_wire(3, ID_B).unwrap(),
-            RefWriteCondition::Match([0xbb; 32])
-        );
+        let connect = |e, id| condition_from_wire(e, id, UnusedExpectedId::Reject);
+        assert_eq!(connect(1, &[]), Ok(RefWriteCondition::Any));
+        assert_eq!(connect(2, &[]), Ok(RefWriteCondition::Missing));
+        assert_eq!(connect(3, ID_B), Ok(RefWriteCondition::Match([0xbb; 32])));
     }
 
     #[test]

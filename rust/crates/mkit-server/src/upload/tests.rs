@@ -307,7 +307,46 @@ fn empty_pack_and_after_last() {
         v.push(Some(&id), Some(0), 0, true).unwrap_err(),
         UploadError::AfterLast
     );
-    assert_eq!(v.finish().unwrap().total, 0);
+    assert_eq!(v.finish().unwrap_err(), UploadError::AfterLast);
+}
+
+#[test]
+fn stream_stays_dead_after_length_mismatch() {
+    let (_, id) = valid_pack();
+    let mismatch = UploadError::LengthMismatch {
+        received: 3,
+        declared: 10,
+    };
+    let mut v = validator(&id, 10, SSH_LIMITS);
+    assert_eq!(v.push(Some(&id), Some(0), 3, true).unwrap_err(), mismatch);
+    assert_eq!(v.received(), 0, "a rejected chunk is never counted");
+    // A chunk that would otherwise be valid is still refused.
+    assert_eq!(v.push(Some(&id), Some(0), 10, true).unwrap_err(), mismatch);
+    assert_eq!(v.received(), 0);
+    assert_eq!(v.finish().unwrap_err(), mismatch);
+}
+
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn byte_count_overflow_is_caught() {
+    let (_, id) = valid_pack();
+    let limits = UploadLimits {
+        max_total_bytes: u64::MAX,
+        max_chunks: u32::MAX,
+    };
+    let mut v = validator(&id, u64::MAX, limits);
+    assert!(
+        !v.push(Some(&id), Some(0), usize::MAX, false)
+            .unwrap()
+            .complete
+    );
+    assert_eq!(v.received(), u64::MAX);
+    assert_eq!(
+        v.push(Some(&id), Some(u64::MAX), usize::MAX, false)
+            .unwrap_err(),
+        UploadError::ByteCountOverflow
+    );
+    assert_eq!(v.received(), u64::MAX);
 }
 
 /// One way to break an otherwise valid stream.
@@ -317,7 +356,20 @@ enum Mutation {
     Overrun,
     WrongPackId,
     MissingLast,
+    /// `last` on a chunk before the final one.
+    EarlyLast,
+    /// A second `last` chunk after the final one.
+    DuplicateLast,
 }
+
+const MUTATIONS: [Mutation; 6] = [
+    Mutation::Gap,
+    Mutation::Overrun,
+    Mutation::WrongPackId,
+    Mutation::MissingLast,
+    Mutation::EarlyLast,
+    Mutation::DuplicateLast,
+];
 
 /// A pack length and a valid split of it into chunk lengths.
 fn split() -> impl Strategy<Value = (u64, Vec<usize>)> {
@@ -331,23 +383,55 @@ fn split() -> impl Strategy<Value = (u64, Vec<usize>)> {
 /// the whole stream, `finish` included.
 fn run(total: u64, lens: &[usize], mutation: Option<(Mutation, usize)>) -> Result<(), UploadError> {
     let id = [7; 32];
+    let hit = |m: Mutation, i: usize| mutation == Some((m, i));
     let mut v = validator(&id, total, CONNECT_LIMITS);
     let mut offset = 0u64;
     for (i, &len) in lens.iter().enumerate() {
-        let hit = |m: Mutation| mutation == Some((m, i));
-        let chunk_id = if hit(Mutation::WrongPackId) {
+        let chunk_id = if hit(Mutation::WrongPackId, i) {
             [8; 32]
         } else {
             id
         };
-        let at = offset + u64::from(hit(Mutation::Gap));
-        let data_len = len + usize::from(hit(Mutation::Overrun));
-        let last =
-            i + 1 == lens.len() && !mutation.is_some_and(|(m, _)| m == Mutation::MissingLast);
+        let at = offset + u64::from(hit(Mutation::Gap, i));
+        let data_len = len + usize::from(hit(Mutation::Overrun, i));
+        let last = (i + 1 == lens.len()
+            && !mutation.is_some_and(|(m, _)| m == Mutation::MissingLast))
+            || hit(Mutation::EarlyLast, i);
         v.push(Some(&chunk_id), Some(at), data_len, last)?;
         offset += len as u64;
     }
+    if mutation.is_some_and(|(m, _)| m == Mutation::DuplicateLast) {
+        v.push(Some(&id), Some(total), 0, true)?;
+    }
     v.finish().map(|_| ())
+}
+
+/// The error `run` must report for `mutation` at chunk `at`.
+fn expected(total: u64, lens: &[usize], mutation: Mutation, at: usize) -> UploadError {
+    let prefix = |i: usize| lens[..i].iter().sum::<usize>() as u64;
+    match mutation {
+        Mutation::Gap => UploadError::OffsetGap {
+            offset: prefix(at) + 1,
+            expected: prefix(at),
+        },
+        // One extra byte either overruns the declared size or leaves the next
+        // chunk one byte short of the running count.
+        Mutation::Overrun if prefix(at + 1) + 1 > total => UploadError::Overrun,
+        Mutation::Overrun => UploadError::OffsetGap {
+            offset: prefix(at + 1),
+            expected: prefix(at + 1) + 1,
+        },
+        Mutation::WrongPackId => UploadError::PackIdMismatch,
+        Mutation::MissingLast => UploadError::NoLast,
+        // An early `last` at the full size completes; the next chunk is then
+        // after `last`.
+        Mutation::EarlyLast if prefix(at + 1) == total => UploadError::AfterLast,
+        Mutation::EarlyLast => UploadError::LengthMismatch {
+            received: prefix(at + 1),
+            declared: total,
+        },
+        Mutation::DuplicateLast => UploadError::AfterLast,
+    }
 }
 
 proptest! {
@@ -359,11 +443,20 @@ proptest! {
     #[test]
     fn any_single_mutation_is_rejected(
         (total, lens) in split(),
-        pick in 0usize..4,
+        pick in 0..MUTATIONS.len(),
         at in any::<prop::sample::Index>(),
     ) {
-        let mutation = [Mutation::Gap, Mutation::Overrun, Mutation::WrongPackId, Mutation::MissingLast][pick];
-        let at = at.index(lens.len());
-        prop_assert!(run(total, &lens, Some((mutation, at))).is_err(), "{:?} at {}", mutation, at);
+        let mutation = MUTATIONS[pick];
+        let at = if mutation == Mutation::EarlyLast {
+            prop_assume!(lens.len() > 1);
+            at.index(lens.len() - 1)
+        } else {
+            at.index(lens.len())
+        };
+        prop_assert_eq!(
+            run(total, &lens, Some((mutation, at))),
+            Err(expected(total, &lens, mutation, at)),
+            "{:?} at {}", mutation, at
+        );
     }
 }

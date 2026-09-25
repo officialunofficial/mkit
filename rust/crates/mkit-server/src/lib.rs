@@ -7,8 +7,7 @@
 //! [`Clock`]) and never spawns on a concrete executor (see [`Spawner`]).
 //! The shared vocabulary is re-exported at the crate root from private
 //! modules. The protocol logic lives in public modules, so call sites name
-//! the protocol they apply (`refs::evaluate_cas`, `quota::evaluate_quota`);
-//! the quota value types are also at the root.
+//! the protocol they apply (`refs::evaluate_cas`, `quota::evaluate_quota`).
 
 pub mod auth_v2;
 pub mod download;
@@ -30,7 +29,6 @@ pub use op::{
     AuthzFacts, Commitment, GrantRef, OpKind, Operation, Procedure, RefUpdate, VerifiedAuth,
 };
 pub use principal::Principal;
-pub use quota::{QuotaLimits, QuotaScope, QuotaState};
 pub use repo::{Addressing, NamespaceKey, RepoId, RepoName};
 #[cfg(not(target_arch = "wasm32"))]
 pub use rt::SystemClock;

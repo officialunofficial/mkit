@@ -142,22 +142,27 @@ fn verify(
     VerifiedAuth::try_from(&authorized)
 }
 
+/// An `UploadPack` header that differs from the signed commitment. The
+/// caller picks the code: `unauthenticated` for the auth v2 `pack:`
+/// commitment, `permission_denied` for a ticket (SPEC-TRANSPORT-CONNECT §5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("pack header differs from signed commitment")]
+pub struct PackCommitmentMismatch;
+
 /// Check an `UploadPack` header against the signed `pack:` commitment,
 /// before any quota is reserved or chunk read.
 ///
 /// # Errors
-/// [`crate::Code::Unauthenticated`] when the commitment is not `pack:` or
-/// names a different id or length.
+/// [`PackCommitmentMismatch`] when the commitment is not `pack:` or names a
+/// different id or length.
 pub fn check_pack_commitment(
     auth: &VerifiedAuth,
     pack_id: &[u8],
     total_bytes: u64,
-) -> Result<(), ServerError> {
+) -> Result<(), PackCommitmentMismatch> {
     match auth.commitment {
         Commitment::Pack { id, len } if id.as_slice() == pack_id && len == total_bytes => Ok(()),
-        _ => Err(ServerError::unauthenticated(
-            "pack header differs from signed commitment",
-        )),
+        _ => Err(PackCommitmentMismatch),
     }
 }
 
@@ -339,9 +344,9 @@ mod tests {
             (&PACK_ID[..31], 12),
         ] {
             let err = check_pack_commitment(&auth, id, len).unwrap_err();
-            assert_eq!(err.code(), Code::Unauthenticated);
+            assert_eq!(err, PackCommitmentMismatch);
             assert_eq!(
-                err.public_message(),
+                err.to_string(),
                 "pack header differs from signed commitment"
             );
         }
@@ -365,8 +370,10 @@ mod tests {
             &golden_headers(&fixture),
         )
         .unwrap();
-        let err = check_pack_commitment(&unary, &PACK_ID, 12).unwrap_err();
-        assert_eq!(err.code(), Code::Unauthenticated);
+        assert_eq!(
+            check_pack_commitment(&unary, &PACK_ID, 12),
+            Err(PackCommitmentMismatch)
+        );
     }
 
     #[test]

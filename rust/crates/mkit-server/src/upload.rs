@@ -57,6 +57,7 @@ pub struct UploadDone {
 /// the binding, which decodes messages and owns the sink; the validator
 /// raises every other variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum UploadError {
     /// The stream did not start with a header. `stream_empty` when it ended
     /// before any message.
@@ -222,7 +223,8 @@ impl From<UploadError> for ServerError {
 }
 
 /// Validates one `UploadPack` stream's framing, chunk by chunk, without
-/// buffering or hashing.
+/// buffering or hashing. After any error the stream is dead: every later
+/// call returns that same error.
 #[derive(Debug, Clone)]
 pub struct UploadValidator {
     key: PackKey,
@@ -231,6 +233,7 @@ pub struct UploadValidator {
     chunks: u32,
     max_chunks: u32,
     complete: bool,
+    failed: Option<UploadError>,
 }
 
 impl UploadValidator {
@@ -260,6 +263,7 @@ impl UploadValidator {
             chunks: 0,
             max_chunks: limits.max_chunks,
             complete: false,
+            failed: None,
         })
     }
 
@@ -270,9 +274,27 @@ impl UploadValidator {
     /// [`UploadError::BadPackId`], [`UploadError::PackIdMismatch`],
     /// [`UploadError::OffsetMissing`], [`UploadError::OffsetGap`],
     /// [`UploadError::ByteCountOverflow`], [`UploadError::Overrun`] or, on the
-    /// `last` chunk, [`UploadError::LengthMismatch`]. The stream is dead after
-    /// any error.
+    /// `last` chunk, [`UploadError::LengthMismatch`]. After any error, this
+    /// and every later call return that same error, and nothing the failed
+    /// chunk carried is counted.
     pub fn push(
+        &mut self,
+        chunk_pack_id: Option<&[u8]>,
+        offset: Option<u64>,
+        data_len: usize,
+        last: bool,
+    ) -> Result<Progress, UploadError> {
+        if let Some(err) = self.failed {
+            return Err(err);
+        }
+        let result = self.accept(chunk_pack_id, offset, data_len, last);
+        if let Err(err) = result {
+            self.failed = Some(err);
+        }
+        result
+    }
+
+    fn accept(
         &mut self,
         chunk_pack_id: Option<&[u8]>,
         offset: Option<u64>,
@@ -303,26 +325,26 @@ impl UploadValidator {
         if received > self.declared {
             return Err(UploadError::Overrun);
         }
-        self.received = received;
-        if last {
-            if received != self.declared {
-                return Err(UploadError::LengthMismatch {
-                    received,
-                    declared: self.declared,
-                });
-            }
-            self.complete = true;
+        if last && received != self.declared {
+            return Err(UploadError::LengthMismatch {
+                received,
+                declared: self.declared,
+            });
         }
-        Ok(Progress {
-            complete: self.complete,
-        })
+        self.received = received;
+        self.complete = last;
+        Ok(Progress { complete: last })
     }
 
     /// End of stream.
     ///
     /// # Errors
+    /// The error that killed the stream, if any; otherwise
     /// [`UploadError::NoLast`] if the `last` chunk never arrived.
     pub fn finish(self) -> Result<UploadDone, UploadError> {
+        if let Some(err) = self.failed {
+            return Err(err);
+        }
         if !self.complete {
             return Err(UploadError::NoLast);
         }

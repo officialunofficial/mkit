@@ -19,6 +19,7 @@ use crate::error::ServerError;
 /// server-side log line and picks the client-facing message; the backend's
 /// own error text never reaches the client.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum StorageOp {
     /// Resolving the blob store (for example an R2 bucket binding) failed.
     BlobBinding,
