@@ -16,8 +16,9 @@ and `wasm32-unknown-unknown`:
   quota evaluation (`quota`), auth v2 glue (`auth_v2`) and storage-error
   redaction (`storage_error`)
 - the storage contract (`store`): a key-level `NamespaceStore` whose only
-  write is one declarative `Batch`, and the key layouts; the in-memory
-  `MemoryKv` reference backend behind the `memory` feature
+  write is one declarative `Batch`, a content-addressed `BlobStore`, the key
+  layouts, value codecs and typed readers, and the replay-ledger model;
+  in-memory reference backends behind the `memory` feature
 
 The policy traits, the request pipeline and the Connect binding land here in
 later work of the same effort.

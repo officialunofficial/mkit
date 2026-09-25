@@ -19,11 +19,18 @@ pub type BoxError = Box<dyn std::error::Error>;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum StoreError {
-    /// The request breaks the contract: an oversize key or value, a scan
-    /// `limit` of 0, a byte range outside the blob, or a blob whose bytes
-    /// do not match its key or declared length. Nothing was written.
+    /// The request breaks the contract: an oversize key, value or batch, a
+    /// scan `limit` of 0, a malformed byte range, or a blob whose bytes do
+    /// not match its key or declared length. Nothing was written.
     #[error("invalid storage request: {0}")]
     Invalid(Cow<'static, str>),
+    /// A byte range starts at or past the end of a blob of `len` bytes
+    /// (HTTP 416 on the serving path).
+    #[error("byte range not satisfiable for a {len}-byte blob")]
+    RangeNotSatisfiable {
+        /// The blob's length.
+        len: u64,
+    },
     /// The store's [`crate::StoreCapabilities`] exclude the request, e.g. a
     /// non-ref key on a `RefsOnly` store or a multi-write batch on a store
     /// without `atomic_multi_key`. Nothing was written.

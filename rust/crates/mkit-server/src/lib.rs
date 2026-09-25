@@ -9,9 +9,9 @@
 //! modules. The protocol logic lives in public modules, so call sites name
 //! the protocol they apply (`refs::evaluate_cas`, `quota::evaluate_quota`).
 //! The storage contract lives in [`store`]: its contract types are also
-//! re-exported at the root, its key layouts stay namespaced
-//! (`store::keys`). The `memory` feature adds the in-memory reference
-//! backends.
+//! re-exported at the root, its key layouts, value codecs and typed
+//! readers stay namespaced (`store::keys`, `store::codec`, `store::read`).
+//! The `memory` feature adds the in-memory reference backends.
 
 pub mod auth_v2;
 pub mod download;
@@ -22,6 +22,7 @@ mod op;
 mod principal;
 pub mod quota;
 pub mod refs;
+mod replay;
 mod repo;
 mod rt;
 pub mod storage_error;
@@ -33,18 +34,23 @@ pub use error::{
     ADMISSION_CHALLENGE_TYPE, Code, ErrorDetail, InvalidHeader, Redacted, ServerError,
 };
 #[cfg(any(test, feature = "memory"))]
-pub use memory::{MemoryFault, MemoryKv};
+pub use memory::{MemoryBlobStore, MemoryFault, MemoryKv, MemoryPackSink};
 pub use op::{
     AuthzFacts, Commitment, GrantRef, OpKind, Operation, Procedure, RefUpdate, VerifiedAuth,
 };
 pub use principal::Principal;
+pub use replay::{
+    ReplayDecision, ReplayKey, ReplayRecord, ReplayState, StoredRejection, StoredResult,
+    UpdateRefResult, classify,
+};
 pub use repo::{Addressing, NamespaceKey, RepoId, RepoName};
 #[cfg(not(target_arch = "wasm32"))]
 pub use rt::SystemClock;
 pub use rt::{BoxFuture, BoxStream, Clock, ManualClock, MaybeSend, MaybeSync, Spawner, send_wrap};
 pub use store::{
-    Batch, BatchOutcome, BoxError, Cursor, Key, KeyClasses, MAX_BATCH_BYTES, MAX_BATCH_OPS,
-    MAX_KEY_BYTES, MAX_VALUE_BYTES, MembershipMode, NamespaceStore, Partition, PartitionStats,
+    Batch, BatchOutcome, BlobBody, BlobKey, BlobMeta, BlobStore, BoxError, ByteRange,
+    CommitOutcome, Cursor, Key, KeyClasses, MAX_BATCH_BYTES, MAX_BATCH_OPS, MAX_KEY_BYTES,
+    MAX_VALUE_BYTES, MembershipMode, NamespaceStore, PackSink, Partition, PartitionStats,
     Precondition, ScanPage, StoreCapabilities, StoreError, Value, Write,
 };
 pub use telemetry::{

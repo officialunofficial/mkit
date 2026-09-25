@@ -45,6 +45,11 @@ train).
   registry, and the in-memory `MemoryKv` reference backend behind the
   `memory` feature. No SQL required of a backend.
 
+- *(server)* `mkit-server` replay-ledger model (a stored result can never
+  be a challenge or a retryable outcome), versioned value codecs, typed
+  readers over any `NamespaceStore`, and the content-addressed `BlobStore` /
+  `PackSink` contract with the `MemoryBlobStore` reference backend.
+
 - *(core)* Closure verification now has a pull-based
   `ObjectSource`/`verify_closure_streaming` API and a native
   `verify_closure_store` helper. `ClosureReport` gains the additive
