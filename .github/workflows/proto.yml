@@ -67,7 +67,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # Full history: `buf breaking` compares each module against
-          # its state on the PR base branch (`origin/main` on push).
+          # its state on the PR base branch (the pushed branch on push).
           fetch-depth: 0
 
       - name: Install buf
@@ -84,15 +84,16 @@ jobs:
           chmod +x /usr/local/bin/buf
           buf --version
 
-      # github.base_ref is empty on `push` events, hence the `main` fallback.
+      # github.base_ref is empty on `push` events, so pushes compare against
+      # the pushed branch itself (github.ref_name).
       - name: Ensure base branch is fetched
         env:
-          BASE_REF: ${{ github.base_ref || 'main' }}
+          BASE_REF: ${{ github.base_ref || github.ref_name }}
         run: git fetch --no-tags origin "${BASE_REF}:refs/remotes/origin/${BASE_REF}" || true
 
       - name: buf lint + breaking (every module)
         env:
-          BASE_REF: ${{ github.base_ref || 'main' }}
+          BASE_REF: ${{ github.base_ref || github.ref_name }}
         run: |
           set -euo pipefail
           status=0
@@ -107,7 +108,7 @@ jobs:
             echo "::group::buf breaking $dir (against origin/${BASE_REF})"
             if git cat-file -e "origin/${BASE_REF}:$dir/buf.yaml" 2>/dev/null; then
               # When $buf_yaml itself changed since the PR base branch
-              # (origin/main on push), pin the HISTORICAL side to the
+              # (the pushed branch on push), pin the HISTORICAL side to the
               # CURRENT buf.yaml (--against-config) instead of letting buf
               # resolve the base branch's own
               # (differently-configured) buf.yaml. Without this, a v2

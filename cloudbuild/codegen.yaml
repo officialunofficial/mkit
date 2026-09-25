@@ -34,8 +34,9 @@ substitutions:
   _CACHE_BUCKET: ${PROJECT_ID}-mkit-sccache
   _CI_IMAGE: us-east4-docker.pkg.dev/${PROJECT_ID}/docker/mkit-ci:rust-1.95.0
   _BUF_VERSION: "1.66.0"
-  # Set by GitHub pull-request triggers; empty on push triggers (see above).
-  _BASE_BRANCH: ""
+  # _BASE_BRANCH is deliberately NOT declared here: a file default could
+  # shadow the value GitHub pull-request triggers populate. ALLOW_LOOSE below
+  # lets push triggers (which don't set it) substitute it as empty.
 
 options:
   machineType: E2_HIGHCPU_8

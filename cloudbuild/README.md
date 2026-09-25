@@ -57,12 +57,21 @@ maintainer **`/gcbrun`** only for external/fork PRs. See
 `--ignored-files` filters.
 
 The setup script skips triggers that already exist, so changing the PR pattern
-doesn't update live triggers. To update an existing `*-pr` trigger, export it
-with `gcloud builds triggers describe <name> --region=us-east4 --format=json`,
-edit `.github.pullRequest.branch`, and re-import it with
-`gcloud builds triggers import --region=us-east4 --source=<file>`. You can also
-edit the base-branch regex in the Cloud Console (Cloud Build → Triggers →
-trigger → Source).
+doesn't update live triggers. These are 2nd-gen triggers (created with
+`--repository`), so the PR base regex lives at
+`.repositoryEventConfig.pullRequest.branch`. To update the existing `*-pr`
+triggers:
+
+```bash
+for t in mkit-ci-pr mkit-codegen-pr mkit-security-pr mkit-docs-pr mkit-geiger-pr; do
+  gcloud builds triggers describe "$t" --project="$PROJECT" --region=us-east4 --format=json > "/tmp/$t.json"
+  jq '.repositoryEventConfig.pullRequest.branch="^(main|feat/mkit-server)$"' "/tmp/$t.json" > "/tmp/$t.new.json"
+  gcloud builds triggers import --project="$PROJECT" --region=us-east4 --source="/tmp/$t.new.json"
+done
+```
+
+You can also edit the base-branch regex in the Cloud Console (Cloud Build →
+Triggers → trigger → Source).
 
 | Trigger | Config | PR gate |
 |---|---|---|
