@@ -8,10 +8,12 @@
 mod error;
 pub mod keys;
 mod kv;
+mod partition;
 
 pub use error::{BoxError, StoreError};
 pub use kv::{
-    Batch, BatchOutcome, Cursor, Key, KeyClasses, MAX_KEY_BYTES, MAX_VALUE_BYTES, MembershipMode,
-    NamespaceStore, Partition, PartitionStats, Precondition, ScanPage, StoreCapabilities, Value,
-    Write,
+    Batch, BatchOutcome, Cursor, Key, KeyClasses, MAX_BATCH_BYTES, MAX_BATCH_OPS, MAX_KEY_BYTES,
+    MAX_VALUE_BYTES, MembershipMode, NamespaceStore, PartitionStats, Precondition, ScanPage,
+    StoreCapabilities, Value, Write,
 };
+pub use partition::Partition;

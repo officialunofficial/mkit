@@ -95,18 +95,18 @@ fn size(rows: &Rows) -> u64 {
         .sum()
 }
 
-/// Check `pre` against `rows` at `now`; `Err(observed)` if it fails.
-fn check(rows: &Rows, pre: &Precondition, now: u64) -> Result<(), Option<Value>> {
+/// Check precondition `index` against `rows` at `now`; the failure outcome
+/// if it does not hold.
+fn check(rows: &Rows, index: usize, pre: &Precondition, now: u64) -> Option<BatchOutcome> {
     let (holds, observed) = match pre {
         Precondition::Absent(k) => (!rows.contains_key(k), rows.get(k).cloned()),
         Precondition::Present(k) => (rows.contains_key(k), None),
         Precondition::Equals(k, v) => (rows.get(k) == Some(v), rows.get(k).cloned()),
-        Precondition::NotAfter(deadline) => (
-            now <= *deadline,
-            Some(Value::new(now.to_be_bytes().to_vec())),
-        ),
+        Precondition::NotAfter(deadline) => {
+            return (now > *deadline).then_some(BatchOutcome::DeadlinePassed { backend_now: now });
+        }
     };
-    if holds { Ok(()) } else { Err(observed) }
+    (!holds).then_some(BatchOutcome::PreconditionFailed { index, observed })
 }
 
 impl NamespaceStore for MemoryKv {
@@ -162,12 +162,13 @@ impl NamespaceStore for MemoryKv {
         take_fault(&self.fault, MemoryFault::ApplyBefore)?;
         let mut partitions = lock(&self.partitions);
         // Rule 8: the store's clock, read once inside the check-and-write.
-        let now = u64::try_from(self.clock.now_ms()).unwrap_or(0);
+        // A reading before the epoch fails every deadline (fail closed).
+        let now = u64::try_from(self.clock.now_ms()).unwrap_or(u64::MAX);
         let empty = Rows::new();
         let rows = partitions.get(p).unwrap_or(&empty);
         for (index, pre) in batch.preconditions.iter().enumerate() {
-            if let Err(observed) = check(rows, pre, now) {
-                return Ok(BatchOutcome::PreconditionFailed { index, observed });
+            if let Some(failed) = check(rows, index, pre, now) {
+                return Ok(failed);
             }
         }
         let adds = batch.has_put();
@@ -212,7 +213,9 @@ mod tests {
     use super::*;
     use crate::repo::{NamespaceKey, RepoName};
     use crate::rt::ManualClock;
-    use crate::store::{KeyClasses, MAX_KEY_BYTES, MAX_VALUE_BYTES, keys};
+    use crate::store::{
+        KeyClasses, MAX_BATCH_BYTES, MAX_BATCH_OPS, MAX_KEY_BYTES, MAX_VALUE_BYTES, keys,
+    };
     use BatchOutcome::Committed;
     use Precondition::{Absent, Equals, NotAfter, Present};
 
@@ -298,6 +301,22 @@ mod tests {
     }
 
     #[test]
+    fn apply_rejects_batches_over_the_op_and_byte_caps() {
+        let kv = MemoryKv::default();
+        let puts = |n: usize, len: usize| {
+            (0..n).fold(Batch::new(), |b, i| {
+                b.put(Key::new(i.to_be_bytes().to_vec()), Value::new(vec![0; len]))
+            })
+        };
+        assert_eq!(ok(&kv, puts(MAX_BATCH_OPS, 1)), Committed);
+        let too_many = puts(MAX_BATCH_OPS, 1).require(Absent(k("z")));
+        assert!(matches!(apply(&kv, too_many), Err(StoreError::Invalid(_))));
+        // Each value fits, the sum does not.
+        let too_big = puts(MAX_BATCH_BYTES / MAX_VALUE_BYTES + 1, MAX_VALUE_BYTES);
+        assert!(matches!(apply(&kv, too_big), Err(StoreError::Invalid(_))));
+    }
+
+    #[test]
     fn not_after_uses_store_clock_at_apply() {
         let clock = Arc::new(ManualClock::new(1_000));
         let kv = MemoryKv::with_clock(clock.clone());
@@ -308,15 +327,22 @@ mod tests {
             .require(Equals(k("x"), v("never")))
             .put(k("a"), v("1"));
         clock.set(1_501);
-        let observed = Value::new(1_501u64.to_be_bytes().to_vec());
-        assert_eq!(ok(&kv, late), failed(0, Some(observed)));
+        let passed = BatchOutcome::DeadlinePassed { backend_now: 1_501 };
+        assert_eq!(ok(&kv, late), passed);
         assert_eq!(ab(&kv), (None, None));
         clock.set(1_500);
         let at_deadline = Batch::new().require(NotAfter(1_500)).put(k("a"), v("1"));
         assert_eq!(ok(&kv, at_deadline), Committed);
-        // A clock before 1970 reads as 0, which meets every deadline.
+        // A clock before 1970 fails closed: no deadline is met.
         clock.set(-5);
-        assert_eq!(ok(&kv, Batch::new().require(NotAfter(0))), Committed);
+        let never = Batch::new()
+            .require(NotAfter(u64::MAX - 1))
+            .put(k("b"), v("1"));
+        let invalid = BatchOutcome::DeadlinePassed {
+            backend_now: u64::MAX,
+        };
+        assert_eq!(ok(&kv, never), invalid);
+        assert_eq!(get(&kv, &k("b")), None);
     }
 
     #[test]
@@ -356,7 +382,13 @@ mod tests {
         let b = || Batch::new().put(k("b"), v("1"));
         assert!(matches!(apply(&kv, b()), Err(StoreError::Full)));
         assert_eq!(ab(&kv), (Some(v("12")), None));
-        assert_eq!(ok(&kv, Batch::new().delete(k("a"))), Committed);
+        // Rule 7: pruning retried as a delete-only batch, preconditions
+        // included, succeeds on a full store.
+        let prune = Batch::new()
+            .require(Equals(k("a"), v("12")))
+            .require(Absent(k("b")))
+            .delete(k("a"));
+        assert_eq!(ok(&kv, prune), Committed);
         assert_eq!(block_on(kv.stats(&ns())).unwrap().bytes, 0);
         assert_eq!(ok(&kv, b()), Committed);
         assert_eq!(block_on(kv.stats(&ns())).unwrap().keys, Some(1));

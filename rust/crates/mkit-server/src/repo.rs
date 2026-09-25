@@ -9,7 +9,7 @@ use crate::error::ServerError;
 
 /// Longest accepted repository name, matching the auth v2 `repository`
 /// component bound (`mkit_core::write_auth`).
-const MAX_REPO_NAME_BYTES: usize = 255;
+pub(crate) const MAX_REPO_NAME_BYTES: usize = 255;
 
 /// The namespace a single-repository deployment uses: a reserved sentinel.
 /// SPEC-TRANSPORT-CONNECT §7.4 namespaces are always `ed25519-<64 hex>` or
@@ -68,6 +68,12 @@ impl NamespaceKey {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// A key read back from storage (`Partition::decode`): the store only
+    /// ever holds keys this server encoded.
+    pub(crate) fn from_stored(key: String) -> Self {
+        Self(key)
     }
 }
 

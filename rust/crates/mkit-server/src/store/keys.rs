@@ -24,15 +24,20 @@
 //! that adds it: tickets `t`, membership `m`, outbox `o` / `oq` / `os`,
 //! outbox backlog counter `oc`, relay high-water marks `rh`, object index
 //! `i`, leases `l`, published pointers `pp`, tombstones `tb`, verification
-//! cursors `vc`, epoch lease `el`, and the `ContentIndex` classes `h`, `g`,
+//! cursors `vc`, epoch lease `el`, the coordinator's shard registry `sr`
+//! (WP-1.22; see `Partition`), and the `ContentIndex` classes `h`, `g`,
 //! `b`, `c`. A new row adds its layout here, with a golden test.
 
 use bytes::{BufMut, Bytes, BytesMut};
 use mkit_core::hash::Hash;
 
-use super::kv::Key;
+use super::kv::{Key, MAX_KEY_BYTES};
 use crate::quota::QuotaScope;
-use crate::repo::RepoName;
+use crate::refs::MAX_REF_NAME_BYTES;
+use crate::repo::{MAX_REPO_NAME_BYTES, RepoName};
+
+// The longest ref key (`r 00 <repo> 00 <refname>`) fits a key.
+const _: () = assert!(2 + MAX_REPO_NAME_BYTES + 1 + MAX_REF_NAME_BYTES <= MAX_KEY_BYTES);
 
 /// The key-layout version this binary writes. A binary that reads a newer
 /// version refuses to serve the partition.
@@ -57,7 +62,8 @@ pub const TAG_TIMER: &str = "w";
 
 /// Tags whose layouts later work packages add. No M0 key uses them.
 pub const RESERVED_TAGS: &[&str] = &[
-    "t", "tb", "m", "o", "oq", "os", "oc", "rh", "i", "l", "pp", "vc", "el", "h", "g", "b", "c",
+    "t", "tb", "m", "o", "oq", "os", "oc", "rh", "i", "l", "pp", "vc", "el", "sr", "h", "g", "b",
+    "c",
 ];
 
 /// A key decoded by [`parse`].

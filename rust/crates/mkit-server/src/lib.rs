@@ -43,9 +43,9 @@ pub use repo::{Addressing, NamespaceKey, RepoId, RepoName};
 pub use rt::SystemClock;
 pub use rt::{BoxFuture, BoxStream, Clock, ManualClock, MaybeSend, MaybeSync, Spawner, send_wrap};
 pub use store::{
-    Batch, BatchOutcome, BoxError, Cursor, Key, KeyClasses, MAX_KEY_BYTES, MAX_VALUE_BYTES,
-    MembershipMode, NamespaceStore, Partition, PartitionStats, Precondition, ScanPage,
-    StoreCapabilities, StoreError, Value, Write,
+    Batch, BatchOutcome, BoxError, Cursor, Key, KeyClasses, MAX_BATCH_BYTES, MAX_BATCH_OPS,
+    MAX_KEY_BYTES, MAX_VALUE_BYTES, MembershipMode, NamespaceStore, Partition, PartitionStats,
+    Precondition, ScanPage, StoreCapabilities, StoreError, Value, Write,
 };
 pub use telemetry::{
     METRIC_LATENCY, METRIC_REQUESTS, METRIC_UPLOAD_BYTES, Metrics, NEVER_ECHO, NEVER_LOG,

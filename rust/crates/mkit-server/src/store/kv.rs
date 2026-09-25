@@ -7,65 +7,24 @@ use bytes::Bytes;
 
 use super::error::StoreError;
 use super::keys;
-use crate::repo::{NamespaceKey, RepoName};
+use super::partition::Partition;
 use crate::rt::{MaybeSend, MaybeSync};
+
+// Portable limits. Every backend accepts batches within them and the core
+// never plans beyond them. They leave headroom under Durable Object SQLite
+// storage (2 MB per row or value, one `transactionSync` per batch; see
+// https://developers.cloudflare.com/durable-objects/platform/limits/), so a
+// batch that fits here fits every backend.
 
 /// Longest accepted key, in bytes.
 pub const MAX_KEY_BYTES: usize = 1024;
-/// Longest accepted value, in bytes: below the Durable Object `SQLite` 2 MB
-/// row limit.
-pub const MAX_VALUE_BYTES: usize = 1024 * 1024;
-
-/// A storage partition: one D34 shard. Everything that must commit
-/// atomically lives in one partition. The core computes the partition of
-/// every operation; a backend maps partitions to whatever it likes (a
-/// Durable Object each, rows keyed by partition in `SQLite`, a qmdb
-/// instance each).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[non_exhaustive]
-pub enum Partition {
-    /// The whole namespace: single-partition mode. Used by M0 (today's
-    /// single `root` Durable Object) and by the ssh / fs-layout path for
-    /// good; not by D34-sharded deployments.
-    Namespace(NamespaceKey),
-    /// D34 (M1): the namespace coordinator: config, the grant epoch and the
-    /// table of currently epoch-leased shards. Rarely written.
-    Coordinator(NamespaceKey),
-    /// D34 (M1): one per (repo, ref). A branch's head and packmap share it
-    /// (`shard_ref` is the `refs/heads/<x>` name). Strongly consistent.
-    Ref {
-        /// Namespace.
-        ns: NamespaceKey,
-        /// Repository.
-        repo: RepoName,
-        /// The ref whose shard this is.
-        shard_ref: String,
-    },
-    /// D34 (M1): repo membership by object-id prefix over the fixed
-    /// `INDEX_FANOUT` (default 4096). Never resharded; eventually
-    /// consistent.
-    RepoIndex {
-        /// Namespace.
-        ns: NamespaceKey,
-        /// Repository.
-        repo: RepoName,
-        /// Object-id prefix bucket.
-        prefix: u16,
-    },
-    /// D34 (M1): the ref-name index `ListRefs` reads, hash-sharded over the
-    /// fixed `REF_INDEX_FANOUT` (default 16). Eventually consistent.
-    RefIndex {
-        /// Namespace.
-        ns: NamespaceKey,
-        /// Repository.
-        repo: RepoName,
-        /// Ref-name hash bucket.
-        bucket: u16,
-    },
-    /// A global `ContentIndex` shard, by object-id prefix over
-    /// `INDEX_FANOUT`.
-    ContentShard(u16),
-}
+/// Longest accepted value, in bytes; below [`MAX_BATCH_BYTES`].
+pub const MAX_VALUE_BYTES: usize = 512 * 1024;
+/// Most preconditions plus writes in one [`Batch`].
+pub const MAX_BATCH_OPS: usize = 100;
+/// Most key and value bytes, summed over a [`Batch`]'s preconditions and
+/// writes.
+pub const MAX_BATCH_BYTES: usize = 1024 * 1024;
 
 macro_rules! bytes_newtype {
     ($(#[$doc:meta])* $name:ident) => {
@@ -125,8 +84,10 @@ pub enum Precondition {
     Equals(Key, Value),
     /// Commit deadline (Unix ms): the batch commits only if the backend's
     /// own clock, read inside the check-and-write step, is `<=` it. It
-    /// names no key, so every store accepts it. `observed` on failure: the
-    /// backend's clock reading as 8 big-endian bytes.
+    /// names no key, so every store accepts it. Failure is
+    /// [`BatchOutcome::DeadlinePassed`], never `PreconditionFailed`. A
+    /// clock reading before the epoch or otherwise invalid fails closed:
+    /// it counts as `u64::MAX`.
     NotAfter(u64),
 }
 
@@ -190,11 +151,16 @@ impl Batch {
     /// in [`NamespaceStore::apply`].
     ///
     /// # Errors
-    /// [`StoreError::Invalid`] for a key over [`MAX_KEY_BYTES`] or a value
-    /// over [`MAX_VALUE_BYTES`]; [`StoreError::Unsupported`] for a key
-    /// outside `caps.key_classes`, or, without `atomic_multi_key`, more
-    /// than one write or a key precondition on another key than the write.
+    /// [`StoreError::Invalid`] for a key over [`MAX_KEY_BYTES`], a value
+    /// over [`MAX_VALUE_BYTES`], more than [`MAX_BATCH_OPS`] operations or
+    /// more than [`MAX_BATCH_BYTES`] in total; [`StoreError::Unsupported`]
+    /// for a key outside `caps.key_classes`, or, without
+    /// `atomic_multi_key`, more than one write or a key precondition on
+    /// another key than the write.
     pub fn validate(&self, caps: &StoreCapabilities) -> Result<(), StoreError> {
+        if self.preconditions.len() + self.writes.len() > MAX_BATCH_OPS {
+            return Err(StoreError::Invalid("batch exceeds MAX_BATCH_OPS".into()));
+        }
         let mut keys = Vec::new();
         for pre in &self.preconditions {
             match pre {
@@ -209,6 +175,13 @@ impl Batch {
                 Write::Put(k, v) => keys.push((k, Some(v))),
                 Write::Delete(k) => keys.push((k, None)),
             }
+        }
+        let total: usize = keys
+            .iter()
+            .map(|(k, v)| k.as_bytes().len() + v.map_or(0, |v| v.as_bytes().len()))
+            .sum();
+        if total > MAX_BATCH_BYTES {
+            return Err(StoreError::Invalid("batch exceeds MAX_BATCH_BYTES".into()));
         }
         for (key, value) in &keys {
             if key.as_bytes().len() > MAX_KEY_BYTES {
@@ -245,12 +218,19 @@ impl Batch {
 pub enum BatchOutcome {
     /// Every precondition held and every write is durable.
     Committed,
-    /// `preconditions[index]` failed; nothing was written.
+    /// `preconditions[index]`, a key precondition, failed; nothing was
+    /// written.
     PreconditionFailed {
         /// Index of the first failing precondition.
         index: usize,
         /// What the store saw (see [`Precondition`]).
         observed: Option<Value>,
+    },
+    /// A [`Precondition::NotAfter`] deadline had passed on the backend's
+    /// clock (normative rule 8); nothing was written.
+    DeadlinePassed {
+        /// The backend's clock reading, Unix ms (`u64::MAX` if invalid).
+        backend_now: u64,
     },
 }
 
@@ -265,6 +245,7 @@ pub struct ScanPage {
 
 /// Which key classes (`store::keys`) a store accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum KeyClasses {
     /// Every class.
     All,
@@ -281,8 +262,12 @@ pub enum MembershipMode {
     Explicit,
 }
 
-/// What a store supports. The pipeline plans around it.
+/// What a store supports. The pipeline plans around it. Start from
+/// [`StoreCapabilities::full`] or [`StoreCapabilities::refs_only`] and set
+/// fields: the struct is `#[non_exhaustive]`, so later fields default
+/// safely.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct StoreCapabilities {
     /// `false`: a batch holds at most one write, and at most one key
     /// precondition, on that same key (plus any `NotAfter`). The pipeline
@@ -364,14 +349,25 @@ pub struct PartitionStats {
 /// 7. **Bounded growth.** The core deletes what it no longer needs through
 ///    ordinary batches; a backend reclaims deleted keys and reports
 ///    [`Self::stats`]. At its cap it returns [`StoreError::Full`] for
-///    batches that add data and keeps serving reads and deletes.
+///    batches that add data and keeps serving reads and deletes. A batch
+///    whose writes are all deletes (preconditions allowed) never returns
+///    `Full`, so on `Full` the caller retries pruning as a delete-only
+///    batch.
 /// 8. **Commit deadline.** [`Precondition::NotAfter`] is evaluated against
 ///    the **backend's own clock** (the `SQLite` host's, the Durable
 ///    Object's, an injected one in memory), read once inside the same
 ///    non-yielding check-and-write step as the key checks, never the
-///    caller's clock. A late batch therefore cannot commit after its
-///    deadline, whenever it arrives. Callers allow for skew between their
-///    clock and the backend's.
+///    caller's clock; an invalid reading fails closed. A late batch
+///    therefore cannot commit after its deadline, whenever it arrives.
+///    A miss is [`BatchOutcome::DeadlinePassed`]: the pipeline answers a
+///    retryable `unavailable`, never `aborted`, `deadline_exceeded` or
+///    `resource_exhausted`, and may re-plan the write once within the
+///    envelope's validity (SPEC-WRITE-GRANTS §5.5). Callers set the
+///    deadline with a margin that covers the skew between their clock and
+///    the backend's **plus** the longest synchronous span between reading
+///    the clock and committing: on Workers `Date.now()` does not advance
+///    during synchronous execution, so the backend's reading can lag real
+///    time by that span.
 pub trait NamespaceStore: MaybeSend + MaybeSync {
     /// What this store supports.
     fn capabilities(&self) -> StoreCapabilities;
@@ -422,8 +418,9 @@ pub trait NamespaceStore: MaybeSend + MaybeSync {
     /// One atomic, all-or-nothing batch: validate it, read the backend
     /// clock once, check every precondition in order against committed
     /// state (`NotAfter` against that reading); on the first failure return
-    /// [`BatchOutcome::PreconditionFailed`] and write nothing, otherwise
-    /// apply every write and return [`BatchOutcome::Committed`].
+    /// [`BatchOutcome::PreconditionFailed`] or
+    /// [`BatchOutcome::DeadlinePassed`] and write nothing, otherwise apply
+    /// every write and return [`BatchOutcome::Committed`].
     fn apply(
         &self,
         p: &Partition,
