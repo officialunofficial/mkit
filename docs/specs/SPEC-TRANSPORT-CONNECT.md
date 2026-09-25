@@ -306,7 +306,7 @@ maps onto a standard Connect code:
 | `RefConflict` | `failed_precondition` | `UpdateRef` on a CAS mismatch, including deletion of an absent ref (§7.8). `AdvanceRefs` reports its conflicts as typed outcomes (§4), never as this error. |
 | `InvalidRef` | `invalid_argument` | Any RPC taking a ref name that fails SPEC-REFS §3. |
 | `ConnectionFailed` | *(not server-raised &mdash; client-observed transport failure, for example TCP reset, deadline exceeded)* | &mdash; |
-| `ServerError{status}` | `unavailable` (5xx-equivalent), `resource_exhausted` (429-equivalent), or `aborted` (a client maps it to a 5xx-equivalent status) | Deployment-specific overload / backend failure; `aborted` also answers a retry of an operation that is still in flight (§7.1). |
+| `ServerError{status}` | `unavailable` (5xx-equivalent), `resource_exhausted` (429-equivalent), or `aborted` (a client maps it to `ServerError{status: 503}`) | Deployment-specific overload / backend failure; `aborted` also answers a retry of an operation that is still in flight (§7.1). |
 | `InvalidResponse` | *(not server-raised &mdash; client-observed: malformed frame, wrong message on a streamed oneof, digest mismatch on `DownloadPack`)* | &mdash; |
 | `ProtocolError` | `invalid_argument` | A client-streaming call whose `header` is missing, arrives after a `chunk`, or whose declared/received byte counts disagree (§6). |
 | `PayloadTooLarge` | `resource_exhausted` | `UploadPack` header `total_bytes` (or the observed stream length) exceeds the server's cap. |
@@ -349,7 +349,7 @@ resolves by calling `BeginUpload` again, never to `RefConflict`.
 | A signed nonce already recorded with a different operation fingerprint (§7.1) | `invalid_argument` |
 | A signed nonce whose operation is still `in_flight` (§7.1). The request never reaches admission. | `aborted` (retryable) |
 | A new operation that the admission step challenges (§5.1) | `permission_denied` with HTTP status 402 and one `AdmissionChallenge` detail |
-| A new operation that the admission step denies outright (§5.1) | `permission_denied`, with no `AdmissionChallenge` detail |
+| A new operation that the admission step denies outright (§5.1) | `permission_denied`, with no `AdmissionChallenge` detail, with its default HTTP status 403, never 402 |
 
 `failed_precondition` is a CAS conflict only on `UpdateRef`. On the
 RPCs above, and on an `UploadPack` that needed a ticket and carried
@@ -482,7 +482,7 @@ and carries `Cache-Control: private`.
 receipt headers (`Access-Control-Expose-Headers: WWW-Authenticate,
 Payment-Receipt, PAYMENT-REQUIRED, PAYMENT-RESPONSE`) and allows the
 credential request headers (`Payment-Authorization`,
-`PAYMENT-SIGNATURE`, and `Authorization`). A preflight `OPTIONS`
+`PAYMENT-SIGNATURE`, `Authorization`, and `Accept-Payment`). A preflight `OPTIONS`
 request never requires payment.
 
 **Redaction.** Servers and clients MUST keep payment credentials and
@@ -499,7 +499,13 @@ with no challenges and an empty description. In both cases the client
 also keeps the response's `WWW-Authenticate` and `PAYMENT-REQUIRED`
 fields for the helper. The client never parses a `problem+json` or
 other non-Connect body, and never retries `AdmissionRequired`
-automatically. Without a helper it fails the operation and shows the
+automatically.
+
+A client implementation must keep the HTTP status of an error
+response, so that it still recognizes a raw 402 that carries no
+Connect detail (informative; an M3 implementation requirement). The
+`connectrpc` 0.9 client drops that status when it builds its error
+(`client/mod.rs`, lines 2173&ndash;2255). Without a helper it fails the operation and shows the
 description and the challenge schemes to the user.
 
 **Admission helper.** A client MAY run a user-configured admission
@@ -571,16 +577,28 @@ name is on the remote's allowlist. Names compare case-insensitively.
 configuration says. An `admission_headers` entry that names one has no
 effect, and the client warns naming it:
 
-- every header whose name begins with `X-`. This covers every auth v2
-  envelope header (`X-Public-Key`, `X-Signature`, `X-Digest`,
-  `X-Created-At`, `X-Expires-At`, `X-Envelope-Version`, `X-Audience`,
-  `X-Repository`, `X-Content-Commitment`), `X-Mkit-Ref` (§7.9), the
-  write-grant header `X-Write-Grant`, `X-Forwarded-*`, and any `X-`
-  header a later mkit specification signs or defines;
+- the auth v2 envelope headers `X-Public-Key`, `X-Signature`,
+  `X-Digest`, `X-Created-At`, `X-Expires-At`, `X-Envelope-Version`,
+  `X-Audience`, `X-Repository`, `X-Content-Commitment`; the write-grant
+  header `X-Write-Grant`; `X-Mkit-Ref` (§7.9); every header beginning
+  `X-Mkit-`; every `X-Forwarded-*` header;
 - `Host`, every `Content-*` header, `Transfer-Encoding`, every
-  `Connect-*` header, `Cookie`, and `Idempotency-Key`;
+  `Connect-*` header, `Cookie`, `Idempotency-Key`, and `Authorization`
+  when the client already sends it to that remote (§7.3);
 - the hop-by-hop headers `Connection`, `Keep-Alive`, every `Proxy-*`
   header, `TE`, `Trailer`, and `Upgrade`.
+
+A later mkit specification that defines a request header MUST name it
+`X-Mkit-*` or add it to this list.
+
+`mkit config` SHOULD refuse to write a reserved name into
+`remote.<name>.admission_headers`. When a client loads such an entry,
+it SHOULD warn with this fixed wording, where `<header>` is the entry
+and `<name>` the remote:
+
+```text
+warning: ignoring reserved header `<header>` in remote.<name>.admission_headers (see SPEC-TRANSPORT-CONNECT §5.1)
+```
 
 **Retry.** With the allowed headers attached, the client sends the same
 logical operation once more. While the auth v2 envelope is still valid
@@ -813,7 +831,8 @@ A server processes a signed write in this order:
 
    Only a new operation continues. So a retry never presents a spent payment
    credential again, and one signer's result is never served to another.
-3. **Authorize** the write (§7.5), then run **admission** (§5.1). A
+3. **Authorize** the write (§7.5), then run **admission** (§5.1)
+   (for `BeginUpload`, after the live-ticket check of §7.7). A
    challenge or a denial allocates nothing. Because the lookup precedes
    admission, a retry stays answerable after the caller has exhausted its
    budget.
@@ -1249,6 +1268,11 @@ Every RPC carries its own nonce: `BeginUpload`, each `UploadPart`,
 `CompleteUpload`, a ticketed `UploadPack`, and `AdvanceRefs` are
 separate signed operations.
 
+The server also runs admission on every other signed unary write:
+`UpdateRef`, including deletion (§7.8), and an `AdvanceRefs` that
+consumes no ticket. Allowing, challenging or denying it is deployment
+policy.
+
 | RPC | Admission | What its apply writes |
 |---|---|---|
 | `BeginUpload` (unary; names its target ref) | Yes | In the target ref's shard: the replay record, a reservation row, and the ticket. |
@@ -1258,19 +1282,23 @@ separate signed operations.
 - **Membership.** A pack becomes a member of the repository only at the
   apply of the `AdvanceRefs` that consumes its ticket. Until then,
   `BeginUpload` for the same signer, ref, and pack returns the existing
-  ticket, never `AlreadyPresent` (§7.6).
+  ticket, never `AlreadyPresent` (§7.6). A `BeginUpload` that finds such
+  a live ticket returns it after authorization and before admission: it
+  runs no admission, creates no reservation, and is never challenged.
 - **One outcome per reservation.** Every reservation that admission
   granted gets exactly one outcome: `Committed`, `Aborted`, or
   `Expired`. `Committed` reports the bytes stored, the bytes new to the
   repository, the bytes new to the store, and the refs advanced.
-- **Aborted.** If an apply fails after admission returned
-  `Allow{reservation}`, for example on a lost compare-and-swap, an epoch
-  mismatch, a pack collected as garbage, or a replay race, the server
-  records `Aborted` for that reservation in a separate transaction.
+- **Aborted.** If the apply of an admitted RPC fails after
+  `Allow{reservation}`, for example an `UpdateRef` compare-and-swap
+  loss, an epoch mismatch or a replay race, or a ticket's pack is
+  collected as garbage before an advance consumes it, the server
+  records `Aborted` in a separate transaction.
 - **Expired.** A ticket that expires before an `AdvanceRefs` consumes
   it produces `Expired` (§7.6).
 - **Conflicts.** An `AdvanceRefs` that ends in a typed conflict (§4)
-  consumes no ticket. Its tickets stay usable until they expire.
+  consumes no ticket. Its tickets stay usable until they expire. A lost
+  compare-and-swap on `AdvanceRefs` is such a conflict, not `Aborted`.
 
 A deployment settles a payment on `Committed` and releases it on
 `Aborted` or `Expired`, so an aborted upload settles nothing
