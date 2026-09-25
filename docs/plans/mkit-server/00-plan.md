@@ -68,7 +68,7 @@ touched wasm crates + `scripts/check-wasm-dep-graph.sh`; `proto` = `buf lint`, `
 - Review: an adversarial Opus reviewer checks the diff against the brief, PRD, specs and invariants; each finding is verified
   against the code before it is applied (the user's peer-review practice). The orchestrator squash-merges into
   `feat/mkit-server` after the reviewer's APPROVE and its own local gate re-run on the rebased branch. There is no CI on
-  the branch; CI runs only on the final PR to `main`, which the user merges. Spec PRs (S1–S3, 3.6, 4.4, 4.11, 5.1a–c) also need the user's approval of the normative text.
+  the branch; CI runs only on the final PR to `main`, which the user merges. The three rebuilt spec PRs (S1–S3) also need the user's approval of the normative text before the orchestrator merges them. Every other spec PR (3.6, 4.4, 4.11, 5.1a–c) merges like code, on local gates plus a clean adversarial review.
 - M0 changes no proto (`git diff origin/feat/mkit-server -- proto/` empty). Proto changes land only in the proto/spec WPs
   that own them (1.2, 2.2, 3.1, 3.6, 4.4, 5.1a–c), additively (D24), with `buf breaking` green.
 - **`apps/vcs-worker/Cargo.lock` refresh.** `workers.yml` builds the worker without `--locked`, so a stale lock doesn't
