@@ -19,9 +19,9 @@ name: "CI: Buf"
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, feat/mkit-server]
   push:
-    branches: [main]
+    branches: [main, feat/mkit-server]
 
 permissions:
   contents: read

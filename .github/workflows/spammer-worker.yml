@@ -19,7 +19,7 @@ on:
   # path-filtered trigger leaves a required status stuck pending on PRs that
   # don't touch spammer-worker paths.
   pull_request:
-    branches: [main]
+    branches: [main, feat/mkit-server]
 
 permissions:
   contents: read

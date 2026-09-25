@@ -15,7 +15,7 @@ name: "CI: Third-party notices"
 
 on:
   push:
-    branches: [main]
+    branches: [main, feat/mkit-server]
     paths:
       - '.github/workflows/third-party-notices.yml'
       - 'rust/Cargo.lock'
@@ -30,7 +30,7 @@ on:
   # required status stuck pending on PRs that don't touch the dependency
   # graph. Mirrors the same pattern already used by mcp.yml/web.yml.
   pull_request:
-    branches: [main]
+    branches: [main, feat/mkit-server]
 
 permissions:
   contents: read

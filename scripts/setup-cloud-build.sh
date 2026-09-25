@@ -85,6 +85,13 @@ fi
 # push while still gating untrusted fork code.
 COL="COMMENTS_ENABLED_FOR_EXTERNAL_CONTRIBUTORS_ONLY"
 
+# PR triggers fire for PRs into main AND into the long-lived feat/mkit-server
+# integration branch, so feature-branch PRs get the same Cloud Build gates.
+# Push triggers stay main-only. NOTE: `mk` skips existing triggers, so this
+# only affects a fresh setup; update existing *-pr triggers by hand (see
+# cloudbuild/README.md "Triggers").
+PR_BASE_PATTERN="${PR_BASE_PATTERN:-^(main|feat/mkit-server)$}"
+
 # Idempotent create: skip if a trigger of this name already exists.
 mk() {
   local name="$1"; shift
@@ -96,7 +103,7 @@ mk() {
   gcloud builds triggers create github --project="$PROJECT" --region="$REGION" \
     --repository="$REPO_RES" --name="$name" "$@"
 }
-mk_pr()   { local n="$1"; shift; mk "$n" --pull-request-pattern='^main$' "$@"; }
+mk_pr()   { local n="$1"; shift; mk "$n" --pull-request-pattern="$PR_BASE_PATTERN" "$@"; }
 mk_push() { local n="$1"; shift; mk "$n" --branch-pattern='^main$' "$@"; }
 
 echo "== triggers =="

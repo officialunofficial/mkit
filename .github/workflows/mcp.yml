@@ -21,7 +21,7 @@ on:
   # "required-but-skipped" trap where a path-filtered trigger leaves a
   # required status stuck pending on PRs that don't touch MCP paths.
   pull_request:
-    branches: [main]
+    branches: [main, feat/mkit-server]
 
 permissions:
   contents: read

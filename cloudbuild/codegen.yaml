@@ -24,19 +24,24 @@
 # pinned in Dockerfile.ci.
 #
 # `buf breaking` compares against the target branch's `buf.yaml` module tip
-# (`.git#branch=main,subdir=proto`) — a no-op the first time a module is
-# added (nothing to break against yet), then enforced on every following
-# proto change per `breaking.use: [FILE]` in buf.yaml.
+# — a no-op the first time a module is added (nothing to break against yet),
+# then enforced on every following proto change per `breaking.use: [FILE]` in
+# buf.yaml. The target branch is the PR base (`_BASE_BRANCH`, populated by
+# GitHub pull-request triggers: `main` or `feat/mkit-server`); push triggers
+# leave it empty and fall back to `main`.
 
 substitutions:
   _CACHE_BUCKET: ${PROJECT_ID}-mkit-sccache
   _CI_IMAGE: us-east4-docker.pkg.dev/${PROJECT_ID}/docker/mkit-ci:rust-1.95.0
   _BUF_VERSION: "1.66.0"
+  # Set by GitHub pull-request triggers; empty on push triggers (see above).
+  _BASE_BRANCH: ""
 
 options:
   machineType: E2_HIGHCPU_8
   diskSizeGb: 100
   dynamicSubstitutions: true
+  substitutionOption: ALLOW_LOOSE
 timeout: 1800s
 
 steps:
@@ -60,6 +65,8 @@ steps:
   - name: ${_CI_IMAGE}
     id: buf-lint-breaking
     entrypoint: bash
+    env:
+      - "BASE_BRANCH=${_BASE_BRANCH}"
     args:
       - -c
       - |
@@ -69,12 +76,23 @@ steps:
         chmod +x /usr/local/bin/buf
         buf --version
         buf lint
+        # Compare against the PR base branch (`main` on push triggers). Fetch
+        # it explicitly; if the fetch fails, fall back to a local ref of the
+        # same name (the pre-parameterization behavior).
+        BASE="$${BASE_BRANCH:-main}"
+        git fetch --no-tags origin "+refs/heads/$${BASE}:refs/remotes/origin/$${BASE}" \
+          || echo "warning: could not fetch $${BASE} from origin; trying a local ref"
+        AGAINST=""
         # First commit of a module has nothing to compare against — buf
         # errors "had no .proto files" rather than passing vacuously, so
         # skip the check when the module is new on this branch relative to
         # the merge target instead of treating that as a failure.
-        if git cat-file -e main:proto 2>/dev/null; then
-          buf breaking --against '.git#branch=main'
+        for ref in "origin/$${BASE}" "$${BASE}"; do
+          if git cat-file -e "$${ref}:proto" 2>/dev/null; then AGAINST="$${ref}"; break; fi
+        done
+        if [ -n "$${AGAINST}" ]; then
+          echo "buf breaking against $${AGAINST}"
+          buf breaking --against ".git#branch=$${AGAINST}"
         else
-          echo "proto/ does not exist on main yet — skipping buf breaking (nothing to compare)."
+          echo "proto/ does not exist on $${BASE} yet — skipping buf breaking (nothing to compare)."
         fi

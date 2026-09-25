@@ -34,7 +34,7 @@ name: "CI: Workers"
 
 on:
   push:
-    branches: [main]
+    branches: [main, feat/mkit-server]
     paths:
       - '.github/workflows/workers.yml'
       - 'apps/repo-worker/**'
@@ -57,7 +57,7 @@ on:
   # required status stuck pending on PRs that don't touch worker paths.
   # Mirrors the same pattern already used by web.yml/mcp.yml.
   pull_request:
-    branches: [main]
+    branches: [main, feat/mkit-server]
 
 permissions:
   contents: read

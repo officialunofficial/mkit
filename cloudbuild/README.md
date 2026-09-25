@@ -48,10 +48,21 @@ layout.
 
 ## Triggers
 
-All on branch `^main$`. Every PR trigger auto-runs for org collaborators and
-needs a maintainer **`/gcbrun`** only for external/fork PRs. See
+PR triggers fire for PRs whose base branch matches `^(main|feat/mkit-server)$`
+(`PR_BASE_PATTERN` in the setup script), so PRs into the `feat/mkit-server`
+integration branch get the same gates as PRs into `main`. Push triggers stay on
+`^main$`. Every PR trigger auto-runs for org collaborators and needs a
+maintainer **`/gcbrun`** only for external/fork PRs. See
 `scripts/setup-cloud-build.sh` for the exact `--included-files`/
 `--ignored-files` filters.
+
+The setup script skips triggers that already exist, so changing the PR pattern
+doesn't update live triggers. To update an existing `*-pr` trigger, export it
+with `gcloud builds triggers describe <name> --region=us-east4 --format=json`,
+edit `.github.pullRequest.branch`, and re-import it with
+`gcloud builds triggers import --region=us-east4 --source=<file>`. You can also
+edit the base-branch regex in the Cloud Console (Cloud Build → Triggers →
+trigger → Source).
 
 | Trigger | Config | PR gate |
 |---|---|---|

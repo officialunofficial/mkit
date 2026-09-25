@@ -33,6 +33,7 @@ on:
   pull_request:
     branches:
       - main
+      - feat/mkit-server
   # The only way to actually run keystore-backends: manual dispatch, on
   # demand, against any branch/ref. Also usable to force-run build-and-test
   # against an arbitrary ref.

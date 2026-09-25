@@ -12,7 +12,7 @@ name: "CI: Proto"
 
 on:
   push:
-    branches: [main]
+    branches: [main, feat/mkit-server]
     paths:
       - '.github/workflows/proto.yml'
       - '**/buf.yaml'
@@ -23,7 +23,7 @@ on:
   # "required-but-skipped" trap where a path-filtered trigger leaves a
   # required status stuck pending on PRs that don't touch proto files.
   pull_request:
-    branches: [main]
+    branches: [main, feat/mkit-server]
 
 permissions:
   contents: read
@@ -67,7 +67,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # Full history: `buf breaking` compares each module against
-          # its state on `origin/main`.
+          # its state on the PR base branch (`origin/main` on push).
           fetch-depth: 0
 
       - name: Install buf
@@ -84,10 +84,15 @@ jobs:
           chmod +x /usr/local/bin/buf
           buf --version
 
-      - name: Ensure origin/main is fetched
-        run: git fetch --no-tags origin main:refs/remotes/origin/main || true
+      # github.base_ref is empty on `push` events, hence the `main` fallback.
+      - name: Ensure base branch is fetched
+        env:
+          BASE_REF: ${{ github.base_ref || 'main' }}
+        run: git fetch --no-tags origin "${BASE_REF}:refs/remotes/origin/${BASE_REF}" || true
 
       - name: buf lint + breaking (every module)
+        env:
+          BASE_REF: ${{ github.base_ref || 'main' }}
         run: |
           set -euo pipefail
           status=0
@@ -99,11 +104,12 @@ jobs:
             if ! buf lint "$dir"; then status=1; fi
             echo "::endgroup::"
 
-            echo "::group::buf breaking $dir (against origin/main)"
-            if git cat-file -e "origin/main:$dir/buf.yaml" 2>/dev/null; then
-              # When $buf_yaml itself changed since origin/main, pin the
-              # HISTORICAL side to the CURRENT buf.yaml (--against-config)
-              # instead of letting buf resolve origin/main's own
+            echo "::group::buf breaking $dir (against origin/${BASE_REF})"
+            if git cat-file -e "origin/${BASE_REF}:$dir/buf.yaml" 2>/dev/null; then
+              # When $buf_yaml itself changed since the PR base branch
+              # (origin/main on push), pin the HISTORICAL side to the
+              # CURRENT buf.yaml (--against-config) instead of letting buf
+              # resolve the base branch's own
               # (differently-configured) buf.yaml. Without this, a v2
               # workspace module transitioning from unnamed to named (e.g.
               # issue #719's `name:` additions) makes buf's workspace-level
@@ -126,15 +132,15 @@ jobs:
               # mode and errors ("did not contain modules found in
               # workspace"), so this is opt-in per dir, not blanket.
               against_config_args=()
-              if ! git diff --quiet origin/main -- "$buf_yaml" 2>/dev/null; then
+              if ! git diff --quiet "origin/${BASE_REF}" -- "$buf_yaml" 2>/dev/null; then
                 against_config_args=(--against-config "$buf_yaml")
-                echo "$buf_yaml changed since origin/main — pinning historical config to current $buf_yaml"
+                echo "$buf_yaml changed since origin/${BASE_REF} — pinning historical config to current $buf_yaml"
               fi
-              if ! buf breaking "$dir" --against ".git#branch=origin/main,subdir=$dir" "${against_config_args[@]+"${against_config_args[@]}"}"; then
+              if ! buf breaking "$dir" --against ".git#branch=origin/${BASE_REF},subdir=$dir" "${against_config_args[@]+"${against_config_args[@]}"}"; then
                 status=1
               fi
             else
-              echo "no prior version of $dir on origin/main — new module, skipping breaking check"
+              echo "no prior version of $dir on origin/${BASE_REF} — new module, skipping breaking check"
             fi
             echo "::endgroup::"
           done < <(git ls-files -z '**/buf.yaml' 'buf.yaml')
