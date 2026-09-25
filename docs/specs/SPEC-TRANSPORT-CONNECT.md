@@ -29,8 +29,10 @@ pack-transfer streaming design, repository addressing, write
 authorization policy, upload tickets, and read consistency &mdash; and how
 the deployment targets (reference Worker, `mkit serve`, native CLI
 client) consume one generated codebase. It does not cover S3 multipart,
-the `WatchRefs` live-feed migration, write grants, admission challenges,
-or any server/client implementation; those are separate changes (§8).
+the `WatchRefs` live-feed migration, admission challenges, or any
+server/client implementation; those are separate changes (§8). Write and
+read grants, epochs, signed reads, and private repositories are
+[SPEC-WRITE-GRANTS](SPEC-WRITE-GRANTS.md)'s.
 
 Supersedes: [SPEC-TRANSPORT](SPEC-TRANSPORT.md) §5 ("HTTP transport") as
 the ACTIVE implementation behind `mkit+https://`/`mkit+http://` in
@@ -134,6 +136,10 @@ same trait `mkit-transport-http`/`-s3`/`-ssh`/`-enc` implement today.
 | *(none &mdash; upload ticket, M1)* | `BeginUpload` (§7.6) | unary |
 | *(none &mdash; one part of a ticketed upload, M1)* | `UploadPart` (§7.6) | client-streaming |
 | *(none &mdash; completes a multipart upload, M1)* | `CompleteUpload` (§7.6) | unary |
+| *(none &mdash; reads a namespace's grant epoch, M2)* | `GetGrantEpoch` ([SPEC-WRITE-GRANTS §5.3](SPEC-WRITE-GRANTS.md#53-rpcs)) | unary |
+| *(none &mdash; raises a namespace's grant epoch, M2)* | `SetGrantEpoch` ([SPEC-WRITE-GRANTS §5.3](SPEC-WRITE-GRANTS.md#53-rpcs)) | unary |
+| *(none &mdash; sets a repository's visibility, M2)* | `SetRepoVisibility` ([SPEC-WRITE-GRANTS §9.1](SPEC-WRITE-GRANTS.md#91-visibility)) | unary |
+| *(none &mdash; mints a signed URL token, M2)* | `IssueObjectUrl` ([SPEC-WRITE-GRANTS §9.4](SPEC-WRITE-GRANTS.md#94-signed-url-tokens)) | unary |
 
 `write_ref` and the blob verbs are `Transport`-trait-level default
 methods that delegate to another trait method **before any transport
@@ -147,7 +153,10 @@ default impls, exactly as every other transport already does.
 The four rows marked "M1" are v2 additions. They have no `Transport`
 trait verb: they are deployment discovery and the ticketed upload
 protocol, which a client drives around the seven verb RPCs. Their proto
-messages land with the M1 implementation (§8), additively.
+messages land with the M1 implementation (§8), additively. The four rows
+marked "M2" are SPEC-WRITE-GRANTS additions for grant epochs, repository
+visibility, and URL tokens; their proto messages land with the M2
+implementation, additively.
 
 Endpoints follow the standard Connect convention:
 `POST /mkit.transport.v1.TransportService/<Method>`.
@@ -178,7 +187,7 @@ headers or a bearer token. The response MAY be cached with
 | `indexed_mode` | Whether the deployment decodes and verifies pushed packs before refs move. |
 | `admission` | Whether the deployment runs an admission step that can challenge a write (§5.1, forthcoming). |
 | `receipt_public_key`, `receipt_key_id` | The key that signs storage receipts, and its key id. Empty until storage receipts are specified. |
-| `grant_schemes` | The owner signature schemes the deployment accepts on write grants (SPEC-WRITE-GRANTS, forthcoming). Empty until that document lands. |
+| `grant_schemes` | The owner signature schemes the deployment accepts on grants and epoch statements ([SPEC-WRITE-GRANTS §4](SPEC-WRITE-GRANTS.md#4-owner-signature-schemes)). Empty on a deployment that accepts no grants. |
 | `namespace_policy` | `allowlist`, `any`, or `single-repository` (§7.5). `single-repository` is advertised, never configured. |
 | `index_fanout` | The fixed object-id-prefix fan-out of the deployment's repository index (§7.9). The default is 4096. |
 
@@ -323,6 +332,9 @@ resolves by calling `BeginUpload` again, never to `RefConflict`.
 | A ticket whose audience, repository, signer, `pack_id`, or byte count differs from the request (§7.6) | `permission_denied` |
 | A malformed repository identity, or a missing `X-Repository` on an unsigned RPC to a multi-repository deployment (§7.4) | `invalid_argument` |
 | A read RPC on a repository that does not exist (§7.4) | `not_found` |
+| A signed read whose auth v2 envelope fails verification ([SPEC-WRITE-GRANTS §9.2](SPEC-WRITE-GRANTS.md#92-signed-reads)) | `unauthenticated` |
+| A grant that does not authorize a write, including an epoch mismatch found at `apply` ([SPEC-WRITE-GRANTS §11](SPEC-WRITE-GRANTS.md#11-error-codes)) | `permission_denied` |
+| Any unauthorized read of a private repository ([SPEC-WRITE-GRANTS §9.3](SPEC-WRITE-GRANTS.md#93-read-authorization)), indistinguishable from a missing repository | `not_found` |
 | An expired, unknown, or missing ticket, or a ticket presented to an advance of a ref it does not name (§7.6) | `failed_precondition` |
 | A part whose subtree hash or length differs from its commitment, or a completion whose merged root or total differs from the ticket (§7.6) | `invalid_argument` |
 | A pack still under verification in indexed mode (§7.6) | `unavailable` |
@@ -505,6 +517,22 @@ Required headers are `X-Envelope-Version: 2`, `X-Audience`, `X-Repository`,
 matching the body commitment. Nonces are 32 cryptographically random bytes
 encoded as 64 lowercase hexadecimal characters, generated once per logical
 operation and retained with timestamps across every transport retry.
+
+A request MAY also carry `X-Write-Grant`, a grant that authorizes the
+signer ([SPEC-WRITE-GRANTS §4.2](SPEC-WRITE-GRANTS.md#42-header-encoding)).
+It is not a signed header: it is not part of the canonical string above,
+and the signature does not bind it.
+
+**Signed reads.** The same contract signs read RPCs
+([SPEC-WRITE-GRANTS §9.2](SPEC-WRITE-GRANTS.md#92-signed-reads)):
+`ListRefs`, `ReadRef`, `PackExists`, `DownloadPack` and `IssueObjectUrl`,
+each with a `body:` commitment over the exact request body. A client
+that has a signer for a remote MUST sign every read RPC to it. A request that carries any auth v2 header MUST verify in full, or it
+is `unauthenticated`. A signed read is idempotent: the server checks the
+validity window only, and records and looks up no replay entry, so the
+replay rules below apply to writes only. `GetServerInfo`,
+`GetGrantEpoch` and `SetGrantEpoch` stay unsigned.
+
 The validity interval MUST be positive and at most 300,000 ms; sender clocks
 may lead the server by at most 30,000 ms. Expired requests MUST be rejected,
 including requests whose results remain cached. Missing or unsupported auth
@@ -658,7 +686,8 @@ HEXLC      = DIGIT / %x61-66              ; 0-9 a-f
 Namespaces are self-certifying: the namespace itself names its owner,
 so a verifier needs no registry to find the owner. The `ed25519-` form
 names an Ed25519 public key. The `0x` form names a 20-byte address;
-SPEC-WRITE-GRANTS (forthcoming) defines how an owner key derives it.
+[SPEC-WRITE-GRANTS §4.1](SPEC-WRITE-GRANTS.md#41-address-derivation)
+defines how an owner key derives it.
 No other namespace form exists, and a deployment MUST NOT resolve
 other forms through a registry of its own.
 
@@ -671,9 +700,11 @@ hexadecimal digits, `/`, and a 100-byte name). That fits within the
 (§7.1).
 
 **Carriage.** A client MUST send the `X-Repository` header on every
-repository RPC, read or write. `GetServerInfo` (§2.1) is the one
-exception: it MAY carry the header. A server treats a request without
-the header as the deployment kind below requires. On a signed write,
+repository RPC, read or write. The exceptions are `GetServerInfo`
+(§2.1), which MAY carry the header, and the namespace RPCs
+`GetGrantEpoch` and `SetGrantEpoch`, which carry none
+([SPEC-WRITE-GRANTS §5.3](SPEC-WRITE-GRANTS.md#53-rpcs)). A server treats a request without
+the header as the deployment kind below requires. On a signed request,
 `X-Repository` MUST equal the signed `<repository>` field byte for
 byte. Envelope verification
 detects a mismatch, so a mismatch is `unauthenticated`. Host, path, and
@@ -682,7 +713,7 @@ forwarded headers MUST NOT select the repository.
 **Single-repository deployments.** The deployment configures exactly
 one repository identity. It MAY be a bare name. A request without
 `X-Repository` resolves to that identity on unsigned RPCs; a signed
-write without `X-Repository` is `unauthenticated` (§7.1). A request that carries any
+request without `X-Repository` is `unauthenticated` (§7.1). A request that carries any
 other well-formed identity is `not_found`. The §7.1 reference Worker is
 a single-repository deployment.
 
@@ -756,8 +787,10 @@ Under `owner`, a write to `<ns>/<name>` is authorized when any of
 these holds:
 
 1. `ns` has the `ed25519-` form and the auth v2 signer is that key.
-2. A valid write grant authorizes the signer (SPEC-WRITE-GRANTS,
-   forthcoming). Until that document lands, only rules 1 and 3 apply.
+2. A valid grant authorizes the signer
+   ([SPEC-WRITE-GRANTS §6](SPEC-WRITE-GRANTS.md#6-server-policy) and
+   [§7](SPEC-WRITE-GRANTS.md#7-verification-order)). Before the M2
+   implementation, only rules 1 and 3 apply (informative).
 3. A deployment-defined authority source authorizes the signer for the
    repository. An example is a ledger's delegated-key record, checked
    against verified state. The deployment MUST document the source and
@@ -765,7 +798,10 @@ these holds:
 
 An `0x` namespace owner cannot sign auth v2, which is Ed25519-only. So
 an `0x` namespace takes writes only through grants or through a
-deployment-defined authority source (informative).
+deployment-defined authority source (informative). Reads of a private
+repository are authorized by the same three rules with the `read`
+capability, and an unauthorized one is `not_found`
+([SPEC-WRITE-GRANTS §9](SPEC-WRITE-GRANTS.md#9-reads-and-private-repositories)).
 
 **Order.** The server authorizes a write after authentication and
 after the replay-record and saved-reply check §7.1 requires, and before
@@ -949,9 +985,10 @@ admission specification (§5.1, forthcoming).
 - Deleting an absent ref is a CAS conflict: `failed_precondition` on
   `UpdateRef`.
 
-The write policy authorizes deletion (§7.5). Once SPEC-WRITE-GRANTS
-lands, a grant authorizes deletion only through its `delete` flag. A
-deployment MAY refuse deletion entirely with `permission_denied`.
+The write policy authorizes deletion (§7.5). A grant authorizes
+deletion only through its `delete` flag
+([SPEC-WRITE-GRANTS §8](SPEC-WRITE-GRANTS.md#8-ref-scopes-and-packmap-coverage)).
+A deployment MAY refuse deletion entirely with `permission_denied`.
 
 This document requires no client command for deletion (informative: a
 `push --delete` command is a separate change).
@@ -965,8 +1002,11 @@ on.
 
 **Strong.** `ReadRef` of a specific ref is strongly consistent, and so
 is every write. Push compare-and-swap MUST use `ReadRef`. A deployment
-MUST NOT serve `ReadRef` from a snapshot to a client that may push;
-until signed reads exist it cannot tell writers apart.
+MUST NOT serve `ReadRef` from a snapshot to a client that may push. A
+client that may push signs its reads (§7.1), so a deployment MAY serve an
+unsigned `ReadRef` from a snapshot and MUST serve a signed one from the
+ref's strongly consistent state
+([SPEC-WRITE-GRANTS §9.2](SPEC-WRITE-GRANTS.md#92-signed-reads)).
 
 **Eventual.** `ListRefs` and pack membership (`PackExists`,
 `DownloadPack`, and `AlreadyPresent` from `BeginUpload`) are eventually
@@ -1046,7 +1086,9 @@ Explicitly deferred to sibling issues:
   and write policies, sharded server metadata, `GetServerInfo`, upload
   tickets and resumable parts, ref deletion, and `ListRefs` paging, with
   the proto additions they need (mkit#1084, mkit#1090).
-- Write grants: SPEC-WRITE-GRANTS, forthcoming (mkit#1085).
+- Implementing write and read grants, epochs, signed reads, private
+  repositories and URL tokens, specified in
+  [SPEC-WRITE-GRANTS](SPEC-WRITE-GRANTS.md) (M2; mkit#1085, mkit#1089).
 - Admission challenges: §5.1 and the §7.7 lifecycle table, forthcoming
   (mkit#1086).
 
@@ -1056,7 +1098,7 @@ Explicitly deferred to sibling issues:
 
 | Version | Status | Changes |
 |---|---|---|
-| `2` | draft | §7.4 repository addressing; §7.5 namespace and write policy (owner key); `GetServerInfo` (§2.1); §7.6 upload tickets and resumable parts; §7.8 ref deletion; §7.9 consistency and `ListRefs` paging; error-code split between `unauthenticated` and `permission_denied` (§5) (mkit#1084, mkit#1090). |
+| `2` | draft | §7.4 repository addressing; §7.5 namespace and write policy (owner key); `GetServerInfo` (§2.1); §7.6 upload tickets and resumable parts; §7.8 ref deletion; §7.9 consistency and `ListRefs` paging; error-code split between `unauthenticated` and `permission_denied` (§5) (mkit#1084, mkit#1090); SPEC-WRITE-GRANTS (mkit#1085): signed reads and `X-Write-Grant` (§7.1), the M2 RPC rows (§2), and grant cross-references. |
 | `1` | draft | Initial `mkit.transport.v1` proto: 7 wire RPCs covering every `Transport` trait verb (§2), `PackChunk` reused byte-for-byte from `ssh.proto`, `RefExpectation`/`RefEntry` duplicated with pinned wire numbers pending mkit#679's shared-proto extraction. |
 
 ---
