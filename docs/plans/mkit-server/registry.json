@@ -1,0 +1,2214 @@
+[
+  {
+    "id": "P0",
+    "title": "Enable CI on feat/mkit-server (PR to main)",
+    "milestone": "P",
+    "track": "prep",
+    "depends_on": [],
+    "size": "S",
+    "summary": "Add feat/mkit-server to every main-only pull_request filter and make buf/codegen breaking checks compare against the PR base branch. The PR lists the Cloud Build trigger and GitHub ruleset changes the user applies in the consoles.",
+    "human_action": true,
+    "area_gates": [
+      "ci-yaml"
+    ]
+  },
+  {
+    "id": "P1",
+    "title": "Create feat/mkit-server and land docs/plans/mkit-server",
+    "milestone": "P",
+    "track": "prep",
+    "depends_on": [
+      "P0"
+    ],
+    "size": "S",
+    "summary": "Orchestrator cuts the integration branch from main and commits the plan, registry and briefs (PRD snapshot headed with decisions D1-D36). A throwaway PR confirms the required checks appear.",
+    "human_action": true,
+    "area_gates": [
+      "docs"
+    ]
+  },
+  {
+    "id": "S1",
+    "title": "SPEC-TRANSPORT-CONNECT v2: addressing, policies, GetServerInfo, upload tickets and parts, ref deletion, consistency (#1084, #1090)",
+    "milestone": "S",
+    "track": "spec",
+    "depends_on": [
+      "P1"
+    ],
+    "size": "L",
+    "summary": "Rebuilds the addressing part of #1087 and folds in #1090: BeginUpload(repository, ref, ...), stateless ticket tokens, client-streaming UploadPart (header then chunks) with signed receipts, CompleteUpload, ref deletion, D34 consistency, ListRefs paging (pages <= 2 MiB) and the D36 X-Mkit-Ref read-your-writes header subject to the caller's view. Docs only; credits @christopherwxyz.",
+    "human_action": true,
+    "area_gates": [
+      "docs"
+    ]
+  },
+  {
+    "id": "S2",
+    "title": "SPEC-WRITE-GRANTS v1 with signed reads, private repos, URL tokens and epoch leases (#1085, #1089)",
+    "milestone": "S",
+    "track": "spec",
+    "depends_on": [
+      "S1"
+    ],
+    "size": "L",
+    "summary": "Grant and epoch statement formats, owner schemes, ref scopes with packmap coverage, epoch-lease revocation with a normative NotAfter commit deadline (min(lease_expires - margin, plan_time + MAX_APPLY_WINDOW), evaluated on the storage backend's clock), SetRepoVisibility, not_found for unauthorized private reads, and IssueObjectUrl tokens signed by a dedicated key. Docs only; stacks on S1.",
+    "human_action": true,
+    "area_gates": [
+      "docs"
+    ]
+  },
+  {
+    "id": "S3",
+    "title": "Admission challenges spec: 402, helper headers and allowlist, replay-after-auth, per-RPC lifecycle (#1086)",
+    "milestone": "S",
+    "track": "spec",
+    "depends_on": [
+      "S1"
+    ],
+    "size": "M",
+    "summary": "HTTP 402 with a Connect body and challenge list, header-returning admission_helper with the allowlist and hard-reserved set, the authenticate-then-replay order, and the per-RPC lifecycle in ref shards. Docs only; stacks on S1.",
+    "human_action": true,
+    "area_gates": [
+      "docs"
+    ]
+  },
+  {
+    "id": "M0-01",
+    "title": "mkit-server crate: core types, errors with response shaping, runtime model, telemetry",
+    "milestone": "M0",
+    "track": "core",
+    "depends_on": [
+      "P1"
+    ],
+    "size": "M",
+    "summary": "Creates the runtime-agnostic mkit-server crate with RepoId, Principal, the typed Operation (with an authz slot), ServerError carrying HTTP status, headers and typed details, and MaybeSend/Clock/Spawner/send_wrap. Compiles for wasm32 and joins the wasm dep-graph check.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm",
+      "sec",
+      "full"
+    ]
+  },
+  {
+    "id": "M0-02a",
+    "title": "Storage contract core: key-level NamespaceStore with NotAfter deadlines, key layouts, codecs, BlobStore trait, replay model, memory backend",
+    "milestone": "M0",
+    "track": "core",
+    "depends_on": [
+      "M0-01"
+    ],
+    "size": "L",
+    "summary": "Defines the backend-agnostic, D34-ready storage contract: a partitioned ordered KV store whose only write is a declarative Batch of preconditions (Absent/Present/Equals and the time-bounded NotAfter(deadline_ms), evaluated on the backend's own clock at apply) plus puts/deletes; the key-layout registry (0x00-terminated class tags) and value codecs; the streaming BlobStore/PackSink trait; the replay-ledger model; and the MemoryKv/MemoryBlobStore reference backends.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm",
+      "sec",
+      "full"
+    ]
+  },
+  {
+    "id": "M0-02b",
+    "title": "Storage contract layers: ContentIndex over shard partitions, portable export/import, optional StoreMaintenance and StateCommitment hooks",
+    "milestone": "M0",
+    "track": "core",
+    "depends_on": [
+      "M0-02a"
+    ],
+    "size": "M",
+    "summary": "Adds the layers over the M0-02a contract that no M0 pipeline path needs: ContentIndex as a typed layer over ContentShard partitions (holders, holds, blocklist, collectable), portable logical export/import for any backend, and the optional StoreMaintenance and StateCommitment hooks.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm"
+    ]
+  },
+  {
+    "id": "M0-03",
+    "title": "mkit-server-conformance crate + storage-contract suite (incl. NotAfter, cancellation and crash/restart)",
+    "milestone": "M0",
+    "track": "conformance",
+    "depends_on": [
+      "M0-02b"
+    ],
+    "size": "M",
+    "summary": "Creates the conformance crate and a generic storage suite that every backend runs by macro, covering preconditions (including NotAfter deadlines evaluated on the store's clock), ordered scans with cursors, limits, isolation, cancellation safety, crash/restart atomicity, export/import and bounded growth. It is the gate for third-party backends.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "full"
+    ]
+  },
+  {
+    "id": "M0-04",
+    "title": "Deduplicated protocol logic: CAS, refs, UploadValidator, download plan, quota math, auth-v2 glue, redaction",
+    "milestone": "M0",
+    "track": "core",
+    "depends_on": [
+      "M0-01"
+    ],
+    "size": "L",
+    "summary": "Creates the single canonical copy of logic duplicated across mkit serve, mkit-transport-connect and vcs-worker, porting the union of their tests with byte-identical messages. Consumers switch later in M0-13, M0-15 and M0-17.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm",
+      "full"
+    ]
+  },
+  {
+    "id": "M0-05a",
+    "title": "Request pipeline core: stage traits, auth modes, ShardMap, pure planners with bounded re-plan and NotAfter deadlines, unary RPC flow",
+    "milestone": "M0",
+    "track": "core",
+    "depends_on": [
+      "M0-02a",
+      "M0-04"
+    ],
+    "size": "L",
+    "summary": "Implements the transport-neutral pipeline for the unary RPCs (ListRefs, ReadRef, UpdateRef, AdvanceRefs, PackExists, health) with PRD §5.4 stages as traits, AuthMode, a ShardMap (SinglePartition in M0), the full AdmissionInput, and pure planners that turn each write into a guarded Batch carrying a NotAfter(plan_time + MAX_APPLY_WINDOW) deadline. Behavior equals today's servers.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm"
+    ]
+  },
+  {
+    "id": "M0-05b",
+    "title": "Request pipeline streaming and faults: UploadSession, DownloadStream, resumable UploadPack, test-fault seam",
+    "milestone": "M0",
+    "track": "core",
+    "depends_on": [
+      "M0-05a"
+    ],
+    "size": "M",
+    "summary": "Adds the streaming half of the pipeline: UploadSession (fresh/resume/replay, bounded memory), DownloadStream, the in-flight replay model for UploadPack, opportunistic pruning, and the test-faults seam (FaultHooks at five points, TestDirectives for fault and clock-skew headers).",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm"
+    ]
+  },
+  {
+    "id": "M0-06",
+    "title": "connect feature: vendored transport codegen, TransportService over the pipeline, auth interceptor, health",
+    "milestone": "M0",
+    "track": "core",
+    "depends_on": [
+      "M0-05b"
+    ],
+    "size": "M",
+    "summary": "Gives mkit-server a wasm-clean Connect binding that both adapters mount unchanged, with the single ServerError-to-Connect mapping including HTTP status, headers and details. Test directives are honored only under test-faults.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm",
+      "proto",
+      "full"
+    ]
+  },
+  {
+    "id": "M0-07",
+    "title": "Black-box wire conformance suite + runner binary; baselines vs today's servers",
+    "milestone": "M0",
+    "track": "conformance",
+    "depends_on": [
+      "M0-03",
+      "M0-06"
+    ],
+    "size": "L",
+    "summary": "Adds a base-URL + signer wire suite pinning today's observable behavior, with milestone and feature gating per case and a runner usable against wrangler dev, staging and third-party servers. It is the M0 no-wire-change oracle.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "full"
+    ]
+  },
+  {
+    "id": "M0-08",
+    "title": "FS stores with the .mkit layout (fs feature): streaming FsBlobStore, refs-only FsLayoutStore",
+    "milestone": "M0",
+    "track": "storage",
+    "depends_on": [
+      "M0-03",
+      "M0-04"
+    ],
+    "size": "M",
+    "summary": "Provides std-only FS stores (no async runtime) that keep FileTransport's on-disk layout: a verify-before-rename streaming blob store and a refs-class key-level store delegating CAS to FileTransport (NotAfter evaluated under the ref lock; layout version implicit). FsLayoutStore is the permanent metadata store of the server-free ssh path.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "full"
+    ]
+  },
+  {
+    "id": "M0-09",
+    "title": "Shared SQL key-value backend SqlKvStore (owned 'static transaction closure, NotAfter, SQLITE_FULL) + mkit-server-native crate with rusqlite",
+    "milestone": "M0",
+    "track": "storage",
+    "depends_on": [
+      "M0-03",
+      "M0-04"
+    ],
+    "size": "L",
+    "summary": "Implements the storage contract once over SQLite as a (partition, key, value) table with versioned physical migrations, shared by rusqlite and every Durable Object, over a SqlConn whose transaction takes an owned 'static FnOnce (no unsafe). NotAfter is checked against the backend clock inside the transaction; SQLITE_FULL maps to StoreError::Full. Enables only mkit-server's sql feature (fs moves to M0-10).",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "sec",
+      "full"
+    ]
+  },
+  {
+    "id": "M0-10",
+    "title": "mkit-server-native router, tower layers and the mkit-server binary (FS + SQLite; enables `fs`; sqlite refuses file-ref roots)",
+    "milestone": "M0",
+    "track": "native",
+    "depends_on": [
+      "M0-06",
+      "M0-07",
+      "M0-08",
+      "M0-09"
+    ],
+    "size": "L",
+    "summary": "Ships the embeddable axum router with timeouts, concurrency cap, body limit, redacting tracing and CORS extension lists, graceful shutdown, and the mkit-server binary (enabling mkit-server's fs feature). --meta sqlite refuses a repo root whose file-ref layout is in use, and marks the root so FsLayoutStore refuses it too. Passes the full wire suite on FS+SQLite and reproduces mkit serve --http.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native",
+      "sec",
+      "full"
+    ]
+  },
+  {
+    "id": "M0-11",
+    "title": "S3 BlobStore (native) + in-repo fake S3; S3+SQLite conformance",
+    "milestone": "M0",
+    "track": "native",
+    "depends_on": [
+      "M0-10"
+    ],
+    "size": "M",
+    "summary": "Adds a streaming, conditional-put S3 blob store reusing mkit-transport-s3 SigV4 with a keyspace option and delete. Proves the S3+SQLite exit combination against an in-repo fake S3 in normal CI.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native",
+      "sec",
+      "full"
+    ]
+  },
+  {
+    "id": "M0-12",
+    "title": "ssh-frame session binding in mkit-server (ssh feature), transport-agnostic",
+    "milestone": "M0",
+    "track": "core",
+    "depends_on": [
+      "M0-05b",
+      "M0-08"
+    ],
+    "size": "L",
+    "summary": "Moves the mkit.rpc.v1.ssh session logic out of mkit-cli into one pipeline-backed driver over any frame source and sink, byte-identical on the wire. A golden session fixture proves no wire change.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "full"
+    ]
+  },
+  {
+    "id": "M0-13",
+    "title": "Port mkit serve (ssh stdio) onto the pipeline; stdio idle timeout; server-free CLI check",
+    "milestone": "M0",
+    "track": "cli",
+    "depends_on": [
+      "M0-08",
+      "M0-12",
+      "M0-15"
+    ],
+    "size": "M",
+    "summary": "Runs mkit serve on the pipeline through a blocking executor over the FS stores, adds a 60 s stdio idle timeout, and enforces the server-free CLI criterion with scripts/check-cli-baseline.sh. mkit-cli now depends on mkit-server (published at WP-REL).",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "cli",
+      "full"
+    ]
+  },
+  {
+    "id": "M0-14",
+    "title": "Encrypted listener moves into the mkit-server binary",
+    "milestone": "M0",
+    "track": "native",
+    "depends_on": [
+      "M0-10",
+      "M0-12"
+    ],
+    "size": "M",
+    "summary": "Hosts the mkit+enc listener in mkit-server serve through the shared ssh-frame session, keeping every fail-closed rule, timeout and budget, via an additive async listener API in mkit-transport-enc.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "full"
+    ]
+  },
+  {
+    "id": "M0-15",
+    "title": "Remove --http/--listen-enc from mkit serve and mkit-transport-connect's server feature; docs",
+    "milestone": "M0",
+    "track": "cli",
+    "depends_on": [
+      "M0-10",
+      "M0-14"
+    ],
+    "size": "M",
+    "summary": "Makes mkit serve the ssh forced-command entry point only, deletes the duplicate native Connect server, ports its e2e tests to mkit-server-native, and repoints docs. CHANGELOG notes the 0.5 bump done at WP-REL.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "cli",
+      "docs",
+      "full"
+    ]
+  },
+  {
+    "id": "M0-16",
+    "title": "mkit-server-worker: streaming R2 BlobStore (spawn_local put), Durable Object SqlConn, per-partition DO client",
+    "milestone": "M0",
+    "track": "worker",
+    "depends_on": [
+      "M0-03",
+      "M0-05b",
+      "M0-06",
+      "M0-09"
+    ],
+    "size": "L",
+    "summary": "Creates the Workers storage half: an R2 store that streams both ways with verify-before-visible (the put is spawn_local'd and awaited at commit, so the bounded sink channel can't deadlock), a DO SqlConn so each DO runs SqlKvStore unmodified (SQLITE_FULL fails closed), and a partition-routed DO client, designed for documented DO limits. Brings workers-rs 0.8.6 into rust/Cargo.lock (wasm-bindgen 0.2.127 -> >=0.2.128, mkit-wasm rebuilt under the web gate). M0 wiring keeps the single root DO.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm",
+      "web",
+      "workers",
+      "sec",
+      "full"
+    ]
+  },
+  {
+    "id": "M0-17",
+    "title": "Port apps/vcs-worker onto mkit-server-worker (streaming dispatch); wrangler dev conformance job",
+    "milestone": "M0",
+    "track": "worker",
+    "depends_on": [
+      "M0-06",
+      "M0-07",
+      "M0-16"
+    ],
+    "size": "L",
+    "summary": "Turns vcs-worker into a thin reference deployment with a streaming fetch adapter (worker::Body request bodies with map_err to a Send+Sync error, generic-body dispatch, respond_streamed responses, deadline headers stripped; fallback: the adapter parses Connect envelopes for UploadPack and calls UploadSession::push), deletes duplicated logic and codegen, bumps compatibility_date, and adds a wrangler dev conformance job.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm",
+      "workers",
+      "conf-wrangler",
+      "ci-yaml",
+      "full"
+    ]
+  },
+  {
+    "id": "M0-18",
+    "title": "release.yml: build (separate cargo invocations), sign, SBOM and provenance for mkit-server archives; release-artifact feature check",
+    "milestone": "M0",
+    "track": "release",
+    "depends_on": [
+      "M0-10"
+    ],
+    "size": "M",
+    "summary": "Every signed release also publishes mkit-server archives for the four mkit targets under the same cosign, SHA256SUMS, provenance and SBOM coverage. mkit and mkit-server build in separate cargo invocations (no feature unification), and a post-build check proves the release mkit artifact has no server features or dependencies. The release build never enables test-faults; the first run is WP-REL's tag.",
+    "human_action": false,
+    "area_gates": [
+      "ci-yaml"
+    ]
+  },
+  {
+    "id": "M0-19",
+    "title": "mkit-server container image (multi-arch, signed, attested)",
+    "milestone": "M0",
+    "track": "release",
+    "depends_on": [
+      "M0-18"
+    ],
+    "size": "M",
+    "summary": "Adds a release job that builds a distroless multi-arch image from the already-signed binaries and pushes it to private ghcr with no latest tag, cosign signature, provenance and SBOM attestation.",
+    "human_action": false,
+    "area_gates": [
+      "ci-yaml"
+    ]
+  },
+  {
+    "id": "M0-20",
+    "title": "M0 exit gate: CI wiring, invariants, exit checklist",
+    "milestone": "M0",
+    "track": "conformance",
+    "depends_on": [
+      "M0-11",
+      "M0-13",
+      "M0-17",
+      "M0-19"
+    ],
+    "size": "S",
+    "summary": "Makes the M0 exit criteria permanent CI gates (just ci-server, Cloud Build steps) and records evidence: native and wrangler dev conformance, CLI e2e, no wire change, server-free CLI. Marks M0 done.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native",
+      "conf-wrangler",
+      "cli",
+      "full"
+    ]
+  },
+  {
+    "id": "1.2",
+    "title": "Proto additions and codegen for M1",
+    "milestone": "M1",
+    "track": "proto",
+    "depends_on": [
+      "S1",
+      "M0-20"
+    ],
+    "size": "S",
+    "summary": "Adds GetServerInfo, BeginUpload with a target ref, client-streaming UploadPart and CompleteUpload with receipts, ticket fields, ref deletion and ListRefs paging to mkit.transport.v1 additively (no label or oneof change to any existing field), regenerating every vendored copy. New RPCs return unimplemented until their WPs land.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "proto",
+      "wasm",
+      "full"
+    ]
+  },
+  {
+    "id": "1.3",
+    "title": "mkit-core: part: commitment and BLAKE3 subtree module",
+    "milestone": "M1",
+    "track": "core",
+    "depends_on": [
+      "S1"
+    ],
+    "size": "M",
+    "summary": "Adds the part:<ticket>:<index>:<subtree>:<len> auth-v2 commitment and a wasm-safe subtree hashing/merge module with golden vectors. Pure core; can start before M0 exits.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm",
+      "golden"
+    ]
+  },
+  {
+    "id": "1.4",
+    "title": "Core: multi-repo addressing through the pipeline",
+    "milestone": "M1",
+    "track": "core",
+    "depends_on": [
+      "S1",
+      "M0-20"
+    ],
+    "size": "M",
+    "summary": "Resolves X-Repository into a RepoId under the S1 grammar for single- and multi-repo deployments and keys every store access by repo through the ShardMap.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native",
+      "conf-wrangler",
+      "wasm"
+    ]
+  },
+  {
+    "id": "1.22",
+    "title": "Core: D34 shard model: D34Shards map, namespace coordinator, ref shards",
+    "milestone": "M1",
+    "track": "core",
+    "depends_on": [
+      "1.4"
+    ],
+    "size": "L",
+    "summary": "Implements the D34 ShardMap (head and packmap share a ref shard; fixed index fan-outs), the namespace coordinator with namespace/repo creation records folded into lease renewal, a versioned coordinator-config cache (creates_repo, visibility) that keeps steady-state writes at ~2 DO calls, and ref-shard routing for ReadRef/UpdateRef/AdvanceRefs behind a --sharding option.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native",
+      "conf-wrangler",
+      "wasm"
+    ]
+  },
+  {
+    "id": "1.24",
+    "title": "Core + adapters: timers (due_at, kind, ref) and alarm multiplexing",
+    "milestone": "M1",
+    "track": "core",
+    "depends_on": [
+      "M0-20"
+    ],
+    "size": "L",
+    "summary": "One scheduling facility for every later timer: per-partition timer keys, idempotent handlers with per-kind budgets, a DO alarm set to min(due_at), and a native periodic driver.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "workers",
+      "conf-wrangler"
+    ]
+  },
+  {
+    "id": "1.5",
+    "title": "Core: namespace_policy, write_policy = owner, startup validation",
+    "milestone": "M1",
+    "track": "core",
+    "depends_on": [
+      "1.22"
+    ],
+    "size": "M",
+    "summary": "Implements the allowlist/any namespace policy and owner-key write policy with fail-closed startup rules, taking creates_namespace/creates_repo from the coordinator. Authorization runs before anything is allocated.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native",
+      "conf-wrangler"
+    ]
+  },
+  {
+    "id": "1.6",
+    "title": "GetServerInfo (server)",
+    "milestone": "M1",
+    "track": "core",
+    "depends_on": [
+      "1.2",
+      "1.5"
+    ],
+    "size": "S",
+    "summary": "Serves GetServerInfo on both adapters with limits, index fan-out, ListRefs page bounds and a BeginUpload threshold of 0 on multi-repo deployments.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native",
+      "conf-wrangler"
+    ]
+  },
+  {
+    "id": "1.7",
+    "title": "Ref-shard rows: tickets, reservations, local membership, outbox (planners)",
+    "milestone": "M1",
+    "track": "storage",
+    "depends_on": [
+      "1.22",
+      "1.24"
+    ],
+    "size": "L",
+    "summary": "Adds the ref-shard key layouts and planners for tickets bound to a ref, reservations, open-ticket counters, local membership additions and outbox rows with a pending index and backlog counter. No physical migration.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native"
+    ]
+  },
+  {
+    "id": "1.23",
+    "title": "Core: repo index shards and the outbox relay",
+    "milestone": "M1",
+    "track": "core",
+    "depends_on": [
+      "1.7",
+      "1.24"
+    ],
+    "size": "L",
+    "summary": "Adds repo index shards over a fixed 4096 prefix fan-out and an at-least-once outbox relay on timers, deduplicated by per-source high-water marks, with a namespace relay watermark that GC and takedown wait on; membership reads use the index plus the D36 X-Mkit-Ref strong path. A test fault delays relay delivery to expose lag windows.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native",
+      "conf-wrangler"
+    ]
+  },
+  {
+    "id": "1.28",
+    "title": "Core: hash-bucketed ref-name index, ListRefs k-way merge pagination; flip Connect deployments to D34",
+    "milestone": "M1",
+    "track": "core",
+    "depends_on": [
+      "1.23",
+      "1.2",
+      "1.8"
+    ],
+    "size": "M",
+    "summary": "Maintains a fixed-fan-out hash-bucketed ref-name index and serves ListRefs by k-way merge behind an opaque cursor with pages of at most 2 MiB. Flips native SQLite and Worker deployments to D34 sharding by default (needs WP-1.8's DO classes).",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native",
+      "conf-wrangler"
+    ]
+  },
+  {
+    "id": "1.25",
+    "title": "Core: epoch leases (D34 revocation)",
+    "milestone": "M1",
+    "track": "core",
+    "depends_on": [
+      "1.22",
+      "1.24"
+    ],
+    "size": "L",
+    "summary": "Implements coordinator-issued 30 s epoch leases: shards use a cached epoch only while leased, every write batch carries NotAfter(min(lease_expires - margin, plan_time + MAX_APPLY_WINDOW)) evaluated on the store's clock, revocation completes when every leased shard acks or its lease expires. Includes a test-only bump and the paused-write/failed-push/expired-lease case.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native",
+      "conf-wrangler"
+    ]
+  },
+  {
+    "id": "1.26",
+    "title": "Core: default quota exact per ref shard, approximate per namespace",
+    "milestone": "M1",
+    "track": "core",
+    "depends_on": [
+      "1.22",
+      "1.24",
+      "1.25"
+    ],
+    "size": "M",
+    "summary": "Charges the default abuse quota exactly inside each ref shard and reconciles per-shard counters into an approximate namespace total served through the lease, with pruned quota windows.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native"
+    ]
+  },
+  {
+    "id": "1.8",
+    "title": "Worker: Durable Object classes per shard kind",
+    "milestone": "M1",
+    "track": "worker",
+    "depends_on": [
+      "1.22",
+      "1.24"
+    ],
+    "size": "M",
+    "summary": "Adds NsCoordinator, RefShard, RepoIndexShard and ContentIndexShard DO classes over SqlKvStore with alarm handlers, wrangler migration v2, and a namespace-creation placement option (locationHint/jurisdiction, default none).",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm",
+      "workers",
+      "conf-wrangler"
+    ]
+  },
+  {
+    "id": "1.9",
+    "title": "Core: BeginUpload with target ref, stateless ticket token, ticketed UploadPack, ticket caps",
+    "milestone": "M1",
+    "track": "core",
+    "depends_on": [
+      "1.2",
+      "1.5",
+      "1.7",
+      "1.23"
+    ],
+    "size": "L",
+    "summary": "Implements BeginUpload in the target ref shard with admission, open-ticket caps per (ref, signer) and per ref, and a stateless signed ticket token; single-part UploadPack verifies the token before reading chunks.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native",
+      "conf-wrangler"
+    ]
+  },
+  {
+    "id": "1.10",
+    "title": "Core: AdvanceRefs consumes tickets, outcomes rows, ref deletion",
+    "milestone": "M1",
+    "track": "core",
+    "depends_on": [
+      "1.9"
+    ],
+    "size": "L",
+    "summary": "AdvanceRefs consumes the ref's tickets in one ref-shard batch with local membership, relay outbox rows and one Committed row per ticket; failures write Aborted separately. A packlist-membership miss is retryable unavailable within the relay-lag bound. Adds ref deletion per S1.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native",
+      "conf-wrangler"
+    ]
+  },
+  {
+    "id": "1.11",
+    "title": "Core: stateless client-streaming UploadPart/CompleteUpload, part receipts, MultipartBlobStore, FS backend",
+    "milestone": "M1",
+    "track": "core",
+    "depends_on": [
+      "1.3",
+      "1.9"
+    ],
+    "size": "L",
+    "summary": "Adds the MultipartBlobStore sub-trait and stateless client-streaming part handlers that verify the ticket token, hash each part as a subtree while streaming it (never buffered whole) and return signed receipts, completing only when the merged root equals the pack id. Part requests touch no metadata shard.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native"
+    ]
+  },
+  {
+    "id": "1.12",
+    "title": "Worker: R2 multipart with client-streamed parts through the Worker",
+    "milestone": "M1",
+    "track": "worker",
+    "depends_on": [
+      "1.11",
+      "1.8"
+    ],
+    "size": "M",
+    "summary": "Streams each client-streamed part through the Worker (subtree hash then uploadPart, memory bounded by one chunk), completes only after verification, allows no presigned uploads, and removes the M0 64 MiB stopgap for ticketed parts.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm",
+      "workers",
+      "conf-wrangler"
+    ]
+  },
+  {
+    "id": "1.13",
+    "title": "Native: S3 multipart BlobStore",
+    "milestone": "M1",
+    "track": "native",
+    "depends_on": [
+      "1.11"
+    ],
+    "size": "M",
+    "summary": "Implements the multipart API on the S3 store with verification before CompleteMultipartUpload and the upload id carried in the ticket token.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native"
+    ]
+  },
+  {
+    "id": "1.14",
+    "title": "Ticket expiry and pre-M3 outbox retention",
+    "milestone": "M1",
+    "track": "core",
+    "depends_on": [
+      "1.10",
+      "1.12",
+      "1.24"
+    ],
+    "size": "M",
+    "summary": "A ticket-expiry timer writes one Expired row, aborts the multipart session and deletes the ticket; a no-op sink acks and deletes outbox rows until M3.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native",
+      "conf-wrangler"
+    ]
+  },
+  {
+    "id": "1.29",
+    "title": "Ops: periodic DO backup export to R2 and per-shard storage alerts",
+    "milestone": "M1",
+    "track": "ops",
+    "depends_on": [
+      "1.24",
+      "1.8"
+    ],
+    "size": "M",
+    "summary": "Exports active DO partitions to R2 on a timer with a documented restore, adds mkit-server backup natively, alerts at 70% and 90% of the per-partition cap from reported stats, and raises a critical alert on SQLITE_FULL (writes fail closed; reads and deletes keep working).",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "workers",
+      "conf-wrangler"
+    ]
+  },
+  {
+    "id": "1.15",
+    "title": "ssh and enc: multi-repo addressing, --principal, implicit session tickets",
+    "milestone": "M1",
+    "track": "cli",
+    "depends_on": [
+      "1.5",
+      "1.10"
+    ],
+    "size": "M",
+    "summary": "Adds mkit serve --principal and per-repo FsLayoutStore directories under a root (no SQLite, so the CLI stays server-free), enc peer principals, owner policy and implicit per-session tickets.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "cli"
+    ]
+  },
+  {
+    "id": "1.16",
+    "title": "Client: X-Repository everywhere, identity validation, GetServerInfo, ListRefs paging, ref hint",
+    "milestone": "M1",
+    "track": "client",
+    "depends_on": [
+      "1.2",
+      "1.6"
+    ],
+    "size": "M",
+    "summary": "The Connect client sends X-Repository on every request, validates the URL identity, caches GetServerInfo to drive atomic advance and uploads, pages ListRefs and sends the D36 X-Mkit-Ref header on packmap-driven fetches.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "cli"
+    ]
+  },
+  {
+    "id": "1.17",
+    "title": "Client: BeginUpload with target ref, ticket threading, nonce/re-sign rule",
+    "milestone": "M1",
+    "track": "client",
+    "depends_on": [
+      "1.16",
+      "1.10"
+    ],
+    "size": "L",
+    "summary": "Pushes call BeginUpload naming the branch, thread tickets through a defaulted Transport::advance_refs_committing so stale node tickets are never attached, and re-sign after the 300 s window.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "cli"
+    ]
+  },
+  {
+    "id": "1.18",
+    "title": "Client: resumable part upload with client-held receipts",
+    "milestone": "M1",
+    "track": "client",
+    "depends_on": [
+      "1.17",
+      "1.3",
+      "1.11"
+    ],
+    "size": "M",
+    "summary": "Uploads large packs as signed parts, keeps the server's part receipts to resume after interruption, and completes the upload without a second whole-pack copy.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "cli"
+    ]
+  },
+  {
+    "id": "1.21",
+    "title": "Worker: published-view ref snapshots per ref-index bucket (R2/Cache, debounced) for readers",
+    "milestone": "M1",
+    "track": "worker",
+    "depends_on": [
+      "1.28",
+      "1.10",
+      "1.8"
+    ],
+    "size": "M",
+    "summary": "Serves unsigned ListRefs (and opt-in unsigned ReadRef) from per-ref-index-bucket R2 snapshots fronted by the Cache API, written by the bucket's shard with debouncing so no R2 key is rewritten more than about once per second. Hot namespaces don't load their DOs; push CAS always reads the ref shard.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "workers",
+      "conf-wrangler",
+      "staging"
+    ]
+  },
+  {
+    "id": "1.27",
+    "title": "M1 conformance: D34, tickets and growth cases (wire, storage, load)",
+    "milestone": "M1",
+    "track": "conformance",
+    "depends_on": [
+      "1.9",
+      "1.10",
+      "1.14",
+      "1.25",
+      "1.26",
+      "1.28"
+    ],
+    "size": "L",
+    "summary": "Adds M1 cases: isolation, namespace policy, target-ref tickets and caps, membership and ListRefs lag windows, D36 read-your-writes through X-Mkit-Ref, epoch-lease revocation races (incl. a paused write that reaches its shard after the lease expired), many-ref throughput in one repo, bounded growth, and ListRefs merge paging with pages <= 2 MiB.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native",
+      "conf-wrangler"
+    ]
+  },
+  {
+    "id": "1.19",
+    "title": "Staging vcs-worker deployment config and runbook",
+    "milestone": "M1",
+    "track": "ops",
+    "depends_on": [
+      "1.6",
+      "1.8",
+      "1.12",
+      "1.14",
+      "1.18",
+      "1.21",
+      "1.29"
+    ],
+    "size": "S",
+    "summary": "Adds env.staging (route, audience, allowlist, R2 buckets, DO migration v2, CPU limit, placement vars) and a deploy/backup/restore runbook. The human creates Cloudflare resources and runs the first deploy and smoke test.",
+    "human_action": true,
+    "area_gates": [
+      "workers",
+      "ci-yaml"
+    ]
+  },
+  {
+    "id": "1.20",
+    "title": "CI: conformance and e2e against deployed staging (M1 exit)",
+    "milestone": "M1",
+    "track": "conformance",
+    "depends_on": [
+      "1.19",
+      "1.27",
+      "1.13",
+      "1.15"
+    ],
+    "size": "S",
+    "summary": "Adds a staging workflow that runs the full M0+M1 wire suite (including throughput and lag windows) and a real mkit push/clone round trip against deployed staging. The human adds the GitHub secrets and variables.",
+    "human_action": true,
+    "area_gates": [
+      "ci-yaml",
+      "staging"
+    ]
+  },
+  {
+    "id": "2.2",
+    "title": "Proto additions for M2",
+    "milestone": "M2",
+    "track": "proto",
+    "depends_on": [
+      "S2",
+      "1.20"
+    ],
+    "size": "S",
+    "summary": "Adds GetGrantEpoch, SetGrantEpoch, IssueObjectUrl and SetRepoVisibility to mkit.transport.v1 additively with regenerated code and unimplemented stubs.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "proto",
+      "full"
+    ]
+  },
+  {
+    "id": "2.3",
+    "title": "mkit-attest: Keccak-256, EIP-191, secp256k1 recovery, address derivation",
+    "milestone": "M2",
+    "track": "crypto",
+    "depends_on": [
+      "S2"
+    ],
+    "size": "M",
+    "summary": "Adds Ethereum primitives (keccak256, personal_sign hashing, low-S secp256k1 recovery, address derivation, P-256 DER to low-S compact) behind a grants feature, with public test vectors.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm",
+      "sec",
+      "golden"
+    ]
+  },
+  {
+    "id": "2.4",
+    "title": "mkit-attest: grant and epoch statement codec plus the ed25519 scheme",
+    "milestone": "M2",
+    "track": "crypto",
+    "depends_on": [
+      "S2"
+    ],
+    "size": "L",
+    "summary": "Strict parser/encoder for mkit-write-grant:v1 and mkit-write-epoch:v1 with canonical-form rejection, grant ids, header encoding and a stateless GrantVerifier, plus a fuzz target.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm",
+      "golden"
+    ]
+  },
+  {
+    "id": "2.5",
+    "title": "mkit-attest: secp256k1-eip191 and webauthn-p256 owner schemes",
+    "milestone": "M2",
+    "track": "crypto",
+    "depends_on": [
+      "2.3",
+      "2.4"
+    ],
+    "size": "M",
+    "summary": "Adds wallet (EIP-191) and WebAuthn P-256 owner-signature schemes bound to the namespace form, with low-S and user-presence rules and golden vectors.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm",
+      "golden"
+    ]
+  },
+  {
+    "id": "2.6",
+    "title": "Server: grant-based write authorization, 0x namespaces, error-code alignment",
+    "milestone": "M2",
+    "track": "core",
+    "depends_on": [
+      "2.5",
+      "2.2"
+    ],
+    "size": "L",
+    "summary": "Extends the owner write policy with header grants verified in S2 order, compares the grant epoch with the ref shard's leased epoch, makes 0x namespaces writable, and centralizes unauthenticated vs permission_denied.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native",
+      "conf-wrangler",
+      "wasm"
+    ]
+  },
+  {
+    "id": "2.7",
+    "title": "Server: ref scopes, packmap coverage and the delete flag",
+    "milestone": "M2",
+    "track": "core",
+    "depends_on": [
+      "2.6"
+    ],
+    "size": "M",
+    "summary": "Evaluates grant ref scopes per ref with create/update/force/delete flags, allows packmap writes only with their head in one AdvanceRefs, and rejects update-without-force grants on opaque servers.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native"
+    ]
+  },
+  {
+    "id": "2.8",
+    "title": "Epoch: GetGrantEpoch/SetGrantEpoch over epoch leases; revoke races",
+    "milestone": "M2",
+    "track": "core",
+    "depends_on": [
+      "2.6",
+      "2.2"
+    ],
+    "size": "M",
+    "summary": "Verifies owner-signed epoch statements and raises the epoch through WP-1.25's lease protocol, reporting success only when leased shards ack or expire. Conformance covers revoke during an in-flight write, a paused write whose push failed reaching its shard after lease expiry, idle shard wake-up and lease-expiry races.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native",
+      "conf-wrangler",
+      "staging"
+    ]
+  },
+  {
+    "id": "2.9",
+    "title": "Server: signed reads, visibility via SetRepoVisibility, read grants, not_found",
+    "milestone": "M2",
+    "track": "core",
+    "depends_on": [
+      "2.6",
+      "2.2"
+    ],
+    "size": "L",
+    "summary": "Verifies auth-v2 on reads without replay, stores visibility in the coordinator (carried to shards by the lease and to Workers by the versioned config cache), requires owner or read grants for private repos, and returns not_found for every unauthorized private read.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native",
+      "conf-wrangler"
+    ]
+  },
+  {
+    "id": "2.10",
+    "title": "Client: signed reads and grant header",
+    "milestone": "M2",
+    "track": "client",
+    "depends_on": [
+      "2.4",
+      "1.20"
+    ],
+    "size": "M",
+    "summary": "The client signs every RPC to its trusted remote (GetServerInfo stays unsigned) and attaches the matching grant header from the user grant store.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "cli"
+    ]
+  },
+  {
+    "id": "2.11",
+    "title": "IssueObjectUrl and signed URL tokens (mint and verify)",
+    "milestone": "M2",
+    "track": "core",
+    "depends_on": [
+      "2.9"
+    ],
+    "size": "M",
+    "summary": "Mints and verifies URL tokens signed by a dedicated deployment URL-token key with key id, 15 min default TTL and a clamp; the verify function is the M2-to-M4 interface.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native",
+      "golden"
+    ]
+  },
+  {
+    "id": "2.12",
+    "title": "ssh and enc: server-side grant registry (mkit-server grant register)",
+    "milestone": "M2",
+    "track": "native",
+    "depends_on": [
+      "2.6",
+      "2.8"
+    ],
+    "size": "M",
+    "summary": "Adds mkit-server grant register/list/remove, storing grants as files under the served root for mkit serve (checked under the ref lock) and as coordinator rows for the enc listener; transport principals evaluate them like header grants.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "cli"
+    ]
+  },
+  {
+    "id": "2.13",
+    "title": "CLI: mkit grant create/add/list and the client grant store",
+    "milestone": "M2",
+    "track": "cli",
+    "depends_on": [
+      "2.5",
+      "2.10"
+    ],
+    "size": "L",
+    "summary": "Builds and signs grant statements (ed25519 and keystore secp256k1 natively, wallet and WebAuthn by import with low-S normalization) and stores grants under the user config dir.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "cli",
+      "docs"
+    ]
+  },
+  {
+    "id": "2.14",
+    "title": "CLI: mkit grant revoke and mkit epoch",
+    "milestone": "M2",
+    "track": "cli",
+    "depends_on": [
+      "2.13",
+      "2.8"
+    ],
+    "size": "M",
+    "summary": "Adds mkit epoch show/bump and grant revoke as an epoch bump bound to the remote's audience, reporting which local grants become invalid.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "cli",
+      "docs"
+    ]
+  },
+  {
+    "id": "2.15",
+    "title": "Staging: enable M2 features and run M2 conformance (M2 exit)",
+    "milestone": "M2",
+    "track": "ops",
+    "depends_on": [
+      "2.7",
+      "2.8",
+      "2.9",
+      "2.11",
+      "2.12",
+      "2.14"
+    ],
+    "size": "S",
+    "summary": "Enables grants, WebAuthn RP pinning, a private test repo and the URL-token key on staging and extends the staging workflow with the M2 cases. The human adds secrets and redeploys.",
+    "human_action": true,
+    "area_gates": [
+      "ci-yaml",
+      "staging"
+    ]
+  },
+  {
+    "id": "3.1",
+    "title": "Proto: AdmissionChallenge error detail and goldens",
+    "milestone": "M3",
+    "track": "proto",
+    "depends_on": [
+      "S3",
+      "1.20"
+    ],
+    "size": "S",
+    "summary": "Adds the opaque AdmissionChallenge{challenges, description} detail with golden binary and JSON 402 bodies.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "proto",
+      "wasm",
+      "golden"
+    ]
+  },
+  {
+    "id": "3.2",
+    "title": "Core: two-phase Admission (Allow/Challenge/Deny), 402 mapping, GetServerInfo fields",
+    "milestone": "M3",
+    "track": "core",
+    "depends_on": [
+      "3.1"
+    ],
+    "size": "M",
+    "summary": "Extends Admission to return challenges, maps them to HTTP 402 with a permission_denied body, detail and passthrough headers before any state write, and passes receipts back with Cache-Control: private.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm"
+    ]
+  },
+  {
+    "id": "3.3",
+    "title": "Core: outcome outbox, OutcomeSink, exactly-one-outcome, backpressure, read outcomes",
+    "milestone": "M3",
+    "track": "core",
+    "depends_on": [
+      "3.2"
+    ],
+    "size": "L",
+    "summary": "Makes ref-shard outbox rows deliverable at least once and deleted on ack, guarantees exactly one outcome per reservation, adds a ReadServed variant, and rejects new admitted writes with retryable unavailable when the backlog exceeds its cap.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native"
+    ]
+  },
+  {
+    "id": "3.4",
+    "title": "Native adapter: outbox delivery task, CORS/redaction, ssh/enc 'use mkit+https'",
+    "milestone": "M3",
+    "track": "native",
+    "depends_on": [
+      "3.3"
+    ],
+    "size": "M",
+    "summary": "Runs native delivery on the timer driver with shutdown drain, extends CORS for payment headers, redacts credentials, and turns ssh/enc challenges into a clear terminal error.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native"
+    ]
+  },
+  {
+    "id": "3.5",
+    "title": "Worker adapter: outbox delivery timer kind, CORS/redaction",
+    "milestone": "M3",
+    "track": "worker",
+    "depends_on": [
+      "3.3"
+    ],
+    "size": "S",
+    "summary": "Registers outbox delivery as a timer kind in RefShard DOs and adds Worker CORS and redaction; no new tables.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm",
+      "workers",
+      "conf-wrangler"
+    ]
+  },
+  {
+    "id": "3.6",
+    "title": "Spec: SPEC-SERVER v1 (M3 sections) and the mkit.server.hooks.v1 proto",
+    "milestone": "M3",
+    "track": "spec",
+    "depends_on": [
+      "S3",
+      "M0-20"
+    ],
+    "size": "M",
+    "summary": "Creates SPEC-SERVER with pipeline order, lifecycle, fail-closed and outbox guarantees, and the hooks.v1 contract with hook-key channel authentication. Requires spec approval.",
+    "human_action": true,
+    "area_gates": [
+      "docs",
+      "proto",
+      "golden"
+    ]
+  },
+  {
+    "id": "3.7",
+    "title": "Core: remote-hook adapter (remote-hooks feature)",
+    "milestone": "M3",
+    "track": "core",
+    "depends_on": [
+      "3.6",
+      "3.3"
+    ],
+    "size": "M",
+    "summary": "Implements Authorizer, Admission, ContentInspector (call shape) and OutcomeSink by calling hooks.v1 over an abstract channel with signing, timeouts, fail-closed mapping and response bounds.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm"
+    ]
+  },
+  {
+    "id": "3.8",
+    "title": "Native hook channels: HTTP and signed webhook outcome sink",
+    "milestone": "M3",
+    "track": "native",
+    "depends_on": [
+      "3.7",
+      "3.4"
+    ],
+    "size": "M",
+    "summary": "Adds an HTTP hook channel with loopback-only plain HTTP and a signed webhook OutcomeSink, with binary config keys.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native"
+    ]
+  },
+  {
+    "id": "3.9",
+    "title": "Worker hook channels: service binding and Queue outcomes",
+    "milestone": "M3",
+    "track": "worker",
+    "depends_on": [
+      "3.7",
+      "3.5"
+    ],
+    "size": "M",
+    "summary": "Adds a service-binding hook channel and a Cloudflare Queue OutcomeSink, tested against a local second Worker.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm",
+      "workers",
+      "conf-wrangler"
+    ]
+  },
+  {
+    "id": "3.10",
+    "title": "Client: 402 detection -> AdmissionRequired, receipt passthrough",
+    "milestone": "M3",
+    "track": "client",
+    "depends_on": [
+      "3.1"
+    ],
+    "size": "M",
+    "summary": "Maps the challenge detail or raw 402 payment headers to a non-retryable AdmissionRequired and captures Payment-Receipt/PAYMENT-RESPONSE through a Connect-specific metadata sink.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "cli"
+    ]
+  },
+  {
+    "id": "3.11",
+    "title": "Client: admission_helper, header allowlist and hard-reserved set (D30)",
+    "milestone": "M3",
+    "track": "client",
+    "depends_on": [
+      "3.10"
+    ],
+    "size": "L",
+    "summary": "Adds the user-scoped, trusted-endpoint-only admission_helper with a JSON exec protocol, the default and per-endpoint allowlist, the hard-reserved set, and one retry within the envelope window.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "cli",
+      "docs"
+    ]
+  },
+  {
+    "id": "3.12",
+    "title": "Stub MPP hook server and helper; end-to-end tests (M3 exit)",
+    "milestone": "M3",
+    "track": "conformance",
+    "depends_on": [
+      "3.8",
+      "3.9",
+      "3.11"
+    ],
+    "size": "L",
+    "summary": "Adds a test-only stub MPP hook and helper and end-to-end tests: challenge to commit with exactly one Committed, Aborted settles nothing, Expired, retry after lost response, old-client fail-fast, reserved-header refusal.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native",
+      "conf-wrangler"
+    ]
+  },
+  {
+    "id": "3.13",
+    "title": "Wire conformance: admission, outcomes and backpressure on both adapters and staging",
+    "milestone": "M3",
+    "track": "conformance",
+    "depends_on": [
+      "3.4",
+      "3.5",
+      "3.12"
+    ],
+    "size": "M",
+    "summary": "Adds black-box admission cases (402 shape, no state on challenge, preflight, receipts, replay ordering) plus outbox backpressure while the hook is down, run natively, on wrangler dev and on staging. The human deploys the stub hook Worker.",
+    "human_action": true,
+    "area_gates": [
+      "rust",
+      "conf-native",
+      "conf-wrangler",
+      "staging",
+      "ci-yaml"
+    ]
+  },
+  {
+    "id": "3.14",
+    "title": "Docs: TypeScript mppx reference Worker (documentation only)",
+    "milestone": "M3",
+    "track": "docs",
+    "depends_on": [
+      "3.6"
+    ],
+    "size": "S",
+    "summary": "A documentation-only reference Worker showing admit via mppx validation and settlement on Committed, with the MPP two-phase caveats.",
+    "human_action": false,
+    "area_gates": [
+      "docs"
+    ]
+  },
+  {
+    "id": "4.1",
+    "title": "mkit-core: pack-ruzstd decode feature and dep-graph check",
+    "milestone": "M4",
+    "track": "core",
+    "depends_on": [
+      "P1"
+    ],
+    "size": "S",
+    "summary": "Adds a decode-only ruzstd path for wasm with differential tests against C zstd and extends the wasm dep-graph check.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm",
+      "sec"
+    ]
+  },
+  {
+    "id": "4.2",
+    "title": "mkit-core: repo-isolated delta-base seam and incremental push verification",
+    "milestone": "M4",
+    "track": "core",
+    "depends_on": [
+      "P1"
+    ],
+    "size": "L",
+    "summary": "Adds a DeltaBaseSource seam and a frontier-aware verify_push that re-hashes, checks signatures and closure against a repo-scoped source, sharing the closure children function with the CLI.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm",
+      "full"
+    ]
+  },
+  {
+    "id": "4.3",
+    "title": "mkit-core: build_disclosure over a generic object source",
+    "milestone": "M4",
+    "track": "core",
+    "depends_on": [
+      "P1"
+    ],
+    "size": "S",
+    "summary": "Generalizes build_disclosure over store::ObjectSource with byte-identical bundles so the server can build proofs without an FS store.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm",
+      "golden"
+    ]
+  },
+  {
+    "id": "4.4",
+    "title": "Spec: indexed mode, D32 extraction, PendingVerification detail",
+    "milestone": "M4",
+    "track": "spec",
+    "depends_on": [
+      "3.6"
+    ],
+    "size": "M",
+    "summary": "Specifies indexed mode (magic classification, MKPL rule, repo-isolated resolution, D32 extraction, pending verification, base-not-yet-visible under eventual membership) and adds the PendingVerification detail. Requires spec approval.",
+    "human_action": true,
+    "area_gates": [
+      "docs",
+      "proto",
+      "golden"
+    ]
+  },
+  {
+    "id": "4.5",
+    "title": "Server: per-repo object index in repo index shards",
+    "milestone": "M4",
+    "track": "core",
+    "depends_on": [
+      "4.4",
+      "1.20"
+    ],
+    "size": "M",
+    "summary": "Stores object-index rows in fixed-fan-out repo index shards through the relay, with repo-scoped batch lookups and no cross-repo query API.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native"
+    ]
+  },
+  {
+    "id": "4.6",
+    "title": "Worker: object index in RepoIndexShard DOs (limits, batching, alerts)",
+    "milestone": "M4",
+    "track": "worker",
+    "depends_on": [
+      "4.5"
+    ],
+    "size": "S",
+    "summary": "Batches relay writes within DO statement, row and subrequest limits and reports shard sizes to the M1 alerts.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm",
+      "workers",
+      "conf-wrangler"
+    ]
+  },
+  {
+    "id": "4.7",
+    "title": "Server: indexed ingestion and pre-receive verification (native/inline)",
+    "milestone": "M4",
+    "track": "core",
+    "depends_on": [
+      "4.1",
+      "4.2",
+      "4.5"
+    ],
+    "size": "L",
+    "summary": "Classifies uploads, resolves delta bases only against repo membership with a uniform permanent error, verifies history before refs move, and commits the verified state in the ref-shard batch.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native"
+    ]
+  },
+  {
+    "id": "4.8a",
+    "title": "mkit-core: windowed, streaming pack reader",
+    "milestone": "M4",
+    "track": "core",
+    "depends_on": [
+      "4.1",
+      "4.2"
+    ],
+    "size": "M",
+    "summary": "Adds a checkpointable pack reader over large byte windows with incremental trailer verification and a bounded zstd window, byte-identical to PackEntries.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm"
+    ]
+  },
+  {
+    "id": "4.8",
+    "title": "Worker: async verification as checkpointed alarm slices",
+    "milestone": "M4",
+    "track": "worker",
+    "depends_on": [
+      "4.7",
+      "4.6",
+      "4.8a"
+    ],
+    "size": "L",
+    "summary": "Verifies packs in the ticket's RefShard DO as alarm slices over large R2 Range windows with a checkpointed cursor, returning PendingVerification until done. The human raises limits.cpu_ms on staging.",
+    "human_action": true,
+    "area_gates": [
+      "rust",
+      "wasm",
+      "workers",
+      "conf-wrangler",
+      "staging"
+    ]
+  },
+  {
+    "id": "4.9",
+    "title": "Client: PendingVerification polling",
+    "milestone": "M4",
+    "track": "client",
+    "depends_on": [
+      "4.4",
+      "1.20"
+    ],
+    "size": "M",
+    "summary": "The push loop polls AdvanceRefs until the ticket expires, honoring retry_after and re-signing after 300 s, outside the generic retry ladder.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "cli"
+    ]
+  },
+  {
+    "id": "4.10a",
+    "title": "ContentIndex shards on Workers and holder sub-sharding",
+    "milestone": "M4",
+    "track": "storage",
+    "depends_on": [
+      "4.4",
+      "1.20"
+    ],
+    "size": "M",
+    "summary": "Wires ContentShard partitions to ContentIndexShard DOs and sub-shards holder rows by (object, hash(holder)) with a safe-direction holder count, so one widely held object can't fill a shard.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm",
+      "workers",
+      "conf-wrangler"
+    ]
+  },
+  {
+    "id": "4.10",
+    "title": "Server: D32 extraction into the global object CAS, holds and holders",
+    "milestone": "M4",
+    "track": "core",
+    "depends_on": [
+      "4.7",
+      "4.10a"
+    ],
+    "size": "L",
+    "summary": "Extracts blobs of at least 64 KiB and reassembles every ChunkedBlob by streaming into one object keyed by its manifest id in the objects keyspace, with whole-file dedup, holds before apply (released only in the relay step that records the holder row) and R2 429 treated as HEAD-then-verify.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native"
+    ]
+  },
+  {
+    "id": "4.11",
+    "title": "Spec: HTTP serving and proofs (#1088)",
+    "milestone": "M4",
+    "track": "spec",
+    "depends_on": [
+      "4.4"
+    ],
+    "size": "M",
+    "summary": "Specifies the /-/ URL grammar, caller-view reachability with 404 before 451, Range/ETag/cache rules, token placement, read admission and the proof delivery format including multi-chunk bundles. Requires spec approval.",
+    "human_action": true,
+    "area_gates": [
+      "docs",
+      "golden"
+    ]
+  },
+  {
+    "id": "4.12",
+    "title": "Server core: HTTP object serving (http-objects feature)",
+    "milestone": "M4",
+    "track": "core",
+    "depends_on": [
+      "4.11",
+      "4.7",
+      "4.10"
+    ],
+    "size": "L",
+    "summary": "A runtime-agnostic HTTP handler that resolves ref paths, checks reachability and authorization, and serves extracted objects by direct Range reads or small objects from pack entries.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm"
+    ]
+  },
+  {
+    "id": "4.13",
+    "title": "Admission on HTTP reads (paid downloads) with ReadServed outcomes",
+    "milestone": "M4",
+    "track": "core",
+    "depends_on": [
+      "4.12",
+      "3.3"
+    ],
+    "size": "S",
+    "summary": "Calls Admission for GETs, returns a plain 402 with passthrough headers and no-store, and emits ReadServed outcomes.",
+    "human_action": false,
+    "area_gates": [
+      "rust"
+    ]
+  },
+  {
+    "id": "4.14",
+    "title": "Proofs: ?proof=1 inclusion and range disclosure; mkit-wasm round trip",
+    "milestone": "M4",
+    "track": "core",
+    "depends_on": [
+      "4.12",
+      "4.3",
+      "4.11"
+    ],
+    "size": "M",
+    "summary": "Builds inclusion and byte-range disclosure proofs, including multi-chunk bundles for ranges across chunk boundaries, verified by mkit-wasm.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm",
+      "golden"
+    ]
+  },
+  {
+    "id": "4.15",
+    "title": "Private serving via M2 signed URLs and read auth",
+    "milestone": "M4",
+    "track": "core",
+    "depends_on": [
+      "4.12",
+      "2.9",
+      "2.11"
+    ],
+    "size": "M",
+    "summary": "Private repos require a valid URL token or signed-read headers, get Cache-Control: private, and are checked for visibility per request.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native"
+    ]
+  },
+  {
+    "id": "4.16",
+    "title": "Adapters: mount HTTP serving (axum and Workers fetch), Range reads, CORS",
+    "milestone": "M4",
+    "track": "native",
+    "depends_on": [
+      "4.12"
+    ],
+    "size": "M",
+    "summary": "Mounts HTTP serving natively and on Workers with FS/S3/R2 range reads, streaming bodies and CORS for GET/HEAD.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm",
+      "workers"
+    ]
+  },
+  {
+    "id": "4.17",
+    "title": "Pre-receive policy hooks: allowed signers per ref, fast-forward-only grants",
+    "milestone": "M4",
+    "track": "core",
+    "depends_on": [
+      "4.7",
+      "4.4",
+      "2.7"
+    ],
+    "size": "M",
+    "summary": "Adds a RefPolicy for allowed signers per ref and fast-forward-only enforcement of update-without-force grants; attestation-gated refs are out of this epic (D33).",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native"
+    ]
+  },
+  {
+    "id": "4.18",
+    "title": "Conformance: indexed mode and serving wire suite (M4 exit)",
+    "milestone": "M4",
+    "track": "conformance",
+    "depends_on": [
+      "4.8",
+      "4.9",
+      "4.10",
+      "4.14",
+      "4.15",
+      "4.16",
+      "4.17"
+    ],
+    "size": "L",
+    "summary": "Black-box cases for verification before refs move, oracle-free thin-delta rejection, MKPL rule, polling, reachability serving, D32 dedup and Range, private serving and proofs, on native, wrangler dev and staging. The human enables indexed mode and CPU limits on staging.",
+    "human_action": true,
+    "area_gates": [
+      "rust",
+      "conf-native",
+      "conf-wrangler",
+      "staging"
+    ]
+  },
+  {
+    "id": "5.1a",
+    "title": "Spec: leases, lifecycle events, server GC, published view and quarantine (#1091 part 1)",
+    "milestone": "M5",
+    "track": "spec",
+    "depends_on": [
+      "3.6",
+      "4.4"
+    ],
+    "size": "M",
+    "summary": "SPEC-SERVER sections for per-ref leases and events, server GC roots/pins/grace, the published pointer rule and caller views, and ContentInspector semantics. Requires spec approval.",
+    "human_action": true,
+    "area_gates": [
+      "docs",
+      "proto",
+      "golden"
+    ]
+  },
+  {
+    "id": "5.1b",
+    "title": "Spec: takedown, RedactionNotice, preservation store, admin API and audit log (#1091 part 2)",
+    "milestone": "M5",
+    "track": "spec",
+    "depends_on": [
+      "5.1a"
+    ],
+    "size": "L",
+    "summary": "Normative takedown levels, whole-object tombstones, delta-safe rewrite with packmap CAS, signed notices, the admin-only preservation store, per-role keys and the admin API with audit log. Requires spec approval.",
+    "human_action": true,
+    "area_gates": [
+      "docs",
+      "proto",
+      "golden"
+    ]
+  },
+  {
+    "id": "5.1c",
+    "title": "Spec: storage receipts predicate (#1092)",
+    "milestone": "M5",
+    "track": "spec",
+    "depends_on": [
+      "5.1a"
+    ],
+    "size": "M",
+    "summary": "The storage-receipt predicate (refs + pack ids only in opaque mode), the published key list and golden DSSE vectors. Requires spec approval.",
+    "human_action": true,
+    "area_gates": [
+      "docs",
+      "proto",
+      "golden"
+    ]
+  },
+  {
+    "id": "5.2",
+    "title": "Leases and lifecycle states: model, enforcement, events",
+    "milestone": "M5",
+    "track": "core",
+    "depends_on": [
+      "5.1a",
+      "3.5",
+      "4.18",
+      "2.15"
+    ],
+    "size": "L",
+    "summary": "Per-ref leases in ref shards with timer-driven active/grace/suspended/deleted transitions, a LeasePolicy hook, and exactly-once lifecycle events through the outbox.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native",
+      "conf-wrangler"
+    ]
+  },
+  {
+    "id": "5.3a",
+    "title": "GC mark: roots, pins, grace, gc_pending; mark → wait → re-check protocol",
+    "milestone": "M5",
+    "track": "core",
+    "depends_on": [
+      "5.2",
+      "4.10"
+    ],
+    "size": "L",
+    "summary": "Runtime-agnostic mark over D34 shards (indexed closure or opaque packmap chains) with pins and fail-closed truncation, marking candidates gc_pending. No cross-shard apply precondition: safety comes from mark -> wait > MAX_APPLY_WINDOW + relay watermark -> re-check roots from ref shards.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native"
+    ]
+  },
+  {
+    "id": "5.3b",
+    "title": "GC sweep: membership drop, holder removal, zero-holder deletion, adapters",
+    "milestone": "M5",
+    "track": "core",
+    "depends_on": [
+      "5.3a"
+    ],
+    "size": "L",
+    "summary": "After the wait, re-reads roots from the strongly consistent ref shards (not the lagging ref index alone), then removes membership and holders and deletes CAS objects and packs only at zero holder count and zero holds through a batch guarded on the mark, via BlobStore::delete, on timers in both adapters.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native",
+      "conf-wrangler"
+    ]
+  },
+  {
+    "id": "5.4",
+    "title": "Published view: (head, packmap) pointer storage and caller view on every read path",
+    "milestone": "M5",
+    "track": "core",
+    "depends_on": [
+      "5.2"
+    ],
+    "size": "L",
+    "summary": "Adds the published pointer to ref shards and answers every read from the caller's view, including the D36 X-Mkit-Ref path (non-writers never see quarantined packs through it), and switches the M1 bucket snapshots to the published view.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native",
+      "conf-wrangler"
+    ]
+  },
+  {
+    "id": "5.5",
+    "title": "ContentInspector: sync checks, async quarantine, clearance, hit -> takedown",
+    "milestone": "M5",
+    "track": "core",
+    "depends_on": [
+      "5.4",
+      "3.7",
+      "5.6"
+    ],
+    "size": "L",
+    "summary": "Sync fast checks in pre_receive, async quarantine per advance with clearance advancing the published pointer, per-inspector fail-closed/publish, and hits becoming takedowns.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native"
+    ]
+  },
+  {
+    "id": "5.6",
+    "title": "Takedown core: tombstones, blocklist (checked by the relay), preservation store, per-repo views, suspension",
+    "milestone": "M5",
+    "track": "core",
+    "depends_on": [
+      "5.1b",
+      "4.10",
+      "5.2",
+      "5.10"
+    ],
+    "size": "L",
+    "summary": "Content/repo/namespace takedown with holder discovery, tombstone views in repo index shards, a global blocklist that the relay also checks on delivery, completion only after the relay watermark passes the takedown point, and a restricted preservation store reachable only through the admin API. Invokes WP-5.10's CachePurger. The human creates the preservation bucket.",
+    "human_action": true,
+    "area_gates": [
+      "rust",
+      "conf-native",
+      "conf-wrangler"
+    ]
+  },
+  {
+    "id": "5.7a",
+    "title": "mkit-core: delta-safe pack rewrite primitive",
+    "milestone": "M5",
+    "track": "core",
+    "depends_on": [
+      "4.2"
+    ],
+    "size": "M",
+    "summary": "A pure rewrite_excluding that drops excluded entries and rawifies every delta whose base chain passes through them, producing a valid v2 pack.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm"
+    ]
+  },
+  {
+    "id": "5.7b",
+    "title": "Server: rewrite orchestration, packlist chain rebuild, packmap CAS",
+    "milestone": "M5",
+    "track": "core",
+    "depends_on": [
+      "5.7a",
+      "5.6"
+    ],
+    "size": "L",
+    "summary": "Rewrites affected packs per holder repo, rebuilds packlist chains and CASes the packmap paired with the unchanged head, recording old-to-new pack ids in the notice.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native"
+    ]
+  },
+  {
+    "id": "5.8",
+    "title": "Storage receipts: ReceiptSigner, receipt key, key list, AdvanceRefs field",
+    "milestone": "M5",
+    "track": "core",
+    "depends_on": [
+      "5.1c",
+      "5.2"
+    ],
+    "size": "L",
+    "summary": "Signs DSSE receipts on commits and lease changes with a dedicated receipt+notice key published in a key list, returned in AdvanceRefs and fetchable later. The human installs the key as a secret.",
+    "human_action": true,
+    "area_gates": [
+      "rust",
+      "conf-native",
+      "golden"
+    ]
+  },
+  {
+    "id": "5.9a",
+    "title": "Server: RedactionNotice detail, HTTP 451, notice signing",
+    "milestone": "M5",
+    "track": "core",
+    "depends_on": [
+      "5.7b",
+      "5.8"
+    ],
+    "size": "M",
+    "summary": "Signed notices on reads and on pushes whose delta base is tombstoned, per-branch flags computed at takedown, and 404-before-451 on HTTP.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native"
+    ]
+  },
+  {
+    "id": "5.9b",
+    "title": "Client: redaction-aware fetch and push re-plan",
+    "milestone": "M5",
+    "track": "client",
+    "depends_on": [
+      "5.9a"
+    ],
+    "size": "M",
+    "summary": "Fetch fails closed with the notice instead of RemoteMissingObject, and push re-plans once excluding tombstoned bases.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "cli"
+    ]
+  },
+  {
+    "id": "5.10",
+    "title": "CachePurger hook and purge triggers (before takedown)",
+    "milestone": "M5",
+    "track": "core",
+    "depends_on": [
+      "5.2"
+    ],
+    "size": "S",
+    "summary": "An implementer-provided CachePurger delivered through the outbox, triggered on suspension, lease deletion and visibility change; WP-5.6 adds the takedown trigger (this WP lands first).",
+    "human_action": false,
+    "area_gates": [
+      "rust"
+    ]
+  },
+  {
+    "id": "5.11a",
+    "title": "Admin API framework: signed envelope, replay protection, audit log",
+    "milestone": "M5",
+    "track": "core",
+    "depends_on": [
+      "5.1b",
+      "4.18",
+      "2.15"
+    ],
+    "size": "L",
+    "summary": "An mkit.server.admin.v1 service signed with a dedicated admin key under its own domain, with replay protection and an append-only audit log; off unless configured. The human generates and installs the admin key.",
+    "human_action": true,
+    "area_gates": [
+      "rust",
+      "proto",
+      "conf-native"
+    ]
+  },
+  {
+    "id": "5.11b",
+    "title": "Admin operations and the mkit-server admin CLI",
+    "milestone": "M5",
+    "track": "native",
+    "depends_on": [
+      "5.11a",
+      "5.6",
+      "5.2",
+      "5.14"
+    ],
+    "size": "L",
+    "summary": "Takedown, reinstatement, suspension, blocklist, leases, ssh grant registration, preserved-byte reads and audit-log reads, plus an mkit-server admin subcommand.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native"
+    ]
+  },
+  {
+    "id": "5.12",
+    "title": "Client: receipt storage under .mkit/attestations (not GC roots, not pushed)",
+    "milestone": "M5",
+    "track": "client",
+    "depends_on": [
+      "5.8"
+    ],
+    "size": "S",
+    "summary": "Stores returned receipts locally under attestations without making them object-GC roots (SPEC-GC amended), never pushes them, and lets verify-attest check them.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "cli",
+      "docs"
+    ]
+  },
+  {
+    "id": "5.13",
+    "title": "Conformance: lifecycle wire suite (M5 exit)",
+    "milestone": "M5",
+    "track": "conformance",
+    "depends_on": [
+      "5.3b",
+      "5.5",
+      "5.7b",
+      "5.9b",
+      "5.10",
+      "5.11b",
+      "5.12"
+    ],
+    "size": "L",
+    "summary": "Every M5 exit criterion as black-box cases on native, wrangler dev and staging, including quarantine through the D36 X-Mkit-Ref path. The human provisions staging keys and the preservation bucket.",
+    "human_action": true,
+    "area_gates": [
+      "rust",
+      "conf-native",
+      "conf-wrangler",
+      "staging"
+    ]
+  },
+  {
+    "id": "5.14",
+    "title": "Reinstatement via server-side pack rewrite",
+    "milestone": "M5",
+    "track": "core",
+    "depends_on": [
+      "5.6",
+      "5.7b"
+    ],
+    "size": "M",
+    "summary": "Reverses a tombstone from the preservation store, lifts the blocklist entry and re-adds the object to affected chains by server-side pack rewrite, audited.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native"
+    ]
+  },
+  {
+    "id": "REL",
+    "title": "Final merge to main: 0.5.0 bump, publish mkit-server crates, first server release",
+    "milestone": "M5",
+    "track": "release",
+    "depends_on": [
+      "1.20",
+      "2.15",
+      "3.13",
+      "3.14",
+      "4.13",
+      "4.18",
+      "5.13"
+    ],
+    "size": "S",
+    "summary": "After every milestone exits, merge feat/mkit-server to main, bump the workspace to 0.5.0, make mkit-server, -native and -conformance publishable (-worker stays unpublished) and cut the signed release. The human confirms ghcr package creation for Actions, tags and publishes per the mkit-release runbook, adds the team owners to the new crates and checks the ghcr package.",
+    "human_action": true,
+    "area_gates": [
+      "full",
+      "ci-yaml"
+    ]
+  }
+]

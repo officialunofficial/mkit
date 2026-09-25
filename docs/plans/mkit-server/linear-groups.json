@@ -1,0 +1,301 @@
+[
+ {
+  "key": "G01",
+  "ms": "Prep & Specs",
+  "title": "Prep: enable CI on feat/mkit-server and land the plan",
+  "wps": [
+   "P0",
+   "P1"
+  ]
+ },
+ {
+  "key": "G02",
+  "ms": "Prep & Specs",
+  "title": "Specs: rebuild #1087 as S1 addressing/uploads, S2 grants/private, S3 admission",
+  "wps": [
+   "S1",
+   "S2",
+   "S3"
+  ]
+ },
+ {
+  "key": "G03",
+  "ms": "M0 Foundation",
+  "title": "M0: core crate, backend-agnostic storage contract and storage conformance",
+  "wps": [
+   "M0-01",
+   "M0-02a",
+   "M0-02b",
+   "M0-03",
+   "M0-04"
+  ]
+ },
+ {
+  "key": "G04",
+  "ms": "M0 Foundation",
+  "title": "M0: request pipeline, Connect binding and wire conformance suite",
+  "wps": [
+   "M0-05a",
+   "M0-05b",
+   "M0-06",
+   "M0-07"
+  ]
+ },
+ {
+  "key": "G05",
+  "ms": "M0 Foundation",
+  "title": "M0: native server, FS/S3/SQL backends, ssh-frame session and the mkit-server binary",
+  "wps": [
+   "M0-08",
+   "M0-09",
+   "M0-10",
+   "M0-11",
+   "M0-12",
+   "M0-14"
+  ]
+ },
+ {
+  "key": "G06",
+  "ms": "M0 Foundation",
+  "title": "M0: port mkit serve (ssh) and vcs-worker onto the core",
+  "wps": [
+   "M0-13",
+   "M0-15",
+   "M0-16",
+   "M0-17"
+  ]
+ },
+ {
+  "key": "G07",
+  "ms": "M0 Foundation",
+  "title": "M0: release pipeline, container image and M0 exit",
+  "wps": [
+   "M0-18",
+   "M0-19",
+   "M0-20"
+  ]
+ },
+ {
+  "key": "G08",
+  "ms": "M1 Addressing & uploads",
+  "title": "M1: proto, part commitments and multi-repo addressing",
+  "wps": [
+   "1.2",
+   "1.3",
+   "1.4"
+  ]
+ },
+ {
+  "key": "G09",
+  "ms": "M1 Addressing & uploads",
+  "title": "M1: D34 sharding (DO classes, relay, timers, ref index), epoch leases, policies, GetServerInfo, quota",
+  "wps": [
+   "1.5",
+   "1.6",
+   "1.7",
+   "1.8",
+   "1.22",
+   "1.23",
+   "1.24",
+   "1.25",
+   "1.26",
+   "1.28"
+  ]
+ },
+ {
+  "key": "G10",
+  "ms": "M1 Addressing & uploads",
+  "title": "M1: BeginUpload tickets, client-streaming parts (R2/S3 multipart), AdvanceRefs consumption",
+  "wps": [
+   "1.9",
+   "1.10",
+   "1.11",
+   "1.12",
+   "1.13",
+   "1.14"
+  ]
+ },
+ {
+  "key": "G11",
+  "ms": "M1 Addressing & uploads",
+  "title": "M1: client changes, ssh/enc multi-repo and published-view snapshots",
+  "wps": [
+   "1.15",
+   "1.16",
+   "1.17",
+   "1.18",
+   "1.21"
+  ]
+ },
+ {
+  "key": "G12",
+  "ms": "M1 Addressing & uploads",
+  "title": "M1: staging, ops (backups, alerts) and M1 exit conformance",
+  "wps": [
+   "1.19",
+   "1.20",
+   "1.27",
+   "1.29"
+  ]
+ },
+ {
+  "key": "G13",
+  "ms": "M2 Identity",
+  "title": "M2: grant and epoch formats and verifiers (mkit-attest)",
+  "wps": [
+   "2.2",
+   "2.3",
+   "2.4",
+   "2.5"
+  ]
+ },
+ {
+  "key": "G14",
+  "ms": "M2 Identity",
+  "title": "M2: server authorization, ref scopes, epochs, signed reads, private repos, URL tokens",
+  "wps": [
+   "2.6",
+   "2.7",
+   "2.8",
+   "2.9",
+   "2.11",
+   "2.12"
+  ]
+ },
+ {
+  "key": "G15",
+  "ms": "M2 Identity",
+  "title": "M2: client signed reads, grant/epoch CLI and M2 exit",
+  "wps": [
+   "2.10",
+   "2.13",
+   "2.14",
+   "2.15"
+  ]
+ },
+ {
+  "key": "G16",
+  "ms": "M3 Admission",
+  "title": "M3: admission (402), outcome outbox and adapter delivery",
+  "wps": [
+   "3.1",
+   "3.2",
+   "3.3",
+   "3.4",
+   "3.5"
+  ]
+ },
+ {
+  "key": "G17",
+  "ms": "M3 Admission",
+  "title": "M3: SPEC-SERVER, remote hooks and hook channels",
+  "wps": [
+   "3.6",
+   "3.7",
+   "3.8",
+   "3.9",
+   "3.14"
+  ]
+ },
+ {
+  "key": "G18",
+  "ms": "M3 Admission",
+  "title": "M3: client 402 handling, admission_helper and M3 exit",
+  "wps": [
+   "3.10",
+   "3.11",
+   "3.12",
+   "3.13"
+  ]
+ },
+ {
+  "key": "G19",
+  "ms": "M4 Indexed mode",
+  "title": "M4: indexed ingestion, verification and D32 extraction",
+  "wps": [
+   "4.1",
+   "4.2",
+   "4.4",
+   "4.5",
+   "4.6",
+   "4.7",
+   "4.8",
+   "4.8a",
+   "4.9",
+   "4.10",
+   "4.10a",
+   "4.17"
+  ]
+ },
+ {
+  "key": "G20",
+  "ms": "M4 Indexed mode",
+  "title": "M4: HTTP serving, proofs, paid/private reads and M4 exit",
+  "wps": [
+   "4.3",
+   "4.11",
+   "4.12",
+   "4.13",
+   "4.14",
+   "4.15",
+   "4.16",
+   "4.18"
+  ]
+ },
+ {
+  "key": "G21",
+  "ms": "M5 Lifecycle",
+  "title": "M5: lifecycle specs, leases and GC",
+  "wps": [
+   "5.1a",
+   "5.1b",
+   "5.1c",
+   "5.2",
+   "5.3a",
+   "5.3b"
+  ]
+ },
+ {
+  "key": "G22",
+  "ms": "M5 Lifecycle",
+  "title": "M5: published view and quarantine (ContentInspector)",
+  "wps": [
+   "5.4",
+   "5.5"
+  ]
+ },
+ {
+  "key": "G23",
+  "ms": "M5 Lifecycle",
+  "title": "M5: storage receipts (server signing and client storage)",
+  "wps": [
+   "5.8",
+   "5.12"
+  ]
+ },
+ {
+  "key": "G24",
+  "ms": "M5 Lifecycle",
+  "title": "M5: takedown, redaction notices, cache purge, admin API, reinstatement",
+  "wps": [
+   "5.6",
+   "5.7a",
+   "5.7b",
+   "5.9a",
+   "5.9b",
+   "5.10",
+   "5.11a",
+   "5.11b",
+   "5.14"
+  ]
+ },
+ {
+  "key": "G25",
+  "ms": "Release",
+  "title": "M5 exit conformance and final release to main (0.5.0)",
+  "wps": [
+   "5.13",
+   "REL"
+  ]
+ }
+]
