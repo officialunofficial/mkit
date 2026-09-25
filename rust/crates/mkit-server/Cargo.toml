@@ -34,10 +34,13 @@ thiserror = "2"
 bytes = "1"
 futures-core = "0.3"
 tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
+# Stored-value codecs (`store::codec`), on every target, so not optional.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [features]
-# In-memory reference backends (`MemoryKv`): the template for third-party
-# backends. Always compiled for this crate's own unit tests.
+# In-memory reference backends (`MemoryKv`, `MemoryBlobStore`): the template
+# for third-party backends. Always compiled for this crate's own unit tests.
 memory = []
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -47,8 +50,6 @@ send_wrapper = { version = "0.6", features = ["futures"] }
 
 [dev-dependencies]
 futures-executor = "0.3"
-# Parses the shared auth v2 golden fixture (rust/tests/golden/auth-v2/).
-serde_json = "1"
 # Signs auth v2 test envelopes with the golden fixture's seed.
 ed25519-dalek = { version = "3", default-features = false, features = ["alloc"] }
 proptest = "1"
