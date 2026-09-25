@@ -10,6 +10,7 @@
 //! the protocol they apply (`refs::evaluate_cas`, `quota::evaluate_quota`);
 //! the quota value types are also at the root.
 
+pub mod auth_v2;
 pub mod download;
 mod error;
 mod op;
@@ -20,6 +21,7 @@ mod repo;
 mod rt;
 pub mod storage_error;
 mod telemetry;
+pub mod upload;
 
 pub use error::{
     ADMISSION_CHALLENGE_TYPE, Code, ErrorDetail, InvalidHeader, Redacted, ServerError,

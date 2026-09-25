@@ -12,8 +12,9 @@ and `wasm32-unknown-unknown`:
   `Spawner`, and `send_wrap`
 - a `Metrics` facade with no dependency on a metrics backend
 - the protocol logic every binding shares: ref CAS and ref-name checks
-  (`refs`), download chunking (`download`), quota evaluation (`quota`) and
-  storage-error redaction (`storage_error`)
+  (`refs`), `UploadPack` framing (`upload`), download chunking (`download`),
+  quota evaluation (`quota`), auth v2 glue (`auth_v2`) and storage-error
+  redaction (`storage_error`)
 
 The storage and policy traits, the request pipeline and the Connect binding
 land here in later work of the same effort.
