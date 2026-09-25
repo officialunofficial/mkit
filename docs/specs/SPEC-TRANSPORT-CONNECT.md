@@ -12,27 +12,30 @@ service: one deployment served one repository, and a valid auth v2
 signature was enough to write. Version 2 is a semantic revision of the
 same wire package. It adds multi-repository addressing (§7.4), namespace
 and write policy (§7.5), `GetServerInfo` (§2.1), upload tickets and
-resumable parts (§7.6), ref deletion (§7.8), and the consistency and
-paging rules of a sharded server (§7.9). `mkit.transport.v1` evolves
+resumable parts (§7.6), ref deletion (§7.8), the consistency and
+paging rules of a sharded server (§7.9), admission challenges (§5.1),
+and the per-RPC upload lifecycle (§7.7). `mkit.transport.v1` evolves
 additively: v2 adds RPCs and fields and never renumbers or removes one,
 so `buf breaking` stays green. The breaks are semantic only. mkit is
 pre-production (CONTRIBUTING, "Pre-production compatibility policy"), so
 v2 has no v1 compatibility machinery: no v1 reader, no negotiation, and
 no fallback mode. The proto messages v2 names land with the M1
-implementation (§8); until then the implementations described under
+implementation, and the admission messages with the M3 implementation
+(§8); until then the implementations described under
 "Reference implementation" below implement the v1 surface only. §9
 records the version history.
 
 Scope: the `mkit.transport.v1.TransportService` Connect service &mdash; its
 proto shape, verb-to-trait mapping, CAS semantics, error-code mapping,
 pack-transfer streaming design, repository addressing, write
-authorization policy, upload tickets, and read consistency &mdash; and how
+authorization policy, upload tickets, admission challenges, and read
+consistency &mdash; and how
 the deployment targets (reference Worker, `mkit serve`, native CLI
 client) consume one generated codebase. It does not cover S3 multipart,
-the `WatchRefs` live-feed migration, admission challenges, or any
-server/client implementation; those are separate changes (§8). Write and
-read grants, epochs, signed reads, and private repositories are
-[SPEC-WRITE-GRANTS](SPEC-WRITE-GRANTS.md)'s.
+the `WatchRefs` live-feed migration, pricing or payment verification,
+or any server/client implementation; those are separate changes (§8).
+Write and read grants, epochs, signed reads, and private repositories
+are [SPEC-WRITE-GRANTS](SPEC-WRITE-GRANTS.md)'s.
 
 Supersedes: [SPEC-TRANSPORT](SPEC-TRANSPORT.md) §5 ("HTTP transport") as
 the ACTIVE implementation behind `mkit+https://`/`mkit+http://` in
@@ -185,7 +188,7 @@ headers or a bearer token. The response MAY be cached with
 | `begin_upload_threshold_bytes` | Packs smaller than this MAY skip `BeginUpload` (§7.6). It is `0` on every multi-repository deployment and whenever `admission` is true. On a single-repository deployment without admission, the value is deployment-defined. |
 | `atomic_advance` | Whether `AdvanceRefs` commits the head and packmap atomically (§4). |
 | `indexed_mode` | Whether the deployment decodes and verifies pushed packs before refs move. |
-| `admission` | Whether the deployment runs an admission step that can challenge a write (§5.1, forthcoming). |
+| `admission` | Whether the deployment runs an admission step that can challenge a request (§5.1). When it is true, `begin_upload_threshold_bytes` is `0`. |
 | `receipt_public_key`, `receipt_key_id` | The key that signs storage receipts, and its key id. Empty until storage receipts are specified. |
 | `grant_schemes` | The owner signature schemes the deployment accepts on grants and epoch statements ([SPEC-WRITE-GRANTS §4](SPEC-WRITE-GRANTS.md#4-owner-signature-schemes)). Empty on a deployment that accepts no grants. |
 | `namespace_policy` | `allowlist`, `any`, or `single-repository` (§7.5). `single-repository` is advertised, never configured. |
@@ -303,20 +306,24 @@ maps onto a standard Connect code:
 | `RefConflict` | `failed_precondition` | `UpdateRef` on a CAS mismatch, including deletion of an absent ref (§7.8). `AdvanceRefs` reports its conflicts as typed outcomes (§4), never as this error. |
 | `InvalidRef` | `invalid_argument` | Any RPC taking a ref name that fails SPEC-REFS §3. |
 | `ConnectionFailed` | *(not server-raised &mdash; client-observed transport failure, for example TCP reset, deadline exceeded)* | &mdash; |
-| `ServerError{status}` | `unavailable` (5xx-equivalent) or `resource_exhausted` (429-equivalent) | Deployment-specific overload / backend failure. |
+| `ServerError{status}` | `unavailable` (5xx-equivalent), `resource_exhausted` (429-equivalent), or `aborted` (a client maps it to `ServerError{status: 503}`) | Deployment-specific overload / backend failure; `aborted` also answers a retry of an operation that is still in flight (§7.1). |
 | `InvalidResponse` | *(not server-raised &mdash; client-observed: malformed frame, wrong message on a streamed oneof, digest mismatch on `DownloadPack`)* | &mdash; |
 | `ProtocolError` | `invalid_argument` | A client-streaming call whose `header` is missing, arrives after a `chunk`, or whose declared/received byte counts disagree (§6). |
 | `PayloadTooLarge` | `resource_exhausted` | `UploadPack` header `total_bytes` (or the observed stream length) exceeds the server's cap. |
+| `AdmissionRequired{challenges, description}` | `permission_denied`, sent with HTTP status 402 and exactly one `AdmissionChallenge` detail (§5.1). A client also maps any HTTP 402 response to this variant. | A unary RPC that the deployment's admission step challenges (§5.1). Never retried. |
 | `InsecureScheme` | *(not applicable &mdash; URL-scheme concern, handled client-side before any RPC is made; see SPEC-TRANSPORT §3)* | &mdash; |
-| `RemoteError(String)` | `unknown` (server-raised, deployment-specific advisory failure with no more specific code applies) &mdash; also the client-side **default** target for any Connect code this table does not otherwise list (`internal`, `aborted`, …), matching the variant's existing "catch-all" contract in `protocol.rs`. | A deployment-specific backend failure that does not fit any row above. |
+| `RemoteError(String)` | `unknown` (server-raised, deployment-specific advisory failure with no more specific code applies) &mdash; also the client-side **default** target for any Connect code this table does not otherwise list (`internal`, `data_loss`, …), matching the variant's existing "catch-all" contract in `protocol.rs`. | A deployment-specific backend failure that does not fit any row above. |
 
 A conforming client's Connect-to-`TransportError` mapping is the
 mechanical inverse of this table, with `RemoteError(String)` as the
 fallback arm for any Connect code not otherwise listed &mdash; the mapping
-is total in both directions, never a partial match. `is_retryable`
-(SPEC-TRANSPORT §7) continues to apply unchanged once translated:
-`unavailable` and `resource_exhausted` are retryable, everything else
-is not.
+is total in both directions, never a partial match. Before it applies
+the table, a client checks for admission: an HTTP 402 response, or a
+`permission_denied` error that carries an `AdmissionChallenge` detail,
+maps to `AdmissionRequired`, never to `AccessDenied` (§5.1).
+`is_retryable` (SPEC-TRANSPORT §7) continues to apply once translated:
+`unavailable`, `resource_exhausted`, and `aborted` are retryable, and
+everything else is not. `AdmissionRequired` is never retryable.
 
 Authentication, authorization, addressing, ticket, and storage
 failures map to these codes. The `Condition` column is what the server
@@ -339,12 +346,272 @@ resolves by calling `BeginUpload` again, never to `RefConflict`.
 | A part whose subtree hash or length differs from its commitment, or a completion whose merged root or total differs from the ticket (§7.6) | `invalid_argument` |
 | A pack still under verification in indexed mode (§7.6) | `unavailable` |
 | A missed commit deadline (`NotAfter`), a full shard, or outbox backpressure. Nothing commits, and a retry with the same nonce is safe. | `unavailable`, never `resource_exhausted` |
+| A signed nonce already recorded with a different operation fingerprint (§7.1) | `invalid_argument` |
+| A signed nonce whose operation is still `in_flight` (§7.1). The request never reaches admission. | `aborted` (retryable) |
+| A new operation that the admission step challenges (§5.1) | `permission_denied` with HTTP status 402 and one `AdmissionChallenge` detail |
+| A new operation that the admission step denies outright (§5.1) | `permission_denied`, with no `AdmissionChallenge` detail, with its default HTTP status 403, never 402 |
 
 `failed_precondition` is a CAS conflict only on `UpdateRef`. On the
 RPCs above, and on an `UploadPack` that needed a ticket and carried
 none, it is a ticket failure (§7.6), which a client MUST NOT treat as a
 ref conflict. No ticket failure is `resource_exhausted`,
-because clients retry that code on the backoff ladder.
+because clients retry that code on the backoff ladder. For the same
+reason, no admission challenge or denial is `resource_exhausted`.
+
+### 5.1 Admission challenges
+
+A server MAY refuse a request until the caller does something outside
+this protocol. Examples are a payment, a quota top-up, or verifying an
+email address. A plain `resource_exhausted` cannot express this,
+because clients retry it on a backoff ladder. A plain
+`permission_denied` cannot express it either, because it gives the
+caller nothing to act on. An admission challenge is a
+`permission_denied` error that tells the caller what to do.
+
+mkit registers no challenge schemes and interprets none. Payment
+protocols such as MPP (the Machine Payments Protocol) and x402 define
+their own challenges, credentials, and receipts. This section defines
+only how they travel through `mkit.transport.v1` and which headers a
+client may attach in reply. Pricing, payment verification, and
+settlement belong to the deployment.
+
+**Error.** The server answers a challenged request with HTTP status
+402 and a Connect error body whose code is `permission_denied`. The
+body carries exactly one error detail of type
+`mkit.transport.v1.AdmissionChallenge`:
+
+```proto
+message AdmissionChallenge {
+  repeated Challenge challenges = 1; // 1 to 8 entries, in the server's order of preference
+  string description = 2;            // text for a person; at most 512 bytes of UTF-8
+}
+
+message Challenge {
+  string scheme = 1; // lowercase token: [a-z0-9][a-z0-9.-]{0,63}
+  string value = 2;  // opaque to mkit; at most 8,192 bytes
+}
+```
+
+The proto messages land additively with the M3 implementation (§8).
+Each `Challenge` is opaque: `scheme` names the external protocol that
+interprets `value`, and a challenge defined by another protocol can
+travel unchanged in `value` (informative: a deployment can mirror each
+`WWW-Authenticate: Payment` challenge it sends as one entry). A client
+treats a detail that breaks these bounds, or a second
+`AdmissionChallenge` detail, as `InvalidResponse`. No RPC response
+message carries an admission result; a challenge is only ever this
+error.
+
+A client that predates this section maps the error to `AccessDenied`
+and fails at once instead of retrying, because the code is
+`permission_denied` (§5).
+
+**Header pass-through.** The 402 response MAY also carry the raw
+challenge headers of the payment protocols the deployment supports:
+one or more `WWW-Authenticate: Payment …` fields (MPP) and a
+`PAYMENT-REQUIRED` field (x402). The server passes them through as
+the deployment's business layer produced them. mkit does not
+interpret them.
+
+**Unary RPCs only.** A challenge applies only to unary RPCs, because a
+client-streaming RPC reports its status after the client has sent the
+whole stream. `GetServerInfo` is never challenged (§2.1), and neither
+is the part path (`UploadPart`, `CompleteUpload`, and a ticketed
+`UploadPack`, §7.6), whose admission happened at `BeginUpload`. When
+the deployment runs admission, `GetServerInfo` advertises
+`admission = true` and `begin_upload_threshold_bytes = 0`, so
+`BeginUpload` is mandatory for every upload (§7.6). §7.7 states which
+RPC of an upload is admitted. Paid bulk downloads are served over
+plain HTTP (informative: a forthcoming HTTP-serving specification),
+where a 402 is an ordinary response.
+
+**Ordering.** For an operation the deployment authenticates, the
+server authenticates before it challenges. For a signed write it
+checks the replay ledger and authorizes before admission, in the order
+§7.1 fixes, so a retry of a committed operation returns its stored
+result and never meets a new challenge. An anonymous operation, such
+as a paid public read, MAY be challenged directly.
+
+**No state on challenge.** A challenged request MUST NOT change any
+state. The server creates no namespace or repository, reserves no
+quota, allocates no ticket, and does not consume the replay nonce. It
+never stores a challenge as a replay result (§7.1). A retry with the
+same nonce is therefore evaluated as a new operation. A denial
+allocates nothing either (§7.5).
+
+**Admission input.** The admission step decides from the operation,
+which carries (informative):
+
+- the audience, repository, procedure, and the verified signer, or
+  "anonymous";
+- the namespace owner and the write authorization used (§7.5);
+- `creates_namespace` and `creates_repo`;
+- for `BeginUpload`, the `pack_id`, the declared byte count, and the
+  bytes new to the repository (known only from membership);
+- the idempotency key.
+
+Two rules about this input are normative. The server MUST give the admission
+step `creates_namespace` and `creates_repo` (§7.5). It MUST NOT give
+the admission step the bytes new to the whole store, because a price
+that depends on them would reveal whether other repositories hold the
+content (§7.4, isolation). Those bytes are reported only in the
+`Committed` outcome (§7.7). Quota scopes that span namespaces, such as
+per payer or per signer across namespaces, cannot be atomic on a store
+sharded by namespace; a deployment keeps them best-effort, reserves
+and reconciles them, or keeps them in its own store (informative).
+
+**Binding (informative).** Binding a challenge to one request, for
+example an HMAC over the MPP challenge parameters, an `opaque` value,
+or a `digest` over the unary `BeginUpload` body, is the deployment's
+job. mkit supplies the fingerprint to bind: the repository, the
+signer, the `pack_id`, and the byte count. A retry sends a
+byte-identical signed body (§7.1), so a `digest` binding holds across
+it.
+
+**Bearer deployments.** A deployment that authenticates callers with
+`Authorization: Bearer` MUST advertise `header="Payment-Authorization"`
+in every MPP challenge it sends, so the payment credential never
+displaces the bearer token.
+
+**Caching.** A 402 response carries `Cache-Control: no-store`. A
+response that carries a `Payment-Receipt` field (MPP) or a
+`PAYMENT-RESPONSE` field (x402) passes that field through to the client
+and carries `Cache-Control: private`.
+
+**CORS.** A deployment that serves browsers exposes the challenge and
+receipt headers (`Access-Control-Expose-Headers: WWW-Authenticate,
+Payment-Receipt, PAYMENT-REQUIRED, PAYMENT-RESPONSE`) and allows the
+credential request headers (`Payment-Authorization`,
+`PAYMENT-SIGNATURE`, `Authorization`, and `Accept-Payment`). A preflight `OPTIONS`
+request never requires payment.
+
+**Redaction.** Servers and clients MUST keep payment credentials and
+receipts out of logs, traces, error messages, and analytics. This
+covers every header a client attaches from its admission helper,
+`Payment-Receipt`, `PAYMENT-RESPONSE`, and the helper's output.
+
+#### Client behavior
+
+A client builds `AdmissionRequired{challenges, description}` from the
+`AdmissionChallenge` detail. A 402 response without that detail, for
+example one an intermediary produced, yields an `AdmissionRequired`
+with no challenges and an empty description. In both cases the client
+also keeps the response's `WWW-Authenticate` and `PAYMENT-REQUIRED`
+fields for the helper. The client never parses a `problem+json` or
+other non-Connect body, and never retries `AdmissionRequired`
+automatically.
+
+A client implementation must keep the HTTP status of an error
+response, so that it still recognizes a raw 402 that carries no
+Connect detail (informative; an M3 implementation requirement). The
+`connectrpc` 0.9 client drops that status when it builds its error
+(`client/mod.rs`, lines 2173&ndash;2255). Without a helper it fails the operation and shows the
+description and the challenge schemes to the user.
+
+**Admission helper.** A client MAY run a user-configured admission
+helper, named by the user-scoped `admission_helper` key:
+
+- Repository configuration MUST NOT set `admission_helper`.
+  [SPEC-CONFIG-SECURITY](SPEC-CONFIG-SECURITY.md#2-per-key-audit)
+  classifies it as UNSAFE.
+- The client runs the helper only for a remote whose endpoint equals
+  the user-scoped `trusted_remote_endpoint`
+  ([SPEC-CONFIG-SECURITY §3.4](SPEC-CONFIG-SECURITY.md#34-runtime-credential-and-request-signing-gates)).
+- The client runs the helper at most once per logical operation.
+
+The client writes one JSON object to the helper's standard input and
+closes it:
+
+```json
+{
+  "origin": "https://vcs.example",
+  "repository": "ed25519-<64 hex>/name",
+  "procedure": "/mkit.transport.v1.TransportService/BeginUpload",
+  "description": "text from the detail, or empty",
+  "challenges": [{ "scheme": "…", "value": "…" }],
+  "headers": {
+    "www-authenticate": ["Payment id=\"…\", …"],
+    "payment-required": ["…"]
+  }
+}
+```
+
+`origin` is the canonical origin of §7.1. `challenges` holds the
+detail's entries, in order, and is empty when the 402 had no detail.
+`headers` maps each lowercase header name to the list of that field's
+values, in the order received; it holds only `www-authenticate` and
+`payment-required`, and omits a name the response did not carry.
+
+The helper answers with exit status 0 and one JSON object on standard
+output that maps header names to string values:
+
+```json
+{ "Payment-Authorization": "Payment eyJ…" }
+```
+
+For an MPP challenge the helper returns `Authorization: Payment …`,
+or `Payment-Authorization: Payment …` when the challenge sets
+`header="Payment-Authorization"`. For an x402 challenge it returns
+`PAYMENT-SIGNATURE` (informative). Any other exit status, output that
+is not such an object, an empty object, a header name that is not an
+HTTP token, two names that differ only in case, or a value that
+contains a control character other than horizontal tab aborts the
+operation. A header value longer than 8,192 bytes also aborts it.
+
+**Header allowlist.** The client attaches a helper header only if its
+name is on the remote's allowlist. Names compare case-insensitively.
+
+- The default allowlist is `Payment-Authorization`,
+  `PAYMENT-SIGNATURE`, and `Authorization`. `Authorization` is on it
+  only when the client does not already send `Authorization` to that
+  remote, that is, when no `MKIT_API_TOKEN` bearer token (§7.3) is
+  configured for it.
+- The user-scoped `remote.<name>.admission_headers` key adds header
+  names to the allowlist of the remote `<name>`
+  ([SPEC-CONFIG-SECURITY](SPEC-CONFIG-SECURITY.md#2-per-key-audit)).
+- A helper header that is not on the allowlist, or that names a header
+  the request already carries, fails the operation. The error names
+  that header.
+
+**Hard-reserved headers.** These names are never allowed, whatever the
+configuration says. An `admission_headers` entry that names one has no
+effect, and the client warns naming it:
+
+- the auth v2 envelope headers `X-Public-Key`, `X-Signature`,
+  `X-Digest`, `X-Created-At`, `X-Expires-At`, `X-Envelope-Version`,
+  `X-Audience`, `X-Repository`, `X-Content-Commitment`; the write-grant
+  header `X-Write-Grant`; `X-Mkit-Ref` (§7.9); every header beginning
+  `X-Mkit-`; every `X-Forwarded-*` header;
+- `Host`, every `Content-*` header, `Transfer-Encoding`, every
+  `Connect-*` header, `Cookie`, `Idempotency-Key`, and `Authorization`
+  when the client already sends it to that remote (§7.3);
+- the hop-by-hop headers `Connection`, `Keep-Alive`, every `Proxy-*`
+  header, `TE`, `Trailer`, and `Upgrade`.
+
+A later mkit specification that defines a request header MUST name it
+`X-Mkit-*` or add it to this list.
+
+`mkit config` SHOULD refuse to write a reserved name into
+`remote.<name>.admission_headers`. When a client loads such an entry,
+it SHOULD warn with this fixed wording, where `<header>` is the entry
+and `<name>` the remote:
+
+```text
+warning: ignoring reserved header `<header>` in remote.<name>.admission_headers (see SPEC-TRANSPORT-CONNECT §5.1)
+```
+
+**Retry.** With the allowed headers attached, the client sends the same
+logical operation once more. While the auth v2 envelope is still valid
+(at most 300 seconds, §7.1), it reuses the nonce, the timestamps, and
+the signed body. After the envelope has expired, it signs a new
+operation over the same request body. The helper headers are not part
+of the auth v2 canonical string. They stay attached to every transport
+retry of that attempt on the backoff ladder. A second challenge for the
+same operation fails it; the client does not run the helper again.
+
+**Receipts.** A client keeps a `Payment-Receipt` or `PAYMENT-RESPONSE`
+field it receives out of logs and traces, and MAY report it to the
+user.
 
 ---
 
@@ -539,27 +806,53 @@ including requests whose results remain cached. Missing or unsupported auth
 versions MUST fail closed.
 
 A valid signature alone is insufficient replay protection. Each service MUST
-persist, for every admitted operation except the replay-exempt uploads of
-§7.6 (`UploadPart` and a ticketed `UploadPack`), a nonce reservation scoped to
+persist, for every signed write except the replay-exempt uploads of §7.6
+(the part path: `UploadPart`, `CompleteUpload`, and a ticketed
+`UploadPack`), a nonce record scoped to
 audience/repository/signer, together with the full authenticated operation
-fingerprint. Reusing a nonce for a
-different operation MUST fail. Same-operation retries MUST return the saved
-result and MUST NOT repeat mutable effects or charge quota again. Nonce,
-quota, reference changes (including both AdvanceRefs writes), chat sequence,
-and reaction toggles MUST commit in one explicit SQLite transaction. A
-transaction failure rolls them all back; broadcasts occur only after commit.
-Replay records MUST remain until the signed expiry has passed.
+fingerprint. Reusing a nonce for a different operation MUST fail.
+Same-operation retries MUST return the saved result and MUST NOT repeat
+mutable effects or charge quota again. Nonce, quota, reference changes
+(including both AdvanceRefs writes), chat sequence, and reaction toggles MUST
+commit in one explicit SQLite transaction. A transaction failure rolls them
+all back; broadcasts occur only after commit. Replay records MUST remain until
+the signed expiry has passed.
 
-For new operations, quota and rate-limit admission MUST precede replay-record
-insertion within that transaction. Rejection MUST NOT allocate a replay record.
-Existing reservations and saved replies MUST be checked before admission, so
-retries remain available after the caller exhausts its budget.
+A server processes a signed write in this order:
 
-Immutable object publication uses a durable pending reservation that charges
-quota once, followed by a conditional content-addressed R2 put and a durable
-result finalization. An interruption after reservation or publication is
-resumed by the same signed operation. Concurrent finalizers return the first
-saved result. An unreachable ledger or failed quota read fails closed.
+1. **Authenticate.** Verify the signature and the validity window. This
+   step writes no state.
+2. **Look up the replay record** for (audience, repository, signer, nonce):
+   - a stored fingerprint that differs from the request's is
+     `invalid_argument`;
+   - a `committed` operation returns its stored result;
+   - an `in_flight` operation returns a retryable `aborted`, without
+     reaching admission.
+
+   Only a new operation continues. So a retry never presents a spent payment
+   credential again, and one signer's result is never served to another.
+3. **Authorize** the write (§7.5), then run **admission** (§5.1)
+   (for `BeginUpload`, after the live-ticket check of §7.7). A
+   challenge or a denial allocates nothing. Because the lookup precedes
+   admission, a retry stays answerable after the caller has exhausted its
+   budget.
+4. **Reserve.** Insert the `in_flight` replay record.
+5. **Apply** the operation's effects.
+6. **Commit** the stored result.
+
+For a unary write, steps 4 to 6 commit together in the one transaction
+required above. §7.7 states what each RPC's apply writes. A challenge and a
+`PendingVerification` answer (§7.6) are never stored as replay results: the
+server leaves no record for the attempt, and removes any `in_flight` record it
+inserted, so a retry with the same nonce is evaluated again from step 2.
+
+**Signed reads** skip the replay ledger and this order's steps 2 and 4 to 6
+("Signed reads" above): a read is idempotent, so the server checks only the
+signature and the validity window.
+
+An upload no longer resumes through its replay record. An interrupted upload
+resumes through its ticket and part receipts (§7.6), under the per-RPC
+lifecycle of §7.7. An unreachable ledger or failed quota read fails closed.
 
 `AUTH_AUDIENCE` must be explicitly configured for every deployment and local
 development origin.
@@ -765,7 +1058,7 @@ may write to the repository in `X-Repository`.
   explicit opt-in. Every new key is a new namespace, and each new
   namespace starts with a fresh default quota. A deployment under
   `any` MUST therefore configure a non-default admission step
-  (§5.1, forthcoming). Without one it MUST refuse to start, unless the
+  (§5.1). Without one it MUST refuse to start, unless the
   operator passes an explicit unsafe override (for example, an
   "unsafe open namespaces" setting; the exact spelling is up to the
   implementation).
@@ -808,10 +1101,10 @@ after the replay-record and saved-reply check §7.1 requires, and before
 it allocates any quota, reservation, or replay record. A rejection
 allocates nothing.
 
-**Creation signals (informative).** The authorization and admission
-steps see whether the write creates a namespace and whether it creates
-a repository (`creates_namespace` and `creates_repo`). The admission
-specification (§5.1, forthcoming) makes these normative.
+**Creation signals.** The authorization and admission steps see
+whether the write creates a namespace and whether it creates a
+repository (`creates_namespace` and `creates_repo`). §5.1 requires the
+server to give both to its admission step.
 
 ### 7.6 Upload tickets and resumable parts
 
@@ -964,10 +1257,54 @@ after the merged root verifies. Presigned direct-to-storage part
 uploads are not allowed, because they would bypass verification before
 completion.
 
-### 7.7 Reserved
+### 7.7 Lifecycle per RPC
 
-This section number is reserved for the per-RPC lifecycle table of the
-admission specification (§5.1, forthcoming).
+This section is normative. It fixes, for each RPC of a ticketed upload,
+whether admission (§5.1) runs and what the RPC's apply writes. The
+shards are those of §7.9: a strongly consistent shard per (repository,
+ref), and eventually consistent repository index shards.
+
+Every RPC carries its own nonce: `BeginUpload`, each `UploadPart`,
+`CompleteUpload`, a ticketed `UploadPack`, and `AdvanceRefs` are
+separate signed operations.
+
+The server also runs admission on every other signed unary write:
+`UpdateRef`, including deletion (§7.8), and an `AdvanceRefs` that
+consumes no ticket. Allowing, challenging or denying it is deployment
+policy.
+
+| RPC | Admission | What its apply writes |
+|---|---|---|
+| `BeginUpload` (unary; names its target ref) | Yes | In the target ref's shard: the replay record, a reservation row, and the ticket. |
+| `UploadPart`, `CompleteUpload`, and a ticketed `UploadPack` (the part path, §7.6) | No | Pack or part bytes only, authorized by the stateless ticket token. The part path writes nothing to a metadata shard. The ticket's audience, repository, and signer MUST equal the request's, and for a ticketed `UploadPack` its `pack_id` and byte count MUST equal the request's `pack:` commitment; otherwise the request is `permission_denied` (§7.6). |
+| `AdvanceRefs` | No; it consumes tickets | In the same ref shard: the head and the packmap, the ref's membership additions, which the server propagates to the repository index shards at least once, and one `Committed` outcome for each ticket it consumes. Tickets are local to the ref shard, so there is no cross-shard handoff. |
+
+- **Membership.** A pack becomes a member of the repository only at the
+  apply of the `AdvanceRefs` that consumes its ticket. Until then,
+  `BeginUpload` for the same signer, ref, and pack returns the existing
+  ticket, never `AlreadyPresent` (§7.6). A `BeginUpload` that finds such
+  a live ticket returns it after authorization and before admission: it
+  runs no admission, creates no reservation, and is never challenged.
+- **One outcome per reservation.** Every reservation that admission
+  granted gets exactly one outcome: `Committed`, `Aborted`, or
+  `Expired`. `Committed` reports the bytes stored, the bytes new to the
+  repository, the bytes new to the store, and the refs advanced.
+- **Aborted.** If the apply of an admitted RPC fails after
+  `Allow{reservation}`, for example an `UpdateRef` compare-and-swap
+  loss, an epoch mismatch or a replay race, or a ticket's pack is
+  collected as garbage before an advance consumes it, the server
+  records `Aborted` in a separate transaction.
+- **Expired.** A ticket that expires before an `AdvanceRefs` consumes
+  it produces `Expired` (§7.6).
+- **Conflicts.** An `AdvanceRefs` that ends in a typed conflict (§4)
+  consumes no ticket. Its tickets stay usable until they expire. A lost
+  compare-and-swap on `AdvanceRefs` is such a conflict, not `Aborted`.
+
+A deployment settles a payment on `Committed` and releases it on
+`Aborted` or `Expired`, so an aborted upload settles nothing
+(informative). How outcomes reach the deployment, through a
+transactional outbox delivered at least once and keyed by reservation
+id, is specified in SPEC-SERVER (forthcoming, informative).
 
 ### 7.8 Ref deletion
 
@@ -1089,8 +1426,15 @@ Explicitly deferred to sibling issues:
 - Implementing write and read grants, epochs, signed reads, private
   repositories and URL tokens, specified in
   [SPEC-WRITE-GRANTS](SPEC-WRITE-GRANTS.md) (M2; mkit#1085, mkit#1089).
-- Admission challenges: §5.1 and the §7.7 lifecycle table, forthcoming
-  (mkit#1086).
+- Implementing admission (M3, mkit#1086): the `AdmissionChallenge` and
+  `Challenge` proto messages, the `AdmissionRequired` `TransportError`
+  variant and the retryable mapping of `aborted` (§5), the server's
+  admission step and outcomes (§5.1, §7.7), and the client's 402
+  handling, `admission_helper`, and header allowlist (§5.1).
+- Outcome delivery, the outbox, and the deployment hooks that decide
+  admission: SPEC-SERVER, forthcoming.
+- Pricing, payment verification, and settlement: deployment policy,
+  never mkit's (§5.1).
 
 ---
 
@@ -1098,7 +1442,7 @@ Explicitly deferred to sibling issues:
 
 | Version | Status | Changes |
 |---|---|---|
-| `2` | draft | §7.4 repository addressing; §7.5 namespace and write policy (owner key); `GetServerInfo` (§2.1); §7.6 upload tickets and resumable parts; §7.8 ref deletion; §7.9 consistency and `ListRefs` paging; error-code split between `unauthenticated` and `permission_denied` (§5) (mkit#1084, mkit#1090); SPEC-WRITE-GRANTS (mkit#1085): signed reads and `X-Write-Grant` (§7.1), the M2 RPC rows (§2), and grant cross-references. |
+| `2` | draft | §7.4 repository addressing; §7.5 namespace and write policy (owner key); `GetServerInfo` (§2.1); §7.6 upload tickets and resumable parts; §7.8 ref deletion; §7.9 consistency and `ListRefs` paging; error-code split between `unauthenticated` and `permission_denied` (§5) (mkit#1084, mkit#1090); SPEC-WRITE-GRANTS (mkit#1085): signed reads and `X-Write-Grant` (§7.1), the M2 RPC rows (§2), and grant cross-references. §5.1 admission challenges: HTTP 402 with `permission_denied` and an opaque challenge list, raw MPP/x402 header pass-through, the header-returning `admission_helper` with its allowlist and hard-reserved set; §7.1 replay lookup after authentication and before authorization and admission, with signed reads outside the ledger; retryable `aborted` for in-flight operations (§5); §7.7 lifecycle per RPC (mkit#1086). The M0 server implementation still resumes an interrupted `UploadPack` through its `in_flight` replay record until M1 tickets land. |
 | `1` | draft | Initial `mkit.transport.v1` proto: 7 wire RPCs covering every `Transport` trait verb (§2), `PackChunk` reused byte-for-byte from `ssh.proto`, `RefExpectation`/`RefEntry` duplicated with pinned wire numbers pending mkit#679's shared-proto extraction. |
 
 ---
@@ -1134,6 +1478,11 @@ reference Worker).
 | Every `TransportError` variant a server can raise has exactly one Connect code it maps to; a client's inverse mapping is mechanical, not heuristic. | §5's table. |
 | No RPC on one repository reads or changes another repository's refs, pack membership, or replay records. | §7.4 isolation; the `X-Repository` carriage rule. |
 | A write is authorized, or rejected with nothing allocated, before any quota or replay state is touched. | §7.5 order. |
+| A retry of a committed signed write returns the stored result and never reaches admission; a retry of an in-flight one gets a retryable `aborted`. | §7.1 order: authenticate, look up, then authorize and admit. |
+| A challenged or denied request changes no state, and no challenge or `PendingVerification` answer is stored as a replay result. | §5.1 "No state on challenge"; §7.1. |
+| A challenge is HTTP 402 with `permission_denied`, only on a unary RPC, and is never retried automatically. | §5.1; §5; SPEC-TRANSPORT §7. |
+| A client attaches only allowlisted helper headers and never a hard-reserved one, whatever the configuration says. | §5.1 header allowlist and hard-reserved headers. |
+| Every admitted reservation gets exactly one outcome: `Committed`, `Aborted`, or `Expired`. | §7.7. |
 | A stock multi-repository deployment never runs `write_policy = open`. | §7.5 write policy. |
 | An `AdvanceRefs` conflict is a typed response value, never a Connect error. | §4 &mdash; matches `AdvanceOutcome`'s three-variant, no-error-variant shape in `protocol.rs`. |
 | The `DownloadPack` Workers-streaming design is documented as unverified end-to-end until a sibling issue proves real client-visible delivery. | §6.3's "Known risk" paragraph; mkit#699/#702's re-verification requirement. |

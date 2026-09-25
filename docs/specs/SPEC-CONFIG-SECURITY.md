@@ -56,7 +56,10 @@ The table below covers every key that `apply_kv` in
 source order), the dotted-section families (`remote.<name>.*`,
 `branch.<name>.*`, allow-listed `core.<key>`) handled via
 `apply_section_kv` / `core_allowed_suffix`, and the `_url`-suffixed
-forward-compat slot.
+forward-compat slot. Rows marked "not yet implemented" classify keys
+that a specification defines before `apply_kv` reads them; the patch
+that implements such a key adds it to `REPO_FORBIDDEN_KEYS` per §5,
+including a matcher for a `remote.<name>.*` pattern key.
 
 | Key                                  | Scope      | Why this classification                                                                                                                                                              |
 |--------------------------------------|------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -79,6 +82,8 @@ forward-compat slot.
 | `ssh.strict_host_key_checking`       | **UNSAFE** | Letting the repo disable host-key checking opens `mkit push` to MITM.                                                                                                              |
 | `ssh.user_known_hosts_file`          | **UNSAFE** | The source of trust for SSH host-key verification.                                                                                                                                  |
 | `ssh.identity_file`                  | **UNSAFE** | Selects which private key SSH presents. Same shape as `signing_key`.                                                                                                                |
+| `admission_helper` (M3, not yet implemented) | **UNSAFE** | Names an executable the client runs when a remote answers with an admission challenge ([SPEC-TRANSPORT-CONNECT §5.1](SPEC-TRANSPORT-CONNECT.md#51-admission-challenges)). It spawns a process and can spend the user's money, so it is RCE plus a payment primitive if repo-controlled. Repository config MUST NOT set it. The client runs it only for a remote that passes the user-scoped `trusted_remote_endpoint` gate (§3.4). |
+| `remote.<name>.admission_headers` (M3, not yet implemented) | **UNSAFE** | Adds header names to the admission-helper allowlist of remote `<name>`. If repo-controlled, it could widen what a helper may attach to requests. It can never add a hard-reserved header (the auth v2 envelope headers, `X-Write-Grant`, `X-Mkit-*`, `X-Forwarded-*`, `Host`, `Content-*`, `Transfer-Encoding`, `Connect-*`, `Cookie`, `Idempotency-Key`, hop-by-hop headers; full list in SPEC-TRANSPORT-CONNECT §5.1); an entry naming one has no effect. `mkit config` SHOULD refuse to write a reserved name, and the load-time warning for one SHOULD use the fixed wording of SPEC-TRANSPORT-CONNECT §5.1. Unlike `remote.<name>.url`, this member of the `remote.<name>.*` family is user-scoped only. |
 | `transport_auth` | **UNSAFE** | Selects whether network requests invoke the ambient signing identity. Repository config MUST NOT enable it. User-scoped envelope signing additionally requires exact `trusted_remote_endpoint` approval before signer resolution. |
 | `attest.default_algorithm`           | **UNSAFE** | Selector. Flipping from `ed25519` to `secp256k1` / `p256` routes attestation signing to whichever non-Ed25519 key the user happens to have set up (confused-deputy).               |
 | `attest.signer`                      | **UNSAFE** | Selector. Flipping from `repo-key` to `external` or `keystore` weaponizes a user-scoped binary/keystore against attacker-chosen content.                                          |
@@ -203,6 +208,17 @@ writes to the user-scoped config. The repo-scoped knob can therefore
 NEVER unilaterally trust a remote &mdash; the user's hand is always
 required.
 
+The admission helper (M3) has a gate of its own. The client MUST NOT run a
+user-scoped `admission_helper`
+([SPEC-TRANSPORT-CONNECT §5.1](SPEC-TRANSPORT-CONNECT.md#51-admission-challenges))
+for a remote unless the remote's endpoint equals the user-scoped
+`trusted_remote_endpoint`. It applies a remote's user-scoped
+`remote.<name>.admission_headers` only under the same condition. A
+repository-configured or CLI-supplied remote therefore cannot trigger the
+helper without the user's exact trust entry. Every header the helper returns
+passes the allowlist and the hard-reserved set of SPEC-TRANSPORT-CONNECT §5.1
+before the client attaches it, and the client never logs the helper's output.
+
 ---
 
 ## 4. Test coverage
@@ -314,6 +330,7 @@ and where each guarantee is anchored.
 | Serializing repo config never emits an UNSAFE key | explicit write-site allow-list in `config::write` (§3.2) |
 | `mkit config <key> <value>` never writes an UNSAFE key repo-scoped | the command intercepts `REPO_FORBIDDEN_KEYS` and routes to the user-scoped file (§3.2) |
 | A repo can NEVER unilaterally attach ambient credentials to its own endpoint | `enforce_trusted_remote_endpoint` requires the user-scoped `trusted_remote_endpoint` to match (§3.4) |
+| A repo can NEVER make the client run the admission helper or widen its header allowlist (M3) | both keys are UNSAFE, and the helper runs only for a remote matching `trusted_remote_endpoint` (§2, §3.4) |
 | Repo-scoped `user.name` / `user.email` never influence the signed author | both are inert; `commit::resolve_author` never reads them (§2) |
 | The classification cannot silently drift from the code | `REPO_FORBIDDEN_KEYS` is the single source of truth (§1); the meta-test iterates the whole array and panics on a missing arm (§4) |
 | Every drop is user-visible with pinned wording | stderr warning, snapshot-tested (§3.3) |
