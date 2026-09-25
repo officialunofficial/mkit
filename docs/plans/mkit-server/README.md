@@ -93,7 +93,7 @@ Split and dropped WPs keep their briefs for the record: [WP-M0-02](briefs/WP-M0-
 | M0-19 | G07 | mkit-server container image (multi-arch, signed, attested) | [brief](briefs/WP-M0-19.md) | | planned |
 | M0-20 | G07 | M0 exit gate: CI wiring, invariants, exit checklist | [brief](briefs/WP-M0-20.md) | | planned |
 | 1.2 | G08 | Proto additions and codegen for M1 | [M1/M2](m1-m2-breakdown.md) | | planned |
-| 1.3 | G08 | mkit-core: part: commitment and BLAKE3 subtree module | [M1/M2](m1-m2-breakdown.md) | | planned |
+| 1.3 | G08 | mkit-core: part: commitment and BLAKE3 subtree module | [brief](briefs/WP-1.3.md) | | planned |
 | 1.4 | G08 | Core: multi-repo addressing through the pipeline | [M1/M2](m1-m2-breakdown.md) | | planned |
 | 1.22 | G09 | Core: D34 shard model: D34Shards map, namespace coordinator, ref shards | [M1/M2](m1-m2-breakdown.md) | | planned |
 | 1.24 | G09 | Core + adapters: timers (due_at, kind, ref) and alarm multiplexing | [M1/M2](m1-m2-breakdown.md) | | planned |
@@ -121,8 +121,9 @@ Split and dropped WPs keep their briefs for the record: [WP-M0-02](briefs/WP-M0-
 | 1.19 | G12 | Staging vcs-worker deployment config and runbook | [M1/M2](m1-m2-breakdown.md) | | planned |
 | 1.20 | G12 | CI: conformance and e2e against deployed staging (M1 exit) | [M1/M2](m1-m2-breakdown.md) | | planned |
 | 2.2 | G13 | Proto additions for M2 | [M1/M2](m1-m2-breakdown.md) | | planned |
-| 2.3 | G13 | mkit-attest: Keccak-256, EIP-191, secp256k1 recovery, address derivation | [M1/M2](m1-m2-breakdown.md) | | planned |
-| 2.4 | G13 | mkit-attest: grant and epoch statement codec plus the ed25519 scheme | [M1/M2](m1-m2-breakdown.md) | | planned |
+| 2.3 | G13 | mkit-attest: Keccak-256, EIP-191, secp256k1 recovery, address derivation | [brief](briefs/WP-2.3.md) | | planned |
+| 2.4a | G13 | grant codec, ref scopes, header codec, repository-name grammar | [brief](briefs/WP-2.4.md) | | planned |
+| 2.4b | G13 | epoch/visibility statements, ed25519 scheme, stateless verifier | [brief](briefs/WP-2.4.md) | | planned |
 | 2.5 | G13 | mkit-attest: secp256k1-eip191 and webauthn-p256 owner schemes | [M1/M2](m1-m2-breakdown.md) | | planned |
 | 2.6 | G14 | Server: grant-based write authorization, 0x namespaces, error-code alignment | [M1/M2](m1-m2-breakdown.md) | | planned |
 | 2.7 | G14 | Server: ref scopes, packmap coverage and the delete flag | [M1/M2](m1-m2-breakdown.md) | | planned |
@@ -148,9 +149,9 @@ Split and dropped WPs keep their briefs for the record: [WP-M0-02](briefs/WP-M0-
 | 3.12 | G18 | Stub MPP hook server and helper; end-to-end tests (M3 exit) | [M3–M5](m3-m5-breakdown.md) | | planned |
 | 3.13 | G18 | Wire conformance: admission, outcomes and backpressure on both adapters and staging | [M3–M5](m3-m5-breakdown.md) | | planned |
 | 3.14 | G17 | Docs: TypeScript mppx reference Worker (documentation only) | [M3–M5](m3-m5-breakdown.md) | | planned |
-| 4.1 | G19 | mkit-core: pack-ruzstd decode feature and dep-graph check | [M3–M5](m3-m5-breakdown.md) | | planned |
-| 4.2 | G19 | mkit-core: repo-isolated delta-base seam and incremental push verification | [M3–M5](m3-m5-breakdown.md) | | planned |
-| 4.3 | G20 | mkit-core: build_disclosure over a generic object source | [M3–M5](m3-m5-breakdown.md) | | planned |
+| 4.1 | G19 | mkit-core: pack-ruzstd decode feature and dep-graph check | [brief](briefs/WP-4.1.md) | | planned |
+| 4.2 | G19 | mkit-core: repo-isolated delta-base seam and incremental push verification | [brief](briefs/WP-4.2.md) | | planned |
+| 4.3 | G20 | mkit-core: build_disclosure over a generic object source | [brief](briefs/WP-4.3.md) | | planned |
 | 4.4 | G19 | Spec: indexed mode, D32 extraction, PendingVerification detail | [M3–M5](m3-m5-breakdown.md) | | planned |
 | 4.5 | G19 | Server: per-repo object index in repo index shards | [M3–M5](m3-m5-breakdown.md) | | planned |
 | 4.6 | G19 | Worker: object index in RepoIndexShard DOs (limits, batching, alerts) | [M3–M5](m3-m5-breakdown.md) | | planned |

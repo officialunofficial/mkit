@@ -160,7 +160,8 @@ Sizes: S ≲ 400, M 400–900, L 900–1500 changed lines.
 | 1.20 | CI: conformance and e2e against deployed staging (M1 exit) | M1 | conformance | 1.19, 1.27, 1.13, 1.15 | S | ci-yaml,staging | yes |
 | 2.2 | Proto additions for M2 | M2 | proto | S2, 1.20 | S | rust,proto,full | no |
 | 2.3 | mkit-attest: Keccak-256, EIP-191, secp256k1 recovery, address derivation | M2 | crypto | S2 | M | rust,wasm,sec,golden | no |
-| 2.4 | mkit-attest: grant and epoch statement codec plus the ed25519 scheme | M2 | crypto | S2 | L | rust,wasm,golden | no |
+| 2.4a | mkit-attest: grant and epoch statement codec plus the ed25519 scheme | M2 | crypto | S2 | L | rust,wasm,golden | no | (split, see briefs/WP-2.4.md)
+| 2.4b | mkit-attest: grant and epoch statement codec plus the ed25519 scheme | M2 | crypto | 2.4a | L | rust,wasm,golden | no | (split)
 | 2.5 | mkit-attest: secp256k1-eip191 and webauthn-p256 owner schemes | M2 | crypto | 2.3, 2.4 | M | rust,wasm,golden | no |
 | 2.6 | Server: grant-based write authorization, 0x namespaces, error-code alignment | M2 | core | 2.5, 2.2 | L | rust,conf-native,conf-wrangler,wasm | no |
 | 2.7 | Server: ref scopes, packmap coverage and the delete flag | M2 | core | 2.6 | M | rust,conf-native | no |
