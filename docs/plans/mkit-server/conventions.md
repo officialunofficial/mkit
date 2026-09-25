@@ -86,6 +86,5 @@ Don't close or comment on #1087; the user does that once S1–S3 have merged.
 An adversarial Opus reviewer checks each diff against the brief, the PRD, the specs and the invariants. Every finding is
 verified against the code before it is applied. The orchestrator squash-merges into `feat/mkit-server` after the
 reviewer's APPROVE and its own local gate re-run on the rebased branch. There is no CI on the branch; CI runs only on
-the final PR to `main`, which the user merges. Spec PRs (S1–S3, 3.6, 4.4, 4.11, 5.1a–c) also need the user's approval
-of the normative text. See [`00-plan.md`](00-plan.md) §1
+the final PR to `main`, which the user merges. The three rebuilt spec PRs (S1–S3) also need the user's approval of the normative text before the orchestrator merges them. Every other spec PR (3.6, 4.4, 4.11, 5.1a–c) merges like code, on local gates plus a clean adversarial review. See [`00-plan.md`](00-plan.md) §1
 for the full merge rules (proto changes, file-overlap ordering, milestone boundaries).
