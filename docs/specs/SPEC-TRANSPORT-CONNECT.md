@@ -173,13 +173,13 @@ headers or a bearer token. The response MAY be cached with
 | `part_size` | The part size for resumable uploads (§7.6): a power of two, at least 8 MiB. |
 | `max_parts` | The largest number of parts in one upload (§7.6). |
 | `max_list_refs_page_size` | The largest number of refs one `ListRefs` page returns (§7.9). |
-| `begin_upload_threshold_bytes` | Packs smaller than this MAY skip `BeginUpload` (§7.6). It is `0` when `admission` is true. The value when admission is off is deployment-defined. |
+| `begin_upload_threshold_bytes` | Packs smaller than this MAY skip `BeginUpload` (§7.6). It is `0` on every multi-repository deployment and whenever `admission` is true. On a single-repository deployment without admission, the value is deployment-defined. |
 | `atomic_advance` | Whether `AdvanceRefs` commits the head and packmap atomically (§4). |
 | `indexed_mode` | Whether the deployment decodes and verifies pushed packs before refs move. |
 | `admission` | Whether the deployment runs an admission step that can challenge a write (§5.1, forthcoming). |
 | `receipt_public_key`, `receipt_key_id` | The key that signs storage receipts, and its key id. Empty until storage receipts are specified. |
 | `grant_schemes` | The owner signature schemes the deployment accepts on write grants (SPEC-WRITE-GRANTS, forthcoming). Empty until that document lands. |
-| `namespace_policy` | `allowlist`, `any`, or `single-repository` (§7.5). |
+| `namespace_policy` | `allowlist`, `any`, or `single-repository` (§7.5). `single-repository` is advertised, never configured. |
 | `index_fanout` | The fixed object-id-prefix fan-out of the deployment's repository index (§7.9). The default is 4096. |
 
 A client MUST NOT assume atomic advance without `atomic_advance = true`
@@ -290,7 +290,7 @@ maps onto a standard Connect code:
 | `TransportError` | Connect code | Raised by |
 |---|---|---|
 | `PackNotFound` | `not_found` | `DownloadPack` before any chunk is sent; `PackExists` never raises this (it returns `exists = false` instead). |
-| `AccessDenied` | `permission_denied` | Any RPC, when the deployment's write or namespace policy (§7.5) rejects an authenticated caller, or a ticket does not bind to the request (§7.6). |
+| `AccessDenied` | `permission_denied`; a client also maps `unauthenticated` to `AccessDenied`. | Any RPC, when the deployment's write or namespace policy (§7.5) rejects an authenticated caller, or a ticket does not bind to the request (§7.6). |
 | `RefConflict` | `failed_precondition` | `UpdateRef` on a CAS mismatch, including deletion of an absent ref (§7.8). `AdvanceRefs` reports its conflicts as typed outcomes (§4), never as this error. |
 | `InvalidRef` | `invalid_argument` | Any RPC taking a ref name that fails SPEC-REFS §3. |
 | `ConnectionFailed` | *(not server-raised &mdash; client-observed transport failure, for example TCP reset, deadline exceeded)* | &mdash; |
@@ -299,7 +299,7 @@ maps onto a standard Connect code:
 | `ProtocolError` | `invalid_argument` | A client-streaming call whose `header` is missing, arrives after a `chunk`, or whose declared/received byte counts disagree (§6). |
 | `PayloadTooLarge` | `resource_exhausted` | `UploadPack` header `total_bytes` (or the observed stream length) exceeds the server's cap. |
 | `InsecureScheme` | *(not applicable &mdash; URL-scheme concern, handled client-side before any RPC is made; see SPEC-TRANSPORT §3)* | &mdash; |
-| `RemoteError(String)` | `unknown` (server-raised, deployment-specific advisory failure with no more specific code applies) &mdash; also the client-side **default** target for any Connect code this table does not otherwise list (`internal`, `aborted`, `unauthenticated`, …), matching the variant's existing "catch-all" contract in `protocol.rs`. | A deployment-specific backend failure that does not fit any row above. |
+| `RemoteError(String)` | `unknown` (server-raised, deployment-specific advisory failure with no more specific code applies) &mdash; also the client-side **default** target for any Connect code this table does not otherwise list (`internal`, `aborted`, …), matching the variant's existing "catch-all" contract in `protocol.rs`. | A deployment-specific backend failure that does not fit any row above. |
 
 A conforming client's Connect-to-`TransportError` mapping is the
 mechanical inverse of this table, with `RemoteError(String)` as the
@@ -309,25 +309,29 @@ is total in both directions, never a partial match. `is_retryable`
 `unavailable` and `resource_exhausted` are retryable, everything else
 is not.
 
-Authentication, authorization, addressing, and ticket failures map to
-these codes. The `Condition` column is what the server observed; the
-client-side mapping is the table above, unchanged.
+Authentication, authorization, addressing, ticket, and storage
+failures map to these codes. The `Condition` column is what the server
+observed. A v2 client maps `failed_precondition` on `BeginUpload`,
+`UploadPart`, `CompleteUpload`, a ticketed `UploadPack`, or an
+`AdvanceRefs` carrying `ticket_ids` to a ticket failure, which it
+resolves by calling `BeginUpload` again, never to `RefConflict`.
 
 | Condition | Connect code |
 |---|---|
-| On an RPC that requires auth v2: a missing, malformed, or expired envelope, a bad signature, or an `X-Repository` that differs from the signed `<repository>` (§7.4) | `unauthenticated` |
+| On an RPC that requires auth v2: a missing, malformed, or expired envelope, a bad signature, a missing `X-Repository`, or an `X-Repository` that differs from the signed `<repository>` (§7.4) | `unauthenticated` |
 | An authenticated principal that the namespace or write policy does not authorize (§7.5) | `permission_denied` |
 | A ticket whose audience, repository, signer, `pack_id`, or byte count differs from the request (§7.6) | `permission_denied` |
-| A malformed repository identity, or a missing `X-Repository` on a multi-repository deployment (§7.4) | `invalid_argument` |
+| A malformed repository identity, or a missing `X-Repository` on an unsigned RPC to a multi-repository deployment (§7.4) | `invalid_argument` |
 | A read RPC on a repository that does not exist (§7.4) | `not_found` |
-| An expired or unknown ticket, or a ticket presented to an advance of a ref it does not name (§7.6) | `failed_precondition` |
+| An expired, unknown, or missing ticket, or a ticket presented to an advance of a ref it does not name (§7.6) | `failed_precondition` |
 | A part whose subtree hash or length differs from its commitment, or a completion whose merged root or total differs from the ticket (§7.6) | `invalid_argument` |
 | A pack still under verification in indexed mode (§7.6) | `unavailable` |
+| A missed commit deadline (`NotAfter`), a full shard, or outbox backpressure. Nothing commits, and a retry with the same nonce is safe. | `unavailable`, never `resource_exhausted` |
 
-`failed_precondition` is a CAS conflict only on `UpdateRef`. On
-`BeginUpload`, `UploadPart`, `CompleteUpload`, `UploadPack`, and
-`AdvanceRefs` it is a ticket failure (§7.6), which a client MUST NOT
-treat as a ref conflict. No ticket failure is `resource_exhausted`,
+`failed_precondition` is a CAS conflict only on `UpdateRef`. On the
+RPCs above, and on an `UploadPack` that needed a ticket and carried
+none, it is a ticket failure (§7.6), which a client MUST NOT treat as a
+ref conflict. No ticket failure is `resource_exhausted`,
 because clients retry that code on the backoff ladder.
 
 ---
@@ -507,7 +511,8 @@ including requests whose results remain cached. Missing or unsupported auth
 versions MUST fail closed.
 
 A valid signature alone is insufficient replay protection. Each service MUST
-persist an admitted operation's nonce reservation scoped to
+persist, for every admitted operation except the replay-exempt uploads of
+§7.6 (`UploadPart` and a ticketed `UploadPack`), a nonce reservation scoped to
 audience/repository/signer, together with the full authenticated operation
 fingerprint. Reusing a nonce for a
 different operation MUST fail. Same-operation retries MUST return the saved
@@ -668,20 +673,22 @@ hexadecimal digits, `/`, and a 100-byte name). That fits within the
 **Carriage.** A client MUST send the `X-Repository` header on every
 repository RPC, read or write. `GetServerInfo` (§2.1) is the one
 exception: it MAY carry the header. A server treats a request without
-the header as the deployment kind below requires. On a signed write, `X-Repository` MUST equal the
-signed `<repository>` field byte for byte. Envelope verification
+the header as the deployment kind below requires. On a signed write,
+`X-Repository` MUST equal the signed `<repository>` field byte for
+byte. Envelope verification
 detects a mismatch, so a mismatch is `unauthenticated`. Host, path, and
 forwarded headers MUST NOT select the repository.
 
 **Single-repository deployments.** The deployment configures exactly
 one repository identity. It MAY be a bare name. A request without
-`X-Repository` resolves to that identity. A request that carries any
+`X-Repository` resolves to that identity on unsigned RPCs; a signed
+write without `X-Repository` is `unauthenticated` (§7.1). A request that carries any
 other well-formed identity is `not_found`. The §7.1 reference Worker is
 a single-repository deployment.
 
 **Multi-repository deployments.** The deployment routes each RPC by
-`X-Repository`. A missing header and a bare name are both
-`invalid_argument`, because only the `namespace "/" name` form is
+`X-Repository`. A missing header on an unsigned RPC and a bare name
+are both `invalid_argument`, because only the `namespace "/" name` form is
 valid here. A read RPC on a repository that does not exist is
 `not_found`, the same as a missing pack or ref.
 
@@ -715,7 +722,7 @@ and the frozen `mkit.rpc.v1.ssh` protocol is untouched.
 ### 7.5 Namespace and write policy
 
 A deployment applies a namespace policy and a write policy to every
-signed write. Together they decide whether an authenticated principal
+signed write except the part path (§7.6). Together they decide whether an authenticated principal
 may write to the repository in `X-Repository`.
 
 **Namespace policy.** `namespace_policy` is one of:
@@ -733,7 +740,9 @@ may write to the repository in `X-Repository`.
   implementation).
 
 A single-repository deployment advertises `single-repository` in
-`GetServerInfo` (§2.1).
+`GetServerInfo` (§2.1). `single-repository` is advertised, never
+configured; it tells a client that bare names and a missing
+`X-Repository` are accepted.
 
 **Write policy.** `write_policy` is one of:
 
@@ -812,7 +821,8 @@ The part's commitment is:
 part:<ticket>:<index>:<subtree-hash>:<len>
 ```
 
-`<ticket>` is the ticket id. `<index>` is the zero-based part index in
+`<ticket>` is the ticket id. A ticket id is 64 lowercase hexadecimal
+digits. `<index>` is the zero-based part index in
 decimal. `<subtree-hash>` is the part's BLAKE3 subtree chaining value
 as 64 lowercase hexadecimal digits. `<len>` is the part's byte count in
 decimal. The signed headers commit to the whole part before the client
@@ -823,7 +833,15 @@ of at least 8 MiB. The last part holds the rest and is not empty. An
 upload has at most `max_parts` parts (§2.1). Part `i` covers pack bytes
 from `i × part_size`. Its subtree hash is the BLAKE3 chaining value of
 those bytes as a non-root subtree at that offset, so the server can
-merge the part hashes into the pack's root hash.
+merge the part hashes into the pack's root hash. Parts merge by
+BLAKE3's left-balanced tree rule.
+
+For `UploadPart`, the header's token ticket id and index MUST equal the
+commitment's `<ticket>` and `<index>`, and `<len>` MUST equal
+`part_size` for every part but the last.
+
+Golden vectors (informative): they land with WP-1.3
+([SPEC-CONVENTIONS §5](SPEC-CONVENTIONS.md#5-golden-vectors-and-conformance-tests)).
 
 The server verifies the ticket token and the commitment before it reads
 any data. It hashes the data as it streams it to storage and MUST NOT
@@ -834,6 +852,14 @@ that binds the ticket id, index, subtree hash, length, and the storage
 backend's tag for the part. A part needs no admission decision, because
 admission happened at `BeginUpload`. Sending a part index again is
 idempotent.
+
+**Part path.** `UploadPart` and a ticketed `UploadPack` form the part
+path. They record no replay entry. They are idempotent by content, so
+the server checks only the validity window, the ticket token, and the
+commitment. The part path does not run the Authorizer; authority is
+checked at `BeginUpload` and again inside the `AdvanceRefs` apply, so a
+revocation between them leaves only unreferenced bytes, reclaimed at
+ticket expiry.
 
 **Completion.** `CompleteUpload{ticket_token, receipts[]}` is a unary,
 signed write with a `body:` commitment. The server verifies every
@@ -852,14 +878,17 @@ the same ticket. The server offers no listing of received parts.
 `UploadPack` with the ticket token in its header and the usual `pack:`
 commitment. It sends no `part:` commitment and no `CompleteUpload`.
 
-**Threshold.** Packs smaller than `begin_upload_threshold_bytes`
-(§2.1) MAY skip `BeginUpload` and use `UploadPack` without a ticket.
-When the deployment runs admission, the threshold is 0 and every upload
-needs a ticket.
+**Threshold.** A multi-repository deployment MUST advertise
+`begin_upload_threshold_bytes = 0`: every upload needs a ticket, so
+membership is always recorded in a ref shard. On a single-repository
+deployment, packs under the threshold MAY skip `BeginUpload`; a stored
+pack is a member. When the deployment runs admission, the threshold is
+0. An upload that needs a ticket and carries none is
+`failed_precondition`.
 
-**Membership.** A pack becomes a member of the repository only at an
-`AdvanceRefs` apply. For a ticketed pack, that is the apply that
-consumes its ticket. `AdvanceRefs` gains a repeated `ticket_ids` field
+**Membership.** On a multi-repository deployment, a pack becomes a
+member of the repository only at the `AdvanceRefs` apply that consumes
+its ticket. `AdvanceRefs` gains a repeated `ticket_ids` field
 naming the tickets it consumes. A ticket can be consumed only by an
 advance of the ref it names; any other advance is `failed_precondition`.
 A head-only `UpdateRef` consumes no tickets. Packlist nodes (`MKPL`) are
@@ -934,7 +963,9 @@ consistent shards (§7.1). This section states what a client can rely
 on.
 
 **Strong.** `ReadRef` of a specific ref is strongly consistent, and so
-is every write. Push compare-and-swap MUST use `ReadRef`.
+is every write. Push compare-and-swap MUST use `ReadRef`. A deployment
+MUST NOT serve `ReadRef` from a snapshot to a client that may push;
+until signed reads exist it cannot tell writers apart.
 
 **Eventual.** `ListRefs` and pack membership (`PackExists`,
 `DownloadPack`, and `AlreadyPresent` from `BeginUpload`) are eventually
@@ -942,8 +973,10 @@ consistent. They may lag a write by seconds. A lag MUST only cause one
 of these:
 
 - a re-upload, because `AlreadyPresent` was not returned;
-- a retryable `unavailable` ("not yet visible"); or
-- an older listing.
+- a retryable `unavailable` ("not yet visible");
+- an older listing; or
+- `not_found` (or `exists = false`) for a pack when the request carried
+  no `X-Mkit-Ref`.
 
 A lag never exposes another repository's data and never acts as an
 existence oracle (§7.4).
