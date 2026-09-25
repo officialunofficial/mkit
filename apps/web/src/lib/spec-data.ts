@@ -126,7 +126,7 @@ export const categories: SpecCategory[] = [
         name: 'SPEC-TRANSPORT-CONNECT',
         status: 'draft-normative',
         description:
-          'The mkit.transport.v1 Connect service, the canonical remote protocol behind mkit+https: proto shape, verb-to-trait mapping, compare-and-swap semantics, and streaming pack transfer.',
+          'The mkit.transport.v1 Connect service, the canonical remote protocol behind mkit+https: multi-repository addressing, namespace and write policy, compare-and-swap semantics, and resumable, ticketed pack uploads.',
       },
       {
         name: 'SPEC-TRANSPORT-ENC',
