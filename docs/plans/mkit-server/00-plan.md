@@ -20,6 +20,14 @@ optimize for scalability". The `feat/scoped-workspaces` coordination notes were 
 
 ---
 
+
+### CI policy (authoritative; supersedes any CI-on-branch wording in this plan)
+
+- **No CI runs for `feat/mkit-server`.** Nothing changes GitHub workflow triggers, Cloud Build triggers or rulesets to cover the branch. WP-P0 (CI enablement) is **dropped**: PR #1094 was closed unmerged.
+- A PR into `feat/mkit-server` merges on two things only: the **executor's local gate run**, whose output goes in the PR body, and a clean **adversarial review**. The orchestrator re-runs the gate after rebasing and before squash-merging.
+- **CI runs once**, on the final PR that merges `feat/mkit-server` into `main` (WP-REL). All normal `main` gates apply there.
+- A WP that adds CI wiring (new jobs, `server-staging.yml`, workflow changes) may add it, but it must trigger only on `main`, `workflow_dispatch` or `schedule`, never on the feature branch. During the epic the same checks run **locally or against staging from the orchestrator's machine**, at the WP and at every milestone boundary, and the results go in the PR or the milestone report.
+
 ## 1. Pipeline
 
 **Roles and models.** One orchestrator session. Executors and reviewers run on **Opus** (user model policy: never Fable
@@ -28,7 +36,7 @@ to a scratchpad file and hands over the path; executors don't poll CI and don't 
 handles CI checks and comments).
 
 **Worktrees and branches.** Every executor works in its own git worktree (Agent `isolation: "worktree"`), based on
-`feat/mkit-server` (P0 alone targets `main`). Branch: `mkit-server/wp-<id>-<slug>`, id lowercased with dots as dashes
+`feat/mkit-server`. Branch: `mkit-server/wp-<id>-<slug>`, id lowercased with dots as dashes
 (`mkit-server/wp-m0-02-storage-traits`, `mkit-server/wp-1-22-shard-model`, `mkit-server/wp-4-10a-content-index-shards`,
 `mkit-server/wp-rel-0-5-release`). Stacked spec PRs (S2, S3 on S1) retarget to `feat/mkit-server` once the parent merges.
 
@@ -92,8 +100,8 @@ Sizes: S ≲ 400, M 400–900, L 900–1500 changed lines.
 
 | id | title | milestone | track | depends-on | size | area gates | human action? |
 |---|---|---|---|---|---|---|---|
-| P0 | Enable CI on feat/mkit-server (PR to main) | P | prep | — | S | ci-yaml | yes |
-| P1 | Create feat/mkit-server and land docs/plans/mkit-server | P | prep | P0 | S | docs | yes |
+| P0 | ~~Enable CI on feat/mkit-server (PR to main)~~ **dropped** (CI policy; #1094 closed) | P | prep | — | S | — | no |
+| P1 | Create feat/mkit-server and land docs/plans/mkit-server (merged, #1093) | P | prep | — | S | docs | yes |
 | S1 | SPEC-TRANSPORT-CONNECT v2: addressing, policies, GetServerInfo, upload tickets and parts, ref deletion, consistency (#1084, #1090) | S | spec | P1 | L | docs | yes |
 | S2 | SPEC-WRITE-GRANTS v1 with signed reads, private repos, URL tokens and epoch leases (#1085, #1089) | S | spec | S1 | L | docs | yes |
 | S3 | Admission challenges spec: 402, helper headers and allowlist, replay-after-auth, per-RPC lifecycle (#1086) | S | spec | S1 | M | docs | yes |
@@ -508,8 +516,8 @@ ContentIndex/export/hooks → M0-02b, unary pipeline → M0-05a, streaming/fault
 
 | When | WP | Action | Who / needs |
 |---|---|---|---|
-| Before P1 | P0 | Update the 5 Cloud Build PR triggers (`mkit-ci-pr`, `mkit-codegen-pr`, `mkit-security-pr`, `mkit-docs-pr`, `mkit-geiger-pr`) to base regex `^(main\|feat/mkit-server)$` (gcloud describe → edit → import, commands in the P0 PR); optionally add `*-feat` push triggers; verify `_BASE_BRANCH` substitution on the first feature-branch PR | GCP project admin |
-| Before P1 | P0 | GitHub ruleset for `feat/mkit-server`: required checks (`ci-gate`, `workers-gate`, `proto-gate`, `web-gate`, `third-party-notices-gate`, buf, Cloud Build), no force-push, squash-only | Repo admin |
+| Before P1 | P0 | ~~Cloud Build PR triggers~~: dropped (no CI on the feature branch) | — |
+| Before P1 | P0 | ~~GitHub ruleset for `feat/mkit-server`~~: dropped (no CI on the feature branch) | — |
 | P1 | P1 | Confirm the checks appear on a throwaway PR | Orchestrator + user |
 | Specs | S1, S2, S3, 3.6, 4.4, 4.11, 5.1a, 5.1b, 5.1c | Approve the normative text; close #1087 with the credit comment when S1–S3 have merged | User |
 | Before M0-16 | M0-16 | Confirm the Cloudflare account is on **Workers Paid** (10 GB SQLite per Durable Object, CPU configurable to 5 min, 10,000 subrequests per invocation); the plan's limits assume it (Free caps DOs at 1 GB) | Cloudflare account admin |

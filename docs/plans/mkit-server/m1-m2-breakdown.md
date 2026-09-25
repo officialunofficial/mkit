@@ -498,7 +498,7 @@ Folded into WP-S1 §7.6/§7.8/§7.9 (adopted Q18 default). Every former dependen
 ### WP-1.20 CI: conformance and e2e against staging (M1 exit)
 
 - **Depends on:** WP-1.19, WP-1.27, WP-1.13, WP-1.15.
-- **Goal:** `.github/workflows/server-staging.yml` (schedule, `workflow_dispatch`, pushes to `feat/mkit-server`):
+- **Goal:** `.github/workflows/server-staging.yml` (schedule, `workflow_dispatch`, and `main` only, per the CI policy; during the epic the orchestrator runs the same suite locally against staging at each milestone boundary):
   optional deploy (secret-gated), the full wire suite (M0+M1 cases, including throughput and lag windows) against
   the **deployed** staging URL, and `scripts/staging-roundtrip.sh` (real `mkit` init/commit/push/clone/verify),
   unique repo per run.

@@ -4,9 +4,16 @@ Shared rules for every work package (WP) of the mkit-server epic ([Linear MKIT-2
 Your brief (`briefs/WP-<id>.md`) is the spec for your WP. Where a brief and [`00-plan.md`](00-plan.md) disagree, `00-plan.md`
 wins. The PRD snapshot is [`prd-snapshot.md`](prd-snapshot.md); Linear is canonical.
 
+## CI policy (authoritative; supersedes any CI-on-branch wording in this plan)
+
+- **No CI runs for `feat/mkit-server`.** Nothing changes GitHub workflow triggers, Cloud Build triggers or rulesets to cover the branch. WP-P0 (CI enablement) is **dropped**: PR #1094 was closed unmerged.
+- A PR into `feat/mkit-server` merges on two things only: the **executor's local gate run**, whose output goes in the PR body, and a clean **adversarial review**. The orchestrator re-runs the gate after rebasing and before squash-merging.
+- **CI runs once**, on the final PR that merges `feat/mkit-server` into `main` (WP-REL). All normal `main` gates apply there.
+- A WP that adds CI wiring (new jobs, `server-staging.yml`, workflow changes) may add it, but it must trigger only on `main`, `workflow_dispatch` or `schedule`, never on the feature branch. During the epic the same checks run **locally or against staging from the orchestrator's machine**, at the WP and at every milestone boundary, and the results go in the PR or the milestone report.
+
 ## Base branch
 
-- Every WP branches from and targets **`feat/mkit-server`**. The one exception is WP-P0 (CI enablement), which targets `main`.
+- Every WP branches from and targets **`feat/mkit-server`**.
 - Start from a fresh fetch: `git fetch origin && git switch -c <branch> origin/feat/mkit-server`.
 - Stacked spec PRs (S2 on S1, S3 on S2) retarget to `feat/mkit-server` once their parent merges.
 - Nothing is released from `feat/mkit-server`. Crates publish and the workspace version moves to 0.5 only at WP-REL.

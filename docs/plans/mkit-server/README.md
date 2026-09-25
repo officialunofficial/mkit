@@ -18,13 +18,10 @@ The implementation plan for the production mkit server epic. The canonical PRD i
 
 ## Branch and PR conventions
 
-- Integration branch: **`feat/mkit-server`**, cut from `main` at `db0b826b`. Every WP targets it, except WP-P0, which targets
-  `main`.
+- Integration branch: **`feat/mkit-server`**, cut from `main` at `db0b826b`. Every WP targets it.
 - One PR per WP. Branch `mkit-server/wp-<id>-<slug>` (id lowercased, dots as dashes).
 - The per-PR gate, commit trailer and the other executor rules are in [`conventions.md`](conventions.md).
-- **CI on the branch:** CI for PRs against `feat/mkit-server` activates once WP-P0 (the CI enablement PR) merges to `main`
-  and `main` is merged into `feat/mkit-server`. Until then, PRs against the branch get no required checks, and the
-  executor's local gate run is the only evidence.
+- **No CI on the branch** (see the CI policy in [`conventions.md`](conventions.md)): local gates plus an adversarial review per PR. CI runs only on the final PR to `main`. WP-P0 is dropped.
 
 ## Linear tracking
 
@@ -68,8 +65,8 @@ Split and dropped WPs keep their briefs for the record: [WP-M0-02](briefs/WP-M0-
 
 | WP | Group | Title | Plan | PR | State |
 |---|---|---|---|---|---|
-| P0 | G01 | Enable CI on feat/mkit-server (PR to main) | [brief](briefs/WP-P0.md) | | PR to `main`, not merged |
-| P1 | G01 | Create feat/mkit-server and land docs/plans/mkit-server | [brief](briefs/WP-P1.md) | | this PR |
+| P0 | G01 | Enable CI on feat/mkit-server (PR to main) | [brief](briefs/WP-P0.md) | [#1094](https://github.com/officialunofficial/mkit/pull/1094) | **dropped** (no CI on the branch) |
+| P1 | G01 | Create feat/mkit-server and land docs/plans/mkit-server | [brief](briefs/WP-P1.md) | [#1093](https://github.com/officialunofficial/mkit/pull/1093) | this PR |
 | S1 | G02 | SPEC-TRANSPORT-CONNECT v2: addressing, policies, GetServerInfo, upload tickets and parts, ref deletion, consistency (#1084, #1090) | [brief](briefs/WP-S1.md) | | planned |
 | S2 | G02 | SPEC-WRITE-GRANTS v1 with signed reads, private repos, URL tokens and epoch leases (#1085, #1089) | [brief](briefs/WP-S2.md) | | planned |
 | S3 | G02 | Admission challenges spec: 402, helper headers and allowlist, replay-after-auth, per-RPC lifecycle (#1086) | [brief](briefs/WP-S3.md) | | planned |
