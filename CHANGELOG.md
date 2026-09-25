@@ -38,6 +38,13 @@ train).
   model and a `Metrics` facade. Builds for native and `wasm32`; first
   published with 0.5.
 
+- *(server)* `mkit-server` storage contract core: the key-level
+  `NamespaceStore` (one declarative `Batch` of `Absent`/`Present`/`Equals`
+  preconditions and a `NotAfter` deadline on the backend's own clock, plus
+  puts and deletes; get/has/get_many/ordered scan), the key-layout
+  registry, and the in-memory `MemoryKv` reference backend behind the
+  `memory` feature. No SQL required of a backend.
+
 - *(core)* Closure verification now has a pull-based
   `ObjectSource`/`verify_closure_streaming` API and a native
   `verify_closure_store` helper. `ClosureReport` gains the additive

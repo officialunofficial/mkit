@@ -12,9 +12,22 @@ use std::borrow::Cow;
 
 use mkit_core::hash::Hash;
 use mkit_core::refs::RefWriteCondition;
-pub use mkit_core::refs::{validate_ref_name, validate_ref_prefix};
+pub use mkit_core::refs::validate_ref_prefix;
 
 use crate::error::{Code, ServerError};
+
+/// Longest ref name the server accepts, in bytes. It bounds every ref key
+/// (`store::keys`) below `MAX_KEY_BYTES`, with room for the longest repo
+/// name; `store::keys` asserts that at compile time.
+pub const MAX_REF_NAME_BYTES: usize = 512;
+
+/// Validate a ref name: the SPEC-REFS §3 grammar
+/// ([`mkit_core::refs::validate_ref_name`]) and at most
+/// [`MAX_REF_NAME_BYTES`] bytes.
+#[must_use]
+pub fn validate_ref_name(name: &str) -> bool {
+    name.len() <= MAX_REF_NAME_BYTES && mkit_core::refs::validate_ref_name(name)
+}
 
 /// A CAS expectation as its wire number, aligned with
 /// `mkit.transport.v1.RefExpectation`. The numbers are load-bearing and match
@@ -527,6 +540,9 @@ mod tests {
     fn ref_name_validation_is_mkit_core() {
         assert!(validate_ref_name("refs/heads/main"));
         assert!(!validate_ref_name("refs/heads/../main"));
+        let longest = format!("refs/heads/{}", "a".repeat(MAX_REF_NAME_BYTES - 11));
+        assert!(validate_ref_name(&longest));
+        assert!(!validate_ref_name(&format!("{longest}a")));
         assert!(validate_ref_prefix(""));
         assert!(validate_ref_prefix("refs/heads/"));
         assert!(!validate_ref_prefix("/"));

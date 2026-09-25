@@ -35,6 +35,11 @@ bytes = "1"
 futures-core = "0.3"
 tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
 
+[features]
+# In-memory reference backends (`MemoryKv`): the template for third-party
+# backends. Always compiled for this crate's own unit tests.
+memory = []
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # `send_wrap` on wasm32: lets a `!Send` handler future satisfy the `+ Send`
 # bound the generated connectrpc traits require (PRD §5.2).
