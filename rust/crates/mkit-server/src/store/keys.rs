@@ -24,9 +24,11 @@
 //! that adds it: tickets `t`, membership `m`, outbox `o` / `oq` / `os`,
 //! outbox backlog counter `oc`, relay high-water marks `rh`, object index
 //! `i`, leases `l`, published pointers `pp`, tombstones `tb`, verification
-//! cursors `vc`, epoch lease `el`, the coordinator's shard registry `sr`
-//! (WP-1.22; see `Partition`), and the `ContentIndex` classes `h`, `g`,
-//! `b`, `c`. A new row adds its layout here, with a golden test.
+//! cursors `vc`, epoch lease `el`, the coordinator's repo registry
+//! [`TAG_REPO_REGISTRY`] and the deployment's namespace list
+//! [`TAG_NAMESPACE_LIST`] (WP-1.22; see `Partition` for enumeration), and
+//! the `ContentIndex` classes `h`, `g`, `b`, `c`. A new row adds its layout
+//! here, with a golden test.
 
 use bytes::{BufMut, Bytes, BytesMut};
 use mkit_core::hash::Hash;
@@ -60,9 +62,35 @@ pub const TAG_GRANT_EPOCH: &str = "e";
 /// Timer tag (layout reserved for WP-1.24).
 pub const TAG_TIMER: &str = "w";
 
+/// Repo registry tag (reserved; WP-1.22 lays it out): one row per repo of
+/// the namespace, in its `Coordinator` partition. Bounded by repos, not
+/// refs.
+pub const TAG_REPO_REGISTRY: &str = "rr";
+/// Namespace list tag (reserved; WP-1.22 lays it out): the deployment's
+/// namespaces, needed only under `namespace_policy = any`. A backend MAY
+/// keep this list in its own metadata instead.
+pub const TAG_NAMESPACE_LIST: &str = "nl";
+
 /// Tags whose layouts later work packages add. No M0 key uses them.
 pub const RESERVED_TAGS: &[&str] = &[
-    "t", "tb", "m", "o", "oq", "os", "oc", "rh", "i", "l", "pp", "vc", "el", "sr", "h", "g", "b",
+    "t",
+    "tb",
+    "m",
+    "o",
+    "oq",
+    "os",
+    "oc",
+    "rh",
+    "i",
+    "l",
+    "pp",
+    "vc",
+    "el",
+    TAG_REPO_REGISTRY,
+    TAG_NAMESPACE_LIST,
+    "h",
+    "g",
+    "b",
     "c",
 ];
 
@@ -344,6 +372,14 @@ mod tests {
             assert_eq!(key.as_bytes(), golden.as_slice());
         }
         assert_eq!(LAYOUT_VERSION, 1);
+        // Reserved enumeration classes: their scan ranges are pinned now.
+        for (tag, start, end) in [
+            (TAG_REPO_REGISTRY, &b"rr\0"[..], &b"rr\x01"[..]),
+            (TAG_NAMESPACE_LIST, b"nl\0", b"nl\x01"),
+        ] {
+            let (s, e) = class_range(tag);
+            assert_eq!((s.as_bytes(), e.as_bytes()), (start, end));
+        }
     }
 
     #[test]

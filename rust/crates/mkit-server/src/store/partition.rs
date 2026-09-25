@@ -18,11 +18,22 @@ use crate::repo::{NamespaceKey, RepoName};
 /// encodings never change; a new kind gets a new tag.
 ///
 /// **Enumeration.** A store is never asked to list its partitions (a
-/// Durable Object namespace cannot list its instances). The core knows
-/// them: in single-partition mode the deployment's `Namespace` partitions
-/// come from its configuration; under D34 the namespace coordinator keeps
-/// a registry of every shard it has created (reserved key class `sr`,
-/// laid out by WP-1.22). Backup and export walk that registry.
+/// Durable Object namespace cannot list its instances). Backup and export
+/// enumerate them hierarchically, from bounded or constructible structures
+/// only; nothing lists every ref shard in one place (one ref per file can
+/// mean millions of them):
+/// 1. **Namespaces** (`Namespace` in single-partition mode, `Coordinator`
+///    under D34) come from deployment configuration and the namespace
+///    allowlist. Under `namespace_policy = any` the deployment keeps a
+///    namespace list (reserved key class `nl`, `store::keys`); a backend
+///    MAY keep it in its own metadata instead.
+/// 2. **Repos**: each coordinator keeps a repo registry, one row per repo
+///    of the namespace (reserved key class `rr`; WP-1.22 lays it out).
+/// 3. **Repo index shards** (`RepoIndex`, `RefIndex`) are enumerable by
+///    construction: their object-id-prefix and ref-name-hash fan-outs are
+///    fixed deployment constants.
+/// 4. **Ref shards** are found by scanning each repo's `RefIndex` shards.
+/// 5. **Content shards** are enumerable by construction (`INDEX_FANOUT`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[non_exhaustive]
 pub enum Partition {
@@ -31,8 +42,8 @@ pub enum Partition {
     /// good; not by D34-sharded deployments.
     Namespace(NamespaceKey),
     /// D34 (M1): the namespace coordinator: config, the grant epoch, the
-    /// table of currently epoch-leased shards and the shard registry.
-    /// Rarely written.
+    /// table of currently epoch-leased shards (bounded by active shards)
+    /// and the repo registry. Rarely written.
     Coordinator(NamespaceKey),
     /// D34 (M1): one per (repo, ref). A branch's head and packmap share it
     /// (`shard_ref` is the `refs/heads/<x>` name). Strongly consistent.
