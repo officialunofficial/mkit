@@ -6,7 +6,12 @@
 //! stage, in order: `identify` (stage 1), `replay_lookup` (the stage 0
 //! lookup), `authorize` (2), `admit` (3), `pre_receive` (5) and
 //! `plan_and_apply` (4 and 6, one batch). Receipts (7) and outcomes (8)
-//! land in M3/M5.
+//! land in M3/M5. The streaming procedures are [`Pipeline::begin_upload`]
+//! ([`UploadSession`]) and [`Pipeline::download`] ([`DownloadStream`]).
+//!
+//! With the `test-faults` feature, `Pipeline::with_faults` installs
+//! `FaultHooks` and [`Pipeline::authenticate`] reads per-request
+//! `TestDirectives`; without it none of that exists in the binary.
 //!
 //! Behavior equals today's servers: `mkit serve --http` (`Bearer`/`Open`:
 //! no replay or quota, packmap-then-head on a non-atomic store),
@@ -14,11 +19,15 @@
 //! advance) and `mkit serve` over ssh (`TransportIdentity`).
 
 mod auth;
+mod download;
+#[cfg(feature = "test-faults")]
+mod faults;
 mod hooks;
 mod plan;
 mod shard;
 #[cfg(test)]
 mod tests;
+mod upload;
 
 use core::future::Future;
 use core::time::Duration;
@@ -46,16 +55,34 @@ use crate::telemetry::{METRIC_LATENCY, METRIC_REQUESTS, Metrics, Redactor};
 use crate::upload::UploadLimits;
 
 pub use auth::{AuthMode, Authenticated, RequestMeta};
+pub use download::{DownloadChunk, DownloadStream};
+#[cfg(feature = "test-faults")]
+pub use faults::{
+    CLOCK_SKEW_HEADER, FAULT_HEADER, FailOnce, FaultHooks, FaultPoint, TestDirectives,
+};
 pub use hooks::{
     Admission, AdmissionDecision, AdmissionInput, Authorizer, Challenge, DefaultAdmission, HookSet,
     Hooks, NoOutcomes, NoPreReceive, NoReceipts, OpenAuthorizer, OutboxRow, OutcomeSink,
     PreReceive, ReceiptSigner,
 };
 use plan::{
-    MAX_REPLAN, PRUNE_LIMIT, Plan, PlanClock, Planned, ReplayGuard, Snapshot, WriteKind,
-    WriteRequest, plan_write, prune_sampled,
+    MAX_REPLAN, PRUNE_LIMIT, Plan, PlanClock, Planned, Snapshot, WriteKind, WriteRequest,
+    plan_write, prune_sampled,
 };
 pub use shard::{ShardMap, SinglePartition};
+pub use upload::{UploadMode, UploadSession};
+
+/// Call the installed fault hooks at a fault point, returning early on
+/// their error. Compiled out without `test-faults`.
+macro_rules! fault {
+    ($pipe:expr, $point:ident, $op:expr, $a:expr) => {
+        #[cfg(feature = "test-faults")]
+        $pipe
+            .fault($crate::pipeline::FaultPoint::$point, $op, $a)
+            .await?
+    };
+}
+pub(crate) use fault;
 
 /// Default bound from planning a batch to its commit (00-plan P-21,
 /// SPEC-WRITE-GRANTS §5.5). It MUST exceed the clock skew between the
@@ -164,6 +191,8 @@ pub struct Pipeline<B, N, H = Hooks> {
     cfg: PipelineConfig,
     clock: Arc<dyn Clock>,
     metrics: Arc<dyn Metrics>,
+    #[cfg(feature = "test-faults")]
+    faults: Option<Arc<dyn faults::DynFaultHooks>>,
 }
 
 impl<B, N, H> core::fmt::Debug for Pipeline<B, N, H> {
@@ -265,7 +294,30 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             cfg,
             clock,
             metrics,
+            #[cfg(feature = "test-faults")]
+            faults: None,
         })
+    }
+
+    /// Install test fault hooks (feature `test-faults` only).
+    #[cfg(feature = "test-faults")]
+    #[must_use]
+    pub fn with_faults(mut self, hooks: impl FaultHooks + 'static) -> Self {
+        self.faults = Some(Arc::new(hooks));
+        self
+    }
+
+    #[cfg(feature = "test-faults")]
+    async fn fault(
+        &self,
+        point: FaultPoint,
+        op: &Operation,
+        a: &Authenticated,
+    ) -> Result<(), ServerError> {
+        match &self.faults {
+            Some(hooks) => hooks.at_boxed(point, op, a.test_directives()).await,
+            None => Ok(()),
+        }
     }
 
     /// Route partitions with `shards` instead of [`SinglePartition`].
@@ -277,13 +329,27 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
 
     /// Stages 0a and 1: verify credentials and map the identity. Pure and
     /// synchronous; writes no state. The result is bound to
-    /// `meta.procedure`.
+    /// `meta.procedure`. Under `test-faults` it also reads the request's
+    /// test directives: the clock skew shifts business time, including the
+    /// auth v2 validity window, for this request only.
     ///
     /// # Errors
-    /// `unauthenticated` for missing or invalid credentials.
+    /// `unauthenticated` for missing or invalid credentials;
+    /// `invalid_argument` for a malformed test directive.
     pub fn authenticate(&self, meta: &RequestMeta<'_>) -> Result<Authenticated, ServerError> {
         tracing::debug!(stage = "authenticate", procedure = method(meta.procedure));
-        auth::authenticate(&self.cfg.auth, meta, self.clock.now_ms())
+        #[cfg(feature = "test-faults")]
+        let directives = TestDirectives::from_headers(meta.header)?;
+        #[cfg(feature = "test-faults")]
+        let skew = directives.clock_skew_ms;
+        #[cfg(not(feature = "test-faults"))]
+        let skew = 0;
+        let now = self.clock.now_ms().saturating_add(skew);
+        let mut a = auth::authenticate(&self.cfg.auth, meta, now)?;
+        a.business_skew_ms = skew;
+        #[cfg(feature = "test-faults")]
+        a.set_test_directives(directives);
+        Ok(a)
     }
 
     /// Every ref of the repository whose name starts with `prefix`, with
@@ -413,6 +479,47 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         .await
     }
 
+    /// Stages 0–3 of an `UploadPack` whose header declared `pack_id` and
+    /// `total_bytes` (`None` when absent): framing, the signed `pack:`
+    /// commitment, the replay lookup, authorization, admission and, for a
+    /// new signed operation, the reservation. Nothing is read from the
+    /// stream before it returns.
+    ///
+    /// # Errors
+    /// The header's [`crate::upload::UploadError`]; `unauthenticated` when
+    /// the header differs from the signed commitment; a stored or
+    /// in-flight replay answer; a hook's error; the reservation's error.
+    pub async fn begin_upload(
+        &self,
+        a: &Authenticated,
+        pack_id: Option<&[u8]>,
+        total_bytes: Option<u64>,
+    ) -> Result<UploadSession<'_, B, N, H>, ServerError> {
+        UploadSession::begin(self, a, pack_id, total_bytes).await
+    }
+
+    /// A pack's bytes as chunks of at most `download_chunk_max` bytes.
+    ///
+    /// # Errors
+    /// `not_found` for a missing pack, before any chunk; the authorizer's
+    /// error; `internal` for a storage failure.
+    pub async fn download(
+        &self,
+        a: &Authenticated,
+        key: PackKey,
+    ) -> Result<DownloadStream, ServerError> {
+        self.observe(a, async {
+            let op = self.identify(a, OpKind::DownloadPack { key })?;
+            self.authorize(&op).await?;
+            let body = self.blobs.get(&key, None).await;
+            match body.map_err(|e| store_error(StorageOp::BlobGet, e))? {
+                Some(body) => Ok(DownloadStream::new(body, self.cfg.download_chunk_max)),
+                None => Err(ServerError::not_found("pack not found")),
+            }
+        })
+        .await
+    }
+
     /// Probe both stores.
     pub async fn health(&self) -> HealthStatus {
         HealthStatus {
@@ -455,21 +562,38 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         a: &Authenticated,
         fut: impl Future<Output = Result<T, ServerError>>,
     ) -> Result<T, ServerError> {
-        let procedure = method(a.procedure());
+        let span = self.rpc_span(a);
+        let start = self.clock.now_ms();
+        let result = fut.instrument(span.clone()).await;
+        self.record(a.procedure(), &span, start, result.as_ref().map(|_| ()));
+        result
+    }
+
+    /// The span around one request.
+    fn rpc_span(&self, a: &Authenticated) -> tracing::Span {
         let repo = match &self.cfg.addressing {
             Addressing::Single { repo } => repo.name.as_str(),
         };
-        let span = tracing::info_span!(
+        tracing::info_span!(
             "mkit.server.rpc",
-            procedure,
+            procedure = method(a.procedure()),
             repo,
             principal = a.principal.kind()
-        );
-        let start = self.clock.now_ms();
-        let result = fut.instrument(span.clone()).await;
-        let code = result.as_ref().err().map_or("ok", |e| e.code().as_str());
-        span.in_scope(|| match &result {
-            Ok(_) => tracing::debug!(code, "rpc done"),
+        )
+    }
+
+    /// A request's outcome log and metrics, once per request.
+    fn record(
+        &self,
+        procedure: Procedure,
+        span: &tracing::Span,
+        start: i64,
+        result: Result<(), &ServerError>,
+    ) {
+        let procedure = method(procedure);
+        let code = result.err().map_or("ok", |e| e.code().as_str());
+        span.in_scope(|| match result {
+            Ok(()) => tracing::debug!(code, "rpc done"),
             Err(e) => {
                 let headers: Vec<_> = e
                     .headers()
@@ -490,7 +614,6 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             &[("procedure", procedure)],
             f64::from(elapsed),
         );
-        result
     }
 
     /// A signed or unsigned unary write, stage by stage. In steady state
@@ -498,17 +621,18 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// hook runs (the replay record and the snapshot) and one `apply`.
     async fn write(&self, a: &Authenticated, kind: OpKind) -> Result<StoredResult, ServerError> {
         let mut op = self.identify(a, kind)?;
+        fault!(self, AfterAuthenticate, &op, a);
         let (kind, refs, p) = self.ref_writes(&op)?;
         let ahead = self.read_ahead(&op, &p, &refs).await?;
         if let Some(stored) = Self::replay_lookup(&op, ahead.as_ref())? {
             return Ok(stored);
         }
         op.authz = self.authorize(&op).await?;
-        let charges = self.admit(&op).await?;
+        fault!(self, AfterAuthorize, &op, a);
+        let charges = self.admit(AdmissionInput::new(&op)).await?;
         self.pre_receive(&op).await?;
         let write = (kind, refs.as_slice(), charges.as_slice());
-        self.plan_and_apply(&op, &p, write, a.business_skew_ms, ahead)
-            .await
+        self.plan_and_apply(&op, a, &p, write, ahead).await
     }
 
     /// Stage 1: the typed operation, for the procedure `a` was
@@ -634,9 +758,8 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
 
     /// Stage 3. A challenge is `permission_denied` "admission required" in
     /// M0 (the 402 response lands in M3); nothing is written for it.
-    async fn admit(&self, op: &Operation) -> Result<Vec<QuotaCharge>, ServerError> {
+    async fn admit(&self, mut input: AdmissionInput<'_>) -> Result<Vec<QuotaCharge>, ServerError> {
         tracing::debug!(stage = "admission");
-        let mut input = AdmissionInput::new(op);
         input.write_quota = self.cfg.write_quota;
         match self.hooks.admission().admit(&input).await? {
             AdmissionDecision::Allow { charges, .. } => Ok(charges),
@@ -658,17 +781,13 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     async fn plan_and_apply(
         &self,
         op: &Operation,
+        a: &Authenticated,
         p: &Partition,
         (kind, refs, charges): (WriteKind, &[RefUpdate], &[QuotaCharge]),
-        skew_ms: i64,
         ahead: Option<Snapshot>,
     ) -> Result<StoredResult, ServerError> {
         let caps = self.meta.capabilities();
-        let replay = op.auth.as_ref().map(|auth| ReplayGuard {
-            scope: auth.replay_scope,
-            fingerprint: auth.fingerprint,
-            expires_at_ms: auth.expires_at_ms,
-        });
+        let replay = upload::replay_guard(op);
         let mut req = WriteRequest {
             repo: &op.repo.name,
             kind,
@@ -678,17 +797,14 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             grant: op.authz.grant,
             layout_version: caps.implicit_layout_version.is_none(),
         };
-        if caps.atomic_multi_key {
-            return self.apply_loop(p, &req, skew_ms, ahead).await;
-        }
-        if replay.is_some() || !charges.is_empty() {
-            return Err(internal("replay and quota need atomic multi-key batches"));
+        if caps.atomic_multi_key || replay.is_some() || !charges.is_empty() {
+            return self.apply_atomic(op, a, p, &req, ahead).await;
         }
         // `Transport::advance_refs`'s default: packmap first, then head.
         req.kind = WriteKind::UpdateRef;
         for (i, update) in refs.iter().enumerate() {
             req.refs = core::slice::from_ref(update);
-            let result = self.apply_loop(p, &req, skew_ms, None).await?;
+            let result = self.apply_loop(op, a, p, &req, None).await?;
             if let StoredResult::UpdateRef(UpdateRefResult::Conflict { .. }) = result {
                 if kind == WriteKind::UpdateRef {
                     return Ok(result);
@@ -702,8 +818,24 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         }
         Ok(match kind {
             WriteKind::UpdateRef => StoredResult::UpdateRef(UpdateRefResult::Committed),
-            WriteKind::AdvanceRefs => StoredResult::AdvanceRefs(AdvanceOutcome::Committed),
+            _ => StoredResult::AdvanceRefs(AdvanceOutcome::Committed),
         })
+    }
+
+    /// [`Self::apply_loop`] on a store with atomic multi-key batches, which
+    /// replay records and quota need.
+    async fn apply_atomic(
+        &self,
+        op: &Operation,
+        a: &Authenticated,
+        p: &Partition,
+        req: &WriteRequest<'_>,
+        ahead: Option<Snapshot>,
+    ) -> Result<StoredResult, ServerError> {
+        if !self.meta.capabilities().atomic_multi_key {
+            return Err(internal("replay and quota need atomic multi-key batches"));
+        }
+        self.apply_loop(op, a, p, req, ahead).await
     }
 
     /// The bounded optimistic loop: read, plan, apply. The first attempt
@@ -714,11 +846,15 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// failed commit, then `unavailable` (SPEC-WRITE-GRANTS §5.5).
     async fn apply_loop(
         &self,
+        op: &Operation,
+        a: &Authenticated,
         p: &Partition,
         req: &WriteRequest<'_>,
-        skew_ms: i64,
         mut ahead: Option<Snapshot>,
     ) -> Result<StoredResult, ServerError> {
+        #[cfg(not(feature = "test-faults"))]
+        let _ = op;
+        let skew_ms = a.business_skew_ms;
         let (mut replans, mut deadline_missed, mut prune_ok) = (0, false, true);
         loop {
             let clock = self.plan_clock(skew_ms, req);
@@ -736,6 +872,9 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 prune,
                 prune_from,
             } = plan;
+            if req.kind != WriteKind::UploadReserve {
+                fault!(self, BeforeFinalApply, op, a);
+            }
             tracing::debug!(stage = "apply", replans);
             match self.meta.apply(p, batch).await {
                 Ok(BatchOutcome::Committed) => return Ok(on_commit),

@@ -70,9 +70,11 @@ pub struct Authenticated {
     /// The verified auth v2 authorization of a signed request.
     pub auth: Option<VerifiedAuth>,
     procedure: Procedure,
-    /// Added to the business clock for this request only: the M0-05b test
-    /// directive. Never feeds a commit deadline.
+    /// Added to the business clock for this request only: the test
+    /// clock-skew directive. Never feeds a commit deadline.
     pub(crate) business_skew_ms: i64,
+    #[cfg(feature = "test-faults")]
+    directives: super::TestDirectives,
 }
 
 impl Authenticated {
@@ -81,6 +83,18 @@ impl Authenticated {
     #[must_use]
     pub fn procedure(&self) -> Procedure {
         self.procedure
+    }
+
+    /// The request's test directives (feature `test-faults` only).
+    #[cfg(feature = "test-faults")]
+    #[must_use]
+    pub fn test_directives(&self) -> &super::TestDirectives {
+        &self.directives
+    }
+
+    #[cfg(feature = "test-faults")]
+    pub(crate) fn set_test_directives(&mut self, directives: super::TestDirectives) {
+        self.directives = directives;
     }
 }
 
@@ -129,6 +143,8 @@ pub(crate) fn authenticate(
         auth,
         procedure,
         business_skew_ms: 0,
+        #[cfg(feature = "test-faults")]
+        directives: super::TestDirectives::default(),
     })
 }
 

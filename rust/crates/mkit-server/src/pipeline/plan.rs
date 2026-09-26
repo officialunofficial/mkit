@@ -17,7 +17,9 @@ use crate::error::ServerError;
 use crate::op::{GrantRef, RefUpdate};
 use crate::quota::{QuotaCharge, QuotaDecision, evaluate_quota};
 use crate::refs::{CasDecision, evaluate_condition};
-use crate::replay::{ReplayRecord, ReplayState, StoredResult, UpdateRefResult};
+use crate::replay::{
+    ReplayDecision, ReplayRecord, ReplayState, StoredResult, UpdateRefResult, classify,
+};
 use crate::repo::RepoName;
 use crate::storage_error::{StorageOp, describe_and_map};
 use crate::store::keys::{self, LAYOUT_VERSION, ParsedKey};
@@ -83,6 +85,12 @@ pub(crate) enum WriteKind {
     UpdateRef,
     /// Packmap and head, in one batch.
     AdvanceRefs,
+    /// An `UploadPack` reservation: the replay record `InFlight { resumable:
+    /// true }` and the quota charge, before any chunk is read.
+    UploadReserve,
+    /// An `UploadPack` commit: the in-flight record becomes
+    /// `Committed(UploadPack)`, guarded by `Equals` on the record read.
+    UploadCommit,
 }
 
 /// The replay record a signed write commits with its effects.
@@ -131,6 +139,9 @@ impl WriteRequest<'_> {
         }
         out.extend(self.charges.iter().map(|c| keys::quota(&c.scope)));
         out.extend(self.refs.iter().map(|r| keys::ref_key(self.repo, &r.name)));
+        if let (WriteKind::UploadCommit, Some(replay)) = (self.kind, self.replay) {
+            out.push(keys::replay(&replay.scope));
+        }
         out
     }
 }
@@ -248,6 +259,7 @@ pub(crate) fn plan_write(
     let on_commit = outcome.unwrap_or(match req.kind {
         WriteKind::UpdateRef => StoredResult::UpdateRef(UpdateRefResult::Committed),
         WriteKind::AdvanceRefs => StoredResult::AdvanceRefs(AdvanceOutcome::Committed),
+        WriteKind::UploadReserve | WriteKind::UploadCommit => StoredResult::UploadPack,
     });
     if conflict && req.replay.is_none() && req.charges.is_empty() {
         return Ok(Planned::Done(on_commit));
@@ -256,23 +268,18 @@ pub(crate) fn plan_write(
         puts.extend(ref_puts);
     }
 
-    let mut replay_index = None;
-    if let Some(replay) = req.replay {
-        let record = ReplayRecord {
-            fingerprint: replay.fingerprint,
-            expires_at_ms: replay.expires_at_ms,
-            state: ReplayState::Committed(on_commit.clone()),
-        };
-        let key = keys::replay(&replay.scope);
-        replay_index = Some(pre.len());
-        pre.push(Precondition::Absent(key.clone()));
-        puts.push(Write::Put(key, codec::encode_replay_record(&record)));
-        let expires = u64::try_from(replay.expires_at_ms).unwrap_or(0);
-        puts.push(Write::Put(
-            keys::replay_expiry(expires, &replay.scope),
-            Value::default(),
-        ));
-    }
+    let replay_index = match req.replay {
+        Some(replay) => {
+            let index = pre.len();
+            if let Some(done) =
+                plan_replay(req.kind, replay, snap, &on_commit, &mut pre, &mut puts)?
+            {
+                return Ok(Planned::Done(done));
+            }
+            Some(index)
+        }
+        None => None,
+    };
 
     let budget = MAX_BATCH_OPS.saturating_sub(pre.len() + puts.len());
     let prune = plan_prune(req, snap, &deadline, budget)?;
@@ -294,6 +301,63 @@ pub(crate) fn plan_write(
         prune,
         prune_from,
     }))
+}
+
+/// The replay record's guard and writes. A new record is guarded
+/// `Absent`, written with its expiry index; an upload's commit guards the
+/// in-flight record it read with `Equals`. `Some(result)` when an upload
+/// being committed already committed: nothing to write.
+fn plan_replay(
+    kind: WriteKind,
+    replay: ReplayGuard,
+    snap: &Snapshot,
+    on_commit: &StoredResult,
+    pre: &mut Vec<Precondition>,
+    puts: &mut Vec<Write>,
+) -> Result<Option<StoredResult>, ServerError> {
+    let key = keys::replay(&replay.scope);
+    let state = match kind {
+        WriteKind::UploadReserve => ReplayState::InFlight { resumable: true },
+        _ => ReplayState::Committed(on_commit.clone()),
+    };
+    let record = ReplayRecord {
+        fingerprint: replay.fingerprint,
+        expires_at_ms: replay.expires_at_ms,
+        state,
+    };
+    if kind == WriteKind::UploadCommit {
+        let stored = snap.get(&key);
+        let decoded = stored.map(codec::decode_replay_record).transpose();
+        match (
+            classify(decoded.map_err(corrupt)?.as_ref(), &replay.fingerprint),
+            stored,
+        ) {
+            (ReplayDecision::Resume, Some(value)) => {
+                pre.push(Precondition::Equals(key.clone(), value.clone()));
+            }
+            (ReplayDecision::Return(result), _) => return Ok(Some(result)),
+            (ReplayDecision::FingerprintMismatch, _) => {
+                return Err(ServerError::invalid_argument(
+                    "nonce reused for a different operation",
+                ));
+            }
+            _ => {
+                return Err(ServerError::aborted_retryable(
+                    "upload reservation lost; retry",
+                ));
+            }
+        }
+        puts.push(Write::Put(key, codec::encode_replay_record(&record)));
+        return Ok(None);
+    }
+    pre.push(Precondition::Absent(key.clone()));
+    puts.push(Write::Put(key, codec::encode_replay_record(&record)));
+    let expires = u64::try_from(replay.expires_at_ms).unwrap_or(0);
+    puts.push(Write::Put(
+        keys::replay_expiry(expires, &replay.scope),
+        Value::default(),
+    ));
+    Ok(None)
 }
 
 /// `Equals` on the value `key` held, or `Absent`.
@@ -374,9 +438,8 @@ fn decide_refs(
                     (WriteKind::AdvanceRefs, 0) => {
                         StoredResult::AdvanceRefs(AdvanceOutcome::PackmapConflict)
                     }
-                    (WriteKind::AdvanceRefs, _) => {
-                        StoredResult::AdvanceRefs(AdvanceOutcome::HeadConflict)
-                    }
+                    // Uploads write no refs.
+                    _ => StoredResult::AdvanceRefs(AdvanceOutcome::HeadConflict),
                 };
                 return Ok((Some(result), Vec::new()));
             }

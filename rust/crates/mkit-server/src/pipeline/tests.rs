@@ -318,6 +318,19 @@ impl Req {
     ) -> Self {
         let digest = to_hex(&hash(body));
         let commitment = format!("body:{digest}");
+        let mut req = Self::committed(key, procedure, &commitment, nonce, created);
+        req.body = body.to_vec();
+        req.header("x-digest", &digest)
+    }
+
+    /// Signed over `commitment` at `created`, valid for 300 s, no body.
+    fn committed(
+        key: &SigningKey,
+        procedure: Procedure,
+        commitment: &str,
+        nonce: &str,
+        created: i64,
+    ) -> Self {
         let expires = created + 300_000;
         let op = SignedOp {
             context: AuthContext {
@@ -325,7 +338,7 @@ impl Req {
                 repository: REPO,
             },
             procedure: procedure.connect_path(),
-            commitment: &commitment,
+            commitment,
             created_at: created,
             expires_at: expires,
             nonce,
@@ -337,15 +350,14 @@ impl Req {
             ("x-repository", REPO.to_owned()),
             ("x-public-key", to_hex(key.verifying_key().as_bytes())),
             ("x-signature", to_hex_bytes(&signature.to_bytes())),
-            ("x-digest", digest),
-            ("x-content-commitment", commitment),
+            ("x-content-commitment", commitment.to_owned()),
             ("x-created-at", created.to_string()),
             ("x-expires-at", expires.to_string()),
             ("idempotency-key", nonce.to_owned()),
         ];
         Self {
             procedure,
-            body: body.to_vec(),
+            body: Vec::new(),
             headers,
             principal: None,
         }
@@ -1905,3 +1917,6 @@ fn lost_prune_race_retries_without_prune_uncounted() {
     let kept = now(env.pipe.meta.inner.get(&ns(), &quota)).unwrap();
     assert!(kept.is_some(), "the raced row is not pruned");
 }
+
+#[path = "tests_stream.rs"]
+mod stream;

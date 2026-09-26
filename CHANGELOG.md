@@ -86,6 +86,16 @@ train).
   most 173 bytes; bare names only through `parse_bare_allowed`).
   **SemVer:** additive.
 
+- *(server)* `mkit-server` streaming pipeline: `Pipeline::begin_upload`
+  returns an `UploadSession` (fresh, resume or replay of the signed
+  operation; the replay record is reserved `InFlight { resumable: true }`
+  with the quota charge before any chunk, and committed by a second batch
+  planned with its own `NotAfter` deadline after the stream), and
+  `Pipeline::download` returns a `DownloadStream` of 800 KiB chunks. Both
+  hold at most one chunk. The `test-faults` feature adds `FaultHooks` at
+  five points and per-request `TestDirectives`. **SemVer:** unreleased
+  API.
+
 - *(core)* Resumable-part building blocks (SPEC-TRANSPORT-CONNECT §7.6):
   `write_auth::ContentCommitment` parses and formats `body:`, `pack:` and the
   new `part:<ticket>:<index>:<subtree>:<len>` commitment, and
