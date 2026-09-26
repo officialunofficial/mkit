@@ -17,12 +17,17 @@ resumable cursor. It does **not** resolve deltas and does not store anything. Th
    - §6: no trailing data.
    - **§11 (streaming hook):** a streaming reader verifies the trailer at END of stream, and the caller MUST discard
      everything it staged if that check fails.
-2. **Equivalence with the buffered reader:** for any byte string `P`, the window reader's full run agrees with
-   `PackEntries::new(P)` followed by full iteration:
+2. **Equivalence with the buffered reader** (amended in amendment 1). For any byte string `P`, a full window-reader run
+   with limits that do not bind agrees with `PackEntries::new(P)` followed by full iteration:
    - **Ok ⇔ Ok.** If both succeed, the yielded entries are equal in order and content. `PackEntry::Raw{bytes}` /
      `PackEntry::Delta{base, stream}` are compared by value, with zstd entries decompressed exactly as `PackEntries` does.
    - **Err ⇔ Err.** The error *variant* may differ: `PackEntries` checks the trailer before parsing entries, while the
      streaming reader checks it last (§11). Entries yielded before an `Err` are provisional.
+   - **The one permitted divergence is a resource-limit failure.** The window reader may return `PackfileTooLarge`,
+     from the `limits` budget or from a failed `try_reserve` (B.3), on a pack `PackEntries` accepts, because
+     `PackEntries` has no budget. That is the only case where the window reader may fail while `PackEntries` succeeds.
+   - Differential tests therefore run with `DecodeLimits::default()`, which is at least any test pack's needs. The
+     budget-failure cases are tested separately (Tests 3).
 3. **Module location:**
    - The module is `mkit_core::pack::window`, in the file `rust/crates/mkit-core/src/pack/window.rs`.
    - `src/pack.rs` declares it with a single line, `pub mod window;` (the Rust 2018 non-`mod.rs` layout).
@@ -94,8 +99,11 @@ resumable cursor. It does **not** resolve deltas and does not store anything. Th
 2. **Window geometry:**
    - `window_size` is a power of two in `[64 KiB, 64 MiB]`. Anything else is rejected in `new`, reusing an existing
      `PackError` variant (see B.6).
-   - Window `k` is exactly `offset = k × window_size`, `len = min(window_size, pack_len − offset)`. The last window
-     contains the trailer.
+   - Window `k` is exactly `offset = k × window_size`, `len = min(window_size, pack_len − offset)`.
+   - **The trailer may straddle windows** (amendment 1): the 32 trailer bytes `[pack_len−32, pack_len)` can span the last
+     two windows (e.g. `pack_len = 65,537`, `window_size = 65,536`: the last window holds one byte). The reader
+     accumulates the trailer bytes across windows and compares them at `Done`. Likewise, an entry frame (header or
+     payload) may straddle any number of windows.
    - `feed` MUST reject any (offset, len) other than the outstanding request.
    - `pack_len < 44` gives `PackfileTooShort`.
 3. **Memory bound:**
