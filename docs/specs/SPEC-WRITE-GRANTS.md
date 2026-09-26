@@ -1130,8 +1130,9 @@ document's rules, independently of the Rust code.
   contexts; plus accepted client-data shapes (no `crossOrigin`, extra
   members, escaped member names and values, the user-verified and
   extension flags with extension bytes, a second origin of one relying
-  party, and a `clientDataJSON` nested exactly 64 deep with the largest
-  finite binary64 number).
+  party, and a `clientDataJSON` nested exactly 64 deep with numbers that
+  round to the largest finite binary64 value: `1.7976931348623158e308`
+  and the integer 2^1024 − 2^970 − 1).
 - `reject/verify-secp256k1-*.json`, `reject/verify-webauthn-*.json`:
   signed statements that fail one §4, §4.1, §4.3 or §4.4 rule each,
   re-signed where needed so that only that rule fails: a high-`s`
@@ -1146,7 +1147,8 @@ document's rules, independently of the Rust code.
   `webauthn.create`; another statement's or a padded challenge;
   `crossOrigin` `true` or `"false"`; `topOrigin`; a duplicate member name
   (plain, escaped and nested); an unpaired surrogate; nesting 65 deep; the
-  number `1e400`; a signature by
+  numbers `1e400`, `1.7976931348623159e308` and 2^1024 − 2^970 (each
+  rounds to infinity); a signature by
   another key or over a reserialized `clientDataJSON`; and a byte after
   the fourth blob field.
 

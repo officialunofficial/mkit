@@ -888,9 +888,13 @@ def ecdsa_self_test():
     at_limit = b'{"x":' + b"[" * 62 + b"{}" + b"]" * 62 + b"}"
     over = b'{"x":' + b"[" * 63 + b"{}" + b"]" * 63 + b"}"
     assert client_data(at_limit) is not None and client_data(over) is None
-    for good in (b"1.7976931348623157e308", b"-1e-400", b"1" + b"0" * 300):
+    max_int = str(2**1024 - 2**970 - 1).encode()  # rounds to the largest binary64
+    tie_int = str(2**1024 - 2**970).encode()      # the midpoint: rounds to infinity
+    for good in (b"1.7976931348623157e308", b"1.7976931348623158e308", max_int, b"-1e-400",
+                 b"1" + b"0" * 300):
         assert client_data(b'{"x":' + good + b"}") is not None, good
-    for bad in (b"1e400", b"-1e400", b"1" + b"0" * 400, b"Infinity", b"-Infinity"):
+    for bad in (b"1e400", b"-1e400", b"1" + b"0" * 400, b"1.7976931348623159e308", tie_int,
+                b"Infinity", b"-Infinity"):
         assert client_data(b'{"x":' + bad + b"}") is None, bad
     # Curve membership: (0, 0) -- pycryptodome's point at infinity -- and
     # coordinates >= p are refused before any library sees them.

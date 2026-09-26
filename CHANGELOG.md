@@ -142,7 +142,13 @@ train).
   challenge, `crossOrigin`, no `topOrigin`, signature over the received
   bytes; SPEC-WRITE-GRANTS §4.3 now states the depth and number limits).
   The legacy DSSE helper `verify_webauthn_wrapping_with_policy` is
-  documented as lax and for self-checks only. New `RelyingParty`, `WebAuthnAssertion` and
+  documented as lax and for self-checks only. `mkit-attest` now enables
+  serde_json's `float_roundtrip` feature (correctly rounded number
+  parsing, so a value that rounds to `f64::MAX` is finite); by Cargo
+  feature unification this applies to **every serde_json parse** in a
+  build that includes `mkit-attest` (the CLI, `mkit-wasm`, and more): number
+  parsing changes only in the last bit in rare cases, where it becomes
+  exact, and gets somewhat slower. New `RelyingParty`, `WebAuthnAssertion` and
   `webauthn_challenge`; `OwnerVerified`/`VerifiedEpoch`/
   `VerifiedVisibility::relying_party`. **Breaking (unreleased API):**
   `VerifierConfig::new` and `new_allowing_loopback` take the relying

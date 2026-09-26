@@ -130,6 +130,11 @@ fn p256_infinity_forgery(digest: &[u8; 32]) -> [u8; 64] {
     unreachable!("some small k gives a low s")
 }
 
+/// 2^1024 − 2^970 − 1: the largest integer that rounds to `f64::MAX`.
+const MAX_ROUNDING_INT: &str = "179769313486231580793728971405303415079934132710037826936173778980444968292764750946649017977587207096330286416692887910946555547851940402630657488671505820681908902000708383676273854845817711531764475730270069855571366959622842914819860834936475292719074168444365510704342711559699508093042880177904174497791";
+/// 2^1024 − 2^970: halfway to 2^1024, so it rounds (to even) to infinity.
+const TIE_INT: &str = "179769313486231580793728971405303415079934132710037826936173778980444968292764750946649017977587207096330286416692887910946555547851940402630657488671505820681908902000708383676273854845817711531764475730270069855571366959622842914819860834936475292719074168444365510704342711559699508093042880177904174497792";
+
 fn relying_parties() -> Vec<RelyingParty> {
     vec![
         RelyingParty::new(RP_ID, [ORIGIN, WWW_ORIGIN]).unwrap(),
@@ -660,9 +665,9 @@ fn wa_vectors() -> Vec<Vector> {
             |c, o| {
                 let depth = MAX_CLIENT_DATA_DEPTH - 1;
                 format!(
-                    r#"{{"type":"webauthn.get","challenge":"{c}","origin":"{o}","n":[1.7976931348623157e308,-1e-400,123456789012345678901234567890],"x":{}{{}}{}}}"#,
+                    r#"{{"type":"webauthn.get","challenge":"{c}","origin":"{o}","n":[1.7976931348623157e308,1.7976931348623158e308,-1e-400,123456789012345678901234567890,{MAX_ROUNDING_INT}],"x":{}{{}}{}}}"#,
                     "[".repeat(depth - 1),
-                    "]".repeat(depth - 1)
+                    "]".repeat(depth - 1),
                 )
             },
             accept_only(ns),
@@ -943,6 +948,28 @@ fn wa_rejects() -> Vec<Reject> {
             "§4.3 rule 2: clientDataJSON nests at most 64 deep (here 65: the top-level object is 1)",
             wa.clone(),
             signed_cd(&too_deep),
+            write_ctx(ns),
+            GrantError::ClientData,
+        ),
+        (
+            "verify-webauthn-client-data-number-rounds-to-infinity",
+            "§4.3 rule 2: every number is finite as a correctly rounded IEEE 754 binary64 value \
+             (1.7976931348623159e308 is past the midpoint above f64::MAX, so it rounds to infinity)",
+            wa.clone(),
+            signed_cd(
+                r#"{"type":"webauthn.get","challenge":"CH","origin":"OR","x":1.7976931348623159e308}"#,
+            ),
+            write_ctx(ns),
+            GrantError::ClientData,
+        ),
+        (
+            "verify-webauthn-client-data-integer-rounds-to-infinity",
+            "§4.3 rule 2: every number is finite as a correctly rounded IEEE 754 binary64 value \
+             (the integer 2^1024 - 2^970 is the midpoint and rounds to even, to infinity)",
+            wa.clone(),
+            signed_cd(&format!(
+                r#"{{"type":"webauthn.get","challenge":"CH","origin":"OR","x":{TIE_INT}}}"#
+            )),
             write_ctx(ns),
             GrantError::ClientData,
         ),
