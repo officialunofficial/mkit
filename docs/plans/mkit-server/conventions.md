@@ -44,6 +44,9 @@ export TMPDIR="$HOME/.cache/mkit-test-tmp"; mkdir -p "$TMPDIR"   # never macOS /
 # Area gates when touched (all from the repo root):
 #   proto:   buf lint && buf breaking --against '.git#branch=origin/feat/mkit-server'
 #   specs / wasm:  just ci-scripts
+#   wasm32 clippy of a workspace crate: always `-p <crate> --no-deps` (mkit-core has wasm32-only
+#            clippy lints of its own that a dependent crate's gate must not inherit):
+#            ( cd rust && cargo clippy --locked -p mkit-server --no-deps --target wasm32-unknown-unknown -- -D warnings )
 #   apps/* workers: (cd apps/<w> && cargo fmt --check && cargo clippy --all-targets -- -D warnings \
 #                    && cargo clippy --target wasm32-unknown-unknown -- -D warnings \
 #                    && cargo test --lib && cargo build --target wasm32-unknown-unknown)
@@ -55,6 +58,32 @@ export TMPDIR="$HOME/.cache/mkit-test-tmp"; mkdir -p "$TMPDIR"   # never macOS /
 # From M0-17 on: any change to mkit-server*/mkit-worker-common dependencies also refreshes and commits
 # apps/vcs-worker/Cargo.lock (workers.yml builds without --locked): (cd apps/vcs-worker && cargo check --target wasm32-unknown-unknown)
 ```
+
+## Build hygiene (lessons from M0)
+
+- **Never share a `CARGO_TARGET_DIR` across worktrees.** Leave it unset and use the worktree's own `rust/target`. A shared
+  directory gives false-fresh builds: cargo reuses an artifact another worktree built from different sources, and a gate
+  passes on code that is not yours. Save space with `CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0` instead, check
+  `df` before a full build, and remove your worktree right after its PR merges.
+- **Some gates need the repo's own target.** Three `mkit-attest` tests and `just _version-contract` (and `just interop-enc`)
+  look for binaries under `rust/target/`. Another reason never to redirect the target.
+- **Scratch files.** Each executor and each reviewer writes scratch files only under its own
+  `$HOME/.cache/mkit-test-tmp/<wp-id>/` (which is also its `TMPDIR`), never to a shared scratchpad path: one executor's gate
+  script was overwritten by a sibling's.
+- **Size rule.** Count **non-test** changed lines only. Non-test lines should stay ≲ 1500 per PR (the S/M/L sizes of
+  `00-plan.md` §2 apply to them); test-heavy overage is accepted. If you are well over, say so and propose a split.
+- **App lockfiles.** `apps/*/Cargo.lock` are separate workspaces that path-depend on `rust/crates/*`. When a path dependency
+  (for example `mkit-server`) gains or changes a dependency, refresh every affected app lock (`cargo metadata --offline`, or
+  the `cargo check --target wasm32-unknown-unknown` above) and commit it; after a rebase, check that each app still builds
+  with `--locked`.
+- **Load-sensitive slow tests.** These debug-build tests take 10–35 s alone but several times that inside a full parallel
+  run, and time out under a high load average (other executors building):
+  - `mkit-core`: `history::ancestry` scrub tests, `refs::cas_*` races, `batch_write_hash_equals_store_write_hash`;
+  - `mkit-cli`: the packmap `verify_new_object_signatures_*` tests and `branch_rename_commit_race`.
+  Since WP-M0-20, `rust/.config/nextest.toml` gives them a 300 s ceiling and runs `branch_rename_commit_race` with no
+  other test beside it (the measurements are in [the M0 exit report](m0-exit-report.md#6-full-local-ci-just-ci-on-the-quiet-machine)).
+  A timeout in one of them, in a module your WP does not touch, is not a failure of your WP until it also fails **rerun
+  alone** (`cargo nextest run -p <crate> -E 'test(=<name>)'`); report it as load-related only if it passes that way.
 
 **Working directory rule:** every gate command in this plan (here, in `00-plan.md`, and in each brief) is run from the **repo root**. A line that starts with `cd rust && …` or `cd apps/<w> && …` means "in a fresh subshell from the repo root", i.e. `( cd rust && … )`. Never chain a bare `cd` into later root-relative commands. `buf` must run from the root, where `buf.yaml` lives.
 

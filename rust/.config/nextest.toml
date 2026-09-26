@@ -61,13 +61,46 @@ slow-timeout = { period = "300s", terminate-after = 1 }
 # 120s kill envelope under the contention of a full parallel run. Not a
 # hang; give it the same generous per-test ceiling as the other
 # real-timing-dependent suites above.
+#
+# WP-M0-20 (the MKIT-29 M0 exit run, 2026-09-26, a quiet 10-core macOS
+# machine with nothing else building): alone it takes 33s, but inside the
+# full workspace run it was killed at 150s, then at 300s, and took 526s
+# under a 600s ceiling. It calibrates its race delays from one `commit` it
+# times at the start, so a loaded start inflates all 36 rounds. It now runs
+# with no other test beside it (`threads-required`), which keeps it near
+# its standalone time, under a 300s ceiling.
 [[profile.default.overrides]]
 filter = 'binary(branch_rename_commit_race)'
-slow-timeout = { period = "150s", terminate-after = 1 }
+threads-required = "num-test-threads"
+slow-timeout = { period = "300s", terminate-after = 1 }
 
 [[profile.ci.overrides]]
 filter = 'binary(branch_rename_commit_race)'
-slow-timeout = { period = "150s", terminate-after = 1 }
+threads-required = "num-test-threads"
+slow-timeout = { period = "300s", terminate-after = 1 }
+
+# CPU-bound debug-build tests that the suite's own parallelism pushes past
+# the default 60s. Measured in WP-M0-20's quiet-machine runs (10 cores,
+# nothing else building): alone, and inside the full workspace run under a
+# 600s ceiling (where the default 60s killed the ones marked TIMEOUT).
+#   mkit-core history::ancestry scrub/full-walk tests   20-23s alone; 118-122s
+#                                                       in the suite (4 TIMEOUT)
+#   mkit-core refs::cas_* races                         48-62s in the suite
+#   mkit-core batch_write_hash_equals_store_write_hash  8s alone; 90s (TIMEOUT)
+#     (and write_parts_equals_concatenated_write, 41s in the suite)
+#   mkit-cli packmap verify_new_object_signatures_*     11.5s alone; 35-60s
+#                                                       in the suite (1 TIMEOUT)
+# None hangs: each walks, hashes or verifies a large fixture in an
+# unoptimized build and is starved of CPU by the other test threads. Exactly
+# these tests get a 300s ceiling (2.5x the worst measured); every other test
+# keeps the 60s / ci 120s one.
+[[profile.default.overrides]]
+filter = '(package(mkit-core) and (test(/^history::ancestry::tests::/) or test(/^refs::tests::cas_/) or test(=batch::tests::batch_write_hash_equals_store_write_hash) or test(=batch::tests::write_parts_equals_concatenated_write))) or (package(mkit-cli) and test(/^remote_dispatch::packmap::tests::verify_new_object_signatures_/))'
+slow-timeout = { period = "60s", terminate-after = 5 }
+
+[[profile.ci.overrides]]
+filter = '(package(mkit-core) and (test(/^history::ancestry::tests::/) or test(/^refs::tests::cas_/) or test(=batch::tests::batch_write_hash_equals_store_write_hash) or test(=batch::tests::write_parts_equals_concatenated_write))) or (package(mkit-cli) and test(/^remote_dispatch::packmap::tests::verify_new_object_signatures_/))'
+slow-timeout = { period = "60s", terminate-after = 5 }
 
 # The storage suite over the `.mkit`-layout stores makes every write durable
 # (fsync the file, rename, fsync the directory): a few cases apply 1,000-2,000

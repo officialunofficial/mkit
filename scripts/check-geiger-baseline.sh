@@ -69,15 +69,76 @@ EXPECTED_CRATES=(
 
 # Run from the crate that pulls every other first-party crate. mkit-cli
 # depends on every other publishable mkit-* crate except mkit-wasm
-# (Cloudflare Workers builds; lints separately). Two of those deps —
+# (Cloudflare Workers builds; lints separately) and the mkit-server-*
+# adapter crates (the separate `mkit-server` binary). Two of those deps —
 # mkit-transport-enc (enc-transport feature) and mkit-git-bridge
 # (git-bridge feature) — are optional, so they only appear in geiger's
 # output when their feature is enabled; the geiger run below passes
 # --features enc-transport,git-bridge so the ceiling is enforced rather
 # than silently skipped.
-cd "$(dirname "$0")/../rust/crates/mkit-cli"
+#
+# The check fails closed. `cargo geiger` exits non-zero on a normal run
+# ("error: Found N warnings": build-script outputs and data files it
+# cannot scan), so its exit status alone says nothing. Instead the run
+# must print the report table with mkit-cli as its root, and every
+# EXPECTED_CRATES entry must appear in it; otherwise the script prints
+# geiger's stderr and fails. (It used to discard stderr and ignore the
+# exit status, and a missing crate was only a warning, so a geiger that
+# could not build printed nothing and the check passed.)
+#
+# cargo-geiger must be installed (`cargo install cargo-geiger --locked
+# --version 0.13.0`; baked into the CI image). MKIT_SKIP_GEIGER=1 skips
+# the check with a visible warning, for a machine without it; CI never
+# sets it.
+#
+# geiger builds the crate graph itself, with its own flags, so it gets its
+# own target directory (`<target>/geiger`): sharing target/debug with a
+# nextest run in flight rebuilds, and can delete, that run's test binaries.
 
-OUTPUT=$(cargo geiger --quiet --features enc-transport,git-bridge 2>/dev/null || true)
+rust_dir="$(cd "$(dirname "$0")/../rust" && pwd)"
+
+if [ "${MKIT_SKIP_GEIGER:-}" = "1" ]; then
+    printf '::warning::MKIT_SKIP_GEIGER=1: the unsafe-code ceiling was NOT checked.\n'
+    exit 0
+fi
+if ! cargo geiger --version >/dev/null 2>&1; then
+    printf '::error::cargo-geiger is not installed, so the unsafe-code ceiling cannot be checked.\n' >&2
+    printf '   install it: cargo install cargo-geiger --locked --version 0.13.0\n' >&2
+    printf '   (or set MKIT_SKIP_GEIGER=1 to skip the check explicitly).\n' >&2
+    exit 1
+fi
+
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$rust_dir/target}/geiger"
+stderr_file="$(mktemp "${TMPDIR:-/tmp}/geiger-stderr.XXXXXX")"
+trap 'rm -f "$stderr_file"' EXIT
+
+cd "$rust_dir/crates/mkit-cli"
+geiger_status=0
+OUTPUT=$(cargo geiger --quiet --features enc-transport,git-bridge 2>"$stderr_file") ||
+    geiger_status=$?
+
+geiger_failed() {
+    printf '::error::cargo geiger produced no usable report (%s; exit %s). Its stderr, without the per-file scan noise:\n' \
+        "$1" "$geiger_status" >&2
+    grep -v -e '^WARNING: Dependency file was never scanned' -e '^Failed to match' "$stderr_file" |
+        tail -n 30 >&2 || true
+    exit 1
+}
+
+# The report's header row and its root, mkit-cli's own row.
+case "$OUTPUT" in
+    *Functions*Expressions*) ;;
+    *) geiger_failed "no report table" ;;
+esac
+# (A here-string, not a pipe: `grep -q` exits at the first match, and
+# under pipefail the writer's SIGPIPE would fail the pipeline.)
+if ! grep -qE '^[0-9]+/[0-9]+ +[0-9]+/[0-9]+ .* mkit-cli [0-9]+\.[0-9]+\.[0-9]+' <<<"$OUTPUT"; then
+    geiger_failed "no mkit-cli root row"
+fi
+# The only non-zero exit a complete run may have is geiger's warning count.
+if [ "$geiger_status" -ne 0 ] && ! grep -qE '^error: Found [0-9]+ warnings$' "$stderr_file"; then
+    geiger_failed "unexpected error"
+fi
 
 FAIL=0
 SEEN=""
@@ -102,10 +163,18 @@ while IFS= read -r line; do
             # Column 2 is the second whitespace-delimited token.
             counts=$(printf '%s\n' "$line" | awk '{print $2}')
             used="${counts%/*}"
+            case "$used" in
+                '' | *[!0-9]*)
+                    printf '::error::could not read the unsafe-expression count of %s from: %s\n' "$name" "$line"
+                    FAIL=1
+                    continue
+                    ;;
+            esac
 
             ceiling=$(ceiling_for "$name")
             if [ "$ceiling" = "UNKNOWN" ]; then
-                printf '::warning::Unknown first-party crate %s (count=%s). Add it to scripts/check-geiger-baseline.sh.\n' "$name" "$used"
+                printf '::error::Unknown first-party crate %s (count=%s). Add it to ceiling_for and EXPECTED_CRATES in scripts/check-geiger-baseline.sh.\n' "$name" "$used"
+                FAIL=1
                 continue
             fi
 
@@ -125,8 +194,14 @@ done <<<"$OUTPUT"
 for name in "${EXPECTED_CRATES[@]}"; do
     case " $SEEN " in
         *" $name "*) ;;
-        *) printf '::warning::Expected %s in geiger output but did not see it. Either the crate was removed or geiger could not reach it.\n' "$name" ;;
+        *)
+            printf '::error::Expected %s in geiger output but did not see it. Either the crate was removed from mkit-cli'"'"'s graph (drop it from EXPECTED_CRATES and ceiling_for) or geiger could not reach it.\n' "$name"
+            FAIL=1
+            ;;
     esac
 done
 
+if [ "$FAIL" -eq 0 ]; then
+    printf 'geiger baseline OK:%s\n' "$SEEN"
+fi
 exit "$FAIL"

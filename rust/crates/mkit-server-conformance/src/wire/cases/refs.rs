@@ -134,7 +134,9 @@ pub(super) async fn invalid_ref_name(ctx: Ctx) -> CaseResult {
 /// SPEC-REFS §2: a server serves only names under `refs/`. A name that
 /// passes the §3 grammar but lies outside `refs/` is `invalid_argument` on
 /// `ReadRef`, `UpdateRef` and either side of `AdvanceRefs`, and nothing is
-/// written.
+/// written: neither the full listing (`ListRefs("")`) nor a listing of each
+/// rejected name's parent shows anything in this case's namespace, so a
+/// server that stores the name and then answers with the error still fails.
 pub(super) async fn non_refs_prefix_rejected(ctx: Ctx) -> CaseResult {
     let ns = ctx.ns();
     let outside = [
@@ -162,7 +164,26 @@ pub(super) async fn non_refs_prefix_rejected(ctx: Ctx) -> CaseResult {
         want_code(resp, INVALID, &format!("AdvanceRefs packmap {name:?}"))?;
     }
     ctx.expect_ref(&head, None).await?;
-    ctx.expect_ref(&packmap, None).await
+    ctx.expect_ref(&packmap, None).await?;
+    // ListRefs prefixes are unrestricted (R-86), so the listings see a
+    // name stored outside `refs/` if the server kept one.
+    let mine = format!("{ns}/");
+    for (name, _) in listing(&ctx, "").await? {
+        ensure!(
+            !name.contains(&mine),
+            "ListRefs \"\": {name:?} was written by a rejected call"
+        );
+    }
+    for name in &outside {
+        let parent = name.strip_suffix("/main").unwrap_or(name);
+        let got = listing(&ctx, parent).await?;
+        ensure!(
+            got.is_empty(),
+            "ListRefs {parent:?}: {:?} was written by a rejected call",
+            got.iter().map(|(n, _)| n).collect::<Vec<_>>()
+        );
+    }
+    Ok(())
 }
 
 /// A valid ref name of exactly `len` bytes under this case's namespace,

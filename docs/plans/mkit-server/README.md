@@ -57,6 +57,22 @@ and one PR per WP. A group is done when all of its WPs have merged.
 | G24 | M5 Lifecycle | M5: takedown, redaction notices, cache purge, admin API, reinstatement | 5.6, 5.7a, 5.7b, 5.9a, 5.9b, 5.10, 5.11a, 5.11b, 5.14 |
 | G25 | Release | M5 exit conformance and final release to main (0.5.0) | 5.13, REL |
 
+## Milestone status
+
+| Milestone | State | Evidence |
+|---|---|---|
+| Prep & Specs | done (P0 dropped) | P1, S1–S3 merged |
+| **M0 Foundation** | **complete**: the 21 other M0 WPs merged, and the exit gate (WP-M0-20) passed on 2026-09-26 | [M0 exit report](m0-exit-report.md) |
+| M1 Addressing & uploads | next; early-start WP 1.3 merged | |
+| M2 Identity | early-start WPs 2.3, 2.4a, 2.4b, 2.5 merged | |
+| M4 Indexed mode | early-start WPs 4.1, 4.2, 4.3 merged | |
+
+M0's exit criteria are permanent gates now: the storage suite per backend and the wire suite (in-process, spawned
+binary and `wrangler dev`), the ssh goldens, `buf breaking`, and the server-free CLI check (`just ci-server`,
+`just ci`, `cloudbuild/ci.yaml` and `workers.yml`, which trigger on `main` only). The open follow-ups carried out of M0
+(WP-REL CI wiring and the 0.5.0 release, M1 paging and multipart, M2 enc-peer grants, and the items for the user) are
+listed in the [exit report](m0-exit-report.md#9-open-follow-ups-not-m0-blockers).
+
 ## Work-package status
 
 The orchestrator updates this table as WPs merge. "Plan" links the brief when one exists, otherwise the milestone breakdown.
@@ -67,33 +83,33 @@ Split and dropped WPs keep their briefs for the record: [WP-M0-02](briefs/WP-M0-
 |---|---|---|---|---|---|
 | P0 | G01 | Enable CI on feat/mkit-server (PR to main) | [brief](briefs/WP-P0.md) | [#1094](https://github.com/officialunofficial/mkit/pull/1094) | **dropped** (no CI on the branch) |
 | P1 | G01 | Create feat/mkit-server and land docs/plans/mkit-server | [brief](briefs/WP-P1.md) | [#1093](https://github.com/officialunofficial/mkit/pull/1093) | merged |
-| S1 | G02 | SPEC-TRANSPORT-CONNECT v2: addressing, policies, GetServerInfo, upload tickets and parts, ref deletion, consistency (#1084, #1090) | [brief](briefs/WP-S1.md) | | planned |
-| S2 | G02 | SPEC-WRITE-GRANTS v1 with signed reads, private repos, URL tokens and epoch leases (#1085, #1089) | [brief](briefs/WP-S2.md) | | planned |
-| S3 | G02 | Admission challenges spec: 402, helper headers and allowlist, replay-after-auth, per-RPC lifecycle (#1086) | [brief](briefs/WP-S3.md) | | planned |
-| M0-01 | G03 | mkit-server crate: core types, errors with response shaping, runtime model, telemetry | [brief](briefs/WP-M0-01.md) | | planned |
-| M0-02a | G03 | Storage contract core: key-level NamespaceStore with NotAfter deadlines, key layouts, codecs, BlobStore trait, replay model, memory backend | [brief](briefs/WP-M0-02a.md) | | planned |
-| M0-02b | G03 | Storage contract layers: ContentIndex over shard partitions, portable export/import, optional StoreMaintenance and StateCommitment hooks | [brief](briefs/WP-M0-02b.md) | | planned |
-| M0-03 | G03 | mkit-server-conformance crate + storage-contract suite (incl. NotAfter, cancellation and crash/restart) | [brief](briefs/WP-M0-03.md) | | planned |
-| M0-04 | G03 | Deduplicated protocol logic: CAS, refs, UploadValidator, download plan, quota math, auth-v2 glue, redaction | [brief](briefs/WP-M0-04.md) | | planned |
-| M0-05a | G04 | Request pipeline core: stage traits, auth modes, ShardMap, pure planners with bounded re-plan and NotAfter deadlines, unary RPC flow | [brief](briefs/WP-M0-05a.md) | | planned |
-| M0-05b | G04 | Request pipeline streaming and faults: UploadSession, DownloadStream, resumable UploadPack, test-fault seam | [brief](briefs/WP-M0-05b.md) | | planned |
-| M0-06 | G04 | connect feature: vendored transport codegen, TransportService over the pipeline, auth interceptor, health | [brief](briefs/WP-M0-06.md) | | planned |
-| M0-07 | G04 | Black-box wire conformance suite + runner binary; baselines vs today's servers | [brief](briefs/WP-M0-07.md) | | planned |
-| M0-08 | G05 | FS stores with the .mkit layout (fs feature): streaming FsBlobStore, refs-only FsLayoutStore | [brief](briefs/WP-M0-08.md) | | planned |
-| M0-09 | G05 | Shared SQL key-value backend SqlKvStore (owned 'static transaction closure, NotAfter, SQLITE_FULL) + mkit-server-native crate with rusqlite | [brief](briefs/WP-M0-09.md) | | planned |
-| M0-10 | G05 | mkit-server-native router, tower layers and the mkit-server binary (FS + SQLite; enables `fs`; sqlite refuses file-ref roots) | [brief](briefs/WP-M0-10.md) | | planned |
-| M0-11 | G05 | S3 BlobStore (native) + in-repo fake S3; S3+SQLite conformance | [brief](briefs/WP-M0-11.md) | | planned |
-| M0-12 | G05 | ssh-frame session binding in mkit-server (ssh feature), transport-agnostic | [brief](briefs/WP-M0-12.md) | | planned |
-| M0-13 | G06 | Port mkit serve (ssh stdio) onto the pipeline; stdio idle timeout; server-free CLI check | [brief](briefs/WP-M0-13.md) | | planned |
-| M0-14 | G05 | Encrypted listener moves into the mkit-server binary | [brief](briefs/WP-M0-14.md) | | planned |
-| M0-15 | G06 | Remove --http/--listen-enc from mkit serve and mkit-transport-connect's server feature; docs | [brief](briefs/WP-M0-15.md) | | planned |
-| M0-16 | G06 | mkit-server-worker: streaming R2 BlobStore (spawn_local put), Durable Object SqlConn, per-partition DO client | [brief](briefs/WP-M0-16.md) | | planned |
-| M0-17 | G06 | Port apps/vcs-worker onto mkit-server-worker (streaming dispatch); wrangler dev conformance job | [brief](briefs/WP-M0-17.md) | | planned |
-| M0-18 | G07 | release.yml: build (separate cargo invocations), sign, SBOM and provenance for mkit-server archives; release-artifact feature check | [brief](briefs/WP-M0-18.md) | | planned |
-| M0-19 | G07 | mkit-server container image (multi-arch, signed, attested) | [brief](briefs/WP-M0-19.md) | | planned |
-| M0-20 | G07 | M0 exit gate: CI wiring, invariants, exit checklist | [brief](briefs/WP-M0-20.md) | | planned |
+| S1 | G02 | SPEC-TRANSPORT-CONNECT v2: addressing, policies, GetServerInfo, upload tickets and parts, ref deletion, consistency (#1084, #1090) | [brief](briefs/WP-S1.md) | [#1096](https://github.com/officialunofficial/mkit/pull/1096) | merged |
+| S2 | G02 | SPEC-WRITE-GRANTS v1 with signed reads, private repos, URL tokens and epoch leases (#1085, #1089) | [brief](briefs/WP-S2.md) | [#1099](https://github.com/officialunofficial/mkit/pull/1099) | merged |
+| S3 | G02 | Admission challenges spec: 402, helper headers and allowlist, replay-after-auth, per-RPC lifecycle (#1086) | [brief](briefs/WP-S3.md) | [#1098](https://github.com/officialunofficial/mkit/pull/1098) | merged |
+| M0-01 | G03 | mkit-server crate: core types, errors with response shaping, runtime model, telemetry | [brief](briefs/WP-M0-01.md) | [#1100](https://github.com/officialunofficial/mkit/pull/1100) | merged |
+| M0-02a | G03 | Storage contract core: key-level NamespaceStore with NotAfter deadlines, key layouts, codecs, BlobStore trait, replay model, memory backend | [brief](briefs/WP-M0-02a.md) | [#1104](https://github.com/officialunofficial/mkit/pull/1104), [#1105](https://github.com/officialunofficial/mkit/pull/1105) | merged |
+| M0-02b | G03 | Storage contract layers: ContentIndex over shard partitions, portable export/import, optional StoreMaintenance and StateCommitment hooks | [brief](briefs/WP-M0-02b.md) | [#1106](https://github.com/officialunofficial/mkit/pull/1106) | merged |
+| M0-03 | G03 | mkit-server-conformance crate + storage-contract suite (incl. NotAfter, cancellation and crash/restart) | [brief](briefs/WP-M0-03.md) | [#1112](https://github.com/officialunofficial/mkit/pull/1112) | merged |
+| M0-04 | G03 | Deduplicated protocol logic: CAS, refs, UploadValidator, download plan, quota math, auth-v2 glue, redaction | [brief](briefs/WP-M0-04.md) | [#1103](https://github.com/officialunofficial/mkit/pull/1103) | merged |
+| M0-05a | G04 | Request pipeline core: stage traits, auth modes, ShardMap, pure planners with bounded re-plan and NotAfter deadlines, unary RPC flow | [brief](briefs/WP-M0-05a.md) | [#1108](https://github.com/officialunofficial/mkit/pull/1108), [#1109](https://github.com/officialunofficial/mkit/pull/1109) | merged |
+| M0-05b | G04 | Request pipeline streaming and faults: UploadSession, DownloadStream, resumable UploadPack, test-fault seam | [brief](briefs/WP-M0-05b.md) | [#1115](https://github.com/officialunofficial/mkit/pull/1115) | merged |
+| M0-06 | G04 | connect feature: vendored transport codegen, TransportService over the pipeline, auth interceptor, health | [brief](briefs/WP-M0-06.md) | [#1121](https://github.com/officialunofficial/mkit/pull/1121) | merged |
+| M0-07 | G04 | Black-box wire conformance suite + runner binary; baselines vs today's servers | [brief](briefs/WP-M0-07.md) | [#1125](https://github.com/officialunofficial/mkit/pull/1125) | merged |
+| M0-08 | G05 | FS stores with the .mkit layout (fs feature): streaming FsBlobStore, refs-only FsLayoutStore | [brief](briefs/WP-M0-08.md) | [#1117](https://github.com/officialunofficial/mkit/pull/1117) | merged |
+| M0-09 | G05 | Shared SQL key-value backend SqlKvStore (owned 'static transaction closure, NotAfter, SQLITE_FULL) + mkit-server-native crate with rusqlite | [brief](briefs/WP-M0-09.md) | [#1118](https://github.com/officialunofficial/mkit/pull/1118) | merged |
+| M0-10 | G05 | mkit-server-native router, tower layers and the mkit-server binary (FS + SQLite; enables `fs`; sqlite refuses file-ref roots) | [brief](briefs/WP-M0-10.md) | [#1126](https://github.com/officialunofficial/mkit/pull/1126) | merged |
+| M0-11 | G05 | S3 BlobStore (native) + in-repo fake S3; S3+SQLite conformance | [brief](briefs/WP-M0-11.md) | [#1128](https://github.com/officialunofficial/mkit/pull/1128) | merged |
+| M0-12 | G05 | ssh-frame session binding in mkit-server (ssh feature), transport-agnostic | [brief](briefs/WP-M0-12.md) | [#1120](https://github.com/officialunofficial/mkit/pull/1120) | merged |
+| M0-13 | G06 | Port mkit serve (ssh stdio) onto the pipeline; stdio idle timeout; server-free CLI check | [brief](briefs/WP-M0-13.md) | [#1133](https://github.com/officialunofficial/mkit/pull/1133) | merged |
+| M0-14 | G05 | Encrypted listener moves into the mkit-server binary | [brief](briefs/WP-M0-14.md) | [#1129](https://github.com/officialunofficial/mkit/pull/1129) | merged |
+| M0-15 | G06 | Remove --http/--listen-enc from mkit serve and mkit-transport-connect's server feature; docs | [brief](briefs/WP-M0-15.md) | [#1132](https://github.com/officialunofficial/mkit/pull/1132) | merged |
+| M0-16 | G06 | mkit-server-worker: streaming R2 BlobStore (spawn_local put), Durable Object SqlConn, per-partition DO client | [brief](briefs/WP-M0-16.md) | [#1124](https://github.com/officialunofficial/mkit/pull/1124) | merged |
+| M0-17 | G06 | Port apps/vcs-worker onto mkit-server-worker (streaming dispatch); wrangler dev conformance job | [brief](briefs/WP-M0-17.md) | [#1127](https://github.com/officialunofficial/mkit/pull/1127) | merged |
+| M0-18 | G07 | release.yml: build (separate cargo invocations), sign, SBOM and provenance for mkit-server archives; release-artifact feature check | [brief](briefs/WP-M0-18.md) | [#1130](https://github.com/officialunofficial/mkit/pull/1130) | merged |
+| M0-19 | G07 | mkit-server container image (multi-arch, signed, attested) | [brief](briefs/WP-M0-19.md) | [#1131](https://github.com/officialunofficial/mkit/pull/1131) | merged |
+| M0-20 | G07 | M0 exit gate: CI wiring, invariants, exit checklist | [brief](briefs/WP-M0-20.md) | | in review (this PR; [M0 exit report](m0-exit-report.md)) |
 | 1.2 | G08 | Proto additions and codegen for M1 | [M1/M2](m1-m2-breakdown.md) | | planned |
-| 1.3 | G08 | mkit-core: part: commitment and BLAKE3 subtree module | [brief](briefs/WP-1.3.md) | | planned |
+| 1.3 | G08 | mkit-core: part: commitment and BLAKE3 subtree module | [brief](briefs/WP-1.3.md) | [#1107](https://github.com/officialunofficial/mkit/pull/1107) | merged |
 | 1.4 | G08 | Core: multi-repo addressing through the pipeline | [M1/M2](m1-m2-breakdown.md) | | planned |
 | 1.22 | G09 | Core: D34 shard model: D34Shards map, namespace coordinator, ref shards | [M1/M2](m1-m2-breakdown.md) | | planned |
 | 1.24 | G09 | Core + adapters: timers (due_at, kind, ref) and alarm multiplexing | [M1/M2](m1-m2-breakdown.md) | | planned |
@@ -121,10 +137,10 @@ Split and dropped WPs keep their briefs for the record: [WP-M0-02](briefs/WP-M0-
 | 1.19 | G12 | Staging vcs-worker deployment config and runbook | [M1/M2](m1-m2-breakdown.md) | | planned |
 | 1.20 | G12 | CI: conformance and e2e against deployed staging (M1 exit) | [M1/M2](m1-m2-breakdown.md) | | planned |
 | 2.2 | G13 | Proto additions for M2 | [M1/M2](m1-m2-breakdown.md) | | planned |
-| 2.3 | G13 | mkit-attest: Keccak-256, EIP-191, secp256k1 recovery, address derivation | [brief](briefs/WP-2.3.md) | | planned |
-| 2.4a | G13 | grant codec, ref scopes, header codec, repository-name grammar | [brief](briefs/WP-2.4.md) | | planned |
-| 2.4b | G13 | epoch/visibility statements, ed25519 scheme, stateless verifier | [brief](briefs/WP-2.4.md) | | planned |
-| 2.5 | G13 | mkit-attest: secp256k1-eip191 and webauthn-p256 owner schemes | [M1/M2](m1-m2-breakdown.md) | | planned |
+| 2.3 | G13 | mkit-attest: Keccak-256, EIP-191, secp256k1 recovery, address derivation | [brief](briefs/WP-2.3.md) | [#1110](https://github.com/officialunofficial/mkit/pull/1110) | merged |
+| 2.4a | G13 | grant codec, ref scopes, header codec, repository-name grammar | [brief](briefs/WP-2.4.md) | [#1114](https://github.com/officialunofficial/mkit/pull/1114) | merged |
+| 2.4b | G13 | epoch/visibility statements, ed25519 scheme, stateless verifier | [brief](briefs/WP-2.4.md) | [#1119](https://github.com/officialunofficial/mkit/pull/1119) | merged |
+| 2.5 | G13 | mkit-attest: secp256k1-eip191 and webauthn-p256 owner schemes | [M1/M2](m1-m2-breakdown.md) | [#1122](https://github.com/officialunofficial/mkit/pull/1122) | merged |
 | 2.6 | G14 | Server: grant-based write authorization, 0x namespaces, error-code alignment | [M1/M2](m1-m2-breakdown.md) | | planned |
 | 2.7 | G14 | Server: ref scopes, packmap coverage and the delete flag | [M1/M2](m1-m2-breakdown.md) | | planned |
 | 2.8 | G14 | Epoch: GetGrantEpoch/SetGrantEpoch over epoch leases; revoke races | [M1/M2](m1-m2-breakdown.md) | | planned |
@@ -149,9 +165,9 @@ Split and dropped WPs keep their briefs for the record: [WP-M0-02](briefs/WP-M0-
 | 3.12 | G18 | Stub MPP hook server and helper; end-to-end tests (M3 exit) | [M3–M5](m3-m5-breakdown.md) | | planned |
 | 3.13 | G18 | Wire conformance: admission, outcomes and backpressure on both adapters and staging | [M3–M5](m3-m5-breakdown.md) | | planned |
 | 3.14 | G17 | Docs: TypeScript mppx reference Worker (documentation only) | [M3–M5](m3-m5-breakdown.md) | | planned |
-| 4.1 | G19 | mkit-core: pack-ruzstd decode feature and dep-graph check | [brief](briefs/WP-4.1.md) | | planned |
-| 4.2 | G19 | mkit-core: repo-isolated delta-base seam and incremental push verification | [brief](briefs/WP-4.2.md) | | planned |
-| 4.3 | G20 | mkit-core: build_disclosure over a generic object source | [brief](briefs/WP-4.3.md) | | planned |
+| 4.1 | G19 | mkit-core: pack-ruzstd decode feature and dep-graph check | [brief](briefs/WP-4.1.md) | [#1116](https://github.com/officialunofficial/mkit/pull/1116) | merged |
+| 4.2 | G19 | mkit-core: repo-isolated delta-base seam and incremental push verification | [brief](briefs/WP-4.2.md) | [#1123](https://github.com/officialunofficial/mkit/pull/1123) | merged |
+| 4.3 | G20 | mkit-core: build_disclosure over a generic object source | [brief](briefs/WP-4.3.md) | [#1113](https://github.com/officialunofficial/mkit/pull/1113) | merged |
 | 4.4 | G19 | Spec: indexed mode, D32 extraction, PendingVerification detail | [M3–M5](m3-m5-breakdown.md) | | planned |
 | 4.5 | G19 | Server: per-repo object index in repo index shards | [M3–M5](m3-m5-breakdown.md) | | planned |
 | 4.6 | G19 | Worker: object index in RepoIndexShard DOs (limits, batching, alerts) | [M3–M5](m3-m5-breakdown.md) | | planned |

@@ -8,7 +8,8 @@
 # these exact commands: docs-lint.yml's check-spec-status.sh,
 # scripts/check-wasm-dep-graph.sh, scripts/check-cli-baseline.sh (the
 # server-free CLI check), `cargo check --target
-# wasm32-unknown-unknown` for mkit-wasm and mkit-server, and
+# wasm32-unknown-unknown` for mkit-wasm and mkit-server, the wasm32 build
+# of mkit-server-worker, and
 # scripts/wasm-ruzstd-check.sh (mkit-core's pack-ruzstd decoder run on
 # wasm32 under node via wasm-pack). The `pack-ruzstd` nextest run in
 # ci-linux / ci-macos is likewise local-only until WP-REL mirrors both
@@ -25,9 +26,14 @@
 #     stays workflow_dispatch-only by design; run it on GitHub, not here).
 #   - web.yml's wasm-pack bundler smoke and bun test/lint/build.
 #
+# Since WP-M0-20, cloudbuild/ci.yaml also runs the dep-graph and
+# CLI-baseline scripts and the mkit-server / mkit-server-worker wasm32
+# builds (its `mkit-server` block).
+#
 # Usage: `just ci` for the host-appropriate subset, or `just ci-linux` /
 # `just ci-macos` / `just ci-security` / `just ci-docs` /
-# `just ci-geiger` / `just ci-scripts` to check one gate in isolation.
+# `just ci-geiger` / `just ci-scripts` / `just ci-server` to check one
+# gate in isolation.
 # Windows is not a supported target (MKIT-6; see docs/INVARIANTS.md), so
 # there is no `just ci-windows`.
 
@@ -143,7 +149,25 @@ ci-scripts:
     fi
     ( cd rust && cargo check -p mkit-wasm --target wasm32-unknown-unknown )
     ( cd rust && cargo check -p mkit-server --target wasm32-unknown-unknown )
+    ( cd rust && cargo build --locked -p mkit-server-worker --target wasm32-unknown-unknown )
     bash scripts/wasm-ruzstd-check.sh
+
+# The MKIT-29 M0 exit gate in one command (WP-M0-20): the mkit-server
+# crates' tests (storage suite per backend, wire suite in-process and over
+# the real binary), the wasm32 builds of the runtime-agnostic core and the
+# Workers adapter, and the server-free CLI check. `just ci` already covers
+# every step (the nextest run is a subset of ci-linux / ci-macos's
+# workspace run; the rest is in ci-scripts), so `ci` does not call this
+# recipe and run the server suites twice. In CI: cloudbuild/ci.yaml's
+# workspace nextest and its mkit-server block (main and PRs to main only).
+ci-server:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ( cd rust && cargo nextest run --locked -p mkit-server -p mkit-server-native \
+        -p mkit-server-conformance -p mkit-server-worker --all-features )
+    ( cd rust && cargo check --locked -p mkit-server --target wasm32-unknown-unknown \
+        && cargo build --locked -p mkit-server-worker --target wasm32-unknown-unknown )
+    bash scripts/check-cli-baseline.sh
 
 # The published mkit-transport-enc 0.4 client (crates.io) against this
 # tree's `mkit-server serve --listen-enc` (contrib/interop/enc-client-0.4).
