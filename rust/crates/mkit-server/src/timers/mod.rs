@@ -267,7 +267,8 @@ pub async fn run_due<S: NamespaceStore>(
                 continue;
             };
             let count = &mut per_kind[usize::from(kind)];
-            if *count >= handler.max_per_tick().unwrap_or(budget.max_per_kind) {
+            // A zero cap would defer the kind forever with no wake.
+            if *count >= handler.max_per_tick().unwrap_or(budget.max_per_kind).max(1) {
                 report.deferred += 1;
                 continue;
             }
@@ -309,9 +310,16 @@ fn next_wake(
     future_due: Option<u64>,
     committed_due: Option<u64>,
 ) -> Option<u64> {
-    let next = if (report.stopped_on_budget || report.deferred > 0) && report.fired > 0 {
+    // A raced row may still be due (its value changed, or the handler's own
+    // precondition failed), so it counts like a deferred or failed timer.
+    let pending = report.deferred > 0 || report.raced > 0;
+    let next = if (report.stopped_on_budget || pending) && report.fired > 0 {
         Some(now_ms)
-    } else if report.failed > 0 || report.unknown > 0 || report.stopped_on_budget {
+    } else if report.failed > 0
+        || report.unknown > 0
+        || report.raced > 0
+        || report.stopped_on_budget
+    {
         min_due(future_due, Some(now_ms.saturating_add(RETRY_BACKOFF_MS)))
     } else {
         future_due

@@ -16,6 +16,11 @@
 //! Object holds one partition, and the column is constant there. It is a
 //! `BLOB`, not `TEXT`: the encoding's components end in `0x00`, which
 //! `SQLite` text functions treat as a terminator.
+//!
+//! Physical v2 adds `kv_timers`, a partial index over the timer rows
+//! (`w 00 …`) that lets a backend find each partition's earliest timer.
+//! It is index-only, but a binary built before v2 refuses a v2 database
+//! ("schema is newer than this binary"): roll back only to a v2 binary.
 
 use super::{SqlConn, SqlError, SqlValue, TxFn, count};
 use crate::store::StoreError;

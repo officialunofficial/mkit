@@ -31,8 +31,11 @@ pub fn alarm_after_tick(next_wake: Option<u64>, now_ms: u64) -> AlarmAction {
     }
 }
 
+/// The latest instant a JavaScript `Date` can hold, Unix ms.
+const MAX_DATE_MS: i64 = 8_640_000_000_000_000;
+
 fn alarm_time(time: u64) -> i64 {
-    i64::try_from(time).unwrap_or(i64::MAX)
+    i64::try_from(time).unwrap_or(MAX_DATE_MS).min(MAX_DATE_MS)
 }
 
 #[cfg(test)]

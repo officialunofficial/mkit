@@ -335,7 +335,8 @@ mod object {
         }
 
         fn now_ms(&self) -> u64 {
-            u64::try_from(self.clock.now_ms()).unwrap_or(u64::MAX)
+            // A pre-epoch reading counts as 0, as natively: never fire everything.
+            u64::try_from(self.clock.now_ms()).unwrap_or(0)
         }
 
         async fn set_alarm(&self, timestamp: i64) -> worker::Result<()> {

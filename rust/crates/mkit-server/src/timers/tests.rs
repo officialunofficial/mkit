@@ -150,6 +150,9 @@ async fn effects_are_atomic_and_failed_handler_condition_is_raced() {
             store.get(&partition(), &effect()).await.unwrap().is_some(),
             !bad
         );
+        // A raced row is still due: it must get a backoff wake, never none.
+        let wake = if bad { Some(100 + RETRY_BACKOFF_MS) } else { None };
+        assert_eq!(report.next_wake_ms, wake);
     }
 }
 #[tokio::test]
@@ -396,6 +399,7 @@ async fn changed_timer_row_loses_guard_and_does_not_apply_effects() {
     )
     .await;
     assert_eq!((report.raced, report.fired), (1, 0));
+    assert_eq!(report.next_wake_ms, Some(100 + RETRY_BACKOFF_MS));
     assert!(store.get(&partition(), &effect()).await.unwrap().is_none());
     assert_eq!(
         store.get(&partition(), &timer(1, 1, 1)).await.unwrap(),
@@ -438,4 +442,40 @@ async fn apply_full_and_deadline_are_failed_without_effects() {
         assert!(store.get(&partition(), &key).await.unwrap().is_some());
         assert!(store.get(&partition(), &effect()).await.unwrap().is_none());
     }
+}
+
+#[tokio::test]
+async fn zero_kind_cap_still_fires_one_per_tick() {
+    let store = memory();
+    put(&store, timer(1, 1, 1)).await;
+    let registry = TimerRegistry::new().register(Handler(1, Action::Effect, Some(0)));
+    let report = tick(
+        &store,
+        &registry,
+        &ManualClock::new(100),
+        &TickBudget::default(),
+    )
+    .await;
+    assert_eq!((report.fired, report.deferred), (1, 0));
+    assert!(store.get(&partition(), &effect()).await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn raced_with_deferred_and_nothing_fired_backs_off() {
+    let store = Racing {
+        inner: memory(),
+        changed: AtomicBool::new(false),
+    };
+    put(&store, timer(1, 1, 1)).await;
+    put(&store, timer(2, 1, 2)).await;
+    let registry = TimerRegistry::new().register(Handler(1, Action::Effect, Some(1)));
+    let report = tick(
+        &store,
+        &registry,
+        &ManualClock::new(100),
+        &TickBudget::default(),
+    )
+    .await;
+    assert_eq!((report.fired, report.raced, report.deferred), (0, 1, 1));
+    assert_eq!(report.next_wake_ms, Some(100 + RETRY_BACKOFF_MS));
 }
