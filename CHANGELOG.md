@@ -373,6 +373,51 @@ train).
   need not hold its body in memory; `sign_request` now delegates to it,
   byte for byte. **SemVer:** additive.
 
+- *(server)* `mkit-server serve --listen-enc <ADDR>` hosts the
+  `mkit+enc://` listener (SPEC-TRANSPORT-ENC §6), beside or instead of the
+  HTTP one (`--listen` is now optional; at least one is required; both
+  share one runtime, one shutdown and one pipeline's stores and write
+  gate). Each session runs `mkit_server::ssh::serve_session` as
+  `Principal::TransportPeer` with the key the handshake authenticated. The
+  flags, fail-closed gate, banner, timeouts, budgets and the
+  `mkit serve-enc/<version>` server id are `mkit serve --listen-enc`'s,
+  which stays until WP-M0-15. New hardening: at most `--max-connections`
+  connections (per listener, handshakes included), a write timeout equal
+  to `--enc-idle-timeout-secs`, graceful drain within
+  `--shutdown-grace-secs`, the allowlist opened without following a
+  symlink and refused if group- or other-writable, and the key file read
+  with `mkit_core::sign::load_raw_32`'s checks. Differences for operators:
+  an allowlist needs `--enc-server-key <PATH>` (no `~/.config/mkit`
+  default: the server resolves no home directory), key and allowlist
+  errors exit 78, and `--enc-handshake-timeout-secs 0` is refused. The
+  `enc` feature is on by default. New `Pipeline::with_auth` builds a
+  sibling pipeline over the same stores and write gate with another
+  `AuthMode`. **Wire changes versus `mkit serve --listen-enc`**, all to
+  the ssh session's replies (SPEC-TRANSPORT §4.2, which SPEC-TRANSPORT-ENC
+  §3 makes normative): a first frame that is not `Hello` is answered
+  `Error{INVALID_REQUEST, "first frame must be Hello"}` and a `Hello` for
+  another version `"unsupported proto_version N"`, then the connection
+  closes (was: closed without a reply); a frame the session does not serve
+  gets its specific message (`"PackChunk arrived without UploadPack
+  header"`, `"Hello after handshake"`, `"unexpected request frame"`; was:
+  `"unexpected frame"`); a record that does not decode as an `SshFrame`
+  gets `"frame parse error"` at the top level and `"pack chunk read
+  failed"` inside an upload, then the session ends (was: closed without a
+  reply); a ref name over 512 bytes gets `"ref name too long"`; the upload
+  rejections are the ssh session's. Clients see no difference on
+  well-formed traffic: the published `mkit-transport-enc` 0.4.2 client
+  passes against the new listener (`just interop-enc`,
+  `contrib/interop/enc-client-0.4`). **SemVer:** unreleased API.
+
+- *(transport-enc)* `serve_tcp_listener`: the async accept loop on a
+  caller-bound `TcpListener`, for a server already on a tokio runtime,
+  with a connection cap and a shutdown future; after shutdown it stops
+  accepting and waits for the sessions in flight (the caller bounds the
+  wait). The blocking `serve_tcp_*` entry points now run on it with their
+  signatures unchanged; a transient `accept` error (a reset connection,
+  descriptor exhaustion) is retried instead of stopping the listener.
+  **SemVer:** additive.
+
 - *(core)* Resumable-part building blocks (SPEC-TRANSPORT-CONNECT §7.6):
   `write_auth::ContentCommitment` parses and formats `body:`, `pack:` and the
   new `part:<ticket>:<index>:<subtree>:<len>` commitment, and

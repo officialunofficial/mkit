@@ -27,7 +27,9 @@ Object backend: both run the same statements and the same schema migrations.
 ## Operator guide: `mkit-server serve`
 
 ```text
-mkit-server serve --listen <ADDR> --repo-root <DIR>
+mkit-server serve [--listen <ADDR>] [--listen-enc <ADDR>] --repo-root <DIR>
+    [--enc-authorized-peers <PATH> --enc-server-key <PATH> | --unsafe-allow-any-enc-peer]
+    [--enc-idle-timeout-secs 60] [--enc-handshake-timeout-secs 60]
     [--meta fs-layout | --meta sqlite:<PATH>]
     [--blob fs | --blob s3://<BUCKET>[/<PREFIX>] --s3-endpoint <URL>
         [--s3-region auto] [--s3-credentials-file <PATH>]   # or MKIT_R2_* / AWS_*
@@ -43,8 +45,12 @@ mkit-server serve --listen <ADDR> --repo-root <DIR>
 mkit-server version
 ```
 
-`mkit-server` replaces `mkit serve --http`; it is a separate binary, so the
-`mkit` CLI carries no HTTP server or `SQLite`.
+`mkit-server` replaces `mkit serve --http` and `mkit serve --listen-enc`;
+it is a separate binary, so the `mkit` CLI carries no HTTP server or
+`SQLite`. Pass `--listen` (HTTP), `--listen-enc` (`mkit+enc://`), or
+both: at least one listener is required, and both serve the same root
+through one pipeline (the same stores and write gate), on one runtime,
+stopped by one signal.
 
 ### Deployment
 
@@ -108,6 +114,51 @@ The listener fails closed, like `mkit serve --http`:
 
 `grpc.health.v1.Health` answers without authentication. Each store's probe
 result is cached for one second, so health checks cannot load the stores.
+
+These flags configure the HTTP listener; without `--listen` they are
+refused (and `MKIT_API_TOKEN` is ignored).
+
+### The enc listener (`mkit+enc://`)
+
+`--listen-enc <ADDR>` serves `mkit+enc://` clients (SPEC-TRANSPORT-ENC):
+an encrypted, mutually authenticated handshake, then the ssh-frame
+protocol of `mkit serve`. Each session runs `mkit_server::ssh::serve_session`
+over the pipeline as the `TransportPeer` principal, holding the client key
+the handshake authenticated; nothing a client sends can change it. The
+flags, messages and the `mkit serve-enc/<version>` server id are those of
+`mkit serve --listen-enc`, which it replaces. It fails closed:
+
+- `--enc-authorized-peers <PATH> --enc-server-key <PATH>`: only the client
+  keys listed (one per line, 64-hex or the 43-char url-safe base64 of
+  `?pubkey=`; `#` comments and blank lines ignored) complete the handshake.
+  The allowlist is opened without following a symlink and must be a
+  regular file neither group nor others can write (`chmod go-w`); an
+  allowlist without a valid key is refused. Peer authorization never comes
+  from the served root's `.mkit/config`.
+- `--unsafe-allow-any-enc-peer`: any client key, with a loud warning.
+  Development only.
+- With neither, or both, the server refuses to start.
+
+The server's static key is the raw 32-byte ed25519 seed in
+`--enc-server-key`, created on first run (`0600`, missing directories
+`0700`, never overwritten); on every start it must be a regular file (no
+symlink on its path), owned by the server's user, with no group or other
+bits, in a directory with none either. Clients pin its public half: the
+server prints `mkit-server serve --listen-enc on <ADDR> (server pubkey =
+<hex>); clients dial mkit+enc://<host>:<port>?pubkey=<hex>` at startup.
+With an allowlist the flag is required, so the key survives restarts
+(`mkit serve` fell back to `~/.config/mkit/enc/server.key`; the server
+resolves no home directory). With `--unsafe-allow-any-enc-peer` and no key
+file the key is per process.
+
+Bounds, as for HTTP: at most `--max-connections` connections at once
+(per listener, handshakes included; the rest wait in the accept backlog);
+`--enc-handshake-timeout-secs` (default 60; SPEC-TRANSPORT-ENC recommends
+10 or less on real networks) for the handshake; `--enc-idle-timeout-secs`
+(default 60; 0 disables it, not recommended) for every frame read and
+write after it; and the ssh session's budgets (10,000 frames and 1 GiB per
+connection; an upload of at most 1 GiB and 10,000 chunks, or
+`--max-pack-bytes` if lower).
 
 ### Metadata storage
 
@@ -247,8 +298,8 @@ The listener speaks plaintext HTTP/1.1 and h2c; terminate TLS at the proxy.
 ### Shutdown and exit codes
 
 SIGINT or SIGTERM stops accepting connections and lets in-flight requests
-finish, for at most `--shutdown-grace-secs`; requests still running then are
-dropped (an interrupted upload leaves nothing visible). The exit codes are
+and enc sessions finish, for at most `--shutdown-grace-secs`; those still
+running then are dropped (an interrupted upload leaves nothing visible). The exit codes are
 `mkit`'s sysexits values: 0 clean shutdown, 64 usage, 65 root without
 `.mkit`, 66 missing root, 69 bind or runtime failure, 75 serve lock busy, 77
 root outside `MKIT_SERVE_ROOT`, 78 refused configuration (including a root
@@ -269,8 +320,11 @@ embedder that wants them installs a recorder.
 fallback is the Connect service: add your own routes to it, or mount it as
 your app's fallback service. Serve it with `serve(listener, router,
 shutdown, &ServeOptions)` to get the connection cap, header-read timeout
-and graceful shutdown. `server::open` builds the same router from a
-resolved `config::ServeConfig`, taking the root's locks.
+and graceful shutdown. `server::open` builds the same router (and the enc
+service) from a resolved `config::ServeConfig`, taking the root's locks.
+With the `enc` feature (on by default), `enc::session_fn` serves enc
+sessions over a `TransportIdentity` pipeline (`Pipeline::with_auth` makes
+one beside yours) and `enc::serve` runs the listener.
 
 ## `SQLite` operations
 

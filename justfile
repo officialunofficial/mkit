@@ -139,6 +139,15 @@ ci-scripts:
     ( cd rust && cargo check -p mkit-server --target wasm32-unknown-unknown )
     bash scripts/wasm-ruzstd-check.sh
 
+# The published mkit-transport-enc 0.4 client (crates.io) against this
+# tree's `mkit-server serve --listen-enc` (contrib/interop/enc-client-0.4).
+interop-enc:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ( cd rust && cargo build --locked -p mkit-server-native --bin mkit-server )
+    target="${CARGO_TARGET_DIR:-$PWD/rust/target}"
+    ( cd contrib/interop/enc-client-0.4 && MKIT_SERVER_BIN="$target/debug/mkit-server" cargo test --locked )
+
 # Mirrors cloudbuild/docs.yaml (rustdoc -D warnings).
 ci-docs:
     #!/usr/bin/env bash

@@ -8,9 +8,11 @@ Implements the `Transport` trait by carrying the existing mkit-rpc
 `SshFrame` message set over an authenticated, encrypted byte stream. The
 crate ships the full client and server stack: in-process round-trips, a real
 TCP dial helper (`tcp::connect_tcp`), a TCP listener with peer-authorization
-policy (`tcp::serve_tcp_with_policy_and_bounds`), and `mkit+enc://` URL
-parsing (`url::parse_enc_url`). It's consumed in production by `mkit-cli`'s
-remote dispatch and `mkit serve --listen-enc`.
+policy (`tcp::serve_tcp_with_policy_and_bounds`, and the async
+`tcp::serve_tcp_listener` with a connection cap and graceful shutdown for a
+server already on a tokio runtime), and `mkit+enc://` URL parsing
+(`url::parse_enc_url`). It's consumed in production by `mkit-cli`'s remote
+dispatch, `mkit serve --listen-enc` and `mkit-server serve --listen-enc`.
 
 ## Layering
 

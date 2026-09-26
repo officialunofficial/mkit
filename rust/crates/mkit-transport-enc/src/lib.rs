@@ -78,7 +78,7 @@ pub mod tokio_io;
 
 #[cfg(feature = "tcp")]
 pub use tcp::{
-    PeerPolicy, TokioExecutor, connect_tcp, connect_tcp_with_executor,
+    PeerPolicy, TokioExecutor, connect_tcp, connect_tcp_with_executor, serve_tcp_listener,
     serve_tcp_with_policy_and_bounds,
 };
 
