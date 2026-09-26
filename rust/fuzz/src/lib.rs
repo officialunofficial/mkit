@@ -674,7 +674,9 @@ pub fn verify_disclosure_one_iteration_with(input: &[u8], fixture: &DisclosureFi
 
 /// Store-less pack iterator: never panics on adversarial bytes. When
 /// `PackReader::read` accepts a pack, `PackEntries::new` accepts it too
-/// and yields `raw_count + delta_count` items.
+/// and yields `raw_count + delta_count` items. `decode_entries_with`
+/// over `NoExternalBases` agrees with `PackReader::read` into an empty
+/// store on every input: same accept/reject, same error, same ids.
 pub fn pack_entries_one_iteration(input: &[u8]) {
     let Some(input) = pack_validated_input(input) else {
         return;
@@ -700,7 +702,36 @@ pub fn pack_entries_one_iteration(input: &[u8]) {
         Ok(s) => s,
         Err(_) => return,
     };
-    if let Ok(report) = mkit_core::pack::PackReader::read(input, &store) {
+    let read = mkit_core::pack::PackReader::read(input, &store);
+    // Into an empty store, the store-less decoder with no external bases
+    // must accept exactly the packs the reader accepts, with the same
+    // error and the same ids in pack order.
+    let decoded = mkit_core::pack::decode_entries_with(
+        input,
+        &mut mkit_core::pack::NoExternalBases,
+        // No budget: this body pins agreement with the reader, which has
+        // none. The budget itself is covered by mkit-core unit tests.
+        mkit_core::pack::DecodeLimits::default().with_max_decoded_bytes(u64::MAX),
+        |_| Ok(()),
+    );
+    match (&read, &decoded) {
+        (Ok(report), Ok(decoded)) => assert_eq!(
+            report.stored, decoded.ids,
+            "decode_entries_with must yield PackReader's ids in pack order"
+        ),
+        (Err(a), Err(b)) => assert_eq!(
+            a.to_string(),
+            b.to_string(),
+            "decode_entries_with must fail exactly as PackReader::read"
+        ),
+        _ => panic!(
+            "decode_entries_with(NoExternalBases) and PackReader::read into an empty \
+             store disagree: reader {:?}, decoder {:?}",
+            read.as_ref().map(|_| ()),
+            decoded.as_ref().map(|_| ())
+        ),
+    }
+    if let Ok(report) = read {
         let entries = mkit_core::pack::PackEntries::new(input)
             .expect("PackReader-accepted pack must parse as PackEntries");
         let got = entries.filter(|e| e.is_ok()).count();

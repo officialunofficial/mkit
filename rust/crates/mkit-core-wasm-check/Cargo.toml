@@ -2,7 +2,8 @@
 # mkit-core's decode-only `pack-ruzstd` path on a real 32-bit
 # `wasm32-unknown-unknown` target (under node, via wasm-bindgen-test) over
 # the committed C-encoded SPEC-PACKFILE v2 fixtures in
-# `rust/tests/golden/pack-v2/`. Native `cargo test` runs the same checks
+# `rust/tests/golden/pack-v2/`, plus the 32-bit pack-framing overflow
+# checks (`tests/pack_framing_32bit.rs`). Native `cargo test` runs the same checks
 # on 64-bit. Run the wasm32 lane with `bash scripts/wasm-ruzstd-check.sh`
 # (part of `just ci-scripts`).
 #

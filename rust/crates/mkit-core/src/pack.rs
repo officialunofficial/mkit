@@ -57,7 +57,10 @@
 //! (`0x02` or `0x04`) `base_hash` MUST appear earlier in the same pack
 //! as a raw entry, OR already exist in the destination object store.
 //! `0x04`'s `base_hash` is never compressed, so this never requires
-//! decompression to evaluate.
+//! decompression to evaluate. The "destination object store" is the
+//! [`DeltaBaseSource`] the decoder is given: the local [`ObjectStore`]
+//! for [`PackReader::read`], or a repository-scoped source for the
+//! store-less [`decode_entries_with`].
 //!
 //! The pack key (SPEC-PACKFILE §7) is `packs/<lower-hex BLAKE3 of entire
 //! pack>`. The trailer is then redundant w.r.t. that key, but it lets a
@@ -1029,7 +1032,10 @@ pub fn delta_base_hashes(pack_bytes: &[u8]) -> Result<Vec<Hash>, PackError> {
         let payload_len =
             u32::from_le_bytes(pack_bytes[pos..pos + 4].try_into().expect("4 bytes")) as usize;
         pos += 4;
-        if pos + payload_len > split {
+        // `payload_len > split - pos`, not `pos + payload_len > split`: the
+        // sum overflows a 32-bit `usize` (wasm32) for `payload_len` near
+        // `u32::MAX`. The frame check above keeps `pos <= split`.
+        if payload_len > split - pos {
             return Err(PackError::UnexpectedEof);
         }
         // `0x04`'s base_hash sits at the same offset (byte 0 of the
@@ -1128,6 +1134,11 @@ impl PackReader {
             std::collections::HashMap::new();
 
         let batch = store.batch();
+        // The destination store is this reader's external delta-base
+        // source (SPEC-PACKFILE §3.2). Monomorphic: `&ObjectStore`'s
+        // `DeltaBaseSource` impl is the same `contains` + `read` pair as
+        // before the seam existed, so this path pays no dispatch cost.
+        let mut bases = store;
 
         // Phase 1 (sequential, cheap relative to phase 2): drain
         // `PackEntries` — already validated and decompressed — into one
@@ -1208,7 +1219,7 @@ impl PackReader {
                 }
                 Entry::Delta { base, stream } => {
                     let stored_hash = stage_delta_target(
-                        store,
+                        &mut bases,
                         &batch,
                         &mut in_pack,
                         owned_bytes,
@@ -1228,6 +1239,366 @@ impl PackReader {
 
         Ok(report)
     }
+}
+
+/// Where a delta's *external* base — one that is not an earlier entry
+/// of the same pack — may come from.
+///
+/// SPEC-PACKFILE §3.2's "destination object store" is the implementor:
+/// the local [`ObjectStore`] on a client, and on a server the pushing
+/// repository's own membership. A server MUST NOT back this with a
+/// global content store or another repository's objects: whether a
+/// delta resolves would then reveal that some other repository holds
+/// the base (PRD §6.5 repository isolation, no existence oracles).
+///
+/// The seam is generic, never `dyn`: [`PackReader::read`] instantiates
+/// it with `&ObjectStore` so the hot unpack path stays monomorphic.
+pub trait DeltaBaseSource {
+    /// Whether [`Self::base`] returns bytes already verified to be the
+    /// object named by the requested id (the store's `read` verifies).
+    ///
+    /// When `false` (the default), the decoder deserializes the bytes
+    /// and re-derives the id itself; anything that is not a storable
+    /// canonical object with exactly the requested id is treated as
+    /// absent ([`PackError::DeltaBaseMissing`]), so an untrusted source
+    /// can never smuggle a different object in as a base. Set it to
+    /// `true` only when `base` itself guarantees that identity, as
+    /// `ObjectStore::read` does; the decoder then skips the re-derive.
+    const VERIFIED: bool = false;
+
+    /// Canonical object bytes for `id`, or `None` when this source may
+    /// not provide it. "Not permitted" and "does not exist" MUST both
+    /// be `None`: the decoder reports them identically, by design.
+    ///
+    /// # Errors
+    ///
+    /// A source failure (I/O, backend error) that is not an answer
+    /// about `id`. It aborts the decode.
+    fn base(&mut self, id: &Hash) -> Result<Option<Vec<u8>>, PackError>;
+}
+
+/// A [`DeltaBaseSource`] with no external bases: a pack must be
+/// self-contained (every delta's base an earlier entry). Used for
+/// closure-profile packs, pack rewrites and tests.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NoExternalBases;
+
+impl DeltaBaseSource for NoExternalBases {
+    fn base(&mut self, _id: &Hash) -> Result<Option<Vec<u8>>, PackError> {
+        Ok(None)
+    }
+}
+
+impl DeltaBaseSource for &ObjectStore {
+    /// `ObjectStore::read` BLAKE3/BMT-verifies the bytes against `id`
+    /// and fails with `HashMismatch` otherwise.
+    const VERIFIED: bool = true;
+
+    fn base(&mut self, id: &Hash) -> Result<Option<Vec<u8>>, PackError> {
+        if self.contains(id) {
+            Ok(Some(self.read(id)?))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+/// One entry handed to [`decode_entries_with`]'s sink, in pack order.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct DecodedEntry<'a> {
+    /// The entry's object id, re-derived from `bytes` (BLAKE3, or the
+    /// BMT root for `Tree`/`ChunkedBlob`).
+    pub id: Hash,
+    /// Canonical object bytes: the raw payload (decompressed for
+    /// `0x03`), or the reconstructed delta target.
+    pub bytes: &'a [u8],
+    /// `bytes` decoded, so the consumer need not deserialize again.
+    pub object: Object,
+    /// `true` for a `0x02`/`0x04` delta target, `false` for a raw entry.
+    pub from_delta: bool,
+}
+
+/// Summary of a successful [`decode_entries_with`] call.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DecodeReport {
+    /// Raw (`0x00`/`0x03`) entries decoded.
+    pub raw_count: usize,
+    /// Delta (`0x02`/`0x04`) entries reconstructed.
+    pub delta_count: usize,
+    /// Every entry's id, in pack order (a repeated entry repeats here,
+    /// as in [`UnpackReport::stored`]).
+    pub ids: Vec<Hash>,
+}
+
+/// Resource limits for [`decode_entries_with`].
+///
+/// A pack's wire size says little about what decoding it allocates: a
+/// `0x03`/`0x04` entry may claim up to [`MAX_RAW_OBJECT_SIZE`] bytes from a
+/// few-byte zstd frame, a delta may declare a result of the same size
+/// from a short run of copies, and a tiny delta may name a huge external
+/// base. A decoder that held all of that until the pack ends would let a
+/// sub-kilobyte pack pin gigabytes. [`decode_entries_with`] therefore
+/// charges every such allocation against [`Self::max_decoded_bytes`] and
+/// rejects the pack with [`PackError::PackfileTooLarge`] once the total
+/// passes it.
+///
+/// The budget is **per call**. It bounds one decode, not a process: a
+/// server running several decodes at once (WP-4.7) must size it from its
+/// isolate's memory limit divided by its decode concurrency. The default,
+/// [`Self::DEFAULT_MAX_DECODED_BYTES`] (1 GiB), equals the largest object
+/// the format allows ([`MAX_RAW_OBJECT_SIZE`]) so that any single valid
+/// object decodes; it is not sized for a constrained isolate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DecodeLimits {
+    /// Cap on the bytes one decode may hold beyond the pack itself: every
+    /// `0x03`/`0x04` entry's claimed `uncompressed_len`, every delta's
+    /// declared result length, and every external base fetched from the
+    /// [`DeltaBaseSource`] while it is cached. `0x00` payloads are borrowed
+    /// from the pack and do not count. An external base is measured once
+    /// fetched, so the peak can pass the cap by the one base whose fetch
+    /// trips it.
+    pub max_decoded_bytes: u64,
+}
+
+impl DecodeLimits {
+    /// Default [`Self::max_decoded_bytes`]: 1 GiB, the maximum object size
+    /// ([`MAX_RAW_OBJECT_SIZE`]). Servers set their own (see the type docs).
+    pub const DEFAULT_MAX_DECODED_BYTES: u64 = MAX_RAW_OBJECT_SIZE as u64;
+
+    /// These limits with [`Self::max_decoded_bytes`] set to `bytes`.
+    #[must_use]
+    pub const fn with_max_decoded_bytes(mut self, bytes: u64) -> Self {
+        self.max_decoded_bytes = bytes;
+        self
+    }
+}
+
+impl Default for DecodeLimits {
+    fn default() -> Self {
+        Self {
+            max_decoded_bytes: Self::DEFAULT_MAX_DECODED_BYTES,
+        }
+    }
+}
+
+/// Running total of a decode's claimed allocations against
+/// [`DecodeLimits::max_decoded_bytes`].
+struct DecodeBudget {
+    used: u64,
+    max: u64,
+}
+
+impl DecodeBudget {
+    fn charge(&mut self, bytes: u64) -> Result<(), PackError> {
+        self.used = self.used.saturating_add(bytes);
+        if self.used > self.max {
+            return Err(PackError::PackfileTooLarge);
+        }
+        Ok(())
+    }
+}
+
+/// The decode path's [`DeltaBaseSource`]: forwards to the caller's source
+/// and charges each base it returns against the decode budget, remembering
+/// the charge so [`Self::release`] can credit it back once no later delta
+/// needs that base. [`PackReader::read`] never uses this.
+struct ChargedBases<'b, B> {
+    inner: &'b mut B,
+    budget: DecodeBudget,
+    charged: std::collections::HashMap<Hash, u64>,
+}
+
+impl<B: DeltaBaseSource> DeltaBaseSource for ChargedBases<'_, B> {
+    const VERIFIED: bool = B::VERIFIED;
+
+    fn base(&mut self, id: &Hash) -> Result<Option<Vec<u8>>, PackError> {
+        let Some(bytes) = self.inner.base(id)? else {
+            return Ok(None);
+        };
+        let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        self.budget.charge(len)?;
+        let held = self.charged.entry(*id).or_default();
+        *held = held.saturating_add(len);
+        Ok(Some(bytes))
+    }
+}
+
+impl<B> ChargedBases<'_, B> {
+    /// Credit back the charge for external base `id`, if it had one.
+    fn release(&mut self, id: &Hash) {
+        if let Some(len) = self.charged.remove(id) {
+            self.budget.used = self.budget.used.saturating_sub(len);
+        }
+    }
+}
+
+/// Little-endian `u32` at `at` in `bytes`, if all four bytes are there.
+fn le_u32_at(bytes: &[u8], at: usize) -> Option<u64> {
+    let field: [u8; 4] = bytes.get(at..at.checked_add(4)?)?.try_into().ok()?;
+    Some(u64::from(u32::from_le_bytes(field)))
+}
+
+/// Charge every `0x03`/`0x04` entry's claimed decompressed size, reading
+/// only its uncompressed-length prefix. Runs after [`PackEntries::new`]
+/// has validated the framing (every frame lies inside the body, which is
+/// why the bounds here can only fall short on a malformed pack) and
+/// before anything is decompressed. A payload too short to carry its
+/// prefix is left for the drain to reject.
+fn charge_compressed_claims(pack: &[u8], budget: &mut DecodeBudget) -> Result<(), PackError> {
+    let split = pack.len() - TRAILER_LEN;
+    let mut pos = HEADER_LEN;
+    while pos < split {
+        let etype = pack[pos];
+        let payload_len = le_u32_at(pack, pos + 1)
+            .and_then(|len| usize::try_from(len).ok())
+            .ok_or(PackError::UnexpectedEof)?;
+        let start = pos + ENTRY_FRAME_LEN;
+        if payload_len > split.saturating_sub(start) {
+            return Err(PackError::UnexpectedEof);
+        }
+        let payload = &pack[start..start + payload_len];
+        let claim = match etype {
+            0x03 => le_u32_at(payload, 0),
+            0x04 => le_u32_at(payload, hash::HASH_LEN),
+            _ => None,
+        };
+        if let Some(claim) = claim {
+            budget.charge(claim)?;
+        }
+        pos = start + payload_len;
+    }
+    Ok(())
+}
+
+/// Store-less decode of `pack` over an explicit [`DeltaBaseSource`].
+///
+/// Validates the pack exactly as [`PackReader::read`] does — header,
+/// trailer, caps and framing via [`PackEntries`], every entry drained
+/// (and `0x03`/`0x04` decompressed) before any entry is judged — then,
+/// in pack order, validates each raw payload as a storable canonical
+/// object, resolves each delta against an earlier entry or else
+/// `bases`, validates the reconstructed target, and hands every entry to
+/// `sink`. Given `&ObjectStore` as `bases`, and limits the pack fits in,
+/// it accepts and rejects exactly the packs `PackReader::read` does
+/// against that store, with the same errors in the same order, but
+/// writes nothing.
+///
+/// Memory is bounded by `limits` (see [`DecodeLimits`]): every
+/// compressed entry's claimed size is charged before anything is
+/// decompressed, every delta's declared result length before any delta
+/// is applied, and every external base as it is fetched. An entry or an
+/// external base stays resident only until the last delta that names it
+/// as its base; an external base's charge is then credited back.
+///
+/// External bases are fetched only for a delta whose base is not an
+/// earlier entry, at most once per distinct base while it is needed, and
+/// never recursively: a base is a canonical object, never a pack-only
+/// delta.
+///
+/// # Errors
+///
+/// [`PackError::PackfileTooLarge`] when the decoded size passes
+/// `limits.max_decoded_bytes`: claims are checked ahead of every
+/// per-entry error except framing, an external base when the delta that
+/// names it is reached. Otherwise the first [`PackError`] in pack order,
+/// or the first error `sink` returns. `sink` may already have seen earlier
+/// entries when an error is returned; a consumer staging them must
+/// discard that staging.
+pub fn decode_entries_with<B: DeltaBaseSource>(
+    pack: &[u8],
+    bases: &mut B,
+    limits: DecodeLimits,
+    mut sink: impl FnMut(DecodedEntry<'_>) -> Result<(), PackError>,
+) -> Result<DecodeReport, PackError> {
+    let pack_entries = PackEntries::new(pack)?;
+    let mut budget = DecodeBudget {
+        used: 0,
+        max: limits.max_decoded_bytes,
+    };
+    charge_compressed_claims(pack, &mut budget)?;
+
+    let mut entries: Vec<PackEntry<'_>> = Vec::with_capacity(pack_entries.entry_count());
+    for entry in pack_entries {
+        entries.push(entry?);
+    }
+
+    // Charge every delta's declared result length before applying any
+    // (a stream too short for its header fails at apply time), and count
+    // how many deltas name each base: an entry stays resident only while
+    // a later delta still needs it.
+    let mut uses: std::collections::HashMap<Hash, usize> = std::collections::HashMap::new();
+    for entry in &entries {
+        if let PackEntry::Delta { base, stream } = entry {
+            if let Some(result_len) = le_u32_at(stream, 5) {
+                budget.charge(result_len)?;
+            }
+            let n = uses.entry(*base).or_default();
+            *n = n.saturating_add(1);
+        }
+    }
+
+    let mut bases = ChargedBases {
+        inner: bases,
+        budget,
+        charged: std::collections::HashMap::new(),
+    };
+    let mut in_pack: std::collections::HashMap<Hash, Cow<'_, [u8]>> =
+        std::collections::HashMap::new();
+    let mut report = DecodeReport {
+        ids: Vec::with_capacity(entries.len()),
+        ..DecodeReport::default()
+    };
+    for entry in entries {
+        match entry {
+            PackEntry::Raw { bytes } => {
+                let object = validate_storable_object(&bytes)?;
+                let id = crate::object::id_from_object(&object, &bytes);
+                sink(DecodedEntry {
+                    id,
+                    bytes: bytes.as_ref(),
+                    object,
+                    from_delta: false,
+                })?;
+                if uses.contains_key(&id) {
+                    in_pack.insert(id, bytes);
+                }
+                report.raw_count += 1;
+                report.ids.push(id);
+            }
+            PackEntry::Delta { base, stream } => {
+                let resolved =
+                    resolve_delta_target(&mut bases, &mut in_pack, base, stream.as_ref())?;
+                drop(stream);
+                // This delta was one of `base`'s uses. After the last one
+                // the base is dropped and, if external, its charge credited.
+                if let Some(left) = uses.get_mut(&base) {
+                    *left = left.saturating_sub(1);
+                    if *left == 0 {
+                        uses.remove(&base);
+                        in_pack.remove(&base);
+                        bases.release(&base);
+                    }
+                }
+                let object = validate_storable_object(&resolved)?;
+                let id = crate::object::id_from_object(&object, &resolved);
+                sink(DecodedEntry {
+                    id,
+                    bytes: &resolved,
+                    object,
+                    from_delta: true,
+                })?;
+                if uses.contains_key(&id) {
+                    in_pack.insert(id, Cow::Owned(resolved));
+                }
+                report.delta_count += 1;
+                report.ids.push(id);
+            }
+        }
+    }
+    Ok(report)
 }
 
 /// One packfile entry, tracked through [`PackReader::read_inner`]'s
@@ -1493,7 +1864,8 @@ impl<'a> PackEntries<'a> {
             if total_payload > payload_cap {
                 return Err(PackError::PackfileTooLarge);
             }
-            if pos + payload_len > split {
+            // Overflow-free on 32-bit `usize`; see `delta_base_hashes`.
+            if payload_len > split - pos {
                 return Err(PackError::UnexpectedEof);
             }
             match etype {
@@ -1581,7 +1953,8 @@ impl<'a> PackEntries<'a> {
                 .expect("4 bytes"),
         ) as usize;
         self.pos += 4;
-        if self.pos + payload_len > self.split {
+        // Overflow-free on 32-bit `usize`; see `delta_base_hashes`.
+        if payload_len > self.split - self.pos {
             return Err(PackError::UnexpectedEof);
         }
         let payload_start = self.pos;
@@ -1655,15 +2028,15 @@ impl<'a> Iterator for PackEntries<'a> {
 /// stored hash; `read_inner`'s phase 3 builds [`UnpackReport`] itself
 /// as it walks `entries` in pack order, so this function doesn't need
 /// to touch it.
-fn stage_delta_target(
-    store: &ObjectStore,
+fn stage_delta_target<B: DeltaBaseSource>(
+    bases: &mut B,
     batch: &crate::batch::WriteBatch<'_>,
     in_pack: &mut std::collections::HashMap<Hash, Cow<'_, [u8]>>,
     owned_bytes: Option<&AtomicU64>,
     base_hash: Hash,
     stream: &[u8],
 ) -> Result<Hash, PackError> {
-    let resolved = resolve_delta_target(store, in_pack, base_hash, stream)?;
+    let resolved = resolve_delta_target(bases, in_pack, base_hash, stream)?;
     let obj = validate_storable_object(&resolved)?;
     let stored_hash = crate::object::id_from_object(&obj, &resolved);
     batch.write_prehashed(stored_hash, &[&resolved])?;
@@ -1674,33 +2047,34 @@ fn stage_delta_target(
     Ok(stored_hash)
 }
 
-/// Resolve a delta's base (in-pack first, then on-disk store) and decode
-/// `stream` against it. Shared by the `0x02` and `0x04` branches of
-/// [`PackReader::read_inner`] — `0x04` differs only in how `stream` was
+/// Resolve a delta's base (in-pack first, then the external
+/// [`DeltaBaseSource`]) and decode `stream` against it. Shared by the
+/// `0x02` and `0x04` branches of [`PackReader::read_inner`] and by
+/// [`decode_entries_with`] — `0x04` differs only in how `stream` was
 /// sourced (decompressed vs. borrowed straight from `pack_bytes`), not
 /// in how base resolution or delta decoding work.
-fn resolve_delta_target(
-    store: &ObjectStore,
+fn resolve_delta_target<B: DeltaBaseSource>(
+    bases: &mut B,
     in_pack: &mut std::collections::HashMap<Hash, Cow<'_, [u8]>>,
     base_hash: Hash,
     stream: &[u8],
 ) -> Result<Vec<u8>, PackError> {
-    // Resolve base: in-pack first, then on-disk. A store-resolved base
-    // is cached into `in_pack` under its own hash so a later delta
-    // entry referencing the same out-of-pack base hits the cache-hit
-    // branch above instead of paying another full read + verify +
-    // decode (#643). This is safe because `store.read` already
-    // hash-verified the bytes against `base_hash`. Cloning once here
-    // (vs. #643's original Arc::clone) is the cost of composing with
-    // #647's Cow-based `in_pack`, which trades that one-time clone for
+    // Resolve base: in-pack first, then the external source. An
+    // externally resolved base is cached into `in_pack` under its own
+    // hash so a later delta entry referencing the same out-of-pack base
+    // hits the cache-hit branch above instead of paying another full
+    // read + verify + decode (#643). This is safe because
+    // `external_base` has already established that the bytes are the
+    // object `base_hash` names (the store's `read` hash-verifies; an
+    // unverified source is re-derived there). Cloning once here (vs.
+    // #643's original Arc::clone) is the cost of composing with #647's
+    // Cow-based `in_pack`, which trades that one-time clone for
     // zero-copy borrows on the far more common raw-entry path — a net
     // win, and this clone only happens once per unique out-of-pack
     // base, not per delta entry.
     let base_bytes: Cow<'_, [u8]> = if let Some(b) = in_pack.get(&base_hash) {
         Cow::Borrowed(b.as_ref())
-    } else if store.contains(&base_hash) {
-        let bytes = store.read(&base_hash)?;
-        validate_storable_object(&bytes)?;
+    } else if let Some(bytes) = external_base(bases, &base_hash)? {
         in_pack.insert(base_hash, Cow::Owned(bytes.clone()));
         Cow::Owned(bytes)
     } else {
@@ -1709,6 +2083,33 @@ fn resolve_delta_target(
     validate_delta_result_size(stream)?;
     let resolved = delta::decode(base_bytes.as_ref(), stream)?;
     Ok(resolved)
+}
+
+/// Fetch an external delta base from `bases` and establish that it is the
+/// storable canonical object `id` names, or report it absent.
+///
+/// A [`DeltaBaseSource::VERIFIED`] source (the local [`ObjectStore`])
+/// already hash-verified the bytes, so this runs exactly the pre-seam
+/// store path: a non-storable object is a loud error. Any other source
+/// is untrusted for identity: bytes that do not deserialize to a
+/// storable object whose re-derived id is `id` are treated as absent,
+/// so the caller reports [`PackError::DeltaBaseMissing`] — the same
+/// error bytes as a base the source does not have at all.
+fn external_base<B: DeltaBaseSource>(
+    bases: &mut B,
+    id: &Hash,
+) -> Result<Option<Vec<u8>>, PackError> {
+    let Some(bytes) = bases.base(id)? else {
+        return Ok(None);
+    };
+    if B::VERIFIED {
+        validate_storable_object(&bytes)?;
+        return Ok(Some(bytes));
+    }
+    match validate_storable_object(&bytes) {
+        Ok(obj) if crate::object::id_from_object(&obj, &bytes) == *id => Ok(Some(bytes)),
+        _ => Ok(None),
+    }
 }
 
 /// Decode `bytes`, enforce the size and storability invariants, and hand back
@@ -2933,6 +3334,628 @@ mod tests {
         let (_dir, store) = fresh_store();
         PackReader::read(&pack, &store).unwrap();
         assert_eq!(store.read(&h).unwrap(), blob);
+    }
+
+    // =====================================================================
+    // `DeltaBaseSource` seam / `decode_entries_with` (WP-4.2)
+    // =====================================================================
+
+    /// `(target id, target bytes, delta stream against the base)`.
+    type Variant = (Hash, Vec<u8>, Vec<u8>);
+    /// `(id, bytes, from_delta)` as a decode sink saw it.
+    type Seen = (Hash, Vec<u8>, bool);
+
+    /// A 512-byte base blob and `n` single-byte variants of it, with
+    /// their delta streams against the base.
+    fn base_and_variants(n: usize) -> (Vec<u8>, Hash, Vec<Variant>) {
+        let mut content = vec![0u8; 512];
+        for (i, b) in content.iter_mut().enumerate() {
+            *b = u8::try_from(i % 251).expect("modulo < 256");
+        }
+        let base = write_blob_via_serialize(&content);
+        let base_hash = hash::hash(&base);
+        let variants = (0..n)
+            .map(|i| {
+                let mut c = content.clone();
+                c[100] = u8::try_from(i).unwrap() ^ 0xA5;
+                let target = write_blob_via_serialize(&c);
+                let stream = delta::encode(&base, &target).unwrap();
+                (hash::hash(&target), target, stream)
+            })
+            .collect();
+        (base, base_hash, variants)
+    }
+
+    /// Decode `pack` through `bases`, collecting what the sink saw.
+    fn decode_collect<B: DeltaBaseSource>(
+        pack: &[u8],
+        bases: &mut B,
+    ) -> Result<(DecodeReport, Vec<Seen>), PackError> {
+        let mut seen = Vec::new();
+        let report = decode_entries_with(pack, bases, DecodeLimits::default(), |e| {
+            assert_eq!(e.id, crate::object::id_from_object(&e.object, e.bytes));
+            seen.push((e.id, e.bytes.to_vec(), e.from_delta));
+            Ok(())
+        })?;
+        Ok((report, seen))
+    }
+
+    /// Self-contained test packs of every entry shape the writer emits
+    /// (raw, raw + in-pack delta, and — under `pack-zstd` — `0x03`/`0x04`).
+    fn self_contained_packs() -> Vec<Vec<u8>> {
+        let mut packs = vec![PackWriter::new().finish().unwrap()];
+
+        let mut w = PackWriter::new();
+        for i in 0..20u32 {
+            let blob = write_blob_via_serialize(&incompressible_bytes(u64::from(i), 256));
+            w.push_raw(hash::hash(&blob), &blob).unwrap();
+        }
+        packs.push(w.finish().unwrap());
+
+        let (base, base_hash, variants) = base_and_variants(3);
+        let mut w = PackWriter::new();
+        w.push_raw(base_hash, &base).unwrap();
+        for (_, _, stream) in &variants {
+            w.push_delta(&base_hash, stream).unwrap();
+        }
+        // Chain: a delta whose base is itself an earlier delta target.
+        let (t0_hash, t0, _) = &variants[0];
+        let mut chained = t0.clone();
+        let last = chained.len() - 1;
+        chained[last] ^= 0x01;
+        w.push_delta(t0_hash, &delta::encode(t0, &chained).unwrap())
+            .unwrap();
+        packs.push(w.finish().unwrap());
+
+        let tree = crate::serialize::serialize(&Object::Tree(crate::object::Tree {
+            entries: vec![crate::object::TreeEntry {
+                name: b"f".to_vec(),
+                mode: crate::object::EntryMode::Blob,
+                object_hash: base_hash,
+            }],
+        }))
+        .unwrap();
+        let mut w = PackWriter::new_raw_only();
+        w.push_raw(crate::object::object_id_from_bytes(&tree), &tree)
+            .unwrap();
+        w.push_raw(base_hash, &base).unwrap();
+        packs.push(w.finish().unwrap());
+
+        #[cfg(feature = "pack-zstd")]
+        {
+            let base = write_blob_via_serialize(b"delta base filler, not target-shaped");
+            let base_hash = hash::hash(&base);
+            let target = write_blob_via_serialize(&compressible_bytes(4096));
+            let raw = write_blob_via_serialize(&compressible_bytes(8192));
+            let mut w = PackWriter::new();
+            w.push_raw(hash::hash(&raw), &raw).unwrap();
+            w.push_raw(base_hash, &base).unwrap();
+            w.push_delta(&base_hash, &delta::encode(&base, &target).unwrap())
+                .unwrap();
+            let pack = w.finish().unwrap();
+            assert_eq!(pack[HEADER_LEN], 0x03, "sanity: zstd-raw entry");
+            packs.push(pack);
+        }
+        packs
+    }
+
+    #[test]
+    fn decode_with_no_external_bases_matches_reader() {
+        for pack in self_contained_packs() {
+            let (_dir, store) = fresh_store();
+            let unpacked = PackReader::read(&pack, &store).unwrap();
+            let (report, seen) = decode_collect(&pack, &mut NoExternalBases).unwrap();
+
+            assert_eq!(report.ids, unpacked.stored);
+            assert_eq!(report.raw_count, unpacked.raw_count as usize);
+            assert_eq!(report.delta_count, unpacked.delta_count as usize);
+            assert_eq!(
+                seen.iter().filter(|s| s.2).count(),
+                unpacked.delta_count as usize
+            );
+            for (id, bytes, _) in &seen {
+                assert_eq!(&store.read(id).unwrap(), bytes, "same bytes under {id:?}");
+            }
+            assert_eq!(seen.iter().map(|s| s.0).collect::<Vec<_>>(), report.ids);
+        }
+    }
+
+    #[test]
+    fn decode_rejects_exactly_what_reader_rejects() {
+        // The reader has no decode budget, so compare against an unbounded
+        // decoder (the over-cap delta would otherwise trip the budget first).
+        let unbounded = DecodeLimits::default().with_max_decoded_bytes(u64::MAX);
+        // Every error-precedence pack pinned above must fail the same way
+        // through the store-less decoder.
+        let base_obj = write_blob_via_serialize(&[0u8; 64]);
+        let target_obj = write_blob_via_serialize(&[1u8; 64]);
+        let base_hash = hash::hash(&base_obj);
+        let stream = delta::encode(&base_obj, &target_obj).unwrap();
+        let mut w = PackWriter::new();
+        w.push_delta(&base_hash, &stream).unwrap();
+        for i in 0..200u32 {
+            if i == 100 {
+                w.push_raw([0xEE; 32], b"not a valid mkit object").unwrap();
+                continue;
+            }
+            let obj = write_blob_via_serialize(&i.to_le_bytes());
+            w.push_raw(hash::hash(&obj), &obj).unwrap();
+        }
+        w.push_raw(base_hash, &base_obj).unwrap();
+        let delta_first = w.finish().unwrap();
+
+        let mut w = PackWriter::new();
+        w.push_raw([0xEE; 32], b"not a valid mkit object").unwrap();
+        w.push_delta(&base_hash, &stream).unwrap();
+        let raw_first = w.finish().unwrap();
+
+        let mut w = PackWriter::new();
+        w.push_raw(base_hash, &base_obj).unwrap();
+        let oversized = {
+            let mut s = stream.clone();
+            s[5..9].copy_from_slice(
+                &u32::try_from(MAX_RAW_OBJECT_SIZE + 1)
+                    .unwrap()
+                    .to_le_bytes(),
+            );
+            s
+        };
+        w.push_delta(&base_hash, &oversized).unwrap();
+        let over_cap = w.finish().unwrap();
+
+        let mut flipped = PackWriter::new().finish().unwrap();
+        flipped[HEADER_LEN] ^= 0x01;
+
+        for pack in [delta_first, raw_first, over_cap, flipped] {
+            let (_dir, store) = fresh_store();
+            let reader = PackReader::read(&pack, &store).unwrap_err();
+            let decoder = decode_entries_with(&pack, &mut NoExternalBases, unbounded, |_| Ok(()))
+                .unwrap_err();
+            assert_eq!(reader.to_string(), decoder.to_string());
+        }
+    }
+
+    #[test]
+    fn external_base_outside_source_is_delta_base_missing() {
+        // The base exists — in a store the decoder is not given. A
+        // membership-scoped source that does not list it, and a source
+        // with no external bases at all, must both fail exactly as a base
+        // that exists nowhere does.
+        struct Membership<'s> {
+            store: &'s ObjectStore,
+            members: std::collections::BTreeSet<Hash>,
+        }
+        impl DeltaBaseSource for Membership<'_> {
+            fn base(&mut self, id: &Hash) -> Result<Option<Vec<u8>>, PackError> {
+                if !self.members.contains(id) {
+                    return Ok(None);
+                }
+                Ok(Some(self.store.read(id)?))
+            }
+        }
+
+        let (_other_dir, other_repo) = fresh_store();
+        let (base, base_hash, variants) = base_and_variants(1);
+        other_repo.write(&base).unwrap();
+        let mut w = PackWriter::new();
+        w.push_delta(&base_hash, &variants[0].2).unwrap();
+        let pack = w.finish().unwrap();
+
+        let (_dir, empty) = fresh_store();
+        let nowhere = PackReader::read(&pack, &empty).unwrap_err().to_string();
+        assert_eq!(
+            nowhere,
+            PackError::DeltaBaseMissing(hash::to_hex(&base_hash)).to_string()
+        );
+
+        let mut sink_calls = 0usize;
+        let no_ext =
+            decode_entries_with(&pack, &mut NoExternalBases, DecodeLimits::default(), |_| {
+                sink_calls += 1;
+                Ok(())
+            })
+            .unwrap_err();
+        assert_eq!(no_ext.to_string(), nowhere);
+
+        let mut scoped = Membership {
+            store: &other_repo,
+            members: std::collections::BTreeSet::new(),
+        };
+        let not_member = decode_entries_with(&pack, &mut scoped, DecodeLimits::default(), |_| {
+            sink_calls += 1;
+            Ok(())
+        })
+        .unwrap_err();
+        assert_eq!(not_member.to_string(), nowhere);
+        assert_eq!(sink_calls, 0);
+
+        // Once the base IS a member, the same pack decodes.
+        scoped.members.insert(base_hash);
+        let (report, seen) = decode_collect(&pack, &mut scoped).unwrap();
+        assert_eq!(report.ids, vec![variants[0].0]);
+        assert_eq!(seen[0].1, variants[0].1);
+        assert!(seen[0].2);
+    }
+
+    #[test]
+    fn untrusted_source_returning_wrong_bytes_is_rejected() {
+        struct Lying {
+            answer: Vec<u8>,
+        }
+        impl DeltaBaseSource for Lying {
+            fn base(&mut self, _id: &Hash) -> Result<Option<Vec<u8>>, PackError> {
+                Ok(Some(self.answer.clone()))
+            }
+        }
+
+        let (base, base_hash, variants) = base_and_variants(1);
+        let mut w = PackWriter::new();
+        w.push_delta(&base_hash, &variants[0].2).unwrap();
+        let pack = w.finish().unwrap();
+        let expected = PackError::DeltaBaseMissing(hash::to_hex(&base_hash)).to_string();
+
+        // A different, perfectly valid object; bytes that are not an
+        // object; and a pack-only delta object: none may stand in.
+        let impostor = write_blob_via_serialize(b"a different valid object");
+        let delta_obj = crate::serialize::serialize(&Object::Delta(crate::object::Delta {
+            base_hash,
+            result_size: 0,
+            instructions: vec![],
+        }))
+        .unwrap();
+        for answer in [impostor, b"garbage".to_vec(), delta_obj] {
+            let mut emitted = Vec::new();
+            let err =
+                decode_entries_with(&pack, &mut Lying { answer }, DecodeLimits::default(), |e| {
+                    emitted.push(e.id);
+                    Ok(())
+                })
+                .unwrap_err();
+            assert_eq!(err.to_string(), expected);
+            assert!(emitted.is_empty(), "no target may be emitted");
+        }
+
+        // The genuine bytes from the same untrusted source are accepted.
+        let (report, _) = decode_collect(&pack, &mut Lying { answer: base }).unwrap();
+        assert_eq!(report.ids, vec![variants[0].0]);
+    }
+
+    #[test]
+    fn store_source_is_verified_once() {
+        // `multiple_deltas_against_shared_external_base_read_store_once`,
+        // through the store-less decoder with `&ObjectStore` as source.
+        const N: usize = 5;
+        let (_dir, store) = fresh_store();
+        let (base, base_hash, variants) = base_and_variants(N);
+        store.write(&base).unwrap();
+        let mut w = PackWriter::new();
+        for (_, _, stream) in &variants {
+            w.push_delta(&base_hash, stream).unwrap();
+        }
+        let pack = w.finish().unwrap();
+
+        let reads_before = store.read_call_count();
+        let mut source = &store;
+        let (report, seen) = decode_collect(&pack, &mut source).unwrap();
+        assert_eq!(store.read_call_count() - reads_before, 1);
+        assert_eq!(report.delta_count, N);
+        for ((id, bytes, _), (want_id, want, _)) in seen.iter().zip(&variants) {
+            assert_eq!(id, want_id);
+            assert_eq!(bytes, want);
+        }
+        // Store-less: nothing was written.
+        for (id, _, _) in &variants {
+            assert!(!store.contains(id));
+        }
+    }
+
+    #[test]
+    fn corrupt_store_base_is_a_loud_store_error() {
+        // The verified store path keeps its pre-seam behavior: a base whose
+        // on-disk bytes no longer hash to its id is `Store(HashMismatch)`,
+        // not a silent "missing".
+        use std::io::{Seek, Write};
+        let (_dir, store) = fresh_store();
+        let (base, base_hash, variants) = base_and_variants(1);
+        store.write(&base).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(store.path_for(&base_hash))
+            .unwrap();
+        f.seek(std::io::SeekFrom::End(-1)).unwrap();
+        f.write_all(&[base[base.len() - 1] ^ 0xFF]).unwrap();
+        drop(f);
+        let mut w = PackWriter::new();
+        w.push_delta(&base_hash, &variants[0].2).unwrap();
+        let pack = w.finish().unwrap();
+
+        let reader = PackReader::read(&pack, &store).unwrap_err();
+        let mut source = &store;
+        let decoder = decode_entries_with(&pack, &mut source, DecodeLimits::default(), |_| Ok(()))
+            .unwrap_err();
+        assert!(matches!(reader, PackError::Store(_)), "{reader:?}");
+        assert_eq!(reader.to_string(), decoder.to_string());
+    }
+
+    /// The WP-4.2 review's memory probe: one 64 KiB raw base, then `n`
+    /// deltas, each a valid SPEC-DELTA stream that rebuilds a distinct
+    /// `target_len`-byte blob purely by copying base bytes (a few bytes of
+    /// wire per 64 KiB of result; `pack-zstd` shrinks it further).
+    /// Returns the pack and the ids of the delta targets.
+    fn delta_bomb(n: u32, target_len: usize) -> (Vec<u8>, Vec<Hash>) {
+        let base = write_blob_via_serialize(&vec![0u8; 65536]);
+        let base_hash = hash::hash(&base);
+        let zeros_at = u32::try_from(base.len() - 65536).unwrap();
+        // Blob prologue + length for a `target_len`-byte blob.
+        let mut prologue = write_blob_via_serialize(&[]);
+        let len_at = prologue.len() - 4;
+        prologue[len_at..].copy_from_slice(&u32::try_from(target_len).unwrap().to_le_bytes());
+        let total = prologue.len() + target_len;
+
+        let mut w = PackWriter::new();
+        w.push_raw(base_hash, &base).unwrap();
+        let mut ids = Vec::new();
+        for i in 0..n {
+            let mut s = vec![delta::STREAM_VERSION];
+            s.extend_from_slice(&u32::try_from(base.len()).unwrap().to_le_bytes());
+            s.extend_from_slice(&u32::try_from(total).unwrap().to_le_bytes());
+            s.push(u8::try_from(prologue.len()).unwrap());
+            s.extend_from_slice(&prologue);
+            // Four distinguishing data bytes, then zeros copied from base.
+            s.push(4);
+            s.extend_from_slice(&i.to_le_bytes());
+            let mut left = target_len - 4;
+            while left > 0 {
+                let len = left.min(65535);
+                s.push(delta::OP_COPY);
+                s.extend_from_slice(&zeros_at.to_le_bytes());
+                s.extend_from_slice(&u16::try_from(len).unwrap().to_le_bytes());
+                left -= len;
+            }
+            w.push_delta(&base_hash, &s).unwrap();
+            let mut data = vec![0u8; target_len];
+            data[..4].copy_from_slice(&i.to_le_bytes());
+            ids.push(hash::hash(&write_blob_via_serialize(&data)));
+        }
+        (w.finish().unwrap(), ids)
+    }
+
+    #[test]
+    fn delta_bomb_is_rejected_before_any_delta_is_applied() {
+        // 16 deltas declaring 128 MiB each (2 GiB in all) from a pack of a
+        // few hundred KiB at most: over the default 1 GiB budget, so the
+        // decode fails before it applies (allocates) a single target.
+        let (pack, _) = delta_bomb(16, 128 << 20);
+        assert!(pack.len() < 512 * 1024, "pack is {} bytes", pack.len());
+        let mut sink_calls = 0usize;
+        let err = decode_entries_with(&pack, &mut NoExternalBases, DecodeLimits::default(), |_| {
+            sink_calls += 1;
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(matches!(err, PackError::PackfileTooLarge), "{err:?}");
+        assert_eq!(sink_calls, 0, "rejected before the first entry is judged");
+    }
+
+    #[test]
+    fn decode_budget_is_caller_set() {
+        // The same construction at a small size decodes to real objects
+        // under a budget that covers it, and fails under one just short of
+        // the declared results alone. (Under `pack-zstd` the writer also
+        // compresses the streams, whose claims are charged too, so the
+        // exact boundary depends on the build.)
+        const TARGET: usize = 256 * 1024;
+        let (pack, ids) = delta_bomb(3, TARGET);
+        let declared = 3 * (TARGET as u64 + 10);
+
+        let fits = DecodeLimits::default().with_max_decoded_bytes(2 * declared);
+        let (_dir, store) = fresh_store();
+        let unpacked = PackReader::read(&pack, &store).unwrap();
+        let mut seen = Vec::new();
+        let report = decode_entries_with(&pack, &mut NoExternalBases, fits, |e| {
+            seen.push(e.id);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(report.ids, unpacked.stored);
+        assert_eq!(seen[1..], ids[..]);
+
+        let short = DecodeLimits::default().with_max_decoded_bytes(declared - 1);
+        let err = decode_entries_with(&pack, &mut NoExternalBases, short, |_| Ok(())).unwrap_err();
+        assert!(matches!(err, PackError::PackfileTooLarge), "{err:?}");
+    }
+
+    #[test]
+    fn compressed_claims_are_charged_before_decompression() {
+        // A v2 `0x03` entry claiming 512 MiB behind a bogus frame: a
+        // decoder that decompressed first would fail on the frame; the
+        // budget must reject on the claim alone.
+        let claimed = u32::try_from(512usize << 20).unwrap();
+        let mut buf = Vec::new();
+        buf.extend_from_slice(MAGIC);
+        buf.extend_from_slice(&VERSION_V2.to_le_bytes());
+        buf.extend_from_slice(&1u32.to_le_bytes());
+        buf.push(0x03);
+        let mut inner = claimed.to_le_bytes().to_vec();
+        inner.extend_from_slice(&[0u8; 8]);
+        buf.extend_from_slice(&u32::try_from(inner.len()).unwrap().to_le_bytes());
+        buf.extend_from_slice(&inner);
+        let pack = finish_pack_body(buf);
+
+        let small = DecodeLimits::default().with_max_decoded_bytes(1 << 20);
+        let err = decode_entries_with(&pack, &mut NoExternalBases, small, |_| Ok(())).unwrap_err();
+        assert!(matches!(err, PackError::PackfileTooLarge), "{err:?}");
+        // Within budget, the frame itself is what fails.
+        let err = decode_entries_with(&pack, &mut NoExternalBases, DecodeLimits::default(), |_| {
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(!matches!(err, PackError::PackfileTooLarge), "{err:?}");
+    }
+
+    #[test]
+    fn payload_len_u32_max_is_a_clean_error() {
+        // `pos + payload_len` used to overflow a 32-bit `usize` (wasm32)
+        // here; the checks are now subtraction-based. 64-bit hosts get the
+        // same clean `UnexpectedEof`; `mkit-core-wasm-check` runs the
+        // wasm32 lane.
+        let blob = write_blob_via_serialize(&[1, 2, 3]);
+        let mut w = PackWriter::new_raw_only();
+        w.push_raw(hash::hash(&blob), &blob).unwrap();
+        let mut pack = w.finish().unwrap();
+        pack[HEADER_LEN + 1..HEADER_LEN + 5].copy_from_slice(&u32::MAX.to_le_bytes());
+        let split = pack.len() - TRAILER_LEN;
+        let trailer = hash::hash(&pack[..split]);
+        pack[split..].copy_from_slice(&trailer);
+
+        assert!(matches!(
+            PackEntries::new(&pack).unwrap_err(),
+            PackError::UnexpectedEof
+        ));
+        assert!(matches!(
+            delta_base_hashes(&pack).unwrap_err(),
+            PackError::UnexpectedEof
+        ));
+        let err = decode_entries_with(&pack, &mut NoExternalBases, DecodeLimits::default(), |_| {
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(matches!(err, PackError::UnexpectedEof), "{err:?}");
+    }
+
+    #[test]
+    fn only_named_bases_stay_resident() {
+        // Behavioral pin for the retention rule: an entry no delta names
+        // is dropped after the sink, yet a later delta against an earlier
+        // *named* entry (raw or delta target) still resolves.
+        let (base, base_hash, variants) = base_and_variants(2);
+        let unrelated = write_blob_via_serialize(b"never a base");
+        let (t0_hash, t0, _) = &variants[0];
+        let mut chained = t0.clone();
+        let last = chained.len() - 1;
+        chained[last] ^= 0x01;
+        let mut w = PackWriter::new();
+        w.push_raw(hash::hash(&unrelated), &unrelated).unwrap();
+        w.push_raw(base_hash, &base).unwrap();
+        w.push_delta(&base_hash, &variants[0].2).unwrap();
+        w.push_delta(t0_hash, &delta::encode(t0, &chained).unwrap())
+            .unwrap();
+        let pack = w.finish().unwrap();
+        let (_dir, store) = fresh_store();
+        let unpacked = PackReader::read(&pack, &store).unwrap();
+        let (report, _) = decode_collect(&pack, &mut NoExternalBases).unwrap();
+        assert_eq!(report.ids, unpacked.stored);
+    }
+
+    /// A repository-membership source over in-memory objects, counting
+    /// fetches (the review's `bomb ext` shape: bases live only here).
+    struct Members {
+        objects: std::collections::HashMap<Hash, Vec<u8>>,
+        fetches: usize,
+    }
+
+    impl DeltaBaseSource for Members {
+        fn base(&mut self, id: &Hash) -> Result<Option<Vec<u8>>, PackError> {
+            self.fetches += 1;
+            Ok(self.objects.get(id).cloned())
+        }
+    }
+
+    /// Two 600 KiB member blobs and a tiny delta against each: `(source,
+    /// [(base id, delta stream)])`. Each delta rebuilds a small blob, so
+    /// its declared result is a few hundred bytes.
+    fn large_member_bases() -> (Members, Vec<(Hash, Vec<u8>)>) {
+        let mut objects = std::collections::HashMap::new();
+        let mut deltas = Vec::new();
+        for seed in [1u64, 2] {
+            let base = write_blob_via_serialize(&incompressible_bytes(seed, 600 * 1024));
+            let id = hash::hash(&base);
+            let target = write_blob_via_serialize(&base[10..300]);
+            deltas.push((id, delta::encode(&base, &target).unwrap()));
+            objects.insert(id, base);
+        }
+        (
+            Members {
+                objects,
+                fetches: 0,
+            },
+            deltas,
+        )
+    }
+
+    fn pack_of_deltas(deltas: &[&(Hash, Vec<u8>)]) -> Vec<u8> {
+        let mut w = PackWriter::new();
+        for (base, stream) in deltas {
+            w.push_delta(base, stream).unwrap();
+        }
+        w.finish().unwrap()
+    }
+
+    #[test]
+    fn external_bases_are_charged_against_the_budget() {
+        let one_mib = DecodeLimits::default().with_max_decoded_bytes(1 << 20);
+        let (mut members, deltas) = large_member_bases();
+
+        // A then B then A: A must stay cached while B is fetched, so the
+        // two 600 KiB bases are held at once and pass the 1 MiB budget at
+        // B's fetch. Only the first delta reaches the sink.
+        let pack = pack_of_deltas(&[&deltas[0], &deltas[1], &deltas[0]]);
+        let mut sink_calls = 0usize;
+        let err = decode_entries_with(&pack, &mut members, one_mib, |_| {
+            sink_calls += 1;
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(matches!(err, PackError::PackfileTooLarge), "{err:?}");
+        assert_eq!(sink_calls, 1);
+
+        // A single base larger than the budget fails before any sink call.
+        let half_mib = DecodeLimits::default().with_max_decoded_bytes(512 * 1024);
+        let pack = pack_of_deltas(&[&deltas[0]]);
+        let mut sink_calls = 0usize;
+        let err = decode_entries_with(&pack, &mut members, half_mib, |_| {
+            sink_calls += 1;
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(matches!(err, PackError::PackfileTooLarge), "{err:?}");
+        assert_eq!(sink_calls, 0);
+    }
+
+    #[test]
+    fn external_base_charge_is_released_after_its_last_use() {
+        // A, A, then B: A's last use comes before B is fetched, so A is
+        // dropped and its charge credited back; the peak is one base, and
+        // the same 1 MiB budget accepts the pack. A is fetched once.
+        let one_mib = DecodeLimits::default().with_max_decoded_bytes(1 << 20);
+        let (mut members, deltas) = large_member_bases();
+        let pack = pack_of_deltas(&[&deltas[0], &deltas[0], &deltas[1]]);
+        let report = decode_entries_with(&pack, &mut members, one_mib, |_| Ok(())).unwrap();
+        assert_eq!(report.delta_count, 3);
+        assert_eq!(members.fetches, 2);
+    }
+
+    #[test]
+    fn sink_error_stops_decode() {
+        let mut w = PackWriter::new();
+        let mut ids = Vec::new();
+        for i in 0..5u32 {
+            let blob = write_blob_via_serialize(&i.to_le_bytes());
+            ids.push(w.push_raw(hash::hash(&blob), &blob).unwrap());
+        }
+        let pack = w.finish().unwrap();
+
+        let mut seen = Vec::new();
+        let err = decode_entries_with(&pack, &mut NoExternalBases, DecodeLimits::default(), |e| {
+            seen.push(e.id);
+            if seen.len() == 2 {
+                return Err(PackError::TrailingData);
+            }
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(matches!(err, PackError::TrailingData), "{err:?}");
+        assert_eq!(seen, ids[..2]);
     }
 
     #[test]

@@ -21,7 +21,9 @@
 //! deterministic from the seed.
 
 use crate::hash::{HASH_LEN, Hash};
-use crate::object::{Commit, Identity, MAGIC, MkitError, ObjectType, Remix, SCHEMA_VERSION, Tag};
+use crate::object::{
+    Commit, Identity, MAGIC, MkitError, Object, ObjectType, Remix, SCHEMA_VERSION, Tag,
+};
 
 use core::fmt;
 use std::path::Path;
@@ -572,6 +574,26 @@ pub fn verify_remix(r: &Remix) -> Result<(), MkitError> {
     verify(&pk, REMIX_DOMAIN, &sb, &sig)
 }
 
+/// Verify the signature a signed object carries: [`verify_commit`],
+/// [`verify_remix`] or [`verify_tag`] by type. `Blob`, `Tree`,
+/// `ChunkedBlob` and `Delta` carry no signature and return `Ok(())`.
+///
+/// The one per-object signature dispatch shared by push verification
+/// (`mkit_core::verify::verify_push`) and the CLI's fetch-side check.
+///
+/// # Errors
+///
+/// The underlying `verify_*` error for a commit, remix or tag whose
+/// signature does not verify under its embedded `signer`.
+pub fn verify_object_signature(obj: &Object) -> Result<(), MkitError> {
+    match obj {
+        Object::Commit(c) => verify_commit(c),
+        Object::Remix(r) => verify_remix(r),
+        Object::Tag(t) => verify_tag(t),
+        Object::Blob(_) | Object::Tree(_) | Object::ChunkedBlob(_) | Object::Delta(_) => Ok(()),
+    }
+}
+
 // -------------------------------------------------------------------
 // Key file I/O — `.mkit/keys/default.key`
 // -------------------------------------------------------------------
@@ -918,6 +940,31 @@ mod tests {
             verify(&kp.public, COMMIT_DOMAIN, &tampered, &sig),
             Err(MkitError::SignatureInvalid)
         ));
+    }
+
+    #[test]
+    fn verify_object_signature_dispatches_by_type() {
+        use crate::object::{Blob, Commit, Identity, Object};
+        let kp = fixed_kp();
+        let mut commit = Commit {
+            tree_hash: [1u8; 32],
+            parents: vec![],
+            author: Identity::ed25519(kp.public.0),
+            signer: kp.public.0,
+            message: b"m".to_vec(),
+            timestamp: 1,
+            message_hash: [0u8; 32],
+            content_digest: [0u8; 32],
+            signature: [0u8; 64],
+        };
+        commit.signature = sign_commit(&commit, &kp).expect("sign").0;
+        verify_object_signature(&Object::Commit(commit.clone())).expect("signed commit");
+        commit.message = b"tampered".to_vec();
+        assert!(matches!(
+            verify_object_signature(&Object::Commit(commit)),
+            Err(MkitError::SignatureInvalid)
+        ));
+        verify_object_signature(&Object::Blob(Blob { data: vec![] })).expect("unsigned kind");
     }
 
     #[test]

@@ -38,7 +38,7 @@ use mkit_core::object::Object;
 use mkit_core::pack::{self, PackReader};
 use mkit_core::protocol::{AdvanceOutcome, PackKey, Transport, TransportError};
 use mkit_core::refs;
-use mkit_core::sign::{self, verify_commit, verify_remix, verify_tag};
+use mkit_core::sign;
 use mkit_core::store::ObjectStore;
 use mkit_core::transfer;
 use rayon::prelude::*;
@@ -791,23 +791,15 @@ fn verify_new_object_signatures(
         .try_for_each(|chunk| verify_slice(store, chunk, true))
 }
 
-/// Verify [`verify_commit`]/[`verify_remix`]/[`verify_tag`] on a single
-/// already-read object; Blob/Tree/ChunkedBlob/Delta carry no signature
-/// and are skipped. The exact per-object check
-/// [`verify_new_object_signatures`] used unconditionally before batch
-/// verification was added, now used both as [`verify_slice`]'s fallback
-/// and — via that fallback — the sole check whenever the batch fast path
-/// doesn't apply or doesn't succeed.
+/// Verify the signature on a single already-read object through
+/// [`sign::verify_object_signature`] (commit/remix/tag; Blob/Tree/
+/// ChunkedBlob/Delta carry no signature and pass). The exact per-object
+/// check [`verify_new_object_signatures`] used unconditionally before
+/// batch verification was added, now used both as [`verify_slice`]'s
+/// fallback and — via that fallback — the sole check whenever the batch
+/// fast path doesn't apply or doesn't succeed.
 fn verify_one_object(h: Hash, obj: &Object) -> Result<(), DispatchError> {
-    let result = match obj {
-        Object::Commit(c) => verify_commit(c),
-        Object::Remix(r) => verify_remix(r),
-        Object::Tag(t) => verify_tag(t),
-        Object::Blob(_) | Object::Tree(_) | Object::ChunkedBlob(_) | Object::Delta(_) => {
-            return Ok(());
-        }
-    };
-    result.map_err(|e| DispatchError::UnsignedOrInvalidObject {
+    sign::verify_object_signature(obj).map_err(|e| DispatchError::UnsignedOrInvalidObject {
         hash: hash::to_hex(&h),
         reason: e.to_string(),
     })

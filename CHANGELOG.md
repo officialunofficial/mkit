@@ -75,6 +75,31 @@ train).
 
 ### Added
 
+- *(core)* `pack::DeltaBaseSource`: the external delta-base lookup is
+  now an explicit, generic parameter, so a server can resolve bases only
+  from the pushing repository's membership (PRD §6.5, no existence
+  oracles). `&ObjectStore` implements it (`PackReader::read` is
+  unchanged, byte for byte and in error order); `NoExternalBases` is the
+  self-contained-pack source. A source not marked `VERIFIED` has its
+  bytes re-derived, and anything but the requested object is
+  `DeltaBaseMissing`, the same error as an absent base. New store-less
+  `pack::decode_entries_with(pack, bases, limits, sink)` validates and
+  decodes a pack in pack order, handing each `DecodedEntry` to `sink`
+  (`DecodeReport` summarizes). `DecodeLimits::max_decoded_bytes` (default
+  1 GiB, per call) caps what a decode may hold: every compressed entry's
+  claimed size and every delta's declared result length are charged
+  before anything is decompressed or applied, and every external base as
+  it is fetched (credited back after its last use), so a tiny pack cannot
+  pin gigabytes (`PackError::PackfileTooLarge`).
+- *(core)* `verify::verify_push(tips, mode, source, known)` /
+  `PushReport`: incremental push verification before refs move. It walks
+  every new tip's closure through the shared closure BFS, re-hashes each
+  object, checks commit/remix/tag signatures, stops at a caller-supplied
+  frontier of objects already verified in the repository, and reports
+  missing, corrupt, badly signed objects and non-commit tips.
+- *(core)* `sign::verify_object_signature(&Object)`: the per-type
+  signature check (`verify_commit` / `verify_remix` / `verify_tag`; Ok for
+  unsigned kinds). The CLI's fetch-side signature check now calls it.
 - *(core)* `verify::build_disclosure_from`: builds SPEC-DISCLOSURE
   bundles through any verifying `store::ObjectSource` (a per-repository
   index or the global object CAS), not just the on-disk `ObjectStore`.
@@ -449,6 +474,15 @@ train).
 
 ### Fixed
 
+- *(core)* Pack framing no longer overflows a 32-bit `usize`: a
+  `payload_len` near `u32::MAX` made `pos + payload_len` trap on wasm32
+  (release builds keep `overflow-checks`) in `PackEntries::new`,
+  `delta_base_hashes` and, through them, `verify_closure_packs` (exported
+  by mkit-wasm). It is now `PackError::UnexpectedEof`; a wasm32 test in
+  `mkit-core-wasm-check` pins it.
+- *(core)* The closure BFS queues each id once. A tree whose entries all
+  name one object no longer grows the queue per reference; fetch order is
+  unchanged.
 - *(core)* The disclosure builder no longer panics on a `ChunkedBlob`
   range whose `offset + len` overflows `u64` (e.g.
   `mkit prove --range 10:18446744073709551615`) or on a chunk shorter

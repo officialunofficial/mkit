@@ -347,6 +347,8 @@ pub use closure::{
     verify_closure, verify_closure_manifest, verify_closure_packs, verify_closure_store,
     verify_closure_streaming,
 };
+mod push;
+pub use push::{PushReport, verify_push};
 
 // ---------------------------------------------------------------------------
 // Public types
