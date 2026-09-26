@@ -10,9 +10,11 @@
 //! * [`epoch`]: the §5.1 epoch statement and the §5.2 check 7.
 //! * [`visibility`]: the §9.1 visibility statement.
 //! * [`config`]: the deployment's [`VerifierConfig`] (own audience,
-//!   accepted schemes).
-//! * [`owner`]: §4 owner-signature dispatch (`ed25519`; the ECDSA schemes
-//!   follow).
+//!   accepted schemes, `WebAuthn` relying parties).
+//! * [`owner`]: §4 owner-signature dispatch (`ed25519`, `secp256k1-eip191`,
+//!   `webauthn-p256`).
+//! * [`webauthn`]: the `webauthn-p256` blob, relying parties and the §4.3
+//!   assertion checks.
 //! * [`verify`]: the stateless §7 verifier, the §5.2 and §9.1 statement
 //!   checks and the §10 registration check.
 //!
@@ -33,6 +35,7 @@ pub mod statement;
 pub mod text;
 pub mod verify;
 pub mod visibility;
+pub mod webauthn;
 
 pub use config::{AcceptedSchemes, VerifierConfig, is_loopback_origin};
 pub use epoch::{EpochStatement, EpochTransition, epoch_transition};
@@ -48,6 +51,7 @@ pub use verify::{
     verify_visibility_statement,
 };
 pub use visibility::{Visibility, VisibilityStatement};
+pub use webauthn::{RelyingParty, WebAuthnAssertion, webauthn_challenge};
 
 /// Domain separator and first field of a grant statement (§12.1).
 pub const DOMAIN_GRANT: &str = "mkit-write-grant:v1";

@@ -20,8 +20,9 @@
 use mkit_core::repo_identity::RepositoryIdentity;
 
 use super::epoch::EpochStatement;
-use super::owner::verify_owner_signature;
+use super::owner::verify_owner;
 use super::visibility::VisibilityStatement;
+use super::webauthn::WebAuthnBinding;
 use super::{
     Capability, Grant, GrantError, MAX_CLOCK_LEAD_MS, OwnerScheme, RefFlags, SignedHeader,
     VerifierConfig,
@@ -37,6 +38,7 @@ macro_rules! verified_statement {
             statement: $statement,
             id: [u8; 32],
             scheme: OwnerScheme,
+            webauthn: Option<WebAuthnBinding>,
         }
 
         impl $name {
@@ -58,6 +60,16 @@ macro_rules! verified_statement {
             pub fn scheme(&self) -> OwnerScheme {
                 self.scheme
             }
+
+            /// For a `webauthn-p256` owner signature, the relying-party id
+            /// and the `clientDataJSON` origin it was bound to (§4.3 rule 4);
+            /// `None` for the other schemes.
+            #[must_use]
+            pub fn relying_party(&self) -> Option<(&str, &str)> {
+                self.webauthn
+                    .as_ref()
+                    .map(|b| (b.rp_id.as_str(), b.origin.as_str()))
+            }
         }
     };
 }
@@ -66,19 +78,21 @@ verified_statement!(
     /// A grant whose owner signature verified (§7 steps 1, 3 and 4). The id
     /// is the grant id of §3.4.
     ///
-    /// [`verify_grant_owner`] depends only on the header bytes and the
-    /// configured schemes, so a server MAY cache this value by exact header
-    /// bytes (§7) and call [`OwnerVerified::check`] on every request. A
-    /// cache must be dropped when the accepted schemes change; `check`
-    /// re-tests that the scheme is still accepted, so a stale entry fails
-    /// closed.
+    /// [`verify_grant_owner`] depends only on the header bytes, the
+    /// configured schemes and (for `webauthn-p256`) the configured relying
+    /// parties, so a server MAY cache this value by exact header bytes (§7)
+    /// and call [`OwnerVerified::check`] on every request. A cache must be
+    /// dropped when that configuration changes; `check` re-tests that the
+    /// scheme is still accepted and that a `webauthn-p256` signature's
+    /// relying party and origin are still configured, so a stale entry
+    /// fails closed.
     ///
     /// Code outside this module cannot build one around an unsigned grant:
     ///
     /// ```compile_fail,E0451
     /// use mkit_attest::grant::{Grant, OwnerScheme, OwnerVerified};
     /// fn forge(statement: Grant) -> OwnerVerified {
-    ///     OwnerVerified { statement, id: [0; 32], scheme: OwnerScheme::Ed25519 }
+    ///     OwnerVerified { statement, id: [0; 32], scheme: OwnerScheme::Ed25519, webauthn: None }
     /// }
     /// ```
     OwnerVerified,
@@ -95,7 +109,7 @@ verified_statement!(
     /// ```compile_fail,E0451
     /// use mkit_attest::grant::{EpochStatement, OwnerScheme, VerifiedEpoch};
     /// fn forge(statement: EpochStatement) -> VerifiedEpoch {
-    ///     VerifiedEpoch { statement, id: [0; 32], scheme: OwnerScheme::Ed25519 }
+    ///     VerifiedEpoch { statement, id: [0; 32], scheme: OwnerScheme::Ed25519, webauthn: None }
     /// }
     /// ```
     VerifiedEpoch,
@@ -113,7 +127,7 @@ verified_statement!(
     /// ```compile_fail,E0451
     /// use mkit_attest::grant::{OwnerScheme, VerifiedVisibility, VisibilityStatement};
     /// fn forge(statement: VisibilityStatement) -> VerifiedVisibility {
-    ///     VerifiedVisibility { statement, id: [0; 32], scheme: OwnerScheme::Ed25519 }
+    ///     VerifiedVisibility { statement, id: [0; 32], scheme: OwnerScheme::Ed25519, webauthn: None }
     /// }
     /// ```
     VerifiedVisibility,
@@ -263,11 +277,11 @@ fn check_audience(cfg: &VerifierConfig, audiences: &[String]) -> Result<(), Gran
 ///
 /// # Errors
 /// The first failure: a header or §3.5 parse error, then a
-/// [`verify_owner_signature`] error.
+/// [`super::verify_owner_signature`] error.
 pub fn verify_grant_owner(cfg: &VerifierConfig, header: &str) -> Result<OwnerVerified, GrantError> {
     let header = SignedHeader::parse(header)?;
     let (grant, id) = Grant::parse_with_id(&header.statement)?;
-    verify_owner_signature(
+    let webauthn = verify_owner(
         cfg,
         header.scheme,
         &header.statement,
@@ -278,12 +292,15 @@ pub fn verify_grant_owner(cfg: &VerifierConfig, header: &str) -> Result<OwnerVer
         statement: grant,
         id,
         scheme: header.scheme,
+        webauthn,
     })
 }
 
 impl OwnerVerified {
     /// The per-request §7 steps, in spec order: the scheme is still
-    /// accepted (step 3, re-tested so a cached value fails closed), step 2
+    /// accepted and, for `webauthn-p256`, its relying party and origin are
+    /// still configured (step 3, re-tested so a cached value fails closed:
+    /// `SchemeNotAdvertised`, `OriginNotAllowed`), step 2
     /// (`NamespaceMismatch`), step 5 (`AudienceNotListed`), step 6
     /// (`RepositoryNotInScope`), step 7 (`CapabilityNotGranted`), step 9
     /// (`GranteeMismatch`) and step 10 (`NotYetValid`, `Expired`).
@@ -298,6 +315,11 @@ impl OwnerVerified {
         let g = &self.statement;
         if !cfg.schemes().contains(self.scheme) {
             return Err(GrantError::SchemeNotAdvertised);
+        }
+        if let Some(b) = &self.webauthn
+            && !cfg.allows_relying_party(&b.rp_id, &b.origin)
+        {
+            return Err(GrantError::OriginNotAllowed);
         }
         if req.repository.namespace() != Some(&g.namespace) {
             return Err(GrantError::NamespaceMismatch);
@@ -361,7 +383,7 @@ pub fn verify_epoch_statement(
 ) -> Result<VerifiedEpoch, GrantError> {
     let header = SignedHeader::parse(header)?;
     let statement = EpochStatement::parse(&header.statement)?;
-    verify_owner_signature(
+    let webauthn = verify_owner(
         cfg,
         header.scheme,
         &header.statement,
@@ -374,6 +396,7 @@ pub fn verify_epoch_statement(
         id: mkit_core::hash::hash(&header.statement),
         statement,
         scheme: header.scheme,
+        webauthn,
     })
 }
 
@@ -404,7 +427,7 @@ pub fn verify_visibility_statement(
         .repository
         .namespace()
         .ok_or(GrantError::Repository)?;
-    verify_owner_signature(
+    let webauthn = verify_owner(
         cfg,
         header.scheme,
         &header.statement,
@@ -417,6 +440,7 @@ pub fn verify_visibility_statement(
         id: mkit_core::hash::hash(&header.statement),
         statement,
         scheme: header.scheme,
+        webauthn,
     })
 }
 

@@ -130,6 +130,24 @@ train).
   `webauthn-p256` without a relying party (§4.3). The verifier results
   have no public fields or constructors; a
   `VerifiedGrant`'s effective flags never cover packmap refs directly.
+
+- *(attest)* SPEC-WRITE-GRANTS ECDSA owner schemes (feature `grants`):
+  `secp256k1-eip191` (strict low-S recovery from the EIP-191 digest,
+  `v` 27 or 28, and the recovered address must equal the `0x`
+  namespace) and `webauthn-p256` (the four-field blob, low-S raw
+  signature, curve-checked key whose address must equal the namespace,
+  UP flag, relying-party id hash and that relying party's origin, and a
+  strict `clientDataJSON`: duplicate member names rejected at any depth,
+  `type`, exact challenge, `crossOrigin`, no `topOrigin`, signature over
+  the received bytes). New `RelyingParty`, `WebAuthnAssertion` and
+  `webauthn_challenge`; `OwnerVerified`/`VerifiedEpoch`/
+  `VerifiedVisibility::relying_party`. **Breaking (unreleased API):**
+  `VerifierConfig::new` and `new_allowing_loopback` take the relying
+  parties (`webauthn-p256` needs one; `new` refuses loopback ones), a
+  cached `OwnerVerified` re-checks its relying party in `check`, and
+  `GrantError::SchemeNotImplemented` is replaced by per-rule variants.
+  Signed goldens and verify-reject vectors for both schemes, cross-checked
+  by `scripts/golden/grants_ref.py` with python-`ecdsa` and pycryptodome.
   New fuzz target `epoch_visibility_parse`; signed goldens
   `{grant,epoch,visibility}-ed25519.json` and `reject/verify-*.json`,
   cross-checked with pycryptodome by `scripts/golden/grants_ref.py`.

@@ -225,7 +225,8 @@ pub fn grant_parse_one_iteration(input: &[u8]) {
 /// re-encodes to exactly the input bytes. The input, read as an
 /// `X-Write-Grant` value, also runs through every verifier entry point,
 /// which must not panic, and whose accepted statements are the canonical
-/// bytes of the header.
+/// bytes of the header. The input also drives the `webauthn-p256` parsers
+/// (see [`webauthn_assertion_checks`]).
 pub fn epoch_visibility_parse_one_iteration(input: &[u8]) {
     use mkit_attest::grant::{
         AcceptedSchemes, Capability, EpochStatement, GrantRequest, OwnerScheme, RepoScope,
@@ -250,6 +251,7 @@ pub fn epoch_visibility_parse_one_iteration(input: &[u8]) {
             "accepted visibility statement must re-encode byte for byte"
         );
     }
+    webauthn_assertion_checks(input);
     let Ok(text) = core::str::from_utf8(input) else {
         return;
     };
@@ -258,7 +260,12 @@ pub fn epoch_visibility_parse_one_iteration(input: &[u8]) {
     };
     let cfg = VerifierConfig::new(
         "https://git.example.com",
-        AcceptedSchemes::of(&[OwnerScheme::Ed25519, OwnerScheme::Secp256k1Eip191]),
+        AcceptedSchemes::of(&[
+            OwnerScheme::Ed25519,
+            OwnerScheme::Secp256k1Eip191,
+            OwnerScheme::WebAuthnP256,
+        ]),
+        vec![fuzz_relying_party()],
     )
     .expect("fixed fuzz config is valid");
     if let Ok(v) = verify_epoch_statement(&cfg, text, NOW_MS) {
@@ -290,6 +297,87 @@ pub fn epoch_visibility_parse_one_iteration(input: &[u8]) {
         }
         let _ = verify_for_registration(&cfg, text, &g.grantee);
     }
+}
+
+fn fuzz_relying_party() -> mkit_attest::grant::RelyingParty {
+    mkit_attest::grant::RelyingParty::new("example.com", ["https://example.com"])
+        .expect("fixed relying party is valid")
+}
+
+/// The `webauthn-p256` owner scheme's parsers (SPEC-WRITE-GRANTS §4, §4.3):
+/// `input` as a whole blob, which never panics and, when its framing
+/// parses, re-encodes to exactly the input; and `input` as the
+/// `clientDataJSON` of an assertion that passes every check before the
+/// client data (owner key: the P-256 generator; `authenticatorData` for
+/// `example.com` with UP set), so the strict JSON walk sees arbitrary bytes.
+/// The signature `(1, 1)` never verifies, so neither may succeed.
+pub fn webauthn_assertion_checks(input: &[u8]) {
+    use mkit_attest::grant::{
+        AcceptedSchemes, Namespace, OwnerScheme, VerifierConfig, WebAuthnAssertion,
+        verify_owner_signature,
+    };
+    /// The P-256 generator `x ‖ y` (SEC 2 §2.4.2).
+    const G: [u8; 64] = [
+        0x6b, 0x17, 0xd1, 0xf2, 0xe1, 0x2c, 0x42, 0x47, 0xf8, 0xbc, 0xe6, 0xe5, 0x63, 0xa4, 0x40,
+        0xf2, 0x77, 0x03, 0x7d, 0x81, 0x2d, 0xeb, 0x33, 0xa0, 0xf4, 0xa1, 0x39, 0x45, 0xd8, 0x98,
+        0xc2, 0x96, 0x4f, 0xe3, 0x42, 0xe2, 0xfe, 0x1a, 0x7f, 0x9b, 0x8e, 0xe7, 0xeb, 0x4a, 0x7c,
+        0x0f, 0x9e, 0x16, 0x2b, 0xce, 0x33, 0x57, 0x6b, 0x31, 0x5e, 0xce, 0xcb, 0xb6, 0x40, 0x68,
+        0x37, 0xbf, 0x51, 0xf5,
+    ];
+    /// SHA-256("example.com").
+    const RP_HASH: [u8; 32] = [
+        0xa3, 0x79, 0xa6, 0xf6, 0xee, 0xaf, 0xb9, 0xa5, 0x5e, 0x37, 0x8c, 0x11, 0x80, 0x34, 0xe2,
+        0x75, 0x1e, 0x68, 0x2f, 0xab, 0x9f, 0x2d, 0x30, 0xab, 0x13, 0xd2, 0x12, 0x55, 0x86, 0xce,
+        0x19, 0x47,
+    ];
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let cfg = VerifierConfig::new(
+        "https://git.example.com",
+        AcceptedSchemes::of(&[OwnerScheme::WebAuthnP256]),
+        vec![fuzz_relying_party()],
+    )
+    .expect("fixed fuzz config is valid");
+    let namespace = Namespace::Address(
+        mkit_attest::eth::address_p256(&G).expect("the generator is a P-256 point"),
+    );
+    let statement = b"mkit-write-grant:v1";
+    let _ = verify_owner_signature(
+        &cfg,
+        OwnerScheme::WebAuthnP256,
+        statement,
+        input,
+        &namespace,
+    );
+    if let Ok(assertion) = WebAuthnAssertion::parse(input) {
+        assert_eq!(
+            assertion.encode().expect("a parsed assertion re-encodes"),
+            input,
+            "a parsed webauthn blob must re-encode byte for byte"
+        );
+    }
+    let mut authenticator_data = RP_HASH.to_vec();
+    authenticator_data.extend_from_slice(&[0x01, 0, 0, 0, 0]);
+    let mut signature = [0u8; 64];
+    signature[31] = 1;
+    signature[63] = 1;
+    let blob = WebAuthnAssertion {
+        public_key: G,
+        authenticator_data,
+        client_data_json: input.to_vec(),
+        signature,
+    }
+    .encode()
+    .expect("a bounded assertion encodes");
+    assert!(
+        verify_owner_signature(
+            &cfg,
+            OwnerScheme::WebAuthnP256,
+            statement,
+            &blob,
+            &namespace
+        )
+        .is_err()
+    );
 }
 
 /// Apply the git tree parser + mode classifier against `input`.
@@ -997,7 +1085,12 @@ mod tests {
         let headers: Vec<String> = [epoch, visibility]
             .iter()
             .flat_map(|s| {
-                [OwnerScheme::Ed25519, OwnerScheme::Secp256k1Eip191].map(|scheme| {
+                [
+                    OwnerScheme::Ed25519,
+                    OwnerScheme::Secp256k1Eip191,
+                    OwnerScheme::WebAuthnP256,
+                ]
+                .map(|scheme| {
                     SignedHeader {
                         statement: s.as_bytes().to_vec(),
                         scheme,
@@ -1015,6 +1108,10 @@ mod tests {
             near_miss.as_bytes(),
             b"",
             &[0xFF; 64],
+            br#"{"type":"webauthn.get","challenge":"x","origin":"https://example.com"}"#,
+            br#"{"type":"webauthn.get","type":"webauthn.get"}"#,
+            br#"{"a":[{"b":{"c":"\ud800"}}]}"#,
+            &[0; 16],
         ];
         cases.extend(headers.iter().map(String::as_bytes));
         for case in cases {

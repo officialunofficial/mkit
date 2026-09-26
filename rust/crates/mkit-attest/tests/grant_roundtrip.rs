@@ -329,6 +329,7 @@ proptest! {
         let cfg = VerifierConfig::new(
             "https://git.example.com",
             AcceptedSchemes::of(&[OwnerScheme::Ed25519]),
+        vec![],
         )
         .unwrap();
         let verified = verify_grant_owner(&cfg, &header).unwrap();

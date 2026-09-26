@@ -7,6 +7,7 @@
 #   rust/tests/golden/grants/grant-statements.json
 #   rust/tests/golden/grants/headers.json
 #   rust/tests/golden/grants/{grant,epoch,visibility}-ed25519.json
+#   rust/tests/golden/grants/{secp256k1-eip191,webauthn-p256}.json
 #   rust/tests/golden/grants/reject/*.json (reject/verify-*: verification)
 #   rust/tests/golden/grants/MANIFEST.txt
 #
@@ -29,6 +30,24 @@
 #     SPEC-SIGNING §1 strict predicate: canonical, non-small-order A and R
 #     and S < L are enforced here, because pycryptodome's RFC 8032 verify
 #     alone accepts, for example, the identity key with R = identity, s = 0.
+#   * the ECDSA owner schemes (§4, §4.1, §4.3, §4.4), written from the spec
+#     with other libraries than the Rust code uses:
+#       - secp256k1-eip191: Keccak-256 from pycryptodome
+#         (Crypto.Hash.keccak); public-key recovery written from SEC 1
+#         §4.1.6 over python-ecdsa's curve arithmetic, cross-checked
+#         against python-ecdsa's own from_public_key_recovery_with_digest
+#         and verify_digest; statements re-signed with python-ecdsa's
+#         RFC 6979 sign_digest_deterministic (HMAC-SHA-256) and low-s
+#         normalization, which must give the fixture's bytes;
+#       - webauthn-p256: points built with pycryptodome ECC.construct
+#         (coordinates checked < p first), signatures verified with DSS
+#         fips-186-3 and re-signed with DSS deterministic-rfc6979 then
+#         normalized to low s; the §4.3 client-data rules with Python's
+#         json module (object_pairs_hook for duplicate names at any depth,
+#         parse_constant refusing NaN/Infinity, strict UTF-8, no unpaired
+#         surrogate).
+#     Self-tests: the web3.js "Some data" EIP-191 vector and the RFC 6979
+#     §A.2.5 P-256/SHA-256 "sample" vector.
 #
 # The reject vectors are authored by the CASES table below: each case edits
 # one field of the §3.4 example so that it breaks exactly one §3.5 rule, and
@@ -46,6 +65,7 @@
 
 import argparse
 import base64
+import hashlib
 import importlib.util
 import ipaddress
 import json
@@ -499,7 +519,7 @@ def b64url_decode(segment):
     return base64.urlsafe_b64decode(segment + "=" * (-len(segment) % 4))
 
 
-def owner_signature(schemes, scheme, statement, blob, namespace):
+def owner_signature(schemes, scheme, statement, blob, namespace, rps=()):
     """§4: the scheme is advertised, valid for the namespace form, and the
     signature verifies with the namespace as owner. None or a reason."""
     if scheme not in schemes:
@@ -515,7 +535,293 @@ def owner_signature(schemes, scheme, statement, blob, namespace):
         return None
     if not namespace.startswith("0x"):
         return "scheme namespace mismatch"
-    return "scheme not implemented"  # the ECDSA schemes land in WP-2.5
+    if scheme == "secp256k1-eip191":
+        return verify_eip191(statement, blob, namespace)
+    return verify_webauthn(statement, blob, namespace, rps)
+
+
+# ---------------------------------------------------------------------------
+# The ECDSA owner schemes (§4, §4.1, §4.3, §4.4).
+
+K1_P = 2**256 - 2**32 - 977
+K1_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+P256_P = 2**256 - 2**224 + 2**192 + 2**96 - 1
+P256_N = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
+
+
+def ecdsa_module():
+    try:
+        import ecdsa  # python-ecdsa
+    except ImportError:
+        sys.exit("FAIL: python-ecdsa not found (pip install ecdsa)")
+    return ecdsa
+
+
+def keccak256(data):
+    """Keccak-256 (original Keccak, 0x01 padding; §4.1), pycryptodome."""
+    from Crypto.Hash import keccak
+    return keccak.new(digest_bits=256, data=data).digest()
+
+
+def sha256(data):
+    return hashlib.sha256(data).digest()
+
+
+def address_of(xy):
+    """§4.1: the last 20 bytes of Keccak-256(x || y)."""
+    return keccak256(xy)[12:]
+
+
+def eip191_digest(statement):
+    """§4: Keccak-256 of the EIP-191 version 0x45 prefix, the statement's
+    byte length in decimal ASCII, then the statement."""
+    return keccak256(b"\x19Ethereum Signed Message:\n" + str(len(statement)).encode()
+                     + statement)
+
+
+def k1_recover(digest, r, s, recid):
+    """SEC 1 §4.1.6 public-key recovery for recovery id 0 or 1 (x = r, the
+    parity of R.y = recid), over python-ecdsa's curve arithmetic. The x || y
+    bytes, or None when r is not the x-coordinate of a curve point."""
+    ecdsa = ecdsa_module()
+    from ecdsa.ellipticcurve import INFINITY, PointJacobi
+    curve, g = ecdsa.SECP256k1.curve, ecdsa.SECP256k1.generator
+    alpha = (r * r * r + 7) % K1_P
+    beta = pow(alpha, (K1_P + 1) // 4, K1_P)
+    if beta * beta % K1_P != alpha:
+        return None
+    y = beta if beta % 2 == recid else K1_P - beta
+    big_r = PointJacobi(curve, r, y, 1, K1_N)
+    e = int.from_bytes(digest, "big") % K1_N
+    q = (big_r * s + g * ((-e) % K1_N)) * pow(r, -1, K1_N)
+    if q == INFINITY:
+        return None
+    xy = q.x().to_bytes(32, "big") + q.y().to_bytes(32, "big")
+    # Cross-check with python-ecdsa's own recovery and verification.
+    sig = r.to_bytes(32, "big") + s.to_bytes(32, "big")
+    candidates = ecdsa.VerifyingKey.from_public_key_recovery_with_digest(
+        sig, digest, ecdsa.SECP256k1, sigdecode=ecdsa.util.sigdecode_string)
+    assert any(c.to_string() == xy for c in candidates), "python-ecdsa recovery disagrees"
+    vk = ecdsa.VerifyingKey.from_string(xy, curve=ecdsa.SECP256k1)
+    assert vk.verify_digest(sig, digest, sigdecode=ecdsa.util.sigdecode_string)
+    return xy
+
+
+def verify_eip191(statement, blob, namespace):
+    """§4 secp256k1-eip191 with the §4.4 rules. None or the first reason."""
+    if len(blob) != 65:
+        return "signature length"
+    v = blob[64]
+    if v not in (27, 28):
+        return "signature recovery id"
+    r, s = int.from_bytes(blob[:32], "big"), int.from_bytes(blob[32:64], "big")
+    if not (1 <= r < K1_N and 1 <= s < K1_N):
+        return "signature scalar"
+    if s > K1_N // 2:
+        return "high s"
+    xy = k1_recover(eip191_digest(statement), r, s, v - 27)
+    if xy is None:
+        return "bad signature"
+    if "0x" + address_of(xy).hex() != namespace:
+        return "owner mismatch"
+    return None
+
+
+def k1_public(secret):
+    ecdsa = ecdsa_module()
+    return ecdsa.SigningKey.from_string(secret, curve=ecdsa.SECP256k1) \
+        .get_verifying_key().to_string()
+
+
+def eip191_sign(secret, statement):
+    """RFC 6979 (HMAC-SHA-256) over the EIP-191 digest, s normalized to the
+    low half and v chosen by recovery (§4.4 client rules)."""
+    ecdsa = ecdsa_module()
+    digest = eip191_digest(statement)
+    sk = ecdsa.SigningKey.from_string(secret, curve=ecdsa.SECP256k1)
+    r_bytes, s_bytes = sk.sign_digest_deterministic(
+        digest, hashfunc=hashlib.sha256, sigencode=ecdsa.util.sigencode_strings)
+    r, s = int.from_bytes(r_bytes, "big"), int.from_bytes(s_bytes, "big")
+    if s > K1_N // 2:
+        s = K1_N - s
+    public = k1_public(secret)
+    recid = next(i for i in (0, 1) if k1_recover(digest, r, s, i) == public)
+    return r.to_bytes(32, "big") + s.to_bytes(32, "big") + bytes([27 + recid])
+
+
+def lp_fields(blob, count):
+    """SPEC-CONVENTIONS §3 [u32 LE length][bytes] fields, nothing after the
+    last; None if the framing does not hold."""
+    out = []
+    for _ in range(count):
+        if len(blob) < 4:
+            return None
+        n = int.from_bytes(blob[:4], "little")
+        blob = blob[4:]
+        if len(blob) < n:
+            return None
+        out.append(blob[:n])
+        blob = blob[n:]
+    return out if not blob else None
+
+
+def lp_encode(*fields):
+    return b"".join(len(f).to_bytes(4, "little") + f for f in fields)
+
+
+class Duplicate(Exception):
+    pass
+
+
+def client_data(raw):
+    """§4.3 rule 2 syntax: RFC 8259 JSON text (strict UTF-8, no NaN or
+    Infinity, no unpaired surrogate) whose top level is an object, with no
+    duplicate member name at any depth (compared after unescaping). The
+    decoded object, or None."""
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+    def pairs(items):
+        names = [k for k, _ in items]
+        if len(set(names)) != len(names):
+            raise Duplicate()
+        return dict(items)
+
+    def constant(name):
+        raise ValueError(name)
+
+    try:
+        value = json.loads(text, object_pairs_hook=pairs, parse_constant=constant)
+    except (ValueError, Duplicate):
+        return None
+
+    def surrogate(v):
+        if isinstance(v, str):
+            return any(0xD800 <= ord(c) <= 0xDFFF for c in v)
+        if isinstance(v, dict):
+            return any(surrogate(k) or surrogate(x) for k, x in v.items())
+        if isinstance(v, list):
+            return any(surrogate(x) for x in v)
+        return False
+
+    if not isinstance(value, dict) or surrogate(value):
+        return None
+    return value
+
+
+def p256_key(x, y):
+    """A pycryptodome P-256 public key, or None if (x, y) is not a point
+    with coordinates below p (SEC 1 §2.3.4)."""
+    from Crypto.PublicKey import ECC
+    if x >= P256_P or y >= P256_P:
+        return None
+    try:
+        return ECC.construct(curve="P-256", point_x=x, point_y=y)
+    except ValueError:
+        return None
+
+
+def webauthn_challenge(statement):
+    return b64url(blake3(statement))
+
+
+def verify_webauthn(statement, blob, namespace, rps):
+    """§4 webauthn-p256 with §4.1, §4.3 and §4.4, in the order the Rust
+    verifier documents (each failure yields the same code, so the order only
+    fixes which reason a vector names). None or the first reason."""
+    from Crypto.Hash import SHA256
+    from Crypto.Signature import DSS
+    fields = lp_fields(blob, 4)
+    if fields is None or len(fields[0]) != 64 or len(fields[3]) != 64:
+        return "webauthn blob"
+    public, auth, raw_client_data, sig = fields
+    r, s = int.from_bytes(sig[:32], "big"), int.from_bytes(sig[32:], "big")
+    if not (1 <= r < P256_N and 1 <= s < P256_N):
+        return "signature scalar"
+    if s > P256_N // 2:
+        return "high s"
+    key = p256_key(int.from_bytes(public[:32], "big"), int.from_bytes(public[32:], "big"))
+    if key is None:
+        return "invalid owner key"
+    if "0x" + address_of(public).hex() != namespace:
+        return "owner mismatch"
+    if len(auth) < 37:
+        return "authenticator data"
+    if not auth[32] & 0x01:
+        return "user not present"
+    rp = next((rp for rp in rps if sha256(rp["id"].encode()) == auth[:32]), None)
+    if rp is None:
+        return "relying party mismatch"
+    cd = client_data(raw_client_data)
+    if cd is None:
+        return "client data"
+    if cd.get("type") != "webauthn.get":
+        return "client data type"
+    if cd.get("challenge") != webauthn_challenge(statement):
+        return "challenge"
+    if "crossOrigin" in cd and cd["crossOrigin"] is not False:
+        return "cross origin"
+    if "topOrigin" in cd:
+        return "top origin"
+    origin = cd.get("origin")
+    if not isinstance(origin, str) or origin not in rp["origins"]:
+        return "origin not allowed"
+    try:
+        DSS.new(key, "fips-186-3", encoding="binary").verify(
+            SHA256.new(auth + sha256(raw_client_data)), sig)
+    except ValueError:
+        return "bad signature"
+    return None
+
+
+def p256_public(secret):
+    from Crypto.PublicKey import ECC
+    point = ECC.construct(curve="P-256", d=int.from_bytes(secret, "big")).pointQ
+    return int(point.x).to_bytes(32, "big") + int(point.y).to_bytes(32, "big")
+
+
+def p256_sign(secret, message):
+    """RFC 6979 P-256/SHA-256 (pycryptodome), then s normalized to the low
+    half as §4.4 asks of the client."""
+    from Crypto.Hash import SHA256
+    from Crypto.PublicKey import ECC
+    from Crypto.Signature import DSS
+    key = ECC.construct(curve="P-256", d=int.from_bytes(secret, "big"))
+    sig = DSS.new(key, "deterministic-rfc6979", encoding="binary").sign(SHA256.new(message))
+    r, s = sig[:32], int.from_bytes(sig[32:], "big")
+    if s > P256_N // 2:
+        s = P256_N - s
+    return r + s.to_bytes(32, "big")
+
+
+def ecdsa_self_test():
+    """Anchor both signers and the recovery on public vectors."""
+    # web3.js accounts.sign("Some data", key), also eth-primitives.json.
+    key = bytes.fromhex("4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318")
+    sig = eip191_sign(key, b"Some data")
+    assert sig.hex() == (
+        "b91467e570a6466aa9e9876cbcd013baba02900b8979d43fe208a4a4f339f5fd"
+        "6007e74cd82e037b800186422fc2da167c747ef045e5d18a5f5d4300f8e1a0291c"), sig.hex()
+    assert verify_eip191(b"Some data", sig,
+                         "0x2c7536e3605d9c16a7a3d7b1898e529396a65c23") is None
+    # RFC 6979 §A.2.5, P-256 with SHA-256, message "sample" (already low s).
+    from Crypto.Hash import SHA256
+    from Crypto.PublicKey import ECC
+    from Crypto.Signature import DSS
+    d = 0xC9AFA9D845BA75166B5C215767B1D6934E50C3DB36E89B127B8A622B120F6721
+    ref = DSS.new(ECC.construct(curve="P-256", d=d), "deterministic-rfc6979",
+                  encoding="binary").sign(SHA256.new(b"sample"))
+    assert ref.hex() == (
+        "efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf3716"
+        "f7cb1c942d657c41d436c7a1b6e29f65f3e900dbb9aff4064dc4ab2f843acda8"), ref.hex()
+    assert p256_public(d.to_bytes(32, "big")).hex().startswith("60fed4ba255a9d31c961eb74")
+    # Client data: duplicates at depth, via escapes, surrogates, constants.
+    assert client_data(b'{"a":{"b":[1,{"c":null}]}}') is not None
+    for bad in (b'{"a":1,"a":1}', b'{"x":[{"a":1,"a":2}]}', b'{"type":1,"\\u0074ype":1}',
+                b'{"x":"\\ud800"}', b'{"x":NaN}', b'[]', b'{"x":"\xff"}', b"{} x"):
+        assert client_data(bad) is None, bad
 
 
 def window(created, expiry, now):
@@ -542,14 +848,14 @@ def decode_header(value, validate):
     return statement, scheme, b64url_decode(blob), statement.decode("ascii").split("\n")
 
 
-def verify_grant(value, schemes, audience, ctx):
+def verify_grant(value, schemes, audience, ctx, rps=()):
     """§7 steps 1-7, 9 and 10 in spec order. None or the first reason."""
     decoded = decode_header(value, validate_grant)
     if isinstance(decoded, str):
         return decoded
     statement, scheme, blob, f = decoded
     namespace = f[1]
-    err = owner_signature(schemes, scheme, statement, blob, namespace)
+    err = owner_signature(schemes, scheme, statement, blob, namespace, rps)
     if err:
         return err
     repository = ctx["repository"]
@@ -567,13 +873,13 @@ def verify_grant(value, schemes, audience, ctx):
     return window(int(f[8]), int(f[9]), ctx["now"])
 
 
-def verify_epoch(value, schemes, audience, now):
+def verify_epoch(value, schemes, audience, now, rps=()):
     """§5.2 checks 1-5. None or the first reason."""
     decoded = decode_header(value, validate_epoch)
     if isinstance(decoded, str):
         return decoded
     statement, scheme, blob, f = decoded
-    err = owner_signature(schemes, scheme, statement, blob, f[1])
+    err = owner_signature(schemes, scheme, statement, blob, f[1], rps)
     if err:
         return err
     if audience not in f[3].split(","):
@@ -581,7 +887,7 @@ def verify_epoch(value, schemes, audience, now):
     return window(int(f[4]), int(f[5]), now)
 
 
-def verify_visibility(value, schemes, audience, repository, now):
+def verify_visibility(value, schemes, audience, repository, now, rps=()):
     """§9.1 statement checks, with X-Repository == the statement's
     repository first. None or the first reason."""
     decoded = decode_header(value, validate_visibility)
@@ -590,7 +896,7 @@ def verify_visibility(value, schemes, audience, repository, now):
     statement, scheme, blob, f = decoded
     if f[1] != repository:
         return "repository mismatch"
-    err = owner_signature(schemes, scheme, statement, blob, f[1].split("/", 1)[0])
+    err = owner_signature(schemes, scheme, statement, blob, f[1].split("/", 1)[0], rps)
     if err:
         return err
     if audience not in f[3].split(","):
@@ -702,17 +1008,97 @@ def check_signed(root):
             r = json.load(fh)
         assert r["kind"] == "grant" and r["rule"], f
         got = verify_grant(r["header"], tuple(r["accepted_schemes"]), r["audience"],
-                           r["context"])
+                           r["context"], r.get("relying_parties", ()))
         assert got == r["expected_error"], (f, got)
         rows.append((f[:-5], r["expected_error"], r["rule"]))
         counts[2] += 1
+    ed_rows = [row for row in rows if not row[0].startswith(ECDSA_REJECT_PREFIXES)]
     expected = {"scheme namespace mismatch", "scheme not advertised", "bad signature",
                 "signature length", "expired", "not yet valid"}
-    assert {row[1] for row in rows} == expected, rows
+    assert {row[1] for row in ed_rows} == expected, ed_rows
+    ecdsa_rows = [row for row in rows if row[0].startswith(ECDSA_REJECT_PREFIXES)]
+    assert {row[1] for row in ecdsa_rows} == ECDSA_REJECT_REASONS, ecdsa_rows
+    for prefix in ECDSA_REJECT_PREFIXES:
+        for reason in ("high s", "scheme namespace mismatch", "scheme not advertised",
+                       "owner mismatch"):
+            assert any(row[0].startswith(prefix) and row[1] == reason for row in rows), \
+                (prefix, reason)
+    assert any(row[0] == "verify-webauthn-user-not-present" for row in rows)
     for name in ("verify-small-order-key", "verify-small-order-r",
                  "verify-signature-s-not-canonical"):
         assert any(row[0] == name for row in rows), f"missing reject/{name}.json"
     return counts, rows
+
+
+ECDSA_REJECT_PREFIXES = ("verify-secp256k1-", "verify-webauthn-")
+ECDSA_REJECT_REASONS = {
+    "high s", "signature recovery id", "signature scalar", "bad signature", "owner mismatch",
+    "signature length", "scheme namespace mismatch", "scheme not advertised",
+    "invalid owner key", "authenticator data", "user not present", "relying party mismatch",
+    "origin not allowed", "client data type", "challenge", "cross origin", "top origin",
+    "client data", "webauthn blob",
+}
+BUILDERS = {
+    "grant": (build_statement, validate_grant),
+    "epoch": (build_epoch, validate_epoch),
+    "visibility": (build_visibility, validate_visibility),
+}
+
+
+def run_context(kind, header, schemes, rps, ctx):
+    if kind == "grant":
+        return verify_grant(header, schemes, ctx["audience"], ctx, rps)
+    if kind == "epoch":
+        return verify_epoch(header, schemes, ctx["audience"], ctx["now"], rps)
+    return verify_visibility(header, schemes, ctx["audience"], ctx["repository"], ctx["now"],
+                             rps)
+
+
+def check_ecdsa(root):
+    """secp256k1-eip191.json and webauthn-p256.json: rebuild each statement,
+    re-sign it (deterministic RFC 6979 on both curves, so blobs and headers
+    must be equal), and re-run every context. Returns (statements,
+    contexts)."""
+    statements = contexts = 0
+    for scheme in ("secp256k1-eip191", "webauthn-p256"):
+        with open(os.path.join(root, f"{scheme}.json"), encoding="utf-8") as fh:
+            file = json.load(fh)
+        assert file["scheme"] == scheme and file["accepted_schemes"] == [scheme]
+        secret = bytes.fromhex(file["owner_private_key"])
+        public = k1_public(secret) if scheme == "secp256k1-eip191" else p256_public(secret)
+        assert public.hex() == file["owner_x"] + file["owner_y"], scheme
+        assert file["namespace"] == "0x" + address_of(public).hex(), scheme
+        rps = file["relying_parties"]
+        schemes = (scheme,)
+        kinds = set()
+        for v in file["vectors"]:
+            build, validate = BUILDERS[v["kind"]]
+            kinds.add(v["kind"])
+            statement = build(v["fields"])
+            assert statement == v["statement"].encode("ascii"), v["name"]
+            assert validate(statement) is None, v["name"]
+            assert blake3(statement).hex() == v["id"], v["name"]
+            if scheme == "secp256k1-eip191":
+                assert eip191_digest(statement).hex() == v["eip191_digest"], v["name"]
+                blob = eip191_sign(secret, statement)
+            else:
+                assert v["challenge"] == webauthn_challenge(statement), v["name"]
+                auth = bytes.fromhex(v["authenticator_data_hex"])
+                assert auth[:32] == sha256(v["rp_id"].encode()), v["name"]
+                raw = v["client_data_json"].encode("utf-8")
+                sig = p256_sign(secret, auth + sha256(raw))
+                assert sig.hex() == v["signature_hex"], v["name"]
+                blob = lp_encode(public, auth, raw, sig)
+            assert blob.hex() == v["blob_hex"], v["name"]
+            header = f"{b64url(statement)}.{scheme}.{b64url(blob)}"
+            assert header == v["header"], v["name"]
+            statements += 1
+            for ctx in v["contexts"]:
+                got = run_context(v["kind"], header, schemes, rps, ctx)
+                assert got == ctx["expected_error"], (scheme, v["name"], ctx["name"], got)
+                contexts += 1
+        assert kinds == {"grant", "epoch", "visibility"}, scheme
+    return statements, contexts
 
 
 # ---------------------------------------------------------------------------
@@ -865,6 +1251,7 @@ def check(root, use_b3sum):
         sys.exit("FAIL: b3sum not found (install it, or pass --no-b3sum)")
 
     ed25519_self_test()
+    ecdsa_self_test()
 
     # Sanity: the validator accepts the §3.4 example and one padded to the bound.
     assert validate_grant("\n".join(EXAMPLE).encode()) is None
@@ -928,6 +1315,7 @@ def check(root, use_b3sum):
             assert blake3(fh.read()).hex() == digest, f"MANIFEST pin for {path}"
 
     signed_counts, verify_rows = check_signed(root)
+    ecdsa_counts = check_ecdsa(root)
 
     print("| reject vector | expected_error | rule |")
     print("|---|---|---|")
@@ -936,6 +1324,7 @@ def check(root, use_b3sum):
     print(f"OK ({len(grants['vectors'])} statements, {len(headers['vectors'])} headers, "
           f"{len(headers['rejects'])} header rejects, {len(rows)} reject vectors, "
           f"{signed_counts[0]} signed statements with {signed_counts[1]} contexts, "
+          f"{ecdsa_counts[0]} ECDSA-signed statements with {ecdsa_counts[1]} contexts, "
           f"{signed_counts[2]} verify rejects, {len(listed)} pinned files)")
 
 

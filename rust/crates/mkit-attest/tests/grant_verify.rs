@@ -31,11 +31,21 @@ fn repo(name: &str) -> RepositoryIdentity {
 }
 
 fn cfg() -> VerifierConfig {
-    VerifierConfig::new(AUDIENCE, AcceptedSchemes::of(&[OwnerScheme::Ed25519])).unwrap()
+    VerifierConfig::new(
+        AUDIENCE,
+        AcceptedSchemes::of(&[OwnerScheme::Ed25519]),
+        vec![],
+    )
+    .unwrap()
 }
 
 fn cfg_with(audience: &str) -> VerifierConfig {
-    VerifierConfig::new(audience, AcceptedSchemes::of(&[OwnerScheme::Ed25519])).unwrap()
+    VerifierConfig::new(
+        audience,
+        AcceptedSchemes::of(&[OwnerScheme::Ed25519]),
+        vec![],
+    )
+    .unwrap()
 }
 
 fn scopes(entries: &[(&str, &str)]) -> RefScopes {
@@ -232,10 +242,10 @@ fn grant_loopback_audience_verifies_only_under_the_dev_config() {
     let header = signed(&g);
     let schemes = AcceptedSchemes::of(&[OwnerScheme::Ed25519]);
     assert_eq!(
-        VerifierConfig::new("http://[::1]:8443", schemes),
+        VerifierConfig::new("http://[::1]:8443", schemes, vec![]),
         Err(GrantError::LoopbackAudience)
     );
-    let dev = VerifierConfig::new_allowing_loopback("http://[::1]:8443", schemes).unwrap();
+    let dev = VerifierConfig::new_allowing_loopback("http://[::1]:8443", schemes, vec![]).unwrap();
     let site = repo("website");
     assert!(
         verify_grant_owner(&dev, &header)
@@ -276,6 +286,7 @@ fn grant_owner_signature_failures() {
     let k1 = VerifierConfig::new(
         AUDIENCE,
         AcceptedSchemes::of(&[OwnerScheme::Secp256k1Eip191]),
+        vec![],
     )
     .unwrap();
     assert_eq!(
@@ -289,7 +300,8 @@ fn grant_owner_signature_failures() {
         verify_grant_owner(&cfg(), &signed(&addr)),
         Err(GrantError::SchemeNamespaceMismatch)
     );
-    // An ECDSA scheme on a `0x` namespace (WP-2.5 implements these).
+    // An ECDSA scheme on a `0x` namespace verifies its blob: an all-zero
+    // `r ‖ s ‖ v` fails on `v` first.
     let ecdsa = SignedHeader {
         statement: addr.encode().unwrap(),
         scheme: OwnerScheme::Secp256k1Eip191,
@@ -300,11 +312,12 @@ fn grant_owner_signature_failures() {
     let both = VerifierConfig::new(
         AUDIENCE,
         AcceptedSchemes::of(&[OwnerScheme::Ed25519, OwnerScheme::Secp256k1Eip191]),
+        vec![],
     )
     .unwrap();
     assert_eq!(
         verify_grant_owner(&both, &ecdsa),
-        Err(GrantError::SchemeNotImplemented)
+        Err(GrantError::SignatureRecoveryId)
     );
     // A malformed header or statement fails before any signature work.
     assert_eq!(
@@ -337,6 +350,7 @@ fn grant_owner_verified_is_cacheable_by_header_bytes() {
     let k1 = VerifierConfig::new(
         AUDIENCE,
         AcceptedSchemes::of(&[OwnerScheme::Secp256k1Eip191]),
+        vec![],
     )
     .unwrap();
     let site = repo("website");

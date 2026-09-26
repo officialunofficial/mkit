@@ -1,10 +1,12 @@
-//! The deployment side of verification: the owner schemes it accepts (§4)
-//! and its own auth v2 audience (§3.2, §7 step 5), as a [`VerifierConfig`].
+//! The deployment side of verification: the owner schemes it accepts (§4),
+//! its own auth v2 audience (§3.2, §7 step 5) and its `WebAuthn` relying
+//! parties (§4.3), as a [`VerifierConfig`].
 
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 use mkit_core::write_auth::validate_audience;
 
+use super::webauthn::RelyingParty;
 use super::{GrantError, OwnerScheme};
 
 /// The owner schemes a deployment accepts, as advertised in `GetServerInfo`'s
@@ -59,58 +61,84 @@ impl AcceptedSchemes {
     }
 }
 
-/// A deployment's verifier configuration: its own auth v2 audience and the
-/// owner schemes it accepts.
+/// A deployment's verifier configuration: its own auth v2 audience, the
+/// owner schemes it accepts, and the `WebAuthn` relying parties it accepts
+/// `webauthn-p256` assertions for (§4.3).
 ///
 /// Only [`VerifierConfig::new`] and [`VerifierConfig::new_allowing_loopback`]
 /// build one. Both require a canonical auth v2 origin (SPEC-TRANSPORT-CONNECT
-/// §7.1). `new` also enforces §3.2 and §10: a deployment's own audience is
-/// "an origin whose host the operator controls, never a loopback address".
-/// That rule binds the deployment's own audience only; a grant's audience
-/// list may name loopback origins, and they simply never match a deployment
-/// built with `new`.
+/// §7.1), and refuse `webauthn-p256` without a relying party (§4.3: "a
+/// deployment that has configured no relying party MUST NOT accept, or
+/// advertise, `webauthn-p256`"). `new` also enforces §3.2 and §10: a
+/// deployment's own audience is "an origin whose host the operator controls,
+/// never a loopback address". That rule binds the deployment's own audience
+/// only; a grant's audience list may name loopback origins, and they simply
+/// never match a deployment built with `new`. `new` refuses loopback relying
+/// parties for the same reason: any local process can ask a passkey to sign
+/// for `localhost`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifierConfig {
     audience: String,
     schemes: AcceptedSchemes,
+    relying_parties: Vec<RelyingParty>,
 }
 
 impl VerifierConfig {
-    /// A production configuration.
+    /// A production configuration. `relying_parties` may be empty unless
+    /// `schemes` includes `webauthn-p256`; relying parties configured while
+    /// that scheme is not accepted are unused.
     ///
     /// # Errors
     /// `Audience` for an origin outside the auth v2 rules;
     /// `LoopbackAudience` for a loopback or unspecified host (see
     /// [`is_loopback_origin`]); `NoRelyingParty` if `schemes` includes
-    /// `webauthn-p256`, which needs a relying party (§4.3) this
-    /// configuration cannot hold yet.
-    pub fn new(audience: &str, schemes: AcceptedSchemes) -> Result<Self, GrantError> {
+    /// `webauthn-p256` and `relying_parties` is empty; `RelyingParty` for two
+    /// relying parties with one id; `LoopbackRelyingParty` for a relying
+    /// party with id `localhost` or `*.localhost`, or a loopback origin.
+    pub fn new(
+        audience: &str,
+        schemes: AcceptedSchemes,
+        relying_parties: Vec<RelyingParty>,
+    ) -> Result<Self, GrantError> {
         if is_loopback_origin(audience) {
             validate_audience(audience).map_err(|_| GrantError::Audience)?;
             return Err(GrantError::LoopbackAudience);
         }
-        Self::new_allowing_loopback(audience, schemes)
+        let cfg = Self::new_allowing_loopback(audience, schemes, relying_parties)?;
+        if cfg.relying_parties.iter().any(RelyingParty::is_loopback) {
+            return Err(GrantError::LoopbackRelyingParty);
+        }
+        Ok(cfg)
     }
 
     /// **Development and tests only.** As [`VerifierConfig::new`], but a
     /// loopback audience such as `http://localhost:8080` or
-    /// `http://[::1]:8443` is allowed. A deployment reachable by anyone
-    /// else MUST NOT use this (§3.2, §10): every local deployment shares a
-    /// loopback audience, so a grant for one would verify at all of them.
+    /// `http://[::1]:8443`, and loopback relying parties, are allowed. A
+    /// deployment reachable by anyone else MUST NOT use this (§3.2, §10):
+    /// every local deployment shares a loopback audience, so a grant for one
+    /// would verify at all of them.
     ///
     /// # Errors
-    /// `Audience` or `NoRelyingParty`, as [`VerifierConfig::new`].
+    /// `Audience`, `NoRelyingParty` or `RelyingParty`, as
+    /// [`VerifierConfig::new`].
     pub fn new_allowing_loopback(
         audience: &str,
         schemes: AcceptedSchemes,
+        relying_parties: Vec<RelyingParty>,
     ) -> Result<Self, GrantError> {
         validate_audience(audience).map_err(|_| GrantError::Audience)?;
-        if schemes.contains(OwnerScheme::WebAuthnP256) {
+        if schemes.contains(OwnerScheme::WebAuthnP256) && relying_parties.is_empty() {
             return Err(GrantError::NoRelyingParty);
+        }
+        for (i, rp) in relying_parties.iter().enumerate() {
+            if relying_parties[..i].iter().any(|r| r.id() == rp.id()) {
+                return Err(GrantError::RelyingParty);
+            }
         }
         Ok(Self {
             audience: audience.to_owned(),
             schemes,
+            relying_parties,
         })
     }
 
@@ -125,6 +153,19 @@ impl VerifierConfig {
     #[must_use]
     pub fn schemes(&self) -> AcceptedSchemes {
         self.schemes
+    }
+
+    /// The configured `WebAuthn` relying parties (§4.3 rule 4).
+    #[must_use]
+    pub fn relying_parties(&self) -> &[RelyingParty] {
+        &self.relying_parties
+    }
+
+    /// Whether `rp_id` is configured with `origin` (§4.3 rule 4).
+    pub(crate) fn allows_relying_party(&self, rp_id: &str, origin: &str) -> bool {
+        self.relying_parties
+            .iter()
+            .any(|rp| rp.id() == rp_id && rp.allows(origin))
     }
 }
 
@@ -286,15 +327,15 @@ mod tests {
         ] {
             assert!(is_loopback_origin(loopback), "{loopback}");
             assert_eq!(
-                VerifierConfig::new(loopback, ed),
+                VerifierConfig::new(loopback, ed, vec![]),
                 Err(GrantError::LoopbackAudience),
                 "{loopback}"
             );
         }
         // The explicit development constructor allows the valid ones.
-        let dev = VerifierConfig::new_allowing_loopback("http://[::1]:8443", ed).unwrap();
+        let dev = VerifierConfig::new_allowing_loopback("http://[::1]:8443", ed, vec![]).unwrap();
         assert_eq!(dev.audience(), "http://[::1]:8443");
-        assert!(VerifierConfig::new_allowing_loopback("http://localhost:8080", ed).is_ok());
+        assert!(VerifierConfig::new_allowing_loopback("http://localhost:8080", ed, vec![]).is_ok());
         for public in [
             "https://git.example.com",
             "https://127.example.com",
@@ -305,7 +346,7 @@ mod tests {
             "https://[2001:db8::1]:8443",
         ] {
             assert!(!is_loopback_origin(public), "{public}");
-            let cfg = VerifierConfig::new(public, ed).unwrap();
+            let cfg = VerifierConfig::new(public, ed, vec![]).unwrap();
             assert_eq!(cfg.audience(), public);
             assert_eq!(cfg.schemes(), ed);
         }
@@ -323,13 +364,13 @@ mod tests {
             "HTTP://LOCALHOST",
             "http://localhost:80",
         ] {
-            let err = VerifierConfig::new(bad, ed).unwrap_err();
+            let err = VerifierConfig::new(bad, ed, vec![]).unwrap_err();
             assert!(
                 matches!(err, GrantError::Audience),
                 "{bad}: {err:?} (a bad origin is an audience error, loopback or not)"
             );
             assert_eq!(
-                VerifierConfig::new_allowing_loopback(bad, ed),
+                VerifierConfig::new_allowing_loopback(bad, ed, vec![]),
                 Err(GrantError::Audience),
                 "{bad}"
             );
@@ -337,11 +378,57 @@ mod tests {
     }
 
     #[test]
-    fn verifier_config_rejects_webauthn_without_relying_party() {
+    fn verifier_config_webauthn_needs_relying_party() {
         let schemes = AcceptedSchemes::of(&[OwnerScheme::Ed25519, OwnerScheme::WebAuthnP256]);
         assert_eq!(
-            VerifierConfig::new("https://git.example.com", schemes),
+            VerifierConfig::new("https://git.example.com", schemes, vec![]),
             Err(GrantError::NoRelyingParty)
         );
+        assert_eq!(
+            VerifierConfig::new_allowing_loopback("http://localhost:8080", schemes, vec![]),
+            Err(GrantError::NoRelyingParty)
+        );
+        let rp = RelyingParty::new("example.com", ["https://example.com"]).unwrap();
+        let cfg =
+            VerifierConfig::new("https://git.example.com", schemes, vec![rp.clone()]).unwrap();
+        assert_eq!(cfg.relying_parties(), std::slice::from_ref(&rp));
+        assert!(cfg.allows_relying_party("example.com", "https://example.com"));
+        assert!(!cfg.allows_relying_party("example.com", "https://example.org"));
+        assert!(!cfg.allows_relying_party("example.org", "https://example.com"));
+        // Relying parties without the scheme are allowed and unused.
+        let ed = AcceptedSchemes::of(&[OwnerScheme::Ed25519]);
+        assert!(VerifierConfig::new("https://git.example.com", ed, vec![rp.clone()]).is_ok());
+        // One id configured twice is ambiguous.
+        let twin = RelyingParty::new("example.com", ["https://www.example.com"]).unwrap();
+        assert_eq!(
+            VerifierConfig::new("https://git.example.com", schemes, vec![rp, twin]),
+            Err(GrantError::RelyingParty)
+        );
+    }
+
+    #[test]
+    fn verifier_config_rejects_loopback_relying_party() {
+        let schemes = AcceptedSchemes::of(&[OwnerScheme::WebAuthnP256]);
+        let public = RelyingParty::new("example.com", ["https://example.com"]).unwrap();
+        for (id, origin) in [
+            ("localhost", "http://localhost:8080"),
+            ("dev.localhost", "https://dev.localhost"),
+            ("example.net", "http://127.0.0.1:8080"),
+        ] {
+            let rp = RelyingParty::new(id, [origin]).unwrap();
+            assert_eq!(
+                VerifierConfig::new(
+                    "https://git.example.com",
+                    schemes,
+                    vec![public.clone(), rp.clone()]
+                ),
+                Err(GrantError::LoopbackRelyingParty),
+                "{id} {origin}"
+            );
+            assert!(
+                VerifierConfig::new_allowing_loopback("https://git.example.com", schemes, vec![rp])
+                    .is_ok()
+            );
+        }
     }
 }

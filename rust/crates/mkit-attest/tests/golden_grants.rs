@@ -4,7 +4,9 @@
 //! * `MKIT_WRITE_GOLDEN=1` (re)writes `rust/tests/golden/grants/
 //!   {grant-statements.json,headers.json,MANIFEST.txt}` from the vectors
 //!   defined here, and the signed `ed25519` fixtures of [`signed`]
-//!   (`{grant,epoch,visibility}-ed25519.json`, `reject/verify-*.json`).
+//!   (`{grant,epoch,visibility}-ed25519.json`, `reject/verify-*.json`) and
+//!   the ECDSA fixtures of [`ecdsa`] (`secp256k1-eip191.json`,
+//!   `webauthn-p256.json`, `reject/verify-{secp256k1,webauthn}-*.json`).
 //!   `MANIFEST.txt` pins every file in the directory, including the reject
 //!   vectors.
 //! * The codec's `reject/*.json` (all but `reject/verify-*`) are authored by
@@ -32,6 +34,9 @@ use serde_json::{Value, json};
 
 #[path = "golden_grants/signed.rs"]
 mod signed;
+
+#[path = "golden_grants/ecdsa.rs"]
+mod ecdsa;
 
 /// The §3.4 example statement (illustrative in the spec; pinned here).
 const SPEC_EXAMPLE: &str = "mkit-write-grant:v1
@@ -466,6 +471,7 @@ fn write_all() {
         &json!({ "spec": "SPEC-WRITE-GRANTS §4.2", "vectors": headers, "rejects": rejects }),
     );
     signed::write_signed();
+    ecdsa::write_ecdsa();
     let mut manifest = String::from(
         "# SPEC-WRITE-GRANTS grant codec and verifier golden vectors (deterministic)\n\
          # Accept, signed and reject/verify-* vectors: `MKIT_WRITE_GOLDEN=1 cargo test -p mkit-attest --features grants --test golden_grants`\n\

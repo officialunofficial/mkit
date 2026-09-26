@@ -1,0 +1,31 @@
+{
+  "accepted_schemes": [
+    "secp256k1-eip191"
+  ],
+  "audience": "https://git.example.com",
+  "context": {
+    "capability": "write",
+    "now": 1790000000000,
+    "repository": "0x2c7536e3605d9c16a7a3d7b1898e529396a65c23/website",
+    "signer": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+  },
+  "expected_error": "signature length",
+  "header": "bWtpdC13cml0ZS1ncmFudDp2MQoweDJjNzUzNmUzNjA1ZDljMTZhN2EzZDdiMTg5OGU1MjkzOTZhNjVjMjMKMHgyYzc1MzZlMzYwNWQ5YzE2YTdhM2Q3YjE4OThlNTI5Mzk2YTY1YzIzL3dlYnNpdGUKZWE0YTZjNjNlMjljNTIwYWJlZjU1MDdiMTMyZWM1Zjk5NTQ3NzZhZWJlYmU3YjkyNDIxZWVhNjkxNDQ2ZDIyYwpyZWFkLHdyaXRlCmh0dHBzOi8vZ2l0LmV4YW1wbGUuY29tLGh0dHBzOi8vZ2l0LmV4YW1wbGUub3JnCnJlZnMvaGVhZHMvbWFpbj1jdTtyZWZzL2hlYWRzL3dpcC8qPWN1ZmQKMAoxNzkwMDAwMDAwMDAwCjE3OTAwODY0MDAwMDAKYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMQ.secp256k1-eip191.CjLWqCD0XkvYFONmE2wiS795KcmpqeWjQABcQZwWTQJOPLbyNM9T4UHnsFyBpEBcm7_GPIpCu__14_QMQ2RqnQ",
+  "kind": "grant",
+  "relying_parties": [
+    {
+      "id": "example.com",
+      "origins": [
+        "https://example.com",
+        "https://www.example.com"
+      ]
+    },
+    {
+      "id": "wallet.example",
+      "origins": [
+        "https://wallet.example"
+      ]
+    }
+  ],
+  "rule": "§4: a secp256k1-eip191 blob is exactly r || s || v (65 bytes)"
+}

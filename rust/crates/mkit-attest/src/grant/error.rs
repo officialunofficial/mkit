@@ -91,13 +91,48 @@ pub enum GrantError {
     /// §4: a scheme not valid for the namespace form (`ed25519` needs an
     /// `ed25519-` namespace; the ECDSA schemes need a `0x` namespace).
     SchemeNamespaceMismatch,
-    /// §4: a scheme this build cannot verify yet.
-    SchemeNotImplemented,
     /// §4: a signature blob of the wrong length for its scheme.
     SignatureLength,
     /// §4: the owner signature does not verify (including a non-canonical
-    /// Ed25519 signature or a small-order or invalid namespace key).
+    /// Ed25519 signature or a small-order or invalid namespace key, and a
+    /// `secp256k1-eip191` signature from which no key recovers).
     BadSignature,
+    /// §4: a `secp256k1-eip191` `v` other than 27 or 28.
+    SignatureRecoveryId,
+    /// §4.4: an ECDSA `r` or `s` outside `[1, n - 1]`.
+    SignatureScalar,
+    /// §4.4: an ECDSA `s` above `n / 2` (never normalized).
+    HighS,
+    /// §4.1, §7 step 4: the recovered or derived owner address is not the
+    /// namespace.
+    OwnerMismatch,
+    /// §4.1: a `webauthn-p256` public key that is not a valid P-256 point.
+    InvalidOwnerKey,
+    /// §4: a `webauthn-p256` blob that is not four length-prefixed fields
+    /// with a 64-byte public key and a 64-byte signature, and nothing after.
+    WebAuthnBlob,
+    /// §4.3 rule 1: `authenticatorData` shorter than 37 bytes.
+    AuthenticatorData,
+    /// §4.3 rule 1: the user-present flag is clear.
+    UserNotPresent,
+    /// §4.3 rule 4: the rpIdHash is not the SHA-256 of a configured relying
+    /// party id.
+    RelyingPartyMismatch,
+    /// §4.3 rule 2: `clientDataJSON` is not a JSON object, or has a
+    /// duplicate member name at some depth.
+    ClientData,
+    /// §4.3 rule 2: `type` is not the string `webauthn.get`.
+    ClientDataType,
+    /// §4.3 rule 2: `challenge` is not the unpadded base64url of the
+    /// statement's BLAKE3.
+    Challenge,
+    /// §4.3 rule 2: `crossOrigin` is present and not `false`.
+    CrossOrigin,
+    /// §4.3 rule 2: a `topOrigin` member is present.
+    TopOrigin,
+    /// §4.3 rule 4: `origin` is not an origin configured for the relying
+    /// party that signed.
+    OriginNotAllowed,
     /// §7 step 2: the grant's namespace is not the request repository's.
     NamespaceMismatch,
     /// §9.1: a visibility statement's repository is not `X-Repository`.
@@ -123,6 +158,14 @@ pub enum GrantError {
     /// Verifier configuration: `webauthn-p256` accepted without a configured
     /// relying party (§4.3).
     NoRelyingParty,
+    /// Verifier configuration: a relying party whose id is not a lowercase
+    /// DNS name, with no origins, an empty, non-ASCII or duplicate origin,
+    /// or an id configured twice.
+    RelyingParty,
+    /// Verifier configuration: a loopback relying party (id `localhost` or
+    /// `*.localhost`, or a loopback origin) and loopback was not explicitly
+    /// allowed.
+    LoopbackRelyingParty,
 }
 
 impl GrantError {
@@ -167,9 +210,23 @@ impl GrantError {
             Self::Visibility => "visibility",
             Self::SchemeNotAdvertised => "scheme not advertised",
             Self::SchemeNamespaceMismatch => "scheme namespace mismatch",
-            Self::SchemeNotImplemented => "scheme not implemented",
             Self::SignatureLength => "signature length",
             Self::BadSignature => "bad signature",
+            Self::SignatureRecoveryId => "signature recovery id",
+            Self::SignatureScalar => "signature scalar",
+            Self::HighS => "high s",
+            Self::OwnerMismatch => "owner mismatch",
+            Self::InvalidOwnerKey => "invalid owner key",
+            Self::WebAuthnBlob => "webauthn blob",
+            Self::AuthenticatorData => "authenticator data",
+            Self::UserNotPresent => "user not present",
+            Self::RelyingPartyMismatch => "relying party mismatch",
+            Self::ClientData => "client data",
+            Self::ClientDataType => "client data type",
+            Self::Challenge => "challenge",
+            Self::CrossOrigin => "cross origin",
+            Self::TopOrigin => "top origin",
+            Self::OriginNotAllowed => "origin not allowed",
             Self::NamespaceMismatch => "namespace mismatch",
             Self::RepositoryMismatch => "repository mismatch",
             Self::AudienceNotListed => "audience not listed",
@@ -180,6 +237,8 @@ impl GrantError {
             Self::Expired => "expired",
             Self::LoopbackAudience => "loopback audience",
             Self::NoRelyingParty => "no relying party",
+            Self::RelyingParty => "relying party",
+            Self::LoopbackRelyingParty => "loopback relying party",
         }
     }
 }
