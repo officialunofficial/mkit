@@ -51,6 +51,20 @@ impl QuotaScope {
     }
 }
 
+/// One charge an Admission decision asks the write's batch to apply: one
+/// operation and `bytes` against `scope`'s current window under `limits`.
+/// The planner evaluates it with [`evaluate_quota`] on the value it read
+/// and guards that read, so the charge is exact within one partition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuotaCharge {
+    /// The counter charged.
+    pub scope: QuotaScope,
+    /// Bytes charged: 0 for ref writes, the declared size for `UploadPack`.
+    pub bytes: u64,
+    /// The window and caps.
+    pub limits: QuotaLimits,
+}
+
 /// Today's per-signer write quota (planner decision Q14): 300 writes and
 /// 128 MiB of `UploadPack` bytes per one-hour window.
 pub const DEFAULT_WRITE_QUOTA: QuotaLimits = QuotaLimits {

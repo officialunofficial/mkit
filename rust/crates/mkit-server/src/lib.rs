@@ -21,6 +21,7 @@ mod error;
 #[cfg(any(test, feature = "memory"))]
 mod memory;
 mod op;
+pub mod pipeline;
 mod principal;
 pub mod quota;
 pub mod refs;
