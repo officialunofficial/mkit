@@ -1,6 +1,7 @@
 # Local CI parity. Each `ci-*` recipe is a literal extraction of commands
 # already run by cloudbuild/ci.yaml / cloudbuild/security.yaml /
-# cloudbuild/docs.yaml / cloudbuild/geiger.yaml / .github/workflows/rust.yml
+# cloudbuild/docs.yaml / cloudbuild/geiger.yaml / .github/workflows/rust.yml /
+# .github/workflows/buf.yml
 # — no new logic lives here, so keep this file in sync with those when they
 # change instead of letting it drift into a second source of truth.
 #
@@ -13,6 +14,9 @@
 # into the CI configs: the mkit-wasm wasm32 check, scripts/wasm-ruzstd-check.sh
 # (mkit-core's pack-ruzstd decoder run on wasm32 under node via wasm-pack),
 # the `pack-ruzstd` nextest run in ci-linux / ci-macos, and `interop-enc`.
+# ci-proto mirrors buf.yml's buf-action lint and breaking gates as CLI
+# commands, followed by the same server-hook JSON script. Its baseline
+# parameter reproduces the action's event-dependent comparison target.
 # None of this is a 1:1 extract of web.yml (wasm-pack bundler + bun) or of
 # workers.yml's worker wasm32 builds.
 #
@@ -131,12 +135,21 @@ ci-security:
     cargo deny --manifest-path contrib/interop/enc-client-0.4/Cargo.toml --all-features \
       check --config rust/deny.toml
 
-# Spec-status, wasm dep-graph, mkit-wasm / mkit-server wasm32 checks, and
+# Mirrors .github/workflows/buf.yml: buf-action lint/breaking and its JSON step.
+# Use the event's PR base or pre-push commit as baseline to match the action;
+# origin/main is the local default, and the feature-branch gate overrides it.
+ci-proto baseline="origin/main":
+    buf lint
+    buf breaking --against '.git#branch={{ baseline }}'
+    bash scripts/check-server-hooks-goldens.sh
+
+# Spec-status, proto schema, wasm dep-graph, mkit-wasm / mkit-server wasm32 checks, and
 # the pack-ruzstd wasm32 test run.
 ci-scripts:
     #!/usr/bin/env bash
     set -euo pipefail
     bash scripts/check-spec-status.sh
+    just ci-proto
     bash scripts/check-wasm-dep-graph.sh
     bash scripts/check-cli-baseline.sh
     if ! rustup target list --installed 2>/dev/null | grep -q '^wasm32-unknown-unknown$'; then

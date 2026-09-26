@@ -25,6 +25,7 @@ front matter.
 - [SPEC-REFS](SPEC-REFS.md) &mdash; ref names, storage, and CAS update variants.
 - [SPEC-RELEASE-THRESHOLD](SPEC-RELEASE-THRESHOLD.md) &mdash; BLS threshold signatures for release-party attestation.
 - [SPEC-RPC](SPEC-RPC.md) &mdash; shared stdio protobuf framing for subprocess protocols.
+- [SPEC-SERVER](SPEC-SERVER.md) &mdash; draft server pipeline, outcome durability, and authenticated remote-hook contract.
 - [SPEC-SIGNING](SPEC-SIGNING.md) &mdash; commit / remix / tag signing hashes and verification.
 - [SPEC-SPARSE-CHECKOUT](SPEC-SPARSE-CHECKOUT.md) &mdash; verifiable server-side sparse checkout over HTTP/S3.
 - [SPEC-TRANSPORT](SPEC-TRANSPORT.md) &mdash; seven-verb transport wire protocol (file, SSH, HTTP [legacy, see SPEC-TRANSPORT-CONNECT], S3, memory).

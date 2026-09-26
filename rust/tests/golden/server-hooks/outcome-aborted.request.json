@@ -1,0 +1,12 @@
+{
+  "outcome": {
+    "reservationId": "demo:write-20260926-001",
+    "audience": "https://vcs.example.test",
+    "repository": "ed25519-a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0/payments-demo",
+    "occurredUnixMs": "1790424001000",
+    "aborted": {
+      "reason": "ABORT_REASON_REF_CONFLICT",
+      "detail": "The admitted UpdateRef lost its compare-and-swap."
+    }
+  }
+}
