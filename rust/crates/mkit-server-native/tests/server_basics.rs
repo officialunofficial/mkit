@@ -6,7 +6,6 @@
 mod common;
 
 use std::convert::Infallible;
-use std::io::Write as _;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -19,6 +18,7 @@ use futures::StreamExt as _;
 use http::{Request, StatusCode};
 use http_body_util::BodyExt as _;
 use mkit_core::hash::{hash, to_hex};
+use mkit_core::protocol::Transport as _;
 use mkit_server::fs::FsLayoutStore;
 use mkit_server::pipeline::{AuthMode, Hooks, Pipeline, PipelineConfig};
 use mkit_server::upload::UploadLimits;
@@ -202,11 +202,17 @@ async fn concurrency_limit_queues_or_rejects_excess() {
     opts.max_concurrency = 1;
     let router = build_router(pipeline(kv.clone(), AuthMode::Open), &opts);
     let started = Instant::now();
-    let calls: Vec<_> = (0..3)
-        .map(|_| tokio::spawn(router.clone().oneshot(read_ref_request(&[]))))
-        .collect();
+    // Each caller reads its whole response: a slot is held until the body
+    // ends.
+    let call = |router: axum::Router| {
+        tokio::spawn(async move {
+            let resp = router.oneshot(read_ref_request(&[])).await.unwrap();
+            reply(resp).await
+        })
+    };
+    let calls: Vec<_> = (0..3).map(|_| call(router.clone())).collect();
     for call in calls {
-        let reply = reply(call.await.unwrap().unwrap()).await;
+        let reply = call.await.unwrap();
         assert!(decode_unary::<ReadRefResponse>(&reply).unwrap().is_ok());
     }
     // The excess calls queued: one at a time, across clones of the router.
@@ -217,11 +223,9 @@ async fn concurrency_limit_queues_or_rejects_excess() {
     let kv = SlowKv::new(Duration::from_millis(300));
     opts.max_concurrency = 8;
     let router = build_router(pipeline(kv.clone(), AuthMode::Open), &opts);
-    let calls: Vec<_> = (0..3)
-        .map(|_| tokio::spawn(router.clone().oneshot(read_ref_request(&[]))))
-        .collect();
+    let calls: Vec<_> = (0..3).map(|_| call(router.clone())).collect();
     for call in calls {
-        call.await.unwrap().unwrap();
+        call.await.unwrap();
     }
     assert!(kv.peak.load(Ordering::SeqCst) > 1);
 }
@@ -564,10 +568,7 @@ fn refuses_to_bind_without_auth_choice() {
 
     // An empty token is refused too, from the file or the environment.
     let token = root.path().join("token");
-    std::fs::File::create(&token)
-        .unwrap()
-        .write_all(b"\n")
-        .unwrap();
+    common::secret_file(&token, b"\n");
     let base = [
         "--listen",
         "127.0.0.1:0",
@@ -586,7 +587,7 @@ fn refuses_to_bind_without_auth_choice() {
 fn token_and_unsafe_are_mutually_exclusive() {
     let root = common::repo_root();
     let token = root.path().join("token");
-    std::fs::write(&token, "t").unwrap();
+    common::secret_file(&token, b"t");
     let base = [
         "--listen",
         "127.0.0.1:0",
@@ -709,9 +710,24 @@ fn sqlite_meta_writes_marker_and_fs_layout_refuses_it() {
     let cfg = sqlite_cfg(root.path());
     drop(server::open(&cfg).unwrap());
     let marker = root.path().join(".mkit/server-meta");
-    assert_eq!(std::fs::read(&marker).unwrap(), b"sqlite\n");
-    // A second sqlite run on the marked root is fine.
+    let text = std::fs::read_to_string(&marker).unwrap();
+    let db = std::fs::canonicalize(root.path())
+        .unwrap()
+        .join("m.sqlite3");
+    assert!(text.starts_with("mkit-server-meta 1\nroot-id "), "{text}");
+    assert!(
+        text.ends_with(&format!("\nsqlite {}\n", db.display())),
+        "{text}"
+    );
+    // A second sqlite run on the marked root is fine, and keeps the id.
     drop(server::open(&cfg).unwrap());
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), text);
+
+    // A local push through `FileTransport` cannot write refs there.
+    let err = mkit_transport_file::FileTransport::new(root.path())
+        .write_ref("refs/heads/main", &hash(b"x"))
+        .unwrap_err();
+    assert!(err.to_string().contains("SQLite"), "{err}");
 
     // `FsLayoutStore::open` and `--meta fs-layout` refuse the root.
     let repo = RepoId {

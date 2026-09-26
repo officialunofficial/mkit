@@ -82,6 +82,14 @@ fn serve(args: &ServeArgs) -> u8 {
             return exit::UNAVAILABLE;
         }
     };
+    // Locks first, outside the runtime: they outlive it (below).
+    let (router, locks) = match server::open(&cfg) {
+        Ok(opened) => opened.into_parts(),
+        Err(e) => {
+            eprintln!("{e}");
+            return e.code;
+        }
+    };
     let result = runtime.block_on(async {
         let shutdown = Shutdown::new();
         let trigger = shutdown.clone();
@@ -89,8 +97,13 @@ fn serve(args: &ServeArgs) -> u8 {
             shutdown_signal().await;
             trigger.trigger();
         });
-        server::run(&cfg, shutdown).await
+        server::serve_router(&cfg, router, shutdown).await
     });
+    // Let store calls still running on the blocking pool (an abandoned
+    // request's `SQLite` commit) finish before the root's locks go, so no
+    // other process can take the root under them.
+    runtime.shutdown_timeout(cfg.serve.grace);
+    drop(locks);
     match result {
         Ok(()) => exit::OK,
         Err(e) => {

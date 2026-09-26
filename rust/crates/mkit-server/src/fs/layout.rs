@@ -21,9 +21,10 @@ use crate::store::{
 };
 
 /// The marker a `mkit-server --meta sqlite:` deployment writes under the
-/// served root (content `sqlite`): the root's refs live in `SQLite`, so
-/// [`FsLayoutStore::open`] refuses it (R-81). Never removed automatically.
-pub const META_MARKER: &str = ".mkit/server-meta";
+/// served root, binding it to one database: the root's refs live in `SQLite`, so
+/// [`FsLayoutStore::open`] refuses it (R-81), and so does every ref write
+/// through `FileTransport`. Never removed automatically.
+pub const META_MARKER: &str = mkit_transport_file::SERVER_META_MARKER;
 
 /// The directory `FileTransport` keeps refs in, as a ref-name prefix.
 const REFS_PREFIX: &str = "refs/";

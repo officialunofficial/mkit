@@ -375,6 +375,18 @@ impl FileTransport {
         canonicalize_with_missing_tail(&self.root).unwrap_or_else(|| self.root.clone())
     }
 
+    /// [`RefFileError::MetaElsewhere`] if the root carries
+    /// [`SERVER_META_MARKER`]. A marker that cannot be checked is refused
+    /// too (fail closed).
+    fn refuse_if_meta_elsewhere(&self) -> Result<(), RefFileError> {
+        let marker = self.root.join(SERVER_META_MARKER);
+        match fs::symlink_metadata(&marker) {
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+            Ok(_) => Err(RefFileError::MetaElsewhere(marker)),
+            Err(e) => Err(RefFileError::Io(e)),
+        }
+    }
+
     fn pack_path(&self, key: &PackKey) -> PathBuf {
         self.root.join("packs").join(key.to_hex())
     }
@@ -601,6 +613,14 @@ impl FileTransport {
 /// next to the refs ([`LockedRefs::write_file`]).
 pub const SERVER_DIR: &str = ".mkit/server";
 
+/// The marker, under a [`FileTransport`] root, that a `mkit-server --meta
+/// sqlite:` deployment writes: the root's refs live in that server's
+/// `SQLite` database, not in ref files. Every ref write through this
+/// transport refuses a marked root ([`RefFileError::MetaElsewhere`]), so a
+/// local push or `mkit serve` cannot keep a second, diverging copy of the
+/// refs. Reads still work.
+pub const SERVER_META_MARKER: &str = ".mkit/server-meta";
+
 /// Why a strict ref-file operation ([`LockedRefs`],
 /// [`FileTransport::read_ref_strict`], [`FileTransport::list_ref_files`],
 /// [`FileTransport::server_path`]) failed. It converts into the
@@ -620,11 +640,21 @@ pub enum RefFileError {
     Corrupt(String),
     /// I/O failed.
     Io(io::Error),
+    /// The root carries [`SERVER_META_MARKER`]: its refs live in a
+    /// `mkit-server` `SQLite` database, so no ref file may be written. The
+    /// marker's path.
+    MetaElsewhere(PathBuf),
 }
 
 impl std::fmt::Display for RefFileError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::MetaElsewhere(marker) => write!(
+                f,
+                "refusing to write ref files: this root's refs live in a mkit-server SQLite \
+                 database (marker {}); push to that server instead",
+                marker.display()
+            ),
             Self::InvalidName(name) => write!(f, "invalid or clashing ref name: {name}"),
             Self::Escape(msg) => f.write_str(msg),
             Self::Conflict => f.write_str("ref CAS precondition failed"),
@@ -688,6 +718,7 @@ impl LockedRefs<'_> {
         if !validate_ref_name(name) {
             return Err(RefFileError::InvalidName(name.to_owned()));
         }
+        self.tx.refuse_if_meta_elsewhere()?;
         let dest = self.tx.ref_path(name);
         self.tx.guard_ref_path(&dest)?;
         if self.tx.ref_clash(&dest) {
@@ -728,6 +759,7 @@ impl LockedRefs<'_> {
         if !validate_ref_name(name) {
             return Err(RefFileError::InvalidName(name.to_owned()));
         }
+        self.tx.refuse_if_meta_elsewhere()?;
         let path = self.tx.ref_path(name);
         self.tx.guard_ref_path(&path)?;
         if path.is_dir() {
@@ -748,6 +780,7 @@ impl LockedRefs<'_> {
     /// # Errors
     /// [`RefFileError::Escape`] for a path outside [`SERVER_DIR`], or I/O.
     pub fn write_file(&self, rel: &Path, bytes: &[u8]) -> Result<(), RefFileError> {
+        self.tx.refuse_if_meta_elsewhere()?;
         let path = self.tx.server_path(rel)?;
         write_atomic(&path, bytes, true).map_err(RefFileError::Io)
     }
@@ -758,6 +791,7 @@ impl LockedRefs<'_> {
     /// # Errors
     /// [`RefFileError::Escape`] for a path outside [`SERVER_DIR`], or I/O.
     pub fn remove_file(&self, rel: &Path) -> Result<bool, RefFileError> {
+        self.tx.refuse_if_meta_elsewhere()?;
         let path = self.tx.server_path(rel)?;
         remove_durably(&path).map_err(RefFileError::Io)
     }
@@ -1738,6 +1772,49 @@ mod tests {
         t.update_ref("refs/heads/a", RefWriteCondition::Any, &h)
             .unwrap();
         assert_eq!(t.read_ref("refs/heads/a").unwrap(), Some(h));
+    }
+
+    #[test]
+    fn ref_writes_refuse_a_root_marked_for_server_sqlite_meta() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let h = blake3_hash(b"before");
+        t.write_ref("refs/heads/main", &h).unwrap();
+        fs::create_dir_all(dir.path().join(".mkit")).unwrap();
+        fs::write(dir.path().join(SERVER_META_MARKER), b"marked").unwrap();
+
+        // Every write path refuses, naming the marker; nothing changes.
+        let err = t.write_ref("refs/heads/main", &blake3_hash(b"after"));
+        match err {
+            Err(TransportError::RemoteError(msg)) => {
+                assert!(
+                    msg.contains("SQLite") && msg.contains("server-meta"),
+                    "{msg}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        let refused = t
+            .with_ref_lock(|refs| {
+                let update = refs.update_ref("refs/heads/x", RefWriteCondition::Missing, &h);
+                let delete = refs.delete_ref("refs/heads/main");
+                let file = refs.write_file(Path::new(".mkit/server/rows/a"), b"x");
+                let remove = refs.remove_file(Path::new(".mkit/server/rows/a"));
+                [update.err(), delete.err(), file.err(), remove.err()]
+            })
+            .unwrap();
+        for err in refused {
+            assert!(
+                matches!(err, Some(RefFileError::MetaElsewhere(_))),
+                "{err:?}"
+            );
+        }
+        // Reads still work.
+        assert_eq!(t.read_ref("refs/heads/main").unwrap(), Some(h));
+        assert_eq!(t.list_refs("").unwrap().len(), 1);
+        // Packs are shared with the server and still upload.
+        let key = PackKey(blake3_hash(b"pack"));
+        t.upload_pack(b"pack", &key).unwrap();
     }
 
     #[test]

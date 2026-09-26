@@ -38,6 +38,11 @@ http = [
     "dep:clap",
     "dep:connectrpc",
     "dep:http",
+    "dep:http-body",
+    "dep:hyper",
+    "dep:hyper-util",
+    "dep:subtle",
+    "dep:getrandom",
     "mkit-server/connect",
     "tokio/rt-multi-thread",
     "tokio/net",
@@ -70,6 +75,16 @@ tower-http = { version = "0.6", default-features = false, features = ["cors", "t
 # `DeadlinePolicy` for the per-procedure timeouts. zstd is fine natively.
 connectrpc = { version = "0.9.1", default-features = false, features = ["axum", "gzip", "zstd", "json"], optional = true }
 http = { version = "1", optional = true }
+http-body = { version = "1", optional = true }
+# The accept loop: hyper-util's auto (HTTP/1.1 + h2c) builder with a timer,
+# so the header-read timeout and HTTP/2 keepalive work, plus graceful
+# shutdown.
+hyper = { version = "1", default-features = false, features = ["server", "http1", "http2"], optional = true }
+hyper-util = { version = "0.1", default-features = false, features = ["server-auto", "server-graceful", "tokio", "http1", "http2"], optional = true }
+# Constant-time bearer pre-check.
+subtle = { version = "2", default-features = false, optional = true }
+# The random root id binding a served root to its SQLite database (R-81).
+getrandom = { version = "0.4", optional = true }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt", "ansi", "env-filter", "json"], optional = true }
 # The metrics facade only; no exporter (planner default Q20).
 metrics = { version = "0.24", optional = true }
@@ -110,4 +125,12 @@ required-features = ["http"]
 
 [[test]]
 name = "wire_binary"
+required-features = ["http"]
+
+[[test]]
+name = "server_hardening"
+required-features = ["http"]
+
+[[test]]
+name = "write_gate"
 required-features = ["http"]

@@ -19,6 +19,17 @@ train).
 
 ### Changed
 
+- *(transport-file)* Every ref write through `FileTransport`
+  (`update_ref`/`write_ref`, and `LockedRefs::update_ref`, `delete_ref`,
+  `write_file`, `remove_file`) refuses a root carrying
+  `SERVER_META_MARKER` (`.mkit/server-meta`), the marker a
+  `mkit-server serve --meta sqlite:` deployment writes, with the new
+  `RefFileError::MetaElsewhere` (a `TransportError::RemoteError` on the
+  `Transport` verbs). That root's refs live in the server's `SQLite`
+  database, so a local `mkit push` to a `file://` remote or `mkit serve`
+  can no longer write a second, diverging copy. Reads and pack uploads
+  are unchanged. **SemVer:** additive (new constant and a variant of the
+  `#[non_exhaustive]` enum); **behavior change** only on marked roots.
 - *(core)* `mkit_core::refs::validate_ref_name` now also requires a name
   of at most `MAX_REF_NAME_BYTES` (512) bytes, per SPEC-REFS v2 §3, so
   every transport and every new local ref refuse a longer one. Creating

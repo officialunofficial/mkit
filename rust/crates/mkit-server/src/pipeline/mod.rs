@@ -581,9 +581,10 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     }
 
     /// How this pipeline authenticates (the ssh session requires
-    /// `TransportIdentity`).
-    #[cfg(feature = "ssh")]
-    pub(crate) fn auth_mode(&self) -> &AuthMode {
+    /// `TransportIdentity`; an HTTP adapter may pre-check a bearer token
+    /// before it spends resources on the request).
+    #[must_use]
+    pub fn auth_mode(&self) -> &AuthMode {
         &self.cfg.auth
     }
 

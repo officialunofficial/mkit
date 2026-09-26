@@ -15,6 +15,7 @@ use mkit_server::sql::Capacity;
 use mkit_server::upload::UploadLimits;
 use mkit_server::{Addressing, NamespaceKey, Redacted, RepoId, RepoName};
 
+use crate::ServeOptions;
 use crate::exit;
 use crate::layers::body_limit_for;
 use crate::router::{CorsPolicy, RouterOptions};
@@ -122,10 +123,21 @@ pub struct ServeArgs {
     /// Deadline of an `UploadPack` or `DownloadPack` stream.
     #[arg(long, value_name = "SECS", default_value_t = 3600)]
     pub stream_timeout_secs: u64,
-    /// Requests served at once; excess requests wait. Keep it below
-    /// tokio's blocking-pool size (512).
+    /// Requests served at once, each until its response body ends; excess
+    /// requests wait. Keep it below tokio's blocking-pool size (512).
     #[arg(long, value_name = "N", default_value_t = 256)]
     pub max_concurrency: usize,
+    /// How long a request waits for a slot before it is shed (HTTP 503,
+    /// Connect `resource_exhausted`); 0 sheds at once.
+    #[arg(long, value_name = "SECS", default_value_t = 5)]
+    pub queue_timeout_secs: u64,
+    /// How long a client may take to send its request headers.
+    #[arg(long, value_name = "SECS", default_value_t = 10)]
+    pub header_read_timeout_secs: u64,
+    /// Connections open at once; further clients wait in the accept
+    /// backlog.
+    #[arg(long, value_name = "N", default_value_t = 1024)]
+    pub max_connections: usize,
     /// An origin browsers may call from (repeatable); `*` allows any.
     #[arg(long, value_name = "ORIGIN")]
     pub cors_allow_origin: Vec<String>,
@@ -175,7 +187,8 @@ pub enum MetaChoice {
     FsLayout,
     /// `SqlKvStore` over this file, capped by `capacity`.
     Sqlite {
-        /// The database file.
+        /// The database file, canonical (its directory resolved), as the
+        /// root's marker records it.
         path: PathBuf,
         /// Its size cap.
         capacity: Capacity,
@@ -196,8 +209,9 @@ pub struct ServeConfig {
     pub pipeline: PipelineConfig,
     /// The router's layers.
     pub router: RouterOptions,
-    /// How long shutdown waits for in-flight requests.
-    pub shutdown_grace: Duration,
+    /// The listener: connection cap, header-read timeout, HTTP/2
+    /// keepalive and the shutdown grace period.
+    pub serve: ServeOptions,
     /// Log line format.
     pub log_format: LogFormat,
 }
@@ -282,8 +296,10 @@ fn resolve_auth(
     }
 }
 
-/// The token in `path`, without one trailing newline.
+/// The token in `path`, without one trailing newline. On Unix the file
+/// must be a regular file (not a symlink) readable by its owner only.
 fn read_token(path: &Path) -> Result<String, ConfigError> {
+    check_secret_file(path)?;
     let text = std::fs::read_to_string(path).map_err(|e| {
         ConfigError::new(
             exit::CONFIG_ERROR,
@@ -295,6 +311,62 @@ fn read_token(path: &Path) -> Result<String, ConfigError> {
     })?;
     let text = text.strip_suffix('\n').unwrap_or(&text);
     Ok(text.strip_suffix('\r').unwrap_or(text).to_owned())
+}
+
+/// Refuse a secret file that is a symlink, not a regular file, or (on
+/// Unix) readable or writable by group or others.
+fn check_secret_file(path: &Path) -> Result<(), ConfigError> {
+    let refuse = |why: String| {
+        Err(ConfigError::new(
+            exit::CONFIG_ERROR,
+            format!("{PREFIX}: --bearer-token-file {}: {why}", path.display()),
+        ))
+    };
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) => return refuse(e.to_string()),
+    };
+    if meta.file_type().is_symlink() {
+        return refuse("is a symlink; point the flag at the file itself".to_owned());
+    }
+    if !meta.is_file() {
+        return refuse("is not a regular file".to_owned());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = meta.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            return refuse(format!(
+                "is accessible by group or others (mode {mode:o}); run `chmod 600 {}`",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `path` with its directory resolved, as the marker records it: the same
+/// database named relatively from another directory, or through a
+/// symlinked directory, gets the same path.
+fn canonical_db_path(path: &Path) -> Result<PathBuf, ConfigError> {
+    let fail = |why: &str| {
+        ConfigError::new(
+            exit::CONFIG_ERROR,
+            format!("{PREFIX}: --meta sqlite:{}: {why}", path.display()),
+        )
+    };
+    let name = path.file_name().ok_or_else(|| fail("names no file"))?;
+    let dir = match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    };
+    let dir = std::fs::canonicalize(dir).map_err(|e| fail(&format!("its directory: {e}")))?;
+    let canonical = dir.join(name);
+    if canonical.to_str().is_none_or(|s| s.contains(['\n', '\r'])) {
+        return Err(fail("the path must be UTF-8 without line breaks"));
+    }
+    Ok(canonical)
 }
 
 /// Resolve `path` as `mkit serve` resolves its root
@@ -364,8 +436,13 @@ pub fn resolve(
     env: &dyn Fn(&str) -> Option<String>,
 ) -> Result<ServeConfig, ConfigError> {
     let usage = |m: &str| ConfigError::new(exit::USAGE, format!("{PREFIX}: {m}"));
-    if args.max_concurrency == 0 {
-        return Err(usage("--max-concurrency must be at least 1"));
+    if args.max_concurrency == 0 || args.max_connections == 0 {
+        return Err(usage(
+            "--max-concurrency and --max-connections must be at least 1",
+        ));
+    }
+    if args.header_read_timeout_secs == 0 {
+        return Err(usage("--header-read-timeout-secs must be at least 1"));
     }
     if args.unary_timeout_secs == 0 || args.stream_timeout_secs == 0 {
         return Err(usage("timeouts must be at least 1 second"));
@@ -373,7 +450,7 @@ pub fn resolve(
     let auth = resolve_auth(args, env)?;
     let meta = match (&args.meta, &auth) {
         (Some(MetaArg::Sqlite(path)), _) => MetaChoice::Sqlite {
-            path: path.clone(),
+            path: canonical_db_path(path)?,
             capacity: Capacity::new(args.sqlite_max_bytes),
         },
         (_, AuthMode::AuthV2(_)) => {
@@ -408,6 +485,7 @@ pub fn resolve(
         unary_timeout: Duration::from_secs(args.unary_timeout_secs),
         stream_timeout: Duration::from_secs(args.stream_timeout_secs),
         max_concurrency: args.max_concurrency,
+        queue_timeout: Duration::from_secs(args.queue_timeout_secs),
         max_body_bytes: body_limit_for(max_pack),
         cors: cors_policy(&args.cors_allow_origin)?,
         redactor: pipeline.redactor.clone(),
@@ -419,7 +497,12 @@ pub fn resolve(
         meta,
         pipeline,
         router,
-        shutdown_grace: Duration::from_secs(args.shutdown_grace_secs),
+        serve: ServeOptions {
+            grace: Duration::from_secs(args.shutdown_grace_secs),
+            header_read_timeout: Duration::from_secs(args.header_read_timeout_secs),
+            max_connections: args.max_connections,
+            ..ServeOptions::default()
+        },
         log_format: args.log_format,
     })
 }

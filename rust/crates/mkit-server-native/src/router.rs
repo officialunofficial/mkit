@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use http::{HeaderName, HeaderValue};
-use mkit_server::pipeline::{HookSet, Pipeline};
+use mkit_server::pipeline::{AuthMode, HookSet, Pipeline};
 use mkit_server::{BlobStore, NamespaceStore, Procedure, Redactor};
 
 use crate::layers;
@@ -35,10 +35,14 @@ pub struct RouterOptions {
     /// Deadline of `UploadPack` and `DownloadPack`, covering the whole
     /// stream.
     pub stream_timeout: Duration,
-    /// Requests in flight at once; excess requests wait for a slot. Keep it
+    /// Requests in flight at once, counted until each response body ends
+    /// (a streamed `DownloadPack` holds its slot while it streams). Keep it
     /// below tokio's blocking-pool size (512 by default): every store call
     /// runs there.
     pub max_concurrency: usize,
+    /// How long a request waits for a slot before it is shed with HTTP 503
+    /// and Connect `resource_exhausted`. Zero sheds at once.
+    pub queue_timeout: Duration,
     /// Largest request body on the wire; a larger `Content-Length` is
     /// refused `413` before any handler runs, and a body that grows past it
     /// fails mid-stream. See [`layers::body_limit_for`].
@@ -62,6 +66,7 @@ impl Default for RouterOptions {
             unary_timeout: Duration::from_secs(30),
             stream_timeout: Duration::from_hours(1),
             max_concurrency: 256,
+            queue_timeout: Duration::from_secs(5),
             max_body_bytes: layers::body_limit_for(mkit_core::protocol::PACK_BODY_LIMIT),
             cors: CorsPolicy::Disabled,
             cors_extra_allow_headers: Vec::new(),
@@ -78,8 +83,10 @@ const STREAMING: [Procedure; 2] = [Procedure::UploadPack, Procedure::DownloadPac
 /// (the `mkit.transport.v1` Connect binding and `grpc.health.v1.Health`,
 /// behind `AuthInterceptor`) over `pipeline`, with the layers `opts`
 /// describes. From the outside in: CORS (a preflight is answered here,
-/// without auth), header redaction, tracing, the concurrency cap, the body
-/// limit, then the per-procedure deadline.
+/// without auth), header redaction, tracing, the bearer pre-check (a
+/// [`AuthMode::Bearer`] pipeline: a request without the token is refused
+/// from its headers, before it takes a slot), the concurrency cap, the
+/// body limit, then the per-procedure deadline.
 ///
 /// Mountable in an implementer's own axum app (PRD §5.1). The Connect
 /// service is the router's fallback, so either make this router the base
@@ -108,6 +115,10 @@ where
     N: NamespaceStore + 'static,
     H: HookSet + 'static,
 {
+    let bearer = match pipeline.auth_mode() {
+        AuthMode::Bearer { token } => Some(token.expose().to_owned()),
+        _ => None,
+    };
     let unary = mkit_server::connect::service(Arc::clone(&pipeline))
         .with_deadline_policy(layers::deadline_policy(opts.unary_timeout, false));
     let streaming = mkit_server::connect::service(pipeline)
@@ -118,5 +129,5 @@ where
             router.route_service(procedure.connect_path(), streaming.clone())
         })
         .fallback_service(unary);
-    layers::apply(router, opts)
+    layers::apply(router, opts, bearer.as_deref())
 }

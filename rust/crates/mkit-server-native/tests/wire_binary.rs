@@ -109,7 +109,7 @@ async fn check(origin: &str, profile: Profile) {
 async fn binary_fs_layout_bearer() {
     let root = common::repo_root();
     let token_file = root.path().join("token");
-    std::fs::write(&token_file, "binary-token\n").unwrap();
+    common::secret_file(&token_file, b"binary-token\n");
     let port = free_port();
     let max_pack = MAX_PACK.to_string();
     let server = Server::start(

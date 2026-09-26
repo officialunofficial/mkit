@@ -1,13 +1,15 @@
-//! The router's tower layers: CORS, header redaction, tracing, the
-//! concurrency cap, the body limit and the per-procedure deadline.
+//! The router's tower layers: CORS, header redaction, tracing, the bearer
+//! pre-check, the concurrency cap, the body limit and the per-procedure
+//! deadline.
 
 use std::time::Duration;
 
 use axum::body::Body;
 use connectrpc::DeadlinePolicy;
 use http::{HeaderName, Method, Request, Response};
-use tower::limit::GlobalConcurrencyLimitLayer;
 use tower::util::{MapRequestLayer, MapResponseLayer};
+
+use crate::guard::{BearerGateLayer, CapLayer};
 use tower_http::body::Limited;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
@@ -82,7 +84,11 @@ fn mark_sensitive(headers: &mut http::HeaderMap, redactor: &mkit_server::Redacto
 
 /// Wrap `router` in the layers `opts` describes (see
 /// [`crate::build_router`] for the order).
-pub(crate) fn apply(router: axum::Router, opts: &RouterOptions) -> axum::Router {
+pub(crate) fn apply(
+    router: axum::Router,
+    opts: &RouterOptions,
+    bearer: Option<&str>,
+) -> axum::Router {
     // The limit wraps the body in `Limited`; the route takes axum's
     // `Body`, so box it back. An oversize `Content-Length` is answered 413
     // here, before the handler.
@@ -94,11 +100,23 @@ pub(crate) fn apply(router: axum::Router, opts: &RouterOptions) -> axum::Router 
         }));
     let redact_req = opts.redactor.clone();
     let redact_resp = opts.redactor.clone();
+    // `Router::layer` layers each route on its own; the cap's semaphore is
+    // shared by every clone of the layer.
     let router = router
         .layer(body_limit)
-        // Router::layer layers each route on its own: the global variant
-        // shares one semaphore across them.
-        .layer(GlobalConcurrencyLimitLayer::new(opts.max_concurrency))
+        .layer(CapLayer::new(opts.max_concurrency, opts.queue_timeout));
+    let router = match bearer {
+        // Outside the cap: a request without the token takes no permit.
+        Some(token) => router.layer(BearerGateLayer::new(token)),
+        None => router,
+    };
+    let router = router
+        // Inside the trace layer, so response values are marked before
+        // the trace records the response.
+        .layer(MapResponseLayer::new(move |mut resp: Response<Body>| {
+            mark_sensitive(resp.headers_mut(), &redact_resp);
+            resp
+        }))
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(
@@ -113,10 +131,6 @@ pub(crate) fn apply(router: axum::Router, opts: &RouterOptions) -> axum::Router 
         .layer(MapRequestLayer::new(move |mut req: Request<Body>| {
             mark_sensitive(req.headers_mut(), &redact_req);
             req
-        }))
-        .layer(MapResponseLayer::new(move |mut resp: Response<Body>| {
-            mark_sensitive(resp.headers_mut(), &redact_resp);
-            resp
         }));
     match cors(opts) {
         Some(cors) => router.layer(cors),

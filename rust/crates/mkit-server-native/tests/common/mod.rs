@@ -8,7 +8,7 @@ use std::path::Path;
 use clap::Parser;
 use mkit_server_conformance::wire::{CASES, Report, Verdict};
 use mkit_server_native::config::{ConfigError, ServeArgs, ServeConfig, resolve};
-use mkit_server_native::{Shutdown, serve};
+use mkit_server_native::{ServeOptions, Shutdown, serve};
 
 /// `mkit-server serve`'s flags, parsed as the binary parses them.
 #[derive(Debug, Parser)]
@@ -56,19 +56,38 @@ pub(crate) async fn listener() -> (tokio::net::TcpListener, String) {
     (listener, origin)
 }
 
-/// Serve `router` on `listener` in the background until `shutdown`.
+/// Serve `router` on `listener` in the background until `shutdown`, with
+/// a 10 s grace.
 pub(crate) fn spawn_serve(
     listener: tokio::net::TcpListener,
     router: axum::Router,
     shutdown: &Shutdown,
 ) -> tokio::task::JoinHandle<std::io::Result<()>> {
+    let mut opts = ServeOptions::default();
+    opts.grace = std::time::Duration::from_secs(10);
+    spawn_serve_with(listener, router, shutdown, opts)
+}
+
+/// [`spawn_serve`] with `opts`.
+pub(crate) fn spawn_serve_with(
+    listener: tokio::net::TcpListener,
+    router: axum::Router,
+    shutdown: &Shutdown,
+    opts: ServeOptions,
+) -> tokio::task::JoinHandle<std::io::Result<()>> {
     let shutdown = shutdown.clone();
-    tokio::spawn(serve(
-        listener,
-        router,
-        shutdown,
-        std::time::Duration::from_secs(10),
-    ))
+    tokio::spawn(async move { serve(listener, router, shutdown, &opts).await })
+}
+
+/// Write a secret file readable by its owner only (`--bearer-token-file`
+/// refuses anything wider).
+pub(crate) fn secret_file(path: &Path, contents: &[u8]) {
+    std::fs::write(path, contents).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
 }
 
 /// Pass iff every failed case is listed in `divergences`, and every listed
