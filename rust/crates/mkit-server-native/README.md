@@ -50,7 +50,8 @@ it is a separate binary, so the `mkit` CLI carries no HTTP server or
 `SQLite`. Pass `--listen` (HTTP), `--listen-enc` (`mkit+enc://`), or
 both: at least one listener is required, and both serve the same root
 through one pipeline (the same stores and write gate), on one runtime,
-stopped by one signal.
+stopped by one signal. `docs/CLI.md` ("Migrating from `mkit serve --http`
+and `--listen-enc`") maps the removed `mkit serve` flags to these.
 
 ### Deployment
 
@@ -82,7 +83,7 @@ still running when another process takes the root.
 
 ### Authentication
 
-The listener fails closed, like `mkit serve --http`:
+The listener fails closed, as `mkit serve --http` did:
 
 - `--auth bearer`, or just a token: every RPC needs `Authorization: Bearer
   <token>`. The token comes from `--bearer-token-file <PATH>` (one trailing

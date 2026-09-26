@@ -2,23 +2,17 @@
 #![cfg_attr(not(test), deny(clippy::print_stdout, clippy::print_stderr))]
 #![doc = include_str!("../README.md")]
 //!
-//! `mkit.transport.v1.TransportService` (SPEC-TRANSPORT-CONNECT): both
-//! halves of the `mkit+https://` remote scheme live in this crate.
+//! `mkit.transport.v1.TransportService` (SPEC-TRANSPORT-CONNECT) client:
+//! [`ConnectTransport`], a non-wasm ConnectRPC client implementing
+//! [`mkit_core::protocol::Transport`] itself, used by `mkit-cli`'s
+//! `remote_dispatch` for `mkit+https://` / loopback `mkit+http://`.
 //!
-//! - **Client** ([`ConnectTransport`]): a non-wasm ConnectRPC client
-//!   implementing [`mkit_core::protocol::Transport`] itself, used by
-//!   `mkit-cli`'s `remote_dispatch` for `mkit+https://` / loopback
-//!   `mkit+http://`. Mandatory — always compiled.
-//! - **Server** ([`router`], [`serve`], [`TransportServer`]): an
-//!   axum-hosted `TransportService` implementation generic over any
-//!   [`mkit_core::protocol::Transport`] backend. This is `mkit serve
-//!   --http`'s implementation
-//!   (`rust/crates/mkit-cli/src/commands/serve/http.rs`). Behind this
-//!   crate's own `server` cargo feature (off by default; `mkit-cli`
-//!   enables it via its `http-transport` feature) so a client-only
-//!   consumer doesn't pay axum/hyper-server's compile cost.
+//! The server is not in this crate: `mkit-server` (`mkit-server-native`,
+//! over `mkit-server`'s pipeline) serves `mkit.transport.v1`. The `server`
+//! feature and its `router`/`serve`/`TransportServer`/`map_transport_error`
+//! API were removed with `mkit serve --http`.
 //!
-//! Both are generated from the same canonical
+//! The client is generated from the canonical
 //! `<repo-root>/proto/mkit/transport/v1/transport.proto` (see `build.rs` —
 //! no duplicated proto, matching `mkit-repo-client`'s pattern for
 //! `mkit.repo.v1`).
@@ -33,16 +27,6 @@ mod client;
 pub mod envelope;
 mod error;
 mod executor;
-#[cfg(feature = "server")]
-mod hashutil;
-#[cfg(feature = "server")]
-mod health;
-#[cfg(feature = "server")]
-mod pack;
-#[cfg(feature = "server")]
-mod refs_convert;
-#[cfg(feature = "server")]
-mod service;
 
 /// Generated `mkit.transport.v1` message + Connect service types, compiled
 /// directly from the canonical `<repo-root>/proto/mkit/transport/v1/transport.proto`
@@ -57,79 +41,12 @@ pub mod proto {
 
 pub use client::{ConnectTransport, PACK_TRANSFER_TIMEOUT, TOKEN_ENV, UNARY_TIMEOUT};
 pub use envelope::EnvelopeSigner;
-#[cfg(feature = "server")]
-pub use error::map_transport_error;
-#[cfg(feature = "server")]
-pub use service::TransportServer;
 
-// Re-exported so integration tests (and any future in-tree reference
-// server) can build request/response messages and register the generated
+// Re-exported so integration tests (and in-tree servers and conformance
+// suites) can build request/response messages and register the generated
 // `TransportService` trait without reaching into this crate's private
 // `proto` module.
 #[doc(hidden)]
 pub mod generated {
     pub use crate::proto::mkit::transport::v1::*;
-}
-
-#[cfg(feature = "server")]
-use std::future::Future;
-#[cfg(feature = "server")]
-use std::sync::Arc;
-
-#[cfg(feature = "server")]
-use mkit_core::protocol::Transport;
-#[cfg(feature = "server")]
-use proto::mkit::transport::v1::TransportServiceExt as _;
-
-/// Build a [`connectrpc::Router`] hosting `mkit.transport.v1.TransportService`
-/// over `transport`, plus the standard `grpc.health.v1.Health` service
-/// (mkit#796) reporting SERVING once a cheap read against `transport`
-/// succeeds (see `src/health.rs`'s `TransportChecker`, crate-private).
-///
-/// Combine with other `connectrpc`/axum routes via `Router::merge` before
-/// calling [`connectrpc::Router::into_axum_router`], or use [`serve`] for
-/// the common single-service case.
-#[cfg(feature = "server")]
-#[must_use]
-pub fn router<T>(transport: Arc<T>) -> connectrpc::Router
-where
-    T: Transport + Send + Sync + 'static,
-{
-    use connectrpc_health::HealthExt as _;
-
-    let router =
-        Arc::new(TransportServer::new(Arc::clone(&transport))).register(connectrpc::Router::new());
-    let health_service = Arc::new(connectrpc_health::HealthService::new(
-        health::TransportChecker::new(transport),
-    ));
-    health_service.register(router)
-}
-
-/// Serve `mkit.transport.v1.TransportService` over `listener`, backed by
-/// `transport`, until `shutdown` resolves (then drain in-flight requests
-/// and return).
-///
-/// This is `mkit serve --http`'s implementation
-/// (`rust/crates/mkit-cli/src/commands/serve/http.rs`): an axum `Router`
-/// whose fallback service is the generated `TransportService` dispatcher,
-/// handed to `axum::serve`. Pass `std::future::pending()` for a listener
-/// that never shuts down gracefully (the caller's own signal handling, if
-/// any, should race this future instead).
-///
-/// # Errors
-///
-/// Propagates any I/O error `axum::serve` returns (accept-loop failure).
-#[cfg(feature = "server")]
-pub async fn serve<T>(
-    listener: tokio::net::TcpListener,
-    transport: Arc<T>,
-    shutdown: impl Future<Output = ()> + Send + 'static,
-) -> std::io::Result<()>
-where
-    T: Transport + Send + Sync + 'static,
-{
-    let app = router(transport).into_axum_router();
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
-        .await
 }

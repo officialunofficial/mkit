@@ -28,104 +28,40 @@ use crate::exit;
 #[derive(Debug, Parser)]
 #[command(
     name = "mkit serve",
-    about = "Speak the mkit-rpc protocol on stdin/stdout (default) or on \
-             an encrypted TCP socket (--listen-enc)."
+    about = "Speak the mkit-rpc SSH-frame protocol on stdin/stdout (the \
+             mkit+ssh:// forced-command server). The HTTP and mkit+enc:// \
+             listeners are the separate `mkit-server` binary."
 )]
 struct ServeOpts {
     /// Path to the repository to serve.
     path: String,
-    /// Listen for incoming encrypted-stream connections on `addr`
-    /// (e.g. `0.0.0.0:9418` or `127.0.0.1:7777`) instead of speaking
-    /// the SSH-frame protocol on stdin/stdout. Requires the
-    /// `enc-transport` cargo feature. See SPEC-TRANSPORT-ENC §6 item 4
-    /// (issue #156).
-    ///
-    /// FAIL-CLOSED: the listener refuses to bind unless either
-    /// `--enc-authorized-peers <PATH>` is supplied (an allowlist of
-    /// client public keys) or `--unsafe-allow-any-enc-peer` is passed.
-    /// Server identity is loaded from `--enc-server-key <PATH>` (a
-    /// user-scoped raw 32-byte key file) so clients can pin
-    /// `?pubkey=<…>` across restarts; with the unsafe flag and no key
-    /// file an ephemeral per-process key is generated instead.
-    #[arg(long = "listen-enc", value_name = "ADDR")]
-    listen_enc: Option<String>,
+}
 
-    /// Path to an allowlist of authorized client public keys, one per
-    /// line (64-hex or 43-char url-safe base64; `#` comments and blank
-    /// lines ignored). A client whose static ed25519 key is not listed
-    /// is rejected at the handshake and never receives any data.
-    ///
-    /// MUST be a CLI-supplied or user-scoped path — peer-authorization
-    /// is NEVER read from repo-local `.mkit/config`.
-    #[arg(long = "enc-authorized-peers", value_name = "PATH")]
-    enc_authorized_peers: Option<String>,
+/// The listener flags `mkit serve` used to take, removed when the HTTP
+/// (`--http`) and encrypted (`--listen-enc`) listeners moved to the
+/// `mkit-server` binary. Clap rejects them as unknown arguments;
+/// [`run`] then adds a pointer to `mkit-server`.
+const REMOVED_LISTENER_FLAGS: &[&str] = &[
+    "--http",
+    "--http-token",
+    "--unsafe-allow-any-http-peer",
+    "--listen-enc",
+    "--enc-authorized-peers",
+    "--enc-server-key",
+    "--unsafe-allow-any-enc-peer",
+    "--enc-idle-timeout-secs",
+    "--enc-handshake-timeout-secs",
+];
 
-    /// Path to the server's stable raw 32-byte ed25519 key file. When
-    /// allowlisting, this is auto-created at a user-scoped default path
-    /// if omitted so the advertised `?pubkey=` is stable across
-    /// restarts. User-scoped/CLI-only; never repo-local.
-    #[arg(long = "enc-server-key", value_name = "PATH")]
-    enc_server_key: Option<String>,
-
-    /// Dev/test escape hatch: accept ANY encrypted peer (fail-open).
-    /// Prints a loud warning. Intended only for local development and
-    /// the direct-listen e2e harness — NEVER for production.
-    #[arg(long = "unsafe-allow-any-enc-peer", default_value_t = false)]
-    unsafe_allow_any_enc_peer: bool,
-
-    /// Post-handshake per-frame idle timeout, in seconds, for the
-    /// encrypted listener (#216). After the handshake completes, a peer
-    /// that does not send the next verb/upload frame within this window
-    /// has its session dropped — preventing a slow-loris peer from
-    /// pinning a worker + socket forever. `0` disables the timeout
-    /// (NOT recommended). Default: 60s.
-    #[arg(
-        long = "enc-idle-timeout-secs",
-        value_name = "SECS",
-        default_value_t = 60
-    )]
-    enc_idle_timeout_secs: u64,
-
-    /// Handshake completion deadline, in seconds, for the encrypted
-    /// listener (#216). SPEC-TRANSPORT-ENC §6.2 recommends tightening to
-    /// ≤5–10s on real networks; the default is deliberately generous.
-    /// Default: 60s.
-    #[arg(
-        long = "enc-handshake-timeout-secs",
-        value_name = "SECS",
-        default_value_t = 60
-    )]
-    enc_handshake_timeout_secs: u64,
-
-    /// Host `mkit.transport.v1.TransportService` (SPEC-TRANSPORT-CONNECT)
-    /// over axum/HTTP on `addr` (e.g. `0.0.0.0:8443` or `127.0.0.1:7777`),
-    /// instead of speaking the SSH-frame protocol on stdin/stdout. Requires
-    /// the `http-transport` cargo feature. This is the self-hosted
-    /// `mkit+https://` remote (issue #700) — put a reverse proxy in front
-    /// for TLS in production; this listener speaks plaintext HTTP.
-    ///
-    /// FAIL-CLOSED, mirroring `--listen-enc`: refuses to bind unless
-    /// either a bearer token is configured (`--http-token` or the
-    /// `MKIT_API_TOKEN` env var — the same variable
-    /// `mkit-transport-http`'s client already sends, SPEC-TRANSPORT §5.2)
-    /// or `--unsafe-allow-any-http-peer` is passed.
-    #[arg(long = "http", value_name = "ADDR")]
-    http: Option<String>,
-
-    /// Bearer token required on every RPC's `Authorization: Bearer <token>`
-    /// header when `--http` is used. Falls back to the `MKIT_API_TOKEN`
-    /// environment variable when omitted. CLI-only/env-only — never read
-    /// from repo-local `.mkit/config`, matching the encrypted listener's
-    /// peer-authorization sourcing.
-    #[arg(long = "http-token", value_name = "TOKEN")]
-    http_token: Option<String>,
-
-    /// Dev/test escape hatch: accept ANY caller on `--http` with no bearer
-    /// check (fail-open). Prints a loud warning. Intended only for local
-    /// development — NEVER for production, since every RPC (including ref
-    /// writes and pack uploads) is unauthenticated.
-    #[arg(long = "unsafe-allow-any-http-peer", default_value_t = false)]
-    unsafe_allow_any_http_peer: bool,
+/// The first removed listener flag in `args` (as `--flag` or
+/// `--flag=value`), stopping at a `--` separator.
+fn removed_listener_flag(args: &[String]) -> Option<&'static str> {
+    args.iter()
+        .take_while(|a| a.as_str() != "--")
+        .find_map(|a| {
+            let name = a.split_once('=').map_or(a.as_str(), |(n, _)| n);
+            REMOVED_LISTENER_FLAGS.iter().copied().find(|f| *f == name)
+        })
 }
 
 // -- Per-connection resource caps -------------------------------------------
@@ -145,7 +81,23 @@ const PACK_CHUNK_DATA_MAX: usize = 800 * 1024;
 pub fn run(args: &[String]) -> u8 {
     let opts = match clap_shim::parse::<ServeOpts>("mkit serve", args) {
         Ok(o) => o,
-        Err(code) => return code,
+        Err(code) => {
+            if let Some(flag) = removed_listener_flag(args) {
+                eprintln!(
+                    "hint: `mkit serve` no longer takes `{flag}`; it only speaks the ssh-frame \
+                     protocol on stdin/stdout.\n\
+                     \x20     The HTTP and mkit+enc:// listeners are the separate `mkit-server` \
+                     binary:\n\
+                     \x20       mkit-server serve --repo-root <PATH> --listen <ADDR>      \
+                     (was: mkit serve <PATH> --http <ADDR>)\n\
+                     \x20       mkit-server serve --repo-root <PATH> --listen-enc <ADDR>  \
+                     (was: mkit serve <PATH> --listen-enc <ADDR>)\n\
+                     \x20     See \"Migrating from `mkit serve --http` and `--listen-enc`\" in \
+                     docs/CLI.md."
+                );
+            }
+            return code;
+        }
     };
 
     let repo_root = match resolve_repo_path(&opts.path) {
@@ -153,8 +105,8 @@ pub fn run(args: &[String]) -> u8 {
         Err(code) => return code,
     };
 
-    // Held for the whole lifetime of this `serve` process, across all
-    // three modes below (SPEC-CONCURRENCY §3.1, MKIT-11/#655): local
+    // Held for the whole lifetime of this `serve` process
+    // (SPEC-CONCURRENCY §3.1, MKIT-11/#655): local
     // worktree-mutating commands and `gc` probe this same lock (see
     // `commands::warn_if_served`) to detect a live `serve` and warn.
     // SHARED, not exclusive — SPEC-TRANSPORT documents multiple
@@ -173,31 +125,6 @@ pub fn run(args: &[String]) -> u8 {
         }
     };
 
-    if let Some(addr) = opts.listen_enc.as_deref() {
-        if opts.http.is_some() {
-            eprintln!("mkit serve: --listen-enc and --http are mutually exclusive");
-            return exit::USAGE;
-        }
-        return run_listen_enc(
-            addr,
-            repo_root,
-            opts.enc_authorized_peers.as_deref(),
-            opts.enc_server_key.as_deref(),
-            opts.unsafe_allow_any_enc_peer,
-            opts.enc_idle_timeout_secs,
-            opts.enc_handshake_timeout_secs,
-        );
-    }
-
-    if let Some(addr) = opts.http.as_deref() {
-        return http::run_listen_http(
-            addr,
-            repo_root,
-            opts.http_token.as_deref(),
-            opts.unsafe_allow_any_http_peer,
-        );
-    }
-
     let tx = FileTransport::new(&repo_root);
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
@@ -207,15 +134,6 @@ pub fn run(args: &[String]) -> u8 {
     serve_loop(&tx, &mut r, &mut w)
 }
 
-mod enc;
-mod http;
-
-// Submodule re-exports kept on the parent surface.
-use enc::run_listen_enc;
-// Re-exported so the parent module's test suite can drive the encrypted
-// listener helpers directly.
-#[cfg(all(test, feature = "enc-transport"))]
-use enc::{load_authorized_peers, serve_enc_session};
 /// Resolve and validate the on-disk path supplied to `mkit serve`.
 pub(crate) fn resolve_repo_path(path: &str) -> Result<PathBuf, u8> {
     let resolved = std::fs::canonicalize(path).map_err(|_| exit::NOINPUT)?;
@@ -429,15 +347,13 @@ fn send(w: &mut impl Write, body: ssh_frame::Body) -> std::io::Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Transport-generic verb decoding (shared by the sync stdin/stdout server and
-// the async encrypted listener).
+// Verb decoding.
 //
 // These helpers are pure: they decode a request frame into either a response
 // `ssh_frame::Body` or a `(ErrorCode, message)` protocol error, with no I/O.
-// Both dispatchers route every non-streaming verb through `handle_simple_verb`
-// and share the download chunking / upload-CAS logic below, so the two servers
-// cannot drift on length checks, the `RefExpectation` -> `RefWriteCondition`
-// mapping, or the per-frame chunk cap.
+// The dispatcher routes every non-streaming verb through `handle_simple_verb`
+// and uses the download chunking / upload-CAS logic below for the streaming
+// ones.
 // ---------------------------------------------------------------------------
 
 /// A protocol-level rejection: an `ErrorCode` plus a static message. The
@@ -456,7 +372,7 @@ fn pack_key_from_id(bytes: Option<&Vec<u8>>) -> Result<PackKey, VerbError> {
 }
 
 /// Decode an `UpdateRef` request into `(name, new_hash, condition)`,
-/// applying the CAS rules shared by both servers. `expected_id` is only
+/// applying the CAS rules. `expected_id` is only
 /// consulted for `MATCH` and MUST be a 32-byte digest. See
 /// SPEC-TRANSPORT §4.2.1.
 fn decode_update_ref(
@@ -547,13 +463,13 @@ fn list_refs_entries(refs: Vec<mkit_core::refs::Ref>) -> Vec<RefEntry> {
 /// protocol error to surface to the client. The `Ok` body may itself be
 /// an `Error` frame when the reply needs dynamic payload the static
 /// `VerbError` shape cannot carry (the §4.2.1 CAS-conflict reply built
-/// by [`cas_conflict_body`]); dispatchers send it like any response.
+/// by [`cas_conflict_body`]); the dispatcher sends it like any response.
 type SimpleVerb = Result<ssh_frame::Body, VerbError>;
 
 /// Handle every non-streaming verb (`PackExists`, `ReadRef`, `UpdateRef`,
 /// `ListRefs`) against `tx`, returning the response body or a protocol
 /// error. The streaming verbs (`DownloadPack`, `UploadPack`) are handled
-/// by the transport-specific dispatchers because they require multiple
+/// by [`dispatch`] because they require multiple
 /// frames, but they reuse [`pack_key_from_id`], [`download_chunks`], and
 /// [`UploadDrain`].
 fn handle_simple_verb(tx: &FileTransport, body: &ssh_frame::Body) -> Option<SimpleVerb> {

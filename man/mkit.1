@@ -1280,7 +1280,15 @@ at
 .It Cm serve Ar path
 Internal subcommand: act as the server end of an
 .Cm mkit+ssh://
-transport.
+transport, speaking the SSH-frame protocol on stdin and stdout.
+It has no network listener: the self-hosted
+.Cm mkit+https://
+and
+.Cm mkit+enc://
+servers are the separate
+.Sy mkit-server
+binary
+.Pq Ic mkit-server serve Fl Fl repo-root Ar path Fl Fl listen Ar addr .
 .It Cm mcp Op Fl Fl repository Ar path
 Start a Model Context Protocol server on stdio so LLM agents can drive
 local repositories: status, diff, log, show, branch, add, commit,

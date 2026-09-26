@@ -1,32 +1,32 @@
 //! FS + fs-layout with a bearer token: the `mkit-server serve` wiring that
-//! replaces `mkit serve --http`. The wire suite runs against it (profile
-//! bearer, non-atomic advance) and against the legacy server
-//! (`mkit_transport_connect` over `FileTransport`, the M0-07 baseline, in
-//! its `none` profile), and every case the legacy server passes must pass
-//! here too.
+//! replaced `mkit serve --http`. The wire suite runs against it (profile
+//! bearer, non-atomic advance), and every case passes.
+//!
+//! Until WP-M0-15 removed `mkit serve --http`, this test also ran the suite
+//! against that legacy server (`mkit_transport_connect::serve` over
+//! `FileTransport`, profile `none`) and required every case the legacy server
+//! passed to pass here too. That comparison held with no native divergence.
+//! The legacy server's one known failure, fixed by the pipeline, was
+//! `refs.invalid_ref_name_invalid_argument`: `AdvanceRefs` with an invalid
+//! head name answered `invalid_argument`, but only after it had written the
+//! packmap, since `mkit serve --http` ran the `Transport::advance_refs`
+//! default (write the packmap, then validate and write the head). The
+//! pipeline validates both names before any write. The legacy server also
+//! had no 512-ref cap on `ListRefs`.
 
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in tests
 
 mod common;
 
 use std::collections::BTreeSet;
-use std::sync::Arc;
 
 use mkit_server_conformance::wire::{Feature, Profile, WireAuth, WireTarget, run};
 use mkit_server_native::{Shutdown, server};
-use mkit_transport_file::FileTransport;
 
 const TOKEN: &str = "native-bearer-token";
 
 /// Cases the native server fails, each with the reason. Target: none.
 const DIVERGENCES: &[(&str, &str)] = &[];
-
-/// The legacy server's known failure (see mkit-server-conformance's
-/// `baseline_legacy_connect.rs`), which the pipeline fixes.
-const LEGACY_DIVERGENCES: &[(&str, &str)] = &[(
-    "refs.invalid_ref_name_invalid_argument",
-    "`mkit serve --http` writes the packmap before it validates the head name",
-)];
 
 fn profile(auth: WireAuth) -> Profile {
     let mut p = Profile::new(auth);
@@ -36,7 +36,7 @@ fn profile(auth: WireAuth) -> Profile {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn fs_layout_bearer_matches_legacy_baseline() {
+async fn fs_layout_bearer_passes_the_wire_suite() {
     // The native server: token from the environment, fs-layout by default.
     let root = common::repo_root();
     let (listener, origin) = common::listener().await;
@@ -63,37 +63,14 @@ async fn fs_layout_bearer_matches_legacy_baseline() {
     let native = run(&target, None).await;
     common::judge(&native, DIVERGENCES);
 
-    // The legacy `mkit serve --http` on another root.
-    let legacy_root = common::repo_root();
-    let (listener, legacy_origin) = common::listener().await;
-    tokio::spawn(mkit_transport_connect::serve(
-        listener,
-        Arc::new(FileTransport::new(legacy_root.path())),
-        std::future::pending(),
-    ));
-    let target = WireTarget {
-        base_url: legacy_origin.parse().unwrap(),
-        profile: profile(WireAuth::None),
-    };
-    let legacy = run(&target, None).await;
-    common::judge(&legacy, LEGACY_DIVERGENCES);
-
-    // Case for case: everything the legacy server passes passes here.
+    // The bearer cases, and the case the legacy server failed, ran and
+    // passed.
     let native_passes: BTreeSet<_> = native.passes().into_iter().collect();
-    let missing: Vec<_> = legacy
-        .passes()
-        .into_iter()
-        .filter(|c| !native_passes.contains(c))
-        .collect();
-    assert!(
-        missing.is_empty(),
-        "legacy passes these, native does not: {missing:?}"
-    );
-    // And the bearer cases ran and passed.
     for case in [
         "auth.bearer_missing_unauthenticated",
         "auth.bearer_wrong_unauthenticated",
         "auth.bearer_applies_to_streaming",
+        "refs.invalid_ref_name_invalid_argument",
     ] {
         assert!(native_passes.contains(case), "{case}");
     }

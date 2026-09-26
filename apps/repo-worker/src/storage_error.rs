@@ -3,7 +3,7 @@
 // Generic, non-leaking client-facing error mapping for this Worker's R2/DO
 // storage-layer calls (`worker_impl/service.rs`).
 //
-// Mirrors `mkit-transport-connect::error::map_transport_error`'s pattern: an
+// Mirrors `mkit-server`'s `connect/error.rs` table's pattern: an
 // explicit, exhaustive mapping from an internal error category onto the
 // Connect error the client actually sees, so a real backend failure (R2/DO
 // SDK text — which can embed bucket keys, JS exception text, or other
@@ -24,9 +24,8 @@ use connectrpc::ConnectError;
 /// `describe_and_map` builds, never sent to the client. Keeping this
 /// exhaustively matched (see `client_message` below) means a new operation
 /// added later must be assigned a client message explicitly, the same
-/// "can't silently fall through unmapped" property
-/// `mkit-transport-connect::error::map_transport_error`'s doc comment calls
-/// out for its own mapping.
+/// "can't silently fall through unmapped" property an exhaustive
+/// error-code table has (`mkit-server`'s `connect/error.rs`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StorageOp {
     /// `env.bucket(STORAGE_BUCKET)` failed to resolve (misconfigured binding).

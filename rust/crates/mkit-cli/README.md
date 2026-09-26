@@ -17,8 +17,7 @@ Most are off by default to keep the baseline build lean:
 
 | Feature | Adds |
 |---|---|
-| `enc-transport` | `mkit+enc://` dispatch and `mkit serve --listen-enc` (SPEC-TRANSPORT-ENC §6). |
-| `http-transport` | `mkit serve --http` &mdash; self-hosted `mkit.transport.v1.TransportService` Connect remote over axum (SPEC-TRANSPORT-CONNECT, issue #700). |
+| `enc-transport` | `mkit+enc://` client dispatch (SPEC-TRANSPORT-ENC §6). |
 | `git-bridge` (alias `git-export`) | `mkit git …` (SPEC-GIT-BRIDGE/SPEC-GIT-IMPORT). |
 | `sparse-checkout` | Verifiable sparse-checkout (issue #158). |
 | `pack-shards` | `mkit pack-shard <hash>` and shard-aware HTTP/S3 downloads (issue #159). |
@@ -27,3 +26,8 @@ Most are off by default to keep the baseline build lean:
 
 See the top-level README and `docs/CLI.md` for the full command reference
 and agent-integration notes (`mkit mcp`).
+
+`mkit serve <path>` is only the `mkit+ssh://` forced-command server. The
+self-hosted `mkit+https://` and `mkit+enc://` listeners are the separate
+`mkit-server` binary (`rust/crates/mkit-server-native`), which keeps the HTTP
+server stack and `SQLite` out of this crate.

@@ -218,10 +218,12 @@ cross-service inconsistency, not a build error.
 
 ## A live `mkit serve` is detectable by local worktree commands
 
-**Always:** every live `mkit serve` process holds a **shared** kernel
+**Always:** every live server process on a root holds a **shared** kernel
 lock (`mkit_core::repo_lock::acquire_shared`) on `<common_dir>/serve.lock`
-for its entire lifetime, across all three of its modes (stdin SSH-frame,
-`--listen-enc`, `--http`). Every command that acquires `worktree.lock`
+for its entire lifetime: `mkit serve <path>` (stdin SSH-frame, its only
+mode) and `mkit-server serve --repo-root <path>` (HTTP and `mkit+enc://`
+listeners; it also holds `<common_dir>/server.lock` exclusively, so one
+`mkit-server` serves a root at a time). Every command that acquires `worktree.lock`
 or `worktrees.lock` (`mkit-cli`'s `acquire_worktree_lock` /
 `acquire_worktrees_registry_lock`) immediately probes that same
 `serve.lock` non-blocking-exclusive (`mkit_core::repo_lock::probe_exclusive`)
@@ -249,7 +251,9 @@ local critical section both remain undetected — see SPEC-CONCURRENCY
 §3.1 for the full statement of what this warning does and does not
 cover.
 
-**Enforced by:** `mkit-cli/tests/serve_guard.rs`.
+**Enforced by:** `mkit-cli/tests/serve_guard.rs`;
+`mkit-server-native/tests/server_basics.rs`
+(`serve_lock_is_held_while_running`).
 
 ## Single commonware release train across every manifest and lockfile
 

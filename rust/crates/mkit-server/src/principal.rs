@@ -12,8 +12,8 @@ pub enum Principal {
         /// The signer's raw Ed25519 public key.
         ed25519: [u8; 32],
     },
-    /// Holder of a deployment-wide shared bearer token (today's
-    /// `mkit serve --http`).
+    /// Holder of a deployment-wide shared bearer token (`mkit-server
+    /// serve --auth bearer`, formerly `mkit serve --http`).
     BearerHolder,
     /// The authenticated peer of an encrypted (`enc`) listener.
     TransportPeer {

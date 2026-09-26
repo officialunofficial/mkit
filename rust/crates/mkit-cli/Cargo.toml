@@ -71,14 +71,12 @@ mkit-transport-file = { version = "0.4", path = "../mkit-transport-file" }
 # `mkit-transport-connect::TOKEN_ENV`, so callers of either transport read
 # the same `MKIT_API_TOKEN` env var).
 mkit-transport-http = { version = "0.4", path = "../mkit-transport-http" }
-# `mkit-transport-connect` provides BOTH the native ConnectRPC client —
-# the active implementation behind `mkit+https://` / loopback
-# `mkit+http://` dispatch (mkit#701) — and the axum-hosted
-# mkit.transport.v1 Connect server `mkit serve --http` uses (issue #700).
-# Required unconditionally (client dispatch, not feature-gated); its own
-# `server`/`axum` Connect features are also unconditional (see
-# `rust/crates/mkit-transport-connect/README.md`), so no `http-transport`
-# feature gate is needed on this dependency itself.
+# `mkit-transport-connect` is the native ConnectRPC client — the active
+# implementation behind `mkit+https://` / loopback `mkit+http://` dispatch
+# (mkit#701). Required unconditionally (client dispatch, not
+# feature-gated). The CLI hosts no Connect server: the self-hosted
+# `mkit+https://` remote is the separate `mkit-server` binary
+# (`mkit-server-native`), which is never a dependency of this crate.
 mkit-transport-connect = { version = "0.4", path = "../mkit-transport-connect" }
 mkit-transport-s3 = { version = "0.4", path = "../mkit-transport-s3" }
 mkit-transport-ssh = { version = "0.4", path = "../mkit-transport-ssh" }
@@ -88,27 +86,8 @@ mkit-transport-ssh = { version = "0.4", path = "../mkit-transport-ssh" }
 # Version-locked to the workspace (0.3); now that mkit-transport-enc is
 # published, release-plz rewrites this requirement on each lockstep bump.
 mkit-transport-enc = { version = "0.4", path = "../mkit-transport-enc", optional = true }
-# Optional: `mkit serve --http`'s axum-hosted mkit.transport.v1 Connect
-# server (issue #700, SPEC-TRANSPORT-CONNECT). Off by default so the
-# baseline `mkit-cli` build doesn't pay axum/hyper's compile cost, mirroring
-# `enc-transport`. Turn on via `--features http-transport`.
-# ConnectRPC + axum are pulled in directly (not just transitively through
-# mkit-transport-connect, which already unconditionally depends on both)
-# so `commands/serve/http.rs` can build the bearer-auth `Interceptor` and
-# drive `axum::serve` itself. Feature set mirrors `mkit-transport-connect`'s
-# own server-side (server + axum), version-pinned to the same "0.8" the
-# rest of the workspace's connectrpc consumers use.
-connectrpc = { version = "0.9.0", default-features = false, features = [
-    "server",
-    "axum",
-    "gzip",
-    "json",
-], optional = true }
-axum = { version = "0.8", default-features = false, features = [
-    "http1",
-    "http2",
-    "tokio",
-], optional = true }
+# Optional: the tokio runtime `mkit mcp --http` (the `mcp-v2` feature) runs
+# on. Off by default so the baseline `mkit-cli` build stays tokio-free.
 tokio = { version = "1", default-features = false, features = [
     "rt-multi-thread",
     "net",
@@ -123,7 +102,7 @@ tokio = { version = "1", default-features = false, features = [
 # traffic; `legacy_session_mode` still serves pre-2026-07-28 clients over
 # reconnect-friendly SSE, same dual-era design as apps/mcp's TS server). Off
 # by default so the baseline `mkit-cli` build doesn't pay tokio's compile
-# cost, mirroring `enc-transport`/`http-transport`. See `commands/mcp_v2.rs`.
+# cost, mirroring `enc-transport`. See `commands/mcp_v2.rs`.
 rmcp = { version = "3", default-features = false, features = [
     "server",
     "transport-io",
@@ -135,11 +114,11 @@ rmcp = { version = "3", default-features = false, features = [
 # raw hyper is all the glue this needs.
 hyper = { version = "1", features = ["server", "http1"], optional = true }
 hyper-util = { version = "0.1", features = ["tokio", "server-auto", "service"], optional = true }
-# Constant-time bearer-token comparison for the `--http-token` auth gate —
+# Constant-time bearer-token comparison for `mkit mcp --http-token` —
 # already resolved transitively (ed25519-dalek pulls it), so this is not a
 # new supply-chain root.
 subtle = { version = "2", optional = true }
-# HeaderMap/header names for the bearer-auth interceptor — already resolved
+# HeaderMap/header names for `mkit mcp --http`'s bearer-auth wrapper — already resolved
 # transitively (reqwest pulls it), not a new supply-chain root.
 http = { version = "1", optional = true }
 # `tower_service::Service` — the trait `mkit mcp --http`'s bearer-auth
@@ -303,22 +282,11 @@ default = []
 # cover it (returning UNAVAILABLE per-site). The release-party signer
 # (issue #160) will later replace the inert arms.
 bls-threshold = ["mkit-attest/bls-threshold", "mkit-keystore/bls-threshold", "dep:rand_core", "dep:commonware-codec"]
-# Enables the `mkit+enc://` dispatch path in `remote_dispatch::open`
-# and the `mkit serve --listen-enc <addr>` listener flag. Pulls in
-# `mkit-transport-enc` with its `tcp` feature (tokio + governor +
-# rand). See SPEC-TRANSPORT-ENC §6 item 3.
+# Enables the `mkit+enc://` client dispatch path in
+# `remote_dispatch::open`. Pulls in `mkit-transport-enc` with its `tcp`
+# feature (tokio + governor + rand) for `connect_tcp`. The listener is
+# `mkit-server serve --listen-enc`, not the CLI. See SPEC-TRANSPORT-ENC §6.
 enc-transport = ["dep:mkit-transport-enc", "mkit-transport-enc/tcp", "dep:commonware-cryptography", "dep:commonware-codec"]
-# Enables `mkit serve --http <addr>` (issue #700): hosts
-# `mkit.transport.v1.TransportService` over axum, backed by `FileTransport`.
-# `mkit-transport-connect` itself is an unconditional dependency (it also
-# backs `mkit+https://` client dispatch, mkit#701) but its OWN server-side
-# axum/hyper-server bits are behind ITS `server` cargo feature (off by
-# default there too), so this feature both flips that on and pulls in the
-# CLI's own directly-used `connectrpc`'s server+axum features, `axum`, and
-# a multi-thread `tokio` runtime for `commands/serve/http.rs`. Off by
-# default so the baseline `mkit-cli` build doesn't pay axum/hyper's compile
-# cost, mirroring `enc-transport`. See SPEC-TRANSPORT-CONNECT.md.
-http-transport = ["mkit-transport-connect/server", "dep:connectrpc", "dep:axum", "dep:tokio", "dep:subtle", "dep:http"]
 # Enables `mkit mcp`'s modern serving path (MCP 2026-07-28, via the official
 # `rmcp` Rust SDK — see the doc comment above rmcp's Cargo.toml entry). Off by
 # default: rmcp pulls in tokio, contradicting the tokio-free baseline build

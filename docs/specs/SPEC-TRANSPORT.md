@@ -295,20 +295,19 @@ the declared upload length and additionally cap the number of chunk
 frames at `MAX_FRAMES_PER_CONN`, so a client cannot bypass the outer
 frame loop by streaming unbounded chunks inside one upload request.
 
-The encrypted-transport listener (`mkit serve --listen-enc`,
-[`mkit-cli/src/commands/serve/enc.rs`](../../rust/crates/mkit-cli/src/commands/serve/enc.rs))
-enforces the same two constants against its own top-level frame loop &mdash;
-sharing `MAX_FRAMES_PER_CONN`/`MAX_BYTES_PER_CONN` with the SSH
-server rather than defining a second set of numbers &mdash; on top of its
-per-frame idle timeout (`--enc-idle-timeout-secs`). Without this, a
-peer that stays under the per-frame idle timeout but never closes the
-connection could hold a listener worker and stream unbounded work
-indefinitely; the SSH path already terminates such a peer via the
-cumulative caps above. A cap trip sends an
-`Error{ ERROR_CODE_INVALID_REQUEST }` frame and drops the connection,
-matching the SSH server's response shape. `mkit-server serve
---listen-enc` runs each session through the SSH server's own session
-(`mkit_server::ssh::serve_session`), so the caps are the same code.
+The encrypted-transport listener (`mkit-server serve --listen-enc`,
+[`mkit-server-native/src/enc.rs`](../../rust/crates/mkit-server-native/src/enc.rs))
+enforces the same two caps: it runs each session through the SSH
+server's own session (`mkit_server::ssh::serve_session`), so the caps are
+the same code, on top of its per-frame idle timeout
+(`--enc-idle-timeout-secs`). Without this, a peer that stays under the
+per-frame idle timeout but never closes the connection could hold a
+listener worker and stream unbounded work indefinitely; the SSH path
+already terminates such a peer via the cumulative caps above. A cap trip
+sends an `Error{ ERROR_CODE_INVALID_REQUEST }` frame and drops the
+connection, matching the SSH server's response shape. (The CLI's former
+`mkit serve --listen-enc` listener, removed in favour of `mkit-server`,
+shared the constants with `mkit serve` the same way.)
 
 The framing layer's per-frame `MAX_FRAME_BYTES = 1 MiB` cap (per
 [SPEC-RPC §1](SPEC-RPC.md#1-wire-framing)) bounds individual frames;

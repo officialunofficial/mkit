@@ -1345,22 +1345,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "connectrpc-health"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d20fc0ce78972ca7473b961953a8d57f5fd5943b184c65c971a96305f28bbebb"
-dependencies = [
- "buffa",
- "connectrpc",
- "futures",
- "http-body",
- "serde",
- "serde_json",
- "tokio",
- "tokio-stream",
-]
-
-[[package]]
 name = "console"
 version = "0.16.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3288,7 +3272,6 @@ version = "0.4.2"
 dependencies = [
  "assert_cmd",
  "assert_fs",
- "axum",
  "buffa",
  "bytes",
  "clap",
@@ -3521,7 +3504,6 @@ dependencies = [
  "mkit-server",
  "mkit-server-native",
  "mkit-transport-connect",
- "mkit-transport-file",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -3611,12 +3593,10 @@ version = "0.4.2"
 name = "mkit-transport-connect"
 version = "0.4.2"
 dependencies = [
- "axum",
  "buffa",
  "bytes",
  "connectrpc",
  "connectrpc-build",
- "connectrpc-health",
  "ed25519-dalek",
  "futures",
  "getrandom 0.4.3",
@@ -3624,11 +3604,9 @@ dependencies = [
  "http",
  "http-body-util",
  "mkit-core",
- "mkit-transport-file",
  "mkit-transport-memory",
  "rustls",
  "serde",
- "tempfile",
  "tokio",
  "url",
  "webpki-roots",
@@ -6018,7 +5996,6 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
- "tokio-util",
 ]
 
 [[package]]

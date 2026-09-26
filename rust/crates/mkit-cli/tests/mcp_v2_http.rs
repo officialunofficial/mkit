@@ -279,7 +279,7 @@ fn unknown_tool_is_a_protocol_error_over_http() {
 }
 
 /// Coverage for `mcp_v2.rs`'s fail-closed `--http` bearer-token gate
-/// (`resolve_http_auth`/`BearerAuthHttp`) — mirrors `mkit serve --http`'s
+/// (`resolve_http_auth`/`BearerAuthHttp`) — mirrors `mkit-server`'s
 /// own gate tests, adapted to the streamable-HTTP transport's plain
 /// request/response shape instead of connect-rpc.
 mod auth {

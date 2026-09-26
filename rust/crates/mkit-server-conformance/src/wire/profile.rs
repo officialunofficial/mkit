@@ -11,7 +11,7 @@ use serde::Deserialize;
 /// How the server authenticates transport RPCs.
 #[derive(Clone, PartialEq, Eq)]
 pub enum WireAuth {
-    /// No authentication (`mkit serve --http`, open deployments).
+    /// No authentication (`mkit-server serve --unsafe-allow-any-peer`, open deployments).
     None,
     /// `Authorization: Bearer <token>` on every transport RPC.
     Bearer {

@@ -212,7 +212,7 @@ fn parse_pubkey_query(query: &str) -> Result<&str, TransportError> {
 ///
 /// This is the canonical on-wire pubkey decoder for the encrypted
 /// transport: the `mkit+enc://?pubkey=` query parser uses it, and
-/// downstream consumers (e.g. `mkit serve --listen-enc`'s
+/// downstream consumers (e.g. `mkit-server serve --listen-enc`'s
 /// authorized-peers file parser) should call it rather than
 /// re-implementing the same encoding, so the accepted forms — and the
 /// rejection of non-zero base64 trailing bits — stay in one place.
@@ -570,7 +570,7 @@ mod tests {
     #[test]
     fn decode_pubkey_public_api_accepts_hex_and_b64_and_rejects_garbage() {
         // The canonical decoder is now public so downstream crates
-        // (e.g. `mkit serve --listen-enc`'s peer-allowlist parser) can
+        // (e.g. `mkit-server serve --listen-enc`'s peer-allowlist parser) can
         // share it. Pin its accepted/rejected forms directly.
         assert_eq!(decode_pubkey(ZERO_HEX).unwrap(), [0u8; 32]);
         assert_eq!(decode_pubkey(ZERO_B64).unwrap(), [0u8; 32]);

@@ -295,9 +295,11 @@ When you add a key to `Config`:
 - The encrypted-transport peer-authorization allowlist and the
   server/client identity keys (issue #178) are likewise
   **user-scoped/CLI-only**. They are supplied as command-line flags
-  (`--enc-authorized-peers`, `--enc-server-key`) or via a user-scoped
-  environment variable (`MKIT_ENC_CLIENT_KEY`) and a user-scoped
-  default path (`~/.config/mkit/enc/server.key`). They are members of
+  (`mkit-server serve --enc-authorized-peers`, `--enc-server-key`) or
+  via a user-scoped environment variable (`MKIT_ENC_CLIENT_KEY`). (The
+  removed `mkit serve --listen-enc` also had a user-scoped default
+  server key path, `~/.config/mkit/enc/server.key`; `mkit-server`
+  requires the flag.) They are members of
   the user-scoped key family alongside the legacy signing-key paths and
   trust-roots, and are **never** read from repo-local `.mkit/config` &mdash;
   there is no repo config knob that sets them, so a hostile repo cannot

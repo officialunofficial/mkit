@@ -3,9 +3,7 @@
 #
 # Regenerate the vendored ConnectRPC codegen for every consumer of the
 # canonical proto/mkit/transport/v1/transport.proto:
-#   - rust/crates/mkit-transport-connect  (native client for mkit+https://,
-#     plus the axum-hosted `mkit serve --http` server behind its `server`
-#     feature)
+#   - rust/crates/mkit-transport-connect  (native client for mkit+https://)
 #   - rust/crates/mkit-server             (the production server's wasm-clean
 #     `connect` binding, mounted by its native and Workers adapters; it also
 #     vendors grpc.health.v1)
@@ -13,7 +11,7 @@
 # apps/vcs-worker no longer vendors its own copy (WP-M0-17): it is a thin
 # deployment of mkit-server-worker, which mounts mkit-server's binding.
 # mkit-server cannot share mkit-transport-connect's copy: that crate's
-# client/server halves are native (Tokio, hyper) and don't compile for the
+# client is native (Tokio, hyper) and doesn't compile for the
 # wasm32-unknown-unknown Workers target, so each consumer vendors its own
 # generated/ from the SAME canonical proto rather than sharing a crate
 # dependency (mirrors apps/repo-worker + mkit-repo-client's split — see
