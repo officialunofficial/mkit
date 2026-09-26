@@ -64,6 +64,8 @@ async fn wire_suite_fs_sqlite_auth_v2() {
     profile.atomic_advance = true;
     profile.max_pack_bytes = MAX_PACK;
     profile.list_refs = 200;
+    // A server started empty for this test: whole-server listings are bounded.
+    profile.fresh_target = true;
     profile.quota = Some(QuotaLimits {
         max_ops: QUOTA.max_ops,
         max_bytes: QUOTA.max_bytes,

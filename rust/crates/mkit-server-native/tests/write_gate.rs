@@ -101,6 +101,8 @@ async fn verdict(gated: bool) -> Verdict {
         seed: [0x3c; 32],
     });
     profile.list_refs = 200;
+    // A server started empty for this test: whole-server listings are bounded.
+    profile.fresh_target = true;
     let target = WireTarget {
         base_url: origin.parse().unwrap(),
         profile,

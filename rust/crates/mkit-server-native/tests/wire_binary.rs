@@ -97,6 +97,8 @@ fn profile(auth: WireAuth, atomic: bool) -> Profile {
     p.atomic_advance = atomic;
     p.max_pack_bytes = MAX_PACK;
     p.list_refs = 200;
+    // A server started empty for this test: whole-server listings are bounded.
+    p.fresh_target = true;
     p.derive_features();
     p.features.insert(Feature::Health);
     p

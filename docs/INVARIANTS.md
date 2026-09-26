@@ -354,7 +354,8 @@ unrecognized `BackendKind`/`KeyRef` backend string, not a fail-closed one.
 ## wasm32 dependency graphs contain no C-toolchain crates
 
 **Always:** the `wasm32-unknown-unknown` normal-dependency graphs of
-`mkit-wasm`, `apps/repo-worker` and `mkit-server` contain none of `blst`,
+`mkit-wasm`, `apps/repo-worker`, `mkit-server`, `mkit-server-worker` and
+`apps/vcs-worker` contain none of `blst`,
 `zstd-sys`, `commonware-runtime` or `commonware-storage`; `mkit-wasm`'s also
 contains no `tokio`. Each crate depends on `mkit-core` with
 `default-features = false`, which keeps `pack-zstd` (and so `zstd-sys`) out.
@@ -379,8 +380,10 @@ could no longer build the server at all.
 **Enforced by:** `scripts/check-wasm-dep-graph.sh` (a `cargo tree` check
 per crate, including the `mkit-core` `pack-ruzstd` graph, which must
 contain `ruzstd`) and the `cargo check --target wasm32-unknown-unknown`
-steps for `mkit-wasm` and `mkit-server`, all run by `just ci-scripts`
-(part of `just ci`).
+steps for `mkit-wasm` and `mkit-server` (and the wasm32 build of
+`mkit-server-worker`), all run by `just ci-scripts` (part of `just ci`);
+cloudbuild/ci.yaml runs the script and the `mkit-server*` wasm32 builds
+on `main` and PRs to it (WP-M0-20).
 
 ## The default `mkit` CLI is server-free
 
@@ -408,9 +411,77 @@ only at release time, where this check fails at the PR.
 
 **Enforced by:** `scripts/check-cli-baseline.sh` (a `cargo tree` model of
 the graph plus a grep of `commands/serve/`), run by `just ci-scripts`
-(part of `just ci`); the release build's real compiler artifacts are
+(part of `just ci`), `just ci-server` and cloudbuild/ci.yaml; the release build's real compiler artifacts are
 checked by `scripts/check-release-artifact-features.sh` against
 `scripts/release/mkit-packages.golden`.
+
+## Every storage backend passes the storage-contract suite
+
+**Always:** every `NamespaceStore` and `BlobStore` a server can be deployed
+on passes `mkit-server-conformance`'s storage suite (`storage_suite!`),
+including the durability cases (`dur.*`: cancellation mid-apply,
+crash/restart without shutdown, portable export/import) and the `NotAfter`
+commit-deadline cases (`kv.not_after_*`), and declares each case it skips,
+for a capability the backend lacks (`StoreCapabilities`, or a reopen that
+an in-memory `SQLite` database cannot do). A declared skip that starts
+passing, or an undeclared one, fails the run.
+
+**Because:** `mkit-server`'s pipeline is written once against the storage
+traits (PRD MKIT-29 §5.1) and trusts their contract: an atomic batch, a
+missed deadline that writes nothing, a crash that leaves either the old or
+the new state. A backend that bends one of these on a single path
+(a partial batch on `SQLITE_FULL`, a blob visible before its final chunk)
+corrupts refs or quota only in the deployment that uses it, where no
+pipeline test looks.
+
+**If violated:** a ref update half-applies or survives its own deadline,
+replay or quota rows diverge from the effects they guard, or an upload is
+readable before it is complete, on one backend only.
+
+**Enforced by:** one test binary per backend in
+`rust/crates/mkit-server-conformance/tests/`: `memory_backends.rs`
+(full-capability and `RefsOnly` memory stores, `MemoryBlobStore`),
+`fs_backends.rs` (`FsLayoutStore`, `FsBlobStore`), `sqlite_backends.rs`
+(`SqlKvStore` over `RusqliteConn`, file and in-memory) and
+`s3_backends.rs` (`S3BlobStore` against the in-repo fake S3); the Workers
+stores (`DoNamespaceStore` over a simulated Durable Object, `R2BlobStore`)
+in `rust/crates/mkit-server-worker/tests/conformance.rs`. The suite's own
+mutation tests (`suite_selftest.rs`) prove each case fails the store bug it
+targets. All run in the workspace nextest (`just ci`, cloudbuild/ci.yaml).
+Simulated Durable Objects cannot show placement, Cloudflare's limits or
+point-in-time recovery; the M1 staging runs (WP-1.20) cover those.
+
+## The native server and the reference Worker pass the black-box wire suite
+
+**Always:** every `mkit.transport.v1` server mkit ships passes
+`mkit-server-conformance`'s wire suite (`mkit-server-conformance wire`)
+over the network, with no divergences (a divergence must be declared with
+its justification in the test, and fails the test once the case passes):
+`mkit-server` on FS + `.mkit` layout (bearer), FS + SQLite and S3 + SQLite
+(auth v2), both in-process and as the real binary, and `apps/vcs-worker`
+under `wrangler dev`. The suite speaks raw Connect with its own client, so
+it checks the wire, not mkit's client library.
+
+**Because:** the servers share one pipeline, but each binding (axum,
+Workers fetch, the storage adapters) can still change status codes,
+compression, streaming or limits on its own. "Nothing changes on the wire"
+(PRD MKIT-29 §8, M0 exit) is only checkable against a fixed, black-box
+suite; a client that happens to tolerate a change would hide it.
+
+**If violated:** a deployment answers with a different error code, drops a
+precondition or a limit, or buffers a stream where the spec requires it to
+stream, and existing clients or third-party implementations break against
+one server only.
+
+**Enforced by:** `rust/crates/mkit-server-native/tests/wire_fs_layout_bearer.rs`,
+`wire_fs_sqlite.rs`, `wire_s3_sqlite.rs` and `wire_binary.rs` (the
+spawned binary), and `rust/crates/mkit-server-conformance/tests/baseline_pipeline_memory.rs`
+(the pipeline over memory stores, plus store mutants each case must catch),
+in the workspace nextest (`just ci`, `just ci-server`, cloudbuild/ci.yaml);
+`scripts/vcs-worker-conformance.sh` for `apps/vcs-worker`, run by
+`.github/workflows/workers.yml`'s `vcs-worker-conformance` job (main and
+PRs to main only; during the MKIT-29 epic it runs locally at each
+milestone boundary).
 
 ## Both zstd backends accept exactly one frame per entry
 

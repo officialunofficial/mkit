@@ -64,6 +64,10 @@ struct WireArgs {
     /// Sign read RPCs too (M2 signed reads; off in M0).
     #[arg(long)]
     sign_reads: bool,
+    /// The server started empty for this run and has no other writers:
+    /// enables whole-server listings (`ListRefs("")`).
+    #[arg(long)]
+    fresh_target: bool,
     /// The server commits `AdvanceRefs` atomically.
     #[arg(long)]
     atomic_advance: bool,
@@ -136,6 +140,7 @@ impl WireArgs {
             replay_prune_grace_ms: self.replay_prune_grace_ms,
             duplicate_retry_ms: self.duplicate_retry_ms,
             sign_reads: self.sign_reads.then_some(true),
+            fresh_target: self.fresh_target.then_some(true),
         }
     }
 }

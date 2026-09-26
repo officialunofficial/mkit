@@ -61,13 +61,78 @@ slow-timeout = { period = "300s", terminate-after = 1 }
 # 120s kill envelope under the contention of a full parallel run. Not a
 # hang; give it the same generous per-test ceiling as the other
 # real-timing-dependent suites above.
+#
+# WP-M0-20 (the MKIT-29 M0 exit run, 2026-09-26, a quiet 10-core M1 Pro
+# with nothing else building): alone it takes 33s, but inside the full
+# workspace run it was killed at 150s, then at 300s, and took 526s under a
+# 600s ceiling. It calibrates its race delays from one `commit` it times at
+# the start, so a loaded start inflates all 36 rounds. It now runs with no
+# other test beside it (`threads-required`); serialized it took 40s, so the
+# 150s ceiling stays.
 [[profile.default.overrides]]
 filter = 'binary(branch_rename_commit_race)'
+threads-required = "num-test-threads"
 slow-timeout = { period = "150s", terminate-after = 1 }
 
 [[profile.ci.overrides]]
 filter = 'binary(branch_rename_commit_race)'
+threads-required = "num-test-threads"
 slow-timeout = { period = "150s", terminate-after = 1 }
+
+# CPU-bound debug-build tests that the suite's own parallelism pushes past
+# the default 60s. Named one by one: each took 40s or more in a full
+# `cargo nextest run --workspace --all-features` in WP-M0-20's quiet-machine
+# runs (10-core M1 Pro, nothing else building), measured under a 600s
+# ceiling on this branch and on `main`; every other test in these modules
+# keeps the 60s (ci: 120s) hang detection.
+#   history::ancestry, the 4 scrub/full-walk tests      20-23s alone; 117-123s
+#                                                       in the suite (TIMEOUT)
+#   history::ancestry, the other 3 scrub tests          40-64s in the suite
+#   refs::tests::cas_{match,delete_vs_match}_* races    44-73s in the suite
+#   batch_write_hash_equals_store_write_hash            8s alone; 88-90s (TIMEOUT)
+#   write_parts_equals_concatenated_write               38-48s in the suite
+#   mkit-cli verify_new_object_signatures_mixed_*       11.5s alone; 56-60s (TIMEOUT)
+# None hangs: each walks, hashes or verifies a large fixture in an
+# unoptimized build and is starved of CPU by the other test threads. They
+# get 300s, about 2.4x the worst measured. That margin was calibrated on an
+# M1 Pro, not on the CI machines.
+[[profile.default.overrides]]
+filter = '''
+package(mkit-core) and (
+    test(=history::ancestry::tests::corruption_outside_the_current_window_is_caught_within_a_bounded_number_of_publishes)
+    or test(=history::ancestry::tests::fast_forward_scrubs_a_bounded_window_not_the_whole_prefix)
+    or test(=history::ancestry::tests::full_walk_fallback_still_verifies_the_spliced_prefix)
+    or test(=history::ancestry::tests::missing_scrub_state_forces_a_full_walk_instead_of_trusting_nothing)
+    or test(=history::ancestry::tests::scrub_lap_completion_forces_a_full_walk_but_keeps_the_generation)
+    or test(=history::ancestry::tests::scrub_state_from_a_superseded_generation_is_discarded_not_misapplied)
+    or test(=history::ancestry::tests::stale_scrub_state_forces_a_full_walk_regardless_of_cursor_position)
+    or test(=refs::tests::cas_delete_vs_match_advance_race_never_lets_both_win_or_loses_the_advance)
+    or test(=refs::tests::cas_match_race_never_loses_an_update_across_uncoordinated_callers)
+    or test(=batch::tests::batch_write_hash_equals_store_write_hash)
+    or test(=batch::tests::write_parts_equals_concatenated_write)
+)
+or (package(mkit-cli) and test(=remote_dispatch::packmap::tests::verify_new_object_signatures_mixed_with_unsigned_object_kinds))
+'''
+slow-timeout = { period = "60s", terminate-after = 5 }
+
+[[profile.ci.overrides]]
+filter = '''
+package(mkit-core) and (
+    test(=history::ancestry::tests::corruption_outside_the_current_window_is_caught_within_a_bounded_number_of_publishes)
+    or test(=history::ancestry::tests::fast_forward_scrubs_a_bounded_window_not_the_whole_prefix)
+    or test(=history::ancestry::tests::full_walk_fallback_still_verifies_the_spliced_prefix)
+    or test(=history::ancestry::tests::missing_scrub_state_forces_a_full_walk_instead_of_trusting_nothing)
+    or test(=history::ancestry::tests::scrub_lap_completion_forces_a_full_walk_but_keeps_the_generation)
+    or test(=history::ancestry::tests::scrub_state_from_a_superseded_generation_is_discarded_not_misapplied)
+    or test(=history::ancestry::tests::stale_scrub_state_forces_a_full_walk_regardless_of_cursor_position)
+    or test(=refs::tests::cas_delete_vs_match_advance_race_never_lets_both_win_or_loses_the_advance)
+    or test(=refs::tests::cas_match_race_never_loses_an_update_across_uncoordinated_callers)
+    or test(=batch::tests::batch_write_hash_equals_store_write_hash)
+    or test(=batch::tests::write_parts_equals_concatenated_write)
+)
+or (package(mkit-cli) and test(=remote_dispatch::packmap::tests::verify_new_object_signatures_mixed_with_unsigned_object_kinds))
+'''
+slow-timeout = { period = "60s", terminate-after = 5 }
 
 # The storage suite over the `.mkit`-layout stores makes every write durable
 # (fsync the file, rename, fsync the directory): a few cases apply 1,000-2,000

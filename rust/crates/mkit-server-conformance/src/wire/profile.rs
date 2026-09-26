@@ -229,6 +229,11 @@ pub struct Profile {
     /// Sign read RPCs too (SPEC-WRITE-GRANTS §9.2, M2). Off in M0, where
     /// reads are unsigned; the hook the M2 signed-read cases turn on.
     pub sign_reads: bool,
+    /// The server started empty for this run and has no other writers, so
+    /// a whole-server `ListRefs("")` is bounded by this run's own refs.
+    /// Off by default: on a long-lived server such a listing grows with
+    /// every run (and a unary listing has no paging before M1, WP-1.27).
+    pub fresh_target: bool,
 }
 
 impl Profile {
@@ -249,6 +254,7 @@ impl Profile {
             replay_prune_grace_ms: DEFAULT_REPLAY_PRUNE_GRACE_MS,
             duplicate_retry_ms: DEFAULT_DUPLICATE_RETRY_MS,
             sign_reads: false,
+            fresh_target: false,
         };
         profile.derive_features();
         profile
@@ -361,6 +367,8 @@ pub struct ProfileSpec {
     pub duplicate_retry_ms: Option<u64>,
     /// See [`Profile::sign_reads`].
     pub sign_reads: Option<bool>,
+    /// See [`Profile::fresh_target`].
+    pub fresh_target: Option<bool>,
 }
 
 impl ProfileSpec {
@@ -412,6 +420,7 @@ impl ProfileSpec {
             replay_prune_grace_ms: over.replay_prune_grace_ms.or(self.replay_prune_grace_ms),
             duplicate_retry_ms: over.duplicate_retry_ms.or(self.duplicate_retry_ms),
             sign_reads: over.sign_reads.or(self.sign_reads),
+            fresh_target: over.fresh_target.or(self.fresh_target),
         }
     }
 
@@ -497,6 +506,7 @@ impl ProfileSpec {
             profile.duplicate_retry_ms = ms;
         }
         profile.sign_reads = self.sign_reads.unwrap_or(false);
+        profile.fresh_target = self.fresh_target.unwrap_or(false);
         profile.derive_features();
         // `name` adds a feature to the derived set, `-name` removes one.
         for entry in self.features.unwrap_or_default() {
