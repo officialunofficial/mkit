@@ -20,7 +20,10 @@ mod maintenance;
 mod partition;
 pub mod read;
 
-pub use blob::{BlobBody, BlobKey, BlobMeta, BlobStore, ByteRange, CommitOutcome, PackSink};
+pub use blob::{
+    BlobBody, BlobKey, BlobMeta, BlobStore, ByteRange, CommitOutcome, MAX_BLOB_PIECE_BYTES,
+    PackSink,
+};
 pub use content_index::{
     BlockEntry, ContentIndex, GcPlan, HoldOutcome, Holder, HolderOutcome, HolderPage, INDEX_FANOUT,
     MAX_BLOCK_REASON_BYTES, MAX_HOLD_TTL_MS, ObjectState, content_shard, content_shards,

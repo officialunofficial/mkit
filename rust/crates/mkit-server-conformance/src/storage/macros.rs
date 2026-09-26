@@ -9,7 +9,8 @@
 /// directory; the invoking crate needs no tokio dependency.
 ///
 /// - `kv = <expr>`: a [`KvHarness`](crate::storage::KvHarness), evaluated
-///   once per case; runs the `kv_*`, `dur_*` and `idx_*` cases.
+///   once per case; runs the `kv_*`, `dur_*` and `idx_*` cases, judged
+///   against its declared skips, plus `declared_skips_name_cases`.
 /// - `blob = <expr>`: a [`BlobHarness`](crate::storage::BlobHarness) such
 ///   as `MemoryBlobStore::default`; runs the `blob_*` cases.
 ///
@@ -23,22 +24,36 @@ macro_rules! storage_suite {
         #[allow(unused_imports)]
         mod $name {
             use super::*;
-            $crate::__with_kv_cases!(__storage_tests { $kv });
-            $crate::__with_blob_cases!(__storage_tests { $blob });
+            $crate::__with_kv_cases!(__storage_tests { $kv, kv_skips });
+            $crate::__with_blob_cases!(__storage_tests { $blob, no_skips });
+            $crate::__declared_skips_test!($kv);
         }
     };
     ($name:ident, kv = $kv:expr $(,)?) => {
         #[allow(unused_imports)]
         mod $name {
             use super::*;
-            $crate::__with_kv_cases!(__storage_tests { $kv });
+            $crate::__with_kv_cases!(__storage_tests { $kv, kv_skips });
+            $crate::__declared_skips_test!($kv);
         }
     };
     ($name:ident, blob = $blob:expr $(,)?) => {
         #[allow(unused_imports)]
         mod $name {
             use super::*;
-            $crate::__with_blob_cases!(__storage_tests { $blob });
+            $crate::__with_blob_cases!(__storage_tests { $blob, no_skips });
+        }
+    };
+}
+
+/// A test that every skip the kv harness declares names a case.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __declared_skips_test {
+    ($kv:expr) => {
+        #[test]
+        fn declared_skips_name_cases() {
+            $crate::__private::check_declared(&$kv);
         }
     };
 }
@@ -74,7 +89,6 @@ macro_rules! __with_kv_cases {
                 kv_oversize_key_invalid,
                 kv_oversize_value_invalid,
                 kv_batch_limits_invalid,
-                kv_partition_encoding_golden,
                 kv_partitions_isolated,
                 kv_codec_golden_values_roundtrip,
                 kv_concurrent_absent_single_winner,
@@ -99,6 +113,7 @@ macro_rules! __with_kv_cases {
                 dur_cancelled_apply_is_all_or_nothing,
                 dur_crash_restart_atomic_at_last_commit,
                 dur_export_import_roundtrip,
+                dur_import_newer_layout_rejected,
             }
             content_index::{
                 idx_holder_add_idempotent,
@@ -112,6 +127,7 @@ macro_rules! __with_kv_cases {
                 idx_gc_commit_then_add_hold_unavailable,
                 idx_blocked_on_add,
                 idx_hold_extension_keeps_max,
+                idx_expired_holds_pruned_on_mutation,
             }
         }
     };
@@ -146,17 +162,21 @@ macro_rules! __with_blob_cases {
     };
 }
 
-/// One `#[test]` per case, each running the case on `$harness`.
+/// One `#[test]` per case, each running the case on `$harness` and
+/// judging it against the skips `__private::$skips` reads from it.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __storage_tests {
-    ($harness:expr ; $($module:ident::{ $($case:ident),* $(,)? })*) => {
+    ($harness:expr, $skips:ident ; $($module:ident::{ $($case:ident),* $(,)? })*) => {
         $($(
             #[test]
             fn $case() {
+                let harness = $harness;
+                let declared = $crate::__private::$skips(&harness);
                 $crate::__private::run(
                     stringify!($case),
-                    $crate::storage::$module::$case($harness),
+                    declared,
+                    $crate::storage::$module::$case(harness),
                 );
             }
         )*)*

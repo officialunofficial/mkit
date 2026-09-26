@@ -1,18 +1,18 @@
 //! [`BlobStore`] cases: content addressing, length checks, visibility,
 //! ranges, streaming and deletion.
 
-use std::sync::Arc;
-
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt as _;
+use futures::future::join_all;
 use mkit_core::hash::hash;
+use mkit_server::store::MAX_BLOB_PIECE_BYTES;
 use mkit_server::{BlobBody, BlobKey, BlobStore, ByteRange, CommitOutcome, PackSink, StoreError};
 
 use super::CaseResult::Pass;
 use super::{BlobHarness, Outcome};
 
 /// Largest piece a streamed body may carry (R-25).
-const MAX_PIECE: usize = 1024 * 1024;
+const MAX_PIECE: usize = MAX_BLOB_PIECE_BYTES;
 
 fn key_of(bytes: &[u8]) -> BlobKey {
     BlobKey::new(hash(bytes))
@@ -32,10 +32,18 @@ async fn put<B: BlobStore>(
     sink.commit().await
 }
 
-/// A body's bytes; checks a stream's declared length and piece sizes.
+/// A body's bytes; checks the body is streamed if over `MAX_PIECE`, and a
+/// stream's declared length and piece sizes.
 async fn read(body: BlobBody) -> Result<Bytes, String> {
     match body {
-        BlobBody::Bytes(bytes) => Ok(bytes),
+        BlobBody::Bytes(bytes) => {
+            ensure!(
+                bytes.len() <= MAX_PIECE,
+                "a {}-byte body is not streamed",
+                bytes.len()
+            );
+            Ok(bytes)
+        }
         BlobBody::Stream { len, mut stream } => {
             let mut out = BytesMut::new();
             while let Some(piece) = stream.next().await {
@@ -172,22 +180,15 @@ pub async fn blob_identical_reput_already_present<H: BlobHarness>(h: H) -> Outco
 
 /// Two concurrent uploads of the same blob both succeed.
 pub async fn blob_concurrent_same_key_both_succeed<H: BlobHarness>(h: H) -> Outcome {
-    let s = Arc::new(h.store());
+    let s = h.store();
     let data = Bytes::from(vec![9_u8; 256 * 1024]);
     let key = key_of(&data);
-    let tasks: Vec<_> = (0..2)
-        .map(|_| {
-            let (s, data) = (s.clone(), data.clone());
-            tokio::spawn(async move {
-                let pieces: Vec<&[u8]> = data.chunks(4096).collect();
-                put(&*s, key, data.len() as u64, &pieces).await
-            })
-        })
-        .collect();
-    for task in tasks {
-        ok!(ok!(task.await));
+    let pieces: Vec<&[u8]> = data.chunks(4096).collect();
+    let uploads = (0..2).map(|_| put(&s, key, data.len() as u64, &pieces));
+    for result in join_all(uploads).await {
+        ok!(result);
     }
-    ensure_eq!(get(&*s, &key, None).await?, Some(data));
+    ensure_eq!(get(&s, &key, None).await?, Some(data));
     Ok(Pass)
 }
 

@@ -43,6 +43,10 @@ impl ByteRange {
     }
 }
 
+/// Largest piece of a streamed [`BlobBody`], and the longest body a
+/// [`BlobStore::get`] may return as one buffer.
+pub const MAX_BLOB_PIECE_BYTES: usize = 1024 * 1024;
+
 /// A blob's metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlobMeta {
@@ -97,10 +101,11 @@ pub trait BlobStore: MaybeSend + MaybeSync {
         len: u64,
     ) -> impl Future<Output = Result<Self::Sink, StoreError>> + MaybeSend;
 
-    /// The blob's bytes, or `range` of them. Backends SHOULD stream
-    /// anything larger than one chunk and never buffer a whole pack. A
-    /// range starting at or past the end is
-    /// [`StoreError::RangeNotSatisfiable`].
+    /// The blob's bytes, or `range` of them. A body longer than
+    /// [`MAX_BLOB_PIECE_BYTES`] MUST be a [`BlobBody::Stream`] whose pieces
+    /// are each at most [`MAX_BLOB_PIECE_BYTES`] (an adapter re-chunks its
+    /// backend's stream); a backend never buffers a whole pack. A range
+    /// starting at or past the end is [`StoreError::RangeNotSatisfiable`].
     fn get(
         &self,
         key: &BlobKey,

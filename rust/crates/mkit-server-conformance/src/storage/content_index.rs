@@ -123,7 +123,8 @@ pub async fn idx_holders_pagination<H: KvHarness>(h: H) -> Outcome {
         ok!(idx.add_holder(&obj, holder, None, 1).await);
     }
     let (mut seen, mut after) = (vec![], None);
-    loop {
+    for page_no in 0.. {
+        ensure!(page_no <= 2 * all.len(), "the holder pages did not end");
         let page = ok!(idx.holders(&obj, after.as_ref(), 2).await);
         ensure!(page.holders.len() <= 2, "page over limit");
         seen.extend(page.holders);
@@ -315,5 +316,28 @@ pub async fn idx_hold_extension_keeps_max<H: KvHarness>(h: H) -> Outcome {
     ensure_err!(long, StoreError::Invalid(_));
     let max = ok!(idx.add_hold(&obj, &[2; 32], 10 + MAX_HOLD_TTL_MS, 10).await);
     ensure_eq!(max, HoldOutcome::Held);
+    Ok(Pass)
+}
+
+/// Ordinary mutations delete the expired holds they read, not only the
+/// GC plan; a live hold stays. (One hold at a time, so the case holds
+/// whatever page size the backend's scans return.)
+pub async fn idx_expired_holds_pruned_on_mutation<H: KvHarness>(h: H) -> Outcome {
+    let obj = [0x2c; 32];
+    let idx = index!(h, obj);
+    ensure_eq!(
+        ok!(idx.add_hold(&obj, &[1; 32], 50, 1).await),
+        HoldOutcome::Held
+    );
+    ok!(idx.add_holder(&obj, &holder("a")?, None, 600).await);
+    ensure_eq!(hold_row(&idx, &obj, &[1; 32]).await?, None);
+    ensure_eq!(
+        ok!(idx.add_hold(&obj, &[2; 32], 900, 600).await),
+        HoldOutcome::Held
+    );
+    ok!(idx.block(&obj, &BlockEntry::new("r", 1), 700).await);
+    ensure_eq!(hold_row(&idx, &obj, &[2; 32]).await?, Some(900));
+    ok!(idx.remove_holder(&obj, &holder("a")?, 901).await);
+    ensure_eq!(hold_row(&idx, &obj, &[2; 32]).await?, None);
     Ok(Pass)
 }

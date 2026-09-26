@@ -11,12 +11,13 @@ use mkit_core::hash::Hasher;
 
 use super::{MemoryFault, lock, take_fault};
 use crate::store::{
-    BlobBody, BlobKey, BlobMeta, BlobStore, ByteRange, CommitOutcome, PackSink, StoreError,
+    BlobBody, BlobKey, BlobMeta, BlobStore, ByteRange, CommitOutcome, MAX_BLOB_PIECE_BYTES,
+    PackSink, StoreError,
 };
 
-/// Bodies longer than this are streamed in pieces of this size: the
-/// contract's SHOULD (`BlobStore::get`), which the conformance suite checks.
-const STREAM_CHUNK: usize = 1024 * 1024;
+/// Bodies longer than this are streamed in pieces of this size
+/// (`BlobStore::get`).
+const STREAM_CHUNK: usize = MAX_BLOB_PIECE_BYTES;
 
 /// `bytes` as a body: whole, or streamed when longer than [`STREAM_CHUNK`].
 fn body(bytes: Bytes) -> BlobBody {
@@ -212,7 +213,7 @@ mod tests {
     fn get(store: &MemoryBlobStore, key: &BlobKey, range: Option<ByteRange>) -> Option<Bytes> {
         match block_on(store.get(key, range)).unwrap()? {
             BlobBody::Bytes(b) => Some(b),
-            BlobBody::Stream { .. } => panic!("memory blobs are never streamed"),
+            BlobBody::Stream { .. } => panic!("a small memory blob is never streamed"),
         }
     }
 
@@ -295,6 +296,41 @@ mod tests {
         assert!(block_on(store.delete(&key)).unwrap());
         assert_eq!(get(&store, &key, None), None);
         assert!(!block_on(store.delete(&key)).unwrap());
+    }
+
+    #[test]
+    fn large_bodies_stream_in_bounded_pieces() {
+        let store = MemoryBlobStore::default();
+        let data: Vec<u8> = (0..=250_u8).cycle().take(STREAM_CHUNK * 2 + 7).collect();
+        let key = key_of(&data);
+        put(&store, key, data.len() as u64, &[&data]).unwrap();
+        let read = |range| {
+            let body = block_on(store.get(&key, range)).unwrap().unwrap();
+            let BlobBody::Stream { len, mut stream } = body else {
+                panic!("a large body is streamed");
+            };
+            let mut out = Vec::new();
+            while let Some(piece) =
+                block_on(core::future::poll_fn(|cx| stream.as_mut().poll_next(cx)))
+            {
+                let piece = piece.unwrap();
+                assert!(piece.len() <= MAX_BLOB_PIECE_BYTES);
+                out.extend_from_slice(&piece);
+            }
+            assert_eq!(out.len() as u64, len);
+            out
+        };
+        assert_eq!(read(None), data);
+        let range = ByteRange {
+            start: 3,
+            end_inclusive: STREAM_CHUNK as u64 + 3,
+        };
+        assert_eq!(read(Some(range)), &data[3..=STREAM_CHUNK + 3]);
+        // Exactly one piece is still one buffer.
+        let edge = &data[..STREAM_CHUNK];
+        let edge_key = key_of(edge);
+        put(&store, edge_key, edge.len() as u64, &[edge]).unwrap();
+        assert_eq!(get(&store, &edge_key, None).unwrap().len(), STREAM_CHUNK);
     }
 
     #[test]

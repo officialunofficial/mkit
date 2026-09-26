@@ -2,9 +2,8 @@
 //! limits, isolation, capabilities, the `NotAfter` deadline (rule 8),
 //! capacity (rule 7) and the golden encodings a backend stores.
 
-use std::sync::Arc;
-
 use futures::FutureExt as _;
+use futures::future::join_all;
 use mkit_core::protocol::AdvanceOutcome;
 use mkit_server::quota::QuotaState;
 use mkit_server::store::{BlockEntry, ObjectState, codec, export_header, keys};
@@ -17,7 +16,7 @@ use mkit_server::{
 use super::CaseResult::{Pass, Skip};
 use super::{
     KEY_PREFIX, KvHarness, NO_CLOCK, Outcome, clocked, commit, k, need_all_classes, need_atomic,
-    outcome, part, put_all, range, rows, scan_all, v,
+    not_written, outcome, part, put_all, range, rows, scan_all, v,
 };
 use BatchOutcome::{Committed, DeadlinePassed, PreconditionFailed};
 use Precondition::{Absent, Equals, NotAfter, Present};
@@ -70,7 +69,14 @@ pub async fn kv_empty_value_distinct_from_absent<H: KvHarness>(h: H) -> Outcome 
         failed(0, Some(empty.clone()))
     );
     commit(&s, &p, Batch::new().require(Present(a.clone()))).await?;
-    commit(&s, &p, Batch::new().require(Equals(a.clone(), empty))).await?;
+    commit(
+        &s,
+        &p,
+        Batch::new().require(Equals(a.clone(), empty.clone())),
+    )
+    .await?;
+    let missing = Batch::new().require(Equals(k(b"missing"), empty));
+    ensure_eq!(outcome(&s, &p, missing).await?, failed(0, None));
     commit(&s, &p, Batch::new().delete(a.clone())).await?;
     ensure_eq!(ok!(s.get(&p, &a).await), None);
     Ok(Pass)
@@ -255,8 +261,8 @@ pub async fn kv_scan_bounds_half_open<H: KvHarness>(h: H) -> Outcome {
     Ok(Pass)
 }
 
-/// Paging resumes strictly after the cursor, even when the last key read
-/// has since been deleted, and never repeats or skips a key.
+/// Paging resumes strictly after the cursor, whether the last key read is
+/// still there or has since been deleted, and never repeats or skips a key.
 pub async fn kv_scan_cursor_resumes_strictly_after<H: KvHarness>(h: H) -> Outcome {
     let (s, p) = (h.store(), part("kv_scan_cursor_resumes_strictly_after"));
     let all: Vec<_> = [b"a", b"b", b"c", b"d"]
@@ -266,13 +272,24 @@ pub async fn kv_scan_cursor_resumes_strictly_after<H: KvHarness>(h: H) -> Outcom
     put_all(&s, &p, &all).await?;
     let (start, end) = range();
     let (mut seen, mut after) = (vec![], None);
-    while seen.len() < 2 {
+    for _ in 0..all.len() * 2 {
+        if seen.len() >= 2 {
+            break;
+        }
         let page = ok!(s.scan(&p, &start, &end, after.as_ref(), 2).await);
         seen.extend(page.entries);
         after = Some(page.next.ok_or("the scan ended with entries unread")?);
     }
+    ensure!(seen.len() >= 2, "the scan returned no entries");
     ensure_eq!(seen, all[..seen.len()].to_vec());
-    commit(&s, &p, Batch::new().delete(seen[seen.len() - 1].0.clone())).await?;
+    let last = seen[seen.len() - 1].0.clone();
+    // The cursor's key is still there: resuming must not return it again.
+    let again = ok!(s.scan(&p, &start, &end, after.as_ref(), 1).await);
+    ensure!(
+        again.entries.iter().all(|e| e.0 > last),
+        "resumed at the cursor"
+    );
+    commit(&s, &p, Batch::new().delete(last)).await?;
     let mut rest = vec![];
     for _ in 0..all.len() * 2 {
         let Some(cursor) = after.take() else { break };
@@ -310,11 +327,13 @@ pub async fn kv_scan_pagination_stable_under_concurrent_puts_after_cursor<H: KvH
     .await?;
     let mut seen = vec![];
     let mut after = page.next;
-    while let Some(cursor) = after {
+    for _ in 0..16 {
+        let Some(cursor) = after.take() else { break };
         let page = ok!(s.scan(&p, &start, &end, Some(&cursor), 1).await);
         seen.extend(page.entries.into_iter().map(|e| e.0));
         after = page.next;
     }
+    ensure!(after.is_none(), "the scan did not end");
     ensure_eq!(seen, vec![k(b"c"), k(b"d"), k(b"f"), k(b"g")]);
     Ok(Pass)
 }
@@ -329,7 +348,11 @@ pub async fn kv_scan_short_page_still_returns_next<H: KvHarness>(h: H) -> Outcom
     let (start, end) = range();
     for limit in 1..=10 {
         let (mut read, mut after) = (0, None);
-        loop {
+        for page_no in 0.. {
+            ensure!(
+                page_no <= 2 * all.len(),
+                "limit {limit}: the scan did not end"
+            );
             let page = ok!(s.scan(&p, &start, &end, after.as_ref(), limit).await);
             ensure!(
                 read + page.entries.len() <= all.len(),
@@ -435,7 +458,9 @@ pub async fn kv_oversize_value_invalid<H: KvHarness>(h: H) -> Outcome {
 }
 
 /// More than `MAX_BATCH_OPS` operations or `MAX_BATCH_BYTES` in one batch
-/// is `Invalid` and writes nothing; exactly `MAX_BATCH_OPS` commits.
+/// is `Invalid` and writes nothing, counting the value bytes of `Equals`
+/// preconditions; exactly `MAX_BATCH_OPS` operations or `MAX_BATCH_BYTES`
+/// commits.
 pub async fn kv_batch_limits_invalid<H: KvHarness>(h: H) -> Outcome {
     let (s, p) = (h.store(), part("kv_batch_limits_invalid"));
     let puts = |n: usize, len: usize| {
@@ -447,10 +472,25 @@ pub async fn kv_batch_limits_invalid<H: KvHarness>(h: H) -> Outcome {
     ensure_err!(s.apply(&p, ops).await, StoreError::Invalid(_));
     let bytes = puts(MAX_BATCH_BYTES / MAX_VALUE_BYTES + 1, MAX_VALUE_BYTES);
     ensure_err!(s.apply(&p, bytes).await, StoreError::Invalid(_));
+    // Two full values fit alone; the precondition's bytes tip it over.
+    let (ka, kb) = (k(b"a"), k(b"b"));
+    let full = Value::new(vec![1; MAX_VALUE_BYTES]);
+    let checked = Batch::new()
+        .require(Equals(ka.clone(), full.clone()))
+        .put(kb.clone(), full.clone());
+    ensure_err!(s.apply(&p, checked).await, StoreError::Invalid(_));
     ensure_eq!(rows(&s, &p).await?, vec![]);
     gate!(need_atomic(&s, &p).await);
     commit(&s, &p, puts(MAX_BATCH_OPS, 1)).await?;
     ensure_eq!(rows(&s, &p).await?.len(), MAX_BATCH_OPS);
+    let rest = MAX_BATCH_BYTES - MAX_VALUE_BYTES - ka.as_bytes().len() - kb.as_bytes().len();
+    let exact = |extra: usize| {
+        Batch::new()
+            .put(ka.clone(), full.clone())
+            .put(kb.clone(), Value::new(vec![2; rest + extra]))
+    };
+    ensure_err!(s.apply(&p, exact(1)).await, StoreError::Invalid(_));
+    commit(&s, &p, exact(0)).await?;
     Ok(Pass)
 }
 
@@ -465,16 +505,6 @@ const GOLDEN_PARTITIONS: [&[u8]; 7] = [
     b"s7\0",
     b"s8\0",
 ];
-
-/// Golden partition encodings (mirrors `store::partition`'s golden test):
-/// a backend that names partitions by `Partition::encode` relies on them.
-pub async fn kv_partition_encoding_golden<H: KvHarness>(_h: H) -> Outcome {
-    for golden in GOLDEN_PARTITIONS {
-        let p = ok!(Partition::decode(golden));
-        ensure_eq!(ok!(p.encode()).to_vec(), golden.to_vec());
-    }
-    Ok(Pass)
-}
 
 /// The same key in different partitions holds different values; a write
 /// or delete in one never shows in another.
@@ -585,20 +615,14 @@ pub async fn kv_codec_golden_values_roundtrip<H: KvHarness>(h: H) -> Outcome {
 /// Sixteen tasks race `Absent(k) + Put(k)`: exactly one commits, and every
 /// loser observes the winner's value. Holds on single-writer backends too.
 pub async fn kv_concurrent_absent_single_winner<H: KvHarness>(h: H) -> Outcome {
-    let (s, p) = (
-        Arc::new(h.store()),
-        part("kv_concurrent_absent_single_winner"),
-    );
-    let tasks: Vec<_> = (0_u8..16)
-        .map(|i| {
-            let (s, p) = (s.clone(), p.clone());
-            let batch = Batch::new().require(Absent(k(b"a"))).put(k(b"a"), v(&[i]));
-            tokio::spawn(async move { s.apply(&p, batch).await })
-        })
-        .collect();
+    let (s, p) = (h.store(), part("kv_concurrent_absent_single_winner"));
+    let racers = (0_u8..16).map(|i| {
+        let batch = Batch::new().require(Absent(k(b"a"))).put(k(b"a"), v(&[i]));
+        s.apply(&p, batch)
+    });
     let mut outcomes = vec![];
-    for task in tasks {
-        outcomes.push(ok!(ok!(task.await)));
+    for result in join_all(racers).await {
+        outcomes.push(ok!(result));
     }
     let winner = ok!(s.get(&p, &k(b"a")).await).ok_or("no winner stored")?;
     let won = outcomes.iter().filter(|o| **o == Committed).count();
@@ -631,6 +655,7 @@ pub async fn kv_refs_only_rejects_other_classes<H: KvHarness>(h: H) -> Outcome {
         if refs_only {
             ensure_err!(s.apply(&p, put).await, StoreError::Unsupported(_));
             ensure_err!(s.apply(&p, check).await, StoreError::Unsupported(_));
+            not_written(&s, &p, &key).await?;
         } else {
             commit(&s, &p, put).await?;
             ensure_eq!(ok!(s.get(&p, &key).await), Some(v(b"1")));
@@ -670,8 +695,9 @@ pub async fn kv_non_atomic_rejects_multi_write_batch<H: KvHarness>(h: H) -> Outc
     }
     for batch in multi {
         ensure_err!(s.apply(&p, batch).await, StoreError::Unsupported(_));
+        not_written(&s, &p, &ka).await?;
+        not_written(&s, &p, &kb).await?;
     }
-    ensure_eq!(rows(&s, &p).await?, vec![]);
     let one = Batch::new()
         .require(NotAfter(u64::MAX))
         .require(Absent(ka.clone()))
@@ -690,6 +716,7 @@ pub async fn kv_layout_version_key_roundtrip<H: KvHarness>(h: H) -> Outcome {
         .put(key.clone(), codec::encode_u32(keys::LAYOUT_VERSION));
     if s.capabilities().implicit_layout_version.is_some() {
         ensure_err!(s.apply(&p, put).await, StoreError::Unsupported(_));
+        not_written(&s, &p, &key).await?;
         return Ok(Skip(
             "store reports implicit_layout_version; it never holds `v`",
         ));
@@ -959,13 +986,13 @@ pub async fn kv_full_store_rejects_writes_but_serves_reads_and_deletes<H: KvHarn
 /// growth reclaimed) once they are deleted (rule 7, R-31).
 pub async fn kv_stats_reports_growth_and_shrink<H: KvHarness>(h: H) -> Outcome {
     let (s, p) = (h.store(), part("kv_stats_reports_growth_and_shrink"));
-    h.refresh_stats(&s);
+    h.refresh_stats(&s).await;
     let base = ok!(s.stats(&p).await);
     let all: Vec<_> = (0_u16..1000)
         .map(|i| (k(&i.to_be_bytes()), Value::new(vec![3; 100])))
         .collect();
     put_all(&s, &p, &all).await?;
-    h.refresh_stats(&s);
+    h.refresh_stats(&s).await;
     let grown = ok!(s.stats(&p).await);
     ensure!(grown.bytes >= base.bytes + 100_000, "{base:?} -> {grown:?}");
     if let (Some(before), Some(after)) = (base.keys, grown.keys) {
@@ -982,7 +1009,7 @@ pub async fn kv_stats_reports_growth_and_shrink<H: KvHarness>(h: H) -> Outcome {
             .fold(Batch::new(), |b, (key, _)| b.delete(key.clone()));
         commit(&s, &p, batch).await?;
     }
-    h.refresh_stats(&s);
+    h.refresh_stats(&s).await;
     let shrunk = ok!(s.stats(&p).await);
     let slack = (grown.bytes - base.bytes) / 10;
     ensure!(
@@ -994,7 +1021,8 @@ pub async fn kv_stats_reports_growth_and_shrink<H: KvHarness>(h: H) -> Outcome {
 
 /// A panic inside the check-and-write step (here: the store clock) leaves
 /// the partition fully before or after the batch and the store usable
-/// (rule 4: a poisoned lock is recovered, never propagated).
+/// (rule 4: a poisoned lock is recovered, never propagated). The apply may
+/// panic or return any error (a blocking adapter maps the join error).
 pub async fn kv_panic_in_check_and_write_recovers<H: KvHarness>(h: H) -> Outcome {
     let Some((s, clock)) = clocked(&h, 1_000) else {
         return Ok(NO_CLOCK);
@@ -1008,16 +1036,19 @@ pub async fn kv_panic_in_check_and_write_recovers<H: KvHarness>(h: H) -> Outcome
     let result = std::panic::AssertUnwindSafe(s.apply(&p, batch))
         .catch_unwind()
         .await;
-    ensure!(
-        result.is_err() || matches!(result, Ok(Ok(Committed))),
-        "{result:?}"
-    );
     let after = rows(&s, &p).await?;
     let before = vec![(k(b"a"), v(b"1"))];
-    ensure!(
-        after == before || after.len() == 2,
-        "torn partition: {after:?}"
-    );
+    let written = vec![(k(b"a"), v(b"1")), (k(b"b"), v(b"2"))];
+    match result {
+        Ok(Ok(Committed)) => ensure_eq!(after, written),
+        Ok(Ok(other)) => return Err(format!("the batch could only commit: {other:?}")),
+        Err(_) | Ok(Err(_)) => {
+            ensure!(
+                after == before || after == written,
+                "torn partition: {after:?}"
+            );
+        }
+    }
     commit(
         &s,
         &p,

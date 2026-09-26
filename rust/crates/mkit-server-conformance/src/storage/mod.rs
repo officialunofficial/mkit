@@ -4,10 +4,20 @@
 //!
 //! Cases are small and deterministic: no wall-clock sleeps, no randomness
 //! beyond a fixed-seed generator. Every case builds its own stores from the
-//! harness and writes only its own partition (`n<case name>`) or its own
-//! content objects, so a backend that shares one database across cases
-//! (and runs them in parallel) still sees independent cases.
+//! harness and writes only partitions no other case writes (`n<case name>`
+//! and names derived from it, the golden partitions of
+//! `kv_partitions_isolated`) or its own content objects, so a backend that
+//! shares one database across cases (and runs them in parallel) still sees
+//! independent cases. Case futures need no particular async runtime.
+//!
+//! **Not checkable black-box.** Rule 8 requires the `NotAfter` clock to be
+//! read inside the same non-yielding step as the key checks. A backend
+//! that reads it before taking its lock or opening its transaction passes
+//! every case here, so each backend tests that ordering itself (M0-08,
+//! M0-09).
 
+use core::future::Future;
+use core::task::Poll;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -128,17 +138,57 @@ pub trait KvHarness: Send + Sync + 'static {
         None
     }
 
-    /// Open the persistent store at `dir`, an empty directory the case
-    /// owns: opening the same `dir` again, after every earlier handle was
-    /// dropped without a clean shutdown, must see exactly the committed
-    /// batches (rule 5).
+    /// Open the persistent store identified by `dir`: an opaque id, unique
+    /// to the case, that is also an empty directory the case owns. A
+    /// backend may use it as a directory, or only as a name (a database
+    /// file, a Durable Object name). Opening the same `dir` again, after
+    /// every earlier handle was dropped without a clean shutdown, must see
+    /// exactly the committed batches (rule 5).
     fn open_at(&self, _dir: &Path) -> Option<Self::Store> {
         None
     }
 
     /// Bring [`NamespaceStore::stats`] up to date, for backends whose stats
     /// may be stale.
-    fn refresh_stats(&self, _store: &Self::Store) {}
+    fn refresh_stats(&self, _store: &Self::Store) -> impl Future<Output = ()> + Send {
+        async {}
+    }
+
+    /// The cases this backend is expected to skip, by name. A skip not
+    /// listed here fails the case, and so does a listed case that passes:
+    /// the declared list is exactly the backend's skip set.
+    fn expected_skips(&self) -> &'static [&'static str] {
+        &[]
+    }
+}
+
+/// A runner's verdict on a case: `Ok` if it passed, or skipped and the
+/// harness declared that skip.
+///
+/// # Errors
+/// The failure message: the case failed, skipped without being declared,
+/// or passed though declared as a skip.
+pub fn verdict(name: &str, declared: &[&str], outcome: Outcome) -> Result<(), String> {
+    match (outcome?, declared.contains(&name)) {
+        (CaseResult::Pass, false) | (CaseResult::Skip(_), true) => Ok(()),
+        (CaseResult::Pass, true) => Err(format!("{name}: declared as a skip but passed")),
+        (CaseResult::Skip(reason), false) => Err(format!("{name}: undeclared skip: {reason}")),
+    }
+}
+
+/// Check that every skip `harness` declares names a case.
+///
+/// # Errors
+/// The first declared name that is not a case.
+pub fn check_declared_skips<H: KvHarness>(harness: &H) -> Result<(), String> {
+    let cases = kv_cases::<H>();
+    for name in harness.expected_skips() {
+        ensure!(
+            cases.iter().any(|c| c.0 == *name),
+            "declared skip {name} is not a case"
+        );
+    }
+    Ok(())
 }
 
 /// What a [`BlobStore`] backend provides: a new, empty store per call. Any
@@ -371,7 +421,8 @@ pub(crate) async fn need_atomic<S: NamespaceStore>(
         .put(k(b"gate/a"), v(b"1"))
         .put(k(b"gate/b"), v(b"1"));
     ensure_err!(s.apply(p, two).await, StoreError::Unsupported(_));
-    ensure_eq!(ok!(s.get(p, &k(b"gate/a")).await), None);
+    not_written(s, p, &k(b"gate/a")).await?;
+    not_written(s, p, &k(b"gate/b")).await?;
     Ok(Some(CaseResult::Skip("store lacks atomic_multi_key")))
 }
 
@@ -387,7 +438,35 @@ pub(crate) async fn need_all_classes<S: NamespaceStore>(
     let key = keys::grant_epoch();
     let batch = Batch::new().put(key.clone(), v(b"1"));
     ensure_err!(s.apply(p, batch).await, StoreError::Unsupported(_));
+    not_written(s, p, &key).await?;
     Ok(Some(CaseResult::Skip("store accepts only ref keys")))
+}
+
+/// A rejected write left nothing: `key` reads as absent, or its class is
+/// unreadable (`Unsupported`).
+pub(crate) async fn not_written<S: NamespaceStore>(
+    s: &S,
+    p: &Partition,
+    key: &Key,
+) -> Result<(), String> {
+    match s.get(p, key).await {
+        Ok(None) | Err(StoreError::Unsupported(_)) => Ok(()),
+        other => Err(format!("rejected write of {key:?} left {other:?}")),
+    }
+}
+
+/// Yield to the executor once.
+pub(crate) async fn yield_now() {
+    let mut yielded = false;
+    core::future::poll_fn(|cx| {
+        if yielded {
+            return Poll::Ready(());
+        }
+        yielded = true;
+        cx.waker().wake_by_ref();
+        Poll::Pending
+    })
+    .await;
 }
 
 /// A directory under the system temp dir, removed on drop.
