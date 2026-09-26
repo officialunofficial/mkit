@@ -35,6 +35,31 @@ fn error_code(code: Code) -> ErrorCode {
     }
 }
 
+/// A connectrpc error (e.g. a broken request stream) as the [`ServerError`]
+/// a request is recorded with: its code, and its message for the log.
+pub(super) fn recorded(err: &ConnectError) -> ServerError {
+    let code = match err.code {
+        ErrorCode::Canceled => Code::Canceled,
+        ErrorCode::InvalidArgument => Code::InvalidArgument,
+        ErrorCode::DeadlineExceeded => Code::DeadlineExceeded,
+        ErrorCode::NotFound => Code::NotFound,
+        ErrorCode::AlreadyExists => Code::AlreadyExists,
+        ErrorCode::PermissionDenied => Code::PermissionDenied,
+        ErrorCode::ResourceExhausted => Code::ResourceExhausted,
+        ErrorCode::FailedPrecondition => Code::FailedPrecondition,
+        ErrorCode::Aborted => Code::Aborted,
+        ErrorCode::OutOfRange => Code::OutOfRange,
+        ErrorCode::Unimplemented => Code::Unimplemented,
+        ErrorCode::Internal => Code::Internal,
+        ErrorCode::Unavailable => Code::Unavailable,
+        ErrorCode::DataLoss => Code::DataLoss,
+        ErrorCode::Unauthenticated => Code::Unauthenticated,
+        // `ErrorCode` is non-exhaustive.
+        _ => Code::Unknown,
+    };
+    ServerError::new(code, err.message.clone().unwrap_or_default())
+}
+
 /// `err`'s response headers. `ServerError` already refused credentials,
 /// framing headers and control characters; a name or value `http` still
 /// rejects is dropped with a warning, its value never logged.
@@ -107,6 +132,8 @@ mod tests {
         ];
         for code in codes {
             assert_eq!(error_code(code).as_str(), code.as_str());
+            let back = recorded(&ConnectError::new(error_code(code), "m"));
+            assert_eq!(back.code(), code);
         }
     }
 

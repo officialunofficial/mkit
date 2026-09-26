@@ -400,11 +400,20 @@ impl<'p, B: BlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p, B, N, H>
 
     /// Discard the upload: nothing becomes visible. An in-flight record
     /// stays resumable. Recorded as `canceled`.
-    pub async fn abort(mut self) {
+    pub async fn abort(self) {
+        self.abort_with(&ServerError::new(Code::Canceled, "upload aborted"))
+            .await;
+    }
+
+    /// Discard the upload because of `err`, e.g. a malformed message the
+    /// binding decoded or a broken request stream: like [`Self::abort`],
+    /// but the request is recorded with `err`'s code, the one the client
+    /// receives. A session that already failed keeps its first error.
+    pub async fn abort_with(mut self, err: &ServerError) {
         if let Some(Target::Sink(sink)) = self.target.take() {
             sink.abort().await;
         }
-        self.fail(&ServerError::new(Code::Canceled, "upload aborted"));
+        self.fail(err);
     }
 
     /// Record the session's one failure.

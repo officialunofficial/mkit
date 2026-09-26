@@ -623,12 +623,20 @@ fn upload_session_records_each_request_once_and_drop_as_canceled() {
     let mut s = begin();
     assert!(block_on(s.push(Some(&id), None, Bytes::new(), false)).is_err());
     drop(s);
+    // `abort_with` records the binding's error; after a failed push the
+    // first error stands.
+    block_on(begin().abort_with(&ServerError::invalid_argument("second header")));
+    let mut s = begin();
+    assert!(block_on(s.push(Some(&id), None, Bytes::new(), false)).is_err());
+    block_on(s.abort_with(&ServerError::unavailable("ignored")));
     assert_eq!(
         codes(&env, "UploadPack"),
         [
             "canceled",
             "canceled",
             "ok",
+            "invalid_argument",
+            "invalid_argument",
             "invalid_argument",
             "invalid_argument"
         ]

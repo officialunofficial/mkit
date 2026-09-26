@@ -3462,6 +3462,7 @@ dependencies = [
  "connectrpc",
  "connectrpc-build",
  "ed25519-dalek",
+ "flate2",
  "futures",
  "futures-core",
  "futures-executor",

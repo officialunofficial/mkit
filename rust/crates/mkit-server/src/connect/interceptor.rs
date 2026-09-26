@@ -25,6 +25,18 @@ use crate::store::{BlobStore, NamespaceStore};
 /// through unauthenticated. For [`crate::pipeline::AuthMode::TransportIdentity`]
 /// an adapter inserts the peer's [`Principal`] into the HTTP request
 /// extensions; nothing a client sends can set it.
+///
+/// It must be the first (outermost) interceptor. An adapter that builds its
+/// own chain from [`super::router`] registers it before any other, so no
+/// interceptor can rewrite the message before the signature is checked. A
+/// rewritten unary payload is verified over its re-encoded bytes, which
+/// fails closed.
+///
+/// A unary body is verified as connectrpc hands it over, after any
+/// `Content-Encoding` is undone. The client signs the bytes it sends
+/// (SPEC-WRITE-GRANTS §9.2, SPEC-TRANSPORT-CONNECT §7.1), so a compressed
+/// signed request does not verify and is rejected `unauthenticated`, as in
+/// `vcs-worker`.
 pub struct AuthInterceptor<B, N, H> {
     pipe: Shared<Pipeline<B, N, H>>,
 }
@@ -83,9 +95,11 @@ where
         mut req: UnaryRequest,
         next: Next<'_>,
     ) -> Result<UnaryResponse, ConnectError> {
-        // The request bytes as received (after any Content-Encoding is
-        // undone), as `vcs-worker` verifies them.
-        self.authenticate(&mut req.ctx, Some(req.payload.bytes()))?;
+        // The bytes the handler will decode: the received ones unless an
+        // earlier interceptor replaced the message (then re-encoded, which
+        // fails the body commitment). See the type docs on compression.
+        let body = req.payload.encoded()?;
+        self.authenticate(&mut req.ctx, Some(&body))?;
         next.run(req).await
     }
 

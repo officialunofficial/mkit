@@ -12,6 +12,7 @@ use connectrpc::{
 use futures::{StreamExt, stream};
 use mkit_core::protocol::{AdvanceOutcome, PackKey};
 
+use super::error::recorded;
 use super::proto::mkit::transport::v1::__buffa::oneof::download_pack_response::Body as DownloadBody;
 use super::proto::mkit::transport::v1::__buffa::oneof::upload_pack_request::Body as UploadBody;
 use super::proto::mkit::transport::v1::{
@@ -118,15 +119,17 @@ async fn upload<B: BlobStore, N: NamespaceStore, H: HookSet>(
     while let Some(item) = requests.next().await {
         let chunk = match item.map(|m| m.to_owned_message().body) {
             Ok(Some(UploadBody::Chunk(chunk))) => *chunk,
-            other => {
-                session.abort().await;
-                return Err(match other {
-                    Err(e) => e,
-                    Ok(body) => ServerError::from(UploadError::UnexpectedMessage {
-                        header: body.is_some(),
-                    })
-                    .into(),
+            // The request is recorded with the code the client receives.
+            Ok(body) => {
+                let err = ServerError::from(UploadError::UnexpectedMessage {
+                    header: body.is_some(),
                 });
+                session.abort_with(&err).await;
+                return Err(err.into());
+            }
+            Err(e) => {
+                session.abort_with(&recorded(&e)).await;
+                return Err(e);
             }
         };
         let data = Bytes::from(chunk.data.unwrap_or_default());
@@ -137,8 +140,9 @@ async fn upload<B: BlobStore, N: NamespaceStore, H: HookSet>(
         {
             Ok(false) => {}
             Ok(true) => break,
+            // `push` already recorded `e`; this only discards the sink.
             Err(e) => {
-                session.abort().await;
+                session.abort_with(&e).await;
                 return Err(e.into());
             }
         }

@@ -588,6 +588,36 @@ async fn upload_pack_first_message_not_header_is_invalid_argument() {
     let msgs = [header(&data), chunk(&hash(&data), 0, &data[..2], false)];
     let (_, end) = server.upload(&msgs, &[]).await.frames();
     assert_eq!(end["error"]["code"], "invalid_argument");
+    // A message with no body after the header.
+    let msgs = [header(&data), UploadPackRequest::default()];
+    let (_, end) = server.upload(&msgs, &[]).await.frames();
+    assert_eq!(
+        end["error"]["message"],
+        "UploadPack: message with neither `header` nor `chunk` set"
+    );
+    assert!(!server.exists(&hash(&data)).await);
+    // Errors before the header are the binding's own and go unrecorded;
+    // after it, each request is recorded with the code the client got,
+    // never `canceled`.
+    assert_eq!(
+        server.codes("UploadPack"),
+        ["invalid_argument", "invalid_argument", "invalid_argument"]
+    );
+}
+
+#[tokio::test]
+async fn upload_pack_broken_stream_records_the_code_sent() {
+    let server = setup(AuthMode::Open).serve();
+    let data = pack(4);
+    // The header, then an envelope that claims 16 bytes and carries 2.
+    let mut body = frame(&header(&data));
+    body.extend_from_slice(&[0, 0, 0, 0, 16, 1, 2]);
+    let path = "mkit.transport.v1.TransportService/UploadPack";
+    let (messages, end) = server.post(path, STREAM, &[], body).await.frames();
+    assert!(messages.is_empty());
+    let code = end["error"]["code"].as_str().unwrap();
+    assert_ne!(code, "canceled");
+    assert_eq!(server.codes("UploadPack"), [code]);
     assert!(!server.exists(&hash(&data)).await);
 }
 
@@ -635,6 +665,36 @@ async fn auth_v2_write_without_headers_is_unauthenticated() {
     assert_eq!(end["error"]["code"], "unauthenticated");
     // Reads stay unsigned.
     assert_eq!(server.read(HEAD).await.exists, Some(false));
+    // Stage 0 rejections are counted like any failed request.
+    assert_eq!(server.codes("UpdateRef"), ["unauthenticated"]);
+    assert_eq!(server.codes("UploadPack"), ["unauthenticated"]);
+    assert_eq!(server.codes("ReadRef"), ["ok"]);
+}
+
+/// Deflate `data` into a gzip member.
+fn gzip(data: &[u8]) -> Vec<u8> {
+    use std::io::Write as _;
+    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    enc.write_all(data).unwrap();
+    enc.finish().unwrap()
+}
+
+#[tokio::test]
+async fn auth_v2_gzip_signed_request_fails_closed() {
+    // SPEC-WRITE-GRANTS §9.2: `body:` commits to the exact HTTP body bytes,
+    // here the gzip member. The binding verifies the decompressed bytes,
+    // so a compressed signed request never verifies: it is rejected, never
+    // accepted on a digest the client did not sign.
+    let server = setup(authv2()).serve();
+    let json = serde_json::to_vec(&update_json(HEAD, "REF_EXPECTATION_ANY", &A)).unwrap();
+    let body = gzip(&json);
+    let mut headers = signed_body(7, "UpdateRef", &body, 1);
+    headers.push(("content-encoding", "gzip".to_owned()));
+    let path = "mkit.transport.v1.TransportService/UpdateRef";
+    let reply = server.post(path, JSON, &headers, body).await;
+    assert_eq!(reply.code(), "unauthenticated");
+    assert_eq!(server.read(HEAD).await.exists, Some(false));
+    assert_eq!(server.codes("UpdateRef"), ["unauthenticated"]);
 }
 
 #[tokio::test]
@@ -692,6 +752,14 @@ async fn bearer_mode_rejects_missing_token_on_streaming_and_unary() {
     );
     let (_, end) = server.download(&[9; 32], &good).await.frames();
     assert_eq!(end["error"]["code"], "not_found");
+    assert_eq!(
+        server.codes("ListRefs"),
+        ["unauthenticated", "unauthenticated", "ok"]
+    );
+    assert_eq!(
+        server.codes("DownloadPack"),
+        ["unauthenticated", "not_found"]
+    );
 }
 
 #[tokio::test]

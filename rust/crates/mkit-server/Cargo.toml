@@ -107,7 +107,9 @@ tempfile = "3"
 # tests/connect_dispatch.rs drives `connect::service` over real Connect HTTP
 # requests on the host.
 http-body-util = "0.1"
-tokio = { version = "1", features = ["macros", "rt"] }
+# Gzip request bodies for the Content-Encoding test.
+flate2 = "1"
+tokio ={ version = "1", features = ["macros", "rt"] }
 tower = { version = "0.5", features = ["util"] }
 
 [[test]]
