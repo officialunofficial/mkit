@@ -227,12 +227,12 @@ where
         ctx: RequestContext,
         request: ServiceRequest<'_, UpdateRefRequest>,
     ) -> ServiceResult<UpdateRefResponse> {
+        let a = authenticated(&ctx)?;
         let m = request.to_owned_message();
         if m.delete.unwrap_or(false) {
             // TODO(WP-1.10): implement ref deletion.
             return Err(not_yet().into());
         }
-        let a = authenticated(&ctx)?;
         let upd = ref_update(
             m.name,
             m.expectation,
@@ -259,12 +259,12 @@ where
         ctx: RequestContext,
         request: ServiceRequest<'_, AdvanceRefsRequest>,
     ) -> ServiceResult<AdvanceRefsResponse> {
+        let a = authenticated(&ctx)?;
         let m = request.to_owned_message();
         if m.delete.unwrap_or(false) || !m.ticket_ids.is_empty() {
             // TODO(WP-1.10): implement ticket consumption and ref deletion.
             return Err(not_yet().into());
         }
-        let a = authenticated(&ctx)?;
         let head = ref_update(
             m.head_ref,
             m.head_expectation,

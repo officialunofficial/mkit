@@ -1021,7 +1021,7 @@ async fn m1_new_unary_rpcs_reach_stubs_without_auth_headers() {
             )
             .await,
     );
-    // Exercise JSON dispatch too, including invalid legacy upload metadata.
+    // Exercise JSON dispatch too.
     for rpc in ["GetServerInfo", "BeginUpload", "CompleteUpload"] {
         assert_unimplemented(&server.json(rpc, &serde_json::json!({}), &[]).await);
     }
@@ -1204,4 +1204,36 @@ async fn m1_list_refs_paging_token_rejected_and_page_size_ignored() {
         .await;
     assert_eq!(json.json()["refs"].as_array().unwrap().len(), 2);
     assert!(json.json().get("nextPageToken").is_none());
+}
+
+#[tokio::test]
+async fn m1_explicit_default_fields_keep_the_legacy_path() {
+    let server = setup(AuthMode::Open).serve();
+    let mut update = update_json(HEAD, "REF_EXPECTATION_ANY", &A);
+    update
+        .as_object_mut()
+        .unwrap()
+        .insert("delete".into(), serde_json::json!(false));
+    assert_eq!(
+        server.json("UpdateRef", &update, &[]).await.status,
+        StatusCode::OK
+    );
+    let advance = serde_json::json!({
+        "headRef": HEAD, "headExpectation": "REF_EXPECTATION_ANY", "headNewId": b64(&B),
+        "packmapRef": PACKMAP, "packmapExpectation": "REF_EXPECTATION_ANY", "packmapNewId": b64(&A),
+        "delete": false, "ticketIds": []
+    });
+    assert_eq!(
+        server.json("AdvanceRefs", &advance, &[]).await.status,
+        StatusCode::OK
+    );
+    let listed = server
+        .json(
+            "ListRefs",
+            &serde_json::json!({ "prefix": "refs/heads/", "pageToken": "" }),
+            &[],
+        )
+        .await;
+    assert_eq!(listed.status, StatusCode::OK);
+    assert_eq!(listed.json()["refs"].as_array().unwrap().len(), 1);
 }
