@@ -656,6 +656,18 @@ fn download_records_at_stream_end_or_drop() {
     let missing = block_on(env.pipe.download(&a, PackKey::new([9; 32])));
     assert_eq!(missing.unwrap_err().code(), Code::NotFound);
     assert_eq!(codes(&env, "DownloadPack"), ["ok", "canceled", "not_found"]);
+    // Dropped right after the `last` chunk, never polled to its end: the
+    // client has the whole pack, so it is `ok`, not `canceled`.
+    let mut stream = block_on(env.pipe.download(&a, key)).unwrap();
+    for _ in 0..3 {
+        let chunk = block_on(poll_fn(|cx| stream.chunks.as_mut().poll_next(cx)));
+        assert!(chunk.unwrap().is_ok());
+    }
+    drop(stream);
+    assert_eq!(
+        codes(&env, "DownloadPack"),
+        ["ok", "canceled", "not_found", "ok"]
+    );
 }
 
 // ----------------------------------------------------------- downloads

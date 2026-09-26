@@ -3456,10 +3456,17 @@ dependencies = [
 name = "mkit-server"
 version = "0.4.2"
 dependencies = [
+ "base64 0.22.1",
+ "buffa",
  "bytes",
+ "connectrpc",
+ "connectrpc-build",
  "ed25519-dalek",
+ "futures",
  "futures-core",
  "futures-executor",
+ "http",
+ "http-body-util",
  "mkit-core",
  "mkit-transport-file",
  "proptest",
@@ -3469,6 +3476,8 @@ dependencies = [
  "subtle",
  "tempfile",
  "thiserror 2.0.20",
+ "tokio",
+ "tower",
  "tracing",
 ]
 

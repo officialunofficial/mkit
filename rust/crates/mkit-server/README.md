@@ -36,7 +36,16 @@ and `wasm32-unknown-unknown`:
   (`x-mkit-test-fault`, `x-mkit-test-clock-skew-ms`). No release build
   enables it; without it the seam is compiled out.
 
-The Connect binding lands here in later work of the same effort.
+- the `connect` feature (on by default): the `mkit.transport.v1` Connect
+  binding. `connect::service(pipeline)` serves `TransportService` and
+  `grpc.health.v1.Health` over the pipeline behind an `AuthInterceptor`
+  that runs stage 0 on the exact unary request bytes. It uses connectrpc
+  without its `server` and `zstd` features, so it stays wasm-clean; the
+  native and Workers adapters mount it unchanged. The generated code is
+  vendored under `generated/` (refresh it with
+  `scripts/regen-transport-proto.sh`), so building needs no `protoc`.
+  Build with `default-features = false` to leave the binding and its
+  dependencies out.
 
 ## Crate map
 

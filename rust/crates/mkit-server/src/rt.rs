@@ -142,6 +142,21 @@ pub fn send_wrap<F: Future>(f: F) -> send_wrapper::SendWrapper<F> {
     send_wrapper::SendWrapper::new(f)
 }
 
+/// [`send_wrap`] for a stream, e.g. a response stream handed to Connect's
+/// `Response::stream_ok`. On native targets the stream is already `Send` and
+/// is returned unchanged.
+#[cfg(all(feature = "connect", not(target_arch = "wasm32")))]
+pub(crate) fn send_wrap_stream<S: futures_core::Stream + Send>(s: S) -> S {
+    s
+}
+
+/// [`send_wrap`] for a stream, e.g. a response stream handed to Connect's
+/// `Response::stream_ok`; the same thread rule applies.
+#[cfg(all(feature = "connect", target_arch = "wasm32"))]
+pub(crate) fn send_wrap_stream<S: futures_core::Stream>(s: S) -> send_wrapper::SendWrapper<S> {
+    send_wrapper::SendWrapper::new(s)
+}
+
 // Native only: these assert the native (`Send`) half of the model.
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {

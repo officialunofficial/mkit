@@ -16,9 +16,13 @@
 //! The `memory` feature adds the in-memory reference backends; the native
 //! `fs` feature adds [`fs`], the stores over the `.mkit` on-disk layout; the
 //! `sql` feature adds `sql::SqlKvStore`, the store over any synchronous
-//! `sql::SqlConn`.
+//! `sql::SqlConn`. The `connect` feature (default) adds the
+//! `mkit.transport.v1` Connect binding over the pipeline
+//! ([`connect::service`]).
 
 pub mod auth_v2;
+#[cfg(feature = "connect")]
+pub mod connect;
 pub mod download;
 mod error;
 #[cfg(all(feature = "fs", not(target_arch = "wasm32")))]

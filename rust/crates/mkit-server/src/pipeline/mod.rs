@@ -506,8 +506,9 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// `not_found` for a missing pack, before any chunk; the authorizer's
     /// error; `internal` for a storage failure.
     ///
-    /// The request is recorded when the stream ends or first fails, and as
-    /// `canceled` when the stream is dropped before its end.
+    /// The request is recorded `ok` when the `last` chunk is yielded, with
+    /// its error at the first failure, and as `canceled` when the stream is
+    /// dropped before either.
     pub async fn download(
         &self,
         a: &Authenticated,

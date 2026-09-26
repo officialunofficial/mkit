@@ -8,6 +8,9 @@
 #     feature)
 #   - apps/vcs-worker                     (the workers-rs ConnectRPC
 #     reference Worker, R2 + Durable Object backed — mkit#699)
+#   - rust/crates/mkit-server             (the production server's wasm-clean
+#     `connect` binding, mounted by its native and Workers adapters; like
+#     vcs-worker it also vendors grpc.health.v1)
 #
 # apps/vcs-worker cannot depend on mkit-transport-connect directly: its
 # client/server halves are native (Tokio, hyper) and don't compile for the
@@ -16,11 +19,11 @@
 # dependency (mirrors apps/repo-worker + mkit-repo-client's split — see
 # scripts/regen-repo-proto.sh).
 #
-# Both build from pre-generated sources committed under their generated/
-# dirs so consumers (Cloudflare Workers Builds, CI, docs.rs) never need
-# protoc (their images lack a protoc new enough for protobuf
+# All three build from pre-generated sources committed under their
+# generated/ dirs so consumers (Cloudflare Workers Builds, CI, docs.rs) never
+# need protoc (their images lack a protoc new enough for protobuf
 # `edition = "2023"`). After editing transport.proto, run this script from
-# the repo root and commit BOTH refreshed generated/ dirs.
+# the repo root and commit EVERY refreshed generated/ dir.
 #
 # Requires protoc >= 27 on PATH (edition 2023 support); mirrors
 # regen-repo-proto.sh / regen-rpc-proto.sh.
@@ -66,10 +69,24 @@ refresh "apps/vcs-worker" \
     "apps/vcs-worker/target/wasm32-unknown-unknown/debug/build/mkit-vcs-worker-*/out" \
     ".mkit-transport-codegen"
 
-if ! git diff --quiet -- rust/crates/mkit-transport-connect/generated apps/vcs-worker/generated; then
+echo ">> mkit-server (wasm32 target; its default features include connect)"
+MKIT_TRANSPORT_CODEGEN=1 cargo build --manifest-path rust/Cargo.toml -p mkit-server --target wasm32-unknown-unknown
+refresh "mkit-server" \
+    "rust/crates/mkit-server/generated" \
+    "rust/target/wasm32-unknown-unknown/debug/build/mkit-server-*/out" \
+    ".mkit-server-transport-codegen"
+
+generated_dirs=(
+    rust/crates/mkit-transport-connect/generated
+    apps/vcs-worker/generated
+    rust/crates/mkit-server/generated
+)
+# `git status --porcelain`, not only `git diff`: a new module lands untracked.
+if ! git diff --quiet -- "${generated_dirs[@]}" \
+    || [ -n "$(git status --porcelain -- "${generated_dirs[@]}")" ]; then
     echo
     echo "generated output changed — review and commit:"
-    git status --short -- rust/crates/mkit-transport-connect/generated apps/vcs-worker/generated
+    git status --short -- "${generated_dirs[@]}"
 else
     echo "generated output is unchanged."
 fi
