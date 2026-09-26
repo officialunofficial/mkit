@@ -81,6 +81,28 @@ train).
   `grant_parse`. Golden and reject vectors under `rust/tests/golden/grants`,
   cross-checked by `scripts/golden/grants_ref.py`. **SemVer:** additive.
 
+- *(attest)* SPEC-WRITE-GRANTS verifier (feature `grants`): the
+  `mkit-write-epoch:v1` and `mkit-repo-visibility:v1` statement codecs,
+  the pure `epoch_transition` (§5.2 check 7, overflow-safe, with the retry
+  rule), the `ed25519` owner scheme (`verify_strict` over the BLAKE3 of the
+  statement, bound to `ed25519-` namespaces; the ECDSA schemes return
+  `SchemeNotImplemented` until WP-2.5), and the stateless verifier:
+  `verify_grant_owner` (§7 steps 1, 3, 4, cacheable by header bytes) plus
+  `OwnerVerified::check` (steps 2, 5–7, 9, 10), `verify_epoch_statement`
+  and `verify_visibility_statement` (distinct `VerifiedEpoch` and
+  `VerifiedVisibility` results, valid at one `now` and never to be
+  cached), and `verify_for_registration` (§10).
+  Expiry is exclusive (`now < expiry`), unlike auth v2. `VerifierConfig`
+  holds the deployment's own audience and refuses a loopback one unless
+  built with `new_allowing_loopback` (§3.2, §10), and refuses
+  `webauthn-p256` without a relying party (§4.3). The verifier results
+  have no public fields or constructors; a
+  `VerifiedGrant`'s effective flags never cover packmap refs directly.
+  New fuzz target `epoch_visibility_parse`; signed goldens
+  `{grant,epoch,visibility}-ed25519.json` and `reject/verify-*.json`,
+  cross-checked with pycryptodome by `scripts/golden/grants_ref.py`.
+  **SemVer:** additive.
+
 - *(core)* `repo_identity`: the SPEC-TRANSPORT-CONNECT §7.4 repository
   identity grammar (`Namespace`, `RepositoryIdentity`; lowercase only, at
   most 173 bytes; bare names only through `parse_bare_allowed`).

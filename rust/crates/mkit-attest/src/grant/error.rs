@@ -1,9 +1,11 @@
 //! [`GrantError`]: why a statement or header was rejected.
 
-/// A rejected grant statement or `X-Write-Grant` header.
+/// A rejected grant, epoch or visibility statement, `X-Write-Grant` header,
+/// owner signature or verification step.
 ///
 /// There is one variant per SPEC-WRITE-GRANTS §3.5 rule family, plus the §4.2
-/// header errors. [`GrantError::reason`] is stable text for logs and golden
+/// header errors, the §4 owner-signature errors, the §7 verification steps
+/// and the verifier configuration errors. [`GrantError::reason`] is stable text for logs and golden
 /// fixtures. It is never shown to clients: the server maps every variant to
 /// one Connect code (§11), `permission_denied` on writes and `not_found` on
 /// private reads.
@@ -79,6 +81,48 @@ pub enum GrantError {
     HeaderBase64,
     /// A scheme token not defined in §4.
     UnknownScheme,
+    /// A visibility statement's repository that is not a full
+    /// `<namespace>/<name>` identity (§9.1).
+    Repository,
+    /// A visibility other than `public` or `private` (§9.1).
+    Visibility,
+    /// §4: a scheme the deployment does not advertise.
+    SchemeNotAdvertised,
+    /// §4: a scheme not valid for the namespace form (`ed25519` needs an
+    /// `ed25519-` namespace; the ECDSA schemes need a `0x` namespace).
+    SchemeNamespaceMismatch,
+    /// §4: a scheme this build cannot verify yet.
+    SchemeNotImplemented,
+    /// §4: a signature blob of the wrong length for its scheme.
+    SignatureLength,
+    /// §4: the owner signature does not verify (including a non-canonical
+    /// Ed25519 signature or a small-order or invalid namespace key).
+    BadSignature,
+    /// §7 step 2: the grant's namespace is not the request repository's.
+    NamespaceMismatch,
+    /// §9.1: a visibility statement's repository is not `X-Repository`.
+    RepositoryMismatch,
+    /// §7 step 5, §5.2 check 4, §9.1: the deployment's own audience is not
+    /// in `audiences` (byte comparison).
+    AudienceNotListed,
+    /// §7 step 6: the repository scope does not cover the repository.
+    RepositoryNotInScope,
+    /// §7 step 7: the capabilities do not cover the operation.
+    CapabilityNotGranted,
+    /// §7 step 9, §10: the grantee is not the signer or principal.
+    GranteeMismatch,
+    /// §7 step 10, §5.2 check 5, §9.1: `created > now + MAX_CLOCK_LEAD_MS`,
+    /// or a negative clock reading.
+    NotYetValid,
+    /// §7 step 10, §5.2 check 5, §9.1: `now >= expiry` (expiry is
+    /// exclusive).
+    Expired,
+    /// Verifier configuration: the deployment's own audience is a loopback
+    /// origin (§3.2, §10) and loopback audiences were not explicitly allowed.
+    LoopbackAudience,
+    /// Verifier configuration: `webauthn-p256` accepted without a configured
+    /// relying party (§4.3).
+    NoRelyingParty,
 }
 
 impl GrantError {
@@ -119,6 +163,23 @@ impl GrantError {
             Self::HeaderFormat => "header format",
             Self::HeaderBase64 => "header base64",
             Self::UnknownScheme => "unknown scheme",
+            Self::Repository => "repository",
+            Self::Visibility => "visibility",
+            Self::SchemeNotAdvertised => "scheme not advertised",
+            Self::SchemeNamespaceMismatch => "scheme namespace mismatch",
+            Self::SchemeNotImplemented => "scheme not implemented",
+            Self::SignatureLength => "signature length",
+            Self::BadSignature => "bad signature",
+            Self::NamespaceMismatch => "namespace mismatch",
+            Self::RepositoryMismatch => "repository mismatch",
+            Self::AudienceNotListed => "audience not listed",
+            Self::RepositoryNotInScope => "repository not in scope",
+            Self::CapabilityNotGranted => "capability not granted",
+            Self::GranteeMismatch => "grantee mismatch",
+            Self::NotYetValid => "not yet valid",
+            Self::Expired => "expired",
+            Self::LoopbackAudience => "loopback audience",
+            Self::NoRelyingParty => "no relying party",
         }
     }
 }

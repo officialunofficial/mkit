@@ -194,3 +194,11 @@ test = false
 doc = false
 bench = false
 required-features = ["libfuzzer"]
+
+[[bin]]
+name = "epoch_visibility_parse"
+path = "fuzz_targets/epoch_visibility_parse.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]

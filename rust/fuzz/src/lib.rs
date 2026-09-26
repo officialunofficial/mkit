@@ -219,6 +219,79 @@ pub fn grant_parse_one_iteration(input: &[u8]) {
     }
 }
 
+/// SPEC-WRITE-GRANTS epoch and visibility statements and the stateless
+/// verifier (`epoch_visibility_parse`): `EpochStatement::parse` and
+/// `VisibilityStatement::parse` never panic, and anything they accept
+/// re-encodes to exactly the input bytes. The input, read as an
+/// `X-Write-Grant` value, also runs through every verifier entry point,
+/// which must not panic, and whose accepted statements are the canonical
+/// bytes of the header.
+pub fn epoch_visibility_parse_one_iteration(input: &[u8]) {
+    use mkit_attest::grant::{
+        AcceptedSchemes, Capability, EpochStatement, GrantRequest, OwnerScheme, RepoScope,
+        RepositoryIdentity, SignedHeader, VerifierConfig, VisibilityStatement,
+        verify_epoch_statement, verify_for_registration, verify_grant_owner,
+        verify_visibility_statement,
+    };
+    const NOW_MS: i64 = 1_790_000_000_000;
+    let input = &input[..input.len().min(MAX_INPUT)];
+    if let Ok(s) = EpochStatement::parse(input) {
+        assert_eq!(
+            s.encode().expect("accepted epoch statement must re-encode"),
+            input,
+            "accepted epoch statement must re-encode byte for byte"
+        );
+    }
+    if let Ok(s) = VisibilityStatement::parse(input) {
+        assert_eq!(
+            s.encode()
+                .expect("accepted visibility statement must re-encode"),
+            input,
+            "accepted visibility statement must re-encode byte for byte"
+        );
+    }
+    let Ok(text) = core::str::from_utf8(input) else {
+        return;
+    };
+    let Ok(header) = SignedHeader::parse(text) else {
+        return;
+    };
+    let cfg = VerifierConfig::new(
+        "https://git.example.com",
+        AcceptedSchemes::of(&[OwnerScheme::Ed25519, OwnerScheme::Secp256k1Eip191]),
+    )
+    .expect("fixed fuzz config is valid");
+    if let Ok(v) = verify_epoch_statement(&cfg, text, NOW_MS) {
+        assert_eq!(v.statement().encode().ok(), Some(header.statement.clone()));
+    }
+    if let Ok(s) = VisibilityStatement::parse(&header.statement)
+        && let Ok(v) = verify_visibility_statement(&cfg, text, &s.repository, NOW_MS)
+    {
+        assert_eq!(v.statement(), &s);
+    }
+    if let Ok(owner) = verify_grant_owner(&cfg, text) {
+        let g = owner.statement();
+        assert_eq!(g.encode().ok(), Some(header.statement.clone()));
+        let repository = match &g.scope {
+            RepoScope::Repository(id) => id.clone(),
+            RepoScope::Namespace => RepositoryIdentity::new(Some(g.namespace), "fuzz")
+                .expect("fixed repository name is valid"),
+        };
+        for capability in [Capability::Read, Capability::Write] {
+            let _ = owner.check(
+                &cfg,
+                &GrantRequest {
+                    repository: &repository,
+                    signer: &g.grantee,
+                    capability,
+                    now_ms: NOW_MS,
+                },
+            );
+        }
+        let _ = verify_for_registration(&cfg, text, &g.grantee);
+    }
+}
+
 /// Apply the git tree parser + mode classifier against `input`.
 pub fn git_tree_parse_one_iteration(input: &[u8]) {
     let input = &input[..input.len().min(MAX_INPUT)];
@@ -904,6 +977,48 @@ mod tests {
             &[0xFF; 64][..],
         ] {
             run_one(case, grant_parse_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_epoch_visibility_parse() {
+        use mkit_attest::grant::{OwnerScheme, SignedHeader};
+        run_iterated_unit(epoch_visibility_parse_one_iteration).unwrap();
+        let epoch = "mkit-write-epoch:v1\n\
+            ed25519-3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29\n\
+            5\nhttps://git.example.com\n1790000000000\n1790086400000\n\
+            9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+        let visibility = "mkit-repo-visibility:v1\n\
+            0x8ba1f109551bd432803012645ac136ddd64dba72/website\n\
+            private\nhttps://git.example.com\n1790000000000\n1790086400000\n\
+            9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+        assert!(mkit_attest::grant::EpochStatement::parse(epoch.as_bytes()).is_ok());
+        assert!(mkit_attest::grant::VisibilityStatement::parse(visibility.as_bytes()).is_ok());
+        let headers: Vec<String> = [epoch, visibility]
+            .iter()
+            .flat_map(|s| {
+                [OwnerScheme::Ed25519, OwnerScheme::Secp256k1Eip191].map(|scheme| {
+                    SignedHeader {
+                        statement: s.as_bytes().to_vec(),
+                        scheme,
+                        blob: vec![7; 64],
+                    }
+                    .encode()
+                    .unwrap()
+                })
+            })
+            .collect();
+        let near_miss = epoch.replace("\n5\n", "\n05\n");
+        let mut cases: Vec<&[u8]> = vec![
+            epoch.as_bytes(),
+            visibility.as_bytes(),
+            near_miss.as_bytes(),
+            b"",
+            &[0xFF; 64],
+        ];
+        cases.extend(headers.iter().map(String::as_bytes));
+        for case in cases {
+            run_one(case, epoch_visibility_parse_one_iteration).unwrap();
         }
     }
 

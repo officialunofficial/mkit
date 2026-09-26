@@ -7,11 +7,14 @@ audience: implementers of mkit.transport.v1 servers that restrict writes or serv
 
 # SPEC-WRITE-GRANTS &mdash; namespace owners delegate repository writes and reads
 
-Status: **Draft**. The grant statement codec and header encoding
-(`mkit_attest::grant`, feature `grants`) and the owner-scheme primitives
-of §4 (Keccak-256, the EIP-191 digest, secp256k1 recovery, address
-derivation and the §4.4 low-`s` rules) are implemented; signature
-verification, epochs, visibility and the §7 verifier are not yet. Golden
+Status: **Draft**. The grant, epoch and visibility statement codecs and
+the header encoding (`mkit_attest::grant`, feature `grants`), the
+owner-scheme primitives of §4 (Keccak-256, the EIP-191 digest, secp256k1
+recovery, address derivation and the §4.4 low-`s` rules), the `ed25519`
+owner scheme, and the stateless verifier (§7 steps 1 to 10, the §5.2 and
+§9.1 statement checks and the §10 registration check) are implemented;
+the `secp256k1-eip191` and `webauthn-p256` schemes and server enforcement
+are not yet. Golden
 vectors ([SPEC-CONVENTIONS §5](SPEC-CONVENTIONS.md#5-golden-vectors-and-conformance-tests))
 land with each implementation; §13.1 lists those that exist and names
 the rest.
@@ -944,6 +947,14 @@ for their principals are registered server-side instead.
   it (§7 step 5). The audience MUST be an origin whose host the operator
   controls, never a loopback address. This keeps a grant issued for one deployment from
   being registered at another.
+- Informative: a deployment's audience SHOULD be a name unique to that
+  deployment. An origin in a private address range (RFC 1918, link-local,
+  IPv6 ULA) or on a shared alias that many deployments can use gives weaker
+  audience separation: a grant naming it may verify at another deployment
+  that uses the same origin. A verifier can reject loopback literals, but it
+  cannot detect a DNS name that resolves to a loopback or shared address
+  (for example `localhost.localdomain` or a wildcard DNS service), so
+  choosing a unique audience is the operator's duty.
 - The epoch of an ssh-only deployment is raised by applying an epoch
   statement through the operator, with the §5.2 acceptance rules
   (informative).
@@ -1082,14 +1093,29 @@ document's rules, independently of the Rust code.
 - `reject/*.json`: one or more rejections for each §3.5 rule, each with
   the rule and the expected reason.
 
+- `grant-ed25519.json`, `epoch-ed25519.json`, `visibility-ed25519.json`:
+  statements signed with the `ed25519` scheme by a fixed owner seed
+  (§4), each with its fields, id, 64-byte signature and full §4.2 header
+  value, plus accept and reject contexts (audience, repository, signer,
+  capability and clock) with the expected reason: every §7 step from 2
+  to 10, the exclusive expiry (`now == expiry` is rejected), the 30 s
+  clock lead at its bound, the §5.2 checks 1 to 5 and the §9.1 checks.
+  `epoch-ed25519.json` also pins §5.2 check 7 and the retry rule at 0
+  and at the 64-bit maximum.
+- `reject/verify-*.json`: signed grants that fail verification: the
+  `ed25519` scheme on a `0x` namespace, an unadvertised scheme, another
+  key's signature, a 63-byte blob, the SPEC-SIGNING §1 strict checks (a
+  small-order namespace key with `R` = identity and `s` = 0, which the
+  plain RFC 8032 equation accepts; a small-order `R`; `s ≥ L`),
+  `now == expiry`, and `created` one millisecond past the clock lead.
+
 Planned, with the implementations that need them: fixtures under
 `rust/tests/golden/grants/` and `rust/tests/golden/url-token/` covering
-at least: canonical epoch and visibility statements with their ids; a
-signature for each scheme; an EIP-191 message and recovery; address
-derivation for a secp256k1 and a P-256 key; a WebAuthn assertion; a
-high-`s` signature for each ECDSA scheme, a cleared user-present flag,
-and a scheme on the wrong namespace form; a URL token; and a signed
-read.
+at least: a signature for each ECDSA scheme; an EIP-191 message and
+recovery; address derivation for a secp256k1 and a P-256 key; a
+WebAuthn assertion; a high-`s` signature for each ECDSA scheme, a
+cleared user-present flag, and an ECDSA scheme on the wrong namespace
+form; a URL token; and a signed read.
 
 Landed so far (each pinned by BLAKE3 in the directory's `MANIFEST.txt`):
 
