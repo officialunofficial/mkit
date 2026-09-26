@@ -1,0 +1,20 @@
+{
+  "audience": "https://api.example.test",
+  "canonical": "mkit-write:v2\nhttps://api.example.test\ned25519-ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c/demo\n/mkit.transport.v1.TransportService/UploadPart\npart:5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a:1:0243953655744783e7cf6d53324f4fcf6d1c38e06565b8f90d472d5ea4a91311:1\n1700000000000\n1700000300000\nabababababababababababababababababababababababababababababababab",
+  "commitment": "part:5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a:1:0243953655744783e7cf6d53324f4fcf6d1c38e06565b8f90d472d5ea4a91311:1",
+  "created_at": 1700000000000,
+  "expires_at": 1700000300000,
+  "index": 1,
+  "len": 1,
+  "nonce": "abababababababababababababababababababababababababababababababab",
+  "procedure": "/mkit.transport.v1.TransportService/UploadPart",
+  "public_key": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+  "repository": "ed25519-ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c/demo",
+  "seed": "0707070707070707070707070707070707070707070707070707070707070707",
+  "signature": "f154779c68e8b35518af1290ad51ed05882ca9ebc71d10327439572f2f54b745ede9c1d137024f979a334fde7ea342e47efc69895524d60ad89569eed60d4f07",
+  "signing_digest": "f29d1563e356f7fc3c2996907e02f44236f539ffbe3d4044e4911e17d08bcae7",
+  "subtree": "0243953655744783e7cf6d53324f4fcf6d1c38e06565b8f90d472d5ea4a91311",
+  "subtree_source": "uploads/subtree-merge.json 8mib-2parts-last-1 part 1",
+  "ticket": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+  "version": 2
+}

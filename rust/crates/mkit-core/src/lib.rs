@@ -53,6 +53,9 @@ pub mod serialize;
 pub mod sign;
 pub mod store;
 pub mod transfer;
+// BLAKE3 subtree hashing for resumable part uploads
+// (SPEC-TRANSPORT-CONNECT §7.6). Pure and wasm-safe.
+pub mod upload_parts;
 // Partial-disclosure verification: prove and verify that a path, chunk, or
 // byte range belongs to a commit id, with no store access and no trust
 // beyond the id itself (issue #1015 verifier kit PR 2). `default-features

@@ -1,0 +1,5 @@
+# SPEC-TRANSPORT-CONNECT §7.6 part-upload golden vectors (deterministic)
+# Produced by `MKIT_WRITE_GOLDEN=1 cargo test -p mkit-core --test golden_uploads`
+# Cross-checked by `python3 scripts/golden/blake3_subtree_ref.py`
+# Format: <name> <blake3-hex-of-file-bytes>
+subtree-merge.json 649acec4f73291e603f74d2822e29f776e4cdf1fead5c0b4e11ff6f2e5dbd159

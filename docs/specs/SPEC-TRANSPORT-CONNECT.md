@@ -1169,8 +1169,26 @@ For `UploadPart`, the header's token ticket id and index MUST equal the
 commitment's `<ticket>` and `<index>`, and `<len>` MUST equal
 `part_size` for every part but the last.
 
-Golden vectors (informative): they land with WP-1.3
-([SPEC-CONVENTIONS §5](SPEC-CONVENTIONS.md#5-golden-vectors-and-conformance-tests)).
+Golden vectors (informative;
+[SPEC-CONVENTIONS §5](SPEC-CONVENTIONS.md#5-golden-vectors-and-conformance-tests)).
+Vector inputs are not stored: input byte `i` is `i mod 251`.
+
+- `rust/tests/golden/uploads/subtree-merge.json` pins, per vector, each
+  part's index, offset, length and subtree chaining value, and the
+  merged root, which equals the BLAKE3 hash of the whole input. The
+  8 MiB vectors cover 2, 3, 5 and 8 parts, with short last parts of
+  1, 1023, 1024, 1025 and `8 MiB − 1` bytes and one upload of only
+  full parts. Vectors marked `"test_geometry": true` use 1 KiB and
+  4 KiB parts, below the minimum part size; they are test-only
+  geometry for deeper, unbalanced trees (2 to 17 parts).
+  `rust/tests/golden/uploads/MANIFEST.txt` pins the file's BLAKE3.
+- `rust/tests/golden/auth-v2/part.json` pins a signed `UploadPart`
+  envelope: its `part:` commitment (the second part of the 8 MiB
+  two-part vector), canonical string, signing digest and Ed25519
+  signature.
+
+`scripts/golden/blake3_subtree_ref.py` checks both files against an
+independent pure-Python BLAKE3.
 
 The server verifies the ticket token and the commitment before it reads
 any data. It hashes the data as it streams it to storage and MUST NOT
