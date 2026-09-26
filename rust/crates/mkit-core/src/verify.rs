@@ -32,18 +32,23 @@
 //! independently-useful primitives (each corresponds to one hop of the
 //! authentication chain: commit → tree steps → leaf → chunk/slice).
 //! [`verify_disclosure`] decodes a self-contained wire bundle (§ below)
-//! and composes them into one call. [`build_disclosure`] is the
-//! (native-only) producer side. Full disclosure — every reachable
-//! object against a commit id — is [`verify_closure`],
-//! [`verify_closure_streaming`], [`verify_closure_packs`], and
-//! [`verify_closure_manifest`], with [`verify_closure_store`] and
-//! [`export_closure`] as native store-backed operations (issue #1015 PR 3).
+//! and composes them into one call. [`build_disclosure_from`] is the
+//! producer side, generic over any verifying [`crate::store::ObjectSource`]
+//! (the on-disk store, an in-memory overlay, or a server-side index or
+//! object CAS); [`build_disclosure`] is its thin wrapper over
+//! [`crate::store::ObjectStore`]. The builder's source trait is distinct
+//! from this module's [`ObjectSource`], the non-verifying
+//! `fetch(&mut self)` trait the closure walker reads through. Full
+//! disclosure — every reachable object against a commit id — is
+//! [`verify_closure`], [`verify_closure_streaming`],
+//! [`verify_closure_packs`], and [`verify_closure_manifest`], with
+//! [`verify_closure_store`] and [`export_closure`] as native store-backed
+//! operations (issue #1015 PR 3).
 //!
-//! Everything except [`build_disclosure`] compiles with
-//! `--no-default-features` and targets `wasm32-unknown-unknown`.
-//! [`build_disclosure`] needs [`crate::store::ObjectStore`], which is
-//! `std`-only already — no separate feature gate is needed since
-//! `mkit-core` itself is a `std` crate (see the crate root docs).
+//! Everything here, the builder included, compiles with
+//! `--no-default-features` and targets `wasm32-unknown-unknown`; no
+//! separate feature gate is needed since `mkit-core` itself is a `std`
+//! crate (see the crate root docs).
 //!
 //! ## Wire bundle (`verify_disclosure` / `build_disclosure`)
 //!
@@ -1245,7 +1250,7 @@ pub fn verify_disclosure(commit_id: &Hash, bundle: &[u8]) -> Result<Disclosed, V
 }
 
 // ---------------------------------------------------------------------------
-// Builder (native only)
+// Builder (generic over `crate::store::ObjectSource`)
 // ---------------------------------------------------------------------------
 
 /// Build a Bao outboard encoding of `bytes` and extract a slice proving
@@ -1269,6 +1274,9 @@ fn extract_bao_slice(bytes: &[u8], bao_offset: u64, len: u64) -> Result<Vec<u8>,
 /// `commit_id`, reading only from `store`. `path` empty with
 /// [`Selector::Object`] discloses the root tree.
 ///
+/// A thin wrapper over [`build_disclosure_from`] for the on-disk
+/// [`crate::store::ObjectStore`]; the bundle bytes are identical.
+///
 /// # Errors
 ///
 /// [`VerifyError::Store`] for any missing/corrupt object; typed errors
@@ -1282,7 +1290,45 @@ pub fn build_disclosure(
     path: &[&[u8]],
     selector: Selector,
 ) -> Result<Vec<u8>, VerifyError> {
-    let commit_bytes = store.read(commit_id)?;
+    build_disclosure_from(store, commit_id, path, selector)
+}
+
+/// Build a disclosure bundle proving `selector`'s content at `path` under
+/// `commit_id`, reading only through `source`: any
+/// [`crate::store::ObjectSource`] (the on-disk store, an
+/// [`crate::store::EphemeralSink`], or a server-side repository index or
+/// object CAS). Not to be confused with [`ObjectSource`], this module's
+/// non-verifying closure-walker trait (`fetch(&mut self)`).
+///
+/// `source` MUST return verified bytes from `read`/`read_object` (the
+/// [`crate::store::ObjectSource`] contract). The builder never calls
+/// `read_unverified` and adds no verification of its own, so the bundle
+/// bytes are identical to [`build_disclosure`]'s for the same objects.
+/// [`crate::store::DisplaySource`] is therefore not a valid source: its
+/// `read` skips verification.
+///
+/// A source that breaks the contract (returns bytes that do not hash to
+/// the requested id) still cannot make the builder panic, and cannot make
+/// it emit a bundle that verifies for content `commit_id` does not commit
+/// to, because the bundle is self-authenticating against `commit_id`. The
+/// build then either fails with a typed [`VerifyError`] or yields a bundle
+/// that [`verify_disclosure`] rejects. It can still waste work: the
+/// builder bounds nothing beyond what the objects themselves declare.
+///
+/// A source reports an absent object as
+/// [`crate::store::StoreError::ObjectNotFound`], which surfaces as
+/// [`VerifyError::Store`] exactly as on the store path.
+///
+/// # Errors
+///
+/// As [`build_disclosure`].
+pub fn build_disclosure_from<S: crate::store::ObjectSource + ?Sized>(
+    source: &S,
+    commit_id: &Hash,
+    path: &[&[u8]],
+    selector: Selector,
+) -> Result<Vec<u8>, VerifyError> {
+    let commit_bytes = source.read(commit_id)?;
     let commit_obj = crate::serialize::deserialize(&commit_bytes)?;
     let tree_hash = match &commit_obj {
         Object::Commit(c) => c.tree_hash,
@@ -1294,7 +1340,7 @@ pub fn build_disclosure(
     let mut current_tree_id = tree_hash;
     let mut leaf_id = tree_hash;
     for (i, &name) in path.iter().enumerate() {
-        let Object::Tree(tree) = store.read_object(&current_tree_id)? else {
+        let Object::Tree(tree) = source.read_object(&current_tree_id)? else {
             return Err(VerifyError::PathThroughNonTree);
         };
         let position =
@@ -1318,7 +1364,7 @@ pub fn build_disclosure(
         }
     }
 
-    let payload = build_payload(store, &leaf_id, selector)?;
+    let payload = build_payload(source, &leaf_id, selector)?;
     Ok(encode_disclosure(
         commit_id,
         &commit_bytes,
@@ -1327,22 +1373,24 @@ pub fn build_disclosure(
     ))
 }
 
-fn build_payload(
-    store: &crate::store::ObjectStore,
+fn build_payload<S: crate::store::ObjectSource + ?Sized>(
+    source: &S,
     leaf_id: &Hash,
     selector: Selector,
 ) -> Result<PayloadWire, VerifyError> {
     match selector {
         Selector::Object => {
-            let bytes = store.read(leaf_id)?;
+            let bytes = source.read(leaf_id)?;
             Ok(PayloadWire::Object { bytes })
         }
         Selector::Chunk(index) => {
-            let Object::ChunkedBlob(cb) = store.read_object(leaf_id)? else {
+            let Object::ChunkedBlob(cb) = source.read_object(leaf_id)? else {
                 return Err(VerifyError::SelectorLeafMismatch);
             };
-            let leaf_count =
-                u32::try_from(cb.chunks.len() + 1).map_err(|_| VerifyError::TooManyChunks)?;
+            let leaf_count = u32::try_from(cb.chunks.len())
+                .ok()
+                .and_then(|n| n.checked_add(1))
+                .ok_or(VerifyError::TooManyChunks)?;
             let chunk_id = *cb
                 .chunks
                 .get(index as usize)
@@ -1351,7 +1399,7 @@ fn build_payload(
                 .checked_add(1)
                 .ok_or(VerifyError::ChunkIndexOutOfRange { index, leaf_count })?;
             let proof = merkle::build_chunks_multi_proof(&cb, [0, position])?;
-            let bytes = store.read(&chunk_id)?;
+            let bytes = source.read(&chunk_id)?;
             Ok(PayloadWire::Chunk {
                 total_size: cb.total_size,
                 chunk_size: cb.chunk_size,
@@ -1369,13 +1417,13 @@ fn build_payload(
             if len == 0 {
                 return Err(VerifyError::ZeroLengthRange);
             }
-            match store.read_object(leaf_id)? {
+            match source.read_object(leaf_id)? {
                 Object::Blob(b) => {
                     let end = offset.checked_add(len).ok_or(VerifyError::OffsetOverflow)?;
                     if end > b.data.len() as u64 {
                         return Err(VerifyError::RangeOutOfBounds);
                     }
-                    let canonical = store.read(leaf_id)?;
+                    let canonical = source.read(leaf_id)?;
                     let bao_offset = offset.checked_add(10).ok_or(VerifyError::OffsetOverflow)?;
                     let slice = extract_bao_slice(&canonical, bao_offset, len)?;
                     Ok(PayloadWire::Range {
@@ -1387,7 +1435,7 @@ fn build_payload(
                     })
                 }
                 Object::ChunkedBlob(cb) => {
-                    build_chunked_range_payload(store, &cb, offset, len, with_offsets)
+                    build_chunked_range_payload(source, &cb, offset, len, with_offsets)
                 }
                 _ => Err(VerifyError::SelectorLeafMismatch),
             }
@@ -1395,8 +1443,8 @@ fn build_payload(
     }
 }
 
-fn build_chunked_range_payload(
-    store: &crate::store::ObjectStore,
+fn build_chunked_range_payload<S: crate::store::ObjectSource + ?Sized>(
+    source: &S,
     cb: &crate::object::ChunkedBlob,
     offset: u64,
     len: u64,
@@ -1409,22 +1457,38 @@ fn build_chunked_range_payload(
     let chunk_bytes: Vec<Vec<u8>> = cb
         .chunks
         .iter()
-        .map(|id| store.read(id))
+        .map(|id| source.read(id))
         .collect::<Result<_, _>>()?;
 
+    // Every length and offset below is checked: `source` bytes and the
+    // caller's `offset`/`len` are both untrusted here, and a panic (the
+    // release profile has `overflow-checks = true`) is never acceptable.
     let mut cumulative: u64 = 0;
     let mut located = None;
     for (idx, bytes) in chunk_bytes.iter().enumerate() {
-        let content_len = (bytes.len() - 10) as u64;
-        if offset < cumulative + content_len {
+        // A chunk is a `Blob`: 10-byte prologue (6-byte header + u32
+        // length) then content. Anything shorter is a truncated object.
+        let content_len = bytes
+            .len()
+            .checked_sub(10)
+            .ok_or(VerifyError::Decode(MkitError::UnexpectedEof))? as u64;
+        let chunk_end = cumulative
+            .checked_add(content_len)
+            .ok_or(VerifyError::OffsetOverflow)?;
+        if offset < chunk_end {
             located = Some((idx, cumulative, content_len));
             break;
         }
-        cumulative += content_len;
+        cumulative = chunk_end;
     }
     let (index, chunk_start, content_len) = located.ok_or(VerifyError::RangeOutOfBounds)?;
-    let offset_in_chunk = offset - chunk_start;
-    if offset_in_chunk + len > content_len {
+    let offset_in_chunk = offset
+        .checked_sub(chunk_start)
+        .ok_or(VerifyError::OffsetOverflow)?;
+    let range_end = offset_in_chunk
+        .checked_add(len)
+        .ok_or(VerifyError::OffsetOverflow)?;
+    if range_end > content_len {
         return Err(VerifyError::RangeCrossesChunkBoundary);
     }
 
@@ -1440,7 +1504,8 @@ fn build_chunked_range_payload(
     if with_offsets {
         for (j, preceding_bytes) in chunk_bytes.iter().enumerate().take(index) {
             let j_u32 = u32::try_from(j).map_err(|_| VerifyError::TooManyChunks)?;
-            let proof_j = merkle::build_chunk_proof(cb, j_u32 + 1)?;
+            let position_j = j_u32.checked_add(1).ok_or(VerifyError::TooManyChunks)?;
+            let proof_j = merkle::build_chunk_proof(cb, position_j)?;
             let slice_j = extract_bao_slice(preceding_bytes, 0, 10)?;
             chunk_len_proofs.push(LenProof {
                 index: j_u32,
@@ -2256,5 +2321,400 @@ mod tests {
             verify_disclosure(&f.commit_id, &tampered),
             Err(VerifyError::InnerRootFoldMismatch)
         ));
+    }
+
+    // --- `build_disclosure_from` over a generic `store::ObjectSource` ---
+
+    use crate::store::StoreError;
+
+    /// A verifying in-memory [`crate::store::ObjectSource`]: every `read`
+    /// re-derives the object id (the trait contract), so it stands in for
+    /// a server-side per-repository index or global CAS.
+    struct MapSource(BTreeMap<Hash, Vec<u8>>);
+
+    impl MapSource {
+        /// Every object currently in `store`.
+        fn from_store(store: &ObjectStore) -> Self {
+            let map = store
+                .iter_object_hashes()
+                .unwrap()
+                .into_iter()
+                .map(|h| (h, store.read(&h).unwrap()))
+                .collect();
+            Self(map)
+        }
+    }
+
+    impl crate::store::ObjectSource for MapSource {
+        fn read(&self, h: &Hash) -> crate::store::StoreResult<Vec<u8>> {
+            let bytes = self
+                .0
+                .get(h)
+                .ok_or_else(|| StoreError::ObjectNotFound(crate::hash::to_hex(h)))?;
+            verify_object_id(bytes, h).map_err(|_| StoreError::HashMismatch {
+                expected: crate::hash::to_hex(h),
+                actual: String::from("<mismatch>"),
+            })?;
+            Ok(bytes.clone())
+        }
+    }
+
+    /// A deliberately NON-verifying source (violates the
+    /// `store::ObjectSource` contract): serves `lie`'s bytes for `target`.
+    struct LyingSource<'a> {
+        inner: &'a MapSource,
+        target: Hash,
+        lie: Vec<u8>,
+    }
+
+    impl crate::store::ObjectSource for LyingSource<'_> {
+        fn read(&self, h: &Hash) -> crate::store::StoreResult<Vec<u8>> {
+            if *h == self.target {
+                return Ok(self.lie.clone());
+            }
+            crate::store::ObjectSource::read(self.inner, h)
+        }
+    }
+
+    /// Another contract-violating source: `read_object(target)` decodes
+    /// `object_lie`, while `read(target)` still returns the honest bytes,
+    /// so the two methods disagree about the same id.
+    struct SplitSource<'a> {
+        inner: &'a MapSource,
+        target: Hash,
+        object_lie: Object,
+    }
+
+    impl crate::store::ObjectSource for SplitSource<'_> {
+        fn read(&self, h: &Hash) -> crate::store::StoreResult<Vec<u8>> {
+            crate::store::ObjectSource::read(self.inner, h)
+        }
+
+        fn read_object(&self, h: &Hash) -> crate::store::StoreResult<Object> {
+            if *h == self.target {
+                return Ok(self.object_lie.clone());
+            }
+            crate::store::ObjectSource::read_object(self.inner, h)
+        }
+    }
+
+    /// Id of the entry `name` in the tree `tree_id`.
+    fn entry_id(store: &ObjectStore, tree_id: &Hash, name: &[u8]) -> Hash {
+        let Object::Tree(tree) = store.read_object(tree_id).unwrap() else {
+            panic!("expected a tree");
+        };
+        tree.entries
+            .iter()
+            .find(|e| e.name == name)
+            .unwrap()
+            .object_hash
+    }
+
+    fn root_tree_id(store: &ObjectStore, commit_id: &Hash) -> Hash {
+        let Object::Commit(c) = store.read_object(commit_id).unwrap() else {
+            panic!("expected a commit");
+        };
+        c.tree_hash
+    }
+
+    /// A second commit (in the fixture store) whose root holds one plain,
+    /// multi-Bao-block `Blob`, so small-blob ranges span block boundaries.
+    fn medium_blob_commit(f: &Fixture) -> Hash {
+        let data: Vec<u8> = (0..5000u32).map(|i| (i % 251) as u8).collect();
+        let blob = store_file_object(&f.store, &data).unwrap();
+        assert!(matches!(
+            f.store.read_object(&blob).unwrap(),
+            Object::Blob(_)
+        ));
+        let tree = Tree {
+            entries: vec![TreeEntry {
+                name: b"medium.bin".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: blob,
+            }],
+        };
+        let tree_hash = f
+            .store
+            .write(&crate::serialize::serialize(&Object::Tree(tree)).unwrap())
+            .unwrap();
+        let kp = KeyPair::from_seed([0x07; 32]);
+        let mut commit = Commit {
+            tree_hash,
+            parents: vec![],
+            author: Identity::ed25519(kp.public.0),
+            signer: kp.public.0,
+            message: b"medium blob".to_vec(),
+            timestamp: 1_726_300_001,
+            message_hash: ZERO,
+            content_digest: ZERO,
+            signature: [0u8; 64],
+        };
+        commit.signature = sign_commit(&commit, &kp).unwrap().0;
+        f.store
+            .write(&crate::serialize::serialize(&Object::Commit(commit)).unwrap())
+            .unwrap()
+    }
+
+    type Case = (Hash, Vec<&'static [u8]>, Selector);
+
+    /// Every selector kind the builder supports, as `(commit, path,
+    /// selector)` cases over the fixture plus [`medium_blob_commit`].
+    fn equivalence_cases(f: &Fixture, medium: Hash) -> Vec<Case> {
+        let range = |offset, len, with_offsets| Selector::Range {
+            offset,
+            len,
+            with_offsets,
+        };
+        let c = f.commit_id;
+        let mut cases: Vec<Case> = vec![
+            (c, vec![], Selector::Object),
+            (c, vec![b"shallow.txt"], Selector::Object),
+            (c, vec![b"sub", b"deep", b"deep.txt"], Selector::Object),
+            (c, vec![b"sub"], Selector::Object),
+            (c, vec![b"exec.sh"], Selector::Object),
+            (c, vec![b"chunked.bin"], Selector::Object),
+            (c, vec![b"shallow.txt"], range(0, 20, false)),
+            (c, vec![b"shallow.txt"], range(8, 4, false)),
+            // Plain blob: first block, last partial block, a range across a
+            // block boundary, and the whole content.
+            (medium, vec![b"medium.bin"], range(0, 1024, false)),
+            (medium, vec![b"medium.bin"], range(4096, 904, false)),
+            (medium, vec![b"medium.bin"], range(1000, 100, false)),
+            (medium, vec![b"medium.bin"], range(0, 5000, false)),
+            // Chunked blob: a range inside chunk 0 and one past it, each
+            // with and without offset proofs.
+            (c, vec![b"chunked.bin"], range(10, 64, false)),
+            (c, vec![b"chunked.bin"], range(10, 64, true)),
+            (c, vec![b"chunked.bin"], range(200_000, 64, false)),
+            (c, vec![b"chunked.bin"], range(200_000, 64, true)),
+        ];
+        let chunked_id = entry_id(&f.store, &root_tree_id(&f.store, &c), b"chunked.bin");
+        let Object::ChunkedBlob(cb) = f.store.read_object(&chunked_id).unwrap() else {
+            panic!("expected a chunked blob");
+        };
+        assert!(cb.chunks.len() > 1, "fixture must yield several chunks");
+        for i in 0..cb.chunks.len() {
+            let index = u32::try_from(i).unwrap();
+            cases.push((c, vec![b"chunked.bin"], Selector::Chunk(index)));
+        }
+        cases
+    }
+
+    fn assert_source_matches_store<S: crate::store::ObjectSource + ?Sized>(
+        f: &Fixture,
+        source: &S,
+        medium: Hash,
+    ) {
+        for (commit, path, selector) in equivalence_cases(f, medium) {
+            let expected = build_disclosure(&f.store, &commit, &path, selector).unwrap();
+            let got = build_disclosure_from(source, &commit, &path, selector).unwrap();
+            assert_eq!(
+                got, expected,
+                "bundle bytes differ for {path:?} / {selector:?}"
+            );
+            verify_disclosure(&commit, &got).unwrap();
+        }
+    }
+
+    #[test]
+    fn disclosure_from_map_source_equals_store_builder() {
+        let f = build_fixture();
+        let medium = medium_blob_commit(&f);
+        let map = MapSource::from_store(&f.store);
+        assert_source_matches_store(&f, &map, medium);
+        // Also through a trait object (`?Sized`).
+        let dyn_source: &dyn crate::store::ObjectSource = &map;
+        assert_source_matches_store(&f, dyn_source, medium);
+    }
+
+    #[test]
+    fn disclosure_from_ephemeral_sink_equals_store_builder() {
+        let f = build_fixture();
+        let medium = medium_blob_commit(&f);
+        let sink = crate::store::EphemeralSink::new(&f.store);
+        assert_source_matches_store(&f, &sink, medium);
+    }
+
+    #[test]
+    fn disclosure_from_missing_object_is_store_error() {
+        let f = build_fixture();
+        let sub_id = entry_id(&f.store, &root_tree_id(&f.store, &f.commit_id), b"sub");
+        let path: [&[u8]; 3] = [b"sub", b"deep", b"deep.txt"];
+
+        let mut map = MapSource::from_store(&f.store);
+        assert!(map.0.remove(&sub_id).is_some());
+        let from_map =
+            build_disclosure_from(&map, &f.commit_id, &path, Selector::Object).unwrap_err();
+
+        f.store.remove_object(&sub_id).unwrap();
+        let from_store =
+            build_disclosure(&f.store, &f.commit_id, &path, Selector::Object).unwrap_err();
+
+        let VerifyError::Store(StoreError::ObjectNotFound(map_hex)) = &from_map else {
+            panic!("expected Store(ObjectNotFound), got {from_map:?}");
+        };
+        let VerifyError::Store(StoreError::ObjectNotFound(store_hex)) = &from_store else {
+            panic!("expected Store(ObjectNotFound), got {from_store:?}");
+        };
+        assert_eq!(map_hex, store_hex);
+        assert_eq!(map_hex, &crate::hash::to_hex(&sub_id));
+        assert_eq!(from_map.to_string(), from_store.to_string());
+    }
+
+    #[test]
+    fn disclosure_from_lying_leaf_fails_verification() {
+        let f = build_fixture();
+        let root = root_tree_id(&f.store, &f.commit_id);
+        let shallow_id = entry_id(&f.store, &root, b"shallow.txt");
+        let exec_id = entry_id(&f.store, &root, b"exec.sh");
+        let map = MapSource::from_store(&f.store);
+        let liar = LyingSource {
+            inner: &map,
+            target: shallow_id,
+            // A different, well-formed blob.
+            lie: f.store.read(&exec_id).unwrap(),
+        };
+        let bundle =
+            build_disclosure_from(&liar, &f.commit_id, &[b"shallow.txt"], Selector::Object)
+                .unwrap();
+        assert!(matches!(
+            verify_disclosure(&f.commit_id, &bundle),
+            Err(VerifyError::PayloadIdMismatch)
+        ));
+    }
+
+    #[test]
+    fn disclosure_from_lying_tree_fails_at_that_path_step() {
+        let f = build_fixture();
+        let root = root_tree_id(&f.store, &f.commit_id);
+        let sub_id = entry_id(&f.store, &root, b"sub");
+        let deep_tree_id = entry_id(&f.store, &sub_id, b"deep");
+        let shallow_id = entry_id(&f.store, &root, b"shallow.txt");
+        // A well-formed forgery of `sub`: it still has the `deep` entry the
+        // path needs, plus an extra one, so the builder walks straight
+        // through it.
+        let forged = Tree {
+            entries: vec![
+                TreeEntry {
+                    name: b"aaa.txt".to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: shallow_id,
+                },
+                TreeEntry {
+                    name: b"deep".to_vec(),
+                    mode: EntryMode::Tree,
+                    object_hash: deep_tree_id,
+                },
+            ],
+        };
+        let map = MapSource::from_store(&f.store);
+        let liar = LyingSource {
+            inner: &map,
+            target: sub_id,
+            lie: crate::serialize::serialize(&Object::Tree(forged)).unwrap(),
+        };
+        let path: [&[u8]; 3] = [b"sub", b"deep", b"deep.txt"];
+        let bundle = build_disclosure_from(&liar, &f.commit_id, &path, Selector::Object).unwrap();
+        // Step 0 (root → sub) is honest; step 1 carries the forged tree's
+        // inner root, which does not wrap to `sub`'s real id.
+        let err = verify_disclosure(&f.commit_id, &bundle).unwrap_err();
+        let VerifyError::InnerRootMismatch { expected, .. } = err else {
+            panic!("expected InnerRootMismatch at the `sub` step, got {err:?}");
+        };
+        assert_eq!(expected, sub_id);
+    }
+
+    #[test]
+    fn disclosure_from_short_chunk_is_error_not_panic() {
+        let f = build_fixture();
+        let root = root_tree_id(&f.store, &f.commit_id);
+        let chunked_id = entry_id(&f.store, &root, b"chunked.bin");
+        let Object::ChunkedBlob(cb) = f.store.read_object(&chunked_id).unwrap() else {
+            panic!("expected a chunked blob");
+        };
+        let map = MapSource::from_store(&f.store);
+        for short_len in [0usize, 1, 9] {
+            let liar = LyingSource {
+                inner: &map,
+                target: cb.chunks[0],
+                lie: vec![0u8; short_len],
+            };
+            for with_offsets in [false, true] {
+                let selector = Selector::Range {
+                    offset: 200_000,
+                    len: 64,
+                    with_offsets,
+                };
+                let err = build_disclosure_from(&liar, &f.commit_id, &[b"chunked.bin"], selector)
+                    .unwrap_err();
+                assert!(
+                    matches!(err, VerifyError::Decode(MkitError::UnexpectedEof)),
+                    "{short_len}-byte chunk: got {err:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn disclosure_range_len_u64_max_is_error_not_panic() {
+        let f = build_fixture();
+        let map = MapSource::from_store(&f.store);
+        let huge = |offset| Selector::Range {
+            offset,
+            len: u64::MAX,
+            with_offsets: false,
+        };
+        for (path, offset) in [
+            (b"chunked.bin".as_slice(), 10),
+            (b"chunked.bin".as_slice(), 200_000),
+            (b"shallow.txt".as_slice(), 1),
+        ] {
+            for result in [
+                build_disclosure(&f.store, &f.commit_id, &[path], huge(offset)),
+                build_disclosure_from(&map, &f.commit_id, &[path], huge(offset)),
+            ] {
+                let err = result.unwrap_err();
+                assert!(
+                    matches!(err, VerifyError::OffsetOverflow),
+                    "{path:?} @ {offset}: got {err:?}"
+                );
+            }
+        }
+        // An offset at the very top of u64 is simply out of bounds.
+        let top = Selector::Range {
+            offset: u64::MAX,
+            len: 1,
+            with_offsets: true,
+        };
+        let err = build_disclosure(&f.store, &f.commit_id, &[b"chunked.bin"], top).unwrap_err();
+        assert!(matches!(err, VerifyError::RangeOutOfBounds), "got {err:?}");
+    }
+
+    #[test]
+    fn disclosure_from_split_blob_source_is_error_not_panic() {
+        let f = build_fixture();
+        let root = root_tree_id(&f.store, &f.commit_id);
+        let shallow_id = entry_id(&f.store, &root, b"shallow.txt");
+        let map = MapSource::from_store(&f.store);
+        // `read_object` claims a 4 KiB blob; `read` returns the real
+        // 20-byte one, so the range is past the canonical bytes.
+        let liar = SplitSource {
+            inner: &map,
+            target: shallow_id,
+            object_lie: Object::Blob(crate::object::Blob {
+                data: vec![0u8; 4096],
+            }),
+        };
+        let selector = Selector::Range {
+            offset: 2048,
+            len: 512,
+            with_offsets: false,
+        };
+        // Either a typed error or a bundle the verifier rejects; never a
+        // panic, never a verifying bundle.
+        if let Ok(bundle) = build_disclosure_from(&liar, &f.commit_id, &[b"shallow.txt"], selector)
+        {
+            assert!(verify_disclosure(&f.commit_id, &bundle).is_err());
+        }
     }
 }

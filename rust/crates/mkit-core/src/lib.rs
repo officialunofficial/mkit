@@ -59,8 +59,8 @@ pub mod upload_parts;
 // Partial-disclosure verification: prove and verify that a path, chunk, or
 // byte range belongs to a commit id, with no store access and no trust
 // beyond the id itself (issue #1015 verifier kit PR 2). `default-features
-// = false` wasm-safe; the one native-only item (`build_disclosure`) is
-// gated on nothing extra since `ObjectStore` is already `std`-only.
+// = false` wasm-safe, builder included: `build_disclosure_from` reads through
+// any verifying `store::ObjectSource`; `build_disclosure` wraps `ObjectStore`.
 pub mod verify;
 pub mod write_auth;
 

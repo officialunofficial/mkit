@@ -31,6 +31,12 @@ train).
 
 ### Added
 
+- *(core)* `verify::build_disclosure_from`: builds SPEC-DISCLOSURE
+  bundles through any verifying `store::ObjectSource` (a per-repository
+  index or the global object CAS), not just the on-disk `ObjectStore`.
+  `build_disclosure` is now a thin wrapper; bundle bytes are unchanged
+  (the disclosure golden regeneration is a zero diff).
+
 - *(server)* `mkit-server` crate (internal foundation for the production
   server, MKIT-29): repo and namespace identifiers, principals, the typed
   `Operation` model, a transport-neutral `ServerError` with redaction and
@@ -246,6 +252,13 @@ train).
 - *(cli)* `mkit mcp --http <addr>` now refuses to bind without authentication, matching `mkit serve --http`'s fail-closed design. Previously it bound the given address (not restricted to loopback despite its own doc comment's claim) with no `Authorization` check at all — any network-reachable caller got unauthenticated access to the full MCP tool catalog, including mutating tools like `mkit_checkout`. It now requires a bearer token (`--http-token <TOKEN>` or the `MKIT_MCP_TOKEN` env var — a name of its own, not `serve --http`'s `MKIT_API_TOKEN`, since the two surfaces have different threat models and must not share a secret) or an explicit `--unsafe-allow-any-http-peer` opt-out that prints a loud warning, enforced on every request via a new `BearerAuthHttp` tower middleware wrapped around `StreamableHttpService`. New `mcp_v2_http.rs` `mod auth` integration tests cover: refusal with no token/flag, refusal on an empty token, refusal when both a token and the unsafe flag are given, 401 on a missing/wrong `Authorization` header, success with the right token, and the `MKIT_MCP_TOKEN` env fallback. **SemVer:** additive — new CLI flags, new env var; existing `--http` usage without them now refuses to start rather than serving unauthenticated (a deliberate behavior change gated by the same version bump the removed-Windows-support entry below already requires).
 
 ### Fixed
+
+- *(core)* The disclosure builder no longer panics on a `ChunkedBlob`
+  range whose `offset + len` overflows `u64` (e.g.
+  `mkit prove --range 10:18446744073709551615`) or on a chunk shorter
+  than its 10-byte `Blob` prologue: these now return
+  `VerifyError::OffsetOverflow` and `VerifyError::Decode(UnexpectedEof)`.
+  Valid bundles are byte-identical.
 
 - *(core)* A `Range` payload over a chunked leaf (`chunk = Some(hdr)`) now
   rejects `len == 0` before running the chunk header's wrap/fold checks,
