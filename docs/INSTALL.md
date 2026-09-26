@@ -164,14 +164,15 @@ Full reproducibility, signing, and supply-chain notes live under
 Every release also ships `mkit-server`, the long-running native server
 (HTTP/Connect listener, `SQLite` or `.mkit`-layout metadata, filesystem or
 S3 blobs, and the `mkit+enc://` listener), as its own archive for the same
-four targets: `mkit-server-<version>-<target>.tar.gz`. It holds the
+four targets: `mkit-server-<version>-<target>.tar.gz`, starting with
+0.5.0 (earlier releases have no server archive). It holds the
 `mkit-server` binary, the licenses, the operator guide (`README.md`) and
 the changelog. It is a separate binary, so the `mkit` CLI carries no HTTP
 server and no `SQLite`. The installer, Homebrew and `cargo binstall`
 install `mkit` only; fetch `mkit-server` directly:
 
 ```sh
-VERSION=0.4.2
+VERSION=<version>   # 0.5.0 or later
 TARGET=x86_64-unknown-linux-gnu
 ARCHIVE="mkit-server-${VERSION}-${TARGET}.tar.gz"
 URL="https://github.com/officialunofficial/mkit/releases/download/v${VERSION}/${ARCHIVE}"

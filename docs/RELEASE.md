@@ -59,7 +59,9 @@ allowlisted release fingerprint, and points at a commit reachable from
      long-running native server, PRD D31), licenses, the operator guide
      (`rust/crates/mkit-server-native/README.md`, as `README.md`) and the
      optional changelog. It is built with `mkit-server-native`'s
-     `enc,http,s3,sqlite` features (`SERVER_FEATURES` in `release.yml`):
+     `enc,http,s3,sqlite` features, with `--no-default-features` (the list
+     lives in
+     [`scripts/release/mkit-server-features`](../scripts/release/mkit-server-features)):
      the HTTP/Connect listener, `SQLite` and `.mkit`-layout metadata,
      filesystem and S3 blobs, and the `mkit+enc://` listener. The
      pipeline's `test-faults` seam is never enabled.
@@ -79,9 +81,19 @@ allowlisted release fingerprint, and points at a commit reachable from
    so a combined build would compile the shipped `mkit` with the server's
    HTTP stack and a bundled `SQLite`. After each build,
    [`scripts/check-release-artifact-features.sh`](../scripts/check-release-artifact-features.sh)
-   reads cargo's compiler-artifact messages and scans the stripped binary:
-   `mkit` must carry no server-only package or feature and no `SQLite`, and
-   `mkit-server` must have exactly `SERVER_FEATURES` and no test seam.
+   reads cargo's compiler-artifact messages and scans the stripped binary.
+   `mkit` must compile only packages listed in
+   [`scripts/release/mkit-packages.golden`](../scripts/release/mkit-packages.golden),
+   no server-only package or feature, tower-http only with reqwest's
+   features, and no `SQLite`. `mkit-server` must have exactly the shipped
+   feature set and no test seam. A new CLI dependency fails the check until
+   `scripts/check-release-artifact-features.sh --update-golden` is run and
+   the golden diff is committed with the change that brought it in.
+
+   [`release-artifact-check.yml`](../.github/workflows/release-artifact-check.yml)
+   runs the same two builds and checks for `x86_64-unknown-linux-gnu` on PRs
+   to `main` (and pushes to it), and checks the golden list is current, so
+   drift shows up before a tag rather than at it.
 
 2. **npm package** `@officialunofficial/mkit-wasm@X.Y.Z`. Built with
    `wasm-pack --target bundler` and published with `npm publish --access
@@ -111,7 +123,7 @@ Run top to bottom. Do not skip steps.
       invocations (the commands `release.yml` runs):
       `cargo build --release --locked -p mkit-cli --bin mkit` and
       `cargo build --release --locked -p mkit-server-native
-      --no-default-features --features enc,http,s3,sqlite --bin mkit-server`:
+      --no-default-features --features "$(../scripts/check-release-artifact-features.sh --server-features)" --bin mkit-server`:
   - [ ] `--target=aarch64-apple-darwin`
   - [ ] `--target=x86_64-apple-darwin`
   - [ ] `--target=x86_64-unknown-linux-gnu`
@@ -611,7 +623,7 @@ export RUSTFLAGS="-C codegen-units=1 -C strip=symbols"
 TARGET=x86_64-unknown-linux-gnu
 cargo build --release --locked --target "$TARGET" -p mkit-cli --bin mkit
 cargo build --release --locked --target "$TARGET" -p mkit-server-native \
-  --no-default-features --features enc,http,s3,sqlite --bin mkit-server
+  --no-default-features --features "$(../scripts/check-release-artifact-features.sh --server-features)" --bin mkit-server
 # 4. Hash the binaries.
 shasum -a 256 "target/$TARGET/release/mkit" "target/$TARGET/release/mkit-server"
 # 5. Compare against the SHA256SUMS inside each release archive.

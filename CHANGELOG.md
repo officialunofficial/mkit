@@ -119,7 +119,11 @@ train).
   new `scripts/check-release-artifact-features.sh` checks each build's
   compiler-artifact messages and binary: `mkit` must carry no server
   package, server feature or `SQLite`, and `mkit-server` exactly the
-  shipped features and never `test-faults`. The `mkit` build now selects
+  shipped features (`scripts/release/mkit-server-features`) and never
+  `test-faults`; `mkit` may compile only the packages in
+  `scripts/release/mkit-packages.golden` (regenerate with `--update-golden`).
+  The new `release-artifact-check.yml` runs the same builds and checks on
+  PRs to `main`. The `mkit` build now selects
   `-p mkit-cli`: the bare `--bin mkit` selected every workspace member and
   unified their features into the shipped CLI. See `docs/RELEASE.md`.
 - *(core)* `pack::DeltaBaseSource`: the external delta-base lookup is

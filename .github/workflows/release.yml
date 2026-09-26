@@ -3,8 +3,9 @@ name: "Release: Artifacts"
 # Triggered by pushing a semver tag (v0.1.0, v1.2.3, etc.).
 #
 # This workflow:
-#   1. Builds static mkit and mkit-server binaries for macOS (arm64/x86_64)
-#      and Linux (x86_64/arm64) with a pinned Rust toolchain (see
+#   1. Builds mkit and mkit-server binaries for macOS (arm64/x86_64) and
+#      Linux (x86_64/arm64; glibc, dynamically linked) with a pinned Rust
+#      toolchain (see
 #      rust/rust-toolchain.toml), one archive per binary per target. The two
 #      binaries are built by separate cargo invocations so feature
 #      unification cannot pull server dependencies into mkit (D31).
@@ -58,13 +59,9 @@ env:
   # The long-running server (mkit-server-native, D31), shipped as its own
   # archive next to mkit's.
   SERVER_BINARY_NAME: mkit-server
-  # mkit-server-native's shipped feature set, implied features included
-  # (`enc` implies `http`, which implies `sqlite`): the HTTP listener with
-  # SQLite metadata, S3 blobs and the mkit+enc:// listener. Built with
-  # --no-default-features so a new default feature (or a test seam such as
-  # `test-faults`) never ships unreviewed; the build job checks the compiled
-  # set against this list.
-  SERVER_FEATURES: "enc,http,s3,sqlite"
+  # mkit-server's shipped feature set is NOT here: it lives in
+  # scripts/release/mkit-server-features in the tagged tree, the one source
+  # this workflow and release-artifact-check.yml (PR time) both read.
 
 jobs:
   validate-release-tag:
@@ -303,16 +300,29 @@ jobs:
             --message-format=json-render-diagnostics > "${RUNNER_TEMP}/mkit-build.jsonl"
 
       # Checks what invocation 1 really compiled (its compiler-artifact
-      # messages) and scans the stripped binary: no server-only package, no
-      # hyper `server`, no connectrpc `server`/`axum`, no SQLite, no test
-      # seam. The PR-time dependency checks model mkit-cli alone and cannot
-      # see unification in this build.
+      # messages) and scans the stripped binary: only packages in
+      # scripts/release/mkit-packages.golden, no server-only package, no
+      # hyper `server`, no connectrpc `server`/`axum`, tower-http only with
+      # reqwest's features, no SQLite, no test seam. release-artifact-check.yml
+      # runs the same builds and check on PRs to main for one Linux target.
       - name: Check release mkit artifact
         shell: bash
         run: |
           bash scripts/check-release-artifact-features.sh \
             "${RUNNER_TEMP}/mkit-build.jsonl" \
             "rust/target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}"
+
+      # mkit-server-native's shipped feature set, implied features included
+      # (scripts/release/mkit-server-features, validated as `a,b,c`). The
+      # build uses --no-default-features so a new default feature (or a test
+      # seam such as `test-faults`) never ships unreviewed.
+      - name: Read mkit-server feature set
+        id: server_features
+        shell: bash
+        run: |
+          FEATURES="$(bash scripts/check-release-artifact-features.sh --server-features)"
+          echo "features=${FEATURES}" >> "$GITHUB_OUTPUT"
+          echo "mkit-server features: ${FEATURES}"
 
       # The server needs no protoc (vendored codegen, WP-M0-06). rusqlite's
       # bundled SQLite is C, compiled by `cc` with the runner's compiler.
@@ -322,6 +332,7 @@ jobs:
         env:
           # Same flags as the mkit build above.
           RUSTFLAGS: "-C codegen-units=1 -C strip=symbols"
+          SERVER_FEATURES: ${{ steps.server_features.outputs.features }}
         run: |
           cargo build \
             --release \
@@ -329,18 +340,20 @@ jobs:
             --target ${{ matrix.target }} \
             -p mkit-server-native \
             --no-default-features \
-            --features "${{ env.SERVER_FEATURES }}" \
+            --features "${SERVER_FEATURES}" \
             --bin ${{ env.SERVER_BINARY_NAME }} \
             --message-format=json-render-diagnostics > "${RUNNER_TEMP}/mkit-server-build.jsonl"
 
-      # mkit-server-native was compiled with exactly SERVER_FEATURES, and no
+      # mkit-server-native was compiled with exactly that feature set, and no
       # package with the pipeline's `test-faults` seam (whose `x-mkit-test-*`
       # headers must also be absent from the binary).
       - name: Check release mkit-server artifact
         shell: bash
+        env:
+          SERVER_FEATURES: ${{ steps.server_features.outputs.features }}
         run: |
           bash scripts/check-release-artifact-features.sh \
-            --server "${{ env.SERVER_FEATURES }}" \
+            --server "${SERVER_FEATURES}" \
             "${RUNNER_TEMP}/mkit-server-build.jsonl" \
             "rust/target/${{ matrix.target }}/release/${{ env.SERVER_BINARY_NAME }}"
 
