@@ -1,16 +1,21 @@
-//! Canonical-form properties of the grant codec (SPEC-WRITE-GRANTS §3):
+//! Canonical-form properties of the grant, epoch and visibility codecs
+//! (SPEC-WRITE-GRANTS §3, §5.1, §9.1):
 //!
-//! * `parse(encode(g)) == g` for generated valid grants;
+//! * `parse(encode(s)) == s` for generated valid statements;
 //! * for any bytes `b` near a valid statement, `parse(b)` succeeding implies
 //!   `encode(parse(b)) == b`, so no two byte strings share a meaning (and a
-//!   grant id);
-//! * the same for `X-Write-Grant` header values.
+//!   statement id);
+//! * the same for `X-Write-Grant` header values, and a verified signed
+//!   header admits no second spelling.
 #![cfg(feature = "grants")]
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in tests
 
+use ed25519_dalek::{Signer as _, SigningKey};
 use mkit_attest::grant::{
-    Capabilities, GRANT_MAX_LIFETIME_MS, Grant, Namespace, OwnerScheme, RefFlags, RefPattern,
-    RefScopes, RepoScope, RepositoryIdentity, SignedHeader,
+    AcceptedSchemes, Capabilities, EPOCH_STATEMENT_MAX_LIFETIME_MS, EpochStatement,
+    GRANT_MAX_LIFETIME_MS, Grant, Namespace, OwnerScheme, RefFlags, RefPattern, RefScopes,
+    RepoScope, RepositoryIdentity, SignedHeader, VerifierConfig, Visibility, VisibilityStatement,
+    verify_grant_owner,
 };
 use proptest::prelude::*;
 
@@ -189,6 +194,151 @@ proptest! {
             && let Ok(parsed) = SignedHeader::parse(&text)
         {
             prop_assert_eq!(parsed.encode().unwrap(), text);
+        }
+    }
+}
+
+fn epoch_statement() -> impl Strategy<Value = EpochStatement> {
+    (
+        namespace(),
+        any::<u64>(),
+        audiences(),
+        0..=i64::MAX - EPOCH_STATEMENT_MAX_LIFETIME_MS,
+        1..=EPOCH_STATEMENT_MAX_LIFETIME_MS,
+        any::<[u8; 32]>(),
+    )
+        .prop_map(
+            |(namespace, new_epoch, audiences, created, life, nonce)| EpochStatement {
+                namespace,
+                new_epoch,
+                audiences,
+                created_ms: created,
+                expiry_ms: created + life,
+                nonce,
+            },
+        )
+}
+
+fn visibility_statement() -> impl Strategy<Value = VisibilityStatement> {
+    (
+        namespace(),
+        "[a-z0-9][a-z0-9._-]{0,99}",
+        prop_oneof![Just(Visibility::Public), Just(Visibility::Private)],
+        audiences(),
+        0..=i64::MAX - EPOCH_STATEMENT_MAX_LIFETIME_MS,
+        1..=EPOCH_STATEMENT_MAX_LIFETIME_MS,
+        any::<[u8; 32]>(),
+    )
+        .prop_map(|(ns, name, visibility, audiences, created, life, nonce)| {
+            VisibilityStatement {
+                repository: RepositoryIdentity::new(Some(ns), &name).unwrap(),
+                visibility,
+                audiences,
+                created_ms: created,
+                expiry_ms: created + life,
+                nonce,
+            }
+        })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(512))]
+
+    #[test]
+    fn epoch_statement_parse_encode_roundtrip(s in epoch_statement()) {
+        let bytes = s.encode().unwrap();
+        prop_assert_eq!(EpochStatement::parse(&bytes).unwrap(), s);
+    }
+
+    #[test]
+    fn epoch_statement_accepted_bytes_are_canonical(
+        s in epoch_statement(),
+        edits in proptest::collection::vec((any::<u8>(), any::<usize>(), any::<u8>()), 1..4),
+    ) {
+        let mut bytes = s.encode().unwrap();
+        for (op, pos, byte) in edits {
+            bytes = mutate(bytes, op, pos, byte);
+        }
+        if let Ok(parsed) = EpochStatement::parse(&bytes) {
+            prop_assert_eq!(parsed.encode().unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn visibility_statement_parse_encode_roundtrip(s in visibility_statement()) {
+        let bytes = s.encode().unwrap();
+        prop_assert_eq!(VisibilityStatement::parse(&bytes).unwrap(), s);
+    }
+
+    #[test]
+    fn visibility_statement_accepted_bytes_are_canonical(
+        s in visibility_statement(),
+        edits in proptest::collection::vec((any::<u8>(), any::<usize>(), any::<u8>()), 1..4),
+    ) {
+        let mut bytes = s.encode().unwrap();
+        for (op, pos, byte) in edits {
+            bytes = mutate(bytes, op, pos, byte);
+        }
+        if let Ok(parsed) = VisibilityStatement::parse(&bytes) {
+            prop_assert_eq!(parsed.encode().unwrap(), bytes);
+        }
+    }
+
+    /// No statement parses as more than one kind: the domain field and the
+    /// field count keep grants, epoch and visibility statements apart.
+    #[test]
+    fn grant_epoch_visibility_domains_are_disjoint(
+        g in grant(), e in epoch_statement(), v in visibility_statement(),
+    ) {
+        let g = g.encode().unwrap();
+        let e = e.encode().unwrap();
+        let v = v.encode().unwrap();
+        prop_assert!(EpochStatement::parse(&g).is_err() && VisibilityStatement::parse(&g).is_err());
+        prop_assert!(Grant::parse(&e).is_err() && VisibilityStatement::parse(&e).is_err());
+        prop_assert!(Grant::parse(&v).is_err() && EpochStatement::parse(&v).is_err());
+    }
+}
+
+proptest! {
+    // Each case signs and verifies once; fewer cases keep the suite fast.
+    #![proptest_config(ProptestConfig::with_cases(128))]
+
+    /// A signed header edited anywhere either fails verification or still
+    /// carries exactly the signed statement and signature: the canonical
+    /// base64url decoder admits no second spelling, so a verified grant
+    /// cannot be varied by a third party.
+    #[test]
+    fn grant_verify_mutated_header_never_admits_other_bytes(
+        g in grant(), op in any::<u8>(), pos in any::<usize>(), byte in any::<u8>(),
+    ) {
+        let key = SigningKey::from_bytes(&[9; 32]);
+        let mut g = g;
+        let ns = Namespace::Ed25519(key.verifying_key().to_bytes());
+        g.scope = match g.scope {
+            RepoScope::Namespace => RepoScope::Namespace,
+            RepoScope::Repository(id) => {
+                RepoScope::Repository(RepositoryIdentity::new(Some(ns), id.name()).unwrap())
+            }
+        };
+        g.namespace = ns;
+        let statement = g.encode().unwrap();
+        let blob = key.sign(blake3::hash(&statement).as_bytes()).to_bytes().to_vec();
+        let header = SignedHeader { statement: statement.clone(), scheme: OwnerScheme::Ed25519, blob }
+            .encode()
+            .unwrap();
+        let cfg = VerifierConfig::new(
+            "https://git.example.com",
+            AcceptedSchemes::of(&[OwnerScheme::Ed25519]),
+        )
+        .unwrap();
+        let verified = verify_grant_owner(&cfg, &header).unwrap();
+        prop_assert_eq!(verified.statement(), &g);
+        let mutated = mutate(header.clone().into_bytes(), op, pos, byte);
+        if let Ok(text) = String::from_utf8(mutated)
+            && let Ok(verified) = verify_grant_owner(&cfg, &text)
+        {
+            prop_assert_eq!(&text, &header);
+            prop_assert_eq!(verified.statement(), &g);
         }
     }
 }

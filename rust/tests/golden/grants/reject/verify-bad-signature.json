@@ -1,0 +1,16 @@
+{
+  "accepted_schemes": [
+    "ed25519"
+  ],
+  "audience": "https://git.example.com",
+  "context": {
+    "capability": "write",
+    "now": 1790000000000,
+    "repository": "ed25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618/website",
+    "signer": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+  },
+  "expected_error": "bad signature",
+  "header": "bWtpdC13cml0ZS1ncmFudDp2MQplZDI1NTE5LWZkMTcyNDM4NWFhMGM3NWI2NGZiNzhjZDYwMmZhMWQ5OTFmZGViZjc2YjEzYzU4ZWQ3MDJlYWM4MzVlOWY2MTgKZWQyNTUxOS1mZDE3MjQzODVhYTBjNzViNjRmYjc4Y2Q2MDJmYTFkOTkxZmRlYmY3NmIxM2M1OGVkNzAyZWFjODM1ZTlmNjE4L3dlYnNpdGUKZWE0YTZjNjNlMjljNTIwYWJlZjU1MDdiMTMyZWM1Zjk5NTQ3NzZhZWJlYmU3YjkyNDIxZWVhNjkxNDQ2ZDIyYwpyZWFkLHdyaXRlCmh0dHBzOi8vZ2l0LmV4YW1wbGUuY29tLGh0dHBzOi8vZ2l0LmV4YW1wbGUub3JnCnJlZnMvaGVhZHMvbWFpbj1jdTtyZWZzL2hlYWRzL3dpcC8qPWN1ZmQKMwoxNzkwMDAwMDAwMDAwCjE3OTAwODY0MDAwMDAKNTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NQ.ed25519.KQvESwfOj_n1z3qSUqbWl2Hc0WWok70VtADDenAoXN8CSKs6Un_j00sThbcqdQkkoNIJQt-S-AOY18ROk6AGDg",
+  "kind": "grant",
+  "rule": "§7 step 3: the owner signature does not verify (signed by another key)"
+}

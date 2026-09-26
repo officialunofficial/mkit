@@ -1,11 +1,15 @@
-//! Golden vectors for the grant codec (SPEC-WRITE-GRANTS §3, §4.2).
+//! Golden vectors for the grant codec and verifier (SPEC-WRITE-GRANTS §3,
+//! §4, §5, §7, §9.1).
 //!
 //! * `MKIT_WRITE_GOLDEN=1` (re)writes `rust/tests/golden/grants/
 //!   {grant-statements.json,headers.json,MANIFEST.txt}` from the vectors
-//!   defined here. `MANIFEST.txt` pins every file in the directory,
-//!   including the reject vectors.
-//! * `reject/*.json` are authored by the case table in
-//!   `scripts/golden/grants_ref.py` (`--write-rejects`), not by this crate.
+//!   defined here, and the signed `ed25519` fixtures of [`signed`]
+//!   (`{grant,epoch,visibility}-ed25519.json`, `reject/verify-*.json`).
+//!   `MANIFEST.txt` pins every file in the directory, including the reject
+//!   vectors.
+//! * The codec's `reject/*.json` (all but `reject/verify-*`) are authored by
+//!   the case table in `scripts/golden/grants_ref.py` (`--write-rejects`),
+//!   not by this crate.
 //! * The normal run reads only the committed files and checks them.
 //!
 //! `scripts/golden/grants_ref.py` is the independent cross-check of every
@@ -25,6 +29,9 @@ use mkit_attest::grant::{
     RepositoryIdentity, SignedHeader,
 };
 use serde_json::{Value, json};
+
+#[path = "golden_grants/signed.rs"]
+mod signed;
 
 /// The §3.4 example statement (illustrative in the spec; pinned here).
 const SPEC_EXAMPLE: &str = "mkit-write-grant:v1
@@ -458,10 +465,11 @@ fn write_all() {
         "headers.json",
         &json!({ "spec": "SPEC-WRITE-GRANTS §4.2", "vectors": headers, "rejects": rejects }),
     );
+    signed::write_signed();
     let mut manifest = String::from(
-        "# SPEC-WRITE-GRANTS grant codec golden vectors (deterministic)\n\
-         # Accept vectors: `MKIT_WRITE_GOLDEN=1 cargo test -p mkit-attest --features grants --test golden_grants`\n\
-         # Reject vectors: `python3 scripts/golden/grants_ref.py rust/tests/golden/grants --write-rejects`\n\
+        "# SPEC-WRITE-GRANTS grant codec and verifier golden vectors (deterministic)\n\
+         # Accept, signed and reject/verify-* vectors: `MKIT_WRITE_GOLDEN=1 cargo test -p mkit-attest --features grants --test golden_grants`\n\
+         # Codec reject vectors: `python3 scripts/golden/grants_ref.py rust/tests/golden/grants --write-rejects`\n\
          # Cross-checked by `python3 scripts/golden/grants_ref.py rust/tests/golden/grants`\n\
          # eth-primitives.json: `MKIT_WRITE_GOLDEN=1 cargo test -p mkit-attest --features grants --test golden_eth`\n\
          # Format: <path> <blake3-hex-of-file-bytes>\n",
@@ -542,13 +550,17 @@ fn header_goldens() {
 }
 
 /// Every §3.5 rule family has at least one reject fixture, and each fixture
-/// fails with exactly its expected error.
+/// fails with exactly its expected error. (`reject/verify-*` are
+/// verification failures, checked by [`signed`].)
 #[test]
 fn reject_goldens() {
     maybe_write();
     let mut seen = Vec::new();
     let mut count = 0;
-    for path in fixture_files().iter().filter(|p| p.starts_with("reject/")) {
+    for path in fixture_files()
+        .iter()
+        .filter(|p| p.starts_with("reject/") && !p.starts_with("reject/verify-"))
+    {
         let fixture = read(path);
         let statement = fixture["statement"].as_str().unwrap();
         let expected = fixture["expected_error"].as_str().unwrap();

@@ -1,10 +1,12 @@
-# SPEC-WRITE-GRANTS grant codec golden vectors (deterministic)
-# Accept vectors: `MKIT_WRITE_GOLDEN=1 cargo test -p mkit-attest --features grants --test golden_grants`
-# Reject vectors: `python3 scripts/golden/grants_ref.py rust/tests/golden/grants --write-rejects`
+# SPEC-WRITE-GRANTS grant codec and verifier golden vectors (deterministic)
+# Accept, signed and reject/verify-* vectors: `MKIT_WRITE_GOLDEN=1 cargo test -p mkit-attest --features grants --test golden_grants`
+# Codec reject vectors: `python3 scripts/golden/grants_ref.py rust/tests/golden/grants --write-rejects`
 # Cross-checked by `python3 scripts/golden/grants_ref.py rust/tests/golden/grants`
 # eth-primitives.json: `MKIT_WRITE_GOLDEN=1 cargo test -p mkit-attest --features grants --test golden_eth`
 # Format: <path> <blake3-hex-of-file-bytes>
+epoch-ed25519.json b7ee07d72c559d540fe2919c43708e5e2e77b5d3bf871ea3ac2bbd5ec3af7184
 eth-primitives.json 326e6d4544c3bdb99ef87992b8c03a835e85b6d8d724e239aaf59e830a6b9306
+grant-ed25519.json e38b17959667b84516cdc827b3f5ac9fb45b92c51407abdc603de547066bc7a8
 grant-statements.json 0d744ec20b5cb3a9f226e44a06a977b52ab877d6adf7070733764180141fd414
 headers.json a5ec6adb5f58d986f7fed42f94c2a1272eebcef7a93b9944a09c9c4f3f4492de
 reject/audience-default-port.json c51ccc6aed892ae44c318229b7832f514bd4882bc78d5b3482286676826b94dd
@@ -64,3 +66,10 @@ reject/repository-name-uppercase.json 282563d6d5c1e5deb3e74ee0d06a436c24eea8bc86
 reject/repository-scope-other-namespace.json 54fdbd425d1cc668c940fba17fbe9b09ae6567ef7cb89525ca6bce9391f415b2
 reject/repository-scope-partial-wildcard.json 253b9de36e4494dfc19035eae79ebebe1fb3cae1906dba0349c527377c5a6886
 reject/statement-4097-bytes.json 1da9bd5a222af489926b0078087f99c8e3ab5e9a9f5ad861290049c573d61b30
+reject/verify-bad-signature.json 4621dc0bd66df4aa3212831dac1d0aa20fb95a78a886094c88cc48038352ea21
+reject/verify-expired-at-expiry.json aab4d78448df42db3227519bd5e8afe5a0cafc99f46a668cad2f194640467a5d
+reject/verify-future-dated.json 10122de620e8b23749d2fda9ab392b82cb41545e337387d4b27d54607437709f
+reject/verify-scheme-not-advertised.json 949cf875e2395f1d32fe74aab60d814ddca484695ac55e277a8da58577ff1a24
+reject/verify-scheme-wrong-namespace-form.json 88dadb8d396adb280dad89c56b2de6448a776265b66be98b3427a4a0ddba869e
+reject/verify-signature-63-bytes.json 39010f1e044e5cba8036423d8350464ceb7f76f63256d970543e1ceb121748af
+visibility-ed25519.json 9b39281c63338caa80fadd432ddc4310f4ff48bdfa7a7927a5d5120e5ccbdb7d

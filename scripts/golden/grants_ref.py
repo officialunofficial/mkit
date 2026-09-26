@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT OR Apache-2.0
 #
-# Independent reference check of the grant codec golden vectors
-# (SPEC-WRITE-GRANTS §3, §4.2; SPEC-TRANSPORT-CONNECT §7.4):
+# Independent reference check of the grant codec and verifier golden
+# vectors (SPEC-WRITE-GRANTS §3, §4, §4.2, §5.1-§5.2, §7, §9.1;
+# SPEC-TRANSPORT-CONNECT §7.4):
 #   rust/tests/golden/grants/grant-statements.json
 #   rust/tests/golden/grants/headers.json
-#   rust/tests/golden/grants/reject/*.json
+#   rust/tests/golden/grants/{grant,epoch,visibility}-ed25519.json
+#   rust/tests/golden/grants/reject/*.json (reject/verify-*: verification)
 #   rust/tests/golden/grants/MANIFEST.txt
 #
 # Everything here is written from the spec text and shares no code with the
@@ -17,12 +19,19 @@
 #     origin rules (SPEC-WRITE-GRANTS §3.2) re-implemented here;
 #   * the §4.2 header built with base64.urlsafe_b64encode(x).rstrip(b"=");
 #   * BLAKE3 from the pure-Python transcription in blake3_subtree_ref.py
-#     (WP-1.3), checked against `b3sum` (the official CLI) unless --no-b3sum.
+#     (WP-1.3), checked against `b3sum` (the official CLI) unless --no-b3sum;
+#   * the signed fixtures: each epoch and visibility statement rebuilt from
+#     its §5.1/§9.1 fields, every statement re-signed from the owner seed with
+#     pycryptodome's RFC 8032 Ed25519 over BLAKE3(statement) (deterministic,
+#     so signature and header bytes must be equal), and every accept, reject
+#     and reject/verify-* context re-run through a stateless verifier written
+#     here from §4, §5.2, §7 and §9.1.
 #
 # The reject vectors are authored by the CASES table below: each case edits
 # one field of the §3.4 example so that it breaks exactly one §3.5 rule, and
 # names that rule and the expected `GrantError::reason`. `--write-rejects`
-# (re)writes reject/*.json from the table; the check mode asserts every file
+# (re)writes reject/*.json (other than reject/verify-*, which the Rust
+# golden writer signs) from the table; the check mode asserts every file
 # still equals its case, that the validator here rejects it for the stated
 # rule, and prints the table.
 #
@@ -60,6 +69,11 @@ MAX_REF_SCOPES = 16
 MAX_STATEMENT_BYTES = 4096
 MAX_GRANT_HEADER_BYTES = 8192
 DOMAIN = "mkit-write-grant:v1"
+DOMAIN_EPOCH = "mkit-write-epoch:v1"
+DOMAIN_VISIBILITY = "mkit-repo-visibility:v1"
+EPOCH_STATEMENT_MAX_LIFETIME_MS = 2_592_000_000
+MAX_EPOCH_STEP = 1024
+MAX_CLOCK_LEAD_MS = 30_000
 SCHEMES = ("ed25519", "secp256k1-eip191", "webauthn-p256")
 U64_MAX = 2**64 - 1
 I64_MAX = 2**63 - 1
@@ -67,6 +81,8 @@ I64_MAX = 2**63 - 1
 # SPEC-TRANSPORT-CONNECT §7.4.
 NAMESPACE_RE = re.compile(r"(ed25519-[0-9a-f]{64}|0x[0-9a-f]{40})\Z")
 NAME_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,99}\Z")
+IDENTITY_RE = re.compile(
+    r"(ed25519-[0-9a-f]{64}|0x[0-9a-f]{40})/[a-z0-9][a-z0-9._-]{0,99}\Z")
 HEX64_RE = re.compile(r"[0-9a-f]{64}\Z")
 DECIMAL_RE = re.compile(r"(0|[1-9][0-9]*)\Z")
 
@@ -245,6 +261,102 @@ def validate_grant(statement):
     return None
 
 
+def split_statement(statement, count):
+    """The §3.1 byte rules and field count shared by every statement."""
+    if len(statement) > MAX_STATEMENT_BYTES:
+        raise Reject("statement too long")
+    for b in statement:
+        if b == 0x0D:
+            raise Reject("carriage return")
+        if b != 0x0A and not 0x21 <= b <= 0x7E:
+            raise Reject("byte out of range")
+    if statement.endswith(b"\n"):
+        raise Reject("final line feed")
+    f = statement.decode("ascii").split("\n")
+    if len(f) != count:
+        raise Reject("field count")
+    if "" in f:
+        raise Reject("empty field")
+    return f
+
+
+def timestamps(created_text, expiry_text):
+    created = decimal(created_text, I64_MAX)
+    expiry = decimal(expiry_text, I64_MAX)
+    return created, expiry
+
+
+def validate_epoch(statement):
+    """None if `statement` is a canonical §5.1 epoch statement, else the
+    reason of the first rule it breaks (the §3.5 rules, seven fields)."""
+    try:
+        f = split_statement(statement, 7)
+        if f[0] != DOMAIN_EPOCH:
+            raise Reject("domain")
+        if not NAMESPACE_RE.match(f[1]):
+            raise Reject("namespace")
+        decimal(f[2], U64_MAX)
+        validate_audiences(f[3])
+        created, expiry = timestamps(f[4], f[5])
+        hex64(f[6])
+        if expiry <= created:
+            raise Reject("expiry not after created")
+        if expiry - created > EPOCH_STATEMENT_MAX_LIFETIME_MS:
+            raise Reject("lifetime too long")
+    except Reject as r:
+        return str(r)
+    return None
+
+
+def validate_visibility(statement):
+    """None if `statement` is a canonical §9.1 visibility statement, else the
+    reason of the first rule it breaks."""
+    try:
+        f = split_statement(statement, 7)
+        if f[0] != DOMAIN_VISIBILITY:
+            raise Reject("domain")
+        if not IDENTITY_RE.match(f[1]):
+            raise Reject("repository")
+        if f[2] not in ("public", "private"):
+            raise Reject("visibility")
+        validate_audiences(f[3])
+        created, expiry = timestamps(f[4], f[5])
+        hex64(f[6])
+        if expiry <= created:
+            raise Reject("expiry not after created")
+        if expiry - created > EPOCH_STATEMENT_MAX_LIFETIME_MS:
+            raise Reject("lifetime too long")
+    except Reject as r:
+        return str(r)
+    return None
+
+
+def build_epoch(fields):
+    """§5.1: seven fields joined by "\n", audiences in ascending byte order."""
+    return "\n".join([
+        DOMAIN_EPOCH,
+        fields["namespace"],
+        str(int(fields["new_epoch"])),
+        ",".join(sorted(fields["audiences"], key=str.encode)),
+        str(int(fields["created"])),
+        str(int(fields["expiry"])),
+        fields["nonce"],
+    ]).encode("ascii")
+
+
+def build_visibility(fields):
+    """§9.1: seven fields joined by "\n", audiences in ascending byte order."""
+    return "\n".join([
+        DOMAIN_VISIBILITY,
+        fields["repository"],
+        fields["visibility"],
+        ",".join(sorted(fields["audiences"], key=str.encode)),
+        str(int(fields["created"])),
+        str(int(fields["expiry"])),
+        fields["nonce"],
+    ]).encode("ascii")
+
+
 def build_statement(fields):
     """Build a grant from a field dict using only the §3.1/§3.2 text rules."""
     audiences = sorted(fields["audiences"], key=str.encode)
@@ -292,6 +404,227 @@ def validate_header(value):
     if not (b64_canonical(parts[0]) and b64_canonical(parts[2])):
         return "header base64"
     return None
+
+
+# ---------------------------------------------------------------------------
+# Owner signatures (§4, ed25519 only) and the stateless verifier (§5.2 checks
+# 1-5, §7 steps 1-10, §9.1), written from the spec text.
+
+
+def eddsa_module():
+    try:
+        from Crypto.Signature import eddsa  # pycryptodome
+    except ImportError:
+        sys.exit("FAIL: pycryptodome not found (pip install pycryptodome)")
+    return eddsa
+
+
+def ed25519_public(seed):
+    return eddsa_module().import_private_key(seed).public_key().export_key(format="raw")
+
+
+def ed25519_sign(seed, statement):
+    """§4 ed25519: RFC 8032 Ed25519 over the 32-byte BLAKE3 of the statement."""
+    eddsa = eddsa_module()
+    return eddsa.new(eddsa.import_private_key(seed), "rfc8032").sign(blake3(statement))
+
+
+def b64url_decode(segment):
+    return base64.urlsafe_b64decode(segment + "=" * (-len(segment) % 4))
+
+
+def owner_signature(schemes, scheme, statement, blob, namespace):
+    """§4: the scheme is advertised, valid for the namespace form, and the
+    signature verifies with the namespace as owner. None or a reason."""
+    if scheme not in schemes:
+        return "scheme not advertised"
+    if scheme == "ed25519":
+        if not namespace.startswith("ed25519-"):
+            return "scheme namespace mismatch"
+        if len(blob) != 64:
+            return "signature length"
+        eddsa = eddsa_module()
+        try:
+            key = eddsa.import_public_key(encoded=bytes.fromhex(namespace[len("ed25519-"):]))
+            eddsa.new(key, "rfc8032").verify(blake3(statement), blob)
+        except ValueError:
+            return "bad signature"
+        return None
+    if not namespace.startswith("0x"):
+        return "scheme namespace mismatch"
+    return "scheme not implemented"  # the ECDSA schemes land in WP-2.5
+
+
+def window(created, expiry, now):
+    """§7 step 10, §5.2 check 5, §9.1: created <= now + 30 s and now < expiry
+    (exclusive). A negative clock fails closed."""
+    if now < 0 or created > now + MAX_CLOCK_LEAD_MS:
+        return "not yet valid"
+    if now >= expiry:
+        return "expired"
+    return None
+
+
+def decode_header(value, validate):
+    """§4.2 decode, then the statement parser. (statement, scheme, blob,
+    fields) or a reason."""
+    err = validate_header(value)
+    if err:
+        return err
+    stmt, scheme, blob = value.split(".")
+    statement = b64url_decode(stmt)
+    err = validate(statement)
+    if err:
+        return err
+    return statement, scheme, b64url_decode(blob), statement.decode("ascii").split("\n")
+
+
+def verify_grant(value, schemes, audience, ctx):
+    """§7 steps 1-7, 9 and 10 in spec order. None or the first reason."""
+    decoded = decode_header(value, validate_grant)
+    if isinstance(decoded, str):
+        return decoded
+    statement, scheme, blob, f = decoded
+    namespace = f[1]
+    err = owner_signature(schemes, scheme, statement, blob, namespace)
+    if err:
+        return err
+    repository = ctx["repository"]
+    repo_ns = repository.split("/", 1)[0] if "/" in repository else None
+    if repo_ns != namespace:
+        return "namespace mismatch"
+    if audience not in f[5].split(","):
+        return "audience not listed"
+    if f[2] not in (f"{namespace}/*", repository):
+        return "repository not in scope"
+    if ctx["capability"] not in f[4].split(","):
+        return "capability not granted"
+    if f[3] != ctx["signer"]:
+        return "grantee mismatch"
+    return window(int(f[8]), int(f[9]), ctx["now"])
+
+
+def verify_epoch(value, schemes, audience, now):
+    """§5.2 checks 1-5. None or the first reason."""
+    decoded = decode_header(value, validate_epoch)
+    if isinstance(decoded, str):
+        return decoded
+    statement, scheme, blob, f = decoded
+    err = owner_signature(schemes, scheme, statement, blob, f[1])
+    if err:
+        return err
+    if audience not in f[3].split(","):
+        return "audience not listed"
+    return window(int(f[4]), int(f[5]), now)
+
+
+def verify_visibility(value, schemes, audience, repository, now):
+    """§9.1 statement checks, with X-Repository == the statement's
+    repository first. None or the first reason."""
+    decoded = decode_header(value, validate_visibility)
+    if isinstance(decoded, str):
+        return decoded
+    statement, scheme, blob, f = decoded
+    if f[1] != repository:
+        return "namespace mismatch"
+    err = owner_signature(schemes, scheme, statement, blob, f[1].split("/", 1)[0])
+    if err:
+        return err
+    if audience not in f[3].split(","):
+        return "audience not listed"
+    return window(int(f[4]), int(f[5]), now)
+
+
+def epoch_transition(stored, new):
+    """§5.2 check 7 and the retry rule."""
+    if new == stored:
+        return "retry"
+    if stored < new <= stored + MAX_EPOCH_STEP:
+        return "advance"
+    return "reject"
+
+
+def check_signed_vector(v, seed, build, validate):
+    """Rebuild, validate, re-sign and re-encode one signed vector."""
+    statement = build(v["fields"])
+    assert statement == v["statement"].encode("ascii"), v["name"]
+    assert validate(statement) is None, (v["name"], validate(statement))
+    assert blake3(statement).hex() == v["id"], v["name"]
+    signature = ed25519_sign(seed, statement)
+    assert signature.hex() == v["signature_hex"], v["name"]
+    assert f"{b64url(statement)}.ed25519.{b64url(signature)}" == v["header"], v["name"]
+    return v["header"]
+
+
+def check_signed(root):
+    """The {grant,epoch,visibility}-ed25519.json fixtures and
+    reject/verify-*.json. Returns ([statements, contexts, verify rejects],
+    table rows)."""
+    counts = [0, 0, 0]
+    files = {}
+    for name in ("grant", "epoch", "visibility"):
+        with open(os.path.join(root, f"{name}-ed25519.json"), encoding="utf-8") as fh:
+            files[name] = json.load(fh)
+        seed = bytes.fromhex(files[name]["owner_seed"])
+        assert files[name]["namespace"] == "ed25519-" + ed25519_public(seed).hex()
+        assert files[name]["accepted_schemes"] == ["ed25519"]
+    schemes = ("ed25519",)
+
+    grants = files["grant"]
+    seed = bytes.fromhex(grants["owner_seed"])
+    for v in grants["vectors"]:
+        header = check_signed_vector(v, seed, build_statement, validate_grant)
+        assert v["fields"]["namespace"] == grants["namespace"]
+        counts[0] += 1
+        for ctx in v["accept_contexts"]:
+            got = verify_grant(header, schemes, ctx["audience"], ctx)
+            assert got is None, (v["name"], ctx["name"], got)
+            counts[1] += 1
+        for ctx in v["reject_contexts"]:
+            got = verify_grant(header, schemes, ctx["audience"], ctx)
+            assert got == ctx["expected_error"], (v["name"], ctx["name"], got)
+            counts[1] += 1
+
+    epochs = files["epoch"]
+    for v in epochs["vectors"]:
+        header = check_signed_vector(v, bytes.fromhex(epochs["owner_seed"]),
+                                     build_epoch, validate_epoch)
+        counts[0] += 1
+        for ctx in v["contexts"]:
+            got = verify_epoch(header, schemes, ctx["audience"], ctx["now"])
+            assert got == ctx["expected_error"], (v["name"], ctx["name"], got)
+            counts[1] += 1
+    for t in epochs["transitions"]:
+        assert epoch_transition(t["stored"], t["new"]) == t["outcome"], t
+
+    visibility = files["visibility"]
+    for v in visibility["vectors"]:
+        header = check_signed_vector(v, bytes.fromhex(visibility["owner_seed"]),
+                                     build_visibility, validate_visibility)
+        counts[0] += 1
+        for ctx in v["contexts"]:
+            got = verify_visibility(header, schemes, ctx["audience"], ctx["repository"],
+                                    ctx["now"])
+            assert got == ctx["expected_error"], (v["name"], ctx["name"], got)
+            counts[1] += 1
+
+    reject_dir = os.path.join(root, "reject")
+    rows = []
+    for f in sorted(os.listdir(reject_dir)):
+        if not f.startswith("verify-"):
+            continue
+        with open(os.path.join(reject_dir, f), encoding="utf-8") as fh:
+            r = json.load(fh)
+        assert r["kind"] == "grant" and r["rule"], f
+        got = verify_grant(r["header"], tuple(r["accepted_schemes"]), r["audience"],
+                           r["context"])
+        assert got == r["expected_error"], (f, got)
+        rows.append((f[:-5], r["expected_error"], r["rule"]))
+        counts[2] += 1
+    expected = {"scheme namespace mismatch", "scheme not advertised", "bad signature",
+                "signature length", "expired", "not yet valid"}
+    assert {row[1] for row in rows} == expected, rows
+    return counts, rows
 
 
 # ---------------------------------------------------------------------------
@@ -473,8 +806,9 @@ def check(root, use_b3sum):
             v["name"], validate_header(v["header"]))
 
     reject_dir = os.path.join(root, "reject")
-    files = sorted(f[:-5] for f in os.listdir(reject_dir) if f.endswith(".json"))
-    assert files == sorted(CASES), "reject/ must hold exactly the CASES table"
+    files = sorted(f[:-5] for f in os.listdir(reject_dir)
+                   if f.endswith(".json") and not f.startswith("verify-"))
+    assert files == sorted(CASES), "reject/ must hold exactly the CASES table (+ verify-*)"
     rows = []
     for name in files:
         with open(os.path.join(reject_dir, f"{name}.json"), encoding="utf-8") as fh:
@@ -503,13 +837,16 @@ def check(root, use_b3sum):
         with open(os.path.join(root, path), "rb") as fh:
             assert blake3(fh.read()).hex() == digest, f"MANIFEST pin for {path}"
 
-    print("| reject vector | expected_error | §3.5 rule |")
+    signed_counts, verify_rows = check_signed(root)
+
+    print("| reject vector | expected_error | rule |")
     print("|---|---|---|")
-    for name, expected, rule in rows:
+    for name, expected, rule in rows + verify_rows:
         print(f"| {name} | {expected} | {rule} |")
     print(f"OK ({len(grants['vectors'])} statements, {len(headers['vectors'])} headers, "
           f"{len(headers['rejects'])} header rejects, {len(rows)} reject vectors, "
-          f"{len(listed)} pinned files)")
+          f"{signed_counts[0]} signed statements with {signed_counts[1]} contexts, "
+          f"{signed_counts[2]} verify rejects, {len(listed)} pinned files)")
 
 
 def main():
