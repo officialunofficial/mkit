@@ -445,7 +445,8 @@ mod tests {
     }
 
     // Ported from apps/vcs-worker/src/refs.rs `digest_length` (`is_valid_digest`),
-    // with the Connect message of mkit-transport-connect/src/hashutil.rs.
+    // with the Connect message of mkit-transport-connect/src/hashutil.rs
+    // (0.4, removed in WP-M0-15).
     #[test]
     fn digest_length() {
         let new_id = |b: &[u8]| hash_from_slice(DigestField::NewId, Some(b));
@@ -478,7 +479,8 @@ mod tests {
         condition_from_wire(expectation, expected_id, UnusedExpectedId::Reject).unwrap_err()
     }
 
-    // Connect messages from mkit-transport-connect/src/refs_convert.rs; ssh
+    // Connect messages from mkit-transport-connect/src/refs_convert.rs
+    // (0.4, removed in WP-M0-15); ssh
     // messages from mkit serve's `decode_update_ref`.
     #[test]
     fn condition_from_wire_unspecified_and_unknown() {

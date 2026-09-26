@@ -93,7 +93,7 @@ rusqlite = { version = "0.40", default-features = false, features = ["bundled", 
 # A reentrant lock: a transaction body runs statements on the connection
 # its own `transaction` call already holds.
 parking_lot = { version = "0.12", optional = true }
-# The router: same axum pin as `mkit-transport-connect`.
+# The router: axum 0.8, the major connectrpc's `axum` feature targets.
 axum = { version = "0.8", default-features = false, features = ["http1", "http2", "tokio"], optional = true }
 tower = { version = "0.5", default-features = false, features = ["limit", "util"], optional = true }
 tower-http = { version = "0.6", default-features = false, features = ["cors", "trace", "limit", "sensitive-headers"], optional = true }

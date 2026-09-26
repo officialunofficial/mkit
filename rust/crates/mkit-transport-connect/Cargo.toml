@@ -121,7 +121,3 @@ connectrpc = { version = "0.9.0", default-features = false, features = [
     "zstd",
     "json",
 ] }
-
-[package.metadata.docs.rs]
-# Build docs with every feature so docs.rs renders the feature-gated API.
-all-features = true
