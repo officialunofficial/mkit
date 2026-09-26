@@ -147,6 +147,18 @@ service TransportService {
   // any message is sent) if the digest is absent. See
   // SPEC-TRANSPORT-CONNECT §6.
   rpc DownloadPack(DownloadPackRequest) returns (stream DownloadPackResponse);
+
+  // Discover deployment capabilities without authentication (SPEC-TRANSPORT-CONNECT §2.1).
+  rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse);
+
+  // Reserve an upload for a ref (SPEC-TRANSPORT-CONNECT §7.6).
+  rpc BeginUpload(BeginUploadRequest) returns (BeginUploadResponse);
+
+  // Stream one ticketed upload part (SPEC-TRANSPORT-CONNECT §7.6).
+  rpc UploadPart(stream UploadPartRequest) returns (UploadPartResponse);
+
+  // Complete a multipart upload using its receipts (SPEC-TRANSPORT-CONNECT §7.6).
+  rpc CompleteUpload(CompleteUploadRequest) returns (CompleteUploadResponse);
 }
 
 // ----------------------------------------------------------------------------
@@ -154,10 +166,16 @@ service TransportService {
 
 message ListRefsRequest {
   string prefix = 1;
+  // Requested page bound, capped by the server (SPEC-TRANSPORT-CONNECT §7.9).
+  uint32 page_size = 2;
+  // Opaque continuation token; empty starts a listing (SPEC-TRANSPORT-CONNECT §7.9).
+  string page_token = 3;
 }
 
 message ListRefsResponse {
   repeated RefEntry refs = 1;
+  // Empty ends the listing (SPEC-TRANSPORT-CONNECT §7.9).
+  string next_page_token = 2;
 }
 
 message ReadRefRequest {
@@ -174,6 +192,8 @@ message UpdateRefRequest {
   RefExpectation expectation = 2;  // REQUIRED; UNSPECIFIED is a protocol error
   bytes expected_id = 3;            // 32 bytes for MATCH; empty for ANY/MISSING
   bytes new_id = 4;                  // 32-byte BLAKE3 digest to write
+  // Delete the ref under its CAS precondition (SPEC-TRANSPORT-CONNECT §7.8).
+  bool delete = 5;
 }
 
 message UpdateRefResponse {
@@ -191,6 +211,10 @@ message AdvanceRefsRequest {
   RefExpectation packmap_expectation = 6;
   bytes packmap_expected_id = 7;
   bytes packmap_new_id = 8;
+  // Upload tickets consumed by this advance (SPEC-TRANSPORT-CONNECT §7.6).
+  repeated bytes ticket_ids = 9;
+  // Delete both refs under their CAS preconditions (SPEC-TRANSPORT-CONNECT §7.8).
+  bool delete = 10;
 }
 
 message AdvanceRefsResponse {
@@ -214,6 +238,8 @@ message PackExistsResponse {
 message UploadPackHeader {
   bytes pack_id = 1;
   uint64 total_bytes = 2;
+  // Opaque authenticated upload ticket (SPEC-TRANSPORT-CONNECT §7.6).
+  bytes ticket_token = 3;
 }
 
 message UploadPackRequest {
@@ -242,3 +268,118 @@ message DownloadPackResponse {
     PackChunk chunk = 2;
   }
 }
+
+// ----------------------------------------------------------------------------
+// Discovery.
+
+// Empty discovery request; X-Repository is optional (SPEC-TRANSPORT-CONNECT §2.1).
+message GetServerInfoRequest {}
+
+// Deployment capabilities, independent of repository existence (SPEC-TRANSPORT-CONNECT §2.1).
+message GetServerInfoResponse {
+  // Wire package: "mkit.transport.v1" (SPEC-TRANSPORT-CONNECT §2.1).
+  string protocol = 1;
+  // Transport specification version: 2 (SPEC-TRANSPORT-CONNECT §2.1).
+  uint32 spec_version = 2;
+  // Largest accepted pack length (SPEC-TRANSPORT-CONNECT §2.1).
+  uint64 max_pack_bytes = 3;
+  // Power of two, at least 8 MiB (SPEC-TRANSPORT-CONNECT §2.1, §7.6).
+  uint64 part_size = 4;
+  // Largest number of parts per upload (SPEC-TRANSPORT-CONNECT §2.1, §7.6).
+  uint32 max_parts = 5;
+  // Largest ref count per page (SPEC-TRANSPORT-CONNECT §2.1, §7.9).
+  uint32 max_list_refs_page_size = 6;
+  // Smaller packs may skip BeginUpload; zero with admission or multiple repositories (SPEC-TRANSPORT-CONNECT §2.1).
+  uint64 begin_upload_threshold_bytes = 7;
+  // Whether AdvanceRefs commits both refs atomically (SPEC-TRANSPORT-CONNECT §2.1, §4).
+  bool atomic_advance = 8;
+  // Whether pushed packs are decoded and verified (SPEC-TRANSPORT-CONNECT §2.1).
+  bool indexed_mode = 9;
+  // Whether admission can challenge requests (SPEC-TRANSPORT-CONNECT §2.1, §5.1).
+  bool admission = 10;
+  // Storage receipt signing key; empty until M5 (SPEC-TRANSPORT-CONNECT §2.1).
+  bytes receipt_public_key = 11;
+  // Storage receipt key identifier; empty until M5 (SPEC-TRANSPORT-CONNECT §2.1).
+  string receipt_key_id = 12;
+  // Accepted owner signature schemes; empty until M2 (SPEC-TRANSPORT-CONNECT §2.1).
+  repeated string grant_schemes = 13;
+  // "allowlist", "any", or "single-repository" (SPEC-TRANSPORT-CONNECT §2.1, §7.5).
+  string namespace_policy = 14;
+  // Fixed index prefix fan-out; default 4096 (SPEC-TRANSPORT-CONNECT §2.1, §7.9).
+  uint32 index_fanout = 15;
+}
+
+// ----------------------------------------------------------------------------
+// Uploads (tickets and parts).
+
+// Reserve an upload; the repository comes only from X-Repository (SPEC-TRANSPORT-CONNECT §7.4, §7.6).
+message BeginUploadRequest {
+  // The ref this upload will advance (SPEC-TRANSPORT-CONNECT §7.6).
+  string ref = 1;
+  // Pack's 32-byte BLAKE3 digest (SPEC-TRANSPORT-CONNECT §7.6).
+  bytes pack_id = 2;
+  // Total pack length (SPEC-TRANSPORT-CONNECT §7.6).
+  uint64 bytes = 3;
+}
+
+// Repository membership or an upload reservation (SPEC-TRANSPORT-CONNECT §7.6).
+message BeginUploadResponse {
+  // Exactly one BeginUpload outcome (SPEC-TRANSPORT-CONNECT §7.6).
+  oneof result {
+    // The pack is already a repository member (SPEC-TRANSPORT-CONNECT §7.6).
+    AlreadyPresent already_present = 1;
+    // The upload reservation and session (SPEC-TRANSPORT-CONNECT §7.6).
+    UploadTicket ticket = 2;
+  }
+}
+
+// Indicates existing pack membership (SPEC-TRANSPORT-CONNECT §7.6).
+message AlreadyPresent {}
+
+// Upload reservation bound by an opaque authenticated token (SPEC-TRANSPORT-CONNECT §7.6).
+message UploadTicket {
+  // 32-byte id; its hex form is <ticket> in part: commitments (SPEC-TRANSPORT-CONNECT §7.6).
+  bytes id = 1;
+  // Uniform non-final part length (SPEC-TRANSPORT-CONNECT §7.6).
+  uint64 part_size = 2;
+  // Expiry in Unix milliseconds, as in auth v2 (SPEC-TRANSPORT-CONNECT §7.6).
+  int64 expires_unix_ms = 3;
+  // Opaque server-authenticated ticket token (SPEC-TRANSPORT-CONNECT §7.6, "Ticket token").
+  bytes token = 4;
+}
+
+// First message of one part's stream (SPEC-TRANSPORT-CONNECT §7.6).
+message UploadPartHeader {
+  // Opaque server-authenticated ticket token (SPEC-TRANSPORT-CONNECT §7.6).
+  bytes ticket_token = 1;
+  // Zero-based part index (SPEC-TRANSPORT-CONNECT §7.6).
+  uint32 index = 2;
+}
+
+// Header followed by ordered part bytes (SPEC-TRANSPORT-CONNECT §7.6).
+message UploadPartRequest {
+  // One message in the part stream (SPEC-TRANSPORT-CONNECT §7.6).
+  oneof msg {
+    // First message only (SPEC-TRANSPORT-CONNECT §7.6).
+    UploadPartHeader header = 1;
+    // Following messages carry the part's bytes in order (SPEC-TRANSPORT-CONNECT §7.6).
+    bytes chunk = 2;
+  }
+}
+
+// Acknowledges one uploaded part (SPEC-TRANSPORT-CONNECT §7.6).
+message UploadPartResponse {
+  // Opaque server-authenticated part receipt (SPEC-TRANSPORT-CONNECT §7.6).
+  bytes receipt = 1;
+}
+
+// Finish an upload after all parts (SPEC-TRANSPORT-CONNECT §7.6).
+message CompleteUploadRequest {
+  // Opaque server-authenticated ticket token (SPEC-TRANSPORT-CONNECT §7.6).
+  bytes ticket_token = 1;
+  // Part receipts in part-index order (SPEC-TRANSPORT-CONNECT §7.6).
+  repeated bytes receipts = 2;
+}
+
+// Empty body is successful completion (SPEC-TRANSPORT-CONNECT §7.6).
+message CompleteUploadResponse {}

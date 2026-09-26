@@ -163,6 +163,13 @@ train).
 
 ### Added
 
+- *(proto)* Add the M1 discovery and ticketed upload RPCs, upload ticket
+  fields, ref deletion fields, and ref-list paging fields to
+  `mkit.transport.v1` (WP-1.2). The server returns `unimplemented`
+  ("not implemented yet") for these RPCs and non-default new request
+  fields until their implementing WPs land. `ListRefs.page_size` is
+  temporarily ignored; existing requests retain their behavior.
+
 - *(server)* The `mkit-server` binary (`mkit-server-native`;
   `mkit-server serve --repo-root <DIR> [--listen <ADDR>] [--listen-enc
   <ADDR>]`) is the self-hosted `mkit+https://` and `mkit+enc://` server. It
