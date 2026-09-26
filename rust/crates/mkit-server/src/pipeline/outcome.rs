@@ -1,6 +1,7 @@
 //! One request's outcome: its span, its log line and its request metrics,
-//! emitted exactly once. A unary request records when it returns; a stream
-//! records at its end or first failure. An [`Outcome`] dropped before it
+//! emitted exactly once. A unary request records when it returns; an upload
+//! at `finish` or its first failure; a download when it yields its `last`
+//! chunk or first fails. An [`Outcome`] dropped before it
 //! recorded (a dropped upload session, a download stream abandoned before
 //! its end, a canceled request future) records `canceled`.
 

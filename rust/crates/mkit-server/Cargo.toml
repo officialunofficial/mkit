@@ -39,8 +39,32 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Constant-time bearer-token comparison (pipeline::auth).
 subtle = { version = "2", default-features = false }
+# The `connect` binding. connectrpc never enables `server` (tokio/net,
+# hyper-util server, libc: not wasm-clean) or `zstd` (zstd-sys, a C
+# library; PRD §5.1). 0.9.1 carries the RUSTSEC-2026-0304 fix: after a
+# client-streaming handler returns, at most 1 MiB / 5 s more of the body is
+# drained (1 MiB only on wasm32).
+connectrpc = { version = "0.9.1", default-features = false, features = ["gzip", "json"], optional = true }
+buffa = { version = "0.9.1", optional = true }
+http = { version = "1", optional = true }
+futures = { version = "0.3", default-features = false, features = ["std"], optional = true }
+# Connect error-detail values are unpadded standard base64.
+base64 = { version = "0.22", optional = true }
 
 [features]
+default = ["connect"]
+# The `mkit.transport.v1` Connect binding (`connect`): vendored codegen,
+# `TransportService` and `grpc.health.v1.Health` over the pipeline, and the
+# auth interceptor. wasm-clean; the native (M0-10) and Workers (M0-17)
+# adapters mount it unchanged.
+connect = [
+    "dep:connectrpc",
+    "dep:buffa",
+    "dep:http",
+    "dep:futures",
+    "dep:base64",
+    "dep:connectrpc-build",
+]
 # In-memory reference backends (`MemoryKv`, `MemoryBlobStore`): the template
 # for third-party backends. Always compiled for this crate's own unit tests.
 memory = []
@@ -68,6 +92,11 @@ mkit-transport-file = { version = "0.4", path = "../mkit-transport-file", option
 # bound the generated connectrpc traits require (PRD §5.2).
 send_wrapper = { version = "0.6", features = ["futures"] }
 
+[build-dependencies]
+# Only `build.rs`'s regeneration path (MKIT_TRANSPORT_CODEGEN=1) uses it; a
+# `default-features = false` build never compiles it.
+connectrpc-build = { version = "0.9.0", optional = true }
+
 [dev-dependencies]
 futures-executor = "0.3"
 # Signs auth v2 test envelopes with the golden fixture's seed.
@@ -75,3 +104,14 @@ ed25519-dalek = { version = "3", default-features = false, features = ["alloc"] 
 proptest = "1"
 # Temp roots for the `fs` store tests.
 tempfile = "3"
+# tests/connect_dispatch.rs drives `connect::service` over real Connect HTTP
+# requests on the host.
+http-body-util = "0.1"
+# Gzip request bodies for the Content-Encoding test.
+flate2 = "1"
+tokio ={ version = "1", features = ["macros", "rt"] }
+tower = { version = "0.5", features = ["util"] }
+
+[[test]]
+name = "connect_dispatch"
+required-features = ["connect", "memory"]

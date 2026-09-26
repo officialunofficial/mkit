@@ -337,9 +337,19 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     ///
     /// # Errors
     /// `unauthenticated` for missing or invalid credentials;
-    /// `invalid_argument` for a malformed test directive.
+    /// `invalid_argument` for a malformed test directive. A rejection is
+    /// recorded like any failed request (procedure, code, latency), with
+    /// principal `none`: no entry point runs after it to record it.
     pub fn authenticate(&self, meta: &RequestMeta<'_>) -> Result<Authenticated, ServerError> {
         tracing::debug!(stage = "authenticate", procedure = method(meta.procedure));
+        let result = self.authenticate_inner(meta);
+        if let Err(err) = &result {
+            self.outcome_for(meta.procedure, "none").record(Err(err));
+        }
+        result
+    }
+
+    fn authenticate_inner(&self, meta: &RequestMeta<'_>) -> Result<Authenticated, ServerError> {
         #[cfg(feature = "test-faults")]
         let directives = TestDirectives::from_headers(meta.header)?;
         #[cfg(feature = "test-faults")]
@@ -506,8 +516,9 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// `not_found` for a missing pack, before any chunk; the authorizer's
     /// error; `internal` for a storage failure.
     ///
-    /// The request is recorded when the stream ends or first fails, and as
-    /// `canceled` when the stream is dropped before its end.
+    /// The request is recorded `ok` when the `last` chunk is yielded, with
+    /// its error at the first failure, and as `canceled` when the stream is
+    /// dropped before either.
     pub async fn download(
         &self,
         a: &Authenticated,
@@ -587,16 +598,16 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
 
     /// The span and recorder of one request.
     fn outcome(&self, a: &Authenticated) -> Outcome {
+        self.outcome_for(a.procedure(), a.principal.kind())
+    }
+
+    /// The span and recorder of one request to `procedure` as `principal`.
+    fn outcome_for(&self, procedure: Procedure, principal: &'static str) -> Outcome {
         let repo = match &self.cfg.addressing {
             Addressing::Single { repo } => repo.name.as_str(),
         };
-        let procedure = method(a.procedure());
-        let span = tracing::info_span!(
-            "mkit.server.rpc",
-            procedure,
-            repo,
-            principal = a.principal.kind()
-        );
+        let procedure = method(procedure);
+        let span = tracing::info_span!("mkit.server.rpc", procedure, repo, principal);
         let (metrics, clock) = (self.metrics.clone(), self.clock.clone());
         Outcome::new(span, procedure, metrics, clock, self.cfg.redactor.clone())
     }

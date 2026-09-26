@@ -130,6 +130,14 @@ impl<I: Iterator<Item = ChunkSpan> + Unpin> Stream for Rechunk<I> {
             };
             if let Some(data) = data {
                 this.span = None;
+                // Success is recorded when the `last` chunk is yielded: a
+                // binding may stop polling there (its client has the
+                // whole pack), and that must not count as `canceled`.
+                if span.last
+                    && let Some(outcome) = &mut this.outcome
+                {
+                    outcome.record(Ok(()));
+                }
                 return Poll::Ready(Some(Ok(DownloadChunk {
                     offset: span.offset,
                     data,
