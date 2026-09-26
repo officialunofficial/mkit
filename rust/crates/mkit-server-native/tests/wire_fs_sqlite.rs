@@ -81,8 +81,7 @@ async fn wire_suite_fs_sqlite_auth_v2() {
     };
     let report = run(&target, None).await;
     common::judge(&report, DIVERGENCES);
-    // Only the `test-faults` cases may skip: the release wiring has no
-    // fault seam.
+    // Fault injection and Multi mode are unavailable in the native wiring.
     for skipped in report.skips() {
         assert!(
             skipped == "advance.nonatomic_packmap_first"
@@ -90,7 +89,10 @@ async fn wire_suite_fs_sqlite_auth_v2() {
                     skipped,
                     "replay.expired_retry_rejected" | "growth.replay_and_quota_pruned"
                 )
-                || skipped.starts_with("auth.bearer"),
+                || skipped.starts_with("auth.bearer")
+                || mkit_server_conformance::wire::CASES
+                    .iter()
+                    .any(|c| c.name == skipped && c.requires.contains(&Feature::MultiRepo)),
             "unexpected skip {skipped}"
         );
     }

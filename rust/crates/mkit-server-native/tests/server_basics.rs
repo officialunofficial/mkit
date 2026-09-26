@@ -795,3 +795,45 @@ fn repo_root_must_hold_dot_mkit_and_respect_serve_root() {
     ];
     common::resolve_with(&flags, &env).unwrap();
 }
+
+#[test]
+fn repository_configuration_uses_addressing_grammar() {
+    let root = common::repo_root();
+    for repository in ["Upper", ".name", "root/name", "a/b", &"a".repeat(101)] {
+        let err = common::resolve_with(
+            &[
+                "--listen",
+                "127.0.0.1:0",
+                "--repo-root",
+                common::s(root.path()),
+                "--unsafe-allow-any-peer",
+                "--repository",
+                repository,
+            ],
+            &[],
+        )
+        .unwrap_err();
+        assert_eq!(err.code, exit::USAGE);
+        assert!(err.message.contains("--repository is invalid"));
+    }
+    for repository in ["default", &format!("ed25519-{}/name", "a".repeat(64))] {
+        let cfg = common::resolve_with(
+            &[
+                "--listen",
+                "127.0.0.1:0",
+                "--repo-root",
+                common::s(root.path()),
+                "--unsafe-allow-any-peer",
+                "--repository",
+                repository,
+            ],
+            &[],
+        )
+        .unwrap();
+        let mkit_server::Addressing::Single { repo } = cfg.pipeline.addressing else {
+            panic!("single deployment");
+        };
+        assert_eq!(repo.namespace.as_str(), "root");
+        assert_eq!(repo.name.as_str(), repository);
+    }
+}

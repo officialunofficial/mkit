@@ -896,3 +896,25 @@ and `rust/tests/golden/closure/neg_delta_entry.*` /
 `neg_compressed_entry.*`, and
 `golden_pack::pack_v2_fixtures::closure_profile_still_rejects_compressed_entries`
 (every feature combination, including a frame corrupted past decoding).
+
+## Repository addressing binds authentication and storage routing
+
+**Always:** stage 0 validates `X-Repository` with the shared identity grammar
+and stores its resolved identity on `Authenticated`. Every operation routes
+refs and replay state through `ShardMap` using that repository. Multi ref reads
+require a ref row in the named repository; Multi pack RPCs return
+`unimplemented` before blob access until repository membership exists.
+
+**Because:** ref keys contain only the repository name; namespace partitions
+provide isolation, and global blob presence would reveal another repository's
+contents. Auth v2 must bind the signature and replay scope to the routed identity.
+
+**If violated:** a request can observe or mutate another repository's refs,
+reuse its replay result, or learn whether it holds particular content.
+
+**Enforced by:** server `repo::tests` (the BLAKE3-pinned repository grammar),
+`pipeline::tests::single_repository_header_rules_preserve_04_requests_and_fail_at_stage_zero`,
+native `tests/repository_routing.rs` over memory and SQLite (including the
+same repository name in different namespaces and shared nonces), and the
+conformance `repo.*` wire cases. Namespace authorization is WP-1.5; pack
+membership is WP-1.10; the coordinator repository registry is WP-1.22.
