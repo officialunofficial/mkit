@@ -152,7 +152,7 @@ const FEATURE_NAMES: [(Feature, &str); 19] = [
     (Feature::TestFaults, "test-faults"),
     (Feature::Health, "health"),
     (Feature::StrictGzipAuth, "strict-gzip-auth"),
-    (Feature::MultiRepo, "multi-repository"),
+    (Feature::MultiRepo, "multi-repo"),
     (Feature::Tickets, "tickets"),
     (Feature::Grants, "grants"),
     (Feature::SignedReads, "signed-reads"),

@@ -111,7 +111,7 @@
 //! | `auth.bearer_applies_to_streaming` | `bearer` | `UploadPack`, `DownloadPack` |
 //! | `auth.v2_missing_headers_unauthenticated` | `auth-v2` | unsigned writes; each required header dropped |
 //! | `auth.v2_wrong_audience` | `auth-v2` | signed for, or sent with, another audience |
-//! | `auth.v2_wrong_repository` | `auth-v2`; excludes `multi-repository` | another well-formed identity gives `not_found` in Single mode |
+//! | `auth.v2_wrong_repository` | `auth-v2`; excludes `multi-repo` | another well-formed identity gives `not_found` in Single mode |
 //! | `auth.v2_wrong_procedure` | `auth-v2` | signed for another RPC |
 //! | `auth.v2_bad_signature` | `auth-v2` | a flipped bit; another signer's key |
 //! | `auth.v2_body_digest_mismatch` | `auth-v2` | another body; an `X-Digest` off the commitment |
@@ -136,14 +136,14 @@
 //! | `quota.replay_not_charged` | `auth-v2`, `replay`, `quota` | |
 //! | `growth.replay_and_quota_pruned` | `auth-v2`, `replay`, `quota`, `test-faults` | records answer before expiry; after validity + grace + window the partition shrinks back to an absolute bound (R-31); needs a quota window ≤ 60 s allowing 265 writes, and a disposable server |
 //! | `list.large_response_within_limit` | | records one `ListRefs` response over `list_refs` refs (M1 asserts the bound) |
-//! | `repo.single_header_mismatch_not_found` | excludes `multi-repository` | Single reads with another identity give `not_found` |
-//! | `repo.single_malformed_invalid_argument` | excludes `multi-repository` | Single reads reject malformed identities |
-//! | `repo.single_signed_missing_header_unauthenticated` | `auth-v2`; excludes `multi-repository` | Single signed writes require X-Repository |
-//! | `repo.isolation_refs` | `multi-repository`, `auth-v2` | refs and writes stay isolated, including equal names in different namespaces |
-//! | `repo.signature_repository_mismatch_unauthenticated` | `multi-repository`, `auth-v2` | a signature for A sent to B is rejected |
-//! | `repo.missing_repository_invalid_argument` | `multi-repository`, `auth-v2` | absent, empty, bare and malformed identities are rejected |
-//! | `repo.read_missing_repo_not_found` | `multi-repository` | `ListRefs` and `ReadRef` of a nonexistent repo give `not_found` |
-//! | `repo.packs_need_membership_unimplemented` | `multi-repository`, `auth-v2` | all pack RPCs await repository membership |
+//! | `repo.single_header_mismatch_not_found` | excludes `multi-repo` | Single reads with another identity give `not_found` |
+//! | `repo.single_malformed_invalid_argument` | excludes `multi-repo` | Single reads reject malformed identities |
+//! | `repo.single_signed_missing_header_unauthenticated` | `auth-v2`; excludes `multi-repo` | Single signed writes require X-Repository |
+//! | `repo.isolation_refs` | `multi-repo`, `auth-v2` | refs and writes stay isolated, including equal names in different namespaces |
+//! | `repo.signature_repository_mismatch_unauthenticated` | `multi-repo`, `auth-v2` | a signature for A sent to B is rejected |
+//! | `repo.missing_repository_invalid_argument` | `multi-repo`, `auth-v2` | absent, empty, bare and malformed identities are rejected |
+//! | `repo.read_missing_repo_not_found` | `multi-repo` | `ListRefs` and `ReadRef` of a nonexistent repo give `not_found` |
+//! | `repo.packs_need_membership_unimplemented` | `multi-repo`, `auth-v2` | all pack RPCs await repository membership |
 //!
 //! # The `test-faults` contract
 //!
@@ -166,10 +166,10 @@
 //! their milestone and feature, so later milestones add them without
 //! renaming. None exists yet, so none can pass vacuously.
 //!
-// TODO(M1, multi-repository): `repo.isolation_packs`,
+// TODO(M1, multi-repo): `repo.isolation_packs`,
 //   `repo.isolation_replay`, `server_info.*` (GetServerInfo),
 //   `list.paging_*` and `list.page_within_2_mib` (§7.9), `refs.delete_*` (§7.8).
-// TODO(M1, multi-repository): `namespace.policy_allowlist`, `namespace.policy_owner`.
+// TODO(M1, multi-repo): `namespace.policy_allowlist`, `namespace.policy_owner`.
 // TODO(M1, tickets): `tickets.begin_upload_*`, `tickets.upload_part_*`,
 //   `tickets.complete_upload_*`, `tickets.advance_consumes_ticket`,
 //   `growth.tickets_and_outbox_pruned` (WP-1.27).
@@ -366,7 +366,7 @@ mod tests {
             multi
                 .skip_reason(&profile)
                 .unwrap()
-                .contains("multi-repository")
+                .contains("multi-repo")
         );
     }
 }

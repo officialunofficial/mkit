@@ -171,11 +171,11 @@ WP-1.7/1.10.
    - a nonexistent repo's reads give `not_found`;
    - pack RPCs give `unimplemented`.
 4. **Wire suite** (black-box, `mkit-server-conformance`):
-   - Add cases under a new declared feature `multi-repository`: the isolation cases above over the wire.
+   - Add cases under a declared feature `multi-repo` (`Feature::MultiRepo`, already exists): the isolation cases above over the wire.
    - Add unconditional single-repo cases: header mismatch gives `not_found`, malformed gives `invalid_argument`, and a
      signed write without the header gives `unauthenticated`.
-   - The in-process pipeline baseline declares `multi-repository` and runs in Multi mode for those cases.
-   - The spawned-binary baseline does not declare `multi-repository` (B.8) but must pass every single-repo case.
+   - The in-process pipeline baseline declares `multi-repo` and runs in Multi mode for those cases.
+   - The spawned-binary baseline does not declare `multi-repo` (B.8) but must pass every single-repo case.
    - vcs-worker: run `scripts/vcs-worker-conformance.sh` locally if wrangler is available (the M0-17 executor had it).
      The single-repo cases must pass. If wrangler isn't available, say so.
 5. **Unchanged behaviour:**
