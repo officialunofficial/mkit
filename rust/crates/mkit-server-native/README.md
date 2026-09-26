@@ -170,9 +170,10 @@ Bounds, as for HTTP:
   authorized client gets in as soon as one frees;
 - at most `--max-connections` sessions at once (per listener). A client
   that completes the handshake while every session slot is taken waits,
-  keeping its handshake slot, until one frees;
-- `--enc-idle-timeout-secs` (default 60; 0 disables it, not recommended)
-  for every frame read and write after the handshake;
+  keeping its handshake slot, until one frees: for at most the handshake
+  timeout, and not past the start of a shutdown;
+- `--enc-idle-timeout-secs` (default 60; at least 1, so every session
+  ends) for every frame read and write after the handshake;
 - the ssh session's budgets (10,000 frames and 1 GiB per connection; an
   upload of at most 1 GiB and 10,000 chunks, or `--max-pack-bytes` if
   lower).

@@ -164,8 +164,7 @@ pub struct ServeArgs {
     #[arg(long)]
     pub unsafe_allow_any_enc_peer: bool,
     /// Drop an enc session whose next frame does not arrive (or whose reply
-    /// cannot be written) within this many seconds; 0 disables it (not
-    /// recommended).
+    /// cannot be written) within this many seconds; at least 1.
     #[arg(long, value_name = "SECS", default_value_t = 60)]
     pub enc_idle_timeout_secs: u64,
     /// Deadline for an enc connection's encrypted handshake.

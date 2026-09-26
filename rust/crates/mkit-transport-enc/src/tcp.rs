@@ -689,7 +689,8 @@ where
 pub struct ListenerLimits {
     /// Authenticated sessions open at once. A connection that completes
     /// its handshake while every session slot is taken keeps its
-    /// handshake slot until one frees.
+    /// handshake slot until one frees, for at most the handshake timeout,
+    /// and is dropped if none frees by then or the listener stops.
     pub max_sessions: usize,
     /// Connections in the encrypted handshake at once; further clients
     /// wait in the kernel's accept backlog.
@@ -799,6 +800,9 @@ where
     let handshakes = semaphore(limits.max_handshakes);
     let session_slots = semaphore(limits.max_sessions);
     let mut connections = JoinSet::new();
+    // Set when the loop stops: connections still waiting for a session
+    // slot give up.
+    let (stopping_tx, _) = tokio::sync::watch::channel(false);
     tokio::pin!(shutdown);
     let result = loop {
         // Reap finished connections so the set stays small.
@@ -829,6 +833,7 @@ where
         let serve_fn = Arc::clone(&serve_fn);
         let policy = Arc::clone(&policy);
         let session_slots = Arc::clone(&session_slots);
+        let stopping = stopping_tx.subscribe();
         connections.spawn(async move {
             let Ok((sink, stream)) = split_tcp(tcp) else {
                 return;
@@ -846,8 +851,22 @@ where
             };
             // Trade the handshake slot for a session slot; until one is
             // free the connection keeps the handshake slot, so waiting
-            // peers stay bounded too.
-            let Ok(_session) = session_slots.acquire_owned().await else {
+            // peers stay bounded too. The wait is bounded like a
+            // handshake, and ends when the listener stops.
+            let mut stopping = stopping;
+            let stopped = async move {
+                // A dropped sender (the blocking entry points, which
+                // leave their connections running) never stops the wait.
+                if stopping.wait_for(|stop| *stop).await.is_err() {
+                    core::future::pending::<()>().await;
+                }
+            };
+            let session = tokio::select! {
+                slot = session_slots.acquire_owned() => slot.ok(),
+                () = tokio::time::sleep(bounds.handshake_timeout) => None,
+                () = stopped => None,
+            };
+            let Some(_session) = session else {
                 return;
             };
             drop(handshake);
@@ -855,6 +874,7 @@ where
         });
     };
     drop(listener);
+    stopping_tx.send_replace(true);
     match mode {
         AcceptMode::Serve => while connections.join_next().await.is_some() {},
         AcceptMode::Legacy => connections.detach_all(),

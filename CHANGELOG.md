@@ -384,15 +384,18 @@ train).
   which stays until WP-M0-15. New hardening: handshakes have their own
   cap (`--enc-max-handshakes`, default 128 or `--max-connections` if
   lower), apart from the `--max-connections` sessions, so sockets that
-  never handshake cannot lock authorized clients out; a write timeout
-  equal to `--enc-idle-timeout-secs`; on shutdown a session ends at its
+  never handshake cannot lock authorized clients out (a client waiting
+  for a session slot after its handshake waits at most the handshake
+  timeout, and not past a shutdown); a write timeout equal to
+  `--enc-idle-timeout-secs`; on shutdown a session ends at its
   next frame boundary (an idle one at once, never inside an upload) within
   `--shutdown-grace-secs`; the allowlist is opened without following a
   symlink and refused unless owned by the server's user or root and not
   group- or other-writable; the key file is read with
   `mkit_core::sign::load_raw_32`'s checks. Differences for operators:
   `--enc-handshake-timeout-secs` defaults to 10 (was 60; SPEC-TRANSPORT-ENC
-  §2.1) and 0 is refused; an allowlist needs `--enc-server-key <PATH>` (no
+  §2.1) and 0 is refused; `--enc-idle-timeout-secs 0` (which `mkit serve`
+  read as "no timeout") is refused, exit 78; an allowlist needs `--enc-server-key <PATH>` (no
   `~/.config/mkit` default: the server resolves no home directory); key
   and allowlist errors exit 78; `--unsafe-allow-any-enc-peer` is refused
   (exit 78) beside an HTTP listener that requires a bearer token or auth

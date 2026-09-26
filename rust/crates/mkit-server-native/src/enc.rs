@@ -209,9 +209,17 @@ pub(crate) fn resolve(args: &ServeArgs) -> Result<Option<EncOptions>, ConfigErro
     if max_handshakes == 0 {
         return Err(usage("--enc-max-handshakes must be at least 1"));
     }
+    // Without an idle timeout a silent session would never end, and a
+    // client waiting for its slot would hold a handshake slot for good.
     let idle = args.enc_idle_timeout_secs;
+    if idle == 0 {
+        return Err(config(
+            "--enc-idle-timeout-secs must be at least 1: a session without one never ends"
+                .to_owned(),
+        ));
+    }
     Ok(Some(EncOptions {
-        idle_timeout: (idle != 0).then(|| Duration::from_secs(idle)),
+        idle_timeout: Some(Duration::from_secs(idle)),
         handshake_timeout: Duration::from_secs(args.enc_handshake_timeout_secs),
         max_sessions: args.max_connections,
         max_handshakes,

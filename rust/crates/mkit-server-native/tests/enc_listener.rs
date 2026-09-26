@@ -534,8 +534,9 @@ fn listen_enc_flag_rules() {
     assert_eq!(cfg.banners(), vec![enc::UNSAFE_ENC_BANNER]);
     let mut idle_off = enc_only.to_vec();
     idle_off.extend(["--enc-idle-timeout-secs", "0"]);
-    let cfg = common::resolve_with(&idle_off, &[]).unwrap();
-    assert_eq!(cfg.enc.unwrap().idle_timeout, None);
+    let err = refused(&idle_off);
+    assert_eq!(err.code, exit::CONFIG_ERROR);
+    assert!(err.message.contains("at least 1"), "{}", err.message);
 
     // The handshake cap: at most --max-connections by default, settable,
     // never 0.
@@ -852,6 +853,86 @@ fn listen_enc_shutdown_ends_idle_sessions() {
     let took = server.stop();
     assert!(took < Duration::from_secs(5), "{took:?}");
     idle.expect_closed();
+}
+
+/// A client that completed its handshake but finds every session slot
+/// taken waits at most the handshake timeout.
+#[test]
+fn listen_enc_session_slot_wait_is_bounded() {
+    let (_td, root) = enc_repo();
+    let server = EncServer::start(
+        &root,
+        &[
+            "--unsafe-allow-any-enc-peer",
+            "--max-connections",
+            "1",
+            "--enc-handshake-timeout-secs",
+            "2",
+        ],
+    );
+    let mut first = server.raw(61);
+    first.hello();
+    let start = Instant::now();
+    let waiting = server.connect_in_thread(62);
+    assert!(!waiting.recv_timeout(Duration::from_secs(30)).unwrap());
+    let waited = start.elapsed();
+    assert!(waited >= Duration::from_millis(1500), "{waited:?}");
+    // The session that held the slot is untouched.
+    first.send(ssh_frame::Body::ListRefs(Box::<ListRefs>::default()));
+    assert!(matches!(
+        first.recv(Duration::from_secs(10)).unwrap().body,
+        Some(ssh_frame::Body::ListRefsResponse(_))
+    ));
+}
+
+/// A shutdown releases a client waiting for a session slot at once rather
+/// than at the end of the grace period.
+#[test]
+fn listen_enc_shutdown_releases_clients_waiting_for_a_slot() {
+    let (_td, root) = enc_repo();
+    let mut server = EncServer::start(
+        &root,
+        &[
+            "--unsafe-allow-any-enc-peer",
+            "--max-connections",
+            "1",
+            "--enc-handshake-timeout-secs",
+            "60",
+        ],
+    );
+    // The slot holder is inside an upload, so it outlives the shutdown.
+    let mut first = server.raw(63);
+    first.hello();
+    let (bytes, key) = valid_pack();
+    let id = key.as_bytes().to_vec();
+    first.send(ssh_frame::Body::UploadPack(Box::new(UploadPack {
+        pack_id: Some(id.clone()),
+        total_bytes: Some(bytes.len() as u64),
+        ..Default::default()
+    })));
+    let waiting = server.connect_in_thread(64);
+    std::thread::sleep(Duration::from_millis(500));
+    server.shutdown.trigger();
+    // The waiting client is let go at once, not after 60 s.
+    assert!(
+        !waiting
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the waiting client was not released")
+    );
+    // The upload finishes; then everything has drained.
+    first.send(ssh_frame::Body::PackChunk(Box::new(PackChunk {
+        pack_id: Some(id),
+        offset: Some(0),
+        data: Some(bytes),
+        last: Some(true),
+        ..Default::default()
+    })));
+    assert!(matches!(
+        first.recv(Duration::from_secs(10)).unwrap().body,
+        Some(ssh_frame::Body::UploadPackResponse(_))
+    ));
+    let took = server.stop();
+    assert!(took < Duration::from_secs(5), "{took:?}");
 }
 
 /// An upload in flight when the shutdown begins still completes; the
