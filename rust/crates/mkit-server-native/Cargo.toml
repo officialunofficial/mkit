@@ -1,0 +1,45 @@
+# mkit-server-native — the native (tokio) adapter of the mkit server (PRD
+# MKIT-29 §5.1). This first cut holds the SQLite metadata backend: the
+# rusqlite `SqlConn` under `mkit-server`'s shared `SqlKvStore`, and the
+# `Blocking` adapter that runs sync-bodied stores on tokio's blocking pool.
+# The axum router, the FS blob store and the `mkit-server` binary land in
+# later work (WP-M0-10), which also enables `mkit-server/fs`.
+#
+# `publish = false` during the epic; WP-REL decides publication. Never a
+# dependency of `mkit-cli`: rusqlite's bundled SQLite (C, built by `cc`)
+# must stay out of the CLI graph.
+[package]
+name = "mkit-server-native"
+description = "Native (tokio) adapter of the mkit server: SQLite metadata backend"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["sqlite"]
+# `RusqliteConn`: SQLite through rusqlite, with SQLite bundled.
+sqlite = ["dep:rusqlite", "dep:parking_lot", "dep:tracing"]
+
+[dependencies]
+# Not `fs`: that feature arrives with WP-M0-10.
+mkit-server = { version = "0.4", path = "../mkit-server", default-features = false, features = ["sql"] }
+tokio = { version = "1", default-features = false, features = ["rt", "sync"] }
+# Drives a sync-bodied store's future to completion on a blocking thread.
+futures-executor = "0.3"
+tracing = { version = "0.1", default-features = false, features = ["std"], optional = true }
+rusqlite = { version = "0.40", default-features = false, features = ["bundled", "cache"], optional = true }
+# A reentrant lock: a transaction body runs statements on the connection
+# its own `transaction` call already holds.
+parking_lot = { version = "0.12", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread"] }
+tempfile = "3"
+futures = "0.3"

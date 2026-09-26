@@ -18,10 +18,12 @@ and `wasm32-unknown-unknown`:
 - the storage contract (`store`): a key-level `NamespaceStore` whose only
   write is one declarative `Batch`, a content-addressed `BlobStore`, the key
   layouts, value codecs and typed readers, and the replay-ledger model;
-  in-memory reference backends behind the `memory` feature, and, behind the
+  in-memory reference backends behind the `memory` feature; behind the
   native `fs` feature, std-only stores over the `.mkit` on-disk layout
   (`FsBlobStore` for `packs/`, `FsLayoutStore` for refs as files) that
-  delegate to `mkit-transport-file`
+  delegate to `mkit-transport-file`; and the shared SQL backend
+  (`SqlKvStore` over a synchronous `SqlConn`, with versioned schema
+  migrations) behind the `sql` feature
 - the request pipeline (`pipeline`): the PRD §5.4 stages as hook traits with
   the M0 defaults, the auth modes (open, bearer, auth v2, transport
   identity), shard routing (`ShardMap`), pure write planners whose batches
