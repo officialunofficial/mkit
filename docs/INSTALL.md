@@ -97,6 +97,19 @@ Targets shipped today:
 Windows is not a supported target (MKIT-6; see `docs/INVARIANTS.md`).
 Windows users should run mkit under WSL, which uses the Linux binary.
 
+**Linux glibc requirement.** The published x86_64 and aarch64 Linux
+archives (v0.3.0 through v0.4.2) require **glibc 2.39 or newer**.
+Check your glibc with `ldd --version | head -1`.
+
+| Release archives | Distributions |
+|------------------|---------------|
+| Run on | Ubuntu 24.04 or newer, Debian 13 or newer, Fedora 40 or newer |
+| Do not run on | Debian 12, Ubuntu 22.04, RHEL/Rocky/Alma 9, Fedora 39 |
+
+On older systems, build from source with `cargo install mkit-cli`, which
+links against your host's glibc, or use a newer distro/container.
+A future release will lower this floor.
+
 If you want "latest", use the hosted installer:
 `curl mkit.sh | sh` (Linux/macOS, including WSL; or the explicit
 `curl -sSfL https://mkit.sh/install.sh | sh`). It resolves the current
