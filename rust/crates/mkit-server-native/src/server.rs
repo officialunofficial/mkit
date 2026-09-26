@@ -16,7 +16,7 @@ use mkit_server::{Addressing, BlobStore, NamespaceStore, RepoId, StoreError, Sys
 use mkit_transport_file::{FileTransport, sync_dir};
 use tokio::net::TcpListener;
 
-use crate::config::{ConfigError, MetaChoice, ServeConfig};
+use crate::config::{BlobChoice, ConfigError, MetaChoice, ServeConfig};
 use crate::telemetry::MetricsBridge;
 use crate::{Blocking, RusqliteConn, Shutdown, build_router, exit, serve};
 
@@ -411,13 +411,24 @@ pub fn open(cfg: &ServeConfig) -> Result<Opened, ConfigError> {
             "only single-repo addressing is served",
         ));
     };
-    let repo: &RepoId = repo;
-    let blobs = Blocking::new(FsBlobStore::new(&cfg.repo_root));
-    let router = match &cfg.meta {
+    let router = match &cfg.blob {
+        BlobChoice::Fs => with_meta(Blocking::new(FsBlobStore::new(&cfg.repo_root)), repo, cfg)?,
+        #[cfg(feature = "s3")]
+        BlobChoice::S3(s3) => with_meta(open_s3(s3, cfg)?, repo, cfg)?,
+    };
+    Ok(Opened { router, locks })
+}
+
+/// The router over `blobs` and the metadata store `cfg` names.
+fn with_meta<B>(blobs: B, repo: &RepoId, cfg: &ServeConfig) -> Result<axum::Router, ConfigError>
+where
+    B: BlobStore + 'static,
+{
+    match &cfg.meta {
         MetaChoice::FsLayout => {
             let meta = FsLayoutStore::open(&cfg.repo_root, repo)
                 .map_err(|e| config_error("--meta fs-layout", e))?;
-            router(blobs, Blocking::new(meta), cfg)?
+            router(blobs, Blocking::new(meta), cfg)
         }
         MetaChoice::Sqlite { path, capacity } => {
             let root_id = claim_root_for_sqlite(&cfg.repo_root, path)?;
@@ -426,10 +437,43 @@ pub fn open(cfg: &ServeConfig) -> Result<Opened, ConfigError> {
             let meta = SqlKvStore::open_with_capacity(conn.clone(), *capacity)
                 .map_err(|e| config_error("--meta sqlite", e))?;
             bind_database(&conn, &root_id, path)?;
-            router(blobs, Blocking::new(meta), cfg)?
+            router(blobs, Blocking::new(meta), cfg)
         }
-    };
-    Ok(Opened { router, locks })
+    }
+}
+
+/// The directory under `<root>/.mkit` where S3 uploads spool: on the
+/// served root's volume, not a possibly RAM-backed system temp directory.
+/// Spool files are unnamed, so a crash leaves nothing in it.
+#[cfg(feature = "s3")]
+pub const S3_SPOOL_DIR: &str = "server-spool";
+
+/// The S3 blob store, spooling under [`S3_SPOOL_DIR`] and capped at the
+/// pack limit.
+#[cfg(feature = "s3")]
+fn open_s3(s3: &crate::s3::S3Config, cfg: &ServeConfig) -> Result<crate::S3BlobStore, ConfigError> {
+    let spool = cfg.repo_root.join(".mkit").join(S3_SPOOL_DIR);
+    fs::create_dir_all(&spool).map_err(|e| config_error("creating the S3 upload spool", e))?;
+    if s3.endpoint.scheme() == "http" && !is_loopback(&s3.endpoint) {
+        tracing::warn!(
+            endpoint = %s3.endpoint,
+            "--s3-endpoint is plain http: pack bytes cross the network unencrypted"
+        );
+    }
+    Ok(crate::S3BlobStore::new(s3.clone(), Arc::new(SystemClock))
+        .map_err(|e| config_error("--blob s3", e))?
+        .with_spool_dir(spool)
+        .with_max_bytes(cfg.pipeline.upload_limits.max_total_bytes))
+}
+
+#[cfg(feature = "s3")]
+fn is_loopback(url: &url::Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(d)) => d == "localhost",
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
 }
 
 /// Bind [`ServeConfig::listen`] and serve `router` until `shutdown`
@@ -451,7 +495,7 @@ pub async fn serve_router(
     let addr = listener
         .local_addr()
         .map_or_else(|_| cfg.listen.to_string(), |a| a.to_string());
-    tracing::info!(%addr, root = %cfg.repo_root.display(), meta = ?cfg.meta, "listening");
+    tracing::info!(%addr, root = %cfg.repo_root.display(), meta = ?cfg.meta, blob = %cfg.blob, "listening");
     serve(listener, router, shutdown, &cfg.serve)
         .await
         .map_err(|e| ConfigError::new(exit::UNAVAILABLE, format!("mkit-server serve: {e}")))?;

@@ -18,6 +18,8 @@ The native (tokio) adapter of the mkit server, and the `mkit-server` binary.
   `NamespaceStore` and `BlobStore`
 - `SqliteKvStore`: `Blocking<SqlKvStore<RusqliteConn>>`, the `NamespaceStore`
   a native server uses
+- `S3BlobStore` (`s3` feature, on by default): the `BlobStore` over an
+  S3-compatible bucket (see "S3 blob storage" below)
 
 The store logic is `mkit-server`'s `SqlKvStore`, shared with the Durable
 Object backend: both run the same statements and the same schema migrations.
@@ -27,6 +29,8 @@ Object backend: both run the same statements and the same schema migrations.
 ```text
 mkit-server serve --listen <ADDR> --repo-root <DIR>
     [--meta fs-layout | --meta sqlite:<PATH>]
+    [--blob fs | --blob s3://<BUCKET>[/<PREFIX>] --s3-endpoint <URL>
+        [--s3-region auto] [--s3-credentials-file <PATH>]]  # or MKIT_R2_* / AWS_*
     [--auth bearer | --auth auth-v2 | --unsafe-allow-any-peer]
     [--bearer-token-file <PATH>]          # or MKIT_API_TOKEN
     [--audience <ORIGIN>] [--repository <ID>]
@@ -139,6 +143,44 @@ a stale copy or a wrong path: serving an old backup would roll the refs and
 the replay ledger back. To restore a backup, stop the server and move the
 backup over the recorded file. A database carrying another root's id, or
 none, is refused too; each error names both paths.
+
+### S3 blob storage
+
+`--blob s3://<BUCKET>[/<PREFIX>]` keeps packs in an S3-compatible bucket
+(AWS S3, Cloudflare R2's S3 API, `MinIO`) as `<PREFIX>/packs/<64-hex>`,
+addressed path-style at `--s3-endpoint` (an origin such as
+`https://<account>.r2.cloudflarestorage.com`, no path). It needs `--meta
+sqlite:<PATH>`: `fs-layout` refs are shared with local `mkit` commands, which
+read packs from `<DIR>/packs`. `--repo-root` still holds `.mkit`, the locks,
+the root marker and the upload spool.
+
+- **Credentials** come from `MKIT_R2_ACCESS_KEY_ID` and
+  `MKIT_R2_SECRET_ACCESS_KEY` (the `mkit+s3://` client's names), else
+  `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, or from
+  `--s3-credentials-file <PATH>`: `KEY=VALUE` lines with those names
+  (systemd `EnvironmentFile` syntax), owner-only as the bearer token file;
+  given a file, the environment is not read for them. Never from the command
+  line or repo config. Temporary credentials (`AWS_SESSION_TOKEN`) are
+  refused. Requests are signed for `--s3-region` (default `auto`, R2's).
+- **The provider must honor `If-None-Match: *` on `PUT`** (AWS S3 since
+  2024, R2, `MinIO`) for put-if-absent reporting. One that ignores it stays
+  correct, since every key only ever holds its verified bytes, but reports
+  re-uploads as new.
+- **Verify before visible.** An upload is spooled to an unnamed file under
+  `<DIR>/.mkit/server-spool` while it is hashed, and sent to the bucket in
+  one `PUT` only after its BLAKE3 matches its key. Nothing unverified ever
+  reaches the bucket, and an aborted, failed or dropped upload sends
+  nothing; a crash leaves no spool file behind. The cost: the spool volume
+  must hold every upload in flight (each up to `--max-pack-bytes`), each
+  pack is written and read locally once, and the bucket transfer starts
+  only when the client's upload ends. A `409`, `429` or `5xx` answer is
+  retried from the spool (three attempts). One `PUT` carries at most 5 GiB,
+  above the 4 GiB default pack cap; resumable multipart uploads come in M1.
+- **Health** probes the bucket with a `HEAD`, at most once a second.
+- A plain-`http` endpoint that is not loopback logs a warning: pack bytes
+  cross the network unencrypted (the signature never carries the secret).
+- Failures are logged with the HTTP status, the S3 error code and request
+  ids; clients see only "object storage request failed".
 
 ### Limits and timeouts
 

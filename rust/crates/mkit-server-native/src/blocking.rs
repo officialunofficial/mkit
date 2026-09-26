@@ -77,7 +77,7 @@ impl<S: fmt::Debug> fmt::Debug for Blocking<S> {
 }
 
 /// Run `f` on a blocking thread; a panic or cancellation is `Unavailable`.
-async fn on_pool<T, F>(f: F) -> Result<T, StoreError>
+pub(crate) async fn on_pool<T, F>(f: F) -> Result<T, StoreError>
 where
     T: Send + 'static,
     F: FnOnce() -> Result<T, StoreError> + Send + 'static,

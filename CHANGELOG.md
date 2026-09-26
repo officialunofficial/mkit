@@ -341,6 +341,31 @@ train).
   wasm-bindgen-futures 0.4.78), which `mkit-wasm` shares. **SemVer:**
   unreleased API.
 
+- *(server)* S3 blob storage for `mkit-server`: `mkit-server-native`'s new
+  `s3` feature (on by default) adds `S3BlobStore`, a content-addressed
+  `BlobStore` over any S3-compatible bucket, signed with
+  `mkit-transport-s3`'s SigV4 code over async reqwest (rustls). An upload
+  spools to an unnamed local temp file while it computes BLAKE3 and
+  SHA-256, and only after the length and BLAKE3 verify does it send one
+  `PUT` with `If-None-Match: *`, so nothing unverified is ever visible
+  and an abort or a dropped sink sends nothing (`412` is
+  `AlreadyPresent`; `409`/`429`/`5xx` are retried from the spool). Serve
+  with `mkit-server serve --blob s3://<BUCKET>[/<PREFIX>] --s3-endpoint
+  <URL> [--s3-region auto] --meta sqlite:<PATH>`, credentials from
+  `MKIT_R2_ACCESS_KEY_ID`/`MKIT_R2_SECRET_ACCESS_KEY` (or the `AWS_*`
+  pair, never with `AWS_SESSION_TOKEN`) or an owner-only
+  `--s3-credentials-file`, never the command line. The provider must honor
+  `If-None-Match: *` on `PUT` (AWS S3, R2, MinIO). `mkit-server-conformance`
+  gains `fake_s3` (feature `fake-s3`): a strict in-memory S3 server that
+  verifies SigV4 independently and models conditional puts, ranges and S3
+  error codes. The storage suite and the full wire suite (in-process and
+  the real binary) pass over S3 + SQLite. The suite runner's runtime now
+  enables tokio's I/O and timer drivers. **SemVer:** unreleased API.
+- *(transport-s3)* `sigv4::sign_request_with_payload_hash` signs a request
+  for a body whose SHA-256 the caller already has, so a streamed upload
+  need not hold its body in memory; `sign_request` now delegates to it,
+  byte for byte. **SemVer:** additive.
+
 - *(core)* Resumable-part building blocks (SPEC-TRANSPORT-CONNECT §7.6):
   `write_auth::ContentCommitment` parses and formats `body:`, `pack:` and the
   new `part:<ticket>:<index>:<subtree>:<len>` commitment, and

@@ -69,6 +69,8 @@
 //! # fn main() {}
 //! ```
 
+#[cfg(feature = "fake-s3")]
+pub mod fake_s3;
 pub mod storage;
 pub mod wire;
 
@@ -80,13 +82,16 @@ pub mod __private {
 
     use crate::storage::{self, CaseResult, KvHarness, Outcome};
 
-    /// Run one case to completion on a fresh multi-threaded runtime.
+    /// Run one case to completion on a fresh multi-threaded runtime, with
+    /// its I/O and timer drivers on (a network backend, such as an S3
+    /// client, needs them).
     ///
     /// # Panics
     /// If the case fails, skips without being declared, or passes though
     /// declared as a skip.
     pub fn run(name: &str, declared: &[&str], case: impl Future<Output = Outcome>) {
         let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
             .worker_threads(4)
             .build()
             .expect("build a tokio runtime");
