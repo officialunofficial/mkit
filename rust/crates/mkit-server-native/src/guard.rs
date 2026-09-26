@@ -15,7 +15,7 @@ use http::{HeaderValue, Request, Response, StatusCode, header};
 use http_body::{Body as HttpBody, Frame, SizeHint};
 use mkit_core::hash::hash;
 use subtle::ConstantTimeEq as _;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::Semaphore;
 use tower::{Layer, Service, ServiceExt as _};
 
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
@@ -47,15 +47,27 @@ fn overloaded() -> Response<Body> {
     resp
 }
 
-/// A response body that holds a concurrency permit until it ends or is
-/// dropped: a streamed `DownloadPack` keeps its slot for as long as it
-/// streams.
-struct PermitBody {
+/// A response body that holds `T` (a concurrency permit, a connection's
+/// activity guard) until it ends or is dropped: a streamed `DownloadPack`
+/// keeps its slot for as long as it streams.
+pub(crate) struct HoldBody<T> {
     inner: Body,
-    permit: Option<OwnedSemaphorePermit>,
+    hold: Option<T>,
 }
 
-impl HttpBody for PermitBody {
+impl<T> HoldBody<T> {
+    pub(crate) fn wrap(inner: Body, hold: T) -> Body
+    where
+        T: Send + Unpin + 'static,
+    {
+        Body::new(Self {
+            inner,
+            hold: Some(hold),
+        })
+    }
+}
+
+impl<T: Unpin> HttpBody for HoldBody<T> {
     type Data = Bytes;
     type Error = axum::Error;
 
@@ -66,8 +78,8 @@ impl HttpBody for PermitBody {
         let this = &mut *self;
         let polled = Pin::new(&mut this.inner).poll_frame(cx);
         if let Poll::Ready(None) = polled {
-            // Done: free the slot before the connection finishes up.
-            this.permit = None;
+            // Done: release before the connection finishes up.
+            this.hold = None;
         }
         polled
     }
@@ -147,12 +159,7 @@ where
                 return Ok(overloaded());
             };
             let resp = inner.oneshot(req).await?;
-            Ok(resp.map(|inner| {
-                Body::new(PermitBody {
-                    inner,
-                    permit: Some(permit),
-                })
-            }))
+            Ok(resp.map(|inner| HoldBody::wrap(inner, permit)))
         })
     }
 }

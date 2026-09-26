@@ -32,7 +32,7 @@ mkit-server serve --listen <ADDR> --repo-root <DIR>
     [--audience <ORIGIN>] [--repository <ID>]
     [--max-pack-bytes N] [--unary-timeout-secs 30] [--stream-timeout-secs 3600]
     [--max-concurrency 256] [--queue-timeout-secs 5]
-    [--max-connections 1024] [--header-read-timeout-secs 10]
+    [--max-connections 1024] [--header-read-timeout-secs 10] [--idle-timeout-secs 60]
     [--cors-allow-origin <ORIGIN>]... [--shutdown-grace-secs 30]
     [--sqlite-max-bytes N] [--log-format text|json]
 mkit-server version
@@ -77,7 +77,10 @@ The listener fails closed, like `mkit serve --http`:
   <token>`. The token comes from `--bearer-token-file <PATH>` (one trailing
   newline ignored) or `MKIT_API_TOKEN`, never from the command line. The file
   must be a regular file (not a symlink) readable by its owner only (`chmod
-  600`). An empty token is refused. The token is checked from the request
+  600`); it is opened once without following symlinks and checked on the
+  open handle. Secret mounts that are symlinks (Kubernetes projects secrets
+  that way) must pass the token through `MKIT_API_TOKEN` instead. An empty
+  token is refused. The token is checked from the request
   headers before the request takes a concurrency slot, so unauthenticated
   callers cost no slot.
 - `--auth auth-v2 --audience <ORIGIN> [--repository <ID>]`: writes carry auth
@@ -126,6 +129,13 @@ removed automatically: to move the refs back to files, stop the server,
 export the refs, write them as files, and delete `.mkit/server-meta` by
 hand.
 
+**Moving a root.** Stop the server, move the root (and its database, if it
+lives elsewhere), and start it with the new `--repo-root` and `--meta
+sqlite:<new path>`. When the database at the new path carries the root's id,
+the server records the new path in the marker (under the ref lock) and
+starts; a database carrying another root's id, or none, is refused with an
+error naming both paths.
+
 ### Limits and timeouts
 
 The listener speaks plaintext HTTP/1.1 and h2c; terminate TLS at the proxy.
@@ -136,6 +146,9 @@ The listener speaks plaintext HTTP/1.1 and h2c; terminate TLS at the proxy.
   request headers in time (or, on a new connection, anything at all) is
   disconnected. HTTP/2 connections are pinged every 30 s and closed if a
   ping goes unanswered for 20 s; each carries at most 128 streams.
+- `--idle-timeout-secs` (default 60): a connection (HTTP/2, or HTTP/1.1
+  keep-alive) with no request in flight for that long is closed gracefully,
+  so idle clients cannot hold every connection slot.
 - `--max-concurrency` (default 256) requests run at once. A request holds its
   slot until its response body ends, so a streaming `DownloadPack` counts
   for as long as it streams. A request that finds no slot within

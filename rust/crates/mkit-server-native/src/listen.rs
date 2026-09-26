@@ -2,9 +2,11 @@
 //! timer, so the header-read timeout and HTTP/2 keepalive take effect, a
 //! cap on open connections, and graceful shutdown.
 
+use std::convert::Infallible;
 use std::future::Future as _;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -12,13 +14,13 @@ use axum::body::Body;
 use hyper::body::Incoming;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto::Builder;
-use hyper_util::server::graceful::GracefulShutdown;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use tower::ServiceExt as _;
 
 use crate::Shutdown;
+use crate::guard::HoldBody;
 
 /// How the listener treats connections. [`ServeOptions::default`] holds
 /// the `mkit-server serve` defaults.
@@ -41,6 +43,10 @@ pub struct ServeOptions {
     pub h2_keepalive_timeout: Duration,
     /// Concurrent streams per HTTP/2 connection.
     pub h2_max_concurrent_streams: u32,
+    /// A connection with no request in flight for this long is closed
+    /// gracefully (HTTP/2 `GOAWAY`; HTTP/1.1 close), so idle clients cannot
+    /// hold every connection slot. Keepalive pings only detect dead peers.
+    pub idle_timeout: Duration,
 }
 
 impl Default for ServeOptions {
@@ -52,6 +58,7 @@ impl Default for ServeOptions {
             h2_keepalive_interval: Duration::from_secs(30),
             h2_keepalive_timeout: Duration::from_secs(20),
             h2_max_concurrent_streams: 128,
+            idle_timeout: Duration::from_mins(1),
         }
     }
 }
@@ -73,8 +80,8 @@ pub async fn serve(
     shutdown: Shutdown,
     opts: &ServeOptions,
 ) -> std::io::Result<()> {
-    let graceful = GracefulShutdown::new();
-    let slots = Arc::new(Semaphore::new(opts.max_connections.max(1)));
+    let max = opts.max_connections.max(1);
+    let slots = Arc::new(Semaphore::new(max));
     let mut builder = Builder::new(TokioExecutor::new());
     builder
         .http1()
@@ -114,24 +121,57 @@ pub async fn serve(
         };
         let _ = stream.set_nodelay(true);
         let io = DetectionTimeout::new(stream, opts.header_read_timeout);
+        let activity = Arc::new(Activity::new());
         let router = router.clone();
+        let tracked = Arc::clone(&activity);
         let service = hyper::service::service_fn(move |req: hyper::Request<Incoming>| {
-            router.clone().oneshot(req.map(Body::new))
+            // Counts until the response body ends or drops, or the request
+            // is abandoned before it answers.
+            let active = Active::start(&tracked);
+            let call = router.clone().oneshot(req.map(Body::new));
+            async move {
+                let resp = call.await?;
+                Ok::<_, Infallible>(resp.map(|body| HoldBody::wrap(body, active)))
+            }
         });
-        let conn = builder
-            .serve_connection_with_upgrades(TokioIo::new(io), service)
-            .into_owned();
-        let conn = graceful.watch(conn);
+        let builder = Arc::clone(&builder);
+        let stop = shutdown.wait();
+        let idle = opts.idle_timeout;
         tokio::spawn(async move {
-            if let Err(e) = conn.await {
-                tracing::debug!(error = %e, "connection ended with an error");
+            let conn = builder.serve_connection_with_upgrades(TokioIo::new(io), service);
+            tokio::pin!(conn);
+            tokio::pin!(stop);
+            let mut closing = false;
+            loop {
+                tokio::select! {
+                    result = conn.as_mut() => {
+                        if let Err(e) = result {
+                            tracing::debug!(error = %e, "connection ended with an error");
+                        }
+                        break;
+                    }
+                    () = &mut stop, if !closing => {
+                        conn.as_mut().graceful_shutdown();
+                        closing = true;
+                    }
+                    () = tokio::time::sleep_until(activity.idle_deadline(idle)), if !closing => {
+                        if activity.is_idle(idle) {
+                            tracing::debug!("closing an idle connection");
+                            conn.as_mut().graceful_shutdown();
+                            closing = true;
+                        }
+                    }
+                }
             }
             drop(slot);
         });
     }
     drop(listener);
+    // Every open connection holds a slot: all of them back means all
+    // connections closed.
+    let all = u32::try_from(max).unwrap_or(u32::MAX);
     tokio::select! {
-        () = graceful.shutdown() => {}
+        _ = slots.acquire_many(all) => {}
         () = tokio::time::sleep(opts.grace) => {
             tracing::warn!(
                 grace_secs = opts.grace.as_secs(),
@@ -140,6 +180,58 @@ pub async fn serve(
         }
     }
     Ok(())
+}
+
+/// One connection's requests in flight and when the last one ended.
+struct Activity {
+    in_flight: AtomicUsize,
+    last: Mutex<tokio::time::Instant>,
+}
+
+impl Activity {
+    fn new() -> Self {
+        Self {
+            in_flight: AtomicUsize::new(0),
+            last: Mutex::new(tokio::time::Instant::now()),
+        }
+    }
+
+    fn last(&self) -> tokio::time::Instant {
+        *self.last.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// When to check for idleness next: when the connection turns idle if
+    /// nothing happens meanwhile, or, with a request in flight, one idle
+    /// period from now (so a long request is not polled in a tight loop).
+    fn idle_deadline(&self, idle: Duration) -> tokio::time::Instant {
+        if self.in_flight.load(Ordering::SeqCst) > 0 {
+            tokio::time::Instant::now() + idle
+        } else {
+            self.last() + idle
+        }
+    }
+
+    fn is_idle(&self, idle: Duration) -> bool {
+        self.in_flight.load(Ordering::SeqCst) == 0 && self.last().elapsed() >= idle
+    }
+}
+
+/// A request in flight on a connection; ending it stamps the connection's
+/// last activity.
+struct Active(Arc<Activity>);
+
+impl Active {
+    fn start(activity: &Arc<Activity>) -> Self {
+        activity.in_flight.fetch_add(1, Ordering::SeqCst);
+        Self(Arc::clone(activity))
+    }
+}
+
+impl Drop for Active {
+    fn drop(&mut self) {
+        *self.0.last.lock().unwrap_or_else(PoisonError::into_inner) = tokio::time::Instant::now();
+        self.0.in_flight.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// An accept error that affects one connection, or passes (descriptor

@@ -151,19 +151,7 @@ fn claim_locked(tx: &FileTransport, root: &Path, db: &Path) -> Result<String, Co
                     )
                 })?;
             if marker.db != db {
-                return Err(ConfigError::new(
-                    exit::CONFIG_ERROR,
-                    format!(
-                        "mkit-server serve: repo root {} is bound to the database {} (marker \
-                         {}), but --meta names {}. Pass --meta sqlite:{} (paths are compared \
-                         after resolving their directory).",
-                        root.display(),
-                        marker.db.display(),
-                        path.display(),
-                        db.display(),
-                        marker.db.display()
-                    ),
-                ));
+                rebind_moved(&path, &marker, db, root)?;
             }
             Ok(marker.root_id)
         }
@@ -187,6 +175,78 @@ fn claim_locked(tx: &FileTransport, root: &Path, db: &Path) -> Result<String, Co
         }
         Err(e) => Err(config_error("reading the meta marker", e)),
     }
+}
+
+/// The root id stored in the existing database `db`, if it has one. Never
+/// creates the file.
+fn stored_root_id(db: &Path) -> Result<Option<String>, ConfigError> {
+    if !db.is_file() {
+        return Ok(None);
+    }
+    let conn =
+        RusqliteConn::open(db).map_err(|e| config_error("--meta sqlite", StoreError::from(e)))?;
+    // No table: a database that was never bound.
+    let Ok(rows) = conn.query("SELECT root_id FROM mkit_server_root WHERE id = 1", &[]) else {
+        return Ok(None);
+    };
+    Ok(match rows.first().and_then(|row| row.first()) {
+        Some(SqlValue::Text(id)) => Some(id.clone()),
+        _ => None,
+    })
+}
+
+/// The marker names another database than `db`. If `db` carries the
+/// marker's root id, the root (or its database) moved: record the new path
+/// in the marker, atomically, under the ref lock the caller holds.
+/// Otherwise `db` is not this root's database, and the root is refused.
+fn rebind_moved(path: &Path, marker: &Marker, db: &Path, root: &Path) -> Result<(), ConfigError> {
+    let stored = stored_root_id(db)?;
+    if stored.as_deref() == Some(marker.root_id.as_str()) {
+        tracing::info!(
+            from = %marker.db.display(),
+            to = %db.display(),
+            "the root's database moved; re-binding the marker"
+        );
+        let moved = Marker {
+            root_id: marker.root_id.clone(),
+            db: db.to_owned(),
+        };
+        let tmp = mkit_transport_file::temp_path(path)
+            .map_err(|e| config_error("re-binding the meta marker", e))?;
+        let write = || -> std::io::Result<()> {
+            let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+            file.write_all(moved.render().as_bytes())?;
+            file.sync_all()?;
+            fs::rename(&tmp, path)?;
+            if let Some(dir) = path.parent() {
+                sync_dir(dir)?;
+            }
+            Ok(())
+        };
+        return write().map_err(|e| {
+            let _ = fs::remove_file(&tmp);
+            config_error("re-binding the meta marker", e)
+        });
+    }
+    let found = match stored {
+        Some(other) => format!("it belongs to another root (root id {other})"),
+        None if db.exists() => "it carries no root binding".to_owned(),
+        None => "it does not exist".to_owned(),
+    };
+    Err(ConfigError::new(
+        exit::CONFIG_ERROR,
+        format!(
+            "mkit-server serve: repo root {} is bound to the database {} (root id {}, marker \
+             {}), but --meta names {}, which is not this root's database: {found}. Point \
+             --meta at this root's database; if you moved the root or its database, pass its \
+             new path and the marker is re-bound automatically.",
+            root.display(),
+            marker.db.display(),
+            marker.root_id,
+            path.display(),
+            db.display(),
+        ),
+    ))
 }
 
 /// How the database stands against the root claiming it.

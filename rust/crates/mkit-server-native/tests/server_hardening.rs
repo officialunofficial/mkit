@@ -332,6 +332,46 @@ async fn max_connections_queues_excess_connections() {
     shutdown.trigger();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn idle_connections_are_closed() {
+    let mut opts = ServeOptions::default();
+    opts.idle_timeout = Duration::from_millis(300);
+    let (addr, shutdown) = listen(opts).await;
+
+    // HTTP/1.1 keep-alive: one request, then silence. (The header-read
+    // timeout, 10 s here, is not what closes it.)
+    let mut h1 = tokio::net::TcpStream::connect(addr).await.unwrap();
+    h1.write_all(b"GET /nope HTTP/1.1\r\nHost: x\r\n\r\n")
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    let started = Instant::now();
+    let read = tokio::time::timeout(Duration::from_secs(8), h1.read_to_end(&mut response)).await;
+    assert!(read.is_ok(), "the idle HTTP/1.1 connection stayed open");
+    assert!(response.starts_with(b"HTTP/1.1 "), "{response:?}");
+    assert!(started.elapsed() < Duration::from_secs(5));
+
+    // HTTP/2 (prior knowledge): one request, then the client keeps the
+    // connection open with no stream; the server closes it.
+    let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let (mut sender, conn) = hyper::client::conn::http2::handshake(
+        hyper_util::rt::TokioExecutor::new(),
+        hyper_util::rt::TokioIo::new(stream),
+    )
+    .await
+    .unwrap();
+    let conn = tokio::spawn(conn);
+    let req = Request::get(format!("http://{addr}/nope"))
+        .body(http_body_util::Empty::<Bytes>::new())
+        .unwrap();
+    let resp = sender.send_request(req).await.unwrap();
+    drop(resp.into_body().collect().await);
+    let closed = tokio::time::timeout(Duration::from_secs(5), conn).await;
+    assert!(closed.is_ok(), "the idle HTTP/2 connection stayed open");
+    drop(sender);
+    shutdown.trigger();
+}
+
 // ---------------------------------------------------------------------------
 // The token file.
 
@@ -463,4 +503,56 @@ fn sqlite_marker_binds_the_root_to_one_database() {
     let stray_meta = format!("sqlite:{}", common::s(&stray));
     let err = server::open(&cfg(third.path(), &stray_meta)).unwrap_err();
     assert!(err.message.contains("no root binding"), "{}", err.message);
+}
+
+/// A root under `parent/name` with its database inside it.
+fn root_with_db(parent: &Path, name: &str) -> (std::path::PathBuf, String) {
+    let root = parent.join(name);
+    std::fs::create_dir_all(root.join(".mkit")).unwrap();
+    let meta = format!("sqlite:{}", common::s(&root.join("meta.sqlite3")));
+    (root, meta)
+}
+
+#[test]
+fn a_moved_root_with_its_database_is_rebound() {
+    let parent = tempfile::tempdir().unwrap();
+    let (old, old_meta) = root_with_db(parent.path(), "old");
+    drop(server::open(&cfg(&old, &old_meta)).unwrap());
+    let marker = |root: &Path| std::fs::read_to_string(root.join(".mkit/server-meta")).unwrap();
+    let before = marker(&old);
+
+    let new = parent.path().join("new");
+    std::fs::rename(&old, &new).unwrap();
+    let new_meta = format!("sqlite:{}", common::s(&new.join("meta.sqlite3")));
+    drop(server::open(&cfg(&new, &new_meta)).unwrap());
+    let after = marker(&new);
+    let db = std::fs::canonicalize(&new).unwrap().join("meta.sqlite3");
+    assert!(
+        after.ends_with(&format!("\nsqlite {}\n", db.display())),
+        "{after}"
+    );
+    // Same root id; only the path changed.
+    assert_eq!(before.lines().nth(1), after.lines().nth(1));
+    drop(server::open(&cfg(&new, &new_meta)).unwrap());
+}
+
+#[test]
+fn another_roots_database_is_not_rebound() {
+    let parent = tempfile::tempdir().unwrap();
+    let (a, a_meta) = root_with_db(parent.path(), "a");
+    let (b, b_meta) = root_with_db(parent.path(), "b");
+    drop(server::open(&cfg(&a, &a_meta)).unwrap());
+    drop(server::open(&cfg(&b, &b_meta)).unwrap());
+    let marker = std::fs::read_to_string(a.join(".mkit/server-meta")).unwrap();
+
+    let err = server::open(&cfg(&a, &b_meta)).unwrap_err();
+    assert_eq!(err.code, exit::CONFIG_ERROR);
+    for needle in ["not this root's database", "another root"] {
+        assert!(err.message.contains(needle), "{needle}: {}", err.message);
+    }
+    assert_eq!(
+        std::fs::read_to_string(a.join(".mkit/server-meta")).unwrap(),
+        marker
+    );
+    drop(server::open(&cfg(&a, &a_meta)).unwrap());
 }

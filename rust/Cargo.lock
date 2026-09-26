@@ -3548,6 +3548,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "libc",
  "metrics",
  "mkit-core",
  "mkit-server",

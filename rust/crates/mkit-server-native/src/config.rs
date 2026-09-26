@@ -138,6 +138,10 @@ pub struct ServeArgs {
     /// backlog.
     #[arg(long, value_name = "N", default_value_t = 1024)]
     pub max_connections: usize,
+    /// Close a connection (HTTP/2 or HTTP/1.1 keep-alive) that has had no
+    /// request in flight for this long.
+    #[arg(long, value_name = "SECS", default_value_t = 60)]
+    pub idle_timeout_secs: u64,
     /// An origin browsers may call from (repeatable); `*` allows any.
     #[arg(long, value_name = "ORIGIN")]
     pub cors_allow_origin: Vec<String>,
@@ -296,54 +300,58 @@ fn resolve_auth(
     }
 }
 
-/// The token in `path`, without one trailing newline. On Unix the file
-/// must be a regular file (not a symlink) readable by its owner only.
+/// The token in `path`, without one trailing newline. The file is opened
+/// once, without following a symlink (`O_NOFOLLOW`, and `O_NONBLOCK` so a
+/// FIFO cannot stall startup), and the checks run on the open handle
+/// (`fstat`): it must be a regular file, on Unix readable by its owner
+/// only. Nothing can swap the file between the check and the read.
 fn read_token(path: &Path) -> Result<String, ConfigError> {
-    check_secret_file(path)?;
-    let text = std::fs::read_to_string(path).map_err(|e| {
+    use std::io::Read as _;
+
+    let refuse = |why: String| {
         ConfigError::new(
             exit::CONFIG_ERROR,
-            format!(
-                "{PREFIX}: cannot read --bearer-token-file {}: {e}",
-                path.display()
-            ),
-        )
-    })?;
-    let text = text.strip_suffix('\n').unwrap_or(&text);
-    Ok(text.strip_suffix('\r').unwrap_or(text).to_owned())
-}
-
-/// Refuse a secret file that is a symlink, not a regular file, or (on
-/// Unix) readable or writable by group or others.
-fn check_secret_file(path: &Path) -> Result<(), ConfigError> {
-    let refuse = |why: String| {
-        Err(ConfigError::new(
-            exit::CONFIG_ERROR,
             format!("{PREFIX}: --bearer-token-file {}: {why}", path.display()),
-        ))
+        )
     };
-    let meta = match std::fs::symlink_metadata(path) {
-        Ok(meta) => meta,
-        Err(e) => return refuse(e.to_string()),
-    };
-    if meta.file_type().is_symlink() {
-        return refuse("is a symlink; point the flag at the file itself".to_owned());
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
+    let mut file = options.open(path).map_err(|e| {
+        #[cfg(unix)]
+        if e.raw_os_error() == Some(libc::ELOOP) {
+            return refuse(
+                "is a symlink; point the flag at the file itself, or pass a symlinked secret \
+                 mount (e.g. Kubernetes) through MKIT_API_TOKEN"
+                    .to_owned(),
+            );
+        }
+        refuse(e.to_string())
+    })?;
+    let meta = file.metadata().map_err(|e| refuse(e.to_string()))?;
     if !meta.is_file() {
-        return refuse("is not a regular file".to_owned());
+        return Err(refuse("is not a regular file".to_owned()));
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
         let mode = meta.permissions().mode() & 0o777;
         if mode & 0o077 != 0 {
-            return refuse(format!(
+            return Err(refuse(format!(
                 "is accessible by group or others (mode {mode:o}); run `chmod 600 {}`",
                 path.display()
-            ));
+            )));
         }
     }
-    Ok(())
+    let mut text = String::new();
+    file.read_to_string(&mut text)
+        .map_err(|e| refuse(format!("cannot read it: {e}")))?;
+    let text = text.strip_suffix('\n').unwrap_or(&text);
+    Ok(text.strip_suffix('\r').unwrap_or(text).to_owned())
 }
 
 /// `path` with its directory resolved, as the marker records it: the same
@@ -441,8 +449,10 @@ pub fn resolve(
             "--max-concurrency and --max-connections must be at least 1",
         ));
     }
-    if args.header_read_timeout_secs == 0 {
-        return Err(usage("--header-read-timeout-secs must be at least 1"));
+    if args.header_read_timeout_secs == 0 || args.idle_timeout_secs == 0 {
+        return Err(usage(
+            "--header-read-timeout-secs and --idle-timeout-secs must be at least 1",
+        ));
     }
     if args.unary_timeout_secs == 0 || args.stream_timeout_secs == 0 {
         return Err(usage("timeouts must be at least 1 second"));
@@ -501,6 +511,7 @@ pub fn resolve(
             grace: Duration::from_secs(args.shutdown_grace_secs),
             header_read_timeout: Duration::from_secs(args.header_read_timeout_secs),
             max_connections: args.max_connections,
+            idle_timeout: Duration::from_secs(args.idle_timeout_secs),
             ..ServeOptions::default()
         },
         log_format: args.log_format,

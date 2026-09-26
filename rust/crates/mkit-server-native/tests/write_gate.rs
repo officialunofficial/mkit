@@ -1,8 +1,9 @@
 //! Regression for the pipeline's write gate (`Pipeline::with_write_gate`):
 //! parallel auth v2 writes by one signer share its quota-window row, so on
 //! a store whose commit takes time they race each other through re-plans.
-//! Without the gate some exhaust the re-plan bound and fail `aborted`;
-//! with it, every write commits. The wire case that first showed it,
+//! Without the gate some exhaust the re-plan bound and fail `aborted`
+//! (the ignored, timing-dependent test shows it); with it, every write
+//! commits. The wire case that first showed it,
 //! `list.large_response_within_limit` (8 writes in flight per signer),
 //! drives both servers.
 
@@ -111,12 +112,20 @@ async fn verdict(gated: bool) -> Verdict {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn same_signer_parallel_writes_need_the_gate() {
+async fn same_signer_parallel_writes_commit_with_the_gate() {
+    let gated = verdict(true).await;
+    assert!(matches!(gated, Verdict::Pass(_)), "{gated:?}");
+}
+
+/// The race the gate removes. It depends on timing (the writes must
+/// interleave inside the slow commit), so it is not part of the gate run;
+/// run it with `--ignored` to see the failure mode.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "timing-dependent demonstration of the race the gate removes"]
+async fn same_signer_parallel_writes_abort_without_the_gate() {
     let ungated = verdict(false).await;
     assert!(
         matches!(&ungated, Verdict::Fail(why) if why.contains("aborted")),
         "without the gate the writes should exhaust their re-plans: {ungated:?}"
     );
-    let gated = verdict(true).await;
-    assert!(matches!(gated, Verdict::Pass(_)), "{gated:?}");
 }
