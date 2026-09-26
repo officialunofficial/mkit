@@ -30,6 +30,7 @@ enum Command {
 }
 
 #[derive(Debug, Args)]
+#[allow(clippy::struct_excessive_bools)] // clap flags
 struct WireArgs {
     /// The server's base URL (http or https).
     #[arg(long, value_name = "URL")]
@@ -49,12 +50,20 @@ struct WireArgs {
     /// Auth v2: the server's repository identity.
     #[arg(long, value_name = "ID")]
     repository: Option<String>,
-    /// Auth v2: the seed every case signer derives from (64 hex).
+    /// Auth v2: the environment variable holding the seed every case
+    /// signer derives from (64 hex). Keeps the seed out of `ps`.
+    #[arg(long, value_name = "VAR", conflicts_with_all = ["signer_seed_hex", "random_signer"])]
+    signer_seed_env: Option<String>,
+    /// Auth v2: the seed itself (visible in process listings; prefer
+    /// `--signer-seed-env`).
     #[arg(long, value_name = "HEX", conflicts_with = "random_signer")]
     signer_seed_hex: Option<String>,
     /// Auth v2: a random seed.
     #[arg(long)]
     random_signer: bool,
+    /// Sign read RPCs too (M2 signed reads; off in M0).
+    #[arg(long)]
+    sign_reads: bool,
     /// The server commits `AdvanceRefs` atomically.
     #[arg(long)]
     atomic_advance: bool,
@@ -92,6 +101,12 @@ struct WireArgs {
     /// Refs the large-listing case creates (default 10000; 0 skips it).
     #[arg(long, value_name = "N")]
     list_refs: Option<u32>,
+    /// The server's replay prune grace after expiry, ms (default 60000).
+    #[arg(long, value_name = "MS")]
+    replay_prune_grace_ms: Option<i64>,
+    /// How long a concurrent duplicate retries `aborted`, ms (default 10000).
+    #[arg(long, value_name = "MS")]
+    duplicate_retry_ms: Option<u64>,
     /// Print the cases with their milestone and requirements, and exit.
     #[arg(long)]
     list_cases: bool,
@@ -105,6 +120,7 @@ impl WireArgs {
             audience: self.audience.clone(),
             repository: self.repository.clone(),
             signer_seed_hex: self.signer_seed_hex.clone(),
+            signer_seed_env: self.signer_seed_env.clone(),
             random_signer: self.random_signer.then_some(true),
             atomic_advance: self.atomic_advance.then_some(true),
             max_pack_bytes: self.max_pack_bytes,
@@ -115,6 +131,9 @@ impl WireArgs {
             features: self.features.clone(),
             run_id: self.run_id.clone(),
             list_refs: self.list_refs,
+            replay_prune_grace_ms: self.replay_prune_grace_ms,
+            duplicate_retry_ms: self.duplicate_retry_ms,
+            sign_reads: self.sign_reads.then_some(true),
         }
     }
 }
@@ -135,6 +154,12 @@ fn wire(args: &WireArgs) -> Result<bool, String> {
         return Ok(true);
     }
     let base_url = args.base_url.clone().ok_or("--base-url is required")?;
+    if !matches!(base_url.scheme(), "http" | "https") {
+        return Err(format!(
+            "--base-url: unsupported scheme `{}` (http, https)",
+            base_url.scheme()
+        ));
+    }
     let file = match &args.profile {
         Some(path) => {
             let text = std::fs::read_to_string(path)

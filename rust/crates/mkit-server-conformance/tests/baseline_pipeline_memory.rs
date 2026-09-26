@@ -5,6 +5,9 @@
 //! atomically, so every profile declares `atomic-advance`. With this
 //! crate's `test-faults` feature a fourth profile adds the clock-skew
 //! directive and `GET /__mkit_test/stats`.
+//!
+//! The `mutant_*` tests serve the same pipeline over a deliberately broken
+//! store and check that the cases meant to catch the breakage fail.
 
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
@@ -18,10 +21,12 @@ use mkit_server::quota::QuotaLimits as ServerQuota;
 use mkit_server::upload::UploadLimits;
 use mkit_server::{
     Addressing, Batch, BatchOutcome, Cursor, Key, MemoryBlobStore, MemoryKv, NamespaceKey,
-    NamespaceStore, Partition, PartitionStats, Redacted, RepoId, RepoName, ScanPage,
-    StoreCapabilities, StoreError, SystemClock, Value,
+    NamespaceStore, Partition, PartitionStats, Precondition, Redacted, RepoId, RepoName, ScanPage,
+    StoreCapabilities, StoreError, SystemClock, Value, Write,
 };
-use mkit_server_conformance::wire::{Profile, QuotaLimits, WireAuth, WireTarget, run};
+use mkit_server_conformance::wire::{
+    Feature, Profile, QuotaLimits, Verdict, WireAuth, WireTarget, run,
+};
 
 const REPOSITORY: &str = "default";
 const TOKEN: &str = "conformance-bearer-token";
@@ -42,9 +47,52 @@ const PIPELINE_DIVERGENCES: &[(&str, &str)] = &[(
      flight (mkit#1120). The assertion is the spec's.",
 )];
 
-/// A memory store shared with the test, for the stats endpoint.
+/// How the store under the pipeline is broken, for the mutant tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mutant {
+    /// A correct store.
+    None,
+    /// Checks key preconditions, pauses, then writes unconditionally: a
+    /// read-then-write compare-and-swap.
+    ReadThenWrite,
+    /// Drops every delete: nothing is ever pruned.
+    NoPrune,
+}
+
+/// A memory store shared with the test (for the stats endpoint), maybe
+/// broken.
 #[derive(Clone)]
-struct Shared(Arc<MemoryKv>);
+struct Shared(Arc<MemoryKv>, Mutant);
+
+impl Shared {
+    /// [`Mutant::ReadThenWrite`]: check, yield, write.
+    async fn racy_apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
+        let mut deadline = Vec::new();
+        for (index, pre) in batch.preconditions.iter().enumerate() {
+            let held = match pre {
+                Precondition::Absent(k) => self.0.get(p, k).await?.is_none(),
+                Precondition::Present(k) => self.0.get(p, k).await?.is_some(),
+                Precondition::Equals(k, v) => self.0.get(p, k).await?.as_ref() == Some(v),
+                Precondition::NotAfter(_) => {
+                    deadline.push(pre.clone());
+                    true
+                }
+            };
+            if !held {
+                return Ok(BatchOutcome::PreconditionFailed {
+                    index,
+                    observed: None,
+                });
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let unchecked = Batch {
+            preconditions: deadline,
+            writes: batch.writes,
+        };
+        self.0.apply(p, unchecked).await
+    }
+}
 
 impl NamespaceStore for Shared {
     fn capabilities(&self) -> StoreCapabilities {
@@ -70,7 +118,12 @@ impl NamespaceStore for Shared {
     ) -> Result<ScanPage, StoreError> {
         self.0.scan(p, start, end, after, limit).await
     }
-    async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
+    async fn apply(&self, p: &Partition, mut batch: Batch) -> Result<BatchOutcome, StoreError> {
+        match self.1 {
+            Mutant::None => {}
+            Mutant::ReadThenWrite => return self.racy_apply(p, batch).await,
+            Mutant::NoPrune => batch.writes.retain(|w| matches!(w, Write::Put(..))),
+        }
         self.0.apply(p, batch).await
     }
     async fn stats(&self, p: &Partition) -> Result<PartitionStats, StoreError> {
@@ -87,6 +140,15 @@ async fn serve(
     auth: impl FnOnce(&str) -> AuthMode,
     quota: Option<ServerQuota>,
 ) -> (String, Shared) {
+    serve_mutant(auth, quota, Mutant::None).await
+}
+
+/// [`serve`] over a store broken as `mutant` says.
+async fn serve_mutant(
+    auth: impl FnOnce(&str) -> AuthMode,
+    quota: Option<ServerQuota>,
+    mutant: Mutant,
+) -> (String, Shared) {
     let (listener, origin) = common::listener().await;
     let repo = RepoId {
         namespace: NamespaceKey::deployment_default(),
@@ -99,7 +161,7 @@ async fn serve(
     let mut cfg = PipelineConfig::new(Addressing::Single { repo }, auth(&origin), limits);
     cfg.write_quota = quota;
     let clock = Arc::new(SystemClock);
-    let meta = Shared(Arc::new(MemoryKv::with_clock(clock.clone())));
+    let meta = Shared(Arc::new(MemoryKv::with_clock(clock.clone())), mutant);
     let pipe = Pipeline::new(
         MemoryBlobStore::default(),
         meta.clone(),
@@ -136,6 +198,7 @@ fn profile(auth: WireAuth) -> Profile {
     p.max_pack_bytes = MAX_PACK;
     p.list_refs = 200;
     p.derive_features();
+    p.features.insert(Feature::Health);
     p
 }
 
@@ -155,6 +218,8 @@ fn v2_profile(origin: &str) -> Profile {
         window_ms: QUOTA.window_ms,
     });
     p.derive_features();
+    // The pipeline rejects a signature over gzip bytes (fails closed).
+    p.features.insert(Feature::StrictGzipAuth);
     p
 }
 
@@ -189,29 +254,36 @@ async fn pipeline_auth_v2_quota_atomic() {
     check(origin, profile).await;
 }
 
+/// The `test-faults` profile: an auth v2 server whose quota window is
+/// short enough for the growth case to wait out (it prunes on the real
+/// clock: about 80 s), with room for the case's probe writes.
+#[cfg(feature = "test-faults")]
+async fn serve_test_faults(mutant: Mutant) -> WireTarget {
+    let quota = ServerQuota {
+        window_ms: 5_000,
+        max_ops: 1_000,
+        ..QUOTA
+    };
+    let (origin, _) = serve_mutant(authv2, Some(quota), mutant).await;
+    let mut profile = v2_profile(&origin);
+    profile.quota = Some(QuotaLimits {
+        max_ops: quota.max_ops,
+        max_bytes: quota.max_bytes,
+        window_ms: quota.window_ms,
+    });
+    profile.features.insert(Feature::TestFaults);
+    WireTarget {
+        base_url: origin.parse().unwrap(),
+        profile,
+    }
+}
+
 /// The `test-faults` cases: the clock-skew directive and the stats
-/// endpoint, on an auth v2 server whose quota window is short enough for
-/// the growth case to wait out (it prunes on the real clock: about 70 s).
+/// endpoint. The rest of the suite ran on the auth v2 profile above.
 #[cfg(feature = "test-faults")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pipeline_auth_v2_test_faults() {
-    use mkit_server_conformance::wire::Feature;
-    let quota = ServerQuota {
-        window_ms: 5_000,
-        ..QUOTA
-    };
-    let (origin, _) = serve(authv2, Some(quota)).await;
-    let mut profile = v2_profile(&origin);
-    profile.quota = profile.quota.map(|q| QuotaLimits {
-        window_ms: quota.window_ms,
-        ..q
-    });
-    profile.features.insert(Feature::TestFaults);
-    let target = WireTarget {
-        base_url: origin.parse().unwrap(),
-        profile,
-    };
-    // The rest of the suite ran on this profile above.
+    let target = serve_test_faults(Mutant::None).await;
     for case in [
         "replay.expired_retry_rejected",
         "growth.replay_and_quota_pruned",
@@ -220,4 +292,42 @@ async fn pipeline_auth_v2_test_faults() {
         common::judge(&report, PIPELINE_DIVERGENCES);
         assert_eq!(report.passes(), [case], "{case} did not run and pass");
     }
+}
+
+/// Run each case in `cases` alone against `target`; each must fail.
+async fn must_fail(target: &WireTarget, cases: &[&str]) {
+    for case in cases {
+        let report = run(target, Some(case)).await;
+        eprintln!("{}", report.tap());
+        assert!(
+            matches!(report.verdict(case), Some(Verdict::Fail(_))),
+            "{case} did not catch the mutant: {:?}",
+            report.verdict(case)
+        );
+    }
+}
+
+/// A read-then-write compare-and-swap lets several racers win: the
+/// concurrent cases must catch it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mutant_read_then_write_fails_concurrent_cas() {
+    let (origin, _) = serve_mutant(|_| AuthMode::Open, None, Mutant::ReadThenWrite).await;
+    let target = WireTarget {
+        base_url: origin.parse().unwrap(),
+        profile: profile(WireAuth::None),
+    };
+    let cases = [
+        "refs.concurrent_missing_one_winner",
+        "refs.concurrent_match_one_winner",
+        "advance.concurrent_one_committed",
+    ];
+    must_fail(&target, &cases).await;
+}
+
+/// A store that never deletes never prunes: the growth case must catch it.
+#[cfg(feature = "test-faults")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mutant_no_prune_fails_growth() {
+    let target = serve_test_faults(Mutant::NoPrune).await;
+    must_fail(&target, &["growth.replay_and_quota_pruned"]).await;
 }

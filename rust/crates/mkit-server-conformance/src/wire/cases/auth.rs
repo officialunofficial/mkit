@@ -5,64 +5,60 @@ use buffa::Message as _;
 use mkit_core::hash::{hash, to_hex};
 use mkit_core::write_auth::MAX_VALIDITY_MS;
 use mkit_transport_connect::generated::{
-    ListRefsRequest, ListRefsResponse, UpdateRefResponse, UploadPackResponse,
+    ListRefsRequest, ListRefsResponse, UpdateRefRequest, UpdateRefResponse, UploadPackResponse,
 };
 
 use super::{
-    A, CaseResult, Ctx, Exp, Failure, ensure, random_pack, update_req, upload_msgs, want_code,
-    want_ok,
+    A, CaseResult, Ctx, Exp, Failure, Signed, ensure, random_pack, sign_unary, update_req,
+    upload_msgs, want_code, want_ok,
 };
-use crate::wire::client::{Rpc, RpcError, UNARY_PROTO, decode_unary, frames};
-use crate::wire::sign::{Envelope, SignedOp, Signer, body_commitment, now_ms, pack_commitment};
+use crate::wire::client::{Rpc, UNARY_PROTO, decode_unary, frames};
+use crate::wire::sign::{Envelope, Signer, body_commitment, now_ms, pack_commitment};
 
-const UNAUTH: &str = "unauthenticated";
+pub(super) const UNAUTH: &str = "unauthenticated";
 
-fn headers(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
-    pairs
-        .iter()
-        .map(|(n, v)| ((*n).to_owned(), (*v).to_owned()))
-        .collect()
+/// `UpdateRef(<ns>/main, ANY, A)`.
+pub(super) fn main_update(ctx: &Ctx) -> UpdateRefRequest {
+    update_req(&ctx.head("main"), Exp::Any, &A)
 }
 
-/// `UpdateRef(<ns>/main, ANY, A)` as exact bytes.
-fn update_body(ctx: &Ctx) -> Vec<u8> {
-    update_req(&ctx.head("main"), Exp::Any, &A).encode_to_vec()
+/// `main_update` signed by `signer`, after `edit`.
+pub(super) fn signed_main(ctx: &Ctx, signer: &Signer, edit: impl FnOnce(&mut Envelope)) -> Signed {
+    sign_unary(signer, Rpc::UpdateRef, &main_update(ctx), edit)
 }
 
-async fn send_update(
-    ctx: &Ctx,
-    body: Vec<u8>,
-    headers: &[(String, String)],
-) -> Result<Result<UpdateRefResponse, RpcError>, String> {
-    ctx.client().unary(Rpc::UpdateRef, body, headers).await
-}
-
-/// An `UpdateRef` with `headers` must be `unauthenticated` and change
-/// nothing.
-async fn rejected_update(
-    ctx: &Ctx,
-    body: Vec<u8>,
-    headers: &[(String, String)],
-    what: &str,
-) -> CaseResult {
-    want_code(send_update(ctx, body, headers).await?, UNAUTH, what)?;
+/// `s` must be `unauthenticated`, and `<ns>/main` still absent.
+pub(super) async fn rejected(ctx: &Ctx, s: &Signed, what: &str) -> CaseResult {
+    want_code(ctx.send::<UpdateRefResponse>(s).await?, UNAUTH, what)?;
     ctx.expect_ref(&ctx.head("main"), None).await
 }
 
-/// An upload of a fresh pack with `headers` must be `unauthenticated`, and
-/// the pack must not be stored.
+/// `main_update` sent with exactly `headers`, which must be rejected.
+async fn rejected_with(ctx: &Ctx, headers: &[(String, String)], what: &str) -> CaseResult {
+    let s = Signed {
+        rpc: Rpc::UpdateRef,
+        body: main_update(ctx).encode_to_vec(),
+        headers: headers.to_vec(),
+        nonce: String::new(),
+    };
+    rejected(ctx, &s, what).await
+}
+
+/// An upload of a fresh pack with `headers` must fail (with `code`, when
+/// one is given), and the pack must not be stored.
 async fn rejected_upload(
     ctx: &Ctx,
     pack: &[u8],
     headers: &[(String, String)],
+    code: Option<&str>,
     what: &str,
 ) -> CaseResult {
     let got = ctx.upload_with(&upload_msgs(pack, 2), headers).await?;
-    let code = got.as_ref().map(|e| e.code.as_str());
-    ensure!(
-        code == Some(UNAUTH),
-        "{what}: expected {UNAUTH}, got {code:?}"
-    );
+    let got = got.as_ref().map(|e| e.code.as_str());
+    match code {
+        Some(code) => ensure!(got == Some(code), "{what}: expected {code}, got {got:?}"),
+        None => ensure!(got.is_some(), "{what}: expected an error, got ok"),
+    }
     ctx.expect_exists(&hash(pack), false).await
 }
 
@@ -72,10 +68,8 @@ async fn bearer_rejections(ctx: &Ctx, auth: &[(String, String)], what: &str) -> 
     let list = ListRefsRequest::default().encode_to_vec();
     let got: Result<ListRefsResponse, _> = ctx.client().unary(Rpc::ListRefs, list, auth).await?;
     want_code(got, UNAUTH, &format!("ListRefs {what}"))?;
-    let got = send_update(ctx, update_body(ctx), auth).await?;
-    want_code(got, UNAUTH, &format!("UpdateRef {what}"))?;
     // Read back with the right token.
-    ctx.expect_ref(&ctx.head("main"), None).await
+    rejected_with(ctx, auth, &format!("UpdateRef {what}")).await
 }
 
 pub(super) async fn bearer_missing(ctx: Ctx) -> CaseResult {
@@ -93,12 +87,8 @@ pub(super) async fn bearer_wrong(ctx: Ctx) -> CaseResult {
         format!("Bearer{token}"),
     ];
     for value in wrong {
-        bearer_rejections(
-            &ctx,
-            &headers(&[("authorization", &value)]),
-            "with a wrong token",
-        )
-        .await?;
+        let auth = [("authorization".to_owned(), value)];
+        bearer_rejections(&ctx, &auth, "with a wrong token").await?;
     }
     Ok(())
 }
@@ -123,7 +113,8 @@ pub(super) async fn bearer_streaming(ctx: Ctx) -> CaseResult {
         reply.messages.is_empty() && code.as_deref() == Some(UNAUTH),
         "DownloadPack without a token: {code:?}"
     );
-    rejected_upload(&ctx, &random_pack(100), &[], "UploadPack without a token").await?;
+    let pack = random_pack(100);
+    rejected_upload(&ctx, &pack, &[], Some(UNAUTH), "UploadPack without a token").await?;
     // With the token the same download passes authentication.
     let reply = ctx.download(&id).await?;
     let code = reply.error.map(|e| e.code);
@@ -136,19 +127,8 @@ pub(super) async fn bearer_streaming(ctx: Ctx) -> CaseResult {
 
 // ------------------------------------------------------------ auth v2
 
-fn update_proc() -> &'static str {
-    Rpc::UpdateRef.procedure()
-}
-
-/// A valid envelope over `body` for `UpdateRef`.
-fn body_envelope(signer: &Signer, body: &[u8]) -> Envelope {
-    let mut env = signer.envelope(update_proc(), body_commitment(body));
-    env.digest = Some(to_hex(&hash(body)));
-    env
-}
-
 pub(super) async fn v2_missing_headers(ctx: Ctx) -> CaseResult {
-    rejected_update(&ctx, update_body(&ctx), &[], "unsigned UpdateRef").await?;
+    rejected_with(&ctx, &[], "unsigned UpdateRef").await?;
     let req = super::advance_req(
         (&ctx.head("main"), Exp::Any, &A),
         (&ctx.packmap("main"), Exp::Any, &A),
@@ -159,100 +139,65 @@ pub(super) async fn v2_missing_headers(ctx: Ctx) -> CaseResult {
         .await?;
     want_code(got, UNAUTH, "unsigned AdvanceRefs")?;
     ctx.expect_ref(&ctx.packmap("main"), None).await?;
-    rejected_upload(&ctx, &random_pack(100), &[], "unsigned UploadPack").await?;
+    let pack = random_pack(100);
+    rejected_upload(&ctx, &pack, &[], Some(UNAUTH), "unsigned UploadPack").await?;
     // Every required header matters: drop each in turn.
-    let signer = ctx.v2_signer("main")?;
-    let body = update_body(&ctx);
-    let op = signer.sign(&body_envelope(&signer, &body));
+    let op = signed_main(&ctx, &ctx.v2_signer("main")?, |_| {});
     for (name, _) in &op.headers {
-        let mut partial = op.headers.clone();
-        partial.retain(|(n, _)| n != name);
-        rejected_update(
-            &ctx,
-            body.clone(),
-            &partial,
-            &format!("UpdateRef without {name}"),
-        )
-        .await?;
+        let mut partial = op.clone();
+        partial.headers.retain(|(n, _)| n != name);
+        rejected(&ctx, &partial, &format!("UpdateRef without {name}")).await?;
     }
     Ok(())
 }
 
 pub(super) async fn v2_wrong_audience(ctx: Ctx) -> CaseResult {
     let signer = ctx.v2_signer("main")?;
-    let body = update_body(&ctx);
-    let mut env = body_envelope(&signer, &body);
-    "https://conformance.invalid".clone_into(&mut env.audience);
-    rejected_update(
+    let other = |env: &mut Envelope| "https://conformance.invalid".clone_into(&mut env.audience);
+    rejected(
         &ctx,
-        body.clone(),
-        &signer.sign(&env).headers,
+        &signed_main(&ctx, &signer, other),
         "signed for another audience",
     )
     .await?;
     // Signed for the right audience, sent with another.
-    let op = signer
-        .sign(&body_envelope(&signer, &body))
-        .with_header("x-audience", "https://conformance.invalid");
-    rejected_update(&ctx, body, &op.headers, "x-audience rewritten").await
+    let op =
+        signed_main(&ctx, &signer, |_| {}).with_header("x-audience", "https://conformance.invalid");
+    rejected(&ctx, &op, "x-audience rewritten").await
 }
 
 pub(super) async fn v2_wrong_repository(ctx: Ctx) -> CaseResult {
     let signer = ctx.v2_signer("main")?;
-    let body = update_body(&ctx);
-    let mut env = body_envelope(&signer, &body);
-    "conformance-wrong-repository".clone_into(&mut env.repository);
-    rejected_update(
+    let other = |env: &mut Envelope| "conformance-wrong-repository".clone_into(&mut env.repository);
+    rejected(
         &ctx,
-        body.clone(),
-        &signer.sign(&env).headers,
+        &signed_main(&ctx, &signer, other),
         "signed for another repository",
     )
     .await?;
-    let op = signer
-        .sign(&body_envelope(&signer, &body))
+    let op = signed_main(&ctx, &signer, |_| {})
         .with_header("x-repository", "conformance-wrong-repository");
-    rejected_update(&ctx, body, &op.headers, "x-repository rewritten").await
+    rejected(&ctx, &op, "x-repository rewritten").await
 }
 
 pub(super) async fn v2_wrong_procedure(ctx: Ctx) -> CaseResult {
     let signer = ctx.v2_signer("main")?;
-    let body = update_body(&ctx);
-    let mut env = body_envelope(&signer, &body);
-    Rpc::AdvanceRefs.procedure().clone_into(&mut env.procedure);
-    rejected_update(
-        &ctx,
-        body,
-        &signer.sign(&env).headers,
-        "signed for AdvanceRefs",
-    )
-    .await
+    let op = signed_main(&ctx, &signer, |env| {
+        Rpc::AdvanceRefs.procedure().clone_into(&mut env.procedure);
+    });
+    rejected(&ctx, &op, "signed for AdvanceRefs").await
 }
 
 pub(super) async fn v2_bad_signature(ctx: Ctx) -> CaseResult {
     let signer = ctx.v2_signer("main")?;
     let other = ctx.v2_signer("other")?;
-    let body = update_body(&ctx);
-    let op = signer.sign(&body_envelope(&signer, &body));
-    let flipped = flip_hex(header(&op, "x-signature"));
+    let op = signed_main(&ctx, &signer, |_| {});
+    let flipped = flip_hex(op.header("x-signature"));
     let tampered = op.clone().with_header("x-signature", flipped);
-    rejected_update(
-        &ctx,
-        body.clone(),
-        &tampered.headers,
-        "a flipped signature bit",
-    )
-    .await?;
+    rejected(&ctx, &tampered, "a flipped signature bit").await?;
     // A valid signature by one key, presented under another key.
     let swapped = op.with_header("x-public-key", other.public_key_hex());
-    rejected_update(&ctx, body, &swapped.headers, "another signer's public key").await
-}
-
-fn header<'a>(op: &'a SignedOp, name: &str) -> &'a str {
-    op.headers
-        .iter()
-        .find(|(n, _)| n == name)
-        .map_or("", |(_, v)| v)
+    rejected(&ctx, &swapped, "another signer's public key").await
 }
 
 /// `hex` with its last character changed (still hex).
@@ -264,58 +209,60 @@ fn flip_hex(hex: &str) -> String {
 }
 
 pub(super) async fn v2_body_digest_mismatch(ctx: Ctx) -> CaseResult {
-    let signer = ctx.v2_signer("main")?;
-    let body = update_body(&ctx);
-    let op = signer.sign_body(update_proc(), &body);
-    // The signed body, then a different body under the same signature.
-    let other = update_req(&ctx.head("main"), Exp::Any, &[0xab; 32]).encode_to_vec();
-    rejected_update(&ctx, other, &op.headers, "a body other than the signed one").await?;
+    let op = signed_main(&ctx, &ctx.v2_signer("main")?, |_| {});
+    // A different body under the signature of the first.
+    let other = Signed {
+        body: update_req(&ctx.head("main"), Exp::Any, &[0xab; 32]).encode_to_vec(),
+        ..op.clone()
+    };
+    rejected(&ctx, &other, "a body other than the signed one").await?;
     // X-Digest that disagrees with the signed commitment.
     let wrong_digest = op.with_header("x-digest", to_hex(&hash(b"other")));
-    rejected_update(
-        &ctx,
-        body,
-        &wrong_digest.headers,
-        "X-Digest differs from the commitment",
-    )
-    .await
+    rejected(&ctx, &wrong_digest, "X-Digest differs from the commitment").await
 }
 
+/// §7.1: the validity interval MUST be positive and at most 300,000 ms;
+/// expired requests MUST be rejected. (The 30 s clock lead is
+/// `auth.v2_clock_lead_bound`.)
 pub(super) async fn v2_expired(ctx: Ctx) -> CaseResult {
     let signer = ctx.v2_signer("main")?;
-    let body = update_body(&ctx);
     let now = now_ms();
     let windows = [
         ("expired", now - 400_000, now - 100_000),
-        ("created in the future", now + 120_000, now + 180_000),
         (
             "a validity window over 300 s",
             now - 1_000,
             now - 1_000 + MAX_VALIDITY_MS + 1,
         ),
         ("expiry before creation", now, now - 1),
+        ("a zero-length window (expiry == creation)", now, now),
     ];
     for (what, created_at, expires_at) in windows {
-        let mut env = body_envelope(&signer, &body);
-        env.created_at = created_at;
-        env.expires_at = expires_at;
-        rejected_update(&ctx, body.clone(), &signer.sign(&env).headers, what).await?;
+        let op = signed_main(&ctx, &signer, |env| {
+            env.created_at = created_at;
+            env.expires_at = expires_at;
+        });
+        rejected(&ctx, &op, what).await?;
     }
     Ok(())
 }
 
 pub(super) async fn v2_version_not_2(ctx: Ctx) -> CaseResult {
     let signer = ctx.v2_signer("main")?;
-    let body = update_body(&ctx);
     for version in [Some("1"), Some("3"), Some(""), None] {
-        let mut env = body_envelope(&signer, &body);
-        env.version = version.map(str::to_owned);
-        let what = format!("X-Envelope-Version {version:?}");
-        rejected_update(&ctx, body.clone(), &signer.sign(&env).headers, &what).await?;
+        let op = signed_main(&ctx, &signer, |env| {
+            env.version = version.map(str::to_owned);
+        });
+        rejected(&ctx, &op, &format!("X-Envelope-Version {version:?}")).await?;
     }
     Ok(())
 }
 
+/// §7.1: the handler MUST compare the `pack:` commitment with the upload
+/// header before reading chunks. The spec names no code for a mismatch,
+/// so any error passes; the pack must not be stored.
+// TODO(spec pass, M1/M2): fix the code (mkit-server sends
+// `unauthenticated`, a ticket mismatch `permission_denied`), then assert it.
 pub(super) async fn v2_pack_commitment_mismatch(ctx: Ctx) -> CaseResult {
     let signer = ctx.v2_signer("main")?;
     let pack = random_pack(100);
@@ -328,7 +275,7 @@ pub(super) async fn v2_pack_commitment_mismatch(ctx: Ctx) -> CaseResult {
     ];
     for (what, commitment) in wrong {
         let op = signer.sign(&signer.envelope(proc, commitment));
-        rejected_upload(&ctx, &pack, &op.headers, what).await?;
+        rejected_upload(&ctx, &pack, &op.headers, None, what).await?;
     }
     Ok(())
 }
@@ -341,18 +288,20 @@ fn gzip(data: &[u8]) -> Result<Vec<u8>, Failure> {
     Ok(enc.finish().map_err(|e| format!("gzip: {e}"))?)
 }
 
-/// A signature over the compressed body bytes, sent with
-/// `Content-Encoding: gzip`, fails closed: rejected, nothing written.
-/// SPEC-WRITE-GRANTS §9.2 has yet to say whether the commitment covers the
-/// encoded or the decoded bytes, so any error code passes.
+/// Opt-in (`strict-gzip-auth`): a signature over the compressed body bytes,
+/// sent with `Content-Encoding: gzip`, fails closed (rejected, nothing
+/// written), as mkit-server and vcs-worker do today. SPEC-WRITE-GRANTS §9.2
+/// ("exact HTTP request body bytes") leaves open whether `body:` covers the
+/// encoded or the decoded bytes; the M2 spec pass (WP-2.6/2.9) decides, so
+/// any error code passes.
 pub(super) async fn v2_gzip_signed_fails_closed(ctx: Ctx) -> CaseResult {
     let signer = ctx.v2_signer("main")?;
-    let body = gzip(&update_body(&ctx))?;
-    let mut headers = signer.sign_body(update_proc(), &body).headers;
+    let body = gzip(&main_update(&ctx).encode_to_vec())?;
+    let mut headers = signer.sign_body(Rpc::UpdateRef.procedure(), &body).headers;
     headers.push(("content-encoding".to_owned(), "gzip".to_owned()));
     let reply = ctx
         .client()
-        .post(update_proc(), UNARY_PROTO, &headers, body)
+        .post(Rpc::UpdateRef.procedure(), UNARY_PROTO, &headers, body)
         .await?;
     let got = decode_unary::<UpdateRefResponse>(&reply)?;
     ensure!(got.is_err(), "a signed gzip request was accepted");
@@ -361,9 +310,8 @@ pub(super) async fn v2_gzip_signed_fails_closed(ctx: Ctx) -> CaseResult {
 
 /// Reads stay unsigned in M0 (signed reads are M2).
 pub(super) async fn v2_reads_unsigned_ok(ctx: Ctx) -> CaseResult {
-    let ns = format!("{}/", ctx.head("dir"));
     let list = ListRefsRequest {
-        prefix: Some(ns),
+        prefix: Some(format!("{}/", ctx.head("dir"))),
         ..Default::default()
     };
     let got: Result<ListRefsResponse, _> = ctx
@@ -382,11 +330,11 @@ pub(super) async fn v2_reads_unsigned_ok(ctx: Ctx) -> CaseResult {
     );
     // A signed upload of a fresh pack, then the unsigned download of it.
     let pack = random_pack(200);
-    let msgs = upload_msgs(&pack, 2);
-    let op = signer_pack(&ctx, &pack)?;
+    let signer = ctx.v2_signer("main")?;
+    let op = signer.sign_pack(Rpc::UploadPack.procedure(), &hash(&pack), pack.len() as u64);
     let reply = ctx
         .client()
-        .stream::<UploadPackResponse>(Rpc::UploadPack, frames(&msgs), &op.headers)
+        .stream::<UploadPackResponse>(Rpc::UploadPack, frames(&upload_msgs(&pack, 2)), &op.headers)
         .await?;
     ensure!(
         reply.error.is_none(),
@@ -396,9 +344,4 @@ pub(super) async fn v2_reads_unsigned_ok(ctx: Ctx) -> CaseResult {
     let got = ctx.fetch(&hash(&pack)).await?;
     ensure!(got == pack, "unsigned download returned other bytes");
     Ok(())
-}
-
-fn signer_pack(ctx: &Ctx, pack: &[u8]) -> Result<SignedOp, Failure> {
-    let signer = ctx.v2_signer("main")?;
-    Ok(signer.sign_pack(Rpc::UploadPack.procedure(), &hash(pack), pack.len() as u64))
 }

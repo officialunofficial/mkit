@@ -36,7 +36,8 @@
 //!    --ip 127.0.0.1 --port 8791 --var AUTH_AUDIENCE:http://127.0.0.1:8791 --var AUTH_REPOSITORY:default)
 //! cargo run -p mkit-server-conformance -- wire --base-url http://127.0.0.1:8791 \
 //!    --auth auth-v2 --audience http://127.0.0.1:8791 --repository default \
-//!    --random-signer --atomic-advance --max-pack-bytes 67108864
+//!    --signer-seed-env MKIT_CONFORMANCE_SEED --atomic-advance --max-pack-bytes 67108864 \
+//!    --features health
 //!
 //! # A deployed server (staging, a third party's): the same flags with its
 //! # origin, or a TOML profile (see `ProfileSpec`); `--list-refs 0` skips the
@@ -78,12 +79,15 @@
 //! | `refs.list_prefix_stripped` | | `ListRefs` strips the prefix and sorts (SPEC-REFS §4, §4.1) |
 //! | `refs.list_prefix_component_boundary` | | a prefix matches at `/` boundaries only, with or without the trailing `/` (SPEC-REFS §4) |
 //! | `refs.list_invalid_prefix_invalid_argument` | | SPEC-REFS §4.2 |
+//! | `refs.concurrent_missing_one_winner` | | 24 racing `MISSING` creates: one wins, the rest `failed_precondition`, the ref holds the winner (SPEC-REFS §7) |
+//! | `refs.concurrent_match_one_winner` | | the same for `MATCH` |
 //! | `advance.committed` | | both refs move |
 //! | `advance.head_conflict_typed` | | `HEAD_CONFLICT` is a response, not an error; head unchanged |
 //! | `advance.packmap_conflict_typed` | | `PACKMAP_CONFLICT`; neither ref moved |
 //! | `advance.atomic_both_untouched` | `atomic-advance` | a head conflict leaves the packmap unchanged too |
 //! | `advance.nonatomic_packmap_first` | not `atomic-advance` | a head conflict leaves the packmap advanced (§4 fallback order) |
 //! | `advance.unspecified_invalid_argument` | | unset expectations, short ids |
+//! | `advance.concurrent_one_committed` | | 24 racing advances: one `COMMITTED`, the rest typed conflicts, both refs at the winner |
 //! | `packs.exists_false_then_true` | | `PackExists` before and after an upload |
 //! | `packs.pack_id_wrong_length_invalid_argument` | | on `PackExists` and `DownloadPack` |
 //! | `upload.roundtrip_multi_chunk` | | 3 chunks up; the download matches bytes and BLAKE3 |
@@ -101,8 +105,8 @@
 //! | `upload.rejected_never_overwrites_existing` | | a bad upload under a stored pack's id changes nothing |
 //! | `download.not_found_before_any_message` | | §6.2 |
 //! | `download.chunks_contiguous_ending_last` | | one header, contiguous chunks, `last` only at the end |
-//! | `health.serving` | | `Check("")` and the transport service are `SERVING`, unauthenticated |
-//! | `health.unknown_service_not_found` | | |
+//! | `health.serving` | `health` | `Check("")` and the transport service are `SERVING`, unauthenticated (no mkit spec requires health, so it is declared) |
+//! | `health.unknown_service_not_found` | `health` | |
 //! | `auth.bearer_missing_unauthenticated` | `bearer` | unary reads and writes |
 //! | `auth.bearer_wrong_unauthenticated` | `bearer` | wrong token, wrong scheme |
 //! | `auth.bearer_applies_to_streaming` | `bearer` | `UploadPack`, `DownloadPack` |
@@ -112,10 +116,13 @@
 //! | `auth.v2_wrong_procedure` | `auth-v2` | signed for another RPC |
 //! | `auth.v2_bad_signature` | `auth-v2` | a flipped bit; another signer's key |
 //! | `auth.v2_body_digest_mismatch` | `auth-v2` | another body; an `X-Digest` off the commitment |
-//! | `auth.v2_expired` | `auth-v2` | expired, future, over-long and inverted windows |
+//! | `auth.v2_expired` | `auth-v2` | expired, over-long, inverted and zero-length windows |
 //! | `auth.v2_version_not_2` | `auth-v2` | versions 1, 3, empty, absent |
-//! | `auth.v2_pack_commitment_mismatch` | `auth-v2` | length, id or kind differs from the upload header |
-//! | `auth.v2_gzip_signed_fails_closed` | `auth-v2` | a signature over gzip bytes is rejected and writes nothing |
+//! | `auth.v2_nonce_not_canonical` | `auth-v2` | uppercase, 63, 65 characters, non-hex |
+//! | `auth.v2_signature_not_strict` | `auth-v2` | `S + ℓ` rejected (strict Ed25519), the canonical signature accepted |
+//! | `auth.v2_clock_lead_bound` | `auth-v2` | created 20 s ahead accepted, 40 s ahead rejected (30 s lead; assumes clocks within ~5 s) |
+//! | `auth.v2_pack_commitment_mismatch` | `auth-v2` | length, id or kind differs from the upload header: any error (no code in the spec yet), nothing stored |
+//! | `auth.v2_gzip_signed_fails_closed` | `auth-v2`, `strict-gzip-auth` | opt-in until the M2 spec decides §9.2: a signature over gzip bytes is rejected and writes nothing |
 //! | `auth.v2_reads_unsigned_ok` | `auth-v2` | M0 reads need no signature |
 //! | `replay.same_op_returns_saved_result_after_ref_moved` | `auth-v2`, `replay` | the `auth_v2.mjs` a, b, a sequence |
 //! | `replay.concurrent_duplicates_all_succeed` | `auth-v2`, `replay` | 16 parallel duplicates, one effect |
@@ -128,7 +135,7 @@
 //! | `quota.bytes_exhaustion_resource_exhausted` | `auth-v2`, `quota` | refused at the header |
 //! | `quota.exhaustion_allocates_no_replay` | `auth-v2`, `replay`, `quota` | the nonce stays unspent |
 //! | `quota.replay_not_charged` | `auth-v2`, `replay`, `quota` | |
-//! | `growth.replay_and_quota_pruned` | `auth-v2`, `replay`, `quota`, `test-faults` | the partition shrinks back after load (R-31); waits out a quota window of at most 60 s |
+//! | `growth.replay_and_quota_pruned` | `auth-v2`, `replay`, `quota`, `test-faults` | records answer before expiry; after validity + grace + window the partition shrinks back to an absolute bound (R-31); needs a quota window ≤ 60 s allowing 265 writes, and a disposable server |
 //! | `list.large_response_within_limit` | | records one `ListRefs` response over `list_refs` refs (M1 asserts the bound) |
 //!
 //! # The `test-faults` contract

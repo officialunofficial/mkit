@@ -112,6 +112,13 @@ pub enum Feature {
     /// The server honors the `test-faults` request directives and serves
     /// `GET /__mkit_test/stats`.
     TestFaults,
+    /// The server serves `grpc.health.v1.Health`. No mkit spec requires
+    /// it, so a profile declares it.
+    Health,
+    /// Opt-in: the server rejects an auth v2 signature over a gzip-encoded
+    /// body. SPEC-WRITE-GRANTS §9.2 has yet to say whether `body:` commits
+    /// to the encoded or the decoded bytes (the M2 spec pass, WP-2.6/2.9).
+    StrictGzipAuth,
     /// Multi-repository addressing (M1).
     MultiRepo,
     /// Upload tickets and resumable parts (M1).
@@ -136,13 +143,15 @@ pub enum Feature {
     Admin,
 }
 
-const FEATURE_NAMES: [(Feature, &str); 17] = [
+const FEATURE_NAMES: [(Feature, &str); 19] = [
     (Feature::Bearer, "bearer"),
     (Feature::AuthV2, "auth-v2"),
     (Feature::AtomicAdvance, "atomic-advance"),
     (Feature::Replay, "replay"),
     (Feature::Quota, "quota"),
     (Feature::TestFaults, "test-faults"),
+    (Feature::Health, "health"),
+    (Feature::StrictGzipAuth, "strict-gzip-auth"),
     (Feature::MultiRepo, "multi-repo"),
     (Feature::Tickets, "tickets"),
     (Feature::Grants, "grants"),
@@ -182,6 +191,13 @@ impl FromStr for Feature {
 /// Default `list.large_response_within_limit` population.
 pub const DEFAULT_LIST_REFS: u32 = 10_000;
 
+/// Default [`Profile::replay_prune_grace_ms`]: mkit-server's grace after an
+/// envelope's expiry before its replay record may be pruned.
+pub const DEFAULT_REPLAY_PRUNE_GRACE_MS: i64 = 60_000;
+
+/// Default [`Profile::duplicate_retry_ms`].
+pub const DEFAULT_DUPLICATE_RETRY_MS: u64 = 10_000;
+
 /// Everything the suite assumes about one server.
 #[derive(Debug, Clone)]
 pub struct Profile {
@@ -203,6 +219,16 @@ pub struct Profile {
     pub features: BTreeSet<Feature>,
     /// Refs `list.large_response_within_limit` creates.
     pub list_refs: u32,
+    /// How long after an envelope's expiry the server may keep its replay
+    /// record before pruning it; the growth case waits it out. No spec
+    /// fixes it (a record MUST outlive the signed expiry, §7.1).
+    pub replay_prune_grace_ms: i64,
+    /// How long `replay.concurrent_duplicates_all_succeed` keeps retrying a
+    /// duplicate answered with the retryable `aborted`.
+    pub duplicate_retry_ms: u64,
+    /// Sign read RPCs too (SPEC-WRITE-GRANTS §9.2, M2). Off in M0, where
+    /// reads are unsigned; the hook the M2 signed-read cases turn on.
+    pub sign_reads: bool,
 }
 
 impl Profile {
@@ -220,6 +246,9 @@ impl Profile {
             milestone: Milestone::M0,
             features: BTreeSet::new(),
             list_refs: DEFAULT_LIST_REFS,
+            replay_prune_grace_ms: DEFAULT_REPLAY_PRUNE_GRACE_MS,
+            duplicate_retry_ms: DEFAULT_DUPLICATE_RETRY_MS,
+            sign_reads: false,
         };
         profile.derive_features();
         profile
@@ -283,7 +312,7 @@ pub(crate) fn random_bytes<const N: usize>() -> [u8; N] {
 /// auth = "auth-v2"            # none | bearer | auth-v2
 /// audience = "http://localhost:8791"
 /// repository = "default"
-/// random_signer = true        # or signer_seed_hex = "<64 hex>"
+/// random_signer = true        # or signer_seed_env = "VAR" (or signer_seed_hex)
 /// atomic_advance = true
 /// max_pack_bytes = 67108864
 /// milestone = "M0"
@@ -303,6 +332,9 @@ pub struct ProfileSpec {
     pub repository: Option<String>,
     /// Auth v2 signer seed, 64 hex characters.
     pub signer_seed_hex: Option<String>,
+    /// The environment variable holding the signer seed (64 hex), which
+    /// keeps it out of files and process listings.
+    pub signer_seed_env: Option<String>,
     /// Use a random auth v2 signer seed.
     pub random_signer: Option<bool>,
     /// The server commits `AdvanceRefs` atomically.
@@ -323,6 +355,12 @@ pub struct ProfileSpec {
     pub run_id: Option<String>,
     /// Refs the large-listing case creates.
     pub list_refs: Option<u32>,
+    /// See [`Profile::replay_prune_grace_ms`].
+    pub replay_prune_grace_ms: Option<i64>,
+    /// See [`Profile::duplicate_retry_ms`].
+    pub duplicate_retry_ms: Option<u64>,
+    /// See [`Profile::sign_reads`].
+    pub sign_reads: Option<bool>,
 }
 
 impl ProfileSpec {
@@ -334,16 +372,34 @@ impl ProfileSpec {
         toml::from_str(text).map_err(|e| format!("profile: {e}"))
     }
 
-    /// `self` with every field `over` sets replaced.
+    /// `self` with every field `over` sets replaced. The signer is one
+    /// choice: if `over` names any signer source, `self`'s are dropped.
     #[must_use]
     pub fn merge(self, over: Self) -> Self {
+        let over_signer = over.signer_seed_hex.is_some()
+            || over.signer_seed_env.is_some()
+            || over.random_signer.is_some();
+        let (signer_seed_hex, signer_seed_env, random_signer) = if over_signer {
+            (
+                over.signer_seed_hex,
+                over.signer_seed_env,
+                over.random_signer,
+            )
+        } else {
+            (
+                self.signer_seed_hex,
+                self.signer_seed_env,
+                self.random_signer,
+            )
+        };
         Self {
             auth: over.auth.or(self.auth),
             bearer_token_env: over.bearer_token_env.or(self.bearer_token_env),
             audience: over.audience.or(self.audience),
             repository: over.repository.or(self.repository),
-            signer_seed_hex: over.signer_seed_hex.or(self.signer_seed_hex),
-            random_signer: over.random_signer.or(self.random_signer),
+            signer_seed_hex,
+            signer_seed_env,
+            random_signer,
             atomic_advance: over.atomic_advance.or(self.atomic_advance),
             max_pack_bytes: over.max_pack_bytes.or(self.max_pack_bytes),
             quota_ops: over.quota_ops.or(self.quota_ops),
@@ -353,11 +409,14 @@ impl ProfileSpec {
             features: over.features.or(self.features),
             run_id: over.run_id.or(self.run_id),
             list_refs: over.list_refs.or(self.list_refs),
+            replay_prune_grace_ms: over.replay_prune_grace_ms.or(self.replay_prune_grace_ms),
+            duplicate_retry_ms: over.duplicate_retry_ms.or(self.duplicate_retry_ms),
+            sign_reads: over.sign_reads.or(self.sign_reads),
         }
     }
 
     /// The profile this spec describes; `env` looks up environment
-    /// variables (the bearer token).
+    /// variables (the bearer token, the signer seed).
     ///
     /// # Errors
     /// A missing or inconsistent field.
@@ -376,15 +435,20 @@ impl ProfileSpec {
                 mkit_core::write_auth::validate_audience(&audience)
                     .map_err(|e| format!("--audience {audience}: {e}"))?;
                 let repository = self.repository.ok_or("--auth auth-v2 needs --repository")?;
-                let seed = match (self.signer_seed_hex, self.random_signer.unwrap_or(false)) {
-                    (Some(hex), false) => mkit_core::hash::from_hex(&hex)
+                let random = self.random_signer.unwrap_or(false);
+                let seed = match (self.signer_seed_hex, self.signer_seed_env, random) {
+                    (Some(hex), None, false) => mkit_core::hash::from_hex(&hex)
                         .map_err(|_| "--signer-seed-hex needs 64 hex characters".to_owned())?,
-                    (None, true) => random_bytes::<32>(),
+                    (None, Some(var), false) => {
+                        let hex = env(&var).ok_or_else(|| format!("${var} is not set"))?;
+                        mkit_core::hash::from_hex(hex.trim())
+                            .map_err(|_| format!("${var} needs 64 hex characters"))?
+                    }
+                    (None, None, true) => random_bytes::<32>(),
                     _ => {
-                        return Err(
-                            "--auth auth-v2 needs exactly one of --signer-seed-hex, --random-signer"
-                                .to_owned(),
-                        );
+                        return Err("--auth auth-v2 needs exactly one of --signer-seed-env, \
+                             --signer-seed-hex, --random-signer"
+                            .to_owned());
                     }
                 };
                 WireAuth::AuthV2 {
@@ -426,6 +490,13 @@ impl ProfileSpec {
         if let Some(n) = self.list_refs {
             profile.list_refs = n;
         }
+        if let Some(ms) = self.replay_prune_grace_ms {
+            profile.replay_prune_grace_ms = ms;
+        }
+        if let Some(ms) = self.duplicate_retry_ms {
+            profile.duplicate_retry_ms = ms;
+        }
+        profile.sign_reads = self.sign_reads.unwrap_or(false);
         profile.derive_features();
         // `name` adds a feature to the derived set, `-name` removes one.
         for entry in self.features.unwrap_or_default() {
@@ -480,6 +551,28 @@ mod tests {
             let built = ProfileSpec::from_toml(text).and_then(|s| s.build(|_| None));
             assert!(built.is_err(), "{text}");
         }
+    }
+
+    #[test]
+    fn flags_override_the_file_signer_and_seeds_come_from_env() {
+        let file = ProfileSpec::from_toml(
+            "auth = \"auth-v2\"\naudience = \"http://localhost:1\"\nrepository = \"r\"\n\
+             random_signer = true",
+        )
+        .unwrap();
+        let flags = ProfileSpec {
+            signer_seed_env: Some("SEED".into()),
+            ..ProfileSpec::default()
+        };
+        let seed = "ab".repeat(32);
+        let p = file
+            .merge(flags)
+            .build(|v| (v == "SEED").then(|| seed.clone()))
+            .unwrap();
+        let WireAuth::AuthV2 { seed: got, .. } = p.auth else {
+            panic!("{:?}", p.auth);
+        };
+        assert_eq!(got, [0xab; 32]);
     }
 
     #[test]

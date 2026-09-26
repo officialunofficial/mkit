@@ -82,14 +82,14 @@ filter = 'binary(fs_backends)'
 slow-timeout = { period = "150s", terminate-after = 1 }
 
 # The wire suite's growth case waits out replay expiry plus the server's
-# prune grace on the real clock (~70s): pruning never follows the
-# test-faults clock skew. Not a hang.
+# prune grace on the real clock (~80s; so does its no-prune mutant):
+# pruning never follows the test-faults clock skew. Not a hang.
 [[profile.default.overrides]]
-filter = 'binary(baseline_pipeline_memory) and test(=pipeline_auth_v2_test_faults)'
+filter = 'binary(baseline_pipeline_memory) and (test(=pipeline_auth_v2_test_faults) or test(=mutant_no_prune_fails_growth))'
 slow-timeout = { period = "180s", terminate-after = 1 }
 
 [[profile.ci.overrides]]
-filter = 'binary(baseline_pipeline_memory) and test(=pipeline_auth_v2_test_faults)'
+filter = 'binary(baseline_pipeline_memory) and (test(=pipeline_auth_v2_test_faults) or test(=mutant_no_prune_fails_growth))'
 slow-timeout = { period = "180s", terminate-after = 1 }
 
 [profile.ignored-lane]

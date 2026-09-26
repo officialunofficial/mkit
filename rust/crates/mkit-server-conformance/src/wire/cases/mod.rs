@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use buffa::Message;
 use futures::future::BoxFuture;
-use mkit_core::hash::hash;
+use mkit_core::hash::{hash, to_hex};
 use mkit_transport_connect::generated::__buffa::oneof::download_pack_response::Body as DownloadBody;
 use mkit_transport_connect::generated::__buffa::oneof::upload_pack_request::Body as UploadBody;
 use mkit_transport_connect::generated::{
@@ -20,10 +20,12 @@ use mkit_transport_connect::generated::{
 
 use super::client::{Client, Rpc, RpcError, StreamReply, frame, frames};
 use super::profile::{Feature, Milestone, Profile, WireAuth, random_bytes};
-use super::sign::Signer;
+use super::sign::{Envelope, Signer, body_commitment};
 
 mod advance;
 mod auth;
+mod auth_bounds;
+mod concurrent;
 mod download;
 mod growth;
 mod health;
@@ -160,12 +162,15 @@ cases! {
     "refs.list_prefix_stripped" => refs::list_prefix_stripped, M0, [], [];
     "refs.list_prefix_component_boundary" => refs::list_prefix_component_boundary, M0, [], [];
     "refs.list_invalid_prefix_invalid_argument" => refs::list_invalid_prefix, M0, [], [];
+    "refs.concurrent_missing_one_winner" => concurrent::missing_one_winner, M0, [], [];
+    "refs.concurrent_match_one_winner" => concurrent::match_one_winner, M0, [], [];
     "advance.committed" => advance::committed, M0, [], [];
     "advance.head_conflict_typed" => advance::head_conflict_typed, M0, [], [];
     "advance.packmap_conflict_typed" => advance::packmap_conflict_typed, M0, [], [];
     "advance.atomic_both_untouched" => advance::atomic_both_untouched, M0, [AtomicAdvance], [];
     "advance.nonatomic_packmap_first" => advance::nonatomic_packmap_first, M0, [], [AtomicAdvance];
     "advance.unspecified_invalid_argument" => advance::unspecified_invalid_argument, M0, [], [];
+    "advance.concurrent_one_committed" => concurrent::advance_one_committed, M0, [], [];
     "packs.exists_false_then_true" => packs::exists_false_then_true, M0, [], [];
     "packs.pack_id_wrong_length_invalid_argument" => packs::pack_id_wrong_length, M0, [], [];
     "upload.roundtrip_multi_chunk" => upload::roundtrip_multi_chunk, M0, [], [];
@@ -183,8 +188,8 @@ cases! {
     "upload.rejected_never_overwrites_existing" => upload::rejected_never_overwrites, M0, [], [];
     "download.not_found_before_any_message" => download::not_found_before_any_message, M0, [], [];
     "download.chunks_contiguous_ending_last" => download::chunks_contiguous_ending_last, M0, [], [];
-    "health.serving" => health::serving, M0, [], [];
-    "health.unknown_service_not_found" => health::unknown_service_not_found, M0, [], [];
+    "health.serving" => health::serving, M0, [Health], [];
+    "health.unknown_service_not_found" => health::unknown_service_not_found, M0, [Health], [];
     "auth.bearer_missing_unauthenticated" => auth::bearer_missing, M0, [Bearer], [];
     "auth.bearer_wrong_unauthenticated" => auth::bearer_wrong, M0, [Bearer], [];
     "auth.bearer_applies_to_streaming" => auth::bearer_streaming, M0, [Bearer], [];
@@ -196,8 +201,11 @@ cases! {
     "auth.v2_body_digest_mismatch" => auth::v2_body_digest_mismatch, M0, [AuthV2], [];
     "auth.v2_expired" => auth::v2_expired, M0, [AuthV2], [];
     "auth.v2_version_not_2" => auth::v2_version_not_2, M0, [AuthV2], [];
+    "auth.v2_nonce_not_canonical" => auth_bounds::v2_nonce_not_canonical, M0, [AuthV2], [];
+    "auth.v2_signature_not_strict" => auth_bounds::v2_signature_not_strict, M0, [AuthV2], [];
+    "auth.v2_clock_lead_bound" => auth_bounds::v2_clock_lead_bound, M0, [AuthV2], [];
     "auth.v2_pack_commitment_mismatch" => auth::v2_pack_commitment_mismatch, M0, [AuthV2], [];
-    "auth.v2_gzip_signed_fails_closed" => auth::v2_gzip_signed_fails_closed, M0, [AuthV2], [];
+    "auth.v2_gzip_signed_fails_closed" => auth::v2_gzip_signed_fails_closed, M0, [AuthV2, StrictGzipAuth], [];
     "auth.v2_reads_unsigned_ok" => auth::v2_reads_unsigned_ok, M0, [AuthV2], [];
     "replay.same_op_returns_saved_result_after_ref_moved" => replay::same_op_after_ref_moved, M0, [AuthV2, Replay], [];
     "replay.concurrent_duplicates_all_succeed" => replay::concurrent_duplicates, M0, [AuthV2, Replay], [];
@@ -372,6 +380,56 @@ pub(crate) enum Commit<'a> {
     Pack(&'a [u8], u64),
 }
 
+/// A signed unary request: its exact body and headers, replayable byte for
+/// byte, or tampered with before sending.
+#[derive(Debug, Clone)]
+pub(crate) struct Signed {
+    pub(crate) rpc: Rpc,
+    pub(crate) body: Vec<u8>,
+    pub(crate) headers: Vec<(String, String)>,
+    /// The `Idempotency-Key`.
+    pub(crate) nonce: String,
+}
+
+impl Signed {
+    /// Replace (or add) header `name`, keeping the signature.
+    pub(crate) fn with_header(mut self, name: &str, value: impl Into<String>) -> Self {
+        self.headers.retain(|(n, _)| n != name);
+        self.headers.push((name.to_owned(), value.into()));
+        self
+    }
+
+    /// The value of header `name`.
+    pub(crate) fn header(&self, name: &str) -> &str {
+        self.headers
+            .iter()
+            .find(|(n, _)| n == name)
+            .map_or("", |(_, v)| v)
+    }
+}
+
+/// Sign `msg` for `rpc` with `signer`: a fresh envelope over the exact
+/// encoded bytes (`body:` commitment and `X-Digest`), which `edit` may
+/// change first (dates, nonce, audience, ...).
+pub(crate) fn sign_unary(
+    signer: &Signer,
+    rpc: Rpc,
+    msg: &impl Message,
+    edit: impl FnOnce(&mut Envelope),
+) -> Signed {
+    let body = msg.encode_to_vec();
+    let mut env = signer.envelope(rpc.procedure(), body_commitment(&body));
+    env.digest = Some(to_hex(&hash(&body)));
+    edit(&mut env);
+    let op = signer.sign(&env);
+    Signed {
+        rpc,
+        body,
+        headers: op.headers,
+        nonce: op.nonce,
+    }
+}
+
 impl Ctx {
     pub(crate) fn new(client: Client, profile: Arc<Profile>, case: &'static str) -> Self {
         Self {
@@ -446,13 +504,25 @@ impl Ctx {
 
     /// The headers the profile's auth mode puts on `rpc`: none; the bearer
     /// token; or, for an auth v2 write, a fresh signature by signer
-    /// `"main"` over `commit`.
+    /// `"main"` over `commit`. Reads are signed only with
+    /// [`Profile::sign_reads`] (M2).
     pub(crate) fn auth_headers(&self, rpc: Rpc, commit: Commit<'_>) -> Vec<(String, String)> {
+        self.auth_headers_as("main", rpc, commit)
+    }
+
+    /// [`Ctx::auth_headers`], signing (under auth v2) as signer `label`.
+    pub(crate) fn auth_headers_as(
+        &self,
+        label: &str,
+        rpc: Rpc,
+        commit: Commit<'_>,
+    ) -> Vec<(String, String)> {
         if let WireAuth::Bearer { token } = &self.profile.auth {
             return vec![("authorization".to_owned(), format!("Bearer {token}"))];
         }
-        // `None` without auth v2; reads stay unsigned in M0.
-        let signer = self.signer("main").filter(|_| rpc.is_write());
+        // `None` without auth v2.
+        let sign = rpc.is_write() || self.profile.sign_reads;
+        let signer = self.signer(label).filter(|_| sign);
         signer.map_or_else(Vec::new, |signer| {
             let op = match commit {
                 Commit::Body(body) => signer.sign_body(rpc.procedure(), body),
@@ -468,9 +538,25 @@ impl Ctx {
         rpc: Rpc,
         req: &impl Message,
     ) -> Result<Result<M, RpcError>, String> {
+        self.call_as("main", rpc, req).await
+    }
+
+    /// [`Ctx::call`] as signer `label` (distinct signers keep concurrent
+    /// writes clear of per-signer quotas).
+    pub(crate) async fn call_as<M: Message>(
+        &self,
+        label: &str,
+        rpc: Rpc,
+        req: &impl Message,
+    ) -> Result<Result<M, RpcError>, String> {
         let body = req.encode_to_vec();
-        let headers = self.auth_headers(rpc, Commit::Body(&body));
+        let headers = self.auth_headers_as(label, rpc, Commit::Body(&body));
         self.client.unary(rpc, body, &headers).await
+    }
+
+    /// Send a [`Signed`] request as it stands.
+    pub(crate) async fn send<M: Message>(&self, s: &Signed) -> Result<Result<M, RpcError>, String> {
+        self.client.unary(s.rpc, s.body.clone(), &s.headers).await
     }
 
     /// `ReadRef(name)`: `Some(id)` or `None`, checking the absent shape.

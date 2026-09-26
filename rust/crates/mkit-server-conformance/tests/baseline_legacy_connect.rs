@@ -13,7 +13,7 @@ mod common;
 
 use std::sync::Arc;
 
-use mkit_server_conformance::wire::{Profile, WireAuth, WireTarget, run};
+use mkit_server_conformance::wire::{Feature, Profile, WireAuth, WireTarget, run};
 use mkit_transport_file::FileTransport;
 
 /// Cases the legacy server fails, each with the reason. The pipeline passes
@@ -45,6 +45,8 @@ async fn legacy_mkit_serve_http() {
 
     let mut profile = Profile::new(WireAuth::None);
     profile.list_refs = 200;
+    // `mkit serve --http` mounts `grpc.health.v1.Health` (mkit#796).
+    profile.features.insert(Feature::Health);
     let target = WireTarget {
         base_url: origin.parse().unwrap(),
         profile,

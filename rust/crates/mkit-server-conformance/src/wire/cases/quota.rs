@@ -3,16 +3,16 @@
 //! replayed write is never charged again. Each case exhausts its own
 //! signer, so it needs a profile that declares a tiny quota.
 
-use buffa::Message as _;
-use mkit_core::hash::{hash, to_hex};
+use mkit_core::hash::hash;
 use mkit_transport_connect::generated::UpdateRefResponse;
 
 use super::{
-    A, CaseResult, Ctx, Exp, Failure, header_msg, random_pack, update_req, want_code, want_ok,
+    A, CaseResult, Ctx, Exp, Failure, Signed, header_msg, random_pack, sign_unary, update_req,
+    want_code, want_ok,
 };
 use crate::wire::client::{Rpc, RpcError};
 use crate::wire::profile::QuotaLimits;
-use crate::wire::sign::{Signer, body_commitment};
+use crate::wire::sign::Signer;
 
 const EXHAUSTED: &str = "resource_exhausted";
 
@@ -23,30 +23,18 @@ fn limits(ctx: &Ctx) -> Result<QuotaLimits, Failure> {
 }
 
 /// A signed `UpdateRef(<ns>/<leaf>, MISSING, A)`, optionally under
-/// `nonce`: body and headers, replayable byte for byte.
-fn signed(
-    ctx: &Ctx,
-    signer: &Signer,
-    leaf: &str,
-    nonce: Option<&str>,
-) -> (Vec<u8>, Vec<(String, String)>) {
-    let body = update_req(&ctx.head(leaf), Exp::Missing, &A).encode_to_vec();
-    let mut env = signer.envelope(Rpc::UpdateRef.procedure(), body_commitment(&body));
-    env.digest = Some(to_hex(&hash(&body)));
-    if let Some(nonce) = nonce {
-        nonce.clone_into(&mut env.nonce);
-    }
-    let headers = signer.sign(&env).headers;
-    (body, headers)
+/// `nonce`.
+fn signed(ctx: &Ctx, signer: &Signer, leaf: &str, nonce: Option<&str>) -> Signed {
+    let req = update_req(&ctx.head(leaf), Exp::Missing, &A);
+    sign_unary(signer, Rpc::UpdateRef, &req, |env| {
+        if let Some(nonce) = nonce {
+            nonce.clone_into(&mut env.nonce);
+        }
+    })
 }
 
-async fn send(
-    ctx: &Ctx,
-    (body, headers): &(Vec<u8>, Vec<(String, String)>),
-) -> Result<Result<UpdateRefResponse, RpcError>, String> {
-    ctx.client()
-        .unary(Rpc::UpdateRef, body.clone(), headers)
-        .await
+async fn send(ctx: &Ctx, s: &Signed) -> Result<Result<UpdateRefResponse, RpcError>, String> {
+    ctx.send(s).await
 }
 
 /// A fresh signed write of `<ns>/<leaf>`.
@@ -120,12 +108,8 @@ pub(super) async fn exhaustion_allocates_no_replay(ctx: Ctx) -> CaseResult {
     want_code(send(&ctx, &x).await?, EXHAUSTED, "write X over the budget")?;
     // Had X left a replay record, another operation under its nonce would
     // be `invalid_argument` (fingerprint mismatch), and X's retry `ok`.
-    let nonce =
-        x.1.iter()
-            .find(|(n, _)| n == "idempotency-key")
-            .map(|(_, v)| v.clone());
     want_code(
-        write(&ctx, &signer, "y", nonce.as_deref()).await?,
+        write(&ctx, &signer, "y", Some(&x.nonce)).await?,
         EXHAUSTED,
         "write Y under X's nonce",
     )?;

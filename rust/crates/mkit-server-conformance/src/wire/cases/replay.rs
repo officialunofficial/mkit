@@ -2,42 +2,29 @@
 //! with the same nonce returns its saved result and repeats no effect; a
 //! nonce reused for another operation is `invalid_argument`.
 
-use buffa::Message as _;
+use std::time::{Duration, Instant};
+
 use futures::future::join_all;
 use mkit_core::hash::hash;
 use mkit_transport_connect::generated::{AdvanceOutcome, AdvanceRefsResponse, UpdateRefResponse};
 
 use super::{
-    A, B, C, CaseResult, Ctx, Exp, advance_req, ensure, outcome_name, random_pack, update_req,
-    upload_msgs, want_code, want_ok,
+    A, B, C, CaseResult, Ctx, Exp, Signed, advance_req, ensure, outcome_name, random_pack,
+    sign_unary, update_req, upload_msgs, want_code, want_ok,
 };
 use crate::wire::client::{Rpc, RpcError};
-use crate::wire::sign::{SignedOp, Signer};
-
-/// A signed request: exact body bytes and headers, replayable.
-struct Signed {
-    rpc: Rpc,
-    body: Vec<u8>,
-    op: SignedOp,
-}
+use crate::wire::sign::Signer;
 
 fn signed(signer: &Signer, rpc: Rpc, msg: &impl buffa::Message) -> Signed {
-    let body = msg.encode_to_vec();
-    let op = signer.sign_body(rpc.procedure(), &body);
-    Signed { rpc, body, op }
+    sign_unary(signer, rpc, msg, |_| {})
 }
 
 async fn send_update(ctx: &Ctx, s: &Signed) -> Result<Result<UpdateRefResponse, RpcError>, String> {
-    ctx.client()
-        .unary(s.rpc, s.body.clone(), &s.op.headers)
-        .await
+    ctx.send(s).await
 }
 
 async fn send_advance(ctx: &Ctx, s: &Signed) -> Result<Result<i32, RpcError>, String> {
-    let got: Result<AdvanceRefsResponse, _> = ctx
-        .client()
-        .unary(s.rpc, s.body.clone(), &s.op.headers)
-        .await?;
+    let got: Result<AdvanceRefsResponse, _> = ctx.send(s).await?;
     Ok(got.map(|r| r.outcome.map_or(0, |o| o.to_i32())))
 }
 
@@ -61,25 +48,24 @@ pub(super) async fn same_op_after_ref_moved(ctx: Ctx) -> CaseResult {
 }
 
 /// All duplicates succeed with the one result. A duplicate that meets the
-/// operation in flight may get a retryable `aborted` (§5), and is retried.
+/// operation in flight may get a retryable `aborted` (§5), and is retried
+/// for up to `Profile::duplicate_retry_ms`.
 pub(super) async fn concurrent_duplicates(ctx: Ctx) -> CaseResult {
     let signer = ctx.v2_signer("main")?;
     let op = update(&ctx, &signer, Exp::Missing, &A);
+    let window = Duration::from_millis(ctx.profile().duplicate_retry_ms);
     let attempt = |ctx: &Ctx, op: &Signed| {
-        let (ctx, rpc, body, headers) =
-            (ctx.clone(), op.rpc, op.body.clone(), op.op.headers.clone());
+        let (ctx, op) = (ctx.clone(), op.clone());
         async move {
-            for _ in 0..20 {
-                let got: Result<UpdateRefResponse, RpcError> =
-                    ctx.client().unary(rpc, body.clone(), &headers).await?;
-                match got {
-                    Err(e) if e.code == "aborted" => {
-                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let started = Instant::now();
+            loop {
+                match ctx.send::<UpdateRefResponse>(&op).await? {
+                    Err(e) if e.code == "aborted" && started.elapsed() < window => {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
                     }
-                    other => return Ok(other.map(|_| ())),
+                    other => return Ok::<_, String>(other.map(|_| ())),
                 }
             }
-            Err("still `aborted` after 20 retries".to_owned())
         }
     };
     let results = join_all((0..16).map(|_| attempt(&ctx, &op))).await;
@@ -94,18 +80,10 @@ pub(super) async fn nonce_reuse_different_op(ctx: Ctx) -> CaseResult {
     let a = update(&ctx, &signer, Exp::Missing, &A);
     want_ok(send_update(&ctx, &a).await?, "first UpdateRef")?;
     // Another operation, correctly signed, under the same nonce.
-    let body = update_req(&ctx.head("main"), Exp::Any, &C).encode_to_vec();
-    let mut env = signer.envelope(
-        Rpc::UpdateRef.procedure(),
-        crate::wire::sign::body_commitment(&body),
-    );
-    env.digest = Some(mkit_core::hash::to_hex(&hash(&body)));
-    env.nonce.clone_from(&a.op.nonce);
-    let reuse = Signed {
-        rpc: Rpc::UpdateRef,
-        body,
-        op: signer.sign(&env),
-    };
+    let other = update_req(&ctx.head("main"), Exp::Any, &C);
+    let reuse = sign_unary(&signer, Rpc::UpdateRef, &other, |env| {
+        env.nonce.clone_from(&a.nonce);
+    });
     want_code(
         send_update(&ctx, &reuse).await?,
         "invalid_argument",
@@ -218,13 +196,10 @@ pub(super) async fn expired_retry_rejected(ctx: Ctx) -> CaseResult {
     let signer = ctx.v2_signer("main")?;
     let a = update(&ctx, &signer, Exp::Missing, &A);
     want_ok(send_update(&ctx, &a).await?, "UpdateRef")?;
-    let mut headers = a.op.headers.clone();
-    headers.push((
-        crate::wire::CLOCK_SKEW_HEADER.to_owned(),
-        "300000".to_owned(),
-    ));
-    let got: Result<UpdateRefResponse, RpcError> =
-        ctx.client().unary(a.rpc, a.body.clone(), &headers).await?;
+    let skewed = a
+        .clone()
+        .with_header(crate::wire::CLOCK_SKEW_HEADER, "300000");
+    let got: Result<UpdateRefResponse, RpcError> = ctx.send(&skewed).await?;
     want_code(got, "unauthenticated", "a replay past its expiry")?;
     ctx.expect_ref(&ctx.head("main"), Some(&A)).await
 }
