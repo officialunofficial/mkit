@@ -17,6 +17,9 @@
 //!   [`NamespaceStore`] that routes each [`Partition`] to its own Durable
 //!   Object ([`naming`]).
 //! - [`wire`]: the JSON between the two; [`clock`]: the Worker clock.
+//! - [`adapter`]: what a deployment's `#[event(fetch)]` and
+//!   `#[durable_object]` call: the pipeline's Connect binding over these
+//!   stores, streaming both bodies.
 //!
 //! Everything that touches a `worker` handle is compiled for `wasm32`
 //! only. The logic around it is generic over small backend traits
@@ -24,10 +27,10 @@
 //! host against simulated R2 and Durable Object backends, through the
 //! `mkit-server-conformance` storage suite.
 //!
-//! The fetch adapter is WP-M0-17's. It strips `connect-timeout-ms` and
-//! `grpc-timeout` before Connect dispatch
-//! (`mkit_worker_common::adapter::is_deadline_header`): connectrpc turns
-//! them into a deadline with `Instant::now()`, which panics on wasm32.
+//! The fetch adapter strips `connect-timeout-ms` and `grpc-timeout` before
+//! Connect dispatch (`mkit_worker_common::adapter::is_deadline_header`):
+//! connectrpc turns them into a deadline with `Instant::now()`, which
+//! panics on wasm32.
 //!
 //! [`BlobStore`]: mkit_server::BlobStore
 //! [`NamespaceStore`]: mkit_server::NamespaceStore
@@ -36,6 +39,7 @@
 //! [`R2BlobStore`]: r2::R2BlobStore
 //! [`DoNamespaceStore`]: ns_client::DoNamespaceStore
 
+pub mod adapter;
 pub mod clock;
 pub mod do_sql;
 #[cfg(feature = "test-faults")]
@@ -89,6 +93,7 @@ mod tests {
     fn no_transaction_control_or_pragma_in_the_crate() {
         let sources = [
             include_str!("lib.rs"),
+            include_str!("adapter.rs"),
             include_str!("clock.rs"),
             include_str!("do_sql.rs"),
             include_str!("naming.rs"),

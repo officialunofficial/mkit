@@ -1,10 +1,9 @@
 //! Write quotas: the value types, the default limits and the fixed-window
 //! evaluation.
 //!
-//! [`evaluate_quota`] is the canonical copy of
-//! `apps/vcs-worker/src/write_quota.rs`, which goes when `vcs-worker`
-//! switches in WP-M0-17. `apps/repo-worker` keeps its own copy (planner
-//! decision Q11).
+//! [`evaluate_quota`] is the canonical copy of vcs-worker's former
+//! `write_quota.rs` (removed when vcs-worker moved onto this crate in
+//! WP-M0-17). `apps/repo-worker` keeps its own copy (planner decision Q11).
 
 use mkit_core::hash::to_hex;
 
@@ -136,9 +135,8 @@ pub fn evaluate_quota(
 mod tests {
     use super::*;
 
-    // The quota tests below are ported verbatim from
-    // apps/vcs-worker/src/write_quota.rs, reading its constants from
-    // DEFAULT_WRITE_QUOTA.
+    // The quota tests below are ported verbatim from vcs-worker's former
+    // write_quota.rs, reading its constants from DEFAULT_WRITE_QUOTA.
     const WRITE_QUOTA_WINDOW_MS: i64 = DEFAULT_WRITE_QUOTA.window_ms;
     const WRITE_QUOTA_MAX_OPS: u32 = DEFAULT_WRITE_QUOTA.max_ops;
     const WRITE_QUOTA_MAX_BYTES: u64 = DEFAULT_WRITE_QUOTA.max_bytes;

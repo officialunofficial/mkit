@@ -71,15 +71,15 @@ pub trait EnvelopeSigner: Send + Sync {
 }
 
 /// `true` for the unary write procedures (`UpdateRef`, `AdvanceRefs`) that
-/// need the body-bound envelope. Mirrors
-/// `apps/vcs-worker/src/worker_impl/auth.rs::requires_unary_write_auth`.
+/// need the body-bound envelope: the procedures `mkit-server`'s auth v2
+/// stage signs as unary writes.
 fn requires_unary_write_auth(procedure: &str) -> bool {
     procedure.ends_with("/UpdateRef") || procedure.ends_with("/AdvanceRefs")
 }
 
 /// `true` for the streaming write procedure (`UploadPack`) that needs the
-/// signed pack-id and length commitment. Mirrors
-/// `apps/vcs-worker/src/worker_impl/auth.rs::requires_stream_write_auth`.
+/// signed pack-id and length commitment, as `mkit-server`'s auth v2 stage
+/// requires.
 fn requires_stream_write_auth(procedure: &str) -> bool {
     procedure.ends_with("/UploadPack")
 }

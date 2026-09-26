@@ -6,9 +6,10 @@ name: "CI: Workers"
 # fmt/clippy/nextest in cloudbuild/ci.yaml never touches them. This workflow
 # is their dedicated gate: fmt, clippy, `cargo test --lib` for all four
 # crates, a wasm32-unknown-unknown build for keys-worker and
-# mkit-worker-common (repo-worker and vcs-worker already get an incidental
-# wasm build via the codegen-freshness check in cloudbuild/codegen.yaml —
-# not duplicated here), and `buf lint` against apps/repo-worker/proto
+# mkit-worker-common (repo-worker gets an incidental wasm build via the
+# codegen-freshness check in cloudbuild/codegen.yaml — not duplicated here;
+# vcs-worker gets its wasm32 clippy step and the conformance job's
+# worker-build), and `buf lint` against apps/repo-worker/proto
 # (apps/repo-worker/buf.yaml is otherwise dormant; no CI surface runs it
 # today). vcs-worker has no app-local buf.yaml — it compiles against the
 # repo-root `proto/` module, already covered by buf.yml/proto.yml — so
@@ -30,7 +31,16 @@ name: "CI: Workers"
 # model as apps/web) — this workflow is validation only.
 # The TypeScript workspace Worker has a separate job below: rebuild the Rust
 # WASM codec, generate binding types, test nanocodex integration, and bundle
-# the Worker plus its Sandbox image. Both jobs feed the existing stable gate.
+# the Worker plus its Sandbox image.
+#
+# apps/vcs-worker is a thin deployment of rust/crates/mkit-server-worker
+# (WP-M0-17), so changes to mkit-server* also trigger this workflow. The
+# `vcs-worker-conformance` job runs the black-box wire suite
+# (mkit-server-conformance) against it under `wrangler dev`
+# (scripts/vcs-worker-conformance.sh). This workflow triggers only on `main`
+# (pushes and PRs into it): during the MKIT-29 epic the same script runs
+# locally, and this job first runs on the final PR to `main`. All jobs feed
+# the existing stable gate.
 
 on:
   push:
@@ -49,6 +59,11 @@ on:
       - 'rust/crates/mkit-attest/**'
       - 'rust/crates/mkit-rpc/**'
       - 'rust/crates/mkit-wasm/**'
+      - 'rust/crates/mkit-server/**'
+      - 'rust/crates/mkit-server-worker/**'
+      - 'rust/crates/mkit-server-conformance/**'
+      - 'rust/crates/mkit-transport-connect/**'
+      - 'scripts/vcs-worker-conformance.sh'
       - 'proto/mkit/transport/v1/**'
   # No `paths:` filter on pull_request: the workflow ALWAYS triggers on PRs so
   # its required check (workers-gate) is never absent. The `ci` job is gated
@@ -88,6 +103,10 @@ jobs:
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d  # v4.0.3
         id: filter
         with:
+          # `workers` lists every in-repo path dependency of the four
+          # worker crates and of the conformance runner (`cargo metadata`
+          # of each app; `cargo tree -p mkit-server-conformance`), plus the
+          # rust/ workspace files the runner builds with.
           filters: |
             workers:
               - '.github/workflows/workers.yml'
@@ -95,6 +114,17 @@ jobs:
               - 'apps/keys-worker/**'
               - 'apps/vcs-worker/**'
               - 'apps/mkit-worker-common/**'
+              - 'rust/Cargo.lock'
+              - 'rust/Cargo.toml'
+              - 'rust/rust-toolchain.toml'
+              - 'rust/crates/mkit-core/**'
+              - 'rust/crates/mkit-attest/**'
+              - 'rust/crates/mkit-rpc/**'
+              - 'rust/crates/mkit-transport-connect/**'
+              - 'rust/crates/mkit-server/**'
+              - 'rust/crates/mkit-server-worker/**'
+              - 'rust/crates/mkit-server-conformance/**'
+              - 'scripts/vcs-worker-conformance.sh'
               - 'proto/mkit/transport/v1/**'
             workspace:
               - '.github/workflows/workers.yml'
@@ -226,9 +256,8 @@ jobs:
         working-directory: apps/vcs-worker
         run: cargo clippy --target wasm32-unknown-unknown --all-targets -- -D warnings
 
-      # vcs-worker's wasm32 build is already exercised (incidentally) by the
-      # codegen-freshness check on Cloud Build (cloudbuild/codegen.yaml ->
-      # scripts/regen-transport-proto.sh) — not duplicated here.
+      # vcs-worker's wasm32 build is exercised by the clippy (wasm32) step
+      # above and by the vcs-worker-conformance job's worker-build.
       - name: vcs-worker - Test (lib)
         working-directory: apps/vcs-worker
         run: cargo test --lib
@@ -298,6 +327,51 @@ jobs:
         working-directory: apps/workspace-worker
         run: npm run build
 
+  # The M0 wire-conformance check of the vcs-worker port (WP-M0-17): the
+  # black-box wire suite against the Worker under `wrangler dev`, in both
+  # the release feature set and the `test-faults` one (clock skew, stats,
+  # quota and growth cases, and the adapter's body-buffer bound).
+  vcs-worker-conformance:
+    name: vcs-worker wire conformance (wrangler dev)
+    needs: changes
+    if: >-
+      always() &&
+      (github.event_name == 'push' || needs.changes.outputs.workers == 'true')
+    runs-on: ubuntu-latest
+    env:
+      WRANGLER_SEND_METRICS: 'false'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install Rust 1.95.0 + wasm32 target
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          toolchain: '1.95.0'
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16  # v2
+        with:
+          workspaces: |
+            rust -> rust/target
+            apps/vcs-worker -> apps/vcs-worker/target
+          prefix-key: "rust-ci-vcs-conformance"
+          cache-on-failure: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: '22'
+
+      - name: Install worker-build
+        run: cargo install worker-build --locked --version 0.8.6
+
+      - name: Wire suite (release features)
+        run: scripts/vcs-worker-conformance.sh
+
+      - name: Wire suite (test-faults)
+        run: scripts/vcs-worker-conformance.sh --test-faults
+
   # Stable required-check name for branch protection. Always runs on PRs
   # (if: always()) so the status is never absent — closing the
   # "required-but-skipped" trap. Both jobs must succeed or be legitimately
@@ -306,7 +380,7 @@ jobs:
   workers-gate:
     name: Workers CI gate
     if: always() && github.event_name == 'pull_request'
-    needs: [ci, workspace]
+    needs: [ci, workspace, vcs-worker-conformance]
     runs-on: ubuntu-latest
     steps:
       - name: Check ci job result
@@ -314,12 +388,13 @@ jobs:
         env:
           CI: ${{ needs.ci.result }}
           WORKSPACE: ${{ needs.workspace.result }}
+          CONFORMANCE: ${{ needs.vcs-worker-conformance.result }}
         run: |
-          for result in "${CI}" "${WORKSPACE}"; do
+          for result in "${CI}" "${WORKSPACE}" "${CONFORMANCE}"; do
             case "${result}" in
               success|skipped) ;;
               *)
-                echo "::error::Workers job did not succeed (Rust=${CI}, workspace=${WORKSPACE})"
+                echo "::error::Workers job did not succeed (Rust=${CI}, workspace=${WORKSPACE}, conformance=${CONFORMANCE})"
                 exit 1
                 ;;
             esac

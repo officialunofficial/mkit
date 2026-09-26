@@ -3574,7 +3574,11 @@ version = "0.4.2"
 dependencies = [
  "base64 0.22.1",
  "bytes",
+ "connectrpc",
  "futures",
+ "http",
+ "http-body",
+ "http-body-util",
  "mkit-core",
  "mkit-server",
  "mkit-server-conformance",
@@ -3584,6 +3588,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tower",
  "tracing",
  "worker",
 ]

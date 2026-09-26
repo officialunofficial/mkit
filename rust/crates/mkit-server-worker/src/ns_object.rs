@@ -261,7 +261,16 @@ mod object {
             }
             let body = req.text().await?;
             let reply = match self.store() {
-                Ok(store) => serve(store, &body).await,
+                Ok(store) => {
+                    // `SqlKvStore` caches stats for a minute; the wire
+                    // suite's stats hook (`test-faults`) measures growth
+                    // write by write, so it reads the table every time.
+                    #[cfg(feature = "test-faults")]
+                    if req.path() == "/stats" {
+                        store.clear_stats_cache();
+                    }
+                    serve(store, &body).await
+                }
                 Err(e) => encode(&failure(&e)),
             };
             let mut response = Response::ok(reply)?;

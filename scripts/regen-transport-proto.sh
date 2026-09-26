@@ -6,20 +6,20 @@
 #   - rust/crates/mkit-transport-connect  (native client for mkit+https://,
 #     plus the axum-hosted `mkit serve --http` server behind its `server`
 #     feature)
-#   - apps/vcs-worker                     (the workers-rs ConnectRPC
-#     reference Worker, R2 + Durable Object backed — mkit#699)
 #   - rust/crates/mkit-server             (the production server's wasm-clean
-#     `connect` binding, mounted by its native and Workers adapters; like
-#     vcs-worker it also vendors grpc.health.v1)
+#     `connect` binding, mounted by its native and Workers adapters; it also
+#     vendors grpc.health.v1)
 #
-# apps/vcs-worker cannot depend on mkit-transport-connect directly: its
+# apps/vcs-worker no longer vendors its own copy (WP-M0-17): it is a thin
+# deployment of mkit-server-worker, which mounts mkit-server's binding.
+# mkit-server cannot share mkit-transport-connect's copy: that crate's
 # client/server halves are native (Tokio, hyper) and don't compile for the
 # wasm32-unknown-unknown Workers target, so each consumer vendors its own
 # generated/ from the SAME canonical proto rather than sharing a crate
 # dependency (mirrors apps/repo-worker + mkit-repo-client's split — see
 # scripts/regen-repo-proto.sh).
 #
-# All three build from pre-generated sources committed under their
+# Both build from pre-generated sources committed under their
 # generated/ dirs so consumers (Cloudflare Workers Builds, CI, docs.rs) never
 # need protoc (their images lack a protoc new enough for protobuf
 # `edition = "2023"`). After editing transport.proto, run this script from
@@ -62,13 +62,6 @@ refresh "mkit-transport-connect" \
     "rust/target/debug/build/mkit-transport-connect-*/out" \
     ".mkit-repo-codegen"
 
-echo ">> apps/vcs-worker (wasm32 target)"
-MKIT_TRANSPORT_CODEGEN=1 cargo build --manifest-path apps/vcs-worker/Cargo.toml --target wasm32-unknown-unknown
-refresh "apps/vcs-worker" \
-    "apps/vcs-worker/generated" \
-    "apps/vcs-worker/target/wasm32-unknown-unknown/debug/build/mkit-vcs-worker-*/out" \
-    ".mkit-transport-codegen"
-
 echo ">> mkit-server (wasm32 target; its default features include connect)"
 MKIT_TRANSPORT_CODEGEN=1 cargo build --manifest-path rust/Cargo.toml -p mkit-server --target wasm32-unknown-unknown
 refresh "mkit-server" \
@@ -78,7 +71,6 @@ refresh "mkit-server" \
 
 generated_dirs=(
     rust/crates/mkit-transport-connect/generated
-    apps/vcs-worker/generated
     rust/crates/mkit-server/generated
 )
 # `git status --porcelain`, not only `git diff`: a new module lands untracked.

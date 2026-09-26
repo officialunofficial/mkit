@@ -163,7 +163,7 @@ pub async fn kv_equals_ok_and_fail_reports_observed<H: KvHarness>(h: H) -> Outco
 
 /// Preconditions are checked in order and the first failure is reported:
 /// what gives `AdvanceRefs` its packmap-before-head precedence
-/// (`apps/vcs-worker/src/worker_impl/refstore.rs:215-255`).
+/// (as vcs-worker's former `RefStore::handle_advance`, before WP-M0-17).
 pub async fn kv_first_failing_precondition_index<H: KvHarness>(h: H) -> Outcome {
     let (s, p) = (h.store(), part("kv_first_failing_precondition_index"));
     gate!(need_atomic(&s, &p).await);
