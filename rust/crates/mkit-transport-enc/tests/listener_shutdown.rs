@@ -14,7 +14,8 @@ use commonware_cryptography::ed25519::{PrivateKey, PublicKey};
 use mkit_transport_enc::tcp::{TokioExecutor, dial_tcp_session_for_test};
 use mkit_transport_enc::tokio_io::{TokioSink, TokioStream};
 use mkit_transport_enc::{
-    EncHandshakeBounds, EncSession, HANDSHAKE_NAMESPACE, PeerPolicy, serve_tcp_listener,
+    EncHandshakeBounds, EncSession, HANDSHAKE_NAMESPACE, ListenerLimits, PeerPolicy,
+    serve_tcp_listener,
 };
 use tokio::sync::{Notify, mpsc, oneshot};
 
@@ -65,7 +66,7 @@ fn serve_tcp_listener_stops_on_shutdown_and_drains() {
         server_key,
         PeerPolicy::AllowAny,
         EncHandshakeBounds::default(),
-        8,
+        ListenerLimits::new(8, 8),
         shutdown,
         serve_fn,
     ));

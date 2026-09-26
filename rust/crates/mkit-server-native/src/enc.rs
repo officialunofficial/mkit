@@ -9,9 +9,12 @@
 //! `server_id` are `mkit serve --listen-enc`'s.
 //!
 //! The listener faces the network, so it is bounded like the HTTP one: a
-//! connection cap (`--max-connections`, per listener, handshakes included),
-//! the handshake deadline, an idle timeout on every frame read and write
-//! after it, and the session's per-connection frame and byte budgets.
+//! cap on sessions (`--max-connections`) and a separate, smaller cap on
+//! handshakes (`--enc-max-handshakes`), so silent sockets cannot lock
+//! authorized clients out; the handshake deadline; an idle timeout on every
+//! frame read and write after it; and the session's per-connection frame
+//! and byte budgets. On shutdown a session ends at its next frame boundary
+//! (never inside an upload).
 
 use std::collections::HashSet;
 use std::fmt;
@@ -25,13 +28,14 @@ use commonware_cryptography::Signer as _;
 use commonware_cryptography::ed25519::{PrivateKey, PublicKey};
 use mkit_core::protocol::TransportError;
 use mkit_rpc::mkit::rpc::v1::ssh::SshFrame;
+use mkit_rpc::mkit::rpc::v1::ssh::ssh_frame;
 use mkit_server::pipeline::{HookSet, Pipeline};
 use mkit_server::ssh::{FrameIoError, FrameSink, FrameSource, SessionConfig, serve_session};
 use mkit_server::{BlobStore, BoxFuture, NamespaceStore, Principal, Redacted};
 use mkit_transport_enc::tokio_io::{TokioSink, TokioStream};
 use mkit_transport_enc::{
-    EncHandshakeBounds, EncInitError, EncReceiver, EncSender, EncSession, PeerPolicy,
-    serve_tcp_listener,
+    EncHandshakeBounds, EncInitError, EncReceiver, EncSender, EncSession, ListenerLimits,
+    PeerPolicy, serve_tcp_listener,
 };
 use tokio::net::TcpListener;
 
@@ -66,6 +70,14 @@ pub enum ServerKeySource {
     Ephemeral,
 }
 
+/// Default `--enc-handshake-timeout-secs` (SPEC-TRANSPORT-ENC §2.1: at most
+/// 10 s on real networks).
+pub const DEFAULT_HANDSHAKE_TIMEOUT_SECS: u64 = 10;
+
+/// Default `--enc-max-handshakes`, lowered to `--max-connections` when that
+/// is smaller.
+pub const DEFAULT_MAX_HANDSHAKES: usize = 128;
+
 /// A resolved `--listen-enc` configuration. Holds no secret: the key is
 /// loaded by [`load_server_key`] when the server opens.
 #[derive(Debug, Clone)]
@@ -82,8 +94,10 @@ pub struct EncOptions {
     pub idle_timeout: Option<Duration>,
     /// The deadline of the encrypted handshake.
     pub handshake_timeout: Duration,
-    /// Connections open at once, handshaking or in session.
-    pub max_connections: usize,
+    /// Sessions open at once (`--max-connections`).
+    pub max_sessions: usize,
+    /// Connections in the handshake at once (`--enc-max-handshakes`).
+    pub max_handshakes: usize,
     /// After shutdown begins, how long sessions in flight may run.
     pub grace: Duration,
 }
@@ -98,8 +112,9 @@ impl EncOptions {
             policy,
             server_key,
             idle_timeout: Some(Duration::from_mins(1)),
-            handshake_timeout: Duration::from_mins(1),
-            max_connections: 1024,
+            handshake_timeout: Duration::from_secs(DEFAULT_HANDSHAKE_TIMEOUT_SECS),
+            max_sessions: 1024,
+            max_handshakes: DEFAULT_MAX_HANDSHAKES,
             grace: Duration::from_secs(30),
         }
     }
@@ -188,11 +203,18 @@ pub(crate) fn resolve(args: &ServeArgs) -> Result<Option<EncOptions>, ConfigErro
             ));
         }
     };
+    let max_handshakes = args
+        .enc_max_handshakes
+        .unwrap_or_else(|| args.max_connections.min(DEFAULT_MAX_HANDSHAKES));
+    if max_handshakes == 0 {
+        return Err(usage("--enc-max-handshakes must be at least 1"));
+    }
     let idle = args.enc_idle_timeout_secs;
     Ok(Some(EncOptions {
         idle_timeout: (idle != 0).then(|| Duration::from_secs(idle)),
         handshake_timeout: Duration::from_secs(args.enc_handshake_timeout_secs),
-        max_connections: args.max_connections,
+        max_sessions: args.max_connections,
+        max_handshakes,
         grace: Duration::from_secs(args.shutdown_grace_secs),
         ..EncOptions::new(listen, policy, server_key)
     }))
@@ -204,8 +226,9 @@ pub(crate) fn resolve(args: &ServeArgs) -> Result<Option<EncOptions>, ConfigErro
 /// and `#` comments ignored.
 ///
 /// The file is opened without following a symlink and must be a regular
-/// file of at most 1 MiB that neither group nor others may write: whoever
-/// can edit it decides who may connect.
+/// file of at most 1 MiB, owned by the server's user or root, that neither
+/// group nor others may write: whoever can edit it decides who may
+/// connect. It is read once, at startup.
 ///
 /// # Errors
 /// A message naming the file, and the line of a malformed key.
@@ -294,9 +317,12 @@ pub fn public_key_hex(key: &PrivateKey) -> String {
 }
 
 /// Serves one authenticated session: the enc session and the peer's
-/// static key, as the handshake established them.
+/// static key, as the handshake established them, until the session ends
+/// or, at a frame boundary, the server's [`Shutdown`] triggers.
 pub type SessionFn = Arc<
-    dyn Fn(EncSession<TokioStream, TokioSink>, PublicKey) -> BoxFuture<'static, ()> + Send + Sync,
+    dyn Fn(EncSession<TokioStream, TokioSink>, PublicKey, Shutdown) -> BoxFuture<'static, ()>
+        + Send
+        + Sync,
 >;
 
 /// Run each session through `mkit_server::ssh::serve_session` on
@@ -304,6 +330,9 @@ pub type SessionFn = Arc<
 /// `Pipeline::with_auth`), as `Principal::TransportPeer` with the peer's
 /// key. The principal comes only from the handshake: nothing the client
 /// sends can set it. `idle_timeout` bounds every frame read and write.
+/// Once the shutdown triggers, the session ends at its next frame
+/// boundary: an idle session at once, a verb after it answers, never
+/// inside an upload.
 pub fn session_fn<B, N, H>(
     pipeline: Arc<Pipeline<B, N, H>>,
     idle_timeout: Option<Duration>,
@@ -313,7 +342,7 @@ where
     N: NamespaceStore + 'static,
     H: HookSet + 'static,
 {
-    Arc::new(move |session, peer| {
+    Arc::new(move |session, peer, shutdown| {
         let pipeline = Arc::clone(&pipeline);
         Box::pin(async move {
             let Ok(ed25519) = <[u8; 32]>::try_from(peer.as_ref()) else {
@@ -323,6 +352,8 @@ where
             let mut src = EncFrameSource {
                 receiver,
                 idle: idle_timeout,
+                shutdown,
+                in_upload: false,
             };
             let mut sink = EncFrameSink {
                 sender,
@@ -344,13 +375,23 @@ where
 /// record-layer failure (the peer closed the stream, an oversized or
 /// forged record) is [`FrameIoError::Eof`]: the receive direction cannot be
 /// resumed (§6.3), so the session ends without a reply.
+///
+/// At a frame boundary a triggered shutdown is [`FrameIoError::Eof`] too,
+/// so the session ends cleanly. The source follows the upload framing it
+/// hands out (an `UploadPack`, then chunks until `last`, or until a frame
+/// that is not a chunk ends it) and never stops inside an upload. When the
+/// session rejects an upload early it reads no chunk, and the source keeps
+/// waiting out that one next read (bounded by the idle timeout): it may
+/// finish late, never early.
 struct EncFrameSource {
     receiver: EncReceiver<TokioStream>,
     idle: Option<Duration>,
+    shutdown: Shutdown,
+    in_upload: bool,
 }
 
-impl FrameSource for EncFrameSource {
-    async fn next_frame(&mut self) -> Result<SshFrame, FrameIoError> {
+impl EncFrameSource {
+    async fn read(&mut self) -> Result<SshFrame, FrameIoError> {
         let read = mkit_transport_enc::recv_frame(&mut self.receiver);
         let result = match self.idle {
             Some(idle) => tokio::time::timeout(idle, read)
@@ -362,6 +403,38 @@ impl FrameSource for EncFrameSource {
             TransportError::ProtocolError => FrameIoError::Malformed,
             _ => FrameIoError::Eof,
         })
+    }
+
+    /// Where `frame` leaves the upload framing.
+    fn track(&mut self, frame: &SshFrame) {
+        self.in_upload = match &frame.body {
+            Some(ssh_frame::Body::UploadPack(_)) => !self.in_upload,
+            Some(ssh_frame::Body::PackChunk(c)) => self.in_upload && c.last != Some(true),
+            _ => false,
+        };
+    }
+}
+
+impl FrameSource for EncFrameSource {
+    async fn next_frame(&mut self) -> Result<SshFrame, FrameIoError> {
+        let result = if self.in_upload {
+            self.read().await
+        } else {
+            if self.shutdown.is_triggered() {
+                return Err(FrameIoError::Eof);
+            }
+            let stop = self.shutdown.wait();
+            tokio::select! {
+                biased;
+                () = stop => return Err(FrameIoError::Eof),
+                result = self.read() => result,
+            }
+        };
+        match &result {
+            Ok(frame) => self.track(frame),
+            Err(_) => self.in_upload = false,
+        }
+        result
     }
 }
 
@@ -432,9 +505,12 @@ pub async fn serve(
         service.key,
         opts.policy.clone(),
         opts.bounds(),
-        opts.max_connections,
+        ListenerLimits::new(opts.max_sessions, opts.max_handshakes),
         shutdown.wait(),
-        move |sess, peer| session(sess, peer),
+        {
+            let shutdown = shutdown.clone();
+            move |sess, peer| session(sess, peer, shutdown.clone())
+        },
     );
     tokio::pin!(run);
     tokio::select! {

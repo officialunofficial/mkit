@@ -63,7 +63,8 @@ struct EncServer {
     addr: SocketAddr,
     pubkey: [u8; 32],
     shutdown: Shutdown,
-    _runtime: tokio::runtime::Runtime,
+    served: Option<tokio::task::JoinHandle<Result<(), mkit_transport_enc::EncInitError>>>,
+    runtime: tokio::runtime::Runtime,
     _locks: server::ServerLocks,
 }
 
@@ -92,14 +93,29 @@ impl EncServer {
         let addr = listener.local_addr().unwrap();
         let shutdown = Shutdown::new();
         let stop = shutdown.clone();
-        runtime.spawn(async move { enc::serve(listener, service, &opts, stop).await });
+        let served = runtime.spawn(async move { enc::serve(listener, service, &opts, stop).await });
         Self {
             addr,
             pubkey,
             shutdown,
-            _runtime: runtime,
+            served: Some(served),
+            runtime,
             _locks: locks,
         }
+    }
+
+    /// Trigger the shutdown; how long `enc::serve` then took to return.
+    fn stop(&mut self) -> Duration {
+        let served = self.served.take().unwrap();
+        let start = Instant::now();
+        self.shutdown.trigger();
+        let result = self
+            .runtime
+            .block_on(async { tokio::time::timeout(Duration::from_mins(1), served).await })
+            .expect("enc::serve returned")
+            .unwrap();
+        assert!(result.is_ok(), "{result:?}");
+        start.elapsed()
     }
 
     /// Unsafe allow-any with an ephemeral key.
@@ -116,6 +132,27 @@ impl EncServer {
             PrivateKey::from_seed(seed),
             TokioExecutor::new().unwrap(),
         )
+    }
+
+    /// Connect (handshake and `Hello`) and list refs with the key of
+    /// `seed` on another thread; the receiver gets whether it worked. The
+    /// session then stays open for a while.
+    fn connect_in_thread(&self, seed: u64) -> std::sync::mpsc::Receiver<bool> {
+        let (addr, pubkey) = (self.addr, self.pubkey);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let client = connect_tcp_with_executor(
+                &addr.ip().to_string(),
+                addr.port(),
+                &pubkey,
+                PrivateKey::from_seed(seed),
+                TokioExecutor::new().unwrap(),
+            );
+            let worked = client.as_ref().is_ok_and(|c| c.list_refs("").is_ok());
+            let _ = tx.send(worked);
+            std::thread::sleep(Duration::from_secs(10));
+        });
+        rx
     }
 
     /// A session past the encrypted handshake, before any frame.
@@ -492,12 +529,47 @@ fn listen_enc_flag_rules() {
     assert!(opts.is_open());
     assert_eq!(opts.server_key, enc::ServerKeySource::Ephemeral);
     assert_eq!(opts.idle_timeout, Some(Duration::from_mins(1)));
-    assert_eq!(opts.handshake_timeout, Duration::from_mins(1));
+    assert_eq!(opts.handshake_timeout, Duration::from_secs(10));
+    assert_eq!((opts.max_sessions, opts.max_handshakes), (1024, 128));
     assert_eq!(cfg.banners(), vec![enc::UNSAFE_ENC_BANNER]);
     let mut idle_off = enc_only.to_vec();
     idle_off.extend(["--enc-idle-timeout-secs", "0"]);
     let cfg = common::resolve_with(&idle_off, &[]).unwrap();
     assert_eq!(cfg.enc.unwrap().idle_timeout, None);
+
+    // The handshake cap: at most --max-connections by default, settable,
+    // never 0.
+    let mut small = enc_only.to_vec();
+    small.extend(["--max-connections", "5"]);
+    let opts = common::resolve_with(&small, &[]).unwrap().enc.unwrap();
+    assert_eq!((opts.max_sessions, opts.max_handshakes), (5, 5));
+    small.extend(["--enc-max-handshakes", "2"]);
+    let opts = common::resolve_with(&small, &[]).unwrap().enc.unwrap();
+    assert_eq!(opts.max_handshakes, 2);
+    let mut zero = enc_only.to_vec();
+    zero.extend(["--enc-max-handshakes", "0"]);
+    assert_eq!(refused(&zero).code, exit::USAGE);
+
+    // An open enc listener beside an HTTP listener that requires
+    // authentication is refused; beside an open one it is allowed.
+    let mut beside = vec!["--listen", "127.0.0.1:0"];
+    beside.extend(enc_only);
+    let err = common::resolve_with(&beside, &[("MKIT_API_TOKEN", "t")]).unwrap_err();
+    assert_eq!(err.code, exit::CONFIG_ERROR);
+    assert!(
+        err.message.contains("--enc-authorized-peers"),
+        "{}",
+        err.message
+    );
+    beside.push("--unsafe-allow-any-peer");
+    let cfg = common::resolve_with(&beside, &[]).unwrap();
+    assert_eq!(
+        cfg.banners(),
+        vec![
+            mkit_server_native::config::UNSAFE_BANNER,
+            enc::UNSAFE_ENC_BANNER
+        ]
+    );
 }
 
 #[test]
@@ -706,33 +778,117 @@ fn listen_enc_caps_open_connections() {
         &root,
         &["--unsafe-allow-any-enc-peer", "--max-connections", "1"],
     );
-    // The one slot is held by a session.
+    // The one session slot is held.
     let mut first = server.raw(31);
     first.hello();
-    // A second client waits in the backlog: its handshake cannot finish.
-    let (addr, pubkey) = (server.addr, server.pubkey);
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let exec = TokioExecutor::new().unwrap();
-        let dialed = dial_tcp_session_for_test(
-            &addr.ip().to_string(),
-            addr.port(),
-            &pubkey,
-            PrivateKey::from_seed(32),
-            HANDSHAKE_NAMESPACE.to_vec(),
-            &exec,
-        );
-        let _ = tx.send(dialed.is_ok());
-        // Keep the runtime (and the session) alive until the test ends.
-        std::thread::sleep(Duration::from_secs(5));
-    });
+    // A second client gets no session (its Hello goes unanswered)...
+    let second = server.connect_in_thread(32);
     assert!(
-        rx.recv_timeout(Duration::from_millis(1500)).is_err(),
-        "a second connection was served past the cap"
+        second.recv_timeout(Duration::from_millis(1500)).is_err(),
+        "a second session was served past the cap"
     );
-    // Closing the first frees the slot.
+    // ...until the first one closes.
     drop(first);
-    assert!(rx.recv_timeout(Duration::from_secs(20)).unwrap());
+    assert!(second.recv_timeout(Duration::from_secs(20)).unwrap());
+}
+
+/// Silent sockets fill only the handshake slots: established sessions go
+/// on, and an allowlisted client connects as soon as one slot frees.
+#[test]
+fn listen_enc_silent_sockets_cannot_lock_out_clients() {
+    let (_td, root) = enc_repo();
+    let peers = root.join("peers.txt");
+    let listed: Vec<String> = [41, 42]
+        .iter()
+        .map(|&seed| mkit_core::hash::to_hex(&raw_pubkey(&PrivateKey::from_seed(seed))))
+        .collect();
+    fs::write(&peers, listed.join("\n")).unwrap();
+    let key = root.join("enc").join("server.key");
+    let server = EncServer::start(
+        &root,
+        &[
+            "--enc-authorized-peers",
+            common::s(&peers),
+            "--enc-server-key",
+            common::s(&key),
+            "--enc-max-handshakes",
+            "2",
+            "--enc-handshake-timeout-secs",
+            "60",
+        ],
+    );
+    let established = server.client(41).unwrap();
+
+    // Two sockets that never handshake take both handshake slots.
+    let mut silent: Vec<_> = (0..2)
+        .map(|_| std::net::TcpStream::connect(server.addr).unwrap())
+        .collect();
+    std::thread::sleep(Duration::from_millis(200));
+    let waiting = server.connect_in_thread(42);
+    assert!(
+        waiting.recv_timeout(Duration::from_millis(1500)).is_err(),
+        "a handshake ran past the handshake cap"
+    );
+    // The established session is unaffected.
+    assert!(established.list_refs("").unwrap().is_empty());
+
+    // One silent socket goes: the allowlisted client gets through.
+    drop(silent.remove(0));
+    assert!(waiting.recv_timeout(Duration::from_secs(20)).unwrap());
+    assert!(established.list_refs("").unwrap().is_empty());
+    drop(silent);
+}
+
+/// On shutdown an idle session ends at once, well inside the grace period
+/// (30 s here), and the listener returns.
+#[test]
+fn listen_enc_shutdown_ends_idle_sessions() {
+    let (_td, root) = enc_repo();
+    let mut server = EncServer::open(&root);
+    let mut idle = server.raw(51);
+    idle.hello();
+    let client = server.client(52).unwrap();
+    assert!(client.list_refs("").unwrap().is_empty());
+    let took = server.stop();
+    assert!(took < Duration::from_secs(5), "{took:?}");
+    idle.expect_closed();
+}
+
+/// An upload in flight when the shutdown begins still completes; the
+/// session ends after it.
+#[test]
+fn listen_enc_shutdown_never_cuts_an_upload() {
+    let (_td, root) = enc_repo();
+    let mut server = EncServer::open(&root);
+    let mut raw = server.raw(53);
+    raw.hello();
+    let (bytes, key) = valid_pack();
+    let id = key.as_bytes().to_vec();
+    raw.send(ssh_frame::Body::UploadPack(Box::new(UploadPack {
+        pack_id: Some(id.clone()),
+        total_bytes: Some(bytes.len() as u64),
+        ..Default::default()
+    })));
+    std::thread::sleep(Duration::from_millis(200));
+    server.shutdown.trigger();
+    std::thread::sleep(Duration::from_millis(200));
+    raw.send(ssh_frame::Body::PackChunk(Box::new(PackChunk {
+        pack_id: Some(id),
+        offset: Some(0),
+        data: Some(bytes.clone()),
+        last: Some(true),
+        ..Default::default()
+    })));
+    match raw.recv(Duration::from_secs(10)).unwrap().body {
+        Some(ssh_frame::Body::UploadPackResponse(_)) => {}
+        other => panic!("expected UploadPackResponse, got {other:?}"),
+    }
+    raw.expect_closed();
+    assert!(server.stop() < Duration::from_secs(5));
+    assert_eq!(
+        FileTransport::new(&root).download_pack(&key).unwrap(),
+        bytes
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -29,7 +29,7 @@ Object backend: both run the same statements and the same schema migrations.
 ```text
 mkit-server serve [--listen <ADDR>] [--listen-enc <ADDR>] --repo-root <DIR>
     [--enc-authorized-peers <PATH> --enc-server-key <PATH> | --unsafe-allow-any-enc-peer]
-    [--enc-idle-timeout-secs 60] [--enc-handshake-timeout-secs 60]
+    [--enc-idle-timeout-secs 60] [--enc-handshake-timeout-secs 10] [--enc-max-handshakes N]
     [--meta fs-layout | --meta sqlite:<PATH>]
     [--blob fs | --blob s3://<BUCKET>[/<PREFIX>] --s3-endpoint <URL>
         [--s3-region auto] [--s3-credentials-file <PATH>]   # or MKIT_R2_* / AWS_*
@@ -132,12 +132,21 @@ flags, messages and the `mkit serve-enc/<version>` server id are those of
   keys listed (one per line, 64-hex or the 43-char url-safe base64 of
   `?pubkey=`; `#` comments and blank lines ignored) complete the handshake.
   The allowlist is opened without following a symlink and must be a
-  regular file neither group nor others can write (`chmod go-w`); an
-  allowlist without a valid key is refused. Peer authorization never comes
-  from the served root's `.mkit/config`.
+  regular file owned by the server's user (or root) that neither group nor
+  others can write (`chmod go-w`); an allowlist without a valid key is
+  refused. Peer authorization never comes from the served root's
+  `.mkit/config`. The file is read once, at startup: to revoke a key,
+  edit it and restart the server, which also ends every open session.
 - `--unsafe-allow-any-enc-peer`: any client key, with a loud warning.
-  Development only.
+  Development only. Refused (exit 78) when the HTTP listener requires a
+  bearer token or auth v2, since it would let any client around them.
 - With neither, or both, the server refuses to start.
+
+> **Authorization (M0).** An enc peer is a `TransportPeer` principal: the
+> handshake authenticates its key, and the allowlist is the whole of its
+> authorization. It may write any ref, like an ssh forced command. Enc
+> peers are NOT subject to the M2 write grants until M2 wires the grant
+> check into the transport-identity path.
 
 The server's static key is the raw 32-byte ed25519 seed in
 `--enc-server-key`, created on first run (`0600`, missing directories
@@ -151,14 +160,22 @@ With an allowlist the flag is required, so the key survives restarts
 resolves no home directory). With `--unsafe-allow-any-enc-peer` and no key
 file the key is per process.
 
-Bounds, as for HTTP: at most `--max-connections` connections at once
-(per listener, handshakes included; the rest wait in the accept backlog);
-`--enc-handshake-timeout-secs` (default 60; SPEC-TRANSPORT-ENC recommends
-10 or less on real networks) for the handshake; `--enc-idle-timeout-secs`
-(default 60; 0 disables it, not recommended) for every frame read and
-write after it; and the ssh session's budgets (10,000 frames and 1 GiB per
-connection; an upload of at most 1 GiB and 10,000 chunks, or
-`--max-pack-bytes` if lower).
+Bounds, as for HTTP:
+
+- at most `--enc-max-handshakes` connections in the handshake at once
+  (default 128, or `--max-connections` if lower; the rest wait in the
+  accept backlog), each for at most `--enc-handshake-timeout-secs`
+  (default 10, SPEC-TRANSPORT-ENC §2.1). Clients that connect and say
+  nothing can fill only these slots: established sessions go on, and an
+  authorized client gets in as soon as one frees;
+- at most `--max-connections` sessions at once (per listener). A client
+  that completes the handshake while every session slot is taken waits,
+  keeping its handshake slot, until one frees;
+- `--enc-idle-timeout-secs` (default 60; 0 disables it, not recommended)
+  for every frame read and write after the handshake;
+- the ssh session's budgets (10,000 frames and 1 GiB per connection; an
+  upload of at most 1 GiB and 10,000 chunks, or `--max-pack-bytes` if
+  lower).
 
 ### Metadata storage
 
@@ -298,7 +315,9 @@ The listener speaks plaintext HTTP/1.1 and h2c; terminate TLS at the proxy.
 ### Shutdown and exit codes
 
 SIGINT or SIGTERM stops accepting connections and lets in-flight requests
-and enc sessions finish, for at most `--shutdown-grace-secs`; those still
+and enc sessions finish, for at most `--shutdown-grace-secs` (an enc
+session ends at its next frame boundary: an idle one at once, never inside
+an upload); those still
 running then are dropped (an interrupted upload leaves nothing visible). The exit codes are
 `mkit`'s sysexits values: 0 clean shutdown, 64 usage, 65 root without
 `.mkit`, 66 missing root, 69 bind or runtime failure, 75 serve lock busy, 77

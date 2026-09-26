@@ -44,6 +44,7 @@ ci:
     just ci-docs
     just ci-geiger
     just ci-scripts
+    just interop-enc
 
 # Mirrors cloudbuild/ci.yaml's rust/ + contrib/signers/ steps.
 ci-linux:
@@ -122,7 +123,10 @@ ci-security:
     }
     ( cd rust && run_audit )
     ( cd contrib/signers && run_audit )
+    ( cd contrib/interop/enc-client-0.4 && run_audit )
     cargo deny --manifest-path rust/Cargo.toml --all-features check
+    cargo deny --manifest-path contrib/interop/enc-client-0.4/Cargo.toml --all-features \
+      check --config rust/deny.toml
 
 # Spec-status, wasm dep-graph, mkit-wasm / mkit-server wasm32 checks, and
 # the pack-ruzstd wasm32 test run.

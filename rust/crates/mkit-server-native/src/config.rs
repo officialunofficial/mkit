@@ -159,7 +159,8 @@ pub struct ServeArgs {
     #[arg(long, value_name = "PATH")]
     pub enc_server_key: Option<PathBuf>,
     /// Development only: the enc listener accepts ANY client key. Without
-    /// `--enc-server-key` the server key is ephemeral.
+    /// `--enc-server-key` the server key is ephemeral. Refused beside an
+    /// HTTP listener that requires authentication.
     #[arg(long)]
     pub unsafe_allow_any_enc_peer: bool,
     /// Drop an enc session whose next frame does not arrive (or whose reply
@@ -168,8 +169,13 @@ pub struct ServeArgs {
     #[arg(long, value_name = "SECS", default_value_t = 60)]
     pub enc_idle_timeout_secs: u64,
     /// Deadline for an enc connection's encrypted handshake.
-    #[arg(long, value_name = "SECS", default_value_t = 60)]
+    #[arg(long, value_name = "SECS", default_value_t = 10)]
     pub enc_handshake_timeout_secs: u64,
+    /// Enc connections in the handshake at once, apart from the
+    /// `--max-connections` sessions, so silent clients cannot take every
+    /// slot (default: 128, or `--max-connections` if lower).
+    #[arg(long, value_name = "N")]
+    pub enc_max_handshakes: Option<usize>,
     /// The served root: a directory holding `.mkit`. Packs live in
     /// `<DIR>/packs`, file refs in `<DIR>/refs`.
     #[arg(long, value_name = "DIR")]
@@ -506,6 +512,8 @@ pub(crate) struct ReadRule {
     what: &'static str,
     /// The `chmod` argument that fixes it.
     chmod: &'static str,
+    /// Whether the file must be owned by the server's user or root.
+    owned: bool,
 }
 
 impl ReadRule {
@@ -514,6 +522,7 @@ impl ReadRule {
         mask: 0o077,
         what: "accessible by group or others",
         chmod: "600",
+        owned: false,
     };
     /// Security configuration anyone may read but only its owner may
     /// change (an allowlist of peer keys).
@@ -522,6 +531,7 @@ impl ReadRule {
         mask: 0o022,
         what: "writable by group or others",
         chmod: "go-w",
+        owned: true,
     };
 }
 
@@ -531,8 +541,9 @@ const MAX_CONFIG_FILE_BYTES: u64 = 1 << 20;
 /// The UTF-8 text of `path`, opened once without following a symlink
 /// (`O_NOFOLLOW`, and `O_NONBLOCK` so a FIFO cannot stall startup), with
 /// the checks run on the open handle (`fstat`): a regular file of at most
-/// 1 MiB, on Unix without `rule`'s mode bits. Nothing can swap the file
-/// between the check and the read.
+/// 1 MiB, on Unix without `rule`'s mode bits (and, when `rule` says so,
+/// owned by this process's effective user or root). Nothing can swap the
+/// file between the check and the read.
 ///
 /// # Errors
 /// Why the file is refused, for the caller to prefix with its flag;
@@ -569,6 +580,15 @@ pub(crate) fn read_checked(path: &Path, rule: &ReadRule, symlink: &str) -> Resul
                 rule.chmod,
                 path.display()
             ));
+        }
+        if rule.owned {
+            use std::os::unix::fs::MetadataExt as _;
+            let (owner, euid) = (meta.uid(), mkit_core::sign::effective_uid());
+            if owner != euid && owner != 0 {
+                return Err(format!(
+                    "is owned by uid {owner}, not by this server's user ({euid}) or root"
+                ));
+            }
         }
     }
     #[cfg(not(unix))]
@@ -887,6 +907,27 @@ fn pipeline_auth(
     Ok(AuthMode::TransportIdentity)
 }
 
+/// An open enc listener would let any client around the authentication
+/// the HTTP listener requires on the same root: refuse it.
+#[cfg(feature = "enc")]
+fn refuse_open_enc_beside_auth(
+    enc: Option<&crate::enc::EncOptions>,
+    auth: &AuthMode,
+) -> Result<(), ConfigError> {
+    let open_enc = enc.is_some_and(crate::enc::EncOptions::is_open);
+    if open_enc && matches!(auth, AuthMode::Bearer { .. } | AuthMode::AuthV2(_)) {
+        return Err(ConfigError::new(
+            exit::CONFIG_ERROR,
+            format!(
+                "{PREFIX}: --unsafe-allow-any-enc-peer would let any enc client write the root \
+                 the HTTP listener protects (bearer token or auth v2); use \
+                 --enc-authorized-peers"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Resolve `args`, reading environment variables through `env`. Nothing
 /// is opened or written: [`crate::server::open`] does that.
 ///
@@ -926,6 +967,8 @@ pub fn resolve(
         ));
     }
     let auth = pipeline_auth(args, env)?;
+    #[cfg(feature = "enc")]
+    refuse_open_enc_beside_auth(enc.as_ref(), &auth)?;
     let meta = match (&args.meta, &auth) {
         (Some(MetaArg::Sqlite(path)), _) => MetaChoice::Sqlite {
             path: canonical_db_path(path)?,

@@ -381,15 +381,23 @@ train).
   `Principal::TransportPeer` with the key the handshake authenticated. The
   flags, fail-closed gate, banner, timeouts, budgets and the
   `mkit serve-enc/<version>` server id are `mkit serve --listen-enc`'s,
-  which stays until WP-M0-15. New hardening: at most `--max-connections`
-  connections (per listener, handshakes included), a write timeout equal
-  to `--enc-idle-timeout-secs`, graceful drain within
-  `--shutdown-grace-secs`, the allowlist opened without following a
-  symlink and refused if group- or other-writable, and the key file read
-  with `mkit_core::sign::load_raw_32`'s checks. Differences for operators:
-  an allowlist needs `--enc-server-key <PATH>` (no `~/.config/mkit`
-  default: the server resolves no home directory), key and allowlist
-  errors exit 78, and `--enc-handshake-timeout-secs 0` is refused. The
+  which stays until WP-M0-15. New hardening: handshakes have their own
+  cap (`--enc-max-handshakes`, default 128 or `--max-connections` if
+  lower), apart from the `--max-connections` sessions, so sockets that
+  never handshake cannot lock authorized clients out; a write timeout
+  equal to `--enc-idle-timeout-secs`; on shutdown a session ends at its
+  next frame boundary (an idle one at once, never inside an upload) within
+  `--shutdown-grace-secs`; the allowlist is opened without following a
+  symlink and refused unless owned by the server's user or root and not
+  group- or other-writable; the key file is read with
+  `mkit_core::sign::load_raw_32`'s checks. Differences for operators:
+  `--enc-handshake-timeout-secs` defaults to 10 (was 60; SPEC-TRANSPORT-ENC
+  §2.1) and 0 is refused; an allowlist needs `--enc-server-key <PATH>` (no
+  `~/.config/mkit` default: the server resolves no home directory); key
+  and allowlist errors exit 78; `--unsafe-allow-any-enc-peer` is refused
+  (exit 78) beside an HTTP listener that requires a bearer token or auth
+  v2. Enc peers are `TransportPeer` principals, not subject to M2 write
+  grants until M2 wires them. The
   `enc` feature is on by default. New `Pipeline::with_auth` builds a
   sibling pipeline over the same stores and write gate with another
   `AuthMode`. **Wire changes versus `mkit serve --listen-enc`**, all to
@@ -411,12 +419,13 @@ train).
 
 - *(transport-enc)* `serve_tcp_listener`: the async accept loop on a
   caller-bound `TcpListener`, for a server already on a tokio runtime,
-  with a connection cap and a shutdown future; after shutdown it stops
-  accepting and waits for the sessions in flight (the caller bounds the
-  wait). The blocking `serve_tcp_*` entry points now run on it with their
-  signatures unchanged; a transient `accept` error (a reset connection,
-  descriptor exhaustion) is retried instead of stopping the listener.
-  **SemVer:** additive.
+  with separate caps on handshakes and sessions (`ListenerLimits`) and a
+  shutdown future; it retries a transient `accept` error (a reset
+  connection, descriptor exhaustion) and, after shutdown, stops accepting
+  and waits for the sessions in flight (the caller bounds the wait). The
+  blocking `serve_tcp_*` entry points share its accept loop with their
+  signatures and behavior unchanged (uncapped, stopping at the first
+  `accept` error and leaving sessions running). **SemVer:** additive.
 
 - *(core)* Resumable-part building blocks (SPEC-TRANSPORT-CONNECT §7.6):
   `write_auth::ContentCommitment` parses and formats `body:`, `pack:` and the

@@ -258,9 +258,12 @@ A listener facing the network bounds each client: the handshake deadline
 (`--enc-handshake-timeout-secs`, §2.1), a per-frame idle timeout after
 it (`--enc-idle-timeout-secs`; `mkit-server` also applies it to each
 write), and the per-connection budgets of SPEC-TRANSPORT §4.4.
-`mkit-server` also caps the connections open at once, handshakes
-included (`--max-connections`), and on shutdown stops accepting and lets
-sessions in flight finish within its grace period.
+`mkit-server` also caps the connections in the handshake
+(`--enc-max-handshakes`) apart from the sessions (`--max-connections`), so
+clients that connect and never handshake cannot hold the slots of
+authorized ones; its handshake deadline defaults to 10 s. On shutdown it
+stops accepting and ends each session at its next frame boundary (never
+inside an upload), within its grace period.
 
 The server identity is a **stable** raw-32 key loaded/auto-created from
 `--enc-server-key <PATH>` (for `mkit serve`, or a user-scoped default

@@ -238,9 +238,19 @@ impl Drop for Active {
 /// exhaustion): back off briefly and keep accepting.
 fn transient(e: &std::io::Error) -> bool {
     use std::io::ErrorKind::{ConnectionAborted, ConnectionReset, Interrupted};
-    matches!(e.kind(), ConnectionAborted | ConnectionReset | Interrupted)
-        || e.raw_os_error()
-            .is_some_and(|code| code == 23 || code == 24) // ENFILE, EMFILE
+    if matches!(e.kind(), ConnectionAborted | ConnectionReset | Interrupted) {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        e.raw_os_error()
+            .is_some_and(|code| code == libc::ENFILE || code == libc::EMFILE)
+    }
+    // Elsewhere only the portable kinds above count as transient.
+    #[cfg(not(unix))]
+    {
+        false
+    }
 }
 
 /// The bytes an HTTP/2 client sends first (RFC 9113 §3.4).
