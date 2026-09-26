@@ -545,6 +545,11 @@ fn another_roots_database_is_not_rebound() {
     drop(server::open(&cfg(&b, &b_meta)).unwrap());
     let marker = std::fs::read_to_string(a.join(".mkit/server-meta")).unwrap();
 
+    // Even with a's database gone (so a move is plausible), b's database
+    // carries another root id.
+    let a_db = a.join("meta.sqlite3");
+    let aside = parent.path().join("aside.sqlite3");
+    std::fs::rename(&a_db, &aside).unwrap();
     let err = server::open(&cfg(&a, &b_meta)).unwrap_err();
     assert_eq!(err.code, exit::CONFIG_ERROR);
     for needle in ["not this root's database", "another root"] {
@@ -554,5 +559,35 @@ fn another_roots_database_is_not_rebound() {
         std::fs::read_to_string(a.join(".mkit/server-meta")).unwrap(),
         marker
     );
+    std::fs::rename(&aside, &a_db).unwrap();
     drop(server::open(&cfg(&a, &a_meta)).unwrap());
+}
+
+#[test]
+fn a_stale_copy_of_the_database_is_refused() {
+    let parent = tempfile::tempdir().unwrap();
+    let (root, meta) = root_with_db(parent.path(), "r1");
+    drop(server::open(&cfg(&root, &meta)).unwrap());
+    let marker = std::fs::read_to_string(root.join(".mkit/server-meta")).unwrap();
+
+    // A copy carries the same root id, but the recorded database still
+    // exists: an old backup or a wrong path, not a move.
+    let copy = parent.path().join("stale-backup.sqlite3");
+    std::fs::copy(root.join("meta.sqlite3"), &copy).unwrap();
+    let copy_meta = format!("sqlite:{}", common::s(&copy));
+    let err = server::open(&cfg(&root, &copy_meta)).unwrap_err();
+    assert_eq!(err.code, exit::CONFIG_ERROR);
+    for needle in [
+        "still exists",
+        "stale copy",
+        "stale-backup.sqlite3",
+        "meta.sqlite3",
+    ] {
+        assert!(err.message.contains(needle), "{needle}: {}", err.message);
+    }
+    assert_eq!(
+        std::fs::read_to_string(root.join(".mkit/server-meta")).unwrap(),
+        marker
+    );
+    drop(server::open(&cfg(&root, &meta)).unwrap());
 }

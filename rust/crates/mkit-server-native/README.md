@@ -131,10 +131,14 @@ hand.
 
 **Moving a root.** Stop the server, move the root (and its database, if it
 lives elsewhere), and start it with the new `--repo-root` and `--meta
-sqlite:<new path>`. When the database at the new path carries the root's id,
-the server records the new path in the marker (under the ref lock) and
-starts; a database carrying another root's id, or none, is refused with an
-error naming both paths.
+sqlite:<new path>`. When the old database path no longer exists and the
+database at the new path carries the root's id, the server records the new
+path in the marker (under the ref lock, logged as a warning) and starts. If
+the old path still exists (or cannot be checked), the new one is refused as
+a stale copy or a wrong path: serving an old backup would roll the refs and
+the replay ledger back. To restore a backup, stop the server and move the
+backup over the recorded file. A database carrying another root's id, or
+none, is refused too; each error names both paths.
 
 ### Limits and timeouts
 

@@ -200,9 +200,42 @@ fn stored_root_id(db: &Path) -> Result<Option<String>, ConfigError> {
 /// in the marker, atomically, under the ref lock the caller holds.
 /// Otherwise `db` is not this root's database, and the root is refused.
 fn rebind_moved(path: &Path, marker: &Marker, db: &Path, root: &Path) -> Result<(), ConfigError> {
+    // Only a real move re-binds: the recorded database must be gone. If it
+    // still exists (or cannot be checked), `db` is a stale copy, an old
+    // backup or a mistyped path, and serving it would roll the refs and the
+    // replay ledger back.
+    match fs::symlink_metadata(&marker.db) {
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Ok(_) => {
+            return Err(ConfigError::new(
+                exit::CONFIG_ERROR,
+                format!(
+                    "mkit-server serve: repo root {} is bound to the database {}, which still \
+                     exists, but --meta names {}. That looks like a stale copy (an old backup) \
+                     or a wrong path, and serving it would roll the refs back. Pass --meta \
+                     sqlite:{}; to restore a backup, stop the server and move the backup over \
+                     that file.",
+                    root.display(),
+                    marker.db.display(),
+                    db.display(),
+                    marker.db.display()
+                ),
+            ));
+        }
+        Err(e) => {
+            return Err(config_error(
+                &format!(
+                    "checking the root's recorded database {} before re-binding to {}",
+                    marker.db.display(),
+                    db.display()
+                ),
+                e,
+            ));
+        }
+    }
     let stored = stored_root_id(db)?;
     if stored.as_deref() == Some(marker.root_id.as_str()) {
-        tracing::info!(
+        tracing::warn!(
             from = %marker.db.display(),
             to = %db.display(),
             "the root's database moved; re-binding the marker"
