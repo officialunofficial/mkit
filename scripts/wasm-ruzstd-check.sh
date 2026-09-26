@@ -28,4 +28,4 @@ if ! rustup target list --installed 2>/dev/null | grep -q '^wasm32-unknown-unkno
 fi
 
 ( cd rust/crates/mkit-core-wasm-check && wasm-pack test --node )
-echo "ok: pack-ruzstd decodes every v2 fixture on wasm32-unknown-unknown"
+echo "ok: pack-ruzstd decodes every v2 fixture, and pack framing is overflow-free, on wasm32-unknown-unknown"

@@ -139,7 +139,7 @@ pub use delta::{
 
 // Packfile reader/writer (SPEC-PACKFILE v1).
 pub use pack::{
-    DecodeReport, DecodedEntry, DeltaBaseSource, HEADER_LEN as PACK_HEADER_LEN,
+    DecodeLimits, DecodeReport, DecodedEntry, DeltaBaseSource, HEADER_LEN as PACK_HEADER_LEN,
     MAGIC as PACK_MAGIC, MAX_ENTRIES as PACK_MAX_ENTRIES,
     MAX_TOTAL_PAYLOAD as PACK_MAX_TOTAL_PAYLOAD, NoExternalBases, PackEntries, PackEntry,
     PackError, PackReader, PackWriter, TRAILER_LEN as PACK_TRAILER_LEN, UnpackReport,

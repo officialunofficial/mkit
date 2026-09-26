@@ -706,10 +706,14 @@ pub fn pack_entries_one_iteration(input: &[u8]) {
     // Into an empty store, the store-less decoder with no external bases
     // must accept exactly the packs the reader accepts, with the same
     // error and the same ids in pack order.
-    let decoded =
-        mkit_core::pack::decode_entries_with(input, &mut mkit_core::pack::NoExternalBases, |_| {
-            Ok(())
-        });
+    let decoded = mkit_core::pack::decode_entries_with(
+        input,
+        &mut mkit_core::pack::NoExternalBases,
+        // No budget: this body pins agreement with the reader, which has
+        // none. The budget itself is covered by mkit-core unit tests.
+        mkit_core::pack::DecodeLimits::default().with_max_decoded_bytes(u64::MAX),
+        |_| Ok(()),
+    );
     match (&read, &decoded) {
         (Ok(report), Ok(decoded)) => assert_eq!(
             report.stored, decoded.ids,

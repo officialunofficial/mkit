@@ -665,8 +665,8 @@ walking a hand-rolled map would accept a different set than
 
 ## Streaming closure verification reads only reachable objects, each once
 
-**Always:** `verify_closure_streaming` and `verify_push` fetch each visited id at most once,
-fetches no id outside the selected snapshot/history closure, and drops an
+**Always:** `verify_closure_streaming` and `verify_push` queue and fetch each visited id at
+most once (so repeated references do not grow the queue), fetch no id outside the selected snapshot/history closure, and drops an
 object's bytes after extracting its child ids; it reports
 `unreferenced_checked = false` because it cannot enumerate objects it never
 requested.
@@ -684,7 +684,8 @@ foreign/unreachable objects and misrepresent what was verified.
 `mkit_core::verify::closure::tests::streaming_fetches_each_reachable_object_once_and_only`,
 which uses a counting source that panics on unknown ids and checks the exact
 snapshot/history fetch sets, and
-`mkit_core::verify::push::tests::each_object_fetched_once_across_multiple_tips`.
+`mkit_core::verify::push::tests::each_object_fetched_once_across_multiple_tips`
+and `mkit_core::verify::closure::tests::repeated_child_ids_are_queued_once`.
 
 ## Push verification and delta bases resolve only within the pushing repository
 
@@ -703,6 +704,16 @@ and a source that may not serve it give the same `DeltaBaseMissing` error;
 an unverified source's bytes are re-derived, so a wrong object is never
 used as a base.
 
+A `known` tip is skipped whole, including the commit/remix/tag type check
+`verify_push` applies to every fetched tip. Callers MUST type-check known
+tips themselves (from their index) before moving a ref to one.
+
+`decode_entries_with` is bounded by the caller's `DecodeLimits`: every
+`0x03`/`0x04` claim and every delta's declared result length is charged
+before it is materialised, and only entries that a later delta names as its
+base stay resident. `PackReader::read` has no such budget (tracked
+separately).
+
 **Because:** PRD §6.5 forbids existence oracles. If a push could close its
 history, or resolve a delta, over objects held only by another repository or
 the global store, the push's success would reveal that some other repository
@@ -720,7 +731,9 @@ unsigned or foreign objects.
 `wrong_bytes_for_id_is_corrupt`) and `mkit_core::pack::tests`
 (`external_base_outside_source_is_delta_base_missing`,
 `untrusted_source_returning_wrong_bytes_is_rejected`,
-`decode_with_no_external_bases_matches_reader`). The server-side wiring and
+`decode_with_no_external_bases_matches_reader`,
+`delta_bomb_is_rejected_before_any_delta_is_applied`,
+`compressed_claims_are_charged_before_decompression`). The server-side wiring and
 the cross-repository uniform-error conformance test belong to WP-4.7.
 
 ## Closure profile is raw-only
