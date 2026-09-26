@@ -33,13 +33,18 @@
 //! read-compare-write sequence and released on `Drop` (including on
 //! panic). The in-process `Mutex` is retained as a fast-path optimisation
 //! and to serialise lock acquisition fairly within one process.
+//!
+//! Every ref write takes both locks, whatever its condition.
+//! [`FileTransport::with_ref_lock`] hands the same lock to callers that
+//! read, decide and write several files as one step (a metadata store's
+//! check-and-write), through [`LockedRefs`].
 
 #![forbid(unsafe_code)]
 
 use std::fs;
 use std::io::{self, ErrorKind};
-use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::path::{Component, Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 
 use mkit_core::hash::Hash;
 use mkit_core::protocol::{PackKey, RefWriteCondition, Transport, TransportError, TransportResult};
@@ -56,6 +61,29 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// A fresh temp-file path next to `dest`: `.<file name>.tmp.<pid>.<seq>`
+/// in `dest`'s directory. Every temp file this crate writes is named here,
+/// from one process-wide counter, so two writers in one process never pick
+/// the same name, and writers in different processes differ by pid. A
+/// streaming writer that publishes into the same layout (a blob store
+/// writing `packs/`) names its temp files here too, so it can never
+/// collide with this crate's own writes.
+///
+/// # Errors
+/// `InvalidInput` if `dest` has no parent directory or no file name.
+pub fn temp_path(dest: &Path) -> io::Result<PathBuf> {
+    let parent = dest
+        .parent()
+        .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "destination path has no parent"))?;
+    let file_name = dest
+        .file_name()
+        .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "destination has no file name"))?
+        .to_string_lossy();
+    let pid = process::id();
+    let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    Ok(parent.join(format!(".{file_name}.tmp.{pid}.{seq}")))
+}
+
 /// Atomically write `bytes` to `dest` using a temp-file + fsync +
 /// rename + parent-dir-fsync sequence. Creates parent dirs when
 /// `make_parents` is `true`. Mirrors `mkit_core::atomic::write_atomic`.
@@ -67,14 +95,7 @@ fn write_atomic(dest: &Path, bytes: &[u8], make_parents: bool) -> io::Result<()>
         fs::create_dir_all(parent)?;
     }
 
-    let file_name = dest
-        .file_name()
-        .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "destination has no file name"))?
-        .to_string_lossy();
-    let pid = process::id();
-    let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp_name = format!(".{file_name}.tmp.{pid}.{seq}");
-    let tmp_path = parent.join(&tmp_name);
+    let tmp_path = temp_path(dest)?;
 
     {
         use std::io::Write;
@@ -104,14 +125,7 @@ fn write_create_new(dest: &Path, bytes: &[u8], make_parents: bool) -> io::Result
         fs::create_dir_all(parent)?;
     }
 
-    let file_name = dest
-        .file_name()
-        .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "destination has no file name"))?
-        .to_string_lossy();
-    let pid = process::id();
-    let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp_name = format!(".{file_name}.tmp.{pid}.{seq}");
-    let tmp_path = parent.join(&tmp_name);
+    let tmp_path = temp_path(dest)?;
 
     {
         use std::io::Write;
@@ -172,6 +186,18 @@ fn sync_parent(dir: &Path) -> io::Result<()> {
 #[allow(clippy::unnecessary_wraps)]
 fn sync_parent(_dir: &Path) -> io::Result<()> {
     Ok(())
+}
+
+/// Fsync directory `dir`, making the renames, links and removals already
+/// done in it durable: what every write of this crate does after its
+/// rename. A missing `dir` counts as success; on non-Unix targets this is a
+/// no-op (see `sync_parent`). For writers that publish into the same
+/// layout with their own temp file (see [`temp_path`]).
+///
+/// # Errors
+/// The directory could not be opened or synced.
+pub fn sync_dir(dir: &Path) -> io::Result<()> {
+    sync_parent(dir)
 }
 
 // ---------------------------------------------------------------------------
@@ -365,6 +391,175 @@ impl FileTransport {
             )))
         }
     }
+
+    /// The transport root: `packs/`, `refs/` and `.mkit/` live under it.
+    #[must_use]
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Run `f` holding the ref mutation lock: this transport's in-process
+    /// mutex, then the OS exclusive lock on `<root>/.mkit/refs/.lock`
+    /// (created on first use). Every ref write takes it, including
+    /// [`Transport::update_ref`], so what `f` reads, decides and writes
+    /// through [`LockedRefs`] is one step that no other writer on the same
+    /// root, in this process or another, can interleave with. Blocks until
+    /// the lock is free. `f` is synchronous, so nothing holds the lock
+    /// across an `.await`.
+    ///
+    /// A panic in `f` releases both locks. The in-process mutex guards no
+    /// data (the state is the files, and every write is one atomic rename),
+    /// so a panic never poisons the transport: the next caller recovers it.
+    ///
+    /// # Errors
+    /// [`TransportError::RemoteError`] if the lock file cannot be created
+    /// or locked; `f` did not run.
+    pub fn with_ref_lock<T>(&self, f: impl FnOnce(&LockedRefs<'_>) -> T) -> TransportResult<T> {
+        let _process_guard = self.cas_lock.lock().unwrap_or_else(PoisonError::into_inner);
+        let _xproc_guard = RefLock::acquire(&self.root)
+            .map_err(|e| TransportError::RemoteError(format!("update_ref mutation lock: {e}")))?;
+        Ok(f(&LockedRefs { tx: self }))
+    }
+
+    /// `rel` under the root, if it is a plain relative path (only normal
+    /// components: no root, `.` or `..`).
+    fn file_path(&self, rel: &Path) -> TransportResult<PathBuf> {
+        let plain = rel.components().next().is_some()
+            && rel.components().all(|c| matches!(c, Component::Normal(_)));
+        if !plain {
+            return Err(TransportError::RemoteError(format!(
+                "not a plain relative path: {}",
+                rel.display()
+            )));
+        }
+        Ok(self.root.join(rel))
+    }
+}
+
+/// The ref files (and other lock-guarded files) of a [`FileTransport`]
+/// root while [`FileTransport::with_ref_lock`] holds the ref lock. Reads
+/// are the transport's own; writes are its CAS and atomic writes, without
+/// taking the lock again.
+#[derive(Debug)]
+pub struct LockedRefs<'a> {
+    tx: &'a FileTransport,
+}
+
+impl LockedRefs<'_> {
+    /// The ref's id: [`Transport::read_ref`], path-escape guard included.
+    ///
+    /// # Errors
+    /// As [`Transport::read_ref`].
+    pub fn read_ref(&self, name: &str) -> TransportResult<Option<Hash>> {
+        self.tx.read_ref(name)
+    }
+
+    /// The CAS write of [`Transport::update_ref`], under the lock already
+    /// held.
+    ///
+    /// # Errors
+    /// As [`Transport::update_ref`].
+    pub fn update_ref(
+        &self,
+        name: &str,
+        condition: RefWriteCondition,
+        hash: &Hash,
+    ) -> TransportResult<()> {
+        if !validate_ref_name(name) {
+            return Err(TransportError::InvalidRef(name.to_owned()));
+        }
+        let dest = self.tx.ref_path(name);
+        self.tx.check_ref_path(&dest)?;
+        let wire = encode_ref_wire(hash);
+
+        match condition {
+            RefWriteCondition::Any => {
+                // Unconditional atomic overwrite.
+                write_atomic(&dest, &wire, true).map_err(|e| {
+                    TransportError::RemoteError(format!("update_ref(Any) I/O error: {e}"))
+                })
+            }
+
+            RefWriteCondition::Missing => {
+                // Exclusive create: succeeds only when the file is absent.
+                match write_create_new(&dest, &wire, true) {
+                    Ok(true) => Ok(()),
+                    Ok(false) => Err(TransportError::RefConflict),
+                    Err(e) => Err(TransportError::RemoteError(format!(
+                        "update_ref(Missing) I/O error: {e}"
+                    ))),
+                }
+            }
+
+            RefWriteCondition::Match(expected) => {
+                let current = read_ref_raw(&dest).map_err(|e| {
+                    TransportError::RemoteError(format!("update_ref(Match) read error: {e}"))
+                })?;
+                match current {
+                    Some(c) if c == expected => {}
+                    _ => return Err(TransportError::RefConflict),
+                }
+
+                write_atomic(&dest, &wire, true).map_err(|e| {
+                    TransportError::RemoteError(format!("update_ref(Match) I/O error: {e}"))
+                })
+            }
+        }
+    }
+
+    /// Remove the ref file, then fsync its directory; `false` if it was
+    /// absent. Directories it leaves empty stay.
+    ///
+    /// # Errors
+    /// [`TransportError::InvalidRef`] for an invalid name,
+    /// [`TransportError::RemoteError`] for the path-escape guard or I/O.
+    pub fn delete_ref(&self, name: &str) -> TransportResult<bool> {
+        if !validate_ref_name(name) {
+            return Err(TransportError::InvalidRef(name.to_owned()));
+        }
+        let path = self.tx.ref_path(name);
+        self.tx.check_ref_path(&path)?;
+        remove_durably(&path)
+            .map_err(|e| TransportError::RemoteError(format!("delete_ref I/O error: {e}")))
+    }
+
+    /// Atomically replace the file at `rel` (a plain relative path under
+    /// the root) with `bytes`, creating its directories: the same temp
+    /// file, fsync, rename and directory fsync as a ref write.
+    ///
+    /// # Errors
+    /// [`TransportError::RemoteError`] for a path that is not plain and
+    /// relative, or for I/O.
+    pub fn write_file(&self, rel: &Path, bytes: &[u8]) -> TransportResult<()> {
+        let path = self.tx.file_path(rel)?;
+        write_atomic(&path, bytes, true)
+            .map_err(|e| TransportError::RemoteError(format!("write_file I/O error: {e}")))
+    }
+
+    /// Remove the file at `rel` (a plain relative path under the root),
+    /// then fsync its directory; `false` if it was absent.
+    ///
+    /// # Errors
+    /// [`TransportError::RemoteError`] for a path that is not plain and
+    /// relative, or for I/O.
+    pub fn remove_file(&self, rel: &Path) -> TransportResult<bool> {
+        let path = self.tx.file_path(rel)?;
+        remove_durably(&path)
+            .map_err(|e| TransportError::RemoteError(format!("remove_file I/O error: {e}")))
+    }
+}
+
+/// Remove `path`, then fsync its directory; `false` if it was absent.
+fn remove_durably(path: &Path) -> io::Result<bool> {
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    }
+    if let Some(parent) = path.parent() {
+        sync_parent(parent)?;
+    }
+    Ok(true)
 }
 
 impl Transport for FileTransport {
@@ -406,53 +601,9 @@ impl Transport for FileTransport {
         if !validate_ref_name(name) {
             return Err(TransportError::InvalidRef(name.to_owned()));
         }
-
-        let dest = self.ref_path(name);
-        self.check_ref_path(&dest)?;
-        let wire = encode_ref_wire(hash);
-
         // Every condition participates: an unconditional write must not
         // interleave between a Match read and its publication.
-        let _process_guard = self
-            .cas_lock
-            .lock()
-            .expect("FileTransport cas_lock poisoned");
-        let _xproc_guard = RefLock::acquire(&self.root)
-            .map_err(|e| TransportError::RemoteError(format!("update_ref mutation lock: {e}")))?;
-
-        match condition {
-            RefWriteCondition::Any => {
-                // Unconditional atomic overwrite.
-                write_atomic(&dest, &wire, true).map_err(|e| {
-                    TransportError::RemoteError(format!("update_ref(Any) I/O error: {e}"))
-                })
-            }
-
-            RefWriteCondition::Missing => {
-                // Exclusive create: succeeds only when the file is absent.
-                match write_create_new(&dest, &wire, true) {
-                    Ok(true) => Ok(()),
-                    Ok(false) => Err(TransportError::RefConflict),
-                    Err(e) => Err(TransportError::RemoteError(format!(
-                        "update_ref(Missing) I/O error: {e}"
-                    ))),
-                }
-            }
-
-            RefWriteCondition::Match(expected) => {
-                let current = read_ref_raw(&dest).map_err(|e| {
-                    TransportError::RemoteError(format!("update_ref(Match) read error: {e}"))
-                })?;
-                match current {
-                    Some(c) if c == expected => {}
-                    _ => return Err(TransportError::RefConflict),
-                }
-
-                write_atomic(&dest, &wire, true).map_err(|e| {
-                    TransportError::RemoteError(format!("update_ref(Match) I/O error: {e}"))
-                })
-            }
-        }
+        self.with_ref_lock(|refs| refs.update_ref(name, condition, hash))?
     }
 
     fn read_ref(&self, name: &str) -> TransportResult<Option<Hash>> {
@@ -1335,5 +1486,101 @@ mod tests {
         // ref wire.
         let after = fs::read(&outside_file).unwrap();
         assert_eq!(after, b"old", "outside file was clobbered despite guard");
+    }
+
+    // ------------------------------------------------------------------
+    // with_ref_lock / LockedRefs
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn with_ref_lock_holds_the_lock_file_and_writes_through_it() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let h = blake3_hash(b"locked");
+        let held = t
+            .with_ref_lock(|refs| {
+                refs.update_ref("refs/heads/a", RefWriteCondition::Missing, &h)
+                    .unwrap();
+                assert_eq!(refs.read_ref("refs/heads/a").unwrap(), Some(h));
+                // Another open file description cannot take the lock.
+                let lock = dir.path().join(".mkit").join("refs").join(".lock");
+                let other = fs::File::open(lock).unwrap();
+                other.try_lock().is_err()
+            })
+            .unwrap();
+        assert!(held, "the ref lock is held inside with_ref_lock");
+        assert_eq!(t.read_ref("refs/heads/a").unwrap(), Some(h));
+    }
+
+    #[test]
+    fn with_ref_lock_recovers_after_a_panic() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            t.with_ref_lock(|_| panic!("panic under the ref lock"))
+        }));
+        assert!(panicked.is_err() && t.cas_lock.is_poisoned());
+        let h = blake3_hash(b"after");
+        t.update_ref("refs/heads/a", RefWriteCondition::Any, &h)
+            .unwrap();
+        assert_eq!(t.read_ref("refs/heads/a").unwrap(), Some(h));
+    }
+
+    #[test]
+    fn delete_ref_removes_the_file_once() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let h = blake3_hash(b"gone");
+        t.update_ref("refs/heads/a", RefWriteCondition::Any, &h)
+            .unwrap();
+        let removed = t
+            .with_ref_lock(|refs| {
+                (
+                    refs.delete_ref("refs/heads/a").unwrap(),
+                    refs.delete_ref("refs/heads/a").unwrap(),
+                )
+            })
+            .unwrap();
+        assert_eq!(removed, (true, false));
+        assert_eq!(t.read_ref("refs/heads/a").unwrap(), None);
+        let invalid = t.with_ref_lock(|refs| refs.delete_ref("../x")).unwrap();
+        assert!(matches!(invalid, Err(TransportError::InvalidRef(_))));
+    }
+
+    #[test]
+    fn locked_file_writes_take_only_plain_relative_paths() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let rel = Path::new(".mkit/server/row");
+        t.with_ref_lock(|refs| {
+            refs.write_file(rel, b"v1").unwrap();
+            refs.write_file(rel, b"v2").unwrap();
+            for bad in ["", "/abs", "../up", "a/../b", "./a"] {
+                assert!(refs.write_file(Path::new(bad), b"x").is_err(), "{bad}");
+                assert!(refs.remove_file(Path::new(bad)).is_err(), "{bad}");
+            }
+        })
+        .unwrap();
+        assert_eq!(fs::read(dir.path().join(rel)).unwrap(), b"v2");
+        let removed = t
+            .with_ref_lock(|refs| {
+                (
+                    refs.remove_file(rel).unwrap(),
+                    refs.remove_file(rel).unwrap(),
+                )
+            })
+            .unwrap();
+        assert_eq!(removed, (true, false));
+    }
+
+    #[test]
+    fn temp_paths_are_unique_hidden_siblings() {
+        let dest = Path::new("/r/packs/abc");
+        let (a, b) = (temp_path(dest).unwrap(), temp_path(dest).unwrap());
+        assert_ne!(a, b);
+        assert_eq!(a.parent(), dest.parent());
+        let name = a.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.starts_with(".abc.tmp."), "{name}");
+        assert!(temp_path(Path::new("/")).is_err());
     }
 }

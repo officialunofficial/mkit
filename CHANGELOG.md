@@ -101,6 +101,21 @@ train).
   once the blob is committed, leaving its in-flight record to the pruner.
   The `test-faults` feature adds `FaultHooks` at five points and
   per-request `TestDirectives`. **SemVer:** unreleased API.
+- *(server)* `mkit-server` `fs` feature (native, std-only, no async
+  runtime): `FsBlobStore` streams uploads into `packs/<64-hex>` and
+  publishes only after BLAKE3 and length verify (temp file, fsync, rename,
+  directory fsync); bodies over 1 MiB stream in 64 KiB pieces.
+  `FsLayoutStore` keeps a repo's refs as `FileTransport` ref files under
+  its ref lock (`.mkit/refs/.lock`), evaluating a `NotAfter` deadline
+  under that lock; other ref-class names live in `.mkit/server/rows/`.
+  Both pass the storage conformance suite. **SemVer:** unreleased API.
+
+- *(transport-file)* `FileTransport::with_ref_lock` runs a closure under
+  the ref lock with a `LockedRefs` handle (`read_ref`, `update_ref`,
+  `delete_ref`, and atomic `write_file`/`remove_file` under the root);
+  `FileTransport::root`, `temp_path` and `sync_dir` are public. A panic
+  under the ref lock no longer poisons the transport: the next writer
+  recovers the in-process lock (it guards no data). **SemVer:** additive.
 
 - *(core)* Resumable-part building blocks (SPEC-TRANSPORT-CONNECT §7.6):
   `write_auth::ContentCommitment` parses and formats `body:`, `pack:` and the

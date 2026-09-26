@@ -69,6 +69,18 @@ slow-timeout = { period = "150s", terminate-after = 1 }
 filter = 'binary(branch_rename_commit_race)'
 slow-timeout = { period = "150s", terminate-after = 1 }
 
+# The storage suite over the `.mkit`-layout stores makes every write durable
+# (fsync the file, rename, fsync the directory): a few cases apply 1,000-2,000
+# single-key batches, ~40s each on a loaded macOS runner (F_FULLFSYNC). Not
+# hangs; the same generous ceiling as the other real-I/O suites.
+[[profile.default.overrides]]
+filter = 'binary(fs_backends)'
+slow-timeout = { period = "150s", terminate-after = 1 }
+
+[[profile.ci.overrides]]
+filter = 'binary(fs_backends)'
+slow-timeout = { period = "150s", terminate-after = 1 }
+
 [profile.ignored-lane]
 # #505 PR 5/5: a handful of irreducibly-real tests (subprocess sleeps,
 # real localhost TCP, the ~5s worktree-lock wait, a real `ssh` connect

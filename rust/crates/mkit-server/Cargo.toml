@@ -48,6 +48,15 @@ memory = []
 # `TestDirectives` (`x-mkit-test-fault`, `x-mkit-test-clock-skew-ms`).
 # Never enabled by a release build or any binary's default features.
 test-faults = []
+# The `.mkit` on-disk layout stores (`fs::FsBlobStore`, `fs::FsLayoutStore`):
+# std-only, no async runtime, so the server-free `mkit serve` (ssh) can use
+# them. Native only: the module and its dependency are cfg'd out on wasm32.
+fs = ["dep:mkit-transport-file"]
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# `fs` delegates ref CAS, the ref lock and atomic writes to FileTransport, so
+# the files stay byte-identical to what `mkit` and `mkit+file://` read.
+mkit-transport-file = { version = "0.4", path = "../mkit-transport-file", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # `send_wrap` on wasm32: lets a `!Send` handler future satisfy the `+ Send`
@@ -59,3 +68,5 @@ futures-executor = "0.3"
 # Signs auth v2 test envelopes with the golden fixture's seed.
 ed25519-dalek = { version = "3", default-features = false, features = ["alloc"] }
 proptest = "1"
+# Temp roots for the `fs` store tests.
+tempfile = "3"
