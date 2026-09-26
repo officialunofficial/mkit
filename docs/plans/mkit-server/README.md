@@ -62,7 +62,7 @@ and one PR per WP. A group is done when all of its WPs have merged.
 | Milestone | State | Evidence |
 |---|---|---|
 | Prep & Specs | done (P0 dropped) | P1, S1–S3 merged |
-| **M0 Foundation** | **complete**: the 21 other M0 WPs merged, and the exit gate (WP-M0-20) passed on 2026-09-26 | [M0 exit report](m0-exit-report.md) |
+| **M0 Foundation** | **complete, pending the user's acceptance of 16 listed wire changes**: the 21 other M0 WPs merged, and the exit gate (WP-M0-20) ran green on 2026-09-26 | [M0 exit report](m0-exit-report.md) |
 | M1 Addressing & uploads | next; early-start WP 1.3 merged | |
 | M2 Identity | early-start WPs 2.3, 2.4a, 2.4b, 2.5 merged | |
 | M4 Indexed mode | early-start WPs 4.1, 4.2, 4.3 merged | |
@@ -71,7 +71,7 @@ M0's exit criteria are permanent gates now: the storage suite per backend and th
 binary and `wrangler dev`), the ssh goldens, `buf breaking`, and the server-free CLI check (`just ci-server`,
 `just ci`, `cloudbuild/ci.yaml` and `workers.yml`, which trigger on `main` only). The open follow-ups carried out of M0
 (WP-REL CI wiring and the 0.5.0 release, M1 paging and multipart, M2 enc-peer grants, and the items for the user) are
-listed in the [exit report](m0-exit-report.md#9-open-follow-ups-not-m0-blockers).
+listed in the [exit report](m0-exit-report.md#10-open-follow-ups-not-m0-blockers).
 
 ## Work-package status
 

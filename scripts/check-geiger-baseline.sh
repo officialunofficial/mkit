@@ -135,9 +135,18 @@ esac
 if ! grep -qE '^[0-9]+/[0-9]+ +[0-9]+/[0-9]+ .* mkit-cli [0-9]+\.[0-9]+\.[0-9]+' <<<"$OUTPUT"; then
     geiger_failed "no mkit-cli root row"
 fi
-# The only non-zero exit a complete run may have is geiger's warning count.
+# The only error a complete run may report is geiger's warning count
+# ("error: Found N warnings"). Any other `error:` line (a crate that failed
+# to compile, a scan that aborted) fails the check even when a table was
+# printed, and so does a non-zero exit without the count line. (No
+# `grep -q` at the end of a pipe: under pipefail its early exit can
+# SIGPIPE the writer and turn a match into "no match".)
+other_errors=$(grep -E '^error:' "$stderr_file" | grep -vE '^error: Found [0-9]+ warnings$' || true)
+if [ -n "$other_errors" ]; then
+    geiger_failed "an error other than the warning count"
+fi
 if [ "$geiger_status" -ne 0 ] && ! grep -qE '^error: Found [0-9]+ warnings$' "$stderr_file"; then
-    geiger_failed "unexpected error"
+    geiger_failed "non-zero exit"
 fi
 
 FAIL=0

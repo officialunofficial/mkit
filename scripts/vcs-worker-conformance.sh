@@ -24,7 +24,8 @@
 #   -- ARGS        passed to every `mkit-server-conformance wire` run (e.g.
 #                  `-- --filter refs.`, `-- --list-refs 1000`).
 #
-# Every server starts from an empty `--persist-to` state directory. Needs
+# Every server starts from an empty `--persist-to` state directory, so the
+# runs declare `--fresh-target` (whole-server listings stay bounded). Needs
 # `worker-build` (cargo install worker-build --locked), Node.js with `npx`,
 # curl, and the Rust toolchain of rust/rust-toolchain.toml.
 #
@@ -139,7 +140,7 @@ run_suite() {
     echo ">> running the wire suite (features: ${features}) $*"
     local status=0
     "${runner}" wire --base-url "${ORIGIN}" --auth auth-v2 --audience "${ORIGIN}" \
-        --repository "${REPOSITORY}" --random-signer --atomic-advance \
+        --repository "${REPOSITORY}" --random-signer --atomic-advance --fresh-target \
         --max-pack-bytes "${MAX_PACK_BYTES}" --features "${features}" \
         "$@" ${runner_args[@]+"${runner_args[@]}"} || status=$?
     if [ "${status}" -ne 0 ]; then

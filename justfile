@@ -4,17 +4,17 @@
 # — no new logic lives here, so keep this file in sync with those when they
 # change instead of letting it drift into a second source of truth.
 #
-# `ci-scripts` is the local stand-in for gates those jobs do not run as
-# these exact commands: docs-lint.yml's check-spec-status.sh,
+# `ci-scripts` bundles script and wasm32 gates. cloudbuild/ci.yaml's
+# `mkit-server` block (since WP-M0-20) runs its
 # scripts/check-wasm-dep-graph.sh, scripts/check-cli-baseline.sh (the
-# server-free CLI check), `cargo check --target
-# wasm32-unknown-unknown` for mkit-wasm and mkit-server, the wasm32 build
-# of mkit-server-worker, and
-# scripts/wasm-ruzstd-check.sh (mkit-core's pack-ruzstd decoder run on
-# wasm32 under node via wasm-pack). The `pack-ruzstd` nextest run in
-# ci-linux / ci-macos is likewise local-only until WP-REL mirrors both
-# into the CI configs. It is not a 1:1
-# extract of web.yml (wasm-pack bundler + bun) or the worker wasm32 builds.
+# server-free CLI check), `cargo check --target wasm32-unknown-unknown` of
+# mkit-server and the wasm32 build of mkit-server-worker, and docs-lint.yml
+# runs its check-spec-status.sh. Still local-only until WP-REL mirrors them
+# into the CI configs: the mkit-wasm wasm32 check, scripts/wasm-ruzstd-check.sh
+# (mkit-core's pack-ruzstd decoder run on wasm32 under node via wasm-pack),
+# the `pack-ruzstd` nextest run in ci-linux / ci-macos, and `interop-enc`.
+# None of this is a 1:1 extract of web.yml (wasm-pack bundler + bun) or of
+# workers.yml's worker wasm32 builds.
 #
 # Not mirrored (CI-infra-specific, not part of the test surface):
 #   - cloudbuild/ci.yaml's swtpm/TPM harness (mkit-sign-tpm's real-device
@@ -25,10 +25,6 @@
 #   - rust.yml's keystore-backends matrix (2-OS native keystore backends —
 #     stays workflow_dispatch-only by design; run it on GitHub, not here).
 #   - web.yml's wasm-pack bundler smoke and bun test/lint/build.
-#
-# Since WP-M0-20, cloudbuild/ci.yaml also runs the dep-graph and
-# CLI-baseline scripts and the mkit-server / mkit-server-worker wasm32
-# builds (its `mkit-server` block).
 #
 # Usage: `just ci` for the host-appropriate subset, or `just ci-linux` /
 # `just ci-macos` / `just ci-security` / `just ci-docs` /
@@ -148,7 +144,7 @@ ci-scripts:
       exit 1
     fi
     ( cd rust && cargo check -p mkit-wasm --target wasm32-unknown-unknown )
-    ( cd rust && cargo check -p mkit-server --target wasm32-unknown-unknown )
+    ( cd rust && cargo check --locked -p mkit-server --target wasm32-unknown-unknown )
     ( cd rust && cargo build --locked -p mkit-server-worker --target wasm32-unknown-unknown )
     bash scripts/wasm-ruzstd-check.sh
 

@@ -134,9 +134,21 @@ pub(super) async fn invalid_ref_name(ctx: Ctx) -> CaseResult {
 /// SPEC-REFS §2: a server serves only names under `refs/`. A name that
 /// passes the §3 grammar but lies outside `refs/` is `invalid_argument` on
 /// `ReadRef`, `UpdateRef` and either side of `AdvanceRefs`, and nothing is
-/// written: neither the full listing (`ListRefs("")`) nor a listing of each
-/// rejected name's parent shows anything in this case's namespace, so a
-/// server that stores the name and then answers with the error still fails.
+/// written.
+///
+/// "Nothing is written" is checked through listings, since `ListRefs`
+/// prefixes are unrestricted (R-86) and so would show a name stored outside
+/// `refs/`: a server that stores the name and then answers with the error
+/// still fails. Each rejected name's own parent prefix (`{ns}`,
+/// `heads/{ns}`, `refsx/{ns}`) must list nothing; those listings are
+/// bounded by this case alone. A whole-server `ListRefs("")` also runs,
+/// but only when the profile declares a fresh target
+/// ([`crate::wire::Profile::fresh_target`]): on a long-lived server it
+/// grows with every run (other cases leave refs behind, 10,000 per run from
+/// `list.large_response_within_limit`), and before M1's paging (WP-1.27) a
+/// unary listing that large can exceed the server's limits. If the server
+/// refuses it as `resource_exhausted`, the sub-check is skipped with a note
+/// rather than failed.
 pub(super) async fn non_refs_prefix_rejected(ctx: Ctx) -> CaseResult {
     let ns = ctx.ns();
     let outside = [
@@ -165,15 +177,6 @@ pub(super) async fn non_refs_prefix_rejected(ctx: Ctx) -> CaseResult {
     }
     ctx.expect_ref(&head, None).await?;
     ctx.expect_ref(&packmap, None).await?;
-    // ListRefs prefixes are unrestricted (R-86), so the listings see a
-    // name stored outside `refs/` if the server kept one.
-    let mine = format!("{ns}/");
-    for (name, _) in listing(&ctx, "").await? {
-        ensure!(
-            !name.contains(&mine),
-            "ListRefs \"\": {name:?} was written by a rejected call"
-        );
-    }
     for name in &outside {
         let parent = name.strip_suffix("/main").unwrap_or(name);
         let got = listing(&ctx, parent).await?;
@@ -182,6 +185,23 @@ pub(super) async fn non_refs_prefix_rejected(ctx: Ctx) -> CaseResult {
             "ListRefs {parent:?}: {:?} was written by a rejected call",
             got.iter().map(|(n, _)| n).collect::<Vec<_>>()
         );
+    }
+    if ctx.profile().fresh_target {
+        let mine = format!("{ns}/");
+        match ctx.list("").await? {
+            Ok(all) => {
+                for (name, _) in all {
+                    ensure!(
+                        !name.contains(&mine),
+                        "ListRefs \"\": {name:?} was written by a rejected call"
+                    );
+                }
+            }
+            Err(e) if e.code == "resource_exhausted" => ctx.set_note(format!(
+                "whole-server ListRefs(\"\") skipped: {e} (unpaged before WP-1.27)"
+            )),
+            Err(e) => return Err(super::Failure::Fail(format!("ListRefs \"\": {e}"))),
+        }
     }
     Ok(())
 }

@@ -76,14 +76,26 @@ export TMPDIR="$HOME/.cache/mkit-test-tmp"; mkdir -p "$TMPDIR"   # never macOS /
   (for example `mkit-server`) gains or changes a dependency, refresh every affected app lock (`cargo metadata --offline`, or
   the `cargo check --target wasm32-unknown-unknown` above) and commit it; after a rebase, check that each app still builds
   with `--locked`.
-- **Load-sensitive slow tests.** These debug-build tests take 10–35 s alone but several times that inside a full parallel
+- **Load-sensitive slow tests.** These debug-build tests take 8–35 s alone but several times that inside a full parallel
   run, and time out under a high load average (other executors building):
-  - `mkit-core`: `history::ancestry` scrub tests, `refs::cas_*` races, `batch_write_hash_equals_store_write_hash`;
-  - `mkit-cli`: the packmap `verify_new_object_signatures_*` tests and `branch_rename_commit_race`.
-  Since WP-M0-20, `rust/.config/nextest.toml` gives them a 300 s ceiling and runs `branch_rename_commit_race` with no
-  other test beside it (the measurements are in [the M0 exit report](m0-exit-report.md#6-full-local-ci-just-ci-on-the-quiet-machine)).
-  A timeout in one of them, in a module your WP does not touch, is not a failure of your WP until it also fails **rerun
-  alone** (`cargo nextest run -p <crate> -E 'test(=<name>)'`); report it as load-related only if it passes that way.
+  - `mkit-core` `history::ancestry::tests::`: `corruption_outside_the_current_window_is_caught_within_a_bounded_number_of_publishes`,
+    `fast_forward_scrubs_a_bounded_window_not_the_whole_prefix`, `full_walk_fallback_still_verifies_the_spliced_prefix`,
+    `missing_scrub_state_forces_a_full_walk_instead_of_trusting_nothing`,
+    `scrub_lap_completion_forces_a_full_walk_but_keeps_the_generation`,
+    `scrub_state_from_a_superseded_generation_is_discarded_not_misapplied`,
+    `stale_scrub_state_forces_a_full_walk_regardless_of_cursor_position`;
+  - `mkit-core` `refs::tests::`: `cas_match_race_never_loses_an_update_across_uncoordinated_callers`,
+    `cas_delete_vs_match_advance_race_never_lets_both_win_or_loses_the_advance`;
+  - `mkit-core` `batch::tests::`: `batch_write_hash_equals_store_write_hash`, `write_parts_equals_concatenated_write`;
+  - `mkit-cli`: `remote_dispatch::packmap::tests::verify_new_object_signatures_mixed_with_unsigned_object_kinds`, and the
+    `branch_rename_commit_race` binary.
+
+  Since WP-M0-20, `rust/.config/nextest.toml` names exactly these: the first twelve get a 300 s ceiling, and
+  `branch_rename_commit_race` runs with no other test beside it under 150 s (the measurements are in
+  [the M0 exit report](m0-exit-report.md#6-full-local-ci-just-ci-on-the-quiet-machine)). Every other test keeps the 60 s
+  hang detection. A timeout in one of them, in a module your WP does not touch, is not a failure of your WP until it also
+  fails **rerun alone** (`cargo nextest run -p <crate> -E 'test(=<name>)'`); report it as load-related only if it passes
+  that way. A new test that needs more time gets its own exact-name override, not a module-wide one.
 
 **Working directory rule:** every gate command in this plan (here, in `00-plan.md`, and in each brief) is run from the **repo root**. A line that starts with `cd rust && …` or `cd apps/<w> && …` means "in a fresh subshell from the repo root", i.e. `( cd rust && … )`. Never chain a bare `cd` into later root-relative commands. `buf` must run from the root, where `buf.yaml` lives.
 

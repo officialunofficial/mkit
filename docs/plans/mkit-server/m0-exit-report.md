@@ -6,9 +6,12 @@ or build ran; the only other load came from macOS services, with a load average 
 and Node 24.13.0. Unless a step says otherwise, every command ran from the repo root with
 `CARGO_PROFILE_{DEV,TEST}_DEBUG=0`, a non-symlinked `TMPDIR` and the worktree's own `rust/target`.
 
-**Verdict: M0 is complete.** Every exit criterion is green. The one CI hazard the run found, pre-existing timeouts under the
-suite's own load, is fixed by targeted nextest overrides (§6). Nothing on the wire changed except the spec-mandated
-changes listed in §4.
+**Verdict.** Three of the four PRD §8 M0 exit criteria are met outright: conformance natively and on `wrangler dev`,
+the existing CLI e2e tests, and the server-free CLI. The fourth, "nothing changes on the wire", is **met except for the
+16 spec-mandated or bug-fix wire changes listed in §4, which require the user's acceptance**. The ssh goldens and the
+Connect wire suite pass unchanged, and `buf breaking` is clean. M0 is complete once the user accepts those changes. The
+one CI hazard the run found (pre-existing timeouts under the suite's own load, the same on `main`) is fixed by
+exact-name nextest overrides (§6). §9 lists the risks for the final PR to `main`.
 
 ## 1. Conformance natively: FS + SQLite and S3 + SQLite (PRD §5.1)
 
@@ -51,9 +54,14 @@ The 11 are `dur_cancelled_apply_is_all_or_nothing`, `dur_crash_restart_atomic_at
 `wrangler dev` runs Durable Object bindings locally, so placement, Cloudflare's limits and point-in-time recovery are
 first exercised by the M1 staging runs (WP-1.20, the orchestrator's local runs against staging during the epic).
 
-**New in this WP:** `refs.non_refs_prefix_rejected` also lists `ListRefs("")` and each rejected name's parent prefix, and
-fails if anything in the case's namespace shows up. A server that stores `{ns}/main` and still answers
-`invalid_argument` now fails the case. It passes on every target above and on vcs-worker (§2).
+**New in this WP:** `refs.non_refs_prefix_rejected` now also lists each rejected name's own parent prefix (`{ns}`,
+`heads/{ns}`, `refsx/{ns}`), each of which must list nothing, so a server that stores `{ns}/main` and still answers
+`invalid_argument` fails the case. Those listings are bounded by the case itself. A whole-server `ListRefs("")` runs as
+well, but only when the profile declares a fresh target (the new `Profile::fresh_target` / `--fresh-target`, set by the
+native test harnesses and `scripts/vcs-worker-conformance.sh`, whose servers all start empty). A long-lived server
+accumulates refs from earlier runs, and an unpaged listing could outgrow its limits before WP-1.27. A
+`resource_exhausted` answer skips that sub-check with a note. The case passes on every target above and on vcs-worker
+(§2).
 
 ## 2. Conformance against `wrangler dev` (vcs-worker)
 
@@ -102,24 +110,41 @@ The 10 skips are the feature-gated cases this build does not enable (bearer auth
   `ListRefs.prefix` comment gives the 512-byte cap (M0-12). No field, type or service changed. (The brief asked for an
   empty diff; these two comment edits are deliberate.)
 
-**Intentional wire changes made during M0** (all in the CHANGELOG's Unreleased section; each follows a spec or fixes a bug). None of
-them is a regression; every other reply is unchanged:
+**Wire changes made during M0.** Each entry of the CHANGELOG's Unreleased section was checked for an observable wire
+or protocol effect; the table lists every one found. Each follows a spec or fixes a bug; none is a silent regression.
+They need the user's acceptance.
 
-| Where | Change | Spec |
-|---|---|---|
-| every binding (`mkit serve` ssh, `mkit-server`, vcs-worker) | a grammar-valid ref name outside `refs/` is refused (`invalid_argument` / `INVALID_REQUEST`) instead of stored | SPEC-REFS v3 §2, SPEC-TRANSPORT §4.2.1, SPEC-TRANSPORT-CONNECT §5 (R-86) |
-| every binding, clients | a ref name or `ListRefs` prefix over 512 bytes is refused (was 4096 on ssh/enc, unbounded on `--http` and the worker) | SPEC-REFS v2 §3 |
-| `mkit-server` (was `mkit serve --http`), vcs-worker | `ListRefs` matches its prefix at a `/` boundary | SPEC-REFS §4 |
-| `mkit serve` (ssh) | a session idle for `--idle-timeout-secs` (default 60) gets `Error{INVALID_REQUEST, "idle timeout"}` and exit 76 | SSH-SECURITY §4, §7 (Q12) |
-| enc listener (moved from `mkit serve --listen-enc` to `mkit-server`) | error replies follow the ssh session: a non-`Hello` first frame, a wrong version, an unexpected frame and a parse error each get their specific `Error` reply (were: silent close or "unexpected frame") | SPEC-TRANSPORT §4.2 via SPEC-TRANSPORT-ENC §3 |
-| vcs-worker | nonce reuse for another operation is `invalid_argument` (was an uncaught 500) | SPEC-TRANSPORT-CONNECT §5 error table, §7.1 |
-| vcs-worker | a 33-byte `expected_id` is `invalid_argument` (was `failed_precondition`) | transport.proto: `expected_id` MUST be 32 bytes (naming the code is an open spec-pass item) |
-| vcs-worker | an upload stream past its declared size and past 64 MiB is `invalid_argument` (was `resource_exhausted`) | SPEC-TRANSPORT-CONNECT §5 (`ProtocolError`: declared and received byte counts disagree) |
-| vcs-worker | storage failures are `internal`/`unavailable` (were `invalid_argument` "refstore …"); a missing `AUTH_AUDIENCE`/`AUTH_REPOSITORY` makes every RPC `unavailable` (was writes only) | SPEC-TRANSPORT-CONNECT §5 (`ServerError` → `unavailable`) |
-| vcs-worker | a gzip unary response is no longer gzipped twice (a bug fix); `DownloadPack` streams 800 KiB chunks instead of one message (framing only; the suite checks contiguity) | bug fix; SPEC-TRANSPORT-CONNECT streaming (no whole-pack buffering) |
+| # | Where | Change | Basis |
+|---|---|---|---|
+| 1 | every binding (`mkit serve` ssh, `mkit-server`, vcs-worker) | a grammar-valid ref name outside `refs/` is refused (`invalid_argument` / `INVALID_REQUEST`) instead of stored | SPEC-REFS v3 §2, SPEC-TRANSPORT §4.2.1, SPEC-TRANSPORT-CONNECT §5 (R-86) |
+| 2 | every binding, and the ssh/enc clients | a ref name or `ListRefs` prefix over 512 bytes is refused (was 4096 on ssh/enc, unbounded on `--http` and the worker); the clients refuse one before sending | SPEC-REFS v2 §3 |
+| 3 | ssh and enc clients | a listed ref whose name is over 512 bytes is skipped instead of failing the listing (as the file, memory, s3 and http clients already did) | SPEC-REFS v2 §3 |
+| 4 | `mkit-server` (was `mkit serve --http`), vcs-worker | `ListRefs` matches its prefix at a `/` boundary and strips the prefix plus its `/` | SPEC-REFS §4 |
+| 5 | `.mkit`-layout `ListRefs` (`mkit serve`, `mkit-server` FS refs) | a legacy ref file that is undecodable, or whose name is over 512 bytes, is skipped with a server-side warning instead of failing the whole listing | SPEC-REFS §3–§4; bug fix |
+| 6 | `mkit-server` (was `mkit serve --http`) | `AdvanceRefs` validates both ref names before any write (`--http` wrote the packmap, then rejected an invalid head) | SPEC-TRANSPORT-CONNECT §5 (all-or-nothing validation); bug fix |
+| 7 | `mkit serve` (ssh) | a session idle for `--idle-timeout-secs` (default 60) gets `Error{INVALID_REQUEST, "idle timeout"}` and exit 76 | SSH-SECURITY §4, §7 (Q12) |
+| 8 | enc listener (moved from `mkit serve --listen-enc` to `mkit-server`) | error replies follow the ssh session: a non-`Hello` first frame, a wrong version, an unserved frame and a parse error each get their specific `Error` reply ("pack chunk read failed" inside an upload, "ref name too long" for a long name), where the old listener closed silently or said "unexpected frame" | SPEC-TRANSPORT §4.2 via SPEC-TRANSPORT-ENC §3 |
+| 9 | enc listener | the handshake timeout default is 10 s (was 60 s); `0` for the handshake or idle timeout is refused at startup (idle `0` used to mean "none") | SPEC-TRANSPORT-ENC §2.1 |
+| 10 | vcs-worker | nonce reuse for another operation is `invalid_argument` (was an uncaught 500) | SPEC-TRANSPORT-CONNECT §5 error table, §7.1 |
+| 11 | vcs-worker | a 33-byte `expected_id` is `invalid_argument` (was `failed_precondition`) | transport.proto: `expected_id` MUST be 32 bytes (naming the code is an open spec-pass item) |
+| 12 | vcs-worker | an upload stream past its declared size and past 64 MiB is `invalid_argument` (was `resource_exhausted`) | SPEC-TRANSPORT-CONNECT §5 (`ProtocolError`: declared and received byte counts disagree) |
+| 13 | vcs-worker | storage failures are `internal`/`unavailable` (were `invalid_argument` "refstore …"); a missing `AUTH_AUDIENCE`/`AUTH_REPOSITORY` makes every RPC `unavailable` (was writes only) | SPEC-TRANSPORT-CONNECT §5 (`ServerError` → `unavailable`) |
+| 14 | vcs-worker | a gzip-compressed unary response is no longer compressed a second time by the runtime | bug fix |
+| 15 | vcs-worker, `mkit-server` | `DownloadPack` streams 800 KiB chunks (vcs-worker sent one message); the suite checks contiguity and `last` | SPEC-TRANSPORT-CONNECT streaming (no whole-pack buffering) |
+| 16 | pack readers (CLI fetch/clone/pull, `mkit-wasm`'s `verify_closure_packs`) | a `0x03`/`0x04` entry holding concatenated or skippable zstd frames, or trailing bytes, is refused (`PackError::ZstdDecompress`); the C path used to accept it | SPEC-PACKFILE §3.3 |
 
-The pack readers' "one zstd frame per entry" rule (SPEC-PACKFILE §3.3) tightens the pack format, not the RPC wire; mkit's
-writer never produced the refused payloads.
+On #16: in M0 no server parses an uploaded pack (`UploadPack` checks only the declared length and BLAKE3 id, before
+and after this branch), so `UploadPack` itself accepts the same packs as before. A pack with such an entry, pushed by a
+third-party writer, is now refused by the reading side: a client's fetch, clone or pull. mkit's `PackWriter` never
+produced one. (The review note said `UploadPack` rejects these; it does not in M0. Server-side verification comes with
+indexed mode, WP-4.7.)
+
+Checked and **not** wire changes: `--max-session-secs` (new, off by default); the upload temp-file sweep; refusing a
+root marked for `mkit-server --meta sqlite:` (`mkit serve` exits 78, `FileTransport` ref writes get `MetaElsewhere`),
+since the marker is new and no existing root carries it; the operator-side flag moves of WP-M0-15 (the bearer token
+from a file or the environment, enc allowlist and key file checks); the storage-contract change that makes a `scan`
+cursor from another range `Invalid` (M0's `ListRefs` has no page token on the wire); and `mkit_rpc`'s `MAX_REF_NAME`
+constant, which is #2.
 
 ## 5. Server-free CLI
 
@@ -170,13 +195,17 @@ at 300 s. Durations:
 `main` shows the same numbers, so the branch introduced none of this. `main`'s own CI config would kill the same tests.
 The fix is in `rust/.config/nextest.toml`, for both the `default` and `ci` profiles:
 
-- `branch_rename_commit_race` runs with no other test beside it (`threads-required = "num-test-threads"`), under a 300 s
-  ceiling. It calibrates its race delays from one `commit` it times at the start, so a loaded start inflates every
-  round. Run exclusively in the final run, it took 39.6 s.
-- The `history::ancestry` tests, `refs::cas_*`, the two `batch::tests` hash tests and the packmap
-  `verify_new_object_signatures_*` tests (41 tests) get a 300 s ceiling. That is 2.5× the worst time measured. Their
-  final-run times were 95–99 s, 68 s and ≤ 61 s. Every other test keeps its existing ceiling (60 s, `ci` 120 s, or its own
-  override).
+- `branch_rename_commit_race` runs with no other test beside it (`threads-required = "num-test-threads"`), under its
+  existing 150 s ceiling. It calibrates its race delays from one `commit` it times at the start, so a loaded start
+  inflates every round. Run exclusively in the final run, it took 39.6 s.
+- Twelve tests, each named exactly (`test(=…)`), get a 300 s ceiling: every test that took 40 s or more in a quiet full
+  run on the branch or on `main`. They are the seven `history::ancestry` scrub/full-walk tests, `refs::tests::cas_match_race_…`
+  and `cas_delete_vs_match_advance_race_…`, `batch_write_hash_equals_store_write_hash`,
+  `write_parts_equals_concatenated_write`, and mkit-cli's `verify_new_object_signatures_mixed_with_unsigned_object_kinds`.
+  300 s is about 2.4× the worst time measured (123 s). Every other test, including the rest of those modules, keeps its
+  existing ceiling (60 s, `ci` 120 s, or its own override), so it keeps hang detection. The final `just ci` run above
+  used an earlier, module-wide version of this filter; the exact-name filter selects a subset of it (checked with
+  `cargo nextest list`), and each of the twelve took at most 99 s in that run.
 
 ## 7. Pack benches (main vs this branch, quiet machine)
 
@@ -212,20 +241,33 @@ delta-heavy pack bench remains the open suggestion from 4.2.
   skipped`, then both wasm32 steps `Finished`, then `check-cli-baseline: OK`, exit 0 in 122 s. `just ci` already covers every step (the workspace nextest and
   `ci-scripts`, which now also builds `mkit-server-worker` for wasm32), so `ci` does not call it and doesn't run the
   server suites twice.
-- `cloudbuild/ci.yaml` gains a `mkit-server` block: the wasm32 check/build and `check-wasm-dep-graph.sh` and
-  `check-cli-baseline.sh`. None of these ran in any CI config before. Its triggers (`mkit-ci-main`, `mkit-ci-pr`) are on
-  `^main$` only (cloudbuild/README.md), so they first run on the final PR to `main`. `workers.yml`'s
-  `vcs-worker-conformance` job (M0-17) triggers on `main` only.
+- `cloudbuild/ci.yaml` gains a `mkit-server` block: `cargo check --locked -p mkit-server` and `cargo build --locked -p
+  mkit-server-worker` for wasm32, `check-wasm-dep-graph.sh` and `check-cli-baseline.sh`. The two scripts and the
+  `mkit-server` check ran in no CI config before. `mkit-server-worker` was already compiled for wasm32 by `workers.yml`,
+  as a dependency of `apps/vcs-worker` (its wasm32 clippy step and the conformance job's `worker-build`), against
+  `apps/vcs-worker/Cargo.lock`; the new step builds it against `rust/Cargo.lock` with `--locked`. The Cloud Build
+  triggers (`mkit-ci-main`, `mkit-ci-pr`) are on `^main$` only (cloudbuild/README.md), so they first run on the final PR
+  to `main`. `workers.yml` (including the `vcs-worker-conformance` job of M0-17) triggers on `main` only.
 - `scripts/check-geiger-baseline.sh` now fails closed. It used to discard `cargo geiger`'s stderr and ignore its exit
   status, and it only warned about a missing crate, so a geiger that could not build reported nothing and passed. geiger
   exits 1 on every normal run ("error: Found N warnings"), so the script now requires the report table and the
   `mkit-cli` root row. A missing or unknown first-party crate, or an unreadable count, is an error. A missing
   `cargo-geiger` is an error, unless `MKIT_SKIP_GEIGER=1` skips the check with a visible warning. geiger now builds in
   `<target>/geiger`, so it cannot clobber a concurrent nextest run. The ceilings did not change: every crate is at its
-  ceiling (mkit-cli 23, mkit-core 3, the rest 0), `mkit-server` included. Failure injection (a failing `cargo`, no
-  geiger, a lowered ceiling, an absent expected crate) fails each case as intended.
+  ceiling (mkit-cli 23, mkit-core 3, the rest 0), `mkit-server` included. Any `error:` line other than the warning
+  count fails the check, even when a table was printed. Failure injection fails each case as intended: a failing
+  `cargo`, no geiger, a lowered ceiling, an absent expected crate, and a complete in-ceiling report beside a compile
+  `error:` line. The control, a complete report with only the warning count, passes.
 
-## 9. Open follow-ups (not M0 blockers)
+## 9. Risks for the final PR to `main`
+
+- **Unmeasured on the CI machines.** Cloud Build's `ci.yaml` has a 2400 s timeout on an E2_HIGHCPU_8. The new cold
+  wasm32 builds of `mkit-server` and `mkit-server-worker`, and `branch_rename_commit_race` now running alone (about
+  40 s here, with the rest of the suite waiting), add time that nobody has measured there. The 300 s ceilings were
+  calibrated on a 10-core M1 Pro, and an 8-vCPU Linux runner, or GitHub's macOS runner, may be slower. The first CI run
+  of the final PR is where these numbers get checked.
+
+## 10. Open follow-ups (not M0 blockers)
 
 Carried to later WPs or to the user; the orchestrator notes have the detail.
 
