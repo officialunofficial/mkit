@@ -78,3 +78,11 @@ fn r2() -> R2BlobStore<SimBucket> {
 }
 
 storage_suite!(workers, kv = Workers::new(), blob = r2);
+
+/// The blob cases again, with R2 answering failed conditions and 429s
+/// before it reads the body.
+fn r2_early() -> R2BlobStore<SimBucket> {
+    R2BlobStore::new(SimBucket::default().answer_early(), PACKS_KEYSPACE)
+}
+
+storage_suite!(workers_r2_early, blob = r2_early);

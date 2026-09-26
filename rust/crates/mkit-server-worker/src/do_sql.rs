@@ -55,10 +55,35 @@ pub const DO_MAX_BYTES: u64 = 10_000_000_000;
 /// The same limit on Workers Free: 1 GB.
 pub const DO_FREE_MAX_BYTES: u64 = 1_000_000_000;
 
-/// The default cap: [`DO_MAX_BYTES`] with `SqlKvStore`'s default reserve
-/// (1/64, about 156 MB) below it, so batches with a put stop at about
-/// 9.84 GB.
+/// The default cap, for **Workers Paid**: [`DO_MAX_BYTES`] with
+/// `SqlKvStore`'s default reserve (1/64, about 156 MB) below it, so batches
+/// with a put stop at about 9.84 GB. A Workers Free deployment must use
+/// `Capacity::new(DO_FREE_MAX_BYTES)` instead (`NsObject::with_capacity`):
+/// with this default it would run into the 1 GB hard limit.
 pub const DO_CAPACITY: Capacity = Capacity::new(DO_MAX_BYTES);
+
+/// `databaseSize` as bytes. workers-rs's `SqlStorage::database_size`
+/// returns `f64 as usize`, which on wasm32 saturates at 2^32 − 1 (about
+/// 4.29 GB): below the soft limit, so the cap would never trigger. The
+/// adapter reads the JavaScript number itself and converts it here.
+///
+/// # Errors
+/// [`SqlError::Backend`] for a missing, non-finite, negative, fractional or
+/// above-2^53 value: the size is unknown, and a batch with a put must not
+/// proceed on a guess.
+pub fn database_size_bytes(value: Option<f64>) -> Result<u64, SqlError> {
+    let bad = || SqlError::Backend(Redacted::new("databaseSize is not a byte count"));
+    let v = value.ok_or_else(bad)?;
+    // `MAX_SAFE_INTEGER` is exactly representable, so the comparison is too.
+    #[allow(clippy::cast_precision_loss)]
+    let max = MAX_SAFE_INTEGER as f64;
+    if !v.is_finite() || v < 0.0 || v.fract() != 0.0 || v > max {
+        return Err(bad());
+    }
+    // In range and integral: the cast is exact.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    Ok(v as u64)
+}
 
 /// Largest integer JavaScript represents exactly, `2^53 − 1`.
 const MAX_SAFE_INTEGER: i64 = (1 << 53) - 1;
@@ -238,6 +263,9 @@ mod conn {
             for row in cursor.raw() {
                 row.map_err(|e| classify_error(&e.to_string()))?;
             }
+            // `rows_written` is also `f64 as usize` (saturating at 2^32 − 1
+            // on wasm32), harmless here: one `SqlKvStore` statement writes
+            // at most one row, and callers ignore the count.
             Ok(cursor.rows_written() as u64)
         }
 
@@ -293,7 +321,12 @@ mod conn {
         }
 
         fn size_bytes(&self) -> Result<u64, SqlError> {
-            Ok(self.sql.database_size() as u64)
+            // Not `SqlStorage::database_size`: its `as usize` saturates at
+            // 2^32 − 1 on wasm32 (see `database_size_bytes`).
+            let size = js_sys::Reflect::get(self.sql.as_ref(), &"databaseSize".into())
+                .ok()
+                .and_then(|v| v.as_f64());
+            super::database_size_bytes(size)
         }
     }
 }
@@ -359,6 +392,35 @@ mod tests {
 
     #[test]
     fn default_capacity_stays_below_the_durable_object_limit() {
+        // Above 2^32 (where workers-rs's `usize` saturates on wasm32) and
+        // at the soft limit, the size survives exactly.
+        let soft = DO_CAPACITY.soft_limit();
+        #[allow(clippy::cast_precision_loss)]
+        for n in [
+            0,
+            4096,
+            (1_u64 << 32) + 1,
+            soft,
+            DO_MAX_BYTES,
+            (1 << 53) - 1,
+        ] {
+            assert_eq!(database_size_bytes(Some(n as f64)).unwrap(), n);
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let above = ((1_u64 << 53) + 2) as f64;
+        for bad in [
+            None,
+            Some(f64::NAN),
+            Some(f64::INFINITY),
+            Some(-1.0),
+            Some(0.5),
+            Some(above),
+        ] {
+            assert!(
+                matches!(database_size_bytes(bad), Err(SqlError::Backend(_))),
+                "{bad:?}"
+            );
+        }
         assert_eq!(DO_CAPACITY.cap_bytes(), DO_MAX_BYTES);
         assert!(DO_CAPACITY.soft_limit() < DO_MAX_BYTES);
         assert_eq!(DO_CAPACITY.reserve_bytes(), DO_MAX_BYTES / 64);

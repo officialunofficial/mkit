@@ -14,13 +14,24 @@
 //! mismatch or a dropped sink never makes anything visible: only verified
 //! bytes are ever published under a key. [`PackSink::commit`] releases the
 //! last byte, closes the body and awaits the put. A failed condition means
-//! the key exists: [`CommitOutcome::AlreadyPresent`]. Memory per upload is
-//! the chunk in flight plus one in the channel.
+//! the key exists: [`CommitOutcome::AlreadyPresent`].
+//!
+//! **Memory** per upload is a few chunks, never the blob: the caller's
+//! chunk, the one in the channel, the `Vec<u8>` workers-rs copies it into
+//! and the `Uint8Array` it copies that into, plus whatever the
+//! fixed-length `TransformStream` queues (about 3 to 4 chunks in all).
+//!
+//! **Early answers.** R2 may answer a put before reading its whole body
+//! (a failed condition, a 429). Every send races the put's answer: once the
+//! put has ended, the sink stops forwarding, keeps hashing the remaining
+//! chunks and discards them, and [`PackSink::commit`] still verifies before
+//! it reports the answer.
 //!
 //! **Limits.** R2 allows about one write per second per key; a concurrent
 //! writer of the same key can make a put fail (HTTP 429). Because a key only
-//! ever holds verified bytes, a failed put whose key is then present is
-//! `AlreadyPresent`; otherwise it is `Unavailable`, and the client retries.
+//! ever holds verified bytes, a failed put of verified bytes whose key is
+//! then present is `AlreadyPresent`; otherwise it is `Unavailable`, and the
+//! client retries.
 //! `max_bytes` (64 MiB by default) caps one put's declared length: a
 //! **documented M1 stopgap** (PRD §8 M0), a counter and not a buffer. M1
 //! replaces it with resumable multipart parts (WP-1.11), which carry R2's
@@ -48,6 +59,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use bytes::Bytes;
 use futures::channel::{mpsc, oneshot};
+use futures::future::{self, Either};
 use futures::{SinkExt as _, Stream, StreamExt as _};
 use mkit_core::hash::Hasher;
 use mkit_server::storage_error::StorageOp;
@@ -206,11 +218,13 @@ impl Withheld {
     }
 }
 
-/// The spawned put behind a sink.
+/// The spawned put behind a sink, and its answer once it has one.
 #[derive(Debug)]
 struct Running {
     tx: Option<mpsc::Sender<Result<Bytes, BodyAborted>>>,
-    done: oneshot::Receiver<PutResult>,
+    /// `None` once the answer is in.
+    done: Option<oneshot::Receiver<PutResult>>,
+    answer: Option<PutResult>,
 }
 
 impl Running {
@@ -219,8 +233,52 @@ impl Running {
         let (tx, rx) = mpsc::channel(0);
         Self {
             tx: Some(tx),
-            done: bucket.spawn_put(object, len, rx),
+            done: Some(bucket.spawn_put(object, len, rx)),
+            answer: None,
         }
+    }
+
+    /// Keep the put's answer; stop feeding its body.
+    fn record(&mut self, answer: Result<PutResult, oneshot::Canceled>) {
+        self.answer = Some(answer.unwrap_or_else(|_| Err("put task dropped".into())));
+        self.done = None;
+        self.tx = None;
+    }
+
+    /// Wait for the answer, if it is not in yet.
+    async fn settle(&mut self) {
+        if let Some(done) = self.done.take() {
+            let answer = done.await;
+            self.record(answer);
+        }
+    }
+
+    /// Forward `chunk`, unless the put has answered. The send races the
+    /// answer: a put that ends without reading its whole body (a failed
+    /// condition, a 429) never leaves the sender waiting on a full channel.
+    async fn send(&mut self, chunk: Bytes) {
+        let (Some(tx), Some(done)) = (self.tx.as_mut(), self.done.as_mut()) else {
+            return;
+        };
+        let ended = match future::select(tx.send(Ok(chunk)), done).await {
+            Either::Left((Ok(()), _)) => return,
+            // The body's reader is gone: the put ended.
+            Either::Left((Err(_), _)) => None,
+            Either::Right((answer, _)) => Some(answer),
+        };
+        match ended {
+            Some(answer) => self.record(answer),
+            None => self.settle().await,
+        }
+    }
+
+    /// Close the body (every declared byte is in it) and return the answer.
+    async fn finish(&mut self) -> PutResult {
+        self.tx = None;
+        self.settle().await;
+        self.answer
+            .take()
+            .unwrap_or_else(|| Err("no answer".into()))
     }
 
     /// Fail the body and wait for the put to end, so nothing it wrote can
@@ -230,7 +288,7 @@ impl Running {
             // A full channel is fine: closing it short fails the put too.
             let _ = tx.try_send(Err(BodyAborted));
         }
-        let _ = self.done.await;
+        self.settle().await;
     }
 }
 
@@ -248,27 +306,12 @@ pub struct R2PackSink<B> {
 }
 
 impl<B: ObjectBucket> R2PackSink<B> {
-    async fn send(&mut self, chunk: Bytes) -> Result<(), StoreError> {
-        if chunk.is_empty() {
-            return Ok(());
+    /// Forward a chunk; after an early answer it is only hashed (by the
+    /// caller) and dropped.
+    async fn send(&mut self, chunk: Bytes) {
+        if let Some(put) = self.put.as_mut().filter(|_| !chunk.is_empty()) {
+            put.send(chunk).await;
         }
-        let Some(tx) = self.put.as_mut().and_then(|p| p.tx.as_mut()) else {
-            return Err(StoreError::Invalid("blob is longer than declared".into()));
-        };
-        if tx.send(Ok(chunk)).await.is_ok() {
-            return Ok(());
-        }
-        // The put ended early; its outcome says why.
-        self.failed = true;
-        let detail = match self.put.take() {
-            Some(p) => match p.done.await {
-                Ok(Err(detail)) => detail,
-                Ok(Ok(_)) => "put finished before its body".into(),
-                Err(_) => "put task dropped".into(),
-            },
-            None => "no put".into(),
-        };
-        Err(backend_error(StorageOp::BlobPut, detail))
     }
 
     async fn fail(&mut self) {
@@ -372,7 +415,10 @@ impl<B: ObjectBucket> PackSink for R2PackSink<B> {
             return Err(StoreError::Invalid("write after a failed write".into()));
         }
         match self.core.push(chunk) {
-            Ok(forward) => self.send(forward).await,
+            Ok(forward) => {
+                self.send(forward).await;
+                Ok(())
+            }
             Err(e) => {
                 self.failed = true;
                 self.fail().await;
@@ -405,17 +451,16 @@ impl<B: ObjectBucket> PackSink for R2PackSink<B> {
             self.put = Some(Running::spawn(&self.bucket, self.object.clone(), 0));
         }
         if let Some(last) = last {
-            self.send(last).await?;
+            self.send(last).await;
         }
         let Some(mut put) = self.put.take() else {
             return Err(backend_error(StorageOp::BlobPut, "no put"));
         };
-        // Close the body: every declared byte is in it.
-        drop(put.tx.take());
-        match put.done.await {
-            Ok(Ok(true)) => Ok(CommitOutcome::Created),
-            Ok(Ok(false)) => Ok(CommitOutcome::AlreadyPresent),
-            Ok(Err(detail)) => {
+        // The bytes verified above, so any answer, early or not, stands.
+        match put.finish().await {
+            Ok(true) => Ok(CommitOutcome::Created),
+            Ok(false) => Ok(CommitOutcome::AlreadyPresent),
+            Err(detail) => {
                 // A key holds only verified bytes: if it is present now (a
                 // concurrent writer, R2's per-key write rate), ours are too.
                 if matches!(self.bucket.head(&self.object).await, Ok(Some(n)) if n == self.core.len)
@@ -424,7 +469,6 @@ impl<B: ObjectBucket> PackSink for R2PackSink<B> {
                 }
                 Err(backend_error(StorageOp::BlobPut, detail))
             }
-            Err(_) => Err(backend_error(StorageOp::BlobPut, "put task dropped")),
         }
     }
 

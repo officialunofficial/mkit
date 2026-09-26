@@ -9,10 +9,12 @@
 //! the host tests run it over a simulated Durable Object connection;
 //! `NsObject` is the wasm32 shell around it.
 
+use core::future::Future;
 use mkit_server::sql::SqlError;
 use mkit_server::storage_error::StorageOp;
 use mkit_server::store::export_page;
-use mkit_server::{Cursor, Key, NamespaceStore, Partition, StoreError};
+
+use mkit_server::{Cursor, Key, NamespaceStore, Partition, ScanPage, StoreError};
 
 use crate::wire::{Blob, NsCall, NsErrKind, NsReply, NsRequest, WireOutcome};
 
@@ -91,10 +93,14 @@ async fn dispatch<S: NamespaceStore>(
             after,
             limit,
         } => {
-            let after = after.map(|c| Cursor::new(c.0));
-            let page = store
-                .scan(p, &key(start), &key(end), after.as_ref(), limit)
-                .await?;
+            let (start, end) = (key(start), key(end));
+            let (start, end) = (&start, &end);
+            let page = bounded_page(
+                limit,
+                after.map(|c| Cursor::new(c.0)),
+                |after, n| async move { store.scan(p, start, end, after.as_ref(), n).await },
+            )
+            .await?;
             NsReply::page(page)
         }
         NsCall::Apply { batch } => NsReply::Outcome {
@@ -112,23 +118,73 @@ async fn dispatch<S: NamespaceStore>(
             NsReply::Ok
         }
         NsCall::Export { after, limit } => {
-            let after = after.map(|c| Cursor::new(c.0));
-            let page = export_page(store, p, after.as_ref(), limit).await?;
-            NsReply::Page {
-                entries: page
-                    .records
-                    .into_iter()
-                    .map(|r| {
-                        (
-                            Blob(r.key.into_bytes().into()),
-                            Blob(r.value.into_bytes().into()),
-                        )
+            let page = bounded_page(
+                limit,
+                after.map(|c| Cursor::new(c.0)),
+                |after, n| async move {
+                    let page = export_page(store, p, after.as_ref(), n).await?;
+                    Ok(ScanPage {
+                        entries: page.records.into_iter().map(|r| (r.key, r.value)).collect(),
+                        next: page.next,
                     })
-                    .collect(),
-                next: page.next.map(|c| Blob(c.as_bytes().to_vec())),
-            }
+                },
+            )
+            .await?;
+            NsReply::page(page)
         }
     })
+}
+
+/// Most entries one scan or export page returns, whatever the caller asks.
+pub const MAX_PAGE_ENTRIES: u32 = 1000;
+
+/// Key and value bytes after which a scan or export page ends early and
+/// returns `next`: a page of 512 KiB values stays a few MiB of JSON in a
+/// 128 MB isolate, not hundreds.
+pub const MAX_PAGE_BYTES: usize = 8 * 1024 * 1024;
+
+/// Entries read from the store per step: one step overshoots the byte
+/// budget by at most this many maximum-size values.
+const PAGE_STEP: u32 = 16;
+
+/// A page of at most `limit` (clamped to [`MAX_PAGE_ENTRIES`]) entries and
+/// about [`MAX_PAGE_BYTES`], read in steps of [`PAGE_STEP`] through `step`
+/// (`after`, `limit`) → page. A short page with `next` is allowed by the
+/// contract: callers page until `next` is `None`.
+async fn bounded_page<F, Fut>(
+    limit: u32,
+    after: Option<Cursor>,
+    mut step: F,
+) -> Result<ScanPage, StoreError>
+where
+    F: FnMut(Option<Cursor>, u32) -> Fut,
+    Fut: Future<Output = Result<ScanPage, StoreError>>,
+{
+    if limit == 0 {
+        // The store's own `Invalid`.
+        return step(after, 0).await;
+    }
+    let limit = limit.min(MAX_PAGE_ENTRIES);
+    let (mut page, mut bytes, mut cursor) = (ScanPage::default(), 0, after);
+    loop {
+        let have = u32::try_from(page.entries.len()).unwrap_or(limit);
+        let got = step(cursor.take(), (limit - have).min(PAGE_STEP)).await?;
+        bytes += got
+            .entries
+            .iter()
+            .map(|(k, v)| k.as_bytes().len() + v.as_bytes().len())
+            .sum::<usize>();
+        page.entries.extend(got.entries);
+        match got.next {
+            Some(next) if page.entries.len() < limit as usize && bytes < MAX_PAGE_BYTES => {
+                cursor = Some(next);
+            }
+            next => {
+                page.next = next;
+                return Ok(page);
+            }
+        }
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -317,5 +373,73 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    fn put(store: &MemoryKv, k: Vec<u8>, v: Vec<u8>) {
+        let p = Partition::decode(b"nroot\0").unwrap();
+        block_on(store.apply(&p, Batch::new().put(Key::new(k), Value::new(v)))).unwrap();
+    }
+
+    /// Page through `call(after)` to the end; each page's raw byte size.
+    fn pages(
+        store: &MemoryKv,
+        call: impl Fn(Option<Blob>) -> NsCall,
+    ) -> (Vec<Vec<u8>>, Vec<usize>) {
+        let (mut keys, mut sizes, mut after) = (Vec::new(), Vec::new(), None);
+        loop {
+            let NsReply::Page { entries, next } = reply(store, call(after.take())) else {
+                panic!("not a page");
+            };
+            assert!(entries.len() <= MAX_PAGE_ENTRIES as usize);
+            sizes.push(entries.iter().map(|(k, v)| k.0.len() + v.0.len()).sum());
+            keys.extend(entries.into_iter().map(|(k, _)| k.0));
+            match next {
+                Some(n) => after = Some(n),
+                None => return (keys, sizes),
+            }
+        }
+    }
+
+    #[test]
+    fn scan_and_export_pages_are_clamped_and_byte_bounded() {
+        // 40 maximum-size values: 20 MiB, over the page byte budget.
+        let big = MemoryKv::default();
+        let key = |i: u16| [b"r\0big\0".as_slice(), &i.to_be_bytes()].concat();
+        for i in 0..40 {
+            put(&big, key(i), vec![7; mkit_server::MAX_VALUE_BYTES]);
+        }
+        let scan = |after| NsCall::Scan {
+            start: Blob::default(),
+            end: Blob(vec![0xff]),
+            after,
+            limit: u32::MAX,
+        };
+        let export = |after| NsCall::Export {
+            after,
+            limit: u32::MAX,
+        };
+        let step = PAGE_STEP as usize * (mkit_server::MAX_VALUE_BYTES + 1024);
+        for call in [&scan as &dyn Fn(Option<Blob>) -> NsCall, &export] {
+            let (keys, sizes) = pages(&big, call);
+            assert_eq!(keys, (0..40).map(key).collect::<Vec<_>>());
+            assert!(sizes.len() > 1, "{sizes:?}");
+            assert!(
+                sizes.iter().all(|&s| s <= MAX_PAGE_BYTES + step),
+                "{sizes:?}"
+            );
+        }
+        // 1,100 small rows: a limit of u32::MAX returns at most 1,000.
+        let small = MemoryKv::default();
+        for i in 0..1100_u16 {
+            put(&small, key(i), vec![1]);
+        }
+        for call in [&scan as &dyn Fn(Option<Blob>) -> NsCall, &export] {
+            let NsReply::Page { entries, next } = reply(&small, call(None)) else {
+                panic!("not a page");
+            };
+            assert_eq!(entries.len(), MAX_PAGE_ENTRIES as usize);
+            assert!(next.is_some());
+            assert_eq!(pages(&small, call).0.len(), 1100);
+        }
     }
 }

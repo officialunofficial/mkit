@@ -9,7 +9,8 @@
 //! - [`SimDoConn`]: Durable Object SQL over rusqlite: it refuses what a
 //!   Durable Object refuses (transaction control, pragmas, `vacuum`, more
 //!   than 100 bound parameters, statements over 100 KB), has a fixed hard
-//!   size limit, measures `databaseSize` as workerd does
+//!   size limit whose `SQLITE_FULL` is fatal (a real object resets), and
+//!   measures `databaseSize` as workerd does
 //!   (`(page_count − freelist_count) × page_size`) and keeps the default
 //!   `backup_to` (`Unsupported`).
 //! - [`Loopback`]: the Worker → Durable Object hop, in process: one
@@ -23,7 +24,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::ops::Range;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use bytes::Bytes;
@@ -52,6 +53,9 @@ pub struct SimBucket {
     /// Fail this many next puts after their body arrived, as R2 does for a
     /// second write of one key within a second (HTTP 429).
     fail_puts: Arc<AtomicUsize>,
+    /// Decide the condition and the 429 before reading the body, and answer
+    /// without reading it (R2 may).
+    early: Arc<AtomicBool>,
 }
 
 /// The piece size simulated bodies arrive in: above the store's limit.
@@ -62,8 +66,26 @@ impl SimBucket {
         self.fail_puts.store(n, Ordering::SeqCst);
     }
 
+    /// Answer a failed condition or a 429 before reading the body.
+    pub fn answer_early(self) -> Self {
+        self.early.store(true, Ordering::SeqCst);
+        self
+    }
+
     pub fn objects(&self) -> usize {
         lock(&self.objects).len()
+    }
+
+    /// A put's answer before it writes, if it does not write: a pending
+    /// 429, or the key already present.
+    fn refuse(&self, key: &str) -> Option<PutResult> {
+        let fail = self
+            .fail_puts
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
+        if fail.is_ok() {
+            return Some(Err("429: too many writes to one key".to_owned()));
+        }
+        lock(&self.objects).contains_key(key).then_some(Ok(false))
     }
 }
 
@@ -73,6 +95,12 @@ impl ObjectBucket for SimBucket {
         let this = self.clone();
         std::thread::spawn(move || {
             let result = block_on(async {
+                if this.early.load(Ordering::SeqCst)
+                    && let Some(answer) = this.refuse(&key)
+                {
+                    // The body is dropped unread.
+                    return answer;
+                }
                 let mut bytes = Vec::new();
                 while let Some(item) = body.next().await {
                     let chunk = item.map_err(|_| "body aborted".to_owned())?;
@@ -84,11 +112,8 @@ impl ObjectBucket for SimBucket {
                 if bytes.len() as u64 != len {
                     return Err("fixed length stream: too short".to_owned());
                 }
-                let fail = this
-                    .fail_puts
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
-                if fail.is_ok() {
-                    return Err("429: too many writes to one key".to_owned());
+                if let Some(answer) = this.refuse(&key) {
+                    return answer;
                 }
                 let mut objects = lock(&this.objects);
                 if objects.contains_key(&key) {
@@ -178,20 +203,45 @@ impl SimDoConn {
     }
 }
 
+/// The engine reached the hard limit. A Durable Object treats `SQLITE_FULL`
+/// inside a transaction as a critical error and resets the object, so the
+/// simulation refuses to go on: the store's reserve must keep every batch,
+/// deletes included, below the hard limit.
+fn engine_full<T>(result: Result<T, SqlError>) -> Result<T, SqlError> {
+    assert!(
+        !matches!(result, Err(SqlError::Full)),
+        "hard SQLITE_FULL: a real Durable Object would reset here"
+    );
+    result
+}
+
 impl SqlConn for SimDoConn {
     fn exec(&self, sql: &str, params: &[SqlValue]) -> Result<u64, SqlError> {
         authorize(sql, params)?;
-        self.0.exec(sql, params)
+        engine_full(self.0.exec(sql, params))
     }
 
     fn query(&self, sql: &str, params: &[SqlValue]) -> Result<Vec<Row>, SqlError> {
         authorize(sql, params)?;
-        self.0.query(sql, params)
+        engine_full(self.0.query(sql, params))
     }
 
-    /// `transactionSync`: the body's statements run inside it.
+    /// `transactionSync`: the body's statements run inside it. A `Full`
+    /// the body returns itself is the store's soft cap; any other `Full`
+    /// (the commit) is the engine's.
     fn transaction<T: 'static>(&self, f: TxFn<Self, T>) -> Result<T, SqlError> {
-        self.0.transaction(Box::new(move |c| f(SimDoConn(c))))
+        let soft = Arc::new(AtomicBool::new(false));
+        let flag = soft.clone();
+        let result = self.0.transaction(Box::new(move |c| {
+            let out = f(SimDoConn(c));
+            flag.store(matches!(out, Err(SqlError::Full)), Ordering::SeqCst);
+            out
+        }));
+        if soft.load(Ordering::SeqCst) {
+            result
+        } else {
+            engine_full(result)
+        }
     }
 
     fn now_ms(&self) -> u64 {

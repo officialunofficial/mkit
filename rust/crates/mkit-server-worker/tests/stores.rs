@@ -208,3 +208,61 @@ fn a_failed_put_is_already_present_only_if_the_key_now_exists() {
         format!("packs/{}", "ab".repeat(32))
     );
 }
+
+fn upload(
+    store: &R2BlobStore<SimBucket>,
+    key: BlobKey,
+    data: &[u8],
+) -> Result<CommitOutcome, StoreError> {
+    block_on(async {
+        let mut sink = store.begin(key, data.len() as u64).await?;
+        // Many more chunks than the channel holds.
+        for chunk in data.chunks(4096) {
+            sink.write(Bytes::copy_from_slice(chunk)).await?;
+        }
+        sink.commit().await
+    })
+}
+
+/// R2 may answer a put before reading its body (a failed condition, a
+/// 429). The sink stops forwarding without hanging, still verifies every
+/// byte, and reports the answer.
+#[test]
+fn early_put_answers_never_hang_and_still_verify() {
+    let bucket = SimBucket::default().answer_early();
+    let store = R2BlobStore::new(bucket.clone(), PACKS_KEYSPACE);
+    let data: Vec<u8> = (0..64 * 4096_u32).map(|i| i.to_le_bytes()[1]).collect();
+    let key = BlobKey::new(hash(&data));
+    assert_eq!(upload(&store, key, &data).unwrap(), CommitOutcome::Created);
+    // Early 412: the key exists.
+    assert_eq!(
+        upload(&store, key, &data).unwrap(),
+        CommitOutcome::AlreadyPresent
+    );
+    // Early 412, but these bytes are not the key's: still `Invalid`.
+    let mut wrong = data.clone();
+    wrong[70_000] ^= 1;
+    assert!(matches!(
+        upload(&store, key, &wrong),
+        Err(StoreError::Invalid(_))
+    ));
+    // Early 429 on a present key: our verified bytes are there.
+    bucket.fail_next_puts(1);
+    assert_eq!(
+        upload(&store, key, &data).unwrap(),
+        CommitOutcome::AlreadyPresent
+    );
+    // Early 429 on an absent key: a retryable failure, nothing visible.
+    let other: Vec<u8> = data.iter().map(|b| b.wrapping_add(1)).collect();
+    let other_key = BlobKey::new(hash(&other));
+    bucket.fail_next_puts(1);
+    assert!(matches!(
+        upload(&store, other_key, &other),
+        Err(StoreError::Unavailable(_))
+    ));
+    assert_eq!(block_on(store.head(&other_key)).unwrap(), None);
+    assert_eq!(
+        upload(&store, other_key, &other).unwrap(),
+        CommitOutcome::Created
+    );
+}
