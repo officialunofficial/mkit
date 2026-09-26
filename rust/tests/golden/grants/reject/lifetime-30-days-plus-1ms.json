@@ -1,0 +1,5 @@
+{
+  "rule": "expiry <= created, or a lifetime above GRANT_MAX_LIFETIME_MS",
+  "statement": "mkit-write-grant:v1\n0x8ba1f109551bd432803012645ac136ddd64dba72\n0x8ba1f109551bd432803012645ac136ddd64dba72/website\n3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29\nread,write\nhttps://git.example.com,https://git.example.org\nrefs/heads/main=cu;refs/heads/wip/*=cufd\n0\n1790000000000\n1792592000001\n9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+  "expected_error": "lifetime too long"
+}

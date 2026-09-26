@@ -74,6 +74,9 @@ pub(crate) mod atomic;
 pub mod ignore;
 pub mod index;
 pub mod refs;
+// SPEC-TRANSPORT-CONNECT §7.4 repository identity grammar (namespaces and
+// names), shared by server addressing and the grant codec.
+pub mod repo_identity;
 pub mod repo_lock;
 pub mod worktree;
 

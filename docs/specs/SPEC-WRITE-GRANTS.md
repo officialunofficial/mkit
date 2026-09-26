@@ -7,12 +7,14 @@ audience: implementers of mkit.transport.v1 servers that restrict writes or serv
 
 # SPEC-WRITE-GRANTS &mdash; namespace owners delegate repository writes and reads
 
-Status: **Draft**. Only the owner-scheme primitives of §4 (Keccak-256,
-the EIP-191 digest, secp256k1 recovery, address derivation and the §4.4
-low-`s` rules) are implemented; the grant verifier is not. Golden
-vectors land with the implementation
-([SPEC-CONVENTIONS §5](SPEC-CONVENTIONS.md#5-golden-vectors-and-conformance-tests));
-this document lists them in §13.1.
+Status: **Draft**. The grant statement codec and header encoding
+(`mkit_attest::grant`, feature `grants`) and the owner-scheme primitives
+of §4 (Keccak-256, the EIP-191 digest, secp256k1 recovery, address
+derivation and the §4.4 low-`s` rules) are implemented; signature
+verification, epochs, visibility and the §7 verifier are not yet. Golden
+vectors ([SPEC-CONVENTIONS §5](SPEC-CONVENTIONS.md#5-golden-vectors-and-conformance-tests))
+land with each implementation; §13.1 lists those that exist and names
+the rest.
 
 Scope: who may write to, or read from, a repository on a
 multi-repository [SPEC-TRANSPORT-CONNECT](SPEC-TRANSPORT-CONNECT.md)
@@ -1057,17 +1059,37 @@ the workspace grant separator `mkit-workspace-grant:v1`.
 - The workspace grant (`mkit-workspace-grant:v1`). It grants workspace
   permissions, not repository access, and stays separate.
 
-### 13.1 Planned golden fixtures (informative)
+### 13.1 Golden fixtures
 
-The implementation adds fixtures under `rust/tests/golden/grants/` and
-`rust/tests/golden/url-token/`. They become this document's test
-vectors when they land, and this subsection then lists them. They cover
-at least: canonical grant and epoch statements with their ids and a
+These fixtures under `rust/tests/golden/grants/` are this document's
+test vectors. `MANIFEST.txt` pins the BLAKE3 of every file, and
+`scripts/golden/grants_ref.py` rebuilds and checks each one from this
+document's rules, independently of the Rust code.
+
+- `grant-statements.json`: canonical grant statements, each with its
+  field values and grant id (§3.2, §3.4). They cover every capability
+  spelling, a single-repository and a `<namespace>/*` scope, both
+  namespace forms, 1 and 8 audiences (an IPv6 origin, `http://` origins
+  with a port), 16 ref scopes with prefix and exact patterns and flag
+  sets from one flag to all four, epochs 0 and 18446744073709551615, `created` 0 with the
+  longest lifetime, the largest timestamps, a statement of exactly
+  `MAX_STATEMENT_BYTES`, and the §3.4 example.
+- `headers.json`: §4.2 header values for each scheme token (the blob
+  bytes are arbitrary; no signature is checked), one of exactly
+  `MAX_GRANT_HEADER_BYTES`, and header rejections (padding, the standard
+  alphabet, non-zero trailing bits, a wrong segment count, an empty
+  segment, an unknown scheme, one byte over the bound).
+- `reject/*.json`: one or more rejections for each §3.5 rule, each with
+  the rule and the expected reason.
+
+Planned, with the implementations that need them: fixtures under
+`rust/tests/golden/grants/` and `rust/tests/golden/url-token/` covering
+at least: canonical epoch and visibility statements with their ids; a
 signature for each scheme; an EIP-191 message and recovery; address
 derivation for a secp256k1 and a P-256 key; a WebAuthn assertion; a
-header value; one rejection for each §3.5 rule, a high-`s` signature
-for each ECDSA scheme, a cleared user-present flag, and a scheme on the
-wrong namespace form; a URL token; and a signed read.
+high-`s` signature for each ECDSA scheme, a cleared user-present flag,
+and a scheme on the wrong namespace form; a URL token; and a signed
+read.
 
 Landed so far (each pinned by BLAKE3 in the directory's `MANIFEST.txt`):
 

@@ -189,6 +189,36 @@ pub fn git_tag_parse_one_iteration(input: &[u8]) {
     let _ = mkit_git_bridge::gitparse::parse_tag(input);
 }
 
+/// SPEC-WRITE-GRANTS grant codec (`grant_parse`): `Grant::parse` and
+/// `SignedHeader::parse` never panic, and anything they accept re-encodes to
+/// exactly the input bytes (one canonical encoding, so one grant id).
+pub fn grant_parse_one_iteration(input: &[u8]) {
+    use mkit_attest::grant::{Grant, SignedHeader};
+    let input = &input[..input.len().min(MAX_INPUT)];
+    if let Ok(grant) = Grant::parse(input) {
+        assert_eq!(
+            grant.encode().expect("accepted grant must re-encode"),
+            input,
+            "accepted grant must re-encode byte for byte"
+        );
+    }
+    if let Ok(text) = core::str::from_utf8(input)
+        && let Ok(header) = SignedHeader::parse(text)
+    {
+        assert_eq!(
+            header.encode().expect("accepted header must re-encode"),
+            text,
+            "accepted header must re-encode byte for byte"
+        );
+        if let Ok(grant) = Grant::parse(&header.statement) {
+            assert_eq!(
+                grant.encode().expect("accepted grant must re-encode"),
+                header.statement
+            );
+        }
+    }
+}
+
 /// Apply the git tree parser + mode classifier against `input`.
 pub fn git_tree_parse_one_iteration(input: &[u8]) {
     let input = &input[..input.len().min(MAX_INPUT)];
@@ -839,6 +869,41 @@ mod tests {
         entry.extend_from_slice(&[9u8; 20]);
         for case in [&entry[..], b"160000 sub\x00short", b"77 x"] {
             run_one(case, git_tree_parse_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_grant_parse() {
+        run_iterated_unit(grant_parse_one_iteration).unwrap();
+        // The SPEC-WRITE-GRANTS §3.4 example, a near miss, and its header.
+        let grant = "mkit-write-grant:v1\n\
+            0x8ba1f109551bd432803012645ac136ddd64dba72\n\
+            0x8ba1f109551bd432803012645ac136ddd64dba72/website\n\
+            3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29\n\
+            read,write\n\
+            https://git.example.com,https://git.example.org\n\
+            refs/heads/main=cu;refs/heads/wip/*=cufd\n\
+            0\n1790000000000\n1792592000000\n\
+            9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+        assert!(mkit_attest::grant::Grant::parse(grant.as_bytes()).is_ok());
+        let header = mkit_attest::grant::SignedHeader {
+            statement: grant.as_bytes().to_vec(),
+            scheme: mkit_attest::grant::OwnerScheme::Ed25519,
+            blob: vec![7; 64],
+        }
+        .encode()
+        .unwrap();
+        let near_miss = grant.replace("=cu;", "=uc;");
+        for case in [
+            grant.as_bytes(),
+            near_miss.as_bytes(),
+            header.as_bytes(),
+            b"YQ==.ed25519.YQ",
+            b"QR.ed25519.YQ",
+            b"",
+            &[0xFF; 64][..],
+        ] {
+            run_one(case, grant_parse_one_iteration).unwrap();
         }
     }
 

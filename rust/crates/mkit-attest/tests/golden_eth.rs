@@ -327,15 +327,25 @@ fn write_all() {
     let mut body = serde_json::to_string_pretty(&build()).unwrap();
     body.push('\n');
     fs::write(dir.join("eth-primitives.json"), &body).unwrap();
-    let manifest = format!(
-        "# SPEC-WRITE-GRANTS golden vectors (deterministic)\n\
-         # Produced by `MKIT_WRITE_GOLDEN=1 cargo test -p mkit-attest --features grants --test golden_eth`\n\
-         # Every value is cross-checked against cast / viem / pycryptodome; see `cross_check` in each file.\n\
-         # Format: <name> <blake3-hex-of-file-bytes>\n\
-         eth-primitives {}\n",
+    // MANIFEST.txt is shared with `golden_grants` (which owns its header and
+    // lists every fixture file); only replace this fixture's own line.
+    let pin = format!(
+        "eth-primitives.json {}",
         blake3::hash(body.as_bytes()).to_hex()
     );
-    fs::write(dir.join("MANIFEST.txt"), manifest).unwrap();
+    let path = dir.join("MANIFEST.txt");
+    let old = fs::read_to_string(&path).unwrap_or_default();
+    let mut lines: Vec<String> = old
+        .lines()
+        .filter(|l| !l.starts_with("eth-primitives.json "))
+        .map(str::to_owned)
+        .collect();
+    let at = lines
+        .iter()
+        .position(|l| !l.starts_with('#') && l.as_str() > pin.as_str())
+        .unwrap_or(lines.len());
+    lines.insert(at, pin);
+    fs::write(&path, lines.join("\n") + "\n").unwrap();
 }
 
 // -- Reader ------------------------------------------------------------
@@ -362,7 +372,7 @@ fn eth_primitives_golden_vectors() {
     let manifest = fs::read_to_string(grants_dir().join("MANIFEST.txt")).unwrap();
     let line = manifest
         .lines()
-        .find(|l| l.starts_with("eth-primitives "))
+        .find(|l| l.starts_with("eth-primitives.json "))
         .expect("eth-primitives line in MANIFEST.txt");
     assert_eq!(
         line.split_whitespace().nth(1).unwrap(),
