@@ -731,13 +731,20 @@ mod tests {
     #[test]
     fn sharding_is_recorded_once_and_mismatches_are_refused() {
         let dir = tempfile::tempdir().unwrap();
-        for (first, other) in [(Sharding::Single, Sharding::D34), (Sharding::D34, Sharding::Single)] {
+        for (first, other) in [
+            (Sharding::Single, Sharding::D34),
+            (Sharding::D34, Sharding::Single),
+        ] {
             let (conn, path) = database(dir.path(), &format!("{}.sqlite3", sharding_name(first)));
             bind_sharding(&conn, first, &path).unwrap();
             bind_sharding(&conn, first, &path).unwrap();
             let refused = bind_sharding(&conn, other, &path).unwrap_err();
             assert_eq!(refused.code, exit::CONFIG_ERROR);
-            assert!(refused.message.contains("--sharding"), "{}", refused.message);
+            assert!(
+                refused.message.contains("--sharding"),
+                "{}",
+                refused.message
+            );
         }
     }
 
