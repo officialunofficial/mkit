@@ -21,6 +21,7 @@ const B64: GeneralPurpose = GeneralPurpose::new(
 
 /// An owner signature scheme (§4).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum OwnerScheme {
     /// `ed25519`: an Ed25519 signature over the BLAKE3 of the statement;
     /// `ed25519-` namespaces only.

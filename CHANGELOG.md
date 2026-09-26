@@ -54,7 +54,9 @@ train).
   (not default): `mkit_attest::grant` parses and encodes the
   `mkit-write-grant:v1` statement strictly (one canonical encoding, every
   §3.5 rejection, no repair), with the §3.1 text rules, ref scopes and §8.1
-  effective flags, the grant id, and the `X-Write-Grant` header
+  effective flags (never for packmap refs; `packmap_head` maps one to the
+  head that covers it, §8.3), the grant id (only from `parse_with_id` or
+  `Grant::id`, never from caller bytes), and the `X-Write-Grant` header
   (`<statement>.<scheme>.<blob>`, strict unpadded base64url). New fuzz target
   `grant_parse`. Golden and reject vectors under `rust/tests/golden/grants`,
   cross-checked by `scripts/golden/grants_ref.py`. **SemVer:** additive.

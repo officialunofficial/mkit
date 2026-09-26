@@ -79,13 +79,16 @@ pub enum RepoScope {
 
 impl RepoScope {
     /// §7 step 6: whether a grant for `namespace` with this scope covers
-    /// `repository`.
+    /// `repository`. Both variants require `repository` to be in
+    /// `namespace`, so a hand-built scope naming another namespace covers
+    /// nothing.
     #[must_use]
     pub fn covers(&self, namespace: &Namespace, repository: &RepositoryIdentity) -> bool {
-        match self {
-            Self::Repository(id) => id == repository,
-            Self::Namespace => repository.namespace() == Some(namespace),
-        }
+        repository.namespace() == Some(namespace)
+            && match self {
+                Self::Repository(id) => id == repository,
+                Self::Namespace => true,
+            }
     }
 
     fn parse(field: &str, namespace: &Namespace) -> Result<Self, GrantError> {
@@ -226,16 +229,29 @@ impl Grant {
         ])
     }
 
-    /// The grant id (§3.4): BLAKE3 of the statement bytes. Pass the exact
-    /// bytes that [`Grant::parse`] accepted; the id does not cover the
-    /// scheme or the signature.
+    /// [`Grant::parse`], also returning the grant id (§3.4): the BLAKE3 of
+    /// the accepted bytes, which are the canonical encoding.
+    ///
+    /// # Errors
+    /// As [`Grant::parse`].
+    pub fn parse_with_id(bytes: &[u8]) -> Result<(Self, [u8; 32]), GrantError> {
+        let grant = Self::parse(bytes)?;
+        Ok((grant, mkit_core::hash::hash(bytes)))
+    }
+
+    /// The grant id (§3.4): the BLAKE3 of the canonical statement,
+    /// [`Grant::encode`]. It equals the id [`Grant::parse_with_id`] returns
+    /// for the same grant, since `encode(parse(b)) == b`. The id covers
+    /// neither the scheme nor the signature.
     ///
     /// The id records which grant a server accepted. It is not an audit
     /// binding: auth v2 does not sign the grant, so it does not show which
     /// grant the signer chose.
-    #[must_use]
-    pub fn id(bytes: &[u8]) -> [u8; 32] {
-        mkit_core::hash::hash(bytes)
+    ///
+    /// # Errors
+    /// As [`Grant::encode`], for a grant that is not valid.
+    pub fn id(&self) -> Result<[u8; 32], GrantError> {
+        Ok(mkit_core::hash::hash(&self.encode()?))
     }
 }
 
@@ -288,7 +304,12 @@ mod tests {
         assert_eq!(g.capabilities, Capabilities::ReadWrite);
         assert_eq!(g.audiences.len(), 2);
         assert_eq!(g.encode().unwrap(), bytes);
-        assert_eq!(Grant::id(&bytes), mkit_core::hash::hash(&bytes));
+        let (parsed, id) = Grant::parse_with_id(&bytes).unwrap();
+        assert_eq!(id, mkit_core::hash::hash(&bytes));
+        assert_eq!(parsed.id().unwrap(), id);
+        let mut bad = parsed;
+        bad.audiences.clear();
+        assert_eq!(bad.id(), Err(GrantError::AudienceCount));
     }
 
     #[test]
@@ -541,6 +562,10 @@ mod tests {
             RepositoryIdentity::parse("0x0000000000000000000000000000000000000001/website")
                 .unwrap();
         let bare = RepositoryIdentity::parse_bare_allowed("website").unwrap();
+        // A hand-built grant whose single-repo scope names another
+        // namespace covers nothing, not even that repository.
+        let mismatched = RepoScope::Repository(foreign.clone());
+        assert!(!mismatched.covers(&ns, &foreign) && !mismatched.covers(&ns, &repo));
         let single = RepoScope::Repository(repo.clone());
         assert!(single.covers(&ns, &repo) && !single.covers(&ns, &other));
         assert!(!single.covers(&ns, &foreign) && !single.covers(&ns, &bare));

@@ -271,7 +271,7 @@ fn statement_json(name: &str, g: &Grant) -> Value {
         "name": name,
         "fields": fields_json(g),
         "statement": String::from_utf8(bytes.clone()).unwrap(),
-        "id": hex(&Grant::id(&bytes)),
+        "id": hex(&g.id().unwrap()),
     })
 }
 
@@ -486,14 +486,15 @@ fn grant_statement_goldens() {
     for (fixture, (name, grant)) in fixtures.iter().zip(&expected) {
         assert_eq!(fixture["name"], *name);
         let bytes = fixture["statement"].as_str().unwrap().as_bytes();
-        let parsed = Grant::parse(bytes).unwrap();
+        let (parsed, id) = Grant::parse_with_id(bytes).unwrap();
         assert_eq!(&parsed, grant, "{name}");
         assert_eq!(
             parsed.encode().unwrap(),
             bytes,
             "{name}: encode(parse(b)) == b"
         );
-        assert_eq!(fixture["id"], hex(&Grant::id(bytes)), "{name}");
+        assert_eq!(fixture["id"], hex(&id), "{name}");
+        assert_eq!(parsed.id().unwrap(), id, "{name}");
         assert_eq!(fixture, &statement_json(name, grant), "{name}");
     }
     assert_eq!(fixtures[0]["statement"], SPEC_EXAMPLE);
@@ -617,11 +618,18 @@ fn manifest_pins_every_file() {
     }
 }
 
+/// The id is the BLAKE3 of the canonical statement (§3.4), from either
+/// entry point; the golden ids are cross-checked by `grants_ref.py`.
 #[test]
-fn grant_id_is_blake3_of_input_bytes() {
+fn grant_id_is_blake3_of_canonical_bytes() {
     let bytes = SPEC_EXAMPLE.as_bytes();
-    assert_eq!(Grant::id(bytes), *blake3::hash(bytes).as_bytes());
-    // Not of anything else: not the header, not a re-encoding with a final LF.
+    let (grant, id) = Grant::parse_with_id(bytes).unwrap();
+    assert_eq!(id, *blake3::hash(bytes).as_bytes());
+    assert_eq!(grant.id().unwrap(), id);
+    // A byte string that is not a canonical grant has no id.
     let with_lf = [bytes, b"\n"].concat();
-    assert_ne!(Grant::id(bytes), Grant::id(&with_lf));
+    assert_eq!(
+        Grant::parse_with_id(&with_lf),
+        Err(GrantError::FinalLineFeed)
+    );
 }

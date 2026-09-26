@@ -155,13 +155,13 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(512))]
 
     #[test]
-    fn parse_encode_roundtrip(g in grant()) {
+    fn grant_parse_encode_roundtrip(g in grant()) {
         let bytes = g.encode().unwrap();
         prop_assert_eq!(Grant::parse(&bytes).unwrap(), g);
     }
 
     #[test]
-    fn accepted_bytes_are_canonical(
+    fn grant_accepted_bytes_are_canonical(
         g in grant(),
         edits in proptest::collection::vec((any::<u8>(), any::<usize>(), any::<u8>()), 1..4),
     ) {
@@ -175,7 +175,7 @@ proptest! {
     }
 
     #[test]
-    fn header_roundtrip_and_canonical(
+    fn grant_header_roundtrip_and_canonical(
         statement in proptest::collection::vec(any::<u8>(), 1..200),
         blob in proptest::collection::vec(any::<u8>(), 1..140),
         scheme in proptest::sample::select(OwnerScheme::ALL.to_vec()),

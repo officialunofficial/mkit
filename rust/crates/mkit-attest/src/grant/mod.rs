@@ -24,7 +24,7 @@ pub mod text;
 pub use error::GrantError;
 pub use header::{OwnerScheme, SignedHeader};
 pub use mkit_core::repo_identity::{Namespace, RepositoryIdentity};
-pub use ref_scope::{RefFlags, RefPattern, RefScopes};
+pub use ref_scope::{RefFlags, RefPattern, RefScopes, head_packmap, packmap_head};
 pub use statement::{Capabilities, Capability, Grant, RepoScope};
 
 /// Domain separator and first field of a grant statement (§12.1).
