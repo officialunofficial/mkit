@@ -23,10 +23,45 @@ mod tests;
 
 pub use blob::{FsBlobStore, FsPackSink};
 pub use layout::FsLayoutStore;
+use std::io::{self, ErrorKind};
+
+use mkit_transport_file::RefFileError;
 
 use crate::store::StoreError;
 
-/// An I/O or transport failure as [`StoreError::Unavailable`].
+/// A failure that is neither I/O nor a ref file's, as
+/// [`StoreError::Unavailable`].
 fn unavailable(e: impl std::error::Error + Send + Sync + 'static) -> StoreError {
     StoreError::unavailable(e)
+}
+
+/// An I/O failure. A full disk or an exhausted quota (`ENOSPC`, `EDQUOT`)
+/// is [`StoreError::Full`]; a directory where a file belongs or the
+/// reverse (`EISDIR`, `ENOTDIR`) is [`StoreError::Invalid`], which no
+/// retry fixes; anything else is [`StoreError::Unavailable`].
+fn io_error(e: io::Error) -> StoreError {
+    match e.kind() {
+        ErrorKind::StorageFull | ErrorKind::QuotaExceeded => StoreError::Full,
+        ErrorKind::IsADirectory | ErrorKind::NotADirectory => {
+            StoreError::Invalid(format!("directory/file clash: {e}").into())
+        }
+        _ => StoreError::unavailable(e),
+    }
+}
+
+/// A `FileTransport` ref-file failure: a clashing or invalid ref name is
+/// [`StoreError::Invalid`], an undecodable ref file
+/// [`StoreError::Corrupt`], I/O as [`io_error`], and a path escape (a
+/// symlink planted under the root) [`StoreError::Unavailable`].
+fn ref_file_error(e: RefFileError) -> StoreError {
+    match e {
+        RefFileError::InvalidName(name) => {
+            StoreError::Invalid(format!("ref name {name} is invalid or clashes with a ref").into())
+        }
+        RefFileError::Corrupt(name) => {
+            StoreError::Corrupt(format!("ref file {name} does not hold a ref id").into())
+        }
+        RefFileError::Io(e) => io_error(e),
+        other => unavailable(other),
+    }
 }

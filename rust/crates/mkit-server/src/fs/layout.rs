@@ -8,10 +8,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use mkit_core::hash::{Hash, hash, to_hex, to_hex_bytes};
-use mkit_core::protocol::{RefWriteCondition, Transport as _, TransportError};
-use mkit_transport_file::{FileTransport, LockedRefs};
+use mkit_core::protocol::RefWriteCondition;
+use mkit_transport_file::{FileTransport, LockedRefs, RefFileError};
 
-use super::unavailable;
+use super::{io_error, ref_file_error, unavailable};
 use crate::refs;
 use crate::repo::{RepoId, RepoName};
 use crate::rt::{Clock, SystemClock};
@@ -45,19 +45,31 @@ enum Slot<'k> {
 /// no layout-version row (the `.mkit` on-disk format is layout version 1).
 ///
 /// A ref (a `refs/` name) is exactly `FileTransport`'s ref file: reads are
-/// [`FileTransport`]'s, and every write is its CAS (`Missing` for an
-/// `Absent` guard, `Match` for an `Equals` guard, `Any` otherwise) and its
-/// atomic write, under its ref lock (`<root>/.mkit/refs/.lock`), so local
-/// `mkit` commands, `mkit+file://` remotes and this store see the same
-/// files and serialize on the same lock. A ref's value is its 32-byte id.
-/// The ref class also allows names that are not ref names, with any value;
-/// the pipeline never writes one, and they live in row files under
-/// `.mkit/server/rows/` written under the same lock.
+/// [`FileTransport`]'s strict reads, and every write is its CAS (`Missing`
+/// for an `Absent` guard, `Match` for an `Equals` guard, `Any` otherwise)
+/// and its atomic write, under its ref lock (`<root>/.mkit/refs/.lock`), so
+/// local `mkit` commands, `mkit+file://` remotes and this store see the
+/// same files and serialize on the same lock. A ref's value is its 32-byte
+/// id. A ref file that does not decode is [`StoreError::Corrupt`] (read,
+/// scan or precondition), never absent. A ref whose file would clash with
+/// another ref's directory, or the reverse, is [`StoreError::Invalid`]; a
+/// delete removes the directories it leaves empty.
+///
+/// The ref class also allows names that are not `refs/` ref names, with
+/// any value. The pipeline never writes one; they live in row files under
+/// `.mkit/server/rows/`, written under the same lock and invisible to the
+/// CLI and `FileTransport` (so a name like `packs/<hex>` can never
+/// overwrite a pack).
 ///
 /// `apply` takes the ref lock, reads the store clock (for a
 /// [`Precondition::NotAfter`]), checks every precondition and writes, all
 /// in one synchronous step (normative rules 4 and 8). Reads take no lock:
-/// every write is one atomic rename.
+/// every write is one atomic rename. A full disk or quota is
+/// [`StoreError::Full`], except for a delete-only batch (rule 7).
+///
+/// TODO(M0-13): a process that crashes mid-write leaves its temp file
+/// (`.<file>.tmp.<pid>.<seq>`, next to the ref or row file) behind;
+/// nothing sweeps them yet. Scans skip them.
 ///
 /// It is the permanent metadata store of the server-free ssh path
 /// (reconciliation R-13), with `SinglePartition` routing.
@@ -145,42 +157,48 @@ impl FsLayoutStore {
     fn read(&self, key: &Key) -> Result<Option<Value>, StoreError> {
         match self.slot(key)? {
             Slot::Ref(name) => {
-                let id = self.tx.read_ref(name).map_err(unavailable)?;
+                // Strict: a ref file that does not decode is `Corrupt`,
+                // never absent, so no precondition passes over it.
+                let id = self.tx.read_ref_strict(name).map_err(ref_file_error)?;
                 Ok(id.map(|id| Value::new(id.to_vec())))
             }
-            Slot::Row(name) => match fs::read(self.root().join(row_path(name))) {
-                Ok(bytes) => {
-                    let (stored, value) = decode_row(&bytes)?;
-                    if stored != name {
-                        return Err(StoreError::Corrupt("row file holds another key".into()));
+            Slot::Row(name) => {
+                let path = self.tx.server_path(&row_path(name));
+                match fs::read(path.map_err(ref_file_error)?) {
+                    Ok(bytes) => {
+                        let (stored, value) = decode_row(&bytes)?;
+                        if stored != name {
+                            return Err(StoreError::Corrupt("row file holds another key".into()));
+                        }
+                        Ok(Some(value))
                     }
-                    Ok(Some(value))
+                    Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+                    Err(e) => Err(io_error(e)),
                 }
-                Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
-                Err(e) => Err(unavailable(e)),
-            },
+            }
         }
     }
 
     /// Every row whose key `keep` accepts, unordered.
     fn rows(&self, keep: impl Fn(&Key) -> bool) -> Result<Vec<(Key, Value)>, StoreError> {
         let mut rows = Vec::new();
-        // Listing `refs/` (not the whole root) never reads a pack. Names
-        // come back relative to `refs/`.
-        for listed in self.tx.list_refs(REFS_PREFIX).map_err(unavailable)? {
-            let name = format!("{REFS_PREFIX}{}", listed.name);
+        // Listing `refs/` (not the whole root) never reads a pack. Strict,
+        // like `read`: a ref file that does not decode fails the scan.
+        let listed = self.tx.list_refs_strict(REFS_PREFIX);
+        for (name, id) in listed.map_err(ref_file_error)? {
             let key = keys::ref_key(&self.repo, &name);
-            if let (true, true, Some(id)) = (is_ref_name(&name), keep(&key), listed.hash) {
+            if is_ref_name(&name) && keep(&key) {
                 rows.push((key, Value::new(id.to_vec())));
             }
         }
-        let dir = match fs::read_dir(self.root().join(ROWS_DIR)) {
+        let rows_dir = self.tx.server_path(Path::new(ROWS_DIR));
+        let dir = match fs::read_dir(rows_dir.map_err(ref_file_error)?) {
             Ok(dir) => dir,
             Err(e) if e.kind() == ErrorKind::NotFound => return Ok(rows),
-            Err(e) => return Err(unavailable(e)),
+            Err(e) => return Err(io_error(e)),
         };
         for entry in dir {
-            let entry = entry.map_err(unavailable)?;
+            let entry = entry.map_err(io_error)?;
             let file_name = entry.file_name();
             let file_name = file_name.to_string_lossy();
             if file_name.starts_with('.') {
@@ -194,7 +212,7 @@ impl FsLayoutStore {
                     continue;
                 }
             }
-            let bytes = fs::read(entry.path()).map_err(unavailable)?;
+            let bytes = fs::read(entry.path()).map_err(io_error)?;
             let (name, value) = decode_row(&bytes)?;
             if row_file_name(name) != file_name {
                 return Err(corrupt_row_name(&file_name));
@@ -265,28 +283,29 @@ impl FsLayoutStore {
                         let id = ref_id(value)?;
                         match refs.update_ref(name, guard.1, &id) {
                             Ok(()) => {}
-                            // A ref file this store could not read (not a
-                            // ref wire) is in the way: report what a read
-                            // sees, as `mkit serve` does on a conflict.
-                            Err(TransportError::RefConflict) => {
+                            // FileTransport's own re-check under the same
+                            // lock failed (unreachable unless a writer
+                            // bypassed the lock): report what a read sees,
+                            // as `mkit serve` does on a conflict.
+                            Err(RefFileError::Conflict) => {
                                 return Ok(BatchOutcome::PreconditionFailed {
                                     index: guard.0,
                                     observed: self.read(key)?,
                                 });
                             }
-                            Err(e) => return Err(unavailable(e)),
+                            Err(e) => return Err(ref_file_error(e)),
                         }
                     }
                     Slot::Row(name) => refs
                         .write_file(&row_path(name), &encode_row(name, value))
-                        .map_err(unavailable)?,
+                        .map_err(ref_file_error)?,
                 },
                 Write::Delete(key) => {
                     match self.slot(key)? {
                         Slot::Ref(name) => refs.delete_ref(name),
                         Slot::Row(name) => refs.remove_file(&row_path(name)),
                     }
-                    .map_err(unavailable)?;
+                    .map_err(ref_file_error)?;
                 }
             }
         }
@@ -317,8 +336,21 @@ const SHORT_ROW: &str = "n";
 /// A row file named after its name's hash: `h<hex(BLAKE3(name))>`, for
 /// longer names (a file name holds at most 255 bytes).
 const HASHED_ROW: &str = "h";
-/// The longest name kept in a file name: 1 + 2 × 120 bytes.
-const MAX_SHORT_ROW: usize = 120;
+/// The longest name kept in a file name (`1 + 2 × 100` bytes).
+pub(super) const MAX_SHORT_ROW: usize = 100;
+
+/// The longest temp file name `FileTransport` writes next to a row file
+/// `<file>`: `.<file>.tmp.<pid: u32>.<seq: u64>`.
+pub(super) const fn max_temp_name(file_name_len: usize) -> usize {
+    1 + file_name_len + ".tmp.".len() + 10 + 1 + 20
+}
+
+/// Every row file, and every temp file written to publish one, fits the
+/// 255-byte file-name limit of common filesystems (APFS, ext4, NTFS), for
+/// any pid and any value of the process-wide temp counter.
+pub(super) const NAME_MAX: usize = 255;
+const _: () = assert!(max_temp_name(SHORT_ROW.len() + 2 * MAX_SHORT_ROW) <= NAME_MAX);
+const _: () = assert!(max_temp_name(HASHED_ROW.len() + 64) <= NAME_MAX);
 
 fn row_file_name(name: &[u8]) -> String {
     if name.len() <= MAX_SHORT_ROW {
@@ -430,9 +462,19 @@ impl NamespaceStore for FsLayoutStore {
                 }
             }
         }
-        self.tx
+        let result = self
+            .tx
             .with_ref_lock(|refs| self.check_and_write(refs, &batch))
-            .map_err(unavailable)?
+            .map_err(ref_file_error)
+            .and_then(|outcome| outcome);
+        match result {
+            // Rule 7: a delete-only batch never reports `Full` (a delete
+            // frees space; a full disk while syncing it is an outage).
+            Err(StoreError::Full) if !batch.has_put() => Err(unavailable(std::io::Error::other(
+                "storage full while deleting",
+            ))),
+            other => other,
+        }
     }
 
     async fn stats(&self, p: &Partition) -> Result<PartitionStats, StoreError> {
@@ -449,7 +491,7 @@ impl NamespaceStore for FsLayoutStore {
     }
 
     async fn probe(&self) -> Result<(), StoreError> {
-        let meta = fs::metadata(self.root()).map_err(unavailable)?;
+        let meta = fs::metadata(self.root()).map_err(io_error)?;
         if meta.is_dir() {
             Ok(())
         } else {

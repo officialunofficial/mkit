@@ -11,9 +11,9 @@ use std::task::{Context, Poll};
 use bytes::{Bytes, BytesMut};
 use futures_core::Stream;
 use mkit_core::hash::Hasher;
-use mkit_transport_file::{sync_dir, temp_path};
+use mkit_transport_file::{create_dir_all_durably, sync_dir, temp_path};
 
-use super::unavailable;
+use super::{io_error, unavailable};
 use crate::store::{
     BlobBody, BlobKey, BlobMeta, BlobStore, ByteRange, CommitOutcome, MAX_BLOB_PIECE_BYTES,
     PackSink, StoreError,
@@ -28,7 +28,13 @@ pub(super) const READ_BLOCK: usize = 64 * 1024;
 /// while hashing it, and becomes visible only once its BLAKE3 and length
 /// verify: fsync, rename over the destination, fsync the directory. A
 /// failed, aborted or dropped upload removes its temp file and never
-/// touches an existing blob.
+/// touches an existing blob. A new directory's entry is fsynced into its
+/// parent before anything is published in it. A full disk or quota is
+/// [`StoreError::Full`].
+///
+/// TODO(M0-13): a process that crashes mid-upload leaves its temp file,
+/// `<keyspace>/.<64-hex>.tmp.<pid>.<seq>`, behind; nothing sweeps them yet.
+/// They are never visible as blobs.
 #[derive(Debug, Clone)]
 pub struct FsBlobStore {
     root: PathBuf,
@@ -119,16 +125,16 @@ impl FsPackSink {
             ));
         }
         let file = self.file.take().ok_or_else(closed)?;
-        file.sync_all().map_err(unavailable)?;
+        file.sync_all().map_err(io_error)?;
         drop(file);
         let tmp = self.tmp.as_ref().ok_or_else(closed)?;
         let existed = self.dest.exists();
         // Identical bytes by construction, so replacing a present blob is
         // harmless, and it repairs one a pre-atomic writer left short.
-        fs::rename(tmp, &self.dest).map_err(unavailable)?;
+        fs::rename(tmp, &self.dest).map_err(io_error)?;
         self.tmp = None;
         if let Some(dir) = self.dest.parent() {
-            sync_dir(dir).map_err(unavailable)?;
+            sync_dir(dir).map_err(io_error)?;
         }
         Ok(existed)
     }
@@ -156,7 +162,7 @@ impl PackSink for FsPackSink {
             return Err(StoreError::Invalid("blob is longer than declared".into()));
         };
         let file = self.file.as_mut().ok_or_else(closed)?;
-        file.write_all(&chunk).map_err(unavailable)?;
+        file.write_all(&chunk).map_err(io_error)?;
         self.hasher.update(&chunk);
         self.written = total;
         Ok(())
@@ -197,7 +203,7 @@ impl Stream for Blocks {
             }
             Err(e) => {
                 this.remaining = 0;
-                Poll::Ready(Some(Err(unavailable(e))))
+                Poll::Ready(Some(Err(io_error(e))))
             }
         }
     }
@@ -211,14 +217,14 @@ impl BlobStore for FsBlobStore {
 
     async fn begin(&self, key: BlobKey, len: u64) -> Result<FsPackSink, StoreError> {
         let dir = self.dir();
-        fs::create_dir_all(&dir).map_err(unavailable)?;
+        create_dir_all_durably(&dir).map_err(io_error)?;
         let dest = self.path(&key);
-        let tmp = temp_path(&dest).map_err(unavailable)?;
+        let tmp = temp_path(&dest).map_err(io_error)?;
         let file = OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&tmp)
-            .map_err(unavailable)?;
+            .map_err(io_error)?;
         Ok(FsPackSink {
             file: Some(file),
             tmp: Some(tmp),
@@ -238,23 +244,22 @@ impl BlobStore for FsBlobStore {
         let mut file = match File::open(self.path(key)) {
             Ok(file) => file,
             Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(unavailable(e)),
+            Err(e) => return Err(io_error(e)),
         };
-        let len = file.metadata().map_err(unavailable)?.len();
+        let len = file.metadata().map_err(io_error)?.len();
         let span = match range {
             Some(range) => range.resolve(len)?,
             None => 0..len,
         };
         if span.start > 0 {
-            file.seek(SeekFrom::Start(span.start))
-                .map_err(unavailable)?;
+            file.seek(SeekFrom::Start(span.start)).map_err(io_error)?;
         }
         let n = span.end - span.start;
         if let Ok(whole) = usize::try_from(n)
             && whole <= MAX_BLOB_PIECE_BYTES
         {
             let mut buf = vec![0; whole];
-            file.read_exact(&mut buf).map_err(unavailable)?;
+            file.read_exact(&mut buf).map_err(io_error)?;
             return Ok(Some(BlobBody::Bytes(Bytes::from(buf))));
         }
         Ok(Some(BlobBody::Stream {
@@ -267,12 +272,12 @@ impl BlobStore for FsBlobStore {
         match fs::metadata(self.path(key)) {
             Ok(meta) => Ok(Some(BlobMeta { len: meta.len() })),
             Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(unavailable(e)),
+            Err(e) => Err(io_error(e)),
         }
     }
 
     async fn probe(&self) -> Result<(), StoreError> {
-        let meta = fs::metadata(&self.root).map_err(unavailable)?;
+        let meta = fs::metadata(&self.root).map_err(io_error)?;
         if meta.is_dir() {
             Ok(())
         } else {
@@ -286,9 +291,9 @@ impl BlobStore for FsBlobStore {
         match fs::remove_file(self.path(key)) {
             Ok(()) => {}
             Err(e) if e.kind() == ErrorKind::NotFound => return Ok(false),
-            Err(e) => return Err(unavailable(e)),
+            Err(e) => return Err(io_error(e)),
         }
-        sync_dir(&self.dir()).map_err(unavailable)?;
+        sync_dir(&self.dir()).map_err(io_error)?;
         Ok(true)
     }
 }

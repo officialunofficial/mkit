@@ -105,17 +105,30 @@ train).
   runtime): `FsBlobStore` streams uploads into `packs/<64-hex>` and
   publishes only after BLAKE3 and length verify (temp file, fsync, rename,
   directory fsync); bodies over 1 MiB stream in 64 KiB pieces.
-  `FsLayoutStore` keeps a repo's refs as `FileTransport` ref files under
-  its ref lock (`.mkit/refs/.lock`), evaluating a `NotAfter` deadline
-  under that lock; other ref-class names live in `.mkit/server/rows/`.
-  Both pass the storage conformance suite. **SemVer:** unreleased API.
+  `FsLayoutStore` keeps a repo's `refs/` refs as `FileTransport` ref files
+  under its ref lock (`.mkit/refs/.lock`), evaluating a `NotAfter`
+  deadline under that lock. An undecodable ref file is `Corrupt`, a ref
+  whose file clashes with another ref's directory (or the reverse) is
+  `Invalid`, and a full disk or quota is `Full`. Both pass the storage
+  conformance suite. **SemVer:** unreleased API. **Behavior change:**
+  `mkit serve` wrote a ref named outside `refs/` (e.g. `main`) to
+  `<root>/main`; the FS store keeps such names in the server-side
+  `.mkit/server/rows/` store instead, invisible to the CLI and
+  `FileTransport`, so a name like `packs/<hex>` can no longer overwrite a
+  pack (whether the pipeline rejects them outright is M0-13's call).
 
 - *(transport-file)* `FileTransport::with_ref_lock` runs a closure under
   the ref lock with a `LockedRefs` handle (`read_ref`, `update_ref`,
-  `delete_ref`, and atomic `write_file`/`remove_file` under the root);
-  `FileTransport::root`, `temp_path` and `sync_dir` are public. A panic
-  under the ref lock no longer poisons the transport: the next writer
-  recovers the in-process lock (it guards no data). **SemVer:** additive.
+  `delete_ref`, and atomic `write_file`/`remove_file` confined to
+  `.mkit/server/`, symlink-escape guarded); typed `RefFileError`; strict
+  `read_ref_strict`/`list_refs_strict` (an undecodable ref file is an
+  error, not absent); `server_path`, `root`, `temp_path`, `sync_dir` and
+  `create_dir_all_durably` are public. Ref writes now fsync the parent
+  of every directory they create, and a ref whose file clashes with
+  another ref's directory (or the reverse) is `InvalidRef`, not a
+  `RemoteError`. A panic under the ref lock no longer poisons the
+  transport: the next writer recovers the in-process lock (it guards no
+  data). **SemVer:** additive.
 
 - *(core)* Resumable-part building blocks (SPEC-TRANSPORT-CONNECT §7.6):
   `write_auth::ContentCommitment` parses and formats `body:`, `pack:` and the
