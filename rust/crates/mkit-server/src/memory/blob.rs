@@ -1,15 +1,50 @@
 //! `MemoryBlobStore`: the reference [`BlobStore`].
 
 use std::collections::BTreeMap;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 
 use bytes::Bytes;
+use futures_core::Stream;
 use mkit_core::hash::Hasher;
 
 use super::{MemoryFault, lock, take_fault};
 use crate::store::{
-    BlobBody, BlobKey, BlobMeta, BlobStore, ByteRange, CommitOutcome, PackSink, StoreError,
+    BlobBody, BlobKey, BlobMeta, BlobStore, ByteRange, CommitOutcome, MAX_BLOB_PIECE_BYTES,
+    PackSink, StoreError,
 };
+
+/// Bodies longer than this are streamed in pieces of this size
+/// (`BlobStore::get`).
+const STREAM_CHUNK: usize = MAX_BLOB_PIECE_BYTES;
+
+/// `bytes` as a body: whole, or streamed when longer than [`STREAM_CHUNK`].
+fn body(bytes: Bytes) -> BlobBody {
+    if bytes.len() <= STREAM_CHUNK {
+        return BlobBody::Bytes(bytes);
+    }
+    BlobBody::Stream {
+        len: bytes.len() as u64,
+        stream: Box::pin(Chunks(bytes)),
+    }
+}
+
+/// The remaining bytes of a streamed body.
+struct Chunks(Bytes);
+
+impl Stream for Chunks {
+    type Item = Result<Bytes, StoreError>;
+
+    fn poll_next(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let rest = &mut self.get_mut().0;
+        if rest.is_empty() {
+            return Poll::Ready(None);
+        }
+        let n = rest.len().min(STREAM_CHUNK);
+        Poll::Ready(Some(Ok(rest.split_to(n))))
+    }
+}
 
 #[derive(Debug, Default)]
 struct Shared {
@@ -91,14 +126,12 @@ impl BlobStore for MemoryBlobStore {
             return Ok(None);
         };
         let Some(range) = range else {
-            return Ok(Some(BlobBody::Bytes(blob)));
+            return Ok(Some(body(blob)));
         };
         let span = range.resolve(blob.len() as u64)?;
         // `resolve` bounds the span by the blob's length, which is a usize.
         let index = |n: u64| usize::try_from(n).map_err(|_| StoreError::Invalid("range".into()));
-        Ok(Some(BlobBody::Bytes(
-            blob.slice(index(span.start)?..index(span.end)?),
-        )))
+        Ok(Some(body(blob.slice(index(span.start)?..index(span.end)?))))
     }
 
     async fn head(&self, key: &BlobKey) -> Result<Option<BlobMeta>, StoreError> {
@@ -180,7 +213,7 @@ mod tests {
     fn get(store: &MemoryBlobStore, key: &BlobKey, range: Option<ByteRange>) -> Option<Bytes> {
         match block_on(store.get(key, range)).unwrap()? {
             BlobBody::Bytes(b) => Some(b),
-            BlobBody::Stream { .. } => panic!("memory blobs are never streamed"),
+            BlobBody::Stream { .. } => panic!("a small memory blob is never streamed"),
         }
     }
 
@@ -263,6 +296,62 @@ mod tests {
         assert!(block_on(store.delete(&key)).unwrap());
         assert_eq!(get(&store, &key, None), None);
         assert!(!block_on(store.delete(&key)).unwrap());
+    }
+
+    #[test]
+    fn large_bodies_stream_in_bounded_pieces() {
+        let store = MemoryBlobStore::default();
+        let data: Vec<u8> = (0..=250_u8).cycle().take(STREAM_CHUNK * 2 + 7).collect();
+        let key = key_of(&data);
+        put(&store, key, data.len() as u64, &[&data]).unwrap();
+        let read = |range| {
+            let body = block_on(store.get(&key, range)).unwrap().unwrap();
+            let BlobBody::Stream { len, mut stream } = body else {
+                panic!("a large body is streamed");
+            };
+            let mut out = Vec::new();
+            while let Some(piece) =
+                block_on(core::future::poll_fn(|cx| stream.as_mut().poll_next(cx)))
+            {
+                let piece = piece.unwrap();
+                assert!(piece.len() <= MAX_BLOB_PIECE_BYTES);
+                out.extend_from_slice(&piece);
+            }
+            assert_eq!(out.len() as u64, len);
+            out
+        };
+        assert_eq!(read(None), data);
+        let range = ByteRange {
+            start: 3,
+            end_inclusive: STREAM_CHUNK as u64 + 3,
+        };
+        assert_eq!(read(Some(range)), &data[3..=STREAM_CHUNK + 3]);
+        // Exactly one piece is still one buffer.
+        let edge = &data[..STREAM_CHUNK];
+        let edge_key = key_of(edge);
+        put(&store, edge_key, edge.len() as u64, &[edge]).unwrap();
+        assert_eq!(get(&store, &edge_key, None).unwrap().len(), STREAM_CHUNK);
+    }
+
+    #[test]
+    fn poisoned_lock_recovers() {
+        let store = MemoryBlobStore::default();
+        let key = key_of(b"a");
+        put(&store, key, 1, &[b"a"]).unwrap();
+        let shared = store.shared.clone();
+        let panicked = std::thread::spawn(move || {
+            let _guard = shared.blobs.lock().unwrap();
+            panic!("poison the blob lock");
+        })
+        .join();
+        assert!(panicked.is_err() && store.shared.blobs.is_poisoned());
+        assert_eq!(get(&store, &key, None).unwrap(), "a");
+        let other = key_of(b"b");
+        assert_eq!(
+            put(&store, other, 1, &[b"b"]).unwrap(),
+            CommitOutcome::Created
+        );
+        assert!(block_on(store.delete(&key)).unwrap());
     }
 
     #[test]

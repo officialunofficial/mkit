@@ -1,0 +1,27 @@
+# mkit-server-conformance: the storage-trait conformance suite (PRD
+# MKIT-29 §5.1, §5.3). Every `NamespaceStore` / `BlobStore` backend, in
+# this workspace or a third party's, runs it with one `storage_suite!`
+# invocation. Native only: it drives each case on a tokio runtime.
+#
+# `publish = false` during the epic; WP-REL decides publication. Never a
+# dependency of `mkit-cli`.
+[package]
+name = "mkit-server-conformance"
+description = "Conformance suite for mkit-server storage backends"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mkit-server = { version = "0.4", path = "../mkit-server", features = ["memory"] }
+mkit-core = { version = "0.4", path = "../mkit-core", default-features = false }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread"] }
+bytes = "1"
+futures = "0.3"

@@ -133,8 +133,14 @@ impl NamespaceStore for MemoryKv {
             return Err(StoreError::Invalid("scan limit must be at least 1".into()));
         }
         let lower = match after.map(|c| Key::new(c.clone().into_bytes())) {
-            Some(cursor) if cursor >= *start => Bound::Excluded(cursor),
-            _ => Bound::Included(start.clone()),
+            None => Bound::Included(start.clone()),
+            // Every cursor this range returns is one of its keys.
+            Some(cursor) if *start <= cursor && cursor < *end => Bound::Excluded(cursor),
+            Some(_) => {
+                return Err(StoreError::Invalid(
+                    "scan cursor outside the scanned range".into(),
+                ));
+            }
         };
         let empty = match &lower {
             Bound::Included(k) | Bound::Excluded(k) => k >= end,
@@ -414,6 +420,12 @@ mod tests {
         // An exact-fit page has no cursor; an inverted range is empty.
         assert_eq!(scan("a", None, 5).unwrap().next, None);
         assert_eq!(scan("d", None, 1).unwrap(), ScanPage::default());
+        // A cursor outside the range is rejected, not silently restarted.
+        let foreign = Cursor::new(&b"0"[..]);
+        assert!(matches!(
+            scan("a", Some(&foreign), 1),
+            Err(StoreError::Invalid(_))
+        ));
         assert!(matches!(scan("a", None, 0), Err(StoreError::Invalid(_))));
     }
 

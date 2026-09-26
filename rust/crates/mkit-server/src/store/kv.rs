@@ -338,7 +338,11 @@ pub struct PartitionStats {
 ///    store usable: check-and-write runs in one non-yielding step (a
 ///    synchronous transaction that runs to completion even if the future is
 ///    dropped, a Durable Object `transactionSync`, a mutex held without
-///    awaits). A poisoned lock is recovered, never propagated.
+///    awaits). The dropped batch may still commit later (a blocking task
+///    keeps running): every later observation is exactly the state before
+///    or after it, never torn, and once the after state has been observed
+///    the before state never reappears. A poisoned lock is recovered, never
+///    propagated.
 /// 5. **Durability.** `Committed` means durable to the level the backend
 ///    documents.
 /// 6. **Atomicity scope.** One batch is one partition; nothing needs
@@ -405,7 +409,10 @@ pub trait NamespaceStore: MaybeSend + MaybeSync {
     }
 
     /// Up to `limit` (at least 1) entries in `[start, end)`, ascending by
-    /// key bytes. `after` resumes strictly after the cursor's position.
+    /// key bytes. `after` resumes strictly after the cursor's position; a
+    /// cursor outside `[start, end)` (forged, or from another range) is
+    /// [`StoreError::Invalid`]. A page may hold fewer than `limit` entries
+    /// and still return `next`: callers page until `next` is `None`.
     fn scan(
         &self,
         p: &Partition,

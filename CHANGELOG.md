@@ -50,6 +50,21 @@ train).
   readers over any `NamespaceStore`, and the content-addressed `BlobStore` /
   `PackSink` contract with the `MemoryBlobStore` reference backend.
 
+- *(server)* `mkit-server-conformance` crate (`publish = false`): the
+  storage-backend conformance suite, the gate for third-party backends.
+  74 generic cases over `NamespaceStore`, `BlobStore` and `ContentIndex`
+  (preconditions, scans, limits, capabilities, the `NotAfter` deadline,
+  capacity, cancellation, crash/restart, export/import, golden encodings);
+  a backend implements `KvHarness`, declares its expected skips (any other
+  skip fails) and invokes `storage_suite!`. Contract changes: `scan`
+  rejects a cursor outside the scanned range as `Invalid` (so `ListRefs`
+  rejects a page token from another prefix instead of restarting); a blob
+  body over 1 MiB MUST be streamed in pieces of at most 1 MiB
+  (`MAX_BLOB_PIECE_BYTES`); rule 4 states what later reads of a dropped
+  apply may see; an import into a `RefsOnly` store refuses an export whose
+  layout version differs from the store's implicit one. **SemVer:**
+  unreleased API.
+
 - *(core)* Resumable-part building blocks (SPEC-TRANSPORT-CONNECT §7.6):
   `write_auth::ContentCommitment` parses and formats `body:`, `pack:` and the
   new `part:<ticket>:<index>:<subtree>:<len>` commitment, and

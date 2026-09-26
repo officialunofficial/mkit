@@ -407,10 +407,19 @@ impl<'a, S: NamespaceStore> Importer<'a, S> {
     ///
     /// # Errors
     /// [`StoreError::Unsupported`] if the export's layout version is newer
-    /// than [`keys::LAYOUT_VERSION`].
+    /// than [`keys::LAYOUT_VERSION`], or differs from the implicit layout
+    /// version of a store that cannot hold `v`.
     pub fn new(store: &'a S, header: &ExportHeader, mode: ImportMode) -> Result<Self, StoreError> {
         check_layout(header.layout_version)?;
         let caps = store.capabilities();
+        if caps
+            .implicit_layout_version
+            .is_some_and(|implicit| implicit != header.layout_version)
+        {
+            return Err(StoreError::Unsupported(
+                "export layout version differs from the store's implicit version".into(),
+            ));
+        }
         Ok(Self {
             store,
             mode,
