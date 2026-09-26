@@ -126,6 +126,20 @@ train).
   PRs to `main`. The `mkit` build now selects
   `-p mkit-cli`: the bare `--bin mkit` selected every workspace member and
   unified their features into the shipped CLI. See `docs/RELEASE.md`.
+- *(release)* Every signed release also publishes the `mkit-server`
+  container image, `ghcr.io/officialunofficial/mkit-server:<version>` (and
+  `:<major>.<minor>`; no `latest` while the repository is private), for
+  `linux/amd64` and `linux/arm64`. It is built from the two signed Linux
+  `mkit-server` archives, not recompiled: the new `container` job verifies
+  each archive's cosign bundle and checksums
+  (`scripts/stage-server-image.sh`) and copies the binary into
+  `gcr.io/distroless/cc-debian13:nonroot` (`contrib/docker/mkit-server/Dockerfile`;
+  non-root, no shell, entrypoint `mkit-server serve`). The new
+  `container-sign` job signs the digest with cosign keyless and attaches
+  SLSA provenance and a CycloneDX SBOM attestation; the release notes
+  carry the digest. `scripts/local-server-image.sh` runs the same staging
+  and image checks locally, without pushing. Running it:
+  `docs/CONTAINER.md`.
 - *(core)* `pack::DeltaBaseSource`: the external delta-base lookup is
   now an explicit, generic parameter, so a server can resolve bases only
   from the pushing repository's membership (PRD §6.5, no existence

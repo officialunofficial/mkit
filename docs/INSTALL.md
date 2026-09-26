@@ -23,6 +23,7 @@ verify the result.
 | CLI on a dev machine (Windows)        | Not supported &mdash; use WSL         | run the above `install.sh` (or `cargo install`) inside WSL |
 | CI / backend (pin a version)          | Release archive                      | `curl -LO …/releases/download/v<VERSION>/mkit-<VERSION>-<target>.tar.gz && tar -xzf mkit-<VERSION>-<target>.tar.gz` |
 | Self-hosted server (`mkit-server`)    | Release archive                      | `curl -LO …/releases/download/v<VERSION>/mkit-server-<VERSION>-<target>.tar.gz` ([details](#mkit-server)) |
+| Self-hosted server in a container     | Container image (ghcr.io)            | `docker pull ghcr.io/officialunofficial/mkit-server@sha256:<digest>` ([details](#container)) |
 | Browser / Cloudflare Worker           | npm                                  | `bun add @officialunofficial/mkit-wasm`                                                                                  |
 | Library inside another Rust crate     | crates.io (or git dependency)        | `mkit-core = "0.3"`                                                                                  |
 
@@ -192,6 +193,30 @@ attestation verify "${ARCHIVE}" --repo officialunofficial/mkit`), SBOM and
 `THIRD-PARTY-NOTICES` as `mkit`. How to run it (authentication, storage,
 limits, the reverse proxy it expects) is in the operator guide,
 [`rust/crates/mkit-server-native/README.md`](../rust/crates/mkit-server-native/README.md).
+
+### Container
+
+From 0.5.0 on, each release also publishes `mkit-server` as a multi-arch
+(`linux/amd64`, `linux/arm64`) image, `ghcr.io/officialunofficial/mkit-server`,
+tagged `<version>` (and `<major>.<minor>` for a final release; no `latest`
+while the repository is private, when the package is private too and needs
+`docker login ghcr.io`). It is distroless and non-root, and holds exactly
+the binary of the signed Linux archive above. Take the digest from the
+release notes, verify it, and pull by digest:
+
+```sh
+IMAGE=ghcr.io/officialunofficial/mkit-server@sha256:<digest>
+cosign verify "$IMAGE" \
+  --certificate-identity-regexp '^https://github\.com/officialunofficial/mkit/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+gh attestation verify "oci://${IMAGE}" --repo officialunofficial/mkit
+docker run --rm --entrypoint /usr/local/bin/mkit-server "$IMAGE" version
+```
+
+The entrypoint is `mkit-server serve`, so arguments after the image are
+`serve` flags. Running it (volumes and their owner, uid 65532; secrets;
+ports; health probes; what to put in front of it) is in
+[`docs/CONTAINER.md`](CONTAINER.md).
 
 ## WASM / npm
 

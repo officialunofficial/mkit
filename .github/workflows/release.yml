@@ -17,7 +17,12 @@ name: "Release: Artifacts"
 #   4. Generates a GitHub-native SLSA build provenance attestation
 #      (actions/attest-build-provenance) over the archives, in addition to
 #      the cosign signatures.
-#   5. Aggregates all artifacts into a GitHub Release.
+#   5. Publishes the mkit-server container image
+#      (ghcr.io/officialunofficial/mkit-server, linux/amd64 + linux/arm64)
+#      from the two signed Linux server archives, then signs its digest with
+#      cosign keyless and attaches SLSA provenance and a CycloneDX SBOM
+#      attestation (container, container-sign).
+#   6. Aggregates all artifacts into a GitHub Release.
 #
 # macOS binaries are intentionally NOT codesigned or notarized — we do not
 # hold an Apple Developer ID. Trust is established via cosign keyless
@@ -59,6 +64,8 @@ env:
   # The long-running server (mkit-server-native, D31), shipped as its own
   # archive next to mkit's.
   SERVER_BINARY_NAME: mkit-server
+  # mkit-server's container image (container / container-sign jobs).
+  IMAGE_NAME: ghcr.io/officialunofficial/mkit-server
   # mkit-server's shipped feature set is NOT here: it lives in
   # scripts/release/mkit-server-features in the tagged tree, the one source
   # this workflow and release-artifact-check.yml (PR time) both read.
@@ -618,10 +625,250 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # ---- mkit-server container image (WP-M0-19) ----------------------------
+  # The image is built FROM the two Linux mkit-server archives the build job
+  # signed, not by a second compile: this job verifies each archive's cosign
+  # bundle (exact identity: this workflow at this tag, this commit), checks
+  # every copied byte against the archive's checksums
+  # (scripts/stage-server-image.sh), and COPYs the binary into distroless
+  # (contrib/docker/mkit-server/Dockerfile, which has no RUN step, so no
+  # QEMU). The image therefore carries exactly the signed bytes.
+  #
+  # Permissions are split between the two image jobs: this one runs the
+  # repo's scripts and the image build and pushes (`packages: write`, no
+  # OIDC); container-sign signs (OIDC) and checks nothing out. No Rust cache
+  # is restored here. No `latest` tag while the repo is private (Q9). The
+  # image's org.opencontainers.image.source label links the package to the
+  # repo; its visibility is checked by hand after the first push
+  # (docs/RELEASE.md, "ghcr.io package").
+  container:
+    name: Build and push container image
+    runs-on: ubuntu-latest
+    needs: [validate-release-tag, build]
+    permissions:
+      contents: read
+      packages: write       # push the image to ghcr.io
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    env:
+      VERSION: ${{ needs.validate-release-tag.outputs.version }}
+      COMMIT: ${{ needs.validate-release-tag.outputs.commit }}
+    steps:
+      - name: Resolve image tags
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAGS="${IMAGE_NAME}:${VERSION}"
+          # A final release also moves <major>.<minor>; a pre-release does not.
+          if [[ "${VERSION}" =~ ^([0-9]+)\.([0-9]+)\.[0-9]+$ ]]; then
+            TAGS="${TAGS},${IMAGE_NAME}:${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+          fi
+          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+          echo "image tags: ${TAGS}"
+
+      - name: Checkout (at resolved tag)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ env.COMMIT }}
+          persist-credentials: false
+
+      - name: Download Linux release archives
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
+        with:
+          pattern: build-*-unknown-linux-gnu
+          merge-multiple: true
+          path: archives
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+        with:
+          cosign-release: v2.4.1
+
+      - name: Verify the server archives' signatures
+        shell: bash
+        run: |
+          set -euo pipefail
+          for TARGET in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+            ARCHIVE="archives/${SERVER_BINARY_NAME}-${VERSION}-${TARGET}.tar.gz"
+            cosign verify-blob \
+              --bundle "${ARCHIVE}.cosign.bundle" \
+              --certificate-identity "https://github.com/${GITHUB_WORKFLOW_REF}" \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+              --certificate-github-workflow-sha "${COMMIT}" \
+              "${ARCHIVE}"
+          done
+
+      - name: Stage the image build context
+        shell: bash
+        run: bash scripts/stage-server-image.sh archives "${VERSION}" image-context
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+        with:
+          # Pinned BuildKit, not the floating buildx-stable-1 tag.
+          driver-opts: image=moby/buildkit:v0.33.0@sha256:6c2fa84a6b61ccd72899dde4239f8d5717f05f9a8ca6f3cad185fb1a95a94de3
+
+      # Before anything is pushed or any registry credential exists on the
+      # runner: both platforms build with the expected config, and the
+      # amd64 image runs `mkit-server version` and `serve --help`, as
+      # 65532:65532, without a shell. (The arm64 binary ran natively in the
+      # build job; the stage step checked it links against this base.)
+      - name: Check the image locally
+        shell: bash
+        run: bash scripts/check-server-image.sh image-context "${VERSION}" linux/amd64 linux/arm64
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # provenance/sbom off: container-sign attaches GitHub's provenance
+      # attestation and the CycloneDX SBOM below, both signed.
+      - name: Build and push
+        id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
+        with:
+          context: image-context
+          file: contrib/docker/mkit-server/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          build-args: |
+            VERSION=${{ env.VERSION }}
+            REVISION=${{ env.COMMIT }}
+          provenance: false
+          sbom: false
+
+      - name: Check the pushed manifest
+        shell: bash
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "ERROR: bad digest '${DIGEST}'" >&2; exit 1; }
+          PLATFORMS="$(docker buildx imagetools inspect "${IMAGE_NAME}@${DIGEST}" --format '{{json .Manifest}}' \
+            | jq -r '[.manifests[].platform | "\(.os)/\(.architecture)"] | sort | join(",")')"
+          if [ "${PLATFORMS}" != "linux/amd64,linux/arm64" ]; then
+            echo "ERROR: ${IMAGE_NAME}@${DIGEST} has platforms '${PLATFORMS}'" >&2
+            exit 1
+          fi
+          echo "${IMAGE_NAME}@${DIGEST}: ${PLATFORMS}"
+
+      # The image's own SBOM (the distroless packages plus the binary), for
+      # the linux/amd64 variant; the arm64 one differs only in architecture.
+      - name: Generate the image SBOM
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26  # v0.24.2
+        with:
+          image: ${{ env.IMAGE_NAME }}@${{ steps.push.outputs.digest }}
+          format: cyclonedx-json
+          output-file: mkit-server-image.sbom.cdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Check the image SBOM is not empty
+        shell: bash
+        run: |
+          set -euo pipefail
+          COUNT="$(jq '.components | length' mkit-server-image.sbom.cdx.json)"
+          [ "${COUNT}" -gt 0 ] || { echo "ERROR: the image SBOM lists no components" >&2; exit 1; }
+          echo "image SBOM: ${COUNT} components"
+
+      - name: Upload image SBOM artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        with:
+          name: container-sbom
+          path: mkit-server-image.sbom.cdx.json
+          if-no-files-found: error
+          retention-days: 7
+
+  # Signs the pushed digest. The only job holding both `id-token: write` and
+  # `packages: write`; it checks nothing out and builds nothing, running
+  # cosign, GitHub's attest action and docker login only.
+  container-sign:
+    name: Sign and attest container image
+    runs-on: ubuntu-latest
+    needs: [validate-release-tag, container]
+    permissions:
+      contents: read
+      packages: write       # push the signature and attestations next to the image
+      id-token: write       # cosign keyless + provenance OIDC
+      attestations: write   # actions/attest-build-provenance
+    env:
+      DIGEST: ${{ needs.container.outputs.digest }}
+      COMMIT: ${{ needs.validate-release-tag.outputs.commit }}
+    steps:
+      - name: Check the digest
+        shell: bash
+        run: |
+          [[ "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "ERROR: bad digest '${DIGEST}'" >&2; exit 1; }
+
+      - name: Download image SBOM
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
+        with:
+          name: container-sbom
+          path: sbom
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+        with:
+          cosign-release: v2.4.1
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Sign the image with cosign (keyless OIDC)
+        shell: bash
+        run: cosign sign --yes "${IMAGE_NAME}@${DIGEST}"
+
+      - name: Generate SLSA build provenance for the image
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE_NAME }}
+          subject-digest: ${{ env.DIGEST }}
+          push-to-registry: true
+
+      - name: Attest the image SBOM
+        shell: bash
+        run: |
+          cosign attest --yes --type cyclonedx \
+            --predicate sbom/mkit-server-image.sbom.cdx.json \
+            "${IMAGE_NAME}@${DIGEST}"
+
+      # The command the release notes and docs/CONTAINER.md give users.
+      - name: Verify the signature and SBOM attestation
+        shell: bash
+        run: |
+          set -euo pipefail
+          IDENTITY=(
+            --certificate-identity "https://github.com/${GITHUB_WORKFLOW_REF}"
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
+            --certificate-github-workflow-sha "${COMMIT}"
+          )
+          cosign verify "${IDENTITY[@]}" "${IMAGE_NAME}@${DIGEST}" > /dev/null
+          cosign verify-attestation --type cyclonedx "${IDENTITY[@]}" "${IMAGE_NAME}@${DIGEST}" > /dev/null
+          echo "${IMAGE_NAME}@${DIGEST}: signature and SBOM attestation verify"
+
   release:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
-    needs: [validate-release-tag, build, sbom, third-party-notices]
+    # Waits for the container jobs, so the notes can name the image digest,
+    # but does not depend on them: a failed image build or push must not
+    # block the binary release. The release then ships without the image
+    # section (the run still fails, so it is noticed).
+    needs: [validate-release-tag, build, sbom, third-party-notices, container, container-sign]
+    if: >-
+      ${{ !cancelled()
+      && needs.validate-release-tag.result == 'success'
+      && needs.build.result == 'success'
+      && needs.sbom.result == 'success'
+      && needs.third-party-notices.result == 'success' }}
     permissions:
       contents: write       # create the GitHub Release + upload assets
       id-token: write       # cosign keyless OIDC + SLSA provenance OIDC
@@ -671,9 +918,15 @@ jobs:
 
       - name: Flatten artifacts into dist/
         shell: bash
+        env:
+          IMAGE_SIGNED: ${{ needs.container-sign.result }}
         run: |
           mkdir -p dist
           find artifacts -type f -exec cp {} dist/ \;
+          # The image SBOM ships only with a signed image.
+          if [ "${IMAGE_SIGNED}" != "success" ]; then
+            rm -f dist/mkit-server-image.sbom.cdx.json
+          fi
           ls -la dist/
 
       # ---- SLSA build provenance (GitHub/Sigstore-native) -----------------
@@ -701,8 +954,12 @@ jobs:
         shell: bash
         working-directory: dist
         run: |
-          sha256sum *.tar.gz *.provenance.jsonl sbom.cdx.json THIRD-PARTY-NOTICES > SHA256SUMS || \
-            shasum -a 256 *.tar.gz *.provenance.jsonl sbom.cdx.json THIRD-PARTY-NOTICES > SHA256SUMS
+          FILES=(*.tar.gz *.provenance.jsonl sbom.cdx.json THIRD-PARTY-NOTICES)
+          if [ -f mkit-server-image.sbom.cdx.json ]; then
+            FILES+=(mkit-server-image.sbom.cdx.json)
+          fi
+          sha256sum "${FILES[@]}" > SHA256SUMS || \
+            shasum -a 256 "${FILES[@]}" > SHA256SUMS
           cat SHA256SUMS
 
       - name: Install cosign
@@ -723,6 +980,54 @@ jobs:
             --output-certificate SHA256SUMS.crt \
             SHA256SUMS
 
+      # The notes' container section: the digest and how to verify it when
+      # container-sign succeeded, else one line saying there is no image.
+      - name: Container image notes
+        id: image
+        shell: bash
+        env:
+          IMAGE_SIGNED: ${{ needs.container-sign.result }}
+          DIGEST: ${{ needs.container.outputs.digest }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          NOTES="${RUNNER_TEMP}/image-notes.md"
+          if [ "${IMAGE_SIGNED}" = "success" ] && [[ "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            sed -e "s|__IMAGE__|${IMAGE_NAME}|g" -e "s|__DIGEST__|${DIGEST}|g" -e "s|__VERSION__|${VERSION}|g" \
+              > "${NOTES}" <<'NOTES_EOF'
+          ### Container image
+
+          `mkit-server` is also published as a multi-arch image (linux/amd64,
+          linux/arm64): distroless, non-root, built from the two Linux
+          `mkit-server` archives above (no separate compile).
+
+          ```sh
+          docker pull __IMAGE__:__VERSION__@__DIGEST__
+          ```
+
+          Pull it by digest. The digest is signed with cosign keyless and
+          carries a SLSA build provenance attestation and a CycloneDX SBOM
+          attestation (the SBOM is also attached as
+          `mkit-server-image.sbom.cdx.json`):
+
+          ```sh
+          cosign verify __IMAGE__@__DIGEST__ \
+            --certificate-identity-regexp '^https://github\.com/officialunofficial/mkit/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$' \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
+          gh attestation verify oci://__IMAGE__@__DIGEST__ --repo officialunofficial/mkit
+          ```
+
+          How to run it: [`docs/CONTAINER.md`](https://github.com/officialunofficial/mkit/blob/v__VERSION__/docs/CONTAINER.md).
+          NOTES_EOF
+          else
+            echo "No \`mkit-server\` container image was published for this release: the container jobs did not succeed." > "${NOTES}"
+          fi
+          {
+            echo "notes<<MKIT_IMAGE_NOTES_EOF"
+            cat "${NOTES}"
+            echo "MKIT_IMAGE_NOTES_EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64  # v3
         with:
@@ -740,6 +1045,7 @@ jobs:
             dist/*.provenance.jsonl
             dist/sbom.cdx.json
             dist/THIRD-PARTY-NOTICES
+            dist/mkit-server-image.sbom.cdx.json
             dist/SHA256SUMS
             dist/SHA256SUMS.sig
             dist/SHA256SUMS.crt
@@ -821,6 +1127,8 @@ jobs:
             Operator guide:
             [`rust/crates/mkit-server-native/README.md`](https://github.com/officialunofficial/mkit/blob/${{ steps.meta.outputs.tag }}/rust/crates/mkit-server-native/README.md).
 
+            ${{ steps.image.outputs.notes }}
+
             ### Platform notes
 
             macOS binaries are **not codesigned or notarized**. Trust is
@@ -854,7 +1162,10 @@ jobs:
     # self-activates the next time a tag is pushed after the repo is made
     # public. The job body keeps its own explicit public-repo guard as a
     # defense-in-depth check.
-    if: github.event.repository.visibility == 'public'
+    #
+    # `release` runs even when the container jobs fail; checking its result
+    # explicitly keeps this job from being skipped along with them.
+    if: ${{ !cancelled() && needs.release.result == 'success' && github.event.repository.visibility == 'public' }}
     needs: [validate-release-tag, build, release]
     permissions:
       contents: write       # attach assets to the GitHub Release
