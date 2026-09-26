@@ -71,6 +71,7 @@ struct ObjectStateV1 {
     seq: u64,
     changed_at_ms: u64,
     holders: u64,
+    deleting: bool,
 }
 
 /// Every [`Code`], to invert [`Code::as_str`].
@@ -250,6 +251,7 @@ pub fn encode_object_state(state: &ObjectState) -> Value {
         seq: state.seq,
         changed_at_ms: state.changed_at_ms,
         holders: state.holders,
+        deleting: state.deleting,
     })
 }
 
@@ -260,6 +262,7 @@ pub fn decode_object_state(value: &Value) -> Result<ObjectState, StoreError> {
         seq: dto.seq,
         changed_at_ms: dto.changed_at_ms,
         holders: dto.holders,
+        deleting: dto.deleting,
     })
 }
 
@@ -413,6 +416,7 @@ mod tests {
             seq: u64::MAX,
             changed_at_ms: 1_700_000_000_000,
             holders: 2,
+            deleting: true,
         };
         let cases: [(Value, &[u8]); 3] = [
             (encode_hold(9), b"\x01{\"expires_at_ms\":9}"),
@@ -422,7 +426,7 @@ mod tests {
             ),
             (
                 encode_object_state(&state),
-                b"\x01{\"seq\":18446744073709551615,\"changed_at_ms\":1700000000000,\"holders\":2}",
+                b"\x01{\"seq\":18446744073709551615,\"changed_at_ms\":1700000000000,\"holders\":2,\"deleting\":true}",
             ),
         ];
         for (value, golden) in &cases {

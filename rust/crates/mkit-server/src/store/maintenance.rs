@@ -29,7 +29,7 @@ use super::error::StoreError;
 use super::keys;
 use super::kv::{
     Batch, BatchOutcome, Cursor, Key, KeyClasses, MAX_BATCH_BYTES, MAX_BATCH_OPS, MAX_KEY_BYTES,
-    MAX_VALUE_BYTES, NamespaceStore, Value,
+    MAX_VALUE_BYTES, NamespaceStore, Precondition, Value,
 };
 use super::partition::Partition;
 use crate::rt::{BoxFuture, MaybeSend, MaybeSync};
@@ -48,6 +48,7 @@ const EXPORT_PAGE: u32 = 256;
 
 /// What an export was taken from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ExportHeader {
     /// The partition's key-layout version: its `v` row, a `RefsOnly`
     /// store's `implicit_layout_version`, or this binary's version for an
@@ -58,8 +59,20 @@ pub struct ExportHeader {
     pub exported_at_ms: u64,
 }
 
+impl ExportHeader {
+    /// A header.
+    #[must_use]
+    pub fn new(layout_version: u32, exported_at_ms: u64) -> Self {
+        Self {
+            layout_version,
+            exported_at_ms,
+        }
+    }
+}
+
 /// One exported row.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ExportRecord {
     /// The row's partition.
     pub partition: Partition,
@@ -69,8 +82,21 @@ pub struct ExportRecord {
     pub value: Value,
 }
 
+impl ExportRecord {
+    /// A record.
+    #[must_use]
+    pub fn new(partition: Partition, key: Key, value: Value) -> Self {
+        Self {
+            partition,
+            key,
+            value,
+        }
+    }
+}
+
 /// One page of [`export_page`].
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub struct ExportPage {
     /// Records in key order.
     pub records: Vec<ExportRecord>,
@@ -331,16 +357,37 @@ impl Iterator for ExportReader<'_> {
     }
 }
 
+/// How an [`Importer`] treats a partition that already holds rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ImportMode {
+    /// Refuse it: a restore goes into empty partitions.
+    #[default]
+    Fresh,
+    /// Write over it: imported rows replace same-key rows, other rows stay.
+    Merge,
+}
+
 /// Restores exported records into a store, in batches within
 /// [`MAX_BATCH_OPS`] and [`MAX_BATCH_BYTES`] (so they fit Durable Object
 /// limits), one partition per batch; one write per batch on a store without
-/// `atomic_multi_key`. Records are plain puts: import into an empty store,
-/// and an interrupted import can be rerun from the start.
+/// `atomic_multi_key`. A partition's records must be contiguous, as an
+/// export writes them.
+///
+/// On the first record of each partition, [`ImportMode::Fresh`] checks the
+/// partition is empty. After a partition's last record, a store that holds
+/// the `v` class gets `v` = the header's layout version if the export had
+/// no `v` row (a `RefsOnly` export), written only if absent. Records are
+/// plain puts, so an interrupted import can be rerun with
+/// [`ImportMode::Merge`].
 #[derive(Debug)]
 pub struct Importer<'a, S> {
     store: &'a S,
+    mode: ImportMode,
+    layout_version: u32,
+    holds_v: bool,
     max_ops: usize,
     partition: Option<Partition>,
+    saw_v: bool,
     batch: Batch,
     bytes: usize,
     imported: u64,
@@ -361,17 +408,21 @@ impl<'a, S: NamespaceStore> Importer<'a, S> {
     /// # Errors
     /// [`StoreError::Unsupported`] if the export's layout version is newer
     /// than [`keys::LAYOUT_VERSION`].
-    pub fn new(store: &'a S, header: &ExportHeader) -> Result<Self, StoreError> {
+    pub fn new(store: &'a S, header: &ExportHeader, mode: ImportMode) -> Result<Self, StoreError> {
         check_layout(header.layout_version)?;
-        let max_ops = if store.capabilities().atomic_multi_key {
-            MAX_BATCH_OPS
-        } else {
-            1
-        };
+        let caps = store.capabilities();
         Ok(Self {
             store,
-            max_ops,
+            mode,
+            layout_version: header.layout_version,
+            holds_v: caps.key_classes == KeyClasses::All,
+            max_ops: if caps.atomic_multi_key {
+                MAX_BATCH_OPS
+            } else {
+                1
+            },
             partition: None,
+            saw_v: false,
             batch: Batch::new(),
             bytes: 0,
             imported: 0,
@@ -383,40 +434,81 @@ impl<'a, S: NamespaceStore> Importer<'a, S> {
     ///
     /// # Errors
     /// [`StoreError::Unsupported`] for a `v` row newer than this binary's
-    /// layout; any error of the store's `apply`.
+    /// layout; [`StoreError::Invalid`] for a non-empty partition under
+    /// [`ImportMode::Fresh`]; any error of the store's `apply`.
     pub async fn push(&mut self, record: ExportRecord) -> Result<(), StoreError> {
-        if record.key == keys::layout_version() {
+        let is_v = record.key == keys::layout_version();
+        if is_v {
             check_layout(codec::decode_u32(&record.value)?)?;
         }
         let size = record.key.as_bytes().len() + record.value.as_bytes().len();
-        if self.partition.as_ref() != Some(&record.partition)
-            || self.batch.writes.len() >= self.max_ops
-            || self.bytes + size > MAX_BATCH_BYTES
-        {
-            self.flush().await?;
+        if self.partition.as_ref() != Some(&record.partition) {
+            self.end_partition().await?;
+            if self.mode == ImportMode::Fresh {
+                let (start, end) = export_range(self.store);
+                let page = self
+                    .store
+                    .scan(&record.partition, &start, &end, None, 1)
+                    .await?;
+                if !page.entries.is_empty() {
+                    return Err(StoreError::Invalid(
+                        "import target partition is not empty".into(),
+                    ));
+                }
+            }
             self.partition = Some(record.partition);
+            self.saw_v = false;
+        } else if self.batch.writes.len() >= self.max_ops || self.bytes + size > MAX_BATCH_BYTES {
+            self.flush().await?;
         }
+        self.saw_v |= is_v;
         self.batch = core::mem::take(&mut self.batch).put(record.key, record.value);
         self.bytes += size;
         self.imported += 1;
         Ok(())
     }
 
+    async fn apply(&self, p: &Partition, batch: Batch) -> Result<(), StoreError> {
+        match self.store.apply(p, batch).await? {
+            BatchOutcome::Committed => Ok(()),
+            _ => Err(StoreError::unavailable("import batch did not commit")),
+        }
+    }
+
     async fn flush(&mut self) -> Result<(), StoreError> {
         let batch = core::mem::take(&mut self.batch);
         self.bytes = 0;
-        match self.partition.take() {
-            Some(p) if !batch.writes.is_empty() => match self.store.apply(&p, batch).await? {
-                BatchOutcome::Committed => Ok(()),
-                _ => Err(StoreError::unavailable("import batch did not commit")),
-            },
+        match &self.partition {
+            Some(p) if !batch.writes.is_empty() => self.apply(p, batch).await,
             _ => Ok(()),
         }
     }
 
-    /// Commit the pending batch; the number of records imported.
-    pub async fn finish(mut self) -> Result<u64, StoreError> {
+    /// Commit the current partition's last batch, then its `v` row if it
+    /// needs one.
+    async fn end_partition(&mut self) -> Result<(), StoreError> {
         self.flush().await?;
+        let Some(p) = self.partition.take() else {
+            return Ok(());
+        };
+        if !self.holds_v || self.saw_v {
+            return Ok(());
+        }
+        let key = keys::layout_version();
+        let batch = Batch::new()
+            .require(Precondition::Absent(key.clone()))
+            .put(key, codec::encode_u32(self.layout_version));
+        match self.store.apply(&p, batch).await? {
+            BatchOutcome::Committed | BatchOutcome::PreconditionFailed { .. } => Ok(()),
+            BatchOutcome::DeadlinePassed { .. } => {
+                Err(StoreError::unavailable("import batch did not commit"))
+            }
+        }
+    }
+
+    /// Commit the pending batches; the number of records imported.
+    pub async fn finish(mut self) -> Result<u64, StoreError> {
+        self.end_partition().await?;
         Ok(self.imported)
     }
 }
@@ -427,13 +519,14 @@ impl<'a, S: NamespaceStore> Importer<'a, S> {
 pub async fn import_stream<S, R>(
     store: &S,
     header: &ExportHeader,
+    mode: ImportMode,
     records: R,
 ) -> Result<u64, StoreError>
 where
     S: NamespaceStore,
     R: Stream<Item = Result<ExportRecord, StoreError>>,
 {
-    let mut importer = Importer::new(store, header)?;
+    let mut importer = Importer::new(store, header, mode)?;
     let mut records = pin!(records);
     while let Some(record) = poll_fn(|cx| records.as_mut().poll_next(cx)).await {
         importer.push(record?).await?;
@@ -487,7 +580,9 @@ mod tests {
     use super::*;
     use crate::memory::MemoryKv;
     use crate::repo::{NamespaceKey, RepoName};
-    use crate::store::content_index::{BlockEntry, ContentIndex, Holder, content_shard};
+    use crate::store::content_index::{
+        BlockEntry, ContentIndex, HoldOutcome, Holder, content_shard,
+    };
     use crate::store::{PartitionStats, ScanPage, StoreCapabilities};
 
     fn ns() -> Partition {
@@ -526,10 +621,14 @@ mod tests {
         })
     }
 
-    fn import_bytes<S: NamespaceStore>(store: &S, bytes: &[u8]) -> Result<u64, StoreError> {
+    fn import_bytes<S: NamespaceStore>(
+        store: &S,
+        bytes: &[u8],
+        mode: ImportMode,
+    ) -> Result<u64, StoreError> {
         let (header, reader) = ExportReader::new(bytes)?;
         block_on(async {
-            let mut importer = Importer::new(store, &header)?;
+            let mut importer = Importer::new(store, &header, mode)?;
             for record in reader {
                 importer.push(record?).await?;
             }
@@ -541,17 +640,12 @@ mod tests {
     fn export_import_roundtrip_is_identical() {
         let (a, b) = ([0x10; 32], [0xf0; 32]);
         let idx = ContentIndex::new(MemoryKv::default());
-        let holder = Holder {
-            ns: NamespaceKey::deployment_default(),
-            repo: repo(),
-        };
+        let holder = Holder::new(NamespaceKey::deployment_default(), repo());
         block_on(async {
             idx.add_holder(&a, &holder, None, 1).await.unwrap();
-            idx.add_hold(&b, &[1; 32], 99, 2).await.unwrap();
-            let entry = BlockEntry {
-                reason: "r".into(),
-                blocked_at_ms: 3,
-            };
+            let held = idx.add_hold(&b, &[1; 32], 99, 2).await.unwrap();
+            assert_eq!(held, HoldOutcome::Held);
+            let entry = BlockEntry::new("r", 3);
             idx.block(&b, &entry, 3).await.unwrap();
             let mut batch = Batch::new()
                 .put(keys::layout_version(), codec::encode_u32(1))
@@ -570,7 +664,7 @@ mod tests {
             let bytes = export_bytes(src, p);
             let rows = u64::try_from(scan_all(src, p).len()).unwrap();
             assert!(rows >= 3);
-            assert_eq!(import_bytes(&dst, &bytes).unwrap(), rows);
+            assert_eq!(import_bytes(&dst, &bytes, ImportMode::Fresh).unwrap(), rows);
             assert_eq!(scan_all(&dst, p), scan_all(src, p), "{p:?}");
             assert_eq!(export_bytes(&dst, p), bytes, "byte-for-byte {p:?}");
         }
@@ -579,7 +673,9 @@ mod tests {
         block_on(async {
             for p in &parts {
                 let (header, stream) = export_partition(src, p, 42).await.unwrap();
-                import_stream(&dst, &header, stream).await.unwrap();
+                import_stream(&dst, &header, ImportMode::Fresh, stream)
+                    .await
+                    .unwrap();
             }
         });
         for p in &parts {
@@ -652,12 +748,12 @@ mod tests {
             exported_at_ms: 0,
         };
         assert!(matches!(
-            Importer::new(&kv, &newer),
+            Importer::new(&kv, &newer, ImportMode::Fresh),
             Err(StoreError::Unsupported(_))
         ));
         let bytes = [&encode_export_header(&newer)[..], &EXPORT_END].concat();
         assert!(matches!(
-            import_bytes(&kv, &bytes),
+            import_bytes(&kv, &bytes, ImportMode::Fresh),
             Err(StoreError::Unsupported(_))
         ));
         // A `v` row newer than the header claims is refused too.
@@ -670,7 +766,7 @@ mod tests {
             key: keys::layout_version(),
             value: codec::encode_u32(keys::LAYOUT_VERSION + 1),
         };
-        let mut importer = Importer::new(&kv, &current).unwrap();
+        let mut importer = Importer::new(&kv, &current, ImportMode::Fresh).unwrap();
         assert!(matches!(
             block_on(importer.push(row)),
             Err(StoreError::Unsupported(_))
@@ -750,7 +846,7 @@ mod tests {
                 batches: Mutex::default(),
             };
             let imported = block_on(async {
-                let mut importer = Importer::new(&store, &header).unwrap();
+                let mut importer = Importer::new(&store, &header, ImportMode::Fresh).unwrap();
                 for record in records.clone() {
                     importer.push(record).await.unwrap();
                 }
@@ -769,7 +865,10 @@ mod tests {
                     "{ops} ops, {bytes} B"
                 );
             }
-            assert_eq!(batches.iter().map(|b| b.0).sum::<usize>(), 250);
+            // A full store also gets one `v` batch per partition: the
+            // export had no `v` row.
+            let v_rows = if caps.atomic_multi_key { 2 } else { 0 };
+            assert_eq!(batches.iter().map(|b| b.0).sum::<usize>(), 250 + v_rows);
             if caps.atomic_multi_key {
                 // Split by bytes (3 big values per batch), by ops and by
                 // partition, never needlessly.
@@ -778,7 +877,11 @@ mod tests {
             for p in [ns(), content_shard(&[0; 32])] {
                 let want: Vec<_> = records.iter().filter(|r| r.partition == p).collect();
                 let got = scan_all(&store.inner, &p);
-                assert_eq!(got.iter().collect::<Vec<_>>(), want);
+                let got: Vec<_> = got
+                    .iter()
+                    .filter(|r| r.key != keys::layout_version())
+                    .collect();
+                assert_eq!(got, want);
             }
         }
     }
@@ -798,5 +901,39 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].key, key);
         assert_eq!(keys::class_range(keys::TAG_REF), export_range(&kv));
+        // Into a full store it gains the header's layout version as `v`.
+        let full = MemoryKv::default();
+        let bytes = export_bytes(&kv, &ns());
+        assert_eq!(import_bytes(&full, &bytes, ImportMode::Fresh).unwrap(), 1);
+        let v = block_on(full.get(&ns(), &keys::layout_version())).unwrap();
+        assert_eq!(v, Some(codec::encode_u32(header.layout_version)));
+        assert_eq!(scan_all(&full, &ns()).len(), 2);
+    }
+
+    #[test]
+    fn import_refuses_a_non_empty_target_unless_merging() {
+        let src = MemoryKv::default();
+        let rows = Batch::new()
+            .put(keys::layout_version(), codec::encode_u32(1))
+            .put(keys::grant_epoch(), codec::encode_u64(9));
+        block_on(src.apply(&ns(), rows)).unwrap();
+        let bytes = export_bytes(&src, &ns());
+        let dst = MemoryKv::default();
+        let other = keys::ref_key(&repo(), "refs/heads/keep");
+        let existing = Batch::new()
+            .put(keys::grant_epoch(), codec::encode_u64(1))
+            .put(other.clone(), codec::encode_ref_id(&[1; 32]));
+        block_on(dst.apply(&ns(), existing)).unwrap();
+        let before = scan_all(&dst, &ns());
+        assert!(matches!(
+            import_bytes(&dst, &bytes, ImportMode::Fresh),
+            Err(StoreError::Invalid(_))
+        ));
+        assert_eq!(scan_all(&dst, &ns()), before, "nothing was written");
+        assert_eq!(import_bytes(&dst, &bytes, ImportMode::Merge).unwrap(), 2);
+        let epoch = block_on(dst.get(&ns(), &keys::grant_epoch())).unwrap();
+        assert_eq!(epoch, Some(codec::encode_u64(9)), "imported rows win");
+        let kept = block_on(dst.get(&ns(), &other)).unwrap();
+        assert!(kept.is_some(), "other rows stay");
     }
 }
