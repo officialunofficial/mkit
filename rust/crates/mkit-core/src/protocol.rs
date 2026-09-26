@@ -455,7 +455,7 @@ pub trait Transport: Send + Sync {
         let mut saw_last = false;
         for chunk in chunks {
             let c = chunk?;
-            if buf.len().saturating_add(c.data.len()) > PACK_BODY_LIMIT_USIZE {
+            if c.data.len() > PACK_BODY_LIMIT_USIZE.saturating_sub(buf.len()) {
                 return Err(TransportError::PayloadTooLarge(PACK_BODY_LIMIT_USIZE));
             }
             buf.extend_from_slice(&c.data);

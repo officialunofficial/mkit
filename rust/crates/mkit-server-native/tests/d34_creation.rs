@@ -466,6 +466,38 @@ async fn creation_race<N: NamespaceStore>(backend: N, sharding: Sharding) {
     }
 }
 
+/// Two first writes to different repos of a new namespace: both observe
+/// `{true, true}`, one creates the namespace, and each registers its own
+/// repo (the loser of `nr` retries with only its `rr`).
+async fn creation_race_two_repos<N: NamespaceStore>(backend: N, sharding: Sharding) {
+    let store = TestStore::new(backend);
+    *store.controls.race.lock().unwrap() = Some(Arc::new(Barrier::new(2)));
+    let (pipe, observed) = pipeline(store.clone(), sharding, multi(), false, false);
+    let a = signed(&pipe, &identity("repo-x"));
+    let b = signed(&pipe, &identity("repo-y"));
+    let writes = async {
+        tokio::join!(
+            pipe.update_ref(&a, update("refs/heads/a", 1)),
+            pipe.update_ref(&b, update("refs/heads/b", 2)),
+        )
+    };
+    let (a_result, b_result) = tokio::time::timeout(std::time::Duration::from_secs(10), writes)
+        .await
+        .unwrap();
+    assert_eq!(a_result.unwrap(), UpdateRefResult::Committed);
+    assert_eq!(b_result.unwrap(), UpdateRefResult::Committed);
+    assert_eq!(
+        *observed.admitted.lock().unwrap(),
+        vec![facts(true, true); 2]
+    );
+    let created = observed.created.lock().unwrap().clone();
+    assert_eq!(created.len(), 2);
+    assert_eq!(created.iter().filter(|c| c.namespace).count(), 1);
+    assert_eq!(created.iter().filter(|c| c.repo).count(), 2);
+    registered(&store, sharding, &a).await;
+    registered(&store, sharding, &b).await;
+}
+
 async fn no_state_on_rejection<N: NamespaceStore>(backend: N, sharding: Sharding) {
     let store = TestStore::new(backend);
     for (repo, challenge, deny) in [("challenged", true, false), ("denied", false, true)] {
@@ -624,6 +656,11 @@ backends!(
     creation_and_cost
 );
 backends!(creation_race_memory, creation_race_sqlite, creation_race);
+backends!(
+    creation_race_two_repos_memory,
+    creation_race_two_repos_sqlite,
+    creation_race_two_repos
+);
 backends!(rejection_memory, rejection_sqlite, no_state_on_rejection);
 backends!(replay_memory, replay_sqlite, replay_skips_coordinator);
 backends!(

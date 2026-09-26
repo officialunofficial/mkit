@@ -32,6 +32,17 @@ train).
   `unimplemented` until WP-1.28. Fs-layout and Worker deployments stay Single.
   Embedders select routing through `PipelineConfig::sharding`; `ShardMap` now
   exposes a name's ref-index shard and the ordered set of ref-index partitions.
+  The native server records a SQLite database's `--sharding` on first use and
+  refuses to start it with another. `Pipeline::with_shards` is removed; select
+  routing with `PipelineConfig::sharding`.
+- *(core)* Add `pack::window`: a synchronous sans-IO pack reader with bounded
+  entry buffers, 64 KiB–64 MiB range windows, and checksummed resumable cursors.
+  Entries remain provisional until the trailer and optional pack id pass at
+  `Done`. Lazy cursor commitments bind the current window prefix on resume;
+  callers keep sources immutable, and completed windows are not re-read.
+  With no requested id, the first run prefetches
+  the trailer windows and persists their digest as an anchor. Native zstd and wasm32 ruzstd share decoding
+  with `PackEntries`; allocation failures return `PackfileTooLarge`.
 
 - *(server)* Validate `X-Repository` before authentication and storage access.
   Single deployments retain headerless reads and signed writes naming their
@@ -186,6 +197,8 @@ train).
   ("not implemented yet") for these RPCs and non-default new request
   fields until their implementing WPs land. `ListRefs.page_size` is
   temporarily ignored; existing requests retain their behavior.
+- *(spec)* SPEC-SERVER v1 M3 pipeline/outcome guarantees and the signed
+  `mkit.server.hooks.v1` contract, proto, and golden vectors (WP-3.6).
 
 - *(server)* The `mkit-server` binary (`mkit-server-native`;
   `mkit-server serve --repo-root <DIR> [--listen <ADDR>] [--listen-enc

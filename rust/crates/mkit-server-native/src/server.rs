@@ -10,7 +10,7 @@ use std::time::Duration;
 use mkit_core::protocol::Transport as _;
 use mkit_core::repo_lock::{self, LockError, RepoLock};
 use mkit_server::fs::{FsBlobStore, FsLayoutStore, META_MARKER};
-use mkit_server::pipeline::{Hooks, Pipeline};
+use mkit_server::pipeline::{Hooks, Pipeline, Sharding};
 use mkit_server::sql::{SqlConn, SqlError, SqlKvStore, SqlValue, TxFn};
 use mkit_server::{Addressing, BlobStore, NamespaceStore, RepoId, StoreError, SystemClock};
 use mkit_transport_file::{FileTransport, sync_dir};
@@ -39,6 +39,12 @@ const MARKER_HEADER: &str = "mkit-server-meta 1";
 /// shared with Durable Objects: the root id this database belongs to.
 const ROOT_TABLE: &str = "CREATE TABLE IF NOT EXISTS mkit_server_root \
      (id INTEGER PRIMARY KEY CHECK (id = 1), root_id TEXT NOT NULL)";
+
+/// The native server's record of the metadata routing (`--sharding`) the
+/// database was written with. Switching it on an existing database would
+/// read refs from other partitions and hide every existing ref (R-93).
+const SHARDING_TABLE: &str = "CREATE TABLE IF NOT EXISTS mkit_server_sharding \
+     (id INTEGER PRIMARY KEY CHECK (id = 1), mode TEXT NOT NULL)";
 
 /// The locks a running server holds on its root; they release on drop.
 #[derive(Debug)]
@@ -310,6 +316,58 @@ fn rebind_moved(path: &Path, marker: &Marker, db: &Path, root: &Path) -> Result<
     ))
 }
 
+/// `--sharding` spelling of `mode`.
+fn sharding_name(mode: Sharding) -> &'static str {
+    match mode {
+        Sharding::D34 => "d34",
+        _ => "single",
+    }
+}
+
+/// Record the database's routing on first use, or check that it matches.
+/// A database that already holds metadata but no record predates
+/// `--sharding` and was written `single`.
+///
+/// # Errors
+/// `CONFIG_ERROR` when the database was written with another `--sharding`,
+/// or its record is unreadable.
+pub fn bind_sharding(conn: &RusqliteConn, mode: Sharding, db: &Path) -> Result<(), ConfigError> {
+    let wanted = sharding_name(mode);
+    let check: TxFn<RusqliteConn, String> = Box::new(move |c: RusqliteConn| {
+        c.exec(SHARDING_TABLE, &[])?;
+        let rows = c.query("SELECT mode FROM mkit_server_sharding WHERE id = 1", &[])?;
+        match rows.first().and_then(|row| row.first()) {
+            Some(SqlValue::Text(stored)) => Ok(stored.clone()),
+            Some(_) => Err(SqlError::Corrupt("sharding record is not text")),
+            None => {
+                let has_data = !c.query("SELECT 1 FROM kv LIMIT 1", &[])?.is_empty();
+                let stored = if has_data { "single" } else { wanted };
+                c.exec(
+                    "INSERT INTO mkit_server_sharding (id, mode) VALUES (1, ?1)",
+                    &[SqlValue::Text(stored.to_owned())],
+                )?;
+                Ok(stored.to_owned())
+            }
+        }
+    });
+    let stored = conn
+        .transaction(check)
+        .map_err(|e| config_error("--meta sqlite", StoreError::from(e)))?;
+    if stored == wanted {
+        return Ok(());
+    }
+    Err(ConfigError::new(
+        exit::CONFIG_ERROR,
+        format!(
+            "mkit-server serve: --meta sqlite:{}: the database was written with --sharding \
+             {stored}, but this server was started with --sharding {wanted}. Changing an \
+             existing database's sharding would hide its refs, and there is no migration yet: \
+             start with --sharding {stored}.",
+            db.display()
+        ),
+    ))
+}
+
 /// How the database stands against the root claiming it.
 enum Binding {
     Same,
@@ -493,6 +551,7 @@ where
             let meta = SqlKvStore::open_with_capacity(conn.clone(), *capacity)
                 .map_err(|e| config_error("--meta sqlite", e))?;
             bind_database(&conn, &root_id, path)?;
+            bind_sharding(&conn, cfg.pipeline.sharding, path)?;
             let meta = Blocking::new(TimerNotifying::new(meta));
             let registry = mkit_server::timers::TimerRegistry::new();
             #[cfg(feature = "test-faults")]
@@ -660,5 +719,42 @@ mod tests {
         ] {
             assert_eq!(Marker::parse(junk), None, "{junk:?}");
         }
+    }
+
+    fn database(dir: &Path, name: &str) -> (RusqliteConn, PathBuf) {
+        let path = dir.join(name);
+        let conn = RusqliteConn::open(&path).unwrap();
+        SqlKvStore::open(conn.clone()).unwrap();
+        (conn, path)
+    }
+
+    #[test]
+    fn sharding_is_recorded_once_and_mismatches_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        for (first, other) in [(Sharding::Single, Sharding::D34), (Sharding::D34, Sharding::Single)] {
+            let (conn, path) = database(dir.path(), &format!("{}.sqlite3", sharding_name(first)));
+            bind_sharding(&conn, first, &path).unwrap();
+            bind_sharding(&conn, first, &path).unwrap();
+            let refused = bind_sharding(&conn, other, &path).unwrap_err();
+            assert_eq!(refused.code, exit::CONFIG_ERROR);
+            assert!(refused.message.contains("--sharding"), "{}", refused.message);
+        }
+    }
+
+    #[test]
+    fn a_database_with_data_but_no_record_was_written_single() {
+        let dir = tempfile::tempdir().unwrap();
+        let (conn, path) = database(dir.path(), "legacy.sqlite3");
+        conn.exec(
+            "INSERT INTO kv (part, key, value) VALUES (?1, ?2, ?3)",
+            &[
+                SqlValue::Blob(b"nroot\0".to_vec()),
+                SqlValue::Blob(b"r\0x".to_vec()),
+                SqlValue::Blob(vec![0; 32]),
+            ],
+        )
+        .unwrap();
+        assert!(bind_sharding(&conn, Sharding::D34, &path).is_err());
+        bind_sharding(&conn, Sharding::Single, &path).unwrap();
     }
 }

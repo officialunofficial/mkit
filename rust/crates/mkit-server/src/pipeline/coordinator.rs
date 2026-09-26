@@ -60,38 +60,48 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             return Ok(Creation::default());
         }
         let created_at_ms = ms(self.clock.now_ms().saturating_add(business_skew_ms));
-        let mut batch = Batch::new();
-        if creation.namespace {
-            let key = keys::namespace_record();
-            let record = codec::NamespaceRecord {
-                created_at_ms,
-                config_version: 1,
-            };
-            batch = batch
-                .require(Precondition::Absent(key.clone()))
-                .put(key, codec::encode_namespace_record(&record));
-        }
-        if creation.repo {
-            let key = keys::repo_record(&op.repo.name);
-            let record = codec::RepoRecord { created_at_ms };
-            batch = batch
-                .require(Precondition::Absent(key.clone()))
-                .put(key, codec::encode_repo_record(&record));
-        }
         let p = self.shards.coordinator(&op.repo.namespace);
-        match self.meta.apply(&p, batch).await.map_err(meta_error)? {
-            BatchOutcome::Committed => Ok(creation),
-            BatchOutcome::PreconditionFailed { .. } => {
-                let after = self.read_creation(op).await?;
-                if after.namespace || after.repo {
-                    Err(internal("coordinator creation race left missing rows"))
-                } else {
-                    Ok(Creation::default())
+        // Rows only ever go from absent to present, so a lost race leaves at
+        // most the rows another writer has not created yet: re-read and
+        // create only those. A second writer racing for a different repo in
+        // a new namespace loses on `nr` and still registers its own `rr`.
+        let mut want = creation;
+        for _ in 0..CREATION_ATTEMPTS {
+            let mut batch = Batch::new();
+            if want.namespace {
+                let key = keys::namespace_record();
+                let record = codec::NamespaceRecord {
+                    created_at_ms,
+                    config_version: 1,
+                };
+                batch = batch
+                    .require(Precondition::Absent(key.clone()))
+                    .put(key, codec::encode_namespace_record(&record));
+            }
+            if want.repo {
+                let key = keys::repo_record(&op.repo.name);
+                let record = codec::RepoRecord { created_at_ms };
+                batch = batch
+                    .require(Precondition::Absent(key.clone()))
+                    .put(key, codec::encode_repo_record(&record));
+            }
+            match self.meta.apply(&p, batch).await.map_err(meta_error)? {
+                BatchOutcome::Committed => return Ok(want),
+                BatchOutcome::PreconditionFailed { .. } => {
+                    want = self.read_creation(op).await?;
+                    if !want.namespace && !want.repo {
+                        return Ok(Creation::default());
+                    }
+                }
+                BatchOutcome::DeadlinePassed { .. } => {
+                    return Err(internal("coordinator batch had no deadline"));
                 }
             }
-            BatchOutcome::DeadlinePassed { .. } => {
-                Err(internal("coordinator batch had no deadline"))
-            }
         }
+        Err(internal("coordinator creation did not settle"))
     }
 }
+
+/// Coordinator creation batches one write attempts: the first, one after
+/// losing `nr`, and one after losing `rr` to a same-repo writer.
+const CREATION_ATTEMPTS: usize = 3;

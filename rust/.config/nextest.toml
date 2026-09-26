@@ -92,6 +92,8 @@ slow-timeout = { period = "150s", terminate-after = 1 }
 #   batch_write_hash_equals_store_write_hash            8s alone; 88-90s (TIMEOUT)
 #   write_parts_equals_concatenated_write               38-48s in the suite
 #   mkit-cli verify_new_object_signatures_mixed_*       11.5s alone; 56-60s (TIMEOUT)
+#   pack::window generated_valid_and_mutated_packs_agree  ~48s alone (pack-ruzstd); 60s under -j 4 (TIMEOUT)
+#   pack delta_bomb_is_rejected_before_any_delta_is_applied  50-60s alone (pack-ruzstd)
 # None hangs: each walks, hashes or verifies a large fixture in an
 # unoptimized build and is starved of CPU by the other test threads. They
 # get 300s, about 2.4x the worst measured. That margin was calibrated on an
@@ -110,6 +112,8 @@ package(mkit-core) and (
     or test(=refs::tests::cas_match_race_never_loses_an_update_across_uncoordinated_callers)
     or test(=batch::tests::batch_write_hash_equals_store_write_hash)
     or test(=batch::tests::write_parts_equals_concatenated_write)
+    or test(=pack::window::tests::generated_valid_and_mutated_packs_agree)
+    or test(=pack::tests::delta_bomb_is_rejected_before_any_delta_is_applied)
 )
 or (package(mkit-cli) and test(=remote_dispatch::packmap::tests::verify_new_object_signatures_mixed_with_unsigned_object_kinds))
 '''
@@ -129,6 +133,8 @@ package(mkit-core) and (
     or test(=refs::tests::cas_match_race_never_loses_an_update_across_uncoordinated_callers)
     or test(=batch::tests::batch_write_hash_equals_store_write_hash)
     or test(=batch::tests::write_parts_equals_concatenated_write)
+    or test(=pack::window::tests::generated_valid_and_mutated_packs_agree)
+    or test(=pack::tests::delta_bomb_is_rejected_before_any_delta_is_applied)
 )
 or (package(mkit-cli) and test(=remote_dispatch::packmap::tests::verify_new_object_signatures_mixed_with_unsigned_object_kinds))
 '''
