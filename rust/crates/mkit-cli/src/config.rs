@@ -878,7 +878,9 @@ fn apply_section_kv(cfg: &mut Config, key: &str, val: &str) -> bool {
         return false;
     };
     // Only flat, ref-safe names (no further dots) are accepted.
-    let valid_name = !name.is_empty() && mkit_core::refs::validate_ref_name(name);
+    // The grammar only: an existing config entry is never dropped for a
+    // name longer than SPEC-REFS §3's bound; `remote add` checks it.
+    let valid_name = !name.is_empty() && mkit_core::refs::validate_ref_name_grammar(name);
     match (section, field) {
         ("remote", "url") => {
             if valid_name {

@@ -1130,7 +1130,7 @@ impl ::buffa::ExtensionSet for Close {
 #[cfg_attr(feature = "arbitrary", derive(::arbitrary::Arbitrary))]
 pub struct ListRefs {
     /// Prefix filter, e.g. "refs/heads/". Empty means "all refs". Length
-    /// capped at MAX_REF_NAME (4096 bytes).
+    /// capped at MAX_REF_NAME (512 bytes, SPEC-REFS §3).
     ///
     /// Field 1: `prefix`
     pub prefix: ::core::option::Option<::buffa::alloc::string::String>,

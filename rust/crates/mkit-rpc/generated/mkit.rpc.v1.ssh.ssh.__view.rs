@@ -1895,7 +1895,7 @@ impl ::buffa::HasMessageView for super::super::Close {
 #[derive(Clone, Debug, Default)]
 pub struct ListRefsView<'a> {
     /// Prefix filter, e.g. "refs/heads/". Empty means "all refs". Length
-    /// capped at MAX_REF_NAME (4096 bytes).
+    /// capped at MAX_REF_NAME (512 bytes, SPEC-REFS §3).
     ///
     /// Field 1: `prefix`
     pub prefix: ::core::option::Option<&'a str>,
@@ -2077,7 +2077,7 @@ impl ListRefsOwnedView {
         self.0.into_bytes()
     }
     /// Prefix filter, e.g. "refs/heads/". Empty means "all refs". Length
-    /// capped at MAX_REF_NAME (4096 bytes).
+    /// capped at MAX_REF_NAME (512 bytes, SPEC-REFS §3).
     ///
     /// Field 1: `prefix`
     #[must_use]

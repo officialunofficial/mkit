@@ -177,6 +177,10 @@ flag       = "c" / "u" / "f" / "d"
 - An **exact pattern** is a ref name valid under
   [SPEC-REFS §3](SPEC-REFS.md#3-ref-name-grammar). It matches that ref
   only.
+- A pattern follows the SPEC-REFS §3 grammar but NOT its 512-byte
+  length bound: only the `MAX_STATEMENT_BYTES` cap of §3.1 bounds it. A
+  pattern longer than any valid ref name matches no ref and grants
+  nothing.
 - A **prefix pattern** is a valid ref name `P` followed by `/*`. It
   matches every ref whose name begins with `P/`, at any depth. The single
   trailing `*` is the only wildcard; a bare `*` is not a pattern.

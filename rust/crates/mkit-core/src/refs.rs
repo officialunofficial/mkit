@@ -65,9 +65,21 @@ const SHALLOW_MAX_BYTES: u64 = 1024 * 1024;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum RefError {
-    /// `name` failed [`validate_ref_name`].
+    /// `name` failed [`validate_ref_name_grammar`].
     #[error("invalid ref name '{0}'")]
     InvalidRefName(String),
+    /// A new ref's name is over its kind's bound: [`MAX_REF_NAME_BYTES`]
+    /// for a ref name, [`MAX_BRANCH_NAME_BYTES`] for a branch and
+    /// [`MAX_TAG_NAME_BYTES`] for a tag (SPEC-REFS §3).
+    #[error("{}", too_long_message(.name, *.len, *.kind))]
+    RefNameTooLong {
+        /// The name.
+        name: String,
+        /// Its length in bytes.
+        len: usize,
+        /// Which bound it broke.
+        kind: RefNameKind,
+    },
     /// On-disk bytes were not a valid 65-byte ref wire (length wrong,
     /// uppercase hex, non-hex byte, etc.).
     #[error("invalid ref content for '{0}'")]
@@ -135,8 +147,180 @@ pub struct Ref {
     pub hash: Option<Hash>,
 }
 
-/// Validate a ref name per SPEC-REFS §3. Used at every transport
-/// boundary; transports MUST NOT silently lower-case or canonicalise.
+/// Longest ref name, in bytes (SPEC-REFS §3). The bound keeps every ref
+/// inside a server's storage key; clients check it before sending
+/// (`mkit_rpc::MAX_REF_NAME`).
+pub const MAX_REF_NAME_BYTES: usize = 512;
+
+/// The wire name prefix of a branch head.
+pub const BRANCH_REF_PREFIX: &str = "refs/heads/";
+/// The wire name prefix of a branch's packmap ref, which a push writes
+/// next to its head (`refs/mkit/packmap/<branch>`).
+pub const PACKMAP_REF_PREFIX: &str = "refs/mkit/packmap/";
+/// The wire name prefix of a tag.
+pub const TAG_REF_PREFIX: &str = "refs/tags/";
+
+/// Longest new branch name, in bytes: a push writes both
+/// `refs/heads/<branch>` and `refs/mkit/packmap/<branch>`, and each must
+/// fit [`MAX_REF_NAME_BYTES`], so the longer prefix sets the bound (494).
+pub const MAX_BRANCH_NAME_BYTES: usize = MAX_REF_NAME_BYTES - PACKMAP_REF_PREFIX.len();
+/// Longest new tag name, in bytes: `refs/tags/<tag>` must fit
+/// [`MAX_REF_NAME_BYTES`] (502).
+pub const MAX_TAG_NAME_BYTES: usize = MAX_REF_NAME_BYTES - TAG_REF_PREFIX.len();
+
+const _: () = assert!(PACKMAP_REF_PREFIX.len() >= BRANCH_REF_PREFIX.len());
+
+/// Which name bound a [`RefError::RefNameTooLong`] broke.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RefNameKind {
+    /// A full ref name, or a remote-tracking or remote name:
+    /// [`MAX_REF_NAME_BYTES`].
+    Ref,
+    /// A local branch name: [`MAX_BRANCH_NAME_BYTES`].
+    Branch,
+    /// A local tag name: [`MAX_TAG_NAME_BYTES`].
+    Tag,
+}
+
+impl RefNameKind {
+    /// The bound, in bytes.
+    #[must_use]
+    pub const fn max_bytes(self) -> usize {
+        match self {
+            Self::Ref => MAX_REF_NAME_BYTES,
+            Self::Branch => MAX_BRANCH_NAME_BYTES,
+            Self::Tag => MAX_TAG_NAME_BYTES,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Ref => "ref",
+            Self::Branch => "branch",
+            Self::Tag => "tag",
+        }
+    }
+
+    /// Where the bound comes from.
+    const fn why(self) -> &'static str {
+        match self {
+            Self::Ref => "",
+            Self::Branch => {
+                ", because refs/heads/<name> and refs/mkit/packmap/<name> must \
+                 each fit the 512-byte ref-name limit"
+            }
+            Self::Tag => ", because refs/tags/<name> must fit the 512-byte ref-name limit",
+        }
+    }
+}
+
+/// The first 64 bytes of a name, for error messages about long names.
+fn name_preview(name: &str) -> String {
+    const SHOWN: usize = 64;
+    match name.get(..SHOWN) {
+        Some(head) if name.len() > SHOWN => format!("{head}..."),
+        _ => name.to_owned(),
+    }
+}
+
+/// `<kind> name too long (<len> bytes; at most <max><why>, SPEC-REFS §3):
+/// '<preview>'`.
+fn too_long_message(name: &str, len: usize, kind: RefNameKind) -> String {
+    format!(
+        "{} name too long ({len} bytes; at most {}{}, SPEC-REFS §3): '{}'",
+        kind.label(),
+        kind.max_bytes(),
+        kind.why(),
+        name_preview(name)
+    )
+}
+
+/// Validate a ref name per SPEC-REFS §3: [`validate_ref_name_grammar`]
+/// and at most [`MAX_REF_NAME_BYTES`] bytes. Used at every transport
+/// boundary and for every ref written; transports MUST NOT silently
+/// lower-case or canonicalise.
+#[must_use]
+pub fn validate_ref_name(name: &str) -> bool {
+    name.len() <= MAX_REF_NAME_BYTES && validate_ref_name_grammar(name)
+}
+
+/// Check the name of a ref about to be created or written: the
+/// SPEC-REFS §3 grammar and length bound.
+///
+/// # Errors
+/// [`RefError::RefNameTooLong`] for a grammatical name over
+/// [`MAX_REF_NAME_BYTES`], [`RefError::InvalidRefName`] otherwise.
+pub fn check_new_ref_name(name: &str) -> RefResult<()> {
+    check_new_name(name, RefNameKind::Ref)
+}
+
+/// Check a new name of `kind` against its grammar and bound.
+///
+/// # Errors
+/// As [`check_new_ref_name`], with `kind`'s bound.
+pub fn check_new_name(name: &str, kind: RefNameKind) -> RefResult<()> {
+    if !validate_ref_name_grammar(name) {
+        return Err(RefError::InvalidRefName(name.to_string()));
+    }
+    if name.len() > kind.max_bytes() {
+        return Err(RefError::RefNameTooLong {
+            name: name.to_string(),
+            len: name.len(),
+            kind,
+        });
+    }
+    Ok(())
+}
+
+/// Check the wire names a push of `branch` writes, `refs/heads/<branch>`
+/// and `refs/mkit/packmap/<branch>`, against [`MAX_REF_NAME_BYTES`]. A
+/// local branch named before the branch bound existed can be longer than
+/// [`MAX_BRANCH_NAME_BYTES`] and still be used locally, but not pushed.
+///
+/// # Errors
+/// [`RefError::RefNameTooLong`] naming the longer wire name.
+pub fn check_pushable_branch(branch: &str) -> RefResult<()> {
+    check_new_name(&format!("{PACKMAP_REF_PREFIX}{branch}"), RefNameKind::Ref)?;
+    check_new_name(&format!("{BRANCH_REF_PREFIX}{branch}"), RefNameKind::Ref)
+}
+
+/// Check a local branch or tag name about to be written under `sub_dir`.
+/// A name within `kind`'s bound always passes. A longer one passes only
+/// while the ref already exists and fits [`MAX_REF_NAME_BYTES`]: a ref
+/// created before the per-kind bound keeps working locally, while a new
+/// one is refused.
+fn check_local_write(
+    common_dir: &Path,
+    sub_dir: &str,
+    name: &str,
+    kind: RefNameKind,
+) -> RefResult<()> {
+    match check_new_name(name, kind) {
+        Err(RefError::RefNameTooLong { .. })
+            if name.len() <= MAX_REF_NAME_BYTES
+                && ref_path(common_dir, sub_dir, name).is_file() =>
+        {
+            Ok(())
+        }
+        other => other,
+    }
+}
+
+/// Check the name of a ref that may already exist, for a read, a listing
+/// or a delete: the grammar only, so a local ref written before
+/// SPEC-REFS §3 bounded names stays visible, resolvable and deletable.
+fn check_existing_ref_name(name: &str) -> RefResult<()> {
+    if validate_ref_name_grammar(name) {
+        Ok(())
+    } else {
+        Err(RefError::InvalidRefName(name.to_string()))
+    }
+}
+
+/// The SPEC-REFS §3 grammar without its length bound: what a local ref
+/// that already exists must satisfy to be read, listed or deleted. New
+/// refs and every transport use [`validate_ref_name`].
 ///
 /// Grammar:
 /// - Non-empty.
@@ -153,7 +337,7 @@ pub struct Ref {
 /// - The final segment may not be the literal `HEAD`, since that
 ///   would shadow the repo-level `HEAD` pointer.
 #[must_use]
-pub fn validate_ref_name(name: &str) -> bool {
+pub fn validate_ref_name_grammar(name: &str) -> bool {
     if name.is_empty() {
         return false;
     }
@@ -342,7 +526,9 @@ pub fn read_head(layout: &RepoLayout) -> RefResult<Head> {
     let s = core::str::from_utf8(&raw).map_err(|_| RefError::InvalidHead)?;
     let trimmed = s.trim_end_matches(['\n', '\r', ' ', '\t']);
     if let Some(branch) = trimmed.strip_prefix(HEAD_REF_PREFIX) {
-        if !validate_ref_name(branch) {
+        // Grammar only: a branch named before SPEC-REFS §3 bounded names
+        // stays checked out; a write to it names the limit.
+        if !validate_ref_name_grammar(branch) {
             return Err(RefError::InvalidHead);
         }
         return Ok(Head::Branch(branch.to_string()));
@@ -361,9 +547,7 @@ pub fn read_head(layout: &RepoLayout) -> RefResult<Head> {
 ///   [`validate_ref_name`].
 /// - [`RefError::Io`] for filesystem failures.
 pub fn write_head_branch(layout: &RepoLayout, branch: &str) -> RefResult<()> {
-    if !validate_ref_name(branch) {
-        return Err(RefError::InvalidRefName(branch.to_string()));
-    }
+    check_local_write(layout.common_dir(), HEADS_DIR, branch, RefNameKind::Branch)?;
     let body = format!("{HEAD_REF_PREFIX}{branch}\n");
     write_atomic(&layout.head_file(), body.as_bytes(), false)?;
     Ok(())
@@ -414,9 +598,7 @@ pub fn update_head(layout: &RepoLayout, commit_hash: &Hash) -> RefResult<()> {
 /// - [`RefError::InvalidRefName`] if `branch` does not validate.
 /// - [`RefError::InvalidRef`] if the on-disk bytes are not a valid wire.
 pub fn read_ref(layout: &RepoLayout, branch: &str) -> RefResult<Option<Hash>> {
-    if !validate_ref_name(branch) {
-        return Err(RefError::InvalidRefName(branch.to_string()));
-    }
+    check_existing_ref_name(branch)?;
     read_ref_under(layout.common_dir(), HEADS_DIR, branch)
 }
 
@@ -438,9 +620,7 @@ pub fn update_ref(
     condition: RefWriteCondition,
     h: &Hash,
 ) -> RefResult<()> {
-    if !validate_ref_name(branch) {
-        return Err(RefError::InvalidRefName(branch.to_string()));
-    }
+    check_local_write(layout.common_dir(), HEADS_DIR, branch, RefNameKind::Branch)?;
     let path = ref_path(layout.common_dir(), HEADS_DIR, branch);
     let wire = encode_ref_wire(h);
     cas_write(layout.common_dir(), &path, &wire, branch, condition)
@@ -456,9 +636,9 @@ pub(crate) fn acquire_history_mutation(
     layout: &RepoLayout,
     branch: &str,
 ) -> RefResult<(crate::repo_lock::RepoLock, RefMutation)> {
-    if !validate_ref_name(branch) {
-        return Err(RefError::InvalidRefName(branch.to_string()));
-    }
+    // Grammar only: deletes take this guard too; writes check the bound
+    // first.
+    check_existing_ref_name(branch)?;
     let history =
         crate::repo_lock::acquire_default(layout.common_dir(), &history_lock_name(branch))
             .map_err(|e| RefError::InvalidRef(format!("{branch}: history lock: {e}")))?;
@@ -477,6 +657,7 @@ pub fn update_ref_with_ancestry(
     target: &Hash,
     store: &crate::store::ObjectStore,
 ) -> RefResult<()> {
+    check_local_write(layout.common_dir(), HEADS_DIR, branch, RefNameKind::Branch)?;
     let (_history, mutation) = acquire_history_mutation(layout, branch)?;
     crate::history::ancestry::advance(layout, branch, &mutation, condition, *target, store).map_err(
         |e| match e {
@@ -504,9 +685,7 @@ pub fn delete_ref_with_ancestry(
 
 /// Delete a branch ref. Errors with [`RefError::NotFound`] if absent.
 pub fn delete_ref(layout: &RepoLayout, branch: &str) -> RefResult<()> {
-    if !validate_ref_name(branch) {
-        return Err(RefError::InvalidRefName(branch.to_string()));
-    }
+    check_existing_ref_name(branch)?;
     let path = ref_path(layout.common_dir(), HEADS_DIR, branch);
     RefMutation::acquire(layout.common_dir(), &path, branch)?.delete(None)
 }
@@ -560,9 +739,7 @@ pub fn delete_ref_safe(layout: &RepoLayout, branch: &str) -> RefResult<()> {
 ///   file is left completely untouched in this case.
 /// - [`RefError::Io`] for filesystem or lock-acquisition failures.
 pub fn delete_ref_if_matches(layout: &RepoLayout, branch: &str, expected: Hash) -> RefResult<()> {
-    if !validate_ref_name(branch) {
-        return Err(RefError::InvalidRefName(branch.to_string()));
-    }
+    check_existing_ref_name(branch)?;
     let path = ref_path(layout.common_dir(), HEADS_DIR, branch);
     RefMutation::acquire(layout.common_dir(), &path, branch)?.delete(Some(expected))
 }
@@ -578,7 +755,8 @@ pub fn list_refs(layout: &RepoLayout) -> RefResult<Vec<Ref>> {
 
 /// Read a remote-tracking branch ref.
 pub fn read_remote_ref(layout: &RepoLayout, remote: &str, branch: &str) -> RefResult<Option<Hash>> {
-    validate_remote_and_branch(remote, branch)?;
+    check_existing_ref_name(remote)?;
+    check_existing_ref_name(branch)?;
     read_ref_under(layout.common_dir(), &remote_ref_dir(remote), branch)
 }
 
@@ -589,7 +767,8 @@ pub fn write_remote_ref(
     branch: &str,
     h: &Hash,
 ) -> RefResult<()> {
-    validate_remote_and_branch(remote, branch)?;
+    check_new_ref_name(remote)?;
+    check_new_ref_name(branch)?;
     let path = ref_path(layout.common_dir(), &remote_ref_dir(remote), branch);
     let wire = encode_ref_wire(h);
     cas_write(
@@ -661,9 +840,7 @@ impl<'a> RemoteRefBatch<'a> {
     /// # Errors
     /// [`RefError::InvalidRefName`] if `remote` fails [`validate_ref_name`].
     pub fn new(layout: &'a RepoLayout, remote: &str) -> RefResult<Self> {
-        if !validate_ref_name(remote) {
-            return Err(RefError::InvalidRefName(remote.to_string()));
-        }
+        check_new_ref_name(remote)?;
         Ok(Self {
             layout,
             sub_dir: remote_ref_dir(remote),
@@ -686,9 +863,7 @@ impl<'a> RemoteRefBatch<'a> {
     /// parent (it is `self.layout.common_dir()` joined with at least the
     /// remote's subdirectory and the branch name).
     pub fn write(&mut self, branch: &str, h: &Hash) -> RefResult<()> {
-        if !validate_ref_name(branch) {
-            return Err(RefError::InvalidRefName(branch.to_string()));
-        }
+        check_new_ref_name(branch)?;
         let path = ref_path(self.layout.common_dir(), &self.sub_dir, branch);
         let guard = RefMutation::acquire(self.layout.common_dir(), &path, branch)?;
         guard.invalidate_history()?;
@@ -727,16 +902,15 @@ impl<'a> RemoteRefBatch<'a> {
 /// Delete a remote-tracking branch ref (e.g. after the upstream
 /// deleted the branch). Errors with [`RefError::NotFound`] if absent.
 pub fn delete_remote_ref(layout: &RepoLayout, remote: &str, branch: &str) -> RefResult<()> {
-    validate_remote_and_branch(remote, branch)?;
+    check_existing_ref_name(remote)?;
+    check_existing_ref_name(branch)?;
     let path = ref_path(layout.common_dir(), &remote_ref_dir(remote), branch);
     RefMutation::acquire(layout.common_dir(), &path, &format!("{remote}/{branch}"))?.delete(None)
 }
 
 /// List all remote-tracking refs for one remote.
 pub fn list_remote_refs(layout: &RepoLayout, remote: &str) -> RefResult<Vec<Ref>> {
-    if !validate_ref_name(remote) {
-        return Err(RefError::InvalidRefName(remote.to_string()));
-    }
+    check_existing_ref_name(remote)?;
     list_refs_under(layout.common_dir(), &remote_ref_dir(remote))
 }
 
@@ -748,9 +922,7 @@ pub fn list_remote_refs_with(
     remote: &str,
     read_batch: impl FnOnce(&[RefCandidate]) -> Vec<RefReadOutcome>,
 ) -> RefResult<Vec<Ref>> {
-    if !validate_ref_name(remote) {
-        return Err(RefError::InvalidRefName(remote.to_string()));
-    }
+    check_existing_ref_name(remote)?;
     list_refs_under_with(layout.common_dir(), &remote_ref_dir(remote), read_batch)
 }
 
@@ -773,7 +945,7 @@ pub fn list_remote_names(layout: &RepoLayout) -> RefResult<Vec<String>> {
             continue;
         }
         if let Some(name) = entry.file_name().to_str()
-            && validate_ref_name(name)
+            && validate_ref_name_grammar(name)
         {
             names.push(name.to_owned());
         }
@@ -788,9 +960,7 @@ pub fn list_remote_names(layout: &RepoLayout) -> RefResult<Vec<String>> {
 
 /// Read the hash a tag points to.
 pub fn read_tag(layout: &RepoLayout, name: &str) -> RefResult<Option<Hash>> {
-    if !validate_ref_name(name) {
-        return Err(RefError::InvalidRefName(name.to_string()));
-    }
+    check_existing_ref_name(name)?;
     read_ref_under(layout.common_dir(), TAGS_DIR, name)
 }
 
@@ -807,9 +977,7 @@ pub fn update_tag(
     condition: RefWriteCondition,
     h: &Hash,
 ) -> RefResult<()> {
-    if !validate_ref_name(name) {
-        return Err(RefError::InvalidRefName(name.to_string()));
-    }
+    check_local_write(layout.common_dir(), TAGS_DIR, name, RefNameKind::Tag)?;
     let path = ref_path(layout.common_dir(), TAGS_DIR, name);
     let wire = encode_ref_wire(h);
     cas_write(layout.common_dir(), &path, &wire, name, condition)
@@ -817,9 +985,7 @@ pub fn update_tag(
 
 /// Delete a tag ref.
 pub fn delete_tag(layout: &RepoLayout, name: &str) -> RefResult<()> {
-    if !validate_ref_name(name) {
-        return Err(RefError::InvalidRefName(name.to_string()));
-    }
+    check_existing_ref_name(name)?;
     let path = ref_path(layout.common_dir(), TAGS_DIR, name);
     RefMutation::acquire(layout.common_dir(), &path, name)?.delete(None)
 }
@@ -910,16 +1076,6 @@ fn ref_path(common_dir: &Path, sub_dir: &str, name: &str) -> PathBuf {
 
 fn remote_ref_dir(remote: &str) -> String {
     format!("{REMOTES_DIR}/{remote}")
-}
-
-fn validate_remote_and_branch(remote: &str, branch: &str) -> RefResult<()> {
-    if !validate_ref_name(remote) {
-        return Err(RefError::InvalidRefName(remote.to_string()));
-    }
-    if !validate_ref_name(branch) {
-        return Err(RefError::InvalidRefName(branch.to_string()));
-    }
-    Ok(())
 }
 
 fn read_ref_under(common_dir: &Path, sub_dir: &str, name: &str) -> RefResult<Option<Hash>> {
@@ -1208,7 +1364,9 @@ fn collect_ref_candidates(
         if !ft.is_file() {
             continue;
         }
-        if !validate_ref_name(&child_name) {
+        // Grammar only: a ref named before SPEC-REFS §3 bounded names is
+        // still listed, so it can be seen, renamed or deleted.
+        if !validate_ref_name_grammar(&child_name) {
             continue;
         }
         out.push(RefCandidate {
@@ -1327,6 +1485,184 @@ mod tests {
     fn validate_accepts_headless_regression() {
         // Only the exact final segment "HEAD" is rejected.
         assert!(validate_ref_name("refs/heads/HEADless"));
+    }
+
+    /// A name of `len` bytes in 100-byte segments (each well under a file
+    /// name's limit).
+    fn long_name(len: usize) -> String {
+        let mut name = String::new();
+        while name.len() < len {
+            if !name.is_empty() {
+                name.push('/');
+            }
+            let seg = (len - name.len()).min(100);
+            name.push_str(&"a".repeat(seg));
+        }
+        assert_eq!(name.len(), len);
+        name
+    }
+
+    /// SPEC-REFS §3: at most `MAX_REF_NAME_BYTES` bytes; the grammar alone
+    /// has no bound.
+    #[test]
+    fn validate_bounds_name_length() {
+        let longest = long_name(MAX_REF_NAME_BYTES);
+        let over = long_name(MAX_REF_NAME_BYTES + 1);
+        assert!(validate_ref_name(&longest));
+        assert!(!validate_ref_name(&over));
+        assert!(validate_ref_name_grammar(&over));
+        assert!(check_new_ref_name(&longest).is_ok());
+        let err = check_new_ref_name(&over).unwrap_err();
+        assert!(matches!(err, RefError::RefNameTooLong { len: 513, .. }));
+        let shown = err.to_string();
+        assert!(
+            shown.contains("ref name too long (513 bytes; at most 512"),
+            "{shown}"
+        );
+        assert!(shown.len() < 200, "the name is shortened: {shown}");
+        assert!(matches!(
+            check_new_ref_name("bad..name/.x"),
+            Err(RefError::InvalidRefName(_))
+        ));
+        assert!(validate_ref_prefix(&format!("{longest}/")));
+        assert!(!validate_ref_prefix(&over));
+    }
+
+    /// A new branch name must leave `refs/heads/<b>` and
+    /// `refs/mkit/packmap/<b>` within 512 bytes (494), a new tag
+    /// `refs/tags/<t>` (502); a branch created before that bound stays
+    /// writable locally but cannot be pushed.
+    #[test]
+    fn branch_and_tag_bounds_derive_from_their_wire_names() {
+        assert_eq!(MAX_BRANCH_NAME_BYTES, 494);
+        assert_eq!(MAX_TAG_NAME_BYTES, 502);
+        let (_dir, layout) = fresh_repo();
+        let id = h("c");
+        update_ref(&layout, &long_name(494), RefWriteCondition::Missing, &id).unwrap();
+        check_pushable_branch(&long_name(494)).unwrap();
+        let err =
+            update_ref(&layout, &long_name(495), RefWriteCondition::Missing, &id).unwrap_err();
+        assert!(matches!(
+            err,
+            RefError::RefNameTooLong {
+                len: 495,
+                kind: RefNameKind::Branch,
+                ..
+            }
+        ));
+        let shown = err.to_string();
+        assert!(
+            shown.contains("branch name too long (495 bytes; at most 494")
+                && shown.contains("refs/mkit/packmap/<name>"),
+            "{shown}"
+        );
+        assert!(matches!(
+            write_head_branch(&layout, &long_name(495)),
+            Err(RefError::RefNameTooLong { .. })
+        ));
+        write_tag(&layout, &long_name(502), &id).unwrap();
+        let err = write_tag(&layout, &long_name(503), &id).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("tag name too long (503 bytes; at most 502"),
+            "{err}"
+        );
+
+        // A 500-byte branch made before the bound: writable, not pushable.
+        let old = long_name(500);
+        let path = ref_path(layout.common_dir(), HEADS_DIR, &old);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, encode_ref_wire(&id)).unwrap();
+        write_ref(&layout, &old, &h("next")).unwrap();
+        write_head_branch(&layout, &old).unwrap();
+        let err = check_pushable_branch(&old).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("ref name too long (518 bytes; at most 512")
+                && err.to_string().contains("'refs/mkit/packmap/"),
+            "{err}"
+        );
+    }
+
+    /// A new branch, tag, remote-tracking ref or HEAD target over the bound
+    /// is refused, naming the limit.
+    #[test]
+    fn new_refs_over_the_bound_are_refused() {
+        let (_dir, layout) = fresh_repo();
+        let over = long_name(MAX_REF_NAME_BYTES + 1);
+        let id = h("c");
+        let too_long = |r: RefResult<()>| matches!(r, Err(RefError::RefNameTooLong { .. }));
+        assert!(too_long(update_ref(
+            &layout,
+            &over,
+            RefWriteCondition::Missing,
+            &id
+        )));
+        assert!(too_long(write_ref(&layout, &over, &id)));
+        assert!(too_long(write_tag(&layout, &over, &id)));
+        assert!(too_long(write_remote_ref(&layout, "origin", &over, &id)));
+        assert!(too_long(write_head_branch(&layout, &over)));
+        let mut batch = RemoteRefBatch::new(&layout, "origin").unwrap();
+        assert!(too_long(batch.write(&over, &id)));
+        assert!(!layout.heads_dir().join("a".repeat(100)).exists());
+    }
+
+    /// A branch file named over the bound, written before SPEC-REFS §3
+    /// bounded names, keeps the repository working: it is listed, read,
+    /// resolved through HEAD and deletable; only writes to it are refused.
+    #[test]
+    fn existing_ref_over_the_bound_stays_usable_and_deletable() {
+        let (_dir, layout) = fresh_repo();
+        let over = long_name(MAX_REF_NAME_BYTES + 1);
+        let id = h("legacy");
+        let path = ref_path(layout.common_dir(), HEADS_DIR, &over);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, encode_ref_wire(&id)).unwrap();
+        write_ref(&layout, "main", &h("main")).unwrap();
+
+        let listed: Vec<_> = list_refs(&layout)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.name)
+            .collect();
+        assert!(listed.contains(&over) && listed.contains(&"main".to_owned()));
+        assert_eq!(read_ref(&layout, &over).unwrap(), Some(id));
+        fs::write(layout.head_file(), format!("{HEAD_REF_PREFIX}{over}\n")).unwrap();
+        assert_eq!(read_head(&layout).unwrap(), Head::Branch(over.clone()));
+        assert_eq!(resolve_head(&layout).unwrap(), Some(id));
+        assert!(matches!(
+            update_head(&layout, &h("next")),
+            Err(RefError::RefNameTooLong { .. })
+        ));
+        assert_eq!(read_ref(&layout, &over).unwrap(), Some(id), "unchanged");
+
+        // The way out: switch away, then delete it (or rename it).
+        write_head_branch(&layout, "main").unwrap();
+        delete_ref_if_matches(&layout, &over, id).unwrap();
+        assert_eq!(read_ref(&layout, &over).unwrap(), None);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, encode_ref_wire(&id)).unwrap();
+        delete_ref_safe(&layout, &over).unwrap();
+        assert!(!path.exists());
+
+        // Tags and remote-tracking refs the same way.
+        let tag = ref_path(layout.common_dir(), TAGS_DIR, &over);
+        fs::create_dir_all(tag.parent().unwrap()).unwrap();
+        fs::write(&tag, encode_ref_wire(&id)).unwrap();
+        assert!(list_tags(&layout).unwrap().iter().any(|r| r.name == over));
+        assert_eq!(read_tag(&layout, &over).unwrap(), Some(id));
+        delete_tag(&layout, &over).unwrap();
+        let remote = ref_path(layout.common_dir(), &remote_ref_dir("origin"), &over);
+        fs::create_dir_all(remote.parent().unwrap()).unwrap();
+        fs::write(&remote, encode_ref_wire(&id)).unwrap();
+        assert!(
+            list_remote_refs(&layout, "origin")
+                .unwrap()
+                .iter()
+                .any(|r| r.name == over)
+        );
+        assert_eq!(read_remote_ref(&layout, "origin", &over).unwrap(), Some(id));
+        delete_remote_ref(&layout, "origin", &over).unwrap();
     }
 
     #[test]

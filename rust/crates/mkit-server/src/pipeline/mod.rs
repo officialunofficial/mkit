@@ -364,12 +364,14 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         Ok(a)
     }
 
-    /// Every ref of the repository whose name starts with `prefix`, with
-    /// `prefix` stripped, read page by page.
+    /// Every ref of the repository under `prefix` at a path-component
+    /// boundary, with the prefix and its `/` stripped (SPEC-REFS §4, see
+    /// [`refs::list_scan_prefix`]), read page by page.
     ///
     /// # Errors
-    /// `invalid_argument` for an invalid prefix; the authorizer's error;
-    /// `internal` for a storage failure.
+    /// `invalid_argument` for an invalid prefix or one over
+    /// [`refs::MAX_REF_NAME_BYTES`]; the authorizer's error; `internal`
+    /// for a storage failure.
     pub async fn list_refs(
         &self,
         a: &Authenticated,
@@ -379,6 +381,9 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             prefix: prefix.to_owned(),
         };
         self.observe(a, async {
+            if prefix.trim_end_matches('/').len() > refs::MAX_REF_NAME_BYTES {
+                return Err(ServerError::invalid_argument(refs::REF_NAME_TOO_LONG));
+            }
             if !refs::validate_ref_prefix(prefix) {
                 return Err(ServerError::invalid_argument(
                     "prefix is invalid (SPEC-REFS §3)",
@@ -387,16 +392,18 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             let op = self.identify(a, kind)?;
             self.authorize(&op).await?;
             let p = self.shards.ref_index(&op.repo);
+            let scan = refs::list_scan_prefix(prefix);
             let (mut out, mut after) = (Vec::new(), None);
             loop {
                 let limit = self.cfg.list_page_limit;
                 let page =
-                    read::list_refs(&self.meta, &p, &op.repo.name, prefix, after.as_ref(), limit)
+                    read::list_refs(&self.meta, &p, &op.repo.name, &scan, after.as_ref(), limit)
                         .await
                         .map_err(meta_error)?;
-                out.extend(page.refs.into_iter().map(|(name, id)| RefEntry {
-                    name: strip_listed_prefix(&name, prefix).to_owned(),
-                    id,
+                // Every scanned name starts with `scan`.
+                out.extend(page.refs.into_iter().filter_map(|(name, id)| {
+                    let name = strip_listed_prefix(&name, prefix)?.to_owned();
+                    Some(RefEntry { name, id })
                 }));
                 match page.next {
                     Some(next) => after = Some(next),
@@ -554,6 +561,26 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             blobs: self.blobs.probe().await.is_ok(),
             meta: self.meta.probe().await.is_ok(),
         }
+    }
+
+    /// How this pipeline authenticates (the ssh session requires
+    /// `TransportIdentity`).
+    #[cfg(feature = "ssh")]
+    pub(crate) fn auth_mode(&self) -> &AuthMode {
+        &self.cfg.auth
+    }
+
+    /// The upload caps `begin_upload` applies: a binding that validates
+    /// framing itself uses the same ones.
+    #[cfg(feature = "ssh")]
+    pub(crate) fn upload_limits(&self) -> UploadLimits {
+        self.cfg.upload_limits
+    }
+
+    /// The metadata store, for the ssh tests' state checks.
+    #[cfg(all(test, feature = "ssh"))]
+    pub(crate) fn meta_store(&self) -> &N {
+        &self.meta
     }
 
     /// What this pipeline offers.
@@ -992,7 +1019,9 @@ fn deny_status(err: ServerError) -> ServerError {
 }
 
 fn check_ref_name(name: &str) -> Result<(), ServerError> {
-    if validate_ref_name(name) {
+    if name.len() > refs::MAX_REF_NAME_BYTES {
+        Err(ServerError::invalid_argument(refs::REF_NAME_TOO_LONG))
+    } else if validate_ref_name(name) {
         Ok(())
     } else {
         Err(ServerError::invalid_argument(

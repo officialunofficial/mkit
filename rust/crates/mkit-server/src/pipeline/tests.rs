@@ -1487,6 +1487,78 @@ fn list_refs_strips_prefix_and_paginates() {
     assert_eq!(scans, 3 + 3);
 }
 
+/// SPEC-REFS §4: a prefix matches at a path-component boundary, with or
+/// without trailing `/`s, and the prefix plus its `/` is stripped; this is
+/// what `mkit serve` (`FileTransport`'s directory walk) answers.
+#[test]
+fn list_refs_prefix_matches_at_component_boundaries() {
+    let clock = clock();
+    let mut cfg = cfg(AuthMode::Open);
+    cfg.list_page_limit = 1;
+    let env = build(cfg, Spy::new(store(&clock)), Hooks::new(), clock);
+    let refs = [
+        ("refs/heads/feat/x", A),
+        ("refs/heads/featx", B),
+        ("refs/heads/main", C),
+        ("refs/headsx/y", A),
+        ("refs/tags/v1", B),
+    ];
+    seed(&env.pipe.meta.inner, &refs);
+    let a = env.auth(&Req::unsigned(Procedure::ListRefs)).unwrap();
+    let list = |prefix: &str| -> Vec<String> {
+        let listed = block_on(env.pipe.list_refs(&a, prefix)).unwrap();
+        listed.into_iter().map(|e| e.name).collect()
+    };
+    let heads = ["feat/x", "featx", "main"];
+    assert_eq!(list("refs/heads"), heads);
+    assert_eq!(list("refs/heads/"), heads);
+    assert_eq!(list("refs/heads//"), heads);
+    assert_eq!(list("refs/heads/feat"), ["x"]);
+    assert_eq!(list("refs/heads/feat/"), ["x"]);
+    assert_eq!(list("refs/heads/ma"), Vec::<String>::new());
+    // A ref named exactly the prefix is not listed.
+    assert_eq!(list("refs/heads/main"), Vec::<String>::new());
+    let all = [
+        "heads/feat/x",
+        "heads/featx",
+        "heads/main",
+        "headsx/y",
+        "tags/v1",
+    ];
+    assert_eq!(list("refs"), all);
+    assert_eq!(list("refs/"), all);
+    assert_eq!(list("refs//"), all);
+    assert_eq!(list("").len(), refs.len());
+    assert_eq!(list("nope/"), Vec::<String>::new());
+    // A prefix over the ref-name limit is refused, not silently empty.
+    let long = format!("refs/{}", "a".repeat(refs::MAX_REF_NAME_BYTES));
+    let err = block_on(env.pipe.list_refs(&a, &long)).unwrap_err();
+    assert_eq!(err.code(), Code::InvalidArgument);
+    assert_eq!(err.public_message(), refs::REF_NAME_TOO_LONG);
+}
+
+/// SPEC-REFS §3: a ref name is at most 512 bytes; a longer one is refused
+/// with its own message on reads and writes.
+#[test]
+fn over_long_ref_names_are_refused_explicitly() {
+    let env = env(AuthMode::Open);
+    let longest = format!("refs/heads/{}", "a".repeat(refs::MAX_REF_NAME_BYTES - 11));
+    let over = format!("{longest}a");
+    assert_eq!(
+        env.open_update(&upd(&longest, Missing, A)).unwrap(),
+        UpdateRefResult::Committed
+    );
+    for err in [env.open_update(&upd(&over, Missing, A)).unwrap_err(), {
+        let a = env.auth(&Req::unsigned(Procedure::ReadRef)).unwrap();
+        block_on(env.pipe.read_ref(&a, &over)).unwrap_err()
+    }] {
+        assert_eq!(err.code(), Code::InvalidArgument);
+        assert_eq!(err.public_message(), refs::REF_NAME_TOO_LONG);
+    }
+    let a = env.auth(&Req::unsigned(Procedure::ReadRef)).unwrap();
+    assert_eq!(block_on(env.pipe.read_ref(&a, &longest)).unwrap(), Some(A));
+}
+
 #[test]
 fn store_error_is_redacted() {
     let clock = clock();

@@ -49,7 +49,8 @@ use std::sync::{Mutex, PoisonError};
 use mkit_core::hash::Hash;
 use mkit_core::protocol::{PackKey, RefWriteCondition, Transport, TransportError, TransportResult};
 use mkit_core::refs::{
-    Ref, decode_ref_wire, encode_ref_wire, validate_ref_name, validate_ref_prefix,
+    Ref, decode_ref_wire, encode_ref_wire, validate_ref_name, validate_ref_name_grammar,
+    validate_ref_prefix,
 };
 
 // We need write_atomic and write_create_new from mkit_core's private `atomic`
@@ -473,15 +474,21 @@ impl FileTransport {
         }
     }
 
-    /// Every ref under `prefix` (a directory, e.g. `refs/`) with full
-    /// names, strictly: a file whose relative name is a valid ref name but
-    /// that does not hold a ref wire is [`RefFileError::Corrupt`], where
-    /// [`Transport::list_refs`] skips it. Symlinks are skipped, as there.
+    /// Every ref file under `prefix` (a directory, e.g. `refs/`), with its
+    /// full name and its id, or `None` for a file whose name is a valid
+    /// ref name (by the grammar: a name over
+    /// [`mkit_core::refs::MAX_REF_NAME_BYTES`] is listed, for the caller to
+    /// skip loudly) but that does not hold a ref wire, which
+    /// [`Transport::list_refs`] skips silently: the caller decides whether
+    /// to skip it loudly or fail. Symlinks, temp and lock files are
+    /// skipped, as there. Sorted by name.
     ///
     /// # Errors
-    /// [`RefFileError::InvalidName`] for an invalid prefix,
-    /// [`RefFileError::Corrupt`], or I/O.
-    pub fn list_refs_strict(&self, prefix: &str) -> Result<Vec<(String, Hash)>, RefFileError> {
+    /// [`RefFileError::InvalidName`] for an invalid prefix, or I/O.
+    pub fn list_ref_files(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<(String, Option<Hash>)>, RefFileError> {
         let trimmed = prefix.trim_end_matches('/');
         if !validate_ref_name(trimmed) {
             return Err(RefFileError::InvalidName(prefix.to_owned()));
@@ -506,13 +513,14 @@ impl FileTransport {
                     continue;
                 };
                 let name = rel.to_string_lossy().replace('\\', "/");
-                if !file_type.is_file() || !validate_ref_name(&name) {
+                // The grammar without the length bound: a ref file named
+                // before SPEC-REFS §3 bounded names is reported, so the
+                // caller can skip it loudly.
+                if !file_type.is_file() || !validate_ref_name_grammar(&name) {
                     continue; // a symlink, a temp or lock file, or no ref name
                 }
                 let bytes = fs::read(&path).map_err(RefFileError::Io)?;
-                let id =
-                    decode_ref_wire(&bytes).ok_or_else(|| RefFileError::Corrupt(name.clone()))?;
-                out.push((name, id));
+                out.push((name, decode_ref_wire(&bytes)));
             }
         }
         out.sort();
@@ -594,7 +602,7 @@ impl FileTransport {
 pub const SERVER_DIR: &str = ".mkit/server";
 
 /// Why a strict ref-file operation ([`LockedRefs`],
-/// [`FileTransport::read_ref_strict`], [`FileTransport::list_refs_strict`],
+/// [`FileTransport::read_ref_strict`], [`FileTransport::list_ref_files`],
 /// [`FileTransport::server_path`]) failed. It converts into the
 /// [`TransportError`] the [`Transport`] verbs return.
 #[derive(Debug)]
@@ -1803,19 +1811,22 @@ mod tests {
             t.read_ref_strict("refs/heads/bad"),
             Err(RefFileError::Corrupt(_))
         ));
-        assert!(matches!(
-            t.list_refs_strict("refs/"),
-            Err(RefFileError::Corrupt(_))
-        ));
+        assert_eq!(
+            t.list_ref_files("refs/").unwrap(),
+            vec![
+                ("refs/heads/bad".to_owned(), None),
+                ("refs/heads/ok".to_owned(), Some(h)),
+            ]
+        );
         fs::remove_file(dir.path().join("refs/heads/bad")).unwrap();
         // Temp and lock files are not refs.
         fs::write(dir.path().join("refs/heads/.ok.tmp.1.2"), b"junk").unwrap();
         assert_eq!(
-            t.list_refs_strict("refs").unwrap(),
-            vec![("refs/heads/ok".to_owned(), h)]
+            t.list_ref_files("refs").unwrap(),
+            vec![("refs/heads/ok".to_owned(), Some(h))]
         );
-        assert_eq!(t.list_refs_strict("refs/tags/").unwrap(), vec![]);
-        assert!(t.list_refs_strict("").is_err());
+        assert_eq!(t.list_ref_files("refs/tags/").unwrap(), vec![]);
+        assert!(t.list_ref_files("").is_err());
     }
 
     #[test]

@@ -116,7 +116,8 @@ class Reject(Exception):
 
 
 def ref_name_ok(name):
-    """SPEC-REFS §3."""
+    """The SPEC-REFS §3 grammar, without its 512-byte length bound: a ref
+    pattern is bounded only by the statement cap (SPEC-WRITE-GRANTS §3.3)."""
     if not name or name.startswith("/"):
         return False
     segments = name.split("/")

@@ -19,6 +19,43 @@ train).
 
 ### Changed
 
+- *(core)* `mkit_core::refs::validate_ref_name` now also requires a name
+  of at most `MAX_REF_NAME_BYTES` (512) bytes, per SPEC-REFS v2 §3, so
+  every transport and every new local ref refuse a longer one. Creating
+  or writing a local branch, tag or remote-tracking ref over the bound
+  fails with the new `RefError::RefNameTooLong`, whose message names the
+  limit. Reading, listing, resolving and deleting a local ref that
+  already exists check only the grammar (the new
+  `validate_ref_name_grammar`), so a longer ref written earlier stays
+  visible and can be deleted or renamed with `mkit branch -d`/`-m`. New:
+  `MAX_REF_NAME_BYTES`, `check_new_ref_name`,
+  `validate_ref_name_grammar`.
+- *(core, cli)* A new local branch name is at most `MAX_BRANCH_NAME_BYTES`
+  (494) bytes and a new tag name at most `MAX_TAG_NAME_BYTES` (502), so
+  their wire names (`refs/heads/<b>` and `refs/mkit/packmap/<b>`,
+  `refs/tags/<t>`) fit the 512-byte bound; the error names the derived
+  limit and why (`RefError::RefNameTooLong` now carries a `RefNameKind`).
+  A push of an older, longer branch fails with "ref name too long",
+  naming the wire name (`check_pushable_branch`). The ssh and enc clients
+  skip a listed ref whose name is over the bound
+  (`mkit_rpc::list_response_refs`) instead of failing the listing, as the
+  file, memory, s3 and http clients do.
+- *(refs, rpc, server)* SPEC-REFS v2: a ref name is at most 512 bytes
+  (§3). `mkit_rpc::MAX_REF_NAME` drops from 4096 to 512 (it is now
+  `mkit_core::refs::MAX_REF_NAME_BYTES`), so the ssh and enc clients
+  refuse a longer name or `ListRefs` prefix before sending.
+  `mkit-server` refuses one on `ReadRef`/`UpdateRef` with
+  `invalid_argument` "ref name too long" (`INVALID_REQUEST` on the ssh
+  wire), and a `ListRefs` over the `.mkit` layout skips a longer legacy
+  ref file with a warning. `mkit serve` over ssh used to accept names of
+  any length. Pre-production policy: no migration.
+- *(server)* `mkit-server`'s `ListRefs` matches its prefix at a
+  path-component boundary and strips the prefix plus its `/`, as
+  SPEC-REFS §4 and `mkit serve` do (`refs/heads` and `refs/heads/` list
+  `main`; `refs/heads/ma` lists nothing). A listing of the `.mkit` layout
+  skips a ref file that holds no ref id, with a warning, instead of
+  failing. `FileTransport::list_refs_strict` is replaced by
+  `list_ref_files`, which reports such a file as `None`.
 - *(core)* Pack readers enforce SPEC-PACKFILE §3.3's "one zstd frame"
   rule. A `0x03`/`0x04` payload holding two concatenated frames, a
   skippable or legacy-magic frame, or trailing bytes after the frame now
