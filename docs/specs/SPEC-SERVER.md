@@ -51,9 +51,11 @@ as STC §7.1 requires; this list names server-internal extension points.
 1. **Identity.** Map the authenticated request to a principal: an
    anonymous caller, an authenticated signer, a bearer holder, an
    authenticated transport peer, or an SSH forced-command identity.
-2. **Authorize.** Decide whether the principal may perform the operation,
-   as STC §7.5 requires. Record the established owner and grant facts
-   in the operation passed to admission.
+2. **Authorize.** Apply namespace and write policy as STC §7.5 requires.
+   Evaluate the built-in namespace policy and rules 1–2 before a remote
+   hook. Configure that hook as `authority` or `check` under §6.2;
+   neither role overrides a namespace-policy denial. Carry the owner
+   and grant facts into both Authorize and Admit requests.
 3. **Admit.** Decide whether the deployment permits this operation now.
    Admission may allow, challenge, or deny it. Admission applies only
    to unary RPCs, as STC §5.1 requires.
@@ -173,6 +175,15 @@ for a ticket-backed reservation with no outcome once its ticket has
 expired. It MUST NOT classify that reservation as an abandoned pending
 operation after a successful `BeginUpload`.
 
+The pending record is the arbiter. Every replacement of a pending
+reservation MUST be conditional, in the same atomic unit, on the
+record still being pending. This applies to the guarded apply
+(§3's `BeginUpload` and directly admitted write rules), the separate
+`Aborted` record, and the reconcile pass. A guarded apply whose
+condition fails MUST commit nothing; the client receives retryable
+`unavailable`. Thus a late apply cannot commit after reconciliation
+has recorded `Aborted`, and at most one replacement succeeds.
+
 Replacement and reconciliation MUST preserve exactly one terminal
 outcome across crashes and concurrent attempts. A reconcile pass MUST
 NOT replace an existing terminal outcome. A committed reservation MUST
@@ -264,8 +275,23 @@ Informative end-to-end admission sequence:
 ### 6.2 Authorize
 
 `AuthorizeRequest.operation` describes the authenticated operation
-before admission. `Operation` has the following fields, also used by
-Admit and Inspect:
+before admission. The deployment MUST configure remote Authorize in
+one of these two roles:
+
+- **`authority`:** the hook is the deployment-defined authority source
+  of STC §7.5 rule 3. The built-in namespace policy (`allowlist`/`any`)
+  MUST be evaluated first; a hook Allow MUST NOT override its denial.
+  Rules 1–2 (owner key and grant) MUST be evaluated before the hook.
+  If either authorizes, the hook MUST still be called and MAY deny.
+- **`check`:** the built-in namespace and write policy MUST run first.
+  The hook can only deny further; it MUST NOT authorize a write the
+  built-in policy rejected.
+
+These roles compose with authorization as STC §7.5 requires. Grant
+verification and its failure handling remain as SPEC-WRITE-GRANTS
+requires; remote Allow does not bypass them.
+
+`Operation` has the following fields, also used by Admit and Inspect:
 
 | Field | Meaning |
 |---|---|
@@ -275,12 +301,12 @@ Admit and Inspect:
 | `principal` | The identity established by the server at stage 1. |
 | `idempotency_key` | The auth v2 nonce of a signed write; empty otherwise. |
 | `refs` | The intended ref changes, in decision order. |
-| `owner` | Whether the principal owns the namespace; established for Admit. |
-| `grant` | The write grant used, if any, and its checked epoch; established for Admit. |
+| `owner` | Whether the principal owns the namespace under STC §7.5 rule 1; set on both Authorize and Admit requests. |
+| `grant` | The write grant used under STC §7.5 rule 2, if any, and its checked epoch; set on both Authorize and Admit requests. |
 
-`owner` and `grant` report authorization facts; Authorize is the stage
-that precedes their establishment. An absent grant means no write
-grant was used. Grant verification and apply preconditions remain
+`owner` and `grant` carry the result of STC §7.5 rules 1–2 on both
+Authorize and Admit requests. An absent grant means no write grant
+was used. Grant verification and apply preconditions remain
 as [SPEC-WRITE-GRANTS §7](SPEC-WRITE-GRANTS.md#7-verification-order)
 requires.
 
@@ -323,9 +349,8 @@ is an empty message permitting the operation to continue. An allowance
 does not itself perform admission or commit a write.
 
 `Deny.code` is a Connect code name. For Authorize, the allowed names
-are `permission_denied`, `not_found`, `unauthenticated`,
-`resource_exhausted`, and `failed_precondition`. The server MUST treat
-any other code as `permission_denied`.
+are exactly `permission_denied`, `not_found`, and `unauthenticated`.
+The server MUST answer any other value as `permission_denied`.
 
 `Deny.message` is public text for the client. It MUST be at most 512
 bytes of UTF-8 and contain no control characters. If it breaks either
@@ -333,9 +358,11 @@ rule, the server MUST replace it with a generic public message.
 Code fallback and message replacement are the specified sanitization
 of a deliberate denial, not hook transport failures.
 
-The same `Deny` message shape is used by Admit and Inspect. Client
-admission denial handling remains as STC §5.1 requires; the Authorize
-code allowlist does not redefine the code for an admission denial.
+The same `Deny` message shape is used by Admit and Inspect. For either
+hook's denial, the server MUST answer `permission_denied` with HTTP 403,
+never 402, whatever `Deny.code` says, as STC §5 requires for an
+admission denial. The public-message sanitation rule above applies
+to denials from all three hooks.
 
 ### 6.3 Admit
 
@@ -380,7 +407,8 @@ Repeated `Header` entries preserve repeated `WWW-Authenticate` fields.
 Their names are compared case-insensitively for the allowlists.
 
 An Admit `deny` is a deliberate admission denial using the `Deny`
-message described in §6.2. It allocates no pending reservation.
+message described in §6.2 and the client response STC §5 requires.
+It allocates no pending reservation.
 A `challenge` likewise allocates no pending reservation.
 
 Informative: the deployment chooses how a reservation represents a
@@ -413,9 +441,10 @@ serving facilities.
 | `reject` | A `Deny` message: inspection rejects the operation, subject to the configured mode. |
 
 `InspectQuarantine.reason` explains the quarantine verdict. It is
-inspection-policy text, not an object body. `reject.code` and
-`reject.message` use the `Deny` shape described in §6.2, including
-the public-message sanitation rule.
+inspection-policy text, at most 512 bytes under §6.6, not an object
+body. An Inspect `reject` is answered as `permission_denied` with
+HTTP 403, never 402, whatever `reject.code` says, as STC §5 requires.
+`reject.message` follows §6.2's public-message sanitation rule.
 
 An asynchronous verdict cannot reverse a ref write already committed.
 In publish mode, later inspection can lead to quarantine. The reserved
@@ -501,6 +530,11 @@ under §8. The specified `Deny` sanitation in §6.2 applies separately.
 - Header names MUST be compared case-insensitively.
 - A `reservation_id` MUST be 1–128 bytes drawn from `[A-Za-z0-9._:-]`.
 - `AdmitResponse.allow.reservation_id` is REQUIRED.
+- A `reservation_id` MUST be unique per server audience across all
+  operations. If the server finds an existing reservation with the
+  same id for a different operation, it MUST treat the response as
+  invalid under §8.
+- `InspectQuarantine.reason` MUST be at most 512 bytes.
 
 The applicable response oneof MUST select a decision or verdict.
 An absent decision does not constitute permission to continue.
@@ -542,13 +576,22 @@ grants, or receipts. Distinct roles MUST use distinct keys.
 origin rules as STC §7.1 requires for its audience. It is not the
 `operation.audience` or `outcome.audience` carried inside the body.
 
+Informative: the audience is an origin, so hook services at different
+paths on one origin share an audience. They SHOULD use distinct keys.
+
 `<full procedure>` is the exact Connect path from §6.1. A verifier
 MUST bind verification to the procedure receiving the request.
 
 `<nonce>` MUST be 32 random bytes encoded as 64 lowercase hex digits.
-The created and expiry fields are decimal epoch milliseconds.
+The created and expiry fields are decimal epoch milliseconds. They
+MUST contain only base-10 ASCII digits, with no sign and no leading
+zeros; a single `0` is allowed.
 The validity interval MUST be positive and at most 300,000 ms.
 The sender's clock MAY lead the receiver's clock by at most 30,000 ms.
+
+A hook server MUST reject a request whose `X-Mkit-Hook-Version` is
+missing or is not `1`, or that lacks any required header, before
+reading the body.
 
 All of the following headers are REQUIRED:
 
@@ -583,6 +626,11 @@ Informative: a fresh signed delivery attempt can carry the same
 durable Outcome body with a fresh hook nonce and validity window.
 Body whitespace and JSON field order affect its digest even when the
 decoded protobuf message is the same.
+
+Hook responses are not signed. Their authenticity rests on TLS with
+server-certificate verification, which the calling server MUST perform
+(plain HTTP is permitted only to loopback, §6.1), or on the isolation
+of a service binding (§7.3).
 
 ### 7.2 Key list and rotation
 

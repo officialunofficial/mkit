@@ -163,8 +163,10 @@ audience: implementers of mkit.transport.v1 servers and of deployment business l
   - A deployment MAY implement any subset; the server calls only the hooks it is configured to use.
   - Plain HTTP only to loopback hosts. Redirects MUST NOT be followed.
 - **§6.2–§6.5:** Semantics of each request and response field, following B.3.
-  - Authorize's Deny codes are an allowlist: `permission_denied`, `not_found`, `unauthenticated`,
-    `resource_exhausted`, `failed_precondition`. Any other code is treated as `permission_denied`.
+  - Authorize's Deny codes are exactly `permission_denied`, `not_found`, `unauthenticated`.
+    Any other code is treated as `permission_denied` (Fix round 1 §1).
+  - Admit and Inspect deny always answer `permission_denied` (HTTP 403, never 402), whatever `Deny.code` says,
+    as STC §5 requires. The message rule below applies to all three (Fix round 1 §1).
   - The Deny message is public text for the client, at most 512 bytes of UTF-8, with no control characters;
     otherwise the server replaces it with a generic message.
 - **§6.4 Inspect** is marked **provisional**: its call shape is fixed, and M5 may add fields additively.
@@ -255,8 +257,8 @@ message Operation {
   Principal principal = 4;
   string idempotency_key = 5;     // auth v2 nonce of a signed write; empty otherwise
   repeated RefChange refs = 6;    // ref writes the operation intends, in decision order
-  bool owner = 7;                 // the principal is the namespace owner (set for Admit)
-  GrantUsed grant = 8;            // the write grant used, if any (set for Admit; M2)
+  bool owner = 7;                 // namespace-owner result (set for Authorize and Admit)
+  GrantUsed grant = 8;            // grant-rule result, if any (set for Authorize and Admit; M2)
 }
 message Principal {
   oneof kind {
@@ -466,3 +468,94 @@ Amendment 1 applied
 
 Amendment 1 additionally requires R-91 in `00-plan.md`, an `outcome-abandoned.request.json` golden
 with `ABORT_REASON_ABANDONED`, and its entries in SPEC-SERVER §15 and the golden-check script.
+
+## Fix round 1
+
+Orchestrator rulings from the review of PR #1142 at `68907a46`. These replace or tighten
+the corresponding earlier brief requirements; all other requirements remain unchanged.
+
+### 1. Blocker: Deny codes (replaces B.2's §6.2 allowlist)
+
+STC §5 gives `failed_precondition` a specific client meaning (a CAS conflict on `UpdateRef`, a ticket failure on
+`BeginUpload`), and treats `resource_exhausted` as retryable.
+
+- **Authorize** `Deny.code` allowlist: exactly `permission_denied`, `not_found` and `unauthenticated`. Any other value
+  is answered as `permission_denied`.
+- **Admit and Inspect** deny: the server answers `permission_denied` (HTTP 403, never 402) whatever `Deny.code` says,
+  per STC §5's admission-denial row. Cite STC §5, not §5.1.
+- The Deny message rule (512 bytes, no control characters, otherwise a generic message) still applies to all three.
+- **Goldens:**
+  - `authorize-deny.response.json` uses a code from the new allowlist.
+  - `admit-deny.response.json` uses `permission_denied`.
+  - Regenerate `MANIFEST.txt` with `UPDATE_GOLDEN=1`, and regenerate signature vectors only if a referenced body
+    changed.
+
+### 2. Exactly-one-outcome mechanism (should-fix 3; tightens amendment 1 §2)
+
+Replace the reconcile paragraph's mechanism with this. The rule text is otherwise kept.
+
+> The pending record is the arbiter. Every replacement of a pending reservation is conditional, in the same atomic
+> unit, on the record still being pending. That covers the guarded apply (rules a and c), the `Aborted` record (rule
+> d) and the reconcile pass. A guarded apply whose condition fails commits nothing, and the client receives a
+> retryable `unavailable`. So a late apply can never commit after the reconcile pass has recorded `Aborted`, and at
+> most one replacement ever succeeds.
+
+Keep the reconcile trigger, "the operation's authentication validity has passed". The conditional replacement makes
+the timing safe.
+
+### 3. Hook header fail-closed (should-fix 4), in §7.1
+
+> A hook server MUST reject a request whose `X-Mkit-Hook-Version` is missing or is not `1`, or that lacks any
+> required header, before reading the body.
+
+Also add the canonical decimal form (nit): created and expiry are base-10 ASCII digits with no sign and no leading
+zeros (a single `0` is allowed). This matches what your test already enforces.
+
+### 4. Response authenticity (should-fix 5), in §7.1 or a short §7.4-style paragraph inside §7
+
+> Hook responses are not signed. Their authenticity rests on TLS with server-certificate verification, which the
+> calling server MUST perform (plain HTTP is permitted only to loopback, §6.1), or on the isolation of a service
+> binding (§7.3).
+
+### 5. `reservation_id` scope (should-fix 6), in §6.6
+
+> A `reservation_id` MUST be unique per server audience across all operations. A server that finds an existing
+> reservation with the same id for a different operation treats the response as invalid (§8).
+
+### 6. Authorize and STC §7.5 (should-fix 7), in §2 (stage 2) and §6.2
+
+A deployment configures the remote Authorize hook in one of two roles. Name them in the spec:
+- **`authority`:** the hook is STC §7.5 rule 3's deployment-defined authority source. The built-in namespace policy
+  (`allowlist`/`any`) is evaluated first, and a hook `Allow` cannot override a namespace-policy denial. Rules 1–2
+  (owner key, grant) are evaluated first. If either authorizes, the hook is still called, and it may deny.
+- **`check`:** the built-in namespace and write policy run first, and the hook can only deny further. It never
+  authorizes a write the built-in policy rejected.
+
+State that `Operation.owner` and `Operation.grant` carry the result of rules 1–2 and are set on **both** Authorize
+and Admit requests. Update the proto comments on those two fields, which currently say "set for Admit"; this is a
+comment-only change. Update the goldens to match if they omit them on authorize.
+
+### 7. Nits (apply)
+
+- **Inspect:** `InspectQuarantine.reason` is at most 512 bytes (§6.6). Inspect `reject` is handled per §1 above.
+- **Goldens:** use a distinct `idempotencyKey` (nonce) in each operation's golden. STC requires a nonce per RPC.
+- **§7.1 informative line:** the audience is an origin, so hook services at different paths on one origin share an
+  audience and SHOULD use distinct keys.
+- **STC §7.7:** replace "SPEC-SERVER (forthcoming, informative)" with a plain link to SPEC-SERVER. This is the only
+  additional STC edit permitted.
+- **CHANGELOG:** wrap the line like its neighbours.
+- **Carry-forward** (record it in the PR body, not in the spec): the queue outcome sink's acknowledgement semantics
+  belong to WP-3.9, and `ReadServed` pending/failure handling to WP-3.3/4.13.
+
+### 8. CI for the golden schema check (should-fix 8)
+
+- Add one step to `.github/workflows/buf.yml`, in the job that already runs `buf lint`, that runs
+  `bash scripts/check-server-hooks-goldens.sh`.
+- That workflow runs on PRs to `main`, not on the feature branch, which is intended: there is no CI on `feat/*`.
+- Keep the `ci-proto` justfile recipe, but make it the literal extraction of that workflow's commands, so the header
+  rule holds.
+
+### 9. Gates, then push
+
+- The brief's gates: `buf lint`/`buf breaking`, the golden script, the pinning test, and `check-spec-status`.
+- Put a "Fix round 1" section in the PR body listing §1–§8.

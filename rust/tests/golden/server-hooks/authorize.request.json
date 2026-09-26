@@ -8,7 +8,7 @@
         "ed25519PublicKey": "0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc="
       }
     },
-    "idempotencyKey": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "idempotencyKey": "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
     "refs": [
       {
         "name": "refs/heads/main",
@@ -16,6 +16,11 @@
         "new": "MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM=",
         "delete": false
       }
-    ]
+    ],
+    "owner": false,
+    "grant": {
+      "grantId": "REREREREREREREREREREREREREREREREREREREREREQ=",
+      "epoch": "7"
+    }
   }
 }

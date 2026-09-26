@@ -27,9 +27,9 @@ message Operation {
   string idempotency_key = 5;
   // Intended ref writes in decision order; SPEC-SERVER §6.2.
   repeated RefChange refs = 6;
-  // Whether the principal owns the namespace, set for Admit; SPEC-SERVER §6.3.
+  // Namespace-owner result, set for Authorize and Admit; SPEC-SERVER §6.2.
   bool owner = 7;
-  // Write grant used, if any, set for Admit; SPEC-SERVER §6.3.
+  // Grant-rule result, if any, set for Authorize and Admit; SPEC-SERVER §6.2.
   GrantUsed grant = 8;
 }
 
@@ -138,7 +138,8 @@ message AuthorizeAllow {}
 
 // Deliberate refusal, distinct from hook execution failure; SPEC-SERVER §§6.2, 8.
 message Deny {
-  // Connect code name; outside the allowlist maps to permission_denied; SPEC-SERVER §6.2.
+  // Authorize allows permission_denied/not_found/unauthenticated; SPEC-SERVER §6.2.
+  // Admit/Inspect always answer permission_denied; SPEC-SERVER §6.2.
   string code = 1;
   // Public UTF-8 text, at most 512 bytes and no control characters; SPEC-SERVER §6.2.
   string message = 2;
@@ -233,7 +234,7 @@ message InspectPass {}
 
 // Inspection decision to quarantine content; SPEC-SERVER §6.4.
 message InspectQuarantine {
-  // Explanation of the quarantine decision; SPEC-SERVER §6.4.
+  // Explanation of the quarantine decision, at most 512 bytes; SPEC-SERVER §§6.4, 6.6.
   string reason = 1;
 }
 

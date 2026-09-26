@@ -1336,7 +1336,7 @@ A deployment settles a payment on `Committed` and releases it on
 `Aborted` or `Expired`, so an aborted upload settles nothing
 (informative). How outcomes reach the deployment, through a
 transactional outbox delivered at least once and keyed by reservation
-id, is specified in SPEC-SERVER (forthcoming, informative).
+id, is specified in [SPEC-SERVER](SPEC-SERVER.md).
 
 ### 7.8 Ref deletion
 
