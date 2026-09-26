@@ -306,6 +306,20 @@ pub(crate) fn check_length_bounds(base_len: usize, result_len: usize) -> Result<
 /// the preceding bounds checks; the `expect` calls trip only if the
 /// compiler's slice-bounds elision is wrong.
 pub fn decode(base: &[u8], stream: &[u8]) -> Result<Vec<u8>, MkitError> {
+    decode_inner(base, stream, None)
+}
+
+/// Pack unpack charges and reserves the entire declared target fallibly
+/// before calling this path. The op checks prevent any subsequent growth.
+pub(crate) fn decode_preallocated(
+    base: &[u8],
+    stream: &[u8],
+    output: Vec<u8>,
+) -> Result<Vec<u8>, MkitError> {
+    decode_inner(base, stream, Some(output))
+}
+
+fn decode_inner(base: &[u8], stream: &[u8], output: Option<Vec<u8>>) -> Result<Vec<u8>, MkitError> {
     if stream.len() < HEADER_LEN {
         return Err(MkitError::UnexpectedEof);
     }
@@ -332,7 +346,7 @@ pub fn decode(base: &[u8], stream: &[u8]) -> Result<Vec<u8>, MkitError> {
     // otherwise triggers a ≈ 1 GiB allocation. The final `result_len`
     // equality check below still enforces wire-level self-consistency.
     let cap_hint = compute_cap_hint(result_len, base.len(), stream.len());
-    let mut out: Vec<u8> = Vec::with_capacity(cap_hint);
+    let mut out = output.unwrap_or_else(|| Vec::with_capacity(cap_hint));
     let mut pos = HEADER_LEN;
     while pos < stream.len() {
         let op = stream[pos];

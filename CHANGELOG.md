@@ -179,6 +179,9 @@ train).
 
 ### Fixed
 
+- *(core, security)* Fix denial of service (DoS) in pack reading by bounding
+  owned memory and checking framing arithmetic on 32-bit targets.
+
 - *(core)* A `Range` payload over a chunked leaf (`chunk = Some(hdr)`) now
   rejects `len == 0` before running the chunk header's wrap/fold checks,
   matching SPEC-DISCLOSURE §4's stated order &mdash; the bundle is rejected

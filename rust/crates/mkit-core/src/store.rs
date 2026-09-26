@@ -488,6 +488,38 @@ impl ObjectStore {
         Ok(bytes)
     }
 
+    /// Read a verified pack base using the caller's budgeted allocator.
+    /// The same open handle supplies the size and bytes; growth is rejected
+    /// rather than letting `read_to_end` allocate outside that budget.
+    pub(crate) fn read_with_allocator<E: From<StoreError>>(
+        &self,
+        h: &Hash,
+        allocate: impl FnOnce(usize) -> Result<Vec<u8>, E>,
+    ) -> Result<Vec<u8>, E> {
+        #[cfg(test)]
+        self.read_calls.fetch_add(1, Ordering::Relaxed);
+        let mut file = File::open(self.path_for(h)).map_err(|e| {
+            E::from(match e.kind() {
+                io::ErrorKind::NotFound => StoreError::ObjectNotFound(to_hex(h)),
+                _ => StoreError::Io(e),
+            })
+        })?;
+        let size = file.metadata().map_err(StoreError::Io)?.len();
+        if size > MAX_RAW_OBJECT_SIZE as u64 {
+            return Err(StoreError::ObjectTooLarge.into());
+        }
+        let len = usize::try_from(size).map_err(|_| StoreError::ObjectTooLarge)?;
+        let mut bytes = allocate(len)?;
+        bytes.resize(len, 0);
+        file.read_exact(&mut bytes).map_err(StoreError::Io)?;
+        let mut extra = [0];
+        if file.read(&mut extra).map_err(StoreError::Io)? != 0 {
+            return Err(StoreError::ObjectTooLarge.into());
+        }
+        check_hash(h, &object_id_from_bytes(&bytes))?;
+        Ok(bytes)
+    }
+
     /// Read raw bytes for `h` WITHOUT the BLAKE3 integrity check that
     /// [`Self::read`] performs — a [`StoreError::HashMismatch`] can
     /// therefore never come out of this path.
