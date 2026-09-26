@@ -959,3 +959,17 @@ unregistered repository.
 **Enforced by:** pipeline pairing tests with the call-counting store and
 native `tests/d34_creation.rs` over memory and SQLite in both sharding
 modes; D34 mapping golden and property tests pin co-location and fixed fan-outs.
+## Timer effects share the row's atomicity boundary
+
+**Always:** a timer handler's batch commits in its timer partition only after
+checking the original row value, together with deleting or rescheduling the row.
+Unknown timer kinds remain stored. Native committed timer Puts notify inside the
+blocking task, even if the awaiting request is canceled.
+
+**Because:** alarm redelivery and concurrent ticks must not duplicate effects;
+cancellation must not hide a durable timer from the native driver.
+
+**If violated:** effects can run twice or a committed timer can remain asleep.
+
+**Enforced by:** `mkit-server/src/timers/tests.rs` race and atomicity tests,
+`mkit-server-native/tests/timers.rs`, and the worker's pure alarm tests.

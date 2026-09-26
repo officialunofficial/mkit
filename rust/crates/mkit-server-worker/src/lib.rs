@@ -20,6 +20,8 @@
 //! - [`adapter`]: what a deployment's `#[event(fetch)]` and
 //!   `#[durable_object]` call: the pipeline's Connect binding over these
 //!   stores, streaming both bodies.
+//! - [`alarm`]: pure alarm choices; `NsObject::alarm` fires due timers and
+//!   sets the object's one alarm to the next partition wake.
 //!
 //! Everything that touches a `worker` handle is compiled for `wasm32`
 //! only. The logic around it is generic over small backend traits
@@ -40,6 +42,7 @@
 //! [`DoNamespaceStore`]: ns_client::DoNamespaceStore
 
 pub mod adapter;
+pub mod alarm;
 pub mod clock;
 pub mod do_sql;
 #[cfg(feature = "test-faults")]

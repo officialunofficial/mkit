@@ -35,6 +35,7 @@ mod quota;
 mod refs;
 mod replay;
 mod repository;
+mod timers;
 mod upload;
 
 /// Why a case did not pass.
@@ -159,6 +160,9 @@ cases! {
     "repo.missing_repository_invalid_argument" => repository::multi_invalid, M1, [MultiRepo, AuthV2], [];
     "repo.read_missing_repo_not_found" => repository::read_missing_repo, M1, [MultiRepo], [];
     "repo.packs_need_membership_unimplemented" => repository::packs_need_membership, M1, [MultiRepo, AuthV2], [];
+    "timers.directive_fires_due" => timers::directive_fires_due, M0, [TestFaults], [];
+    "timers.fire_on_schedule" => timers::fire_on_schedule, M0, [TestFaults, Timers], [];
+    "timers.redelivery_is_idempotent" => timers::redelivery_is_idempotent, M0, [TestFaults], [];
     "refs.read_missing" => refs::read_missing, M0, [], [];
     "refs.update_any_then_read" => refs::update_any_then_read, M0, [], [];
     "refs.update_missing_conflict_failed_precondition" => refs::update_missing_conflict, M0, [], [];

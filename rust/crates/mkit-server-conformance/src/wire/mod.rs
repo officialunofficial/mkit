@@ -50,7 +50,7 @@
 //! - It writes only refs under `refs/heads/conformance/<run_id>/<case>/`
 //!   (and the matching `refs/mkit/packmap/...`) and uploads only fresh
 //!   random packs, so it can run again and again against a persistent
-//!   server. It never deletes anything (M0 has no ref deletion).
+//!   server. Timer cases ask a test handler to delete only their own refs.
 //! - Under auth v2 each case signs with its own key, derived from the
 //!   profile seed, the run id and the case name, so per-signer quotas never
 //!   couple cases or runs.
@@ -65,6 +65,9 @@
 //!
 //! | Case | Requires | Asserts |
 //! |---|---|---|
+//! | `timers.directive_fires_due` | `test-faults` | a future timer remains; a skewed tick deletes only the due ref |
+//! | `timers.fire_on_schedule` | `test-faults`, `timers` | the driver deletes the ref within 20 s without a manual tick |
+//! | `timers.redelivery_is_idempotent` | `test-faults` | repeated ticks succeed with no further effects |
 //! | `refs.read_missing` | | an absent ref reads `exists = false`, empty id |
 //! | `refs.update_any_then_read` | | `ANY` creates, then clobbers |
 //! | `refs.update_missing_conflict_failed_precondition` | | `MISSING` on an existing ref; ref unchanged |
@@ -235,6 +238,9 @@ pub const D34_LIST_REFS_SKIPS: &[&str] = &[
     "repo.isolation_refs",
     // The unsigned-read case probes successful ListRefs as well as ReadRef.
     "auth.v2_reads_unsigned_ok",
+    // These timer directives tick through successful ListRefs.
+    "timers.directive_fires_due",
+    "timers.redelivery_is_idempotent",
 ];
 
 fn sharding_skip_reason(case: &Case, profile: &Profile) -> Option<String> {
@@ -330,7 +336,7 @@ mod tests {
             .map(|case| case.name)
             .collect();
         assert_eq!(skipped, D34_LIST_REFS_SKIPS.iter().copied().collect());
-        assert_eq!(skipped.len(), 6);
+        assert_eq!(skipped.len(), 8);
         for name in &skipped {
             assert!(
                 name.contains("list")
@@ -339,6 +345,8 @@ mod tests {
                         "refs.non_refs_prefix_rejected"
                             | "repo.isolation_refs"
                             | "auth.v2_reads_unsigned_ok"
+                            | "timers.directive_fires_due"
+                            | "timers.redelivery_is_idempotent"
                     )
             );
         }

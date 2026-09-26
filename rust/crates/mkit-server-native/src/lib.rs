@@ -29,6 +29,8 @@ mod spawn;
 mod sqlite;
 #[cfg(feature = "http")]
 pub mod telemetry;
+#[cfg(feature = "http")]
+pub mod timers;
 
 pub use blocking::{Blocking, BlockingSink, PROBE_CACHE_TTL};
 #[cfg(feature = "http")]

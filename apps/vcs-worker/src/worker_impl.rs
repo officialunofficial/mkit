@@ -36,4 +36,8 @@ impl DurableObject for RefStore {
     async fn fetch(&self, req: Request) -> Result<Response> {
         self.object.handle(req).await
     }
+
+    async fn alarm(&self) -> Result<Response> {
+        self.object.alarm().await
+    }
 }

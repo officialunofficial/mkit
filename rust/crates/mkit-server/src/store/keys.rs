@@ -21,7 +21,7 @@
 //! | repo record (`Coordinator`) | `rr 00 <repo>` | codec `RepoRecord` |
 //! | repo-known marker (ref shard) | `rk 00 <repo>` | empty |
 //! | grant epoch | `e 00` | be64; absent means 0, never written as 0 |
-//! | timer (reserved, WP-1.24) | `w 00 <due_at:be64> <kind:u8> <ref>` | codec per kind |
+//! | timer (owned by `timers`) | `w 00 <due_at:be64> <kind:u8> <ref>` | codec per kind |
 //! | holder (`ContentShard`) | `h 00 <object:32> <ns> 00 <repo>` | empty |
 //! | GC hold (`ContentShard`) | `g 00 <object:32> <hold_id:32>` | codec `hold` |
 //! | blocklist (`ContentShard`) | `b 00 <object:32>` | codec `BlockEntry` |
@@ -70,7 +70,7 @@ pub const TAG_QUOTA: &str = "q";
 pub const TAG_QUOTA_WINDOW: &str = "qx";
 /// Grant epoch tag.
 pub const TAG_GRANT_EPOCH: &str = "e";
-/// Timer tag (layout reserved for WP-1.24).
+/// Timer tag (owned by `timers`).
 pub const TAG_TIMER: &str = "w";
 /// `ContentIndex` holder tag.
 pub const TAG_HOLDER: &str = "h";
@@ -304,7 +304,7 @@ pub fn grant_epoch() -> Key {
     key(TAG_GRANT_EPOCH, &[])
 }
 
-/// `w 00 <due_at> <kind> <reference>` (reserved for WP-1.24).
+/// `w 00 <due_at> <kind> <reference>` (owned by `timers`).
 #[must_use]
 pub fn timer(due_at_ms: u64, kind: u8, reference: &[u8]) -> Key {
     key(TAG_TIMER, &[&due_at_ms.to_be_bytes(), &[kind], reference])

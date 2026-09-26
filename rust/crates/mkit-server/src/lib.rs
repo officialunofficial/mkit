@@ -45,6 +45,7 @@ pub mod ssh;
 pub mod storage_error;
 pub mod store;
 mod telemetry;
+pub mod timers;
 pub mod upload;
 
 pub use error::{
