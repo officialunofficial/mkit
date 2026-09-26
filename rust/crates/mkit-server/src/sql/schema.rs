@@ -16,6 +16,11 @@
 //! Object holds one partition, and the column is constant there. It is a
 //! `BLOB`, not `TEXT`: the encoding's components end in `0x00`, which
 //! `SQLite` text functions treat as a terminator.
+//!
+//! Physical v2 adds `kv_timers`, a partial index over the timer rows
+//! (`w 00 …`) that lets a backend find each partition's earliest timer.
+//! It is index-only, but a binary built before v2 refuses a v2 database
+//! ("schema is newer than this binary"): roll back only to a v2 binary.
 
 use super::{SqlConn, SqlError, SqlValue, TxFn, count};
 use crate::store::StoreError;
@@ -39,16 +44,24 @@ const WRITE_VERSION: &str = "INSERT INTO mkit_schema (id, version) VALUES (1, ?1
      ON CONFLICT (id) DO UPDATE SET version = excluded.version";
 
 /// Every migration, in ascending version order.
-pub const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    statements: &[
-        "CREATE TABLE IF NOT EXISTS kv (part BLOB NOT NULL, key BLOB NOT NULL, \
+pub const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        statements: &[
+            "CREATE TABLE IF NOT EXISTS kv (part BLOB NOT NULL, key BLOB NOT NULL, \
          value BLOB NOT NULL, PRIMARY KEY (part, key)) WITHOUT ROWID",
-    ],
-}];
+        ],
+    },
+    Migration {
+        version: 2,
+        statements: &[
+            "CREATE INDEX IF NOT EXISTS kv_timers ON kv (key, part) WHERE key >= x'7700' AND key < x'7701'",
+        ],
+    },
+];
 
 /// The schema version this binary expects: the last migration's.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// The version recorded in the database: 0 for a new one.
 fn stored_version<C: SqlConn>(conn: &C) -> Result<u32, SqlError> {

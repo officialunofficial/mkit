@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add partition timers with guarded atomic handlers, fair tick budgets, SQLite timer heads, Durable Object alarm multiplexing and a native SQLite driver (WP-1.24). No production kind is registered yet.
+- The SQL store schema moves to version 2 (an index-only migration, applied on open to native databases and Durable Objects). A binary built before it refuses a migrated database, so roll back only to a version-2 binary.
+
 **Verifier kit.** First-class commit-hash verification for an untrusted
 object set or a few-KiB disclosure bundle: CLI `mkit prove`,
 `mkit verify-proof`, `mkit closure export`, and `mkit closure verify`;

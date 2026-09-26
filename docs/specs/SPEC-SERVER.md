@@ -351,6 +351,9 @@ does not itself perform admission or commit a write.
 `Deny.code` is a Connect code name. For Authorize, the allowed names
 are exactly `permission_denied`, `not_found`, and `unauthenticated`.
 The server MUST answer any other value as `permission_denied`.
+`not_found` is honoured only on read procedures, where it hides a
+private repository; on a write the server MUST answer it as
+`permission_denied`.
 
 `Deny.message` is public text for the client. It MUST be at most 512
 bytes of UTF-8 and contain no control characters. If it breaks either
@@ -531,9 +534,11 @@ under §8. The specified `Deny` sanitation in §6.2 applies separately.
 - A `reservation_id` MUST be 1–128 bytes drawn from `[A-Za-z0-9._:-]`.
 - `AdmitResponse.allow.reservation_id` is REQUIRED.
 - A `reservation_id` MUST be unique per server audience across all
-  operations. If the server finds an existing reservation with the
-  same id for a different operation, it MUST treat the response as
-  invalid under §8.
+  operations. If the server finds an existing pending record or
+  terminal outcome for the returned `reservation_id`, whether for a
+  different operation or for a retry of the same one, it MUST treat the
+  response as invalid under §8. A hook MUST return a fresh id for each
+  allowance.
 - `InspectQuarantine.reason` MUST be at most 512 bytes.
 
 The applicable response oneof MUST select a decision or verdict.
