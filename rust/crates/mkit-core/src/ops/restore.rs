@@ -644,6 +644,7 @@ fn restore_blob(
                 written += buf.len() as u64;
             }
             cb.check_reassembled_size(usize::try_from(written).unwrap_or(usize::MAX))?;
+            #[cfg(not(target_arch = "wasm32"))] // wasm File has no destructor
             drop(tmp);
             finish_atomic_write(&tmp_path, &final_path, executable)?;
         }
@@ -704,6 +705,7 @@ where
                 }
             }
             cb.check_reassembled_size(usize::try_from(written).unwrap_or(usize::MAX))?;
+            #[cfg(not(target_arch = "wasm32"))] // wasm File has no destructor
             drop(tmp);
             finish_atomic_write(&tmp_path, &final_path, executable)?;
         }
@@ -786,6 +788,7 @@ fn create_symlink(_target: &str, _link: &Path) -> io::Result<()> {
 fn write_file_atomic(dir: &Path, name: &str, data: &[u8], executable: bool) -> io::Result<()> {
     let (tmp_path, final_path, mut tmp) = create_tmp_for_write(dir, name)?;
     tmp.write_all(data)?;
+    #[cfg(not(target_arch = "wasm32"))] // wasm File has no destructor
     drop(tmp);
     finish_atomic_write(&tmp_path, &final_path, executable)
 }

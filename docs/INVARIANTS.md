@@ -897,6 +897,35 @@ and `rust/tests/golden/closure/neg_delta_entry.*` /
 `golden_pack::pack_v2_fixtures::closure_profile_still_rejects_compressed_entries`
 (every feature combination, including a frame corrupted past decoding).
 
+## Windowed pack entries stay provisional until complete verification
+
+**Always:** `pack::window` yields the same entry values as `PackEntries` when
+resource limits do not bind, and returns `Done` only after framing, the trailer,
+and any expected whole-pack id pass. Drivers discard all staged entries on
+any error, including entries yielded before a checkpoint.
+
+**Binding.** `Done` means every entry yielded across the whole run chain (the original run and every resume
+through its cursors) is an entry, in order, of the one pack whose bytes hash to the verified pack id: the trailer,
+and `expected_pack_id` when set. A cursor from pack A used on a source that yields different bytes for any
+not-yet-verified range fails with `PackfileCorrupted`, never `Done`. The reader does not re-read ranges it has
+already verified. **Keeping the source immutable across resumes is the caller's job** (informative: WP-4.8 binds
+R2 range reads to the object's etag). A source whose already-verified prefix changed after verification can still
+reach `Done`, but only with entries of the verified pack.
+
+A `None` checkpoint means keep the previous cursor. After a boundary-state `None` (the trailer phase), resuming re-reads at most one window plus the trailer; after a mid-entry `None`, it re-reads every window the unfinished entry spans.
+
+**Because:** a streaming trailer check occurs after entries have been delivered;
+completed-window CVs and the lazy current-window prefix commitment bind the
+entries staged across resumes without re-reading completed ranges.
+
+**If violated:** malformed packs or mismatched cursor/source pairs can publish
+partially verified data.
+
+**Enforced by:** `rust/crates/mkit-core/src/pack/window/tests.rs` differential,
+resume, cursor-binding, released-window, resource-budget, and trailer-split tests;
+the `mkit-core-wasm-check` v2 differential harness. Caller staging rollback and
+source immutability remain obligations of WP-4.7/4.8; the core reader does not store objects.
+
 ## Pack exclusions preserve surviving objects and delta bases
 
 **Always:** a pack rewrite drops every excluded entry and rawifies a surviving

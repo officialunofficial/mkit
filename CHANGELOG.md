@@ -22,6 +22,15 @@ train).
 
 ### Changed
 
+- *(core)* Add `pack::window`: a synchronous sans-IO pack reader with bounded
+  entry buffers, 64 KiB–64 MiB range windows, and checksummed resumable cursors.
+  Entries remain provisional until the trailer and optional pack id pass at
+  `Done`. Lazy cursor commitments bind the current window prefix on resume;
+  callers keep sources immutable, and completed windows are not re-read.
+  With no requested id, the first run prefetches
+  the trailer windows and persists their digest as an anchor. Native zstd and wasm32 ruzstd share decoding
+  with `PackEntries`; allocation failures return `PackfileTooLarge`.
+
 - *(server)* Validate `X-Repository` before authentication and storage access.
   Single deployments retain headerless reads and signed writes naming their
   configured identity; another valid identity returns `not_found`, and a

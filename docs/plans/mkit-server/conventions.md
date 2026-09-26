@@ -31,11 +31,18 @@ wins. The PRD snapshot is [`prd-snapshot.md`](prd-snapshot.md); Linear is canoni
 
 ## TMPDIR
 
+Every executor uses its own worktree's `rust/target`; never set or share
+`CARGO_TARGET_DIR` (shared targets can give false-fresh builds across worktrees).
+Export `CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0` to limit disk usage.
+Scratch files belong only under `$HOME/.cache/mkit-test-tmp/<wp-id>/`; never write
+shared scratchpad paths or another executor's files. Leave the worktree in place
+for the orchestrator to remove after merge.
+
 Never run the test suite under macOS `/tmp` or `/var`: they are symlinks, and about 20 sign/attest tests fail spuriously on
 the resolved path. Always export a non-symlinked `TMPDIR` first:
 
 ```bash
-export TMPDIR="$HOME/.cache/mkit-test-tmp"; mkdir -p "$TMPDIR"   # never macOS /tmp (symlink breaks sign/attest tests)
+export TMPDIR="$HOME/.cache/mkit-test-tmp/<wp-id>"; mkdir -p "$TMPDIR"   # never macOS /tmp (symlink breaks sign/attest tests)
 # Run from the repo root. Rust steps run in a subshell under rust/, like the justfile recipes.
 ( cd rust && cargo fmt --check )
 ( cd rust && cargo clippy --all-targets --all-features --workspace -- -D warnings )
