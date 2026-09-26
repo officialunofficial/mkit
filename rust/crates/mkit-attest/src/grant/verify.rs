@@ -9,8 +9,13 @@
 //! caller's.
 //!
 //! Every value this module returns proves a verification ran:
-//! [`OwnerVerified`] and [`VerifiedGrant`] have no public fields or
-//! constructors, so only these functions build them.
+//! [`OwnerVerified`], [`VerifiedGrant`], [`VerifiedEpoch`] and
+//! [`VerifiedVisibility`] have no public fields or constructors, so only
+//! these functions build them.
+//!
+//! Only [`OwnerVerified`] may be cached (by exact header bytes). The other
+//! three embed a time-window check at one `now`, so they are evidence for
+//! that one request and MUST NOT be cached or reused.
 
 use mkit_core::repo_identity::RepositoryIdentity;
 
@@ -22,50 +27,98 @@ use super::{
     VerifierConfig,
 };
 
-/// A statement whose owner signature verified (§7 steps 1, 3 and 4 for a
-/// grant).
-///
-/// For a grant, [`verify_grant_owner`] depends only on the header bytes and
-/// the configured schemes, so a server MAY cache its result by exact header
-/// bytes (§7) and call [`OwnerVerified::check`] on every request. A cache
-/// must be dropped when the accepted schemes change; `check` re-tests that
-/// the scheme is still accepted, so a stale entry fails closed.
-///
-/// Code outside this module cannot build one around an unsigned statement:
-///
-/// ```compile_fail,E0451
-/// use mkit_attest::grant::{Grant, OwnerScheme, OwnerVerified};
-/// fn forge(statement: Grant) -> OwnerVerified<Grant> {
-///     OwnerVerified { statement, id: [0; 32], scheme: OwnerScheme::Ed25519 }
-/// }
-/// ```
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct OwnerVerified<S> {
-    statement: S,
-    id: [u8; 32],
-    scheme: OwnerScheme,
+/// Generates a verification result type: private fields, read-only
+/// accessors, no constructor outside this module.
+macro_rules! verified_statement {
+    ($(#[$meta:meta])* $name:ident, $statement:ty) => {
+        $(#[$meta])*
+        #[derive(Clone, Debug, PartialEq, Eq)]
+        pub struct $name {
+            statement: $statement,
+            id: [u8; 32],
+            scheme: OwnerScheme,
+        }
+
+        impl $name {
+            /// The verified statement.
+            #[must_use]
+            pub fn statement(&self) -> &$statement {
+                &self.statement
+            }
+
+            /// The statement id: the BLAKE3 of the statement bytes. It
+            /// covers neither the scheme nor the signature.
+            #[must_use]
+            pub fn id(&self) -> &[u8; 32] {
+                &self.id
+            }
+
+            /// The owner scheme that verified.
+            #[must_use]
+            pub fn scheme(&self) -> OwnerScheme {
+                self.scheme
+            }
+        }
+    };
 }
 
-impl<S> OwnerVerified<S> {
-    /// The verified statement.
-    #[must_use]
-    pub fn statement(&self) -> &S {
-        &self.statement
-    }
+verified_statement!(
+    /// A grant whose owner signature verified (§7 steps 1, 3 and 4). The id
+    /// is the grant id of §3.4.
+    ///
+    /// [`verify_grant_owner`] depends only on the header bytes and the
+    /// configured schemes, so a server MAY cache this value by exact header
+    /// bytes (§7) and call [`OwnerVerified::check`] on every request. A
+    /// cache must be dropped when the accepted schemes change; `check`
+    /// re-tests that the scheme is still accepted, so a stale entry fails
+    /// closed.
+    ///
+    /// Code outside this module cannot build one around an unsigned grant:
+    ///
+    /// ```compile_fail,E0451
+    /// use mkit_attest::grant::{Grant, OwnerScheme, OwnerVerified};
+    /// fn forge(statement: Grant) -> OwnerVerified {
+    ///     OwnerVerified { statement, id: [0; 32], scheme: OwnerScheme::Ed25519 }
+    /// }
+    /// ```
+    OwnerVerified,
+    Grant
+);
 
-    /// The statement id: the BLAKE3 of the statement bytes (the grant id of
-    /// §3.4 for a grant). It covers neither the scheme nor the signature.
-    #[must_use]
-    pub fn id(&self) -> &[u8; 32] {
-        &self.id
-    }
+verified_statement!(
+    /// An epoch statement that passed §5.2 checks 1–5 at one `now`.
+    ///
+    /// It includes the audience and time-window checks, so it is evidence
+    /// for one `SetGrantEpoch` call only: it MUST NOT be cached by header
+    /// bytes or reused later, since that would skip the expiry check.
+    ///
+    /// ```compile_fail,E0451
+    /// use mkit_attest::grant::{EpochStatement, OwnerScheme, VerifiedEpoch};
+    /// fn forge(statement: EpochStatement) -> VerifiedEpoch {
+    ///     VerifiedEpoch { statement, id: [0; 32], scheme: OwnerScheme::Ed25519 }
+    /// }
+    /// ```
+    VerifiedEpoch,
+    EpochStatement
+);
 
-    /// The owner scheme that verified.
-    #[must_use]
-    pub fn scheme(&self) -> OwnerScheme {
-        self.scheme
-    }
-}
+verified_statement!(
+    /// A visibility statement that passed the §9.1 checks for one
+    /// repository at one `now`.
+    ///
+    /// It includes the audience and time-window checks, so it is evidence
+    /// for one `SetRepoVisibility` call only: it MUST NOT be cached by
+    /// header bytes or reused later, since that would skip the expiry check.
+    ///
+    /// ```compile_fail,E0451
+    /// use mkit_attest::grant::{OwnerScheme, VerifiedVisibility, VisibilityStatement};
+    /// fn forge(statement: VisibilityStatement) -> VerifiedVisibility {
+    ///     VerifiedVisibility { statement, id: [0; 32], scheme: OwnerScheme::Ed25519 }
+    /// }
+    /// ```
+    VerifiedVisibility,
+    VisibilityStatement
+);
 
 /// One request a grant is checked against (§7 steps 2, 5–7, 9 and 10).
 #[derive(Clone, Copy, Debug)]
@@ -211,10 +264,7 @@ fn check_audience(cfg: &VerifierConfig, audiences: &[String]) -> Result<(), Gran
 /// # Errors
 /// The first failure: a header or §3.5 parse error, then a
 /// [`verify_owner_signature`] error.
-pub fn verify_grant_owner(
-    cfg: &VerifierConfig,
-    header: &str,
-) -> Result<OwnerVerified<Grant>, GrantError> {
+pub fn verify_grant_owner(cfg: &VerifierConfig, header: &str) -> Result<OwnerVerified, GrantError> {
     let header = SignedHeader::parse(header)?;
     let (grant, id) = Grant::parse_with_id(&header.statement)?;
     verify_owner_signature(
@@ -231,7 +281,7 @@ pub fn verify_grant_owner(
     })
 }
 
-impl OwnerVerified<Grant> {
+impl OwnerVerified {
     /// The per-request §7 steps, in spec order: the scheme is still
     /// accepted (step 3, re-tested so a cached value fails closed), step 2
     /// (`NamespaceMismatch`), step 5 (`AudienceNotListed`), step 6
@@ -284,7 +334,7 @@ pub fn verify_for_registration(
     cfg: &VerifierConfig,
     header: &str,
     principal: &[u8; 32],
-) -> Result<OwnerVerified<Grant>, GrantError> {
+) -> Result<OwnerVerified, GrantError> {
     let verified = verify_grant_owner(cfg, header)?;
     check_audience(cfg, &verified.statement.audiences)?;
     if verified.statement.grantee != *principal {
@@ -300,13 +350,15 @@ pub fn verify_for_registration(
 /// `now < expiry`. Check 6 (namespace policy) and check 7 with the retry
 /// rule ([`super::epoch_transition`]) are the caller's.
 ///
+/// The result MUST NOT be cached: it holds only at `now_ms`.
+///
 /// # Errors
 /// The first failed check.
 pub fn verify_epoch_statement(
     cfg: &VerifierConfig,
     header: &str,
     now_ms: i64,
-) -> Result<OwnerVerified<EpochStatement>, GrantError> {
+) -> Result<VerifiedEpoch, GrantError> {
     let header = SignedHeader::parse(header)?;
     let statement = EpochStatement::parse(&header.statement)?;
     verify_owner_signature(
@@ -318,7 +370,7 @@ pub fn verify_epoch_statement(
     )?;
     check_audience(cfg, &statement.audiences)?;
     check_window(statement.created_ms, statement.expiry_ms, now_ms)?;
-    Ok(OwnerVerified {
+    Ok(VerifiedEpoch {
         id: mkit_core::hash::hash(&header.statement),
         statement,
         scheme: header.scheme,
@@ -327,11 +379,13 @@ pub fn verify_epoch_statement(
 
 /// §9.1 checks for a visibility statement in the §4.2 encoding, sent for
 /// `repository` (`X-Repository`): it decodes and parses; its repository is
-/// `repository` (`NamespaceMismatch` otherwise); the scheme is advertised,
+/// `repository` (`RepositoryMismatch` otherwise); the scheme is advertised,
 /// valid for the repository's namespace and the signature verifies, so the
 /// owner is that namespace; the deployment's own audience is listed; and
 /// `created <= now + MAX_CLOCK_LEAD_MS` and `now < expiry`. Accepting only
 /// a `created` greater than the last accepted one is the caller's.
+///
+/// The result MUST NOT be cached: it holds only at `now_ms`.
 ///
 /// # Errors
 /// The first failed check.
@@ -340,11 +394,11 @@ pub fn verify_visibility_statement(
     header: &str,
     repository: &RepositoryIdentity,
     now_ms: i64,
-) -> Result<OwnerVerified<VisibilityStatement>, GrantError> {
+) -> Result<VerifiedVisibility, GrantError> {
     let header = SignedHeader::parse(header)?;
     let statement = VisibilityStatement::parse(&header.statement)?;
     if statement.repository != *repository {
-        return Err(GrantError::NamespaceMismatch);
+        return Err(GrantError::RepositoryMismatch);
     }
     let namespace = statement
         .repository
@@ -359,7 +413,7 @@ pub fn verify_visibility_statement(
     )?;
     check_audience(cfg, &statement.audiences)?;
     check_window(statement.created_ms, statement.expiry_ms, now_ms)?;
-    Ok(OwnerVerified {
+    Ok(VerifiedVisibility {
         id: mkit_core::hash::hash(&header.statement),
         statement,
         scheme: header.scheme,

@@ -947,6 +947,14 @@ for their principals are registered server-side instead.
   it (§7 step 5). The audience MUST be an origin whose host the operator
   controls, never a loopback address. This keeps a grant issued for one deployment from
   being registered at another.
+- Informative: a deployment's audience SHOULD be a name unique to that
+  deployment. An origin in a private address range (RFC 1918, link-local,
+  IPv6 ULA) or on a shared alias that many deployments can use gives weaker
+  audience separation: a grant naming it may verify at another deployment
+  that uses the same origin. A verifier can reject loopback literals, but it
+  cannot detect a DNS name that resolves to a loopback or shared address
+  (for example `localhost.localdomain` or a wildcard DNS service), so
+  choosing a unique audience is the operator's duty.
 - The epoch of an ssh-only deployment is raised by applying an epoch
   statement through the operator, with the §5.2 acceptance rules
   (informative).
@@ -1096,8 +1104,10 @@ document's rules, independently of the Rust code.
   and at the 64-bit maximum.
 - `reject/verify-*.json`: signed grants that fail verification: the
   `ed25519` scheme on a `0x` namespace, an unadvertised scheme, another
-  key's signature, a 63-byte blob, `now == expiry`, and `created` one
-  millisecond past the clock lead.
+  key's signature, a 63-byte blob, the SPEC-SIGNING §1 strict checks (a
+  small-order namespace key with `R` = identity and `s` = 0, which the
+  plain RFC 8032 equation accepts; a small-order `R`; `s ≥ L`),
+  `now == expiry`, and `created` one millisecond past the clock lead.
 
 Planned, with the implementations that need them: fixtures under
 `rust/tests/golden/grants/` and `rust/tests/golden/url-token/` covering

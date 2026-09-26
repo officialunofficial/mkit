@@ -98,9 +98,10 @@ pub enum GrantError {
     /// §4: the owner signature does not verify (including a non-canonical
     /// Ed25519 signature or a small-order or invalid namespace key).
     BadSignature,
-    /// §7 step 2: the statement's namespace is not the request
-    /// repository's, or a statement's repository is not the request's.
+    /// §7 step 2: the grant's namespace is not the request repository's.
     NamespaceMismatch,
+    /// §9.1: a visibility statement's repository is not `X-Repository`.
+    RepositoryMismatch,
     /// §7 step 5, §5.2 check 4, §9.1: the deployment's own audience is not
     /// in `audiences` (byte comparison).
     AudienceNotListed,
@@ -170,6 +171,7 @@ impl GrantError {
             Self::SignatureLength => "signature length",
             Self::BadSignature => "bad signature",
             Self::NamespaceMismatch => "namespace mismatch",
+            Self::RepositoryMismatch => "repository mismatch",
             Self::AudienceNotListed => "audience not listed",
             Self::RepositoryNotInScope => "repository not in scope",
             Self::CapabilityNotGranted => "capability not granted",

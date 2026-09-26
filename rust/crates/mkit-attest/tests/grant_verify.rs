@@ -473,7 +473,7 @@ fn visibility_statement_verifies() {
     assert_eq!(at(&site, CREATED - 30_001), Err(GrantError::NotYetValid));
     assert_eq!(
         at(&repo("blog"), CREATED),
-        Err(GrantError::NamespaceMismatch)
+        Err(GrantError::RepositoryMismatch)
     );
     assert_eq!(
         verify_visibility_statement(

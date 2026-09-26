@@ -15,7 +15,7 @@
 
 use ed25519_dalek::Signer as _;
 use mkit_attest::grant::{
-    AcceptedSchemes, Capability, EpochStatement, EpochTransition, GrantRequest, OwnerVerified,
+    AcceptedSchemes, Capability, EpochStatement, EpochTransition, GrantRequest, VerifiedEpoch,
     VerifierConfig, Visibility, VisibilityStatement, epoch_transition, verify_epoch_statement,
     verify_grant_owner, verify_visibility_statement,
 };
@@ -28,6 +28,30 @@ const CREATED: i64 = 1_790_000_000_000;
 const DAY_MS: i64 = 86_400_000;
 /// A key that is neither the owner nor the grantee.
 const OTHER_SEED: [u8; 32] = [10; 32];
+/// The Ed25519 identity point (y = 1), of order 1.
+const IDENTITY_POINT: [u8; 32] = {
+    let mut p = [0; 32];
+    p[0] = 1;
+    p
+};
+/// The Ed25519 group order L, little-endian.
+const ED25519_L: [u8; 32] = [
+    0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10,
+];
+
+/// The signature `R || s` with `s + L` in place of `s` (same value mod L).
+fn add_l(signature: &[u8]) -> Vec<u8> {
+    let mut out = signature.to_vec();
+    let mut carry = 0u16;
+    for (i, l) in ED25519_L.iter().enumerate() {
+        let sum = u16::from(out[32 + i]) + u16::from(*l) + carry;
+        out[32 + i] = sum.to_le_bytes()[0];
+        carry = sum >> 8;
+    }
+    assert_eq!(carry, 0);
+    out
+}
 
 fn owner_key() -> SigningKey {
     SigningKey::from_bytes(&OWNER_SEED)
@@ -516,7 +540,7 @@ fn visibility_contexts() -> Vec<(VisibilityContext, Option<GrantError>)> {
                 format!("{}/blog", key_ns()),
                 CREATED,
             ),
-            Some(GrantError::NamespaceMismatch),
+            Some(GrantError::RepositoryMismatch),
         ),
         (
             ("at-expiry", AUDIENCE, site.clone(), expiry),
@@ -589,6 +613,7 @@ type VerifyReject = (
     GrantError,
 );
 
+#[allow(clippy::too_many_lines)] // a data table
 fn verify_rejects() -> Vec<VerifyReject> {
     let (_, good) = grant_vectors().swap_remove(0);
     let bytes = good.encode().unwrap();
@@ -620,7 +645,54 @@ fn verify_rejects() -> Vec<VerifyReject> {
     );
     let mut short = sign(&owner_key(), &bytes);
     short.pop();
+    // The same grant for the identity point as the namespace key, with the
+    // signature R = identity, s = 0: the cofactored equation holds for any
+    // message, and only the strict predicate's small-order check refuses it.
+    let weak = Namespace::Ed25519(IDENTITY_POINT);
+    let mut weak_grant = good.clone();
+    weak_grant.namespace = weak;
+    weak_grant.scope = repo(weak, "website");
+    let weak_bytes = weak_grant.encode().unwrap();
+    let weak_ctx: GrantContext = (
+        "",
+        AUDIENCE,
+        format!("{weak}/website"),
+        grantee(),
+        Capability::Write,
+        CREATED,
+    );
+    let identity_r_zero_s = [IDENTITY_POINT, [0; 32]].concat();
     vec![
+        (
+            "verify-small-order-key",
+            "§4, SPEC-SIGNING §1: a small-order namespace key (the identity) is rejected, \
+             even with R = identity and s = 0",
+            vec![OwnerScheme::Ed25519],
+            header(&weak_bytes, OwnerScheme::Ed25519, identity_r_zero_s.clone()),
+            weak_ctx,
+            GrantError::BadSignature,
+        ),
+        (
+            "verify-small-order-r",
+            "§4, SPEC-SIGNING §1: a signature whose R is a small-order point (the identity) \
+             is rejected",
+            vec![OwnerScheme::Ed25519],
+            header(&bytes, OwnerScheme::Ed25519, identity_r_zero_s),
+            ctx(CREATED),
+            GrantError::BadSignature,
+        ),
+        (
+            "verify-signature-s-not-canonical",
+            "§4, SPEC-SIGNING §1: s >= L is rejected (the owner's valid signature with s + L)",
+            vec![OwnerScheme::Ed25519],
+            header(
+                &bytes,
+                OwnerScheme::Ed25519,
+                add_l(&sign(&owner_key(), &bytes)),
+            ),
+            ctx(CREATED),
+            GrantError::BadSignature,
+        ),
         (
             "verify-scheme-wrong-namespace-form",
             "§4: ed25519 is valid only for an ed25519- namespace",
@@ -800,7 +872,7 @@ fn epoch_ed25519_goldens() {
             "{name}"
         );
     }
-    let verified: OwnerVerified<EpochStatement> =
+    let verified: VerifiedEpoch =
         verify_epoch_statement(&ed_cfg(AUDIENCE), &header_text, CREATED).unwrap();
     assert_eq!(verified.statement(), &epoch_vector());
     for (stored, new, outcome) in transitions() {

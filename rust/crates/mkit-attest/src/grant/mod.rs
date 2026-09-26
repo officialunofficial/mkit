@@ -43,8 +43,9 @@ pub use owner::verify_owner_signature;
 pub use ref_scope::{RefFlags, RefPattern, RefScopes, head_packmap, packmap_head};
 pub use statement::{Capabilities, Capability, Grant, RepoScope};
 pub use verify::{
-    GrantRequest, OwnerVerified, VerifiedGrant, verify_epoch_statement, verify_for_registration,
-    verify_grant_owner, verify_visibility_statement,
+    GrantRequest, OwnerVerified, VerifiedEpoch, VerifiedGrant, VerifiedVisibility,
+    verify_epoch_statement, verify_for_registration, verify_grant_owner,
+    verify_visibility_statement,
 };
 pub use visibility::{Visibility, VisibilityStatement};
 

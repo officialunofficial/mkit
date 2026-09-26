@@ -25,7 +25,10 @@
 #     pycryptodome's RFC 8032 Ed25519 over BLAKE3(statement) (deterministic,
 #     so signature and header bytes must be equal), and every accept, reject
 #     and reject/verify-* context re-run through a stateless verifier written
-#     here from §4, §5.2, §7 and §9.1.
+#     here from §4, §5.2, §7 and §9.1. Signatures are checked with the
+#     SPEC-SIGNING §1 strict predicate: canonical, non-small-order A and R
+#     and S < L are enforced here, because pycryptodome's RFC 8032 verify
+#     alone accepts, for example, the identity key with R = identity, s = 0.
 #
 # The reject vectors are authored by the CASES table below: each case edits
 # one field of the §3.4 example so that it breaks exactly one §3.5 rule, and
@@ -429,6 +432,69 @@ def ed25519_sign(seed, statement):
     return eddsa.new(eddsa.import_private_key(seed), "rfc8032").sign(blake3(statement))
 
 
+# Ed25519 arithmetic (RFC 8032 §5.1) for the SPEC-SIGNING §1 checks 1-3,
+# which RFC 8032 leaves optional and pycryptodome does not enforce.
+ED_P = 2**255 - 19
+ED_L = 2**252 + 27742317777372353535851937790883648493
+ED_D = -121665 * pow(121666, ED_P - 2, ED_P) % ED_P
+ED_SQRT_M1 = pow(2, (ED_P - 1) // 4, ED_P)
+ED_IDENTITY = (0, 1)
+
+
+def ed_decode(encoded):
+    """RFC 8032 §5.1.3 point decoding with the canonical rule of
+    SPEC-SIGNING §1 check 1 (y < p, and no x = 0 with the sign bit set).
+    None if the encoding is not a canonical curve point."""
+    y = int.from_bytes(encoded, "little")
+    sign, y = y >> 255, y & ((1 << 255) - 1)
+    if y >= ED_P:
+        return None
+    x2 = (y * y - 1) * pow(ED_D * y * y + 1, ED_P - 2, ED_P) % ED_P
+    x = pow(x2, (ED_P + 3) // 8, ED_P)
+    if (x * x - x2) % ED_P:
+        x = x * ED_SQRT_M1 % ED_P
+    if (x * x - x2) % ED_P:
+        return None
+    if x == 0 and sign:
+        return None
+    if x & 1 != sign:
+        x = ED_P - x
+    return (x, y)
+
+
+def ed_add(p1, p2):
+    """Affine twisted Edwards addition (a = -1); complete on Ed25519."""
+    (x1, y1), (x2, y2) = p1, p2
+    t = ED_D * x1 * x2 * y1 * y2 % ED_P
+    x3 = (x1 * y2 + x2 * y1) * pow(1 + t, ED_P - 2, ED_P) % ED_P
+    y3 = (y1 * y2 + x1 * x2) * pow(1 - t, ED_P - 2, ED_P) % ED_P
+    return (x3, y3)
+
+
+def ed_small_order(point):
+    """SPEC-SIGNING §1 check 2: [8]P is the identity."""
+    for _ in range(3):
+        point = ed_add(point, point)
+    return point == ED_IDENTITY
+
+
+def ed25519_verify_strict(public, message, signature):
+    """SPEC-SIGNING §1: canonical, non-small-order A and R; S < L; then the
+    RFC 8032 equation (pycryptodome). True iff every check passes."""
+    a = ed_decode(public)
+    r = ed_decode(signature[:32])
+    if a is None or r is None or ed_small_order(a) or ed_small_order(r):
+        return False
+    if int.from_bytes(signature[32:], "little") >= ED_L:
+        return False
+    eddsa = eddsa_module()
+    try:
+        eddsa.new(eddsa.import_public_key(encoded=public), "rfc8032").verify(message, signature)
+    except ValueError:
+        return False
+    return True
+
+
 def b64url_decode(segment):
     return base64.urlsafe_b64decode(segment + "=" * (-len(segment) % 4))
 
@@ -443,11 +509,8 @@ def owner_signature(schemes, scheme, statement, blob, namespace):
             return "scheme namespace mismatch"
         if len(blob) != 64:
             return "signature length"
-        eddsa = eddsa_module()
-        try:
-            key = eddsa.import_public_key(encoded=bytes.fromhex(namespace[len("ed25519-"):]))
-            eddsa.new(key, "rfc8032").verify(blake3(statement), blob)
-        except ValueError:
+        public = bytes.fromhex(namespace[len("ed25519-"):])
+        if not ed25519_verify_strict(public, blake3(statement), blob):
             return "bad signature"
         return None
     if not namespace.startswith("0x"):
@@ -526,7 +589,7 @@ def verify_visibility(value, schemes, audience, repository, now):
         return decoded
     statement, scheme, blob, f = decoded
     if f[1] != repository:
-        return "namespace mismatch"
+        return "repository mismatch"
     err = owner_signature(schemes, scheme, statement, blob, f[1].split("/", 1)[0])
     if err:
         return err
@@ -542,6 +605,28 @@ def epoch_transition(stored, new):
     if stored < new <= stored + MAX_EPOCH_STEP:
         return "advance"
     return "reject"
+
+
+def ed25519_self_test():
+    """The strict predicate accepts a real signature and refuses the forms
+    plain RFC 8032 verification tolerates."""
+    seed = bytes([9] * 32)
+    public = ed25519_public(seed)
+    message = blake3(b"self-test")
+    good = ed25519_sign(seed, b"self-test")  # signs BLAKE3(b"self-test") == message
+    assert ed25519_verify_strict(public, message, good)
+    identity = (1).to_bytes(32, "little")
+    forged = identity + bytes(32)  # R = identity, s = 0
+    # The cofactored equation holds for the identity key, so a lax
+    # verifier accepts it; the strict predicate must not.
+    assert not ed25519_verify_strict(identity, message, forged)
+    order2 = (ED_P - 1).to_bytes(32, "little")
+    assert ed_small_order(ed_decode(order2)) and ed_small_order(ed_decode(bytes(32)))
+    assert not ed_small_order(ed_decode(public))
+    assert not ed25519_verify_strict(public, message, identity + good[32:])
+    high_s = good[:32] + (int.from_bytes(good[32:], "little") + ED_L).to_bytes(32, "little")
+    assert not ed25519_verify_strict(public, message, high_s)
+    assert ed_decode(ED_P.to_bytes(32, "little")) is None  # y = p: non-canonical
 
 
 def check_signed_vector(v, seed, build, validate):
@@ -624,6 +709,9 @@ def check_signed(root):
     expected = {"scheme namespace mismatch", "scheme not advertised", "bad signature",
                 "signature length", "expired", "not yet valid"}
     assert {row[1] for row in rows} == expected, rows
+    for name in ("verify-small-order-key", "verify-small-order-r",
+                 "verify-signature-s-not-canonical"):
+        assert any(row[0] == name for row in rows), f"missing reject/{name}.json"
     return counts, rows
 
 
@@ -775,6 +863,8 @@ def check(root, use_b3sum):
     ), "reference BLAKE3 self-test"
     if use_b3sum and shutil.which("b3sum") is None:
         sys.exit("FAIL: b3sum not found (install it, or pass --no-b3sum)")
+
+    ed25519_self_test()
 
     # Sanity: the validator accepts the §3.4 example and one padded to the bound.
     assert validate_grant("\n".join(EXAMPLE).encode()) is None

@@ -24,7 +24,7 @@
         },
         {
           "audience": "https://git.example.com",
-          "expected_error": "namespace mismatch",
+          "expected_error": "repository mismatch",
           "name": "other-repository",
           "now": 1790000000000,
           "repository": "ed25519-fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618/blog"
