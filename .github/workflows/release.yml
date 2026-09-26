@@ -3,10 +3,13 @@ name: "Release: Artifacts"
 # Triggered by pushing a semver tag (v0.1.0, v1.2.3, etc.).
 #
 # This workflow:
-#   1. Builds static mkit binaries for macOS (arm64/x86_64) and Linux
-#      (x86_64/arm64) with a pinned Rust toolchain (see
-#      rust/rust-toolchain.toml). Windows is not a supported target
-#      (MKIT-6; see docs/INVARIANTS.md) — WSL runs the Linux binary.
+#   1. Builds static mkit and mkit-server binaries for macOS (arm64/x86_64)
+#      and Linux (x86_64/arm64) with a pinned Rust toolchain (see
+#      rust/rust-toolchain.toml), one archive per binary per target. The two
+#      binaries are built by separate cargo invocations so feature
+#      unification cannot pull server dependencies into mkit (D31).
+#      Windows is not a supported target (MKIT-6; see docs/INVARIANTS.md) —
+#      WSL runs the Linux binary.
 #   2. Produces a CycloneDX SBOM (sbom.cdx.json).
 #   3. Signs every archive with cosign OIDC keyless (transparency log: Rekor)
 #      and signs the aggregated SHA256SUMS the same way.
@@ -52,6 +55,16 @@ permissions:
 env:
   RUST_VERSION: "1.95.0"
   BINARY_NAME: mkit
+  # The long-running server (mkit-server-native, D31), shipped as its own
+  # archive next to mkit's.
+  SERVER_BINARY_NAME: mkit-server
+  # mkit-server-native's shipped feature set, implied features included
+  # (`enc` implies `http`, which implies `sqlite`): the HTTP listener with
+  # SQLite metadata, S3 blobs and the mkit+enc:// listener. Built with
+  # --no-default-features so a new default feature (or a test seam such as
+  # `test-faults`) never ships unreviewed; the build job checks the compiled
+  # set against this list.
+  SERVER_FEATURES: "enc,http,s3,sqlite"
 
 jobs:
   validate-release-tag:
@@ -233,6 +246,8 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "archive=${{ env.BINARY_NAME }}-${VERSION}-${{ matrix.target }}.${{ matrix.archive_ext }}" >> "$GITHUB_OUTPUT"
           echo "stage=${{ env.BINARY_NAME }}-${VERSION}-${{ matrix.target }}" >> "$GITHUB_OUTPUT"
+          echo "server_archive=${{ env.SERVER_BINARY_NAME }}-${VERSION}-${{ matrix.target }}.${{ matrix.archive_ext }}" >> "$GITHUB_OUTPUT"
+          echo "server_stage=${{ env.SERVER_BINARY_NAME }}-${VERSION}-${{ matrix.target }}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout (at resolved tag)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -263,7 +278,15 @@ jobs:
           version: '31.0'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build release binary
+      # mkit and mkit-server are built by SEPARATE cargo invocations, each
+      # selecting one package with -p. Cargo unifies features across every
+      # package selected in one invocation, so building both binaries at
+      # once (or a bare `--bin mkit` from the workspace root, which selects
+      # every member) would compile the shipped mkit with hyper `server`,
+      # connectrpc `axum` and a bundled SQLite (D31). Both invocations share
+      # target/: units built with different feature sets get different
+      # hashes, so neither overwrites the other's.
+      - name: Build release mkit binary
         shell: bash
         working-directory: rust
         env:
@@ -275,7 +298,75 @@ jobs:
             --release \
             --locked \
             --target ${{ matrix.target }} \
-            --bin ${{ env.BINARY_NAME }}
+            -p mkit-cli \
+            --bin ${{ env.BINARY_NAME }} \
+            --message-format=json-render-diagnostics > "${RUNNER_TEMP}/mkit-build.jsonl"
+
+      # Checks what invocation 1 really compiled (its compiler-artifact
+      # messages) and scans the stripped binary: no server-only package, no
+      # hyper `server`, no connectrpc `server`/`axum`, no SQLite, no test
+      # seam. The PR-time dependency checks model mkit-cli alone and cannot
+      # see unification in this build.
+      - name: Check release mkit artifact
+        shell: bash
+        run: |
+          bash scripts/check-release-artifact-features.sh \
+            "${RUNNER_TEMP}/mkit-build.jsonl" \
+            "rust/target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}"
+
+      # The server needs no protoc (vendored codegen, WP-M0-06). rusqlite's
+      # bundled SQLite is C, compiled by `cc` with the runner's compiler.
+      - name: Build release mkit-server binary
+        shell: bash
+        working-directory: rust
+        env:
+          # Same flags as the mkit build above.
+          RUSTFLAGS: "-C codegen-units=1 -C strip=symbols"
+        run: |
+          cargo build \
+            --release \
+            --locked \
+            --target ${{ matrix.target }} \
+            -p mkit-server-native \
+            --no-default-features \
+            --features "${{ env.SERVER_FEATURES }}" \
+            --bin ${{ env.SERVER_BINARY_NAME }} \
+            --message-format=json-render-diagnostics > "${RUNNER_TEMP}/mkit-server-build.jsonl"
+
+      # mkit-server-native was compiled with exactly SERVER_FEATURES, and no
+      # package with the pipeline's `test-faults` seam (whose `x-mkit-test-*`
+      # headers must also be absent from the binary).
+      - name: Check release mkit-server artifact
+        shell: bash
+        run: |
+          bash scripts/check-release-artifact-features.sh \
+            --server "${{ env.SERVER_FEATURES }}" \
+            "${RUNNER_TEMP}/mkit-server-build.jsonl" \
+            "rust/target/${{ matrix.target }}/release/${{ env.SERVER_BINARY_NAME }}"
+
+      # Runs both binaries where the runner can execute them (every leg but
+      # x86_64-apple-darwin, cross-built on arm64): the version contract,
+      # and no test-only flag in mkit-server's help.
+      - name: Smoke-test release binaries
+        shell: bash
+        working-directory: rust
+        run: |
+          set -euo pipefail
+          HOST="$(rustc -vV | sed -n 's/^host: //p')"
+          if [ "${HOST}" != "${{ matrix.target }}" ]; then
+            echo "Cross-built for ${{ matrix.target }} on ${HOST}; skipping the run check."
+            exit 0
+          fi
+          VERSION="${{ steps.meta.outputs.version }}"
+          BIN_DIR="target/${{ matrix.target }}/release"
+          test "$("${BIN_DIR}/${{ env.BINARY_NAME }}" version)" = "mkit ${VERSION}"
+          test "$("${BIN_DIR}/${{ env.SERVER_BINARY_NAME }}" version)" = "mkit-server ${VERSION}"
+          HELP="$("${BIN_DIR}/${{ env.SERVER_BINARY_NAME }}" serve --help)"
+          if printf '%s\n' "${HELP}" | grep -Eiq -- '--[a-z0-9-]*(test|fault)|x-mkit-test'; then
+            echo "ERROR: mkit-server serve --help lists a test-only flag" >&2
+            exit 1
+          fi
+          echo "mkit ${VERSION} and mkit-server ${VERSION} run on ${HOST}"
 
       - name: Stage archive contents
         shell: bash
@@ -299,51 +390,80 @@ jobs:
           cp completions/mkit.zsh "${STAGE}/share/completions/_mkit"
           cp completions/mkit.fish "${STAGE}/share/completions/mkit.fish"
 
+      - name: Stage server archive contents
+        shell: bash
+        run: |
+          STAGE="${{ steps.meta.outputs.server_stage }}"
+          mkdir -p "${STAGE}"
+          BIN_SRC="rust/target/${{ matrix.target }}/release/${{ env.SERVER_BINARY_NAME }}"
+          if [ -f "${BIN_SRC}" ]; then
+            cp "${BIN_SRC}" "${STAGE}/"
+          else
+            echo "ERROR: ${{ env.SERVER_BINARY_NAME }} binary not found at ${BIN_SRC}" >&2
+            ls -la "rust/target/${{ matrix.target }}/release/" || true
+            exit 1
+          fi
+          cp LICENSE-MIT LICENSE-APACHE "${STAGE}/"
+          # The operator guide.
+          cp rust/crates/mkit-server-native/README.md "${STAGE}/README.md"
+          # Optional artifacts — included when present.
+          [ -f CHANGELOG.md ] && cp CHANGELOG.md "${STAGE}/" || true
+
+      # The steps below run once per archive (mkit, then mkit-server) with
+      # the same commands and flags as a single-archive build.
       - name: Compute per-archive SHA256SUMS
         shell: bash
-        working-directory: ${{ steps.meta.outputs.stage }}
         run: |
-          if command -v sha256sum >/dev/null 2>&1; then
-            find . -type f ! -name SHA256SUMS -exec sha256sum {} \; | sort -k 2 > SHA256SUMS
-          else
-            find . -type f ! -name SHA256SUMS -exec shasum -a 256 {} \; | sort -k 2 > SHA256SUMS
-          fi
-          cat SHA256SUMS
+          for STAGE in "${{ steps.meta.outputs.stage }}" "${{ steps.meta.outputs.server_stage }}"; do
+            (
+              cd "${STAGE}"
+              if command -v sha256sum >/dev/null 2>&1; then
+                find . -type f ! -name SHA256SUMS -exec sha256sum {} \; | sort -k 2 > SHA256SUMS
+              else
+                find . -type f ! -name SHA256SUMS -exec shasum -a 256 {} \; | sort -k 2 > SHA256SUMS
+              fi
+              cat SHA256SUMS
+            )
+          done
 
-      - name: Create archive (tar.gz)
+      - name: Create archives (tar.gz)
         shell: bash
         run: |
           tar -czf "${{ steps.meta.outputs.archive }}" "${{ steps.meta.outputs.stage }}"
-          ls -la "${{ steps.meta.outputs.archive }}"
+          tar -czf "${{ steps.meta.outputs.server_archive }}" "${{ steps.meta.outputs.server_stage }}"
+          ls -la "${{ steps.meta.outputs.archive }}" "${{ steps.meta.outputs.server_archive }}"
 
       - name: Compute archive-level SHA256
         shell: bash
         run: |
-          if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum "${{ steps.meta.outputs.archive }}" > "${{ steps.meta.outputs.archive }}.sha256"
-          else
-            shasum -a 256 "${{ steps.meta.outputs.archive }}" > "${{ steps.meta.outputs.archive }}.sha256"
-          fi
-          cat "${{ steps.meta.outputs.archive }}.sha256"
+          for ARCHIVE in "${{ steps.meta.outputs.archive }}" "${{ steps.meta.outputs.server_archive }}"; do
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256"
+            else
+              shasum -a 256 "${ARCHIVE}" > "${ARCHIVE}.sha256"
+            fi
+            cat "${ARCHIVE}.sha256"
+          done
 
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
         with:
           cosign-release: v2.4.1
 
-      - name: Sign archive with cosign (keyless OIDC)
+      - name: Sign archives with cosign (keyless OIDC)
         shell: bash
         env:
           COSIGN_EXPERIMENTAL: "1"
           COSIGN_YES: "true"
         run: |
-          ARCHIVE="${{ steps.meta.outputs.archive }}"
-          cosign sign-blob --yes \
-            --bundle "${ARCHIVE}.cosign.bundle" \
-            --output-signature "${ARCHIVE}.sig" \
-            --output-certificate "${ARCHIVE}.crt" \
-            "${ARCHIVE}"
-          echo "Signed ${ARCHIVE}; transparency log entries visible at https://search.sigstore.dev/"
+          for ARCHIVE in "${{ steps.meta.outputs.archive }}" "${{ steps.meta.outputs.server_archive }}"; do
+            cosign sign-blob --yes \
+              --bundle "${ARCHIVE}.cosign.bundle" \
+              --output-signature "${ARCHIVE}.sig" \
+              --output-certificate "${ARCHIVE}.crt" \
+              "${ARCHIVE}"
+            echo "Signed ${ARCHIVE}; transparency log entries visible at https://search.sigstore.dev/"
+          done
 
       # NOTE: macOS binaries are deliberately not codesigned or notarized.
       # We rely on cosign keyless signatures (signed above) for trust.
@@ -361,6 +481,11 @@ jobs:
             ${{ steps.meta.outputs.archive }}.sig
             ${{ steps.meta.outputs.archive }}.crt
             ${{ steps.meta.outputs.archive }}.cosign.bundle
+            ${{ steps.meta.outputs.server_archive }}
+            ${{ steps.meta.outputs.server_archive }}.sha256
+            ${{ steps.meta.outputs.server_archive }}.sig
+            ${{ steps.meta.outputs.server_archive }}.crt
+            ${{ steps.meta.outputs.server_archive }}.cosign.bundle
           if-no-files-found: error
           retention-days: 7
 
@@ -390,6 +515,10 @@ jobs:
           ref: ${{ steps.meta.outputs.commit }}
           fetch-depth: 0
 
+      # Scans the checked-out tree, so it reads rust/Cargo.lock: one graph
+      # for the whole workspace, covering both shipped binaries (mkit and
+      # mkit-server, whose axum/hyper/rusqlite/libsqlite3-sys and S3/enc
+      # dependencies live in the same lockfile).
       - name: Generate CycloneDX SBOM
         uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26  # v0.24.2
         with:
@@ -458,7 +587,8 @@ jobs:
       # (--all-features, so no optional/feature-gated dependency's license is
       # silently dropped from attribution just because this release's default
       # build didn't enable it) — matches the SBOM job's whole-workspace scope
-      # above. rust/about.toml carries the accepted-license policy in lockstep
+      # above. The workspace includes mkit-server-native, so the notices
+      # cover both shipped binaries, deduplicated. rust/about.toml carries the accepted-license policy in lockstep
       # with rust/deny.toml's [licenses] allow list; cargo-about fails this
       # step outright on any dependency whose license isn't in that list, and
       # that failure is a real release blocker (see rust/about.toml).
@@ -649,6 +779,35 @@ jobs:
             This is additive to the cosign signature above, not a
             replacement for it.
 
+            ### `mkit-server`
+
+            Each target also ships
+            `mkit-server-${{ steps.meta.outputs.version }}-<target>.tar.gz`: the
+            long-running native server (HTTP/Connect listener, SQLite or
+            `.mkit`-layout metadata, filesystem or S3 blobs, and the
+            `mkit+enc://` listener). It is a separate binary built in its own
+            cargo invocation, so the `mkit` CLI carries no HTTP server and no
+            SQLite. The archive holds the binary, licenses, the operator guide
+            (`README.md`) and the changelog.
+
+            It is covered by the same trust chain as `mkit`: a per-archive
+            cosign signature (`.cosign.bundle`, `.sig`, `.crt`), an entry in
+            the signed `SHA256SUMS`, the SLSA provenance above, and the SBOM
+            and `THIRD-PARTY-NOTICES` below. Verify it the same way:
+
+            ```sh
+            ARCHIVE=mkit-server-${{ steps.meta.outputs.version }}-<target>.tar.gz
+            cosign verify-blob \
+              --certificate-identity-regexp '^https://github\.com/officialunofficial/mkit/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$' \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+              --bundle "${ARCHIVE}.cosign.bundle" \
+              "${ARCHIVE}"
+            gh attestation verify "${ARCHIVE}" --repo officialunofficial/mkit
+            ```
+
+            Operator guide:
+            [`rust/crates/mkit-server-native/README.md`](https://github.com/officialunofficial/mkit/blob/${{ steps.meta.outputs.tag }}/rust/crates/mkit-server-native/README.md).
+
             ### Platform notes
 
             macOS binaries are **not codesigned or notarized**. Trust is
@@ -661,8 +820,10 @@ jobs:
             ### SBOM
 
             A CycloneDX SBOM (`sbom.cdx.json`) is attached. Reflects the
-            Rust crate graph (blake3, reqwest/rustls, ed25519-dalek, etc.)
-            plus toolchain and OS libraries.
+            Rust crate graph of the whole workspace, covering both `mkit` and
+            `mkit-server` (blake3, reqwest/rustls, ed25519-dalek, axum,
+            rusqlite with its bundled SQLite, etc.) plus toolchain and OS
+            libraries.
 
             ### npm package
 

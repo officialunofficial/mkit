@@ -40,7 +40,8 @@ it verifies that the tag is strict semver, annotated, GPG-signed by an
 allowlisted release fingerprint, and points at a commit reachable from
 `origin/main`. It then produces:
 
-1. **GitHub Release** with native binaries for four targets:
+1. **GitHub Release** with native `mkit` and `mkit-server` binaries for four
+   targets:
    - `aarch64-apple-darwin`
    - `x86_64-apple-darwin`
    - `aarch64-unknown-linux-gnu`
@@ -49,14 +50,38 @@ allowlisted release fingerprint, and points at a commit reachable from
    Windows is not a supported target (MKIT-6; see `docs/INVARIANTS.md`).
    Windows users should run mkit under WSL, which uses the Linux binary.
 
-   Each archive contains the `mkit` binary, licenses, README,
-   optional changelog, `share/man/man1/mkit.1`, and shell completions under
-   `share/completions/`. Each archive is cosign-signed (keyless OIDC, Rekor
-   logged) and ships alongside per-archive `.sig`/`.crt`/`.cosign.bundle`, an
-   aggregate `SHA256SUMS` (also cosign-signed), a CycloneDX `sbom.cdx.json`,
-   a `THIRD-PARTY-NOTICES` file, and a standards-based SLSA build provenance
+   Each target ships two archives:
+
+   - `mkit-X.Y.Z-<target>.tar.gz`: the `mkit` binary, licenses, README,
+     optional changelog, `share/man/man1/mkit.1`, and shell completions under
+     `share/completions/`.
+   - `mkit-server-X.Y.Z-<target>.tar.gz`: the `mkit-server` binary (the
+     long-running native server, PRD D31), licenses, the operator guide
+     (`rust/crates/mkit-server-native/README.md`, as `README.md`) and the
+     optional changelog. It is built with `mkit-server-native`'s
+     `enc,http,s3,sqlite` features (`SERVER_FEATURES` in `release.yml`):
+     the HTTP/Connect listener, `SQLite` and `.mkit`-layout metadata,
+     filesystem and S3 blobs, and the `mkit+enc://` listener. The
+     pipeline's `test-faults` seam is never enabled.
+
+   Each archive is cosign-signed (keyless OIDC, Rekor logged) and ships
+   alongside per-archive `.sig`/`.crt`/`.cosign.bundle`, an aggregate
+   `SHA256SUMS` (also cosign-signed), a CycloneDX `sbom.cdx.json`, a
+   `THIRD-PARTY-NOTICES` file, and a standards-based SLSA build provenance
    attestation (`actions/attest-build-provenance`), verifiable with `gh
-   attestation verify` or `slsa-verifier` in addition to cosign.
+   attestation verify` or `slsa-verifier` in addition to cosign. Both
+   binaries share that trust chain. The SBOM and the notices cover the whole
+   workspace, so they cover both binaries' dependencies.
+
+   The two binaries are built by **separate cargo invocations** (`-p
+   mkit-cli --bin mkit`, then `-p mkit-server-native --bin mkit-server`).
+   Cargo unifies features across every package selected in one invocation,
+   so a combined build would compile the shipped `mkit` with the server's
+   HTTP stack and a bundled `SQLite`. After each build,
+   [`scripts/check-release-artifact-features.sh`](../scripts/check-release-artifact-features.sh)
+   reads cargo's compiler-artifact messages and scans the stripped binary:
+   `mkit` must carry no server-only package or feature and no `SQLite`, and
+   `mkit-server` must have exactly `SERVER_FEATURES` and no test seam.
 
 2. **npm package** `@officialunofficial/mkit-wasm@X.Y.Z`. Built with
    `wasm-pack --target bundler` and published with `npm publish --access
@@ -82,7 +107,11 @@ Run top to bottom. Do not skip steps.
 
 - [ ] `main` is green in CI (build plus test).
 - [ ] `cd rust && cargo test --workspace` passes on a fresh clone.
-- [ ] `cargo build --release` passes for each release target:
+- [ ] Both release builds pass for each release target, as separate
+      invocations (the commands `release.yml` runs):
+      `cargo build --release --locked -p mkit-cli --bin mkit` and
+      `cargo build --release --locked -p mkit-server-native
+      --no-default-features --features enc,http,s3,sqlite --bin mkit-server`:
   - [ ] `--target=aarch64-apple-darwin`
   - [ ] `--target=x86_64-apple-darwin`
   - [ ] `--target=x86_64-unknown-linux-gnu`
@@ -122,7 +151,8 @@ Run top to bottom. Do not skip steps.
       `mkit-X.Y.Z-aarch64-apple-darwin.tar.gz`,
       `mkit-X.Y.Z-x86_64-apple-darwin.tar.gz`,
       `mkit-X.Y.Z-aarch64-unknown-linux-gnu.tar.gz`, and
-      `mkit-X.Y.Z-x86_64-unknown-linux-gnu.tar.gz`.
+      `mkit-X.Y.Z-x86_64-unknown-linux-gnu.tar.gz`, plus
+      `mkit-server-X.Y.Z-<target>.tar.gz` for the same four targets.
 - [ ] `sbom.cdx.json` present.
 - [ ] `THIRD-PARTY-NOTICES` present.
 - [ ] `SHA256SUMS`, `SHA256SUMS.sig`, `SHA256SUMS.crt`,
@@ -164,6 +194,11 @@ disagree, fix the script:
       `share/completions/mkit.fish`.
 - [ ] Basic flow: `mkit init` → add a file → `mkit commit`.
 - [ ] `npm view @officialunofficial/mkit-wasm@X.Y.Z` and `npm audit signatures`.
+- [ ] `mkit-server-X.Y.Z-<target>.tar.gz` (the script does not cover it):
+      verify its cosign signature and `SHA256SUMS` entry as shown
+      [below](#verify-a-downloaded-archive), extract it, and check that
+      `./mkit-server-X.Y.Z-<target>/mkit-server version` prints
+      `mkit-server X.Y.Z`.
 
 ### Distribution and announce
 
@@ -213,7 +248,7 @@ disagree, fix the script:
    strict `vX.Y.Z[-prerelease]` form, and tag targets not reachable from
    `origin/main`.
 5. Watch the workflows. `release.yml` job order is:
-   `validate-release-tag` → `build` (× 4 archs) → `sbom` / `third-party-notices`
+   `validate-release-tag` → `build` (× 4 archs, `mkit` + `mkit-server`) → `sbom` / `third-party-notices`
    (parallel) → `release` → `publish-wasm`. `crates-publish.yml` runs `cargo
    publish --workspace --locked` in dependency order.
 6. Run the [smoke test](#smoke-test).
@@ -302,16 +337,19 @@ release signature cannot be reused on any other artifact. The installer
 
 ### Artifacts attached to every release
 
-For each of the four target archives, release archives build the production
+For each of the four targets, release archives build the production
 `mkit-cli` target for that platform. The CLI enables the matching keystore
 software-protector feature so `software` keys are encrypted at rest on supported
 targets without changing the lean default feature set of the `mkit-keystore`
-library crate.
+library crate. Each target also ships the `mkit-server` binary, built from
+`mkit-server-native` in its own cargo invocation (see
+[What gets published](#what-gets-published)).
 
 | File | Purpose |
 | --- | --- |
 | `mkit-X.Y.Z-<triple>.tar.gz` | Binary, licenses, README, manpage, completions. |
-| `...sha256` | SHA256 of the archive (convenience). |
+| `mkit-server-X.Y.Z-<triple>.tar.gz` | `mkit-server` binary, licenses, operator guide (`README.md`), changelog. |
+| `...sha256` | SHA256 of the archive (convenience). Every archive, of either binary, has the full set of sidecars. |
 | `...sig` | Raw cosign signature (base64). |
 | `...crt` | Fulcio-issued code-signing certificate. |
 | `...cosign.bundle` | Bundle: sig plus cert plus Rekor entry. |
@@ -341,6 +379,9 @@ cosign verify-blob \
   --bundle "${ARCHIVE}.cosign.bundle" \
   "${ARCHIVE}"
 ```
+
+The same command verifies an `mkit-server` archive: set
+`ARCHIVE="mkit-server-${VERSION}-${TARGET}.tar.gz"`.
 
 Expected output: `Verified OK`. The `--certificate-identity-regexp` pins the
 signature to a tag build of mkit's release workflow; a signature produced by any
@@ -408,6 +449,7 @@ mkit-specific parsing:
 
 ```sh
 gh attestation verify mkit-X.Y.Z-<target>.tar.gz --repo officialunofficial/mkit
+gh attestation verify mkit-server-X.Y.Z-<target>.tar.gz --repo officialunofficial/mkit
 ```
 
 or with [`slsa-verifier`](https://github.com/slsa-framework/slsa-verifier):
@@ -561,13 +603,18 @@ byte-identical binary to the one published on GitHub Releases.
 ```sh
 # 1. Clone at the release tag.
 git clone --depth 1 --branch vX.Y.Z https://github.com/officialunofficial/mkit.git
-cd mkit
+cd mkit/rust
 # 2. rustup picks up rust-toolchain.toml on first `cargo` invocation.
-# 3. Build for your target.
-cargo build --release --manifest-path rust/Cargo.toml --bin mkit
-# 4. Hash the binary.
-shasum -a 256 rust/target/release/mkit
-# 5. Compare against SHA256SUMS from the GitHub Release.
+# 3. Build for your target with release.yml's commands, one package per
+#    invocation (a combined build unifies features and differs).
+export RUSTFLAGS="-C codegen-units=1 -C strip=symbols"
+TARGET=x86_64-unknown-linux-gnu
+cargo build --release --locked --target "$TARGET" -p mkit-cli --bin mkit
+cargo build --release --locked --target "$TARGET" -p mkit-server-native \
+  --no-default-features --features enc,http,s3,sqlite --bin mkit-server
+# 4. Hash the binaries.
+shasum -a 256 "target/$TARGET/release/mkit" "target/$TARGET/release/mkit-server"
+# 5. Compare against the SHA256SUMS inside each release archive.
 ```
 
 If the hashes don't match, treat it as a supply-chain incident: open an issue

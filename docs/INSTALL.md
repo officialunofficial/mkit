@@ -22,6 +22,7 @@ verify the result.
 | CLI on a dev machine (Linux/macOS)    | Release archive or `cargo install --git` | `curl mkit.sh \| sh` *or* `cargo install --git https://github.com/officialunofficial/mkit mkit-cli` |
 | CLI on a dev machine (Windows)        | Not supported &mdash; use WSL         | run the above `install.sh` (or `cargo install`) inside WSL |
 | CI / backend (pin a version)          | Release archive                      | `curl -LO …/releases/download/v<VERSION>/mkit-<VERSION>-<target>.tar.gz && tar -xzf mkit-<VERSION>-<target>.tar.gz` |
+| Self-hosted server (`mkit-server`)    | Release archive                      | `curl -LO …/releases/download/v<VERSION>/mkit-server-<VERSION>-<target>.tar.gz` ([details](#mkit-server)) |
 | Browser / Cloudflare Worker           | npm                                  | `bun add @officialunofficial/mkit-wasm`                                                                                  |
 | Library inside another Rust crate     | crates.io (or git dependency)        | `mkit-core = "0.3"`                                                                                  |
 
@@ -157,6 +158,39 @@ cosign verify-blob \
 
 Full reproducibility, signing, and supply-chain notes live under
 [`docs/RELEASE.md`](RELEASE.md).
+
+### `mkit-server`
+
+Every release also ships `mkit-server`, the long-running native server
+(HTTP/Connect listener, `SQLite` or `.mkit`-layout metadata, filesystem or
+S3 blobs, and the `mkit+enc://` listener), as its own archive for the same
+four targets: `mkit-server-<version>-<target>.tar.gz`. It holds the
+`mkit-server` binary, the licenses, the operator guide (`README.md`) and
+the changelog. It is a separate binary, so the `mkit` CLI carries no HTTP
+server and no `SQLite`. The installer, Homebrew and `cargo binstall`
+install `mkit` only; fetch `mkit-server` directly:
+
+```sh
+VERSION=0.4.2
+TARGET=x86_64-unknown-linux-gnu
+ARCHIVE="mkit-server-${VERSION}-${TARGET}.tar.gz"
+URL="https://github.com/officialunofficial/mkit/releases/download/v${VERSION}/${ARCHIVE}"
+curl -LO "$URL"
+curl -LO "${URL}.cosign.bundle"
+cosign verify-blob \
+  --bundle "${ARCHIVE}.cosign.bundle" \
+  --certificate-identity-regexp '^https://github\.com/officialunofficial/mkit/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  "${ARCHIVE}"
+tar -xzf "${ARCHIVE}"
+"./mkit-server-${VERSION}-${TARGET}/mkit-server" version
+```
+
+It is covered by the same signed `SHA256SUMS`, SLSA provenance (`gh
+attestation verify "${ARCHIVE}" --repo officialunofficial/mkit`), SBOM and
+`THIRD-PARTY-NOTICES` as `mkit`. How to run it (authentication, storage,
+limits, the reverse proxy it expects) is in the operator guide,
+[`rust/crates/mkit-server-native/README.md`](../rust/crates/mkit-server-native/README.md).
 
 ## WASM / npm
 

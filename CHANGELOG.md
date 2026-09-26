@@ -109,6 +109,19 @@ train).
 
 ### Added
 
+- *(release)* Every signed release also ships
+  `mkit-server-<version>-<target>.tar.gz` for the same four targets as
+  `mkit` (the `mkit-server` binary, licenses, the operator guide and the
+  changelog), covered by the same per-archive cosign signatures, signed
+  `SHA256SUMS`, SLSA provenance, SBOM and `THIRD-PARTY-NOTICES`. It is
+  built from `mkit-server-native` with `--no-default-features --features
+  enc,http,s3,sqlite`, in a cargo invocation separate from `mkit`'s. The
+  new `scripts/check-release-artifact-features.sh` checks each build's
+  compiler-artifact messages and binary: `mkit` must carry no server
+  package, server feature or `SQLite`, and `mkit-server` exactly the
+  shipped features and never `test-faults`. The `mkit` build now selects
+  `-p mkit-cli`: the bare `--bin mkit` selected every workspace member and
+  unified their features into the shipped CLI. See `docs/RELEASE.md`.
 - *(core)* `pack::DeltaBaseSource`: the external delta-base lookup is
   now an explicit, generic parameter, so a server can resolve bases only
   from the pushing repository's membership (PRD §6.5, no existence
