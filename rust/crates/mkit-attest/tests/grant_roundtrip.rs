@@ -156,8 +156,17 @@ fn mutate(mut bytes: Vec<u8>, op: u8, pos: usize, byte: u8) -> Vec<u8> {
     bytes
 }
 
+/// Proptest case count: `PROPTEST_CASES` when set (for deeper local runs),
+/// else `default` (explicit `with_cases` would otherwise ignore the env).
+fn cases(default: u32) -> u32 {
+    std::env::var("PROPTEST_CASES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(512))]
+    #![proptest_config(ProptestConfig::with_cases(cases(512)))]
 
     #[test]
     fn grant_parse_encode_roundtrip(g in grant()) {
@@ -242,7 +251,7 @@ fn visibility_statement() -> impl Strategy<Value = VisibilityStatement> {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(512))]
+    #![proptest_config(ProptestConfig::with_cases(cases(512)))]
 
     #[test]
     fn epoch_statement_parse_encode_roundtrip(s in epoch_statement()) {
@@ -301,7 +310,7 @@ proptest! {
 
 proptest! {
     // Each case signs and verifies once; fewer cases keep the suite fast.
-    #![proptest_config(ProptestConfig::with_cases(128))]
+    #![proptest_config(ProptestConfig::with_cases(cases(128)))]
 
     /// A signed header edited anywhere either fails verification or still
     /// carries exactly the signed statement and signature: the canonical

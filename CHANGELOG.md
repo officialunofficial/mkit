@@ -138,8 +138,11 @@ train).
   signature, curve-checked key whose address must equal the namespace,
   UP flag, relying-party id hash and that relying party's origin, and a
   strict `clientDataJSON`: duplicate member names rejected at any depth,
-  `type`, exact challenge, `crossOrigin`, no `topOrigin`, signature over
-  the received bytes). New `RelyingParty`, `WebAuthnAssertion` and
+  nesting at most 64 deep, finite binary64 numbers only, `type`, exact
+  challenge, `crossOrigin`, no `topOrigin`, signature over the received
+  bytes; SPEC-WRITE-GRANTS §4.3 now states the depth and number limits).
+  The legacy DSSE helper `verify_webauthn_wrapping_with_policy` is
+  documented as lax and for self-checks only. New `RelyingParty`, `WebAuthnAssertion` and
   `webauthn_challenge`; `OwnerVerified`/`VerifiedEpoch`/
   `VerifiedVisibility::relying_party`. **Breaking (unreleased API):**
   `VerifierConfig::new` and `new_allowing_loopback` take the relying

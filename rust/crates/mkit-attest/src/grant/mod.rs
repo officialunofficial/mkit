@@ -51,7 +51,7 @@ pub use verify::{
     verify_visibility_statement,
 };
 pub use visibility::{Visibility, VisibilityStatement};
-pub use webauthn::{RelyingParty, WebAuthnAssertion, webauthn_challenge};
+pub use webauthn::{MAX_CLIENT_DATA_DEPTH, RelyingParty, WebAuthnAssertion, webauthn_challenge};
 
 /// Domain separator and first field of a grant statement (§12.1).
 pub const DOMAIN_GRANT: &str = "mkit-write-grant:v1";

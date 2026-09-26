@@ -18,11 +18,13 @@
 //! context and reject through its own verifier written from the spec.
 
 use k256::ecdsa::SigningKey as K1Key;
+use k256::elliptic_curve::ops::Reduce;
+use k256::elliptic_curve::point::AffineCoordinates;
 use mkit_attest::eth;
 use mkit_attest::grant::{
-    AcceptedSchemes, Capability, EpochStatement, GrantRequest, RelyingParty, VerifierConfig,
-    Visibility, VisibilityStatement, WebAuthnAssertion, verify_epoch_statement, verify_grant_owner,
-    verify_visibility_statement, webauthn_challenge,
+    AcceptedSchemes, Capability, EpochStatement, GrantRequest, MAX_CLIENT_DATA_DEPTH, RelyingParty,
+    VerifierConfig, Visibility, VisibilityStatement, WebAuthnAssertion, verify_epoch_statement,
+    verify_grant_owner, verify_visibility_statement, webauthn_challenge,
 };
 use p256::ecdsa::signature::Signer as _;
 use p256::ecdsa::{Signature as P256Signature, SigningKey as P256Key};
@@ -74,6 +76,58 @@ fn neg(n: &[u8; 32], s: &[u8]) -> [u8; 32] {
         out[i] = (d + 256 * borrow).to_le_bytes()[0];
     }
     out
+}
+
+/// A secp256k1 `r ‖ s ‖ v` over `digest` whose SEC 1 recovery yields the
+/// point at infinity: `R = kG`, `r = x(R)`, `s = e / k`, so
+/// `r⁻¹(sR − eG) = O`. A verifier must refuse it (no key recovers).
+#[allow(clippy::many_single_char_names)] // the ECDSA equation
+fn k1_infinity_forgery(digest: &[u8; 32]) -> [u8; 65] {
+    type S = k256::Scalar;
+    let e = <S as Reduce<k256::FieldBytes>>::reduce(&(*digest).into());
+    for k in 2u64..1000 {
+        let k = S::from(k);
+        let point = (k256::ProjectivePoint::GENERATOR * k).to_affine();
+        let x = point.x();
+        let r = <S as Reduce<k256::FieldBytes>>::reduce(&x);
+        if r.to_bytes() != x {
+            continue; // x >= n: r would not name R
+        }
+        let s = e * k.invert().unwrap();
+        let mut out = [0u8; 65];
+        out[..32].copy_from_slice(&r.to_bytes());
+        out[32..64].copy_from_slice(&s.to_bytes());
+        let sig = k256::ecdsa::Signature::from_slice(&out[..64]).unwrap();
+        if sig.normalize_s() != sig {
+            continue; // keep only low s, so the scalar checks pass
+        }
+        out[64] = 27 + u8::from(bool::from(point.y_is_odd()));
+        return out;
+    }
+    unreachable!("some small k gives a low s")
+}
+
+/// A P-256 `r ‖ s` that verifies against the point at infinity for the
+/// SHA-256 `digest`: `r = x(kG)`, `s = e / k`. Libraries that represent
+/// the identity as `(0, 0)` accept it for the all-zero public key; a
+/// verifier must refuse that key before it checks the signature.
+#[allow(clippy::many_single_char_names)] // the ECDSA equation
+fn p256_infinity_forgery(digest: &[u8; 32]) -> [u8; 64] {
+    type S = p256::Scalar;
+    let e = <S as Reduce<p256::FieldBytes>>::reduce(&(*digest).into());
+    for k in 2u64..1000 {
+        let k = S::from(k);
+        let x = (p256::ProjectivePoint::GENERATOR * k).to_affine().x();
+        let r = <S as Reduce<p256::FieldBytes>>::reduce(&x);
+        let s = e * k.invert().unwrap();
+        let mut out = [0u8; 64];
+        out[..32].copy_from_slice(&r.to_bytes());
+        out[32..].copy_from_slice(&s.to_bytes());
+        if eth::p256_check_raw_low_s(&out).is_ok() {
+            return out;
+        }
+    }
+    unreachable!("some small k gives a low s")
 }
 
 fn relying_parties() -> Vec<RelyingParty> {
@@ -597,6 +651,22 @@ fn wa_vectors() -> Vec<Vector> {
             client_data,
             accept_only(ns),
         ),
+        wa_vector(
+            "grant-client-data-at-limits",
+            // Nested exactly MAX_CLIENT_DATA_DEPTH deep (the top-level object
+            // is depth 1), with the largest finite binary64 and an underflow.
+            Statement::Grant(grant_for(ns, 0xb1)),
+            (RP_ID, ORIGIN, 0x01, &[]),
+            |c, o| {
+                let depth = MAX_CLIENT_DATA_DEPTH - 1;
+                format!(
+                    r#"{{"type":"webauthn.get","challenge":"{c}","origin":"{o}","n":[1.7976931348623157e308,-1e-400,123456789012345678901234567890],"x":{}{{}}{}}}"#,
+                    "[".repeat(depth - 1),
+                    "]".repeat(depth - 1)
+                )
+            },
+            accept_only(ns),
+        ),
     ]
 }
 
@@ -772,6 +842,15 @@ fn k1_rejects() -> Vec<Reject> {
             GrantError::SchemeNamespaceMismatch,
         ),
         (
+            "verify-secp256k1-recovers-infinity",
+            "§4, §4.1: no key recovers when s·R = e·G (R = kG, r = x(R), s = e/k gives the point \
+             at infinity, which is no public key)",
+            k1.clone(),
+            with(&k1_infinity_forgery(&eth::eip191_hash(&bytes))),
+            write_ctx(ns),
+            GrantError::BadSignature,
+        ),
+        (
             "verify-secp256k1-not-advertised",
             "§4, §7 step 3: a scheme the deployment does not advertise fails",
             vec![OwnerScheme::Ed25519, OwnerScheme::WebAuthnP256],
@@ -824,7 +903,57 @@ fn wa_rejects() -> Vec<Reject> {
     let mut trailing = good.encode().unwrap();
     trailing.push(0);
     let ed_grant = grant_for(key_ns(), 0xb1).encode().unwrap();
+    // The all-zero key (x = y = 0: pycryptodome's encoding of the point at
+    // infinity) owning its own namespace, with a signature that verifies
+    // against the point at infinity.
+    let zero_ns = Namespace::Address(eth::keccak256(&[0; 64])[12..].try_into().unwrap());
+    let zero_bytes = grant_for(zero_ns, 0xb4).encode().unwrap();
+    let zero_cd = client_data(&webauthn_challenge(&zero_bytes), ORIGIN);
+    let zero_auth = authenticator_data(RP_ID, 0x01, &[]);
+    let zero_digest: [u8; 32] =
+        Sha256::digest([&zero_auth[..], &Sha256::digest(zero_cd.as_bytes())[..]].concat()).into();
+    let zero_key = WebAuthnAssertion {
+        public_key: [0; 64],
+        signature: p256_infinity_forgery(&zero_digest),
+        authenticator_data: zero_auth,
+        client_data_json: zero_cd.into_bytes(),
+    };
+    let depth = MAX_CLIENT_DATA_DEPTH;
+    let too_deep = format!(
+        r#"{{"type":"webauthn.get","challenge":"CH","origin":"OR","x":{}{{}}{}}}"#,
+        "[".repeat(depth - 1),
+        "]".repeat(depth - 1)
+    );
     vec![
+        (
+            "verify-webauthn-key-zero",
+            "§4.1: the public key is a valid P-256 point; x = y = 0 is not (some libraries encode \
+             the point at infinity so, and this signature verifies against infinity)",
+            wa.clone(),
+            signed_header(
+                &zero_bytes,
+                OwnerScheme::WebAuthnP256,
+                zero_key.encode().unwrap(),
+            ),
+            write_ctx(zero_ns),
+            GrantError::InvalidOwnerKey,
+        ),
+        (
+            "verify-webauthn-client-data-too-deep",
+            "§4.3 rule 2: clientDataJSON nests at most 64 deep (here 65: the top-level object is 1)",
+            wa.clone(),
+            signed_cd(&too_deep),
+            write_ctx(ns),
+            GrantError::ClientData,
+        ),
+        (
+            "verify-webauthn-client-data-number-overflow",
+            "§4.3 rule 2: every number is finite as an IEEE 754 binary64 value (1e400 is not)",
+            wa.clone(),
+            signed_cd(r#"{"type":"webauthn.get","challenge":"CH","origin":"OR","x":1e400}"#),
+            write_ctx(ns),
+            GrantError::ClientData,
+        ),
         (
             "verify-webauthn-high-s",
             "§4.4: s > n/2 is rejected, never normalized (the owner's signature with n - s)",

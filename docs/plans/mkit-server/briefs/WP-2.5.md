@@ -201,10 +201,13 @@ trailing non-whitespace fails): every object collects its **decoded** member nam
 reports the decoded values of `type`, `challenge`, `origin`, `crossOrigin` and `topOrigin` as
 `{ string | false | other }`. Member values are compared after JSON unescaping (RFC 8259 semantics: the member *is*
 the decoded string). serde_json already rejects invalid UTF-8, unpaired surrogate escapes, raw control characters,
-`NaN`/`Infinity`, comments, trailing commas and a BOM. Its two implementation limits (nesting depth 128; numbers
-outside the IEEE 754 double range) only reject more (RFC 8259 §9 permits both); no golden depends on them. The
-Python reference applies the same rules with `json.loads` (`object_pairs_hook` for duplicates, `parse_constant`
-refusing `NaN`/`Infinity`, strict UTF-8 decoding, and a lone-surrogate check).
+`NaN`/`Infinity`, comments, trailing commas and a BOM. Two limits are normative (added to §4.3 rule 2 in review):
+nesting at most `MAX_CLIENT_DATA_DEPTH` = 64 (top-level object = 1), enforced by the walk's own counter, below
+serde_json's internal cap (which allows only 127 levels, so "128" could not be the rule); and every number finite as a
+correctly rounded binary64 (`1e400` rejected). The Python reference applies the same rules with `json.loads`
+(`object_pairs_hook` for duplicates, `parse_constant` refusing `NaN`/`Infinity`, `parse_float`/`parse_int` refusing
+non-finite values, a depth count, strict UTF-8 decoding, and a lone-surrogate check), and decides curve membership
+from the curve equations itself (pycryptodome accepts `(0, 0)`, its point at infinity, as a P-256 key).
 
 ### Client helpers (`grant/webauthn.rs`)
 

@@ -69,6 +69,7 @@ import hashlib
 import importlib.util
 import ipaddress
 import json
+import math
 import os
 import re
 import shutil
@@ -547,6 +548,32 @@ K1_P = 2**256 - 2**32 - 977
 K1_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
 P256_P = 2**256 - 2**224 + 2**192 + 2**96 - 1
 P256_N = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
+P256_B = 0x5AC635D8AA3A93E7B3EBBD55769886BC651D06B0CC53B0F63BCE3C3E27D2604B
+# §4.3 rule 2 limits on clientDataJSON.
+MAX_CLIENT_DATA_DEPTH = 64
+
+
+# Curve membership is decided here, from the curve equations, never by a
+# library: pycryptodome encodes the point at infinity as (0, 0) and accepts
+# it as a public key, and libraries may reduce coordinates >= p. A point
+# must have 0 <= x, y < p, must not be (0, 0), and must satisfy the
+# equation (SEC 1 §2.3.4, §3.2.2.1; SPEC-WRITE-GRANTS §4.1).
+
+
+def on_k1(x, y):
+    """(x, y) is an affine secp256k1 point: y^2 = x^3 + 7 (mod p)."""
+    return (0 <= x < K1_P and 0 <= y < K1_P and (x, y) != (0, 0)
+            and (y * y - (x * x * x + 7)) % K1_P == 0)
+
+
+def on_p256(x, y):
+    """(x, y) is an affine P-256 point: y^2 = x^3 - 3x + b (mod p)."""
+    return (0 <= x < P256_P and 0 <= y < P256_P and (x, y) != (0, 0)
+            and (y * y - (x * x * x - 3 * x + P256_B)) % P256_P == 0)
+
+
+def xy_ints(xy):
+    return int.from_bytes(xy[:32], "big"), int.from_bytes(xy[32:], "big")
 
 
 def ecdsa_module():
@@ -591,12 +618,18 @@ def k1_recover(digest, r, s, recid):
     if beta * beta % K1_P != alpha:
         return None
     y = beta if beta % 2 == recid else K1_P - beta
+    assert on_k1(r, y)
     big_r = PointJacobi(curve, r, y, 1, K1_N)
     e = int.from_bytes(digest, "big") % K1_N
     q = (big_r * s + g * ((-e) % K1_N)) * pow(r, -1, K1_N)
+    # The point at infinity is no public key (s·R = e·G). Decide it here,
+    # not only through the library's INFINITY sentinel.
     if q == INFINITY:
         return None
-    xy = q.x().to_bytes(32, "big") + q.y().to_bytes(32, "big")
+    qx, qy = q.x(), q.y()
+    if qx is None or qy is None or not on_k1(qx, qy):
+        return None
+    xy = qx.to_bytes(32, "big") + qy.to_bytes(32, "big")
     # Cross-check with python-ecdsa's own recovery and verification.
     sig = r.to_bytes(32, "big") + s.to_bytes(32, "big")
     candidates = ecdsa.VerifyingKey.from_public_key_recovery_with_digest(
@@ -629,8 +662,10 @@ def verify_eip191(statement, blob, namespace):
 
 def k1_public(secret):
     ecdsa = ecdsa_module()
-    return ecdsa.SigningKey.from_string(secret, curve=ecdsa.SECP256k1) \
+    xy = ecdsa.SigningKey.from_string(secret, curve=ecdsa.SECP256k1) \
         .get_verifying_key().to_string()
+    assert on_k1(*xy_ints(xy))
+    return xy
 
 
 def eip191_sign(secret, statement):
@@ -676,8 +711,10 @@ class Duplicate(Exception):
 def client_data(raw):
     """§4.3 rule 2 syntax: RFC 8259 JSON text (strict UTF-8, no NaN or
     Infinity, no unpaired surrogate) whose top level is an object, with no
-    duplicate member name at any depth (compared after unescaping). The
-    decoded object, or None."""
+    duplicate member name at any depth (compared after unescaping), nested
+    at most MAX_CLIENT_DATA_DEPTH deep (the top-level object is 1), and
+    every number finite as an IEEE 754 binary64 value. The decoded object,
+    or None."""
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError:
@@ -692,9 +729,30 @@ def client_data(raw):
     def constant(name):
         raise ValueError(name)
 
+    def number(text):
+        value = float(text)  # correctly rounded; overflow gives inf
+        if not math.isfinite(value):
+            raise ValueError(text)
+        return value
+
+    def integer(text):
+        float(int(text))  # raises OverflowError past the binary64 range
+        return int(text)
+
     try:
-        value = json.loads(text, object_pairs_hook=pairs, parse_constant=constant)
-    except (ValueError, Duplicate):
+        value = json.loads(text, object_pairs_hook=pairs, parse_constant=constant,
+                           parse_float=number, parse_int=integer)
+    except (ValueError, OverflowError, RecursionError, Duplicate):
+        return None
+
+    def depth(v):
+        if isinstance(v, dict):
+            return 1 + max((depth(x) for x in v.values()), default=0)
+        if isinstance(v, list):
+            return 1 + max((depth(x) for x in v), default=0)
+        return 0
+
+    if depth(value) > MAX_CLIENT_DATA_DEPTH:
         return None
 
     def surrogate(v):
@@ -712,10 +770,12 @@ def client_data(raw):
 
 
 def p256_key(x, y):
-    """A pycryptodome P-256 public key, or None if (x, y) is not a point
-    with coordinates below p (SEC 1 §2.3.4)."""
+    """A pycryptodome P-256 public key, or None if (x, y) is not a P-256
+    point by `on_p256` (coordinates below p, not (0, 0), on the curve).
+    pycryptodome alone would accept (0, 0), its encoding of the point at
+    infinity, against which ECDSA is forgeable."""
     from Crypto.PublicKey import ECC
-    if x >= P256_P or y >= P256_P:
+    if not on_p256(x, y):
         return None
     try:
         return ECC.construct(curve="P-256", point_x=x, point_y=y)
@@ -779,6 +839,7 @@ def verify_webauthn(statement, blob, namespace, rps):
 def p256_public(secret):
     from Crypto.PublicKey import ECC
     point = ECC.construct(curve="P-256", d=int.from_bytes(secret, "big")).pointQ
+    assert on_p256(int(point.x), int(point.y))
     return int(point.x).to_bytes(32, "big") + int(point.y).to_bytes(32, "big")
 
 
@@ -822,6 +883,30 @@ def ecdsa_self_test():
     for bad in (b'{"a":1,"a":1}', b'{"x":[{"a":1,"a":2}]}', b'{"type":1,"\\u0074ype":1}',
                 b'{"x":"\\ud800"}', b'{"x":NaN}', b'[]', b'{"x":"\xff"}', b"{} x"):
         assert client_data(bad) is None, bad
+    # §4.3 rule 2 limits: depth 64 is the deepest (top-level object = 1),
+    # numbers finite as binary64.
+    at_limit = b'{"x":' + b"[" * 62 + b"{}" + b"]" * 62 + b"}"
+    over = b'{"x":' + b"[" * 63 + b"{}" + b"]" * 63 + b"}"
+    assert client_data(at_limit) is not None and client_data(over) is None
+    for good in (b"1.7976931348623157e308", b"-1e-400", b"1" + b"0" * 300):
+        assert client_data(b'{"x":' + good + b"}") is not None, good
+    for bad in (b"1e400", b"-1e400", b"1" + b"0" * 400, b"Infinity", b"-Infinity"):
+        assert client_data(b'{"x":' + bad + b"}") is None, bad
+    # Curve membership: (0, 0) -- pycryptodome's point at infinity -- and
+    # coordinates >= p are refused before any library sees them.
+    from Crypto.PublicKey import ECC
+    assert p256_key(0, 0) is None and not on_k1(0, 0)
+    try:
+        ECC.construct(curve="P-256", point_x=0, point_y=0)
+        library_accepts_infinity = True
+    except ValueError:
+        library_accepts_infinity = False
+    print(f"note: pycryptodome ECC.construct(P-256, 0, 0) accepted: {library_accepts_infinity}")
+    y0 = 0x66485C780E2F83D72433BD5D84A06BB6541C2AF31DAE871728BF856A174F93F4  # x = 0
+    assert on_p256(0, y0) and not on_p256(P256_P, y0) and p256_key(P256_P, y0) is None
+    gx = 0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798
+    gy = 0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8
+    assert on_k1(gx, gy) and not on_k1(gx + K1_P, gy) and not on_k1(gx, gy + 1)
 
 
 def window(created, expiry, now):

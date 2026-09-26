@@ -33,6 +33,10 @@ const FLAG_USER_PRESENT: u8 = 0x01;
 const CLIENT_DATA_TYPE_GET: &str = "webauthn.get";
 /// Longest relying-party id: a DNS name.
 const MAX_RP_ID_LEN: usize = 253;
+/// Deepest accepted `clientDataJSON` nesting (§4.3 rule 2): the top-level
+/// object is depth 1, and each array or object inside adds one. An explicit
+/// limit, independent of (and below) `serde_json`'s own recursion cap.
+pub const MAX_CLIENT_DATA_DEPTH: usize = 64;
 
 // ---- relying parties ---------------------------------------------------
 
@@ -245,14 +249,30 @@ struct ClientData {
     top_origin: bool,
 }
 
-/// Walk one JSON value, rejecting a repeated member name in any object.
-struct Walk;
+/// Walk one JSON value at nesting `depth` (the top-level object is 1),
+/// rejecting a repeated member name in any object, an array or object
+/// deeper than [`MAX_CLIENT_DATA_DEPTH`], and a non-finite number.
+#[derive(Clone, Copy)]
+struct Walk {
+    depth: usize,
+}
+
+impl Walk {
+    fn enter<E: de::Error>(self) -> Result<Self, E> {
+        if self.depth > MAX_CLIENT_DATA_DEPTH {
+            return Err(E::custom("nesting too deep"));
+        }
+        Ok(Self {
+            depth: self.depth + 1,
+        })
+    }
+}
 
 impl<'de> DeserializeSeed<'de> for Walk {
     type Value = Member;
 
     fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<Member, D::Error> {
-        d.deserialize_any(Walk)
+        d.deserialize_any(self)
     }
 }
 
@@ -275,8 +295,14 @@ impl<'de> Visitor<'de> for Walk {
         Ok(Member::Other)
     }
 
-    fn visit_f64<E>(self, _: f64) -> Result<Member, E> {
-        Ok(Member::Other)
+    fn visit_f64<E: de::Error>(self, v: f64) -> Result<Member, E> {
+        // serde_json already refuses a number outside the `f64` range; the
+        // rule is §4.3's, so it is stated here too.
+        if v.is_finite() {
+            Ok(Member::Other)
+        } else {
+            Err(E::custom("non-finite number"))
+        }
     }
 
     fn visit_str<E>(self, v: &str) -> Result<Member, E> {
@@ -288,25 +314,27 @@ impl<'de> Visitor<'de> for Walk {
     }
 
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Member, A::Error> {
-        while seq.next_element_seed(Walk)?.is_some() {}
+        let inner = self.enter()?;
+        while seq.next_element_seed(inner)?.is_some() {}
         Ok(Member::Other)
     }
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Member, A::Error> {
-        walk_object(&mut map, |_, _| {})?;
+        walk_object(&mut map, self.enter()?, |_, _| {})?;
         Ok(Member::Other)
     }
 }
 
-/// Walk one object's members, calling `each` with every (decoded) name and
-/// value; a repeated name is an error.
+/// Walk one object's members (their values walked with `inner`), calling
+/// `each` with every (decoded) name and value; a repeated name is an error.
 fn walk_object<'de, A: MapAccess<'de>>(
     map: &mut A,
+    inner: Walk,
     mut each: impl FnMut(&str, Member),
 ) -> Result<(), A::Error> {
     let mut seen = BTreeSet::new();
     while let Some(name) = map.next_key::<String>()? {
-        let value = map.next_value_seed(Walk)?;
+        let value = map.next_value_seed(inner)?;
         each(&name, value);
         if !seen.insert(name) {
             return Err(de::Error::custom("duplicate member name"));
@@ -335,7 +363,8 @@ impl<'de> Visitor<'de> for TopLevel {
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<ClientData, A::Error> {
         let mut out = ClientData::default();
-        walk_object(&mut map, |name, value| match name {
+        let inner = Walk { depth: 1 }.enter()?;
+        walk_object(&mut map, inner, |name, value| match name {
             "type" => out.ty = Some(value),
             "challenge" => out.challenge = Some(value),
             "origin" => out.origin = Some(value),
@@ -348,10 +377,11 @@ impl<'de> Visitor<'de> for TopLevel {
 }
 
 /// §4.3 rule 2's syntax: an RFC 8259 object with no duplicate member name
-/// at any depth (names compared after unescaping), valid UTF-8 and nothing
-/// but whitespace after it. `serde_json` also refuses unpaired surrogate
-/// escapes, raw control characters, `NaN`, comments and trailing commas;
-/// its limits (depth 128, numbers within the `f64` range) only reject more.
+/// at any depth (names compared after unescaping), nesting at most
+/// [`MAX_CLIENT_DATA_DEPTH`] deep, every number finite as an IEEE 754
+/// binary64 value, valid UTF-8 and nothing but whitespace after it.
+/// `serde_json` also refuses unpaired surrogate escapes, raw control
+/// characters, `NaN`, comments and trailing commas.
 fn parse_client_data(bytes: &[u8]) -> Result<ClientData, GrantError> {
     let mut de = serde_json::Deserializer::from_slice(bytes);
     let data = TopLevel
@@ -571,6 +601,45 @@ mod tests {
             parse_client_data(b"{\"x\":\"\xff\"}").unwrap_err(),
             GrantError::ClientData
         );
+        // Nesting: the top-level object is depth 1; depth 64 is accepted,
+        // 65 is not, whatever mix of arrays and objects gets there.
+        let nest = |depth: usize, open: &str, close: &str| {
+            format!(
+                "{{\"x\":{}1{}}}",
+                open.repeat(depth - 1),
+                close.repeat(depth - 1)
+            )
+        };
+        assert!(parse_client_data(nest(MAX_CLIENT_DATA_DEPTH, "[", "]").as_bytes()).is_ok());
+        assert!(parse_client_data(nest(MAX_CLIENT_DATA_DEPTH, "{\"a\":", "}").as_bytes()).is_ok());
+        assert_eq!(
+            parse_client_data(nest(MAX_CLIENT_DATA_DEPTH + 1, "[", "]").as_bytes()).unwrap_err(),
+            GrantError::ClientData
+        );
+        assert_eq!(
+            parse_client_data(nest(MAX_CLIENT_DATA_DEPTH + 1, "{\"a\":", "}").as_bytes())
+                .unwrap_err(),
+            GrantError::ClientData
+        );
+        // Numbers: finite binary64 values only.
+        for good in [
+            "1e308",
+            "-1.7976931348623157e308",
+            "1e-400",
+            "123456789012345678901234567890",
+        ] {
+            assert!(
+                parse_client_data(format!("{{\"x\":{good}}}").as_bytes()).is_ok(),
+                "{good}"
+            );
+        }
+        for bad in ["1e400", "-1e400", &format!("1{}", "0".repeat(400))] {
+            assert_eq!(
+                parse_client_data(format!("{{\"x\":{bad}}}").as_bytes()).unwrap_err(),
+                GrantError::ClientData,
+                "{bad}"
+            );
+        }
         // The walk sees every depth, even inside arrays of arrays.
         let deep = format!("{}{{\"a\":1,\"a\":2}}{}", "[".repeat(50), "]".repeat(50));
         assert!(parse_client_data(format!("{{\"x\":{deep}}}").as_bytes()).is_err());
@@ -619,6 +688,15 @@ mod tests {
         );
     }
 
+    /// Proptest case count: `PROPTEST_CASES` when set (for deeper local runs),
+    /// else `default` (explicit `with_cases` would otherwise ignore the env).
+    fn cases(default: u32) -> u32 {
+        std::env::var("PROPTEST_CASES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default)
+    }
+
     fn json_value() -> impl proptest::strategy::Strategy<Value = serde_json::Value> {
         use proptest::prelude::*;
         use serde_json::Value;
@@ -639,7 +717,7 @@ mod tests {
     }
 
     proptest::proptest! {
-        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(256))]
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(cases(256)))]
 
         /// Differential against `serde_json::Value`: every duplicate-free
         /// object serde_json writes is accepted; the same object with one

@@ -31,6 +31,15 @@ const K1_N: &str = "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd036
 const P256_N: &str = "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551";
 const P256_P: &str = "ffffffff00000001000000000000000000000000ffffffffffffffffffffffff";
 
+/// Proptest case count: `PROPTEST_CASES` when set (for deeper local runs),
+/// else `default` (explicit `with_cases` would otherwise ignore the env).
+fn cases(default: u32) -> u32 {
+    std::env::var("PROPTEST_CASES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
 // ---- shared ------------------------------------------------------------
 
 fn h32(s: &str) -> [u8; 32] {
@@ -293,7 +302,7 @@ fn secp256k1_owner_signature_rejects() {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(64))]
+    #![proptest_config(ProptestConfig::with_cases(cases(64)))]
 
     /// A normalized EIP-191 signature verifies against its own address, and
     /// no single-byte change to the blob or the statement verifies against
@@ -883,7 +892,7 @@ fn webauthn_client_normalizes_der_signatures() {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(48))]
+    #![proptest_config(ProptestConfig::with_cases(cases(48)))]
 
     /// An assertion over any statement, with any flags that include UP and
     /// any trailing `authenticatorData`, verifies; no single-byte change to

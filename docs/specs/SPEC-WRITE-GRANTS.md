@@ -279,7 +279,12 @@ bytes of the Keccak-256 of its 64 uncompressed coordinate bytes (`x`
 then `y`, each 32 bytes big-endian, without a prefix byte). The
 namespace digits are the lowercase hexadecimal of those 20 bytes, with
 no mixed-case checksum. A verifier MUST reject a public key that is not
-a valid point on its curve, including the point at infinity.
+a valid point on its curve, including the point at infinity: both
+coordinates are less than the curve's field prime `p`, they satisfy the
+curve equation, and the 64 zero bytes (which some libraries use for the
+point at infinity) are never a key. For `secp256k1-eip191`, a signature
+from which no key recovers, or which recovers the point at infinity, is
+rejected.
 
 Keccak-256 is the original Keccak submission with `0x01` padding, as
 Ethereum uses it, not FIPS 202 SHA3-256.
@@ -327,7 +332,11 @@ For `webauthn-p256`, the verifier MUST check all of these:
    signature counter are not checked; the verifier is stateless.
 2. `clientDataJSON` is a JSON object
    ([RFC 8259](https://www.rfc-editor.org/rfc/rfc8259)) with no
-   duplicate member names at any depth. Its `type` member is the string
+   duplicate member names at any depth, member names compared after
+   unescaping. It nests at most 64 deep: the top-level object is depth
+   1, and each array or object inside a value adds one. Every number in
+   it, converted to an IEEE 754 binary64 value with correct rounding, is
+   finite (so `1e400` is rejected). Its `type` member is the string
    `webauthn.get`. Its `challenge` member is exactly the string of 43
    characters that is the unpadded base64url of the 32-byte BLAKE3 of
    the canonical statement. `crossOrigin`, if present, is `false`. A
@@ -1121,19 +1130,23 @@ document's rules, independently of the Rust code.
   contexts; plus accepted client-data shapes (no `crossOrigin`, extra
   members, escaped member names and values, the user-verified and
   extension flags with extension bytes, a second origin of one relying
-  party).
+  party, and a `clientDataJSON` nested exactly 64 deep with the largest
+  finite binary64 number).
 - `reject/verify-secp256k1-*.json`, `reject/verify-webauthn-*.json`:
   signed statements that fail one §4, §4.1, §4.3 or §4.4 rule each,
   re-signed where needed so that only that rule fails: a high-`s`
   signature for each ECDSA scheme; `v` of 0 and 29; `r` or `s` out of
-  range; an `r` that is no x-coordinate; another owner's key; each ECDSA
+  range; an `r` that is no x-coordinate; a signature that recovers the
+  point at infinity; another owner's key; each ECDSA
   scheme on an `ed25519-` namespace and unadvertised; a public key off
-  the curve or with `x = p`; a 36-byte `authenticatorData`; a cleared
+  the curve, with `x = p`, or all zero (with a signature that verifies
+  against the point at infinity); a 36-byte `authenticatorData`; a cleared
   user-present flag; an unconfigured relying party; an origin that is not
   configured, or configured for another relying party; `type`
   `webauthn.create`; another statement's or a padded challenge;
   `crossOrigin` `true` or `"false"`; `topOrigin`; a duplicate member name
-  (plain, escaped and nested); an unpaired surrogate; a signature by
+  (plain, escaped and nested); an unpaired surrogate; nesting 65 deep; the
+  number `1e400`; a signature by
   another key or over a reserialized `clientDataJSON`; and a byte after
   the fourth blob field.
 
