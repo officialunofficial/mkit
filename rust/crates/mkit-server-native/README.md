@@ -65,6 +65,20 @@ body, so the server must read the (up to 4 MiB) unary body before it can
 reject an unsigned or forged request. Pass the original origin through
 unchanged: auth v2 signatures name the public origin (`--audience`).
 
+### Running in a container
+
+Releases publish `ghcr.io/officialunofficial/mkit-server` (`linux/amd64`,
+`linux/arm64`): distroless, running as uid 65532, with this binary at
+`/usr/local/bin/mkit-server` and `mkit-server serve` as the entrypoint, so
+arguments after the image are the flags below. Listen on `0.0.0.0` inside
+the container; make the root, the `SQLite` file and the enc key directory
+writable by uid 65532; pass Kubernetes secrets through `MKIT_API_TOKEN` and
+the S3 environment variables (secret volumes are symlinks, which the file
+flags refuse); and probe `grpc.health.v1.Health` from outside, since the
+image has no shell (for readiness only: it reports store outages). Details,
+including the enc port's per-IP limit:
+[`docs/CONTAINER.md`](https://github.com/officialunofficial/mkit/blob/main/docs/CONTAINER.md).
+
 ### The served root
 
 `--repo-root` must be a directory holding `.mkit`, and must lie under
