@@ -1,0 +1,54 @@
+`mkit serve` is only the ssh-frame stdin/stdout server. The HTTP and
+mkit+enc:// listener flags it used to take are unknown arguments (usage
+error, exit 64) with a pointer to `mkit-server`.
+
+```
+$ mkit serve --http 127.0.0.1:0 .
+? 64
+error: unexpected argument '--http' found
+
+  tip: to pass '--http' as a value, use '-- --http'
+
+Usage: mkit serve <PATH>
+
+For more information, try '--help'.
+hint: `mkit serve` no longer takes `--http`; it only speaks the ssh-frame protocol on stdin/stdout.
+      The HTTP and mkit+enc:// listeners are the separate `mkit-server` binary:
+        mkit-server serve --repo-root <PATH> --listen <ADDR>      (was: mkit serve <PATH> --http <ADDR>)
+        mkit-server serve --repo-root <PATH> --listen-enc <ADDR>  (was: mkit serve <PATH> --listen-enc <ADDR>)
+      See "Migrating from `mkit serve --http` and `--listen-enc`" in docs/CLI.md.
+
+```
+
+```
+$ mkit serve . --listen-enc=127.0.0.1:9418 --unsafe-allow-any-enc-peer
+? 64
+error: unexpected argument '--listen-enc' found
+
+  tip: to pass '--listen-enc' as a value, use '-- --listen-enc'
+
+Usage: mkit serve <PATH>
+
+For more information, try '--help'.
+hint: `mkit serve` no longer takes `--listen-enc`; it only speaks the ssh-frame protocol on stdin/stdout.
+      The HTTP and mkit+enc:// listeners are the separate `mkit-server` binary:
+        mkit-server serve --repo-root <PATH> --listen <ADDR>      (was: mkit serve <PATH> --http <ADDR>)
+        mkit-server serve --repo-root <PATH> --listen-enc <ADDR>  (was: mkit serve <PATH> --listen-enc <ADDR>)
+      See "Migrating from `mkit serve --http` and `--listen-enc`" in docs/CLI.md.
+
+```
+
+An unrelated unknown flag gets clap's error alone.
+
+```
+$ mkit serve . --bogus
+? 64
+error: unexpected argument '--bogus' found
+
+  tip: to pass '--bogus' as a value, use '-- --bogus'
+
+Usage: mkit serve <PATH>
+
+For more information, try '--help'.
+
+```

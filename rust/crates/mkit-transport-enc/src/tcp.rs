@@ -471,7 +471,7 @@ fn decode_peer_pubkey(bytes: &[u8; 32]) -> Result<PublicKey, EncInitError> {
 ///   escape. It is fail-OPEN and must never be the implicit default.
 /// - [`PeerPolicy::Allowlist`] accepts only dialers whose 32-byte
 ///   ed25519 public key is in the set. This is the fail-CLOSED posture
-///   `mkit serve --listen-enc` uses once an authorized-peers file is
+///   `mkit-server serve --listen-enc` uses once an authorized-peers file is
 ///   configured.
 #[derive(Clone, Debug)]
 pub enum PeerPolicy {
@@ -530,8 +530,8 @@ fn encode_pubkey(peer: &PublicKey) -> Option<[u8; 32]> {
 /// operator-tunable [`EncHandshakeBounds`] for tightening the
 /// handshake/synchrony deadlines on real networks.
 ///
-/// This is the blocking listener entry point consumed by
-/// `mkit serve --listen-enc`. It builds and blocks on its own tokio
+/// This is the blocking listener entry point (the removed
+/// `mkit serve --listen-enc` ran on it). It builds and blocks on its own tokio
 /// runtime, so it must not be called from inside one: a server already on
 /// a runtime uses [`serve_tcp_listener`], which also takes a shutdown
 /// signal and a connection cap.

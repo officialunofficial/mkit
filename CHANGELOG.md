@@ -109,6 +109,13 @@ train).
 
 ### Added
 
+- *(server)* The `mkit-server` binary (`mkit-server-native`;
+  `mkit-server serve --repo-root <DIR> [--listen <ADDR>] [--listen-enc
+  <ADDR>]`) is the self-hosted `mkit+https://` and `mkit+enc://` server. It
+  replaces `mkit serve --http` and `mkit serve --listen-enc`, which the CLI
+  no longer has (see **Removed** for the flag mapping). Its operator guide
+  is `rust/crates/mkit-server-native/README.md`.
+
 - *(release)* Every signed release also ships
   `mkit-server-<version>-<target>.tar.gz` for the same four targets as
   `mkit` (the `mkit-server` binary, licenses, the operator guide and the
@@ -398,7 +405,7 @@ train).
   `Principal::TransportPeer` with the key the handshake authenticated. The
   flags, fail-closed gate, banner, timeouts, budgets and the
   `mkit serve-enc/<version>` server id are `mkit serve --listen-enc`'s,
-  which stays until WP-M0-15. New hardening: handshakes have their own
+  which WP-M0-15 removed (see **Removed**). New hardening: handshakes have their own
   cap (`--enc-max-handshakes`, default 128 or `--max-connections` if
   lower), apart from the `--max-connections` sessions, so sockets that
   never handshake cannot lock authorized clients out (a client waiting
@@ -853,6 +860,50 @@ train).
 - *(cli, internal)* `mkit-cli`'s six "sequential below a per-thread threshold, rayon `par_iter` at or above it" fan-outs (`commands::add`'s per-file and per-chunk hashing, `remote_dispatch`'s pack-compression and delta-encoding, `remote_dispatch::packmap`'s signature verification) each hand-duplicated the branch-and-collect boilerplate around the shared `fanout::threshold` formula. New `fanout::map_seq_or_par`/`fanout::try_map_seq_or_par` factor that shape out for the four call sites it fits exactly (by-reference, in-order, infallible or `Result`-collecting); `prepare_delta_batch` (consumes by value) and `verify_new_object_signatures` (deliberately chunks its parallel path — see the entry above) keep their own loops since forcing either into the shared shape would need extra generic machinery to claw back what a bespoke loop gets for free. No behavior change. **SemVer:** none — `pub(crate)`-only, no public API surface.
 
 ### Removed
+
+- **`mkit serve --http` and `mkit serve --listen-enc` (WP-M0-15).** `mkit
+  serve <PATH>` is now only the `mkit+ssh://` forced-command server
+  (SSH-frame protocol on stdin/stdout, unchanged). Its HTTP and encrypted
+  listeners moved to the separate `mkit-server` binary, so the CLI carries
+  no HTTP server stack or `SQLite`. The removed flags are clap usage errors
+  (exit 64) with a hint naming `mkit-server`. Removed with them: the
+  flags `--http-token`, `--unsafe-allow-any-http-peer`,
+  `--enc-authorized-peers`, `--enc-server-key`,
+  `--unsafe-allow-any-enc-peer`, `--enc-idle-timeout-secs`,
+  `--enc-handshake-timeout-secs`, and `mkit-cli`'s `http-transport` cargo
+  feature (`enc-transport` stays: it is the `mkit+enc://` client). The
+  pre-production policy allows the removal without a deprecation period.
+  Migration, on the same root (the served layout is unchanged):
+
+  | Removed (`mkit serve <PATH> ...`) | Use (`mkit-server serve --repo-root <PATH> ...`) |
+  |---|---|
+  | `--http <ADDR>` | `--listen <ADDR>` (FS packs and `.mkit`-layout refs by default, as before) |
+  | `--http-token <TOKEN>` | `--bearer-token-file <PATH>` (owner-only file) or `MKIT_API_TOKEN`; the token is no longer accepted on the command line |
+  | `MKIT_API_TOKEN` | unchanged |
+  | `--unsafe-allow-any-http-peer` | `--unsafe-allow-any-peer` |
+  | `--listen-enc <ADDR>` | `--listen-enc <ADDR>` (alone, or beside `--listen`) |
+  | `--enc-authorized-peers <PATH>` | unchanged; the file must be owned by the server's user (or root) and not group- or other-writable |
+  | `--enc-server-key <PATH>` | unchanged, and required with an allowlist (no `~/.config/mkit/enc/server.key` default) |
+  | `--unsafe-allow-any-enc-peer` | unchanged; refused beside an HTTP listener that requires a token or auth v2 |
+  | `--enc-idle-timeout-secs <SECS>` | unchanged; `0` (was "no timeout") is refused |
+  | `--enc-handshake-timeout-secs <SECS>` | unchanged; default 10 (was 60); `0` is refused |
+  | `cargo install mkit-cli --features http-transport` | the `mkit-server-<version>-<target>.tar.gz` release archive, or `cargo build -p mkit-server-native --bin mkit-server` |
+
+- **`mkit-transport-connect`'s `server` cargo feature (breaking).** The
+  axum-hosted server that backed `mkit serve --http` is gone, with its
+  public API: `serve`, `router`, `TransportServer` and
+  `map_transport_error`, and the `axum` and `connectrpc-health`
+  dependencies. The crate is now the `mkit+https://` client
+  (`ConnectTransport`) only; serve `mkit.transport.v1` with `mkit-server`.
+  Removing a published feature and public items is semver-breaking, so the
+  next release of `mkit-transport-connect` (and, with lockstep versioning,
+  every `mkit-*` crate) is **0.5.0**, done at the release that merges the
+  `mkit-server` work to `main` (cargo-semver-checks runs at the tag,
+  `crates-publish.yml`). crates.io lists `mkit-cli` as its only published
+  dependent, and no published `mkit-cli` enables the feature by default.
+  `mkit-server-conformance`'s legacy `mkit serve --http` wire baseline is
+  removed with it; the `mkit+http://` client end-to-end tests now run
+  against `mkit-server` (`mkit-server-native/tests/client_e2e.rs`).
 
 - Compatibility-only index readers/migration APIs, legacy history APIs, the
   hash-only rename API, and redundant sparse-selection APIs. Pre-production

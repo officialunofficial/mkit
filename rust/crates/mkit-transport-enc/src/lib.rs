@@ -11,7 +11,7 @@
 //! (`tcp::connect_tcp`), a TCP listener with peer-authorization policy
 //! (`tcp::serve_tcp_with_policy_and_bounds`), and `mkit+enc://` URL
 //! parsing ([`url::parse_enc_url`]). It is consumed in production by
-//! `mkit-cli`'s remote dispatch and `mkit serve --listen-enc`.
+//! `mkit-cli`'s remote dispatch and `mkit-server serve --listen-enc`.
 //!
 //! ## Layering (see SPEC-TRANSPORT-ENC for the full picture)
 //!
@@ -84,10 +84,10 @@ pub use tcp::{
 
 /// Re-export of the encrypted-stream `Sender` / `Receiver` types
 /// downstream callers need to plug a custom server-side verb loop on
-/// top of an [`EncSession`]. The `mkit serve --listen-enc` dispatch
-/// lives in `mkit-cli` and consumes this re-export rather than
-/// depending on `commonware-stream` directly; that keeps the CLI
-/// crate's transitive surface area centred on `mkit-transport-enc`.
+/// top of an [`EncSession`]. The `mkit-server serve --listen-enc`
+/// dispatch (`mkit-server-native`) consumes this re-export rather than
+/// depending on `commonware-stream` directly; that keeps its transitive
+/// surface area centred on `mkit-transport-enc`.
 pub use commonware_stream::encrypted::{Receiver as EncReceiver, Sender as EncSender};
 
 use std::sync::atomic::{AtomicBool, Ordering};

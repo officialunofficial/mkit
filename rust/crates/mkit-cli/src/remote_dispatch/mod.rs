@@ -409,7 +409,7 @@ fn open_with_ssh_options(
 /// environment variable (a user-scoped / CLI-supplied path — never
 /// repo-local `.mkit/config`, which `open_enc` has no access to anyway).
 /// When the variable is unset we fall back to a fresh ephemeral key per
-/// process, which still works against `--unsafe-allow-any-enc-peer`
+/// process, which still works against `mkit-server serve --unsafe-allow-any-enc-peer`
 /// servers.
 #[cfg(feature = "enc-transport")]
 const ENC_CLIENT_KEY_ENV: &str = "MKIT_ENC_CLIENT_KEY";

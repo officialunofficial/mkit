@@ -40,7 +40,7 @@ document points here.
 | `refs-history-<branch>.lock` | common dir, keyed on the branch name | per-branch | ancestry intent + ref + descriptor publication for one branch (`mkit_core::refs::history_lock_name`) | §3.2, §3.3 (this document) |
 | `refs-<ref>.lock` | common dir, keyed on the full ref path | per-ref | every direct on-disk ref mutation: Any, Missing, Match, delete, tags, remote refs and batch writes (`mkit_core::refs::cas_lock_name`) | SPEC-REFS §5.1 |
 | `<root>/.mkit/refs/.lock` | transport root | per-repo, **local to the file transport only** | the file transport's own Any/Missing/Match critical sections (`mkit-transport-file`'s `RefLock`) | SPEC-TRANSPORT, §3.1 (this document) |
-| `serve.lock` | common dir | per-repo, **detection only, not a critical-section lock** | held **shared** by every live `mkit serve` process for its whole lifetime; probed non-blocking-exclusive by `worktree.lock`/`worktrees.lock` acquisition to warn when a root is concurrently served (MKIT-11/#655) | §3.1 (this document) |
+| `serve.lock` | common dir | per-repo, **detection only, not a critical-section lock** | held **shared** for its whole lifetime by every live server process on the root: `mkit serve` (stdin SSH-frame, its only mode) and `mkit-server serve` (HTTP and `mkit+enc://` listeners, which also holds `server.lock` exclusively, so one `mkit-server` serves a root at a time); probed non-blocking-exclusive by `worktree.lock`/`worktrees.lock` acquisition to warn when a root is concurrently served (MKIT-11/#655) | §3.1 (this document) |
 
 The recovery log (`.mkit/recovery-log`) has **no dedicated lock** &mdash; see
 §3.2.
@@ -67,18 +67,24 @@ the file transport does not acquire the local full-ref lock, `worktree.lock`,
 `worktrees.lock`, or `refs-history-<branch>.lock`.
 
 The cross-domain gap remains: local `mkit commit`/`checkout`/`gc` against a
-directory simultaneously served by `mkit serve` is not coordinated with the
+directory simultaneously served by `mkit serve` or `mkit-server` is not coordinated with the
 transport. A local ref mutation can race a client CAS, and a GC sweep can race
 a push's object publication. The supported file-transport deployment is a
 bare/shared remote that a worktree-owning process does not also mutate directly.
-Local worktree commands against a live `mkit serve` root remain unsupported.
+Local worktree commands against a live `mkit serve` or `mkit-server` root remain unsupported.
 
 **MKIT-11/#655 turned this from silent into detected**, without closing
-it: every live `mkit serve` process holds a **shared** kernel lock
-(`std::fs::File::lock_shared`, never exclusive &mdash; SPEC-TRANSPORT
-documents multiple concurrent `serve` processes against one root, e.g.
-one per SSH forced-command connection, as a supported deployment, so
-`serve` instances must not exclude each other) on `serve.lock` (in the common dir) for its whole lifetime. `worktree.lock`
+it: every live server process on the root &mdash; `mkit serve <path>`
+(stdin SSH-frame, its only mode) and `mkit-server serve --repo-root
+<path>` (HTTP and `mkit+enc://` listeners) &mdash; holds a **shared**
+kernel lock (`std::fs::File::lock_shared`, never exclusive &mdash;
+SPEC-TRANSPORT documents multiple concurrent `serve` processes against
+one root, e.g. one per SSH forced-command connection, as a supported
+deployment, so `serve` instances must not exclude each other) on
+`serve.lock` (in the common dir) for its whole lifetime. `mkit-server`
+also holds `server.lock` (in the common dir) **exclusively**, so one
+`mkit-server` serves a root at a time; it shares `serve.lock` with any
+`mkit serve` processes on the same root. `worktree.lock`
 and `worktrees.lock` acquisition (`mkit-cli`'s `acquire_worktree_lock`
 and `acquire_worktrees_registry_lock`) each follow up with a
 non-blocking exclusive probe of that same `serve.lock`

@@ -93,7 +93,7 @@ rusqlite = { version = "0.40", default-features = false, features = ["bundled", 
 # A reentrant lock: a transaction body runs statements on the connection
 # its own `transaction` call already holds.
 parking_lot = { version = "0.12", optional = true }
-# The router: same axum pin as `mkit-transport-connect`.
+# The router: axum 0.8, the major connectrpc's `axum` feature targets.
 axum = { version = "0.8", default-features = false, features = ["http1", "http2", "tokio"], optional = true }
 tower = { version = "0.5", default-features = false, features = ["limit", "util"], optional = true }
 tower-http = { version = "0.6", default-features = false, features = ["cors", "trace", "limit", "sensitive-headers"], optional = true }
@@ -142,9 +142,9 @@ tempfile = "3"
 futures = "0.3"
 mkit-server = { version = "0.4", path = "../mkit-server", features = ["memory"] }
 mkit-server-conformance = { path = "../mkit-server-conformance", features = ["fake-s3"] }
-# tests/wire_fs_layout_bearer.rs diffs against today's `mkit serve --http`
-# (the `server` feature; WP-M0-15 removes that half with it).
-mkit-transport-connect = { version = "0.4", path = "../mkit-transport-connect", features = ["server"] }
+# The generated `mkit.transport.v1` messages, and `ConnectTransport`, the
+# `mkit+http://` client (tests/client_e2e.rs).
+mkit-transport-connect = { version = "0.4", path = "../mkit-transport-connect" }
 buffa = "0.9.1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1", "http2"] }
@@ -163,6 +163,10 @@ required-features = ["http"]
 
 [[test]]
 name = "wire_fs_layout_bearer"
+required-features = ["http"]
+
+[[test]]
+name = "client_e2e"
 required-features = ["http"]
 
 [[test]]

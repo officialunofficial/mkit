@@ -13,7 +13,7 @@
 //! `FaultHooks` and [`Pipeline::authenticate`] reads per-request
 //! `TestDirectives`; without it none of that exists in the binary.
 //!
-//! Behavior equals today's servers: `mkit serve --http` (`Bearer`/`Open`:
+//! Behavior equals the servers it replaces: `mkit serve --http` (`Bearer`/`Open`:
 //! no replay or quota, packmap-then-head on a non-atomic store),
 //! `vcs-worker` (`AuthV2`: replay ledger, per-signer quota, atomic
 //! advance) and `mkit serve` over ssh (`TransportIdentity`).

@@ -265,8 +265,8 @@ impl Raw {
 // Moved from mkit-cli's `serve` tests.
 
 #[test]
-// Real localhost TCP; kept in the serial `--ignored` lane like its
-// `mkit serve` original (same name, so the lane's filter selects both).
+// Real localhost TCP; kept in the serial `--ignored` lane, whose filter
+// (rust/.config/nextest.toml) names the four `listen_enc_*` real-TCP tests.
 #[ignore = "real localhost TCP + wall-clock recv_timeout; run via the serial --ignored CI lane"]
 fn listen_enc_rejected_upload_does_not_overwrite_existing_pack() {
     let (_td, root) = enc_repo();

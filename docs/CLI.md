@@ -1083,75 +1083,49 @@ Remote / sync:
   forces it off, and `MKIT_PROGRESS=always`/`never` overrides the
   tty-detection explicitly (mirrors `NO_COLOR`/`CLICOLOR_FORCE`).
 - `mkit serve <path>` &mdash; internal SSH transport server. Speaks the
-  mkit-rpc SSH framing on stdin/stdout by default. Holds a shared
+  mkit-rpc SSH framing on stdin/stdout (its only mode). Holds a shared
   `serve.lock` in `<path>/.mkit` for as long as the process is alive
   (any number of concurrent `serve` processes may hold it at once); a
   local worktree-mutating command or `gc` run against that same path
   while it is held prints a warning to stderr and proceeds &mdash; it is not
   refused, and this is detection, not coordination (SPEC-CONCURRENCY
   §3.1).
-- `mkit serve <path> --listen-enc <addr>` &mdash; bind a TCP socket on
-  `<addr>` (for example, `0.0.0.0:9418`) and serve the same protocol over
-  an encrypted-stream transport. Requires building the binary with
-  `--features enc-transport`. **Fail-closed**: the listener refuses to
-  bind unless one of the following is supplied:
-  - `--enc-authorized-peers <PATH>` &mdash; an allowlist of authorized client
-    public keys, one per line (64-hex or 43-char url-safe base64; `#`
-    comments and blank lines ignored). A client whose static ed25519
-    key is not listed is rejected at the handshake and receives no data.
-    This path MUST be CLI-supplied or user-scoped &mdash; peer-authorization
-    is never read from repo-local `.mkit/config`.
-  - `--unsafe-allow-any-enc-peer` &mdash; a development escape that accepts
-    ANY peer. Prints a loud warning; never use in production.
-  These two flags are mutually exclusive.
 
-  Post-handshake resource bounds (slow-loris hardening):
-  - `--enc-idle-timeout-secs <SECS>` &mdash; per-frame idle timeout applied
-    after the handshake completes. A peer that does not send its next
-    verb/upload frame within this window has its session dropped, so a
-    peer that finishes the handshake then stalls cannot pin a worker plus
-    socket indefinitely. `0` disables the timeout (not recommended).
-    Default: `60`.
-  - `--enc-handshake-timeout-secs <SECS>` &mdash; overall deadline for
-    completing the cryptographic handshake. SPEC-TRANSPORT-ENC §6.2
-    recommends tightening to ≤5–10s on real networks; the default is
-    deliberately generous. Default: `60`.
+  `mkit serve` has no network listener. The self-hosted `mkit+https://`
+  remote and the `mkit+enc://` listener are the separate `mkit-server`
+  binary (release archive `mkit-server-<version>-<target>.tar.gz`, see
+  [INSTALL.md](INSTALL.md#mkit-server); operator guide
+  [`rust/crates/mkit-server-native/README.md`](../rust/crates/mkit-server-native/README.md)):
+  `mkit-server serve --repo-root <path> --listen <addr>` and/or
+  `--listen-enc <addr>`. It holds the same shared `serve.lock`.
 
-  `--enc-server-key <PATH>` selects the server's stable raw 32-byte
-  ed25519 key file (auto-created with `0600`/`0700` hardening on first
-  run). When allowlisting and the flag is omitted, the key is
-  auto-created at the user-scoped default `~/.config/mkit/enc/server.key`
-  so the advertised `?pubkey=` is **stable across restarts**. Only the
-  unsafe allow-any mode without a key file falls back to an ephemeral
-  per-process key. The server prints its public key to stderr at
-  startup; clients dial `mkit+enc://<host>:<port>?pubkey=<key>` after
-  copying that key out-of-band. A client may pin its own identity (so
-  an allowlisting server can recognize it across restarts) by pointing
-  the `MKIT_ENC_CLIENT_KEY` environment variable at a user-scoped raw
-  32-byte key file; otherwise the client uses an ephemeral key. The
-  default port advertised by `mkit+enc://` URLs when none is supplied
-  is **9418**. Full keystore integration is deferred (see
-  SPEC-TRANSPORT-ENC §6.2).
-- `mkit serve <path> --http <addr>` &mdash; self-hosted Connect remote: bind
-  `<addr>` (for example, `0.0.0.0:8443`) and host `mkit.transport.v1.TransportService`
-  (SPEC-TRANSPORT-CONNECT) over axum/HTTP, instead of the SSH-frame
-  protocol. Requires building with `--features http-transport`. This is
-  a plaintext HTTP listener &mdash; put a TLS-terminating reverse proxy in
-  front for production use (or bind to loopback and tunnel).
-  **Fail-closed**, mirroring `--listen-enc`: refuses to bind unless one
-  of the following is supplied:
-  - `--http-token <TOKEN>` (or the `MKIT_API_TOKEN` environment variable
-    &mdash; the same variable `mkit+https://` clients already send as
-    `Authorization: Bearer <token>`, SPEC-TRANSPORT §5.2) &mdash; every RPC
-    (unary and streaming, including `UploadPack`/`DownloadPack`) is
-    rejected with `unauthenticated` unless it carries a matching bearer
-    token, checked in constant time.
-  - `--unsafe-allow-any-http-peer` &mdash; a development escape that accepts
-    ANY caller with no authentication at all. Prints a loud warning;
-    never use in production.
-  These two are mutually exclusive, and mutually exclusive with
-  `--listen-enc`. `Ctrl-C`/`SIGTERM` drain in-flight requests before
-  exiting (the same cooperative shutdown flag the rest of the CLI uses).
+  **Migrating from `mkit serve --http` and `--listen-enc`.** Both were
+  removed from `mkit serve` (passing them is a usage error, exit 64, with a
+  hint). Serve the same root with `mkit-server`:
+
+  | Removed (`mkit serve <path> ...`) | Use (`mkit-server serve --repo-root <path> ...`) |
+  |---|---|
+  | `--http <addr>` | `--listen <addr>` (filesystem packs and `.mkit`-layout refs by default, as before) |
+  | `--http-token <token>` | `--bearer-token-file <path>` (owner-only file) or `MKIT_API_TOKEN`; never on the command line |
+  | `MKIT_API_TOKEN` | unchanged |
+  | `--unsafe-allow-any-http-peer` | `--unsafe-allow-any-peer` |
+  | `--listen-enc <addr>` | `--listen-enc <addr>` (alone, or beside `--listen`) |
+  | `--enc-authorized-peers <path>` | unchanged; the file must be owned by the server's user (or root) and not group- or other-writable |
+  | `--enc-server-key <path>` | unchanged, and required with an allowlist (no `~/.config/mkit/enc/server.key` default) |
+  | `--unsafe-allow-any-enc-peer` | unchanged; refused beside an HTTP listener that requires a token or auth v2 |
+  | `--enc-idle-timeout-secs <secs>` | unchanged; `0` (was "no timeout") is refused |
+  | `--enc-handshake-timeout-secs <secs>` | unchanged; default `10` (was `60`); `0` is refused |
+  | building `mkit` with `--features http-transport` | the `mkit-server` release archive, or `cargo build -p mkit-server-native --bin mkit-server` |
+
+  Clients are unchanged: `mkit+https://` (and loopback `mkit+http://`)
+  remotes send `MKIT_API_TOKEN` as a bearer token, and `mkit+enc://`
+  remotes (a `mkit` built with `--features enc-transport`) pin the
+  server's `?pubkey=`, which `mkit-server` prints at startup. A client may
+  pin its own identity (so an allowlisting server can recognize it across
+  restarts) by pointing the `MKIT_ENC_CLIENT_KEY` environment variable at
+  a user-scoped raw 32-byte key file; otherwise the client uses an
+  ephemeral key. The default port advertised by `mkit+enc://` URLs when
+  none is supplied is **9418**.
 - `mkit pack-shard <hash> [--out <dir>] [--force]` &mdash; encode a stored
   pack into Reed-Solomon shards plus a manifest, ready to publish to
   an HTTP / S3 origin. Producer side of the SPEC-PACK-SHARDS

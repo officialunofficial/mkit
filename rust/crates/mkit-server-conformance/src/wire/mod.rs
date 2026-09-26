@@ -1,8 +1,8 @@
 //! The black-box wire conformance suite (PRD §5.1 part b): it drives any
 //! `mkit.transport.v1` server over real HTTP, given only a base URL and a
 //! [`Profile`] of what the server offers. It never reaches into a
-//! server's process, so it runs unchanged against `mkit serve --http`, the
-//! native adapter, `wrangler dev`, staging, or a third party's server
+//! server's process, so it runs unchanged against `mkit-server serve`, the
+//! vcs-worker under `wrangler dev`, staging, or a third party's server
 //! (e.g. Workers with custom storage, or a Rust container). It is the M0
 //! "nothing changes on the wire" oracle, and the M1–M5 cases extend it.
 //!
@@ -28,7 +28,7 @@
 //! WP that changes server behavior and at every milestone boundary.
 //!
 //! ```text
-//! # In-process baselines (pipeline over memory stores, and `mkit serve --http`):
+//! # In-process baselines (the pipeline over memory stores):
 //! cargo nextest run -p mkit-server-conformance --all-features -E 'binary(/^baseline_/)'
 //!
 //! # vcs-worker under `wrangler dev`, from the repo root: builds the Worker,

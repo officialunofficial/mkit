@@ -20,7 +20,7 @@ pub enum AuthMode {
     /// trusted caller). No replay ledger.
     Open,
     /// A shared `Authorization: Bearer <token>`, required on every RPC,
-    /// unary and streaming (`mkit serve --http` parity). The BLAKE3
+    /// unary and streaming (as the removed `mkit serve --http` did). The BLAKE3
     /// digests of the presented and expected values are compared in
     /// constant time, so neither the content nor the length leaks. No
     /// replay ledger.
