@@ -31,13 +31,11 @@
 //! # In-process baselines (pipeline over memory stores, and `mkit serve --http`):
 //! cargo nextest run -p mkit-server-conformance --all-features -E 'binary(/^baseline_/)'
 //!
-//! # vcs-worker under `wrangler dev` (today's Worker; WP-M0-17 automates this):
-//! (cd apps/vcs-worker && worker-build --dev && npx wrangler dev --config wrangler.dev.jsonc \
-//!    --ip 127.0.0.1 --port 8791 --var AUTH_AUDIENCE:http://127.0.0.1:8791 --var AUTH_REPOSITORY:default)
-//! cargo run -p mkit-server-conformance -- wire --base-url http://127.0.0.1:8791 \
-//!    --auth auth-v2 --audience http://127.0.0.1:8791 --repository default \
-//!    --signer-seed-env MKIT_CONFORMANCE_SEED --atomic-advance --max-pack-bytes 67108864 \
-//!    --features health
+//! # vcs-worker under `wrangler dev`, from the repo root: builds the Worker,
+//! # serves it from a fresh state directory and runs this suite
+//! # (`--test-faults` adds the clock-skew, stats, quota and growth cases):
+//! scripts/vcs-worker-conformance.sh
+//! scripts/vcs-worker-conformance.sh --test-faults
 //!
 //! # A deployed server (staging, a third party's): the same flags with its
 //! # origin, or a TOML profile (see `ProfileSpec`); `--list-refs 0` skips the

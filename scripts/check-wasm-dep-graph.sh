@@ -91,6 +91,9 @@ check_tree "mkit-wasm" "rust/crates/mkit-wasm" "" "" blst zstd-sys commonware-ru
 check_tree "apps/repo-worker" "apps/repo-worker" "" "" blst zstd-sys commonware-runtime commonware-storage
 check_tree "mkit-server" "rust/crates/mkit-server" "" "" blst zstd-sys commonware-runtime commonware-storage
 check_tree "mkit-server-worker" "rust/crates/mkit-server-worker" "" "" blst zstd-sys commonware-runtime commonware-storage
+# apps/vcs-worker is a thin deployment of mkit-server-worker (WP-M0-17),
+# built by worker-build from its own Cargo.lock.
+check_tree "apps/vcs-worker" "apps/vcs-worker" "" "" blst zstd-sys commonware-runtime commonware-storage
 # mkit-core's decode-only pure-Rust zstd backend must select `ruzstd` and
 # stay C-free. The first consumer that enables it (WP 4.8) adds its own
 # positive check here.
@@ -103,4 +106,4 @@ if [ "$fail" -ne 0 ]; then
   exit 1
 fi
 
-echo "ok: mkit-wasm, apps/repo-worker, mkit-server, mkit-server-worker and mkit-core (pack-ruzstd) wasm32 dependency graphs contain no C-toolchain crates"
+echo "ok: mkit-wasm, apps/repo-worker, mkit-server, mkit-server-worker, apps/vcs-worker and mkit-core (pack-ruzstd) wasm32 dependency graphs contain no C-toolchain crates"

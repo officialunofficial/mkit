@@ -6,7 +6,9 @@
 {
   "name": "mkit-vcs-worker",
   "main": "build/worker/shim.mjs",
-  "compatibility_date": "2024-09-23",
+  // The date the pinned wrangler's workerd supports (as
+  // apps/workspace-worker); scripts/vcs-worker-conformance.sh passes on it.
+  "compatibility_date": "2026-09-09",
   // Same rationale as apps/repo-worker/wrangler.jsonc: the Cloudflare
   // Workers Build image ships no Rust toolchain, so this installs rustup
   // (pinned 1.95.0 + wasm32) and worker-build, guarded by `command -v` so
@@ -17,7 +19,15 @@
 
   "observability": { "enabled": true },
   // Override AUTH_AUDIENCE with the exact published origin before deployment.
-  "vars": { "AUTH_AUDIENCE": "http://localhost:8787", "AUTH_REPOSITORY": "default" },
+  // WORKERS_PLAN caps each Durable Object's SQLite store for the account's
+  // plan: `free` (1 GB, the safe default) or `paid` (10 GB). Set `paid` only
+  // once the account is confirmed on Workers Paid: a Paid cap on a Free
+  // account runs into the 1 GB hard limit, which resets the object.
+  "vars": {
+    "AUTH_AUDIENCE": "http://localhost:8787",
+    "AUTH_REPOSITORY": "default",
+    "WORKERS_PLAN": "free"
+  },
 
   // Smart Placement: run the Worker close to its back-end (the RefStore DO +
   // R2), not just at the edge nearest the client.
@@ -31,11 +41,13 @@
   // packs/{hex(pack_id)}.
   "r2_buckets": [{ "binding": "STORAGE", "bucket_name": "mkit-vcs-objects" }],
 
-  // The RefStore Durable Object — ONE global instance for the whole
-  // deployment (no per-room/per-project split; see README.md) — owns all
-  // mutable refs (serial CAS, including the two-ref AdvanceRefs
-  // transaction).
+  // The RefStore Durable Object: the partition store of the deployment's
+  // one namespace (instance "root"), holding refs, replay records and quota
+  // windows in one SQLite key-value table.
   "durable_objects": { "bindings": [{ "name": "REFSTORE", "class_name": "RefStore" }] },
 
+  // Keep `migrations`: wrangler's newer `exports`-style Durable Object
+  // declaration and the `migrations` array are mutually exclusive, and this
+  // deployment's class, binding and `v1` tag stay as they are (no migration).
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RefStore"] }]
 }

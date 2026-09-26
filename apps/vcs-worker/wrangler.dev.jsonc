@@ -1,14 +1,18 @@
 // DEV-ONLY local config. Same as wrangler.jsonc but the build command is a
-// no-op: the wasm bundle is prebuilt with `worker-build --release`, and
-// letting wrangler re-run worker-build on its file-watcher causes an
-// infinite rebuild/reload loop (it watches the build/ dir it writes into).
-// Run with: wrangler dev -c wrangler.dev.jsonc
+// no-op: the wasm bundle is prebuilt with `worker-build` (`--dev` or
+// `--release`), and letting wrangler re-run worker-build on its file-watcher
+// causes an infinite rebuild/reload loop (it watches the build/ dir it
+// writes into). Run with: wrangler dev -c wrangler.dev.jsonc, or run
+// scripts/vcs-worker-conformance.sh (repo root), which passes the vars.
 {
   "name": "mkit-vcs-worker",
   "main": "build/worker/shim.mjs",
-  "compatibility_date": "2024-09-23",
+  "compatibility_date": "2026-09-09",
   "build": { "command": "true" },
+  "vars": { "WORKERS_PLAN": "free" },
   "r2_buckets": [{ "binding": "STORAGE", "bucket_name": "mkit-vcs-objects" }],
   "durable_objects": { "bindings": [{ "name": "REFSTORE", "class_name": "RefStore" }] },
+  // `migrations`, not the `exports`-style declaration: the two are mutually
+  // exclusive (see wrangler.jsonc).
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RefStore"] }]
 }

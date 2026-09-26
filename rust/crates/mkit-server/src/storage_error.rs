@@ -6,10 +6,10 @@
 //! [`StorageOp`] family. The mapping is exhaustive, so a new operation must
 //! be given a public message explicitly.
 //!
-//! The canonical copy of `apps/vcs-worker/src/storage_error.rs`, with the
-//! operations generalized from R2 and the ref-store Durable Object to any
-//! blob or metadata store. The old copy goes when `vcs-worker` switches in
-//! WP-M0-17. `apps/repo-worker` keeps its own copy (planner decision Q11).
+//! The canonical copy of vcs-worker's former `storage_error.rs` (removed in
+//! WP-M0-17), with the operations generalized from R2 and the ref-store
+//! Durable Object to any blob or metadata store. `apps/repo-worker` keeps
+//! its own copy (planner decision Q11).
 
 use std::fmt;
 

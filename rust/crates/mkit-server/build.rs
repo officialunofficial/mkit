@@ -8,7 +8,6 @@
 // Default path: copy the pre-generated sources committed under generated/
 // into $OUT_DIR. NO protoc required: Cloudflare Workers Builds, CI and
 // docs.rs ship no protoc new enough for the `edition = "2023"` proto.
-// Mirrors apps/vcs-worker/build.rs.
 //
 // Regeneration path: set MKIT_TRANSPORT_CODEGEN=1 to run connectrpc-build
 // against the CANONICAL repo-root protos (proto/mkit/transport/v1/

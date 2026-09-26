@@ -1,12 +1,13 @@
 //! Ref compare-and-swap and ref-name helpers (SPEC-TRANSPORT-CONNECT §3,
 //! SPEC-TRANSPORT §4.2.1, SPEC-REFS §3 and §4).
 //!
-//! The canonical copy of logic that today lives in `apps/vcs-worker/src/refs.rs`,
+//! The canonical copy of logic that also lives in
 //! `mkit-transport-connect`'s `refs_convert.rs` and `hashutil.rs`, and
-//! `mkit serve`'s `pack_key_from_id`/`decode_update_ref`. The old copies go
-//! when their consumers switch: `mkit serve` in WP-M0-13,
-//! `mkit-transport-connect` in WP-M0-15 and `vcs-worker` in WP-M0-17.
-//! `apps/repo-worker` keeps its own copy (planner decision Q11).
+//! `mkit serve`'s `pack_key_from_id`/`decode_update_ref` (and lived in
+//! vcs-worker's former `refs.rs`, removed in WP-M0-17). The old copies go
+//! when their consumers switch: `mkit serve` in WP-M0-13 and
+//! `mkit-transport-connect` in WP-M0-15. `apps/repo-worker` keeps its own
+//! copy (planner decision Q11).
 
 use std::borrow::Cow;
 

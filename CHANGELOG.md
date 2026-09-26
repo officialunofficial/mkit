@@ -30,6 +30,29 @@ train).
   can no longer write a second, diverging copy. Reads and pack uploads
   are unchanged. **SemVer:** additive (new constant and a variant of the
   `#[non_exhaustive]` enum); **behavior change** only on marked roots.
+- *(vcs-worker)* `apps/vcs-worker` is a thin deployment of
+  `mkit-server-worker`: its fetch handler and `RefStore` Durable Object
+  call the new `mkit_server_worker::adapter`, which serves `mkit-server`'s
+  pipeline over R2 and Durable Object SQLite, streaming request and
+  response bodies (no whole-pack buffering; `DownloadPack` sends 800 KiB
+  chunks instead of one). Class `RefStore`, binding `REFSTORE` and bucket
+  `STORAGE` are unchanged, with no wrangler migration; the Durable Object
+  now keeps a `kv` table and ignores the old `refs`, `write_quota` and
+  `authenticated_operations` tables (never deployed; no migration). Wire
+  changes, all SPEC-mandated: a reused nonce for another operation is
+  `invalid_argument` (was an uncaught 500); a 33-byte `expected_id` is
+  `invalid_argument` (was `failed_precondition`); `ListRefs` matches its
+  prefix at a path-component boundary; a gzip-compressed unary response
+  (e.g. a large `ListRefs`) is no longer compressed a second time by the
+  runtime; an upload stream that runs past its declared size and past
+  64 MiB is `invalid_argument` (was `resource_exhausted`); storage
+  failures surface as `internal`/`unavailable` instead of
+  `invalid_argument` "refstore …"; a missing `AUTH_AUDIENCE` or
+  `AUTH_REPOSITORY` makes every RPC `unavailable` (was: writes only). New
+  var `WORKERS_PLAN` (`free`, the default, or `paid`) caps the Durable
+  Object store for the plan. The generated code, `build.rs` and the
+  duplicated modules are gone; `scripts/vcs-worker-conformance.sh` runs
+  the wire suite against it under `wrangler dev`.
 - *(core)* `mkit_core::refs::validate_ref_name` now also requires a name
   of at most `MAX_REF_NAME_BYTES` (512) bytes, per SPEC-REFS v2 §3, so
   every transport and every new local ref refuse a longer one. Creating
