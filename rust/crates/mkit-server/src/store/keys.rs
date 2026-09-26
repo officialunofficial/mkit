@@ -19,6 +19,10 @@
 //! | quota window index | `qx 00 <window_start:be64> <scope>` | empty |
 //! | grant epoch | `e 00` | be64; absent means 0, never written as 0 |
 //! | timer (reserved, WP-1.24) | `w 00 <due_at:be64> <kind:u8> <ref>` | codec per kind |
+//! | holder (`ContentShard`) | `h 00 <object:32> <ns> 00 <repo>` | empty |
+//! | GC hold (`ContentShard`) | `g 00 <object:32> <hold_id:32>` | codec `hold` |
+//! | blocklist (`ContentShard`) | `b 00 <object:32>` | codec `BlockEntry` |
+//! | object state (`ContentShard`) | `c 00 <object:32>` | codec `ObjectState` |
 //!
 //! Reserved tags ([`RESERVED_TAGS`]), each laid out by the work package
 //! that adds it: tickets `t`, membership `m`, outbox `o` / `oq` / `os`,
@@ -26,17 +30,22 @@
 //! `i`, leases `l`, published pointers `pp`, tombstones `tb`, verification
 //! cursors `vc`, epoch lease `el`, the coordinator's repo registry
 //! [`TAG_REPO_REGISTRY`] and the deployment's namespace list
-//! [`TAG_NAMESPACE_LIST`] (WP-1.22; see `Partition` for enumeration), and
-//! the `ContentIndex` classes `h`, `g`, `b`, `c`. A new row adds its layout
-//! here, with a golden test.
+//! [`TAG_NAMESPACE_LIST`] (WP-1.22; see `Partition` for enumeration). A
+//! new row adds its layout here, with a golden test.
+//!
+//! The `ContentIndex` classes (`h`, `g`, `b`, `c`) live only in
+//! `ContentShard` partitions. Holder rows are provisional: WP-4.10a moves
+//! them to sub-shards by (object, hash(holder)); the holder count already
+//! lives in the object's `c` row.
 
 use bytes::{BufMut, Bytes, BytesMut};
 use mkit_core::hash::Hash;
 
+use super::error::StoreError;
 use super::kv::{Key, MAX_KEY_BYTES};
 use crate::quota::QuotaScope;
 use crate::refs::MAX_REF_NAME_BYTES;
-use crate::repo::{MAX_REPO_NAME_BYTES, RepoName};
+use crate::repo::{MAX_REPO_NAME_BYTES, NamespaceKey, RepoName};
 
 // The longest ref key (`r 00 <repo> 00 <refname>`) fits a key.
 const _: () = assert!(2 + MAX_REPO_NAME_BYTES + 1 + MAX_REF_NAME_BYTES <= MAX_KEY_BYTES);
@@ -61,6 +70,14 @@ pub const TAG_QUOTA_WINDOW: &str = "qx";
 pub const TAG_GRANT_EPOCH: &str = "e";
 /// Timer tag (layout reserved for WP-1.24).
 pub const TAG_TIMER: &str = "w";
+/// `ContentIndex` holder tag.
+pub const TAG_HOLDER: &str = "h";
+/// `ContentIndex` GC hold tag.
+pub const TAG_HOLD: &str = "g";
+/// `ContentIndex` blocklist tag.
+pub const TAG_BLOCK: &str = "b";
+/// `ContentIndex` object state (last change and holder count) tag.
+pub const TAG_OBJECT_STATE: &str = "c";
 
 /// Repo registry tag (reserved; WP-1.22 lays it out): one row per repo of
 /// the namespace, in its `Coordinator` partition. Bounded by repos, not
@@ -88,10 +105,6 @@ pub const RESERVED_TAGS: &[&str] = &[
     "el",
     TAG_REPO_REGISTRY,
     TAG_NAMESPACE_LIST,
-    "h",
-    "g",
-    "b",
-    "c",
 ];
 
 /// A key decoded by [`parse`].
@@ -136,6 +149,26 @@ pub enum ParsedKey {
         /// What the timer refers to.
         reference: Bytes,
     },
+    /// `h 00 <object> <ns> 00 <repo>`.
+    Holder {
+        /// Object id.
+        object: Hash,
+        /// Holding namespace.
+        ns: NamespaceKey,
+        /// Holding repository.
+        repo: RepoName,
+    },
+    /// `g 00 <object> <hold_id>`.
+    Hold {
+        /// Object id.
+        object: Hash,
+        /// Hold id.
+        hold_id: Hash,
+    },
+    /// `b 00 <object>`.
+    Block(Hash),
+    /// `c 00 <object>`.
+    ObjectState(Hash),
 }
 
 fn key(tag: &str, parts: &[&[u8]]) -> Key {
@@ -248,6 +281,60 @@ pub fn timer(due_at_ms: u64, kind: u8, reference: &[u8]) -> Key {
     key(TAG_TIMER, &[&due_at_ms.to_be_bytes(), &[kind], reference])
 }
 
+/// `h 00 <object> <ns> 00 <repo>`.
+///
+/// # Errors
+/// [`StoreError::Invalid`] if `ns` contains `0x00` (no valid namespace
+/// does).
+pub fn holder(object: &Hash, ns: &NamespaceKey, repo: &RepoName) -> Result<Key, StoreError> {
+    if ns.as_str().as_bytes().contains(&0) {
+        return Err(StoreError::Invalid("namespace contains 0x00".into()));
+    }
+    Ok(key(
+        TAG_HOLDER,
+        &[
+            object,
+            ns.as_str().as_bytes(),
+            b"\0",
+            repo.as_str().as_bytes(),
+        ],
+    ))
+}
+
+/// The scan range of every holder row of `object`.
+#[must_use]
+pub fn holders_of(object: &Hash) -> (Key, Key) {
+    let start = key(TAG_HOLDER, &[object]);
+    let end = successor(&start);
+    (start, end)
+}
+
+/// `g 00 <object> <hold_id>`.
+#[must_use]
+pub fn hold(object: &Hash, hold_id: &Hash) -> Key {
+    key(TAG_HOLD, &[object, hold_id])
+}
+
+/// The scan range of every hold on `object`.
+#[must_use]
+pub fn holds_of(object: &Hash) -> (Key, Key) {
+    let start = key(TAG_HOLD, &[object]);
+    let end = successor(&start);
+    (start, end)
+}
+
+/// `b 00 <object>`.
+#[must_use]
+pub fn block(object: &Hash) -> Key {
+    key(TAG_BLOCK, &[object])
+}
+
+/// `c 00 <object>`.
+#[must_use]
+pub fn object_state(object: &Hash) -> Key {
+    key(TAG_OBJECT_STATE, &[object])
+}
+
 fn be64(bytes: &[u8]) -> Option<(u64, &[u8])> {
     let (head, rest) = bytes.split_first_chunk::<8>()?;
     Some((u64::from_be_bytes(*head), rest))
@@ -300,6 +387,24 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
                 reference: Bytes::copy_from_slice(reference),
             }
         }
+        b"h" => {
+            let (object, rest) = body.split_first_chunk::<32>()?;
+            let sep = rest.iter().position(|&b| b == 0)?;
+            ParsedKey::Holder {
+                object: *object,
+                ns: NamespaceKey::from_stored(text(&rest[..sep])?),
+                repo: RepoName::new(text(&rest[sep + 1..])?).ok()?,
+            }
+        }
+        b"g" => {
+            let (object, hold_id) = body.split_first_chunk::<32>()?;
+            ParsedKey::Hold {
+                object: *object,
+                hold_id: hash(hold_id)?,
+            }
+        }
+        b"b" => ParsedKey::Block(hash(body)?),
+        b"c" => ParsedKey::ObjectState(hash(body)?),
         _ => return None,
     })
 }
@@ -316,7 +421,6 @@ pub fn quota_for_window(index: &Key) -> Option<Key> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repo::NamespaceKey;
     use proptest::prelude::*;
 
     fn repo(name: &str) -> RepoName {
@@ -337,6 +441,10 @@ mod tests {
             TAG_QUOTA_WINDOW,
             TAG_GRANT_EPOCH,
             TAG_TIMER,
+            TAG_HOLDER,
+            TAG_HOLD,
+            TAG_BLOCK,
+            TAG_OBJECT_STATE,
         ];
         tags.extend_from_slice(RESERVED_TAGS);
         tags
@@ -367,6 +475,16 @@ mod tests {
                 timer(1, 7, b"refs/heads/x"),
                 [&b"w\0"[..], &[0, 0, 0, 0, 0, 0, 0, 1, 7], b"refs/heads/x"].concat(),
             ),
+            (
+                holder(&s, &NamespaceKey::deployment_default(), &repo("a")).unwrap(),
+                [&b"h\0"[..], &[0x11; 32], b"root\0a"].concat(),
+            ),
+            (
+                hold(&s, &[0x22; 32]),
+                [&b"g\0"[..], &[0x11; 32], &[0x22; 32]].concat(),
+            ),
+            (block(&s), [&b"b\0"[..], &[0x11; 32]].concat()),
+            (object_state(&s), [&b"c\0"[..], &[0x11; 32]].concat()),
         ];
         for (key, golden) in cases {
             assert_eq!(key.as_bytes(), golden.as_slice());
@@ -465,6 +583,23 @@ mod tests {
                     reference: Bytes::from_static(b"r"),
                 },
             ),
+            (
+                holder(&s, &NamespaceKey::deployment_default(), &repo("a")).unwrap(),
+                ParsedKey::Holder {
+                    object: s,
+                    ns: NamespaceKey::deployment_default(),
+                    repo: repo("a"),
+                },
+            ),
+            (
+                hold(&s, &[3; 32]),
+                ParsedKey::Hold {
+                    object: s,
+                    hold_id: [3; 32],
+                },
+            ),
+            (block(&s), ParsedKey::Block(s)),
+            (object_state(&s), ParsedKey::ObjectState(s)),
         ];
         for (key, parsed) in cases {
             assert_eq!(parse(&key), Some(parsed));
@@ -477,8 +612,24 @@ mod tests {
             b"px\0\0",
             b"el\0",
             b"no-terminator",
+            b"c\0short",
+            b"g\0short",
         ] {
             assert_eq!(parse(&Key::new(bad.to_vec())), None);
         }
+        // An object's holder and hold ranges hold exactly its rows.
+        let other = [0x23; 32];
+        let (start, end) = holders_of(&s);
+        let own = holder(&s, &NamespaceKey::deployment_default(), &repo("z")).unwrap();
+        let foreign = holder(&other, &NamespaceKey::deployment_default(), &repo("a")).unwrap();
+        assert!(start <= own && own < end && !(start <= foreign && foreign < end));
+        let (start, end) = holds_of(&s);
+        assert!(start <= hold(&s, &[0xff; 32]) && hold(&s, &[0xff; 32]) < end);
+        assert!(!(start <= hold(&other, &[0; 32]) && hold(&other, &[0; 32]) < end));
+        let nul = NamespaceKey::from_stored("a\0b".into());
+        assert!(matches!(
+            holder(&s, &nul, &repo("a")),
+            Err(StoreError::Invalid(_))
+        ));
     }
 }
