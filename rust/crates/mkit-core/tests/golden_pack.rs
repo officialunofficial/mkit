@@ -572,6 +572,22 @@ mod pack_v2_fixtures {
             commit.signature = sign_commit(&commit, &kp).unwrap().0;
             let tree_and_commit = vec![leaf, tree, raw(&Object::Commit(commit))];
 
+            // Literal-heavy blobs (16-symbol noise: Huffman-compressible,
+            // few LZ matches) so the frames carry the 4-byte (14-bit) and
+            // 5-byte (18-bit) literals-section headers: ~10 KiB, 64 KiB and
+            // 263 KiB (several 128 KiB blocks).
+            let hex16 = |seed: u32, len: usize| -> Vec<u8> {
+                noise(seed, len)
+                    .iter()
+                    .map(|b| b"0123456789abcdef"[usize::from(b & 15)])
+                    .collect()
+            };
+            let large_literals = vec![
+                raw(&blob(hex16(11, 10 * 1024))),
+                raw(&blob(hex16(12, 64 * 1024))),
+                raw(&blob(hex16(13, 263 * 1024))),
+            ];
+
             vec![
                 ("raw_4k_repeat", "one 0x03 zstd-raw entry", raw_4k),
                 (
@@ -588,6 +604,12 @@ mod pack_v2_fixtures {
                     "tree_and_commit",
                     "a 0x00 leaf blob, a 0x03 tree and a 0x03 Ed25519-signed commit",
                     tree_and_commit,
+                ),
+                (
+                    "large_literals",
+                    "three 0x03 blobs (10 KiB, 64 KiB, 263 KiB) whose frames use the \
+                     4- and 5-byte literals-section headers",
+                    large_literals,
                 ),
             ]
         }
@@ -694,7 +716,7 @@ mod pack_v2_fixtures {
             .into_iter()
             .filter_map(|(f, _)| f.strip_suffix(".bin").map(str::to_string))
             .collect();
-        assert_eq!(names.len(), 4, "MANIFEST.txt lists {names:?}");
+        assert_eq!(names.len(), 5, "MANIFEST.txt lists {names:?}");
         for name in names {
             let pack = load(&format!("{name}.bin"));
             let side = sidecar(&name);

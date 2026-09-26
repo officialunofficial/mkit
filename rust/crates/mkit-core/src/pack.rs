@@ -756,8 +756,9 @@ fn zstd_decompress_capped(_frame: &[u8], _capacity: usize) -> Result<Vec<u8>, Pa
 /// default window, so a frame written by a streaming encoder with no
 /// pledged size still decodes. Frames declaring a window above
 /// `max(claim, this)` are rejected (fail-closed; the C one-shot decoder
-/// would accept them). Bounding the window is what bounds memory: the
-/// streaming decoder keeps up to one window of not-yet-emitted output.
+/// would accept them). Bounding the window bounds the decoder's own
+/// buffer: it keeps up to one window of not-yet-emitted output (see
+/// [`ruzstd_decompress_capped`] for the overall peak, about 3× the claim).
 #[cfg(feature = "pack-ruzstd")]
 #[cfg_attr(all(feature = "pack-zstd", not(test)), allow(dead_code))]
 const RUZSTD_MIN_WINDOW_LIMIT: u64 = 8 << 20;
@@ -771,9 +772,21 @@ const RUZSTD_MIN_WINDOW_LIMIT: u64 = 8 << 20;
 /// a declared frame content size must not exceed `capacity` and must
 /// equal the decoded length; output past `capacity` is an error, not a
 /// short read; a content checksum, when present, must match; nothing
-/// may follow the frame. The output buffer grows with the decoded
-/// bytes — `capacity` is attacker-chosen (up to 1 GiB) and is never
-/// pre-allocated — and at most `capacity + 1` bytes are ever read out.
+/// may follow the frame. At most `capacity + 1` bytes are ever read out.
+///
+/// Memory: `capacity` is attacker-chosen (up to 1 GiB) and is not
+/// pre-allocated; the output grows with the decoded bytes, so a frame
+/// that stops short costs only what it produced. A frame that really
+/// decodes to the claim peaks at about **3× the claim**, against about 1×
+/// on the C path: ruzstd's ring buffer rounds its capacity up to a power
+/// of two and holds up to one window (the whole frame, for single-segment
+/// frames) of not-yet-emitted output, while `read_to_end` grows the output
+/// `Vec` by doubling. Measured: a 16 KiB RLE payload claiming 512 MiB
+/// reaches about 1.55 GiB RSS (C: about 0.54 GiB). Pre-sizing the output
+/// to the claim would cut the doubling but allocate the full claim for
+/// frames that never deliver it, so it is not done; a caller-set
+/// decoded-size budget is WP-4.8a's.
+///
 /// With `pack-zstd` also on, only the differential tests call it.
 #[cfg(feature = "pack-ruzstd")]
 #[cfg_attr(all(feature = "pack-zstd", not(test)), allow(dead_code))]
@@ -918,7 +931,10 @@ fn ruzstd_check_reserved_fields(frame: &[u8]) -> Result<(), &'static str> {
 #[cfg_attr(all(feature = "pack-zstd", not(test)), allow(dead_code))]
 fn ruzstd_sequence_modes(block: &[u8]) -> Result<u8, &'static str> {
     const MALFORMED: &str = "malformed zstd block";
-    let byte = |i: usize| block.get(i).copied().ok_or(MALFORMED).map(usize::from);
+    // Header fields are assembled in `u64`, never `usize`: the 5-byte
+    // literals header spans 40 bits, which overflows a 32-bit `usize`
+    // (wasm32) and silently drops the compressed size's top bits.
+    let byte = |i: usize| block.get(i).copied().ok_or(MALFORMED).map(u64::from);
     let b0 = byte(0)?;
     // Literals section: header, then its content.
     let (header_len, content_len) = match (b0 & 3, (b0 >> 2) & 3) {
@@ -938,13 +954,15 @@ fn ruzstd_sequence_modes(block: &[u8]) -> Result<u8, &'static str> {
                 2 => (4, 14),
                 _ => (5, 18),
             };
-            let mut h = 0usize;
+            let mut h = 0u64;
             for i in (0..len).rev() {
                 h = (h << 8) | byte(i)?;
             }
             (len, (h >> (4 + bits)) & ((1 << bits) - 1))
         }
     };
+    // At most 20 bits, so it fits any `usize`.
+    let content_len = usize::try_from(content_len).map_err(|_| MALFORMED)?;
     let seq = header_len + content_len;
     let modes_at = match byte(seq)? {
         0 => return Ok(0),

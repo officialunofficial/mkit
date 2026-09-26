@@ -56,6 +56,45 @@ fn raw_block_frame(content: &[u8], fcs: Option<u32>, window_log: Option<u8>) -> 
     f
 }
 
+/// The committed C-encoded v2 fixtures (`rust/tests/golden/pack-v2/`).
+#[cfg(all(feature = "pack-zstd", feature = "pack-ruzstd"))]
+const FIXTURES: [&str; 5] = [
+    "raw_4k_repeat",
+    "delta_repeat",
+    "mixed",
+    "tree_and_commit",
+    "large_literals",
+];
+
+#[cfg(feature = "pack-ruzstd")]
+fn fixture(name: &str) -> Vec<u8> {
+    let mut dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    dir.pop();
+    dir.pop();
+    dir.extend(["tests", "golden", "pack-v2", &format!("{name}.bin")]);
+    std::fs::read(dir).unwrap()
+}
+
+/// Every `0x03`/`0x04` entry's `[claim][frame]` payload, in pack order.
+#[cfg(feature = "pack-ruzstd")]
+fn zstd_payloads(pack: &[u8]) -> Vec<&[u8]> {
+    let count = u32::from_le_bytes(pack[ENTRY_COUNT_OFFSET..HEADER_LEN].try_into().unwrap());
+    let mut pos = HEADER_LEN;
+    let mut out = Vec::new();
+    for _ in 0..count {
+        let etype = pack[pos];
+        let len = u32::from_le_bytes(pack[pos + 1..pos + 5].try_into().unwrap()) as usize;
+        let payload = &pack[pos + ENTRY_FRAME_LEN..pos + ENTRY_FRAME_LEN + len];
+        pos += ENTRY_FRAME_LEN + len;
+        match etype {
+            0x03 => out.push(payload),
+            0x04 => out.push(&payload[hash::HASH_LEN..]),
+            _ => {}
+        }
+    }
+    out
+}
+
 /// The variant class a decode ended in; the message inside
 /// `ZstdDecompress` may legitimately differ between backends.
 #[cfg(feature = "pack-ruzstd")]
@@ -166,10 +205,56 @@ mod ruzstd_backend {
         }
     }
 
-    /// Claims are checked before anything is decoded or allocated, and the
-    /// decoder never reads past `claim + 1` output bytes.
+    /// `Size_Format` of every compressed block's Huffman-coded literals
+    /// section in a dictionary-less frame.
+    fn literals_size_formats(frame: &[u8]) -> Vec<u8> {
+        let d = frame[4];
+        assert_eq!(d & 3, 0, "no dictionary id");
+        let single = d & 0x20 != 0;
+        let fcs_len = [usize::from(single), 2, 4, 8][usize::from(d >> 6)];
+        let mut pos = 5 + usize::from(!single) + fcs_len;
+        let mut formats = Vec::new();
+        loop {
+            let h = u32::from_le_bytes([frame[pos], frame[pos + 1], frame[pos + 2], 0]);
+            let size = (h >> 3) as usize;
+            let kind = (h >> 1) & 3;
+            if kind == 2 && frame[pos + 3] & 3 >= 2 {
+                formats.push((frame[pos + 3] >> 2) & 3);
+            }
+            pos += 3 + if kind == 1 { 1 } else { size };
+            if h & 1 == 1 {
+                return formats;
+            }
+        }
+    }
+
+    /// The 4-byte (14-bit) and 5-byte (18-bit) literals headers decode.
+    /// On a 32-bit target the 5-byte header overflowed `usize` in the
+    /// sequence-mode walker; the wasm32 harness
+    /// (`scripts/wasm-ruzstd-check.sh`) runs this fixture there.
     #[test]
-    fn ruzstd_rejects_over_cap_without_allocating() {
+    fn ruzstd_decodes_4_and_5_byte_literals_headers() {
+        let pack = fixture("large_literals");
+        let mut formats = Vec::new();
+        for payload in zstd_payloads(&pack) {
+            formats.extend(literals_size_formats(&payload[ZSTD_LEN_PREFIX..]));
+            decompress_zstd_entry_with(payload, ruzstd_decompress_capped).unwrap();
+        }
+        assert!(
+            formats.contains(&2),
+            "no 4-byte literals header in {formats:?}"
+        );
+        assert!(
+            formats.contains(&3),
+            "no 5-byte literals header in {formats:?}"
+        );
+    }
+
+    /// Over-cap claims fail before any frame byte is read; declared sizes
+    /// above the claim fail from the header; output past the claim stops
+    /// at `claim + 1` bytes. (Allocation itself is not measured here.)
+    #[test]
+    fn ruzstd_rejects_claims_before_or_at_the_cap() {
         let r = decode(MAX_RAW_OBJECT_SIZE + 1, &[0u8; 8]);
         assert!(
             matches!(r, Err(PackError::DecompressedSizeOverCap(n)) if n == MAX_RAW_OBJECT_SIZE + 1),
@@ -459,36 +544,20 @@ mod differential {
     /// Every `0x03`/`0x04` payload in `pack` decodes identically under both
     /// backends; returns the decoded payloads in entry order.
     fn assert_pack_agrees(case: &str, pack: &[u8]) -> Vec<Vec<u8>> {
-        let count = u32::from_le_bytes(pack[ENTRY_COUNT_OFFSET..HEADER_LEN].try_into().unwrap());
-        let mut pos = HEADER_LEN;
-        let mut out = Vec::new();
-        for i in 0..count {
-            let etype = pack[pos];
-            let len = u32::from_le_bytes(pack[pos + 1..pos + 5].try_into().unwrap()) as usize;
-            let payload = &pack[pos + ENTRY_FRAME_LEN..pos + ENTRY_FRAME_LEN + len];
-            pos += ENTRY_FRAME_LEN + len;
-            let inner = match etype {
-                0x03 => payload,
-                0x04 => &payload[hash::HASH_LEN..],
-                _ => continue,
-            };
-            out.push(agree(&format!("{case} entry {i}"), inner).unwrap());
-        }
-        out
+        zstd_payloads(pack)
+            .iter()
+            .enumerate()
+            .map(|(i, inner)| agree(&format!("{case} zstd entry {i}"), inner).unwrap())
+            .collect()
     }
 
     #[test]
     fn backends_agree_on_committed_v2_fixtures() {
-        let mut dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        dir.pop();
-        dir.pop();
-        dir.extend(["tests", "golden", "pack-v2"]);
         let mut seen = 0;
-        for name in ["raw_4k_repeat", "delta_repeat", "mixed", "tree_and_commit"] {
-            let pack = std::fs::read(dir.join(format!("{name}.bin"))).unwrap();
-            seen += assert_pack_agrees(name, &pack).len();
+        for name in FIXTURES {
+            seen += assert_pack_agrees(name, &fixture(name)).len();
         }
-        assert_eq!(seen, 6, "compressed entries across the fixtures");
+        assert_eq!(seen, 9, "compressed entries across the fixtures");
     }
 
     /// Deterministic object content of a given shape.

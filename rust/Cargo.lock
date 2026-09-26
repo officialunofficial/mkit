@@ -3357,6 +3357,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mkit-core-wasm-check"
+version = "0.4.2"
+dependencies = [
+ "mkit-core",
+ "serde_json",
+ "wasm-bindgen-test",
+]
+
+[[package]]
 name = "mkit-fuzz"
 version = "0.0.0"
 dependencies = [

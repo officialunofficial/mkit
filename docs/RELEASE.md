@@ -232,7 +232,7 @@ in `rust/Cargo.toml` at the tagged tree).
 
 | Publishes to crates.io | Stays off crates.io (`publish = false`) |
 |---|---|
-| the library crates (`mkit-core`, `mkit-rpc`, `mkit-attest`, `mkit-keystore`, `mkit-git-bridge`, `mkit-transport-{file,http,memory,s3,ssh,enc}`) plus `mkit-cli` (so `cargo install mkit-cli` works) | `mkit-wasm` (npm-only), `mkit-repo-client`, `mkit-test-util`, `fuzz`, `benches`. The contrib signers are a separate workspace under `contrib/signers/` (not workspace members at all). |
+| the library crates (`mkit-core`, `mkit-rpc`, `mkit-attest`, `mkit-keystore`, `mkit-git-bridge`, `mkit-transport-{file,http,memory,s3,ssh,enc}`) plus `mkit-cli` (so `cargo install mkit-cli` works) | `mkit-wasm` (npm-only), `mkit-repo-client`, `mkit-test-util`, `mkit-core-wasm-check`, `fuzz`, `benches`. The contrib signers are a separate workspace under `contrib/signers/` (not workspace members at all). |
 
 The published crates depend only on each other, forming a closed,
 dependency-ordered set; `cargo publish --workspace` computes that order and

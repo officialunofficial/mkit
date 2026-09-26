@@ -6,8 +6,12 @@
 #
 # `ci-scripts` is the local stand-in for gates those jobs do not run as
 # these exact commands: docs-lint.yml's check-spec-status.sh,
-# scripts/check-wasm-dep-graph.sh, and `cargo check --target
-# wasm32-unknown-unknown` for mkit-wasm and mkit-server. It is not a 1:1
+# scripts/check-wasm-dep-graph.sh, `cargo check --target
+# wasm32-unknown-unknown` for mkit-wasm and mkit-server, and
+# scripts/wasm-ruzstd-check.sh (mkit-core's pack-ruzstd decoder run on
+# wasm32 under node via wasm-pack). The `pack-ruzstd` nextest run in
+# ci-linux / ci-macos is likewise local-only until WP-REL mirrors both
+# into the CI configs. It is not a 1:1
 # extract of web.yml (wasm-pack bundler + bun) or the worker wasm32 builds.
 #
 # Not mirrored (CI-infra-specific, not part of the test surface):
@@ -53,6 +57,8 @@ ci-linux:
     ( cd contrib/signers && cargo build --locked --all-features )
     ( cd contrib/signers && cargo nextest run --locked --all-features )
     ( cd rust && cargo nextest run --locked --workspace --all-features )
+    # --all-features decodes through C zstd; this is the pure-Rust path.
+    ( cd rust && cargo nextest run --locked -p mkit-core --no-default-features --features pack-ruzstd )
     ( cd rust && cargo nextest run --locked --workspace --all-features \
         --profile ignored-lane --run-ignored ignored-only )
     ( cd rust && cargo test --manifest-path fuzz/Cargo.toml )
@@ -80,6 +86,8 @@ ci-macos:
     # git-dependent tests fail loudly instead of silently skipping if it's
     # missing here too. See rust.yml's "Test (nextest)" step comment.
     ( cd rust && MKIT_TEST_STRICT=1 cargo nextest run --locked --workspace --all-features )
+    # --all-features decodes through C zstd; this is the pure-Rust path.
+    ( cd rust && cargo nextest run --locked -p mkit-core --no-default-features --features pack-ruzstd )
     ( cd rust && cargo nextest run --locked --workspace --all-features \
         --profile ignored-lane --run-ignored ignored-only )
     ( cd rust && cargo test --manifest-path fuzz/Cargo.toml )
@@ -116,7 +124,8 @@ ci-security:
     ( cd contrib/signers && run_audit )
     cargo deny --manifest-path rust/Cargo.toml --all-features check
 
-# Spec-status, wasm dep-graph, and mkit-wasm / mkit-server wasm32 checks.
+# Spec-status, wasm dep-graph, mkit-wasm / mkit-server wasm32 checks, and
+# the pack-ruzstd wasm32 test run.
 ci-scripts:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -128,6 +137,7 @@ ci-scripts:
     fi
     ( cd rust && cargo check -p mkit-wasm --target wasm32-unknown-unknown )
     ( cd rust && cargo check -p mkit-server --target wasm32-unknown-unknown )
+    bash scripts/wasm-ruzstd-check.sh
 
 # Mirrors cloudbuild/docs.yaml (rustdoc -D warnings).
 ci-docs:

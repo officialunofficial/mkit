@@ -382,8 +382,13 @@ exactly one RFC 8878 Zstandard frame (SPEC-PACKFILE §3.3). The C backend
 skippable or legacy frame magic, a second concatenated frame and any
 trailing byte, with `PackError::ZstdDecompress`. Both apply the same §3.3
 bomb guards (claim ≤ `MAX_RAW_OBJECT_SIZE` before decoding, output bounded
-to the claim, exact length re-check). The pure-Rust path never
-pre-allocates the claim and reads out at most `claim + 1` bytes; it also
+to the claim, exact length re-check). The pure-Rust path does not
+pre-allocate the claim and reads out at most `claim + 1` bytes, but a
+frame that decodes to its claim peaks at about 3× the claim (C: about
+1×): ruzstd's ring buffer rounds up to a power of two and holds up to one
+window of pending output, and `read_to_end` grows the output by doubling
+(a 512 MiB claim measured about 1.55 GiB RSS). A decoded-size budget set
+by the caller is WP-4.8a's. The pure-Rust path also
 checks what `ruzstd` skips and the C decoder enforces: the declared
 content size against the claim and the decoded length, the content
 checksum, the reserved descriptor and sequence-mode bits, and the
@@ -397,6 +402,9 @@ other rejects splits pushes, fetches and indexed state between them.
 **If violated:** a push accepted on one runtime is rejected on the other,
 or a runtime decodes bytes the spec forbids (a second frame's content).
 
+The hand-written frame parsing assembles header fields in `u64`, never
+`usize`, so it behaves the same on 32-bit wasm32 as on 64-bit native.
+
 **Residual divergence (documented, not closed):** the two decoders agree
 on every frame an encoder produces (differential proptest over
 `PackWriter` output, C-encoded fixtures) and on the curated adversarial
@@ -406,19 +414,31 @@ table. On *malformed* frames they do not fully agree. Fail-closed on
 the window (legal for raw blocks and for multi-block frames), and
 corrupt entropy-coded sections the C one-shot decoder tolerates. Fail-open
 (it accepts, C rejects) and both-accept-different-bytes cases also exist
-for a small share of randomly corrupted frames, in Huffman/FSE table
-internals that no cheap check reaches; the reference `zstd` CLI rejects
-those frames too. Integrity is unaffected, because decoded bytes must
-parse as a canonical object and are stored under their own content id, so
-no runtime can accept wrong content under a given id. The divergence can
-only change which objects, if any, a crafted pack yields on each runtime.
-Consumers that decode the same pack bytes on both runtimes (4.7/4.8
-indexed ingestion) must not assume they derive the same object set from a
-malformed pack.
+for a small share of corrupted frames, in Huffman/FSE table internals
+that no cheap check reaches; the reference `zstd` CLI rejects those
+frames too. Over 850k mutated frames: 134 accepted only by `pack-ruzstd`,
+2,580 accepted only by C, 4 accepted by both with different bytes, no
+panics. The WP-4.1 brief called the first class "not tolerable"; it is
+accepted as this documented residual because no consumer enables
+`pack-ruzstd` yet and object ids are content-derived. Integrity is
+unaffected: decoded bytes must parse as a canonical object and are stored
+under their own content id, so no runtime can accept wrong content under
+a given id. The divergence can only change which objects, if any, a
+crafted pack yields on each runtime.
+
+**Consumers MUST:** a server that accepts a pushed pack through
+`pack-ruzstd` MUST NOT serve that pack's `0x03`/`0x04` frames verbatim to
+other clients unless the reference (C) decoder has accepted them. It
+serves server-derived bytes instead: raw v1 entries, or frames the server
+re-encoded itself. No consumer may assume two runtimes derive the same
+object set from the same client-supplied compressed frames. Owners:
+WP-4.7 (indexed ingestion) and WP-4.8 (Workers verification), which
+enable `pack-ruzstd` first.
 
 **Enforced by:** `mkit_core::pack::zstd_tests` (`c_backend_enforces_one_frame`,
-`ruzstd_enforces_one_frame`, `ruzstd_rejects_over_cap_without_allocating`,
+`ruzstd_enforces_one_frame`, `ruzstd_rejects_claims_before_or_at_the_cap`,
 `ruzstd_rejects_huge_window_frame`,
+`ruzstd_decodes_4_and_5_byte_literals_headers`,
 `ruzstd_enforces_reserved_bits_and_block_size`, and under
 `--all-features` the differential `backends_agree_on_adversarial_frames`,
 `backends_agree_on_bit_flipped_frames`,
@@ -427,7 +447,9 @@ malformed pack.
 `backends_agree_on_committed_v2_fixtures` and
 `ruzstd_matches_c_on_writer_output`), plus
 `golden_pack::pack_v2_fixtures::pack_v2_fixtures_decode_without_c_zstd`
-over `rust/tests/golden/pack-v2/`.
+over `rust/tests/golden/pack-v2/`, the `pack-ruzstd`-only nextest run in
+`just ci`, and `scripts/wasm-ruzstd-check.sh` (the same fixtures decoded
+on a real wasm32 target by `mkit-core-wasm-check`, in `just ci-scripts`).
 
 ## Hosted workspaces separate public projects from owner execution
 
