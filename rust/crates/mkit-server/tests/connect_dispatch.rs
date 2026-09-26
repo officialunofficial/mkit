@@ -17,13 +17,17 @@ use http::{HeaderMap, StatusCode};
 use http_body_util::{BodyExt, Full};
 use mkit_core::hash::{hash, to_hex, to_hex_bytes};
 use mkit_core::write_auth::{Context as AuthContext, Operation as SignedOp};
+use mkit_server::Procedure;
 use mkit_server::auth_v2::AuthV2Config;
 use mkit_server::connect::proto::mkit::transport::v1::__buffa::oneof::download_pack_response::Body as DownloadBody;
 use mkit_server::connect::proto::mkit::transport::v1::__buffa::oneof::upload_pack_request::Body as UploadBody;
+use mkit_server::connect::proto::mkit::transport::v1::__buffa::oneof::upload_part_request::Msg as PartMsg;
 use mkit_server::connect::proto::mkit::transport::v1::{
-    AdvanceOutcome, AdvanceRefsRequest, AdvanceRefsResponse, DownloadPackRequest,
-    DownloadPackResponse, PackChunk, PackExistsRequest, PackExistsResponse, ReadRefRequest,
-    ReadRefResponse, RefExpectation, UploadPackHeader, UploadPackRequest,
+    AdvanceOutcome, AdvanceRefsRequest, AdvanceRefsResponse, BeginUploadRequest,
+    CompleteUploadRequest, DownloadPackRequest, DownloadPackResponse, GetServerInfoRequest,
+    ListRefsRequest, ListRefsResponse, PackChunk, PackExistsRequest, PackExistsResponse,
+    ReadRefRequest, ReadRefResponse, RefExpectation, UploadPackHeader, UploadPackRequest,
+    UploadPartHeader, UploadPartRequest,
 };
 use mkit_server::connect::{self};
 use mkit_server::pipeline::{
@@ -955,4 +959,249 @@ async fn test_fault_header_honored_with_feature() {
     assert_eq!(end["error"]["message"], "injected test fault");
     let (_, end) = server.upload(&msgs, &headers).await.frames();
     assert!(end.get("error").is_none(), "fires once: {end}");
+}
+
+// -------------------------------------------------------------- M1 stubs
+
+fn assert_unimplemented(reply: &Reply) {
+    assert_eq!(reply.code(), "unimplemented");
+    assert_eq!(reply.json()["message"], "not implemented yet");
+}
+
+#[test]
+fn m1_stub_paths_are_not_authenticated_procedures_yet() {
+    // WP-1.6, WP-1.9 and WP-1.11 must flip these as their handlers land.
+    // GetServerInfo remains public by spec §2.1, with an explicit Procedure.
+    for rpc in [
+        "GetServerInfo",
+        "BeginUpload",
+        "UploadPart",
+        "CompleteUpload",
+    ] {
+        let path = format!("/mkit.transport.v1.TransportService/{rpc}");
+        assert_eq!(Procedure::from_connect_path(&path), None, "{rpc}");
+    }
+}
+
+#[tokio::test]
+async fn m1_new_unary_rpcs_reach_stubs_without_auth_headers() {
+    let server = setup(AuthMode::Bearer {
+        token: Redacted::new(TOKEN),
+    })
+    .serve();
+    assert_unimplemented(
+        &server
+            .unary("GetServerInfo", &GetServerInfoRequest::default(), &[])
+            .await,
+    );
+    assert_unimplemented(
+        &server
+            .unary(
+                "BeginUpload",
+                &BeginUploadRequest {
+                    r#ref: Some(HEAD.into()),
+                    pack_id: Some(A.to_vec()),
+                    bytes: Some(8),
+                    ..Default::default()
+                },
+                &[],
+            )
+            .await,
+    );
+    assert_unimplemented(
+        &server
+            .unary(
+                "CompleteUpload",
+                &CompleteUploadRequest {
+                    ticket_token: Some(vec![1]),
+                    receipts: vec![vec![2]],
+                    ..Default::default()
+                },
+                &[],
+            )
+            .await,
+    );
+    // Exercise JSON dispatch too, including invalid legacy upload metadata.
+    for rpc in ["GetServerInfo", "BeginUpload", "CompleteUpload"] {
+        assert_unimplemented(&server.json(rpc, &serde_json::json!({}), &[]).await);
+    }
+}
+
+#[tokio::test]
+async fn m1_upload_part_stub_ignores_stream_contents_without_auth() {
+    let server = setup(AuthMode::Bearer {
+        token: Redacted::new(TOKEN),
+    })
+    .serve();
+    let header = UploadPartRequest {
+        msg: Some(PartMsg::Header(Box::new(UploadPartHeader {
+            ticket_token: Some(vec![1]),
+            index: Some(2),
+            ..Default::default()
+        }))),
+        ..Default::default()
+    };
+    let chunk = UploadPartRequest {
+        msg: Some(PartMsg::Chunk(vec![3, 4])),
+        ..Default::default()
+    };
+    let mut full = frame(&header);
+    full.extend(frame(&chunk));
+    // Malformed frame, and no header at all: neither is validated by the handler.
+    for body in [full, vec![], vec![0, 0, 0, 0, 16, 1, 2]] {
+        let reply = server
+            .post(
+                "mkit.transport.v1.TransportService/UploadPart",
+                STREAM,
+                &[],
+                body,
+            )
+            .await;
+        let (messages, end) = reply.frames();
+        assert!(messages.is_empty());
+        assert_eq!(end["error"]["code"], "unimplemented");
+        assert_eq!(end["error"]["message"], "not implemented yet");
+    }
+}
+
+#[tokio::test]
+async fn m1_ref_stubs_precede_validation_and_never_write() {
+    for (rpc, extra) in [
+        ("UpdateRef", serde_json::json!({ "delete": true })),
+        ("AdvanceRefs", serde_json::json!({ "delete": true })),
+        ("AdvanceRefs", serde_json::json!({ "ticketIds": [b64(&A)] })),
+    ] {
+        let mut config = setup(AuthMode::Open);
+        config.meta = Some(
+            MemoryKv::with_clock(Arc::new(ManualClock::new(T0)))
+                .with_fault(MemoryFault::ApplyBefore),
+        );
+        let server = config.serve();
+        // Missing required legacy fields would fail validation if the stub were late.
+        assert_unimplemented(&server.json(rpc, &extra, &[]).await);
+        let mut valid = if rpc == "UpdateRef" {
+            update_json(HEAD, "REF_EXPECTATION_ANY", &A)
+        } else {
+            serde_json::json!({
+                "headRef": HEAD, "headExpectation": "REF_EXPECTATION_ANY", "headNewId": b64(&A),
+                "packmapRef": PACKMAP, "packmapExpectation": "REF_EXPECTATION_ANY", "packmapNewId": b64(&B)
+            })
+        };
+        valid
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        assert_unimplemented(&server.json(rpc, &valid, &[]).await);
+        assert_eq!(server.read(HEAD).await.exists, Some(false));
+        assert_eq!(server.read(PACKMAP).await.exists, Some(false));
+        assert!(
+            server.codes(rpc).is_empty(),
+            "stub must not call the pipeline"
+        );
+        // The one-shot apply fault is still armed: neither stub reached a write.
+        let legacy = update_json(HEAD, "REF_EXPECTATION_ANY", &A);
+        assert_eq!(
+            server.json("UpdateRef", &legacy, &[]).await.code(),
+            "internal"
+        );
+        assert_eq!(
+            server.json("UpdateRef", &legacy, &[]).await.status,
+            StatusCode::OK
+        );
+    }
+}
+
+#[tokio::test]
+async fn m1_ticketed_upload_pack_rejects_before_chunks_and_header_validation() {
+    let server = setup(AuthMode::Open).serve();
+    let data = pack(8);
+    let ticketed = UploadPackRequest {
+        body: Some(UploadBody::Header(Box::new(UploadPackHeader {
+            pack_id: Some(hash(&data).to_vec()),
+            total_bytes: Some(data.len() as u64),
+            ticket_token: Some(vec![1]),
+            ..Default::default()
+        }))),
+        ..Default::default()
+    };
+    let invalid = UploadPackRequest {
+        body: Some(UploadBody::Header(Box::new(UploadPackHeader {
+            ticket_token: Some(vec![1]),
+            ..Default::default()
+        }))),
+        ..Default::default()
+    };
+    for msg in [ticketed, invalid] {
+        let mut body = frame(&msg);
+        // If chunks were read, this truncated frame would fail decoding.
+        body.extend([0, 0, 0, 0, 16, 1, 2]);
+        let reply = server
+            .post(
+                "mkit.transport.v1.TransportService/UploadPack",
+                STREAM,
+                &[],
+                body,
+            )
+            .await;
+        let (messages, end) = reply.frames();
+        assert!(messages.is_empty());
+        assert_eq!(end["error"]["code"], "unimplemented");
+        assert_eq!(end["error"]["message"], "not implemented yet");
+    }
+    assert!(!server.exists(&hash(&data)).await);
+    assert!(server.codes("UploadPack").is_empty());
+}
+
+#[tokio::test]
+async fn m1_list_refs_paging_token_rejected_and_page_size_ignored() {
+    let server = setup(AuthMode::Open).serve();
+    for (name, id) in [(HEAD, A), ("refs/heads/dev", B)] {
+        assert_eq!(
+            server
+                .json(
+                    "UpdateRef",
+                    &update_json(name, "REF_EXPECTATION_ANY", &id),
+                    &[]
+                )
+                .await
+                .status,
+            StatusCode::OK
+        );
+    }
+    // An invalid prefix must not reach validation when a token is supplied.
+    assert_unimplemented(
+        &server
+            .unary(
+                "ListRefs",
+                &ListRefsRequest {
+                    prefix: Some("invalid".into()),
+                    page_token: Some("next".into()),
+                    ..Default::default()
+                },
+                &[],
+            )
+            .await,
+    );
+    let list = |page_size| ListRefsRequest {
+        prefix: Some("refs/heads/".into()),
+        page_size,
+        ..Default::default()
+    };
+    let original = server
+        .unary("ListRefs", &list(None), &[])
+        .await
+        .decode::<ListRefsResponse>();
+    let bounded = server
+        .unary("ListRefs", &list(Some(1)), &[])
+        .await
+        .decode::<ListRefsResponse>();
+    assert_eq!(bounded, original);
+    assert_eq!(bounded.refs.len(), 2);
+    // Keep the legacy response bytes unchanged: absent means an empty token.
+    assert_eq!(bounded.next_page_token, None);
+    let json = server
+        .json("ListRefs", &serde_json::json!({ "pageSize": 1 }), &[])
+        .await;
+    assert_eq!(json.json()["refs"].as_array().unwrap().len(), 2);
+    assert!(json.json().get("nextPageToken").is_none());
 }
