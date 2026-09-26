@@ -27,6 +27,9 @@ members = [
     "crates/mkit-server-conformance",
     # The native adapter: SQLite metadata backend (publish = false).
     "crates/mkit-server-native",
+    # The Cloudflare Workers adapter: R2 blobs, Durable Object metadata
+    # (publish = false).
+    "crates/mkit-server-worker",
     "benches",
     # Dev-only test helpers shared across crates' test suites
     # (publish = false — never a normal dependency, see the crate's

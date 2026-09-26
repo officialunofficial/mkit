@@ -1,0 +1,65 @@
+# mkit-server-worker — the Cloudflare Workers adapter of the mkit server
+# (PRD MKIT-29 §5.1), storage half: a streaming R2 `BlobStore`, a Durable
+# Object `SqlConn` under `mkit-server`'s shared `SqlKvStore`, the Durable
+# Object request handler, and the Worker-side `NamespaceStore` client that
+# routes each partition to its own Durable Object. The fetch adapter and
+# the vcs-worker port land in WP-M0-17.
+#
+# Everything that touches `worker` handles is `#[cfg(target_arch =
+# "wasm32")]`; the logic around it (the verifying sink, the wire codec, the
+# routing, the error classifiers) is host-compiled and host-tested against
+# simulated R2 and Durable Object backends. The `worker` dependencies are
+# therefore wasm32-only.
+#
+# `publish = false` for good (planner default Q6): a deployment crate.
+# It depends on `apps/mkit-worker-common` (a standalone package with its own
+# `[workspace]` table, which Cargo ignores for a path dependency: it is not a
+# member of this workspace).
+[package]
+name = "mkit-server-worker"
+description = "Cloudflare Workers adapter of the mkit server: R2 blobs and Durable Object metadata"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# Store-level fault injection (a failed final R2 chunk, a Durable Object
+# batch that fails once after its writes), plus the pipeline seam of
+# `mkit-server/test-faults`. Never enabled by a release build.
+test-faults = ["mkit-server/test-faults"]
+
+[dependencies]
+# `connect` (on by default) for M0-17's fetch adapter; `sql` for the shared
+# `SqlKvStore`. No `fs` (native only) and no `memory`.
+mkit-server = { version = "0.4", path = "../mkit-server", features = ["connect", "sql"] }
+# default-features = false keeps `pack-zstd` (zstd-sys, C) out of wasm32.
+mkit-core = { version = "0.4", path = "../mkit-core", default-features = false }
+bytes = "1"
+# mpsc/oneshot channels between a sink and its spawned R2 put.
+futures = { version = "0.3", default-features = false, features = ["std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Keys and values cross the Worker <-> Durable Object JSON wire as base64.
+base64 = "0.22"
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Same pin and features as apps/vcs-worker and apps/mkit-worker-common.
+worker = { version = "0.8", features = ["http"] }
+mkit-worker-common = { path = "../../../apps/mkit-worker-common" }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+mkit-server = { version = "0.4", path = "../mkit-server", features = ["memory"] }
+mkit-server-conformance = { path = "../mkit-server-conformance" }
+# `RusqliteConn` under the simulated Durable Object connection.
+mkit-server-native = { path = "../mkit-server-native" }
+futures = { version = "0.3", features = ["executor"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread"] }
+tempfile = "3"

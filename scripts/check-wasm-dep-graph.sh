@@ -33,7 +33,8 @@ fail=0
 # mkit's own crates. Checking for it there would flag a dependency this
 # repo already accepts, not a regression. mkit-server is not checked for it
 # either: its Connect binding pulls `connectrpc` (and so `tokio`) from
-# WP-M0-06 on, for the same reason.
+# WP-M0-06 on, for the same reason. Nor is mkit-server-worker, which adds
+# `worker` on top of mkit-server (WP-M0-16).
 #
 # check_tree <label> <manifest-dir> <extra-cargo-tree-args> <required> <forbidden...>
 #   extra-cargo-tree-args: e.g. "--no-default-features --features pack-ruzstd",
@@ -89,6 +90,7 @@ check_tree() {
 check_tree "mkit-wasm" "rust/crates/mkit-wasm" "" "" blst zstd-sys commonware-runtime commonware-storage tokio ruzstd
 check_tree "apps/repo-worker" "apps/repo-worker" "" "" blst zstd-sys commonware-runtime commonware-storage
 check_tree "mkit-server" "rust/crates/mkit-server" "" "" blst zstd-sys commonware-runtime commonware-storage
+check_tree "mkit-server-worker" "rust/crates/mkit-server-worker" "" "" blst zstd-sys commonware-runtime commonware-storage
 # mkit-core's decode-only pure-Rust zstd backend must select `ruzstd` and
 # stay C-free. The first consumer that enables it (WP 4.8) adds its own
 # positive check here.
@@ -101,4 +103,4 @@ if [ "$fail" -ne 0 ]; then
   exit 1
 fi
 
-echo "ok: mkit-wasm, apps/repo-worker, mkit-server and mkit-core (pack-ruzstd) wasm32 dependency graphs contain no C-toolchain crates"
+echo "ok: mkit-wasm, apps/repo-worker, mkit-server, mkit-server-worker and mkit-core (pack-ruzstd) wasm32 dependency graphs contain no C-toolchain crates"
