@@ -215,7 +215,9 @@ impl ObjectSource for EphemeralSink<'_> {
 /// publication (commit/merge/rebase tree writes), dedup, fetch/apply, or
 /// any path whose output becomes durable state or gets applied elsewhere
 /// (e.g. the format-patch body in `git_tools.rs`, which is deliberately
-/// NOT wrapped because `git am` applies it into new commits). See
+/// NOT wrapped because `git am` applies it into new commits), including
+/// [`crate::verify::build_disclosure_from`], whose bundles are published
+/// proofs. See
 /// [`ObjectStore::read_unverified`] for the full policy this wrapper
 /// exists to apply consistently (#625).
 pub struct DisplaySource<'a, S: ObjectSource + ?Sized> {

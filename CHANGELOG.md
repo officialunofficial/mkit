@@ -31,6 +31,12 @@ train).
 
 ### Added
 
+- *(core)* `verify::build_disclosure_from`: builds SPEC-DISCLOSURE
+  bundles through any verifying `store::ObjectSource` (a per-repository
+  index or the global object CAS), not just the on-disk `ObjectStore`.
+  `build_disclosure` is now a thin wrapper; bundle bytes are unchanged
+  (the disclosure golden regeneration is a zero diff).
+
 - *(server)* `mkit-server` crate (internal foundation for the production
   server, MKIT-29): repo and namespace identifiers, principals, the typed
   `Operation` model, a transport-neutral `ServerError` with redaction and
