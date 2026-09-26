@@ -2032,3 +2032,37 @@ fn lost_prune_race_retries_without_prune_uncounted() {
 
 #[path = "tests_stream.rs"]
 mod stream;
+
+#[test]
+fn single_repository_header_rules_preserve_04_requests_and_fail_at_stage_zero() {
+    let env = env(authv2());
+    // 0.4.x reads carry no header, and signed writes carry the configured identity.
+    assert_eq!(env.read(HEAD), None);
+    let calls_before = env.pipe.meta.calls();
+    let u = upd(HEAD, Missing, A);
+    let signed = Req::update(&key(7), 1, &u, T0);
+    let mut absent = signed.clone();
+    absent.headers.retain(|(n, _)| *n != "x-repository");
+    for value in [None, Some("")] {
+        let mut request = absent.clone();
+        if let Some(value) = value {
+            request = request.header("x-repository", value);
+        }
+        let err = env.auth(&request).unwrap_err();
+        assert_eq!(err.code(), Code::Unauthenticated);
+        assert_eq!(
+            err.public_message(),
+            "missing X-Repository on a signed request"
+        );
+    }
+    let other = Req::unsigned(Procedure::ReadRef).header("x-repository", "other");
+    assert_eq!(env.auth(&other).unwrap_err().code(), Code::NotFound);
+    let bad = Req::unsigned(Procedure::ReadRef).header("x-repository", ".bad");
+    assert_eq!(env.auth(&bad).unwrap_err().code(), Code::InvalidArgument);
+    assert!(env.batches().is_empty());
+    assert_eq!(env.pipe.meta.calls(), calls_before);
+    assert_eq!(env.metrics.count(crate::METRIC_REQUESTS), 5);
+
+    assert_eq!(env.update(&signed, &u).unwrap(), UpdateRefResult::Committed);
+    assert_eq!(env.read(HEAD), Some(A));
+}

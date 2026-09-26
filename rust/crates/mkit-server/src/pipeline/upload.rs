@@ -199,6 +199,7 @@ impl<'p, B: BlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p, B, N, H>
         pack_id: Option<&[u8]>,
         total_bytes: Option<u64>,
     ) -> Result<Opened<B::Sink>, ServerError> {
+        pipe.require_pack_membership()?;
         let validator = UploadValidator::new(pack_id, total_bytes, pipe.cfg.upload_limits)?;
         let (key, declared) = (validator.key(), validator.declared());
         let kind = OpKind::UploadPack {

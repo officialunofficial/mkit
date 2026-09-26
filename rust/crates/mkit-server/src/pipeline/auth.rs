@@ -11,6 +11,7 @@ use crate::auth_v2::{self, AuthV2Config};
 use crate::error::{Redacted, ServerError};
 use crate::op::{Procedure, VerifiedAuth};
 use crate::principal::Principal;
+use crate::repo::ResolvedRepo;
 
 /// How a deployment authenticates requests.
 #[derive(Debug, Clone)]
@@ -70,6 +71,7 @@ pub struct Authenticated {
     /// The verified auth v2 authorization of a signed request.
     pub auth: Option<VerifiedAuth>,
     procedure: Procedure,
+    repo: ResolvedRepo,
     /// Added to the business clock for this request only: the test
     /// clock-skew directive. Never feeds a commit deadline.
     pub(crate) business_skew_ms: i64,
@@ -83,6 +85,12 @@ impl Authenticated {
     #[must_use]
     pub fn procedure(&self) -> Procedure {
         self.procedure
+    }
+
+    /// The repository resolved and bound to this request at stage 0.
+    #[must_use]
+    pub fn repo(&self) -> &ResolvedRepo {
+        &self.repo
     }
 
     /// The request's test directives (feature `test-faults` only).
@@ -103,6 +111,8 @@ pub(crate) fn authenticate(
     mode: &AuthMode,
     meta: &RequestMeta<'_>,
     now_ms: i64,
+    repo: ResolvedRepo,
+    expected_repository: &str,
 ) -> Result<Authenticated, ServerError> {
     let procedure = meta.procedure;
     let (principal, auth) = match mode {
@@ -118,7 +128,7 @@ pub(crate) fn authenticate(
             (Principal::BearerHolder, None)
         }
         AuthMode::AuthV2(cfg) if procedure.is_write() => {
-            let auth = verify_auth_v2(cfg, meta, now_ms)?;
+            let auth = verify_auth_v2(cfg, expected_repository, meta, now_ms)?;
             (
                 Principal::Signer {
                     ed25519: auth.signer,
@@ -142,6 +152,7 @@ pub(crate) fn authenticate(
         principal,
         auth,
         procedure,
+        repo,
         business_skew_ms: 0,
         #[cfg(feature = "test-faults")]
         directives: super::TestDirectives::default(),
@@ -150,16 +161,17 @@ pub(crate) fn authenticate(
 
 fn verify_auth_v2(
     cfg: &AuthV2Config,
+    repository: &str,
     meta: &RequestMeta<'_>,
     now_ms: i64,
 ) -> Result<VerifiedAuth, ServerError> {
     let headers = auth_v2::headers_from(meta.header);
     let path = meta.procedure.connect_path();
     if meta.procedure.is_streaming() {
-        return auth_v2::verify_stream(cfg, path, now_ms, &headers);
+        return auth_v2::verify_stream_for(cfg, repository, path, now_ms, &headers);
     }
     let body = meta.unary_body.ok_or_else(|| {
         ServerError::internal("authentication failed", "unary request without its body")
     })?;
-    auth_v2::verify_unary(cfg, path, body, now_ms, &headers)
+    auth_v2::verify_unary_for(cfg, repository, path, body, now_ms, &headers)
 }

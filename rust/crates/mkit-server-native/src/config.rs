@@ -987,6 +987,8 @@ pub fn resolve(
     };
     let blob = resolve_blob(args, &meta, env)?;
     let repo_root = resolve_repo_root(&args.repo_root, env)?;
+    mkit_core::repo_identity::RepositoryIdentity::parse_bare_allowed(&args.repository)
+        .map_err(|_| usage("--repository is invalid (SPEC-TRANSPORT-CONNECT §7.4)"))?;
     let name = RepoName::new(args.repository.clone())
         .map_err(|_| usage(&format!("--repository {:?} is invalid", args.repository)))?;
     let repo = RepoId {

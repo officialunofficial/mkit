@@ -1,5 +1,6 @@
 # Transport golden vectors (deterministic)
 # Produced by the transport framing + sigv4 fixtures
-# Format: <name> <blake3-hex-of-bin-bytes>
+# Format: <binary-stem or JSON filename> <blake3-hex-of-file-bytes>
 frame_hello 7d3f3d20fb6c4722b15a594f5c37db5398a8cce73833c9c37936d56a39b3b531
 frame_upload_pack ba7a0c2b3be073c9dac237e740e727c61666140cd7dbfcb4df64910746e4afcf
+repository-grammar.json 7a93bfa0ba43c1367474c2d9c9a001b57dd85ed4a9757fd2be0644c23878f330
