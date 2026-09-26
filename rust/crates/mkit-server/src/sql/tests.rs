@@ -1,7 +1,7 @@
 //! Pure unit tests: value mapping, the migration list, and the statement
 //! texts. The engine-backed tests live in `mkit-server-native`.
 
-use super::kv::{DELETE, GET, PROBE, PUT, SCAN_AFTER, SCAN_FROM, STATS, get_many_sql};
+use super::kv::{DELETE, GET, PROBE, PUT, SCAN_AFTER, SCAN_FROM, STATS, TIMER_HEADS, get_many_sql};
 use super::schema::{BOOTSTRAP, MIGRATIONS, SCHEMA_VERSION};
 use super::*;
 
@@ -32,11 +32,20 @@ fn max_param(sql: &str) -> usize {
 }
 
 fn statements() -> Vec<String> {
-    let mut all: Vec<String> = [GET, PUT, DELETE, SCAN_FROM, SCAN_AFTER, STATS, PROBE]
-        .iter()
-        .chain(core::iter::once(&BOOTSTRAP))
-        .map(|s| (*s).to_owned())
-        .collect();
+    let mut all: Vec<String> = [
+        GET,
+        PUT,
+        DELETE,
+        SCAN_FROM,
+        SCAN_AFTER,
+        STATS,
+        PROBE,
+        TIMER_HEADS,
+    ]
+    .iter()
+    .chain(core::iter::once(&BOOTSTRAP))
+    .map(|s| (*s).to_owned())
+    .collect();
     all.extend(
         MIGRATIONS
             .iter()
@@ -162,4 +171,11 @@ fn reserve_formula() {
     assert_eq!(custom.cap_bytes(), 1 << 20);
     assert_eq!(custom.soft_limit(), (1 << 20) - 4096);
     assert_eq!(Capacity::new(1 << 20).soft_limit(), 0, "saturates");
+}
+
+#[test]
+fn timer_heads_predicate_matches_partial_index() {
+    let index = MIGRATIONS[1].statements[0];
+    let predicate = index.split_once("WHERE ").unwrap().1;
+    assert!(TIMER_HEADS.contains(predicate));
 }

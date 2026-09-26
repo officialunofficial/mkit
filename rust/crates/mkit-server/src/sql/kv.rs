@@ -30,6 +30,9 @@ pub(super) const SCAN_AFTER: &str = "SELECT key, value FROM kv \
      WHERE part = ?1 AND key > ?2 AND key < ?3 ORDER BY key LIMIT ?4";
 pub(super) const STATS: &str =
     "SELECT COUNT(*), SUM(length(key) + length(value)) FROM kv WHERE part = ?1";
+/// Earliest timer key per partition; predicate matches the partial index verbatim.
+pub const TIMER_HEADS: &str =
+    "SELECT part, MIN(key) FROM kv WHERE key >= x'7700' AND key < x'7701' GROUP BY part";
 pub(super) const PROBE: &str = "SELECT 1";
 
 /// The `get_many` statement for `n` keys (`?2` … `?{n+1}`).
@@ -100,6 +103,27 @@ impl<C: SqlConn> SqlKvStore<C> {
         store.conn.set_size_limit(capacity.cap_bytes())?;
         store.capacity = Some(capacity);
         Ok(store)
+    }
+
+    /// Earliest timer due in each partition, using the timer partial index.
+    ///
+    /// # Errors
+    /// Store errors for failed queries or corrupt partition/key encodings.
+    pub fn timer_heads(&self) -> Result<Vec<(Partition, u64)>, StoreError> {
+        self.conn
+            .query(TIMER_HEADS, &[])?
+            .into_iter()
+            .map(|mut row| {
+                let partition = Partition::decode(&blob(&mut row, 0)?)?;
+                let key = Key::new(blob(&mut row, 1)?);
+                match crate::store::keys::parse(&key) {
+                    Some(crate::store::keys::ParsedKey::Timer { due_at_ms, .. }) => {
+                        Ok((partition, due_at_ms))
+                    }
+                    _ => Err(StoreError::Corrupt("timer head key".into())),
+                }
+            })
+            .collect()
     }
 
     /// The cap, if any.
