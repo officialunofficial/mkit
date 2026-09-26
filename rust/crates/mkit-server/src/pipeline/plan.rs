@@ -18,7 +18,8 @@ use crate::op::{GrantRef, RefUpdate};
 use crate::quota::{QuotaCharge, QuotaDecision, evaluate_quota};
 use crate::refs::{CasDecision, evaluate_condition};
 use crate::replay::{
-    ReplayDecision, ReplayRecord, ReplayState, StoredResult, UpdateRefResult, classify,
+    ReplayDecision, ReplayRecord, ReplayState, StoredRejection, StoredResult, UpdateRefResult,
+    classify,
 };
 use crate::repo::RepoName;
 use crate::storage_error::{StorageOp, describe_and_map};
@@ -124,6 +125,9 @@ pub(crate) struct WriteRequest<'a> {
     /// Whether to guard the layout version key: false on stores that
     /// report an implicit layout version.
     pub(crate) layout_version: bool,
+    /// `UploadCommit` only: a final `pre_receive` rejection to store in
+    /// place of `UploadPack`, so a retry is answered before re-streaming.
+    pub(crate) rejection: Option<&'a StoredRejection>,
 }
 
 impl WriteRequest<'_> {
@@ -259,7 +263,11 @@ pub(crate) fn plan_write(
     let on_commit = outcome.unwrap_or(match req.kind {
         WriteKind::UpdateRef => StoredResult::UpdateRef(UpdateRefResult::Committed),
         WriteKind::AdvanceRefs => StoredResult::AdvanceRefs(AdvanceOutcome::Committed),
-        WriteKind::UploadReserve | WriteKind::UploadCommit => StoredResult::UploadPack,
+        WriteKind::UploadReserve | WriteKind::UploadCommit => {
+            req.rejection.map_or(StoredResult::UploadPack, |r| {
+                StoredResult::Rejected(r.clone())
+            })
+        }
     });
     if conflict && req.replay.is_none() && req.charges.is_empty() {
         return Ok(Planned::Done(on_commit));

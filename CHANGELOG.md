@@ -92,9 +92,15 @@ train).
   with the quota charge before any chunk, and committed by a second batch
   planned with its own `NotAfter` deadline after the stream), and
   `Pipeline::download` returns a `DownloadStream` of 800 KiB chunks. Both
-  hold at most one chunk. The `test-faults` feature adds `FaultHooks` at
-  five points and per-request `TestDirectives`. **SemVer:** unreleased
-  API.
+  hold at most one chunk. Resuming an in-flight upload is legacy M0
+  behavior for un-ticketed uploads (`vcs-worker` parity), a deliberate
+  exception to SPEC-TRANSPORT-CONNECT §7.1 step 2 that goes when WP-1.9
+  ships replay-exempt ticketed uploads. A replay verifies the stream
+  without writing the blob; a final `pre_receive` rejection is stored as
+  the operation's result; an upload that outlives its envelope returns OK
+  once the blob is committed, leaving its in-flight record to the pruner.
+  The `test-faults` feature adds `FaultHooks` at five points and
+  per-request `TestDirectives`. **SemVer:** unreleased API.
 
 - *(core)* Resumable-part building blocks (SPEC-TRANSPORT-CONNECT §7.6):
   `write_auth::ContentCommitment` parses and formats `body:`, `pack:` and the

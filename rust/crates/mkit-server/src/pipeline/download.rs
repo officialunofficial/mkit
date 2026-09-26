@@ -13,6 +13,7 @@ use core::task::{Context, Poll, ready};
 use bytes::{Bytes, BytesMut};
 use futures_core::Stream;
 
+use super::outcome::Outcome;
 use crate::download::{ChunkSpan, chunk_plan};
 use crate::error::ServerError;
 use crate::rt::BoxStream;
@@ -49,8 +50,9 @@ impl fmt::Debug for DownloadStream {
 }
 
 impl DownloadStream {
-    /// Chunk `body` into pieces of at most `max` bytes.
-    pub(crate) fn new(body: BlobBody, max: usize) -> Self {
+    /// Chunk `body` into pieces of at most `max` bytes; `outcome` records
+    /// the request at the stream's end or first failure.
+    pub(crate) fn new(body: BlobBody, max: usize, outcome: Option<Outcome>) -> Self {
         let (total, rest, source) = match body {
             BlobBody::Bytes(bytes) => (bytes.len() as u64, bytes, None),
             BlobBody::Stream { len, stream } => (len, Bytes::new(), Some(stream)),
@@ -62,6 +64,7 @@ impl DownloadStream {
             rest,
             buf: BytesMut::new(),
             done: false,
+            outcome,
         };
         Self {
             total_bytes: total,
@@ -87,11 +90,15 @@ struct Rechunk<I> {
     /// The chunk being assembled when it spans store pieces.
     buf: BytesMut,
     done: bool,
+    outcome: Option<Outcome>,
 }
 
 impl<I: Iterator<Item = ChunkSpan> + Unpin> Rechunk<I> {
     fn fail(&mut self, err: ServerError) -> Poll<Option<Result<DownloadChunk, ServerError>>> {
         self.done = true;
+        if let Some(outcome) = &mut self.outcome {
+            outcome.record(Err(&err));
+        }
         Poll::Ready(Some(Err(err)))
     }
 }
@@ -107,6 +114,9 @@ impl<I: Iterator<Item = ChunkSpan> + Unpin> Stream for Rechunk<I> {
         loop {
             let Some(span) = this.span.or_else(|| this.spans.next()) else {
                 this.done = true;
+                if let Some(outcome) = &mut this.outcome {
+                    outcome.record(Ok(()));
+                }
                 return Poll::Ready(None);
             };
             this.span = Some(span);

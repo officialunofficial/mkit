@@ -29,6 +29,7 @@ use crate::store::{
     Batch, Key, PartitionStats, Precondition, ScanPage, StoreCapabilities, Value, Write, codec,
     keys,
 };
+use crate::telemetry::METRIC_REQUESTS;
 
 const AUDIENCE: &str = "https://api.example.test";
 const REPO: &str = "room-a";
@@ -966,6 +967,7 @@ fn plan_cas_any_missing_match_on_snapshot() {
             charges: &[],
             grant: None,
             layout_version: false,
+            rejection: None,
         };
         let values: Vec<_> = current.map(|id| ref_value(HEAD, id)).into_iter().collect();
         let planned = plan_write(&req, &snapshot(&req, &values), &clock_at(5, None)).unwrap();
@@ -1014,6 +1016,7 @@ fn plan_conflict_writes_only_the_replay_record() {
         charges: &[],
         grant: None,
         layout_version: false,
+        rejection: None,
     };
     let values = [ref_value(PACKMAP, A), ref_value(HEAD, B)];
     let Planned::Apply(plan) =
@@ -1077,6 +1080,7 @@ fn plan_quota_exhaustion_yields_no_batch() {
         charges: &charges,
         grant: None,
         layout_version: true,
+        rejection: None,
     };
     let used = QuotaState {
         window_start: T0,
@@ -1123,6 +1127,7 @@ proptest! {
             charges: &charges,
             grant: None,
             layout_version: layout.is_some(),
+            rejection: None,
         };
         let mut values = Vec::new();
         for (name, current) in [(PACKMAP, currents.0), (HEAD, currents.1)] {
@@ -1628,6 +1633,7 @@ fn plan_signed_conflict_still_charges_quota() {
         charges: &charges,
         grant: None,
         layout_version: false,
+        rejection: None,
     };
     let values = [ref_value(HEAD, A)];
     let clock = clock_at(ms(T0), None);
@@ -1679,6 +1685,7 @@ fn plan_prune_fits_the_batch_op_cap() {
         charges: &charges,
         grant: None,
         layout_version: true,
+        rejection: None,
     };
     let mut snap = snapshot(&req, &[]);
     let limit = usize::try_from(PRUNE_LIMIT).unwrap();
@@ -1723,6 +1730,7 @@ fn prune_sampling_is_deterministic_one_in_eight() {
         charges: &[],
         grant: None,
         layout_version: false,
+        rejection: None,
     };
     let sampled = (0u8..=255)
         .filter(|b| {

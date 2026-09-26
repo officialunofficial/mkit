@@ -9,6 +9,7 @@ use futures_core::Stream;
 use super::*;
 use crate::download::chunk_plan;
 use crate::memory::MemoryPackSink;
+use crate::replay::StoredRejection;
 use crate::store::{BlobBody, BlobKey, BlobMeta, ByteRange, CommitOutcome, PackSink};
 use crate::telemetry::{METRIC_UPLOAD_BYTES, NoopMetrics};
 use crate::upload::UploadError;
@@ -466,6 +467,197 @@ fn stream_entry_futures_are_send() {
     send(&s.finish());
 }
 
+#[test]
+fn upload_outliving_its_envelope_commits_the_blob_without_the_record() {
+    let env = env(authv2());
+    let data = pack(64);
+    let req = signed_upload(&key(7), &data, 1);
+    let a = env.auth(&req).unwrap();
+    let id = hash(&data);
+    block_on(async {
+        let mut s = env
+            .pipe
+            .begin_upload(&a, Some(&id), Some(64))
+            .await
+            .unwrap();
+        for span in chunk_plan(64, 16) {
+            if span.offset == 16 {
+                // Past `expires_at + MAX_CLOCK_LEAD_MS`: no batch of this
+                // operation can commit any more.
+                env.clock.advance(300_000 + 30_001);
+            }
+            let at = usize::try_from(span.offset).unwrap();
+            let chunk = Bytes::copy_from_slice(&data[at..at + span.len]);
+            s.push(Some(&id), Some(span.offset), chunk, span.last)
+                .await
+                .unwrap();
+        }
+        s.finish().await.unwrap();
+    });
+    env.clock.set(T0); // only so the helpers can re-authenticate `req`
+    assert!(blob_present(&env, &data));
+    assert_eq!(quota(&env), (1, 64), "charged exactly once");
+    assert_eq!(
+        replay_state(&env, &req),
+        Some(IN_FLIGHT),
+        "left to the pruner"
+    );
+    assert_eq!(env.batches().len(), 1, "no commit batch was even tried");
+}
+
+/// Refuses every pack with `code`.
+struct Refuse(Code);
+
+impl PreReceive for Refuse {
+    async fn check(&self, _op: &Operation, _pack: Option<&BlobKey>) -> Result<(), ServerError> {
+        Err(ServerError::new(self.0, "pack refused by policy"))
+    }
+}
+
+fn refusing(code: Code) -> Env<Hooks<OpenAuthorizer, DefaultAdmission, Refuse>> {
+    let clock = clock();
+    let hooks = Hooks {
+        authorizer: OpenAuthorizer,
+        admission: DefaultAdmission,
+        pre_receive: Refuse(code),
+        receipts: NoReceipts,
+        outcomes: NoOutcomes,
+    };
+    build(cfg(authv2()), Spy::new(store(&clock)), hooks, clock)
+}
+
+#[test]
+fn upload_pre_receive_final_rejection_is_stored_and_answered_before_streaming() {
+    let env = refusing(Code::PermissionDenied);
+    let data = pack(40);
+    let req = signed_upload(&key(7), &data, 1);
+    let err = upload(&env, &req, &data, 16).unwrap_err();
+    assert_eq!(
+        (err.code(), err.public_message()),
+        (Code::PermissionDenied, "pack refused by policy")
+    );
+    let stored = StoredRejection::new(Code::PermissionDenied, "pack refused by policy").unwrap();
+    let rejected = ReplayState::Committed(StoredResult::Rejected(stored));
+    assert_eq!(replay_state(&env, &req), Some(rejected));
+    // `pre_receive` runs after the blob is visible; GC reclaims it.
+    assert!(blob_present(&env, &data));
+    assert_eq!(quota(&env), (1, 40));
+    // The retry is answered at `begin_upload`: one read, no stream, no batch.
+    let (calls, batches) = (env.pipe.meta.calls(), env.batches().len());
+    let a = env.auth(&req).unwrap();
+    let again = block_on(env.pipe.begin_upload(&a, Some(&hash(&data)), Some(40))).unwrap_err();
+    assert_eq!(again.code(), Code::PermissionDenied);
+    assert_eq!(env.pipe.meta.calls(), calls + 1);
+    assert_eq!(env.batches().len(), batches);
+
+    // A retryable refusal is not stored: the record stays resumable.
+    let env = refusing(Code::Unavailable);
+    let err = upload(&env, &req, &data, 16).unwrap_err();
+    assert_eq!(err.code(), Code::Unavailable);
+    assert_eq!(replay_state(&env, &req), Some(IN_FLIGHT));
+    let a = env.auth(&req).unwrap();
+    let session = block_on(env.pipe.begin_upload(&a, Some(&hash(&data)), Some(40))).unwrap();
+    assert_eq!(session.mode(), UploadMode::Resume);
+}
+
+#[test]
+fn upload_replay_never_recreates_a_deleted_blob() {
+    let env = env(authv2());
+    let data = pack(50);
+    let req = signed_upload(&key(7), &data, 1);
+    assert_eq!(upload(&env, &req, &data, 16).unwrap(), UploadMode::Fresh);
+    // GC or a takedown removes the pack.
+    assert!(now(env.pipe.blobs.delete(&PackKey::new(hash(&data)))).unwrap());
+    assert_eq!(upload(&env, &req, &data, 16).unwrap(), UploadMode::Replay);
+    assert!(!blob_present(&env, &data), "a replay writes no blob");
+    // A replay still verifies the stream it is sent.
+    let a = env.auth(&req).unwrap();
+    let id = hash(&data);
+    let err = block_on(async {
+        let mut s = env.pipe.begin_upload(&a, Some(&id), Some(50)).await?;
+        s.push(Some(&id), Some(0), Bytes::from(vec![0; 50]), true)
+            .await?;
+        s.finish().await
+    })
+    .unwrap_err();
+    assert_eq!(
+        err.public_message(),
+        UploadError::DigestMismatch.connect_message()
+    );
+    assert_eq!(env.batches().len(), 2, "reserve and commit only");
+}
+
+/// The `code` label of every request metric for `procedure`, in order.
+fn codes<H: HookSet>(env: &Env<H>, procedure: &str) -> Vec<String> {
+    let label = |labels: &Labels, name: &str| {
+        labels
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.clone())
+            .unwrap()
+    };
+    let recorded = env.metrics.0.lock().unwrap();
+    recorded
+        .iter()
+        .filter(|(n, l)| *n == METRIC_REQUESTS && label(l, "procedure") == procedure)
+        .map(|(_, l)| label(l, "code"))
+        .collect()
+}
+
+#[test]
+fn upload_session_records_each_request_once_and_drop_as_canceled() {
+    let env = env(AuthMode::Open);
+    let a = env.auth(&Req::unsigned(Procedure::UploadPack)).unwrap();
+    let data = pack(8);
+    let id = hash(&data);
+    let begin = || block_on(env.pipe.begin_upload(&a, Some(&id), Some(8))).unwrap();
+    drop(begin());
+    block_on(begin().abort());
+    assert_eq!(codes(&env, "UploadPack"), ["canceled", "canceled"]);
+    upload(&env, &Req::unsigned(Procedure::UploadPack), &data, 3).unwrap();
+    // A failed push records once, however the session then ends.
+    let mut s = begin();
+    let gap = block_on(s.push(Some(&id), Some(1), Bytes::from_static(b"x"), false));
+    assert_eq!(gap.unwrap_err().code(), Code::InvalidArgument);
+    assert!(block_on(s.finish()).is_err());
+    let mut s = begin();
+    assert!(block_on(s.push(Some(&id), None, Bytes::new(), false)).is_err());
+    drop(s);
+    assert_eq!(
+        codes(&env, "UploadPack"),
+        [
+            "canceled",
+            "canceled",
+            "ok",
+            "invalid_argument",
+            "invalid_argument"
+        ]
+    );
+}
+
+#[test]
+fn download_records_at_stream_end_or_drop() {
+    let clock = clock();
+    let mut c = cfg(AuthMode::Open);
+    c.download_chunk_max = 4;
+    let env = build(c, Spy::new(store(&clock)), Hooks::new(), clock);
+    let key = store_blob(&env.pipe.blobs, &pack(10));
+    let a = env.auth(&Req::unsigned(Procedure::DownloadPack)).unwrap();
+    let mut stream = block_on(env.pipe.download(&a, key)).unwrap();
+    assert!(codes(&env, "DownloadPack").is_empty(), "not at creation");
+    assert_eq!(collect(&mut stream).len(), 3);
+    assert_eq!(codes(&env, "DownloadPack"), ["ok"]);
+    drop(stream);
+    // Abandoned after one chunk.
+    let mut stream = block_on(env.pipe.download(&a, key)).unwrap();
+    let first = block_on(poll_fn(|cx| stream.chunks.as_mut().poll_next(cx)));
+    assert!(first.unwrap().is_ok());
+    drop(stream);
+    let missing = block_on(env.pipe.download(&a, PackKey::new([9; 32])));
+    assert_eq!(missing.unwrap_err().code(), Code::NotFound);
+    assert_eq!(codes(&env, "DownloadPack"), ["ok", "canceled", "not_found"]);
+}
+
 // ----------------------------------------------------------- downloads
 
 #[test]
@@ -518,7 +710,7 @@ fn download_short_body_is_internal() {
         len: 10,
         stream: Box::pin(ShortBody(Some(Bytes::from_static(b"12345")))),
     };
-    let mut stream = DownloadStream::new(body, 4);
+    let mut stream = DownloadStream::new(body, 4, None);
     let items = collect(&mut stream);
     assert_eq!(items.len(), 2);
     assert_eq!(items[0].as_ref().unwrap().data, "1234");
@@ -724,6 +916,30 @@ mod faults {
                 FaultPoint::BeforeFinalApply,
             ]
         );
+    }
+
+    #[test]
+    fn upload_commit_late_after_expiry_still_answers_ok() {
+        // Streamed to just before `expires_at`; the commit is then paused
+        // past its deadline and past `expires_at` (but not the cap).
+        let (env, _) = stalled(1);
+        let data = pack(20);
+        let req = signed_upload(&key(7), &data, 1);
+        let a = env.auth(&req).unwrap();
+        let id = hash(&data);
+        block_on(async {
+            let mut s = env.pipe.begin_upload(&a, Some(&id), Some(20)).await?;
+            s.push(Some(&id), Some(0), Bytes::from(data.clone()), true)
+                .await?;
+            env.clock.set(T0 + 295_000);
+            s.finish().await
+        })
+        .unwrap();
+        env.clock.set(T0);
+        assert!(blob_present(&env, &data));
+        assert_eq!(quota(&env), (1, 20));
+        assert_eq!(replay_state(&env, &req), Some(IN_FLIGHT));
+        assert_eq!(env.batches().len(), 2, "reserve and one late commit");
     }
 
     #[test]

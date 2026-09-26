@@ -23,6 +23,7 @@ mod download;
 #[cfg(feature = "test-faults")]
 mod faults;
 mod hooks;
+mod outcome;
 mod plan;
 mod shard;
 #[cfg(test)]
@@ -51,7 +52,7 @@ use crate::store::{
     Batch, BatchOutcome, BlobStore, Key, KeyClasses, NamespaceStore, Partition, StoreError, Value,
     codec, keys, read,
 };
-use crate::telemetry::{METRIC_LATENCY, METRIC_REQUESTS, Metrics, Redactor};
+use crate::telemetry::{Metrics, Redactor};
 use crate::upload::UploadLimits;
 
 pub use auth::{AuthMode, Authenticated, RequestMeta};
@@ -65,6 +66,7 @@ pub use hooks::{
     Hooks, NoOutcomes, NoPreReceive, NoReceipts, OpenAuthorizer, OutboxRow, OutcomeSink,
     PreReceive, ReceiptSigner,
 };
+use outcome::Outcome;
 use plan::{
     MAX_REPLAN, PRUNE_LIMIT, Plan, PlanClock, Planned, Snapshot, WriteKind, WriteRequest,
     plan_write, prune_sampled,
@@ -503,21 +505,36 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// # Errors
     /// `not_found` for a missing pack, before any chunk; the authorizer's
     /// error; `internal` for a storage failure.
+    ///
+    /// The request is recorded when the stream ends or first fails, and as
+    /// `canceled` when the stream is dropped before its end.
     pub async fn download(
         &self,
         a: &Authenticated,
         key: PackKey,
     ) -> Result<DownloadStream, ServerError> {
-        self.observe(a, async {
+        let mut outcome = self.outcome(a);
+        let opened = async {
             let op = self.identify(a, OpKind::DownloadPack { key })?;
             self.authorize(&op).await?;
             let body = self.blobs.get(&key, None).await;
             match body.map_err(|e| store_error(StorageOp::BlobGet, e))? {
-                Some(body) => Ok(DownloadStream::new(body, self.cfg.download_chunk_max)),
+                Some(body) => Ok(body),
                 None => Err(ServerError::not_found("pack not found")),
             }
-        })
-        .await
+        }
+        .instrument(outcome.span.clone())
+        .await;
+        match opened {
+            Ok(body) => {
+                let max = self.cfg.download_chunk_max;
+                Ok(DownloadStream::new(body, max, Some(outcome)))
+            }
+            Err(err) => {
+                outcome.record(Err(&err));
+                Err(err)
+            }
+        }
     }
 
     /// Probe both stores.
@@ -562,58 +579,26 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         a: &Authenticated,
         fut: impl Future<Output = Result<T, ServerError>>,
     ) -> Result<T, ServerError> {
-        let span = self.rpc_span(a);
-        let start = self.clock.now_ms();
-        let result = fut.instrument(span.clone()).await;
-        self.record(a.procedure(), &span, start, result.as_ref().map(|_| ()));
+        let mut outcome = self.outcome(a);
+        let result = fut.instrument(outcome.span.clone()).await;
+        outcome.record(result.as_ref().map(|_| ()));
         result
     }
 
-    /// The span around one request.
-    fn rpc_span(&self, a: &Authenticated) -> tracing::Span {
+    /// The span and recorder of one request.
+    fn outcome(&self, a: &Authenticated) -> Outcome {
         let repo = match &self.cfg.addressing {
             Addressing::Single { repo } => repo.name.as_str(),
         };
-        tracing::info_span!(
+        let procedure = method(a.procedure());
+        let span = tracing::info_span!(
             "mkit.server.rpc",
-            procedure = method(a.procedure()),
+            procedure,
             repo,
             principal = a.principal.kind()
-        )
-    }
-
-    /// A request's outcome log and metrics, once per request.
-    fn record(
-        &self,
-        procedure: Procedure,
-        span: &tracing::Span,
-        start: i64,
-        result: Result<(), &ServerError>,
-    ) {
-        let procedure = method(procedure);
-        let code = result.err().map_or("ok", |e| e.code().as_str());
-        span.in_scope(|| match result {
-            Ok(()) => tracing::debug!(code, "rpc done"),
-            Err(e) => {
-                let headers: Vec<_> = e
-                    .headers()
-                    .iter()
-                    .map(|(n, v)| (n.as_str(), self.cfg.redactor.loggable(n, v)))
-                    .collect();
-                tracing::info!(code, message = e.public_message(), ?headers, "rpc failed");
-            }
-        });
-        self.metrics.incr(
-            METRIC_REQUESTS,
-            &[("procedure", procedure), ("code", code)],
-            1,
         );
-        let elapsed = u32::try_from(self.clock.now_ms().saturating_sub(start)).unwrap_or(u32::MAX);
-        self.metrics.observe_ms(
-            METRIC_LATENCY,
-            &[("procedure", procedure)],
-            f64::from(elapsed),
-        );
+        let (metrics, clock) = (self.metrics.clone(), self.clock.clone());
+        Outcome::new(span, procedure, metrics, clock, self.cfg.redactor.clone())
     }
 
     /// A signed or unsigned unary write, stage by stage. In steady state
@@ -796,6 +781,7 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             charges,
             grant: op.authz.grant,
             layout_version: caps.implicit_layout_version.is_none(),
+            rejection: None,
         };
         if caps.atomic_multi_key || replay.is_some() || !charges.is_empty() {
             return self.apply_atomic(op, a, p, &req, ahead).await;
