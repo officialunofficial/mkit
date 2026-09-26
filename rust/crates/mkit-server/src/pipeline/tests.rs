@@ -21,9 +21,10 @@ use crate::memory::{MemoryBlobStore, MemoryFault, MemoryKv};
 use crate::op::VerifiedAuth;
 use crate::principal::Principal;
 use crate::quota::{QuotaScope, QuotaState};
-use crate::replay::{ReplayRecord, ReplayState};
+use crate::replay::{ReplayKey, ReplayRecord, ReplayState};
 use crate::repo::{NamespaceKey, RepoId, RepoName};
 use crate::rt::ManualClock;
+use crate::store::keys::LAYOUT_VERSION;
 use crate::store::{
     Batch, Key, PartitionStats, Precondition, ScanPage, StoreCapabilities, Value, Write, codec,
     keys,
@@ -75,6 +76,7 @@ struct Spy {
     yields: bool,
     seen: Mutex<Vec<Key>>,
     batches: Mutex<Vec<Batch>>,
+    calls: AtomicU32,
 }
 
 impl Spy {
@@ -85,6 +87,7 @@ impl Spy {
             yields: false,
             seen: Mutex::default(),
             batches: Mutex::default(),
+            calls: AtomicU32::new(0),
         }
     }
 
@@ -96,7 +99,13 @@ impl Spy {
         self
     }
 
+    /// Backend round trips so far.
+    fn calls(&self) -> u32 {
+        self.calls.load(Ordering::SeqCst)
+    }
+
     async fn pause(&self) {
+        self.calls.fetch_add(1, Ordering::SeqCst);
         if self.yields {
             YieldOnce::default().await;
         }
@@ -116,6 +125,18 @@ impl NamespaceStore for Spy {
         self.pause().await;
         self.saw(key);
         self.inner.get(p, key).await
+    }
+
+    async fn get_many(
+        &self,
+        p: &Partition,
+        keys: &[Key],
+    ) -> Result<Vec<Option<Value>>, StoreError> {
+        self.pause().await;
+        for k in keys {
+            self.saw(k);
+        }
+        self.inner.get_many(p, keys).await
     }
 
     async fn scan(
@@ -438,6 +459,23 @@ fn replay_row(env: &Env, req: &Req) -> Option<crate::replay::ReplayRecord> {
         &ReplayKey(scope),
     ))
     .unwrap()
+}
+
+/// The first nonce from `from` whose replay scope is (or is not) sampled
+/// for pruning.
+fn nonce_where<H: HookSet>(env: &Env<H>, k: &SigningKey, sampled: bool, from: u32) -> u32 {
+    let u = upd(HEAD, Missing, A);
+    (from..from + 1_000)
+        .find(|n| {
+            let scope = env
+                .auth(&Req::update(k, *n, &u, T0))
+                .unwrap()
+                .auth
+                .unwrap()
+                .replay_scope;
+            scope[0].is_multiple_of(plan::PRUNE_SAMPLE) == sampled
+        })
+        .unwrap()
 }
 
 fn code<T: core::fmt::Debug>(r: Result<T, ServerError>) -> Code {
@@ -1358,8 +1396,9 @@ fn store_full_maps_to_unavailable() {
     now(kv.apply(&ns(), expired())).unwrap();
     let env = build(cfg(authv2()), Spy::new(kv), Hooks::new(), clock);
     let u = upd(HEAD, Missing, A);
+    let n = nonce_where(&env, &key(7), true, 1);
     let err = env
-        .update(&Req::update(&key(7), 1, &u, T0), &u)
+        .update(&Req::update(&key(7), n, &u, T0), &u)
         .unwrap_err();
     assert_eq!(
         (err.code(), err.public_message()),
@@ -1502,7 +1541,8 @@ fn replay_and_quota_rows_shrink_after_load() {
     assert_eq!(baseline, [500, 500, 50, 50]);
     // Past the envelope window plus the prune grace, and two quota windows.
     env.clock.advance(300_000 + 60_000 + 120_000 + 1);
-    for n in 500..520 {
+    // One write in eight runs the prune, of up to PRUNE_LIMIT rows each.
+    for n in 500..580 {
         write(200, n);
     }
     let after = counts(&env);
@@ -1704,4 +1744,164 @@ fn admission_allow_constructor() {
         deny.with_reservation("x"),
         AdmissionDecision::Deny(_)
     ));
+}
+
+// ---------------------------------------------- review: round trips etc.
+
+#[test]
+fn signed_write_costs_two_backend_calls_in_steady_state() {
+    let env = env(authv2());
+    let k = key(7);
+    let mut measured = Vec::new();
+    let mut n = 0;
+    for (i, sampled) in [false, false, true, false].into_iter().enumerate() {
+        n = nonce_where(&env, &k, sampled, n + 1);
+        let u = upd(&format!("refs/heads/b{i}"), Missing, A);
+        let before = env.pipe.meta.calls();
+        env.update(&Req::update(&k, n, &u, T0), &u).unwrap();
+        measured.push((sampled, env.pipe.meta.calls() - before));
+    }
+    // One get_many and one apply; a sampled write adds its two prune scans.
+    assert_eq!(measured, [(false, 2), (false, 2), (true, 4), (false, 2)]);
+    // A replay is one read and no apply.
+    let u = upd("refs/heads/b0", Missing, A);
+    let first = nonce_where(&env, &k, false, 1);
+    let before = env.pipe.meta.calls();
+    env.update(&Req::update(&k, first, &u, T0), &u).unwrap();
+    assert_eq!(env.pipe.meta.calls() - before, 1);
+}
+
+#[test]
+fn signed_deadline_is_capped_by_the_envelope() {
+    // A long apply window: the envelope cap binds.
+    let first = clock();
+    let mut long = cfg(authv2());
+    long.max_apply_window = Duration::from_mins(2);
+    let env = build(long, Spy::new(store(&first)), Hooks::new(), first);
+    let u = upd(HEAD, Missing, A);
+    let req = Req::update(&key(7), 1, &u, T0);
+    env.clock.set(T0 + 290_000);
+    env.update(&req, &u).unwrap();
+    let expires = ms(T0) + 300_000;
+    let cap = expires + MAX_CLOCK_LEAD_MS.unsigned_abs();
+    assert_eq!(
+        env.batches()[0].preconditions[0],
+        Precondition::NotAfter(cap)
+    );
+
+    // A late batch whose envelope expired meanwhile is not re-planned.
+    let clock = clock();
+    clock.set(T0 + 295_000);
+    let spy = Spy::new(store(&clock)).hook(late(&clock, 1));
+    let env = build(cfg(authv2()), spy, Hooks::new(), clock);
+    let err = env.update(&req, &u).unwrap_err();
+    assert_eq!(err.code(), Code::Unavailable);
+    assert_eq!(env.batches().len(), 1);
+    assert!(env.rows().is_empty());
+}
+
+#[test]
+fn deny_with_402_but_no_challenge_detail_is_403() {
+    let paid = ServerError::permission_denied("pay").with_http_status(402);
+    let challenge = ServerError::admission_challenge(bytes::Bytes::from_static(b"c"));
+    for (denial, status) in [(paid, 403), (challenge, 402)] {
+        let clock = clock();
+        let hooks = with_admission(Fixed(AdmissionDecision::Deny(denial)));
+        let env = build(cfg(authv2()), Spy::new(store(&clock)), hooks, clock);
+        let u = upd(HEAD, Missing, A);
+        let err = env
+            .update(&Req::update(&key(7), 1, &u, T0), &u)
+            .unwrap_err();
+        assert_eq!(
+            (err.code(), err.http_status()),
+            (Code::PermissionDenied, Some(status))
+        );
+        assert!(env.rows().is_empty());
+    }
+}
+
+struct Granting;
+
+impl Authorizer for Granting {
+    async fn authorize(&self, _: &Operation) -> Result<AuthzFacts, ServerError> {
+        Ok(AuthzFacts {
+            owner: true,
+            grant: Some(crate::op::GrantRef {
+                id: [9; 32],
+                epoch: 0,
+            }),
+        })
+    }
+}
+
+#[derive(Default)]
+struct SeesAuthz(Mutex<Option<AuthzFacts>>);
+
+impl Admission for SeesAuthz {
+    async fn admit(&self, input: &AdmissionInput<'_>) -> Result<AdmissionDecision, ServerError> {
+        *self.0.lock().unwrap() = Some(input.op.authz.clone());
+        Ok(AdmissionDecision::allow(Vec::new()))
+    }
+}
+
+#[test]
+fn authorizer_facts_reach_admission_and_apply() {
+    let clock = clock();
+    let hooks = Hooks {
+        authorizer: Granting,
+        admission: SeesAuthz::default(),
+        pre_receive: NoPreReceive,
+        receipts: NoReceipts,
+        outcomes: NoOutcomes,
+    };
+    let env = build(cfg(authv2()), Spy::new(store(&clock)), hooks, clock);
+    let u = upd(HEAD, Missing, A);
+    env.update(&Req::update(&key(7), 1, &u, T0), &u).unwrap();
+    let seen = env.pipe.hooks.admission.0.lock().unwrap().clone().unwrap();
+    assert!(seen.owner);
+    assert_eq!(seen.grant.map(|g| g.epoch), Some(0));
+    // The grant's epoch is required at apply: absent means epoch 0.
+    let guard = Precondition::Absent(keys::grant_epoch());
+    assert!(env.batches()[0].preconditions.contains(&guard));
+}
+
+#[test]
+fn lost_prune_race_retries_without_prune_uncounted() {
+    let clock = clock();
+    let other = QuotaScope::for_signer(&NamespaceKey::deployment_default(), &[42; 32]);
+    let quota = keys::quota(&other);
+    let stale = QuotaState {
+        window_start: 1,
+        ops: 1,
+        bytes: 0,
+    };
+    let kv = store(&clock);
+    let seed_batch = Batch::new()
+        .put(quota.clone(), codec::encode_quota_state(&stale))
+        .put(keys::quota_window(1, &other), Value::default());
+    now(kv.apply(&ns(), seed_batch)).unwrap();
+    // Apply 0: another writer moves the stale quota row (the prune guard
+    // fails). Applies 1..=MAX_REPLAN: a real guard breaks each time.
+    let (applies, layout) = (AtomicU32::new(0), interfere(MAX_REPLAN));
+    let race = quota.clone();
+    let hook = move |kv: &MemoryKv, p: &Partition, batch: &Batch| {
+        if applies.fetch_add(1, Ordering::SeqCst) == 0 {
+            let moved = QuotaState { ops: 2, ..stale };
+            let bump = Batch::new().put(race.clone(), codec::encode_quota_state(&moved));
+            now(kv.apply(p, bump)).unwrap();
+        } else {
+            layout(kv, p, batch);
+        }
+    };
+    let env = build(cfg(authv2()), Spy::new(kv).hook(hook), Hooks::new(), clock);
+    let n = nonce_where(&env, &key(7), true, 1);
+    let u = upd(HEAD, Missing, A);
+    env.update(&Req::update(&key(7), n, &u, T0), &u).unwrap();
+    let batches = env.batches();
+    assert_eq!(batches.len(), usize::try_from(MAX_REPLAN).unwrap() + 2);
+    let deletes = |b: &Batch| b.writes.iter().any(|w| matches!(w, Write::Delete(_)));
+    assert!(deletes(&batches[0]), "the first attempt prunes");
+    assert!(!batches[1..].iter().any(deletes), "the retries do not");
+    let kept = now(env.pipe.meta.inner.get(&ns(), &quota)).unwrap();
+    assert!(kept.is_some(), "the raced row is not pruned");
 }

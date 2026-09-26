@@ -26,20 +26,21 @@ use std::sync::Arc;
 
 use mkit_core::hash::{Hash, to_hex_bytes};
 use mkit_core::protocol::{AdvanceOutcome, PackKey};
+use mkit_core::write_auth::MAX_CLOCK_LEAD_MS;
 use tracing::Instrument;
 
 use crate::download::DOWNLOAD_CHUNK_MAX;
-use crate::error::{InvalidHeader, ServerError};
-use crate::op::{OpKind, Operation, Procedure, RefUpdate};
-use crate::quota::{DEFAULT_WRITE_QUOTA, QuotaCharge, QuotaLimits};
+use crate::error::{ADMISSION_CHALLENGE_TYPE, InvalidHeader, ServerError};
+use crate::op::{AuthzFacts, OpKind, Operation, Procedure, RefUpdate};
+use crate::quota::{DEFAULT_WRITE_QUOTA, QuotaCharge, QuotaLimits, QuotaScope};
 use crate::refs::{self, strip_listed_prefix, validate_ref_name};
-use crate::replay::{ReplayDecision, ReplayKey, StoredResult, UpdateRefResult, classify};
+use crate::replay::{ReplayDecision, StoredResult, UpdateRefResult, classify};
 use crate::repo::Addressing;
 use crate::rt::Clock;
 use crate::storage_error::{StorageOp, describe_and_map};
 use crate::store::{
-    Batch, BatchOutcome, BlobStore, KeyClasses, NamespaceStore, Partition, StoreError, Value,
-    codec, keys::LAYOUT_VERSION, read,
+    Batch, BatchOutcome, BlobStore, Key, KeyClasses, NamespaceStore, Partition, StoreError, Value,
+    codec, keys, read,
 };
 use crate::telemetry::{METRIC_LATENCY, METRIC_REQUESTS, Metrics, Redactor};
 use crate::upload::UploadLimits;
@@ -52,7 +53,7 @@ pub use hooks::{
 };
 use plan::{
     MAX_REPLAN, PRUNE_LIMIT, Plan, PlanClock, Planned, ReplayGuard, Snapshot, WriteKind,
-    WriteRequest, plan_write,
+    WriteRequest, plan_write, prune_sampled,
 };
 pub use shard::{ShardMap, SinglePartition};
 
@@ -62,6 +63,11 @@ pub use shard::{ShardMap, SinglePartition};
 /// Workers; zero natively) plus the longest synchronous span before the
 /// commit, by a wide margin: a batch that misses it commits nothing.
 pub const MAX_APPLY_WINDOW: Duration = Duration::from_secs(10);
+
+// A signed write's deadline is capped at `expires_at + MAX_CLOCK_LEAD_MS`
+// (see `plan_clock`). That stays below the replay prune grace, so a stalled
+// duplicate can never commit after its record could have been pruned.
+const _: () = assert!(MAX_CLOCK_LEAD_MS.unsigned_abs() < read::REPLAY_PRUNE_GRACE_MS);
 
 /// Default `ListRefs` scan page.
 pub const DEFAULT_LIST_PAGE_LIMIT: u32 = 1000;
@@ -74,8 +80,9 @@ pub const METRIC_PARTITION_FULL: &str = "mkit_server_partition_full";
 /// header; label `reason` (`name`, `reserved`, `value`).
 pub const METRIC_HEADER_DROPPED: &str = "mkit_server_error_header_dropped_total";
 
-/// A deployment's pipeline settings.
+/// A deployment's pipeline settings. Start from [`PipelineConfig::new`].
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct PipelineConfig {
     /// How requests map to a repository (M0: `Single`).
     pub addressing: Addressing,
@@ -116,6 +123,7 @@ impl PipelineConfig {
 
 /// What the pipeline offers bindings (and a future `GetServerInfo`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PipelineCapabilities {
     /// `AdvanceRefs` commits head and packmap in one batch.
     pub atomic_advance: bool,
@@ -238,7 +246,7 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             "a store without atomic batches must report its layout version"
         } else if caps
             .implicit_layout_version
-            .is_some_and(|v| v != LAYOUT_VERSION)
+            .is_some_and(|v| v != keys::LAYOUT_VERSION)
         {
             "the store's layout version is not this server's"
         } else if cfg.list_page_limit == 0 || cfg.max_apply_window.is_zero() {
@@ -485,18 +493,21 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         result
     }
 
-    /// A signed or unsigned unary write, stage by stage.
+    /// A signed or unsigned unary write, stage by stage. In steady state
+    /// a signed write costs two backend calls: one `get_many` before any
+    /// hook runs (the replay record and the snapshot) and one `apply`.
     async fn write(&self, a: &Authenticated, kind: OpKind) -> Result<StoredResult, ServerError> {
-        let op = self.identify(a, kind)?;
+        let mut op = self.identify(a, kind)?;
         let (kind, refs, p) = self.ref_writes(&op)?;
-        if let Some(stored) = self.replay_lookup(&op, &p).await? {
+        let ahead = self.read_ahead(&op, &p, &refs).await?;
+        if let Some(stored) = Self::replay_lookup(&op, ahead.as_ref())? {
             return Ok(stored);
         }
-        self.authorize(&op).await?;
+        op.authz = self.authorize(&op).await?;
         let charges = self.admit(&op).await?;
         self.pre_receive(&op).await?;
-        let skew = a.business_skew_ms;
-        self.plan_and_apply(&op, &p, kind, &refs, &charges, skew)
+        let write = (kind, refs.as_slice(), charges.as_slice());
+        self.plan_and_apply(&op, &p, write, a.business_skew_ms, ahead)
             .await
     }
 
@@ -544,27 +555,81 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         Ok((kind, refs, p))
     }
 
-    /// Stage 0 lookup: a signed write's replay record, before any hook.
-    /// A committed record's result is returned; a new one continues.
-    async fn replay_lookup(
+    /// One `get_many` before any hook, on an atomic store: the write's
+    /// refs and layout version, and for a signed write its replay record,
+    /// the grant epoch and the default quota key it will most likely be
+    /// charged. Keys admission adds later are read after it.
+    async fn read_ahead(
         &self,
         op: &Operation,
         p: &Partition,
+        refs: &[RefUpdate],
+    ) -> Result<Option<Snapshot>, ServerError> {
+        let caps = self.meta.capabilities();
+        if !caps.atomic_multi_key {
+            return Ok(None);
+        }
+        let mut wanted: Vec<Key> = refs
+            .iter()
+            .map(|r| keys::ref_key(&op.repo.name, &r.name))
+            .collect();
+        if caps.implicit_layout_version.is_none() {
+            wanted.push(keys::layout_version());
+        }
+        if let Some(auth) = &op.auth {
+            wanted.push(keys::replay(&auth.replay_scope));
+            wanted.push(keys::grant_epoch());
+            if self.cfg.write_quota.is_some() {
+                let scope = QuotaScope::for_signer(&op.repo.namespace, &auth.signer);
+                wanted.push(keys::quota(&scope));
+            }
+        }
+        let mut snap = Snapshot::default();
+        self.fill(p, &mut snap, wanted).await?;
+        Ok(Some(snap))
+    }
+
+    /// Read every key of `wanted` that `snap` lacks, in one `get_many`.
+    async fn fill(
+        &self,
+        p: &Partition,
+        snap: &mut Snapshot,
+        mut wanted: Vec<Key>,
+    ) -> Result<(), ServerError> {
+        wanted.retain(|k| !snap.contains(k));
+        wanted.sort();
+        wanted.dedup();
+        if wanted.is_empty() {
+            return Ok(());
+        }
+        let values = self.meta.get_many(p, &wanted).await.map_err(meta_error)?;
+        for (key, value) in wanted.into_iter().zip(values) {
+            snap.insert(key, value);
+        }
+        Ok(())
+    }
+
+    /// Stage 0 lookup: a signed write's replay record, from the read-ahead
+    /// and before any hook. A committed record's result is returned, an
+    /// in-flight one is `aborted`; a new operation continues.
+    fn replay_lookup(
+        op: &Operation,
+        ahead: Option<&Snapshot>,
     ) -> Result<Option<StoredResult>, ServerError> {
-        let Some(auth) = &op.auth else {
+        let (Some(auth), Some(snap)) = (&op.auth, ahead) else {
             return Ok(None);
         };
         tracing::debug!(stage = "replay_lookup");
-        let record = read::replay_lookup(&self.meta, p, &ReplayKey(auth.replay_scope))
-            .await
-            .map_err(meta_error)?;
+        let stored = snap.get(&keys::replay(&auth.replay_scope));
+        let record = stored.map(codec::decode_replay_record).transpose();
+        let record = record.map_err(meta_error)?;
         replay_answer(classify(record.as_ref(), &auth.fingerprint))
     }
 
-    /// Stage 2.
-    async fn authorize(&self, op: &Operation) -> Result<(), ServerError> {
+    /// Stage 2: the facts it returns become `op.authz` before admission.
+    async fn authorize(&self, op: &Operation) -> Result<AuthzFacts, ServerError> {
         tracing::debug!(stage = "authorize");
-        self.hooks.authorizer().authorize(op).await.map(drop)
+        self.hooks.authorizer().authorize(op).await
     }
 
     /// Stage 3. A challenge is `permission_denied` "admission required" in
@@ -578,7 +643,7 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             AdmissionDecision::Challenge { .. } => {
                 Err(ServerError::permission_denied("admission required"))
             }
-            AdmissionDecision::Deny(err) => Err(err),
+            AdmissionDecision::Deny(err) => Err(deny_status(err)),
         }
     }
 
@@ -594,10 +659,9 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         &self,
         op: &Operation,
         p: &Partition,
-        kind: WriteKind,
-        refs: &[RefUpdate],
-        charges: &[QuotaCharge],
+        (kind, refs, charges): (WriteKind, &[RefUpdate], &[QuotaCharge]),
         skew_ms: i64,
+        ahead: Option<Snapshot>,
     ) -> Result<StoredResult, ServerError> {
         let caps = self.meta.capabilities();
         let replay = op.auth.as_ref().map(|auth| ReplayGuard {
@@ -615,7 +679,7 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             layout_version: caps.implicit_layout_version.is_none(),
         };
         if caps.atomic_multi_key {
-            return self.apply_loop(p, &req, skew_ms).await;
+            return self.apply_loop(p, &req, skew_ms, ahead).await;
         }
         if replay.is_some() || !charges.is_empty() {
             return Err(internal("replay and quota need atomic multi-key batches"));
@@ -624,7 +688,7 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         req.kind = WriteKind::UpdateRef;
         for (i, update) in refs.iter().enumerate() {
             req.refs = core::slice::from_ref(update);
-            let result = self.apply_loop(p, &req, skew_ms).await?;
+            let result = self.apply_loop(p, &req, skew_ms, None).await?;
             if let StoredResult::UpdateRef(UpdateRefResult::Conflict { .. }) = result {
                 if kind == WriteKind::UpdateRef {
                     return Ok(result);
@@ -642,20 +706,24 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         })
     }
 
-    /// The bounded optimistic loop: read, plan, apply. A guard another
-    /// writer broke re-plans up to [`MAX_REPLAN`] times, then `aborted`. A
-    /// missed deadline re-plans once while the envelope is valid, then
-    /// `unavailable` (SPEC-WRITE-GRANTS §5.5).
+    /// The bounded optimistic loop: read, plan, apply. The first attempt
+    /// plans on `ahead`, reading only what it lacks. A guard another
+    /// writer broke re-plans up to [`MAX_REPLAN`] times, then `aborted`; a
+    /// lost prune race retries once without the prune, uncounted. A missed
+    /// deadline re-plans once while the envelope is still valid at the
+    /// failed commit, then `unavailable` (SPEC-WRITE-GRANTS §5.5).
     async fn apply_loop(
         &self,
         p: &Partition,
         req: &WriteRequest<'_>,
         skew_ms: i64,
+        mut ahead: Option<Snapshot>,
     ) -> Result<StoredResult, ServerError> {
-        let (mut replans, mut deadline_missed) = (0, false);
+        let (mut replans, mut deadline_missed, mut prune_ok) = (0, false, true);
         loop {
-            let clock = self.plan_clock(skew_ms);
-            let snap = self.read_snapshot(p, req, &clock).await?;
+            let clock = self.plan_clock(skew_ms, req);
+            let base = ahead.take().unwrap_or_default();
+            let snap = self.read_snapshot(p, req, &clock, base, prune_ok).await?;
             let plan = match plan_write(req, &snap, &clock)? {
                 Planned::Done(result) => return Ok(result),
                 Planned::Apply(plan) => plan,
@@ -666,7 +734,7 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 replay_index,
                 epoch_index,
                 prune,
-                ..
+                prune_from,
             } = plan;
             tracing::debug!(stage = "apply", replans);
             match self.meta.apply(p, batch).await {
@@ -677,8 +745,12 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                         deadline = clock.deadline(),
                         "commit deadline passed"
                     );
+                    // Validity at the failed commit, on both clocks.
                     let now = self.clock.now_ms().saturating_add(skew_ms);
-                    let valid = req.replay.is_none_or(|r| now <= r.expires_at_ms);
+                    let backend = i64::try_from(backend_now).unwrap_or(i64::MAX);
+                    let valid = req
+                        .replay
+                        .is_none_or(|r| now.max(backend) <= r.expires_at_ms);
                     if deadline_missed || !valid {
                         return Err(ServerError::unavailable("commit deadline passed; retry"));
                     }
@@ -690,6 +762,10 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     }
                     if Some(index) == epoch_index {
                         return Err(plan::epoch_moved());
+                    }
+                    if index >= prune_from && prune_ok {
+                        prune_ok = false;
+                        continue;
                     }
                     replans += 1;
                     if replans > MAX_REPLAN {
@@ -703,46 +779,49 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     }
 
     /// The deadline uses the injected clock unshifted; business time adds
-    /// the request's skew.
-    fn plan_clock(&self, skew_ms: i64) -> PlanClock {
+    /// the request's skew. A signed write's deadline is also capped at
+    /// `expires_at + MAX_CLOCK_LEAD_MS`, below the replay prune grace.
+    fn plan_clock(&self, skew_ms: i64, req: &WriteRequest<'_>) -> PlanClock {
         let now = self.clock.now_ms();
+        let lead = MAX_CLOCK_LEAD_MS.unsigned_abs();
         PlanClock {
             plan_time_ms: ms(now),
             business_now_ms: now.saturating_add(skew_ms),
             max_apply_window_ms: u64::try_from(self.cfg.max_apply_window.as_millis())
                 .unwrap_or(u64::MAX),
-            deadline_cap: None,
+            deadline_cap: req.replay.map(|r| ms(r.expires_at_ms).saturating_add(lead)),
         }
     }
 
-    /// Everything [`plan_write`] reads: its keys, and for signed or charged
-    /// writes a bounded page of prune candidates.
+    /// Everything [`plan_write`] reads that `base` lacks, in one
+    /// `get_many`. A sampled write ([`prune_sampled`]) first scans a
+    /// bounded page of prune candidates, on the real clock, never the
+    /// business clock.
     async fn read_snapshot(
         &self,
         p: &Partition,
         req: &WriteRequest<'_>,
         clock: &PlanClock,
+        mut snap: Snapshot,
+        prune: bool,
     ) -> Result<Snapshot, ServerError> {
-        let mut snap = Snapshot::default();
-        let now = ms(clock.business_now_ms);
-        if req.replay.is_some() {
-            snap.expired_replays = read::expired_replay_keys(&self.meta, p, now, PRUNE_LIMIT)
-                .await
-                .map_err(meta_error)?;
+        let now = clock.plan_time_ms;
+        if prune && prune_sampled(req, now) {
+            if req.replay.is_some() {
+                snap.expired_replays = read::expired_replay_keys(&self.meta, p, now, PRUNE_LIMIT)
+                    .await
+                    .map_err(meta_error)?;
+            }
+            if let Some(window) = req.charges.iter().map(|c| c.limits.window_ms).max() {
+                snap.stale_quotas =
+                    read::stale_quota_keys(&self.meta, p, now, ms(window), PRUNE_LIMIT)
+                        .await
+                        .map_err(meta_error)?;
+            }
         }
-        if let Some(window) = req.charges.iter().map(|c| c.limits.window_ms).max() {
-            snap.stale_quotas = read::stale_quota_keys(&self.meta, p, now, ms(window), PRUNE_LIMIT)
-                .await
-                .map_err(meta_error)?;
-        }
-        let mut keys = req.read_keys();
-        keys.extend(snap.stale_quotas.iter().map(|(_, quota)| quota.clone()));
-        keys.sort();
-        keys.dedup();
-        let values = self.meta.get_many(p, &keys).await.map_err(meta_error)?;
-        for (key, value) in keys.into_iter().zip(values) {
-            snap.insert(key, value);
-        }
+        let mut wanted = req.read_keys();
+        wanted.extend(snap.stale_quotas.iter().map(|(_, quota)| quota.clone()));
+        self.fill(p, &mut snap, wanted).await?;
         Ok(snap)
     }
 
@@ -758,6 +837,21 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             tracing::warn!(error = %e, "prune on a full partition failed");
         }
         ServerError::unavailable("storage partition full")
+    }
+}
+
+/// A denial is 403, never 402: only [`ServerError::admission_challenge`],
+/// with its `AdmissionChallenge` detail, answers 402
+/// (SPEC-TRANSPORT-CONNECT §5).
+fn deny_status(err: ServerError) -> ServerError {
+    let challenge = err
+        .details()
+        .iter()
+        .any(|d| d.type_name == ADMISSION_CHALLENGE_TYPE);
+    if err.http_status() == Some(402) && !challenge {
+        err.with_http_status(403)
+    } else {
+        err
     }
 }
 

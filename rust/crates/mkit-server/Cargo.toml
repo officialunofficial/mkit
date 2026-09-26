@@ -37,6 +37,8 @@ tracing = { version = "0.1", default-features = false, features = ["std", "attri
 # Stored-value codecs (`store::codec`), on every target, so not optional.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Constant-time bearer-token comparison (pipeline::auth).
+subtle = { version = "2", default-features = false }
 
 [features]
 # In-memory reference backends (`MemoryKv`, `MemoryBlobStore`): the template

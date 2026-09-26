@@ -4,6 +4,9 @@
 
 use core::fmt;
 
+use mkit_core::hash::hash;
+use subtle::ConstantTimeEq;
+
 use crate::auth_v2::{self, AuthV2Config};
 use crate::error::{Redacted, ServerError};
 use crate::op::{Procedure, VerifiedAuth};
@@ -11,13 +14,16 @@ use crate::principal::Principal;
 
 /// How a deployment authenticates requests.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum AuthMode {
     /// No credentials; every request is `Anonymous` (unsafe-any HTTP, or a
     /// trusted caller). No replay ledger.
     Open,
     /// A shared `Authorization: Bearer <token>`, required on every RPC,
-    /// unary and streaming (`mkit serve --http` parity), compared in
-    /// constant time. No replay ledger.
+    /// unary and streaming (`mkit serve --http` parity). The BLAKE3
+    /// digests of the presented and expected values are compared in
+    /// constant time, so neither the content nor the length leaks. No
+    /// replay ledger.
     Bearer {
         /// The expected token.
         token: Redacted,
@@ -89,7 +95,8 @@ pub(crate) fn authenticate(
         AuthMode::Bearer { token } => {
             let got = (meta.header)("authorization").unwrap_or_default();
             let expected = format!("Bearer {}", token.expose());
-            if !ct_eq(got.as_bytes(), expected.as_bytes()) {
+            let same = hash(got.as_bytes()).ct_eq(&hash(expected.as_bytes()));
+            if !bool::from(same) {
                 return Err(ServerError::unauthenticated(
                     "missing or invalid Authorization: Bearer <token>",
                 ));
@@ -105,7 +112,10 @@ pub(crate) fn authenticate(
                 Some(auth),
             )
         }
-        // Reads stay unsigned under auth v2 (`vcs-worker` parity).
+        // Reads stay unsigned under auth v2 (`vcs-worker` parity): auth
+        // headers on a read are ignored. SPEC-TRANSPORT-CONNECT §7.1 says a
+        // read that carries any auth v2 header MUST verify in full; that
+        // lands with signed reads in M2 (SPEC-WRITE-GRANTS §9.2).
         AuthMode::Open | AuthMode::AuthV2(_) => (Principal::Anonymous, None),
         AuthMode::TransportIdentity => (
             meta.transport_principal
@@ -136,27 +146,4 @@ fn verify_auth_v2(
         ServerError::internal("authentication failed", "unary request without its body")
     })?;
     auth_v2::verify_unary(cfg, path, body, now_ms, &headers)
-}
-
-/// Constant-time equality (`http.rs` rationale: a timing side channel on
-/// the bearer check leaks the token). Only the length is not hidden.
-fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let diff = a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y));
-    core::hint::black_box(diff) == 0
-}
-
-#[cfg(test)]
-mod tests {
-    use super::ct_eq;
-
-    #[test]
-    fn ct_eq_compares_bytes_and_length() {
-        assert!(ct_eq(b"Bearer abc", b"Bearer abc"));
-        assert!(ct_eq(b"", b""));
-        assert!(!ct_eq(b"Bearer abc", b"Bearer abd"));
-        assert!(!ct_eq(b"Bearer ab", b"Bearer abc"));
-    }
 }
