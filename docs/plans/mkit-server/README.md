@@ -62,7 +62,7 @@ and one PR per WP. A group is done when all of its WPs have merged.
 | Milestone | State | Evidence |
 |---|---|---|
 | Prep & Specs | done (P0 dropped) | P1, S1–S3 merged |
-| **M0 Foundation** | **complete, pending the user's acceptance of 16 listed wire changes**: the 21 other M0 WPs merged, and the exit gate (WP-M0-20) ran green on 2026-09-26 | [M0 exit report](m0-exit-report.md) |
+| **M0 Foundation** | **complete** (2026-09-26): all 22 M0 WPs merged, the exit gate (WP-M0-20) ran green, and the user accepted the 16 listed wire changes | [M0 exit report](m0-exit-report.md) |
 | M1 Addressing & uploads | next; early-start WP 1.3 merged | |
 | M2 Identity | early-start WPs 2.3, 2.4a, 2.4b, 2.5 merged | |
 | M4 Indexed mode | early-start WPs 4.1, 4.2, 4.3 merged | |

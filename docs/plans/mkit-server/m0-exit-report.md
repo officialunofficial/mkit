@@ -9,7 +9,8 @@ and Node 24.13.0. Unless a step says otherwise, every command ran from the repo 
 **Verdict.** Three of the four PRD §8 M0 exit criteria are met outright: conformance natively and on `wrangler dev`,
 the existing CLI e2e tests, and the server-free CLI. The fourth, "nothing changes on the wire", is **met except for the
 16 spec-mandated or bug-fix wire changes listed in §4, which require the user's acceptance**. The ssh goldens and the
-Connect wire suite pass unchanged, and `buf breaking` is clean. M0 is complete once the user accepts those changes. The
+Connect wire suite pass unchanged, and `buf breaking` is clean. **The user accepted all 16 changes on 2026-09-26, so M0 is
+complete.** The
 one CI hazard the run found (pre-existing timeouts under the suite's own load, the same on `main`) is fixed by
 exact-name nextest overrides (§6). §9 lists the risks for the final PR to `main`.
 
@@ -112,7 +113,7 @@ The 10 skips are the feature-gated cases this build does not enable (bearer auth
 
 **Wire changes made during M0.** Each entry of the CHANGELOG's Unreleased section was checked for an observable wire
 or protocol effect; the table lists every one found. Each follows a spec or fixes a bug; none is a silent regression.
-They need the user's acceptance.
+**Accepted by the user on 2026-09-26.**
 
 | # | Where | Change | Basis |
 |---|---|---|---|
