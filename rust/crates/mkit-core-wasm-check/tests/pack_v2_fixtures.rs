@@ -12,7 +12,8 @@
 use std::collections::HashMap;
 
 use mkit_core::hash::{self, Hash, from_hex, to_hex};
-use mkit_core::pack::{PackEntries, PackEntry};
+use mkit_core::pack::window::read_all;
+use mkit_core::pack::{DecodeLimits, PackEntries, PackEntry};
 use serde_json::Value;
 
 macro_rules! fixture {
@@ -109,5 +110,71 @@ fn pack_v2_fixtures_decode_through_ruzstd() {
             count += 1;
         }
         assert_eq!(count, want.len(), "{name}: every entry decoded");
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn pack_v2_window_reader_matches_buffered_ruzstd() {
+    let listed = MANIFEST
+        .lines()
+        .filter(|line| line.contains(".bin "))
+        .count();
+    assert_eq!(listed, FIXTURES.len(), "all v2 goldens must be exercised");
+    for (name, pack, _) in FIXTURES {
+        for window_size in [64 << 10, 1 << 20] {
+            let mut buffered = PackEntries::new(pack).unwrap();
+            let raw_only = buffered.is_raw_only();
+            let first_non_raw = buffered.first_non_raw_index();
+            let mut source = pack;
+            let mut count = 0;
+            let summary = read_all(
+                &mut source,
+                u64::try_from(pack.len()).unwrap(),
+                window_size,
+                DecodeLimits::default(),
+                Some(hash::hash(pack)),
+                |actual| {
+                    let expected = buffered.next().unwrap().unwrap();
+                    match (expected, actual) {
+                        (PackEntry::Raw { bytes: want }, PackEntry::Raw { bytes: got }) => {
+                            assert_eq!(want, got, "{name}: raw entry {count}");
+                        }
+                        (
+                            PackEntry::Delta {
+                                base: want_base,
+                                stream: want_stream,
+                            },
+                            PackEntry::Delta {
+                                base: got_base,
+                                stream: got_stream,
+                            },
+                        ) => {
+                            assert_eq!(want_base, got_base, "{name}: delta base {count}");
+                            assert_eq!(want_stream, got_stream, "{name}: delta stream {count}");
+                        }
+                        (want, got) => panic!("{name}: entry {count}: {want:?} != {got:?}"),
+                    }
+                    count += 1;
+                    Ok(())
+                },
+            )
+            .unwrap_or_else(|error| panic!("{name}, window {window_size}: {error}"));
+            assert!(
+                buffered.next().is_none(),
+                "{name}: every buffered entry yielded"
+            );
+            assert_eq!(summary.entry_count, count, "{name}: count");
+            assert_eq!(summary.raw_only, raw_only, "{name}: raw-only summary");
+            assert_eq!(
+                summary.first_non_raw, first_non_raw,
+                "{name}: first non-raw"
+            );
+            assert_eq!(
+                summary.version,
+                u32::from_le_bytes(pack[4..8].try_into().unwrap()),
+                "{name}: version"
+            );
+        }
     }
 }

@@ -19,6 +19,14 @@ train).
 
 ### Changed
 
+- *(core)* Add `pack::window`: a synchronous sans-IO pack reader with bounded
+  entry buffers, 64 KiB–64 MiB range windows, and checksummed resumable cursors.
+  Entries remain provisional until the trailer and optional pack id pass at
+  `Done`. Resumed runs re-read the skipped prefix before completion to bind the
+  cursor to the supplied bytes. With no requested id, the first run prefetches
+  the trailer windows and persists their digest as an anchor. Native zstd and wasm32 ruzstd share decoding
+  with `PackEntries`; allocation failures return `PackfileTooLarge`.
+
 - *(cli)* `mkit serve <path>` runs on `mkit-server`: its engine is
   `mkit_server::ssh::serve_session` over the pipeline with the `.mkit`
   layout stores (`FsBlobStore`, `FsLayoutStore`), driven by

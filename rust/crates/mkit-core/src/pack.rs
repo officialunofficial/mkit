@@ -67,6 +67,8 @@
 //! streaming reader detect bit-rot before the whole pack has been
 //! hashed end-to-end.
 
+pub mod window;
+
 use crate::delta;
 use crate::hash::{self, Hash};
 use crate::object::{MkitError, Object};
@@ -673,6 +675,18 @@ fn decompress_zstd_entry_with(
     payload: &[u8],
     backend: fn(&[u8], usize) -> Result<Vec<u8>, PackError>,
 ) -> Result<Vec<u8>, PackError> {
+    let (uncompressed_len, frame) = zstd_claim(payload)?;
+    let decompressed = backend(frame, uncompressed_len)?;
+    if decompressed.len() != uncompressed_len {
+        return Err(PackError::DecompressedSizeMismatch(
+            uncompressed_len,
+            decompressed.len(),
+        ));
+    }
+    Ok(decompressed)
+}
+
+fn zstd_claim(payload: &[u8]) -> Result<(usize, &[u8]), PackError> {
     if payload.len() < ZSTD_LEN_PREFIX {
         return Err(PackError::ZstdEntryTruncated);
     }
@@ -682,14 +696,7 @@ fn decompress_zstd_entry_with(
         return Err(PackError::DecompressedSizeOverCap(uncompressed_len));
     }
     let frame = &payload[ZSTD_LEN_PREFIX..];
-    let decompressed = backend(frame, uncompressed_len)?;
-    if decompressed.len() != uncompressed_len {
-        return Err(PackError::DecompressedSizeMismatch(
-            uncompressed_len,
-            decompressed.len(),
-        ));
-    }
-    Ok(decompressed)
+    Ok((uncompressed_len, frame))
 }
 
 /// RFC 8878 §3.1.1 Zstandard frame magic number, as it appears on the
@@ -738,7 +745,18 @@ fn zstd_decompress_capped(frame: &[u8], capacity: usize) -> Result<Vec<u8>, Pack
             ));
         }
     }
-    zstd::bulk::decompress(frame, capacity).map_err(|e| PackError::ZstdDecompress(e.to_string()))
+    let size = zstd::bulk::Decompressor::upper_bound(frame)
+        .unwrap_or(capacity)
+        .min(capacity);
+    let mut out = Vec::new();
+    out.try_reserve_exact(size)
+        .map_err(|_| PackError::PackfileTooLarge)?;
+    let mut decoder =
+        zstd::bulk::Decompressor::new().map_err(|e| PackError::ZstdDecompress(e.to_string()))?;
+    decoder
+        .decompress_to_buffer(frame, &mut out)
+        .map_err(|e| PackError::ZstdDecompress(e.to_string()))?;
+    Ok(out)
 }
 
 /// Without the C library, the pure-Rust decoder serves every read.
@@ -783,12 +801,10 @@ const RUZSTD_MIN_WINDOW_LIMIT: u64 = 8 << 20;
 /// decodes to the claim peaks at about **3× the claim**, against about 1×
 /// on the C path: ruzstd's ring buffer rounds its capacity up to a power
 /// of two and holds up to one window (the whole frame, for single-segment
-/// frames) of not-yet-emitted output, while `read_to_end` grows the output
-/// `Vec` by doubling. Measured: a 16 KiB RLE payload claiming 512 MiB
-/// reaches about 1.55 GiB RSS (C: about 0.54 GiB). Pre-sizing the output
-/// to the claim would cut the doubling but allocate the full claim for
-/// frames that never deliver it, so it is not done; a caller-set
-/// decoded-size budget is WP-4.8a's.
+/// frames) of not-yet-emitted output, plus an output `Vec` growing geometrically
+/// up to the claim. Output growth uses `try_reserve_exact` and never reserves
+/// past the claim. The window reader checks its caller-set budget first;
+/// that budget covers the carried payload and output, not the decoder's ring.
 ///
 /// With `pack-zstd` also on, only the differential tests call it.
 #[cfg(feature = "pack-ruzstd")]
@@ -831,14 +847,30 @@ pub(crate) fn ruzstd_decompress_capped(
     }
 
     let mut out = Vec::new();
-    (&mut stream)
-        .take(cap.saturating_add(1))
-        .read_to_end(&mut out)
-        .map_err(fail)?;
-    if out.len() > capacity {
-        return Err(fail(format_args!(
-            "zstd frame decompresses past the claimed {capacity} bytes"
-        )));
+    let mut chunk = [0; 8192];
+    loop {
+        // Probe one extra byte without allocating past the claim.
+        let room = capacity.saturating_sub(out.len());
+        let take = room.saturating_add(1).min(chunk.len());
+        let n = stream.read(&mut chunk[..take]).map_err(fail)?;
+        if n == 0 {
+            break;
+        }
+        if n > room {
+            return Err(fail(format_args!(
+                "zstd frame decompresses past the claimed {capacity} bytes"
+            )));
+        }
+        let needed = out
+            .len()
+            .checked_add(n)
+            .ok_or(PackError::PackfileTooLarge)?;
+        if needed > out.capacity() {
+            let target = out.capacity().saturating_mul(2).max(needed).min(capacity);
+            out.try_reserve_exact(target - out.len())
+                .map_err(|_| PackError::PackfileTooLarge)?;
+        }
+        out.extend_from_slice(&chunk[..n]);
     }
     let decoder = &stream.decoder;
     if !decoder.is_finished() {
@@ -1963,42 +1995,47 @@ impl<'a> PackEntries<'a> {
         self.last_payload_range = Some(payload_start..payload_end);
         self.pos = payload_end;
         self.yielded += 1;
-        match etype {
-            0x00 => Ok(PackEntry::Raw {
-                bytes: Cow::Borrowed(payload),
-            }),
-            0x02 => {
-                if payload.len() < hash::HASH_LEN {
-                    return Err(PackError::DeltaEntryTruncated);
-                }
-                let mut base = [0u8; hash::HASH_LEN];
-                base.copy_from_slice(&payload[..hash::HASH_LEN]);
-                Ok(PackEntry::Delta {
-                    base,
-                    stream: Cow::Borrowed(&payload[hash::HASH_LEN..]),
-                })
+        decode_payload(etype, self.version, payload)
+    }
+}
+
+// Shared by the buffered and windowed readers; framing is checked by each caller.
+fn decode_payload(etype: u8, version: u32, payload: &[u8]) -> Result<PackEntry<'_>, PackError> {
+    match etype {
+        0x00 => Ok(PackEntry::Raw {
+            bytes: Cow::Borrowed(payload),
+        }),
+        0x02 => {
+            if payload.len() < hash::HASH_LEN {
+                return Err(PackError::DeltaEntryTruncated);
             }
-            0x03 if self.version == VERSION_V2 => {
-                let obj_bytes = decompress_zstd_entry(payload)?;
-                Ok(PackEntry::Raw {
-                    bytes: Cow::Owned(obj_bytes),
-                })
-            }
-            0x04 if self.version == VERSION_V2 => {
-                if payload.len() < hash::HASH_LEN {
-                    return Err(PackError::DeltaEntryTruncated);
-                }
-                let mut base = [0u8; hash::HASH_LEN];
-                base.copy_from_slice(&payload[..hash::HASH_LEN]);
-                let stream = decompress_zstd_entry(&payload[hash::HASH_LEN..])?;
-                Ok(PackEntry::Delta {
-                    base,
-                    stream: Cow::Owned(stream),
-                })
-            }
-            0x01 => Err(PackError::InvalidEntryType(0x01)),
-            other => Err(PackError::InvalidEntryType(other)),
+            let mut base = [0u8; hash::HASH_LEN];
+            base.copy_from_slice(&payload[..hash::HASH_LEN]);
+            Ok(PackEntry::Delta {
+                base,
+                stream: Cow::Borrowed(&payload[hash::HASH_LEN..]),
+            })
         }
+        0x03 if version == VERSION_V2 => {
+            let obj_bytes = decompress_zstd_entry(payload)?;
+            Ok(PackEntry::Raw {
+                bytes: Cow::Owned(obj_bytes),
+            })
+        }
+        0x04 if version == VERSION_V2 => {
+            if payload.len() < hash::HASH_LEN {
+                return Err(PackError::DeltaEntryTruncated);
+            }
+            let mut base = [0u8; hash::HASH_LEN];
+            base.copy_from_slice(&payload[..hash::HASH_LEN]);
+            let stream = decompress_zstd_entry(&payload[hash::HASH_LEN..])?;
+            Ok(PackEntry::Delta {
+                base,
+                stream: Cow::Owned(stream),
+            })
+        }
+        0x01 => Err(PackError::InvalidEntryType(0x01)),
+        other => Err(PackError::InvalidEntryType(other)),
     }
 }
 

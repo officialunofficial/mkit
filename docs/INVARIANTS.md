@@ -876,3 +876,23 @@ and `rust/tests/golden/closure/neg_delta_entry.*` /
 `neg_compressed_entry.*`, and
 `golden_pack::pack_v2_fixtures::closure_profile_still_rejects_compressed_entries`
 (every feature combination, including a frame corrupted past decoding).
+
+## Windowed pack entries stay provisional until complete verification
+
+**Always:** `pack::window` yields the same entry values as `PackEntries` when
+resource limits do not bind, and returns `Done` only after framing, the trailer,
+and any expected whole-pack id pass. A resumed run verifies skipped source
+windows against its persisted CV state, and unbound initial runs persist a
+trailer anchor before yielding entries. Drivers discard all staged entries on
+any error, including entries yielded before a checkpoint.
+
+**Because:** a streaming trailer check occurs after entries have been delivered;
+a cursor checksum alone does not authenticate source bytes skipped on resume.
+
+**If violated:** malformed packs or mismatched cursor/source pairs can publish
+partially verified data.
+
+**Enforced by:** `rust/crates/mkit-core/src/pack/window/tests.rs` differential,
+resume, cursor-binding, resource-budget, and trailer-split tests; the
+`mkit-core-wasm-check` v2 differential harness. Caller staging rollback remains
+an obligation of WP-4.7/4.8; the core reader does not store objects.
