@@ -1305,9 +1305,15 @@ pub fn build_disclosure(
 /// `read_unverified` and adds no verification of its own, so the bundle
 /// bytes are identical to [`build_disclosure`]'s for the same objects.
 /// [`crate::store::DisplaySource`] is therefore not a valid source: its
-/// `read` skips verification. A lying source can only produce a bundle
-/// that [`verify_disclosure`] rejects, because the bundle is
-/// self-authenticating against `commit_id`.
+/// `read` skips verification.
+///
+/// A source that breaks the contract (returns bytes that do not hash to
+/// the requested id) still cannot make the builder panic, and cannot make
+/// it emit a bundle that verifies for content `commit_id` does not commit
+/// to, because the bundle is self-authenticating against `commit_id`. The
+/// build then either fails with a typed [`VerifyError`] or yields a bundle
+/// that [`verify_disclosure`] rejects. It can still waste work: the
+/// builder bounds nothing beyond what the objects themselves declare.
 ///
 /// A source reports an absent object as
 /// [`crate::store::StoreError::ObjectNotFound`], which surfaces as
@@ -1381,8 +1387,10 @@ fn build_payload<S: crate::store::ObjectSource + ?Sized>(
             let Object::ChunkedBlob(cb) = source.read_object(leaf_id)? else {
                 return Err(VerifyError::SelectorLeafMismatch);
             };
-            let leaf_count =
-                u32::try_from(cb.chunks.len() + 1).map_err(|_| VerifyError::TooManyChunks)?;
+            let leaf_count = u32::try_from(cb.chunks.len())
+                .ok()
+                .and_then(|n| n.checked_add(1))
+                .ok_or(VerifyError::TooManyChunks)?;
             let chunk_id = *cb
                 .chunks
                 .get(index as usize)
@@ -1452,19 +1460,35 @@ fn build_chunked_range_payload<S: crate::store::ObjectSource + ?Sized>(
         .map(|id| source.read(id))
         .collect::<Result<_, _>>()?;
 
+    // Every length and offset below is checked: `source` bytes and the
+    // caller's `offset`/`len` are both untrusted here, and a panic (the
+    // release profile has `overflow-checks = true`) is never acceptable.
     let mut cumulative: u64 = 0;
     let mut located = None;
     for (idx, bytes) in chunk_bytes.iter().enumerate() {
-        let content_len = (bytes.len() - 10) as u64;
-        if offset < cumulative + content_len {
+        // A chunk is a `Blob`: 10-byte prologue (6-byte header + u32
+        // length) then content. Anything shorter is a truncated object.
+        let content_len = bytes
+            .len()
+            .checked_sub(10)
+            .ok_or(VerifyError::Decode(MkitError::UnexpectedEof))? as u64;
+        let chunk_end = cumulative
+            .checked_add(content_len)
+            .ok_or(VerifyError::OffsetOverflow)?;
+        if offset < chunk_end {
             located = Some((idx, cumulative, content_len));
             break;
         }
-        cumulative += content_len;
+        cumulative = chunk_end;
     }
     let (index, chunk_start, content_len) = located.ok_or(VerifyError::RangeOutOfBounds)?;
-    let offset_in_chunk = offset - chunk_start;
-    if offset_in_chunk + len > content_len {
+    let offset_in_chunk = offset
+        .checked_sub(chunk_start)
+        .ok_or(VerifyError::OffsetOverflow)?;
+    let range_end = offset_in_chunk
+        .checked_add(len)
+        .ok_or(VerifyError::OffsetOverflow)?;
+    if range_end > content_len {
         return Err(VerifyError::RangeCrossesChunkBoundary);
     }
 
@@ -1480,7 +1504,8 @@ fn build_chunked_range_payload<S: crate::store::ObjectSource + ?Sized>(
     if with_offsets {
         for (j, preceding_bytes) in chunk_bytes.iter().enumerate().take(index) {
             let j_u32 = u32::try_from(j).map_err(|_| VerifyError::TooManyChunks)?;
-            let proof_j = merkle::build_chunk_proof(cb, j_u32 + 1)?;
+            let position_j = j_u32.checked_add(1).ok_or(VerifyError::TooManyChunks)?;
+            let proof_j = merkle::build_chunk_proof(cb, position_j)?;
             let slice_j = extract_bao_slice(preceding_bytes, 0, 10)?;
             chunk_len_proofs.push(LenProof {
                 index: j_u32,
@@ -2351,6 +2376,28 @@ mod tests {
         }
     }
 
+    /// Another contract-violating source: `read_object(target)` decodes
+    /// `object_lie`, while `read(target)` still returns the honest bytes,
+    /// so the two methods disagree about the same id.
+    struct SplitSource<'a> {
+        inner: &'a MapSource,
+        target: Hash,
+        object_lie: Object,
+    }
+
+    impl crate::store::ObjectSource for SplitSource<'_> {
+        fn read(&self, h: &Hash) -> crate::store::StoreResult<Vec<u8>> {
+            crate::store::ObjectSource::read(self.inner, h)
+        }
+
+        fn read_object(&self, h: &Hash) -> crate::store::StoreResult<Object> {
+            if *h == self.target {
+                return Ok(self.object_lie.clone());
+            }
+            crate::store::ObjectSource::read_object(self.inner, h)
+        }
+    }
+
     /// Id of the entry `name` in the tree `tree_id`.
     fn entry_id(store: &ObjectStore, tree_id: &Hash, name: &[u8]) -> Hash {
         let Object::Tree(tree) = store.read_object(tree_id).unwrap() else {
@@ -2470,7 +2517,7 @@ mod tests {
     }
 
     #[test]
-    fn build_from_map_source_equals_store_builder() {
+    fn disclosure_from_map_source_equals_store_builder() {
         let f = build_fixture();
         let medium = medium_blob_commit(&f);
         let map = MapSource::from_store(&f.store);
@@ -2481,7 +2528,7 @@ mod tests {
     }
 
     #[test]
-    fn build_from_ephemeral_sink_equals_store_builder() {
+    fn disclosure_from_ephemeral_sink_equals_store_builder() {
         let f = build_fixture();
         let medium = medium_blob_commit(&f);
         let sink = crate::store::EphemeralSink::new(&f.store);
@@ -2489,7 +2536,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_object_in_source_is_store_error() {
+    fn disclosure_from_missing_object_is_store_error() {
         let f = build_fixture();
         let sub_id = entry_id(&f.store, &root_tree_id(&f.store, &f.commit_id), b"sub");
         let path: [&[u8]; 3] = [b"sub", b"deep", b"deep.txt"];
@@ -2515,7 +2562,7 @@ mod tests {
     }
 
     #[test]
-    fn lying_source_bundle_fails_verification() {
+    fn disclosure_from_lying_leaf_fails_verification() {
         let f = build_fixture();
         let root = root_tree_id(&f.store, &f.commit_id);
         let shallow_id = entry_id(&f.store, &root, b"shallow.txt");
@@ -2534,5 +2581,140 @@ mod tests {
             verify_disclosure(&f.commit_id, &bundle),
             Err(VerifyError::PayloadIdMismatch)
         ));
+    }
+
+    #[test]
+    fn disclosure_from_lying_tree_fails_at_that_path_step() {
+        let f = build_fixture();
+        let root = root_tree_id(&f.store, &f.commit_id);
+        let sub_id = entry_id(&f.store, &root, b"sub");
+        let deep_tree_id = entry_id(&f.store, &sub_id, b"deep");
+        let shallow_id = entry_id(&f.store, &root, b"shallow.txt");
+        // A well-formed forgery of `sub`: it still has the `deep` entry the
+        // path needs, plus an extra one, so the builder walks straight
+        // through it.
+        let forged = Tree {
+            entries: vec![
+                TreeEntry {
+                    name: b"aaa.txt".to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: shallow_id,
+                },
+                TreeEntry {
+                    name: b"deep".to_vec(),
+                    mode: EntryMode::Tree,
+                    object_hash: deep_tree_id,
+                },
+            ],
+        };
+        let map = MapSource::from_store(&f.store);
+        let liar = LyingSource {
+            inner: &map,
+            target: sub_id,
+            lie: crate::serialize::serialize(&Object::Tree(forged)).unwrap(),
+        };
+        let path: [&[u8]; 3] = [b"sub", b"deep", b"deep.txt"];
+        let bundle = build_disclosure_from(&liar, &f.commit_id, &path, Selector::Object).unwrap();
+        // Step 0 (root → sub) is honest; step 1 carries the forged tree's
+        // inner root, which does not wrap to `sub`'s real id.
+        let err = verify_disclosure(&f.commit_id, &bundle).unwrap_err();
+        let VerifyError::InnerRootMismatch { expected, .. } = err else {
+            panic!("expected InnerRootMismatch at the `sub` step, got {err:?}");
+        };
+        assert_eq!(expected, sub_id);
+    }
+
+    #[test]
+    fn disclosure_from_short_chunk_is_error_not_panic() {
+        let f = build_fixture();
+        let root = root_tree_id(&f.store, &f.commit_id);
+        let chunked_id = entry_id(&f.store, &root, b"chunked.bin");
+        let Object::ChunkedBlob(cb) = f.store.read_object(&chunked_id).unwrap() else {
+            panic!("expected a chunked blob");
+        };
+        let map = MapSource::from_store(&f.store);
+        for short_len in [0usize, 1, 9] {
+            let liar = LyingSource {
+                inner: &map,
+                target: cb.chunks[0],
+                lie: vec![0u8; short_len],
+            };
+            for with_offsets in [false, true] {
+                let selector = Selector::Range {
+                    offset: 200_000,
+                    len: 64,
+                    with_offsets,
+                };
+                let err = build_disclosure_from(&liar, &f.commit_id, &[b"chunked.bin"], selector)
+                    .unwrap_err();
+                assert!(
+                    matches!(err, VerifyError::Decode(MkitError::UnexpectedEof)),
+                    "{short_len}-byte chunk: got {err:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn disclosure_range_len_u64_max_is_error_not_panic() {
+        let f = build_fixture();
+        let map = MapSource::from_store(&f.store);
+        let huge = |offset| Selector::Range {
+            offset,
+            len: u64::MAX,
+            with_offsets: false,
+        };
+        for (path, offset) in [
+            (b"chunked.bin".as_slice(), 10),
+            (b"chunked.bin".as_slice(), 200_000),
+            (b"shallow.txt".as_slice(), 1),
+        ] {
+            for result in [
+                build_disclosure(&f.store, &f.commit_id, &[path], huge(offset)),
+                build_disclosure_from(&map, &f.commit_id, &[path], huge(offset)),
+            ] {
+                let err = result.unwrap_err();
+                assert!(
+                    matches!(err, VerifyError::OffsetOverflow),
+                    "{path:?} @ {offset}: got {err:?}"
+                );
+            }
+        }
+        // An offset at the very top of u64 is simply out of bounds.
+        let top = Selector::Range {
+            offset: u64::MAX,
+            len: 1,
+            with_offsets: true,
+        };
+        let err = build_disclosure(&f.store, &f.commit_id, &[b"chunked.bin"], top).unwrap_err();
+        assert!(matches!(err, VerifyError::RangeOutOfBounds), "got {err:?}");
+    }
+
+    #[test]
+    fn disclosure_from_split_blob_source_is_error_not_panic() {
+        let f = build_fixture();
+        let root = root_tree_id(&f.store, &f.commit_id);
+        let shallow_id = entry_id(&f.store, &root, b"shallow.txt");
+        let map = MapSource::from_store(&f.store);
+        // `read_object` claims a 4 KiB blob; `read` returns the real
+        // 20-byte one, so the range is past the canonical bytes.
+        let liar = SplitSource {
+            inner: &map,
+            target: shallow_id,
+            object_lie: Object::Blob(crate::object::Blob {
+                data: vec![0u8; 4096],
+            }),
+        };
+        let selector = Selector::Range {
+            offset: 2048,
+            len: 512,
+            with_offsets: false,
+        };
+        // Either a typed error or a bundle the verifier rejects; never a
+        // panic, never a verifying bundle.
+        if let Ok(bundle) = build_disclosure_from(&liar, &f.commit_id, &[b"shallow.txt"], selector)
+        {
+            assert!(verify_disclosure(&f.commit_id, &bundle).is_err());
+        }
     }
 }

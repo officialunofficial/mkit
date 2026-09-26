@@ -253,6 +253,13 @@ train).
 
 ### Fixed
 
+- *(core)* The disclosure builder no longer panics on a `ChunkedBlob`
+  range whose `offset + len` overflows `u64` (e.g.
+  `mkit prove --range 10:18446744073709551615`) or on a chunk shorter
+  than its 10-byte `Blob` prologue: these now return
+  `VerifyError::OffsetOverflow` and `VerifyError::Decode(UnexpectedEof)`.
+  Valid bundles are byte-identical.
+
 - *(core)* A `Range` payload over a chunked leaf (`chunk = Some(hdr)`) now
   rejects `len == 0` before running the chunk header's wrap/fold checks,
   matching SPEC-DISCLOSURE §4's stated order &mdash; the bundle is rejected
