@@ -836,3 +836,222 @@ mod tests {
         out
     }
 }
+
+/// Kani proof harnesses (`cargo kani -p mkit-keystore --harness
+/// software_key_record_`), the model-checked counterpart of the
+/// `software_key_record` fuzz target (SPEC-KEYSTORE §6.1.1).
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    /// Stand-in for `std::fmt::format` (behind every `format!` in this
+    /// module's error paths): formatting is trusted `std` code, and
+    /// CBMC's unrolling of the integer/`Display` machinery dominates the
+    /// proof otherwise. Error *messages* are not part of any property
+    /// checked here.
+    fn no_format(_args: std::fmt::Arguments<'_>) -> String {
+        String::new()
+    }
+
+    /// Stand-in for `core::str::from_utf8` (behind `String::from_utf8`):
+    /// succeeds or fails nondeterministically. `String::from_utf8`
+    /// ignores the returned `&str` on success and keeps the original
+    /// bytes, so record contents are unchanged. CBMC otherwise unrolls
+    /// `core`'s word-at-a-time validator to the global bound for every
+    /// field, which dominates these proofs; UTF-8 validation itself is
+    /// trusted `core` code. This over-approximates: the decoder is proved
+    /// panic-free whichever way validation goes.
+    fn any_utf8(_v: &[u8]) -> core::result::Result<&str, core::str::Utf8Error> {
+        if kani::any() {
+            Ok("")
+        } else {
+            Err(core::str::from_utf8_mut(&mut [0xFF]).expect_err("0xFF is never UTF-8"))
+        }
+    }
+
+    /// Minimal accepted record: magic(8) + version/alg/attrs(3) + six
+    /// u32 length prefixes (24) + 24-byte nonce = 59 bytes.
+    const MIN_RECORD: usize = 8 + 3 + 6 * 4 + NONCE_LEN;
+
+    fn decode_at<const N: usize>() -> bool {
+        let input: [u8; N] = kani::any();
+        EncryptedKeyRecord::decode(&input).is_ok()
+    }
+
+    /// `decode` never panics/overflows/reads OOB on the empty input or on
+    /// any 7-byte input (one short of the 8-byte magic; every byte
+    /// symbolic). All inputs shorter than a minimal record (59 bytes)
+    /// are rejected. One or two lengths per harness: one harness for
+    /// 0..=8, 9..=11, {0, 4, 7} or {0, 7} ran out of memory.
+    #[kani::proof]
+    #[kani::stub(std::fmt::format, no_format)]
+    #[kani::stub(core::str::from_utf8, any_utf8)]
+    // Largest loop: the 8-byte magic comparison.
+    #[kani::unwind(10)]
+    fn software_key_record_decode_len_0() {
+        assert!(!decode_at::<0>());
+    }
+
+    /// As above for 7 bytes.
+    #[kani::proof]
+    #[kani::stub(std::fmt::format, no_format)]
+    #[kani::stub(core::str::from_utf8, any_utf8)]
+    #[kani::unwind(10)]
+    fn software_key_record_decode_len_7() {
+        assert!(!decode_at::<7>());
+    }
+
+    /// As above for 1 and 2 bytes.
+    #[kani::proof]
+    #[kani::stub(std::fmt::format, no_format)]
+    #[kani::stub(core::str::from_utf8, any_utf8)]
+    #[kani::unwind(10)]
+    fn software_key_record_decode_len_1_2() {
+        assert!(!decode_at::<1>() && !decode_at::<2>());
+    }
+
+    /// As above for 3 and 4 bytes.
+    #[kani::proof]
+    #[kani::stub(std::fmt::format, no_format)]
+    #[kani::stub(core::str::from_utf8, any_utf8)]
+    #[kani::unwind(10)]
+    fn software_key_record_decode_len_3_4() {
+        assert!(!decode_at::<3>() && !decode_at::<4>());
+    }
+
+    /// As above for 5 and 6 bytes.
+    #[kani::proof]
+    #[kani::stub(std::fmt::format, no_format)]
+    #[kani::stub(core::str::from_utf8, any_utf8)]
+    #[kani::unwind(10)]
+    fn software_key_record_decode_len_5_6() {
+        assert!(!decode_at::<5>() && !decode_at::<6>());
+    }
+
+    /// As above for 8 and 9 bytes (full magic, then the version byte).
+    #[kani::proof]
+    #[kani::stub(std::fmt::format, no_format)]
+    #[kani::stub(core::str::from_utf8, any_utf8)]
+    #[kani::unwind(10)]
+    fn software_key_record_decode_magic_no_panic() {
+        assert!(!decode_at::<8>() && !decode_at::<9>());
+    }
+
+    /// As above for 10 and 11 bytes (algorithm id, then attrs).
+    #[kani::proof]
+    #[kani::stub(std::fmt::format, no_format)]
+    #[kani::stub(core::str::from_utf8, any_utf8)]
+    #[kani::unwind(10)]
+    fn software_key_record_decode_header_no_panic() {
+        assert!(!decode_at::<10>() && !decode_at::<11>());
+    }
+
+    /// As above at exactly 15 bytes: header + a free protector length
+    /// prefix (the first `read_vec` bound check). Longer fully-symbolic
+    /// inputs cost several minutes of CBMC per length.
+    #[kani::proof]
+    #[kani::stub(std::fmt::format, no_format)]
+    #[kani::stub(core::str::from_utf8, any_utf8)]
+    #[kani::unwind(10)]
+    fn software_key_record_decode_15b_no_panic() {
+        assert!(!decode_at::<15>());
+    }
+
+    /// Nonce equality without a 24-byte `memcmp` loop.
+    fn same_nonce(a: &[u8; NONCE_LEN], b: &[u8; NONCE_LEN]) -> bool {
+        let w =
+            |x: &[u8; NONCE_LEN], i: usize| u64::from_le_bytes(x[i..i + 8].try_into().expect("8"));
+        w(a, 0) == w(b, 0) && w(a, 8) == w(b, 8) && w(a, 16) == w(b, 16)
+    }
+
+    fn record_rt<const P: usize, const K: usize, const B: usize>() {
+        fn utf8<const L: usize>() -> String {
+            let b: [u8; L] = kani::any();
+            let s = String::from_utf8(b.to_vec());
+            kani::assume(s.is_ok());
+            s.unwrap_or_default()
+        }
+        let algorithm = match kani::any::<u8>() % 3 {
+            0 => Algorithm::Ed25519,
+            1 => Algorithm::Secp256k1,
+            _ => Algorithm::P256,
+        };
+        let r = EncryptedKeyRecord {
+            algorithm,
+            public_key: kani::any::<[u8; B]>().to_vec(),
+            keyid: utf8::<K>(),
+            attrs: attrs_from_bits(kani::any::<u8>() & 0b111).expect("valid bits"),
+            protector: utf8::<P>(),
+            nonce: kani::any(),
+            wrapped_dek: kani::any::<[u8; B]>().to_vec(),
+            ciphertext: kani::any::<[u8; B]>().to_vec(),
+        };
+        let bytes = r.encode().expect("small record encodes");
+        let back = EncryptedKeyRecord::decode(&bytes).expect("decodes");
+        assert!(back.algorithm == r.algorithm && back.attrs == r.attrs);
+        assert!(back.protector == r.protector && back.keyid == r.keyid);
+        assert!(back.public_key == r.public_key && back.wrapped_dek == r.wrapped_dek);
+        assert!(back.ciphertext == r.ciphertext && same_nonce(&back.nonce, &r.nonce));
+    }
+
+    /// Round-trip `decode(encode(r)) == r` for records with empty
+    /// protector/keyid/public-key/wrapped-DEK/ciphertext fields, any
+    /// algorithm (1..=3), any attrs, symbolic nonce. (Non-empty field
+    /// combinations exceed the per-harness budget; see the report.)
+    #[kani::proof]
+    #[kani::stub(std::fmt::format, no_format)]
+    // Largest loop: the 8-byte magic comparison.
+    #[kani::unwind(10)]
+    fn software_key_record_roundtrip() {
+        record_rt::<0, 0, 0>();
+    }
+
+    /// SPEC-KEYSTORE §6.1.1: "A decoder MUST reject id `0x04` inside a
+    /// `MKITKSV1` record." Holds in the default build; run with
+    /// `--features bls-threshold` to reproduce the discrepancy recorded
+    /// for that build (`algorithm_from_id(4)` is accepted there and
+    /// rejection is deferred to `decrypt`'s plaintext-length check).
+    #[kani::proof]
+    #[kani::stub(std::fmt::format, no_format)]
+    #[kani::unwind(26)]
+    fn software_key_record_rejects_algorithm_4() {
+        let mut bytes = EncryptedKeyRecord {
+            algorithm: Algorithm::Ed25519,
+            public_key: Vec::new(),
+            keyid: String::new(),
+            attrs: attrs_from_bits(kani::any::<u8>() & 0b111).expect("valid bits"),
+            protector: String::new(),
+            nonce: kani::any(),
+            wrapped_dek: Vec::new(),
+            ciphertext: Vec::new(),
+        }
+        .encode()
+        .expect("encodes");
+        bytes[9] = 0x04;
+        assert!(EncryptedKeyRecord::decode(&bytes).is_err());
+    }
+
+    /// Canary: the checker must falsify "a valid record with one
+    /// trailing byte still decodes" (§6.1.1 trailing-bytes rule), showing
+    /// the rejection path the no-panic harness relies on is live.
+    #[kani::proof]
+    #[kani::stub(std::fmt::format, no_format)]
+    #[kani::unwind(26)]
+    #[kani::should_panic]
+    fn software_key_record_canary_trailing_byte_accepted() {
+        let r = EncryptedKeyRecord {
+            algorithm: Algorithm::Ed25519,
+            public_key: Vec::new(),
+            keyid: String::new(),
+            attrs: attrs_from_bits(0).expect("valid bits"),
+            protector: String::new(),
+            nonce: [0; NONCE_LEN],
+            wrapped_dek: Vec::new(),
+            ciphertext: Vec::new(),
+        };
+        let mut bytes = r.encode().expect("encodes");
+        assert_eq!(bytes.len(), MIN_RECORD);
+        bytes.push(kani::any());
+        assert!(EncryptedKeyRecord::decode(&bytes).is_ok());
+    }
+}
