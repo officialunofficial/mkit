@@ -54,7 +54,8 @@ pub use error::{
 #[cfg(any(test, feature = "memory"))]
 pub use memory::{MemoryBlobStore, MemoryFault, MemoryKv, MemoryPackSink};
 pub use op::{
-    AuthzFacts, Commitment, GrantRef, OpKind, Operation, Procedure, RefUpdate, VerifiedAuth,
+    AuthzFacts, Commitment, Creation, GrantRef, OpKind, Operation, Procedure, RefUpdate,
+    VerifiedAuth,
 };
 pub use principal::Principal;
 pub use replay::{

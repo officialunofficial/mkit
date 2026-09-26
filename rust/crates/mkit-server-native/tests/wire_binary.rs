@@ -20,7 +20,9 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use mkit_server_conformance::wire::{Feature, Profile, WireAuth, WireTarget, run};
+use mkit_server_conformance::wire::{
+    D34_LIST_REFS_SKIPS, Feature, Profile, Verdict, WireAuth, WireTarget, run,
+};
 
 const BIN: &str = env!("CARGO_BIN_EXE_mkit-server");
 const MAX_PACK: u64 = 4 << 20;
@@ -109,7 +111,38 @@ async fn check(origin: &str, profile: Profile) {
         base_url: origin.parse().unwrap(),
         profile,
     };
-    common::judge(&run(&target, None).await, DIVERGENCES);
+    let report = run(&target, None).await;
+    common::judge(&report, DIVERGENCES);
+    let mut skipped: Vec<_> = report
+        .cases
+        .iter()
+        .filter_map(|case| match &case.verdict {
+            Verdict::Skip(reason) if reason.contains("d34 sharding") => Some(case.name),
+            _ => None,
+        })
+        .collect();
+    if target.profile.sharding_d34 {
+        let mut expected: Vec<_> = D34_LIST_REFS_SKIPS
+            .iter()
+            .copied()
+            .filter(|name| {
+                mkit_server_conformance::wire::CASES
+                    .iter()
+                    .find(|case| case.name == *name)
+                    .unwrap()
+                    .skip_reason(&target.profile)
+                    .is_none()
+            })
+            .collect();
+        skipped.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(
+            skipped, expected,
+            "D34 skips only its declared ListRefs cases"
+        );
+    } else {
+        assert!(skipped.is_empty());
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -142,6 +175,15 @@ async fn binary_fs_layout_bearer() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn binary_fs_sqlite_auth_v2() {
+    fs_sqlite_auth_v2("single").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn binary_fs_sqlite_auth_v2_d34() {
+    fs_sqlite_auth_v2("d34").await;
+}
+
+async fn fs_sqlite_auth_v2(sharding: &str) {
     let root = common::repo_root();
     let port = free_port();
     let origin = format!("http://127.0.0.1:{port}");
@@ -153,6 +195,8 @@ async fn binary_fs_sqlite_auth_v2() {
         &[
             "--meta",
             &meta,
+            "--sharding",
+            sharding,
             "--auth",
             "auth-v2",
             "--audience",
@@ -170,6 +214,7 @@ async fn binary_fs_sqlite_auth_v2() {
         true,
     );
     profile.features.insert(Feature::StrictGzipAuth);
+    profile.sharding_d34 = sharding == "d34";
     profile.features.insert(Feature::Timers);
     #[cfg(feature = "test-faults")]
     profile.features.insert(Feature::TestFaults);

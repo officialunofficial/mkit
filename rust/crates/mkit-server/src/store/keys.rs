@@ -17,6 +17,9 @@
 //! | replay expiry index | `px 00 <expires_at:be64> <scope:32>` | empty |
 //! | quota state | `q 00 <scope>` | codec `QuotaState` |
 //! | quota window index | `qx 00 <window_start:be64> <scope>` | empty |
+//! | namespace record (`Coordinator`) | `nr 00` | codec `NamespaceRecord` |
+//! | repo record (`Coordinator`) | `rr 00 <repo>` | codec `RepoRecord` |
+//! | repo-known marker (ref shard) | `rk 00 <repo>` | empty |
 //! | grant epoch | `e 00` | be64; absent means 0, never written as 0 |
 //! | timer (owned by `timers`) | `w 00 <due_at:be64> <kind:u8> <ref>` | codec per kind |
 //! | holder (`ContentShard`) | `h 00 <object:32> <ns> 00 <repo>` | empty |
@@ -28,9 +31,8 @@
 //! that adds it: tickets `t`, membership `m`, outbox `o` / `oq` / `os`,
 //! outbox backlog counter `oc`, relay high-water marks `rh`, object index
 //! `i`, leases `l`, published pointers `pp`, tombstones `tb`, verification
-//! cursors `vc`, epoch lease `el`, the coordinator's repo registry
-//! [`TAG_REPO_REGISTRY`] and the deployment's namespace list
-//! [`TAG_NAMESPACE_LIST`] (WP-1.22; see `Partition` for enumeration). A
+//! cursors `vc`, epoch lease `el`, and the deployment's namespace list
+//! [`TAG_NAMESPACE_LIST`] (WP-1.5; see `Partition` for enumeration). A
 //! new row adds its layout here, with a golden test.
 //!
 //! The `ContentIndex` classes (`h`, `g`, `b`, `c`) live only in
@@ -79,11 +81,15 @@ pub const TAG_BLOCK: &str = "b";
 /// `ContentIndex` object state (last change and holder count) tag.
 pub const TAG_OBJECT_STATE: &str = "c";
 
-/// Repo registry tag (reserved; WP-1.22 lays it out): one row per repo of
-/// the namespace, in its `Coordinator` partition. Bounded by repos, not
-/// refs.
+/// Namespace record tag: the namespace's creation time and configuration
+/// version, in its coordinator.
+pub const TAG_NAMESPACE_RECORD: &str = "nr";
+/// Repo-known marker tag: the repository is registered in its coordinator.
+pub const TAG_REPO_KNOWN: &str = "rk";
+/// Repo registry tag: one row per repo of the namespace, in its
+/// coordinator partition. Bounded by repos, not refs.
 pub const TAG_REPO_REGISTRY: &str = "rr";
-/// Namespace list tag (reserved; WP-1.22 lays it out): the deployment's
+/// Namespace list tag (reserved; WP-1.5 lays it out): the deployment's
 /// namespaces, needed only under `namespace_policy = any`. A backend MAY
 /// keep this list in its own metadata instead.
 pub const TAG_NAMESPACE_LIST: &str = "nl";
@@ -103,7 +109,6 @@ pub const RESERVED_TAGS: &[&str] = &[
     "pp",
     "vc",
     "el",
-    TAG_REPO_REGISTRY,
     TAG_NAMESPACE_LIST,
 ];
 
@@ -113,6 +118,12 @@ pub const RESERVED_TAGS: &[&str] = &[
 pub enum ParsedKey {
     /// `v 00`.
     LayoutVersion,
+    /// `nr 00`.
+    NamespaceRecord,
+    /// `rr 00 <repo>`.
+    RepoRecord(RepoName),
+    /// `rk 00 <repo>`.
+    RepoKnown(RepoName),
     /// `r 00 <repo> 00 <refname>`.
     Ref {
         /// Repository.
@@ -212,6 +223,24 @@ pub fn is_ref_key(key: &Key) -> bool {
 #[must_use]
 pub fn layout_version() -> Key {
     key(TAG_LAYOUT_VERSION, &[])
+}
+
+/// `nr 00`: the namespace coordinator record.
+#[must_use]
+pub fn namespace_record() -> Key {
+    key(TAG_NAMESPACE_RECORD, &[])
+}
+
+/// `rr 00 <repo>`: the repository coordinator record.
+#[must_use]
+pub fn repo_record(repo: &RepoName) -> Key {
+    key(TAG_REPO_REGISTRY, &[repo.as_str().as_bytes()])
+}
+
+/// `rk 00 <repo>`: the ref shard's repository registration marker.
+#[must_use]
+pub fn repo_known(repo: &RepoName) -> Key {
+    key(TAG_REPO_KNOWN, &[repo.as_str().as_bytes()])
 }
 
 /// `r 00 <repo> 00 <name>`.
@@ -344,8 +373,8 @@ fn hash(bytes: &[u8]) -> Option<Hash> {
     Hash::try_from(bytes).ok()
 }
 
-/// Decode a key of any M0 class; `None` for a malformed key or a reserved
-/// class.
+/// Decode a key of any laid-out class; `None` for a malformed key or a
+/// reserved class.
 #[must_use]
 pub fn parse(key: &Key) -> Option<ParsedKey> {
     let bytes = key.as_bytes();
@@ -355,6 +384,9 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
     Some(match tag {
         b"v" if body.is_empty() => ParsedKey::LayoutVersion,
         b"e" if body.is_empty() => ParsedKey::GrantEpoch,
+        b"nr" if body.is_empty() => ParsedKey::NamespaceRecord,
+        b"rr" => ParsedKey::RepoRecord(RepoName::new(text(body)?).ok()?),
+        b"rk" => ParsedKey::RepoKnown(RepoName::new(text(body)?).ok()?),
         b"r" => {
             let sep = body.iter().position(|&b| b == 0)?;
             ParsedKey::Ref {
@@ -445,6 +477,9 @@ mod tests {
             TAG_HOLD,
             TAG_BLOCK,
             TAG_OBJECT_STATE,
+            TAG_NAMESPACE_RECORD,
+            TAG_REPO_REGISTRY,
+            TAG_REPO_KNOWN,
         ];
         tags.extend_from_slice(RESERVED_TAGS);
         tags
@@ -456,6 +491,9 @@ mod tests {
         let q = format!("root\n{}", "ab".repeat(32));
         let cases: Vec<(Key, Vec<u8>)> = vec![
             (layout_version(), b"v\0".to_vec()),
+            (namespace_record(), b"nr\0".to_vec()),
+            (repo_record(&repo("room-a")), b"rr\0room-a".to_vec()),
+            (repo_known(&repo("room-a")), b"rk\0room-a".to_vec()),
             (
                 ref_key(&repo("room-a"), "refs/heads/main"),
                 b"r\0room-a\0refs/heads/main".to_vec(),
@@ -490,7 +528,7 @@ mod tests {
             assert_eq!(key.as_bytes(), golden.as_slice());
         }
         assert_eq!(LAYOUT_VERSION, 1);
-        // Reserved enumeration classes: their scan ranges are pinned now.
+        // Enumeration classes: their scan ranges remain pinned.
         for (tag, start, end) in [
             (TAG_REPO_REGISTRY, &b"rr\0"[..], &b"rr\x01"[..]),
             (TAG_NAMESPACE_LIST, b"nl\0", b"nl\x01"),
@@ -575,6 +613,9 @@ mod tests {
                 },
             ),
             (grant_epoch(), ParsedKey::GrantEpoch),
+            (namespace_record(), ParsedKey::NamespaceRecord),
+            (repo_record(&repo("a")), ParsedKey::RepoRecord(repo("a"))),
+            (repo_known(&repo("a")), ParsedKey::RepoKnown(repo("a"))),
             (
                 timer(3, 2, b"r"),
                 ParsedKey::Timer {
@@ -614,6 +655,9 @@ mod tests {
             b"no-terminator",
             b"c\0short",
             b"g\0short",
+            b"nr\0extra",
+            b"rr\0",
+            b"rk\0bad name",
         ] {
             assert_eq!(parse(&Key::new(bad.to_vec())), None);
         }

@@ -626,6 +626,47 @@ fn token_and_unsafe_are_mutually_exclusive() {
 }
 
 #[test]
+fn sharding_d34_requires_sqlite_and_defaults_to_single() {
+    use mkit_server::pipeline::Sharding;
+
+    let root = common::repo_root();
+    let base = [
+        "--listen",
+        "127.0.0.1:0",
+        "--repo-root",
+        common::s(root.path()),
+        "--unsafe-allow-any-peer",
+    ];
+    assert_eq!(
+        common::resolve_with(&base, &[]).unwrap().pipeline.sharding,
+        Sharding::Single
+    );
+    for meta in [&[][..], &["--meta", "fs-layout"][..]] {
+        let flags = [&base[..], meta, &["--sharding", "d34"]].concat();
+        let err = common::resolve_with(&flags, &[]).unwrap_err();
+        assert_eq!(err.code, exit::USAGE);
+        assert!(
+            err.message
+                .contains("--sharding d34 requires --meta sqlite:")
+        );
+        let out = Command::new(BIN)
+            .arg("serve")
+            .args(&flags)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(i32::from(exit::USAGE)));
+    }
+    let db = root.path().join("shards.sqlite3");
+    let meta = format!("sqlite:{}", common::s(&db));
+    for (flag, expected) in [("single", Sharding::Single), ("d34", Sharding::D34)] {
+        let flags = [&base[..], &["--meta", &meta, "--sharding", flag]].concat();
+        let cfg = common::resolve_with(&flags, &[]).unwrap();
+        assert_eq!(cfg.pipeline.sharding, expected);
+    }
+    assert!(!db.exists(), "config resolution performs no storage writes");
+}
+
+#[test]
 fn authv2_requires_sqlite_meta() {
     let root = common::repo_root();
     let base = [

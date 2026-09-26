@@ -270,6 +270,16 @@ pub struct AuthzFacts {
     pub owner: bool,
 }
 
+/// Namespace and repository creation facts for a write.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Creation {
+    /// Whether the namespace is new.
+    pub namespace: bool,
+    /// Whether the repository is new.
+    pub repo: bool,
+}
+
 /// A decoded request, ready for policy and storage.
 ///
 /// Non-exhaustive: build it with [`Operation::new`].
@@ -286,6 +296,10 @@ pub struct Operation {
     pub kind: OpKind,
     /// What the Authorizer established.
     pub authz: AuthzFacts,
+    /// Pre-admission observation: racing first writes may both observe creation.
+    pub creation: Creation,
+    /// Creation committed by this operation; only one racing writer creates a row.
+    pub created: Creation,
 }
 
 impl Operation {
@@ -303,6 +317,8 @@ impl Operation {
             auth,
             kind,
             authz: AuthzFacts::default(),
+            creation: Creation::default(),
+            created: Creation::default(),
         }
     }
 

@@ -228,6 +228,26 @@ pub struct WireTarget {
     pub profile: Profile,
 }
 
+/// Wire cases requiring successful `ListRefs` while D34's ref index is deferred.
+/// Rejected names and repository headers still run: their validation precedes routing.
+pub const D34_LIST_REFS_SKIPS: &[&str] = &[
+    "refs.non_refs_prefix_rejected",
+    "refs.list_prefix_stripped",
+    "refs.list_prefix_component_boundary",
+    "list.large_response_within_limit",
+    "repo.isolation_refs",
+    // The unsigned-read case probes successful ListRefs as well as ReadRef.
+    "auth.v2_reads_unsigned_ok",
+    // These timer directives tick through successful ListRefs.
+    "timers.directive_fires_due",
+    "timers.redelivery_is_idempotent",
+];
+
+fn sharding_skip_reason(case: &Case, profile: &Profile) -> Option<String> {
+    (profile.sharding_d34 && D34_LIST_REFS_SKIPS.contains(&case.name))
+        .then(|| "ListRefs under d34 sharding lands with WP-1.28".to_owned())
+}
+
 /// Run every case whose name contains `filter` (all when `None`) against
 /// `target`, in [`CASES`] order.
 pub async fn run(target: &WireTarget, filter: Option<&str>) -> Report {
@@ -254,7 +274,10 @@ pub async fn run(target: &WireTarget, filter: Option<&str>) -> Report {
         .iter()
         .filter(|c| filter.is_none_or(|f| c.name.contains(f)))
     {
-        let verdict = match case.skip_reason(&profile) {
+        let verdict = match case
+            .skip_reason(&profile)
+            .or_else(|| sharding_skip_reason(case, &profile))
+        {
             Some(reason) => Verdict::Skip(reason),
             None => run_case(case, Ctx::new(client.clone(), profile.clone(), case.name)).await,
         };
@@ -283,8 +306,8 @@ fn preamble(target: &WireTarget) -> Vec<String> {
     vec![
         format!("target {}", target.base_url),
         format!(
-            "profile auth={:?} milestone={:?} max_pack_bytes={} quota={:?}",
-            p.auth, p.milestone, p.max_pack_bytes, p.quota
+            "profile auth={:?} milestone={:?} max_pack_bytes={} quota={:?} sharding_d34={}",
+            p.auth, p.milestone, p.max_pack_bytes, p.quota, p.sharding_d34
         ),
         format!("features [{}]", features.join(", ")),
         format!(
@@ -299,6 +322,35 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
+
+    #[test]
+    fn d34_skips_only_explicit_successful_listings() {
+        let mut profile = Profile::new(WireAuth::None);
+        for case in CASES {
+            assert!(sharding_skip_reason(case, &profile).is_none());
+        }
+        profile.sharding_d34 = true;
+        let skipped: BTreeSet<_> = CASES
+            .iter()
+            .filter(|case| sharding_skip_reason(case, &profile).is_some())
+            .map(|case| case.name)
+            .collect();
+        assert_eq!(skipped, D34_LIST_REFS_SKIPS.iter().copied().collect());
+        assert_eq!(skipped.len(), 8);
+        for name in &skipped {
+            assert!(
+                name.contains("list")
+                    || matches!(
+                        *name,
+                        "refs.non_refs_prefix_rejected"
+                            | "repo.isolation_refs"
+                            | "auth.v2_reads_unsigned_ok"
+                            | "timers.directive_fires_due"
+                            | "timers.redelivery_is_idempotent"
+                    )
+            );
+        }
+    }
 
     #[test]
     fn at_least_45_cases_with_unique_documented_names() {

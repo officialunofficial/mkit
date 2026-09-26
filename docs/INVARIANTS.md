@@ -964,7 +964,29 @@ reuse its replay result, or learn whether it holds particular content.
 native `tests/repository_routing.rs` over memory and SQLite (including the
 same repository name in different namespaces and shared nonces), and the
 conformance `repo.*` wire cases. Namespace authorization is WP-1.5; pack
-membership is WP-1.10; the coordinator repository registry is WP-1.22.
+membership is WP-1.10; WP-1.22 moved existence to the coordinator repository registry.
+
+## Branch shards preserve atomic advances and registered repository state
+
+**Always:** D34 accepts only matching `refs/heads/<x>` and
+`refs/mkit/packmap/<x>` for `AdvanceRefs`, before storage or replay access,
+and commits their effects and replay state in one ref partition. Multi writes
+observe creation after replay lookup and commit coordinator registration only
+after authorization and admission allow them, before committing refs. A
+ref-shard repo-known marker is written with the ref batch.
+
+**Because:** a store batch cannot span partitions. Registration before refs
+makes a crash leave an empty registered repository; marker caching preserves
+the two-call steady write path. Admission observations can race, while
+`Operation::created` reports only creation actually committed by this write.
+
+**If violated:** advances lose atomicity, challenges create repository state,
+replays reach creation hooks, or committed refs become unreadable as an
+unregistered repository.
+
+**Enforced by:** pipeline pairing tests with the call-counting store and
+native `tests/d34_creation.rs` over memory and SQLite in both sharding
+modes; D34 mapping golden and property tests pin co-location and fixed fan-outs.
 
 ## Timer effects share the row's atomicity boundary
 

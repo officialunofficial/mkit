@@ -1,7 +1,10 @@
 //! Shard routing (PRD §5.3, D34; reconciliation R-29). Planners never
 //! hard-code a partition: they ask a [`ShardMap`]. M1 (WP-1.22) adds the
-//! D34 map and switches the Connect deployments to it; the planners stay
-//! the same.
+//! D34 map for configured Connect deployments; the planners stay the same.
+
+mod d34;
+
+pub use d34::D34Shards;
 
 use crate::repo::{NamespaceKey, RepoId};
 use crate::rt::{MaybeSend, MaybeSync};
@@ -17,8 +20,11 @@ pub trait ShardMap: MaybeSend + MaybeSync {
     /// The namespace coordinator: configuration and the grant epoch.
     fn coordinator(&self, ns: &NamespaceKey) -> Partition;
 
-    /// The ref-name index `ListRefs` reads.
-    fn ref_index(&self, repo: &RepoId) -> Partition;
+    /// The ref-name index shard that holds `ref_name`.
+    fn ref_index(&self, repo: &RepoId, ref_name: &str) -> Partition;
+
+    /// Every ref-name index shard of `repo`, in bucket order.
+    fn ref_index_partitions(&self, repo: &RepoId) -> Vec<Partition>;
 
     /// The membership shard of `pack`.
     fn membership(&self, repo: &RepoId, pack: &BlobKey) -> Partition;
@@ -38,8 +44,12 @@ impl ShardMap for SinglePartition {
         Partition::Namespace(ns.clone())
     }
 
-    fn ref_index(&self, repo: &RepoId) -> Partition {
+    fn ref_index(&self, repo: &RepoId, _ref_name: &str) -> Partition {
         Partition::Namespace(repo.namespace.clone())
+    }
+
+    fn ref_index_partitions(&self, repo: &RepoId) -> Vec<Partition> {
+        vec![Partition::Namespace(repo.namespace.clone())]
     }
 
     fn membership(&self, repo: &RepoId, _pack: &BlobKey) -> Partition {

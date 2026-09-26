@@ -203,11 +203,14 @@ pub const DEFAULT_DUPLICATE_RETRY_MS: u64 = 10_000;
 
 /// Everything the suite assumes about one server.
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)] // Independent server capabilities and runner settings.
 pub struct Profile {
     /// How transport RPCs authenticate.
     pub auth: WireAuth,
     /// `true`: head/packmap conflicts leave both refs untouched.
     pub atomic_advance: bool,
+    /// D34 ref shards: successful `ListRefs` is deferred to WP-1.28.
+    pub sharding_d34: bool,
     /// The largest pack the server accepts; the oversize case sends a
     /// header declaring one byte more.
     pub max_pack_bytes: u64,
@@ -248,6 +251,7 @@ impl Profile {
         let mut profile = Self {
             auth,
             atomic_advance: false,
+            sharding_d34: false,
             max_pack_bytes: mkit_core::protocol::PACK_BODY_LIMIT,
             quota: None,
             run_id: random_hex::<8>(),
@@ -348,6 +352,8 @@ pub struct ProfileSpec {
     pub random_signer: Option<bool>,
     /// The server commits `AdvanceRefs` atomically.
     pub atomic_advance: Option<bool>,
+    /// Metadata routing: `single` (default) or `d34`.
+    pub sharding: Option<String>,
     /// The server's pack cap.
     pub max_pack_bytes: Option<u64>,
     /// Declared quota: writes per window.
@@ -412,6 +418,7 @@ impl ProfileSpec {
             signer_seed_env,
             random_signer,
             atomic_advance: over.atomic_advance.or(self.atomic_advance),
+            sharding: over.sharding.or(self.sharding),
             max_pack_bytes: over.max_pack_bytes.or(self.max_pack_bytes),
             quota_ops: over.quota_ops.or(self.quota_ops),
             quota_bytes: over.quota_bytes.or(self.quota_bytes),
@@ -473,6 +480,11 @@ impl ProfileSpec {
         };
         let mut profile = Profile::new(auth);
         profile.atomic_advance = self.atomic_advance.unwrap_or(false);
+        profile.sharding_d34 = match self.sharding.as_deref().unwrap_or("single") {
+            "single" => false,
+            "d34" => true,
+            other => return Err(format!("unknown sharding `{other}` (single|d34)")),
+        };
         if let Some(max) = self.max_pack_bytes {
             profile.max_pack_bytes = max;
         }
@@ -525,6 +537,27 @@ impl ProfileSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sharding_profile_defaults_validates_and_overrides() {
+        let single = ProfileSpec::default().build(|_| None).unwrap();
+        assert!(!single.sharding_d34);
+        let file = ProfileSpec::from_toml("sharding = \"d34\"").unwrap();
+        assert!(file.clone().build(|_| None).unwrap().sharding_d34);
+        let flags = ProfileSpec {
+            sharding: Some("single".into()),
+            ..ProfileSpec::default()
+        };
+        assert!(!file.merge(flags).build(|_| None).unwrap().sharding_d34);
+        assert!(
+            ProfileSpec {
+                sharding: Some("other".into()),
+                ..ProfileSpec::default()
+            }
+            .build(|_| None)
+            .is_err()
+        );
+    }
 
     #[test]
     fn toml_and_flags_merge_flags_win() {

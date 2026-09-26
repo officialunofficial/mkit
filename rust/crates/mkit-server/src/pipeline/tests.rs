@@ -967,6 +967,7 @@ fn plan_cas_any_missing_match_on_snapshot() {
             charges: &[],
             grant: None,
             layout_version: false,
+            mark_repo_known: false,
             rejection: None,
         };
         let values: Vec<_> = current.map(|id| ref_value(HEAD, id)).into_iter().collect();
@@ -1016,6 +1017,7 @@ fn plan_conflict_writes_only_the_replay_record() {
         charges: &[],
         grant: None,
         layout_version: false,
+        mark_repo_known: false,
         rejection: None,
     };
     let values = [ref_value(PACKMAP, A), ref_value(HEAD, B)];
@@ -1080,6 +1082,7 @@ fn plan_quota_exhaustion_yields_no_batch() {
         charges: &charges,
         grant: None,
         layout_version: true,
+        mark_repo_known: false,
         rejection: None,
     };
     let used = QuotaState {
@@ -1127,6 +1130,7 @@ proptest! {
             charges: &charges,
             grant: None,
             layout_version: layout.is_some(),
+            mark_repo_known: false,
             rejection: None,
         };
         let mut values = Vec::new();
@@ -1241,7 +1245,7 @@ fn single_partition_maps_everything_to_the_namespace() {
     assert_eq!(shards.ref_shard(&repo, HEAD), expected);
     assert_eq!(shards.ref_shard(&repo, PACKMAP), expected);
     assert_eq!(shards.coordinator(&repo.namespace), expected);
-    assert_eq!(shards.ref_index(&repo), expected);
+    assert_eq!(shards.ref_index(&repo, HEAD), expected);
     assert_eq!(shards.membership(&repo, &PackKey::new(A)), expected);
 }
 
@@ -1737,6 +1741,7 @@ fn plan_signed_conflict_still_charges_quota() {
         charges: &charges,
         grant: None,
         layout_version: false,
+        mark_repo_known: false,
         rejection: None,
     };
     let values = [ref_value(HEAD, A)];
@@ -1789,6 +1794,7 @@ fn plan_prune_fits_the_batch_op_cap() {
         charges: &charges,
         grant: None,
         layout_version: true,
+        mark_repo_known: false,
         rejection: None,
     };
     let mut snap = snapshot(&req, &[]);
@@ -1834,6 +1840,7 @@ fn prune_sampling_is_deterministic_one_in_eight() {
         charges: &[],
         grant: None,
         layout_version: false,
+        mark_repo_known: false,
         rejection: None,
     };
     let sampled = (0u8..=255)
@@ -2065,4 +2072,158 @@ fn single_repository_header_rules_preserve_04_requests_and_fail_at_stage_zero() 
 
     assert_eq!(env.update(&signed, &u).unwrap(), UpdateRefResult::Committed);
     assert_eq!(env.read(HEAD), Some(A));
+}
+
+#[test]
+fn d34_advance_pairing_rejected_before_storage_and_replay() {
+    let clock = clock();
+    let mut config = cfg(authv2());
+    config.sharding = Sharding::D34;
+    let env = build(config, Spy::new(store(&clock)), Hooks::new(), clock);
+    let pairs = [
+        ("refs/heads/f", "refs/mkit/packmap/g"),
+        ("refs/heads/f", "refs/packmaps/f"),
+        ("refs/tags/t", "refs/mkit/packmap/t"),
+        ("refs/heads/F", "refs/mkit/packmap/f"),
+    ];
+    for (i, (head, packmap)) in pairs.into_iter().enumerate() {
+        let request = Req::signed(
+            &key(7),
+            Procedure::AdvanceRefs,
+            b"pair",
+            &nonce(u32::try_from(i).unwrap()),
+            T0,
+        );
+        let auth = env.auth(&request).unwrap();
+        let err = block_on(env.pipe.advance_refs(
+            &auth,
+            upd(head, Missing, A),
+            upd(packmap, Missing, B),
+        ))
+        .unwrap_err();
+        assert_eq!(err.code(), Code::InvalidArgument);
+        assert_eq!(
+            err.public_message(),
+            "AdvanceRefs pairs refs/heads/<x> with refs/mkit/packmap/<x> on this server"
+        );
+        assert_eq!(env.pipe.meta.calls(), 0);
+        assert!(env.batches().is_empty());
+        let replay = keys::replay(&auth.auth.as_ref().unwrap().replay_scope);
+        for name in [head, packmap] {
+            let p = env.pipe.shards.ref_shard(&repo(), name);
+            assert_eq!(now(env.pipe.meta.inner.get(&p, &replay)).unwrap(), None);
+            assert!(
+                now(env.pipe.meta.inner.scan(
+                    &p,
+                    &Key::default(),
+                    &Key::new(vec![0xff]),
+                    None,
+                    100
+                ))
+                .unwrap()
+                .entries
+                .is_empty()
+            );
+        }
+    }
+}
+
+#[test]
+fn d34_canonical_advance_commits_in_one_ref_partition() {
+    let clock = clock();
+    let partitions = Arc::new(Mutex::new(Vec::new()));
+    let recorded = partitions.clone();
+    let meta = Spy::new(store(&clock)).hook(move |_, p, batch| {
+        recorded.lock().unwrap().push((p.clone(), batch.clone()));
+    });
+    let mut config = cfg(authv2());
+    config.sharding = Sharding::D34;
+    let env = build(config, meta, Hooks::new(), clock);
+    let head = "refs/heads/f";
+    let packmap = "refs/mkit/packmap/f";
+    // Choose an unsampled replay scope so the store-call assertion pins the hot path.
+    let request = (0..100)
+        .map(|n| Req::signed(&key(7), Procedure::AdvanceRefs, b"canonical", &nonce(n), T0))
+        .find(|r| {
+            !env.auth(r).unwrap().auth.as_ref().unwrap().replay_scope[0]
+                .is_multiple_of(PRUNE_SAMPLE)
+        })
+        .unwrap();
+    assert_eq!(
+        env.advance(&request, &upd(head, Missing, A), &upd(packmap, Missing, B))
+            .unwrap(),
+        AdvanceOutcome::Committed
+    );
+    assert_eq!(env.pipe.meta.calls(), 2);
+    let applied = partitions.lock().unwrap();
+    let [(p, batch)] = applied.as_slice() else {
+        panic!("advance must use one batch")
+    };
+    let expected = Partition::Ref {
+        ns: repo().namespace,
+        repo: repo().name,
+        shard_ref: head.into(),
+    };
+    assert_eq!(p, &expected);
+    for (name, id) in [(head, A), (packmap, B)] {
+        assert!(batch.writes.contains(&Write::Put(
+            keys::ref_key(&repo().name, name),
+            codec::encode_ref_id(&id)
+        )));
+        assert_eq!(
+            now(read::read_ref(&env.pipe.meta.inner, p, &repo().name, name)).unwrap(),
+            Some(id)
+        );
+    }
+    assert!(
+        now(env.pipe.meta.inner.get(
+            p,
+            &keys::replay(&env.auth(&request).unwrap().auth.unwrap().replay_scope)
+        ))
+        .unwrap()
+        .is_some()
+    );
+    // Replay lookup returns before any hooks or extra store calls.
+    let before = env.pipe.meta.calls();
+    assert_eq!(
+        env.advance(&request, &upd(head, Missing, A), &upd(packmap, Missing, B))
+            .unwrap(),
+        AdvanceOutcome::Committed
+    );
+    assert_eq!(env.pipe.meta.calls() - before, 1);
+}
+
+#[test]
+fn single_advance_preserves_noncanonical_served_pairing() {
+    let env = env(AuthMode::Open);
+    assert_eq!(
+        env.advance(
+            &Req::unsigned(Procedure::AdvanceRefs),
+            &upd("refs/heads/f", Missing, A),
+            &upd("refs/packmaps/f", Missing, B)
+        )
+        .unwrap(),
+        AdvanceOutcome::Committed
+    );
+    assert_eq!(env.batches().len(), 1);
+    assert_eq!(
+        now(read::read_ref(
+            &env.pipe.meta.inner,
+            &ns(),
+            &repo().name,
+            "refs/heads/f"
+        ))
+        .unwrap(),
+        Some(A)
+    );
+    assert_eq!(
+        now(read::read_ref(
+            &env.pipe.meta.inner,
+            &ns(),
+            &repo().name,
+            "refs/packmaps/f"
+        ))
+        .unwrap(),
+        Some(B)
+    );
 }

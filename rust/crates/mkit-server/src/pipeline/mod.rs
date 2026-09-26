@@ -19,6 +19,7 @@
 //! advance) and `mkit serve` over ssh (`TransportIdentity`).
 
 mod auth;
+mod coordinator;
 mod download;
 #[cfg(feature = "test-faults")]
 mod faults;
@@ -73,7 +74,7 @@ use plan::{
     MAX_REPLAN, PRUNE_LIMIT, Plan, PlanClock, Planned, Snapshot, WriteKind, WriteRequest,
     plan_write, prune_sampled,
 };
-pub use shard::{ShardMap, SinglePartition};
+pub use shard::{D34Shards, ShardMap, SinglePartition};
 pub use upload::{UploadMode, UploadSession};
 
 /// Call the installed fault hooks at a fault point, returning early on
@@ -111,12 +112,25 @@ pub const METRIC_PARTITION_FULL: &str = "mkit_server_partition_full";
 /// header; label `reason` (`name`, `reserved`, `value`).
 pub const METRIC_HEADER_DROPPED: &str = "mkit_server_error_header_dropped_total";
 
+/// Deployment routing for repository state.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Sharding {
+    /// All rows of a namespace share one partition.
+    #[default]
+    Single,
+    /// Coordinator and per-branch ref shards (D34).
+    D34,
+}
+
 /// A deployment's pipeline settings. Start from [`PipelineConfig::new`].
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct PipelineConfig {
     /// How requests map to a repository (M0: `Single`).
     pub addressing: Addressing,
+    /// How metadata partitions are routed.
+    pub sharding: Sharding,
     /// How requests authenticate.
     pub auth: AuthMode,
     /// Upload caps, supplied by the binding (used by M0-05b).
@@ -124,7 +138,8 @@ pub struct PipelineConfig {
     /// Largest download chunk (used by M0-05b).
     pub download_chunk_max: usize,
     /// The default write quota: `Some(DEFAULT_WRITE_QUOTA)` for auth v2
-    /// deployments (`vcs-worker` parity).
+    /// deployments (`vcs-worker` parity). Under D34 it counts per ref shard;
+    /// the namespace aggregate lands with WP-1.26.
     pub write_quota: Option<QuotaLimits>,
     /// `ListRefs` scan page size, at least 1.
     pub list_page_limit: u32,
@@ -141,6 +156,7 @@ impl PipelineConfig {
         let write_quota = matches!(auth, AuthMode::AuthV2(_)).then_some(DEFAULT_WRITE_QUOTA);
         Self {
             addressing,
+            sharding: Sharding::Single,
             auth,
             upload_limits,
             download_chunk_max: DOWNLOAD_CHUNK_MAX,
@@ -255,7 +271,7 @@ fn ms(ms: i64) -> u64 {
 }
 
 impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
-    /// A pipeline over `blobs` and `meta`, routed by [`SinglePartition`].
+    /// A pipeline over `blobs` and `meta`, routed by `cfg.sharding`.
     ///
     /// # Errors
     /// `invalid_argument` for a configuration the store cannot serve: auth
@@ -276,6 +292,10 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let full = caps.atomic_multi_key && caps.key_classes == KeyClasses::All;
         let refused = if matches!(cfg.auth, AuthMode::AuthV2(_)) && !full {
             "auth v2 needs every key class and atomic multi-key batches"
+        } else if (cfg.sharding == Sharding::D34 || matches!(cfg.addressing, Addressing::Multi(_)))
+            && !full
+        {
+            "sharded or multi-repository routing needs every key class and atomic multi-key batches"
         } else if !caps.atomic_multi_key && caps.implicit_layout_version.is_none() {
             "a store without atomic batches must report its layout version"
         } else if caps
@@ -291,11 +311,15 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         if !refused.is_empty() {
             return Err(ServerError::invalid_argument(refused));
         }
+        let shards: Arc<dyn ShardMap> = match cfg.sharding {
+            Sharding::Single => Arc::new(SinglePartition),
+            Sharding::D34 => Arc::new(D34Shards),
+        };
         Ok(Self {
             blobs,
             meta,
             hooks,
-            shards: Arc::new(SinglePartition),
+            shards,
             cfg,
             clock,
             metrics,
@@ -324,13 +348,6 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             Some(hooks) => hooks.at_boxed(point, op, a.test_directives()).await,
             None => Ok(()),
         }
-    }
-
-    /// Route partitions with `shards` instead of [`SinglePartition`].
-    #[must_use]
-    pub fn with_shards(mut self, shards: Arc<dyn ShardMap>) -> Self {
-        self.shards = shards;
-        self
     }
 
     /// Run the writes to one partition one at a time in this process: each
@@ -454,6 +471,18 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             let op = self.identify(a, kind)?;
             self.authorize(&op).await?;
             self.require_repository(&op.repo).await?;
+            let partitions = self.shards.ref_index_partitions(&op.repo);
+            if partitions.len() != 1 {
+                // TODO(WP-1.28): read the eventually consistent ref-name index.
+                return Err(ServerError::new(
+                    crate::Code::Unimplemented,
+                    "ListRefs under d34 sharding lands with WP-1.28",
+                ));
+            }
+            let p = partitions
+                .into_iter()
+                .next()
+                .ok_or_else(|| internal("missing ref index"))?;
             #[cfg(feature = "test-faults")]
             faults::run_timers(
                 a.test_directives(),
@@ -464,7 +493,6 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 ms(self.clock.now_ms().saturating_add(a.business_skew_ms)),
             )
             .await?;
-            let p = self.shards.ref_index(&op.repo);
             let scan = refs::list_scan_prefix(prefix);
             let (mut out, mut after) = (Vec::new(), None);
             loop {
@@ -548,6 +576,15 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         self.observe(a, async {
             check_ref_name(&head.name)?;
             check_ref_name(&packmap.name)?;
+            if self.cfg.sharding == Sharding::D34 {
+                let head_branch = head.name.strip_prefix("refs/heads/");
+                let packmap_branch = packmap.name.strip_prefix(mkit_core::refs::PACKMAP_REF_PREFIX);
+                if head_branch.is_none() || head_branch != packmap_branch {
+                    return Err(ServerError::invalid_argument(
+                        "AdvanceRefs pairs refs/heads/<x> with refs/mkit/packmap/<x> on this server",
+                    ));
+                }
+            }
             match self.write(a, OpKind::AdvanceRefs { head, packmap }).await? {
                 StoredResult::AdvanceRefs(outcome) => Ok(outcome),
                 other => Err(stored_mismatch(&other)),
@@ -728,9 +765,11 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         if let Some(stored) = Self::replay_lookup(&op, ahead.as_ref())? {
             return Ok(stored);
         }
+        op.creation = self.creation_facts(&op, ahead.as_ref()).await?;
         op.authz = self.authorize(&op).await?;
         fault!(self, AfterAuthorize, &op, a);
         let charges = self.admit(AdmissionInput::new(&op)).await?;
+        op.created = self.commit_creation(&op, a.business_skew_ms).await?;
         self.pre_receive(&op).await?;
         let write = (kind, refs.as_slice(), charges.as_slice());
         self.plan_and_apply(&op, a, &p, write, ahead).await
@@ -757,19 +796,20 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         Ok(Operation::new(repo, principal, a.auth.clone(), kind))
     }
 
-    /// Multi reads require at least one ref row in this repository's index.
+    /// Multi reads require a repository registered in the namespace coordinator.
     async fn require_repository(&self, repo: &crate::repo::RepoId) -> Result<(), ServerError> {
         if matches!(self.cfg.addressing, Addressing::Multi(_)) {
-            // TODO(WP-1.22): replace with the coordinator repo registry (rr)
-            let p = self.shards.ref_index(repo);
-            let (start, end) = keys::ref_prefix_range(&repo.name, "");
-            let page = self
+            let p = self.shards.coordinator(&repo.namespace);
+            let value = self
                 .meta
-                .scan(&p, &start, &end, None, 1)
+                .get(&p, &keys::repo_record(&repo.name))
                 .await
                 .map_err(meta_error)?;
-            if page.entries.is_empty() {
-                return Err(ServerError::not_found("repository not found"));
+            match value {
+                Some(value) => {
+                    codec::decode_repo_record(&value).map_err(meta_error)?;
+                }
+                None => return Err(ServerError::not_found("repository not found")),
             }
         }
         Ok(())
@@ -831,8 +871,12 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         if caps.implicit_layout_version.is_none() {
             wanted.push(keys::layout_version());
         }
+        if matches!(self.cfg.addressing, Addressing::Multi(_)) {
+            wanted.push(keys::repo_known(&op.repo.name));
+        }
         if let Some(auth) = &op.auth {
             wanted.push(keys::replay(&auth.replay_scope));
+            // TODO(WP-1.25): propagate the coordinator epoch through leases.
             wanted.push(keys::grant_epoch());
             if self.cfg.write_quota.is_some() {
                 let scope = QuotaScope::for_signer(&op.repo.namespace, &auth.signer);
@@ -927,6 +971,10 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             charges,
             grant: op.authz.grant,
             layout_version: caps.implicit_layout_version.is_none(),
+            mark_repo_known: matches!(self.cfg.addressing, Addressing::Multi(_))
+                && ahead
+                    .as_ref()
+                    .is_none_or(|snap| snap.get(&keys::repo_known(&op.repo.name)).is_none()),
             rejection: None,
         };
         if caps.atomic_multi_key || replay.is_some() || !charges.is_empty() {

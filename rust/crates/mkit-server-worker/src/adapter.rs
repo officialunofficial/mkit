@@ -116,6 +116,37 @@ impl core::fmt::Display for ConfigError {
 impl std::error::Error for ConfigError {}
 
 impl WorkerConfig {
+    /// Build the deployment pipeline configuration without store access.
+    /// Workers keep Single routing until DO shard dispatch lands (WP-1.8).
+    #[cfg(any(target_arch = "wasm32", test))]
+    fn pipeline_config(&self) -> Result<mkit_server::pipeline::PipelineConfig, ConfigError> {
+        use mkit_server::auth_v2::AuthV2Config;
+        use mkit_server::pipeline::{AuthMode, PipelineConfig, Sharding};
+        use mkit_server::upload::UploadLimits;
+        use mkit_server::{Addressing, NamespaceKey, RepoId, RepoName};
+
+        let bad = |e: &dyn core::fmt::Display| ConfigError(e.to_string());
+        let auth = AuthV2Config::new(&self.audience, &self.repository).map_err(|e| bad(&e))?;
+        let repo = RepoId {
+            namespace: NamespaceKey::deployment_default(),
+            name: RepoName::new(&self.repository).map_err(|e| bad(&e))?,
+        };
+        let limits = UploadLimits {
+            max_total_bytes: MAX_PACK_BYTES,
+            // vcs-worker had no chunk cap; the body cap bounds the count.
+            max_chunks: u32::MAX,
+        };
+        let mut config =
+            PipelineConfig::new(Addressing::Single { repo }, AuthMode::AuthV2(auth), limits);
+        // TODO(WP-1.8): route D34 partitions through DO shard dispatch.
+        config.sharding = Sharding::Single;
+        #[cfg(feature = "test-faults")]
+        if let Some(quota) = self.test_quota {
+            config.write_quota = Some(quota);
+        }
+        Ok(config)
+    }
+
     /// The settings from `var`, which looks a Worker var up by name.
     ///
     /// # Errors
@@ -512,10 +543,9 @@ pub use glue::{fetch, ns_object, serve};
 mod glue {
     use std::sync::Arc;
 
-    use mkit_server::auth_v2::{AuthV2Config, CORS_ALLOW_HEADERS};
-    use mkit_server::pipeline::{AuthMode, Hooks, Pipeline, PipelineConfig};
-    use mkit_server::upload::UploadLimits;
-    use mkit_server::{Addressing, NamespaceKey, NoopMetrics, RepoId, RepoName};
+    use mkit_server::NoopMetrics;
+    use mkit_server::auth_v2::CORS_ALLOW_HEADERS;
+    use mkit_server::pipeline::{Hooks, Pipeline};
     use mkit_worker_common::adapter::{
         copy_headers_filtered, copy_response_headers, is_deadline_header, respond_streamed,
         to_http_method,
@@ -549,24 +579,7 @@ mod glue {
     /// The pipeline for `cfg` over `env`'s bindings.
     fn pipeline(env: &Env, cfg: &WorkerConfig) -> Result<WorkerPipeline, ConfigError> {
         let bad = |e: &dyn core::fmt::Display| ConfigError(e.to_string());
-        let auth = AuthV2Config::new(cfg.audience.as_str(), cfg.repository.as_str())
-            .map_err(|e| bad(&e))?;
-        let repo = RepoId {
-            namespace: NamespaceKey::deployment_default(),
-            name: RepoName::new(cfg.repository.as_str()).map_err(|e| bad(&e))?,
-        };
-        let limits = UploadLimits {
-            max_total_bytes: MAX_PACK_BYTES,
-            // vcs-worker had no chunk cap; the body cap bounds the count.
-            max_chunks: u32::MAX,
-        };
-        #[allow(unused_mut)]
-        let mut config =
-            PipelineConfig::new(Addressing::Single { repo }, AuthMode::AuthV2(auth), limits);
-        #[cfg(feature = "test-faults")]
-        if let Some(quota) = cfg.test_quota {
-            config.write_quota = Some(quota);
-        }
+        let config = cfg.pipeline_config()?;
         let blobs = R2BlobStore::new(
             EnvBucket::new(env.clone(), cfg.blob_binding),
             PACKS_KEYSPACE,
@@ -791,6 +804,19 @@ mod tests {
         assert_eq!(
             WorkerConfig::from_vars(vars(&[(AUDIENCE_VAR, "https://vcs.example")])).unwrap_err(),
             ConfigError("AUTH_REPOSITORY is not configured".into())
+        );
+    }
+
+    #[test]
+    fn deployment_pipeline_keeps_single_sharding_until_do_dispatch() {
+        let cfg = WorkerConfig::from_vars(vars(&[
+            (AUDIENCE_VAR, "https://vcs.example"),
+            (REPOSITORY_VAR, "default"),
+        ]))
+        .unwrap();
+        assert_eq!(
+            cfg.pipeline_config().unwrap().sharding,
+            mkit_server::pipeline::Sharding::Single
         );
     }
 
