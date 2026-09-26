@@ -282,7 +282,8 @@ See [`SSH-SECURITY.md`](../SSH-SECURITY.md) for the full trust model.
 
 The `mkit serve` server enforces per-connection budgets to bound a
 misbehaving or malicious client (see
-[`mkit-cli/src/commands/serve/mod.rs`](../../rust/crates/mkit-cli/src/commands/serve/mod.rs)):
+[`mkit-server/src/ssh/budget.rs`](../../rust/crates/mkit-server/src/ssh/budget.rs),
+the session `mkit serve` runs since it moved onto `mkit-server`):
 
 - `MAX_FRAMES_PER_CONN = 10_000` &mdash; hard cap on frames after `Hello`.
 - `MAX_BYTES_PER_CONN  = 1 GiB`  &mdash; cap on cumulative request payload bytes.
@@ -294,6 +295,17 @@ Nested `UploadPack` chunk drains enforce the same 1 GiB byte ceiling on
 the declared upload length and additionally cap the number of chunk
 frames at `MAX_FRAMES_PER_CONN`, so a client cannot bypass the outer
 frame loop by streaming unbounded chunks inside one upload request.
+
+The budgets bound a client that keeps sending; an idle timeout bounds one
+that stops. `mkit serve` ends a session after `--idle-timeout-secs`
+seconds (default 60; `0` disables it) in which no byte arrives from the
+client, whether before `Hello`, between requests or inside an upload
+(whose partial pack is discarded). It answers, best effort, with
+`Error{ ERROR_CODE_INVALID_REQUEST, "idle timeout" }` and exits with
+`exit::PROTOCOL_ERROR`. The timer counts only silence: an upload that is
+still arriving never trips it, however long one chunk frame takes, and
+time the server spends answering is not counted. See
+[`SSH-SECURITY.md`](../SSH-SECURITY.md) §4.
 
 The encrypted-transport listener (`mkit-server serve --listen-enc`,
 [`mkit-server-native/src/enc.rs`](../../rust/crates/mkit-server-native/src/enc.rs))

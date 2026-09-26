@@ -1277,10 +1277,22 @@ The first time either alias is set in a repo that has never set
 (or the other alias), a one-time warning is printed to stderr pointing
 at
 .Cm user.identity .
-.It Cm serve Ar path
+.It Cm serve Oo Fl Fl idle-timeout-secs Ar secs Oc Ar path
 Internal subcommand: act as the server end of an
 .Cm mkit+ssh://
 transport, speaking the SSH-frame protocol on stdin and stdout.
+.Fl Fl idle-timeout-secs
+.Pq default 60 ; 0 disables it
+ends the session, with exit status 76, after that many seconds without a
+byte from the client; an upload that keeps sending never trips it.
+Only refs named under
+.Pa refs/
+are served; a ref file an older
+.Nm
+.Cm serve
+left at the root of
+.Ar path
+is reported on stderr at startup and left in place.
 It has no network listener: the self-hosted
 .Cm mkit+https://
 and

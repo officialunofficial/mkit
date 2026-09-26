@@ -1082,14 +1082,33 @@ Remote / sync:
   delta graph. Progress shows only when stderr is a tty; `-q`/`--quiet`
   forces it off, and `MKIT_PROGRESS=always`/`never` overrides the
   tty-detection explicitly (mirrors `NO_COLOR`/`CLICOLOR_FORCE`).
-- `mkit serve <path>` &mdash; internal SSH transport server. Speaks the
-  mkit-rpc SSH framing on stdin/stdout (its only mode). Holds a shared
-  `serve.lock` in `<path>/.mkit` for as long as the process is alive
-  (any number of concurrent `serve` processes may hold it at once); a
-  local worktree-mutating command or `gc` run against that same path
-  while it is held prints a warning to stderr and proceeds &mdash; it is not
-  refused, and this is detection, not coordination (SPEC-CONCURRENCY
-  §3.1).
+- `mkit serve [--idle-timeout-secs <secs>] <path>` &mdash; internal SSH
+  transport server. Speaks the mkit-rpc SSH framing on stdin/stdout (its
+  only mode). Holds a shared `serve.lock` in `<path>/.mkit` for as long as
+  the process is alive (any number of concurrent `serve` processes may
+  hold it at once); a local worktree-mutating command or `gc` run against
+  that same path while it is held prints a warning to stderr and proceeds
+  &mdash; it is not refused, and this is detection, not coordination
+  (SPEC-CONCURRENCY §3.1).
+
+  `--idle-timeout-secs <secs>` (default `60`; `0` disables it) ends the
+  session after that long without a byte from the client, whether before
+  the handshake, between requests or in the middle of an upload (whose
+  partial pack is discarded): it answers `Error{INVALID_REQUEST, "idle
+  timeout"}` and exits 76. An upload that keeps sending never trips it,
+  however slow. See [SSH-SECURITY.md](SSH-SECURITY.md) §4.
+
+  Refs are served only under `refs/` (SPEC-REFS §2). Older `mkit serve`
+  versions stored any valid name as a file at the root (`main` as
+  `<path>/main`); such a name is now refused by name ("ref name must start
+  with refs/"), and at startup `mkit serve` warns on stderr (which ssh
+  shows the client) about ref files it finds outside `refs/`, leaving them
+  in place: move each under `refs/` (e.g. `refs/heads/main`) or delete it.
+  At startup, when no other `mkit serve` or `mkit-server` is serving the
+  root, it also removes upload temp files (`packs/.<hex>.tmp.<pid>.<seq>`)
+  that a crashed server left, once they are an hour old. A root served by
+  `mkit-server --meta sqlite:` (marked `.mkit/server-meta`) is refused
+  (exit 78): its refs live in the database.
 
   `mkit serve` has no network listener. The self-hosted `mkit+https://`
   remote and the `mkit+enc://` listener are the separate `mkit-server`

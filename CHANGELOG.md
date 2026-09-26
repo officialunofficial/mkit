@@ -19,6 +19,42 @@ train).
 
 ### Changed
 
+- *(cli)* `mkit serve <path>` runs on `mkit-server`: its engine is
+  `mkit_server::ssh::serve_session` over the pipeline with the `.mkit`
+  layout stores (`FsBlobStore`, `FsLayoutStore`), driven by
+  `futures::executor::block_on`, so the CLI still builds no async
+  runtime. Its own protocol code is gone. The wire is unchanged: the two
+  golden sessions captured from 0.4.2 (`rust/tests/golden/ssh-serve/`)
+  reproduce byte for byte through the binary. `mkit-cli` now depends on
+  `mkit-server` (features `ssh` and `fs` only), which is first published
+  with the 0.5 release. **Behavior changes:**
+  - **Idle timeout.** `mkit serve` ends a session after
+    `--idle-timeout-secs` (default 60; `0` disables it) without a byte
+    from the client, answering `Error{INVALID_REQUEST, "idle timeout"}`
+    and exiting 76 (SSH-SECURITY §4, §7: slow-loris is now mitigated). An
+    upload that keeps sending never trips it; one that stops midway is
+    discarded.
+  - **Refs only under `refs/`.** A ref name outside `refs/` (`main`,
+    `heads/main`) that `mkit serve` used to store at `<root>/<name>` is
+    refused by name ("ref name must start with refs/"); at startup
+    `mkit serve` warns on stderr about such ref files it finds under the
+    root and leaves them in place. See the `mkit-server` entry below.
+  - **Crashed uploads are swept.** At startup, when no other
+    `mkit serve` or `mkit-server` holds `serve.lock`, upload temp files
+    (`packs/.<hex>.tmp.<pid>.<seq>`) at least an hour old are removed.
+  - A root marked for `mkit-server --meta sqlite:` is refused (exit 78).
+  The default CLI graph is checked server-free by the new
+  `scripts/check-cli-baseline.sh` (in `just ci-scripts`; INVARIANTS "The
+  default `mkit` CLI is server-free").
+- *(server)* The pipeline serves only ref names under `refs/`
+  (`mkit_server::refs::is_served_ref_name`; SPEC-REFS §2), on every
+  binding: `ReadRef`, `UpdateRef` and `AdvanceRefs` refuse any other
+  grammar-valid name with `invalid_argument` "ref name must start with
+  refs/" (`INVALID_REQUEST` on the ssh wire), where they used to store it
+  (in `.mkit/server/rows/` on the `.mkit` layout, invisible to the CLI).
+  `ListRefs` prefixes are unrestricted; one outside `refs/` lists nothing.
+  New `FsBlobStore::sweep_stale_uploads` and
+  `FsLayoutStore::legacy_ref_files`. **SemVer:** unreleased API.
 - *(transport-file)* Every ref write through `FileTransport`
   (`update_ref`/`write_ref`, and `LockedRefs::update_ref`, `delete_ref`,
   `write_file`, `remove_file`) refuses a root carrying
@@ -334,7 +370,8 @@ train).
   `<root>/main`; the FS store keeps such names in the server-side
   `.mkit/server/rows/` store instead, invisible to the CLI and
   `FileTransport`, so a name like `packs/<hex>` can no longer overwrite a
-  pack (whether the pipeline rejects them outright is M0-13's call).
+  pack. (The pipeline now refuses such names outright; see the
+  `mkit-server` `refs/` entry above.)
 
 - *(transport-file)* `FileTransport::with_ref_lock` runs a closure under
   the ref lock with a `LockedRefs` handle (`read_ref`, `update_ref`,

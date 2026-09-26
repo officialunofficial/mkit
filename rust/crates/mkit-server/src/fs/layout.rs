@@ -26,8 +26,9 @@ use crate::store::{
 /// through `FileTransport`. Never removed automatically.
 pub const META_MARKER: &str = mkit_transport_file::SERVER_META_MARKER;
 
-/// The directory `FileTransport` keeps refs in, as a ref-name prefix.
-const REFS_PREFIX: &str = "refs/";
+/// The directory `FileTransport` keeps refs in, as a ref-name prefix: the
+/// names the pipeline serves.
+const REFS_PREFIX: &str = refs::SERVED_REFS_PREFIX;
 
 /// Where the ref-class rows whose name is not a `refs/` ref name live,
 /// relative to the root: out of reach of every ref name (a ref name
@@ -65,10 +66,12 @@ enum Slot<'k> {
 /// delete removes the directories it leaves empty.
 ///
 /// The ref class also allows names that are not `refs/` ref names, with
-/// any value. The pipeline never writes one; they live in row files under
-/// `.mkit/server/rows/`, written under the same lock and invisible to the
-/// CLI and `FileTransport` (so a name like `packs/<hex>` can never
-/// overwrite a pack).
+/// any value. The pipeline never writes one (it serves only `refs/` names,
+/// R-86); they live in row files under `.mkit/server/rows/`, written under
+/// the same lock and invisible to the CLI and `FileTransport` (so a name
+/// like `packs/<hex>` can never overwrite a pack). Ref files an older
+/// `mkit serve` wrote outside `refs/` are not served;
+/// [`FsLayoutStore::legacy_ref_files`] finds them.
 ///
 /// `apply` takes the ref lock, reads the store clock (for a
 /// [`Precondition::NotAfter`]), checks every precondition and writes, all
@@ -76,9 +79,11 @@ enum Slot<'k> {
 /// every write is one atomic rename. A full disk or quota is
 /// [`StoreError::Full`], except for a delete-only batch (rule 7).
 ///
-/// TODO(M0-13): a process that crashes mid-write leaves its temp file
-/// (`.<file>.tmp.<pid>.<seq>`, next to the ref or row file) behind;
-/// nothing sweeps them yet. Scans skip them.
+/// A process that crashes mid-write leaves its temp file
+/// (`.<file>.tmp.<pid>.<seq>`, next to the ref or row file) behind. It is
+/// at most a ref wire or a row long; scans skip it, and nothing sweeps it
+/// (the pack temp files a crashed upload leaves are swept, see
+/// `FsBlobStore::sweep_stale_uploads`).
 ///
 /// It is the permanent metadata store of the server-free ssh path
 /// (reconciliation R-13), with `SinglePartition` routing.
@@ -163,6 +168,70 @@ impl FsLayoutStore {
     #[must_use]
     pub fn root(&self) -> &Path {
         self.tx.root()
+    }
+
+    /// Ref files outside `refs/` that an older `mkit serve` wrote: it
+    /// stored a ref named `main` as `<root>/main`. The pipeline serves only
+    /// `refs/` names (R-86), so such a ref is refused by name on a read or
+    /// write and missing from every listing; a server reports these files
+    /// so the operator can move them under `refs/` (or delete them).
+    ///
+    /// Walks the root, skipping `refs/`, `packs/` and every entry whose name
+    /// starts with `.` (`.mkit/` among them; no ref name component can),
+    /// and reports each regular file whose path is a ref name (the
+    /// SPEC-REFS §3 grammar) and whose content is a ref wire, sorted. The
+    /// walk stops after `max_entries` directory entries, so a large
+    /// worktree under the root is checked only in part. Never modifies
+    /// anything.
+    ///
+    /// # Errors
+    /// I/O listing the root itself; an unreadable entry below it is
+    /// skipped.
+    pub fn legacy_ref_files(&self, max_entries: usize) -> std::io::Result<Vec<String>> {
+        let root = self.root();
+        let mut found = Vec::new();
+        let mut seen = 0usize;
+        let mut dirs = vec![(root.to_path_buf(), String::new())];
+        let mut first = true;
+        while let Some((dir, prefix)) = dirs.pop() {
+            let entries = match fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                Err(e) if first => return Err(e),
+                Err(_) => continue,
+            };
+            first = false;
+            for entry in entries {
+                seen += 1;
+                if seen > max_entries {
+                    found.sort();
+                    return Ok(found);
+                }
+                let Ok(entry) = entry else { continue };
+                let file_name = entry.file_name();
+                let Some(file_name) = file_name.to_str() else {
+                    continue;
+                };
+                let top_skip = prefix.is_empty() && matches!(file_name, "refs" | "packs");
+                if top_skip || file_name.starts_with('.') {
+                    continue;
+                }
+                let name = format!("{prefix}{file_name}");
+                // `DirEntry::file_type` does not follow a symlink.
+                let Ok(kind) = entry.file_type() else {
+                    continue;
+                };
+                if kind.is_dir() {
+                    dirs.push((entry.path(), format!("{name}/")));
+                } else if kind.is_file()
+                    && mkit_core::refs::validate_ref_name_grammar(&name)
+                    && holds_ref_wire(&entry.path())
+                {
+                    found.push(name);
+                }
+            }
+        }
+        found.sort();
+        Ok(found)
     }
 
     fn check_partition(&self, p: &Partition) -> Result<(), StoreError> {
@@ -368,9 +437,23 @@ impl FsLayoutStore {
     }
 }
 
+/// Whether the file at `path` holds a ref wire (64 lowercase hex digits,
+/// optionally followed by whitespace), reading at most a few bytes more.
+fn holds_ref_wire(path: &Path) -> bool {
+    const MAX_WIRE: u64 = 80;
+    let Ok(file) = fs::File::open(path) else {
+        return false;
+    };
+    let mut bytes = Vec::new();
+    let read = std::io::Read::read_to_end(&mut std::io::Read::take(file, MAX_WIRE + 1), &mut bytes);
+    read.is_ok()
+        && bytes.len() as u64 <= MAX_WIRE
+        && mkit_core::refs::decode_ref_wire(&bytes).is_some()
+}
+
 /// Whether `name` is a ref this store keeps as a `FileTransport` ref file.
 fn is_ref_name(name: &str) -> bool {
-    name.starts_with(REFS_PREFIX) && refs::validate_ref_name(name)
+    refs::is_served_ref_name(name)
 }
 
 /// A ref's value: its 32-byte id.

@@ -1,12 +1,11 @@
 //! Ref compare-and-swap and ref-name helpers (SPEC-TRANSPORT-CONNECT §3,
 //! SPEC-TRANSPORT §4.2.1, SPEC-REFS §3 and §4).
 //!
-//! The canonical copy of logic that also lives in `mkit serve`'s
-//! `pack_key_from_id`/`decode_update_ref` (and lived in vcs-worker's former
-//! `refs.rs`, removed in WP-M0-17, and `mkit-transport-connect` 0.4's
-//! `refs_convert.rs` and `hashutil.rs`, removed in WP-M0-15). The old copy
-//! goes when `mkit serve` switches, in WP-M0-13. `apps/repo-worker` keeps its
-//! own copy (planner decision Q11).
+//! The canonical copy of logic that lived in `mkit serve`'s
+//! `pack_key_from_id`/`decode_update_ref` (removed in WP-M0-13), vcs-worker's
+//! former `refs.rs` (removed in WP-M0-17), and `mkit-transport-connect` 0.4's
+//! `refs_convert.rs` and `hashutil.rs` (removed in WP-M0-15).
+//! `apps/repo-worker` keeps its own copy (planner decision Q11).
 
 use std::borrow::Cow;
 
@@ -26,6 +25,29 @@ pub const MAX_REF_NAME_BYTES: usize = mkit_core::refs::MAX_REF_NAME_BYTES;
 /// The public message for a ref name or `ListRefs` prefix over
 /// [`MAX_REF_NAME_BYTES`]; `mkit serve` sends it as-is.
 pub const REF_NAME_TOO_LONG: &str = "ref name too long";
+
+/// The prefix of every ref name the pipeline serves: refs live under
+/// `refs/` (SPEC-REFS §2: `refs/heads/`, `refs/tags/`, and mkit's own
+/// `refs/mkit/packmap/`).
+pub const SERVED_REFS_PREFIX: &str = "refs/";
+
+/// The public message for a ref name outside [`SERVED_REFS_PREFIX`];
+/// `mkit serve` sends it as-is.
+pub const REF_NAME_OUTSIDE_REFS: &str = "ref name must start with refs/";
+
+/// Whether the pipeline serves `name`: a valid ref name
+/// ([`validate_ref_name`]) under [`SERVED_REFS_PREFIX`].
+///
+/// SPEC-REFS §3's grammar also admits names such as `main`, and the old
+/// `mkit serve` wrote them to `<root>/main` (so `packs/<hex>` could
+/// overwrite a pack). The pipeline refuses them on every read and write,
+/// by name, rather than storing them where the CLI cannot see them
+/// (reconciliation R-86). Listing prefixes are not restricted: a prefix
+/// outside `refs/` simply lists nothing.
+#[must_use]
+pub fn is_served_ref_name(name: &str) -> bool {
+    name.starts_with(SERVED_REFS_PREFIX) && validate_ref_name(name)
+}
 
 /// Validate a ref name: the SPEC-REFS §3 grammar and at most
 /// [`MAX_REF_NAME_BYTES`] bytes ([`mkit_core::refs::validate_ref_name`]).

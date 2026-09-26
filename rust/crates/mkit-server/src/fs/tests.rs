@@ -820,3 +820,122 @@ fn open_refuses_a_root_marked_for_sqlite_meta() {
     assert!(message.contains("--meta sqlite"), "{message}");
     assert!(message.contains("server-meta"), "{message}");
 }
+
+// ------------------------------------------------ crashed uploads, R-86
+
+/// Set `path`'s modification time `age` in the past.
+fn age_file(path: &Path, age: std::time::Duration) {
+    let when = std::time::SystemTime::now() - age;
+    fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(when)
+        .unwrap();
+}
+
+#[test]
+fn upload_temp_names_match_exactly() {
+    use super::blob::is_upload_temp_name;
+    let hex = "ab".repeat(32);
+    assert!(is_upload_temp_name(&format!(".{hex}.tmp.123.0")));
+    assert!(is_upload_temp_name(&format!(
+        ".{hex}.tmp.4294967295.18446744073709551615"
+    )));
+    for bad in [
+        hex.clone(),
+        format!("{hex}.tmp.1.2"),
+        format!(".{}.tmp.1.2", "AB".repeat(32)),
+        format!(".{}.tmp.1.2", "ab".repeat(31)),
+        format!(".{hex}a.tmp.1.2"),
+        format!(".{hex}.tmp.1"),
+        format!(".{hex}.tmp..2"),
+        format!(".{hex}.tmp.1.2.3"),
+        format!(".{hex}.tmp.1.x"),
+        format!(".{hex}.tmp.12345678901.2"),
+        format!(".{hex}.lock"),
+        ".lock".to_owned(),
+    ] {
+        assert!(!is_upload_temp_name(&bad), "{bad}");
+    }
+}
+
+#[test]
+fn sweep_removes_only_old_upload_temp_files() {
+    let td = TempDir::new().unwrap();
+    let store = FsBlobStore::new(td.path());
+    // A missing keyspace directory sweeps nothing.
+    let hour = std::time::Duration::from_hours(1);
+    assert_eq!(store.sweep_stale_uploads(hour).unwrap(), 0);
+
+    let tx = FileTransport::new(td.path());
+    let pack = b"a published pack".to_vec();
+    let key = PackKey::new(hash(&pack));
+    tx.upload_pack(&pack, &key).unwrap();
+    let packs = td.path().join("packs");
+    let hex = key.to_hex();
+    let old_tmp = packs.join(format!(".{hex}.tmp.77.0"));
+    let fresh_tmp = packs.join(format!(".{hex}.tmp.77.1"));
+    let old_other = packs.join(format!(".{hex}.lock"));
+    let old_link = packs.join(format!(".{hex}.tmp.77.2"));
+    for p in [&old_tmp, &fresh_tmp, &old_other] {
+        fs::write(p, b"partial").unwrap();
+    }
+    let two_hours = std::time::Duration::from_hours(2);
+    for p in [&old_tmp, &old_other, &packs.join(&hex)] {
+        age_file(p, two_hours);
+    }
+    std::os::unix::fs::symlink(&old_other, &old_link).unwrap();
+
+    assert_eq!(store.sweep_stale_uploads(hour).unwrap(), 1);
+    assert!(!old_tmp.exists(), "the old temp file is swept");
+    assert!(fresh_tmp.exists(), "a fresh temp file may be a live upload");
+    assert!(old_other.exists(), "another name is never touched");
+    assert!(
+        old_link.symlink_metadata().is_ok(),
+        "a symlink is never touched"
+    );
+    assert_eq!(
+        tx.download_pack(&key).unwrap(),
+        pack,
+        "blobs are never touched"
+    );
+}
+
+#[test]
+fn legacy_ref_files_finds_refs_outside_refs_dir() {
+    let td = TempDir::new().unwrap();
+    let root = td.path();
+    let tx = FileTransport::new(root);
+    tx.update_ref("refs/heads/main", RefWriteCondition::Any, &id(b"m"))
+        .unwrap();
+    let pack = b"pack".to_vec();
+    tx.upload_pack(&pack, &PackKey::new(hash(&pack))).unwrap();
+    fs::create_dir_all(root.join(".mkit")).unwrap();
+    let wire = mkit_core::refs::encode_ref_wire(&id(b"legacy"));
+    // What an older `mkit serve` wrote for `main` and `heads/dev`.
+    fs::write(root.join("main"), wire).unwrap();
+    fs::create_dir_all(root.join("heads")).unwrap();
+    fs::write(root.join("heads/dev"), wire).unwrap();
+    // Not legacy refs: another file, a hidden one, one under `.mkit`, and
+    // a ref-wire file whose name fails the grammar.
+    fs::write(root.join("README"), b"hello\n").unwrap();
+    fs::write(root.join(".hidden"), wire).unwrap();
+    fs::write(root.join(".mkit/stray"), wire).unwrap();
+    fs::write(root.join("bad name"), wire).unwrap();
+
+    let store = layout(root);
+    assert_eq!(
+        store.legacy_ref_files(10_000).unwrap(),
+        ["heads/dev", "main"]
+    );
+    // The walk is bounded.
+    assert!(store.legacy_ref_files(1).unwrap().len() <= 1);
+    // A root without legacy refs reports none.
+    let clean = TempDir::new().unwrap();
+    FileTransport::new(clean.path())
+        .update_ref("refs/heads/main", RefWriteCondition::Any, &id(b"m"))
+        .unwrap();
+    let clean = layout(clean.path());
+    assert!(clean.legacy_ref_files(10_000).unwrap().is_empty());
+}

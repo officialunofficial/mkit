@@ -1050,9 +1050,12 @@ the same identity in `X-Repository` on every repository RPC, reads
 included, and in the signed `<repository>` field on writes.
 
 **ssh and enc (informative).** The ssh and enc transports carry no
-`X-Repository`. For them the path argument of `mkit serve <path>` is
-the addressing input. The on-disk layout under that path is unchanged,
-and the frozen `mkit.rpc.v1.ssh` protocol is untouched.
+`X-Repository`. For ssh the addressing input is the path argument of
+`mkit serve <path>`, the forced command; for enc it is the root of the
+`mkit-server serve --repo-root <DIR> --listen-enc <ADDR>` that accepted
+the connection (SPEC-TRANSPORT-ENC §6). The on-disk layout under that
+path is unchanged, and the frozen `mkit.rpc.v1.ssh` protocol is
+untouched.
 
 ### 7.5 Namespace and write policy
 

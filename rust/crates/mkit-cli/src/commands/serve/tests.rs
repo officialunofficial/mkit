@@ -1,31 +1,142 @@
+//! `mkit serve`'s own code: repo resolution, the stdio adapter and its idle
+//! timeout, the startup sweep and the legacy-ref warning. The session's
+//! frame-level behavior is tested in `mkit-server` (`ssh::tests`); the
+//! golden sessions run through the real binary in `tests/serve_golden.rs`.
+
+use std::fs;
+use std::io::{self, Cursor, Read};
+use std::path::Path;
+use std::time::{Duration, Instant};
+
+use mkit_core::hash::hash;
+use mkit_core::protocol::{PackKey, RefWriteCondition, Transport as _};
+use mkit_rpc::mkit::rpc::v1::ssh::{
+    Close, Hello, HelloResponse, PackChunk, SshFrame, UploadPack, ssh_frame,
+};
+use mkit_rpc::mkit::rpc::v1::{ErrorCode, ProtocolVersion};
+use mkit_transport_file::FileTransport;
+
 use super::*;
 use crate::exit;
-use std::fs;
-use std::io::Cursor;
 
-fn upload_header(pack_id: Vec<u8>, total_bytes: Option<u64>) -> UploadPack {
-    UploadPack {
-        pack_id: Some(pack_id),
-        total_bytes,
+const GOLDEN_IN: &[u8] = include_bytes!("../../../../../tests/golden/ssh-serve/session-1.in.bin");
+const GOLDEN_OUT: &[u8] = include_bytes!("../../../../../tests/golden/ssh-serve/session-1.bin");
+/// The `server_id` the golden sessions were captured with.
+const GOLDEN_SERVER_ID: &str = "mkit serve/0.4.2";
+
+type Body = ssh_frame::Body;
+
+// ---------------------------------------------------------------- helpers
+
+fn repo_root() -> tempfile::TempDir {
+    let td = tempfile::tempdir().unwrap();
+    fs::create_dir_all(td.path().join(".mkit")).unwrap();
+    td
+}
+
+fn frame(body: Body) -> SshFrame {
+    SshFrame {
+        body: Some(body),
         ..Default::default()
     }
 }
 
-fn upload_chunk(pack_id: Vec<u8>, offset: Option<u64>, data: &[u8], last: bool) -> PackChunk {
-    PackChunk {
-        pack_id: Some(pack_id),
-        offset,
-        data: Some(data.to_vec()),
-        last: Some(last),
+fn hello() -> Body {
+    Body::Hello(Box::new(
+        Hello::default().with_proto(ProtocolVersion::ProtocolVersion1),
+    ))
+}
+
+fn close() -> Body {
+    Body::Close(Box::<Close>::default())
+}
+
+fn encode(bodies: impl IntoIterator<Item = Body>) -> Vec<u8> {
+    let mut out = Vec::new();
+    for body in bodies {
+        mkit_rpc::write_frame(&mut out, &frame(body)).unwrap();
+    }
+    out
+}
+
+fn decode(mut bytes: &[u8]) -> Vec<SshFrame> {
+    let mut out = Vec::new();
+    while !bytes.is_empty() {
+        out.push(mkit_rpc::read_frame::<_, SshFrame>(&mut bytes).unwrap());
+    }
+    out
+}
+
+fn assert_error(f: &SshFrame, code: ErrorCode, message: &str) {
+    let Some(Body::Error(e)) = &f.body else {
+        panic!("expected Error, got {:?}", f.body);
+    };
+    assert!(e.code.is_some_and(|c| c == code), "code of {e:?}");
+    assert_eq!(e.message.as_deref(), Some(message));
+}
+
+/// `serve_stdio` over in-memory streams, with the output bytes.
+fn serve(root: &Path, input: impl Read + Send + 'static, idle: Option<Duration>) -> (u8, Vec<u8>) {
+    let mut out = Vec::new();
+    let code = serve_stdio(root, input, &mut out, idle, false);
+    (code, out)
+}
+
+/// The golden patterned pack bytes (`mkit-server`'s `ssh::tests`).
+fn pack_bytes(len: usize, seed: u8) -> Vec<u8> {
+    #[allow(clippy::cast_possible_truncation)]
+    (0..len)
+        .map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed))
+        .collect()
+}
+
+/// `golden` with its `HelloResponse` (the first frame) re-encoded with
+/// this build's `server_id`, so the pin survives a version bump; the rest
+/// is compared byte for byte.
+fn with_current_server_id(golden: &[u8]) -> Vec<u8> {
+    let mut tail = golden;
+    let first: SshFrame = mkit_rpc::read_frame(&mut tail).unwrap();
+    let resp = HelloResponse {
+        proto: Some(ProtocolVersion::ProtocolVersion1.into()),
+        server_id: Some(GOLDEN_SERVER_ID.to_owned()),
         ..Default::default()
+    };
+    assert_eq!(first, frame(Body::HelloResponse(Box::new(resp.clone()))));
+    let current = HelloResponse {
+        server_id: Some(format!("mkit serve/{CLI_VERSION}")),
+        ..resp
+    };
+    let mut out = Vec::new();
+    mkit_rpc::write_frame(&mut out, &frame(Body::HelloResponse(Box::new(current)))).unwrap();
+    out.extend_from_slice(tail);
+    out
+}
+
+/// A reader that serves `bytes` in `piece`-byte reads, sleeping `gap`
+/// before each (and `first_gap` before the first).
+struct Trickle {
+    bytes: Cursor<Vec<u8>>,
+    piece: usize,
+    first_gap: Duration,
+    gap: Duration,
+    started: bool,
+}
+
+impl Read for Trickle {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let gap = if self.started {
+            self.gap
+        } else {
+            self.first_gap
+        };
+        self.started = true;
+        std::thread::sleep(gap);
+        let n = buf.len().min(self.piece);
+        self.bytes.read(&mut buf[..n])
     }
 }
 
-fn valid_pack() -> (Vec<u8>, PackKey) {
-    let bytes = b"valid pack bytes".to_vec();
-    let key = PackKey::new(hash(&bytes));
-    (bytes, key)
-}
+// ------------------------------------------------------------- resolution
 
 #[test]
 fn resolve_repo_path_rejects_missing_path() {
@@ -42,424 +153,9 @@ fn resolve_repo_path_rejects_non_repo_dir() {
 
 #[test]
 fn resolve_repo_path_accepts_repo_dir() {
-    let td = tempfile::tempdir().unwrap();
-    fs::create_dir_all(td.path().join(".mkit")).unwrap();
+    let td = repo_root();
     let resolved = resolve_repo_path(td.path().to_str().unwrap()).unwrap();
     assert!(resolved.join(".mkit").is_dir());
-}
-
-#[test]
-fn upload_drain_accepts_valid_chunks() {
-    let (bytes, key) = valid_pack();
-    let mut drain = UploadDrain::new(&upload_header(
-        key.as_bytes().to_vec(),
-        Some(bytes.len() as u64),
-    ))
-    .unwrap();
-    assert!(
-        !drain
-            .push_chunk(&upload_chunk(
-                key.as_bytes().to_vec(),
-                Some(0),
-                &bytes[..5],
-                false
-            ))
-            .unwrap()
-    );
-    assert!(
-        drain
-            .push_chunk(&upload_chunk(
-                key.as_bytes().to_vec(),
-                Some(5),
-                &bytes[5..],
-                true,
-            ))
-            .unwrap()
-    );
-    let (got, got_key) = drain.into_parts();
-    assert_eq!(got, bytes);
-    assert_eq!(got_key.as_bytes(), key.as_bytes());
-}
-
-#[test]
-fn upload_drain_rejects_malformed_streams() {
-    let (bytes, key) = valid_pack();
-    assert!(UploadDrain::new(&upload_header(key.as_bytes().to_vec(), None)).is_err());
-    assert!(
-        UploadDrain::new(&upload_header(
-            key.as_bytes().to_vec(),
-            Some(MAX_BYTES_PER_CONN + 1),
-        ))
-        .is_err()
-    );
-
-    let mut drain = UploadDrain::new(&upload_header(
-        key.as_bytes().to_vec(),
-        Some(bytes.len() as u64),
-    ))
-    .unwrap();
-    assert!(
-        drain
-            .push_chunk(&upload_chunk(
-                key.as_bytes().to_vec(),
-                Some(1),
-                &bytes,
-                true
-            ))
-            .is_err()
-    );
-
-    let mut drain = UploadDrain::new(&upload_header(
-        key.as_bytes().to_vec(),
-        Some(bytes.len() as u64),
-    ))
-    .unwrap();
-    assert!(
-        drain
-            .push_chunk(&upload_chunk(vec![0xAA; 32], Some(0), &bytes, true))
-            .is_err()
-    );
-
-    let mut drain = UploadDrain::new(&upload_header(
-        key.as_bytes().to_vec(),
-        Some(bytes.len() as u64 - 1),
-    ))
-    .unwrap();
-    assert!(
-        drain
-            .push_chunk(&upload_chunk(
-                key.as_bytes().to_vec(),
-                Some(0),
-                &bytes,
-                true
-            ))
-            .is_err()
-    );
-
-    let mut drain = UploadDrain::new(&upload_header(
-        key.as_bytes().to_vec(),
-        Some(bytes.len() as u64),
-    ))
-    .unwrap();
-    assert!(
-        drain
-            .push_chunk(&upload_chunk(
-                key.as_bytes().to_vec(),
-                Some(0),
-                &bytes[..bytes.len() - 1],
-                true,
-            ))
-            .is_err()
-    );
-
-    let wrong_bytes = b"wrong pack bytes";
-    let mut drain = UploadDrain::new(&upload_header(
-        key.as_bytes().to_vec(),
-        Some(wrong_bytes.len() as u64),
-    ))
-    .unwrap();
-    assert!(
-        drain
-            .push_chunk(&upload_chunk(
-                key.as_bytes().to_vec(),
-                Some(0),
-                wrong_bytes,
-                true,
-            ))
-            .is_err()
-    );
-}
-
-fn write_body(buf: &mut Vec<u8>, body: ssh_frame::Body) {
-    mkit_rpc::write_frame(
-        buf,
-        &SshFrame {
-            body: Some(body),
-            ..Default::default()
-        },
-    )
-    .unwrap();
-}
-
-#[test]
-fn serve_loop_rejects_invalid_upload_before_storage() {
-    let td = tempfile::tempdir().unwrap();
-    let tx = FileTransport::new(td.path());
-    let bogus_key = PackKey::new([0x77; 32]);
-
-    let mut input = Vec::new();
-    write_body(
-        &mut input,
-        ssh_frame::Body::Hello(Box::new(
-            mkit_rpc::mkit::rpc::v1::ssh::Hello::default()
-                .with_proto(ProtocolVersion::ProtocolVersion1),
-        )),
-    );
-    write_body(
-        &mut input,
-        ssh_frame::Body::UploadPack(Box::new(upload_header(
-            bogus_key.as_bytes().to_vec(),
-            Some(5),
-        ))),
-    );
-    write_body(
-        &mut input,
-        ssh_frame::Body::PackChunk(Box::new(upload_chunk(
-            bogus_key.as_bytes().to_vec(),
-            Some(0),
-            b"wrong",
-            true,
-        ))),
-    );
-
-    let mut reader = Cursor::new(input);
-    let mut output = Vec::new();
-    assert_eq!(serve_loop(&tx, &mut reader, &mut output), exit::OK);
-    assert!(!tx.pack_exists(&bogus_key).unwrap());
-
-    let mut out = Cursor::new(output);
-    let _hello: SshFrame = mkit_rpc::read_frame(&mut out).unwrap();
-    let err: SshFrame = mkit_rpc::read_frame(&mut out).unwrap();
-    assert!(matches!(err.body, Some(ssh_frame::Body::Error(_))));
-}
-
-#[test]
-fn serve_loop_rejected_upload_does_not_overwrite_existing_pack() {
-    let td = tempfile::tempdir().unwrap();
-    let tx = FileTransport::new(td.path());
-    let (bytes, key) = valid_pack();
-    tx.upload_pack(&bytes, &key).unwrap();
-
-    let mut input = Vec::new();
-    write_body(
-        &mut input,
-        ssh_frame::Body::Hello(Box::new(
-            mkit_rpc::mkit::rpc::v1::ssh::Hello::default()
-                .with_proto(ProtocolVersion::ProtocolVersion1),
-        )),
-    );
-    write_body(
-        &mut input,
-        ssh_frame::Body::UploadPack(Box::new(upload_header(key.as_bytes().to_vec(), Some(5)))),
-    );
-    write_body(
-        &mut input,
-        ssh_frame::Body::PackChunk(Box::new(upload_chunk(
-            key.as_bytes().to_vec(),
-            Some(0),
-            b"wrong",
-            true,
-        ))),
-    );
-
-    let mut reader = Cursor::new(input);
-    let mut output = Vec::new();
-    assert_eq!(serve_loop(&tx, &mut reader, &mut output), exit::OK);
-    assert_eq!(tx.download_pack(&key).unwrap(), bytes);
-}
-
-/// Build an `UpdateRef` request body. `expected` is only set for MATCH.
-fn update_ref_body(
-    name: &str,
-    new_id: [u8; 32],
-    expectation: RefExpectation,
-    expected: Option<[u8; 32]>,
-) -> ssh_frame::Body {
-    let mut req = mkit_rpc::mkit::rpc::v1::ssh::UpdateRef::default()
-        .with_name(name)
-        .with_new_id(new_id.to_vec())
-        .with_expectation(expectation);
-    if let Some(e) = expected {
-        req = req.with_expected_id(e.to_vec());
-    }
-    ssh_frame::Body::UpdateRef(Box::new(req))
-}
-
-/// SPEC-TRANSPORT §4.2.1 over the real sync server: two writers race a
-/// create-only (`MISSING`) update; the loser's reply is
-/// `Error{INVALID_REQUEST}` carrying the WINNER's id in `details`, and
-/// the shared client classifier maps it to `RefConflict` — not
-/// `RemoteError`. Before the #551 fix the server sent empty `details`,
-/// so the strict SSH classifier degraded the conflict to `RemoteError`.
-#[test]
-fn serve_loop_cas_conflict_carries_current_id_in_details() {
-    let td = tempfile::tempdir().unwrap();
-    let tx = FileTransport::new(td.path());
-    let id_winner = [0xA1u8; 32];
-    let id_loser = [0xB2u8; 32];
-
-    let mut input = Vec::new();
-    write_body(
-        &mut input,
-        ssh_frame::Body::Hello(Box::new(
-            mkit_rpc::mkit::rpc::v1::ssh::Hello::default()
-                .with_proto(ProtocolVersion::ProtocolVersion1),
-        )),
-    );
-    // Writer A: create-only, wins.
-    write_body(
-        &mut input,
-        update_ref_body("refs/heads/main", id_winner, RefExpectation::Missing, None),
-    );
-    // Writer B: create-only, loses the race.
-    write_body(
-        &mut input,
-        update_ref_body("refs/heads/main", id_loser, RefExpectation::Missing, None),
-    );
-
-    let mut reader = Cursor::new(input);
-    let mut output = Vec::new();
-    assert_eq!(serve_loop(&tx, &mut reader, &mut output), exit::OK);
-    // The ref holds the winner's id; the loser clobbered nothing.
-    assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some(id_winner));
-
-    let mut out = Cursor::new(output);
-    let _hello: SshFrame = mkit_rpc::read_frame(&mut out).unwrap();
-    let win: SshFrame = mkit_rpc::read_frame(&mut out).unwrap();
-    assert!(matches!(
-        win.body,
-        Some(ssh_frame::Body::UpdateRefResponse(_))
-    ));
-    let lose: SshFrame = mkit_rpc::read_frame(&mut out).unwrap();
-    let Some(ssh_frame::Body::Error(err)) = lose.body else {
-        panic!("loser must receive an Error frame, got {:?}", lose.body);
-    };
-    assert!(err.code.is_some_and(|c| c == ErrorCode::InvalidRequest));
-    assert_eq!(
-        err.details.as_deref(),
-        Some(&id_winner[..]),
-        "details must carry the CURRENT ref value (the winner's id)"
-    );
-    // The exact frame the server produced classifies as RefConflict
-    // through the shared client-side mapping both transports use.
-    assert!(matches!(
-        mkit_rpc::map_update_ref_error(*err, RefWriteCondition::Missing, "ssh"),
-        mkit_core::protocol::TransportError::RefConflict
-    ));
-}
-
-/// A stale `MATCH` update against the real sync server: the reply's
-/// `details` carries the current (unchanged) ref value.
-#[test]
-fn serve_loop_match_conflict_reports_current_value() {
-    let td = tempfile::tempdir().unwrap();
-    let tx = FileTransport::new(td.path());
-    let current = [0x11u8; 32];
-    let stale = [0x22u8; 32];
-    let next = [0x33u8; 32];
-    tx.update_ref("refs/heads/main", RefWriteCondition::Any, &current)
-        .unwrap();
-
-    let mut input = Vec::new();
-    write_body(
-        &mut input,
-        ssh_frame::Body::Hello(Box::new(
-            mkit_rpc::mkit::rpc::v1::ssh::Hello::default()
-                .with_proto(ProtocolVersion::ProtocolVersion1),
-        )),
-    );
-    write_body(
-        &mut input,
-        update_ref_body("refs/heads/main", next, RefExpectation::Match, Some(stale)),
-    );
-
-    let mut reader = Cursor::new(input);
-    let mut output = Vec::new();
-    assert_eq!(serve_loop(&tx, &mut reader, &mut output), exit::OK);
-    assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some(current));
-
-    let mut out = Cursor::new(output);
-    let _hello: SshFrame = mkit_rpc::read_frame(&mut out).unwrap();
-    let reply: SshFrame = mkit_rpc::read_frame(&mut out).unwrap();
-    let Some(ssh_frame::Body::Error(err)) = reply.body else {
-        panic!(
-            "stale MATCH must receive an Error frame, got {:?}",
-            reply.body
-        );
-    };
-    assert!(err.code.is_some_and(|c| c == ErrorCode::InvalidRequest));
-    assert_eq!(err.details.as_deref(), Some(&current[..]));
-}
-
-/// `MATCH` against a ref that does not exist: still a CAS conflict on
-/// the wire (`INVALID_REQUEST`), but there is no current value to
-/// surface, so `details` stays empty — mirroring `ReadRefResponse`'s
-/// empty-means-absent encoding. Strict clients surface this as a
-/// remote error carrying the server's descriptive message rather than
-/// a `RefConflict` with a fabricated id.
-#[test]
-fn serve_loop_match_conflict_on_absent_ref_has_empty_details() {
-    let td = tempfile::tempdir().unwrap();
-    let tx = FileTransport::new(td.path());
-
-    let mut input = Vec::new();
-    write_body(
-        &mut input,
-        ssh_frame::Body::Hello(Box::new(
-            mkit_rpc::mkit::rpc::v1::ssh::Hello::default()
-                .with_proto(ProtocolVersion::ProtocolVersion1),
-        )),
-    );
-    write_body(
-        &mut input,
-        update_ref_body(
-            "refs/heads/ghost",
-            [0x44u8; 32],
-            RefExpectation::Match,
-            Some([0x55u8; 32]),
-        ),
-    );
-
-    let mut reader = Cursor::new(input);
-    let mut output = Vec::new();
-    assert_eq!(serve_loop(&tx, &mut reader, &mut output), exit::OK);
-    assert_eq!(tx.read_ref("refs/heads/ghost").unwrap(), None);
-
-    let mut out = Cursor::new(output);
-    let _hello: SshFrame = mkit_rpc::read_frame(&mut out).unwrap();
-    let reply: SshFrame = mkit_rpc::read_frame(&mut out).unwrap();
-    let Some(ssh_frame::Body::Error(err)) = reply.body else {
-        panic!("absent-ref MATCH must receive an Error frame");
-    };
-    assert!(err.code.is_some_and(|c| c == ErrorCode::InvalidRequest));
-    assert_eq!(err.details.as_deref().map_or(0, <[u8]>::len), 0);
-    // Empty details → strict classifier reports the server's message,
-    // not RefConflict.
-    let mapped =
-        mkit_rpc::map_update_ref_error(*err, RefWriteCondition::Match([0x55u8; 32]), "ssh");
-    match mapped {
-        mkit_core::protocol::TransportError::RemoteError(msg) => {
-            assert!(msg.contains("absent"), "message should say absent: {msg}");
-        }
-        other => panic!("expected RemoteError, got {other:?}"),
-    }
-}
-
-// Note: containment via MKIT_SERVE_ROOT is enforced — tested via
-// an integration test in tests/ rather than here, since this
-// crate forbids `unsafe` (which `std::env::set_var` requires
-// since Rust 1.92).
-
-#[test]
-fn pack_key_from_id_rejects_bad_length_as_invalid_request() {
-    // `pack_key_from_id` is the shared decoder behind PackExists and
-    // DownloadPack. This covers
-    // the decoder itself: a wrong-length or missing pack_id must yield an
-    // InvalidRequest verb error, which the dispatcher then turns into an
-    // error frame — replacing the pre-unification sync path that silently
-    // dropped the connection. (The frame emission is exercised separately
-    // by the serve_loop tests.)
-    let wrong_len = vec![0u8; 16];
-    assert!(matches!(
-        pack_key_from_id(Some(&wrong_len)),
-        Err((ErrorCode::InvalidRequest, _))
-    ));
-    assert!(matches!(
-        pack_key_from_id(None),
-        Err((ErrorCode::InvalidRequest, _))
-    ));
-    // A correct 32-byte id still decodes.
-    assert!(pack_key_from_id(Some(&vec![7u8; 32])).is_ok());
 }
 
 #[test]
@@ -473,8 +169,239 @@ fn removed_listener_flag_names_the_first_removed_flag() {
         removed_listener_flag(&args(&["--enc-idle-timeout-secs=5", "--listen-enc", "x"])),
         Some("--enc-idle-timeout-secs")
     );
-    // Not a removed flag, a prefix of one, or anything after `--`.
+    // Not a removed flag, a prefix of one, anything after `--`, or the
+    // idle timeout `mkit serve` does take.
     assert_eq!(removed_listener_flag(&args(&["repo", "--bogus"])), None);
     assert_eq!(removed_listener_flag(&args(&["--htt", "repo"])), None);
     assert_eq!(removed_listener_flag(&args(&["--", "--http"])), None);
+    assert_eq!(
+        removed_listener_flag(&args(&["repo", "--idle-timeout-secs", "5"])),
+        None
+    );
+}
+
+#[test]
+fn idle_timeout_flag_defaults_to_60_and_takes_zero() {
+    let parse = |a: &[&str]| {
+        let args = a.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        clap_shim::parse::<ServeOpts>("mkit serve", &args).unwrap()
+    };
+    assert_eq!(parse(&["repo"]).idle_timeout_secs, 60);
+    assert_eq!(
+        parse(&["repo", "--idle-timeout-secs", "0"]).idle_timeout_secs,
+        0
+    );
+    assert_eq!(
+        parse(&["--idle-timeout-secs=5", "repo"]).idle_timeout_secs,
+        5
+    );
+}
+
+// ---------------------------------------------------------------- session
+
+/// The M0-12 golden session through `serve_stdio`, over the `.mkit`
+/// layout seeded as it was captured: refs `main`, `dev`, `tags/v1` and one
+/// 1000-byte pack.
+#[test]
+fn serve_stdio_matches_golden_session() {
+    let td = repo_root();
+    let tx = FileTransport::new(td.path());
+    for (name, id) in [
+        ("refs/heads/main", [0x11; 32]),
+        ("refs/heads/dev", [0x22; 32]),
+        ("refs/tags/v1", [0x33; 32]),
+    ] {
+        tx.update_ref(name, RefWriteCondition::Any, &id).unwrap();
+    }
+    let seeded = pack_bytes(1000, 7);
+    tx.upload_pack(&seeded, &PackKey::new(hash(&seeded)))
+        .unwrap();
+
+    let (code, out) = serve(
+        td.path(),
+        Cursor::new(GOLDEN_IN),
+        Some(Duration::from_mins(1)),
+    );
+    assert_eq!(code, exit::OK);
+    let want = with_current_server_id(GOLDEN_OUT);
+    let (got_frames, want_frames) = (decode(&out), decode(&want));
+    for (i, (g, w)) in got_frames.iter().zip(&want_frames).enumerate() {
+        assert_eq!(g, w, "frame {i}");
+    }
+    assert_eq!(out, want);
+    // The refs the session left are `FileTransport`'s files.
+    assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some([0x44; 32]));
+}
+
+#[test]
+fn idle_timeout_ends_session_with_protocol_error() {
+    let td = repo_root();
+    // A client that connects and sends nothing: the pipe's writer stays
+    // open until the test ends.
+    let (reader, _writer) = io::pipe().unwrap();
+    let started = Instant::now();
+    let (code, out) = serve(td.path(), reader, Some(Duration::from_millis(100)));
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(code, exit::PROTOCOL_ERROR);
+    let frames = decode(&out);
+    assert_eq!(frames.len(), 1, "{frames:?}");
+    assert_error(&frames[0], ErrorCode::InvalidRequest, "idle timeout");
+}
+
+#[test]
+fn zero_disables_timeout() {
+    let td = repo_root();
+    let slow = Trickle {
+        bytes: Cursor::new(encode([hello(), close()])),
+        piece: usize::MAX,
+        first_gap: Duration::from_millis(300),
+        gap: Duration::ZERO,
+        started: false,
+    };
+    let (code, out) = serve(td.path(), slow, None);
+    assert_eq!(code, exit::OK);
+    let frames = decode(&out);
+    assert!(matches!(frames[0].body, Some(Body::HelloResponse(_))));
+    // The same client against a 100 ms timeout is cut off before `Hello`.
+    let slow = Trickle {
+        bytes: Cursor::new(encode([hello(), close()])),
+        piece: usize::MAX,
+        first_gap: Duration::from_millis(300),
+        gap: Duration::ZERO,
+        started: false,
+    };
+    let (code, _) = serve(td.path(), slow, Some(Duration::from_millis(100)));
+    assert_eq!(code, exit::PROTOCOL_ERROR);
+}
+
+/// An upload that keeps sending never trips the timeout, even though one
+/// chunk frame takes several timeouts to arrive; a client that stops in
+/// the middle of one does, and the upload is discarded.
+#[test]
+fn idle_timeout_counts_bytes_not_frames() {
+    let pack = pack_bytes(4000, 3);
+    let id = hash(&pack).to_vec();
+    let header = Body::UploadPack(Box::new(UploadPack {
+        pack_id: Some(id.clone()),
+        total_bytes: Some(pack.len() as u64),
+        ..Default::default()
+    }));
+    let chunk = Body::PackChunk(Box::new(PackChunk {
+        pack_id: Some(id.clone()),
+        offset: Some(0),
+        data: Some(pack.clone()),
+        last: Some(true),
+        ..Default::default()
+    }));
+    let input = encode([hello(), header.clone(), chunk, close()]);
+
+    // ~4 KiB at 400 bytes per 40 ms: about 400 ms, 4x the timeout.
+    let td = repo_root();
+    let trickle = Trickle {
+        bytes: Cursor::new(input),
+        piece: 400,
+        first_gap: Duration::ZERO,
+        gap: Duration::from_millis(40),
+        started: false,
+    };
+    let (code, out) = serve(td.path(), trickle, Some(Duration::from_millis(100)));
+    assert_eq!(code, exit::OK);
+    let frames = decode(&out);
+    assert!(
+        matches!(frames[1].body, Some(Body::UploadPackResponse(_))),
+        "{frames:?}"
+    );
+    let key = PackKey::new(hash(&pack));
+    assert!(FileTransport::new(td.path()).pack_exists(&key).unwrap());
+
+    // The header, then silence.
+    let td = repo_root();
+    let (reader, mut writer) = io::pipe().unwrap();
+    io::Write::write_all(&mut writer, &encode([hello(), header])).unwrap();
+    let (code, out) = serve(td.path(), reader, Some(Duration::from_millis(100)));
+    assert_eq!(code, exit::PROTOCOL_ERROR);
+    let frames = decode(&out);
+    assert_error(&frames[1], ErrorCode::InvalidRequest, "idle timeout");
+    assert!(!FileTransport::new(td.path()).pack_exists(&key).unwrap());
+    let packs = td.path().join("packs");
+    let left = fs::read_dir(&packs).map_or(0, Iterator::count);
+    assert_eq!(left, 0, "the upload's temp file is removed");
+    drop(writer);
+}
+
+#[test]
+fn a_root_whose_refs_live_in_sqlite_is_refused() {
+    let td = repo_root();
+    fs::write(td.path().join(".mkit/server-meta"), b"sqlite").unwrap();
+    let (code, out) = serve(td.path(), Cursor::new(encode([hello()])), None);
+    assert_eq!(code, exit::CONFIG_ERROR);
+    assert!(out.is_empty());
+}
+
+#[test]
+fn stop_after_hello_ends_cleanly_after_the_handshake() {
+    let td = repo_root();
+    let input = Cursor::new(encode([hello(), close()]));
+    let mut out = Vec::new();
+    let code = serve_stdio(td.path(), input, &mut out, None, true);
+    assert_eq!(code, exit::OK);
+    let frames = decode(&out);
+    assert_eq!(frames.len(), 1);
+    assert!(matches!(frames[0].body, Some(Body::HelloResponse(_))));
+}
+
+// ------------------------------------------------------- startup upkeep
+
+#[test]
+fn startup_sweeps_crashed_uploads_only_when_no_server_holds_the_lock() {
+    let td = repo_root();
+    let packs = td.path().join("packs");
+    fs::create_dir_all(&packs).unwrap();
+    let stale = packs.join(format!(".{}.tmp.4242.0", "ab".repeat(32)));
+    fs::write(&stale, b"partial").unwrap();
+    let old = std::time::SystemTime::now() - Duration::from_hours(2);
+    fs::File::options()
+        .write(true)
+        .open(&stale)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+
+    // Another server is up (it holds `serve.lock` shared): no sweep.
+    let dot_mkit = td.path().join(".mkit");
+    let other = repo_lock::acquire_shared(
+        &dot_mkit,
+        crate::commands::SERVE_LOCK,
+        repo_lock::DEFAULT_TIMEOUT,
+    )
+    .unwrap();
+    let ours = lock_and_sweep(td.path()).unwrap();
+    assert!(stale.exists(), "swept while another server was up");
+    drop((ours, other));
+
+    // Alone: swept, and the shared lock is held afterwards.
+    let ours = lock_and_sweep(td.path()).unwrap();
+    assert!(!stale.exists());
+    assert!(!repo_lock::probe_exclusive(&dot_mkit, crate::commands::SERVE_LOCK).unwrap());
+    drop(ours);
+}
+
+#[test]
+fn legacy_refs_warning_names_the_files_and_the_fix() {
+    let root = Path::new("/srv/repo");
+    assert_eq!(legacy_refs_warning(root, &[]), None);
+    let names: Vec<String> = ["main", "a", "b", "c", "d", "e", "f"]
+        .map(String::from)
+        .to_vec();
+    let w = legacy_refs_warning(root, &names).unwrap();
+    assert!(w.contains("7 ref file(s) outside refs/"), "{w}");
+    assert!(w.contains("(main, a, b, c, d and 2 more)"), "{w}");
+    assert!(
+        w.contains("mv /srv/repo/main /srv/repo/refs/heads/main"),
+        "{w}"
+    );
 }

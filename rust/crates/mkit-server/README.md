@@ -46,6 +46,11 @@ and `wasm32-unknown-unknown`:
   `scripts/regen-transport-proto.sh`), so building needs no `protoc`.
   Build with `default-features = false` to leave the binding and its
   dependencies out.
+- the `ssh` feature: the `mkit.rpc.v1.ssh` session over the pipeline
+  (`ssh::serve_session`), with no async runtime of its own. `mkit serve`
+  (the `mkit` CLI, which depends on this crate with only `ssh` and `fs`)
+  runs it over stdio under a blocking executor, and the native enc
+  listener under tokio.
 
 ## Crate map
 

@@ -2,10 +2,9 @@
 //!
 //! The canonical copy of the chunk loops in `mkit-transport-connect` 0.4's
 //! `pack.rs` (`chunk_download`) and `mkit serve`'s `download_chunks`; `vcs-worker`
-//! sends one chunk today and adopts this plan (planner decision Q17). The old
-//! copies go when their consumers switch: `mkit serve` in WP-M0-13,
-//! `vcs-worker` in WP-M0-17; `mkit-transport-connect`'s went with its server
-//! in WP-M0-15.
+//! adopted this plan in WP-M0-17 (planner decision Q17). The old copies are
+//! gone: `mkit serve`'s in WP-M0-13, `mkit-transport-connect`'s with its
+//! server in WP-M0-15.
 
 /// Largest `PackChunk.data` a server sends: well below the 1 MiB frame limit
 /// of the ssh/enc framing, and a manageable Connect message size.

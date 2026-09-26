@@ -1073,15 +1073,20 @@ fn deny_status(err: ServerError) -> ServerError {
     }
 }
 
+/// A ref name the pipeline reads or writes: at most
+/// [`refs::MAX_REF_NAME_BYTES`], the SPEC-REFS §3 grammar, and under
+/// `refs/` ([`refs::is_served_ref_name`], R-86), each refused by name.
 fn check_ref_name(name: &str) -> Result<(), ServerError> {
     if name.len() > refs::MAX_REF_NAME_BYTES {
         Err(ServerError::invalid_argument(refs::REF_NAME_TOO_LONG))
-    } else if validate_ref_name(name) {
-        Ok(())
-    } else {
+    } else if !validate_ref_name(name) {
         Err(ServerError::invalid_argument(
             "ref name is invalid (SPEC-REFS §3)",
         ))
+    } else if refs::is_served_ref_name(name) {
+        Ok(())
+    } else {
+        Err(ServerError::invalid_argument(refs::REF_NAME_OUTSIDE_REFS))
     }
 }
 

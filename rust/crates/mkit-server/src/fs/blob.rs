@@ -7,6 +7,7 @@ use std::io::{self, ErrorKind, Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::time::{Duration, SystemTime};
 
 use bytes::{Bytes, BytesMut};
 use futures_core::Stream;
@@ -32,9 +33,9 @@ pub(super) const READ_BLOCK: usize = 64 * 1024;
 /// parent before anything is published in it. A full disk or quota is
 /// [`StoreError::Full`].
 ///
-/// TODO(M0-13): a process that crashes mid-upload leaves its temp file,
-/// `<keyspace>/.<64-hex>.tmp.<pid>.<seq>`, behind; nothing sweeps them yet.
-/// They are never visible as blobs.
+/// A process that crashes mid-upload leaves its temp file,
+/// `<keyspace>/.<64-hex>.tmp.<pid>.<seq>`, behind. It is never visible as
+/// a blob; [`FsBlobStore::sweep_stale_uploads`] removes old ones.
 #[derive(Debug, Clone)]
 pub struct FsBlobStore {
     root: PathBuf,
@@ -85,6 +86,73 @@ impl FsBlobStore {
     fn path(&self, key: &BlobKey) -> PathBuf {
         self.dir().join(key.to_hex())
     }
+
+    /// Remove the temp files crashed uploads left in the keyspace
+    /// directory: regular files named exactly `.<64-hex>.tmp.<pid>.<seq>`
+    /// (the names [`temp_path`] gives an upload, from this store or
+    /// `FileTransport::upload_pack`) last modified at least `min_age` ago.
+    /// Nothing else is touched: no blob, no symlink, no other name, no file
+    /// modified in the future. Returns how many were removed; a file that
+    /// cannot be inspected or removed is skipped.
+    ///
+    /// A live upload keeps its temp file's modification time fresh as it
+    /// writes, so a `min_age` well above any pause between two writes of
+    /// one upload is safe against `FileTransport` writers, which take no
+    /// lock. The caller must also rule out a live writer that can pause for
+    /// longer, a stalled streaming upload: `mkit serve` sweeps only while
+    /// it holds `serve.lock` exclusively, which no other `mkit serve` or
+    /// `mkit-server` (each holds it shared) can then hold.
+    ///
+    /// # Errors
+    /// I/O listing the directory; a missing directory sweeps nothing.
+    pub fn sweep_stale_uploads(&self, min_age: Duration) -> io::Result<usize> {
+        let entries = match fs::read_dir(self.dir()) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(0),
+            Err(e) => return Err(e),
+        };
+        let now = SystemTime::now();
+        let mut removed = 0;
+        for entry in entries {
+            let Ok(entry) = entry else { continue };
+            let name = entry.file_name();
+            if !name.to_str().is_some_and(is_upload_temp_name) {
+                continue;
+            }
+            // `DirEntry::metadata` does not follow a symlink.
+            let Ok(meta) = entry.metadata() else { continue };
+            let stale = meta.is_file()
+                && meta
+                    .modified()
+                    .ok()
+                    .and_then(|m| now.duration_since(m).ok())
+                    .is_some_and(|age| age >= min_age);
+            if stale && fs::remove_file(entry.path()).is_ok() {
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+}
+
+/// Whether `name` is an upload's temp file name, `.<64 lowercase
+/// hex>.tmp.<pid>.<seq>`, with a decimal `u32` pid and `u64` sequence.
+pub(super) fn is_upload_temp_name(name: &str) -> bool {
+    let decimal = |s: &str, max: usize| {
+        !s.is_empty() && s.len() <= max && s.bytes().all(|b| b.is_ascii_digit())
+    };
+    let Some(rest) = name.strip_prefix('.') else {
+        return false;
+    };
+    let Some((hex, rest)) = rest.split_at_checked(64) else {
+        return false;
+    };
+    let Some((pid, seq)) = rest.strip_prefix(".tmp.").and_then(|r| r.split_once('.')) else {
+        return false;
+    };
+    hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        && decimal(pid, 10)
+        && decimal(seq, 20)
 }
 
 /// The upload handle of [`FsBlobStore`]: a temp file and a running hash.
