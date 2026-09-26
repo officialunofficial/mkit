@@ -66,7 +66,11 @@ mod tests {
         assert_eq!(alarm_after_tick(None, 100), AlarmAction::Delete);
         assert_eq!(
             alarm_after_tick(Some(u64::MAX), 100),
-            AlarmAction::Set(i64::MAX)
+            AlarmAction::Set(MAX_DATE_MS)
+        );
+        assert_eq!(
+            alarm_after_tick(Some(9_000_000_000_000_000), 100),
+            AlarmAction::Set(MAX_DATE_MS)
         );
     }
 }

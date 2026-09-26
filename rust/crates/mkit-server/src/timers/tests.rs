@@ -151,7 +151,11 @@ async fn effects_are_atomic_and_failed_handler_condition_is_raced() {
             !bad
         );
         // A raced row is still due: it must get a backoff wake, never none.
-        let wake = if bad { Some(100 + RETRY_BACKOFF_MS) } else { None };
+        let wake = if bad {
+            Some(100 + RETRY_BACKOFF_MS)
+        } else {
+            None
+        };
         assert_eq!(report.next_wake_ms, wake);
     }
 }
