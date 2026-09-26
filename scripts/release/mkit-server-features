@@ -1,0 +1,6 @@
+# mkit-server-native's shipped feature set, implied features included
+# (`enc` implies `http`, which implies `sqlite`): the HTTP listener with
+# SQLite metadata, S3 blobs and the mkit+enc:// listener. The one source
+# for release.yml and release-artifact-check.yml; the release build uses
+# --no-default-features, and the artifact check requires exactly this set.
+enc,http,s3,sqlite

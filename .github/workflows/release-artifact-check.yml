@@ -1,0 +1,150 @@
+name: "CI: Release artifact check"
+
+# PR-time preview of release.yml's build job for one Linux target: the two
+# release cargo invocations (mkit, then mkit-server with the shipped feature
+# set from scripts/release/mkit-server-features) and
+# scripts/check-release-artifact-features.sh on each. Without it, feature
+# drift (a new server-only package in the mkit CLI, a renamed or missing
+# mkit-server feature, a new default feature) would first surface at tag
+# time, when release.yml runs.
+#
+# Triggers: PRs to main and pushes to main only. Nothing runs for feature
+# branches (feat/*), per the mkit-server epic's CI policy. The release
+# profile (codegen-units=1) makes this a slow job, so it runs only when an
+# input that can move the result changes.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/release-artifact-check.yml'
+      - '.github/workflows/release.yml'
+      - 'scripts/check-release-artifact-features.sh'
+      - 'scripts/release/**'
+      - 'rust/Cargo.lock'
+      - 'rust/Cargo.toml'
+      - 'rust/crates/**/Cargo.toml'
+      - 'rust/crates/mkit-cli/**'
+      - 'rust/crates/mkit-server-native/**'
+      - 'rust/rust-toolchain.toml'
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/release-artifact-check.yml'
+      - '.github/workflows/release.yml'
+      - 'scripts/check-release-artifact-features.sh'
+      - 'scripts/release/**'
+      - 'rust/Cargo.lock'
+      - 'rust/Cargo.toml'
+      - 'rust/crates/**/Cargo.toml'
+      - 'rust/crates/mkit-cli/**'
+      - 'rust/crates/mkit-server-native/**'
+      - 'rust/rust-toolchain.toml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: "1.95.0"
+  CARGO_INCREMENTAL: 0
+  TARGET: x86_64-unknown-linux-gnu
+
+jobs:
+  release-artifact-check:
+    name: Release artifact check (x86_64-unknown-linux-gnu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install Rust ${{ env.RUST_VERSION }} + target
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: ${{ env.TARGET }}
+
+      # Deliberately NOT a `rust-release-*` prefix: PR-event caches must
+      # never be restorable by release.yml (see its cache-poisoning note).
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16  # v2
+        with:
+          workspaces: rust -> rust/target
+          prefix-key: "rust-artifact-check"
+          key: artifact-check-${{ env.TARGET }}
+
+      - name: Read mkit-server feature set
+        id: server_features
+        shell: bash
+        run: |
+          FEATURES="$(bash scripts/check-release-artifact-features.sh --server-features)"
+          echo "features=${FEATURES}" >> "$GITHUB_OUTPUT"
+          echo "mkit-server features: ${FEATURES}"
+
+      # The same two invocations as release.yml's build job.
+      - name: Build release mkit binary
+        shell: bash
+        working-directory: rust
+        env:
+          RUSTFLAGS: "-C codegen-units=1 -C strip=symbols"
+        run: |
+          cargo build \
+            --release \
+            --locked \
+            --target "${TARGET}" \
+            -p mkit-cli \
+            --bin mkit \
+            --message-format=json-render-diagnostics > "${RUNNER_TEMP}/mkit-build.jsonl"
+
+      - name: Check release mkit artifact
+        shell: bash
+        run: |
+          bash scripts/check-release-artifact-features.sh \
+            "${RUNNER_TEMP}/mkit-build.jsonl" \
+            "rust/target/${TARGET}/release/mkit"
+
+      - name: Build release mkit-server binary
+        shell: bash
+        working-directory: rust
+        env:
+          RUSTFLAGS: "-C codegen-units=1 -C strip=symbols"
+          SERVER_FEATURES: ${{ steps.server_features.outputs.features }}
+        run: |
+          cargo build \
+            --release \
+            --locked \
+            --target "${TARGET}" \
+            -p mkit-server-native \
+            --no-default-features \
+            --features "${SERVER_FEATURES}" \
+            --bin mkit-server \
+            --message-format=json-render-diagnostics > "${RUNNER_TEMP}/mkit-server-build.jsonl"
+
+      - name: Check release mkit-server artifact
+        shell: bash
+        env:
+          SERVER_FEATURES: ${{ steps.server_features.outputs.features }}
+        run: |
+          bash scripts/check-release-artifact-features.sh \
+            --server "${SERVER_FEATURES}" \
+            "${RUNNER_TEMP}/mkit-server-build.jsonl" \
+            "rust/target/${TARGET}/release/mkit-server"
+
+      # The golden package list must still match release.yml's targets
+      # (`--update-golden` output is deterministic): catches a Cargo.lock or
+      # manifest change that adds a CLI dependency on another target only.
+      - name: Check the golden package list is current
+        shell: bash
+        run: |
+          bash scripts/check-release-artifact-features.sh --update-golden
+          if ! git diff --exit-code -- scripts/release/mkit-packages.golden; then
+            echo "ERROR: scripts/release/mkit-packages.golden is stale; run" >&2
+            echo "  scripts/check-release-artifact-features.sh --update-golden" >&2
+            echo "review the diff (every new name is a new dependency of the shipped mkit CLI) and commit it." >&2
+            exit 1
+          fi
