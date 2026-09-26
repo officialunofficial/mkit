@@ -31,14 +31,18 @@ train).
   - **Idle timeout.** `mkit serve` ends a session after
     `--idle-timeout-secs` (default 60; `0` disables it) without a byte
     from the client, answering `Error{INVALID_REQUEST, "idle timeout"}`
-    and exiting 76 (SSH-SECURITY §4, §7: slow-loris is now mitigated). An
-    upload that keeps sending never trips it; one that stops midway is
-    discarded.
+    and exiting 76 (SSH-SECURITY §4, §7). It bounds client silence only:
+    an upload that keeps sending never trips it; one that stops midway is
+    discarded. A new, optional `--max-session-secs` (default `0`, off)
+    caps the whole process, which also bounds a client that trickles
+    bytes or stops reading. Both flags accept at most 604800 (7 days).
   - **Refs only under `refs/`.** A ref name outside `refs/` (`main`,
     `heads/main`) that `mkit serve` used to store at `<root>/<name>` is
-    refused by name ("ref name must start with refs/"); at startup
-    `mkit serve` warns on stderr about such ref files it finds under the
-    root and leaves them in place. See the `mkit-server` entry below.
+    refused by name ("ref name must start with refs/ (… see the
+    migration notes)"). Such files are left in place and never reported
+    to clients; docs/CLI.md, "Refs outside `refs/`", gives a `find`/`mv`
+    recipe for an operator to locate and move them by hand. See the
+    `mkit-server` entry below.
   - **Crashed uploads are swept.** At startup, when no other
     `mkit serve` or `mkit-server` holds `serve.lock`, upload temp files
     (`packs/.<hex>.tmp.<pid>.<seq>`) at least an hour old are removed.
@@ -50,11 +54,13 @@ train).
   (`mkit_server::refs::is_served_ref_name`; SPEC-REFS §2), on every
   binding: `ReadRef`, `UpdateRef` and `AdvanceRefs` refuse any other
   grammar-valid name with `invalid_argument` "ref name must start with
-  refs/" (`INVALID_REQUEST` on the ssh wire), where they used to store it
+  refs/ …" (`INVALID_REQUEST` on the ssh wire), where they used to store it
   (in `.mkit/server/rows/` on the `.mkit` layout, invisible to the CLI).
   `ListRefs` prefixes are unrestricted; one outside `refs/` lists nothing.
-  New `FsBlobStore::sweep_stale_uploads` and
-  `FsLayoutStore::legacy_ref_files`. **SemVer:** unreleased API.
+  Normative in SPEC-REFS v3 §2 (the §2 namespace list now includes
+  `refs/mkit/packmap/`), SPEC-TRANSPORT §4.2.1 and SPEC-TRANSPORT-CONNECT
+  §5; new wire-suite case `refs.non_refs_prefix_rejected`. New
+  `FsBlobStore::sweep_stale_uploads`. **SemVer:** unreleased API.
 - *(transport-file)* Every ref write through `FileTransport`
   (`update_ref`/`write_ref`, and `LockedRefs::update_ref`, `delete_ref`,
   `write_file`, `remove_file`) refuses a root carrying

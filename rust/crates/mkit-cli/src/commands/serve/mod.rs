@@ -38,6 +38,9 @@ use stdio::StdioFrameSource;
 /// The default of `--idle-timeout-secs` (planner decision Q12).
 const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 60;
 
+/// The largest `--idle-timeout-secs` and `--max-session-secs`: 7 days.
+const MAX_TIMEOUT_SECS: u64 = 7 * 24 * 60 * 60;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "mkit serve",
@@ -49,10 +52,26 @@ struct ServeOpts {
     /// Path to the repository to serve.
     path: String,
     /// End the session after this many seconds without a byte from the
-    /// client; 0 disables the timeout. A slow upload that keeps sending
-    /// never trips it.
-    #[arg(long, value_name = "SECS", default_value_t = DEFAULT_IDLE_TIMEOUT_SECS)]
+    /// client; 0 disables the timeout (at most 604800, 7 days). A slow
+    /// upload that keeps sending never trips it.
+    #[arg(
+        long,
+        value_name = "SECS",
+        default_value_t = DEFAULT_IDLE_TIMEOUT_SECS,
+        value_parser = clap::value_parser!(u64).range(..=MAX_TIMEOUT_SECS)
+    )]
     idle_timeout_secs: u64,
+    /// End the process this many seconds after it starts, whatever the
+    /// client is doing; 0 (the default) disables the cap (at most 604800,
+    /// 7 days). It also bounds a client that trickles bytes or stops
+    /// reading, which the idle timeout does not.
+    #[arg(
+        long,
+        value_name = "SECS",
+        default_value_t = 0,
+        value_parser = clap::value_parser!(u64).range(..=MAX_TIMEOUT_SECS)
+    )]
+    max_session_secs: u64,
 }
 
 /// The listener flags `mkit serve` used to take, removed when the HTTP
@@ -90,10 +109,6 @@ const REPOSITORY: &str = "default";
 /// it. A live upload rewrites its temp file continuously; see
 /// [`sweep_crashed_uploads`].
 const STALE_UPLOAD_AGE: Duration = Duration::from_hours(1);
-
-/// How many directory entries the startup check for legacy ref files
-/// visits at most ([`FsLayoutStore::legacy_ref_files`]).
-const LEGACY_REF_SCAN_ENTRIES: usize = 4096;
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
@@ -139,7 +154,9 @@ pub fn run(args: &[String]) -> u8 {
         }
     };
 
-    warn_legacy_refs(&repo_root);
+    if opts.max_session_secs > 0 {
+        spawn_session_cap(Duration::from_secs(opts.max_session_secs));
+    }
 
     // Test-only fault injection for the mkit#703 SSH retry regression
     // test (`tests/ssh_retry_e2e.rs`): end right after a successful
@@ -212,47 +229,26 @@ fn sweep_crashed_uploads(repo_root: &Path) {
     let _ = FsBlobStore::new(repo_root).sweep_stale_uploads(STALE_UPLOAD_AGE);
 }
 
-/// Warn, on stderr (which ssh relays to the client), about ref files an
-/// older `mkit serve` wrote outside `refs/`. They are not served (R-86):
-/// a read or write of such a name is refused by name, and listings omit
-/// it. Nothing is moved or deleted.
-fn warn_legacy_refs(repo_root: &Path) {
-    let Ok(meta) = FsLayoutStore::open(repo_root, &repo_id()) else {
-        return; // `serve_stdio` reports why the root cannot be served.
-    };
-    let Ok(names) = meta.legacy_ref_files(LEGACY_REF_SCAN_ENTRIES) else {
-        return;
-    };
-    if let Some(message) = legacy_refs_warning(repo_root, &names) {
-        eprintln!("{message}");
+/// `--max-session-secs`: a thread that ends the process once `max` has
+/// passed. It must work while the main thread is blocked in a write to a
+/// client that stopped reading, so it ends the process rather than
+/// signalling the session. That is safe at any point: an upload's temp
+/// file is never visible (and is swept later), every ref write is one
+/// atomic rename, and the kernel releases the ref and serve locks.
+fn spawn_session_cap(max: Duration) {
+    let spawned = std::thread::Builder::new()
+        .name("mkit-serve-session-cap".to_owned())
+        .spawn(move || {
+            std::thread::sleep(max);
+            eprintln!(
+                "mkit serve: session exceeded --max-session-secs {}; closing",
+                max.as_secs()
+            );
+            std::process::exit(i32::from(exit::PROTOCOL_ERROR));
+        });
+    if let Err(e) = spawned {
+        eprintln!("mkit serve: --max-session-secs is not enforced: {e}");
     }
-}
-
-/// The warning for legacy ref files `names` under `repo_root`, if any.
-fn legacy_refs_warning(repo_root: &Path, names: &[String]) -> Option<String> {
-    const SHOWN: usize = 5;
-    if names.is_empty() {
-        return None;
-    }
-    let list = names
-        .iter()
-        .take(SHOWN)
-        .map(String::as_str)
-        .collect::<Vec<_>>()
-        .join(", ");
-    let more = match names.len().saturating_sub(SHOWN) {
-        0 => String::new(),
-        n => format!(" and {n} more"),
-    };
-    Some(format!(
-        "warning: mkit serve: {root} holds {n} ref file(s) outside refs/ ({list}{more}), written by \
-         an older `mkit serve`. They are not served: refs must be named under refs/ \
-         (SPEC-REFS §2). Move each under refs/, to the name clients use (a branch \
-         `main` is `refs/heads/main`: `mv {root}/main {root}/refs/heads/main`), or delete \
-         it.",
-        root = repo_root.display(),
-        n = names.len(),
-    ))
 }
 
 /// The repository `mkit serve` serves (see [`REPOSITORY`]).
@@ -332,6 +328,7 @@ where
         SessionEnd::Timeout => {
             let frame = mkit_rpc::ssh_error_frame(ErrorCode::InvalidRequest, "idle timeout");
             let _ = mkit_rpc::write_frame(&mut sink.0, &frame);
+            let _ = sink.0.flush();
             exit::PROTOCOL_ERROR
         }
     }

@@ -8,10 +8,10 @@
 //! |---|---|---|
 //! | `PackExists` | any | `exists = false` |
 //! | `ReadRef` | a name over 512 bytes | `INVALID_REQUEST "ref name too long"` |
-//! | `ReadRef` | a valid name outside `refs/` | `INVALID_REQUEST "ref name must start with refs/"` |
+//! | `ReadRef` | a valid name outside `refs/` | `INVALID_REQUEST`, [`REF_NAME_OUTSIDE_REFS`] |
 //! | `ReadRef` | any other | `INTERNAL "read ref failed"` |
 //! | `UpdateRef` | a name over 512 bytes | `INVALID_REQUEST "ref name too long"` |
-//! | `UpdateRef` | a valid name outside `refs/` | `INVALID_REQUEST "ref name must start with refs/"` |
+//! | `UpdateRef` | a valid name outside `refs/` | `INVALID_REQUEST`, [`REF_NAME_OUTSIDE_REFS`] |
 //! | `UpdateRef` | a CAS conflict | [`cas_conflict_body`] |
 //! | `UpdateRef` | any other | `INVALID_REQUEST "update ref failed"` |
 //! | `ListRefs` | any | `INTERNAL "list refs failed"` |

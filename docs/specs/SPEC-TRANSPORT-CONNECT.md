@@ -306,7 +306,7 @@ maps onto a standard Connect code:
 | `PackNotFound` | `not_found` | `DownloadPack` before any chunk is sent; `PackExists` never raises this (it returns `exists = false` instead). |
 | `AccessDenied` | `permission_denied`; a client also maps `unauthenticated` to `AccessDenied`. | Any RPC, when the deployment's write or namespace policy (§7.5) rejects an authenticated caller, or a ticket does not bind to the request (§7.6). |
 | `RefConflict` | `failed_precondition` | `UpdateRef` on a CAS mismatch, including deletion of an absent ref (§7.8). `AdvanceRefs` reports its conflicts as typed outcomes (§4), never as this error. |
-| `InvalidRef` | `invalid_argument` | Any RPC taking a ref name that fails SPEC-REFS §3. |
+| `InvalidRef` | `invalid_argument` | Any RPC taking a ref name that fails SPEC-REFS §3, or (`ReadRef`, `UpdateRef`, either name of `AdvanceRefs`) a name outside `refs/`, which a server does not serve (SPEC-REFS §2); that message starts `ref name must start with refs/`. |
 | `ConnectionFailed` | *(not server-raised &mdash; client-observed transport failure, for example TCP reset, deadline exceeded)* | &mdash; |
 | `ServerError{status}` | `unavailable` (5xx-equivalent), `resource_exhausted` (429-equivalent), or `aborted` (a client maps it to `ServerError{status: 503}`) | Deployment-specific overload / backend failure; `aborted` also answers a retry of an operation that is still in flight (§7.1). |
 | `InvalidResponse` | *(not server-raised &mdash; client-observed: malformed frame, wrong message on a streamed oneof, digest mismatch on `DownloadPack`)* | &mdash; |

@@ -31,18 +31,22 @@ pub const REF_NAME_TOO_LONG: &str = "ref name too long";
 /// `refs/mkit/packmap/`).
 pub const SERVED_REFS_PREFIX: &str = "refs/";
 
-/// The public message for a ref name outside [`SERVED_REFS_PREFIX`];
-/// `mkit serve` sends it as-is.
-pub const REF_NAME_OUTSIDE_REFS: &str = "ref name must start with refs/";
+/// The public message for a ref name outside [`SERVED_REFS_PREFIX`]
+/// (SPEC-REFS §2), on every binding; `mkit serve` sends it as-is. It
+/// points an operator whose repo holds such refs, written by an older
+/// `mkit serve`, to the migration notes (docs/CLI.md, "Refs outside
+/// `refs/`"); it names no server path.
+pub const REF_NAME_OUTSIDE_REFS: &str = "ref name must start with refs/ (refs outside refs/ \
+     written by older servers are no longer served; see the migration notes)";
 
 /// Whether the pipeline serves `name`: a valid ref name
 /// ([`validate_ref_name`]) under [`SERVED_REFS_PREFIX`].
 ///
 /// SPEC-REFS §3's grammar also admits names such as `main`, and the old
 /// `mkit serve` wrote them to `<root>/main` (so `packs/<hex>` could
-/// overwrite a pack). The pipeline refuses them on every read and write,
-/// by name, rather than storing them where the CLI cannot see them
-/// (reconciliation R-86). Listing prefixes are not restricted: a prefix
+/// overwrite a pack). SPEC-REFS §2 requires a transport server to refuse
+/// them on every read and write, by name, with
+/// [`REF_NAME_OUTSIDE_REFS`] (reconciliation R-86). Listing prefixes are not restricted: a prefix
 /// outside `refs/` simply lists nothing.
 #[must_use]
 pub fn is_served_ref_name(name: &str) -> bool {

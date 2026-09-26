@@ -1,6 +1,6 @@
 ---
 spec: SPEC-REFS
-version: 2
+version: 3
 status: stable-normative
 audience: implementers of compatible ref stores and transports
 ---
@@ -57,13 +57,34 @@ Hash value: 32 bytes of BLAKE3. Writer computes
 
 ## 2. Ref namespace
 
-Refs live under three namespaces:
+Refs live under `refs/`, in these namespaces:
 
 ```
 refs/heads/<name>                  branch refs
 refs/tags/<name>                   tag refs
 refs/remotes/<remote>/<name>       remote-tracking branch refs
+refs/mkit/packmap/<name>           pack map of branch <name> (pushed with it)
 ```
+
+**Served names.** A transport server (`mkit serve`, `mkit-server`, the
+Workers server) MUST serve only ref names under `refs/`. It MUST refuse
+any other name that passes the §3 grammar (for example `main`,
+`heads/main`) on every read and write (`ReadRef`, `UpdateRef` and both
+names of `AdvanceRefs`), before touching storage, with an explicit error:
+`invalid_argument` on Connect (SPEC-TRANSPORT-CONNECT §5) and
+`Error{ERROR_CODE_INVALID_REQUEST}` on the ssh frame protocol
+(SPEC-TRANSPORT §4.2.1), whose message starts `ref name must start with
+refs/`. It MUST NOT answer such a name as absent. A `ListRefs` prefix is
+not restricted: a prefix outside `refs/` lists nothing. A name that
+fails the §3 grammar is refused as §3 says. The local and client-side
+transports (file, s3, memory) are not servers and are unaffected.
+
+*Informative.* Every mkit client writes only `refs/heads/`, `refs/tags/`
+and `refs/mkit/packmap/` names. `mkit serve` before 0.5 stored any
+grammar-valid name as a file at the served root (`main` as
+`<root>/main`), so a third-party client could have left such files; they
+are no longer served, and `docs/CLI.md` ("Refs outside `refs/`") says how
+an operator finds and moves them. Version 3 added this rule.
 
 On local disk (`.mkit/refs/heads/<name>`, `.mkit/refs/tags/<name>`,
 `.mkit/refs/remotes/<remote>/<name>`). On transports, branch and tag refs

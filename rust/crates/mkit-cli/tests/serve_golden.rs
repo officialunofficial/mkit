@@ -4,8 +4,8 @@
 //! be the captured output byte for byte (with this build's version in the
 //! `HelloResponse`, the only frame that names it).
 //!
-//! Also: a repo holding ref files an older `mkit serve` wrote outside
-//! `refs/` gets a warning on stderr, and those names are refused.
+//! Also: a name outside `refs/` is refused by name, and
+//! `--max-session-secs` ends a session the client holds open.
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
@@ -164,11 +164,12 @@ fn session_2_is_byte_identical_through_the_binary() {
     assert_golden(&out, SESSION_2_OUT);
 }
 
-/// R-86: `<root>/main`, a ref an older `mkit serve` stored for the name
-/// `main`, is reported on stderr (which ssh relays to the client), a read
-/// of `main` is refused by name, and the file is left alone.
+/// R-86 (SPEC-REFS §2): `<root>/main`, a ref an older `mkit serve` stored
+/// for the name `main`, is not served: a read of `main` is refused by name,
+/// pointing at the migration notes. Nothing reaches stderr (no server path
+/// is sent to the client), and the file is left alone.
 #[test]
-fn legacy_root_level_refs_are_reported_and_refused() {
+fn refs_outside_refs_dir_are_refused_without_leaking_paths() {
     let td = repo_root();
     seed(td.path(), &[("refs/heads/main", [0x11; 32])], &[]);
     let wire = mkit_core::refs::encode_ref_wire(&[0x22; 32]);
@@ -189,15 +190,58 @@ fn legacy_root_level_refs_are_reported_and_refused() {
     }
     let out = mkit_serve(td.path(), &input);
     assert!(out.status.success(), "{out:?}");
-    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("1 ref file(s) outside refs/ (main)"),
-        "{stderr}"
+        out.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
     );
     let frames = decode(&out.stdout);
     let Some(Body::Error(e)) = &frames[1].body else {
         panic!("expected Error, got {:?}", frames[1].body);
     };
-    assert_eq!(e.message.as_deref(), Some("ref name must start with refs/"));
+    let message = e.message.as_deref().unwrap_or_default();
+    assert!(
+        message.starts_with("ref name must start with refs/"),
+        "{message}"
+    );
+    assert!(message.contains("migration notes"), "{message}");
     assert_eq!(fs::read(td.path().join("main")).unwrap(), wire);
+}
+
+/// `--max-session-secs` ends the process even while the client holds the
+/// session open and silent (with the idle timeout off), exit 76.
+#[test]
+fn max_session_secs_ends_a_held_session() {
+    let td = repo_root();
+    let xdg = tempfile::tempdir().unwrap();
+    let started = std::time::Instant::now();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_mkit"))
+        .args([
+            "serve",
+            "--idle-timeout-secs",
+            "0",
+            "--max-session-secs",
+            "1",
+        ])
+        .arg(td.path())
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", xdg.path())
+        .env_remove("MKIT_SERVE_ROOT")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Kept open (never written) until the process has exited.
+    let stdin = child.stdin.take().unwrap();
+    let out = child.wait_with_output().unwrap();
+    drop(stdin);
+    assert_eq!(out.status.code(), Some(76), "{out:?}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(30),
+        "{:?}",
+        started.elapsed()
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("--max-session-secs"), "{stderr}");
 }

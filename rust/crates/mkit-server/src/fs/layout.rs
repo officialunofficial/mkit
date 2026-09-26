@@ -70,8 +70,7 @@ enum Slot<'k> {
 /// R-86); they live in row files under `.mkit/server/rows/`, written under
 /// the same lock and invisible to the CLI and `FileTransport` (so a name
 /// like `packs/<hex>` can never overwrite a pack). Ref files an older
-/// `mkit serve` wrote outside `refs/` are not served;
-/// [`FsLayoutStore::legacy_ref_files`] finds them.
+/// `mkit serve` wrote outside `refs/` (`<root>/main`) are not served.
 ///
 /// `apply` takes the ref lock, reads the store clock (for a
 /// [`Precondition::NotAfter`]), checks every precondition and writes, all
@@ -168,70 +167,6 @@ impl FsLayoutStore {
     #[must_use]
     pub fn root(&self) -> &Path {
         self.tx.root()
-    }
-
-    /// Ref files outside `refs/` that an older `mkit serve` wrote: it
-    /// stored a ref named `main` as `<root>/main`. The pipeline serves only
-    /// `refs/` names (R-86), so such a ref is refused by name on a read or
-    /// write and missing from every listing; a server reports these files
-    /// so the operator can move them under `refs/` (or delete them).
-    ///
-    /// Walks the root, skipping `refs/`, `packs/` and every entry whose name
-    /// starts with `.` (`.mkit/` among them; no ref name component can),
-    /// and reports each regular file whose path is a ref name (the
-    /// SPEC-REFS §3 grammar) and whose content is a ref wire, sorted. The
-    /// walk stops after `max_entries` directory entries, so a large
-    /// worktree under the root is checked only in part. Never modifies
-    /// anything.
-    ///
-    /// # Errors
-    /// I/O listing the root itself; an unreadable entry below it is
-    /// skipped.
-    pub fn legacy_ref_files(&self, max_entries: usize) -> std::io::Result<Vec<String>> {
-        let root = self.root();
-        let mut found = Vec::new();
-        let mut seen = 0usize;
-        let mut dirs = vec![(root.to_path_buf(), String::new())];
-        let mut first = true;
-        while let Some((dir, prefix)) = dirs.pop() {
-            let entries = match fs::read_dir(&dir) {
-                Ok(entries) => entries,
-                Err(e) if first => return Err(e),
-                Err(_) => continue,
-            };
-            first = false;
-            for entry in entries {
-                seen += 1;
-                if seen > max_entries {
-                    found.sort();
-                    return Ok(found);
-                }
-                let Ok(entry) = entry else { continue };
-                let file_name = entry.file_name();
-                let Some(file_name) = file_name.to_str() else {
-                    continue;
-                };
-                let top_skip = prefix.is_empty() && matches!(file_name, "refs" | "packs");
-                if top_skip || file_name.starts_with('.') {
-                    continue;
-                }
-                let name = format!("{prefix}{file_name}");
-                // `DirEntry::file_type` does not follow a symlink.
-                let Ok(kind) = entry.file_type() else {
-                    continue;
-                };
-                if kind.is_dir() {
-                    dirs.push((entry.path(), format!("{name}/")));
-                } else if kind.is_file()
-                    && mkit_core::refs::validate_ref_name_grammar(&name)
-                    && holds_ref_wire(&entry.path())
-                {
-                    found.push(name);
-                }
-            }
-        }
-        found.sort();
-        Ok(found)
     }
 
     fn check_partition(&self, p: &Partition) -> Result<(), StoreError> {
@@ -435,20 +370,6 @@ impl FsLayoutStore {
         }
         Ok(BatchOutcome::Committed)
     }
-}
-
-/// Whether the file at `path` holds a ref wire (64 lowercase hex digits,
-/// optionally followed by whitespace), reading at most a few bytes more.
-fn holds_ref_wire(path: &Path) -> bool {
-    const MAX_WIRE: u64 = 80;
-    let Ok(file) = fs::File::open(path) else {
-        return false;
-    };
-    let mut bytes = Vec::new();
-    let read = std::io::Read::read_to_end(&mut std::io::Read::take(file, MAX_WIRE + 1), &mut bytes);
-    read.is_ok()
-        && bytes.len() as u64 <= MAX_WIRE
-        && mkit_core::refs::decode_ref_wire(&bytes).is_some()
 }
 
 /// Whether `name` is a ref this store keeps as a `FileTransport` ref file.

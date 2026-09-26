@@ -50,7 +50,8 @@ impl Activity {
     }
 
     fn last(&self) -> Instant {
-        self.base + Duration::from_millis(self.last_ms.load(Ordering::Relaxed))
+        let since = Duration::from_millis(self.last_ms.load(Ordering::Relaxed));
+        self.base.checked_add(since).unwrap_or(self.base)
     }
 }
 
@@ -120,7 +121,10 @@ impl FrameSource for StdioFrameSource {
         };
         let waiting_since = Instant::now();
         loop {
-            let deadline = waiting_since.max(self.activity.last()) + idle;
+            // A deadline past what `Instant` can hold is no deadline.
+            let Some(deadline) = waiting_since.max(self.activity.last()).checked_add(idle) else {
+                return self.rx.recv().unwrap_or_else(|_| Err(gone()));
+            };
             let Some(left) = deadline.checked_duration_since(Instant::now()) else {
                 return Err(FrameIoError::Timeout);
             };

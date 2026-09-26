@@ -1082,7 +1082,7 @@ Remote / sync:
   delta graph. Progress shows only when stderr is a tty; `-q`/`--quiet`
   forces it off, and `MKIT_PROGRESS=always`/`never` overrides the
   tty-detection explicitly (mirrors `NO_COLOR`/`CLICOLOR_FORCE`).
-- `mkit serve [--idle-timeout-secs <secs>] <path>` &mdash; internal SSH
+- `mkit serve [--idle-timeout-secs <secs>] [--max-session-secs <secs>] <path>` &mdash; internal SSH
   transport server. Speaks the mkit-rpc SSH framing on stdin/stdout (its
   only mode). Holds a shared `serve.lock` in `<path>/.mkit` for as long as
   the process is alive (any number of concurrent `serve` processes may
@@ -1096,15 +1096,16 @@ Remote / sync:
   the handshake, between requests or in the middle of an upload (whose
   partial pack is discarded): it answers `Error{INVALID_REQUEST, "idle
   timeout"}` and exits 76. An upload that keeps sending never trips it,
-  however slow. See [SSH-SECURITY.md](SSH-SECURITY.md) §4.
+  however slow. It bounds only a *silent* client: one that trickles bytes,
+  or stops reading a download, is not idle. For those, `--max-session-secs
+  <secs>` (default `0`, off) ends the process that long after it starts,
+  whatever the client is doing, exit 76; set it above your longest
+  legitimate clone or push. Both flags accept at most 604800 (7 days). See
+  [SSH-SECURITY.md](SSH-SECURITY.md) §4.
 
-  Refs are served only under `refs/` (SPEC-REFS §2). Older `mkit serve`
-  versions stored any valid name as a file at the root (`main` as
-  `<path>/main`); such a name is now refused by name ("ref name must start
-  with refs/"), and at startup `mkit serve` warns on stderr (which ssh
-  shows the client) about ref files it finds outside `refs/`, leaving them
-  in place: move each under `refs/` (e.g. `refs/heads/main`) or delete it.
-  At startup, when no other `mkit serve` or `mkit-server` is serving the
+  Refs are served only under `refs/` (SPEC-REFS §2). A read or write of
+  any other name is refused by name ("ref name must start with refs/ …");
+  see "Refs outside `refs/`" below. At startup, when no other `mkit serve` or `mkit-server` is serving the
   root, it also removes upload temp files (`packs/.<hex>.tmp.<pid>.<seq>`)
   that a crashed server left, once they are an hour old. A root served by
   `mkit-server --meta sqlite:` (marked `.mkit/server-meta`) is refused
@@ -1145,6 +1146,32 @@ Remote / sync:
   a user-scoped raw 32-byte key file; otherwise the client uses an
   ephemeral key. The default port advertised by `mkit+enc://` URLs when
   none is supplied is **9418**.
+
+  **Refs outside `refs/`.** `mkit serve` before 0.5 stored any
+  grammar-valid ref name as a file at the served root, so a name without
+  the `refs/` prefix (`main`, `heads/main`) became `<path>/main` or
+  `<path>/heads/main`. No mkit client ever wrote such names, but a
+  third-party client could have. Servers now serve only `refs/` names
+  (SPEC-REFS §2) and refuse others; they never read, move or delete these
+  files. To find candidates, with no server running against the root,
+  list the small files outside `.mkit/`, `refs/` and `packs/` that hold a
+  64-hex ref id, and review each one (a worktree file can match too):
+
+  ```sh
+  cd /srv/mkit/repo
+  find . -path ./.mkit -prune -o -path ./refs -prune -o -path ./packs -prune \
+    -o -type f -size -81c -exec grep -lxE '[0-9a-f]{64}' {} +
+  ```
+
+  Then move each real ref to the `refs/` name your clients use, without
+  overwriting an existing one (for a branch `main`, `refs/heads/main`):
+
+  ```sh
+  mkdir -p refs/heads && mv -n main refs/heads/main
+  ```
+
+  or delete it if nothing needs it. The same applies to a root served by
+  `mkit-server --repo-root` with the default `.mkit`-layout refs.
 - `mkit pack-shard <hash> [--out <dir>] [--force]` &mdash; encode a stored
   pack into Reed-Solomon shards plus a manifest, ready to publish to
   an HTTP / S3 origin. Producer side of the SPEC-PACK-SHARDS

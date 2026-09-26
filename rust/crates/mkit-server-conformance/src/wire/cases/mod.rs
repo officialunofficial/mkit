@@ -158,6 +158,7 @@ cases! {
     "refs.update_any_with_expected_id_invalid_argument" => refs::update_any_with_expected_id, M0, [], [];
     "refs.invalid_ref_name_invalid_argument" => refs::invalid_ref_name, M0, [], [];
     "refs.name_over_512_bytes_invalid_argument" => refs::name_over_512_bytes, M0, [], [];
+    "refs.non_refs_prefix_rejected" => refs::non_refs_prefix_rejected, M0, [], [];
     "refs.new_id_wrong_length_invalid_argument" => refs::new_id_wrong_length, M0, [], [];
     "refs.list_prefix_stripped" => refs::list_prefix_stripped, M0, [], [];
     "refs.list_prefix_component_boundary" => refs::list_prefix_component_boundary, M0, [], [];

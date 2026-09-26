@@ -821,7 +821,7 @@ fn open_refuses_a_root_marked_for_sqlite_meta() {
     assert!(message.contains("server-meta"), "{message}");
 }
 
-// ------------------------------------------------ crashed uploads, R-86
+// ------------------------------------------------------- crashed uploads
 
 /// Set `path`'s modification time `age` in the past.
 fn age_file(path: &Path, age: std::time::Duration) {
@@ -900,42 +900,4 @@ fn sweep_removes_only_old_upload_temp_files() {
         pack,
         "blobs are never touched"
     );
-}
-
-#[test]
-fn legacy_ref_files_finds_refs_outside_refs_dir() {
-    let td = TempDir::new().unwrap();
-    let root = td.path();
-    let tx = FileTransport::new(root);
-    tx.update_ref("refs/heads/main", RefWriteCondition::Any, &id(b"m"))
-        .unwrap();
-    let pack = b"pack".to_vec();
-    tx.upload_pack(&pack, &PackKey::new(hash(&pack))).unwrap();
-    fs::create_dir_all(root.join(".mkit")).unwrap();
-    let wire = mkit_core::refs::encode_ref_wire(&id(b"legacy"));
-    // What an older `mkit serve` wrote for `main` and `heads/dev`.
-    fs::write(root.join("main"), wire).unwrap();
-    fs::create_dir_all(root.join("heads")).unwrap();
-    fs::write(root.join("heads/dev"), wire).unwrap();
-    // Not legacy refs: another file, a hidden one, one under `.mkit`, and
-    // a ref-wire file whose name fails the grammar.
-    fs::write(root.join("README"), b"hello\n").unwrap();
-    fs::write(root.join(".hidden"), wire).unwrap();
-    fs::write(root.join(".mkit/stray"), wire).unwrap();
-    fs::write(root.join("bad name"), wire).unwrap();
-
-    let store = layout(root);
-    assert_eq!(
-        store.legacy_ref_files(10_000).unwrap(),
-        ["heads/dev", "main"]
-    );
-    // The walk is bounded.
-    assert!(store.legacy_ref_files(1).unwrap().len() <= 1);
-    // A root without legacy refs reports none.
-    let clean = TempDir::new().unwrap();
-    FileTransport::new(clean.path())
-        .update_ref("refs/heads/main", RefWriteCondition::Any, &id(b"m"))
-        .unwrap();
-    let clean = layout(clean.path());
-    assert!(clean.legacy_ref_files(10_000).unwrap().is_empty());
 }

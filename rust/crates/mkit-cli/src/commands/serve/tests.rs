@@ -1,5 +1,5 @@
 //! `mkit serve`'s own code: repo resolution, the stdio adapter and its idle
-//! timeout, the startup sweep and the legacy-ref warning. The session's
+//! timeout, the session cap flag and the startup sweep. The session's
 //! frame-level behavior is tested in `mkit-server` (`ssh::tests`); the
 //! golden sessions run through the real binary in `tests/serve_golden.rs`.
 
@@ -178,6 +178,54 @@ fn removed_listener_flag_names_the_first_removed_flag() {
         removed_listener_flag(&args(&["repo", "--idle-timeout-secs", "5"])),
         None
     );
+}
+
+/// Both timeout flags are bounded at 7 days; past that clap refuses the
+/// value (no `Instant` overflow can follow from a huge one).
+#[test]
+fn timeout_flags_are_bounded() {
+    let parse = |a: &[&str]| {
+        let args = a.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        clap_shim::parse::<ServeOpts>("mkit serve", &args)
+    };
+    let week = MAX_TIMEOUT_SECS.to_string();
+    let over = (MAX_TIMEOUT_SECS + 1).to_string();
+    for flag in ["--idle-timeout-secs", "--max-session-secs"] {
+        assert!(parse(&["repo", flag, &week]).is_ok(), "{flag}");
+        assert_eq!(
+            parse(&["repo", flag, &over]).unwrap_err(),
+            exit::DATAERR,
+            "{flag}"
+        );
+        let max = u64::MAX.to_string();
+        assert_eq!(
+            parse(&["repo", flag, &max]).unwrap_err(),
+            exit::DATAERR,
+            "{flag}"
+        );
+    }
+    let opts = parse(&["repo"]).unwrap();
+    assert_eq!(
+        opts.max_session_secs, 0,
+        "the session cap is off by default"
+    );
+    assert_eq!(
+        parse(&["repo", "--max-session-secs", "30"])
+            .unwrap()
+            .max_session_secs,
+        30
+    );
+}
+
+/// An idle timeout whose deadline an `Instant` cannot hold waits forever
+/// instead of panicking.
+#[test]
+fn a_huge_idle_timeout_does_not_overflow() {
+    let td = repo_root();
+    let input = Cursor::new(encode([hello(), close()]));
+    let (code, out) = serve(td.path(), input, Some(Duration::from_secs(u64::MAX)));
+    assert_eq!(code, exit::OK);
+    assert!(matches!(decode(&out)[0].body, Some(Body::HelloResponse(_))));
 }
 
 #[test]
@@ -388,20 +436,4 @@ fn startup_sweeps_crashed_uploads_only_when_no_server_holds_the_lock() {
     assert!(!stale.exists());
     assert!(!repo_lock::probe_exclusive(&dot_mkit, crate::commands::SERVE_LOCK).unwrap());
     drop(ours);
-}
-
-#[test]
-fn legacy_refs_warning_names_the_files_and_the_fix() {
-    let root = Path::new("/srv/repo");
-    assert_eq!(legacy_refs_warning(root, &[]), None);
-    let names: Vec<String> = ["main", "a", "b", "c", "d", "e", "f"]
-        .map(String::from)
-        .to_vec();
-    let w = legacy_refs_warning(root, &names).unwrap();
-    assert!(w.contains("7 ref file(s) outside refs/"), "{w}");
-    assert!(w.contains("(main, a, b, c, d and 2 more)"), "{w}");
-    assert!(
-        w.contains("mv /srv/repo/main /srv/repo/refs/heads/main"),
-        "{w}"
-    );
 }
