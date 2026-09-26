@@ -514,7 +514,10 @@ proptest! {
         let second = rewrite_excluding(&pack, &excluded, &mut bases.clone(), DecodeLimits::default()).unwrap();
         prop_assert_eq!(&first, &second);
         let expected: Vec<_> = original.into_iter().filter(|o| !excluded.contains(&o.0)).collect();
-        prop_assert_eq!(collect(&first.bytes, &mut bases.clone()), expected);
+        // Takedown property: the output decodes without any excluded base.
+        let mut scoped = bases.clone();
+        scoped.objects.retain(|id, _| !excluded.contains(id));
+        prop_assert_eq!(collect(&first.bytes, &mut scoped), expected);
         let mut seen = HashSet::new();
         let removed: Vec<_> = entries.iter().filter_map(|(id, _)| (excluded.contains(id) && seen.insert(*id)).then_some(*id)).collect();
         let rawified: Vec<_> = entries.iter().filter_map(|(id, base)| (!excluded.contains(id) && base.is_some_and(|base| excluded.contains(&base))).then_some(*id)).collect();

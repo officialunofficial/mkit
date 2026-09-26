@@ -811,7 +811,8 @@ and `rust/tests/golden/closure/neg_delta_entry.*` /
 **Always:** a pack rewrite drops every excluded entry and rawifies a surviving
 delta only when its direct base is excluded. Surviving bytes and entry order
 are preserved; an unchanged pack keeps its original bytes. Rewrites use the
-existing `DecodeLimits` charged-payload accounting and repository-scoped bases.
+existing `DecodeLimits` charged-payload accounting; the caller supplies
+repository-scoped bases.
 
 **Because:** deleting a delta base otherwise makes retained objects undecodable;
 transitive rawification adds size without improving decodability.

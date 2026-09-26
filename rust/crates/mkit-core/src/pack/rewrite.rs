@@ -2,8 +2,8 @@
 //!
 //! Rewrites are deterministic within a build's feature set. Native writers
 //! (`pack-zstd`) may compress entries; decode-only wasm writers emit v1 packs.
-//! Both preserve the same objects, but their pack bytes may differ. WP-5.7b
-//! pins rewrites to the native path for stable pack identities.
+//! Both preserve the same objects, but their pack bytes may differ. Callers
+//! that need stable pack ids should rewrite on a `pack-zstd` build.
 
 use super::{
     DecodeLimits, DecodedEntry, DeltaBaseSource, ENTRY_FRAME_LEN, HEADER_LEN, PackError,
