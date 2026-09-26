@@ -53,6 +53,7 @@ Useful extras:
 ```sh
 cargo install cargo-deny cargo-audit cargo-nextest    # supply-chain + faster tests
 cargo install cargo-mutants                           # mutation testing (see Test-first below)
+cargo install wasm-pack --locked --version 0.13.1    # wasm32 lane of `just ci-scripts`
 cargo deny check                                      # licenses, sources, advisories
 cargo audit                                           # RUSTSEC advisories
 ```

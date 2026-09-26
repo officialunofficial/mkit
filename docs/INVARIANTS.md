@@ -428,9 +428,10 @@ crafted pack yields on each runtime.
 
 **Consumers MUST:** a server that accepts a pushed pack through
 `pack-ruzstd` MUST NOT serve that pack's `0x03`/`0x04` frames verbatim to
-other clients unless the reference (C) decoder has accepted them. It
-serves server-derived bytes instead: raw v1 entries, or frames the server
-re-encoded itself. No consumer may assume two runtimes derive the same
+other clients unless the reference (C) decoder decodes them to the same
+bytes the server indexed (both decoders can accept a frame yet produce
+different bytes). Otherwise it MUST serve server-derived bytes instead:
+raw v1 entries, or frames the server re-encoded itself. No consumer may assume two runtimes derive the same
 object set from the same client-supplied compressed frames. Owners:
 WP-4.7 (indexed ingestion) and WP-4.8 (Workers verification), which
 enable `pack-ruzstd` first.
