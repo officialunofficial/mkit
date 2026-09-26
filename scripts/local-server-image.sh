@@ -6,8 +6,9 @@
 # WITHOUT pushing anything. It packs two locally built Linux binaries into
 # archives laid out as release.yml's build job lays them out (the binary,
 # the licenses, SHA256SUMS; a `.sha256` per archive), then runs
-# scripts/stage-server-image.sh and scripts/check-server-image.sh on them:
-# both platforms are built and inspected, the host's is run.
+# scripts/stage-server-image.sh and scripts/check-server-image.sh on them
+# (both platforms are built and inspected, the host's is run), and
+# scripts/verify-server-image-binaries.sh on the built images.
 #
 # Usage: scripts/local-server-image.sh <version> <x86_64-linux-binary> <aarch64-linux-binary>
 #
@@ -51,4 +52,10 @@ pack() {
 pack x86_64-unknown-linux-gnu "$2"
 pack aarch64-unknown-linux-gnu "$3"
 bash "${ROOT}/scripts/stage-server-image.sh" "$WORK" "$VERSION" "${WORK}/context"
-bash "${ROOT}/scripts/check-server-image.sh" "${WORK}/context" "$VERSION" linux/amd64 linux/arm64
+trap 'docker image rm mkit-server:check-amd64 mkit-server:check-arm64 >/dev/null 2>&1 || true; rm -rf "$WORK"' EXIT
+MKIT_IMAGE_CHECK_KEEP=1 bash "${ROOT}/scripts/check-server-image.sh" "${WORK}/context" "$VERSION" linux/amd64 linux/arm64
+# As release.yml does on the pushed digest, from the local images instead.
+for ARCH in amd64 arm64; do
+  MKIT_IMAGE_PULL=missing bash "${ROOT}/scripts/verify-server-image-binaries.sh" \
+    "mkit-server:check-${ARCH}" "$WORK" "$VERSION" "$ARCH"
+done

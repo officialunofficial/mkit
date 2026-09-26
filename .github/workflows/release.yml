@@ -82,6 +82,7 @@ jobs:
       tag_object: ${{ steps.validate.outputs.tag_object }}
       commit: ${{ steps.validate.outputs.commit }}
       version: ${{ steps.validate.outputs.version }}
+      newest_of_minor: ${{ steps.validate.outputs.newest_of_minor }}
     steps:
       - name: Checkout release refs
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -203,11 +204,28 @@ jobs:
           fi
 
           VERSION="${TAG#v}"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "ref=${REF}" >> "$GITHUB_OUTPUT"
-          echo "tag_object=${TAG_OBJECT}" >> "$GITHUB_OUTPUT"
-          echo "commit=${TAG_COMMIT}" >> "$GITHUB_OUTPUT"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+          # Whether this is a final release and the highest final vX.Y.* tag
+          # (tags were fetched above): only then may the image's X.Y tag
+          # move to it, so re-running an old tag never moves X.Y backwards.
+          NEWEST_OF_MINOR=false
+          if [[ "${TAG}" =~ ^v([0-9]+)\.([0-9]+)\.[0-9]+$ ]]; then
+            MINOR_LINE="v${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+            HIGHEST="$(git tag -l "${MINOR_LINE}.*" | grep -E "^${MINOR_LINE//./\\.}\.[0-9]+$" | sort -V | tail -n1)"
+            if [ "${HIGHEST}" = "${TAG}" ]; then
+              NEWEST_OF_MINOR=true
+            fi
+          fi
+          echo "newest_of_minor=${NEWEST_OF_MINOR}"
+
+          {
+            echo "tag=${TAG}"
+            echo "ref=${REF}"
+            echo "tag_object=${TAG_OBJECT}"
+            echo "commit=${TAG_COMMIT}"
+            echo "version=${VERSION}"
+            echo "newest_of_minor=${NEWEST_OF_MINOR}"
+          } >> "$GITHUB_OUTPUT"
 
   build:
     name: Build ${{ matrix.target }}
@@ -227,8 +245,12 @@ jobs:
           - target: x86_64-apple-darwin
             runner: macos-14
             archive_ext: tar.gz
+          # Both Linux legs on Ubuntu 24.04 explicitly: the binaries link
+          # the runner's glibc symbol versions, which the container image's
+          # base (Debian 13, glibc 2.41) must provide. A floating
+          # ubuntu-latest could move past it.
           - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
             archive_ext: tar.gz
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
@@ -634,13 +656,19 @@ jobs:
   # (contrib/docker/mkit-server/Dockerfile, which has no RUN step, so no
   # QEMU). The image therefore carries exactly the signed bytes.
   #
-  # Permissions are split between the two image jobs: this one runs the
-  # repo's scripts and the image build and pushes (`packages: write`, no
-  # OIDC); container-sign signs (OIDC) and checks nothing out. No Rust cache
-  # is restored here. No `latest` tag while the repo is private (Q9). The
-  # image's org.opencontainers.image.source label links the package to the
-  # repo; its visibility is checked by hand after the first push
-  # (docs/RELEASE.md, "ghcr.io package").
+  # Three jobs, so that an image is only ever TAGGED once it is signed:
+  # - container (`packages: write`, no OIDC) runs the repo's scripts and the
+  #   build, and pushes by digest only (no tag), then checks that each
+  #   platform of the pushed digest holds the archive's exact binary;
+  # - container-sign (OIDC; no checkout, no build, no docker action) signs
+  #   and attests that digest and verifies the result;
+  # - container-tag (`packages: write`, no OIDC) then points X.Y.Z (and
+  #   X.Y, when this is the newest X.Y.* release) at the digest, and reports
+  #   whether anonymous users can pull it.
+  # A failure anywhere leaves at most an untagged digest in the registry,
+  # and the release notes say so. No Rust cache is restored in any of them.
+  # No `latest` tag (Q9, pending). The image's
+  # org.opencontainers.image.source label links the package to the repo.
   container:
     name: Build and push container image
     runs-on: ubuntu-latest
@@ -654,19 +682,6 @@ jobs:
       VERSION: ${{ needs.validate-release-tag.outputs.version }}
       COMMIT: ${{ needs.validate-release-tag.outputs.commit }}
     steps:
-      - name: Resolve image tags
-        id: meta
-        shell: bash
-        run: |
-          set -euo pipefail
-          TAGS="${IMAGE_NAME}:${VERSION}"
-          # A final release also moves <major>.<minor>; a pre-release does not.
-          if [[ "${VERSION}" =~ ^([0-9]+)\.([0-9]+)\.[0-9]+$ ]]; then
-            TAGS="${TAGS},${IMAGE_NAME}:${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
-          fi
-          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
-          echo "image tags: ${TAGS}"
-
       - name: Checkout (at resolved tag)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -725,17 +740,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # By digest only: no tag exists until container-tag, after signing.
       # provenance/sbom off: container-sign attaches GitHub's provenance
       # attestation and the CycloneDX SBOM below, both signed.
-      - name: Build and push
+      - name: Build and push by digest
         id: push
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
         with:
           context: image-context
           file: contrib/docker/mkit-server/Dockerfile
           platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,oci-mediatypes=true,push=true
           build-args: |
             VERSION=${{ env.VERSION }}
             REVISION=${{ env.COMMIT }}
@@ -756,6 +771,16 @@ jobs:
             exit 1
           fi
           echo "${IMAGE_NAME}@${DIGEST}: ${PLATFORMS}"
+
+      # Before anything signs the digest: each platform's
+      # /usr/local/bin/mkit-server, pulled back from the registry, must hash
+      # to the `./mkit-server` entry of the cosign-verified archive's
+      # SHA256SUMS. Fails closed.
+      - name: Check the pushed binaries against the archives
+        shell: bash
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: bash scripts/verify-server-image-binaries.sh "${IMAGE_NAME}@${DIGEST}" archives "${VERSION}"
 
       # The image's own SBOM (the distroless packages plus the binary), for
       # the linux/amd64 variant; the arm64 one differs only in architecture.
@@ -784,9 +809,9 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # Signs the pushed digest. The only job holding both `id-token: write` and
-  # `packages: write`; it checks nothing out and builds nothing, running
-  # cosign, GitHub's attest action and docker login only.
+  # Signs the pushed digest. The only image job holding `id-token: write`;
+  # it checks nothing out, builds nothing and runs no docker action: only
+  # cosign (which also logs in to ghcr.io) and GitHub's attest action.
   container-sign:
     name: Sign and attest container image
     runs-on: ubuntu-latest
@@ -816,12 +841,13 @@ jobs:
         with:
           cosign-release: v2.4.1
 
+      # cosign writes the credential to ~/.docker/config.json, where the
+      # attest action's registry push also finds it.
       - name: Log in to ghcr.io
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "${GITHUB_TOKEN}" | cosign login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
 
       - name: Sign the image with cosign (keyless OIDC)
         shell: bash
@@ -855,6 +881,60 @@ jobs:
           cosign verify-attestation --type cyclonedx "${IDENTITY[@]}" "${IMAGE_NAME}@${DIGEST}" > /dev/null
           echo "${IMAGE_NAME}@${DIGEST}: signature and SBOM attestation verify"
 
+  # Tags the signed digest: X.Y.Z always, X.Y only for a final release that
+  # is the newest of its X.Y line (so re-running an old tag never moves it
+  # back). The exact manifest bytes are PUT under each tag and each tag is
+  # checked to resolve to the digest (scripts/ghcr-image.sh). Then it
+  # reports, without failing, whether an anonymous client can pull the
+  # digest: package visibility is a manual setting (docs/RELEASE.md).
+  container-tag:
+    name: Tag container image
+    runs-on: ubuntu-latest
+    needs: [validate-release-tag, container, container-sign]
+    permissions:
+      contents: read
+      packages: write       # add tags to the image
+    outputs:
+      tags: ${{ steps.tag.outputs.tags }}
+      public: ${{ steps.public.outputs.public }}
+    env:
+      DIGEST: ${{ needs.container.outputs.digest }}
+      VERSION: ${{ needs.validate-release-tag.outputs.version }}
+      NEWEST_OF_MINOR: ${{ needs.validate-release-tag.outputs.newest_of_minor }}
+      COMMIT: ${{ needs.validate-release-tag.outputs.commit }}
+    steps:
+      - name: Checkout (at resolved tag)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ env.COMMIT }}
+          persist-credentials: false
+
+      - name: Tag the signed digest
+        id: tag
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAGS=("${VERSION}")
+          if [ "${NEWEST_OF_MINOR}" = "true" ]; then
+            [[ "${VERSION}" =~ ^([0-9]+)\.([0-9]+)\.[0-9]+$ ]]
+            TAGS+=("${BASH_REMATCH[1]}.${BASH_REMATCH[2]}")
+          fi
+          bash scripts/ghcr-image.sh tag "${IMAGE_NAME#ghcr.io/}" "${DIGEST}" "${TAGS[@]}"
+          echo "tags=${TAGS[*]}" >> "$GITHUB_OUTPUT"
+
+      - name: Check anonymous pull
+        id: public
+        shell: bash
+        run: |
+          if bash scripts/ghcr-image.sh check-public "${IMAGE_NAME#ghcr.io/}" "${DIGEST}"; then
+            echo "public=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "public=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=mkit-server image is not public::Anonymous clients cannot pull ${IMAGE_NAME}@${DIGEST}. Make the ghcr.io package public (docs/RELEASE.md, \"ghcr.io package\")."
+          fi
+
   release:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
@@ -862,7 +942,7 @@ jobs:
     # but does not depend on them: a failed image build or push must not
     # block the binary release. The release then ships without the image
     # section (the run still fails, so it is noticed).
-    needs: [validate-release-tag, build, sbom, third-party-notices, container, container-sign]
+    needs: [validate-release-tag, build, sbom, third-party-notices, container, container-sign, container-tag]
     if: >-
       ${{ !cancelled()
       && needs.validate-release-tag.result == 'success'
@@ -980,29 +1060,49 @@ jobs:
             --output-certificate SHA256SUMS.crt \
             SHA256SUMS
 
-      # The notes' container section: the digest and how to verify it when
-      # container-sign succeeded, else one line saying there is no image.
+      # The notes' container section, stating what the container jobs
+      # actually published: a signed and tagged image; a signed image
+      # reachable by digest only (tagging failed); an unsigned, untagged
+      # digest (signing failed: do not use); or nothing.
       - name: Container image notes
         id: image
         shell: bash
         env:
-          IMAGE_SIGNED: ${{ needs.container-sign.result }}
+          PUSHED: ${{ needs.container.result }}
+          SIGNED: ${{ needs.container-sign.result }}
+          TAGGED: ${{ needs.container-tag.result }}
+          TAGS: ${{ needs.container-tag.outputs.tags }}
+          PUBLIC: ${{ needs.container-tag.outputs.public }}
           DIGEST: ${{ needs.container.outputs.digest }}
           VERSION: ${{ steps.meta.outputs.version }}
         run: |
           set -euo pipefail
           NOTES="${RUNNER_TEMP}/image-notes.md"
-          if [ "${IMAGE_SIGNED}" = "success" ] && [[ "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            sed -e "s|__IMAGE__|${IMAGE_NAME}|g" -e "s|__DIGEST__|${DIGEST}|g" -e "s|__VERSION__|${VERSION}|g" \
+          if ! [[ "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            DIGEST=""
+          fi
+          if [ "${SIGNED}" = "success" ] && [ -n "${DIGEST}" ]; then
+            if [ "${TAGGED}" = "success" ]; then
+              PULL="__IMAGE__:__VERSION__@__DIGEST__"
+              STATE="Tags: \`${TAGS// /\`, \`}\` (no \`latest\`)."
+              if [ "${PUBLIC}" != "true" ]; then
+                STATE="${STATE} When this release was published the package was not yet public, so pulls needed \`docker login ghcr.io\`."
+              fi
+            else
+              PULL="__IMAGE__@__DIGEST__"
+              STATE="**Tagging failed:** the image is signed but has no tag; pull it by digest."
+            fi
+            sed -e "s|__STATE__|${STATE}|" -e "s|__PULL__|${PULL}|g" \
+              -e "s|__IMAGE__|${IMAGE_NAME}|g" -e "s|__DIGEST__|${DIGEST}|g" -e "s|__VERSION__|${VERSION}|g" \
               > "${NOTES}" <<'NOTES_EOF'
           ### Container image
 
           `mkit-server` is also published as a multi-arch image (linux/amd64,
           linux/arm64): distroless, non-root, built from the two Linux
-          `mkit-server` archives above (no separate compile).
+          `mkit-server` archives above (no separate compile). __STATE__
 
           ```sh
-          docker pull __IMAGE__:__VERSION__@__DIGEST__
+          docker pull __PULL__
           ```
 
           Pull it by digest. The digest is signed with cosign keyless and
@@ -1012,15 +1112,25 @@ jobs:
 
           ```sh
           cosign verify __IMAGE__@__DIGEST__ \
-            --certificate-identity-regexp '^https://github\.com/officialunofficial/mkit/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$' \
+            --certificate-identity "https://github.com/officialunofficial/mkit/.github/workflows/release.yml@refs/tags/v__VERSION__" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
           gh attestation verify oci://__IMAGE__@__DIGEST__ --repo officialunofficial/mkit
           ```
 
           How to run it: [`docs/CONTAINER.md`](https://github.com/officialunofficial/mkit/blob/v__VERSION__/docs/CONTAINER.md).
           NOTES_EOF
+          elif [ "${PUSHED}" = "success" ] && [ -n "${DIGEST}" ]; then
+            {
+              echo "### Container image"
+              echo
+              echo "**No signed \`mkit-server\` image was published for this release:** signing failed. An unsigned, untagged digest (\`${DIGEST}\`) may remain in \`${IMAGE_NAME}\`; do not use it."
+            } > "${NOTES}"
           else
-            echo "No \`mkit-server\` container image was published for this release: the container jobs did not succeed." > "${NOTES}"
+            {
+              echo "### Container image"
+              echo
+              echo "No \`mkit-server\` container image was published for this release: the image build or push failed."
+            } > "${NOTES}"
           fi
           {
             echo "notes<<MKIT_IMAGE_NOTES_EOF"

@@ -11,7 +11,8 @@ storage backends, limits) is documented in the operator guide,
 | | |
 | --- | --- |
 | Name | `ghcr.io/officialunofficial/mkit-server` |
-| Tags | `X.Y.Z`, and `X.Y` for a final release. There is **no `latest` tag** while the repository is private. |
+| Tags | `X.Y.Z`, and `X.Y`, which follows the newest final `X.Y.*` release. There is **no `latest` tag**. Tags are applied only after the digest is signed. |
+| Visibility | Public: pull without logging in |
 | Platforms | `linux/amd64`, `linux/arm64` |
 | Base | `gcr.io/distroless/cc-debian13:nonroot`, pinned by digest: a few Debian 13 libraries (glibc 2.41, `libgcc_s`, …) and CA certificates, no shell, no package manager |
 | Binary | `/usr/local/bin/mkit-server`, exactly the binary of the signed `mkit-server-X.Y.Z-<target>.tar.gz` release archive. It is not recompiled. |
@@ -26,47 +27,49 @@ subcommands through the entrypoint:
 docker run --rm --entrypoint /usr/local/bin/mkit-server "$IMAGE" version
 ```
 
-While the repository is private, the package is private too. Run `docker
-login ghcr.io` with a token that has `read:packages` first.
-
 ## Verify, then pull by digest
 
 The release notes give the image digest. Verify the digest (cosign
 signature, SLSA provenance, SBOM attestation) as
-[`docs/RELEASE.md`](RELEASE.md#verify-the-container-image) shows, and then
-deploy that digest, not a tag:
+[`docs/RELEASE.md`](RELEASE.md#verify-the-container-image) shows, pinning
+the signer identity to the exact release tag, and then deploy that digest,
+not a tag:
 
 ```sh
+VERSION=X.Y.Z
 IMAGE=ghcr.io/officialunofficial/mkit-server@sha256:...   # from the release notes
 cosign verify "$IMAGE" \
-  --certificate-identity-regexp '^https://github\.com/officialunofficial/mkit/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$' \
+  --certificate-identity "https://github.com/officialunofficial/mkit/.github/workflows/release.yml@refs/tags/v${VERSION}" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
 ```
 
 ## Quick start
 
 ```sh
-# The served root: a directory holding `.mkit`, writable by uid 65532.
-# `mkit init` creates `.mkit`; an empty `.mkit` directory is all the server
-# checks for.
-sudo mkdir -p /srv/mkit/root/.mkit
-sudo chown -R 65532:65532 /srv/mkit
+# Data: the served root (a directory holding `.mkit`) and the SQLite file,
+# writable by uid 65532. `mkit init` creates `.mkit`; an empty `.mkit`
+# directory is all the server checks for.
+sudo mkdir -p /srv/mkit/data/root/.mkit
+sudo chown -R 65532:65532 /srv/mkit/data
 
-# The bearer token: a regular file, owned by 65532, mode 600.
-sudo install -o 65532 -g 65532 -m 600 /dev/null /srv/mkit/token
-openssl rand -hex 32 | sudo tee /srv/mkit/token > /dev/null
+# The bearer token, outside the data volume: a regular file owned by
+# 65532, mode 600, mounted read-only on its own.
+sudo mkdir -p /etc/mkit-server
+sudo install -o 65532 -g 65532 -m 600 /dev/null /etc/mkit-server/token
+openssl rand -hex 32 | sudo tee /etc/mkit-server/token > /dev/null
 
 docker run -d --name mkit-server \
   --read-only --tmpfs /tmp \
   --cap-drop ALL --security-opt no-new-privileges \
   --stop-timeout 40 \
   -p 127.0.0.1:8080:8080 \
-  -v /srv/mkit:/srv/mkit \
+  -v /srv/mkit/data:/data \
+  -v /etc/mkit-server/token:/run/secrets/mkit-token:ro \
   "$IMAGE" \
   --listen 0.0.0.0:8080 \
-  --repo-root /srv/mkit/root \
-  --meta sqlite:/srv/mkit/meta.sqlite \
-  --bearer-token-file /srv/mkit/token \
+  --repo-root /data/root \
+  --meta sqlite:/data/meta.sqlite \
+  --bearer-token-file /run/secrets/mkit-token \
   --log-format json
 ```
 
@@ -140,7 +143,7 @@ Never pass a secret on the command line; the server has no flag for one.
   `pods/exec`.
 - **The enc server key** has no environment alternative. Keep it on the
   persistent volume and let the server create it on the first start
-  (`--enc-server-key /srv/mkit/keys/enc/server.key`): it must survive
+  (`--enc-server-key /data/keys/enc/server.key`): it must survive
   restarts, since clients pin its public half. With a Kubernetes `fsGroup`,
   set `fsGroupChangePolicy: OnRootMismatch`. The default policy re-applies
   group permissions to every file at each mount, which gives the key group
@@ -158,16 +161,12 @@ binary has no probe subcommand. Probe from outside instead.
 authentication (each store's probe is cached for one second), over gRPC
 (h2c), Connect and JSON:
 
-- **Kubernetes:** a native gRPC probe.
-
-  ```yaml
-  livenessProbe:
-    grpc:
-      port: 8080
-  readinessProbe:
-    grpc:
-      port: 8080
-  ```
+- **Kubernetes:** a native gRPC probe for **readiness only**. Health
+  reports the stores' state, so it turns `NOT_SERVING` when a store (the
+  S3 bucket, the disk) is unavailable. That should take the pod out of
+  service, not restart it: a liveness probe on it would restart-loop the
+  pod through every storage outage. Use a TCP check for liveness (see
+  [Kubernetes](#kubernetes)).
 
 - **Docker, a load balancer, or a monitor:**
 
@@ -179,6 +178,74 @@ authentication (each store's probe is cached for one second), over gRPC
 
 - An enc-only deployment has no health endpoint; use a TCP check on its
   port.
+
+## Kubernetes
+
+A fragment of a single-replica Deployment serving HTTP with SQLite
+metadata. It is not a complete manifest: add the volume claim, a Service
+and the reverse proxy in front.
+
+```yaml
+spec:
+  replicas: 1                    # one server process per root
+  strategy:
+    type: Recreate               # the old pod releases the root's lock first
+  template:
+    spec:
+      terminationGracePeriodSeconds: 45   # above --shutdown-grace-secs
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mkit-server
+          image: ghcr.io/officialunofficial/mkit-server@sha256:...   # verified digest
+          args:
+            - --listen=0.0.0.0:8080
+            - --repo-root=/data/root
+            - --meta=sqlite:/data/meta.sqlite
+            - --log-format=json
+          env:
+            - name: MKIT_API_TOKEN           # Secret volumes are symlinks
+              valueFrom:
+                secretKeyRef:
+                  name: mkit-server
+                  key: api-token
+          ports:
+            - name: http
+              containerPort: 8080
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            grpc:
+              port: 8080
+          livenessProbe:
+            tcpSocket:
+              port: 8080
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: mkit-server-data
+        - name: tmp
+          emptyDir: {}
+```
+
+The served root needs its `.mkit` directory before the first start. The
+image has no shell, so create it with `mkdir -p /data/root/.mkit` from an
+init container using a small image with one (busybox, say), running as
+65532.
 
 ## In front of the server
 

@@ -95,34 +95,52 @@ allowlisted release fingerprint, and points at a commit reachable from
    to `main` (and pushes to it), and checks the golden list is current, so
    drift shows up before a tag rather than at it.
 
-2. **Container image** `ghcr.io/officialunofficial/mkit-server:X.Y.Z` (and
-   `:X.Y` for a final release; **no `latest` tag** while the repository is
-   private), for `linux/amd64` and `linux/arm64`. The `container` job builds
-   it from the two Linux `mkit-server` archives above, not by a second
-   compile: it verifies each archive's cosign bundle (identity: this
-   workflow at this tag and commit), checks every copied file against the
-   archive's `.sha256` and its internal `SHA256SUMS`
-   ([`scripts/stage-server-image.sh`](../scripts/stage-server-image.sh)),
-   and `COPY`s the binary into `gcr.io/distroless/cc-debian13:nonroot`
-   (pinned by digest,
-   [`contrib/docker/mkit-server/Dockerfile`](../contrib/docker/mkit-server/Dockerfile)).
-   Before pushing, it builds both platforms and runs the amd64 image
-   ([`scripts/check-server-image.sh`](../scripts/check-server-image.sh)).
-   The `container-sign` job then signs the pushed digest with cosign
-   keyless and attaches a SLSA build provenance attestation and a CycloneDX
-   SBOM attestation; the SBOM is also a release asset
-   (`mkit-server-image.sbom.cdx.json`, in `SHA256SUMS`), and the release
-   notes carry the digest. Only `container` and `container-sign` hold
-   `packages: write`; only `container-sign`, which checks nothing out and
-   builds nothing, holds `id-token: write`. A failed image does not block
-   the binary release: `release` still publishes, without the image
-   section. Running the image: [`docs/CONTAINER.md`](CONTAINER.md).
+2. **Container image** `ghcr.io/officialunofficial/mkit-server:X.Y.Z`, for
+   `linux/amd64` and `linux/arm64`, public so anyone can pull it. `:X.Y`
+   also moves to it when it is a final release and the newest of its `X.Y`
+   line (`validate-release-tag`'s `newest_of_minor`), so re-running an old
+   tag never moves `X.Y` back. There is **no `latest` tag** (Q9, pending).
+   Three jobs publish it, and a tag only ever names a signed digest:
+   - `container` (`packages: write`, no OIDC) builds it from the two Linux
+     `mkit-server` archives above, not by a second compile. It verifies
+     each archive's cosign bundle (identity: this workflow at this tag and
+     commit), checks every copied file against the archive's `.sha256` and
+     its internal `SHA256SUMS`
+     ([`scripts/stage-server-image.sh`](../scripts/stage-server-image.sh)),
+     and `COPY`s the binary into `gcr.io/distroless/cc-debian13:nonroot`
+     (pinned by digest,
+     [`contrib/docker/mkit-server/Dockerfile`](../contrib/docker/mkit-server/Dockerfile)).
+     Before pushing, it builds both platforms and runs the amd64 image
+     ([`scripts/check-server-image.sh`](../scripts/check-server-image.sh)).
+     It pushes **by digest only**, with no tag, then pulls each platform
+     back and checks its `/usr/local/bin/mkit-server` against the
+     archive's `SHA256SUMS`
+     ([`scripts/verify-server-image-binaries.sh`](../scripts/verify-server-image-binaries.sh)).
+   - `container-sign` (`id-token: write`; no checkout, no build, no docker
+     action; it logs in with `cosign login`) signs the digest with cosign
+     keyless, attaches a SLSA build provenance attestation and a CycloneDX
+     SBOM attestation, and verifies both. The SBOM is also a release asset
+     (`mkit-server-image.sbom.cdx.json`, in `SHA256SUMS`).
+   - `container-tag` (`packages: write`, no OIDC) then points the tags at
+     the digest, putting the exact manifest bytes under each tag and
+     checking each resolves to the digest
+     ([`scripts/ghcr-image.sh`](../scripts/ghcr-image.sh)). It also checks
+     that an anonymous client can pull the digest, and raises a workflow
+     warning (without failing) when the package is not public.
 
-   The base is Debian 13 (glibc 2.41), not Debian 12: the release binaries
-   are built on `ubuntu-24.04` runners, and `aws-lc-sys` (rustls's crypto
-   provider) links glibc 2.38 symbols, which Debian 12's glibc 2.36 lacks.
-   The stage script refuses a binary that needs a newer glibc than the
-   base's, or any shared library besides glibc and `libgcc_s`.
+   A failed image does not block the binary release: `release` still
+   publishes, and its notes state what was published (a signed and tagged
+   image; a signed image reachable by digest only; an unsigned, untagged
+   digest not to be used; or nothing). Running the image:
+   [`docs/CONTAINER.md`](CONTAINER.md).
+
+   The base is Debian 13 (glibc 2.41), not Debian 12 (glibc 2.36): both
+   Linux release legs run on `ubuntu-24.04` (pinned, glibc 2.39), and the
+   binaries may reference any glibc symbol version up to that. Today's
+   already need 2.38 (`aws-lc-sys`, rustls's crypto provider, links
+   `__isoc23_strtol` and `__isoc23_sscanf`). The stage script refuses a
+   binary that needs a newer glibc than the base's, or any shared library
+   besides glibc and `libgcc_s`.
 
 3. **npm package** `@officialunofficial/mkit-wasm@X.Y.Z`. Built with
    `wasm-pack --target bundler` and published with `npm publish --access
@@ -196,7 +214,9 @@ image's config (user `65532:65532`, entrypoint `mkit-server serve`, the
 version label), and on the host's platform runs `mkit-server version`
 and `serve --help` and confirms there is no shell. With
 `MKIT_IMAGE_CHECK_RUN_ALL=1` and emulation (Docker Desktop has it) it runs
-both platforms.
+both platforms. Last, `scripts/verify-server-image-binaries.sh` copies each
+image's binary out and compares it with the archive's `SHA256SUMS`, as the
+release does on the pushed digest.
 
 The binaries must be built the way `release.yml` builds them, on a glibc
 no newer than the runners' (Ubuntu 24.04). From any Docker host, in an
@@ -247,9 +267,11 @@ reads foreign ELF files (llvm-objdump, the macOS default).
 - [ ] `mkit-X.Y.Z.provenance.jsonl` (SLSA build provenance) present, and
       `gh attestation verify <archive> --repo officialunofficial/mkit`
       succeeds for at least one archive.
-- [ ] `container` and `container-sign` succeeded; the release notes'
-      "Container image" section names the digest, and
-      `mkit-server-image.sbom.cdx.json` is attached.
+- [ ] `container`, `container-sign` and `container-tag` succeeded; the
+      release notes' "Container image" section names the digest and the
+      tags, and `mkit-server-image.sbom.cdx.json` is attached.
+- [ ] `container-tag` raised no "mkit-server image is not public" warning
+      (if it did, see [ghcr.io package](#ghcrio-package-mkit-server-image)).
 
 ### Smoke test
 
@@ -316,10 +338,12 @@ disagree, fix the script:
 
 - [ ] Open a PR bumping `CHANGELOG.md` with a fresh `## [Unreleased]` heading at
       the top.
-- [ ] In the org's Packages, check `mkit-server`: its visibility (private
-      while the repository is private) and that it is linked to
+- [ ] In the org's Packages, check `mkit-server`: it is **public**, so
+      users can pull it without logging in, and it is linked to
       `officialunofficial/mkit` (the image's
-      `org.opencontainers.image.source` label links it on first push). This
+      `org.opencontainers.image.source` label links it on first push).
+      `docker logout ghcr.io && docker pull
+      ghcr.io/officialunofficial/mkit-server@<digest>` must succeed. This
       is a human check after every release that creates or changes the
       package.
 - [ ] File follow-up issues for anything discovered during smoke test.
@@ -349,8 +373,9 @@ disagree, fix the script:
    `origin/main`.
 5. Watch the workflows. `release.yml` job order is:
    `validate-release-tag` → `build` (× 4 archs, `mkit` + `mkit-server`) → `sbom` / `third-party-notices` /
-   `container` → `container-sign` (parallel) → `release` → `publish-wasm`.
-   `release` waits for the container jobs but runs even if they fail. `crates-publish.yml` runs `cargo
+   `container` → `container-sign` → `container-tag` (parallel) → `release` →
+   `publish-wasm`. `release` waits for the container jobs but runs even if
+   they fail. `crates-publish.yml` runs `cargo
    publish --workspace --locked` in dependency order.
 6. Run the [smoke test](#smoke-test).
 
@@ -573,18 +598,19 @@ place and is independently verified above.
 
 `ghcr.io/officialunofficial/mkit-server` is signed by digest, by the same
 workflow identity as the archives. Take the digest from the release notes
-and always pull by digest; a tag can be moved, a digest cannot. While the
-repository is private, `docker login ghcr.io` first (a token with
-`read:packages`).
+and always pull by digest; a tag can be moved, a digest cannot. The package
+is public: no login is needed. Pin the identity to the exact release tag,
+so a signature from any other release of the same workflow does not pass.
 
 ```sh
+VERSION=X.Y.Z
 IMAGE=ghcr.io/officialunofficial/mkit-server
 DIGEST=sha256:...   # from the release notes
-IDENTITY='^https://github\.com/officialunofficial/mkit/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$'
+IDENTITY="https://github.com/officialunofficial/mkit/.github/workflows/release.yml@refs/tags/v${VERSION}"
 
 # The cosign signature on the digest.
 cosign verify "${IMAGE}@${DIGEST}" \
-  --certificate-identity-regexp "${IDENTITY}" \
+  --certificate-identity "${IDENTITY}" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
 
 # SLSA build provenance (GitHub's attestation, pushed to the registry).
@@ -592,15 +618,24 @@ gh attestation verify "oci://${IMAGE}@${DIGEST}" --repo officialunofficial/mkit
 
 # The signed CycloneDX SBOM attestation, and its predicate.
 cosign verify-attestation --type cyclonedx "${IMAGE}@${DIGEST}" \
-  --certificate-identity-regexp "${IDENTITY}" \
+  --certificate-identity "${IDENTITY}" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
   | jq -r '.payload | @base64d | fromjson | .predicate | .components | length'
 ```
 
 The image holds exactly the binary of the matching
-`mkit-server-X.Y.Z-<target>.tar.gz` (the `container` job verified the
-archive's signature and checksums before copying it), so the binary's hash
-inside the image equals the one in that archive's `SHA256SUMS`.
+`mkit-server-X.Y.Z-<target>.tar.gz`: the `container` job verified the
+archive's signature and checksums before copying it, and checked each
+pushed platform's binary against the archive's `SHA256SUMS` before
+`container-sign` signed the digest. To check it yourself (the image has no
+shell, so copy the file out):
+
+```sh
+CID=$(docker create --platform linux/amd64 "${IMAGE}@${DIGEST}")
+docker cp "${CID}:/usr/local/bin/mkit-server" ./mkit-server-from-image
+docker rm "${CID}"
+shasum -a 256 ./mkit-server-from-image   # = ./mkit-server in the archive's SHA256SUMS
+```
 
 ### macOS Gatekeeper
 
@@ -700,7 +735,8 @@ version tag (`@v4`) or a full SHA. No `@main`, no `@latest`. Trusted publishers:
 `anchore/sbom-action`, `softprops/action-gh-release`, `ossf/scorecard-action`,
 `docker/setup-buildx-action`, `docker/login-action`,
 `docker/build-push-action` (the container image; pinned by full SHA, with
-BuildKit pinned by digest).
+BuildKit pinned by digest, and used only in the `container` job, which has
+no `id-token: write`).
 Any new action from an untrusted publisher needs the same two-maintainer review
 as a Rust dep.
 
@@ -823,9 +859,12 @@ After the first push, in the package's settings:
   `org.opencontainers.image.source` label links it) and that the repository
   has write access under "Manage Actions access", so later releases can
   push.
-- Confirm its visibility is **private** while the repository is private.
-  When the repository goes public, make the package public and decide on a
-  `latest` tag (Q9: none until then).
+- Make it **public** (Package settings, "Change visibility"), so users can
+  pull it without logging in. A package created from Actions starts
+  private, and this setting is manual, so `container-tag` checks an
+  anonymous pull of each release's digest and raises a workflow warning
+  when it fails. Anonymous `docker pull` of the digest must work.
+- There is no `latest` tag (Q9, decided separately).
 
 ### `CODECOV_TOKEN`
 

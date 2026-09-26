@@ -38,8 +38,10 @@ HOST="$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}')"
 die() { echo "check-server-image: $*" >&2; exit 1; }
 
 TAGS=()
+# MKIT_IMAGE_CHECK_KEEP=1 leaves the mkit-server:check-<arch> images for the
+# caller (scripts/local-server-image.sh), which removes them.
 cleanup() {
-  if [ "${#TAGS[@]}" -gt 0 ]; then
+  if [ "${#TAGS[@]}" -gt 0 ] && [ "${MKIT_IMAGE_CHECK_KEEP:-0}" != 1 ]; then
     docker image rm "${TAGS[@]}" >/dev/null 2>&1 || true
   fi
 }

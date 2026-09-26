@@ -16,11 +16,12 @@
 #
 # The binaries are glibc-linked (libc, libm, libgcc_s; SQLite is bundled),
 # which distroless `cc` provides. The base is Debian 13 (glibc 2.41), not
-# Debian 12: release.yml builds on ubuntu-24.04 runners, and aws-lc-sys's C
-# code (rustls's crypto provider) links glibc 2.38 symbols
-# (`__isoc23_strtol`, `__isoc23_sscanf`), which Debian 12's glibc 2.36
-# lacks. The stage script refuses a binary that needs another library or a
-# newer glibc than this base's.
+# Debian 12 (glibc 2.36): release.yml builds on ubuntu-24.04 runners
+# (glibc 2.39), and a binary may reference any symbol version up to that.
+# Today's binaries already need 2.38 (aws-lc-sys's C code, rustls's crypto
+# provider, links `__isoc23_strtol` and `__isoc23_sscanf`). The stage script
+# reports the newest version each binary needs, and refuses a binary that
+# needs another library or a newer glibc than this base's.
 #
 # Dependabot (.github/dependabot.yml, "docker") bumps the digest below.
 FROM gcr.io/distroless/cc-debian13:nonroot@sha256:54df941ed0d06a1bd95ef5e0ce391fd8d9f94b64782dc9a60062727849ee3f97

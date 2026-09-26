@@ -74,7 +74,8 @@ the container; make the root, the `SQLite` file and the enc key directory
 writable by uid 65532; pass Kubernetes secrets through `MKIT_API_TOKEN` and
 the S3 environment variables (secret volumes are symlinks, which the file
 flags refuse); and probe `grpc.health.v1.Health` from outside, since the
-image has no shell. Details, including the enc port's per-IP limit:
+image has no shell (for readiness only: it reports store outages). Details,
+including the enc port's per-IP limit:
 [`docs/CONTAINER.md`](https://github.com/officialunofficial/mkit/blob/main/docs/CONTAINER.md).
 
 ### The served root
