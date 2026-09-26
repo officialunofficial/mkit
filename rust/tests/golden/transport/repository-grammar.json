@@ -1,0 +1,117 @@
+[
+  {
+    "identity": "default",
+    "single_ok": true,
+    "multi_ok": false
+  },
+  {
+    "identity": "a.b_c-9",
+    "single_ok": true,
+    "multi_ok": false
+  },
+  {
+    "identity": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "single_ok": true,
+    "multi_ok": false
+  },
+  {
+    "identity": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "single_ok": false,
+    "multi_ok": false
+  },
+  {
+    "identity": "ed25519-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/one",
+    "single_ok": true,
+    "multi_ok": true
+  },
+  {
+    "identity": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/two",
+    "single_ok": true,
+    "multi_ok": true
+  },
+  {
+    "identity": "ed25519-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "single_ok": true,
+    "multi_ok": true
+  },
+  {
+    "identity": "ed25519-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "single_ok": false,
+    "multi_ok": false
+  },
+  {
+    "identity": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "single_ok": true,
+    "multi_ok": true
+  },
+  {
+    "identity": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "single_ok": false,
+    "multi_ok": false
+  },
+  {
+    "identity": "ed25519-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/one",
+    "single_ok": false,
+    "multi_ok": false
+  },
+  {
+    "identity": "0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB/two",
+    "single_ok": false,
+    "multi_ok": false
+  },
+  {
+    "identity": "ed25519-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/",
+    "single_ok": false,
+    "multi_ok": false
+  },
+  {
+    "identity": "ed25519-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/x",
+    "single_ok": false,
+    "multi_ok": false
+  },
+  {
+    "identity": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/x",
+    "single_ok": false,
+    "multi_ok": false
+  },
+  {
+    "identity": ".name",
+    "single_ok": false,
+    "multi_ok": false
+  },
+  {
+    "identity": "..",
+    "single_ok": false,
+    "multi_ok": false
+  },
+  {
+    "identity": "ed25519-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/.name",
+    "single_ok": false,
+    "multi_ok": false
+  },
+  {
+    "identity": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/..",
+    "single_ok": false,
+    "multi_ok": false
+  },
+  {
+    "identity": "root/name",
+    "single_ok": false,
+    "multi_ok": false
+  },
+  {
+    "identity": "Default",
+    "single_ok": false,
+    "multi_ok": false
+  },
+  {
+    "identity": "a/b",
+    "single_ok": false,
+    "multi_ok": false
+  },
+  {
+    "identity": "has space",
+    "single_ok": false,
+    "multi_ok": false
+  }
+]

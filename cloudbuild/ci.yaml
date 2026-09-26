@@ -219,4 +219,21 @@ steps:
           cargo check --workspace --locked --all-targets
         )
 
+        # ── mkit-server (MKIT-29 M0 exit gate, WP-M0-20; `just ci-server`) ──
+        # The workspace nextest above already runs the storage suite per
+        # backend and the wire suite (in-process and over the real
+        # `mkit-server` binary: mkit-server-native's wire_* tests). These
+        # add what it cannot: the runtime-agnostic core and the Workers
+        # adapter must build for wasm32 (a native-only dependency breaks the
+        # Workers deployment, not the host build), the wasm32 graphs must
+        # stay free of C-toolchain crates, and the default `mkit` CLI must
+        # stay server-free (docs/INVARIANTS.md). The triggers run on main
+        # and PRs to main only (cloudbuild/README.md).
+        ( cd rust
+          cargo check --locked -p mkit-server --target wasm32-unknown-unknown
+          cargo build --locked -p mkit-server-worker --target wasm32-unknown-unknown
+        )
+        bash scripts/check-wasm-dep-graph.sh
+        bash scripts/check-cli-baseline.sh
+
         sccache --show-stats

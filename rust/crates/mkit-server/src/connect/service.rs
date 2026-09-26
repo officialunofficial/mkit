@@ -16,11 +16,13 @@ use super::error::recorded;
 use super::proto::mkit::transport::v1::__buffa::oneof::download_pack_response::Body as DownloadBody;
 use super::proto::mkit::transport::v1::__buffa::oneof::upload_pack_request::Body as UploadBody;
 use super::proto::mkit::transport::v1::{
-    AdvanceOutcome as WireOutcome, AdvanceRefsRequest, AdvanceRefsResponse, DownloadPackHeader,
-    DownloadPackRequest, DownloadPackResponse, ListRefsRequest, ListRefsResponse, PackChunk,
-    PackExistsRequest, PackExistsResponse, ReadRefRequest, ReadRefResponse, RefEntry,
-    RefExpectation, TransportService, UpdateRefRequest, UpdateRefResponse, UploadPackRequest,
-    UploadPackResponse,
+    AdvanceOutcome as WireOutcome, AdvanceRefsRequest, AdvanceRefsResponse, BeginUploadRequest,
+    BeginUploadResponse, CompleteUploadRequest, CompleteUploadResponse, DownloadPackHeader,
+    DownloadPackRequest, DownloadPackResponse, GetServerInfoRequest, GetServerInfoResponse,
+    ListRefsRequest, ListRefsResponse, PackChunk, PackExistsRequest, PackExistsResponse,
+    ReadRefRequest, ReadRefResponse, RefEntry, RefExpectation, TransportService, UpdateRefRequest,
+    UpdateRefResponse, UploadPackRequest, UploadPackResponse, UploadPartRequest,
+    UploadPartResponse,
 };
 use super::{Shared, authenticated};
 use crate::error::ServerError;
@@ -33,8 +35,9 @@ use crate::store::{BlobStore, NamespaceStore};
 use crate::upload::UploadError;
 
 /// `TransportService` over a [`Pipeline`]. Each handler takes the
-/// [`Authenticated`] that [`super::AuthInterceptor`] stored; without it
-/// every RPC is `unauthenticated` "missing authorization".
+/// [`Authenticated`] that [`super::AuthInterceptor`] stored for existing RPCs;
+/// the M1 discovery and upload RPCs are unauthenticated stubs until their
+/// implementing WPs land.
 pub struct ConnectTransport<B, N, H> {
     pipe: Shared<Pipeline<B, N, H>>,
 }
@@ -71,6 +74,10 @@ fn ref_update(
         condition,
         new: hash_from_slice(DigestField::NewId, new_id)?,
     })
+}
+
+fn not_yet() -> ServerError {
+    ServerError::unimplemented("not implemented yet")
 }
 
 fn pack_key(pack_id: Option<&[u8]>) -> Result<PackKey, ServerError> {
@@ -113,6 +120,15 @@ async fn upload<B: BlobStore, N: NamespaceStore, H: HookSet>(
         },
     };
     let header = header.map_err(ServerError::from)?;
+    if !header
+        .ticket_token
+        .as_deref()
+        .unwrap_or_default()
+        .is_empty()
+    {
+        // TODO(WP-1.9): implement ticketed UploadPack before reading chunks.
+        return Err(not_yet().into());
+    }
     let mut session = pipe
         .begin_upload(a, header.pack_id.as_deref(), header.total_bytes)
         .await?;
@@ -164,7 +180,13 @@ where
         request: ServiceRequest<'_, ListRefsRequest>,
     ) -> ServiceResult<ListRefsResponse> {
         let a = authenticated(&ctx)?;
-        let prefix = request.to_owned_message().prefix.unwrap_or_default();
+        let m = request.to_owned_message();
+        if !m.page_token.as_deref().unwrap_or_default().is_empty() {
+            // TODO(WP-1.28): implement ListRefs continuation tokens.
+            return Err(not_yet().into());
+        }
+        // TODO(WP-1.28): honour page_size and caps
+        let prefix = m.prefix.unwrap_or_default();
         let pipe = self.pipe.arc();
         send_wrap(async move {
             let refs = pipe.list_refs(&a, &prefix).await?;
@@ -207,6 +229,10 @@ where
     ) -> ServiceResult<UpdateRefResponse> {
         let a = authenticated(&ctx)?;
         let m = request.to_owned_message();
+        if m.delete.unwrap_or(false) {
+            // TODO(WP-1.10): implement ref deletion.
+            return Err(not_yet().into());
+        }
         let upd = ref_update(
             m.name,
             m.expectation,
@@ -235,6 +261,10 @@ where
     ) -> ServiceResult<AdvanceRefsResponse> {
         let a = authenticated(&ctx)?;
         let m = request.to_owned_message();
+        if m.delete.unwrap_or(false) || !m.ticket_ids.is_empty() {
+            // TODO(WP-1.10): implement ticket consumption and ref deletion.
+            return Err(not_yet().into());
+        }
         let head = ref_update(
             m.head_ref,
             m.head_expectation,
@@ -318,5 +348,176 @@ where
                 .map_err(ConnectError::from)
         });
         Response::stream_ok(stream::iter([Ok(header)]).chain(send_wrap_stream(chunks)))
+    }
+
+    async fn get_server_info(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, GetServerInfoRequest>,
+    ) -> ServiceResult<GetServerInfoResponse> {
+        // SECURITY: GetServerInfo stays unauthenticated by SPEC-TRANSPORT-CONNECT §2.1.
+        // TODO(WP-1.6): implement deployment discovery and add an explicit Procedure variant.
+        Err(not_yet().into())
+    }
+
+    async fn begin_upload(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, BeginUploadRequest>,
+    ) -> ServiceResult<BeginUploadResponse> {
+        // SECURITY: unauthenticated until WP-1.9 adds a Procedure variant; the implementing WP MUST add it.
+        // TODO(WP-1.9): implement upload tickets.
+        Err(not_yet().into())
+    }
+
+    async fn upload_part(
+        &self,
+        _ctx: RequestContext,
+        _requests: InboundStream<UploadPartRequest>,
+    ) -> ServiceResult<UploadPartResponse> {
+        // SECURITY: unauthenticated until WP-1.11 adds a Procedure variant; the implementing WP MUST add it.
+        // TODO(WP-1.11): implement part uploads; only connectrpc may read this stream for now.
+        Err(not_yet().into())
+    }
+
+    async fn complete_upload(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, CompleteUploadRequest>,
+    ) -> ServiceResult<CompleteUploadResponse> {
+        // SECURITY: unauthenticated until WP-1.11 adds a Procedure variant; the implementing WP MUST add it.
+        // TODO(WP-1.11): implement multipart completion.
+        Err(not_yet().into())
+    }
+}
+
+#[cfg(test)]
+mod proto_roundtrip {
+    use super::super::proto::mkit::transport::v1::__buffa::oneof::{
+        begin_upload_response::Result as BeginResult, upload_part_request::Msg as PartMsg,
+    };
+    use super::super::proto::mkit::transport::v1::*;
+    use buffa::Message;
+
+    fn roundtrip<M: Message + PartialEq + core::fmt::Debug>(message: &M) {
+        let encoded = message.encode_to_vec();
+        assert_eq!(
+            &M::decode_from_slice(&encoded).expect("decode generated message"),
+            message
+        );
+    }
+
+    fn ticket() -> UploadTicket {
+        UploadTicket {
+            id: Some(vec![0x12; 32]),
+            part_size: Some(8 << 20),
+            expires_unix_ms: Some(1_700_000_000_000),
+            token: Some(vec![0xa1, 0xb2]),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn discovery_messages_roundtrip() {
+        // Empty messages have no declared fields to populate.
+        roundtrip(&GetServerInfoRequest::default());
+        roundtrip(&GetServerInfoResponse {
+            protocol: Some("mkit.transport.v1".into()),
+            spec_version: Some(2),
+            max_pack_bytes: Some(1 << 34),
+            part_size: Some(8 << 20),
+            max_parts: Some(1024),
+            max_list_refs_page_size: Some(512),
+            begin_upload_threshold_bytes: Some(8 << 20),
+            atomic_advance: Some(true),
+            indexed_mode: Some(true),
+            admission: Some(true),
+            receipt_public_key: Some(vec![0x34; 32]),
+            receipt_key_id: Some("receipt-key".into()),
+            grant_schemes: vec!["ed25519".into(), "eip191-secp256k1".into()],
+            namespace_policy: Some("allowlist".into()),
+            index_fanout: Some(4096),
+            ..Default::default()
+        });
+    }
+
+    #[test]
+    fn ticket_messages_and_both_results_roundtrip() {
+        roundtrip(&BeginUploadRequest {
+            r#ref: Some("refs/heads/main".into()),
+            pack_id: Some(vec![0x56; 32]),
+            bytes: Some(1 << 33),
+            ..Default::default()
+        });
+        roundtrip(&AlreadyPresent::default());
+        roundtrip(&ticket());
+        roundtrip(&BeginUploadResponse {
+            result: Some(BeginResult::AlreadyPresent(Box::default())),
+            ..Default::default()
+        });
+        roundtrip(&BeginUploadResponse {
+            result: Some(BeginResult::Ticket(Box::new(ticket()))),
+            ..Default::default()
+        });
+    }
+
+    #[test]
+    fn part_messages_and_both_stream_alternatives_roundtrip() {
+        let header = UploadPartHeader {
+            ticket_token: Some(vec![0x78, 0x9a]),
+            index: Some(3),
+            ..Default::default()
+        };
+        roundtrip(&header);
+        roundtrip(&UploadPartRequest {
+            msg: Some(PartMsg::Header(Box::new(header))),
+            ..Default::default()
+        });
+        roundtrip(&UploadPartRequest {
+            msg: Some(PartMsg::Chunk(vec![0x01, 0x23, 0x45])),
+            ..Default::default()
+        });
+        roundtrip(&UploadPartResponse {
+            receipt: Some(vec![0xab, 0xcd]),
+            ..Default::default()
+        });
+        roundtrip(&CompleteUploadRequest {
+            ticket_token: Some(vec![0x78, 0x9a]),
+            receipts: vec![vec![0xab, 0xcd], vec![0xef, 0x01]],
+            ..Default::default()
+        });
+        roundtrip(&CompleteUploadResponse::default());
+    }
+
+    #[test]
+    fn additive_fields_roundtrip() {
+        roundtrip(&ListRefsRequest {
+            prefix: Some("refs/heads/".into()),
+            page_size: Some(1),
+            page_token: Some("continuation".into()),
+            ..Default::default()
+        });
+        roundtrip(&ListRefsResponse {
+            refs: vec![RefEntry {
+                name: Some("main".into()),
+                object_id: Some(vec![0x23; 32]),
+                ..Default::default()
+            }],
+            next_page_token: Some("next".into()),
+            ..Default::default()
+        });
+        roundtrip(&UpdateRefRequest {
+            delete: Some(true),
+            ..Default::default()
+        });
+        roundtrip(&AdvanceRefsRequest {
+            ticket_ids: vec![vec![0x45; 32], vec![0x67; 32]],
+            delete: Some(true),
+            ..Default::default()
+        });
+        roundtrip(&UploadPackHeader {
+            ticket_token: Some(vec![0x89, 0xab]),
+            ..Default::default()
+        });
     }
 }

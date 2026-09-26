@@ -120,13 +120,18 @@ impl WorkerConfig {
     ///
     /// # Errors
     /// A missing `AUTH_AUDIENCE` or `AUTH_REPOSITORY` (vcs-worker parity:
-    /// "`<VAR>` is not configured"), or a malformed `TEST_QUOTA_*` var.
+    /// "`<VAR>` is not configured"), an invalid repository identity, or a malformed `TEST_QUOTA_*` var.
     pub fn from_vars(var: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
         let required =
             |name: &str| var(name).ok_or_else(|| ConfigError(format!("{name} is not configured")));
+        let audience = required(AUDIENCE_VAR)?;
+        let repository = required(REPOSITORY_VAR)?;
+        mkit_core::repo_identity::RepositoryIdentity::parse_bare_allowed(&repository).map_err(
+            |_| ConfigError("AUTH_REPOSITORY is invalid (SPEC-TRANSPORT-CONNECT §7.4)".into()),
+        )?;
         Ok(Self {
-            audience: required(AUDIENCE_VAR)?,
-            repository: required(REPOSITORY_VAR)?,
+            audience,
+            repository,
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
             blob_binding: crate::r2::STORAGE_BINDING,
             #[cfg(feature = "test-faults")]
@@ -781,6 +786,28 @@ mod tests {
             WorkerConfig::from_vars(vars(&[(AUDIENCE_VAR, "https://vcs.example")])).unwrap_err(),
             ConfigError("AUTH_REPOSITORY is not configured".into())
         );
+    }
+
+    #[test]
+    fn config_validates_repository_grammar() {
+        for repository in ["Upper", ".name", "root/name", "a/b", &"a".repeat(101)] {
+            let err = WorkerConfig::from_vars(vars(&[
+                (AUDIENCE_VAR, "https://vcs.example"),
+                (REPOSITORY_VAR, repository),
+            ]))
+            .unwrap_err();
+            assert_eq!(
+                err,
+                ConfigError("AUTH_REPOSITORY is invalid (SPEC-TRANSPORT-CONNECT §7.4)".into())
+            );
+        }
+        let identity = format!("ed25519-{}/name", "a".repeat(64));
+        let cfg = WorkerConfig::from_vars(vars(&[
+            (AUDIENCE_VAR, "https://vcs.example"),
+            (REPOSITORY_VAR, &identity),
+        ]))
+        .unwrap();
+        assert_eq!(cfg.repository, identity);
     }
 
     #[cfg(feature = "test-faults")]

@@ -60,7 +60,7 @@ pub use replay::{
     ReplayDecision, ReplayKey, ReplayRecord, ReplayState, StoredRejection, StoredResult,
     UpdateRefResult, classify,
 };
-pub use repo::{Addressing, NamespaceKey, RepoId, RepoName};
+pub use repo::{Addressing, MultiAddressing, NamespaceKey, RepoId, RepoName, ResolvedRepo};
 #[cfg(not(target_arch = "wasm32"))]
 pub use rt::SystemClock;
 pub use rt::{BoxFuture, BoxStream, Clock, ManualClock, MaybeSend, MaybeSync, Spawner, send_wrap};
