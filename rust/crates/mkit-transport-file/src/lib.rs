@@ -33,13 +33,18 @@
 //! read-compare-write sequence and released on `Drop` (including on
 //! panic). The in-process `Mutex` is retained as a fast-path optimisation
 //! and to serialise lock acquisition fairly within one process.
+//!
+//! Every ref write takes both locks, whatever its condition.
+//! [`FileTransport::with_ref_lock`] hands the same lock to callers that
+//! read, decide and write several files as one step (a metadata store's
+//! check-and-write), through [`LockedRefs`].
 
 #![forbid(unsafe_code)]
 
 use std::fs;
 use std::io::{self, ErrorKind};
-use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::path::{Component, Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 
 use mkit_core::hash::Hash;
 use mkit_core::protocol::{PackKey, RefWriteCondition, Transport, TransportError, TransportResult};
@@ -56,6 +61,29 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// A fresh temp-file path next to `dest`: `.<file name>.tmp.<pid>.<seq>`
+/// in `dest`'s directory. Every temp file this crate writes is named here,
+/// from one process-wide counter, so two writers in one process never pick
+/// the same name, and writers in different processes differ by pid. A
+/// streaming writer that publishes into the same layout (a blob store
+/// writing `packs/`) names its temp files here too, so it can never
+/// collide with this crate's own writes.
+///
+/// # Errors
+/// `InvalidInput` if `dest` has no parent directory or no file name.
+pub fn temp_path(dest: &Path) -> io::Result<PathBuf> {
+    let parent = dest
+        .parent()
+        .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "destination path has no parent"))?;
+    let file_name = dest
+        .file_name()
+        .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "destination has no file name"))?
+        .to_string_lossy();
+    let pid = process::id();
+    let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    Ok(parent.join(format!(".{file_name}.tmp.{pid}.{seq}")))
+}
+
 /// Atomically write `bytes` to `dest` using a temp-file + fsync +
 /// rename + parent-dir-fsync sequence. Creates parent dirs when
 /// `make_parents` is `true`. Mirrors `mkit_core::atomic::write_atomic`.
@@ -64,17 +92,10 @@ fn write_atomic(dest: &Path, bytes: &[u8], make_parents: bool) -> io::Result<()>
         .parent()
         .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "destination path has no parent"))?;
     if make_parents {
-        fs::create_dir_all(parent)?;
+        create_dir_all_durably(parent)?;
     }
 
-    let file_name = dest
-        .file_name()
-        .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "destination has no file name"))?
-        .to_string_lossy();
-    let pid = process::id();
-    let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp_name = format!(".{file_name}.tmp.{pid}.{seq}");
-    let tmp_path = parent.join(&tmp_name);
+    let tmp_path = temp_path(dest)?;
 
     {
         use std::io::Write;
@@ -101,17 +122,10 @@ fn write_create_new(dest: &Path, bytes: &[u8], make_parents: bool) -> io::Result
         .parent()
         .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "destination path has no parent"))?;
     if make_parents {
-        fs::create_dir_all(parent)?;
+        create_dir_all_durably(parent)?;
     }
 
-    let file_name = dest
-        .file_name()
-        .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "destination has no file name"))?
-        .to_string_lossy();
-    let pid = process::id();
-    let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp_name = format!(".{file_name}.tmp.{pid}.{seq}");
-    let tmp_path = parent.join(&tmp_name);
+    let tmp_path = temp_path(dest)?;
 
     {
         use std::io::Write;
@@ -171,6 +185,41 @@ fn sync_parent(dir: &Path) -> io::Result<()> {
 #[cfg(not(unix))]
 #[allow(clippy::unnecessary_wraps)]
 fn sync_parent(_dir: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+/// Fsync directory `dir`, making the renames, links and removals already
+/// done in it durable: what every write of this crate does after its
+/// rename. A missing `dir` counts as success; on non-Unix targets this is a
+/// no-op (see `sync_parent`). For writers that publish into the same
+/// layout with their own temp file (see [`temp_path`]).
+///
+/// # Errors
+/// The directory could not be opened or synced.
+pub fn sync_dir(dir: &Path) -> io::Result<()> {
+    sync_parent(dir)
+}
+
+/// [`fs::create_dir_all`], then fsync the parent of every directory it
+/// created, top-most first, so a file later published in `dir` does not
+/// vanish with its directory on power loss. A no-op when `dir` exists.
+///
+/// # Errors
+/// A directory could not be created or a parent could not be synced.
+pub fn create_dir_all_durably(dir: &Path) -> io::Result<()> {
+    if dir.is_dir() {
+        return Ok(());
+    }
+    let missing: Vec<&Path> = dir
+        .ancestors()
+        .take_while(|d| !d.as_os_str().is_empty() && !d.exists())
+        .collect();
+    fs::create_dir_all(dir)?;
+    for created in missing.iter().rev() {
+        if let Some(parent) = created.parent().filter(|p| !p.as_os_str().is_empty()) {
+            sync_parent(parent)?;
+        }
+    }
     Ok(())
 }
 
@@ -365,6 +414,358 @@ impl FileTransport {
             )))
         }
     }
+
+    /// The transport root: `packs/`, `refs/` and `.mkit/` live under it.
+    #[must_use]
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Run `f` holding the ref mutation lock: this transport's in-process
+    /// mutex, then the OS exclusive lock on `<root>/.mkit/refs/.lock`
+    /// (created on first use). Every ref write takes it, including
+    /// [`Transport::update_ref`], so what `f` reads, decides and writes
+    /// through [`LockedRefs`] is one step that no other writer on the same
+    /// root, in this process or another, can interleave with. Blocks until
+    /// the lock is free. `f` is synchronous, so nothing holds the lock
+    /// across an `.await`.
+    ///
+    /// A panic in `f` releases both locks. The in-process mutex guards no
+    /// data (the state is the files, and every write is one atomic rename),
+    /// so a panic never poisons the transport: the next caller recovers it.
+    ///
+    /// # Errors
+    /// [`RefFileError::Io`] if the lock file cannot be created or locked;
+    /// `f` did not run.
+    pub fn with_ref_lock<T>(
+        &self,
+        f: impl FnOnce(&LockedRefs<'_>) -> T,
+    ) -> Result<T, RefFileError> {
+        let _process_guard = self.cas_lock.lock().unwrap_or_else(PoisonError::into_inner);
+        let _xproc_guard = RefLock::acquire(&self.root).map_err(RefFileError::Io)?;
+        Ok(f(&LockedRefs { tx: self }))
+    }
+
+    /// The ref's id, strictly: like [`Transport::read_ref`], but a ref file
+    /// that does not hold a ref wire is [`RefFileError::Corrupt`] rather
+    /// than absent. A directory where the ref file would be is no ref.
+    ///
+    /// # Errors
+    /// [`RefFileError::InvalidName`], [`RefFileError::Escape`] for the
+    /// path-escape guard, [`RefFileError::Corrupt`], or I/O.
+    pub fn read_ref_strict(&self, name: &str) -> Result<Option<Hash>, RefFileError> {
+        if !validate_ref_name(name) {
+            return Err(RefFileError::InvalidName(name.to_owned()));
+        }
+        let path = self.ref_path(name);
+        if path.is_dir() {
+            return Ok(None);
+        }
+        if path.exists() {
+            self.guard_ref_path(&path)?;
+        }
+        match fs::read(&path) {
+            Ok(bytes) => decode_ref_wire(&bytes)
+                .map(Some)
+                .ok_or_else(|| RefFileError::Corrupt(name.to_owned())),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(RefFileError::Io(e)),
+        }
+    }
+
+    /// Every ref under `prefix` (a directory, e.g. `refs/`) with full
+    /// names, strictly: a file whose relative name is a valid ref name but
+    /// that does not hold a ref wire is [`RefFileError::Corrupt`], where
+    /// [`Transport::list_refs`] skips it. Symlinks are skipped, as there.
+    ///
+    /// # Errors
+    /// [`RefFileError::InvalidName`] for an invalid prefix,
+    /// [`RefFileError::Corrupt`], or I/O.
+    pub fn list_refs_strict(&self, prefix: &str) -> Result<Vec<(String, Hash)>, RefFileError> {
+        let trimmed = prefix.trim_end_matches('/');
+        if !validate_ref_name(trimmed) {
+            return Err(RefFileError::InvalidName(prefix.to_owned()));
+        }
+        let mut out = Vec::new();
+        let mut dirs = vec![self.root.join(trimmed)];
+        while let Some(dir) = dirs.pop() {
+            let entries = match fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                Err(e) if e.kind() == ErrorKind::NotFound => continue,
+                Err(e) => return Err(RefFileError::Io(e)),
+            };
+            for entry in entries {
+                let entry = entry.map_err(RefFileError::Io)?;
+                let path = entry.path();
+                let file_type = entry.file_type().map_err(RefFileError::Io)?;
+                if file_type.is_dir() {
+                    dirs.push(path);
+                    continue;
+                }
+                let Ok(rel) = path.strip_prefix(&self.root) else {
+                    continue;
+                };
+                let name = rel.to_string_lossy().replace('\\', "/");
+                if !file_type.is_file() || !validate_ref_name(&name) {
+                    continue; // a symlink, a temp or lock file, or no ref name
+                }
+                let bytes = fs::read(&path).map_err(RefFileError::Io)?;
+                let id =
+                    decode_ref_wire(&bytes).ok_or_else(|| RefFileError::Corrupt(name.clone()))?;
+                out.push((name, id));
+            }
+        }
+        out.sort();
+        Ok(out)
+    }
+
+    /// The path of a server-owned file: `rel` must be a plain relative path
+    /// (normal components only) under [`SERVER_DIR`], and must not resolve
+    /// outside `<root>/.mkit/server` through a symlink. The only files
+    /// [`LockedRefs::write_file`] and [`LockedRefs::remove_file`] touch.
+    ///
+    /// # Errors
+    /// [`RefFileError::Escape`] for any other path.
+    pub fn server_path(&self, rel: &Path) -> Result<PathBuf, RefFileError> {
+        let plain = rel.components().all(|c| matches!(c, Component::Normal(_)));
+        let inside = rel
+            .strip_prefix(SERVER_DIR)
+            .is_ok_and(|r| r.components().next().is_some());
+        if !plain || !inside {
+            return Err(RefFileError::Escape(format!(
+                "path escape: {} is not a path under {SERVER_DIR}",
+                rel.display()
+            )));
+        }
+        let path = self.root.join(rel);
+        let base = self.canonical_root().join(SERVER_DIR);
+        let resolved = if path.exists() {
+            fs::canonicalize(&path).map_err(RefFileError::Io)?
+        } else {
+            canonicalize_with_missing_tail(&path).unwrap_or_else(|| path.clone())
+        };
+        if resolved.starts_with(&base) {
+            Ok(path)
+        } else {
+            Err(RefFileError::Escape(format!(
+                "path escape: {} resolves outside {SERVER_DIR}",
+                path.display()
+            )))
+        }
+    }
+
+    /// [`Self::check_ref_path`] as a [`RefFileError`].
+    fn guard_ref_path(&self, path: &Path) -> Result<(), RefFileError> {
+        self.check_ref_path(path).map_err(|e| match e {
+            TransportError::RemoteError(msg) => RefFileError::Escape(msg),
+            other => RefFileError::Escape(other.to_string()),
+        })
+    }
+
+    /// Whether writing a ref file at `dest` clashes with another ref: a
+    /// directory is where the file would go, or a file is where one of its
+    /// directories would go.
+    fn ref_clash(&self, dest: &Path) -> bool {
+        dest.is_dir()
+            || dest
+                .ancestors()
+                .skip(1)
+                .take_while(|d| *d != self.root)
+                .any(Path::is_file)
+    }
+
+    /// Remove the directories between `path` and `<root>/<first component
+    /// of name>` that are empty, innermost first; best-effort.
+    fn prune_empty_parents(&self, path: &Path, name: &str) {
+        let stop = self.root.join(name.split('/').next().unwrap_or(name));
+        for dir in path.ancestors().skip(1) {
+            if dir == stop || !dir.starts_with(&stop) || fs::remove_dir(dir).is_err() {
+                break;
+            }
+            if let Some(parent) = dir.parent() {
+                let _ = sync_parent(parent);
+            }
+        }
+    }
+}
+
+/// The directory, under a [`FileTransport`] root, of files a server keeps
+/// next to the refs ([`LockedRefs::write_file`]).
+pub const SERVER_DIR: &str = ".mkit/server";
+
+/// Why a strict ref-file operation ([`LockedRefs`],
+/// [`FileTransport::read_ref_strict`], [`FileTransport::list_refs_strict`],
+/// [`FileTransport::server_path`]) failed. It converts into the
+/// [`TransportError`] the [`Transport`] verbs return.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum RefFileError {
+    /// Not a valid ref name, or the ref clashes with another: a directory
+    /// is where its file would go, or a file where its directory would.
+    InvalidName(String),
+    /// A path the operation may not touch: outside [`SERVER_DIR`], or
+    /// resolving outside the root through a symlink.
+    Escape(String),
+    /// The CAS condition did not hold.
+    Conflict,
+    /// A ref file exists but does not hold a ref wire.
+    Corrupt(String),
+    /// I/O failed.
+    Io(io::Error),
+}
+
+impl std::fmt::Display for RefFileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidName(name) => write!(f, "invalid or clashing ref name: {name}"),
+            Self::Escape(msg) => f.write_str(msg),
+            Self::Conflict => f.write_str("ref CAS precondition failed"),
+            Self::Corrupt(name) => write!(f, "ref file {name} does not hold a ref id"),
+            Self::Io(e) => write!(f, "ref file I/O error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for RefFileError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<RefFileError> for TransportError {
+    fn from(e: RefFileError) -> Self {
+        match e {
+            RefFileError::InvalidName(name) => Self::InvalidRef(name),
+            RefFileError::Conflict => Self::RefConflict,
+            other => Self::RemoteError(other.to_string()),
+        }
+    }
+}
+
+/// The ref files (and the server files under [`SERVER_DIR`]) of a
+/// [`FileTransport`] root while [`FileTransport::with_ref_lock`] holds the
+/// ref lock. Writes are the transport's CAS and atomic writes, without
+/// taking the lock again.
+#[derive(Debug)]
+pub struct LockedRefs<'a> {
+    tx: &'a FileTransport,
+}
+
+impl LockedRefs<'_> {
+    /// The ref's id: [`FileTransport::read_ref_strict`].
+    ///
+    /// # Errors
+    /// As [`FileTransport::read_ref_strict`].
+    pub fn read_ref(&self, name: &str) -> Result<Option<Hash>, RefFileError> {
+        self.tx.read_ref_strict(name)
+    }
+
+    /// The CAS write of [`Transport::update_ref`], under the lock already
+    /// held. A ref that clashes with another (a directory where its file
+    /// would go, or a file where its directory would) is
+    /// [`RefFileError::InvalidName`].
+    ///
+    /// # Errors
+    /// [`RefFileError::InvalidName`], [`RefFileError::Escape`],
+    /// [`RefFileError::Conflict`], or I/O.
+    pub fn update_ref(
+        &self,
+        name: &str,
+        condition: RefWriteCondition,
+        hash: &Hash,
+    ) -> Result<(), RefFileError> {
+        if !validate_ref_name(name) {
+            return Err(RefFileError::InvalidName(name.to_owned()));
+        }
+        let dest = self.tx.ref_path(name);
+        self.tx.guard_ref_path(&dest)?;
+        if self.tx.ref_clash(&dest) {
+            return Err(RefFileError::InvalidName(name.to_owned()));
+        }
+        let wire = encode_ref_wire(hash);
+
+        match condition {
+            // Unconditional atomic overwrite.
+            RefWriteCondition::Any => write_atomic(&dest, &wire, true).map_err(RefFileError::Io),
+
+            RefWriteCondition::Missing => {
+                // Exclusive create: succeeds only when the file is absent.
+                match write_create_new(&dest, &wire, true) {
+                    Ok(true) => Ok(()),
+                    Ok(false) => Err(RefFileError::Conflict),
+                    Err(e) => Err(RefFileError::Io(e)),
+                }
+            }
+
+            RefWriteCondition::Match(expected) => {
+                match read_ref_raw(&dest).map_err(RefFileError::Io)? {
+                    Some(c) if c == expected => {}
+                    _ => return Err(RefFileError::Conflict),
+                }
+                write_atomic(&dest, &wire, true).map_err(RefFileError::Io)
+            }
+        }
+    }
+
+    /// Remove the ref file, fsync its directory, then remove the
+    /// directories it left empty below the name's first component (so
+    /// `refs/` stays); `false` if there was no ref file.
+    ///
+    /// # Errors
+    /// [`RefFileError::InvalidName`], [`RefFileError::Escape`], or I/O.
+    pub fn delete_ref(&self, name: &str) -> Result<bool, RefFileError> {
+        if !validate_ref_name(name) {
+            return Err(RefFileError::InvalidName(name.to_owned()));
+        }
+        let path = self.tx.ref_path(name);
+        self.tx.guard_ref_path(&path)?;
+        if path.is_dir() {
+            return Ok(false);
+        }
+        let removed = remove_durably(&path).map_err(RefFileError::Io)?;
+        if removed {
+            self.tx.prune_empty_parents(&path, name);
+        }
+        Ok(removed)
+    }
+
+    /// Atomically replace the server file at `rel` (see
+    /// [`FileTransport::server_path`]) with `bytes`, creating its
+    /// directories: the same temp file, fsync, rename and directory fsync
+    /// as a ref write.
+    ///
+    /// # Errors
+    /// [`RefFileError::Escape`] for a path outside [`SERVER_DIR`], or I/O.
+    pub fn write_file(&self, rel: &Path, bytes: &[u8]) -> Result<(), RefFileError> {
+        let path = self.tx.server_path(rel)?;
+        write_atomic(&path, bytes, true).map_err(RefFileError::Io)
+    }
+
+    /// Remove the server file at `rel` (see [`FileTransport::server_path`]),
+    /// then fsync its directory; `false` if it was absent.
+    ///
+    /// # Errors
+    /// [`RefFileError::Escape`] for a path outside [`SERVER_DIR`], or I/O.
+    pub fn remove_file(&self, rel: &Path) -> Result<bool, RefFileError> {
+        let path = self.tx.server_path(rel)?;
+        remove_durably(&path).map_err(RefFileError::Io)
+    }
+}
+
+/// Remove `path`, then fsync its directory; `false` if it was absent.
+fn remove_durably(path: &Path) -> io::Result<bool> {
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    }
+    if let Some(parent) = path.parent() {
+        sync_parent(parent)?;
+    }
+    Ok(true)
 }
 
 impl Transport for FileTransport {
@@ -406,53 +807,9 @@ impl Transport for FileTransport {
         if !validate_ref_name(name) {
             return Err(TransportError::InvalidRef(name.to_owned()));
         }
-
-        let dest = self.ref_path(name);
-        self.check_ref_path(&dest)?;
-        let wire = encode_ref_wire(hash);
-
         // Every condition participates: an unconditional write must not
         // interleave between a Match read and its publication.
-        let _process_guard = self
-            .cas_lock
-            .lock()
-            .expect("FileTransport cas_lock poisoned");
-        let _xproc_guard = RefLock::acquire(&self.root)
-            .map_err(|e| TransportError::RemoteError(format!("update_ref mutation lock: {e}")))?;
-
-        match condition {
-            RefWriteCondition::Any => {
-                // Unconditional atomic overwrite.
-                write_atomic(&dest, &wire, true).map_err(|e| {
-                    TransportError::RemoteError(format!("update_ref(Any) I/O error: {e}"))
-                })
-            }
-
-            RefWriteCondition::Missing => {
-                // Exclusive create: succeeds only when the file is absent.
-                match write_create_new(&dest, &wire, true) {
-                    Ok(true) => Ok(()),
-                    Ok(false) => Err(TransportError::RefConflict),
-                    Err(e) => Err(TransportError::RemoteError(format!(
-                        "update_ref(Missing) I/O error: {e}"
-                    ))),
-                }
-            }
-
-            RefWriteCondition::Match(expected) => {
-                let current = read_ref_raw(&dest).map_err(|e| {
-                    TransportError::RemoteError(format!("update_ref(Match) read error: {e}"))
-                })?;
-                match current {
-                    Some(c) if c == expected => {}
-                    _ => return Err(TransportError::RefConflict),
-                }
-
-                write_atomic(&dest, &wire, true).map_err(|e| {
-                    TransportError::RemoteError(format!("update_ref(Match) I/O error: {e}"))
-                })
-            }
-        }
+        Ok(self.with_ref_lock(|refs| refs.update_ref(name, condition, hash))??)
     }
 
     fn read_ref(&self, name: &str) -> TransportResult<Option<Hash>> {
@@ -1335,5 +1692,216 @@ mod tests {
         // ref wire.
         let after = fs::read(&outside_file).unwrap();
         assert_eq!(after, b"old", "outside file was clobbered despite guard");
+    }
+
+    // ------------------------------------------------------------------
+    // with_ref_lock / LockedRefs
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn with_ref_lock_holds_the_lock_file_and_writes_through_it() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let h = blake3_hash(b"locked");
+        let held = t
+            .with_ref_lock(|refs| {
+                refs.update_ref("refs/heads/a", RefWriteCondition::Missing, &h)
+                    .unwrap();
+                assert_eq!(refs.read_ref("refs/heads/a").unwrap(), Some(h));
+                // Another open file description cannot take the lock.
+                let lock = dir.path().join(".mkit").join("refs").join(".lock");
+                let other = fs::File::open(lock).unwrap();
+                other.try_lock().is_err()
+            })
+            .unwrap();
+        assert!(held, "the ref lock is held inside with_ref_lock");
+        assert_eq!(t.read_ref("refs/heads/a").unwrap(), Some(h));
+    }
+
+    #[test]
+    fn with_ref_lock_recovers_after_a_panic() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            t.with_ref_lock(|_| panic!("panic under the ref lock"))
+        }));
+        assert!(panicked.is_err() && t.cas_lock.is_poisoned());
+        let h = blake3_hash(b"after");
+        t.update_ref("refs/heads/a", RefWriteCondition::Any, &h)
+            .unwrap();
+        assert_eq!(t.read_ref("refs/heads/a").unwrap(), Some(h));
+    }
+
+    #[test]
+    fn delete_ref_removes_the_file_once_and_prunes_empty_dirs() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let h = blake3_hash(b"gone");
+        t.update_ref("refs/heads/team/a", RefWriteCondition::Any, &h)
+            .unwrap();
+        t.update_ref("refs/tags/v1", RefWriteCondition::Any, &h)
+            .unwrap();
+        let removed = t
+            .with_ref_lock(|refs| {
+                (
+                    refs.delete_ref("refs/heads/team/a").unwrap(),
+                    refs.delete_ref("refs/heads/team/a").unwrap(),
+                )
+            })
+            .unwrap();
+        assert_eq!(removed, (true, false));
+        assert_eq!(t.read_ref("refs/heads/team/a").unwrap(), None);
+        // The emptied `refs/heads/team` and `refs/heads` are gone; `refs`
+        // and the non-empty `refs/tags` stay.
+        assert!(!dir.path().join("refs/heads").exists());
+        assert!(dir.path().join("refs/tags/v1").is_file());
+        // So the name is free for a ref file again.
+        t.update_ref("refs/heads/team", RefWriteCondition::Missing, &h)
+            .unwrap();
+        let invalid = t.with_ref_lock(|refs| refs.delete_ref("../x")).unwrap();
+        assert!(matches!(invalid, Err(RefFileError::InvalidName(_))));
+        // A directory where the ref file would be is no ref.
+        let dir_ref = t.with_ref_lock(|refs| refs.delete_ref("refs")).unwrap();
+        assert!(!dir_ref.unwrap());
+    }
+
+    #[test]
+    fn ref_directory_file_clashes_are_invalid_names() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let h = blake3_hash(b"clash");
+        t.update_ref("refs/heads/a/b", RefWriteCondition::Any, &h)
+            .unwrap();
+        t.update_ref("refs/heads/c", RefWriteCondition::Any, &h)
+            .unwrap();
+        for name in ["refs/heads/a", "refs/heads/c/d"] {
+            for condition in [RefWriteCondition::Any, RefWriteCondition::Missing] {
+                let err = t.update_ref(name, condition, &h).unwrap_err();
+                assert!(
+                    matches!(err, TransportError::InvalidRef(_)),
+                    "{name}: {err:?}"
+                );
+            }
+        }
+        assert_eq!(t.read_ref_strict("refs/heads/a").unwrap(), None);
+        assert_eq!(t.read_ref_strict("refs/heads/c").unwrap(), Some(h));
+    }
+
+    #[test]
+    fn strict_reads_report_corrupt_ref_files() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let h = blake3_hash(b"ok");
+        t.update_ref("refs/heads/ok", RefWriteCondition::Any, &h)
+            .unwrap();
+        fs::write(dir.path().join("refs/heads/bad"), b"not a ref\n").unwrap();
+        // The lenient verbs treat it as absent and skip it...
+        assert_eq!(t.read_ref("refs/heads/bad").unwrap(), None);
+        assert_eq!(t.list_refs("refs/").unwrap().len(), 1);
+        // ...the strict ones report it.
+        assert!(matches!(
+            t.read_ref_strict("refs/heads/bad"),
+            Err(RefFileError::Corrupt(_))
+        ));
+        assert!(matches!(
+            t.list_refs_strict("refs/"),
+            Err(RefFileError::Corrupt(_))
+        ));
+        fs::remove_file(dir.path().join("refs/heads/bad")).unwrap();
+        // Temp and lock files are not refs.
+        fs::write(dir.path().join("refs/heads/.ok.tmp.1.2"), b"junk").unwrap();
+        assert_eq!(
+            t.list_refs_strict("refs").unwrap(),
+            vec![("refs/heads/ok".to_owned(), h)]
+        );
+        assert_eq!(t.list_refs_strict("refs/tags/").unwrap(), vec![]);
+        assert!(t.list_refs_strict("").is_err());
+    }
+
+    #[test]
+    fn locked_file_writes_stay_under_the_server_dir() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let rel = Path::new(".mkit/server/row");
+        t.with_ref_lock(|refs| {
+            refs.write_file(rel, b"v1").unwrap();
+            refs.write_file(rel, b"v2").unwrap();
+            for bad in [
+                "",
+                "/abs",
+                "../up",
+                "a/../b",
+                "./a",
+                ".mkit/server",
+                ".mkit/server/../refs/.lock",
+                ".mkit/refs/.lock",
+                "refs/x",
+                "packs/x",
+            ] {
+                let write = refs.write_file(Path::new(bad), b"x");
+                assert!(matches!(write, Err(RefFileError::Escape(_))), "{bad}");
+                let remove = refs.remove_file(Path::new(bad));
+                assert!(matches!(remove, Err(RefFileError::Escape(_))), "{bad}");
+            }
+        })
+        .unwrap();
+        assert_eq!(fs::read(dir.path().join(rel)).unwrap(), b"v2");
+        assert!(!dir.path().join("refs/x").exists() && !dir.path().join("packs").exists());
+        let removed = t
+            .with_ref_lock(|refs| {
+                (
+                    refs.remove_file(rel).unwrap(),
+                    refs.remove_file(rel).unwrap(),
+                )
+            })
+            .unwrap();
+        assert_eq!(removed, (true, false));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn locked_file_writes_reject_a_symlinked_server_dir() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tmp();
+        let outside = tmp();
+        fs::create_dir_all(dir.path().join(".mkit")).unwrap();
+        symlink(outside.path(), dir.path().join(".mkit/server")).unwrap();
+        let t = FileTransport::new(dir.path());
+        let result = t
+            .with_ref_lock(|refs| refs.write_file(Path::new(".mkit/server/row"), b"x"))
+            .unwrap();
+        assert!(matches!(result, Err(RefFileError::Escape(_))));
+        assert!(!outside.path().join("row").exists());
+        // A symlink to a directory inside the root is refused too.
+        fs::remove_file(dir.path().join(".mkit/server")).unwrap();
+        fs::create_dir_all(dir.path().join("refs")).unwrap();
+        symlink(dir.path().join("refs"), dir.path().join(".mkit/server")).unwrap();
+        assert!(matches!(
+            t.server_path(Path::new(".mkit/server/row")),
+            Err(RefFileError::Escape(_))
+        ));
+    }
+
+    #[test]
+    fn create_dir_all_durably_creates_nested_dirs() {
+        let dir = tmp();
+        let nested = dir.path().join("a/b/c");
+        create_dir_all_durably(&nested).unwrap();
+        assert!(nested.is_dir());
+        create_dir_all_durably(&nested).unwrap();
+        fs::write(dir.path().join("file"), b"x").unwrap();
+        assert!(create_dir_all_durably(&dir.path().join("file/sub")).is_err());
+    }
+
+    #[test]
+    fn temp_paths_are_unique_hidden_siblings() {
+        let dest = Path::new("/r/packs/abc");
+        let (a, b) = (temp_path(dest).unwrap(), temp_path(dest).unwrap());
+        assert_ne!(a, b);
+        assert_eq!(a.parent(), dest.parent());
+        let name = a.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.starts_with(".abc.tmp."), "{name}");
+        assert!(temp_path(Path::new("/")).is_err());
     }
 }

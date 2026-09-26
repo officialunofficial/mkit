@@ -13,11 +13,14 @@
 //! readers stay namespaced (`store::keys`, `store::codec`, `store::read`),
 //! as do the export/import helpers and the `ContentIndex` row types
 //! (`store::export_partition`, `store::Holder`).
-//! The `memory` feature adds the in-memory reference backends.
+//! The `memory` feature adds the in-memory reference backends; the native
+//! `fs` feature adds [`fs`], the stores over the `.mkit` on-disk layout.
 
 pub mod auth_v2;
 pub mod download;
 mod error;
+#[cfg(all(feature = "fs", not(target_arch = "wasm32")))]
+pub mod fs;
 #[cfg(any(test, feature = "memory"))]
 mod memory;
 mod op;

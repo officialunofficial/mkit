@@ -3419,11 +3419,13 @@ dependencies = [
  "futures-core",
  "futures-executor",
  "mkit-core",
+ "mkit-transport-file",
  "proptest",
  "send_wrapper",
  "serde",
  "serde_json",
  "subtle",
+ "tempfile",
  "thiserror 2.0.20",
  "tracing",
 ]

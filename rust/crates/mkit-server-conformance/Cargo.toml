@@ -25,3 +25,8 @@ mkit-core = { version = "0.4", path = "../mkit-core", default-features = false }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread"] }
 bytes = "1"
 futures = "0.3"
+
+[dev-dependencies]
+# tests/fs_backends.rs: the `.mkit`-layout stores (native only, like this
+# crate).
+mkit-server = { version = "0.4", path = "../mkit-server", features = ["fs"] }
