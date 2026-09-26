@@ -15,6 +15,7 @@
 //! caller input can reach a hazmat assertion.
 
 use crate::hash::Hash;
+use crate::write_auth::PartCommitment;
 use blake3::hazmat::{self, HasherExt, Mode};
 
 /// Smallest legal part size (SPEC-TRANSPORT-CONNECT §7.6).
@@ -101,6 +102,11 @@ impl PartPlan {
         if count > max_parts {
             return Err(PartError::TooManyParts);
         }
+        // Every part-range end, `count × part_size`, must fit u64; this also
+        // keeps every range length within `left_subtree_len`'s domain.
+        u64::from(count)
+            .checked_mul(part_size)
+            .ok_or(PartError::TooManyParts)?;
         Ok(Self {
             total,
             part_size,
@@ -147,6 +153,20 @@ impl PartPlan {
     /// [`PartError::IndexOutOfRange`] for `index >= count()`.
     pub fn expected_len(&self, index: u32) -> Result<u64, PartError> {
         Ok((self.total - self.offset(index)?).min(self.part_size))
+    }
+
+    /// Check a `part:` commitment against this plan (SPEC-TRANSPORT-CONNECT
+    /// §7.6): the index is in range, and the length is `part_size` for every
+    /// part but the last, and the remainder for the last.
+    ///
+    /// # Errors
+    /// [`PartError::IndexOutOfRange`] or [`PartError::LengthMismatch`].
+    pub fn check(&self, commitment: &PartCommitment) -> Result<(), PartError> {
+        if commitment.len == self.expected_len(commitment.index)? {
+            Ok(())
+        } else {
+            Err(PartError::LengthMismatch)
+        }
     }
 
     /// Byte count of the parts `lo..hi` (`lo < hi <= count`).
@@ -357,15 +377,63 @@ mod tests {
 
     #[test]
     fn plan_arithmetic_near_u64_max() {
-        let top = 1 << 63;
-        let plan = PartPlan::new(u64::MAX, top, u32::MAX).unwrap();
-        assert_eq!(plan.count(), 2);
-        assert_eq!(plan.offset(1), Ok(top));
-        assert_eq!(plan.expected_len(0), Ok(top));
-        assert_eq!(plan.expected_len(1), Ok(top - 1));
-        assert_eq!(plan.offset(2), Err(PartError::IndexOutOfRange));
-        let hasher = PartHasher::new(&plan, 1).unwrap();
+        // `count × part_size` would overflow u64: rejected, never a panic in
+        // `range_len` or `left_subtree_len`.
+        for (total, part_size, max_parts) in [
+            (u64::MAX, 1 << 63, u32::MAX),
+            (u64::MAX, 1 << 51, 10_000),
+            (u64::MAX - (1 << 51) + 2, 1 << 51, 10_000),
+        ] {
+            assert_eq!(
+                PartPlan::new(total, part_size, max_parts),
+                Err(PartError::TooManyParts),
+                "{total} {part_size}"
+            );
+        }
+        // The largest plans whose last range end still fits.
+        let top = 1 << 62;
+        let plan = PartPlan::new(u64::MAX - top, top, u32::MAX).unwrap();
+        assert_eq!(plan.count(), 3);
+        assert_eq!(plan.offset(2), Ok(2 * top));
+        assert_eq!(plan.expected_len(2), Ok(top - 1));
+        assert_eq!(plan.offset(3), Err(PartError::IndexOutOfRange));
+        let hasher = PartHasher::new(&plan, 2).unwrap();
         assert_eq!(hasher.finalize(), Err(PartError::LengthMismatch));
+        assert!(merge_to_root(&plan, &[[0; 32]; 3]).is_ok());
+        let plan = PartPlan::new(u64::MAX - (1 << 51) + 1, 1 << 51, 10_000).unwrap();
+        assert_eq!(plan.count(), 8191);
+        assert!(merge_to_root(&plan, &vec![[0; 32]; 8191]).is_ok());
+    }
+
+    #[test]
+    fn plan_checks_part_commitments() {
+        let plan = PartPlan::new(2 * MIN_PART_SIZE + 5, MIN_PART_SIZE, 3).unwrap();
+        let part = |index, len| PartCommitment {
+            ticket: [0x5a; 32],
+            index,
+            subtree: [0xcd; 32],
+            len,
+        };
+        assert_eq!(plan.check(&part(0, MIN_PART_SIZE)), Ok(()));
+        assert_eq!(plan.check(&part(1, MIN_PART_SIZE)), Ok(()));
+        assert_eq!(plan.check(&part(2, 5)), Ok(()));
+        for (index, len) in [
+            (0, MIN_PART_SIZE - 1),
+            (1, MIN_PART_SIZE + 1),
+            (1, 5),
+            (2, 4),
+            (2, 6),
+            (2, MIN_PART_SIZE),
+        ] {
+            assert_eq!(
+                plan.check(&part(index, len)),
+                Err(PartError::LengthMismatch),
+                "{index} {len}"
+            );
+        }
+        for index in [3, u32::MAX] {
+            assert_eq!(plan.check(&part(index, 5)), Err(PartError::IndexOutOfRange));
+        }
     }
 
     #[test]
@@ -558,6 +626,17 @@ mod tests {
                 if let Ok(mut hasher) = PartHasher::new(&plan, index) {
                     let _ = hasher.update(&[0; 3]);
                     let _ = hasher.finalize();
+                }
+                let _ = plan.check(&PartCommitment {
+                    ticket: [0; 32],
+                    index,
+                    subtree: [0; 32],
+                    len: total % 97,
+                });
+                // Reach `range_len`/`left_subtree_len` on every small plan.
+                if plan.count() <= 64 {
+                    let cvs = vec![[0; 32]; plan.count() as usize];
+                    prop_assert!(merge_to_root(&plan, &cvs).is_ok());
                 }
                 let _ = merge_to_root(&plan, &[[0; 32]; 3]);
             }

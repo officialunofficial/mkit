@@ -116,6 +116,7 @@ pub struct PartCommitment {
 
 /// The kind of a [`ContentCommitment`], without its fields.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CommitmentKind {
     /// `body:`
     Body,
@@ -203,15 +204,19 @@ impl core::fmt::Display for ContentCommitment {
 
 /// What a verifier expects the signed content commitment to be.
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub enum ExpectedCommitment<'a> {
     /// Unary: exactly this text, plus the `X-Digest` check for `body:`.
     Exact(&'a str),
     /// `UploadPack` stream: any well-formed `pack:`. The handler compares it
     /// with the first stream message itself.
     PackStream,
-    /// `UploadPart` stream: any well-formed `part:`. The handler compares the
-    /// ticket id and index with the first stream message itself
-    /// (SPEC-TRANSPORT-CONNECT §7.6).
+    /// `UploadPart` stream: any well-formed `part:`. Verification does not
+    /// bind the commitment to a ticket, so the handler (WP-1.11) MUST, before
+    /// reading any part byte, compare the ticket id and index with the first
+    /// stream message and call
+    /// [`PartPlan::check`](crate::upload_parts::PartPlan::check) with the
+    /// ticket's plan, which enforces `<len>` (SPEC-TRANSPORT-CONNECT §7.6).
     PartStream,
 }
 
