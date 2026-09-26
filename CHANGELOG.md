@@ -50,6 +50,20 @@ train).
   readers over any `NamespaceStore`, and the content-addressed `BlobStore` /
   `PackSink` contract with the `MemoryBlobStore` reference backend.
 
+- *(attest)* SPEC-WRITE-GRANTS grant codec behind the new `grants` feature
+  (not default): `mkit_attest::grant` parses and encodes the
+  `mkit-write-grant:v1` statement strictly (one canonical encoding, every
+  §3.5 rejection, no repair), with the §3.1 text rules, ref scopes and §8.1
+  effective flags, the grant id, and the `X-Write-Grant` header
+  (`<statement>.<scheme>.<blob>`, strict unpadded base64url). New fuzz target
+  `grant_parse`. Golden and reject vectors under `rust/tests/golden/grants`,
+  cross-checked by `scripts/golden/grants_ref.py`. **SemVer:** additive.
+
+- *(core)* `repo_identity`: the SPEC-TRANSPORT-CONNECT §7.4 repository
+  identity grammar (`Namespace`, `RepositoryIdentity`; lowercase only, at
+  most 173 bytes; bare names only through `parse_bare_allowed`).
+  **SemVer:** additive.
+
 - *(core)* Resumable-part building blocks (SPEC-TRANSPORT-CONNECT §7.6):
   `write_auth::ContentCommitment` parses and formats `body:`, `pack:` and the
   new `part:<ticket>:<index>:<subtree>:<len>` commitment, and

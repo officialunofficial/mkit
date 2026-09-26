@@ -31,6 +31,8 @@
 //!   on-disk layout with atomic writes.
 //! * [`verify`] — per-signature crypto verdict against a trust-root
 //!   registry, plus a subject-extraction helper.
+//! * `grant` (feature `grants`) — SPEC-WRITE-GRANTS grant statement codec,
+//!   ref scopes and the `X-Write-Grant` header encoding.
 //!
 //! No `serde_json::to_string` is used on the emit path — the canonical
 //! encoder is hand-rolled per RFC 8785 because `serde_json` does NOT
@@ -44,6 +46,9 @@
 
 pub mod algorithm;
 pub mod envelope;
+// SPEC-WRITE-GRANTS grant statement codec and `X-Write-Grant` header.
+#[cfg(feature = "grants")]
+pub mod grant;
 pub mod jcs;
 pub mod pin_provider;
 pub mod signer;

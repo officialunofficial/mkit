@@ -27,6 +27,10 @@ default = ["algo-ed25519", "algo-secp256k1", "algo-p256"]
 algo-ed25519 = ["dep:ed25519-dalek"]
 algo-secp256k1 = ["dep:k256"]
 algo-p256 = ["dep:p256"]
+# SPEC-WRITE-GRANTS grant statement codec and `X-Write-Grant` header
+# (`mkit_attest::grant`). Not a default feature. The ECDSA owner schemes
+# widen this line (secp256k1, p256, Keccak-256) when they land.
+grants = ["algo-ed25519"]
 # BLS12-381 M-of-N threshold signing — for the release-party flow.
 # OFF by default: commonware-cryptography's `std` feature pulls blst
 # (a sizeable precompiled BLS library, via the `bls12381` feature `std`
@@ -123,6 +127,8 @@ rand_core = { version = "0.10", optional = true, default-features = false }
 
 [dev-dependencies]
 hex = "0.4"
+# Roundtrip property tests over generated grants (`grant` module).
+proptest = "1"
 # Tests that hand-build signing keys need dalek unconditionally, so pull
 # it in as a dev-dep separate from the feature-gated runtime dep.
 ed25519-dalek = { version = "3", default-features = false, features = ["alloc"] }
