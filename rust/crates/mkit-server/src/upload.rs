@@ -13,9 +13,8 @@
 //! `vcs-worker`'s `upload_pack`. Each [`UploadError`] keeps today's text for
 //! both wire families: [`UploadError::ssh_message`] is `mkit serve`'s and
 //! [`UploadError::connect_message`] is `mkit-transport-connect`'s (the server
-//! it had until WP-M0-15, behind `mkit serve --http`). The old copies go when
-//! their consumers switch: `mkit serve` in WP-M0-13, `vcs-worker` in
-//! WP-M0-17.
+//! it had until WP-M0-15, behind `mkit serve --http`). The old copies are
+//! gone: `mkit serve`'s in WP-M0-13, `vcs-worker`'s in WP-M0-17.
 
 use std::borrow::Cow;
 

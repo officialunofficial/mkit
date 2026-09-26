@@ -8,8 +8,10 @@
 //! |---|---|---|
 //! | `PackExists` | any | `exists = false` |
 //! | `ReadRef` | a name over 512 bytes | `INVALID_REQUEST "ref name too long"` |
+//! | `ReadRef` | a valid name outside `refs/` | `INVALID_REQUEST`, [`REF_NAME_OUTSIDE_REFS`] |
 //! | `ReadRef` | any other | `INTERNAL "read ref failed"` |
 //! | `UpdateRef` | a name over 512 bytes | `INVALID_REQUEST "ref name too long"` |
+//! | `UpdateRef` | a valid name outside `refs/` | `INVALID_REQUEST`, [`REF_NAME_OUTSIDE_REFS`] |
 //! | `UpdateRef` | a CAS conflict | [`cas_conflict_body`] |
 //! | `UpdateRef` | any other | `INVALID_REQUEST "update ref failed"` |
 //! | `ListRefs` | any | `INTERNAL "list refs failed"` |
@@ -18,11 +20,16 @@
 //! | `UploadPack` | bytes that do not hash to `pack_id` | `INVALID_REQUEST`, [`UploadError::ssh_message`] |
 //! | `UploadPack` | any other | `INTERNAL "upload failed"` |
 //!
-//! Two rows are new. A mid-download read failure cannot happen in
-//! `mkit serve`, which reads the whole pack before its header. And
-//! `mkit serve` had no ref-name length limit; SPEC-REFS §3 now caps names at
-//! 512 bytes (`refs::MAX_REF_NAME_BYTES`), and an over-long name is refused
-//! by name rather than failing like a storage error.
+//! Three kinds of row are new. A mid-download read failure cannot happen in
+//! `mkit serve`, which reads the whole pack before its header. `mkit serve`
+//! had no ref-name length limit; SPEC-REFS §3 now caps names at 512 bytes
+//! (`refs::MAX_REF_NAME_BYTES`), and an over-long name is refused by name
+//! rather than failing like a storage error. And `mkit serve` stored a name
+//! outside `refs/` (`main`) as `<root>/main`; the pipeline serves only
+//! `refs/` names (R-86, [`crate::refs::is_served_ref_name`]), and a
+//! grammar-valid name outside it is refused by name, so a client of a repo
+//! holding such a legacy ref gets an error, never a silent "absent". A name
+//! that fails the grammar keeps its old reply.
 
 use core::future::poll_fn;
 
@@ -42,8 +49,8 @@ use crate::op::{Procedure, RefUpdate};
 use crate::pipeline::{Authenticated, HookSet, Pipeline, RequestMeta, UploadSession};
 use crate::principal::Principal;
 use crate::refs::{
-    DigestField, MAX_REF_NAME_BYTES, REF_NAME_TOO_LONG, RefWireError, UnusedExpectedId,
-    condition_from_wire, hash_from_slice,
+    DigestField, MAX_REF_NAME_BYTES, REF_NAME_OUTSIDE_REFS, REF_NAME_TOO_LONG, RefWireError,
+    UnusedExpectedId, condition_from_wire, hash_from_slice, is_served_ref_name, validate_ref_name,
 };
 use crate::store::{BlobStore, NamespaceStore};
 use crate::upload::{UploadError, UploadLimits, UploadValidator};
@@ -115,10 +122,14 @@ pub fn cas_conflict_body(current: Option<Hash>) -> ssh_frame::Body {
     ))
 }
 
-/// Refuse a ref name over [`MAX_REF_NAME_BYTES`] by name (SPEC-REFS §3).
-fn check_name_len(name: &str) -> Result<(), VerbError> {
+/// Refuse by name a ref name over [`MAX_REF_NAME_BYTES`] (SPEC-REFS §3),
+/// or a valid one outside `refs/` (R-86). A name that fails the grammar
+/// passes, to fail in the pipeline with the verb's old reply.
+fn check_name(name: &str) -> Result<(), VerbError> {
     if name.len() > MAX_REF_NAME_BYTES {
         Err((ErrorCode::InvalidRequest, REF_NAME_TOO_LONG))
+    } else if validate_ref_name(name) && !is_served_ref_name(name) {
+        Err((ErrorCode::InvalidRequest, REF_NAME_OUTSIDE_REFS))
     } else {
         Ok(())
     }
@@ -215,7 +226,7 @@ impl<'p, B: BlobStore, N: NamespaceStore, H: HookSet> Verbs<'p, B, N, H> {
             },
             Body::ReadRef(req) => {
                 let name = req.name.clone().unwrap_or_default();
-                if let Err(e) = check_name_len(&name) {
+                if let Err(e) = check_name(&name) {
                     return Some(Err(e));
                 }
                 let read = match self.auth(Procedure::ReadRef) {
@@ -235,7 +246,7 @@ impl<'p, B: BlobStore, N: NamespaceStore, H: HookSet> Verbs<'p, B, N, H> {
                     Ok(update) => update,
                     Err(e) => return Some(Err(e)),
                 };
-                if let Err(e) = check_name_len(&update.name) {
+                if let Err(e) = check_name(&update.name) {
                     return Some(Err(e));
                 }
                 let result = match self.auth(Procedure::UpdateRef) {

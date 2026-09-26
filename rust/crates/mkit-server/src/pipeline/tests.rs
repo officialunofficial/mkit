@@ -1559,6 +1559,38 @@ fn over_long_ref_names_are_refused_explicitly() {
     assert_eq!(block_on(env.pipe.read_ref(&a, &longest)).unwrap(), Some(A));
 }
 
+/// R-86: the pipeline serves only `refs/` names (SPEC-REFS §2); a valid
+/// name outside it is refused by name on reads and writes, and nothing is
+/// stored.
+#[test]
+fn ref_names_outside_refs_are_refused_explicitly() {
+    let env = env(AuthMode::Open);
+    let before = env.rows();
+    let read = |name: &str| {
+        let a = env.auth(&Req::unsigned(Procedure::ReadRef)).unwrap();
+        block_on(env.pipe.read_ref(&a, name)).unwrap_err()
+    };
+    let advance = |head: &str| {
+        let req = Req::unsigned(Procedure::AdvanceRefs);
+        env.advance(&req, &upd(head, Missing, A), &upd(PACKMAP, Missing, B))
+            .unwrap_err()
+    };
+    for name in ["main", "heads/main", "packs/x", "refsx/y"] {
+        for err in [
+            env.open_update(&upd(name, Missing, A)).unwrap_err(),
+            read(name),
+            advance(name),
+        ] {
+            assert_eq!(err.code(), Code::InvalidArgument, "{name}");
+            assert_eq!(err.public_message(), refs::REF_NAME_OUTSIDE_REFS, "{name}");
+        }
+    }
+    // A grammar failure keeps its own message.
+    let err = read("main/.x");
+    assert_eq!(err.public_message(), "ref name is invalid (SPEC-REFS §3)");
+    assert_eq!(env.rows(), before, "nothing was stored");
+}
+
 #[test]
 fn store_error_is_redacted() {
     let clock = clock();

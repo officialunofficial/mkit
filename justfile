@@ -6,7 +6,8 @@
 #
 # `ci-scripts` is the local stand-in for gates those jobs do not run as
 # these exact commands: docs-lint.yml's check-spec-status.sh,
-# scripts/check-wasm-dep-graph.sh, `cargo check --target
+# scripts/check-wasm-dep-graph.sh, scripts/check-cli-baseline.sh (the
+# server-free CLI check), `cargo check --target
 # wasm32-unknown-unknown` for mkit-wasm and mkit-server, and
 # scripts/wasm-ruzstd-check.sh (mkit-core's pack-ruzstd decoder run on
 # wasm32 under node via wasm-pack). The `pack-ruzstd` nextest run in
@@ -135,6 +136,7 @@ ci-scripts:
     set -euo pipefail
     bash scripts/check-spec-status.sh
     bash scripts/check-wasm-dep-graph.sh
+    bash scripts/check-cli-baseline.sh
     if ! rustup target list --installed 2>/dev/null | grep -q '^wasm32-unknown-unknown$'; then
       echo "error: wasm32-unknown-unknown target not installed. Run: rustup target add wasm32-unknown-unknown" >&2
       exit 1

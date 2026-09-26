@@ -7,7 +7,8 @@
 //!
 //! * **Local + stdio.** Newline-delimited JSON-RPC 2.0 on stdin/stdout,
 //!   processed sequentially. No async runtime: the loop is plain
-//!   blocking I/O, keeping the default build tokio-free.
+//!   blocking I/O, so the default build stays server-free (no HTTP
+//!   server, no runtime of its own; `scripts/check-cli-baseline.sh`).
 //! * **Subprocess execution.** Each tool call re-invokes this same
 //!   binary (`std::env::current_exe()`) with a structured argv — never
 //!   a shell — capturing stdout/stderr and the sysexits code. The MCP

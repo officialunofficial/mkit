@@ -26,8 +26,9 @@ use crate::store::{
 /// through `FileTransport`. Never removed automatically.
 pub const META_MARKER: &str = mkit_transport_file::SERVER_META_MARKER;
 
-/// The directory `FileTransport` keeps refs in, as a ref-name prefix.
-const REFS_PREFIX: &str = "refs/";
+/// The directory `FileTransport` keeps refs in, as a ref-name prefix: the
+/// names the pipeline serves.
+const REFS_PREFIX: &str = refs::SERVED_REFS_PREFIX;
 
 /// Where the ref-class rows whose name is not a `refs/` ref name live,
 /// relative to the root: out of reach of every ref name (a ref name
@@ -65,10 +66,11 @@ enum Slot<'k> {
 /// delete removes the directories it leaves empty.
 ///
 /// The ref class also allows names that are not `refs/` ref names, with
-/// any value. The pipeline never writes one; they live in row files under
-/// `.mkit/server/rows/`, written under the same lock and invisible to the
-/// CLI and `FileTransport` (so a name like `packs/<hex>` can never
-/// overwrite a pack).
+/// any value. The pipeline never writes one (it serves only `refs/` names,
+/// R-86); they live in row files under `.mkit/server/rows/`, written under
+/// the same lock and invisible to the CLI and `FileTransport` (so a name
+/// like `packs/<hex>` can never overwrite a pack). Ref files an older
+/// `mkit serve` wrote outside `refs/` (`<root>/main`) are not served.
 ///
 /// `apply` takes the ref lock, reads the store clock (for a
 /// [`Precondition::NotAfter`]), checks every precondition and writes, all
@@ -76,9 +78,11 @@ enum Slot<'k> {
 /// every write is one atomic rename. A full disk or quota is
 /// [`StoreError::Full`], except for a delete-only batch (rule 7).
 ///
-/// TODO(M0-13): a process that crashes mid-write leaves its temp file
-/// (`.<file>.tmp.<pid>.<seq>`, next to the ref or row file) behind;
-/// nothing sweeps them yet. Scans skip them.
+/// A process that crashes mid-write leaves its temp file
+/// (`.<file>.tmp.<pid>.<seq>`, next to the ref or row file) behind. It is
+/// at most a ref wire or a row long; scans skip it, and nothing sweeps it
+/// (the pack temp files a crashed upload leaves are swept, see
+/// `FsBlobStore::sweep_stale_uploads`).
 ///
 /// It is the permanent metadata store of the server-free ssh path
 /// (reconciliation R-13), with `SinglePartition` routing.
@@ -370,7 +374,7 @@ impl FsLayoutStore {
 
 /// Whether `name` is a ref this store keeps as a `FileTransport` ref file.
 fn is_ref_name(name: &str) -> bool {
-    name.starts_with(REFS_PREFIX) && refs::validate_ref_name(name)
+    refs::is_served_ref_name(name)
 }
 
 /// A ref's value: its 32-byte id.

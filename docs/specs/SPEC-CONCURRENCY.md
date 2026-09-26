@@ -40,7 +40,7 @@ document points here.
 | `refs-history-<branch>.lock` | common dir, keyed on the branch name | per-branch | ancestry intent + ref + descriptor publication for one branch (`mkit_core::refs::history_lock_name`) | §3.2, §3.3 (this document) |
 | `refs-<ref>.lock` | common dir, keyed on the full ref path | per-ref | every direct on-disk ref mutation: Any, Missing, Match, delete, tags, remote refs and batch writes (`mkit_core::refs::cas_lock_name`) | SPEC-REFS §5.1 |
 | `<root>/.mkit/refs/.lock` | transport root | per-repo, **local to the file transport only** | the file transport's own Any/Missing/Match critical sections (`mkit-transport-file`'s `RefLock`) | SPEC-TRANSPORT, §3.1 (this document) |
-| `serve.lock` | common dir | per-repo, **detection only, not a critical-section lock** | held **shared** for its whole lifetime by every live server process on the root: `mkit serve` (stdin SSH-frame, its only mode) and `mkit-server serve` (HTTP and `mkit+enc://` listeners, which also holds `server.lock` exclusively, so one `mkit-server` serves a root at a time); probed non-blocking-exclusive by `worktree.lock`/`worktrees.lock` acquisition to warn when a root is concurrently served (MKIT-11/#655) | §3.1 (this document) |
+| `serve.lock` | common dir | per-repo, **detection only, not a critical-section lock** | held **shared** for its whole lifetime by every live server process on the root: `mkit serve` (stdin SSH-frame, its only mode) and `mkit-server serve` (HTTP and `mkit+enc://` listeners, which also holds `server.lock` exclusively, so one `mkit-server` serves a root at a time); taken exclusive without waiting by a starting `mkit serve` only to sweep crashed uploads' temp files; probed non-blocking-exclusive by `worktree.lock`/`worktrees.lock` acquisition to warn when a root is concurrently served (MKIT-11/#655) | §3.1 (this document) |
 
 The recovery log (`.mkit/recovery-log`) has **no dedicated lock** &mdash; see
 §3.2.
@@ -84,7 +84,11 @@ deployment, so `serve` instances must not exclude each other) on
 `serve.lock` (in the common dir) for its whole lifetime. `mkit-server`
 also holds `server.lock` (in the common dir) **exclusively**, so one
 `mkit-server` serves a root at a time; it shares `serve.lock` with any
-`mkit serve` processes on the same root. `worktree.lock`
+`mkit serve` processes on the same root. The one exclusive hold: at
+startup `mkit serve` tries `serve.lock` exclusively, without waiting, and
+only while it holds it (so no other server is up) sweeps the temp files
+crashed uploads left in `packs/`, then drops it and takes the shared lock;
+if the lock is busy it skips the sweep. `worktree.lock`
 and `worktrees.lock` acquisition (`mkit-cli`'s `acquire_worktree_lock`
 and `acquire_worktrees_registry_lock`) each follow up with a
 non-blocking exclusive probe of that same `serve.lock`

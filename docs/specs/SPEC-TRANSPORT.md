@@ -231,7 +231,18 @@ the `mkit.repo.v1` multiplayer protocol uses for its own `UpdateRef`.
 
 A conforming server MUST treat `REF_EXPECTATION_UNSPECIFIED` (the
 zero value, sent when the client omits the field) as a protocol
-error and reply with `ERROR_CODE_INVALID_REQUEST`. mkit is alpha
+error and reply with `ERROR_CODE_INVALID_REQUEST`.
+
+A server serves only ref names under `refs/` (SPEC-REFS §2). An
+`UpdateRef` or `ReadRef` whose name passes the SPEC-REFS §3 grammar but
+lies outside `refs/` is answered, before any storage access, with:
+
+| Request | Reply |
+|---|---|
+| `UpdateRef`/`ReadRef` naming a grammar-valid ref outside `refs/` | `Error { code = ERROR_CODE_INVALID_REQUEST, message = "ref name must start with refs/ (…)" }`, empty `details` |
+
+Never with an absent-ref answer. Having empty `details`, it is not a
+CAS conflict; a client surfaces it as a remote error with its message. mkit is alpha
 (pre-1.0) &mdash; clients and servers move together; there is no v0.x
 back-compatibility surface to preserve.
 
@@ -282,7 +293,8 @@ See [`SSH-SECURITY.md`](../SSH-SECURITY.md) for the full trust model.
 
 The `mkit serve` server enforces per-connection budgets to bound a
 misbehaving or malicious client (see
-[`mkit-cli/src/commands/serve/mod.rs`](../../rust/crates/mkit-cli/src/commands/serve/mod.rs)):
+[`mkit-server/src/ssh/budget.rs`](../../rust/crates/mkit-server/src/ssh/budget.rs),
+the session `mkit serve` runs since it moved onto `mkit-server`):
 
 - `MAX_FRAMES_PER_CONN = 10_000` &mdash; hard cap on frames after `Hello`.
 - `MAX_BYTES_PER_CONN  = 1 GiB`  &mdash; cap on cumulative request payload bytes.
@@ -294,6 +306,19 @@ Nested `UploadPack` chunk drains enforce the same 1 GiB byte ceiling on
 the declared upload length and additionally cap the number of chunk
 frames at `MAX_FRAMES_PER_CONN`, so a client cannot bypass the outer
 frame loop by streaming unbounded chunks inside one upload request.
+
+The budgets bound how much a client can make the server do; an idle
+timeout bounds a client that goes silent. `mkit serve` ends a session after `--idle-timeout-secs`
+seconds (default 60; `0` disables it) in which no byte arrives from the
+client, whether before `Hello`, between requests or inside an upload
+(whose partial pack is discarded). It answers, best effort, with
+`Error{ ERROR_CODE_INVALID_REQUEST, "idle timeout" }` and exits with
+`exit::PROTOCOL_ERROR`. The timer counts only silence: an upload that is
+still arriving never trips it, however long one chunk frame takes, and
+time the server spends answering is not counted. It does not bound a
+client that trickles bytes or stops reading; the budgets do, in part,
+and an operator can cap the whole session with `--max-session-secs`
+(off by default). See [`SSH-SECURITY.md`](../SSH-SECURITY.md) §4.
 
 The encrypted-transport listener (`mkit-server serve --listen-enc`,
 [`mkit-server-native/src/enc.rs`](../../rust/crates/mkit-server-native/src/enc.rs))

@@ -81,13 +81,15 @@ mkit-transport-connect = { version = "0.4", path = "../mkit-transport-connect" }
 mkit-transport-s3 = { version = "0.4", path = "../mkit-transport-s3" }
 mkit-transport-ssh = { version = "0.4", path = "../mkit-transport-ssh" }
 # Optional: encrypted-stream transport. Off by default so the
-# baseline `mkit-cli` build doesn't pay tokio's compile cost. Turn on
-# via `--features enc-transport`. See SPEC-TRANSPORT-ENC §6.
+# default `mkit-cli` build doesn't compile its tcp stack (tokio's `net`,
+# governor, rand) or commonware. Turn on via `--features enc-transport`. See SPEC-TRANSPORT-ENC §6.
 # Version-locked to the workspace (0.3); now that mkit-transport-enc is
 # published, release-plz rewrites this requirement on each lockstep bump.
 mkit-transport-enc = { version = "0.4", path = "../mkit-transport-enc", optional = true }
 # Optional: the tokio runtime `mkit mcp --http` (the `mcp-v2` feature) runs
-# on. Off by default so the baseline `mkit-cli` build stays tokio-free.
+# on, with the hyper server. Off by default, so the default `mkit-cli`
+# build stays server-free (scripts/check-cli-baseline.sh): tokio is in the
+# default graph only as the Connect and reqwest clients' runtime.
 tokio = { version = "1", default-features = false, features = [
     "rt-multi-thread",
     "net",
@@ -101,8 +103,8 @@ tokio = { version = "1", default-features = false, features = [
 # is `mkit mcp --http <addr>` (SEP-2567 dropped sessions for 2026-07-28
 # traffic; `legacy_session_mode` still serves pre-2026-07-28 clients over
 # reconnect-friendly SSE, same dual-era design as apps/mcp's TS server). Off
-# by default so the baseline `mkit-cli` build doesn't pay tokio's compile
-# cost, mirroring `enc-transport`. See `commands/mcp_v2.rs`.
+# by default so the default `mkit-cli` build compiles no MCP HTTP server,
+# mirroring `enc-transport`. See `commands/mcp_v2.rs`.
 rmcp = { version = "3", default-features = false, features = [
     "server",
     "transport-io",
@@ -135,6 +137,18 @@ tower-service = { version = "0.3", optional = true }
 http-body-util = { version = "0.1", optional = true }
 bytes = { version = "1", optional = true }
 mkit-rpc = { version = "0.4", path = "../mkit-rpc" }
+# `mkit serve`'s engine: the ssh-frame session (`ssh`) over the pipeline
+# with the `.mkit` layout stores (`fs`). `default-features = false` keeps
+# out `connect` (the Connect binding: connectrpc, http) and every other
+# feature: the CLI serves no Connect, SQL or test seam, and
+# scripts/check-release-artifact-features.sh allows only these two.
+# Nothing in it builds an async runtime (tokio's `sync` only, for a lock
+# `mkit serve` never takes). First published at the 0.5 release (WP-REL).
+mkit-server = { version = "0.4", path = "../mkit-server", default-features = false, features = ["ssh", "fs"] }
+# `mkit serve` drives the session future with `futures::executor::block_on`
+# on the main thread: no async runtime. Already in the graph (via
+# mkit-transport-connect and reqwest), so not a new supply-chain root.
+futures = { version = "0.3", default-features = false, features = ["executor", "std"] }
 # commonware-cryptography's ed25519 PrivateKey is the static-key type
 # the encrypted transport handshake takes. Pulled in here behind the
 # `enc-transport` feature so the keystore-driven key-loading path in
@@ -289,8 +303,9 @@ bls-threshold = ["mkit-attest/bls-threshold", "mkit-keystore/bls-threshold", "de
 enc-transport = ["dep:mkit-transport-enc", "mkit-transport-enc/tcp", "dep:commonware-cryptography", "dep:commonware-codec"]
 # Enables `mkit mcp`'s modern serving path (MCP 2026-07-28, via the official
 # `rmcp` Rust SDK — see the doc comment above rmcp's Cargo.toml entry). Off by
-# default: rmcp pulls in tokio, contradicting the tokio-free baseline build
-# (see commands/mcp.rs's module doc); the pre-existing hand-rolled stdio
+# default: rmcp brings a hyper server and a tokio runtime, and the default
+# build is server-free (scripts/check-cli-baseline.sh; see commands/mcp.rs's
+# module doc); the pre-existing hand-rolled stdio
 # server stays the default `mkit mcp` implementation either way. Turn on via
 # `--features mcp-v2`.
 mcp-v2 = ["dep:rmcp", "dep:tokio", "dep:hyper", "dep:hyper-util", "dep:subtle", "dep:http", "dep:tower-service", "dep:http-body-util", "dep:bytes", "tokio/net", "tokio/signal"]

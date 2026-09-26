@@ -228,7 +228,11 @@ or `worktrees.lock` (`mkit-cli`'s `acquire_worktree_lock` /
 `acquire_worktrees_registry_lock`) immediately probes that same
 `serve.lock` non-blocking-exclusive (`mkit_core::repo_lock::probe_exclusive`)
 and, if it finds the lock busy, prints a warning to stderr naming the
-served root before proceeding.
+served root before proceeding. The one exclusive holder: at startup
+`mkit serve` tries `serve.lock` exclusively without waiting, and only
+while it holds it (no other server is up) sweeps the temp files crashed
+uploads left in `packs/` (`.<hex>.tmp.<pid>.<seq>`, at least an hour
+old), then takes it shared as above.
 
 **Because:** `mkit-transport-file`'s only lock (`<root>/.mkit/refs/.lock`)
 serializes file-transport instances against *each other*, not against
@@ -377,6 +381,36 @@ per crate, including the `mkit-core` `pack-ruzstd` graph, which must
 contain `ruzstd`) and the `cargo check --target wasm32-unknown-unknown`
 steps for `mkit-wasm` and `mkit-server`, all run by `just ci-scripts`
 (part of `just ci`).
+
+## The default `mkit` CLI is server-free
+
+**Always:** the normal dependency graph of `mkit-cli` with its default
+features, on every target, contains no `axum`, `mkit-server-native`,
+`rusqlite` or `libsqlite3-sys`; it enables no hyper `server` feature, no
+hyper-util `server*` feature and no connectrpc `server` or `axum` feature;
+and it has `mkit-server` (the engine of `mkit serve`) with only the `ssh`
+and `fs` features. `mkit serve` builds no async runtime: it runs the ssh
+session under `futures::executor::block_on`, and its code names no tokio.
+tokio itself is allowed: it is the runtime of the Connect and reqwest
+*clients* in the default graph, and `mkit-server` uses only `tokio::sync`.
+
+**Because:** the CLI is what every user installs (`cargo install
+mkit-cli`, the release archives). The HTTP and `mkit+enc://` servers, the
+`SQLite` metadata store and their dependencies belong to the separate
+`mkit-server` binary (PRD MKIT-29, decision Q1). A server stack in the CLI
+graph grows the published crate's supply chain, its build time and its
+binary, and invites serving code paths the CLI was never reviewed for.
+
+**If violated:** the published `mkit` compiles an HTTP server, a C
+`SQLite` build or a second async stack that no CLI command needs; the
+release check (`scripts/check-release-artifact-features.sh`) then fails
+only at release time, where this check fails at the PR.
+
+**Enforced by:** `scripts/check-cli-baseline.sh` (a `cargo tree` model of
+the graph plus a grep of `commands/serve/`), run by `just ci-scripts`
+(part of `just ci`); the release build's real compiler artifacts are
+checked by `scripts/check-release-artifact-features.sh` against
+`scripts/release/mkit-packages.golden`.
 
 ## Both zstd backends accept exactly one frame per entry
 

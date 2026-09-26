@@ -131,6 +131,40 @@ pub(super) async fn invalid_ref_name(ctx: Ctx) -> CaseResult {
     ctx.expect_ref(&ctx.packmap("main"), None).await
 }
 
+/// SPEC-REFS §2: a server serves only names under `refs/`. A name that
+/// passes the §3 grammar but lies outside `refs/` is `invalid_argument` on
+/// `ReadRef`, `UpdateRef` and either side of `AdvanceRefs`, and nothing is
+/// written.
+pub(super) async fn non_refs_prefix_rejected(ctx: Ctx) -> CaseResult {
+    let ns = ctx.ns();
+    let outside = [
+        format!("{ns}/main"),
+        format!("heads/{ns}/main"),
+        format!("refsx/{ns}/main"),
+    ];
+    let (head, packmap) = (ctx.head("main"), ctx.packmap("main"));
+    for name in &outside {
+        want_code(
+            read_code(&ctx, name).await?,
+            INVALID,
+            &format!("ReadRef {name:?}"),
+        )?;
+        want_code(
+            ctx.update(name, Exp::Any, &A).await?,
+            INVALID,
+            &format!("UpdateRef {name:?}"),
+        )?;
+        let req = advance_req((name, Exp::Any, &A), (&packmap, Exp::Any, &A));
+        let resp: Result<AdvanceRefsResponse, _> = ctx.call(Rpc::AdvanceRefs, &req).await?;
+        want_code(resp, INVALID, &format!("AdvanceRefs head {name:?}"))?;
+        let req = advance_req((&head, Exp::Any, &A), (name, Exp::Any, &A));
+        let resp: Result<AdvanceRefsResponse, _> = ctx.call(Rpc::AdvanceRefs, &req).await?;
+        want_code(resp, INVALID, &format!("AdvanceRefs packmap {name:?}"))?;
+    }
+    ctx.expect_ref(&head, None).await?;
+    ctx.expect_ref(&packmap, None).await
+}
+
 /// A valid ref name of exactly `len` bytes under this case's namespace,
 /// in components of at most 64 bytes (filesystem-backed servers).
 fn name_of_len(ctx: &Ctx, len: usize) -> String {

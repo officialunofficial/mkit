@@ -306,7 +306,7 @@ maps onto a standard Connect code:
 | `PackNotFound` | `not_found` | `DownloadPack` before any chunk is sent; `PackExists` never raises this (it returns `exists = false` instead). |
 | `AccessDenied` | `permission_denied`; a client also maps `unauthenticated` to `AccessDenied`. | Any RPC, when the deployment's write or namespace policy (§7.5) rejects an authenticated caller, or a ticket does not bind to the request (§7.6). |
 | `RefConflict` | `failed_precondition` | `UpdateRef` on a CAS mismatch, including deletion of an absent ref (§7.8). `AdvanceRefs` reports its conflicts as typed outcomes (§4), never as this error. |
-| `InvalidRef` | `invalid_argument` | Any RPC taking a ref name that fails SPEC-REFS §3. |
+| `InvalidRef` | `invalid_argument` | Any RPC taking a ref name that fails SPEC-REFS §3, or (`ReadRef`, `UpdateRef`, either name of `AdvanceRefs`) a name outside `refs/`, which a server does not serve (SPEC-REFS §2); that message starts `ref name must start with refs/`. |
 | `ConnectionFailed` | *(not server-raised &mdash; client-observed transport failure, for example TCP reset, deadline exceeded)* | &mdash; |
 | `ServerError{status}` | `unavailable` (5xx-equivalent), `resource_exhausted` (429-equivalent), or `aborted` (a client maps it to `ServerError{status: 503}`) | Deployment-specific overload / backend failure; `aborted` also answers a retry of an operation that is still in flight (§7.1). |
 | `InvalidResponse` | *(not server-raised &mdash; client-observed: malformed frame, wrong message on a streamed oneof, digest mismatch on `DownloadPack`)* | &mdash; |
@@ -1050,9 +1050,12 @@ the same identity in `X-Repository` on every repository RPC, reads
 included, and in the signed `<repository>` field on writes.
 
 **ssh and enc (informative).** The ssh and enc transports carry no
-`X-Repository`. For them the path argument of `mkit serve <path>` is
-the addressing input. The on-disk layout under that path is unchanged,
-and the frozen `mkit.rpc.v1.ssh` protocol is untouched.
+`X-Repository`. For ssh the addressing input is the path argument of
+`mkit serve <path>`, the forced command; for enc it is the root of the
+`mkit-server serve --repo-root <DIR> --listen-enc <ADDR>` that accepted
+the connection (SPEC-TRANSPORT-ENC §6). The on-disk layout under that
+path is unchanged, and the frozen `mkit.rpc.v1.ssh` protocol is
+untouched.
 
 ### 7.5 Namespace and write policy
 

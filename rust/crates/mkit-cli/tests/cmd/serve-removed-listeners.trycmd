@@ -9,7 +9,7 @@ error: unexpected argument '--http' found
 
   tip: to pass '--http' as a value, use '-- --http'
 
-Usage: mkit serve <PATH>
+Usage: mkit serve [OPTIONS] <PATH>
 
 For more information, try '--help'.
 hint: `mkit serve` no longer takes `--http`; it only speaks the ssh-frame protocol on stdin/stdout.

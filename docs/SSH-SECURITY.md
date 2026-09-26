@@ -112,11 +112,23 @@ affected, not every SSH session on your machine.
 - **No known-hosts auto-rotation.** If the upstream rotates its host
   key, the user's ssh will prompt or reject depending on
   `StrictHostKeyChecking`. mkit has no custom path here.
-- **No timeout on initial hello (server side).** A misbehaving client
-  that connects and sends nothing will block the server's
-  `mkit serve` process until the SSH channel times out at the
-  transport layer. Implementing a per-handle read timeout is deferred
-  work.
+- **Idle timeout: client silence only (server side).** `mkit serve`
+  ends a session after `--idle-timeout-secs` seconds (default 60; `0`
+  disables it) without a byte from the client: before `Hello`, between
+  requests, or in the middle of an upload, whose partial pack is then
+  discarded. It answers `Error{INVALID_REQUEST, "idle timeout"}` (best
+  effort) and exits with status 76. Only silence counts: an upload that
+  keeps sending never trips it, and time the server spends answering never
+  counts.
+- **What the idle timeout does not bound.** A client that trickles a few
+  bytes at a time, or one that stops *reading* a download while its ssh
+  still answers keepalives, is not idle. `ClientAliveInterval` does not
+  help either, since the client's ssh is alive. Such a session is bounded
+  only by the per-connection frame and byte budgets (SPEC-TRANSPORT §4.4),
+  by sshd's `MaxSessions` and `MaxStartups`, and, if the operator sets
+  one, by `mkit serve --max-session-secs <secs>` (default `0`, off): a
+  hard cap on the process's lifetime, whatever the client does, exit 76.
+  Set it above the longest legitimate clone or push.
 
 ---
 
@@ -161,7 +173,6 @@ Candidate future work (non-binding):
 - A native SSH implementation (for example, via `russh`), so mkit owns
   host-key verification and can ship fingerprint pinning in
   `.mkit/config`.
-- Server-side read deadline on the hello handshake.
 - `mkit fingerprint` CLI for verifying and storing remote host keys.
 
 Until then: rely on `ssh(1)` and the pinning keys above.
@@ -176,11 +187,15 @@ Until then: rely on `ssh(1)` and the pinning keys above.
 | Upstream host-key rotation (silent swap)  | user's `StrictHostKeyChecking=yes` plus known_hosts |
 | Wrong binary on remote (legacy rename)    | OP_HELLO, §7.4 (fails loud)         |
 | Future-proto mkit client ↔ older server   | OP_HELLO STATUS_UNSUPPORTED reply   |
-| Slow-loris client against `mkit serve`    | **NOT mitigated** (§4)             |
+| Silent client holding `mkit serve`        | `--idle-timeout-secs` (default 60 s; §4) |
+| Trickling or non-reading client           | budgets (SPEC-TRANSPORT §4.4), sshd `MaxSessions`/`MaxStartups`, optional `--max-session-secs` (§4) |
 | Compromised identity file                 | user's key management              |
 | Agent forwarding abuse                    | user's `ForwardAgent no`           |
 
-For the `NOT mitigated` row: until the server-side read deadline lands,
-run `mkit serve` under the SSH transport (which itself times out idle
-channels via `ClientAliveInterval`). Do not expose it as a standalone
-service on an unmanaged socket.
+For the last two rows: the idle timeout bounds only a client that goes
+silent. A client that keeps a session busy slowly, or stops reading, is
+bounded by the budgets, by sshd's limits on sessions per connection and
+on unauthenticated connections, and by `--max-session-secs` when the
+operator sets it; it is off by default. Keep `mkit serve` behind sshd as
+a forced command; do not expose it as a standalone service on an
+unmanaged socket.

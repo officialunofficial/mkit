@@ -1050,6 +1050,45 @@ fn over_long_ref_names_are_refused_by_name() {
     assert_error(&frames[5], ErrorCode::Internal, "list refs failed");
 }
 
+/// R-86: a valid name outside `refs/` (`mkit serve` stored `main` as
+/// `<root>/main`) is refused by name on reads and writes; a name that fails
+/// the grammar keeps its old reply, and listings are unaffected.
+#[test]
+fn ref_names_outside_refs_are_refused_by_name() {
+    let (pipe, _) = mem();
+    let (end, frames) = run(
+        &pipe,
+        [
+            update("main", &[1; 32], Some(RefExpectation::Any), None),
+            read_ref("main"),
+            update("packs/x", &[1; 32], Some(RefExpectation::Missing), None),
+            read_ref("heads/main"),
+            // Field errors still come first.
+            update("main", &[1; 5], Some(RefExpectation::Any), None),
+            // Grammar failures: the old replies.
+            read_ref(".main"),
+            update(".main", &[1; 32], Some(RefExpectation::Any), None),
+            list_refs(Some("heads/")),
+        ],
+    );
+    assert_eq!(end, SessionEnd::Clean);
+    let outside = crate::refs::REF_NAME_OUTSIDE_REFS;
+    for f in &frames[..4] {
+        assert_error(f, ErrorCode::InvalidRequest, outside);
+    }
+    assert_error(
+        &frames[4],
+        ErrorCode::InvalidRequest,
+        "new_id must be 32 bytes",
+    );
+    assert_error(&frames[5], ErrorCode::Internal, "read ref failed");
+    assert_error(&frames[6], ErrorCode::InvalidRequest, "update ref failed");
+    let Some(Body::ListRefsResponse(listed)) = &frames[7].body else {
+        panic!("expected ListRefsResponse, got {:?}", frames[7].body);
+    };
+    assert!(listed.refs.is_empty());
+}
+
 /// SPEC-REFS §4 over the ssh wire: component-boundary prefixes, as
 /// `mkit serve` answers them (pinned byte for byte by `session-2`).
 #[test]

@@ -153,6 +153,7 @@ mkit-cli
 mkit-core
 mkit-keystore
 mkit-rpc
+mkit-server
 mkit-transport-connect
 mkit-transport-file
 mkit-transport-http
