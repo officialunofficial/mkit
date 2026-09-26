@@ -10,11 +10,12 @@ audience: implementers of mkit.transport.v1 servers that restrict writes or serv
 Status: **Draft**. The grant, epoch and visibility statement codecs and
 the header encoding (`mkit_attest::grant`, feature `grants`), the
 owner-scheme primitives of §4 (Keccak-256, the EIP-191 digest, secp256k1
-recovery, address derivation and the §4.4 low-`s` rules), the `ed25519`
-owner scheme, and the stateless verifier (§7 steps 1 to 10, the §5.2 and
-§9.1 statement checks and the §10 registration check) are implemented;
-the `secp256k1-eip191` and `webauthn-p256` schemes and server enforcement
-are not yet. Golden
+recovery, address derivation and the §4.4 low-`s` rules), all three
+owner schemes (`ed25519`, `secp256k1-eip191` and `webauthn-p256`, with
+the §4.3 rules against configured relying parties), and the stateless
+verifier (§7 steps 1 to 10, the §5.2 and §9.1 statement checks and the
+§10 registration check) are implemented; server enforcement is not yet.
+Golden
 vectors ([SPEC-CONVENTIONS §5](SPEC-CONVENTIONS.md#5-golden-vectors-and-conformance-tests))
 land with each implementation; §13.1 lists those that exist and names
 the rest.
@@ -278,7 +279,12 @@ bytes of the Keccak-256 of its 64 uncompressed coordinate bytes (`x`
 then `y`, each 32 bytes big-endian, without a prefix byte). The
 namespace digits are the lowercase hexadecimal of those 20 bytes, with
 no mixed-case checksum. A verifier MUST reject a public key that is not
-a valid point on its curve, including the point at infinity.
+a valid point on its curve, including the point at infinity: both
+coordinates are less than the curve's field prime `p`, they satisfy the
+curve equation, and the 64 zero bytes (which some libraries use for the
+point at infinity) are never a key. For `secp256k1-eip191`, a signature
+from which no key recovers, or which recovers the point at infinity, is
+rejected.
 
 Keccak-256 is the original Keccak submission with `0x01` padding, as
 Ethereum uses it, not FIPS 202 SHA3-256.
@@ -326,7 +332,11 @@ For `webauthn-p256`, the verifier MUST check all of these:
    signature counter are not checked; the verifier is stateless.
 2. `clientDataJSON` is a JSON object
    ([RFC 8259](https://www.rfc-editor.org/rfc/rfc8259)) with no
-   duplicate member names at any depth. Its `type` member is the string
+   duplicate member names at any depth, member names compared after
+   unescaping. It nests at most 64 deep: the top-level object is depth
+   1, and each array or object inside a value adds one. Every number in
+   it, converted to an IEEE 754 binary64 value with correct rounding, is
+   finite (so `1e400` is rejected). Its `type` member is the string
    `webauthn.get`. Its `challenge` member is exactly the string of 43
    characters that is the unpadded base64url of the 32-byte BLAKE3 of
    the canonical statement. `crossOrigin`, if present, is `false`. A
@@ -1109,13 +1119,42 @@ document's rules, independently of the Rust code.
   plain RFC 8032 equation accepts; a small-order `R`; `s ≥ L`),
   `now == expiry`, and `created` one millisecond past the clock lead.
 
+- `secp256k1-eip191.json`: a grant, an epoch statement and a visibility
+  statement signed with the `secp256k1-eip191` scheme by a fixed owner
+  key (RFC 6979, low `s`), each with its fields, id, EIP-191 digest,
+  65-byte `r‖s‖v` blob, full §4.2 header value and contexts.
+- `webauthn-p256.json`: the three statement kinds asserted with the
+  `webauthn-p256` scheme by a fixed P-256 key for two configured relying
+  parties (§4.3 rule 4), each with its `authenticatorData`,
+  `clientDataJSON`, challenge, low-`s` raw signature, blob, header and
+  contexts; plus accepted client-data shapes (no `crossOrigin`, extra
+  members, escaped member names and values, the user-verified and
+  extension flags with extension bytes, a second origin of one relying
+  party, and a `clientDataJSON` nested exactly 64 deep with numbers that
+  round to the largest finite binary64 value: `1.7976931348623158e308`
+  and the integer 2^1024 − 2^970 − 1).
+- `reject/verify-secp256k1-*.json`, `reject/verify-webauthn-*.json`:
+  signed statements that fail one §4, §4.1, §4.3 or §4.4 rule each,
+  re-signed where needed so that only that rule fails: a high-`s`
+  signature for each ECDSA scheme; `v` of 0 and 29; `r` or `s` out of
+  range; an `r` that is no x-coordinate; a signature that recovers the
+  point at infinity; another owner's key; each ECDSA
+  scheme on an `ed25519-` namespace and unadvertised; a public key off
+  the curve, with `x = p`, or all zero (with a signature that verifies
+  against the point at infinity); a 36-byte `authenticatorData`; a cleared
+  user-present flag; an unconfigured relying party; an origin that is not
+  configured, or configured for another relying party; `type`
+  `webauthn.create`; another statement's or a padded challenge;
+  `crossOrigin` `true` or `"false"`; `topOrigin`; a duplicate member name
+  (plain, escaped and nested); an unpaired surrogate; nesting 65 deep; the
+  numbers `1e400`, `1.7976931348623159e308` and 2^1024 − 2^970 (each
+  rounds to infinity); a signature by
+  another key or over a reserialized `clientDataJSON`; and a byte after
+  the fourth blob field.
+
 Planned, with the implementations that need them: fixtures under
-`rust/tests/golden/grants/` and `rust/tests/golden/url-token/` covering
-at least: a signature for each ECDSA scheme; an EIP-191 message and
-recovery; address derivation for a secp256k1 and a P-256 key; a
-WebAuthn assertion; a high-`s` signature for each ECDSA scheme, a
-cleared user-present flag, and an ECDSA scheme on the wrong namespace
-form; a URL token; and a signed read.
+`rust/tests/golden/url-token/` and `rust/tests/golden/grants/` covering
+at least a URL token and a signed read.
 
 Landed so far (each pinned by BLAKE3 in the directory's `MANIFEST.txt`):
 

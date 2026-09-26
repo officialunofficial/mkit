@@ -150,6 +150,19 @@ impl WebAuthnPolicy {
 /// Verify a `WebAuthn`-wrapped P-256 signature against a DSSE PAE,
 /// applying [`WebAuthnPolicy`] ceremony checks.
 ///
+/// # Warning: lax, for self-checks only
+///
+/// This helper is lenient by design: `clientDataJSON` is read into a
+/// `serde_json::Value`, so when a member name repeats the **last** one wins;
+/// a `topOrigin` member is accepted; `crossOrigin` is only refused when it
+/// is the boolean `true`; and at most **one** relying party is pinned, with
+/// an origin list that is not tied to it. Use it only to check an assertion
+/// the caller itself requested from its own authenticator (a signer
+/// self-check). It MUST NOT be used to verify assertions from third
+/// parties, such as SPEC-WRITE-GRANTS owner signatures: for those use the
+/// strict `webauthn-p256` scheme in `mkit_attest::grant::webauthn` (feature
+/// `grants`) through `mkit_attest::grant::verify_owner_signature`.
+///
 /// This is the policy-aware counterpart of [`verify_webauthn_wrapping`]
 /// (which delegates here with [`WebAuthnPolicy::permissive`]). The
 /// cryptographic steps are identical; the policy adds RP-ID-hash,
@@ -315,6 +328,9 @@ pub fn verify_webauthn_wrapping_with_policy(
 
 /// Verify a `WebAuthn`-wrapped P-256 signature against a DSSE PAE,
 /// performing cryptographic-only checks (no ceremony policy).
+///
+/// The warning on [`verify_webauthn_wrapping_with_policy`] applies: this is
+/// a lax self-check helper and MUST NOT verify third-party assertions.
 ///
 /// This is a thin compatibility wrapper that delegates to
 /// [`verify_webauthn_wrapping_with_policy`] with

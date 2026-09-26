@@ -1,0 +1,31 @@
+{
+  "accepted_schemes": [
+    "webauthn-p256"
+  ],
+  "audience": "https://git.example.com",
+  "context": {
+    "capability": "write",
+    "now": 1790000000000,
+    "repository": "0xdb1cf7c2c5375aea1b363bd4a67803c7f704051b/website",
+    "signer": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+  },
+  "expected_error": "owner mismatch",
+  "header": "bWtpdC13cml0ZS1ncmFudDp2MQoweGRiMWNmN2MyYzUzNzVhZWExYjM2M2JkNGE2NzgwM2M3ZjcwNDA1MWIKMHhkYjFjZjdjMmM1Mzc1YWVhMWIzNjNiZDRhNjc4MDNjN2Y3MDQwNTFiL3dlYnNpdGUKZWE0YTZjNjNlMjljNTIwYWJlZjU1MDdiMTMyZWM1Zjk5NTQ3NzZhZWJlYmU3YjkyNDIxZWVhNjkxNDQ2ZDIyYwpyZWFkLHdyaXRlCmh0dHBzOi8vZ2l0LmV4YW1wbGUuY29tLGh0dHBzOi8vZ2l0LmV4YW1wbGUub3JnCnJlZnMvaGVhZHMvbWFpbj1jdTtyZWZzL2hlYWRzL3dpcC8qPWN1ZmQKMAoxNzkwMDAwMDAwMDAwCjE3OTAwODY0MDAwMDAKYjFiMWIxYjFiMWIxYjFiMWIxYjFiMWIxYjFiMWIxYjFiMWIxYjFiMWIxYjFiMWIxYjFiMWIxYjFiMWIxYjFiMQ.webauthn-p256.QAAAAFs2iQ2svXyalrt0oe4os9LXW3LgmiDvJc-Ob9ip8DUNDhS-2NRoKjTYNTi9_1uW6JpmZuwNtXRdAvoSEAct91olAAAAo3mm9u6vuaVeN4wRgDTidR5oL6ufLTCrE9ISVYbOGUcBAAAAKoQAAAB7InR5cGUiOiJ3ZWJhdXRobi5nZXQiLCJjaGFsbGVuZ2UiOiJ5dWxXQ2NEcThHWVdXRVlnWjd0VDIxNUZvV1lMU0FvMGZaVWtZbGxuaC1jIiwib3JpZ2luIjoiaHR0cHM6Ly9leGFtcGxlLmNvbSIsImNyb3NzT3JpZ2luIjpmYWxzZX1AAAAADs1C3fPIy2U1gZGBILLq0kjBO4By62M-uRIUWinR-gF1U3-BpMdtKnLrMA_lulcRdCX21f_jC-sBFTbwR0Pkxw",
+  "kind": "grant",
+  "relying_parties": [
+    {
+      "id": "example.com",
+      "origins": [
+        "https://example.com",
+        "https://www.example.com"
+      ]
+    },
+    {
+      "id": "wallet.example",
+      "origins": [
+        "https://wallet.example"
+      ]
+    }
+  ],
+  "rule": "§4, §7 step 4: the public key's address is not the namespace (another key's valid assertion)"
+}

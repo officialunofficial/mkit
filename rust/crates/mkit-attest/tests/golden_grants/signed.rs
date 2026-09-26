@@ -5,9 +5,10 @@
 //!   statements signed by the owner seed `0909…09`, with their ids, the
 //!   64-byte signature, the full `X-Write-Grant` value, and accept and
 //!   reject contexts, each reject with its `GrantError::reason`;
-//! * `reject/verify-*.json`: one verification failure each (wrong scheme
-//!   form, unadvertised scheme, bad signature, short blob, expired at
-//!   exactly `expiry`, future-dated).
+//! * `reject/verify-*.json` (other than `verify-secp256k1-*` and
+//!   `verify-webauthn-*`, which [`super::ecdsa`] writes): one verification
+//!   failure each (wrong scheme form, unadvertised scheme, bad signature,
+//!   short blob, expired at exactly `expiry`, future-dated).
 //!
 //! `scripts/golden/grants_ref.py` rebuilds every statement, re-signs it with
 //! pycryptodome's RFC 8032 Ed25519 (deterministic, so the bytes are equal)
@@ -74,14 +75,14 @@ fn header(statement: &[u8], scheme: OwnerScheme, blob: Vec<u8>) -> String {
 }
 
 fn cfg(audience: &str, schemes: &[OwnerScheme]) -> VerifierConfig {
-    VerifierConfig::new(audience, AcceptedSchemes::of(schemes)).unwrap()
+    VerifierConfig::new(audience, AcceptedSchemes::of(schemes), vec![]).unwrap()
 }
 
 fn ed_cfg(audience: &str) -> VerifierConfig {
     cfg(audience, &[OwnerScheme::Ed25519])
 }
 
-fn identity(s: &str) -> RepositoryIdentity {
+pub(super) fn identity(s: &str) -> RepositoryIdentity {
     RepositoryIdentity::parse_bare_allowed(s).unwrap()
 }
 
@@ -93,7 +94,7 @@ fn capability(s: &str) -> Capability {
     }
 }
 
-fn capability_text(c: Capability) -> &'static str {
+pub(super) fn capability_text(c: Capability) -> &'static str {
     match c {
         Capability::Read => "read",
         Capability::Write => "write",
@@ -111,7 +112,7 @@ fn reason(result: Result<(), GrantError>) -> Value {
 
 /// A per-request context for a grant: `(name, audience, repository, signer,
 /// capability, now)`.
-type GrantContext = (
+pub(super) type GrantContext = (
     &'static str,
     &'static str,
     String,
@@ -358,7 +359,7 @@ fn run_grant_context(header: &str, ctx: &GrantContext) -> Result<(), GrantError>
         .map(|_| ())
 }
 
-fn grant_context_json(ctx: &GrantContext, expected: Option<GrantError>) -> Value {
+pub(super) fn grant_context_json(ctx: &GrantContext, expected: Option<GrantError>) -> Value {
     let (name, audience, repository, signer, capability, now) = ctx;
     let mut v = json!({
         "name": name,
@@ -478,18 +479,32 @@ fn run_epoch_context(header: &str, audience: &str, now: i64) -> Result<(), Grant
     verify_epoch_statement(&ed_cfg(audience), header, now).map(|_| ())
 }
 
-fn epoch_file() -> Value {
-    let s = epoch_vector();
-    let bytes = s.encode().unwrap();
-    let fields = json!({
+pub(super) fn epoch_fields(s: &EpochStatement) -> Value {
+    json!({
         "namespace": s.namespace.to_string(),
         "new_epoch": s.new_epoch,
         "audiences": s.audiences,
         "created": s.created_ms,
         "expiry": s.expiry_ms,
         "nonce": hex(&s.nonce),
-    });
-    let mut v = signed_json("epoch-4", &bytes, &fields, s.id().unwrap());
+    })
+}
+
+pub(super) fn visibility_fields(s: &VisibilityStatement) -> Value {
+    json!({
+        "repository": s.repository.to_string(),
+        "visibility": s.visibility.token(),
+        "audiences": s.audiences,
+        "created": s.created_ms,
+        "expiry": s.expiry_ms,
+        "nonce": hex(&s.nonce),
+    })
+}
+
+fn epoch_file() -> Value {
+    let s = epoch_vector();
+    let bytes = s.encode().unwrap();
+    let mut v = signed_json("epoch-4", &bytes, &epoch_fields(&s), s.id().unwrap());
     v["contexts"] = epoch_contexts()
         .iter()
         .map(|((name, audience, now), e)| {
@@ -579,15 +594,12 @@ fn run_visibility_context(
 fn visibility_file() -> Value {
     let s = visibility_vector();
     let bytes = s.encode().unwrap();
-    let fields = json!({
-        "repository": s.repository.to_string(),
-        "visibility": s.visibility.token(),
-        "audiences": s.audiences,
-        "created": s.created_ms,
-        "expiry": s.expiry_ms,
-        "nonce": hex(&s.nonce),
-    });
-    let mut v = signed_json("private-website", &bytes, &fields, s.id().unwrap());
+    let mut v = signed_json(
+        "private-website",
+        &bytes,
+        &visibility_fields(&s),
+        s.id().unwrap(),
+    );
     v["contexts"] = visibility_contexts()
         .iter()
         .map(|((name, audience, repository, now), e)| {
@@ -907,9 +919,10 @@ fn visibility_ed25519_goldens() {
 fn grant_verify_reject_goldens() {
     maybe_write();
     let expected = verify_rejects();
+    // The ECDSA schemes' verify rejects are `ecdsa`'s.
     let files: Vec<String> = fixture_files()
         .into_iter()
-        .filter(|p| p.starts_with("reject/verify-"))
+        .filter(|p| p.starts_with("reject/verify-") && !super::ecdsa::is_ecdsa_reject(p))
         .collect();
     let mut names: Vec<String> = expected
         .iter()
