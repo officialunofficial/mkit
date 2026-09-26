@@ -75,6 +75,26 @@ train).
 
 ### Added
 
+- *(core)* `pack::DeltaBaseSource`: the external delta-base lookup is
+  now an explicit, generic parameter, so a server can resolve bases only
+  from the pushing repository's membership (PRD §6.5, no existence
+  oracles). `&ObjectStore` implements it (`PackReader::read` is
+  unchanged, byte for byte and in error order); `NoExternalBases` is the
+  self-contained-pack source. A source not marked `VERIFIED` has its
+  bytes re-derived, and anything but the requested object is
+  `DeltaBaseMissing`, the same error as an absent base. New store-less
+  `pack::decode_entries_with(pack, bases, sink)` validates and decodes a
+  pack in pack order, handing each `DecodedEntry` to `sink`
+  (`DecodeReport` summarizes).
+- *(core)* `verify::verify_push(tips, mode, source, known)` /
+  `PushReport`: incremental push verification before refs move. It walks
+  every new tip's closure through the shared closure BFS, re-hashes each
+  object, checks commit/remix/tag signatures, stops at a caller-supplied
+  frontier of objects already verified in the repository, and reports
+  missing, corrupt, badly signed objects and non-commit tips.
+- *(core)* `sign::verify_object_signature(&Object)`: the per-type
+  signature check (`verify_commit` / `verify_remix` / `verify_tag`; Ok for
+  unsigned kinds). The CLI's fetch-side signature check now calls it.
 - *(core)* `verify::build_disclosure_from`: builds SPEC-DISCLOSURE
   bundles through any verifying `store::ObjectSource` (a per-repository
   index or the global object CAS), not just the on-disk `ObjectStore`.

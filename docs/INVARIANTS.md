@@ -639,8 +639,10 @@ and `rust/tests/golden/disclosure/neg_incomplete_length_proof_set.*`;
 **Always:** every reachability walk &mdash; store-backed
 `reachable_objects` / `reachable_closure` / `reachable_snapshot`, the
 store-less `verify_closure` BFS, the pull-based `verify_closure_streaming`
-walk, and push/fetch pack planning &mdash; takes
-its edges from `ops::graph::children(obj, mode)`. Snapshot mode omits
+walk, push verification (`verify_push`), and push/fetch pack planning &mdash; takes
+its edges from `ops::graph::children(obj, mode)`. The verifiers
+(`verify_closure*` and `verify_push`) share one BFS, `verify::closure::walk`;
+none keeps a walker of its own. Snapshot mode omits
 commit/remix parents; history mode includes them; remix `sources` and
 `Delta.base_hash` are never followed.
 
@@ -655,13 +657,15 @@ walking a hand-rolled map would accept a different set than
 `reachable_objects`.
 
 **Enforced by:** `mkit_core::ops::graph::tests::children_snapshot_omits_parents_history_includes_them`,
-`reachable_snapshot_excludes_parent_commit`, and
+`reachable_snapshot_excludes_parent_commit`,
 `mkit_core::verify::closure::tests::history_on_snapshot_reports_parent_missing`
-/ `snapshot_on_history_reports_parent_unreferenced`.
+/ `snapshot_on_history_reports_parent_unreferenced`, and
+`mkit_core::verify::push::tests::history_vs_snapshot` /
+`remix_sources_never_followed`.
 
 ## Streaming closure verification reads only reachable objects, each once
 
-**Always:** `verify_closure_streaming` fetches each visited id at most once,
+**Always:** `verify_closure_streaming` and `verify_push` fetch each visited id at most once,
 fetches no id outside the selected snapshot/history closure, and drops an
 object's bytes after extracting its child ids; it reports
 `unreferenced_checked = false` because it cannot enumerate objects it never
@@ -679,7 +683,45 @@ foreign/unreachable objects and misrepresent what was verified.
 **Enforced by:**
 `mkit_core::verify::closure::tests::streaming_fetches_each_reachable_object_once_and_only`,
 which uses a counting source that panics on unknown ids and checks the exact
-snapshot/history fetch sets.
+snapshot/history fetch sets, and
+`mkit_core::verify::push::tests::each_object_fetched_once_across_multiple_tips`.
+
+## Push verification and delta bases resolve only within the pushing repository
+
+**Always:** `verify_push` reads objects only through the `ObjectSource` its
+caller supplies, and stops only at ids the caller's `known` accepts; a
+`known` id is neither fetched nor descended. A server supplies a source
+limited to the pushing repository's members plus the pushed objects, and
+`known` holds only for objects whose whole closure (in the walk's mode) was
+already verified in that repository. Every fetched object is re-hashed, and
+every commit, remix and tag has its signature checked
+(`sign::verify_object_signature`), before any ref moves. Likewise a delta's
+external base comes only from the `pack::DeltaBaseSource` the decoder is
+given: the local `ObjectStore` on a client, the repository's membership on a
+server, never a global content store. A source that does not have a base
+and a source that may not serve it give the same `DeltaBaseMissing` error;
+an unverified source's bytes are re-derived, so a wrong object is never
+used as a base.
+
+**Because:** PRD §6.5 forbids existence oracles. If a push could close its
+history, or resolve a delta, over objects held only by another repository or
+the global store, the push's success would reveal that some other repository
+holds those objects, and the repository would reference objects it never
+held. A `known` that meant "exists somewhere" would skip verification of
+content this repository never checked.
+
+**If violated:** a pusher could probe for private content by pushing deltas
+or commits over guessed ids, or land a ref whose history includes unverified,
+unsigned or foreign objects.
+
+**Enforced by:** `mkit_core::verify::push::tests` (`frontier_stop` and
+`known_tip_is_noop`, whose source panics on any fetch past the frontier;
+`unsigned_commit_rejected`, `forged_tag_rejected`, `remix_signature_checked`,
+`wrong_bytes_for_id_is_corrupt`) and `mkit_core::pack::tests`
+(`external_base_outside_source_is_delta_base_missing`,
+`untrusted_source_returning_wrong_bytes_is_rejected`,
+`decode_with_no_external_bases_matches_reader`). The server-side wiring and
+the cross-repository uniform-error conformance test belong to WP-4.7.
 
 ## Closure profile is raw-only
 

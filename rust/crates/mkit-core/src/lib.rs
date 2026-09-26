@@ -118,7 +118,7 @@ pub use sign::{
     COMMIT_DOMAIN, KeyPair, PublicKey, REMIX_DOMAIN, SecretSeed, Signature, TAG_DOMAIN,
     commit_signing_bytes, commit_signing_hash, remix_signing_bytes, remix_signing_hash,
     sign_commit, sign_remix, sign_tag, tag_signing_bytes, tag_signing_hash, verify, verify_commit,
-    verify_remix, verify_tag,
+    verify_object_signature, verify_remix, verify_tag,
 };
 pub use store::{
     MAX_RAW_OBJECT_SIZE, MAX_TREE_DEPTH, MKIT_DIR, OBJECTS_DIR, ObjectStore, StoreError,
@@ -139,9 +139,11 @@ pub use delta::{
 
 // Packfile reader/writer (SPEC-PACKFILE v1).
 pub use pack::{
-    HEADER_LEN as PACK_HEADER_LEN, MAGIC as PACK_MAGIC, MAX_ENTRIES as PACK_MAX_ENTRIES,
-    MAX_TOTAL_PAYLOAD as PACK_MAX_TOTAL_PAYLOAD, PackEntries, PackEntry, PackError, PackReader,
-    PackWriter, TRAILER_LEN as PACK_TRAILER_LEN, UnpackReport, VERSION as PACK_VERSION, pack_key,
+    DecodeReport, DecodedEntry, DeltaBaseSource, HEADER_LEN as PACK_HEADER_LEN,
+    MAGIC as PACK_MAGIC, MAX_ENTRIES as PACK_MAX_ENTRIES,
+    MAX_TOTAL_PAYLOAD as PACK_MAX_TOTAL_PAYLOAD, NoExternalBases, PackEntries, PackEntry,
+    PackError, PackReader, PackWriter, TRAILER_LEN as PACK_TRAILER_LEN, UnpackReport,
+    VERSION as PACK_VERSION, decode_entries_with, pack_key,
 };
 
 // Refs, index, worktree, ignore, and repo_lock.

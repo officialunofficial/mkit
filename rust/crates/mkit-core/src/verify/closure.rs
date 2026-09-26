@@ -15,7 +15,7 @@ use bytes::Buf;
 use commonware_codec::{EncodeSize, ReadExt, ReadRangeExt, Write};
 
 use crate::hash::{Hash, hash};
-use crate::object::Object;
+use crate::object::{Object, ObjectType};
 use crate::ops::graph::{ClosureMode, children};
 use crate::pack::{self, PackEntries, PackEntry, PackWriter, pack_key};
 use crate::store::{ObjectStore, StoreError};
@@ -211,39 +211,93 @@ impl ObjectSource for &ObjectStore {
     }
 }
 
-fn walk_closure(
-    root: &Hash,
+/// What the shared walker does when a root turns out not to be a
+/// commit, remix or tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RootRule {
+    /// Abort with [`VerifyError::ClosureRootWrongType`] (closure callers).
+    Fail,
+    /// Record it in [`Walk::bad_roots`] and keep walking (push verification).
+    Record,
+}
+
+/// Outcome of the shared [`walk`].
+#[derive(Debug, Default)]
+pub(crate) struct Walk {
+    /// Fetched objects whose id was re-derived and matched.
+    pub(crate) verified: usize,
+    /// Frontier stops: ids for which `known` held; never fetched.
+    pub(crate) skipped_known: usize,
+    /// Referenced (or a root) but absent from the source, sorted.
+    pub(crate) missing: Vec<Hash>,
+    /// Undecodable or mis-identified bytes, sorted by requested id.
+    pub(crate) corrupt: Vec<(Hash, String)>,
+    /// Roots that are not a commit/remix/tag ([`RootRule::Record`]), sorted.
+    pub(crate) bad_roots: Vec<(Hash, ObjectType)>,
+    /// Every id the walk reached, including frontier stops.
+    pub(crate) visited: BTreeSet<Hash>,
+}
+
+/// The one closure BFS. Every closure and push verifier in this crate
+/// walks through here, taking its edges from [`children`]`(obj, mode)`.
+///
+/// Starting from every id in `roots`, each id is visited at most once:
+/// - `known(id)` true: a frontier stop, counted and neither fetched nor
+///   descended;
+/// - otherwise fetched once from `source`, deserialized and re-hashed
+///   ([`crate::object::id_from_object`]); absent → `missing`, bad bytes
+///   or a different derived id → `corrupt` (not descended);
+/// - a root must be a commit/remix/tag (`root_rule`);
+/// - `visit` sees each verified object, then its children are queued and
+///   its bytes dropped.
+///
+/// `known` is the caller's frontier contract: it may hold only for ids
+/// whose whole closure in `mode` was already verified *in the same
+/// repository*. See [`crate::verify::verify_push`].
+///
+/// # Errors
+///
+/// [`VerifyError::TooManyClosureObjects`] past [`pack::MAX_ENTRIES`]
+/// visited ids, [`VerifyError::ClosureRootWrongType`] under
+/// [`RootRule::Fail`], a source error, or the first error `visit` returns.
+pub(crate) fn walk(
+    roots: &[Hash],
     mode: ClosureMode,
     source: &mut impl ObjectSource,
-) -> Result<(ClosureReport, BTreeSet<Hash>), VerifyError> {
-    let mut visited = BTreeSet::new();
-    let mut missing = Vec::new();
-    let mut corrupt = Vec::new();
-    let mut queue = VecDeque::from([*root]);
-    let mut verified = 0usize;
+    mut known: impl FnMut(&Hash) -> bool,
+    root_rule: RootRule,
+    mut visit: impl FnMut(&Hash, &Object) -> Result<(), VerifyError>,
+) -> Result<Walk, VerifyError> {
+    let root_set: BTreeSet<Hash> = roots.iter().copied().collect();
+    let mut out = Walk::default();
+    let mut queue: VecDeque<Hash> = roots.iter().copied().collect();
 
     while let Some(id) = queue.pop_front() {
-        if !visited.insert(id) {
+        if !out.visited.insert(id) {
             continue;
         }
-        if visited.len() > pack::MAX_ENTRIES as usize {
+        if out.visited.len() > pack::MAX_ENTRIES as usize {
             return Err(VerifyError::TooManyClosureObjects);
+        }
+        if known(&id) {
+            out.skipped_known += 1;
+            continue;
         }
 
         let Some(bytes) = source.fetch(&id)? else {
-            missing.push(id);
+            out.missing.push(id);
             continue;
         };
         let object = match crate::serialize::deserialize(bytes.as_ref()) {
             Ok(object) => object,
             Err(error) => {
-                corrupt.push((id, error.to_string()));
+                out.corrupt.push((id, error.to_string()));
                 continue;
             }
         };
         let derived = crate::object::id_from_object(&object, bytes.as_ref());
         if derived != id {
-            corrupt.push((
+            out.corrupt.push((
                 id,
                 format!(
                     "object bytes hash to {}, expected {}",
@@ -253,34 +307,59 @@ fn walk_closure(
             ));
             continue;
         }
-        if id == *root {
+        if root_set.contains(&id) {
             match &object {
                 Object::Commit(_) | Object::Remix(_) | Object::Tag(_) => {}
-                other => return Err(VerifyError::ClosureRootWrongType(other.object_type())),
+                other => match root_rule {
+                    RootRule::Fail => {
+                        return Err(VerifyError::ClosureRootWrongType(other.object_type()));
+                    }
+                    RootRule::Record => out.bad_roots.push((id, other.object_type())),
+                },
             }
         }
+        visit(&id, &object)?;
 
         let child_ids = children(&object, mode);
-        verified += 1;
+        out.verified += 1;
         drop(object);
         drop(bytes);
         queue.extend(child_ids);
     }
 
-    missing.sort_unstable();
-    missing.dedup();
-    corrupt.sort_by_key(|(id, _)| *id);
+    out.missing.sort_unstable();
+    out.missing.dedup();
+    out.corrupt.sort_by_key(|(id, _)| *id);
+    out.bad_roots.sort_by_key(|(id, _)| *id);
+    Ok(out)
+}
+
+/// Single-root closure walk: [`walk`] with no frontier, no visitor and a
+/// hard root-type rule.
+fn walk_closure(
+    root: &Hash,
+    mode: ClosureMode,
+    source: &mut impl ObjectSource,
+) -> Result<(ClosureReport, BTreeSet<Hash>), VerifyError> {
+    let walked = walk(
+        std::slice::from_ref(root),
+        mode,
+        source,
+        |_| false,
+        RootRule::Fail,
+        |_, _| Ok(()),
+    )?;
     Ok((
         ClosureReport {
             root: *root,
             mode,
-            verified,
-            missing,
-            corrupt,
+            verified: walked.verified,
+            missing: walked.missing,
+            corrupt: walked.corrupt,
             unreferenced: Vec::new(),
             unreferenced_checked: false,
         },
-        visited,
+        walked.visited,
     ))
 }
 
