@@ -7,6 +7,7 @@ use mkit_core::hash::{Hash, from_hex, to_hex};
 use mkit_core::protocol::AdvanceOutcome;
 use serde::{Deserialize, Serialize};
 
+use super::content_index::{BlockEntry, ObjectState};
 use super::error::StoreError;
 use super::kv::Value;
 use crate::error::Code;
@@ -49,6 +50,27 @@ struct QuotaV1 {
     window_start: i64,
     ops: u32,
     bytes: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HoldV1 {
+    expires_at_ms: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BlockV1 {
+    reason: String,
+    blocked_at_ms: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ObjectStateV1 {
+    seq: u64,
+    changed_at_ms: u64,
+    holders: u64,
 }
 
 /// Every [`Code`], to invert [`Code::as_str`].
@@ -191,6 +213,56 @@ pub fn decode_quota_state(value: &Value) -> Result<QuotaState, StoreError> {
     })
 }
 
+/// Encode a `ContentIndex` GC hold: its expiry, Unix ms.
+#[must_use]
+pub fn encode_hold(expires_at_ms: u64) -> Value {
+    encode_json(&HoldV1 { expires_at_ms })
+}
+
+/// Decode a `ContentIndex` GC hold's expiry.
+pub fn decode_hold(value: &Value) -> Result<u64, StoreError> {
+    let dto: HoldV1 = decode_json(value, "bad hold")?;
+    Ok(dto.expires_at_ms)
+}
+
+/// Encode a blocklist entry.
+#[must_use]
+pub fn encode_block_entry(entry: &BlockEntry) -> Value {
+    encode_json(&BlockV1 {
+        reason: entry.reason.clone(),
+        blocked_at_ms: entry.blocked_at_ms,
+    })
+}
+
+/// Decode a blocklist entry.
+pub fn decode_block_entry(value: &Value) -> Result<BlockEntry, StoreError> {
+    let dto: BlockV1 = decode_json(value, "bad blocklist entry")?;
+    Ok(BlockEntry {
+        reason: dto.reason,
+        blocked_at_ms: dto.blocked_at_ms,
+    })
+}
+
+/// Encode a `ContentIndex` object state.
+#[must_use]
+pub fn encode_object_state(state: &ObjectState) -> Value {
+    encode_json(&ObjectStateV1 {
+        seq: state.seq,
+        changed_at_ms: state.changed_at_ms,
+        holders: state.holders,
+    })
+}
+
+/// Decode a `ContentIndex` object state.
+pub fn decode_object_state(value: &Value) -> Result<ObjectState, StoreError> {
+    let dto: ObjectStateV1 = decode_json(value, "bad object state")?;
+    Ok(ObjectState {
+        seq: dto.seq,
+        changed_at_ms: dto.changed_at_ms,
+        holders: dto.holders,
+    })
+}
+
 /// A ref value: the raw 32-byte id.
 #[must_use]
 pub fn encode_ref_id(id: &Hash) -> Value {
@@ -329,6 +401,52 @@ mod tests {
         );
         assert_eq!(encode_u64(1).as_bytes(), [0, 0, 0, 0, 0, 0, 0, 1]);
         assert_eq!(encode_u32(1).as_bytes(), [0, 0, 0, 1]);
+    }
+
+    #[test]
+    fn content_index_codecs_golden_bytes() {
+        let block = BlockEntry {
+            reason: "dmca".into(),
+            blocked_at_ms: 7,
+        };
+        let state = ObjectState {
+            seq: u64::MAX,
+            changed_at_ms: 1_700_000_000_000,
+            holders: 2,
+        };
+        let cases: [(Value, &[u8]); 3] = [
+            (encode_hold(9), b"\x01{\"expires_at_ms\":9}"),
+            (
+                encode_block_entry(&block),
+                b"\x01{\"reason\":\"dmca\",\"blocked_at_ms\":7}",
+            ),
+            (
+                encode_object_state(&state),
+                b"\x01{\"seq\":18446744073709551615,\"changed_at_ms\":1700000000000,\"holders\":2}",
+            ),
+        ];
+        for (value, golden) in &cases {
+            assert_eq!(value.as_bytes(), *golden);
+        }
+        assert_eq!(decode_hold(&cases[0].0).unwrap(), 9);
+        assert_eq!(decode_block_entry(&cases[1].0).unwrap(), block);
+        assert_eq!(decode_object_state(&cases[2].0).unwrap(), state);
+        for bad in [
+            &b"\x02{\"expires_at_ms\":9}"[..],
+            b"\x01{\"expires_at_ms\":-1}",
+            b"\x01{\"seq\":0,\"changed_at_ms\":0}",
+        ] {
+            let v = Value::new(bad.to_vec());
+            assert!(matches!(decode_hold(&v), Err(StoreError::Corrupt(_))));
+            assert!(matches!(
+                decode_block_entry(&v),
+                Err(StoreError::Corrupt(_))
+            ));
+            assert!(matches!(
+                decode_object_state(&v),
+                Err(StoreError::Corrupt(_))
+            ));
+        }
     }
 
     #[test]

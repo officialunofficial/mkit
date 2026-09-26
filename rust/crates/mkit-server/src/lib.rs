@@ -10,7 +10,9 @@
 //! the protocol they apply (`refs::evaluate_cas`, `quota::evaluate_quota`).
 //! The storage contract lives in [`store`]: its contract types are also
 //! re-exported at the root, its key layouts, value codecs and typed
-//! readers stay namespaced (`store::keys`, `store::codec`, `store::read`).
+//! readers stay namespaced (`store::keys`, `store::codec`, `store::read`),
+//! as do the export/import helpers and the `ContentIndex` row types
+//! (`store::export_partition`, `store::Holder`).
 //! The `memory` feature adds the in-memory reference backends.
 
 pub mod auth_v2;
@@ -49,9 +51,10 @@ pub use rt::SystemClock;
 pub use rt::{BoxFuture, BoxStream, Clock, ManualClock, MaybeSend, MaybeSync, Spawner, send_wrap};
 pub use store::{
     Batch, BatchOutcome, BlobBody, BlobKey, BlobMeta, BlobStore, BoxError, ByteRange,
-    CommitOutcome, Cursor, Key, KeyClasses, MAX_BATCH_BYTES, MAX_BATCH_OPS, MAX_KEY_BYTES,
-    MAX_VALUE_BYTES, MembershipMode, NamespaceStore, PackSink, Partition, PartitionStats,
-    Precondition, ScanPage, StoreCapabilities, StoreError, Value, Write,
+    CommitOutcome, ContentIndex, Cursor, Key, KeyClasses, MAX_BATCH_BYTES, MAX_BATCH_OPS,
+    MAX_KEY_BYTES, MAX_VALUE_BYTES, MembershipMode, NamespaceStore, PackSink, Partition,
+    PartitionStats, Precondition, ScanPage, StateCommitment, StoreCapabilities, StoreError,
+    StoreMaintenance, Value, Write,
 };
 pub use telemetry::{
     METRIC_LATENCY, METRIC_REQUESTS, METRIC_UPLOAD_BYTES, Metrics, NEVER_ECHO, NEVER_LOG,
