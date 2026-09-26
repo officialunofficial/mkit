@@ -1,0 +1,329 @@
+edition = "2023";
+package mkit.server.hooks.v1;
+
+// Deployment business-logic hooks, called as configured; SPEC-SERVER §6.1.
+service HooksService {
+  // Decide whether the verified principal may act; SPEC-SERVER §6.2.
+  rpc Authorize(AuthorizeRequest) returns (AuthorizeResponse);
+  // Decide admission before the guarded apply; SPEC-SERVER §6.3.
+  rpc Admit(AdmitRequest) returns (AdmitResponse);
+  // Inspect object metadata without inline content; SPEC-SERVER §6.4.
+  rpc Inspect(InspectRequest) returns (InspectResponse);
+  // Deliver a durable reservation outcome at least once; SPEC-SERVER §§5, 6.5.
+  rpc Outcome(OutcomeRequest) returns (OutcomeResponse);
+}
+
+// Verified operation context shared by decision hooks; SPEC-SERVER §6.2.
+message Operation {
+  // The mkit server's canonical origin, not the hook's origin; SPEC-SERVER §6.2.
+  string audience = 1;
+  // Full repository identity as STC §7.4 requires; SPEC-SERVER §6.2.
+  string repository = 2;
+  // Full Connect procedure path of the client RPC; SPEC-SERVER §6.2.
+  string procedure = 3;
+  // Identity established before authorization; SPEC-SERVER §6.2.
+  Principal principal = 4;
+  // Auth v2 nonce of a signed write; empty otherwise; SPEC-SERVER §6.2.
+  string idempotency_key = 5;
+  // Intended ref writes in decision order; SPEC-SERVER §6.2.
+  repeated RefChange refs = 6;
+  // Whether the principal owns the namespace, set for Admit; SPEC-SERVER §6.3.
+  bool owner = 7;
+  // Write grant used, if any, set for Admit; SPEC-SERVER §6.3.
+  GrantUsed grant = 8;
+}
+
+// Credential class and verified identity, without bearer secrets; SPEC-SERVER §6.2.
+message Principal {
+  // Exactly one identity class; SPEC-SERVER §6.2.
+  oneof kind {
+    // No authenticated credentials; SPEC-SERVER §6.2.
+    Anonymous anonymous = 1;
+    // Verified auth v2 signer; SPEC-SERVER §6.2.
+    Signer signer = 2;
+    // Holder of the deployment's bearer credential; SPEC-SERVER §6.2.
+    BearerHolder bearer_holder = 3;
+    // Authenticated encrypted-transport peer; SPEC-SERVER §6.2.
+    TransportPeer transport_peer = 4;
+    // Identity established by an SSH forced command; SPEC-SERVER §6.2.
+    SshForcedCommand ssh_forced_command = 5;
+  }
+}
+
+// Anonymous identity; no credential data accompanies it; SPEC-SERVER §6.2.
+message Anonymous {}
+
+// Identity proved by an auth v2 signature; SPEC-SERVER §6.2.
+message Signer {
+  // Raw 32-byte Ed25519 public key of the signer; SPEC-SERVER §6.2.
+  bytes ed25519_public_key = 1;
+}
+
+// Bearer-holder identity; the token is never sent to hooks; SPEC-SERVER §6.2.
+message BearerHolder {}
+
+// Identity of an authenticated encrypted-transport peer; SPEC-SERVER §6.2.
+message TransportPeer {
+  // Raw 32-byte Ed25519 public key of the peer; SPEC-SERVER §6.2.
+  bytes ed25519_public_key = 1;
+}
+
+// Identity named by an SSH forced command; SPEC-SERVER §6.2.
+message SshForcedCommand {
+  // Raw 32-byte Ed25519 public key, or empty if unknown; SPEC-SERVER §6.2.
+  bytes ed25519_public_key = 1;
+}
+
+// One intended conditional ref write or deletion; SPEC-SERVER §6.2.
+message RefChange {
+  // Full ref name, such as refs/heads/main; SPEC-SERVER §6.2.
+  string name = 1;
+  // Exactly one compare-and-swap precondition; SPEC-SERVER §6.2.
+  oneof condition {
+    // Accept any current ref state; SPEC-SERVER §6.2.
+    Unconditional any = 2;
+    // Require the ref to be absent; SPEC-SERVER §6.2.
+    MustNotExist missing = 3;
+    // Require the ref to hold this 32-byte object id; SPEC-SERVER §6.2.
+    bytes expected = 4;
+  }
+
+  // New 32-byte target id; empty when delete is true; SPEC-SERVER §6.2.
+  bytes new = 5;
+  // True when the operation deletes this ref; SPEC-SERVER §6.2.
+  bool delete = 6;
+}
+
+// Unconditional ref-write precondition; SPEC-SERVER §6.2.
+message Unconditional {}
+
+// Create-only precondition requiring an absent ref; SPEC-SERVER §6.2.
+message MustNotExist {}
+
+// Write grant and epoch established by authorization; SPEC-SERVER §6.3.
+message GrantUsed {
+  // Raw 32-byte id of the grant used; SPEC-SERVER §6.3.
+  bytes grant_id = 1;
+  // Namespace grant epoch checked during authorization; SPEC-SERVER §6.3.
+  uint64 epoch = 2;
+}
+
+// Client response header permitted by the hook allowlist; SPEC-SERVER §6.6.
+message Header {
+  // Header name, compared case-insensitively; SPEC-SERVER §6.6.
+  string name = 1;
+  // At most 8,192 bytes of visible ASCII plus SP; SPEC-SERVER §6.6.
+  string value = 2;
+}
+
+// Stage-2 authorization input before quota or replay allocation; SPEC-SERVER §6.2.
+message AuthorizeRequest {
+  // Verified operation and intended ref writes; SPEC-SERVER §6.2.
+  Operation operation = 1;
+}
+
+// Authorization decision returned in a successful Connect response; SPEC-SERVER §6.2.
+message AuthorizeResponse {
+  // Exactly one allow or deliberate denial; SPEC-SERVER §6.2.
+  oneof result {
+    // Permit the operation to proceed to admission; SPEC-SERVER §6.2.
+    AuthorizeAllow allow = 1;
+    // Refuse the operation with public client text; SPEC-SERVER §6.2.
+    Deny deny = 2;
+  }
+}
+
+// Authorization permission; it conveys no admission reservation; SPEC-SERVER §6.2.
+message AuthorizeAllow {}
+
+// Deliberate refusal, distinct from hook execution failure; SPEC-SERVER §§6.2, 8.
+message Deny {
+  // Connect code name; outside the allowlist maps to permission_denied; SPEC-SERVER §6.2.
+  string code = 1;
+  // Public UTF-8 text, at most 512 bytes and no control characters; SPEC-SERVER §6.2.
+  string message = 2;
+}
+
+// Stage-3 pricing and admission facts, without store-deduplication data; SPEC-SERVER §6.3.
+message AdmitRequest {
+  // Operation including established owner and grant facts; SPEC-SERVER §6.3.
+  Operation operation = 1;
+  // Declared request bytes; zero for ref-only writes; SPEC-SERVER §6.3.
+  uint64 declared_bytes = 2;
+  // Raw 32-byte pack id for BeginUpload; empty otherwise; SPEC-SERVER §6.3.
+  bytes pack_id = 3;
+  // Whether this operation creates its namespace; SPEC-SERVER §6.3.
+  bool creates_namespace = 4;
+  // Whether this operation creates its repository; SPEC-SERVER §6.3.
+  bool creates_repo = 5;
+  // Bytes new to the repository; absent when unknown, present zero when none; SPEC-SERVER §6.3.
+  uint64 new_to_repo_bytes = 6;
+}
+
+// Admission decision with no internal quota charges on the wire; SPEC-SERVER §6.3.
+message AdmitResponse {
+  // Exactly one permission, challenge, or deliberate denial; SPEC-SERVER §6.3.
+  oneof decision {
+    // Permit apply and identify the reservation to settle; SPEC-SERVER §6.3.
+    AdmitAllow allow = 1;
+    // Request credentials without allocating server state; SPEC-SERVER §6.3.
+    AdmitChallenge challenge = 2;
+    // Refuse the operation; SPEC-SERVER §6.3.
+    Deny deny = 3;
+  }
+}
+
+// Admission permission with a required outcome idempotency key; SPEC-SERVER §6.3.
+message AdmitAllow {
+  // Required 1–128 bytes of [A-Za-z0-9._:-], used to key outcomes; SPEC-SERVER §6.6.
+  string reservation_id = 1;
+  // Only Payment-Receipt and PAYMENT-RESPONSE, within §6.6 limits; SPEC-SERVER §6.3.
+  repeated Header response_headers = 2;
+}
+
+// Credential challenge passed to the client as STC §5.1 requires; SPEC-SERVER §6.3.
+message AdmitChallenge {
+  // One to eight challenges within STC §5.1 bounds; SPEC-SERVER §6.6.
+  repeated Challenge challenges = 1;
+  // Human-readable challenge description, at most 512 bytes; SPEC-SERVER §6.6.
+  string description = 2;
+  // Only WWW-Authenticate (repeatable) and PAYMENT-REQUIRED; SPEC-SERVER §6.6.
+  repeated Header response_headers = 3;
+}
+
+// One opaque credential challenge under STC §5.1; SPEC-SERVER §6.3.
+message Challenge {
+  // Authentication-scheme token as STC §5.1 requires; SPEC-SERVER §6.6.
+  string scheme = 1;
+  // Opaque challenge value, at most 8,192 bytes; SPEC-SERVER §6.6.
+  string value = 2;
+}
+
+// Provisional inspection input; M5 may add fields additively; SPEC-SERVER §6.4.
+message InspectRequest {
+  // Verified operation whose content is inspected; SPEC-SERVER §6.4.
+  Operation operation = 1;
+  // Object metadata only; object bytes are fetched out of band; SPEC-SERVER §6.4.
+  repeated InspectObject objects = 2;
+}
+
+// Object identity and length without its content bytes; SPEC-SERVER §6.4.
+message InspectObject {
+  // Raw 32-byte object id; SPEC-SERVER §6.4.
+  bytes id = 1;
+  // Object size in bytes; SPEC-SERVER §6.4.
+  uint64 size = 2;
+}
+
+// Provisional inspection verdict applied under the configured mode; SPEC-SERVER §§6.4, 8.
+message InspectResponse {
+  // Exactly one pass, quarantine, or rejection; SPEC-SERVER §6.4.
+  oneof verdict {
+    // Accept the inspected content; SPEC-SERVER §6.4.
+    InspectPass pass = 1;
+    // Mark content for quarantine; SPEC-SERVER §6.4.
+    InspectQuarantine quarantine = 2;
+    // Reject content with a deliberate denial; SPEC-SERVER §6.4.
+    Deny reject = 3;
+  }
+}
+
+// Inspection acceptance; SPEC-SERVER §6.4.
+message InspectPass {}
+
+// Inspection decision to quarantine content; SPEC-SERVER §6.4.
+message InspectQuarantine {
+  // Explanation of the quarantine decision; SPEC-SERVER §6.4.
+  string reason = 1;
+}
+
+// At-least-once delivery of one durable reservation outcome; SPEC-SERVER §§5, 6.5.
+message OutcomeRequest {
+  // Outcome keyed by its reservation id; SPEC-SERVER §6.5.
+  Outcome outcome = 1;
+}
+
+// Empty acknowledgement; any 2xx Connect response acknowledges delivery; SPEC-SERVER §8.
+message OutcomeResponse {}
+
+// Final result of a reservation; receivers deduplicate by its id; SPEC-SERVER §§5, 6.5.
+message Outcome {
+  // Admission reservation id and delivery idempotency key; SPEC-SERVER §6.5.
+  string reservation_id = 1;
+  // Canonical origin of the mkit server that performed the operation; SPEC-SERVER §6.5.
+  string audience = 2;
+  // Full repository identity of the operation; SPEC-SERVER §6.5.
+  string repository = 3;
+  // Time the outcome occurred, in Unix epoch milliseconds; SPEC-SERVER §6.5.
+  int64 occurred_unix_ms = 4;
+  // Exactly one final outcome; SPEC-SERVER §6.5.
+  oneof kind {
+    // Successful write applied durably; SPEC-SERVER §§3, 6.5.
+    Committed committed = 5;
+    // Failed or abandoned apply; SPEC-SERVER §§5, 6.5.
+    Aborted aborted = 6;
+    // Upload ticket expired without consumption; SPEC-SERVER §§5, 6.5.
+    Expired expired = 7;
+    // Paid read served content; SPEC-SERVER §6.5.
+    ReadServed read_served = 8;
+  }
+}
+
+// Successful apply and its byte accounting and ref effects; SPEC-SERVER §6.5.
+message Committed {
+  // Bytes stored for this reservation's committed operation; SPEC-SERVER §6.5.
+  uint64 bytes_stored = 1;
+  // Bytes newly added to the repository's membership; SPEC-SERVER §6.5.
+  uint64 new_to_repo = 2;
+  // Bytes new to the store, disclosed only in Committed; SPEC-SERVER §§5, 6.5.
+  uint64 new_to_store = 3;
+  // Ref changes durably applied by the operation; SPEC-SERVER §6.5.
+  repeated CommittedRef refs = 4;
+}
+
+// One committed ref target or deletion; SPEC-SERVER §6.5.
+message CommittedRef {
+  // Full name of the changed ref; SPEC-SERVER §6.5.
+  string name = 1;
+  // New raw 32-byte target id; empty when deleted is true; SPEC-SERVER §6.5.
+  bytes new = 2;
+  // True when the committed change deleted the ref; SPEC-SERVER §6.5.
+  bool deleted = 3;
+}
+
+// Failed apply, recorded separately from that apply; SPEC-SERVER §§3, 6.5.
+message Aborted {
+  // Typed failure or reconciliation reason; SPEC-SERVER §6.5.
+  AbortReason reason = 1;
+  // Operator text, at most 512 bytes; never shown to clients; SPEC-SERVER §6.5.
+  string detail = 2;
+}
+
+// Reason the guarded apply failed or was abandoned; SPEC-SERVER §§5, 6.5.
+enum AbortReason {
+  // No specific failure reason supplied; SPEC-SERVER §6.5.
+  ABORT_REASON_UNSPECIFIED = 0;
+  // Ref compare-and-swap was lost; SPEC-SERVER §6.5.
+  ABORT_REASON_REF_CONFLICT = 1;
+  // Grant epoch changed before apply; SPEC-SERVER §6.5.
+  ABORT_REASON_EPOCH_MISMATCH = 2;
+  // A pack needed for apply was missing; SPEC-SERVER §6.5.
+  ABORT_REASON_PACK_MISSING = 3;
+  // Another operation won the replay reservation race; SPEC-SERVER §6.5.
+  ABORT_REASON_REPLAY_RACE = 4;
+  // Internal failure prevented apply; SPEC-SERVER §6.5.
+  ABORT_REASON_INTERNAL = 5;
+  // No recorded apply result (e.g. a crash); set by reconcile; SPEC-SERVER §5.
+  ABORT_REASON_ABANDONED = 6;
+}
+
+// Ticket expired unconsumed; its reservation is released; SPEC-SERVER §§5, 6.5.
+message Expired {}
+
+// Paid-read result with the object and bytes delivered; SPEC-SERVER §6.5.
+message ReadServed {
+  // Raw 32-byte id of the object served; SPEC-SERVER §6.5.
+  bytes object = 1;
+  // Number of bytes served to the client; SPEC-SERVER §6.5.
+  uint64 bytes_served = 2;
+}

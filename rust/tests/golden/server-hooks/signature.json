@@ -1,0 +1,58 @@
+{
+  "vectors": [
+    {
+      "test_key_label": "TEST KEY ONLY: dedicated hook role, never use in a deployment",
+      "test_seed_hex": "5353535353535353535353535353535353535353535353535353535353535353",
+      "key_id": "test-hook-2026-09",
+      "audience": "https://hooks.example.test",
+      "procedure": "/mkit.server.hooks.v1.HooksService/Admit",
+      "created_at_ms": "1790424000000",
+      "expires_at_ms": "1790424300000",
+      "nonce": "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+      "body_file": "admit.request.json",
+      "body_utf8": "{\n  \"operation\": {\n    \"audience\": \"https://vcs.example.test\",\n    \"repository\": \"ed25519-d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737/payments-demo\",\n    \"procedure\": \"/mkit.transport.v1.TransportService/BeginUpload\",\n    \"principal\": {\n      \"signer\": {\n        \"ed25519PublicKey\": \"0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc=\"\n      }\n    },\n    \"idempotencyKey\": \"a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1\",\n    \"owner\": false,\n    \"grant\": {\n      \"grantId\": \"REREREREREREREREREREREREREREREREREREREREREQ=\",\n      \"epoch\": \"7\"\n    }\n  },\n  \"declaredBytes\": \"16384\",\n  \"packId\": \"VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVU=\",\n  \"createsNamespace\": false,\n  \"createsRepo\": false,\n  \"newToRepoBytes\": \"8192\"\n}\n",
+      "body_digest": "body:9f8094a04222fcf0e859a0fa83870592c6bf97f59dbb20d6c14fe5dd3d012faf",
+      "canonical": "mkit-hook:v1\ntest-hook-2026-09\nhttps://hooks.example.test\n/mkit.server.hooks.v1.HooksService/Admit\nbody:9f8094a04222fcf0e859a0fa83870592c6bf97f59dbb20d6c14fe5dd3d012faf\n1790424000000\n1790424300000\nb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+      "canonical_blake3": "ea9fd20de14aea3a4f3b9bcf960354003a7996617ac62f50dcba63bffa9a8235",
+      "public_key": "f80cccdce4ae1c07ae208a2adf99a310ae4207e0306fa0236110b06827bbb8d0",
+      "signature": "7ea5526cb817ef339200c4f5e15e1fae4b2e5dee2749d8abe70d2a8f10c093ad1cdbdbf45497a8e096bf8782e7bc4747d823a3f4eb4bf5208b7d71eb0e4c0002",
+      "headers": {
+        "X-Mkit-Hook-Audience": "https://hooks.example.test",
+        "X-Mkit-Hook-Created-At": "1790424000000",
+        "X-Mkit-Hook-Digest": "body:9f8094a04222fcf0e859a0fa83870592c6bf97f59dbb20d6c14fe5dd3d012faf",
+        "X-Mkit-Hook-Expires-At": "1790424300000",
+        "X-Mkit-Hook-Key-Id": "test-hook-2026-09",
+        "X-Mkit-Hook-Nonce": "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+        "X-Mkit-Hook-Signature": "7ea5526cb817ef339200c4f5e15e1fae4b2e5dee2749d8abe70d2a8f10c093ad1cdbdbf45497a8e096bf8782e7bc4747d823a3f4eb4bf5208b7d71eb0e4c0002",
+        "X-Mkit-Hook-Version": "1"
+      }
+    },
+    {
+      "test_key_label": "TEST KEY ONLY: dedicated hook role, never use in a deployment",
+      "test_seed_hex": "5353535353535353535353535353535353535353535353535353535353535353",
+      "key_id": "test-hook-2026-09",
+      "audience": "https://hooks.example.test",
+      "procedure": "/mkit.server.hooks.v1.HooksService/Outcome",
+      "created_at_ms": "1790424000000",
+      "expires_at_ms": "1790424300000",
+      "nonce": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+      "body_file": "outcome-committed.request.json",
+      "body_utf8": "{\n  \"outcome\": {\n    \"reservationId\": \"demo:upload-20260926-001\",\n    \"audience\": \"https://vcs.example.test\",\n    \"repository\": \"ed25519-d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737/payments-demo\",\n    \"occurredUnixMs\": \"1790424001000\",\n    \"committed\": {\n      \"bytesStored\": \"16384\",\n      \"newToRepo\": \"8192\",\n      \"newToStore\": \"4096\",\n      \"refs\": [\n        {\n          \"name\": \"refs/heads/main\",\n          \"new\": \"MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM=\",\n          \"deleted\": false\n        },\n        {\n          \"name\": \"refs/tags/old\",\n          \"new\": \"\",\n          \"deleted\": true\n        }\n      ]\n    }\n  }\n}\n",
+      "body_digest": "body:4a2ce392a0650c3497e837f79a2dbe8ce30d05c91d84634bf19b2a48eeca8acc",
+      "canonical": "mkit-hook:v1\ntest-hook-2026-09\nhttps://hooks.example.test\n/mkit.server.hooks.v1.HooksService/Outcome\nbody:4a2ce392a0650c3497e837f79a2dbe8ce30d05c91d84634bf19b2a48eeca8acc\n1790424000000\n1790424300000\nb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+      "canonical_blake3": "5d2cb3f6b4999213340d8a91ebde4cb1391b6071423aadf64dd347bfc1b4df2c",
+      "public_key": "f80cccdce4ae1c07ae208a2adf99a310ae4207e0306fa0236110b06827bbb8d0",
+      "signature": "62d933e6d46767f790313175e1c5c9b0b815ee48e69ec8b01132f9b42be3d5a13b016b2f942633883044726fe673f1f392ebc70d249133e9c7fe60bd3d1d0f01",
+      "headers": {
+        "X-Mkit-Hook-Audience": "https://hooks.example.test",
+        "X-Mkit-Hook-Created-At": "1790424000000",
+        "X-Mkit-Hook-Digest": "body:4a2ce392a0650c3497e837f79a2dbe8ce30d05c91d84634bf19b2a48eeca8acc",
+        "X-Mkit-Hook-Expires-At": "1790424300000",
+        "X-Mkit-Hook-Key-Id": "test-hook-2026-09",
+        "X-Mkit-Hook-Nonce": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+        "X-Mkit-Hook-Signature": "62d933e6d46767f790313175e1c5c9b0b815ee48e69ec8b01132f9b42be3d5a13b016b2f942633883044726fe673f1f392ebc70d249133e9c7fe60bd3d1d0f01",
+        "X-Mkit-Hook-Version": "1"
+      }
+    }
+  ]
+}

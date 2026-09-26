@@ -104,13 +104,21 @@ audience: implementers of mkit.transport.v1 servers and of deployment business l
   - c) A challenge or a denial at stages 2–3 writes nothing (cite STC §5.1).
   - d) Signed reads skip the replay ledger (cite STC §7.1).
   - e) Unary RPCs only are admitted (cite STC §5.1).
-- **§3:**
-  - Cite STC §7.7 for what each RPC's apply writes.
-  - Add the server-internal rules:
-    - the reservation, the ticket, and every outcome row for an operation commit in the **same atomic unit as the
-      operation's ref write**;
-    - a pack becomes a repository member only at the `AdvanceRefs` apply.
-  - Do NOT describe key layouts, partitions or shards. Those are implementation.
+- **§3 (amendment 1):**
+  - Cite STC §7.7 for what each RPC's apply writes. Restate nothing from its table.
+  - Add only these server-internal rules, as normative text:
+    - **a. `BeginUpload`:** the replay record, the reservation and the ticket commit in one atomic unit, in the target
+      ref's shard.
+    - **b. `AdvanceRefs` that consumes tickets:** the head, the packmap, the membership additions, and one `Committed`
+      outcome record per consumed ticket commit in one atomic unit, in that ref's shard.
+    - **c. A directly admitted unary write** (`UpdateRef`, including deletion, and an `AdvanceRefs` that consumes no
+      ticket): its ref write and its `Committed` outcome record commit in one atomic unit.
+    - **d. `Aborted` is recorded in a separate atomic unit** after the failed apply (cite STC §7.7). An `AdvanceRefs`
+      that ends in a typed conflict consumes no ticket and records no outcome: its tickets stay usable (cite STC
+      §7.7 "Conflicts").
+    - **e. A pack becomes a member of the repository only at the apply of the `AdvanceRefs` that consumes its ticket**
+      (cite STC §7.7).
+  - Do NOT describe key layouts, partitions or shard kinds beyond "the target ref's shard", which STC §7.7 uses.
 - **§4:** A bulleted list of fail-closed rules:
   - a missing or unsupported auth version (cite STC §7.1);
   - authorize/admit hook failure (§8);
@@ -126,8 +134,19 @@ audience: implementers of mkit.transport.v1 servers and of deployment business l
   - there is no ordering guarantee between reservations;
   - `Aborted` is written in a separate atomic unit after a failed apply;
   - `Expired` when a ticket expires unconsumed;
-  - **Reconcile rule:** a reservation that has no outcome when its ticket's expiry has passed gets `Expired` from the
-    server's periodic reconcile pass. This covers a crash between a failed apply and its `Aborted` write.
+  - **Pending reservations (amendment 1).**
+    - For every admitted RPC whose admission returned a reservation, the server MUST durably record the reservation
+      as *pending* before the apply it guards.
+    - That apply replaces the pending record: with the ticket for `BeginUpload` (rule a), or with the `Committed`
+      outcome for a directly admitted write (rule c).
+    - A failed apply replaces it with `Aborted` (rule d).
+  - **Reconcile (amendment 1).**
+    - A periodic reconcile pass records `Aborted` with reason `ABANDONED` for every pending reservation whose
+      operation's authentication validity (STC §7.1: at most 300,000 ms) has passed without either replacement.
+    - A ticket that expires unconsumed produces `Expired` (cite STC §7.7).
+    - Every reservation gets exactly one outcome, crashes included.
+  - Informative: the pending record costs one extra atomic unit per admitted write. It exists only when a deployment's
+    admission returns reservations, so the default quota admission pays nothing.
   - An outcome is retained until acknowledged.
   - **Backpressure:** a server MAY refuse new *admitted* writes with a retryable `unavailable` while its undelivered
     outcome backlog exceeds a configured bound. It MUST NOT drop outcomes, and reads and non-admitted writes are
@@ -358,6 +377,7 @@ enum AbortReason {
   ABORT_REASON_PACK_MISSING = 3;
   ABORT_REASON_REPLAY_RACE = 4;
   ABORT_REASON_INTERNAL = 5;
+  ABORT_REASON_ABANDONED = 6;   // no recorded apply result; reconcile pass (SPEC-SERVER §5)
 }
 message Expired {}
 message ReadServed { bytes object = 1; uint64 bytes_served = 2; }
@@ -374,7 +394,7 @@ message ReadServed { bytes object = 1; uint64 bytes_served = 2; }
    `authorize-allow.response.json`, `authorize-deny.response.json`, `admit.request.json`,
    `admit-allow.response.json`, `admit-challenge.response.json`, `admit-deny.response.json`, `inspect.request.json`,
    `inspect-pass.response.json`, `outcome-committed.request.json`, `outcome-aborted.request.json`,
-   `outcome-expired.request.json`, `outcome-read-served.request.json`, `outcome.response.json`.
+   `outcome-expired.request.json`, `outcome-abandoned.request.json`, `outcome-read-served.request.json`, `outcome.response.json`.
    - Use realistic values: a `0x…`/`ed25519-…` repository identity, a signer principal, a `BeginUpload` admit with a
      `pack_id`, and an MPP-shaped `WWW-Authenticate` pass-through header whose value is an obviously fake example.
 2. **`signature.json`:** at least two vectors (an `Admit` request and an `Outcome` webhook). Each has:
@@ -441,3 +461,8 @@ message ReadServed { bytes object = 1; uint64 bytes_served = 2; }
 - The docs checks the repo already has for specs (e.g. a markdown link check, if one exists in `just ci` / `ci-scripts`).
   Do not add new tooling beyond B.4.6.
 - The goldens outside `server-hooks/` are unchanged (`git diff --exit-code rust/tests/golden/ ':!rust/tests/golden/server-hooks'`).
+
+Amendment 1 applied
+
+Amendment 1 additionally requires R-91 in `00-plan.md`, an `outcome-abandoned.request.json` golden
+with `ABORT_REASON_ABANDONED`, and its entries in SPEC-SERVER §15 and the golden-check script.

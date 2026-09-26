@@ -1,0 +1,12 @@
+{
+  "outcome": {
+    "reservationId": "demo:upload-20260926-001",
+    "audience": "https://vcs.example.test",
+    "repository": "ed25519-d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737/payments-demo",
+    "occurredUnixMs": "1790424001000",
+    "aborted": {
+      "reason": "ABORT_REASON_ABANDONED",
+      "detail": "Pending reservation had no apply result before authentication expired."
+    }
+  }
+}

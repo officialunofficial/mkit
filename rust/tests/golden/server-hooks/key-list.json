@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "keys": [
+    {
+      "keyId": "test-hook-2026-09",
+      "alg": "ed25519",
+      "publicKey": "f80cccdce4ae1c07ae208a2adf99a310ae4207e0306fa0236110b06827bbb8d0",
+      "notBeforeMs": "1790423900000",
+      "notAfterMs": "1790424600000"
+    }
+  ]
+}

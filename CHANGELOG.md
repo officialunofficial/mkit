@@ -172,6 +172,7 @@ train).
   ("not implemented yet") for these RPCs and non-default new request
   fields until their implementing WPs land. `ListRefs.page_size` is
   temporarily ignored; existing requests retain their behavior.
+- *(spec)* SPEC-SERVER v1 M3 pipeline/outcome guarantees and the signed `mkit.server.hooks.v1` contract, proto, and golden vectors (WP-3.6).
 
 - *(server)* The `mkit-server` binary (`mkit-server-native`;
   `mkit-server serve --repo-root <DIR> [--listen <ADDR>] [--listen-enc

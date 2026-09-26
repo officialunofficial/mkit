@@ -1,0 +1,35 @@
+{
+  "operation": {
+    "audience": "https://vcs.example.test",
+    "repository": "ed25519-d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737/payments-demo",
+    "procedure": "/mkit.transport.v1.TransportService/AdvanceRefs",
+    "principal": {
+      "signer": {
+        "ed25519PublicKey": "0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc="
+      }
+    },
+    "idempotencyKey": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "refs": [
+      {
+        "name": "refs/heads/main",
+        "missing": {},
+        "new": "MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM="
+      },
+      {
+        "name": "refs/mkit/packmap/main",
+        "any": {},
+        "new": "ZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmY="
+      }
+    ]
+  },
+  "objects": [
+    {
+      "id": "MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM=",
+      "size": "8192"
+    },
+    {
+      "id": "ZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmY=",
+      "size": "256"
+    }
+  ]
+}
