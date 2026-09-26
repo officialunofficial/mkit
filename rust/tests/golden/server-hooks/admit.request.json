@@ -1,0 +1,23 @@
+{
+  "operation": {
+    "audience": "https://vcs.example.test",
+    "repository": "ed25519-a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0/payments-demo",
+    "procedure": "/mkit.transport.v1.TransportService/BeginUpload",
+    "principal": {
+      "signer": {
+        "ed25519PublicKey": "0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc="
+      }
+    },
+    "idempotencyKey": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "owner": false,
+    "grant": {
+      "grantId": "REREREREREREREREREREREREREREREREREREREREREQ=",
+      "epoch": "7"
+    }
+  },
+  "declaredBytes": "16384",
+  "packId": "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVU=",
+  "createsNamespace": false,
+  "createsRepo": false,
+  "newToRepoBytes": "8192"
+}

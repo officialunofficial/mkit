@@ -1,0 +1,17 @@
+{
+  "challenge": {
+    "challenges": [
+      {
+        "scheme": "mpp",
+        "value": "fake-example-challenge-not-valid"
+      }
+    ],
+    "description": "Example upload payment required.",
+    "responseHeaders": [
+      {
+        "name": "WWW-Authenticate",
+        "value": "Payment id=\"fake-example-not-valid\", method=\"tempo\", intent=\"charge\", request=\"fake-example-request-not-valid\""
+      }
+    ]
+  }
+}

@@ -1464,8 +1464,7 @@ Explicitly deferred to sibling issues:
   variant and the retryable mapping of `aborted` (§5), the server's
   admission step and outcomes (§5.1, §7.7), and the client's 402
   handling, `admission_helper`, and header allowlist (§5.1).
-- Outcome delivery, the outbox, and the deployment hooks that decide
-  admission: SPEC-SERVER, forthcoming.
+- the remote-hook contract and outcome guarantees: see [SPEC-SERVER](SPEC-SERVER.md).
 - Pricing, payment verification, and settlement: deployment policy,
   never mkit's (§5.1).
 
