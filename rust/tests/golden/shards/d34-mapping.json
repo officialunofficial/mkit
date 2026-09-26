@@ -1,0 +1,104 @@
+{
+  "ref_index_fanout": 16,
+  "membership_fanout": 4096,
+  "refs": [
+    {
+      "namespace": "root",
+      "repo": "a",
+      "ref_name": "refs/heads/main",
+      "ref_partition_hex": "72726f6f74006100726566732f68656164732f6d61696e00",
+      "ref_index_partition_hex": "78726f6f740061003900"
+    },
+    {
+      "namespace": "root",
+      "repo": "a",
+      "ref_name": "refs/mkit/packmap/main",
+      "ref_partition_hex": "72726f6f74006100726566732f68656164732f6d61696e00",
+      "ref_index_partition_hex": "78726f6f74006100313100"
+    },
+    {
+      "namespace": "root",
+      "repo": "a",
+      "ref_name": "refs/tags/v1",
+      "ref_partition_hex": "72726f6f74006100726566732f746167732f763100",
+      "ref_index_partition_hex": "78726f6f74006100313400"
+    },
+    {
+      "namespace": "root",
+      "repo": "a",
+      "ref_name": "refs/heads/a/b",
+      "ref_partition_hex": "72726f6f74006100726566732f68656164732f612f6200",
+      "ref_index_partition_hex": "78726f6f740061003100"
+    },
+    {
+      "namespace": "root",
+      "repo": "a",
+      "ref_name": "refs/mkit/packmap/a/b",
+      "ref_partition_hex": "72726f6f74006100726566732f68656164732f612f6200",
+      "ref_index_partition_hex": "78726f6f74006100313500"
+    },
+    {
+      "namespace": "root",
+      "repo": "b",
+      "ref_name": "refs/heads/main",
+      "ref_partition_hex": "72726f6f74006200726566732f68656164732f6d61696e00",
+      "ref_index_partition_hex": "78726f6f740062003900"
+    },
+    {
+      "namespace": "tenant",
+      "repo": "a",
+      "ref_name": "refs/heads/main",
+      "ref_partition_hex": "7274656e616e74006100726566732f68656164732f6d61696e00",
+      "ref_index_partition_hex": "7874656e616e740061003900"
+    },
+    {
+      "namespace": "tenant",
+      "repo": "a",
+      "ref_name": "refs/packmaps/main",
+      "ref_partition_hex": "7274656e616e74006100726566732f7061636b6d6170732f6d61696e00",
+      "ref_index_partition_hex": "7874656e616e740061003400"
+    }
+  ],
+  "packs": [
+    {
+      "namespace": "root",
+      "repo": "a",
+      "pack_id": "0000000000000000000000000000000000000000000000000000000000000000",
+      "prefix": 0,
+      "membership_partition_hex": "69726f6f740061003000"
+    },
+    {
+      "namespace": "root",
+      "repo": "a",
+      "pack_id": "ffff000000000000000000000000000000000000000000000000000000000000",
+      "prefix": 4095,
+      "membership_partition_hex": "69726f6f740061003430393500"
+    },
+    {
+      "namespace": "root",
+      "repo": "a",
+      "pack_id": "123f000000000000000000000000000000000000000000000000000000000000",
+      "prefix": 291,
+      "membership_partition_hex": "69726f6f7400610032393100"
+    }
+  ],
+  "coordinator_partition_hex": "63726f6f7400",
+  "ref_index_partitions_hex": [
+    "78726f6f740061003000",
+    "78726f6f740061003100",
+    "78726f6f740061003200",
+    "78726f6f740061003300",
+    "78726f6f740061003400",
+    "78726f6f740061003500",
+    "78726f6f740061003600",
+    "78726f6f740061003700",
+    "78726f6f740061003800",
+    "78726f6f740061003900",
+    "78726f6f74006100313000",
+    "78726f6f74006100313100",
+    "78726f6f74006100313200",
+    "78726f6f74006100313300",
+    "78726f6f74006100313400",
+    "78726f6f74006100313500"
+  ]
+}

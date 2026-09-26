@@ -10,7 +10,7 @@ use std::time::Duration;
 use clap::{Args, ValueEnum};
 use http::HeaderValue;
 use mkit_server::auth_v2::AuthV2Config;
-use mkit_server::pipeline::{AuthMode, PipelineConfig};
+use mkit_server::pipeline::{AuthMode, PipelineConfig, Sharding};
 use mkit_server::sql::Capacity;
 use mkit_server::upload::UploadLimits;
 use mkit_server::{Addressing, NamespaceKey, Redacted, RepoId, RepoName};
@@ -122,6 +122,16 @@ pub enum AuthArg {
     AuthV2,
 }
 
+/// `--sharding`: `SQLite` metadata routing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+pub enum ShardingArg {
+    /// Keep all namespace rows together.
+    #[default]
+    Single,
+    /// Route refs per branch and configuration to the coordinator.
+    D34,
+}
+
 /// `--log-format`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
 pub enum LogFormat {
@@ -183,6 +193,9 @@ pub struct ServeArgs {
     /// bearer and unsafe auth) or `sqlite:<PATH>` (required for auth v2).
     #[arg(long, value_name = "fs-layout|sqlite:<PATH>")]
     pub meta: Option<MetaArg>,
+    /// Metadata partition routing. `d34` requires `--meta sqlite:<PATH>`.
+    #[arg(long, value_enum, default_value = "single")]
+    pub sharding: ShardingArg,
     /// Where packs live: `fs` (`<DIR>/packs`) or `s3://<BUCKET>[/<PREFIX>]`,
     /// an S3-compatible bucket that honors `If-None-Match: *` (needs
     /// `--s3-endpoint`, `--meta sqlite:<PATH>`, and credentials from
@@ -927,6 +940,17 @@ fn refuse_open_enc_beside_auth(
     Ok(())
 }
 
+fn resolve_sharding(args: &ServeArgs) -> Result<Sharding, ConfigError> {
+    match args.sharding {
+        ShardingArg::Single => Ok(Sharding::Single),
+        ShardingArg::D34 if matches!(args.meta, Some(MetaArg::Sqlite(_))) => Ok(Sharding::D34),
+        ShardingArg::D34 => Err(ConfigError::new(
+            exit::USAGE,
+            format!("{PREFIX}: --sharding d34 requires --meta sqlite:<PATH>"),
+        )),
+    }
+}
+
 /// Resolve `args`, reading environment variables through `env`. Nothing
 /// is opened or written: [`crate::server::open`] does that.
 ///
@@ -965,6 +989,7 @@ pub fn resolve(
             format!("{PREFIX}: --listen-enc needs the `enc` cargo feature; rebuild with it"),
         ));
     }
+    let sharding = resolve_sharding(args)?;
     let auth = pipeline_auth(args, env)?;
     #[cfg(feature = "enc")]
     refuse_open_enc_beside_auth(enc.as_ref(), &auth)?;
@@ -1003,7 +1028,8 @@ pub fn resolve(
         max_chunks: u32::MAX,
     };
     // `new` sets the default write quota for auth v2 only.
-    let pipeline = PipelineConfig::new(Addressing::Single { repo }, auth, limits);
+    let mut pipeline = PipelineConfig::new(Addressing::Single { repo }, auth, limits);
+    pipeline.sharding = sharding;
     let router = RouterOptions {
         unary_timeout: Duration::from_secs(args.unary_timeout_secs),
         stream_timeout: Duration::from_secs(args.stream_timeout_secs),

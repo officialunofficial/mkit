@@ -45,6 +45,10 @@ use crate::repo::{NamespaceKey, RepoName};
 pub const INDEX_FANOUT: u16 = 4096;
 const _: () = assert!(INDEX_FANOUT == 1 << 12);
 
+/// Ref-name hash fan-out: a fixed deployment constant, never resharded
+/// (PRD §5.3, D34).
+pub const REF_INDEX_FANOUT: u16 = 16;
+
 /// Longest [`BlockEntry::reason`], in bytes.
 pub const MAX_BLOCK_REASON_BYTES: usize = 256;
 

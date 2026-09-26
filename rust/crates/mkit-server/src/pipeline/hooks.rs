@@ -31,8 +31,9 @@ pub trait Authorizer: MaybeSend + MaybeSync {
 /// Stage 3 input: the full PRD §5.4 field set, present from M0
 /// (reconciliation R-10). M0 fills `op`, `declared_bytes`, `pack_id`,
 /// `idempotency_key` (the auth v2 nonce) and `write_quota`;
-/// `creates_namespace`/`creates_repo` stay false and `new_to_repo_bytes`
-/// `None` until M1, and the grant comes from `op.authz` (M2). Bytes new to
+/// Creation fields are the pre-admission observation from `op.creation`;
+/// racing first writes may both observe creation. `new_to_repo_bytes` stays
+/// `None` until membership, and the grant comes from `op.authz` (M2). Bytes new to
 /// the store are deliberately absent: they would be a pricing oracle.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -43,9 +44,9 @@ pub struct AdmissionInput<'a> {
     pub declared_bytes: u64,
     /// The pack an upload names.
     pub pack_id: Option<PackKey>,
-    /// Whether the write creates its namespace (M1).
+    /// Whether the namespace was absent before admission; racing writes may both see true.
     pub creates_namespace: bool,
-    /// Whether the write creates its repository (M1).
+    /// Whether the repository was absent before admission; racing writes may both see true.
     pub creates_repo: bool,
     /// Bytes new to the repository, known only from membership (M1).
     pub new_to_repo_bytes: Option<u64>,
@@ -64,8 +65,8 @@ impl<'a> AdmissionInput<'a> {
             op,
             declared_bytes: 0,
             pack_id: None,
-            creates_namespace: false,
-            creates_repo: false,
+            creates_namespace: op.creation.namespace,
+            creates_repo: op.creation.repo,
             new_to_repo_bytes: None,
             idempotency_key: op.auth.as_ref().map(|auth| auth.nonce.as_str()),
             write_quota: None,

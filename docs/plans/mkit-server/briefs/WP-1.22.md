@@ -171,6 +171,32 @@ This WP:
   `config_version` is delivered with the lease. Until then multi-repo reads that never touch a ref shard do one
   coordinator `get`."
 
+### B.8 AdvanceRefs pairing (amendment 1)
+
+1. **Under `Sharding::D34`,** `AdvanceRefs` requires the canonical pair: `head_ref = refs/heads/<x>` and
+   `packmap_ref = refs/mkit/packmap/<x>`, with the same `<x>` byte for byte.
+   - Any other pairing is `invalid_argument`, with the public message
+     `"AdvanceRefs pairs refs/heads/<x> with refs/mkit/packmap/<x> on this server"`.
+   - Check alongside ref-name validation, before any store access and before replay lookup. A rejected pairing
+     writes and reads nothing.
+2. **Under `Sharding::Single`,** any two valid served names may still be paired.
+3. Keep `ref_writes`'s `internal` check, "shard map splits a head from its packmap", as a defensive assertion;
+   canonical pairing makes it unreachable under D34.
+4. **Spec:** append exactly this sentence to SPEC-TRANSPORT-CONNECT §4 after `supports_atomic_advance`:
+
+   > A server whose ref state is sharded per branch (§7.9) MAY require `packmap_ref` to be
+   > `refs/mkit/packmap/<x>` when `head_ref` is `refs/heads/<x>` (SPEC-REFS §2), and answer any other pairing with
+   > `invalid_argument`; every mkit client already sends that pairing.
+
+   Add a one-line entry under the current version's M1 notes in §9, following its existing format. No other spec edits.
+5. **Tests:** D34's `refs/heads/f` + `refs/mkit/packmap/f` commits in one `Partition::Ref`.
+   `refs/heads/f` + `refs/mkit/packmap/g`, `refs/heads/f` + `refs/packmaps/f`, and `refs/tags/t` +
+   `refs/mkit/packmap/t` each return `invalid_argument`, with no store call (call-counting wrapper) and no replay
+   record. Single's `refs/heads/f` + `refs/packmaps/f` still commits.
+6. **Wire:** add any existing non-canonical pairing case to the explicit D34 skip list with its reason; do not change
+   the case itself. This extends the ListRefs-only skip rule below. `mkit-transport-connect/tests/roundtrip.rs`
+   uses that crate's own in-test server, is unaffected by this WP, and stays unchanged.
+
 ## C. Your decisions (record each in the PR under "Executor decisions")
 
 - How `Pipeline` holds the `ShardMap` (generic parameter vs `Arc<dyn ShardMap>`), within B.7's constraint.

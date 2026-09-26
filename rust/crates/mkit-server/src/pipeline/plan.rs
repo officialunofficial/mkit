@@ -125,6 +125,8 @@ pub(crate) struct WriteRequest<'a> {
     /// Whether to guard the layout version key: false on stores that
     /// report an implicit layout version.
     pub(crate) layout_version: bool,
+    /// Ensure this ref shard knows its repository was registered.
+    pub(crate) mark_repo_known: bool,
     /// `UploadCommit` only: a final `pre_receive` rejection to store in
     /// place of `UploadPack`, so a retry is answered before re-streaming.
     pub(crate) rejection: Option<&'a StoredRejection>,
@@ -135,6 +137,9 @@ impl WriteRequest<'_> {
     #[must_use]
     pub(crate) fn read_keys(&self) -> Vec<Key> {
         let mut out = Vec::new();
+        if self.mark_repo_known {
+            out.push(keys::repo_known(self.repo));
+        }
         if self.layout_version {
             out.push(keys::layout_version());
         }
@@ -248,6 +253,13 @@ pub(crate) fn plan_write(
             Err(e) => return Err(corrupt(e)),
         }
         pre.push(guard(key, snap));
+    }
+    if req.mark_repo_known {
+        let key = keys::repo_known(req.repo);
+        if snap.get(&key).is_none() {
+            pre.push(Precondition::Absent(key.clone()));
+            puts.push(Write::Put(key, Value::default()));
+        }
     }
     for charge in req.charges {
         plan_charge(charge, snap, clock.business_now_ms, &mut pre, &mut puts)?;

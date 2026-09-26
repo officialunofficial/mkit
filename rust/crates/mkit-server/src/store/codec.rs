@@ -14,6 +14,24 @@ use crate::error::Code;
 use crate::quota::QuotaState;
 use crate::replay::{ReplayRecord, ReplayState, StoredRejection, StoredResult, UpdateRefResult};
 
+/// The namespace coordinator record. The first configuration version is 1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NamespaceRecord {
+    /// Creation time, Unix milliseconds from the business clock.
+    pub created_at_ms: u64,
+    /// Namespace configuration version, starting at 1.
+    pub config_version: u64,
+}
+
+/// The repository coordinator record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepoRecord {
+    /// Creation time, Unix milliseconds from the business clock.
+    pub created_at_ms: u64,
+}
+
 /// Version byte of every structured value this binary writes.
 pub const CODEC_V1: u8 = 0x01;
 
@@ -116,6 +134,33 @@ fn decode_json<'a, T: Deserialize<'a>>(
 
 fn hash_from(hex: &str) -> Result<Hash, StoreError> {
     from_hex(hex).map_err(|_| corrupt("bad hash"))
+}
+
+/// Encode a namespace coordinator record.
+#[must_use]
+pub fn encode_namespace_record(record: &NamespaceRecord) -> Value {
+    encode_json(record)
+}
+
+/// Decode a namespace coordinator record. Configuration version zero is
+/// invalid: the namespace's first version is 1.
+pub fn decode_namespace_record(value: &Value) -> Result<NamespaceRecord, StoreError> {
+    let record: NamespaceRecord = decode_json(value, "bad namespace record")?;
+    if record.config_version == 0 {
+        return Err(corrupt("namespace configuration version is zero"));
+    }
+    Ok(record)
+}
+
+/// Encode a repository coordinator record.
+#[must_use]
+pub fn encode_repo_record(record: &RepoRecord) -> Value {
+    encode_json(record)
+}
+
+/// Decode a repository coordinator record.
+pub fn decode_repo_record(value: &Value) -> Result<RepoRecord, StoreError> {
+    decode_json(value, "bad repo record")
 }
 
 /// Encode a replay record.
@@ -404,6 +449,57 @@ mod tests {
         );
         assert_eq!(encode_u64(1).as_bytes(), [0, 0, 0, 0, 0, 0, 0, 1]);
         assert_eq!(encode_u32(1).as_bytes(), [0, 0, 0, 1]);
+    }
+
+    #[test]
+    fn coordinator_codecs_roundtrip_and_golden_bytes() {
+        let namespace = NamespaceRecord {
+            created_at_ms: 1_700_000_000_000,
+            config_version: 1,
+        };
+        let repo = RepoRecord {
+            created_at_ms: u64::MAX,
+        };
+        let namespace_value = encode_namespace_record(&namespace);
+        let repo_value = encode_repo_record(&repo);
+        assert_eq!(
+            namespace_value.as_bytes(),
+            b"\x01{\"created_at_ms\":1700000000000,\"config_version\":1}"
+        );
+        assert_eq!(
+            repo_value.as_bytes(),
+            b"\x01{\"created_at_ms\":18446744073709551615}"
+        );
+        assert_eq!(
+            decode_namespace_record(&namespace_value).unwrap(),
+            namespace
+        );
+        assert_eq!(decode_repo_record(&repo_value).unwrap(), repo);
+        for bytes in [
+            &b""[..],
+            b"\x02{\"created_at_ms\":0,\"config_version\":1}",
+            b"\x01{\"created_at_ms\":-1,\"config_version\":1}",
+            b"\x01{\"created_at_ms\":0,\"config_version\":0}",
+            b"\x01{\"created_at_ms\":0,\"config_version\":1,\"extra\":1}",
+            b"\x01{\"created_at_ms\":0}",
+        ] {
+            assert!(matches!(
+                decode_namespace_record(&Value::new(bytes.to_vec())),
+                Err(StoreError::Corrupt(_))
+            ));
+        }
+        for bytes in [
+            &b""[..],
+            b"\x02{\"created_at_ms\":0}",
+            b"\x01{\"created_at_ms\":-1}",
+            b"\x01{\"created_at_ms\":0,\"extra\":1}",
+            b"\x01{}",
+        ] {
+            assert!(matches!(
+                decode_repo_record(&Value::new(bytes.to_vec())),
+                Err(StoreError::Corrupt(_))
+            ));
+        }
     }
 
     #[test]

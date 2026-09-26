@@ -19,6 +19,17 @@ train).
 
 ### Changed
 
+- *(server)* Add native `--sharding single|d34` (default `single`) for SQLite
+  metadata. D34 co-locates each branch head and canonical packmap in one ref
+  shard and requires that pairing for `AdvanceRefs`, rejecting others before
+  storage access. Multi repositories now use coordinator namespace/repository
+  records and expose observed and committed creation facts to hooks. Replays
+  and quotas follow the ref shard; the default D34 quota counts per ref shard
+  until the namespace aggregate in WP-1.26. D34 `ListRefs` returns
+  `unimplemented` until WP-1.28. Fs-layout and Worker deployments stay Single.
+  Embedders select routing through `PipelineConfig::sharding`; `ShardMap` now
+  exposes a name's ref-index shard and the ordered set of ref-index partitions.
+
 - *(server)* Validate `X-Repository` before authentication and storage access.
   Single deployments retain headerless reads and signed writes naming their
   configured identity; another valid identity returns `not_found`, and a

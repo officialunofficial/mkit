@@ -26,7 +26,8 @@ pub use blob::{
 };
 pub use content_index::{
     BlockEntry, ContentIndex, GcPlan, HoldOutcome, Holder, HolderOutcome, HolderPage, INDEX_FANOUT,
-    MAX_BLOCK_REASON_BYTES, MAX_HOLD_TTL_MS, ObjectState, content_shard, content_shards,
+    MAX_BLOCK_REASON_BYTES, MAX_HOLD_TTL_MS, ObjectState, REF_INDEX_FANOUT, content_shard,
+    content_shards,
 };
 pub use error::{BoxError, StoreError};
 pub use kv::{

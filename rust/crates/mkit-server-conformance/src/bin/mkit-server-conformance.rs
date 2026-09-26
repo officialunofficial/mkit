@@ -71,6 +71,9 @@ struct WireArgs {
     /// The server commits `AdvanceRefs` atomically.
     #[arg(long)]
     atomic_advance: bool,
+    /// Server metadata routing: single or d34.
+    #[arg(long, value_name = "single|d34")]
+    sharding: Option<String>,
     /// The largest pack the server accepts.
     #[arg(long, value_name = "N")]
     max_pack_bytes: Option<u64>,
@@ -129,6 +132,7 @@ impl WireArgs {
             signer_seed_env: self.signer_seed_env.clone(),
             random_signer: self.random_signer.then_some(true),
             atomic_advance: self.atomic_advance.then_some(true),
+            sharding: self.sharding.clone(),
             max_pack_bytes: self.max_pack_bytes,
             quota_ops: self.quota_ops,
             quota_bytes: self.quota_bytes,
