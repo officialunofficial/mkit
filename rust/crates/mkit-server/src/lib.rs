@@ -14,10 +14,11 @@
 //! as do the export/import helpers and the `ContentIndex` row types
 //! (`store::export_partition`, `store::Holder`).
 //! The `memory` feature adds the in-memory reference backends; the native
-//! `fs` feature adds [`fs`], the stores over the `.mkit` on-disk layout; the
-//! `sql` feature adds `sql::SqlKvStore`, the store over any synchronous
-//! `sql::SqlConn`. The `connect` feature (default) adds the
-//! `mkit.transport.v1` Connect binding over the pipeline
+//! `fs` feature adds the `fs` module, the stores over the `.mkit` on-disk
+//! layout; the `sql` feature adds `sql::SqlKvStore`, the store over any
+//! synchronous `sql::SqlConn`; the `ssh` feature adds the `ssh` module, the
+//! `mkit.rpc.v1.ssh` session over the pipeline. The `connect` feature
+//! (default) adds the `mkit.transport.v1` Connect binding over the pipeline
 //! ([`connect::service`]).
 
 pub mod auth_v2;
@@ -39,6 +40,8 @@ mod repo;
 mod rt;
 #[cfg(feature = "sql")]
 pub mod sql;
+#[cfg(feature = "ssh")]
+pub mod ssh;
 pub mod storage_error;
 pub mod store;
 mod telemetry;

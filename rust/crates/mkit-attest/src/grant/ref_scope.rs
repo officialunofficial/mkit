@@ -9,7 +9,7 @@
 
 use core::fmt;
 
-use mkit_core::refs::validate_ref_name;
+use mkit_core::refs::{validate_ref_name, validate_ref_name_grammar};
 
 use super::text::strictly_ascending;
 use super::{GrantError, MAX_REF_SCOPES};
@@ -134,13 +134,20 @@ impl RefPattern {
     /// Parse a pattern.
     ///
     /// # Errors
-    /// `RefPattern` if it is not a SPEC-REFS §3 ref name, optionally followed
-    /// by `/*` (so a bare `*` and `refs/heads/*x` fail); `PackmapPattern` if
-    /// it is or begins with [`PACKMAP_PREFIX`].
+    /// `RefPattern` if it does not follow the SPEC-REFS §3 ref-name
+    /// grammar, optionally followed by `/*` (so a bare `*` and
+    /// `refs/heads/*x` fail); `PackmapPattern` if it is or begins with
+    /// [`PACKMAP_PREFIX`].
+    ///
+    /// The grammar only, not §3's 512-byte name bound: the statement cap
+    /// already bounds a pattern, and a pattern longer than any ref name
+    /// matches no ref, so it grants nothing. Checking the bound here
+    /// would change which signed statements parse (the golden vectors
+    /// pad a statement to its cap with one long pattern).
     pub fn parse(s: &str) -> Result<Self, GrantError> {
         let pattern = match s.strip_suffix("/*") {
-            Some(prefix) if validate_ref_name(prefix) => Self::Prefix(prefix.to_owned()),
-            None if validate_ref_name(s) => Self::Exact(s.to_owned()),
+            Some(prefix) if validate_ref_name_grammar(prefix) => Self::Prefix(prefix.to_owned()),
+            None if validate_ref_name_grammar(s) => Self::Exact(s.to_owned()),
             _ => return Err(GrantError::RefPattern),
         };
         if s.starts_with(PACKMAP_PREFIX) {
@@ -282,6 +289,47 @@ mod tests {
         let s = RefScopes::parse(field).unwrap();
         assert_eq!(s.to_string(), field);
         s
+    }
+
+    /// SPEC-WRITE-GRANTS §3.3: a pattern follows the SPEC-REFS §3 grammar
+    /// without its 512-byte bound, so one over it parses, but it matches
+    /// no valid ref and grants nothing.
+    #[test]
+    fn pattern_over_the_ref_name_bound_parses_but_grants_nothing() {
+        use mkit_core::refs::MAX_REF_NAME_BYTES;
+        // `refs/heads/` plus 100-byte segments, `len` bytes in all.
+        let name = |len: usize| {
+            let mut s = String::from("refs/heads/");
+            while s.len() < len {
+                if !s.ends_with('/') {
+                    s.push('/');
+                }
+                let seg = (len - s.len()).min(100);
+                s.push_str(&"x".repeat(seg));
+            }
+            s
+        };
+        let longest = name(MAX_REF_NAME_BYTES);
+        let over = name(MAX_REF_NAME_BYTES + 1);
+        assert_eq!((longest.len(), over.len()), (512, 513));
+        assert!(validate_ref_name(&longest) && !validate_ref_name(&over));
+        // `over` extends `longest`'s parent directory, so the prefix
+        // pattern over it would cover `longest`'s siblings if it could.
+        let s = scopes(&format!("{over}/*=cufd;{over}=cufd"));
+        assert!(matches!(RefPattern::parse(&over), Ok(RefPattern::Exact(_))));
+        for r in [
+            longest.as_str(),
+            &longest[..longest.len() - 1],
+            &longest[..longest.rfind('/').unwrap()],
+            "refs/heads/main",
+            "refs/heads/x",
+        ] {
+            assert_eq!(s.effective_flags(r), RefFlags::EMPTY, "{r}");
+        }
+        // Nor does it grant the over-long names it would match: those are
+        // not valid ref names.
+        assert_eq!(s.effective_flags(&over), RefFlags::EMPTY);
+        assert_eq!(s.effective_flags(&format!("{over}/y")), RefFlags::EMPTY);
     }
 
     #[test]

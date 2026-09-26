@@ -32,8 +32,10 @@ pub async fn read_ref<S: NamespaceStore>(
     value.as_ref().map(codec::decode_ref_id).transpose()
 }
 
-/// Up to `limit` refs of `repo` whose names start with `prefix`, after
-/// `after`. Names are returned in full; the binding strips the prefix.
+/// Up to `limit` refs of `repo` whose names start with `prefix` as raw
+/// bytes, after `after`. Names are returned in full. `ListRefs` passes
+/// [`crate::refs::list_scan_prefix`] so it matches at a component boundary
+/// (SPEC-REFS §4), then strips it.
 pub async fn list_refs<S: NamespaceStore>(
     store: &S,
     p: &Partition,

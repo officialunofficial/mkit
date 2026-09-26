@@ -523,22 +523,32 @@ fn layout_ref_directory_file_clash_is_invalid_and_delete_prunes() {
     );
 }
 
+/// A ref file that does not decode is `Corrupt` for a read of its name
+/// and for a precondition on it, but a scan skips it (with a warning), as
+/// `FileTransport::list_refs` does: one stray file (`refs/heads/README`)
+/// must not fail every listing, in its range or out of it.
 #[test]
-fn layout_corrupt_ref_file_is_corrupt_for_reads_scans_and_preconditions() {
+fn layout_corrupt_ref_file_is_corrupt_for_reads_and_preconditions_skipped_by_scans() {
     let dir = TempDir::new().unwrap();
     let refs = layout(dir.path());
     fs::create_dir_all(dir.path().join("refs/heads")).unwrap();
+    fs::create_dir_all(dir.path().join("refs/tags")).unwrap();
     fs::write(dir.path().join("refs/heads/bad"), b"garbage\n").unwrap();
+    fs::write(dir.path().join("refs/tags/README"), b"not a ref\n").unwrap();
+    let good = id(b"good");
+    let put = Batch::new().put(ref_key("refs/heads/good"), codec::encode_ref_id(&good));
+    assert_eq!(apply(&refs, put).unwrap(), BatchOutcome::Committed);
     let key = ref_key("refs/heads/bad");
     assert!(matches!(
         block_on(refs.get(&part(), &key)),
         Err(StoreError::Corrupt(_))
     ));
-    let (start, end) = keys::ref_prefix_range(&repo().name, "refs/");
-    assert!(matches!(
-        block_on(refs.scan(&part(), &start, &end, None, 10)),
-        Err(StoreError::Corrupt(_))
-    ));
+    for prefix in ["refs/", "refs/heads/"] {
+        let (start, end) = keys::ref_prefix_range(&repo().name, prefix);
+        let page = block_on(refs.scan(&part(), &start, &end, None, 10)).unwrap();
+        let listed: Vec<_> = page.entries.iter().map(|(k, _)| k.clone()).collect();
+        assert_eq!(listed, [ref_key("refs/heads/good")], "{prefix}");
+    }
     let new = codec::encode_ref_id(&id(b"new"));
     for pre in [
         Precondition::Absent(key.clone()),
@@ -552,6 +562,33 @@ fn layout_corrupt_ref_file_is_corrupt_for_reads_scans_and_preconditions() {
         fs::read(dir.path().join("refs/heads/bad")).unwrap(),
         b"garbage\n"
     );
+}
+
+/// Plant a ref file the way a server did before SPEC-REFS §3 bounded
+/// names (`FileTransport` now refuses to write one).
+fn plant_legacy_ref(root: &Path, name: &str, id: &[u8; 32]) {
+    let path = name.split('/').fold(root.to_path_buf(), |p, s| p.join(s));
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, mkit_core::refs::encode_ref_wire(id)).unwrap();
+}
+
+/// A ref file whose name is over the 512-byte limit (SPEC-REFS §3),
+/// written by an older server, is skipped by scans with a warning; the
+/// pipeline refuses the name before it reaches the store.
+#[test]
+fn layout_scan_skips_over_long_legacy_ref_files() {
+    let dir = TempDir::new().unwrap();
+    let long = format!("refs/heads/{}", vec!["a".repeat(200); 3].join("/"));
+    assert!(long.len() > crate::refs::MAX_REF_NAME_BYTES);
+    let tx = FileTransport::new(dir.path());
+    plant_legacy_ref(dir.path(), &long, &id(b"long"));
+    tx.update_ref("refs/heads/main", RefWriteCondition::Any, &id(b"main"))
+        .unwrap();
+    let refs = layout(dir.path());
+    let (start, end) = keys::ref_prefix_range(&repo().name, "refs/");
+    let page = block_on(refs.scan(&part(), &start, &end, None, 10)).unwrap();
+    let listed: Vec<_> = page.entries.iter().map(|(k, _)| k.clone()).collect();
+    assert_eq!(listed, [ref_key("refs/heads/main")]);
 }
 
 #[test]

@@ -28,7 +28,7 @@ use crate::mkit::rpc::v1::ssh::{SshFrame, ssh_frame};
 
 use mkit_core::hash::Hash;
 use mkit_core::protocol::{TransportError, TransportResult};
-use mkit_core::refs::{Ref, RefWriteCondition, validate_ref_name};
+use mkit_core::refs::{Ref, RefWriteCondition, validate_ref_name_grammar};
 
 // ---------------------------------------------------------------------------
 // Error-frame builders (used by signer subprocesses + SSH server)
@@ -69,10 +69,11 @@ pub fn ssh_error_frame(code: ErrorCode, message: impl Into<String>) -> SshFrame 
 // Transport-side limits + frame helpers (shared by transport-ssh / -enc)
 // ---------------------------------------------------------------------------
 
-/// Maximum combined ref / prefix name length accepted by client-side
-/// validation before sending a frame. The 4 KiB bound matches the
-/// server-side cap so the client can fail fast without a round-trip.
-pub const MAX_REF_NAME: usize = 4096;
+/// Maximum ref / prefix name length, in bytes, accepted by client-side
+/// validation before sending a frame: SPEC-REFS §3's ref-name bound,
+/// [`mkit_core::refs::MAX_REF_NAME_BYTES`], which servers enforce, so the
+/// client fails fast without a round-trip.
+pub const MAX_REF_NAME: usize = mkit_core::refs::MAX_REF_NAME_BYTES;
 
 /// Per-frame pack-data segment cap. Pack uploads chunk the body into
 /// frames this size so the framing layer's 1 MiB length cap
@@ -208,8 +209,10 @@ pub fn body_name(b: &Option<ssh_frame::Body>) -> &'static str {
 }
 
 /// Validate + convert a wire-level [`RefEntry`] into a [`Ref`]. Fails
-/// the response if the name violates SPEC-REFS §3 or the object id
-/// isn't exactly 32 bytes.
+/// the response if the name violates the SPEC-REFS §3 grammar or the
+/// object id isn't exactly 32 bytes. The §3 length bound is not checked
+/// here: [`list_response_refs`] skips a listed name over it, so one ref a
+/// pre-bound server still holds cannot fail a whole listing.
 ///
 /// # Errors
 ///
@@ -218,7 +221,7 @@ pub fn body_name(b: &Option<ssh_frame::Body>) -> &'static str {
 /// * [`TransportError::InvalidResponse`] — object id is not 32 bytes.
 pub fn ref_entry_to_ref(e: RefEntry) -> TransportResult<Ref> {
     let name = e.name.unwrap_or_default();
-    if !validate_ref_name(&name) {
+    if !validate_ref_name_grammar(&name) {
         return Err(TransportError::InvalidRef(name));
     }
     let oid = e.object_id.unwrap_or_default();
@@ -233,10 +236,64 @@ pub fn ref_entry_to_ref(e: RefEntry) -> TransportResult<Ref> {
     })
 }
 
+/// The refs of a `ListRefsResponse` to a request for `prefix`, skipping
+/// every entry whose full name (the prefix plus `/` plus the listed name)
+/// is over [`MAX_REF_NAME`], as the file, memory, s3 and http clients skip
+/// such names: a server from before SPEC-REFS §3's bound may still hold
+/// one, and the client could never read or write it.
+///
+/// TODO: the CLI fetch path does not warn about skipped names yet; that
+/// needs the skipped count carried through `Transport::list_refs`, which
+/// returns only the refs.
+///
+/// # Errors
+/// [`ref_entry_to_ref`]'s, for any entry that is not skipped.
+pub fn list_response_refs(prefix: &str, entries: Vec<RefEntry>) -> TransportResult<Vec<Ref>> {
+    let trimmed = prefix.trim_end_matches('/');
+    let prefix_len = if trimmed.is_empty() {
+        0
+    } else {
+        trimmed.len() + 1
+    };
+    entries
+        .into_iter()
+        .filter(|e| prefix_len + e.name.as_ref().map_or(0, String::len) <= MAX_REF_NAME)
+        .map(ref_entry_to_ref)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use buffa::Message;
+
+    /// One over-long entry from a pre-bound server is skipped, not a
+    /// failed listing; the bound counts the prefix.
+    #[test]
+    fn list_response_refs_skips_names_over_the_bound() {
+        let entry = |name: &str| {
+            RefEntry::default()
+                .with_name(name)
+                .with_object_id(vec![7u8; 32])
+        };
+        let long = vec!["x".repeat(100); 6].join("/");
+        assert_eq!(long.len(), 605);
+        let fits = "y".repeat(MAX_REF_NAME - "refs/heads/".len());
+        let over = format!("{fits}y");
+        let listed = list_response_refs(
+            "refs/heads/",
+            vec![entry("main"), entry(&long), entry(&fits), entry(&over)],
+        )
+        .unwrap();
+        let names: Vec<_> = listed.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["main", fits.as_str()]);
+        // Without a prefix, the listed name is the full name.
+        let full = format!("refs/heads/{long}");
+        let listed = list_response_refs("", vec![entry(&full), entry("refs/heads/a")]).unwrap();
+        assert_eq!(listed.len(), 1);
+        // A name the grammar rejects still fails the response.
+        assert!(list_response_refs("", vec![entry("bad name")]).is_err());
+    }
 
     #[test]
     fn signer_error_frame_round_trips() {

@@ -1,6 +1,6 @@
 ---
 spec: SPEC-REFS
-version: 1
+version: 2
 status: stable-normative
 audience: implementers of compatible ref stores and transports
 ---
@@ -123,6 +123,33 @@ Plus these rejections:
   suffix; for example `refs/heads/main.lock` is reserved).
 - Final segment equal to `HEAD` → invalid (shadows the repo-level
   `HEAD` pointer; for example `HEAD` and `refs/heads/HEAD` are rejected).
+- Longer than **512 bytes** → invalid. A ref name is ASCII, so this is
+  also its length in characters. The bound keeps every ref inside a
+  server's storage key (`mkit-server` `store::keys`); the constant is
+  `mkit_core::refs::MAX_REF_NAME_BYTES`. A transport server MUST refuse
+  a longer name on a read or a write with an explicit "ref name too
+  long" error, never as absent or a generic failure, and a client
+  SHOULD refuse it before sending (`mkit_rpc::MAX_REF_NAME`, the same
+  value). A server's listing skips a stored ref whose name is longer
+  (written before this bound existed) and logs it; it does not fail the
+  listing. Locally, a new branch, tag or remote-tracking ref over the
+  bound is refused with a message naming the limit, while an existing
+  one stays readable, listable and deletable (and can be renamed with
+  `mkit branch -m`), so a repository with such a ref keeps working.
+
+*Informative: derived local bounds.* A local branch or tag name is
+short; its wire name adds a prefix. A push of branch `b` writes both
+`refs/heads/<b>` and `refs/mkit/packmap/<b>`, so a new branch name is at
+most 512 − 18 = **494 bytes** (`MAX_BRANCH_NAME_BYTES`); a tag's wire
+name is `refs/tags/<t>`, so a new tag name is at most 512 − 10 = **502
+bytes** (`MAX_TAG_NAME_BYTES`). `mkit` refuses to create a longer one and
+says which bound applies. A branch created before these bounds, up to
+512 bytes, can still be committed to, renamed and deleted locally, but a
+push of it fails with "ref name too long", naming the wire name.
+
+**Version 2** added the 512-byte bound, a deliberate breaking change
+under the pre-production policy with no migration path: version 1 had
+no length limit, and the ssh server accepted names of any length.
 
 **Notable divergences from Git ref naming:**
 
@@ -221,7 +248,9 @@ empty slice, not null.
 ### 4.2 Prefix validation
 
 The prefix itself must be empty or pass the same grammar as a ref name
-(§3), possibly with a single trailing `/`. Transports MUST reject
+(§3), including its 512-byte bound, once its trailing `/`s are removed:
+trailing `/`s are ignored, so `refs/heads`, `refs/heads/` and
+`refs/heads//` are the same prefix (§4 normalizes all three to `P'`). Transports MUST reject
 invalid prefixes (the core helper `validate_ref_prefix` returns a
 boolean; transports wrap the false case as their domain-specific
 `InvalidRef` error, for example `RefError::InvalidRefName` on the file

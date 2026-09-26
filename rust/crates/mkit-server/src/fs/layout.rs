@@ -50,8 +50,11 @@ enum Slot<'k> {
 /// and its atomic write, under its ref lock (`<root>/.mkit/refs/.lock`), so
 /// local `mkit` commands, `mkit+file://` remotes and this store see the
 /// same files and serialize on the same lock. A ref's value is its 32-byte
-/// id. A ref file that does not decode is [`StoreError::Corrupt`] (read,
-/// scan or precondition), never absent. A ref whose file would clash with
+/// id. A ref file that does not decode is [`StoreError::Corrupt`] on a
+/// read or a precondition, never absent; a scan skips it with a warning,
+/// like a ref file whose name is over [`refs::MAX_REF_NAME_BYTES`] (written
+/// before SPEC-REFS §3 capped names), as `FileTransport::list_refs` skips
+/// both. A ref whose file would clash with
 /// another ref's directory, or the reverse, is [`StoreError::Invalid`]; a
 /// delete removes the directories it leaves empty.
 ///
@@ -182,13 +185,29 @@ impl FsLayoutStore {
     /// Every row whose key `keep` accepts, unordered.
     fn rows(&self, keep: impl Fn(&Key) -> bool) -> Result<Vec<(Key, Value)>, StoreError> {
         let mut rows = Vec::new();
-        // Listing `refs/` (not the whole root) never reads a pack. Strict,
-        // like `read`: a ref file that does not decode fails the scan.
-        let listed = self.tx.list_refs_strict(REFS_PREFIX);
+        // Listing `refs/` (not the whole root) never reads a pack. Unlike
+        // `read`, a listing skips a file it cannot serve, loudly, as
+        // `FileTransport::list_refs` (today's `mkit serve`) skips it: one
+        // stray file must not fail every listing of its directory.
+        let listed = self.tx.list_ref_files(REFS_PREFIX);
         for (name, id) in listed.map_err(ref_file_error)? {
             let key = keys::ref_key(&self.repo, &name);
-            if is_ref_name(&name) && keep(&key) {
-                rows.push((key, Value::new(id.to_vec())));
+            if !keep(&key) {
+                continue;
+            }
+            if name.len() > refs::MAX_REF_NAME_BYTES {
+                // Written before SPEC-REFS §3 capped ref names.
+                tracing::warn!(
+                    len = name.len(),
+                    max = refs::MAX_REF_NAME_BYTES,
+                    "skipping a ref file whose name is over the ref-name limit"
+                );
+                continue;
+            }
+            match id {
+                Some(id) if is_ref_name(&name) => rows.push((key, Value::new(id.to_vec()))),
+                Some(_) => {}
+                None => tracing::warn!(file = %name, "skipping a ref file that holds no ref id"),
             }
         }
         let rows_dir = self.tx.server_path(Path::new(ROWS_DIR));

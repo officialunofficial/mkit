@@ -732,6 +732,10 @@ pub fn push_branch_with_limits(
     rebaseline_threshold: usize,
     pack_payload_cap: u64,
 ) -> Result<(), DispatchError> {
+    // Both wire names must fit SPEC-REFS §3's bound; a local branch named
+    // before `MAX_BRANCH_NAME_BYTES` existed may not. Say so by name
+    // rather than as a transport's "invalid ref name".
+    refs::check_pushable_branch(branch)?;
     // Diff against the remote's CURRENT tip so we send only what it lacks
     // and can delta against bases it already holds. Planning is an
     // optimization; the head CAS below remains authoritative.

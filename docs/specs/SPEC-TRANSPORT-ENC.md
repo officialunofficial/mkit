@@ -183,7 +183,7 @@ keeps the protocol-version dance in one place.
 | Cap | Value | Source |
 |---|---|---|
 | Max single encrypted record | 1 MiB | `mkit_rpc::MAX_FRAME_BYTES` |
-| Max ref name / prefix | 4096 bytes | `MAX_REF_NAME` in `mkit-rpc/src/helpers.rs` (re-exported by `mkit-transport-enc`) |
+| Max ref name / prefix | 512 bytes (SPEC-REFS §3) | `MAX_REF_NAME` in `mkit-rpc/src/helpers.rs` (re-exported by `mkit-transport-enc`), equal to `mkit_core::refs::MAX_REF_NAME_BYTES` |
 | Per-chunk pack data | 800 KiB | `CHUNK_DATA_MAX`; same as `mkit-transport-ssh` |
 | Pack body total | `mkit_core::protocol::PACK_BODY_LIMIT` | Shared client cap |
 

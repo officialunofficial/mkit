@@ -3477,6 +3477,7 @@ dependencies = [
  "http",
  "http-body-util",
  "mkit-core",
+ "mkit-rpc",
  "mkit-transport-file",
  "proptest",
  "send_wrapper",

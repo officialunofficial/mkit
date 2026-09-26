@@ -228,7 +228,7 @@ fn parse_descriptor_header(input: &mut &[u8]) -> Result<AncestryDescriptor, Hist
         .map_err(|_| invalid())?
         .to_owned();
     if !full_ref.starts_with("refs/heads/")
-        || !refs::validate_ref_name(&full_ref)
+        || !refs::validate_ref_name_grammar(&full_ref)
         || count == 0
         || count > MAX_ANCESTRY_LEAVES as u64
     {

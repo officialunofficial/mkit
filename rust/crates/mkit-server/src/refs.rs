@@ -16,17 +16,22 @@ pub use mkit_core::refs::validate_ref_prefix;
 
 use crate::error::{Code, ServerError};
 
-/// Longest ref name the server accepts, in bytes. It bounds every ref key
+/// Longest ref name, in bytes: SPEC-REFS §3's bound,
+/// [`mkit_core::refs::MAX_REF_NAME_BYTES`]. It bounds every ref key
 /// (`store::keys`) below `MAX_KEY_BYTES`, with room for the longest repo
-/// name; `store::keys` asserts that at compile time.
-pub const MAX_REF_NAME_BYTES: usize = 512;
+/// name; `store::keys` asserts that at compile time. Clients check the
+/// same bound (`mkit_rpc::MAX_REF_NAME`) before sending.
+pub const MAX_REF_NAME_BYTES: usize = mkit_core::refs::MAX_REF_NAME_BYTES;
 
-/// Validate a ref name: the SPEC-REFS §3 grammar
-/// ([`mkit_core::refs::validate_ref_name`]) and at most
-/// [`MAX_REF_NAME_BYTES`] bytes.
+/// The public message for a ref name or `ListRefs` prefix over
+/// [`MAX_REF_NAME_BYTES`]; `mkit serve` sends it as-is.
+pub const REF_NAME_TOO_LONG: &str = "ref name too long";
+
+/// Validate a ref name: the SPEC-REFS §3 grammar and at most
+/// [`MAX_REF_NAME_BYTES`] bytes ([`mkit_core::refs::validate_ref_name`]).
 #[must_use]
 pub fn validate_ref_name(name: &str) -> bool {
-    name.len() <= MAX_REF_NAME_BYTES && mkit_core::refs::validate_ref_name(name)
+    mkit_core::refs::validate_ref_name(name)
 }
 
 /// A CAS expectation as its wire number, aligned with
@@ -292,19 +297,37 @@ pub fn hash_from_slice(field: DigestField, bytes: Option<&[u8]>) -> Result<Hash,
     })
 }
 
-/// The name `ListRefs` returns for a stored ref: `full` with `prefix`
-/// stripped when it starts with it, otherwise `full` unchanged.
+/// The scan prefix of a validated `ListRefs` prefix (SPEC-REFS §4): empty
+/// for an empty prefix, otherwise the prefix with its trailing `/`s
+/// replaced by exactly one. A listing covers the refs whose full name
+/// starts with it, so a prefix matches only at a path-component boundary:
+/// `refs/heads`, `refs/heads/` and `refs//` all scan `refs/heads/` (and
+/// `refs/`), `refs/heads/ma` scans `refs/heads/ma/` and does not match
+/// `refs/heads/main`, and a ref named exactly the prefix is never listed.
+#[must_use]
+pub fn list_scan_prefix(prefix: &str) -> String {
+    let trimmed = prefix.trim_end_matches('/');
+    if trimmed.is_empty() {
+        String::new()
+    } else {
+        format!("{trimmed}/")
+    }
+}
+
+/// The name `ListRefs` returns for a stored ref `full` under `prefix`:
+/// `full` with [`list_scan_prefix`]`(prefix)` stripped, or `None` when it
+/// does not extend the prefix at a component boundary (SPEC-REFS §4).
 ///
 /// `Transport::list_refs` promises that returned names have the prefix
-/// stripped (SPEC-REFS §4), and every native transport honors it. The CLI's
-/// fetch, pull and clone path relies on it to derive each branch's packmap
-/// ref (`refs/mkit/packmap/<bare-branch>`) from the listed name. Returning
-/// the full path there breaks that lookup (`packmap_ref("refs/heads/main")`
-/// is not `refs/mkit/packmap/main`), which surfaces as "no pack map to
+/// stripped, and every native transport honors it. The CLI's fetch, pull
+/// and clone path relies on it to derive each branch's packmap ref
+/// (`refs/mkit/packmap/<bare-branch>`) from the listed name. Returning the
+/// full path there breaks that lookup (`packmap_ref("refs/heads/main")` is
+/// not `refs/mkit/packmap/main`), which surfaces as "no pack map to
 /// reconstruct it" on `mkit clone`, not as an auth or wire error.
 #[must_use]
-pub fn strip_listed_prefix<'a>(full: &'a str, prefix: &str) -> &'a str {
-    full.strip_prefix(prefix).unwrap_or(full)
+pub fn strip_listed_prefix<'a>(full: &'a str, prefix: &str) -> Option<&'a str> {
+    full.strip_prefix(list_scan_prefix(prefix).as_str())
 }
 
 #[cfg(test)]
@@ -516,24 +539,29 @@ mod tests {
         assert_eq!(connect(3, ID_B), Ok(RefWriteCondition::Match([0xbb; 32])));
     }
 
+    /// SPEC-REFS §4: component-boundary matching, as `FileTransport`'s
+    /// directory walk does it.
     #[test]
-    fn strip_listed_prefix_strips_only_a_matching_prefix() {
-        assert_eq!(
-            strip_listed_prefix("refs/heads/main", "refs/heads/"),
-            "main"
-        );
-        assert_eq!(
-            strip_listed_prefix("refs/heads/main", ""),
-            "refs/heads/main"
-        );
-        assert_eq!(
-            strip_listed_prefix("refs/tags/v1", "refs/heads/"),
-            "refs/tags/v1"
-        );
-        assert_eq!(
-            strip_listed_prefix("refs/heads/main", "refs/heads/main"),
-            ""
-        );
+    fn strip_listed_prefix_matches_at_component_boundaries() {
+        let strip = strip_listed_prefix;
+        for p in ["refs/heads", "refs/heads/", "refs/heads//"] {
+            assert_eq!(strip("refs/heads/main", p), Some("main"), "{p}");
+            assert_eq!(strip("refs/heads/feat/x", p), Some("feat/x"), "{p}");
+            assert_eq!(strip("refs/tags/v1", p), None, "{p}");
+        }
+        assert_eq!(strip("refs/heads/main", ""), Some("refs/heads/main"));
+        assert_eq!(strip("refs/heads/main", "refs//"), Some("heads/main"));
+        assert_eq!(strip("refs/heads/main", "refs"), Some("heads/main"));
+        // A bare string prefix is no match, so names never start with `/`
+        // and `feat/x` and `featx` never both strip to `x`.
+        assert_eq!(strip("refs/heads/main", "refs/heads/ma"), None);
+        assert_eq!(strip("refs/heads/featx", "refs/heads/feat"), None);
+        assert_eq!(strip("refs/heads/feat/x", "refs/heads/feat"), Some("x"));
+        // A ref named exactly the prefix is not listed.
+        assert_eq!(strip("refs/heads/main", "refs/heads/main"), None);
+        assert_eq!(list_scan_prefix(""), "");
+        assert_eq!(list_scan_prefix("refs//"), "refs/");
+        assert_eq!(list_scan_prefix("refs/heads/main"), "refs/heads/main/");
     }
 
     #[test]

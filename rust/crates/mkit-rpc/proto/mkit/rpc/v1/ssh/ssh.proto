@@ -126,7 +126,7 @@ message Close {
 
 message ListRefs {
   // Prefix filter, e.g. "refs/heads/". Empty means "all refs". Length
-  // capped at MAX_REF_NAME (4096 bytes).
+  // capped at MAX_REF_NAME (512 bytes, SPEC-REFS §3).
   string prefix = 1;
 }
 
