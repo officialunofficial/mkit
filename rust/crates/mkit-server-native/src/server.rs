@@ -414,7 +414,10 @@ pub fn open(cfg: &ServeConfig) -> Result<Opened, ConfigError> {
     let router = match &cfg.blob {
         BlobChoice::Fs => with_meta(Blocking::new(FsBlobStore::new(&cfg.repo_root)), repo, cfg)?,
         #[cfg(feature = "s3")]
-        BlobChoice::S3(s3) => with_meta(open_s3(s3, cfg)?, repo, cfg)?,
+        BlobChoice::S3 {
+            config,
+            spool_max_bytes,
+        } => with_meta(open_s3(config, *spool_max_bytes, cfg)?, repo, cfg)?,
     };
     Ok(Opened { router, locks })
 }
@@ -444,36 +447,38 @@ where
 
 /// The directory under `<root>/.mkit` where S3 uploads spool: on the
 /// served root's volume, not a possibly RAM-backed system temp directory.
-/// Spool files are unnamed, so a crash leaves nothing in it.
+/// Spool files are unnamed; leftovers of a crash are swept at startup.
 #[cfg(feature = "s3")]
 pub const S3_SPOOL_DIR: &str = "server-spool";
 
-/// The S3 blob store, spooling under [`S3_SPOOL_DIR`] and capped at the
-/// pack limit.
+/// The S3 blob store, spooling under [`S3_SPOOL_DIR`] within its budget
+/// and capped at the pack limit. Runs under the root's exclusive
+/// `server.lock`, so the spool directory's leftovers are a crashed
+/// server's, and are swept.
 #[cfg(feature = "s3")]
-fn open_s3(s3: &crate::s3::S3Config, cfg: &ServeConfig) -> Result<crate::S3BlobStore, ConfigError> {
+fn open_s3(
+    s3: &crate::s3::S3Config,
+    spool_max_bytes: u64,
+    cfg: &ServeConfig,
+) -> Result<crate::S3BlobStore, ConfigError> {
     let spool = cfg.repo_root.join(".mkit").join(S3_SPOOL_DIR);
     fs::create_dir_all(&spool).map_err(|e| config_error("creating the S3 upload spool", e))?;
-    if s3.endpoint.scheme() == "http" && !is_loopback(&s3.endpoint) {
+    let swept = crate::s3::sweep_spool_dir(&spool)
+        .map_err(|e| config_error("sweeping the S3 upload spool", e))?;
+    if swept > 0 {
+        tracing::warn!(swept, "removed spool files a crashed server left");
+    }
+    if s3.endpoint.scheme() == "http" && !s3.endpoint_is_loopback() {
         tracing::warn!(
             endpoint = %s3.endpoint,
-            "--s3-endpoint is plain http: pack bytes cross the network unencrypted"
+            "--s3-allow-insecure-http: pack bytes cross the network in cleartext"
         );
     }
     Ok(crate::S3BlobStore::new(s3.clone(), Arc::new(SystemClock))
         .map_err(|e| config_error("--blob s3", e))?
         .with_spool_dir(spool)
+        .with_spool_max_bytes(spool_max_bytes)
         .with_max_bytes(cfg.pipeline.upload_limits.max_total_bytes))
-}
-
-#[cfg(feature = "s3")]
-fn is_loopback(url: &url::Url) -> bool {
-    match url.host() {
-        Some(url::Host::Domain(d)) => d == "localhost",
-        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
-        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
-        None => false,
-    }
 }
 
 /// Bind [`ServeConfig::listen`] and serve `router` until `shutdown`

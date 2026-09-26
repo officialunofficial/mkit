@@ -75,7 +75,7 @@ async fn wire_suite_s3_sqlite_auth_v2() {
         &env,
     )
     .unwrap();
-    assert!(matches!(cfg.blob, BlobChoice::S3(_)));
+    assert!(matches!(cfg.blob, BlobChoice::S3 { .. }));
     cfg.pipeline.write_quota = Some(QUOTA);
     let opened = server::open(&cfg).unwrap();
     let shutdown = Shutdown::new();
@@ -176,7 +176,7 @@ fn s3_flags_and_credentials_resolve_fail_closed() {
     // The MKIT_R2_* pair wins over AWS_*; the secret never shows.
     let both = [&mkit[..], &aws[..]].concat();
     let cfg = resolve(&endpoint, &both).unwrap();
-    let BlobChoice::S3(s3) = &cfg.blob else {
+    let BlobChoice::S3 { config: s3, .. } = &cfg.blob else {
         panic!("not s3")
     };
     assert_eq!(s3.credentials.access_key_id, "AKIDMKIT");
@@ -189,7 +189,7 @@ fn s3_flags_and_credentials_resolve_fail_closed() {
     let shown = format!("{cfg:?}");
     assert!(!shown.contains("mkit-secret"), "{shown}");
     // The AWS pair alone works, but not with a session token.
-    let BlobChoice::S3(s3) = resolve(&endpoint, &aws).unwrap().blob else {
+    let BlobChoice::S3 { config: s3, .. } = resolve(&endpoint, &aws).unwrap().blob else {
         panic!("not s3")
     };
     assert_eq!(s3.credentials.access_key_id, "AKIDAWS");
@@ -294,7 +294,7 @@ fn s3_credentials_file_replaces_the_environment() {
         (S3_ACCESS_KEY_ENV, "AKIDENV"),
         (S3_SECRET_KEY_ENV, "env-secret"),
     ];
-    let BlobChoice::S3(s3) = common::resolve_with(&flags, &env).unwrap().blob else {
+    let BlobChoice::S3 { config: s3, .. } = common::resolve_with(&flags, &env).unwrap().blob else {
         panic!("not s3")
     };
     assert_eq!(s3.credentials.access_key_id, "AKIDFILE");
@@ -312,4 +312,61 @@ fn s3_credentials_file_replaces_the_environment() {
         let e = common::resolve_with(&flags, &[]).unwrap_err();
         assert!(e.message.contains("group or others"), "{e}");
     }
+}
+
+#[test]
+fn insecure_http_needs_an_explicit_opt_in() {
+    let root = common::repo_root();
+    let root_s = common::s(root.path());
+    let meta = format!("sqlite:{}", common::s(&root.path().join("m.sqlite3")));
+    let env = [(S3_ACCESS_KEY_ENV, "AKID"), (S3_SECRET_KEY_ENV, "secret")];
+    let resolve = |extra: &[&str]| common::resolve_with(&s3_flags(root_s, &meta, extra), &env);
+    // Plain http to a remote host: refused without the flag.
+    let e = resolve(&["--s3-endpoint", "http://s3.example"]).unwrap_err();
+    assert_eq!(e.code, exit::CONFIG_ERROR, "{e}");
+    assert!(e.message.contains("--s3-allow-insecure-http"), "{e}");
+    resolve(&[
+        "--s3-endpoint",
+        "http://s3.example",
+        "--s3-allow-insecure-http",
+    ])
+    .unwrap();
+    // Loopback http and https need no flag.
+    for ok in [
+        "http://127.0.0.1:9000",
+        "http://[::1]:9000",
+        "http://localhost:9000",
+        "https://s3.example",
+    ] {
+        resolve(&["--s3-endpoint", ok]).unwrap();
+    }
+}
+
+#[test]
+fn spool_budget_defaults_and_must_fit_a_pack() {
+    let root = common::repo_root();
+    let root_s = common::s(root.path());
+    let meta = format!("sqlite:{}", common::s(&root.path().join("m.sqlite3")));
+    let env = [(S3_ACCESS_KEY_ENV, "AKID"), (S3_SECRET_KEY_ENV, "secret")];
+    let resolve = |extra: &[&str]| common::resolve_with(&s3_flags(root_s, &meta, extra), &env);
+    let spool_of = |cfg: mkit_server_native::config::ServeConfig| match cfg.blob {
+        BlobChoice::S3 {
+            spool_max_bytes, ..
+        } => spool_max_bytes,
+        _ => panic!("not s3"),
+    };
+    let endpoint = ["--s3-endpoint", "https://s3.example"];
+    assert_eq!(
+        spool_of(resolve(&endpoint).unwrap()),
+        mkit_server_native::s3::DEFAULT_SPOOL_MAX_BYTES
+    );
+    let small = [&endpoint[..], &["--s3-spool-max-bytes", "1024"]].concat();
+    let e = resolve(&small).unwrap_err();
+    assert!(e.message.contains("--s3-spool-max-bytes"), "{e}");
+    let fits = [
+        &endpoint[..],
+        &["--s3-spool-max-bytes", "2048", "--max-pack-bytes", "2048"],
+    ]
+    .concat();
+    assert_eq!(spool_of(resolve(&fits).unwrap()), 2048);
 }

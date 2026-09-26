@@ -349,11 +349,18 @@ train).
   SHA-256, and only after the length and BLAKE3 verify does it send one
   `PUT` with `If-None-Match: *`, so nothing unverified is ever visible
   and an abort or a dropped sink sends nothing (`412` is
-  `AlreadyPresent`; `409`/`429`/`5xx` are retried from the spool). Serve
+  `AlreadyPresent`; `409`/`429`/`5xx`/`400 RequestTimeout` are retried from
+  the spool with jittered backoff honoring `Retry-After`, each attempt
+  bounded by a 60 s stall timeout and a size-scaled deadline). Each upload
+  reserves its declared length from a spool budget
+  (`--s3-spool-max-bytes`, default 16 GiB) before any byte arrives; no
+  room, or a full disk, is a retryable "storage partition full". Serve
   with `mkit-server serve --blob s3://<BUCKET>[/<PREFIX>] --s3-endpoint
-  <URL> [--s3-region auto] --meta sqlite:<PATH>`, credentials from
+  <URL> [--s3-region auto] --meta sqlite:<PATH>`; a non-loopback `http`
+  endpoint is refused without `--s3-allow-insecure-http`. Credentials from
   `MKIT_R2_ACCESS_KEY_ID`/`MKIT_R2_SECRET_ACCESS_KEY` (or the `AWS_*`
-  pair, never with `AWS_SESSION_TOKEN`) or an owner-only
+  pair; temporary credentials with `AWS_SESSION_TOKEN`, so IAM roles,
+  IRSA and ECS task roles, are unsupported for now) or an owner-only
   `--s3-credentials-file`, never the command line. The provider must honor
   `If-None-Match: *` on `PUT` (AWS S3, R2, MinIO). `mkit-server-conformance`
   gains `fake_s3` (feature `fake-s3`): a strict in-memory S3 server that

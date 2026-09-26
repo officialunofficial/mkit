@@ -41,7 +41,10 @@
 //!
 //! An error response carries an S3 XML error body (except for `HEAD`,
 //! which has none) and an `x-amz-request-id`. Every request is recorded
-//! ([`FakeS3::requests`]); faults can be injected ([`FakeS3::fail_next`]).
+//! ([`FakeS3::requests`]); faults can be injected: an error answer
+//! ([`FakeS3::fail_next`], optionally with `Retry-After`), a commit whose
+//! answer is lost ([`FakeS3::fail_after_commit`]), a stall
+//! ([`FakeS3::stall_next`]).
 //! A request the fake answers early still has its body read first, so a
 //! client never sees a reset instead of the answer.
 
@@ -155,10 +158,24 @@ impl fmt::Debug for RecordedRequest {
     }
 }
 
-/// A queued fault: the next request matching `method` gets `status`.
+/// A queued fault for the next request matching `method`.
 struct Fault {
     method: Option<Method>,
-    status: StatusCode,
+    kind: FaultKind,
+}
+
+enum FaultKind {
+    /// Answer `status` (with `Retry-After: secs`, if set) without serving
+    /// the request.
+    Before {
+        status: StatusCode,
+        retry_after: Option<u64>,
+    },
+    /// Serve the request (a `PUT` is stored), then answer `status`: an
+    /// answer lost after the commit.
+    AfterCommit(StatusCode),
+    /// Never read the body and never answer.
+    Stall,
 }
 
 #[derive(Default)]
@@ -310,14 +327,47 @@ impl FakeS3 {
             .insert(key.to_owned(), bytes);
     }
 
+    fn queue(&self, method: Option<Method>, kind: FaultKind) {
+        self.shared.lock().faults.push_back(Fault { method, kind });
+    }
+
     /// Answer the next request whose method is `method` (any, for `None`)
-    /// with `status` and a matching S3 error code, after reading its body.
+    /// with `status` and a matching S3 error code (`400` is
+    /// `RequestTimeout`), after reading its body, without serving it.
     /// Queued faults fire in order.
     pub fn fail_next(&self, method: Option<Method>, status: StatusCode) {
-        self.shared
-            .lock()
-            .faults
-            .push_back(Fault { method, status });
+        self.queue(
+            method,
+            FaultKind::Before {
+                status,
+                retry_after: None,
+            },
+        );
+    }
+
+    /// [`Self::fail_next`], with `Retry-After: <secs>`.
+    pub fn fail_next_retry_after(&self, method: Option<Method>, status: StatusCode, secs: u64) {
+        self.queue(
+            method,
+            FaultKind::Before {
+                status,
+                retry_after: Some(secs),
+            },
+        );
+    }
+
+    /// Serve the next request matching `method` (a `PUT` is stored), then
+    /// answer `status` instead of its real answer: a commit whose answer is
+    /// lost.
+    pub fn fail_after_commit(&self, method: Option<Method>, status: StatusCode) {
+        self.queue(method, FaultKind::AfterCommit(status));
+    }
+
+    /// Stall the next request matching `method`: its body is never read
+    /// and it is never answered. It is recorded at once, with status
+    /// `408`, and hangs until the client gives up or the fake stops.
+    pub fn stall_next(&self, method: Option<Method>) {
+        self.queue(method, FaultKind::Stall);
     }
 }
 
@@ -358,6 +408,7 @@ fn not_implemented(what: &str) -> S3Error {
 /// The S3 code a fault status carries.
 fn fault_code(status: StatusCode) -> &'static str {
     match status.as_u16() {
+        400 => "RequestTimeout",
         409 => "ConditionalRequestConflict",
         429 | 503 => "SlowDown",
         403 => "AccessDenied",
@@ -415,14 +466,60 @@ async fn handle(State(shared): State<Arc<Shared>>, request: Request<Body>) -> Re
     };
     let mut received = 0;
     let head = parts.method == Method::HEAD;
-    let result = match fault {
-        Some(fault) => {
+    let record = |received: u64, status: StatusCode| RecordedRequest {
+        method: parts.method.clone(),
+        path: path.clone(),
+        query: query.clone(),
+        headers: parts
+            .headers
+            .iter()
+            .map(|(n, v)| {
+                (
+                    n.as_str().to_owned(),
+                    String::from_utf8_lossy(v.as_bytes()).into_owned(),
+                )
+            })
+            .collect(),
+        body_len: received,
+        status,
+    };
+    let mut retry_after = None;
+    let result = match fault.map(|f| f.kind) {
+        Some(FaultKind::Stall) => {
+            shared
+                .lock()
+                .requests
+                .push(record(0, StatusCode::REQUEST_TIMEOUT));
+            // Hold the body unread; never answer.
+            let _body = body;
+            return std::future::pending().await;
+        }
+        Some(FaultKind::Before {
+            status,
+            retry_after: after,
+        }) => {
             received = drain(body).await;
-            Err(err(
-                fault.status,
-                fault_code(fault.status),
-                "injected fault",
-            ))
+            retry_after = after;
+            Err(err(status, fault_code(status), "injected fault"))
+        }
+        Some(FaultKind::AfterCommit(status)) => {
+            let served = serve(
+                &shared,
+                &parts,
+                &path,
+                query.as_deref(),
+                body,
+                &mut received,
+            )
+            .await;
+            match served {
+                Ok(_) => Err(err(
+                    status,
+                    fault_code(status),
+                    "injected fault after commit",
+                )),
+                Err(e) => Err(e),
+            }
         }
         None => {
             serve(
@@ -443,23 +540,12 @@ async fn handle(State(shared): State<Arc<Shared>>, request: Request<Body>) -> Re
     if let Ok(id) = HeaderValue::from_str(&request_id) {
         answer.headers.insert("x-amz-request-id", id);
     }
-    shared.lock().requests.push(RecordedRequest {
-        method: parts.method.clone(),
-        path,
-        query,
-        headers: parts
+    if let Some(secs) = retry_after {
+        answer
             .headers
-            .iter()
-            .map(|(n, v)| {
-                (
-                    n.as_str().to_owned(),
-                    String::from_utf8_lossy(v.as_bytes()).into_owned(),
-                )
-            })
-            .collect(),
-        body_len: received,
-        status: answer.status,
-    });
+            .insert(header::RETRY_AFTER, HeaderValue::from(secs));
+    }
+    shared.lock().requests.push(record(received, answer.status));
     let mut response = Response::new(Body::from(answer.body));
     *response.status_mut() = answer.status;
     *response.headers_mut() = answer.headers;

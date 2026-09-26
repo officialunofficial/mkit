@@ -7,11 +7,17 @@
 //! shape vcs-worker's R2 layout uses.
 //!
 //! **Verify before visible: spool, verify, then one conditional `PUT`.** An
-//! upload spools to an unnamed temp file (unlinked at creation, so neither
-//! a dropped sink nor a crashed process leaves anything behind) while it
+//! upload spools to an unnamed temp file (`O_TMPFILE` on Linux; elsewhere a
+//! `.tmp*` file unlinked right after it is created, and
+//! [`sweep_spool_dir`] clears the names a crash in between leaves) while it
 //! computes BLAKE3 (the identity) and SHA-256 (the `SigV4` payload hash)
-//! incrementally. [`PackSink::commit`] checks the length and the BLAKE3
-//! against the key **before any request is issued**; only then does it send
+//! incrementally. Each upload reserves its declared length from a spool
+//! budget ([`DEFAULT_SPOOL_MAX_BYTES`]) at `begin`, before any byte
+//! arrives; with no room, `begin` is [`StoreError::Full`]. A full disk or
+//! quota while spooling is `Full` too.
+//! [`PackSink::commit`](mkit_server::PackSink::commit) checks the length
+//! and the BLAKE3 against the key **before any request is issued**; only
+//! then does it send
 //! one `PUT` with `If-None-Match: *`, its body streamed back from the spool
 //! file. S3 makes an object visible only once its whole body has arrived,
 //! so nothing unverified is ever visible under a key, and an abort, a
@@ -21,8 +27,8 @@
 //! and the `PUT` starts only after the last byte arrived, so an upload's
 //! latency is the client transfer plus the bucket transfer. Local disk
 //! (under the spool directory, `<repo-root>/.mkit/server-spool` in the
-//! binary) must hold the concurrent uploads, each up to the pack cap; memory
-//! stays at one chunk per upload. The alternatives trade that for other
+//! binary) must hold the concurrent uploads, within the spool budget;
+//! memory stays at one chunk per upload. The alternatives trade that for other
 //! costs: a staging key plus a server-side copy doubles the bucket writes
 //! and leaves orphans on a crash, and a multipart upload completed only
 //! after verification needs parts of at least 5 MiB and an
@@ -30,10 +36,15 @@
 //! arrives in M1 (#1090).
 //!
 //! **Put-if-absent.** `412 Precondition Failed` is
-//! [`CommitOutcome::AlreadyPresent`]. A `409` (a concurrent `DELETE`), a
-//! `429` or a `5xx` is retried from the spool, up to [`PUT_ATTEMPTS`] times.
-//! Because a key only ever holds verified bytes, a failed `PUT` whose key is
-//! then present with the right length is `AlreadyPresent` too.
+//! [`CommitOutcome::AlreadyPresent`](mkit_server::CommitOutcome::AlreadyPresent).
+//! A `409` (a concurrent `DELETE`), a `429`, a `5xx` or a `400 RequestTimeout` is retried from the spool, up
+//! to [`PUT_ATTEMPTS`] times, with jittered exponential backoff that
+//! honors `Retry-After`. Each attempt ends early if the body stops moving
+//! (or the answer stops coming) for the stall timeout (60 s), and in any
+//! case after [`PUT_DEADLINE_BASE`] plus the body at
+//! [`PUT_MIN_BYTES_PER_SEC`]. Because a key only ever holds verified bytes,
+//! a failed `PUT` whose key is then present with the right length is
+//! `AlreadyPresent` too.
 //! `--blob s3` expects a provider that honors `If-None-Match: *` on `PUT`
 //! (AWS S3 since 2024, R2, `MinIO`). One that ignores it stays correct, since
 //! a re-put rewrites identical bytes atomically; it only reports `Created`
@@ -55,33 +66,31 @@
 //! Credentials come from the operator's environment or a secret file
 //! ([`crate::config`]); their `Debug` output is redacted.
 
+mod put;
+mod sink;
+
 use std::fmt::{self, Write as _};
-use std::fs::File;
-use std::io::{self, Write as _};
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
 use futures_util::{Stream, StreamExt as _};
-use mkit_core::hash::{Hasher, to_hex_bytes};
 use mkit_server::storage_error::{StorageOp, describe_and_map};
 use mkit_server::store::MAX_BLOB_PIECE_BYTES;
-use mkit_server::{
-    BlobBody, BlobKey, BlobMeta, BlobStore, ByteRange, Clock, CommitOutcome, PackSink, Redactor,
-    StoreError,
-};
+use mkit_server::{BlobBody, BlobKey, BlobMeta, BlobStore, ByteRange, Clock, Redactor, StoreError};
 use mkit_transport_s3::sigv4;
 pub use mkit_transport_s3::sigv4::Credentials;
 use reqwest::header::{self, HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Method, Response, StatusCode};
-use sha2::{Digest as _, Sha256};
 use url::Url;
 
+pub use self::put::{PUT_ATTEMPTS, PUT_DEADLINE_BASE, PUT_MIN_BYTES_PER_SEC};
+use self::sink::SpoolBudget;
+pub use self::sink::{S3PackSink, sweep_spool_dir};
 use crate::PROBE_CACHE_TTL;
-use crate::blocking::on_pool;
 
 /// The pack keyspace: objects are `<prefix/>packs/<hex>`.
 pub const PACKS_KEYSPACE: &str = "packs";
@@ -89,11 +98,16 @@ pub const PACKS_KEYSPACE: &str = "packs";
 /// The largest body one S3 `PUT` accepts (5 GiB).
 pub const MAX_SINGLE_PUT_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 
-/// How many times a commit sends its `PUT` before it gives up.
-pub const PUT_ATTEMPTS: u32 = 3;
+/// The default spool budget: the declared bytes of all open uploads
+/// together (16 GiB).
+pub const DEFAULT_SPOOL_MAX_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 
-/// The piece size a `PUT` body is read from the spool in.
-const SPOOL_READ_BYTES: usize = 256 * 1024;
+/// How long a `PUT` may go without its body moving, or without an answer
+/// once the body is sent, before the attempt is abandoned.
+pub const DEFAULT_STALL_TIMEOUT: Duration = Duration::from_mins(1);
+
+/// How long a bucket probe may take.
+pub const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How much of an error response is read to find its S3 error code.
 const ERROR_BODY_LIMIT: usize = 4096;
@@ -198,14 +212,31 @@ fn valid_prefix(p: &str) -> bool {
         })
 }
 
+impl S3Config {
+    /// Whether the endpoint's host is loopback (`localhost`, `127/8`,
+    /// `::1`): plain `http` there never crosses a network.
+    #[must_use]
+    pub fn endpoint_is_loopback(&self) -> bool {
+        match self.endpoint.host() {
+            Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+            None => false,
+        }
+    }
+}
+
 /// The last probe: when it ran and whether it passed.
-type ProbeCache = tokio::sync::Mutex<Option<(Instant, bool)>>;
+type ProbeCache = Mutex<Option<(Instant, bool)>>;
 
 /// A content-addressed [`BlobStore`] for one keyspace of an S3 bucket (see
 /// the module docs). Needs a tokio runtime.
 #[derive(Clone)]
 pub struct S3BlobStore {
+    /// `GET`, `HEAD`, `DELETE`: a read timeout from the request's start.
     client: reqwest::Client,
+    /// `PUT`: no read timeout; the stall timeout and deadline bound it.
+    put_client: reqwest::Client,
     /// `scheme://host[:port]`, signed as `host`.
     origin: String,
     bucket: String,
@@ -214,6 +245,8 @@ pub struct S3BlobStore {
     credentials: Credentials,
     clock: Arc<dyn Clock>,
     spool_dir: Option<PathBuf>,
+    spool: Arc<SpoolBudget>,
+    stall_timeout: Duration,
     max_bytes: u64,
     probe: Arc<ProbeCache>,
 }
@@ -225,6 +258,7 @@ impl fmt::Debug for S3BlobStore {
             .field("object_base", &self.object_base)
             .field("credentials", &self.credentials)
             .field("spool_dir", &self.spool_dir)
+            .field("spool_max_bytes", &self.spool.max())
             .field("max_bytes", &self.max_bytes)
             .finish_non_exhaustive()
     }
@@ -258,26 +292,60 @@ impl S3BlobStore {
                 format!("keyspace {keyspace:?} is not one plain segment").into(),
             ));
         }
-        let client = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(10))
-            // Per read, not per request: a long download keeps going.
+        let builder = || {
+            reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                // A redirect (a wrong region) would need a new signature.
+                .redirect(reqwest::redirect::Policy::none())
+        };
+        let client = builder()
+            // reqwest's read timeout bounds the wait for the answer from the
+            // request's start, then each body read: right for bodiless
+            // requests, fatal for a long upload (hence `put_client`).
             .read_timeout(Duration::from_mins(1))
-            // A redirect (a wrong region) would need a new signature.
-            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|e| fail(StorageOp::BlobBinding, e))?;
+        let put_client = builder()
             .build()
             .map_err(|e| fail(StorageOp::BlobBinding, e))?;
         let prefix = cfg.prefix.map(|p| format!("{p}/")).unwrap_or_default();
         Ok(Self {
             client,
+            put_client,
             origin,
             object_base: format!("/{}/{prefix}{keyspace}/", cfg.bucket),
             bucket: cfg.bucket,
             credentials: cfg.credentials,
             clock,
             spool_dir: None,
+            spool: Arc::new(SpoolBudget::new(DEFAULT_SPOOL_MAX_BYTES)),
+            stall_timeout: DEFAULT_STALL_TIMEOUT,
             max_bytes: MAX_SINGLE_PUT_BYTES,
             probe: Arc::default(),
         })
+    }
+
+    /// Let the uploads in flight declare at most `max_bytes` of spool in
+    /// total (default [`DEFAULT_SPOOL_MAX_BYTES`]); a `begin` that does not
+    /// fit is [`StoreError::Full`] before any byte arrives.
+    #[must_use]
+    pub fn with_spool_max_bytes(mut self, max_bytes: u64) -> Self {
+        self.spool = Arc::new(SpoolBudget::new(max_bytes));
+        self
+    }
+
+    /// Abandon a `PUT` attempt after `timeout` without progress (default
+    /// [`DEFAULT_STALL_TIMEOUT`]).
+    #[must_use]
+    pub fn with_stall_timeout(mut self, timeout: Duration) -> Self {
+        self.stall_timeout = timeout;
+        self
+    }
+
+    /// The spool bytes the open uploads have reserved.
+    #[must_use]
+    pub fn spool_reserved_bytes(&self) -> u64 {
+        self.spool.reserved()
     }
 
     /// Spool uploads in `dir` (it must exist) rather than the system temp
@@ -306,9 +374,21 @@ impl S3BlobStore {
         format!("{}{}", self.object_base, key.to_hex())
     }
 
-    /// Send a request signed for `payload_sha256`.
+    /// Send a bodiless request.
     async fn send(
         &self,
+        method: Method,
+        path: &str,
+        headers: HeaderMap,
+    ) -> Result<Response, reqwest::Error> {
+        self.send_with(&self.client, method, path, EMPTY_SHA256, headers, None)
+            .await
+    }
+
+    /// Send a request signed for `payload_sha256` through `client`.
+    async fn send_with(
+        &self,
+        client: &reqwest::Client,
         method: Method,
         path: &str,
         payload_sha256: &str,
@@ -338,8 +418,7 @@ impl S3BlobStore {
                 headers.insert(HeaderName::from_static(name), value);
             }
         }
-        let mut request = self
-            .client
+        let mut request = client
             .request(method, format!("{}{path}", self.origin))
             .headers(headers);
         if let Some(body) = body {
@@ -351,7 +430,7 @@ impl S3BlobStore {
     /// The object's length, if present.
     async fn head_len(&self, path: &str) -> Result<Option<u64>, StoreError> {
         let resp = self
-            .send(Method::HEAD, path, EMPTY_SHA256, HeaderMap::new(), None)
+            .send(Method::HEAD, path, HeaderMap::new())
             .await
             .map_err(|e| fail(StorageOp::BlobHead, e))?;
         match resp.status() {
@@ -363,57 +442,6 @@ impl S3BlobStore {
             _ => Err(status_error(StorageOp::BlobHead, "HEAD", resp).await),
         }
     }
-
-    /// `PUT` the verified spool under `key`, if absent.
-    async fn put_verified(
-        &self,
-        key: &BlobKey,
-        spool: Arc<File>,
-        len: u64,
-        sha256: &str,
-    ) -> Result<CommitOutcome, StoreError> {
-        let path = self.object_path(key);
-        let mut last = String::new();
-        for attempt in 0..PUT_ATTEMPTS {
-            if attempt > 0 {
-                tokio::time::sleep(Duration::from_millis(100 << (2 * attempt))).await;
-            }
-            let mut headers = HeaderMap::new();
-            headers.insert(header::CONTENT_LENGTH, HeaderValue::from(len));
-            headers.insert(header::IF_NONE_MATCH, HeaderValue::from_static("*"));
-            headers.insert(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("application/octet-stream"),
-            );
-            let body = reqwest::Body::wrap_stream(spool_stream(Arc::clone(&spool), len));
-            match self
-                .send(Method::PUT, &path, sha256, headers, Some(body))
-                .await
-            {
-                Ok(resp) => match resp.status() {
-                    StatusCode::OK => return Ok(CommitOutcome::Created),
-                    StatusCode::PRECONDITION_FAILED => return Ok(CommitOutcome::AlreadyPresent),
-                    s if retryable(s) => last = describe(&resp, "PUT", s).await_code(resp).await,
-                    _ => return Err(status_error(StorageOp::BlobPut, "PUT", resp).await),
-                },
-                Err(e) => last = format!("PUT: {e}"),
-            }
-        }
-        // A key only ever holds verified bytes: if it is present now (a
-        // racing writer, or our own PUT whose answer was lost), ours are.
-        if matches!(self.head_len(&path).await, Ok(Some(n)) if n == len) {
-            return Ok(CommitOutcome::AlreadyPresent);
-        }
-        Err(fail(StorageOp::BlobPut, last))
-    }
-}
-
-/// A `PUT` answer worth retrying: a concurrent-delete conflict, throttling
-/// or a server fault.
-fn retryable(status: StatusCode) -> bool {
-    status == StatusCode::CONFLICT
-        || status == StatusCode::TOO_MANY_REQUESTS
-        || status.is_server_error()
 }
 
 /// The log line and client error for a failed backend call.
@@ -501,62 +529,6 @@ fn content_range(resp: &Response) -> Option<(u64, u64, u64)> {
     (first <= last && last < total).then_some((first, last, total))
 }
 
-/// Read `buf.len()` bytes of `file` at `offset`, leaving its cursor alone
-/// (a retried `PUT` must not race an abandoned one's reads).
-fn read_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::FileExt::read_exact_at(file, buf, offset)
-    }
-    #[cfg(windows)]
-    {
-        let mut done = 0;
-        while done < buf.len() {
-            let n = std::os::windows::fs::FileExt::seek_read(
-                file,
-                &mut buf[done..],
-                offset + done as u64,
-            )?;
-            if n == 0 {
-                return Err(io::ErrorKind::UnexpectedEof.into());
-            }
-            done += n;
-        }
-        Ok(())
-    }
-}
-
-/// The spool's first `len` bytes, [`SPOOL_READ_BYTES`] at a time, each
-/// read on the blocking pool.
-fn spool_stream(
-    spool: Arc<File>,
-    len: u64,
-) -> impl Stream<Item = Result<Bytes, StoreError>> + Send + 'static {
-    futures_util::stream::unfold(0_u64, move |offset| {
-        let spool = Arc::clone(&spool);
-        async move {
-            if offset >= len {
-                return None;
-            }
-            let n =
-                usize::try_from(len - offset).map_or(SPOOL_READ_BYTES, |r| r.min(SPOOL_READ_BYTES));
-            let piece = on_pool(move || {
-                let mut buf = vec![0; n];
-                read_at(&spool, &mut buf, offset).map_err(|e| fail(StorageOp::FsIo, e))?;
-                Ok(Bytes::from(buf))
-            })
-            .await;
-            // After an error the stream ends: the offset jumps past `len`.
-            let next = if piece.is_ok() {
-                offset + n as u64
-            } else {
-                len
-            };
-            Some((piece, next))
-        }
-    })
-}
-
 /// A response body as the pieces of a [`BlobBody::Stream`] of `len` bytes.
 fn stream_body(resp: Response, len: u64) -> BlobBody {
     BlobBody::Stream {
@@ -631,27 +603,7 @@ impl BlobStore for S3BlobStore {
                 "blob exceeds the store's size cap".into(),
             ));
         }
-        let dir = self.spool_dir.clone();
-        let file = on_pool(move || {
-            match dir {
-                Some(dir) => tempfile::tempfile_in(dir),
-                None => tempfile::tempfile(),
-            }
-            .map_err(|e| fail(StorageOp::FsIo, format!("creating an upload spool: {e}")))
-        })
-        .await?;
-        Ok(S3PackSink {
-            store: self.clone(),
-            key,
-            declared: len,
-            written: 0,
-            spool: Some(Spool {
-                file,
-                blake3: Hasher::new(),
-                sha256: Sha256::new(),
-            }),
-            failed: false,
-        })
+        sink::begin(self, key, len).await
     }
 
     async fn get(
@@ -671,7 +623,7 @@ impl BlobStore for S3BlobStore {
             }
         }
         let resp = self
-            .send(Method::GET, &path, EMPTY_SHA256, headers, None)
+            .send(Method::GET, &path, headers)
             .await
             .map_err(|e| fail(StorageOp::BlobGet, e))?;
         match (resp.status(), range) {
@@ -727,12 +679,14 @@ impl BlobStore for S3BlobStore {
             .map(|len| BlobMeta { len }))
     }
 
-    /// `HEAD` on the bucket, at most once per [`PROBE_CACHE_TTL`]
-    /// (unauthenticated health checks must not become one billed request
-    /// each).
+    /// `HEAD` on the bucket, bounded by [`PROBE_TIMEOUT`]; a result answers
+    /// every probe for [`PROBE_CACHE_TTL`] (unauthenticated health checks
+    /// must not become one billed request each). No lock is held across
+    /// the request: concurrent probes of an expired cache may each send
+    /// one.
     async fn probe(&self) -> Result<(), StoreError> {
-        let mut last = self.probe.lock().await;
-        if let Some((at, ok)) = *last
+        let cached = *self.probe.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((at, ok)) = cached
             && at.elapsed() < PROBE_CACHE_TTL
         {
             return if ok {
@@ -742,15 +696,22 @@ impl BlobStore for S3BlobStore {
             };
         }
         let path = format!("/{}", self.bucket);
-        let result = match self
-            .send(Method::HEAD, &path, EMPTY_SHA256, HeaderMap::new(), None)
-            .await
-        {
-            Ok(resp) if resp.status() == StatusCode::OK => Ok(()),
-            Ok(resp) => Err(status_error(StorageOp::BlobHead, "HEAD bucket", resp).await),
-            Err(e) => Err(fail(StorageOp::BlobHead, e)),
+        let sent = tokio::time::timeout(
+            PROBE_TIMEOUT,
+            self.send(Method::HEAD, &path, HeaderMap::new()),
+        )
+        .await;
+        let result = match sent {
+            Ok(Ok(resp)) if resp.status() == StatusCode::OK => Ok(()),
+            Ok(Ok(resp)) => Err(status_error(StorageOp::BlobHead, "HEAD bucket", resp).await),
+            Ok(Err(e)) => Err(fail(StorageOp::BlobHead, e)),
+            Err(_) => Err(fail(
+                StorageOp::BlobHead,
+                format!("HEAD bucket: no answer within {PROBE_TIMEOUT:?}"),
+            )),
         };
-        *last = Some((Instant::now(), result.is_ok()));
+        *self.probe.lock().unwrap_or_else(PoisonError::into_inner) =
+            Some((Instant::now(), result.is_ok()));
         result
     }
 
@@ -762,7 +723,7 @@ impl BlobStore for S3BlobStore {
             return Ok(false);
         }
         let resp = self
-            .send(Method::DELETE, &path, EMPTY_SHA256, HeaderMap::new(), None)
+            .send(Method::DELETE, &path, HeaderMap::new())
             .await
             .map_err(|e| fail(StorageOp::BlobPut, e))?;
         match resp.status() {
@@ -774,133 +735,4 @@ impl BlobStore for S3BlobStore {
             _ => Err(status_error(StorageOp::BlobPut, "DELETE", resp).await),
         }
     }
-}
-
-/// An upload's spool file and its two running hashes.
-struct Spool {
-    /// Unnamed: it goes away with its last handle, even on a crash.
-    file: File,
-    blake3: Hasher,
-    sha256: Sha256,
-}
-
-impl Spool {
-    fn append(&mut self, chunk: &[u8]) -> io::Result<()> {
-        self.file.write_all(chunk)?;
-        self.blake3.update(chunk);
-        self.sha256.update(chunk);
-        Ok(())
-    }
-}
-
-/// The upload handle of [`S3BlobStore`]: bytes go to a local spool file,
-/// never to the bucket, until [`PackSink::commit`] has verified them.
-/// Memory is one chunk, never the blob.
-pub struct S3PackSink {
-    store: S3BlobStore,
-    key: BlobKey,
-    declared: u64,
-    written: u64,
-    /// `None` once failed, or lost to a cancelled write.
-    spool: Option<Spool>,
-    failed: bool,
-}
-
-impl fmt::Debug for S3PackSink {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("S3PackSink")
-            .field("key", &self.key.to_hex())
-            .field("declared", &self.declared)
-            .field("written", &self.written)
-            .field("failed", &self.failed)
-            .finish_non_exhaustive()
-    }
-}
-
-impl S3PackSink {
-    /// The spool file's size: the upload's bytes are on disk, not in
-    /// memory. For tests.
-    #[doc(hidden)]
-    #[must_use]
-    pub fn spooled_bytes(&self) -> Option<u64> {
-        let spool = self.spool.as_ref()?;
-        spool.file.metadata().ok().map(|m| m.len())
-    }
-
-    fn fail(&mut self) {
-        self.failed = true;
-        self.spool = None;
-    }
-}
-
-fn sink_gone() -> StoreError {
-    StoreError::unavailable("upload spool lost to a cancelled write")
-}
-
-impl PackSink for S3PackSink {
-    async fn write(&mut self, chunk: Bytes) -> Result<(), StoreError> {
-        if self.failed {
-            return Err(StoreError::Invalid("write after a failed write".into()));
-        }
-        let total = self.written.checked_add(chunk.len() as u64);
-        let Some(total) = total.filter(|t| *t <= self.declared) else {
-            self.fail();
-            return Err(StoreError::Invalid("blob is longer than declared".into()));
-        };
-        if chunk.is_empty() {
-            return Ok(());
-        }
-        let Some(mut spool) = self.spool.take() else {
-            self.failed = true;
-            return Err(sink_gone());
-        };
-        // If this future is dropped mid-write, the spool goes with the
-        // blocking task, and later calls fail.
-        let appended = on_pool(move || {
-            let result = spool.append(&chunk);
-            Ok((spool, result))
-        })
-        .await;
-        match appended {
-            Ok((spool, Ok(()))) => {
-                self.spool = Some(spool);
-                self.written = total;
-                Ok(())
-            }
-            Ok((_, Err(e))) => {
-                self.fail();
-                Err(fail(
-                    StorageOp::FsIo,
-                    format!("writing an upload spool: {e}"),
-                ))
-            }
-            Err(e) => {
-                self.fail();
-                Err(e)
-            }
-        }
-    }
-
-    async fn commit(mut self) -> Result<CommitOutcome, StoreError> {
-        if self.failed {
-            return Err(StoreError::Invalid("commit after a failed write".into()));
-        }
-        if self.written != self.declared {
-            return Err(StoreError::Invalid("blob length does not match".into()));
-        }
-        let spool = self.spool.take().ok_or_else(sink_gone)?;
-        // Verify first: nothing is sent for bytes that do not match.
-        if spool.blake3.finalize() != self.key.0 {
-            return Err(StoreError::Invalid(
-                "blob hash does not match its key".into(),
-            ));
-        }
-        let sha256 = to_hex_bytes(&spool.sha256.finalize());
-        self.store
-            .put_verified(&self.key, Arc::new(spool.file), self.declared, &sha256)
-            .await
-    }
-
-    /// Nothing was sent: dropping the spool discards the upload.
-    async fn abort(self) {}
 }

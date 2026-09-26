@@ -310,6 +310,138 @@ async fn persistent_failure_falls_back_to_head() {
 }
 
 #[tokio::test]
+async fn lost_commit_answer_retries_to_already_present() {
+    let fake = FakeS3::start();
+    let s = store(&fake);
+    // The first PUT is stored, but its answer is a 500.
+    fake.fail_after_commit(Some(Method::PUT), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        put(&s, b"lost").await.unwrap(),
+        CommitOutcome::AlreadyPresent
+    );
+    let statuses: Vec<_> = fake
+        .requests()
+        .iter()
+        .filter(|r| r.method == Method::PUT)
+        .map(|r| r.status)
+        .collect();
+    assert_eq!(
+        statuses,
+        [
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::PRECONDITION_FAILED
+        ]
+    );
+    assert_eq!(fake.keys(DEFAULT_BUCKET), [object_key(b"lost")]);
+    assert_eq!(
+        fake.object(DEFAULT_BUCKET, &object_key(b"lost")).unwrap(),
+        "lost"
+    );
+}
+
+#[tokio::test]
+async fn retry_after_and_request_timeout_are_honored() {
+    let fake = FakeS3::start();
+    let s = store(&fake);
+    fake.fail_next_retry_after(Some(Method::PUT), StatusCode::SERVICE_UNAVAILABLE, 1);
+    let started = std::time::Instant::now();
+    assert_eq!(put(&s, b"slow").await.unwrap(), CommitOutcome::Created);
+    assert!(started.elapsed() >= std::time::Duration::from_secs(1));
+    // S3's `400 RequestTimeout` (a body that arrived too slowly) is
+    // retried; another 400 is not.
+    fake.clear_requests();
+    fake.fail_next(Some(Method::PUT), StatusCode::BAD_REQUEST);
+    assert_eq!(put(&s, b"timed").await.unwrap(), CommitOutcome::Created);
+    assert_eq!(puts(&fake), 2);
+}
+
+#[tokio::test]
+async fn stalled_put_is_abandoned_and_retried() {
+    let fake = FakeS3::start();
+    let s = store(&fake).with_stall_timeout(std::time::Duration::from_millis(300));
+    // A small body fits the socket buffers, so the stall is the missing
+    // answer; an 8 MiB one stops moving while the bucket does not read.
+    let big: Vec<u8> = (0..8 << 20_u32)
+        .map(|i| u8::try_from(i % 241).unwrap())
+        .collect();
+    for data in [&b"stall"[..], &big] {
+        fake.clear_requests();
+        fake.stall_next(Some(Method::PUT));
+        let started = std::time::Instant::now();
+        assert_eq!(put(&s, data).await.unwrap(), CommitOutcome::Created);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(20),
+            "{:?}",
+            started.elapsed()
+        );
+        let statuses: Vec<_> = fake.requests().iter().map(|r| r.status).collect();
+        assert_eq!(statuses, [StatusCode::REQUEST_TIMEOUT, StatusCode::OK]);
+    }
+}
+
+#[tokio::test]
+async fn probe_is_bounded_and_cached() {
+    let fake = FakeS3::start();
+    let s = store(&fake);
+    fake.stall_next(Some(Method::HEAD));
+    let started = std::time::Instant::now();
+    assert!(s.probe().await.is_err());
+    let took = started.elapsed();
+    assert!(
+        took >= mkit_server_native::s3::PROBE_TIMEOUT && took < std::time::Duration::from_secs(15),
+        "{took:?}"
+    );
+    // The failure is cached: no second request.
+    assert!(s.probe().await.is_err());
+    assert_eq!(fake.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn spool_budget_reserves_the_declared_length() {
+    let fake = FakeS3::start();
+    let s = store(&fake).with_spool_max_bytes(10);
+    // More than the whole spool can ever hold: invalid, not retryable.
+    assert!(matches!(
+        s.begin(key_of(b"x"), 11).await,
+        Err(StoreError::Invalid(_))
+    ));
+    let first = s.begin(key_of(b"123456"), 6).await.unwrap();
+    assert_eq!(s.spool_reserved_bytes(), 6);
+    // No room: Full before any byte arrives, and nothing is sent.
+    assert!(matches!(
+        s.begin(key_of(b"abcdef"), 6).await,
+        Err(StoreError::Full)
+    ));
+    // A drop, an abort and a commit each release their reservation.
+    drop(first);
+    assert_eq!(s.spool_reserved_bytes(), 0);
+    let sink = s.begin(key_of(b"abcdef"), 6).await.unwrap();
+    sink.abort().await;
+    assert_eq!(s.spool_reserved_bytes(), 0);
+    assert_eq!(put(&s, b"abcdef").await.unwrap(), CommitOutcome::Created);
+    assert_eq!(s.spool_reserved_bytes(), 0);
+    let mut failed = s.begin(key_of(b"other"), 6).await.unwrap();
+    failed.write(Bytes::from_static(b"abcdef")).await.unwrap();
+    assert!(failed.commit().await.is_err());
+    assert_eq!(s.spool_reserved_bytes(), 0);
+}
+
+#[test]
+fn spool_sweep_removes_only_leftover_spool_files() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(".tmpA1b2C3"), b"crash leftover").unwrap();
+    std::fs::write(dir.path().join("keep.txt"), b"not ours").unwrap();
+    std::fs::create_dir(dir.path().join(".tmpdir")).unwrap();
+    assert_eq!(
+        mkit_server_native::s3::sweep_spool_dir(dir.path()).unwrap(),
+        1
+    );
+    assert!(!dir.path().join(".tmpA1b2C3").exists());
+    assert!(dir.path().join("keep.txt").exists());
+    assert!(dir.path().join(".tmpdir").exists());
+}
+
+#[tokio::test]
 async fn missing_bucket_is_an_error_not_an_absent_blob() {
     let fake = FakeS3::start();
     let mut cfg = config(&fake);

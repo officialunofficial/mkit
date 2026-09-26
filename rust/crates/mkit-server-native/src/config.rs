@@ -168,6 +168,16 @@ pub struct ServeArgs {
     /// read for them.
     #[arg(long, value_name = "PATH")]
     pub s3_credentials_file: Option<PathBuf>,
+    /// Allow a plain-`http` `--s3-endpoint` that is not loopback. Pack bytes
+    /// then cross the network in cleartext and can be tampered with on the
+    /// path. Development only.
+    #[arg(long)]
+    pub s3_allow_insecure_http: bool,
+    /// The most local disk the uploads in flight may declare together while
+    /// they spool (default 16 GiB); an upload that does not fit is refused
+    /// (retryable) before any byte arrives. At least `--max-pack-bytes`.
+    #[arg(long, value_name = "N")]
+    pub s3_spool_max_bytes: Option<u64>,
     /// How writes authenticate: `bearer` (the default when a token is
     /// configured) or `auth-v2` (signed writes; needs `--audience`).
     #[arg(long, value_enum)]
@@ -279,7 +289,12 @@ pub enum BlobChoice {
     Fs,
     /// `S3BlobStore` over this bucket.
     #[cfg(feature = "s3")]
-    S3(Box<crate::s3::S3Config>),
+    S3 {
+        /// The bucket, endpoint and credentials.
+        config: Box<crate::s3::S3Config>,
+        /// The upload spool's budget.
+        spool_max_bytes: u64,
+    },
 }
 
 impl fmt::Display for BlobChoice {
@@ -287,7 +302,7 @@ impl fmt::Display for BlobChoice {
         match self {
             Self::Fs => f.write_str("fs"),
             #[cfg(feature = "s3")]
-            Self::S3(cfg) => {
+            Self::S3 { config: cfg, .. } => {
                 write!(f, "s3://{}", cfg.bucket)?;
                 if let Some(prefix) = &cfg.prefix {
                     write!(f, "/{prefix}")?;
@@ -530,10 +545,12 @@ fn resolve_blob(
     let usage = |m: &str| ConfigError::new(exit::USAGE, format!("{PREFIX}: {m}"));
     let (bucket, prefix) = match &args.blob {
         BlobArg::Fs => {
-            if args.s3_endpoint.is_some() || args.s3_credentials_file.is_some() {
-                return Err(usage(
-                    "--s3-endpoint and --s3-credentials-file need --blob s3://<BUCKET>",
-                ));
+            if args.s3_endpoint.is_some()
+                || args.s3_credentials_file.is_some()
+                || args.s3_allow_insecure_http
+                || args.s3_spool_max_bytes.is_some()
+            {
+                return Err(usage("--s3-* flags need --blob s3://<BUCKET>"));
             }
             return Ok(BlobChoice::Fs);
         }
@@ -594,7 +611,33 @@ fn s3_choice(
     };
     cfg.validate()
         .map_err(|e| invalid(format!("--blob s3: {e}")))?;
-    Ok(BlobChoice::S3(Box::new(cfg)))
+    if cfg.endpoint.scheme() == "http"
+        && !cfg.endpoint_is_loopback()
+        && !args.s3_allow_insecure_http
+    {
+        return Err(invalid(format!(
+            "--s3-endpoint {} is plain http to a non-loopback host: pack bytes would cross the \
+             network in cleartext and could be tampered with. Use https, or pass \
+             --s3-allow-insecure-http (development only).",
+            cfg.endpoint
+        )));
+    }
+    let max_pack = args
+        .max_pack_bytes
+        .unwrap_or(mkit_core::protocol::PACK_BODY_LIMIT);
+    let spool_max_bytes = args
+        .s3_spool_max_bytes
+        .unwrap_or(crate::s3::DEFAULT_SPOOL_MAX_BYTES);
+    if spool_max_bytes < max_pack {
+        return Err(invalid(format!(
+            "--s3-spool-max-bytes {spool_max_bytes} is below the pack cap {max_pack} \
+             (--max-pack-bytes): the largest upload could never spool"
+        )));
+    }
+    Ok(BlobChoice::S3 {
+        config: Box::new(cfg),
+        spool_max_bytes,
+    })
 }
 
 /// The S3 access key pair: from `--s3-credentials-file` if given, else the

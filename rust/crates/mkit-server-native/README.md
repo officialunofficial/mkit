@@ -30,7 +30,8 @@ Object backend: both run the same statements and the same schema migrations.
 mkit-server serve --listen <ADDR> --repo-root <DIR>
     [--meta fs-layout | --meta sqlite:<PATH>]
     [--blob fs | --blob s3://<BUCKET>[/<PREFIX>] --s3-endpoint <URL>
-        [--s3-region auto] [--s3-credentials-file <PATH>]]  # or MKIT_R2_* / AWS_*
+        [--s3-region auto] [--s3-credentials-file <PATH>]   # or MKIT_R2_* / AWS_*
+        [--s3-spool-max-bytes N] [--s3-allow-insecure-http]]
     [--auth bearer | --auth auth-v2 | --unsafe-allow-any-peer]
     [--bearer-token-file <PATH>]          # or MKIT_API_TOKEN
     [--audience <ORIGIN>] [--repository <ID>]
@@ -160,25 +161,54 @@ the root marker and the upload spool.
   `--s3-credentials-file <PATH>`: `KEY=VALUE` lines with those names
   (systemd `EnvironmentFile` syntax), owner-only as the bearer token file;
   given a file, the environment is not read for them. Never from the command
-  line or repo config. Temporary credentials (`AWS_SESSION_TOKEN`) are
-  refused. Requests are signed for `--s3-region` (default `auto`, R2's).
+  line or repo config. Requests are signed for `--s3-region` (default
+  `auto`, R2's).
+- **Long-lived keys only.** Temporary credentials (`AWS_SESSION_TOKEN`) are
+  refused: they need an `x-amz-security-token` header, which the signer
+  (`mkit-transport-s3::sigv4`, a published crate whose `Credentials` has no
+  token field; adding one would break semver) does not send. So IAM roles,
+  instance profiles, IRSA (EKS service accounts) and ECS task roles are
+  unsupported until an additive signer sends the token.
+- **Permissions.** The key needs, on the bucket (or its prefix):
+  `s3:PutObject` (uploads), `s3:GetObject` (downloads, `HEAD`),
+  `s3:ListBucket` (the health probe's `HEAD` on the bucket; it is also what
+  lets S3 answer `404` for a missing pack: without it, S3 answers `403` and
+  every absent-pack check, and the health check, fails as a storage error),
+  and `s3:DeleteObject` (garbage collection, from M5; unused in M0). An R2
+  API token needs "Object Read & Write" on the bucket.
 - **The provider must honor `If-None-Match: *` on `PUT`** (AWS S3 since
   2024, R2, `MinIO`) for put-if-absent reporting. One that ignores it stays
   correct, since every key only ever holds its verified bytes, but reports
   re-uploads as new.
-- **Verify before visible.** An upload is spooled to an unnamed file under
+- **TLS.** A plain-`http` endpoint to a non-loopback host is refused unless
+  `--s3-allow-insecure-http` is passed (development only): pack bytes would
+  cross the network in cleartext, and on-path tampering would go unnoticed
+  (downloads are not re-verified against their BLAKE3, and
+  `If-None-Match` is not signed). Loopback `http` is allowed.
+- **Verify before visible.** An upload is spooled under
   `<DIR>/.mkit/server-spool` while it is hashed, and sent to the bucket in
   one `PUT` only after its BLAKE3 matches its key. Nothing unverified ever
   reaches the bucket, and an aborted, failed or dropped upload sends
-  nothing; a crash leaves no spool file behind. The cost: the spool volume
-  must hold every upload in flight (each up to `--max-pack-bytes`), each
-  pack is written and read locally once, and the bucket transfer starts
-  only when the client's upload ends. A `409`, `429` or `5xx` answer is
-  retried from the spool (three attempts). One `PUT` carries at most 5 GiB,
-  above the 4 GiB default pack cap; resumable multipart uploads come in M1.
-- **Health** probes the bucket with a `HEAD`, at most once a second.
-- A plain-`http` endpoint that is not loopback logs a warning: pack bytes
-  cross the network unencrypted (the signature never carries the secret).
+  nothing. Spool files are unnamed: on Linux `O_TMPFILE`, so they never
+  have a name; elsewhere (macOS) a `.tmp*` file is unlinked right after it
+  is created, and the leftovers of a crash in between are swept at startup.
+  The cost: each pack is written and read locally once, and the bucket
+  transfer starts only when the client's upload ends.
+- **Spool budget.** `--s3-spool-max-bytes` (default 16 GiB, at least
+  `--max-pack-bytes`) caps the disk the uploads in flight may use: each
+  reserves its declared length before any byte arrives, and one that does
+  not fit is refused at once with a retryable `unavailable` ("storage
+  partition full"), as is a full disk while spooling.
+- **Retries.** A `PUT` answered `409`, `429`, `5xx` or `400 RequestTimeout`
+  is retried from the spool (three attempts), after a jittered exponential
+  backoff (100 ms, then 400 ms) that honors `Retry-After` (up to 10 s).
+  An attempt is abandoned when its body stops moving, or its answer does
+  not come, for 60 s, and in any case after 60 s plus 1 s per MiB. A failed
+  `PUT` whose object is then present with the right length counts as
+  already present. One `PUT` carries at most 5 GiB, above the 4 GiB
+  default pack cap; resumable multipart uploads come in M1.
+- **Health** probes the bucket with a `HEAD` (5 s timeout), at most once a
+  second.
 - Failures are logged with the HTTP status, the S3 error code and request
   ids; clients see only "object storage request failed".
 
