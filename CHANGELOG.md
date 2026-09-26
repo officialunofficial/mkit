@@ -19,6 +19,13 @@ train).
 
 ### Changed
 
+- *(core)* Pack readers enforce SPEC-PACKFILE §3.3's "one zstd frame"
+  rule. A `0x03`/`0x04` payload holding two concatenated frames, a
+  skippable or legacy-magic frame, or trailing bytes after the frame now
+  fails with `PackError::ZstdDecompress`. The C path
+  (`zstd::bulk::decompress`) used to decode concatenated frames and skip
+  skippable ones. mkit's `PackWriter` never produced such payloads.
+  Pre-production policy: no compatibility path.
 - *(core)* SPEC-DISCLOSURE v2: every `Step` and chunk header carries a
   mandatory 32-byte `inner_root` (bare BMT root of the parent Tree /
   ChunkedBlob). Bundle version byte is `2`; version `1` is a typed
@@ -36,6 +43,18 @@ train).
   index or the global object CAS), not just the on-disk `ObjectStore`.
   `build_disclosure` is now a thin wrapper; bundle bytes are unchanged
   (the disclosure golden regeneration is a zero diff).
+
+- *(core)* `pack-ruzstd` feature: a decode-only, pure-Rust zstd backend
+  (`ruzstd` 0.9, with `twox-hash` for frame checksums) that lets a
+  `wasm32-unknown-unknown` build read SPEC-PACKFILE v2 `0x03`/`0x04`
+  entries under the same bomb guards, length checks and one-frame rule
+  as the C path. It never pre-allocates the claimed size. `PackWriter`
+  still compresses only with `pack-zstd`, and `pack-zstd` decodes when
+  both features are on. No consumer enables it yet. Also added: C-encoded
+  v2 fixtures in `rust/tests/golden/pack-v2/` (SPEC-PACKFILE §10 #20), a
+  C-vs-Rust differential test suite, and a `pack-ruzstd` graph check in
+  `scripts/check-wasm-dep-graph.sh`. Residual divergence on malformed
+  frames is documented in `docs/INVARIANTS.md`.
 
 - *(server)* `mkit-server` crate (internal foundation for the production
   server, MKIT-29): repo and namespace identifiers, principals, the typed

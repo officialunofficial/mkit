@@ -14,6 +14,9 @@
 //!
 //! Goldens for #2 / #3 do NOT live on disk — they're inline byte
 //! arrays so the spec change → test failure feedback is immediate.
+//! The exception is the C-encoded v2 fixtures under
+//! `rust/tests/golden/pack-v2/` (see [`pack_v2_fixtures`]), which exist
+//! so decode-only builds have real compressed bytes to read.
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
@@ -384,4 +387,413 @@ fn pack_v2_compressed_delta_pin_bytes_roundtrip() {
     assert_eq!(report.delta_count, 1);
     assert_eq!(report.stored, vec![base_hash, target_hash]);
     assert_eq!(store.read(&target_hash).unwrap(), target_bytes);
+}
+
+/// SPEC-PACKFILE v2 committed fixtures (`rust/tests/golden/pack-v2/`,
+/// §10 vector #20).
+///
+/// The writer-driven v2 pins above need `pack-zstd` to build their packs,
+/// so a decode-only build had no real v2 bytes to read. These fixtures are
+/// produced once by the C encoder (`MKIT_WRITE_GOLDEN=1 cargo test -p
+/// mkit-core --test golden_pack`, default features) and read back by every
+/// build that has a decoder, including `pack-ruzstd` alone. `MANIFEST.txt`
+/// pins the BLAKE3 of every file; each `.json` sidecar lists the entries'
+/// wire types, object ids and byte digests, plus the zstd frame offsets
+/// for an independent `zstd -d` cross-check.
+mod pack_v2_fixtures {
+    use std::fs;
+    use std::ops::Range;
+    use std::path::PathBuf;
+
+    use mkit_core::hash::{self, from_hex, to_hex};
+    use mkit_core::pack::PackReader;
+    use serde_json::Value;
+
+    pub(super) fn dir() -> PathBuf {
+        let mut d = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        d.pop(); // crates/
+        d.pop(); // rust/
+        d.extend(["tests", "golden", "pack-v2"]);
+        d
+    }
+
+    /// `(wire type, payload range)` for every entry, from the framing alone.
+    pub(super) fn frames(pack: &[u8]) -> Vec<(u8, Range<usize>)> {
+        let count = u32::from_le_bytes(pack[8..12].try_into().unwrap());
+        let mut pos = 12;
+        (0..count)
+            .map(|_| {
+                let etype = pack[pos];
+                let len = u32::from_le_bytes(pack[pos + 1..pos + 5].try_into().unwrap()) as usize;
+                pos += 5 + len;
+                (etype, pos - len..pos)
+            })
+            .collect()
+    }
+
+    fn manifest() -> Vec<(String, String)> {
+        fs::read_to_string(dir().join("MANIFEST.txt"))
+            .expect("missing pack-v2/MANIFEST.txt")
+            .lines()
+            .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
+            .map(|l| {
+                let mut parts = l.split_whitespace();
+                (
+                    parts.next().unwrap().to_string(),
+                    parts.next().unwrap().to_string(),
+                )
+            })
+            .collect()
+    }
+
+    /// Read a fixture file, asserting its BLAKE3 matches `MANIFEST.txt`.
+    fn load(file: &str) -> Vec<u8> {
+        let want = manifest()
+            .into_iter()
+            .find(|(f, _)| f == file)
+            .unwrap_or_else(|| panic!("{file} is not listed in MANIFEST.txt"))
+            .1;
+        let bytes = fs::read(dir().join(file)).unwrap_or_else(|e| panic!("read {file}: {e}"));
+        assert_eq!(to_hex(&hash::hash(&bytes)), want, "{file}: digest drift");
+        bytes
+    }
+
+    fn sidecar(name: &str) -> Value {
+        serde_json::from_slice(&load(&format!("{name}.json"))).unwrap()
+    }
+
+    fn hex_field(v: &Value, key: &str) -> hash::Hash {
+        from_hex(v[key].as_str().unwrap()).unwrap()
+    }
+
+    #[cfg(feature = "pack-zstd")]
+    mod write {
+        use std::fmt::Write as _;
+        use std::fs;
+
+        use mkit_core::delta;
+        use mkit_core::hash::{self, Hash, ZERO, to_hex};
+        use mkit_core::object::{Blob, Commit, EntryMode, Identity, Object, Tree, TreeEntry};
+        use mkit_core::pack::{PackWriter, pack_key};
+        use mkit_core::sign::{KeyPair, sign_commit};
+        use serde_json::json;
+
+        use super::{dir, frames};
+
+        /// One pushed object: its serialized bytes and, for a delta push,
+        /// the base it is encoded against.
+        struct Push {
+            bytes: Vec<u8>,
+            delta_base: Option<Vec<u8>>,
+        }
+
+        fn raw(obj: &Object) -> Push {
+            Push {
+                bytes: mkit_core::serialize::serialize(obj).unwrap(),
+                delta_base: None,
+            }
+        }
+
+        fn delta_of(base: &Push, obj: &Object) -> Push {
+            Push {
+                bytes: mkit_core::serialize::serialize(obj).unwrap(),
+                delta_base: Some(base.bytes.clone()),
+            }
+        }
+
+        fn blob(data: Vec<u8>) -> Object {
+            Object::Blob(Blob { data })
+        }
+
+        fn id(bytes: &[u8]) -> Hash {
+            let obj = mkit_core::serialize::deserialize(bytes).unwrap();
+            mkit_core::object::id_from_object(&obj, bytes)
+        }
+
+        /// LCG filler the §3.3 writer policy declines to compress.
+        fn noise(seed: u32, len: usize) -> Vec<u8> {
+            let mut s = seed;
+            (0..len)
+                .map(|_| {
+                    s = s.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                    s.to_be_bytes()[1]
+                })
+                .collect()
+        }
+
+        fn fixtures() -> Vec<(&'static str, &'static str, Vec<Push>)> {
+            // The inputs of `pack_v2_compressed_raw_pin_bytes_roundtrip`.
+            let raw_4k = vec![raw(&blob(vec![0x42; 4096]))];
+
+            // The inputs of `pack_v2_compressed_delta_pin_bytes_roundtrip`.
+            let base = raw(&blob(
+                b"delta base filler, deliberately unrelated to the target".to_vec(),
+            ));
+            let target = delta_of(&base, &blob(vec![0x42; 4096]));
+            let delta_repeat = vec![base, target];
+
+            // 0x00, 0x03, 0x02 and 0x04 in one pack; the 0x04 entry's base
+            // is the 0x02 entry's target (an in-pack delta chain).
+            let a_data = noise(7, 200);
+            let a = raw(&blob(a_data.clone()));
+            let b = raw(&blob(b"mkit pack v2 fixture line\n".repeat(120)));
+            let mut c_data = a_data;
+            c_data[100] ^= 0xFF;
+            let c = delta_of(&a, &blob(c_data.clone()));
+            let mut d_data = c_data;
+            d_data.extend_from_slice(&[0x61; 4096]);
+            let d = delta_of(&c, &blob(d_data));
+            let mixed = vec![a, b, c, d];
+
+            // A compressible tree and an Ed25519-signed commit over it.
+            let leaf = raw(&blob(b"shared leaf".to_vec()));
+            let leaf_id = id(&leaf.bytes);
+            let tree = raw(&Object::Tree(Tree {
+                entries: (0..64)
+                    .map(|i| TreeEntry {
+                        name: format!("module_{i:03}.rs").into_bytes(),
+                        mode: EntryMode::Blob,
+                        object_hash: leaf_id,
+                    })
+                    .collect(),
+            }));
+            let kp = KeyPair::from_seed([0x07; 32]);
+            let mut commit = Commit {
+                tree_hash: id(&tree.bytes),
+                parents: vec![],
+                author: Identity::ed25519(kp.public.0),
+                signer: kp.public.0,
+                message: b"pack-v2 fixture: compressible commit message. ".repeat(20),
+                timestamp: 1_726_300_000,
+                message_hash: ZERO,
+                content_digest: ZERO,
+                signature: [0u8; 64],
+            };
+            commit.signature = sign_commit(&commit, &kp).unwrap().0;
+            let tree_and_commit = vec![leaf, tree, raw(&Object::Commit(commit))];
+
+            vec![
+                ("raw_4k_repeat", "one 0x03 zstd-raw entry", raw_4k),
+                (
+                    "delta_repeat",
+                    "a 0x00 base and a 0x04 zstd-delta entry against it",
+                    delta_repeat,
+                ),
+                (
+                    "mixed",
+                    "0x00, 0x03, 0x02 and 0x04 entries; the 0x04 base is the 0x02 target",
+                    mixed,
+                ),
+                (
+                    "tree_and_commit",
+                    "a 0x00 leaf blob, a 0x03 tree and a 0x03 Ed25519-signed commit",
+                    tree_and_commit,
+                ),
+            ]
+        }
+
+        fn entry_json(
+            pack: &[u8],
+            etype: u8,
+            range: std::ops::Range<usize>,
+            p: &Push,
+        ) -> serde_json::Value {
+            let mut e = json!({
+                "type": etype,
+                "id": to_hex(&id(&p.bytes)),
+                "len": p.bytes.len(),
+                "blake3_of_bytes": to_hex(&hash::hash(&p.bytes)),
+            });
+            let prefix = match etype {
+                0x03 => 0,
+                0x04 => 32,
+                _ => return e,
+            };
+            let len_at = range.start + prefix;
+            let claim = u32::from_le_bytes(pack[len_at..len_at + 4].try_into().unwrap());
+            let decoded = match &p.delta_base {
+                None => p.bytes.clone(),
+                Some(base) => delta::encode(base, &p.bytes).unwrap(),
+            };
+            e["uncompressed_len"] = json!(claim);
+            e["frame_offset"] = json!(len_at + 4);
+            e["frame_len"] = json!(range.end - len_at - 4);
+            e["decoded_blake3"] = json!(to_hex(&hash::hash(&decoded)));
+            e
+        }
+
+        fn write_all() {
+            let dir = dir();
+            fs::create_dir_all(&dir).unwrap();
+            let mut manifest = String::from(
+                "# SPEC-PACKFILE v2 fixtures, written by the C zstd encoder (pack-zstd)\n\
+                 # Produced by `MKIT_WRITE_GOLDEN=1 cargo test -p mkit-core --test golden_pack`\n\
+                 # Format: <file> <blake3-hex-of-file-bytes>\n\
+                 # See docs/specs/SPEC-PACKFILE.md section 10, vector #20.\n",
+            );
+            for (name, description, pushes) in fixtures() {
+                let mut w = PackWriter::new();
+                for p in &pushes {
+                    match &p.delta_base {
+                        None => {
+                            w.push_raw(id(&p.bytes), &p.bytes).unwrap();
+                        }
+                        Some(base) => {
+                            let stream = delta::encode(base, &p.bytes).unwrap();
+                            w.push_delta(&id(base), &stream).unwrap();
+                        }
+                    }
+                }
+                let pack = w.finish().unwrap();
+                let entries: Vec<_> = frames(&pack)
+                    .into_iter()
+                    .zip(&pushes)
+                    .map(|((etype, range), p)| entry_json(&pack, etype, range, p))
+                    .collect();
+                let sidecar = json!({
+                    "name": name,
+                    "description": description,
+                    "bin": format!("{name}.bin"),
+                    "size": pack.len(),
+                    "version": u32::from_le_bytes(pack[4..8].try_into().unwrap()),
+                    "pack_key": to_hex(&pack_key(&pack)),
+                    "entries": entries,
+                });
+                let json_bytes = serde_json::to_string_pretty(&sidecar).unwrap() + "\n";
+                for (file, bytes) in [
+                    (format!("{name}.bin"), pack),
+                    (format!("{name}.json"), json_bytes.into_bytes()),
+                ] {
+                    let _ = writeln!(manifest, "{file} {}", to_hex(&hash::hash(&bytes)));
+                    fs::write(dir.join(&file), bytes).unwrap();
+                }
+            }
+            fs::write(dir.join("MANIFEST.txt"), manifest).unwrap();
+        }
+
+        #[test]
+        fn write_pack_v2_goldens_if_requested() {
+            if std::env::var("MKIT_WRITE_GOLDEN").is_ok() {
+                write_all();
+            }
+        }
+    }
+
+    /// Every committed v2 fixture decodes to the sidecar's objects through
+    /// both [`PackEntries`] and [`PackReader::read`], with whichever
+    /// decoder this build has — the pure-Rust one under `pack-ruzstd`
+    /// alone.
+    #[test]
+    #[cfg(any(feature = "pack-zstd", feature = "pack-ruzstd"))]
+    fn pack_v2_fixtures_decode_without_c_zstd() {
+        use std::collections::HashMap;
+
+        use mkit_core::pack::{PackEntries, PackEntry, pack_key};
+
+        let names: Vec<String> = manifest()
+            .into_iter()
+            .filter_map(|(f, _)| f.strip_suffix(".bin").map(str::to_string))
+            .collect();
+        assert_eq!(names.len(), 4, "MANIFEST.txt lists {names:?}");
+        for name in names {
+            let pack = load(&format!("{name}.bin"));
+            let side = sidecar(&name);
+            assert_eq!(to_hex(&pack_key(&pack)), side["pack_key"].as_str().unwrap());
+            let want = side["entries"].as_array().unwrap();
+            let wire = frames(&pack);
+            assert_eq!(wire.len(), want.len(), "{name}: entry count");
+            for ((etype, _), w) in wire.iter().zip(want) {
+                assert_eq!(u64::from(*etype), w["type"].as_u64().unwrap(), "{name}");
+            }
+            assert!(
+                wire.iter().any(|(t, _)| *t == 0x03 || *t == 0x04),
+                "{name}: fixture must exercise the zstd decoder"
+            );
+
+            let mut resolved: HashMap<hash::Hash, Vec<u8>> = HashMap::new();
+            for (entry, w) in PackEntries::new(&pack).unwrap().zip(want) {
+                let (object, decoded) = match entry.unwrap() {
+                    PackEntry::Raw { bytes } => (bytes.to_vec(), bytes.into_owned()),
+                    PackEntry::Delta { base, stream } => (
+                        mkit_core::delta::decode(&resolved[&base], &stream).unwrap(),
+                        stream.into_owned(),
+                    ),
+                };
+                if let Some(d) = w["decoded_blake3"].as_str() {
+                    assert_eq!(to_hex(&hash::hash(&decoded)), d, "{name}: decoded payload");
+                }
+                assert_eq!(object.len() as u64, w["len"].as_u64().unwrap(), "{name}");
+                assert_eq!(
+                    hash::hash(&object),
+                    hex_field(w, "blake3_of_bytes"),
+                    "{name}"
+                );
+                let obj = mkit_core::serialize::deserialize(&object).unwrap();
+                let id = mkit_core::object::id_from_object(&obj, &object);
+                assert_eq!(id, hex_field(w, "id"), "{name}: object id");
+                resolved.insert(id, object);
+            }
+            assert_eq!(resolved.len(), want.len(), "{name}: every entry decoded");
+
+            let dir = tempfile::TempDir::new().unwrap();
+            let store = super::ObjectStore::init(&super::RepoLayout::single(dir.path())).unwrap();
+            let report = PackReader::read(&pack, &store).unwrap();
+            let ids: Vec<_> = want.iter().map(|w| hex_field(w, "id")).collect();
+            assert_eq!(report.stored, ids, "{name}: stored ids");
+            for w in want {
+                let bytes = store.read(&hex_field(w, "id")).unwrap();
+                assert_eq!(
+                    hash::hash(&bytes),
+                    hex_field(w, "blake3_of_bytes"),
+                    "{name}"
+                );
+            }
+        }
+    }
+
+    /// SPEC-DISCLOSURE §7.2: the closure profile is raw-only and rejects a
+    /// compressed entry from the type scan, without decompressing it —
+    /// whichever decoder is compiled in. A frame corrupted beyond decoding
+    /// still yields the profile violation, not a zstd error.
+    #[test]
+    fn closure_profile_still_rejects_compressed_entries() {
+        use mkit_core::ClosureMode;
+        use mkit_core::verify::{VerifyError, verify_closure_packs};
+
+        let pack = load("raw_4k_repeat.bin");
+        let root = hex_field(&sidecar("raw_4k_repeat")["entries"][0], "id");
+        let mut corrupt = pack.clone();
+        let (_, range) = frames(&corrupt)[0].clone();
+        corrupt[range.start + 4..range.end].fill(0xEE);
+        let split = corrupt.len() - 32;
+        let trailer = hash::hash(&corrupt[..split]);
+        corrupt[split..].copy_from_slice(&trailer);
+        for p in [&pack, &corrupt] {
+            let err = verify_closure_packs(&root, ClosureMode::Snapshot, &[p.as_slice()]);
+            assert!(
+                matches!(
+                    err,
+                    Err(VerifyError::ClosureProfileViolation {
+                        pack_index: 0,
+                        entry_index: 0
+                    })
+                ),
+                "got {err:?}"
+            );
+        }
+    }
+
+    /// With no decoder compiled in, a compressed entry still fails closed.
+    #[test]
+    #[cfg(not(any(feature = "pack-zstd", feature = "pack-ruzstd")))]
+    fn compressed_fixture_fails_closed_without_a_decoder() {
+        let pack = load("raw_4k_repeat.bin");
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = super::ObjectStore::init(&super::RepoLayout::single(dir.path())).unwrap();
+        let err = PackReader::read(&pack, &store).unwrap_err();
+        assert!(
+            matches!(err, mkit_core::pack::PackError::ZstdDecompress(_)),
+            "got {err:?}"
+        );
+    }
 }

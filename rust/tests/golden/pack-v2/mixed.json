@@ -1,0 +1,42 @@
+{
+  "bin": "mixed.bin",
+  "description": "0x00, 0x03, 0x02 and 0x04 entries; the 0x04 base is the 0x02 target",
+  "entries": [
+    {
+      "blake3_of_bytes": "64a282a28bb8c0ca9d0ceed20cfe7c5e2bcc8df223cd7cdf17801e2f79f5291b",
+      "id": "64a282a28bb8c0ca9d0ceed20cfe7c5e2bcc8df223cd7cdf17801e2f79f5291b",
+      "len": 210,
+      "type": 0
+    },
+    {
+      "blake3_of_bytes": "cca51ff50cfa41e6be29f2d8324ab16d241ff107f3b2ce936d58f358a08a6f75",
+      "decoded_blake3": "cca51ff50cfa41e6be29f2d8324ab16d241ff107f3b2ce936d58f358a08a6f75",
+      "frame_len": 55,
+      "frame_offset": 236,
+      "id": "cca51ff50cfa41e6be29f2d8324ab16d241ff107f3b2ce936d58f358a08a6f75",
+      "len": 3130,
+      "type": 3,
+      "uncompressed_len": 3130
+    },
+    {
+      "blake3_of_bytes": "3ab6793e2631e265b73b55e46eae4cc79e7900f85491413d369e4314002251fd",
+      "id": "3ab6793e2631e265b73b55e46eae4cc79e7900f85491413d369e4314002251fd",
+      "len": 210,
+      "type": 2
+    },
+    {
+      "blake3_of_bytes": "fd7ea6140978665ecaefa638955311399ec066d3f897066691742eb3951db7c9",
+      "decoded_blake3": "95343a32ae90008f76c471581100015272509a15574b7be89354349af45107a4",
+      "frame_len": 60,
+      "frame_offset": 395,
+      "id": "fd7ea6140978665ecaefa638955311399ec066d3f897066691742eb3951db7c9",
+      "len": 4306,
+      "type": 4,
+      "uncompressed_len": 4162
+    }
+  ],
+  "name": "mixed",
+  "pack_key": "a4f107ff62d8995a4a3d0babc662c7125c16bc76e8264ac39c49a2ce13f75adb",
+  "size": 487,
+  "version": 2
+}

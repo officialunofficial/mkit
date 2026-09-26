@@ -415,9 +415,10 @@ mkit v1 is the first version. The format rule going forward is:
 
 The conformance vectors below are exercised in
 `rust/crates/mkit-core/tests/golden_pack.rs` and the unit tests in
-`rust/crates/mkit-core/src/pack.rs::tests`. They are inline byte pins
-rather than on-disk goldens, so any framing drift fails the test suite
-immediately. Reader-error vectors map to `PackError` variants on the
+`rust/crates/mkit-core/src/pack.rs::tests` and `pack/zstd_tests.rs`.
+They are inline byte pins rather than on-disk goldens, so any framing
+drift fails the test suite immediately; #20 is the exception, a set of
+committed C-encoded packs that give decode-only builds real bytes. Reader-error vectors map to `PackError` variants on the
 Rust API surface; the spec-level names below stay protocol-neutral.
 
 1. **Empty pack**: header, `entry_count=0`, and trailer. Length
@@ -477,6 +478,24 @@ Rust API surface; the spec-level names below stay protocol-neutral.
     re-runs vectors #1–#12 above and asserts byte-identical output,
     the no-regression guardrail for the format this revision does not
     otherwise touch.
+19. **`0x03`/`0x04` payload that is not exactly one zstd frame** &mdash;
+    two concatenated frames, a valid frame plus one trailing byte, a
+    lone skippable frame (magic `0x184D2A5?`), or a skippable frame
+    before or after a valid one &rarr; rejected (`ZstdDecompress`) by
+    every decoder backend (§3.3 "one zstd frame"). Pinned by
+    `c_backend_enforces_one_frame`, `ruzstd_enforces_one_frame` and
+    `backends_agree_on_adversarial_frames` (`pack/zstd_tests.rs`).
+20. **C-encoded v2 fixtures decode byte-identically under a
+    decode-only backend**: the committed packs in
+    `rust/tests/golden/pack-v2/` (`0x03`, `0x04`, a mixed pack with an
+    in-pack delta chain, a compressed tree and signed commit), written
+    by the C zstd encoder, recover the object ids and bytes their
+    `.json` sidecars list through `PackEntries` and `PackReader::read`
+    with only the pure-Rust `pack-ruzstd` decoder compiled in
+    (`pack_v2_fixtures_decode_without_c_zstd`), and decode identically
+    under both backends (`backends_agree_on_committed_v2_fixtures`).
+    Each sidecar records every frame's offset and length, so the
+    reference `zstd -d` CLI can cross-check the decoded bytes.
 
 ---
 

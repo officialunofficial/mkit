@@ -41,7 +41,11 @@
 //! *before* any decompression allocation, decompression itself is
 //! capacity-bounded to that claim, and the actual decompressed length
 //! is re-checked against the claim afterward (`DecompressedSizeMismatch`
-//! / `DecompressedSizeOverCap`).
+//! / `DecompressedSizeOverCap`). The payload must be exactly one
+//! Zstandard frame. The C decoder (`pack-zstd`) serves reads when it is
+//! compiled in; otherwise the pure-Rust, decode-only `pack-ruzstd`
+//! backend does, under the same checks; with neither, a compressed entry
+//! fails closed.
 //!
 //! Caps (SPEC-PACKFILE §5, unchanged by v2 — measured on the *wire*
 //! size; the decompressed-side cap above is separate and new):
@@ -656,6 +660,16 @@ fn maybe_compress(_data: &[u8]) -> Option<Vec<u8>> {
 /// that claim, and the actual decompressed length is re-checked
 /// against the claim afterward.
 fn decompress_zstd_entry(payload: &[u8]) -> Result<Vec<u8>, PackError> {
+    decompress_zstd_entry_with(payload, zstd_decompress_capped)
+}
+
+/// [`decompress_zstd_entry`] over an explicit backend, so the
+/// differential tests can drive the C and pure-Rust decoders through the
+/// exact same claim / length checks.
+fn decompress_zstd_entry_with(
+    payload: &[u8],
+    backend: fn(&[u8], usize) -> Result<Vec<u8>, PackError>,
+) -> Result<Vec<u8>, PackError> {
     if payload.len() < ZSTD_LEN_PREFIX {
         return Err(PackError::ZstdEntryTruncated);
     }
@@ -665,7 +679,7 @@ fn decompress_zstd_entry(payload: &[u8]) -> Result<Vec<u8>, PackError> {
         return Err(PackError::DecompressedSizeOverCap(uncompressed_len));
     }
     let frame = &payload[ZSTD_LEN_PREFIX..];
-    let decompressed = zstd_decompress_capped(frame, uncompressed_len)?;
+    let decompressed = backend(frame, uncompressed_len)?;
     if decompressed.len() != uncompressed_len {
         return Err(PackError::DecompressedSizeMismatch(
             uncompressed_len,
@@ -675,19 +689,270 @@ fn decompress_zstd_entry(payload: &[u8]) -> Result<Vec<u8>, PackError> {
     Ok(decompressed)
 }
 
-/// Decompress `frame`, bounding the allocation to `capacity` bytes
-/// (already checked against [`MAX_RAW_OBJECT_SIZE`] by the caller) so
-/// a corrupt or hostile frame can't force an over-large allocation.
+/// RFC 8878 §3.1.1 Zstandard frame magic number, as it appears on the
+/// wire (`0xFD2FB528` little-endian). SPEC-PACKFILE §3.3 allows exactly
+/// one such frame per entry: a skippable frame (`0x184D2A5?`) or a
+/// legacy pre-RFC frame magic is rejected by both backends.
+#[cfg(any(feature = "pack-zstd", feature = "pack-ruzstd"))]
+const ZSTD_FRAME_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
+
+/// Both backends' first check: the payload must open with the one
+/// Zstandard frame magic SPEC-PACKFILE §3.3 permits.
+#[cfg(any(feature = "pack-zstd", feature = "pack-ruzstd"))]
+fn require_zstd_frame_magic(frame: &[u8]) -> Result<(), PackError> {
+    if frame.starts_with(&ZSTD_FRAME_MAGIC) {
+        Ok(())
+    } else {
+        Err(PackError::ZstdDecompress(
+            "entry payload does not start with a Zstandard frame magic \
+             (skippable and legacy frames are not allowed)"
+                .to_string(),
+        ))
+    }
+}
+
+/// Decompress `frame` — exactly one Zstandard frame, nothing before or
+/// after it — bounding the allocation to `capacity` bytes (already
+/// checked against [`MAX_RAW_OBJECT_SIZE`] by the caller) so a corrupt
+/// or hostile frame can't force an over-large allocation. The C decoder
+/// (`pack-zstd`) is selected whenever it is compiled in.
 #[cfg(feature = "pack-zstd")]
 fn zstd_decompress_capped(frame: &[u8], capacity: usize) -> Result<Vec<u8>, PackError> {
+    require_zstd_frame_magic(frame)?;
+    // `ZSTD_decompressDCtx` (behind `bulk::decompress`) would otherwise
+    // decode concatenated frames and skip skippable ones.
+    match zstd::zstd_safe::find_frame_compressed_size(frame) {
+        Ok(n) if n == frame.len() => {}
+        Ok(n) => {
+            return Err(PackError::ZstdDecompress(format!(
+                "{} byte(s) after the entry's single zstd frame",
+                frame.len() - n
+            )));
+        }
+        Err(code) => {
+            return Err(PackError::ZstdDecompress(
+                zstd::zstd_safe::get_error_name(code).to_string(),
+            ));
+        }
+    }
     zstd::bulk::decompress(frame, capacity).map_err(|e| PackError::ZstdDecompress(e.to_string()))
 }
 
-#[cfg(not(feature = "pack-zstd"))]
+/// Without the C library, the pure-Rust decoder serves every read.
+#[cfg(all(not(feature = "pack-zstd"), feature = "pack-ruzstd"))]
+fn zstd_decompress_capped(frame: &[u8], capacity: usize) -> Result<Vec<u8>, PackError> {
+    ruzstd_decompress_capped(frame, capacity)
+}
+
+#[cfg(not(any(feature = "pack-zstd", feature = "pack-ruzstd")))]
 fn zstd_decompress_capped(_frame: &[u8], _capacity: usize) -> Result<Vec<u8>, PackError> {
     Err(PackError::ZstdDecompress(
-        "this build was compiled without the `pack-zstd` feature".to_string(),
+        "this build was compiled without the `pack-zstd` or `pack-ruzstd` feature".to_string(),
     ))
+}
+
+/// Smallest window the pure-Rust decoder accepts regardless of the
+/// claim: 8 MiB (`windowLog` 23) covers every non-ultra zstd level's
+/// default window, so a frame written by a streaming encoder with no
+/// pledged size still decodes. Frames declaring a window above
+/// `max(claim, this)` are rejected (fail-closed; the C one-shot decoder
+/// would accept them). Bounding the window is what bounds memory: the
+/// streaming decoder keeps up to one window of not-yet-emitted output.
+#[cfg(feature = "pack-ruzstd")]
+#[cfg_attr(all(feature = "pack-zstd", not(test)), allow(dead_code))]
+const RUZSTD_MIN_WINDOW_LIMIT: u64 = 8 << 20;
+
+/// Pure-Rust (`ruzstd`) decode of exactly one Zstandard frame, bounded
+/// to `capacity` output bytes. Compiled whenever `pack-ruzstd` is on,
+/// including alongside `pack-zstd`, so the differential tests can run
+/// both backends over the same inputs.
+///
+/// Matches the C path's accept/reject decisions and error variants:
+/// a declared frame content size must not exceed `capacity` and must
+/// equal the decoded length; output past `capacity` is an error, not a
+/// short read; a content checksum, when present, must match; nothing
+/// may follow the frame. The output buffer grows with the decoded
+/// bytes — `capacity` is attacker-chosen (up to 1 GiB) and is never
+/// pre-allocated — and at most `capacity + 1` bytes are ever read out.
+/// With `pack-zstd` also on, only the differential tests call it.
+#[cfg(feature = "pack-ruzstd")]
+#[cfg_attr(all(feature = "pack-zstd", not(test)), allow(dead_code))]
+pub(crate) fn ruzstd_decompress_capped(
+    frame: &[u8],
+    capacity: usize,
+) -> Result<Vec<u8>, PackError> {
+    use ruzstd::decoding::{FrameDecoder, StreamingDecoder};
+    use std::io::Read as _;
+
+    fn fail(msg: impl std::fmt::Display) -> PackError {
+        PackError::ZstdDecompress(msg.to_string())
+    }
+
+    require_zstd_frame_magic(frame)?;
+    let cap = u64::try_from(capacity).unwrap_or(u64::MAX);
+    let mut decoder = FrameDecoder::new();
+    decoder.set_max_window_size(cap.max(RUZSTD_MIN_WINDOW_LIMIT));
+    let mut src = frame;
+    let mut stream = StreamingDecoder::new_with_decoder(&mut src, decoder).map_err(fail)?;
+
+    // RFC 8878 §3.1.1.1.1. The header parsed, so the descriptor byte
+    // after the magic exists. ruzstd ignores the reserved bit, which a
+    // decoder must refuse (the C decoder does).
+    let descriptor = frame[ZSTD_FRAME_MAGIC.len()];
+    if descriptor & 0x08 != 0 {
+        return Err(fail("zstd frame descriptor has its reserved bit set"));
+    }
+    // A content size is present iff the FCS flag or the single-segment
+    // flag is set.
+    let declared =
+        (descriptor >> 6 != 0 || descriptor & 0x20 != 0).then(|| stream.decoder.content_size());
+    if let Some(n) = declared
+        && n > cap
+    {
+        return Err(fail(format_args!(
+            "frame content size {n} exceeds the claimed {capacity} bytes"
+        )));
+    }
+
+    let mut out = Vec::new();
+    (&mut stream)
+        .take(cap.saturating_add(1))
+        .read_to_end(&mut out)
+        .map_err(fail)?;
+    if out.len() > capacity {
+        return Err(fail(format_args!(
+            "zstd frame decompresses past the claimed {capacity} bytes"
+        )));
+    }
+    let decoder = &stream.decoder;
+    if !decoder.is_finished() {
+        return Err(fail("zstd frame ended before its last block"));
+    }
+    // RFC 8878 §3.1.1.2.4: no block may decode to more than
+    // `min(Window_Size, 128 KiB)`. ruzstd does not check it; the C
+    // decoder does for compressed blocks. Per-block sizes are not
+    // observable here, so a windowed frame whose window is under 128 KiB
+    // may not decode past its window at all (fail-closed for raw-block
+    // and multi-block tiny-window frames, which no default encoder
+    // setting produces).
+    if descriptor & 0x20 == 0 {
+        let window_descriptor = frame[ZSTD_FRAME_MAGIC.len() + 1];
+        let base = 1u64 << (10 + (window_descriptor >> 3));
+        let window = base + (base >> 3) * u64::from(window_descriptor & 7);
+        if window < 128 * 1024 && out.len() as u64 > window {
+            return Err(fail(format_args!(
+                "zstd frame decodes {} bytes through a {window}-byte window",
+                out.len()
+            )));
+        }
+    }
+    if let Some(n) = declared
+        && n != out.len() as u64
+    {
+        return Err(fail(format_args!(
+            "frame content size {n} does not match the {} decoded bytes",
+            out.len()
+        )));
+    }
+    if let Some(stored) = decoder.get_checksum_from_data()
+        && decoder.get_calculated_checksum() != Some(stored)
+    {
+        return Err(fail("zstd frame content checksum mismatch"));
+    }
+    drop(stream);
+    if !src.is_empty() {
+        return Err(fail(format_args!(
+            "{} byte(s) after the entry's single zstd frame",
+            src.len()
+        )));
+    }
+    ruzstd_check_reserved_fields(frame).map_err(fail)?;
+    Ok(out)
+}
+
+/// Re-walk an already-decoded frame's blocks (RFC 8878 §3.1.1.2–3) for
+/// the reserved fields ruzstd ignores and the C decoder rejects: the
+/// sequences section's `Symbol_Compression_Modes` reserved bits. Without
+/// this, a frame the C path refuses would decode here — a fail-open
+/// divergence between the native and Workers readers.
+#[cfg(feature = "pack-ruzstd")]
+#[cfg_attr(all(feature = "pack-zstd", not(test)), allow(dead_code))]
+fn ruzstd_check_reserved_fields(frame: &[u8]) -> Result<(), &'static str> {
+    const MALFORMED: &str = "malformed zstd frame";
+    let byte = |i: usize| frame.get(i).copied().ok_or(MALFORMED);
+    let descriptor = byte(ZSTD_FRAME_MAGIC.len())?;
+    let single_segment = descriptor & 0x20 != 0;
+    let fcs_len = match descriptor >> 6 {
+        0 => usize::from(single_segment),
+        1 => 2,
+        2 => 4,
+        _ => 8,
+    };
+    let mut pos = ZSTD_FRAME_MAGIC.len()
+        + 1
+        + usize::from(!single_segment)
+        + [0, 1, 2, 4][usize::from(descriptor & 3)]
+        + fcs_len;
+    loop {
+        let header = u32::from_le_bytes([byte(pos)?, byte(pos + 1)?, byte(pos + 2)?, 0]);
+        pos += 3;
+        let size = (header >> 3) as usize;
+        let body_len = match (header >> 1) & 3 {
+            1 => 1, // RLE: one byte, repeated `size` times
+            _ => size,
+        };
+        let body = frame.get(pos..pos + body_len).ok_or(MALFORMED)?;
+        if (header >> 1) & 3 == 2 && ruzstd_sequence_modes(body)? & 3 != 0 {
+            return Err("zstd sequences section has its reserved mode bits set");
+        }
+        pos += body_len;
+        if header & 1 == 1 {
+            return Ok(());
+        }
+    }
+}
+
+/// The `Symbol_Compression_Modes` byte of a compressed block, or `0` when
+/// the block has no sequences (RFC 8878 §3.1.1.3.1.1, §3.1.1.3.2.1).
+#[cfg(feature = "pack-ruzstd")]
+#[cfg_attr(all(feature = "pack-zstd", not(test)), allow(dead_code))]
+fn ruzstd_sequence_modes(block: &[u8]) -> Result<u8, &'static str> {
+    const MALFORMED: &str = "malformed zstd block";
+    let byte = |i: usize| block.get(i).copied().ok_or(MALFORMED).map(usize::from);
+    let b0 = byte(0)?;
+    // Literals section: header, then its content.
+    let (header_len, content_len) = match (b0 & 3, (b0 >> 2) & 3) {
+        // Raw / RLE literals: 5-, 12- or 20-bit regenerated size.
+        (kind @ (0 | 1), format) => {
+            let (len, regen) = match format {
+                0 | 2 => (1, b0 >> 3),
+                1 => (2, (b0 >> 4) | (byte(1)? << 4)),
+                _ => (3, (b0 >> 4) | (byte(1)? << 4) | (byte(2)? << 12)),
+            };
+            (len, if kind == 0 { regen } else { 1 })
+        }
+        // Compressed / treeless literals: 10-, 14- or 18-bit sizes.
+        (_, format) => {
+            let (len, bits) = match format {
+                0 | 1 => (3, 10),
+                2 => (4, 14),
+                _ => (5, 18),
+            };
+            let mut h = 0usize;
+            for i in (0..len).rev() {
+                h = (h << 8) | byte(i)?;
+            }
+            (len, (h >> (4 + bits)) & ((1 << bits) - 1))
+        }
+    };
+    let seq = header_len + content_len;
+    let modes_at = match byte(seq)? {
+        0 => return Ok(0),
+        n if n < 128 => seq + 1,
+        255 => seq + 3,
+        _ => seq + 2,
+    };
+    block.get(modes_at).copied().ok_or(MALFORMED)
 }
 
 /// Collect the `base_hash` of every `0x02` delta entry in `pack_bytes`,
@@ -1459,6 +1724,9 @@ fn validate_delta_result_size(stream: &[u8]) -> Result<(), PackError> {
 // =========================================================================
 // Tests
 // =========================================================================
+
+#[cfg(test)]
+mod zstd_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2405,6 +2673,7 @@ mod tests {
     /// Highly-compressible synthetic payload: `MIN_COMPRESS_LEN` (64) is
     /// the writer's floor, so use something well past it — a single
     /// repeated byte is the easiest thing for zstd to shrink hard.
+    #[cfg(feature = "pack-zstd")]
     fn compressible_bytes(len: usize) -> Vec<u8> {
         vec![0x42u8; len]
     }
