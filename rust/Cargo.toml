@@ -23,6 +23,8 @@ members = [
     "crates/mkit-wasm",
     "crates/mkit-repo-client",
     "crates/mkit-server",
+    # The storage-backend conformance suite (publish = false).
+    "crates/mkit-server-conformance",
     "benches",
     # Dev-only test helpers shared across crates' test suites
     # (publish = false — never a normal dependency, see the crate's

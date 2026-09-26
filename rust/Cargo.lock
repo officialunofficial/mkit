@@ -3427,6 +3427,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mkit-server-conformance"
+version = "0.4.2"
+dependencies = [
+ "bytes",
+ "futures",
+ "mkit-core",
+ "mkit-server",
+ "tokio",
+]
+
+[[package]]
 name = "mkit-test-util"
 version = "0.4.2"
 

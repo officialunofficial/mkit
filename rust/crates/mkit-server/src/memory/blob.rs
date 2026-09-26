@@ -1,15 +1,49 @@
 //! `MemoryBlobStore`: the reference [`BlobStore`].
 
 use std::collections::BTreeMap;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 
 use bytes::Bytes;
+use futures_core::Stream;
 use mkit_core::hash::Hasher;
 
 use super::{MemoryFault, lock, take_fault};
 use crate::store::{
     BlobBody, BlobKey, BlobMeta, BlobStore, ByteRange, CommitOutcome, PackSink, StoreError,
 };
+
+/// Bodies longer than this are streamed in pieces of this size: the
+/// contract's SHOULD (`BlobStore::get`), which the conformance suite checks.
+const STREAM_CHUNK: usize = 1024 * 1024;
+
+/// `bytes` as a body: whole, or streamed when longer than [`STREAM_CHUNK`].
+fn body(bytes: Bytes) -> BlobBody {
+    if bytes.len() <= STREAM_CHUNK {
+        return BlobBody::Bytes(bytes);
+    }
+    BlobBody::Stream {
+        len: bytes.len() as u64,
+        stream: Box::pin(Chunks(bytes)),
+    }
+}
+
+/// The remaining bytes of a streamed body.
+struct Chunks(Bytes);
+
+impl Stream for Chunks {
+    type Item = Result<Bytes, StoreError>;
+
+    fn poll_next(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let rest = &mut self.get_mut().0;
+        if rest.is_empty() {
+            return Poll::Ready(None);
+        }
+        let n = rest.len().min(STREAM_CHUNK);
+        Poll::Ready(Some(Ok(rest.split_to(n))))
+    }
+}
 
 #[derive(Debug, Default)]
 struct Shared {
@@ -91,14 +125,12 @@ impl BlobStore for MemoryBlobStore {
             return Ok(None);
         };
         let Some(range) = range else {
-            return Ok(Some(BlobBody::Bytes(blob)));
+            return Ok(Some(body(blob)));
         };
         let span = range.resolve(blob.len() as u64)?;
         // `resolve` bounds the span by the blob's length, which is a usize.
         let index = |n: u64| usize::try_from(n).map_err(|_| StoreError::Invalid("range".into()));
-        Ok(Some(BlobBody::Bytes(
-            blob.slice(index(span.start)?..index(span.end)?),
-        )))
+        Ok(Some(body(blob.slice(index(span.start)?..index(span.end)?))))
     }
 
     async fn head(&self, key: &BlobKey) -> Result<Option<BlobMeta>, StoreError> {
@@ -263,6 +295,27 @@ mod tests {
         assert!(block_on(store.delete(&key)).unwrap());
         assert_eq!(get(&store, &key, None), None);
         assert!(!block_on(store.delete(&key)).unwrap());
+    }
+
+    #[test]
+    fn poisoned_lock_recovers() {
+        let store = MemoryBlobStore::default();
+        let key = key_of(b"a");
+        put(&store, key, 1, &[b"a"]).unwrap();
+        let shared = store.shared.clone();
+        let panicked = std::thread::spawn(move || {
+            let _guard = shared.blobs.lock().unwrap();
+            panic!("poison the blob lock");
+        })
+        .join();
+        assert!(panicked.is_err() && store.shared.blobs.is_poisoned());
+        assert_eq!(get(&store, &key, None).unwrap(), "a");
+        let other = key_of(b"b");
+        assert_eq!(
+            put(&store, other, 1, &[b"b"]).unwrap(),
+            CommitOutcome::Created
+        );
+        assert!(block_on(store.delete(&key)).unwrap());
     }
 
     #[test]

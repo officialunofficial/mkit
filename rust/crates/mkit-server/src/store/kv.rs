@@ -405,7 +405,10 @@ pub trait NamespaceStore: MaybeSend + MaybeSync {
     }
 
     /// Up to `limit` (at least 1) entries in `[start, end)`, ascending by
-    /// key bytes. `after` resumes strictly after the cursor's position.
+    /// key bytes. `after` resumes strictly after the cursor's position; a
+    /// cursor outside `[start, end)` (forged, or from another range) is
+    /// [`StoreError::Invalid`]. A page may hold fewer than `limit` entries
+    /// and still return `next`: callers page until `next` is `None`.
     fn scan(
         &self,
         p: &Partition,
