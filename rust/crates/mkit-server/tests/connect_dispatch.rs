@@ -924,13 +924,45 @@ fn fault_headers(fault: &str, skew: &str) -> Vec<(&'static str, String)> {
 async fn test_fault_header_ignored_without_feature() {
     let server = setup(AuthMode::Open).serve();
     let data = pack(5);
-    let headers = fault_headers("after-put", "not-a-number");
+    let mut headers = fault_headers("after-put", "not-a-number");
+    headers.push(("x-mkit-test-timer-ms", "not-a-number".into()));
+    headers.push(("x-mkit-test-run-timers", "bad ref".into()));
     let (_, end) = server
         .upload(&upload_msgs(&data, 4), &headers)
         .await
         .frames();
     assert!(end.get("error").is_none(), "{end}");
     assert!(server.exists(&hash(&data)).await);
+}
+
+#[cfg(not(feature = "test-faults"))]
+#[tokio::test]
+async fn timer_headers_are_unknown_without_test_faults() {
+    let server = setup(AuthMode::Open).serve();
+    for header in [
+        "x-mkit-test-timer-ms",
+        "x-mkit-test-run-timers",
+        "x-unknown-test-header",
+    ] {
+        let headers = [(header, "malformed value".to_owned())];
+        let reply = server
+            .json(
+                "UpdateRef",
+                &update_json(HEAD, "REF_EXPECTATION_ANY", &A),
+                &headers,
+            )
+            .await;
+        assert_eq!(reply.status, StatusCode::OK);
+        let reply = server
+            .json(
+                "ListRefs",
+                &serde_json::json!({"prefix": "refs/heads/"}),
+                &headers,
+            )
+            .await;
+        assert_eq!(reply.status, StatusCode::OK);
+        assert_eq!(server.read(HEAD).await.object_id.as_deref(), Some(&A[..]));
+    }
 }
 
 #[cfg(feature = "test-faults")]

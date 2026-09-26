@@ -25,6 +25,8 @@ workspace = true
 
 [features]
 default = ["sqlite", "http", "s3", "enc"]
+# Test-only timer handlers and pipeline directives; absent from release builds.
+test-faults = ["mkit-server/test-faults"]
 # `S3BlobStore`: content-addressed blobs in an S3-compatible bucket, signed
 # with `mkit-transport-s3`'s SigV4 code, over reqwest (async, rustls: the
 # workspace's existing HTTP client and TLS stack, no new supply chain).
@@ -175,6 +177,10 @@ required-features = ["http"]
 
 [[test]]
 name = "wire_binary"
+required-features = ["http"]
+
+[[test]]
+name = "timers"
 required-features = ["http"]
 
 [[test]]

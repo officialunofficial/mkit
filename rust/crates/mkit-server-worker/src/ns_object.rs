@@ -2,11 +2,11 @@
 //! [`NsRequest`], run it on the object's `SqlKvStore`, answer one
 //! [`NsReply`].
 //!
-//! The object is a pure key-value store: it evaluates batch preconditions
-//! (with `NotAfter` against its own clock) and nothing else. No pipeline
-//! logic (CAS, quota, replay) runs in it, so any other backend can replace
-//! it. [`serve`] is the whole protocol and is generic over the store, so
-//! the host tests run it over a simulated Durable Object connection;
+//! The object evaluates batch preconditions (with `NotAfter` against its
+//! own clock) and runs partition-local timer handlers on its alarm. No
+//! pipeline logic (CAS, quota, replay) runs in it, so any other backend can
+//! replace it. [`serve`] is the whole key-value protocol and is generic
+//! over the store, so host tests run it over a simulated Durable Object connection;
 //! `NsObject` is the wasm32 shell around it.
 
 use core::future::Future;
@@ -22,22 +22,32 @@ use crate::wire::{Blob, NsCall, NsErrKind, NsReply, NsRequest, WireOutcome};
 /// request is an `Invalid` reply, a failed store an error reply whose
 /// backend detail goes to the log only.
 pub async fn serve<S: NamespaceStore>(store: &S, body: &str) -> String {
-    let reply = match serde_json::from_str::<NsRequest>(body) {
+    encode(&serve_reply(store, body).await.0)
+}
+
+/// Keep the committed timer Put alongside its typed reply for alarm wiring.
+async fn serve_reply<S: NamespaceStore>(store: &S, body: &str) -> (NsReply, Option<u64>) {
+    match serde_json::from_str::<NsRequest>(body) {
         Ok(request) => match Partition::decode(&request.part.0) {
             Ok(p) => dispatch(store, &p, request.call)
                 .await
-                .unwrap_or_else(|e| failure(&e)),
-            Err(_) => NsReply::Err {
+                .unwrap_or_else(|e| (failure(&e), None)),
+            Err(_) => (
+                NsReply::Err {
+                    kind: NsErrKind::Invalid,
+                    message: "malformed partition".into(),
+                },
+                None,
+            ),
+        },
+        Err(_) => (
+            NsReply::Err {
                 kind: NsErrKind::Invalid,
-                message: "malformed partition".into(),
+                message: "malformed request".into(),
             },
-        },
-        Err(_) => NsReply::Err {
-            kind: NsErrKind::Invalid,
-            message: "malformed request".into(),
-        },
-    };
-    encode(&reply)
+            None,
+        ),
+    }
 }
 
 /// A reply body.
@@ -67,9 +77,9 @@ async fn dispatch<S: NamespaceStore>(
     store: &S,
     p: &Partition,
     call: NsCall,
-) -> Result<NsReply, StoreError> {
+) -> Result<(NsReply, Option<u64>), StoreError> {
     let key = |b: Blob| Key::new(b.0);
-    Ok(match call {
+    let reply = match call {
         NsCall::Get { key: k } => NsReply::Value {
             value: store
                 .get(p, &key(k))
@@ -103,9 +113,17 @@ async fn dispatch<S: NamespaceStore>(
             .await?;
             NsReply::page(page)
         }
-        NsCall::Apply { batch } => NsReply::Outcome {
-            outcome: WireOutcome::from(store.apply(p, batch.into()).await?),
-        },
+        NsCall::Apply { batch } => {
+            let batch = batch.into();
+            let earliest = crate::alarm::earliest_timer_put(&batch);
+            let outcome = WireOutcome::from(store.apply(p, batch).await?);
+            let earliest = if outcome == WireOutcome::Committed {
+                earliest
+            } else {
+                None
+            };
+            return Ok((NsReply::Outcome { outcome }, earliest));
+        }
         NsCall::Stats => {
             let stats = store.stats(p).await?;
             NsReply::Stats {
@@ -132,7 +150,8 @@ async fn dispatch<S: NamespaceStore>(
             .await?;
             NsReply::page(page)
         }
-    })
+    };
+    Ok((reply, None))
 }
 
 /// Most entries one scan or export page returns, whatever the caller asks.
@@ -194,10 +213,14 @@ pub use object::{DoConn, NsObject};
 mod object {
     use std::cell::OnceCell;
 
+    use mkit_server::Clock;
     use mkit_server::sql::{Capacity, SqlKvStore};
-    use worker::{Method, Request, Response, State};
+    use mkit_server::timers::{TickBudget, TimerRegistry, run_due};
+    use worker::{Method, Request, Response, ScheduledTime, State, Storage};
 
-    use super::{encode, failure, serve};
+    use super::{encode, failure, serve_reply};
+    use crate::alarm::{AlarmAction, alarm_after_put, alarm_after_tick};
+    use crate::clock::WorkerClock;
     use crate::do_sql::{DO_CAPACITY, DoSqlConn};
 
     /// The connection a partition's Durable Object runs its store on: the
@@ -213,11 +236,26 @@ mod object {
     /// the first request and kept for the object's lifetime. The
     /// `#[durable_object]` class itself stays in the deployment's cdylib
     /// (M0-17) and holds one of these.
-    #[derive(Debug)]
     pub struct NsObject {
         conn: DoConn,
         capacity: Capacity,
         store: OnceCell<SqlKvStore<DoConn>>,
+        storage: Storage,
+        clock: WorkerClock,
+        registry: TimerRegistry<SqlKvStore<DoConn>>,
+    }
+
+    impl core::fmt::Debug for NsObject {
+        fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            formatter
+                .debug_struct("NsObject")
+                .field("conn", &self.conn)
+                .field("capacity", &self.capacity)
+                .field("store", &self.store)
+                .field("storage", &self.storage)
+                .field("clock", &self.clock)
+                .finish_non_exhaustive()
+        }
     }
 
     impl NsObject {
@@ -232,6 +270,9 @@ mod object {
                 conn,
                 capacity: DO_CAPACITY,
                 store: OnceCell::new(),
+                storage: state.storage(),
+                clock: WorkerClock,
+                registry: TimerRegistry::new(),
             };
             (object, state)
         }
@@ -241,6 +282,13 @@ mod object {
         #[must_use]
         pub fn with_capacity(mut self, capacity: Capacity) -> Self {
             self.capacity = capacity;
+            self
+        }
+
+        /// Install the handlers built by the deployment adapter at startup.
+        #[must_use]
+        pub fn with_registry(mut self, registry: TimerRegistry<SqlKvStore<DoConn>>) -> Self {
+            self.registry = registry;
             self
         }
 
@@ -269,7 +317,13 @@ mod object {
                     if req.path() == "/stats" {
                         store.clear_stats_cache();
                     }
-                    serve(store, &body).await
+                    let (reply, earliest) = serve_reply(store, &body).await;
+                    if let Some(earliest) = earliest
+                        && let Err(error) = self.lower_alarm(earliest).await
+                    {
+                        crate::log_failure(&format!("timer alarm update failed: {error}"));
+                    }
+                    encode(&reply)
                 }
                 Err(e) => encode(&failure(&e)),
             };
@@ -279,6 +333,64 @@ mod object {
                 .set("Content-Type", "application/json")?;
             Ok(response)
         }
+
+        fn now_ms(&self) -> u64 {
+            u64::try_from(self.clock.now_ms()).unwrap_or(u64::MAX)
+        }
+
+        async fn set_alarm(&self, timestamp: i64) -> worker::Result<()> {
+            // workers-rs interprets an i64 as a relative offset. A Date
+            // explicitly supplies the absolute timestamp chosen by the core.
+            #[allow(clippy::cast_precision_loss)]
+            let date = worker::js_sys::Date::new(&worker::wasm_bindgen::JsValue::from_f64(
+                timestamp as f64,
+            ));
+            self.storage.set_alarm(ScheduledTime::new(date)).await
+        }
+
+        async fn lower_alarm(&self, earliest: u64) -> worker::Result<()> {
+            let current = self.storage.get_alarm().await?;
+            if let Some(next) = alarm_after_put(current, earliest, self.now_ms()) {
+                self.set_alarm(next).await?;
+            }
+            Ok(())
+        }
+
+        /// Fire due timers and multiplex all partition heads onto one alarm.
+        pub async fn alarm(&self) -> worker::Result<Response> {
+            let store = self.store().map_err(|error| alarm_error(&error))?;
+            let heads = store.timer_heads().map_err(|error| alarm_error(&error))?;
+            let now = self.now_ms();
+            let mut next_wake = None;
+            for (partition, _) in heads {
+                let report = run_due(
+                    store,
+                    &partition,
+                    &self.registry,
+                    &self.clock,
+                    now,
+                    &TickBudget::default(),
+                )
+                .await
+                .map_err(|error| alarm_error(&error))?;
+                if let Some(next) = report.next_wake_ms {
+                    next_wake = Some(next_wake.map_or(next, |current: u64| current.min(next)));
+                }
+            }
+            let result = match alarm_after_tick(next_wake, now) {
+                AlarmAction::Set(next) => self.set_alarm(next).await,
+                AlarmAction::Delete => self.storage.delete_alarm().await,
+            };
+            if let Err(error) = result {
+                crate::log_failure(&format!("timer alarm update failed: {error}"));
+            }
+            Response::ok("timers processed")
+        }
+    }
+
+    fn alarm_error(error: &mkit_server::StoreError) -> worker::Error {
+        let _ = failure(error);
+        worker::Error::RustError(error.to_string())
     }
 }
 
@@ -297,6 +409,41 @@ mod tests {
 
     fn reply(store: &MemoryKv, call: NsCall) -> NsReply {
         serde_json::from_str(&block_on(serve(store, &request(call)))).unwrap()
+    }
+
+    #[test]
+    fn alarm_hint_is_returned_only_for_committed_timer_puts() {
+        let store = MemoryKv::default();
+        let timer = mkit_server::store::keys::timer(500, 1, b"timer");
+        let apply = |batch| {
+            block_on(serve_reply(
+                &store,
+                &request(NsCall::Apply {
+                    batch: WireBatch::from(batch),
+                }),
+            ))
+        };
+        let batch = Batch::new()
+            .require(Precondition::Absent(timer.clone()))
+            .put(timer.clone(), Value::new(Vec::new()));
+        let (reply, earliest) = apply(batch.clone());
+        assert_eq!(
+            reply,
+            NsReply::Outcome {
+                outcome: WireOutcome::Committed
+            }
+        );
+        assert_eq!(earliest, Some(500));
+        let (reply, earliest) = apply(batch);
+        assert!(matches!(
+            reply,
+            NsReply::Outcome {
+                outcome: WireOutcome::PreconditionFailed { .. }
+            }
+        ));
+        assert_eq!(earliest, None);
+        let (_, earliest) = apply(Batch::new().delete(timer));
+        assert_eq!(earliest, None);
     }
 
     #[test]

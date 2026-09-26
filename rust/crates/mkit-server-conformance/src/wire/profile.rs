@@ -112,6 +112,8 @@ pub enum Feature {
     /// The server honors the `test-faults` request directives and serves
     /// `GET /__mkit_test/stats`.
     TestFaults,
+    /// The server fires due timers on its own clock (a driver runs).
+    Timers,
     /// The server serves `grpc.health.v1.Health`. No mkit spec requires
     /// it, so a profile declares it.
     Health,
@@ -143,13 +145,14 @@ pub enum Feature {
     Admin,
 }
 
-const FEATURE_NAMES: [(Feature, &str); 19] = [
+const FEATURE_NAMES: [(Feature, &str); 20] = [
     (Feature::Bearer, "bearer"),
     (Feature::AuthV2, "auth-v2"),
     (Feature::AtomicAdvance, "atomic-advance"),
     (Feature::Replay, "replay"),
     (Feature::Quota, "quota"),
     (Feature::TestFaults, "test-faults"),
+    (Feature::Timers, "timers"),
     (Feature::Health, "health"),
     (Feature::StrictGzipAuth, "strict-gzip-auth"),
     (Feature::MultiRepo, "multi-repo"),

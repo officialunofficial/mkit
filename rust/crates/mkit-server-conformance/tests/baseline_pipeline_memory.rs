@@ -310,6 +310,8 @@ async fn serve_test_faults(mutant: Mutant) -> WireTarget {
 async fn pipeline_auth_v2_test_faults() {
     let target = serve_test_faults(Mutant::None).await;
     for case in [
+        "timers.directive_fires_due",
+        "timers.redelivery_is_idempotent",
         "replay.expired_retry_rejected",
         "growth.replay_and_quota_pruned",
     ] {

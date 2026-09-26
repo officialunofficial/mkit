@@ -156,7 +156,7 @@ features="health,strict-gzip-auth"
 build_args=(--dev)
 vars=(--var "AUTH_AUDIENCE:${ORIGIN}" --var "AUTH_REPOSITORY:${REPOSITORY}")
 if [ "${test_faults}" -eq 1 ]; then
-    features="${features},test-faults"
+    features="${features},test-faults,timers"
     build_args+=(--features test-faults)
 fi
 

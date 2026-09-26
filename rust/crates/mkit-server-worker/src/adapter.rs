@@ -689,7 +689,13 @@ mod glue {
             worker::console_error!("{e}; using the Workers Free cap");
             free
         });
-        NsObject::new(state).0.with_capacity(capacity)
+        let registry = mkit_server::timers::TimerRegistry::new();
+        #[cfg(feature = "test-faults")]
+        let registry = registry.register(mkit_server::timers::test_kind::TestTimer);
+        NsObject::new(state)
+            .0
+            .with_capacity(capacity)
+            .with_registry(registry)
     }
 
     #[cfg(feature = "test-faults")]
@@ -845,6 +851,7 @@ mod tests {
         let directives = |fault: &str| TestDirectives {
             fault: Some(fault.to_owned()),
             clock_skew_ms: 0,
+            ..TestDirectives::default()
         };
         let armed = Arc::new(AtomicUsize::new(0));
         let counter = armed.clone();

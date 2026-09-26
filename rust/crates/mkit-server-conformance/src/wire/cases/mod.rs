@@ -34,6 +34,7 @@ mod packs;
 mod quota;
 mod refs;
 mod replay;
+mod timers;
 mod upload;
 
 /// Why a case did not pass.
@@ -150,6 +151,9 @@ macro_rules! cases {
 }
 
 cases! {
+    "timers.directive_fires_due" => timers::directive_fires_due, M0, [TestFaults], [];
+    "timers.fire_on_schedule" => timers::fire_on_schedule, M0, [TestFaults, Timers], [];
+    "timers.redelivery_is_idempotent" => timers::redelivery_is_idempotent, M0, [TestFaults], [];
     "refs.read_missing" => refs::read_missing, M0, [], [];
     "refs.update_any_then_read" => refs::update_any_then_read, M0, [], [];
     "refs.update_missing_conflict_failed_precondition" => refs::update_missing_conflict, M0, [], [];

@@ -170,6 +170,9 @@ async fn binary_fs_sqlite_auth_v2() {
         true,
     );
     profile.features.insert(Feature::StrictGzipAuth);
+    profile.features.insert(Feature::Timers);
+    #[cfg(feature = "test-faults")]
+    profile.features.insert(Feature::TestFaults);
     check(&origin, profile).await;
     assert!(server.stop().success());
 }
@@ -221,6 +224,9 @@ async fn binary_s3_sqlite_auth_v2() {
         true,
     );
     profile.features.insert(Feature::StrictGzipAuth);
+    profile.features.insert(Feature::Timers);
+    #[cfg(feature = "test-faults")]
+    profile.features.insert(Feature::TestFaults);
     check(&origin, profile).await;
     assert!(server.stop().success());
     assert!(!fake.keys(DEFAULT_BUCKET).is_empty());

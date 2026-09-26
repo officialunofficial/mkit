@@ -60,7 +60,8 @@ pub use auth::{AuthMode, Authenticated, RequestMeta};
 pub use download::{DownloadChunk, DownloadStream};
 #[cfg(feature = "test-faults")]
 pub use faults::{
-    CLOCK_SKEW_HEADER, FAULT_HEADER, FailOnce, FaultHooks, FaultPoint, TestDirectives,
+    CLOCK_SKEW_HEADER, FAULT_HEADER, FailOnce, FaultHooks, FaultPoint, RUN_TIMERS_HEADER,
+    TIMER_MS_HEADER, TestDirectives,
 };
 pub use hooks::{
     Admission, AdmissionDecision, AdmissionInput, Authorizer, Challenge, DefaultAdmission, HookSet,
@@ -440,6 +441,16 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             }
             let op = self.identify(a, kind)?;
             self.authorize(&op).await?;
+            #[cfg(feature = "test-faults")]
+            faults::run_timers(
+                a.test_directives(),
+                &self.meta,
+                self.shards.as_ref(),
+                &op.repo,
+                self.clock.as_ref(),
+                ms(self.clock.now_ms().saturating_add(a.business_skew_ms)),
+            )
+            .await?;
             let p = self.shards.ref_index(&op.repo);
             let scan = refs::list_scan_prefix(prefix);
             let (mut out, mut after) = (Vec::new(), None);
@@ -956,7 +967,27 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             }
             tracing::debug!(stage = "apply", replans);
             match self.meta.apply(p, batch).await {
-                Ok(BatchOutcome::Committed) => return Ok(on_commit),
+                Ok(BatchOutcome::Committed) => {
+                    #[cfg(feature = "test-faults")]
+                    if let OpKind::UpdateRef(upd) = &op.kind
+                        && matches!(
+                            on_commit,
+                            StoredResult::UpdateRef(UpdateRefResult::Committed)
+                        )
+                    {
+                        let timer_partition = self.shards.ref_shard(&op.repo, &upd.name);
+                        faults::schedule_timer(
+                            a.test_directives(),
+                            &self.meta,
+                            &timer_partition,
+                            &op.repo.name,
+                            &upd.name,
+                            ms(clock.business_now_ms),
+                        )
+                        .await?;
+                    }
+                    return Ok(on_commit);
+                }
                 Ok(BatchOutcome::DeadlinePassed { backend_now }) => {
                     tracing::info!(
                         backend_now,

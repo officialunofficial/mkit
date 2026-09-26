@@ -10,8 +10,8 @@ use std::sync::{Arc, Barrier, Mutex, PoisonError};
 use futures::StreamExt as _;
 use futures::executor::block_on;
 use mkit_server::sql::{
-    Capacity, DEFAULT_PAGE_SIZE, MAX_BOUND_PARAMS, SqlConn, SqlError, SqlKvStore, SqlValue, TxFn,
-    batch_growth_bytes, reserve_floor, schema,
+    Capacity, DEFAULT_PAGE_SIZE, MAX_BOUND_PARAMS, SqlConn, SqlError, SqlKvStore, SqlValue,
+    TIMER_HEADS, TxFn, batch_growth_bytes, reserve_floor, schema,
 };
 use mkit_server::store::{
     EXPORT_END, ExportReader, ImportMode, codec, encode_export_header, encode_export_record,
@@ -38,6 +38,86 @@ fn v(s: &str) -> Value {
 
 fn file(dir: &Path) -> RusqliteConn {
     RusqliteConn::open(dir.join("meta.sqlite3")).unwrap()
+}
+
+#[test]
+fn timer_index_migrates_v1_and_reopening_is_idempotent() {
+    let conn = RusqliteConn::open_in_memory().unwrap();
+    conn.exec(schema::BOOTSTRAP, &[]).unwrap();
+    for statement in schema::MIGRATIONS[0].statements {
+        conn.exec(statement, &[]).unwrap();
+    }
+    conn.exec("INSERT INTO mkit_schema (id, version) VALUES (1, 1)", &[])
+        .unwrap();
+    assert!(
+        conn.query(
+            "SELECT name FROM sqlite_master WHERE name = 'kv_timers'",
+            &[]
+        )
+        .unwrap()
+        .is_empty()
+    );
+    let store = SqlKvStore::open(conn.clone()).unwrap();
+    assert_eq!(store.layout_version(), 2);
+    assert_eq!(
+        conn.query(
+            "SELECT name FROM sqlite_master WHERE name = 'kv_timers'",
+            &[]
+        )
+        .unwrap(),
+        vec![vec![SqlValue::Text("kv_timers".to_owned())]]
+    );
+    let reopened = SqlKvStore::open(conn.clone()).unwrap();
+    assert_eq!(reopened.layout_version(), 2);
+    assert_eq!(
+        conn.query("SELECT version FROM mkit_schema WHERE id = 1", &[])
+            .unwrap(),
+        vec![vec![SqlValue::Integer(2)]]
+    );
+}
+
+#[test]
+fn timer_heads_returns_minimum_per_partition() {
+    let store = SqlKvStore::open(RusqliteConn::open_in_memory().unwrap()).unwrap();
+    assert!(store.timer_heads().unwrap().is_empty());
+    for (partition, due) in [(ns("a"), 90), (ns("b"), 20), (ns("a"), 10)] {
+        apply(
+            &store,
+            &partition,
+            Batch::new().put(keys::timer(due, 1, b"ref"), v("timer")),
+        )
+        .unwrap();
+    }
+    apply(
+        &store,
+        &ns("c"),
+        Batch::new().put(k("not-a-timer"), v("ref")),
+    )
+    .unwrap();
+    let mut heads = store.timer_heads().unwrap();
+    heads.sort();
+    assert_eq!(heads, vec![(ns("a"), 10), (ns("b"), 20)]);
+}
+
+#[test]
+fn timer_heads_query_plan_uses_partial_index() {
+    let conn = RusqliteConn::open_in_memory().unwrap();
+    let store = SqlKvStore::open(conn.clone()).unwrap();
+    apply(
+        &store,
+        &ns("a"),
+        Batch::new().put(keys::timer(10, 1, b"ref"), v("timer")),
+    )
+    .unwrap();
+    let plan = conn
+        .query(&format!("EXPLAIN QUERY PLAN {TIMER_HEADS}"), &[])
+        .unwrap();
+    assert!(
+        plan.iter()
+            .flatten()
+            .any(|value| matches!(value, SqlValue::Text(detail) if detail.contains("kv_timers"))),
+        "timer heads index unused: {plan:?}"
+    );
 }
 
 fn apply<C: SqlConn>(

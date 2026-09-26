@@ -23,6 +23,11 @@ pub const FAULT_HEADER: &str = "x-mkit-test-fault";
 /// for this request only.
 pub const CLOCK_SKEW_HEADER: &str = "x-mkit-test-clock-skew-ms";
 
+/// Delay before the committed `UpdateRef`'s test timer, in milliseconds.
+pub const TIMER_MS_HEADER: &str = "x-mkit-test-timer-ms";
+/// Ref whose shard is ticked before `ListRefs`.
+pub const RUN_TIMERS_HEADER: &str = "x-mkit-test-run-timers";
+
 /// Where the pipeline calls [`FaultHooks::at`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FaultPoint {
@@ -90,6 +95,10 @@ pub struct TestDirectives {
     pub fault: Option<String>,
     /// Business-clock skew, ms.
     pub clock_skew_ms: i64,
+    /// Test timer delay on a committed `UpdateRef`.
+    pub timer_ms: Option<u64>,
+    /// Ref shard to tick before `ListRefs`.
+    pub run_timers: Option<String>,
 }
 
 impl TestDirectives {
@@ -105,7 +114,25 @@ impl TestDirectives {
             })?,
             None => 0,
         };
+        let timer_ms = get(TIMER_MS_HEADER)
+            .map(|v| {
+                v.trim().parse::<u64>().map_err(|_| {
+                    ServerError::invalid_argument("x-mkit-test-timer-ms is not an unsigned integer")
+                })
+            })
+            .transpose()?;
+        let run_timers = get(RUN_TIMERS_HEADER);
+        if run_timers
+            .as_ref()
+            .is_some_and(|name| !crate::refs::validate_ref_name(name))
+        {
+            return Err(ServerError::invalid_argument(
+                "x-mkit-test-run-timers is not a ref name",
+            ));
+        }
         Ok(Self {
+            timer_ms,
+            run_timers,
             fault: get(FAULT_HEADER).filter(|f| !f.is_empty()),
             clock_skew_ms,
         })
@@ -155,5 +182,84 @@ impl FaultHooks for FailOnce {
             return Err(ServerError::internal("injected test fault", token));
         }
         Ok(())
+    }
+}
+
+/// Schedule only after the ref batch really committed (never on replay/conflict).
+pub(crate) async fn schedule_timer<S: crate::NamespaceStore>(
+    directives: &TestDirectives,
+    store: &S,
+    p: &crate::Partition,
+    repo: &crate::RepoName,
+    name: &str,
+    business_now: u64,
+) -> Result<(), ServerError> {
+    use crate::store::keys;
+    use crate::timers::registry::kinds;
+    use crate::{Batch, BatchOutcome, Value};
+    let Some(delay) = directives.timer_ms else {
+        return Ok(());
+    };
+    let reference = [repo.as_str().as_bytes(), b"\0", name.as_bytes()].concat();
+    let batch = Batch::new().put(
+        keys::timer(
+            business_now.saturating_add(delay),
+            kinds::TEST.get(),
+            &reference,
+        ),
+        Value::default(),
+    );
+    match store.apply(p, batch).await {
+        Ok(BatchOutcome::Committed) => Ok(()),
+        outcome => Err(ServerError::internal(
+            "test timer scheduling failed",
+            format!("{outcome:?}"),
+        )),
+    }
+}
+/// Tick the requested ref shard before the ordinary listing.
+pub(crate) async fn run_timers<S: crate::NamespaceStore>(
+    directives: &TestDirectives,
+    store: &S,
+    shards: &dyn super::ShardMap,
+    repo: &crate::RepoId,
+    clock: &dyn crate::Clock,
+    business_now: u64,
+) -> Result<(), ServerError> {
+    use crate::timers::{TickBudget, TimerRegistry, run_due, test_kind::TestTimer};
+    if let Some(name) = &directives.run_timers {
+        run_due(
+            store,
+            &shards.ref_shard(repo, name),
+            &TimerRegistry::new().register(TestTimer),
+            clock,
+            business_now,
+            &TickBudget::default(),
+        )
+        .await
+        .map_err(|e| ServerError::internal("test timer tick failed", e))?;
+    }
+    Ok(())
+}
+#[cfg(test)]
+mod timer_tests {
+    use super::*;
+    #[test]
+    fn timer_directives_validate_values() {
+        for (header, value) in [
+            (TIMER_MS_HEADER, "-1"),
+            (TIMER_MS_HEADER, "18446744073709551616"),
+            (RUN_TIMERS_HEADER, "bad ref"),
+        ] {
+            assert!(TestDirectives::from_headers(|h| (h == header).then(|| value.into())).is_err());
+        }
+        let d = TestDirectives::from_headers(|h| match h {
+            TIMER_MS_HEADER => Some("1000".into()),
+            RUN_TIMERS_HEADER => Some("refs/heads/x".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(d.timer_ms, Some(1000));
+        assert_eq!(d.run_timers.as_deref(), Some("refs/heads/x"));
     }
 }

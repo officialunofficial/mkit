@@ -18,6 +18,7 @@ use tokio::net::TcpListener;
 
 use crate::config::{BlobChoice, ConfigError, MetaChoice, ServeConfig};
 use crate::telemetry::MetricsBridge;
+use crate::timers::{TimerDriver, TimerNotifying};
 use crate::{Blocking, RusqliteConn, Shutdown, build_router, exit, serve};
 
 /// The lock every live server holds **shared** under `<root>/.mkit`, so
@@ -58,6 +59,8 @@ pub struct Services {
     /// `ServeConfig::enc`.
     #[cfg(feature = "enc")]
     pub enc: Option<crate::enc::EncService>,
+    /// Prepared `SQLite` timer driver, started by [`serve_services`].
+    pub timers: Option<TimerDriver>,
 }
 
 /// A server ready to bind: its services, and the root's locks.
@@ -68,6 +71,8 @@ pub struct Opened {
     /// The enc listener's service, when configured.
     #[cfg(feature = "enc")]
     pub enc: Option<crate::enc::EncService>,
+    /// Prepared timer driver; absent for filesystem metadata.
+    pub timers: Option<TimerDriver>,
     locks: ServerLocks,
 }
 
@@ -81,6 +86,7 @@ impl Opened {
             router: self.router,
             #[cfg(feature = "enc")]
             enc: self.enc,
+            timers: self.timers,
         };
         (services, self.locks)
     }
@@ -399,6 +405,7 @@ where
         router: build_router(Arc::new(pipeline), &cfg.router),
         #[cfg(feature = "enc")]
         enc,
+        timers: None,
     })
 }
 
@@ -463,6 +470,7 @@ pub fn open(cfg: &ServeConfig) -> Result<Opened, ConfigError> {
         router: services.router,
         #[cfg(feature = "enc")]
         enc: services.enc,
+        timers: services.timers,
         locks,
     })
 }
@@ -485,7 +493,14 @@ where
             let meta = SqlKvStore::open_with_capacity(conn.clone(), *capacity)
                 .map_err(|e| config_error("--meta sqlite", e))?;
             bind_database(&conn, &root_id, path)?;
-            build_services(blobs, Blocking::new(meta), cfg)
+            let meta = Blocking::new(TimerNotifying::new(meta));
+            let registry = mkit_server::timers::TimerRegistry::new();
+            #[cfg(feature = "test-faults")]
+            let registry = registry.register(mkit_server::timers::test_kind::TestTimer);
+            let driver = TimerDriver::new(meta.clone(), registry, Arc::new(SystemClock));
+            let mut services = build_services(blobs, meta, cfg)?;
+            services.timers = Some(driver);
+            Ok(services)
         }
     }
 }
@@ -556,6 +571,15 @@ pub async fn serve_services(
         (Some(opts), Some(service)) => Some((bind(opts.listen, "--listen-enc").await?, service)),
         _ => None,
     };
+    let timer_task = match services.timers {
+        Some(driver) => Some(
+            driver
+                .start(shutdown.clone())
+                .await
+                .map_err(|e| config_error("timer directory", e))?,
+        ),
+        None => None,
+    };
     let root = cfg.repo_root.display();
     let stop_on_error = |result: Result<(), ConfigError>| {
         if result.is_err() {
@@ -598,6 +622,10 @@ pub async fn serve_services(
     let (http_result, enc_result) = tokio::join!(async { stop_on_error(http_run.await) }, async {
         stop_on_error(enc_run.await)
     },);
+    shutdown.trigger();
+    if let Some(task) = timer_task {
+        task.await.map_err(|e| config_error("timer driver", e))?;
+    }
     tracing::info!("stopped");
     http_result.and(enc_result)
 }

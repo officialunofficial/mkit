@@ -111,7 +111,11 @@ async fn wire_suite_s3_sqlite_auth_v2() {
             skipped == "advance.nonatomic_packmap_first"
                 || matches!(
                     skipped,
-                    "replay.expired_retry_rejected" | "growth.replay_and_quota_pruned"
+                    "timers.directive_fires_due"
+                        | "timers.fire_on_schedule"
+                        | "timers.redelivery_is_idempotent"
+                        | "replay.expired_retry_rejected"
+                        | "growth.replay_and_quota_pruned"
                 )
                 || skipped.starts_with("auth.bearer"),
             "unexpected skip {skipped}"
