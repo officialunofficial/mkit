@@ -74,7 +74,7 @@
 //! | `refs.update_unspecified_invalid_argument` | | unset or `UNSPECIFIED` expectation (§3) |
 //! | `refs.update_any_with_expected_id_invalid_argument` | | `ANY`/`MISSING` with an `expected_id` |
 //! | `refs.invalid_ref_name_invalid_argument` | | SPEC-REFS §3 names on `ReadRef`, `UpdateRef`, `AdvanceRefs` |
-//! | `refs.name_over_512_bytes_invalid_argument` | | a 512-byte name works, 513 bytes is `invalid_argument` (SPEC-REFS §3, mkit#1120) |
+//! | `refs.name_over_512_bytes_invalid_argument` | | a 512-byte name works, 513 bytes is `invalid_argument` (SPEC-REFS v2 §3) |
 //! | `refs.new_id_wrong_length_invalid_argument` | | ids that are not 32 bytes |
 //! | `refs.list_prefix_stripped` | | `ListRefs` strips the prefix and sorts (SPEC-REFS §4, §4.1) |
 //! | `refs.list_prefix_component_boundary` | | a prefix matches at `/` boundaries only, with or without the trailing `/` (SPEC-REFS §4) |

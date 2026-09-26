@@ -42,12 +42,7 @@ const QUOTA: ServerQuota = ServerQuota {
 /// Cases the pipeline fails today, each with the reason: fixed in flight,
 /// never an accepted behavior. An entry that starts passing fails the
 /// baseline until it is removed.
-const PIPELINE_DIVERGENCES: &[(&str, &str)] = &[(
-    "refs.list_prefix_component_boundary",
-    "ListRefs matches the prefix as a bare string (`.../feat` lists `.../featx` as `x` \
-     and `.../feat/x` as `/x`), against SPEC-REFS §4's `/` boundary; the fix is in \
-     flight (mkit#1120). The assertion is the spec's.",
-)];
+const PIPELINE_DIVERGENCES: &[(&str, &str)] = &[];
 
 /// A replay-expiry or quota-window index key.
 fn is_index(key: &Key) -> bool {

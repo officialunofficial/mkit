@@ -150,7 +150,7 @@ fn name_of_len(ctx: &Ctx, len: usize) -> String {
     name
 }
 
-/// SPEC-REFS §3 caps a ref name at 512 bytes (mkit#1120).
+/// SPEC-REFS v2 §3 caps a ref name at 512 bytes.
 pub(super) async fn name_over_512_bytes(ctx: Ctx) -> CaseResult {
     let at_cap = name_of_len(&ctx, 512);
     let over = name_of_len(&ctx, 513);

@@ -18,19 +18,13 @@ use mkit_transport_file::FileTransport;
 
 /// Cases the legacy server fails, each with the reason. The pipeline passes
 /// all of them; `mkit serve --http` moves onto it in WP-M0-15.
-const LEGACY_DIVERGENCES: &[(&str, &str)] = &[
-    (
-        "refs.invalid_ref_name_invalid_argument",
-        "AdvanceRefs with an invalid head name is `invalid_argument`, but only after the \
-         packmap was written: the `Transport::advance_refs` default writes the packmap, then \
-         validates and writes the head. The pipeline validates both names before any write.",
-    ),
-    (
-        "refs.name_over_512_bytes_invalid_argument",
-        "FileTransport has no ref-name length cap (only SPEC-REFS §3's grammar); the \
-         512-byte cap arrives with the pipeline (mkit_server::refs::MAX_REF_NAME_BYTES).",
-    ),
-];
+const LEGACY_DIVERGENCES: &[(&str, &str)] = &[(
+    "refs.invalid_ref_name_invalid_argument",
+    "AdvanceRefs with an invalid head name is `invalid_argument`, but only after the packmap \
+     was written: `mkit serve --http` runs the `Transport::advance_refs` default, which writes \
+     the packmap, then validates and writes the head. The pipeline validates both names before \
+     any write; M0-15 moves `mkit serve --http` onto it.",
+)];
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn legacy_mkit_serve_http() {
