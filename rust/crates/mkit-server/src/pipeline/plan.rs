@@ -21,36 +21,55 @@ use crate::replay::{ReplayRecord, ReplayState, StoredResult, UpdateRefResult};
 use crate::repo::RepoName;
 use crate::storage_error::{StorageOp, describe_and_map};
 use crate::store::keys::{self, LAYOUT_VERSION, ParsedKey};
-use crate::store::{Batch, Key, Precondition, Value, Write, codec};
+use crate::store::{Batch, Key, MAX_BATCH_OPS, Precondition, Value, Write, codec};
 
 /// Most re-plans after a guard failed because another writer changed a
 /// value the plan read; then the write is a retryable `aborted`.
-pub const MAX_REPLAN: u32 = 8;
+pub(crate) const MAX_REPLAN: u32 = 8;
 
 /// Most expired replay records, and separately most stale quota windows,
-/// one write prunes (each an index key plus its row: at most 16 keys).
-pub const PRUNE_LIMIT: u32 = 8;
+/// one sampled write prunes (each an index key plus its row). One write in
+/// [`PRUNE_SAMPLE`] prunes, so this must be at least `PRUNE_SAMPLE` for
+/// growth to stay bounded; the batch op cap trims it further
+/// ([`MAX_BATCH_OPS`]). WP-1.24's alarm sweep replaces this.
+pub(crate) const PRUNE_LIMIT: u32 = 16;
+
+/// One write in this many runs the prune scans.
+pub(crate) const PRUNE_SAMPLE: u8 = 8;
+
+const _: () = assert!(PRUNE_LIMIT >= PRUNE_SAMPLE as u32);
+
+/// Whether this write runs the prune scans: deterministically one in
+/// [`PRUNE_SAMPLE`], by replay scope for a signed write, keeping the scans
+/// off the hot path.
+#[must_use]
+pub(crate) fn prune_sampled(req: &WriteRequest<'_>, plan_time_ms: u64) -> bool {
+    match req.replay {
+        Some(replay) => replay.scope[0].is_multiple_of(PRUNE_SAMPLE),
+        None => !req.charges.is_empty() && plan_time_ms.is_multiple_of(u64::from(PRUNE_SAMPLE)),
+    }
+}
 
 /// The clocks one planning attempt uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PlanClock {
+pub(crate) struct PlanClock {
     /// Unix ms from the injected clock, never shifted by a test clock-skew
     /// directive. Only the commit deadline uses it.
-    pub plan_time_ms: u64,
+    pub(crate) plan_time_ms: u64,
     /// Business time, Unix ms: quota windows and replay pruning.
-    pub business_now_ms: i64,
+    pub(crate) business_now_ms: i64,
     /// `PipelineConfig::max_apply_window`, in ms.
-    pub max_apply_window_ms: u64,
+    pub(crate) max_apply_window_ms: u64,
     /// An extra bound on the deadline: WP-1.25 passes
     /// `lease_expires - margin` here without touching the planners.
-    pub deadline_cap: Option<u64>,
+    pub(crate) deadline_cap: Option<u64>,
 }
 
 impl PlanClock {
     /// `min(plan_time + max_apply_window, deadline_cap)`: the batch's
     /// `NotAfter`, which the backend checks on its own clock.
     #[must_use]
-    pub fn deadline(&self) -> u64 {
+    pub(crate) fn deadline(&self) -> u64 {
         let window = self.plan_time_ms.saturating_add(self.max_apply_window_ms);
         self.deadline_cap.map_or(window, |cap| cap.min(window))
     }
@@ -58,7 +77,8 @@ impl PlanClock {
 
 /// The ref write being planned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WriteKind {
+#[non_exhaustive]
+pub(crate) enum WriteKind {
     /// One conditional ref write.
     UpdateRef,
     /// Packmap and head, in one batch.
@@ -67,40 +87,41 @@ pub enum WriteKind {
 
 /// The replay record a signed write commits with its effects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ReplayGuard {
+pub(crate) struct ReplayGuard {
     /// The auth v2 replay scope.
-    pub scope: Hash,
+    pub(crate) scope: Hash,
     /// The operation fingerprint.
-    pub fingerprint: Hash,
+    pub(crate) fingerprint: Hash,
     /// Envelope expiry, Unix ms.
-    pub expires_at_ms: i64,
+    pub(crate) expires_at_ms: i64,
 }
 
 /// A write to plan.
 #[derive(Debug, Clone)]
-pub struct WriteRequest<'a> {
+#[non_exhaustive]
+pub(crate) struct WriteRequest<'a> {
     /// The repository whose refs are written.
-    pub repo: &'a RepoName,
+    pub(crate) repo: &'a RepoName,
     /// What the refs are.
-    pub kind: WriteKind,
+    pub(crate) kind: WriteKind,
     /// Ref writes in decision order: `[update]`, or `[packmap, head]`, so a
     /// packmap conflict takes precedence (`refstore.rs` parity).
-    pub refs: &'a [RefUpdate],
+    pub(crate) refs: &'a [RefUpdate],
     /// The replay record to commit, for signed writes.
-    pub replay: Option<ReplayGuard>,
+    pub(crate) replay: Option<ReplayGuard>,
     /// Quota charges from admission.
-    pub charges: &'a [QuotaCharge],
+    pub(crate) charges: &'a [QuotaCharge],
     /// The grant the write was authorized under (M2).
-    pub grant: Option<GrantRef>,
+    pub(crate) grant: Option<GrantRef>,
     /// Whether to guard the layout version key: false on stores that
     /// report an implicit layout version.
-    pub layout_version: bool,
+    pub(crate) layout_version: bool,
 }
 
 impl WriteRequest<'_> {
     /// Every key the planner reads, besides prune candidates.
     #[must_use]
-    pub fn read_keys(&self) -> Vec<Key> {
+    pub(crate) fn read_keys(&self) -> Vec<Key> {
         let mut out = Vec::new();
         if self.layout_version {
             out.push(keys::layout_version());
@@ -117,24 +138,30 @@ impl WriteRequest<'_> {
 /// What a planning attempt read: key values plus the prune candidates of
 /// `store::read::{expired_replay_keys, stale_quota_keys}`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Snapshot {
+pub(crate) struct Snapshot {
     values: BTreeMap<Key, Option<Value>>,
     /// `(index, record)` pairs of expired replay records.
-    pub expired_replays: Vec<(Key, Key)>,
+    pub(crate) expired_replays: Vec<(Key, Key)>,
     /// `(index, quota)` pairs of ended quota windows; their quota keys are
     /// read too.
-    pub stale_quotas: Vec<(Key, Key)>,
+    pub(crate) stale_quotas: Vec<(Key, Key)>,
 }
 
 impl Snapshot {
     /// Record that `key` held `value`.
-    pub fn insert(&mut self, key: Key, value: Option<Value>) {
+    pub(crate) fn insert(&mut self, key: Key, value: Option<Value>) {
         self.values.insert(key, value);
+    }
+
+    /// Whether `key` was read.
+    #[must_use]
+    pub(crate) fn contains(&self, key: &Key) -> bool {
+        self.values.contains_key(key)
     }
 
     /// What `key` held; a key never read counts as absent.
     #[must_use]
-    pub fn get(&self, key: &Key) -> Option<&Value> {
+    pub(crate) fn get(&self, key: &Key) -> Option<&Value> {
         debug_assert!(self.values.contains_key(key), "planner read an unread key");
         self.values.get(key).and_then(Option::as_ref)
     }
@@ -142,23 +169,28 @@ impl Snapshot {
 
 /// A planned batch and what it means.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Plan {
+pub(crate) struct Plan {
     /// The batch; its first precondition is always the `NotAfter`.
-    pub batch: Batch,
+    pub(crate) batch: Batch,
     /// The result once the batch commits.
-    pub on_commit: StoredResult,
+    pub(crate) on_commit: StoredResult,
     /// Index of the replay record's `Absent` guard.
-    pub replay_index: Option<usize>,
+    pub(crate) replay_index: Option<usize>,
     /// Index of the grant epoch guard.
-    pub epoch_index: Option<usize>,
+    pub(crate) epoch_index: Option<usize>,
     /// The prune deletes alone, retried when a full partition rejects the
     /// batch (delete-only batches never fail with `Full`).
-    pub prune: Option<Batch>,
+    pub(crate) prune: Option<Batch>,
+    /// Index of the first prune guard: a failure at or after it is only
+    /// the opportunistic prune losing a race, so the pipeline retries
+    /// without the prune.
+    pub(crate) prune_from: usize,
 }
 
 /// What [`plan_write`] decided.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Planned {
+#[non_exhaustive]
+pub(crate) enum Planned {
     /// Apply this batch.
     Apply(Plan),
     /// Nothing to write: an unsigned write that conflicts on the snapshot.
@@ -171,7 +203,7 @@ pub enum Planned {
 /// `resource_exhausted` when a quota charge is over budget (nothing is
 /// written), `permission_denied` when the grant epoch moved, and `internal`
 /// for an undecodable stored value or a newer layout version.
-pub fn plan_write(
+pub(crate) fn plan_write(
     req: &WriteRequest<'_>,
     snap: &Snapshot,
     clock: &PlanClock,
@@ -206,6 +238,11 @@ pub fn plan_write(
         plan_charge(charge, snap, clock.business_now_ms, &mut pre, &mut puts)?;
     }
 
+    // Quota IS charged on a CAS conflict, as in vcs-worker, where the
+    // charge commits in the same transaction as the replay row: a conflict
+    // still costs an operation and a ledger row, so the charge bounds
+    // ledger growth per signer. PRD §5.4's separate `Aborted` transaction
+    // is for M3 payment reservations, not this abuse quota.
     let (outcome, ref_puts) = decide_refs(req, snap, &mut pre)?;
     let conflict = outcome.is_some();
     let on_commit = outcome.unwrap_or(match req.kind {
@@ -237,10 +274,12 @@ pub fn plan_write(
         ));
     }
 
-    let prune = plan_prune(req, snap, &deadline)?;
+    let budget = MAX_BATCH_OPS.saturating_sub(pre.len() + puts.len());
+    let prune = plan_prune(req, snap, &deadline, budget)?;
     // Prune deletes go first: a later write to the same key wins.
     let mut writes = prune.as_ref().map(|b| b.writes.clone()).unwrap_or_default();
     writes.extend(puts);
+    let prune_from = pre.len();
     if let Some(prune) = &prune {
         pre.extend(prune.preconditions.iter().skip(1).cloned());
     }
@@ -253,6 +292,7 @@ pub fn plan_write(
         replay_index,
         epoch_index,
         prune,
+        prune_from,
     }))
 }
 
@@ -349,18 +389,27 @@ fn decide_refs(
 /// The opportunistic prune: every expired replay record, and every stale
 /// quota window not charged by this write (the charge rolls it over
 /// itself). A quota row is deleted only while it still holds the window
-/// its index names, guarded by `Equals`.
+/// its index names, guarded by `Equals`. At most `budget` operations, so
+/// the combined batch stays within [`MAX_BATCH_OPS`].
 fn plan_prune(
     req: &WriteRequest<'_>,
     snap: &Snapshot,
     deadline: &Precondition,
+    budget: usize,
 ) -> Result<Option<Batch>, ServerError> {
     let mut batch = Batch::new().require(deadline.clone());
+    let used = |b: &Batch| b.preconditions.len() - 1 + b.writes.len();
     for (index, record) in &snap.expired_replays {
+        if used(&batch) + 2 > budget {
+            break;
+        }
         batch = batch.delete(index.clone()).delete(record.clone());
     }
     let charged: Vec<Key> = req.charges.iter().map(|c| keys::quota(&c.scope)).collect();
     for (index, quota) in &snap.stale_quotas {
+        if used(&batch) + 3 > budget {
+            break;
+        }
         if charged.contains(quota) {
             continue;
         }

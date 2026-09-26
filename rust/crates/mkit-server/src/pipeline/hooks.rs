@@ -10,19 +10,22 @@ use core::future::Future;
 use mkit_core::protocol::PackKey;
 
 use crate::error::ServerError;
-use crate::op::Operation;
+use crate::op::{AuthzFacts, Operation};
 use crate::quota::{QuotaCharge, QuotaLimits, QuotaScope};
 use crate::rt::{MaybeSend, MaybeSync};
 use crate::store::BlobKey;
 
 /// Stage 2: may the principal do this? Runs before any quota or replay
-/// record is allocated; an error is returned as is.
+/// record is allocated; an error is returned as is. The facts it returns
+/// become `op.authz` before admission, so M2 can report the grant it
+/// matched (and its epoch, which `apply` then requires).
 pub trait Authorizer: MaybeSend + MaybeSync {
-    /// Allow `op`, or return the error to answer with.
+    /// Allow `op` with the facts established, or return the error to
+    /// answer with.
     fn authorize(
         &self,
         op: &Operation,
-    ) -> impl Future<Output = Result<(), ServerError>> + MaybeSend;
+    ) -> impl Future<Output = Result<AuthzFacts, ServerError>> + MaybeSend;
 }
 
 /// Stage 3 input: the full PRD §5.4 field set, present from M0
@@ -82,8 +85,11 @@ pub struct Challenge {
 /// What stage 3 decided. A challenge or a denial allocates nothing, and no
 /// code path stores either as a replay result.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum AdmissionDecision {
-    /// Proceed, applying `charges` in the write's batch.
+    /// Proceed, applying `charges` in the write's batch. Build it with
+    /// [`AdmissionDecision::allow`].
+    #[non_exhaustive]
     Allow {
         /// Quota charges the batch applies atomically with the write.
         charges: Vec<QuotaCharge>,
@@ -100,6 +106,26 @@ pub enum AdmissionDecision {
     },
     /// Refuse with this error.
     Deny(ServerError),
+}
+
+impl AdmissionDecision {
+    /// `Allow` with `charges` and no reservation.
+    #[must_use]
+    pub fn allow(charges: Vec<QuotaCharge>) -> Self {
+        Self::Allow {
+            charges,
+            reservation: None,
+        }
+    }
+
+    /// Set the reservation of an `Allow`; other decisions are unchanged.
+    #[must_use]
+    pub fn with_reservation(mut self, id: impl Into<String>) -> Self {
+        if let Self::Allow { reservation, .. } = &mut self {
+            *reservation = Some(id.into());
+        }
+        self
+    }
 }
 
 /// Stage 3: admission, e.g. an abuse quota or a payment.
@@ -234,8 +260,8 @@ where
 pub struct OpenAuthorizer;
 
 impl Authorizer for OpenAuthorizer {
-    async fn authorize(&self, _op: &Operation) -> Result<(), ServerError> {
-        Ok(())
+    async fn authorize(&self, _op: &Operation) -> Result<AuthzFacts, ServerError> {
+        Ok(AuthzFacts::default())
     }
 }
 
@@ -256,10 +282,7 @@ impl Admission for DefaultAdmission {
             }],
             _ => Vec::new(),
         };
-        Ok(AdmissionDecision::Allow {
-            charges,
-            reservation: None,
-        })
+        Ok(AdmissionDecision::allow(charges))
     }
 }
 

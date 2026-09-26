@@ -6,6 +6,7 @@ use mkit_core::protocol::{AdvanceOutcome, PackKey};
 use mkit_core::refs::RefWriteCondition::{self, Any, Match, Missing};
 use proptest::prelude::*;
 
+use super::plan::*;
 use super::*;
 use crate::error::Code;
 use crate::op::{RefUpdate, VerifiedAuth};
@@ -362,4 +363,147 @@ fn single_partition_maps_everything_to_the_namespace() {
     assert_eq!(shards.coordinator(&repo.namespace), expected);
     assert_eq!(shards.ref_index(&repo), expected);
     assert_eq!(shards.membership(&repo, &PackKey::new(A)), expected);
+}
+
+#[test]
+fn plan_signed_conflict_still_charges_quota() {
+    let name = repo_name();
+    let refs = [upd(HEAD, Missing, C)];
+    let charges = [charge(5)];
+    let req = WriteRequest {
+        repo: &name,
+        kind: WriteKind::UpdateRef,
+        refs: &refs,
+        replay: Some(replay()),
+        charges: &charges,
+        grant: None,
+        layout_version: false,
+    };
+    let values = [ref_value(HEAD, A)];
+    let clock = clock_at(ms(T0), None);
+    let Planned::Apply(plan) = plan_write(&req, &snapshot(&req, &values), &clock).unwrap() else {
+        panic!("a signed conflict is stored");
+    };
+    let conflict = UpdateRefResult::Conflict { current: Some(A) };
+    assert_eq!(plan.on_commit, StoredResult::UpdateRef(conflict));
+    let quota = keys::quota(&charges[0].scope);
+    let after = plan.batch.writes.iter().find_map(|w| match w {
+        Write::Put(k, v) if *k == quota => Some(codec::decode_quota_state(v).unwrap()),
+        _ => None,
+    });
+    let one = QuotaState {
+        window_start: T0,
+        ops: 1,
+        bytes: 0,
+    };
+    assert_eq!(after, Some(one));
+    assert!(
+        plan.batch
+            .preconditions
+            .contains(&Precondition::Absent(quota))
+    );
+    let ref_key = keys::ref_key(&name, HEAD);
+    let moved = plan
+        .batch
+        .writes
+        .iter()
+        .any(|w| matches!(w, Write::Put(k, _) if *k == ref_key));
+    assert!(!moved, "the ref stays");
+}
+
+#[test]
+fn plan_prune_fits_the_batch_op_cap() {
+    let name = repo_name();
+    let refs = [upd(PACKMAP, Any, C), upd(HEAD, Any, C)];
+    let charges: Vec<_> = (0u8..4)
+        .map(|i| QuotaCharge {
+            scope: QuotaScope::for_signer(&NamespaceKey::deployment_default(), &[i; 32]),
+            ..charge(5)
+        })
+        .collect();
+    let req = WriteRequest {
+        repo: &name,
+        kind: WriteKind::AdvanceRefs,
+        refs: &refs,
+        replay: Some(replay()),
+        charges: &charges,
+        grant: None,
+        layout_version: true,
+    };
+    let mut snap = snapshot(&req, &[]);
+    let limit = usize::try_from(PRUNE_LIMIT).unwrap();
+    for i in 0..limit {
+        let old = [u8::try_from(100 + i).unwrap(); 32];
+        snap.expired_replays
+            .push((keys::replay_expiry(1, &old), keys::replay(&old)));
+        let scope = QuotaScope::for_signer(&NamespaceKey::deployment_default(), &old);
+        let state = QuotaState {
+            window_start: 5,
+            ops: 1,
+            bytes: 0,
+        };
+        let quota = keys::quota(&scope);
+        snap.insert(quota.clone(), Some(codec::encode_quota_state(&state)));
+        snap.stale_quotas
+            .push((keys::quota_window(5, &scope), quota));
+    }
+    let Planned::Apply(plan) = plan_write(&req, &snap, &clock_at(ms(T0), None)).unwrap() else {
+        panic!("a write");
+    };
+    let ops = plan.batch.preconditions.len() + plan.batch.writes.len();
+    assert!(ops <= crate::store::MAX_BATCH_OPS, "{ops}");
+    assert!(plan.batch.validate(&StoreCapabilities::full()).is_ok());
+    let prune = plan.prune.unwrap();
+    assert!(prune.writes.len() >= 2 * limit, "every replay pair fits");
+    // Prune guards come last, from `prune_from` on.
+    let guards = &plan.batch.preconditions[plan.prune_from..];
+    assert_eq!(guards, &prune.preconditions[1..]);
+    assert!(guards.iter().all(|p| matches!(p, Precondition::Equals(..))));
+}
+
+#[test]
+fn prune_sampling_is_deterministic_one_in_eight() {
+    let name = repo_name();
+    let refs = [upd(HEAD, Any, C)];
+    let request = |replay: Option<ReplayGuard>| WriteRequest {
+        repo: &name,
+        kind: WriteKind::UpdateRef,
+        refs: &refs,
+        replay,
+        charges: &[],
+        grant: None,
+        layout_version: false,
+    };
+    let sampled = (0u8..=255)
+        .filter(|b| {
+            let scoped = ReplayGuard {
+                scope: [*b; 32],
+                ..replay()
+            };
+            prune_sampled(&request(Some(scoped)), 3)
+        })
+        .count();
+    assert_eq!(sampled, 256 / 8);
+    assert!(!prune_sampled(&request(None), 8), "nothing to prune");
+}
+
+#[test]
+fn admission_allow_constructor() {
+    let decision = AdmissionDecision::allow(vec![charge(1)]).with_reservation("r-1");
+    let AdmissionDecision::Allow {
+        charges,
+        reservation,
+    } = decision
+    else {
+        panic!("allow");
+    };
+    assert_eq!(
+        (charges, reservation),
+        (vec![charge(1)], Some("r-1".into()))
+    );
+    let deny = AdmissionDecision::Deny(crate::ServerError::permission_denied("no"));
+    assert!(matches!(
+        deny.with_reservation("x"),
+        AdmissionDecision::Deny(_)
+    ));
 }
