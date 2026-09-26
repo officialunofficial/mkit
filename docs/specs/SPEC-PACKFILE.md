@@ -176,7 +176,10 @@ overhead and CPU cost isn't worth it below this) **and** `4 +
 zstd_compressed_len < raw_len` (strictly smaller on the wire than
 sending it uncompressed &mdash; the same "strictly smaller or don't bother"
 posture as the delta-preference heuristic in §3, mirrored here for
-consistency). mkit's own writer uses zstd compression level 3 (the
+consistency). A writer MUST NOT emit a `0x03` or `0x04` entry whose
+`uncompressed_len` would exceed `MAX_RAW_OBJECT_SIZE`; it writes such a
+payload uncompressed (`0x00` or `0x02`).
+mkit's own writer uses zstd compression level 3 (the
 library default); this spec does not mandate a specific level, since
 the byte layout is level-independent &mdash; any level a compliant zstd
 decoder can read is valid.

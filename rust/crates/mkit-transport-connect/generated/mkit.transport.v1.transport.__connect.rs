@@ -54,6 +54,38 @@ pub type OwnedDownloadPackRequestView = ::buffa::view::OwnedView<
 pub type OwnedDownloadPackResponseView = ::buffa::view::OwnedView<
     __buffa::view::DownloadPackResponseView<'static>,
 >;
+///Shorthand for `OwnedView<GetServerInfoRequestView<'static>>`.
+pub type OwnedGetServerInfoRequestView = ::buffa::view::OwnedView<
+    __buffa::view::GetServerInfoRequestView<'static>,
+>;
+///Shorthand for `OwnedView<GetServerInfoResponseView<'static>>`.
+pub type OwnedGetServerInfoResponseView = ::buffa::view::OwnedView<
+    __buffa::view::GetServerInfoResponseView<'static>,
+>;
+///Shorthand for `OwnedView<BeginUploadRequestView<'static>>`.
+pub type OwnedBeginUploadRequestView = ::buffa::view::OwnedView<
+    __buffa::view::BeginUploadRequestView<'static>,
+>;
+///Shorthand for `OwnedView<BeginUploadResponseView<'static>>`.
+pub type OwnedBeginUploadResponseView = ::buffa::view::OwnedView<
+    __buffa::view::BeginUploadResponseView<'static>,
+>;
+///Shorthand for `OwnedView<UploadPartRequestView<'static>>`.
+pub type OwnedUploadPartRequestView = ::buffa::view::OwnedView<
+    __buffa::view::UploadPartRequestView<'static>,
+>;
+///Shorthand for `OwnedView<UploadPartResponseView<'static>>`.
+pub type OwnedUploadPartResponseView = ::buffa::view::OwnedView<
+    __buffa::view::UploadPartResponseView<'static>,
+>;
+///Shorthand for `OwnedView<CompleteUploadRequestView<'static>>`.
+pub type OwnedCompleteUploadRequestView = ::buffa::view::OwnedView<
+    __buffa::view::CompleteUploadRequestView<'static>,
+>;
+///Shorthand for `OwnedView<CompleteUploadResponseView<'static>>`.
+pub type OwnedCompleteUploadResponseView = ::buffa::view::OwnedView<
+    __buffa::view::CompleteUploadResponseView<'static>,
+>;
 impl ::connectrpc::Encodable<ListRefsResponse>
 for __buffa::view::ListRefsResponseView<'_> {
     fn encode(
@@ -278,6 +310,134 @@ for ::buffa::view::OwnedView<__buffa::view::DownloadPackResponseView<'static>> {
         )
     }
 }
+impl ::connectrpc::Encodable<GetServerInfoResponse>
+for __buffa::view::GetServerInfoResponseView<'_> {
+    fn encode(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body(self, codec)
+    }
+}
+impl ::connectrpc::Encodable<GetServerInfoResponse>
+for ::buffa::view::OwnedView<__buffa::view::GetServerInfoResponseView<'static>> {
+    fn encode(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body(self.reborrow(), codec)
+    }
+    /// An `OwnedView` still holds the buffer it was decoded from, so
+    /// its large fields can be handed to the response body by
+    /// reference count instead of copied. The bare view impl above
+    /// cannot do this: it has borrows but no buffer to name.
+    fn encode_segments(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::connectrpc::EncodedBody, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body_segments(
+            self.reborrow(),
+            self.bytes(),
+            codec,
+        )
+    }
+}
+impl ::connectrpc::Encodable<BeginUploadResponse>
+for __buffa::view::BeginUploadResponseView<'_> {
+    fn encode(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body(self, codec)
+    }
+}
+impl ::connectrpc::Encodable<BeginUploadResponse>
+for ::buffa::view::OwnedView<__buffa::view::BeginUploadResponseView<'static>> {
+    fn encode(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body(self.reborrow(), codec)
+    }
+    /// An `OwnedView` still holds the buffer it was decoded from, so
+    /// its large fields can be handed to the response body by
+    /// reference count instead of copied. The bare view impl above
+    /// cannot do this: it has borrows but no buffer to name.
+    fn encode_segments(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::connectrpc::EncodedBody, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body_segments(
+            self.reborrow(),
+            self.bytes(),
+            codec,
+        )
+    }
+}
+impl ::connectrpc::Encodable<UploadPartResponse>
+for __buffa::view::UploadPartResponseView<'_> {
+    fn encode(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body(self, codec)
+    }
+}
+impl ::connectrpc::Encodable<UploadPartResponse>
+for ::buffa::view::OwnedView<__buffa::view::UploadPartResponseView<'static>> {
+    fn encode(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body(self.reborrow(), codec)
+    }
+    /// An `OwnedView` still holds the buffer it was decoded from, so
+    /// its large fields can be handed to the response body by
+    /// reference count instead of copied. The bare view impl above
+    /// cannot do this: it has borrows but no buffer to name.
+    fn encode_segments(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::connectrpc::EncodedBody, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body_segments(
+            self.reborrow(),
+            self.bytes(),
+            codec,
+        )
+    }
+}
+impl ::connectrpc::Encodable<CompleteUploadResponse>
+for __buffa::view::CompleteUploadResponseView<'_> {
+    fn encode(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body(self, codec)
+    }
+}
+impl ::connectrpc::Encodable<CompleteUploadResponse>
+for ::buffa::view::OwnedView<__buffa::view::CompleteUploadResponseView<'static>> {
+    fn encode(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body(self.reborrow(), codec)
+    }
+    /// An `OwnedView` still holds the buffer it was decoded from, so
+    /// its large fields can be handed to the response body by
+    /// reference count instead of copied. The bare view impl above
+    /// cannot do this: it has borrows but no buffer to name.
+    fn encode_segments(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::connectrpc::EncodedBody, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body_segments(
+            self.reborrow(),
+            self.bytes(),
+            codec,
+        )
+    }
+}
 /// Full service name for this service.
 pub const TRANSPORT_SERVICE_SERVICE_NAME: &str = "mkit.transport.v1.TransportService";
 /// Static [`Spec`](::connectrpc::Spec) for the `ListRefs` RPC, as seen by the server; the generated client passes it with [`origin`](::connectrpc::Spec::origin) `Client` (compare across sides with [`Spec::same_method`](::connectrpc::Spec::same_method)).
@@ -320,6 +480,30 @@ pub const TRANSPORT_SERVICE_UPLOAD_PACK_SPEC: ::connectrpc::Spec = ::connectrpc:
 pub const TRANSPORT_SERVICE_DOWNLOAD_PACK_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
         "/mkit.transport.v1.TransportService/DownloadPack",
         ::connectrpc::StreamType::ServerStream,
+    )
+    .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
+/// Static [`Spec`](::connectrpc::Spec) for the `GetServerInfo` RPC, as seen by the server; the generated client passes it with [`origin`](::connectrpc::Spec::origin) `Client` (compare across sides with [`Spec::same_method`](::connectrpc::Spec::same_method)).
+pub const TRANSPORT_SERVICE_GET_SERVER_INFO_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
+        "/mkit.transport.v1.TransportService/GetServerInfo",
+        ::connectrpc::StreamType::Unary,
+    )
+    .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
+/// Static [`Spec`](::connectrpc::Spec) for the `BeginUpload` RPC, as seen by the server; the generated client passes it with [`origin`](::connectrpc::Spec::origin) `Client` (compare across sides with [`Spec::same_method`](::connectrpc::Spec::same_method)).
+pub const TRANSPORT_SERVICE_BEGIN_UPLOAD_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
+        "/mkit.transport.v1.TransportService/BeginUpload",
+        ::connectrpc::StreamType::Unary,
+    )
+    .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
+/// Static [`Spec`](::connectrpc::Spec) for the `UploadPart` RPC, as seen by the server; the generated client passes it with [`origin`](::connectrpc::Spec::origin) `Client` (compare across sides with [`Spec::same_method`](::connectrpc::Spec::same_method)).
+pub const TRANSPORT_SERVICE_UPLOAD_PART_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
+        "/mkit.transport.v1.TransportService/UploadPart",
+        ::connectrpc::StreamType::ClientStream,
+    )
+    .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
+/// Static [`Spec`](::connectrpc::Spec) for the `CompleteUpload` RPC, as seen by the server; the generated client passes it with [`origin`](::connectrpc::Spec::origin) `Client` (compare across sides with [`Spec::same_method`](::connectrpc::Spec::same_method)).
+pub const TRANSPORT_SERVICE_COMPLETE_UPLOAD_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
+        "/mkit.transport.v1.TransportService/CompleteUpload",
+        ::connectrpc::StreamType::Unary,
     )
     .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
 /// Server trait for TransportService.
@@ -513,6 +697,77 @@ pub trait TransportService: Send + Sync + 'static {
             ::connectrpc::ServiceStream<
                 impl ::connectrpc::Encodable<DownloadPackResponse> + Send + use<Self>,
             >,
+        >,
+    > + Send;
+    /// Discover deployment capabilities without authentication (SPEC-TRANSPORT-CONNECT §2.1).
+    ///
+    /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
+    ///
+    /// `request` is borrowed from the request body and is valid for the
+    /// duration of the call; message fields are read directly on it
+    /// (zero-copy). The response cannot borrow from `request` — use
+    /// `.to_owned_message()` (or copy the specific fields) for anything
+    /// returned, stored, or moved into `tokio::spawn`.
+    fn get_server_info<'a>(
+        &'a self,
+        ctx: ::connectrpc::RequestContext,
+        request: ::connectrpc::ServiceRequest<'_, GetServerInfoRequest>,
+    ) -> impl ::std::future::Future<
+        Output = ::connectrpc::ServiceResult<
+            impl ::connectrpc::Encodable<GetServerInfoResponse> + Send + use<'a, Self>,
+        >,
+    > + Send;
+    /// Reserve an upload for a ref (SPEC-TRANSPORT-CONNECT §7.6).
+    ///
+    /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
+    ///
+    /// `request` is borrowed from the request body and is valid for the
+    /// duration of the call; message fields are read directly on it
+    /// (zero-copy). The response cannot borrow from `request` — use
+    /// `.to_owned_message()` (or copy the specific fields) for anything
+    /// returned, stored, or moved into `tokio::spawn`.
+    fn begin_upload<'a>(
+        &'a self,
+        ctx: ::connectrpc::RequestContext,
+        request: ::connectrpc::ServiceRequest<'_, BeginUploadRequest>,
+    ) -> impl ::std::future::Future<
+        Output = ::connectrpc::ServiceResult<
+            impl ::connectrpc::Encodable<BeginUploadResponse> + Send + use<'a, Self>,
+        >,
+    > + Send;
+    /// Stream one ticketed upload part (SPEC-TRANSPORT-CONNECT §7.6).
+    ///
+    /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
+    ///
+    /// Each `requests` item is a [`StreamMessage`](::connectrpc::StreamMessage):
+    /// it owns its buffer, is `Send + 'static`, and exposes zero-copy
+    /// accessor methods (`item.name()`), `.view()`, and
+    /// `.to_owned_message()`.
+    fn upload_part<'a>(
+        &'a self,
+        ctx: ::connectrpc::RequestContext,
+        requests: ::connectrpc::InboundStream<UploadPartRequest>,
+    ) -> impl ::std::future::Future<
+        Output = ::connectrpc::ServiceResult<
+            impl ::connectrpc::Encodable<UploadPartResponse> + Send + use<'a, Self>,
+        >,
+    > + Send;
+    /// Complete a multipart upload using its receipts (SPEC-TRANSPORT-CONNECT §7.6).
+    ///
+    /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
+    ///
+    /// `request` is borrowed from the request body and is valid for the
+    /// duration of the call; message fields are read directly on it
+    /// (zero-copy). The response cannot borrow from `request` — use
+    /// `.to_owned_message()` (or copy the specific fields) for anything
+    /// returned, stored, or moved into `tokio::spawn`.
+    fn complete_upload<'a>(
+        &'a self,
+        ctx: ::connectrpc::RequestContext,
+        request: ::connectrpc::ServiceRequest<'_, CompleteUploadRequest>,
+    ) -> impl ::std::future::Future<
+        Output = ::connectrpc::ServiceResult<
+            impl ::connectrpc::Encodable<CompleteUploadResponse> + Send + use<'a, Self>,
         >,
     > + Send;
 }
@@ -717,6 +972,100 @@ impl<S: TransportService> TransportServiceExt for S {
                 }),
             )
             .with_spec(TRANSPORT_SERVICE_DOWNLOAD_PACK_SPEC)
+            .route_view(
+                TRANSPORT_SERVICE_SERVICE_NAME,
+                "GetServerInfo",
+                {
+                    let svc = ::std::sync::Arc::clone(&self);
+                    ::connectrpc::view_handler_fn(move |
+                        ctx,
+                        req: ::buffa::view::OwnedView<
+                            __buffa::view::GetServerInfoRequestView<'static>,
+                        >,
+                        format|
+                    {
+                        let svc = ::std::sync::Arc::clone(&svc);
+                        async move {
+                            let sreq = ::connectrpc::ServiceRequest::<
+                                GetServerInfoRequest,
+                            >::from_parts(req.reborrow(), req.bytes());
+                            svc.get_server_info(ctx, sreq)
+                                .await?
+                                .encode::<GetServerInfoResponse>(format)
+                        }
+                    })
+                },
+            )
+            .with_spec(TRANSPORT_SERVICE_GET_SERVER_INFO_SPEC)
+            .route_view(
+                TRANSPORT_SERVICE_SERVICE_NAME,
+                "BeginUpload",
+                {
+                    let svc = ::std::sync::Arc::clone(&self);
+                    ::connectrpc::view_handler_fn(move |
+                        ctx,
+                        req: ::buffa::view::OwnedView<
+                            __buffa::view::BeginUploadRequestView<'static>,
+                        >,
+                        format|
+                    {
+                        let svc = ::std::sync::Arc::clone(&svc);
+                        async move {
+                            let sreq = ::connectrpc::ServiceRequest::<
+                                BeginUploadRequest,
+                            >::from_parts(req.reborrow(), req.bytes());
+                            svc.begin_upload(ctx, sreq)
+                                .await?
+                                .encode::<BeginUploadResponse>(format)
+                        }
+                    })
+                },
+            )
+            .with_spec(TRANSPORT_SERVICE_BEGIN_UPLOAD_SPEC)
+            .route_view_client_stream(
+                TRANSPORT_SERVICE_SERVICE_NAME,
+                "UploadPart",
+                ::connectrpc::view_client_streaming_handler_fn({
+                    let svc = ::std::sync::Arc::clone(&self);
+                    move |ctx, req, format| {
+                        let svc = ::std::sync::Arc::clone(&svc);
+                        async move {
+                            let req = ::connectrpc::dispatcher::codegen::into_stream_messages::<
+                                UploadPartRequest,
+                            >(req);
+                            svc.upload_part(ctx, req)
+                                .await?
+                                .encode::<UploadPartResponse>(format)
+                        }
+                    }
+                }),
+            )
+            .with_spec(TRANSPORT_SERVICE_UPLOAD_PART_SPEC)
+            .route_view(
+                TRANSPORT_SERVICE_SERVICE_NAME,
+                "CompleteUpload",
+                {
+                    let svc = ::std::sync::Arc::clone(&self);
+                    ::connectrpc::view_handler_fn(move |
+                        ctx,
+                        req: ::buffa::view::OwnedView<
+                            __buffa::view::CompleteUploadRequestView<'static>,
+                        >,
+                        format|
+                    {
+                        let svc = ::std::sync::Arc::clone(&svc);
+                        async move {
+                            let sreq = ::connectrpc::ServiceRequest::<
+                                CompleteUploadRequest,
+                            >::from_parts(req.reborrow(), req.bytes());
+                            svc.complete_upload(ctx, sreq)
+                                .await?
+                                .encode::<CompleteUploadResponse>(format)
+                        }
+                    })
+                },
+            )
+            .with_spec(TRANSPORT_SERVICE_COMPLETE_UPLOAD_SPEC)
     }
 }
 /// Type-inference marker used by [`Router::add_service`](::connectrpc::Router::add_service).
@@ -811,6 +1160,30 @@ impl<T: TransportService> ::connectrpc::Dispatcher for TransportServiceServer<T>
                 Some(
                     ::connectrpc::dispatcher::codegen::MethodDescriptor::server_streaming()
                         .with_spec(TRANSPORT_SERVICE_DOWNLOAD_PACK_SPEC),
+                )
+            }
+            "GetServerInfo" => {
+                Some(
+                    ::connectrpc::dispatcher::codegen::MethodDescriptor::unary(false)
+                        .with_spec(TRANSPORT_SERVICE_GET_SERVER_INFO_SPEC),
+                )
+            }
+            "BeginUpload" => {
+                Some(
+                    ::connectrpc::dispatcher::codegen::MethodDescriptor::unary(false)
+                        .with_spec(TRANSPORT_SERVICE_BEGIN_UPLOAD_SPEC),
+                )
+            }
+            "UploadPart" => {
+                Some(
+                    ::connectrpc::dispatcher::codegen::MethodDescriptor::client_streaming()
+                        .with_spec(TRANSPORT_SERVICE_UPLOAD_PART_SPEC),
+                )
+            }
+            "CompleteUpload" => {
+                Some(
+                    ::connectrpc::dispatcher::codegen::MethodDescriptor::unary(false)
+                        .with_spec(TRANSPORT_SERVICE_COMPLETE_UPLOAD_SPEC),
                 )
             }
             _ => None,
@@ -910,6 +1283,60 @@ impl<T: TransportService> ::connectrpc::Dispatcher for TransportServiceServer<T>
                     svc.pack_exists(ctx, req).await?.encode::<PackExistsResponse>(format)
                 })
             }
+            "GetServerInfo" => {
+                let svc = ::std::sync::Arc::clone(&self.inner);
+                Box::pin(async move {
+                    let body = ::connectrpc::dispatcher::codegen::request_proto_bytes::<
+                        GetServerInfoRequest,
+                    >(request.encoded()?, format)?;
+                    let req: __buffa::view::GetServerInfoRequestView<'_> = ::connectrpc::dispatcher::codegen::decode_borrowed_request_view(
+                        &body,
+                        ctx.decode_options(),
+                    )?;
+                    let req = ::connectrpc::ServiceRequest::<
+                        GetServerInfoRequest,
+                    >::from_parts(&req, &body);
+                    svc.get_server_info(ctx, req)
+                        .await?
+                        .encode::<GetServerInfoResponse>(format)
+                })
+            }
+            "BeginUpload" => {
+                let svc = ::std::sync::Arc::clone(&self.inner);
+                Box::pin(async move {
+                    let body = ::connectrpc::dispatcher::codegen::request_proto_bytes::<
+                        BeginUploadRequest,
+                    >(request.encoded()?, format)?;
+                    let req: __buffa::view::BeginUploadRequestView<'_> = ::connectrpc::dispatcher::codegen::decode_borrowed_request_view(
+                        &body,
+                        ctx.decode_options(),
+                    )?;
+                    let req = ::connectrpc::ServiceRequest::<
+                        BeginUploadRequest,
+                    >::from_parts(&req, &body);
+                    svc.begin_upload(ctx, req)
+                        .await?
+                        .encode::<BeginUploadResponse>(format)
+                })
+            }
+            "CompleteUpload" => {
+                let svc = ::std::sync::Arc::clone(&self.inner);
+                Box::pin(async move {
+                    let body = ::connectrpc::dispatcher::codegen::request_proto_bytes::<
+                        CompleteUploadRequest,
+                    >(request.encoded()?, format)?;
+                    let req: __buffa::view::CompleteUploadRequestView<'_> = ::connectrpc::dispatcher::codegen::decode_borrowed_request_view(
+                        &body,
+                        ctx.decode_options(),
+                    )?;
+                    let req = ::connectrpc::ServiceRequest::<
+                        CompleteUploadRequest,
+                    >::from_parts(&req, &body);
+                    svc.complete_upload(ctx, req)
+                        .await?
+                        .encode::<CompleteUploadResponse>(format)
+                })
+            }
             _ => ::connectrpc::dispatcher::codegen::unimplemented_unary(path),
         }
     }
@@ -973,6 +1400,17 @@ impl<T: TransportService> ::connectrpc::Dispatcher for TransportServiceServer<T>
                     svc.upload_pack(ctx, req_stream)
                         .await?
                         .encode::<UploadPackResponse>(format)
+                })
+            }
+            "UploadPart" => {
+                let svc = ::std::sync::Arc::clone(&self.inner);
+                Box::pin(async move {
+                    let req_stream = ::connectrpc::dispatcher::codegen::decode_message_request_stream::<
+                        UploadPartRequest,
+                    >(requests, format, ctx.decode_options().clone());
+                    svc.upload_part(ctx, req_stream)
+                        .await?
+                        .encode::<UploadPartResponse>(format)
                 })
             }
             _ => ::connectrpc::dispatcher::codegen::unimplemented_unary(path),
@@ -1351,6 +1789,180 @@ where
                 &self.transport,
                 &self.config,
                 TRANSPORT_SERVICE_DOWNLOAD_PACK_SPEC
+                    .with_origin(::connectrpc::SpecOrigin::Client),
+                request,
+                options,
+            )
+            .await
+    }
+    /// Call the GetServerInfo RPC. Sends a request to /mkit.transport.v1.TransportService/GetServerInfo.
+    pub async fn get_server_info(
+        &self,
+        request: GetServerInfoRequest,
+    ) -> Result<
+        ::connectrpc::client::UnaryResponse<
+            ::buffa::view::OwnedView<__buffa::view::GetServerInfoResponseView<'static>>,
+        >,
+        ::connectrpc::ConnectError,
+    > {
+        self.get_server_info_with_options(
+                request,
+                ::connectrpc::client::CallOptions::default(),
+            )
+            .await
+    }
+    /// Call the GetServerInfo RPC with explicit per-call options. Options override [`ClientConfig`](::connectrpc::client::ClientConfig) defaults.
+    pub async fn get_server_info_with_options(
+        &self,
+        request: GetServerInfoRequest,
+        options: ::connectrpc::client::CallOptions,
+    ) -> Result<
+        ::connectrpc::client::UnaryResponse<
+            ::buffa::view::OwnedView<__buffa::view::GetServerInfoResponseView<'static>>,
+        >,
+        ::connectrpc::ConnectError,
+    > {
+        ::connectrpc::client::call_unary(
+                &self.transport,
+                &self.config,
+                TRANSPORT_SERVICE_GET_SERVER_INFO_SPEC
+                    .with_origin(::connectrpc::SpecOrigin::Client),
+                request,
+                options,
+            )
+            .await
+    }
+    /// Call the BeginUpload RPC. Sends a request to /mkit.transport.v1.TransportService/BeginUpload.
+    pub async fn begin_upload(
+        &self,
+        request: BeginUploadRequest,
+    ) -> Result<
+        ::connectrpc::client::UnaryResponse<
+            ::buffa::view::OwnedView<__buffa::view::BeginUploadResponseView<'static>>,
+        >,
+        ::connectrpc::ConnectError,
+    > {
+        self.begin_upload_with_options(
+                request,
+                ::connectrpc::client::CallOptions::default(),
+            )
+            .await
+    }
+    /// Call the BeginUpload RPC with explicit per-call options. Options override [`ClientConfig`](::connectrpc::client::ClientConfig) defaults.
+    pub async fn begin_upload_with_options(
+        &self,
+        request: BeginUploadRequest,
+        options: ::connectrpc::client::CallOptions,
+    ) -> Result<
+        ::connectrpc::client::UnaryResponse<
+            ::buffa::view::OwnedView<__buffa::view::BeginUploadResponseView<'static>>,
+        >,
+        ::connectrpc::ConnectError,
+    > {
+        ::connectrpc::client::call_unary(
+                &self.transport,
+                &self.config,
+                TRANSPORT_SERVICE_BEGIN_UPLOAD_SPEC
+                    .with_origin(::connectrpc::SpecOrigin::Client),
+                request,
+                options,
+            )
+            .await
+    }
+    /// Call the UploadPart RPC. Sends a request to /mkit.transport.v1.TransportService/UploadPart.
+    ///
+    /// `requests` is any `Stream<Item = ...> + Send + 'static` of
+    /// request messages (the `ClientRequestStream` bound); messages
+    /// are sent as the stream yields them. It backs the request
+    /// body, so yield owned messages or feed the call from a
+    /// channel-backed stream. For a collection that is already in
+    /// hand, wrap it with `::connectrpc::stream_iter(...)`.
+    ///
+    /// Dropping the returned future cancels the call: the request
+    /// body is dropped along with it, so messages the stream had
+    /// not yet yielded are never delivered. A caller that needs the
+    /// request delivered must drive the call to completion rather
+    /// than, say, wrapping it in a `timeout`.
+    pub async fn upload_part(
+        &self,
+        requests: impl ::connectrpc::client::ClientRequestStream<UploadPartRequest>,
+    ) -> Result<
+        ::connectrpc::client::UnaryResponse<
+            ::buffa::view::OwnedView<__buffa::view::UploadPartResponseView<'static>>,
+        >,
+        ::connectrpc::ConnectError,
+    > {
+        self.upload_part_with_options(
+                requests,
+                ::connectrpc::client::CallOptions::default(),
+            )
+            .await
+    }
+    /// Call the UploadPart RPC with explicit per-call options. Options override [`ClientConfig`](::connectrpc::client::ClientConfig) defaults.
+    ///
+    /// `requests` is any `Stream<Item = ...> + Send + 'static` of
+    /// request messages (the `ClientRequestStream` bound); messages
+    /// are sent as the stream yields them. It backs the request
+    /// body, so yield owned messages or feed the call from a
+    /// channel-backed stream. For a collection that is already in
+    /// hand, wrap it with `::connectrpc::stream_iter(...)`.
+    ///
+    /// Dropping the returned future cancels the call: the request
+    /// body is dropped along with it, so messages the stream had
+    /// not yet yielded are never delivered. A caller that needs the
+    /// request delivered must drive the call to completion rather
+    /// than, say, wrapping it in a `timeout`.
+    pub async fn upload_part_with_options(
+        &self,
+        requests: impl ::connectrpc::client::ClientRequestStream<UploadPartRequest>,
+        options: ::connectrpc::client::CallOptions,
+    ) -> Result<
+        ::connectrpc::client::UnaryResponse<
+            ::buffa::view::OwnedView<__buffa::view::UploadPartResponseView<'static>>,
+        >,
+        ::connectrpc::ConnectError,
+    > {
+        ::connectrpc::client::call_client_stream(
+                &self.transport,
+                &self.config,
+                TRANSPORT_SERVICE_UPLOAD_PART_SPEC
+                    .with_origin(::connectrpc::SpecOrigin::Client),
+                requests,
+                options,
+            )
+            .await
+    }
+    /// Call the CompleteUpload RPC. Sends a request to /mkit.transport.v1.TransportService/CompleteUpload.
+    pub async fn complete_upload(
+        &self,
+        request: CompleteUploadRequest,
+    ) -> Result<
+        ::connectrpc::client::UnaryResponse<
+            ::buffa::view::OwnedView<__buffa::view::CompleteUploadResponseView<'static>>,
+        >,
+        ::connectrpc::ConnectError,
+    > {
+        self.complete_upload_with_options(
+                request,
+                ::connectrpc::client::CallOptions::default(),
+            )
+            .await
+    }
+    /// Call the CompleteUpload RPC with explicit per-call options. Options override [`ClientConfig`](::connectrpc::client::ClientConfig) defaults.
+    pub async fn complete_upload_with_options(
+        &self,
+        request: CompleteUploadRequest,
+        options: ::connectrpc::client::CallOptions,
+    ) -> Result<
+        ::connectrpc::client::UnaryResponse<
+            ::buffa::view::OwnedView<__buffa::view::CompleteUploadResponseView<'static>>,
+        >,
+        ::connectrpc::ConnectError,
+    > {
+        ::connectrpc::client::call_unary(
+                &self.transport,
+                &self.config,
+                TRANSPORT_SERVICE_COMPLETE_UPLOAD_SPEC
                     .with_origin(::connectrpc::SpecOrigin::Client),
                 request,
                 options,

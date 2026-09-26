@@ -1,9 +1,9 @@
 //! Repository and namespace identifiers (PRD §6.1).
 //!
-//! M0 serves a single repository per deployment. The `namespace/name`
-//! grammar and multi-repository addressing arrive in M1
-//! (SPEC-TRANSPORT-CONNECT v2 §7.4); until then a [`RepoName`] is validated
-//! exactly like the auth v2 `repository` component.
+//! Single deployments retain their configured name and `root` namespace.
+//! Multi deployments use SPEC-TRANSPORT-CONNECT §7.4 identities.
+
+use mkit_core::repo_identity::{Namespace, RepositoryIdentity};
 
 use crate::error::ServerError;
 
@@ -50,8 +50,8 @@ impl RepoName {
 }
 
 /// A namespace key. Under D34 it selects the namespace coordinator and
-/// prefixes every shard key. M0 has only the deployment default; the
-/// self-certifying namespace grammar (D4) lands in M1.
+/// prefixes every shard key. Single deployments use the reserved default;
+/// Multi deployments use a parsed self-certifying namespace (§7.4).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NamespaceKey(String);
 
@@ -70,6 +70,11 @@ impl NamespaceKey {
         &self.0
     }
 
+    /// A canonical namespace already validated by the shared grammar.
+    pub(crate) fn from_namespace(namespace: &Namespace) -> Self {
+        Self(namespace.to_string())
+    }
+
     /// A key read back from storage (`Partition::decode`): the store only
     /// ever holds keys this server encoded.
     pub(crate) fn from_stored(key: String) -> Self {
@@ -86,33 +91,86 @@ pub struct RepoId {
     pub name: RepoName,
 }
 
-/// How a deployment maps a request to a repository. M1 adds multi-repository
-/// addressing (`Multi { policy }`).
+/// Multi-repository addressing. Namespace policy is added by WP-1.5.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MultiAddressing {}
+
+impl MultiAddressing {
+    /// Route requests using their namespaced `X-Repository` identity.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
+/// A resolved request target and its byte-exact wire identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ResolvedRepo {
+    /// The storage identity (single deployments retain the M0 layout).
+    pub repo: RepoId,
+    /// The identity carried on the wire.
+    pub identity: String,
+}
+
+/// How a deployment maps a request to a repository.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Addressing {
-    /// One configured repository serves every request.
+    /// One configured repository, with optional addressing on unsigned RPCs.
     Single {
         /// The configured repository.
         repo: RepoId,
     },
+    /// Routes by `X-Repository`; not deployable until WP-1.10 lands pack membership.
+    Multi(MultiAddressing),
 }
 
 impl Addressing {
-    /// Resolve the repository a request targets.
-    ///
-    /// M0 wire compatibility: on a single-repository deployment the
-    /// `X-Repository` header is ignored and every request resolves to the
-    /// configured repository. Reads are unaffected by it today; writes are
-    /// bound to the deployment's repository by the auth v2 context instead.
-    /// M1 validates the header against SPEC-TRANSPORT-CONNECT v2 §7.4.
+    /// Resolve the request target using SPEC-TRANSPORT-CONNECT §7.4.
+    /// Empty headers count as absent; identities are never normalized.
     ///
     /// # Errors
-    /// None in M0; M1 rejects a mismatched or malformed header.
-    pub fn resolve(&self, x_repository: Option<&str>) -> Result<&RepoId, ServerError> {
-        let _ = x_repository;
+    /// `invalid_argument` for malformed identities or missing Multi headers;
+    /// `unauthenticated` for missing signed Single headers; `not_found` for
+    /// another well-formed identity on a Single deployment.
+    pub fn resolve(
+        &self,
+        x_repository: Option<&str>,
+        signed: bool,
+    ) -> Result<ResolvedRepo, ServerError> {
+        let header = x_repository.filter(|s| !s.is_empty());
+        let invalid = || ServerError::invalid_argument("invalid X-Repository");
         match self {
-            Self::Single { repo } => Ok(repo),
+            Self::Single { repo } => {
+                if let Some(header) = header {
+                    RepositoryIdentity::parse_bare_allowed(header).map_err(|_| invalid())?;
+                    if header != repo.name.as_str() {
+                        return Err(ServerError::not_found("repository not found"));
+                    }
+                } else if signed {
+                    return Err(ServerError::unauthenticated(
+                        "missing X-Repository on a signed request",
+                    ));
+                }
+                Ok(ResolvedRepo {
+                    repo: repo.clone(),
+                    identity: repo.name.as_str().to_owned(),
+                })
+            }
+            Self::Multi(_) => {
+                let header = header.ok_or_else(invalid)?;
+                let identity = RepositoryIdentity::parse(header).map_err(|_| invalid())?;
+                let namespace = identity.namespace().ok_or_else(invalid)?;
+                Ok(ResolvedRepo {
+                    repo: RepoId {
+                        namespace: NamespaceKey::from_namespace(namespace),
+                        name: RepoName::new(identity.name())?,
+                    },
+                    identity: header.to_owned(),
+                })
+            }
         }
     }
 }
@@ -148,17 +206,136 @@ mod tests {
     }
 
     #[test]
-    fn single_addressing_ignores_header_in_m0() {
-        let repo = RepoId {
-            namespace: NamespaceKey::deployment_default(),
-            name: RepoName::new("room-a").unwrap(),
+    fn single_addressing_rejects_another_identity() {
+        let addressing = Addressing::Single {
+            repo: RepoId {
+                namespace: NamespaceKey::deployment_default(),
+                name: RepoName::new("room-a").unwrap(),
+            },
         };
-        let addressing = Addressing::Single { repo: repo.clone() };
-        // M0 wire compat: the header never changes the target. M1 replaces
-        // this test when it starts validating `X-Repository`.
-        assert_eq!(addressing.resolve(None).unwrap(), &repo);
-        assert_eq!(addressing.resolve(Some("other")).unwrap(), &repo);
-        assert_eq!(addressing.resolve(Some("")).unwrap(), &repo);
+        assert_eq!(
+            addressing
+                .resolve(Some("room-b"), false)
+                .unwrap_err()
+                .code(),
+            Code::NotFound
+        );
+    }
+
+    fn single(identity: &str) -> Addressing {
+        Addressing::Single {
+            repo: RepoId {
+                namespace: NamespaceKey::deployment_default(),
+                name: RepoName::new(identity).unwrap(),
+            },
+        }
+    }
+
+    #[test]
+    fn resolution_table_and_safe_errors() {
+        let single = single("default");
+        let multi = Addressing::Multi(MultiAddressing::new());
+        for signed in [false, true] {
+            for absent in [None, Some("")] {
+                let result = single.resolve(absent, signed);
+                if signed {
+                    let e = result.unwrap_err();
+                    assert_eq!(e.code(), Code::Unauthenticated);
+                    assert_eq!(
+                        e.public_message(),
+                        "missing X-Repository on a signed request"
+                    );
+                } else {
+                    assert_eq!(
+                        result.unwrap(),
+                        single.resolve(Some("default"), false).unwrap()
+                    );
+                }
+                let e = multi.resolve(absent, signed).unwrap_err();
+                assert_eq!(e.code(), Code::InvalidArgument);
+                assert_eq!(e.public_message(), "invalid X-Repository");
+            }
+            assert_eq!(
+                single
+                    .resolve(Some("default"), signed)
+                    .unwrap()
+                    .repo
+                    .namespace
+                    .as_str(),
+                "root"
+            );
+            for bad in ["Default", ".x", "has space", "a/b"] {
+                let e = single.resolve(Some(bad), signed).unwrap_err();
+                assert_eq!(e.code(), Code::InvalidArgument);
+                assert_eq!(e.public_message(), "invalid X-Repository");
+            }
+            let identity = format!("ed25519-{}/one", "a".repeat(64));
+            for other in ["other", &identity] {
+                let e = single.resolve(Some(other), signed).unwrap_err();
+                assert_eq!(e.code(), Code::NotFound);
+                assert_eq!(e.public_message(), "repository not found");
+            }
+            let resolved = multi.resolve(Some(&identity), signed).unwrap();
+            assert_eq!(resolved.identity, identity);
+            assert_eq!(resolved.repo.namespace.as_str(), &identity[..72]);
+            assert_eq!(resolved.repo.name.as_str(), "one");
+            assert_eq!(
+                multi.resolve(Some("default"), signed).unwrap_err().code(),
+                Code::InvalidArgument
+            );
+            let configured = self::single(&identity)
+                .resolve(Some(&identity), true)
+                .unwrap();
+            assert_eq!(configured.repo.namespace.as_str(), "root");
+            assert_eq!(configured.repo.name.as_str(), identity);
+        }
+    }
+
+    #[test]
+    fn golden_repository_grammar_drives_both_modes() {
+        #[derive(serde::Deserialize)]
+        struct Case {
+            identity: String,
+            single_ok: bool,
+            multi_ok: bool,
+        }
+        let bytes = include_bytes!("../../../tests/golden/transport/repository-grammar.json");
+        let cases: Vec<Case> = serde_json::from_slice(bytes).unwrap();
+        let manifest = include_str!("../../../tests/golden/transport/MANIFEST.txt");
+        let digest = mkit_core::hash::to_hex(&mkit_core::hash::hash(bytes));
+        assert!(
+            manifest
+                .lines()
+                .any(|line| line == format!("repository-grammar.json {digest}"))
+        );
+        let multi = Addressing::Multi(MultiAddressing::new());
+        for case in cases {
+            // Valid Single cases configure their byte-exact identity; invalid
+            // cases use a valid config and must fail grammar, not equality.
+            for (addressing, valid) in [
+                (
+                    single(if case.single_ok {
+                        &case.identity
+                    } else {
+                        "default"
+                    }),
+                    case.single_ok,
+                ),
+                (multi.clone(), case.multi_ok),
+            ] {
+                let result = addressing.resolve(Some(&case.identity), false);
+                if valid {
+                    assert_eq!(result.unwrap().identity, case.identity);
+                } else {
+                    assert_eq!(
+                        result.unwrap_err().code(),
+                        Code::InvalidArgument,
+                        "{}",
+                        case.identity
+                    );
+                }
+            }
+        }
     }
 
     #[test]

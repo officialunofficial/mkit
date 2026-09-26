@@ -393,12 +393,23 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         tracing::debug!(stage = "authenticate", procedure = method(meta.procedure));
         let result = self.authenticate_inner(meta);
         if let Err(err) = &result {
-            self.outcome_for(meta.procedure, "none").record(Err(err));
+            self.outcome_for(meta.procedure, "none", "-")
+                .record(Err(err));
         }
         result
     }
 
     fn authenticate_inner(&self, meta: &RequestMeta<'_>) -> Result<Authenticated, ServerError> {
+        let signed = matches!(self.cfg.auth, AuthMode::AuthV2(_)) && meta.procedure.is_write();
+        let repo = self
+            .cfg
+            .addressing
+            .resolve((meta.header)("x-repository").as_deref(), signed)?;
+        let expected_repository = match (&self.cfg.addressing, &self.cfg.auth) {
+            (Addressing::Single { .. }, AuthMode::AuthV2(cfg)) => cfg.repository(),
+            _ => &repo.identity,
+        }
+        .to_owned();
         #[cfg(feature = "test-faults")]
         let directives = TestDirectives::from_headers(meta.header)?;
         #[cfg(feature = "test-faults")]
@@ -406,7 +417,7 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         #[cfg(not(feature = "test-faults"))]
         let skew = 0;
         let now = self.clock.now_ms().saturating_add(skew);
-        let mut a = auth::authenticate(&self.cfg.auth, meta, now)?;
+        let mut a = auth::authenticate(&self.cfg.auth, meta, now, repo, &expected_repository)?;
         a.business_skew_ms = skew;
         #[cfg(feature = "test-faults")]
         a.set_test_directives(directives);
@@ -418,6 +429,7 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// [`refs::list_scan_prefix`]), read page by page.
     ///
     /// # Errors
+    /// `not_found` for a nonexistent Multi repository;
     /// `invalid_argument` for an invalid prefix or one over
     /// [`refs::MAX_REF_NAME_BYTES`]; the authorizer's error; `internal`
     /// for a storage failure.
@@ -440,6 +452,7 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             }
             let op = self.identify(a, kind)?;
             self.authorize(&op).await?;
+            self.require_repository(&op.repo).await?;
             let p = self.shards.ref_index(&op.repo);
             let scan = refs::list_scan_prefix(prefix);
             let (mut out, mut after) = (Vec::new(), None);
@@ -466,6 +479,7 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// One ref's id, if it exists.
     ///
     /// # Errors
+    /// `not_found` for a nonexistent Multi repository;
     /// `invalid_argument` for an invalid name; the authorizer's error;
     /// `internal` for a storage failure.
     pub async fn read_ref(
@@ -480,6 +494,7 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             check_ref_name(name)?;
             let op = self.identify(a, kind)?;
             self.authorize(&op).await?;
+            self.require_repository(&op.repo).await?;
             let p = self.shards.ref_shard(&op.repo, name);
             read::read_ref(&self.meta, &p, &op.repo.name, name)
                 .await
@@ -530,14 +545,16 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         .await
     }
 
-    /// Whether the pack is present (M0 membership: presence in the blob
-    /// store).
+    /// Whether the pack is present in a Single deployment's blob store.
+    /// Multi deployments require repository membership before serving packs.
     ///
     /// # Errors
-    /// The authorizer's error; `internal` for a storage failure.
+    /// `unimplemented` for Multi mode; the authorizer's error;
+    /// `internal` for a storage failure.
     pub async fn pack_exists(&self, a: &Authenticated, key: PackKey) -> Result<bool, ServerError> {
         self.observe(a, async {
             let op = self.identify(a, OpKind::PackExists { key })?;
+            self.require_pack_membership()?;
             self.authorize(&op).await?;
             let head = self.blobs.head(&key).await;
             Ok(head
@@ -554,7 +571,8 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// stream before it returns.
     ///
     /// # Errors
-    /// The header's [`crate::upload::UploadError`]; `unauthenticated` when
+    /// `unimplemented` for Multi mode;
+    /// the header's [`crate::upload::UploadError`]; `unauthenticated` when
     /// the header differs from the signed commitment; a stored or
     /// in-flight replay answer; a hook's error; the reservation's error.
     pub async fn begin_upload(
@@ -569,6 +587,7 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// A pack's bytes as chunks of at most `download_chunk_max` bytes.
     ///
     /// # Errors
+    /// `unimplemented` for Multi mode;
     /// `not_found` for a missing pack, before any chunk; the authorizer's
     /// error; `internal` for a storage failure.
     ///
@@ -583,6 +602,7 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let mut outcome = self.outcome(a);
         let opened = async {
             let op = self.identify(a, OpKind::DownloadPack { key })?;
+            self.require_pack_membership()?;
             self.authorize(&op).await?;
             let body = self.blobs.get(&key, None).await;
             match body.map_err(|e| store_error(StorageOp::BlobGet, e))? {
@@ -675,14 +695,11 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
 
     /// The span and recorder of one request.
     fn outcome(&self, a: &Authenticated) -> Outcome {
-        self.outcome_for(a.procedure(), a.principal.kind())
+        self.outcome_for(a.procedure(), a.principal.kind(), &a.repo().identity)
     }
 
     /// The span and recorder of one request to `procedure` as `principal`.
-    fn outcome_for(&self, procedure: Procedure, principal: &'static str) -> Outcome {
-        let repo = match &self.cfg.addressing {
-            Addressing::Single { repo } => repo.name.as_str(),
-        };
+    fn outcome_for(&self, procedure: Procedure, principal: &'static str, repo: &str) -> Outcome {
         let procedure = method(procedure);
         let span = tracing::info_span!("mkit.server.rpc", procedure, repo, principal);
         let (metrics, clock) = (self.metrics.clone(), self.clock.clone());
@@ -724,9 +741,39 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 "missing auth v2 authorization",
             ));
         }
-        let repo = self.cfg.addressing.resolve(None)?.clone();
+        let repo = a.repo().repo.clone();
         let principal = a.principal.clone();
         Ok(Operation::new(repo, principal, a.auth.clone(), kind))
+    }
+
+    /// Multi reads require at least one ref row in this repository's index.
+    async fn require_repository(&self, repo: &crate::repo::RepoId) -> Result<(), ServerError> {
+        if matches!(self.cfg.addressing, Addressing::Multi(_)) {
+            // TODO(WP-1.22): replace with the coordinator repo registry (rr)
+            let p = self.shards.ref_index(repo);
+            let (start, end) = keys::ref_prefix_range(&repo.name, "");
+            let page = self
+                .meta
+                .scan(&p, &start, &end, None, 1)
+                .await
+                .map_err(meta_error)?;
+            if page.entries.is_empty() {
+                return Err(ServerError::not_found("repository not found"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Multi packs must not consult the global blob store as an existence oracle.
+    fn require_pack_membership(&self) -> Result<(), ServerError> {
+        // TODO(WP-1.10): scope pack RPCs to repository membership.
+        if matches!(self.cfg.addressing, Addressing::Multi(_)) {
+            return Err(ServerError::new(
+                crate::Code::Unimplemented,
+                "pack RPCs need repository membership",
+            ));
+        }
+        Ok(())
     }
 
     /// A unary write's ref writes in decision order (packmap first) and

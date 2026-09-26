@@ -31,6 +31,8 @@ const DIVERGENCES: &[(&str, &str)] = &[];
 fn profile(auth: WireAuth) -> Profile {
     let mut p = Profile::new(auth);
     p.list_refs = 200;
+    // A server started empty for this test: whole-server listings are bounded.
+    p.fresh_target = true;
     p.features.insert(Feature::Health);
     p
 }
