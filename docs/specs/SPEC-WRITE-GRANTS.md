@@ -7,11 +7,12 @@ audience: implementers of mkit.transport.v1 servers that restrict writes or serv
 
 # SPEC-WRITE-GRANTS &mdash; namespace owners delegate repository writes and reads
 
-Status: **Draft**. No implementation exists yet. Golden vectors land
-with the first implementation
+Status: **Draft**. Only the owner-scheme primitives of §4 (Keccak-256,
+the EIP-191 digest, secp256k1 recovery, address derivation and the §4.4
+low-`s` rules) are implemented; the grant verifier is not. Golden
+vectors land with the implementation
 ([SPEC-CONVENTIONS §5](SPEC-CONVENTIONS.md#5-golden-vectors-and-conformance-tests));
-this document lists none until then. §13.1 names the fixtures that
-implementation adds.
+this document lists them in §13.1.
 
 Scope: who may write to, or read from, a repository on a
 multi-repository [SPEC-TRANSPORT-CONNECT](SPEC-TRANSPORT-CONNECT.md)
@@ -1067,6 +1068,12 @@ derivation for a secp256k1 and a P-256 key; a WebAuthn assertion; a
 header value; one rejection for each §3.5 rule, a high-`s` signature
 for each ECDSA scheme, a cleared user-present flag, and a scheme on the
 wrong namespace form; a URL token; and a signed read.
+
+Landed so far (each pinned by BLAKE3 in the directory's `MANIFEST.txt`):
+
+| Fixture | Pins |
+|---|---|
+| `rust/tests/golden/grants/eth-primitives.json` | Keccak-256 of the empty string, `abc` and a 4,096-byte statement-shaped input, plus the differing SHA3-256 of the empty string (§4.1); two EIP-191 vectors (§4): the public `Some data` vector and the §3.4 example grant, each with its message, digest, private key, 65-byte `r‖s‖v` signature and recovered address; the high-`s` twin of each, which a verifier rejects and a client normalizes back (§4.4); the address, `x` and `y` of two secp256k1 and two P-256 keys, including `d = 1` on each curve (§4.1); one key per curve with `x ≥ p` whose reduction is on the curve, which a verifier rejects (§4.1); and a P-256 DER signature with high `s`, its low-`s` raw `r‖s`, and seven DER encodings a client rejects: a non-minimal integer, a trailing byte, a negative integer, a 33-byte integer, `r = 0`, `r = n` and a long-form length (§4.4). |
 
 ---
 

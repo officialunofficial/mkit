@@ -59,6 +59,16 @@ train).
   part values into the pack id. Golden vectors under
   `rust/tests/golden/{uploads,auth-v2}`. **SemVer:** additive.
 
+- *(attest)* `mkit_attest::eth`, behind the new default-off `grants`
+  feature: Keccak-256 (original Keccak, not SHA3-256), the EIP-191
+  personal-message digest, strict low-S secp256k1 recovery from
+  `r ‖ s ‖ v`, curve-validated secp256k1 and P-256 address derivation,
+  and the SPEC-WRITE-GRANTS §4.4 client normalizers (EIP-191 `v`/high-`s`,
+  P-256 DER to raw low-S `r ‖ s`), with a module-local `EthError`. Adds
+  the `sha3 0.11` dependency (optional). Golden vectors in
+  `rust/tests/golden/grants/eth-primitives.json`, cross-checked against
+  Foundry `cast`, viem and pycryptodome.
+
 - *(core)* Closure verification now has a pull-based
   `ObjectSource`/`verify_closure_streaming` API and a native
   `verify_closure_store` helper. `ClosureReport` gains the additive

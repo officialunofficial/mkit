@@ -27,6 +27,10 @@ default = ["algo-ed25519", "algo-secp256k1", "algo-p256"]
 algo-ed25519 = ["dep:ed25519-dalek"]
 algo-secp256k1 = ["dep:k256"]
 algo-p256 = ["dep:p256"]
+# SPEC-WRITE-GRANTS owner-signature primitives (`eth` module): Keccak-256,
+# EIP-191 digests, strict secp256k1 recovery, curve-validated address
+# derivation. OFF by default; pure Rust and wasm32-safe.
+grants = ["algo-ed25519", "algo-secp256k1", "algo-p256", "dep:sha3"]
 # BLS12-381 M-of-N threshold signing — for the release-party flow.
 # OFF by default: commonware-cryptography's `std` feature pulls blst
 # (a sizeable precompiled BLS library, via the `bls12381` feature `std`
@@ -98,6 +102,12 @@ p256 = { version = "0.14", optional = true, default-features = false, features =
 # cosign / `gh attestation verify` / the SLSA verifier can read it,
 # regardless of which signing algorithms are compiled in.
 sha2 = { version = "0.11", default-features = false }
+# Keccak-256 (the ORIGINAL Keccak, `0x01` padding) for the `grants`
+# feature's address derivation and EIP-191 digests (SPEC-WRITE-GRANTS
+# §4, §4.1). Same `digest 0.11` line as `sha2`; its only other
+# dependency, `keccak 0.2`, is already in the graph via ed25519-dalek.
+# Never use `sha3::Sha3_256` for these values.
+sha3 = { version = "0.11", default-features = false, optional = true }
 # BLS12-381 threshold signing (feature `bls-threshold`). Pulls blst via
 # commonware-cryptography's `std` feature (which, since 2026.9.0, enables
 # the now-optional `bls12381` feature that gates `dep:blst` — `std` is

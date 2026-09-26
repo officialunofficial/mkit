@@ -1,0 +1,5 @@
+# SPEC-WRITE-GRANTS golden vectors (deterministic)
+# Produced by `MKIT_WRITE_GOLDEN=1 cargo test -p mkit-attest --features grants --test golden_eth`
+# Every value is cross-checked against cast / viem / pycryptodome; see `cross_check` in each file.
+# Format: <name> <blake3-hex-of-file-bytes>
+eth-primitives 326e6d4544c3bdb99ef87992b8c03a835e85b6d8d724e239aaf59e830a6b9306
