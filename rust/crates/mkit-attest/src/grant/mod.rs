@@ -1,0 +1,52 @@
+//! Write grants (SPEC-WRITE-GRANTS): the `mkit-write-grant:v1` statement
+//! codec and its `X-Write-Grant` header encoding.
+//!
+//! * [`text`]: the §3.1 canonical text rules every statement shares.
+//! * [`ref_scope`]: §3.3 ref-scope patterns and flags, §8.1 effective flags.
+//! * [`statement`]: the §3.2 grant statement, its §3.5 rejections and the
+//!   §3.4 grant id.
+//! * [`header`]: the §4.2 `<statement>.<scheme>.<blob>` header value.
+//!
+//! Every parser here is strict and canonical: it accepts exactly one
+//! encoding per value and never repairs, and every encoder reproduces that
+//! encoding (`encode(parse(b)) == b`). Owner-signature verification, the
+//! epoch and visibility statements and the §7 verifier build on this.
+//!
+//! Repository identities and namespaces come from
+//! [`mkit_core::repo_identity`] (SPEC-TRANSPORT-CONNECT §7.4).
+
+pub mod error;
+pub mod header;
+pub mod ref_scope;
+pub mod statement;
+pub mod text;
+
+pub use error::GrantError;
+pub use header::{OwnerScheme, SignedHeader};
+pub use mkit_core::repo_identity::{Namespace, RepositoryIdentity};
+pub use ref_scope::{RefFlags, RefPattern, RefScopes, head_packmap, packmap_head};
+pub use statement::{Capabilities, Capability, Grant, RepoScope};
+
+/// Domain separator and first field of a grant statement (§12.1).
+pub const DOMAIN_GRANT: &str = "mkit-write-grant:v1";
+
+/// Longest grant lifetime: 30 days (§1.1).
+pub const GRANT_MAX_LIFETIME_MS: i64 = 2_592_000_000;
+/// Longest epoch or visibility statement lifetime: 30 days (§1.1).
+pub const EPOCH_STATEMENT_MAX_LIFETIME_MS: i64 = 2_592_000_000;
+/// Largest accepted epoch increase in one epoch statement (§1.1, §5.2).
+pub const MAX_EPOCH_STEP: u64 = 1024;
+/// Largest accepted clock lead of a statement's `created` (§1.1): the auth
+/// v2 clock lead.
+pub const MAX_CLOCK_LEAD_MS: i64 = mkit_core::write_auth::MAX_CLOCK_LEAD_MS;
+/// Most audiences in one statement (§1.1).
+pub const MAX_AUDIENCES: usize = 8;
+/// Most ref-scope entries in one grant (§1.1).
+pub const MAX_REF_SCOPES: usize = 16;
+/// Longest statement in bytes (§1.1, §3.1).
+pub const MAX_STATEMENT_BYTES: usize = 4096;
+/// Longest `X-Write-Grant` header value in bytes (§1.1, §4.2).
+pub const MAX_GRANT_HEADER_BYTES: usize = 8192;
+
+// §1.1 fixes the clock lead to the auth v2 value.
+const _: () = assert!(MAX_CLOCK_LEAD_MS == 30_000);

@@ -27,9 +27,10 @@ default = ["algo-ed25519", "algo-secp256k1", "algo-p256"]
 algo-ed25519 = ["dep:ed25519-dalek"]
 algo-secp256k1 = ["dep:k256"]
 algo-p256 = ["dep:p256"]
-# SPEC-WRITE-GRANTS owner-signature primitives (`eth` module): Keccak-256,
-# EIP-191 digests, strict secp256k1 recovery, curve-validated address
-# derivation. OFF by default; pure Rust and wasm32-safe.
+# SPEC-WRITE-GRANTS support (not a default feature; pure Rust and wasm32-safe):
+# the grant statement codec and `X-Write-Grant` header (`mkit_attest::grant`)
+# and the §4 owner-signature primitives (`eth` module): Keccak-256, EIP-191
+# digests, strict secp256k1 recovery, curve-validated address derivation.
 grants = ["algo-ed25519", "algo-secp256k1", "algo-p256", "dep:sha3"]
 # BLS12-381 M-of-N threshold signing — for the release-party flow.
 # OFF by default: commonware-cryptography's `std` feature pulls blst
@@ -133,6 +134,8 @@ rand_core = { version = "0.10", optional = true, default-features = false }
 
 [dev-dependencies]
 hex = "0.4"
+# Roundtrip property tests over generated grants (`grant` module).
+proptest = "1"
 # Tests that hand-build signing keys need dalek unconditionally, so pull
 # it in as a dev-dep separate from the feature-gated runtime dep.
 ed25519-dalek = { version = "3", default-features = false, features = ["alloc"] }
