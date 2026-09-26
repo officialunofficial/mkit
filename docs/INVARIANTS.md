@@ -912,7 +912,7 @@ already verified. **Keeping the source immutable across resumes is the caller's 
 R2 range reads to the object's etag). A source whose already-verified prefix changed after verification can still
 reach `Done`, but only with entries of the verified pack.
 
-A `None` checkpoint means keep the previous cursor. Resuming from it re-reads at most one window plus the trailer.
+A `None` checkpoint means keep the previous cursor. After a boundary-state `None` (the trailer phase), resuming re-reads at most one window plus the trailer; after a mid-entry `None`, it re-reads every window the unfinished entry spans.
 
 **Because:** a streaming trailer check occurs after entries have been delivered;
 completed-window CVs and the lazy current-window prefix commitment bind the
