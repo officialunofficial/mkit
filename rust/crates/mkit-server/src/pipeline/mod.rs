@@ -196,7 +196,7 @@ pub struct Pipeline<B, N, H = Hooks> {
     metrics: Arc<dyn Metrics>,
     #[cfg(feature = "test-faults")]
     faults: Option<Arc<dyn faults::DynFaultHooks>>,
-    gate: Option<gate::WriteGate>,
+    gate: Option<Arc<gate::WriteGate>>,
 }
 
 impl<B, N, H> core::fmt::Debug for Pipeline<B, N, H> {
@@ -342,8 +342,40 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// processes on one store still race, through the optimistic loop.
     #[must_use]
     pub fn with_write_gate(mut self) -> Self {
-        self.gate = Some(gate::WriteGate::new());
+        self.gate = Some(Arc::new(gate::WriteGate::new()));
         self
+    }
+
+    /// A second pipeline over the same stores, hooks, shard map, clock,
+    /// metrics, test fault hooks and write gate, authenticating with
+    /// `auth`: how one server hosts bindings with different identity
+    /// sources on one root (the enc listener's `TransportIdentity` beside
+    /// an HTTP listener's bearer token or auth v2) while its writes to a
+    /// partition still pass one gate. Every other setting is `self`'s.
+    ///
+    /// # Errors
+    /// As [`Self::new`] for `auth` over these stores.
+    pub fn with_auth(&self, auth: AuthMode) -> Result<Self, ServerError>
+    where
+        B: Clone,
+        N: Clone,
+        H: Clone,
+    {
+        let mut cfg = self.cfg.clone();
+        cfg.auth = auth;
+        let mut sibling = Self::new(
+            self.blobs.clone(),
+            self.meta.clone(),
+            self.hooks.clone(),
+            cfg,
+            Arc::clone(&self.clock),
+            Arc::clone(&self.metrics),
+        )?;
+        sibling.shards = Arc::clone(&self.shards);
+        sibling.gate.clone_from(&self.gate);
+        #[cfg(feature = "test-faults")]
+        sibling.faults.clone_from(&self.faults);
+        Ok(sibling)
     }
 
     /// Stages 0a and 1: verify credentials and map the identity. Pure and

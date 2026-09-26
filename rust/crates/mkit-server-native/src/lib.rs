@@ -5,6 +5,8 @@
 mod blocking;
 #[cfg(feature = "http")]
 pub mod config;
+#[cfg(feature = "enc")]
+pub mod enc;
 #[cfg(feature = "http")]
 pub mod exit;
 #[cfg(feature = "http")]

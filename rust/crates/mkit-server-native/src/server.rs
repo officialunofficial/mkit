@@ -46,21 +46,43 @@ pub struct ServerLocks {
     _serve: RepoLock,
 }
 
-/// A server ready to bind: its router, and the root's locks.
+/// What a server serves over its stores: the HTTP router and, when
+/// configured, the enc listener's service. Both run one pipeline's stores,
+/// hooks and write gate.
+#[derive(Debug)]
+pub struct Services {
+    /// The router over the configured stores (served only with
+    /// [`ServeConfig::listen`]).
+    pub router: axum::Router,
+    /// The enc listener's key and session function, with
+    /// `ServeConfig::enc`.
+    #[cfg(feature = "enc")]
+    pub enc: Option<crate::enc::EncService>,
+}
+
+/// A server ready to bind: its services, and the root's locks.
 #[derive(Debug)]
 pub struct Opened {
     /// The router over the configured stores.
     pub router: axum::Router,
+    /// The enc listener's service, when configured.
+    #[cfg(feature = "enc")]
+    pub enc: Option<crate::enc::EncService>,
     locks: ServerLocks,
 }
 
 impl Opened {
-    /// The router, and the locks to hold until the runtime that serves it
-    /// has shut down (so no store call is still running on its blocking
-    /// pool when another process may take the root).
+    /// The services, and the locks to hold until the runtime that serves
+    /// them has shut down (so no store call is still running on its
+    /// blocking pool when another process may take the root).
     #[must_use = "the locks release when dropped"]
-    pub fn into_parts(self) -> (axum::Router, ServerLocks) {
-        (self.router, self.locks)
+    pub fn into_parts(self) -> (Services, ServerLocks) {
+        let services = Services {
+            router: self.router,
+            #[cfg(feature = "enc")]
+            enc: self.enc,
+        };
+        (services, self.locks)
     }
 }
 
@@ -340,11 +362,13 @@ pub fn bind_database(conn: &RusqliteConn, root_id: &str, db: &Path) -> Result<()
     }
 }
 
-/// The pipeline over `blobs` and `meta`, as a router.
-fn router<B, N>(blobs: B, meta: N, cfg: &ServeConfig) -> Result<axum::Router, ConfigError>
+/// The pipeline over `blobs` and `meta` as a router and, with an enc
+/// listener, the enc service over its `TransportIdentity` sibling (same
+/// stores, same write gate).
+fn build_services<B, N>(blobs: B, meta: N, cfg: &ServeConfig) -> Result<Services, ConfigError>
 where
-    B: BlobStore + 'static,
-    N: NamespaceStore + 'static,
+    B: BlobStore + Clone + 'static,
+    N: NamespaceStore + Clone + 'static,
 {
     let pipeline = Pipeline::new(
         blobs,
@@ -359,7 +383,23 @@ where
     // serialize each partition's writes here rather than race them
     // through re-plans.
     .with_write_gate();
-    Ok(build_router(Arc::new(pipeline), &cfg.router))
+    #[cfg(feature = "enc")]
+    let enc = match &cfg.enc {
+        Some(opts) => {
+            let sibling = pipeline
+                .with_auth(mkit_server::pipeline::AuthMode::TransportIdentity)
+                .map_err(|e| config_error("pipeline", e))?;
+            let key = crate::enc::load_server_key(&opts.server_key)?;
+            let session = crate::enc::session_fn(Arc::new(sibling), opts.idle_timeout);
+            Some(crate::enc::EncService { key, session })
+        }
+        None => None,
+    };
+    Ok(Services {
+        router: build_router(Arc::new(pipeline), &cfg.router),
+        #[cfg(feature = "enc")]
+        enc,
+    })
 }
 
 /// Take the root's locks: [`SERVER_LOCK`] exclusively (one server per
@@ -411,7 +451,7 @@ pub fn open(cfg: &ServeConfig) -> Result<Opened, ConfigError> {
             "only single-repo addressing is served",
         ));
     };
-    let router = match &cfg.blob {
+    let services = match &cfg.blob {
         BlobChoice::Fs => with_meta(Blocking::new(FsBlobStore::new(&cfg.repo_root)), repo, cfg)?,
         #[cfg(feature = "s3")]
         BlobChoice::S3 {
@@ -419,19 +459,24 @@ pub fn open(cfg: &ServeConfig) -> Result<Opened, ConfigError> {
             spool_max_bytes,
         } => with_meta(open_s3(config, *spool_max_bytes, cfg)?, repo, cfg)?,
     };
-    Ok(Opened { router, locks })
+    Ok(Opened {
+        router: services.router,
+        #[cfg(feature = "enc")]
+        enc: services.enc,
+        locks,
+    })
 }
 
-/// The router over `blobs` and the metadata store `cfg` names.
-fn with_meta<B>(blobs: B, repo: &RepoId, cfg: &ServeConfig) -> Result<axum::Router, ConfigError>
+/// The services over `blobs` and the metadata store `cfg` names.
+fn with_meta<B>(blobs: B, repo: &RepoId, cfg: &ServeConfig) -> Result<Services, ConfigError>
 where
-    B: BlobStore + 'static,
+    B: BlobStore + Clone + 'static,
 {
     match &cfg.meta {
         MetaChoice::FsLayout => {
             let meta = FsLayoutStore::open(&cfg.repo_root, repo)
                 .map_err(|e| config_error("--meta fs-layout", e))?;
-            router(blobs, Blocking::new(meta), cfg)
+            build_services(blobs, Blocking::new(meta), cfg)
         }
         MetaChoice::Sqlite { path, capacity } => {
             let root_id = claim_root_for_sqlite(&cfg.repo_root, path)?;
@@ -440,7 +485,7 @@ where
             let meta = SqlKvStore::open_with_capacity(conn.clone(), *capacity)
                 .map_err(|e| config_error("--meta sqlite", e))?;
             bind_database(&conn, &root_id, path)?;
-            router(blobs, Blocking::new(meta), cfg)
+            build_services(blobs, Blocking::new(meta), cfg)
         }
     }
 }
@@ -481,41 +526,90 @@ fn open_s3(
         .with_max_bytes(cfg.pipeline.upload_limits.max_total_bytes))
 }
 
-/// Bind [`ServeConfig::listen`] and serve `router` until `shutdown`
-/// triggers and in-flight requests drain (see [`crate::serve`]).
-///
-/// # Errors
-/// `UNAVAILABLE` when the address cannot be bound or the listener fails.
-pub async fn serve_router(
-    cfg: &ServeConfig,
-    router: axum::Router,
-    shutdown: Shutdown,
-) -> Result<(), ConfigError> {
-    let listener = TcpListener::bind(cfg.listen).await.map_err(|e| {
+async fn bind(addr: std::net::SocketAddr, flag: &str) -> Result<TcpListener, ConfigError> {
+    TcpListener::bind(addr).await.map_err(|e| {
         ConfigError::new(
             exit::UNAVAILABLE,
-            format!("mkit-server serve: bind {}: {e}", cfg.listen),
+            format!("mkit-server serve: {flag} {addr}: bind: {e}"),
         )
-    })?;
-    let addr = listener
-        .local_addr()
-        .map_or_else(|_| cfg.listen.to_string(), |a| a.to_string());
-    tracing::info!(%addr, root = %cfg.repo_root.display(), meta = ?cfg.meta, blob = %cfg.blob, "listening");
-    serve(listener, router, shutdown, &cfg.serve)
-        .await
-        .map_err(|e| ConfigError::new(exit::UNAVAILABLE, format!("mkit-server serve: {e}")))?;
-    tracing::info!("stopped");
-    Ok(())
+    })
 }
 
-/// [`open`], then [`serve_router`]; the locks are released on return. The
-/// binary instead holds them until its runtime has shut down.
+/// Bind the configured listeners, then serve `services` on them until
+/// `shutdown` triggers and in-flight requests and sessions drain (see
+/// [`crate::serve`] and `enc::serve`). Both listeners share the runtime and
+/// the shutdown signal; one that fails triggers it, so the other drains too.
 ///
 /// # Errors
-/// As [`open`] and [`serve_router`].
+/// `UNAVAILABLE` when an address cannot be bound or a listener fails.
+pub async fn serve_services(
+    cfg: &ServeConfig,
+    services: Services,
+    shutdown: Shutdown,
+) -> Result<(), ConfigError> {
+    let http = match cfg.listen {
+        Some(addr) => Some(bind(addr, "--listen").await?),
+        None => None,
+    };
+    #[cfg(feature = "enc")]
+    let enc = match (&cfg.enc, services.enc) {
+        (Some(opts), Some(service)) => Some((bind(opts.listen, "--listen-enc").await?, service)),
+        _ => None,
+    };
+    let root = cfg.repo_root.display();
+    let stop_on_error = |result: Result<(), ConfigError>| {
+        if result.is_err() {
+            shutdown.trigger();
+        }
+        result
+    };
+    let router = services.router;
+    let http_run = async {
+        let Some(listener) = http else {
+            return Ok(());
+        };
+        let addr = listener.local_addr().map(|a| a.to_string());
+        let addr = addr.unwrap_or_default();
+        tracing::info!(%addr, %root, meta = ?cfg.meta, blob = %cfg.blob, "listening");
+        serve(listener, router, shutdown.clone(), &cfg.serve)
+            .await
+            .map_err(|e| ConfigError::new(exit::UNAVAILABLE, format!("mkit-server serve: {e}")))
+    };
+    #[cfg(feature = "enc")]
+    let enc_run = async {
+        let (Some(opts), Some((listener, service))) = (&cfg.enc, enc) else {
+            return Ok(());
+        };
+        let addr = listener.local_addr().map(|a| a.to_string());
+        let addr = addr.unwrap_or_default();
+        let pubkey = crate::enc::public_key_hex(&service.key);
+        tracing::info!(%addr, %pubkey, %root, meta = ?cfg.meta, blob = %cfg.blob, "enc listening");
+        crate::enc::serve(listener, service, opts, shutdown.clone())
+            .await
+            .map_err(|e| {
+                ConfigError::new(
+                    exit::UNAVAILABLE,
+                    format!("mkit-server serve: --listen-enc: {e}"),
+                )
+            })
+    };
+    #[cfg(not(feature = "enc"))]
+    let enc_run = async { Ok(()) };
+    let (http_result, enc_result) = tokio::join!(async { stop_on_error(http_run.await) }, async {
+        stop_on_error(enc_run.await)
+    },);
+    tracing::info!("stopped");
+    http_result.and(enc_result)
+}
+
+/// [`open`], then [`serve_services`]; the locks are released on return.
+/// The binary instead holds them until its runtime has shut down.
+///
+/// # Errors
+/// As [`open`] and [`serve_services`].
 pub async fn run(cfg: &ServeConfig, shutdown: Shutdown) -> Result<(), ConfigError> {
-    let (router, _locks) = open(cfg)?.into_parts();
-    serve_router(cfg, router, shutdown).await
+    let (services, _locks) = open(cfg)?.into_parts();
+    serve_services(cfg, services, shutdown).await
 }
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
 //! `mkit-server`: the long-running native mkit server (PRD §5.1, D31).
 //!
 //! ```text
-//! mkit-server serve --listen <ADDR> --repo-root <DIR> [...]
+//! mkit-server serve [--listen <ADDR>] [--listen-enc <ADDR>] --repo-root <DIR> [...]
 //! mkit-server version
 //! ```
 //!
@@ -10,7 +10,7 @@
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use mkit_server_native::config::{ServeArgs, UNSAFE_BANNER, resolve};
+use mkit_server_native::config::{ServeArgs, resolve};
 use mkit_server_native::telemetry::{DEFAULT_FILTER, init_tracing};
 use mkit_server_native::{Shutdown, exit, server, shutdown_signal};
 
@@ -26,7 +26,7 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Serve `mkit.transport.v1` over HTTP (terminate TLS at a reverse
-    /// proxy).
+    /// proxy), `mkit+enc://` clients over the encrypted listener, or both.
     Serve(Box<ServeArgs>),
     /// Print the version.
     Version,
@@ -64,8 +64,8 @@ fn serve(args: &ServeArgs) -> u8 {
             return e.code;
         }
     };
-    if cfg.is_open() {
-        eprintln!("{UNSAFE_BANNER}");
+    for banner in cfg.banners() {
+        eprintln!("{banner}");
     }
     let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| DEFAULT_FILTER.to_owned());
     if let Err(e) = init_tracing(cfg.log_format, &filter) {
@@ -83,13 +83,20 @@ fn serve(args: &ServeArgs) -> u8 {
         }
     };
     // Locks first, outside the runtime: they outlive it (below).
-    let (router, locks) = match server::open(&cfg) {
+    let (services, locks) = match server::open(&cfg) {
         Ok(opened) => opened.into_parts(),
         Err(e) => {
             eprintln!("{e}");
             return e.code;
         }
     };
+    #[cfg(feature = "enc")]
+    if let (Some(opts), Some(service)) = (&cfg.enc, &services.enc) {
+        eprintln!(
+            "{}",
+            mkit_server_native::enc::announcement(opts.listen, &service.key)
+        );
+    }
     let result = runtime.block_on(async {
         let shutdown = Shutdown::new();
         let trigger = shutdown.clone();
@@ -97,7 +104,7 @@ fn serve(args: &ServeArgs) -> u8 {
             shutdown_signal().await;
             trigger.trigger();
         });
-        server::serve_router(&cfg, router, shutdown).await
+        server::serve_services(&cfg, services, shutdown).await
     });
     // Let store calls still running on the blocking pool (an abandoned
     // request's `SQLite` commit) finish before the root's locks go, so no

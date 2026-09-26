@@ -44,6 +44,7 @@ ci:
     just ci-docs
     just ci-geiger
     just ci-scripts
+    just interop-enc
 
 # Mirrors cloudbuild/ci.yaml's rust/ + contrib/signers/ steps.
 ci-linux:
@@ -122,7 +123,10 @@ ci-security:
     }
     ( cd rust && run_audit )
     ( cd contrib/signers && run_audit )
+    ( cd contrib/interop/enc-client-0.4 && run_audit )
     cargo deny --manifest-path rust/Cargo.toml --all-features check
+    cargo deny --manifest-path contrib/interop/enc-client-0.4/Cargo.toml --all-features \
+      check --config rust/deny.toml
 
 # Spec-status, wasm dep-graph, mkit-wasm / mkit-server wasm32 checks, and
 # the pack-ruzstd wasm32 test run.
@@ -138,6 +142,15 @@ ci-scripts:
     ( cd rust && cargo check -p mkit-wasm --target wasm32-unknown-unknown )
     ( cd rust && cargo check -p mkit-server --target wasm32-unknown-unknown )
     bash scripts/wasm-ruzstd-check.sh
+
+# The published mkit-transport-enc 0.4 client (crates.io) against this
+# tree's `mkit-server serve --listen-enc` (contrib/interop/enc-client-0.4).
+interop-enc:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ( cd rust && cargo build --locked -p mkit-server-native --bin mkit-server )
+    target="${CARGO_TARGET_DIR:-$PWD/rust/target}"
+    ( cd contrib/interop/enc-client-0.4 && MKIT_SERVER_BIN="$target/debug/mkit-server" cargo test --locked )
 
 # Mirrors cloudbuild/docs.yaml (rustdoc -D warnings).
 ci-docs:

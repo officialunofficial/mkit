@@ -60,7 +60,11 @@ default = []
 # builds without tokio when the in-process path is all callers need
 # (transport-trait shape work, deterministic-runtime tests). Turn on
 # from `mkit-cli` via its `enc-transport` feature.
-tcp = ["dep:tokio", "dep:getrandom", "dep:rand_core", "dep:governor"]
+tcp = ["dep:tokio", "dep:getrandom", "dep:rand_core", "dep:governor", "dep:libc"]
+
+[target.'cfg(unix)'.dependencies]
+# `ENFILE`/`EMFILE`: the accept errors the listener retries.
+libc = { version = "0.2", optional = true }
 
 [dev-dependencies]
 # Deterministic runner for the in-process round-trip test. The test

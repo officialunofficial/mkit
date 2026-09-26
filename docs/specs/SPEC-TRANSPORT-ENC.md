@@ -170,7 +170,13 @@ After the encrypted handshake completes, the client MUST send a
 `Hello` frame with `proto = PROTOCOL_VERSION_1` and `client_id =
 "mkit <semver>"`. The server MUST reply with a `HelloResponse` whose
 `proto` matches. If either side disagrees, both close the connection
-without further verb exchange.
+without further verb exchange. As over ssh (SPEC-TRANSPORT §4.2), a
+server answers a first frame that is not `Hello` with
+`Error{INVALID_REQUEST, "first frame must be Hello"}`, and a `Hello` for
+another version with `Error{INVALID_REQUEST, "unsupported proto_version
+<n>"}`, before it closes; it serves no verb on that connection. (The
+legacy `mkit serve --listen-enc` closes without replying; it is removed
+in favour of `mkit-server serve --listen-enc`.)
 
 This Hello is layered **on top of** the encrypted channel, not inside
 the encrypted handshake. It mirrors what `mkit-transport-ssh` does and
@@ -228,23 +234,41 @@ crate.
 `remote_dispatch::open` recognizes the `mkit+enc://` scheme behind the
 `mkit-cli/enc-transport` cargo feature; default builds remain SSH-only.
 
-`mkit serve --listen-enc <addr>` spawns an async accept loop via
-`mkit_transport_enc::serve_tcp_with_policy`. The listener is
-**fail-closed** (issue #178): it refuses to bind unless the operator
+Two listeners serve the protocol. `mkit-server serve --listen-enc <addr>`
+runs `mkit_transport_enc::serve_tcp_listener`, the async accept loop,
+on the server's runtime beside its HTTP listener, and serves every
+session with `mkit_server::ssh::serve_session` over the server's
+pipeline, as the `TransportPeer` principal holding the key the handshake
+authenticated; its verb replies are therefore the ssh session's (§3).
+`mkit serve --listen-enc <addr>` (the CLI, until its removal) runs the
+blocking `serve_tcp_with_policy_and_bounds`. Both listeners are
+**fail-closed** (issue #178): they refuse to bind unless the operator
 supplies `--enc-authorized-peers <PATH>` (an allowlist of client public
 keys) or passes `--unsafe-allow-any-enc-peer` (a dev escape that prints
-a loud warning). `serve_tcp_with_policy` consults a `PeerPolicy` &mdash;
+a loud warning). The accept loop consults a `PeerPolicy` &mdash;
 `AllowAny` (dev / the explicit unsafe escape) or
 `Allowlist(HashSet<[u8;32]>)` built from the `--enc-authorized-peers`
 file (one client pubkey per line, 64-hex or 43-char url-safe base64;
-`#` comments and blank lines ignored). The bare `serve_tcp` retains
+`#` comments and blank lines ignored). `serve_tcp_with_addr` retains
 `AllowAny` for the direct e2e harness only. The allowlist bouncer
 rejects any unlisted dialer at the handshake &mdash; a rejected peer never
 receives a `HelloResponse`, list-refs, packs, or update-ref.
 
+A listener facing the network bounds each client: the handshake deadline
+(`--enc-handshake-timeout-secs`, §2.1), a per-frame idle timeout after
+it (`--enc-idle-timeout-secs`; `mkit-server` also applies it to each
+write), and the per-connection budgets of SPEC-TRANSPORT §4.4.
+`mkit-server` also caps the connections in the handshake
+(`--enc-max-handshakes`) apart from the sessions (`--max-connections`), so
+clients that connect and never handshake cannot hold the slots of
+authorized ones; its handshake deadline defaults to 10 s. On shutdown it
+stops accepting and ends each session at its next frame boundary (never
+inside an upload), within its grace period.
+
 The server identity is a **stable** raw-32 key loaded/auto-created from
-`--enc-server-key <PATH>` (or a user-scoped default
-`~/.config/mkit/enc/server.key`) so the advertised `?pubkey=` is stable
+`--enc-server-key <PATH>` (for `mkit serve`, or a user-scoped default
+`~/.config/mkit/enc/server.key`; `mkit-server` requires the flag with an
+allowlist) so the advertised `?pubkey=` is stable
 across restarts; only the unsafe allow-any mode keeps an ephemeral
 per-process key. A client can similarly pin its identity via the
 `MKIT_ENC_CLIENT_KEY` environment variable (a user-scoped or

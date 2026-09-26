@@ -24,7 +24,7 @@ authors.workspace = true
 workspace = true
 
 [features]
-default = ["sqlite", "http", "s3"]
+default = ["sqlite", "http", "s3", "enc"]
 # `S3BlobStore`: content-addressed blobs in an S3-compatible bucket, signed
 # with `mkit-transport-s3`'s SigV4 code, over reqwest (async, rustls: the
 # workspace's existing HTTP client and TLS stack, no new supply chain).
@@ -61,6 +61,19 @@ http = [
     "tokio/signal",
     "tokio/macros",
     "tokio/time",
+]
+# `mkit-server serve --listen-enc`: the `mkit+enc://` listener, each
+# session run by `mkit_server::ssh::serve_session` over the pipeline
+# (the feature set of `mkit-cli`'s `enc-transport`).
+enc = [
+    "http",
+    "dep:mkit-transport-enc",
+    "mkit-transport-enc/tcp",
+    "dep:commonware-cryptography",
+    "dep:commonware-codec",
+    "dep:mkit-rpc",
+    "dep:zeroize",
+    "mkit-server/ssh",
 ]
 
 [dependencies]
@@ -111,6 +124,13 @@ sha2 = { version = "0.11", optional = true }
 # The unnamed upload spool file.
 tempfile = { version = "3", optional = true }
 url = { version = "2", optional = true }
+# The enc listener: the published transport's async accept loop, the
+# server's static ed25519 key, and the ssh frame type the session speaks.
+mkit-transport-enc = { version = "0.4", path = "../mkit-transport-enc", optional = true }
+commonware-cryptography = { workspace = true, features = ["std"], optional = true }
+commonware-codec = { workspace = true, optional = true }
+mkit-rpc = { version = "0.4", path = "../mkit-rpc", optional = true }
+zeroize = { version = "1", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 # `O_NOFOLLOW`/`O_NONBLOCK` for opening the bearer token file once.
@@ -168,3 +188,7 @@ required-features = ["http", "s3"]
 [[test]]
 name = "s3_store"
 required-features = ["s3"]
+
+[[test]]
+name = "enc_listener"
+required-features = ["enc"]

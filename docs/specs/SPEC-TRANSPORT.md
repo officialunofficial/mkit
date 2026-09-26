@@ -306,7 +306,9 @@ connection could hold a listener worker and stream unbounded work
 indefinitely; the SSH path already terminates such a peer via the
 cumulative caps above. A cap trip sends an
 `Error{ ERROR_CODE_INVALID_REQUEST }` frame and drops the connection,
-matching the SSH server's response shape.
+matching the SSH server's response shape. `mkit-server serve
+--listen-enc` runs each session through the SSH server's own session
+(`mkit_server::ssh::serve_session`), so the caps are the same code.
 
 The framing layer's per-frame `MAX_FRAME_BYTES = 1 MiB` cap (per
 [SPEC-RPC §1](SPEC-RPC.md#1-wire-framing)) bounds individual frames;

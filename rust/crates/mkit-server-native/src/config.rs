@@ -138,9 +138,43 @@ pub enum LogFormat {
 #[allow(clippy::struct_excessive_bools)]
 pub struct ServeArgs {
     /// Address to listen on, e.g. `127.0.0.1:8080`. Plaintext HTTP/1.1 and
-    /// h2c: terminate TLS at a reverse proxy.
+    /// h2c: terminate TLS at a reverse proxy. Optional with `--listen-enc`;
+    /// at least one listener is required.
     #[arg(long, value_name = "ADDR")]
-    pub listen: SocketAddr,
+    pub listen: Option<SocketAddr>,
+    /// Also (or only) serve `mkit+enc://` clients on this address
+    /// (SPEC-TRANSPORT-ENC). Fails closed: needs `--enc-authorized-peers`
+    /// or `--unsafe-allow-any-enc-peer`.
+    #[arg(long, value_name = "ADDR")]
+    pub listen_enc: Option<SocketAddr>,
+    /// The enc listener's allowlist of client ed25519 public keys, one per
+    /// line (64-hex or 43-char url-safe base64; `#` comments and blank
+    /// lines ignored). An unlisted client is rejected at the handshake.
+    #[arg(long, value_name = "PATH")]
+    pub enc_authorized_peers: Option<PathBuf>,
+    /// The enc listener's stable raw 32-byte ed25519 key file, created
+    /// (`0600`, in `0700` directories) on first run. Required with
+    /// `--enc-authorized-peers`, so the `?pubkey=` clients pin survives
+    /// restarts.
+    #[arg(long, value_name = "PATH")]
+    pub enc_server_key: Option<PathBuf>,
+    /// Development only: the enc listener accepts ANY client key. Without
+    /// `--enc-server-key` the server key is ephemeral. Refused beside an
+    /// HTTP listener that requires authentication.
+    #[arg(long)]
+    pub unsafe_allow_any_enc_peer: bool,
+    /// Drop an enc session whose next frame does not arrive (or whose reply
+    /// cannot be written) within this many seconds; at least 1.
+    #[arg(long, value_name = "SECS", default_value_t = 60)]
+    pub enc_idle_timeout_secs: u64,
+    /// Deadline for an enc connection's encrypted handshake.
+    #[arg(long, value_name = "SECS", default_value_t = 10)]
+    pub enc_handshake_timeout_secs: u64,
+    /// Enc connections in the handshake at once, apart from the
+    /// `--max-connections` sessions, so silent clients cannot take every
+    /// slot (default: 128, or `--max-connections` if lower).
+    #[arg(long, value_name = "N")]
+    pub enc_max_handshakes: Option<usize>,
     /// The served root: a directory holding `.mkit`. Packs live in
     /// `<DIR>/packs`, file refs in `<DIR>/refs`.
     #[arg(long, value_name = "DIR")]
@@ -216,8 +250,8 @@ pub struct ServeArgs {
     /// How long a client may take to send its request headers.
     #[arg(long, value_name = "SECS", default_value_t = 10)]
     pub header_read_timeout_secs: u64,
-    /// Connections open at once; further clients wait in the accept
-    /// backlog.
+    /// Connections open at once, per listener; further clients wait in the
+    /// accept backlog.
     #[arg(long, value_name = "N", default_value_t = 1024)]
     pub max_connections: usize,
     /// Close a connection (HTTP/2 or HTTP/1.1 keep-alive) that has had no
@@ -317,15 +351,20 @@ impl fmt::Display for BlobChoice {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ServeConfig {
-    /// Where to listen.
-    pub listen: SocketAddr,
+    /// Where the HTTP listener listens, if there is one.
+    pub listen: Option<SocketAddr>,
+    /// The enc listener, if there is one.
+    #[cfg(feature = "enc")]
+    pub enc: Option<crate::enc::EncOptions>,
     /// The canonical served root.
     pub repo_root: PathBuf,
     /// The metadata store.
     pub meta: MetaChoice,
     /// The blob store.
     pub blob: BlobChoice,
-    /// The pipeline's settings (auth, addressing, limits, quota).
+    /// The HTTP pipeline's settings (auth, addressing, limits, quota). The
+    /// enc listener runs a `TransportIdentity` sibling of it; with no HTTP
+    /// listener, its auth is `TransportIdentity` too.
     pub pipeline: PipelineConfig,
     /// The router's layers.
     pub router: RouterOptions,
@@ -343,6 +382,25 @@ impl ServeConfig {
     pub fn is_open(&self) -> bool {
         matches!(self.pipeline.auth, AuthMode::Open)
     }
+
+    /// The warnings to print before serving: [`UNSAFE_BANNER`] for an open
+    /// HTTP listener, the enc one for an enc listener accepting any peer.
+    #[must_use]
+    pub fn banners(&self) -> Vec<&'static str> {
+        let mut banners = Vec::new();
+        if self.is_open() {
+            banners.push(UNSAFE_BANNER);
+        }
+        #[cfg(feature = "enc")]
+        if self
+            .enc
+            .as_ref()
+            .is_some_and(crate::enc::EncOptions::is_open)
+        {
+            banners.push(crate::enc::UNSAFE_ENC_BANNER);
+        }
+        banners
+    }
 }
 
 /// The banner `--unsafe-allow-any-peer` prints, as `mkit serve --http`
@@ -355,7 +413,7 @@ Every RPC — including ref writes and pack uploads — is open.
 Use this only for local development, NEVER in production.
 ============================================================";
 
-const PREFIX: &str = "mkit-server serve";
+pub(crate) const PREFIX: &str = "mkit-server serve";
 
 /// The auth mode the flags choose, fail-closed as `mkit serve --http`
 /// (`serve/http.rs`): a token and the unsafe flag exclude each other, an
@@ -428,17 +486,70 @@ fn read_token(path: &Path) -> Result<String, ConfigError> {
 }
 
 /// The whole of the secret file `path`, given by `flag`, opened and checked
-/// as described at [`read_token`]; `env_hint` names the environment
-/// alternative. Error messages never quote its contents.
+/// as described at [`read_token`] ([`read_checked`] with
+/// [`ReadRule::SECRET`]); `env_hint` names the environment alternative.
+/// Error messages never quote its contents.
 fn read_secret_file(path: &Path, flag: &str, env_hint: &str) -> Result<String, ConfigError> {
-    use std::io::Read as _;
-
-    let refuse = |why: String| {
+    let symlink = format!(
+        "is a symlink; point the flag at the file itself, or pass a symlinked secret mount \
+         (e.g. Kubernetes) through {env_hint}"
+    );
+    read_checked(path, &ReadRule::SECRET, &symlink).map_err(|why| {
         ConfigError::new(
             exit::CONFIG_ERROR,
             format!("{PREFIX}: {flag} {}: {why}", path.display()),
         )
+    })
+}
+
+/// Which permission bits [`read_checked`] refuses on Unix, and how it
+/// tells the operator.
+pub(crate) struct ReadRule {
+    /// Refused mode bits.
+    mask: u32,
+    /// What the refused bits allow, e.g. `accessible by group or others`.
+    what: &'static str,
+    /// The `chmod` argument that fixes it.
+    chmod: &'static str,
+    /// Whether the file must be owned by the server's user or root.
+    owned: bool,
+}
+
+impl ReadRule {
+    /// A secret: readable by its owner only.
+    pub(crate) const SECRET: Self = Self {
+        mask: 0o077,
+        what: "accessible by group or others",
+        chmod: "600",
+        owned: false,
     };
+    /// Security configuration anyone may read but only its owner may
+    /// change (an allowlist of peer keys).
+    #[cfg(feature = "enc")]
+    pub(crate) const OWNER_WRITABLE: Self = Self {
+        mask: 0o022,
+        what: "writable by group or others",
+        chmod: "go-w",
+        owned: true,
+    };
+}
+
+/// Most bytes [`read_checked`] reads.
+const MAX_CONFIG_FILE_BYTES: u64 = 1 << 20;
+
+/// The UTF-8 text of `path`, opened once without following a symlink
+/// (`O_NOFOLLOW`, and `O_NONBLOCK` so a FIFO cannot stall startup), with
+/// the checks run on the open handle (`fstat`): a regular file of at most
+/// 1 MiB, on Unix without `rule`'s mode bits (and, when `rule` says so,
+/// owned by this process's effective user or root). Nothing can swap the
+/// file between the check and the read.
+///
+/// # Errors
+/// Why the file is refused, for the caller to prefix with its flag;
+/// `symlink` when it is a symlink.
+pub(crate) fn read_checked(path: &Path, rule: &ReadRule, symlink: &str) -> Result<String, String> {
+    use std::io::Read as _;
+
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -446,34 +557,48 @@ fn read_secret_file(path: &Path, flag: &str, env_hint: &str) -> Result<String, C
         use std::os::unix::fs::OpenOptionsExt as _;
         options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
-    let mut file = options.open(path).map_err(|e| {
+    let file = options.open(path).map_err(|e| {
         #[cfg(unix)]
         if e.raw_os_error() == Some(libc::ELOOP) {
-            return refuse(format!(
-                "is a symlink; point the flag at the file itself, or pass a symlinked secret \
-                 mount (e.g. Kubernetes) through {env_hint}"
-            ));
+            return symlink.to_owned();
         }
-        refuse(e.to_string())
+        e.to_string()
     })?;
-    let meta = file.metadata().map_err(|e| refuse(e.to_string()))?;
+    let meta = file.metadata().map_err(|e| e.to_string())?;
     if !meta.is_file() {
-        return Err(refuse("is not a regular file".to_owned()));
+        return Err("is not a regular file".to_owned());
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
         let mode = meta.permissions().mode() & 0o777;
-        if mode & 0o077 != 0 {
-            return Err(refuse(format!(
-                "is accessible by group or others (mode {mode:o}); run `chmod 600 {}`",
+        if mode & rule.mask != 0 {
+            return Err(format!(
+                "is {} (mode {mode:o}); run `chmod {} {}`",
+                rule.what,
+                rule.chmod,
                 path.display()
-            )));
+            ));
+        }
+        if rule.owned {
+            use std::os::unix::fs::MetadataExt as _;
+            let (owner, euid) = (meta.uid(), mkit_core::sign::effective_uid());
+            if owner != euid && owner != 0 {
+                return Err(format!(
+                    "is owned by uid {owner}, not by this server's user ({euid}) or root"
+                ));
+            }
         }
     }
+    #[cfg(not(unix))]
+    let _ = rule;
     let mut text = String::new();
-    file.read_to_string(&mut text)
-        .map_err(|e| refuse(format!("cannot read it: {e}")))?;
+    file.take(MAX_CONFIG_FILE_BYTES + 1)
+        .read_to_string(&mut text)
+        .map_err(|e| format!("cannot read it: {e}"))?;
+    if text.len() as u64 > MAX_CONFIG_FILE_BYTES {
+        return Err("is larger than 1 MiB".to_owned());
+    }
     Ok(text)
 }
 
@@ -753,6 +878,55 @@ fn cors_policy(origins: &[String]) -> Result<CorsPolicy, ConfigError> {
         .map(CorsPolicy::AllowOrigins)
 }
 
+/// The pipeline's auth mode: the HTTP listener's ([`resolve_auth`]), or,
+/// with only the enc listener, `TransportIdentity`: it authenticates its
+/// peers itself. The HTTP flags would then silently do nothing, so they are
+/// refused; `MKIT_API_TOKEN` in the environment is ignored.
+fn pipeline_auth(
+    args: &ServeArgs,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<AuthMode, ConfigError> {
+    if args.listen.is_some() {
+        return resolve_auth(args, env);
+    }
+    let http_only = args.auth.is_some()
+        || args.bearer_token_file.is_some()
+        || args.unsafe_allow_any_peer
+        || args.audience.is_some()
+        || !args.cors_allow_origin.is_empty();
+    if http_only {
+        return Err(ConfigError::new(
+            exit::USAGE,
+            format!(
+                "{PREFIX}: --auth, --bearer-token-file, --unsafe-allow-any-peer, --audience and \
+                 --cors-allow-origin configure the HTTP listener; pass --listen <ADDR>"
+            ),
+        ));
+    }
+    Ok(AuthMode::TransportIdentity)
+}
+
+/// An open enc listener would let any client around the authentication
+/// the HTTP listener requires on the same root: refuse it.
+#[cfg(feature = "enc")]
+fn refuse_open_enc_beside_auth(
+    enc: Option<&crate::enc::EncOptions>,
+    auth: &AuthMode,
+) -> Result<(), ConfigError> {
+    let open_enc = enc.is_some_and(crate::enc::EncOptions::is_open);
+    if open_enc && matches!(auth, AuthMode::Bearer { .. } | AuthMode::AuthV2(_)) {
+        return Err(ConfigError::new(
+            exit::CONFIG_ERROR,
+            format!(
+                "{PREFIX}: --unsafe-allow-any-enc-peer would let any enc client write the root \
+                 the HTTP listener protects (bearer token or auth v2); use \
+                 --enc-authorized-peers"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Resolve `args`, reading environment variables through `env`. Nothing
 /// is opened or written: [`crate::server::open`] does that.
 ///
@@ -776,7 +950,24 @@ pub fn resolve(
     if args.unary_timeout_secs == 0 || args.stream_timeout_secs == 0 {
         return Err(usage("timeouts must be at least 1 second"));
     }
-    let auth = resolve_auth(args, env)?;
+    if args.listen.is_none() && args.listen_enc.is_none() {
+        return Err(usage(
+            "no listener: pass --listen <ADDR> (HTTP), --listen-enc <ADDR> (mkit+enc://), or \
+             both",
+        ));
+    }
+    #[cfg(feature = "enc")]
+    let enc = crate::enc::resolve(args)?;
+    #[cfg(not(feature = "enc"))]
+    if args.listen_enc.is_some() {
+        return Err(ConfigError::new(
+            exit::UNAVAILABLE,
+            format!("{PREFIX}: --listen-enc needs the `enc` cargo feature; rebuild with it"),
+        ));
+    }
+    let auth = pipeline_auth(args, env)?;
+    #[cfg(feature = "enc")]
+    refuse_open_enc_beside_auth(enc.as_ref(), &auth)?;
     let meta = match (&args.meta, &auth) {
         (Some(MetaArg::Sqlite(path)), _) => MetaChoice::Sqlite {
             path: canonical_db_path(path)?,
@@ -821,20 +1012,23 @@ pub fn resolve(
         redactor: pipeline.redactor.clone(),
         ..RouterOptions::default()
     };
+    let serve = ServeOptions {
+        grace: Duration::from_secs(args.shutdown_grace_secs),
+        header_read_timeout: Duration::from_secs(args.header_read_timeout_secs),
+        max_connections: args.max_connections,
+        idle_timeout: Duration::from_secs(args.idle_timeout_secs),
+        ..ServeOptions::default()
+    };
     Ok(ServeConfig {
         listen: args.listen,
+        #[cfg(feature = "enc")]
+        enc,
         repo_root,
         meta,
         blob,
         pipeline,
         router,
-        serve: ServeOptions {
-            grace: Duration::from_secs(args.shutdown_grace_secs),
-            header_read_timeout: Duration::from_secs(args.header_read_timeout_secs),
-            max_connections: args.max_connections,
-            idle_timeout: Duration::from_secs(args.idle_timeout_secs),
-            ..ServeOptions::default()
-        },
+        serve,
         log_format: args.log_format,
     })
 }

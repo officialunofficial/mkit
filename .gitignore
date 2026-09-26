@@ -47,6 +47,8 @@ apps/*/.vocs/
 
 # Reference-signers workspace build output (separate workspace, #225)
 contrib/signers/target/
+# The published-enc-client interop check (separate workspace, `just interop-enc`)
+contrib/interop/*/target/
 
 # Scratch output of `buf generate` run locally against a proto/buf.gen.yaml
 # template (issue #719). Vendored/committed generated code (e.g.

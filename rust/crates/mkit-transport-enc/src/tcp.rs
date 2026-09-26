@@ -53,6 +53,8 @@ use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use mkit_core::protocol::async_shim::Executor;
 use rand_core::{TryCryptoRng, TryRng, UnwrapErr};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 
 use crate::tokio_io::{TokioSink, TokioStream, split_tcp};
 use crate::{
@@ -522,13 +524,17 @@ fn encode_pubkey(peer: &PublicKey) -> Option<[u8; 32]> {
 ///
 /// `serve_fn` is invoked on a fresh tokio task per accepted connection,
 /// so it gets to `.await` freely and stays inside the listener's
-/// runtime context for ambient I/O. Runs until `accept` fails (host
-/// shutdown or socket error). Also accepts operator-tunable
-/// [`EncHandshakeBounds`] for tightening the handshake/synchrony
-/// deadlines on real networks.
+/// runtime context for ambient I/O. Runs until `accept` fails with a
+/// non-transient error (host shutdown or socket error); a transient one
+/// (a reset connection, descriptor exhaustion) is retried. Also accepts
+/// operator-tunable [`EncHandshakeBounds`] for tightening the
+/// handshake/synchrony deadlines on real networks.
 ///
-/// This is the production listener entry point consumed by
-/// `mkit serve --listen-enc`.
+/// This is the blocking listener entry point consumed by
+/// `mkit serve --listen-enc`. It builds and blocks on its own tokio
+/// runtime, so it must not be called from inside one: a server already on
+/// a runtime uses [`serve_tcp_listener`], which also takes a shutdown
+/// signal and a connection cap.
 ///
 /// # Errors
 ///
@@ -622,9 +628,11 @@ where
     )
 }
 
-/// Shared accept-loop implementation for every `serve_tcp*` entry point.
-/// The `policy` is consulted by the handshake bouncer; a rejected peer
-/// never reaches `serve_fn`.
+/// Shared entry for the blocking `serve_tcp*` functions: build the
+/// listener on `executor`'s runtime, then run the accept loop as they
+/// always have: uncapped, with no shutdown signal, stopping at the first
+/// `accept` error with `Ok(())` and leaving the sessions in flight running
+/// on the runtime.
 #[allow(clippy::needless_pass_by_value)]
 fn serve_tcp_inner<F, Fut>(
     addr: &str,
@@ -639,10 +647,7 @@ where
     F: Fn(EncSession<TokioStream, TokioSink>, PublicKey) -> Fut + Send + Sync + 'static,
     Fut: core::future::Future<Output = ()> + Send + 'static,
 {
-    let pool = acquire_network_buffer_pool();
     let addr_owned = addr.to_string();
-    let serve_fn = Arc::new(serve_fn);
-    let policy = Arc::new(policy);
     executor.handle().block_on(async move {
         let bind_addr: SocketAddr = addr_owned
             .parse()
@@ -656,43 +661,245 @@ where
                 .map_err(|e| EncInitError::HandshakeFailed(format!("local_addr: {e}")))?;
             cb(local);
         }
-        loop {
-            let (tcp, _peer_addr) = match listener.accept().await {
-                Ok(p) => p,
-                Err(_) => break,
-            };
-            let pool = pool.clone();
-            let signing_key = signing_key.clone();
-            let serve_fn = serve_fn.clone();
-            let policy = policy.clone();
-            tokio::spawn(async move {
-                let (sink, stream) = match split_tcp(tcp) {
-                    Ok(p) => p,
-                    Err(_) => return,
-                };
-                let ctx = TokioContext::new(pool);
-                let cfg = default_handshake_config_with_bounds(signing_key, bounds);
-                // The bouncer runs inside the handshake: a peer the
-                // policy rejects gets `PeerRejected` and never receives
-                // a HelloResponse / any application data.
-                let bouncer = {
-                    let policy = policy.clone();
-                    move |peer: PublicKey| {
-                        let policy = policy.clone();
-                        async move { policy.admits(&peer) }
-                    }
-                };
-                if let Ok((peer, sender, receiver)) = listen(ctx, bouncer, cfg, stream, sink).await
-                {
-                    let sess = EncSession::new(sender, receiver);
-                    serve_fn(sess, peer).await;
-                }
-                // Per-connection handshake failure (including policy
-                // rejection) is dropped; other peers keep accepting.
-            });
-        }
+        let never = core::future::pending::<()>();
+        let _ = accept_loop(
+            listener,
+            signing_key,
+            policy,
+            bounds,
+            ListenerLimits::UNBOUNDED,
+            never,
+            serve_fn,
+            AcceptMode::Legacy,
+        )
+        .await;
         Ok::<_, EncInitError>(())
     })
+}
+
+/// Caps on the connections [`serve_tcp_listener`] holds open.
+///
+/// Handshaking connections and sessions have separate caps. A client
+/// that connects and stays silent holds a handshake slot until the
+/// handshake deadline, at no cost to itself; with one shared cap, enough
+/// of them would lock every authorized client out. With two, they can
+/// fill only the handshake slots, and established sessions are untouched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ListenerLimits {
+    /// Authenticated sessions open at once. A connection that completes
+    /// its handshake while every session slot is taken keeps its
+    /// handshake slot until one frees, for at most the handshake timeout,
+    /// and is dropped if none frees by then or the listener stops.
+    pub max_sessions: usize,
+    /// Connections in the encrypted handshake at once; further clients
+    /// wait in the kernel's accept backlog.
+    pub max_handshakes: usize,
+}
+
+impl ListenerLimits {
+    /// No cap (the blocking `serve_tcp_*` entry points).
+    pub const UNBOUNDED: Self = Self {
+        max_sessions: usize::MAX,
+        max_handshakes: usize::MAX,
+    };
+
+    /// At most `max_sessions` sessions and `max_handshakes` handshakes at
+    /// once (each at least 1).
+    #[must_use]
+    pub const fn new(max_sessions: usize, max_handshakes: usize) -> Self {
+        Self {
+            max_sessions,
+            max_handshakes,
+        }
+    }
+}
+
+fn semaphore(permits: usize) -> Arc<Semaphore> {
+    Arc::new(Semaphore::new(permits.clamp(1, Semaphore::MAX_PERMITS)))
+}
+
+/// How [`accept_loop`] treats `accept` errors and the sessions in flight
+/// when it stops.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AcceptMode {
+    /// Retry a transient `accept` error; wait for the sessions in flight.
+    Serve,
+    /// The blocking entry points' historic behavior: stop at any `accept`
+    /// error and leave the sessions in flight running.
+    Legacy,
+}
+
+/// Serve encrypted connections on an already-bound `listener` from inside
+/// the caller's tokio runtime, until `shutdown` resolves: the async,
+/// embeddable form of [`serve_tcp_with_policy_and_bounds`] for a server
+/// that runs other listeners on the same runtime (`mkit-server serve
+/// --listen-enc`).
+///
+/// Each accepted connection runs the handshake under `bounds` (its
+/// `handshake_timeout` bounds the whole exchange) with `policy` as the
+/// bouncer, then `serve_fn` with the session and the peer's
+/// authenticated static key, on its own task, within `limits` (see
+/// [`ListenerLimits`]). A transient `accept` error (a reset connection,
+/// descriptor exhaustion) is retried after a short pause.
+///
+/// When `shutdown` resolves the listener closes at once and the future
+/// then waits for every connection in flight to finish. Bound that wait
+/// with the caller's grace period (`tokio::time::timeout`): dropping the
+/// future aborts the connections still open, at their next await.
+///
+/// # Errors
+///
+/// [`EncInitError::HandshakeFailed`] naming a non-transient `accept`
+/// error; the listener stops, and the connections in flight are drained
+/// first as for a shutdown.
+pub async fn serve_tcp_listener<F, Fut>(
+    listener: TcpListener,
+    signing_key: PrivateKey,
+    policy: PeerPolicy,
+    bounds: EncHandshakeBounds,
+    limits: ListenerLimits,
+    shutdown: impl core::future::Future<Output = ()> + Send,
+    serve_fn: F,
+) -> Result<(), EncInitError>
+where
+    F: Fn(EncSession<TokioStream, TokioSink>, PublicKey) -> Fut + Send + Sync + 'static,
+    Fut: core::future::Future<Output = ()> + Send + 'static,
+{
+    accept_loop(
+        listener,
+        signing_key,
+        policy,
+        bounds,
+        limits,
+        shutdown,
+        serve_fn,
+        AcceptMode::Serve,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn accept_loop<F, Fut>(
+    listener: TcpListener,
+    signing_key: PrivateKey,
+    policy: PeerPolicy,
+    bounds: EncHandshakeBounds,
+    limits: ListenerLimits,
+    shutdown: impl core::future::Future<Output = ()> + Send,
+    serve_fn: F,
+    mode: AcceptMode,
+) -> Result<(), EncInitError>
+where
+    F: Fn(EncSession<TokioStream, TokioSink>, PublicKey) -> Fut + Send + Sync + 'static,
+    Fut: core::future::Future<Output = ()> + Send + 'static,
+{
+    let pool = acquire_network_buffer_pool();
+    let serve_fn = Arc::new(serve_fn);
+    let policy = Arc::new(policy);
+    let handshakes = semaphore(limits.max_handshakes);
+    let session_slots = semaphore(limits.max_sessions);
+    let mut connections = JoinSet::new();
+    // Set when the loop stops: connections still waiting for a session
+    // slot give up.
+    let (stopping_tx, _) = tokio::sync::watch::channel(false);
+    tokio::pin!(shutdown);
+    let result = loop {
+        // Reap finished connections so the set stays small.
+        while connections.try_join_next().is_some() {}
+        // A handshake slot first, so excess clients wait in the backlog.
+        let handshake = tokio::select! {
+            biased;
+            () = &mut shutdown => break Ok(()),
+            slot = Arc::clone(&handshakes).acquire_owned() => match slot {
+                Ok(slot) => slot,
+                Err(_) => break Ok(()),
+            },
+        };
+        let tcp = tokio::select! {
+            biased;
+            () = &mut shutdown => break Ok(()),
+            accepted = listener.accept() => match accepted {
+                Ok((tcp, _)) => tcp,
+                Err(e) if mode == AcceptMode::Serve && transient_accept_error(&e) => {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    continue;
+                }
+                Err(e) => break Err(EncInitError::HandshakeFailed(format!("accept: {e}"))),
+            },
+        };
+        let pool = pool.clone();
+        let signing_key = signing_key.clone();
+        let serve_fn = Arc::clone(&serve_fn);
+        let policy = Arc::clone(&policy);
+        let session_slots = Arc::clone(&session_slots);
+        let stopping = stopping_tx.subscribe();
+        connections.spawn(async move {
+            let Ok((sink, stream)) = split_tcp(tcp) else {
+                return;
+            };
+            let ctx = TokioContext::new(pool);
+            let cfg = default_handshake_config_with_bounds(signing_key, bounds);
+            // The bouncer runs inside the handshake: a peer the policy
+            // rejects gets `PeerRejected` and never receives a
+            // HelloResponse or any application data.
+            let bouncer = move |peer: PublicKey| async move { policy.admits(&peer) };
+            // A failed handshake (a rejected peer, a timeout) drops only
+            // this connection, and its handshake slot.
+            let Ok((peer, sender, receiver)) = listen(ctx, bouncer, cfg, stream, sink).await else {
+                return;
+            };
+            // Trade the handshake slot for a session slot; until one is
+            // free the connection keeps the handshake slot, so waiting
+            // peers stay bounded too. The wait is bounded like a
+            // handshake, and ends when the listener stops.
+            let mut stopping = stopping;
+            let stopped = async move {
+                // A dropped sender (the blocking entry points, which
+                // leave their connections running) never stops the wait.
+                if stopping.wait_for(|stop| *stop).await.is_err() {
+                    core::future::pending::<()>().await;
+                }
+            };
+            let session = tokio::select! {
+                slot = session_slots.acquire_owned() => slot.ok(),
+                () = tokio::time::sleep(bounds.handshake_timeout) => None,
+                () = stopped => None,
+            };
+            let Some(_session) = session else {
+                return;
+            };
+            drop(handshake);
+            serve_fn(EncSession::new(sender, receiver), peer).await;
+        });
+    };
+    drop(listener);
+    stopping_tx.send_replace(true);
+    match mode {
+        AcceptMode::Serve => while connections.join_next().await.is_some() {},
+        AcceptMode::Legacy => connections.detach_all(),
+    }
+    result
+}
+
+/// An accept error that affects one connection, or passes (descriptor
+/// exhaustion): back off briefly and keep accepting.
+fn transient_accept_error(e: &std::io::Error) -> bool {
+    use std::io::ErrorKind::{ConnectionAborted, ConnectionReset, Interrupted};
+    if matches!(e.kind(), ConnectionAborted | ConnectionReset | Interrupted) {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        e.raw_os_error()
+            .is_some_and(|code| code == libc::ENFILE || code == libc::EMFILE)
+    }
+    // Elsewhere only the portable kinds above count as transient: any
+    // other error stops the listener rather than spin.
+    #[cfg(not(unix))]
+    {
+        false
+    }
 }
 
 #[cfg(test)]
