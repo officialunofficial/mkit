@@ -56,8 +56,12 @@ fn windowed(
 }
 
 fn differential(pack: &[u8], window: u64) {
+    differential_with_id(pack, window, None);
+}
+
+fn differential_with_id(pack: &[u8], window: u64, expected: Option<Hash>) {
     let reference = buffered(pack);
-    let actual = windowed(pack, window, DecodeLimits::default(), None);
+    let actual = windowed(pack, window, DecodeLimits::default(), expected);
     match (reference, actual) {
         (Ok(reference), Ok(actual)) => assert_eq!(reference, actual),
         (Err(_), Err(_)) => {}
@@ -92,7 +96,7 @@ fn raw_pack(payloads: &[Vec<u8>]) -> Vec<u8> {
     writer.finish().unwrap()
 }
 
-fn feed_from(reader: &mut WindowReader, pack: &[u8], request: WindowRequest) {
+fn assert_request_geometry(reader: &WindowReader, request: WindowRequest) {
     assert_eq!(request.offset % reader.state.window_size, 0);
     assert_eq!(
         request.len,
@@ -101,16 +105,37 @@ fn feed_from(reader: &mut WindowReader, pack: &[u8], request: WindowRequest) {
             .window_size
             .min(reader.state.pack_len - request.offset)
     );
+}
+
+fn feed_from(reader: &mut WindowReader, pack: &[u8], request: WindowRequest) {
+    assert_request_geometry(reader, request);
     let from = usize::try_from(request.offset).unwrap();
     let to = usize::try_from(request.offset + request.len).unwrap();
     reader.feed(request.offset, &pack[from..to]).unwrap();
 }
 
 fn drive(reader: &mut WindowReader, pack: &[u8]) -> Result<(Vec<Value>, WindowSummary), PackError> {
+    drive_from(reader, pack, 0)
+}
+
+fn drive_from(
+    reader: &mut WindowReader,
+    pack: &[u8],
+    minimum_offset: u64,
+) -> Result<(Vec<Value>, WindowSummary), PackError> {
     let mut values = Vec::new();
     loop {
         match reader.step()? {
-            Step::NeedWindow(request) => feed_from(reader, pack, request),
+            Step::NeedWindow(request) => {
+                assert_request_geometry(reader, request);
+                assert!(
+                    request.offset >= minimum_offset,
+                    "a resume must not re-read completed windows"
+                );
+                let mut source = pack;
+                let bytes = source.read_window(request.offset, request.len)?;
+                reader.feed(request.offset, &bytes)?;
+            }
             Step::Entry(entry) => values.push(value(entry)),
             Step::Done(summary) => return Ok((values, summary)),
         }
@@ -190,6 +215,16 @@ fn generated_pack(entries: &[(bool, bool, Vec<u8>)]) -> Vec<u8> {
     writer.finish().unwrap()
 }
 
+fn prepend_padding(pack: &[u8], window: u64) -> Vec<u8> {
+    let padding = raw_pack(&[vec![0xa5; usize::try_from(window).unwrap()]]);
+    let mut bytes = pack[..12].to_vec();
+    let count = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+    bytes[8..12].copy_from_slice(&(count + 1).to_le_bytes());
+    bytes.extend_from_slice(&padding[12..padding.len() - 32]);
+    bytes.extend_from_slice(&pack[12..pack.len() - 32]);
+    finish_bytes(bytes)
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(40))]
 
@@ -199,26 +234,30 @@ proptest! {
         mutation in any::<usize>(),
         bit in 0u8..8,
     ) {
-        let pack = generated_pack(&entries);
-        assert!(buffered(&pack).is_ok());
+        let generated = generated_pack(&entries);
         for window in [WINDOW, 1024 * 1024] {
-            differential(&pack, window);
+            let pack = prepend_padding(&generated, window);
+            assert!(buffered(&pack).is_ok());
+            let after_padding = 17 + usize::try_from(window).unwrap();
+            assert!(after_padding > usize::try_from(window).unwrap());
             let mut flipped = pack.clone();
-            let at = mutation % flipped.len();
+            let at = after_padding + mutation % (flipped.len() - after_padding);
             flipped[at] ^= 1 << bit;
-            differential(&flipped, window);
             let mut framing_mutation = flipped.clone();
             let split = framing_mutation.len() - 32;
             let checksum = hash::hash(&framing_mutation[..split]);
             framing_mutation[split..].copy_from_slice(&checksum);
-            differential(&framing_mutation, window);
-            differential(&pack[..mutation % pack.len()], window);
+            let truncated = &pack[..after_padding + mutation % (pack.len() - after_padding)];
             let mut extra = pack.clone();
             extra.extend_from_slice(&[bit, 0xa5]);
-            differential(&extra, window);
             let mut trailing = pack[..pack.len() - 32].to_vec();
             trailing.push(bit);
-            differential(&finish_bytes(trailing), window);
+            let trailing = finish_bytes(trailing);
+            for input in [pack.as_slice(), flipped.as_slice(), framing_mutation.as_slice(), truncated, extra.as_slice(), trailing.as_slice()] {
+                for expected in [None, Some(hash::hash(input))] {
+                    differential_with_id(input, window, expected);
+                }
+            }
         }
     }
 
@@ -337,9 +376,17 @@ fn resume_each_entry(pack: &[u8], window: u64, expected: Option<Hash>) {
                 let cursor = WindowCursor::from_bytes(&bytes).unwrap();
                 assert_eq!(cursor.to_bytes(), bytes);
                 reader = WindowReader::resume(&cursor, DecodeLimits::default()).unwrap();
+                assert_eq!(
+                    reader.checkpoint().is_some(),
+                    cursor.pos.is_multiple_of(window)
+                );
                 let Step::NeedWindow(request) = reader.step().unwrap() else {
                     panic!("resume must request a window")
                 };
+                assert_eq!(
+                    reader.checkpoint().is_some(),
+                    cursor.pos.is_multiple_of(window)
+                );
                 assert_eq!(request.offset, cursor.pos / window * window);
                 feed_from(&mut reader, pack, request);
             }
@@ -453,7 +500,7 @@ fn cursors_reject_corruption_truncation_version_and_inconsistent_fields() {
 }
 
 #[test]
-fn a_cursor_never_completes_a_different_pack_even_with_a_stale_trailer() {
+fn changed_verified_prefix_preserves_entries_of_the_original_verified_pack() {
     let pack = raw_pack(&[
         vec![0x11; usize::try_from(WINDOW * 2 + 23).unwrap()],
         vec![0x22; 77],
@@ -463,8 +510,8 @@ fn a_cursor_never_completes_a_different_pack_even_with_a_stale_trailer() {
         assert!(cursor.completed > 0);
         for update_trailer in [false, true] {
             // Mutation is entirely in a completed window: the suffix and all
-            // resumed entry bytes stay identical. The stale-trailer case must
-            // revalidate the cursor's skipped prefix before allowing Done.
+            // resumed entry bytes stay identical. Stored CVs and previously
+            // yielded entries still belong to the original verified pack.
             let mut other = pack.clone();
             other[19] ^= 1;
             if update_trailer {
@@ -477,10 +524,18 @@ fn a_cursor_never_completes_a_different_pack_even_with_a_stale_trailer() {
                 DecodeLimits::default(),
             )
             .unwrap();
-            assert!(matches!(
-                drive(&mut resumed, &other),
-                Err(PackError::PackfileCorrupted)
-            ));
+            let result = drive_from(&mut resumed, &other, cursor.completed * WINDOW);
+            if update_trailer {
+                assert!(matches!(result, Err(PackError::PackfileCorrupted)));
+            } else {
+                let (remaining, summary) = result.unwrap();
+                let mut yielded = vec![Value::Raw(vec![
+                    0x11;
+                    usize::try_from(WINDOW * 2 + 23).unwrap()
+                ])];
+                yielded.extend(remaining);
+                assert_eq!((yielded, summary), buffered(&pack).unwrap());
+            }
         }
         let mut wrong_length = cursor.clone();
         wrong_length.pack_len = 43;
@@ -489,6 +544,130 @@ fn a_cursor_never_completes_a_different_pack_even_with_a_stale_trailer() {
             Err(PackError::PackfileCorrupted)
         ));
     }
+}
+
+#[test]
+fn fix_round_one_resuming_genuine_pack_rejects_a_tampered_yielded_prefix_on_feed() {
+    let genuine = raw_pack(&[vec![0x11; 21], vec![0x22; 77]]);
+    let mut tampered = genuine.clone();
+    tampered[19] ^= 1;
+    for expected in [None, Some(hash::hash(&genuine))] {
+        let cursor = first_cursor(&tampered, expected);
+        assert_eq!(cursor.completed, 0);
+        let cursor = WindowCursor::from_bytes(&cursor.to_bytes()).unwrap();
+        let mut resumed = WindowReader::resume(&cursor, DecodeLimits::default()).unwrap();
+        let Step::NeedWindow(request) = resumed.step().unwrap() else {
+            panic!()
+        };
+        let from = usize::try_from(request.offset).unwrap();
+        let to = usize::try_from(request.offset + request.len).unwrap();
+        assert!(
+            matches!(
+                resumed.feed(request.offset, &genuine[from..to]),
+                Err(PackError::PackfileCorrupted)
+            ),
+            "a previously yielded tampered prefix must fail on the first resumed feed"
+        );
+    }
+}
+
+#[test]
+fn probe_shaped_resume_rejects_tampered_entry_in_checkpoint_window() {
+    let genuine = raw_pack(&[
+        vec![0x61; usize::try_from(WINDOW).unwrap() - 14],
+        vec![0x11; 100],
+        vec![0x22; usize::try_from(WINDOW + 50).unwrap()],
+    ]);
+    let mut tampered = genuine.clone();
+    tampered[usize::try_from(WINDOW).unwrap() + 8 + 10] ^= 1;
+    for expected in [None, Some(hash::hash(&genuine))] {
+        let mut original = WindowReader::new(
+            u64::try_from(tampered.len()).unwrap(),
+            WINDOW,
+            DecodeLimits::default(),
+            expected,
+        )
+        .unwrap();
+        let mut yielded = Vec::new();
+        let cursor = loop {
+            match original.step().unwrap() {
+                Step::NeedWindow(request) => feed_from(&mut original, &tampered, request),
+                Step::Entry(entry) => {
+                    yielded.push(value(entry));
+                    if yielded.len() == 2 {
+                        break original.checkpoint().unwrap();
+                    }
+                    assert_eq!(original.state.pos, WINDOW + 3);
+                }
+                Step::Done(_) => panic!("the probe needs a cursor after entry A"),
+            }
+        };
+        assert_ne!(yielded[1], Value::Raw(vec![0x11; 100]));
+        assert_eq!(cursor.index, 2);
+        assert_eq!(cursor.completed, 1);
+        assert_eq!(cursor.pos, WINDOW + 108);
+        let mut resumed = WindowReader::resume(
+            &WindowCursor::from_bytes(&cursor.to_bytes()).unwrap(),
+            DecodeLimits::default(),
+        )
+        .unwrap();
+        let Step::NeedWindow(request) = resumed.step().unwrap() else {
+            panic!()
+        };
+        assert_eq!(request.offset, WINDOW);
+        let start = usize::try_from(request.offset).unwrap();
+        let end = usize::try_from(request.offset + request.len).unwrap();
+        assert!(matches!(
+            resumed.feed(request.offset, &genuine[start..end]),
+            Err(PackError::PackfileCorrupted)
+        ));
+    }
+}
+
+#[test]
+fn fix_round_one_checkpoint_is_absent_when_its_boundary_window_was_released() {
+    let pack = raw_pack(&[vec![0x53; 65_537 - 49]]);
+    assert_eq!(pack.len(), 65_537);
+    let mut reader = WindowReader::new(
+        65_537,
+        WINDOW,
+        DecodeLimits::default(),
+        Some(hash::hash(&pack)),
+    )
+    .unwrap();
+    let Step::NeedWindow(request) = reader.step().unwrap() else {
+        panic!()
+    };
+    feed_from(&mut reader, &pack, request);
+    let Step::Entry(entry) = reader.step().unwrap() else {
+        panic!()
+    };
+    let yielded = value(entry);
+    let retained = reader.checkpoint().unwrap();
+    assert_eq!(retained.pos, 65_505);
+    let Step::NeedWindow(request) = reader.step().unwrap() else {
+        panic!()
+    };
+    assert_eq!(request.offset, WINDOW);
+    assert!(reader.window.is_empty());
+    assert!(
+        reader.checkpoint().is_none(),
+        "the partial boundary window is no longer resident"
+    );
+    feed_from(&mut reader, &pack, request);
+    let Step::Done(summary) = reader.step().unwrap() else {
+        panic!()
+    };
+    assert!(reader.checkpoint().is_none());
+    let mut resumed = WindowReader::resume(
+        &WindowCursor::from_bytes(&retained.to_bytes()).unwrap(),
+        DecodeLimits::default(),
+    )
+    .unwrap();
+    let (remaining, resumed_summary) = drive(&mut resumed, &pack).unwrap();
+    assert!(remaining.is_empty());
+    assert_eq!(resumed_summary, summary);
+    assert_eq!((vec![yielded], summary), buffered(&pack).unwrap());
 }
 
 #[test]
@@ -515,6 +694,102 @@ fn cursors_bind_same_window_prefix_and_unseen_future_entries() {
             ));
         }
     }
+}
+
+#[test]
+fn a_same_window_mutation_after_the_cursor_is_rejected_at_done() {
+    let genuine = raw_pack(&[vec![0x11; 21], vec![0x22; 77]]);
+    for expected in [None, Some(hash::hash(&genuine))] {
+        let cursor = first_cursor(&genuine, expected);
+        let mut tampered = genuine.clone();
+        let at = usize::try_from(cursor.pos).unwrap() + 5;
+        assert!(at < usize::try_from(WINDOW).unwrap());
+        tampered[at] ^= 1;
+        let mut resumed = WindowReader::resume(
+            &WindowCursor::from_bytes(&cursor.to_bytes()).unwrap(),
+            DecodeLimits::default(),
+        )
+        .unwrap();
+        assert!(resumed.checkpoint().is_none());
+        let Step::NeedWindow(request) = resumed.step().unwrap() else {
+            panic!()
+        };
+        assert!(resumed.checkpoint().is_none());
+        feed_from(&mut resumed, &tampered, request);
+        let Step::Entry(entry) = resumed.step().unwrap() else {
+            panic!()
+        };
+        assert_ne!(value(entry), Value::Raw(vec![0x22; 77]));
+        assert!(matches!(resumed.step(), Err(PackError::PackfileCorrupted)));
+        assert!(resumed.checkpoint().is_none());
+    }
+}
+
+#[test]
+fn exact_window_boundary_checkpoint_needs_no_resident_window() {
+    let pack = raw_pack(&[vec![0x61; usize::try_from(WINDOW).unwrap() - 17]]);
+    let mut reader = WindowReader::new(
+        u64::try_from(pack.len()).unwrap(),
+        WINDOW,
+        DecodeLimits::default(),
+        Some(hash::hash(&pack)),
+    )
+    .unwrap();
+    assert!(reader.checkpoint().is_none());
+    let Step::NeedWindow(request) = reader.step().unwrap() else {
+        panic!()
+    };
+    assert!(reader.checkpoint().is_none());
+    feed_from(&mut reader, &pack, request);
+    assert!(matches!(reader.step().unwrap(), Step::Entry(_)));
+    let retained = reader.checkpoint().unwrap();
+    assert_eq!(retained.pos, WINDOW);
+    assert!(retained.window_prefix.is_none());
+    let Step::NeedWindow(request) = reader.step().unwrap() else {
+        panic!()
+    };
+    assert!(reader.window.is_empty());
+    assert!(reader.checkpoint().is_some());
+    feed_from(&mut reader, &pack, request);
+    assert!(matches!(reader.step().unwrap(), Step::Done(_)));
+    assert!(reader.checkpoint().is_some());
+    let mut resumed = WindowReader::resume(
+        &WindowCursor::from_bytes(&retained.to_bytes()).unwrap(),
+        DecodeLimits::default(),
+    )
+    .unwrap();
+    assert!(resumed.window.is_empty());
+    assert!(resumed.checkpoint().is_some());
+    assert!(drive(&mut resumed, &pack).unwrap().0.is_empty());
+}
+
+#[test]
+fn cursor_prefix_presence_must_match_its_partial_window_geometry() {
+    let partial_pack = raw_pack(&[vec![0x11; 21], vec![0x22; 77]]);
+    let mut partial = first_cursor(&partial_pack, Some(hash::hash(&partial_pack)));
+    assert!(partial.window_prefix.is_some());
+    partial.window_prefix = None;
+    assert!(matches!(
+        WindowCursor::from_bytes(&partial.to_bytes()),
+        Err(PackError::PackfileCorrupted)
+    ));
+    assert!(matches!(
+        WindowReader::resume(&partial, DecodeLimits::default()),
+        Err(PackError::PackfileCorrupted)
+    ));
+    let boundary_pack = raw_pack(&[vec![0x33; usize::try_from(WINDOW).unwrap() - 17]]);
+    let mut boundary = first_cursor(&boundary_pack, Some(hash::hash(&boundary_pack)));
+    assert_eq!(boundary.pos, WINDOW);
+    assert!(boundary.window_prefix.is_none());
+    boundary.window_prefix = Some([0x44; 32]);
+    assert!(matches!(
+        WindowCursor::from_bytes(&boundary.to_bytes()),
+        Err(PackError::PackfileCorrupted)
+    ));
+    assert!(matches!(
+        WindowReader::resume(&boundary, DecodeLimits::default()),
+        Err(PackError::PackfileCorrupted)
+    ));
 }
 
 #[test]
@@ -547,8 +822,13 @@ fn checkpoint_is_absent_mid_header_and_mid_payload() {
     let Step::NeedWindow(request) = reader.step().unwrap() else {
         panic!()
     };
+    assert!(!reader.carry.is_empty());
     assert!(reader.checkpoint().is_none());
     feed_from(&mut reader, &pack, request);
+    assert!(!reader.window.is_empty());
+    assert!(!reader.carry.is_empty());
+    assert_eq!(reader.start, WINDOW * 2);
+    assert!(reader.checkpoint().is_none());
     let Step::NeedWindow(request) = reader.step().unwrap() else {
         panic!()
     };
@@ -598,6 +878,58 @@ fn giant_zstd_claim_and_carried_payload_are_rejected_before_allocation() {
         Err(PackError::PackfileTooLarge)
     ));
     assert_eq!(reader.carry.capacity(), 0);
+}
+
+#[test]
+fn a_late_zstd_claim_exceeds_budget_before_a_decode_allocation() {
+    let mut claim = (1024u32 * 1024 * 1024).to_le_bytes().to_vec();
+    claim.extend_from_slice(&[0x28, 0xb5, 0x2f, 0xfd]);
+    for kind in [3, 4] {
+        let payload = if kind == 4 {
+            [vec![0x42; 32], claim.clone()].concat()
+        } else {
+            claim.clone()
+        };
+        let padding = usize::try_from(WINDOW).unwrap() - 22;
+        let pack = synthetic(2, &[(0, vec![0x61; padding]), (kind, payload.clone())]);
+        let mut reader = WindowReader::new(
+            u64::try_from(pack.len()).unwrap(),
+            WINDOW,
+            DecodeLimits::default(),
+            Some(hash::hash(&pack)),
+        )
+        .unwrap();
+        let Step::NeedWindow(request) = reader.step().unwrap() else {
+            panic!()
+        };
+        feed_from(&mut reader, &pack, request);
+        assert!(matches!(reader.step().unwrap(), Step::Entry(_)));
+        let cursor = reader.checkpoint().unwrap();
+        assert_eq!(cursor.pos, WINDOW - 5);
+        let budget = u64::try_from(payload.len()).unwrap();
+        reader = WindowReader::resume(
+            &WindowCursor::from_bytes(&cursor.to_bytes()).unwrap(),
+            DecodeLimits::default().with_max_decoded_bytes(budget),
+        )
+        .unwrap();
+        let Step::NeedWindow(request) = reader.step().unwrap() else {
+            panic!()
+        };
+        assert_eq!(request.offset, 0);
+        feed_from(&mut reader, &pack, request);
+        let Step::NeedWindow(request) = reader.step().unwrap() else {
+            panic!()
+        };
+        assert_eq!(request.offset, WINDOW);
+        assert_eq!(reader.header_used, 5);
+        assert!(reader.carry.is_empty());
+        assert!(reader.checkpoint().is_none());
+        feed_from(&mut reader, &pack, request);
+        assert!(matches!(reader.step(), Err(PackError::PackfileTooLarge)));
+        assert_eq!(reader.carry.capacity(), 0);
+        assert!(reader.peak <= usize::try_from(WINDOW).unwrap());
+        assert!(reader.checkpoint().is_none());
+    }
 }
 
 #[test]

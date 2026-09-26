@@ -13,11 +13,10 @@
 //! plus decoded output when both are live. Decoder-internal memory is additional
 //! (in particular the ruzstd ring buffer; see the parent module).
 //!
-//! A resumed run re-fetches its current window, then verifies skipped windows
-//! before returning `Done`. That extra prefix pass binds the cursor even to a
-//! source with a changed prefix and an unchanged, stale trailer. Without a
-//! requested pack id, the initial run first fetches the trailer window(s),
-//! retaining that anchor in its cursor to bind even an unseen suffix.
+//! A resumed run re-fetches its current window and checks the checkpoint's
+//! prefix commitment before yielding entries. Completed windows are not re-read.
+//! Without a requested pack id, the initial run first fetches the trailer
+//! window(s), retaining that anchor in its cursor to bind even an unseen suffix.
 
 use super::{
     DecodeLimits, MAGIC, MAX_ENTRIES, MAX_TOTAL_PAYLOAD, PackEntry, PackError, decode_payload,
@@ -68,12 +67,19 @@ enum Phase {
     Frame,
     Payload,
     Finish,
-    Verify,
     Done,
     Failed,
 }
 
 /// An I/O-free decoder retaining only the current window and current entry.
+///
+/// **Binding.** `Done` means every entry yielded across the whole run chain (the original run and every resume
+/// through its cursors) is an entry, in order, of the one pack whose bytes hash to the verified pack id: the trailer,
+/// and `expected_pack_id` when set. A cursor from pack A used on a source that yields different bytes for any
+/// not-yet-verified range fails with `PackfileCorrupted`, never `Done`. The reader does not re-read ranges it has
+/// already verified. **Keeping the source immutable across resumes is the caller's job** (informative: WP-4.8 binds
+/// R2 range reads to the object's etag). A source whose already-verified prefix changed after verification can still
+/// reach `Done`, but only with entries of the verified pack.
 #[derive(Debug)]
 pub struct WindowReader {
     state: WindowCursor,
@@ -91,9 +97,7 @@ pub struct WindowReader {
     payload_len: u64,
     carry: Vec<u8>,
     trailer: [u8; 32],
-    guard: Option<WindowCursor>,
-    verify_count: u64,
-    verify_trees: (Tree, Tree),
+    resume_prefix: Option<Hash>,
     #[cfg(test)]
     peak: usize,
 }
@@ -153,9 +157,7 @@ impl WindowReader {
         cursor.validate()?;
         let mut reader = Self::from_state(cursor.clone(), limits, Phase::Boundary);
         reader.boundary = Some(cursor.clone());
-        if cursor.completed != 0 {
-            reader.guard = Some(cursor.clone());
-        }
+        reader.resume_prefix = cursor.window_prefix;
         Ok(reader)
     }
 
@@ -178,9 +180,7 @@ impl WindowReader {
             payload_len: 0,
             carry: Vec::new(),
             trailer: [0; 32],
-            guard: None,
-            verify_count: 0,
-            verify_trees: (Tree::new(), Tree::new()),
+            resume_prefix: None,
             #[cfg(test)]
             peak: 0,
         }
@@ -285,29 +285,7 @@ impl WindowReader {
                     {
                         return Err(PackError::PackfileCorrupted);
                     }
-                    self.phase = if self.guard.is_some() {
-                        Phase::Verify
-                    } else {
-                        Phase::Done
-                    };
-                }
-                Phase::Verify => {
-                    let guard = self.guard.as_ref().ok_or(PackError::PackfileCorrupted)?;
-                    if self.verify_count == guard.completed {
-                        if self.verify_trees.0 != guard.trailer_tree
-                            || self.verify_trees.1 != guard.id_tree
-                        {
-                            return Err(PackError::PackfileCorrupted);
-                        }
-                        self.guard = None;
-                        self.phase = Phase::Done;
-                    } else {
-                        let offset = self
-                            .verify_count
-                            .checked_mul(self.state.window_size)
-                            .ok_or(PackError::PackfileCorrupted)?;
-                        return self.need(offset);
-                    }
+                    self.phase = Phase::Done;
                 }
             }
         }
@@ -572,8 +550,7 @@ impl WindowReader {
     }
 
     fn retains_window(&self) -> bool {
-        self.phase != Phase::Verify
-            && !(self.phase == Phase::Anchor && self.state.pack_len > self.state.window_size)
+        !(self.phase == Phase::Anchor && self.state.pack_len > self.state.window_size)
     }
 
     fn validate_feed(&self, offset: u64, bytes: &[u8]) -> Result<WindowRequest, PackError> {
@@ -588,30 +565,25 @@ impl WindowReader {
 
     fn feed_data(&mut self, offset: u64, bytes: &[u8]) -> Result<(), PackError> {
         let request = self.validate_feed(offset, bytes)?;
+        if let Some(expected) = self.resume_prefix {
+            let prefix_len = self
+                .state
+                .pos
+                .checked_sub(offset)
+                .ok_or(PackError::PackfileCorrupted)?;
+            let prefix = bytes
+                .get(..us(prefix_len)?)
+                .ok_or(PackError::PackfileCorrupted)?;
+            if crate::hash::hash(prefix) != expected {
+                return Err(PackError::PackfileCorrupted);
+            }
+            self.resume_prefix = None;
+        }
         if self.phase == Phase::Anchor && self.state.pack_len > self.state.window_size {
             self.end = offset
                 .checked_add(request.len)
                 .ok_or(PackError::PackfileCorrupted)?;
             self.collect_trailer(offset, bytes)?;
-        } else if self.phase == Phase::Verify {
-            self.verify_trees.0.absorb(
-                offset,
-                bytes,
-                self.state.split(),
-                self.state.window_size,
-            )?;
-            if self.state.expected.is_some() {
-                self.verify_trees.1.absorb(
-                    offset,
-                    bytes,
-                    self.state.pack_len,
-                    self.state.window_size,
-                )?;
-            }
-            self.verify_count = self
-                .verify_count
-                .checked_add(1)
-                .ok_or(PackError::PackfileCorrupted)?;
         } else {
             self.before = (self.state.trailer_tree.clone(), self.state.id_tree.clone());
             self.state.trailer_tree.absorb(
@@ -663,12 +635,31 @@ impl WindowReader {
     }
 
     /// A compact checkpoint only at an entry boundary, never within an entry.
+    ///
+    /// Hashes the current window prefix lazily on this call. Returns `None` if
+    /// the reader has released the bytes needed for that prefix, including while
+    /// fetching a split trailer or awaiting a resumed window. Keep the previous
+    /// cursor in that case. No bytes are needed when the boundary is exactly at
+    /// a window start. Mid-entry states, including carried straddling entries,
+    /// never produce a checkpoint.
     #[must_use]
     pub fn checkpoint(&self) -> Option<WindowCursor> {
         if !matches!(self.phase, Phase::Boundary | Phase::Finish | Phase::Done) {
             return None;
         }
-        self.boundary.clone()
+        let mut cursor = self.boundary.clone()?;
+        let start = cursor.completed.checked_mul(cursor.window_size)?;
+        let prefix_len = cursor.pos.checked_sub(start)?;
+        cursor.window_prefix = if prefix_len == 0 {
+            None
+        } else {
+            if self.start != start {
+                return None;
+            }
+            let end = usize::try_from(prefix_len).ok()?;
+            Some(crate::hash::hash(self.window.get(..end)?))
+        };
+        Some(cursor)
     }
 
     fn boundary_state(&self) -> WindowCursor {

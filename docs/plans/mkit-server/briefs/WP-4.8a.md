@@ -139,14 +139,27 @@ resumable cursor. It does **not** resolve deltas and does not store anything. Th
      - the running payload sum;
      - the completed-window count;
      - the chaining-value stack(s);
+     - `window_prefix: Option<[u8; 32]>`, a lazy checkpoint commitment to the current window bytes before `pos`
+       (fix round 1);
      - a trailing BLAKE3-derived 32-byte checksum over the preceding fields.
-   - Max encoded size: 4 KiB.
+   - Max encoded size: 4 KiB, including the tagged 32-byte window-prefix commitment (fix round 1).
    - `from_bytes` rejects any version other than 1, a bad checksum, or inconsistent fields (offset outside
      `[12, pack_len−32]`, index > entry count, CV stack depth inconsistent with the window count), with `PackfileCorrupted`.
-   - `resume` then re-requests the window containing the next entry.
-   - Binding: a cursor from pack A used on pack B must fail. It fails either at `from_bytes`/`resume`, when
-     `expected_pack_id` or `pack_len` differ, or at `Done` through the trailer and pack-id roots. It must never yield a
-     `Done`.
+   - `resume` then re-requests the window containing the next entry. On its first feed, compare the bytes before
+     `pos` with the cursor's window-prefix commitment before yielding any entry (fix round 1).
+   - `checkpoint()` hashes that prefix only on the call itself. It returns `None` if those bytes have been released;
+     when `pos == window_start`, it needs no bytes and behaves as before (fix round 1 amendment 1).
+   - `from_bytes` rejects a window-prefix presence inconsistent with `pos > completed × window_size`, using
+     `PackfileCorrupted` (fix round 1).
+   - **Fix round 1 — revised binding:**
+
+     **Binding.** `Done` means every entry yielded across the whole run chain (the original run and every resume
+     through its cursors) is an entry, in order, of the one pack whose bytes hash to the verified pack id: the trailer,
+     and `expected_pack_id` when set. A cursor from pack A used on a source that yields different bytes for any
+     not-yet-verified range fails with `PackfileCorrupted`, never `Done`. The reader does not re-read ranges it has
+     already verified. **Keeping the source immutable across resumes is the caller's job** (informative: WP-4.8 binds
+     R2 range reads to the object's etag). A source whose already-verified prefix changed after verification can still
+     reach `Done`, but only with entries of the verified pack.
 6. **Error variant reuse** (no new variants):
 
    | Condition | Variant |

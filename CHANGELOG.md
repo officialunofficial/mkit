@@ -22,8 +22,9 @@ train).
 - *(core)* Add `pack::window`: a synchronous sans-IO pack reader with bounded
   entry buffers, 64 KiB–64 MiB range windows, and checksummed resumable cursors.
   Entries remain provisional until the trailer and optional pack id pass at
-  `Done`. Resumed runs re-read the skipped prefix before completion to bind the
-  cursor to the supplied bytes. With no requested id, the first run prefetches
+  `Done`. Lazy cursor commitments bind the current window prefix on resume;
+  callers keep sources immutable, and completed windows are not re-read.
+  With no requested id, the first run prefetches
   the trailer windows and persists their digest as an anchor. Native zstd and wasm32 ruzstd share decoding
   with `PackEntries`; allocation failures return `PackfileTooLarge`.
 

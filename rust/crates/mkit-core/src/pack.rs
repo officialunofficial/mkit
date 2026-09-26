@@ -860,6 +860,7 @@ pub(crate) fn ruzstd_decompress_capped(
 
     let mut out = Vec::new();
     let mut chunk = [0; 8192];
+    // ruzstd's in-memory decoder never yields Interrupted.
     loop {
         // Probe one extra byte without allocating past the claim.
         let room = capacity.saturating_sub(out.len());

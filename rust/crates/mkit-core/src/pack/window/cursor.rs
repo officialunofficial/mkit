@@ -1,7 +1,9 @@
 //! Canonical v1 cursor: version byte; four u64s (pack length, window size,
 //! position, payload sum); u32 version/count/index; optional first-non-raw u32;
-//! completed-window u64; optional expected id and trailer anchor; two trees (u8 depth, CVs,
-//! optional root); checksum. Optional fields have a 0/1 tag. All integers LE.
+//! completed-window u64; optional expected id, trailer anchor, and current-window
+//! prefix commitment; two trees (u8 depth, CVs, optional root); checksum. Optional
+//! fields have a 0/1 tag. All integers LE. The tagged prefix adds at most 33 bytes;
+//! the complete encoding remains bounded by 4 KiB.
 use super::{MAX_ENTRIES, MAX_TOTAL_PAYLOAD, PackError, Tree, geometry};
 use crate::hash::{self, Hash};
 
@@ -19,6 +21,7 @@ pub struct WindowCursor {
     pub(super) completed: u64,
     pub(super) expected: Option<Hash>,
     pub(super) anchor: Option<Hash>,
+    pub(super) window_prefix: Option<Hash>,
     pub(super) trailer_tree: Tree,
     pub(super) id_tree: Tree,
 }
@@ -37,6 +40,7 @@ impl WindowCursor {
             completed: 0,
             expected,
             anchor: None,
+            window_prefix: None,
             trailer_tree: Tree::new(),
             id_tree: Tree::new(),
         }
@@ -54,7 +58,9 @@ impl WindowCursor {
         let max_len = MAX_TOTAL_PAYLOAD
             .checked_add(u64::from(self.count) * 5)
             .and_then(|n| n.checked_add(44));
-        if (self.expected.is_none() && self.anchor.is_none())
+        let window_start = self.completed.checked_mul(self.window_size);
+        if window_start.is_none_or(|start| self.window_prefix.is_some() != (self.pos > start))
+            || (self.expected.is_none() && self.anchor.is_none())
             || !matches!(self.version, 1 | 2)
             || self.count > MAX_ENTRIES
             || self.index > self.count
@@ -96,6 +102,7 @@ impl WindowCursor {
         out.extend_from_slice(&self.completed.to_le_bytes());
         write_option(&mut out, self.expected);
         write_option(&mut out, self.anchor);
+        write_option(&mut out, self.window_prefix);
         for tree in [&self.trailer_tree, &self.id_tree] {
             // Full pack geometry needs fewer than 64 CVs (and at most 17 under
             // the format caps), so this is lossless for every internal cursor.
@@ -138,6 +145,7 @@ impl WindowCursor {
             completed: 0,
             expected: None,
             anchor: None,
+            window_prefix: None,
             trailer_tree: Tree::new(),
             id_tree: Tree::new(),
         };
@@ -145,6 +153,7 @@ impl WindowCursor {
         state.completed = r.u64()?;
         state.expected = r.optional_hash()?;
         state.anchor = r.optional_hash()?;
+        state.window_prefix = r.optional_hash()?;
         state.trailer_tree = r.tree()?;
         state.id_tree = r.tree()?;
         if !r.0.is_empty() {
