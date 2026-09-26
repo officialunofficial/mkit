@@ -3495,13 +3495,29 @@ dependencies = [
 name = "mkit-server-conformance"
 version = "0.4.2"
 dependencies = [
+ "axum",
+ "buffa",
  "bytes",
+ "clap",
+ "connectrpc",
+ "ed25519-dalek",
+ "flate2",
  "futures",
+ "getrandom 0.4.3",
+ "http",
+ "http-body-util",
  "mkit-core",
  "mkit-server",
  "mkit-server-native",
+ "mkit-transport-connect",
+ "mkit-transport-file",
+ "serde",
+ "serde_json",
  "tempfile",
  "tokio",
+ "toml",
+ "url",
+ "webpki-roots",
 ]
 
 [[package]]
