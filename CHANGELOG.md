@@ -151,6 +151,10 @@ train).
 
 ### Added
 
+- *(core)* Add `pack::rewrite_excluding` and `pack::Rewritten` for budgeted
+  pack rewrites: excluded objects are dropped, deltas with excluded direct
+  bases become raw, and unchanged packs retain their exact bytes.
+
 - *(server)* The `mkit-server` binary (`mkit-server-native`;
   `mkit-server serve --repo-root <DIR> [--listen <ADDR>] [--listen-enc
   <ADDR>]`) is the self-hosted `mkit+https://` and `mkit+enc://` server. It
@@ -682,6 +686,7 @@ train).
 
 ### Fixed
 
+- *(core)* Pack writer no longer zstd-compresses a payload over `MAX_RAW_OBJECT_SIZE`, which readers reject.
 - *(core)* Pack framing no longer overflows a 32-bit `usize`: a
   `payload_len` near `u32::MAX` made `pos + payload_len` trap on wasm32
   (release builds keep `overflow-checks`) in `PackEntries::new`,

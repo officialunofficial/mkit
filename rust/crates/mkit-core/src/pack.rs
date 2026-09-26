@@ -67,10 +67,12 @@
 //! streaming reader detect bit-rot before the whole pack has been
 //! hashed end-to-end.
 
+pub mod rewrite;
 use crate::delta;
 use crate::hash::{self, Hash};
 use crate::object::{MkitError, Object};
 use crate::store::{MAX_RAW_OBJECT_SIZE, ObjectStore};
+pub use rewrite::{Rewritten, rewrite_excluding};
 use std::borrow::Cow;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -613,6 +615,16 @@ pub fn pack_key(pack_bytes: &[u8]) -> Hash {
 /// rather than a new failure mode to propagate.
 #[cfg(feature = "pack-zstd")]
 fn maybe_compress(data: &[u8]) -> Option<Vec<u8>> {
+    maybe_compress_capped(data, MAX_RAW_OBJECT_SIZE)
+}
+
+#[cfg(feature = "pack-zstd")]
+fn maybe_compress_capped(data: &[u8], max_len: usize) -> Option<Vec<u8>> {
+    // SPEC-PACKFILE §3.3: a reader rejects any `uncompressed_len` over
+    // MAX_RAW_OBJECT_SIZE, so a larger payload is written uncompressed.
+    if data.len() > max_len {
+        return None;
+    }
     if data.len() < MIN_COMPRESS_LEN {
         return None;
     }

@@ -805,3 +805,20 @@ and `rust/tests/golden/closure/neg_delta_entry.*` /
 `neg_compressed_entry.*`, and
 `golden_pack::pack_v2_fixtures::closure_profile_still_rejects_compressed_entries`
 (every feature combination, including a frame corrupted past decoding).
+
+## Pack exclusions preserve surviving objects and delta bases
+
+**Always:** a pack rewrite drops every excluded entry and rawifies a surviving
+delta only when its direct base is excluded. Surviving bytes and entry order
+are preserved; an unchanged pack keeps its original bytes. Rewrites use the
+existing `DecodeLimits` charged-payload accounting and repository-scoped bases.
+
+**Because:** deleting a delta base otherwise makes retained objects undecodable;
+transitive rawification adds size without improving decodability.
+
+**If violated:** a takedown can corrupt unrelated objects or reveal external
+object membership.
+
+**Enforced by:** `pack::rewrite::tests` (128 property cases, chains of depth 1–5,
+external bases, duplicates, compressed fixtures and budget/error checks), plus
+`mkit-core-wasm-check/tests/pack_rewrite.rs` and the hostile-length wasm harness.

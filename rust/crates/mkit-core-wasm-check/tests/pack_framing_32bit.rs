@@ -10,7 +10,7 @@
 use mkit_core::ops::graph::ClosureMode;
 use mkit_core::pack::{
     DecodeLimits, HEADER_LEN, NoExternalBases, PackEntries, PackError, PackWriter, TRAILER_LEN,
-    decode_entries_with, delta_base_hashes,
+    decode_entries_with, delta_base_hashes, rewrite_excluding,
 };
 
 /// A one-entry raw pack with the entry's `payload_len` patched to `len`
@@ -52,6 +52,14 @@ fn payload_len_near_u32_max_is_a_clean_error() {
         let err = decode_entries_with(&pack, &mut NoExternalBases, DecodeLimits::default(), |_| {
             Ok(())
         })
+        .unwrap_err();
+        assert!(matches!(err, PackError::UnexpectedEof), "{err:?}");
+        let err = rewrite_excluding(
+            &pack,
+            &std::collections::HashSet::new(),
+            &mut NoExternalBases,
+            DecodeLimits::default(),
+        )
         .unwrap_err();
         assert!(matches!(err, PackError::UnexpectedEof), "{err:?}");
     }
