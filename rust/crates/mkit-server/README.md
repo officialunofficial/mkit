@@ -22,11 +22,16 @@ and `wasm32-unknown-unknown`:
 - the request pipeline (`pipeline`): the PRD §5.4 stages as hook traits with
   the M0 defaults, the auth modes (open, bearer, auth v2, transport
   identity), shard routing (`ShardMap`), pure write planners whose batches
-  carry a `NotAfter` commit deadline, and the unary RPCs over the storage
-  contract
+  carry a `NotAfter` commit deadline, the unary RPCs over the storage
+  contract, and the streaming ones: a resumable `UploadPack`
+  (`UploadSession`, memory bounded by one chunk) and a chunked
+  `DownloadPack` (`DownloadStream`)
+- the `test-faults` feature, for test builds only: `FaultHooks` called at
+  five pipeline points and per-request `TestDirectives`
+  (`x-mkit-test-fault`, `x-mkit-test-clock-skew-ms`). No release build
+  enables it; without it the seam is compiled out.
 
-The streaming RPCs and the Connect binding land here in later work of the
-same effort.
+The Connect binding lands here in later work of the same effort.
 
 ## Crate map
 

@@ -29,6 +29,7 @@ use crate::store::{
     Batch, Key, PartitionStats, Precondition, ScanPage, StoreCapabilities, Value, Write, codec,
     keys,
 };
+use crate::telemetry::METRIC_REQUESTS;
 
 const AUDIENCE: &str = "https://api.example.test";
 const REPO: &str = "room-a";
@@ -318,6 +319,19 @@ impl Req {
     ) -> Self {
         let digest = to_hex(&hash(body));
         let commitment = format!("body:{digest}");
+        let mut req = Self::committed(key, procedure, &commitment, nonce, created);
+        req.body = body.to_vec();
+        req.header("x-digest", &digest)
+    }
+
+    /// Signed over `commitment` at `created`, valid for 300 s, no body.
+    fn committed(
+        key: &SigningKey,
+        procedure: Procedure,
+        commitment: &str,
+        nonce: &str,
+        created: i64,
+    ) -> Self {
         let expires = created + 300_000;
         let op = SignedOp {
             context: AuthContext {
@@ -325,7 +339,7 @@ impl Req {
                 repository: REPO,
             },
             procedure: procedure.connect_path(),
-            commitment: &commitment,
+            commitment,
             created_at: created,
             expires_at: expires,
             nonce,
@@ -337,15 +351,14 @@ impl Req {
             ("x-repository", REPO.to_owned()),
             ("x-public-key", to_hex(key.verifying_key().as_bytes())),
             ("x-signature", to_hex_bytes(&signature.to_bytes())),
-            ("x-digest", digest),
-            ("x-content-commitment", commitment),
+            ("x-content-commitment", commitment.to_owned()),
             ("x-created-at", created.to_string()),
             ("x-expires-at", expires.to_string()),
             ("idempotency-key", nonce.to_owned()),
         ];
         Self {
             procedure,
-            body: body.to_vec(),
+            body: Vec::new(),
             headers,
             principal: None,
         }
@@ -954,6 +967,7 @@ fn plan_cas_any_missing_match_on_snapshot() {
             charges: &[],
             grant: None,
             layout_version: false,
+            rejection: None,
         };
         let values: Vec<_> = current.map(|id| ref_value(HEAD, id)).into_iter().collect();
         let planned = plan_write(&req, &snapshot(&req, &values), &clock_at(5, None)).unwrap();
@@ -1002,6 +1016,7 @@ fn plan_conflict_writes_only_the_replay_record() {
         charges: &[],
         grant: None,
         layout_version: false,
+        rejection: None,
     };
     let values = [ref_value(PACKMAP, A), ref_value(HEAD, B)];
     let Planned::Apply(plan) =
@@ -1065,6 +1080,7 @@ fn plan_quota_exhaustion_yields_no_batch() {
         charges: &charges,
         grant: None,
         layout_version: true,
+        rejection: None,
     };
     let used = QuotaState {
         window_start: T0,
@@ -1111,6 +1127,7 @@ proptest! {
             charges: &charges,
             grant: None,
             layout_version: layout.is_some(),
+            rejection: None,
         };
         let mut values = Vec::new();
         for (name, current) in [(PACKMAP, currents.0), (HEAD, currents.1)] {
@@ -1616,6 +1633,7 @@ fn plan_signed_conflict_still_charges_quota() {
         charges: &charges,
         grant: None,
         layout_version: false,
+        rejection: None,
     };
     let values = [ref_value(HEAD, A)];
     let clock = clock_at(ms(T0), None);
@@ -1667,6 +1685,7 @@ fn plan_prune_fits_the_batch_op_cap() {
         charges: &charges,
         grant: None,
         layout_version: true,
+        rejection: None,
     };
     let mut snap = snapshot(&req, &[]);
     let limit = usize::try_from(PRUNE_LIMIT).unwrap();
@@ -1711,6 +1730,7 @@ fn prune_sampling_is_deterministic_one_in_eight() {
         charges: &[],
         grant: None,
         layout_version: false,
+        rejection: None,
     };
     let sampled = (0u8..=255)
         .filter(|b| {
@@ -1905,3 +1925,6 @@ fn lost_prune_race_retries_without_prune_uncounted() {
     let kept = now(env.pipe.meta.inner.get(&ns(), &quota)).unwrap();
     assert!(kept.is_some(), "the raced row is not pruned");
 }
+
+#[path = "tests_stream.rs"]
+mod stream;

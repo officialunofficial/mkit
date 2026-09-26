@@ -44,6 +44,10 @@ subtle = { version = "2", default-features = false }
 # In-memory reference backends (`MemoryKv`, `MemoryBlobStore`): the template
 # for third-party backends. Always compiled for this crate's own unit tests.
 memory = []
+# The pipeline's test seam: `FaultHooks` at five points and per-request
+# `TestDirectives` (`x-mkit-test-fault`, `x-mkit-test-clock-skew-ms`).
+# Never enabled by a release build or any binary's default features.
+test-faults = []
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # `send_wrap` on wasm32: lets a `!Send` handler future satisfy the `+ Send`
