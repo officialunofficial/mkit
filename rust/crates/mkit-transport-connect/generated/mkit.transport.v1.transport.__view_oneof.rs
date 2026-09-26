@@ -35,3 +35,33 @@ pub mod download_pack_response {
         ),
     }
 }
+pub mod begin_upload_response {
+    #[allow(unused_imports)]
+    use super::*;
+    #[derive(Clone, Debug)]
+    pub enum Result<'a> {
+        AlreadyPresent(
+            ::buffa::alloc::boxed::Box<
+                super::super::super::super::__buffa::view::AlreadyPresentView<'a>,
+            >,
+        ),
+        Ticket(
+            ::buffa::alloc::boxed::Box<
+                super::super::super::super::__buffa::view::UploadTicketView<'a>,
+            >,
+        ),
+    }
+}
+pub mod upload_part_request {
+    #[allow(unused_imports)]
+    use super::*;
+    #[derive(Clone, Debug)]
+    pub enum Msg<'a> {
+        Header(
+            ::buffa::alloc::boxed::Box<
+                super::super::super::super::__buffa::view::UploadPartHeaderView<'a>,
+            >,
+        ),
+        Chunk(&'a [u8]),
+    }
+}

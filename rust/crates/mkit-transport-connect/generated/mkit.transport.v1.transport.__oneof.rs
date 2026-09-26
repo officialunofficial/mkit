@@ -97,3 +97,91 @@ pub mod download_pack_response {
         }
     }
 }
+pub mod begin_upload_response {
+    #[allow(unused_imports)]
+    use super::*;
+    /// Exactly one BeginUpload outcome (SPEC-TRANSPORT-CONNECT §7.6).
+    #[derive(Clone, PartialEq, Debug)]
+    pub enum Result {
+        AlreadyPresent(::buffa::alloc::boxed::Box<super::super::super::AlreadyPresent>),
+        Ticket(::buffa::alloc::boxed::Box<super::super::super::UploadTicket>),
+    }
+    impl ::buffa::Oneof for Result {}
+    impl From<super::super::super::AlreadyPresent> for Result {
+        fn from(v: super::super::super::AlreadyPresent) -> Self {
+            Self::AlreadyPresent(::buffa::alloc::boxed::Box::new(v))
+        }
+    }
+    impl From<super::super::super::AlreadyPresent> for ::core::option::Option<Result> {
+        fn from(v: super::super::super::AlreadyPresent) -> Self {
+            Self::Some(Result::from(v))
+        }
+    }
+    impl From<super::super::super::UploadTicket> for Result {
+        fn from(v: super::super::super::UploadTicket) -> Self {
+            Self::Ticket(::buffa::alloc::boxed::Box::new(v))
+        }
+    }
+    impl From<super::super::super::UploadTicket> for ::core::option::Option<Result> {
+        fn from(v: super::super::super::UploadTicket) -> Self {
+            Self::Some(Result::from(v))
+        }
+    }
+    impl serde::Serialize for Result {
+        fn serialize<S: serde::Serializer>(
+            &self,
+            s: S,
+        ) -> ::core::result::Result<S::Ok, S::Error> {
+            use serde::ser::SerializeMap;
+            let mut map = s.serialize_map(Some(1))?;
+            match self {
+                Self::AlreadyPresent(v) => {
+                    map.serialize_entry("alreadyPresent", v)?;
+                }
+                Self::Ticket(v) => {
+                    map.serialize_entry("ticket", v)?;
+                }
+            }
+            map.end()
+        }
+    }
+}
+pub mod upload_part_request {
+    #[allow(unused_imports)]
+    use super::*;
+    /// One message in the part stream (SPEC-TRANSPORT-CONNECT §7.6).
+    #[derive(Clone, PartialEq, Debug)]
+    pub enum Msg {
+        Header(::buffa::alloc::boxed::Box<super::super::super::UploadPartHeader>),
+        Chunk(::buffa::alloc::vec::Vec<u8>),
+    }
+    impl ::buffa::Oneof for Msg {}
+    impl From<super::super::super::UploadPartHeader> for Msg {
+        fn from(v: super::super::super::UploadPartHeader) -> Self {
+            Self::Header(::buffa::alloc::boxed::Box::new(v))
+        }
+    }
+    impl From<super::super::super::UploadPartHeader> for ::core::option::Option<Msg> {
+        fn from(v: super::super::super::UploadPartHeader) -> Self {
+            Self::Some(Msg::from(v))
+        }
+    }
+    impl serde::Serialize for Msg {
+        fn serialize<S: serde::Serializer>(
+            &self,
+            s: S,
+        ) -> ::core::result::Result<S::Ok, S::Error> {
+            use serde::ser::SerializeMap;
+            let mut map = s.serialize_map(Some(1))?;
+            match self {
+                Self::Header(v) => {
+                    map.serialize_entry("header", v)?;
+                }
+                Self::Chunk(v) => {
+                    map.serialize_entry("chunk", &::buffa::json_helpers::ProtoJson(v))?;
+                }
+            }
+            map.end()
+        }
+    }
+}

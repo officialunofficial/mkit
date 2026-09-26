@@ -451,6 +451,26 @@ targets. All run in the workspace nextest (`just ci`, cloudbuild/ci.yaml).
 Simulated Durable Objects cannot show placement, Cloudflare's limits or
 point-in-time recovery; the M1 staging runs (WP-1.20) cover those.
 
+## M1 Connect surfaces remain explicit stubs until implementation
+
+**Always:** until their implementing WPs land, the four new discovery and
+upload RPCs return `unimplemented` ("not implemented yet"). Ref deletion,
+advance ticket ids, upload ticket tokens and ref-list continuation tokens
+are rejected before validation or pipeline writes. `page_size` is ignored
+and listings end with an empty `next_page_token`.
+
+**Because:** the new RPC paths currently bypass authentication because
+`Procedure::from_connect_path` does not recognise them. WP-1.9 and WP-1.11
+must add authenticated procedures before enabling upload behavior;
+WP-1.6 must make discovery explicit while keeping it public by spec §2.1.
+
+**If violated:** a new field can silently invoke legacy behavior, or an
+unauthenticated upload handler can mutate state.
+
+**Enforced by:** `mkit-server/tests/connect_dispatch.rs`'s `m1_*` tests
+and the TODO and SECURITY comments in `connect/service.rs`. Implementing
+WPs replace the relevant stub assertions with their behavior and auth tests.
+
 ## The native server and the reference Worker pass the black-box wire suite
 
 **Always:** every `mkit.transport.v1` server mkit ships passes
