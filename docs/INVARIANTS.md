@@ -965,3 +965,18 @@ native `tests/repository_routing.rs` over memory and SQLite (including the
 same repository name in different namespaces and shared nonces), and the
 conformance `repo.*` wire cases. Namespace authorization is WP-1.5; pack
 membership is WP-1.10; the coordinator repository registry is WP-1.22.
+
+## Timer effects share the row's atomicity boundary
+
+**Always:** a timer handler's batch commits in its timer partition only after
+checking the original row value, together with deleting or rescheduling the row.
+Unknown timer kinds remain stored. Native committed timer Puts notify inside the
+blocking task, even if the awaiting request is canceled.
+
+**Because:** alarm redelivery and concurrent ticks must not duplicate effects;
+cancellation must not hide a durable timer from the native driver.
+
+**If violated:** effects can run twice or a committed timer can remain asleep.
+
+**Enforced by:** `mkit-server/src/timers/tests.rs` race and atomicity tests,
+`mkit-server-native/tests/timers.rs`, and the worker's pure alarm tests.

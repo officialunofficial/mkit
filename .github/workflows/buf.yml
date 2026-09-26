@@ -4,7 +4,8 @@ name: "CI: Buf"
 # covers all three proto trees — rust/crates/mkit-rpc/proto
 # (mkit.rpc.v1[.signer/.ssh/.verify]), apps/repo-worker/proto
 # (mkit.repo.v1), and proto (mkit.transport.v1) — as workspace modules.
-# This is the ONLY place buf lint / buf breaking run —
+# This workflow runs buf lint / buf breaking and the hook JSON gate;
+# `just ci-proto` mirrors these gates locally.
 # cloudbuild/codegen.yaml (Cloud Build) covers vendored-codegen
 # freshness via scripts/check-generated-fresh.sh, which is a separate,
 # additive concern (and not a required status for external fork PRs the
@@ -64,3 +65,6 @@ jobs:
           push: false
           archive: false
           pr_comment: false
+
+      - name: Check server-hook golden JSON
+        run: bash scripts/check-server-hooks-goldens.sh

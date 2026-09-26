@@ -1,0 +1,15 @@
+{
+  "allow": {
+    "reservationId": "demo:upload-20260926-001",
+    "responseHeaders": [
+      {
+        "name": "Payment-Receipt",
+        "value": "fake-example-receipt-not-valid"
+      },
+      {
+        "name": "PAYMENT-RESPONSE",
+        "value": "fake-example-response-not-valid"
+      }
+    ]
+  }
+}
