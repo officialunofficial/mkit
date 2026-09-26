@@ -50,6 +50,15 @@ train).
   readers over any `NamespaceStore`, and the content-addressed `BlobStore` /
   `PackSink` contract with the `MemoryBlobStore` reference backend.
 
+- *(core)* Resumable-part building blocks (SPEC-TRANSPORT-CONNECT §7.6):
+  `write_auth::ContentCommitment` parses and formats `body:`, `pack:` and the
+  new `part:<ticket>:<index>:<subtree>:<len>` commitment, and
+  `verify_headers_with(.., ExpectedCommitment::PartStream, ..)` verifies an
+  `UploadPart` envelope; the new `upload_parts` module validates part
+  geometry, streams a part into its BLAKE3 subtree chaining value and merges
+  part values into the pack id. Golden vectors under
+  `rust/tests/golden/{uploads,auth-v2}`. **SemVer:** additive.
+
 - *(core)* Closure verification now has a pull-based
   `ObjectSource`/`verify_closure_streaming` API and a native
   `verify_closure_store` helper. `ClosureReport` gains the additive
