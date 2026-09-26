@@ -1,16 +1,16 @@
 # mkit-server-native — the native (tokio) adapter of the mkit server (PRD
-# MKIT-29 §5.1). This first cut holds the SQLite metadata backend: the
-# rusqlite `SqlConn` under `mkit-server`'s shared `SqlKvStore`, and the
-# `Blocking` adapter that runs sync-bodied stores on tokio's blocking pool.
-# The axum router, the FS blob store and the `mkit-server` binary land in
-# later work (WP-M0-10), which also enables `mkit-server/fs`.
+# MKIT-29 §5.1): the SQLite metadata backend (the rusqlite `SqlConn` under
+# `mkit-server`'s shared `SqlKvStore`), the `Blocking` adapter that runs
+# sync-bodied stores on tokio's blocking pool, the embeddable axum router
+# with its production tower layers, and the `mkit-server` binary (FS blobs,
+# `.mkit`-layout or SQLite metadata; WP-M0-10, D31).
 #
 # `publish = false` during the epic; WP-REL decides publication. Never a
 # dependency of `mkit-cli`: rusqlite's bundled SQLite (C, built by `cc`)
-# must stay out of the CLI graph.
+# and the HTTP server stack must stay out of the CLI graph.
 [package]
 name = "mkit-server-native"
-description = "Native (tokio) adapter of the mkit server: SQLite metadata backend"
+description = "Native (tokio) adapter of the mkit server: axum router, SQLite metadata backend and the mkit-server binary"
 publish = false
 version.workspace = true
 edition.workspace = true
@@ -23,23 +23,91 @@ authors.workspace = true
 workspace = true
 
 [features]
-default = ["sqlite"]
+default = ["sqlite", "http"]
 # `RusqliteConn`: SQLite through rusqlite, with SQLite bundled.
-sqlite = ["dep:rusqlite", "dep:parking_lot", "dep:tracing"]
+sqlite = ["dep:rusqlite", "dep:parking_lot"]
+# The axum router, its tower layers, graceful shutdown, tracing and the
+# `metrics` bridge, and the `mkit-server` binary.
+http = [
+    "sqlite",
+    "dep:axum",
+    "dep:tower",
+    "dep:tower-http",
+    "dep:tracing-subscriber",
+    "dep:metrics",
+    "dep:clap",
+    "dep:connectrpc",
+    "dep:http",
+    "mkit-server/connect",
+    "tokio/rt-multi-thread",
+    "tokio/net",
+    "tokio/signal",
+    "tokio/macros",
+    "tokio/time",
+]
 
 [dependencies]
-# Not `fs`: that feature arrives with WP-M0-10.
-mkit-server = { version = "0.4", path = "../mkit-server", default-features = false, features = ["sql"] }
+# `fs`: the `.mkit` on-disk layout stores the binary serves (moved here from
+# WP-M0-09, R-71). `sql`: the shared SQL store under `RusqliteConn`.
+mkit-server = { version = "0.4", path = "../mkit-server", default-features = false, features = ["sql", "fs"] }
+mkit-core = { version = "0.4", path = "../mkit-core", default-features = false }
+# The file-ref check behind `--meta sqlite:` (R-81).
+mkit-transport-file = { version = "0.4", path = "../mkit-transport-file" }
 tokio = { version = "1", default-features = false, features = ["rt", "sync"] }
 # Drives a sync-bodied store's future to completion on a blocking thread.
 futures-executor = "0.3"
-tracing = { version = "0.1", default-features = false, features = ["std"], optional = true }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+bytes = "1"
+tracing = { version = "0.1", default-features = false, features = ["std"] }
 rusqlite = { version = "0.40", default-features = false, features = ["bundled", "cache"], optional = true }
 # A reentrant lock: a transaction body runs statements on the connection
 # its own `transaction` call already holds.
 parking_lot = { version = "0.12", optional = true }
+# The router: same axum pin as `mkit-transport-connect`.
+axum = { version = "0.8", default-features = false, features = ["http1", "http2", "tokio"], optional = true }
+tower = { version = "0.5", default-features = false, features = ["limit", "util"], optional = true }
+tower-http = { version = "0.6", default-features = false, features = ["cors", "trace", "limit", "sensitive-headers"], optional = true }
+# `DeadlinePolicy` for the per-procedure timeouts. zstd is fine natively.
+connectrpc = { version = "0.9.1", default-features = false, features = ["axum", "gzip", "zstd", "json"], optional = true }
+http = { version = "1", optional = true }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt", "ansi", "env-filter", "json"], optional = true }
+# The metrics facade only; no exporter (planner default Q20).
+metrics = { version = "0.24", optional = true }
+clap = { version = "4", default-features = false, features = ["std", "help", "error-context", "usage", "derive", "env"], optional = true }
 
 [dev-dependencies]
-tokio = { version = "1", default-features = false, features = ["rt-multi-thread"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "time", "net", "io-util"] }
 tempfile = "3"
 futures = "0.3"
+mkit-server = { version = "0.4", path = "../mkit-server", features = ["memory"] }
+mkit-server-conformance = { path = "../mkit-server-conformance" }
+# tests/wire_fs_layout_bearer.rs diffs against today's `mkit serve --http`
+# (the `server` feature; WP-M0-15 removes that half with it).
+mkit-transport-connect = { version = "0.4", path = "../mkit-transport-connect", features = ["server"] }
+buffa = "0.9.1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+serde_json = "1"
+url = "2"
+
+[[bin]]
+name = "mkit-server"
+path = "src/bin/mkit-server.rs"
+required-features = ["http"]
+
+[[test]]
+name = "wire_fs_sqlite"
+required-features = ["http"]
+
+[[test]]
+name = "wire_fs_layout_bearer"
+required-features = ["http"]
+
+[[test]]
+name = "server_basics"
+required-features = ["http"]
+
+[[test]]
+name = "wire_binary"
+required-features = ["http"]

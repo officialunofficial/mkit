@@ -33,6 +33,9 @@ mkit-core = { version = "0.4", path = "../mkit-core", default-features = false }
 thiserror = "2"
 bytes = "1"
 futures-core = "0.3"
+# The optional write gate's async mutex (`Pipeline::with_write_gate`);
+# runtime-agnostic and wasm-clean.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
 # Stored-value codecs (`store::codec`), on every target, so not optional.
 serde = { version = "1", features = ["derive"] }

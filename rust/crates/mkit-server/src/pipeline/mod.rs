@@ -22,6 +22,7 @@ mod auth;
 mod download;
 #[cfg(feature = "test-faults")]
 mod faults;
+mod gate;
 mod hooks;
 mod outcome;
 mod plan;
@@ -195,6 +196,7 @@ pub struct Pipeline<B, N, H = Hooks> {
     metrics: Arc<dyn Metrics>,
     #[cfg(feature = "test-faults")]
     faults: Option<Arc<dyn faults::DynFaultHooks>>,
+    gate: Option<gate::WriteGate>,
 }
 
 impl<B, N, H> core::fmt::Debug for Pipeline<B, N, H> {
@@ -298,6 +300,7 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             metrics,
             #[cfg(feature = "test-faults")]
             faults: None,
+            gate: None,
         })
     }
 
@@ -326,6 +329,20 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     #[must_use]
     pub fn with_shards(mut self, shards: Arc<dyn ShardMap>) -> Self {
         self.shards = shards;
+        self
+    }
+
+    /// Run the writes to one partition one at a time in this process: each
+    /// write's read-plan-apply loop waits for the partition's gate, as a
+    /// Durable Object's input gate serializes them on Workers. For a
+    /// single-process server over a single-writer store (native `SQLite`,
+    /// which commits one batch at a time anyway): concurrent writes that
+    /// share a key, such as one signer's quota window, then never exhaust
+    /// the re-plan bound and fail `aborted`. Reads are not gated. Several
+    /// processes on one store still race, through the optimistic loop.
+    #[must_use]
+    pub fn with_write_gate(mut self) -> Self {
+        self.gate = Some(gate::WriteGate::new());
         self
     }
 
@@ -878,6 +895,11 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     ) -> Result<StoredResult, ServerError> {
         #[cfg(not(feature = "test-faults"))]
         let _ = op;
+        // Held until the loop ends (see `with_write_gate`).
+        let _gate = match &self.gate {
+            Some(gate) => Some(gate.enter(p).await),
+            None => None,
+        };
         let skew_ms = a.business_skew_ms;
         let (mut replans, mut deadline_missed, mut prune_ok) = (0, false, true);
         loop {

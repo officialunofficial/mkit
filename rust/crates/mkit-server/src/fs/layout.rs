@@ -20,6 +20,11 @@ use crate::store::{
     ScanPage, StoreCapabilities, StoreError, Value, Write, keys,
 };
 
+/// The marker a `mkit-server --meta sqlite:` deployment writes under the
+/// served root (content `sqlite`): the root's refs live in `SQLite`, so
+/// [`FsLayoutStore::open`] refuses it (R-81). Never removed automatically.
+pub const META_MARKER: &str = ".mkit/server-meta";
+
 /// The directory `FileTransport` keeps refs in, as a ref-name prefix.
 const REFS_PREFIX: &str = "refs/";
 
@@ -100,6 +105,36 @@ impl FsLayoutStore {
     pub fn new(root: impl Into<PathBuf>, repo: &RepoId) -> Self {
         let partition = Partition::Namespace(repo.namespace.clone());
         Self::in_partition(root, partition, repo.name.clone())
+    }
+
+    /// [`Self::new`], refusing a root whose refs live in `SQLite` (R-81):
+    /// one carrying the [`META_MARKER`] a `mkit-server --meta sqlite:`
+    /// deployment writes. Serving its ref files too would keep a second,
+    /// diverging copy of the refs. Every server of a `.mkit` root opens
+    /// its ref store through here.
+    ///
+    /// # Errors
+    /// [`StoreError::Unsupported`] naming both ways out when the root is
+    /// marked; [`StoreError::Unavailable`] when the marker cannot be
+    /// checked.
+    pub fn open(root: impl Into<PathBuf>, repo: &RepoId) -> Result<Self, StoreError> {
+        let root = root.into();
+        let marker = root.join(META_MARKER);
+        match fs::symlink_metadata(&marker) {
+            Ok(_) => Err(StoreError::Unsupported(
+                format!(
+                    "repo root {} is served with --meta sqlite (marker {META_MARKER}): its refs \
+                     live in SQLite, and serving its file-based refs would keep a second, \
+                     diverging copy. Serve this root with --meta sqlite:<PATH>, or migrate the \
+                     refs back to files and remove {} by hand.",
+                    root.display(),
+                    marker.display()
+                )
+                .into(),
+            )),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(Self::new(root, repo)),
+            Err(e) => Err(unavailable(e)),
+        }
     }
 
     /// `repo`'s refs in `partition`, served from `root`: for a deployment
