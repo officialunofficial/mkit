@@ -81,6 +81,17 @@ slow-timeout = { period = "150s", terminate-after = 1 }
 filter = 'binary(fs_backends)'
 slow-timeout = { period = "150s", terminate-after = 1 }
 
+# The wire suite's growth case waits out replay expiry plus the server's
+# prune grace on the real clock (~70s): pruning never follows the
+# test-faults clock skew. Not a hang.
+[[profile.default.overrides]]
+filter = 'binary(baseline_pipeline_memory) and test(=pipeline_auth_v2_test_faults)'
+slow-timeout = { period = "180s", terminate-after = 1 }
+
+[[profile.ci.overrides]]
+filter = 'binary(baseline_pipeline_memory) and test(=pipeline_auth_v2_test_faults)'
+slow-timeout = { period = "180s", terminate-after = 1 }
+
 [profile.ignored-lane]
 # #505 PR 5/5: a handful of irreducibly-real tests (subprocess sleeps,
 # real localhost TCP, the ~5s worktree-lock wait, a real `ssh` connect

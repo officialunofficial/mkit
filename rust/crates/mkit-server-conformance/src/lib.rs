@@ -1,7 +1,13 @@
 #![forbid(unsafe_code)]
 // Cases take their harness by value so every case future is `'static`.
 #![allow(clippy::needless_pass_by_value)]
-//! Conformance suite for `mkit-server` storage backends (PRD §5.1, §5.3).
+//! Conformance suites for `mkit-server` storage backends and for
+//! `mkit.transport.v1` servers (PRD §5.1, §5.3).
+//!
+//! [`wire`] is the black-box wire suite: it drives any server over HTTP
+//! from a base URL and a profile, and ships as the
+//! `mkit-server-conformance wire` binary. The rest of this page is about
+//! the storage suite.
 //!
 //! [`storage`] holds generic cases for the key-level
 //! [`NamespaceStore`](mkit_server::NamespaceStore) contract (its eight
@@ -64,6 +70,7 @@
 //! ```
 
 pub mod storage;
+pub mod wire;
 
 #[doc(hidden)]
 pub mod __private {
