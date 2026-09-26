@@ -80,12 +80,20 @@ This WP is the pure primitive underneath: one pack in, one rewritten pack out.
      in the pack (decode it even though it is dropped) or from `bases`, which WP-5.7b supplies from the preservation
      store.
    - If it's unavailable, the error is `DeltaBaseMissing`, exactly as in the decoder.
-7. **Memory:**
-   - All decoding goes through the existing budgeted machinery (`decode_entries_with` / `DecodeLimits` semantics:
-     charge claims before decompressing, charge external bases, release after last use).
-   - Resident memory stays within `limits.max_decoded_bytes` plus the input pack plus the output buffer.
-   - The output is bounded by `PackWriter`'s own caps (`MAX_ENTRIES`, `MAX_TOTAL_PAYLOAD`); going over is the writer's
-     existing error.
+7. **Memory (clarified in amendment 1): this means the existing `DecodeLimits` charged-payload accounting, NOT a strict
+   allocation cap.**
+   - All decoding goes through the existing budgeted machinery (`decode_entries_with` / `DecodeLimits` semantics):
+     charge claims before decompressing, charge each external base when it is fetched, and release bases after their
+     last use.
+   - The bound is exactly what `DecodeLimits` already documents (`pack.rs`, the `DecodeLimits` doc comment): the
+     *charged* total stays ≤ `limits.max_decoded_bytes`, with the two documented overshoots allowed:
+     - one external base whose fetch trips the cap (it is measured after the source returns it);
+     - the transient working memory of decompressing one entry (ruzstd peaks at about 3× the claim).
+   - Add nothing stricter than what `decode_entries_with` enforces, and nothing looser.
+   - On top of that, only the input pack and the output buffer are resident. The output is bounded by `PackWriter`'s
+     own caps (`MAX_ENTRIES`, `MAX_TOTAL_PAYLOAD`); going over is the writer's existing error.
+   - Tests assert on the charged accounting (a test-only counter, or observing `PackfileTooLarge` before the sink or
+     writer grows), not on RSS.
 8. **Errors:**
    - An invalid input pack gives the same error the decoder returns.
    - No new variants.
