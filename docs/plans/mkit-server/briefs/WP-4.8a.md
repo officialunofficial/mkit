@@ -10,7 +10,9 @@ resumable cursor. It does **not** resolve deltas and does not store anything. Th
 
 1. **Format rules** come from `docs/specs/SPEC-PACKFILE.md`:
    - §1: layout; trailer = `BLAKE3(bytes[0 .. len-32])`.
-   - §2: framing, `payload_len` ≤ 2^31-1, bounds-checked against the pre-trailer tail.
+   - §2: framing, `payload_len` bounds-checked against the pre-trailer tail. **Amendment 3:** for the length limit, mirror
+     `PackEntries` exactly. It accepts any `u32` `payload_len` within the bounds check and the 4 GiB payload-sum cap. Do
+     NOT add §2's `≤ 2^31-1` check here; that spec/implementation mismatch is tracked separately.
    - §3: entry types `0x00`/`0x02`/`0x03`/`0x04`; `0x03`/`0x04` only in v2.
    - §3.3: zstd bomb guards; claims checked before any allocation, and the exact length re-checked.
    - §5: `MAX_ENTRIES` and the `MAX_TOTAL_PAYLOAD` payload-sum cap.
@@ -111,6 +113,11 @@ resumable cursor. It does **not** resolve deltas and does not store anything. Th
    - The carried partial entry (an entry straddling windows) and each `0x03`/`0x04` claimed `uncompressed_len` are
      charged against `limits.max_decoded_bytes`. Going over gives `PackfileTooLarge`, before allocating.
    - Use `Vec::try_reserve` for these buffers, so a failed allocation is an error (`PackfileTooLarge`), not an abort.
+   - **Clarified in amendment 2:** "charged" means charged *before* the allocation, against the claim (the declared
+     `uncompressed_len`, or the frame's payload length for a carried entry). The one allowed overshoot is the
+     transient working memory of decompressing one entry: ruzstd peaks at about 3× the claim (documented from WP-4.1).
+     This WP does not bound that below the claim. Tests assert on the charged accounting (a test-only counter), not on
+     RSS.
    - Entries are never retained after they are yielded.
 4. **Streaming trailer and pack-id hashing:**
    - Hash incrementally with `blake3::hazmat` subtree chaining values, window by window, following BLAKE3's left-balanced
