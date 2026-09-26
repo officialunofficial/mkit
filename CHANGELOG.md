@@ -152,6 +152,23 @@ train).
   transport: the next writer recovers the in-process lock (it guards no
   data). **SemVer:** additive.
 
+- *(server)* `SQLite` metadata backend: `mkit-server`'s `sql` feature adds
+  `SqlKvStore`, the `NamespaceStore` contract implemented once over a
+  synchronous `SqlConn` (one `kv` table keyed by partition and key, each
+  batch one transaction, `NotAfter` read on the backend clock inside it)
+  with versioned, forward-only schema migrations that refuse a newer
+  schema. An optional `Capacity` sets a hard cap and a soft limit a reserve
+  below it: batches with a put return `StoreError::Full` at the soft limit,
+  and the reserve keeps delete-only batches (which can split b-tree pages)
+  from ever hitting the engine limit. It compiles for wasm32, so Durable
+  Object SQLite can share it. New `mkit-server-native` crate
+  (`publish = false`): `RusqliteConn` (bundled SQLite, WAL,
+  `synchronous = FULL`), the `Blocking` adapter that runs sync-bodied
+  stores on tokio's blocking pool, and physical (`VACUUM INTO`) and
+  logical backup/restore documentation. Passes the conformance suite with
+  zero skips on a file-backed store. Not in the `mkit-cli` graph.
+  **SemVer:** unreleased API.
+
 - *(core)* Resumable-part building blocks (SPEC-TRANSPORT-CONNECT §7.6):
   `write_auth::ContentCommitment` parses and formats `body:`, `pack:` and the
   new `part:<ticket>:<index>:<subtree>:<len>` commitment, and

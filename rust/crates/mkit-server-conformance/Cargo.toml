@@ -30,3 +30,6 @@ futures = "0.3"
 # tests/fs_backends.rs: the `.mkit`-layout stores (native only, like this
 # crate).
 mkit-server = { version = "0.4", path = "../mkit-server", features = ["fs"] }
+# The SQLite backend under test (tests/sqlite_backends.rs).
+mkit-server-native = { path = "../mkit-server-native" }
+tempfile = "3"

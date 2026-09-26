@@ -52,6 +52,11 @@ test-faults = []
 # std-only, no async runtime, so the server-free `mkit serve` (ssh) can use
 # them. Native only: the module and its dependency are cfg'd out on wasm32.
 fs = ["dep:mkit-transport-file"]
+# The shared SQL backend (`sql::SqlKvStore`) over the synchronous
+# `sql::SqlConn` trait. No SQL engine dependency: `mkit-server-native`
+# implements `SqlConn` with rusqlite, the Workers adapter with Durable
+# Object SQLite. Compiles for wasm32.
+sql = []
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # `fs` delegates ref CAS, the ref lock and atomic writes to FileTransport, so

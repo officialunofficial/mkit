@@ -14,7 +14,9 @@
 //! as do the export/import helpers and the `ContentIndex` row types
 //! (`store::export_partition`, `store::Holder`).
 //! The `memory` feature adds the in-memory reference backends; the native
-//! `fs` feature adds [`fs`], the stores over the `.mkit` on-disk layout.
+//! `fs` feature adds [`fs`], the stores over the `.mkit` on-disk layout; the
+//! `sql` feature adds `sql::SqlKvStore`, the store over any synchronous
+//! `sql::SqlConn`.
 
 pub mod auth_v2;
 pub mod download;
@@ -31,6 +33,8 @@ pub mod refs;
 mod replay;
 mod repo;
 mod rt;
+#[cfg(feature = "sql")]
+pub mod sql;
 pub mod storage_error;
 pub mod store;
 mod telemetry;
