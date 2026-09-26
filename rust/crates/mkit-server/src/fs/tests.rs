@@ -802,3 +802,21 @@ proptest! {
         prop_assert_eq!(on_disk, modeled);
     }
 }
+
+#[test]
+fn open_refuses_a_root_marked_for_sqlite_meta() {
+    let dir = TempDir::new().unwrap();
+    // Unmarked: opens, and serves the same files as `new`.
+    let store = FsLayoutStore::open(dir.path(), &repo()).unwrap();
+    let put = Batch::new().put(ref_key("refs/heads/main"), Value::new(id(b"a").to_vec()));
+    assert_eq!(apply(&store, put).unwrap(), BatchOutcome::Committed);
+
+    fs::create_dir_all(dir.path().join(".mkit")).unwrap();
+    fs::write(dir.path().join(super::META_MARKER), b"sqlite").unwrap();
+    let err = FsLayoutStore::open(dir.path(), &repo()).unwrap_err();
+    let StoreError::Unsupported(message) = err else {
+        panic!("{err:?}");
+    };
+    assert!(message.contains("--meta sqlite"), "{message}");
+    assert!(message.contains("server-meta"), "{message}");
+}

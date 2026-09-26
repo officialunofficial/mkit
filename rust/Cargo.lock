@@ -3181,6 +3181,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "metrics"
+version = "0.24.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "89550ee9f79e88fef3119de263694973a8adb26c21d75322164fb8c493039fe2"
+dependencies = [
+ "portable-atomic",
+ "rapidhash",
+]
+
+[[package]]
 name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3524,14 +3534,38 @@ dependencies = [
 name = "mkit-server-native"
 version = "0.4.2"
 dependencies = [
+ "axum",
+ "buffa",
+ "bytes",
+ "clap",
+ "connectrpc",
  "futures",
  "futures-executor",
+ "futures-util",
+ "getrandom 0.4.3",
+ "http",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "libc",
+ "metrics",
+ "mkit-core",
  "mkit-server",
+ "mkit-server-conformance",
+ "mkit-transport-connect",
+ "mkit-transport-file",
  "parking_lot",
  "rusqlite",
+ "serde_json",
+ "subtle",
  "tempfile",
  "tokio",
+ "tower",
+ "tower-http",
  "tracing",
+ "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
@@ -4677,6 +4711,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "513962919efc330f829edb2535844d1b912b0fbe2ca165d613e4e8788bb05a5a"
 dependencies = [
  "rand_core 0.9.5",
+]
+
+[[package]]
+name = "rapidhash"
+version = "4.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5da7e78a036ce858e8d55b7e7dc8ba3a88b78350fd2155d3591bbd966b58589e"
+dependencies = [
+ "rustversion",
 ]
 
 [[package]]

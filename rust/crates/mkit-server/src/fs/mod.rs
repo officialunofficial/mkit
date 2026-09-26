@@ -22,7 +22,7 @@ mod layout;
 mod tests;
 
 pub use blob::{FsBlobStore, FsPackSink};
-pub use layout::FsLayoutStore;
+pub use layout::{FsLayoutStore, META_MARKER};
 use std::io::{self, ErrorKind};
 
 use mkit_transport_file::RefFileError;
