@@ -172,7 +172,7 @@ async fn open_downloads_hold_their_slots_and_excess_is_shed() {
     assert_eq!(shed.status, 503);
     assert_eq!(shed.headers["retry-after"], "1");
     let err = decode_unary::<ReadRefResponse>(&shed).unwrap().unwrap_err();
-    assert_eq!(err.code, "resource_exhausted");
+    assert_eq!(err.code, "unavailable");
 
     // Finishing one body frees its slot.
     let done = decode_stream::<DownloadPackResponse>(&reply(first).await).unwrap();

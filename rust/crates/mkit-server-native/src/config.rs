@@ -128,7 +128,7 @@ pub struct ServeArgs {
     #[arg(long, value_name = "N", default_value_t = 256)]
     pub max_concurrency: usize,
     /// How long a request waits for a slot before it is shed (HTTP 503,
-    /// Connect `resource_exhausted`); 0 sheds at once.
+    /// Connect `unavailable`); 0 sheds at once.
     #[arg(long, value_name = "SECS", default_value_t = 5)]
     pub queue_timeout_secs: u64,
     /// How long a client may take to send its request headers.

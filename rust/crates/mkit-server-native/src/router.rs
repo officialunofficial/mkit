@@ -41,7 +41,7 @@ pub struct RouterOptions {
     /// runs there.
     pub max_concurrency: usize,
     /// How long a request waits for a slot before it is shed with HTTP 503
-    /// and Connect `resource_exhausted`. Zero sheds at once.
+    /// and Connect `unavailable`. Zero sheds at once.
     pub queue_timeout: Duration,
     /// Largest request body on the wire; a larger `Content-Length` is
     /// refused `413` before any handler runs, and a body that grows past it

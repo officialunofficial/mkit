@@ -34,11 +34,12 @@ fn connect_error(status: StatusCode, code: &str, message: &str) -> Response<Body
 }
 
 /// The answer when no permit frees up within the queue timeout: HTTP 503
-/// with `Retry-After`, Connect code `resource_exhausted`.
+/// with `Retry-After`, Connect code `unavailable` (503 in both the Connect
+/// and gRPC mappings, so every client reads the same retryable status).
 fn overloaded() -> Response<Body> {
     let mut resp = connect_error(
         StatusCode::SERVICE_UNAVAILABLE,
-        "resource_exhausted",
+        "unavailable",
         "server busy; retry",
     );
     resp.headers_mut()

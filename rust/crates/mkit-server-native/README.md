@@ -140,7 +140,7 @@ The listener speaks plaintext HTTP/1.1 and h2c; terminate TLS at the proxy.
   slot until its response body ends, so a streaming `DownloadPack` counts
   for as long as it streams. A request that finds no slot within
   `--queue-timeout-secs` (default 5; 0 sheds at once) is answered HTTP 503
-  with `Retry-After: 1` and Connect code `resource_exhausted`. Keep the cap
+  with `Retry-After: 1` and Connect code `unavailable`. Keep the cap
   below tokio's blocking-pool size (512 by default): every store call runs
   there.
 - `--max-pack-bytes` (default 4 GiB) caps an upload's declared size; the
