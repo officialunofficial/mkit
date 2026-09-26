@@ -86,10 +86,11 @@ train).
   `pack::decode_entries_with(pack, bases, limits, sink)` validates and
   decodes a pack in pack order, handing each `DecodedEntry` to `sink`
   (`DecodeReport` summarizes). `DecodeLimits::max_decoded_bytes` (default
-  1 GiB) caps what a decode may materialise: every compressed entry's
+  1 GiB, per call) caps what a decode may hold: every compressed entry's
   claimed size and every delta's declared result length are charged
-  before anything is decompressed or applied, so a tiny pack cannot pin
-  gigabytes (`PackError::PackfileTooLarge`).
+  before anything is decompressed or applied, and every external base as
+  it is fetched (credited back after its last use), so a tiny pack cannot
+  pin gigabytes (`PackError::PackfileTooLarge`).
 - *(core)* `verify::verify_push(tips, mode, source, known)` /
   `PushReport`: incremental push verification before refs move. It walks
   every new tip's closure through the shared closure BFS, re-hashes each

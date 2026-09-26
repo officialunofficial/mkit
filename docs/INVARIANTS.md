@@ -710,9 +710,12 @@ tips themselves (from their index) before moving a ref to one.
 
 `decode_entries_with` is bounded by the caller's `DecodeLimits`: every
 `0x03`/`0x04` claim and every delta's declared result length is charged
-before it is materialised, and only entries that a later delta names as its
-base stay resident. `PackReader::read` has no such budget (tracked
-separately).
+before it is materialised, and every external base from the
+`DeltaBaseSource` as it is fetched. An entry or external base stays
+resident only until the last delta that names it; an external base's
+charge is then credited back. The budget is per call: a server sizes it
+from its isolate limit and decode concurrency. `PackReader::read` has no
+such budget (tracked separately).
 
 **Because:** PRD §6.5 forbids existence oracles. If a push could close its
 history, or resolve a delta, over objects held only by another repository or
@@ -733,7 +736,8 @@ unsigned or foreign objects.
 `untrusted_source_returning_wrong_bytes_is_rejected`,
 `decode_with_no_external_bases_matches_reader`,
 `delta_bomb_is_rejected_before_any_delta_is_applied`,
-`compressed_claims_are_charged_before_decompression`). The server-side wiring and
+`compressed_claims_are_charged_before_decompression`,
+`external_bases_are_charged_against_the_budget`). The server-side wiring and
 the cross-repository uniform-error conformance test belong to WP-4.7.
 
 ## Closure profile is raw-only

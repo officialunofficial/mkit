@@ -1336,25 +1336,36 @@ pub struct DecodeReport {
 ///
 /// A pack's wire size says little about what decoding it allocates: a
 /// `0x03`/`0x04` entry may claim up to [`MAX_RAW_OBJECT_SIZE`] bytes from a
-/// few-byte zstd frame, and a delta may declare a result of the same size
-/// from a short run of copies. A decoder that holds its entries until the
-/// pack ends would let a sub-kilobyte pack pin gigabytes.
-/// [`decode_entries_with`] therefore adds up every such claim *before*
-/// materialising it and rejects the pack once the total passes
-/// [`Self::max_decoded_bytes`].
+/// few-byte zstd frame, a delta may declare a result of the same size
+/// from a short run of copies, and a tiny delta may name a huge external
+/// base. A decoder that held all of that until the pack ends would let a
+/// sub-kilobyte pack pin gigabytes. [`decode_entries_with`] therefore
+/// charges every such allocation against [`Self::max_decoded_bytes`] and
+/// rejects the pack with [`PackError::PackfileTooLarge`] once the total
+/// passes it.
+///
+/// The budget is **per call**. It bounds one decode, not a process: a
+/// server running several decodes at once (WP-4.7) must size it from its
+/// isolate's memory limit divided by its decode concurrency. The default,
+/// [`Self::DEFAULT_MAX_DECODED_BYTES`] (1 GiB), equals the largest object
+/// the format allows ([`MAX_RAW_OBJECT_SIZE`]) so that any single valid
+/// object decodes; it is not sized for a constrained isolate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DecodeLimits {
-    /// Cap on the bytes a decode may materialise beyond the pack itself:
-    /// the sum of every `0x03`/`0x04` entry's claimed `uncompressed_len`
-    /// plus every delta's declared result length. `0x00` payloads are
-    /// borrowed from the pack and do not count.
+    /// Cap on the bytes one decode may hold beyond the pack itself: every
+    /// `0x03`/`0x04` entry's claimed `uncompressed_len`, every delta's
+    /// declared result length, and every external base fetched from the
+    /// [`DeltaBaseSource`] while it is cached. `0x00` payloads are borrowed
+    /// from the pack and do not count. An external base is measured once
+    /// fetched, so the peak can pass the cap by the one base whose fetch
+    /// trips it.
     pub max_decoded_bytes: u64,
 }
 
 impl DecodeLimits {
-    /// Default [`Self::max_decoded_bytes`]: 1 GiB, the size of one
-    /// largest-possible object. A server sizes this to its isolate.
+    /// Default [`Self::max_decoded_bytes`]: 1 GiB, the maximum object size
+    /// ([`MAX_RAW_OBJECT_SIZE`]). Servers set their own (see the type docs).
     pub const DEFAULT_MAX_DECODED_BYTES: u64 = MAX_RAW_OBJECT_SIZE as u64;
 
     /// These limits with [`Self::max_decoded_bytes`] set to `bytes`.
@@ -1387,6 +1398,40 @@ impl DecodeBudget {
             return Err(PackError::PackfileTooLarge);
         }
         Ok(())
+    }
+}
+
+/// The decode path's [`DeltaBaseSource`]: forwards to the caller's source
+/// and charges each base it returns against the decode budget, remembering
+/// the charge so [`Self::release`] can credit it back once no later delta
+/// needs that base. [`PackReader::read`] never uses this.
+struct ChargedBases<'b, B> {
+    inner: &'b mut B,
+    budget: DecodeBudget,
+    charged: std::collections::HashMap<Hash, u64>,
+}
+
+impl<B: DeltaBaseSource> DeltaBaseSource for ChargedBases<'_, B> {
+    const VERIFIED: bool = B::VERIFIED;
+
+    fn base(&mut self, id: &Hash) -> Result<Option<Vec<u8>>, PackError> {
+        let Some(bytes) = self.inner.base(id)? else {
+            return Ok(None);
+        };
+        let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        self.budget.charge(len)?;
+        let held = self.charged.entry(*id).or_default();
+        *held = held.saturating_add(len);
+        Ok(Some(bytes))
+    }
+}
+
+impl<B> ChargedBases<'_, B> {
+    /// Credit back the charge for external base `id`, if it had one.
+    fn release(&mut self, id: &Hash) {
+        if let Some(len) = self.charged.remove(id) {
+            self.budget.used = self.budget.used.saturating_sub(len);
+        }
     }
 }
 
@@ -1443,20 +1488,23 @@ fn charge_compressed_claims(pack: &[u8], budget: &mut DecodeBudget) -> Result<()
 ///
 /// Memory is bounded by `limits` (see [`DecodeLimits`]): every
 /// compressed entry's claimed size is charged before anything is
-/// decompressed, and every delta's declared result length before any
-/// delta is applied. After `sink` has seen an entry, it is kept only if
-/// a later delta names it as its base.
+/// decompressed, every delta's declared result length before any delta
+/// is applied, and every external base as it is fetched. An entry or an
+/// external base stays resident only until the last delta that names it
+/// as its base; an external base's charge is then credited back.
 ///
 /// External bases are fetched only for a delta whose base is not an
-/// earlier entry, at most once per distinct base, and never
-/// recursively: a base is a canonical object, never a pack-only delta.
+/// earlier entry, at most once per distinct base while it is needed, and
+/// never recursively: a base is a canonical object, never a pack-only
+/// delta.
 ///
 /// # Errors
 ///
-/// [`PackError::PackfileTooLarge`] when the claimed decoded size passes
-/// `limits.max_decoded_bytes` (checked ahead of every per-entry error
-/// except framing); otherwise the first [`PackError`] in pack order, or
-/// the first error `sink` returns. `sink` may already have seen earlier
+/// [`PackError::PackfileTooLarge`] when the decoded size passes
+/// `limits.max_decoded_bytes`: claims are checked ahead of every
+/// per-entry error except framing, an external base when the delta that
+/// names it is reached. Otherwise the first [`PackError`] in pack order,
+/// or the first error `sink` returns. `sink` may already have seen earlier
 /// entries when an error is returned; a consumer staging them must
 /// discard that staging.
 pub fn decode_entries_with<B: DeltaBaseSource>(
@@ -1478,18 +1526,25 @@ pub fn decode_entries_with<B: DeltaBaseSource>(
     }
 
     // Charge every delta's declared result length before applying any
-    // (a stream too short for its header fails at apply time), and note
-    // which ids some delta names as its base: only those stay resident.
-    let mut wanted: std::collections::HashSet<Hash> = std::collections::HashSet::new();
+    // (a stream too short for its header fails at apply time), and count
+    // how many deltas name each base: an entry stays resident only while
+    // a later delta still needs it.
+    let mut uses: std::collections::HashMap<Hash, usize> = std::collections::HashMap::new();
     for entry in &entries {
         if let PackEntry::Delta { base, stream } = entry {
             if let Some(result_len) = le_u32_at(stream, 5) {
                 budget.charge(result_len)?;
             }
-            wanted.insert(*base);
+            let n = uses.entry(*base).or_default();
+            *n = n.saturating_add(1);
         }
     }
 
+    let mut bases = ChargedBases {
+        inner: bases,
+        budget,
+        charged: std::collections::HashMap::new(),
+    };
     let mut in_pack: std::collections::HashMap<Hash, Cow<'_, [u8]>> =
         std::collections::HashMap::new();
     let mut report = DecodeReport {
@@ -1507,15 +1562,26 @@ pub fn decode_entries_with<B: DeltaBaseSource>(
                     object,
                     from_delta: false,
                 })?;
-                if wanted.contains(&id) {
+                if uses.contains_key(&id) {
                     in_pack.insert(id, bytes);
                 }
                 report.raw_count += 1;
                 report.ids.push(id);
             }
             PackEntry::Delta { base, stream } => {
-                let resolved = resolve_delta_target(bases, &mut in_pack, base, stream.as_ref())?;
+                let resolved =
+                    resolve_delta_target(&mut bases, &mut in_pack, base, stream.as_ref())?;
                 drop(stream);
+                // This delta was one of `base`'s uses. After the last one
+                // the base is dropped and, if external, its charge credited.
+                if let Some(left) = uses.get_mut(&base) {
+                    *left = left.saturating_sub(1);
+                    if *left == 0 {
+                        uses.remove(&base);
+                        in_pack.remove(&base);
+                        bases.release(&base);
+                    }
+                }
                 let object = validate_storable_object(&resolved)?;
                 let id = crate::object::id_from_object(&object, &resolved);
                 sink(DecodedEntry {
@@ -1524,7 +1590,7 @@ pub fn decode_entries_with<B: DeltaBaseSource>(
                     object,
                     from_delta: true,
                 })?;
-                if wanted.contains(&id) {
+                if uses.contains_key(&id) {
                     in_pack.insert(id, Cow::Owned(resolved));
                 }
                 report.delta_count += 1;
@@ -3779,6 +3845,94 @@ mod tests {
         let unpacked = PackReader::read(&pack, &store).unwrap();
         let (report, _) = decode_collect(&pack, &mut NoExternalBases).unwrap();
         assert_eq!(report.ids, unpacked.stored);
+    }
+
+    /// A repository-membership source over in-memory objects, counting
+    /// fetches (the review's `bomb ext` shape: bases live only here).
+    struct Members {
+        objects: std::collections::HashMap<Hash, Vec<u8>>,
+        fetches: usize,
+    }
+
+    impl DeltaBaseSource for Members {
+        fn base(&mut self, id: &Hash) -> Result<Option<Vec<u8>>, PackError> {
+            self.fetches += 1;
+            Ok(self.objects.get(id).cloned())
+        }
+    }
+
+    /// Two 600 KiB member blobs and a tiny delta against each: `(source,
+    /// [(base id, delta stream)])`. Each delta rebuilds a small blob, so
+    /// its declared result is a few hundred bytes.
+    fn large_member_bases() -> (Members, Vec<(Hash, Vec<u8>)>) {
+        let mut objects = std::collections::HashMap::new();
+        let mut deltas = Vec::new();
+        for seed in [1u64, 2] {
+            let base = write_blob_via_serialize(&incompressible_bytes(seed, 600 * 1024));
+            let id = hash::hash(&base);
+            let target = write_blob_via_serialize(&base[10..300]);
+            deltas.push((id, delta::encode(&base, &target).unwrap()));
+            objects.insert(id, base);
+        }
+        (
+            Members {
+                objects,
+                fetches: 0,
+            },
+            deltas,
+        )
+    }
+
+    fn pack_of_deltas(deltas: &[&(Hash, Vec<u8>)]) -> Vec<u8> {
+        let mut w = PackWriter::new();
+        for (base, stream) in deltas {
+            w.push_delta(base, stream).unwrap();
+        }
+        w.finish().unwrap()
+    }
+
+    #[test]
+    fn external_bases_are_charged_against_the_budget() {
+        let one_mib = DecodeLimits::default().with_max_decoded_bytes(1 << 20);
+        let (mut members, deltas) = large_member_bases();
+
+        // A then B then A: A must stay cached while B is fetched, so the
+        // two 600 KiB bases are held at once and pass the 1 MiB budget at
+        // B's fetch. Only the first delta reaches the sink.
+        let pack = pack_of_deltas(&[&deltas[0], &deltas[1], &deltas[0]]);
+        let mut sink_calls = 0usize;
+        let err = decode_entries_with(&pack, &mut members, one_mib, |_| {
+            sink_calls += 1;
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(matches!(err, PackError::PackfileTooLarge), "{err:?}");
+        assert_eq!(sink_calls, 1);
+
+        // A single base larger than the budget fails before any sink call.
+        let half_mib = DecodeLimits::default().with_max_decoded_bytes(512 * 1024);
+        let pack = pack_of_deltas(&[&deltas[0]]);
+        let mut sink_calls = 0usize;
+        let err = decode_entries_with(&pack, &mut members, half_mib, |_| {
+            sink_calls += 1;
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(matches!(err, PackError::PackfileTooLarge), "{err:?}");
+        assert_eq!(sink_calls, 0);
+    }
+
+    #[test]
+    fn external_base_charge_is_released_after_its_last_use() {
+        // A, A, then B: A's last use comes before B is fetched, so A is
+        // dropped and its charge credited back; the peak is one base, and
+        // the same 1 MiB budget accepts the pack. A is fetched once.
+        let one_mib = DecodeLimits::default().with_max_decoded_bytes(1 << 20);
+        let (mut members, deltas) = large_member_bases();
+        let pack = pack_of_deltas(&[&deltas[0], &deltas[0], &deltas[1]]);
+        let report = decode_entries_with(&pack, &mut members, one_mib, |_| Ok(())).unwrap();
+        assert_eq!(report.delta_count, 3);
+        assert_eq!(members.fetches, 2);
     }
 
     #[test]
