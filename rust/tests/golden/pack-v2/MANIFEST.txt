@@ -1,0 +1,14 @@
+# SPEC-PACKFILE v2 fixtures, written by the C zstd encoder (pack-zstd)
+# Produced by `MKIT_WRITE_GOLDEN=1 cargo test -p mkit-core --test golden_pack`
+# Format: <file> <blake3-hex-of-file-bytes>
+# See docs/specs/SPEC-PACKFILE.md section 10, vector #20.
+raw_4k_repeat.bin dea58b65addfd67f943440774775f6c63957ab4cd64fa383a23fac52f0b5766a
+raw_4k_repeat.json f950e4f5fc03211782f0d13f28ab8f42eed1672f6b661efa017d03471985d8f6
+delta_repeat.bin ece5976ae44eb546c029df0da826d13e06abd82f60fadfb3bf702bc1562e478f
+delta_repeat.json 020f83adadcf977bdf1a1a1e83b9683bbf2f21a40153e0a6fe6dd6de4d12f9af
+mixed.bin a4f107ff62d8995a4a3d0babc662c7125c16bc76e8264ac39c49a2ce13f75adb
+mixed.json 4691b9f585ce3e49b27aaba4c52880a1abe15b1360bea0d7c425d368736c5787
+tree_and_commit.bin 3b50149a0433384d72ff837765ca9c1173f2bd4a2731efb468e3f8f9f0c8ac26
+tree_and_commit.json daca39db4f68f5bca434f369543da44e1c309c43133ad5b6502dcd6486548e92
+large_literals.bin df925789c13ba282cbc4251b9fa06bcf8e40faae3fc456a26174f6d1211e56bf
+large_literals.json 43e1632da6cd9c68117795e887d547f72543c48b782ec639a3f2fc0699828051

@@ -19,6 +19,13 @@ train).
 
 ### Changed
 
+- *(core)* Pack readers enforce SPEC-PACKFILE §3.3's "one zstd frame"
+  rule. A `0x03`/`0x04` payload holding two concatenated frames, a
+  skippable or legacy-magic frame, or trailing bytes after the frame now
+  fails with `PackError::ZstdDecompress`. The C path
+  (`zstd::bulk::decompress`) used to decode concatenated frames and skip
+  skippable ones. mkit's `PackWriter` never produced such payloads.
+  Pre-production policy: no compatibility path.
 - *(core)* SPEC-DISCLOSURE v2: every `Step` and chunk header carries a
   mandatory 32-byte `inner_root` (bare BMT root of the parent Tree /
   ChunkedBlob). Bundle version byte is `2`; version `1` is a typed
@@ -36,6 +43,31 @@ train).
   index or the global object CAS), not just the on-disk `ObjectStore`.
   `build_disclosure` is now a thin wrapper; bundle bytes are unchanged
   (the disclosure golden regeneration is a zero diff).
+
+- *(core)* `pack-ruzstd` feature: a decode-only, pure-Rust zstd backend
+  (`ruzstd` 0.9, with `twox-hash` for frame checksums) that lets a
+  `wasm32-unknown-unknown` build read SPEC-PACKFILE v2 `0x03`/`0x04`
+  entries under the same bomb guards, length checks and one-frame rule
+  as the C path. It does not pre-allocate the claimed size, but a frame
+  that decodes to its claim peaks at about 3× the claim (C: about 1×),
+  because ruzstd's ring buffer rounds up to a power of two and
+  `read_to_end` grows the output by doubling; a 512 MiB claim measured
+  about 1.55 GiB RSS. `PackWriter` still compresses only with
+  `pack-zstd`, and `pack-zstd` decodes when both features are on. No
+  consumer enables it yet. Also added: C-encoded v2 fixtures in
+  `rust/tests/golden/pack-v2/` (SPEC-PACKFILE §10 #20, including frames
+  with 4- and 5-byte literals headers), a C-vs-Rust differential test
+  suite, a wasm32 test lane (`scripts/wasm-ruzstd-check.sh`, crate
+  `mkit-core-wasm-check`, in `just ci-scripts`), a `pack-ruzstd` nextest
+  run in `just ci`, and a `pack-ruzstd` graph check in
+  `scripts/check-wasm-dep-graph.sh`.
+  **Accepted deviation:** the WP-4.1 brief called any frame that ruzstd
+  accepts and C rejects "not tolerable". Such frames remain on malformed
+  input and are accepted as a documented residual (no consumer yet;
+  object ids are content-derived). Over 850k mutated frames: 134 accepted
+  only by ruzstd, 2,580 accepted only by C, 4 accepted by both with
+  different bytes, no panics. Consumer requirements are in
+  `docs/INVARIANTS.md`.
 
 - *(server)* `mkit-server` crate (internal foundation for the production
   server, MKIT-29): repo and namespace identifiers, principals, the typed

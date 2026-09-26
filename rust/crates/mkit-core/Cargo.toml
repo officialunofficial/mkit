@@ -87,6 +87,15 @@ zeroize = { version = "1", features = ["derive"] }
 # via the commonware dependency stack. This direct dependency uses the
 # newer safe wrapper while sharing the same underlying zstd C library.
 zstd = { version = "0.14", optional = true }
+# Decode-only, pure-Rust zstd for SPEC-PACKFILE v2 `0x03`/`0x04` entries on
+# targets that cannot link the C library (wasm32-unknown-unknown), gated by
+# the `pack-ruzstd` feature below. mkit-core only ever calls its
+# `decoding` module; `PackWriter` never compresses without `pack-zstd`.
+# `default-features = false` + `std` + `hash`: `hash` pulls the pure-Rust
+# `twox-hash` so frame content checksums are verified, not ignored. Pure
+# Rust, no C toolchain: `scripts/check-wasm-dep-graph.sh` proves the
+# `pack-ruzstd` graph stays free of `zstd-sys`.
+ruzstd = { version = "0.9", optional = true, default-features = false, features = ["std", "hash"] }
 
 # POSIX uid + O_NOFOLLOW for the key file open path. Unix-only; the
 # Windows path uses default ACLs as documented in `docs/specs/SPEC-SIGNING.md`.
@@ -118,8 +127,19 @@ default = ["pack-zstd"]
 # `pack.rs` reject v2 packs at compile time — a build without it can
 # still fail closed at runtime on a `0x03`/`0x04` entry — it only
 # means this build's `PackWriter` never emits them and this build's
-# `PackReader` can't decompress ones it receives.
+# `PackReader` can't decompress ones it receives (unless `pack-ruzstd`
+# below supplies a decoder).
 pack-zstd = ["dep:zstd"]
+# SPEC-PACKFILE v2 decode-only backend (pure Rust, wasm32-clean): lets a
+# build without `pack-zstd` (e.g. a Workers isolate) READ `0x03`/`0x04`
+# entries under the same §3.3 bomb guards, length checks and one-frame
+# rule as the C path. It never makes `PackWriter` compress: without
+# `pack-zstd` every pack written is still v1. When both features are on,
+# `pack-zstd` (C) decodes and `pack-ruzstd` is compiled only so the
+# differential tests can run both backends over the same inputs. Not
+# enabled by any consumer yet; `mkit-wasm` stays raw-only
+# (SPEC-DISCLOSURE §7.2).
+pack-ruzstd = ["dep:ruzstd"]
 # Canonical first-parent snapshots use the synchronous in-memory MMB primitive.
 history-mmr = ["dep:commonware-storage", "dep:commonware-cryptography"]
 # Sparse witnesses use the canonical Tree codec and the base BLAKE3 hasher.

@@ -32,6 +32,9 @@ members = [
     # (publish = false — never a normal dependency, see the crate's
     # Cargo.toml header).
     "crates/mkit-test-util",
+    # wasm32 harness for mkit-core's `pack-ruzstd` decoder (publish = false,
+    # test-only; see the crate's Cargo.toml header).
+    "crates/mkit-core-wasm-check",
     # The reference external-signer binaries (mkit-sign-{file,ctap,tpm}) are a
     # SEPARATE workspace under contrib/signers/ — see contrib/signers/Cargo.toml.
     # They were members here, but out-of-tree members (`../contrib/...`) break

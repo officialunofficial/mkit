@@ -7,7 +7,10 @@
 # these build for `wasm32-unknown-unknown`, and mkit-wasm / apps/repo-worker /
 # mkit-server depend on mkit-core with default-features=false specifically to
 # keep them out (see crates/mkit-core/Cargo.toml and
-# crates/mkit-attest/Cargo.toml's wasm comments). This is a fast `cargo
+# crates/mkit-attest/Cargo.toml's wasm comments). It also checks the
+# `mkit-core --no-default-features --features pack-ruzstd` graph (the
+# decode-only pure-Rust zstd backend) both contains `ruzstd` and stays
+# C-free. This is a fast `cargo
 # tree` check, not a build: it does not replace
 # `cargo build --target wasm32-unknown-unknown`, only catches a
 # manifest change that widened the dependency graph before a slow wasm
@@ -31,10 +34,20 @@ fail=0
 # repo already accepts, not a regression. mkit-server is not checked for it
 # either: its Connect binding pulls `connectrpc` (and so `tokio`) from
 # WP-M0-06 on, for the same reason.
+#
+# check_tree <label> <manifest-dir> <extra-cargo-tree-args> <required> <forbidden...>
+#   extra-cargo-tree-args: e.g. "--no-default-features --features pack-ruzstd",
+#                          or "" for the crate's own feature set
+#   required:              space-separated crates the graph MUST contain, or ""
+#                          (proves a feature really selects the backend it names)
 check_tree() {
   local label="$1"
   local manifest_dir="$2"
-  shift 2
+  local extra_args=()
+  if [ -n "$3" ]; then read -r -a extra_args <<<"$3"; fi
+  local required=()
+  if [ -n "$4" ]; then read -r -a required <<<"$4"; fi
+  shift 4
   local forbidden=("$@")
 
   if ! command -v cargo >/dev/null 2>&1; then
@@ -47,7 +60,7 @@ check_tree() {
   fi
 
   local tree
-  if ! tree=$(cd "$manifest_dir" && cargo tree --target wasm32-unknown-unknown -e normal --prefix none 2>&1); then
+  if ! tree=$(cd "$manifest_dir" && cargo tree --target wasm32-unknown-unknown -e normal --prefix none ${extra_args[@]+"${extra_args[@]}"} 2>&1); then
     echo "error: 'cargo tree --target wasm32-unknown-unknown' failed for ${label}:"
     echo "$tree"
     fail=1
@@ -55,6 +68,12 @@ check_tree() {
   fi
 
   local crate
+  for crate in ${required[@]+"${required[@]}"}; do
+    if ! echo "$tree" | grep -qE "^${crate} v"; then
+      echo "error: ${label}'s wasm32 dependency graph does not contain '${crate}', which it must"
+      fail=1
+    fi
+  done
   for crate in "${forbidden[@]}"; do
     if echo "$tree" | grep -qE "^${crate} v"; then
       echo "error: ${label}'s wasm32 dependency graph pulls in '${crate}', which does not build for wasm32-unknown-unknown:"
@@ -64,9 +83,17 @@ check_tree() {
   done
 }
 
-check_tree "mkit-wasm" "rust/crates/mkit-wasm" blst zstd-sys commonware-runtime commonware-storage tokio
-check_tree "apps/repo-worker" "apps/repo-worker" blst zstd-sys commonware-runtime commonware-storage
-check_tree "mkit-server" "rust/crates/mkit-server" blst zstd-sys commonware-runtime commonware-storage
+# `ruzstd` is forbidden in mkit-wasm to make its raw-only decision explicit
+# (SPEC-DISCLOSURE §7.2); drop it from that list when mkit-wasm opts into
+# `pack-ruzstd`.
+check_tree "mkit-wasm" "rust/crates/mkit-wasm" "" "" blst zstd-sys commonware-runtime commonware-storage tokio ruzstd
+check_tree "apps/repo-worker" "apps/repo-worker" "" "" blst zstd-sys commonware-runtime commonware-storage
+check_tree "mkit-server" "rust/crates/mkit-server" "" "" blst zstd-sys commonware-runtime commonware-storage
+# mkit-core's decode-only pure-Rust zstd backend must select `ruzstd` and
+# stay C-free. The first consumer that enables it (WP 4.8) adds its own
+# positive check here.
+check_tree "mkit-core (pack-ruzstd)" "rust/crates/mkit-core" "--no-default-features --features pack-ruzstd" "ruzstd" \
+  blst zstd-sys commonware-runtime commonware-storage
 
 if [ "$fail" -ne 0 ]; then
   echo
@@ -74,4 +101,4 @@ if [ "$fail" -ne 0 ]; then
   exit 1
 fi
 
-echo "ok: mkit-wasm, apps/repo-worker and mkit-server wasm32 dependency graphs contain no C-toolchain crates"
+echo "ok: mkit-wasm, apps/repo-worker, mkit-server and mkit-core (pack-ruzstd) wasm32 dependency graphs contain no C-toolchain crates"
