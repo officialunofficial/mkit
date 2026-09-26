@@ -1950,7 +1950,9 @@ mod tests {
         assert_eq!(budget.peak.load(Ordering::Relaxed), budget.cap);
         // An insufficient base budget fails inside the store allocator,
         // before any buffer exists, and leaves the cache empty.
+        drop(in_pack);
         let budget = ResidentBudget::new(base.len() - 1, None);
+        let mut in_pack = std::collections::HashMap::new();
         let mut uses = std::collections::HashMap::from([(
             base_hash,
             BaseUses {
@@ -1999,6 +2001,71 @@ mod tests {
         assert_eq!(budget.used.load(Ordering::Relaxed), 0);
         assert!(!store.contains(&hash::hash(&first)));
         assert!(!store.contains(&hash::hash(&second)));
+    }
+
+    #[test]
+    #[ignore = "decodes more than 200 MiB; run in the serial ignored-lane"]
+    #[cfg(feature = "pack-zstd")]
+    fn large_mixed_pack_decodes_under_production_resident_cap() {
+        let started = std::time::Instant::now();
+        const GROUPS: u32 = 13;
+        const RAW_LEN: usize = 16 * 1024 * 1024;
+        const COMPRESSED_LEN: usize = 4 * 1024 * 1024;
+        let mut writer = PackWriter::new();
+        let mut expected = Vec::new();
+        // Model transfer-planner order: each raw base is immediately
+        // followed by its delta, alternating binary and text-like files.
+        for group in 0..GROUPS {
+            for content in [
+                incompressible_bytes(0xA000_0000 + u64::from(group), RAW_LEN),
+                vec![u8::try_from(group).unwrap(); COMPRESSED_LEN],
+            ] {
+                let base = write_blob_via_serialize(&content);
+                let base_hash = hash::hash(&base);
+                writer.push_raw(base_hash, &base).unwrap();
+                expected.push(base_hash);
+                let mut target = base.clone();
+                *target.last_mut().unwrap() ^= 0x80;
+                let target_hash = hash::hash(&target);
+                writer
+                    .push_delta(&base_hash, &delta::encode(&base, &target).unwrap())
+                    .unwrap();
+                expected.push(target_hash);
+            }
+        }
+        let pack = writer.finish().unwrap();
+        // Require at least 200 MiB on the wire as well as reconstructed
+        // content; highly compressed entries cannot satisfy this by claim.
+        assert!(pack.len() >= 200 * 1024 * 1024);
+        let mut parser = PackEntries::new(&pack).unwrap();
+        let (mut raw, mut zstd, mut deltas) = (0, 0, 0);
+        for _ in 0..parser.entry_count() {
+            match parser.next_encoded_entry().unwrap() {
+                Entry::Raw(EncodedPayload::Plain(_)) => raw += 1,
+                Entry::Raw(EncodedPayload::Zstd(_)) => zstd += 1,
+                Entry::Delta { .. } => deltas += 1,
+            }
+        }
+        assert_eq!((raw, zstd, deltas), (GROUPS, GROUPS, 2 * GROUPS));
+        let (_dir, store) = fresh_store();
+        let budget = ResidentBudget::new(resident_bytes_cap(pack.len()), None);
+        let report =
+            PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &budget).unwrap();
+        assert_eq!(report.raw_count, 2 * GROUPS);
+        assert_eq!(report.delta_count, 2 * GROUPS);
+        assert_eq!(report.stored, expected);
+        assert_eq!(budget.used.load(Ordering::Relaxed), 0);
+        assert!(budget.peak.load(Ordering::Relaxed) <= budget.cap);
+        // Verify every stored object through the real store identity check.
+        for id in report.stored {
+            store.read(&id).unwrap();
+        }
+        eprintln!(
+            "large mixed pack: {} wire bytes, {} peak owned bytes, {:?}",
+            pack.len(),
+            budget.peak.load(Ordering::Relaxed),
+            started.elapsed()
+        );
     }
 
     #[test]
