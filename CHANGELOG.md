@@ -228,6 +228,23 @@ train).
   zero skips on a file-backed store. Not in the `mkit-cli` graph.
   **SemVer:** unreleased API.
 
+- *(server)* New `mkit-server-worker` crate (`publish = false`), the
+  storage half of the Cloudflare Workers adapter: `R2BlobStore` streams
+  both ways (a put spawned at `begin` and fed through a depth-1 channel;
+  the blob's last byte is withheld until its BLAKE3 verifies, so only
+  verified bytes are ever published, and an abort or a dropped sink
+  leaves nothing; bodies read back in pieces of at most 1 MiB; a 64 MiB
+  per-blob cap as an M1 stopgap), `DoSqlConn` (Durable Object SQLite under
+  the shared `SqlKvStore`, batches in `transactionSync`, a soft cap below
+  the 10 GB limit measured by `databaseSize`, which excludes free pages),
+  the Durable Object request handler, and `DoNamespaceStore`, which routes
+  each partition to its own Durable Object (M0: `REFSTORE`/`"root"`). It
+  passes the conformance suite with zero skips over simulated R2 and
+  Durable Object backends. Adding workers-rs 0.8.6 moves `rust/Cargo.lock`
+  from wasm-bindgen 0.2.127 to 0.2.128 (with js-sys/web-sys 0.3.105,
+  wasm-bindgen-futures 0.4.78), which `mkit-wasm` shares. **SemVer:**
+  unreleased API.
+
 - *(core)* Resumable-part building blocks (SPEC-TRANSPORT-CONNECT §7.6):
   `write_auth::ContentCommitment` parses and formats `body:`, `pack:` and the
   new `part:<ticket>:<index>:<subtree>:<len>` commitment, and
