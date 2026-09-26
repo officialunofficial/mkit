@@ -19,12 +19,14 @@ and `wasm32-unknown-unknown`:
   write is one declarative `Batch`, a content-addressed `BlobStore`, the key
   layouts, value codecs and typed readers, and the replay-ledger model;
   in-memory reference backends behind the `memory` feature
-- the request pipeline's surface (`pipeline`): the PRD §5.4 stages as hook
-  traits with the M0 defaults, shard routing (`ShardMap`), and pure write
-  planners whose batches carry a `NotAfter` commit deadline
+- the request pipeline (`pipeline`): the PRD §5.4 stages as hook traits with
+  the M0 defaults, the auth modes (open, bearer, auth v2, transport
+  identity), shard routing (`ShardMap`), pure write planners whose batches
+  carry a `NotAfter` commit deadline, and the unary RPCs over the storage
+  contract
 
-The pipeline's entry points and the Connect binding land here in later work
-of the same effort.
+The streaming RPCs and the Connect binding land here in later work of the
+same effort.
 
 ## Crate map
 
