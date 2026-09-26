@@ -1,9 +1,10 @@
 //! Baseline: the wire suite against the pipeline's Connect binding
 //! (`mkit_server::connect::service`) over the memory stores, served by
 //! `axum` on a loopback port, in three auth profiles: `none`, `bearer`, and
-//! `auth-v2` with a tiny quota. The memory store commits batches
+//! `auth-v2` with a tiny quota, plus a Multi auth-v2 baseline for the
+//! repository cases. The memory store commits batches
 //! atomically, so every profile declares `atomic-advance`. With this
-//! crate's `test-faults` feature a fourth profile adds the clock-skew
+//! crate's `test-faults` feature another profile adds the clock-skew
 //! directive and `GET /__mkit_test/stats`.
 //!
 //! The `mutant_*` tests serve the same pipeline over a deliberately broken
@@ -22,12 +23,12 @@ use mkit_server::quota::QuotaLimits as ServerQuota;
 use mkit_server::store::keys::ParsedKey;
 use mkit_server::upload::UploadLimits;
 use mkit_server::{
-    Addressing, Batch, BatchOutcome, Cursor, Key, MemoryBlobStore, MemoryKv, NamespaceKey,
-    NamespaceStore, Partition, PartitionStats, Precondition, Redacted, RepoId, RepoName, ScanPage,
-    StoreCapabilities, StoreError, SystemClock, Value, Write,
+    Addressing, Batch, BatchOutcome, Cursor, Key, MemoryBlobStore, MemoryKv, MultiAddressing,
+    NamespaceKey, NamespaceStore, Partition, PartitionStats, Precondition, Redacted, RepoId,
+    RepoName, ScanPage, StoreCapabilities, StoreError, SystemClock, Value, Write,
 };
 use mkit_server_conformance::wire::{
-    Feature, Profile, QuotaLimits, Verdict, WireAuth, WireTarget, run,
+    Feature, Milestone, Profile, QuotaLimits, Verdict, WireAuth, WireTarget, run,
 };
 
 const REPOSITORY: &str = "default";
@@ -171,6 +172,15 @@ async fn serve_mutant(
     quota: Option<ServerQuota>,
     mutant: Mutant,
 ) -> (String, Shared) {
+    serve_addressing(auth, quota, mutant, false).await
+}
+
+async fn serve_addressing(
+    auth: impl FnOnce(&str) -> AuthMode,
+    quota: Option<ServerQuota>,
+    mutant: Mutant,
+    multi: bool,
+) -> (String, Shared) {
     let (listener, origin) = common::listener().await;
     let repo = RepoId {
         namespace: NamespaceKey::deployment_default(),
@@ -180,7 +190,12 @@ async fn serve_mutant(
         max_total_bytes: MAX_PACK,
         max_chunks: 64,
     };
-    let mut cfg = PipelineConfig::new(Addressing::Single { repo }, auth(&origin), limits);
+    let addressing = if multi {
+        Addressing::Multi(MultiAddressing::new())
+    } else {
+        Addressing::Single { repo }
+    };
+    let mut cfg = PipelineConfig::new(addressing, auth(&origin), limits);
     cfg.write_quota = quota;
     let clock = Arc::new(SystemClock);
     let kv = Arc::new(MemoryKv::with_clock(clock.clone()));
@@ -277,6 +292,37 @@ async fn pipeline_auth_v2_quota_atomic() {
     let (origin, _) = serve(authv2, Some(QUOTA)).await;
     let profile = v2_profile(&origin);
     check(origin, profile).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pipeline_multi_repository() {
+    let auth = |origin: &str| AuthMode::AuthV2(AuthV2Config::new(origin, "").unwrap());
+    let (origin, _) = serve_addressing(auth, None, Mutant::None, true).await;
+    let mut profile = profile(WireAuth::AuthV2 {
+        audience: origin.clone(),
+        repository: "ignored-in-multi-mode".to_owned(),
+        seed: [0x5e; 32],
+    });
+    profile.milestone = Milestone::M1;
+    profile.features.insert(Feature::MultiRepo);
+    let target = WireTarget {
+        base_url: origin.parse().unwrap(),
+        profile,
+    };
+    // M0 cases exercise headerless reads and packs; the Multi cases
+    // carry repository identities and require the pack membership guard.
+    let report = run(&target, Some("repo.")).await;
+    common::judge(&report, PIPELINE_DIVERGENCES);
+    for case in mkit_server_conformance::wire::CASES
+        .iter()
+        .filter(|c| c.requires.contains(&Feature::MultiRepo))
+    {
+        assert!(
+            matches!(report.verdict(case.name), Some(Verdict::Pass(_))),
+            "{} did not run",
+            case.name
+        );
+    }
 }
 
 /// The `test-faults` profile: an auth v2 server whose quota window is

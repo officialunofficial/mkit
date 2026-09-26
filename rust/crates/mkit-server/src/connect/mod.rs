@@ -58,7 +58,8 @@ pub mod proto {
 }
 
 /// `TransportService` and `Health` over `pipeline`, without the
-/// interceptor: every transport RPC then fails `unauthenticated`. Mount
+/// interceptor: every authenticated transport RPC then fails
+/// `unauthenticated`; the M1 stub RPCs answer `unimplemented`. Mount
 /// [`service`] unless another layer installs [`AuthInterceptor`].
 pub fn router<B, N, H>(pipeline: Arc<Pipeline<B, N, H>>) -> Router
 where

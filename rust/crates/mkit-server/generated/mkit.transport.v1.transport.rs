@@ -780,13 +780,36 @@ pub struct ListRefsRequest {
     /// Field 1: `prefix`
     #[serde(rename = "prefix", skip_serializing_if = "::core::option::Option::is_none")]
     pub prefix: ::core::option::Option<::buffa::alloc::string::String>,
+    /// Requested page bound, capped by the server (SPEC-TRANSPORT-CONNECT §7.9).
+    ///
+    /// Field 2: `page_size`
+    #[serde(
+        rename = "pageSize",
+        alias = "page_size",
+        with = "::buffa::json_helpers::opt_uint32",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub page_size: ::core::option::Option<u32>,
+    /// Opaque continuation token; empty starts a listing (SPEC-TRANSPORT-CONNECT §7.9).
+    ///
+    /// Field 3: `page_token`
+    #[serde(
+        rename = "pageToken",
+        alias = "page_token",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub page_token: ::core::option::Option<::buffa::alloc::string::String>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
 impl ::core::fmt::Debug for ListRefsRequest {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("ListRefsRequest").field("prefix", &self.prefix).finish()
+        f.debug_struct("ListRefsRequest")
+            .field("prefix", &self.prefix)
+            .field("page_size", &self.page_size)
+            .field("page_token", &self.page_token)
+            .finish()
     }
 }
 impl ListRefsRequest {
@@ -805,6 +828,23 @@ impl ListRefsRequest {
         value: impl Into<::buffa::alloc::string::String>,
     ) -> Self {
         self.prefix = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::page_size`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_page_size(mut self, value: u32) -> Self {
+        self.page_size = Some(value);
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::page_token`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_page_token(
+        mut self,
+        value: impl Into<::buffa::alloc::string::String>,
+    ) -> Self {
+        self.page_token = Some(value.into());
         self
     }
 }
@@ -831,6 +871,12 @@ impl ::buffa::Message for ListRefsRequest {
         if let Some(ref v) = self.prefix {
             size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
         }
+        if let Some(v) = self.page_size {
+            size += 1u64 + ::buffa::types::uint32_encoded_len(v) as u64;
+        }
+        if let Some(ref v) = self.page_token {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -843,6 +889,12 @@ impl ::buffa::Message for ListRefsRequest {
         use ::buffa::Enumeration as _;
         if let Some(ref v) = self.prefix {
             ::buffa::types::put_string_field(1u32, v, buf);
+        }
+        if let Some(v) = self.page_size {
+            ::buffa::types::put_uint32_field(2u32, v, buf);
+        }
+        if let Some(ref v) = self.page_token {
+            ::buffa::types::put_string_field(3u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -867,6 +919,27 @@ impl ::buffa::Message for ListRefsRequest {
                     buf,
                 )?;
             }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.page_size = ::core::option::Option::Some(
+                    ::buffa::types::decode_uint32(buf)?,
+                );
+            }
+            3u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_string(
+                    self
+                        .page_token
+                        .get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -876,6 +949,8 @@ impl ::buffa::Message for ListRefsRequest {
     }
     fn clear(&mut self) {
         self.prefix = ::core::option::Option::None;
+        self.page_size = ::core::option::Option::None;
+        self.page_token = ::core::option::Option::None;
         self.__buffa_unknown_fields.clear();
     }
 }
@@ -919,13 +994,25 @@ pub struct ListRefsResponse {
         deserialize_with = "::buffa::json_helpers::null_as_default"
     )]
     pub refs: ::buffa::alloc::vec::Vec<RefEntry>,
+    /// Empty ends the listing (SPEC-TRANSPORT-CONNECT §7.9).
+    ///
+    /// Field 2: `next_page_token`
+    #[serde(
+        rename = "nextPageToken",
+        alias = "next_page_token",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub next_page_token: ::core::option::Option<::buffa::alloc::string::String>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
 impl ::core::fmt::Debug for ListRefsResponse {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("ListRefsResponse").field("refs", &self.refs).finish()
+        f.debug_struct("ListRefsResponse")
+            .field("refs", &self.refs)
+            .field("next_page_token", &self.next_page_token)
+            .finish()
     }
 }
 impl ListRefsResponse {
@@ -934,6 +1021,18 @@ impl ListRefsResponse {
     ///
     /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
     pub const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.ListRefsResponse";
+}
+impl ListRefsResponse {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::next_page_token`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_next_page_token(
+        mut self,
+        value: impl Into<::buffa::alloc::string::String>,
+    ) -> Self {
+        self.next_page_token = Some(value.into());
+        self
+    }
 }
 ::buffa::impl_default_instance!(ListRefsResponse);
 impl ::buffa::MessageName for ListRefsResponse {
@@ -963,6 +1062,9 @@ impl ::buffa::Message for ListRefsResponse {
                 += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
                     + inner_size as u64;
         }
+        if let Some(ref v) = self.next_page_token {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -980,6 +1082,9 @@ impl ::buffa::Message for ListRefsResponse {
                 buf,
             );
             v.write_to(__cache, buf);
+        }
+        if let Some(ref v) = self.next_page_token {
+            ::buffa::types::put_string_field(2u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -1006,6 +1111,18 @@ impl ::buffa::Message for ListRefsResponse {
                 ::buffa::Message::merge_length_delimited(&mut elem, buf, ctx)?;
                 self.refs.push(elem);
             }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_string(
+                    self
+                        .next_page_token
+                        .get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -1015,6 +1132,7 @@ impl ::buffa::Message for ListRefsResponse {
     }
     fn clear(&mut self) {
         self.refs.clear();
+        self.next_page_token = ::core::option::Option::None;
         self.__buffa_unknown_fields.clear();
     }
 }
@@ -1389,6 +1507,11 @@ pub struct UpdateRefRequest {
         skip_serializing_if = "::core::option::Option::is_none"
     )]
     pub new_id: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
+    /// Delete the ref under its CAS precondition (SPEC-TRANSPORT-CONNECT §7.8).
+    ///
+    /// Field 5: `delete`
+    #[serde(rename = "delete", skip_serializing_if = "::core::option::Option::is_none")]
+    pub delete: ::core::option::Option<bool>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -1400,6 +1523,7 @@ impl ::core::fmt::Debug for UpdateRefRequest {
             .field("expectation", &self.expectation)
             .field("expected_id", &self.expected_id)
             .field("new_id", &self.new_id)
+            .field("delete", &self.delete)
             .finish()
     }
 }
@@ -1451,6 +1575,13 @@ impl UpdateRefRequest {
         self.new_id = Some(value.into());
         self
     }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::delete`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_delete(mut self, value: bool) -> Self {
+        self.delete = Some(value);
+        self
+    }
 }
 ::buffa::impl_default_instance!(UpdateRefRequest);
 impl ::buffa::MessageName for UpdateRefRequest {
@@ -1484,6 +1615,9 @@ impl ::buffa::Message for UpdateRefRequest {
         if let Some(ref v) = self.new_id {
             size += 1u64 + ::buffa::types::bytes_encoded_len(v) as u64;
         }
+        if self.delete.is_some() {
+            size += 1u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -1505,6 +1639,9 @@ impl ::buffa::Message for UpdateRefRequest {
         }
         if let Some(ref v) = self.new_id {
             ::buffa::types::put_shared_bytes_field(4u32, v, buf);
+        }
+        if let Some(v) = self.delete {
+            ::buffa::types::put_bool_field(5u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -1558,6 +1695,15 @@ impl ::buffa::Message for UpdateRefRequest {
                     buf,
                 )?;
             }
+            5u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.delete = ::core::option::Option::Some(
+                    ::buffa::types::decode_bool(buf)?,
+                );
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -1570,6 +1716,7 @@ impl ::buffa::Message for UpdateRefRequest {
         self.expectation = ::core::option::Option::None;
         self.expected_id = ::core::option::Option::None;
         self.new_id = ::core::option::Option::None;
+        self.delete = ::core::option::Option::None;
         self.__buffa_unknown_fields.clear();
     }
 }
@@ -1773,6 +1920,21 @@ pub struct AdvanceRefsRequest {
         skip_serializing_if = "::core::option::Option::is_none"
     )]
     pub packmap_new_id: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
+    /// Upload tickets consumed by this advance (SPEC-TRANSPORT-CONNECT §7.6).
+    ///
+    /// Field 9: `ticket_ids`
+    #[serde(
+        rename = "ticketIds",
+        alias = "ticket_ids",
+        with = "::buffa::json_helpers::proto_seq",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec"
+    )]
+    pub ticket_ids: ::buffa::alloc::vec::Vec<::buffa::alloc::vec::Vec<u8>>,
+    /// Delete both refs under their CAS preconditions (SPEC-TRANSPORT-CONNECT §7.8).
+    ///
+    /// Field 10: `delete`
+    #[serde(rename = "delete", skip_serializing_if = "::core::option::Option::is_none")]
+    pub delete: ::core::option::Option<bool>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -1788,6 +1950,8 @@ impl ::core::fmt::Debug for AdvanceRefsRequest {
             .field("packmap_expectation", &self.packmap_expectation)
             .field("packmap_expected_id", &self.packmap_expected_id)
             .field("packmap_new_id", &self.packmap_new_id)
+            .field("ticket_ids", &self.ticket_ids)
+            .field("delete", &self.delete)
             .finish()
     }
 }
@@ -1879,6 +2043,13 @@ impl AdvanceRefsRequest {
         self.packmap_new_id = Some(value.into());
         self
     }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::delete`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_delete(mut self, value: bool) -> Self {
+        self.delete = Some(value);
+        self
+    }
 }
 ::buffa::impl_default_instance!(AdvanceRefsRequest);
 impl ::buffa::MessageName for AdvanceRefsRequest {
@@ -1924,6 +2095,12 @@ impl ::buffa::Message for AdvanceRefsRequest {
         if let Some(ref v) = self.packmap_new_id {
             size += 1u64 + ::buffa::types::bytes_encoded_len(v) as u64;
         }
+        for v in &self.ticket_ids {
+            size += 1u64 + ::buffa::types::bytes_encoded_len(v) as u64;
+        }
+        if self.delete.is_some() {
+            size += 1u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -1957,6 +2134,12 @@ impl ::buffa::Message for AdvanceRefsRequest {
         }
         if let Some(ref v) = self.packmap_new_id {
             ::buffa::types::put_shared_bytes_field(8u32, v, buf);
+        }
+        for v in &self.ticket_ids {
+            ::buffa::types::put_shared_bytes_field(9u32, v, buf);
+        }
+        if let Some(v) = self.delete {
+            ::buffa::types::put_bool_field(10u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -2059,6 +2242,26 @@ impl ::buffa::Message for AdvanceRefsRequest {
                     buf,
                 )?;
             }
+            9u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                let __elem = ::buffa::types::decode_bytes(buf)?;
+                ctx.register_element_memory(
+                    ::buffa::__private::element_footprint(&__elem),
+                )?;
+                self.ticket_ids.push(__elem);
+            }
+            10u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.delete = ::core::option::Option::Some(
+                    ::buffa::types::decode_bool(buf)?,
+                );
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -2075,6 +2278,8 @@ impl ::buffa::Message for AdvanceRefsRequest {
         self.packmap_expectation = ::core::option::Option::None;
         self.packmap_expected_id = ::core::option::Option::None;
         self.packmap_new_id = ::core::option::Option::None;
+        self.ticket_ids.clear();
+        self.delete = ::core::option::Option::None;
         self.__buffa_unknown_fields.clear();
     }
 }
@@ -2541,6 +2746,16 @@ pub struct UploadPackHeader {
         skip_serializing_if = "::core::option::Option::is_none"
     )]
     pub total_bytes: ::core::option::Option<u64>,
+    /// Opaque authenticated upload ticket (SPEC-TRANSPORT-CONNECT §7.6).
+    ///
+    /// Field 3: `ticket_token`
+    #[serde(
+        rename = "ticketToken",
+        alias = "ticket_token",
+        with = "::buffa::json_helpers::opt_bytes",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub ticket_token: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -2550,6 +2765,7 @@ impl ::core::fmt::Debug for UploadPackHeader {
         f.debug_struct("UploadPackHeader")
             .field("pack_id", &self.pack_id)
             .field("total_bytes", &self.total_bytes)
+            .field("ticket_token", &self.ticket_token)
             .finish()
     }
 }
@@ -2576,6 +2792,16 @@ impl UploadPackHeader {
     ///Sets [`Self::total_bytes`] to `Some(value)`, consuming and returning `self`.
     pub fn with_total_bytes(mut self, value: u64) -> Self {
         self.total_bytes = Some(value);
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::ticket_token`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_ticket_token(
+        mut self,
+        value: impl Into<::buffa::alloc::vec::Vec<u8>>,
+    ) -> Self {
+        self.ticket_token = Some(value.into());
         self
     }
 }
@@ -2605,6 +2831,9 @@ impl ::buffa::Message for UploadPackHeader {
         if let Some(v) = self.total_bytes {
             size += 1u64 + ::buffa::types::uint64_encoded_len(v) as u64;
         }
+        if let Some(ref v) = self.ticket_token {
+            size += 1u64 + ::buffa::types::bytes_encoded_len(v) as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -2620,6 +2849,9 @@ impl ::buffa::Message for UploadPackHeader {
         }
         if let Some(v) = self.total_bytes {
             ::buffa::types::put_uint64_field(2u32, v, buf);
+        }
+        if let Some(ref v) = self.ticket_token {
+            ::buffa::types::put_shared_bytes_field(3u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -2653,6 +2885,16 @@ impl ::buffa::Message for UploadPackHeader {
                     ::buffa::types::decode_uint64(buf)?,
                 );
             }
+            3u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_bytes(
+                    self.ticket_token.get_or_insert_with(::buffa::alloc::vec::Vec::new),
+                    buf,
+                )?;
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -2663,6 +2905,7 @@ impl ::buffa::Message for UploadPackHeader {
     fn clear(&mut self) {
         self.pack_id = ::core::option::Option::None;
         self.total_bytes = ::core::option::Option::None;
+        self.ticket_token = ::core::option::Option::None;
         self.__buffa_unknown_fields.clear();
     }
 }
@@ -3630,3 +3873,2439 @@ pub mod download_pack_response {
     #[doc(inline)]
     pub use super::__buffa::view::oneof::download_pack_response::Body as BodyView;
 }
+/// ----------------------------------------------------------------------------
+/// Discovery.
+///
+/// Empty discovery request; X-Repository is optional (SPEC-TRANSPORT-CONNECT §2.1).
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize, ::serde::Deserialize)]
+#[serde(default)]
+pub struct GetServerInfoRequest {
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for GetServerInfoRequest {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("GetServerInfoRequest").finish()
+    }
+}
+impl GetServerInfoRequest {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.GetServerInfoRequest";
+}
+::buffa::impl_default_instance!(GetServerInfoRequest);
+impl ::buffa::MessageName for GetServerInfoRequest {
+    const PACKAGE: &'static str = "mkit.transport.v1";
+    const NAME: &'static str = "GetServerInfoRequest";
+    const FULL_NAME: &'static str = "mkit.transport.v1.GetServerInfoRequest";
+    const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.GetServerInfoRequest";
+}
+impl ::buffa::Message for GetServerInfoRequest {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for GetServerInfoRequest {
+    const PROTO_FQN: &'static str = "mkit.transport.v1.GetServerInfoRequest";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for GetServerInfoRequest {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __GET_SERVER_INFO_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/mkit.transport.v1.GetServerInfoRequest",
+    to_json: ::buffa::type_registry::any_to_json::<GetServerInfoRequest>,
+    from_json: ::buffa::type_registry::any_from_json::<GetServerInfoRequest>,
+    is_wkt: false,
+};
+/// Deployment capabilities, independent of repository existence (SPEC-TRANSPORT-CONNECT §2.1).
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize, ::serde::Deserialize)]
+#[serde(default)]
+pub struct GetServerInfoResponse {
+    /// Wire package: "mkit.transport.v1" (SPEC-TRANSPORT-CONNECT §2.1).
+    ///
+    /// Field 1: `protocol`
+    #[serde(
+        rename = "protocol",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub protocol: ::core::option::Option<::buffa::alloc::string::String>,
+    /// Transport specification version: 2 (SPEC-TRANSPORT-CONNECT §2.1).
+    ///
+    /// Field 2: `spec_version`
+    #[serde(
+        rename = "specVersion",
+        alias = "spec_version",
+        with = "::buffa::json_helpers::opt_uint32",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub spec_version: ::core::option::Option<u32>,
+    /// Largest accepted pack length (SPEC-TRANSPORT-CONNECT §2.1).
+    ///
+    /// Field 3: `max_pack_bytes`
+    #[serde(
+        rename = "maxPackBytes",
+        alias = "max_pack_bytes",
+        with = "::buffa::json_helpers::opt_uint64",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub max_pack_bytes: ::core::option::Option<u64>,
+    /// Power of two, at least 8 MiB (SPEC-TRANSPORT-CONNECT §2.1, §7.6).
+    ///
+    /// Field 4: `part_size`
+    #[serde(
+        rename = "partSize",
+        alias = "part_size",
+        with = "::buffa::json_helpers::opt_uint64",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub part_size: ::core::option::Option<u64>,
+    /// Largest number of parts per upload (SPEC-TRANSPORT-CONNECT §2.1, §7.6).
+    ///
+    /// Field 5: `max_parts`
+    #[serde(
+        rename = "maxParts",
+        alias = "max_parts",
+        with = "::buffa::json_helpers::opt_uint32",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub max_parts: ::core::option::Option<u32>,
+    /// Largest ref count per page (SPEC-TRANSPORT-CONNECT §2.1, §7.9).
+    ///
+    /// Field 6: `max_list_refs_page_size`
+    #[serde(
+        rename = "maxListRefsPageSize",
+        alias = "max_list_refs_page_size",
+        with = "::buffa::json_helpers::opt_uint32",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub max_list_refs_page_size: ::core::option::Option<u32>,
+    /// Smaller packs may skip BeginUpload; zero with admission or multiple repositories (SPEC-TRANSPORT-CONNECT §2.1).
+    ///
+    /// Field 7: `begin_upload_threshold_bytes`
+    #[serde(
+        rename = "beginUploadThresholdBytes",
+        alias = "begin_upload_threshold_bytes",
+        with = "::buffa::json_helpers::opt_uint64",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub begin_upload_threshold_bytes: ::core::option::Option<u64>,
+    /// Whether AdvanceRefs commits both refs atomically (SPEC-TRANSPORT-CONNECT §2.1, §4).
+    ///
+    /// Field 8: `atomic_advance`
+    #[serde(
+        rename = "atomicAdvance",
+        alias = "atomic_advance",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub atomic_advance: ::core::option::Option<bool>,
+    /// Whether pushed packs are decoded and verified (SPEC-TRANSPORT-CONNECT §2.1).
+    ///
+    /// Field 9: `indexed_mode`
+    #[serde(
+        rename = "indexedMode",
+        alias = "indexed_mode",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub indexed_mode: ::core::option::Option<bool>,
+    /// Whether admission can challenge requests (SPEC-TRANSPORT-CONNECT §2.1, §5.1).
+    ///
+    /// Field 10: `admission`
+    #[serde(
+        rename = "admission",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub admission: ::core::option::Option<bool>,
+    /// Storage receipt signing key; empty until M5 (SPEC-TRANSPORT-CONNECT §2.1).
+    ///
+    /// Field 11: `receipt_public_key`
+    #[serde(
+        rename = "receiptPublicKey",
+        alias = "receipt_public_key",
+        with = "::buffa::json_helpers::opt_bytes",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub receipt_public_key: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
+    /// Storage receipt key identifier; empty until M5 (SPEC-TRANSPORT-CONNECT §2.1).
+    ///
+    /// Field 12: `receipt_key_id`
+    #[serde(
+        rename = "receiptKeyId",
+        alias = "receipt_key_id",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub receipt_key_id: ::core::option::Option<::buffa::alloc::string::String>,
+    /// Accepted owner signature schemes; empty until M2 (SPEC-TRANSPORT-CONNECT §2.1).
+    ///
+    /// Field 13: `grant_schemes`
+    #[serde(
+        rename = "grantSchemes",
+        alias = "grant_schemes",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec",
+        deserialize_with = "::buffa::json_helpers::null_as_default"
+    )]
+    pub grant_schemes: ::buffa::alloc::vec::Vec<::buffa::alloc::string::String>,
+    /// "allowlist", "any", or "single-repository" (SPEC-TRANSPORT-CONNECT §2.1, §7.5).
+    ///
+    /// Field 14: `namespace_policy`
+    #[serde(
+        rename = "namespacePolicy",
+        alias = "namespace_policy",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub namespace_policy: ::core::option::Option<::buffa::alloc::string::String>,
+    /// Fixed index prefix fan-out; default 4096 (SPEC-TRANSPORT-CONNECT §2.1, §7.9).
+    ///
+    /// Field 15: `index_fanout`
+    #[serde(
+        rename = "indexFanout",
+        alias = "index_fanout",
+        with = "::buffa::json_helpers::opt_uint32",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub index_fanout: ::core::option::Option<u32>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for GetServerInfoResponse {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("GetServerInfoResponse")
+            .field("protocol", &self.protocol)
+            .field("spec_version", &self.spec_version)
+            .field("max_pack_bytes", &self.max_pack_bytes)
+            .field("part_size", &self.part_size)
+            .field("max_parts", &self.max_parts)
+            .field("max_list_refs_page_size", &self.max_list_refs_page_size)
+            .field("begin_upload_threshold_bytes", &self.begin_upload_threshold_bytes)
+            .field("atomic_advance", &self.atomic_advance)
+            .field("indexed_mode", &self.indexed_mode)
+            .field("admission", &self.admission)
+            .field("receipt_public_key", &self.receipt_public_key)
+            .field("receipt_key_id", &self.receipt_key_id)
+            .field("grant_schemes", &self.grant_schemes)
+            .field("namespace_policy", &self.namespace_policy)
+            .field("index_fanout", &self.index_fanout)
+            .finish()
+    }
+}
+impl GetServerInfoResponse {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.GetServerInfoResponse";
+}
+impl GetServerInfoResponse {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::protocol`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_protocol(
+        mut self,
+        value: impl Into<::buffa::alloc::string::String>,
+    ) -> Self {
+        self.protocol = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::spec_version`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_spec_version(mut self, value: u32) -> Self {
+        self.spec_version = Some(value);
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::max_pack_bytes`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_max_pack_bytes(mut self, value: u64) -> Self {
+        self.max_pack_bytes = Some(value);
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::part_size`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_part_size(mut self, value: u64) -> Self {
+        self.part_size = Some(value);
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::max_parts`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_max_parts(mut self, value: u32) -> Self {
+        self.max_parts = Some(value);
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::max_list_refs_page_size`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_max_list_refs_page_size(mut self, value: u32) -> Self {
+        self.max_list_refs_page_size = Some(value);
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::begin_upload_threshold_bytes`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_begin_upload_threshold_bytes(mut self, value: u64) -> Self {
+        self.begin_upload_threshold_bytes = Some(value);
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::atomic_advance`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_atomic_advance(mut self, value: bool) -> Self {
+        self.atomic_advance = Some(value);
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::indexed_mode`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_indexed_mode(mut self, value: bool) -> Self {
+        self.indexed_mode = Some(value);
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::admission`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_admission(mut self, value: bool) -> Self {
+        self.admission = Some(value);
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::receipt_public_key`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_receipt_public_key(
+        mut self,
+        value: impl Into<::buffa::alloc::vec::Vec<u8>>,
+    ) -> Self {
+        self.receipt_public_key = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::receipt_key_id`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_receipt_key_id(
+        mut self,
+        value: impl Into<::buffa::alloc::string::String>,
+    ) -> Self {
+        self.receipt_key_id = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::namespace_policy`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_namespace_policy(
+        mut self,
+        value: impl Into<::buffa::alloc::string::String>,
+    ) -> Self {
+        self.namespace_policy = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::index_fanout`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_index_fanout(mut self, value: u32) -> Self {
+        self.index_fanout = Some(value);
+        self
+    }
+}
+::buffa::impl_default_instance!(GetServerInfoResponse);
+impl ::buffa::MessageName for GetServerInfoResponse {
+    const PACKAGE: &'static str = "mkit.transport.v1";
+    const NAME: &'static str = "GetServerInfoResponse";
+    const FULL_NAME: &'static str = "mkit.transport.v1.GetServerInfoResponse";
+    const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.GetServerInfoResponse";
+}
+impl ::buffa::Message for GetServerInfoResponse {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        if let Some(ref v) = self.protocol {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
+        if let Some(v) = self.spec_version {
+            size += 1u64 + ::buffa::types::uint32_encoded_len(v) as u64;
+        }
+        if let Some(v) = self.max_pack_bytes {
+            size += 1u64 + ::buffa::types::uint64_encoded_len(v) as u64;
+        }
+        if let Some(v) = self.part_size {
+            size += 1u64 + ::buffa::types::uint64_encoded_len(v) as u64;
+        }
+        if let Some(v) = self.max_parts {
+            size += 1u64 + ::buffa::types::uint32_encoded_len(v) as u64;
+        }
+        if let Some(v) = self.max_list_refs_page_size {
+            size += 1u64 + ::buffa::types::uint32_encoded_len(v) as u64;
+        }
+        if let Some(v) = self.begin_upload_threshold_bytes {
+            size += 1u64 + ::buffa::types::uint64_encoded_len(v) as u64;
+        }
+        if self.atomic_advance.is_some() {
+            size += 1u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
+        }
+        if self.indexed_mode.is_some() {
+            size += 1u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
+        }
+        if self.admission.is_some() {
+            size += 1u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
+        }
+        if let Some(ref v) = self.receipt_public_key {
+            size += 1u64 + ::buffa::types::bytes_encoded_len(v) as u64;
+        }
+        if let Some(ref v) = self.receipt_key_id {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
+        for v in &self.grant_schemes {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
+        if let Some(ref v) = self.namespace_policy {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
+        if let Some(v) = self.index_fanout {
+            size += 1u64 + ::buffa::types::uint32_encoded_len(v) as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let Some(ref v) = self.protocol {
+            ::buffa::types::put_string_field(1u32, v, buf);
+        }
+        if let Some(v) = self.spec_version {
+            ::buffa::types::put_uint32_field(2u32, v, buf);
+        }
+        if let Some(v) = self.max_pack_bytes {
+            ::buffa::types::put_uint64_field(3u32, v, buf);
+        }
+        if let Some(v) = self.part_size {
+            ::buffa::types::put_uint64_field(4u32, v, buf);
+        }
+        if let Some(v) = self.max_parts {
+            ::buffa::types::put_uint32_field(5u32, v, buf);
+        }
+        if let Some(v) = self.max_list_refs_page_size {
+            ::buffa::types::put_uint32_field(6u32, v, buf);
+        }
+        if let Some(v) = self.begin_upload_threshold_bytes {
+            ::buffa::types::put_uint64_field(7u32, v, buf);
+        }
+        if let Some(v) = self.atomic_advance {
+            ::buffa::types::put_bool_field(8u32, v, buf);
+        }
+        if let Some(v) = self.indexed_mode {
+            ::buffa::types::put_bool_field(9u32, v, buf);
+        }
+        if let Some(v) = self.admission {
+            ::buffa::types::put_bool_field(10u32, v, buf);
+        }
+        if let Some(ref v) = self.receipt_public_key {
+            ::buffa::types::put_shared_bytes_field(11u32, v, buf);
+        }
+        if let Some(ref v) = self.receipt_key_id {
+            ::buffa::types::put_string_field(12u32, v, buf);
+        }
+        for v in &self.grant_schemes {
+            ::buffa::types::put_string_field(13u32, v, buf);
+        }
+        if let Some(ref v) = self.namespace_policy {
+            ::buffa::types::put_string_field(14u32, v, buf);
+        }
+        if let Some(v) = self.index_fanout {
+            ::buffa::types::put_uint32_field(15u32, v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_string(
+                    self
+                        .protocol
+                        .get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.spec_version = ::core::option::Option::Some(
+                    ::buffa::types::decode_uint32(buf)?,
+                );
+            }
+            3u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.max_pack_bytes = ::core::option::Option::Some(
+                    ::buffa::types::decode_uint64(buf)?,
+                );
+            }
+            4u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.part_size = ::core::option::Option::Some(
+                    ::buffa::types::decode_uint64(buf)?,
+                );
+            }
+            5u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.max_parts = ::core::option::Option::Some(
+                    ::buffa::types::decode_uint32(buf)?,
+                );
+            }
+            6u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.max_list_refs_page_size = ::core::option::Option::Some(
+                    ::buffa::types::decode_uint32(buf)?,
+                );
+            }
+            7u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.begin_upload_threshold_bytes = ::core::option::Option::Some(
+                    ::buffa::types::decode_uint64(buf)?,
+                );
+            }
+            8u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.atomic_advance = ::core::option::Option::Some(
+                    ::buffa::types::decode_bool(buf)?,
+                );
+            }
+            9u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.indexed_mode = ::core::option::Option::Some(
+                    ::buffa::types::decode_bool(buf)?,
+                );
+            }
+            10u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.admission = ::core::option::Option::Some(
+                    ::buffa::types::decode_bool(buf)?,
+                );
+            }
+            11u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_bytes(
+                    self
+                        .receipt_public_key
+                        .get_or_insert_with(::buffa::alloc::vec::Vec::new),
+                    buf,
+                )?;
+            }
+            12u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_string(
+                    self
+                        .receipt_key_id
+                        .get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
+            13u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                let __elem = ::buffa::types::decode_string(buf)?;
+                ctx.register_element_memory(
+                    ::buffa::__private::element_footprint(&__elem),
+                )?;
+                self.grant_schemes.push(__elem);
+            }
+            14u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_string(
+                    self
+                        .namespace_policy
+                        .get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
+            15u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.index_fanout = ::core::option::Option::Some(
+                    ::buffa::types::decode_uint32(buf)?,
+                );
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.protocol = ::core::option::Option::None;
+        self.spec_version = ::core::option::Option::None;
+        self.max_pack_bytes = ::core::option::Option::None;
+        self.part_size = ::core::option::Option::None;
+        self.max_parts = ::core::option::Option::None;
+        self.max_list_refs_page_size = ::core::option::Option::None;
+        self.begin_upload_threshold_bytes = ::core::option::Option::None;
+        self.atomic_advance = ::core::option::Option::None;
+        self.indexed_mode = ::core::option::Option::None;
+        self.admission = ::core::option::Option::None;
+        self.receipt_public_key = ::core::option::Option::None;
+        self.receipt_key_id = ::core::option::Option::None;
+        self.grant_schemes.clear();
+        self.namespace_policy = ::core::option::Option::None;
+        self.index_fanout = ::core::option::Option::None;
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for GetServerInfoResponse {
+    const PROTO_FQN: &'static str = "mkit.transport.v1.GetServerInfoResponse";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for GetServerInfoResponse {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __GET_SERVER_INFO_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/mkit.transport.v1.GetServerInfoResponse",
+    to_json: ::buffa::type_registry::any_to_json::<GetServerInfoResponse>,
+    from_json: ::buffa::type_registry::any_from_json::<GetServerInfoResponse>,
+    is_wkt: false,
+};
+/// ----------------------------------------------------------------------------
+/// Uploads (tickets and parts).
+///
+/// Reserve an upload; the repository comes only from X-Repository (SPEC-TRANSPORT-CONNECT §7.4, §7.6).
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize, ::serde::Deserialize)]
+#[serde(default)]
+pub struct BeginUploadRequest {
+    /// The ref this upload will advance (SPEC-TRANSPORT-CONNECT §7.6).
+    ///
+    /// Field 1: `ref`
+    #[serde(rename = "ref", skip_serializing_if = "::core::option::Option::is_none")]
+    pub r#ref: ::core::option::Option<::buffa::alloc::string::String>,
+    /// Pack's 32-byte BLAKE3 digest (SPEC-TRANSPORT-CONNECT §7.6).
+    ///
+    /// Field 2: `pack_id`
+    #[serde(
+        rename = "packId",
+        alias = "pack_id",
+        with = "::buffa::json_helpers::opt_bytes",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub pack_id: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
+    /// Total pack length (SPEC-TRANSPORT-CONNECT §7.6).
+    ///
+    /// Field 3: `bytes`
+    #[serde(
+        rename = "bytes",
+        with = "::buffa::json_helpers::opt_uint64",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub bytes: ::core::option::Option<u64>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for BeginUploadRequest {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("BeginUploadRequest")
+            .field("ref", &self.r#ref)
+            .field("pack_id", &self.pack_id)
+            .field("bytes", &self.bytes)
+            .finish()
+    }
+}
+impl BeginUploadRequest {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.BeginUploadRequest";
+}
+impl BeginUploadRequest {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets `ref` to `Some(value)`, consuming and returning `self`.
+    pub fn with_ref(mut self, value: impl Into<::buffa::alloc::string::String>) -> Self {
+        self.r#ref = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::pack_id`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_pack_id(
+        mut self,
+        value: impl Into<::buffa::alloc::vec::Vec<u8>>,
+    ) -> Self {
+        self.pack_id = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::bytes`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_bytes(mut self, value: u64) -> Self {
+        self.bytes = Some(value);
+        self
+    }
+}
+::buffa::impl_default_instance!(BeginUploadRequest);
+impl ::buffa::MessageName for BeginUploadRequest {
+    const PACKAGE: &'static str = "mkit.transport.v1";
+    const NAME: &'static str = "BeginUploadRequest";
+    const FULL_NAME: &'static str = "mkit.transport.v1.BeginUploadRequest";
+    const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.BeginUploadRequest";
+}
+impl ::buffa::Message for BeginUploadRequest {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        if let Some(ref v) = self.r#ref {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
+        if let Some(ref v) = self.pack_id {
+            size += 1u64 + ::buffa::types::bytes_encoded_len(v) as u64;
+        }
+        if let Some(v) = self.bytes {
+            size += 1u64 + ::buffa::types::uint64_encoded_len(v) as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let Some(ref v) = self.r#ref {
+            ::buffa::types::put_string_field(1u32, v, buf);
+        }
+        if let Some(ref v) = self.pack_id {
+            ::buffa::types::put_shared_bytes_field(2u32, v, buf);
+        }
+        if let Some(v) = self.bytes {
+            ::buffa::types::put_uint64_field(3u32, v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_string(
+                    self.r#ref.get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_bytes(
+                    self.pack_id.get_or_insert_with(::buffa::alloc::vec::Vec::new),
+                    buf,
+                )?;
+            }
+            3u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.bytes = ::core::option::Option::Some(
+                    ::buffa::types::decode_uint64(buf)?,
+                );
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.r#ref = ::core::option::Option::None;
+        self.pack_id = ::core::option::Option::None;
+        self.bytes = ::core::option::Option::None;
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for BeginUploadRequest {
+    const PROTO_FQN: &'static str = "mkit.transport.v1.BeginUploadRequest";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for BeginUploadRequest {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __BEGIN_UPLOAD_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/mkit.transport.v1.BeginUploadRequest",
+    to_json: ::buffa::type_registry::any_to_json::<BeginUploadRequest>,
+    from_json: ::buffa::type_registry::any_from_json::<BeginUploadRequest>,
+    is_wkt: false,
+};
+/// Repository membership or an upload reservation (SPEC-TRANSPORT-CONNECT §7.6).
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize)]
+#[serde(default)]
+pub struct BeginUploadResponse {
+    #[serde(flatten)]
+    pub result: ::core::option::Option<__buffa::oneof::begin_upload_response::Result>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for BeginUploadResponse {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("BeginUploadResponse").field("result", &self.result).finish()
+    }
+}
+impl BeginUploadResponse {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.BeginUploadResponse";
+}
+::buffa::impl_default_instance!(BeginUploadResponse);
+impl ::buffa::MessageName for BeginUploadResponse {
+    const PACKAGE: &'static str = "mkit.transport.v1";
+    const NAME: &'static str = "BeginUploadResponse";
+    const FULL_NAME: &'static str = "mkit.transport.v1.BeginUploadResponse";
+    const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.BeginUploadResponse";
+}
+impl ::buffa::Message for BeginUploadResponse {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        if let ::core::option::Option::Some(ref v) = self.result {
+            match v {
+                __buffa::oneof::begin_upload_response::Result::AlreadyPresent(x) => {
+                    let __slot = __cache.reserve();
+                    let inner = x.compute_size(__cache);
+                    __cache.set(__slot, inner);
+                    size
+                        += 1u64 + ::buffa::encoding::varint_len(inner as u64) as u64
+                            + inner as u64;
+                }
+                __buffa::oneof::begin_upload_response::Result::Ticket(x) => {
+                    let __slot = __cache.reserve();
+                    let inner = x.compute_size(__cache);
+                    __cache.set(__slot, inner);
+                    size
+                        += 1u64 + ::buffa::encoding::varint_len(inner as u64) as u64
+                            + inner as u64;
+                }
+            }
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        __cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let ::core::option::Option::Some(ref v) = self.result {
+            match v {
+                __buffa::oneof::begin_upload_response::Result::AlreadyPresent(x) => {
+                    ::buffa::types::put_len_delimited_header(
+                        1u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    x.write_to(__cache, buf);
+                }
+                __buffa::oneof::begin_upload_response::Result::Ticket(x) => {
+                    ::buffa::types::put_len_delimited_header(
+                        2u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    x.write_to(__cache, buf);
+                }
+            }
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                if let ::core::option::Option::Some(
+                    __buffa::oneof::begin_upload_response::Result::AlreadyPresent(
+                        ref mut existing,
+                    ),
+                ) = self.result
+                {
+                    ::buffa::Message::merge_length_delimited(&mut **existing, buf, ctx)?;
+                } else {
+                    let mut val = ::core::default::Default::default();
+                    ::buffa::Message::merge_length_delimited(&mut val, buf, ctx)?;
+                    self.result = ::core::option::Option::Some(
+                        __buffa::oneof::begin_upload_response::Result::AlreadyPresent(
+                            ::buffa::alloc::boxed::Box::new(val),
+                        ),
+                    );
+                }
+            }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                if let ::core::option::Option::Some(
+                    __buffa::oneof::begin_upload_response::Result::Ticket(
+                        ref mut existing,
+                    ),
+                ) = self.result
+                {
+                    ::buffa::Message::merge_length_delimited(&mut **existing, buf, ctx)?;
+                } else {
+                    let mut val = ::core::default::Default::default();
+                    ::buffa::Message::merge_length_delimited(&mut val, buf, ctx)?;
+                    self.result = ::core::option::Option::Some(
+                        __buffa::oneof::begin_upload_response::Result::Ticket(
+                            ::buffa::alloc::boxed::Box::new(val),
+                        ),
+                    );
+                }
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.result = ::core::option::Option::None;
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for BeginUploadResponse {
+    const PROTO_FQN: &'static str = "mkit.transport.v1.BeginUploadResponse";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl<'de> serde::Deserialize<'de> for BeginUploadResponse {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        struct _V;
+        impl<'de> serde::de::Visitor<'de> for _V {
+            type Value = BeginUploadResponse;
+            fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                f.write_str("struct BeginUploadResponse")
+            }
+            #[allow(clippy::field_reassign_with_default)]
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> ::core::result::Result<BeginUploadResponse, A::Error> {
+                let mut __oneof_result: ::core::option::Option<
+                    __buffa::oneof::begin_upload_response::Result,
+                > = None;
+                while let Some(key) = map.next_key::<::buffa::alloc::string::String>()? {
+                    match key.as_str() {
+                        "alreadyPresent" | "already_present" => {
+                            let v: ::core::option::Option<AlreadyPresent> = map
+                                .next_value_seed(
+                                    ::buffa::json_helpers::NullableDeserializeSeed(
+                                        ::buffa::json_helpers::DefaultDeserializeSeed::<
+                                            AlreadyPresent,
+                                        >::new(),
+                                    ),
+                                )?;
+                            if let Some(v) = v {
+                                if __oneof_result.is_some() {
+                                    return Err(
+                                        serde::de::Error::custom(
+                                            "multiple oneof fields set for 'result'",
+                                        ),
+                                    );
+                                }
+                                __oneof_result = Some(
+                                    __buffa::oneof::begin_upload_response::Result::AlreadyPresent(
+                                        ::buffa::alloc::boxed::Box::new(v),
+                                    ),
+                                );
+                            }
+                        }
+                        "ticket" => {
+                            let v: ::core::option::Option<UploadTicket> = map
+                                .next_value_seed(
+                                    ::buffa::json_helpers::NullableDeserializeSeed(
+                                        ::buffa::json_helpers::DefaultDeserializeSeed::<
+                                            UploadTicket,
+                                        >::new(),
+                                    ),
+                                )?;
+                            if let Some(v) = v {
+                                if __oneof_result.is_some() {
+                                    return Err(
+                                        serde::de::Error::custom(
+                                            "multiple oneof fields set for 'result'",
+                                        ),
+                                    );
+                                }
+                                __oneof_result = Some(
+                                    __buffa::oneof::begin_upload_response::Result::Ticket(
+                                        ::buffa::alloc::boxed::Box::new(v),
+                                    ),
+                                );
+                            }
+                        }
+                        _ => {
+                            map.next_value::<serde::de::IgnoredAny>()?;
+                        }
+                    }
+                }
+                let mut __r = <BeginUploadResponse as ::core::default::Default>::default();
+                __r.result = __oneof_result;
+                Ok(__r)
+            }
+        }
+        d.deserialize_map(_V)
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for BeginUploadResponse {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __BEGIN_UPLOAD_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/mkit.transport.v1.BeginUploadResponse",
+    to_json: ::buffa::type_registry::any_to_json::<BeginUploadResponse>,
+    from_json: ::buffa::type_registry::any_from_json::<BeginUploadResponse>,
+    is_wkt: false,
+};
+pub mod begin_upload_response {
+    #[allow(unused_imports)]
+    use super::*;
+    #[doc(inline)]
+    pub use super::__buffa::oneof::begin_upload_response::Result;
+    #[doc(inline)]
+    pub use super::__buffa::view::oneof::begin_upload_response::Result as ResultView;
+}
+/// Indicates existing pack membership (SPEC-TRANSPORT-CONNECT §7.6).
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize, ::serde::Deserialize)]
+#[serde(default)]
+pub struct AlreadyPresent {
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for AlreadyPresent {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("AlreadyPresent").finish()
+    }
+}
+impl AlreadyPresent {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.AlreadyPresent";
+}
+::buffa::impl_default_instance!(AlreadyPresent);
+impl ::buffa::MessageName for AlreadyPresent {
+    const PACKAGE: &'static str = "mkit.transport.v1";
+    const NAME: &'static str = "AlreadyPresent";
+    const FULL_NAME: &'static str = "mkit.transport.v1.AlreadyPresent";
+    const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.AlreadyPresent";
+}
+impl ::buffa::Message for AlreadyPresent {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for AlreadyPresent {
+    const PROTO_FQN: &'static str = "mkit.transport.v1.AlreadyPresent";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for AlreadyPresent {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __ALREADY_PRESENT_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/mkit.transport.v1.AlreadyPresent",
+    to_json: ::buffa::type_registry::any_to_json::<AlreadyPresent>,
+    from_json: ::buffa::type_registry::any_from_json::<AlreadyPresent>,
+    is_wkt: false,
+};
+/// Upload reservation bound by an opaque authenticated token (SPEC-TRANSPORT-CONNECT §7.6).
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize, ::serde::Deserialize)]
+#[serde(default)]
+pub struct UploadTicket {
+    /// 32-byte id; its hex form is \<ticket\> in part: commitments (SPEC-TRANSPORT-CONNECT §7.6).
+    ///
+    /// Field 1: `id`
+    #[serde(
+        rename = "id",
+        with = "::buffa::json_helpers::opt_bytes",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub id: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
+    /// Uniform non-final part length (SPEC-TRANSPORT-CONNECT §7.6).
+    ///
+    /// Field 2: `part_size`
+    #[serde(
+        rename = "partSize",
+        alias = "part_size",
+        with = "::buffa::json_helpers::opt_uint64",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub part_size: ::core::option::Option<u64>,
+    /// Expiry in Unix milliseconds, as in auth v2 (SPEC-TRANSPORT-CONNECT §7.6).
+    ///
+    /// Field 3: `expires_unix_ms`
+    #[serde(
+        rename = "expiresUnixMs",
+        alias = "expires_unix_ms",
+        with = "::buffa::json_helpers::opt_int64",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub expires_unix_ms: ::core::option::Option<i64>,
+    /// Opaque server-authenticated ticket token (SPEC-TRANSPORT-CONNECT §7.6, "Ticket token").
+    ///
+    /// Field 4: `token`
+    #[serde(
+        rename = "token",
+        with = "::buffa::json_helpers::opt_bytes",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub token: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for UploadTicket {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("UploadTicket")
+            .field("id", &self.id)
+            .field("part_size", &self.part_size)
+            .field("expires_unix_ms", &self.expires_unix_ms)
+            .field("token", &self.token)
+            .finish()
+    }
+}
+impl UploadTicket {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.UploadTicket";
+}
+impl UploadTicket {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::id`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_id(mut self, value: impl Into<::buffa::alloc::vec::Vec<u8>>) -> Self {
+        self.id = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::part_size`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_part_size(mut self, value: u64) -> Self {
+        self.part_size = Some(value);
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::expires_unix_ms`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_expires_unix_ms(mut self, value: i64) -> Self {
+        self.expires_unix_ms = Some(value);
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::token`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_token(mut self, value: impl Into<::buffa::alloc::vec::Vec<u8>>) -> Self {
+        self.token = Some(value.into());
+        self
+    }
+}
+::buffa::impl_default_instance!(UploadTicket);
+impl ::buffa::MessageName for UploadTicket {
+    const PACKAGE: &'static str = "mkit.transport.v1";
+    const NAME: &'static str = "UploadTicket";
+    const FULL_NAME: &'static str = "mkit.transport.v1.UploadTicket";
+    const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.UploadTicket";
+}
+impl ::buffa::Message for UploadTicket {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        if let Some(ref v) = self.id {
+            size += 1u64 + ::buffa::types::bytes_encoded_len(v) as u64;
+        }
+        if let Some(v) = self.part_size {
+            size += 1u64 + ::buffa::types::uint64_encoded_len(v) as u64;
+        }
+        if let Some(v) = self.expires_unix_ms {
+            size += 1u64 + ::buffa::types::int64_encoded_len(v) as u64;
+        }
+        if let Some(ref v) = self.token {
+            size += 1u64 + ::buffa::types::bytes_encoded_len(v) as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let Some(ref v) = self.id {
+            ::buffa::types::put_shared_bytes_field(1u32, v, buf);
+        }
+        if let Some(v) = self.part_size {
+            ::buffa::types::put_uint64_field(2u32, v, buf);
+        }
+        if let Some(v) = self.expires_unix_ms {
+            ::buffa::types::put_int64_field(3u32, v, buf);
+        }
+        if let Some(ref v) = self.token {
+            ::buffa::types::put_shared_bytes_field(4u32, v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_bytes(
+                    self.id.get_or_insert_with(::buffa::alloc::vec::Vec::new),
+                    buf,
+                )?;
+            }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.part_size = ::core::option::Option::Some(
+                    ::buffa::types::decode_uint64(buf)?,
+                );
+            }
+            3u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.expires_unix_ms = ::core::option::Option::Some(
+                    ::buffa::types::decode_int64(buf)?,
+                );
+            }
+            4u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_bytes(
+                    self.token.get_or_insert_with(::buffa::alloc::vec::Vec::new),
+                    buf,
+                )?;
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.id = ::core::option::Option::None;
+        self.part_size = ::core::option::Option::None;
+        self.expires_unix_ms = ::core::option::Option::None;
+        self.token = ::core::option::Option::None;
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for UploadTicket {
+    const PROTO_FQN: &'static str = "mkit.transport.v1.UploadTicket";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for UploadTicket {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __UPLOAD_TICKET_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/mkit.transport.v1.UploadTicket",
+    to_json: ::buffa::type_registry::any_to_json::<UploadTicket>,
+    from_json: ::buffa::type_registry::any_from_json::<UploadTicket>,
+    is_wkt: false,
+};
+/// First message of one part's stream (SPEC-TRANSPORT-CONNECT §7.6).
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize, ::serde::Deserialize)]
+#[serde(default)]
+pub struct UploadPartHeader {
+    /// Opaque server-authenticated ticket token (SPEC-TRANSPORT-CONNECT §7.6).
+    ///
+    /// Field 1: `ticket_token`
+    #[serde(
+        rename = "ticketToken",
+        alias = "ticket_token",
+        with = "::buffa::json_helpers::opt_bytes",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub ticket_token: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
+    /// Zero-based part index (SPEC-TRANSPORT-CONNECT §7.6).
+    ///
+    /// Field 2: `index`
+    #[serde(
+        rename = "index",
+        with = "::buffa::json_helpers::opt_uint32",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub index: ::core::option::Option<u32>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for UploadPartHeader {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("UploadPartHeader")
+            .field("ticket_token", &self.ticket_token)
+            .field("index", &self.index)
+            .finish()
+    }
+}
+impl UploadPartHeader {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.UploadPartHeader";
+}
+impl UploadPartHeader {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::ticket_token`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_ticket_token(
+        mut self,
+        value: impl Into<::buffa::alloc::vec::Vec<u8>>,
+    ) -> Self {
+        self.ticket_token = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::index`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_index(mut self, value: u32) -> Self {
+        self.index = Some(value);
+        self
+    }
+}
+::buffa::impl_default_instance!(UploadPartHeader);
+impl ::buffa::MessageName for UploadPartHeader {
+    const PACKAGE: &'static str = "mkit.transport.v1";
+    const NAME: &'static str = "UploadPartHeader";
+    const FULL_NAME: &'static str = "mkit.transport.v1.UploadPartHeader";
+    const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.UploadPartHeader";
+}
+impl ::buffa::Message for UploadPartHeader {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        if let Some(ref v) = self.ticket_token {
+            size += 1u64 + ::buffa::types::bytes_encoded_len(v) as u64;
+        }
+        if let Some(v) = self.index {
+            size += 1u64 + ::buffa::types::uint32_encoded_len(v) as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let Some(ref v) = self.ticket_token {
+            ::buffa::types::put_shared_bytes_field(1u32, v, buf);
+        }
+        if let Some(v) = self.index {
+            ::buffa::types::put_uint32_field(2u32, v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_bytes(
+                    self.ticket_token.get_or_insert_with(::buffa::alloc::vec::Vec::new),
+                    buf,
+                )?;
+            }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.index = ::core::option::Option::Some(
+                    ::buffa::types::decode_uint32(buf)?,
+                );
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.ticket_token = ::core::option::Option::None;
+        self.index = ::core::option::Option::None;
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for UploadPartHeader {
+    const PROTO_FQN: &'static str = "mkit.transport.v1.UploadPartHeader";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for UploadPartHeader {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __UPLOAD_PART_HEADER_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/mkit.transport.v1.UploadPartHeader",
+    to_json: ::buffa::type_registry::any_to_json::<UploadPartHeader>,
+    from_json: ::buffa::type_registry::any_from_json::<UploadPartHeader>,
+    is_wkt: false,
+};
+/// Header followed by ordered part bytes (SPEC-TRANSPORT-CONNECT §7.6).
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize)]
+#[serde(default)]
+pub struct UploadPartRequest {
+    #[serde(flatten)]
+    pub msg: ::core::option::Option<__buffa::oneof::upload_part_request::Msg>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for UploadPartRequest {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("UploadPartRequest").field("msg", &self.msg).finish()
+    }
+}
+impl UploadPartRequest {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.UploadPartRequest";
+}
+::buffa::impl_default_instance!(UploadPartRequest);
+impl ::buffa::MessageName for UploadPartRequest {
+    const PACKAGE: &'static str = "mkit.transport.v1";
+    const NAME: &'static str = "UploadPartRequest";
+    const FULL_NAME: &'static str = "mkit.transport.v1.UploadPartRequest";
+    const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.UploadPartRequest";
+}
+impl ::buffa::Message for UploadPartRequest {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        if let ::core::option::Option::Some(ref v) = self.msg {
+            match v {
+                __buffa::oneof::upload_part_request::Msg::Header(x) => {
+                    let __slot = __cache.reserve();
+                    let inner = x.compute_size(__cache);
+                    __cache.set(__slot, inner);
+                    size
+                        += 1u64 + ::buffa::encoding::varint_len(inner as u64) as u64
+                            + inner as u64;
+                }
+                __buffa::oneof::upload_part_request::Msg::Chunk(x) => {
+                    size += 1u64 + ::buffa::types::bytes_encoded_len(x) as u64;
+                }
+            }
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        __cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let ::core::option::Option::Some(ref v) = self.msg {
+            match v {
+                __buffa::oneof::upload_part_request::Msg::Header(x) => {
+                    ::buffa::types::put_len_delimited_header(
+                        1u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    x.write_to(__cache, buf);
+                }
+                __buffa::oneof::upload_part_request::Msg::Chunk(x) => {
+                    ::buffa::types::put_shared_bytes_field(2u32, x, buf);
+                }
+            }
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                if let ::core::option::Option::Some(
+                    __buffa::oneof::upload_part_request::Msg::Header(ref mut existing),
+                ) = self.msg
+                {
+                    ::buffa::Message::merge_length_delimited(&mut **existing, buf, ctx)?;
+                } else {
+                    let mut val = ::core::default::Default::default();
+                    ::buffa::Message::merge_length_delimited(&mut val, buf, ctx)?;
+                    self.msg = ::core::option::Option::Some(
+                        __buffa::oneof::upload_part_request::Msg::Header(
+                            ::buffa::alloc::boxed::Box::new(val),
+                        ),
+                    );
+                }
+            }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                self.msg = ::core::option::Option::Some(
+                    __buffa::oneof::upload_part_request::Msg::Chunk(
+                        ::buffa::types::decode_bytes(buf)?,
+                    ),
+                );
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.msg = ::core::option::Option::None;
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for UploadPartRequest {
+    const PROTO_FQN: &'static str = "mkit.transport.v1.UploadPartRequest";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl<'de> serde::Deserialize<'de> for UploadPartRequest {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        struct _V;
+        impl<'de> serde::de::Visitor<'de> for _V {
+            type Value = UploadPartRequest;
+            fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                f.write_str("struct UploadPartRequest")
+            }
+            #[allow(clippy::field_reassign_with_default)]
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> ::core::result::Result<UploadPartRequest, A::Error> {
+                let mut __oneof_msg: ::core::option::Option<
+                    __buffa::oneof::upload_part_request::Msg,
+                > = None;
+                while let Some(key) = map.next_key::<::buffa::alloc::string::String>()? {
+                    match key.as_str() {
+                        "header" => {
+                            let v: ::core::option::Option<UploadPartHeader> = map
+                                .next_value_seed(
+                                    ::buffa::json_helpers::NullableDeserializeSeed(
+                                        ::buffa::json_helpers::DefaultDeserializeSeed::<
+                                            UploadPartHeader,
+                                        >::new(),
+                                    ),
+                                )?;
+                            if let Some(v) = v {
+                                if __oneof_msg.is_some() {
+                                    return Err(
+                                        serde::de::Error::custom(
+                                            "multiple oneof fields set for 'msg'",
+                                        ),
+                                    );
+                                }
+                                __oneof_msg = Some(
+                                    __buffa::oneof::upload_part_request::Msg::Header(
+                                        ::buffa::alloc::boxed::Box::new(v),
+                                    ),
+                                );
+                            }
+                        }
+                        "chunk" => {
+                            struct _DeserSeed;
+                            impl<'de> serde::de::DeserializeSeed<'de> for _DeserSeed {
+                                type Value = ::buffa::alloc::vec::Vec<u8>;
+                                fn deserialize<D: serde::Deserializer<'de>>(
+                                    self,
+                                    d: D,
+                                ) -> ::core::result::Result<
+                                    ::buffa::alloc::vec::Vec<u8>,
+                                    D::Error,
+                                > {
+                                    ::buffa::json_helpers::bytes::deserialize(d)
+                                }
+                            }
+                            let v: ::core::option::Option<
+                                ::buffa::alloc::vec::Vec<u8>,
+                            > = map
+                                .next_value_seed(
+                                    ::buffa::json_helpers::NullableDeserializeSeed(_DeserSeed),
+                                )?;
+                            if let Some(v) = v {
+                                if __oneof_msg.is_some() {
+                                    return Err(
+                                        serde::de::Error::custom(
+                                            "multiple oneof fields set for 'msg'",
+                                        ),
+                                    );
+                                }
+                                __oneof_msg = Some(
+                                    __buffa::oneof::upload_part_request::Msg::Chunk(v),
+                                );
+                            }
+                        }
+                        _ => {
+                            map.next_value::<serde::de::IgnoredAny>()?;
+                        }
+                    }
+                }
+                let mut __r = <UploadPartRequest as ::core::default::Default>::default();
+                __r.msg = __oneof_msg;
+                Ok(__r)
+            }
+        }
+        d.deserialize_map(_V)
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for UploadPartRequest {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __UPLOAD_PART_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/mkit.transport.v1.UploadPartRequest",
+    to_json: ::buffa::type_registry::any_to_json::<UploadPartRequest>,
+    from_json: ::buffa::type_registry::any_from_json::<UploadPartRequest>,
+    is_wkt: false,
+};
+pub mod upload_part_request {
+    #[allow(unused_imports)]
+    use super::*;
+    #[doc(inline)]
+    pub use super::__buffa::oneof::upload_part_request::Msg;
+    #[doc(inline)]
+    pub use super::__buffa::view::oneof::upload_part_request::Msg as MsgView;
+}
+/// Acknowledges one uploaded part (SPEC-TRANSPORT-CONNECT §7.6).
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize, ::serde::Deserialize)]
+#[serde(default)]
+pub struct UploadPartResponse {
+    /// Opaque server-authenticated part receipt (SPEC-TRANSPORT-CONNECT §7.6).
+    ///
+    /// Field 1: `receipt`
+    #[serde(
+        rename = "receipt",
+        with = "::buffa::json_helpers::opt_bytes",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub receipt: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for UploadPartResponse {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("UploadPartResponse").field("receipt", &self.receipt).finish()
+    }
+}
+impl UploadPartResponse {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.UploadPartResponse";
+}
+impl UploadPartResponse {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::receipt`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_receipt(
+        mut self,
+        value: impl Into<::buffa::alloc::vec::Vec<u8>>,
+    ) -> Self {
+        self.receipt = Some(value.into());
+        self
+    }
+}
+::buffa::impl_default_instance!(UploadPartResponse);
+impl ::buffa::MessageName for UploadPartResponse {
+    const PACKAGE: &'static str = "mkit.transport.v1";
+    const NAME: &'static str = "UploadPartResponse";
+    const FULL_NAME: &'static str = "mkit.transport.v1.UploadPartResponse";
+    const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.UploadPartResponse";
+}
+impl ::buffa::Message for UploadPartResponse {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        if let Some(ref v) = self.receipt {
+            size += 1u64 + ::buffa::types::bytes_encoded_len(v) as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let Some(ref v) = self.receipt {
+            ::buffa::types::put_shared_bytes_field(1u32, v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_bytes(
+                    self.receipt.get_or_insert_with(::buffa::alloc::vec::Vec::new),
+                    buf,
+                )?;
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.receipt = ::core::option::Option::None;
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for UploadPartResponse {
+    const PROTO_FQN: &'static str = "mkit.transport.v1.UploadPartResponse";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for UploadPartResponse {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __UPLOAD_PART_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/mkit.transport.v1.UploadPartResponse",
+    to_json: ::buffa::type_registry::any_to_json::<UploadPartResponse>,
+    from_json: ::buffa::type_registry::any_from_json::<UploadPartResponse>,
+    is_wkt: false,
+};
+/// Finish an upload after all parts (SPEC-TRANSPORT-CONNECT §7.6).
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize, ::serde::Deserialize)]
+#[serde(default)]
+pub struct CompleteUploadRequest {
+    /// Opaque server-authenticated ticket token (SPEC-TRANSPORT-CONNECT §7.6).
+    ///
+    /// Field 1: `ticket_token`
+    #[serde(
+        rename = "ticketToken",
+        alias = "ticket_token",
+        with = "::buffa::json_helpers::opt_bytes",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub ticket_token: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
+    /// Part receipts in part-index order (SPEC-TRANSPORT-CONNECT §7.6).
+    ///
+    /// Field 2: `receipts`
+    #[serde(
+        rename = "receipts",
+        with = "::buffa::json_helpers::proto_seq",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec"
+    )]
+    pub receipts: ::buffa::alloc::vec::Vec<::buffa::alloc::vec::Vec<u8>>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for CompleteUploadRequest {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("CompleteUploadRequest")
+            .field("ticket_token", &self.ticket_token)
+            .field("receipts", &self.receipts)
+            .finish()
+    }
+}
+impl CompleteUploadRequest {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.CompleteUploadRequest";
+}
+impl CompleteUploadRequest {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::ticket_token`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_ticket_token(
+        mut self,
+        value: impl Into<::buffa::alloc::vec::Vec<u8>>,
+    ) -> Self {
+        self.ticket_token = Some(value.into());
+        self
+    }
+}
+::buffa::impl_default_instance!(CompleteUploadRequest);
+impl ::buffa::MessageName for CompleteUploadRequest {
+    const PACKAGE: &'static str = "mkit.transport.v1";
+    const NAME: &'static str = "CompleteUploadRequest";
+    const FULL_NAME: &'static str = "mkit.transport.v1.CompleteUploadRequest";
+    const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.CompleteUploadRequest";
+}
+impl ::buffa::Message for CompleteUploadRequest {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        if let Some(ref v) = self.ticket_token {
+            size += 1u64 + ::buffa::types::bytes_encoded_len(v) as u64;
+        }
+        for v in &self.receipts {
+            size += 1u64 + ::buffa::types::bytes_encoded_len(v) as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let Some(ref v) = self.ticket_token {
+            ::buffa::types::put_shared_bytes_field(1u32, v, buf);
+        }
+        for v in &self.receipts {
+            ::buffa::types::put_shared_bytes_field(2u32, v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_bytes(
+                    self.ticket_token.get_or_insert_with(::buffa::alloc::vec::Vec::new),
+                    buf,
+                )?;
+            }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                let __elem = ::buffa::types::decode_bytes(buf)?;
+                ctx.register_element_memory(
+                    ::buffa::__private::element_footprint(&__elem),
+                )?;
+                self.receipts.push(__elem);
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.ticket_token = ::core::option::Option::None;
+        self.receipts.clear();
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for CompleteUploadRequest {
+    const PROTO_FQN: &'static str = "mkit.transport.v1.CompleteUploadRequest";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for CompleteUploadRequest {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __COMPLETE_UPLOAD_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/mkit.transport.v1.CompleteUploadRequest",
+    to_json: ::buffa::type_registry::any_to_json::<CompleteUploadRequest>,
+    from_json: ::buffa::type_registry::any_from_json::<CompleteUploadRequest>,
+    is_wkt: false,
+};
+/// Empty body is successful completion (SPEC-TRANSPORT-CONNECT §7.6).
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize, ::serde::Deserialize)]
+#[serde(default)]
+pub struct CompleteUploadResponse {
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for CompleteUploadResponse {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("CompleteUploadResponse").finish()
+    }
+}
+impl CompleteUploadResponse {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.CompleteUploadResponse";
+}
+::buffa::impl_default_instance!(CompleteUploadResponse);
+impl ::buffa::MessageName for CompleteUploadResponse {
+    const PACKAGE: &'static str = "mkit.transport.v1";
+    const NAME: &'static str = "CompleteUploadResponse";
+    const FULL_NAME: &'static str = "mkit.transport.v1.CompleteUploadResponse";
+    const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.CompleteUploadResponse";
+}
+impl ::buffa::Message for CompleteUploadResponse {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for CompleteUploadResponse {
+    const PROTO_FQN: &'static str = "mkit.transport.v1.CompleteUploadResponse";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for CompleteUploadResponse {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __COMPLETE_UPLOAD_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/mkit.transport.v1.CompleteUploadResponse",
+    to_json: ::buffa::type_registry::any_to_json::<CompleteUploadResponse>,
+    from_json: ::buffa::type_registry::any_from_json::<CompleteUploadResponse>,
+    is_wkt: false,
+};

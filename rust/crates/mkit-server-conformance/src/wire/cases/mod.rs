@@ -34,6 +34,7 @@ mod packs;
 mod quota;
 mod refs;
 mod replay;
+mod repository;
 mod timers;
 mod upload;
 
@@ -151,6 +152,14 @@ macro_rules! cases {
 }
 
 cases! {
+    "repo.single_header_mismatch_not_found" => repository::single_header_mismatch, M0, [], [MultiRepo];
+    "repo.single_malformed_invalid_argument" => repository::single_malformed, M0, [], [MultiRepo];
+    "repo.single_signed_missing_header_unauthenticated" => repository::single_signed_missing, M0, [AuthV2], [MultiRepo];
+    "repo.isolation_refs" => repository::isolation_refs, M1, [MultiRepo, AuthV2], [];
+    "repo.signature_repository_mismatch_unauthenticated" => repository::signature_mismatch, M1, [MultiRepo, AuthV2], [];
+    "repo.missing_repository_invalid_argument" => repository::multi_invalid, M1, [MultiRepo, AuthV2], [];
+    "repo.read_missing_repo_not_found" => repository::read_missing_repo, M1, [MultiRepo], [];
+    "repo.packs_need_membership_unimplemented" => repository::packs_need_membership, M1, [MultiRepo, AuthV2], [];
     "timers.directive_fires_due" => timers::directive_fires_due, M0, [TestFaults], [];
     "timers.fire_on_schedule" => timers::fire_on_schedule, M0, [TestFaults, Timers], [];
     "timers.redelivery_is_idempotent" => timers::redelivery_is_idempotent, M0, [TestFaults], [];
@@ -200,7 +209,7 @@ cases! {
     "auth.bearer_applies_to_streaming" => auth::bearer_streaming, M0, [Bearer], [];
     "auth.v2_missing_headers_unauthenticated" => auth::v2_missing_headers, M0, [AuthV2], [];
     "auth.v2_wrong_audience" => auth::v2_wrong_audience, M0, [AuthV2], [];
-    "auth.v2_wrong_repository" => auth::v2_wrong_repository, M0, [AuthV2], [];
+    "auth.v2_wrong_repository" => auth::v2_wrong_repository, M0, [AuthV2], [MultiRepo];
     "auth.v2_wrong_procedure" => auth::v2_wrong_procedure, M0, [AuthV2], [];
     "auth.v2_bad_signature" => auth::v2_bad_signature, M0, [AuthV2], [];
     "auth.v2_body_digest_mismatch" => auth::v2_body_digest_mismatch, M0, [AuthV2], [];

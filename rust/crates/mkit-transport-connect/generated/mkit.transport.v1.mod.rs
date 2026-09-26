@@ -50,6 +50,17 @@ pub mod __buffa {
         reg.register_json_any(super::__DOWNLOAD_PACK_REQUEST_JSON_ANY);
         reg.register_json_any(super::__DOWNLOAD_PACK_HEADER_JSON_ANY);
         reg.register_json_any(super::__DOWNLOAD_PACK_RESPONSE_JSON_ANY);
+        reg.register_json_any(super::__GET_SERVER_INFO_REQUEST_JSON_ANY);
+        reg.register_json_any(super::__GET_SERVER_INFO_RESPONSE_JSON_ANY);
+        reg.register_json_any(super::__BEGIN_UPLOAD_REQUEST_JSON_ANY);
+        reg.register_json_any(super::__BEGIN_UPLOAD_RESPONSE_JSON_ANY);
+        reg.register_json_any(super::__ALREADY_PRESENT_JSON_ANY);
+        reg.register_json_any(super::__UPLOAD_TICKET_JSON_ANY);
+        reg.register_json_any(super::__UPLOAD_PART_HEADER_JSON_ANY);
+        reg.register_json_any(super::__UPLOAD_PART_REQUEST_JSON_ANY);
+        reg.register_json_any(super::__UPLOAD_PART_RESPONSE_JSON_ANY);
+        reg.register_json_any(super::__COMPLETE_UPLOAD_REQUEST_JSON_ANY);
+        reg.register_json_any(super::__COMPLETE_UPLOAD_RESPONSE_JSON_ANY);
     }
 }
 #[doc(inline)]
@@ -124,6 +135,50 @@ pub use self::__buffa::view::DownloadPackHeaderOwnedView;
 pub use self::__buffa::view::DownloadPackResponseView;
 #[doc(inline)]
 pub use self::__buffa::view::DownloadPackResponseOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::GetServerInfoRequestView;
+#[doc(inline)]
+pub use self::__buffa::view::GetServerInfoRequestOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::GetServerInfoResponseView;
+#[doc(inline)]
+pub use self::__buffa::view::GetServerInfoResponseOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::BeginUploadRequestView;
+#[doc(inline)]
+pub use self::__buffa::view::BeginUploadRequestOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::BeginUploadResponseView;
+#[doc(inline)]
+pub use self::__buffa::view::BeginUploadResponseOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::AlreadyPresentView;
+#[doc(inline)]
+pub use self::__buffa::view::AlreadyPresentOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::UploadTicketView;
+#[doc(inline)]
+pub use self::__buffa::view::UploadTicketOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::UploadPartHeaderView;
+#[doc(inline)]
+pub use self::__buffa::view::UploadPartHeaderOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::UploadPartRequestView;
+#[doc(inline)]
+pub use self::__buffa::view::UploadPartRequestOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::UploadPartResponseView;
+#[doc(inline)]
+pub use self::__buffa::view::UploadPartResponseOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::CompleteUploadRequestView;
+#[doc(inline)]
+pub use self::__buffa::view::CompleteUploadRequestOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::CompleteUploadResponseView;
+#[doc(inline)]
+pub use self::__buffa::view::CompleteUploadResponseOwnedView;
 #[doc(inline)]
 pub use self::__buffa::register_types;
 include!("mkit.transport.v1.transport.__connect.rs");

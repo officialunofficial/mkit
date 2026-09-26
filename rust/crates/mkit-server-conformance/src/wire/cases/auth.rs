@@ -169,15 +169,20 @@ pub(super) async fn v2_wrong_audience(ctx: Ctx) -> CaseResult {
 pub(super) async fn v2_wrong_repository(ctx: Ctx) -> CaseResult {
     let signer = ctx.v2_signer("main")?;
     let other = |env: &mut Envelope| "conformance-wrong-repository".clone_into(&mut env.repository);
-    rejected(
-        &ctx,
-        &signed_main(&ctx, &signer, other),
+    want_code(
+        ctx.send::<UpdateRefResponse>(&signed_main(&ctx, &signer, other))
+            .await?,
+        "not_found",
         "signed for another repository",
-    )
-    .await?;
+    )?;
     let op = signed_main(&ctx, &signer, |_| {})
         .with_header("x-repository", "conformance-wrong-repository");
-    rejected(&ctx, &op, "x-repository rewritten").await
+    want_code(
+        ctx.send::<UpdateRefResponse>(&op).await?,
+        "not_found",
+        "x-repository rewritten",
+    )?;
+    ctx.expect_ref(&ctx.head("main"), None).await
 }
 
 pub(super) async fn v2_wrong_procedure(ctx: Ctx) -> CaseResult {

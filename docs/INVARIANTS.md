@@ -451,6 +451,26 @@ targets. All run in the workspace nextest (`just ci`, cloudbuild/ci.yaml).
 Simulated Durable Objects cannot show placement, Cloudflare's limits or
 point-in-time recovery; the M1 staging runs (WP-1.20) cover those.
 
+## M1 Connect surfaces remain explicit stubs until implementation
+
+**Always:** until their implementing WPs land, the four new discovery and
+upload RPCs return `unimplemented` ("not implemented yet"). Ref deletion,
+advance ticket ids, upload ticket tokens and ref-list continuation tokens
+are rejected before validation or pipeline writes. `page_size` is ignored
+and listings end with an empty `next_page_token`.
+
+**Because:** the new RPC paths currently bypass authentication because
+`Procedure::from_connect_path` does not recognise them. WP-1.9 and WP-1.11
+must add authenticated procedures before enabling upload behavior;
+WP-1.6 must make discovery explicit while keeping it public by spec §2.1.
+
+**If violated:** a new field can silently invoke legacy behavior, or an
+unauthenticated upload handler can mutate state.
+
+**Enforced by:** `mkit-server/tests/connect_dispatch.rs`'s `m1_*` tests
+and the TODO and SECURITY comments in `connect/service.rs`. Implementing
+WPs replace the relevant stub assertions with their behavior and auth tests.
+
 ## The native server and the reference Worker pass the black-box wire suite
 
 **Always:** every `mkit.transport.v1` server mkit ships passes
@@ -876,6 +896,46 @@ and `rust/tests/golden/closure/neg_delta_entry.*` /
 `neg_compressed_entry.*`, and
 `golden_pack::pack_v2_fixtures::closure_profile_still_rejects_compressed_entries`
 (every feature combination, including a frame corrupted past decoding).
+
+## Pack exclusions preserve surviving objects and delta bases
+
+**Always:** a pack rewrite drops every excluded entry and rawifies a surviving
+delta only when its direct base is excluded. Surviving bytes and entry order
+are preserved; an unchanged pack keeps its original bytes. Rewrites use the
+existing `DecodeLimits` charged-payload accounting; the caller supplies
+repository-scoped bases.
+
+**Because:** deleting a delta base otherwise makes retained objects undecodable;
+transitive rawification adds size without improving decodability.
+
+**If violated:** a takedown can corrupt unrelated objects or reveal external
+object membership.
+
+**Enforced by:** `pack::rewrite::tests` (128 property cases, chains of depth 1–5,
+external bases, duplicates, compressed fixtures and budget/error checks), plus
+`mkit-core-wasm-check/tests/pack_rewrite.rs` and the hostile-length wasm harness.
+
+## Repository addressing binds authentication and storage routing
+
+**Always:** stage 0 validates `X-Repository` with the shared identity grammar
+and stores its resolved identity on `Authenticated`. Every operation routes
+refs and replay state through `ShardMap` using that repository. Multi ref reads
+require a ref row in the named repository; Multi pack RPCs return
+`unimplemented` before blob access until repository membership exists.
+
+**Because:** ref keys contain only the repository name; namespace partitions
+provide isolation, and global blob presence would reveal another repository's
+contents. Auth v2 must bind the signature and replay scope to the routed identity.
+
+**If violated:** a request can observe or mutate another repository's refs,
+reuse its replay result, or learn whether it holds particular content.
+
+**Enforced by:** server `repo::tests` (the BLAKE3-pinned repository grammar),
+`pipeline::tests::single_repository_header_rules_preserve_04_requests_and_fail_at_stage_zero`,
+native `tests/repository_routing.rs` over memory and SQLite (including the
+same repository name in different namespaces and shared nonces), and the
+conformance `repo.*` wire cases. Namespace authorization is WP-1.5; pack
+membership is WP-1.10; the coordinator repository registry is WP-1.22.
 
 ## Timer effects share the row's atomicity boundary
 

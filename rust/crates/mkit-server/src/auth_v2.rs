@@ -36,8 +36,9 @@ pub const HEADER_NAMES: [&str; 10] = [
 pub const CORS_ALLOW_HEADERS: &str = "x-envelope-version, x-audience, x-repository, x-content-commitment, x-expires-at, x-public-key, x-signature, x-digest, x-created-at, \
      idempotency-key, content-type, connect-protocol-version";
 
-/// The deployment's own identity, which every signature must name. It comes
-/// from configuration, never from request headers.
+/// The trusted audience and Single deployment's expected repository.
+/// In Multi mode the pipeline ignores this repository field and verifies
+/// against the resolved request identity instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthV2Config {
     audience: String,
@@ -74,10 +75,10 @@ impl AuthV2Config {
         &self.repository
     }
 
-    fn context(&self) -> Context<'_> {
+    fn context<'a>(&'a self, repository: &'a str) -> Context<'a> {
         Context {
             audience: &self.audience,
-            repository: &self.repository,
+            repository,
         }
     }
 }
@@ -111,8 +112,27 @@ pub fn verify_unary(
     now_ms: i64,
     headers: &Headers,
 ) -> Result<VerifiedAuth, ServerError> {
+    verify_unary_for(cfg, cfg.repository(), procedure_path, body, now_ms, headers)
+}
+
+/// Verify against the stage-0 resolved repository in Multi mode.
+pub(crate) fn verify_unary_for(
+    cfg: &AuthV2Config,
+    repository: &str,
+    procedure_path: &str,
+    body: &[u8],
+    now_ms: i64,
+    headers: &Headers,
+) -> Result<VerifiedAuth, ServerError> {
     let commitment = format!("body:{}", to_hex(&hash(body)));
-    verify(cfg, procedure_path, Some(&commitment), now_ms, headers)
+    verify(
+        cfg,
+        repository,
+        procedure_path,
+        Some(&commitment),
+        now_ms,
+        headers,
+    )
 }
 
 /// Authenticate a streaming upload: the signature must carry a `pack:`
@@ -127,18 +147,36 @@ pub fn verify_stream(
     now_ms: i64,
     headers: &Headers,
 ) -> Result<VerifiedAuth, ServerError> {
-    verify(cfg, procedure_path, None, now_ms, headers)
+    verify_stream_for(cfg, cfg.repository(), procedure_path, now_ms, headers)
+}
+
+/// Verify a streaming envelope against the resolved repository in Multi mode.
+pub(crate) fn verify_stream_for(
+    cfg: &AuthV2Config,
+    repository: &str,
+    procedure_path: &str,
+    now_ms: i64,
+    headers: &Headers,
+) -> Result<VerifiedAuth, ServerError> {
+    verify(cfg, repository, procedure_path, None, now_ms, headers)
 }
 
 fn verify(
     cfg: &AuthV2Config,
+    repository: &str,
     procedure_path: &str,
     commitment: Option<&str>,
     now_ms: i64,
     headers: &Headers,
 ) -> Result<VerifiedAuth, ServerError> {
-    let authorized = verify_headers(cfg.context(), procedure_path, commitment, now_ms, headers)
-        .map_err(|e| ServerError::unauthenticated(e.0))?;
+    let authorized = verify_headers(
+        cfg.context(repository),
+        procedure_path,
+        commitment,
+        now_ms,
+        headers,
+    )
+    .map_err(|e| ServerError::unauthenticated(e.0))?;
     VerifiedAuth::try_from(&authorized)
 }
 
