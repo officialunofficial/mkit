@@ -362,11 +362,6 @@ mod tests {
             .unwrap();
         assert!(multi.skip_reason(&profile).unwrap().contains("milestone"));
         profile.milestone = Milestone::M1;
-        assert!(
-            multi
-                .skip_reason(&profile)
-                .unwrap()
-                .contains("multi-repo")
-        );
+        assert!(multi.skip_reason(&profile).unwrap().contains("multi-repo"));
     }
 }
