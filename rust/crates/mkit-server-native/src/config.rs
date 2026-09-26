@@ -59,6 +59,59 @@ impl FromStr for MetaArg {
     }
 }
 
+/// Where the packs live (`--blob`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlobArg {
+    /// Files under the served root, `<DIR>/packs/<64-hex>`.
+    Fs,
+    /// An S3-compatible bucket (`s3://<BUCKET>[/<PREFIX>]`).
+    S3 {
+        /// The bucket.
+        bucket: String,
+        /// The key prefix, without a trailing `/`.
+        prefix: Option<String>,
+    },
+}
+
+impl FromStr for BlobArg {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        if s == "fs" {
+            return Ok(Self::Fs);
+        }
+        let Some(rest) = s.strip_prefix("s3://") else {
+            return Err(format!(
+                "expected fs or s3://<BUCKET>[/<PREFIX>], got {s:?}"
+            ));
+        };
+        let rest = rest.strip_suffix('/').unwrap_or(rest);
+        let (bucket, prefix) = match rest.split_once('/') {
+            Some((bucket, prefix)) => (bucket, Some(prefix.to_owned())),
+            None => (rest, None),
+        };
+        if bucket.is_empty() {
+            return Err(format!("{s:?} names no bucket"));
+        }
+        Ok(Self::S3 {
+            bucket: bucket.to_owned(),
+            prefix,
+        })
+    }
+}
+
+/// The S3 access key id's environment variable: the one the
+/// `mkit+s3://` client transport reads (`SPEC-CONFIG-SECURITY`).
+pub const S3_ACCESS_KEY_ENV: &str = "MKIT_R2_ACCESS_KEY_ID";
+/// The S3 secret access key's environment variable.
+pub const S3_SECRET_KEY_ENV: &str = "MKIT_R2_SECRET_ACCESS_KEY";
+/// The AWS-standard fallback for [`S3_ACCESS_KEY_ENV`].
+pub const AWS_ACCESS_KEY_ENV: &str = "AWS_ACCESS_KEY_ID";
+/// The AWS-standard fallback for [`S3_SECRET_KEY_ENV`].
+pub const AWS_SECRET_KEY_ENV: &str = "AWS_SECRET_ACCESS_KEY";
+/// Temporary AWS credentials, which the signer cannot send.
+pub const AWS_SESSION_TOKEN_ENV: &str = "AWS_SESSION_TOKEN";
+
 /// `--auth`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum AuthArg {
@@ -96,6 +149,35 @@ pub struct ServeArgs {
     /// bearer and unsafe auth) or `sqlite:<PATH>` (required for auth v2).
     #[arg(long, value_name = "fs-layout|sqlite:<PATH>")]
     pub meta: Option<MetaArg>,
+    /// Where packs live: `fs` (`<DIR>/packs`) or `s3://<BUCKET>[/<PREFIX>]`,
+    /// an S3-compatible bucket that honors `If-None-Match: *` (needs
+    /// `--s3-endpoint`, `--meta sqlite:<PATH>`, and credentials from
+    /// `MKIT_R2_ACCESS_KEY_ID`/`MKIT_R2_SECRET_ACCESS_KEY`, the `AWS_*`
+    /// pair, or `--s3-credentials-file`).
+    #[arg(long, value_name = "fs|s3://BUCKET[/PREFIX]", default_value = "fs")]
+    pub blob: BlobArg,
+    /// The S3 API origin, e.g. `https://<account>.r2.cloudflarestorage.com`
+    /// (no path: buckets are addressed path-style).
+    #[arg(long, value_name = "URL")]
+    pub s3_endpoint: Option<String>,
+    /// The region S3 requests are signed for (`auto` for R2).
+    #[arg(long, value_name = "REGION", default_value = "auto")]
+    pub s3_region: String,
+    /// A file of `KEY=VALUE` lines setting the S3 credential variables
+    /// (owner-only, as `--bearer-token-file`); the environment is then not
+    /// read for them.
+    #[arg(long, value_name = "PATH")]
+    pub s3_credentials_file: Option<PathBuf>,
+    /// Allow a plain-`http` `--s3-endpoint` that is not loopback. Pack bytes
+    /// then cross the network in cleartext and can be tampered with on the
+    /// path. Development only.
+    #[arg(long)]
+    pub s3_allow_insecure_http: bool,
+    /// The most local disk the uploads in flight may declare together while
+    /// they spool (default 16 GiB); an upload that does not fit is refused
+    /// (retryable) before any byte arrives. At least `--max-pack-bytes`.
+    #[arg(long, value_name = "N")]
+    pub s3_spool_max_bytes: Option<u64>,
     /// How writes authenticate: `bearer` (the default when a token is
     /// configured) or `auth-v2` (signed writes; needs `--audience`).
     #[arg(long, value_enum)]
@@ -199,6 +281,38 @@ pub enum MetaChoice {
     },
 }
 
+/// The blob store to open. `Debug` redacts the S3 secret key.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum BlobChoice {
+    /// `FsBlobStore` under the served root.
+    Fs,
+    /// `S3BlobStore` over this bucket.
+    #[cfg(feature = "s3")]
+    S3 {
+        /// The bucket, endpoint and credentials.
+        config: Box<crate::s3::S3Config>,
+        /// The upload spool's budget.
+        spool_max_bytes: u64,
+    },
+}
+
+impl fmt::Display for BlobChoice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Fs => f.write_str("fs"),
+            #[cfg(feature = "s3")]
+            Self::S3 { config: cfg, .. } => {
+                write!(f, "s3://{}", cfg.bucket)?;
+                if let Some(prefix) = &cfg.prefix {
+                    write!(f, "/{prefix}")?;
+                }
+                write!(f, " at {}", cfg.endpoint)
+            }
+        }
+    }
+}
+
 /// A resolved, validated `serve` configuration.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -209,6 +323,8 @@ pub struct ServeConfig {
     pub repo_root: PathBuf,
     /// The metadata store.
     pub meta: MetaChoice,
+    /// The blob store.
+    pub blob: BlobChoice,
     /// The pipeline's settings (auth, addressing, limits, quota).
     pub pipeline: PipelineConfig,
     /// The router's layers.
@@ -306,12 +422,21 @@ fn resolve_auth(
 /// (`fstat`): it must be a regular file, on Unix readable by its owner
 /// only. Nothing can swap the file between the check and the read.
 fn read_token(path: &Path) -> Result<String, ConfigError> {
+    let text = read_secret_file(path, "--bearer-token-file", TOKEN_ENV)?;
+    let text = text.strip_suffix('\n').unwrap_or(&text);
+    Ok(text.strip_suffix('\r').unwrap_or(text).to_owned())
+}
+
+/// The whole of the secret file `path`, given by `flag`, opened and checked
+/// as described at [`read_token`]; `env_hint` names the environment
+/// alternative. Error messages never quote its contents.
+fn read_secret_file(path: &Path, flag: &str, env_hint: &str) -> Result<String, ConfigError> {
     use std::io::Read as _;
 
     let refuse = |why: String| {
         ConfigError::new(
             exit::CONFIG_ERROR,
-            format!("{PREFIX}: --bearer-token-file {}: {why}", path.display()),
+            format!("{PREFIX}: {flag} {}: {why}", path.display()),
         )
     };
     let mut options = std::fs::OpenOptions::new();
@@ -324,11 +449,10 @@ fn read_token(path: &Path) -> Result<String, ConfigError> {
     let mut file = options.open(path).map_err(|e| {
         #[cfg(unix)]
         if e.raw_os_error() == Some(libc::ELOOP) {
-            return refuse(
+            return refuse(format!(
                 "is a symlink; point the flag at the file itself, or pass a symlinked secret \
-                 mount (e.g. Kubernetes) through MKIT_API_TOKEN"
-                    .to_owned(),
-            );
+                 mount (e.g. Kubernetes) through {env_hint}"
+            ));
         }
         refuse(e.to_string())
     })?;
@@ -350,8 +474,7 @@ fn read_token(path: &Path) -> Result<String, ConfigError> {
     let mut text = String::new();
     file.read_to_string(&mut text)
         .map_err(|e| refuse(format!("cannot read it: {e}")))?;
-    let text = text.strip_suffix('\n').unwrap_or(&text);
-    Ok(text.strip_suffix('\r').unwrap_or(text).to_owned())
+    Ok(text)
 }
 
 /// `path` with its directory resolved, as the marker records it: the same
@@ -411,6 +534,202 @@ pub fn resolve_repo_root(
         }
     }
     Ok(resolved)
+}
+
+/// The blob store `--blob` names, with its S3 settings checked.
+fn resolve_blob(
+    args: &ServeArgs,
+    meta: &MetaChoice,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<BlobChoice, ConfigError> {
+    let usage = |m: &str| ConfigError::new(exit::USAGE, format!("{PREFIX}: {m}"));
+    let (bucket, prefix) = match &args.blob {
+        BlobArg::Fs => {
+            if args.s3_endpoint.is_some()
+                || args.s3_credentials_file.is_some()
+                || args.s3_allow_insecure_http
+                || args.s3_spool_max_bytes.is_some()
+            {
+                return Err(usage("--s3-* flags need --blob s3://<BUCKET>"));
+            }
+            return Ok(BlobChoice::Fs);
+        }
+        BlobArg::S3 { bucket, prefix } => (bucket, prefix),
+    };
+    if *meta == MetaChoice::FsLayout {
+        return Err(ConfigError::new(
+            exit::CONFIG_ERROR,
+            format!(
+                "{PREFIX}: --blob s3 requires --meta sqlite:<PATH>: fs-layout ref files are \
+                 shared with local mkit commands, which read packs from <DIR>/packs"
+            ),
+        ));
+    }
+    s3_choice(args, bucket, prefix.as_deref(), env)
+}
+
+#[cfg(not(feature = "s3"))]
+fn s3_choice(
+    _args: &ServeArgs,
+    _bucket: &str,
+    _prefix: Option<&str>,
+    _env: &dyn Fn(&str) -> Option<String>,
+) -> Result<BlobChoice, ConfigError> {
+    Err(ConfigError::new(
+        exit::CONFIG_ERROR,
+        format!("{PREFIX}: --blob s3: this mkit-server was built without the `s3` feature"),
+    ))
+}
+
+#[cfg(feature = "s3")]
+fn s3_choice(
+    args: &ServeArgs,
+    bucket: &str,
+    prefix: Option<&str>,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<BlobChoice, ConfigError> {
+    let invalid = |m: String| ConfigError::new(exit::CONFIG_ERROR, format!("{PREFIX}: {m}"));
+    let Some(endpoint) = &args.s3_endpoint else {
+        return Err(ConfigError::new(
+            exit::USAGE,
+            format!("{PREFIX}: --blob s3://… requires --s3-endpoint <URL>"),
+        ));
+    };
+    let endpoint: url::Url = endpoint
+        .parse()
+        .map_err(|e| invalid(format!("--s3-endpoint {endpoint:?}: {e}")))?;
+    let (access_key_id, secret_access_key) = s3_credentials(args, env)?;
+    let cfg = crate::s3::S3Config {
+        endpoint,
+        bucket: bucket.to_owned(),
+        prefix: prefix.map(str::to_owned),
+        credentials: crate::s3::Credentials {
+            access_key_id,
+            secret_access_key,
+            region: args.s3_region.clone(),
+        },
+    };
+    cfg.validate()
+        .map_err(|e| invalid(format!("--blob s3: {e}")))?;
+    if cfg.endpoint.scheme() == "http"
+        && !cfg.endpoint_is_loopback()
+        && !args.s3_allow_insecure_http
+    {
+        return Err(invalid(format!(
+            "--s3-endpoint {} is plain http to a non-loopback host: pack bytes would cross the \
+             network in cleartext and could be tampered with. Use https, or pass \
+             --s3-allow-insecure-http (development only).",
+            cfg.endpoint
+        )));
+    }
+    let max_pack = args
+        .max_pack_bytes
+        .unwrap_or(mkit_core::protocol::PACK_BODY_LIMIT);
+    let spool_max_bytes = args
+        .s3_spool_max_bytes
+        .unwrap_or(crate::s3::DEFAULT_SPOOL_MAX_BYTES);
+    if spool_max_bytes < max_pack {
+        return Err(invalid(format!(
+            "--s3-spool-max-bytes {spool_max_bytes} is below the pack cap {max_pack} \
+             (--max-pack-bytes): the largest upload could never spool"
+        )));
+    }
+    Ok(BlobChoice::S3 {
+        config: Box::new(cfg),
+        spool_max_bytes,
+    })
+}
+
+/// The S3 access key pair: from `--s3-credentials-file` if given, else the
+/// environment; [`S3_ACCESS_KEY_ENV`]/[`S3_SECRET_KEY_ENV`] first, then
+/// the `AWS_*` pair. A pair is taken whole from one source. Temporary AWS
+/// credentials are refused: the signer does not send
+/// `x-amz-security-token`. Never taken from the command line.
+#[cfg(feature = "s3")]
+fn s3_credentials(
+    args: &ServeArgs,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<(String, String), ConfigError> {
+    let refuse = |m: String| ConfigError::new(exit::CONFIG_ERROR, format!("{PREFIX}: {m}"));
+    let file_vars = match &args.s3_credentials_file {
+        Some(path) => Some(parse_env_file(path)?),
+        None => None,
+    };
+    let lookup = |name: &str| match &file_vars {
+        Some(vars) => vars.get(name).cloned(),
+        None => env(name),
+    };
+    let source = match &args.s3_credentials_file {
+        Some(path) => format!("--s3-credentials-file {}", path.display()),
+        None => "the environment".to_owned(),
+    };
+    for (id, secret) in [
+        (S3_ACCESS_KEY_ENV, S3_SECRET_KEY_ENV),
+        (AWS_ACCESS_KEY_ENV, AWS_SECRET_KEY_ENV),
+    ] {
+        match (lookup(id), lookup(secret)) {
+            (None, None) => {}
+            (Some(id_value), Some(secret_value)) => {
+                if id_value.is_empty() || secret_value.is_empty() {
+                    return Err(refuse(format!("{id} and {secret} in {source} are empty")));
+                }
+                if id == AWS_ACCESS_KEY_ENV && lookup(AWS_SESSION_TOKEN_ENV).is_some() {
+                    return Err(refuse(format!(
+                        "{source} sets {AWS_SESSION_TOKEN_ENV}: temporary credentials are not \
+                         supported; use a long-lived access key"
+                    )));
+                }
+                return Ok((id_value, secret_value));
+            }
+            _ => {
+                return Err(refuse(format!(
+                    "{source} sets only one of {id} and {secret}"
+                )));
+            }
+        }
+    }
+    Err(refuse(format!(
+        "--blob s3 needs credentials: set {S3_ACCESS_KEY_ENV} and {S3_SECRET_KEY_ENV} (or \
+         {AWS_ACCESS_KEY_ENV} and {AWS_SECRET_KEY_ENV}) in {source}"
+    )))
+}
+
+/// The `KEY=VALUE` lines of the secret file `path` (systemd
+/// `EnvironmentFile` syntax: blank lines and `#` comments skipped, an
+/// optional `export `, values optionally in matching quotes). Errors name
+/// the line number, never its contents.
+#[cfg(feature = "s3")]
+fn parse_env_file(path: &Path) -> Result<std::collections::HashMap<String, String>, ConfigError> {
+    let text = read_secret_file(
+        path,
+        "--s3-credentials-file",
+        &format!("{S3_ACCESS_KEY_ENV}/{S3_SECRET_KEY_ENV}"),
+    )?;
+    let mut vars = std::collections::HashMap::new();
+    for (n, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        let Some((name, value)) = line.split_once('=') else {
+            return Err(ConfigError::new(
+                exit::CONFIG_ERROR,
+                format!(
+                    "{PREFIX}: --s3-credentials-file {}: line {} is not KEY=VALUE",
+                    path.display(),
+                    n + 1
+                ),
+            ));
+        };
+        let value = value.trim();
+        let unquoted = ['"', '\'']
+            .iter()
+            .find_map(|q| value.strip_prefix(*q)?.strip_suffix(*q))
+            .unwrap_or(value);
+        vars.insert(name.trim().to_owned(), unquoted.to_owned());
+    }
+    Ok(vars)
 }
 
 fn cors_policy(origins: &[String]) -> Result<CorsPolicy, ConfigError> {
@@ -475,6 +794,7 @@ pub fn resolve(
         }
         (Some(MetaArg::FsLayout) | None, _) => MetaChoice::FsLayout,
     };
+    let blob = resolve_blob(args, &meta, env)?;
     let repo_root = resolve_repo_root(&args.repo_root, env)?;
     let name = RepoName::new(args.repository.clone())
         .map_err(|_| usage(&format!("--repository {:?} is invalid", args.repository)))?;
@@ -505,6 +825,7 @@ pub fn resolve(
         listen: args.listen,
         repo_root,
         meta,
+        blob,
         pipeline,
         router,
         serve: ServeOptions {

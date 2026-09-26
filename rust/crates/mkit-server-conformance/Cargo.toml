@@ -29,6 +29,10 @@ workspace = true
 # (the clock-skew directive, plus the baseline's `GET /__mkit_test/stats`)
 # so the `TestFaults` wire cases run. The wire suite itself never needs it.
 test-faults = ["mkit-server/test-faults"]
+# `fake_s3`: a strict in-memory S3 server (path-style objects, SigV4
+# verification, conditional puts, ranges) for testing S3 blob stores in
+# normal CI without Docker. A test utility: never in a release binary.
+fake-s3 = ["dep:axum", "dep:sha2", "dep:hmac", "tokio/net"]
 
 [dependencies]
 mkit-server = { version = "0.4", path = "../mkit-server", features = ["memory"] }
@@ -55,6 +59,11 @@ clap = { version = "4", default-features = false, features = ["std", "help", "er
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }
+# `fake-s3`: the server, and an independent SigV4 verifier (not
+# `mkit-transport-s3`'s signer, so a signing bug cannot verify itself).
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"], optional = true }
+sha2 = { version = "0.11", optional = true }
+hmac = { version = "0.13", optional = true }
 
 [dev-dependencies]
 # tests/fs_backends.rs: the `.mkit`-layout stores (native only, like this
@@ -74,3 +83,7 @@ mkit-transport-file = { version = "0.4", path = "../mkit-transport-file" }
 [[bin]]
 name = "mkit-server-conformance"
 path = "src/bin/mkit-server-conformance.rs"
+
+[[test]]
+name = "s3_backends"
+required-features = ["fake-s3"]

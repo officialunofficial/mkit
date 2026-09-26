@@ -51,6 +51,10 @@ impl Drop for Server {
 
 impl Server {
     fn start(port: u16, root: &Path, flags: &[&str]) -> Self {
+        Self::start_with_env(port, root, flags, &[])
+    }
+
+    fn start_with_env(port: u16, root: &Path, flags: &[&str], env: &[(&str, &str)]) -> Self {
         let listen = format!("127.0.0.1:{port}");
         let child = Command::new(BIN)
             .args(["serve", "--listen", &listen, "--repo-root"])
@@ -58,6 +62,7 @@ impl Server {
             .args(flags)
             .env_remove("MKIT_API_TOKEN")
             .env_remove("MKIT_SERVE_ROOT")
+            .envs(env.iter().copied())
             .env("RUST_LOG", "warn")
             .stdin(Stdio::null())
             .spawn()
@@ -165,4 +170,57 @@ async fn binary_fs_sqlite_auth_v2() {
     profile.features.insert(Feature::StrictGzipAuth);
     check(&origin, profile).await;
     assert!(server.stop().success());
+}
+
+/// S3 + `SQLite`, auth v2: the binary over the in-repo fake S3, with the
+/// credentials in its environment.
+#[cfg(feature = "s3")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn binary_s3_sqlite_auth_v2() {
+    use mkit_server_conformance::fake_s3::{DEFAULT_BUCKET, FakeS3};
+
+    let fake = FakeS3::start();
+    let root = common::repo_root();
+    let port = free_port();
+    let origin = format!("http://127.0.0.1:{port}");
+    let meta = format!("sqlite:{}", common::s(&root.path().join("meta.sqlite3")));
+    let max_pack = MAX_PACK.to_string();
+    let endpoint = fake.endpoint();
+    let blob = format!("s3://{DEFAULT_BUCKET}/binary");
+    let opts = fake.options();
+    let server = Server::start_with_env(
+        port,
+        root.path(),
+        &[
+            "--meta",
+            &meta,
+            "--blob",
+            &blob,
+            "--s3-endpoint",
+            &endpoint,
+            "--auth",
+            "auth-v2",
+            "--audience",
+            &origin,
+            "--max-pack-bytes",
+            &max_pack,
+        ],
+        &[
+            ("MKIT_R2_ACCESS_KEY_ID", &opts.access_key_id),
+            ("MKIT_R2_SECRET_ACCESS_KEY", &opts.secret_access_key),
+        ],
+    );
+    let mut profile = profile(
+        WireAuth::AuthV2 {
+            audience: origin.clone(),
+            repository: "default".to_owned(),
+            seed: [0x3b; 32],
+        },
+        true,
+    );
+    profile.features.insert(Feature::StrictGzipAuth);
+    check(&origin, profile).await;
+    assert!(server.stop().success());
+    assert!(!fake.keys(DEFAULT_BUCKET).is_empty());
+    assert!(!root.path().join("packs").exists());
 }

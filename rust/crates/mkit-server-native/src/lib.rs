@@ -15,6 +15,8 @@ pub mod layers;
 mod listen;
 #[cfg(feature = "http")]
 mod router;
+#[cfg(feature = "s3")]
+pub mod s3;
 #[cfg(feature = "http")]
 pub mod server;
 #[cfg(feature = "http")]
@@ -31,6 +33,8 @@ pub use blocking::{Blocking, BlockingSink, PROBE_CACHE_TTL};
 pub use listen::{ServeOptions, serve};
 #[cfg(feature = "http")]
 pub use router::{CorsPolicy, RouterOptions, build_router};
+#[cfg(feature = "s3")]
+pub use s3::{S3BlobStore, S3Config, S3PackSink};
 #[cfg(feature = "http")]
 pub use shutdown::{Shutdown, shutdown_signal};
 #[cfg(feature = "http")]

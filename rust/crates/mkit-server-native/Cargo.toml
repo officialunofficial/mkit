@@ -3,7 +3,8 @@
 # `mkit-server`'s shared `SqlKvStore`), the `Blocking` adapter that runs
 # sync-bodied stores on tokio's blocking pool, the embeddable axum router
 # with its production tower layers, and the `mkit-server` binary (FS blobs,
-# `.mkit`-layout or SQLite metadata; WP-M0-10, D31).
+# `.mkit`-layout or SQLite metadata; WP-M0-10, D31), and the S3 blob store
+# (`s3`, WP-M0-11).
 #
 # `publish = false` during the epic; WP-REL decides publication. Never a
 # dependency of `mkit-cli`: rusqlite's bundled SQLite (C, built by `cc`)
@@ -23,7 +24,18 @@ authors.workspace = true
 workspace = true
 
 [features]
-default = ["sqlite", "http"]
+default = ["sqlite", "http", "s3"]
+# `S3BlobStore`: content-addressed blobs in an S3-compatible bucket, signed
+# with `mkit-transport-s3`'s SigV4 code, over reqwest (async, rustls: the
+# workspace's existing HTTP client and TLS stack, no new supply chain).
+s3 = [
+    "dep:mkit-transport-s3",
+    "dep:reqwest",
+    "dep:sha2",
+    "dep:tempfile",
+    "dep:url",
+    "tokio/time",
+]
 # `RusqliteConn`: SQLite through rusqlite, with SQLite bundled.
 sqlite = ["dep:rusqlite", "dep:parking_lot"]
 # The axum router, its tower layers, graceful shutdown, tracing and the
@@ -89,6 +101,16 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["s
 # The metrics facade only; no exporter (planner default Q20).
 metrics = { version = "0.24", optional = true }
 clap = { version = "4", default-features = false, features = ["std", "help", "error-context", "usage", "derive", "env"], optional = true }
+# `s3`: only `sigv4` is used, the published crate's public signer; its
+# blocking client is never called here.
+mkit-transport-s3 = { version = "0.4", path = "../mkit-transport-s3", optional = true }
+# Same major and TLS feature as the workspace's other reqwest users.
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream"], optional = true }
+# The SigV4 payload hash, computed while an upload spools.
+sha2 = { version = "0.11", optional = true }
+# The unnamed upload spool file.
+tempfile = { version = "3", optional = true }
+url = { version = "2", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 # `O_NOFOLLOW`/`O_NONBLOCK` for opening the bearer token file once.
@@ -99,7 +121,7 @@ tokio = { version = "1", default-features = false, features = ["rt-multi-thread"
 tempfile = "3"
 futures = "0.3"
 mkit-server = { version = "0.4", path = "../mkit-server", features = ["memory"] }
-mkit-server-conformance = { path = "../mkit-server-conformance" }
+mkit-server-conformance = { path = "../mkit-server-conformance", features = ["fake-s3"] }
 # tests/wire_fs_layout_bearer.rs diffs against today's `mkit serve --http`
 # (the `server` feature; WP-M0-15 removes that half with it).
 mkit-transport-connect = { version = "0.4", path = "../mkit-transport-connect", features = ["server"] }
@@ -138,3 +160,11 @@ required-features = ["http"]
 [[test]]
 name = "write_gate"
 required-features = ["http"]
+
+[[test]]
+name = "wire_s3_sqlite"
+required-features = ["http", "s3"]
+
+[[test]]
+name = "s3_store"
+required-features = ["s3"]

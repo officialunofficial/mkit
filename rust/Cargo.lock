@@ -3514,6 +3514,7 @@ dependencies = [
  "flate2",
  "futures",
  "getrandom 0.4.3",
+ "hmac",
  "http",
  "http-body-util",
  "mkit-core",
@@ -3523,6 +3524,7 @@ dependencies = [
  "mkit-transport-file",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tempfile",
  "tokio",
  "toml",
@@ -3555,9 +3557,12 @@ dependencies = [
  "mkit-server-conformance",
  "mkit-transport-connect",
  "mkit-transport-file",
+ "mkit-transport-s3",
  "parking_lot",
+ "reqwest",
  "rusqlite",
  "serde_json",
+ "sha2 0.11.0",
  "subtle",
  "tempfile",
  "tokio",
@@ -4844,12 +4849,14 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "tower",
  "tower-http",
  "tower-service",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wasm-streams 0.5.0",
  "web-sys",
 ]
 
@@ -6574,6 +6581,19 @@ checksum = "f37b4f992cebe528ef34964ae69681ac0fe7080071e7298e46008f9d380302af"
 
 [[package]]
 name = "wasm-streams"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d1ec4f6517c9e11ae630e200b2b65d193279042e28edd4a2cda233e46670bbb"
+dependencies = [
+ "futures-util",
+ "js-sys",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
+name = "wasm-streams"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7d3be8814f5ba5f074491a469eed3d73c273ffad955f25ed1635efac4b0d269"
@@ -6898,7 +6918,7 @@ dependencies = [
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
- "wasm-streams",
+ "wasm-streams 0.6.0",
  "web-sys",
  "worker-macros",
  "worker-sys",
