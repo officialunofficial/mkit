@@ -6,10 +6,11 @@
 #
 #   tag <repo> <digest> <tag>...
 #       Fetch the manifest at <digest>, check its bytes hash to <digest>, and
-#       PUT those exact bytes under each <tag>; then check each tag resolves
-#       to <digest>. A tag therefore never names anything but the signed
-#       digest (a re-serializing tool could change it). Needs GITHUB_ACTOR
-#       and GITHUB_TOKEN (packages: write).
+#       PUT those exact bytes under each <tag> in order, checking each tag
+#       resolves to <digest>; prints `tagged <tag>` for each one applied and
+#       stops at the first failure. A tag therefore never names anything but
+#       the signed digest (a re-serializing tool could change it). Needs
+#       GITHUB_ACTOR and GITHUB_TOKEN (packages: write).
 #   check-public <repo> <digest>
 #       Resolve <digest> with an anonymous token: exits 0 when anyone can
 #       pull the image, 1 when not (the package is still private).
@@ -31,23 +32,33 @@ sha256_of() {
   fi
 }
 
+# Credentials never go on curl's command line, where the process list
+# would show them: curl reads them as a config file on stdin (`-K -`;
+# printf is a shell builtin, so they are not in any argv either).
+
 # A bearer token for <repo> with <scope>, as GITHUB_ACTOR when <auth> is
 # "user", else anonymous.
 token() {
   local repo="$1" scope="$2" auth="$3" url
   url="${REGISTRY}/token?service=ghcr.io&scope=repository:${repo}:${scope}"
   if [ "$auth" = user ]; then
-    curl -fsS -u "${GITHUB_ACTOR:?}:${GITHUB_TOKEN:?}" "$url" | jq -er .token
+    printf 'user = "%s:%s"\n' "${GITHUB_ACTOR:?}" "${GITHUB_TOKEN:?}" | curl -fsS -K - "$url" | jq -er .token
   else
     curl -fsS "$url" | jq -er .token
   fi
 }
 
+# curl with `Authorization: Bearer <token>` ($1), then curl's arguments.
+curl_bearer() {
+  local tok="$1"
+  shift
+  printf 'header = "Authorization: Bearer %s"\n' "$tok" | curl -K - "$@"
+}
+
 # The Docker-Content-Digest a HEAD of manifests/<ref> answers.
 resolve() {
   local repo="$1" ref="$2" tok="$3"
-  curl -fsSI -H "Authorization: Bearer ${tok}" -H "Accept: ${ACCEPT}" \
-    "${REGISTRY}/v2/${repo}/manifests/${ref}" \
+  curl_bearer "$tok" -fsSI -H "Accept: ${ACCEPT}" "${REGISTRY}/v2/${repo}/manifests/${ref}" \
     | tr -d '\r' | awk 'tolower($1) == "docker-content-digest:" { print $2 }'
 }
 
@@ -62,20 +73,19 @@ case "$CMD" in
     TOK="$(token "$REPO" pull,push user)"
     WORK="$(mktemp -d)"
     trap 'rm -rf "$WORK"' EXIT
-    curl -fsS -D "${WORK}/headers" -o "${WORK}/manifest" \
-      -H "Authorization: Bearer ${TOK}" -H "Accept: ${ACCEPT}" \
-      "${REGISTRY}/v2/${REPO}/manifests/${DIGEST}"
+    curl_bearer "$TOK" -fsS -D "${WORK}/headers" -o "${WORK}/manifest" \
+      -H "Accept: ${ACCEPT}" "${REGISTRY}/v2/${REPO}/manifests/${DIGEST}"
     TYPE="$(tr -d '\r' < "${WORK}/headers" | awk 'tolower($1) == "content-type:" { print $2 }')"
     [ -n "$TYPE" ] || die "no Content-Type for ${REPO}@${DIGEST}"
     GOT="sha256:$(sha256_of "${WORK}/manifest")"
     [ "$GOT" = "$DIGEST" ] || die "the manifest fetched for ${DIGEST} hashes to ${GOT}"
     for TAG in "$@"; do
       [[ "$TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] || die "bad tag '${TAG}'"
-      curl -fsS -X PUT -H "Authorization: Bearer ${TOK}" -H "Content-Type: ${TYPE}" \
+      curl_bearer "$TOK" -fsS -X PUT -H "Content-Type: ${TYPE}" \
         --data-binary "@${WORK}/manifest" "${REGISTRY}/v2/${REPO}/manifests/${TAG}" > /dev/null
       AT="$(resolve "$REPO" "$TAG" "$TOK")"
       [ "$AT" = "$DIGEST" ] || die "tag ${TAG} resolves to '${AT}', not ${DIGEST}"
-      echo "ghcr.io/${REPO}:${TAG} -> ${DIGEST}"
+      echo "tagged ${TAG}"
     done
     ;;
   check-public)

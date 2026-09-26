@@ -895,6 +895,7 @@ jobs:
       contents: read
       packages: write       # add tags to the image
     outputs:
+      wanted: ${{ steps.tag.outputs.wanted }}
       tags: ${{ steps.tag.outputs.tags }}
       public: ${{ steps.public.outputs.public }}
     env:
@@ -915,14 +916,23 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
           TAGS=("${VERSION}")
           if [ "${NEWEST_OF_MINOR}" = "true" ]; then
-            [[ "${VERSION}" =~ ^([0-9]+)\.([0-9]+)\.[0-9]+$ ]]
+            [[ "${VERSION}" =~ ^([0-9]+)\.([0-9]+)\.[0-9]+$ ]] || exit 1
             TAGS+=("${BASH_REMATCH[1]}.${BASH_REMATCH[2]}")
           fi
-          bash scripts/ghcr-image.sh tag "${IMAGE_NAME#ghcr.io/}" "${DIGEST}" "${TAGS[@]}"
-          echo "tags=${TAGS[*]}" >> "$GITHUB_OUTPUT"
+          # `wanted` and `tags` (the ones actually applied) are both output
+          # even when tagging fails part-way, so the notes can say which.
+          LOG="${RUNNER_TEMP}/tag.log"
+          bash scripts/ghcr-image.sh tag "${IMAGE_NAME#ghcr.io/}" "${DIGEST}" "${TAGS[@]}" | tee "${LOG}"
+          STATUS="${PIPESTATUS[0]}"
+          APPLIED="$(sed -n 's/^tagged //p' "${LOG}" | tr '\n' ' ' | sed 's/ $//')"
+          {
+            echo "wanted=${TAGS[*]}"
+            echo "tags=${APPLIED}"
+          } >> "$GITHUB_OUTPUT"
+          exit "${STATUS}"
 
       - name: Check anonymous pull
         id: public
@@ -1071,6 +1081,7 @@ jobs:
           PUSHED: ${{ needs.container.result }}
           SIGNED: ${{ needs.container-sign.result }}
           TAGGED: ${{ needs.container-tag.result }}
+          WANTED: ${{ needs.container-tag.outputs.wanted }}
           TAGS: ${{ needs.container-tag.outputs.tags }}
           PUBLIC: ${{ needs.container-tag.outputs.public }}
           DIGEST: ${{ needs.container.outputs.digest }}
@@ -1081,17 +1092,34 @@ jobs:
           if ! [[ "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
             DIGEST=""
           fi
+          # A space-separated tag list as `a`, `b`.
+          quote_tags() { local t="$1"; echo "\`${t// /\`, \`}\`"; }
           if [ "${SIGNED}" = "success" ] && [ -n "${DIGEST}" ]; then
-            if [ "${TAGGED}" = "success" ]; then
-              PULL="__IMAGE__:__VERSION__@__DIGEST__"
-              STATE="Tags: \`${TAGS// /\`, \`}\` (no \`latest\`)."
-              if [ "${PUBLIC}" != "true" ]; then
-                STATE="${STATE} When this release was published the package was not yet public, so pulls needed \`docker login ghcr.io\`."
-              fi
-            else
-              PULL="__IMAGE__@__DIGEST__"
+            # Which of the wanted tags were applied (container-tag reports
+            # them even when it fails part-way).
+            MISSING=""
+            for T in ${WANTED}; do
+              case " ${TAGS} " in
+                *" ${T} "*) ;;
+                *) MISSING="${MISSING:+${MISSING} }${T}" ;;
+              esac
+            done
+            if [ -z "${WANTED}" ]; then
               STATE="**Tagging failed:** the image is signed but has no tag; pull it by digest."
+            elif [ -z "${TAGS}" ]; then
+              STATE="**Tagging failed:** the image is signed but has no tag (wanted $(quote_tags "${WANTED}")); pull it by digest."
+            elif [ -n "${MISSING}" ]; then
+              STATE="**Tagging partly failed:** tagged $(quote_tags "${TAGS}"); not tagged: $(quote_tags "${MISSING}")."
+            else
+              STATE="Tags: $(quote_tags "${TAGS}") (no \`latest\`)."
             fi
+            if [ "${PUBLIC}" = "false" ]; then
+              STATE="${STATE} When this release was published the package was not yet public, so pulls needed \`docker login ghcr.io\`."
+            fi
+            case " ${TAGS} " in
+              *" ${VERSION} "*) PULL="__IMAGE__:__VERSION__@__DIGEST__" ;;
+              *) PULL="__IMAGE__@__DIGEST__" ;;
+            esac
             sed -e "s|__STATE__|${STATE}|" -e "s|__PULL__|${PULL}|g" \
               -e "s|__IMAGE__|${IMAGE_NAME}|g" -e "s|__DIGEST__|${DIGEST}|g" -e "s|__VERSION__|${VERSION}|g" \
               > "${NOTES}" <<'NOTES_EOF'

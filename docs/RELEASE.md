@@ -113,8 +113,11 @@ allowlisted release fingerprint, and points at a commit reachable from
      Before pushing, it builds both platforms and runs the amd64 image
      ([`scripts/check-server-image.sh`](../scripts/check-server-image.sh)).
      It pushes **by digest only**, with no tag, then pulls each platform
-     back and checks its `/usr/local/bin/mkit-server` against the
-     archive's `SHA256SUMS`
+     back and checks it is the pinned base's layers plus exactly the two
+     `COPY` layers (holding only the binary and the licenses), with the
+     expected config (user, entrypoint, cmd, ports, the base's env), and
+     that its `/usr/local/bin/mkit-server` matches the archive's
+     `SHA256SUMS`
      ([`scripts/verify-server-image-binaries.sh`](../scripts/verify-server-image-binaries.sh)).
    - `container-sign` (`id-token: write`; no checkout, no build, no docker
      action; it logs in with `cosign login`) signs the digest with cosign
@@ -214,8 +217,8 @@ image's config (user `65532:65532`, entrypoint `mkit-server serve`, the
 version label), and on the host's platform runs `mkit-server version`
 and `serve --help` and confirms there is no shell. With
 `MKIT_IMAGE_CHECK_RUN_ALL=1` and emulation (Docker Desktop has it) it runs
-both platforms. Last, `scripts/verify-server-image-binaries.sh` copies each
-image's binary out and compares it with the archive's `SHA256SUMS`, as the
+both platforms. Last, `scripts/verify-server-image-binaries.sh` checks each
+image's layers and config and compares its binary with the archive's `SHA256SUMS`, as the
 release does on the pushed digest.
 
 The binaries must be built the way `release.yml` builds them, on a glibc
