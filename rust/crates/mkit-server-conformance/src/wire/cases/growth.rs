@@ -14,8 +14,15 @@
 //!
 //! The bound is absolute. The probe's per-write growth is measured before
 //! the load, and the partition must come back to at most its pre-load size
-//! plus that growth per trigger plus 10% of the load. A server that never
-//! prunes keeps the whole load and fails, however many triggers it sees.
+//! plus that growth per trigger plus the load's lasting rows. When the
+//! stats hook reports `keys`, the bound is on the exact key count: the load
+//! may leave only its two refs, so even one leaked index row per record
+//! fails. Otherwise it falls back to bytes, with 10% of the load as slack.
+//! A server that never prunes keeps the whole load and fails, however many
+//! triggers it sees.
+//!
+//! The case needs a disposable server: other records expiring on the same
+//! partition would be pruned during calibration and skew the measurement.
 
 use std::time::Duration;
 
@@ -42,8 +49,36 @@ const MAX_TRIGGERS: u32 = 256;
 /// Probe writes per quota window the case needs.
 const PROBE_WRITES: u32 = 1 + CALIBRATE + MAX_TRIGGERS;
 
-/// `bytes` from the stats endpoint.
-async fn stats_bytes(ctx: &Ctx) -> Result<u64, Failure> {
+/// Keys the load leaves for good: its two refs (`load`, `last`).
+const LASTING_KEYS: u64 = 2;
+
+/// One stats reading.
+#[derive(Debug, Clone, Copy)]
+struct Stats {
+    bytes: u64,
+    keys: Option<u64>,
+}
+
+/// What the bound counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Unit {
+    Keys,
+    Bytes,
+}
+
+impl Stats {
+    fn get(self, unit: Unit) -> Result<u64, Failure> {
+        match unit {
+            Unit::Bytes => Ok(self.bytes),
+            Unit::Keys => self
+                .keys
+                .ok_or_else(|| Failure::Fail(format!("GET {STATS_PATH}: `keys` went missing"))),
+        }
+    }
+}
+
+/// The stats endpoint's reading.
+async fn stats(ctx: &Ctx) -> Result<Stats, Failure> {
     let reply = ctx.client().get(STATS_PATH).await?;
     ensure!(
         reply.status == 200,
@@ -52,9 +87,12 @@ async fn stats_bytes(ctx: &Ctx) -> Result<u64, Failure> {
     );
     let json: serde_json::Value = serde_json::from_slice(&reply.body)
         .map_err(|e| format!("GET {STATS_PATH}: not JSON: {e}"))?;
-    json.get("bytes")
+    let bytes = json
+        .get("bytes")
         .and_then(serde_json::Value::as_u64)
-        .ok_or_else(|| Failure::Fail(format!("GET {STATS_PATH}: no `bytes` in {json}")))
+        .ok_or_else(|| Failure::Fail(format!("GET {STATS_PATH}: no `bytes` in {json}")))?;
+    let keys = json.get("keys").and_then(serde_json::Value::as_u64);
+    Ok(Stats { bytes, keys })
 }
 
 /// A signed `UpdateRef(<ns>/<leaf>, exp, A)` by `signer`, valid for
@@ -90,18 +128,24 @@ pub(super) async fn replay_and_quota_pruned(ctx: Ctx) -> CaseResult {
         send(&ctx, &write(&ctx, &probe, "probe", Exp::Any)).await?,
         "probe write",
     )?;
-    let calibrating = stats_bytes(&ctx).await?;
+    let first = stats(&ctx).await?;
+    let unit = if first.keys.is_some() {
+        Unit::Keys
+    } else {
+        Unit::Bytes
+    };
+    let calibrating = first.get(unit)?;
     for i in 0..CALIBRATE {
         let s = write(&ctx, &probe, "probe", Exp::Any);
         want_ok(send(&ctx, &s).await?, &format!("calibration write {i}"))?;
     }
-    let before = stats_bytes(&ctx).await?;
+    let before = stats(&ctx).await?.get(unit)?;
     // A server holding other expired records may prune some of them here,
     // which would understate this: run the case on a disposable server.
     ensure!(
         before > calibrating,
-        "calibration saw no growth ({calibrating} -> {before} bytes): other records were pruned \
-         meanwhile; run on a fresh server"
+        "calibration saw no growth ({calibrating} -> {before} {unit:?}): other records were \
+         pruned meanwhile; run on a fresh server"
     );
     let per_probe = (before - calibrating) as f64 / f64::from(CALIBRATE);
 
@@ -115,10 +159,10 @@ pub(super) async fn replay_and_quota_pruned(ctx: Ctx) -> CaseResult {
     }
     let last = write(&ctx, &ctx.v2_signer("load-last")?, "last", Exp::Missing);
     want_ok(send(&ctx, &last).await?, "the last load write")?;
-    let loaded = stats_bytes(&ctx).await?;
+    let loaded = stats(&ctx).await?.get(unit)?;
     ensure!(
         loaded > before,
-        "no growth under load: {before} -> {loaded} bytes"
+        "no growth under load: {before} -> {loaded} {unit:?}"
     );
     // Lower bound: before its expiry the record still answers its replay.
     want_ok(
@@ -131,24 +175,28 @@ pub(super) async fn replay_and_quota_pruned(ctx: Ctx) -> CaseResult {
     tokio::time::sleep(Duration::from_millis(u64::try_from(wait_ms).unwrap_or(0))).await;
     ensure!(now_ms() >= signed_at + wait_ms, "suite bug: short sleep");
 
-    let slack = 0.1 * (loaded - before) as f64;
+    let slack = match unit {
+        Unit::Keys => LASTING_KEYS as f64,
+        Unit::Bytes => 0.1 * (loaded - before) as f64,
+    };
+    let bound = |t: u32| before as f64 + f64::from(t) * per_probe + slack;
     let mut now = loaded;
     for t in 1..=MAX_TRIGGERS {
         let s = write(&ctx, &probe, "probe", Exp::Any);
         want_ok(send(&ctx, &s).await?, &format!("trigger write {t}"))?;
-        now = stats_bytes(&ctx).await?;
-        let bound = before as f64 + f64::from(t) * per_probe + slack;
-        if now as f64 <= bound {
+        now = stats(&ctx).await?.get(unit)?;
+        if now as f64 <= bound(t) {
             ctx.set_note(format!(
-                "{before} -> {loaded} bytes under load; {now} after {t} trigger writes \
-                 (bound {bound:.0})"
+                "{unit:?}: {before} -> {loaded} under load; {now} after {t} trigger writes \
+                 (bound {:.0})",
+                bound(t)
             ));
             return Ok(());
         }
     }
-    let bound = before as f64 + f64::from(MAX_TRIGGERS) * per_probe + slack;
     Err(Failure::Fail(format!(
-        "not pruned: {before} -> {loaded} bytes under load, {now} after {MAX_TRIGGERS} \
-         trigger writes {wait_ms} ms later, bound {bound:.0} ({per_probe:.0} bytes per probe write)"
+        "not pruned ({unit:?}): {before} -> {loaded} under load, {now} after {MAX_TRIGGERS} \
+         trigger writes {wait_ms} ms later, bound {:.0} ({per_probe:.1} per probe write)",
+        bound(MAX_TRIGGERS)
     )))
 }

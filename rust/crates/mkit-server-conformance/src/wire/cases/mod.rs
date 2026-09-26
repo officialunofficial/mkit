@@ -726,15 +726,24 @@ impl Ctx {
         &self,
         id: &[u8],
     ) -> Result<StreamReply<DownloadPackResponse>, Failure> {
+        let (body, headers) = self.download_call(id);
+        Ok(self
+            .client
+            .stream(Rpc::DownloadPack, body, &headers)
+            .await?)
+    }
+
+    /// A `DownloadPack(id)` request body (one framed message) and its
+    /// headers. A signed read commits to that exact body, envelope
+    /// included (SPEC-WRITE-GRANTS §9.2).
+    fn download_call(&self, id: &[u8]) -> (Vec<u8>, Vec<(String, String)>) {
         let req = DownloadPackRequest {
             pack_id: Some(id.to_vec()),
             ..Default::default()
         };
-        let headers = self.auth_headers(Rpc::DownloadPack, Commit::Body(&[]));
-        Ok(self
-            .client
-            .stream(Rpc::DownloadPack, frame(&req.encode_to_vec()), &headers)
-            .await?)
+        let body = frame(&req.encode_to_vec());
+        let headers = self.auth_headers(Rpc::DownloadPack, Commit::Body(&body));
+        (body, headers)
     }
 
     /// Download pack `id` and check the §6.2 shape: one header, then chunks
@@ -823,4 +832,35 @@ pub(crate) fn want_outcome(got: Result<i32, RpcError>, want: AdvanceOutcome) -> 
         outcome_name(got)
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signed_download_commits_to_the_framed_request() {
+        let mut profile = Profile::new(WireAuth::AuthV2 {
+            audience: "https://a.test".into(),
+            repository: "r".into(),
+            seed: [1; 32],
+        });
+        profile.sign_reads = true;
+        let client = Client::new(&"https://a.test".parse().unwrap()).unwrap();
+        let ctx = Ctx::new(client, Arc::new(profile), "unit");
+        let (body, headers) = ctx.download_call(&[7; 32]);
+        let req = DownloadPackRequest {
+            pack_id: Some(vec![7; 32]),
+            ..Default::default()
+        };
+        assert_eq!(body, frame(&req.encode_to_vec()));
+        let get = |name: &str| {
+            headers
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, v)| v.clone())
+        };
+        assert_eq!(get("x-content-commitment"), Some(body_commitment(&body)));
+        assert_eq!(get("x-digest"), Some(to_hex(&hash(&body))));
+    }
 }

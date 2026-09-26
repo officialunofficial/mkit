@@ -79,7 +79,7 @@
 //! | `refs.list_prefix_stripped` | | `ListRefs` strips the prefix and sorts (SPEC-REFS §4, §4.1) |
 //! | `refs.list_prefix_component_boundary` | | a prefix matches at `/` boundaries only, with or without the trailing `/` (SPEC-REFS §4) |
 //! | `refs.list_invalid_prefix_invalid_argument` | | SPEC-REFS §4.2 |
-//! | `refs.concurrent_missing_one_winner` | | 24 racing `MISSING` creates: one wins, the rest `failed_precondition`, the ref holds the winner (SPEC-REFS §7) |
+//! | `refs.concurrent_missing_one_winner` | | 3 rounds of 24 racing `MISSING` creates: one wins, the rest `failed_precondition`, the ref holds the winner (SPEC-REFS §7) |
 //! | `refs.concurrent_match_one_winner` | | the same for `MATCH` |
 //! | `advance.committed` | | both refs move |
 //! | `advance.head_conflict_typed` | | `HEAD_CONFLICT` is a response, not an error; head unchanged |
@@ -87,7 +87,7 @@
 //! | `advance.atomic_both_untouched` | `atomic-advance` | a head conflict leaves the packmap unchanged too |
 //! | `advance.nonatomic_packmap_first` | not `atomic-advance` | a head conflict leaves the packmap advanced (§4 fallback order) |
 //! | `advance.unspecified_invalid_argument` | | unset expectations, short ids |
-//! | `advance.concurrent_one_committed` | | 24 racing advances: one `COMMITTED`, the rest typed conflicts, both refs at the winner |
+//! | `advance.concurrent_one_committed` | | 3 rounds of 24 racing advances: one `COMMITTED`, the rest typed conflicts, both refs at the winner |
 //! | `packs.exists_false_then_true` | | `PackExists` before and after an upload |
 //! | `packs.pack_id_wrong_length_invalid_argument` | | on `PackExists` and `DownloadPack` |
 //! | `upload.roundtrip_multi_chunk` | | 3 chunks up; the download matches bytes and BLAKE3 |
@@ -144,7 +144,14 @@
 //! (shift its business clock for that request) and serves
 //! `GET` [`STATS_PATH`] as `{"bytes": <u64>, "keys": <u64 or null>}` for
 //! the partition that holds the repository's replay records and quota
-//! windows. Release builds do neither.
+//! windows. Release builds do neither. Report `keys` when you can: the
+//! growth case then bounds the exact key count instead of bytes.
+//!
+//! `growth.replay_and_quota_pruned` needs a **disposable server**: a fresh
+//! one, or one no other client writes to, with nothing else expiring on
+//! that partition. It measures growth and pruning by the partition's total,
+//! so other traffic, or other records being pruned during its calibration,
+//! skews the measurement.
 //!
 //! # Reserved cases (M1–M5)
 //!

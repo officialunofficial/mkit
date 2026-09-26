@@ -83,7 +83,9 @@ struct WireArgs {
     #[arg(long, value_name = "M")]
     milestone: Option<String>,
     /// Add features to the derived set, or remove one with a leading `-`
-    /// (comma-separated, e.g. test-faults,-replay).
+    /// (comma-separated, e.g. health,test-faults,-replay). With
+    /// test-faults and a declared short quota window, the growth case runs:
+    /// it needs a disposable server (fresh, no other writers).
     #[arg(
         long,
         value_name = "A,B",

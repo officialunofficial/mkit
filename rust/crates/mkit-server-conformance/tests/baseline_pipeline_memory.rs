@@ -13,11 +13,13 @@
 
 mod common;
 
-use std::sync::Arc;
+use std::collections::BTreeSet;
+use std::sync::{Arc, Mutex};
 
 use mkit_server::auth_v2::AuthV2Config;
 use mkit_server::pipeline::{AuthMode, Hooks, Pipeline, PipelineConfig};
 use mkit_server::quota::QuotaLimits as ServerQuota;
+use mkit_server::store::keys::ParsedKey;
 use mkit_server::upload::UploadLimits;
 use mkit_server::{
     Addressing, Batch, BatchOutcome, Cursor, Key, MemoryBlobStore, MemoryKv, NamespaceKey,
@@ -47,6 +49,14 @@ const PIPELINE_DIVERGENCES: &[(&str, &str)] = &[(
      flight (mkit#1120). The assertion is the spec's.",
 )];
 
+/// A replay-expiry or quota-window index key.
+fn is_index(key: &Key) -> bool {
+    matches!(
+        mkit_server::store::keys::parse(key),
+        Some(ParsedKey::ReplayExpiry { .. } | ParsedKey::QuotaWindow { .. })
+    )
+}
+
 /// How the store under the pipeline is broken, for the mutant tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mutant {
@@ -57,12 +67,16 @@ enum Mutant {
     ReadThenWrite,
     /// Drops every delete: nothing is ever pruned.
     NoPrune,
+    /// Prunes records but leaks their expiry-index rows (`px`, `qx`): the
+    /// delete is dropped and the row hidden from scans, so pruning goes on
+    /// while the rows pile up.
+    LeakIndex,
 }
 
 /// A memory store shared with the test (for the stats endpoint), maybe
 /// broken.
 #[derive(Clone)]
-struct Shared(Arc<MemoryKv>, Mutant);
+struct Shared(Arc<MemoryKv>, Mutant, Arc<Mutex<BTreeSet<Key>>>);
 
 impl Shared {
     /// [`Mutant::ReadThenWrite`]: check, yield, write.
@@ -116,13 +130,26 @@ impl NamespaceStore for Shared {
         after: Option<&Cursor>,
         limit: u32,
     ) -> Result<ScanPage, StoreError> {
-        self.0.scan(p, start, end, after, limit).await
+        let mut page = self.0.scan(p, start, end, after, limit).await?;
+        let leaked = self.2.lock().unwrap();
+        page.entries.retain(|(k, _)| !leaked.contains(k));
+        Ok(page)
     }
     async fn apply(&self, p: &Partition, mut batch: Batch) -> Result<BatchOutcome, StoreError> {
         match self.1 {
             Mutant::None => {}
             Mutant::ReadThenWrite => return self.racy_apply(p, batch).await,
             Mutant::NoPrune => batch.writes.retain(|w| matches!(w, Write::Put(..))),
+            Mutant::LeakIndex => {
+                let mut leaked = self.2.lock().unwrap();
+                batch.writes.retain(|w| match w {
+                    Write::Delete(k) if is_index(k) => {
+                        leaked.insert(k.clone());
+                        false
+                    }
+                    _ => true,
+                });
+            }
         }
         self.0.apply(p, batch).await
     }
@@ -161,7 +188,8 @@ async fn serve_mutant(
     let mut cfg = PipelineConfig::new(Addressing::Single { repo }, auth(&origin), limits);
     cfg.write_quota = quota;
     let clock = Arc::new(SystemClock);
-    let meta = Shared(Arc::new(MemoryKv::with_clock(clock.clone())), mutant);
+    let kv = Arc::new(MemoryKv::with_clock(clock.clone()));
+    let meta = Shared(kv, mutant, Arc::default());
     let pipe = Pipeline::new(
         MemoryBlobStore::default(),
         meta.clone(),
@@ -329,5 +357,14 @@ async fn mutant_read_then_write_fails_concurrent_cas() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn mutant_no_prune_fails_growth() {
     let target = serve_test_faults(Mutant::NoPrune).await;
+    must_fail(&target, &["growth.replay_and_quota_pruned"]).await;
+}
+
+/// A store that prunes records but leaks their index rows: the growth
+/// case's exact key-count bound must catch it.
+#[cfg(feature = "test-faults")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mutant_index_leak_fails_growth() {
+    let target = serve_test_faults(Mutant::LeakIndex).await;
     must_fail(&target, &["growth.replay_and_quota_pruned"]).await;
 }

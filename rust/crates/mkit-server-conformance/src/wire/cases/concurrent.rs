@@ -5,7 +5,9 @@
 //! (read-then-write) lets several win.
 //!
 //! Each racer is a distinct operation (its own id and, under auth v2, its
-//! own signer), never a replay of another.
+//! own signer), never a replay of another. Each case races [`ROUNDS`]
+//! times, on a fresh ref each round, so a narrow race window has several
+//! chances to show.
 
 use futures::future::join_all;
 use mkit_core::hash::hash;
@@ -14,17 +16,25 @@ use mkit_transport_connect::generated::{AdvanceOutcome, AdvanceRefsResponse, Upd
 use super::{A, CaseResult, Ctx, Exp, Failure, advance_req, ensure, update_req, want_outcome};
 use crate::wire::client::{Rpc, RpcError};
 
-/// Racers per case.
+/// Racers per round.
 const RACERS: usize = 24;
+/// Rounds per case, each with the same assertions.
+const ROUNDS: usize = 3;
 
-/// Racer `i`'s new id.
-fn racer_id(i: usize) -> [u8; 32] {
-    hash(&(i as u64).to_be_bytes())
+/// Racer `i`'s new id in round `round`.
+fn racer_id(round: usize, i: usize) -> [u8; 32] {
+    hash(format!("{round}/{i}").as_bytes())
+}
+
+/// Racer `i`'s signer label in round `round`.
+fn racer_label(round: usize, i: usize) -> String {
+    format!("racer{round}-{i}")
 }
 
 /// The one winner among `results` (`Ok` = won); every loser must carry
 /// `conflict`.
 fn one_winner<T>(
+    round: usize,
     results: Vec<Result<Result<T, RpcError>, String>>,
     conflict: &str,
 ) -> Result<usize, Failure> {
@@ -35,62 +45,75 @@ fn one_winner<T>(
             Err(e) if e.code == conflict => {}
             Err(e) => {
                 return Err(Failure::Fail(format!(
-                    "racer {i}: expected ok or {conflict}, got {e}"
+                    "round {round}, racer {i}: expected ok or {conflict}, got {e}"
                 )));
             }
         }
     }
     ensure!(
         winners.len() == 1,
-        "{} racers won (racers {winners:?}), want exactly 1",
+        "round {round}: {} racers won (racers {winners:?}), want exactly 1",
         winners.len()
     );
     Ok(winners[0])
 }
 
-async fn race_update(ctx: &Ctx, exp: Exp<'_>) -> Result<usize, Failure> {
-    let name = ctx.head("main");
+/// Race `RACERS` updates of `<ns>/main-r<round>` under `exp`.
+async fn race_update(ctx: &Ctx, round: usize, exp: Exp<'_>) -> CaseResult {
+    let name = ctx.head(&format!("main-r{round}"));
     let racers = (0..RACERS).map(|i| {
-        let req = update_req(&name, exp, &racer_id(i));
-        let label = format!("racer{i}");
+        let req = update_req(&name, exp, &racer_id(round, i));
+        let label = racer_label(round, i);
         async move {
             ctx.call_as::<UpdateRefResponse>(&label, Rpc::UpdateRef, &req)
                 .await
         }
     });
-    let winner = one_winner(join_all(racers).await, "failed_precondition")?;
-    ctx.expect_ref(&name, Some(&racer_id(winner))).await?;
-    Ok(winner)
+    let winner = one_winner(round, join_all(racers).await, "failed_precondition")?;
+    ctx.expect_ref(&name, Some(&racer_id(round, winner))).await
 }
 
 pub(super) async fn missing_one_winner(ctx: Ctx) -> CaseResult {
-    race_update(&ctx, Exp::Missing).await.map(|_| ())
+    for round in 0..ROUNDS {
+        race_update(&ctx, round, Exp::Missing).await?;
+    }
+    Ok(())
 }
 
 pub(super) async fn match_one_winner(ctx: Ctx) -> CaseResult {
-    ctx.set(&ctx.head("main"), Exp::Missing, &A).await?;
-    race_update(&ctx, Exp::Match(&A)).await.map(|_| ())
+    for round in 0..ROUNDS {
+        ctx.set(&ctx.head(&format!("main-r{round}")), Exp::Missing, &A)
+            .await?;
+        race_update(&ctx, round, Exp::Match(&A)).await?;
+    }
+    Ok(())
 }
 
 /// All racers advance from A; exactly one is `COMMITTED`, the rest are
 /// typed conflicts (never errors), and head and packmap both end at the
 /// winner's id.
 pub(super) async fn advance_one_committed(ctx: Ctx) -> CaseResult {
-    let (head, packmap) = (ctx.head("main"), ctx.packmap("main"));
+    for round in 0..ROUNDS {
+        advance_round(&ctx, round).await?;
+    }
+    Ok(())
+}
+
+async fn advance_round(ctx: &Ctx, round: usize) -> CaseResult {
+    let leaf = format!("main-r{round}");
+    let (head, packmap) = (ctx.head(&leaf), ctx.packmap(&leaf));
     let seed = advance_req((&head, Exp::Missing, &A), (&packmap, Exp::Missing, &A));
     want_outcome(
         ctx.advance(&seed).await?,
         AdvanceOutcome::ADVANCE_OUTCOME_COMMITTED,
     )?;
-    let racer_ctx = &ctx;
     let racers = (0..RACERS).map(|i| {
-        let ctx = racer_ctx;
-        let id = racer_id(i);
+        let id = racer_id(round, i);
         let req = advance_req(
             (&head, Exp::Match(&A), &id),
             (&packmap, Exp::Match(&A), &id),
         );
-        let label = format!("racer{i}");
+        let label = racer_label(round, i);
         async move {
             let got: Result<AdvanceRefsResponse, RpcError> =
                 ctx.call_as(&label, Rpc::AdvanceRefs, &req).await?;
@@ -109,23 +132,23 @@ pub(super) async fn advance_one_committed(ctx: Ctx) -> CaseResult {
             Ok(o) if conflicts.contains(&o) => {}
             Ok(o) => {
                 return Err(Failure::Fail(format!(
-                    "racer {i}: outcome {}",
+                    "round {round}, racer {i}: outcome {}",
                     super::outcome_name(o)
                 )));
             }
             Err(e) => {
                 return Err(Failure::Fail(format!(
-                    "racer {i}: a conflict must be an outcome, got {e}"
+                    "round {round}, racer {i}: a conflict must be an outcome, got {e}"
                 )));
             }
         }
     }
     ensure!(
         winners.len() == 1,
-        "{} racers committed (racers {winners:?}), want exactly 1",
+        "round {round}: {} racers committed (racers {winners:?}), want exactly 1",
         winners.len()
     );
-    let id = racer_id(winners[0]);
+    let id = racer_id(round, winners[0]);
     ctx.expect_ref(&head, Some(&id)).await?;
     ctx.expect_ref(&packmap, Some(&id)).await
 }
