@@ -2,4 +2,4 @@
 # Produced by `MKIT_WRITE_GOLDEN=1 cargo test -p mkit-attest --features grants --test golden_eth`
 # Every value is cross-checked against cast / viem / pycryptodome; see `cross_check` in each file.
 # Format: <name> <blake3-hex-of-file-bytes>
-eth-primitives 07091c6ccab07b08dce96217a73b64c0f62f308cd92c5512f670ee3fdc88e927
+eth-primitives 326e6d4544c3bdb99ef87992b8c03a835e85b6d8d724e239aaf59e830a6b9306

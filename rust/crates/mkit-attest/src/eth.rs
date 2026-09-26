@@ -8,8 +8,8 @@
 //!
 //! The module keeps two roles apart (SPEC-WRITE-GRANTS §4.4):
 //!
-//! * **Verifier** functions ([`recover_secp256k1`],
-//!   [`eip191_recover_address`], [`p256_check_raw_low_s`],
+//! * **Verifier** functions ([`eip191_recover_address`],
+//!   [`p256_check_raw_low_s`],
 //!   [`address_secp256k1`], [`address_p256`]) are strict: they reject
 //!   `v ∉ {27, 28}`, scalars outside `[1, n − 1]`, high-`s` signatures and
 //!   off-curve keys, and never normalize anything.
@@ -92,15 +92,15 @@ pub fn eip191_hash(statement: &[u8]) -> [u8; 32] {
 /// from a 65-byte `r ‖ s ‖ v` signature over `prehash`.
 ///
 /// `prehash` MUST be a Keccak-256 digest (see [`eip191_hash`]). Recovery
-/// from any other value "succeeds" with a meaningless key, so prefer
-/// [`eip191_recover_address`].
+/// from any other value "succeeds" with a meaningless key, so this stays
+/// crate-private and callers go through [`eip191_recover_address`].
 ///
 /// # Errors
 /// * [`EthError::RecoveryIdInvalid`] — `v ∉ {27, 28}`.
 /// * [`EthError::ScalarOutOfRange`] — `r` or `s` outside `[1, n − 1]`.
 /// * [`EthError::HighS`] — `s > n / 2` (never normalized).
 /// * [`EthError::RecoveryFailed`] — no key recovers, or it does not verify.
-pub fn recover_secp256k1(prehash: &[u8; 32], sig: &[u8; 65]) -> Result<[u8; 64], EthError> {
+pub(crate) fn recover_secp256k1(prehash: &[u8; 32], sig: &[u8; 65]) -> Result<[u8; 64], EthError> {
     let is_y_odd = match sig[64] {
         27 => false,
         28 => true,
@@ -117,7 +117,10 @@ pub fn recover_secp256k1(prehash: &[u8; 32], sig: &[u8; 65]) -> Result<[u8; 64],
     let recid = RecoveryId::new(is_y_odd, false);
     let key = K256VerifyingKey::recover_from_prehash(prehash, &signature, recid)
         .map_err(|_| EthError::RecoveryFailed)?;
-    // Defense in depth: ecdsa 0.17's recovery does not re-verify.
+    // A correctly recovered key always verifies (by construction), so this
+    // never fires today. It guards against a future regression in the
+    // ecdsa/k256 recovery code, which does not re-verify in 0.17; it is not
+    // a defense against any known attack.
     key.verify_prehash(prehash, &signature)
         .map_err(|_| EthError::RecoveryFailed)?;
     let point = key.to_sec1_point(false);
@@ -126,11 +129,21 @@ pub fn recover_secp256k1(prehash: &[u8; 32], sig: &[u8; 65]) -> Result<[u8; 64],
     Ok(xy)
 }
 
-/// Verifier: [`eip191_hash`], then [`recover_secp256k1`], then
-/// [`address_secp256k1`].
+/// Verifier: the address (§4.1) of the secp256k1 key that produced the
+/// 65-byte `r ‖ s ‖ v` signature over [`eip191_hash`]`(statement)`.
+///
+/// A successful recovery is never authorization: any well-formed
+/// signature recovers *some* address. The caller MUST compare the returned
+/// address with the `0x` namespace it is authorizing (SPEC-WRITE-GRANTS
+/// §2) and reject on mismatch.
 ///
 /// # Errors
-/// As [`recover_secp256k1`] and [`address_secp256k1`].
+/// * [`EthError::RecoveryIdInvalid`] — `v ∉ {27, 28}`.
+/// * [`EthError::ScalarOutOfRange`] — `r` or `s` outside `[1, n − 1]`.
+/// * [`EthError::HighS`] — `s > n / 2` (never normalized).
+/// * [`EthError::RecoveryFailed`] — no key recovers, or it does not verify.
+/// * [`EthError::InvalidPoint`] — the recovered key is not a curve point
+///   (unreachable in practice).
 pub fn eip191_recover_address(statement: &[u8], sig: &[u8; 65]) -> Result<Address, EthError> {
     let xy = recover_secp256k1(&eip191_hash(statement), sig)?;
     address_secp256k1(&xy)
@@ -264,6 +277,13 @@ mod tests {
     /// P-256 generator `G` (SEC 2 §2.4.2 / FIPS 186-4 D.1.2.3).
     const P256_G: &str = "6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296\
                           4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5";
+
+    /// secp256k1 `x = p + 1`, `y = sqrt(1 + 7) mod p`.
+    const K1_X_P_PLUS_1: &str = "fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc30\
+                                 4218f20ae6c646b363db68605822fb14264ca8d2587fdd6fbc750d587e76a7ee";
+    /// P-256 `x = p`, `y = sqrt(b) mod p`.
+    const P256_X_P: &str = "ffffffff00000001000000000000000000000000ffffffffffffffffffffffff\
+                            66485c780e2f83d72433bd5d84a06bb6541c2af31dae871728bf856a174f93f4";
 
     /// pycryptodome `DSS(deterministic-rfc6979, der)` P-256 signature,
     /// re-encoded with `s' = n − s` (high) via `DerSequence`.
@@ -451,6 +471,15 @@ mod tests {
         p[63] ^= 0x01;
         assert_eq!(address_p256(&p), Err(EthError::InvalidPoint));
 
+        // Non-canonical coordinates: `x ≥ p` whose reduction mod p IS on
+        // the curve (secp256k1 x = p + 1 ≡ 1, P-256 x = p ≡ 0, with the
+        // matching y computed in Python), so only the range check rejects.
+        assert_eq!(
+            address_secp256k1(&h(K1_X_P_PLUS_1)),
+            Err(EthError::InvalidPoint)
+        );
+        assert_eq!(address_p256(&h(P256_X_P)), Err(EthError::InvalidPoint));
+
         // Each curve's generator is not a point on the other curve.
         assert_eq!(address_p256(&h(&strip(K1_G))), Err(EthError::InvalidPoint));
         assert_eq!(
@@ -500,6 +529,47 @@ mod tests {
             p256_der_to_low_s_raw(&low_raw_bytes()),
             Err(EthError::InvalidDer)
         );
+    }
+
+    /// `SEQUENCE { r_tlv, s_tlv }` with a short-form length.
+    fn der_seq(r_tlv: &[u8], s_tlv: &[u8]) -> Vec<u8> {
+        let mut out = vec![0x30, u8::try_from(r_tlv.len() + s_tlv.len()).unwrap()];
+        out.extend_from_slice(r_tlv);
+        out.extend_from_slice(s_tlv);
+        out
+    }
+
+    #[test]
+    fn p256_der_rejects_malformed_integers_and_lengths() {
+        let low_der = hex::decode(strip(P256_DER_LOW_S)).unwrap();
+        let (r_tlv, s_tlv) = (&low_der[2..37], &low_der[37..]);
+        let r_body = &r_tlv[3..]; // 32 bytes, after `02 21 00`
+        let n: [u8; 32] = h(P256_N);
+
+        let negative = der_seq(&[0x02, 0x01, 0x80], s_tlv);
+        let mut wide = vec![0x02, 0x21, 0x01];
+        wide.extend_from_slice(r_body);
+        let too_wide = der_seq(&wide, s_tlv);
+        let r_zero = der_seq(&[0x02, 0x01, 0x00], s_tlv);
+        let mut r_n = vec![0x02, 0x21, 0x00];
+        r_n.extend_from_slice(&n);
+        let r_is_n = der_seq(&r_n, s_tlv);
+        let mut long_form = vec![0x30, 0x81, low_der[1]];
+        long_form.extend_from_slice(&low_der[2..]);
+
+        for (name, der) in [
+            ("negative integer", negative),
+            ("33-byte integer", too_wide),
+            ("r = 0", r_zero),
+            ("r = n", r_is_n),
+            ("long-form length", long_form),
+        ] {
+            assert_eq!(
+                p256_der_to_low_s_raw(&der),
+                Err(EthError::InvalidDer),
+                "{name}"
+            );
+        }
     }
 
     fn low_raw_bytes() -> Vec<u8> {

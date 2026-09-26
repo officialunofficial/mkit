@@ -29,12 +29,29 @@
       "y": "ae431632d8194b34e257b08cd0414ff123a0dc11155ee384b801b7fc180c1bb7"
     }
   ],
+  "address_invalid": [
+    {
+      "curve": "secp256k1",
+      "expected": "InvalidPoint",
+      "name": "x = p + 1 (reduces to x = 1)",
+      "x": "fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc30",
+      "y": "4218f20ae6c646b363db68605822fb14264ca8d2587fdd6fbc750d587e76a7ee"
+    },
+    {
+      "curve": "p256",
+      "expected": "InvalidPoint",
+      "name": "x = p (reduces to x = 0)",
+      "x": "ffffffff00000001000000000000000000000000ffffffffffffffffffffffff",
+      "y": "66485c780e2f83d72433bd5d84a06bb6541c2af31dae871728bf856a174f93f4"
+    }
+  ],
   "cross_check": {
     "address": "secp256k1: `cast wallet public-key` and `cast wallet address`; p256: pycryptodome ECC.construct(curve='P-256', d) then keccak(digest_bits=256) of x||y",
+    "address_invalid": "Python: x >= p, y = sqrt(x^3 + ax + b) of x mod p, so the reduced point is on the curve",
     "eip191": "digest: `cast hash-message` and viem hashMessage({raw}); signature: `cast wallet sign --private-key` (RFC 6979, low-S); address: viem recoverMessageAddress and `cast wallet verify`",
     "high_s": "Python n - s over the eip191 signatures; viem recoverMessageAddress on `normalized`",
     "keccak256": "Foundry cast 1.6.0-nightly `cast keccak 0x<input_hex>`; pycryptodome 3.23 keccak(digest_bits=256); sha3_256_negative via Python hashlib.sha3_256",
-    "p256_der": "pycryptodome DSS(deterministic-rfc6979, encoding='der'), then s -> n - s re-encoded with DerSequence"
+    "p256_der": "pycryptodome DSS(deterministic-rfc6979, encoding='der'), then s -> n - s re-encoded with DerSequence; each InvalidDer entry is rejected by pycryptodome's strict DER verify"
   },
   "eip191": [
     {
@@ -108,6 +125,31 @@
       "der": "3045022100907b70536a3d9eb8726087f33ea2f8ffb76bc9ed5caa4aec4f60a857687f6ab8022058316faa2f4d416b2736941776a8927dde5fa0012a6155854221fd4493bb11ad00",
       "expected": "InvalidDer",
       "name": "trailing-byte"
+    },
+    {
+      "der": "3025020180022058316faa2f4d416b2736941776a8927dde5fa0012a6155854221fd4493bb11ad",
+      "expected": "InvalidDer",
+      "name": "negative-integer"
+    },
+    {
+      "der": "3045022101907b70536a3d9eb8726087f33ea2f8ffb76bc9ed5caa4aec4f60a857687f6ab8022058316faa2f4d416b2736941776a8927dde5fa0012a6155854221fd4493bb11ad",
+      "expected": "InvalidDer",
+      "name": "33-byte-integer"
+    },
+    {
+      "der": "3025020100022058316faa2f4d416b2736941776a8927dde5fa0012a6155854221fd4493bb11ad",
+      "expected": "InvalidDer",
+      "name": "r-zero"
+    },
+    {
+      "der": "3045022100ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551022058316faa2f4d416b2736941776a8927dde5fa0012a6155854221fd4493bb11ad",
+      "expected": "InvalidDer",
+      "name": "r-equals-n"
+    },
+    {
+      "der": "308145022100907b70536a3d9eb8726087f33ea2f8ffb76bc9ed5caa4aec4f60a857687f6ab8022058316faa2f4d416b2736941776a8927dde5fa0012a6155854221fd4493bb11ad",
+      "expected": "InvalidDer",
+      "name": "long-form-length"
     }
   ],
   "sha3_256_negative": {

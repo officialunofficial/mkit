@@ -25,7 +25,7 @@ use k256::ecdsa::SigningKey as K256SigningKey;
 use mkit_attest::eth::{
     EthError, address_hex, address_p256, address_secp256k1, eip191_hash, eip191_message,
     eip191_recover_address, keccak256, normalize_eip191_signature, p256_check_raw_low_s,
-    p256_der_to_low_s_raw, recover_secp256k1,
+    p256_der_to_low_s_raw,
 };
 use mkit_attest::signer_p256::verify_p256;
 use p256::ecdsa::{Signature as P256Signature, SigningKey as P256SigningKey};
@@ -205,26 +205,74 @@ fn p256_der_entries() -> Vec<Value> {
     let mut trailing = low_der.to_vec();
     trailing.push(0x00);
 
-    vec![
-        json!({
-            "name": "high-s",
-            "message": P256_DER_MESSAGE,
-            "public_key": hex::encode(pubkey),
-            "der": hex::encode(high_der.as_bytes()),
-            "raw_low_s": hex::encode(raw),
-            "raw_high_s": hex::encode(high.to_bytes()),
-        }),
-        json!({
-            "name": "non-minimal-integer",
-            "der": hex::encode(non_minimal),
-            "expected": "InvalidDer",
-        }),
-        json!({
-            "name": "trailing-byte",
-            "der": hex::encode(trailing),
-            "expected": "InvalidDer",
-        }),
-    ]
+    // More strict-DER rejections, each built from the low-S signature's
+    // `r` / `s` TLVs (`r` TLV = `02 21 00 ‖ r`, `s` TLV = `02 20 ‖ s`).
+    let (r_tlv, s_tlv) = (&low_der[2..37], &low_der[37..]);
+    let seq = |r: &[u8]| {
+        let mut out = vec![0x30, u8::try_from(r.len() + s_tlv.len()).unwrap()];
+        out.extend_from_slice(r);
+        out.extend_from_slice(s_tlv);
+        out
+    };
+    let mut wide = vec![0x02, 0x21, 0x01];
+    wide.extend_from_slice(&r_tlv[3..]);
+    let mut r_n = vec![0x02, 0x21, 0x00];
+    r_n.extend_from_slice(&h32(P256_N));
+    let mut long_form = vec![0x30, 0x81, low_der[1]];
+    long_form.extend_from_slice(&low_der[2..]);
+    let rejected = [
+        ("non-minimal-integer", non_minimal),
+        ("trailing-byte", trailing),
+        ("negative-integer", seq(&[0x02, 0x01, 0x80])),
+        ("33-byte-integer", seq(&wide)),
+        ("r-zero", seq(&[0x02, 0x01, 0x00])),
+        ("r-equals-n", seq(&r_n)),
+        ("long-form-length", long_form),
+    ];
+
+    let mut entries = vec![json!({
+        "name": "high-s",
+        "message": P256_DER_MESSAGE,
+        "public_key": hex::encode(pubkey),
+        "der": hex::encode(high_der.as_bytes()),
+        "raw_low_s": hex::encode(raw),
+        "raw_high_s": hex::encode(high.to_bytes()),
+    })];
+    for (name, der) in rejected {
+        assert_eq!(
+            p256_der_to_low_s_raw(&der),
+            Err(EthError::InvalidDer),
+            "{name}"
+        );
+        entries.push(json!({ "name": name, "der": hex::encode(der), "expected": "InvalidDer" }));
+    }
+    entries
+}
+
+/// Non-canonical coordinates whose reduction mod p IS on the curve, so
+/// only the `x < p` range check rejects them (y = sqrt(x³ + ax + b) of the
+/// reduced x, computed in Python).
+fn address_invalid_entries() -> Vec<Value> {
+    let cases = [
+        (
+            "secp256k1",
+            "x = p + 1 (reduces to x = 1)",
+            "fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc30",
+            "4218f20ae6c646b363db68605822fb14264ca8d2587fdd6fbc750d587e76a7ee",
+        ),
+        (
+            "p256",
+            "x = p (reduces to x = 0)",
+            "ffffffff00000001000000000000000000000000ffffffffffffffffffffffff",
+            "66485c780e2f83d72433bd5d84a06bb6541c2af31dae871728bf856a174f93f4",
+        ),
+    ];
+    cases
+        .iter()
+        .map(|(curve, name, x, y)| {
+            json!({ "curve": curve, "name": name, "x": x, "y": y, "expected": "InvalidPoint" })
+        })
+        .collect()
 }
 
 fn build() -> Value {
@@ -243,7 +291,8 @@ fn build() -> Value {
             "eip191": "digest: `cast hash-message` and viem hashMessage({raw}); signature: `cast wallet sign --private-key` (RFC 6979, low-S); address: viem recoverMessageAddress and `cast wallet verify`",
             "high_s": "Python n - s over the eip191 signatures; viem recoverMessageAddress on `normalized`",
             "address": "secp256k1: `cast wallet public-key` and `cast wallet address`; p256: pycryptodome ECC.construct(curve='P-256', d) then keccak(digest_bits=256) of x||y",
-            "p256_der": "pycryptodome DSS(deterministic-rfc6979, encoding='der'), then s -> n - s re-encoded with DerSequence"
+            "address_invalid": "Python: x >= p, y = sqrt(x^3 + ax + b) of x mod p, so the reduced point is on the curve",
+            "p256_der": "pycryptodome DSS(deterministic-rfc6979, encoding='der'), then s -> n - s re-encoded with DerSequence; each InvalidDer entry is rejected by pycryptodome's strict DER verify"
         },
         "keccak256": [
             { "name": "empty", "input_hex": "", "digest": hex::encode(keccak256(b"")) },
@@ -267,6 +316,7 @@ fn build() -> Value {
             address_entry("p256", &key_one()),
             address_entry("p256", P256_RANDOM_KEY),
         ],
+        "address_invalid": address_invalid_entries(),
         "p256_der": p256_der_entries(),
     })
 }
@@ -357,11 +407,9 @@ fn check_eip191(g: &Value) {
         assert_eq!(sig[64], 27 + recid.to_byte());
         let address = eip191_recover_address(statement, &sig).unwrap();
         assert_eq!(address_hex(&address), str_field(e, "address"));
-        let xy = recover_secp256k1(&digest, &sig).unwrap();
-        assert_eq!(
-            &xy[..],
-            &sk.verifying_key().to_sec1_point(false).as_bytes()[1..]
-        );
+        // The recovered address is the signing key's own address.
+        let xy = public_xy("secp256k1", &h32(str_field(e, "private_key")));
+        assert_eq!(address, address_secp256k1(&xy).unwrap());
     }
 }
 
@@ -396,11 +444,25 @@ fn check_address(g: &Value) {
         };
         assert_eq!(address_hex(&address), str_field(e, "address"));
     }
+
+    assert_eq!(arr(g, "address_invalid").len(), 2);
+    for e in arr(g, "address_invalid") {
+        assert_eq!(str_field(e, "expected"), "InvalidPoint");
+        let mut xy = [0u8; 64];
+        xy[..32].copy_from_slice(&hex_field(e, "x"));
+        xy[32..].copy_from_slice(&hex_field(e, "y"));
+        let got = match str_field(e, "curve") {
+            "secp256k1" => address_secp256k1(&xy),
+            "p256" => address_p256(&xy),
+            other => panic!("unknown curve {other}"),
+        };
+        assert_eq!(got, Err(EthError::InvalidPoint), "{e}");
+    }
 }
 
 fn check_p256_der(g: &Value) {
     let der = arr(g, "p256_der");
-    assert_eq!(der.len(), 3);
+    assert_eq!(der.len(), 8);
     for e in der {
         let bytes = hex_field(e, "der");
         if let Some(expected) = e["expected"].as_str() {
