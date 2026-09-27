@@ -2007,10 +2007,10 @@ mod tests {
     #[ignore = "decodes more than 200 MiB; run in the serial ignored-lane"]
     #[cfg(feature = "pack-zstd")]
     fn large_mixed_pack_decodes_under_production_resident_cap() {
-        let started = std::time::Instant::now();
         const GROUPS: u32 = 13;
         const RAW_LEN: usize = 16 * 1024 * 1024;
         const COMPRESSED_LEN: usize = 4 * 1024 * 1024;
+        let started = std::time::Instant::now();
         let mut writer = PackWriter::new();
         let mut expected = Vec::new();
         // Model transfer-planner order: each raw base is immediately
