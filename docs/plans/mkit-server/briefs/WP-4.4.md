@@ -219,3 +219,16 @@ Add the matching row to the STC §2.1 table.
 - `just ci-server`
 - the wasm32 check of `mkit-server`, and the wasm32 build of `apps/vcs-worker`
 - The goldens are unchanged except the new transport files and the MANIFEST lines.
+
+## Amendment 1: STC §7.9 lag list
+
+The orchestrator approved the anticipated §D escalation. Add this exact
+bullet as the last item in STC §7.9's “A lag MUST only cause one of these” list:
+
+- in indexed mode, a uniform `failed_precondition` ("delta base not available in this repository") for a delta
+  base that is still unresolved once the consuming ticket is older than the deployment's relay-lag bound
+  (SPEC-SERVER §9.4). It is byte-identical whether the object exists in another repository or nowhere.
+
+No other §7.9 edit. Include this change in the new STC version-history row
+and in the PR body's “Spec changes”. Continue B.1–B.7 and all gates in the
+same worktree and branch; the definition of done remains an open PR.

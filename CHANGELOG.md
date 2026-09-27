@@ -188,6 +188,8 @@ train).
 
 ### Added
 
+- Indexed-mode server contract, D32 file extraction, repository-isolated delta resolution, and additive `PendingVerification` detail and `max_delta_chain_depth` discovery field (WP-4.4).
+
 - *(core)* Add `pack::rewrite_excluding` and `pack::Rewritten` for budgeted
   pack rewrites: excluded objects are dropped, deltas with excluded direct
   bases become raw, and unchanged packs retain their exact bytes.

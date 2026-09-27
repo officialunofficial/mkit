@@ -194,6 +194,7 @@ headers or a bearer token. The response MAY be cached with
 | `receipt_public_key`, `receipt_key_id` | The key that signs storage receipts, and its key id. Empty until storage receipts are specified. |
 | `grant_schemes` | The owner signature schemes the deployment accepts on grants and epoch statements ([SPEC-WRITE-GRANTS §4](SPEC-WRITE-GRANTS.md#4-owner-signature-schemes)). Empty on a deployment that accepts no grants. |
 | `namespace_policy` | `allowlist`, `any`, or `single-repository` (§7.5). `single-repository` is advertised, never configured. |
+| `max_delta_chain_depth` | Delta-chain depth cap (SPEC-SERVER §9.8), default 50 in indexed mode; `0` when indexed mode is off. |
 | `index_fanout` | The fixed object-id-prefix fan-out of the deployment's repository index (§7.9). The default is 4096. |
 
 A client MUST NOT assume atomic advance without `atomic_advance = true`
@@ -350,7 +351,7 @@ resolves by calling `BeginUpload` again, never to `RefConflict`.
 | Any unauthorized read of a private repository ([SPEC-WRITE-GRANTS §9.3](SPEC-WRITE-GRANTS.md#93-read-authorization)), indistinguishable from a missing repository | `not_found` |
 | An expired, unknown, or missing ticket, or a ticket presented to an advance of a ref it does not name (§7.6) | `failed_precondition` |
 | A part whose subtree hash or length differs from its commitment, or a completion whose merged root or total differs from the ticket (§7.6) | `invalid_argument` |
-| A pack still under verification in indexed mode (§7.6) | `unavailable` |
+| A pack still under verification in indexed mode (§7.6) | `unavailable` with exactly one `PendingVerification` detail |
 | A missed commit deadline (`NotAfter`), a full shard, or outbox backpressure. Nothing commits, and a retry with the same nonce is safe. | `unavailable`, never `resource_exhausted` |
 | A signed nonce already recorded with a different operation fingerprint (§7.1) | `invalid_argument` |
 | A signed nonce whose operation is still `in_flight` (§7.1). The request never reaches admission. | `aborted` (retryable) |
@@ -1269,6 +1270,9 @@ verification, is `failed_precondition`. A ticket, signer, or
 commitment mismatch is `permission_denied`. A bad part hash or length
 is `invalid_argument`. No ticket failure is `resource_exhausted`,
 because clients retry that code on the backoff ladder (§5).
+On `failed_precondition` with public message `delta base not available in this repository`
+(SPEC-SERVER §9.4), the client MUST re-plan the upload once as a self-contained pack
+with no external delta bases and retry with a new ticket.
 
 **Expiry.** A ticket expires less than 7 days after `BeginUpload`. A
 ticket that expires before an advance consumes it produces an `Expired`
@@ -1280,11 +1284,16 @@ timestamps while the envelope is valid (at most 300 seconds, §7.1).
 After that it signs a new operation.
 
 **Pending verification.** In indexed mode, an `AdvanceRefs` that
-consumes a pack still under verification fails with `unavailable` and a
-`PendingVerification{retry_after}` detail. The client polls until the
-ticket expires, rather than following its normal backoff ladder, and
-signs a new operation once the envelope lapses. This detail is reserved
-here and becomes normative with indexed mode.
+consumes a pack still under verification MUST fail with `unavailable`
+and exactly one `PendingVerification` detail (SPEC-SERVER §9.5).
+Its `retry_after_ms` field is the server's suggested poll interval,
+which the server MUST set to 1–60,000 milliseconds. The client MUST
+poll, waiting `retry_after_ms` clamped to 1–60,000 milliseconds between
+attempts, until the ticket expires; it MUST NOT use its normal backoff
+ladder for this answer. The client MUST reuse the nonce while the
+envelope is valid and sign a new operation after it lapses (§7.1,
+at most 300 seconds). A server MUST NOT store this answer as a replay
+result (§7.1).
 
 **Storage visibility (informative).** On every backend, the storage
 commit is the point at which a pack becomes visible. On an object store
@@ -1391,6 +1400,9 @@ of these:
 - an older listing; or
 - `not_found` (or `exists = false`) for a pack when the request carried
   no `X-Mkit-Ref`.
+- in indexed mode, a uniform `failed_precondition` ("delta base not available in this repository") for a delta
+  base that is still unresolved once the consuming ticket is older than the deployment's relay-lag bound
+  (SPEC-SERVER §9.4). It is byte-identical whether the object exists in another repository or nowhere.
 
 A lag never exposes another repository's data and never acts as an
 existence oracle (§7.4).
@@ -1478,6 +1490,7 @@ Explicitly deferred to sibling issues:
 
 | Version | Status | Changes |
 |---|---|---|
+| `2` | draft | Indexed mode: normative PendingVerification polling (§5, §7.6), self-contained replanning for unavailable repository delta bases (§7.6), advertised max_delta_chain_depth (§2.1), and the uniform failed_precondition after the relay-lag bound in §7.9 (WP-4.4, amendment 1). |
 | `2` | draft | §7.4 repository addressing; §7.5 namespace and write policy (owner key); `GetServerInfo` (§2.1); §7.6 upload tickets and resumable parts; §7.8 ref deletion; §7.9 consistency and `ListRefs` paging; error-code split between `unauthenticated` and `permission_denied` (§5) (mkit#1084, mkit#1090); SPEC-WRITE-GRANTS (mkit#1085): signed reads and `X-Write-Grant` (§7.1), the M2 RPC rows (§2), and grant cross-references. §5.1 admission challenges: HTTP 402 with `permission_denied` and an opaque challenge list, raw MPP/x402 header pass-through, the header-returning `admission_helper` with its allowlist and hard-reserved set; §7.1 replay lookup after authentication and before authorization and admission, with signed reads outside the ledger; retryable `aborted` for in-flight operations (§5); §7.7 lifecycle per RPC (mkit#1086). The M0 server implementation still resumes an interrupted `UploadPack` through its `in_flight` replay record until M1 tickets land. M1: branch-sharded servers MAY require the canonical `AdvanceRefs` head/packmap pairing (§4; WP-1.22 amendment 1). |
 | `1` | draft | Initial `mkit.transport.v1` proto: 7 wire RPCs covering every `Transport` trait verb (§2), `PackChunk` reused byte-for-byte from `ssh.proto`, `RefExpectation`/`RefEntry` duplicated with pinned wire numbers pending mkit#679's shared-proto extraction. |
 
