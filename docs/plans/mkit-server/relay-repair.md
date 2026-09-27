@@ -38,7 +38,9 @@ raise its `os` above every target's `rh` for that source or re-key it
 before new writes (R-102; WP-1.29). Never lower or prune target watermarks.
 
 Per-fire inspection remains bounded by `4 × max_rows` and 4 MiB of encoded
-queue rows. A permanently blocked prefix beyond that inspection bound can
-still hide later targets; repair the blocked destination or drain its
-backlog. Target rotation prevents starvation among targets visible within
-that bounded prefix; it does not promise unbounded backlog traversal.
+queue rows. The source's persistent `rs 00` scan row lets the next fire resume
+past retained rows for blocked targets, while preserving the per-target order
+invariant. A cycle resets after its observed `os` or when its 32-target blocked
+set fills. With fewer than 32 distinct failing targets ahead of a healthy
+target, a blocked backlog cannot hide that target indefinitely. Repair failing
+destinations when the cap is reached; the next cycle retries their rows.

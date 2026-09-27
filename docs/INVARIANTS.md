@@ -1156,10 +1156,23 @@ and pre-delivery hook effects. Duplicates never apply a target batch. Source
 cleanup guards each encoded row; draining the timer guards the originally
 observed `os`, so a same-millisecond writer cannot lose its wake-up. Writers
 stamp and chunk rows, and commit an immediate kind-3 timer with their outbox.
-Target watermarks are never pruned and are bounded by source shards.
+Target watermarks and the one `rs 00` scan row per source are never pruned;
+watermarks are bounded by source shards.
+
+**Always:** during an active relay scan cycle, every undelivered row whose
+sequence is at or below the durable cursor has a target in the cycle's
+sorted, deduplicated blocked set. That set holds at most 32 targets. A cycle
+ending at its observed `os` ignores newer rows until the next cycle. The
+source atomically guards its previous scan state and commits the new state
+with any queue-row deletions; a guard conflict retries. Reaching the cycle
+end or the blocked-set cap starts the next fire at the head. Thus a target's
+later row cannot advance `rh` past its earlier undelivered row: an earlier
+row before the cursor blocks the target, and one after it is scanned first.
 
 **Because:** target delivery and source cleanup cannot share a transaction.
 A crash, overlapping timer fires, or a concurrent writer can occur between them.
+Source-head scans alone would indefinitely hide a healthy target behind more
+than one fire's inspection cap of permanently failing rows.
 
 **If violated:** re-delivery overwrites newer index values, hook effects detach
 from their membership writes, or newly queued rows lose their relay timer.
@@ -1171,9 +1184,10 @@ chunk-limit and wake-up tests; native SQLite driver tests; Worker Loopback host
 tests. Worker RefShard registration uses
 plan-specific fire caps and two target calls per target per fire, including
 chunking and contention. Fires inspect up to four times their row delivery
-budget, leave blocked targets behind, and rotate target selection in timer
-values without skipping a target's earlier rows. Corruption stops delivery
-after its decodable prefix. Coordinator watermarks follow in WP-1.23c;
+budget, persist bounded cycle progress in `rs 00`, and revisit blocked targets
+at the next cycle. A healthy target is reached when fewer than 32 distinct
+failing targets precede it; beyond the cap, the cycle resets. Corruption stops
+delivery after its decodable prefix. Coordinator watermarks follow in WP-1.23c;
 writers in WP-1.9/1.10.
 
 ## Pack reads consult only the named repository's membership

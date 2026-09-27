@@ -534,6 +534,7 @@ ContentIndex/export/hooks → M0-02b, unary pipeline → M0-05a, streaming/fault
 | R-105 | ListRefs default page cap | WP-1.28 defines an absent or 0 `page_size` as the server's `max_list_refs_page_size`, and adds that sentence to STC §7.9. The WP-1.16 client never sets `page_size`. | 1.16, 1.28 |
 
 | R-106 | WP-1.23 coordinator watermark split | WP-1.23b ships the Worker relay, R-103 liveness and membership reads. The coordinator watermark (P-23) becomes WP-1.23c, which must land before WP-5.3a (GC) and WP-5.6 (takedown), its only consumers. It covers: the renewal payload carrying each shard's relay watermark; `ls` retention while a shard's outbox is undelivered (this changes `LeaseSweep`); and `namespace_relay_watermark()` as the minimum, with the coordinator keeping the running maximum per shard (the WP-1.23a lower bound can move backwards). | 1.23b, 1.23c, 5.3a, 5.6 |
+| R-110 | WP-1.23b relay liveness | The source keeps a durable scan state (`rs 00`: cycle end, cursor, and at most 32 blocked targets), so a failing target's backlog cannot hide a healthy target beyond the per-fire inspection budget. A healthy target is delivered while fewer than 32 distinct failing targets precede it. Otherwise the cycle resets, and every row is retried at least once per cycle. This supersedes R-103's liveness wording. | 1.23b |
 
 ---
 
