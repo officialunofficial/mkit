@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Worker: add Durable Object classes for D34 coordinator, ref, repository/ref-name index and content partitions, retaining RefStore for single deployments; reject foreign partition kinds and preserve alarms scheduled while a timer tick awaits I/O. Deployment vars now select `single` (default) or `d34` with a root sharding marker guard that caches settled results, retries transient storage errors and re-checks config changes; placement is deployment-wide and jurisdiction is fixed for its lifetime.
+- Server D34 ref writes now hold coordinator epoch leases, with backend commit
+  deadlines, guarded revocation pushes and kind-1 expiry sweeps. Creation and
+  renewal cost four store calls; usable leases keep steady writes at two.
+  Recovery explicitly records a lease-table holdoff before revocation completes.
+  Single sharding and M1 reads retain their existing behavior. Grant RPCs,
+  read renewal, visibility, and backup restore integration follow in later WPs.
 - Add partition timers with guarded atomic handlers, fair tick budgets, SQLite timer heads, Durable Object alarm multiplexing and a native SQLite driver (WP-1.24). Production handlers register as their work packages land.
 - The SQL store schema moves to version 2 (an index-only migration, applied on open to native databases and Durable Objects). A binary built before it refuses a migrated database, so roll back only to a version-2 binary.
 

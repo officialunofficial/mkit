@@ -33,10 +33,12 @@ impl TimerKind {
 /// | 0xF0..=0xFE | Reserved for tests |
 /// | 0xFF | TEST (`test-faults` only) |
 pub mod kinds {
-    /// Source-side outbox delivery.
-    pub const RELAY: super::TimerKind = super::TimerKind::new(3);
+    /// Expired coordinator epoch-lease table rows.
+    pub const LEASE_SWEEP: super::TimerKind = super::TimerKind::new(1);
     /// Ticket expiry. Allocating the kind does not register a handler.
     pub const TICKET_EXPIRY: super::TimerKind = super::TimerKind::new(2);
+    /// Source-side outbox delivery.
+    pub const RELAY: super::TimerKind = super::TimerKind::new(3);
     /// Ref deletion used only by test drivers and directives.
     #[cfg(feature = "test-faults")]
     pub const TEST: super::TimerKind = super::TimerKind::new(0xFF);

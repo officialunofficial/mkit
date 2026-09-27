@@ -235,6 +235,7 @@ impl<'p, B: BlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p, B, N, H>
                     grant: op.authz.grant,
                     layout_version: pipe.meta.capabilities().implicit_layout_version.is_none(),
                     mark_repo_known: false,
+                    lease: None,
                     rejection: None,
                 };
                 pipe.apply_atomic(&op, a, &p, &req, ahead).await?;
@@ -369,6 +370,7 @@ impl<'p, B: BlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p, B, N, H>
             grant: self.op.authz.grant,
             layout_version: pipe.meta.capabilities().implicit_layout_version.is_none(),
             mark_repo_known: false,
+            lease: None,
             rejection: rejection.as_ref(),
         };
         match pipe

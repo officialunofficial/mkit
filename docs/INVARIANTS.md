@@ -1061,6 +1061,45 @@ health checks before every Worker conformance phase. At most 3 DO calls per
 request arriving before the first definitive result is cached; 0 afterwards;
 never more than one check per request.
 
+## Epoch lease acknowledgements describe durable shard state
+
+**Always:** outside a declared recovery hold-off, `ls.acked_epoch = n` only if
+the shard's `el` durably holds epoch at least n, or every older-epoch write is
+already past its backend deadline.
+Live renewals preserve acknowledgement. Revocation pushes even to an absent
+`el`, guards the observed shard value, then acknowledges in a separate guarded
+coordinator batch. Every D34 ref batch guards `el` and starts with
+`NotAfter(min(plan_time + MAX_APPLY_WINDOW, expires - margin, replay cap))`.
+Creation and lease registration commit together only after authorization and
+admission. D34 creates coordinator `nr`/`rr` records even with Single addressing,
+so every leased shard has the records its guards and `config_version` require.
+The Single sharding path continues reading and guarding `e` directly.
+Safety requires `lease_margin_ms` to exceed the maximum skew between every
+pipeline instance clock (grant, renewal and revoke), the sweep driver clock,
+and every backend clock; this deployment assumption is documented, not checked
+by `Pipeline::new`.
+
+During declared recovery, a rebuilt missing `ls` row may acknowledge the current
+epoch before a surviving old `el` is replaced. The persistent `lr` hold-off
+prevents completion for `epoch_lease + margin`, so every surviving old write's
+deadline has passed before revocation can complete.
+
+**Because:** a coordinator acknowledgement before shard installation could
+report completion while a delayed old-epoch batch can still commit. Expiry
+alone is safe only because the storage backend checks its own clock atomically.
+
+**If violated:** a revoked grant can mutate a ref after revocation completes,
+or denied/challenged requests can allocate lease state.
+
+**Enforced by:** `pipeline/lease.rs`, `pipeline/revocation.rs`, the pure write
+planner, and native `tests/epoch_leases.rs` on memory and SQLite. The Rust
+interleaving property test covers the protocol model; pipeline regressions
+protect the implementation. `LeaseSweep` guards expired coordinator rows and
+moves its timer atomically with each renewal. Recovery is declared with the
+persistent `lr` marker; restore/rebuild procedures MUST call
+`mark_lease_table_recovered` before serving writes (WP-1.29). Completion waits
+`epoch_lease + margin` after that marker, independent of namespace creation time.
+
 ## Namespace and write policy decide before allocation and never read existence
 
 **Always:** Multi writes pass the namespace policy and owner/authority policy

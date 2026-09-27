@@ -771,9 +771,15 @@ mod glue {
             worker::console_error!("{e}; using the Workers Free cap");
             free
         });
-        // TODO(WP-1.25 merge): register LeaseSweep only on coordinator classes
         // TODO(WP-1.23b): register RelayHandler for RefShard with DoNamespaceStore<StubTransport>.
         let registry = mkit_server::timers::TimerRegistry::new();
+        // Lease-table rows and their sweep timers live only in coordinator
+        // partitions (WP-1.25).
+        let registry = if class == crate::classes::ShardClass::NsCoordinator {
+            registry.register(mkit_server::timers::lease_sweep::LeaseSweep)
+        } else {
+            registry
+        };
         #[cfg(feature = "test-faults")]
         let registry = registry.register(mkit_server::timers::test_kind::TestTimer);
         NsObject::new(state, class)
