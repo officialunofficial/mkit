@@ -8,7 +8,7 @@ use std::sync::{Mutex, PoisonError};
 use super::{Capacity, Row, SqlConn, SqlError, SqlValue, TxFn, blob, count, schema};
 use crate::store::{
     Batch, BatchOutcome, Cursor, Key, NamespaceStore, Partition, PartitionStats, Precondition,
-    ScanPage, StoreCapabilities, StoreError, StoreMaintenance, Value, Write,
+    ScanPage, StoreCapabilities, StoreError, StoreMaintenance, Value, Write, codec, keys,
 };
 
 /// Keys per `get_many` statement: one partition parameter plus this many
@@ -47,12 +47,13 @@ pub(super) fn get_many_sql(n: usize) -> String {
 /// The [`NamespaceStore`] contract (and [`StoreMaintenance`]) over any
 /// [`SqlConn`]: full capabilities, every batch one [`SqlConn::transaction`].
 ///
-/// With a [`Capacity`], a batch holding a put returns [`StoreError::Full`]
-/// once the database uses [`Capacity::soft_limit`] bytes or more, checked
-/// inside its transaction; delete-only batches are never refused, and the
-/// reserve above the soft limit keeps them from hitting the engine limit
-/// (normative rule 7). An engine `Full` on a delete-only batch is reported
-/// as [`StoreError::Unavailable`], never `Full`.
+/// With a [`Capacity`], an ordinary batch holding a put returns
+/// [`StoreError::Full`] once the database uses [`Capacity::soft_limit`] bytes
+/// or more, checked inside its transaction. Delete-only batches and bounded,
+/// guarded relay-scan checkpoints may use the reserve above that limit; a
+/// full ref shard must still be able to advance past a failed relay target.
+/// An engine `Full` on a delete-only batch is reported as
+/// [`StoreError::Unavailable`], never `Full`.
 ///
 /// Every method is synchronous inside: its future completes on first poll.
 /// On a native server wrap it in `mkit-server-native`'s `Blocking`, which
@@ -196,6 +197,7 @@ fn check_and_write<C: SqlConn>(
     }
     if let Some(limit) = soft_limit
         && batch.has_put()
+        && !is_relay_scan_checkpoint(&batch)
         && conn.size_bytes()? >= limit
     {
         return Err(SqlError::Full);
@@ -210,6 +212,28 @@ fn check_and_write<C: SqlConn>(
         };
     }
     Ok(BatchOutcome::Committed)
+}
+
+// The SQL reserve also belongs to source cleanup. Relay scan progress is a
+// bounded control row, guarded by its prior value and committed with only
+// relay-row deletions. Exclude exactly that shape from the soft put cutoff;
+// malformed or unrelated writes still receive Full. The hard engine limit
+// remains enforced by SqlConn for every batch.
+fn is_relay_scan_checkpoint(batch: &Batch) -> bool {
+    let scan_key = keys::relay_scan();
+    let guarded = batch.preconditions.iter().any(|pre| {
+        matches!(pre, Precondition::Absent(key) | Precondition::Equals(key, _) if key == &scan_key)
+    });
+    let mut scan_puts = 0;
+    let only_cleanup = batch.writes.iter().all(|write| match write {
+        Write::Put(key, value) if key == &scan_key => {
+            scan_puts += 1;
+            codec::decode_relay_scan(value).is_ok()
+        }
+        Write::Delete(key) => matches!(keys::parse(key), Some(keys::ParsedKey::Relay(_))),
+        Write::Put(..) => false,
+    });
+    guarded && only_cleanup && scan_puts == 1
 }
 
 fn entry(mut row: Row) -> Result<(Key, Value), SqlError> {
