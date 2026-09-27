@@ -149,7 +149,8 @@ check repository membership first, with a cheap uniform 404 on a miss,
 then prove reachability from a published ref value. The walk follows
 repository-local object references, including parents and chunk manifests;
 it MUST NOT follow foreign remix sources or pack-only delta bases.
-It MUST NOT consult the global content store to resolve a missing member.
+The global content store MUST NOT be consulted during HTTP resolution or
+serving.
 Extracted copies keyed by object id (SPEC-SERVER §9.6) MUST NOT constitute
 authorization, membership, reachability, or observable delta bases.
 
