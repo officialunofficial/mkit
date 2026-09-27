@@ -76,7 +76,10 @@ impl Procedure {
     /// `UploadPack`.
     #[must_use]
     pub const fn is_write(self) -> bool {
-        matches!(self, Self::UpdateRef | Self::AdvanceRefs | Self::BeginUpload | Self::UploadPack)
+        matches!(
+            self,
+            Self::UpdateRef | Self::AdvanceRefs | Self::BeginUpload | Self::UploadPack
+        )
     }
 
     /// Whether the procedure streams: `UploadPack` and `DownloadPack`.

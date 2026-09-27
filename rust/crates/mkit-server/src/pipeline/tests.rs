@@ -981,7 +981,7 @@ fn plan_cas_any_missing_match_on_snapshot() {
             mark_repo_known: false,
             lease: None,
             rejection: None,
-                    begin: None,
+            begin: None,
         };
         let values: Vec<_> = current.map(|id| ref_value(HEAD, id)).into_iter().collect();
         let planned = plan_write(&req, &snapshot(&req, &values), &clock_at(5, None)).unwrap();
@@ -1033,7 +1033,7 @@ fn plan_conflict_writes_only_the_replay_record() {
         mark_repo_known: false,
         lease: None,
         rejection: None,
-                    begin: None,
+        begin: None,
     };
     let values = [ref_value(PACKMAP, A), ref_value(HEAD, B)];
     let Planned::Apply(plan) =
@@ -1100,7 +1100,7 @@ fn plan_quota_exhaustion_yields_no_batch() {
         mark_repo_known: false,
         lease: None,
         rejection: None,
-                    begin: None,
+        begin: None,
     };
     let used = QuotaState {
         window_start: T0,
@@ -1763,7 +1763,7 @@ fn plan_signed_conflict_still_charges_quota() {
         mark_repo_known: false,
         lease: None,
         rejection: None,
-                    begin: None,
+        begin: None,
     };
     let values = [ref_value(HEAD, A)];
     let clock = clock_at(ms(T0), None);
@@ -1818,7 +1818,7 @@ fn plan_prune_fits_the_batch_op_cap() {
         mark_repo_known: false,
         lease: None,
         rejection: None,
-                    begin: None,
+        begin: None,
     };
     let mut snap = snapshot(&req, &[]);
     let limit = usize::try_from(PRUNE_LIMIT).unwrap();
@@ -1866,7 +1866,7 @@ fn prune_sampling_is_deterministic_one_in_eight() {
         mark_repo_known: false,
         lease: None,
         rejection: None,
-                    begin: None,
+        begin: None,
     };
     let sampled = (0u8..=255)
         .filter(|b| {
@@ -2328,7 +2328,7 @@ fn d34_prune_retry_refreshes_the_epoch_even_without_a_counted_replan() {
             install: false,
         }),
         rejection: None,
-                    begin: None,
+        begin: None,
     };
     let ahead = snapshot(
         &req,
@@ -2435,7 +2435,7 @@ fn leased_epoch_checks_use_the_granted_epoch_and_cap_replay_deadlines() {
             layout_version: false,
             mark_repo_known: false,
             rejection: None,
-                    begin: None,
+            begin: None,
             lease: Some(lease::LeaseWrite {
                 value: codec::EpochLease {
                     epoch: 7,

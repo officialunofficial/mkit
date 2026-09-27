@@ -56,13 +56,13 @@ use crate::replay::{BeginUploadResult, ReplayDecision, StoredResult, UpdateRefRe
 use crate::repo::Addressing;
 use crate::rt::Clock;
 use crate::storage_error::{StorageOp, describe_and_map};
+use crate::store::tickets::TicketCaps;
 use crate::store::{
     Batch, BatchOutcome, BlobStore, Key, KeyClasses, NamespaceStore, Partition, StoreError, Value,
     codec, keys, read,
 };
 use crate::telemetry::{Metrics, Redactor};
 use crate::upload::{UploadLimits, token::TicketKeys};
-use crate::store::tickets::TicketCaps;
 use begin::BeginWrite;
 
 pub use auth::{AuthMode, Authenticated, RequestMeta};
@@ -209,7 +209,10 @@ impl PipelineConfig {
             begin_upload_threshold_bytes: u64::MAX,
             ticket_keys: None,
             ticket_ttl_ms: 86_400_000,
-            ticket_caps: TicketCaps { per_ref: 1024, per_signer: 64 },
+            ticket_caps: TicketCaps {
+                per_ref: 1024,
+                per_signer: 64,
+            },
             download_chunk_max: DOWNLOAD_CHUNK_MAX,
             write_quota,
             list_page_limit: DEFAULT_LIST_PAGE_LIMIT,
@@ -360,8 +363,14 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         metrics: Arc<dyn Metrics>,
     ) -> Result<Self, ServerError> {
         cfg.validate_server_info_limits()?;
-        if cfg.ticket_ttl_ms == 0 || cfg.ticket_ttl_ms >= 604_800_000 || cfg.ticket_caps.per_ref == 0 || cfg.ticket_caps.per_signer == 0 {
-            return Err(ServerError::invalid_argument("invalid upload ticket lifetime or caps"));
+        if cfg.ticket_ttl_ms == 0
+            || cfg.ticket_ttl_ms >= 604_800_000
+            || cfg.ticket_caps.per_ref == 0
+            || cfg.ticket_caps.per_signer == 0
+        {
+            return Err(ServerError::invalid_argument(
+                "invalid upload ticket lifetime or caps",
+            ));
         }
         let policy_refusal = match (&cfg.addressing, cfg.write_policy) {
             (Addressing::Multi(_), WritePolicy::Open) => {
@@ -934,7 +943,8 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         };
         self.pre_receive(&op).await?;
         let write = (kind, refs.as_slice(), charges.as_slice());
-        self.plan_and_apply(&op, a, &p, write, ahead, lease, begin.as_ref()).await
+        self.plan_and_apply(&op, a, &p, write, ahead, (lease, begin.as_ref()))
+            .await
     }
 
     /// Stage 1: the typed operation, for the procedure `a` was
@@ -1000,7 +1010,13 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             OpKind::AdvanceRefs { head, packmap } => {
                 (WriteKind::AdvanceRefs, vec![packmap.clone(), head.clone()])
             }
-            OpKind::BeginUpload { ref_name, .. } => return Ok((WriteKind::BeginUpload, vec![], self.shards.ref_shard(&op.repo, ref_name))),
+            OpKind::BeginUpload { ref_name, .. } => {
+                return Ok((
+                    WriteKind::BeginUpload,
+                    vec![],
+                    self.shards.ref_shard(&op.repo, ref_name),
+                ));
+            }
             _ => return Err(internal("not a unary write")),
         };
         let p = self.shards.ref_shard(&op.repo, &refs[0].name);
@@ -1051,8 +1067,17 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             }
         }
         if let OpKind::BeginUpload { ref_name, key, .. } = &op.kind {
-            let signer = op.auth.as_ref().ok_or_else(|| internal("missing ticket signer"))?.signer;
-            wanted.extend(begin::decision_keys(&op.repo.name, ref_name, &key.0, &signer)?);
+            let signer = op
+                .auth
+                .as_ref()
+                .ok_or_else(|| internal("missing ticket signer"))?
+                .signer;
+            wanted.extend(begin::decision_keys(
+                &op.repo.name,
+                ref_name,
+                &key.0,
+                &signer,
+            )?);
         }
         let mut snap = Snapshot::default();
         self.fill(p, &mut snap, wanted).await?;
@@ -1133,7 +1158,13 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         tracing::debug!(stage = "admission");
         input.write_quota = self.cfg.write_quota;
         match self.hooks.admission().admit(&input).await? {
-            AdmissionDecision::Allow { charges, reservation } => Ok(Allowance { charges, reservation }),
+            AdmissionDecision::Allow {
+                charges,
+                reservation,
+            } => Ok(Allowance {
+                charges,
+                reservation,
+            }),
             AdmissionDecision::Challenge { .. } => {
                 Err(ServerError::permission_denied("admission required"))
             }
@@ -1156,8 +1187,7 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         p: &Partition,
         (kind, refs, charges): (WriteKind, &[RefUpdate], &[QuotaCharge]),
         ahead: Option<Snapshot>,
-        lease: Option<lease::LeaseWrite>,
-        begin: Option<&BeginWrite>,
+        (lease, begin): (Option<lease::LeaseWrite>, Option<&BeginWrite>),
     ) -> Result<StoredResult, ServerError> {
         let caps = self.meta.capabilities();
         let replay = upload::replay_guard(op);
@@ -1392,6 +1422,14 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         self.fill(p, &mut snap, wanted).await?;
         if let Some(BeginWrite::Open(open)) = req.begin {
             begin::read_indexed(&self.meta, p, &open.spec, &mut snap).await?;
+            let reservation = crate::store::tickets::keys(&open.spec).reservation;
+            if snap.get(&reservation).is_some()
+                && let Some(replay) = req.replay
+            {
+                let key = keys::replay(&replay.scope);
+                let value = self.meta.get(p, &key).await.map_err(meta_error)?;
+                snap.insert(key, value);
+            }
         }
         Ok(snap)
     }

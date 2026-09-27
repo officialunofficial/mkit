@@ -114,6 +114,19 @@ async fn check(origin: &str, profile: Profile) {
         profile,
     };
     let report = run(&target, None).await;
+    if target.profile.has(Feature::Tickets) {
+        for name in [
+            "tickets.begin_upload_new",
+            "tickets.begin_upload_idempotent",
+            "tickets.begin_upload_caps",
+            "tickets.begin_upload_packmap_refused",
+        ] {
+            assert!(
+                matches!(report.verdict(name), Some(Verdict::Pass(_))),
+                "{name} did not pass"
+            );
+        }
+    }
     if target.profile.has(Feature::EpochLeases) {
         assert!(matches!(
             report.verdict("leases.bump_completes_and_writes_continue"),

@@ -131,10 +131,10 @@ pub(crate) struct WriteRequest<'a> {
     pub(crate) layout_version: bool,
     /// Ensure this ref shard knows its repository was registered.
     pub(crate) mark_repo_known: bool,
-    /// `UploadCommit` only: a final `pre_receive` rejection to store in
-    /// place of `UploadPack`, so a retry is answered before re-streaming.
     /// Ticket opening or pre-admission answer.
     pub(crate) begin: Option<&'a super::begin::BeginWrite>,
+    /// `UploadCommit` only: a final `pre_receive` rejection to store in
+    /// place of `UploadPack`, so a retry is answered before re-streaming.
     pub(crate) rejection: Option<&'a StoredRejection>,
 }
 
@@ -159,7 +159,9 @@ impl WriteRequest<'_> {
         }
         out.extend(self.charges.iter().map(|c| keys::quota(&c.scope)));
         out.extend(self.refs.iter().map(|r| keys::ref_key(self.repo, &r.name)));
-        if let (WriteKind::UploadCommit, Some(replay)) = (self.kind, self.replay) {
+        if let (WriteKind::UploadCommit | WriteKind::BeginUpload, Some(replay)) =
+            (self.kind, self.replay)
+        {
             out.push(keys::replay(&replay.scope));
         }
         out
@@ -239,6 +241,11 @@ pub(crate) fn plan_write(
     snap: &Snapshot,
     clock: &PlanClock,
 ) -> Result<Planned, ServerError> {
+    // A racing retry may read ticket/reservation rows after its initial
+    // replay observation. Resolve the committed answer before ticket planning.
+    if let Some(result) = replayed_begin_upload(req, snap)? {
+        return Ok(Planned::Done(result));
+    }
     let deadline = Precondition::NotAfter(clock.deadline());
     let mut pre = vec![deadline.clone()];
     let mut puts = Vec::new();
@@ -294,24 +301,8 @@ pub(crate) fn plan_write(
         plan_charge(charge, snap, clock.business_now_ms, &mut pre, &mut puts)?;
     }
 
-    // Quota IS charged on a CAS conflict, as in vcs-worker, where the
-    // charge commits in the same transaction as the replay row: a conflict
-    // still costs an operation and a ledger row, so the charge bounds
-    // ledger growth per signer. PRD §5.4's separate `Aborted` transaction
-    // is for M3 payment reservations, not this abuse quota.
-    let (outcome, ref_puts) = decide_refs(req, snap, &mut pre)?;
-    let conflict = outcome.is_some();
-    let ticket_result = req.begin.map(|b| super::begin::plan(b, snap, clock, &mut pre, &mut puts)).transpose()?;
-    let on_commit = if let Some(result) = outcome.or(ticket_result) { result } else { match req.kind {
-        WriteKind::BeginUpload => return Err(ServerError::internal("ticket plan failed", "missing BeginUpload plan")),
-        WriteKind::UpdateRef => StoredResult::UpdateRef(UpdateRefResult::Committed),
-        WriteKind::AdvanceRefs => StoredResult::AdvanceRefs(AdvanceOutcome::Committed),
-        WriteKind::UploadReserve | WriteKind::UploadCommit => {
-            req.rejection.map_or(StoredResult::UploadPack, |r| {
-                StoredResult::Rejected(r.clone())
-            })
-        }
-    }};
+    let (on_commit, ref_puts, conflict) =
+        decide_write_result(req, snap, clock, &mut pre, &mut puts)?;
     if conflict && req.replay.is_none() && req.charges.is_empty() {
         return Ok(Planned::Done(on_commit));
     }
@@ -352,6 +343,65 @@ pub(crate) fn plan_write(
         prune,
         prune_from,
     }))
+}
+
+fn replayed_begin_upload(
+    req: &WriteRequest<'_>,
+    snap: &Snapshot,
+) -> Result<Option<StoredResult>, ServerError> {
+    if req.kind != WriteKind::BeginUpload {
+        return Ok(None);
+    }
+    let Some(replay) = req.replay else {
+        return Ok(None);
+    };
+    let record = snap
+        .get(&keys::replay(&replay.scope))
+        .map(codec::decode_replay_record)
+        .transpose()
+        .map_err(corrupt)?;
+    super::replay_answer(classify(record.as_ref(), &replay.fingerprint))
+}
+
+/// Decide ref conflicts or the ticket result before writing replay state.
+fn decide_write_result(
+    req: &WriteRequest<'_>,
+    snap: &Snapshot,
+    clock: &PlanClock,
+    pre: &mut Vec<Precondition>,
+    puts: &mut Vec<Write>,
+) -> Result<(StoredResult, Vec<Write>, bool), ServerError> {
+    // Quota IS charged on a CAS conflict, as in vcs-worker, where the
+    // charge commits in the same transaction as the replay row: a conflict
+    // still costs an operation and a ledger row, so the charge bounds
+    // ledger growth per signer. PRD §5.4's separate `Aborted` transaction
+    // is for M3 payment reservations, not this abuse quota.
+    let (outcome, ref_puts) = decide_refs(req, snap, pre)?;
+    let conflict = outcome.is_some();
+    let ticket_result = req
+        .begin
+        .map(|b| super::begin::plan(b, snap, clock, pre, puts))
+        .transpose()?;
+    let on_commit = if let Some(result) = outcome.or(ticket_result) {
+        result
+    } else {
+        match req.kind {
+            WriteKind::BeginUpload => {
+                return Err(ServerError::internal(
+                    "ticket plan failed",
+                    "missing BeginUpload plan",
+                ));
+            }
+            WriteKind::UpdateRef => StoredResult::UpdateRef(UpdateRefResult::Committed),
+            WriteKind::AdvanceRefs => StoredResult::AdvanceRefs(AdvanceOutcome::Committed),
+            WriteKind::UploadReserve | WriteKind::UploadCommit => {
+                req.rejection.map_or(StoredResult::UploadPack, |r| {
+                    StoredResult::Rejected(r.clone())
+                })
+            }
+        }
+    };
+    Ok((on_commit, ref_puts, conflict))
 }
 
 /// The replay record's guard and writes. A new record is guarded

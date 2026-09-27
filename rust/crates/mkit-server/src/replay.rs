@@ -230,6 +230,7 @@ mod tests {
             match result {
                 StoredResult::UpdateRef(_)
                 | StoredResult::AdvanceRefs(_)
+                | StoredResult::BeginUpload(_)
                 | StoredResult::UploadPack => true,
                 StoredResult::Rejected(r) => StoredRejection::is_storable(r.code()),
             }

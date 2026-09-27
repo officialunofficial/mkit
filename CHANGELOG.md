@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server: implement authenticated `BeginUpload` tickets with stateless BLAKE3 MAC
+  tokens, rotation by key id, admission-free live-ticket/member results, open-ticket
+  caps, and byte-identical replay. Configure native keys with `--ticket-key-file`
+  or `MKIT_TICKET_KEYS`, and Worker keys with `TICKET_KEYS`. The internal legacy
+  UploadPack session API is now `open_upload`; ticketed uploads follow in WP-1.9b.
+
 - Worker: add Durable Object classes for D34 coordinator, ref, repository/ref-name index and content partitions, retaining RefStore for single deployments; reject foreign partition kinds and preserve alarms scheduled while a timer tick awaits I/O. Deployment vars now select `single` (default) or `d34` with a root sharding marker guard that caches settled results, retries transient storage errors and re-checks config changes; placement is deployment-wide and jurisdiction is fixed for its lifetime.
 - Server D34 ref writes now hold coordinator epoch leases, with backend commit
   deadlines, guarded revocation pushes and kind-1 expiry sweeps. Creation and

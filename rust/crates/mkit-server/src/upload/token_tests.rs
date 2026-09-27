@@ -48,11 +48,11 @@ fn verification_failures_are_failed_precondition() {
         keys.verify(&token, claims().expires_at_ms),
         keys.verify(&token, claims().expires_at_ms + 1),
     ] {
-        assert_eq!(failure.unwrap_err().code, Code::FailedPrecondition);
+        assert_eq!(failure.unwrap_err().code(), Code::FailedPrecondition);
     }
     for prefix in 0..token.len() {
         assert_eq!(
-            keys.verify(&token[..prefix], 0).unwrap_err().code,
+            keys.verify(&token[..prefix], 0).unwrap_err().code(),
             Code::FailedPrecondition
         );
     }
@@ -78,7 +78,7 @@ fn authenticated_garbage_is_rejected_after_mac() {
         let tag = blake3::keyed_hash(&keys.keys[0].mac_key(), &message);
         message.extend_from_slice(tag.as_bytes());
         assert_eq!(
-            keys.verify(&message, 0).unwrap_err().code,
+            keys.verify(&message, 0).unwrap_err().code(),
             Code::FailedPrecondition
         );
     }
@@ -93,7 +93,7 @@ fn rotation_accepts_old_and_signs_new() {
     assert_eq!(rotated.verify(&old.mint(&claims), 0).unwrap(), claims);
     assert_eq!(rotated.mint(&claims), new.mint(&claims));
     assert_eq!(
-        new.verify(&old.mint(&claims), 0).unwrap_err().code,
+        new.verify(&old.mint(&claims), 0).unwrap_err().code(),
         Code::FailedPrecondition
     );
 }
@@ -153,7 +153,7 @@ fn bindings_fail_with_permission_denied() {
             claims
                 .check_binding(audience, repository, &signer, &pack, bytes)
                 .unwrap_err()
-                .code,
+                .code(),
             Code::PermissionDenied
         );
     }

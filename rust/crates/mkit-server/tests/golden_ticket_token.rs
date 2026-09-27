@@ -140,7 +140,7 @@ fn golden_ticket_token_v1() {
             _ => keys.verify(&token, now).unwrap_err(),
         };
         assert_eq!(
-            error.code.as_str(),
+            error.code().as_str(),
             failure["code"].as_str().unwrap(),
             "{}",
             failure["name"]

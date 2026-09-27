@@ -40,6 +40,7 @@ fn creds_env(fake: &FakeS3) -> [(&'static str, String); 2] {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::too_many_lines)] // The S3 wire scenario includes setup and cleanup assertions.
 async fn wire_suite_s3_sqlite_auth_v2() {
     let fake = FakeS3::start();
     let root = common::repo_root();
@@ -84,6 +85,7 @@ async fn wire_suite_s3_sqlite_auth_v2() {
     .unwrap();
     assert!(matches!(cfg.blob, BlobChoice::S3 { .. }));
     cfg.pipeline.write_quota = Some(QUOTA);
+    cfg.pipeline.ticket_caps.per_signer = 4;
     let opened = server::open(&cfg).unwrap();
     let shutdown = Shutdown::new();
     let served = common::spawn_serve(listener, opened.router.clone(), &shutdown);
@@ -107,6 +109,7 @@ async fn wire_suite_s3_sqlite_auth_v2() {
     profile.derive_features();
     profile.features.insert(Feature::Health);
     profile.features.insert(Feature::Tickets);
+    profile.ticket_per_signer = 4;
     profile.features.insert(Feature::StrictGzipAuth);
     let target = WireTarget {
         base_url: origin.parse().unwrap(),

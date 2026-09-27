@@ -350,10 +350,7 @@ fn upload_memory_bounded_by_one_chunk() {
         })
         .unwrap();
     block_on(async {
-        let mut s = pipe
-            .open_upload(&a, Some(&id), Some(10_000))
-            .await
-            .unwrap();
+        let mut s = pipe.open_upload(&a, Some(&id), Some(10_000)).await.unwrap();
         for (i, span) in chunk_plan(10_000, 1_024).enumerate() {
             let at = usize::try_from(span.offset).unwrap();
             let chunk = Bytes::copy_from_slice(&data[at..at + span.len]);
@@ -381,11 +378,7 @@ fn upload_final_apply_deadline_is_computed_after_streaming() {
     let id = hash(&data);
     let slow = 3 * i64::try_from(WINDOW).unwrap();
     block_on(async {
-        let mut s = env
-            .pipe
-            .open_upload(&a, Some(&id), Some(64))
-            .await
-            .unwrap();
+        let mut s = env.pipe.open_upload(&a, Some(&id), Some(64)).await.unwrap();
         for span in chunk_plan(64, 16) {
             // A stream slower than the apply window in total.
             env.clock.advance(slow / 4);
@@ -475,11 +468,7 @@ fn upload_outliving_its_envelope_commits_the_blob_without_the_record() {
     let a = env.auth(&req).unwrap();
     let id = hash(&data);
     block_on(async {
-        let mut s = env
-            .pipe
-            .open_upload(&a, Some(&id), Some(64))
-            .await
-            .unwrap();
+        let mut s = env.pipe.open_upload(&a, Some(&id), Some(64)).await.unwrap();
         for span in chunk_plan(64, 16) {
             if span.offset == 16 {
                 // Past `expires_at + MAX_CLOCK_LEAD_MS`: no batch of this

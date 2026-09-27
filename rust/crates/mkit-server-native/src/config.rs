@@ -241,7 +241,7 @@ pub struct ServeArgs {
     #[arg(long, value_name = "PATH")]
     pub bearer_token_file: Option<PathBuf>,
     /// Deployment upload MAC keys, one `<key-id> <64 hex>` per line. The
-    /// first signs and every listed key verifies. Without it, read MKIT_TICKET_KEYS.
+    /// first signs and every listed key verifies. Without it, read `MKIT_TICKET_KEYS`.
     #[arg(long, value_name = "PATH")]
     pub ticket_key_file: Option<PathBuf>,
     /// Auth v2: the deployment's canonical origin, byte for byte as
@@ -536,7 +536,7 @@ fn resolve_ticket_keys(
         None => env(TICKET_KEYS_ENV),
     };
     text.map(|text| {
-        TicketKeys::parse(&text).map_err(|_| {
+        TicketKeys::parse_secret(text).map_err(|_| {
             ConfigError::new(
                 exit::USAGE,
                 format!(

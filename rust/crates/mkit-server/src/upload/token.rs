@@ -158,6 +158,13 @@ impl TicketKeys {
         Ok(Self { keys })
     }
 
+    /// Parse an owned deployment secret, wiping its source text when parsing
+    /// completes, including on invalid configuration.
+    pub fn parse_secret(text: String) -> Result<Self, TicketKeyError> {
+        let text = Zeroizing::new(text);
+        Self::parse(&text)
+    }
+
     /// Mint a token from trusted claims.
     ///
     /// # Panics
@@ -166,7 +173,8 @@ impl TicketKeys {
     #[must_use]
     pub fn mint(&self, claims: &TicketClaims) -> Vec<u8> {
         let key = &self.keys[0]; // constructors enforce a nonempty key set
-        let mut bytes = vec![1, key.id.len() as u8];
+        let id_len = u8::try_from(key.id.len()).expect("validated ticket key id");
+        let mut bytes = vec![1, id_len];
         bytes.extend_from_slice(key.id.as_bytes());
         bytes.extend_from_slice(&claims.ticket_id);
         append_field(&mut bytes, claims.audience.as_bytes());

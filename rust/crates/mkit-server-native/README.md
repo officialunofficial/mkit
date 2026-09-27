@@ -36,6 +36,7 @@ mkit-server serve [--listen <ADDR>] [--listen-enc <ADDR>] --repo-root <DIR>
         [--s3-spool-max-bytes N] [--s3-allow-insecure-http]]
     [--auth bearer | --auth auth-v2 | --unsafe-allow-any-peer]
     [--bearer-token-file <PATH>]          # or MKIT_API_TOKEN
+    [--ticket-key-file <PATH>]            # or MKIT_TICKET_KEYS
     [--audience <ORIGIN>] [--repository <ID>]
     [--max-pack-bytes N] [--unary-timeout-secs 30] [--stream-timeout-secs 3600]
     [--max-concurrency 256] [--queue-timeout-secs 5]
@@ -113,7 +114,12 @@ The listener fails closed, as `mkit serve --http` did:
   v2 signatures (SPEC-TRANSPORT-CONNECT §7.1) for exactly that audience and
   repository, with the replay ledger and the default per-signer write quota
   (300 writes and 128 MiB an hour). Reads are unsigned in M0. Needs
-  `--meta sqlite:`.
+  `--meta sqlite:`. To serve `BeginUpload`, set `--ticket-key-file <PATH>`
+  or `MKIT_TICKET_KEYS` to one `<key-id> <64 hex>` entry per line. The
+  first key signs; all listed keys verify, so prepend a new key to rotate.
+  Blank lines and `#` comments are allowed. The file follows the same
+  owner-only, no-symlink rule as the bearer secret; invalid keys fail with
+  `USAGE`. Without keys, `BeginUpload` answers `unimplemented`.
 - `--unsafe-allow-any-peer`: no authentication at all, with a loud warning.
   Development only.
 - With none of these the server refuses to start (`CONFIG_ERROR`). A token

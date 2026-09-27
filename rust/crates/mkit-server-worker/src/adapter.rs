@@ -95,7 +95,7 @@ pub struct WorkerConfig {
     pub audience: String,
     /// `AUTH_REPOSITORY`: the repository identity writes are signed for.
     pub repository: String,
-    /// Upload MAC keys; missing keys disable BeginUpload.
+    /// Upload MAC keys; missing keys disable `BeginUpload`.
     pub ticket_keys: Option<TicketKeys>,
     /// `SHARDING`: single (default) or d34; guarded against changing existing data.
     pub sharding: Sharding,
@@ -162,7 +162,7 @@ impl WorkerConfig {
         let mut config =
             PipelineConfig::new(Addressing::Single { repo }, AuthMode::AuthV2(auth), limits);
         config.sharding = self.sharding;
-        config.ticket_keys = self.ticket_keys.clone();
+        config.ticket_keys.clone_from(&self.ticket_keys);
         #[cfg(feature = "test-faults")]
         if let Some(quota) = self.test_quota {
             config.write_quota = Some(quota);
@@ -185,7 +185,8 @@ impl WorkerConfig {
         )?;
         let ticket_keys = var(TICKET_KEYS_VAR)
             .map(|text| {
-                TicketKeys::parse(&text).map_err(|_| ConfigError("TICKET_KEYS is invalid".into()))
+                TicketKeys::parse_secret(text)
+                    .map_err(|_| ConfigError("TICKET_KEYS is invalid".into()))
             })
             .transpose()?;
         let sharding = match var("SHARDING").as_deref() {

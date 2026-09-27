@@ -17,13 +17,13 @@ use super::proto::mkit::transport::v1::__buffa::oneof::begin_upload_response::Re
 use super::proto::mkit::transport::v1::__buffa::oneof::download_pack_response::Body as DownloadBody;
 use super::proto::mkit::transport::v1::__buffa::oneof::upload_pack_request::Body as UploadBody;
 use super::proto::mkit::transport::v1::{
-    AdvanceOutcome as WireOutcome, AdvanceRefsRequest, AdvanceRefsResponse, AlreadyPresent,
-    BeginUploadRequest, BeginUploadResponse, CompleteUploadRequest, CompleteUploadResponse,
-    DownloadPackHeader, DownloadPackRequest, DownloadPackResponse, GetServerInfoRequest,
-    GetServerInfoResponse, ListRefsRequest, ListRefsResponse, PackChunk, PackExistsRequest,
-    PackExistsResponse, ReadRefRequest, ReadRefResponse, RefEntry, RefExpectation,
-    TransportService, UpdateRefRequest, UpdateRefResponse, UploadPackRequest, UploadPackResponse,
-    UploadPartRequest, UploadPartResponse, UploadTicket,
+    AdvanceOutcome as WireOutcome, AdvanceRefsRequest, AdvanceRefsResponse, BeginUploadRequest,
+    BeginUploadResponse, CompleteUploadRequest, CompleteUploadResponse, DownloadPackHeader,
+    DownloadPackRequest, DownloadPackResponse, GetServerInfoRequest, GetServerInfoResponse,
+    ListRefsRequest, ListRefsResponse, PackChunk, PackExistsRequest, PackExistsResponse,
+    ReadRefRequest, ReadRefResponse, RefEntry, RefExpectation, TransportService, UpdateRefRequest,
+    UpdateRefResponse, UploadPackRequest, UploadPackResponse, UploadPartRequest,
+    UploadPartResponse, UploadTicket,
 };
 use super::{Shared, authenticated};
 use crate::error::ServerError;
@@ -380,9 +380,7 @@ where
                 )
                 .await?;
             let result = match result {
-                BeginUploadResult::AlreadyPresent => {
-                    BeginResult::AlreadyPresent(Box::new(AlreadyPresent::default()))
-                }
+                BeginUploadResult::AlreadyPresent => BeginResult::AlreadyPresent(Box::default()),
                 BeginUploadResult::Ticket {
                     id,
                     part_size,

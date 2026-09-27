@@ -59,6 +59,7 @@ async fn wire_suite_fs_sqlite_auth_v2() {
     )
     .unwrap();
     cfg.pipeline.write_quota = Some(QUOTA);
+    cfg.pipeline.ticket_caps.per_signer = 4;
     let opened = server::open(&cfg).unwrap();
     let shutdown = Shutdown::new();
     let served = common::spawn_serve(listener, opened.router.clone(), &shutdown);
@@ -82,6 +83,7 @@ async fn wire_suite_fs_sqlite_auth_v2() {
     profile.derive_features();
     profile.features.insert(Feature::Health);
     profile.features.insert(Feature::Tickets);
+    profile.ticket_per_signer = 4;
     // The pipeline rejects a signature over gzip bytes (fails closed).
     profile.features.insert(Feature::StrictGzipAuth);
     let target = WireTarget {

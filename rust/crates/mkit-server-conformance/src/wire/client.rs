@@ -37,6 +37,8 @@ pub enum Rpc {
     AdvanceRefs,
     /// `PackExists`
     PackExists,
+    /// `BeginUpload`
+    BeginUpload,
     /// `UploadPack` (client-streaming)
     UploadPack,
     /// `DownloadPack` (server-streaming)
@@ -53,6 +55,7 @@ impl Rpc {
             Self::UpdateRef => "/mkit.transport.v1.TransportService/UpdateRef",
             Self::AdvanceRefs => "/mkit.transport.v1.TransportService/AdvanceRefs",
             Self::PackExists => "/mkit.transport.v1.TransportService/PackExists",
+            Self::BeginUpload => "/mkit.transport.v1.TransportService/BeginUpload",
             Self::UploadPack => "/mkit.transport.v1.TransportService/UploadPack",
             Self::DownloadPack => "/mkit.transport.v1.TransportService/DownloadPack",
         }
@@ -61,7 +64,10 @@ impl Rpc {
     /// Whether auth v2 requires a signature.
     #[must_use]
     pub fn is_write(self) -> bool {
-        matches!(self, Self::UpdateRef | Self::AdvanceRefs | Self::UploadPack)
+        matches!(
+            self,
+            Self::UpdateRef | Self::AdvanceRefs | Self::BeginUpload | Self::UploadPack
+        )
     }
 }
 
@@ -77,7 +83,7 @@ pub struct Reply {
 }
 
 /// A Connect error as the client received it. Cases compare `code` (and
-/// `http_status`, `details` where the spec fixes them), never `message`.
+/// `http_status`, `details` and `message` only where the spec fixes them).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RpcError {
     /// The Connect code, e.g. `invalid_argument`.
@@ -86,7 +92,7 @@ pub struct RpcError {
     pub http_status: u16,
     /// `(type, base64 value)` of each error detail.
     pub details: Vec<(String, String)>,
-    /// For diagnostics only.
+    /// For diagnostics, and assertions where the spec fixes exact public text.
     pub message: String,
 }
 

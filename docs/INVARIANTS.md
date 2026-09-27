@@ -1212,3 +1212,23 @@ entry decompression or retained delta targets.
 **Enforced by:** `pack::tests` resident-peak, bomb, retention-equivalence and
 maximum-wire-length regressions; live wasm framing tests in
 `apps/web/src/lib/mkit.test.ts`.
+
+## BeginUpload decisions and replay share the write batch
+
+**Always:** BeginUpload authorizes before returning a live ticket or membership
+result. Those results skip admission and quota but persist a replay record.
+A new ticket, its counters, expiry timer, Ticketed reservation, quota and replay
+commit in the target ref shard's one guarded batch. D34 uses the common epoch
+lease stages, el guard and capped deadline. Replay stores the complete token.
+
+**Because:** repeat operations must allocate neither extra reservations nor cap
+slots, and a retry must still return identical token bytes after consumption or
+key rotation. Membership decisions in Multi may consult only the local repo row.
+
+**If violated:** a denied request allocates state, racing opens exceed the caps,
+retries charge admission again, or token results disappear with ticket rows.
+
+**Enforced by:** `pipeline/{begin,plan}.rs`, strict replay codecs, token goldens,
+and native `tests/begin_upload.rs` over memory and SQLite (Single and D34).
+Ticket expiry cleanup and admission Pending/Aborted reconciliation remain
+WP-1.14 and WP-3.3 respectively.

@@ -806,6 +806,7 @@ name = "mkit-server"
 version = "0.4.2"
 dependencies = [
  "base64",
+ "blake3",
  "buffa",
  "bytes",
  "connectrpc",
@@ -821,6 +822,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]
