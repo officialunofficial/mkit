@@ -367,10 +367,13 @@ impl BmtTree {
 
     /// Generates a range proof for the contiguous leaves `start..=end`.
     fn range_proof(&self, start: u32, end: u32) -> Result<Proof, MerkleError> {
+        // Intentional divergence from `commonware_storage::bmt`, whose
+        // `range_proof(0, 0)` on an empty tree returns `Proof::default()`:
+        // SPEC-MERKLE-OBJECTS §5.4 requires a builder to refuse every
+        // position of the empty `Tree`, including the range `0..=0`.
+        // `tests::proofs_match_commonware` only draws `n >= 1`, so the
+        // cross-check never compares this case.
         if self.empty {
-            if start == 0 && end == 0 {
-                return Ok(Proof::default());
-            }
             return Err(MerkleError::PositionOutOfRange(start));
         }
         if start > end {
@@ -1259,6 +1262,26 @@ mod tests {
         assert_eq!(
             verify_tree_entries_multi(&id, &[], &real_proof),
             Err(MerkleError::NoPositions)
+        );
+    }
+
+    #[test]
+    fn empty_tree_builders_refuse_position_zero() {
+        // SPEC-MERKLE-OBJECTS §5.4: position 0 of the empty `Tree`
+        // (leaf_count 0), including the range `0..=0`, MUST be refused
+        // rather than answered with the all-default proof (MKIT-56).
+        let empty = tree(vec![]);
+        assert_eq!(
+            build_tree_entries_range_proof(&empty, 0, 0),
+            Err(MerkleError::PositionOutOfRange(0))
+        );
+        assert_eq!(
+            build_tree_entry_proof(&empty, 0),
+            Err(MerkleError::PositionOutOfRange(0))
+        );
+        assert_eq!(
+            build_tree_entries_multi_proof(&empty, [0]),
+            Err(MerkleError::PositionOutOfRange(0))
         );
     }
 

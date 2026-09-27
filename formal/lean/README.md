@@ -135,10 +135,10 @@ rule for range proofs against the empty Tree. Status: resolved and checked.
 `start` it returns `PositionOutOfRange`; both reject). The model rejects it
 too, proved by `verifyRangeId_nil`. The exporter's `golden-empty-tree` case
 has two `ADV` lines (`multi -` and `range 0,0`, all-default proof), and Rust
-and the model both reject them in the difftest. The builder side is still
-open: SPEC-MERKLE-OBJECTS §5.4 now requires builders to refuse it, but
-`merkle.rs`'s range builder returns `Proof::default()` for `0..=0` of the
-empty Tree (Kani harness `merkle_builder_empty_tree_refuses` fails on it).
+and the model both reject them in the difftest. The builder side is fixed
+too (MKIT-56): SPEC-MERKLE-OBJECTS §5.4 requires builders to refuse it, and
+`merkle.rs`'s range builder now returns `PositionOutOfRange` for every range
+of the empty Tree (Kani harness `merkle_builder_empty_tree_refuses` passes).
 
 ## Delta (MKIT-25)
 
