@@ -22,6 +22,14 @@ train).
 
 ### Changed
 
+- *(server)* Multi addressing now defaults to an empty namespace allowlist and
+  owner writes. Namespace denials and non-owner writes return `permission_denied`
+  before allocation. Authorizer hooks can be additional checks or explicit
+  authority sources, with owner facts passed to Authorize and Admit. Startup
+  refuses incompatible write policies, an open authority hook, and `any` with
+  default admission unless explicitly overridden (D27; WP-1.5). Embedders select
+  these policies in core; adapter multi-mode configuration follows in WP-1.30.
+
 - *(server)* Add native `--sharding single|d34` (default `single`) for SQLite
   metadata. D34 co-locates each branch head and canonical packmap in one ref
   shard and requires that pairing for `AdvanceRefs`, rejecting others before

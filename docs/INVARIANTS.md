@@ -1002,3 +1002,27 @@ cancellation must not hide a durable timer from the native driver.
 
 **Enforced by:** `mkit-server/src/timers/tests.rs` race and atomicity tests,
 `mkit-server-native/tests/timers.rs`, and the worker's pure alarm tests.
+
+## Namespace and write policy decide before allocation and never read existence
+
+**Always:** Multi writes pass the namespace policy and owner/authority policy
+in the authorize stage, after replay lookup and creation observations, before
+admission or any quota, reservation, replay, namespace or repository allocation.
+Built-in policy never reads creation facts or repository existence. Namespace
+and non-owner denials have the same public `permission_denied` message,
+"write not permitted". Namespace denial never calls the authorizer. Authorize
+and Admit both see the established owner and grant facts; authority hooks still
+run for owners and may deny them. Single deployments retain open write behavior.
+
+**Because:** unauthorized writes must not disclose repository existence or
+allowlist contents, allocate state, or bypass a deployment namespace boundary.
+
+**If violated:** denied callers can create storage state or infer other tenants'
+repositories; an authority Allow can bypass a namespace restriction.
+
+**Enforced by:** `Pipeline::new` validates policy combinations and D27 using
+wasm-safe provided trait methods. `Pipeline::authorize` enforces STC §7.5 and
+SPEC-SERVER §6.2. `pipeline::tests::policy` covers the policy/principal/hook matrix,
+startup refusals, identical existing/missing repository denials, and empty
+coordinator/ref shards after every denial. Wire `policy.*` cases pin owner,
+non-owner and allowlist behavior. Grants and private reads remain M2.

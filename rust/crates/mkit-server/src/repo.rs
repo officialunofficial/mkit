@@ -6,6 +6,7 @@
 use mkit_core::repo_identity::{Namespace, RepositoryIdentity};
 
 use crate::error::ServerError;
+use crate::policy::NamespacePolicy;
 
 /// Longest accepted repository name, matching the auth v2 `repository`
 /// component bound (`mkit_core::write_auth`).
@@ -91,16 +92,26 @@ pub struct RepoId {
     pub name: RepoName,
 }
 
-/// Multi-repository addressing. Namespace policy is added by WP-1.5.
+/// Multi-repository addressing with a deployment namespace policy.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct MultiAddressing {}
+pub struct MultiAddressing {
+    /// Namespaces permitted for writes. Defaults to an empty allowlist.
+    pub namespace_policy: NamespacePolicy,
+}
 
 impl MultiAddressing {
     /// Route requests using their namespaced `X-Repository` identity.
     #[must_use]
     pub fn new() -> Self {
-        Self {}
+        Self::default()
+    }
+
+    /// Route with the given namespace policy (SPEC-TRANSPORT-CONNECT §7.5).
+    #[must_use]
+    pub fn with_namespace_policy(mut self, policy: NamespacePolicy) -> Self {
+        self.namespace_policy = policy;
+        self
     }
 }
 

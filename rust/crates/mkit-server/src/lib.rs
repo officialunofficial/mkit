@@ -32,6 +32,7 @@ pub mod fs;
 mod memory;
 mod op;
 pub mod pipeline;
+pub mod policy;
 mod principal;
 pub mod quota;
 pub mod refs;
