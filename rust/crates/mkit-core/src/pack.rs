@@ -676,11 +676,9 @@ fn decompress_zstd_entry(payload: &[u8]) -> Result<Vec<u8>, PackError> {
 #[cfg(feature = "pack-zstd")]
 fn decompress_zstd_into(payload: &[u8], output: &mut Vec<u8>) -> Result<(), PackError> {
     let len = zstd_entry_len(payload)?;
-    output.resize(len, 0);
+    output.clear();
     let actual = zstd::bulk::Decompressor::new()
-        .and_then(|mut decoder| {
-            decoder.decompress_to_buffer(&payload[ZSTD_LEN_PREFIX..], output.as_mut_slice())
-        })
+        .and_then(|mut decoder| decoder.decompress_to_buffer(&payload[ZSTD_LEN_PREFIX..], output))
         .map_err(|e| PackError::ZstdDecompress(e.to_string()))?;
     if actual != len {
         return Err(PackError::DecompressedSizeMismatch(len, actual));
@@ -883,49 +881,69 @@ impl PackReader {
                 Entry::Delta { .. } => None,
             })
             .collect();
-        let mut raw_results = stage_raw_entries(&batch, &raw_frames, &uses, budget).into_iter();
-        let mut in_pack = std::collections::HashMap::new();
-        let mut report = UnpackReport::default();
-        // Phase 3 exposes bases only at their pack position and releases
-        // them immediately after their last use, including cached store bases.
-        for entry in entries {
-            match entry {
-                Entry::Raw(payload) => {
-                    let (stored_hash, retained) = raw_results.next().expect("raw frame result")?;
-                    if has_remaining_uses(&uses, &stored_hash) {
-                        if let Some(bytes) = retained {
-                            in_pack.insert(stored_hash, ResidentBytes::Owned(bytes));
-                        } else if let EncodedPayload::Plain(bytes) = payload {
-                            in_pack.insert(stored_hash, ResidentBytes::Borrowed(bytes));
-                        }
-                    }
-                    report.raw_count += 1;
-                    report.stored.push(stored_hash);
-                }
-                Entry::Delta { base, stream } => {
-                    let stream = stream.decode(budget)?;
-                    let stored_hash = stage_delta_target(
-                        store,
-                        &batch,
-                        &mut in_pack,
-                        &mut uses,
-                        budget,
-                        base,
-                        stream.as_ref(),
-                    )?;
-                    report.delta_count += 1;
-                    report.stored.push(stored_hash);
-                }
-            }
-        }
-        batch.commit()?;
-        Ok(report)
+        let raw_results = stage_raw_entries(&batch, &raw_frames, &uses, budget);
+        finish_pack_read(entries, raw_results, uses, budget, store, batch)
     }
 }
 
-/// Owned payload budget: at least one maximum-size base plus target (2 GiB),
-/// or sixteen times the wire pack size for less compressible normal packs.
-/// Saturation preserves this bound on 32-bit hosts without arithmetic traps.
+/// Replay staging results in pack order; deferred admissions are strict here.
+fn finish_pack_read<'b>(
+    entries: Vec<Entry<'_>>,
+    raw_results: RawStageResults<'b>,
+    mut uses: std::collections::HashMap<Hash, BaseUses>,
+    budget: &'b ResidentBudget<'_>,
+    store: &ObjectStore,
+    batch: crate::batch::WriteBatch<'_>,
+) -> Result<UnpackReport, PackError> {
+    let mut raw_results = raw_results.into_iter();
+    let mut in_pack = std::collections::HashMap::new();
+    let mut report = UnpackReport::default();
+    // Phase 3 exposes bases only at their pack position and releases
+    // them immediately after their last use, including cached store bases.
+    for (position, entry) in entries.into_iter().enumerate() {
+        match entry {
+            Entry::Raw(payload) => {
+                let (stored_hash, retained) = raw_results
+                    .next()
+                    .expect("raw frame result")
+                    .unwrap_or_else(|| {
+                        prepare_and_stage_raw(&batch, position, payload, &uses, budget)
+                    })?;
+                if has_remaining_uses(&uses, &stored_hash) {
+                    if let Some(bytes) = retained {
+                        in_pack.insert(stored_hash, ResidentBytes::Owned(bytes));
+                    } else if let EncodedPayload::Plain(bytes) = payload {
+                        in_pack.insert(stored_hash, ResidentBytes::Borrowed(bytes));
+                    }
+                }
+                report.raw_count += 1;
+                report.stored.push(stored_hash);
+            }
+            Entry::Delta { base, stream } => {
+                let stream = stream.decode(budget)?;
+                let stored_hash = stage_delta_target(
+                    store,
+                    &batch,
+                    &mut in_pack,
+                    &mut uses,
+                    budget,
+                    base,
+                    stream.as_ref(),
+                )?;
+                report.delta_count += 1;
+                report.stored.push(stored_hash);
+            }
+        }
+    }
+    batch.commit()?;
+    Ok(report)
+}
+
+/// Owned payload cap: `max(2 * MAX_RAW_OBJECT_SIZE, 16 * pack_len)`.
+/// The 2 GiB floor covers a maximum-size base plus target; a compressed delta
+/// also charges its decoded stream, so a 1 GiB store base plus 1 GiB target
+/// from a small pack is refused while that stream is resident.
+/// Saturation avoids arithmetic traps on 32-bit hosts.
 fn resident_bytes_cap(pack_len: usize) -> usize {
     MAX_RAW_OBJECT_SIZE
         .saturating_mul(2)
@@ -966,12 +984,7 @@ impl<'a> ResidentBudget<'a> {
     }
 
     fn allocate(&self, len: usize) -> Result<OwnedBytes<'_>, PackError> {
-        let reservation = self.charge(len)?;
-        let mut bytes = Vec::new();
-        bytes
-            .try_reserve_exact(len)
-            .map_err(|_| PackError::PackfileTooLarge)?;
-        Ok(OwnedBytes { bytes, reservation })
+        self.charge(len)?.allocate()
     }
 
     fn record_owned(&self, len: usize) {
@@ -984,6 +997,19 @@ impl<'a> ResidentBudget<'a> {
 struct Reservation<'a> {
     budget: &'a ResidentBudget<'a>,
     len: usize,
+}
+
+impl<'a> Reservation<'a> {
+    fn allocate(self) -> Result<OwnedBytes<'a>, PackError> {
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(self.len)
+            .map_err(|_| PackError::PackfileTooLarge)?;
+        Ok(OwnedBytes {
+            bytes,
+            reservation: self,
+        })
+    }
 }
 
 impl Drop for Reservation<'_> {
@@ -1032,6 +1058,25 @@ impl<'p> EncodedPayload<'p> {
             }
         }
     }
+
+    /// Only a failed admission is deferred; allocation and decode errors are permanent.
+    fn decode_for_staging<'b>(
+        self,
+        budget: &'b ResidentBudget<'_>,
+    ) -> Result<Option<ResidentBytes<'p, 'b>>, PackError> {
+        match self {
+            Self::Plain(bytes) => Ok(Some(ResidentBytes::Borrowed(bytes))),
+            Self::Zstd(payload) => {
+                let len = zstd_entry_len(payload)?;
+                let Ok(reservation) = budget.charge(len) else {
+                    return Ok(None);
+                };
+                let mut output = reservation.allocate()?;
+                decompress_zstd_into(payload, &mut output.bytes)?;
+                Ok(Some(ResidentBytes::Owned(output)))
+            }
+        }
+    }
 }
 
 enum Entry<'p> {
@@ -1052,7 +1097,9 @@ fn has_remaining_uses(uses: &std::collections::HashMap<Hash, BaseUses>, hash: &H
     uses.get(hash).is_some_and(|usage| usage.remaining != 0)
 }
 
-type RawStageResults<'b> = Vec<Result<(Hash, Option<OwnedBytes<'b>>), PackError>>;
+// None marks deferred admission or work skipped after an earlier failure.
+type RawStageResult<'b> = Option<Result<(Hash, Option<OwnedBytes<'b>>), PackError>>;
+type RawStageResults<'b> = Vec<RawStageResult<'b>>;
 
 /// Validate, hash and stage independent raw frames, preserving result order.
 /// Errors stay in the result queue until phase 3 reaches that pack position.
@@ -1070,9 +1117,12 @@ fn stage_raw_entries<'b>(
             return stage_raw_entries_parallel(batch, frames, uses, budget, threads);
         }
     }
+    let first_failure = std::sync::atomic::AtomicUsize::new(usize::MAX);
     frames
         .iter()
-        .map(|&(position, payload)| prepare_and_stage_raw(batch, position, payload, uses, budget))
+        .map(|&(position, payload)| {
+            stage_raw_in_phase_two(batch, position, payload, uses, budget, &first_failure)
+        })
         .collect()
 }
 
@@ -1084,6 +1134,7 @@ fn stage_raw_entries_parallel<'b>(
     budget: &'b ResidentBudget<'_>,
     threads: usize,
 ) -> RawStageResults<'b> {
+    let first_failure = &std::sync::atomic::AtomicUsize::new(usize::MAX);
     let chunk_size = frames.len().div_ceil(threads).max(1);
     let mut out = Vec::with_capacity(frames.len());
     std::thread::scope(|scope| {
@@ -1094,7 +1145,14 @@ fn stage_raw_entries_parallel<'b>(
                     chunk
                         .iter()
                         .map(|&(position, payload)| {
-                            prepare_and_stage_raw(batch, position, payload, uses, budget)
+                            stage_raw_in_phase_two(
+                                batch,
+                                position,
+                                payload,
+                                uses,
+                                budget,
+                                first_failure,
+                            )
                         })
                         .collect::<Vec<_>>()
                 })
@@ -1107,6 +1165,28 @@ fn stage_raw_entries_parallel<'b>(
     out
 }
 
+fn stage_raw_in_phase_two<'b>(
+    batch: &crate::batch::WriteBatch<'_>,
+    position: usize,
+    payload: EncodedPayload<'_>,
+    uses: &std::collections::HashMap<Hash, BaseUses>,
+    budget: &'b ResidentBudget<'_>,
+    first_failure: &std::sync::atomic::AtomicUsize,
+) -> RawStageResult<'b> {
+    if position > first_failure.load(Ordering::Relaxed) {
+        return None;
+    }
+    let result = match payload.decode_for_staging(budget) {
+        Ok(Some(payload)) => stage_decoded_raw(batch, position, payload, uses, budget),
+        Ok(None) => return None,
+        Err(error) => Err(error),
+    };
+    if result.is_err() {
+        first_failure.fetch_min(position, Ordering::Relaxed);
+    }
+    Some(result)
+}
+
 fn prepare_and_stage_raw<'b>(
     batch: &crate::batch::WriteBatch<'_>,
     position: usize,
@@ -1114,7 +1194,16 @@ fn prepare_and_stage_raw<'b>(
     uses: &std::collections::HashMap<Hash, BaseUses>,
     budget: &'b ResidentBudget<'_>,
 ) -> Result<(Hash, Option<OwnedBytes<'b>>), PackError> {
-    let payload = payload.decode(budget)?;
+    stage_decoded_raw(batch, position, payload.decode(budget)?, uses, budget)
+}
+
+fn stage_decoded_raw<'b>(
+    batch: &crate::batch::WriteBatch<'_>,
+    position: usize,
+    payload: ResidentBytes<'_, 'b>,
+    uses: &std::collections::HashMap<Hash, BaseUses>,
+    budget: &'b ResidentBudget<'_>,
+) -> Result<(Hash, Option<OwnedBytes<'b>>), PackError> {
     let obj = validate_storable_object(payload.as_ref())?;
     let stored_hash = crate::object::id_from_object(&obj, payload.as_ref());
     batch.write_prehashed(stored_hash, &[payload.as_ref()])?;
@@ -1630,6 +1719,188 @@ mod tests {
             };
             assert!(matches!(parser.next(), Some(Err(PackError::UnexpectedEof))));
         }
+    }
+
+    #[test]
+    #[cfg(feature = "pack-zstd")]
+    fn junk_zstd_claims_fail_without_zero_filling() {
+        let mut body = Vec::from(MAGIC.as_slice());
+        body.extend_from_slice(&VERSION_V2.to_le_bytes());
+        body.extend_from_slice(&64u32.to_le_bytes());
+        for _ in 0..64 {
+            body.push(0x03);
+            body.extend_from_slice(&5u32.to_le_bytes());
+            body.extend_from_slice(&u32::try_from(MAX_RAW_OBJECT_SIZE).unwrap().to_le_bytes());
+            body.push(0xAA);
+        }
+        let pack = finish_pack_body(body);
+        let (_dir, store) = fresh_store();
+        let started = std::time::Instant::now();
+        assert!(matches!(
+            PackReader::read(&pack, &store),
+            Err(PackError::ZstdDecompress(_))
+        ));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "junk frames must not initialize the claimed buffers: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    #[cfg(all(feature = "pack-zstd", not(target_arch = "wasm32")))]
+    fn phase_two_budget_contention_retries_sequentially() {
+        let bytes = write_blob_via_serialize(&vec![b'a'; 256 * 1024]);
+        let mut writer = PackWriter::new();
+        for _ in 0..16 {
+            writer.push_raw(hash::hash(&bytes), &bytes).unwrap();
+        }
+        let pack = writer.finish().unwrap();
+        let mut parser = PackEntries::new(&pack).unwrap();
+        let frames: Vec<_> = (0..parser.entry_count())
+            .map(|position| match parser.next_encoded_entry().unwrap() {
+                Entry::Raw(payload @ EncodedPayload::Zstd(_)) => (position, payload),
+                _ => panic!("expected compressed raw frame"),
+            })
+            .collect();
+        for threads in [1, 2, 4] {
+            let (_dir, store) = fresh_store();
+            let batch = store.batch();
+            let budget = ResidentBudget::new(bytes.len(), None);
+            let uses = std::collections::HashMap::new();
+            // Hold an in-flight worker's entire allowance until every other
+            // worker has attempted admission, avoiding scheduler-dependent races.
+            let in_flight = budget.allocate(bytes.len()).unwrap();
+            let first_failure = std::sync::atomic::AtomicUsize::new(usize::MAX);
+            assert!(
+                stage_raw_in_phase_two(
+                    &batch,
+                    frames[0].0,
+                    frames[0].1,
+                    &uses,
+                    &budget,
+                    &first_failure
+                )
+                .is_none()
+            );
+            assert_eq!(first_failure.load(Ordering::Relaxed), usize::MAX);
+            let results = stage_raw_entries_parallel(&batch, &frames, &uses, &budget, threads);
+            assert_eq!(results.len(), frames.len());
+            assert!(results.iter().all(Option::is_none));
+            drop(in_flight);
+
+            let entries = frames
+                .iter()
+                .map(|(_, payload)| Entry::Raw(*payload))
+                .collect();
+            let report = finish_pack_read(entries, results, uses, &budget, &store, batch).unwrap();
+            assert_eq!(report.raw_count, 16);
+            assert_eq!(report.delta_count, 0);
+            assert_eq!(report.stored, vec![hash::hash(&bytes); 16]);
+            assert_eq!(store.read(&hash::hash(&bytes)).unwrap(), bytes);
+            assert_eq!(budget.peak.load(Ordering::Relaxed), bytes.len());
+            assert_eq!(budget.used.load(Ordering::Relaxed), 0);
+        }
+    }
+
+    #[test]
+    fn phase_two_skips_after_the_first_permanent_failure() {
+        let (_dir, store) = fresh_store();
+        let batch = store.batch();
+        let uses = std::collections::HashMap::new();
+        let budget = ResidentBudget::new(1024, None);
+        let first_failure = std::sync::atomic::AtomicUsize::new(usize::MAX);
+        assert!(matches!(
+            stage_raw_in_phase_two(
+                &batch,
+                7,
+                EncodedPayload::Plain(b"garbage"),
+                &uses,
+                &budget,
+                &first_failure
+            ),
+            Some(Err(PackError::InvalidObject(_)))
+        ));
+        let invalid_claim = u32::MAX.to_le_bytes();
+        assert!(
+            stage_raw_in_phase_two(
+                &batch,
+                19,
+                EncodedPayload::Zstd(&invalid_claim),
+                &uses,
+                &budget,
+                &first_failure
+            )
+            .is_none()
+        );
+        assert_eq!(budget.peak.load(Ordering::Relaxed), 0);
+        let valid = write_blob_via_serialize(b"earlier pack position");
+        assert!(matches!(
+            stage_raw_in_phase_two(
+                &batch,
+                3,
+                EncodedPayload::Plain(&valid),
+                &uses,
+                &budget,
+                &first_failure
+            ),
+            Some(Ok(_))
+        ));
+        assert_eq!(first_failure.load(Ordering::Relaxed), 7);
+        for _ in 0..2 {
+            assert!(matches!(
+                stage_raw_in_phase_two(
+                    &batch,
+                    2,
+                    EncodedPayload::Plain(b"garbage"),
+                    &uses,
+                    &budget,
+                    &first_failure
+                ),
+                Some(Err(PackError::InvalidObject(_)))
+            ));
+            assert_eq!(first_failure.load(Ordering::Relaxed), 2);
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "pack-zstd")]
+    fn deferred_raw_error_precedes_a_later_staging_failure() {
+        let mut payload = 7u32.to_le_bytes().to_vec();
+        payload.extend_from_slice(&zstd::bulk::compress(b"garbage", 3).unwrap());
+        let over_cap = u32::try_from(MAX_RAW_OBJECT_SIZE + 1)
+            .unwrap()
+            .to_le_bytes();
+        let (_dir, store) = fresh_store();
+        let batch = store.batch();
+        let uses = std::collections::HashMap::new();
+        let budget = ResidentBudget::new(7, None);
+        let first_failure = std::sync::atomic::AtomicUsize::new(usize::MAX);
+        let in_flight = budget.allocate(7).unwrap();
+        let earlier = EncodedPayload::Zstd(&payload);
+        let later = EncodedPayload::Zstd(&over_cap);
+        let deferred = stage_raw_in_phase_two(&batch, 0, earlier, &uses, &budget, &first_failure);
+        assert!(deferred.is_none());
+        let failed = stage_raw_in_phase_two(&batch, 1, later, &uses, &budget, &first_failure);
+        assert!(matches!(
+            failed,
+            Some(Err(PackError::DecompressedSizeOverCap(_)))
+        ));
+        assert_eq!(first_failure.load(Ordering::Relaxed), 1);
+        drop(in_flight);
+        assert!(matches!(
+            finish_pack_read(
+                vec![Entry::Raw(earlier), Entry::Raw(later)],
+                vec![deferred, failed],
+                uses,
+                &budget,
+                &store,
+                batch
+            ),
+            Err(PackError::InvalidObject(MkitError::InvalidObjectType(103)))
+        ));
+        assert_eq!(budget.used.load(Ordering::Relaxed), 0);
+        assert!(!store.contains(&hash::hash(b"garbage")));
     }
 
     #[test]

@@ -69,6 +69,17 @@ slow-timeout = { period = "150s", terminate-after = 1 }
 filter = 'binary(branch_rename_commit_race)'
 slow-timeout = { period = "150s", terminate-after = 1 }
 
+# This pack residency regression expands several 128 MiB delta targets.
+# Its debug CPU work takes about 26 s alone, so allow shared-machine load
+# without classifying the bounded decode as a hang.
+[[profile.default.overrides]]
+filter = 'test(=pack::tests::compressed_delta_bomb_releases_targets_and_checks_cap_before_allocation)'
+slow-timeout = { period = "300s", terminate-after = 1 }
+
+[[profile.ci.overrides]]
+filter = 'test(=pack::tests::compressed_delta_bomb_releases_targets_and_checks_cap_before_allocation)'
+slow-timeout = { period = "300s", terminate-after = 1 }
+
 [profile.ignored-lane]
 # #505 PR 5/5: a handful of irreducibly-real tests (subprocess sleeps,
 # real localhost TCP, the ~5s worktree-lock wait, a real `ssh` connect
