@@ -201,6 +201,9 @@ train).
 
 ### Added
 
+- *(spec)* Indexed-mode server contract, D32 file extraction, repository-isolated
+  resolution, and additive `PendingVerification` detail and
+  `max_delta_chain_depth` discovery field (WP-4.4).
 - *(spec)* Add bounded admission credential headers to hooks.v1 `AdmitRequest` (WP-3.6b).
 - *(docs)* Add an unsupported TypeScript `mppx` admission Worker reference for
   `mkit.server.hooks.v1`, with delayed settlement and optional signed hooks (WP-3.14).

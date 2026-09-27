@@ -4127,6 +4127,16 @@ pub struct GetServerInfoResponse {
         skip_serializing_if = "::core::option::Option::is_none"
     )]
     pub index_fanout: ::core::option::Option<u32>,
+    /// SPEC-SERVER §9.8; 0 when indexed mode is off
+    ///
+    /// Field 16: `max_delta_chain_depth`
+    #[serde(
+        rename = "maxDeltaChainDepth",
+        alias = "max_delta_chain_depth",
+        with = "::buffa::json_helpers::opt_uint32",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub max_delta_chain_depth: ::core::option::Option<u32>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -4149,6 +4159,7 @@ impl ::core::fmt::Debug for GetServerInfoResponse {
             .field("grant_schemes", &self.grant_schemes)
             .field("namespace_policy", &self.namespace_policy)
             .field("index_fanout", &self.index_fanout)
+            .field("max_delta_chain_depth", &self.max_delta_chain_depth)
             .finish()
     }
 }
@@ -4270,6 +4281,13 @@ impl GetServerInfoResponse {
         self.index_fanout = Some(value);
         self
     }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::max_delta_chain_depth`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_max_delta_chain_depth(mut self, value: u32) -> Self {
+        self.max_delta_chain_depth = Some(value);
+        self
+    }
 }
 ::buffa::impl_default_instance!(GetServerInfoResponse);
 impl ::buffa::MessageName for GetServerInfoResponse {
@@ -4336,6 +4354,9 @@ impl ::buffa::Message for GetServerInfoResponse {
         if let Some(v) = self.index_fanout {
             size += 1u64 + ::buffa::types::uint32_encoded_len(v) as u64;
         }
+        if let Some(v) = self.max_delta_chain_depth {
+            size += 2u64 + ::buffa::types::uint32_encoded_len(v) as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -4390,6 +4411,9 @@ impl ::buffa::Message for GetServerInfoResponse {
         }
         if let Some(v) = self.index_fanout {
             ::buffa::types::put_uint32_field(15u32, v, buf);
+        }
+        if let Some(v) = self.max_delta_chain_depth {
+            ::buffa::types::put_uint32_field(16u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -4553,6 +4577,15 @@ impl ::buffa::Message for GetServerInfoResponse {
                     ::buffa::types::decode_uint32(buf)?,
                 );
             }
+            16u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.max_delta_chain_depth = ::core::option::Option::Some(
+                    ::buffa::types::decode_uint32(buf)?,
+                );
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -4576,6 +4609,7 @@ impl ::buffa::Message for GetServerInfoResponse {
         self.grant_schemes.clear();
         self.namespace_policy = ::core::option::Option::None;
         self.index_fanout = ::core::option::Option::None;
+        self.max_delta_chain_depth = ::core::option::Option::None;
         self.__buffa_unknown_fields.clear();
     }
 }
@@ -6307,5 +6341,150 @@ pub const __COMPLETE_UPLOAD_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEn
     type_url: "type.googleapis.com/mkit.transport.v1.CompleteUploadResponse",
     to_json: ::buffa::type_registry::any_to_json::<CompleteUploadResponse>,
     from_json: ::buffa::type_registry::any_from_json::<CompleteUploadResponse>,
+    is_wkt: false,
+};
+/// ----------------------------------------------------------------------------
+/// Errors/details.
+///
+/// Detail on an `unavailable` AdvanceRefs whose consumed pack is still under
+/// verification (SPEC-TRANSPORT-CONNECT §7.6; SPEC-SERVER §9.5).
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize, ::serde::Deserialize)]
+#[serde(default)]
+pub struct PendingVerification {
+    /// server's suggested poll interval, 1000..=60000
+    ///
+    /// Field 1: `retry_after_ms`
+    #[serde(
+        rename = "retryAfterMs",
+        alias = "retry_after_ms",
+        with = "::buffa::json_helpers::opt_uint32",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub retry_after_ms: ::core::option::Option<u32>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for PendingVerification {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("PendingVerification")
+            .field("retry_after_ms", &self.retry_after_ms)
+            .finish()
+    }
+}
+impl PendingVerification {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.PendingVerification";
+}
+impl PendingVerification {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::retry_after_ms`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_retry_after_ms(mut self, value: u32) -> Self {
+        self.retry_after_ms = Some(value);
+        self
+    }
+}
+::buffa::impl_default_instance!(PendingVerification);
+impl ::buffa::MessageName for PendingVerification {
+    const PACKAGE: &'static str = "mkit.transport.v1";
+    const NAME: &'static str = "PendingVerification";
+    const FULL_NAME: &'static str = "mkit.transport.v1.PendingVerification";
+    const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.PendingVerification";
+}
+impl ::buffa::Message for PendingVerification {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        if let Some(v) = self.retry_after_ms {
+            size += 1u64 + ::buffa::types::uint32_encoded_len(v) as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let Some(v) = self.retry_after_ms {
+            ::buffa::types::put_uint32_field(1u32, v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.retry_after_ms = ::core::option::Option::Some(
+                    ::buffa::types::decode_uint32(buf)?,
+                );
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.retry_after_ms = ::core::option::Option::None;
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for PendingVerification {
+    const PROTO_FQN: &'static str = "mkit.transport.v1.PendingVerification";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for PendingVerification {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __PENDING_VERIFICATION_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/mkit.transport.v1.PendingVerification",
+    to_json: ::buffa::type_registry::any_to_json::<PendingVerification>,
+    from_json: ::buffa::type_registry::any_from_json::<PendingVerification>,
     is_wkt: false,
 };
