@@ -1168,8 +1168,32 @@ that source or re-keying it (R-102; WP-1.29).
 
 **Enforced by:** `mkit-server/src/relay/tests.rs` crash, contention, ordering,
 chunk-limit and wake-up tests; native SQLite driver tests; Worker Loopback host
-tests. Worker registration, membership reads and coordinator watermarks follow
-in WP-1.23b; writers in WP-1.9/1.10.
+tests. Worker RefShard registration uses
+plan-specific fire caps and two target calls per target per fire, including
+chunking and contention. Fires inspect up to four times their row delivery
+budget, leave blocked targets behind, and rotate target selection in timer
+values without skipping a target's earlier rows. Corruption stops delivery
+after its decodable prefix. Coordinator watermarks follow in WP-1.23c;
+writers in WP-1.9/1.10.
+
+## Pack reads consult only the named repository's membership
+
+**Always:** Multi PackExists and DownloadPack authorize and check repository
+existence, then consult the repository's membership index before opening a
+blob. An optional X-Mkit-Ref checks only the same repository's ref shard;
+invalid, unserved, unknown or overlong hints never cause a public error.
+The hint is outside the auth v2 canonical string. Single reads treat stored
+packs as members. M1 has no quarantined view; later visibility checks must
+constrain both index and hinted answers to the caller's permitted view.
+
+**Because:** blobs may be shared globally, and index relay can lag a write.
+
+**If violated:** pack reads expose another repository's content or make
+malformed hints an existence oracle.
+
+**Enforced by:** store::read::is_member, pipeline pack reads and bounded hint
+parsing, unit call-count/isolation tests and Multi wire membership cases.
+
 
 ## Deployment discovery is public and repository-independent
 

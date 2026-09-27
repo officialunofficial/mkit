@@ -17,7 +17,7 @@ use crate::{
 };
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 fn source() -> Partition {
@@ -98,10 +98,13 @@ async fn fire<S: NamespaceStore, T: NamespaceStore, H: RelayHook>(
 struct Instrumented {
     inner: MemoryKv,
     fail_target: Option<Partition>,
+    fail_targets: Vec<Partition>,
+    calls: Arc<AtomicUsize>,
+    scanned: AtomicUsize,
     fail_delete: AtomicBool,
     race_watermark: AtomicBool,
     append_on_drain: Mutex<Option<Batch>>,
-    applies: Mutex<Vec<(Partition, Batch)>>,
+    applies: Arc<Mutex<Vec<(Partition, Batch)>>>,
     short_pages: bool,
     fail_watermark_after_apply: bool,
 }
@@ -110,10 +113,13 @@ impl Instrumented {
         Self {
             inner: memory(),
             fail_target: None,
+            fail_targets: Vec::new(),
+            calls: Arc::new(AtomicUsize::new(0)),
+            scanned: AtomicUsize::new(0),
             fail_delete: AtomicBool::new(false),
             race_watermark: AtomicBool::new(false),
             append_on_drain: Mutex::new(None),
-            applies: Mutex::new(Vec::new()),
+            applies: Arc::new(Mutex::new(Vec::new())),
             short_pages: false,
             fail_watermark_after_apply: false,
         }
@@ -124,6 +130,7 @@ impl NamespaceStore for Instrumented {
         self.inner.capabilities()
     }
     async fn get(&self, p: &Partition, k: &Key) -> Result<Option<Value>, StoreError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
         if self.fail_watermark_after_apply
             && matches!(keys::parse(k), Some(keys::ParsedKey::RelayHighWater(_)))
             && !self.applies.lock().unwrap().is_empty()
@@ -156,6 +163,7 @@ impl NamespaceStore for Instrumented {
                 },
             )
             .await?;
+        self.scanned.fetch_add(page.entries.len(), Ordering::SeqCst);
         if start == &keys::class_range(keys::TAG_RELAY).0 && page.entries.is_empty() {
             let writer = self.append_on_drain.lock().unwrap().take();
             if let Some(batch) = writer {
@@ -168,8 +176,9 @@ impl NamespaceStore for Instrumented {
         Ok(page)
     }
     async fn apply(&self, p: &Partition, b: Batch) -> Result<BatchOutcome, StoreError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
         self.applies.lock().unwrap().push((p.clone(), b.clone()));
-        if self.fail_target.as_ref() == Some(p) {
+        if self.fail_target.as_ref() == Some(p) || self.fail_targets.contains(p) {
             return Err(StoreError::Full);
         }
         if b.writes.iter().any(|w| matches!(w,Write::Delete(k) if matches!(keys::parse(k),Some(keys::ParsedKey::Relay(_))))) && self.fail_delete.swap(false,Ordering::SeqCst) { return Err(StoreError::Full); }
@@ -396,10 +405,12 @@ async fn budgets_reschedule_and_short_pages_are_followed() {
         RelayBudget {
             max_rows: 2,
             max_targets: 16,
+            max_target_calls: None,
         },
         RelayBudget {
             max_rows: 256,
             max_targets: 1,
+            max_target_calls: None,
         },
     ] {
         let mut s = Instrumented::new();
@@ -423,7 +434,7 @@ async fn budgets_reschedule_and_short_pages_are_followed() {
 }
 
 #[tokio::test]
-async fn corrupt_row_stops_tick_without_skipping_or_deleting() {
+async fn corrupt_row_delivers_decodable_prefix_then_stops() {
     let s = memory();
     let h = handler(Instrumented::new());
     append(&s, &target(0), vec![(key(), Value::default())], 50).await;
@@ -434,8 +445,8 @@ async fn corrupt_row_stops_tick_without_skipping_or_deleting() {
     .await
     .unwrap();
     assert!(matches!(fire(&h, &s).await.unwrap(), Fired::Retry));
-    assert_eq!(queued(&s).await.len(), 2);
-    assert!(h.target.applies.lock().unwrap().is_empty());
+    assert_eq!(queued(&s).await.len(), 1);
+    assert_eq!(h.target.applies.lock().unwrap().len(), 1);
 }
 
 struct Hook {
@@ -885,10 +896,12 @@ async fn zero_row_or_target_budget_is_clamped_to_one_and_delivers() {
         RelayBudget {
             max_rows: 0,
             max_targets: 16,
+            max_target_calls: None,
         },
         RelayBudget {
             max_rows: 256,
             max_targets: 0,
+            max_target_calls: None,
         },
     ] {
         let source = memory();
@@ -905,4 +918,198 @@ async fn zero_row_or_target_budget_is_clamped_to_one_and_delivers() {
         assert!(queued(&source).await.is_empty());
         assert_eq!(relay.target.applies.lock().unwrap().len(), 1);
     }
+}
+
+#[tokio::test]
+async fn failing_target_backlog_does_not_fill_the_delivery_window() {
+    let s = memory();
+    let mut target_store = Instrumented::new();
+    target_store.fail_target = Some(target(0));
+    let h = RelayHandler {
+        budget: RelayBudget {
+            max_rows: 2,
+            max_targets: 2,
+            max_target_calls: None,
+        },
+        ..handler(target_store)
+    };
+    for _ in 0..3 {
+        append(&s, &target(0), vec![(key(), Value::default())], 50).await;
+    }
+    append(&s, &target(1), vec![(key(), Value::default())], 50).await;
+    fire(&h, &s).await.unwrap();
+    assert_eq!(
+        h.target.get(&target(1), &key()).await.unwrap(),
+        Some(Value::default())
+    );
+    assert_eq!(queued(&s).await.len(), 3);
+}
+
+#[tokio::test]
+async fn full_failing_target_budget_rotates_to_the_next_target() {
+    let s = memory();
+    let mut target_store = Instrumented::new();
+    target_store.fail_targets = vec![target(0), target(1)];
+    let h = RelayHandler {
+        budget: RelayBudget {
+            max_rows: 2,
+            max_targets: 2,
+            max_target_calls: None,
+        },
+        ..handler(target_store)
+    };
+    append(&s, &target(0), vec![(key(), Value::default())], 50).await;
+    append(&s, &target(1), vec![(key(), Value::default())], 50).await;
+    append(&s, &target(2), vec![(key(), Value::default())], 50).await;
+    let registry = TimerRegistry::new().register(h);
+    for now in [50, 50 + crate::timers::RETRY_BACKOFF_MS] {
+        run_due(
+            &s,
+            &source(),
+            &registry,
+            &ManualClock::new(i64::try_from(now).unwrap()),
+            now,
+            &TickBudget::default(),
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(
+        queued(&s).await.len(),
+        2,
+        "healthy target must drain despite the full failing target budget"
+    );
+}
+
+#[tokio::test]
+async fn target_sequence_order_survives_timer_rotation_across_fires() {
+    let s = memory();
+    let target_store = Instrumented::new();
+    let applies = target_store.applies.clone();
+    for seq in 1..=5u8 {
+        append(
+            &s,
+            &target(u16::from(seq % 2)),
+            vec![(key(), Value::new(vec![seq]))],
+            50,
+        )
+        .await;
+    }
+    let registry = TimerRegistry::new().register(RelayHandler {
+        budget: RelayBudget {
+            max_rows: 1,
+            max_targets: 1,
+            max_target_calls: Some(2),
+        },
+        ..handler(target_store)
+    });
+    for now in 50..55 {
+        run_due(
+            &s,
+            &source(),
+            &registry,
+            &ManualClock::new(i64::try_from(now).unwrap()),
+            now,
+            &TickBudget::default(),
+        )
+        .await
+        .unwrap();
+    }
+    assert!(queued(&s).await.is_empty());
+    let applies = applies.lock().unwrap();
+    for (p, expected) in [(target(1), vec![1, 3, 5]), (target(0), vec![2, 4])] {
+        let seen: Vec<_> = applies
+            .iter()
+            .filter(|(target, _)| target == &p)
+            .flat_map(|(_, batch)| batch.writes.iter())
+            .filter_map(|write| match write {
+                Write::Put(k, v) if k == &keys::relay_high_water(&source()).unwrap() => {
+                    Some(codec::decode_u64(v).unwrap())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(seen, expected);
+    }
+}
+
+#[tokio::test]
+async fn target_call_cap_defers_chunks_without_losing_completed_prefix() {
+    let s = memory();
+    let h = RelayHandler {
+        budget: RelayBudget {
+            max_rows: 128,
+            max_targets: 8,
+            max_target_calls: Some(2),
+        },
+        ..handler(Instrumented::new())
+    };
+    let puts = (0..192u16)
+        .map(|i| (Key::new(i.to_be_bytes().to_vec()), Value::default()))
+        .collect();
+    append(&s, &target(0), puts, 50).await;
+    assert_eq!(queued(&s).await.len(), 2);
+    assert!(matches!(
+        fire(&h, &s).await.unwrap(),
+        Fired::Reschedule { due_at_ms: 101, .. }
+    ));
+    assert_eq!(h.target.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(queued(&s).await.len(), 1);
+    assert!(matches!(fire(&h, &s).await.unwrap(), Fired::Done(_)));
+    assert_eq!(h.target.calls.load(Ordering::SeqCst), 4);
+    assert!(queued(&s).await.is_empty());
+}
+
+#[tokio::test]
+async fn target_call_cap_defers_watermark_race_without_exceeding_calls() {
+    let s = memory();
+    let h = RelayHandler {
+        budget: RelayBudget {
+            max_rows: 128,
+            max_targets: 8,
+            max_target_calls: Some(2),
+        },
+        ..handler(Instrumented::new())
+    };
+    h.target.race_watermark.store(true, Ordering::SeqCst);
+    append(
+        &s,
+        &target(0),
+        vec![(key(), Value::new(b"first".to_vec()))],
+        50,
+    )
+    .await;
+    append(
+        &s,
+        &target(0),
+        vec![(key(), Value::new(b"second".to_vec()))],
+        50,
+    )
+    .await;
+    fire(&h, &s).await.unwrap();
+    assert_eq!(h.target.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(queued(&s).await.len(), 2);
+    fire(&h, &s).await.unwrap();
+    assert_eq!(h.target.calls.load(Ordering::SeqCst), 4);
+    assert!(queued(&s).await.is_empty());
+}
+
+#[tokio::test]
+async fn blocked_prefix_does_not_exceed_four_times_the_row_budget() {
+    let s = Instrumented::new();
+    let mut target_store = Instrumented::new();
+    target_store.fail_target = Some(target(0));
+    for _ in 0..9 {
+        append(&s, &target(0), vec![(key(), Value::default())], 50).await;
+    }
+    let h = RelayHandler {
+        budget: RelayBudget {
+            max_rows: 2,
+            max_targets: 2,
+            max_target_calls: None,
+        },
+        ..handler(target_store)
+    };
+    fire(&h, &s).await.unwrap();
+    assert_eq!(s.scanned.load(Ordering::SeqCst), 8);
 }

@@ -16,16 +16,21 @@ pub const RELAY_LAG_BOUND_MS: u64 = 60_000;
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub struct RelayBudget {
-    /// Maximum queue rows inspected (default 256).
+    /// Maximum queue rows delivered (default 256); up to four times as many
+    /// are inspected to find work behind blocked targets.
     pub max_rows: u32,
     /// Maximum distinct targets visited (default 16).
     pub max_targets: u32,
+    /// Optional maximum target store calls per target per fire. Workers use
+    /// two (one watermark get and one apply); native defaults to no cap.
+    pub max_target_calls: Option<u32>,
 }
 impl Default for RelayBudget {
     fn default() -> Self {
         Self {
             max_rows: 256,
             max_targets: 16,
+            max_target_calls: None,
         }
     }
 }
@@ -38,7 +43,7 @@ impl Default for RelayBudget {
 /// clock before retrying on `os`. The first row's `at_ms` still bounds every
 /// later row's commit time from below, because later rows commit after it.
 /// So the value is a valid lower bound, but it can move **backwards** as
-/// rows are delivered. A consumer (WP-1.23b's coordinator) keeps the running
+/// rows are delivered. A consumer (WP-1.23c's coordinator) keeps the running
 /// maximum it has seen, which stays safe for the same reason. The bound
 /// assumes the writer's clock is not ahead of the committing store's clock
 /// by more than the lease margin. Saturates at zero; an empty source

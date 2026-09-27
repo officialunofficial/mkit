@@ -532,6 +532,9 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let skew = 0;
         let now = self.clock.now_ms().saturating_add(skew);
         let mut a = auth::authenticate(&self.cfg.auth, meta, now, repo, &expected_repository)?;
+        // Header adapters supply UTF-8 Strings; undecodable bytes are absent.
+        a.ref_hint =
+            (meta.header)("x-mkit-ref").filter(|name| name.len() <= refs::MAX_REF_NAME_BYTES);
         a.business_skew_ms = skew;
         #[cfg(feature = "test-faults")]
         a.set_test_directives(directives);
@@ -702,13 +705,16 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// Multi deployments require repository membership before serving packs.
     ///
     /// # Errors
-    /// `unimplemented` for Multi mode; the authorizer's error;
-    /// `internal` for a storage failure.
+    /// `not_found` for a nonexistent Multi repository; the authorizer's
+    /// error; `internal` for a storage failure.
     pub async fn pack_exists(&self, a: &Authenticated, key: PackKey) -> Result<bool, ServerError> {
         self.observe(a, async {
             let op = self.identify(a, OpKind::PackExists { key })?;
-            self.require_pack_membership()?;
             self.authorize(&op).await?;
+            self.require_repository(&op.repo).await?;
+            if !self.pack_is_member(a, &key).await? {
+                return Ok(false);
+            }
             let head = self.blobs.head(&key).await;
             Ok(head
                 .map_err(|e| store_error(StorageOp::BlobHead, e))?
@@ -740,8 +746,7 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// A pack's bytes as chunks of at most `download_chunk_max` bytes.
     ///
     /// # Errors
-    /// `unimplemented` for Multi mode;
-    /// `not_found` for a missing pack, before any chunk; the authorizer's
+    /// `not_found` for a missing repository or non-member pack, before any chunk; the authorizer's
     /// error; `internal` for a storage failure.
     ///
     /// The request is recorded `ok` when the `last` chunk is yielded, with
@@ -755,8 +760,11 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let mut outcome = self.outcome(a);
         let opened = async {
             let op = self.identify(a, OpKind::DownloadPack { key })?;
-            self.require_pack_membership()?;
             self.authorize(&op).await?;
+            self.require_repository(&op.repo).await?;
+            if !self.pack_is_member(a, &key).await? {
+                return Err(ServerError::not_found("pack not found"));
+            }
             let body = self.blobs.get(&key, None).await;
             match body.map_err(|e| store_error(StorageOp::BlobGet, e))? {
                 Some(body) => Ok(body),
@@ -949,9 +957,24 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         Ok(())
     }
 
+    async fn pack_is_member(&self, a: &Authenticated, key: &PackKey) -> Result<bool, ServerError> {
+        if matches!(self.cfg.addressing, Addressing::Single { .. }) {
+            return Ok(true);
+        }
+        read::is_member(
+            &self.meta,
+            self.shards.as_ref(),
+            &a.repo().repo,
+            &key.0,
+            a.ref_hint.as_deref(),
+        )
+        .await
+        .map_err(meta_error)
+    }
+
     /// Multi packs must not consult the global blob store as an existence oracle.
     fn require_pack_membership(&self) -> Result<(), ServerError> {
-        // TODO(WP-1.10): scope pack RPCs to repository membership.
+        // TODO(WP-1.9b): wire ticketed uploads in Multi mode.
         if matches!(self.cfg.addressing, Addressing::Multi(_)) {
             return Err(ServerError::new(
                 crate::Code::Unimplemented,

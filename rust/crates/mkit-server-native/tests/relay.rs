@@ -169,6 +169,7 @@ struct FaultSql {
     inner: Arc<SqlKvStore<RusqliteConn>>,
     fail_deletes: Arc<AtomicUsize>,
     reject_target: Option<Partition>,
+    reject_targets: Vec<Partition>,
     committed: Arc<Mutex<Vec<Batch>>>,
 }
 
@@ -178,6 +179,7 @@ impl FaultSql {
             inner: Arc::new(SqlKvStore::open(RusqliteConn::open_in_memory().unwrap()).unwrap()),
             fail_deletes: Arc::new(AtomicUsize::new(0)),
             reject_target,
+            reject_targets: Vec::new(),
             committed: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -235,6 +237,7 @@ impl NamespaceStore for FaultSql {
                 if matches!(keys::parse(key), Some(keys::ParsedKey::Relay(_))))
         });
         if self.reject_target.as_ref() == Some(p)
+            || self.reject_targets.contains(p)
             || (deleting_relay
                 && self
                     .fail_deletes
@@ -284,6 +287,14 @@ async fn queue(source: &FaultSql, partition: &Partition, relays: RelayPuts) {
         source.apply(partition, batch).await.unwrap(),
         BatchOutcome::Committed
     );
+}
+
+fn sql_budget(rows: u32, targets: u32, calls: Option<u32>) -> RelayBudget {
+    let mut budget = RelayBudget::default();
+    budget.max_rows = rows;
+    budget.max_targets = targets;
+    budget.max_target_calls = calls;
+    budget
 }
 
 fn sql_registry(target: FaultSql) -> TimerRegistry<FaultSql> {
@@ -525,4 +536,194 @@ async fn sqlite_chunks_target_operations_and_source_cleanup_bytes() {
                 .all(|write| matches!(write, Write::Delete(_)))
         );
     }
+}
+
+#[tokio::test]
+async fn sqlite_failing_backlog_does_not_fill_the_delivery_window() {
+    let source = FaultSql::new(None);
+    let partition = D34Shards.ref_shard(&repo(), "refs/heads/main");
+    let failing = Partition::ContentShard(0);
+    let healthy = Partition::ContentShard(1);
+    let target = FaultSql::new(Some(failing.clone()));
+    for _ in 0..3 {
+        queue(
+            &source,
+            &partition,
+            vec![(
+                failing.clone(),
+                vec![(Key::new(b"r\0failed".to_vec()), Value::default())],
+            )],
+        )
+        .await;
+    }
+    let key = Key::new(b"r\0healthy".to_vec());
+    queue(
+        &source,
+        &partition,
+        vec![(healthy.clone(), vec![(key.clone(), Value::default())])],
+    )
+    .await;
+    let registry = TimerRegistry::new().register(RelayHandler {
+        target: target.clone(),
+        hook: NoHook,
+        budget: sql_budget(2, 2, None),
+    });
+    run_due(
+        &source,
+        &partition,
+        &registry,
+        &ManualClock::new(100),
+        100,
+        &TickBudget::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        target.get(&healthy, &key).await.unwrap(),
+        Some(Value::default())
+    );
+    assert_eq!(pending(&source, &partition).await.len(), 3);
+}
+
+#[tokio::test]
+async fn sqlite_full_failing_target_budget_rotates_to_next_target() {
+    let source = FaultSql::new(None);
+    let partition = D34Shards.ref_shard(&repo(), "refs/heads/main");
+    let mut target = FaultSql::new(None);
+    target.reject_targets = vec![Partition::ContentShard(0), Partition::ContentShard(1)];
+    let key = Key::new(b"r\0healthy".to_vec());
+    for i in 0..3u16 {
+        queue(
+            &source,
+            &partition,
+            vec![(
+                Partition::ContentShard(i),
+                vec![(key.clone(), Value::default())],
+            )],
+        )
+        .await;
+    }
+    let registry = TimerRegistry::new().register(RelayHandler {
+        target: target.clone(),
+        hook: NoHook,
+        budget: sql_budget(2, 2, None),
+    });
+    for now in [100, 100 + mkit_server::timers::RETRY_BACKOFF_MS] {
+        run_due(
+            &source,
+            &partition,
+            &registry,
+            &ManualClock::new(i64::try_from(now).unwrap()),
+            now,
+            &TickBudget::default(),
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(
+        target.get(&Partition::ContentShard(2), &key).await.unwrap(),
+        Some(Value::default())
+    );
+    assert_eq!(pending(&source, &partition).await.len(), 2);
+}
+
+#[tokio::test]
+async fn sqlite_target_sequence_order_survives_timer_rotation() {
+    let source = FaultSql::new(None);
+    let partition = D34Shards.ref_shard(&repo(), "refs/heads/main");
+    let target = FaultSql::new(None);
+    let key = Key::new(b"r\0ordered".to_vec());
+    for seq in 1..=5u8 {
+        queue(
+            &source,
+            &partition,
+            vec![(
+                Partition::ContentShard(u16::from(seq % 2)),
+                vec![(key.clone(), Value::new(vec![seq]))],
+            )],
+        )
+        .await;
+    }
+    let registry = TimerRegistry::new().register(RelayHandler {
+        target: target.clone(),
+        hook: NoHook,
+        budget: sql_budget(1, 1, Some(2)),
+    });
+    for now in 100..105 {
+        run_due(
+            &source,
+            &partition,
+            &registry,
+            &ManualClock::new(i64::try_from(now).unwrap()),
+            now,
+            &TickBudget::default(),
+        )
+        .await
+        .unwrap();
+    }
+    assert!(pending(&source, &partition).await.is_empty());
+    let rh = keys::relay_high_water(&partition).unwrap();
+    let watermarks: Vec<_> = target
+        .batches()
+        .iter()
+        .flat_map(|batch| batch.writes.iter())
+        .filter_map(|write| match write {
+            Write::Put(k, value) if k == &rh => Some(codec::decode_u64(value).unwrap()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(watermarks, vec![1, 2, 3, 4, 5]);
+    assert_eq!(
+        target.get(&Partition::ContentShard(1), &key).await.unwrap(),
+        Some(Value::new(vec![5]))
+    );
+    assert_eq!(
+        target.get(&Partition::ContentShard(0), &key).await.unwrap(),
+        Some(Value::new(vec![4]))
+    );
+}
+
+#[tokio::test]
+async fn sqlite_corrupt_row_delivers_decodable_prefix_then_stops() {
+    let source = FaultSql::new(None);
+    let partition = D34Shards.ref_shard(&repo(), "refs/heads/main");
+    let target = FaultSql::new(None);
+    let destination = Partition::ContentShard(0);
+    let key = Key::new(b"r\0healthy".to_vec());
+    queue(
+        &source,
+        &partition,
+        vec![(destination.clone(), vec![(key.clone(), Value::default())])],
+    )
+    .await;
+    source
+        .apply(
+            &partition,
+            Batch::new().put(keys::relay(2), Value::new(b"bad".to_vec())),
+        )
+        .await
+        .unwrap();
+    let report = run_due(
+        &source,
+        &partition,
+        &sql_registry(target.clone()),
+        &ManualClock::new(100),
+        100,
+        &TickBudget::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.failed, 1);
+    assert_eq!(pending(&source, &partition).await.len(), 1);
+    assert_eq!(
+        target.get(&destination, &key).await.unwrap(),
+        Some(Value::default())
+    );
+    assert!(
+        source
+            .get(&partition, &keys::relay(2))
+            .await
+            .unwrap()
+            .is_some()
+    );
 }

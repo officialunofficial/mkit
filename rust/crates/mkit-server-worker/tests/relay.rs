@@ -2,51 +2,22 @@
 
 mod common;
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-
 use common::{DoConfig, Loopback};
 use futures::executor::block_on;
 use mkit_server::pipeline::{D34Shards, ShardMap};
-use mkit_server::relay::{NoHook, RelayBudget, RelayHandler};
 use mkit_server::sql::SqlKvStore;
 use mkit_server::store::{codec, keys, outbox::OutboxBuilder, tickets::plan_membership};
-use mkit_server::timers::{
-    DueTimer, Fired, TickBudget, TimerCtx, TimerHandler, TimerKind, TimerRegistry, registry::kinds,
-    run_due,
-};
+use mkit_server::timers::{TickBudget, registry::kinds, run_due};
 use mkit_server::{
-    Batch, BatchOutcome, BlobKey, BoxFuture, ManualClock, NamespaceKey, NamespaceStore, RepoId,
-    RepoName, StoreError, Value, Write,
+    Batch, BatchOutcome, BlobKey, Key, ManualClock, NamespaceKey, NamespaceStore, RepoId, RepoName,
+    Value, Write,
 };
 use mkit_server_native::RusqliteConn;
+use mkit_server_worker::adapter::{ConfigError, timer_registry};
+use mkit_server_worker::classes::ShardClass;
 use mkit_server_worker::ns_client::DoNamespaceStore;
 
 type Source = SqlKvStore<RusqliteConn>;
-
-// The timer context and row are non-exhaustive. Let run_due construct them,
-// then explicitly invoke fire across the two different concrete store types.
-struct WorkerRelay {
-    relay: RelayHandler<DoNamespaceStore<Loopback>>,
-    fires: Arc<AtomicUsize>,
-}
-
-impl TimerHandler<Source> for WorkerRelay {
-    fn kind(&self) -> TimerKind {
-        kinds::RELAY
-    }
-
-    fn fire<'a>(
-        &'a self,
-        ctx: &'a TimerCtx<'a, Source>,
-        timer: &'a DueTimer,
-    ) -> BoxFuture<'a, Result<Fired, StoreError>> {
-        Box::pin(async move {
-            self.fires.fetch_add(1, Ordering::SeqCst);
-            self.relay.fire(ctx, timer).await
-        })
-    }
-}
 
 #[test]
 #[allow(clippy::too_many_lines)] // One delivery followed by replay shares exact row bytes and call counts.
@@ -94,15 +65,7 @@ fn relay_uses_one_watermark_read_and_one_atomic_apply_per_target() {
             source.apply(&source_partition, batch).await.unwrap(),
             BatchOutcome::Committed
         );
-        let fires = Arc::new(AtomicUsize::new(0));
-        let registry = TimerRegistry::new().register(WorkerRelay {
-            relay: RelayHandler {
-                target: target.clone(),
-                hook: NoHook,
-                budget: RelayBudget::default(),
-            },
-            fires: fires.clone(),
-        });
+        let registry = timer_registry(ShardClass::RefShard, Ok(target.clone()), Some("free"));
         let clock = ManualClock::new(i64::try_from(now).unwrap());
         let report = run_due(
             &source,
@@ -115,7 +78,6 @@ fn relay_uses_one_watermark_read_and_one_atomic_apply_per_target() {
         .await
         .unwrap();
         assert_eq!(report.fired, 1);
-        assert_eq!(fires.load(Ordering::SeqCst), 1);
         assert_eq!(target.transport().calls(), 4, "get rh + apply per target");
 
         let rh = keys::relay_high_water(&source_partition).unwrap();
@@ -132,6 +94,13 @@ fn relay_uses_one_watermark_read_and_one_atomic_apply_per_target() {
             assert_eq!(source.get(&source_partition, key).await.unwrap(), None);
         }
         assert_eq!(target.transport().targets().len(), 2);
+        assert!(
+            target
+                .transport()
+                .targets()
+                .iter()
+                .all(|target| target.binding == ShardClass::RepoIndexShard.binding())
+        );
         for pack in &packs {
             let partition = D34Shards.membership(&repo, &BlobKey::new(*pack));
             let key = keys::membership(&repo.name, pack);
@@ -172,7 +141,6 @@ fn relay_uses_one_watermark_read_and_one_atomic_apply_per_target() {
         .await
         .unwrap();
         assert_eq!(report.fired, 1);
-        assert_eq!(fires.load(Ordering::SeqCst), 2);
         assert_eq!(
             target.transport().calls() - before,
             2,
@@ -197,5 +165,204 @@ fn relay_uses_one_watermark_read_and_one_atomic_apply_per_target() {
                 .entries
                 .is_empty()
         );
+    });
+}
+
+fn source() -> Source {
+    SqlKvStore::open(RusqliteConn::open_in_memory().unwrap()).unwrap()
+}
+
+fn repo() -> RepoId {
+    RepoId {
+        namespace: NamespaceKey::deployment_default(),
+        name: RepoName::new("relay").unwrap(),
+    }
+}
+
+#[test]
+fn relay_is_registered_only_on_ref_shards() {
+    block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        let target = Loopback::store(dir.path().to_path_buf(), DoConfig::default());
+        for class in [
+            ShardClass::RefStore,
+            ShardClass::NsCoordinator,
+            ShardClass::RefShard,
+            ShardClass::RepoIndexShard,
+            ShardClass::ContentIndexShard,
+        ] {
+            let source = source();
+            let partition = D34Shards.ref_shard(&repo(), "refs/heads/main");
+            let timer = keys::timer(100, kinds::RELAY.get(), b"");
+            source
+                .apply(
+                    &partition,
+                    Batch::new().put(timer.clone(), Value::default()),
+                )
+                .await
+                .unwrap();
+            let registry = timer_registry(class, Ok(target.clone()), None);
+            let report = run_due(
+                &source,
+                &partition,
+                &registry,
+                &ManualClock::new(100),
+                100,
+                &TickBudget::default(),
+            )
+            .await
+            .unwrap();
+            if class == ShardClass::RefShard {
+                assert_eq!(report.fired, 1);
+                assert_eq!(source.get(&partition, &timer).await.unwrap(), None);
+            } else {
+                assert_eq!(report.unknown, 1);
+                assert_eq!(
+                    source.get(&partition, &timer).await.unwrap(),
+                    Some(Value::default())
+                );
+            }
+        }
+        assert_eq!(target.transport().calls(), 0);
+    });
+}
+
+#[test]
+fn relay_config_failure_retries_the_stored_timer() {
+    block_on(async {
+        let source = source();
+        let partition = D34Shards.ref_shard(&repo(), "refs/heads/main");
+        let timer = keys::timer(100, kinds::RELAY.get(), b"");
+        source
+            .apply(
+                &partition,
+                Batch::new().put(timer.clone(), Value::default()),
+            )
+            .await
+            .unwrap();
+        let target: Result<DoNamespaceStore<Loopback>, _> =
+            Err(ConfigError("AUTH_REPOSITORY is not configured".into()));
+        let registry = timer_registry(ShardClass::RefShard, target, Some("free"));
+        let report = run_due(
+            &source,
+            &partition,
+            &registry,
+            &ManualClock::new(100),
+            100,
+            &TickBudget::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.failed, 1);
+        assert_eq!(report.unknown, 0);
+        assert_eq!(report.next_wake_ms, Some(5_100));
+        assert_eq!(
+            source.get(&partition, &timer).await.unwrap(),
+            Some(Value::default())
+        );
+    });
+}
+
+#[test]
+fn worker_plan_caps_relay_fires_per_alarm() {
+    block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        let target = Loopback::store(dir.path().to_path_buf(), DoConfig::default());
+        for (plan, cap) in [(None, 2), (Some("free"), 2), (Some("paid"), 4)] {
+            let source = source();
+            let partition = D34Shards.ref_shard(&repo(), "refs/heads/main");
+            let mut batch = Batch::new();
+            for reference in 0..5u8 {
+                batch = batch.put(
+                    keys::timer(100, kinds::RELAY.get(), &[reference]),
+                    Value::default(),
+                );
+            }
+            source.apply(&partition, batch).await.unwrap();
+            let registry = timer_registry(ShardClass::RefShard, Ok(target.clone()), plan);
+            let report = run_due(
+                &source,
+                &partition,
+                &registry,
+                &ManualClock::new(100),
+                100,
+                &TickBudget::default(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(report.fired, cap);
+            assert_eq!(report.deferred, 5 - cap);
+        }
+        assert_eq!(target.transport().calls(), 0);
+    });
+}
+
+#[test]
+fn worker_relay_defers_chunks_after_two_target_calls_per_fire() {
+    block_on(async {
+        for plan in ["free", "paid"] {
+            let dir = tempfile::tempdir().unwrap();
+            let target = Loopback::store(dir.path().to_path_buf(), DoConfig::default());
+            let source = source();
+            let repo = repo();
+            let partition = D34Shards.ref_shard(&repo, "refs/heads/main");
+            let destination = D34Shards.membership(&repo, &BlobKey::new([0x11; 32]));
+            let mut batch = Batch::new()
+                .put(keys::outbox_sequence(), codec::encode_u64(3))
+                .put(keys::timer(100, kinds::RELAY.get(), b""), Value::default());
+            for seq in 1..=3u64 {
+                let puts = (0..96u8)
+                    .map(|key| (Key::new(vec![key]), codec::encode_u64(seq)))
+                    .collect();
+                let row = codec::RelayV1 {
+                    at_ms: 100,
+                    target: destination.clone(),
+                    puts,
+                };
+                batch = batch.put(keys::relay(seq), codec::encode_relay(&row).unwrap());
+            }
+            source.apply(&partition, batch).await.unwrap();
+            let registry = timer_registry(ShardClass::RefShard, Ok(target.clone()), Some(plan));
+            let mut due = 100;
+            for seq in 1..=3u64 {
+                let before = target.transport().calls();
+                let report = run_due(
+                    &source,
+                    &partition,
+                    &registry,
+                    &ManualClock::new(i64::try_from(due).unwrap()),
+                    due,
+                    &TickBudget::default(),
+                )
+                .await
+                .unwrap();
+                assert_eq!(report.fired, 1);
+                assert_eq!(
+                    target.transport().calls() - before,
+                    2,
+                    "plan {plan}, seq {seq}"
+                );
+                assert_eq!(
+                    source.get(&partition, &keys::relay(seq)).await.unwrap(),
+                    None
+                );
+                assert_eq!(
+                    target.get(&destination, &Key::new(vec![0])).await.unwrap(),
+                    Some(codec::encode_u64(seq))
+                );
+                if seq < 3 {
+                    assert!(
+                        source
+                            .get(&partition, &keys::relay(seq + 1))
+                            .await
+                            .unwrap()
+                            .is_some()
+                    );
+                    due = report.next_wake_ms.unwrap();
+                } else {
+                    assert_eq!(report.next_wake_ms, None);
+                }
+            }
+        }
     });
 }

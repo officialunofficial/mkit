@@ -1,5 +1,7 @@
 //! Ordered target batches, guarded watermarks, and bounded source cleanup.
 
+use std::collections::BTreeSet;
+
 use super::{NoHook, RELAY_LAG_BOUND_MS, RelayBudget, RelayHook};
 use crate::rt::BoxFuture;
 use crate::store::{
@@ -54,66 +56,74 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
     ) -> Result<Fired, StoreError> {
         let os_key = keys::outbox_sequence();
         let observed_os = ctx.store.get(ctx.partition, &os_key).await?;
-        let rows = read_rows(ctx, self.budget.max_rows.max(1)).await?;
-        // Decode all inspected rows before making progress: corruption is never skipped.
-        let mut groups: Vec<TargetRows> = Vec::new();
-        for (key, value) in rows {
-            let decoded = (|| {
-                let Some(keys::ParsedKey::Relay(seq)) = keys::parse(&key) else {
-                    return Err(StoreError::Corrupt("bad relay queue key".into()));
-                };
-                if seq == 0 {
-                    return Err(StoreError::Corrupt("relay sequence is zero".into()));
-                }
-                Ok((seq, codec::decode_relay(&value)?))
-            })();
-            let (seq, row) = match decoded {
-                Ok(row) => row,
-                Err(error) => {
-                    tracing::warn!(source = ?ctx.partition, ?key, %error, "corrupt relay row; tick stopped");
-                    return Ok(Fired::Retry);
-                }
-            };
-            if groups.is_empty() {
-                let age_ms = ctx.now_ms.saturating_sub(row.at_ms);
-                if age_ms > RELAY_LAG_BOUND_MS {
-                    tracing::warn!(source = ?ctx.partition, age_ms, "outbox relay lag bound exceeded");
-                }
-            }
-            let i = groups
-                .iter()
-                .position(|(p, _)| p == &row.target)
-                .unwrap_or_else(|| {
-                    groups.push((row.target.clone(), Vec::new()));
-                    groups.len() - 1
-                });
-            groups[i].1.push((seq, row, key, value));
+        let max_rows = self.budget.max_rows.max(1);
+        let rows = read_rows(ctx, max_rows.saturating_mul(4)).await?;
+        let inspected = rows.len();
+        // Always inspect from the source head: resuming a range scan could skip
+        // an older row for a chosen target and advance its watermark past it.
+        let (mut groups, corrupt) = decode_groups(ctx.partition, ctx.now_ms, rows);
+        // Rotate targets, rather than source rows, across fires. A full set of
+        // failing targets cannot spend every subsequent fire's target budget.
+        // The cursor is the first seq of the last visited group; it is only a
+        // selection hint and never allows a target's own prefix to be skipped.
+        let previous = if timer.value.as_bytes().is_empty() {
+            0
+        } else {
+            codec::decode_u64(&timer.value)?
+        };
+        if let Some(start) = groups.iter().position(|(_, rows)| rows[0].0 > previous) {
+            groups.rotate_left(start);
         }
+        let target_limit = self.budget.max_targets.max(1) as usize;
+        let mut blocked = groups
+            .iter()
+            .skip(target_limit)
+            .map(|(target, _)| target.clone())
+            .collect::<BTreeSet<_>>();
         let rh = keys::relay_high_water(ctx.partition)?;
         let mut delivered = Vec::new();
         let mut failed = false;
-        for (target, rows) in groups
-            .into_iter()
-            .take(self.budget.max_targets.max(1) as usize)
-        {
+        let mut cursor = previous;
+        for (target, rows) in groups {
+            if blocked.contains(&target) || delivered.len() >= max_rows as usize {
+                blocked.insert(target);
+                continue;
+            }
+            cursor = rows[0].0;
             let target_rows = rows
                 .iter()
+                .take(max_rows as usize - delivered.len())
                 .map(|(seq, row, _, _)| (*seq, row.clone()))
                 .collect::<Vec<_>>();
-            let count = self.deliver_target(&target, &rh, &target_rows).await;
+            let (count, target_failed) = self.deliver_target(&target, &rh, &target_rows).await;
             if count < rows.len() {
-                failed = true;
+                // Failed and budget-cut targets retain their entire remaining
+                // prefix, so all later rows for that target stay behind too.
+                blocked.insert(target);
             }
+            failed |= target_failed;
             delivered.extend(
                 rows.into_iter()
                     .take(count)
                     .map(|(_, _, key, value)| (key, value)),
             );
         }
+        let completed = delivered.len();
         delete_rows(ctx, delivered).await?;
-        let (start, end) = keys::class_range(keys::TAG_RELAY);
-        let remaining = ctx.store.scan(ctx.partition, &start, &end, None, 1).await?;
-        if !remaining.entries.is_empty() || remaining.next.is_some() {
+        if corrupt {
+            // Make progress on the decodable prefix but never cross corruption.
+            return Ok(Fired::Retry);
+        }
+        let has_remaining = if inspected > completed {
+            true
+        } else {
+            // When every inspected row completed, at most max_rows were read.
+            // This drain probe therefore also fits the 4 * max_rows scan cap.
+            let (start, end) = keys::class_range(keys::TAG_RELAY);
+            let remaining = ctx.store.scan(ctx.partition, &start, &end, None, 1).await?;
+            !remaining.entries.is_empty() || remaining.next.is_some()
+        };
+        if has_remaining {
             // Successful reschedules do not invoke core failure backoff. Explicitly
             // back off failures; budget continuations only need a distinct key.
             let due = ctx
@@ -122,7 +132,7 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
                 .max(timer.due_at_ms.saturating_add(1));
             Ok(Fired::Reschedule {
                 due_at_ms: due,
-                value: Value::default(),
+                value: codec::encode_u64(cursor),
                 batch: Batch::new(),
             })
         } else {
@@ -137,11 +147,21 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
     }
 
     /// Returns the committed/duplicate prefix, retaining progress if a later chunk fails.
-    async fn deliver_target(&self, target: &Partition, rh: &Key, rows: &[(u64, RelayV1)]) -> usize {
+    async fn deliver_target(
+        &self,
+        target: &Partition,
+        rh: &Key,
+        rows: &[(u64, RelayV1)],
+    ) -> (usize, bool) {
         let mut completed = 0;
+        let mut calls = 0u32;
         while completed < rows.len() {
             let mut committed = false;
             for _ in 0..2 {
+                if self.budget.max_target_calls.is_some_and(|cap| calls >= cap) {
+                    return (completed, false);
+                }
+                calls = calls.saturating_add(1);
                 let snapshot = async {
                     let observed = self.target.get(target, rh).await?;
                     let hw = observed
@@ -156,14 +176,14 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
                     Ok(snapshot) => snapshot,
                     Err(error) => {
                         tracing::warn!(?target, %error, "relay watermark read failed");
-                        return completed;
+                        return (completed, true);
                     }
                 };
                 while completed < rows.len() && rows[completed].0 <= hw {
                     completed += 1;
                 }
                 if completed == rows.len() {
-                    return completed;
+                    return (completed, false);
                 }
                 let mut batch = Batch::new().require(match observed {
                     Some(value) => Precondition::Equals(rh.clone(), value),
@@ -175,7 +195,7 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
                         seq = rows[completed].0,
                         "relay row cannot fit one target batch; delivery to this target is stalled"
                     );
-                    return completed;
+                    return (completed, true);
                 }
                 // A hook can use more space than the remaining headroom. Shrink
                 // a combined group rather than stalling rows that fit individually.
@@ -196,7 +216,7 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
                         .await
                     {
                         tracing::warn!(?target, %error, "relay hook failed");
-                        return completed;
+                        return (completed, true);
                     }
                     if let Err(error) = extended.validate(&self.target.capabilities()) {
                         if matches!(error, StoreError::Invalid(_)) && end > completed + 1 {
@@ -204,12 +224,16 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
                             continue;
                         }
                         tracing::warn!(?target, %error, "relay target batch invalid");
-                        return completed;
+                        return (completed, true);
                     }
                     batch = extended;
                     break;
                 }
                 // Hook additions share the apply's atomicity and size boundary.
+                if self.budget.max_target_calls.is_some_and(|cap| calls >= cap) {
+                    return (completed, false);
+                }
+                calls = calls.saturating_add(1);
                 match self.target.apply(target, batch).await {
                     Ok(BatchOutcome::Committed) => {
                         completed = end;
@@ -219,16 +243,61 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
                     Ok(BatchOutcome::PreconditionFailed { .. }) => {}
                     other => {
                         tracing::warn!(?target, ?other, "relay target apply failed");
-                        return completed;
+                        return (completed, true);
                     }
                 }
             }
             if !committed {
-                return completed;
+                return (completed, true);
             }
         }
-        completed
+        (completed, false)
     }
+}
+
+fn decode_groups(
+    source: &Partition,
+    now_ms: u64,
+    rows: Vec<(Key, Value)>,
+) -> (Vec<TargetRows>, bool) {
+    let mut corrupt = false;
+    let mut warned_lag = false;
+    let mut groups: Vec<TargetRows> = Vec::new();
+    for (key, value) in rows {
+        let decoded = (|| {
+            let Some(keys::ParsedKey::Relay(seq)) = keys::parse(&key) else {
+                return Err(StoreError::Corrupt("bad relay queue key".into()));
+            };
+            if seq == 0 {
+                return Err(StoreError::Corrupt("relay sequence is zero".into()));
+            }
+            Ok((seq, codec::decode_relay(&value)?))
+        })();
+        let (seq, row) = match decoded {
+            Ok(row) => row,
+            Err(error) => {
+                tracing::warn!(source = ?source, ?key, %error, "corrupt relay row; tick stopped");
+                corrupt = true;
+                break;
+            }
+        };
+        if !warned_lag {
+            let age_ms = now_ms.saturating_sub(row.at_ms);
+            if age_ms > RELAY_LAG_BOUND_MS {
+                tracing::warn!(source = ?source, age_ms, "outbox relay lag bound exceeded");
+                warned_lag = true;
+            }
+        }
+        let i = groups
+            .iter()
+            .position(|(p, _)| p == &row.target)
+            .unwrap_or_else(|| {
+                groups.push((row.target.clone(), Vec::new()));
+                groups.len() - 1
+            });
+        groups[i].1.push((seq, row, key, value));
+    }
+    (groups, corrupt)
 }
 
 fn fitting_prefix(base: &Batch, rh: &Key, rows: &[(u64, RelayV1)]) -> usize {
