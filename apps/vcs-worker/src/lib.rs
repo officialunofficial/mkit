@@ -13,4 +13,4 @@
 mod worker_impl;
 
 #[cfg(target_arch = "wasm32")]
-pub use worker_impl::RefStore;
+pub use worker_impl::{ContentIndexShard, NsCoordinator, RefShard, RefStore, RepoIndexShard};

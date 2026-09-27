@@ -294,6 +294,8 @@ pub struct Operation {
     pub auth: Option<VerifiedAuth>,
     /// What the request does.
     pub kind: OpKind,
+    /// Epoch leased for this D34 write; `None` under Single.
+    pub leased_epoch: Option<u64>,
     /// What the Authorizer established.
     pub authz: AuthzFacts,
     /// Pre-admission observation: racing first writes may both observe creation.
@@ -316,6 +318,7 @@ impl Operation {
             principal,
             auth,
             kind,
+            leased_epoch: None,
             authz: AuthzFacts::default(),
             creation: Creation::default(),
             created: Creation::default(),

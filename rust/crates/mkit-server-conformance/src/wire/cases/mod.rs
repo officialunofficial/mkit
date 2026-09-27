@@ -30,6 +30,7 @@ mod download;
 mod growth;
 mod health;
 mod info;
+mod leases;
 mod list;
 mod packs;
 mod policy;
@@ -154,6 +155,7 @@ macro_rules! cases {
 }
 
 cases! {
+    "leases.bump_completes_and_writes_continue" => leases::bump_completes_and_writes_continue, M1, [EpochLeases, TestFaults], [];
     "info.shape_and_policy" => info::shape_and_policy, M1, [], [];
     "info.ignores_repository_header" => info::ignores_repository_header, M1, [], [];
     "repo.single_header_mismatch_not_found" => repository::single_header_mismatch, M0, [], [MultiRepo];

@@ -104,4 +104,4 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
 
 /// Coordinator creation batches one write attempts: the first, one after
 /// losing `nr`, and one after losing `rr` to a same-repo writer.
-const CREATION_ATTEMPTS: usize = 3;
+pub(super) const CREATION_ATTEMPTS: usize = 3;

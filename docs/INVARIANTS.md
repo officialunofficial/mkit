@@ -1006,6 +1006,103 @@ cancellation must not hide a durable timer from the native driver.
 **Enforced by:** `mkit-server/src/timers/tests.rs` race and atomicity tests,
 `mkit-server-native/tests/timers.rs`, and the worker's pure alarm tests.
 
+## Worker shard classes reject foreign partition kinds
+
+**Always:** each Durable Object class accepts only its assigned partition kinds
+before dispatching a store call. RepoIndexShard serves both repo and ref indexes.
+
+**Because:** the wire carries the partition, so a class must check the request's
+kind rather than trusting its caller's binding selection.
+
+**If violated:** an incorrectly routed request can write into a foreign class.
+
+**Enforced by:** `mkit-server-worker::ns_object::serve_reply` and the full
+class/partition cross-product in `mkit-server-worker/tests/stores.rs`.
+
+## Worker timer ticks retain alarms scheduled while awaiting I/O
+
+**Always:** after running due timers, the alarm handler re-reads the current
+alarm and retains the earlier of it and the tick's next wake. With default
+storage options and no intervening I/O, Cloudflare input gates protect this
+final read/write sequence from request delivery.
+
+**Because:** `getAlarm` returns null during an alarm handler unless `setAlarm`
+has been called since it started. A timer Apply interleaved while a handler
+awaits non-storage I/O may install a new alarm.
+
+**If violated:** the final tick reschedule or delete can overwrite that alarm,
+delaying or stranding a newly inserted timer.
+
+**Enforced by:** `NsObject::alarm`, `alarm_after_tick_with_current`, and its host
+regression tests. Gate semantics follow [Cloudflare's glossary](https://developers.cloudflare.com/durable-objects/reference/glossary/)
+and [storage transaction documentation](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/#transaction);
+the null behavior is documented in [the alarms API](https://developers.cloudflare.com/durable-objects/api/alarms/#getalarm).
+
+## Worker deployment sharding is bound before serving RPCs
+
+**Always:** a Worker isolate validates its configured sharding against `sm 00`
+in the root RefStore before serving RPCs. An unmarked root with rows is single.
+Each cold request runs its own check with its own store handle. The thread-local
+`RefCell<Option<Settled>>` caches only plain definitive data: success, mismatch
+or corruption. No future, promise or request handle crosses request contexts.
+Storage failures remain request-local and are retried by the next request.
+The cache is keyed by mode and jurisdiction; a changed key drops the cache and
+re-checks storage. A failed Absent uses its atomic observation; an absent
+observation or an undecodable marker refuses as corruption.
+
+**Because:** changing partition routing over existing data hides its refs;
+[Workers continuations](https://developers.cloudflare.com/workers/configuration/compatibility-flags/#handle-cross-request-promise-resolution-correctly)
+remain tied to their original request context; a transient backend
+outage must not permanently poison an isolate.
+
+**If violated:** cold requests can hang, deployments can appear empty, or a
+brief outage can strand all subsequent requests.
+
+**Enforced by:** `sharding_guard::{Settled, check_mode}`, the adapter's isolate-local
+cache, host interleaving/error/config regression tests, and 30 concurrent cold
+health checks before every Worker conformance phase. At most 3 DO calls per
+request arriving before the first definitive result is cached; 0 afterwards;
+never more than one check per request.
+
+## Epoch lease acknowledgements describe durable shard state
+
+**Always:** outside a declared recovery hold-off, `ls.acked_epoch = n` only if
+the shard's `el` durably holds epoch at least n, or every older-epoch write is
+already past its backend deadline.
+Live renewals preserve acknowledgement. Revocation pushes even to an absent
+`el`, guards the observed shard value, then acknowledges in a separate guarded
+coordinator batch. Every D34 ref batch guards `el` and starts with
+`NotAfter(min(plan_time + MAX_APPLY_WINDOW, expires - margin, replay cap))`.
+Creation and lease registration commit together only after authorization and
+admission. D34 creates coordinator `nr`/`rr` records even with Single addressing,
+so every leased shard has the records its guards and `config_version` require.
+The Single sharding path continues reading and guarding `e` directly.
+Safety requires `lease_margin_ms` to exceed the maximum skew between every
+pipeline instance clock (grant, renewal and revoke), the sweep driver clock,
+and every backend clock; this deployment assumption is documented, not checked
+by `Pipeline::new`.
+
+During declared recovery, a rebuilt missing `ls` row may acknowledge the current
+epoch before a surviving old `el` is replaced. The persistent `lr` hold-off
+prevents completion for `epoch_lease + margin`, so every surviving old write's
+deadline has passed before revocation can complete.
+
+**Because:** a coordinator acknowledgement before shard installation could
+report completion while a delayed old-epoch batch can still commit. Expiry
+alone is safe only because the storage backend checks its own clock atomically.
+
+**If violated:** a revoked grant can mutate a ref after revocation completes,
+or denied/challenged requests can allocate lease state.
+
+**Enforced by:** `pipeline/lease.rs`, `pipeline/revocation.rs`, the pure write
+planner, and native `tests/epoch_leases.rs` on memory and SQLite. The Rust
+interleaving property test covers the protocol model; pipeline regressions
+protect the implementation. `LeaseSweep` guards expired coordinator rows and
+moves its timer atomically with each renewal. Recovery is declared with the
+persistent `lr` marker; restore/rebuild procedures MUST call
+`mark_lease_table_recovered` before serving writes (WP-1.29). Completion waits
+`epoch_lease + margin` after that marker, independent of namespace creation time.
+
 ## Namespace and write policy decide before allocation and never read existence
 
 **Always:** Multi writes pass the namespace policy and owner/authority policy
@@ -1079,7 +1176,12 @@ in WP-1.23b; writers in WP-1.9/1.10.
 **Always:** GetServerInfo is unauthenticated, never resolves a repository and
 never reads the store. Its response depends only on deployment configuration,
 hook defaults and store capabilities, with the upload threshold zero for
-Multi addressing or admission.
+Multi addressing or admission. The one exception is the Worker's
+deployment-wide sharding guard (R-94), which runs before every RPC, this one
+included: until an isolate has settled the guard, a cold GetServerInfo may
+read the root marker, and a deployment whose marker mismatches answers
+`unavailable` instead of advertising capabilities it would then refuse. The
+guard is deployment-wide, so this never depends on a repository.
 
 **Because:** clients need capabilities before authenticating, and discovery
 must never expose whether a repository exists (STC §2.1).

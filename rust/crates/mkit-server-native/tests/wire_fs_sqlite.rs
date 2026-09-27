@@ -88,7 +88,8 @@ async fn wire_suite_fs_sqlite_auth_v2() {
             skipped == "advance.nonatomic_packmap_first"
                 || matches!(
                     skipped,
-                    "timers.directive_fires_due"
+                    "leases.bump_completes_and_writes_continue"
+                        | "timers.directive_fires_due"
                         | "timers.fire_on_schedule"
                         | "timers.redelivery_is_idempotent"
                         | "replay.expired_retry_rejected"
