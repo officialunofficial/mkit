@@ -344,8 +344,8 @@ failures map to these codes. The `Condition` column is what the server
 observed. Subject to the checks above, a v2 client maps
 `failed_precondition` on `BeginUpload`, `UploadPart`, `CompleteUpload`,
 a ticketed `UploadPack`, or an `AdvanceRefs` carrying `ticket_ids` to a
-ticket failure, which it
-resolves by calling `BeginUpload` again, never to `RefConflict`.
+ticket failure, which it resolves by calling `BeginUpload` again, never
+to `RefConflict`.
 
 | Condition | Connect code |
 |---|---|
@@ -361,6 +361,7 @@ resolves by calling `BeginUpload` again, never to `RefConflict`.
 | An unresolved delta base after the relay-lag bound, in indexed mode (SPEC-SERVER §9.4) | `failed_precondition`, with public message `delta base not available in this repository` |
 | A part whose subtree hash or length differs from its commitment, or a completion whose merged root or total differs from the ticket (§7.6) | `invalid_argument` |
 | A pack still under verification in indexed mode (§7.6) | `unavailable` with exactly one `PendingVerification` detail |
+| A membership-dependent miss within the relay-lag bound, in indexed mode ([SPEC-SERVER §9.4](SPEC-SERVER.md#94-repository-isolated-membership-checks)) | `unavailable` with no detail; a retry with the same nonce is safe |
 | A missed commit deadline (`NotAfter`), a full shard, or outbox backpressure. Nothing commits, and a retry with the same nonce is safe. | `unavailable`, never `resource_exhausted` |
 | A signed nonce already recorded with a different operation fingerprint (§7.1) | `invalid_argument` |
 | A signed nonce whose operation is still `in_flight` (§7.1). The request never reaches admission. | `aborted` (retryable) |

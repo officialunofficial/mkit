@@ -781,7 +781,9 @@ Clients use that discovery result when planning uploads and interpreting
 verification responses.
 
 Opaque mode is the default; packs are stored as opaque bytes. In that
-mode, §9.2–§9.6 and §9.8 do not apply. The allowed-signer policy in
+mode, §9.2–§9.6 do not apply; of §9.8, only the effective
+`max_pack_bytes` and the `max_delta_chain_depth = 0` advertisement
+apply. The allowed-signer policy in
 §9.7(a) applies in both modes because it depends only on the request's
 authenticated signer. Fast-forward-only (§9.7(b)) requires indexed
 mode. Upload commitments, authentication, tickets, and membership
@@ -860,10 +862,11 @@ Signature validity uses the signed fields and domain separators of
 SPEC-SIGNING. It does not imply that the auth v2 signer is an allowed
 signer for a particular ref; that separate policy is in §9.7.
 
-The following failures MUST return `invalid_argument` with a public
-message naming the corresponding category:
+The following failures MUST return `invalid_argument` with exactly
+the public message shown (the `open closure` row follows §9.4's lag
+rule):
 
-| Verification failure | Public message category |
+| Verification failure | Public message |
 |---|---|
 | Object id does not match its content | `object hash mismatch` |
 | Commit, remix, or tag signature does not verify | `bad signature` |
@@ -933,7 +936,7 @@ The relay-lag bound is deployment configuration. It bounds the
 visibility retry interval; it is not a claim that an unresolved object
 must exist elsewhere. It does not extend the ticket's expiry.
 
-On that `failed_precondition`, a client MUST re-plan the upload once
+On the delta-base `failed_precondition`, a client MUST re-plan the upload once
 as a self-contained pack with no external delta bases and retry with
 a new signed operation (new nonce) with a new ticket, as STC §7.6
 requires. A second failure does not start an unbounded series of
@@ -966,9 +969,11 @@ progress, and a pending response do not themselves consume a ticket
 or move refs.
 
 A server MAY report an upload-local failure earlier than the advance,
-for example on `CompleteUpload`, only when it depends on the uploaded
-bytes alone: unknown upload type, object hash mismatch, a bad signature
-on an object in the pack, or a delta chain too deep. An earlier report
+for example on `CompleteUpload`, only when the consuming advance would
+also report it and it depends on the uploaded bytes alone: an unknown
+upload type, an object hash mismatch, a bad signature on an object the
+advance would check under §9.3(b), or a delta chain too deep whose whole
+chain is inside the pack. An earlier report
 MUST use `invalid_argument` and the same public message as at advance;
 it MUST NOT use `failed_precondition`, which STC §5 maps to a ticket
 failure on upload RPCs. Membership-dependent failures (§9.4) MUST be
@@ -1036,8 +1041,8 @@ member of every repository that mentions its id.
 
 Serving is authorized per repository (the HTTP-serving specification).
 Existence in the global content store MUST NOT be observable through
-this transport protocol, as §9.4 requires. The extracted serving copy MUST NOT become a delta-base
-resolution source.
+this transport protocol, as §9.4 requires. The extracted serving copy
+MUST NOT become a delta-base resolution source.
 
 Informative: deduplication may change the amount or timing of
 server-side work. Protocol responses do not differ based on
@@ -1075,8 +1080,8 @@ verification in indexed mode. A policy violation MUST fail with
 
 The allowed-signer set applies in both modes to the authenticated
 operation signer. Valid signatures on reachable commits do not
-independently authorize that signer to move the ref. Grant and namespace authorization remain
-subject to STC and SPEC-WRITE-GRANTS.
+independently authorize that signer to move the ref. Grant and
+namespace authorization remain subject to STC and SPEC-WRITE-GRANTS.
 
 Fast-forward-only requires indexed mode because the server needs the
 commit graph. An opaque-mode deployment MUST refuse to start with a
