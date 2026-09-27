@@ -150,19 +150,21 @@ whose `mtime` cannot be read (`ops::gc::run_gc`). An implementation MUST
 read `now` no later than the start of the mark; the safety condition
 below depends on it.
 
-**Hazard: a dedup hit does not refresh the grace window.** Object writes
+**Hazard: an object whose `mtime` is not refreshed.** Object writes
 are content-addressed and idempotent. When the object's file already
 exists (for `BulkWriter::write`, with the same bytes),
 `ObjectStore::write`, `WriteBatch` and `BulkWriter::write` return without
-rewriting it, and none of them changes its `mtime`. An object that a
-writer does not write at all because the store already has it is likewise
-left with its old `mtime`. So when a concurrent writer's closure includes an object that
+rewriting it, but set its `mtime` to the current time first; if they
+cannot, they rewrite the object instead (MKIT-55). An object that a
+writer does not write at all because it already has it (a git import
+skips every object its map cache already translated) is left with its
+old `mtime`. So when a concurrent writer's closure includes an object that
 already exists as an old unreachable object (such as a commit superseded
 by a rewrite whose recovery-log entry has expired, then pushed again, or
-a blob identical to one in such a commit), this interleaving loses it,
-however quickly the writer runs:
+a blob identical to one in such a commit) and the writer does not write
+it, this interleaving loses it however quickly the writer runs:
 
-1. The writer writes the object: a dedup hit, so its `mtime` stays old.
+1. The writer skips the object, so its `mtime` stays old.
 2. gc reads `now` and computes its live set; the object is unreachable.
 3. gc's sweep sees `now - mtime >= grace` and deletes the object.
 4. The writer publishes a ref whose closure contains the object.
@@ -170,8 +172,10 @@ however quickly the writer runs:
 The published ref now dangles. The next `mkit gc` aborts with
 `ObjectNotFound` ("Fail-closed requirement"), so no further object is
 lost, but the deleted object is not recovered. The Quint model in
-`formal/quint/gc` reproduces this as the `gcPushFast` instance and the
-`fastPushDedupLossTest` scenario.
+`formal/quint/gc` reproduces this as the `gcPushFast` instance (a write
+that keeps the old `mtime`) and the `fastPushDedupLossTest` scenario;
+`gcPushFastFreshen`, a write that refreshes it as the object writers
+now do, is safe.
 
 **Safety condition (normative).** Let a writer that does not hold gc's
 locks publish a ref at instant `T`. The publication cannot lose an object
@@ -191,15 +195,19 @@ delete an object at the boundary (the model's `mutBoundedLax` mutant and
 `boundaryLossTest`). Consequences:
 
 - A writer outside gc's lock set MUST NOT rely on the duration of its own
-  write-to-publish window to meet this condition, because a dedup hit or
-  a skipped object keeps the object's old `mtime`. The condition is met by
+  write-to-publish window to meet this condition, because a skipped
+  object keeps its old `mtime`. The condition is met by
   a write-to-publish window shorter than `grace` only when every object
   the writer relies on had its `mtime` set within that window.
 - `--grace-secs 0` is never safe against a concurrent writer outside gc's
   lock set.
-- The current implementation does not refresh `mtime` on a dedup hit, so
-  it does not meet the condition for such an object. Operators MUST NOT
-  run `mkit gc` concurrently with pushes into, or git imports into, the
+- The object writers refresh `mtime` on a dedup hit, so an object a
+  writer writes meets the condition when its write-to-publish window is
+  shorter than `grace`, unless the refresh lands after gc's sweep read
+  the old `mtime` and before it unlinks the object (`ops::gc::run_gc`
+  does not do the two atomically). A git import does not write objects its map cache
+  already covers, so it does not meet the condition for such an object.
+  Operators MUST NOT run `mkit gc` concurrently with git imports into the
   same repository unless the condition is otherwise guaranteed.
 
 ## Invariants
@@ -214,7 +222,7 @@ delete an object at the boundary (the model's `mutBoundedLax` mutant and
 | A crash cannot persist a ref rewrite while losing its recovery entry | `record` fsyncs the log file and its parent directory before returning ("Recovery log") |
 | A producer append cannot race an `expire` rewrite and vanish | callers hold the repo lock; gc runs expire → collect roots → prune under the same lock ("Recovery log") |
 | Recently-orphaned objects survive a gc run | unreachable objects younger than the grace window (default 14 days) are skipped ("Status") |
-| A writer outside gc's lock set never publishes a dangling ref | only when every object its publication makes newly reachable has an on-disk `mtime` within `grace` of the publication; a dedup hit does not refresh `mtime`, so this is not guaranteed today ("Concurrent writers and the grace window") |
+| A writer outside gc's lock set never publishes a dangling ref | only when every object its publication makes newly reachable has an on-disk `mtime` within `grace` of the publication; a dedup hit refreshes `mtime`, but an object a git import skips via its map cache keeps its old `mtime`, so this is not guaranteed today ("Concurrent writers and the grace window") |
 | An unset ref never pins an object | the all-zero hash is excluded from roots ("Retention roots") |
 
 The load-bearing rule is the fail-closed requirement: every guarantee

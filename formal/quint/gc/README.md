@@ -80,9 +80,12 @@ workers, Apalache with `-Xmx4g`; one JVM at a time.
 - **Objects:** 8 objects in a fixed DAG. Objects 5 and 7 start as old orphans;
   5 is in the writer's closure, 7 is garbage nobody writes, so a gc can
   delete something while a writer is in flight. Writes are content-addressed:
-  a dedup hit leaves the existing mtime unchanged, as in `ObjectStore::write`
-  (`final_path.exists()`) and `BulkWriter::write` (byte-equal existing file),
-  unless `FRESHEN` is set.
+  a dedup hit leaves the existing mtime unchanged unless `FRESHEN` is set.
+  `FRESHEN = true` is the implementation since MKIT-55: `ObjectStore::write`
+  (`final_path.exists()`), `WriteBatch` and `BulkWriter::write` (byte-equal
+  existing file) set the existing file's mtime to now on a dedup hit, and
+  rewrite the object if they cannot. `FRESHEN = false` is the implementation
+  before MKIT-55.
 
 **Bounds:** 8 objects, 3 refs plus the recovery log, 1 producer, 1 writer,
 1 tag publisher, clock 0..6, `GRACE = 2` (0 in `gcGrace0`), `RETAIN = 2`,
@@ -128,8 +131,8 @@ object and deletes an old one in its closure), `CanaryNoTagPublished`.
 | Instance | Writer assumption | Result |
 |---|---|---|
 | `gcPushRaw`, `gcPushRawFreshen` | none | `NoDangling` and `NoLivePruned` violated: the writer writes at t, gc runs with `now ≥ t + GRACE`, the writer then publishes |
-| `gcPushFast` | publish < GRACE after the write | Violated even with a zero-duration writer: 5 is an old orphan, the write is a dedup hit that keeps mtime 0 (`fastPushDedupLossTest`) |
-| `gcPushFastFreshen` | as above, mtime refreshed on dedup | Safe |
+| `gcPushFast` | publish < GRACE after the write | Violated even with a zero-duration writer: 5 is an old orphan, the write is a dedup hit that keeps mtime 0 (`fastPushDedupLossTest`). The implementation before MKIT-55 |
+| `gcPushFastFreshen` | as above, mtime refreshed on dedup | Safe. The implementation since MKIT-55, except gc's mtime-read-then-unlink window (below) |
 | `gcPushBounded` | at publish time T, every object the tip makes newly reachable is present with `T - mtime < GRACE` (on-disk mtime) | Safe |
 | `mutBoundedLax` | the same with `T - mtime <= GRACE` | Violated (`boundaryLossTest`): the bound is tight |
 
@@ -142,7 +145,11 @@ the boundary, `gcPushFast`, `gcPushRaw*`), not proved in general. It works
 because gc reads `now` before its mark, so a gc whose mark precedes the
 publish has `now ≤ T`, and the other roots are frozen during a gc run
 (producers are excluded, expire precedes mark). The writer's duration bounds
-this only when a dedup hit refreshes mtime (`gcPushFastFreshen`).
+this only when a dedup hit refreshes mtime (`gcPushFastFreshen`), which the
+object writers do since MKIT-55. The model's `GcSweep(o)` reads o's mtime and
+deletes o in one step; `run_gc` reads `object_metadata` and later calls
+`remove_object`, so a refresh that lands between the two still loses the
+object. That window is not modelled, and closing it needs a gc-side change.
 `--grace-secs 0` is never safe against such a writer. This is the condition
 SPEC-GC now states as normative.
 
@@ -166,8 +173,14 @@ a closure present under the lock stays present until the publish.
 - **git-bridge import:** `mkit git import`/`fetch`/`pull` writes loose objects
   through `BulkWriter` and publishes tags and remote-tracking refs under
   `git-<remote>.lock` only (git_import.rs), outside gc's lock set.
-  `BulkWriter::write` leaves a byte-equal existing object untouched, so its
-  mtime stays old. `gcPushFast`/`gcPushRaw` are this writer.
+  Since MKIT-55 `BulkWriter::write` refreshes the mtime of a byte-equal
+  existing object, so for the objects it writes the importer is
+  `gcPushFastFreshen` (`gcPushFast` before MKIT-55; `gcPushRaw*` if its
+  write-to-publish window can exceed GRACE). The model's writer writes every
+  object of its tip. The importer does not: an object its map cache already
+  translated is not written at all and keeps its old mtime, which is the
+  `gcPushFast` behaviour for that object. SPEC-GC keeps the operator rule
+  against running gc concurrently with a git import for this reason.
 - **File-transport and served pushes do not race `mkit gc` on this branch.**
   `FileTransport` and `mkit serve`/`mkit-server` (`FsBlobStore`,
   `FsLayoutStore`) store `<root>/packs/<64-hex>` and `<root>/refs/...`.
@@ -290,6 +303,17 @@ every state with at most two producer rewrites and no corrupt source.
 | `mutLeakLock::NoLeakedLock`, `mutStuckPush::NoStuckPush` | 3, 4 | violated, 8 s, 7 s |
 | `ciHoldFirst::All`, `ciShortTtlGrace::All` | 16 | ok, 33 s, 36 s |
 | every `ci*` mutant and unsafe ordering above, `ciHoldFirst::CanaryNoDeleteThenPublish` | 10, 12 | violated, 5 to 9 s |
+
+**MKIT-55 re-run (2026-09-27)**, after the object writers began refreshing
+mtime on a dedup hit (the model is unchanged; this confirms the instance the
+code now matches): `ONLY=gc SEL='^gcPushFast' APALACHE=1 ./check.sh` exits 0.
+All 8 gc `quint test` scenarios pass; `quint run` `gcPushFastFreshen::All` and
+`::NoLivePruned` ok, `gcPushFast::NoDangling`/`::NoLivePruned` and the
+`gcPushFastFreshen` canaries `CanaryNoPruneDuringPush`/`CanaryNoPrunedPushPublished`
+violated as expected; Apalache `gcPushFastFreshen::All` length 8 ok (450 s),
+`gcPushFast::NoDangling` / `::NoLivePruned` length 8 violated (174 s / 67 s),
+`gcPushFastFreshen::CanaryNoPrunedPushPublished` length 9 violated (41 s).
+Bounded, not proved.
 
 `gcTagRoot::NoDangling` is not run under Apalache: its shortest
 counterexample is 16 steps (gc must sweep all seven objects and finish before

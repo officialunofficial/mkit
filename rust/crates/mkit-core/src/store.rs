@@ -142,8 +142,9 @@ impl BulkWriter<'_> {
     /// store's global invariant (an object is never visible before its
     /// bytes are durable), so another process's `contains()` dedup can
     /// never reference a half-written object. An existing path is
-    /// byte-verified: matched objects are left in place (but still
-    /// fsynced at commit, see below), torn ones are rewritten.
+    /// byte-verified: matched objects are left in place with a refreshed
+    /// `mtime` (MKIT-55; still fsynced at commit, see below), torn ones
+    /// are rewritten.
     ///
     /// # Panics
     /// Never in practice: object paths always have a 2-hex shard
@@ -163,8 +164,11 @@ impl BulkWriter<'_> {
         let shard_dir = final_path
             .parent()
             .expect("object path always has a 2-hex parent");
+        // A match whose mtime cannot be refreshed (MKIT-55, see
+        // `refresh_mtime`) is rewritten like a torn file.
         if let Ok(existing) = fs::read(&final_path)
             && existing == bytes
+            && refresh_mtime(&final_path).is_ok()
         {
             // The bytes may have matched out of the PAGE CACHE of a
             // crashed session's unsynced write — byte equality is not a
@@ -374,8 +378,9 @@ impl ObjectStore {
 
     /// Write `bytes` to the store, returning their BLAKE3 hash. Atomic:
     /// writes to a sibling temp file, `fsync`s, then renames into place.
-    /// Idempotent — re-writing the same bytes is a no-op (the temp file
-    /// is unlinked on the early-return path).
+    /// Idempotent — re-writing the same bytes only refreshes the
+    /// object's `mtime`, restarting gc's grace window (MKIT-55; see
+    /// `refresh_mtime`), and writes nothing.
     ///
     /// # Panics
     ///
@@ -387,10 +392,14 @@ impl ObjectStore {
         }
         let h = object_id_from_bytes(bytes);
         let final_path = self.path_for(&h);
-        if final_path.exists() {
-            // Dedup hit: the object is visible, but if another process
-            // renamed it and has not yet flushed the dirent, it may not
-            // be durable — and our caller is about to reference it.
+        // Dedup hit: refresh the grace window (MKIT-55, see
+        // `refresh_mtime`). If the refresh fails (the object vanished
+        // under a concurrent gc, or we may not set its times), fall
+        // through and rewrite it instead of reporting a stale hit.
+        if final_path.exists() && refresh_mtime(&final_path).is_ok() {
+            // The object is visible, but if another process renamed
+            // it and has not yet flushed the dirent, it may not be
+            // durable — and our caller is about to reference it.
             // Flush its shard dir before returning (SPEC-OBJECTS §10.1
             // dedup rule, mirroring WriteBatch's touched_shards).
             self.syncer()
@@ -425,9 +434,10 @@ impl ObjectStore {
     /// torn, since contents were fsynced first. Existing paths are
     /// VERIFIED (byte compare)
     /// rather than blindly rewritten or blindly trusted: a matching
-    /// file is left untouched (it may be durable and referenced by
-    /// native history — replacing it with an unsynced inode would put
-    /// it at risk), a torn one is healed by rewrite, and reads always
+    /// file is left in place with only its `mtime` refreshed (it may be
+    /// durable and referenced by native history — replacing it with an
+    /// unsynced inode would put it at risk), a torn one is healed by
+    /// rewrite, and reads always
     /// BLAKE3-verify. Callers MUST gate bulk sessions behind their
     /// own crash marker and re-run on detection.
     #[must_use]
@@ -790,6 +800,54 @@ impl ObjectSink for ObjectStore {
     fn has(&self, h: &Hash) -> bool {
         self.contains(h)
     }
+}
+
+/// Reset an existing object file's `mtime` to now, on a dedup hit.
+///
+/// gc's grace window is measured from the object file's on-disk
+/// `mtime` (SPEC-GC "Concurrent writers and the grace window"). A
+/// writer outside gc's lock set that dedups against an OLD unreachable
+/// object and then publishes a ref over it would otherwise lose the
+/// object to a gc run in between (MKIT-55). Callers treat an `Err` as
+/// "not refreshed" and fall back to rewriting the object, which gives
+/// it a fresh inode and `mtime`; they never report a dedup hit whose
+/// `mtime` was not refreshed.
+///
+/// - Permissions: on Unix, setting an explicit time needs ownership,
+///   not write access, so a read-only fd works on a read-only object
+///   file; a non-owner gets `EPERM` and so rewrites. Windows needs a
+///   write-capable handle for `SetFileTime`.
+/// - Durability: the new `mtime` is not fsynced. It only has to hold
+///   between this dedup hit and the writer's ref publish, in the same
+///   boot, where gc reads it from the in-memory inode. A crash ends the
+///   writer: a ref it already published durably makes the object a gc
+///   root, and an unpublished one never needed it, so a reverted
+///   `mtime` after a crash cannot lose a reachable object.
+/// - Cost: one `open` + `futimens` (plus `close`) per dedup hit.
+///
+/// This does not close gc's own window between reading an object's
+/// `mtime` and unlinking it (`ops::gc::run_gc`): a refresh that lands
+/// inside it still loses the object.
+pub(crate) fn refresh_mtime(path: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    if FAIL_REFRESH.get() {
+        return Err(io::ErrorKind::NotFound.into());
+    }
+    let mut opts = fs::OpenOptions::new();
+    if cfg!(unix) {
+        opts.read(true);
+    } else {
+        opts.write(true);
+    }
+    opts.open(path)?.set_modified(std::time::SystemTime::now())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test seam: make [`refresh_mtime`] fail on this thread, as a
+    /// concurrent gc unlink (`NotFound`) would, to exercise the
+    /// callers' rewrite fallback.
+    static FAIL_REFRESH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// On Unix, fsync the directory holding the just-renamed file so the
@@ -1192,5 +1250,158 @@ mod bulk_writer_tests {
         assert_eq!(store.read(&h1).unwrap(), obj);
         // Interoperates with the normal (fsynced) writer.
         assert_eq!(store.write(&obj).unwrap(), h1);
+    }
+}
+
+/// MKIT-55: a dedup hit must refresh the existing object's `mtime`, so
+/// a writer outside gc's lock set (git import) that is about to publish
+/// a ref over an old unreachable object does not lose it to a gc with a
+/// grace window (SPEC-GC "Concurrent writers and the grace window").
+#[cfg(test)]
+mod dedup_mtime_tests {
+    use super::*;
+    use crate::batch::SyncPolicy;
+    use crate::layout::RepoLayout;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    const DAY: u64 = 24 * 60 * 60;
+    /// gc's default grace window (SPEC-GC "Status").
+    const GRACE: u64 = 14 * DAY;
+
+    fn repo() -> (tempfile::TempDir, ObjectStore) {
+        let td = tempfile::tempdir().unwrap();
+        let store = ObjectStore::init(&RepoLayout::single(td.path())).unwrap();
+        crate::refs::init(&RepoLayout::single(td.path())).unwrap();
+        (td, store)
+    }
+
+    fn mtime(store: &ObjectStore, h: &Hash) -> SystemTime {
+        fs::metadata(store.path_for(h)).unwrap().modified().unwrap()
+    }
+
+    /// Age the object file past the grace window, as an object written
+    /// long ago and since orphaned (e.g. a superseded commit whose
+    /// recovery entry expired) would be.
+    fn backdate(store: &ObjectStore, h: &Hash) -> SystemTime {
+        let old = SystemTime::now() - Duration::from_secs(30 * DAY);
+        File::open(store.path_for(h))
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        assert!(mtime(store, h) <= old + Duration::from_secs(1));
+        old
+    }
+
+    fn now_secs() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    /// Write an object, age it, dedup-write it again through `rewrite`,
+    /// then run a gc with the default grace: the re-written object must
+    /// have a fresh `mtime` and survive, while an equally old orphan
+    /// nobody re-wrote is pruned (so the gc really sweeps).
+    fn assert_dedup_refreshes(read_only: bool, rewrite: impl Fn(&ObjectStore, &[u8]) -> Hash) {
+        let (td, store) = repo();
+        let bytes = b"object the import is about to publish".to_vec();
+        let h = store.write(&bytes).unwrap();
+        let control = store.write(b"old orphan nobody writes again").unwrap();
+        backdate(&store, &h);
+        backdate(&store, &control);
+        if read_only {
+            // A store copied or restored with read-only object files:
+            // refreshing the mtime must not need write permission.
+            let mut perm = fs::metadata(store.path_for(&h)).unwrap().permissions();
+            perm.set_readonly(true);
+            fs::set_permissions(store.path_for(&h), perm).unwrap();
+        }
+
+        let before = SystemTime::now() - Duration::from_secs(1);
+        assert_eq!(rewrite(&store, &bytes), h);
+        assert!(
+            mtime(&store, &h) >= before,
+            "dedup hit must refresh the object's mtime"
+        );
+
+        let report = crate::ops::gc::run_gc(
+            &store,
+            &RepoLayout::single(td.path()),
+            now_secs(),
+            GRACE,
+            false,
+        )
+        .unwrap();
+        assert!(store.contains(&h), "re-written object pruned: {report:?}");
+        assert_eq!(store.read(&h).unwrap(), bytes);
+        assert!(!store.contains(&control), "control orphan kept: {report:?}");
+    }
+
+    #[test]
+    fn store_write_dedup_refreshes_mtime() {
+        assert_dedup_refreshes(false, |s, b| s.write(b).unwrap());
+    }
+
+    #[test]
+    fn store_write_dedup_refreshes_read_only_object() {
+        assert_dedup_refreshes(true, |s, b| s.write(b).unwrap());
+    }
+
+    #[test]
+    fn batch_dedup_refreshes_mtime() {
+        for policy in [SyncPolicy::Batch, SyncPolicy::PerObject] {
+            for read_only in [false, true] {
+                assert_dedup_refreshes(read_only, |s, b| {
+                    let batch = s.batch_with_policy(policy);
+                    let h = batch.write(b).unwrap();
+                    batch.commit().unwrap();
+                    h
+                });
+            }
+        }
+    }
+
+    /// A failed refresh must not be reported as a dedup hit: every
+    /// writer falls back to rewriting the object, which gives it a
+    /// fresh `mtime` too.
+    #[test]
+    fn failed_refresh_falls_back_to_rewrite() {
+        fn failing<T>(f: impl FnOnce() -> T) -> T {
+            FAIL_REFRESH.set(true);
+            let out = f();
+            FAIL_REFRESH.set(false);
+            out
+        }
+        for read_only in [false, true] {
+            assert_dedup_refreshes(read_only, |s, b| failing(|| s.write(b).unwrap()));
+            for policy in [SyncPolicy::Batch, SyncPolicy::PerObject] {
+                assert_dedup_refreshes(read_only, |s, b| {
+                    let batch = s.batch_with_policy(policy);
+                    let h = failing(|| batch.write(b).unwrap());
+                    batch.commit().unwrap();
+                    h
+                });
+            }
+        }
+        assert_dedup_refreshes(false, |s, b| {
+            let mut bw = s.bulk_writer();
+            let h = failing(|| bw.write(b).unwrap());
+            bw.commit().unwrap();
+            h
+        });
+    }
+
+    /// Writable object files only: `BulkWriter::commit` re-opens a
+    /// re-used object for writing to fsync it, which a read-only object
+    /// file refuses (independent of the mtime refresh).
+    #[test]
+    fn bulk_writer_dedup_refreshes_mtime() {
+        assert_dedup_refreshes(false, |s, b| {
+            let mut bw = s.bulk_writer();
+            let h = bw.write(b).unwrap();
+            bw.commit().unwrap();
+            h
+        });
     }
 }

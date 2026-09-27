@@ -59,7 +59,7 @@ module gcCore {
   //                      publishes (a crashed/failed writer); only PushAbort
   //            "fastNoAbort" progress mutant: "fast" without PushAbort
   const PUSH_MODE: str
-  const FRESHEN: bool          // dedup hit refreshes mtime (store.rs does NOT)
+  const FRESHEN: bool          // dedup hit refreshes mtime (store.rs does since MKIT-55)
   const GRACE: int             // object grace window (default 14 d; `--grace-secs`)
   // TAG_CHECK: a later root publish of PUSH_TIP under the lock, as
   // `mkit tag <hash>` / `attest` / `update-ref` do (#267):
@@ -561,7 +561,7 @@ module gcPushRawFreshen {
       .then(PushPublish)
       .expect(not(NoDangling) and NoLivePruned)
 }
-module gcPushFast {         // push publishes within GRACE; store as implemented
+module gcPushFast {         // push publishes within GRACE; store before MKIT-55 (no mtime refresh)
   import gcCore(PUSH_MODE = "fast", FRESHEN = false, GRACE = 2, TAG_CHECK = "none",
     MUTANT = "none").*
 
@@ -581,7 +581,7 @@ module gcPushFast {         // push publishes within GRACE; store as implemented
       .then(GcLock).then(GcExpireRead).then(GcExpireWrite).then(GcMark)
       .expect(gcPhase == "idle" and aborts == 1 and markedUnreadable)
 }
-module gcPushFastFreshen {  // push publishes within GRACE, dedup refreshes mtime
+module gcPushFastFreshen {  // push publishes within GRACE, dedup refreshes mtime (store as implemented)
   import gcCore(PUSH_MODE = "fast", FRESHEN = true, GRACE = 2, TAG_CHECK = "none",
     MUTANT = "none").*
 
