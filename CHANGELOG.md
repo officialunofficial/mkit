@@ -32,6 +32,12 @@ train).
 - *(client)* Remove `ConnectTransport::with_atomic_advance` for the upcoming
   0.5.0 release. `GetServerInfo` is the sole source of atomic-advance capability
   (WP-1.16).
+- *(client)* Connect remote URLs whose path is not a repository identity now
+  fail at open with `MalformedUrl`, even against servers that ignore the path:
+  for example `/org/repo`, `/MyRepo`, percent-encoded paths, dot segments, and
+  extra or missing slashes after the scheme. Use an empty path or a lowercase
+  bare name (`mkit+https://host/myproj`) for single-repository servers, and
+  `<ed25519-… | 0x…>/<name>` for namespaced ones (STC §7.4) (WP-1.16).
 
 ### Changed
 

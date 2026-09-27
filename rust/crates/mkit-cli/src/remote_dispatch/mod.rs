@@ -187,11 +187,11 @@ pub enum DispatchError {
 /// operations. Pack downloads retain their content-specific missing errors.
 fn repository_operation_error(tx: &dyn Transport, error: TransportError) -> DispatchError {
     if matches!(&error, TransportError::PackNotFound)
-        && let Some((identity, origin)) = tx.repository_address()
+        && let Some(address) = tx.repository_address()
     {
         return DispatchError::RepositoryNotFound {
-            identity: identity.to_owned(),
-            origin: origin.to_owned(),
+            identity: address.repository.to_owned(),
+            origin: address.origin.to_owned(),
         };
     }
     error.into()

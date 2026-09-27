@@ -386,7 +386,7 @@ mod tests {
             let repository = get("x-repository");
             let expires = get("x-expires-at");
             if audience != "https://example.invalid"
-                || repository != "default"
+                || repository.is_empty()
                 || get("x-envelope-version") != "2"
             {
                 return false;
@@ -427,7 +427,7 @@ mod tests {
             let expires = get("x-expires-at");
             let commitment = get("x-content-commitment");
             if audience != "https://example.invalid"
-                || repository != "default"
+                || repository.is_empty()
                 || get("x-envelope-version") != "2"
             {
                 return false;
@@ -622,6 +622,8 @@ mod tests {
             }
         }
 
+        const NAMESPACED: &str = "0x0123456789abcdef0123456789abcdef01234567/photos";
+
         #[test]
         fn ref_hint_is_excluded_from_signed_canonical_string() {
             let captured = Arc::new(Mutex::new(None));
@@ -631,7 +633,7 @@ mod tests {
                 },
                 Some(Arc::new(DalekSigner(SigningKey::from_bytes(&[9; 32])))),
                 "https://example.invalid".into(),
-                "default".into(),
+                NAMESPACED.into(),
             );
             let procedure = "/mkit.transport.v1.TransportService/UpdateRef";
             let mut req = build_request(procedure, b"write-body");
@@ -653,8 +655,10 @@ mod tests {
                 &got.headers,
                 &got.body
             ));
+            assert_eq!(got.headers["x-repository"], NAMESPACED);
+            // The signature binds the repository: another identity fails.
             got.headers
-                .insert("x-repository", HeaderValue::from_static("other"));
+                .insert("x-repository", HeaderValue::from_static("default"));
             assert!(!verify_unary_from_headers(
                 procedure,
                 &got.headers,

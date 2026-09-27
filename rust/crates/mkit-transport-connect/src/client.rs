@@ -15,7 +15,7 @@ use mkit_core::hash::Hash;
 use mkit_core::protocol::async_shim::Executor as _;
 use mkit_core::protocol::{
     AdvanceOutcome as CoreAdvanceOutcome, BackoffIterator, PACK_BODY_LIMIT, PACK_BODY_LIMIT_USIZE,
-    PackKey, RefWriteCondition, Transport, TransportError, TransportResult,
+    PackKey, RefWriteCondition, RepositoryAddress, Transport, TransportError, TransportResult,
 };
 use mkit_core::refs::{Ref, validate_ref_name};
 use mkit_core::repo_identity::{IdentityError, RepositoryIdentity};
@@ -34,6 +34,7 @@ use crate::proto::mkit::transport::v1::{
 
 /// Capability discovery result, immutable for a transport's lifetime.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum ServerInfoView {
     /// A validated v2 (or later) deployment advertisement.
     V2(Box<GetServerInfoResponse>),
@@ -45,11 +46,15 @@ pub enum ServerInfoView {
 
 /// Invalid remote URL or repository path; no path spelling is repaired.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum UrlIdentityError {
     /// URL parsing failed.
     Url(url::ParseError),
     /// A query or fragment would make the repository address ambiguous.
     QueryOrFragment,
+    /// The URL is not literally `scheme://authority/path`, or URL parsing
+    /// would rewrite its path (dot segments, backslashes, extra slashes).
+    NonLiteralPath,
     /// The literal path is outside the repository identity grammar.
     Identity(IdentityError),
 }
@@ -61,6 +66,9 @@ impl std::fmt::Display for UrlIdentityError {
             Self::QueryOrFragment => {
                 f.write_str("repository URLs cannot contain a non-empty query or fragment")
             }
+            Self::NonLiteralPath => f.write_str(
+                "repository URLs must be written as scheme://host/path, with a path URL parsing leaves unchanged",
+            ),
             Self::Identity(e) => e.fmt(f),
         }
     }
@@ -71,7 +79,7 @@ impl std::error::Error for UrlIdentityError {
         match self {
             Self::Url(e) => Some(e),
             Self::Identity(e) => Some(e),
-            Self::QueryOrFragment => None,
+            Self::QueryOrFragment | Self::NonLiteralPath => None,
         }
     }
 }
@@ -88,16 +96,21 @@ pub fn repository_identity_from_url(url: &str) -> Result<RepositoryIdentity, Url
     {
         return Err(UrlIdentityError::QueryOrFragment);
     }
-    // WHATWG URL parsing repairs dot segments and backslashes. Validate
-    // the original path, so those repairs cannot alter repository routing.
-    let authority_start = stripped.find("://").map_or(0, |i| i + 3);
-    let rest = &stripped[authority_start..];
+    // WHATWG URL parsing repairs dot segments, backslashes and missing or
+    // extra slashes after the scheme. Require the literal text to be
+    // `scheme://authority/path` with the path the parser also sees, so those
+    // repairs cannot alter repository routing.
+    let scheme_sep = format!("{}://", parsed.scheme());
+    let rest = match stripped.get(..scheme_sep.len()) {
+        Some(head) if head.eq_ignore_ascii_case(&scheme_sep) => &stripped[scheme_sep.len()..],
+        _ => return Err(UrlIdentityError::NonLiteralPath),
+    };
     let path_start = rest.find(['/', '?', '#', '\\']).unwrap_or(rest.len());
-    let path = rest[path_start..]
-        .split(['?', '#'])
-        .next()
-        .unwrap_or("")
-        .trim_matches('/');
+    let raw_path = rest[path_start..].split(['?', '#']).next().unwrap_or("");
+    if raw_path != parsed.path() && !(raw_path.is_empty() && parsed.path() == "/") {
+        return Err(UrlIdentityError::NonLiteralPath);
+    }
+    let path = raw_path.trim_matches('/');
     RepositoryIdentity::parse_bare_allowed(if path.is_empty() { "default" } else { path })
         .map_err(UrlIdentityError::Identity)
 }
@@ -121,6 +134,10 @@ fn ref_hint(options: CallOptions, ref_name: Option<&str>) -> CallOptions {
 /// A generous termination bound: at most 100,000 pages per listing.
 /// This prevents cyclic cursors from holding a client forever.
 const MAX_LIST_REFS_PAGES: usize = 100_000;
+
+/// Bound on one listing's accumulated ref names plus 32-byte ids, so a server
+/// cannot grow a paged listing without limit.
+const MAX_LIST_REFS_BYTES: usize = 128 * 1024 * 1024;
 
 /// Environment variable consulted at [`ConnectTransport::connect`] time for
 /// an optional Bearer token — same name `mkit-transport-http` used
@@ -283,7 +300,9 @@ impl ConnectTransport {
     /// # Errors
     ///
     /// - [`TransportError::InvalidResponse`] — URL has no `mkit+` prefix,
-    ///   is otherwise unparseable, or uses a scheme other than `http`/`https`.
+    ///   is otherwise unparseable, uses a scheme other than `http`/`https`,
+    ///   or its path, query or fragment is not a valid repository address;
+    ///   [`repository_identity_from_url`] reports which.
     /// - [`TransportError::InsecureScheme`] — plain `http://` to a
     ///   non-loopback host.
     /// - [`TransportError::ConnectionFailed`] — the local tokio runtime
@@ -762,8 +781,8 @@ impl Transport for ConnectTransport {
         self.pack_exists_with_hint(key, Some(ref_name))
     }
 
-    fn repository_address(&self) -> Option<(&str, &str)> {
-        Some((&self.repository_text, &self.origin))
+    fn repository_address(&self) -> Option<RepositoryAddress<'_>> {
+        Some(RepositoryAddress::new(&self.repository_text, &self.origin))
     }
 
     fn update_ref(
@@ -829,6 +848,8 @@ impl Transport for ConnectTransport {
     fn list_refs(&self, prefix: &str) -> TransportResult<Vec<Ref>> {
         let mut refs: Vec<Ref> = Vec::new();
         let mut page_token = None;
+        let mut seen_tokens = std::collections::HashSet::new();
+        let mut listed_bytes = 0usize;
         for _ in 0..MAX_LIST_REFS_PAGES {
             let response = self.retrying(|| {
                 self.executor.block_on(async {
@@ -867,15 +888,21 @@ impl Transport for ConnectTransport {
             if page.windows(2).any(|pair| pair[0].name >= pair[1].name) {
                 return Err(TransportError::InvalidResponse);
             }
-            refs.extend(page);
-            let next = response.next_page_token.filter(|token| !token.is_empty());
-            if next.is_none() {
-                return Ok(refs);
-            }
-            if next == page_token {
+            listed_bytes = page.iter().fold(listed_bytes, |acc, r| {
+                acc.saturating_add(r.name.len()).saturating_add(32)
+            });
+            if listed_bytes > MAX_LIST_REFS_BYTES {
                 return Err(TransportError::InvalidResponse);
             }
-            page_token = next;
+            refs.extend(page);
+            let Some(next) = response.next_page_token.filter(|token| !token.is_empty()) else {
+                return Ok(refs);
+            };
+            // Any repeated cursor, not only the previous one, is a cycle.
+            if !seen_tokens.insert(next.clone()) {
+                return Err(TransportError::InvalidResponse);
+            }
+            page_token = Some(next);
         }
         Err(TransportError::InvalidResponse)
     }
@@ -1000,7 +1027,7 @@ mod tests {
         );
         assert_eq!(
             t.repository_address(),
-            Some(("myproj", "http://127.0.0.1:9"))
+            Some(RepositoryAddress::new("myproj", "http://127.0.0.1:9"))
         );
     }
 
@@ -1013,6 +1040,14 @@ mod tests {
             ("/myproj".into(), "myproj".into()),
             (format!("/{ns}/name"), format!("{ns}/name")),
             (format!("/{ns}/name/"), format!("{ns}/name")),
+            (
+                format!("/0x{}/{}", "cd".repeat(20), "n".repeat(100)),
+                format!("0x{}/{}", "cd".repeat(20), "n".repeat(100)),
+            ),
+            (
+                format!("/{ns}/{}", "a".repeat(100)),
+                format!("{ns}/{}", "a".repeat(100)),
+            ),
         ] {
             let url = format!("mkit+https://example.invalid{path}");
             assert_eq!(
@@ -1040,6 +1075,25 @@ mod tests {
             ));
         }
         assert!(repository_identity_from_url("not a url").is_err());
+        // Extra or missing slashes after the scheme move the path under WHATWG
+        // parsing; the literal spelling is refused instead of reinterpreted.
+        for url in [
+            "mkit+http:///localhost/",
+            "mkit+https:///myproj",
+            "mkit+https:/host/x://y",
+        ] {
+            assert!(
+                matches!(
+                    repository_identity_from_url(url),
+                    Err(UrlIdentityError::NonLiteralPath)
+                ),
+                "{url}"
+            );
+        }
+        assert!(
+            repository_identity_from_url(&format!("mkit+https:/0x{}/name", "cd".repeat(20)))
+                .is_err()
+        );
         assert_eq!(
             repository_identity_from_url("mkit+https://example.invalid/name?#")
                 .unwrap()

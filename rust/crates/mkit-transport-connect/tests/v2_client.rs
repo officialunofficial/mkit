@@ -36,6 +36,8 @@ struct Captured {
     repository: Option<String>,
     hint: Option<String>,
     list: Option<generated::ListRefsRequest>,
+    /// Public key, signature, created-at and idempotency key, when signed.
+    signed: Option<[String; 4]>,
 }
 
 struct State {
@@ -45,6 +47,7 @@ struct State {
     missing: bool,
     read_failures: usize,
     download_failures: usize,
+    update_failures: usize,
     requests: Vec<Captured>,
 }
 
@@ -57,6 +60,7 @@ impl Default for State {
             missing: false,
             read_failures: 0,
             download_failures: 0,
+            update_failures: 0,
             requests: Vec::new(),
         }
     }
@@ -76,6 +80,14 @@ impl TestService {
             repository: header("x-repository"),
             hint: header("x-mkit-ref"),
             list: None,
+            signed: header("x-signature").map(|signature| {
+                [
+                    header("x-public-key").unwrap_or_default(),
+                    signature,
+                    header("x-created-at").unwrap_or_default(),
+                    header("idempotency-key").unwrap_or_default(),
+                ]
+            }),
         });
     }
 }
@@ -201,10 +213,16 @@ impl generated::TransportService for TestService {
 
     async fn update_ref(
         &self,
-        _ctx: RequestContext,
+        ctx: RequestContext,
         _request: ServiceRequest<'_, generated::UpdateRefRequest>,
     ) -> ServiceResult<generated::UpdateRefResponse> {
-        Err(ConnectError::unimplemented("unused"))
+        self.capture("UpdateRef", &ctx);
+        let mut state = self.0.lock().unwrap();
+        if state.update_failures > 0 {
+            state.update_failures -= 1;
+            return Err(ConnectError::new(ErrorCode::Aborted, "replay in flight"));
+        }
+        Ok(Response::new(generated::UpdateRefResponse::default()))
     }
 
     async fn advance_refs(
@@ -528,6 +546,79 @@ fn repeated_token_and_nonincreasing_page_boundary_are_rejected() {
         ));
         assert_eq!(served.calls("ListRefs"), 2);
     }
+}
+
+/// Deterministic stand-in signer: the "signature" is the signing digest, so
+/// equal signatures mean an equal canonical string.
+struct DigestSigner;
+
+impl mkit_transport_connect::EnvelopeSigner for DigestSigner {
+    fn public_key_hex(&self) -> String {
+        "11".repeat(32)
+    }
+
+    fn sign_hex(&self, message: &[u8; 32]) -> Result<String, String> {
+        let hex: String = message.iter().map(|b| format!("{b:02x}")).collect();
+        Ok(hex.repeat(2))
+    }
+}
+
+#[test]
+fn aborted_signed_write_retries_with_the_same_nonce_and_signature() {
+    let served = Served::new(State {
+        update_failures: 1,
+        ..Default::default()
+    });
+    let client = ConnectTransport::connect_for_test_with_signer(
+        format!("http://127.0.0.1:{}", served.port).parse().unwrap(),
+        Some(Arc::new(DigestSigner)),
+    );
+    client
+        .update_ref(
+            "refs/heads/main",
+            mkit_core::protocol::RefWriteCondition::Any,
+            &hash(DATA),
+        )
+        .unwrap();
+    let state = served.state.lock().unwrap();
+    let attempts: Vec<_> = state
+        .requests
+        .iter()
+        .filter(|capture| capture.rpc == "UpdateRef")
+        .map(|capture| capture.signed.clone().expect("signed write"))
+        .collect();
+    assert_eq!(attempts.len(), 2, "one aborted attempt, one retry");
+    assert!(attempts[0].iter().all(|value| !value.is_empty()));
+    assert_eq!(attempts[0], attempts[1]);
+}
+
+#[test]
+fn cursor_cycles_and_unordered_pages_are_rejected() {
+    // Empty pages cycling A -> B -> A: the repeat is two pages back.
+    let served = Served::new(State {
+        pages: vec![
+            page(&["refs/heads/a"], Some("A")),
+            page(&[], Some("B")),
+            page(&[], Some("A")),
+        ],
+        ..Default::default()
+    });
+    assert!(matches!(
+        served.client().list_refs(""),
+        Err(TransportError::InvalidResponse)
+    ));
+    assert_eq!(served.calls("ListRefs"), 3);
+
+    // Out-of-order names within one page.
+    let served = Served::new(State {
+        pages: vec![page(&["refs/heads/b", "refs/heads/a"], None)],
+        ..Default::default()
+    });
+    assert!(matches!(
+        served.client().list_refs(""),
+        Err(TransportError::InvalidResponse)
+    ));
+    assert_eq!(served.calls("ListRefs"), 1);
 }
 
 #[test]

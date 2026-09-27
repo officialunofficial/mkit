@@ -391,10 +391,28 @@ pub struct PackChunk {
 /// responsible — the abstract trait takes no position. The
 /// [`is_retryable`] and [`BackoffIterator`] helpers are provided for
 /// implementations that embed the policy.
+/// The repository a transport addresses, for remote error context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RepositoryAddress<'a> {
+    /// Repository identity as sent on the wire (STC §7.4).
+    pub repository: &'a str,
+    /// Origin (scheme and authority) of the remote.
+    pub origin: &'a str,
+}
+
+impl<'a> RepositoryAddress<'a> {
+    /// Build an address from a repository identity and a remote origin.
+    #[must_use]
+    pub const fn new(repository: &'a str, origin: &'a str) -> Self {
+        Self { repository, origin }
+    }
+}
+
 pub trait Transport: Send + Sync {
     /// Repository identity and origin used for remote error context, if available.
     /// Existing transports carry no addressing context by default.
-    fn repository_address(&self) -> Option<(&str, &str)> {
+    fn repository_address(&self) -> Option<RepositoryAddress<'_>> {
         None
     }
 

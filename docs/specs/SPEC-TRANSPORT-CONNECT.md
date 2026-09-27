@@ -959,7 +959,8 @@ Every `Transport` method `ConnectTransport` implements is driven through
 the same `mkit_core::protocol::retrying`/`BackoffIterator` ladder
 `mkit-transport-http`/`-ssh`/`-enc` share (mkit#703, mkit#790): a
 transient `ConnectionFailed` or the Connect codes §5 maps onto a
-5xx/429-equivalent (`unavailable`, `resource_exhausted`) is retried per
+5xx/429-equivalent (`unavailable`, `resource_exhausted`), or `aborted`
+(§5), is retried per
 SPEC-TRANSPORT §7's `is_retryable` classification, read off the
 `TransportError` §5's client-side mapping produces rather than directly
 off an HTTP status. Each retry re-issues the whole RPC from scratch
