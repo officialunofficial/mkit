@@ -50,7 +50,7 @@ fn policy_hooks(deny: bool) -> Hooks<PolicyHook, PolicyAdmission> {
 
 fn namespace_policy(kind: u8, namespace: &Namespace) -> NamespacePolicy {
     match kind {
-        0 => NamespacePolicy::Allowlist([namespace.clone()].into()),
+        0 => NamespacePolicy::Allowlist([*namespace].into()),
         1 => NamespacePolicy::default(),
         _ => NamespacePolicy::Any {
             unsafe_without_admission: true,
@@ -98,7 +98,7 @@ fn namespace_write_policy_matrix_denials_allocate_nothing() {
                 let namespace = if index == 4 {
                     Namespace::Address([3; 20])
                 } else {
-                    ed_namespace.clone()
+                    ed_namespace
                 };
                 for (role, hook_denies) in [
                     (AuthorizerRole::Check, false),
@@ -106,95 +106,111 @@ fn namespace_write_policy_matrix_denials_allocate_nothing() {
                     (AuthorizerRole::Authority, false),
                     (AuthorizerRole::Authority, true),
                 ] {
-                    let mut c = policy_cfg(multi, namespace_policy(policy_kind, &namespace));
-                    c.authorizer_role = role;
-                    let clock = clock();
-                    let hooks = policy_hooks(hook_denies);
-                    let seen = hooks.authorizer.seen.clone();
-                    let admitted = hooks.admission.0.clone();
-                    let e = build(c, Spy::new(store(&clock)), hooks, clock);
-                    let identity = if multi {
-                        format!("{namespace}/{REPO}")
-                    } else {
-                        REPO.to_owned()
-                    };
-                    let mut auth = e
-                        .auth(
-                            &Req::unsigned(Procedure::UpdateRef).header("x-repository", &identity),
-                        )
-                        .unwrap();
-                    auth.principal = principal.clone();
-                    // Supply a stage-0 verified envelope to exercise replay and quota
-                    // allocation alongside every principal combination.
-                    auth.auth = Some(VerifiedAuth {
-                        signer: owner_key,
-                        replay_scope: [1; 32],
-                        fingerprint: [2; 32],
-                        nonce: nonce(1),
-                        commitment: crate::op::Commitment::Body(A),
-                        expires_at_ms: T0 + 300_000,
-                    });
-                    let owner = index != 4 && principal.ed25519() == Some(&owner_key);
-                    let namespace_passes = !multi || policy_kind != 1;
-                    let hook_called =
-                        namespace_passes && (!multi || owner || role == AuthorizerRole::Authority);
-                    let allowed = hook_called && !hook_denies;
-                    let result = now(e.pipe.update_ref(&auth, upd(HEAD, Any, A)));
-                    let context = format!(
-                        "multi={multi} policy={policy_kind} principal={index} role={role:?} deny={hook_denies}"
+                    check_policy_case(
+                        multi,
+                        policy_kind,
+                        principal,
+                        namespace,
+                        role,
+                        hook_denies,
+                        matches!(index, 0 | 5 | 6),
                     );
-                    assert_eq!(result.is_ok(), allowed, "{context}");
-                    assert_eq!(
-                        seen.lock().unwrap().len(),
-                        usize::from(hook_called),
-                        "{context}"
-                    );
-                    assert_eq!(
-                        admitted.lock().unwrap().len(),
-                        usize::from(allowed),
-                        "{context}"
-                    );
-                    if multi && hook_called {
-                        let observed = seen.lock().unwrap();
-                        assert_eq!(
-                            observed[0].authz,
-                            AuthzFacts { owner, grant: None },
-                            "{context}"
-                        );
-                    }
-                    if multi && allowed {
-                        assert_eq!(
-                            admitted.lock().unwrap()[0],
-                            AuthzFacts { owner, grant: None },
-                            "{context}"
-                        );
-                    }
-                    if !allowed {
-                        let err = result.unwrap_err();
-                        assert_eq!(err.code(), Code::PermissionDenied, "{context}");
-                        assert_eq!(
-                            err.public_message(),
-                            if hook_called {
-                                "hook denial"
-                            } else {
-                                "write not permitted"
-                            },
-                            "{context}"
-                        );
-                        assert!(e.pipe.meta.batches.lock().unwrap().is_empty(), "{context}");
-                        for p in [
-                            e.pipe.shards.coordinator(&auth.repo().repo.namespace),
-                            e.pipe.shards.ref_shard(&auth.repo().repo, HEAD),
-                        ] {
-                            assert_eq!(
-                                now(e.pipe.meta.inner.stats(&p)).unwrap().keys,
-                                Some(0),
-                                "{context}"
-                            );
-                        }
-                    }
                 }
             }
+        }
+    }
+}
+
+fn check_policy_case(
+    multi: bool,
+    policy_kind: u8,
+    principal: &Principal,
+    namespace: Namespace,
+    role: AuthorizerRole,
+    hook_denies: bool,
+    owner: bool,
+) {
+    let mut c = policy_cfg(multi, namespace_policy(policy_kind, &namespace));
+    c.authorizer_role = role;
+    let clock = clock();
+    let hooks = policy_hooks(hook_denies);
+    let seen = hooks.authorizer.seen.clone();
+    let admitted = hooks.admission.0.clone();
+    let e = build(c, Spy::new(store(&clock)), hooks, clock);
+    let identity = if multi {
+        format!("{namespace}/{REPO}")
+    } else {
+        REPO.to_owned()
+    };
+    let mut auth = e
+        .auth(&Req::unsigned(Procedure::UpdateRef).header("x-repository", &identity))
+        .unwrap();
+    auth.principal = principal.clone();
+    // Supply a stage-0 verified envelope to exercise replay and quota
+    // allocation alongside every principal combination.
+    auth.auth = Some(VerifiedAuth {
+        signer: [1; 32],
+        replay_scope: [1; 32],
+        fingerprint: [2; 32],
+        nonce: nonce(1),
+        commitment: crate::op::Commitment::Body(A),
+        expires_at_ms: T0 + 300_000,
+    });
+    let namespace_passes = !multi || policy_kind != 1;
+    let hook_called = namespace_passes && (!multi || owner || role == AuthorizerRole::Authority);
+    let allowed = hook_called && !hook_denies;
+    let result = now(e.pipe.update_ref(&auth, upd(HEAD, Any, A)));
+    let context = format!(
+        "multi={multi} policy={policy_kind} principal={principal:?} role={role:?} deny={hook_denies}"
+    );
+    assert_eq!(result.is_ok(), allowed, "{context}");
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        usize::from(hook_called),
+        "{context}"
+    );
+    assert_eq!(
+        admitted.lock().unwrap().len(),
+        usize::from(allowed),
+        "{context}"
+    );
+    if multi && hook_called {
+        let observed = seen.lock().unwrap();
+        assert_eq!(
+            observed[0].authz,
+            AuthzFacts { owner, grant: None },
+            "{context}"
+        );
+    }
+    if multi && allowed {
+        assert_eq!(
+            admitted.lock().unwrap()[0],
+            AuthzFacts { owner, grant: None },
+            "{context}"
+        );
+    }
+    if !allowed {
+        let err = result.unwrap_err();
+        assert_eq!(err.code(), Code::PermissionDenied, "{context}");
+        assert_eq!(
+            err.public_message(),
+            if hook_called {
+                "hook denial"
+            } else {
+                "write not permitted"
+            },
+            "{context}"
+        );
+        assert!(e.pipe.meta.batches.lock().unwrap().is_empty(), "{context}");
+        for p in [
+            e.pipe.shards.coordinator(&auth.repo().repo.namespace),
+            e.pipe.shards.ref_shard(&auth.repo().repo, HEAD),
+        ] {
+            assert_eq!(
+                now(e.pipe.meta.inner.stats(&p)).unwrap().keys,
+                Some(0),
+                "{context}"
+            );
         }
     }
 }

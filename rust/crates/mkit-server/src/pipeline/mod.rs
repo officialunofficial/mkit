@@ -179,7 +179,7 @@ impl PipelineConfig {
         }
     }
 
-    /// The namespace policy advertised by GetServerInfo (STC §2.1).
+    /// The namespace policy advertised by `GetServerInfo` (STC §2.1).
     #[must_use]
     pub fn advertised_namespace_policy(&self) -> &'static str {
         match &self.addressing {
