@@ -1,6 +1,6 @@
 //! [`storage_suite!`](crate::storage_suite) and the case lists it expands.
 //! Each list is written once and feeds both the macro and the
-//! [`kv_cases`](super::kv_cases) / [`blob_cases`](super::blob_cases)
+//! [`kv_cases`](super::kv_cases()) / [`blob_cases`](super::blob_cases)
 //! registries.
 
 /// Expands to one `#[test]` per case in a module named `$name`: tests are
@@ -108,6 +108,12 @@ macro_rules! __with_kv_cases {
                 kv_full_store_rejects_writes_but_serves_reads_and_deletes,
                 kv_stats_reports_growth_and_shrink,
                 kv_panic_in_check_and_write_recovers,
+            }
+            kv_cases::{
+                kv_ticket_create_idempotent,
+                kv_refs_membership_outcome_atomic,
+                kv_ticket_changed_precondition_writes_nothing,
+                kv_outcome_ack_exact_backlog,
             }
             durability::{
                 dur_cancelled_apply_is_all_or_nothing,

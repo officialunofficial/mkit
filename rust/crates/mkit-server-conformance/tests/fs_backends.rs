@@ -159,6 +159,10 @@ impl NamespaceStore for Routed {
 /// `RefsOnly` store), plus the capacity case: a filesystem has no cap of
 /// its own, so it never returns `Full`.
 const SKIPS: &[&str] = &[
+    "kv_ticket_create_idempotent",
+    "kv_refs_membership_outcome_atomic",
+    "kv_ticket_changed_precondition_writes_nothing",
+    "kv_outcome_ack_exact_backlog",
     "kv_first_failing_precondition_index",
     "kv_failed_batch_writes_nothing",
     "kv_put_delete_same_key_last_write_wins",
