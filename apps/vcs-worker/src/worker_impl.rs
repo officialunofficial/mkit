@@ -42,7 +42,7 @@ impl DurableObject for RefStore {
     }
 }
 
-/// The NsCoordinator partition store, with the deployment capacity and timer registry.
+/// The `NsCoordinator` partition store, with the deployment capacity and timer registry.
 #[durable_object]
 pub struct NsCoordinator {
     object: NsObject,
@@ -64,7 +64,7 @@ impl DurableObject for NsCoordinator {
     }
 }
 
-/// The RefShard partition store, with the deployment capacity and timer registry.
+/// The `RefShard` partition store, with the deployment capacity and timer registry.
 #[durable_object]
 pub struct RefShard {
     object: NsObject,
@@ -86,7 +86,7 @@ impl DurableObject for RefShard {
     }
 }
 
-/// The RepoIndexShard partition store, with the deployment capacity and timer registry.
+/// The `RepoIndexShard` partition store, with the deployment capacity and timer registry.
 #[durable_object]
 pub struct RepoIndexShard {
     object: NsObject,
@@ -108,7 +108,7 @@ impl DurableObject for RepoIndexShard {
     }
 }
 
-/// The ContentIndexShard partition store, with the deployment capacity and timer registry.
+/// The `ContentIndexShard` partition store, with the deployment capacity and timer registry.
 #[durable_object]
 pub struct ContentIndexShard {
     object: NsObject,
