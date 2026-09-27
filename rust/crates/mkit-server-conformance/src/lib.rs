@@ -33,7 +33,7 @@
 //! `Fn() -> impl BlobStore` as a blob harness), then invokes
 //! [`storage_suite!`] from its `tests/` directory. Each case becomes its
 //! own `#[test]`, named `<module>::<case>`, so a failure names the case.
-//! A runner that cannot use the macro iterates [`storage::kv_cases`] and
+//! A runner that cannot use the macro iterates [`storage::kv_cases()`] and
 //! [`storage::blob_cases`] instead, on any executor (the case futures need
 //! no particular runtime), and judges each with [`storage::verdict`].
 //!

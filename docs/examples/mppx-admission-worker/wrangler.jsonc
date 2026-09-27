@@ -1,0 +1,26 @@
+{
+  "name": "mppx-admission-reference",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-26",
+  "compatibility_flags": ["nodejs_compat"],
+  // Unsigned hooks are accessible only through an isolated service binding.
+  "workers_dev": false,
+  "preview_urls": false,
+  "vars": {
+    "BEARER_AUTHENTICATED": "false",
+    "HOOK_HTTP_SIGNATURES": "false",
+    "HOOK_AUDIENCE": "https://hooks.example.test",
+    "MKIT_AUDIENCE": "https://vcs.example.test",
+    "PAYMENT_REALM": "vcs.example.test",
+    "TEMPO_RPC_URL": "https://rpc.moderato.tempo.xyz",
+    "PAYMENT_CURRENCY": "0x20c0000000000000000000000000000000000000",
+    // TESTNET placeholder: replace with the merchant's recipient address.
+    "PAYMENT_RECIPIENT": "0x0000000000000000000000000000000000000001"
+  },
+  // Supply MPP_SECRET_KEY as a secret; do not check it into the example.
+  // Optional HTTP mode also needs HOOK_KEY_LIST_JSON (trusted public keys).
+  "durable_objects": {
+    "bindings": [{"name": "RESERVATIONS", "class_name": "Reservations"}]
+  },
+  "migrations": [{"tag": "v1", "new_sqlite_classes": ["Reservations"]}]
+}

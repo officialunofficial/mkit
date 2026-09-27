@@ -154,8 +154,9 @@ Entry condition: M1 is merged and S3 (#1086) is merged. M3 runs in parallel with
   Aborted rejected, expiry; flaky sink delivers at least once and rows are deleted on ack; backpressure: backlog over
   the threshold → new admitted writes get `unavailable`, reads and non-admitted writes unaffected, recovery drains.
 - **Size:** L (~1100).
-- **Risks:** a crash between a failed apply and the `Aborted` write: the delivery driver's reconcile pass emits
-  `Expired` for reservations with no outcome past ticket expiry (SPEC-SERVER states it).
+- **Risks:** a crash between a failed apply and the `Aborted` write: the delivery driver's reconcile pass records
+  `Aborted(ABANDONED)` for pending reservations past their authentication validity (SPEC-SERVER §5,
+  R-91); ticket reservations get `Expired` at ticket expiry.
 
 ### WP-3.4: Native adapter: outbox delivery task, CORS/redaction, ssh/enc "use mkit+https"
 - **Depends on:** WP-3.3.

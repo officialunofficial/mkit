@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex};
 
 use mkit_server::auth_v2::AuthV2Config;
 use mkit_server::pipeline::{AuthMode, Hooks, Pipeline, PipelineConfig};
+use mkit_server::policy::NamespacePolicy;
 use mkit_server::quota::QuotaLimits as ServerQuota;
 use mkit_server::store::keys::ParsedKey;
 use mkit_server::upload::UploadLimits;
@@ -172,14 +173,14 @@ async fn serve_mutant(
     quota: Option<ServerQuota>,
     mutant: Mutant,
 ) -> (String, Shared) {
-    serve_addressing(auth, quota, mutant, false).await
+    serve_addressing(auth, quota, mutant, None).await
 }
 
 async fn serve_addressing(
     auth: impl FnOnce(&str) -> AuthMode,
     quota: Option<ServerQuota>,
     mutant: Mutant,
-    multi: bool,
+    multi: Option<&Profile>,
 ) -> (String, Shared) {
     let (listener, origin) = common::listener().await;
     let repo = RepoId {
@@ -190,11 +191,12 @@ async fn serve_addressing(
         max_total_bytes: MAX_PACK,
         max_chunks: 64,
     };
-    let addressing = if multi {
-        Addressing::Multi(MultiAddressing::new())
-    } else {
-        Addressing::Single { repo }
-    };
+    let addressing = multi.map_or(Addressing::Single { repo }, |profile| {
+        Addressing::Multi(
+            MultiAddressing::new()
+                .with_namespace_policy(NamespacePolicy::Allowlist(multi_allowlist(profile))),
+        )
+    });
     let mut cfg = PipelineConfig::new(addressing, auth(&origin), limits);
     cfg.write_quota = quota;
     let clock = Arc::new(SystemClock);
@@ -220,6 +222,40 @@ async fn serve_addressing(
     );
     tokio::spawn(async move { axum::serve(listener, app).await });
     (origin, meta)
+}
+
+/// Every Multi case's repository owners are admitted, while the denial case's
+/// `non-allowlisted` label stays outside the set.
+fn multi_allowlist(profile: &Profile) -> BTreeSet<mkit_core::repo_identity::Namespace> {
+    let WireAuth::AuthV2 {
+        audience,
+        repository,
+        seed,
+    } = &profile.auth
+    else {
+        panic!("Multi baseline needs auth v2");
+    };
+    mkit_server_conformance::wire::CASES
+        .iter()
+        .filter(|case| case.requires.contains(&Feature::MultiRepo))
+        .flat_map(|case| {
+            ["repository-a", "repository-b"].map(|label| {
+                let label = format!("{}/{label}", case.name);
+                let signer = mkit_server_conformance::wire::sign::Signer::derive(
+                    seed,
+                    &profile.run_id,
+                    &label,
+                    audience,
+                    repository,
+                );
+                mkit_core::repo_identity::Namespace::parse(&format!(
+                    "ed25519-{}",
+                    signer.public_key_hex()
+                ))
+                .unwrap()
+            })
+        })
+        .collect()
 }
 
 /// `GET /__mkit_test/stats`: the single partition's stats.
@@ -297,14 +333,21 @@ async fn pipeline_auth_v2_quota_atomic() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pipeline_multi_repository() {
     let auth = |origin: &str| AuthMode::AuthV2(AuthV2Config::new(origin, "").unwrap());
-    let (origin, _) = serve_addressing(auth, None, Mutant::None, true).await;
+    // Key derivation is independent of the audience; fix the run id before
+    // startup so the allowlist and every case derive the same owners.
     let mut profile = profile(WireAuth::AuthV2 {
-        audience: origin.clone(),
+        audience: "http://localhost".to_owned(),
         repository: "ignored-in-multi-mode".to_owned(),
         seed: [0x5e; 32],
     });
     profile.milestone = Milestone::M1;
     profile.features.insert(Feature::MultiRepo);
+    profile.features.insert(Feature::NamespacePolicy);
+    let (origin, _) = serve_addressing(auth, None, Mutant::None, Some(&profile)).await;
+    let WireAuth::AuthV2 { audience, .. } = &mut profile.auth else {
+        unreachable!()
+    };
+    audience.clone_from(&origin);
     let target = WireTarget {
         base_url: origin.parse().unwrap(),
         profile,
@@ -312,13 +355,20 @@ async fn pipeline_multi_repository() {
     // M0 cases exercise headerless reads and packs; the Multi cases
     // carry repository identities and require the pack membership guard.
     let report = run(&target, Some("repo.")).await;
+    let policy_report = run(&target, Some("policy.")).await;
     common::judge(&report, PIPELINE_DIVERGENCES);
+    common::judge(&policy_report, PIPELINE_DIVERGENCES);
     for case in mkit_server_conformance::wire::CASES
         .iter()
         .filter(|c| c.requires.contains(&Feature::MultiRepo))
     {
+        let case_report = if case.name.starts_with("policy.") {
+            &policy_report
+        } else {
+            &report
+        };
         assert!(
-            matches!(report.verdict(case.name), Some(Verdict::Pass(_))),
+            matches!(case_report.verdict(case.name), Some(Verdict::Pass(_))),
             "{} did not run",
             case.name
         );

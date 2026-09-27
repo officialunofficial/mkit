@@ -3,16 +3,22 @@
 //! are raw big-endian. Decoding an unknown version, a wrong length or a
 //! value that fails validation is [`StoreError::Corrupt`].
 
-use mkit_core::hash::{Hash, from_hex, to_hex};
+use mkit_core::hash::{Hash, from_hex, to_hex, to_hex_bytes};
 use mkit_core::protocol::AdvanceOutcome;
 use serde::{Deserialize, Serialize};
 
 use super::content_index::{BlockEntry, ObjectState};
 use super::error::StoreError;
-use super::kv::Value;
+use super::keys::validate_reservation_id;
+use super::kv::{Key, MAX_KEY_BYTES, MAX_VALUE_BYTES, Value};
+use super::partition::Partition;
 use crate::error::Code;
 use crate::quota::QuotaState;
+use crate::refs::is_served_ref_name;
 use crate::replay::{ReplayRecord, ReplayState, StoredRejection, StoredResult, UpdateRefResult};
+use crate::repo::RepoName;
+use mkit_core::repo_identity::RepositoryIdentity;
+use mkit_core::upload_parts::MIN_PART_SIZE;
 
 /// The namespace coordinator record. The first configuration version is 1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,6 +36,192 @@ pub struct NamespaceRecord {
 pub struct RepoRecord {
     /// Creation time, Unix milliseconds from the business clock.
     pub created_at_ms: u64,
+}
+
+/// An open upload ticket. Its audience is bound by the shard's deployment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TicketV1 {
+    /// Repository name within the partition's namespace.
+    #[serde(with = "repo_json")]
+    pub repo: RepoName,
+    /// Ref authorized to consume the ticket.
+    pub ref_name: String,
+    /// Authorized signer.
+    #[serde(with = "hash_json")]
+    pub signer: Hash,
+    /// Expected pack id.
+    #[serde(with = "hash_json")]
+    pub pack_id: Hash,
+    /// Declared nonzero pack size.
+    pub bytes: u64,
+    /// Power-of-two part size, at least the protocol minimum.
+    pub part_size: u64,
+    /// Expiry, Unix milliseconds.
+    pub expires_at_ms: u64,
+    /// Creation, Unix milliseconds.
+    pub created_at_ms: u64,
+    /// One durable outcome id, including synthetic ids for default admission.
+    pub reservation_id: String,
+    /// Backend multipart upload session, when allocated.
+    pub upload_session: Option<String>,
+}
+
+/// The hooks protocol's terminal abort reasons.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum AbortReason {
+    /// A guarded ref update failed.
+    RefConflict,
+    /// An epoch changed.
+    EpochMismatch,
+    /// A required pack is missing.
+    PackMissing,
+    /// A concurrent request won the replay race.
+    ReplayRace,
+    /// An internal failure prevented the apply.
+    Internal,
+    /// Reconcile found an abandoned pending reservation.
+    Abandoned,
+}
+
+/// A ref changed by a committed reservation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutcomeRef {
+    /// Full ref name.
+    pub name: String,
+    /// New ref target; absent on deletion.
+    #[serde(with = "optional_hash_json")]
+    pub new: Option<Hash>,
+    /// Whether this ref was deleted.
+    pub deleted: bool,
+}
+
+/// The one durable reservation arbiter, replaced under an Equals guard.
+///
+/// WP-3.3 adds `Pending { … }` and `ReadServed { … }` under `CODEC_V1`.
+/// Unknown state tags fail decoding, so older readers fail closed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ReservationV1 {
+    /// Successful `BeginUpload`, awaiting ticket consumption or expiry.
+    Ticketed {
+        /// Bound ticket id.
+        #[serde(with = "hash_json")]
+        ticket_id: Hash,
+    },
+    /// A committed apply, including its byte accounting and ref changes.
+    Committed {
+        /// Full wire repository identity (or a bare single-deployment name).
+        repository: String,
+        /// Outcome time, Unix milliseconds.
+        occurred_at_ms: u64,
+        /// Stored bytes.
+        bytes_stored: u64,
+        /// Bytes new to the repository.
+        new_to_repo: u64,
+        /// Bytes new to the store.
+        new_to_store: u64,
+        /// Ref changes included in this apply.
+        refs: Vec<OutcomeRef>,
+    },
+    /// Failed apply or abandoned pending reservation.
+    Aborted {
+        /// Full wire repository identity (or a bare single-deployment name).
+        repository: String,
+        /// Outcome time, Unix milliseconds.
+        occurred_at_ms: u64,
+        /// Stable hooks reason.
+        reason: AbortReason,
+        /// Safe diagnostic detail, bounded to 512 UTF-8 bytes.
+        detail: String,
+    },
+    /// An unconsumed ticket expired.
+    Expired {
+        /// Full wire repository identity (or a bare single-deployment name).
+        repository: String,
+        /// Outcome time, Unix milliseconds.
+        occurred_at_ms: u64,
+    },
+}
+
+/// An idempotent relay of upserts to one partition. Deletions are excluded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelayV1 {
+    /// Destination partition.
+    pub target: Partition,
+    /// Idempotent key/value upserts.
+    pub puts: Vec<(Key, Value)>,
+}
+
+/// Terminal outcome backlog. Relay rows are excluded.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Backlog {
+    /// Number of terminal outcome rows.
+    pub rows: u64,
+    /// Sum of terminal outcome key lengths plus encoded value lengths.
+    pub bytes: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RelayDtoV1 {
+    target: String,
+    puts: Vec<(String, String)>,
+}
+
+mod hash_json {
+    use super::{Deserialize, Hash, from_hex, to_hex};
+    pub(super) fn serialize<S: serde::Serializer>(
+        hash: &Hash,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&to_hex(hash))
+    }
+    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Hash, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        from_hex(&s).map_err(serde::de::Error::custom)
+    }
+}
+
+mod optional_hash_json {
+    use super::{Deserialize, Hash, Serialize, from_hex, to_hex};
+    // serde with-module serialization requires a reference to the field.
+    #[allow(clippy::ref_option)]
+    pub(super) fn serialize<S: serde::Serializer>(
+        hash: &Option<Hash>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        hash.as_ref().map(to_hex).serialize(serializer)
+    }
+    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Hash>, D::Error> {
+        Option::<String>::deserialize(deserializer)?
+            .as_deref()
+            .map(from_hex)
+            .transpose()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+mod repo_json {
+    use super::{Deserialize, RepoName};
+    pub(super) fn serialize<S: serde::Serializer>(
+        repo: &RepoName,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(repo.as_str())
+    }
+    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<RepoName, D::Error> {
+        RepoName::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
 }
 
 /// Version byte of every structured value this binary writes.
@@ -161,6 +353,154 @@ pub fn encode_repo_record(record: &RepoRecord) -> Value {
 /// Decode a repository coordinator record.
 pub fn decode_repo_record(value: &Value) -> Result<RepoRecord, StoreError> {
     decode_json(value, "bad repo record")
+}
+
+/// Validate ticket semantics before opening or after decoding a row.
+pub fn validate_ticket(ticket: &TicketV1) -> Result<(), StoreError> {
+    let ttl = ticket.expires_at_ms.checked_sub(ticket.created_at_ms);
+    if !is_served_ref_name(&ticket.ref_name)
+        || !validate_reservation_id(&ticket.reservation_id)
+        || ticket.bytes == 0
+        || ticket.part_size < MIN_PART_SIZE
+        || !ticket.part_size.is_power_of_two()
+        || !matches!(ttl, Some(1..604_800_000))
+    {
+        return Err(corrupt("invalid ticket"));
+    }
+    Ok(())
+}
+
+/// Encode an upload ticket.
+#[must_use]
+pub fn encode_ticket(ticket: &TicketV1) -> Value {
+    encode_json(ticket)
+}
+
+/// Decode an upload ticket, validating ref, reservation, geometry and lifetime.
+pub fn decode_ticket(value: &Value) -> Result<TicketV1, StoreError> {
+    check_value_limit(value)?;
+    let ticket = decode_json(value, "bad ticket")?;
+    validate_ticket(&ticket)?;
+    Ok(ticket)
+}
+
+/// Encode a ticket-backed reservation or terminal outcome.
+#[must_use]
+pub fn encode_reservation(reservation: &ReservationV1) -> Value {
+    encode_json(reservation)
+}
+
+/// Decode a reservation; unknown states, identities and malformed outcomes fail closed.
+pub fn decode_reservation(value: &Value) -> Result<ReservationV1, StoreError> {
+    check_value_limit(value)?;
+    let reservation = decode_json(value, "bad reservation")?;
+    let repository = match &reservation {
+        ReservationV1::Ticketed { .. } => return Ok(reservation),
+        ReservationV1::Committed {
+            repository, refs, ..
+        } => {
+            for r in refs {
+                if !is_served_ref_name(&r.name) || r.deleted != r.new.is_none() {
+                    return Err(corrupt("invalid outcome ref"));
+                }
+            }
+            repository
+        }
+        ReservationV1::Aborted {
+            repository, detail, ..
+        } => {
+            if detail.len() > 512 {
+                return Err(corrupt("outcome detail exceeds 512 bytes"));
+            }
+            repository
+        }
+        ReservationV1::Expired { repository, .. } => repository,
+    };
+    RepositoryIdentity::parse_bare_allowed(repository)
+        .map_err(|_| corrupt("bad outcome repository"))?;
+    Ok(reservation)
+}
+
+fn check_value_limit(value: &Value) -> Result<(), StoreError> {
+    if value.as_bytes().len() > MAX_VALUE_BYTES {
+        return Err(corrupt("value exceeds MAX_VALUE_BYTES"));
+    }
+    Ok(())
+}
+
+fn hex_bytes(hex: &str) -> Result<Vec<u8>, StoreError> {
+    if !hex.len().is_multiple_of(2) {
+        return Err(corrupt("bad hex bytes"));
+    }
+    let digit = |b| match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        _ => None,
+    };
+    hex.as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            Ok(digit(pair[0]).ok_or_else(|| corrupt("bad hex bytes"))? * 16
+                + digit(pair[1]).ok_or_else(|| corrupt("bad hex bytes"))?)
+        })
+        .collect()
+}
+
+/// Encode idempotent relay upserts. A malformed target returns Invalid.
+pub fn encode_relay(relay: &RelayV1) -> Result<Value, StoreError> {
+    let value = encode_json(&RelayDtoV1 {
+        target: to_hex_bytes(&relay.target.encode()?),
+        puts: relay
+            .puts
+            .iter()
+            .map(|(key, value)| (to_hex_bytes(key.as_bytes()), to_hex_bytes(value.as_bytes())))
+            .collect(),
+    });
+    if value.as_bytes().len() > MAX_VALUE_BYTES {
+        return Err(StoreError::Invalid("relay exceeds MAX_VALUE_BYTES".into()));
+    }
+    for (key, value) in &relay.puts {
+        if key.as_bytes().len() > MAX_KEY_BYTES || value.as_bytes().len() > MAX_VALUE_BYTES {
+            return Err(StoreError::Invalid("invalid relay upsert size".into()));
+        }
+    }
+    Ok(value)
+}
+
+/// Decode a relay target and its bounded idempotent upserts.
+pub fn decode_relay(value: &Value) -> Result<RelayV1, StoreError> {
+    check_value_limit(value)?;
+    let dto: RelayDtoV1 = decode_json(value, "bad relay")?;
+    let target = Partition::decode(&hex_bytes(&dto.target)?)?;
+    let puts = dto
+        .puts
+        .into_iter()
+        .map(|(key, value)| {
+            let key = hex_bytes(&key)?;
+            let value = hex_bytes(&value)?;
+            if key.len() > MAX_KEY_BYTES || value.len() > MAX_VALUE_BYTES {
+                return Err(corrupt("invalid relay upsert size"));
+            }
+            Ok((Key::new(key), Value::new(value)))
+        })
+        .collect::<Result<_, StoreError>>()?;
+    Ok(RelayV1 { target, puts })
+}
+
+/// Encode the terminal outcome backlog.
+#[must_use]
+pub fn encode_backlog(backlog: &Backlog) -> Value {
+    encode_json(backlog)
+}
+
+/// Decode the terminal outcome backlog.
+pub fn decode_backlog(value: &Value) -> Result<Backlog, StoreError> {
+    check_value_limit(value)?;
+    let backlog: Backlog = decode_json(value, "bad outcome backlog")?;
+    if (backlog.rows == 0) != (backlog.bytes == 0) {
+        return Err(corrupt("inconsistent outcome backlog"));
+    }
+    Ok(backlog)
 }
 
 /// Encode a replay record.
@@ -351,6 +691,226 @@ pub fn decode_u32(value: &Value) -> Result<u32, StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ticket_fixture() -> TicketV1 {
+        TicketV1 {
+            repo: RepoName::new("a").unwrap(),
+            ref_name: "refs/heads/main".into(),
+            signer: [0x11; 32],
+            pack_id: [0x22; 32],
+            bytes: 9,
+            part_size: MIN_PART_SIZE,
+            expires_at_ms: 24,
+            created_at_ms: 1,
+            reservation_id: "R-1:ok".into(),
+            upload_session: None,
+        }
+    }
+
+    fn json_value(json: &serde_json::Value) -> Value {
+        let mut bytes = vec![CODEC_V1];
+        bytes.extend(serde_json::to_vec(json).unwrap());
+        Value::new(bytes)
+    }
+
+    #[test]
+    fn ticket_codec_golden_roundtrip_and_rejections() {
+        let ticket = ticket_fixture();
+        let golden = format!(
+            r#"{{"repo":"a","ref_name":"refs/heads/main","signer":"{}","pack_id":"{}","bytes":9,"part_size":8388608,"expires_at_ms":24,"created_at_ms":1,"reservation_id":"R-1:ok","upload_session":null}}"#,
+            "11".repeat(32),
+            "22".repeat(32)
+        );
+        assert_eq!(
+            encode_ticket(&ticket).as_bytes(),
+            [&[CODEC_V1][..], golden.as_bytes()].concat()
+        );
+        assert_eq!(decode_ticket(&encode_ticket(&ticket)).unwrap(), ticket);
+        let mut session = ticket.clone();
+        session.upload_session = Some("backend-session".into());
+        assert_eq!(decode_ticket(&encode_ticket(&session)).unwrap(), session);
+        let base = serde_json::to_value(&ticket).unwrap();
+        for (field, bad) in [
+            ("signer", serde_json::json!("bad hex")),
+            ("pack_id", serde_json::json!("00")),
+            ("bytes", serde_json::json!(0)),
+            ("part_size", serde_json::json!(8_388_609)),
+            ("part_size", serde_json::json!(1)),
+            ("unknown", serde_json::json!(1)),
+            ("reservation_id", serde_json::json!("bad/id")),
+            ("reservation_id", serde_json::json!("")),
+            ("reservation_id", serde_json::json!("a".repeat(129))),
+            ("repo", serde_json::json!("bad name")),
+            ("ref_name", serde_json::json!("refs/heads/../b")),
+            ("expires_at_ms", serde_json::json!(1)),
+            ("expires_at_ms", serde_json::json!(604_800_001)),
+            ("created_at_ms", serde_json::json!(25)),
+            ("bytes", serde_json::json!(-1)),
+        ] {
+            let mut bad_json = base.clone();
+            bad_json[field] = bad;
+            assert!(
+                matches!(
+                    decode_ticket(&json_value(&bad_json)),
+                    Err(StoreError::Corrupt(_))
+                ),
+                "{field}"
+            );
+        }
+        let mut boundary = ticket;
+        boundary.expires_at_ms = boundary.created_at_ms + 604_799_999;
+        assert!(decode_ticket(&encode_ticket(&boundary)).is_ok());
+        for bad in [
+            Value::new(vec![]),
+            Value::new(b"\x02{}".to_vec()),
+            Value::new(b"\x01{".to_vec()),
+            Value::new(vec![0; MAX_VALUE_BYTES + 1]),
+        ] {
+            assert!(decode_ticket(&bad).is_err());
+        }
+    }
+
+    #[test]
+    fn reservation_codec_all_variants_golden_and_roundtrip() {
+        let cases = vec![
+            (ReservationV1::Ticketed { ticket_id: [0x11; 32] }, format!(r#"{{"state":"ticketed","ticket_id":"{}"}}"#, "11".repeat(32))),
+            (ReservationV1::Committed { repository: "a".into(), occurred_at_ms: 7, bytes_stored: 9, new_to_repo: 8, new_to_store: 6, refs: vec![OutcomeRef { name: "refs/heads/main".into(), new: Some([0x22; 32]), deleted: false }, OutcomeRef { name: "refs/tags/v1".into(), new: None, deleted: true }] }, format!(r#"{{"state":"committed","repository":"a","occurred_at_ms":7,"bytes_stored":9,"new_to_repo":8,"new_to_store":6,"refs":[{{"name":"refs/heads/main","new":"{}","deleted":false}},{{"name":"refs/tags/v1","new":null,"deleted":true}}]}}"#, "22".repeat(32))),
+            (ReservationV1::Aborted { repository: "a".into(), occurred_at_ms: 7, reason: AbortReason::Abandoned, detail: "gone".into() }, r#"{"state":"aborted","repository":"a","occurred_at_ms":7,"reason":"ABANDONED","detail":"gone"}"#.into()),
+            (ReservationV1::Expired { repository: "a".into(), occurred_at_ms: 7 }, r#"{"state":"expired","repository":"a","occurred_at_ms":7}"#.into()),
+        ];
+        for (row, golden) in cases {
+            let value = encode_reservation(&row);
+            assert_eq!(
+                value.as_bytes(),
+                [&[CODEC_V1][..], golden.as_bytes()].concat()
+            );
+            assert_eq!(decode_reservation(&value).unwrap(), row);
+            let mut json = serde_json::to_value(&row).unwrap();
+            json["extra"] = serde_json::json!(1);
+            assert!(decode_reservation(&json_value(&json)).is_err());
+        }
+        for (reason, name) in [
+            (AbortReason::RefConflict, "REF_CONFLICT"),
+            (AbortReason::EpochMismatch, "EPOCH_MISMATCH"),
+            (AbortReason::PackMissing, "PACK_MISSING"),
+            (AbortReason::ReplayRace, "REPLAY_RACE"),
+            (AbortReason::Internal, "INTERNAL"),
+            (AbortReason::Abandoned, "ABANDONED"),
+        ] {
+            let row = ReservationV1::Aborted {
+                repository: "a".into(),
+                occurred_at_ms: 7,
+                reason,
+                detail: String::new(),
+            };
+            let value = encode_reservation(&row);
+            assert_eq!(value.as_bytes(), format!("\x01{{\"state\":\"aborted\",\"repository\":\"a\",\"occurred_at_ms\":7,\"reason\":\"{name}\",\"detail\":\"\"}}").as_bytes());
+            assert_eq!(decode_reservation(&value).unwrap(), row);
+        }
+        let full_repo = format!(
+            "ed25519-{}/{}",
+            "ab".repeat(32),
+            "r".repeat(mkit_core::repo_identity::MAX_NAME_LEN)
+        );
+        let row = ReservationV1::Expired {
+            repository: full_repo,
+            occurred_at_ms: 7,
+        };
+        assert_eq!(decode_reservation(&encode_reservation(&row)).unwrap(), row);
+    }
+
+    #[test]
+    fn reservation_codec_rejects_malformed_states_and_outcomes() {
+        for json in [
+            serde_json::json!({"state":"unknown"}),
+            serde_json::json!({"state":"pending"}),
+            serde_json::json!({"state":"ticketed","ticket_id":"nope"}),
+            serde_json::json!({"state":"expired","repository":"bad name","occurred_at_ms":7}),
+            serde_json::json!({"state":"aborted","repository":"a","occurred_at_ms":7,"reason":"UNKNOWN","detail":""}),
+            serde_json::json!({"state":"aborted","repository":"a","occurred_at_ms":7,"reason":"INTERNAL","detail":"x".repeat(513)}),
+            serde_json::json!({"state":"aborted","repository":"a","occurred_at_ms":7,"reason":"INTERNAL","detail":"é".repeat(257)}),
+            serde_json::json!({"state":"committed","repository":"a","occurred_at_ms":7,"bytes_stored":1,"new_to_repo":1,"new_to_store":0,"refs":[{"name":"bad","new":null,"deleted":true}]}),
+            serde_json::json!({"state":"committed","repository":"a","occurred_at_ms":7,"bytes_stored":1,"new_to_repo":1,"new_to_store":0,"refs":[{"name":"refs/heads/a","new":null,"deleted":false}]}),
+            serde_json::json!({"state":"committed","repository":"a","occurred_at_ms":7,"bytes_stored":1,"new_to_repo":1,"new_to_store":0,"refs":[{"name":"refs/heads/a","new":"bad","deleted":false}]}),
+            serde_json::json!({"state":"committed","repository":"a","occurred_at_ms":7,"bytes_stored":1,"new_to_repo":1,"new_to_store":0,"refs":[{"name":"refs/heads/a","new":null,"deleted":true,"extra":1}]}),
+        ] {
+            assert!(matches!(
+                decode_reservation(&json_value(&json)),
+                Err(StoreError::Corrupt(_))
+            ));
+        }
+        let boundary = ReservationV1::Aborted {
+            repository: "a".into(),
+            occurred_at_ms: 7,
+            reason: AbortReason::Internal,
+            detail: "é".repeat(256),
+        };
+        assert_eq!(
+            decode_reservation(&encode_reservation(&boundary)).unwrap(),
+            boundary
+        );
+        for value in [
+            Value::new(vec![]),
+            Value::new(b"\x02{}".to_vec()),
+            Value::new(b"\x01{".to_vec()),
+        ] {
+            assert!(decode_reservation(&value).is_err());
+        }
+    }
+
+    #[test]
+    fn relay_and_backlog_codec_golden_roundtrip_and_rejections() {
+        let relay = RelayV1 {
+            target: Partition::Namespace(crate::repo::NamespaceKey::deployment_default()),
+            puts: vec![(Key::new(b"m\0a\0".to_vec()), Value::new(vec![]))],
+        };
+        let encoded = encode_relay(&relay).unwrap();
+        assert_eq!(
+            encoded.as_bytes(),
+            b"\x01{\"target\":\"6e726f6f7400\",\"puts\":[[\"6d006100\",\"\"]]}"
+        );
+        assert_eq!(decode_relay(&encoded).unwrap(), relay);
+        let backlog = Backlog { rows: 3, bytes: 72 };
+        let encoded = encode_backlog(&backlog);
+        assert_eq!(encoded.as_bytes(), b"\x01{\"rows\":3,\"bytes\":72}");
+        assert_eq!(decode_backlog(&encoded).unwrap(), backlog);
+        assert_eq!(
+            decode_backlog(&encode_backlog(&Backlog::default())).unwrap(),
+            Backlog::default()
+        );
+        for json in [
+            serde_json::json!({"target":"bad","puts":[]}),
+            serde_json::json!({"target":"zz","puts":[]}),
+            serde_json::json!({"target":"00","puts":[]}),
+            serde_json::json!({"target":"6e726f6f7400","puts":[["gg",""]]}),
+            serde_json::json!({"target":"6e726f6f7400","puts":[],"extra":1}),
+            serde_json::json!({"target":"6e726f6f7400","puts":[["00".repeat(MAX_KEY_BYTES + 1),""]]}),
+        ] {
+            assert!(decode_relay(&json_value(&json)).is_err());
+        }
+        for json in [
+            serde_json::json!({"rows":-1,"bytes":1}),
+            serde_json::json!({"rows":1,"bytes":0}),
+            serde_json::json!({"rows":0,"bytes":1}),
+            serde_json::json!({"rows":1,"bytes":1,"extra":1}),
+        ] {
+            assert!(decode_backlog(&json_value(&json)).is_err());
+        }
+        for value in [
+            Value::new(vec![]),
+            Value::new(b"\x02{}".to_vec()),
+            Value::new(b"\x01{".to_vec()),
+            Value::new(vec![0; MAX_VALUE_BYTES + 1]),
+        ] {
+            assert!(decode_backlog(&value).is_err());
+            assert!(decode_relay(&value).is_err());
+        }
+        let oversized = RelayV1 {
+            target: relay.target,
+            puts: vec![(Key::new(vec![0; MAX_KEY_BYTES + 1]), Value::new(vec![]))],
+        };
+        assert!(encode_relay(&oversized).is_err());
+    }
 
     fn records() -> Vec<ReplayRecord> {
         let results = [
