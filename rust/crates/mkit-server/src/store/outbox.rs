@@ -8,8 +8,8 @@ use mkit_core::hash::{Hash, to_hex};
 
 use super::codec::{self, Backlog, RelayV1, ReservationV1};
 use super::{
-    Batch, Key, MAX_BATCH_OPS, Partition, Precondition, StoreCapabilities, StoreError, Value,
-    Write, keys,
+    Batch, Key, MAX_BATCH_BYTES, MAX_BATCH_OPS, MAX_KEY_BYTES, MAX_VALUE_BYTES, Partition,
+    Precondition, StoreCapabilities, StoreError, Value, Write, keys,
 };
 
 /// Seven tickets fit even with a guarded index deletion for each ticket.
@@ -18,18 +18,24 @@ use super::{
 /// (its `tu` guard and write).
 ///
 /// The advance's shared ops, as `plan_write` builds them, are
-/// [`ADVANCE_SHARED_OPS`] = 21: `NotAfter` 1, grant epoch guard 1, layout
+/// [`ADVANCE_SHARED_OPS`] = 22: `NotAfter` 1, grant epoch guard 1, layout
 /// version guard 1, default quota charge 4 (guard, put, window delete,
 /// window put), head and packmap CAS 4, replay 3 (`Absent` p, put p, put
-/// px), the per-ref `tc` counter 2, `os` 2, `oc` 2, and the lease guard 1:
-/// 7 * (9 + 2) + 21 = 98. WP-1.10 must reserve these ticket ops before
+/// px), the per-ref `tc` counter 2, `os` 2, `oc` 2, the lease guard 1, and the relay kick timer 1:
+/// 7 * (9 + 2) + 22 = 99. WP-1.10 must reserve these ticket ops before
 /// sizing pruning (`plan_prune` fills the remaining budget), and must not
 /// add a second admission charge or an `rk` write to the advance without
 /// re-checking this sum.
 pub const MAX_TICKETS_PER_ADVANCE: usize = 7;
 /// The advance batch's ops outside the per-ticket and per-signer ones.
-pub const ADVANCE_SHARED_OPS: usize = 21;
+pub const ADVANCE_SHARED_OPS: usize = 22;
 const _: () = assert!(MAX_TICKETS_PER_ADVANCE * (9 + 2) + ADVANCE_SHARED_OPS <= MAX_BATCH_OPS);
+
+/// Maximum upserts per relay row; two ops guard/advance rh, two remain for hooks.
+pub const MAX_RELAY_PUTS: usize = 96;
+const _: () = assert!(MAX_RELAY_PUTS + 2 <= MAX_BATCH_OPS);
+// The encoded row is at most 512 KiB, leaving room for the worst rh guard/put.
+const _: () = assert!(MAX_VALUE_BYTES + 2 * (MAX_KEY_BYTES + 8) <= MAX_BATCH_BYTES);
 
 /// Reservation id for an allowance that has no deployment reservation.
 #[must_use]
@@ -83,6 +89,7 @@ pub struct OutboxBuilder {
     relays: BTreeMap<Partition, BTreeMap<Key, Value>>,
     reservations: BTreeSet<String>,
     error: Option<StoreError>,
+    relay_at_ms: Option<u64>,
 }
 
 impl OutboxBuilder {
@@ -107,6 +114,7 @@ impl OutboxBuilder {
             relays: BTreeMap::new(),
             reservations: BTreeSet::new(),
             error: None,
+            relay_at_ms: None,
         })
     }
 
@@ -189,6 +197,11 @@ impl OutboxBuilder {
         self.remember(result);
     }
 
+    /// Stamp relay rows and schedule their immediate source-side kick.
+    pub fn relay_at(&mut self, now_ms: u64) {
+        self.relay_at_ms = Some(now_ms);
+    }
+
     /// Group idempotent upserts by target, sorting keys deterministically.
     /// Conflicting values for one target/key invalidate the whole fragment.
     pub fn relay(&mut self, target: &Partition, puts: Vec<(Key, Value)>) {
@@ -218,18 +231,52 @@ impl OutboxBuilder {
         for rid in &self.reservations {
             require_unplanned(&keys::reservation(rid)?, pre, writes)?;
         }
+        let mut relay_due = None;
         for (target, puts) in std::mem::take(&mut self.relays) {
             if puts.is_empty() {
                 continue;
             }
-            let row = RelayV1 {
+            let at_ms = self
+                .relay_at_ms
+                .ok_or_else(|| StoreError::Invalid("relay rows need relay_at".into()))?;
+            relay_due = Some(at_ms);
+            let mut row = RelayV1 {
+                at_ms,
                 target,
-                puts: puts.into_iter().collect(),
+                puts: Vec::new(),
             };
-            let value = codec::encode_relay(&row)?;
-            codec::decode_relay(&value)?;
-            let seq = self.allocate()?;
-            self.writes.push(Write::Put(keys::relay(seq), value));
+            let base_bytes = codec::encode_relay(&row)?.as_bytes().len();
+            let mut encoded_bytes = base_bytes;
+            for (key, value) in puts {
+                // JSON uses hex strings: ["key","value"], plus a comma after the first.
+                let bytes = 7 + 2 * (key.as_bytes().len() + value.as_bytes().len());
+                if key.as_bytes().len() > MAX_KEY_BYTES
+                    || value.as_bytes().len() > MAX_VALUE_BYTES
+                    || base_bytes + bytes > MAX_VALUE_BYTES
+                {
+                    return Err(StoreError::Invalid(
+                        "relay upsert cannot fit one row".into(),
+                    ));
+                }
+                let addition = bytes + usize::from(!row.puts.is_empty());
+                if row.puts.len() == MAX_RELAY_PUTS
+                    || encoded_bytes + addition > MAX_VALUE_BYTES
+                    || encoded_bytes + addition + 2 * (MAX_KEY_BYTES + 8) > MAX_BATCH_BYTES
+                {
+                    self.push_relay(&row)?;
+                    row.puts.clear();
+                    encoded_bytes = base_bytes;
+                }
+                encoded_bytes += bytes + usize::from(!row.puts.is_empty());
+                row.puts.push((key, value));
+            }
+            self.push_relay(&row)?;
+        }
+        if let Some(due) = relay_due {
+            self.writes.push(Write::Put(
+                keys::timer(due, crate::timers::registry::kinds::RELAY.get(), b""),
+                Value::default(),
+            ));
         }
         if self.sequence_touched {
             require_unplanned(&keys::outbox_sequence(), pre, writes)?;
@@ -256,6 +303,14 @@ impl OutboxBuilder {
         batch.validate(&StoreCapabilities::full())?;
         pre.extend(batch.preconditions);
         writes.extend(batch.writes);
+        Ok(())
+    }
+
+    fn push_relay(&mut self, row: &RelayV1) -> Result<(), StoreError> {
+        let value = codec::encode_relay(row)?;
+        codec::decode_relay(&value)?;
+        let seq = self.allocate()?;
+        self.writes.push(Write::Put(keys::relay(seq), value));
         Ok(())
     }
 

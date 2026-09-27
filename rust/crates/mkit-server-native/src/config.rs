@@ -940,6 +940,25 @@ fn refuse_open_enc_beside_auth(
     Ok(())
 }
 
+/// `--max-pack-bytes`, bounded by what `GetServerInfo` advertises for
+/// resumable uploads: `part_size × max_parts` (8 MiB × 10,000 by default).
+fn resolve_max_pack(args: &ServeArgs) -> Result<u64, ConfigError> {
+    let max_pack = args
+        .max_pack_bytes
+        .unwrap_or(mkit_core::protocol::PACK_BODY_LIMIT);
+    let part_limit = mkit_core::upload_parts::MIN_PART_SIZE * 10_000;
+    if max_pack > part_limit {
+        return Err(ConfigError::new(
+            exit::USAGE,
+            format!(
+                "{PREFIX}: --max-pack-bytes {max_pack} exceeds the resumable-upload limit of \
+                 {part_limit} bytes (8 MiB parts × 10,000 parts)"
+            ),
+        ));
+    }
+    Ok(max_pack)
+}
+
 fn resolve_sharding(args: &ServeArgs) -> Result<Sharding, ConfigError> {
     match args.sharding {
         ShardingArg::Single => Ok(Sharding::Single),
@@ -1020,9 +1039,7 @@ pub fn resolve(
         namespace: NamespaceKey::deployment_default(),
         name,
     };
-    let max_pack = args
-        .max_pack_bytes
-        .unwrap_or(mkit_core::protocol::PACK_BODY_LIMIT);
+    let max_pack = resolve_max_pack(args)?;
     let limits = UploadLimits {
         max_total_bytes: max_pack,
         max_chunks: u32::MAX,

@@ -835,7 +835,8 @@ fn zstd_decompress_into(
 /// `max(claim, this)` are rejected (fail-closed; the C one-shot decoder
 /// would accept them). Bounding the window bounds the decoder's own
 /// buffer: it keeps up to one window of not-yet-emitted output (see
-/// [`ruzstd_decompress_capped`] for the overall peak, about 3× the claim).
+/// [`ruzstd_decompress_capped`]: the peak is the claim plus that ring
+/// buffer, rounded up to a power of two).
 #[cfg(feature = "pack-ruzstd")]
 #[cfg_attr(all(feature = "pack-zstd", not(test)), allow(dead_code))]
 const RUZSTD_MIN_WINDOW_LIMIT: u64 = 8 << 20;
@@ -857,8 +858,9 @@ const RUZSTD_MIN_WINDOW_LIMIT: u64 = 8 << 20;
 /// outside the owned-payload resident cap, just as for the window reader's
 /// carry/output budget. No output allocation grows past the admitted claim.
 ///
-/// Allocating adapter for differential tests; production decode supplies its
-/// already reserved output to `ruzstd_decompress_into` on either backend.
+/// Allocating adapter for differential tests. Production decode supplies its
+/// already reserved output to `ruzstd_decompress_into` when `pack-zstd` is off,
+/// and to the C `zstd_decompress_into` when it is on.
 #[cfg(feature = "pack-ruzstd")]
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn ruzstd_decompress_capped(

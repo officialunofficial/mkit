@@ -86,6 +86,7 @@ async fn wire_suite_s3_sqlite_auth_v2() {
         repository: REPOSITORY.to_owned(),
         seed: [0x53; 32],
     });
+    profile.milestone = mkit_server_conformance::wire::Milestone::M1;
     profile.atomic_advance = true;
     profile.max_pack_bytes = MAX_PACK;
     profile.list_refs = 200;
