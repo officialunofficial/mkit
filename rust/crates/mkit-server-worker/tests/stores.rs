@@ -358,7 +358,9 @@ fn foreign_partition_kinds_are_rejected_before_store_access() {
             let reply: NsReply =
                 serde_json::from_str(&block_on(transport.call(&target, "apply", body)).unwrap())
                     .unwrap();
-            if !class.accepts(partition) {
+            if class.accepts(partition) {
+                assert!(matches!(reply, NsReply::Outcome { .. }));
+            } else {
                 assert_eq!(
                     reply,
                     NsReply::Err {
@@ -370,8 +372,6 @@ fn foreign_partition_kinds_are_rejected_before_store_access() {
                     block_on(transport.raw_value(&target, partition, &key(0))),
                     None
                 );
-            } else {
-                assert!(matches!(reply, NsReply::Outcome { .. }));
             }
         }
     }

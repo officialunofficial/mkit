@@ -126,7 +126,7 @@ struct Racing {
 
 impl Racing {
     fn record(&self, name: &'static str) {
-        self.calls.lock().unwrap().push(name);
+        self.calls.lock().expect("call trace lock").push(name);
     }
 }
 
@@ -151,7 +151,7 @@ impl NamespaceStore for Racing {
             DeploymentGuard::default()
                 .check(self.store.clone(), self.winner, None)
                 .await
-                .unwrap();
+                .expect("winning isolate initializes its marker");
         }
         self.store.scan(p, start, end, after, limit).await
     }
@@ -160,7 +160,7 @@ impl NamespaceStore for Racing {
         DeploymentGuard::default()
             .check(self.store.clone(), self.winner, None)
             .await
-            .unwrap();
+            .expect("winning isolate initializes its marker");
         let outcome = self.store.apply(p, batch).await?;
         assert!(matches!(
             outcome,
