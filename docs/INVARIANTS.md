@@ -1217,7 +1217,9 @@ maximum-wire-length regressions; live wasm framing tests in
 
 **Always:** readers and anonymous callers see only published ref values and
 published repository membership. Every newly reachable file object and every
-file entry in a pack added by an advance is inspected; a later pass cannot skip
+file entry in a pack added by an advance is covered by the configured
+inspection obligations or the explicit unavailable-publish policy. A later
+pass cannot skip
 an earlier held or pending advance. A reused pack from another pending advance
 cannot satisfy published membership, even through `X-Mkit-Ref`.
 
