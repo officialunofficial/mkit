@@ -26,7 +26,12 @@
   "vars": {
     "AUTH_AUDIENCE": "http://localhost:8787",
     "AUTH_REPOSITORY": "default",
-    "WORKERS_PLAN": "free"
+    "WORKERS_PLAN": "free",
+    // The root RefStore sharding marker refuses changes over existing data (R-94).
+    "SHARDING": "single"
+    // Optional NAMESPACE_LOCATION_HINT / NAMESPACE_JURISDICTION are deployment-wide.
+    // Jurisdiction (eu, us, fedramp) is fixed for the deployment lifetime:
+    // changing it re-maps all names to new, empty objects.
   },
 
   // Smart Placement: run the Worker close to its back-end (the RefStore DO +
@@ -41,13 +46,21 @@
   // packs/{hex(pack_id)}.
   "r2_buckets": [{ "binding": "STORAGE", "bucket_name": "mkit-vcs-objects" }],
 
-  // The RefStore Durable Object: the partition store of the deployment's
-  // one namespace (instance "root"), holding refs, replay records and quota
-  // windows in one SQLite key-value table.
-  "durable_objects": { "bindings": [{ "name": "REFSTORE", "class_name": "RefStore" }] },
+  // Single deployments use RefStore (instance "root"). D34 routes each
+  // partition kind to its class; repo and ref-name indexes share a binding.
+  "durable_objects": { "bindings": [
+    { "name": "REFSTORE", "class_name": "RefStore" },
+    { "name": "NS_COORD", "class_name": "NsCoordinator" },
+    { "name": "REF_SHARD", "class_name": "RefShard" },
+    { "name": "REPO_INDEX", "class_name": "RepoIndexShard" },
+    { "name": "CONTENT_INDEX", "class_name": "ContentIndexShard" }
+  ] },
 
   // Keep `migrations`: wrangler's newer `exports`-style Durable Object
   // declaration and the `migrations` array are mutually exclusive, and this
-  // deployment's class, binding and `v1` tag stay as they are (no migration).
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RefStore"] }]
+  // deployment keeps RefStore and v1 for single deployments. Append v2 for D34.
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["RefStore"] },
+    { "tag": "v2", "new_sqlite_classes": ["NsCoordinator", "RefShard", "RepoIndexShard", "ContentIndexShard"] }
+  ]
 }

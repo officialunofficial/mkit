@@ -55,6 +55,9 @@ use http_body::{Body, Frame, SizeHint};
 use mkit_server::quota::QuotaLimits;
 use mkit_server::sql::Capacity;
 
+use crate::naming::Placement;
+use mkit_server::pipeline::Sharding;
+
 use crate::do_sql::{DO_CAPACITY, DO_FREE_MAX_BYTES};
 
 /// The Worker var holding the canonical origin writes are signed for.
@@ -89,6 +92,11 @@ pub struct WorkerConfig {
     pub audience: String,
     /// `AUTH_REPOSITORY`: the repository identity writes are signed for.
     pub repository: String,
+    /// `SHARDING`: single (default) or d34; guarded against changing existing data.
+    pub sharding: Sharding,
+    /// Deployment-wide placement. Jurisdiction must remain fixed for its lifetime:
+    /// changing it maps every name to new, empty objects.
+    pub placement: Placement,
     /// The request body cap, [`DEFAULT_MAX_BODY_BYTES`].
     pub max_body_bytes: usize,
     /// The R2 bucket binding ([`crate::r2::STORAGE_BINDING`]). Durable
@@ -116,12 +124,22 @@ impl core::fmt::Display for ConfigError {
 impl std::error::Error for ConfigError {}
 
 impl WorkerConfig {
+    /// The store Health probes for this deployment mode.
+    #[must_use]
+    pub fn probe_partition(&self) -> mkit_server::Partition {
+        let root = mkit_server::NamespaceKey::deployment_default();
+        if self.sharding == Sharding::D34 {
+            mkit_server::Partition::Coordinator(root)
+        } else {
+            mkit_server::Partition::Namespace(root)
+        }
+    }
+
     /// Build the deployment pipeline configuration without store access.
-    /// Workers keep Single routing until DO shard dispatch lands (WP-1.8).
     #[cfg(any(target_arch = "wasm32", test))]
     fn pipeline_config(&self) -> Result<mkit_server::pipeline::PipelineConfig, ConfigError> {
         use mkit_server::auth_v2::AuthV2Config;
-        use mkit_server::pipeline::{AuthMode, PipelineConfig, Sharding};
+        use mkit_server::pipeline::{AuthMode, PipelineConfig};
         use mkit_server::upload::UploadLimits;
         use mkit_server::{Addressing, NamespaceKey, RepoId, RepoName};
 
@@ -138,8 +156,7 @@ impl WorkerConfig {
         };
         let mut config =
             PipelineConfig::new(Addressing::Single { repo }, AuthMode::AuthV2(auth), limits);
-        // TODO(WP-1.8): route D34 partitions through DO shard dispatch.
-        config.sharding = Sharding::Single;
+        config.sharding = self.sharding;
         #[cfg(feature = "test-faults")]
         if let Some(quota) = self.test_quota {
             config.write_quota = Some(quota);
@@ -160,7 +177,27 @@ impl WorkerConfig {
         mkit_core::repo_identity::RepositoryIdentity::parse_bare_allowed(&repository).map_err(
             |_| ConfigError("AUTH_REPOSITORY is invalid (SPEC-TRANSPORT-CONNECT §7.4)".into()),
         )?;
+        let sharding = match var("SHARDING").as_deref() {
+            None | Some("single") => Sharding::Single,
+            Some("d34") => Sharding::D34,
+            Some(_) => return Err(ConfigError("SHARDING must be single or d34".into())),
+        };
+        let jurisdiction = var("NAMESPACE_JURISDICTION");
+        if jurisdiction
+            .as_deref()
+            .is_some_and(|value| !matches!(value, "eu" | "us" | "fedramp"))
+        {
+            return Err(ConfigError(
+                "NAMESPACE_JURISDICTION must be eu, us or fedramp".into(),
+            ));
+        }
+        let placement = Placement {
+            location_hint: var("NAMESPACE_LOCATION_HINT"),
+            jurisdiction,
+        };
         Ok(Self {
+            sharding,
+            placement,
             audience,
             repository,
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
@@ -560,10 +597,14 @@ mod glue {
         plan_capacity, unavailable_json,
     };
     use crate::clock::WorkerClock;
-    use crate::naming::Placement;
     use crate::ns_client::{StubTransport, WorkerNamespaceStore};
     use crate::ns_object::NsObject;
     use crate::r2::{EnvBucket, PACKS_KEYSPACE, R2BlobStore, WorkerBlobStore};
+    use crate::sharding_guard::{Settled, check_mode};
+
+    thread_local! {
+        static SHARDING_GUARD: std::cell::RefCell<Option<Settled>> = const { std::cell::RefCell::new(None) };
+    }
 
     /// The pipeline a request runs on.
     type WorkerPipeline = Pipeline<WorkerBlobStore, WorkerNamespaceStore, Hooks>;
@@ -585,7 +626,10 @@ mod glue {
             PACKS_KEYSPACE,
         )
         .with_max_bytes(MAX_PACK_BYTES);
-        let meta = WorkerNamespaceStore::new(StubTransport::new(env.clone(), Placement::default()));
+        let meta = WorkerNamespaceStore::new(
+            StubTransport::new(env.clone(), cfg.placement.clone()),
+            cfg.probe_partition(),
+        );
         #[cfg(feature = "test-faults")]
         let faulted = blobs.clone();
         let pipe = Pipeline::new(
@@ -651,9 +695,29 @@ mod glue {
         if is_options_preflight(&req) {
             return cors_preflight_response(CORS_ALLOW_HEADERS, CORS_ALLOW_METHODS);
         }
+        let meta = WorkerNamespaceStore::new(
+            StubTransport::new(env.clone(), cfg.placement.clone()),
+            cfg.probe_partition(),
+        );
+        let jurisdiction = cfg.placement.jurisdiction.as_deref();
+        let cached =
+            SHARDING_GUARD.with(|cache| Settled::cached(cache, cfg.sharding, jurisdiction));
+        let checked = if let Some(outcome) = cached {
+            outcome.into_result()
+        } else {
+            // This request owns every await. Only settled data crosses requests.
+            let result = check_mode(&meta, cfg.sharding).await;
+            SHARDING_GUARD.with(|cache| Settled::finish(cache, cfg.sharding, jurisdiction, result))
+        };
+        if let Err(error) = checked {
+            return Ok(with_cors(json_response(
+                unavailable_json(error.public_message()),
+                503,
+            )?));
+        }
         #[cfg(feature = "test-faults")]
         if req.method() == worker::Method::Get && req.path() == test::STATS_PATH {
-            return Ok(with_cors(test::stats(&env).await?));
+            return Ok(with_cors(test::stats(&env, cfg).await?));
         }
         let length = req.headers().get("content-length").ok().flatten();
         if content_length_exceeds(length.as_deref(), cfg.max_body_bytes) {
@@ -701,18 +765,24 @@ mod glue {
     /// The Durable Object of a partition for `state`: its store capped for
     /// the plan in `env`'s `WORKERS_PLAN` var (see [`plan_capacity`]).
     #[must_use]
-    pub fn ns_object(state: State, env: &Env) -> NsObject {
+    pub fn ns_object(state: State, env: &Env, class: crate::classes::ShardClass) -> NsObject {
         let plan = env.var(PLAN_VAR).ok().map(|v| v.to_string());
         let capacity = plan_capacity(plan.as_deref()).unwrap_or_else(|(e, free)| {
             worker::console_error!("{e}; using the Workers Free cap");
             free
         });
         // TODO(WP-1.23b): register RelayHandler for RefShard with DoNamespaceStore<StubTransport>.
-        let registry = mkit_server::timers::TimerRegistry::new()
-            .register(mkit_server::timers::lease_sweep::LeaseSweep);
+        let registry = mkit_server::timers::TimerRegistry::new();
+        // Lease-table rows and their sweep timers live only in coordinator
+        // partitions (WP-1.25).
+        let registry = if class == crate::classes::ShardClass::NsCoordinator {
+            registry.register(mkit_server::timers::lease_sweep::LeaseSweep)
+        } else {
+            registry
+        };
         #[cfg(feature = "test-faults")]
         let registry = registry.register(mkit_server::timers::test_kind::TestTimer);
-        NsObject::new(state)
+        NsObject::new(state, class)
             .0
             .with_capacity(capacity)
             .with_registry(registry)
@@ -726,7 +796,6 @@ mod glue {
         use worker::{Env, Response};
 
         use super::super::faults::FaultState;
-        use crate::naming::Placement;
         use crate::ns_client::{StubTransport, WorkerNamespaceStore};
 
         /// The wire suite's stats hook (M0-07).
@@ -743,9 +812,17 @@ mod glue {
 
         /// `{bytes, keys}` of the deployment-default partition, which holds
         /// the replay records and quota windows.
-        pub(super) async fn stats(env: &Env) -> worker::Result<Response> {
-            let store =
-                WorkerNamespaceStore::new(StubTransport::new(env.clone(), Placement::default()));
+        pub(super) async fn stats(
+            env: &Env,
+            cfg: &super::WorkerConfig,
+        ) -> worker::Result<Response> {
+            if cfg.sharding == mkit_server::pipeline::Sharding::D34 {
+                return Response::error("stats hook is single-sharding only", 409);
+            }
+            let store = WorkerNamespaceStore::new(
+                StubTransport::new(env.clone(), cfg.placement.clone()),
+                cfg.probe_partition(),
+            );
             let p = Partition::Namespace(NamespaceKey::deployment_default());
             match store.stats(&p).await {
                 Ok(s) => {
@@ -810,16 +887,54 @@ mod tests {
     }
 
     #[test]
-    fn deployment_pipeline_keeps_single_sharding_until_do_dispatch() {
-        let cfg = WorkerConfig::from_vars(vars(&[
+    fn sharding_parsing_and_pipeline_selection() {
+        let base = [
             (AUDIENCE_VAR, "https://vcs.example"),
             (REPOSITORY_VAR, "default"),
-        ]))
-        .unwrap();
+        ];
+        for (value, expected) in [
+            (None, Sharding::Single),
+            (Some("single"), Sharding::Single),
+            (Some("d34"), Sharding::D34),
+        ] {
+            let mut pairs = base.to_vec();
+            if let Some(value) = value {
+                pairs.push(("SHARDING", value));
+            }
+            let cfg = WorkerConfig::from_vars(vars(&pairs)).unwrap();
+            assert_eq!(cfg.sharding, expected);
+            assert_eq!(cfg.pipeline_config().unwrap().sharding, expected);
+        }
+        let mut pairs = base.to_vec();
+        pairs.push(("SHARDING", "other"));
+        assert!(WorkerConfig::from_vars(vars(&pairs)).is_err());
+    }
+
+    #[test]
+    fn placement_parsing_is_deployment_wide() {
+        let base = [
+            (AUDIENCE_VAR, "https://vcs.example"),
+            (REPOSITORY_VAR, "default"),
+        ];
         assert_eq!(
-            cfg.pipeline_config().unwrap().sharding,
-            mkit_server::pipeline::Sharding::Single
+            WorkerConfig::from_vars(vars(&base)).unwrap().placement,
+            Placement::default()
         );
+        for jurisdiction in ["eu", "us", "fedramp"] {
+            let mut pairs = base.to_vec();
+            pairs.extend([
+                ("NAMESPACE_JURISDICTION", jurisdiction),
+                ("NAMESPACE_LOCATION_HINT", "weur"),
+            ]);
+            let placement = WorkerConfig::from_vars(vars(&pairs)).unwrap().placement;
+            assert_eq!(placement.jurisdiction.as_deref(), Some(jurisdiction));
+            assert_eq!(placement.location_hint.as_deref(), Some("weur"));
+        }
+        for value in ["", "EU", "weur", "invalid"] {
+            let mut pairs = base.to_vec();
+            pairs.push(("NAMESPACE_JURISDICTION", value));
+            assert!(WorkerConfig::from_vars(vars(&pairs)).is_err());
+        }
     }
 
     #[test]
