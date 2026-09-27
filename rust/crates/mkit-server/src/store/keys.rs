@@ -29,6 +29,7 @@
 //! | local membership | `m 00 <repo> 00 <pack:32>` | empty |
 //! | reservation and outcome | `o 00 <reservation_id>` | codec `ReservationV1` |
 //! | outcome pending index | `oq 00 <seq:be64> <reservation_id>` | empty |
+//! | relay high-water mark | `rh 00 <Partition::encode(source)>` | be64; never pruned, bounded by source shards |
 //! | relay queue | `or 00 <seq:be64>` | codec `RelayV1` |
 //! | outbox sequence | `os 00` | be64; last allocated, starts at 1, never deleted |
 //! | outcome backlog | `oc 00` | codec `Backlog`; absent means zero |
@@ -39,7 +40,7 @@
 //! | object state (`ContentShard`) | `c 00 <object:32>` | codec `ObjectState` |
 //!
 //! Reserved tags ([`RESERVED_TAGS`]), each laid out by the work package
-//! that adds it: relay high-water marks `rh`, object index
+//! that adds it: object index
 //! `i`, leases `l`, published pointers `pp`, tombstones `tb`, verification
 //! cursors `vc`, epoch lease `el`, and the deployment's namespace list
 //! [`TAG_NAMESPACE_LIST`] (WP-1.5; see `Partition` for enumeration). A
@@ -53,6 +54,7 @@
 use bytes::{BufMut, Bytes, BytesMut};
 use mkit_core::hash::Hash;
 
+use super::Partition;
 use super::error::StoreError;
 use super::kv::{Key, MAX_KEY_BYTES};
 use crate::quota::QuotaScope;
@@ -61,6 +63,9 @@ use crate::repo::{MAX_REPO_NAME_BYTES, NamespaceKey, RepoName};
 
 // The longest ticket index (`ti 00 <repo> 00 <ref> 00 <pack> <signer>`) fits.
 const _: () = assert!(3 + MAX_REPO_NAME_BYTES + 1 + MAX_REF_NAME_BYTES + 1 + 64 <= MAX_KEY_BYTES);
+
+// rh + Ref partition: tag, longest ed25519 namespace (72), repo, ref, terminators.
+const _: () = assert!(3 + 1 + 72 + MAX_REPO_NAME_BYTES + MAX_REF_NAME_BYTES + 3 <= MAX_KEY_BYTES);
 
 // The longest ref key (`r 00 <repo> 00 <refname>`) fits a key.
 const _: () = assert!(2 + MAX_REPO_NAME_BYTES + 1 + MAX_REF_NAME_BYTES <= MAX_KEY_BYTES);
@@ -123,13 +128,15 @@ pub const TAG_RESERVATION: &str = "o";
 pub const TAG_OUTCOME_PENDING: &str = "oq";
 /// Membership relay queue tag.
 pub const TAG_RELAY: &str = "or";
+/// Per-source relay deduplication watermark in the target.
+pub const TAG_RELAY_HIGH_WATER: &str = "rh";
 /// Last allocated outbox sequence tag.
 pub const TAG_OUTBOX_SEQUENCE: &str = "os";
 /// Terminal outcome backlog tag.
 pub const TAG_OUTCOME_BACKLOG: &str = "oc";
 
 /// Tags whose layouts later work packages add. No M0 key uses them.
-pub const RESERVED_TAGS: &[&str] = &["tb", "rh", "i", "l", "pp", "vc", "el", TAG_NAMESPACE_LIST];
+pub const RESERVED_TAGS: &[&str] = &["tb", "i", "l", "pp", "vc", "el", TAG_NAMESPACE_LIST];
 
 /// A key decoded by [`parse`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,6 +150,8 @@ pub enum ParsedKey {
     RepoRecord(RepoName),
     /// `rk 00 <repo>`.
     RepoKnown(RepoName),
+    /// `rh 00 <Partition::encode(source)>`. Never pruned.
+    RelayHighWater(Partition),
     /// `r 00 <repo> 00 <refname>`.
     Ref {
         /// Repository.
@@ -471,6 +480,11 @@ pub fn relay(seq: u64) -> Key {
     key(TAG_RELAY, &[&seq.to_be_bytes()])
 }
 
+/// `rh 00 <Partition::encode(source)>`. Never pruned: bounded by source shards.
+pub fn relay_high_water(source: &Partition) -> Result<Key, StoreError> {
+    checked_key(TAG_RELAY_HIGH_WATER, &[&source.encode()?])
+}
+
 /// `os 00`.
 #[must_use]
 pub fn outbox_sequence() -> Key {
@@ -613,6 +627,7 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
         b"e" if body.is_empty() => ParsedKey::GrantEpoch,
         b"nr" if body.is_empty() => ParsedKey::NamespaceRecord,
         b"rr" => ParsedKey::RepoRecord(RepoName::new(text(body)?).ok()?),
+        b"rh" => ParsedKey::RelayHighWater(Partition::decode(body).ok()?),
         b"rk" => ParsedKey::RepoKnown(RepoName::new(text(body)?).ok()?),
         b"r" => {
             let sep = body.iter().position(|&b| b == 0)?;
@@ -737,6 +752,7 @@ mod tests {
             TAG_NAMESPACE_RECORD,
             TAG_REPO_REGISTRY,
             TAG_REPO_KNOWN,
+            TAG_RELAY_HIGH_WATER,
             TAG_TICKET,
             TAG_TICKET_INDEX,
             TAG_TICKETS_PER_REF,
@@ -758,6 +774,10 @@ mod tests {
         let q = format!("root\n{}", "ab".repeat(32));
         let cases: Vec<(Key, Vec<u8>)> = vec![
             (layout_version(), b"v\0".to_vec()),
+            (
+                relay_high_water(&Partition::ContentShard(7)).unwrap(),
+                b"rh\0s7\0".to_vec(),
+            ),
             (namespace_record(), b"nr\0".to_vec()),
             (repo_record(&repo("room-a")), b"rr\0room-a".to_vec()),
             (repo_known(&repo("room-a")), b"rk\0room-a".to_vec()),
