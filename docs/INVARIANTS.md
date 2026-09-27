@@ -1212,3 +1212,24 @@ entry decompression or retained delta targets.
 **Enforced by:** `pack::tests` resident-peak, bomb, retention-equivalence and
 maximum-wire-length regressions; live wasm framing tests in
 `apps/web/src/lib/mkit.test.ts`.
+
+
+## Storage pressure observes physical capacity after commit
+
+**Always:** Worker pressure samples use the local physical database size only
+following a committed batch containing a put, before alarm I/O. Native SQLite
+samples the database-wide physical size every 60 seconds and stops on shutdown.
+Alerts use the put soft limit, 70%/90% thresholds and five-point hysteresis;
+per-instance ten-minute limits survive clearing and re-entry. Only the highest
+active severity emits. Counters and gauges are never sampled; Worker latency
+observations are sampled once per hundred calls across the isolate.
+
+**Because:** logical row bytes do not measure the physical storage cap, and
+pre-commit or unsampled latency logging can mislead or overwhelm operators.
+
+**If violated:** capacity exhaustion becomes invisible, or repeated writes
+flood logs while operators need the critical alert.
+
+**Enforced by:** `telemetry/pressure.rs` pure transition tests, Worker
+`ns_object::PressureStore` and `tests/stores.rs` over the DO SQL shim,
+console sink/subscriber tests, and native `pressure.rs` shutdown/size-task tests.

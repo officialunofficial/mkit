@@ -14,6 +14,9 @@
 
 use crate::rt::{MaybeSend, MaybeSync};
 
+/// Physical storage pressure and alert bookkeeping shared by adapters.
+pub mod pressure;
+
 /// Counter: requests handled. Labels: `procedure`, `code`.
 pub const METRIC_REQUESTS: &str = "mkit_server_requests_total";
 /// Histogram: request latency in milliseconds. Labels: `procedure`.
@@ -108,6 +111,8 @@ pub trait Metrics: MaybeSend + MaybeSync {
     fn incr(&self, name: &'static str, labels: &[(&'static str, &str)], by: u64);
     /// Record one observation, in milliseconds, in the histogram `name`.
     fn observe_ms(&self, name: &'static str, labels: &[(&'static str, &str)], ms: f64);
+    /// Set a gauge. Sinks without gauge support may discard it.
+    fn gauge(&self, _name: &'static str, _labels: &[(&'static str, &str)], _value: f64) {}
 }
 
 /// A [`Metrics`] sink that discards everything.
