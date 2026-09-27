@@ -32,7 +32,7 @@ workspace = true
 mkit-core = { version = "0.4", path = "../mkit-core", default-features = false }
 thiserror = "2"
 blake3 = { version = "1", default-features = false }
-zeroize = { version = "1", features = ["derive"] }
+zeroize = "1"
 bytes = "1"
 futures-core = "0.3"
 # The optional write gate's async mutex (`Pipeline::with_write_gate`):

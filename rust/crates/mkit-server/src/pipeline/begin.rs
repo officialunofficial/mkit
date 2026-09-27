@@ -237,6 +237,10 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let AuthMode::AuthV2(auth) = &self.cfg.auth else {
             return Err(internal("missing ticket audience"));
         };
+        // The token encodes the audience with a u16 length; never let minting panic.
+        if u16::try_from(auth.audience().len()).is_err() {
+            return Err(internal("ticket audience too long"));
+        }
         Ok((keys, auth.audience()))
     }
 

@@ -1246,7 +1246,9 @@ key rotation. Membership decisions in Multi may consult only the local repo row.
 **If violated:** a denied request allocates state, racing opens exceed the caps,
 retries charge admission again, or token results disappear with ticket rows.
 
-**Enforced by:** `pipeline/{begin,plan}.rs`, strict replay codecs, token goldens,
-and native `tests/begin_upload.rs` over memory and SQLite (Single and D34).
+**Enforced by:** `mkit-server/tests/golden_ticket_token.rs`
+(`golden_ticket_token_v1`), `mkit-server/tests/begin_upload_codec.rs`, native
+`tests/begin_upload.rs` (`lifecycle_*`, `caps_*`, `race_*`, `rejected_*`) over
+memory and SQLite (Single and D34), and the wire `tickets.*` cases.
 Ticket expiry cleanup and admission Pending/Aborted reconciliation remain
 WP-1.14 and WP-3.3 respectively.
