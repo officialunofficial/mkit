@@ -6352,7 +6352,7 @@ pub const __COMPLETE_UPLOAD_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEn
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct PendingVerification {
-    /// server's suggested poll interval, 1..=60000
+    /// server's suggested poll interval, 1000..=60000
     ///
     /// Field 1: `retry_after_ms`
     #[serde(

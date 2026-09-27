@@ -391,5 +391,5 @@ message CompleteUploadResponse {}
 // Detail on an `unavailable` AdvanceRefs whose consumed pack is still under
 // verification (SPEC-TRANSPORT-CONNECT §7.6; SPEC-SERVER §9.5).
 message PendingVerification {
-  uint32 retry_after_ms = 1;   // server's suggested poll interval, 1..=60000
+  uint32 retry_after_ms = 1;   // server's suggested poll interval, 1000..=60000
 }

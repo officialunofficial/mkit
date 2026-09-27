@@ -232,3 +232,129 @@ bullet as the last item in STC §7.9's “A lag MUST only cause one of these” 
 No other §7.9 edit. Include this change in the new STC version-history row
 and in the PR body's “Spec changes”. Continue B.1–B.7 and all gates in the
 same worktree and branch; the definition of done remains an open PR.
+
+## Fix round 1
+
+The adversarial review of PR #1148 (head 83175f3a) confirmed:
+- the proto, codegen (additions only), goldens (the `.bin` is `08 88 27`) and renumbering;
+- the §9.3 codes and §9.4 isolation wording;
+- the STC edits as amended.
+
+It found one blocker and several gaps. Most of them are gaps in my brief, not errors of yours. Continue in the same
+worktree and branch (`.claude/worktrees/wp-4-4`, `mkit-server/wp-4-4-indexed-mode-spec`), and push to the same PR.
+The definition of done is the fixes pushed to PR #1148. Fold these rulings into
+`docs/plans/mkit-server/briefs/WP-4.4.md` under "Fix round 1".
+
+### 0. Rebase first
+
+Merge `origin/feat/mkit-server` (now at 2a730513 or later: WP-3.6b, 3.14, 1.5 and 1.7 merged). The expected conflicts:
+- **SPEC-SERVER version history:** fold your change into the **existing version `1` row**, which now reads "… M5
+  sections reserved. Admission credential headers (§6.3)." Append "; indexed mode (§9)". There must be no second `1`
+  row.
+- **`CHANGELOG.md`:** keep both entries.
+- WP-3.6b's §6.3 text and §16 test-anchor rows merge on their own.
+
+### 1. Blocker: every membership-dependent check gets the lag window (generalises §9.4)
+
+Membership is eventually consistent (STC §7.9), so every check that reads repository membership is membership-
+dependent:
+- delta-base resolution (§9.4);
+- closure (§9.3(c): "already a verified member");
+- the packlist rule (§9.2: "a member of the repository").
+
+**Rule** (in §9.4, retitled so it covers all three; §9.2 and §9.3(c) point to it). For a membership-dependent miss:
+- **While the consuming ticket is younger than the relay-lag bound:** a retryable `unavailable`, with the public
+  message `"repository membership not yet visible"`. The same message for all three checks.
+- **After the bound:** the permanent uniform error of that check:
+  - delta base → `failed_precondition` `"delta base not available in this repository"` (unchanged);
+  - closure → `invalid_argument` `"open closure"`;
+  - packlist → `invalid_argument` `"packlist lists a pack that is not in this repository"` (a **new, distinct**
+    message; see §5).
+- Each is byte-identical whether the object or pack exists in another repository or nowhere.
+- Add an informative sentence: the ticket's age is a sound proxy, because the needed object was written before the
+  client fetched it, which was before `BeginUpload`.
+
+**STC §7.9:** replace amendment 1's bullet with this generic one, and fix the list grammar (move `; or` to the new
+penultimate item, end the last with `.`, and wrap at about 72 columns like the rest of the file):
+
+> - in indexed mode, once the consuming ticket is older than the deployment's relay-lag bound, the uniform permanent
+>   error of the membership-dependent check that missed (SPEC-SERVER §9.4). It is byte-identical whether the object
+>   or pack exists in another repository or nowhere.
+
+### 2. STC §5: the client must not treat the delta-base error as a ticket failure (S1)
+
+- **Add a §5 Condition row:** "An unresolved delta base after the relay-lag bound, in indexed mode (SPEC-SERVER
+  §9.4)" → `failed_precondition`, with the message above.
+- **In the §5 client-mapping paragraph** (next to the existing pre-table admission check), add two checks that run
+  before the generic `failed_precondition` mapping:
+  - on `AdvanceRefs`, `failed_precondition` with exactly that message is **not** a ticket failure: the client
+    re-plans once as a self-contained pack (§7.6 "Errors");
+  - `unavailable` with a `PendingVerification` detail is handled by §7.6 "Pending verification": poll, no ladder.
+
+### 3. The replan is a new operation (S2)
+
+In the §7.6 "Errors" re-plan sentence, say "… and retries in a **new signed operation (new nonce)** with a new
+ticket". A new `ticket_ids` changes the operation fingerprint.
+
+### 4. The lag answer is never a replay result (S3)
+
+- **STC §7.1:** extend the existing sentence "A challenge and a `PendingVerification` answer (§7.6) are never stored
+  as replay results …" to also cover "a membership-lag `unavailable` (SPEC-SERVER §9.4)". Keep the rest of that
+  sentence, including removing any `in_flight` record.
+- **SPEC-SERVER §9.4:** state the same.
+- These are the only STC §7.1 edits.
+
+### 5. Packlist gets its own error (S4)
+
+- As in §1: the packlist failure uses its own message and `invalid_argument` (permanent).
+- **Client action,** one informative STC §7.6 "Errors" sentence: the client rebuilds its packlist from the packs the
+  remote actually holds, then retries in a new operation.
+
+### 6. Early reporting only for upload-local failures (S5)
+
+§9.5's "MAY report earlier (e.g. on `CompleteUpload`)" is restricted to failures that depend only on the uploaded
+bytes:
+- unknown upload type;
+- object hash mismatch;
+- a bad signature on an object in the pack;
+- a delta chain too deep.
+
+Membership-dependent failures (§9.4) are reported only on the consuming `AdvanceRefs`. Early reports use
+`invalid_argument` only, never `failed_precondition`, which §5 maps to a ticket failure.
+
+### 7. Opaque mode and §9.7 (S6)
+
+§9.1 states:
+- in opaque mode, §9.2–§9.6 and §9.8 do not apply;
+- §9.7(a), **allowed signers per ref, applies in both modes**, because it depends only on the request's
+  authenticated signer;
+- §9.7(b), fast-forward-only, requires indexed mode (the existing startup refusal stays).
+
+### 8. `retry_after_ms` floor (N5; this supersedes B.4's clamp)
+
+- The client clamps `retry_after_ms` to **1,000–60,000 ms**. A missing or zero value means 1,000.
+- A server SHOULD send at least 1,000.
+- Update the STC §7.6 text, the proto comment (`1000..=60000`) and the golden only if its value falls outside. The
+  golden's 5,000 is fine.
+
+### 9. Mechanical fixes
+
+- **S7, stale §15→§16 references:** `rust/crates/mkit-server/tests/golden_server_hooks.rs:1` ("§§6–7 and §15" →
+  "§16") and `scripts/check-server-hooks-goldens.sh` lines ~3 and ~10.
+- **N2:** STC must have one version `2` row. Fold your change into the existing row; no duplicate.
+- **N3:** the §2.1 row for `max_delta_chain_depth` goes after `index_fanout`.
+- **N4:** no WP ids in normative text. "(specified separately in WP-4.11)" becomes "(the HTTP-serving specification)".
+- **N6:** an informative §9.6 note: deduplication may change server-side work (timing). Protocol responses don't
+  differ, and deployments that treat timing as sensitive can disable dedup.
+- **N7:** the CHANGELOG line gets the `*(spec)*` scope, wrapped like its neighbours, with no stray blank line. Update
+  the transport `MANIFEST.txt` header comment to describe its entries accurately.
+
+### 10. Gates, then push
+
+- `buf lint`, and `buf breaking` against `origin/feat/mkit-server` (a proto comment change only);
+- `bash scripts/check-generated-fresh.sh`, since the proto comment changes the generated docs: regenerate if needed;
+- the golden test;
+- `check-server-hooks-goldens.sh`;
+- `check-spec-status.sh`.
+
+Push, and add a "Fix round 1" section to the PR body covering §0–§9.

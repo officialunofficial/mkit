@@ -1,4 +1,4 @@
-//! Authoritative bytes for SPEC-SERVER §§6–7 and §15.
+//! Authoritative bytes for SPEC-SERVER §§6–7 and §16.
 //! Read-only by default; `UPDATE_GOLDEN=1` deliberately rebuilds signatures
 //! and the complete manifest from the checked-in request bodies and fields.
 #![allow(clippy::unwrap_used)] // Test failures are assertions.

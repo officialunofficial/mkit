@@ -780,9 +780,11 @@ choice through `GetServerInfo.indexed_mode`, as
 Clients use that discovery result when planning uploads and interpreting
 verification responses.
 
-Opaque mode is the default. In opaque mode, the indexed-ingest
-obligations of this section do not apply: packs are stored as opaque
-bytes. Upload commitments, authentication, tickets, and membership
+Opaque mode is the default; packs are stored as opaque bytes. In that
+mode, §9.2–§9.6 and §9.8 do not apply. The allowed-signer policy in
+§9.7(a) applies in both modes because it depends only on the request's
+authenticated signer. Fast-forward-only (§9.7(b)) requires indexed
+mode. Upload commitments, authentication, tickets, and membership
 still follow STC; opaque storage does not relax those wire guarantees.
 
 An indexed deployment decodes pushed packs and indexes their objects
@@ -817,8 +819,9 @@ or earlier under §9.5. No ref moves as a result of that failed advance.
 
 Every pack listed by a consumed `MKPL` node MUST either already be a
 member of the same repository or be ticketed and consumed in the same
-`AdvanceRefs`. A listing that satisfies neither alternative fails with
-the uniform `failed_precondition` and message of §9.4.
+`AdvanceRefs`. A membership-dependent miss follows the lag window in
+§9.4; after that window, it fails with `invalid_argument` and public
+message `packlist lists a pack that is not in this repository`.
 
 Packlist nodes themselves need tickets, as STC §7.6's membership rule
 requires. A node's upload is not evidence that its listed packs belong
@@ -834,18 +837,20 @@ commit under the existing atomic lifecycle in §3 and STC §7.7.
 Before an `AdvanceRefs` that consumes a pack commits, the server MUST
 have verified all of the following:
 
-1. **Object identity.** Every object's id agrees with its content under
-   [SPEC-OBJECTS §10](SPEC-OBJECTS.md#10-storage), including the
-   type-specific identity rules referenced there.
-2. **Signatures.** Every commit, remix, and tag signature reachable
-   from the new tips verifies under
-   [SPEC-SIGNING §3–§4a and §6](SPEC-SIGNING.md#6-verification-algorithm).
-3. **Closure.** Every object reachable from the advanced head is in
-   the consumed packs or is already a verified member of the same
-   repository. Object references follow the corresponding object
-   layouts in [SPEC-OBJECTS §4–§7](SPEC-OBJECTS.md#4-tree-0x02).
-4. **Delta resolution.** Every delta resolves under §9.4 within the
-   chain-depth limit advertised under §9.8.
+- **(a) Object identity.** Every object's id agrees with its content under
+  [SPEC-OBJECTS §10](SPEC-OBJECTS.md#10-storage), including the
+  type-specific identity rules referenced there.
+- **(b) Signatures.** Every commit, remix, and tag signature reachable
+  from the new tips verifies under
+  [SPEC-SIGNING §3–§4a and §6](SPEC-SIGNING.md#6-verification-algorithm).
+- **(c) Closure.** Every object reachable from the advanced head is in
+  the consumed packs or is already a verified member of the same
+  repository. A membership-dependent miss follows §9.4's lag window
+  before it is a permanent `open closure` failure. Object references
+  follow the corresponding object layouts in
+  [SPEC-OBJECTS §4–§7](SPEC-OBJECTS.md#4-tree-0x02).
+- **(d) Delta resolution.** Every delta resolves under §9.4 within the
+  chain-depth limit advertised under §9.8.
 
 Object identity is checked on the reconstructed object, not on an
 unverified claim in an entry. A transport-level pack commitment does
@@ -862,7 +867,7 @@ message naming the corresponding category:
 |---|---|
 | Object id does not match its content | `object hash mismatch` |
 | Commit, remix, or tag signature does not verify | `bad signature` |
-| Reachable object is absent from the permitted closure | `open closure` |
+| Reachable object is absent from the permitted closure after §9.4's lag window | `open closure` |
 | Delta chain exceeds the advertised cap | `delta chain too deep` |
 
 These are permanent failures. Clients MUST NOT retry the rejected
@@ -875,7 +880,7 @@ objects for closure. This does not allow an unverified staged object
 to stand in for a verified member, or permit a membership lookup in
 another repository.
 
-### 9.4 Repository-isolated resolution
+### 9.4 Repository-isolated membership checks
 
 A delta base MUST resolve only from an earlier entry in the same pack,
 as [SPEC-PACKFILE §4](SPEC-PACKFILE.md#4-ordering-rule) requires for
@@ -889,25 +894,40 @@ repository. This applies the isolation guarantee of
 [STC §7.4](SPEC-TRANSPORT-CONNECT.md#74-repository-addressing) to
 verification as well as to ordinary membership queries.
 
-Repository membership is eventually consistent under STC §7.9. For an
-unresolved base, while the consuming ticket is younger than the
-deployment's relay-lag bound, the server MUST return retryable
-`unavailable` with public message `delta base not yet visible`.
-This temporary response is permitted only within that interval.
+Repository membership is eventually consistent under STC §7.9.
+Every membership-dependent check MUST use the lag window below:
+delta-base resolution, closure (§9.3(c)), and the packlist rule (§9.2).
+Each check reads only the membership of the same repository.
 
-Once the consuming ticket is older than that bound, an
-unresolved base MUST return `failed_precondition` with this exact
-public message:
+For a membership-dependent miss, while the consuming ticket is younger
+than the deployment's relay-lag bound, the server MUST return retryable
+`unavailable` with public message `repository membership not yet visible`.
+The same message applies to all three checks. This temporary response
+is permitted only within that interval.
 
-```text
-delta base not available in this repository
-```
+Once the consuming ticket is older than that bound, the server MUST
+return the permanent error of the check that missed:
 
-The permanent response MUST be byte-identical whether the object
-exists in another repository or nowhere. The temporary response also
-MUST NOT distinguish those cases. The server uses ticket age and
+| Membership-dependent miss | Connect code | Exact public message |
+|---|---|---|
+| Unresolved delta base | `failed_precondition` | `delta base not available in this repository` |
+| Reachable object absent from the permitted closure | `invalid_argument` | `open closure` |
+| Packlist names a pack absent from the repository and not ticketed and consumed in the same advance | `invalid_argument` | `packlist lists a pack that is not in this repository` |
+
+Each permanent response MUST be byte-identical whether the object or
+pack exists in another repository or nowhere. The temporary response
+also MUST NOT distinguish those cases. The server uses ticket age and
 repository-scoped visibility, not a global-existence query, to select
-between the two responses.
+the response.
+
+A membership-lag `unavailable` MUST NOT be stored as a replay result
+(STC §7.1). The server MUST leave no replay record for the attempt and
+remove any `in_flight` record it inserted, so the same nonce can be
+evaluated again as membership becomes visible.
+
+Informative: the consuming ticket's age is a sound proxy because the
+needed object or pack was written before the client fetched it, which
+was before `BeginUpload`.
 
 The relay-lag bound is deployment configuration. It bounds the
 visibility retry interval; it is not a claim that an unresolved object
@@ -915,8 +935,9 @@ must exist elsewhere. It does not extend the ticket's expiry.
 
 On that `failed_precondition`, a client MUST re-plan the upload once
 as a self-contained pack with no external delta bases and retry with
-a new ticket, as STC §7.6 requires. A second failure does not start an
-unbounded series of replans.
+a new signed operation (new nonce) with a new ticket, as STC §7.6
+requires. A second failure does not start an unbounded series of
+replans.
 
 Informative: repository A and repository B may hold identical bytes.
 A delta pushed to B cannot use A's membership to satisfy resolution.
@@ -933,19 +954,26 @@ requires. This answer MUST NOT be stored as a replay result, under
 STC §7.1; a retry must be able to observe verification progress.
 
 `PendingVerification.retry_after_ms` is the server's suggested poll
-interval in milliseconds. The server MUST supply a value in 1–60,000.
-STC §7.6 requires the client to clamp it to that interval, poll until
-ticket expiry, and use that polling interval instead of its normal
-backoff ladder.
+interval in milliseconds. The server SHOULD send at least 1,000.
+STC §7.6 requires the client to clamp it to 1,000–60,000 milliseconds;
+a missing or zero value means 1,000. The client polls until ticket
+expiry, using that polling interval instead of its normal backoff
+ladder.
 
 A pending answer is not a committed advance. The existing ticket
 lifecycle remains authoritative; upload completion, verification
 progress, and a pending response do not themselves consume a ticket
 or move refs.
 
-A server MAY report a verification failure earlier than the advance,
-for example on `CompleteUpload`. An earlier report MUST use the same
-code and public message as the failure would receive at advance.
+A server MAY report an upload-local failure earlier than the advance,
+for example on `CompleteUpload`, only when it depends on the uploaded
+bytes alone: unknown upload type, object hash mismatch, a bad signature
+on an object in the pack, or a delta chain too deep. An earlier report
+MUST use `invalid_argument` and the same public message as at advance;
+it MUST NOT use `failed_precondition`, which STC §5 maps to a ticket
+failure on upload RPCs. Membership-dependent failures (§9.4) MUST be
+reported only on the consuming `AdvanceRefs`.
+
 Asynchronous scheduling does not turn a permanent validation failure
 into a successful completion of the advance.
 
@@ -1006,11 +1034,15 @@ The store can retain one serving copy for repositories that share the
 same file object. Deduplication does not make that object a verified
 member of every repository that mentions its id.
 
-Serving is authorized per repository under the HTTP-serving contract
-(specified separately in WP-4.11). Existence in the global content
-store MUST NOT be observable through this transport protocol, as §9.4
-requires. The extracted serving copy MUST NOT become a delta-base
+Serving is authorized per repository (the HTTP-serving specification).
+Existence in the global content store MUST NOT be observable through
+this transport protocol, as §9.4 requires. The extracted serving copy MUST NOT become a delta-base
 resolution source.
+
+Informative: deduplication may change the amount or timing of
+server-side work. Protocol responses do not differ based on
+deduplication. Deployments that treat timing as sensitive can disable
+deduplication.
 
 Informative: extracted objects are served with byte-range support
 under the HTTP-serving specification. A range reads file bytes from
@@ -1027,23 +1059,23 @@ A deployment MAY configure the following policies per ref-name pattern,
 using the grammar of
 [SPEC-WRITE-GRANTS §3.3](SPEC-WRITE-GRANTS.md#33-ref-scope-entries):
 
-- **Allowed-signer set.** Only the configured auth v2 signers may move
+- **(a) Allowed-signer set.** Only the configured auth v2 signers may move
   matching refs.
-- **Fast-forward-only.** A matching ref may only move to a descendant
+- **(b) Fast-forward-only.** A matching ref may only move to a descendant
   of its current value.
 
 Both policies are checked at pre-receive (§2 stage 5), after
-verification. A policy violation MUST fail with `permission_denied`
-and the corresponding public message:
+verification in indexed mode. A policy violation MUST fail with
+`permission_denied` and the corresponding public message:
 
 | Policy violated | Public message |
 |---|---|
 | Allowed-signer set | `signer not allowed for this ref` |
 | Fast-forward-only | `non-fast-forward update not allowed on this ref` |
 
-The allowed-signer set applies to the authenticated operation signer.
-Valid signatures on reachable commits do not independently authorize
-that signer to move the ref. Grant and namespace authorization remain
+The allowed-signer set applies in both modes to the authenticated
+operation signer. Valid signatures on reachable commits do not
+independently authorize that signer to move the ref. Grant and namespace authorization remain
 subject to STC and SPEC-WRITE-GRANTS.
 
 Fast-forward-only requires indexed mode because the server needs the

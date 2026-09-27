@@ -9007,7 +9007,7 @@ impl ::serde::Serialize for CompleteUploadResponseOwnedView {
 /// verification (SPEC-TRANSPORT-CONNECT §7.6; SPEC-SERVER §9.5).
 #[derive(Clone, Debug, Default)]
 pub struct PendingVerificationView<'a> {
-    /// server's suggested poll interval, 1..=60000
+    /// server's suggested poll interval, 1000..=60000
     ///
     /// Field 1: `retry_after_ms`
     pub retry_after_ms: ::core::option::Option<u32>,
@@ -9228,7 +9228,7 @@ impl PendingVerificationOwnedView {
     pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
         self.0.into_bytes()
     }
-    /// server's suggested poll interval, 1..=60000
+    /// server's suggested poll interval, 1000..=60000
     ///
     /// Field 1: `retry_after_ms`
     #[must_use]
