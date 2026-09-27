@@ -5,7 +5,7 @@
 # apps/vcs-worker under a local `wrangler dev`: the M0 "nothing changes on
 # the wire" exit check for the vcs-worker port (WP-M0-17).
 #
-#   scripts/vcs-worker-conformance.sh [--test-faults] [-- <extra runner args>]
+#   scripts/vcs-worker-conformance.sh [--test-faults] [--sharding single|d34] [-- <extra runner args>]
 #
 #   (default)      a release-feature build; the whole suite once.
 #   --test-faults  a `test-faults` build, in two phases, each on a fresh
@@ -21,6 +21,8 @@
 #                  one frame, so a `ListRefs` of N refs is about 45*N bytes
 #                  held whole (1.2 MB at 30,000; the default 10,000-ref case
 #                  stays under) until WP-1.27 pages it.
+#   --sharding d34  D34 phase 1 only: quota is per ref shard and growth stats
+#                   are single-only. Add --test-faults to exercise RefShard alarms.
 #   -- ARGS        passed to every `mkit-server-conformance wire` run (e.g.
 #                  `-- --filter refs.`, `-- --list-refs 1000`).
 #
@@ -62,12 +64,18 @@ TEST_QUOTA_WINDOW_MS=60000
 MAX_BUFFERED_BYTES=1048576
 
 test_faults=0
+sharding=single
 runner_args=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --test-faults) test_faults=1 ;;
+        --sharding)
+            if [ $# -lt 2 ] || { [ "$2" != single ] && [ "$2" != d34 ]; }; then
+                echo "--sharding requires single or d34" >&2; exit 2
+            fi
+            sharding="$2"; shift ;;
         --) shift; runner_args=("$@"); break ;;
-        *) echo "usage: $0 [--test-faults] [-- <runner args>]" >&2; exit 2 ;;
+        *) echo "usage: $0 [--test-faults] [--sharding single|d34] [-- <runner args>]" >&2; exit 2 ;;
     esac
     shift
 done
@@ -141,7 +149,7 @@ run_suite() {
     local status=0
     "${runner}" wire --base-url "${ORIGIN}" --auth auth-v2 --audience "${ORIGIN}" \
         --repository "${REPOSITORY}" --random-signer --atomic-advance --fresh-target \
-        --max-pack-bytes "${MAX_PACK_BYTES}" --features "${features}" \
+        --max-pack-bytes "${MAX_PACK_BYTES}" --features "${features}" --sharding "${sharding}" \
         "$@" ${runner_args[@]+"${runner_args[@]}"} || status=$?
     if [ "${status}" -ne 0 ]; then
         echo "wire suite failed (exit ${status}); wrangler log tail:" >&2
@@ -154,7 +162,7 @@ run_suite() {
 # gzip-encoded bytes (fails closed, SPEC-WRITE-GRANTS §9.2 is open).
 features="health,strict-gzip-auth"
 build_args=(--dev)
-vars=(--var "AUTH_AUDIENCE:${ORIGIN}" --var "AUTH_REPOSITORY:${REPOSITORY}")
+vars=(--var "AUTH_AUDIENCE:${ORIGIN}" --var "AUTH_REPOSITORY:${REPOSITORY}" --var "SHARDING:${sharding}")
 if [ "${test_faults}" -eq 1 ]; then
     features="${features},test-faults,timers"
     build_args+=(--features test-faults)
@@ -173,6 +181,9 @@ run_suite "${features}"
 stop_server
 
 if [ "${test_faults}" -eq 1 ]; then
+    if [ "${sharding}" = d34 ]; then
+        echo ">> skipping phase 2: D34 quota counts per ref shard until WP-1.26; the growth stats hook is single-sharding only"
+    else
     quota_args=(--quota-ops "${TEST_QUOTA_OPS}" --quota-bytes "${TEST_QUOTA_BYTES}"
         --quota-window-ms "${TEST_QUOTA_WINDOW_MS}")
     start_server quota "${vars[@]}" \
@@ -182,6 +193,8 @@ if [ "${test_faults}" -eq 1 ]; then
     run_suite "${features}" "${quota_args[@]}" --filter growth.
     run_suite "${features}" "${quota_args[@]}" --filter quota.
     stop_server
+
+    fi
 
     # A test-faults build logs `mkit-adapter peak-buffered-bytes <n> ...
     # path <path>` per request: the most body bytes the adapter held at

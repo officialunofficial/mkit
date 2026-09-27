@@ -196,3 +196,16 @@ The default stays `single`. WP-1.28 flips it.
   `apps/vcs-worker/Cargo.lock` only if it goes stale (`conventions.md:66`).
 - The four conformance runs of B.6. Wrangler has been available to earlier executors. If it isn't, that's a D-stop,
   because this WP's evidence is the Worker.
+
+## Amendment 1: guard race observation (approved)
+
+Use `BatchOutcome::PreconditionFailed { observed, .. }` from the failed
+`Absent(sm 00)` apply instead of re-reading. The store contract returns the
+value read atomically inside the check-and-write step. This replaces B.2's
+"PreconditionFailed → re-read once and compare" with "compare the observed value".
+
+If `observed` is `None`, which a failed `Absent` cannot produce under the
+contract, treat it as a corrupt reply: refuse with `unavailable`, and log it.
+
+The per-isolate cap remains at most three DO calls (`get`, `scan`, `apply`).
+Test that the race path uses `observed` and that its call count is exactly 3.

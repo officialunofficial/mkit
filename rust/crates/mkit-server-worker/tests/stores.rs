@@ -266,3 +266,147 @@ fn early_put_answers_never_hang_and_still_verify() {
         CommitOutcome::Created
     );
 }
+
+#[test]
+fn every_partition_kind_routes_and_is_isolated() {
+    use mkit_server_worker::classes::ShardClass;
+    use mkit_server_worker::naming::do_target;
+    let dir = tempfile::tempdir().unwrap();
+    let store = Loopback::store(dir.path().to_path_buf(), DoConfig::default());
+    let cases: Vec<(&[u8], ShardClass)> = vec![
+        (b"nroot\0", ShardClass::RefStore),
+        (b"nother\0", ShardClass::RefStore),
+        (b"croot\0", ShardClass::NsCoordinator),
+        (b"cother\0", ShardClass::NsCoordinator),
+        (b"rroot\0a\0refs/heads/main\0", ShardClass::RefShard),
+        (b"rother\0a\0refs/heads/main\0", ShardClass::RefShard),
+        (b"iroot\0a\x000\0", ShardClass::RepoIndexShard),
+        (b"iother\0a\x000\0", ShardClass::RepoIndexShard),
+        (b"xroot\0a\x000\0", ShardClass::RepoIndexShard),
+        (b"xother\0a\x000\0", ShardClass::RepoIndexShard),
+        (b"s0\0", ShardClass::ContentIndexShard),
+        (b"s1\0", ShardClass::ContentIndexShard),
+    ];
+    let k = Key::new(b"test\0".to_vec());
+    for (i, (encoded, class)) in cases.iter().enumerate() {
+        let partition = Partition::decode(encoded).unwrap();
+        assert!(class.accepts(&partition));
+        assert_eq!(do_target(&partition).unwrap().binding, class.binding());
+        assert_eq!(block_on(store.get(&partition, &k)).unwrap(), None);
+        block_on(store.apply(
+            &partition,
+            Batch::new().put(k.clone(), Value::new(i.to_be_bytes().to_vec())),
+        ))
+        .unwrap();
+    }
+    for (i, (encoded, _)) in cases.iter().enumerate() {
+        let partition = Partition::decode(encoded).unwrap();
+        assert_eq!(
+            block_on(store.get(&partition, &k))
+                .unwrap()
+                .unwrap()
+                .as_bytes(),
+            &i.to_be_bytes()
+        );
+    }
+    assert_eq!(store.transport().targets().len(), cases.len());
+}
+
+#[test]
+fn foreign_partition_kinds_are_rejected_before_store_access() {
+    use mkit_server_worker::classes::ShardClass;
+    use mkit_server_worker::naming::DoTarget;
+    use mkit_server_worker::ns_client::NsTransport;
+    use mkit_server_worker::wire::{NsCall, NsErrKind, NsReply, NsRequest, WireBatch};
+    let dir = tempfile::tempdir().unwrap();
+    let transport = Loopback::new(dir.path().to_path_buf(), DoConfig::default());
+    let classes = [
+        ShardClass::RefStore,
+        ShardClass::NsCoordinator,
+        ShardClass::RefShard,
+        ShardClass::RepoIndexShard,
+        ShardClass::ContentIndexShard,
+    ];
+    let partitions: Vec<Partition> = [
+        b"nroot\0".as_slice(),
+        b"croot\0",
+        b"rroot\0a\0refs/heads/main\0",
+        b"iroot\0a\x000\0",
+        b"xroot\0a\x000\0",
+        b"s0\0",
+    ]
+    .into_iter()
+    .map(|bytes| Partition::decode(bytes).unwrap())
+    .collect();
+    for class in classes {
+        let target = DoTarget {
+            binding: class.binding(),
+            name: "guard-test".into(),
+        };
+        for partition in &partitions {
+            let batch = Batch::new().put(key(0), Value::new(b"foreign".to_vec()));
+            let body = serde_json::to_string(
+                &NsRequest::new(
+                    partition,
+                    NsCall::Apply {
+                        batch: WireBatch::from(batch),
+                    },
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            let reply: NsReply =
+                serde_json::from_str(&block_on(transport.call(&target, "apply", body)).unwrap())
+                    .unwrap();
+            if !class.accepts(partition) {
+                assert_eq!(
+                    reply,
+                    NsReply::Err {
+                        kind: NsErrKind::Invalid,
+                        message: "partition kind not served by this class".into()
+                    }
+                );
+                assert_eq!(
+                    block_on(transport.raw_value(&target, partition, &key(0))),
+                    None
+                );
+            } else {
+                assert!(matches!(reply, NsReply::Outcome { .. }));
+            }
+        }
+    }
+}
+
+#[test]
+fn probe_targets_follow_the_deployment_sharding() {
+    use mkit_server_worker::adapter::WorkerConfig;
+    use mkit_server_worker::naming::do_target;
+    use mkit_server_worker::ns_client::DoNamespaceStore;
+    for mode in ["single", "d34"] {
+        let cfg = WorkerConfig::from_vars(|name| match name {
+            "AUTH_AUDIENCE" => Some("https://vcs.example".into()),
+            "AUTH_REPOSITORY" => Some("default".into()),
+            "SHARDING" => Some(mode.into()),
+            _ => None,
+        })
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let store = DoNamespaceStore::new(
+            Loopback::new(dir.path().to_path_buf(), DoConfig::default()),
+            cfg.probe_partition(),
+        );
+        block_on(store.probe()).unwrap();
+        assert_eq!(
+            store.transport().targets(),
+            vec![do_target(&cfg.probe_partition()).unwrap()]
+        );
+        assert_eq!(
+            cfg.probe_partition(),
+            if mode == "single" {
+                root()
+            } else {
+                Partition::Coordinator(NamespaceKey::deployment_default())
+            }
+        );
+    }
+}

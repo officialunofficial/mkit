@@ -11,6 +11,7 @@
 //!
 //! | Class | Key | Value |
 //! |---|---|---|
+//! | deployment sharding marker (root `Namespace` only) | `sm 00` | UTF-8 `single` or `d34` |
 //! | layout version | `v 00` | be32 [`LAYOUT_VERSION`]; never on `RefsOnly` stores |
 //! | ref | `r 00 <repo> 00 <refname>` | 32-byte id |
 //! | replay record | `p 00 <scope:32>` | codec `ReplayRecord` |
@@ -58,6 +59,8 @@ pub const LAYOUT_VERSION: u32 = 1;
 
 /// Layout version tag.
 pub const TAG_LAYOUT_VERSION: &str = "v";
+/// Worker deployment sharding marker tag (root Namespace only).
+pub const TAG_SHARDING_MARKER: &str = "sm";
 /// Ref tag.
 pub const TAG_REF: &str = "r";
 /// Replay record tag.
@@ -116,6 +119,8 @@ pub const RESERVED_TAGS: &[&str] = &[
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ParsedKey {
+    /// `sm 00`: the Worker deployment sharding mode.
+    ShardingMarker,
     /// `v 00`.
     LayoutVersion,
     /// `nr 00`.
@@ -223,6 +228,12 @@ pub fn is_ref_key(key: &Key) -> bool {
 #[must_use]
 pub fn layout_version() -> Key {
     key(TAG_LAYOUT_VERSION, &[])
+}
+
+/// `sm 00`: UTF-8 `single` or `d34`, only in the root Namespace partition.
+#[must_use]
+pub fn sharding_marker() -> Key {
+    key(TAG_SHARDING_MARKER, &[])
 }
 
 /// `nr 00`: the namespace coordinator record.
@@ -382,6 +393,7 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
     let (tag, body) = (&bytes[..split], &bytes[split + 1..]);
     let text = |b: &[u8]| String::from_utf8(b.to_vec()).ok();
     Some(match tag {
+        b"sm" if body.is_empty() => ParsedKey::ShardingMarker,
         b"v" if body.is_empty() => ParsedKey::LayoutVersion,
         b"e" if body.is_empty() => ParsedKey::GrantEpoch,
         b"nr" if body.is_empty() => ParsedKey::NamespaceRecord,
@@ -465,6 +477,7 @@ mod tests {
 
     fn all_tags() -> Vec<&'static str> {
         let mut tags = vec![
+            TAG_SHARDING_MARKER,
             TAG_LAYOUT_VERSION,
             TAG_REF,
             TAG_REPLAY,
@@ -490,6 +503,7 @@ mod tests {
         let s = [0x11; 32];
         let q = format!("root\n{}", "ab".repeat(32));
         let cases: Vec<(Key, Vec<u8>)> = vec![
+            (sharding_marker(), b"sm\0".to_vec()),
             (layout_version(), b"v\0".to_vec()),
             (namespace_record(), b"nr\0".to_vec()),
             (repo_record(&repo("room-a")), b"rr\0room-a".to_vec()),
@@ -613,6 +627,7 @@ mod tests {
                 },
             ),
             (grant_epoch(), ParsedKey::GrantEpoch),
+            (sharding_marker(), ParsedKey::ShardingMarker),
             (namespace_record(), ParsedKey::NamespaceRecord),
             (repo_record(&repo("a")), ParsedKey::RepoRecord(repo("a"))),
             (repo_known(&repo("a")), ParsedKey::RepoKnown(repo("a"))),

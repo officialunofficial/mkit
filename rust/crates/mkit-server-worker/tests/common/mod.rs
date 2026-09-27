@@ -297,7 +297,10 @@ impl Loopback {
     }
 
     pub fn store(dir: PathBuf, config: DoConfig) -> DoNamespaceStore<Self> {
-        DoNamespaceStore::new(Self::new(dir, config))
+        DoNamespaceStore::new(
+            Self::new(dir, config),
+            mkit_server::Partition::Namespace(mkit_server::NamespaceKey::deployment_default()),
+        )
     }
 
     fn object(&self, target: &DoTarget) -> DoStore {
@@ -319,6 +322,34 @@ impl Loopback {
             Arc::new(SqlKvStore::open_with_capacity(conn, self.config.capacity).expect("open"));
         objects.insert(target.clone(), store.clone());
         store
+    }
+
+    /// Apply directly to model a concurrent isolate without adding a transport hop.
+    pub async fn raw_apply(
+        &self,
+        target: &DoTarget,
+        partition: &mkit_server::Partition,
+        batch: mkit_server::Batch,
+    ) {
+        use mkit_server::NamespaceStore;
+        assert_eq!(
+            self.object(target)
+                .apply(partition, batch)
+                .await
+                .expect("apply"),
+            mkit_server::BatchOutcome::Committed
+        );
+    }
+
+    /// Inspect a partition directly, bypassing the class guard for regression tests.
+    pub async fn raw_value(
+        &self,
+        target: &DoTarget,
+        partition: &mkit_server::Partition,
+        key: &mkit_server::Key,
+    ) -> Option<mkit_server::Value> {
+        use mkit_server::NamespaceStore;
+        self.object(target).get(partition, key).await.expect("read")
     }
 
     /// Forget every object's cached stats.
@@ -347,7 +378,17 @@ impl NsTransport for Loopback {
     ) -> Result<String, StoreError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let store = self.object(target);
-        Ok(serve(&*store, &body).await)
+        let class = [
+            mkit_server_worker::classes::ShardClass::RefStore,
+            mkit_server_worker::classes::ShardClass::NsCoordinator,
+            mkit_server_worker::classes::ShardClass::RefShard,
+            mkit_server_worker::classes::ShardClass::RepoIndexShard,
+            mkit_server_worker::classes::ShardClass::ContentIndexShard,
+        ]
+        .into_iter()
+        .find(|class| class.binding() == target.binding)
+        .expect("class binding");
+        Ok(serve(&*store, &body, class).await)
     }
 }
 

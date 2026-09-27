@@ -1002,3 +1002,51 @@ cancellation must not hide a durable timer from the native driver.
 
 **Enforced by:** `mkit-server/src/timers/tests.rs` race and atomicity tests,
 `mkit-server-native/tests/timers.rs`, and the worker's pure alarm tests.
+
+## Worker shard classes reject foreign partition kinds
+
+**Always:** each Durable Object class accepts only its assigned partition kinds
+before dispatching a store call. RepoIndexShard serves both repo and ref indexes.
+
+**Because:** the wire carries the partition, so a class must check the request's
+kind rather than trusting its caller's binding selection.
+
+**If violated:** an incorrectly routed request can write into a foreign class.
+
+**Enforced by:** `mkit-server-worker::ns_object::serve_reply` and the full
+class/partition cross-product in `mkit-server-worker/tests/stores.rs`.
+
+## Worker timer ticks retain alarms scheduled while awaiting I/O
+
+**Always:** after running due timers, the alarm handler re-reads the current
+alarm and retains the earlier of it and the tick's next wake. With default
+storage options and no intervening I/O, Cloudflare input gates protect this
+final read/write sequence from request delivery.
+
+**Because:** `getAlarm` returns null during an alarm handler unless `setAlarm`
+has been called since it started. A timer Apply interleaved while a handler
+awaits non-storage I/O may install a new alarm.
+
+**If violated:** the final tick reschedule or delete can overwrite that alarm,
+delaying or stranding a newly inserted timer.
+
+**Enforced by:** `NsObject::alarm`, `alarm_after_tick_with_current`, and its host
+regression tests. Gate semantics follow [Cloudflare's glossary](https://developers.cloudflare.com/durable-objects/reference/glossary/)
+and [storage transaction documentation](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/#transaction);
+the null behavior is documented in [the alarms API](https://developers.cloudflare.com/durable-objects/api/alarms/#getalarm).
+
+## Worker deployment sharding is bound before serving RPCs
+
+**Always:** a Worker isolate validates its configured sharding against `sm 00`
+in the root RefStore before serving RPCs. An unmarked root with rows is single.
+Concurrent requests share the same in-flight check and cached result. Reused
+isolates refuse mode or jurisdiction changes locally without new DO calls. A failed
+Absent uses its atomic observation; an absent observation refuses as corruption.
+
+**Because:** changing partition routing over existing data hides its refs.
+
+**If violated:** deployments can appear empty or disagree about where writes go.
+
+**Enforced by:** `sharding_guard::DeploymentGuard`, the adapter's isolate-local
+cache, and `mkit-server-worker/tests/sharding_guard.rs`. The check uses at most
+three DO calls per isolate, including a marker race.

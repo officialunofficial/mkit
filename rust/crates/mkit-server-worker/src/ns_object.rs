@@ -16,38 +16,43 @@ use mkit_server::store::export_page;
 
 use mkit_server::{Cursor, Key, NamespaceStore, Partition, ScanPage, StoreError};
 
+use crate::classes::ShardClass;
 use crate::wire::{Blob, NsCall, NsErrKind, NsReply, NsRequest, WireOutcome};
 
 /// Answer one request body with a reply body. Never fails: a malformed
 /// request is an `Invalid` reply, a failed store an error reply whose
 /// backend detail goes to the log only.
-pub async fn serve<S: NamespaceStore>(store: &S, body: &str) -> String {
-    encode(&serve_reply(store, body).await.0)
+pub async fn serve<S: NamespaceStore>(store: &S, body: &str, class: ShardClass) -> String {
+    encode(&serve_reply(store, body, class).await.0)
 }
 
 /// Keep the committed timer Put alongside its typed reply for alarm wiring.
-async fn serve_reply<S: NamespaceStore>(store: &S, body: &str) -> (NsReply, Option<u64>) {
-    match serde_json::from_str::<NsRequest>(body) {
-        Ok(request) => match Partition::decode(&request.part.0) {
-            Ok(p) => dispatch(store, &p, request.call)
-                .await
-                .unwrap_or_else(|e| (failure(&e), None)),
-            Err(_) => (
-                NsReply::Err {
-                    kind: NsErrKind::Invalid,
-                    message: "malformed partition".into(),
-                },
-                None,
-            ),
-        },
-        Err(_) => (
-            NsReply::Err {
-                kind: NsErrKind::Invalid,
-                message: "malformed request".into(),
-            },
-            None,
-        ),
+async fn serve_reply<S: NamespaceStore>(
+    store: &S,
+    body: &str,
+    class: ShardClass,
+) -> (NsReply, Option<u64>) {
+    match decode_request(body, class) {
+        Ok((partition, call)) => dispatch(store, &partition, call)
+            .await
+            .unwrap_or_else(|error| (failure(&error), None)),
+        Err(reply) => (reply, None),
     }
+}
+
+fn decode_request(body: &str, class: ShardClass) -> Result<(Partition, NsCall), NsReply> {
+    let invalid = |message: &str| NsReply::Err {
+        kind: NsErrKind::Invalid,
+        message: message.into(),
+    };
+    let request: NsRequest =
+        serde_json::from_str(body).map_err(|_| invalid("malformed request"))?;
+    let partition =
+        Partition::decode(&request.part.0).map_err(|_| invalid("malformed partition"))?;
+    if !class.accepts(&partition) {
+        return Err(invalid("partition kind not served by this class"));
+    }
+    Ok((partition, request.call))
 }
 
 /// A reply body.
@@ -218,8 +223,9 @@ mod object {
     use mkit_server::timers::{TickBudget, TimerRegistry, run_due};
     use worker::{Method, Request, Response, ScheduledTime, State, Storage};
 
-    use super::{encode, failure, serve_reply};
-    use crate::alarm::{AlarmAction, alarm_after_put, alarm_after_tick};
+    use super::{decode_request, dispatch, encode, failure};
+    use crate::alarm::{AlarmAction, alarm_after_put, alarm_after_tick_with_current};
+    use crate::classes::ShardClass;
     use crate::clock::WorkerClock;
     use crate::do_sql::{DO_CAPACITY, DoSqlConn};
 
@@ -237,6 +243,7 @@ mod object {
     /// `#[durable_object]` class itself stays in the deployment's cdylib
     /// (M0-17) and holds one of these.
     pub struct NsObject {
+        class: ShardClass,
         conn: DoConn,
         capacity: Capacity,
         store: OnceCell<SqlKvStore<DoConn>>,
@@ -262,11 +269,12 @@ mod object {
         /// The object for `state`, capped at [`DO_CAPACITY`]; gives the
         /// state back.
         #[must_use]
-        pub fn new(state: State) -> (Self, State) {
+        pub fn new(state: State, class: ShardClass) -> (Self, State) {
             let (conn, state) = DoSqlConn::from_state(state);
             #[cfg(feature = "test-faults")]
             let conn = crate::faults::FaultConn::new(conn);
             let object = Self {
+                class,
                 conn,
                 capacity: DO_CAPACITY,
                 store: OnceCell::new(),
@@ -308,8 +316,13 @@ mod object {
                 return Response::error("method not allowed", 405);
             }
             let body = req.text().await?;
-            let reply = match self.store() {
-                Ok(store) => {
+            let decoded = decode_request(&body, self.class);
+            let reply = match decoded.and_then(|request| {
+                self.store()
+                    .map(|store| (store, request))
+                    .map_err(|error| failure(&error))
+            }) {
+                Ok((store, (partition, call))) => {
                     // `SqlKvStore` caches stats for a minute; the wire
                     // suite's stats hook (`test-faults`) measures growth
                     // write by write, so it reads the table every time.
@@ -317,7 +330,9 @@ mod object {
                     if req.path() == "/stats" {
                         store.clear_stats_cache();
                     }
-                    let (reply, earliest) = serve_reply(store, &body).await;
+                    let (reply, earliest) = dispatch(store, &partition, call)
+                        .await
+                        .unwrap_or_else(|error| (failure(&error), None));
                     if let Some(earliest) = earliest
                         && let Err(error) = self.lower_alarm(earliest).await
                     {
@@ -325,7 +340,7 @@ mod object {
                     }
                     encode(&reply)
                 }
-                Err(e) => encode(&failure(&e)),
+                Err(reply) => encode(&reply),
             };
             let mut response = Response::ok(reply)?;
             response
@@ -378,7 +393,11 @@ mod object {
                     next_wake = Some(next_wake.map_or(next, |current: u64| current.min(next)));
                 }
             }
-            let result = match alarm_after_tick(next_wake, now) {
+            let result = match alarm_after_tick_with_current(
+                self.storage.get_alarm().await?,
+                next_wake,
+                now,
+            ) {
                 AlarmAction::Set(next) => self.set_alarm(next).await,
                 AlarmAction::Delete => self.storage.delete_alarm().await,
             };
@@ -409,7 +428,12 @@ mod tests {
     }
 
     fn reply(store: &MemoryKv, call: NsCall) -> NsReply {
-        serde_json::from_str(&block_on(serve(store, &request(call)))).unwrap()
+        serde_json::from_str(&block_on(serve(
+            store,
+            &request(call),
+            ShardClass::RefStore,
+        )))
+        .unwrap()
     }
 
     #[test]
@@ -422,6 +446,7 @@ mod tests {
                 &request(NsCall::Apply {
                     batch: WireBatch::from(batch),
                 }),
+                ShardClass::RefStore,
             ))
         };
         let batch = Batch::new()
@@ -509,7 +534,8 @@ mod tests {
             }
         ));
         for body in ["", "{}", r#"{"part":"!!","call":{"op":"probe"}}"#] {
-            let r: NsReply = serde_json::from_str(&block_on(serve(&store, body))).unwrap();
+            let r: NsReply =
+                serde_json::from_str(&block_on(serve(&store, body, ShardClass::RefStore))).unwrap();
             assert!(
                 matches!(
                     r,
@@ -522,7 +548,8 @@ mod tests {
             );
         }
         let bad_part = r#"{"part":"cQ==","call":{"op":"probe"}}"#;
-        let r: NsReply = serde_json::from_str(&block_on(serve(&store, bad_part))).unwrap();
+        let r: NsReply =
+            serde_json::from_str(&block_on(serve(&store, bad_part, ShardClass::RefStore))).unwrap();
         assert!(matches!(
             r,
             NsReply::Err {

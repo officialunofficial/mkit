@@ -34,8 +34,9 @@ pub struct DoTarget {
 }
 
 /// Where new Durable Objects are created. A Durable Object is pinned near
-/// its first access; a hint or jurisdiction applies only then. M0 passes
-/// none; WP-1.8 exposes it as a namespace-creation option.
+/// its first access; the hint defaults to none. Placement is deployment-wide.
+/// Jurisdiction must remain fixed for the deployment lifetime: changing it
+/// maps every name to a new, empty object.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Placement {
     /// A `locationHint` such as `"weur"`.
