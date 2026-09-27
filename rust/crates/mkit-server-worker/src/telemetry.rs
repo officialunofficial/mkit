@@ -1,5 +1,5 @@
 //! Worker console telemetry. Counters and gauges are never sampled;
-//! latency observations emit every hundredth call, across request-created
+//! latency observations emit on the first and then every hundredth call, across request-created
 //! default sinks in one isolate. Each emitted line is one JSON object.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -58,7 +58,7 @@ impl Default for ConsoleMetrics {
 
 impl<S: LineSink> ConsoleMetrics<S> {
     /// Use an injected sink and a fresh deterministic sampler. Observation
-    /// 100, 200, and so on are emitted; counters and gauges always emit.
+    /// 1, 101, 201, and so on are emitted; counters and gauges always emit.
     #[must_use]
     pub fn with_sink(sink: S) -> Self {
         Self {
@@ -92,7 +92,8 @@ impl<S: LineSink> Metrics for ConsoleMetrics<S> {
                 Some(if n == 99 { 0 } else { n + 1 })
             })
             .unwrap_or_else(|n| n);
-        if previous == 99 {
+        // Emit on calls 1, 101, 201, ... so short-lived isolates still report.
+        if previous == 0 {
             self.emit(name, labels, &Value::from(ms));
         }
     }
@@ -249,12 +250,13 @@ mod tests {
             );
         }
         let lines = sink.0.lock().unwrap();
-        assert_eq!(lines.len(), 2);
+        assert_eq!(lines.len(), 3);
         assert_eq!(
             lines[0].1,
-            json!({"metric":"latency", "labels":{"procedure":"UpdateRef"}, "value":100.0})
+            json!({"metric":"latency", "labels":{"procedure":"UpdateRef"}, "value":1.0})
         );
-        assert_eq!(lines[1].1["value"], 200.0);
+        assert_eq!(lines[1].1["value"], 101.0);
+        assert_eq!(lines[2].1["value"], 201.0);
     }
 
     #[test]

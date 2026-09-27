@@ -88,21 +88,6 @@ fn write_backup(args: &BackupArgs) -> Result<u64, (u8, String)> {
     let MetaArg::Sqlite(source) = &args.meta else {
         return Err((exit::USAGE, "--meta must be sqlite:<PATH>".to_owned()));
     };
-    match std::fs::symlink_metadata(&args.out) {
-        Ok(_) => {
-            return Err((
-                exit::USAGE,
-                format!("--out {} already exists", args.out.display()),
-            ));
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err((
-                exit::USAGE,
-                format!("--out {}: {error}", args.out.display()),
-            ));
-        }
-    }
     if !source.is_file() {
         return Err((
             exit::NOINPUT,
@@ -116,7 +101,34 @@ fn write_backup(args: &BackupArgs) -> Result<u64, (u8, String)> {
         .out
         .to_str()
         .ok_or_else(|| (exit::USAGE, "--out must be a UTF-8 path".to_owned()))?;
-    let fail = |error: String| (exit::UNAVAILABLE, error);
+    // Claim the output atomically: `create_new` refuses an existing path,
+    // including a planted symlink, and the file starts owner-only because the
+    // backup holds repository, ref and signer metadata. `VACUUM INTO` accepts
+    // an empty target file.
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    match options.open(&args.out) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err((
+                exit::USAGE,
+                format!("--out {} already exists", args.out.display()),
+            ));
+        }
+        Err(error) => {
+            return Err((
+                exit::USAGE,
+                format!("--out {}: {error}", args.out.display()),
+            ));
+        }
+    }
+    let fail = |error: String| {
+        // Never leave a partial file that a later run would mistake for a backup.
+        let _ = std::fs::remove_file(&args.out);
+        (exit::UNAVAILABLE, error)
+    };
     // A separate WAL connection reads a consistent snapshot without
     // acquiring the server's root locks or stopping its writers.
     let conn = RusqliteConn::open(source).map_err(|error| fail(error.to_string()))?;

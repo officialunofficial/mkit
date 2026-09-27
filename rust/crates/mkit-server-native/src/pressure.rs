@@ -80,7 +80,7 @@ impl PressureMonitor {
                 &[("kind", "database")],
                 bytes as f64,
             );
-            let now_ms = u64::try_from(SystemClock.now_ms()).unwrap_or(u64::MAX);
+            let now_ms = u64::try_from(SystemClock.now_ms()).unwrap_or(0);
             let (next, alerts) = observe(state, bytes, self.capacity.soft_limit(), now_ms);
             state = next;
             for level in alerts {
