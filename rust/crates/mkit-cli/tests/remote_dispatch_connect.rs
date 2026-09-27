@@ -12,8 +12,8 @@
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::process::Command;
-use std::sync::Arc;
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 
 use connectrpc::server::Server;
 use connectrpc::{
@@ -99,8 +99,38 @@ fn wire_to_condition(
     }
 }
 
+#[derive(Debug)]
+struct CapturedCall {
+    procedure: &'static str,
+    repository: Option<String>,
+    ref_hint: Option<String>,
+}
+
+type CapturedCalls = Arc<Mutex<Vec<CapturedCall>>>;
+
 struct TestService {
     inner: Arc<MemoryTransport>,
+    calls: CapturedCalls,
+    not_found: Vec<&'static str>,
+}
+
+impl TestService {
+    fn capture(&self, ctx: &RequestContext, procedure: &'static str) -> Result<(), ConnectError> {
+        let header = |name| {
+            ctx.headers()
+                .get(name)
+                .map(|value| value.to_str().unwrap().to_owned())
+        };
+        self.calls.lock().unwrap().push(CapturedCall {
+            procedure,
+            repository: header("x-repository"),
+            ref_hint: header("x-mkit-ref"),
+        });
+        if self.not_found.contains(&procedure) {
+            return Err(ConnectError::not_found("repository not found"));
+        }
+        Ok(())
+    }
 }
 
 #[allow(refining_impl_trait)]
@@ -108,9 +138,10 @@ impl generated::TransportService for TestService {
     // WP-1.2: compile-only stubs for the additive M1 trait methods.
     async fn get_server_info(
         &self,
-        _ctx: RequestContext,
+        ctx: RequestContext,
         _request: ServiceRequest<'_, generated::GetServerInfoRequest>,
     ) -> ServiceResult<generated::GetServerInfoResponse> {
+        self.capture(&ctx, "GetServerInfo")?;
         Err(connectrpc::ConnectError::unimplemented(
             "not implemented yet",
         ))
@@ -148,9 +179,10 @@ impl generated::TransportService for TestService {
 
     async fn list_refs(
         &self,
-        _ctx: RequestContext,
+        ctx: RequestContext,
         request: ServiceRequest<'_, generated::ListRefsRequest>,
     ) -> ServiceResult<generated::ListRefsResponse> {
+        self.capture(&ctx, "ListRefs")?;
         let msg = request.to_owned_message();
         let prefix = msg.prefix.unwrap_or_default();
         let refs = self.inner.list_refs(&prefix).map_err(to_connect_error)?;
@@ -169,9 +201,10 @@ impl generated::TransportService for TestService {
 
     async fn read_ref(
         &self,
-        _ctx: RequestContext,
+        ctx: RequestContext,
         request: ServiceRequest<'_, generated::ReadRefRequest>,
     ) -> ServiceResult<generated::ReadRefResponse> {
+        self.capture(&ctx, "ReadRef")?;
         let msg = request.to_owned_message();
         let name = msg.name.unwrap_or_default();
         let current = self.inner.read_ref(&name).map_err(to_connect_error)?;
@@ -184,9 +217,10 @@ impl generated::TransportService for TestService {
 
     async fn update_ref(
         &self,
-        _ctx: RequestContext,
+        ctx: RequestContext,
         request: ServiceRequest<'_, generated::UpdateRefRequest>,
     ) -> ServiceResult<generated::UpdateRefResponse> {
+        self.capture(&ctx, "UpdateRef")?;
         let msg = request.to_owned_message();
         let name = msg.name.unwrap_or_default();
         let condition = wire_to_condition(msg.expectation, msg.expected_id)?;
@@ -199,9 +233,10 @@ impl generated::TransportService for TestService {
 
     async fn advance_refs(
         &self,
-        _ctx: RequestContext,
+        ctx: RequestContext,
         request: ServiceRequest<'_, generated::AdvanceRefsRequest>,
     ) -> ServiceResult<generated::AdvanceRefsResponse> {
+        self.capture(&ctx, "AdvanceRefs")?;
         let msg = request.to_owned_message();
         let head_ref = msg.head_ref.unwrap_or_default();
         let head_condition = wire_to_condition(msg.head_expectation, msg.head_expected_id)?;
@@ -235,9 +270,10 @@ impl generated::TransportService for TestService {
 
     async fn pack_exists(
         &self,
-        _ctx: RequestContext,
+        ctx: RequestContext,
         request: ServiceRequest<'_, generated::PackExistsRequest>,
     ) -> ServiceResult<generated::PackExistsResponse> {
+        self.capture(&ctx, "PackExists")?;
         let msg = request.to_owned_message();
         let key = PackKey::new(to_hash(msg.pack_id)?);
         let exists = self.inner.pack_exists(&key).map_err(to_connect_error)?;
@@ -249,9 +285,10 @@ impl generated::TransportService for TestService {
 
     async fn upload_pack(
         &self,
-        _ctx: RequestContext,
+        ctx: RequestContext,
         mut requests: connectrpc::InboundStream<generated::UploadPackRequest>,
     ) -> ServiceResult<generated::UploadPackResponse> {
+        self.capture(&ctx, "UploadPack")?;
         let first = requests
             .next()
             .await
@@ -303,9 +340,10 @@ impl generated::TransportService for TestService {
 
     async fn download_pack(
         &self,
-        _ctx: RequestContext,
+        ctx: RequestContext,
         request: ServiceRequest<'_, generated::DownloadPackRequest>,
     ) -> ServiceResult<ServiceStream<generated::DownloadPackResponse>> {
+        self.capture(&ctx, "DownloadPack")?;
         let msg = request.to_owned_message();
         let key = PackKey::new(to_hash(msg.pack_id)?);
         let bytes = self.inner.download_pack(&key).map_err(to_connect_error)?;
@@ -348,7 +386,22 @@ fn spawn_server(
     u16,
     tokio::sync::oneshot::Sender<()>,
     std::thread::JoinHandle<()>,
+    CapturedCalls,
 ) {
+    spawn_server_with_errors(backend, Vec::new())
+}
+
+fn spawn_server_with_errors(
+    backend: Arc<MemoryTransport>,
+    not_found: Vec<&'static str>,
+) -> (
+    u16,
+    tokio::sync::oneshot::Sender<()>,
+    std::thread::JoinHandle<()>,
+    CapturedCalls,
+) {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let server_calls = Arc::clone(&calls);
     let (addr_tx, addr_rx) = mpsc::channel();
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
 
@@ -368,7 +421,11 @@ fn spawn_server(
                 .port();
             addr_tx.send(port).expect("send bound port to test thread");
 
-            let service = Arc::new(TestService { inner: backend });
+            let service = Arc::new(TestService {
+                inner: backend,
+                calls: server_calls,
+                not_found,
+            });
             let router = Router::new().add_service(service);
 
             bound
@@ -381,7 +438,7 @@ fn spawn_server(
     });
 
     let port = addr_rx.recv().expect("recv bound port");
-    (port, shutdown_tx, handle)
+    (port, shutdown_tx, handle, calls)
 }
 
 // ---------------------------------------------------------------------------
@@ -440,7 +497,7 @@ fn push_then_pull_roundtrip_through_real_connect_server() {
     let (src, tip_hex) = source_repo_with_one_commit();
 
     let backend = Arc::new(MemoryTransport::new());
-    let (port, shutdown, handle) = spawn_server(backend);
+    let (port, shutdown, handle, calls) = spawn_server(backend);
     let url = format!("mkit+http://127.0.0.1:{port}/myproj");
 
     // -- push --------------------------------------------------------
@@ -469,6 +526,134 @@ fn push_then_pull_roundtrip_through_real_connect_server() {
         "pull must materialise the committed file"
     );
 
+    {
+        let calls = calls.lock().unwrap();
+        assert!(!calls.is_empty());
+        assert!(
+            calls
+                .iter()
+                .all(|call| call.repository.as_deref() == Some("myproj")),
+            "{calls:?}"
+        );
+        let downloads: Vec<_> = calls
+            .iter()
+            .filter(|call| call.procedure == "DownloadPack")
+            .collect();
+        assert!(
+            downloads.len() >= 2,
+            "packlist and pack downloads must both be observed: {calls:?}"
+        );
+        assert!(
+            downloads
+                .iter()
+                .all(|call| call.ref_hint.as_deref() == Some("refs/heads/main")),
+            "{downloads:?}"
+        );
+        assert!(
+            calls
+                .iter()
+                .filter(|call| call.procedure != "DownloadPack")
+                .all(|call| call.ref_hint.is_none())
+        );
+    }
     let _ = shutdown.send(());
     handle.join().expect("server thread joins cleanly");
+}
+
+#[test]
+fn open_rejects_invalid_repository_path_before_connecting() {
+    for path in [
+        "Uppercase",
+        "namespace//repo",
+        "some/project/path",
+        "repo%20name",
+    ] {
+        let url = format!("mkit+http://127.0.0.1:1/{path}");
+        let Err(err) = remote_dispatch::open(&url) else {
+            panic!("invalid repository path accepted: {path}");
+        };
+        assert!(
+            matches!(err, remote_dispatch::DispatchError::MalformedUrl(_)),
+            "{err:?}"
+        );
+        let message = err.to_string();
+        assert!(message.contains(path), "{message}");
+        assert!(message.contains(&url), "{message}");
+    }
+}
+
+#[test]
+fn list_refs_not_found_names_the_repository_and_origin() {
+    let repo = tempfile::tempdir().unwrap();
+    assert!(run_in(repo.path(), &["init"]).status.success());
+    let (port, shutdown, handle, _) =
+        spawn_server_with_errors(Arc::new(MemoryTransport::new()), vec!["ListRefs"]);
+    let origin = format!("http://127.0.0.1:{port}");
+    let tx = remote_dispatch::open(&format!("mkit+{origin}/myproj")).unwrap();
+    let error = remote_dispatch::fetch_all(repo.path(), tx.as_ref(), "default").unwrap_err();
+    let remote_dispatch::DispatchError::RepositoryNotFound {
+        identity,
+        origin: observed,
+    } = &error
+    else {
+        panic!("expected repository-not-found error, got {error:?}");
+    };
+    assert_eq!(identity, "myproj");
+    assert_eq!(observed, &origin);
+    assert!(error.to_string().contains("empty path selects `default`"));
+    drop(tx);
+    let _ = shutdown.send(());
+    handle.join().unwrap();
+}
+
+#[test]
+fn read_ref_not_found_is_an_absent_ref() {
+    let (port, shutdown, handle, calls) =
+        spawn_server_with_errors(Arc::new(MemoryTransport::new()), vec!["ReadRef"]);
+    let tx = remote_dispatch::open(&format!("mkit+http://127.0.0.1:{port}/myproj")).unwrap();
+    assert_eq!(tx.read_ref("refs/heads/main").unwrap(), None);
+    assert_eq!(
+        calls.lock().unwrap().len(),
+        1,
+        "ReadRef must not trigger discovery"
+    );
+    drop(tx);
+    let _ = shutdown.send(());
+    handle.join().unwrap();
+}
+
+#[test]
+fn push_not_found_names_the_repository_for_each_write() {
+    let (src, _) = source_repo_with_one_commit();
+    for procedure in ["UploadPack", "AdvanceRefs", "UpdateRef"] {
+        let (port, shutdown, handle, calls) =
+            spawn_server_with_errors(Arc::new(MemoryTransport::new()), vec![procedure]);
+        let origin = format!("http://127.0.0.1:{port}");
+        let tx = remote_dispatch::open(&format!("mkit+{origin}/myproj")).unwrap();
+        if procedure == "UpdateRef" {
+            // The first push publishes its refs through AdvanceRefs. An unchanged
+            // second push reaches the head-only UpdateRef path.
+            remote_dispatch::push_all(src.path(), tx.as_ref()).unwrap();
+        }
+        let error = remote_dispatch::push_all(src.path(), tx.as_ref()).unwrap_err();
+        let remote_dispatch::DispatchError::RepositoryNotFound {
+            identity,
+            origin: observed,
+        } = &error
+        else {
+            panic!("{procedure}: expected repository-not-found error, got {error:?}");
+        };
+        assert_eq!(identity, "myproj", "{procedure}");
+        assert_eq!(observed, &origin, "{procedure}");
+        assert!(
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|call| call.procedure == procedure)
+        );
+        drop(tx);
+        let _ = shutdown.send(());
+        handle.join().unwrap();
+    }
 }

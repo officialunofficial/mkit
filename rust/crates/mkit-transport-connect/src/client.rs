@@ -4,7 +4,7 @@
 
 use std::env;
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -17,7 +17,8 @@ use mkit_core::protocol::{
     AdvanceOutcome as CoreAdvanceOutcome, BackoffIterator, PACK_BODY_LIMIT, PACK_BODY_LIMIT_USIZE,
     PackKey, RefWriteCondition, Transport, TransportError, TransportResult,
 };
-use mkit_core::refs::Ref;
+use mkit_core::refs::{Ref, validate_ref_name};
+use mkit_core::repo_identity::{IdentityError, RepositoryIdentity};
 use url::{Host, Url};
 
 use crate::envelope::{EnvelopeSigner, EnvelopeTransport, RetryIdentity};
@@ -26,9 +27,100 @@ use crate::executor::TokioExecutor;
 use crate::proto::mkit::transport::v1::__buffa::oneof::download_pack_response::Body as DownloadBody;
 use crate::proto::mkit::transport::v1::{
     AdvanceOutcome as ProtoAdvanceOutcome, AdvanceRefsRequest, DownloadPackRequest,
-    ListRefsRequest, PackChunk, PackExistsRequest, ReadRefRequest, RefExpectation,
-    TransportServiceClient, UpdateRefRequest, UploadPackHeader, UploadPackRequest,
+    GetServerInfoRequest, GetServerInfoResponse, ListRefsRequest, PackChunk, PackExistsRequest,
+    ReadRefRequest, RefExpectation, TransportServiceClient, UpdateRefRequest, UploadPackHeader,
+    UploadPackRequest,
 };
+
+/// Capability discovery result, immutable for a transport's lifetime.
+#[derive(Debug, Clone)]
+pub enum ServerInfoView {
+    /// A validated v2 (or later) deployment advertisement.
+    V2(Box<GetServerInfoResponse>),
+    /// The discovery procedure is unimplemented on this server.
+    Legacy,
+    /// Discovery failed after retries or returned invalid capabilities.
+    Unknown,
+}
+
+/// Invalid remote URL or repository path; no path spelling is repaired.
+#[derive(Debug)]
+pub enum UrlIdentityError {
+    /// URL parsing failed.
+    Url(url::ParseError),
+    /// A query or fragment would make the repository address ambiguous.
+    QueryOrFragment,
+    /// The literal path is outside the repository identity grammar.
+    Identity(IdentityError),
+}
+
+impl std::fmt::Display for UrlIdentityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Url(e) => write!(f, "invalid URL: {e}"),
+            Self::QueryOrFragment => {
+                f.write_str("repository URLs cannot contain a non-empty query or fragment")
+            }
+            Self::Identity(e) => e.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for UrlIdentityError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Url(e) => Some(e),
+            Self::Identity(e) => Some(e),
+            Self::QueryOrFragment => None,
+        }
+    }
+}
+
+/// Read the repository identity from a remote URL's literal path.
+///
+/// # Errors
+/// Returns [`UrlIdentityError`] for an invalid URL, query, fragment or identity.
+pub fn repository_identity_from_url(url: &str) -> Result<RepositoryIdentity, UrlIdentityError> {
+    let stripped = url.strip_prefix("mkit+").unwrap_or(url);
+    let parsed = Url::parse(stripped).map_err(UrlIdentityError::Url)?;
+    if parsed.query().is_some_and(|s| !s.is_empty())
+        || parsed.fragment().is_some_and(|s| !s.is_empty())
+    {
+        return Err(UrlIdentityError::QueryOrFragment);
+    }
+    // WHATWG URL parsing repairs dot segments and backslashes. Validate
+    // the original path, so those repairs cannot alter repository routing.
+    let authority_start = stripped.find("://").map_or(0, |i| i + 3);
+    let rest = &stripped[authority_start..];
+    let path_start = rest.find(['/', '?', '#', '\\']).unwrap_or(rest.len());
+    let path = rest[path_start..]
+        .split(['?', '#'])
+        .next()
+        .unwrap_or("")
+        .trim_matches('/');
+    RepositoryIdentity::parse_bare_allowed(if path.is_empty() { "default" } else { path })
+        .map_err(UrlIdentityError::Identity)
+}
+
+fn valid_server_info(info: &GetServerInfoResponse) -> bool {
+    info.protocol.as_deref() == Some("mkit.transport.v1")
+        && info.spec_version.is_some_and(|v| v >= 2)
+        && info
+            .part_size
+            .is_some_and(|v| v >= 8 * 1024 * 1024 && v.is_power_of_two())
+        && info.max_list_refs_page_size.is_some_and(|v| v >= 1)
+}
+
+fn ref_hint(options: CallOptions, ref_name: Option<&str>) -> CallOptions {
+    match ref_name.filter(|name| validate_ref_name(name)) {
+        Some(name) => options.with_header("x-mkit-ref", name),
+        None => options,
+    }
+}
+
+/// A generous termination bound: at most 100,000 pages per listing.
+/// This prevents cyclic cursors from holding a client forever.
+const MAX_LIST_REFS_PAGES: usize = 100_000;
 
 /// Environment variable consulted at [`ConnectTransport::connect`] time for
 /// an optional Bearer token — same name `mkit-transport-http` used
@@ -84,8 +176,10 @@ const CHUNK_SIZE: usize = 800 * 1024;
 pub struct ConnectTransport {
     client: TransportServiceClient<EnvelopeTransport<HttpClient>>,
     executor: TokioExecutor,
-    /// See [`Self::with_atomic_advance`].
-    atomic_advance: bool,
+    server_info: OnceLock<ServerInfoView>,
+    repository: RepositoryIdentity,
+    repository_text: String,
+    origin: String,
     /// Per-call timeout applied to `ListRefs`/`ReadRef`/`UpdateRef`/
     /// `AdvanceRefs`/`PackExists`. See [`Self::with_unary_timeout`].
     unary_timeout: Duration,
@@ -106,7 +200,8 @@ pub struct ConnectTransport {
 impl std::fmt::Debug for ConnectTransport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ConnectTransport")
-            .field("atomic_advance", &self.atomic_advance)
+            .field("server_info", &self.server_info)
+            .field("repository", &self.repository)
             .field("unary_timeout", &self.unary_timeout)
             .field("pack_transfer_timeout", &self.pack_transfer_timeout)
             .finish_non_exhaustive()
@@ -181,17 +276,9 @@ impl ConnectTransport {
     /// variable `mkit-transport-http` reads). A missing variable is fine —
     /// public read endpoints remain accessible.
     ///
-    /// Per SPEC-TRANSPORT-CONNECT §2, every RPC resolves to the FIXED path
-    /// `/mkit.transport.v1.TransportService/<Method>` — the proto carries
-    /// no project field, unlike the retired JSON dialect's
-    /// `/<project>/packs` convention. Any path component on the URL (e.g.
-    /// `mkit+https://host/project`) is therefore discarded when building
-    /// the Connect base URI: only the scheme, host, and port are used. A
-    /// deployment that needs to distinguish projects does so by host
-    /// (subdomain) or a separate deployment entirely, not a URL path — the
-    /// path segment is accepted (for URL-shape consistency with the
-    /// `mkit+file://`/`mkit+s3://` schemes, which DO use it) but currently
-    /// has no effect on the wire.
+    /// RPCs use the fixed `/mkit.transport.v1.TransportService/<Method>`
+    /// paths. The URL path is validated as a repository identity and sent
+    /// as `X-Repository` on every RPC; an empty path names `default`.
     ///
     /// # Errors
     ///
@@ -227,9 +314,11 @@ impl ConnectTransport {
             .ok_or(TransportError::InvalidResponse)?;
         let parsed = Url::parse(stripped).map_err(|_| TransportError::InvalidResponse)?;
         validate_http_scheme(&parsed)?;
+        let repository =
+            repository_identity_from_url(url).map_err(|_| TransportError::InvalidResponse)?;
+        let origin = parsed.origin().ascii_serialization();
 
-        // Authority only — see the doc comment above for why the path is
-        // deliberately dropped.
+        // RPC routes are rooted at the origin; the identity travels in a header.
         let authority = format!(
             "{}://{}",
             parsed.scheme(),
@@ -251,18 +340,9 @@ impl ConnectTransport {
         } else {
             HttpClient::plaintext()
         };
-        let repository = parsed.path().trim_matches('/');
-        let repository = if repository.is_empty() {
-            "default"
-        } else {
-            repository
-        };
-        let transport = EnvelopeTransport::new(
-            transport,
-            signer,
-            parsed.origin().ascii_serialization(),
-            repository.to_owned(),
-        );
+        let repository_text = repository.to_string();
+        let transport =
+            EnvelopeTransport::new(transport, signer, origin.clone(), repository_text.clone());
 
         // The underlying `ClientConfig` default is a defense-in-depth
         // fallback only: every RPC below sets an explicit per-call
@@ -283,7 +363,10 @@ impl ConnectTransport {
         Ok(Self {
             client: TransportServiceClient::new(transport, config),
             executor,
-            atomic_advance: false,
+            server_info: OnceLock::new(),
+            repository,
+            repository_text,
+            origin,
             unary_timeout: UNARY_TIMEOUT,
             pack_transfer_timeout: PACK_TRANSFER_TIMEOUT,
             backoff: BackoffIterator::new,
@@ -318,14 +401,26 @@ impl ConnectTransport {
             base_uri.scheme_str().unwrap_or("http"),
             base_uri.authority().expect("test authority")
         );
-        let config = ClientConfig::new(base_uri).with_default_timeout(Duration::from_secs(10));
+        let repository =
+            repository_identity_from_url(&base_uri.to_string()).expect("test identity");
+        let repository_text = repository.to_string();
+        let config = ClientConfig::new(audience.parse().expect("test origin"))
+            .with_default_timeout(Duration::from_secs(10));
         Self {
             client: TransportServiceClient::new(
-                EnvelopeTransport::new(HttpClient::plaintext(), signer, audience, "default".into()),
+                EnvelopeTransport::new(
+                    HttpClient::plaintext(),
+                    signer,
+                    audience.clone(),
+                    repository_text.clone(),
+                ),
                 config,
             ),
             executor: TokioExecutor::new().expect("tokio runtime for test transport"),
-            atomic_advance: false,
+            server_info: OnceLock::new(),
+            repository,
+            repository_text,
+            origin: audience,
             unary_timeout: UNARY_TIMEOUT,
             pack_transfer_timeout: PACK_TRANSFER_TIMEOUT,
             backoff: test_backoff,
@@ -350,22 +445,37 @@ impl ConnectTransport {
         transport
     }
 
-    /// Declare that the remote deployment's `AdvanceRefs` commits the
-    /// head-and-packmap write as one indivisible transaction, so
-    /// [`Transport::supports_atomic_advance`] should report `true`.
-    ///
-    /// Per SPEC-TRANSPORT-CONNECT §4, the wire itself carries no
-    /// "is this deployment transactional?" negotiation — either the
-    /// deployment documents its guarantee out-of-band, or (as here) the
-    /// caller records it via configuration. Defaults to `false`: an
-    /// unconfigured transport never claims atomicity it cannot verify,
-    /// which per `Transport::supports_atomic_advance`'s doc comment is the
-    /// safe default (callers must never request a packmap reset against a
-    /// transport that returns `false`).
-    #[must_use]
-    pub fn with_atomic_advance(mut self, atomic: bool) -> Self {
-        self.atomic_advance = atomic;
-        self
+    /// Discover and cache deployment capabilities for this instance's lifetime.
+    /// Legacy and failed discovery stay conservative, even if the server changes.
+    pub fn server_info(&self) -> &ServerInfoView {
+        self.server_info.get_or_init(|| {
+            self.retrying(|| {
+                self.executor.block_on(async {
+                    match self
+                        .client
+                        .get_server_info_with_options(
+                            GetServerInfoRequest::default(),
+                            CallOptions::default().with_timeout(self.unary_timeout),
+                        )
+                        .await
+                    {
+                        Ok(response) => {
+                            let info = response.into_owned();
+                            Ok(if valid_server_info(&info) {
+                                ServerInfoView::V2(Box::new(info))
+                            } else {
+                                ServerInfoView::Unknown
+                            })
+                        }
+                        Err(e) if e.code == connectrpc::ErrorCode::Unimplemented => {
+                            Ok(ServerInfoView::Legacy)
+                        }
+                        Err(e) => Err(map_connect_error(e, ErrorContext::Ref)),
+                    }
+                })
+            })
+            .unwrap_or(ServerInfoView::Unknown)
+        })
     }
 
     /// Override the per-call timeout applied to cheap unary RPCs
@@ -388,6 +498,120 @@ impl ConnectTransport {
     pub fn with_pack_transfer_timeout(mut self, timeout: Duration) -> Self {
         self.pack_transfer_timeout = timeout;
         self
+    }
+
+    fn download_pack_with_hint(
+        &self,
+        key: &PackKey,
+        ref_name: Option<&str>,
+    ) -> TransportResult<Vec<u8>> {
+        // `block_on_local`, not `block_on`: see its doc comment — the
+        // server-streaming `.message()` read here hits a rustc HRTB/GAT
+        // limitation against the `Send`-bound trait method, not an actual
+        // thread-safety issue.
+        //
+        // The whole stream (request through final chunk) is re-issued from
+        // scratch on every retry attempt — a partially-read stream from a
+        // failed prior attempt is never resumed.
+        self.retrying(|| {
+            self.executor.block_on_local(async {
+                let options = ref_hint(
+                    CallOptions::default().with_timeout(self.pack_transfer_timeout),
+                    ref_name,
+                );
+                let mut stream = self
+                    .client
+                    .download_pack_with_options(
+                        DownloadPackRequest {
+                            pack_id: Some(key.as_bytes().to_vec()),
+                            ..Default::default()
+                        },
+                        options,
+                    )
+                    .await
+                    .map_err(|e| map_connect_error(e, ErrorContext::Ref))?;
+
+                let first = stream
+                    .message()
+                    .await
+                    .map_err(|e| map_connect_error(e, ErrorContext::Ref))?
+                    .ok_or(TransportError::InvalidResponse)?;
+                let total_bytes = match first.to_owned_message().body {
+                    Some(DownloadBody::Header(h)) => h.total_bytes.unwrap_or(0),
+                    _ => return Err(TransportError::InvalidResponse),
+                };
+                if total_bytes > PACK_BODY_LIMIT {
+                    return Err(TransportError::PayloadTooLarge(
+                        usize::try_from(total_bytes).unwrap_or(usize::MAX),
+                    ));
+                }
+
+                let mut buf: Vec<u8> = Vec::with_capacity(
+                    usize::try_from(total_bytes).unwrap_or(PACK_BODY_LIMIT_USIZE),
+                );
+                loop {
+                    let next = stream
+                        .message()
+                        .await
+                        .map_err(|e| map_connect_error(e, ErrorContext::Ref))?
+                        .ok_or(TransportError::InvalidResponse)?;
+                    match next.to_owned_message().body {
+                        Some(DownloadBody::Chunk(c)) => {
+                            let offset = c.offset.unwrap_or(0);
+                            if offset != buf.len() as u64 {
+                                return Err(TransportError::InvalidResponse);
+                            }
+                            let data = c.data.unwrap_or_default();
+                            if buf.len().saturating_add(data.len()) > PACK_BODY_LIMIT_USIZE {
+                                return Err(TransportError::PayloadTooLarge(
+                                    buf.len() + data.len(),
+                                ));
+                            }
+                            buf.extend_from_slice(&data);
+                            if c.last.unwrap_or(false) {
+                                break;
+                            }
+                        }
+                        _ => return Err(TransportError::InvalidResponse),
+                    }
+                }
+                if buf.len() as u64 != total_bytes {
+                    return Err(TransportError::InvalidResponse);
+                }
+                Ok(buf)
+            })
+        })
+    }
+
+    fn pack_exists_with_hint(
+        &self,
+        key: &PackKey,
+        ref_name: Option<&str>,
+    ) -> TransportResult<bool> {
+        self.retrying(|| {
+            self.executor.block_on(async {
+                let options = ref_hint(
+                    CallOptions::default().with_timeout(self.unary_timeout),
+                    ref_name,
+                );
+                let response = self
+                    .client
+                    .pack_exists_with_options(
+                        PackExistsRequest {
+                            pack_id: Some(key.as_bytes().to_vec()),
+                            ..Default::default()
+                        },
+                        options,
+                    )
+                    .await
+                    .map_err(|e| map_connect_error(e, ErrorContext::Ref));
+                match response {
+                    Ok(resp) => Ok(resp.into_owned().exists.unwrap_or(false)),
+                    Err(TransportError::PackNotFound) => Ok(false),
+                    Err(e) => Err(e),
+                }
+            })
+        })
     }
 
     /// Drive `op` through the standard 5-attempt backoff ladder shared by
@@ -519,100 +743,27 @@ impl Transport for ConnectTransport {
     }
 
     fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
-        // `block_on_local`, not `block_on`: see its doc comment — the
-        // server-streaming `.message()` read here hits a rustc HRTB/GAT
-        // limitation against the `Send`-bound trait method, not an actual
-        // thread-safety issue.
-        //
-        // The whole stream (request through final chunk) is re-issued from
-        // scratch on every retry attempt — a partially-read stream from a
-        // failed prior attempt is never resumed.
-        self.retrying(|| {
-            self.executor.block_on_local(async {
-                let options = CallOptions::default().with_timeout(self.pack_transfer_timeout);
-                let mut stream = self
-                    .client
-                    .download_pack_with_options(
-                        DownloadPackRequest {
-                            pack_id: Some(key.as_bytes().to_vec()),
-                            ..Default::default()
-                        },
-                        options,
-                    )
-                    .await
-                    .map_err(|e| map_connect_error(e, ErrorContext::Ref))?;
+        self.download_pack_with_hint(key, None)
+    }
 
-                let first = stream
-                    .message()
-                    .await
-                    .map_err(|e| map_connect_error(e, ErrorContext::Ref))?
-                    .ok_or(TransportError::InvalidResponse)?;
-                let total_bytes = match first.to_owned_message().body {
-                    Some(DownloadBody::Header(h)) => h.total_bytes.unwrap_or(0),
-                    _ => return Err(TransportError::InvalidResponse),
-                };
-                if total_bytes > PACK_BODY_LIMIT {
-                    return Err(TransportError::PayloadTooLarge(
-                        usize::try_from(total_bytes).unwrap_or(usize::MAX),
-                    ));
-                }
+    fn download_pack_via_ref(&self, key: &PackKey, ref_name: &str) -> TransportResult<Vec<u8>> {
+        self.download_pack_with_hint(key, Some(ref_name))
+    }
 
-                let mut buf: Vec<u8> = Vec::with_capacity(
-                    usize::try_from(total_bytes).unwrap_or(PACK_BODY_LIMIT_USIZE),
-                );
-                loop {
-                    let next = stream
-                        .message()
-                        .await
-                        .map_err(|e| map_connect_error(e, ErrorContext::Ref))?
-                        .ok_or(TransportError::InvalidResponse)?;
-                    match next.to_owned_message().body {
-                        Some(DownloadBody::Chunk(c)) => {
-                            let offset = c.offset.unwrap_or(0);
-                            if offset != buf.len() as u64 {
-                                return Err(TransportError::InvalidResponse);
-                            }
-                            let data = c.data.unwrap_or_default();
-                            if buf.len().saturating_add(data.len()) > PACK_BODY_LIMIT_USIZE {
-                                return Err(TransportError::PayloadTooLarge(
-                                    buf.len() + data.len(),
-                                ));
-                            }
-                            buf.extend_from_slice(&data);
-                            if c.last.unwrap_or(false) {
-                                break;
-                            }
-                        }
-                        _ => return Err(TransportError::InvalidResponse),
-                    }
-                }
-                if buf.len() as u64 != total_bytes {
-                    return Err(TransportError::InvalidResponse);
-                }
-                Ok(buf)
-            })
-        })
+    fn download_blob_via_ref(&self, key: &PackKey, ref_name: &str) -> TransportResult<Vec<u8>> {
+        self.download_pack_via_ref(key, ref_name)
     }
 
     fn pack_exists(&self, key: &PackKey) -> TransportResult<bool> {
-        self.retrying(|| {
-            self.executor.block_on(async {
-                let options = CallOptions::default().with_timeout(self.unary_timeout);
-                let resp = self
-                    .client
-                    .pack_exists_with_options(
-                        PackExistsRequest {
-                            pack_id: Some(key.as_bytes().to_vec()),
-                            ..Default::default()
-                        },
-                        options,
-                    )
-                    .await
-                    .map_err(|e| map_connect_error(e, ErrorContext::Ref))?
-                    .into_owned();
-                Ok(resp.exists.unwrap_or(false))
-            })
-        })
+        self.pack_exists_with_hint(key, None)
+    }
+
+    fn pack_exists_via_ref(&self, key: &PackKey, ref_name: &str) -> TransportResult<bool> {
+        self.pack_exists_with_hint(key, Some(ref_name))
+    }
+
+    fn repository_address(&self) -> Option<(&str, &str)> {
+        Some((&self.repository_text, &self.origin))
     }
 
     fn update_ref(
@@ -649,7 +800,7 @@ impl Transport for ConnectTransport {
         self.retrying(|| {
             self.executor.block_on(async {
                 let options = CallOptions::default().with_timeout(self.unary_timeout);
-                let resp = self
+                let response = self
                     .client
                     .read_ref_with_options(
                         ReadRefRequest {
@@ -659,8 +810,12 @@ impl Transport for ConnectTransport {
                         options,
                     )
                     .await
-                    .map_err(|e| map_connect_error(e, ErrorContext::Ref))?
-                    .into_owned();
+                    .map_err(|e| map_connect_error(e, ErrorContext::Ref));
+                let resp = match response {
+                    Ok(resp) => resp.into_owned(),
+                    Err(TransportError::PackNotFound) => return Ok(None),
+                    Err(e) => return Err(e),
+                };
                 if resp.exists.unwrap_or(false) {
                     let id = resp.object_id.ok_or(TransportError::InvalidResponse)?;
                     Ok(Some(bytes_to_hash(&id)?))
@@ -672,34 +827,57 @@ impl Transport for ConnectTransport {
     }
 
     fn list_refs(&self, prefix: &str) -> TransportResult<Vec<Ref>> {
-        self.retrying(|| {
-            self.executor.block_on(async {
-                let options = CallOptions::default().with_timeout(self.unary_timeout);
-                let resp = self
-                    .client
-                    .list_refs_with_options(
-                        ListRefsRequest {
-                            prefix: Some(prefix.to_owned()),
-                            ..Default::default()
-                        },
-                        options,
-                    )
-                    .await
-                    .map_err(|e| map_connect_error(e, ErrorContext::Ref))?
-                    .into_owned();
-                resp.refs
-                    .into_iter()
-                    .map(|e| {
-                        let name = e.name.ok_or(TransportError::InvalidResponse)?;
-                        let object_id = e.object_id.ok_or(TransportError::InvalidResponse)?;
-                        Ok(Ref {
-                            name,
-                            hash: Some(bytes_to_hash(&object_id)?),
-                        })
+        let mut refs: Vec<Ref> = Vec::new();
+        let mut page_token = None;
+        for _ in 0..MAX_LIST_REFS_PAGES {
+            let response = self.retrying(|| {
+                self.executor.block_on(async {
+                    self.client
+                        .list_refs_with_options(
+                            ListRefsRequest {
+                                prefix: Some(prefix.to_owned()),
+                                page_token: page_token.clone(),
+                                // The server chooses its configured page cap (R-105).
+                                ..Default::default()
+                            },
+                            CallOptions::default().with_timeout(self.unary_timeout),
+                        )
+                        .await
+                        .map(|r| r.into_owned())
+                        .map_err(|e| map_connect_error(e, ErrorContext::Ref))
+                })
+            })?;
+            let page: Vec<Ref> = response
+                .refs
+                .into_iter()
+                .map(|entry| {
+                    Ok(Ref {
+                        name: entry.name.ok_or(TransportError::InvalidResponse)?,
+                        hash: Some(bytes_to_hash(
+                            &entry.object_id.ok_or(TransportError::InvalidResponse)?,
+                        )?),
                     })
-                    .collect()
-            })
-        })
+                })
+                .collect::<TransportResult<_>>()?;
+            if let (Some(last), Some(first)) = (refs.last(), page.first())
+                && first.name <= last.name
+            {
+                return Err(TransportError::InvalidResponse);
+            }
+            if page.windows(2).any(|pair| pair[0].name >= pair[1].name) {
+                return Err(TransportError::InvalidResponse);
+            }
+            refs.extend(page);
+            let next = response.next_page_token.filter(|token| !token.is_empty());
+            if next.is_none() {
+                return Ok(refs);
+            }
+            if next == page_token {
+                return Err(TransportError::InvalidResponse);
+            }
+            page_token = next;
+        }
+        Err(TransportError::InvalidResponse)
     }
 
     fn advance_refs(
@@ -750,7 +928,7 @@ impl Transport for ConnectTransport {
     }
 
     fn supports_atomic_advance(&self) -> bool {
-        self.atomic_advance
+        matches!(self.server_info(), ServerInfoView::V2(info) if info.atomic_advance == Some(true))
     }
 }
 
@@ -785,7 +963,7 @@ mod tests {
     #[test]
     fn connect_accepts_plain_http_for_loopback() {
         let t = ConnectTransport::connect("mkit+http://127.0.0.1:9/proj").unwrap();
-        assert!(!t.atomic_advance);
+        assert!(t.server_info.get().is_none());
     }
 
     #[test]
@@ -795,7 +973,7 @@ mod tests {
         // feature is linked in the process (mkit#701) — this exercises
         // exactly that path. Construction does not make a network call.
         let t = ConnectTransport::connect("mkit+https://example.invalid/proj").unwrap();
-        assert!(!t.atomic_advance);
+        assert!(t.server_info.get().is_none());
     }
 
     #[test]
@@ -806,8 +984,7 @@ mod tests {
         // prefix on the Connect base URI (mkit#701 regression: an earlier
         // version of this code folded the path in, breaking every call
         // against a server mounted at the standard root path).
-        let t =
-            ConnectTransport::connect("mkit+https://example.invalid/some/project/path").unwrap();
+        let t = ConnectTransport::connect("mkit+https://example.invalid/myproj").unwrap();
         assert_eq!(
             t.client.config().base_uri().to_string(),
             "https://example.invalid/"
@@ -815,11 +992,60 @@ mod tests {
     }
 
     #[test]
-    fn with_atomic_advance_sets_the_flag() {
-        let t = ConnectTransport::connect("mkit+http://127.0.0.1:9/proj")
-            .unwrap()
-            .with_atomic_advance(true);
-        assert!(t.supports_atomic_advance());
+    fn test_constructor_routes_at_origin_and_keeps_identity() {
+        let t = ConnectTransport::connect_for_test("http://127.0.0.1:9/myproj".parse().unwrap());
+        assert_eq!(
+            t.client.config().base_uri().to_string(),
+            "http://127.0.0.1:9/"
+        );
+        assert_eq!(
+            t.repository_address(),
+            Some(("myproj", "http://127.0.0.1:9"))
+        );
+    }
+
+    #[test]
+    fn url_identity_table_preserves_literal_paths() {
+        let ns = format!("ed25519-{}", "ab".repeat(32));
+        for (path, expected) in [
+            ("".to_owned(), "default".to_owned()),
+            ("/".into(), "default".into()),
+            ("/myproj".into(), "myproj".into()),
+            (format!("/{ns}/name"), format!("{ns}/name")),
+            (format!("/{ns}/name/"), format!("{ns}/name")),
+        ] {
+            let url = format!("mkit+https://example.invalid{path}");
+            assert_eq!(
+                repository_identity_from_url(&url).unwrap().to_string(),
+                expected
+            );
+        }
+        for path in [
+            "/ns/name".to_owned(),
+            "/Upper".into(),
+            "/a%62".into(),
+            format!("/{ns}//name"),
+            "/name?q=1".into(),
+            "/name#frag".into(),
+            format!("/{ns}/{}", "a".repeat(101)),
+            "/a/../name".into(),
+            "/a\\name".into(),
+            "/a/%2e%2e/name".into(),
+        ] {
+            let url = format!("mkit+https://example.invalid{path}");
+            assert!(repository_identity_from_url(&url).is_err(), "{url}");
+            assert!(matches!(
+                ConnectTransport::connect(&url),
+                Err(TransportError::InvalidResponse)
+            ));
+        }
+        assert!(repository_identity_from_url("not a url").is_err());
+        assert_eq!(
+            repository_identity_from_url("mkit+https://example.invalid/name?#")
+                .unwrap()
+                .name(),
+            "name"
+        );
     }
 
     // -- per-verb-class timeouts (mkit#798) ------------------------------

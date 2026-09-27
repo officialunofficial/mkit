@@ -67,9 +67,24 @@ pub(crate) fn map_connect_error(err: ConnectError, ctx: ErrorContext) -> Transpo
         ErrorCode::ResourceExhausted => TransportError::ServerError {
             status: RESOURCE_EXHAUSTED_STATUS,
         },
-        ErrorCode::Unavailable => TransportError::ServerError {
+        ErrorCode::Unavailable | ErrorCode::Aborted => TransportError::ServerError {
             status: UNAVAILABLE_STATUS,
         },
         _ => TransportError::RemoteError(message()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn aborted_is_retryable() {
+        let err = map_connect_error(
+            ConnectError::new(ErrorCode::Aborted, "in flight"),
+            ErrorContext::Ref,
+        );
+        assert!(matches!(err, TransportError::ServerError { status: 503 }));
+        assert!(mkit_core::protocol::is_retryable(&err));
     }
 }

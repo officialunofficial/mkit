@@ -392,6 +392,12 @@ pub struct PackChunk {
 /// [`is_retryable`] and [`BackoffIterator`] helpers are provided for
 /// implementations that embed the policy.
 pub trait Transport: Send + Sync {
+    /// Repository identity and origin used for remote error context, if available.
+    /// Existing transports carry no addressing context by default.
+    fn repository_address(&self) -> Option<(&str, &str)> {
+        None
+    }
+
     /// Upload a pack. The digest is computed by the caller (BLAKE3 of
     /// the full pack bytes) and used as the object key — servers MAY
     /// dedupe on this key.
@@ -402,6 +408,11 @@ pub trait Transport: Send + Sync {
     /// Returns [`TransportError::PackNotFound`] if the remote does not
     /// hold this digest.
     fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>>;
+
+    /// Download a pack with a read-your-writes ref hint. Defaults to ignoring it.
+    fn download_pack_via_ref(&self, key: &PackKey, _ref_name: &str) -> TransportResult<Vec<u8>> {
+        self.download_pack(key)
+    }
 
     /// Upload a pack by streaming bounded-size [`PackChunk`]s instead of
     /// requiring the whole pack materialized as one `&[u8]` up front.
@@ -509,6 +520,11 @@ pub trait Transport: Send + Sync {
     /// network transports.
     fn pack_exists(&self, key: &PackKey) -> TransportResult<bool>;
 
+    /// Check a pack with a read-your-writes ref hint. Defaults to ignoring it.
+    fn pack_exists_via_ref(&self, key: &PackKey, _ref_name: &str) -> TransportResult<bool> {
+        self.pack_exists(key)
+    }
+
     /// Upload a content-addressed **auxiliary blob** — transfer metadata
     /// that is NOT a packfile (e.g. a packlist chain node, SPEC-PACKFILE is
     /// silent on these). The key is BLAKE3 of `bytes`, exactly like a pack.
@@ -528,6 +544,11 @@ pub trait Transport: Send + Sync {
     /// the remote does not hold this digest.
     fn download_blob(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
         self.download_pack(key)
+    }
+
+    /// Download auxiliary metadata with a ref hint. Defaults to ignoring it.
+    fn download_blob_via_ref(&self, key: &PackKey, _ref_name: &str) -> TransportResult<Vec<u8>> {
+        self.download_blob(key)
     }
 
     /// Unconditional ref write — equivalent to

@@ -57,6 +57,14 @@ pub(crate) fn packmap_ref(branch: &str) -> String {
     format!("refs/mkit/packmap/{branch}")
 }
 
+/// Push and fetch callers may carry a short branch name or its full ref name.
+fn branch_ref_hint(branch: &str) -> String {
+    format!(
+        "refs/heads/{}",
+        branch.strip_prefix("refs/heads/").unwrap_or(branch)
+    )
+}
+
 /// Number of read-modify-write attempts when chaining a new pack onto the
 /// packmap. Each conflict means another pusher advanced the packmap; we
 /// re-read and retry. Exhaustion (sustained contention) aborts the push
@@ -128,13 +136,14 @@ pub(crate) fn rebaseline_depth() -> usize {
 
 /// Download and decode one packlist node by key. Packlist nodes are
 /// auxiliary transfer metadata, not packfiles, so they travel over the
-/// dedicated [`Transport::download_blob`] verb.
+/// dedicated [`Transport::download_blob_via_ref`] verb, with the branch hint.
 fn download_packlist_node(
     tx: &dyn Transport,
     key: Hash,
+    ref_name: &str,
 ) -> Result<transfer::PackListNode, DispatchError> {
     let requested = PackKey::from_hash(key);
-    let bytes = tx.download_blob(&requested)?;
+    let bytes = tx.download_blob_via_ref(&requested, ref_name)?;
     requested.verify_bytes(&bytes)?;
     Ok(transfer::decode_packlist(&bytes)?)
 }
@@ -169,6 +178,7 @@ fn walk_pack_chain(
     let mut pack_count = 0usize;
     let mut seen = std::collections::HashSet::new();
     let mut cursor = Some(head_key);
+    let ref_name = branch_ref_hint(branch);
     while let Some(key) = cursor {
         if crate::signal::is_shutdown() {
             return Err(DispatchError::Interrupted);
@@ -177,7 +187,7 @@ fn walk_pack_chain(
         if !seen.insert(key) || seen.len() > MAX_PACK_CHAIN_DEPTH {
             return Err(invalid());
         }
-        let node = match download_packlist_node(tx, key) {
+        let node = match download_packlist_node(tx, key, &ref_name) {
             Ok(n) => n,
             // A referenced-but-undeliverable / undecodable node = broken
             // chain (distinct from a transient transport error).
@@ -467,7 +477,8 @@ pub(crate) fn advance_packmap(
         };
         let node = transfer::encode_packlist(prev, pack_keys)?;
         let node_key = pack::pack_key(&node);
-        tx.upload_blob(&node, &PackKey::from_hash(node_key))?;
+        tx.upload_blob(&node, &PackKey::from_hash(node_key))
+            .map_err(|error| super::repository_operation_error(tx, error))?;
         // CAS off the packmap's CURRENT value (`prior`), independent of the
         // node's `prev` — a reset still has to win the race for the ref.
         let packmap_condition = match prior {
@@ -477,14 +488,17 @@ pub(crate) fn advance_packmap(
         // Commit the packmap AND the head together (#408). A transactional
         // transport applies both atomically; the default does packmap-then-
         // head — still safe, the head never lands past an unadvanced packmap.
-        match tx.advance_refs(
-            &head_name,
-            head_condition,
-            &tip,
-            &packmap_name,
-            packmap_condition,
-            &node_key,
-        )? {
+        match tx
+            .advance_refs(
+                &head_name,
+                head_condition,
+                &tip,
+                &packmap_name,
+                packmap_condition,
+                &node_key,
+            )
+            .map_err(|error| super::repository_operation_error(tx, error))?
+        {
             AdvanceOutcome::Committed => return Ok(()),
             // Another pusher advanced the packmap under us — re-read and retry.
             AdvanceOutcome::PackmapConflict => {}
@@ -516,7 +530,7 @@ pub(crate) fn commit_head(
         Err(TransportError::RefConflict) => Err(DispatchError::NonFastForwardPush {
             branch: branch.to_owned(),
         }),
-        Err(e) => Err(e.into()),
+        Err(e) => Err(super::repository_operation_error(tx, e)),
     }
 }
 
@@ -991,6 +1005,7 @@ fn download_pack_chain_with_limits(
         packs: Vec::new(),
         bytes: 0,
     };
+    let ref_name = branch_ref_hint(branch);
     for &pk in chain {
         if crate::signal::is_shutdown() {
             return Err(DispatchError::Interrupted);
@@ -999,7 +1014,7 @@ fn download_pack_chain_with_limits(
         if applied.contains(&key) {
             continue;
         }
-        let pack = match tx.download_pack(&key) {
+        let pack = match tx.download_pack_via_ref(&key, &ref_name) {
             Ok(b) => b,
             Err(TransportError::PackNotFound) => {
                 return Err(DispatchError::AdvertisedPackMissing {
@@ -1155,7 +1170,7 @@ mod tests {
         let key = hash::hash(&a);
         tx.upload_blob(&b, &PackKey::from_hash(key)).unwrap();
         assert!(matches!(
-            download_packlist_node(&tx, key),
+            download_packlist_node(&tx, key, "refs/heads/main"),
             Err(DispatchError::Transport(TransportError::InvalidResponse))
         ));
     }

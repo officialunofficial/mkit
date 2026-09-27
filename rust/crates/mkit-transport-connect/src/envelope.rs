@@ -84,6 +84,12 @@ fn requires_stream_write_auth(procedure: &str) -> bool {
     procedure.ends_with("/UploadPack")
 }
 
+/// Every current procedure carries repository addressing. M2 will exclude
+/// GetGrantEpoch/SetGrantEpoch, which carry no repository (STC §7.4).
+fn carries_repository(_procedure: &str) -> bool {
+    true
+}
+
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -106,8 +112,8 @@ fn insert_header(headers: &mut HeaderMap, name: &'static str, value: &str) -> Re
 }
 
 /// [`ClientTransport`] wrapper that signs write RPCs with a write envelope
-/// before delegating to `inner`. Reads and, when `signer` is `None`, every
-/// call pass through unchanged — this is the SAME transport type used
+/// before delegating to `inner`. Every call carries repository addressing; reads and unsigned
+/// calls require no signing — this is the SAME transport type used
 /// whether or not envelope auth is configured, so the bearer-token-only
 /// path (`ConnectTransport::connect`, #700/#701) pays no signing overhead
 /// beyond one `Option` check per call.
@@ -117,6 +123,7 @@ pub struct EnvelopeTransport<T> {
     signer: Option<Arc<dyn EnvelopeSigner>>,
     audience: String,
     repository: String,
+    repository_header: Result<HeaderValue, String>,
 }
 
 impl<T> EnvelopeTransport<T> {
@@ -126,11 +133,14 @@ impl<T> EnvelopeTransport<T> {
         audience: String,
         repository: String,
     ) -> Self {
+        let repository_header = HeaderValue::from_str(&repository)
+            .map_err(|e| format!("invalid x-repository header value: {e}"));
         Self {
             inner,
             signer,
             audience,
             repository,
+            repository_header,
         }
     }
 }
@@ -171,8 +181,18 @@ impl<T: ClientTransport> ClientTransport for EnvelopeTransport<T> {
 
     fn send(
         &self,
-        request: Request<ClientBody>,
+        mut request: Request<ClientBody>,
     ) -> BoxFuture<'static, Result<Response<Self::ResponseBody>, Self::Error>> {
+        if carries_repository(request.uri().path()) {
+            let header = match &self.repository_header {
+                Ok(header) => header.clone(),
+                Err(error) => {
+                    let error = error.clone();
+                    return Box::pin(async move { Err(EnvelopeTransportError::Sign(error)) });
+                }
+            };
+            request.headers_mut().insert("x-repository", header);
+        }
         let inner = self.inner.clone();
         let audience = self.audience.clone();
         let repository = self.repository.clone();
@@ -559,6 +579,7 @@ mod tests {
                 "/mkit.transport.v1.TransportService/ReadRef",
                 "/mkit.transport.v1.TransportService/PackExists",
                 "/mkit.transport.v1.TransportService/DownloadPack",
+                "/mkit.transport.v1.TransportService/GetServerInfo",
             ] {
                 let req = build_request(procedure, b"read-body");
                 futures::executor::block_on(transport.send(req)).expect("send ok");
@@ -568,7 +589,77 @@ mod tests {
                     "{procedure} must not be signed"
                 );
                 assert!(got.headers.get(header::SIGNATURE).is_none());
+                assert_eq!(got.headers["x-repository"], "default");
             }
+        }
+
+        #[test]
+        fn repository_is_present_without_signer_on_every_read() {
+            let captured = Arc::new(Mutex::new(None));
+            let transport = EnvelopeTransport::new(
+                CapturingTransport {
+                    captured: captured.clone(),
+                },
+                None,
+                "https://example.invalid".into(),
+                "default".into(),
+            );
+            for method in [
+                "ListRefs",
+                "ReadRef",
+                "PackExists",
+                "DownloadPack",
+                "GetServerInfo",
+            ] {
+                let procedure = format!("/mkit.transport.v1.TransportService/{method}");
+                let mut req = build_request(&procedure, b"read-body");
+                req.headers_mut()
+                    .insert("x-repository", HeaderValue::from_static("wrong"));
+                futures::executor::block_on(transport.send(req)).unwrap();
+                let got = captured.lock().unwrap().take().unwrap();
+                assert_eq!(got.headers["x-repository"], "default");
+                assert_eq!(got.headers.get_all("x-repository").iter().count(), 1);
+            }
+        }
+
+        #[test]
+        fn ref_hint_is_excluded_from_signed_canonical_string() {
+            let captured = Arc::new(Mutex::new(None));
+            let transport = EnvelopeTransport::new(
+                CapturingTransport {
+                    captured: captured.clone(),
+                },
+                Some(Arc::new(DalekSigner(SigningKey::from_bytes(&[9; 32])))),
+                "https://example.invalid".into(),
+                "default".into(),
+            );
+            let procedure = "/mkit.transport.v1.TransportService/UpdateRef";
+            let mut req = build_request(procedure, b"write-body");
+            req.headers_mut()
+                .insert("x-mkit-ref", HeaderValue::from_static("refs/heads/main"));
+            futures::executor::block_on(transport.send(req)).unwrap();
+            let mut got = captured.lock().unwrap().take().unwrap();
+            assert_eq!(got.headers["x-mkit-ref"], "refs/heads/main");
+            assert_eq!(got.headers.get_all("x-repository").iter().count(), 1);
+            assert!(verify_unary_from_headers(
+                procedure,
+                &got.headers,
+                &got.body
+            ));
+            got.headers
+                .insert("x-mkit-ref", HeaderValue::from_static("refs/heads/other"));
+            assert!(verify_unary_from_headers(
+                procedure,
+                &got.headers,
+                &got.body
+            ));
+            got.headers
+                .insert("x-repository", HeaderValue::from_static("other"));
+            assert!(!verify_unary_from_headers(
+                procedure,
+                &got.headers,
+                &got.body
+            ));
         }
 
         #[test]
@@ -591,6 +682,7 @@ mod tests {
             futures::executor::block_on(transport.send(req)).expect("send ok");
             let got = captured.lock().unwrap().take().expect("request captured");
             assert!(got.headers.get(header::PUBLIC_KEY).is_none());
+            assert_eq!(got.headers["x-repository"], "default");
         }
     }
 }
