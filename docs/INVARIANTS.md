@@ -595,3 +595,22 @@ incompatible carriers.
 `mkit_core::verify::closure::tests::delta_pack_is_profile_violation`,
 and `rust/tests/golden/closure/neg_delta_entry.*` /
 `neg_compressed_entry.*`.
+
+## Pack unpack bounds owned payload residency
+
+**Always:** unpack charges decompressed payloads, delta targets and cached store
+bases before allocation against `max(2 × MAX_RAW_OBJECT_SIZE, 16 × pack_len)`.
+Raw wire payloads stay borrowed; a base is released after its final delta use.
+Decompression writes into reserved capacity without initializing the claimed
+size first. Raw staging skips positions after its earliest permanent failure;
+transient worker admission failures are retried strictly in pack order.
+Framing arithmetic rejects out-of-bounds lengths on native and wasm32 hosts.
+
+**Because:** authenticated or malicious packs must not exhaust memory through
+entry decompression or retained delta targets.
+
+**If violated:** fetch, clone, pull or wasm pack verification can deny service.
+
+**Enforced by:** `pack::tests` resident-peak, bomb, retention-equivalence and
+maximum-wire-length regressions; live wasm framing tests in
+`apps/web/src/lib/mkit.test.ts`.
