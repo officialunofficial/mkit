@@ -1212,3 +1212,21 @@ entry decompression or retained delta targets.
 **Enforced by:** `pack::tests` resident-peak, bomb, retention-equivalence and
 maximum-wire-length regressions; live wasm framing tests in
 `apps/web/src/lib/mkit.test.ts`.
+
+## Inspection clearance bounds every reader surface (specified, implementation pending)
+
+**Always:** readers and anonymous callers see only published ref values and
+published repository membership. Every newly reachable file object and every
+file entry in a pack added by an advance is inspected; a later pass cannot skip
+an earlier held or pending advance. A reused pack from another pending advance
+cannot satisfy published membership, even through `X-Mkit-Ref`.
+
+**Because:** whole-pack downloads, HTTP, URL tokens, snapshots and caches must
+not expose uninspected or uncleared content, including surplus pack entries.
+
+**If violated:** a reader can bypass quarantine through an alternate serving
+surface or another ref that reuses pending content.
+
+**Enforced by:** normative SPEC-SERVER §§10–11 (WP-5.1a-2 amendment 1).
+Runtime enforcement and behavioral conformance remain for WP-5.4/5.5/5.13;
+the current goldens verify the additive hook wire contract only.

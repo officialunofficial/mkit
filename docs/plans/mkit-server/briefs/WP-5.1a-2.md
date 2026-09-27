@@ -136,3 +136,25 @@ It also corrects today's §6.4 and §8 text, which contradicts D18/D28.
 - `bash scripts/check-server-hooks-goldens.sh`
 - `just ci-server`
 - the wasm32 check of `mkit-server`
+
+## Amendment 1 (orchestrator resolution, fixed Section B)
+
+- **B.9:** The inspected set is the union of every newly reachable file object
+  and every file entry of every pack the advance adds to repository membership,
+  reachable or not. File objects include plain blobs of any size, ChunkedBlob
+  manifests and chunks. Apply the same set in sync and async phases; do not
+  reject surplus entries or narrow the original decision.
+- **B.10:** Any inspector requires indexed mode. Refuse startup with either sync
+  or async inspection in opaque mode; §6.4 identifies decoded pack entries.
+- **B.11:** Own inspection and pack dependencies must pass. A listed pack is
+  eligible if already published or added by this advance itself. Clearance
+  atomically publishes own added membership and published ref value; an
+  unpublished pack added by another advance blocks clearance.
+- **B.12:** Cleared starts publish in the same apply; synchronous holds retain
+  the previous published value. Published equals live only while no held or
+  pending advance blocks the ref. Sync-only deployments retain a published view.
+
+The original escalation is resolved by these decisions. Delete the escalation
+file in the final diff and preserve its content in the PR body under
+“Escalation resolved (amendment 1)”. Escalate again only for a concrete reader
+surface that can observe uninspected or uncleared content after B.9–B.12.

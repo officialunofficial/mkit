@@ -411,6 +411,8 @@ impl From<ServerInfo> for GetServerInfoResponse {
             namespace_policy: Some(info.namespace_policy.into()),
             index_fanout: Some(info.index_fanout),
             max_delta_chain_depth: Some(info.max_delta_chain_depth),
+            // Inspection is specified but not implemented yet (WP-5.1a-2).
+            async_inspection: Some(false),
             __buffa_unknown_fields: buffa::UnknownFields::default(),
         }
     }

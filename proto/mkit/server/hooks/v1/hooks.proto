@@ -212,7 +212,7 @@ message Challenge {
 message InspectRequest {
   // Verified operation whose content is inspected; SPEC-SERVER §6.4.
   Operation operation = 1;
-  // Every newly reachable file object; bytes use a private channel; SPEC-SERVER §11.1.
+  // Newly reachable files plus every file entry of added packs; SPEC-SERVER §11.1.
   repeated InspectObject objects = 2;
   // PRE_RECEIVE at stage 5 or QUARANTINE at stage 9; SPEC-SERVER §11.1.
   InspectPhase phase = 3;
@@ -265,7 +265,7 @@ message InspectResponse {
     // Re-poll an asynchronous inspection; invalid in PRE_RECEIVE; SPEC-SERVER §11.3.
     InspectDefer defer = 4;
   }
-  // Raw 32-byte object ids, meaningful only with reject or quarantine; SPEC-SERVER §6.4.
+  // Raw 32-byte ids from the inspected set, only with reject or quarantine; SPEC-SERVER §6.4.
   repeated bytes flagged_objects = 5;
 }
 

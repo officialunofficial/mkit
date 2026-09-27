@@ -187,7 +187,7 @@ headers or a bearer token. The response MAY be cached with
 | `part_size` | The part size for resumable uploads (§7.6): a power of two, at least 8 MiB. |
 | `max_parts` | The largest number of parts in one upload (§7.6). |
 | `max_list_refs_page_size` | The largest number of refs one `ListRefs` page returns (§7.9). |
-| `begin_upload_threshold_bytes` | Packs smaller than this MAY skip `BeginUpload` (§7.6). It is `0` on every multi-repository deployment and whenever `admission` is true. On a single-repository deployment without admission, the value is deployment-defined. |
+| `begin_upload_threshold_bytes` | Packs smaller than this MAY skip `BeginUpload` (§7.6). It is `0` on every multi-repository deployment, whenever `admission` is true, and with any inspector configured (SPEC-SERVER §11.1). On a single-repository deployment without admission or inspection, the value is deployment-defined. |
 | `atomic_advance` | Whether `AdvanceRefs` commits the head and packmap atomically (§4). |
 | `indexed_mode` | Whether the deployment decodes and verifies pushed packs before refs move. |
 | `admission` | Whether the deployment runs an admission step that can challenge a request (§5.1). When it is true, `begin_upload_threshold_bytes` is `0`. |
@@ -196,6 +196,7 @@ headers or a bearer token. The response MAY be cached with
 | `namespace_policy` | `allowlist`, `any`, or `single-repository` (§7.5). `single-repository` is advertised, never configured. |
 | `index_fanout` | The fixed object-id-prefix fan-out of the deployment's repository index (§7.9). The default is 4096. |
 | `max_delta_chain_depth` | Delta-chain depth cap (SPEC-SERVER §9.8), default 50 in indexed mode; `0` when indexed mode is off. |
+| `async_inspection` | Whether any asynchronous inspector is configured (SPEC-SERVER §10–§11). When true, writers must sign reads to see pending content. False does not bypass synchronous quarantine. |
 
 A client MUST NOT assume atomic advance without `atomic_advance = true`
 from this call. `atomic_advance` replaces the client-side opt-in of v1
@@ -1261,9 +1262,10 @@ commitment. It sends no `part:` commitment and no `CompleteUpload`.
 `begin_upload_threshold_bytes = 0`: every upload needs a ticket, so
 membership is always recorded in a ref shard. On a single-repository
 deployment, packs under the threshold MAY skip `BeginUpload`; a stored
-pack is a member. When the deployment runs admission, the threshold is
-0. An upload that needs a ticket and carries none is
-`failed_precondition`.
+pack is a member. When the deployment runs admission or configures an
+inspector
+(SPEC-SERVER §11.1), the threshold is 0. An upload that needs a ticket
+and carries none is `failed_precondition`.
 
 **Membership.** On a multi-repository deployment, a pack becomes a
 member of the repository only at the `AdvanceRefs` apply that consumes
@@ -1514,6 +1516,7 @@ Explicitly deferred to sibling issues:
 | Version | Status | Changes |
 |---|---|---|
 | `2` | draft | §7.4 repository addressing; §7.5 namespace and write policy (owner key); `GetServerInfo` (§2.1); §7.6 upload tickets and resumable parts; §7.8 ref deletion; §7.9 consistency and `ListRefs` paging; error-code split between `unauthenticated` and `permission_denied` (§5) (mkit#1084, mkit#1090); SPEC-WRITE-GRANTS (mkit#1085): signed reads and `X-Write-Grant` (§7.1), the M2 RPC rows (§2), and grant cross-references. §5.1 admission challenges: HTTP 402 with `permission_denied` and an opaque challenge list, raw MPP/x402 header pass-through, the header-returning `admission_helper` with its allowlist and hard-reserved set; §7.1 replay lookup after authentication and before authorization and admission, with signed reads outside the ledger; retryable `aborted` for in-flight operations (§5); §7.7 lifecycle per RPC (mkit#1086). The M0 server implementation still resumes an interrupted `UploadPack` through its `in_flight` replay record until M1 tickets land. M1: branch-sharded servers MAY require the canonical `AdvanceRefs` head/packmap pairing (§4; WP-1.22 amendment 1). Indexed mode: PendingVerification polling with a 1,000 ms floor (§5, §7.6), delta-base mapping and self-contained replanning in a new signed operation (§5, §7.6), packlist rebuilding (§7.6), advertised max_delta_chain_depth (§2.1), and the membership-dependent lag window and replay exclusion (§7.1, §7.9; SPEC-SERVER §9.4). |
+| `2` (WP-5.1a-2) | draft | Additive `GetServerInfoResponse.async_inspection = 18` (§2.1); published-view and quarantine rules in SPEC-SERVER §10–§11 (WP-5.1a-2). |
 | `1` | draft | Initial `mkit.transport.v1` proto: 7 wire RPCs covering every `Transport` trait verb (§2), `PackChunk` reused byte-for-byte from `ssh.proto`, `RefExpectation`/`RefEntry` duplicated with pinned wire numbers pending mkit#679's shared-proto extraction. |
 
 ---
