@@ -36,7 +36,35 @@ SPEC-MERKLE-OBJECTS §5 and SPEC-DISCLOSURE; user guide
 commonware-identical (`commonware_storage::bmt::Proof` at the pinned
 train).
 
+### Breaking changes
+
+- *(client)* Remove `ConnectTransport::with_atomic_advance` for the upcoming
+  0.5.0 release. `GetServerInfo` is the sole source of atomic-advance capability
+  (WP-1.16).
+- *(client)* Connect remote URLs whose path is not a repository identity now
+  fail at open with `MalformedUrl`, even against servers that ignore the path:
+  for example `/org/repo`, `/MyRepo`, percent-encoded paths, dot segments, and
+  extra or missing slashes after the scheme. Use an empty path or a lowercase
+  bare name (`mkit+https://host/myproj`) for single-repository servers, and
+  `<ed25519-… | 0x…>/<name>` for namespaced ones (STC §7.4) (WP-1.16).
+
 ### Changed
+
+- *(client)* Validate the remote URL path as a repository identity and carry
+  `X-Repository` on every Connect RPC, including anonymous reads. Empty paths
+  address `default`; reads against a different configured single-repository
+  identity now fail. Repository-not-found errors name the identity and origin.
+- *(client)* Discover and cache atomic advance automatically from
+  `GetServerInfo`, with conservative defaults for legacy or unavailable servers.
+  SQLite and Durable Object pushes may now re-baseline the packmap chain.
+  Concatenate paged `ListRefs` responses with ordering and termination guards.
+- *(core)* Add defaulted `Transport::download_pack_via_ref`,
+  `download_blob_via_ref`, and `pack_exists_via_ref` methods. Connect uses their
+  validated `X-Mkit-Ref` hint for packmap-driven downloads; other transports
+  preserve their existing behavior. Add defaulted `repository_address` for
+  remote error context.
+- *(client)* Retry Connect `aborted` responses as temporary failures (503).
+  Missing ref reads return `None`; missing pack checks return `false`.
 
 - *(server)* Add source-side outbox relay kind 3, ordered target batches,
   persistent per-source `rh` deduplication watermarks, atomic pre-delivery hooks,
