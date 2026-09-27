@@ -293,21 +293,9 @@ fn check_schedule(
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(1_000))]
-    #[test]
-    fn completed_revocation_fences_every_older_planned_write(
-        actions in prop::collection::vec(action_strategy(), 1..500),
-        backend_skew_ms in prop::array::uniform2(-4_999i64..5_000),
-    ) {
-        check_schedule(actions, backend_skew_ms)?;
-    }
-}
-
-proptest! {
     #![proptest_config(ProptestConfig::with_cases(10_000))]
     #[test]
-    #[ignore = "10,000-case protocol exploration exceeds the 30-second debug budget"]
-    fn completed_revocation_fences_every_older_planned_write_10000_cases(
+    fn completed_revocation_fences_every_older_planned_write(
         actions in prop::collection::vec(action_strategy(), 1..500),
         backend_skew_ms in prop::array::uniform2(-4_999i64..5_000),
     ) {
@@ -494,37 +482,28 @@ fn push_then_installed_renewal_then_stale_ack_preserves_extended_lease() {
 
 #[test]
 fn excessive_backend_skew_negative_control_finds_old_epoch_commit() {
-    use proptest::test_runner::{TestError, TestRunner};
+    use proptest::test_runner::{RngSeed, TestError, TestRunner};
 
-    // This run is expected to fail the safety property: a backend lagging by
-    // more than margin can still accept an old deadline at coordinator expiry.
-    // Disable persistence because this is an intentional failing experiment.
+    // Use the same action generator and safety property as the positive run.
+    // A lagging backend can accept an old deadline after coordinator expiry;
+    // positive skew instead rejects writes earlier, so it cannot expose this
+    // violation. Fix the seed and disable persistence for this deliberately
+    // failing experiment; the runner searches until it finds a counterexample.
     let mut runner = TestRunner::new(ProptestConfig {
-        cases: 128,
+        cases: 10_000,
+        rng_seed: RngSeed::Fixed(0),
         failure_persistence: None,
         ..ProptestConfig::default()
     });
-    let result = runner.run(&(5_001i64..10_001), |excessive_lag_ms| {
-        let mut model = Model {
-            backend_skew_ms: [-excessive_lag_ms, 0],
-            ..Model::default()
-        };
-        model.renew(0, true);
-        prop_assert!(!model.apply(0));
-        model.now = LEASE_MS - MARGIN_MS - MIN_BUDGET_MS;
-        model.plan(0);
-        prop_assert_eq!(model.writes.len(), 1);
-        model.epoch = 1;
-        model.now = LEASE_MS;
-        prop_assert!(model.complete());
-        prop_assert!(
-            !model.apply(0),
-            "negative control detected an old-epoch commit after Complete"
-        );
-        Ok(())
+    let strategy = (
+        prop::collection::vec(action_strategy(), 1..500),
+        -10_000i64..=-5_001,
+    );
+    let result = runner.run(&strategy, |(actions, excessive_lag_ms)| {
+        check_schedule(actions, [excessive_lag_ms, 0])
     });
     assert!(
         matches!(result, Err(TestError::Fail(_, _))),
-        "the excessive-skew experiment must find a safety violation: {result:?}"
+        "the generated excessive-skew experiment must find a safety violation: {result:?}"
     );
 }

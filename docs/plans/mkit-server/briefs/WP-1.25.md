@@ -459,3 +459,62 @@ fail its backend deadline. Debug-only `#[should_panic]` regressions with skew
 Continue from local commit `46bb4c4f`, finish the remaining gates, push to PR
 #1150, and record this ruling in the PR body's "Fix round 1" section. Done means
 the fixes are pushed to that PR.
+
+## Fix round 2
+
+The orchestrator's re-review of `aa311adb` confirmed fix round 1 and its amendment,
+including unchanged protocol and store-call counts. Continue in the same branch
+and worktree, push to PR #1150, and record these rulings in its body. Done means
+the fixes are pushed.
+
+### 0. Merge the moved base first
+
+Merge `origin/feat/mkit-server`, including WP-4.4 (`1ec82daa`), WP-1.23a
+(`c805cf7b`), and WP-1.6 (`4ba50b6e`). Keep both sides:
+
+- `RESERVED_TAGS = ["tb", "i", "l", "pp", "vc", TAG_NAMESPACE_LIST]`, without
+  `"rh"` or `"el"`.
+- Timer kinds: 1 `LEASE_SWEEP`, 2 `TICKET_EXPIRY`, 3 `RELAY`.
+- Native registry chains `LeaseSweep` and `RelayHandler`.
+- Worker adapter retains `LeaseSweep` and `TODO(WP-1.23b)`.
+- Keep both CHANGELOG, INVARIANTS and plan additions; order R rows numerically.
+
+### 1. Declared recovery amends fix round 1 amendment 1
+
+After lease-table loss, `mark_lease_table_recovered` declares recovery (R-100).
+A surviving shard `el` may legitimately outlive missing `ls` rows until its old
+expiry; the recovery hold-off covers this. The clock-aware debug assertion from
+fix round 1 amendment 1 must also account for that supported state.
+
+Add `keys::lease_recovery()` to `read_lease`'s existing coordinator `get_many`.
+This remains one call, preserving 2/4/4 write counts. Skip the assertion while
+`now < lr.resumed_at_ms + epoch_lease_ms + lease_margin_ms`. Outside that window,
+retain the assertion and its skew bound.
+
+Port the reviewer's probe to memory and SQLite regressions: write at 0, delete
+`ls`, call `mark_lease_table_recovered`, then write at 24,500. Renewal must commit
+without panic. Probe source:
+`/private/tmp/claude-501/-Users-vitormarthendalnunes-Documents-21-Uno-04-Mkit-mkit/cdfd3c8e-a2c7-4777-b325-7d29f4530525/scratchpad/review-1150b-recovery-assert-probe.patch`.
+
+### 2. Default model lane: 10,000 cases
+
+The reviewer measured 4.1 s for 10,000 cases in a debug build and 0.6 s for 1,000
+inside a full `-j 4` run. Move 10,000 cases into the default lane, remove the
+ignored duplicate and its nextest overrides. If the former 59 s measurement is
+reproducible, document its environment in the PR; keep 10,000 default cases unless
+it exceeds 30 s on a quiet machine. This amends fix round 1's lane choice.
+
+### 3. Generator-driven negative control
+
+Replace or supplement the handwritten negative control with a `TestRunner` over
+the real `vec(action_strategy(), 1..500)` generator and backend skew
+`-10_000..=-5_001`. Assert `TestError::Fail`. Explain the asymmetry: a lagging
+backend can accept an old deadline after coordinator expiry; positive skew
+rejects sooner and does not expose this violation. Preserve fixed schedules and
+the distinction between protocol-model tests and pipeline implementation tests.
+
+### 4. Gates and push
+
+Run four-server-crate nextest, Clippy, wasm32 and native D34 wire gates. Push to
+PR #1150 and add a "Fix round 2" section covering the merge, recovery assertion,
+default model lane, generator negative control and verification results.

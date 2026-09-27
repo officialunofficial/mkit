@@ -99,13 +99,14 @@ impl<N: NamespaceStore> NamespaceStore for TestStore<N> {
     ) -> Result<Vec<Option<Value>>, StoreError> {
         self.record(Call::Many(p.clone(), names.to_vec()));
         let values = self.inner.get_many(p, names).await?;
-        // Single reads nr/rr; D34 folds creation into the nr/rr/e/ls
+        // Single reads nr/rr; D34 folds creation into the nr/rr/e/ls/lr
         // lease snapshot. Both coordinator reads pause after observation.
         if names.first() == Some(&keys::namespace_record()) {
-            assert!(names.len() == 2 || names.len() == 4);
-            if names.len() == 4 {
+            assert!(names.len() == 2 || names.len() == 5);
+            if names.len() == 5 {
                 assert_eq!(names[2], keys::grant_epoch());
                 assert!(names[3].as_bytes().starts_with(b"ls\0"));
+                assert_eq!(names[4], keys::lease_recovery());
             }
             let barrier = self.controls.race.lock().unwrap().clone();
             if let Some(barrier) = barrier

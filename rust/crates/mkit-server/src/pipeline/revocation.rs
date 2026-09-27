@@ -221,8 +221,9 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     }
 
     /// Push and acknowledge at most four live shards in one bounded slice.
-    /// `ls.acked_epoch = n` only if the shard's el durably holds epoch >= n,
-    /// or all older-epoch writes are already past their commit deadline.
+    /// Outside a declared recovery hold-off, `ls.acked_epoch = n` only if the
+    /// shard's el durably holds epoch >= n, or all older-epoch writes are already
+    /// past their commit deadline. Recovery fences surviving copies until then.
     /// Renewal alone never raises a live row's acknowledgement.
     ///
     /// # Errors

@@ -1,9 +1,11 @@
 //! D34 grants are observed before authorization and durably recorded only
 //! after admission. Creation and renewal share one coordinator transaction.
 //!
-//! `ls.acked_epoch = n` means that el durably holds epoch >= n, or every
-//! older-epoch write is already past its deadline. A live renewal preserves
-//! acknowledgement; only a committed revoke push can raise it.
+//! Outside a declared recovery hold-off, `ls.acked_epoch = n` means that el
+//! durably holds epoch >= n, or every older-epoch write is past its deadline.
+//! A live renewal preserves acknowledgement; only a committed revoke push can
+//! raise it. During recovery, a rebuilt missing row can precede shard installation;
+//! the lr hold-off fences completion until every surviving old deadline has passed.
 
 use crate::op::{Creation, Operation};
 use crate::repo::Addressing;
@@ -35,6 +37,7 @@ pub(super) struct CoordinatorLease {
     leased_epoch: u64,
     shard: Option<Value>,
     observed_el: Option<codec::EpochLease>,
+    recovery: Option<codec::LeaseRecovery>,
 }
 
 impl CoordinatorLease {
@@ -104,7 +107,15 @@ fn grant_batch(
         .map(codec::decode_leased_shard)
         .transpose()
         .map_err(meta_error)?;
-    if old.is_none_or(|lease| lease.expires_at_ms <= now) {
+    // A declared recovery can leave a surviving el without its lease-table row.
+    // Completion remains fenced by the same hold-off in revoke_step.
+    let recovering = read.recovery.is_some_and(|lr| {
+        now < lr
+            .resumed_at_ms
+            .saturating_add(cfg.epoch_lease_ms)
+            .saturating_add(cfg.lease_margin_ms)
+    });
+    if !recovering && old.is_none_or(|lease| lease.expires_at_ms <= now) {
         let observed_ls_expires = old.map_or(0, |lease| lease.expires_at_ms);
         // Safety relies on lease_margin_ms exceeding every clock skew
         // (see PipelineConfig::lease_margin_ms).
@@ -221,13 +232,14 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             keys::repo_record(&op.repo.name),
             keys::grant_epoch(),
             keys::leased_shard(&op.repo.name, shard_ref(p)?),
+            keys::lease_recovery(),
         ];
         let rows = self
             .meta
             .get_many(&self.shards.coordinator(&op.repo.namespace), &wanted)
             .await
             .map_err(meta_error)?;
-        let [namespace, repo, epoch, shard] = rows.as_slice() else {
+        let [namespace, repo, epoch, shard, recovery] = rows.as_slice() else {
             return Err(internal("lease get_many returned the wrong row count"));
         };
         if let Some(value) = namespace {
@@ -254,6 +266,11 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .unwrap_or(0),
             shard: shard.clone(),
             observed_el,
+            recovery: recovery
+                .as_ref()
+                .map(codec::decode_lease_recovery)
+                .transpose()
+                .map_err(meta_error)?,
         };
         Ok(read)
     }

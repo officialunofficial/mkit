@@ -1005,8 +1005,9 @@ cancellation must not hide a durable timer from the native driver.
 
 ## Epoch lease acknowledgements describe durable shard state
 
-**Always:** `ls.acked_epoch = n` only if the shard's `el` durably holds epoch
-at least n, or every older-epoch write is already past its backend deadline.
+**Always:** outside a declared recovery hold-off, `ls.acked_epoch = n` only if
+the shard's `el` durably holds epoch at least n, or every older-epoch write is
+already past its backend deadline.
 Live renewals preserve acknowledgement. Revocation pushes even to an absent
 `el`, guards the observed shard value, then acknowledges in a separate guarded
 coordinator batch. Every D34 ref batch guards `el` and starts with
@@ -1019,6 +1020,11 @@ Safety requires `lease_margin_ms` to exceed the maximum skew between every
 pipeline instance clock (grant, renewal and revoke), the sweep driver clock,
 and every backend clock; this deployment assumption is documented, not checked
 by `Pipeline::new`.
+
+During declared recovery, a rebuilt missing `ls` row may acknowledge the current
+epoch before a surviving old `el` is replaced. The persistent `lr` hold-off
+prevents completion for `epoch_lease + margin`, so every surviving old write's
+deadline has passed before revocation can complete.
 
 **Because:** a coordinator acknowledgement before shard installation could
 report completion while a delayed old-epoch batch can still commit. Expiry

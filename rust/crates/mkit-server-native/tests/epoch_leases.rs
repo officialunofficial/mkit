@@ -362,7 +362,7 @@ fn assert_cost(calls: &[Call], expected: usize) {
     );
     if expected == 4 {
         assert!(
-            matches!(&calls[1], Call::Many(Partition::Coordinator(_), ks) if ks.len() == 4 && ks.contains(&keys::grant_epoch()))
+            matches!(&calls[1], Call::Many(Partition::Coordinator(_), ks) if ks.len() == 5 && ks.contains(&keys::grant_epoch()) && ks.contains(&keys::lease_recovery()))
         );
         assert!(
             matches!(&calls[2], Call::Apply(Partition::Coordinator(_), b, BatchOutcome::Committed) if !b.preconditions.iter().any(|p| matches!(p, Precondition::NotAfter(_))))
@@ -1308,3 +1308,52 @@ async fn excessive_sweep_clock_skew_panics_sqlite() {
     )
     .await;
 }
+
+/// Declared table loss can leave a live shard copy ahead of missing ls rows.
+/// The recovery hold-off fences completion while renewal installs a new copy.
+async fn recovered_loss_then_renew<N: NamespaceStore + 'static>(
+    backend: N,
+    clock: Arc<ManualClock>,
+    store_clock: Arc<ManualClock>,
+) {
+    let store = Store::new(backend);
+    let pipe = pipeline(
+        store.clone(),
+        clock.clone(),
+        Arc::new(Faults::default()),
+        Reject::Allow,
+    );
+    let a = auth(&pipe, None);
+    committed(&pipe, &a, REF, 1).await;
+    assert_eq!(el(&store, &a, REF).await.expires_at_ms, 30_000);
+    assert_eq!(
+        store
+            .inner
+            .apply(&coordinator(&a), Batch::new().delete(ls_key(&a, REF)))
+            .await
+            .unwrap(),
+        BatchOutcome::Committed,
+    );
+    pipe.mark_lease_table_recovered(&a.repo().repo.namespace)
+        .await
+        .unwrap();
+    clock.set(24_500);
+    store_clock.set(24_500);
+    store.take();
+    committed(&pipe, &a, REF, 2).await;
+    let calls = store.take();
+    assert_eq!(calls.len(), 4, "{calls:?}");
+    assert_eq!(el(&store, &a, REF).await.expires_at_ms, 54_500);
+    assert_eq!(ls(&store, &a, REF).await.expires_at_ms, 54_500);
+    assert_eq!(
+        pipe.revoke_step(&a.repo().repo.namespace, &RevokeBudget::new(10_000))
+            .await
+            .unwrap(),
+        RevokeProgress::Pending { remaining: 1 },
+    );
+}
+backends!(
+    recovered_loss_renewal_memory,
+    recovered_loss_renewal_sqlite,
+    recovered_loss_then_renew
+);
