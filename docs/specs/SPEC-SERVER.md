@@ -1232,9 +1232,10 @@ initial publication has no circular membership dependency.
 Deletions MUST publish immediately under STC §7.8 and MUST NOT wait for
 inspection. Completion of older work MUST NOT resurrect a deleted ref.
 A deletion establishes a new publication boundary: earlier unfinished
-inspection work cannot change it, and recreation starts a new eligible
-prefix after that deletion. A later recreation still follows this section's
-clearance and pack-dependency rules.
+inspection work cannot change it. After deletion, the eligible prefix is
+evaluated only over later advances; older unfinished advances cannot block
+recreation or publish their values or membership. A later recreation
+still follows this section's clearance and pack-dependency rules.
 
 The published pointer MUST be written in the same apply for advances that
 start `cleared`, including no-inspector or synchronous-pass advances whose
@@ -1269,7 +1270,7 @@ URL tokens MUST resolve in the published view even when issued by a writer
 published one. HTTP serving MUST use visible ref values and visible
 membership from this section before returning object bytes or proofs.
 
-`GetServerInfo.async_inspection` MUST report whether any asynchronous
+`GetServerInfoResponse.async_inspection` MUST report whether any asynchronous
 inspector is configured, independently of repository existence. When true,
 a writer must sign reads to see pending content. A false value does not
 exempt synchronous quarantine from the published-view rules.
