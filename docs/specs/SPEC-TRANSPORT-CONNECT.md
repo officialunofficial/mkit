@@ -946,26 +946,22 @@ Verified live: real `mkit push`/`clone`/`pull` (envelope auth) against a
 local `wrangler dev` instance of `apps/vcs-worker` &mdash; see
 `apps/vcs-worker/README.md` "Known limitations".
 
-One deliberate gap from full HTTP-transport parity: `ConnectTransport::
-supports_atomic_advance()` defaults to `false` (opt in via
-`with_atomic_advance(true)`), where `HttpTransport::
-supports_atomic_advance()` always returned `true`. SPEC-TRANSPORT-CONNECT
-§4 requires a client to only claim atomicity a deployment has actually
-documented; since no reference Connect server (mkit#699) exists yet to
-confirm a transactional `AdvanceRefs`, the safe default means pushes over
-`mkit+https://` take the ordered (non-atomic) `advance_refs` fallback and
-do not re-baseline/reset the packmap chain &mdash; `remote_dispatch::
-push_branch`'s re-baseline gate already requires `supports_atomic_advance()
-== true` before resetting (mkit#521), so this is a (temporary) loss of
-the packmap-compaction optimization, not a correctness gap. v2 closes
-this gap on the wire: a v2 client reads `atomic_advance` from
-`GetServerInfo` (§2.1) and drops the local opt-in.
+`ConnectTransport::supports_atomic_advance()` lazily reads `atomic_advance`
+from `GetServerInfo` (§2.1) and caches discovery for the transport instance's
+lifetime. It reports `true` only when a validated v2 advertisement explicitly
+sets `atomic_advance = true`. Servers that return `unimplemented`, failed
+discovery after the retry ladder, and invalid advertisements retain the
+conservative `false` default. There is no local opt-in. Transactional SQLite
+and Durable Object deployments can therefore enable the existing packmap
+re-baseline gate automatically; the gate still requires advertised atomicity
+before resetting a chain (mkit#521).
 
 Every `Transport` method `ConnectTransport` implements is driven through
 the same `mkit_core::protocol::retrying`/`BackoffIterator` ladder
 `mkit-transport-http`/`-ssh`/`-enc` share (mkit#703, mkit#790): a
 transient `ConnectionFailed` or the Connect codes §5 maps onto a
-5xx/429-equivalent (`unavailable`, `resource_exhausted`) is retried per
+5xx/429-equivalent (`unavailable`, `resource_exhausted`), or `aborted`
+(§5), is retried per
 SPEC-TRANSPORT §7's `is_retryable` classification, read off the
 `TransportError` §5's client-side mapping produces rather than directly
 off an HTTP status. Each retry re-issues the whole RPC from scratch

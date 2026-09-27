@@ -39,7 +39,7 @@ use mkit_core::protocol::{PackKey, Transport, TransportError};
 use mkit_core::refs::{self, Head};
 use mkit_core::store::{ObjectStore, StoreError};
 use mkit_core::transfer::{self, PackListError};
-use mkit_transport_connect::ConnectTransport;
+use mkit_transport_connect::{ConnectTransport, repository_identity_from_url};
 use mkit_transport_file::FileTransport;
 use mkit_transport_s3::S3Transport;
 use mkit_transport_ssh::{SshInitError, SshOptions, SshTransport, parse_mkit_ssh_url};
@@ -60,6 +60,10 @@ pub enum DispatchError {
     UnsupportedScheme(String),
     #[error("malformed URL: {0}")]
     MalformedUrl(String),
+    #[error(
+        "repository `{identity}` not found at {origin}; check the remote URL path against the server's configured name (an empty path selects `default` on a single-repository deployment)"
+    )]
+    RepositoryNotFound { identity: String, origin: String },
     #[error("no HEAD branch to push")]
     NoHead,
     /// A poll-loop checkpoint observed `signal::is_shutdown() == true`
@@ -177,6 +181,20 @@ pub enum DispatchError {
     /// a raw path component under `.mkit/applied-packs/`.
     #[error("invalid remote name for applied-packs record: '{0}'")]
     InvalidRemoteName(String),
+}
+
+/// Interpret a missing result as a repository failure only for repository-level
+/// operations. Pack downloads retain their content-specific missing errors.
+fn repository_operation_error(tx: &dyn Transport, error: TransportError) -> DispatchError {
+    if matches!(&error, TransportError::PackNotFound)
+        && let Some(address) = tx.repository_address()
+    {
+        return DispatchError::RepositoryNotFound {
+            identity: address.repository.to_owned(),
+            origin: address.origin.to_owned(),
+        };
+    }
+    error.into()
 }
 
 /// Open a transport for `endpoint` only after the per-endpoint
@@ -360,6 +378,17 @@ fn open_with_ssh_options(
         ));
     }
     if url.starts_with("mkit+https://") || url.starts_with("mkit+http://") {
+        repository_identity_from_url(url).map_err(|reason| {
+            let path = url
+                .split_once("://")
+                .and_then(|(_, rest)| rest.split_once('/'))
+                .map_or("", |(_, path)| path)
+                .split(['?', '#'])
+                .next()
+                .unwrap_or("")
+                .trim_matches('/');
+            DispatchError::MalformedUrl(format!("repository identity `{path}` in {url}: {reason}"))
+        })?;
         // ConnectTransport::connect_with_signer strips the `mkit+` prefix
         // itself and reads MKIT_API_TOKEN from the environment (mkit#701 —
         // the native mkit.transport.v1 ConnectRPC client, replacing the
@@ -1166,7 +1195,8 @@ fn seal_pack(
     let sealed = std::mem::replace(w, PackWriter::new());
     let pack = sealed.finish()?;
     let pack_key = pack::pack_key(&pack);
-    tx.upload_pack(&pack, &PackKey::from_hash(pack_key))?;
+    tx.upload_pack(&pack, &PackKey::from_hash(pack_key))
+        .map_err(|error| repository_operation_error(tx, error))?;
     // Upload is complete — report the real byte count handed to the
     // transport, not an estimate.
     crate::progress::report(crate::progress::Event::PackUploaded(pack.len() as u64));
@@ -1456,7 +1486,9 @@ fn fetch_objects_inner(
     applied: &mut AppliedPacks,
     require_signed: bool,
 ) -> Result<usize, DispatchError> {
-    let remote_refs = tx.list_refs("refs/heads/")?;
+    let remote_refs = tx
+        .list_refs("refs/heads/")
+        .map_err(|error| repository_operation_error(tx, error))?;
     let mut n = 0;
     // Batch every fetched branch's remote-tracking-ref write (#645): see
     // `push_all_with` for the same pattern and its rationale. `tracking.write`
