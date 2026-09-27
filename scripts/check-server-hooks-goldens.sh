@@ -18,6 +18,7 @@ message_type() {
   done <<'TABLE'
 authorize.request.json AuthorizeRequest
 authorize-allow.response.json AuthorizeResponse
+authorize-writer-view.response.json AuthorizeResponse
 authorize-deny.response.json AuthorizeResponse
 admit.request.json AdmitRequest
 admit-first-attempt.request.json AdmitRequest
@@ -26,6 +27,10 @@ admit-challenge.response.json AdmitResponse
 admit-deny.response.json AdmitResponse
 inspect.request.json InspectRequest
 inspect-pass.response.json InspectResponse
+inspect-quarantine-phase.request.json InspectRequest
+inspect-quarantine.response.json InspectResponse
+inspect-reject-flagged.response.json InspectResponse
+inspect-defer.response.json InspectResponse
 outcome-committed.request.json OutcomeRequest
 outcome-aborted.request.json OutcomeRequest
 outcome-abandoned.request.json OutcomeRequest
@@ -60,8 +65,8 @@ for file in "$golden_dir"/*.request.json "$golden_dir"/*.response.json; do
   count=$((count + 1))
 done
 
-if [[ "$count" -ne 16 ]]; then
-  echo "check-server-hooks-goldens: expected 16 mapped fixtures, found $count" >&2
+if [[ "$count" -ne 21 ]]; then
+  echo "check-server-hooks-goldens: expected 21 mapped fixtures, found $count" >&2
   exit 1
 fi
 echo "check-server-hooks-goldens: all $count fixtures preserve canonical protobuf JSON"

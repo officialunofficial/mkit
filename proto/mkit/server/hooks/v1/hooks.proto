@@ -136,12 +136,16 @@ message AuthorizeResponse {
 }
 
 // Authorization permission; it conveys no admission reservation; SPEC-SERVER §6.2.
-message AuthorizeAllow {}
+message AuthorizeAllow {
+  // Authority-source allowance grants this signed caller the repository's writer view;
+  // ignored for a check hook and does not bypass read authorization; SPEC-SERVER §10.1.
+  bool writer_view = 1;
+}
 
 // Deliberate refusal, distinct from hook execution failure; SPEC-SERVER §§6.2, 8.
 message Deny {
   // Authorize allows permission_denied/not_found/unauthenticated; SPEC-SERVER §6.2.
-  // Admit/Inspect always answer permission_denied; SPEC-SERVER §6.2.
+  // Admit and pre-receive Inspect answer permission_denied; async Inspect is a hit; SPEC-SERVER §11.
   string code = 1;
   // Public UTF-8 text, at most 512 bytes and no control characters; SPEC-SERVER §6.2.
   string message = 2;
@@ -204,36 +208,74 @@ message Challenge {
   string value = 2;
 }
 
-// Provisional inspection input; M5 may add fields additively; SPEC-SERVER §6.4.
+// Inspection input with metadata only; SPEC-SERVER §§6.4, 11.
 message InspectRequest {
   // Verified operation whose content is inspected; SPEC-SERVER §6.4.
   Operation operation = 1;
-  // Object metadata only; object bytes are fetched out of band; SPEC-SERVER §6.4.
+  // Every newly reachable file object; bytes use a private channel; SPEC-SERVER §11.1.
   repeated InspectObject objects = 2;
+  // PRE_RECEIVE at stage 5 or QUARANTINE at stage 9; SPEC-SERVER §11.1.
+  InspectPhase phase = 3;
+  // Stable logical inspection id across retries, distinct from hook nonces; SPEC-SERVER §11.3.
+  string inspection_id = 4;
 }
 
-// Object identity and length without its content bytes; SPEC-SERVER §6.4.
+// Pipeline phase of the inspection; SPEC-SERVER §11.1.
+enum InspectPhase {
+  // Legacy unspecified phase; callers of the §11 contract send an explicit phase.
+  INSPECT_PHASE_UNSPECIFIED = 0;
+  // Synchronous inspection before apply.
+  INSPECT_PHASE_PRE_RECEIVE = 1;
+  // Asynchronous inspection after commit.
+  INSPECT_PHASE_QUARANTINE = 2;
+}
+
+// Object identity, type and length without content bytes; SPEC-SERVER §6.4.
 message InspectObject {
   // Raw 32-byte object id; SPEC-SERVER §6.4.
   bytes id = 1;
   // Object size in bytes; SPEC-SERVER §6.4.
   uint64 size = 2;
+  // Blob, chunked-file manifest, or chunk; SPEC-SERVER §11.1.
+  InspectObjectKind kind = 3;
 }
 
-// Provisional inspection verdict applied under the configured mode; SPEC-SERVER §§6.4, 8.
+// File-object classification, independent of extraction; SPEC-SERVER §11.1.
+enum InspectObjectKind {
+  // Legacy unspecified kind; callers of the §11 contract send an explicit kind.
+  INSPECT_OBJECT_KIND_UNSPECIFIED = 0;
+  // Plain blob of any size, including an extracted blob.
+  INSPECT_OBJECT_KIND_BLOB = 1;
+  // Chunked-file manifest; its chunks are also inspected.
+  INSPECT_OBJECT_KIND_CHUNKED_FILE = 2;
+  // Chunk referenced by a newly reachable chunked file.
+  INSPECT_OBJECT_KIND_CHUNK = 3;
+}
+
+// Verdict semantics depend on phase, never on on_unavailable; SPEC-SERVER §11.
 message InspectResponse {
-  // Exactly one pass, quarantine, or rejection; SPEC-SERVER §6.4.
+  // Exactly one pass, quarantine, rejection, or async deferral; SPEC-SERVER §6.4.
   oneof verdict {
-    // Accept the inspected content; SPEC-SERVER §6.4.
+    // Accept this inspector's inspected content; SPEC-SERVER §11.
     InspectPass pass = 1;
-    // Mark content for quarantine; SPEC-SERVER §6.4.
+    // Hold the advance pending re-inspection or admin release; SPEC-SERVER §11.
     InspectQuarantine quarantine = 2;
-    // Reject content with a deliberate denial; SPEC-SERVER §6.4.
+    // Pre-receive denial or post-commit takedown hit; SPEC-SERVER §11.
     Deny reject = 3;
+    // Re-poll an asynchronous inspection; invalid in PRE_RECEIVE; SPEC-SERVER §11.3.
+    InspectDefer defer = 4;
   }
+  // Raw 32-byte object ids, meaningful only with reject or quarantine; SPEC-SERVER §6.4.
+  repeated bytes flagged_objects = 5;
 }
 
-// Inspection acceptance; SPEC-SERVER §6.4.
+// Asynchronous re-poll suggestion; SPEC-SERVER §11.3.
+message InspectDefer {
+  // Server clamps to 1000–60000 ms; absent or zero means 1000 ms.
+  uint32 retry_after_ms = 1;
+}
+
+// Empty successful inspection verdict; SPEC-SERVER §6.4.
 message InspectPass {}
 
 // Inspection decision to quarantine content; SPEC-SERVER §6.4.
