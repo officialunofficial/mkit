@@ -41,6 +41,8 @@ pub struct ServerInfo {
     pub namespace_policy: &'static str,
     /// Fixed repository index fan-out.
     pub index_fanout: u32,
+    /// Delta-chain depth cap; 0 while indexed mode is off (SPEC-SERVER §9.8).
+    pub max_delta_chain_depth: u32,
 }
 
 impl PipelineConfig {
@@ -92,6 +94,7 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             grant_schemes: Vec::new(),
             namespace_policy: self.cfg.advertised_namespace_policy(),
             index_fanout: u32::from(INDEX_FANOUT),
+            max_delta_chain_depth: 0,
         }
     }
 }

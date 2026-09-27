@@ -4,6 +4,7 @@ use mkit_transport_connect::generated::GetServerInfoResponse;
 
 use super::{CaseResult, Ctx, Feature, ensure, want_ok};
 use crate::wire::client::{Reply, UNARY_PROTO, decode_unary};
+use crate::wire::profile::WireAuth;
 
 const INFO: &str = "/mkit.transport.v1.TransportService/GetServerInfo";
 
@@ -51,6 +52,13 @@ pub(super) async fn shape_and_policy(ctx: Ctx) -> CaseResult {
         "invalid page size: {page_size}"
     );
     ensure!(info.index_fanout == Some(4096), "incorrect index_fanout");
+    let depth = info
+        .max_delta_chain_depth
+        .ok_or("missing max_delta_chain_depth")?;
+    ensure!(
+        info.indexed_mode == Some(true) || depth == 0,
+        "max_delta_chain_depth must be 0 outside indexed mode: {depth}"
+    );
     ensure!(
         info.atomic_advance == Some(ctx.profile().has(Feature::AtomicAdvance)),
         "atomic_advance disagrees with profile"
@@ -109,7 +117,17 @@ pub(super) async fn shape_and_policy(ctx: Ctx) -> CaseResult {
 pub(super) async fn ignores_repository_header(ctx: Ctx) -> CaseResult {
     let original = discover(&ctx, &[]).await?;
     let nonexistent = format!("ed25519-{}/info-{}", "00".repeat(32), ctx.profile().run_id);
-    for repository in [nonexistent.as_str(), "Uppercase/../invalid"] {
+    // The configured (existing) repository must not change the answer
+    // either: that would make GetServerInfo an existence oracle.
+    let existing = match &ctx.profile().auth {
+        WireAuth::AuthV2 { repository, .. } => repository.clone(),
+        _ => "default".to_owned(),
+    };
+    for repository in [
+        existing.as_str(),
+        nonexistent.as_str(),
+        "Uppercase/../invalid",
+    ] {
         let reply = discover(&ctx, &[("x-repository".into(), repository.into())]).await?;
         ensure!(
             reply.body == original.body,

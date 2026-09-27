@@ -16,6 +16,7 @@ fn server_info_defaults_and_custom_limits_read_no_store() {
     assert_eq!(info.begin_upload_threshold_bytes, u64::MAX);
     assert_eq!(info.namespace_policy, "single-repository");
     assert_eq!(info.index_fanout, 4096);
+    assert_eq!(info.max_delta_chain_depth, 0);
     assert!(info.atomic_advance);
     assert!(!info.indexed_mode && !info.admission);
     assert!(info.receipt_public_key.is_empty());

@@ -1281,6 +1281,7 @@ async fn server_info_is_public_ignores_repository_and_sets_cache_header() {
         assert_eq!(info.protocol.as_deref(), Some("mkit.transport.v1"));
         assert_eq!(info.spec_version, Some(2));
         assert_eq!(info.indexed_mode, Some(false));
+        assert_eq!(info.max_delta_chain_depth, Some(0));
         assert_eq!(info.admission, Some(false));
         assert_eq!(info.begin_upload_threshold_bytes, Some(u64::MAX));
         assert_eq!(info.receipt_public_key, Some(vec![]));
@@ -1303,6 +1304,7 @@ async fn server_info_is_public_ignores_repository_and_sets_cache_header() {
             .await;
         assert_eq!(json.status, StatusCode::OK);
         assert_eq!(json.json()["protocol"], "mkit.transport.v1");
+        assert_eq!(json.json()["maxDeltaChainDepth"], 0);
         assert_eq!(
             json.json()["beginUploadThresholdBytes"],
             u64::MAX.to_string()

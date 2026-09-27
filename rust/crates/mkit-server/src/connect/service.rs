@@ -410,7 +410,8 @@ impl From<ServerInfo> for GetServerInfoResponse {
             grant_schemes: info.grant_schemes,
             namespace_policy: Some(info.namespace_policy.into()),
             index_fanout: Some(info.index_fanout),
-            ..Default::default()
+            max_delta_chain_depth: Some(info.max_delta_chain_depth),
+            __buffa_unknown_fields: buffa::UnknownFields::default(),
         }
     }
 }
