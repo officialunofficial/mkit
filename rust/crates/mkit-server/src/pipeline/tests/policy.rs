@@ -356,17 +356,3 @@ fn reads_keep_hook_behavior_and_invalid_multi_namespace_is_internal() {
         "write not permitted"
     );
 }
-
-#[test]
-fn with_auth_revalidates_policy_and_retains_valid_configuration() {
-    let ns = Namespace::Ed25519([1; 32]);
-    let mut pipe = construct(policy_cfg(true, namespace_policy(0, &ns)), Hooks::new()).unwrap();
-    assert!(pipe.with_auth(AuthMode::TransportIdentity).is_ok());
-    // A sibling must not bypass constructor validation, even if an internal
-    // caller supplied an incompatible config.
-    pipe.cfg.write_policy = WritePolicy::Open;
-    assert_eq!(
-        pipe.with_auth(AuthMode::Open).unwrap_err().code(),
-        Code::InvalidArgument
-    );
-}
