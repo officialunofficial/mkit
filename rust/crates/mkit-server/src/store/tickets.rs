@@ -218,6 +218,11 @@ pub fn plan_ticket_open(
     }
     let read_keys = keys(spec);
     let id = ticket_id(&spec.reservation_id);
+    if reads.reservation.is_some() {
+        return Err(TicketPlanError::Invalid("reservation id already in use"));
+    }
+    // A ticket row the index doesn't name as live must not exist.
+    let mut unread_indexed = None;
     if let Some(index) = &reads.index {
         let indexed_id = codec::decode_ref_id(index).map_err(TicketPlanError::Corrupt)?;
         let raw = reads.indexed_ticket.as_ref().or_else(|| {
@@ -240,7 +245,14 @@ pub fn plan_ticket_open(
             if existing.expires_at_ms > spec.now_ms {
                 return Err(TicketPlanError::Existing(existing));
             }
+        } else if indexed_id != id {
+            // The caller didn't read the indexed ticket: require it gone, so
+            // a live ticket can never be shadowed by a second one.
+            unread_indexed = Some(layout::ticket(&indexed_id));
         }
+    }
+    if reads.ticket.is_some() {
+        return Err(TicketPlanError::Invalid("ticket id already in use"));
     }
     // BeginUpload creates exactly one ticket. Reject a second open for
     // this ref in a composed batch rather than using stale cap snapshots.
@@ -265,6 +277,9 @@ pub fn plan_ticket_open(
         Precondition::Absent(read_keys.ticket.clone()),
         guard(read_keys.index.clone(), reads.index.as_ref()),
     ]);
+    if let Some(key) = unread_indexed {
+        staged_pre.push(Precondition::Absent(key));
+    }
     staged_writes.extend([
         Write::Put(read_keys.ticket, value),
         Write::Put(read_keys.index, codec::encode_ref_id(&id)),
@@ -387,6 +402,7 @@ pub fn plan_membership(
     outbox: &mut OutboxBuilder,
     writes: &mut Vec<Write>,
 ) {
+    debug_assert_eq!(repo, &repo_id.name, "membership repo must match its RepoId");
     for pack in packs.iter().collect::<BTreeSet<_>>() {
         let key = layout::membership(repo, pack);
         let put = Write::Put(key.clone(), Value::default());

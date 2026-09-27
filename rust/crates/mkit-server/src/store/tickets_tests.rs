@@ -740,3 +740,55 @@ fn deterministic_ticket_id_binds_the_domain_and_reservation() {
     assert_ne!(id, ticket_id("reservation-2"));
     assert_eq!(to_hex(&id).len(), 64);
 }
+
+#[test]
+fn unread_indexed_ticket_must_be_gone_so_a_live_one_is_never_shadowed() {
+    let store = MemoryKv::default();
+    let original = spec();
+    // A live ticket and its index row exist.
+    assert_eq!(
+        apply(&store, open(&original, &TicketReads::default())),
+        BatchOutcome::Committed
+    );
+    let mut retry = original.clone();
+    retry.reservation_id = "retry".into();
+    // The caller read the index but not the ticket it names.
+    let reads = TicketReads {
+        index: get(&store, &keys(&original).index),
+        per_ref: Some(codec::encode_u64(1)),
+        per_signer: Some(codec::encode_u64(1)),
+        ..TicketReads::default()
+    };
+    let batch = open(&retry, &reads);
+    let old = layout::ticket(&ticket_id(&original.reservation_id));
+    assert!(batch.preconditions.contains(&Precondition::Absent(old)));
+    assert!(matches!(
+        apply(&store, batch),
+        BatchOutcome::PreconditionFailed { .. }
+    ));
+}
+
+#[test]
+fn observed_reservation_or_ticket_row_is_rejected_before_planning() {
+    for reads in [
+        TicketReads {
+            reservation: Some(codec::encode_u64(1)),
+            ..TicketReads::default()
+        },
+        TicketReads {
+            ticket: Some(codec::encode_ticket(&spec().record())),
+            ..TicketReads::default()
+        },
+    ] {
+        let mut batch = Batch::new();
+        let result = plan_ticket_open(
+            &spec(),
+            &reads,
+            caps(),
+            &mut batch.preconditions,
+            &mut batch.writes,
+        );
+        assert!(matches!(result, Err(TicketPlanError::Invalid(_))));
+        assert_eq!(batch, Batch::new());
+    }
+}

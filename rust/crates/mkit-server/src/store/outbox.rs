@@ -14,11 +14,22 @@ use super::{
 
 /// Seven tickets fit even with a guarded index deletion for each ticket.
 /// Each ticket uses 9 ops (t guard/delete, ti guard/delete, o guard/put,
-/// oq put, membership put, relay share); each distinct signer uses 2.
-/// The shared ref counter and head/packmap, replay, os/oc, deadline and
-/// lease guards fit in the caller's remaining 20 ops: 7*(9+2)+20 = 97.
+/// oq put, membership put, relay share); each distinct signer uses 2
+/// (its `tu` guard and write).
+///
+/// The advance's shared ops, as `plan_write` builds them, are
+/// [`ADVANCE_SHARED_OPS`] = 21: `NotAfter` 1, grant epoch guard 1, layout
+/// version guard 1, default quota charge 4 (guard, put, window delete,
+/// window put), head and packmap CAS 4, replay 3 (`Absent` p, put p, put
+/// px), the per-ref `tc` counter 2, `os` 2, `oc` 2, and the lease guard 1:
+/// 7 * (9 + 2) + 21 = 98. WP-1.10 must reserve these ticket ops before
+/// sizing pruning (`plan_prune` fills the remaining budget), and must not
+/// add a second admission charge or an `rk` write to the advance without
+/// re-checking this sum.
 pub const MAX_TICKETS_PER_ADVANCE: usize = 7;
-const _: () = assert!(MAX_TICKETS_PER_ADVANCE * (9 + 2) + 20 <= MAX_BATCH_OPS);
+/// The advance batch's ops outside the per-ticket and per-signer ones.
+pub const ADVANCE_SHARED_OPS: usize = 21;
+const _: () = assert!(MAX_TICKETS_PER_ADVANCE * (9 + 2) + ADVANCE_SHARED_OPS <= MAX_BATCH_OPS);
 
 /// Reservation id for an allowance that has no deployment reservation.
 #[must_use]
@@ -122,9 +133,11 @@ impl OutboxBuilder {
             if !self.reservations.insert(rid.to_owned()) {
                 return Err(StoreError::Invalid("duplicate reservation in batch".into()));
             }
-            // A collision is deliberately guarded by Absent, including
-            // when the caller already observed it.
-            let _ = prior;
+            // A row the caller already observed is a duplicate id, not a
+            // race: reject it now instead of planning a batch that fails.
+            if prior.is_some() {
+                return Err(StoreError::Invalid("reservation id already in use".into()));
+            }
             self.pre.push(Precondition::Absent(key.clone()));
             self.writes.push(Write::Put(
                 key,
@@ -247,7 +260,9 @@ impl OutboxBuilder {
     }
 
     /// Finish the fixed fragment API; malformed input makes the caller's
-    /// complete batch uncommittable. Use `try_finish` to report the error.
+    /// complete batch uncommittable, which looks like a retryable conflict.
+    /// Wiring code (WP-1.9, 1.10, 1.14, 3.3) MUST call `try_finish` so the
+    /// error is reported instead.
     pub fn finish(self, pre: &mut Vec<Precondition>, writes: &mut Vec<Write>) {
         if self.try_finish(pre, writes).is_err() {
             let key = keys::outbox_sequence();

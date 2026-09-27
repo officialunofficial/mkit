@@ -67,16 +67,27 @@ fn synthetic_id_has_fixed_golden_charset_and_length() {
 }
 
 #[test]
-fn reserve_guards_absence_even_when_prior_was_observed_and_never_counts_backlog() {
+fn reserve_rejects_an_observed_duplicate_and_guards_absence_otherwise() {
     let store = MemoryKv::default();
     let rid = "reservation-1";
     let key = keys::reservation(rid).unwrap();
+    // An id the caller already observed is a duplicate, reported as an
+    // error rather than planned into a batch that can only fail.
+    let mut builder = OutboxBuilder::new(None, None).unwrap();
+    builder.reserve(rid, [2; 32], Some(&ticketed()));
+    let (mut pre, mut writes) = (Vec::new(), Vec::new());
+    assert!(matches!(
+        builder.try_finish(&mut pre, &mut writes),
+        Err(StoreError::Invalid(_))
+    ));
+    // Unobserved, it is guarded by Absent, so a concurrent row still
+    // fails the batch; the reservation never counts toward the backlog.
     assert_eq!(
         apply(&store, Batch::new().put(key.clone(), ticketed())),
         BatchOutcome::Committed
     );
     let mut builder = OutboxBuilder::new(None, None).unwrap();
-    builder.reserve(rid, [2; 32], Some(&ticketed()));
+    builder.reserve(rid, [2; 32], None);
     let batch = finish(builder);
     assert_eq!(batch.preconditions, vec![Precondition::Absent(key.clone())]);
     assert_eq!(batch.writes.len(), 1);
