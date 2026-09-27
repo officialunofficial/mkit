@@ -1,5 +1,7 @@
 //! Pipeline tests over the memory stores and a `ManualClock`.
 
+mod policy;
+
 use std::future::Future;
 use std::pin::{Pin, pin};
 use std::sync::atomic::{AtomicU32, Ordering};

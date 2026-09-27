@@ -16,10 +16,16 @@ use crate::rt::{MaybeSend, MaybeSync};
 use crate::store::BlobKey;
 
 /// Stage 2: may the principal do this? Runs before any quota or replay
-/// record is allocated; an error is returned as is. The facts it returns
-/// become `op.authz` before admission, so M2 can report the grant it
-/// matched (and its epoch, which `apply` then requires).
+/// record is allocated; an error is returned as is. In Multi addressing,
+/// `op.authz` already carries built-in owner/grant facts (SPEC-SERVER §6.2),
+/// which are preserved for admission. Single addressing uses returned facts.
+/// M2 adds grants and their epoch preconditions.
 pub trait Authorizer: MaybeSend + MaybeSync {
+    /// Whether this is the open default, unsuitable as an authority source.
+    fn is_open(&self) -> bool {
+        false
+    }
+
     /// Allow `op` with the facts established, or return the error to
     /// answer with.
     fn authorize(
@@ -131,6 +137,11 @@ impl AdmissionDecision {
 
 /// Stage 3: admission, e.g. an abuse quota or a payment.
 pub trait Admission: MaybeSend + MaybeSync {
+    /// Whether this is the default quota-only admission (D27).
+    fn is_default(&self) -> bool {
+        false
+    }
+
     /// Decide whether a new write may proceed.
     fn admit(
         &self,
@@ -261,6 +272,10 @@ where
 pub struct OpenAuthorizer;
 
 impl Authorizer for OpenAuthorizer {
+    fn is_open(&self) -> bool {
+        true
+    }
+
     async fn authorize(&self, _op: &Operation) -> Result<AuthzFacts, ServerError> {
         Ok(AuthzFacts::default())
     }
@@ -269,11 +284,15 @@ impl Authorizer for OpenAuthorizer {
 /// Today's abuse quota: a signed write charges one operation and its
 /// declared bytes to its signer's counter in its namespace, under
 /// `input.write_quota`. Unsigned writes and deployments without a quota
-/// are allowed with no charge. WP-1.5 adds the per-namespace charge.
+/// are allowed with no charge. WP-1.26 adds the per-namespace charge.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DefaultAdmission;
 
 impl Admission for DefaultAdmission {
+    fn is_default(&self) -> bool {
+        true
+    }
+
     async fn admit(&self, input: &AdmissionInput<'_>) -> Result<AdmissionDecision, ServerError> {
         let charges = match (input.write_quota, &input.op.auth) {
             (Some(limits), Some(auth)) if input.op.procedure().is_write() => vec![QuotaCharge {
