@@ -1322,8 +1322,9 @@ At stage 5, the server MUST call each synchronous inspector with
 | Unavailable, `publish` | Permit apply without this inspector's clearance; other inspectors and §10 still apply. |
 
 `defer` is an asynchronous verdict and MUST be treated as an invalid
-response in this phase. A pass by one inspector MUST NOT override another
-inspector's quarantine or rejection. A synchronous hold persists even
+response in this phase. A reject from any synchronous inspector MUST deny the operation even if
+another inspector returned quarantine. A pass by one inspector MUST NOT
+override another inspector's quarantine or rejection. A synchronous hold persists even
 when no asynchronous inspector is configured, until re-inspection or
 admin release. With no hold and asynchronous obligations remaining, the
 committed advance starts `pending`; otherwise §10 determines clearance.
@@ -1365,7 +1366,8 @@ It is the elapsed time from the advance's commit to the deadline at which
 continued unavailability permits clearance for that inspector. mkit
 specifies no default. This deadline MUST survive restarts; reattempts MUST
 NOT reset it. It MUST NOT release a deliberate hold or a dependency on
-another unpublished advance.
+another unpublished advance. Reaching the deadline MUST NOT cancel the
+scheduled inspection; a later verdict still requires action.
 
 A later hit after deadline-based publication MUST become a takedown,
 never a retroactive un-publish or rollback of the committed push. A
