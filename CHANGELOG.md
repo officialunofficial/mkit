@@ -189,6 +189,8 @@ train).
 ### Added
 
 - *(spec)* Add bounded admission credential headers to hooks.v1 `AdmitRequest` (WP-3.6b).
+- *(docs)* Add an unsupported TypeScript `mppx` admission Worker reference for
+  `mkit.server.hooks.v1`, with delayed settlement and optional signed hooks (WP-3.14).
 - *(core)* Add `pack::rewrite_excluding` and `pack::Rewritten` for budgeted
   pack rewrites: excluded objects are dropped, deltas with excluded direct
   bases become raw, and unchanged packs retain their exact bytes.
