@@ -152,3 +152,42 @@ cover the whole space to their bounds.
   only by `mkit-server`).
 - The git bridge locks (`git-<remote>.lock`, `git-import-key.lock`) that
   another track is adding to SPEC-CONCURRENCY §2/§4 are not in this model.
+
+## Model-based conformance (MKIT-22)
+
+`refs_mbt.qnt` (additive; `refs.qnt` is unchanged) instantiates `refs.qnt`
+with `NO_FAULTS` for 2 (`refs_mbt2`) and 3 (`refs_mbt3`) processes and adds
+the scheduler `stepLin`: a disk `readRef` is not scheduled while a process
+of the other disk lock domain (local chain vs file transport) has read the
+same ref and not committed. That removes exactly the documented §3.1
+cross-domain gap, which the real, atomic API calls cannot reproduce, so every
+trace is linearizable at the ref level and can be replayed. Generated traces
+must satisfy `LinSafety` (`Safety` and `NoCrossDomainGap`); the
+unrestricted `stepAll` must still reach the gap.
+
+`formal/scripts/gen-refs-traces.sh` draws the ITF traces
+(`quint run --mbt --out-itf`, one seed each, 60 steps), strips the
+variables the harness does not read, and writes them to
+`rust/crates/mkit-formal-conformance/tests/fixtures/formal_refs/`
+(`CHECK=1` regenerates into a temp dir and diffs). The Rust test
+`rust/crates/mkit-formal-conformance/tests/formal_refs_conformance.rs`
+(`cargo test -p mkit-formal-conformance`, offline, normal CI) replays each
+step against `mkit_core::refs`, `ops::recovery`, `FileTransport` and
+`MemoryTransport` on a temp repo and compares, after every step, the disk
+refs (through `refs::read_ref` and through `FileTransport`), the memory
+refs, the recovery log, and every commit's outcome (`ok` / `conflict` /
+`notfound`). The op-to-call mapping and what is not compared (lock steps,
+the `history-mmr` ancestry path) are in that file's header.
+
+| Check | Bound | Result |
+|-------|-------|--------|
+| `quint run refs_mbt2 --step stepLin` `LinSafety` | 2000 samples x 60 steps, seed 0x1 | ok |
+| `quint run refs_mbt3 --step stepLin` `LinSafety` | 2000 samples x 60 steps, seed 0x1 | ok |
+| `quint run refs_mbt3 --step stepLin` `LinSafety` (one-off, not in the script) | 20000 samples x 40 steps, seed 0x1, 9 min | ok |
+| `quint run refs_mbt3 --step stepAll` `NoCrossDomainGap` | 20000 samples x 60 steps, seed 0x1 | violation (as it must) |
+| Replay of 5 fixtures (`refs_mbt2` seeds 0xa, 0xf, 0x24; `refs_mbt3` seeds 0x1b, 0x21) | 300 steps, 41 commits | every step agrees |
+| `harness_detects_adapter_faults` | 5 deliberate adapter bugs (one per domain, plus conditional delete and dropped record) | each caught |
+| `harness_detects_a_tampered_trace` | flipped outcome, altered ref value | each caught at that state |
+
+Bounded is not proved: the fixtures are 5 sampled traces, not every
+interleaving.

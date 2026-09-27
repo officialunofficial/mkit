@@ -38,6 +38,9 @@ members = [
     # wasm32 harness for mkit-core's `pack-ruzstd` decoder (publish = false,
     # test-only; see the crate's Cargo.toml header).
     "crates/mkit-core-wasm-check",
+    # Model-based conformance: replays the formal models' ITF traces
+    # against the real code (publish = false, test-only; MKIT-22).
+    "crates/mkit-formal-conformance",
     # The reference external-signer binaries (mkit-sign-{file,ctap,tpm}) are a
     # SEPARATE workspace under contrib/signers/ — see contrib/signers/Cargo.toml.
     # They were members here, but out-of-tree members (`../contrib/...`) break
