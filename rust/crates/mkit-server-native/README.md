@@ -405,8 +405,17 @@ per-partition layout version (the `v` row) covers them.
 
 ### Physical backup
 
-Take a consistent copy of the whole database, online, with
-`StoreMaintenance::backup_to(dest)`, which runs `VACUUM INTO '<dest>'`
+Take a consistent copy of the whole database while the server runs:
+
+```sh
+mkit-server backup --meta sqlite:/srv/mkit/meta.sqlite3 --out /srv/backups/meta.sqlite3
+```
+
+The command opens a separate WAL reader and runs `VACUUM INTO`. It prints
+the output path and size in bytes. The output must not already exist;
+an existing path is refused with exit code 64 (`USAGE`).
+
+Embedders can call `StoreMaintenance::backup_to(dest)`, which runs `VACUUM INTO '<dest>'`
 (`RusqliteConn`'s backup hook; the shared SQL store has no engine-specific
 backup of its own, and a Durable Object uses the portable export). `dest`
 must not exist. The copy is compacted and self-contained (no WAL files). The
@@ -417,6 +426,12 @@ recent commits may still sit in `<file>-wal`.
 To restore, stop the server, move the database and its `-wal` and `-shm`
 files aside, put the backup in the database's place, and start the server.
 Migrations run on open, so a backup from an older binary is brought forward.
+Restart with the same `--sharding` mode used by the backed-up database
+(R-93); its stored routing mode is checked on startup.
+
+This physical backup covers one native `SQLite` database. WP-1.29b will add
+portable snapshot export for Durable Objects, native `export`/`restore`,
+and a recovery runbook for disaster recovery and backend migration.
 
 ### Portable logical backup
 
@@ -445,3 +460,23 @@ overrides it. See `mkit_server::sql::Capacity` for the derivation.
 same code, but surfaces as `StoreError::Unavailable`, because deleting rows
 does not free disk space (the file never shrinks without `VACUUM`). Watch the
 host's free space separately.
+
+
+### Storage pressure alerts
+
+With `SQLite` metadata, the server reads physical database bytes at startup and
+then every 60 seconds against the `--sqlite-max-bytes` soft limit (the hard cap
+minus the pruning reserve). A `storage_pressure` event contains `level`,
+`kind = database`, `bytes`, `limit_bytes` and `pct`: warning at 70%, critical at
+90%. A level clears at 65% or 85%, respectively. Only the highest
+active level emits, at most once per level per ten minutes. JSON log mode keeps
+these fields structured. The `mkit_server_partition_bytes{kind="database"}`
+gauge uses the metrics facade; an embedder must install a recorder to export it.
+
+Workers emit the same pressure fields after committed put batches, using the
+local physical `databaseSize` and the `WORKERS_PLAN` soft limit. Metrics go to
+console JSON as `{"metric": name, "labels": {...}, "value": n}`. Counters and
+gauges always emit; latency observations emit every hundredth call across an
+isolate. Info events use the log console; warning/error events use the error
+console. Debug and trace events are disabled. Pressure state is per DO instance;
+a new instance starts a new alert interval.

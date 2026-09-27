@@ -1444,7 +1444,12 @@ fn store_full_maps_to_unavailable() {
         (err.code(), err.public_message()),
         (Code::Unavailable, "storage partition full")
     );
+    assert_eq!(METRIC_PARTITION_FULL, "mkit_server_partition_full_total");
     assert_eq!(env.metrics.count(METRIC_PARTITION_FULL), 1);
+    assert!(env.metrics.0.lock().unwrap().contains(&(
+        METRIC_PARTITION_FULL,
+        vec![("kind".into(), "namespace".into())]
+    )));
     // The prune ran as a delete-only batch; nothing else was written.
     assert!(env.rows().is_empty(), "{:?}", env.rows());
 }
@@ -2522,4 +2527,48 @@ fn lease_directives_parse_epochs_and_require_an_explicit_recovery_marker() {
             .unwrap_err();
         assert_eq!(error.code(), Code::InvalidArgument);
     }
+}
+
+#[test]
+fn partition_full_counter_labels_every_partition_kind() {
+    let env = env(authv2());
+    let namespace = NamespaceKey::deployment_default();
+    let repo = RepoName::new("room-a").unwrap();
+    for (partition, kind) in [
+        (Partition::Namespace(namespace.clone()), "namespace"),
+        (Partition::Coordinator(namespace.clone()), "coordinator"),
+        (
+            Partition::Ref {
+                ns: namespace.clone(),
+                repo: repo.clone(),
+                shard_ref: HEAD.into(),
+            },
+            "ref",
+        ),
+        (
+            Partition::RepoIndex {
+                ns: namespace.clone(),
+                repo: repo.clone(),
+                prefix: 0,
+            },
+            "repo_index",
+        ),
+        (
+            Partition::RefIndex {
+                ns: namespace,
+                repo,
+                bucket: 0,
+            },
+            "ref_index",
+        ),
+        (Partition::ContentShard(0), "content"),
+    ] {
+        let error = now(env.pipe.partition_full(&partition, None));
+        assert_eq!(error.code(), Code::Unavailable);
+        assert!(env.metrics.0.lock().unwrap().contains(&(
+            "mkit_server_partition_full_total",
+            vec![("kind".into(), kind.into())]
+        )));
+    }
+    assert_eq!(env.metrics.count(METRIC_PARTITION_FULL), 6);
 }

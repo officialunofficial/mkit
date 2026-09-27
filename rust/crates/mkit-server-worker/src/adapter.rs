@@ -602,7 +602,7 @@ pub use glue::{fetch, ns_object, serve};
 mod glue {
     use std::sync::Arc;
 
-    use mkit_server::NoopMetrics;
+    use crate::telemetry::{ConsoleMetrics, install};
     use mkit_server::auth_v2::CORS_ALLOW_HEADERS;
     use mkit_server::pipeline::{Hooks, Pipeline};
     use mkit_worker_common::adapter::{
@@ -660,7 +660,7 @@ mod glue {
             Hooks::new(),
             config,
             Arc::new(WorkerClock),
-            Arc::new(NoopMetrics),
+            Arc::new(ConsoleMetrics::default()),
         )
         .map_err(|e| bad(&e))?;
         #[cfg(feature = "test-faults")]
@@ -700,6 +700,7 @@ mod glue {
     /// # Errors
     /// Only when the runtime fails to build a response.
     pub async fn fetch(req: Request, env: Env) -> worker::Result<Response> {
+        install();
         match WorkerConfig::from_env(&env) {
             Ok(cfg) => serve(req, env, &cfg).await,
             Err(_) if is_options_preflight(&req) => {
@@ -714,6 +715,7 @@ mod glue {
     /// # Errors
     /// Only when the runtime fails to build a response.
     pub async fn serve(req: Request, env: Env, cfg: &WorkerConfig) -> worker::Result<Response> {
+        install();
         if is_options_preflight(&req) {
             return cors_preflight_response(CORS_ALLOW_HEADERS, CORS_ALLOW_METHODS);
         }
@@ -788,6 +790,7 @@ mod glue {
     /// the plan in `env`'s `WORKERS_PLAN` var (see [`plan_capacity`]).
     #[must_use]
     pub fn ns_object(state: State, env: &Env, class: crate::classes::ShardClass) -> NsObject {
+        install();
         let plan = env.var(PLAN_VAR).ok().map(|v| v.to_string());
         let capacity = plan_capacity(plan.as_deref()).unwrap_or_else(|(e, free)| {
             worker::console_error!("{e}; using the Workers Free cap");

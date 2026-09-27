@@ -115,8 +115,8 @@ const _: () = assert!(MAX_CLOCK_LEAD_MS.unsigned_abs() < read::REPLAY_PRUNE_GRAC
 pub const DEFAULT_LIST_PAGE_LIMIT: u32 = 1000;
 
 /// Counter: a write failed because its partition is full (00-plan P-24).
-/// Alert on any increase.
-pub const METRIC_PARTITION_FULL: &str = "mkit_server_partition_full";
+/// Label `kind`; alert on any increase.
+pub const METRIC_PARTITION_FULL: &str = "mkit_server_partition_full_total";
 
 /// Counter: [`Pipeline::with_header`] dropped an invalid or reserved
 /// header; label `reason` (`name`, `reserved`, `value`).
@@ -1437,9 +1437,10 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// A full partition: count it, retry the prune alone (deletes still
     /// work) and fail closed with a retryable `unavailable`.
     async fn partition_full(&self, p: &Partition, prune: Option<Batch>) -> ServerError {
-        self.metrics.incr(METRIC_PARTITION_FULL, &[], 1);
+        self.metrics
+            .incr(METRIC_PARTITION_FULL, &[("kind", p.kind())], 1);
         let name = p.encode().map(|b| to_hex_bytes(&b)).unwrap_or_default();
-        tracing::error!(partition = %name, "storage partition full");
+        tracing::error!(partition = %name, kind = p.kind(), "storage partition full");
         if let Some(prune) = prune
             && let Err(e) = self.meta.apply(p, prune).await
         {

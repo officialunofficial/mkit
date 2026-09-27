@@ -55,6 +55,10 @@ impl Metrics for MetricsBridge {
     fn observe_ms(&self, name: &'static str, l: &[(&'static str, &str)], ms: f64) {
         metrics::histogram!(name, labels(l)).record(ms);
     }
+
+    fn gauge(&self, name: &'static str, l: &[(&'static str, &str)], value: f64) {
+        metrics::gauge!(name, labels(l)).set(value);
+    }
 }
 
 #[cfg(test)]
@@ -69,6 +73,11 @@ mod tests {
             mkit_server::METRIC_LATENCY,
             &[("procedure", "ReadRef")],
             2.0,
+        );
+        sink.gauge(
+            "mkit_server_partition_bytes",
+            &[("kind", "database")],
+            4096.0,
         );
     }
 

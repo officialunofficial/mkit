@@ -46,7 +46,7 @@ pub mod sql;
 pub mod ssh;
 pub mod storage_error;
 pub mod store;
-mod telemetry;
+pub mod telemetry;
 pub mod timers;
 pub mod upload;
 
