@@ -600,9 +600,10 @@ mod glue {
     use crate::ns_client::{StubTransport, WorkerNamespaceStore};
     use crate::ns_object::NsObject;
     use crate::r2::{EnvBucket, PACKS_KEYSPACE, R2BlobStore, WorkerBlobStore};
+    use crate::sharding_guard::DeploymentGuard;
 
     thread_local! {
-        static SHARDING_GUARD: crate::sharding_guard::DeploymentGuard = Default::default();
+        static SHARDING_GUARD: DeploymentGuard = DeploymentGuard::default();
     }
 
     /// The pipeline a request runs on.
