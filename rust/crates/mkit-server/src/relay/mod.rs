@@ -30,9 +30,19 @@ impl Default for RelayBudget {
     }
 }
 
-/// Commit-time lower bound through which this source has delivered its outbox.
-/// The first row is oldest because writers append in commit order. Saturates
-/// at zero for a writer timestamp of zero; an empty source is current at now.
+/// A commit-time lower bound for this source's undelivered outbox: every
+/// undelivered row committed at or after the returned time (+1).
+///
+/// Rows are in commit order (the `os` guard), but `at_ms` is the writer's
+/// plan-time reading and is **not** monotonic in seq: a writer may read its
+/// clock before retrying on `os`. The first row's `at_ms` still bounds every
+/// later row's commit time from below, because later rows commit after it.
+/// So the value is a valid lower bound, but it can move **backwards** as
+/// rows are delivered. A consumer (WP-1.23b's coordinator) keeps the running
+/// maximum it has seen, which stays safe for the same reason. The bound
+/// assumes the writer's clock is not ahead of the committing store's clock
+/// by more than the lease margin. Saturates at zero; an empty source
+/// reports `now_ms`.
 pub async fn relay_watermark<S: NamespaceStore>(
     store: &S,
     p: &Partition,

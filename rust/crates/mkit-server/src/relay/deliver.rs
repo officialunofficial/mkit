@@ -54,7 +54,7 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
     ) -> Result<Fired, StoreError> {
         let os_key = keys::outbox_sequence();
         let observed_os = ctx.store.get(ctx.partition, &os_key).await?;
-        let rows = read_rows(ctx, self.budget.max_rows).await?;
+        let rows = read_rows(ctx, self.budget.max_rows.max(1)).await?;
         // Decode all inspected rows before making progress: corruption is never skipped.
         let mut groups: Vec<TargetRows> = Vec::new();
         for (key, value) in rows {
@@ -92,7 +92,10 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
         let rh = keys::relay_high_water(ctx.partition)?;
         let mut delivered = Vec::new();
         let mut failed = false;
-        for (target, rows) in groups.into_iter().take(self.budget.max_targets as usize) {
+        for (target, rows) in groups
+            .into_iter()
+            .take(self.budget.max_targets.max(1) as usize)
+        {
             let target_rows = rows
                 .iter()
                 .map(|(seq, row, _, _)| (*seq, row.clone()))
@@ -123,10 +126,13 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
                 batch: Batch::new(),
             })
         } else {
-            Ok(Fired::Done(match observed_os {
-                Some(value) => Batch::new().require(Precondition::Equals(os_key, value)),
-                None => Batch::new(),
-            }))
+            // Guard `os` either way: a first-ever relay row committed during
+            // this fire moves `os` from absent, so `Done` races and the timer
+            // stays.
+            Ok(Fired::Done(Batch::new().require(match observed_os {
+                Some(value) => Precondition::Equals(os_key, value),
+                None => Precondition::Absent(os_key),
+            })))
         }
     }
 
@@ -165,6 +171,10 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
                 });
                 let mut end = completed + fitting_prefix(&batch, rh, &rows[completed..]);
                 if end == completed {
+                    tracing::warn!(
+                        seq = rows[completed].0,
+                        "relay row cannot fit one target batch; delivery to this target is stalled"
+                    );
                     return completed;
                 }
                 // A hook can use more space than the remaining headroom. Shrink

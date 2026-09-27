@@ -849,13 +849,18 @@ async fn later_watermark_read_failure_preserves_committed_chunk_cleanup() {
 }
 
 #[tokio::test]
-async fn drained_sources_guard_observed_sequence_and_absent_sequence_needs_no_guard() {
+async fn drained_sources_guard_observed_or_absent_sequence() {
     let s = memory();
     let h = handler(memory());
     let Fired::Done(batch) = fire(&h, &s).await.unwrap() else {
         panic!("empty source not done")
     };
-    assert_eq!(batch, Batch::new());
+    // A first-ever relay row committed during the fire moves `os` from
+    // absent, so `Done` must race rather than drop the kick.
+    assert_eq!(
+        batch.preconditions,
+        vec![Precondition::Absent(keys::outbox_sequence())]
+    );
     s.apply(
         &source(),
         Batch::new().put(keys::outbox_sequence(), codec::encode_u64(7)),
@@ -875,7 +880,7 @@ async fn drained_sources_guard_observed_sequence_and_absent_sequence_needs_no_gu
 }
 
 #[tokio::test]
-async fn zero_row_or_target_budget_delivers_nothing_and_keeps_the_kick() {
+async fn zero_row_or_target_budget_is_clamped_to_one_and_delivers() {
     for budget in [
         RelayBudget {
             max_rows: 0,
@@ -892,11 +897,12 @@ async fn zero_row_or_target_budget_delivers_nothing_and_keeps_the_kick() {
             ..handler(Instrumented::new())
         };
         append(&source, &target(0), vec![(key(), Value::default())], 50).await;
+        // A zero budget would reschedule at `now` forever; it is clamped to 1.
         assert!(matches!(
             fire(&relay, &source).await.unwrap(),
-            Fired::Reschedule { .. }
+            Fired::Done(_)
         ));
-        assert_eq!(queued(&source).await.len(), 1);
-        assert!(relay.target.applies.lock().unwrap().is_empty());
+        assert!(queued(&source).await.is_empty());
+        assert_eq!(relay.target.applies.lock().unwrap().len(), 1);
     }
 }
