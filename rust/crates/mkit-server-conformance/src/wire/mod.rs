@@ -61,10 +61,13 @@
 //! # Cases
 //!
 //! Names are stable: a baseline or a divergence list may refer to them.
-//! Multi-repository and namespace-policy cases are milestone M1; the rest are M0.
+//! Discovery, multi-repository and namespace-policy cases are milestone M1;
+//! the rest are M0.
 //!
 //! | Case | Requires | Asserts |
 //! |---|---|---|
+//! | `info.shape_and_policy` | | unauthenticated discovery reports consistent limits, policy and bounded private caching |
+//! | `info.ignores_repository_header` | | absent, nonexistent and malformed repository identities yield identical response bytes |
 //! | `policy.owner_write_allowed` | `namespace-policy`, `multi-repo`, `auth-v2` | an allowlisted namespace owner writes and reads its ref |
 //! | `policy.non_owner_write_denied` | `namespace-policy`, `multi-repo`, `auth-v2` | a non-owner gets `permission_denied`; reads show existing and absent refs unchanged |
 //! | `policy.non_allowlisted_namespace_denied` | `namespace-policy`, `multi-repo`, `auth-v2` | an owner outside the allowlist gets `permission_denied`; the repository is not created |

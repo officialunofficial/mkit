@@ -1106,3 +1106,49 @@ strict `store/codec.rs` decodes, and `mkit-server-conformance/src/storage/kv_cas
 creation, atomic publication, stale-ticket and acknowledgement cases over memory
 and SQLite. RPC composition and expiry are WP-1.9/1.10/1.14; WP-3.3 adds guarded
 Pending reservations, ReadServed, reconciliation and backlog enforcement.
+
+## Relay delivery advances durable per-source watermarks before source cleanup
+
+**Always:** relay rows for a source/target pair apply in sequence order. Each
+batch guards the target's `rh` and advances it atomically with the row upserts
+and pre-delivery hook effects. Duplicates never apply a target batch. Source
+cleanup guards each encoded row; draining the timer guards the originally
+observed `os`, so a same-millisecond writer cannot lose its wake-up. Writers
+stamp and chunk rows, and commit an immediate kind-3 timer with their outbox.
+Target watermarks are never pruned and are bounded by source shards.
+
+**Because:** target delivery and source cleanup cannot share a transaction.
+A crash, overlapping timer fires, or a concurrent writer can occur between them.
+
+**If violated:** re-delivery overwrites newer index values, hook effects detach
+from their membership writes, or newly queued rows lose their relay timer.
+Restoring an older source requires raising `os` above every target's `rh` for
+that source or re-keying it (R-102; WP-1.29).
+
+**Enforced by:** `mkit-server/src/relay/tests.rs` crash, contention, ordering,
+chunk-limit and wake-up tests; native SQLite driver tests; Worker Loopback host
+tests. Worker registration, membership reads and coordinator watermarks follow
+in WP-1.23b; writers in WP-1.9/1.10.
+
+## Deployment discovery is public and repository-independent
+
+**Always:** GetServerInfo is unauthenticated, never resolves a repository and
+never reads the store. Its response depends only on deployment configuration,
+hook defaults and store capabilities, with the upload threshold zero for
+Multi addressing or admission. The one exception is the Worker's
+deployment-wide sharding guard (R-94), which runs before every RPC, this one
+included: until an isolate has settled the guard, a cold GetServerInfo may
+read the root marker, and a deployment whose marker mismatches answers
+`unavailable` instead of advertising capabilities it would then refuse. The
+guard is deployment-wide, so this never depends on a repository.
+
+**Because:** clients need capabilities before authenticating, and discovery
+must never expose whether a repository exists (STC §2.1).
+
+**If violated:** clients cannot discover bearer deployments or malformed and
+unknown identities become a repository existence oracle.
+
+**Enforced by:** pipeline `tests::info`, Connect dispatch discovery tests,
+native `server_hardening` bearer/concurrency regression and wire cases
+`info.shape_and_policy` and `info.ignores_repository_header` on Single, Multi,
+native binary and Worker runners.

@@ -36,6 +36,7 @@ pub mod policy;
 mod principal;
 pub mod quota;
 pub mod refs;
+pub mod relay;
 mod replay;
 mod repo;
 mod rt;

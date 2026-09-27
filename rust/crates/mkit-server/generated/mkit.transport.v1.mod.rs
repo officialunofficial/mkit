@@ -61,6 +61,7 @@ pub mod __buffa {
         reg.register_json_any(super::__UPLOAD_PART_RESPONSE_JSON_ANY);
         reg.register_json_any(super::__COMPLETE_UPLOAD_REQUEST_JSON_ANY);
         reg.register_json_any(super::__COMPLETE_UPLOAD_RESPONSE_JSON_ANY);
+        reg.register_json_any(super::__PENDING_VERIFICATION_JSON_ANY);
     }
 }
 #[doc(inline)]
@@ -179,6 +180,10 @@ pub use self::__buffa::view::CompleteUploadRequestOwnedView;
 pub use self::__buffa::view::CompleteUploadResponseView;
 #[doc(inline)]
 pub use self::__buffa::view::CompleteUploadResponseOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::PendingVerificationView;
+#[doc(inline)]
+pub use self::__buffa::view::PendingVerificationOwnedView;
 #[doc(inline)]
 pub use self::__buffa::register_types;
 include!("mkit.transport.v1.transport.__connect.rs");

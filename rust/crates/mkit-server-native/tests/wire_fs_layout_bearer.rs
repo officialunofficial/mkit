@@ -30,6 +30,7 @@ const DIVERGENCES: &[(&str, &str)] = &[];
 
 fn profile(auth: WireAuth) -> Profile {
     let mut p = Profile::new(auth);
+    p.milestone = mkit_server_conformance::wire::Milestone::M1;
     p.list_refs = 200;
     // A server started empty for this test: whole-server listings are bounded.
     p.fresh_target = true;
@@ -69,6 +70,8 @@ async fn fs_layout_bearer_passes_the_wire_suite() {
     // passed.
     let native_passes: BTreeSet<_> = native.passes().into_iter().collect();
     for case in [
+        "info.shape_and_policy",
+        "info.ignores_repository_header",
         "auth.bearer_missing_unauthenticated",
         "auth.bearer_wrong_unauthenticated",
         "auth.bearer_applies_to_streaming",
