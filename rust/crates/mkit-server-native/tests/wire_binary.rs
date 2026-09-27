@@ -96,6 +96,7 @@ impl Server {
 
 fn profile(auth: WireAuth, atomic: bool) -> Profile {
     let mut p = Profile::new(auth);
+    p.milestone = mkit_server_conformance::wire::Milestone::M1;
     p.atomic_advance = atomic;
     p.max_pack_bytes = MAX_PACK;
     p.list_refs = 200;
@@ -113,6 +114,12 @@ async fn check(origin: &str, profile: Profile) {
     };
     let report = run(&target, None).await;
     common::judge(&report, DIVERGENCES);
+    for name in ["info.shape_and_policy", "info.ignores_repository_header"] {
+        assert!(
+            matches!(report.verdict(name), Some(Verdict::Pass(_))),
+            "{name} did not run"
+        );
+    }
     let mut skipped: Vec<_> = report
         .cases
         .iter()

@@ -164,9 +164,11 @@ where
     }
 }
 
-/// The transport paths a bearer deployment guards; health stays open.
+/// The transport paths a bearer deployment guards; health and deployment
+/// discovery stay open. Both still pass through the concurrency cap.
 fn guarded(path: &str) -> bool {
     !path.starts_with("/grpc.health.v1.Health/")
+        && path != "/mkit.transport.v1.TransportService/GetServerInfo"
 }
 
 /// In bearer mode, checks `Authorization: Bearer <token>` from the headers

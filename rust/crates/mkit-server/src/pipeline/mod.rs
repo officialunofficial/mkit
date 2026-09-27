@@ -25,6 +25,7 @@ mod download;
 mod faults;
 mod gate;
 mod hooks;
+mod info;
 mod outcome;
 mod plan;
 mod shard;
@@ -71,6 +72,7 @@ pub use hooks::{
     Hooks, NoOutcomes, NoPreReceive, NoReceipts, OpenAuthorizer, OutboxRow, OutcomeSink,
     PreReceive, ReceiptSigner,
 };
+pub use info::ServerInfo;
 use outcome::Outcome;
 use plan::{
     MAX_REPLAN, PRUNE_LIMIT, Plan, PlanClock, Planned, Snapshot, WriteKind, WriteRequest,
@@ -141,6 +143,16 @@ pub struct PipelineConfig {
     pub authorizer_role: AuthorizerRole,
     /// Upload caps, supplied by the binding (used by M0-05b).
     pub upload_limits: UploadLimits,
+    /// Resumable upload part size: a power of two in 8–32 MiB.
+    pub part_size: u64,
+    /// Largest number of parts, sufficient to reach the upload byte cap.
+    pub max_parts: u32,
+    /// Largest requested `ListRefs` page, in 1..=10,000. The default 1000
+    /// refs with at most 512-byte names fit STC §7.9's 2 MiB page bound.
+    pub max_list_refs_page_size: u32,
+    /// Packs smaller than this may skip `BeginUpload`; `u64::MAX` means never
+    /// required. Advertised as zero with Multi addressing or admission.
+    pub begin_upload_threshold_bytes: u64,
     /// Largest download chunk (used by M0-05b).
     pub download_chunk_max: usize,
     /// The default write quota: `Some(DEFAULT_WRITE_QUOTA)` for auth v2
@@ -171,6 +183,10 @@ impl PipelineConfig {
             sharding: Sharding::Single,
             auth,
             upload_limits,
+            part_size: mkit_core::upload_parts::MIN_PART_SIZE,
+            max_parts: 10_000,
+            max_list_refs_page_size: DEFAULT_LIST_PAGE_LIMIT,
+            begin_upload_threshold_bytes: u64::MAX,
             download_chunk_max: DOWNLOAD_CHUNK_MAX,
             write_quota,
             list_page_limit: DEFAULT_LIST_PAGE_LIMIT,
@@ -192,7 +208,7 @@ impl PipelineConfig {
     }
 }
 
-/// What the pipeline offers bindings (and a future `GetServerInfo`).
+/// What the pipeline offers bindings and `GetServerInfo`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PipelineCapabilities {
@@ -303,7 +319,9 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// `FsLayoutStore` never runs auth v2); a store without atomic batches
     /// must report an implicit layout version; a store's layout version
     /// must be this binary's; the page limit and apply window must be
-    /// positive. Namespace/write policy combinations must be compatible;
+    /// positive. Resumable upload and advertised page limits must be valid
+    /// and the part capacity must reach the upload byte cap. Namespace/write
+    /// policy combinations must be compatible;
     /// `any` requires non-default admission or its explicit unsafe override,
     /// and an authority authorizer must not be the open default.
     pub fn new(
@@ -314,6 +332,7 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         clock: Arc<dyn Clock>,
         metrics: Arc<dyn Metrics>,
     ) -> Result<Self, ServerError> {
+        cfg.validate_server_info_limits()?;
         let policy_refusal = match (&cfg.addressing, cfg.write_policy) {
             (Addressing::Multi(_), WritePolicy::Open) => {
                 Some("write_policy open is single-repository only (SPEC-TRANSPORT-CONNECT §7.5)")

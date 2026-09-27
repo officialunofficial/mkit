@@ -32,8 +32,8 @@ use mkit_server_native::{
 };
 use mkit_transport_connect::generated::__buffa::oneof::upload_pack_request::Body as UploadBody;
 use mkit_transport_connect::generated::{
-    DownloadPackRequest, DownloadPackResponse, PackChunk, ReadRefRequest, ReadRefResponse,
-    UploadPackHeader, UploadPackRequest, UploadPackResponse,
+    DownloadPackRequest, DownloadPackResponse, GetServerInfoResponse, PackChunk, ReadRefRequest,
+    ReadRefResponse, UploadPackHeader, UploadPackRequest, UploadPackResponse,
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tower::ServiceExt as _;
@@ -590,4 +590,45 @@ fn a_stale_copy_of_the_database_is_refused() {
         marker
     );
     drop(server::open(&cfg(&root, &meta)).unwrap());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bearer_server_info_is_public_but_still_takes_a_concurrency_slot() {
+    const INFO: &str = "/mkit.transport.v1.TransportService/GetServerInfo";
+    let mut opts = RouterOptions::default();
+    opts.max_concurrency = 1;
+    opts.queue_timeout = Duration::from_millis(100);
+    let router = build_router(pipeline(bearer()), &opts);
+    let discover = || post(INFO, "application/proto", Body::empty(), false);
+    let public = reply(router.clone().oneshot(discover()).await.unwrap()).await;
+    assert_eq!(public.status, 200);
+    let info = decode_unary::<GetServerInfoResponse>(&public)
+        .unwrap()
+        .unwrap();
+    assert_eq!(info.protocol.as_deref(), Some("mkit.transport.v1"));
+    assert_eq!(public.headers["cache-control"], "private, max-age=60");
+    for path in [
+        READ_REF,
+        DOWNLOAD_PACK,
+        "/mkit.transport.v1.TransportService/GetServerInfo/",
+        "/mkit.transport.v1.TransportService/GetServerInfoExtra",
+    ] {
+        let denied = router
+            .clone()
+            .oneshot(post(path, "application/proto", Body::empty(), false))
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED, "{path}");
+    }
+    let held = router
+        .clone()
+        .oneshot(download(&[0; 32], true))
+        .await
+        .unwrap();
+    let shed = router.clone().oneshot(discover()).await.unwrap();
+    assert_eq!(shed.status(), StatusCode::SERVICE_UNAVAILABLE);
+    drop(shed);
+    drop(held);
+    let public = router.oneshot(discover()).await.unwrap();
+    assert_eq!(public.status(), StatusCode::OK);
 }

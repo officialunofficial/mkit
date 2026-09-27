@@ -1071,3 +1071,21 @@ that source or re-keying it (R-102; WP-1.29).
 chunk-limit and wake-up tests; native SQLite driver tests; Worker Loopback host
 tests. Worker registration, membership reads and coordinator watermarks follow
 in WP-1.23b; writers in WP-1.9/1.10.
+
+## Deployment discovery is public and repository-independent
+
+**Always:** GetServerInfo is unauthenticated, never resolves a repository and
+never reads the store. Its response depends only on deployment configuration,
+hook defaults and store capabilities, with the upload threshold zero for
+Multi addressing or admission.
+
+**Because:** clients need capabilities before authenticating, and discovery
+must never expose whether a repository exists (STC §2.1).
+
+**If violated:** clients cannot discover bearer deployments or malformed and
+unknown identities become a repository existence oracle.
+
+**Enforced by:** pipeline `tests::info`, Connect dispatch discovery tests,
+native `server_hardening` bearer/concurrency regression and wire cases
+`info.shape_and_policy` and `info.ignores_repository_header` on Single, Multi,
+native binary and Worker runners.

@@ -972,15 +972,12 @@ fn too_many_chunks_is_rejected() {
 }
 
 /// The per-upload chunk cap of SPEC-TRANSPORT §4.4 holds even when the
-/// pipeline's own upload limits set none.
+/// pipeline's own upload limits set no chunk cap.
 #[test]
-fn chunk_cap_holds_with_an_uncapped_pipeline() {
+fn chunk_cap_holds_with_an_uncapped_chunk_pipeline() {
     let clock = Arc::new(ManualClock::new(T0));
     let mut uncapped = cfg(AuthMode::TransportIdentity);
-    uncapped.upload_limits = crate::upload::UploadLimits {
-        max_total_bytes: u64::MAX,
-        max_chunks: u32::MAX,
-    };
+    uncapped.upload_limits.max_chunks = u32::MAX;
     let blobs = MemoryBlobStore::default();
     let meta = MemoryKv::with_clock(clock.clone());
     let metrics = Arc::new(NoopMetrics);
