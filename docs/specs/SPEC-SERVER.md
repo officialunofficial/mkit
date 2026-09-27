@@ -10,7 +10,8 @@ audience: implementers of mkit.transport.v1 servers and of deployment business l
 ## 1. Scope and relation to SPEC-TRANSPORT-CONNECT
 
 This specification defines server-internal pipeline guarantees, durable
-outcomes, and the contract between a server and deployment business logic.
+outcomes and lifecycle events, storage leases, server garbage collection,
+and the contract between a server and deployment business logic.
 An independent hook implementation can use this contract and the
 `mkit.server.hooks.v1` schema without using a server implementation.
 
@@ -1184,7 +1185,10 @@ pure function of those terms and `now`:
 
 An absent lease has state `active` without a time limit. Zero-length
 intervals are empty. The server MUST evaluate the effective storage-lease
-state on every request; access enforcement MUST NOT wait for a timer.
+state on every repository request; access enforcement MUST NOT wait for
+a timer. Repository-independent deployment discovery remains as STC
+§2.1 requires: it MUST NOT resolve a repository or depend on its
+storage-lease state.
 An expired state MUST NOT be served as active from a stale state cache.
 For branch deletion, head and packmap MUST be removed together, along
 with the branch's published pointer. A repository-level deletion applies
@@ -1212,16 +1216,20 @@ blocked by suspension MUST also return that permission error.
 These storage-lease denials MUST NOT use `failed_precondition`, which
 would cause clients to restart `BeginUpload`. Read responses and caches
 MUST preserve the denial and MUST NOT expose suspended or deleted data
-through a cached successful response. Cache-purge wire details are
-reserved for §16.
+through a cached successful response. Signed URL reads remain subject
+to these storage-lease checks and resolve only in the published view, as
+[SPEC-WRITE-GRANTS §9.4](SPEC-WRITE-GRANTS.md#94-signed-url-tokens) requires.
+Cache-purge wire details are reserved for §16.
 
 ### 12.3 Setting leases and transition work
 
 `SetLease` assigns, replaces, or removes storage-lease terms for a
 repository default or, in indexed mode, an individual ref. Only an
 administrator authorized for that scope MAY set a lease. The right
-includes shortening a lease; the server MUST evaluate shortened terms
-immediately, including transitions directly to suspension or deletion.
+includes shortening a lease. The server MUST evaluate shortened terms
+without waiting for a timer, subject to §12.1's completion bound for
+repository defaults. This includes transitions directly to suspension
+or deletion.
 Removing a repository default makes undeleted refs without per-ref
 terms permanent. Removing per-ref terms restores the repository default,
 or permanent retention if that default is absent. Both actions MUST NOT
@@ -1322,7 +1330,8 @@ Per-repository GC MUST include all of the following roots:
 An `AlreadyPresent` answer MUST pin its pack against repository removal
 and byte deletion for `already_present_pin_window`, beginning at the
 answer. Repeated answers extend protection to cover each answer's
-window. Pins remain effective throughout the removal protocol.
+window. The pin MUST be durable before the answer is returned. Pins
+remain effective throughout the removal protocol.
 
 Every pack and packlist node on a root's packmap chain MUST remain live
 in both indexed and opaque modes: clients fail closed when a packmap
