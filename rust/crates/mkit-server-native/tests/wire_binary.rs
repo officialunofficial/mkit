@@ -63,6 +63,7 @@ impl Server {
             .arg(root)
             .args(flags)
             .env_remove("MKIT_API_TOKEN")
+            .env_remove("MKIT_TICKET_KEYS")
             .env_remove("MKIT_SERVE_ROOT")
             .envs(env.iter().copied())
             .env("RUST_LOG", "warn")
@@ -113,6 +114,19 @@ async fn check(origin: &str, profile: Profile) {
         profile,
     };
     let report = run(&target, None).await;
+    if target.profile.has(Feature::Tickets) {
+        for name in [
+            "tickets.begin_upload_new",
+            "tickets.begin_upload_idempotent",
+            "tickets.begin_upload_caps",
+            "tickets.begin_upload_packmap_refused",
+        ] {
+            assert!(
+                matches!(report.verdict(name), Some(Verdict::Pass(_))),
+                "{name} did not pass"
+            );
+        }
+    }
     if target.profile.has(Feature::EpochLeases) {
         assert!(matches!(
             report.verdict("leases.bump_completes_and_writes_continue"),
@@ -198,6 +212,11 @@ async fn binary_fs_sqlite_auth_v2_d34() {
 
 async fn fs_sqlite_auth_v2(sharding: &str) {
     let root = common::repo_root();
+    let ticket_file = root.path().join("ticket.keys");
+    common::secret_file(
+        &ticket_file,
+        b"dev 1111111111111111111111111111111111111111111111111111111111111111\n",
+    );
     let port = free_port();
     let origin = format!("http://127.0.0.1:{port}");
     let meta = format!("sqlite:{}", common::s(&root.path().join("meta.sqlite3")));
@@ -210,6 +229,8 @@ async fn fs_sqlite_auth_v2(sharding: &str) {
             &meta,
             "--sharding",
             sharding,
+            "--ticket-key-file",
+            common::s(&ticket_file),
             "--auth",
             "auth-v2",
             "--audience",
@@ -227,6 +248,7 @@ async fn fs_sqlite_auth_v2(sharding: &str) {
         true,
     );
     profile.features.insert(Feature::StrictGzipAuth);
+    profile.features.insert(Feature::Tickets);
     profile.sharding_d34 = sharding == "d34";
     profile.features.insert(Feature::Timers);
     #[cfg(feature = "test-faults")]
@@ -250,6 +272,11 @@ async fn binary_s3_sqlite_auth_v2() {
 
     let fake = FakeS3::start();
     let root = common::repo_root();
+    let ticket_file = root.path().join("ticket.keys");
+    common::secret_file(
+        &ticket_file,
+        b"dev 1111111111111111111111111111111111111111111111111111111111111111\n",
+    );
     let port = free_port();
     let origin = format!("http://127.0.0.1:{port}");
     let meta = format!("sqlite:{}", common::s(&root.path().join("meta.sqlite3")));
@@ -267,6 +294,8 @@ async fn binary_s3_sqlite_auth_v2() {
             &blob,
             "--s3-endpoint",
             &endpoint,
+            "--ticket-key-file",
+            common::s(&ticket_file),
             "--auth",
             "auth-v2",
             "--audience",
@@ -288,6 +317,7 @@ async fn binary_s3_sqlite_auth_v2() {
         true,
     );
     profile.features.insert(Feature::StrictGzipAuth);
+    profile.features.insert(Feature::Tickets);
     profile.features.insert(Feature::Timers);
     #[cfg(feature = "test-faults")]
     profile.features.insert(Feature::TestFaults);

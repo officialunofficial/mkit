@@ -57,6 +57,7 @@ use mkit_server::sql::Capacity;
 
 use crate::naming::Placement;
 use mkit_server::pipeline::Sharding;
+use mkit_server::upload::token::TicketKeys;
 
 use crate::do_sql::{DO_CAPACITY, DO_FREE_MAX_BYTES};
 
@@ -66,6 +67,8 @@ pub const AUDIENCE_VAR: &str = "AUTH_AUDIENCE";
 pub const REPOSITORY_VAR: &str = "AUTH_REPOSITORY";
 /// The Worker var naming the Cloudflare plan: `paid` or `free`.
 pub const PLAN_VAR: &str = "WORKERS_PLAN";
+/// The deployment secret containing upload MAC keys.
+pub const TICKET_KEYS_VAR: &str = "TICKET_KEYS";
 
 /// The largest pack one `UploadPack` may declare: 64 MiB, vcs-worker's
 /// cap. A documented M1 stopgap: resumable parts (WP-1.11) replace it.
@@ -92,6 +95,8 @@ pub struct WorkerConfig {
     pub audience: String,
     /// `AUTH_REPOSITORY`: the repository identity writes are signed for.
     pub repository: String,
+    /// Upload MAC keys; missing keys disable `BeginUpload`.
+    pub ticket_keys: Option<TicketKeys>,
     /// `SHARDING`: single (default) or d34; guarded against changing existing data.
     pub sharding: Sharding,
     /// Deployment-wide placement. Jurisdiction must remain fixed for its lifetime:
@@ -157,6 +162,7 @@ impl WorkerConfig {
         let mut config =
             PipelineConfig::new(Addressing::Single { repo }, AuthMode::AuthV2(auth), limits);
         config.sharding = self.sharding;
+        config.ticket_keys.clone_from(&self.ticket_keys);
         #[cfg(feature = "test-faults")]
         if let Some(quota) = self.test_quota {
             config.write_quota = Some(quota);
@@ -177,6 +183,12 @@ impl WorkerConfig {
         mkit_core::repo_identity::RepositoryIdentity::parse_bare_allowed(&repository).map_err(
             |_| ConfigError("AUTH_REPOSITORY is invalid (SPEC-TRANSPORT-CONNECT §7.4)".into()),
         )?;
+        let ticket_keys = var(TICKET_KEYS_VAR)
+            .map(|text| {
+                TicketKeys::parse_secret(text)
+                    .map_err(|_| ConfigError("TICKET_KEYS is invalid".into()))
+            })
+            .transpose()?;
         let sharding = match var("SHARDING").as_deref() {
             None | Some("single") => Sharding::Single,
             Some("d34") => Sharding::D34,
@@ -200,6 +212,7 @@ impl WorkerConfig {
             placement,
             audience,
             repository,
+            ticket_keys,
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
             blob_binding: crate::r2::STORAGE_BINDING,
             #[cfg(feature = "test-faults")]
@@ -213,7 +226,16 @@ impl WorkerConfig {
     /// As [`Self::from_vars`].
     #[cfg(target_arch = "wasm32")]
     pub fn from_env(env: &worker::Env) -> Result<Self, ConfigError> {
-        Self::from_vars(|name| env.var(name).ok().map(|v| v.to_string()))
+        Self::from_vars(|name| {
+            if name == TICKET_KEYS_VAR {
+                env.secret(name)
+                    .ok()
+                    .map(|secret| secret.to_string())
+                    .or_else(|| env.var(name).ok().map(|value| value.to_string()))
+            } else {
+                env.var(name).ok().map(|value| value.to_string())
+            }
+        })
     }
 }
 
@@ -887,6 +909,30 @@ mod tests {
             WorkerConfig::from_vars(vars(&[(AUDIENCE_VAR, "https://vcs.example")])).unwrap_err(),
             ConfigError("AUTH_REPOSITORY is not configured".into())
         );
+    }
+
+    #[test]
+    fn ticket_keys_are_optional_validated_and_passed_to_the_pipeline() {
+        let base = [
+            (AUDIENCE_VAR, "https://vcs.example"),
+            (REPOSITORY_VAR, "default"),
+        ];
+        let cfg = WorkerConfig::from_vars(vars(&base)).unwrap();
+        assert!(cfg.ticket_keys.is_none());
+        let mut pairs = base.to_vec();
+        let secret = "dev 1111111111111111111111111111111111111111111111111111111111111111";
+        pairs.push((TICKET_KEYS_VAR, secret));
+        let cfg = WorkerConfig::from_vars(vars(&pairs)).unwrap();
+        assert!(cfg.ticket_keys.is_some());
+        assert_eq!(cfg.pipeline_config().unwrap().ticket_keys, cfg.ticket_keys);
+        for invalid in ["", "dev secret-must-not-be-echoed", "bad/key 11"] {
+            pairs.pop();
+            pairs.push((TICKET_KEYS_VAR, invalid));
+            assert_eq!(
+                WorkerConfig::from_vars(vars(&pairs)).unwrap_err(),
+                ConfigError("TICKET_KEYS is invalid".into())
+            );
+        }
     }
 
     #[test]

@@ -217,6 +217,13 @@ async fn serve_sharding(
     let mut cfg = PipelineConfig::new(addressing, auth(&origin), limits);
     cfg.write_quota = quota;
     cfg.sharding = sharding;
+    cfg.ticket_keys = Some(
+        mkit_server::upload::token::TicketKeys::parse(
+            "dev 1111111111111111111111111111111111111111111111111111111111111111",
+        )
+        .unwrap(),
+    );
+    cfg.ticket_caps.per_signer = 4;
     let clock = Arc::new(SystemClock);
     let kv = Arc::new(MemoryKv::with_clock(clock.clone()));
     let meta = Shared(kv, mutant, Arc::default());
@@ -315,6 +322,8 @@ fn v2_profile(origin: &str) -> Profile {
     p.derive_features();
     // The pipeline rejects a signature over gzip bytes (fails closed).
     p.features.insert(Feature::StrictGzipAuth);
+    p.features.insert(Feature::Tickets);
+    p.ticket_per_signer = 4;
     p
 }
 
@@ -324,6 +333,19 @@ async fn check(origin: String, profile: Profile) {
         profile,
     };
     let report = run(&target, None).await;
+    if target.profile.has(Feature::Tickets) {
+        for name in [
+            "tickets.begin_upload_new",
+            "tickets.begin_upload_idempotent",
+            "tickets.begin_upload_caps",
+            "tickets.begin_upload_packmap_refused",
+        ] {
+            assert!(
+                matches!(report.verdict(name), Some(Verdict::Pass(_))),
+                "{name} did not pass"
+            );
+        }
+    }
     common::judge(&report, PIPELINE_DIVERGENCES);
     for name in ["info.shape_and_policy", "info.ignores_repository_header"] {
         assert!(
@@ -524,6 +546,9 @@ async fn pipeline_d34_epoch_leases() {
     let report = run(&target, Some(case)).await;
     common::judge(&report, PIPELINE_DIVERGENCES);
     assert_eq!(report.passes(), [case]);
+    let tickets = run(&target, Some("tickets.")).await;
+    common::judge(&tickets, PIPELINE_DIVERGENCES);
+    assert_eq!(tickets.passes().len(), 4, "all ticket cases run under D34");
 
     let repo = RepoId {
         namespace: NamespaceKey::deployment_default(),

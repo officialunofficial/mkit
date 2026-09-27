@@ -3,3 +3,4 @@
 # Cross-checked by `python3 scripts/golden/blake3_subtree_ref.py`
 # Format: <name> <blake3-hex-of-file-bytes>
 subtree-merge.json 649acec4f73291e603f74d2822e29f776e4cdf1fead5c0b4e11ff6f2e5dbd159
+ticket-token-v1.json d7d10eac56669f62e89aebe8f004442c9d35d6baa106786d6c1bd0744f86a7bc

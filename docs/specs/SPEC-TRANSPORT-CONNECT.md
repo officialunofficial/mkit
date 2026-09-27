@@ -332,7 +332,9 @@ Before the generic `failed_precondition` mapping, a client MUST check
 whether `AdvanceRefs` returned `failed_precondition` with exact public
 message `delta base not available in this repository`. That answer is
 not a ticket failure: the client re-plans once as a self-contained pack
-(§7.6, **Errors**). A client MUST also check for `unavailable` with a
+(§7.6, **Errors**). On `BeginUpload`, `failed_precondition` with exact
+public message `too many open upload tickets` is also not a ticket
+failure. A client MUST also check for `unavailable` with a
 `PendingVerification` detail and follow §7.6's **Pending verification**
 polling rule, without its normal backoff ladder.
 `is_retryable` (SPEC-TRANSPORT §7) continues to apply once translated:
@@ -345,7 +347,8 @@ observed. Subject to the checks above, a v2 client maps
 `failed_precondition` on `BeginUpload`, `UploadPart`, `CompleteUpload`,
 a ticketed `UploadPack`, or an `AdvanceRefs` carrying `ticket_ids` to a
 ticket failure, which it resolves by calling `BeginUpload` again, never
-to `RefConflict`.
+to `RefConflict`, except for the two cases the paragraph after the table
+excludes.
 
 | Condition | Connect code |
 |---|---|
@@ -358,6 +361,7 @@ to `RefConflict`.
 | A grant that does not authorize a write, including an epoch mismatch found at `apply` ([SPEC-WRITE-GRANTS §11](SPEC-WRITE-GRANTS.md#11-error-codes)) | `permission_denied` |
 | Any unauthorized read of a private repository ([SPEC-WRITE-GRANTS §9.3](SPEC-WRITE-GRANTS.md#93-read-authorization)), indistinguishable from a missing repository | `not_found` |
 | An expired, unknown, or missing ticket, or a ticket presented to an advance of a ref it does not name (§7.6) | `failed_precondition` |
+| Too many open upload tickets for the ref or the signer (§7.6) | `failed_precondition`, with public message `too many open upload tickets` |
 | An unresolved delta base after the relay-lag bound, in indexed mode (SPEC-SERVER §9.4) | `failed_precondition`, with public message `delta base not available in this repository` |
 | A part whose subtree hash or length differs from its commitment, or a completion whose merged root or total differs from the ticket (§7.6) | `invalid_argument` |
 | A pack still under verification in indexed mode (§7.6) | `unavailable` with exactly one `PendingVerification` detail |
@@ -369,9 +373,12 @@ to `RefConflict`.
 | A new operation that the admission step denies outright (§5.1) | `permission_denied`, with no `AdmissionChallenge` detail, with its default HTTP status 403, never 402 |
 
 `failed_precondition` is a CAS conflict only on `UpdateRef`. Except
-for the indexed delta-base case above, it is a ticket failure on the
+for the indexed delta-base case and the `BeginUpload` open-ticket cap
+case (`too many open upload tickets`) above, it is a ticket failure on the
 other RPCs listed here and on an `UploadPack` that needed a ticket and
-carried none (§7.6). A client MUST NOT treat a ticket failure as a ref
+carried none (§7.6). On the cap case, the client fails the operation
+with a user-visible error and does not call `BeginUpload` again.
+A client MUST NOT treat a ticket failure as a ref
 conflict. No ticket failure is `resource_exhausted`,
 because clients retry that code on the backoff ladder. For the same
 reason, no admission challenge or denial is `resource_exhausted`.
@@ -1154,6 +1161,7 @@ ticket, `BeginUpload` returns the existing ticket: the same id and the
 same upload session, never `AlreadyPresent`. Membership is eventually
 consistent (§7.9), so a server MAY return a ticket for a pack that is
 already a member. That costs only a re-upload.
+`AlreadyPresent` and a returned live ticket run no admission.
 
 **Ticket token.** `token` is an opaque, server-authenticated value that
 binds the ticket id, audience, repository, signer, `pack_id`, `bytes`,
@@ -1509,7 +1517,7 @@ Explicitly deferred to sibling issues:
 
 | Version | Status | Changes |
 |---|---|---|
-| `2` | draft | §7.4 repository addressing; §7.5 namespace and write policy (owner key); `GetServerInfo` (§2.1); §7.6 upload tickets and resumable parts; §7.8 ref deletion; §7.9 consistency and `ListRefs` paging; error-code split between `unauthenticated` and `permission_denied` (§5) (mkit#1084, mkit#1090); SPEC-WRITE-GRANTS (mkit#1085): signed reads and `X-Write-Grant` (§7.1), the M2 RPC rows (§2), and grant cross-references. §5.1 admission challenges: HTTP 402 with `permission_denied` and an opaque challenge list, raw MPP/x402 header pass-through, the header-returning `admission_helper` with its allowlist and hard-reserved set; §7.1 replay lookup after authentication and before authorization and admission, with signed reads outside the ledger; retryable `aborted` for in-flight operations (§5); §7.7 lifecycle per RPC (mkit#1086). The M0 server implementation still resumes an interrupted `UploadPack` through its `in_flight` replay record until M1 tickets land. M1: branch-sharded servers MAY require the canonical `AdvanceRefs` head/packmap pairing (§4; WP-1.22 amendment 1). Indexed mode: PendingVerification polling with a 1,000 ms floor (§5, §7.6), delta-base mapping and self-contained replanning in a new signed operation (§5, §7.6), packlist rebuilding (§7.6), advertised max_delta_chain_depth (§2.1), and the membership-dependent lag window and replay exclusion (§7.1, §7.9; SPEC-SERVER §9.4). |
+| `2` | draft | §7.4 repository addressing; §7.5 namespace and write policy (owner key); `GetServerInfo` (§2.1); §7.6 upload tickets and resumable parts; §7.8 ref deletion; §7.9 consistency and `ListRefs` paging; error-code split between `unauthenticated` and `permission_denied` (§5) (mkit#1084, mkit#1090); SPEC-WRITE-GRANTS (mkit#1085): signed reads and `X-Write-Grant` (§7.1), the M2 RPC rows (§2), and grant cross-references. §5.1 admission challenges: HTTP 402 with `permission_denied` and an opaque challenge list, raw MPP/x402 header pass-through, the header-returning `admission_helper` with its allowlist and hard-reserved set; §7.1 replay lookup after authentication and before authorization and admission, with signed reads outside the ledger; retryable `aborted` for in-flight operations (§5); §7.7 lifecycle per RPC (mkit#1086). The M0 server implementation still resumes an interrupted `UploadPack` through its `in_flight` replay record until M1 tickets land. M1: branch-sharded servers MAY require the canonical `AdvanceRefs` head/packmap pairing (§4; WP-1.22 amendment 1). Indexed mode: PendingVerification polling with a 1,000 ms floor (§5, §7.6), delta-base mapping and self-contained replanning in a new signed operation (§5, §7.6), packlist rebuilding (§7.6), advertised max_delta_chain_depth (§2.1), and the membership-dependent lag window and replay exclusion (§7.1, §7.9; SPEC-SERVER §9.4). BeginUpload open-ticket cap error and client no-retry carve-out (§5), and admission-free AlreadyPresent/live-ticket results (§7.6; WP-1.9a amendment 1). |
 | `1` | draft | Initial `mkit.transport.v1` proto: 7 wire RPCs covering every `Transport` trait verb (§2), `PackChunk` reused byte-for-byte from `ssh.proto`, `RefExpectation`/`RefEntry` duplicated with pinned wire numbers pending mkit#679's shared-proto extraction. |
 
 ---
