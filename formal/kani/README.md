@@ -50,8 +50,9 @@ a `*_canary_*` harness is `#[kani::should_panic]` and must report
 `VERIFICATION:- SUCCESSFUL (encountered one or more panics as expected)`:
 the checker has falsified a deliberately wrong statement, which shows the
 property it mirrors is checkable at that bound. Every other harness must
-report `VERIFICATION:- SUCCESSFUL`, except the two marked **FINDING**
-below, which fail on purpose until the production code is fixed.
+report `VERIFICATION:- SUCCESSFUL`. The two harnesses marked
+**FINDING** below failed until the production code was fixed (MKIT-56,
+MKIT-59, 2026-09-27); both now pass.
 `kani::cover!` sites must be `satisfied` (Kani prints `N of N cover
 properties satisfied`); they show the asserted `Ok` paths are reachable.
 
@@ -95,7 +96,7 @@ build. Cap: 15 min per harness.
 | `merkle_roundtrip_one_chunk` | independent §1.1/§5.3 builder's proof accepted by `verify_chunk` | 1 symbolic chunk | pass | 11 s |
 | `merkle_roundtrip_two_chunks` | as above, both positions | 2 symbolic chunks | pass | 26 s |
 | `merkle_canary_tampered_leaf_verifies` | canary: "any leaf verifies under a genuine proof" | 2 chunks | falsified (expected) | 15 s |
-| `merkle_builder_empty_tree_refuses` | **new**: §5.4 builder rule (added on this branch): every single-leaf, multi-leaf and range request against the empty `Tree` is refused | any `u32` position/start/end | **FAILS — FINDING 1** (counterexample `start = end = 0`), 1/1 cover | 7 s |
+| `merkle_builder_empty_tree_refuses` | **new**: §5.4 builder rule (added on this branch): every single-leaf, multi-leaf and range request against the empty `Tree` is refused | any `u32` position/start/end | pass after the MKIT-56 fix (FINDING 1; failed before with `start = end = 0`), 1/1 cover | 8 s |
 
 ### mkit-core: pack (BLAKE3 → `toy_hash`, zstd decompression stubbed)
 
@@ -122,8 +123,8 @@ build. Cap: 15 min per harness.
 | `software_key_record_decode_header_no_panic` | as above | 10, 11 B | pass | 119 s |
 | `software_key_record_decode_15b_no_panic` | as above | 15 B | pass | 58 s |
 | `software_key_record_roundtrip` | `decode(encode(r)) == r` | empty variable fields, any algorithm 1–3, attrs, nonce | pass | 27 s |
-| `software_key_record_rejects_algorithm_4` | §6.1.1 "MUST reject id `0x04`" | minimal record, symbolic attrs/nonce | pass (default features) | 23 s |
-| same, `--features bls-threshold` | as above | as above | **FAILS — FINDING 2** | 45 s |
+| `software_key_record_rejects_algorithm_4` | §6.1.1 "MUST reject id `0x04`" | minimal record, symbolic attrs/nonce | pass (default features) | 27 s |
+| same, `--features bls-threshold` | as above | as above | pass after the MKIT-59 fix (FINDING 2; failed before) | 62 s |
 | `software_key_record_canary_trailing_byte_accepted` | canary: "valid record + 1 trailing byte still decodes" | 59 + 1 B | falsified (expected) | 21 s |
 
 ### mkit-rpc
@@ -144,15 +145,25 @@ build. Cap: 15 min per harness.
    returns `Ok(Proof { leaf_count: 0, siblings: [] })`.
    `merkle_builder_empty_tree_refuses` reports this counterexample
    (`start = 0, end = 0`; the single-leaf and multi-leaf builders refuse
-   correctly). Production code was left unchanged; the harness passes
-   once the builder refuses.
+   correctly). **Fixed (MKIT-56):** `range_proof` now returns
+   `PositionOutOfRange(start)` for every range of the empty tree, an
+   intentional divergence from upstream `commonware_storage::bmt` (commented
+   in the code; the commonware cross-check draws `n >= 1` only). Regression
+   test `merkle::tests::empty_tree_builders_refuse_position_zero`; the
+   harness passes (2026-09-27: `0 of 4628 failed`, 1/1 cover, 7.5 s).
 2. **SPEC-KEYSTORE §6.1.1 algorithm id `0x04` under `bls-threshold`.**
    The spec says a `MKITKSV1` decoder MUST reject id `0x04`.
    `algorithm_from_id` maps `4 => Algorithm::Bls12381Threshold` when the
    `bls-threshold` feature is on, so `EncryptedKeyRecord::decode` accepts
    such a record; rejection only happens later, in `decrypt`'s plaintext
-   length check. `software_key_record_rejects_algorithm_4` holds in the
-   default build and fails with `--features bls-threshold`.
+   length check. `software_key_record_rejects_algorithm_4` held in the
+   default build and failed with `--features bls-threshold`. **Fixed
+   (MKIT-59):** §6.1.1 and §6.1.2 are explicit that shares use the separate
+   `MKITKSB1` record, so `algorithm_from_id` now rejects `4` in every build
+   (no spec change). Regression test
+   `encrypted_record::tests::encrypted_record_decode_rejects_reserved_algorithm_4`
+   (failed under `bls-threshold` before the fix); the harness passes in
+   both configurations (2026-09-27: `0 of 771 failed` each).
 
 ## Dropped or narrowed (did not finish within 15 min)
 

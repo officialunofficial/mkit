@@ -266,14 +266,12 @@ fn algorithm_id(algorithm: Algorithm) -> u8 {
         Algorithm::Ed25519 => 1,
         Algorithm::Secp256k1 => 2,
         Algorithm::P256 => 3,
-        // 4 is reserved for BLS12-381 threshold. The on-disk wire
-        // format is shared with Ed25519/secp/p256, but the plaintext
-        // payload is a variable-length commonware-codec `Share`, not a
-        // 32-byte scalar. Decoders for the canonical
-        // `EncryptedKeyRecord` path reject id `4` because the
-        // plaintext length check would fail; BLS shares are decoded
-        // through `BlsShareRecord` instead, which uses a distinct
-        // magic header.
+        // 4 is reserved for BLS12-381 threshold (SPEC-KEYSTORE §6.1.1).
+        // It never appears in a canonical `MKITKSV1` record: a share's
+        // plaintext is a variable-length commonware-codec `Share`, not a
+        // 32-byte scalar, so shares are stored through `BlsShareRecord`
+        // (distinct `MKITKSB1` magic, §6.1.2) and `algorithm_from_id`
+        // rejects id `4` in every build.
         #[cfg(feature = "bls-threshold")]
         Algorithm::Bls12381Threshold => 4,
     }
@@ -284,8 +282,8 @@ fn algorithm_from_id(id: u8) -> Result<Algorithm> {
         1 => Ok(Algorithm::Ed25519),
         2 => Ok(Algorithm::Secp256k1),
         3 => Ok(Algorithm::P256),
-        #[cfg(feature = "bls-threshold")]
-        4 => Ok(Algorithm::Bls12381Threshold),
+        // 4 (BLS12-381 threshold) is reserved and MUST be rejected inside
+        // a `MKITKSV1` record even under `bls-threshold` (§6.1.1).
         other => Err(Error::Encoding(format!("unknown algorithm id: {other}"))),
     }
 }
@@ -795,6 +793,20 @@ mod tests {
         );
     }
 
+    /// SPEC-KEYSTORE §6.1.1: id `0x04` is reserved and a decoder MUST
+    /// reject it inside a `MKITKSV1` record in every build, including
+    /// `bls-threshold` (shares use `MKITKSB1`, §6.1.2). MKIT-59.
+    #[test]
+    fn encrypted_record_decode_rejects_reserved_algorithm_4() {
+        let mut encoded = stable_record().encode().expect("encode stable record");
+        assert_eq!(encoded[9], 0x01);
+        encoded[9] = 0x04;
+        assert!(matches!(
+            EncryptedKeyRecord::decode(&encoded),
+            Err(Error::Encoding(_))
+        ));
+    }
+
     #[test]
     fn encrypted_record_bytes_are_stable_for_v1() {
         let encoded = stable_record().encode().expect("encode stable record");
@@ -1010,10 +1022,9 @@ mod kani_proofs {
     }
 
     /// SPEC-KEYSTORE §6.1.1: "A decoder MUST reject id `0x04` inside a
-    /// `MKITKSV1` record." Holds in the default build; run with
-    /// `--features bls-threshold` to reproduce the discrepancy recorded
-    /// for that build (`algorithm_from_id(4)` is accepted there and
-    /// rejection is deferred to `decrypt`'s plaintext-length check).
+    /// `MKITKSV1` record." Holds in both the default build and
+    /// `--features bls-threshold` (MKIT-59: that build used to accept id
+    /// `4` and defer rejection to `decrypt`'s plaintext-length check).
     #[kani::proof]
     #[kani::stub(std::fmt::format, no_format)]
     #[kani::unwind(26)]
