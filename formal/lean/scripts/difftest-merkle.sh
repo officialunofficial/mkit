@@ -2,7 +2,7 @@
 # Reproduce every MKIT-24 check: build the Lean package (proofs + canaries,
 # no `sorry`), audit axioms, export Rust vectors, run the Lean differential
 # test, then confirm the canaries are caught (two model mutants, two corrupted
-# Rust verdicts). Needs Lean 4.23.0 (`LAKE`, default `lake`) and cargo.
+# Rust verdicts). Needs Lean 4.34.0 (lean-toolchain) (`LAKE`, default `lake`) and cargo.
 # Env: MKIT_FORMAL_SEED, MKIT_FORMAL_TREES (forwarded to the exporter).
 set -euo pipefail
 pkg=$(cd "$(dirname "$0")/.." && pwd)

@@ -861,6 +861,9 @@ mod kani_proofs {
     /// field, which dominates these proofs; UTF-8 validation itself is
     /// trusted `core` code. This over-approximates: the decoder is proved
     /// panic-free whichever way validation goes.
+    // `from_utf8` itself is the stubbed function, so the error value is
+    // built through `from_utf8_mut` on a known-invalid literal.
+    #[allow(invalid_from_utf8)]
     fn any_utf8(_v: &[u8]) -> core::result::Result<&str, core::str::Utf8Error> {
         if kani::any() {
             Ok("")
@@ -997,7 +1000,7 @@ mod kani_proofs {
     /// Round-trip `decode(encode(r)) == r` for records with empty
     /// protector/keyid/public-key/wrapped-DEK/ciphertext fields, any
     /// algorithm (1..=3), any attrs, symbolic nonce. (Non-empty field
-    /// combinations exceed the per-harness budget; see the report.)
+    /// combinations exceed the per-harness budget; see formal/kani/README.md.)
     #[kani::proof]
     #[kani::stub(std::fmt::format, no_format)]
     // Largest loop: the 8-byte magic comparison.

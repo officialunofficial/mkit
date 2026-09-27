@@ -1,5 +1,11 @@
 # History publication and recovery (MKIT-20)
 
+Tool pins (MKIT-17): quint 0.32.0, Java 21, Apalache 0.62.2 run directly on
+the TLA+ that `quint compile` emits, and TLC from the `tlc2.TLC` class in that
+Apalache jar (sha256 `079b6c23…6efaa8`). `quint compile` itself uses quint's
+bundled Apalache (0.56.1) only to translate to TLA+; `quint verify` is not
+used for any result below.
+
 Quint models of first-parent ancestry publication, crash recovery and the
 scrub schedule in [SPEC-HISTORY-PROOF §4](../../../docs/specs/SPEC-HISTORY-PROOF.md),
 under the guards in [SPEC-CONCURRENCY §3.3/§4](../../../docs/specs/SPEC-CONCURRENCY.md).
@@ -50,6 +56,12 @@ A ghost `lineage[g]` records whether every ref value written since generation
 | `FinishOnlyFromRecorded` | recovery proceeds only from the recorded previous or target ref (§4.4) | `mutFinishAnyRef` (recovery accepts any ref; needs a raw writer that steps over the intent) |
 | `RecoveryEnabled`, `NeverFailsClosed` | when idle with an intent, recovery's precondition holds and its result satisfies the invariants, so the intent is always recoverable; divergence (fail closed) is unreachable through supported APIs | `mutRawIgnoresTx` (a raw writer steps over the intent, so recovery fails closed and the intent stays) |
 | `IntentRootsRetained` | pending intent refs stay GC roots (§4.3); the intent's target chain is present (§4.2: missing ancestors fail before publication) | `mutGcIgnoresIntent`, `mutSkipVerify` |
+| `IntentEventuallyCleared` (TLC, `tlc/MCL.tla`) | progress: an intent is always eventually removed by recovery, given fair callers and finitely many crashes (§4.4 "completes steps 4–7") | `mutRecoverSkipsPending` (recovery resumes at step 5 and errors at step 6 forever; every safety invariant still holds), `mutRawIgnoresTx` (fails closed forever) |
+
+Each mutant is checked, by quint and by TLC, against the one invariant it is
+meant to break, not against the `Safety` conjunction, so a mutant caught by an
+unrelated conjunct would be reported as unexpected. TLC exit codes are also
+matched exactly (12 for an invariant, 13 for a temporal property).
 
 `mutWriteBeforeInvalidate` (a raw write moves the tip before removing
 `current`) violates `CurrentMatchesRef` through a crash between the two
@@ -71,17 +83,50 @@ be withheld and GC-rooted, and require the whole chain `[1,2,3]` in the
 reused generation after recovery. `rawAbaTest` and `deleteRecreateTest`
 require a fresh generation.
 
-**Recovery liveness** is checked in safety form. `RecoveryEnabled` shows that
-from every reachable idle state with an intent, `finish` is enabled. `finish`
-is deterministic, and its remaining five durable steps lead to a state
-satisfying all invariants with the intent removed; the boundary tests execute
-this path. Liveness under an unbounded number of crashes is not claimed: a
-crash can always interrupt recovery.
+**Recovery progress.** TLC runs with `-deadlock`, but that hides nothing
+here: `Gc` and `WriteObject` are enabled whenever no operation is in flight
+and `Crash` whenever one is, so no state is a deadlock. A stuck protocol
+would instead be a recovery that errors on every retry, leaving the intent
+and withholding proofs forever. Safety invariants cannot see that
+(`mutRecoverSkipsPending` passes all of them), so `tlc/MCL.tla` checks the
+temporal property
+
+    IntentEventuallyCleared == (calm /\ tx.present) ~> ~tx.present
+
+under `WF(Progress)` (a started operation keeps taking steps),
+`WF(RecoverAttempt)` (while an intent exists, some caller eventually runs
+`advance` or `delete`, which recover first, §4.4 step 1) and finitely many
+crashes. The last is a prophecy flag `calm` that may switch on once and then
+forbids `Crash`; every behaviour with finitely many crashes is the projection
+of one that switches it on after its last crash. Liveness under unboundedly
+many crashes is not claimed: a crash can always interrupt recovery.
+
+A liveness property was chosen over a bounded "completion is reachable"
+witness because the failure mode of interest (retrying forever) is a cycle,
+which reachability does not exclude. Non-vacuity: the property fails for
+`mutRecoverSkipsPending` (lasso: crash after step 6, then recover → step 5 →
+step 6 errors → recover …) and `mutRawIgnoresTx`; it fails without
+`WF(RecoverAttempt)` (GC loops forever with the intent pending); and
+`CanaryNoCalmIntent` shows intents do reach the crash-free suffix.
+
+Two encoding pitfalls, both caught by the mutant: a crash must be selected by
+name (`history.qnt` splits `step` into `noCrashStep` and `Crash` for this),
+because an in-flight error has exactly the effect of a crash, so excluding
+crashes by effect (`~Crash` on steps, or `<>[][~Crash]_vars`) also excludes
+the failing retry and made TLC report the mutant as live.
+
+`RecoveryEnabled` remains the safety-form companion: from every reachable
+idle state with an intent, `finish`'s precondition holds.
 
 **Bounds:** commits {1,2,3,4} in the first-parent forest 1←2←3, 1←4; at most
 3 generations minted; one branch. TLC explores the whole reachable space of
-this instance, at every depth. Quint simulation runs traces of up to 30
-steps. Apalache checks depth 10.
+this instance, at every depth (VIEW-reduced: 200,388 distinct states,
+depth 37; the progress check has 400,776 with the `calm` flag). The VIEW
+drops ghosts no guard reads and the state of dead generations; it is a
+bisimulation quotient, so it is sound for the invariants and for
+`IntentEventuallyCleared`, whose predicates and actions read only viewed
+variables. Quint simulation runs 50,000 traces of up to 30 steps. Apalache
+checks `Safety` to length 10 (length 12 did not finish within the 30-minute budget).
 
 ## scrub.qnt
 
@@ -112,86 +157,130 @@ case the real constants cannot produce. `ActualPublishBound` held only
 because the leaf cap cut every such lap short (with a 24-leaf cap, quint
 finds the violation). The current constants hold with a 24-leaf cap too.
 
+SPEC-HISTORY-PROOF §4.5 now states the corrected numbers (spec text fix in
+this PR): a rotation takes `floor((vt-1)/window) + 1` fast-forward publishes,
+at most **65**, not 64 (e.g. `vt = 32769`, `window = 512`: 64 window
+publishes plus the full walk), and that bound holds only **when every
+advisory `scrub` write lands**; a lost write leaves the old cursor, the same
+window is re-read, and only the 7-day bound remains. The model's
+`LAP_FRACTION + 1` is the scaled 65. §2.2's `inactive_peaks` field is a
+wire-format detail of the inclusion proof (always 0 in mkit) and does not
+touch publication, recovery or the scrub, so no model change was needed.
+
 | Property | Result |
 |---|---|
-| `ActualPublishBound`: no leaf goes more than `LAP_FRACTION+1` publishes unread | holds (TLC over the whole finite instance: any number of publishes, with the fast-forwards per generation bounded by the leaf cap); falsified by `mutWrapWithoutFull` |
-| `TimeBound`: after a publish, every leaf was read within `MAX_AGE` | holds, including with lost writes; falsified by `mutIgnoreAge` and `scrubClockBack` |
-| `InvalidForcesFull`: invalid scrub state always forces a full walk | holds; falsified by `mutTrustInvalid` |
-| `SpecPublishBound`: "at 64 fast-forward publishes" | **violated** (finding 1) |
-| `WindowOnlyWhenFresh`: window only if "fewer than" 7 days elapsed | **violated** (finding 2) |
+| `ActualPublishBound`: no leaf goes more than `LAP_FRACTION+1` (real 65) publishes unread, the corrected §4.5 bound | holds (TLC over the whole finite instance: any number of publishes, with the fast-forwards per generation bounded by the leaf cap; Apalache length 8); falsified by `mutWrapWithoutFull`; falsified by `scrubLossy`, as §4.5 now says |
+| `TimeBound`: after a publish, every leaf was read within `MAX_AGE` (7 days) | holds, including with lost writes; falsified by `mutIgnoreAge` and by `scrubClockBack` (wall clock steps back, now stated in §4.5) |
+| `InvalidForcesFull`: invalid, missing or foreign-generation scrub state always forces a full walk | holds; falsified by `mutTrustInvalid` |
+| `SpecPublishBound`: the superseded "64 fast-forward publishes" | **violated**, kept as a regression witness for finding 1 |
+| `WindowOnlyWhenFresh`: window only if "fewer than" 7 days elapsed | **violated** (finding 2, still open) |
 
 ## Commands and outcomes
 
 ```sh
-./check.sh              # quint typecheck/test/run and TLC: "all checks as expected" (~9 min)
-APALACHE=1 ./check.sh   # adds Apalache 0.47.2 bounded runs
+./check.sh                           # quint + TLC: "all checks as expected" (5m53s)
+APALACHE=1 ./check.sh   # adds Apalache 0.62.2, Safety to HISTORY_DEPTH (default 10)
+# final runs: HISTORY_DEPTH=8, "all checks as expected" (10m44s); length 10 run separately
 ```
 
-Individual commands (all run for MKIT-20, with the results shown):
+Tool locations default to `${FV_HOME:-$HOME/.local/share/mkit-fv}/apalache-0.62.2`
+(`APALACHE_MC`, `TLA2TOOLS` override; TLC defaults to the Apalache jar).
+`JAVA_HOME` defaults to `/usr/libexec/java_home -v 21`, then Homebrew's
+`openjdk@21`. Heaps: TLC `-Xmx4g`, 4 workers (`TLC_HEAP`, `TLC_WORKERS`);
+Apalache `JVM_ARGS=-Xmx4g`. Timings are on a shared 15-core M-series Mac
+with other checkers running, 2026-09-26.
 
-```sh
-quint test history.qnt --main history            # 7 passing
-quint test scrub.qnt --main scrub                # realLapBoundTest, realLapTest passing
-quint run history.qnt --main history --invariant Safety \
-  --max-steps 30 --max-samples 50000 --backend rust              # [ok]
-quint run history.qnt --main <mutant> --invariant <inv> ...      # [violation], per table
-quint compile --target tlaplus --main history --invariant Safety history.qnt > history.tla
-java -cp /opt/fv/tla2tools.jar tlc2.TLC -deadlock -config tlc/MC.cfg tlc/MC.tla
-  # No error: 9,903,627 states generated, 200,388 distinct (view) states, depth 37
-apalache-mc check --init=q_init --next=q_step --inv=q_inv --length=10 history.tla
-  # Apalache 0.47.2, Safety: "no error up to computation length 10" (25m35s,
-  # before FastForwardRetainsGeneration was added; with it: length 8, 4m06s;
-  # re-run after review changes: length 8, NoError, 4m57s)
-  # CanaryNeverServed violated at depth 6; mutGcIgnoresIntent violated at depth 3;
-  # mutFreshGenOnFF at 7, mutSkipVerify at 2, mutFinishAnyRef at 5
-  # mutWriteBeforeInvalidate CurrentMatchesRef violated at 7 (length 7, 19s)
-apalache-mc check ... --length=8 scrub.tla   # ActualPublishBound,TimeBound,InvalidForcesFull: NoError (79s)
-                                             # SpecPublishBound: violated at depth 3
-                                             # mutTrustInvalid InvalidForcesFull: violated at depth 2
-# scrubUnbounded under tlc/MCS VIEW: ActualPublishBound,TimeBound,InvalidForcesFull:
-#   No error, 340,717 states generated, 1,904 distinct, depth 6;
-#   SpecPublishBound violated (init vt=7, three window publishes)
+Results of the final run (`check.sh` output, abridged):
+
+```text
+quint test history (7 passing), scrub (realLapBoundTest, realLapTest)    ok
+quint run history::Safety (50,000 traces x 30 steps)                      ok
+quint run canaries x6, each mutant::its invariant x12                      violation
+quint run mutLoadIgnoresTx::ServedMatchesRef / ServedGenerationFresh        ok
+quint run mutRecoverSkipsPending::Safety                                  ok
+quint run scrub/scrubLossy/scrubClockBack/mut* (16 steps)                 as in the table
+tlc history::Safety                                   ok         200,388 distinct (VIEW), depth 37, 12s
+tlc history::IntentEventuallyCleared                  ok         400,776 distinct (VIEW + calm), under 1 min
+tlc history::IntentEventuallyCleared, no WF(RecoverAttempt)  liveness violation
+tlc history::CanaryNoCalmIntent                       violation
+tlc mutLoadIgnoresTx::NoProofWhileIntent              violation  (837 distinct)
+tlc mutRawIgnoresTx::RecoveryEnabled                  violation  (477)
+tlc mutRawIgnoresTx::NeverFailsClosed                 violation  (1,813)
+tlc mutRawSkipsInvalidate::GenerationFastForwardOnly  violation  (6,801)
+tlc mutRawSkipsInvalidate::ServedGenerationFresh      violation  (11,561)
+tlc mutGcIgnoresIntent::IntentRootsRetained           violation  (107)
+tlc mutHealTipOnly::CurrentMatchesRef                 violation  (52,411)
+tlc mutReuseGenOnRewrite::GenerationFastForwardOnly   violation  (57,388)
+tlc mutFreshGenOnFF::FastForwardRetainsGeneration     violation  (1,426)
+tlc mutSkipVerify::IntentRootsRetained                violation  (35)
+tlc mutFinishAnyRef::FinishOnlyFromRecorded           violation  (1,803)
+tlc mutWriteBeforeInvalidate::CurrentMatchesRef       violation  (1,499)
+tlc mutRecoverSkipsPending::Safety                    ok         148,902 distinct
+tlc mutRecoverSkipsPending::IntentEventuallyCleared   liveness violation
+tlc mutRawIgnoresTx::IntentEventuallyCleared          liveness violation
+tlc scrubUnbounded::{ActualPublishBound,TimeBound,InvalidForcesFull}  ok  1,904 distinct each
+tlc scrubUnbounded::SpecPublishBound                  violation  (init vt=7, three window publishes)
+apalache history::Safety                        length 8   NoError   124s
+apalache history::Safety                        length 10  NoError   471s (7m51s)
+apalache history::Safety                        length 12  not finished: stopped after 36 min (over budget) while
+                                                           checking step 12, no violation reported up to then
+apalache history::CanaryNeverServed             length 7   violation  10s
+apalache mutGcIgnoresIntent::IntentRootsRetained length 7  violation   8s
+apalache mutFreshGenOnFF::FastForwardRetainsGeneration length 8  violation 11s
+apalache mutSkipVerify::IntentRootsRetained     length 7   violation   7s
+apalache mutFinishAnyRef::FinishOnlyFromRecorded length 7  violation   9s
+apalache mutWriteBeforeInvalidate::CurrentMatchesRef length 7  violation 14s
+apalache scrub::ActualPublishBound,TimeBound,InvalidForcesFull length 8  NoError 39s
+apalache scrub::SpecPublishBound                length 8   violation   4s
+apalache mutTrustInvalid::InvalidForcesFull     length 8   violation   3s
+apalache scrubLossy::ActualPublishBound         length 8   violation   5s
 ```
+
+Each Apalache run is `apalache-mc check --init=q_init --next=q_step
+--inv=q_inv --length=N M.tla` on the output of `quint compile --target
+tlaplus --main <module> --invariant <inv>`. Earlier results (Apalache
+0.47.2, which predates the FoldSet soundness fixes; the models use `fold`)
+are superseded by these. Bounded Apalache runs are not proofs; the TLC runs
+are exhaustive for the finite instances described above, nothing more.
 
 ## Findings
 
-1. **Scrub lap is 65 publishes, not 64.** `window = max(512, vt/64)`, and the
-   window path runs only while `cursor + window < verified_through`, so a lap
-   takes `floor((vt-1)/window) + 1` publishes. That is 65 whenever
-   `vt >= 32768` and `vt` is not a multiple of 64, e.g. `vt = 32769` or
-   `vt = 999999`; `realLapBoundTest` shows 65 is also the maximum. The
-   minimal scaled counterexample (TLC, Apalache and quint): a full verify with
-   `vt=7` and `w=2`, then 3 window publishes cover `[0,6)`, and leaf 6 is not
-   read again until the 4th publish (`LAP_FRACTION + 1`).
-2. **The 7-day boundary is off by one.** §4.5 permits the window path only
-   when *fewer than* 604800 s have elapsed. The code uses the window path when
-   `now - last_full_verify_unix <= 604800` (`stale` is `> SCRUB_MAX_AGE_SECS`),
-   so at exactly 604800 s it takes the window path.
-3. **The publish bound depends on the scrub write landing.**
-   `write_scrub_state`'s result is discarded (`let _ =`), the write is not
-   synced (`write_atomic(.., false)`), and a crash between `finish` and that
-   write loses the advanced cursor, so the same window is re-read. In that case `ActualPublishBound` fails (`scrubLossy`); only the
-   7-day bound holds.
-4. **The time bound assumes a wall clock that never steps back.** With
-   `saturating_sub`, a `last_full_verify_unix` in the future counts as 0 s
-   elapsed, so a clock step-back delays the 7-day full walk
-   (`scrubClockBack`).
-5. **§4.5's scrub encoding is out of date** (doc drift). The spec has
-   `"MKSC" || u8(1)` with no generation and a 61+32 layout; the code writes
-   `MKSC\x02 || generation[32] || cursor || verified_through || last_full ||
-   BLAKE3` (93 bytes) and discards state whose generation does not match.
-   §4.1's layout also omits the `scrub` file.
-6. **The 7-day bound only applies when a publish happens** (spec ambiguity).
-   §4.5 says the scrub bounds the interval before a leaf is re-verified to
-   "64 fast-forward publishes or 7 days of wall-clock time, whichever comes
-   first". The staleness check runs only inside a fast-forward publish, so an
-   idle branch is not re-verified after 7 days; `TimeBound` is therefore
-   stated at publish time. (`AncestrySnapshot::load` re-walks the whole chain
-   from the store on every read, so served proofs do not depend on the
-   scrub.)
+Status against the SPEC-HISTORY-PROOF text on this branch (including the
+§4.1/§4.5 spec text fixes in this PR).
+
+1. **Scrub lap is 65 publishes, not 64.** Fixed in the spec: §4.5 now
+   gives `floor((vt-1)/window) + 1`, at most 65. `window = max(512, vt/64)`,
+   and the window path runs only while `cursor + window < verified_through`;
+   65 occurs whenever `vt >= 32768` and `vt` is not a multiple of 64 (e.g.
+   `vt = 32769` or `999999`); `realLapBoundTest` shows 65 is also the
+   maximum. Minimal scaled counterexample to the old claim (TLC, Apalache,
+   quint): a full verify with `vt=7`, `w=2`, then 3 window publishes cover
+   `[0,6)`, and leaf 6 is not read again until the 4th publish.
+2. **The 7-day boundary is off by one (open).** §4.5 permits the window path
+   only when *fewer than* 604800 s have elapsed. The code uses the window
+   path when `now - last_full_verify_unix <= 604800` (`stale` is
+   `> SCRUB_MAX_AGE_SECS`), so at exactly 604800 s it takes the window path.
+   Either the spec should say "at most" or the code should use `>=`.
+3. **The publish bound depends on the scrub write landing.** Fixed in the
+   spec: §4.5 now says the 65-publish bound does not hold when the advisory
+   write is lost and only the 7-day bound applies. `write_scrub_state`'s
+   result is discarded (`let _ =`), the write is not synced
+   (`write_atomic(.., false)`), and a crash between `finish` and that write
+   loses the advanced cursor (`scrubLossy` falsifies `ActualPublishBound`,
+   keeps `TimeBound`).
+4. **The time bound assumes a wall clock that never steps back.** Now stated
+   in §4.5 (`saturating_sub` counts a future `last_full_verify_unix` as 0 s
+   elapsed; `scrubClockBack`).
+5. **§4.5's scrub encoding was out of date.** Fixed in the spec: §4.5 now
+   has `"MKSC" || u8(2) || generation[32] || ...` (93 bytes) with the
+   generation binding, and §4.1 lists `scrub`.
+6. **The 7-day bound only applies when a publish happens.** Now stated in
+   §4.5 ("evaluated only when a fast-forward publish runs"); `TimeBound` is
+   stated at publish time. Served proofs do not depend on the scrub
+   (`AncestrySnapshot::load` re-walks the chain).
 
 The history state machine itself (§4.3–§4.4, deletion and recreate) showed
-no violation.
+no safety or progress violation in the modelled instance.
 
 ## Limitations
 
@@ -199,8 +288,10 @@ no violation.
   checksums and corruption of history metadata are not modelled (the Rust
   tests `tampered_snapshot_and_transaction_fail_closed` cover them).
 - GC is atomic with respect to publication. This assumes every branch-moving
-  command holds a `worktree.lock` or `worktrees.lock` (`branch -d`/`-m`) that
-  GC also takes, per the SPEC-CONCURRENCY §4 table. GC's grace window is not modelled.
+  command holds a `worktree.lock` or `worktrees.lock` that GC also takes, per
+  the SPEC-CONCURRENCY §4 table (the git bridge's import phase takes no
+  `worktree.lock`, but writes only tags and remote-tracking refs; its branch
+  fast-forward takes `worktree.lock`). GC's grace window is not modelled.
 - Ref writes that bypass `RefMutation` (for example the file transport's own
   `refs/` tree, SPEC-CONCURRENCY §3.1) are outside the model.
   `mutRawSkipsInvalidate` shows such a writer could revive a generation
@@ -213,3 +304,10 @@ no violation.
 - Object loss other than GC (bit rot, a torn write) is not modelled in
   `history.qnt`, so a published tip's chain stays present; `scrub.qnt` covers
   the schedule that re-reads it.
+- `IntentEventuallyCleared` assumes fair callers and finitely many crashes;
+  it is checked only in the finite instance and only by TLC (Apalache runs
+  are safety only). It relies on the VIEW being a bisimulation quotient (see
+  `tlc/MC.tla`); the unreduced instance exceeds 7,000,000 states at depth 27
+  and was not run to completion.
+- TLC from the Apalache jar prints a build-time-less version string (the
+  current timestamp); the jar is identified by its sha256 above.

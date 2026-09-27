@@ -16,9 +16,15 @@
 //   producer: amend/reset/rebase moving `main` (SPEC-GC "Recovery log"): under
 //             its tree's worktree.lock, write the new tip's objects → record the
 //             superseded tip → move the ref → release.
-//   push    : a file-transport push (SPEC-CONCURRENCY §3.1): writes the tip's
-//             objects, later publishes ref `pushed`. It takes NONE of gc's
-//             locks, so it interleaves freely with a gc run.
+//   push    : a writer outside gc's lock set (SPEC-GC "Concurrent writers and
+//             the grace window"): writes the tip's objects into the store gc
+//             sweeps, later publishes ref `pushed`, taking NONE of gc's locks.
+//             In the code on this branch that writer is the import phase of
+//             `mkit git import/fetch/pull` (BulkWriter under git-<remote>.lock
+//             only). File-transport and served pushes write <root>/packs and
+//             <root>/refs, which gc neither sweeps nor reads (see README).
+//   tag     : a later root publish under the lock (tag/attest/update-ref),
+//             re-verifying its target (TAG_CHECK).
 //   env     : a root source (ref file / recovery log) becomes unreadable or is
 //             repaired; the discrete clock advances.
 //
@@ -35,7 +41,7 @@
 // - gc's `now` is read once after the locks (commands/gc.rs); each object's
 //   mtime is read when the sweep reaches it (gc.rs `store.object_metadata`).
 //
-// Bounds (explicit): 8 objects, 3 refs + recovery log, 1 producer, 1 push,
+// Bounds (explicit): 8 objects, 3 refs + recovery log, 1 producer, 1 push, 1 tag,
 // clock 0..MAXT = 6, GRACE = 2 (0 in gcGrace0), RETAIN = 2, KEEP_LAST = 1,
 // at most MAXSEQ = 3 recovery records. Commands: see check.sh / README.md.
 
@@ -49,14 +55,31 @@ module gcCore {
   //                      mtime > publish time - GRACE (the timing assumption,
   //                      `pushTimingOk`)
   //            "boundedLax" mutant: the same with >= (off by one at the boundary)
+  //            "abandon" the writer writes the tip's objects and never
+  //                      publishes (a crashed/failed writer); only PushAbort
+  //            "fastNoAbort" progress mutant: "fast" without PushAbort
   const PUSH_MODE: str
   const FRESHEN: bool          // dedup hit refreshes mtime (store.rs does NOT)
   const GRACE: int             // object grace window (default 14 d; `--grace-secs`)
-  // Mutants (all false in conforming instances), for non-vacuity only.
-  const BUG_NO_LOCK: bool      // gc does not exclude producers' worktree.lock
-  const BUG_LENIENT: bool      // gc skips unreadable sources instead of aborting
-  const BUG_NO_RECORD: bool    // producer moves the ref without recording
-  const BUG_NO_KEEP_LAST: bool // expire ignores the keep-last floor
+  // TAG_CHECK: a later root publish of PUSH_TIP under the lock, as
+  // `mkit tag <hash>` / `attest` / `update-ref` do (#267):
+  //   "none"    actor disabled
+  //   "root"    re-verify only the target object (`store.contains`, as
+  //             commands/tag.rs, attest.rs and update_ref.rs do)
+  //   "closure" re-verify the target's whole closure
+  const TAG_CHECK: str
+  // MUTANT ("none" in conforming instances), for non-vacuity only:
+  //   "noLock"     gc does not exclude producers' worktree.lock
+  //   "lenient"    gc skips unreadable sources instead of aborting
+  //   "noRecord"   producer moves the ref without recording
+  //   "noKeepLast" expire ignores the keep-last floor
+  //   "leakLock"   gc's expire-abort path does not release its locks
+  const MUTANT: str
+  pure val BUG_NO_LOCK = MUTANT == "noLock"
+  pure val BUG_LENIENT = MUTANT == "lenient"
+  pure val BUG_NO_RECORD = MUTANT == "noRecord"
+  pure val BUG_NO_KEEP_LAST = MUTANT == "noKeepLast"
+  pure val BUG_LEAK_LOCK = MUTANT == "leakLock"
 
   // ---- constants -------------------------------------------------------------
   pure val NONE = -1
@@ -251,7 +274,8 @@ module gcCore {
   }
   // Timing assumption evaluated at the publish instant `clock`.
   def pushTimingOk: bool =
-    if (PUSH_MODE == "fast") clock - pushStart < GRACE
+    if (PUSH_MODE == "abandon") false
+    else if (PUSH_MODE == "fast" or PUSH_MODE == "fastNoAbort") clock - pushStart < GRACE
     // Objects already live need no freshness: roots other than the push are
     // frozen during a gc run (producers are excluded by the locks, expire
     // precedes mark), so a gc that marked before the publish marked them too.
@@ -262,9 +286,12 @@ module gcCore {
       CLOS.get(PUSH_TIP).exclude(live)
         .forall(o => present.contains(o) and clock - mtime.get(o) <= GRACE)
     else true
+  // Guards, shared by the actions and by the progress invariants.
+  def pushPublishEnabled: bool = pushPhase == "wrote" and pushTimingOk
+  def pushAbortEnabled: bool =
+    pushPhase == "wrote" and not(pushTimingOk) and PUSH_MODE != "fastNoAbort"
   action PushPublish = all {
-    pushPhase == "wrote",
-    pushTimingOk,
+    pushPublishEnabled,
     refs' = refs.set("pushed", PUSH_TIP),
     corrupt' = corrupt.exclude(Set("pushed")),
     pushPhase' = "done", pushStart' = pushStart,
@@ -274,13 +301,31 @@ module gcCore {
   }
   // A push that misses its deadline gives up without publishing.
   action PushAbort = all {
-    pushPhase == "wrote",
-    not(pushTimingOk),
+    pushAbortEnabled,
     pushPhase' = "done", pushStart' = pushStart,
     clock' = clock, keepStore, refs' = refs, corrupt' = corrupt,
     lockHolder' = lockHolder,
     keepLog, keepGc, keepProd,
     lastAction' = { name: "push abort", arg: PUSH_TIP },
+  }
+
+  // ---- later root publish under the lock (commands/tag.rs, attest.rs) ----------
+  // One atomic step under this tree's worktree.lock, which gc's lock set
+  // contains, so it never overlaps a gc run. The target was resolved before
+  // the lock; under it the command re-verifies the target and publishes.
+  def tagCheckOk(t: int): bool =
+    if (TAG_CHECK == "root") present.contains(t)
+    else CLOS.get(t).subseteq(present)
+  action TagPublish(t: int): bool = all {
+    TAG_CHECK != "none",
+    lockHolder == "none",
+    refs.get("tag") != t,
+    tagCheckOk(t),
+    refs' = refs.set("tag", t),
+    corrupt' = corrupt.exclude(Set("tag")),
+    clock' = clock, keepStore, lockHolder' = lockHolder,
+    keepLog, keepGc, keepProd, keepPush,
+    lastAction' = { name: "tag publish", arg: t },
   }
 
   // ---- gc (commands/gc.rs → recovery::expire → ops::gc::run_gc) ---------------
@@ -308,7 +353,7 @@ module gcCore {
     gcPhase == "locked",
     gcPhase' = if (expAborts) "idle" else "expRead",
     aborts' = if (expAborts) aborts + 1 else aborts,
-    lockHolder' = if (expAborts) gcRelease else lockHolder,
+    lockHolder' = if (expAborts and not(BUG_LEAK_LOCK)) gcRelease else lockHolder,
     gcKept' = rlog.filter(e => retained(e, rlog)),
     gcDropAny' = rlog.exists(e => not(retained(e, rlog))),
     lastAction' = { name: if (expAborts) "gc abort (expire)" else "gc expire read", arg: NONE },
@@ -403,6 +448,7 @@ module gcCore {
     PushWrite,
     PushPublish,
     PushAbort,
+    TagPublish(PUSH_TIP),
     GcLock,
     GcExpireRead,
     GcExpireWrite,
@@ -433,6 +479,18 @@ module gcCore {
   val Safety = NoLivePruned and NoDangling and UnreadableAborts
                and SupersededRetained and LockExclusion
 
+  // ---- progress (state predicates) -----------------------------------------------
+  // TLC's deadlock check is vacuous here (Corrupt/Repair are always enabled)
+  // and is switched off anyway, so stuck actors are stated explicitly. gc and
+  // producer steps are guarded by their phase alone, so the non-trivial
+  // cases are a lock nobody active holds (gc and every producer then block
+  // forever) and a push that can neither publish nor abort.
+  val NoLeakedLock = (lockHolder == "gc" implies gcPhase != "idle")
+                     and (lockHolder == "prod" implies prodPhase != "idle")
+  val NoStuckPush = pushPhase == "wrote" implies (pushPublishEnabled or pushAbortEnabled)
+  val Progress = NoLeakedLock and NoStuckPush
+  val All = Safety and Progress
+
   // ---- canaries: each MUST be violated (reachability witnesses) ---------------
   val CanaryNoPrune = prunes == 0
   val CanaryNoAbort = aborts == 0
@@ -444,13 +502,17 @@ module gcCore {
   // gc deleted an object while a push was in flight AND that push then
   // published: the interleaving the timing assumption has to make safe.
   val CanaryNoPrunedPushPublished = not(prunedInPush and refs.get("pushed") != NONE)
+  // gc kept a young unreachable object (the abandoned tip 6) but pruned an
+  // old object in its closure (5): the per-object grace window at work.
+  val CanaryNoYoungOverPruned = not(present.contains(PUSH_TIP) and not(present.contains(5)))
+  val CanaryNoTagPublished = refs.get("tag") != PUSH_TIP
 }
 
 // ---- conforming instances --------------------------------------------------
 // Supported deployment: no push concurrent with gc (SPEC-CONCURRENCY §3.1).
 module gc {
-  import gcCore(PUSH_MODE = "none", FRESHEN = false, GRACE = 2, BUG_NO_LOCK = false,
-    BUG_LENIENT = false, BUG_NO_RECORD = false, BUG_NO_KEEP_LAST = false).*
+  import gcCore(PUSH_MODE = "none", FRESHEN = false, GRACE = 2, TAG_CHECK = "none",
+    MUTANT = "none").*
 
   run closTableTest = init.expect(OBJS.forall(o => CLOS.get(o) == edgeClosure(Set(o))))
   // reset C1 -> C0 (records C1), amend C0 -> C1' (records C0); after RETAIN the
@@ -477,17 +539,17 @@ module gc {
 }
 // `--grace-secs 0` in the supported deployment: the locks alone keep it safe.
 module gcGrace0 {
-  import gcCore(PUSH_MODE = "none", FRESHEN = false, GRACE = 0, BUG_NO_LOCK = false,
-    BUG_LENIENT = false, BUG_NO_RECORD = false, BUG_NO_KEEP_LAST = false).*
+  import gcCore(PUSH_MODE = "none", FRESHEN = false, GRACE = 0, TAG_CHECK = "none",
+    MUTANT = "none").*
 }
 // Push may run concurrently with gc (outside the supported deployment).
 module gcPushRaw {
-  import gcCore(PUSH_MODE = "raw", FRESHEN = false, GRACE = 2, BUG_NO_LOCK = false,
-    BUG_LENIENT = false, BUG_NO_RECORD = false, BUG_NO_KEEP_LAST = false).*
+  import gcCore(PUSH_MODE = "raw", FRESHEN = false, GRACE = 2, TAG_CHECK = "none",
+    MUTANT = "none").*
 }
 module gcPushRawFreshen {
-  import gcCore(PUSH_MODE = "raw", FRESHEN = true, GRACE = 2, BUG_NO_LOCK = false,
-    BUG_LENIENT = false, BUG_NO_RECORD = false, BUG_NO_KEEP_LAST = false).*
+  import gcCore(PUSH_MODE = "raw", FRESHEN = true, GRACE = 2, TAG_CHECK = "none",
+    MUTANT = "none").*
 
   // Slow push: fresh objects written at t=0, published at t=2 >= GRACE; a gc
   // with now=2 prunes the not-yet-referenced tip in between.
@@ -500,8 +562,8 @@ module gcPushRawFreshen {
       .expect(not(NoDangling) and NoLivePruned)
 }
 module gcPushFast {         // push publishes within GRACE; store as implemented
-  import gcCore(PUSH_MODE = "fast", FRESHEN = false, GRACE = 2, BUG_NO_LOCK = false,
-    BUG_LENIENT = false, BUG_NO_RECORD = false, BUG_NO_KEEP_LAST = false).*
+  import gcCore(PUSH_MODE = "fast", FRESHEN = false, GRACE = 2, TAG_CHECK = "none",
+    MUTANT = "none").*
 
   // Zero-duration push still loses data: object 5 is an old orphan, the push's
   // write of 5 is a dedup hit that keeps mtime 0, gc (now = 2) prunes it
@@ -520,8 +582,8 @@ module gcPushFast {         // push publishes within GRACE; store as implemented
       .expect(gcPhase == "idle" and aborts == 1 and markedUnreadable)
 }
 module gcPushFastFreshen {  // push publishes within GRACE, dedup refreshes mtime
-  import gcCore(PUSH_MODE = "fast", FRESHEN = true, GRACE = 2, BUG_NO_LOCK = false,
-    BUG_LENIENT = false, BUG_NO_RECORD = false, BUG_NO_KEEP_LAST = false).*
+  import gcCore(PUSH_MODE = "fast", FRESHEN = true, GRACE = 2, TAG_CHECK = "none",
+    MUTANT = "none").*
 
   // gc (now = 2) prunes garbage 7 while the push is in flight; the push's
   // dedup write of 5 refreshed its mtime, so gc keeps it and the publish is safe.
@@ -534,8 +596,8 @@ module gcPushFastFreshen {  // push publishes within GRACE, dedup refreshes mtim
               and not(CanaryNoPrunedPushPublished))
 }
 module gcPushBounded {      // the exact on-disk-mtime timing assumption
-  import gcCore(PUSH_MODE = "bounded", FRESHEN = false, GRACE = 2, BUG_NO_LOCK = false,
-    BUG_LENIENT = false, BUG_NO_RECORD = false, BUG_NO_KEEP_LAST = false).*
+  import gcCore(PUSH_MODE = "bounded", FRESHEN = false, GRACE = 2, TAG_CHECK = "none",
+    MUTANT = "none").*
 
   // gc prunes the old orphan 5; the push then writes 5 afresh (not a dedup
   // hit any more), gc prunes 7 mid-push, and the publish is safe.
@@ -550,12 +612,12 @@ module gcPushBounded {      // the exact on-disk-mtime timing assumption
 
 // ---- mutants (non-vacuity) -------------------------------------------------
 module mutNoLock {          // violates SupersededRetained, LockExclusion
-  import gcCore(PUSH_MODE = "none", FRESHEN = false, GRACE = 2, BUG_NO_LOCK = true,
-    BUG_LENIENT = false, BUG_NO_RECORD = false, BUG_NO_KEEP_LAST = false).*
+  import gcCore(PUSH_MODE = "none", FRESHEN = false, GRACE = 2, TAG_CHECK = "none",
+    MUTANT = "noLock").*
 }
 module mutBoundedLax {      // mtime >= T - GRACE is not enough: violates NoDangling
-  import gcCore(PUSH_MODE = "boundedLax", FRESHEN = false, GRACE = 2, BUG_NO_LOCK = false,
-    BUG_LENIENT = false, BUG_NO_RECORD = false, BUG_NO_KEEP_LAST = false).*
+  import gcCore(PUSH_MODE = "boundedLax", FRESHEN = false, GRACE = 2, TAG_CHECK = "none",
+    MUTANT = "none").*
 
   // P written at t=0, gc (now = 2) marks without it, the push publishes at
   // t=2 (age exactly GRACE), then gc's sweep deletes the now-live P.
@@ -566,18 +628,59 @@ module mutBoundedLax {      // mtime >= T - GRACE is not enough: violates NoDang
       .expect(not(NoLivePruned) and not(NoDangling))
 }
 module mutNoLockGrace0 {    // --grace-secs 0 without gc's lock set: violates NoDangling
-  import gcCore(PUSH_MODE = "none", FRESHEN = false, GRACE = 0, BUG_NO_LOCK = true,
-    BUG_LENIENT = false, BUG_NO_RECORD = false, BUG_NO_KEEP_LAST = false).*
+  import gcCore(PUSH_MODE = "none", FRESHEN = false, GRACE = 0, TAG_CHECK = "none",
+    MUTANT = "noLock").*
 }
 module mutLenient {         // violates UnreadableAborts, NoLivePruned
-  import gcCore(PUSH_MODE = "none", FRESHEN = false, GRACE = 2, BUG_NO_LOCK = false,
-    BUG_LENIENT = true, BUG_NO_RECORD = false, BUG_NO_KEEP_LAST = false).*
+  import gcCore(PUSH_MODE = "none", FRESHEN = false, GRACE = 2, TAG_CHECK = "none",
+    MUTANT = "lenient").*
 }
 module mutNoRecord {        // violates SupersededRetained
-  import gcCore(PUSH_MODE = "none", FRESHEN = false, GRACE = 2, BUG_NO_LOCK = false,
-    BUG_LENIENT = false, BUG_NO_RECORD = true, BUG_NO_KEEP_LAST = false).*
+  import gcCore(PUSH_MODE = "none", FRESHEN = false, GRACE = 2, TAG_CHECK = "none",
+    MUTANT = "noRecord").*
 }
 module mutNoKeepLast {      // violates SupersededRetained
-  import gcCore(PUSH_MODE = "none", FRESHEN = false, GRACE = 2, BUG_NO_LOCK = false,
-    BUG_LENIENT = false, BUG_NO_RECORD = false, BUG_NO_KEEP_LAST = true).*
+  import gcCore(PUSH_MODE = "none", FRESHEN = false, GRACE = 2, TAG_CHECK = "none",
+    MUTANT = "noKeepLast").*
+}
+module mutLeakLock {        // gc's expire-abort path keeps its locks: violates NoLeakedLock
+  import gcCore(PUSH_MODE = "none", FRESHEN = false, GRACE = 2, TAG_CHECK = "none",
+    MUTANT = "leakLock").*
+}
+module mutStuckPush {       // a fast push that can neither publish nor abort: NoStuckPush
+  import gcCore(PUSH_MODE = "fastNoAbort", FRESHEN = true, GRACE = 2, TAG_CHECK = "none",
+    MUTANT = "none").*
+}
+
+// ---- later root publish of an abandoned tip (supported deployment) -----------
+// A writer wrote P = 6 and its closure (5 is a dedup hit on an old orphan,
+// mtime 0) and never published (crash or error). gc keeps the young 6 and
+// prunes the old 5: the grace window is per object, not per closure. A later
+// `mkit tag <P>` under the lock re-verifies only P (`store.contains`), so it
+// publishes a root whose closure is incomplete.
+module gcTagRoot {          // as implemented: violates NoDangling
+  import gcCore(PUSH_MODE = "abandon", FRESHEN = false, GRACE = 2, TAG_CHECK = "root",
+    MUTANT = "none").*
+
+  run tagAfterGraceTest =
+    init.then(Tick(2)).then(PushWrite).then(PushAbort)
+      .then(GcLock).then(GcExpireRead).then(GcExpireWrite).then(GcMark)
+      .then(GcSweep(0)).then(GcSweep(1)).then(GcSweep(2)).then(GcSweep(3))
+      .then(GcSweep(5)).then(GcSweep(6)).then(GcSweep(7)).then(GcDone)
+      .expect(present.contains(6) and not(present.contains(5)) and Safety)
+      .then(TagPublish(6))
+      .expect(not(NoDangling) and NoLivePruned)
+}
+module gcTagClosure {       // re-verify the closure under the lock: safe
+  import gcCore(PUSH_MODE = "abandon", FRESHEN = false, GRACE = 2, TAG_CHECK = "closure",
+    MUTANT = "none").*
+
+  run tagRefusedTest =
+    init.then(Tick(2)).then(PushWrite).then(PushAbort)
+      .then(GcLock).then(GcExpireRead).then(GcExpireWrite).then(GcMark)
+      .then(GcSweep(5)).then(GcSweep(6)).then(GcSweep(7))
+      .then(GcSweep(0)).then(GcSweep(1)).then(GcSweep(2)).then(GcSweep(3)).then(GcDone)
+      // every other TagPublish guard holds; only the closure check refuses
+      .expect(present.contains(6) and not(tagCheckOk(6)) and lockHolder == "none"
+              and refs.get("tag") != 6 and Safety)
 }

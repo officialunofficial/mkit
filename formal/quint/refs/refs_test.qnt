@@ -5,7 +5,7 @@
 // a documented gap is reachable.
 module refs_test {
   import refs(PROCS = Set("p1", "p2", "p3"),
-              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false }).* from "./refs"
+              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false }).* from "./refs"
 
   pure def op(kind: str, t: int, r: int, c: Cond, v: int, d: bool): Op =
     { kind: kind, tree: t, ref: r, cond: c, value: v, del: d }
@@ -93,17 +93,40 @@ module refs_test {
       .then(commitRef("p1")).then(commitRef("p2"))
       .expect(not(NoLostUpdateFile))
 
-  // WITNESS (documented, SPEC-REFS §5.1/§8): memory-transport .match race.
-  run memMatchRaceWitnessTest =
+  // Memory transport: `update_ref` holds its Mutex across read-check-write
+  // (mkit-transport-memory), so two Match(1) CAS have exactly one winner.
+  run memMatchAtomicTest =
     initFixed(SAFE_INIT, ABSENT, ABSENT, 1)
+      .then(beginOp("p1", op("mem", 0, 0, Match(1), 2, false)))
+      .then(beginOp("p2", op("mem", 0, 0, Match(1), 1, false)))
+      .then(acquire("p1"))
+      .expect(not(canMove("p2")))            // blocked on the Mutex
+      .then(readRef("p1")).then(commitRef("p1")).then(release("p1"))
+      .then(acquire("p2")).then(readRef("p2")).then(commitRef("p2"))
+      .expect(and { Safety, mem.get(0) == 2, lastAction.outcome == "conflict" })
+
+  // MUTANT (the old SPEC-REFS §5.1 memory row, "NOT atomic"): without the
+  // Mutex both Match(1) CAS succeed and one write is lost.
+  run mutantMemNoMutexTest =
+    initFixed({ ...NO_FAULTS, memNoMutex: true }, ABSENT, ABSENT, 1)
       .then(beginOp("p1", op("mem", 0, 0, Match(1), 2, false)))
       .then(beginOp("p2", op("mem", 0, 0, Match(1), 1, false)))
       .then(readRef("p1")).then(readRef("p2"))
       .then(commitRef("p1")).then(commitRef("p2"))
-      .expect(and { Safety, not(WitnessMemMatchRace) })
+      .expect(and { not(NoLostUpdateMem), not(Safety), lastAction.outcome == "ok" })
+
+  // MUTANT: without the Mutex even Missing races (a HashMap has no O_EXCL).
+  run mutantMemNoMutexMissingTest =
+    initFixed({ ...NO_FAULTS, memNoMutex: true }, ABSENT, ABSENT, ABSENT)
+      .then(beginOp("p1", op("mem", 0, 0, Missing, 2, false)))
+      .then(beginOp("p2", op("mem", 0, 0, Missing, 1, false)))
+      .then(readRef("p1")).then(readRef("p2"))
+      .then(commitRef("p1")).then(commitRef("p2"))
+      .expect(and { not(NoLostUpdateMem), mem.get(0) == 1 })
 
   // WITNESS — DOCUMENTED GAP (SPEC-CONCURRENCY §3.1): a local Match write
-  // under refs-<ref>.lock and a file-transport write under RefLock hit the
+  // under refs-<ref>.lock and a file-transport write under RefLock (from
+  // `mkit serve`, `mkit-server` fs-layout or a mkit+file:// push) hit the
   // same file with no common lock. Safety (per-domain) still holds.
   run crossDomainGapWitnessTest =
     initFixed(SAFE_INIT, 1, 1, ABSENT)
@@ -207,7 +230,7 @@ module refs_test {
   // MUTANT: a broken (non-exclusive) kernel lock lets two processes hold
   // worktree.lock(main) at once. LockOwnership fails.
   run mutantRacyAcquireTest =
-    initFixed({ ...NO_FAULTS, racyAcquire: true }, 1, 1, ABSENT)
+    initFixed({ ...NO_FAULTS, racyAcquire: true, memNoMutex: false }, 1, 1, ABSENT)
       .then(beginOp("p1", op("updateRef", 0, 0, Any, 2, false)))
       .then(beginOp("p2", op("updateRef", 0, 1, Any, 2, false)))
       .then(acquire("p1")).then(acquire("p2"))

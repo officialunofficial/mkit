@@ -21,6 +21,9 @@ open MkitFormal.Merkle MkitFormal.Merkle.Canaries
 #print axioms selPath_levels_increasing
 #print axioms selMulti_singleton
 #print axioms reconstructMulti_nil
+#print axioms reconstructRange_nil
+#print axioms verifyRangeId_nil
+#print axioms verifyMultiId_nil
 #print axioms reconstructMulti_dup
 #print axioms reconstructMulti_oob
 #print axioms verifyChunksMulti_pos0
@@ -40,3 +43,4 @@ open MkitFormal.Merkle MkitFormal.Merkle.Canaries
 #print axioms mutant_noSwap_incomplete
 #print axioms mutant_v1Dup_incomplete
 #print axioms mutant_v1_selection_rejected
+#print axioms vacuous_accepts_empty_tree

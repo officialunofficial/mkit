@@ -18,6 +18,10 @@ reader enforces this per-opcode, not only at end-of-stream)".
   and `runT_bounded` proves every recorded count is `≤ result_len`.
   Canary `runT_noOverrun_exceeds` (in `DeltaCanaries`) shows the bound fails
   once the check is dropped.
+* `run_prefix` / `apply_prefix`: every proper prefix of an accepted stream is
+  rejected, as `eof` (cut inside an instruction) or `resultLenUnderrun` (cut
+  at an instruction boundary; see `DeltaCanaries.boundary_cut_is_underrun`
+  for the §10 finding and `noFinalLen_accepts_prefix` for non-vacuity).
 -/
 
 namespace MkitFormal.Delta
@@ -46,19 +50,19 @@ theorem run_decoded (base : Bytes) (rl : Nat) :
     rw [decodeInstrs] at h
     rw [run]
     by_cases hc : 128 ≤ op.toNat
-    · simp only [hc, if_true] at h ⊢
+    · simp only [hc, ite_true] at h ⊢
       by_cases hr : op.toNat ≠ 128
       · simp [hr] at h
-      · simp only [hr, if_false] at h ⊢
+      · simp only [hr, ite_false] at h ⊢
         split at h
         · rename_i o l ho hl2
           have := readLE_len hl2
           simp at this
           have hlen6 : ¬ rest.length < 6 := by omega
-          simp only [hlen6, if_false]
+          simp only [hlen6, ite_false]
           by_cases hz : l = 0
           · simp [hz] at h
-          · simp only [hz, if_false] at h ⊢
+          · simp only [hz, ite_false] at h ⊢
             cases hd : decodeInstrs (rest.drop 6) with
             | error e => simp [hd, Except.map] at h
             | ok is' =>
@@ -68,25 +72,25 @@ theorem run_decoded (base : Bytes) (rl : Nat) :
               obtain ⟨hb, hin'⟩ := hin
               have hcl : ((base.drop o).take l).length = l := by simp; omega
               have hnb : ¬ base.length < o + l := by omega
-              simp only [hnb, if_false]
+              simp only [hnb, ite_false]
               by_cases hov : rl < out.length + l
-              · simp only [hov, if_true, lenVerdict, exec, execInstr, List.length_append, hcl]
+              · simp only [hov, ite_true, lenVerdict, exec, execInstr, List.length_append, hcl]
                 have h1 : (out.length + (l + (exec base is').length) = rl) = False := by
                   simp; omega
                 have h2 : rl < out.length + (l + (exec base is').length) := by omega
                 simp [h1, h2]
-              · simp only [hov, if_false]
+              · simp only [hov, ite_false]
                 rw [slice?_eq hb]
                 simp only
                 rw [run_decoded base rl _ _ is' hd hin' (by simp; omega)]
                 simp [exec, execInstr]
         · simp at h
-    · simp only [hc, if_false] at h ⊢
+    · simp only [hc, ite_false] at h ⊢
       by_cases h0 : op.toNat = 0
       · simp [h0] at h
       · by_cases hls : rest.length < op.toNat
         · simp [h0, hls] at h
-        · simp only [h0, hls, if_false] at h ⊢
+        · simp only [h0, hls, ite_false] at h ⊢
           cases hd : decodeInstrs (rest.drop op.toNat) with
           | error e => simp [hd, Except.map] at h
           | ok is' =>
@@ -95,12 +99,12 @@ theorem run_decoded (base : Bytes) (rl : Nat) :
             simp only [List.all_cons, Bool.and_eq_true] at hin
             have htl : (rest.take op.toNat).length = op.toNat := by simp; omega
             by_cases hov : rl < out.length + op.toNat
-            · simp only [hov, if_true, lenVerdict, exec, execInstr, List.length_append, htl]
+            · simp only [hov, ite_true, lenVerdict, exec, execInstr, List.length_append, htl]
               have h1 : (out.length + (op.toNat + (exec base is').length) = rl) = False := by
                 simp; omega
               have h2 : rl < out.length + (op.toNat + (exec base is').length) := by omega
               simp [h1, h2]
-            · simp only [hov, if_false]
+            · simp only [hov, ite_false]
               rw [slice?_eq (by simp; omega)]
               simp only [List.drop_zero]
               rw [run_decoded base rl _ _ is' hd hin.2 (by simp; omega)]
@@ -120,7 +124,7 @@ theorem apply_decoded (base s : Bytes) (d : Delta) (hd : decode s = .ok d)
     simp only [decode] at hd
     by_cases hv : v ≠ 0x01
     · simp [hv] at hd
-    · simp only [hv, if_false] at hd
+    · simp only [hv, ite_false] at hd
       split at hd
       · rename_i bl rl hbl hrl
         cases hdi : decodeInstrs (rest.drop 8) with
@@ -133,7 +137,7 @@ theorem apply_decoded (base s : Bytes) (d : Delta) (hd : decode s = .ok d)
           simp only [Decidable.not_not] at hv
           subst hv
           unfold apply
-          simp only [headerLen, List.length_cons, show ¬ rest.length + 1 < 9 by omega, if_false,
+          simp only [headerLen, List.length_cons, show ¬ rest.length + 1 < 9 by omega, ite_false,
             hbl, hrl, hb, ne_eq, not_true_eq_false]
           simpa using run_decoded base rl _ [] is hdi hin (by simp)
       · simp at hd
@@ -200,32 +204,38 @@ theorem runT_fst (base : Bytes) (rl : Nat) :
   | [], out => by rw [runT, run]
   | op :: rest, out => by
     rw [runT, run]
-    simp only [tcons, Bool.true_eq, true_and]
-    split
-    · split
-      · rfl
-      · split
-        · rfl
-        · split
-          · split
-            · rfl
-            · split
-              · rfl
-              · split
+    simp only [tcons, true_and]
+    by_cases hc : 128 ≤ op.toNat
+    · simp only [hc, ite_true]
+      by_cases hr : op.toNat ≠ 128
+      · simp [hr]
+      · simp only [hr, ite_false]
+        by_cases h6 : rest.length < 6
+        · simp [h6]
+        · simp only [h6, ite_false]
+          cases readLE 4 rest <;> cases readLE 2 (rest.drop 4) <;> try rfl
+          rename_i off len
+          by_cases hz : len = 0
+          · simp [hz]
+          · by_cases hb : base.length < off + len
+            · simp [hz, hb]
+            · by_cases ho : rl < out.length + len
+              · simp [hz, hb, ho]
+              · simp only [hz, hb, ho, ite_false]
+                cases slice? base off len
                 · rfl
-                · split
-                  · exact runT_fst base rl _ _
-                  · rfl
-          · rfl
-    · split
-      · rfl
-      · split
-        · rfl
-        · split
-          · rfl
-          · split
-            · exact runT_fst base rl _ _
+                · exact runT_fst base rl _ _
+    · simp only [hc, ite_false]
+      by_cases h0 : op.toNat = 0
+      · simp [h0]
+      · by_cases hl : rest.length < op.toNat
+        · simp [h0, hl]
+        · by_cases ho : rl < out.length + op.toNat
+          · simp [h0, hl, ho]
+          · simp only [h0, hl, ho, ite_false]
+            cases slice? rest 0 op.toNat
             · rfl
+            · exact runT_fst base rl _ _
 termination_by r => r.length
 decreasing_by all_goals simp; omega
 
@@ -237,7 +247,7 @@ theorem runT_bounded (base : Bytes) (rl : Nat) :
     rw [runT]; simpa using hle
   | op :: rest, out, hle => by
     rw [runT]
-    simp only [tcons, Bool.true_eq, true_and, List.mem_cons]
+    simp only [tcons, true_and, List.mem_cons]
     intro n hn
     rcases hn with hn | hn
     · omega
@@ -293,5 +303,125 @@ theorem apply_running_le (base rest : Bytes) (bl rl : Nat)
   rw [runT_fst]
   unfold apply
   simp [headerLen, show ¬ rest.length + 1 < 9 by omega, hbl, hrl, hb]
+
+/-! ## Truncation (§2, §10 "truncation is distinguishable") -/
+
+theorem readLE_take {k m : Nat} {r : Bytes} (h : k ≤ m) : readLE k (r.take m) = readLE k r := by
+  induction k generalizing m r with
+  | zero => simp [readLE]
+  | succ k ih =>
+    cases r with
+    | nil => simp [readLE]
+    | cons b r =>
+      cases m with
+      | zero => omega
+      | succ m => simp [readLE, ih (show k ≤ m by omega)]
+
+/-- Every proper prefix `r.take k` of an accepted instruction suffix is
+rejected, and only as `eof` (cut inside an instruction) or
+`resultLenUnderrun` (cut at an instruction boundary): no instruction emits
+zero bytes, so a boundary cut always leaves the output short. -/
+theorem run_prefix (base : Bytes) (rl : Nat) :
+    ∀ (r out res : Bytes) (k : Nat), run base rl r out = .ok res → k < r.length →
+      run base rl (r.take k) out = .error .eof ∨
+        run base rl (r.take k) out = .error .resultLenUnderrun
+  | [], _, _, _, _, hk => by simp at hk
+  | op :: rest, out, res, k, h, hk => by
+    rw [run] at h
+    by_cases hc : 128 ≤ op.toNat
+    · simp only [hc, ite_true] at h
+      by_cases hr : op.toNat ≠ 128
+      · simp [hr] at h
+      · simp only [hr, ite_false] at h
+        by_cases h6 : rest.length < 6
+        · simp [h6] at h
+        · simp only [h6, ite_false] at h
+          obtain ⟨o, ho⟩ := readLE_some (k := 4) (r := rest) (by omega)
+          obtain ⟨l, hl⟩ := readLE_some (k := 2) (r := rest.drop 4) (by simp; omega)
+          simp only [ho, hl] at h
+          by_cases hz : l = 0
+          · simp [hz] at h
+          by_cases hb : base.length < o + l
+          · simp [hz, hb] at h
+          by_cases hov : rl < out.length + l
+          · simp [hz, hb, hov] at h
+          simp only [hz, hb, hov, ite_false] at h
+          rw [slice?_eq (by omega)] at h
+          cases k with
+          | zero =>
+            right; rw [List.take_zero, run]
+            simp only [show out.length ≠ rl by omega, ite_false]
+          | succ k =>
+            rw [List.take_succ_cons, run]
+            simp only [hc, hr, ite_true, ite_false]
+            by_cases hk6 : k < 6
+            · left; simp only [show (rest.take k).length < 6 by simp; omega, ite_true]
+            · simp only [show ¬ (rest.take k).length < 6 by simp; omega, ite_false]
+              rw [readLE_take (by omega), List.drop_take, readLE_take (by omega)]
+              simp only [ho, hl, hz, hb, hov, ite_false]
+              rw [slice?_eq (by omega), List.drop_take]
+              exact run_prefix base rl _ _ res (k - 6) h (by simp at hk ⊢; omega)
+    · simp only [hc, ite_false] at h
+      by_cases h0 : op.toNat = 0
+      · simp [h0] at h
+      by_cases hls : rest.length < op.toNat
+      · simp [h0, hls] at h
+      by_cases hov : rl < out.length + op.toNat
+      · simp [h0, hls, hov] at h
+      simp only [h0, hls, hov, ite_false] at h
+      rw [slice?_eq (by simp; omega)] at h
+      cases k with
+      | zero =>
+        right; rw [List.take_zero, run]
+        simp only [show out.length ≠ rl by omega, ite_false]
+      | succ k =>
+        rw [List.take_succ_cons, run]
+        simp only [hc, h0, ite_false]
+        by_cases hkl : k < op.toNat
+        · left; simp only [show (rest.take k).length < op.toNat by simp; omega, ite_true]
+        · simp only [show ¬ (rest.take k).length < op.toNat by simp; omega, hov, ite_false]
+          rw [slice?_eq (by simp; omega)]
+          simp only [List.drop_zero, Nat.sub_zero, List.take_take, List.drop_take] at h ⊢
+          rw [show min op.toNat k = op.toNat by omega]
+          exact run_prefix base rl _ _ res (k - op.toNat) h (by simp at hk ⊢; omega)
+termination_by r => r.length
+decreasing_by all_goals simp; omega
+
+/-- §2 / §10: every proper prefix of an accepted stream is rejected, as
+`UnexpectedEof` or as `DeltaCorrupt(ResultLenUnderrun)`. A truncated stream
+is therefore never accepted, but a cut at an instruction boundary is reported
+as corruption, not as truncation (`DeltaCanaries.boundary_cut_is_underrun`). -/
+theorem apply_prefix (base s res : Bytes) (k : Nat) (h : apply base s = .ok res)
+    (hk : k < s.length) :
+    apply base (s.take k) = .error .eof ∨ apply base (s.take k) = .error .resultLenUnderrun := by
+  by_cases h9 : k < headerLen
+  · left; unfold apply
+    have : (s.take k).length < headerLen := by simp; omega
+    simp only [this, ite_true]
+  unfold apply at h
+  split at h
+  · simp at h
+  match s, h, hk with
+  | v :: rest, h, hk =>
+    simp only at h
+    by_cases hv : v ≠ 0x01
+    · simp [hv] at h
+    simp only [hv, ite_false] at h
+    simp only [headerLen, List.length_cons] at h9 hk
+    obtain ⟨bl, hbl⟩ := readLE_some (k := 4) (r := rest) (by omega)
+    obtain ⟨rl, hrl⟩ := readLE_some (k := 4) (r := rest.drop 4) (by simp; omega)
+    simp only [hbl, hrl] at h
+    by_cases hb : bl ≠ base.length
+    · simp [hb] at h
+    simp only [hb, ite_false] at h
+    obtain ⟨k, rfl⟩ : ∃ j, k = j + 1 := ⟨k - 1, by omega⟩
+    unfold apply
+    rw [List.take_succ_cons]
+    simp only [headerLen, List.length_cons, List.length_take,
+      show ¬ min k rest.length + 1 < 9 by omega, ite_false, hv]
+    rw [readLE_take (by omega), List.drop_take, readLE_take (by omega)]
+    simp only [hbl, hrl, hb, ite_false]
+    rw [List.drop_take]
+    exact run_prefix base rl _ [] res (k - 8) h (by simp; omega)
 
 end MkitFormal.Delta

@@ -5128,6 +5128,12 @@ mod tests {
 /// entry frame: CBMC's symbolic execution of the `PackError` →
 /// `StoreError` → `std::io::Error` drop glue dominates (~13 min), so
 /// that composition is left to the `pack` fuzz target.
+///
+/// The `pack_window_cursor_*` harnesses cover the one new decoder surface
+/// of the windowed reader (SPEC-PACKFILE §11): the persisted resumable
+/// cursor (`window::WindowCursor::from_bytes`). Its framing path shares
+/// `decode_payload` with `PackEntries`; `rewrite::rewrite_excluding`
+/// parses through `PackEntries`/`decode_entries_with` and adds no decoder.
 #[cfg(kani)]
 mod kani_proofs {
     use super::*;
@@ -5321,5 +5327,130 @@ mod kani_proofs {
         let flip: u8 = kani::any_where(|&f| f != 0);
         pack[i] ^= flip;
         assert!(PackEntries::new(&pack).is_ok());
+    }
+
+    /// A checksum-valid symbolic cursor encoding (canonical v1 field
+    /// order: see the `window::cursor` module doc) of `N` body bytes, all
+    /// symbolic except the option tags (0/1) at the concrete `(offset,
+    /// present)` positions in `tags` and the two tree depth bytes at
+    /// `depths`, which are 0. A symbolic tag or depth byte (even one
+    /// restricted to "valid or rejected") makes CBMC explore every
+    /// layout after it (the reader's `Result` is merged at each return,
+    /// so later field offsets become symbolic); that did not finish within
+    /// 10 min. The (toy) checksum is appended
+    /// so the checksum gate passes and every field parser and the
+    /// geometry validation run on attacker-chosen values.
+    fn cursor_bytes<const N: usize>(tags: &[(usize, bool)], depths: [usize; 2]) -> Vec<u8> {
+        let mut body: [u8; N] = kani::any();
+        for &(at, present) in tags {
+            body[at] = u8::from(present);
+        }
+        for at in depths {
+            body[at] = 0;
+        }
+        let mut out = Vec::with_capacity(N + hash::HASH_LEN);
+        out.extend_from_slice(&body);
+        out.extend_from_slice(&toy_hash(&body));
+        out
+    }
+
+    /// Layout A (125-byte body): first-window boundary bound to the
+    /// trailer anchor, no pack id requested, no first-non-raw index;
+    /// current-window prefix commitment present; both trees empty.
+    /// Offsets: version 0, four u64 + three u32 at 1..45, tags at 45
+    /// (first-non-raw), 54 (expected), 55 (anchor) + digest, 88 (prefix)
+    /// + digest, trees at 121/122 and 123/124.
+    fn cursor_anchor() -> Vec<u8> {
+        cursor_bytes::<125>(
+            &[
+                (45, false),
+                (54, false),
+                (55, true),
+                (88, true),
+                (122, false),
+                (124, false),
+            ],
+            [121, 123],
+        )
+    }
+
+    /// Resumable-cursor decoder (`window::WindowCursor::from_bytes`, the
+    /// persisted state of the SPEC-PACKFILE §11 windowed reader) on a
+    /// checksum-valid layout-A encoding whose every numeric field and
+    /// digest is symbolic: decoding (field parsing, trailing-byte check,
+    /// geometry validation) never panics, overflows
+    /// or reads out of bounds; `cover` shows acceptance is reachable.
+    /// (Also asserting that an accepted cursor re-encodes byte-exactly
+    /// via `to_bytes`, and the pack-id-bound layout, each did not finish
+    /// within 15 min; the round-trip stays with the `window` unit tests.)
+    #[kani::proof]
+    #[kani::stub(crate::hash::hash, toy_hash)]
+    // Run with `-Z unstable-options --cbmc-args --unwindset memcmp.0:33`
+    // (checksum comparison); the tree loops read no CVs.
+    #[kani::unwind(7)]
+    fn pack_window_cursor_decode() {
+        let got = window::WindowCursor::from_bytes(&cursor_anchor());
+        let ok = got.is_ok();
+        // Skip the harness-side `PackError` drop glue (`Store` →
+        // `std::io::Error`); nothing about dropping is checked here.
+        core::mem::forget(got);
+        kani::cover!(ok, "accepted_anchor_cursor");
+    }
+
+    /// A concrete, valid layout-A cursor (100-byte pack, 64 KiB windows,
+    /// boundary right after the header, no entries; symbolic anchor and
+    /// prefix digests) with `mask` XORed into the low byte of `pack_len`
+    /// (offset 1, inside the checksummed body) after the checksum is
+    /// computed. Every flipped `pack_len` in 44..=255 is still valid
+    /// geometry for this cursor, so for those only the checksum rejects.
+    fn flipped_cursor(mask: u8) -> Vec<u8> {
+        let mut body = [0u8; 125];
+        body[0] = 1; // cursor encoding version
+        body[1..9].copy_from_slice(&100u64.to_le_bytes()); // pack_len
+        body[9..17].copy_from_slice(&(64u64 << 10).to_le_bytes()); // window
+        body[17..25].copy_from_slice(&12u64.to_le_bytes()); // pos
+        body[33..37].copy_from_slice(&1u32.to_le_bytes()); // pack version
+        body[55] = 1; // anchor present
+        body[56..88].copy_from_slice(&kani::any::<Hash>());
+        body[88] = 1; // window prefix present
+        body[89..121].copy_from_slice(&kani::any::<Hash>());
+        let mut out = body.to_vec();
+        out.extend_from_slice(&toy_hash(&body));
+        out[1] ^= mask;
+        out
+    }
+
+    /// Checksum gate: the concrete cursor above decodes iff it is
+    /// unmodified, i.e. every single-byte change to its `pack_len` field
+    /// (most of which leave a still-valid cursor) is rejected. One
+    /// `from_bytes` call per harness: each costs ~7 min of CBMC symbolic
+    /// execution (~6.8M steps, much of it `PackError` → `StoreError` →
+    /// `std::io::Error` machinery), so two calls did not finish within
+    /// 15 min.
+    #[kani::proof]
+    #[kani::stub(crate::hash::hash, toy_hash)]
+    // As above: `--cbmc-args --unwindset memcmp.0:33`.
+    #[kani::unwind(7)]
+    fn pack_window_cursor_flip_rejected() {
+        let mask: u8 = kani::any();
+        let got = window::WindowCursor::from_bytes(&flipped_cursor(mask));
+        let ok = got.is_ok();
+        core::mem::forget(got);
+        assert_eq!(ok, mask == 0);
+    }
+
+    /// Canary: the checker must falsify "a flipped `pack_len` byte still
+    /// decodes" (the negation of the property above).
+    #[kani::proof]
+    #[kani::stub(crate::hash::hash, toy_hash)]
+    // As above: `--cbmc-args --unwindset memcmp.0:33`.
+    #[kani::unwind(7)]
+    #[kani::should_panic]
+    fn pack_window_cursor_canary_flip_accepted() {
+        let got =
+            window::WindowCursor::from_bytes(&flipped_cursor(kani::any_where(|&m: &u8| m != 0)));
+        let ok = got.is_ok();
+        core::mem::forget(got);
+        assert!(ok);
     }
 }

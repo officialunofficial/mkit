@@ -1796,6 +1796,33 @@ mod kani_proofs {
         chunk_rt::<2>(2);
     }
 
+    /// SPEC-MERKLE-OBJECTS §5.4 builder rule: "A builder MUST refuse any
+    /// position `>= leaf_count` ... A builder asked for position 0 of an
+    /// empty `Tree`, including the range `0..=0`, MUST refuse rather than
+    /// return the all-default proof." For the empty `Tree` every
+    /// single-leaf, range and (one-position) multi-leaf request, over
+    /// every `u32` position, is refused. The `cover` shows the range
+    /// assertion is on a reachable path.
+    #[kani::proof]
+    #[kani::stub(h2, toy_h2)]
+    #[kani::stub(crate::hash::domain_digest, toy_domain_digest)]
+    #[kani::stub(crate::hash::hash, toy_hash)]
+    #[kani::unwind(3)]
+    fn merkle_builder_empty_tree_refuses() {
+        let empty = Tree {
+            entries: Vec::new(),
+        };
+        let (p, start, end): (u32, u32, u32) = (kani::any(), kani::any(), kani::any());
+        assert!(build_tree_entry_proof(&empty, p).is_err());
+        assert!(build_tree_entries_multi_proof(&empty, [p]).is_err());
+        let range = build_tree_entries_range_proof(&empty, start, end);
+        kani::cover!(range.is_err(), "range_refused");
+        assert!(
+            range.is_err(),
+            "empty-Tree range proof must be refused (SPEC-MERKLE-OBJECTS §5.4)"
+        );
+    }
+
     /// Canary (§6 "leaf tampered"): the checker must find a forged chunk
     /// hash that the verifier rejects under a genuine 2-chunk proof, i.e.
     /// falsify "any leaf verifies under a genuine proof".

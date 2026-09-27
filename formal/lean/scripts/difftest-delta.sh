@@ -2,7 +2,7 @@
 # Reproduce every MKIT-25 check: build the Lean SPEC-DELTA model (proofs +
 # canaries, no `sorry`), audit axioms, export Rust vectors, run the Lean
 # differential test, then confirm the canaries are caught (each `--mutant`
-# reader and a corrupted Rust verdict). Needs Lean 4.23.0 (`LAKE`, default
+# reader and a corrupted Rust verdict). Needs Lean 4.34.0 (lean-toolchain) (`LAKE`, default
 # `lake`) and cargo.
 # Env: MKIT_FORMAL_SEED, MKIT_FORMAL_DELTA_CASES (forwarded to the exporter).
 set -euo pipefail

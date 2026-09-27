@@ -1,7 +1,8 @@
 // -*- mode: Bluespec; -*-
 // Scrub schedule for fast-forward publication (MKIT-20).
 //
-// Models docs/specs/SPEC-HISTORY-PROOF.md §4.5 as implemented by
+// Models docs/specs/SPEC-HISTORY-PROOF.md §4.5 (scrub v2, generation-bound,
+// with the corrected 65-publish lap and the lost-write caveat) as implemented by
 // `decide_chain` / `advance` / `ScrubState` in
 // rust/crates/mkit-core/src/history/ancestry.rs, for one branch. Only the
 // verification SCHEDULE is modelled: the published chain is identical on
@@ -148,18 +149,24 @@ module scrubCore {
   // How many publishes a leaf has gone unread.
   def age(i: int): int = pubs - lastPub.get(i)
 
-  // §4.5 claim: every leaf is re-read at least once every LAP_FRACTION
-  // (real: 64) fast-forward publishes. age is sampled after each publish,
-  // so a gap of g publishes between reads shows as age g - 1.
+  // The superseded §4.5 claim (every leaf re-read within LAP_FRACTION, real
+  // 64, fast-forward publishes). Kept as a regression witness: it must stay
+  // violated. age is sampled after each publish, so a gap of g publishes
+  // between reads shows as age g - 1.
   val SpecPublishBound = leavesOf(chainLen).forall(i => age(i) <= LAP_FRACTION - 1)
-  // What the implementation guarantees: a lap is at most LAP_FRACTION + 1
-  // publishes (LAP_FRACTION windows, then the full walk).
+  // The corrected §4.5 bound: "when every advisory scrub write lands, no
+  // leaf goes more than 65 fast-forward publishes ... without being re-read",
+  // i.e. a lap is at most LAP_FRACTION + 1 publishes (LAP_FRACTION windows,
+  // then the full walk). With lost scrub writes (scrubLossy) it fails, as
+  // §4.5 now states.
   val ActualPublishBound = leavesOf(chainLen).forall(i => age(i) <= LAP_FRACTION)
   // §4.5: right after a publish, every leaf was read within MAX_AGE (7 days)
-  // of real time.
+  // of real time ("as measured at a publish"; holds with lost scrub writes,
+  // fails if the wall clock steps back, as §4.5 now states).
   val TimeBound = lastMode != "init" implies
     leavesOf(chainLen).forall(i => real - lastReal.get(i) <= MAX_AGE)
-  // §4.5: the window path requires FEWER than MAX_AGE seconds elapsed.
+  // §4.5: the window path requires FEWER than MAX_AGE seconds elapsed. Still
+  // violated: the code takes the window path at exactly 604800 s (finding 2).
   val WindowOnlyWhenFresh = lastMode == "window" implies lastElapsed < MAX_AGE
   // §4.5: missing/corrupt/foreign-generation state always forces a full walk.
   val InvalidForcesFull = (lastMode == "window") implies lastScrubValid

@@ -1,22 +1,39 @@
 // -*- mode: Bluespec; -*-
 // Ref CAS and lock-order model for mkit (Linear MKIT-19, workstream quint-refs).
 //
-// Models:
+// Models (specs on branch claude/kind-brahmagupta-esqhc0, server era;
+// SPEC-REFS v3, SPEC-CONCURRENCY as of this branch):
 //   - SPEC-REFS §5 updateRef conditions Any / Missing / Match(H) and deletes
 //     (unconditional `delete_ref`, conditional `delete_ref_if_matches`).
 //   - SPEC-REFS §5.1 atomicity matrix for the three in-repo lock domains:
 //       local : direct on-disk mutation under `refs-<ref>.lock` (refs.rs RefMutation)
-//       file  : file transport under `<root>/.mkit/refs/.lock` (RefLock)
-//       mem   : in-process memory transport, NO lock; `.match` is a
-//               read-then-write race per the normative matrix.
+//       file  : file transport under `<root>/.mkit/refs/.lock` (RefLock). This
+//               is also the domain of every SERVER of a `.mkit` root: `mkit
+//               serve` (ssh-frame) and `mkit-server serve --meta fs-layout`
+//               write refs through `FileTransport` (`FsLayoutStore::apply` ->
+//               `FileTransport::with_ref_lock`), so a `file` op below stands
+//               for a CAS from `mkit serve`, `mkit-server` or a direct
+//               `mkit+file://` push alike. (`mkit-server --meta sqlite` keeps
+//               refs in SQLite; the R-81 root marker makes FileTransport refuse
+//               ref writes there, so that root has no on-disk ref domain; not
+//               modelled.)
+//       mem   : in-process memory transport. The code
+//               (mkit-transport-memory `update_ref`) holds its `Mutex` across
+//               read-check-write, so `.match` is ATOMIC (in-process only);
+//               SPEC-REFS §5.1 now says so ("atomic*: the read-check-write
+//               runs under the instance's one Mutex"; the v1 text said "NOT
+//               atomic"). Modelled as an in-process lock (id 8, its own
+//               domain); the old race is kept as the `memNoMutex` mutant.
 //   - SPEC-CONCURRENCY §2 lock inventory, §4 global order
 //       worktrees.lock ≺ worktree.lock(s) ≺ refs-history-<b>.lock ≺ refs-<ref>.lock
 //     and in-class canonical order (main tree first, then ids; refs lexicographic).
 //   - SPEC-CONCURRENCY §3.2 recovery-log record/expire synchronisation by
 //     lock-superset containment (no dedicated lock).
-//   - SPEC-CONCURRENCY §3.1: the file-transport RefLock is a separate domain
-//     that writes the SAME ref files as the local chain; the cross-domain race
-//     is a documented, unresolved gap (witnessed below, not a bug).
+//   - SPEC-CONCURRENCY §3.1: the file-transport RefLock (hence `mkit serve` and
+//     `mkit-server`) is a separate domain that writes the SAME ref files as the
+//     local chain; the cross-domain race is a documented, unresolved gap
+//     (witnessed below, not a bug). serve.lock / server.lock, the startup
+//     upload sweep and the served-name rule are in serve.qnt.
 //
 // Each process runs one operation at a time as explicit steps
 //   begin → acquire* → readRef → commitRef → release                 (ref writers)
@@ -29,7 +46,8 @@
 // `commitRef` checks Match against the value seen at `readRef` (TOCTOU window
 // that the lock is supposed to close); Missing is decided on the actual file
 // (O_EXCL / create_new, SPEC-REFS §5.1), unconditional delete fails NotFound on
-// the actual file.
+// the actual file. For `mem`, Missing is decided on the value read under the
+// mutex (a HashMap has no O_EXCL); with the mutex that is the actual value.
 //
 // Lock waits block forever (the 5 s repo_lock timeout, SPEC-CONCURRENCY §4
 // last paragraph, is abstracted away: "SHOULD NOT rely on the timeout").
@@ -37,12 +55,8 @@
 // Every step sets `lastAction` (step label + parameters + outcome) so traces
 // can be replayed against the Rust implementation (ITF conformance).
 //
-// Code/spec drift (recorded as findings, not modelled): the Rust memory
-// transport holds a Mutex across its read-check-write, so it is stronger than
-// SPEC-REFS §5.1 says; this model follows the spec.
-//
-// Bounds (explicit): 3 processes (refs3) or 2 (refs2, Apalache), 2 worktrees
-// (0 = main, 1 = linked id), 2 branch refs (0 = refs/heads/a ≺ 1 =
+// Bounds (explicit): 3 processes (refs3) or 2 (refs2, Apalache/TLC), 2
+// worktrees (0 = main, 1 = linked id), 2 branch refs (0 = refs/heads/a ≺ 1 =
 // refs/heads/b), hash values {1, 2}, 0 = ref absent, lock plans ≤ 4 locks.
 // Multi-ref commands (branch -m, batched remote writes) publish one ref at a
 // time (SPEC-CONCURRENCY §4 last sentence of the order paragraph), so each
@@ -50,15 +64,7 @@
 // writes take only refs-<ref>.lock; that lock-set shape is covered by two
 // updateRef ops from different trees (sharing only refs-<ref>.lock).
 //
-// Checks (see refs_test.qnt for pinned scenarios):
-//   quint test refs_test.qnt
-//   quint run refs.qnt --main refs3 --invariant Safety --max-samples 100000 --max-steps 40
-//   quint run refs.qnt --main refs3 --invariant WitnessCrossDomainGap   # expect violation
-//   quint run refs.qnt --main refs2_noRefLock --invariant NoLostUpdateLocal   # mutant: expect violation
-//   quint compile --target tlaplus --main refs2 --invariant Safety refs.qnt > refs2.tla
-//   apalache-mc check --init=q_init --next=q_step --inv=refs2_refs_Safety --length=8 refs2.tla
-// (quint verify's gRPC server may be flaky under load; running apalache-mc
-// on the compiled TLA+ is equivalent.)
+// Checks: ./check.sh (see README.md for every command and expected outcome).
 // Mutant modules (each must violate the invariant named next to it) are at
 // the end of this file.
 module refs {
@@ -76,6 +82,7 @@ module refs {
   //   5 refs-<refs/heads/a>.lock 6 refs-<refs/heads/b>.lock
   //   7 <root>/.mkit/refs/.lock  (file-transport RefLock; separate domain,
   //     never composed with 0..6 — §3.1, §4 "not composed")
+  //   8 MemoryTransport's in-process Mutex (its own domain)
   type Lock = int
 
   // An operation request. `kind` selects the lock plan / command path.
@@ -87,8 +94,9 @@ module refs {
   //               (checkout -b/-B: checkout.rs takes the registry lock, then
   //               its tree's lock, then write_ref_recording_history)
   //   gc        : worktrees.lock ≺ worktree.lock(0) ≺ worktree.lock(1), then recovery::expire
-  //   file      : file-transport RefLock only (mkit serve / mkit+file:// push)
-  //   mem       : memory transport, no lock
+  //   file      : file-transport RefLock only (mkit serve, mkit-server
+  //               fs-layout, mkit+file:// push)
+  //   mem       : memory transport, its in-process Mutex only
   // `del` = delete instead of write (branch only): Any = delete_ref,
   // Match(e) = delete_ref_if_matches(e).
   type Op = { kind: str, tree: int, ref: int, cond: Cond, value: int, del: bool }
@@ -112,6 +120,7 @@ module refs {
     noFileLock: bool,   // file transport skips RefLock
     gcSkipTrees: bool,  // gc expires holding only worktrees.lock (violates §3.2)
     racyAcquire: bool,  // acquire ignores exclusivity (a broken flock; violates §2)
+    memNoMutex: bool,   // memory transport without its Mutex (the old §5.1 "NOT atomic" row)
   }
 
   type Violation = { writer: str, by: str }
@@ -127,12 +136,13 @@ module refs {
   pure val VALUES: Set[int] = Set(1, 2)
   pure val ABSENT: int = 0
   pure val KINDS: Set[str] = Set("commit", "amend", "updateRef", "branch", "checkout", "gc", "file", "mem")
-  pure val LOCKS: Set[Lock] = 0.to(7)
+  pure val LOCKS: Set[Lock] = 0.to(8)
   pure val FREE: Proc = ""
   pure val PLAN_IDX: Set[int] = 0.to(3)  // every lock plan has at most 4 locks
 
   pure val WTS: Lock = 0
   pure val FILE_LOCK: Lock = 7
+  pure val MEM_LOCK: Lock = 8
   pure def wtLock(t: int): Lock = 1 + t
   pure def histLock(r: int): Lock = 3 + r
   pure def refLock(r: int): Lock = 5 + r
@@ -144,6 +154,7 @@ module refs {
   }
   pure val NO_FAULTS: Faults = {
     misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false,
+    memNoMutex: false,
   }
 
   // ------------------------------------------------------------- helpers
@@ -170,6 +181,7 @@ module refs {
        else [WTS, wtLock(op.tree), histLock(op.ref), refLock(op.ref)])
     else if (op.kind == "gc") (if (f.gcSkipTrees) [WTS] else [WTS, wtLock(0), wtLock(1)])
     else if (op.kind == "file") (if (f.noFileLock) [] else [FILE_LOCK])
+    else if (op.kind == "mem") (if (f.memNoMutex) [] else [MEM_LOCK])
     else []
 
   pure def bodyStart(kind: str): str = if (kind == "gc") "expireRead" else "read"
@@ -316,7 +328,8 @@ module refs {
     // Decision as implemented per SPEC-REFS §5.1 / refs.rs RefMutation:
     val ok = match op.cond {
       | Any => (not(op.del)) or actual != ABSENT   // delete_ref: NotFound on the actual file
-      | Missing => actual == ABSENT                // O_EXCL / create_new
+      | Missing => if (store == "mem") st.observed == ABSENT  // HashMap: read under the Mutex
+                   else actual == ABSENT                // O_EXCL / create_new
       | Match(e) => st.observed == e and ((not(op.del)) or actual != ABSENT)
     }
     val newVal = if (op.del) ABSENT else op.value
@@ -400,8 +413,9 @@ module refs {
     st.pc != "acquire" or faults.racyAcquire or owner.get(nextLock(st)) == FREE
   }
 
-  action step = {
-    nondet p = PROCS.filter(q => canMove(q)).oneOf()
+  // begin with every op parameter chosen nondeterministically. Bound here,
+  // not in `step`, so TLC does not re-enumerate them for the other actions.
+  action beginAny(p: Proc): bool = {
     nondet kind = KINDS.oneOf()
     nondet t = TREES.oneOf()
     nondet r = REFS.oneOf()
@@ -409,8 +423,13 @@ module refs {
     nondet v = VALUES.oneOf()
     nondet d = Set(false, true).oneOf()
     nondet rv = Set(false, true).oneOf()
+    begin(p, mkOp(kind, t, r, c, v, d), rv and faults.misorder)
+  }
+
+  action step = {
+    nondet p = PROCS.filter(q => canMove(q)).oneOf()
     any {
-      begin(p, mkOp(kind, t, r, c, v, d), rv and faults.misorder),
+      beginAny(p),
       acquire(p),
       record(p),
       readRef(p),
@@ -458,7 +477,10 @@ module refs {
   val NoLostUpdateLocal: bool = not(violations.contains({ writer: "local", by: "local" }))
   // Same for the file transport's RefLock domain.
   val NoLostUpdateFile: bool = not(violations.contains({ writer: "file", by: "file" }))
-  val NoLostUpdateWithinDomain: bool = NoLostUpdateLocal and NoLostUpdateFile
+  // Memory transport: its Mutex makes read-check-write atomic (SPEC-REFS
+  // §5.1 memory row, "atomic*", in-process only).
+  val NoLostUpdateMem: bool = not(violations.contains({ writer: "mem", by: "mem" }))
+  val NoLostUpdateWithinDomain: bool = NoLostUpdateLocal and NoLostUpdateFile and NoLostUpdateMem
 
   // SPEC-CONCURRENCY §3.2: whenever expire is mid-rewrite, gc holds every
   // registered tree's worktree.lock (the superset that excludes producers)...
@@ -473,8 +495,8 @@ module refs {
   }
 
   // ---------------------------------------------- witnesses (expected FALSE)
-  // Documented §5.1 exception: memory-transport .match is a read-then-write race.
-  val WitnessMemMatchRace: bool = not(violations.contains({ writer: "mem", by: "mem" }))
+  // (The former WitnessMemMatchRace is now the Safety conjunct
+  // NoLostUpdateMem; its race survives only as the refs2_memNoMutex mutant.)
   // DOCUMENTED GAP (SPEC-CONCURRENCY §3.1, SPEC-REFS §5.1 "There is no rule
   // that closes this gap"): a local ref write and a file-transport CAS on the
   // same root are not serialized. Expected reachable; not a bug.
@@ -491,40 +513,44 @@ module refs {
 }
 
 // ------------------------------------------------------------ instances
-// FAULTS literal: { misorder, noRefLock, noFileLock, gcSkipTrees, racyAcquire }.
+// FAULTS literal: { misorder, noRefLock, noFileLock, gcSkipTrees, racyAcquire, memNoMutex }.
 // 3 processes: every wait-for cycle shape (2- and 3-cycles). quint run.
 module refs3 {
   import refs(PROCS = Set("p1", "p2", "p3"),
-              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false }).*
+              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false }).*
 }
 // 2 processes: Apalache instance (lost update, cross-domain gap, 2-cycle
 // deadlock and record/expire interleaving all need only 2 processes).
 module refs2 {
   import refs(PROCS = Set("p1", "p2"),
-              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false }).*
+              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false }).*
 }
 // Mutants (non-vacuity): each must violate the named invariant.
 module refs3_misorder {    // NoDeadlock, LockOrderRespected
   import refs(PROCS = Set("p1", "p2", "p3"),
-              FAULTS = { misorder: true, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false }).*
+              FAULTS = { misorder: true, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false }).*
 }
 module refs2_misorder {    // NoDeadlock, LockOrderRespected
   import refs(PROCS = Set("p1", "p2"),
-              FAULTS = { misorder: true, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false }).*
+              FAULTS = { misorder: true, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false }).*
 }
 module refs2_noRefLock {   // NoLostUpdateLocal
   import refs(PROCS = Set("p1", "p2"),
-              FAULTS = { misorder: false, noRefLock: true, noFileLock: false, gcSkipTrees: false, racyAcquire: false }).*
+              FAULTS = { misorder: false, noRefLock: true, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: false }).*
 }
 module refs2_noFileLock {  // NoLostUpdateFile
   import refs(PROCS = Set("p1", "p2"),
-              FAULTS = { misorder: false, noRefLock: false, noFileLock: true, gcSkipTrees: false, racyAcquire: false }).*
+              FAULTS = { misorder: false, noRefLock: false, noFileLock: true, gcSkipTrees: false, racyAcquire: false, memNoMutex: false }).*
 }
 module refs2_gcSkipTrees { // NoRecordExpireInterleave, ExpireHoldsSuperset
   import refs(PROCS = Set("p1", "p2"),
-              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: true, racyAcquire: false }).*
+              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: true, racyAcquire: false, memNoMutex: false }).*
 }
 module refs2_racyAcquire { // LockOwnership
   import refs(PROCS = Set("p1", "p2"),
-              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: true }).*
+              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: true, memNoMutex: false }).*
+}
+module refs2_memNoMutex {  // NoLostUpdateMem (the old SPEC-REFS §5.1 memory row)
+  import refs(PROCS = Set("p1", "p2"),
+              FAULTS = { misorder: false, noRefLock: false, noFileLock: false, gcSkipTrees: false, racyAcquire: false, memNoMutex: true }).*
 }

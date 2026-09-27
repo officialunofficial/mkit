@@ -34,6 +34,7 @@ module historyCore {
   const BUG_SKIP_VERIFY: bool           // intent persisted without ancestors
   const BUG_FINISH_ANY_REF: bool        // recovery accepts any ref value
   const BUG_WRITE_BEFORE_INVALIDATE: bool  // raw write moves the ref first
+  const BUG_RECOVER_SKIPS_PENDING: bool    // recovery resumes at step 5, not 4
 
   // ---- commit universe ----------------------------------------------------
   // First-parent forest: 1 <- 2 <- 3 and 1 <- 4 (a fork). 0 is "no ref".
@@ -168,7 +169,10 @@ module historyCore {
       else chainOf(tx.target)
     if (ok) all {
       keepDurable,
-      pc' = "f_pending", after' = k, opTarget' = t, opExpect' = exp, memChain' = rebuilt,
+      // §4.4: recovery "completes steps 4-7", starting by rewriting
+      // pending-snapshot from the rebuilt chain. The mutant trusts whatever
+      // pending-snapshot a crash left behind and resumes at step 5.
+      pc' = if (BUG_RECOVER_SKIPS_PENDING) "f_ref" else "f_pending", after' = k, opTarget' = t, opExpect' = exp, memChain' = rebuilt,
       keepGhost,
     }
     else all {
@@ -372,15 +376,19 @@ module historyCore {
     ev' = { ...ev, crashTx: ev.crashTx or tx.present },
   }
 
-  action step = {
+  // Every step except Crash. Kept as its own action so the progress check
+  // (tlc/MCL.tla) can tell a crash from an operation that fails with the
+  // same effect (an in-flight error also resets the volatile state).
+  action noCrashStep = {
     nondet t = COMMITS.oneOf()
     nondet e = EXPECTS.oneOf()
     any {
       Advance(t, e), AdvanceCont, FPending, FRef, FSnap, FCurrent, FClear,
       Delete(e), RawDelete(e), DelInval, DelRef, RawWrite(t, e), RawWriteRef,
-      Gc, WriteObject(t), Crash,
+      Gc, WriteObject(t),
     }
   }
+  action step = any { noCrashStep, Crash }
 
   // ---- invariants -----------------------------------------------------------
   // §4.4: proofs MUST be withheld while an intent exists.
@@ -446,7 +454,7 @@ module history {
     BUG_RAW_SKIPS_INVALIDATE = false, BUG_GC_IGNORES_INTENT = false,
     BUG_HEAL_TIP_ONLY = false, BUG_REUSE_GEN_ON_REWRITE = false,
     BUG_FRESH_GEN_ON_FF = false, BUG_SKIP_VERIFY = false, BUG_FINISH_ANY_REF = false,
-    BUG_WRITE_BEFORE_INVALIDATE = false
+    BUG_WRITE_BEFORE_INVALIDATE = false, BUG_RECOVER_SKIPS_PENDING = false
   ).*
 
   // Scenario tests mirroring ancestry.rs
@@ -495,7 +503,7 @@ module mutLoadIgnoresTx {   // violates NoProofWhileIntent
     BUG_RAW_SKIPS_INVALIDATE = false, BUG_GC_IGNORES_INTENT = false,
     BUG_HEAL_TIP_ONLY = false, BUG_REUSE_GEN_ON_REWRITE = false,
     BUG_FRESH_GEN_ON_FF = false, BUG_SKIP_VERIFY = false, BUG_FINISH_ANY_REF = false,
-    BUG_WRITE_BEFORE_INVALIDATE = false
+    BUG_WRITE_BEFORE_INVALIDATE = false, BUG_RECOVER_SKIPS_PENDING = false
   ).*
 }
 module mutRawIgnoresTx {    // violates RecoveryEnabled / NeverFailsClosed
@@ -504,7 +512,7 @@ module mutRawIgnoresTx {    // violates RecoveryEnabled / NeverFailsClosed
     BUG_RAW_SKIPS_INVALIDATE = false, BUG_GC_IGNORES_INTENT = false,
     BUG_HEAL_TIP_ONLY = false, BUG_REUSE_GEN_ON_REWRITE = false,
     BUG_FRESH_GEN_ON_FF = false, BUG_SKIP_VERIFY = false, BUG_FINISH_ANY_REF = false,
-    BUG_WRITE_BEFORE_INVALIDATE = false
+    BUG_WRITE_BEFORE_INVALIDATE = false, BUG_RECOVER_SKIPS_PENDING = false
   ).*
 }
 module mutRawSkipsInvalidate {  // violates GenerationFastForwardOnly (ABA)
@@ -513,7 +521,7 @@ module mutRawSkipsInvalidate {  // violates GenerationFastForwardOnly (ABA)
     BUG_RAW_SKIPS_INVALIDATE = true, BUG_GC_IGNORES_INTENT = false,
     BUG_HEAL_TIP_ONLY = false, BUG_REUSE_GEN_ON_REWRITE = false,
     BUG_FRESH_GEN_ON_FF = false, BUG_SKIP_VERIFY = false, BUG_FINISH_ANY_REF = false,
-    BUG_WRITE_BEFORE_INVALIDATE = false
+    BUG_WRITE_BEFORE_INVALIDATE = false, BUG_RECOVER_SKIPS_PENDING = false
   ).*
 }
 module mutGcIgnoresIntent {  // violates IntentRootsRetained
@@ -522,7 +530,7 @@ module mutGcIgnoresIntent {  // violates IntentRootsRetained
     BUG_RAW_SKIPS_INVALIDATE = false, BUG_GC_IGNORES_INTENT = true,
     BUG_HEAL_TIP_ONLY = false, BUG_REUSE_GEN_ON_REWRITE = false,
     BUG_FRESH_GEN_ON_FF = false, BUG_SKIP_VERIFY = false, BUG_FINISH_ANY_REF = false,
-    BUG_WRITE_BEFORE_INVALIDATE = false
+    BUG_WRITE_BEFORE_INVALIDATE = false, BUG_RECOVER_SKIPS_PENDING = false
   ).*
 }
 module mutHealTipOnly {     // violates CurrentMatchesRef
@@ -531,7 +539,7 @@ module mutHealTipOnly {     // violates CurrentMatchesRef
     BUG_RAW_SKIPS_INVALIDATE = false, BUG_GC_IGNORES_INTENT = false,
     BUG_HEAL_TIP_ONLY = true, BUG_REUSE_GEN_ON_REWRITE = false,
     BUG_FRESH_GEN_ON_FF = false, BUG_SKIP_VERIFY = false, BUG_FINISH_ANY_REF = false,
-    BUG_WRITE_BEFORE_INVALIDATE = false
+    BUG_WRITE_BEFORE_INVALIDATE = false, BUG_RECOVER_SKIPS_PENDING = false
   ).*
 }
 module mutReuseGenOnRewrite {  // violates GenerationFastForwardOnly
@@ -540,7 +548,7 @@ module mutReuseGenOnRewrite {  // violates GenerationFastForwardOnly
     BUG_RAW_SKIPS_INVALIDATE = false, BUG_GC_IGNORES_INTENT = false,
     BUG_HEAL_TIP_ONLY = false, BUG_REUSE_GEN_ON_REWRITE = true,
     BUG_FRESH_GEN_ON_FF = false, BUG_SKIP_VERIFY = false, BUG_FINISH_ANY_REF = false,
-    BUG_WRITE_BEFORE_INVALIDATE = false
+    BUG_WRITE_BEFORE_INVALIDATE = false, BUG_RECOVER_SKIPS_PENDING = false
   ).*
 }
 module mutFreshGenOnFF {    // violates FastForwardRetainsGeneration
@@ -549,7 +557,7 @@ module mutFreshGenOnFF {    // violates FastForwardRetainsGeneration
     BUG_RAW_SKIPS_INVALIDATE = false, BUG_GC_IGNORES_INTENT = false,
     BUG_HEAL_TIP_ONLY = false, BUG_REUSE_GEN_ON_REWRITE = false,
     BUG_FRESH_GEN_ON_FF = true, BUG_SKIP_VERIFY = false, BUG_FINISH_ANY_REF = false,
-    BUG_WRITE_BEFORE_INVALIDATE = false
+    BUG_WRITE_BEFORE_INVALIDATE = false, BUG_RECOVER_SKIPS_PENDING = false
   ).*
 }
 module mutSkipVerify {      // violates IntentRootsRetained (§4.2 missing ancestors)
@@ -558,7 +566,7 @@ module mutSkipVerify {      // violates IntentRootsRetained (§4.2 missing ances
     BUG_RAW_SKIPS_INVALIDATE = false, BUG_GC_IGNORES_INTENT = false,
     BUG_HEAL_TIP_ONLY = false, BUG_REUSE_GEN_ON_REWRITE = false,
     BUG_FRESH_GEN_ON_FF = false, BUG_SKIP_VERIFY = true, BUG_FINISH_ANY_REF = false,
-    BUG_WRITE_BEFORE_INVALIDATE = false
+    BUG_WRITE_BEFORE_INVALIDATE = false, BUG_RECOVER_SKIPS_PENDING = false
   ).*
 }
 // Needs a raw writer that steps over the intent to create the divergence.
@@ -568,7 +576,7 @@ module mutFinishAnyRef {    // violates FinishOnlyFromRecorded
     BUG_RAW_SKIPS_INVALIDATE = false, BUG_GC_IGNORES_INTENT = false,
     BUG_HEAL_TIP_ONLY = false, BUG_REUSE_GEN_ON_REWRITE = false,
     BUG_FRESH_GEN_ON_FF = false, BUG_SKIP_VERIFY = false, BUG_FINISH_ANY_REF = true,
-    BUG_WRITE_BEFORE_INVALIDATE = false
+    BUG_WRITE_BEFORE_INVALIDATE = false, BUG_RECOVER_SKIPS_PENDING = false
   ).*
 }
 // §4.4 deletion / refs.rs `RefMutation::write`: invalidate BEFORE the tip moves.
@@ -578,6 +586,20 @@ module mutWriteBeforeInvalidate {  // violates CurrentMatchesRef (crash between)
     BUG_RAW_SKIPS_INVALIDATE = false, BUG_GC_IGNORES_INTENT = false,
     BUG_HEAL_TIP_ONLY = false, BUG_REUSE_GEN_ON_REWRITE = false,
     BUG_FRESH_GEN_ON_FF = false, BUG_SKIP_VERIFY = false, BUG_FINISH_ANY_REF = false,
-    BUG_WRITE_BEFORE_INVALIDATE = true
+    BUG_WRITE_BEFORE_INVALIDATE = true, BUG_RECOVER_SKIPS_PENDING = false
+  ).*
+}
+// §4.4 "completes steps 4-7": recovery skips rewriting pending-snapshot.
+// After a crash before step 4 (or after step 6 consumed it) there is no
+// pending snapshot, step 6 errors on every retry and the intent is never
+// cleared. Every safety invariant still holds (proofs stay withheld); only
+// the progress property in tlc/MCL.tla catches it.
+module mutRecoverSkipsPending {  // violates IntentEventuallyCleared (liveness)
+  import historyCore(
+    BUG_LOAD_IGNORES_TX = false, BUG_RAW_IGNORES_TX = false,
+    BUG_RAW_SKIPS_INVALIDATE = false, BUG_GC_IGNORES_INTENT = false,
+    BUG_HEAL_TIP_ONLY = false, BUG_REUSE_GEN_ON_REWRITE = false,
+    BUG_FRESH_GEN_ON_FF = false, BUG_SKIP_VERIFY = false, BUG_FINISH_ANY_REF = false,
+    BUG_WRITE_BEFORE_INVALIDATE = false, BUG_RECOVER_SKIPS_PENDING = true
   ).*
 }

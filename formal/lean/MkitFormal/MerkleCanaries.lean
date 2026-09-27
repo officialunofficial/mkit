@@ -194,4 +194,22 @@ def multiOk (n : Nat) (P order : List Nat) : Bool :=
   | some ([(_, d)], []) => termHasher.fin 4 d == innerRoot termHasher (ls 4)
   | _ => false)
 
+/-! ## §5.4 zero positions: `verifyRangeId_nil` / `verifyMultiId_nil` are not vacuous -/
+
+/-- A verifier that special-cases zero positions into the fold of nothing
+(`H("")` finalized with the claimed `leaf_count`), the vacuous success §5.4
+forbids. -/
+def reconstructMultiVacuous (h : Hasher Tm) (pf : Proof Tm) (elems : List (Tm × Nat)) :
+    Option Tm :=
+  if elems.isEmpty then some (h.fin pf.leafCount h.empty) else reconstructMulti h pf elems
+
+/-- It accepts the all-default proof over the empty range against the empty
+Tree's id, which the real verifier rejects. -/
+theorem vacuous_accepts_empty_tree :
+    (reconstructMultiVacuous termHasher ⟨0, []⟩ []).map
+        (termHasher.wrap .tree) = some (objectId termHasher .tree []) ∧
+      verifyRangeId termHasher .tree ⟨0, []⟩ 0 [] (objectId termHasher .tree []) = false := by
+  refine ⟨?_, verifyRangeId_nil _ _ _ _ _⟩
+  simp [reconstructMultiVacuous, objectId, innerRoot, level0, top]
+
 end MkitFormal.Merkle.Canaries

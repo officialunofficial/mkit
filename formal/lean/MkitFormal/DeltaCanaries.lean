@@ -1,4 +1,4 @@
-import MkitFormal.DeltaProofs
+import MkitFormal.DeltaRunning
 
 /-!
 # Non-vacuity witnesses for the SPEC-DELTA theorems (MKIT-25)
@@ -10,11 +10,13 @@ stream with the §8 error. Likewise the `wf` hypothesis of `decode_encode`,
 the reserved-bit check behind `encode_decode`, and the byte re-verification
 of the writer model behind `apply_encodeWith` are each shown load-bearing.
 
-The only §4 check without a canary here is the per-opcode `result_len`
-overrun check: dropping it changes the error *kind* (`resultLenUnderrun`
-at end of stream instead of `resultLenOverrun`) but not acceptance, so it is
-covered by the differential test (which compares error kinds), see
-`overrun_kind_only`.
+The per-opcode `result_len` overrun check does not change acceptance when
+dropped, only the error *kind* (`resultLenUnderrun` at end of stream instead
+of `resultLenOverrun`) and the running emitted-byte count. Its canaries are
+`overrun_kind_only` (the mutant contradicts `apply_overrun` /
+`apply_decoded` of `MkitFormal.DeltaRunning`) and `runT_noOverrun_exceeds`
+(the mutant's running count exceeds `result_len`, contradicting
+`runT_bounded`); the differential test also compares error kinds.
 -/
 
 namespace MkitFormal.Delta.Canaries
@@ -129,6 +131,51 @@ theorem overrun_kind_only :
   constructor
   · simp [apply, run, sLong, readLE, headerLen]
   · simp [applyMut, runMut, sLong, readLE, headerLen, slice?]
+
+/-- `sLong` satisfies the premises of `apply_overrun` (decodes, targets the
+empty base, no COPY, emits 2 > 1 bytes), so the real `apply` must report
+`resultLenOverrun`; the `noOverrun` mutant above does not. -/
+theorem sLong_overrun_premises :
+    decode sLong = .ok ⟨0, 1, [.insert [7, 8]]⟩ ∧ (exec [] [.insert [7, 8]]).length = 2 := by
+  constructor
+  · simp [decode, decodeInstrs, sLong, readLE, Except.map]
+  · simp [exec, execInstr]
+
+theorem apply_overrun_sLong : apply [] sLong = .error .resultLenOverrun :=
+  apply_overrun [] sLong ⟨0, 1, [.insert [7, 8]]⟩ sLong_overrun_premises.1 rfl rfl
+    (by simp [exec, execInstr])
+
+/-- Without the per-opcode check the running emitted-byte count reaches 2
+while `result_len = 1`: `runT_bounded` fails for `ovr = false`. -/
+theorem runT_noOverrun_exceeds :
+    (runT false [] 1 [2, 7, 8] []).2 = [0, 2] ∧
+      (runT true [] 1 [2, 7, 8] []).2 = [0] := by
+  constructor
+  · simp [runT, tcons, slice?]
+  · simp [runT, tcons]
+
+/-! ## Truncation (`apply_prefix`) -/
+
+/-- Two 1-byte INSERTs, `result_len = 2`. -/
+def sTwo : Bytes := [1, 0, 0, 0, 0, 2, 0, 0, 0, 1, 7, 1, 8]
+
+theorem apply_sTwo : apply [] sTwo = .ok [7, 8] := by
+  simp [apply, run, sTwo, readLE, headerLen, slice?]
+
+/-- Finding (SPEC-DELTA §10 row 7): a cut at an instruction boundary is
+reported as `DeltaCorrupt(ResultLenUnderrun)`, not `UnexpectedEof`; a cut
+inside an instruction is `UnexpectedEof`. -/
+theorem boundary_cut_is_underrun :
+    apply [] (sTwo.take 11) = .error .resultLenUnderrun ∧
+      apply [] (sTwo.take 12) = .error .eof := by
+  constructor
+  · simp [apply, run, sTwo, readLE, headerLen, slice?]
+  · simp [apply, run, sTwo, readLE, headerLen, slice?]
+
+/-- `apply_prefix` is not vacuous: without the end-of-stream length check the
+boundary-cut prefix of an accepted stream is accepted. -/
+theorem noFinalLen_accepts_prefix : applyMut .noFinalLen [] (sTwo.take 11) = .ok [7] := by
+  simp [applyMut, runMut, sTwo, readLE, headerLen, slice?]
 
 /-! ## `decode_encode` needs `wf` -/
 

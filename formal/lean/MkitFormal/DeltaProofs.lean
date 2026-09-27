@@ -131,8 +131,8 @@ theorem decodeInstrs_encInstrs :
       rw [List.drop_left' (by simp)]
     simp only [encInstrs, encInstr, List.cons_append]
     rw [decodeInstrs]
-    simp only [show (0x80 : UInt8).toNat = 128 from rfl, Nat.le_refl, if_true, ne_eq,
-      not_true_eq_false, if_false]
+    simp only [show (0x80 : UInt8).toNat = 128 from rfl, Nat.le_refl, ite_true, ne_eq,
+      not_true_eq_false, ite_false]
     rw [d4, d6, List.append_assoc, readLE_leBytes, readLE_leBytes, ih]
     have : o % 256 ^ 4 = o := Nat.mod_eq_of_lt (by rw [p4]; omega)
     have : l % 256 ^ 2 = l := Nat.mod_eq_of_lt (by rw [p2]; omega)
@@ -156,7 +156,7 @@ theorem decode_encode (d : Delta) (h : d.wf = true) : decode (encode d) = .ok d 
   obtain ⟨bl, rl, is⟩ := d
   simp only [Delta.wf, Bool.and_eq_true, decide_eq_true_eq] at h
   obtain ⟨⟨hb, hr⟩, hs⟩ := h
-  simp only [encode, decode, ne_eq, not_true_eq_false, if_false]
+  simp only [encode, decode, ne_eq, not_true_eq_false, ite_false]
   rw [readLE_leBytes, List.drop_left' (by simp), readLE_leBytes,
     ← List.append_assoc, List.drop_left' (by simp), decodeInstrs_encInstrs is hs]
   simp [Nat.mod_eq_of_lt hb, Nat.mod_eq_of_lt hr, Except.map]
@@ -171,15 +171,15 @@ theorem encInstrs_decodeInstrs :
   | op :: rest, is, h => by
     rw [decodeInstrs] at h
     by_cases hc : 128 ≤ op.toNat
-    · simp only [hc, if_true] at h
+    · simp only [hc, ite_true] at h
       by_cases hr : op.toNat ≠ 128
       · simp [hr] at h
-      · simp only [hr, if_false] at h
+      · simp only [hr, ite_false] at h
         split at h
         · rename_i off len h4 h2
           by_cases hz : len = 0
           · simp [hz] at h
-          · simp only [hz, if_false] at h
+          · simp only [hz, ite_false] at h
             cases hd : decodeInstrs (rest.drop 6) with
             | error e => simp [hd, Except.map] at h
             | ok is' =>
@@ -199,12 +199,12 @@ theorem encInstrs_decodeInstrs :
                 rw [e2, e4]
               · simp [Instr.wf, ih2]; omega
         · simp at h
-    · simp only [hc, if_false] at h
+    · simp only [hc, ite_false] at h
       by_cases h0 : op.toNat = 0
       · simp [h0] at h
       · by_cases hl : rest.length < op.toNat
         · simp [h0, hl] at h
-        · simp only [h0, hl, if_false] at h
+        · simp only [h0, hl, ite_false] at h
           cases hd : decodeInstrs (rest.drop op.toNat) with
           | error e => simp [hd, Except.map] at h
           | ok is' =>
@@ -226,7 +226,7 @@ theorem encode_decode (s : Bytes) (d : Delta) (h : decode s = .ok d) :
     simp only [decode] at h
     by_cases hv : v ≠ 0x01
     · simp [hv] at h
-    · simp only [hv, if_false] at h
+    · simp only [hv, ite_false] at h
       simp only [Decidable.not_not] at hv
       split at h
       · rename_i bl rl hb hr
@@ -440,19 +440,19 @@ theorem run_complete (base : Bytes) (rl : Nat) :
     rw [decodeInstrs] at h
     rw [run]
     by_cases hc : 128 ≤ op.toNat
-    · simp only [hc, if_true] at h ⊢
+    · simp only [hc, ite_true] at h ⊢
       by_cases hr : op.toNat ≠ 128
       · simp [hr] at h
-      · simp only [hr, if_false] at h ⊢
+      · simp only [hr, ite_false] at h ⊢
         split at h
         · rename_i o l ho hl2
           have := readLE_len hl2
           simp at this
           have hlen6 : ¬ rest.length < 6 := by omega
-          simp only [hlen6, if_false]
+          simp only [hlen6, ite_false]
           by_cases hz : l = 0
           · simp [hz] at h
-          · simp only [hz, if_false] at h ⊢
+          · simp only [hz, ite_false] at h ⊢
             cases hd : decodeInstrs (rest.drop 6) with
             | error e => simp [hd, Except.map] at h
             | ok is' =>
@@ -464,18 +464,18 @@ theorem run_complete (base : Bytes) (rl : Nat) :
               have hcl : ((base.drop o).take l).length = l := by simp; omega
               have hnb : ¬ base.length < o + l := by omega
               have hno : ¬ rl < out.length + l := by omega
-              simp only [hnb, hno, if_false]
+              simp only [hnb, hno, ite_false]
               rw [slice?_eq hb]
               simp only
               rw [run_complete base rl _ _ is' hd hin' (by simp; omega)]
               simp [exec, execInstr]
         · simp at h
-    · simp only [hc, if_false] at h ⊢
+    · simp only [hc, ite_false] at h ⊢
       by_cases h0 : op.toNat = 0
       · simp [h0] at h
       · by_cases hls : rest.length < op.toNat
         · simp [h0, hls] at h
-        · simp only [h0, hls, if_false] at h ⊢
+        · simp only [h0, hls, ite_false] at h ⊢
           cases hd : decodeInstrs (rest.drop op.toNat) with
           | error e => simp [hd, Except.map] at h
           | ok is' =>
@@ -485,7 +485,7 @@ theorem run_complete (base : Bytes) (rl : Nat) :
             simp only [exec, execInstr, List.length_append] at hl
             have htl : (rest.take op.toNat).length = op.toNat := by simp; omega
             have hno : ¬ rl < out.length + op.toNat := by omega
-            simp only [hno, if_false]
+            simp only [hno, ite_false]
             rw [slice?_eq (by simp; omega)]
             simp only [List.drop_zero]
             rw [run_complete base rl _ _ is' hd hin.2 (by simp; omega)]
@@ -505,7 +505,7 @@ theorem apply_complete (base s : Bytes) (d : Delta) (hd : decode s = .ok d)
     simp only [decode] at hd
     by_cases hv : v ≠ 0x01
     · simp [hv] at hd
-    · simp only [hv, if_false] at hd
+    · simp only [hv, ite_false] at hd
       split at hd
       · rename_i bl rl hbl hrl
         cases hdi : decodeInstrs (rest.drop 8) with
@@ -518,7 +518,7 @@ theorem apply_complete (base s : Bytes) (d : Delta) (hd : decode s = .ok d)
           simp only [Decidable.not_not] at hv
           subst hv
           unfold apply
-          simp only [headerLen, List.length_cons, show ¬ rest.length + 1 < 9 by omega, if_false,
+          simp only [headerLen, List.length_cons, show ¬ rest.length + 1 < 9 by omega, ite_false,
             hbl, hrl, hb, ne_eq, not_true_eq_false]
           simpa using run_complete base rl _ [] is hdi hin (by simpa using hl)
       · simp at hd

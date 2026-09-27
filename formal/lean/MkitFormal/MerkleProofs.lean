@@ -148,14 +148,14 @@ theorem foldUp_complete (h : Hasher D) (n : Nat) : ∀ (lv : List D) (p : Nat),
     · have : p = 0 := by omega
       subst this
       simp [hl, top_eq_of_le h lv hl]
-    · simp only [hl, if_false]
+    · simp only [hl, ite_false]
       rw [top_eq_pairUp h lv hl]
       have hlen := length_pairUp h lv
       have ih' := ih ((lv.length + 1) / 2) (by omega) (pairUp h lv) (p / 2) hlen (by omega)
       have hq := getD_pairUp h lv (p / 2) (by omega)
       by_cases hdup : p % 2 = 0 ∧ lv.length ≤ p + 1
       · have hs : sibIndex lv.length p = p := sibIndex_eq_self.mpr hdup
-        simp only [hdup, and_self, if_true, hs, List.nil_append]
+        simp only [hdup, and_self, ite_true, hs, List.nil_append]
         rw [← ih']
         congr 1
         rw [hq]
@@ -163,7 +163,7 @@ theorem foldUp_complete (h : Hasher D) (n : Nat) : ∀ (lv : List D) (p : Nat),
         have h1 : ¬ (p + 1 < lv.length) := by omega
         simp [e, h1]
       · have hs : sibIndex lv.length p ≠ p := fun e => hdup (sibIndex_eq_self.mp e)
-        simp only [hdup, if_false, hs, List.singleton_append]
+        simp only [hdup, ite_false, hs, List.singleton_append]
         rw [← ih']
         congr 1
         rw [hq]
@@ -192,12 +192,12 @@ theorem foldUp_dup (hs : ¬ s ≤ 1) (hd : p % 2 = 0 ∧ s ≤ p + 1) :
 
 theorem foldUp_nil (hs : ¬ s ≤ 1) (hd : ¬ (p % 2 = 0 ∧ s ≤ p + 1)) :
     foldUp h s p c [] = none := by
-  rw [foldUp.eq_def]; simp only [hs, hd, if_false]
+  rw [foldUp.eq_def]; simp only [hs, hd, ite_false]
 
 theorem foldUp_cons (hs : ¬ s ≤ 1) (hd : ¬ (p % 2 = 0 ∧ s ≤ p + 1)) :
     foldUp h s p c (x :: rest) =
       foldUp h ((s + 1) / 2) (p / 2) (if p % 2 = 0 then h.node c x else h.node x c) rest := by
-  rw [foldUp.eq_def]; simp only [hs, hd, if_false]
+  rw [foldUp.eq_def]; simp only [hs, hd, ite_false]
 
 theorem selPath_base (hs : s ≤ 1) : selPath s p lvl = [] := by
   rw [selPath]; simp [hs]
@@ -248,19 +248,19 @@ theorem foldUp_sound (h : Hasher D) (hN : NodeInj h) (n : Nat) :
       cases sibs with
       | nil => simp_all [top_eq_of_le h lv hl]
       | cons _ _ => simp [hl] at hf
-    · simp only [hl, if_false] at hf ⊢
+    · simp only [hl, ite_false] at hf ⊢
       rw [top_eq_pairUp h lv hl] at hf
       have hlen := length_pairUp h lv
       have hq := getD_pairUp_sib h lv p hp
       by_cases hdup : p % 2 = 0 ∧ lv.length ≤ p + 1
       · have hs : sibIndex lv.length p = p := sibIndex_eq_self.mpr hdup
-        simp only [hdup, and_self, if_true] at hf
+        simp only [hdup, and_self, ite_true] at hf
         obtain ⟨h1, h2⟩ := ih _ (by omega) (pairUp h lv) (p / 2) _ sibs hlen (by omega) hf
         rw [hq, hs] at h1
-        simp only [hdup.1, if_true] at h1
+        simp only [hdup.1, ite_true] at h1
         exact ⟨(hN _ _ _ _ h1).1, by simp [hs, h2]⟩
       · have hs : sibIndex lv.length p ≠ p := fun e => hdup (sibIndex_eq_self.mp e)
-        simp only [hdup, if_false] at hf
+        simp only [hdup, ite_false] at hf
         cases sibs with
         | nil => simp at hf
         | cons x rest =>
@@ -268,10 +268,10 @@ theorem foldUp_sound (h : Hasher D) (hN : NodeInj h) (n : Nat) :
           obtain ⟨h1, h2⟩ := ih _ (by omega) (pairUp h lv) (p / 2) _ rest hlen (by omega) hf
           rw [hq] at h1
           by_cases hev : p % 2 = 0
-          · simp only [hev, if_true] at h1
+          · simp only [hev, ite_true] at h1
             obtain ⟨e1, e2⟩ := hN _ _ _ _ h1
             exact ⟨e1, by simp [hs, e2, h2]⟩
-          · simp only [hev, if_false] at h1
+          · simp only [hev, ite_false] at h1
             obtain ⟨e1, e2⟩ := hN _ _ _ _ h1
             exact ⟨e2, by simp [hs, e1, h2]⟩
 
@@ -389,13 +389,13 @@ theorem foldUp_length (h : Hasher D) (s : Nat) :
     rw [selPath]
     by_cases hl : s ≤ 1
     · cases sibs <;> simp_all
-    · simp only [hl, if_false, List.length_append] at hf ⊢
+    · simp only [hl, ite_false, List.length_append] at hf ⊢
       by_cases hdup : p % 2 = 0 ∧ s ≤ p + 1
       · have hs : sibIndex s p = p := sibIndex_eq_self.mpr hdup
-        simp only [hdup, and_self, if_true] at hf
+        simp only [hdup, and_self, ite_true] at hf
         simp [hs, ih _ (by omega) _ (lvl + 1) _ _ _ hf]
       · have hs : sibIndex s p ≠ p := fun e => hdup (sibIndex_eq_self.mp e)
-        simp only [hdup, if_false] at hf
+        simp only [hdup, ite_false] at hf
         cases sibs with
         | nil => simp at hf
         | cons x rest =>
@@ -577,6 +577,26 @@ theorem reconstructMulti_nil (h : Hasher D) (pf : Proof D) : reconstructMulti h 
   simp [reconstructMulti]
 
 omit [Inhabited D] in
+/-- §5.4: a range proof over zero positions (an empty leaf slice) is rejected,
+whatever the start and the proof. -/
+theorem reconstructRange_nil (h : Hasher D) (pf : Proof D) (start : Nat) :
+    reconstructRange h pf start [] = none := by
+  simp [reconstructRange, reconstructMulti]
+
+omit [Inhabited D] in
+/-- §4 / §5.4: in particular the all-default proof (`leaf_count = 0`,
+`siblings = []`) with an empty range never verifies, not even against the
+empty Tree's id; the same holds for multi-proofs (`reconstructMulti_nil`). -/
+theorem verifyRangeId_nil [DecidableEq D] (h : Hasher D) (k : Kind) (pf : Proof D)
+    (start : Nat) (id : D) : verifyRangeId h k pf start [] id = false := by
+  simp [verifyRangeId, reconstructRange_nil]
+
+omit [Inhabited D] in
+theorem verifyMultiId_nil [DecidableEq D] (h : Hasher D) (k : Kind) (pf : Proof D) (id : D) :
+    verifyMultiId h k pf [] id = false := by
+  simp [verifyMultiId, reconstructMulti_nil]
+
+omit [Inhabited D] in
 /-- §5.4: a repeated position is rejected. -/
 theorem reconstructMulti_dup (h : Hasher D) (pf : Proof D) (elems : List (D × Nat))
     (hd : ¬ (elems.map (·.2)).Nodup) : reconstructMulti h pf elems = none := by
@@ -634,13 +654,13 @@ theorem foldMulti_single (h : Hasher D) (s : Nat) : ∀ (p : Nat) (d : D) (sibs 
       simp only [multiStep, alone]
       by_cases hd : p % 2 = 0 ∧ s ≤ p + 1
       · rw [foldUp_dup h hs hd]
-        simp only [hd, and_self, if_true]
+        simp only [hd, and_self, ite_true]
         exact ih _ (by omega) _ _ _
       · cases sibs with
         | nil => rw [foldUp_nil h hs hd]; simp [hd]
         | cons x rest =>
           rw [foldUp_cons h hs hd]
-          simp only [hd, if_false]
+          simp only [hd, ite_false]
           exact ih _ (by omega) _ _ _
 
 omit [Inhabited D] in
@@ -655,7 +675,7 @@ theorem reconstructMulti_singleton (h : Hasher D) (pf : Proof D) (x : D) (i : Na
     simp only [List.isEmpty_cons, List.any_cons, List.any_nil, hn, decide_false,
       Bool.or_false, List.map_cons, List.map_nil, List.nodup_cons, List.not_mem_nil,
       not_false_eq_true, List.nodup_nil, and_self, decide_true, Bool.not_true,
-      Bool.false_eq_true, if_false, hi, if_true]
+      Bool.false_eq_true, ite_false, hi, ite_true]
     have hs : List.mergeSort [(i, h.leaf i x)] (fun a b => decide (a.1 ≤ b.1)) =
         [(i, h.leaf i x)] := by simp
     rw [hs]
