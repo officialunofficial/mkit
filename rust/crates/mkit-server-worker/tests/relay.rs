@@ -169,13 +169,14 @@ fn relay_uses_one_watermark_read_and_one_atomic_apply_per_target() {
 }
 
 fn source() -> Source {
-    SqlKvStore::open(RusqliteConn::open_in_memory().unwrap()).unwrap()
+    SqlKvStore::open(RusqliteConn::open_in_memory().expect("in-memory SQLite"))
+        .expect("SQL namespace store")
 }
 
 fn repo() -> RepoId {
     RepoId {
         namespace: NamespaceKey::deployment_default(),
-        name: RepoName::new("relay").unwrap(),
+        name: RepoName::new("relay").expect("valid repository name"),
     }
 }
 

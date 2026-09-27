@@ -25,17 +25,8 @@ fn sql_soft_limit_reserves_space_for_guarded_relay_scan_progress() {
     let source = source();
     let queued = keys::relay(1);
     let row = Value::new(b"queued relay".to_vec());
-    let old_timer = keys::timer(1, 3, b"");
     assert_eq!(
         block_on(uncapped.apply(&source, Batch::new().put(queued.clone(), row.clone()))).unwrap(),
-        BatchOutcome::Committed
-    );
-    assert_eq!(
-        block_on(uncapped.apply(
-            &source,
-            Batch::new().put(old_timer.clone(), Value::default())
-        ))
-        .unwrap(),
         BatchOutcome::Committed
     );
     drop(uncapped);
@@ -93,6 +84,43 @@ fn sql_soft_limit_reserves_space_for_guarded_relay_scan_progress() {
     assert_eq!(block_on(capped.get(&source, &queued)).unwrap(), None);
     assert_eq!(block_on(capped.get(&source, &rs)).unwrap(), Some(second));
 
+    // A caller cannot use an unguarded rs put or mix it with an unrelated put
+    // to bypass the soft limit.
+    assert!(matches!(
+        block_on(capped.apply(&source, Batch::new().put(rs.clone(), Value::default()))),
+        Err(StoreError::Full)
+    ));
+    assert!(matches!(
+        block_on(
+            capped.apply(
+                &source,
+                Batch::new()
+                    .require(Precondition::Present(rs.clone()))
+                    .put(rs, Value::default())
+                    .put(Key::new(b"other".to_vec()), Value::default())
+            )
+        ),
+        Err(StoreError::Full)
+    ));
+}
+
+#[test]
+fn sql_soft_limit_reserves_space_for_guarded_relay_timer_reschedule() {
+    let conn = RusqliteConn::open_in_memory().unwrap();
+    let source = source();
+    let old_timer = keys::timer(1, 3, b"");
+    let uncapped = SqlKvStore::open(conn.clone()).unwrap();
+    assert_eq!(
+        block_on(uncapped.apply(
+            &source,
+            Batch::new().put(old_timer.clone(), Value::default())
+        ))
+        .unwrap(),
+        BatchOutcome::Committed
+    );
+    drop(uncapped);
+    let capped =
+        SqlKvStore::open_with_capacity(conn, Capacity::new(1 << 20).with_reserve(1 << 20)).unwrap();
     let next_timer = keys::timer(2, 3, b"");
     let next_turn = codec::encode_u64(1);
     assert_eq!(
@@ -113,13 +141,6 @@ fn sql_soft_limit_reserves_space_for_guarded_relay_scan_progress() {
         block_on(capped.get(&source, &next_timer)).unwrap(),
         Some(next_turn)
     );
-
-    // A caller cannot use an unguarded rs put or mix it with an unrelated put
-    // to bypass the soft limit.
-    assert!(matches!(
-        block_on(capped.apply(&source, Batch::new().put(rs.clone(), Value::default()))),
-        Err(StoreError::Full)
-    ));
     assert!(matches!(
         block_on(
             capped.apply(
@@ -131,18 +152,6 @@ fn sql_soft_limit_reserves_space_for_guarded_relay_scan_progress() {
                     ))
                     .delete(next_timer)
                     .put(keys::timer(3, 2, b""), codec::encode_u64(2))
-            )
-        ),
-        Err(StoreError::Full)
-    ));
-    assert!(matches!(
-        block_on(
-            capped.apply(
-                &source,
-                Batch::new()
-                    .require(Precondition::Present(rs.clone()))
-                    .put(rs, Value::default())
-                    .put(Key::new(b"other".to_vec()), Value::default())
             )
         ),
         Err(StoreError::Full)
