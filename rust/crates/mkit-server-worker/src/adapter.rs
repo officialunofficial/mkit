@@ -600,10 +600,10 @@ mod glue {
     use crate::ns_client::{StubTransport, WorkerNamespaceStore};
     use crate::ns_object::NsObject;
     use crate::r2::{EnvBucket, PACKS_KEYSPACE, R2BlobStore, WorkerBlobStore};
-    use crate::sharding_guard::DeploymentGuard;
+    use crate::sharding_guard::{Settled, check_mode};
 
     thread_local! {
-        static SHARDING_GUARD: DeploymentGuard = DeploymentGuard::default();
+        static SHARDING_GUARD: std::cell::RefCell<Option<Settled>> = const { std::cell::RefCell::new(None) };
     }
 
     /// The pipeline a request runs on.
@@ -699,11 +699,19 @@ mod glue {
             StubTransport::new(env.clone(), cfg.placement.clone()),
             cfg.probe_partition(),
         );
-        let checked = SHARDING_GUARD
-            .with(|guard| guard.check(meta, cfg.sharding, cfg.placement.jurisdiction.as_deref()));
-        if checked.await.is_err() {
+        let jurisdiction = cfg.placement.jurisdiction.as_deref();
+        let cached =
+            SHARDING_GUARD.with(|cache| Settled::cached(cache, cfg.sharding, jurisdiction));
+        let checked = if let Some(outcome) = cached {
+            outcome.into_result()
+        } else {
+            // This request owns every await. Only settled data crosses requests.
+            let result = check_mode(&meta, cfg.sharding).await;
+            SHARDING_GUARD.with(|cache| Settled::finish(cache, cfg.sharding, jurisdiction, result))
+        };
+        if let Err(error) = checked {
             return Ok(with_cors(json_response(
-                unavailable_json(crate::sharding_guard::MISMATCH_MESSAGE),
+                unavailable_json(error.public_message()),
                 503,
             )?));
         }
@@ -763,6 +771,7 @@ mod glue {
             worker::console_error!("{e}; using the Workers Free cap");
             free
         });
+        // TODO(WP-1.25 merge): register LeaseSweep only on coordinator classes
         let registry = mkit_server::timers::TimerRegistry::new();
         #[cfg(feature = "test-faults")]
         let registry = registry.register(mkit_server::timers::test_kind::TestTimer);

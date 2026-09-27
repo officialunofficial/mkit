@@ -209,3 +209,39 @@ contract, treat it as a corrupt reply: refuse with `unavailable`, and log it.
 
 The per-isolate cap remains at most three DO calls (`get`, `scan`, `apply`).
 Test that the race path uses `observed` and that its call count is exactly 3.
+
+## Fix round 1 (orchestrator rulings, PR #1151)
+
+This supersedes B.2's cap wording and Amendment 1's per-isolate cap.
+
+1. Cache only a settled, definitive result as plain data in a thread-local
+   `RefCell<Option<Settled>>`. Never cache or share a future, promise or handle:
+   Workers cross-request promise continuations can hang concurrent cold requests.
+   A request with no cached result runs its own check on its own store handle.
+   Concurrent checks use `Absent` and compare its atomic `observed` value.
+   Cache the first definitive result. The cap is at most 3 DO calls per request,
+   and only for requests arriving before the first definitive result is cached;
+   0 afterwards; never more than one check per request. Update R-94 accordingly.
+2. Cache only `Ok`, `Mismatch { stored, configured }` and `Corrupt` (missing
+   `observed` or undecodable marker). A `StoreError` answers unavailable with
+   "deployment storage unavailable" and is not cached. Only Mismatch uses
+   "deployment sharding mismatch"; Corrupt uses
+   "deployment sharding marker corrupt" and logs.
+3. Key the cached result by effective `(sharding mode, jurisdiction)`. A changed
+   key in a reused isolate drops the cache and re-checks the authoritative marker.
+4. Host tests must interleave two checks in one isolate through `Absent`/`observed`,
+   with exactly one marker written; prove no future or promise is shared, backend
+   errors are retried, config changes re-check, and outcomes map to their messages.
+   Before every phase's health wait, run 30 concurrent cold Health/Check requests
+   and require all to answer HTTP 200 / SERVING. Repeat all four Worker suites on
+   a quiet machine without a parallel CLI suite: single, single test-faults, d34,
+   d34 test-faults. Record clean results, without the earlier load artifacts as
+   gate exceptions.
+5. Remove the stray CHANGELOG blank. If WP-1.25 (#1150) has merged, register
+   LeaseSweep only for NsCoordinator and RefStore (single). Otherwise leave
+   `// TODO(WP-1.25 merge): register LeaseSweep only on coordinator classes`.
+6. Merge origin/feat/mkit-server at 2a730513 or later, preserving both sides of
+   adjacent key/doc additions and sorting R rows numerically.
+7. Run locked worker/server all-feature nextest, clippy, worker wasm32 build,
+   vcs-worker worker-build, and all four conformance runs including cold starts.
+   Push to the same PR and add a "Fix round 1" section to its body.

@@ -13,7 +13,26 @@ use mkit_server::{
 };
 use mkit_server_worker::naming::do_target;
 use mkit_server_worker::ns_client::DoNamespaceStore;
-use mkit_server_worker::sharding_guard::DeploymentGuard;
+use mkit_server_worker::sharding_guard::{GuardError, Outcome, Settled, check_mode};
+
+// Same cache operations as the adapter; each returned future belongs to its
+// caller and the RefCell holds only the settled data defined by the library.
+#[derive(Default)]
+struct DeploymentGuard(std::cell::RefCell<Option<Settled>>);
+impl DeploymentGuard {
+    async fn check<S: NamespaceStore>(
+        &self,
+        store: S,
+        mode: Sharding,
+        jurisdiction: Option<&str>,
+    ) -> Result<(), GuardError> {
+        if let Some(outcome) = Settled::cached(&self.0, mode, jurisdiction) {
+            return outcome.into_result();
+        }
+        let result = check_mode(&store, mode).await;
+        Settled::finish(&self.0, mode, jurisdiction, result)
+    }
+}
 
 fn root() -> Partition {
     Partition::Namespace(NamespaceKey::deployment_default())
@@ -45,7 +64,7 @@ fn empty_d34_root_records_mode_and_later_single_isolate_refuses() {
     let later = DeploymentGuard::default();
     let before = store.transport().calls();
     let error = block_on(later.check(store.clone(), Sharding::Single, None)).unwrap_err();
-    assert!(error.0.contains("configured=single stored=d34"));
+    assert!(error.to_string().contains("configured=single stored=d34"));
     block_on(later.check(store.clone(), Sharding::Single, None)).unwrap_err();
     assert_eq!(
         store.transport().calls() - before,
@@ -70,7 +89,7 @@ fn unmarked_single_ref_data_refuses_d34_and_records_single() {
     let before = store.transport().calls();
     let error =
         block_on(DeploymentGuard::default().check(store.clone(), Sharding::D34, None)).unwrap_err();
-    assert!(error.0.contains("configured=d34 stored=single"));
+    assert!(error.to_string().contains("configured=d34 stored=single"));
     assert_eq!(store.transport().calls() - before, 2);
     assert_eq!(
         block_on(store.get(&root(), &keys::sharding_marker())).unwrap(),
@@ -97,10 +116,97 @@ fn empty_single_root_records_single() {
     );
 }
 
+/// Yield after each observation so both request handles see an empty root
+/// before either conditional write. No synchronization future is shared.
+#[derive(Clone)]
+struct Interleaved {
+    store: DoNamespaceStore<Loopback>,
+    committed: Arc<std::sync::atomic::AtomicUsize>,
+    observed: Arc<std::sync::atomic::AtomicUsize>,
+    fail_get: Arc<std::sync::atomic::AtomicBool>,
+}
+impl Interleaved {
+    fn new(store: DoNamespaceStore<Loopback>) -> Self {
+        Self {
+            store,
+            committed: Arc::default(),
+            observed: Arc::default(),
+            fail_get: Arc::default(),
+        }
+    }
+}
+async fn yield_once() {
+    let mut yielded = false;
+    futures::future::poll_fn(|cx| {
+        if yielded {
+            std::task::Poll::Ready(())
+        } else {
+            yielded = true;
+            cx.waker().wake_by_ref();
+            std::task::Poll::Pending
+        }
+    })
+    .await;
+}
+impl NamespaceStore for Interleaved {
+    fn capabilities(&self) -> StoreCapabilities {
+        self.store.capabilities()
+    }
+    async fn get(&self, p: &Partition, key: &Key) -> Result<Option<Value>, StoreError> {
+        if self
+            .fail_get
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(StoreError::unavailable(std::io::Error::other(
+                "temporary outage",
+            )));
+        }
+        let result = self.store.get(p, key).await;
+        yield_once().await;
+        result
+    }
+    async fn scan(
+        &self,
+        p: &Partition,
+        start: &Key,
+        end: &Key,
+        after: Option<&Cursor>,
+        limit: u32,
+    ) -> Result<ScanPage, StoreError> {
+        let result = self.store.scan(p, start, end, after, limit).await;
+        yield_once().await;
+        result
+    }
+    async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
+        let result = self.store.apply(p, batch).await?;
+        match &result {
+            BatchOutcome::Committed => {
+                self.committed
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            BatchOutcome::PreconditionFailed {
+                observed: Some(value),
+                ..
+            } => {
+                assert!(value == &mode("d34") || value == &mode("single"));
+                self.observed
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+        Ok(result)
+    }
+    async fn stats(&self, p: &Partition) -> Result<PartitionStats, StoreError> {
+        self.store.stats(p).await
+    }
+    async fn probe(&self) -> Result<(), StoreError> {
+        self.store.probe().await
+    }
+}
 #[test]
-fn overlapping_requests_share_the_in_flight_check() {
+fn overlapping_requests_own_their_checks_and_compare_atomic_observed() {
     let dir = tempfile::tempdir().unwrap();
-    let store = store(&dir);
+    let store = Interleaved::new(store(&dir));
     let guard = DeploymentGuard::default();
     let (a, b) = block_on(futures::future::join(
         guard.check(store.clone(), Sharding::D34, None),
@@ -108,7 +214,36 @@ fn overlapping_requests_share_the_in_flight_check() {
     ));
     a.unwrap();
     b.unwrap();
-    assert_eq!(store.transport().calls(), 3);
+    assert_eq!(
+        store.store.transport().calls(),
+        6,
+        "each request owns get, scan, apply"
+    );
+    assert_eq!(store.committed.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(store.observed.load(std::sync::atomic::Ordering::SeqCst), 1);
+    block_on(guard.check(store.clone(), Sharding::D34, None)).unwrap();
+    assert_eq!(
+        store.store.transport().calls(),
+        6,
+        "settled success costs zero calls"
+    );
+}
+#[test]
+fn transient_storage_error_is_not_cached() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Interleaved::new(store(&dir));
+    store
+        .fail_get
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let guard = DeploymentGuard::default();
+    let error = block_on(guard.check(store.clone(), Sharding::D34, None)).unwrap_err();
+    assert_eq!(error.public_message(), "deployment storage unavailable");
+    assert!(
+        guard.0.borrow().is_none(),
+        "storage errors never settle the cache"
+    );
+    block_on(guard.check(store.clone(), Sharding::D34, None)).unwrap();
+    assert_eq!(store.store.transport().calls(), 3);
 }
 
 /// Two isolates overlap between the loser's scan and conditional apply. The
@@ -148,19 +283,23 @@ impl NamespaceStore for Racing {
     ) -> Result<ScanPage, StoreError> {
         self.record("scan");
         if self.winner_at_scan {
-            DeploymentGuard::default()
-                .check(self.store.clone(), self.winner, None)
-                .await
-                .expect("winning isolate initializes its marker");
+            assert_eq!(
+                check_mode(&self.store, self.winner)
+                    .await
+                    .expect("winning isolate initializes its marker"),
+                Outcome::Ok
+            );
         }
         self.store.scan(p, start, end, after, limit).await
     }
     async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
         self.record("apply");
-        DeploymentGuard::default()
-            .check(self.store.clone(), self.winner, None)
-            .await
-            .expect("winning isolate initializes its marker");
+        assert_eq!(
+            check_mode(&self.store, self.winner)
+                .await
+                .expect("winning isolate initializes its marker"),
+            Outcome::Ok
+        );
         let outcome = self.store.apply(p, batch).await?;
         assert!(matches!(
             outcome,
@@ -219,7 +358,7 @@ fn absent_race_uses_atomic_observation_in_exactly_three_calls() {
         assert_eq!(
             racing.store.transport().calls(),
             6,
-            "three DO calls per isolate, including the winner"
+            "three DO calls per request, including the winner"
         );
         let _ = block_on(guard.check(racing.clone(), Sharding::D34, None));
         assert_eq!(racing.calls.lock().unwrap().len(), 3);
@@ -238,8 +377,7 @@ fn failed_absent_without_observed_value_refuses_as_corruption() {
     };
     let error = block_on(DeploymentGuard::default().check(racing.clone(), Sharding::D34, None))
         .unwrap_err();
-    assert!(error.0.contains("corrupt reply"));
-    assert!(error.0.contains("failed Absent has no observed value"));
+    assert_eq!(error.public_message(), "deployment sharding marker corrupt");
     assert_eq!(*racing.calls.lock().unwrap(), ["get", "scan", "apply"]);
     assert_eq!(racing.store.transport().calls(), 6);
 }
@@ -279,35 +417,155 @@ fn marker_installed_between_get_and_scan_is_compared_as_a_marker() {
 }
 
 #[test]
-fn reused_isolate_refuses_changed_mode_after_completed_check() {
+fn reused_isolate_rechecks_changed_mode_after_completed_check() {
     let dir = tempfile::tempdir().unwrap();
     let store = store(&dir);
     let guard = DeploymentGuard::default();
     block_on(guard.check(store.clone(), Sharding::Single, None)).unwrap();
     let error = block_on(guard.check(store.clone(), Sharding::D34, None)).unwrap_err();
-    assert!(error.0.contains("configured=d34 isolate=single"));
-    assert_eq!(store.transport().calls(), 3);
+    assert!(error.to_string().contains("configured=d34 stored=single"));
+    assert_eq!(
+        store.transport().calls(),
+        4,
+        "changed config reads the marker again"
+    );
 }
 
 #[test]
-fn reused_isolate_refuses_changed_mode_during_initialization() {
+fn reused_isolate_checks_each_config_while_requests_are_in_flight() {
     let dir = tempfile::tempdir().unwrap();
-    let store = store(&dir);
+    let store = Interleaved::new(store(&dir));
     let guard = DeploymentGuard::default();
-    let initial = guard.check(store.clone(), Sharding::Single, None);
+    let (single, d34) = block_on(futures::future::join(
+        guard.check(store.clone(), Sharding::Single, None),
+        guard.check(store.clone(), Sharding::D34, None),
+    ));
+    single.unwrap();
+    assert_eq!(
+        d34.unwrap_err().public_message(),
+        "deployment sharding mismatch"
+    );
+    assert_eq!(store.store.transport().calls(), 6);
     block_on(guard.check(store.clone(), Sharding::D34, None)).unwrap_err();
-    assert_eq!(store.transport().calls(), 0);
-    block_on(initial).unwrap();
-    assert_eq!(store.transport().calls(), 3);
+    assert_eq!(
+        store.store.transport().calls(),
+        7,
+        "old config's settled value is dropped"
+    );
 }
 
 #[test]
-fn reused_isolate_refuses_jurisdiction_changes_without_another_store_call() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = store(&dir);
+fn reused_isolate_rechecks_jurisdiction_with_the_new_store_handle() {
+    let eu = tempfile::tempdir().unwrap();
+    let us = tempfile::tempdir().unwrap();
+    let eu = store(&eu);
+    let us = store(&us);
     let guard = DeploymentGuard::default();
-    block_on(guard.check(store.clone(), Sharding::D34, Some("eu"))).unwrap();
-    block_on(guard.check(store.clone(), Sharding::D34, Some("us"))).unwrap_err();
-    block_on(guard.check(store.clone(), Sharding::D34, None)).unwrap_err();
-    assert_eq!(store.transport().calls(), 3);
+    block_on(guard.check(eu.clone(), Sharding::D34, Some("eu"))).unwrap();
+    block_on(guard.check(us.clone(), Sharding::Single, Some("us"))).unwrap();
+    assert_eq!(
+        us.transport().calls(),
+        3,
+        "new jurisdiction maps to empty objects"
+    );
+    block_on(guard.check(eu.clone(), Sharding::Single, Some("eu"))).unwrap_err();
+    assert_eq!(
+        eu.transport().calls(),
+        4,
+        "original jurisdiction's marker is authoritative"
+    );
+}
+
+#[test]
+fn every_definitive_outcome_is_cached_and_has_its_public_message() {
+    for (bytes, sharding, expected) in [
+        (b"d34".to_vec(), Sharding::D34, None),
+        (
+            b"single".to_vec(),
+            Sharding::D34,
+            Some("deployment sharding mismatch"),
+        ),
+        (
+            vec![0xff],
+            Sharding::Single,
+            Some("deployment sharding marker corrupt"),
+        ),
+        (
+            b"unknown".to_vec(),
+            Sharding::D34,
+            Some("deployment sharding marker corrupt"),
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir);
+        block_on(store.apply(
+            &root(),
+            Batch::new().put(keys::sharding_marker(), Value::new(bytes)),
+        ))
+        .unwrap();
+        let before = store.transport().calls();
+        let guard = DeploymentGuard::default();
+        for _ in 0..2 {
+            let result = block_on(guard.check(store.clone(), sharding, None));
+            assert_eq!(result.err().map(|error| error.public_message()), expected);
+        }
+        assert_eq!(store.transport().calls() - before, 1);
+    }
+    assert_eq!(
+        Outcome::Corrupt.into_result().unwrap_err().public_message(),
+        "deployment sharding marker corrupt"
+    );
+}
+
+#[test]
+fn old_config_completion_does_not_replace_newer_settled_config() {
+    let eu = tempfile::tempdir().unwrap();
+    let us = tempfile::tempdir().unwrap();
+    let eu = Interleaved::new(store(&eu));
+    let us = store(&us);
+    let guard = DeploymentGuard::default();
+    block_on(async {
+        let old = guard.check(eu.clone(), Sharding::D34, Some("eu"));
+        futures::pin_mut!(old);
+        assert!(futures::poll!(&mut old).is_pending());
+        guard
+            .check(us.clone(), Sharding::Single, Some("us"))
+            .await
+            .unwrap();
+        old.await.unwrap();
+        guard
+            .check(us.clone(), Sharding::Single, Some("us"))
+            .await
+            .unwrap();
+    });
+    assert_eq!(
+        us.transport().calls(),
+        3,
+        "new config remains settled after old completion"
+    );
+    assert_eq!(eu.store.transport().calls(), 3);
+}
+
+#[test]
+fn canceled_cold_request_leaves_no_cached_request_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Interleaved::new(store(&dir));
+    let guard = DeploymentGuard::default();
+    block_on(async {
+        {
+            let canceled = guard.check(store.clone(), Sharding::D34, None);
+            futures::pin_mut!(canceled);
+            assert!(futures::poll!(&mut canceled).is_pending());
+        }
+        assert!(guard.0.borrow().is_none());
+        guard
+            .check(store.clone(), Sharding::D34, None)
+            .await
+            .unwrap();
+    });
+    assert_eq!(
+        store.store.transport().calls(),
+        4,
+        "one canceled get and three new request calls"
+    );
 }

@@ -1,114 +1,183 @@
-//! Once-per-isolate deployment sharding validation over the root `RefStore`.
+//! Deployment sharding checks with a cache of settled data, never request futures.
 
-use std::cell::OnceCell;
+use std::cell::RefCell;
 
-use futures::future::{FutureExt, Shared};
-use mkit_server::BoxFuture;
 use mkit_server::pipeline::Sharding;
 use mkit_server::store::keys;
 use mkit_server::{
-    Batch, BatchOutcome, Key, NamespaceKey, NamespaceStore, Partition, Precondition, Value,
+    Batch, BatchOutcome, Key, NamespaceKey, NamespaceStore, Partition, Precondition, StoreError,
+    Value,
 };
 
-/// Public refusal text, shared with the adapter's unavailable response.
+/// Public mode refusal text.
 pub const MISMATCH_MESSAGE: &str = "deployment sharding mismatch";
+/// Public corruption refusal text.
+pub const CORRUPT_MESSAGE: &str = "deployment sharding marker corrupt";
+/// Public transient backend failure text.
+pub const STORAGE_MESSAGE: &str = "deployment storage unavailable";
 
-/// Server-side detail of a refused deployment (never returned to clients).
+/// A definitive observation of the deployment marker.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GuardError(pub String);
+pub enum Outcome {
+    /// The configured mode matches or was recorded.
+    Ok,
+    /// The marker (or unmarked single data) names a different mode.
+    Mismatch {
+        /// Mode in storage.
+        stored: Sharding,
+        /// Mode requested by this deployment.
+        configured: Sharding,
+    },
+    /// The marker or conditional-write reply cannot be decoded.
+    Corrupt,
+}
 
+impl Outcome {
+    /// Map a definitive outcome to the adapter's response.
+    pub fn into_result(self) -> Result<(), GuardError> {
+        match self {
+            Self::Ok => Ok(()),
+            refusal => Err(GuardError::Refused(refusal)),
+        }
+    }
+}
+
+/// Server-side refusal detail; backend errors are never cached.
+#[derive(Debug)]
+pub enum GuardError {
+    /// A definitive refusal.
+    Refused(Outcome),
+    /// A request-local, retryable storage failure.
+    Storage(StoreError),
+}
 impl core::fmt::Display for GuardError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str(&self.0)
+        match self {
+            Self::Refused(Outcome::Mismatch { stored, configured }) => write!(
+                f,
+                "{MISMATCH_MESSAGE}: configured={} stored={}",
+                mode_name(*configured),
+                mode_name(*stored)
+            ),
+            Self::Refused(_) => f.write_str(CORRUPT_MESSAGE),
+            Self::Storage(error) => write!(f, "{STORAGE_MESSAGE}: {error}"),
+        }
     }
 }
-
 impl std::error::Error for GuardError {}
-
-type Check = Shared<BoxFuture<'static, Result<(), GuardError>>>;
-
-/// Shares both an in-flight check and its result across requests in an isolate.
-/// A canceled request leaves the check available to the next request. Success
-/// and refusal are cached for the isolate's lifetime, including backend errors.
-#[derive(Default)]
-pub struct DeploymentGuard {
-    check: OnceCell<(Sharding, Option<String>, Check)>,
-}
-
-impl core::fmt::Debug for DeploymentGuard {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("DeploymentGuard")
-            .field("initialized", &self.check.get().is_some())
-            .finish()
+impl GuardError {
+    /// Public text used in an unavailable response, without backend detail.
+    #[must_use]
+    pub fn public_message(&self) -> &'static str {
+        match self {
+            Self::Refused(Outcome::Mismatch { .. }) => MISMATCH_MESSAGE,
+            Self::Refused(_) => CORRUPT_MESSAGE,
+            Self::Storage(_) => STORAGE_MESSAGE,
+        }
     }
 }
 
-impl DeploymentGuard {
-    /// Check the configured mode once, sharing at most three store calls.
-    /// `store` must describe the same deployment for this cache's lifetime.
-    /// A changed mode or jurisdiction in a reused isolate refuses locally without
-    /// store calls: both are fixed for the deployment lifetime.
-    pub fn check<S: NamespaceStore + 'static>(
-        &self,
-        store: S,
+/// Plain cached data, keyed by the config that selected the deployment's objects.
+/// This deliberately contains no future, promise, transport or request handle.
+#[derive(Debug, Clone)]
+pub struct Settled {
+    mode: Sharding,
+    jurisdiction: Option<String>,
+    outcome: Outcome,
+}
+
+impl Settled {
+    /// Read the cache, dropping observations made for a different config key.
+    /// No borrow survives this call or any subsequent store await.
+    pub fn cached(
+        cache: &RefCell<Option<Self>>,
         mode: Sharding,
         jurisdiction: Option<&str>,
-    ) -> Check {
-        let (checked_mode, checked_jurisdiction, check) = self.check.get_or_init(|| {
-            let future: BoxFuture<'static, Result<(), GuardError>> = Box::pin(async move {
-                let result = check_mode(&store, mode).await;
-                if let Err(error) = &result {
-                    crate::log_failure(&error.0);
-                }
-                result
-            });
-            (mode, jurisdiction.map(str::to_owned), future.shared())
-        });
-        if *checked_mode != mode || checked_jurisdiction.as_deref() != jurisdiction {
-            let error = GuardError(format!(
-                "{MISMATCH_MESSAGE}: configured={} isolate={} configured-jurisdiction={jurisdiction:?} isolate-jurisdiction={checked_jurisdiction:?}",
-                mode_name(mode).unwrap_or("unsupported"),
-                mode_name(*checked_mode).unwrap_or("unsupported"),
-            ));
-            crate::log_failure(&error.0);
-            let refused: BoxFuture<'static, Result<(), GuardError>> =
-                Box::pin(async move { Err(error) });
-            return refused.shared();
+    ) -> Option<Outcome> {
+        let mut cached = cache.borrow_mut();
+        if cached.as_ref().is_some_and(|entry| {
+            entry.mode != mode || entry.jurisdiction.as_deref() != jurisdiction
+        }) {
+            *cached = None;
         }
-        check.clone()
+        cached.as_ref().map(|entry| entry.outcome.clone())
+    }
+
+    /// Cache the first definitive result for this key. A transient storage error
+    /// returns to its request without changing the cache. An older config's
+    /// completion cannot replace an already settled result for a newer config.
+    pub fn finish(
+        cache: &RefCell<Option<Self>>,
+        mode: Sharding,
+        jurisdiction: Option<&str>,
+        result: Result<Outcome, StoreError>,
+    ) -> Result<(), GuardError> {
+        let outcome = match result {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                crate::log_failure(&format!("{STORAGE_MESSAGE}: {error}"));
+                return Err(GuardError::Storage(error));
+            }
+        };
+        // Every fresh refusal logs, even if another request settled first.
+        match &outcome {
+            Outcome::Ok => {}
+            Outcome::Mismatch { stored, configured } => crate::log_failure(&format!(
+                "{MISMATCH_MESSAGE}: configured={} stored={}",
+                mode_name(*configured),
+                mode_name(*stored)
+            )),
+            Outcome::Corrupt => crate::log_failure(CORRUPT_MESSAGE),
+        }
+        let mut cached = cache.borrow_mut();
+        if cached.is_none() {
+            *cached = Some(Self {
+                mode,
+                jurisdiction: jurisdiction.map(str::to_owned),
+                outcome: outcome.clone(),
+            });
+        }
+        outcome.into_result()
     }
 }
 
-fn mode_name(mode: Sharding) -> Result<&'static str, GuardError> {
+fn mode_name(mode: Sharding) -> &'static str {
     match mode {
-        Sharding::Single => Ok("single"),
-        Sharding::D34 => Ok("d34"),
-        _ => Err(GuardError("unsupported deployment sharding mode".into())),
+        Sharding::Single => "single",
+        Sharding::D34 => "d34",
+        _ => "unsupported",
     }
 }
 
-fn compare(observed: &Value, mode: &str) -> Result<(), GuardError> {
-    if observed.as_bytes() == mode.as_bytes() {
-        Ok(())
+fn compare(observed: &Value, configured: Sharding) -> Outcome {
+    let stored = match observed.as_bytes() {
+        b"single" => Sharding::Single,
+        b"d34" => Sharding::D34,
+        _ => return Outcome::Corrupt,
+    };
+    if stored == configured {
+        Outcome::Ok
     } else {
-        Err(GuardError(format!(
-            "{MISMATCH_MESSAGE}: configured={mode} stored={}",
-            String::from_utf8_lossy(observed.as_bytes())
-        )))
+        Outcome::Mismatch { stored, configured }
     }
 }
 
-async fn check_mode<S: NamespaceStore>(store: &S, sharding: Sharding) -> Result<(), GuardError> {
-    let mode = mode_name(sharding)?;
+/// Run one request's independent marker check with its own store handle.
+/// At most three calls: get, scan, apply. A failed Absent uses its observation.
+///
+/// # Errors
+/// Backend errors are returned separately from definitive marker outcomes.
+pub async fn check_mode<S: NamespaceStore>(
+    store: &S,
+    sharding: Sharding,
+) -> Result<Outcome, StoreError> {
+    if !matches!(sharding, Sharding::Single | Sharding::D34) {
+        return Ok(Outcome::Corrupt);
+    }
     let root = Partition::Namespace(NamespaceKey::deployment_default());
     let marker = keys::sharding_marker();
-    let failure = |error| {
-        GuardError(format!(
-            "deployment sharding guard: configured={mode}: {error}"
-        ))
-    };
-    if let Some(observed) = store.get(&root, &marker).await.map_err(failure)? {
-        return compare(&observed, mode);
+    if let Some(observed) = store.get(&root, &marker).await? {
+        return Ok(compare(&observed, sharding));
     }
     // The exclusive upper bound is above every permitted (<= MAX_KEY_BYTES) key.
     let rows = store
@@ -119,32 +188,28 @@ async fn check_mode<S: NamespaceStore>(store: &S, sharding: Sharding) -> Result<
             None,
             1,
         )
-        .await
-        .map_err(failure)?;
+        .await?;
     if let Some((key, value)) = rows.entries.first()
         && *key == marker
     {
-        // Another isolate may have installed the marker after our get.
-        return compare(value, mode);
+        return Ok(compare(value, sharding));
     }
-    if !rows.entries.is_empty() && mode == "d34" {
-        // Unmarked data was written by a single-sharding deployment.
-        return compare(&Value::new(b"single".to_vec()), mode);
+    if !rows.entries.is_empty() && sharding == Sharding::D34 {
+        return Ok(Outcome::Mismatch {
+            stored: Sharding::Single,
+            configured: sharding,
+        });
     }
     let batch = Batch::new()
         .require(Precondition::Absent(marker.clone()))
-        .put(marker, Value::new(mode.as_bytes().to_vec()));
-    match store.apply(&root, batch).await.map_err(failure)? {
-        BatchOutcome::Committed => Ok(()),
+        .put(marker, Value::new(mode_name(sharding).as_bytes().to_vec()));
+    Ok(match store.apply(&root, batch).await? {
+        BatchOutcome::Committed => Outcome::Ok,
         BatchOutcome::PreconditionFailed {
             observed: Some(value),
             ..
-        } => compare(&value, mode),
-        BatchOutcome::PreconditionFailed { observed: None, .. } => Err(GuardError(format!(
-            "deployment sharding guard corrupt reply: configured={mode}; failed Absent has no observed value"
-        ))),
-        BatchOutcome::DeadlinePassed { .. } => Err(GuardError(format!(
-            "deployment sharding guard corrupt reply: configured={mode}; batch has no deadline"
-        ))),
-    }
+        } => compare(&value, sharding),
+        BatchOutcome::PreconditionFailed { observed: None, .. }
+        | BatchOutcome::DeadlinePassed { .. } => Outcome::Corrupt,
+    })
 }

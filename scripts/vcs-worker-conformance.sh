@@ -127,6 +127,29 @@ start_server() {
     server_pid=$!
     set +m
 
+    # Wait only for TCP readiness: an HTTP probe would warm the guard before
+    # concurrent requests could exercise cold-start initialization.
+    if ! node - "${PORT}" <<'NODE'
+const net = require('node:net');
+const deadline = Date.now() + 120000;
+function connect() {
+    const socket = net.connect({host: '127.0.0.1', port: Number(process.argv[2])});
+    socket.once('connect', () => { socket.destroy(); process.exit(0); });
+    socket.once('error', () => {
+        socket.destroy();
+        if (Date.now() >= deadline) process.exit(1);
+        setTimeout(connect, 100);
+    });
+}
+connect();
+NODE
+    then
+        echo "wrangler dev did not open its port; its log:" >&2
+        tail -n 80 "${log}" >&2
+        exit 1
+    fi
+    cold_start "${name}"
+
     echo ">> [${name}] waiting for grpc.health.v1.Health/Check to report SERVING (up to 120 s)"
     local deadline=$((SECONDS + 120))
     until curl -fsS -X POST "${ORIGIN}/grpc.health.v1.Health/Check" \
@@ -139,6 +162,40 @@ start_server() {
         fi
         sleep 1
     done
+}
+
+# Each request owns its curl process and response files. All thirty wait for
+# the release file, then call the freshly started server before any health wait.
+cold_start() {
+    local name="$1" cold="${work}/$1/cold-start" i pid failed=0
+    local pids=()
+    mkdir -p "${cold}"
+    echo ">> [${name}] concurrent cold-start: 30 Health/Check requests"
+    for i in $(seq 1 30); do
+        (
+            while [ ! -f "${cold}/release" ]; do sleep 0.01; done
+            curl -sS --max-time 60 -X POST "${ORIGIN}/grpc.health.v1.Health/Check" \
+                -H 'content-type: application/json' -H 'connect-protocol-version: 1' \
+                --data '{}' -o "${cold}/${i}.body" -w '%{http_code}' \
+                >"${cold}/${i}.status" 2>"${cold}/${i}.error"
+        ) &
+        pids+=("$!")
+    done
+    touch "${cold}/release"
+    for pid in "${pids[@]}"; do wait "${pid}" || failed=1; done
+    for i in $(seq 1 30); do
+        if [ "$(cat "${cold}/${i}.status")" != 200 ] ||
+            ! grep -Eq '"status"[[:space:]]*:[[:space:]]*"SERVING"' "${cold}/${i}.body"; then
+            echo "cold-start request ${i} failed:" >&2
+            cat "${cold}/${i}.status" "${cold}/${i}.body" "${cold}/${i}.error" >&2
+            failed=1
+        fi
+    done
+    if [ "${failed}" -ne 0 ]; then
+        tail -n 80 "${log}" >&2
+        exit 1
+    fi
+    echo ">> [${name}] concurrent cold-start passed: 30/30 HTTP 200 / SERVING"
 }
 
 # run_suite <features> <runner args...>

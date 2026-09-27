@@ -1039,17 +1039,28 @@ the null behavior is documented in [the alarms API](https://developers.cloudflar
 
 **Always:** a Worker isolate validates its configured sharding against `sm 00`
 in the root RefStore before serving RPCs. An unmarked root with rows is single.
-Concurrent requests share the same in-flight check and cached result. Reused
-isolates refuse mode or jurisdiction changes locally without new DO calls. A failed
-Absent uses its atomic observation; an absent observation refuses as corruption.
+Each cold request runs its own check with its own store handle. The thread-local
+`RefCell<Option<Settled>>` caches only plain definitive data: success, mismatch
+or corruption. No future, promise or request handle crosses request contexts.
+Storage failures remain request-local and are retried by the next request.
+The cache is keyed by mode and jurisdiction; a changed key drops the cache and
+re-checks storage. A failed Absent uses its atomic observation; an absent
+observation or an undecodable marker refuses as corruption.
 
-**Because:** changing partition routing over existing data hides its refs.
+**Because:** changing partition routing over existing data hides its refs;
+[Workers continuations](https://developers.cloudflare.com/workers/configuration/compatibility-flags/#handle-cross-request-promise-resolution-correctly)
+remain tied to their original request context; a transient backend
+outage must not permanently poison an isolate.
 
-**If violated:** deployments can appear empty or disagree about where writes go.
+**If violated:** cold requests can hang, deployments can appear empty, or a
+brief outage can strand all subsequent requests.
 
-**Enforced by:** `sharding_guard::DeploymentGuard`, the adapter's isolate-local
-cache, and `mkit-server-worker/tests/sharding_guard.rs`. The check uses at most
-three DO calls per isolate, including a marker race.
+**Enforced by:** `sharding_guard::{Settled, check_mode}`, the adapter's isolate-local
+cache, host interleaving/error/config regression tests, and 30 concurrent cold
+health checks before every Worker conformance phase. At most 3 DO calls per
+request arriving before the first definitive result is cached; 0 afterwards;
+never more than one check per request.
+
 ## Namespace and write policy decide before allocation and never read existence
 
 **Always:** Multi writes pass the namespace policy and owner/authority policy
