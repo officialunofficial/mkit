@@ -655,7 +655,7 @@ fn download_pack_retries_on_unavailable_then_succeeds() {
 #[test]
 fn does_not_retry_a_non_retryable_error() {
     // `not_found` maps to `TransportError::PackNotFound`, which
-    // `is_retryable` explicitly excludes — the call must surface on the
+    // `is_retryable` explicitly excludes — the call must finish on the
     // very first attempt even though the server is configured to "fail"
     // (from its own counter's perspective) 5 times.
     let (port, shutdown_tx, handle, calls) =
@@ -663,10 +663,11 @@ fn does_not_retry_a_non_retryable_error() {
     let client = connect_to(port);
 
     let key = PackKey::new([0xEE; 32]);
-    let err = client
-        .pack_exists(&key)
-        .expect_err("pack_exists surfaces PackNotFound immediately, no retry");
-    assert!(matches!(err, TransportError::PackNotFound), "{err:?}");
+    assert!(
+        !client
+            .pack_exists(&key)
+            .expect("not_found means the pack is absent")
+    );
     assert_eq!(
         calls.load(Ordering::SeqCst),
         1,

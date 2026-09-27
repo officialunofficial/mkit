@@ -18,8 +18,8 @@ use mkit_core::protocol::{
 };
 use mkit_server_conformance::wire::client::{Client, Rpc, UNARY_JSON};
 use mkit_server_native::{Shutdown, server};
-use mkit_transport_connect::ConnectTransport;
 use mkit_transport_connect::generated::{UpdateRefRequest, UpdateRefResponse};
+use mkit_transport_connect::{ConnectTransport, ServerInfoView};
 
 /// A running `mkit-server serve --unsafe-allow-any-peer` over a temp root.
 struct Served {
@@ -34,12 +34,22 @@ struct Served {
 
 impl Served {
     fn start() -> Self {
+        Self::start_with_sqlite(false)
+    }
+
+    fn start_with_sqlite(sqlite: bool) -> Self {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
             .build()
             .unwrap();
         let root = common::repo_root();
+        let sqlite_meta = format!("sqlite:{}", common::s(&root.path().join("meta.sqlite3")));
+        let meta = if sqlite {
+            sqlite_meta.as_str()
+        } else {
+            "fs-layout"
+        };
         let cfg = common::resolve_with(
             &[
                 "--listen",
@@ -47,11 +57,12 @@ impl Served {
                 "--repo-root",
                 common::s(root.path()),
                 "--unsafe-allow-any-peer",
+                "--meta",
+                meta,
             ],
             &[],
         )
         .unwrap();
-        assert_eq!(cfg.meta, mkit_server_native::config::MetaChoice::FsLayout);
         let opened = server::open(&cfg).unwrap();
         let shutdown = Shutdown::new();
         let (listener, origin) = runtime.block_on(common::listener());
@@ -251,4 +262,25 @@ fn health_check_reports_serving() {
     assert_eq!(reply.status, 404);
     let json: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
     assert_eq!(json["code"], "not_found", "{json}");
+}
+
+/// Capability discovery follows the actual storage adapter's transaction support.
+#[test]
+fn get_server_info_reports_fs_layout_and_sqlite_atomicity() {
+    for sqlite in [false, true] {
+        let served = Served::start_with_sqlite(sqlite);
+        let client = served.client();
+        assert_eq!(client.supports_atomic_advance(), sqlite);
+        assert_eq!(
+            client.supports_atomic_advance(),
+            sqlite,
+            "cached capability"
+        );
+        let ServerInfoView::V2(info) = client.server_info() else {
+            panic!("native server must advertise STC v2");
+        };
+        assert_eq!(info.protocol.as_deref(), Some("mkit.transport.v1"));
+        assert_eq!(info.spec_version, Some(2));
+        assert_eq!(info.atomic_advance, Some(sqlite));
+    }
 }
