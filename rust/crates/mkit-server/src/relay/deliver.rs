@@ -54,7 +54,7 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
     ) -> Result<Fired, StoreError> {
         let os_key = keys::outbox_sequence();
         let observed_os = ctx.store.get(ctx.partition, &os_key).await?;
-        let rows = read_rows(ctx, self.budget.max_rows.max(1)).await?;
+        let rows = read_rows(ctx, self.budget.max_rows).await?;
         // Decode all inspected rows before making progress: corruption is never skipped.
         let mut groups: Vec<TargetRows> = Vec::new();
         for (key, value) in rows {
@@ -92,10 +92,7 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
         let rh = keys::relay_high_water(ctx.partition)?;
         let mut delivered = Vec::new();
         let mut failed = false;
-        for (target, rows) in groups
-            .into_iter()
-            .take(self.budget.max_targets.max(1) as usize)
-        {
+        for (target, rows) in groups.into_iter().take(self.budget.max_targets as usize) {
             let target_rows = rows
                 .iter()
                 .map(|(seq, row, _, _)| (*seq, row.clone()))
@@ -268,6 +265,9 @@ async fn read_rows<S: NamespaceStore>(
     ctx: &TimerCtx<'_, S>,
     limit: u32,
 ) -> Result<Vec<(Key, Value)>, StoreError> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
     let (start, end) = keys::class_range(keys::TAG_RELAY);
     let mut rows = Vec::new();
     let mut encoded_bytes = 0;

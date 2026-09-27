@@ -873,3 +873,30 @@ async fn drained_sources_guard_observed_sequence_and_absent_sequence_needs_no_gu
         )]
     );
 }
+
+#[tokio::test]
+async fn zero_row_or_target_budget_delivers_nothing_and_keeps_the_kick() {
+    for budget in [
+        RelayBudget {
+            max_rows: 0,
+            max_targets: 16,
+        },
+        RelayBudget {
+            max_rows: 256,
+            max_targets: 0,
+        },
+    ] {
+        let source = memory();
+        let relay = RelayHandler {
+            budget,
+            ..handler(Instrumented::new())
+        };
+        append(&source, &target(0), vec![(key(), Value::default())], 50).await;
+        assert!(matches!(
+            fire(&relay, &source).await.unwrap(),
+            Fired::Reschedule { .. }
+        ));
+        assert_eq!(queued(&source).await.len(), 1);
+        assert!(relay.target.applies.lock().unwrap().is_empty());
+    }
+}
