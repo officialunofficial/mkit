@@ -84,6 +84,8 @@ impl PlanClock {
 pub(crate) enum WriteKind {
     /// One conditional ref write.
     UpdateRef,
+    /// Unary ticket opening, with replay and lease guards.
+    BeginUpload,
     /// Packmap and head, in one batch.
     AdvanceRefs,
     /// An `UploadPack` reservation: the replay record `InFlight { resumable:
@@ -131,6 +133,8 @@ pub(crate) struct WriteRequest<'a> {
     pub(crate) mark_repo_known: bool,
     /// `UploadCommit` only: a final `pre_receive` rejection to store in
     /// place of `UploadPack`, so a retry is answered before re-streaming.
+    /// Ticket opening or pre-admission answer.
+    pub(crate) begin: Option<&'a super::begin::BeginWrite>,
     pub(crate) rejection: Option<&'a StoredRejection>,
 }
 
@@ -139,6 +143,9 @@ impl WriteRequest<'_> {
     #[must_use]
     pub(crate) fn read_keys(&self) -> Vec<Key> {
         let mut out = Vec::new();
+        if let Some(super::begin::BeginWrite::Open(open)) = self.begin {
+            out.extend(super::begin::open_keys(&open.spec));
+        }
         if self.mark_repo_known {
             out.push(keys::repo_known(self.repo));
         }
@@ -294,7 +301,9 @@ pub(crate) fn plan_write(
     // is for M3 payment reservations, not this abuse quota.
     let (outcome, ref_puts) = decide_refs(req, snap, &mut pre)?;
     let conflict = outcome.is_some();
-    let on_commit = outcome.unwrap_or(match req.kind {
+    let ticket_result = req.begin.map(|b| super::begin::plan(b, snap, clock, &mut pre, &mut puts)).transpose()?;
+    let on_commit = if let Some(result) = outcome.or(ticket_result) { result } else { match req.kind {
+        WriteKind::BeginUpload => return Err(ServerError::internal("ticket plan failed", "missing BeginUpload plan")),
         WriteKind::UpdateRef => StoredResult::UpdateRef(UpdateRefResult::Committed),
         WriteKind::AdvanceRefs => StoredResult::AdvanceRefs(AdvanceOutcome::Committed),
         WriteKind::UploadReserve | WriteKind::UploadCommit => {
@@ -302,7 +311,7 @@ pub(crate) fn plan_write(
                 StoredResult::Rejected(r.clone())
             })
         }
-    });
+    }};
     if conflict && req.replay.is_none() && req.charges.is_empty() {
         return Ok(Planned::Done(on_commit));
     }

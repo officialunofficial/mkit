@@ -349,7 +349,7 @@ impl<'p, B: BlobStore, N: NamespaceStore, H: HookSet> Verbs<'p, B, N, H> {
             Err(e) => return emit_error(sink, ErrorCode::InvalidRequest, e.ssh_message()).await,
         };
         let mut session = match self.auth(Procedure::UploadPack) {
-            Ok(a) => self.pipe.begin_upload(&a, pack_id, total).await.ok(),
+            Ok(a) => self.pipe.open_upload(&a, pack_id, total).await.ok(),
             Err(_) => None,
         };
         loop {

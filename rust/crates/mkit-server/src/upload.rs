@@ -385,3 +385,6 @@ fn pack_key(id: Option<&[u8]>, chunk: bool) -> Result<PackKey, UploadError> {
 
 #[cfg(test)]
 mod tests;
+
+/// Stateless authenticated upload tickets.
+pub mod token;

@@ -13,6 +13,7 @@ use mkit_server::auth_v2::AuthV2Config;
 use mkit_server::pipeline::{AuthMode, PipelineConfig, Sharding};
 use mkit_server::sql::Capacity;
 use mkit_server::upload::UploadLimits;
+use mkit_server::upload::token::TicketKeys;
 use mkit_server::{Addressing, NamespaceKey, Redacted, RepoId, RepoName};
 
 use crate::ServeOptions;
@@ -23,6 +24,9 @@ use crate::router::{CorsPolicy, RouterOptions};
 /// The bearer token's environment variable: the one `mkit serve --http`
 /// reads and the `mkit+https://` client sends (SPEC-TRANSPORT §5.2).
 pub const TOKEN_ENV: &str = "MKIT_API_TOKEN";
+
+/// The deployment upload MAC keys, as an alternative to `--ticket-key-file`.
+pub const TICKET_KEYS_ENV: &str = "MKIT_TICKET_KEYS";
 
 /// Pins every served root under a directory, as for `mkit serve`.
 pub const SERVE_ROOT_ENV: &str = "MKIT_SERVE_ROOT";
@@ -236,6 +240,10 @@ pub struct ServeArgs {
     /// Without it, `MKIT_API_TOKEN` is read.
     #[arg(long, value_name = "PATH")]
     pub bearer_token_file: Option<PathBuf>,
+    /// Deployment upload MAC keys, one `<key-id> <64 hex>` per line. The
+    /// first signs and every listed key verifies. Without it, read MKIT_TICKET_KEYS.
+    #[arg(long, value_name = "PATH")]
+    pub ticket_key_file: Option<PathBuf>,
     /// Auth v2: the deployment's canonical origin, byte for byte as
     /// clients sign it (e.g. `https://vcs.example`).
     #[arg(long, value_name = "ORIGIN")]
@@ -513,6 +521,31 @@ fn read_secret_file(path: &Path, flag: &str, env_hint: &str) -> Result<String, C
             format!("{PREFIX}: {flag} {}: {why}", path.display()),
         )
     })
+}
+
+/// Resolve the upload MAC secret without exposing key material in errors.
+fn resolve_ticket_keys(
+    args: &ServeArgs,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<Option<TicketKeys>, ConfigError> {
+    let text = match &args.ticket_key_file {
+        Some(path) => Some(
+            read_secret_file(path, "--ticket-key-file", TICKET_KEYS_ENV)
+                .map_err(|error| ConfigError::new(exit::USAGE, error.message))?,
+        ),
+        None => env(TICKET_KEYS_ENV),
+    };
+    text.map(|text| {
+        TicketKeys::parse(&text).map_err(|_| {
+            ConfigError::new(
+                exit::USAGE,
+                format!(
+                    "{PREFIX}: upload ticket keys are invalid; expected <key-id> <64 hex> per line"
+                ),
+            )
+        })
+    })
+    .transpose()
 }
 
 /// Which permission bits [`read_checked`] refuses on Unix, and how it
@@ -1047,6 +1080,7 @@ pub fn resolve(
     // `new` sets the default write quota for auth v2 only.
     let mut pipeline = PipelineConfig::new(Addressing::Single { repo }, auth, limits);
     pipeline.sharding = sharding;
+    pipeline.ticket_keys = resolve_ticket_keys(args, env)?;
     let router = RouterOptions {
         unary_timeout: Duration::from_secs(args.unary_timeout_secs),
         stream_timeout: Duration::from_secs(args.stream_timeout_secs),

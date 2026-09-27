@@ -37,7 +37,7 @@ fn upload<H: HookSet>(
     let id = hash(pack);
     block_on(async {
         let len = Some(pack.len() as u64);
-        let mut session = env.pipe.begin_upload(&a, Some(&id), len).await?;
+        let mut session = env.pipe.open_upload(&a, Some(&id), len).await?;
         let mode = session.mode();
         for span in chunk_plan(pack.len() as u64, chunk) {
             let at = usize::try_from(span.offset).unwrap();
@@ -161,7 +161,7 @@ fn upload_commitment_mismatch_is_unauthenticated_before_reservation() {
     let a = env.auth(&signed_upload(&key(7), &data, 1)).unwrap();
     let id = hash(&data);
     for (pack_id, total) in [(hash(b"other"), 12), (id, 13)] {
-        let err = block_on(env.pipe.begin_upload(&a, Some(&pack_id), Some(total))).unwrap_err();
+        let err = block_on(env.pipe.open_upload(&a, Some(&pack_id), Some(total))).unwrap_err();
         assert_eq!(err.code(), Code::Unauthenticated);
         assert_eq!(
             err.public_message(),
@@ -174,7 +174,7 @@ fn upload_commitment_mismatch_is_unauthenticated_before_reservation() {
     assert_eq!(code(env.auth(&body)), Code::Unauthenticated);
     // Nor do credentials checked for another procedure.
     let read = env.auth(&Req::unsigned(Procedure::ReadRef)).unwrap();
-    let err = block_on(env.pipe.begin_upload(&read, Some(&id), Some(12))).unwrap_err();
+    let err = block_on(env.pipe.open_upload(&read, Some(&id), Some(12))).unwrap_err();
     assert_eq!(err.code(), Code::Unauthenticated);
     assert!(env.rows().is_empty());
 }
@@ -191,7 +191,7 @@ fn upload_hash_mismatch_never_visible() {
         let a = env.auth(&req).unwrap();
         let id = hash(&data);
         let err = block_on(async {
-            let mut s = env.pipe.begin_upload(&a, Some(&id), Some(20)).await?;
+            let mut s = env.pipe.open_upload(&a, Some(&id), Some(20)).await?;
             s.push(Some(&id), Some(0), Bytes::from(vec![0; 20]), true)
                 .await?;
             s.finish().await
@@ -218,7 +218,7 @@ fn upload_framing_errors_map_codes() {
     let a = env.auth(&Req::unsigned(Procedure::UploadPack)).unwrap();
     let id = hash(b"abc");
     // A header without a pack id.
-    let err = block_on(env.pipe.begin_upload(&a, None, Some(3))).unwrap_err();
+    let err = block_on(env.pipe.open_upload(&a, None, Some(3))).unwrap_err();
     assert_eq!(err.code(), Code::InvalidArgument);
     assert_eq!(
         err.public_message(),
@@ -230,7 +230,7 @@ fn upload_framing_errors_map_codes() {
     );
     block_on(async {
         // An offset gap kills the stream: later calls repeat the error.
-        let mut s = env.pipe.begin_upload(&a, Some(&id), Some(3)).await.unwrap();
+        let mut s = env.pipe.open_upload(&a, Some(&id), Some(3)).await.unwrap();
         s.push(Some(&id), Some(0), Bytes::from_static(b"a"), false)
             .await
             .unwrap();
@@ -249,7 +249,7 @@ fn upload_framing_errors_map_codes() {
         assert_eq!(same(again.await.unwrap_err()), same(err.clone()));
         assert_eq!(same(s.finish().await.unwrap_err()), same(err));
         // A stream that ends without `last`.
-        let mut s = env.pipe.begin_upload(&a, Some(&id), Some(3)).await.unwrap();
+        let mut s = env.pipe.open_upload(&a, Some(&id), Some(3)).await.unwrap();
         s.push(Some(&id), Some(0), Bytes::from_static(b"ab"), false)
             .await
             .unwrap();
@@ -270,7 +270,7 @@ fn upload_oversize_declared_is_resource_exhausted() {
     let commitment = format!("pack:{}:{big}", to_hex(&[5; 32]));
     let req = Req::committed(&key(7), Procedure::UploadPack, &commitment, &nonce(1), T0);
     let a = env.auth(&req).unwrap();
-    let err = block_on(env.pipe.begin_upload(&a, Some(&[5; 32]), Some(big))).unwrap_err();
+    let err = block_on(env.pipe.open_upload(&a, Some(&[5; 32]), Some(big))).unwrap_err();
     assert_eq!(err.code(), Code::ResourceExhausted);
     assert!(env.rows().is_empty());
     assert_eq!(env.pipe.meta.calls(), 0);
@@ -351,7 +351,7 @@ fn upload_memory_bounded_by_one_chunk() {
         .unwrap();
     block_on(async {
         let mut s = pipe
-            .begin_upload(&a, Some(&id), Some(10_000))
+            .open_upload(&a, Some(&id), Some(10_000))
             .await
             .unwrap();
         for (i, span) in chunk_plan(10_000, 1_024).enumerate() {
@@ -383,7 +383,7 @@ fn upload_final_apply_deadline_is_computed_after_streaming() {
     block_on(async {
         let mut s = env
             .pipe
-            .begin_upload(&a, Some(&id), Some(64))
+            .open_upload(&a, Some(&id), Some(64))
             .await
             .unwrap();
         for span in chunk_plan(64, 16) {
@@ -459,10 +459,10 @@ fn stream_entry_futures_are_send() {
     fn send<T: Send>(_: &T) {}
     let env = env(AuthMode::Open);
     let a = env.auth(&Req::unsigned(Procedure::UploadPack)).unwrap();
-    send(&env.pipe.begin_upload(&a, Some(&[1; 32]), Some(1)));
+    send(&env.pipe.open_upload(&a, Some(&[1; 32]), Some(1)));
     let d = env.auth(&Req::unsigned(Procedure::DownloadPack)).unwrap();
     send(&env.pipe.download(&d, PackKey::new([1; 32])));
-    let mut s = block_on(env.pipe.begin_upload(&a, Some(&[1; 32]), Some(1))).unwrap();
+    let mut s = block_on(env.pipe.open_upload(&a, Some(&[1; 32]), Some(1))).unwrap();
     send(&s.push(Some(&[1; 32]), Some(0), Bytes::from_static(b"x"), true));
     send(&s.finish());
 }
@@ -477,7 +477,7 @@ fn upload_outliving_its_envelope_commits_the_blob_without_the_record() {
     block_on(async {
         let mut s = env
             .pipe
-            .begin_upload(&a, Some(&id), Some(64))
+            .open_upload(&a, Some(&id), Some(64))
             .await
             .unwrap();
         for span in chunk_plan(64, 16) {
@@ -542,10 +542,10 @@ fn upload_pre_receive_final_rejection_is_stored_and_answered_before_streaming() 
     // `pre_receive` runs after the blob is visible; GC reclaims it.
     assert!(blob_present(&env, &data));
     assert_eq!(quota(&env), (1, 40));
-    // The retry is answered at `begin_upload`: one read, no stream, no batch.
+    // The retry is answered at `open_upload`: one read, no stream, no batch.
     let (calls, batches) = (env.pipe.meta.calls(), env.batches().len());
     let a = env.auth(&req).unwrap();
-    let again = block_on(env.pipe.begin_upload(&a, Some(&hash(&data)), Some(40))).unwrap_err();
+    let again = block_on(env.pipe.open_upload(&a, Some(&hash(&data)), Some(40))).unwrap_err();
     assert_eq!(again.code(), Code::PermissionDenied);
     assert_eq!(env.pipe.meta.calls(), calls + 1);
     assert_eq!(env.batches().len(), batches);
@@ -556,7 +556,7 @@ fn upload_pre_receive_final_rejection_is_stored_and_answered_before_streaming() 
     assert_eq!(err.code(), Code::Unavailable);
     assert_eq!(replay_state(&env, &req), Some(IN_FLIGHT));
     let a = env.auth(&req).unwrap();
-    let session = block_on(env.pipe.begin_upload(&a, Some(&hash(&data)), Some(40))).unwrap();
+    let session = block_on(env.pipe.open_upload(&a, Some(&hash(&data)), Some(40))).unwrap();
     assert_eq!(session.mode(), UploadMode::Resume);
 }
 
@@ -574,7 +574,7 @@ fn upload_replay_never_recreates_a_deleted_blob() {
     let a = env.auth(&req).unwrap();
     let id = hash(&data);
     let err = block_on(async {
-        let mut s = env.pipe.begin_upload(&a, Some(&id), Some(50)).await?;
+        let mut s = env.pipe.open_upload(&a, Some(&id), Some(50)).await?;
         s.push(Some(&id), Some(0), Bytes::from(vec![0; 50]), true)
             .await?;
         s.finish().await
@@ -610,7 +610,7 @@ fn upload_session_records_each_request_once_and_drop_as_canceled() {
     let a = env.auth(&Req::unsigned(Procedure::UploadPack)).unwrap();
     let data = pack(8);
     let id = hash(&data);
-    let begin = || block_on(env.pipe.begin_upload(&a, Some(&id), Some(8))).unwrap();
+    let begin = || block_on(env.pipe.open_upload(&a, Some(&id), Some(8))).unwrap();
     drop(begin());
     block_on(begin().abort());
     assert_eq!(codes(&env, "UploadPack"), ["canceled", "canceled"]);
@@ -948,7 +948,7 @@ mod faults {
         let a = env.auth(&req).unwrap();
         let id = hash(&data);
         block_on(async {
-            let mut s = env.pipe.begin_upload(&a, Some(&id), Some(20)).await?;
+            let mut s = env.pipe.open_upload(&a, Some(&id), Some(20)).await?;
             s.push(Some(&id), Some(0), Bytes::from(data.clone()), true)
                 .await?;
             env.clock.set(T0 + 295_000);

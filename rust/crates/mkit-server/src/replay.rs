@@ -50,10 +50,30 @@ pub enum StoredResult {
     UpdateRef(UpdateRefResult),
     /// `AdvanceRefs`.
     AdvanceRefs(AdvanceOutcome),
+    /// `BeginUpload` completed.
+    BeginUpload(BeginUploadResult),
     /// `UploadPack` succeeded.
     UploadPack,
     /// A final rejection after the reservation, e.g. a policy denial.
     Rejected(StoredRejection),
+}
+
+/// A replayable ticket-opening result. Tokens are retained verbatim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BeginUploadResult {
+    /// The repository already holds the pack.
+    AlreadyPresent,
+    /// A live upload reservation.
+    Ticket {
+        /// Reservation-derived ticket identifier.
+        id: Hash,
+        /// Upload geometry in bytes.
+        part_size: u64,
+        /// Business-clock expiry.
+        expires_at_ms: u64,
+        /// Stateless authenticated claims, including the MAC.
+        token: Vec<u8>,
+    },
 }
 
 /// The result of an `UpdateRef` compare-and-swap.
