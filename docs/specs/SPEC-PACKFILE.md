@@ -330,9 +330,8 @@ mkit packfiles (v1 and v2 alike) are **buffered**, not streamed. The
 reader reads the entire packfile into memory and then walks entries.
 This is a deliberate simplification. Consequences:
 
-- Memory = packfile size (4 GiB worst-case on the wire; per-entry
-  decompression of a `0x03`/`0x04` entry adds at most one
-  `MAX_RAW_OBJECT_SIZE` (1 GiB) buffer at a time &mdash; see §3.3).
+- In addition to the buffered packfile, owned resident payloads are capped at
+  `max(2 × MAX_RAW_OBJECT_SIZE, 16 × pack_len)`, charged before allocation.
 - Random access to entries is O(n) scan since no entry index exists.
 
 A future version may add a trailing index; neither v1 nor v2 does.
