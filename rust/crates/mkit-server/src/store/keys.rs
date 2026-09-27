@@ -21,6 +21,17 @@
 //! | repo record (`Coordinator`) | `rr 00 <repo>` | codec `RepoRecord` |
 //! | repo-known marker (ref shard) | `rk 00 <repo>` | empty |
 //! | grant epoch | `e 00` | be64; absent means 0, never written as 0 |
+//! | ticket | `t 00 <ticket_id:32>` | codec `TicketV1` |
+//! | ticket idempotency | `ti 00 <repo> 00 <ref> 00 <pack:32> <signer:32>` | raw ticket id |
+//! | open tickets per ref | `tc 00 <repo> 00 <ref>` | be64; absent means 0, deleted at 0 |
+//! | open tickets per signer | `tu 00 <repo> 00 <ref> 00 <signer:32>` | be64; same rules |
+//! | ticket expiry timer | `w 00 <expires_at:be64> 02 <ticket_id:32>` | empty |
+//! | local membership | `m 00 <repo> 00 <pack:32>` | empty |
+//! | reservation and outcome | `o 00 <reservation_id>` | codec `ReservationV1` |
+//! | outcome pending index | `oq 00 <seq:be64> <reservation_id>` | empty |
+//! | relay queue | `or 00 <seq:be64>` | codec `RelayV1` |
+//! | outbox sequence | `os 00` | be64; last allocated, starts at 1, never deleted |
+//! | outcome backlog | `oc 00` | codec `Backlog`; absent means zero |
 //! | timer (owned by `timers`) | `w 00 <due_at:be64> <kind:u8> <ref>` | codec per kind |
 //! | holder (`ContentShard`) | `h 00 <object:32> <ns> 00 <repo>` | empty |
 //! | GC hold (`ContentShard`) | `g 00 <object:32> <hold_id:32>` | codec `hold` |
@@ -28,8 +39,7 @@
 //! | object state (`ContentShard`) | `c 00 <object:32>` | codec `ObjectState` |
 //!
 //! Reserved tags ([`RESERVED_TAGS`]), each laid out by the work package
-//! that adds it: tickets `t`, membership `m`, outbox `o` / `oq` / `os`,
-//! outbox backlog counter `oc`, relay high-water marks `rh`, object index
+//! that adds it: relay high-water marks `rh`, object index
 //! `i`, leases `l`, published pointers `pp`, tombstones `tb`, verification
 //! cursors `vc`, epoch lease `el`, and the deployment's namespace list
 //! [`TAG_NAMESPACE_LIST`] (WP-1.5; see `Partition` for enumeration). A
@@ -46,8 +56,11 @@ use mkit_core::hash::Hash;
 use super::error::StoreError;
 use super::kv::{Key, MAX_KEY_BYTES};
 use crate::quota::QuotaScope;
-use crate::refs::MAX_REF_NAME_BYTES;
+use crate::refs::{MAX_REF_NAME_BYTES, is_served_ref_name};
 use crate::repo::{MAX_REPO_NAME_BYTES, NamespaceKey, RepoName};
+
+// The longest ticket index (`ti 00 <repo> 00 <ref> 00 <pack> <signer>`) fits.
+const _: () = assert!(3 + MAX_REPO_NAME_BYTES + 1 + MAX_REF_NAME_BYTES + 1 + 64 <= MAX_KEY_BYTES);
 
 // The longest ref key (`r 00 <repo> 00 <refname>`) fits a key.
 const _: () = assert!(2 + MAX_REPO_NAME_BYTES + 1 + MAX_REF_NAME_BYTES <= MAX_KEY_BYTES);
@@ -94,23 +107,29 @@ pub const TAG_REPO_REGISTRY: &str = "rr";
 /// keep this list in its own metadata instead.
 pub const TAG_NAMESPACE_LIST: &str = "nl";
 
+/// Ticket row tag.
+pub const TAG_TICKET: &str = "t";
+/// Ticket idempotency index tag.
+pub const TAG_TICKET_INDEX: &str = "ti";
+/// Open-ticket counter per ref tag.
+pub const TAG_TICKETS_PER_REF: &str = "tc";
+/// Open-ticket counter per signer tag.
+pub const TAG_TICKETS_PER_SIGNER: &str = "tu";
+/// Local repository membership tag.
+pub const TAG_MEMBERSHIP: &str = "m";
+/// Reservation and terminal outcome tag.
+pub const TAG_RESERVATION: &str = "o";
+/// Undelivered terminal outcome index tag.
+pub const TAG_OUTCOME_PENDING: &str = "oq";
+/// Membership relay queue tag.
+pub const TAG_RELAY: &str = "or";
+/// Last allocated outbox sequence tag.
+pub const TAG_OUTBOX_SEQUENCE: &str = "os";
+/// Terminal outcome backlog tag.
+pub const TAG_OUTCOME_BACKLOG: &str = "oc";
+
 /// Tags whose layouts later work packages add. No M0 key uses them.
-pub const RESERVED_TAGS: &[&str] = &[
-    "t",
-    "tb",
-    "m",
-    "o",
-    "oq",
-    "os",
-    "oc",
-    "rh",
-    "i",
-    "l",
-    "pp",
-    "vc",
-    "el",
-    TAG_NAMESPACE_LIST,
-];
+pub const RESERVED_TAGS: &[&str] = &["tb", "rh", "i", "l", "pp", "vc", "el", TAG_NAMESPACE_LIST];
 
 /// A key decoded by [`parse`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,6 +168,57 @@ pub enum ParsedKey {
         /// Quota scope.
         scope: String,
     },
+    /// `t 00 <ticket_id>`.
+    Ticket(Hash),
+    /// `ti 00 <repo> 00 <ref> 00 <pack> <signer>`.
+    TicketIndex {
+        /// Repository.
+        repo: RepoName,
+        /// Ref name.
+        name: String,
+        /// Pack id.
+        pack_id: Hash,
+        /// Signer id.
+        signer: Hash,
+    },
+    /// `tc 00 <repo> 00 <ref>`.
+    TicketsPerRef {
+        /// Repository.
+        repo: RepoName,
+        /// Ref name.
+        name: String,
+    },
+    /// `tu 00 <repo> 00 <ref> 00 <signer>`.
+    TicketsPerSigner {
+        /// Repository.
+        repo: RepoName,
+        /// Ref name.
+        name: String,
+        /// Signer id.
+        signer: Hash,
+    },
+    /// `m 00 <repo> 00 <pack>`.
+    Membership {
+        /// Repository.
+        repo: RepoName,
+        /// Pack id.
+        pack_id: Hash,
+    },
+    /// `o 00 <reservation_id>`.
+    Reservation(String),
+    /// `oq 00 <seq> <reservation_id>`.
+    OutcomePending {
+        /// Allocated sequence.
+        seq: u64,
+        /// Reservation id.
+        reservation_id: String,
+    },
+    /// `or 00 <seq>`.
+    Relay(u64),
+    /// `os 00`.
+    OutboxSequence,
+    /// `oc 00`.
+    OutcomeBacklog,
     /// `e 00`.
     GrantEpoch,
     /// `w 00 <due_at> <kind> <ref>`.
@@ -298,6 +368,121 @@ pub fn quota_window_before(before_ms: u64) -> (Key, Key) {
     (start, key(TAG_QUOTA_WINDOW, &[&before_ms.to_be_bytes()]))
 }
 
+/// Whether an id satisfies SPEC-SERVER §6.6: 1–128 ASCII bytes.
+#[must_use]
+pub fn validate_reservation_id(rid: &str) -> bool {
+    (1..=128).contains(&rid.len())
+        && rid
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._:-".contains(&b))
+}
+
+fn checked_key(tag: &str, parts: &[&[u8]]) -> Result<Key, StoreError> {
+    let result = key(tag, parts);
+    if result.as_bytes().len() > MAX_KEY_BYTES {
+        return Err(StoreError::Invalid("key exceeds MAX_KEY_BYTES".into()));
+    }
+    Ok(result)
+}
+
+fn check_ticket_ref(name: &str) -> Result<(), StoreError> {
+    if !is_served_ref_name(name) {
+        return Err(StoreError::Invalid("invalid ticket ref name".into()));
+    }
+    Ok(())
+}
+
+/// `t 00 <ticket_id>`; fixed length, always within the store limit.
+#[must_use]
+pub fn ticket(id: &Hash) -> Key {
+    key(TAG_TICKET, &[id])
+}
+
+/// `ti 00 <repo> 00 <ref> 00 <pack> <signer>`.
+pub fn ticket_index(
+    repo: &RepoName,
+    name: &str,
+    pack: &Hash,
+    signer: &Hash,
+) -> Result<Key, StoreError> {
+    check_ticket_ref(name)?;
+    checked_key(
+        TAG_TICKET_INDEX,
+        &[
+            repo.as_str().as_bytes(),
+            b"\0",
+            name.as_bytes(),
+            b"\0",
+            pack,
+            signer,
+        ],
+    )
+}
+
+/// `tc 00 <repo> 00 <ref>`.
+pub fn tickets_per_ref(repo: &RepoName, name: &str) -> Result<Key, StoreError> {
+    check_ticket_ref(name)?;
+    checked_key(
+        TAG_TICKETS_PER_REF,
+        &[repo.as_str().as_bytes(), b"\0", name.as_bytes()],
+    )
+}
+
+/// `tu 00 <repo> 00 <ref> 00 <signer>`.
+pub fn tickets_per_signer(repo: &RepoName, name: &str, signer: &Hash) -> Result<Key, StoreError> {
+    check_ticket_ref(name)?;
+    checked_key(
+        TAG_TICKETS_PER_SIGNER,
+        &[
+            repo.as_str().as_bytes(),
+            b"\0",
+            name.as_bytes(),
+            b"\0",
+            signer,
+        ],
+    )
+}
+
+/// `m 00 <repo> 00 <pack>`; bounded by `RepoName` and the fixed hash size.
+#[must_use]
+pub fn membership(repo: &RepoName, pack: &Hash) -> Key {
+    key(TAG_MEMBERSHIP, &[repo.as_str().as_bytes(), b"\0", pack])
+}
+
+/// `o 00 <reservation_id>`.
+pub fn reservation(rid: &str) -> Result<Key, StoreError> {
+    if !validate_reservation_id(rid) {
+        return Err(StoreError::Invalid("invalid reservation id".into()));
+    }
+    checked_key(TAG_RESERVATION, &[rid.as_bytes()])
+}
+
+/// `oq 00 <seq> <reservation_id>`.
+pub fn outcome_pending(seq: u64, rid: &str) -> Result<Key, StoreError> {
+    if !validate_reservation_id(rid) || seq == 0 {
+        return Err(StoreError::Invalid("invalid outcome pending key".into()));
+    }
+    checked_key(TAG_OUTCOME_PENDING, &[&seq.to_be_bytes(), rid.as_bytes()])
+}
+
+/// `or 00 <seq>`; fixed length, always within the store limit.
+#[must_use]
+pub fn relay(seq: u64) -> Key {
+    key(TAG_RELAY, &[&seq.to_be_bytes()])
+}
+
+/// `os 00`.
+#[must_use]
+pub fn outbox_sequence() -> Key {
+    key(TAG_OUTBOX_SEQUENCE, &[])
+}
+
+/// `oc 00`.
+#[must_use]
+pub fn outcome_backlog() -> Key {
+    key(TAG_OUTCOME_BACKLOG, &[])
+}
+
 /// `e 00`.
 #[must_use]
 pub fn grant_epoch() -> Key {
@@ -373,11 +558,53 @@ fn hash(bytes: &[u8]) -> Option<Hash> {
     Hash::try_from(bytes).ok()
 }
 
+fn parse_ticket_binding(tag: &[u8], body: &[u8]) -> Option<ParsedKey> {
+    let text = |b: &[u8]| String::from_utf8(b.to_vec()).ok();
+    Some({
+        let sep = body.iter().position(|&b| b == 0)?;
+        let repo = RepoName::new(text(&body[..sep])?).ok()?;
+        let rest = &body[sep + 1..];
+        if tag == b"tc" {
+            let name = text(rest)?;
+            check_ticket_ref(&name).ok()?;
+            ParsedKey::TicketsPerRef { repo, name }
+        } else {
+            let sep = rest.iter().position(|&b| b == 0)?;
+            let name = text(&rest[..sep])?;
+            check_ticket_ref(&name).ok()?;
+            let tail = &rest[sep + 1..];
+            if tag == b"ti" {
+                let (pack_id, signer) = tail.split_first_chunk::<32>()?;
+                ParsedKey::TicketIndex {
+                    repo,
+                    name,
+                    pack_id: *pack_id,
+                    signer: hash(signer)?,
+                }
+            } else {
+                ParsedKey::TicketsPerSigner {
+                    repo,
+                    name,
+                    signer: hash(tail)?,
+                }
+            }
+        }
+    })
+}
+
+fn parse_reservation_id(bytes: &[u8]) -> Option<String> {
+    let rid = std::str::from_utf8(bytes).ok()?;
+    validate_reservation_id(rid).then(|| rid.to_owned())
+}
+
 /// Decode a key of any laid-out class; `None` for a malformed key or a
 /// reserved class.
 #[must_use]
 pub fn parse(key: &Key) -> Option<ParsedKey> {
     let bytes = key.as_bytes();
+    if bytes.len() > MAX_KEY_BYTES {
+        return None;
+    }
     let split = bytes.iter().position(|&b| b == 0)?;
     let (tag, body) = (&bytes[..split], &bytes[split + 1..]);
     let text = |b: &[u8]| String::from_utf8(b.to_vec()).ok();
@@ -394,6 +621,36 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
                 name: text(&body[sep + 1..])?,
             }
         }
+        b"t" => ParsedKey::Ticket(hash(body)?),
+        b"ti" | b"tc" | b"tu" => parse_ticket_binding(tag, body)?,
+        b"m" => {
+            let sep = body.iter().position(|&b| b == 0)?;
+            ParsedKey::Membership {
+                repo: RepoName::new(text(&body[..sep])?).ok()?,
+                pack_id: hash(&body[sep + 1..])?,
+            }
+        }
+        b"o" => ParsedKey::Reservation(parse_reservation_id(body)?),
+        b"oq" => {
+            let (seq, rest) = be64(body)?;
+            let reservation_id = parse_reservation_id(rest)?;
+            if seq == 0 {
+                return None;
+            }
+            ParsedKey::OutcomePending {
+                seq,
+                reservation_id,
+            }
+        }
+        b"or" => {
+            let (seq, rest) = be64(body)?;
+            if !rest.is_empty() {
+                return None;
+            }
+            ParsedKey::Relay(seq)
+        }
+        b"os" if body.is_empty() => ParsedKey::OutboxSequence,
+        b"oc" if body.is_empty() => ParsedKey::OutcomeBacklog,
         b"p" => ParsedKey::Replay(hash(body)?),
         b"px" => {
             let (expires_at_ms, rest) = be64(body)?;
@@ -480,6 +737,16 @@ mod tests {
             TAG_NAMESPACE_RECORD,
             TAG_REPO_REGISTRY,
             TAG_REPO_KNOWN,
+            TAG_TICKET,
+            TAG_TICKET_INDEX,
+            TAG_TICKETS_PER_REF,
+            TAG_TICKETS_PER_SIGNER,
+            TAG_MEMBERSHIP,
+            TAG_RESERVATION,
+            TAG_OUTCOME_PENDING,
+            TAG_RELAY,
+            TAG_OUTBOX_SEQUENCE,
+            TAG_OUTCOME_BACKLOG,
         ];
         tags.extend_from_slice(RESERVED_TAGS);
         tags
@@ -536,6 +803,141 @@ mod tests {
             let (s, e) = class_range(tag);
             assert_eq!((s.as_bytes(), e.as_bytes()), (start, end));
         }
+    }
+
+    #[test]
+    fn ticket_outbox_layouts_golden_and_roundtrip() {
+        let r = repo("a");
+        let name = "refs/heads/main";
+        let pack = [0x11; 32];
+        let signer = [0x22; 32];
+        let seq = 0x0102_0304_0506_0708;
+        let cases = vec![
+            (
+                ticket(&pack),
+                [&b"t\0"[..], &pack].concat(),
+                ParsedKey::Ticket(pack),
+            ),
+            (
+                ticket_index(&r, name, &pack, &signer).unwrap(),
+                [&b"ti\0a\0refs/heads/main\0"[..], &pack, &signer].concat(),
+                ParsedKey::TicketIndex {
+                    repo: r.clone(),
+                    name: name.into(),
+                    pack_id: pack,
+                    signer,
+                },
+            ),
+            (
+                tickets_per_ref(&r, name).unwrap(),
+                b"tc\0a\0refs/heads/main".to_vec(),
+                ParsedKey::TicketsPerRef {
+                    repo: r.clone(),
+                    name: name.into(),
+                },
+            ),
+            (
+                tickets_per_signer(&r, name, &signer).unwrap(),
+                [&b"tu\0a\0refs/heads/main\0"[..], &signer].concat(),
+                ParsedKey::TicketsPerSigner {
+                    repo: r.clone(),
+                    name: name.into(),
+                    signer,
+                },
+            ),
+            (
+                membership(&r, &pack),
+                [&b"m\0a\0"[..], &pack].concat(),
+                ParsedKey::Membership {
+                    repo: r,
+                    pack_id: pack,
+                },
+            ),
+            (
+                reservation("R-1:ok").unwrap(),
+                b"o\0R-1:ok".to_vec(),
+                ParsedKey::Reservation("R-1:ok".into()),
+            ),
+            (
+                outcome_pending(seq, "R-1:ok").unwrap(),
+                [&b"oq\0"[..], &[1, 2, 3, 4, 5, 6, 7, 8], b"R-1:ok"].concat(),
+                ParsedKey::OutcomePending {
+                    seq,
+                    reservation_id: "R-1:ok".into(),
+                },
+            ),
+            (
+                relay(seq),
+                [&b"or\0"[..], &[1, 2, 3, 4, 5, 6, 7, 8]].concat(),
+                ParsedKey::Relay(seq),
+            ),
+            (
+                outbox_sequence(),
+                b"os\0".to_vec(),
+                ParsedKey::OutboxSequence,
+            ),
+            (
+                outcome_backlog(),
+                b"oc\0".to_vec(),
+                ParsedKey::OutcomeBacklog,
+            ),
+            (
+                timer(seq, 2, &pack),
+                [&b"w\0"[..], &[1, 2, 3, 4, 5, 6, 7, 8, 2], &pack].concat(),
+                ParsedKey::Timer {
+                    due_at_ms: seq,
+                    kind: 2,
+                    reference: Bytes::copy_from_slice(&pack),
+                },
+            ),
+        ];
+        for (key, golden, parsed) in cases {
+            assert_eq!(key.as_bytes(), golden);
+            assert_eq!(parse(&key), Some(parsed));
+        }
+    }
+
+    #[test]
+    fn ticket_outbox_key_validation_and_maximum() {
+        let r = repo(&"a".repeat(MAX_REPO_NAME_BYTES));
+        let name = format!(
+            "refs/heads/{}",
+            "b".repeat(MAX_REF_NAME_BYTES - "refs/heads/".len())
+        );
+        let longest = ticket_index(&r, &name, &[0; 32], &[0; 32]).unwrap();
+        assert_eq!(
+            longest.as_bytes().len(),
+            3 + MAX_REPO_NAME_BYTES + 1 + MAX_REF_NAME_BYTES + 1 + 64
+        );
+        assert!(longest.as_bytes().len() <= MAX_KEY_BYTES);
+        assert!(parse(&longest).is_some());
+        for rid in ["", "bad/rid", "space id", "nonascii-é", &"a".repeat(129)] {
+            assert!(!validate_reservation_id(rid));
+            assert!(reservation(rid).is_err());
+            assert!(outcome_pending(1, rid).is_err());
+        }
+        assert!(reservation(&"a".repeat(128)).is_ok());
+        assert!(outcome_pending(0, "ok").is_err());
+        for name in ["", "bad", "refs/heads/a\0b", &format!("{name}x")] {
+            assert!(ticket_index(&r, name, &[0; 32], &[0; 32]).is_err());
+            assert!(tickets_per_ref(&r, name).is_err());
+            assert!(tickets_per_signer(&r, name, &[0; 32]).is_err());
+        }
+        for bad in [
+            &b"t\0short"[..],
+            b"ti\0a\0refs/heads/a\0short",
+            b"tc\0a\0bad",
+            b"tu\0a\0refs/heads/a\0short",
+            b"m\0a\0short",
+            b"o\0bad/id",
+            b"oq\0short",
+            b"or\0short",
+            b"os\0extra",
+            b"oc\0extra",
+        ] {
+            assert_eq!(parse(&Key::new(bad.to_vec())), None);
+        }
+        assert_eq!(parse(&Key::new(vec![b'x'; MAX_KEY_BYTES + 1])), None);
     }
 
     #[test]

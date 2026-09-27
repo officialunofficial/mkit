@@ -22,6 +22,12 @@ train).
 
 ### Changed
 
+- *(server)* Add pure ref-shard planners and strict version-1 codecs for upload
+  tickets, reservations, local pack membership and outcome/relay queues (WP-1.7).
+  Shared counters and outbox sequence/backlog edits carry snapshot guards;
+  ticket expiry kind 2 is allocated without an RPC or timer handler. Storage
+  layout version stays 1.
+
 - *(server)* Add native `--sharding single|d34` (default `single`) for SQLite
   metadata. D34 co-locates each branch head and canonical packmap in one ref
   shard and requires that pairing for `AdvanceRefs`, rejecting others before
