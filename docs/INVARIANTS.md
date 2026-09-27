@@ -1048,3 +1048,21 @@ strict `store/codec.rs` decodes, and `mkit-server-conformance/src/storage/kv_cas
 creation, atomic publication, stale-ticket and acknowledgement cases over memory
 and SQLite. RPC composition and expiry are WP-1.9/1.10/1.14; WP-3.3 adds guarded
 Pending reservations, ReadServed, reconciliation and backlog enforcement.
+
+## Deployment discovery is public and repository-independent
+
+**Always:** GetServerInfo is unauthenticated, never resolves a repository and
+never reads the store. Its response depends only on deployment configuration,
+hook defaults and store capabilities, with the upload threshold zero for
+Multi addressing or admission.
+
+**Because:** clients need capabilities before authenticating, and discovery
+must never expose whether a repository exists (STC §2.1).
+
+**If violated:** clients cannot discover bearer deployments or malformed and
+unknown identities become a repository existence oracle.
+
+**Enforced by:** pipeline `tests::info`, Connect dispatch discovery tests,
+native `server_hardening` bearer/concurrency regression and wire cases
+`info.shape_and_policy` and `info.ignores_repository_header` on Single, Multi,
+native binary and Worker runners.

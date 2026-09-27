@@ -25,9 +25,9 @@ use mkit_server::connect::proto::mkit::transport::v1::__buffa::oneof::upload_par
 use mkit_server::connect::proto::mkit::transport::v1::{
     AdvanceOutcome, AdvanceRefsRequest, AdvanceRefsResponse, BeginUploadRequest,
     CompleteUploadRequest, DownloadPackRequest, DownloadPackResponse, GetServerInfoRequest,
-    ListRefsRequest, ListRefsResponse, PackChunk, PackExistsRequest, PackExistsResponse,
-    ReadRefRequest, ReadRefResponse, RefExpectation, UploadPackHeader, UploadPackRequest,
-    UploadPartHeader, UploadPartRequest,
+    GetServerInfoResponse, ListRefsRequest, ListRefsResponse, PackChunk, PackExistsRequest,
+    PackExistsResponse, ReadRefRequest, ReadRefResponse, RefExpectation, UploadPackHeader,
+    UploadPackRequest, UploadPartHeader, UploadPartRequest,
 };
 use mkit_server::connect::{self};
 use mkit_server::pipeline::{
@@ -1002,14 +1002,13 @@ fn assert_unimplemented(reply: &Reply) {
 
 #[test]
 fn m1_stub_paths_are_not_authenticated_procedures_yet() {
-    // WP-1.6, WP-1.9 and WP-1.11 must flip these as their handlers land.
-    // GetServerInfo remains public by spec §2.1, with an explicit Procedure.
-    for rpc in [
-        "GetServerInfo",
-        "BeginUpload",
-        "UploadPart",
-        "CompleteUpload",
-    ] {
+    // GetServerInfo is permanently outside Procedure: no auth or resolution.
+    assert_eq!(
+        Procedure::from_connect_path("/mkit.transport.v1.TransportService/GetServerInfo"),
+        None
+    );
+    // WP-1.9 and WP-1.11 still need authenticated procedures for these stubs.
+    for rpc in ["BeginUpload", "UploadPart", "CompleteUpload"] {
         let path = format!("/mkit.transport.v1.TransportService/{rpc}");
         assert_eq!(Procedure::from_connect_path(&path), None, "{rpc}");
     }
@@ -1021,11 +1020,6 @@ async fn m1_new_unary_rpcs_reach_stubs_without_auth_headers() {
         token: Redacted::new(TOKEN),
     })
     .serve();
-    assert_unimplemented(
-        &server
-            .unary("GetServerInfo", &GetServerInfoRequest::default(), &[])
-            .await,
-    );
     assert_unimplemented(
         &server
             .unary(
@@ -1054,7 +1048,7 @@ async fn m1_new_unary_rpcs_reach_stubs_without_auth_headers() {
             .await,
     );
     // Exercise JSON dispatch too.
-    for rpc in ["GetServerInfo", "BeginUpload", "CompleteUpload"] {
+    for rpc in ["BeginUpload", "CompleteUpload"] {
         assert_unimplemented(&server.json(rpc, &serde_json::json!({}), &[]).await);
     }
 }
@@ -1268,4 +1262,52 @@ async fn m1_explicit_default_fields_keep_the_legacy_path() {
         .await;
     assert_eq!(listed.status, StatusCode::OK);
     assert_eq!(listed.json()["refs"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn server_info_is_public_ignores_repository_and_sets_cache_header() {
+    for auth in [
+        AuthMode::Open,
+        AuthMode::Bearer {
+            token: Redacted::new(TOKEN),
+        },
+        authv2(),
+    ] {
+        let server = setup(auth).serve();
+        let original = server
+            .unary("GetServerInfo", &GetServerInfoRequest::default(), &[])
+            .await;
+        let info: GetServerInfoResponse = original.decode();
+        assert_eq!(info.protocol.as_deref(), Some("mkit.transport.v1"));
+        assert_eq!(info.spec_version, Some(2));
+        assert_eq!(info.indexed_mode, Some(false));
+        assert_eq!(info.admission, Some(false));
+        assert_eq!(info.begin_upload_threshold_bytes, Some(u64::MAX));
+        assert_eq!(info.receipt_public_key, Some(vec![]));
+        assert_eq!(info.receipt_key_id.as_deref(), Some(""));
+        assert!(info.grant_schemes.is_empty());
+        assert_eq!(original.headers["cache-control"], "private, max-age=60");
+        for repository in ["not-here", "ed25519:bad/../invalid"] {
+            let reply = server
+                .unary(
+                    "GetServerInfo",
+                    &GetServerInfoRequest::default(),
+                    &[("x-repository", repository.to_owned())],
+                )
+                .await;
+            assert_eq!(reply.status, StatusCode::OK);
+            assert_eq!(reply.body, original.body);
+        }
+        let json = server
+            .json("GetServerInfo", &serde_json::json!({}), &[])
+            .await;
+        assert_eq!(json.status, StatusCode::OK);
+        assert_eq!(json.json()["protocol"], "mkit.transport.v1");
+        assert_eq!(
+            json.json()["beginUploadThresholdBytes"],
+            u64::MAX.to_string()
+        );
+        assert_eq!(json.headers["cache-control"], "private, max-age=60");
+        assert!(server.codes.0.lock().unwrap().is_empty());
+    }
 }

@@ -140,7 +140,7 @@ run_suite() {
     echo ">> running the wire suite (features: ${features}) $*"
     local status=0
     "${runner}" wire --base-url "${ORIGIN}" --auth auth-v2 --audience "${ORIGIN}" \
-        --repository "${REPOSITORY}" --random-signer --atomic-advance --fresh-target \
+        --repository "${REPOSITORY}" --random-signer --atomic-advance --fresh-target --milestone M1 \
         --max-pack-bytes "${MAX_PACK_BYTES}" --features "${features}" \
         "$@" ${runner_args[@]+"${runner_args[@]}"} || status=$?
     if [ "${status}" -ne 0 ]; then

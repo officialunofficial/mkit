@@ -22,6 +22,11 @@ train).
 
 ### Changed
 
+- *(server)* Implement unauthenticated `GetServerInfo` deployment discovery
+  with validated upload limits, namespace/admission policy, store capabilities
+  and private caching for 60 seconds. Repository headers never affect the
+  response; native bearer deployments also expose it without a token (WP-1.6).
+
 - *(server)* Multi addressing now defaults to an empty namespace allowlist and
   owner writes. Namespace denials and non-owner writes return `permission_denied`
   before allocation. Authorizer hooks can be additional checks or explicit
