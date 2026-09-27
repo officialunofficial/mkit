@@ -1,0 +1,12 @@
+{
+  "blake3": "790a76120c9dc368c3cca55363b91ceef0122656b9186bbb0c9b4dc780d95990",
+  "commit": "220761e8f895888b5fba12997417faf940408bd03652818e40be1cc02dd39606",
+  "expect": {
+    "accept": false,
+    "expand_to": null,
+    "reject_reason": "span_leaf_context"
+  },
+  "name": "neg_mismatched_leaf",
+  "schema_version": 1,
+  "size": 117492
+}

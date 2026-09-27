@@ -1,0 +1,12 @@
+{
+  "blake3": "deba440d02974e076f7c8af42d54079f246093ef14598118a0a40597301d1d27",
+  "commit": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
+  "expect": {
+    "accept": false,
+    "expand_to": null,
+    "reject_reason": "span_trailing_bytes"
+  },
+  "name": "neg_trailing",
+  "schema_version": 1,
+  "size": 148143
+}

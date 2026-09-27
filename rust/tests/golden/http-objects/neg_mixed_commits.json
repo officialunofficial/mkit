@@ -1,0 +1,12 @@
+{
+  "blake3": "524a47f80f61e0ca397954a4ec2a2cdfc0588cc2dcefd4593e4b72ca35fc396b",
+  "commit": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
+  "expect": {
+    "accept": false,
+    "expand_to": null,
+    "reject_reason": "span_inner_invalid"
+  },
+  "name": "neg_mixed_commits",
+  "schema_version": 1,
+  "size": 148142
+}

@@ -1,0 +1,12 @@
+{
+  "blake3": "f4da2ffb979f16ad35ee5ec5c2c18d16c12501d3c0e7c0865bc6ef7c67d5abad",
+  "commit": "9ad689378ee86b1bf3baf714392f8ed03fc551cb21b0fa8aeeb07e47cc053f74",
+  "expect": {
+    "accept": false,
+    "expand_to": null,
+    "reject_reason": "span_commit"
+  },
+  "name": "neg_trusted_commit",
+  "schema_version": 1,
+  "size": 148142
+}

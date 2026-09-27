@@ -1,0 +1,12 @@
+{
+  "blake3": "792446eebf35553f1665aa13258913fca1f9b65b7c359dad12c35e764d77940c",
+  "commit": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
+  "expect": {
+    "accept": false,
+    "expand_to": null,
+    "reject_reason": "span_last_unneeded"
+  },
+  "name": "neg_superfluous_last",
+  "schema_version": 1,
+  "size": 148142
+}

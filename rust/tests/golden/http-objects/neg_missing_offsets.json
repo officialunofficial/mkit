@@ -1,0 +1,12 @@
+{
+  "blake3": "d690b0a67deb1141ea7f7a22a2fad3d535f05a6bda110253ceaf17658c1ccd24",
+  "commit": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
+  "expect": {
+    "accept": false,
+    "expand_to": null,
+    "reject_reason": "span_anchor_offset"
+  },
+  "name": "neg_missing_offsets",
+  "schema_version": 1,
+  "size": 146427
+}

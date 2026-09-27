@@ -169,6 +169,18 @@ The interval is the one STC §7.1 requires, bounded by 300,000 ms.
 This rule covers a crash between recording the pending reservation
 and recording either a successful apply result or an abort.
 
+For an admitted HTTP read with a reservation id, the server MUST durably
+record a pending read before sending the first response byte. Its abandonment
+deadline MUST be a deployment-configured bound measured from reservation
+creation, independent of an authentication validity interval. The server MUST
+stop sending by that deadline. Completion, including partial transmission,
+MUST conditionally replace the pending read with `ReadServed` recording actual
+body bytes sent; successful HEAD records zero. A failure before the first byte
+MUST conditionally replace it with `Aborted(INTERNAL)`. Reconciliation after
+the deadline MUST conditionally record `Aborted(ABANDONED)` if it remains
+pending. These replacements use the same pending-record arbiter below.
+[SPEC-HTTP-OBJECTS](SPEC-HTTP-OBJECTS.md) fixes read ordering and admission input.
+
 An unconsumed ticket that expires MUST produce `Expired`, as STC
 §7.7 requires. The periodic reconcile pass MUST produce `Expired`
 for a ticket-backed reservation with no outcome once its ticket has
@@ -304,6 +316,12 @@ requires; remote Allow does not bypass them.
 | `refs` | The intended ref changes, in decision order. |
 | `owner` | Whether the principal owns the namespace under STC §7.5 rule 1; set on both Authorize and Admit requests. |
 | `grant` | The write grant used under STC §7.5 rule 2, if any, and its checked epoch; set on both Authorize and Admit requests. |
+
+For plain HTTP reads, `procedure` MUST be `/mkit.http.v1/GetObject` or
+`/mkit.http.v1/GetRefPath`, and `principal` MUST be `anonymous`, as
+[SPEC-HTTP-OBJECTS](SPEC-HTTP-OBJECTS.md) requires. These are hook operation
+identifiers, not additional Connect RPCs; HTTP admission follows that
+specification rather than the unary-RPC eligibility rule of STC §5.1.
 
 `owner` and `grant` carry the result of STC §7.5 rules 1–2 on both
 Authorize and Admit requests. An absent grant means no write grant

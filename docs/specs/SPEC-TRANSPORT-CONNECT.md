@@ -440,8 +440,9 @@ the deployment runs admission, `GetServerInfo` advertises
 `admission = true` and `begin_upload_threshold_bytes = 0`, so
 `BeginUpload` is mandatory for every upload (§7.6). §7.7 states which
 RPC of an upload is admitted. Paid bulk downloads are served over
-plain HTTP (informative: a forthcoming HTTP-serving specification),
-where a 402 is an ordinary response.
+plain HTTP under [SPEC-HTTP-OBJECTS](SPEC-HTTP-OBJECTS.md),
+where a 402 is an ordinary response. That specification fixes HTTP read
+authorization, admission, cache headers, and CORS.
 
 **Ordering.** For an operation the deployment authenticates, the
 server authenticates before it challenges. For a signed write it
@@ -1024,8 +1025,10 @@ repository RPC, read or write. The exceptions are `GetServerInfo`
 the header as the deployment kind below requires. On a signed request,
 `X-Repository` MUST equal the signed `<repository>` field byte for
 byte. Envelope verification
-detects a mismatch, so a mismatch is `unauthenticated`. Host, path, and
-forwarded headers MUST NOT select the repository.
+detects a mismatch, so a mismatch is `unauthenticated`. For Connect RPCs,
+Host, path, and forwarded headers MUST NOT select the repository. Plain HTTP
+object serving instead selects the repository by path and MUST ignore
+`X-Repository`, as [SPEC-HTTP-OBJECTS](SPEC-HTTP-OBJECTS.md) requires.
 
 **Single-repository deployments.** The deployment configures exactly
 one repository identity. It MAY be a bare name. A request without

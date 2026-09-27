@@ -1,0 +1,12 @@
+{
+  "blake3": "077d4619f0c7b8c8c9bc3bec373310174b5e432e47ca4de8e3c38e67a3b91c4a",
+  "commit": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
+  "expect": {
+    "accept": false,
+    "expand_to": null,
+    "reject_reason": "span_anchor_invalid"
+  },
+  "name": "neg_missing_anchor",
+  "schema_version": 1,
+  "size": 144147
+}

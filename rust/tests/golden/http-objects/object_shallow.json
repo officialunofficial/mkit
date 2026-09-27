@@ -1,0 +1,23 @@
+{
+  "blake3": "7c4614d9773fc021ce830d42c384a3d2376aa29788e177a7269b980ad816cef2",
+  "commit": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
+  "expect": {
+    "accept": true,
+    "disclosed": {
+      "bytes_blake3": "684833f5cc69fe8fbb550a67bd90386c46e978d77b7b4f7e23cdb654d2c82c2b",
+      "bytes_len": 30,
+      "commit": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
+      "leaf": "684833f5cc69fe8fbb550a67bd90386c46e978d77b7b4f7e23cdb654d2c82c2b",
+      "path_hex": [
+        "7368616c6c6f772e747874"
+      ],
+      "payload": {
+        "kind": "Object"
+      },
+      "signature_valid": true
+    }
+  },
+  "name": "object_shallow",
+  "schema_version": 1,
+  "size": 533
+}

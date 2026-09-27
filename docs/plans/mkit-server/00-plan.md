@@ -202,9 +202,9 @@ Sizes: S ≲ 400, M 400–900, L 900–1500 changed lines.
 | 4.11 | Spec: HTTP serving and proofs (#1088) | M4 | spec | 4.4 | M | docs,golden | yes |
 | 4.12 | Server core: HTTP object serving (http-objects feature) | M4 | core | 4.11, 4.7, 4.10 | L | rust,wasm | no |
 | 4.13 | Admission on HTTP reads (paid downloads) with ReadServed outcomes | M4 | core | 4.12, 3.3 | S | rust | no |
-| 4.14 | Proofs: ?proof=1 inclusion and range disclosure; mkit-wasm round trip | M4 | core | 4.12, 4.3, 4.11 | M | rust,wasm,golden | no |
+| 4.14 | Proofs: query ranges, MKDS core/wasm verifier, boundary-aware builder and Workers prefetch (R-109) | M4 | core | 4.12, 4.3, 4.11 | M | rust,wasm,golden | no |
 | 4.15 | Private serving via M2 signed URLs and read auth | M4 | core | 4.12, 2.9, 2.11 | M | rust,conf-native | no |
-| 4.16 | Adapters: mount HTTP serving (axum and Workers fetch), Range reads, CORS | M4 | native | 4.12 | M | rust,wasm,workers | no |
+| 4.16 | Adapters: HTTP serving, Range, GET/HEAD CORS and query-string redaction (R-109) | M4 | native | 4.12 | M | rust,wasm,workers | no |
 | 4.17 | Pre-receive policy hooks: allowed signers per ref, fast-forward-only grants | M4 | core | 4.7, 4.4, 2.7 | M | rust,conf-native | no |
 | 4.18 | Conformance: indexed mode and serving wire suite (M4 exit) | M4 | conformance | 4.8, 4.9, 4.10, 4.14, 4.15, 4.16, 4.17 | L | rust,conf-native,conf-wrangler,staging | yes |
 | 5.1a | Spec: leases, lifecycle events, server GC, published view and quarantine (#1091 part 1) | M5 | spec | 3.6, 4.4 | M | docs,proto,golden | yes |
@@ -532,6 +532,7 @@ ContentIndex/export/hooks → M0-02b, unary pipeline → M0-05a, streaming/fault
 | R-102 | Relay lifecycle | `RelayV1` is upserts-only. Index deletes (ref deletion, WP-1.10/1.28) are designed by WP-1.28, either as tombstones or `RelayV2` with deletes. `rh` ordering keeps them safe because each key has exactly one source. Restore MUST set each restored source's `os` above every target's `rh` for that source, or re-key it: an older snapshot regresses `os` and new rows could be dropped as duplicates. There is no relay-backlog bound yet (the PRD bound is for outcomes); exceeding `RELAY_LAG_BOUND_MS` is logged | 1.23a, 1.28, 1.29 |
 | R-103 | Relay liveness under failing targets (WP-1.23a review) | A persistently failing target whose backlog fills a fire's row budget (or 16 failing targets) stalls the source's other targets: 1.23a scans a contiguous window from the lowest seq. Harmless natively (one store); **WP-1.23b MUST fix it before Worker delivery**: keep a per-fire blocked-target set, scan past the window leaving only blocked targets' rows (order-safe), cap rows/bytes inspected, and set a RELAY `max_per_tick` within Worker subrequest limits. One undecodable row halts its source's outbox by design (never skipped); 1.23b delivers the decodable prefix before it and adds a repair runbook. Relay values are effectively ≤ ~256 KiB (hex in JSON). | 1.23a, 1.23b |
 | R-105 | ListRefs default page cap | WP-1.28 defines an absent or 0 `page_size` as the server's `max_list_refs_page_size`, and adds that sentence to STC §7.9. The WP-1.16 client never sets `page_size`. | 1.16, 1.28 |
+| R-109 | WP-4.11 decisions | **M4-a:** query-selected proof ranges; **M4-b:** MKDS over unchanged MKDP v2 (user, 2026-09-27). URL-token paths may be empty (root tree). HTTP selects repository by path; STC §7.4 is scoped to Connect RPCs. Indexed mode only; bearer gate applies. Deferred: signed-read HTTP GETs; an object-id field on `AdmitRequest` and a token `Principal` (both need a proto WP); an O(1)-offset proof builder (4.10 records chunk offsets, 4.14 adds a boundary-aware builder and in-memory `ObjectSource` prefetch on Workers). 4.14 adds mkit-core/mkit-wasm MKDS verification; 4.16 adds HEAD to native CORS and redacts query strings. | 4.10, 4.11, 4.14, 4.15, 4.16 |
 
 ---
 

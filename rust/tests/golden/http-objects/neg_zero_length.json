@@ -1,0 +1,12 @@
+{
+  "blake3": "c27bbac3b52526df2a8ba65b5cd0dc8bab911c9990ec4d3b07e30b9746bb0e4e",
+  "commit": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
+  "expect": {
+    "accept": false,
+    "expand_to": null,
+    "reject_reason": "span_range_arithmetic"
+  },
+  "name": "neg_zero_length",
+  "schema_version": 1,
+  "size": 148142
+}
