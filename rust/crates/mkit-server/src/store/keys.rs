@@ -11,6 +11,7 @@
 //!
 //! | Class | Key | Value |
 //! |---|---|---|
+//! | deployment sharding marker (root `Namespace` only) | `sm 00` | UTF-8 `single` or `d34` |
 //! | layout version | `v 00` | be32 [`LAYOUT_VERSION`]; never on `RefsOnly` stores |
 //! | ref | `r 00 <repo> 00 <refname>` | 32-byte id |
 //! | replay record | `p 00 <scope:32>` | codec `ReplayRecord` |
@@ -21,6 +22,9 @@
 //! | repo record (`Coordinator`) | `rr 00 <repo>` | codec `RepoRecord` |
 //! | repo-known marker (ref shard) | `rk 00 <repo>` | empty |
 //! | grant epoch | `e 00` | be64; absent means 0, never written as 0 |
+//! | epoch lease (ref shard) | `el 00` | codec `EpochLease` |
+//! | leased shard (`Coordinator`) | `ls 00 <repo> 00 <shard_ref>` | codec `LeasedShard` |
+//! | lease recovery (`Coordinator`) | `lr 00` | codec `LeaseRecovery` |
 //! | ticket | `t 00 <ticket_id:32>` | codec `TicketV1` |
 //! | ticket idempotency | `ti 00 <repo> 00 <ref> 00 <pack:32> <signer:32>` | raw ticket id |
 //! | open tickets per ref | `tc 00 <repo> 00 <ref>` | be64; absent means 0, deleted at 0 |
@@ -42,7 +46,7 @@
 //! Reserved tags ([`RESERVED_TAGS`]), each laid out by the work package
 //! that adds it: object index
 //! `i`, leases `l`, published pointers `pp`, tombstones `tb`, verification
-//! cursors `vc`, epoch lease `el`, and the deployment's namespace list
+//! cursors `vc`, and the deployment's namespace list
 //! [`TAG_NAMESPACE_LIST`] (WP-1.5; see `Partition` for enumeration). A
 //! new row adds its layout here, with a golden test.
 //!
@@ -76,6 +80,8 @@ pub const LAYOUT_VERSION: u32 = 1;
 
 /// Layout version tag.
 pub const TAG_LAYOUT_VERSION: &str = "v";
+/// Worker deployment sharding marker tag (root Namespace only).
+pub const TAG_SHARDING_MARKER: &str = "sm";
 /// Ref tag.
 pub const TAG_REF: &str = "r";
 /// Replay record tag.
@@ -88,6 +94,12 @@ pub const TAG_QUOTA: &str = "q";
 pub const TAG_QUOTA_WINDOW: &str = "qx";
 /// Grant epoch tag.
 pub const TAG_GRANT_EPOCH: &str = "e";
+/// Ref shard's epoch lease tag.
+pub const TAG_EPOCH_LEASE: &str = "el";
+/// Coordinator's leased shard table tag.
+pub const TAG_LEASED_SHARD: &str = "ls";
+/// Coordinator's declared lease-table recovery marker tag.
+pub const TAG_LEASE_RECOVERY: &str = "lr";
 /// Timer tag (owned by `timers`).
 pub const TAG_TIMER: &str = "w";
 /// `ContentIndex` holder tag.
@@ -136,12 +148,14 @@ pub const TAG_OUTBOX_SEQUENCE: &str = "os";
 pub const TAG_OUTCOME_BACKLOG: &str = "oc";
 
 /// Tags whose layouts later work packages add. No M0 key uses them.
-pub const RESERVED_TAGS: &[&str] = &["tb", "i", "l", "pp", "vc", "el", TAG_NAMESPACE_LIST];
+pub const RESERVED_TAGS: &[&str] = &["tb", "i", "l", "pp", "vc", TAG_NAMESPACE_LIST];
 
 /// A key decoded by [`parse`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ParsedKey {
+    /// `sm 00`: the Worker deployment sharding mode.
+    ShardingMarker,
     /// `v 00`.
     LayoutVersion,
     /// `nr 00`.
@@ -230,6 +244,17 @@ pub enum ParsedKey {
     OutcomeBacklog,
     /// `e 00`.
     GrantEpoch,
+    /// `el 00`.
+    EpochLease,
+    /// `ls 00 <repo> 00 <shard_ref>`.
+    LeasedShard {
+        /// Repository whose ref shard holds the lease.
+        repo: RepoName,
+        /// The `Partition::Ref.shard_ref` identity.
+        shard_ref: String,
+    },
+    /// `lr 00`.
+    LeaseRecovery,
     /// `w 00 <due_at> <kind> <ref>`.
     Timer {
         /// Due time, Unix ms.
@@ -302,6 +327,12 @@ pub fn is_ref_key(key: &Key) -> bool {
 #[must_use]
 pub fn layout_version() -> Key {
     key(TAG_LAYOUT_VERSION, &[])
+}
+
+/// `sm 00`: UTF-8 `single` or `d34`, only in the root Namespace partition.
+#[must_use]
+pub fn sharding_marker() -> Key {
+    key(TAG_SHARDING_MARKER, &[])
 }
 
 /// `nr 00`: the namespace coordinator record.
@@ -503,6 +534,27 @@ pub fn grant_epoch() -> Key {
     key(TAG_GRANT_EPOCH, &[])
 }
 
+/// `el 00`: the ref shard's epoch lease.
+#[must_use]
+pub fn epoch_lease() -> Key {
+    key(TAG_EPOCH_LEASE, &[])
+}
+
+/// `ls 00 <repo> 00 <shard_ref>`: a coordinator lease-table row.
+#[must_use]
+pub fn leased_shard(repo: &RepoName, shard_ref: &str) -> Key {
+    key(
+        TAG_LEASED_SHARD,
+        &[repo.as_str().as_bytes(), b"\0", shard_ref.as_bytes()],
+    )
+}
+
+/// `lr 00`: the coordinator's declared recovery time.
+#[must_use]
+pub fn lease_recovery() -> Key {
+    key(TAG_LEASE_RECOVERY, &[])
+}
+
 /// `w 00 <due_at> <kind> <reference>` (owned by `timers`).
 #[must_use]
 pub fn timer(due_at_ms: u64, kind: u8, reference: &[u8]) -> Key {
@@ -611,6 +663,14 @@ fn parse_reservation_id(bytes: &[u8]) -> Option<String> {
     validate_reservation_id(rid).then(|| rid.to_owned())
 }
 
+fn parse_leased_shard(body: &[u8]) -> Option<ParsedKey> {
+    let sep = body.iter().position(|&b| b == 0)?;
+    Some(ParsedKey::LeasedShard {
+        repo: RepoName::new(core::str::from_utf8(&body[..sep]).ok()?).ok()?,
+        shard_ref: core::str::from_utf8(&body[sep + 1..]).ok()?.to_owned(),
+    })
+}
+
 /// Decode a key of any laid-out class; `None` for a malformed key or a
 /// reserved class.
 #[must_use]
@@ -623,8 +683,12 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
     let (tag, body) = (&bytes[..split], &bytes[split + 1..]);
     let text = |b: &[u8]| String::from_utf8(b.to_vec()).ok();
     Some(match tag {
+        b"sm" if body.is_empty() => ParsedKey::ShardingMarker,
         b"v" if body.is_empty() => ParsedKey::LayoutVersion,
         b"e" if body.is_empty() => ParsedKey::GrantEpoch,
+        b"el" if body.is_empty() => ParsedKey::EpochLease,
+        b"lr" if body.is_empty() => ParsedKey::LeaseRecovery,
+        b"ls" => parse_leased_shard(body)?,
         b"nr" if body.is_empty() => ParsedKey::NamespaceRecord,
         b"rr" => ParsedKey::RepoRecord(RepoName::new(text(body)?).ok()?),
         b"rh" => ParsedKey::RelayHighWater(Partition::decode(body).ok()?),
@@ -737,6 +801,7 @@ mod tests {
 
     fn all_tags() -> Vec<&'static str> {
         let mut tags = vec![
+            TAG_SHARDING_MARKER,
             TAG_LAYOUT_VERSION,
             TAG_REF,
             TAG_REPLAY,
@@ -744,6 +809,9 @@ mod tests {
             TAG_QUOTA,
             TAG_QUOTA_WINDOW,
             TAG_GRANT_EPOCH,
+            TAG_EPOCH_LEASE,
+            TAG_LEASED_SHARD,
+            TAG_LEASE_RECOVERY,
             TAG_TIMER,
             TAG_HOLDER,
             TAG_HOLD,
@@ -773,6 +841,7 @@ mod tests {
         let s = [0x11; 32];
         let q = format!("root\n{}", "ab".repeat(32));
         let cases: Vec<(Key, Vec<u8>)> = vec![
+            (sharding_marker(), b"sm\0".to_vec()),
             (layout_version(), b"v\0".to_vec()),
             (
                 relay_high_water(&Partition::ContentShard(7)).unwrap(),
@@ -796,6 +865,12 @@ mod tests {
                 [&b"qx\0"[..], &[0, 0, 0, 0, 0, 0, 1, 0], q.as_bytes()].concat(),
             ),
             (grant_epoch(), b"e\0".to_vec()),
+            (epoch_lease(), b"el\0".to_vec()),
+            (lease_recovery(), b"lr\0".to_vec()),
+            (
+                leased_shard(&repo("a"), "refs/heads/main"),
+                b"ls\0a\0refs/heads/main".to_vec(),
+            ),
             (
                 timer(1, 7, b"refs/heads/x"),
                 [&b"w\0"[..], &[0, 0, 0, 0, 0, 0, 0, 1, 7], b"refs/heads/x"].concat(),
@@ -1035,6 +1110,16 @@ mod tests {
                 },
             ),
             (grant_epoch(), ParsedKey::GrantEpoch),
+            (epoch_lease(), ParsedKey::EpochLease),
+            (lease_recovery(), ParsedKey::LeaseRecovery),
+            (
+                leased_shard(&repo("a"), "refs/heads/main"),
+                ParsedKey::LeasedShard {
+                    repo: repo("a"),
+                    shard_ref: "refs/heads/main".into(),
+                },
+            ),
+            (sharding_marker(), ParsedKey::ShardingMarker),
             (namespace_record(), ParsedKey::NamespaceRecord),
             (repo_record(&repo("a")), ParsedKey::RepoRecord(repo("a"))),
             (repo_known(&repo("a")), ParsedKey::RepoKnown(repo("a"))),
@@ -1073,7 +1158,6 @@ mod tests {
             &b"p\0short"[..],
             b"v\0x",
             b"px\0\0",
-            b"el\0",
             b"no-terminator",
             b"c\0short",
             b"g\0short",
@@ -1097,5 +1181,16 @@ mod tests {
             holder(&s, &nul, &repo("a")),
             Err(StoreError::Invalid(_))
         ));
+    }
+    #[test]
+    fn lease_keys_reject_malformed_payloads() {
+        for bad in [
+            &b"el\0extra"[..],
+            b"lr\0extra",
+            b"ls\0no-separator",
+            b"ls\0\0refs/heads/main",
+        ] {
+            assert_eq!(parse(&Key::new(bad.to_vec())), None);
+        }
     }
 }

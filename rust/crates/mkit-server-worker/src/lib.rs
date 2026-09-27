@@ -23,6 +23,10 @@
 //! - [`alarm`]: pure alarm choices; `NsObject::alarm` fires due timers and
 //!   sets the object's one alarm to the next partition wake.
 //!
+//! `NAMESPACE_LOCATION_HINT` and `NAMESPACE_JURISDICTION` apply deployment-wide,
+//! defaulting to none. Jurisdiction is fixed for the deployment lifetime:
+//! changing it re-maps every object name to new, empty objects.
+//!
 //! Everything that touches a `worker` handle is compiled for `wasm32`
 //! only. The logic around it is generic over small backend traits
 //! ([`r2::ObjectBucket`], [`ns_client::NsTransport`]) and tested on the
@@ -43,6 +47,7 @@
 
 pub mod adapter;
 pub mod alarm;
+pub mod classes;
 pub mod clock;
 pub mod do_sql;
 #[cfg(feature = "test-faults")]
@@ -51,6 +56,7 @@ pub mod naming;
 pub mod ns_client;
 pub mod ns_object;
 pub mod r2;
+pub mod sharding_guard;
 pub mod wire;
 
 use mkit_server::StoreError;

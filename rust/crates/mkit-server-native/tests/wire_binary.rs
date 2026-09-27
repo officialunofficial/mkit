@@ -113,6 +113,12 @@ async fn check(origin: &str, profile: Profile) {
         profile,
     };
     let report = run(&target, None).await;
+    if target.profile.has(Feature::EpochLeases) {
+        assert!(matches!(
+            report.verdict("leases.bump_completes_and_writes_continue"),
+            Some(Verdict::Pass(_))
+        ));
+    }
     common::judge(&report, DIVERGENCES);
     for name in ["info.shape_and_policy", "info.ignores_repository_header"] {
         assert!(
@@ -224,7 +230,13 @@ async fn fs_sqlite_auth_v2(sharding: &str) {
     profile.sharding_d34 = sharding == "d34";
     profile.features.insert(Feature::Timers);
     #[cfg(feature = "test-faults")]
-    profile.features.insert(Feature::TestFaults);
+    {
+        profile.features.insert(Feature::TestFaults);
+        if profile.sharding_d34 {
+            profile.milestone = mkit_server_conformance::wire::Milestone::M1;
+            profile.features.insert(Feature::EpochLeases);
+        }
+    }
     check(&origin, profile).await;
     assert!(server.stop().success());
 }

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Worker: add Durable Object classes for D34 coordinator, ref, repository/ref-name index and content partitions, retaining RefStore for single deployments; reject foreign partition kinds and preserve alarms scheduled while a timer tick awaits I/O. Deployment vars now select `single` (default) or `d34` with a root sharding marker guard that caches settled results, retries transient storage errors and re-checks config changes; placement is deployment-wide and jurisdiction is fixed for its lifetime.
+- Server D34 ref writes now hold coordinator epoch leases, with backend commit
+  deadlines, guarded revocation pushes and kind-1 expiry sweeps. Creation and
+  renewal cost four store calls; usable leases keep steady writes at two.
+  Recovery explicitly records a lease-table holdoff before revocation completes.
+  Single sharding and M1 reads retain their existing behavior. Grant RPCs,
+  read renewal, visibility, and backup restore integration follow in later WPs.
 - Add partition timers with guarded atomic handlers, fair tick budgets, SQLite timer heads, Durable Object alarm multiplexing and a native SQLite driver (WP-1.24). Production handlers register as their work packages land.
 - The SQL store schema moves to version 2 (an index-only migration, applied on open to native databases and Durable Objects). A binary built before it refuses a migrated database, so roll back only to a version-2 binary.
 
@@ -775,6 +782,9 @@ train).
   verified normally).
 
 ### Security
+
+- *(core, security)* Fix denial of service (DoS) in pack reading by bounding
+  owned memory and checking framing arithmetic on 32-bit targets.
 
 - *(core)* Fixed a crash (`slice index out of range` panic) in `history-mmr` ancestry publish's bounded scrub-window verification, found by code review. `ScrubState` (the rolling re-verification schedule for a branch's reused ancestry prefix) carried no binding to the generation it was computed against; `advance`'s advisory `write_scrub_state` call runs strictly after `finish` has already durably committed a publish, so a crash (or a failed write) in that window left a rewrite/reset's *old* generation's scrub state — sized for its own, possibly much longer, chain — on disk paired with the *new*, possibly much shorter, one. The next ordinary fast-forward would then compute a scrub window against the old `verified_through` and slice a chain far too short for it. `ScrubState` now records and validates the generation it was computed against; a mismatch (this exact crash window, or any other cause) is treated exactly like "no prior scrub state" and falls back to a full walk, the module's existing fail-safe design for missing or corrupt state. New regression test reproduces the exact on-disk byte state without needing to inject a crash mid-`advance`, confirmed to panic without the fix and pass with it. **SemVer:** none — `ScrubState`'s on-disk format changed (magic bumped `\x01` → `\x02`); a pre-upgrade file simply fails to decode under the new layout and falls back to a full walk, the same safe behavior a missing file already gets.
 

@@ -70,6 +70,8 @@ impl Future for YieldOnce {
     }
 }
 
+type AfterApplyHook = Box<dyn Fn(&MemoryKv, &Partition, &Batch, &BatchOutcome) + Send + Sync>;
+
 type ApplyHook = Box<dyn Fn(&MemoryKv, &Partition, &Batch) + Send + Sync>;
 
 /// A `MemoryKv` that records every key it sees and batch it applies, can
@@ -77,6 +79,7 @@ type ApplyHook = Box<dyn Fn(&MemoryKv, &Partition, &Batch) + Send + Sync>;
 struct Spy {
     inner: MemoryKv,
     hook: Option<ApplyHook>,
+    after_hook: Option<AfterApplyHook>,
     yields: bool,
     seen: Mutex<Vec<Key>>,
     batches: Mutex<Vec<Batch>>,
@@ -88,6 +91,7 @@ impl Spy {
         Self {
             inner,
             hook: None,
+            after_hook: None,
             yields: false,
             seen: Mutex::default(),
             batches: Mutex::default(),
@@ -173,7 +177,11 @@ impl NamespaceStore for Spy {
         if let Some(hook) = &self.hook {
             hook(&self.inner, p, &batch);
         }
-        self.inner.apply(p, batch).await
+        let outcome = self.inner.apply(p, batch.clone()).await?;
+        if let Some(hook) = &self.after_hook {
+            hook(&self.inner, p, &batch, &outcome);
+        }
+        Ok(outcome)
     }
 
     async fn stats(&self, p: &Partition) -> Result<PartitionStats, StoreError> {
@@ -971,6 +979,7 @@ fn plan_cas_any_missing_match_on_snapshot() {
             grant: None,
             layout_version: false,
             mark_repo_known: false,
+            lease: None,
             rejection: None,
         };
         let values: Vec<_> = current.map(|id| ref_value(HEAD, id)).into_iter().collect();
@@ -1021,6 +1030,7 @@ fn plan_conflict_writes_only_the_replay_record() {
         grant: None,
         layout_version: false,
         mark_repo_known: false,
+        lease: None,
         rejection: None,
     };
     let values = [ref_value(PACKMAP, A), ref_value(HEAD, B)];
@@ -1086,6 +1096,7 @@ fn plan_quota_exhaustion_yields_no_batch() {
         grant: None,
         layout_version: true,
         mark_repo_known: false,
+        lease: None,
         rejection: None,
     };
     let used = QuotaState {
@@ -1134,6 +1145,7 @@ proptest! {
             grant: None,
             layout_version: layout.is_some(),
             mark_repo_known: false,
+                    lease: None,
             rejection: None,
         };
         let mut values = Vec::new();
@@ -1745,6 +1757,7 @@ fn plan_signed_conflict_still_charges_quota() {
         grant: None,
         layout_version: false,
         mark_repo_known: false,
+        lease: None,
         rejection: None,
     };
     let values = [ref_value(HEAD, A)];
@@ -1798,6 +1811,7 @@ fn plan_prune_fits_the_batch_op_cap() {
         grant: None,
         layout_version: true,
         mark_repo_known: false,
+        lease: None,
         rejection: None,
     };
     let mut snap = snapshot(&req, &[]);
@@ -1844,6 +1858,7 @@ fn prune_sampling_is_deterministic_one_in_eight() {
         grant: None,
         layout_version: false,
         mark_repo_known: false,
+        lease: None,
         rejection: None,
     };
     let sampled = (0u8..=255)
@@ -2157,9 +2172,13 @@ fn d34_canonical_advance_commits_in_one_ref_partition() {
             .unwrap(),
         AdvanceOutcome::Committed
     );
-    assert_eq!(env.pipe.meta.calls(), 2);
+    assert_eq!(env.pipe.meta.calls(), 4);
     let applied = partitions.lock().unwrap();
-    let [(p, batch)] = applied.as_slice() else {
+    let refs: Vec<_> = applied
+        .iter()
+        .filter(|(p, _)| matches!(p, Partition::Ref { .. }))
+        .collect();
+    let [(p, batch)] = refs.as_slice() else {
         panic!("advance must use one batch")
     };
     let expected = Partition::Ref {
@@ -2196,6 +2215,249 @@ fn d34_canonical_advance_commits_in_one_ref_partition() {
     assert_eq!(env.pipe.meta.calls() - before, 1);
 }
 
+fn prune_race_then_push(kv: MemoryKv, pushed: codec::EpochLease) -> Spy {
+    let scope = QuotaScope::for_signer(&NamespaceKey::deployment_default(), &[42; 32]);
+    let quota = keys::quota(&scope);
+    let stale = QuotaState {
+        window_start: 1,
+        ops: 1,
+        bytes: 0,
+    };
+    let index = keys::quota_window(1, &scope);
+    let raced_quota = quota.clone();
+    let prune_index = index.clone();
+    let mut meta = Spy::new(kv).hook(move |store, p, batch| {
+        if batch.writes.contains(&Write::Delete(prune_index.clone())) {
+            assert_eq!(
+                now(store.apply(
+                    p,
+                    Batch::new().put(
+                        raced_quota.clone(),
+                        codec::encode_quota_state(&QuotaState { ops: 2, ..stale })
+                    )
+                ))
+                .unwrap(),
+                BatchOutcome::Committed
+            );
+        }
+    });
+    meta.after_hook = Some(Box::new(move |store, p, batch, outcome| {
+        if batch.writes.contains(&Write::Delete(index.clone())) {
+            let BatchOutcome::PreconditionFailed { index: failed, .. } = outcome else {
+                panic!("prune guard must fail")
+            };
+            assert_eq!(
+                batch.preconditions[*failed],
+                Precondition::Equals(quota.clone(), codec::encode_quota_state(&stale))
+            );
+            assert_eq!(
+                now(store.apply(
+                    p,
+                    Batch::new().put(keys::epoch_lease(), codec::encode_epoch_lease(&pushed))
+                ))
+                .unwrap(),
+                BatchOutcome::Committed
+            );
+        }
+    }));
+    meta
+}
+
+#[test]
+fn d34_prune_retry_refreshes_the_epoch_even_without_a_counted_replan() {
+    let clock = clock();
+    let pushed = codec::EpochLease {
+        epoch: 1,
+        expires_at_ms: ms(T0) + 30_000,
+        config_version: 1,
+    };
+    let meta = prune_race_then_push(store(&clock), pushed);
+    let scope = QuotaScope::for_signer(&NamespaceKey::deployment_default(), &[42; 32]);
+    let stale = QuotaState {
+        window_start: 1,
+        ops: 1,
+        bytes: 0,
+    };
+    let mut config = cfg(AuthMode::Open);
+    config.sharding = Sharding::D34;
+    let env = build(config, meta, Hooks::new(), clock);
+    let p = D34Shards.ref_shard(&repo(), HEAD);
+    let old = codec::EpochLease { epoch: 0, ..pushed };
+    assert_eq!(
+        now(env.pipe.meta.inner.apply(
+            &p,
+            Batch::new()
+                .put(keys::epoch_lease(), codec::encode_epoch_lease(&old))
+                .put(keys::quota_window(1, &scope), Value::default())
+                .put(keys::quota(&scope), codec::encode_quota_state(&stale))
+        ))
+        .unwrap(),
+        BatchOutcome::Committed
+    );
+    let refs = [upd(HEAD, Any, C)];
+    let charges = [QuotaCharge {
+        scope: QuotaScope::for_signer(&NamespaceKey::deployment_default(), &[43; 32]),
+        bytes: 0,
+        limits: DEFAULT_WRITE_QUOTA,
+    }];
+    let req = WriteRequest {
+        repo: &repo_name(),
+        kind: WriteKind::UpdateRef,
+        refs: &refs,
+        replay: Some(ReplayGuard {
+            scope: [0; 32],
+            fingerprint: [1; 32],
+            expires_at_ms: T0 + 100_000,
+        }),
+        charges: &charges,
+        grant: Some(crate::op::GrantRef {
+            id: [9; 32],
+            epoch: 0,
+        }),
+        layout_version: false,
+        mark_repo_known: false,
+        lease: Some(lease::LeaseWrite {
+            value: old,
+            install: false,
+        }),
+        rejection: None,
+    };
+    let ahead = snapshot(
+        &req,
+        &[(keys::epoch_lease(), codec::encode_epoch_lease(&old))],
+    );
+    let a = env.auth(&Req::unsigned(Procedure::UpdateRef)).unwrap();
+    let op = env
+        .pipe
+        .identify(&a, OpKind::UpdateRef(refs[0].clone()))
+        .unwrap();
+    assert_eq!(
+        block_on(env.pipe.apply_loop(&op, &a, &p, &req, Some(ahead)))
+            .unwrap_err()
+            .code(),
+        Code::PermissionDenied
+    );
+    assert_eq!(
+        env.batches().len(),
+        1,
+        "the old grant fails planning before the retry applies"
+    );
+    assert_eq!(
+        now(env
+            .pipe
+            .meta
+            .inner
+            .get(&p, &keys::ref_key(&repo_name(), HEAD)))
+        .unwrap(),
+        None
+    );
+    assert_eq!(
+        now(env.pipe.meta.inner.get(&p, &keys::epoch_lease())).unwrap(),
+        Some(codec::encode_epoch_lease(&pushed))
+    );
+}
+
+#[test]
+fn epoch_lease_configuration_refuses_zero_margin_and_insufficient_budget() {
+    for (lease, margin, budget, valid) in [
+        (30_000, 5_000, 1_000, true),
+        (6_001, 5_000, 1_000, true),
+        (6_000, 5_000, 1_000, false),
+        (30_000, 0, 1_000, false),
+        (u64::MAX, u64::MAX, 1, false),
+    ] {
+        let clock = clock();
+        let mut config = cfg(AuthMode::Open);
+        config.epoch_lease_ms = lease;
+        config.lease_margin_ms = margin;
+        config.min_lease_budget_ms = budget;
+        let result = Pipeline::new(
+            MemoryBlobStore::default(),
+            store(&clock),
+            Hooks::new(),
+            config,
+            clock,
+            Arc::new(SpyMetrics::default()),
+        );
+        assert_eq!(result.is_ok(), valid);
+        if !valid {
+            assert_eq!(result.unwrap_err().code(), Code::InvalidArgument);
+        }
+    }
+}
+
+#[test]
+fn single_signed_write_reads_the_epoch_directly_and_never_el() {
+    let env = env(authv2());
+    let update = upd(HEAD, Missing, A);
+    env.update(&Req::update(&key(7), 1, &update, T0), &update)
+        .unwrap();
+    let read = env.pipe.meta.seen.lock().unwrap();
+    assert!(read.contains(&keys::grant_epoch()));
+    assert!(!read.contains(&keys::epoch_lease()));
+}
+
+#[test]
+fn leased_epoch_checks_use_the_granted_epoch_and_cap_replay_deadlines() {
+    let env = env(AuthMode::Open);
+    let name = repo_name();
+    let refs = [upd(HEAD, Any, A)];
+    let stored = codec::EpochLease {
+        epoch: 6,
+        expires_at_ms: ms(T0) + 30_000,
+        config_version: 1,
+    };
+    for (expires_at_ms, expected) in [
+        (ms(T0) + 30_000, ms(T0) + 2_500),
+        (ms(T0) + 7_000, ms(T0) + 2_000),
+    ] {
+        let req = WriteRequest {
+            repo: &name,
+            kind: WriteKind::UpdateRef,
+            refs: &refs,
+            replay: Some(ReplayGuard {
+                expires_at_ms: T0 - MAX_CLOCK_LEAD_MS + 2_500,
+                ..replay()
+            }),
+            charges: &[],
+            grant: Some(crate::op::GrantRef {
+                id: [9; 32],
+                epoch: 7,
+            }),
+            layout_version: false,
+            mark_repo_known: false,
+            rejection: None,
+            lease: Some(lease::LeaseWrite {
+                value: codec::EpochLease {
+                    epoch: 7,
+                    expires_at_ms,
+                    ..stored
+                },
+                install: true,
+            }),
+        };
+        let clock = env.pipe.plan_clock(100_000, &req);
+        assert_eq!(clock.deadline(), expected);
+        let snap = snapshot(
+            &req,
+            &[(keys::epoch_lease(), codec::encode_epoch_lease(&stored))],
+        );
+        let Planned::Apply(plan) = plan_write(&req, &snap, &clock).unwrap() else {
+            panic!("lease installation must apply")
+        };
+        assert_eq!(
+            plan.batch.preconditions[0],
+            Precondition::NotAfter(expected)
+        );
+        assert_eq!(plan.epoch_index, None);
+        assert!(plan.batch.preconditions.contains(&Precondition::Equals(
+            keys::epoch_lease(),
+            codec::encode_epoch_lease(&stored)
+        )));
+        assert!(!req.read_keys().contains(&keys::grant_epoch()));
+    }
+}
+
 #[test]
 fn single_advance_preserves_noncanonical_served_pairing() {
     let env = env(AuthMode::Open);
@@ -2229,4 +2491,26 @@ fn single_advance_preserves_noncanonical_served_pairing() {
         .unwrap(),
         Some(B)
     );
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn lease_directives_parse_epochs_and_require_an_explicit_recovery_marker() {
+    let directives = TestDirectives::from_headers(|name| match name {
+        BUMP_EPOCH_HEADER => Some("42".into()),
+        LEASE_RECOVERED_HEADER => Some("1".into()),
+        _ => None,
+    })
+    .unwrap();
+    assert_eq!(directives.bump_epoch, Some(42));
+    assert!(directives.lease_recovered);
+    for (header, value) in [
+        (BUMP_EPOCH_HEADER, "-1"),
+        (BUMP_EPOCH_HEADER, "18446744073709551616"),
+        (LEASE_RECOVERED_HEADER, "0"),
+    ] {
+        let error = TestDirectives::from_headers(|name| (name == header).then(|| value.into()))
+            .unwrap_err();
+        assert_eq!(error.code(), Code::InvalidArgument);
+    }
 }

@@ -11,8 +11,17 @@
   "build": { "command": "true" },
   "vars": { "WORKERS_PLAN": "free" },
   "r2_buckets": [{ "binding": "STORAGE", "bucket_name": "mkit-vcs-objects" }],
-  "durable_objects": { "bindings": [{ "name": "REFSTORE", "class_name": "RefStore" }] },
+  "durable_objects": { "bindings": [
+    { "name": "REFSTORE", "class_name": "RefStore" },
+    { "name": "NS_COORD", "class_name": "NsCoordinator" },
+    { "name": "REF_SHARD", "class_name": "RefShard" },
+    { "name": "REPO_INDEX", "class_name": "RepoIndexShard" },
+    { "name": "CONTENT_INDEX", "class_name": "ContentIndexShard" }
+  ] },
   // `migrations`, not the `exports`-style declaration: the two are mutually
   // exclusive (see wrangler.jsonc).
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RefStore"] }]
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["RefStore"] },
+    { "tag": "v2", "new_sqlite_classes": ["NsCoordinator", "RefShard", "RepoIndexShard", "ContentIndexShard"] }
+  ]
 }

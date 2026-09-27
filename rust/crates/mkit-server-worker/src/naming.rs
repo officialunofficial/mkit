@@ -1,11 +1,10 @@
 //! Partition → Durable Object routing (D34): one Durable Object instance per
 //! [`Partition`], one Durable Object class per shard kind.
 //!
-//! M0 serves one partition, `Partition::Namespace(root)`, from the
-//! `REFSTORE` binding's `"root"` instance: the name vcs-worker's `RefStore`
-//! already uses (planner default Q13), so no Durable Object migration is
-//! needed. The other kinds are reserved for D34; WP-1.8 adds their
-//! bindings, and WP-4.10a wires the content shards.
+//! Single deployments serve `Partition::Namespace(root)` from the
+//! `REFSTORE` binding's `"root"` instance, retaining the M0 names (Q13).
+//! D34 kinds use the classes added by migration v2. Repository and ref-name
+//! indexes share one binding; WP-4.10a wires the content shards.
 
 use mkit_server::{NamespaceKey, Partition, StoreError};
 
@@ -34,8 +33,9 @@ pub struct DoTarget {
 }
 
 /// Where new Durable Objects are created. A Durable Object is pinned near
-/// its first access; a hint or jurisdiction applies only then. M0 passes
-/// none; WP-1.8 exposes it as a namespace-creation option.
+/// its first access; the hint defaults to none. Placement is deployment-wide.
+/// Jurisdiction must remain fixed for the deployment lifetime: changing it
+/// maps every name to a new, empty object.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Placement {
     /// A `locationHint` such as `"weur"`.

@@ -123,6 +123,9 @@ pub enum Feature {
     StrictGzipAuth,
     /// Multi-repository addressing (M1).
     MultiRepo,
+    /// Epoch leases for D34 grant revocation (M1).
+    EpochLeases,
+
     /// Namespace allowlists and owner writes (M1). The profile's allowlist
     /// admits each Multi case's derived `repository-a` and `repository-b`
     /// keys and excludes `policy.non_allowlisted_namespace_denied`'s
@@ -140,7 +143,7 @@ pub enum Feature {
     IndexedMode,
     /// Plain-HTTP object serving (M4).
     HttpObjects,
-    /// Epoch leases and GC (M5).
+    /// Lifecycle leases and GC (M5).
     Leases,
     /// Takedown (M5).
     Takedown,
@@ -150,7 +153,7 @@ pub enum Feature {
     Admin,
 }
 
-const FEATURE_NAMES: [(Feature, &str); 21] = [
+const FEATURE_NAMES: [(Feature, &str); 22] = [
     (Feature::Bearer, "bearer"),
     (Feature::AuthV2, "auth-v2"),
     (Feature::AtomicAdvance, "atomic-advance"),
@@ -161,6 +164,7 @@ const FEATURE_NAMES: [(Feature, &str); 21] = [
     (Feature::Health, "health"),
     (Feature::StrictGzipAuth, "strict-gzip-auth"),
     (Feature::MultiRepo, "multi-repo"),
+    (Feature::EpochLeases, "epoch-leases"),
     (Feature::NamespacePolicy, "namespace-policy"),
     (Feature::Tickets, "tickets"),
     (Feature::Grants, "grants"),

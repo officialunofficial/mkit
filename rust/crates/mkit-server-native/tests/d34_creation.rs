@@ -99,9 +99,15 @@ impl<N: NamespaceStore> NamespaceStore for TestStore<N> {
     ) -> Result<Vec<Option<Value>>, StoreError> {
         self.record(Call::Many(p.clone(), names.to_vec()));
         let values = self.inner.get_many(p, names).await?;
-        // The coordinator request is identifiable even under Single, where
-        // it shares a partition with the write's read-ahead.
+        // Single reads nr/rr; D34 folds creation into the nr/rr/e/ls/lr
+        // lease snapshot. Both coordinator reads pause after observation.
         if names.first() == Some(&keys::namespace_record()) {
+            assert!(names.len() == 2 || names.len() == 5);
+            if names.len() == 5 {
+                assert_eq!(names[2], keys::grant_epoch());
+                assert!(names[3].as_bytes().starts_with(b"ls\0"));
+                assert_eq!(names[4], keys::lease_recovery());
+            }
             let barrier = self.controls.race.lock().unwrap().clone();
             if let Some(barrier) = barrier
                 && self.controls.race_reads.fetch_add(1, Ordering::SeqCst) < 2
@@ -418,11 +424,24 @@ async fn creation_and_cost<N: NamespaceStore>(backend: N, sharding: Sharding) {
         .await
         .unwrap();
     let calls = store.take_calls();
-    assert_eq!(calls.len(), 3, "{sharding:?}: {calls:?}");
-    assert!(matches!(
-        calls.as_slice(),
-        [Call::Many(..), Call::Many(..), Call::Apply(..)]
-    ));
+    let expected_calls = if sharding == Sharding::D34 { 4 } else { 3 };
+    assert_eq!(calls.len(), expected_calls, "{sharding:?}: {calls:?}");
+    if sharding == Sharding::D34 {
+        assert!(matches!(
+            calls.as_slice(),
+            [
+                Call::Many(..),
+                Call::Many(..),
+                Call::Apply(..),
+                Call::Apply(..)
+            ]
+        ));
+    } else {
+        assert!(matches!(
+            calls.as_slice(),
+            [Call::Many(..), Call::Many(..), Call::Apply(..)]
+        ));
+    }
 
     let second = signed(&pipe, &identity("second"));
     pipe.update_ref(&second, update("refs/heads/a", 4))
@@ -625,18 +644,27 @@ async fn single_addressing<N: NamespaceStore>(backend: N, sharding: Sharding) {
     pipe.update_ref(&auth, update("refs/heads/a", 1))
         .await
         .unwrap();
-    assert_eq!(store.take_calls().len(), 2);
+    assert_eq!(
+        store.take_calls().len(),
+        if sharding == Sharding::D34 { 4 } else { 2 }
+    );
     assert_eq!(
         *observed.admitted.lock().unwrap(),
         vec![Creation::default()]
     );
     assert_eq!(*observed.created.lock().unwrap(), vec![Creation::default()]);
     let p = coordinator(sharding, &auth);
+    // D34 needs nr/rr even with Single addressing: lease grants guard the
+    // registry rows and carry nr.config_version into el. Creation facts stay
+    // false because the configured repository already exists to the caller.
     for key in [
         keys::namespace_record(),
         keys::repo_record(&auth.repo().repo.name),
     ] {
-        assert!(store.inner.get(&p, &key).await.unwrap().is_none());
+        assert_eq!(
+            store.inner.get(&p, &key).await.unwrap().is_some(),
+            sharding == Sharding::D34
+        );
     }
 }
 
