@@ -27,7 +27,9 @@ The encoding, domain-separator, and golden-vector conventions of that
 specification apply throughout this document.
 
 A server that runs remote hooks MUST implement §5–§8. A server without
-remote hooks MUST still implement §2–§5. A deployment implements the
+remote hooks MUST still implement §2–§5. Servers MUST also implement the
+applicable indexed-mode, storage-lease, and server-GC requirements of
+§§9, 12, and 13. A deployment implements the
 business decisions exposed by hooks; the server implements the pipeline,
 validation, durable recording, and delivery guarantees specified here.
 
@@ -36,7 +38,9 @@ policy, moderation policy, or the deployment's account model.
 [SPEC-WRITE-GRANTS](SPEC-WRITE-GRANTS.md) remains authoritative for grants,
 their verification, and the preconditions they carry into apply.
 
-Sections 10–14 reserve the M5 contracts. Inspection in §6.4 is provisional:
+Sections 10–18 cover the M5 contracts; §§12–13 specify storage leases,
+lifecycle events, and server garbage collection. The other M5 sections
+remain reserved. Inspection in §6.4 is provisional:
 the call shape is fixed, and M5 may add fields additively.
 
 ## 2. Pipeline order
@@ -71,8 +75,10 @@ as STC §7.1 requires; this list names server-internal extension points.
    receipt signing for the committed operation.
 8. **Outcome delivery.** Deliver the durable outcome to the configured
    sink under §5 and, for remote hooks, §6.5 and §8.
-9. **Asynchronous inspection and lease events.** Run configured
-   asynchronous inspection and lease-policy events after apply.
+9. **Asynchronous inspection and lifecycle events.** Run configured
+   asynchronous inspection after apply. Storage-lease timers perform
+   transition side effects and durably record events under §12; request
+   enforcement evaluates storage leases independently of those timers.
 
 Stages before stage 4 MUST NOT write server state. Admission may plan a
 default quota reservation, but that reservation MUST be committed with
@@ -135,13 +141,14 @@ A conforming server MUST enforce these rules:
 - An unknown scheduled-work kind MUST be retained, never discarded.
 - Startup with `namespace_policy = any` and default admission MUST be
   refused unless explicitly overridden, as STC §7.5 requires.
-- An outcome MUST NOT be dropped. It remains durable until acknowledged.
+- An outcome or lifecycle event MUST NOT be dropped. It remains durable
+  until acknowledged.
 
 Unknown scheduled work remains available for a version that understands
 it. Treating that work as successfully completed would discard an
 obligation that the current server cannot interpret.
 
-## 5. Outcomes and the outbox
+## 5. Outcomes, lifecycle events and the outbox
 
 Every reservation granted by admission MUST get exactly one terminal
 outcome: `Committed`, `Aborted`, or `Expired`; a paid read instead uses
@@ -198,13 +205,16 @@ be at least once, using the reservation id as the idempotency key.
 There is no ordering guarantee between reservations. A receiver MUST
 treat a repeated outcome for the same reservation as the same result.
 
-The durable outbox holds outcomes awaiting acknowledgement. Delivery
+The durable outbox holds outcomes and §12 lifecycle events awaiting
+acknowledgement. Events use `event_id` as their idempotency key; event
+acknowledgement does not acknowledge an outcome or another event. Delivery
 attempts and process restarts MUST NOT discard an unacknowledged row.
 Acknowledging one reservation does not acknowledge another reservation.
 
 A server MAY refuse new admitted writes with retryable `unavailable`
-while its undelivered outcome backlog exceeds a configured bound.
-It MUST NOT drop outcomes to relieve that backlog. Reads and writes
+while its combined undelivered outcome and event backlog exceeds a
+configured bound. Events MUST count toward that bound. The server MUST
+NOT drop outcomes or events to relieve that backlog. Reads and writes
 that do not run admission MUST be unaffected by this backpressure.
 
 `new_to_store` bytes appear only in `Committed`, as STC §5.1 requires
@@ -236,6 +246,7 @@ HTTPS, subject to the loopback exception below. Its service name is
 | Admit | `/mkit.server.hooks.v1.HooksService/Admit` |
 | Inspect | `/mkit.server.hooks.v1.HooksService/Inspect` |
 | Outcome | `/mkit.server.hooks.v1.HooksService/Outcome` |
+| Event | `/mkit.server.hooks.v1.HooksService/Event` |
 
 Hook servers MUST support the JSON codec, `application/json`. They
 MAY also support the binary codec. The calling server MUST send JSON
@@ -250,7 +261,7 @@ Scalar fields use explicit presence. In particular, absence of
 `new_to_repo_bytes` means unknown; a present value of zero means the
 server knows that zero bytes are new to the repository.
 
-A deployment MAY implement any subset of the four RPCs. The calling
+A deployment MAY implement any subset of the five RPCs. The calling
 server MUST call only the hooks it is configured to use. Configuration
 of a subset does not change the semantics of a hook that is enabled.
 
@@ -603,7 +614,7 @@ client-visible response under STC.
 
 ### 7.1 Signed requests
 
-Every hook request, including Outcome delivered as a webhook, MUST
+Every hook request, including Outcome and Event delivered as webhooks, MUST
 be signed with a deployment hook key, except on a channel configured
 under §7.3. Signing covers the exact request body bytes sent on that
 channel; it does not sign a reserialized representation.
@@ -632,7 +643,8 @@ grants, or receipts. Distinct roles MUST use distinct keys.
 
 `<audience>` is the hook endpoint's canonical origin, using the same
 origin rules as STC §7.1 requires for its audience. It is not the
-`operation.audience` or `outcome.audience` carried inside the body.
+`operation.audience`, `outcome.audience`, or `event.audience` carried
+inside the body.
 
 Informative: the audience is an origin, so hook services at different
 paths on one origin share an audience. They SHOULD use distinct keys.
@@ -676,12 +688,13 @@ The hook server MUST:
    the exact received request body bytes.
 5. Reject replay of a nonce within the validity window.
 
-Outcome processing MUST additionally be idempotent by `reservation_id`.
+Outcome processing MUST additionally be idempotent by `reservation_id`;
+Event processing MUST be idempotent by `event_id`.
 Repeated logical delivery does not permit nonce replay to bypass the
 channel authentication check.
 
 Informative: a fresh signed delivery attempt can carry the same
-durable Outcome body with a fresh hook nonce and validity window.
+durable Outcome or Event body with a fresh hook nonce and validity window.
 Body whitespace and JSON field order affect its digest even when the
 decoded protobuf message is the same.
 
@@ -757,10 +770,11 @@ Connect transport errors from failure handling.
 Timeouts are deployment configuration. Informative: a default hook
 timeout is 5 seconds.
 
-Outcome delivery MUST retry with exponential backoff and jitter until
-acknowledged. It MUST never be dropped. Any 2xx Connect response to
-Outcome is an acknowledgement. Transport errors, timeouts, and
-non-2xx responses leave the outcome awaiting delivery.
+Outcome and Event delivery MUST retry with exponential backoff and
+jitter until acknowledged. Neither MUST be dropped. Any 2xx Connect
+response to Outcome or Event is an acknowledgement. Transport errors,
+timeouts, and non-2xx responses leave the outcome or event awaiting
+delivery.
 
 Informative: an initial retry interval of 1 second, a factor of 2,
 and a cap of 15 minutes are example settings. The §5 retention rule
@@ -1123,25 +1137,306 @@ Reserved: this section is specified with M5 (see the version history).
 
 Reserved: this section is specified with M5 (see the version history).
 
-## 12. Admin API and audit log (reserved, M5)
+## 12. Storage leases and lifecycle events
+
+### 12.1 Terms and scope
+
+Storage leases govern retention and access. They are unrelated to the
+namespace epoch leases of
+[SPEC-WRITE-GRANTS §5.4](SPEC-WRITE-GRANTS.md#54-epoch-leases-and-the-apply-check).
+Lease terms, prices, and renewal endpoints belong to deployment policy.
+mkit defines no default storage-lease durations. No storage lease means
+permanent retention, subject to separate administrative policy.
+
+A storage lease has `{expires_at_ms, grace_ms, suspension_ms}`.
+`expires_at_ms` is an absolute Unix epoch time in milliseconds;
+`grace_ms` and `suspension_ms` are nonnegative durations in milliseconds.
+Policy MUST explicitly set all three terms when assigning a lease.
+The server MUST reject terms whose state boundaries cannot be represented
+without overflow; it MUST NOT silently substitute defaults.
+
+Indexed deployments MUST support per-ref storage leases. The ref shard
+holds the per-ref terms; the namespace coordinator holds the
+repository-level default and propagates changes with `config_version`.
+An explicit per-ref lease overrides that default; otherwise the ref uses
+the repository default. Opaque deployments support repository-level
+storage leases only and MUST NOT accept per-ref terms.
+
+Repository-level changes MUST become effective within one epoch lease
+plus the configuration cache TTL. They MUST follow the visibility
+completion rule of
+[SPEC-WRITE-GRANTS §9.1](SPEC-WRITE-GRANTS.md#91-visibility): completion
+requires leased shards to acknowledge the change or lose their leases,
+and every other cached copy to expire or be invalidated.
+
+### 12.2 State and request enforcement
+
+For an undeleted lease, let `e = expires_at_ms`, `g = grace_ms`,
+`s = suspension_ms`, and `now` be the storage backend's time. State is a
+pure function of those terms and `now`:
+
+| State | Time interval | Effect |
+|---|---|---|
+| `active` | `now < e` | Normal reads and writes. |
+| `grace` | `e ≤ now < e + g` | Writes blocked; reads allowed. |
+| `suspended` | `e + g ≤ now < e + g + s` | Reads and writes blocked. |
+| `deleted` | `e + g + s ≤ now` | Terminal for this lease: remove the ref and its published pointer; objects await §13 GC. |
+
+An absent lease has state `active` without a time limit. Zero-length
+intervals are empty. The server MUST evaluate the effective storage-lease
+state on every request; access enforcement MUST NOT wait for a timer.
+An expired state MUST NOT be served as active from a stale state cache.
+For branch deletion, head and packmap MUST be removed together, along
+with the branch's published pointer. A repository-level deletion applies
+to every ref governed by that lease. Delayed removal MUST NOT make a
+logically deleted ref accessible or a GC root.
+
+Renewal during `grace` or `suspended`, with terms placing the lease in
+`active` at backend time, MUST restore `active`. `deleted` is terminal:
+a new lease permits new writes only and MUST NOT restore removed refs,
+published pointers, or the old lease's data. A late renewal MUST NOT
+cancel deletion of the old lease merely because timer work is delayed.
+
+Administrative suspension is a separate override, including applicable
+repository, namespace, and takedown suspensions. The effective state MUST
+be the more severe of storage-lease state and that override, in the order
+`active < grace < suspended < deleted`. Payment renewal MUST NOT lift
+an administrative or takedown suspension.
+
+A write in `grace` MUST return `permission_denied` with exactly
+`repository lease expired; writes blocked`. Reads in `suspended` or
+`deleted` MUST return `not_found` to readers, without revealing
+repository existence; an authorized writer of that repository instead
+receives `permission_denied` with exactly `lease suspended`. Writes
+blocked by suspension MUST also return that permission error.
+These storage-lease denials MUST NOT use `failed_precondition`, which
+would cause clients to restart `BeginUpload`. Read responses and caches
+MUST preserve the denial and MUST NOT expose suspended or deleted data
+through a cached successful response. Cache-purge wire details are
+reserved for §16.
+
+### 12.3 Setting leases and transition work
+
+`SetLease` assigns, replaces, or removes storage-lease terms for a
+repository default or, in indexed mode, an individual ref. Only an
+administrator authorized for that scope MAY set a lease. The right
+includes shortening a lease; the server MUST evaluate shortened terms
+immediately, including transitions directly to suspension or deletion.
+Removing a repository default makes undeleted refs without per-ref
+terms permanent. Removing per-ref terms restores the repository default,
+or permanent retention if that default is absent. Both actions MUST NOT
+resurrect a deleted lease. Every SetLease action MUST be audited.
+The admin API wire, authentication, and audit-log details are reserved
+for §16 (WP-5.1b); this section defines its semantics only.
+
+At ref creation, the server MUST consult a deployment storage-lease
+policy hook to assign explicit initial terms or permanent retention,
+subject to the repository default and opaque-mode restriction of §12.1.
+Failure to obtain that policy decision MUST fail closed and MUST NOT
+create a permanently retained ref by treating failure as an absent lease.
+This is a policy obligation, not a remote-hook wire addition.
+`AdmitAllow.lease` is deferred; admission does not assign lease terms
+through the current hooks schema.
+
+Timers MUST durably perform the transition side effects and record an
+event for every transition, including expiry, renewal, policy changes,
+and administrative changes. Work MUST survive restart and MUST NOT
+record the same logical transition as distinct events. Timer delay
+never delays request enforcement. Expiry work MUST be conditional on
+the applicable lease instance and terms, so old work cannot delete a
+renewed ref. Once a lease is deleted, its pending deletion MUST target
+only that lease's ref incarnation; a new lease MUST treat those old refs
+as absent even before cleanup finishes. Delayed work MUST NOT delete a
+ref created under the new lease.
+
+### 12.4 Event messages and delivery
+
+`HooksService/Event(EventRequest)` delivers a lifecycle event.
+`EventRequest.event` is REQUIRED; `EventResponse` is empty. The shared
+`Event` fields are:
+
+| Field | Meaning |
+|---|---|
+| `event_id = 1` | Idempotency key: 1–128 bytes of `[A-Za-z0-9._:-]`, unique per server audience. |
+| `audience = 2` | The mkit server's canonical origin, distinct from the hook-channel signing audience. |
+| `repository = 3` | Full repository identity under STC §7.4. |
+| `occurred_unix_ms = 4` | Transition time as signed 64-bit Unix epoch milliseconds, independent of delivery time. |
+| `sequence = 5` | Unsigned 64-bit sequence, strictly increasing per `(repository, ref-or-repository)` scope for distinct events. |
+| `kind` | Exactly one transition kind; `lease = 6` is defined here. Field 7 is left for WP-5.1a-2's publication transition. |
+
+`LeaseTransition` has these fields:
+
+| Field | Meaning |
+|---|---|
+| `ref = 1` | Full ref name; empty means repository-level scope. |
+| `from = 2`, `to = 3` | Previous and resulting effective lease states. |
+| `lease_expires_unix_ms = 4` | Applicable storage lease's expiry; absent for permanent retention. |
+| `cause = 5` | `EXPIRY`, `RENEWAL`, `POLICY`, or `ADMIN`. |
+
+`LeaseState` numbers are `LEASE_STATE_UNSPECIFIED = 0`,
+`LEASE_STATE_ACTIVE = 1`, `LEASE_STATE_GRACE = 2`,
+`LEASE_STATE_SUSPENDED = 3`, and `LEASE_STATE_DELETED = 4`.
+`LeaseCause` numbers are `LEASE_CAUSE_UNSPECIFIED = 0`,
+`LEASE_CAUSE_EXPIRY = 1`, `LEASE_CAUSE_RENEWAL = 2`,
+`LEASE_CAUSE_POLICY = 3`, and `LEASE_CAUSE_ADMIN = 4`.
+Senders MUST populate every shared Event field and exactly one kind,
+and MUST supply known, non-unspecified states and a non-unspecified
+cause. Retries MUST retain the event id, sequence, scope, and body.
+Sequences MUST NOT reset on restart, renewal, or ref recreation.
+
+Events MUST use the same durable outbox as outcomes (§5), be delivered
+at least once, and remain retained until acknowledged. Delivery has no
+ordering guarantee. Receivers MUST deduplicate by `event_id` and use
+`sequence` to order events within their scope; an older late delivery
+MUST NOT roll back a newer state. Signing follows §7.1 and retry follows
+§8. Events count toward §5's combined backlog bound.
+
+The remote `CachePurge` contract is deferred to §16 (WP-5.1b).
+Informative: WP-5.10 supplies a Rust trait only; it does not add a remote RPC.
+
+## 13. Server garbage collection
+
+### 13.1 Named parameters
+
+| Parameter | Value or constraint | Meaning |
+|---|---|---|
+| `gc_grace` | 7 d | Minimum time a repository candidate remains marked before removal. |
+| `relay_lag_bound` | 60 s | Deployment relay-lag bound; elapsed time does not replace the actual watermark. |
+| `already_present_pin_window` | At least the deployment's maximum ticket lifetime | Minimum pack pin after an `AlreadyPresent` response. |
+| `MAX_APPLY_WINDOW`, `margin` | SPEC-WRITE-GRANTS §1.1 | Commit-window parameters used in §13.3; this spec does not redefine them. |
+
+The commit-deadline and `NotAfter` obligation on every write batch is
+[SPEC-WRITE-GRANTS §5.5](SPEC-WRITE-GRANTS.md#55-commit-deadline).
+The parameter definitions are in
+[SPEC-WRITE-GRANTS §1.1](SPEC-WRITE-GRANTS.md#11-named-parameters).
+
+### 13.2 Roots and liveness
+
+Per-repository GC MUST include all of the following roots:
+
+- Every live ref value, including each branch's packmap chain.
+- Every published pointer, including its head and packmap.
+- Every unexpired ticket's pack or packlist node.
+- Every unexpired hold.
+
+An `AlreadyPresent` answer MUST pin its pack against repository removal
+and byte deletion for `already_present_pin_window`, beginning at the
+answer. Repeated answers extend protection to cover each answer's
+window. Pins remain effective throughout the removal protocol.
+
+Every pack and packlist node on a root's packmap chain MUST remain live
+in both indexed and opaque modes: clients fail closed when a packmap
+pack is missing. Indexed mode additionally retains the complete object
+closure for repository index rows and extracted objects. Opaque mode
+cannot prove object closure; if a repository has any live non-branch
+ref, GC MUST retain all its member packs.
+
+A planned but unapplied write is a pending advance covered by the wait
+phase below. An advance awaiting inspection clearance has already
+committed a live ref and MUST remain a root. A lease-deleted ref is not
+a root. Preservation-store bytes and blocklist rows MUST NOT be
+collected by server GC; their separate retention and purge rules are
+reserved for §§14 and 16 (WP-5.1b).
+
+### 13.3 Per-repository mark, wait, re-check and drop
+
+GC MUST perform these phases in order for each repository:
+
+1. **Mark.** Compute the complete live set and mark only unreachable,
+   unpinned candidates `gc_pending(since)`. `since` is the backend time
+   at which this mark was established; `mark` below denotes that time.
+2. **Wait.** Removal MUST wait until all three conditions hold:
+   `now > mark + MAX_APPLY_WINDOW + margin`; the namespace relay
+   watermark has passed that point; and `since + gc_grace ≤ now`.
+   The watermark is the namespace's completed-relay frontier, including
+   outstanding work from active shards. A fixed sleep or a lagging
+   index MUST NOT substitute for that frontier.
+3. **Re-check.** Re-read the complete roots from strongly consistent
+   ref shards. The shard list MUST be the union of the ref index read
+   after the watermark condition holds and the coordinator's
+   active-shard table, never the eventually consistent ref index alone.
+   Re-check published pointers, unexpired tickets, holds, pins, and
+   object closure as applicable. A candidate that became live or
+   pinned, or whose mark changed, MUST NOT be removed.
+4. **Drop.** Only after that re-check, remove the candidate's repository
+   membership, associated repository index rows, and this repository's
+   holder. Each removal MUST be guarded on the unchanged mark and
+   last-change sequence so a concurrent unmark or new reference makes
+   it fail without removal.
+
+A planner relying on a `gc_pending` member MUST unmark it before planning
+its use. A new mark restarts the wait. This obligation and the commit
+deadlines cover planned, unapplied advances without a cross-shard GC
+state precondition on ref apply. A planner encountering `deleting` MUST
+return retryable `unavailable` or arrange a re-upload; it MUST NOT
+report a permanent absence merely because deletion is in progress.
+
+### 13.4 Global byte deletion
+
+Global pack or extracted-object bytes MUST be deleted only with zero
+holders and zero live holds. Holder counts MUST conservatively cover
+holder additions still in flight; an incomplete holder addition MUST
+prevent deletion. A hold MUST continue protecting the bytes until the
+holder is durably covered by holder accounting. This closes the relay
+lag hole for a holder whose membership has committed but whose holder
+record is still in flight.
+
+Byte deletion MUST use a per-object guarded step: verify the mark and
+last-change sequence together with zero holders and zero live holds,
+enter `deleting`, delete the bytes, then clear the deletion state.
+Concurrent changes MUST invalidate the guard; new users MUST NOT obtain
+unprotected bytes while the object is `deleting`. Crashes MUST leave
+this step retryable without exposing partially deleted bytes as usable.
+No cross-namespace watermark is required: holds and conservative holder
+accounting protect holders still in flight across namespaces.
+
+Content-index holders and holds are a normative obligation for packs
+as well as extracted objects. Without pack holders and holds, GC MAY
+drop unreachable repository membership after §13.3, but MUST NOT delete
+pack bytes.
+
+Informative: the pack-holder implementation gap belongs to WP-5.3a with
+WP-4.10; `gc_pending` and the `AlreadyPresent` pin are implementation
+state for WP-5.3a, not new wire fields.
+
+### 13.5 Fail-closed collection
+
+GC MUST abort the run on any unreadable root source, undecodable packlist
+node, missing root or referenced object, or truncated walk. It MUST NOT
+remove membership, index rows, holders, or bytes on the strength of a
+partial root set or incomplete closure. These are the same fail-closed
+principles as [SPEC-GC](SPEC-GC.md#fail-closed-requirement), applied to
+server roots. A failure in the re-check MUST also abort removal; it
+MUST NOT reuse the earlier mark's liveness verdict.
+
+## 14. Takedown and redaction notices (reserved, M5)
 
 Reserved: this section is specified with M5 (see the version history).
 
-## 13. Custom backends, backup and migrations (reserved, M5)
+## 15. Storage receipts (reserved, M5)
 
 Reserved: this section is specified with M5 (see the version history).
 
-## 14. Conformance scope (reserved, M5)
+## 16. Admin API and audit log (reserved, M5)
 
 Reserved: this section is specified with M5 (see the version history).
 
-## 15. Version history
+## 17. Custom backends, backup and migrations (reserved, M5)
+
+Reserved: this section is specified with M5 (see the version history).
+
+## 18. Conformance scope (reserved, M5)
+
+Reserved: this section is specified with M5 (see the version history).
+
+## 19. Version history
 
 | Version | Status | Change |
 |---|---|---|
+| 1 | draft | Additive M5 storage leases and lifecycle Event (§12), server GC (§13), and section renumbering (§§19–20); `GetServerInfo.leases` in STC §2.1. |
 | 1 | draft | Initial M3 pipeline, durable outcome and remote-hook contract; M5 sections reserved. Admission credential headers (§6.3); indexed mode (§9). |
 
-## 16. Test anchors
+## 20. Test anchors
 
 The fixtures under `rust/tests/golden/server-hooks/` are the authoritative
 pinned bytes, as [SPEC-CONVENTIONS §5](SPEC-CONVENTIONS.md#5-golden-vectors-and-conformance-tests)
@@ -1165,7 +1460,10 @@ requires. These anchors are informative descriptions of those bytes.
 | `outcome-expired.request.json` | Unconsumed ticket expiry (§5, §6.5). |
 | `outcome-read-served.request.json` | Paid-read object and bytes served (§5, §6.5). |
 | `outcome.response.json` | Empty Outcome acknowledgement (§6.5, §8). |
-| `signature.json` | Admit body including credential headers and Outcome body, with exact bytes, canonical signing strings, hashes, signatures, and full headers (§7.1). |
+| `event-lease-grace.request.json` | Ref-level expiry into grace, sequence and lease terms (§12.4). |
+| `event-lease-deleted.request.json` | Repository-level expiry into deletion (§12.4). |
+| `event.response.json` | Empty Event acknowledgement (§12.4, §8). |
+| `signature.json` | Admit body including credential headers, Outcome body, and Event body, with exact bytes, canonical signing strings, hashes, signatures, and full headers (§7.1). |
 | `key-list.json` | Public test key distribution document (§7.2). |
 | `MANIFEST.txt` | BLAKE3 hashes of every other golden file, including both Admit attempts (SPEC-CONVENTIONS §5). |
 

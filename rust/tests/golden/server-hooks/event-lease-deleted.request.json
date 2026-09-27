@@ -1,0 +1,16 @@
+{
+  "event": {
+    "eventId": "lease:deleted:example:main:3",
+    "audience": "https://vcs.example.test",
+    "repository": "ed25519-a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0/payments-demo",
+    "occurredUnixMs": "1791028800000",
+    "sequence": "3",
+    "lease": {
+      "ref": "",
+      "from": "LEASE_STATE_SUSPENDED",
+      "to": "LEASE_STATE_DELETED",
+      "leaseExpiresUnixMs": "1790424000000",
+      "cause": "LEASE_CAUSE_EXPIRY"
+    }
+  }
+}

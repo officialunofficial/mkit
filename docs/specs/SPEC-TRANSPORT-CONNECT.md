@@ -195,6 +195,7 @@ headers or a bearer token. The response MAY be cached with
 | `grant_schemes` | The owner signature schemes the deployment accepts on grants and epoch statements ([SPEC-WRITE-GRANTS §4](SPEC-WRITE-GRANTS.md#4-owner-signature-schemes)). Empty on a deployment that accepts no grants. |
 | `namespace_policy` | `allowlist`, `any`, or `single-repository` (§7.5). `single-repository` is advertised, never configured. |
 | `index_fanout` | The fixed object-id-prefix fan-out of the deployment's repository index (§7.9). The default is 4096. |
+| `leases` | Whether the deployment enforces storage leases under SPEC-SERVER §12. |
 | `max_delta_chain_depth` | Delta-chain depth cap (SPEC-SERVER §9.8), default 50 in indexed mode; `0` when indexed mode is off. |
 
 A client MUST NOT assume atomic advance without `atomic_advance = true`
@@ -1353,9 +1354,11 @@ policy.
   repository, the bytes new to the store, and the refs advanced.
 - **Aborted.** If the apply of an admitted RPC fails after
   `Allow{reservation}`, for example an `UpdateRef` compare-and-swap
-  loss, an epoch mismatch or a replay race, or a ticket's pack is
-  collected as garbage before an advance consumes it, the server
-  records `Aborted` in a separate transaction.
+  loss, an epoch mismatch or a replay race, the server records `Aborted`
+  in a separate transaction. A missing ticket pack is also a defensive
+  abort case; conforming server GC retains every unexpired ticket pack
+  as a root (SPEC-SERVER §13), so it cannot normally collect that pack
+  before the advance consumes the ticket.
 - **Expired.** A ticket that expires before an `AdvanceRefs` consumes
   it produces `Expired` (§7.6).
 - **Conflicts.** An `AdvanceRefs` that ends in a typed conflict (§4)
@@ -1509,6 +1512,7 @@ Explicitly deferred to sibling issues:
 
 | Version | Status | Changes |
 |---|---|---|
+| `2` | draft | Additive `GetServerInfoResponse.leases = 17` (§2.1; SPEC-SERVER §12); §7.7 ticket-pack loss clarified as a defensive abort case. |
 | `2` | draft | §7.4 repository addressing; §7.5 namespace and write policy (owner key); `GetServerInfo` (§2.1); §7.6 upload tickets and resumable parts; §7.8 ref deletion; §7.9 consistency and `ListRefs` paging; error-code split between `unauthenticated` and `permission_denied` (§5) (mkit#1084, mkit#1090); SPEC-WRITE-GRANTS (mkit#1085): signed reads and `X-Write-Grant` (§7.1), the M2 RPC rows (§2), and grant cross-references. §5.1 admission challenges: HTTP 402 with `permission_denied` and an opaque challenge list, raw MPP/x402 header pass-through, the header-returning `admission_helper` with its allowlist and hard-reserved set; §7.1 replay lookup after authentication and before authorization and admission, with signed reads outside the ledger; retryable `aborted` for in-flight operations (§5); §7.7 lifecycle per RPC (mkit#1086). The M0 server implementation still resumes an interrupted `UploadPack` through its `in_flight` replay record until M1 tickets land. M1: branch-sharded servers MAY require the canonical `AdvanceRefs` head/packmap pairing (§4; WP-1.22 amendment 1). Indexed mode: PendingVerification polling with a 1,000 ms floor (§5, §7.6), delta-base mapping and self-contained replanning in a new signed operation (§5, §7.6), packlist rebuilding (§7.6), advertised max_delta_chain_depth (§2.1), and the membership-dependent lag window and replay exclusion (§7.1, §7.9; SPEC-SERVER §9.4). |
 | `1` | draft | Initial `mkit.transport.v1` proto: 7 wire RPCs covering every `Transport` trait verb (§2), `PackChunk` reused byte-for-byte from `ssh.proto`, `RefExpectation`/`RefEntry` duplicated with pinned wire numbers pending mkit#679's shared-proto extraction. |
 
