@@ -699,7 +699,7 @@ mod glue {
             cfg.probe_partition(),
         );
         let checked = SHARDING_GUARD
-            .with(|guard| guard.check(meta, cfg.sharding, cfg.placement.jurisdiction.clone()));
+            .with(|guard| guard.check(meta, cfg.sharding, cfg.placement.jurisdiction.as_deref()));
         if checked.await.is_err() {
             return Ok(with_cors(json_response(
                 unavailable_json(crate::sharding_guard::MISMATCH_MESSAGE),

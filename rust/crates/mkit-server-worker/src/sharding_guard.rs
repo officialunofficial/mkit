@@ -1,4 +1,4 @@
-//! Once-per-isolate deployment sharding validation over the root RefStore.
+//! Once-per-isolate deployment sharding validation over the root `RefStore`.
 
 use std::cell::OnceCell;
 
@@ -52,7 +52,7 @@ impl DeploymentGuard {
         &self,
         store: S,
         mode: Sharding,
-        jurisdiction: Option<String>,
+        jurisdiction: Option<&str>,
     ) -> Check {
         let (checked_mode, checked_jurisdiction, check) = self.check.get_or_init(|| {
             let future: BoxFuture<'static, Result<(), GuardError>> = Box::pin(async move {
@@ -62,9 +62,9 @@ impl DeploymentGuard {
                 }
                 result
             });
-            (mode, jurisdiction.clone(), future.shared())
+            (mode, jurisdiction.map(str::to_owned), future.shared())
         });
-        if *checked_mode != mode || *checked_jurisdiction != jurisdiction {
+        if *checked_mode != mode || checked_jurisdiction.as_deref() != jurisdiction {
             let error = GuardError(format!(
                 "{MISMATCH_MESSAGE}: configured={} isolate={} configured-jurisdiction={jurisdiction:?} isolate-jurisdiction={checked_jurisdiction:?}",
                 mode_name(mode).unwrap_or("unsupported"),

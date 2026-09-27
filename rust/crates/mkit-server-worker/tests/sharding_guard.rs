@@ -306,8 +306,8 @@ fn reused_isolate_refuses_jurisdiction_changes_without_another_store_call() {
     let dir = tempfile::tempdir().unwrap();
     let store = store(&dir);
     let guard = DeploymentGuard::default();
-    block_on(guard.check(store.clone(), Sharding::D34, Some("eu".into()))).unwrap();
-    block_on(guard.check(store.clone(), Sharding::D34, Some("us".into()))).unwrap_err();
+    block_on(guard.check(store.clone(), Sharding::D34, Some("eu"))).unwrap();
+    block_on(guard.check(store.clone(), Sharding::D34, Some("us"))).unwrap_err();
     block_on(guard.check(store.clone(), Sharding::D34, None)).unwrap_err();
     assert_eq!(store.transport().calls(), 3);
 }
