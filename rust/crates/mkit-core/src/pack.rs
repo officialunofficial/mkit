@@ -857,9 +857,10 @@ const RUZSTD_MIN_WINDOW_LIMIT: u64 = 8 << 20;
 /// outside the owned-payload resident cap, just as for the window reader's
 /// carry/output budget. No output allocation grows past the admitted claim.
 ///
-/// With `pack-zstd` also on, only the differential tests call it.
+/// Allocating adapter for differential tests; production decode supplies its
+/// already reserved output to `ruzstd_decompress_into` on either backend.
 #[cfg(feature = "pack-ruzstd")]
-#[cfg_attr(all(feature = "pack-zstd", not(test)), allow(dead_code))]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn ruzstd_decompress_capped(
     frame: &[u8],
     capacity: usize,
