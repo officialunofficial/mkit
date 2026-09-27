@@ -39,7 +39,7 @@ enum Command {
 
 #[derive(Debug, Args)]
 struct BackupArgs {
-    /// Existing `SQLite` metadata database: sqlite:<PATH>.
+    /// Existing `SQLite` metadata database: `sqlite:<PATH>`.
     #[arg(long)]
     meta: MetaArg,
     /// New output file; any existing path is refused.
