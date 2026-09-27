@@ -3,6 +3,7 @@
 
 mod common;
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
@@ -10,7 +11,7 @@ use std::time::Duration;
 
 use mkit_server::pipeline::{D34Shards, ShardMap};
 use mkit_server::relay::{NoHook, RelayBudget, RelayHandler};
-use mkit_server::sql::SqlKvStore;
+use mkit_server::sql::{Capacity, SqlKvStore};
 use mkit_server::store::{codec, keys, outbox::OutboxBuilder, tickets::plan_membership};
 use mkit_server::timers::{TickBudget, TimerRegistry, registry::kinds, run_due};
 use mkit_server::{
@@ -170,16 +171,27 @@ struct FaultSql {
     fail_deletes: Arc<AtomicUsize>,
     reject_target: Option<Partition>,
     reject_targets: Vec<Partition>,
+    reject_dynamic: Arc<Mutex<BTreeSet<Partition>>>,
+    scan_conflict: Arc<std::sync::atomic::AtomicBool>,
     committed: Arc<Mutex<Vec<Batch>>>,
 }
 
 impl FaultSql {
     fn new(reject_target: Option<Partition>) -> Self {
+        Self::with_store(
+            SqlKvStore::open(RusqliteConn::open_in_memory().unwrap()).unwrap(),
+            reject_target,
+        )
+    }
+
+    fn with_store(inner: SqlKvStore<RusqliteConn>, reject_target: Option<Partition>) -> Self {
         Self {
-            inner: Arc::new(SqlKvStore::open(RusqliteConn::open_in_memory().unwrap()).unwrap()),
+            inner: Arc::new(inner),
             fail_deletes: Arc::new(AtomicUsize::new(0)),
             reject_target,
             reject_targets: Vec::new(),
+            reject_dynamic: Arc::default(),
+            scan_conflict: Arc::default(),
             committed: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -238,6 +250,7 @@ impl NamespaceStore for FaultSql {
         });
         if self.reject_target.as_ref() == Some(p)
             || self.reject_targets.contains(p)
+            || self.reject_dynamic.lock().unwrap().contains(p)
             || (deleting_relay
                 && self
                     .fail_deletes
@@ -247,6 +260,19 @@ impl NamespaceStore for FaultSql {
             return Err(StoreError::Unavailable(
                 "injected relay boundary failure".into(),
             ));
+        }
+        let scan_key = keys::relay_scan();
+        if self.scan_conflict.load(Ordering::SeqCst)
+            && let Some(index) = batch.preconditions.iter().position(|pre| {
+                matches!(pre, mkit_server::Precondition::Absent(k)
+                    | mkit_server::Precondition::Equals(k, _) if k == &scan_key)
+            })
+        {
+            self.scan_conflict.store(false, Ordering::SeqCst);
+            return Ok(BatchOutcome::PreconditionFailed {
+                index,
+                observed: None,
+            });
         }
         let result = self.inner.apply(p, batch.clone()).await?;
         if result == BatchOutcome::Committed {
@@ -366,7 +392,20 @@ async fn sqlite_crash_after_target_commit_retries_without_another_target_apply()
     .await
     .unwrap();
     assert_eq!(second.fired, 1);
-    assert!(pending(&source, &partition).await.is_empty());
+    let remaining = pending(&source, &partition).await;
+    assert!(
+        remaining.is_empty(),
+        "second tick left {:?}; state {:?}",
+        remaining
+            .iter()
+            .map(|(k, _)| keys::parse(k))
+            .collect::<Vec<_>>(),
+        source
+            .get(&partition, &keys::relay_scan())
+            .await
+            .unwrap()
+            .map(|v| codec::decode_relay_scan(&v).unwrap())
+    );
     assert_eq!(
         target.batches().len(),
         1,
@@ -533,7 +572,8 @@ async fn sqlite_chunks_target_operations_and_source_cleanup_bytes() {
             batch
                 .writes
                 .iter()
-                .all(|write| matches!(write, Write::Delete(_)))
+                .all(|write| matches!(write, Write::Delete(_))
+                    || matches!(write, Write::Put(key, _) if *key == keys::relay_scan()))
         );
     }
 }
@@ -672,7 +712,24 @@ async fn sqlite_target_sequence_order_survives_timer_rotation() {
             _ => None,
         })
         .collect();
-    assert_eq!(watermarks, vec![1, 2, 3, 4, 5]);
+    assert_eq!(
+        watermarks
+            .iter()
+            .copied()
+            .filter(|seq| seq % 2 == 1)
+            .collect::<Vec<_>>(),
+        vec![1, 3, 5],
+        "odd rows must commit in order within their target"
+    );
+    assert_eq!(
+        watermarks
+            .iter()
+            .copied()
+            .filter(|seq| seq % 2 == 0)
+            .collect::<Vec<_>>(),
+        vec![2, 4],
+        "even rows must commit in order within their target"
+    );
     assert_eq!(
         target.get(&Partition::ContentShard(1), &key).await.unwrap(),
         Some(Value::new(vec![5]))
@@ -699,7 +756,9 @@ async fn sqlite_corrupt_row_delivers_decodable_prefix_then_stops() {
     source
         .apply(
             &partition,
-            Batch::new().put(keys::relay(2), Value::new(b"bad".to_vec())),
+            Batch::new()
+                .put(keys::relay(2), Value::new(b"bad".to_vec()))
+                .put(keys::outbox_sequence(), codec::encode_u64(2)),
         )
         .await
         .unwrap();
@@ -725,5 +784,261 @@ async fn sqlite_corrupt_row_delivers_decodable_prefix_then_stops() {
             .await
             .unwrap()
             .is_some()
+    );
+}
+
+async fn plant_sql_schedule(source: &FaultSql, partition: &Partition, schedule: &[u16]) {
+    for (chunk_index, chunk) in schedule.chunks(90).enumerate() {
+        let mut batch = Batch::new();
+        for (offset, destination) in chunk.iter().enumerate() {
+            let seq = u64::try_from(chunk_index * 90 + offset + 1).unwrap();
+            let row = codec::RelayV1 {
+                at_ms: 100,
+                target: Partition::ContentShard(*destination),
+                puts: vec![(
+                    Key::new([b"delivered/".as_slice(), &seq.to_be_bytes()].concat()),
+                    codec::encode_u64(seq),
+                )],
+            };
+            batch = batch.put(keys::relay(seq), codec::encode_relay(&row).unwrap());
+        }
+        assert_eq!(
+            source.apply(partition, batch).await.unwrap(),
+            BatchOutcome::Committed
+        );
+    }
+    assert_eq!(
+        source
+            .apply(
+                partition,
+                Batch::new()
+                    .put(
+                        keys::outbox_sequence(),
+                        codec::encode_u64(schedule.len() as u64)
+                    )
+                    .put(keys::timer(100, kinds::RELAY.get(), b""), Value::default())
+            )
+            .await
+            .unwrap(),
+        BatchOutcome::Committed
+    );
+}
+
+fn sql_order_key(seq: u64) -> Key {
+    Key::new([b"delivered/".as_slice(), &seq.to_be_bytes()].concat())
+}
+
+async fn one_sql_relay_tick(
+    source: &FaultSql,
+    partition: &Partition,
+    target: FaultSql,
+    now: u64,
+) -> mkit_server::timers::RunReport {
+    let registry = TimerRegistry::new().register(RelayHandler {
+        target,
+        hook: NoHook,
+        budget: sql_budget(128, 8, Some(2)),
+    });
+    run_due(
+        source,
+        partition,
+        &registry,
+        &ManualClock::new(i64::try_from(now).unwrap()),
+        now,
+        &TickBudget::new(1, 1, 512, 60_000),
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn sqlite_durable_scan_crosses_600_row_backlog_and_recovers_after_restart() {
+    let source = FaultSql::new(None);
+    let target = FaultSql::new(None);
+    let partition = D34Shards.ref_shard(&repo(), "refs/heads/main");
+    let a = Partition::ContentShard(0);
+    let b = Partition::ContentShard(1);
+    target.reject_dynamic.lock().unwrap().insert(a.clone());
+    let mut schedule = vec![0; 599];
+    schedule.push(1);
+    plant_sql_schedule(&source, &partition, &schedule).await;
+    let mut now = 100;
+    for _ in 0..3 {
+        let report = one_sql_relay_tick(&source, &partition, target.clone(), now).await;
+        now = report.next_wake_ms.unwrap_or(now + 1).max(now + 1);
+    }
+    assert_eq!(
+        target.get(&b, &sql_order_key(600)).await.unwrap(),
+        Some(codec::encode_u64(600))
+    );
+    assert!(
+        source
+            .get(&partition, &keys::relay(1))
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let scan = source
+        .get(&partition, &keys::relay_scan())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        codec::decode_relay_scan(&scan).is_ok(),
+        "SQLite checkpoint did not survive handler restart"
+    );
+    target.reject_dynamic.lock().unwrap().clear();
+    for _ in 0..12 {
+        let report = one_sql_relay_tick(&source, &partition, target.clone(), now).await;
+        now = report.next_wake_ms.unwrap_or(now + 1).max(now + 1);
+        if source
+            .get(&partition, &keys::relay(1))
+            .await
+            .unwrap()
+            .is_none()
+            && source
+                .get(&partition, &keys::relay(599))
+                .await
+                .unwrap()
+                .is_none()
+        {
+            break;
+        }
+    }
+    assert!(pending(&source, &partition).await.is_empty());
+    assert_eq!(
+        target.get(&a, &sql_order_key(1)).await.unwrap(),
+        Some(codec::encode_u64(1))
+    );
+    assert_eq!(
+        target.get(&a, &sql_order_key(599)).await.unwrap(),
+        Some(codec::encode_u64(599))
+    );
+    let delivered: Vec<_> = target
+        .batches()
+        .iter()
+        .flat_map(|batch| batch.writes.iter())
+        .filter_map(|write| match write {
+            Write::Put(k, v) if k.as_bytes().starts_with(b"delivered/") => {
+                Some(codec::decode_u64(v).unwrap())
+            }
+            _ => None,
+        })
+        .collect();
+    let a_delivered: Vec<_> = delivered.into_iter().filter(|seq| *seq <= 599).collect();
+    assert_eq!(a_delivered, (1..=599).collect::<Vec<_>>());
+}
+
+#[tokio::test]
+async fn sqlite_scan_state_guard_conflict_retries_without_deleting_rows() {
+    let source = FaultSql::new(None);
+    let target = FaultSql::new(None);
+    let partition = D34Shards.ref_shard(&repo(), "refs/heads/main");
+    plant_sql_schedule(&source, &partition, &[0, 1, 0]).await;
+    source.scan_conflict.store(true, Ordering::SeqCst);
+    let first = one_sql_relay_tick(&source, &partition, target.clone(), 100).await;
+    assert_eq!(first.failed, 1);
+    assert_eq!(pending(&source, &partition).await.len(), 3);
+    assert!(
+        source
+            .get(&partition, &keys::relay_scan())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let now = first.next_wake_ms.unwrap();
+    let second = one_sql_relay_tick(&source, &partition, target.clone(), now).await;
+    assert_eq!(second.fired, 1);
+    let mut now = second.next_wake_ms.unwrap_or(now + 1);
+    for _ in 0..4 {
+        if pending(&source, &partition).await.is_empty() {
+            break;
+        }
+        let report = one_sql_relay_tick(&source, &partition, target.clone(), now).await;
+        now = report.next_wake_ms.unwrap_or(now + 1).max(now + 1);
+    }
+    assert!(pending(&source, &partition).await.is_empty());
+    assert_eq!(
+        target
+            .get(&Partition::ContentShard(0), &sql_order_key(1))
+            .await
+            .unwrap(),
+        Some(codec::encode_u64(1))
+    );
+    assert_eq!(
+        target
+            .get(&Partition::ContentShard(0), &sql_order_key(3))
+            .await
+            .unwrap(),
+        Some(codec::encode_u64(3))
+    );
+}
+
+#[tokio::test]
+async fn sqlite_full_source_relay_timer_still_advances_past_a_failing_target() {
+    let conn = RusqliteConn::open_in_memory().unwrap();
+    let source = FaultSql::with_store(SqlKvStore::open(conn.clone()).unwrap(), None);
+    let partition = D34Shards.ref_shard(&repo(), "refs/heads/main");
+    let a = Partition::ContentShard(0);
+    let b = Partition::ContentShard(1);
+    let a_key = Key::new(b"failed".to_vec());
+    let b_key = Key::new(b"healthy".to_vec());
+    queue(
+        &source,
+        &partition,
+        vec![
+            (a.clone(), vec![(a_key, Value::default())]),
+            (b.clone(), vec![(b_key.clone(), Value::default())]),
+        ],
+    )
+    .await;
+    drop(source);
+    // Soft limit zero forbids ordinary puts. Relay cursor checkpoints and
+    // rescheduling must still progress within the hard-limit reserve.
+    let source = FaultSql::with_store(
+        SqlKvStore::open_with_capacity(conn, Capacity::new(1 << 20).with_reserve(1 << 20)).unwrap(),
+        None,
+    );
+    let target = FaultSql::new(Some(a.clone()));
+    let mut now = 100;
+    for _ in 0..8 {
+        let registry = TimerRegistry::new().register(RelayHandler {
+            target: target.clone(),
+            hook: NoHook,
+            budget: sql_budget(2, 1, None),
+        });
+        let report = run_due(
+            &source,
+            &partition,
+            &registry,
+            &ManualClock::new(i64::try_from(now).unwrap()),
+            now,
+            &TickBudget::new(1, 1, 64, 10_000),
+        )
+        .await
+        .unwrap();
+        if target.get(&b, &b_key).await.unwrap().is_some() {
+            break;
+        }
+        now = report.next_wake_ms.unwrap_or(now + 5_000).max(now + 1);
+    }
+    assert_eq!(
+        target.get(&b, &b_key).await.unwrap(),
+        Some(Value::default()),
+        "a zero-soft-limit source kept the relay timer on failing A and starved B"
+    );
+    assert!(
+        source
+            .get(&partition, &keys::relay(1))
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        source
+            .get(&partition, &keys::relay(2))
+            .await
+            .unwrap()
+            .is_none()
     );
 }

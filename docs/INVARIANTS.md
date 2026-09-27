@@ -1168,6 +1168,9 @@ with any queue-row deletions; a guard conflict retries. Reaching the cycle
 end or the blocked-set cap starts the next fire at the head. Thus a target's
 later row cannot advance `rh` past its earlier undelivered row: an earlier
 row before the cursor blocks the target, and one after it is scanned first.
+At the SQL soft capacity limit, only a valid, guarded `rs` checkpoint, with
+any relay-row deletions, or a guarded kind-3 relay timer reschedule may use
+the reserved space; ordinary puts still fail.
 
 **Because:** target delivery and source cleanup cannot share a transaction.
 A crash, overlapping timer fires, or a concurrent writer can occur between them.
@@ -1180,7 +1183,8 @@ Restoring an older source requires raising `os` above every target's `rh` for
 that source or re-keying it (R-102; WP-1.29).
 
 **Enforced by:** `mkit-server/src/relay/tests.rs` crash, contention, ordering,
-chunk-limit and wake-up tests; native SQLite driver tests; Worker Loopback host
+chunk-limit and wake-up tests; native SQLite driver and soft-limit checkpoint
+tests; Worker Loopback host
 tests. Worker RefShard registration uses
 plan-specific fire caps and two target calls per target per fire, including
 chunking and contention. Fires inspect up to four times their row delivery

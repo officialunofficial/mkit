@@ -7,7 +7,7 @@ use crate::rt::BoxFuture;
 use crate::store::{
     Batch, BatchOutcome, Key, NamespaceStore, Partition, Precondition, StoreCapabilities,
     StoreError, Value, Write,
-    codec::{self, RelayV1},
+    codec::{self, MAX_BLOCKED_TARGETS, RelayScanV1, RelayV1},
     keys,
 };
 use crate::timers::{
@@ -22,6 +22,22 @@ const SCAN_PAGE_ROWS: u32 = 4;
 
 type QueuedRow = (u64, RelayV1, Key, Value);
 type TargetRows = (Partition, Vec<QueuedRow>);
+type InspectedRow = (u64, Partition, Key, Value);
+
+struct ScanWindow {
+    rows: Vec<InspectedRow>,
+    groups: Vec<TargetRows>,
+    corrupt: bool,
+    exhausted: bool,
+}
+
+struct Dispatch {
+    delivered: BTreeSet<u64>,
+    block: BTreeSet<Partition>,
+    pause_at: Option<u64>,
+    overflow_at: Option<u64>,
+    failed: bool,
+}
 
 /// Pushes a source's queued rows to a separately supplied target store.
 /// Each source/key must have exactly one producer; target rh rows never expire.
@@ -55,95 +71,171 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
         timer: &DueTimer,
     ) -> Result<Fired, StoreError> {
         let os_key = keys::outbox_sequence();
-        let observed_os = ctx.store.get(ctx.partition, &os_key).await?;
+        let sequence_value = ctx.store.get(ctx.partition, &os_key).await?;
+        let os = sequence_value
+            .as_ref()
+            .map(codec::decode_u64)
+            .transpose()?
+            .unwrap_or(0);
+        let rs_key = keys::relay_scan();
+        let mut scan_value = ctx.store.get(ctx.partition, &rs_key).await?;
+        let mut scan = scan_value
+            .as_ref()
+            .map(codec::decode_relay_scan)
+            .transpose()?
+            .filter(|state| state.cursor < state.cycle_end)
+            .unwrap_or(RelayScanV1 {
+                cycle_end: os,
+                cursor: 0,
+                blocked: Vec::new(),
+            });
         let max_rows = self.budget.max_rows.max(1);
-        let rows = read_rows(ctx, max_rows.saturating_mul(4)).await?;
-        let inspected = rows.len();
-        // Always inspect from the source head: resuming a range scan could skip
-        // an older row for a chosen target and advance its watermark past it.
-        let (mut groups, corrupt) = decode_groups(ctx.partition, ctx.now_ms, rows);
-        // Rotate targets, rather than source rows, across fires. A full set of
-        // failing targets cannot spend every subsequent fire's target budget.
-        // The cursor is the first seq of the last visited group; it is only a
-        // selection hint and never allows a target's own prefix to be skipped.
-        let previous = if timer.value.as_bytes().is_empty() {
+        let (rows, exhausted) = read_rows(ctx, &scan, max_rows.saturating_mul(4)).await?;
+        let window = decode_window(ctx.partition, ctx.now_ms, rows, exhausted);
+        // The timer's turn rotates target selection between completed scan
+        // cycles. A last-target cursor can starve a target when that target
+        // falls in an earlier scan window than the last attempted target.
+        let turn = if timer.value.as_bytes().is_empty() {
             0
         } else {
             codec::decode_u64(&timer.value)?
         };
-        if let Some(start) = groups.iter().position(|(_, rows)| rows[0].0 > previous) {
-            groups.rotate_left(start);
-        }
-        let target_limit = self.budget.max_targets.max(1) as usize;
-        let mut blocked = groups
-            .iter()
-            .skip(target_limit)
-            .map(|(target, _)| target.clone())
-            .collect::<BTreeSet<_>>();
         let rh = keys::relay_high_water(ctx.partition)?;
-        let mut delivered = Vec::new();
-        let mut failed = false;
-        let mut cursor = previous;
-        for (target, rows) in groups {
-            if blocked.contains(&target) || delivered.len() >= max_rows as usize {
-                blocked.insert(target);
-                continue;
-            }
-            cursor = rows[0].0;
-            let target_rows = rows
-                .iter()
-                .take(max_rows as usize - delivered.len())
-                .map(|(seq, row, _, _)| (*seq, row.clone()))
-                .collect::<Vec<_>>();
-            let (count, target_failed) = self.deliver_target(&target, &rh, &target_rows).await;
-            if count < rows.len() {
-                // Failed and budget-cut targets retain their entire remaining
-                // prefix, so all later rows for that target stay behind too.
-                blocked.insert(target);
-            }
-            failed |= target_failed;
-            delivered.extend(
-                rows.into_iter()
-                    .take(count)
-                    .map(|(_, _, key, value)| (key, value)),
-            );
-        }
-        let completed = delivered.len();
-        delete_rows(ctx, delivered).await?;
-        if corrupt {
-            // Make progress on the decodable prefix but never cross corruption.
+        let dispatch = self
+            .dispatch(&window.groups, &scan.blocked, &rh, turn, max_rows)
+            .await;
+        if !checkpoint_window(ctx, &rs_key, &mut scan_value, &mut scan, &window, &dispatch).await? {
             return Ok(Fired::Retry);
         }
-        let has_remaining = if inspected > completed {
+        if window.corrupt {
+            // The valid prefix is durable; the malformed row stays at the
+            // front of the next scan and is never bypassed.
+            return Ok(Fired::Retry);
+        }
+        let has_remaining = if !scan.blocked.is_empty()
+            || scan.cursor < scan.cycle_end
+            || window.rows.len() > dispatch.delivered.len()
+        {
             true
         } else {
-            // When every inspected row completed, at most max_rows were read.
-            // This drain probe therefore also fits the 4 * max_rows scan cap.
             let (start, end) = keys::class_range(keys::TAG_RELAY);
             let remaining = ctx.store.scan(ctx.partition, &start, &end, None, 1).await?;
             !remaining.entries.is_empty() || remaining.next.is_some()
         };
         if has_remaining {
-            // Successful reschedules do not invoke core failure backoff. Explicitly
-            // back off failures; budget continuations only need a distinct key.
             let due = ctx
                 .now_ms
-                .saturating_add(if failed { RETRY_BACKOFF_MS } else { 0 })
+                .saturating_add(if dispatch.failed && scan.cursor >= scan.cycle_end {
+                    RETRY_BACKOFF_MS
+                } else {
+                    0
+                })
                 .max(timer.due_at_ms.saturating_add(1));
             Ok(Fired::Reschedule {
                 due_at_ms: due,
-                value: codec::encode_u64(cursor),
+                value: codec::encode_u64(
+                    turn.wrapping_add(u64::from(scan.cursor >= scan.cycle_end)),
+                ),
                 batch: Batch::new(),
             })
         } else {
             // Guard `os` either way: a first-ever relay row committed during
             // this fire moves `os` from absent, so `Done` races and the timer
             // stays.
-            Ok(Fired::Done(Batch::new().require(match observed_os {
+            Ok(Fired::Done(Batch::new().require(match sequence_value {
                 Some(value) => Precondition::Equals(os_key, value),
                 None => Precondition::Absent(os_key),
             })))
         }
+    }
+
+    async fn dispatch(
+        &self,
+        groups: &[TargetRows],
+        blocked: &[Partition],
+        rh: &Key,
+        turn: u64,
+        max_rows: u32,
+    ) -> Dispatch {
+        let mut eligible = groups
+            .iter()
+            .filter(|(target, _)| blocked.binary_search(target).is_err())
+            .collect::<Vec<_>>();
+        if !eligible.is_empty() {
+            let count = u64::try_from(eligible.len()).unwrap_or(u64::MAX);
+            let start = usize::try_from(turn % count).unwrap_or(0);
+            eligible.rotate_left(start);
+        }
+        let selected = eligible
+            .into_iter()
+            .take(self.budget.max_targets.max(1) as usize)
+            .map(|(target, _)| target.clone())
+            .collect::<BTreeSet<_>>();
+        let mut progress = Dispatch {
+            delivered: BTreeSet::new(),
+            block: BTreeSet::new(),
+            pause_at: None,
+            overflow_at: None,
+            failed: false,
+        };
+        // Process selected groups in first-seq order, regardless of the
+        // rotated selection, so a blocked-set overflow stops later targets.
+        for (i, (target, rows)) in groups.iter().enumerate() {
+            if progress.pause_at.is_some_and(|at| rows[0].0 >= at) {
+                break;
+            }
+            if blocked.binary_search(target).is_ok() {
+                continue;
+            }
+            if !selected.contains(target) {
+                if blocked.len() + progress.block.len() == MAX_BLOCKED_TARGETS {
+                    progress.overflow_at = Some(rows[0].0);
+                    break;
+                }
+                progress.block.insert(target.clone());
+                continue;
+            }
+            if progress.delivered.len() >= max_rows as usize {
+                progress.pause_at = Some(rows[0].0);
+                break;
+            }
+            // Do not apply this target's later rows across another target's
+            // first row: that later target may overflow the blocked set.
+            let next_target = groups.get(i + 1).map(|(_, rows)| rows[0].0);
+            let until = next_target
+                .into_iter()
+                .chain(progress.pause_at)
+                .min()
+                .unwrap_or(u64::MAX);
+            let budget = max_rows as usize - progress.delivered.len();
+            let target_rows = rows
+                .iter()
+                .take_while(|(seq, _, _, _)| *seq < until)
+                .take(budget)
+                .map(|(seq, row, _, _)| (*seq, row.clone()))
+                .collect::<Vec<_>>();
+            let (count, failed) = self.deliver_target(target, rh, &target_rows).await;
+            progress
+                .delivered
+                .extend(rows.iter().take(count).map(|(seq, _, _, _)| *seq));
+            progress.failed |= failed;
+            if failed {
+                if blocked.len() + progress.block.len() == MAX_BLOCKED_TARGETS {
+                    progress.overflow_at = Some(rows[count].0);
+                    break;
+                }
+                progress.block.insert(target.clone());
+            } else if count < rows.len() {
+                // A healthy target cut by a row or Worker-call budget resumes
+                // at its own first unattempted row on the next fire.
+                progress.pause_at = Some(
+                    progress
+                        .pause_at
+                        .map_or(rows[count].0, |at| at.min(rows[count].0)),
+                );
+            }
+        }
+        progress
     }
 
     /// Returns the committed/duplicate prefix, retaining progress if a later chunk fails.
@@ -255,14 +347,19 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
     }
 }
 
-fn decode_groups(
+fn decode_window(
     source: &Partition,
     now_ms: u64,
     rows: Vec<(Key, Value)>,
-) -> (Vec<TargetRows>, bool) {
-    let mut corrupt = false;
+    exhausted: bool,
+) -> ScanWindow {
+    let mut window = ScanWindow {
+        rows: Vec::new(),
+        groups: Vec::new(),
+        corrupt: false,
+        exhausted,
+    };
     let mut warned_lag = false;
-    let mut groups: Vec<TargetRows> = Vec::new();
     for (key, value) in rows {
         let decoded = (|| {
             let Some(keys::ParsedKey::Relay(seq)) = keys::parse(&key) else {
@@ -277,7 +374,8 @@ fn decode_groups(
             Ok(row) => row,
             Err(error) => {
                 tracing::warn!(source = ?source, ?key, %error, "corrupt relay row; tick stopped");
-                corrupt = true;
+                window.corrupt = true;
+                window.exhausted = false;
                 break;
             }
         };
@@ -288,16 +386,141 @@ fn decode_groups(
                 warned_lag = true;
             }
         }
-        let i = groups
+        let target = row.target.clone();
+        window
+            .rows
+            .push((seq, target.clone(), key.clone(), value.clone()));
+        let i = window
+            .groups
             .iter()
-            .position(|(p, _)| p == &row.target)
+            .position(|(partition, _)| partition == &target)
             .unwrap_or_else(|| {
-                groups.push((row.target.clone(), Vec::new()));
-                groups.len() - 1
+                window.groups.push((target, Vec::new()));
+                window.groups.len() - 1
             });
-        groups[i].1.push((seq, row, key, value));
+        window.groups[i].1.push((seq, row, key, value));
     }
-    (groups, corrupt)
+    window
+}
+
+async fn checkpoint_window<S: NamespaceStore>(
+    ctx: &TimerCtx<'_, S>,
+    rs_key: &Key,
+    observed: &mut Option<Value>,
+    scan: &mut RelayScanV1,
+    window: &ScanWindow,
+    dispatch: &Dispatch,
+) -> Result<bool, StoreError> {
+    let mut staged = scan.clone();
+    let mut deletions = Vec::new();
+    let mut interrupted = false;
+    let mut overflow = false;
+    for (seq, target, key, value) in &window.rows {
+        if dispatch.overflow_at.is_some_and(|at| *seq >= at) {
+            overflow = true;
+            break;
+        }
+        if dispatch.pause_at.is_some_and(|at| *seq >= at) {
+            interrupted = true;
+            break;
+        }
+        let mut next = staged.clone();
+        next.cursor = *seq;
+        if !dispatch.delivered.contains(seq)
+            && let Err(at) = next.blocked.binary_search(target)
+        {
+            if !dispatch.block.contains(target) {
+                interrupted = true;
+                break;
+            }
+            if next.blocked.len() == MAX_BLOCKED_TARGETS {
+                overflow = true;
+                break;
+            }
+            next.blocked.insert(at, target.clone());
+        }
+        let mut candidate = deletions.clone();
+        if dispatch.delivered.contains(seq) {
+            candidate.push((key.clone(), value.clone()));
+        }
+        if checkpoint_batch(rs_key, observed.as_ref(), &next, &candidate)?
+            .validate(&ctx.store.capabilities())
+            .is_err()
+        {
+            if deletions.is_empty()
+                || !apply_checkpoint(ctx, rs_key, observed, &staged, &deletions).await?
+            {
+                return Ok(false);
+            }
+            deletions.clear();
+            checkpoint_batch(
+                rs_key,
+                observed.as_ref(),
+                &next,
+                &candidate[candidate.len() - usize::from(dispatch.delivered.contains(seq))..],
+            )?
+            .validate(&ctx.store.capabilities())?;
+            if dispatch.delivered.contains(seq) {
+                deletions.push((key.clone(), value.clone()));
+            }
+        } else {
+            deletions = candidate;
+        }
+        staged = next;
+    }
+    if overflow {
+        // Terminal marker: the next fire starts from the head with an empty
+        // blocked set. The row that would exceed the cap is retained.
+        staged.cursor = staged.cycle_end;
+    } else if !window.corrupt && !interrupted && window.exhausted {
+        // No more queued rows exist in this cycle's bounded sequence range;
+        // missing sequence numbers are holes left by prior cleanup.
+        staged.cursor = staged.cycle_end;
+    }
+    if !apply_checkpoint(ctx, rs_key, observed, &staged, &deletions).await? {
+        return Ok(false);
+    }
+    *scan = staged;
+    Ok(true)
+}
+
+fn checkpoint_batch(
+    rs_key: &Key,
+    observed: Option<&Value>,
+    state: &RelayScanV1,
+    deletions: &[(Key, Value)],
+) -> Result<Batch, StoreError> {
+    let encoded = codec::encode_relay_scan(state)?;
+    let guard = match observed {
+        Some(value) => Precondition::Equals(rs_key.clone(), value.clone()),
+        None => Precondition::Absent(rs_key.clone()),
+    };
+    let mut batch = Batch::new().require(guard).put(rs_key.clone(), encoded);
+    for (key, value) in deletions {
+        batch = batch
+            .require(Precondition::Equals(key.clone(), value.clone()))
+            .delete(key.clone());
+    }
+    Ok(batch)
+}
+
+async fn apply_checkpoint<S: NamespaceStore>(
+    ctx: &TimerCtx<'_, S>,
+    rs_key: &Key,
+    observed: &mut Option<Value>,
+    state: &RelayScanV1,
+    deletions: &[(Key, Value)],
+) -> Result<bool, StoreError> {
+    let batch = checkpoint_batch(rs_key, observed.as_ref(), state, deletions)?;
+    batch.validate(&ctx.store.capabilities())?;
+    let encoded = codec::encode_relay_scan(state)?;
+    match ctx.store.apply(ctx.partition, batch).await? {
+        BatchOutcome::Committed => {
+            *observed = Some(encoded);
+            Ok(true)
+        }
+        BatchOutcome::PreconditionFailed { .. } | BatchOutcome::DeadlinePassed { .. } => Ok(false),
+    }
 }
 
 fn fitting_prefix(base: &Batch, rh: &Key, rows: &[(u64, RelayV1)]) -> usize {
@@ -342,12 +565,23 @@ fn target_batch(rh: &Key, observed: Option<&Value>, rows: &[(u64, RelayV1)]) -> 
 
 async fn read_rows<S: NamespaceStore>(
     ctx: &TimerCtx<'_, S>,
+    state: &RelayScanV1,
     limit: u32,
-) -> Result<Vec<(Key, Value)>, StoreError> {
-    if limit == 0 {
-        return Ok(Vec::new());
+) -> Result<(Vec<(Key, Value)>, bool), StoreError> {
+    if state.cursor >= state.cycle_end || limit == 0 {
+        return Ok((Vec::new(), true));
     }
-    let (start, end) = keys::class_range(keys::TAG_RELAY);
+    // Include the exact cursor key (which may remain for a blocked target)
+    // so malformed keys between it and the next sequence cannot be skipped.
+    // At cursor zero the class head also catches malformed keys before seq 1.
+    let anchor = (state.cursor != 0).then(|| keys::relay(state.cursor));
+    let start = anchor
+        .clone()
+        .unwrap_or_else(|| keys::class_range(keys::TAG_RELAY).0);
+    let end = state
+        .cycle_end
+        .checked_add(1)
+        .map_or_else(|| keys::class_range(keys::TAG_RELAY).1, keys::relay);
     let mut rows = Vec::new();
     let mut encoded_bytes = 0;
     let mut remaining = limit;
@@ -364,42 +598,20 @@ async fn read_rows<S: NamespaceStore>(
             )
             .await?;
         for (key, value) in page.entries {
+            remaining -= 1;
+            if anchor.as_ref() == Some(&key) {
+                continue;
+            }
             let size = key.as_bytes().len() + value.as_bytes().len();
             if !rows.is_empty() && encoded_bytes + size > MAX_FIRE_BYTES {
-                return Ok(rows);
+                return Ok((rows, false));
             }
             encoded_bytes += size;
             rows.push((key, value));
-            remaining -= 1;
         }
         if remaining == 0 || page.next.is_none() {
-            return Ok(rows);
+            return Ok((rows, page.next.is_none()));
         }
         cursor = page.next;
     }
-}
-
-async fn delete_rows<S: NamespaceStore>(
-    ctx: &TimerCtx<'_, S>,
-    rows: Vec<(Key, Value)>,
-) -> Result<(), StoreError> {
-    let mut batch = Batch::new();
-    for (key, value) in rows {
-        let mut candidate = batch
-            .clone()
-            .require(Precondition::Equals(key.clone(), value.clone()))
-            .delete(key.clone());
-        if candidate.validate(&StoreCapabilities::full()).is_err() {
-            ctx.store.apply(ctx.partition, batch).await?;
-            candidate = Batch::new()
-                .require(Precondition::Equals(key.clone(), value))
-                .delete(key);
-        }
-        batch = candidate;
-    }
-    if !batch.writes.is_empty() {
-        ctx.store.apply(ctx.partition, batch).await?;
-    }
-    // A raced cleanup leaves rows for the next fire, which skips them via rh.
-    Ok(())
 }

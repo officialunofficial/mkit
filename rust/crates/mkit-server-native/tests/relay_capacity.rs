@@ -25,8 +25,17 @@ fn sql_soft_limit_reserves_space_for_guarded_relay_scan_progress() {
     let source = source();
     let queued = keys::relay(1);
     let row = Value::new(b"queued relay".to_vec());
+    let old_timer = keys::timer(1, 3, b"");
     assert_eq!(
         block_on(uncapped.apply(&source, Batch::new().put(queued.clone(), row.clone()))).unwrap(),
+        BatchOutcome::Committed
+    );
+    assert_eq!(
+        block_on(uncapped.apply(
+            &source,
+            Batch::new().put(old_timer.clone(), Value::default())
+        ))
+        .unwrap(),
         BatchOutcome::Committed
     );
     drop(uncapped);
@@ -84,10 +93,46 @@ fn sql_soft_limit_reserves_space_for_guarded_relay_scan_progress() {
     assert_eq!(block_on(capped.get(&source, &queued)).unwrap(), None);
     assert_eq!(block_on(capped.get(&source, &rs)).unwrap(), Some(second));
 
+    let next_timer = keys::timer(2, 3, b"");
+    let next_turn = codec::encode_u64(1);
+    assert_eq!(
+        block_on(
+            capped.apply(
+                &source,
+                Batch::new()
+                    .require(Precondition::Equals(old_timer.clone(), Value::default()))
+                    .delete(old_timer.clone())
+                    .put(next_timer.clone(), next_turn.clone())
+            )
+        )
+        .unwrap(),
+        BatchOutcome::Committed
+    );
+    assert_eq!(block_on(capped.get(&source, &old_timer)).unwrap(), None);
+    assert_eq!(
+        block_on(capped.get(&source, &next_timer)).unwrap(),
+        Some(next_turn)
+    );
+
     // A caller cannot use an unguarded rs put or mix it with an unrelated put
     // to bypass the soft limit.
     assert!(matches!(
         block_on(capped.apply(&source, Batch::new().put(rs.clone(), Value::default()))),
+        Err(StoreError::Full)
+    ));
+    assert!(matches!(
+        block_on(
+            capped.apply(
+                &source,
+                Batch::new()
+                    .require(Precondition::Equals(
+                        next_timer.clone(),
+                        codec::encode_u64(1)
+                    ))
+                    .delete(next_timer)
+                    .put(keys::timer(3, 2, b""), codec::encode_u64(2))
+            )
+        ),
         Err(StoreError::Full)
     ));
     assert!(matches!(

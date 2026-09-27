@@ -50,8 +50,9 @@ pub(super) fn get_many_sql(n: usize) -> String {
 /// With a [`Capacity`], an ordinary batch holding a put returns
 /// [`StoreError::Full`] once the database uses [`Capacity::soft_limit`] bytes
 /// or more, checked inside its transaction. Delete-only batches and bounded,
-/// guarded relay-scan checkpoints may use the reserve above that limit; a
-/// full ref shard must still be able to advance past a failed relay target.
+/// guarded relay-scan checkpoints and relay timer reschedules may use the
+/// reserve above that limit; a full ref shard must still be able to advance
+/// past a failed relay target.
 /// An engine `Full` on a delete-only batch is reported as
 /// [`StoreError::Unavailable`], never `Full`.
 ///
@@ -198,6 +199,7 @@ fn check_and_write<C: SqlConn>(
     if let Some(limit) = soft_limit
         && batch.has_put()
         && !is_relay_scan_checkpoint(&batch)
+        && !is_relay_timer_reschedule(&batch)
         && conn.size_bytes()? >= limit
     {
         return Err(SqlError::Full);
@@ -234,6 +236,44 @@ fn is_relay_scan_checkpoint(batch: &Batch) -> bool {
         Write::Put(..) => false,
     });
     guarded && only_cleanup && scan_puts == 1
+}
+
+// A relay timer moves one bounded control row, retaining the retry turn even
+// when the source has reached its soft capacity. The old row is guarded and
+// deleted first; this exception cannot create another timer or write data.
+fn is_relay_timer_reschedule(batch: &Batch) -> bool {
+    let (
+        [Precondition::Equals(old_key, old_value)],
+        [Write::Delete(deleted), Write::Put(new_key, new_value)],
+    ) = (batch.preconditions.as_slice(), batch.writes.as_slice())
+    else {
+        return false;
+    };
+    if old_key != deleted
+        || (!old_value.as_bytes().is_empty() && codec::decode_u64(old_value).is_err())
+        || codec::decode_u64(new_value).is_err()
+    {
+        return false;
+    }
+    let (
+        Some(keys::ParsedKey::Timer {
+            due_at_ms: old_due,
+            kind: old_kind,
+            reference: old_ref,
+        }),
+        Some(keys::ParsedKey::Timer {
+            due_at_ms: new_due,
+            kind: new_kind,
+            reference: new_ref,
+        }),
+    ) = (keys::parse(old_key), keys::parse(new_key))
+    else {
+        return false;
+    };
+    old_kind == crate::timers::registry::kinds::RELAY.get()
+        && new_kind == old_kind
+        && old_ref == new_ref
+        && new_due > old_due
 }
 
 fn entry(mut row: Row) -> Result<(Key, Value), SqlError> {

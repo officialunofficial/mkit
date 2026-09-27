@@ -15,6 +15,7 @@ use crate::{
     Batch, BatchOutcome, BoxFuture, Cursor, ManualClock, MemoryKv, NamespaceKey, PartitionStats,
     Precondition, RepoId, RepoName, ScanPage, StoreCapabilities, Value, Write,
 };
+use std::collections::BTreeSet;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -107,6 +108,10 @@ struct Instrumented {
     applies: Arc<Mutex<Vec<(Partition, Batch)>>>,
     short_pages: bool,
     fail_watermark_after_apply: bool,
+    reject: Mutex<BTreeSet<Partition>>,
+    fail_first: Mutex<BTreeSet<Partition>>,
+    successful: Mutex<Vec<(Partition, Batch)>>,
+    scan_conflict: AtomicBool,
 }
 impl Instrumented {
     fn new() -> Self {
@@ -122,6 +127,10 @@ impl Instrumented {
             applies: Arc::new(Mutex::new(Vec::new())),
             short_pages: false,
             fail_watermark_after_apply: false,
+            reject: Mutex::default(),
+            fail_first: Mutex::default(),
+            successful: Mutex::default(),
+            scan_conflict: AtomicBool::new(false),
         }
     }
 }
@@ -178,7 +187,11 @@ impl NamespaceStore for Instrumented {
     async fn apply(&self, p: &Partition, b: Batch) -> Result<BatchOutcome, StoreError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.applies.lock().unwrap().push((p.clone(), b.clone()));
-        if self.fail_target.as_ref() == Some(p) || self.fail_targets.contains(p) {
+        if self.fail_target.as_ref() == Some(p)
+            || self.fail_targets.contains(p)
+            || self.reject.lock().unwrap().contains(p)
+            || self.fail_first.lock().unwrap().remove(p)
+        {
             return Err(StoreError::Full);
         }
         if b.writes.iter().any(|w| matches!(w,Write::Delete(k) if matches!(keys::parse(k),Some(keys::ParsedKey::Relay(_))))) && self.fail_delete.swap(false,Ordering::SeqCst) { return Err(StoreError::Full); }
@@ -194,7 +207,21 @@ impl NamespaceStore for Instrumented {
                 )
                 .await?;
         }
-        self.inner.apply(p, b).await
+        let scan_key = keys::relay_scan();
+        if p == &source()
+            && self.scan_conflict.load(Ordering::SeqCst)
+            && let Some(index) = b.preconditions.iter().position(|pre| {
+                matches!(pre, Precondition::Absent(k) | Precondition::Equals(k, _) if k == &scan_key)
+            })
+        {
+            self.scan_conflict.store(false, Ordering::SeqCst);
+            return Ok(BatchOutcome::PreconditionFailed { index, observed: None });
+        }
+        let result = self.inner.apply(p, b.clone()).await?;
+        if result == BatchOutcome::Committed {
+            self.successful.lock().unwrap().push((p.clone(), b));
+        }
+        Ok(result)
     }
     async fn stats(&self, p: &Partition) -> Result<PartitionStats, StoreError> {
         self.inner.stats(p).await
@@ -440,7 +467,9 @@ async fn corrupt_row_delivers_decodable_prefix_then_stops() {
     append(&s, &target(0), vec![(key(), Value::default())], 50).await;
     s.apply(
         &source(),
-        Batch::new().put(keys::relay(2), Value::new(b"bad".to_vec())),
+        Batch::new()
+            .put(keys::relay(2), Value::new(b"bad".to_vec()))
+            .put(keys::outbox_sequence(), codec::encode_u64(2)),
     )
     .await
     .unwrap();
@@ -1112,4 +1141,600 @@ async fn blocked_prefix_does_not_exceed_four_times_the_row_budget() {
     };
     fire(&h, &s).await.unwrap();
     assert_eq!(s.scanned.load(Ordering::SeqCst), 8);
+}
+
+#[tokio::test]
+async fn malformed_queue_key_before_first_sequence_blocks_later_delivery() {
+    for corrupt_key in [keys::relay(0), Key::new(b"or\0".to_vec())] {
+        let s = memory();
+        let h = handler(Instrumented::new());
+        let valid = RelayV1 {
+            at_ms: 50,
+            target: target(0),
+            puts: vec![(order_key(2), codec::encode_u64(2))],
+        };
+        s.apply(
+            &source(),
+            Batch::new()
+                .put(corrupt_key.clone(), Value::new(b"bad".to_vec()))
+                .put(keys::relay(2), codec::encode_relay(&valid).unwrap())
+                .put(keys::outbox_sequence(), codec::encode_u64(2)),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(fire(&h, &s).await.unwrap(), Fired::Retry),
+            "malformed key {corrupt_key:?} was skipped"
+        );
+        assert!(s.get(&source(), &corrupt_key).await.unwrap().is_some());
+        assert!(s.get(&source(), &keys::relay(2)).await.unwrap().is_some());
+        assert!(
+            h.target
+                .get(&target(0), &order_key(2))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            h.target
+                .get(&target(0), &keys::relay_high_water(&source()).unwrap())
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
+#[tokio::test]
+async fn malformed_suffix_between_cursor_and_next_sequence_blocks_delivery() {
+    let s = memory();
+    let h = handler(Instrumented::new());
+    let malformed = Key::new([keys::relay(1).as_bytes(), b"\xff"].concat());
+    assert!(keys::relay(1) < malformed && malformed < keys::relay(2));
+    let valid = RelayV1 {
+        at_ms: 50,
+        target: target(0),
+        puts: vec![(order_key(2), codec::encode_u64(2))],
+    };
+    let scan = codec::RelayScanV1 {
+        cycle_end: 2,
+        cursor: 1,
+        blocked: vec![],
+    };
+    s.apply(
+        &source(),
+        Batch::new()
+            .put(malformed.clone(), Value::new(b"bad".to_vec()))
+            .put(keys::relay(2), codec::encode_relay(&valid).unwrap())
+            .put(keys::outbox_sequence(), codec::encode_u64(2))
+            .put(keys::relay_scan(), codec::encode_relay_scan(&scan).unwrap()),
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(fire(&h, &s).await.unwrap(), Fired::Retry),
+        "malformed suffix after cursor was skipped"
+    );
+    assert!(s.get(&source(), &malformed).await.unwrap().is_some());
+    assert!(
+        h.target
+            .get(&target(0), &order_key(2))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        h.target
+            .get(&target(0), &keys::relay_high_water(&source()).unwrap())
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+fn order_key(seq: u64) -> Key {
+    Key::new([b"delivered/".as_slice(), &seq.to_be_bytes()].concat())
+}
+
+async fn plant_schedule<S: NamespaceStore>(store: &S, schedule: &[u16]) {
+    for (offset, chunk) in schedule.chunks(90).enumerate() {
+        let mut batch = Batch::new();
+        for (index, destination) in chunk.iter().enumerate() {
+            let seq = u64::try_from(offset * 90 + index + 1).unwrap();
+            let row = RelayV1 {
+                at_ms: 50,
+                target: target(*destination),
+                puts: vec![(order_key(seq), codec::encode_u64(seq))],
+            };
+            batch = batch.put(keys::relay(seq), codec::encode_relay(&row).unwrap());
+        }
+        assert_eq!(
+            store.apply(&source(), batch).await.unwrap(),
+            BatchOutcome::Committed
+        );
+    }
+    store
+        .apply(
+            &source(),
+            Batch::new().put(
+                keys::outbox_sequence(),
+                codec::encode_u64(schedule.len() as u64),
+            ),
+        )
+        .await
+        .unwrap();
+}
+
+fn scan_budget(rows: u32, targets: u32) -> RelayBudget {
+    RelayBudget {
+        max_rows: rows,
+        max_targets: targets,
+        max_target_calls: Some(2),
+    }
+}
+
+#[tokio::test]
+async fn durable_scan_reaches_healthy_row_after_512_failed_rows_and_retries_next_cycle() {
+    let mut timer_value = Value::default();
+    let source_store = Instrumented::new();
+    let t = Instrumented::new();
+    t.reject.lock().unwrap().insert(target(0));
+    let mut h = RelayHandler {
+        budget: scan_budget(128, 8),
+        ..handler(t)
+    };
+    let mut schedule = vec![0; 512];
+    schedule.push(1);
+    plant_schedule(&source_store, &schedule).await;
+    for _ in 0..3 {
+        let inspected_before = source_store.scanned.load(Ordering::SeqCst);
+        fire_with_value(&h, &source_store, &mut timer_value)
+            .await
+            .unwrap();
+        assert!(source_store.scanned.load(Ordering::SeqCst) - inspected_before <= 512);
+        // Simulate an isolate/process being recreated between every fire.
+        h = RelayHandler {
+            target: h.target,
+            hook: NoHook,
+            budget: scan_budget(128, 8),
+        };
+    }
+    assert!(
+        h.target
+            .get(&target(1), &order_key(513))
+            .await
+            .unwrap()
+            .is_some(),
+        "bounded durable scan never reached the healthy row beyond its first window"
+    );
+    assert_eq!(queued(&source_store).await.len(), 512);
+    assert!(
+        h.target
+            .applies
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(p, _)| p == &target(0))
+            .count()
+            >= 2,
+        "blocked A was not retried after a completed scan cycle"
+    );
+    h.target.reject.lock().unwrap().clear();
+    for _ in 0..12 {
+        fire_with_value(&h, &source_store, &mut timer_value)
+            .await
+            .unwrap();
+        if queued(&source_store).await.is_empty() {
+            break;
+        }
+    }
+    assert!(
+        queued(&source_store).await.is_empty(),
+        "blocked target was not retried after cycle reset"
+    );
+    assert!(
+        h.target
+            .get(&target(0), &order_key(1))
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        h.target
+            .get(&target(0), &order_key(512))
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn durable_scan_keeps_seq_600_behind_failed_seq_1_until_head_restart() {
+    let mut timer_value = Value::default();
+    let s = memory();
+    let t = Instrumented::new();
+    t.fail_first.lock().unwrap().insert(target(0));
+    let h = RelayHandler {
+        budget: scan_budget(128, 8),
+        ..handler(t)
+    };
+    let mut schedule = vec![1; 600];
+    schedule[0] = 0;
+    schedule[599] = 0;
+    plant_schedule(&s, &schedule).await;
+    for _ in 0..20 {
+        fire_with_value(&h, &s, &mut timer_value).await.unwrap();
+        let delivered_old = h
+            .target
+            .get(&target(0), &order_key(1))
+            .await
+            .unwrap()
+            .is_some();
+        let delivered_new = h
+            .target
+            .get(&target(0), &order_key(600))
+            .await
+            .unwrap()
+            .is_some();
+        assert!(
+            !delivered_new || delivered_old,
+            "watermark skipped an older undelivered target row"
+        );
+        if queued(&s).await.is_empty() {
+            break;
+        }
+    }
+    assert!(queued(&s).await.is_empty());
+    assert!(
+        h.target
+            .get(&target(0), &order_key(1))
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        h.target
+            .get(&target(0), &order_key(600))
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let seen = committed_sequences(&h.target, &target(0));
+    assert_eq!(seen, vec![1, 600]);
+}
+
+fn committed_sequences(store: &Instrumented, destination: &Partition) -> Vec<u64> {
+    store
+        .successful
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(p, _)| p == destination)
+        .flat_map(|(_, batch)| batch.writes.iter())
+        .filter_map(|write| match write {
+            Write::Put(k, v) if k.as_bytes().starts_with(b"delivered/") => {
+                Some(codec::decode_u64(v).unwrap())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn durable_scan_overflow_33_failures_restarts_safely_and_recovers_all_rows() {
+    let mut timer_value = Value::default();
+    let s = memory();
+    let t = Instrumented::new();
+    *t.reject.lock().unwrap() = (0..33).map(target).collect();
+    let h = RelayHandler {
+        budget: scan_budget(4, 8),
+        ..handler(t)
+    };
+    let mut schedule: Vec<_> = (0..33).collect();
+    schedule.extend(0..34);
+    plant_schedule(&s, &schedule).await;
+    let mut first_overflow_attempts = None;
+    let mut retried_after_overflow = false;
+    for _ in 0..80 {
+        fire_with_value(&h, &s, &mut timer_value).await.unwrap();
+        let attempts = h
+            .target
+            .applies
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(p, _)| p == &target(0))
+            .count();
+        if let Some(first) = first_overflow_attempts {
+            retried_after_overflow |= attempts > first;
+        }
+        let state = s
+            .get(&source(), &keys::relay_scan())
+            .await
+            .unwrap()
+            .unwrap();
+        let state = codec::decode_relay_scan(&state).unwrap();
+        if state.cursor == state.cycle_end && state.blocked.len() == codec::MAX_BLOCKED_TARGETS {
+            first_overflow_attempts.get_or_insert(attempts);
+        }
+    }
+    assert!(
+        first_overflow_attempts.is_some(),
+        "33rd failed target did not end the cycle"
+    );
+    assert!(
+        retried_after_overflow,
+        "first failed target was not retried after cycle reset"
+    );
+    assert!(
+        s.get(&source(), &keys::relay(33)).await.unwrap().is_some(),
+        "overflow lost the 33rd target's row"
+    );
+    assert!(
+        h.target
+            .get(&target(33), &order_key(67))
+            .await
+            .unwrap()
+            .is_none(),
+        "healthy target beyond 33 failed targets was visited before recovery"
+    );
+    for destination in 0..33 {
+        assert!(committed_sequences(&h.target, &target(destination)).is_empty());
+    }
+    h.target.reject.lock().unwrap().clear();
+    for _ in 0..80 {
+        fire_with_value(&h, &s, &mut timer_value).await.unwrap();
+        if queued(&s).await.is_empty() {
+            break;
+        }
+    }
+    assert!(queued(&s).await.is_empty());
+    for destination in 0..34 {
+        let actual = committed_sequences(&h.target, &target(destination));
+        let expected: Vec<_> = schedule
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| **p == destination)
+            .map(|(i, _)| i as u64 + 1)
+            .collect();
+        assert_eq!(actual, expected, "overflow reordered target {destination}");
+    }
+}
+
+#[tokio::test]
+async fn overflowing_target_does_not_apply_grouped_row_past_stop_point() {
+    let s = memory();
+    let t = Instrumented::new();
+    *t.reject.lock().unwrap() = (1..=33).map(target).collect();
+    let h = RelayHandler {
+        budget: scan_budget(64, 64),
+        ..handler(t)
+    };
+    let mut schedule = vec![0];
+    schedule.extend(1..=33);
+    schedule.push(0);
+    plant_schedule(&s, &schedule).await;
+    let mut timer_value = Value::default();
+    fire_with_value(&h, &s, &mut timer_value).await.unwrap();
+    assert!(
+        h.target
+            .get(&target(0), &order_key(1))
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        h.target
+            .get(&target(0), &order_key(35))
+            .await
+            .unwrap()
+            .is_none(),
+        "overflow at seq34 must stop before grouped A row seq35"
+    );
+    assert_eq!(
+        h.target
+            .get(&target(0), &keys::relay_high_water(&source()).unwrap())
+            .await
+            .unwrap(),
+        Some(codec::encode_u64(1))
+    );
+    assert!(s.get(&source(), &keys::relay(35)).await.unwrap().is_some());
+    let state = s
+        .get(&source(), &keys::relay_scan())
+        .await
+        .unwrap()
+        .unwrap();
+    let state = codec::decode_relay_scan(&state).unwrap();
+    assert_eq!(state.cursor, 35);
+    assert_eq!(state.blocked.len(), 32);
+    h.target.reject.lock().unwrap().clear();
+    for _ in 0..16 {
+        fire_with_value(&h, &s, &mut timer_value).await.unwrap();
+        if queued(&s).await.is_empty() {
+            break;
+        }
+    }
+    assert!(queued(&s).await.is_empty());
+    assert_eq!(committed_sequences(&h.target, &target(0)), vec![1, 35]);
+}
+
+#[tokio::test]
+async fn durable_scan_guard_conflict_keeps_cleanup_and_state_atomic() {
+    let mut timer_value = Value::default();
+    let s = Instrumented::new();
+    let h = handler(Instrumented::new());
+    plant_schedule(&s, &[0, 1, 0]).await;
+    s.scan_conflict.store(true, Ordering::SeqCst);
+    let result = fire_with_value(&h, &s, &mut timer_value).await.unwrap();
+    assert!(
+        matches!(result, Fired::Retry),
+        "source scan-state race must retry"
+    );
+    assert_eq!(
+        queued(&s).await.len(),
+        3,
+        "failed scan guard deleted source rows"
+    );
+    assert!(
+        s.get(&source(), &keys::relay_scan())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    for _ in 0..4 {
+        fire_with_value(&h, &s, &mut timer_value).await.unwrap();
+        if queued(&s).await.is_empty() {
+            break;
+        }
+    }
+    assert!(queued(&s).await.is_empty());
+    assert_eq!(committed_sequences(&h.target, &target(0)), vec![1, 3]);
+    assert_eq!(committed_sequences(&h.target, &target(1)), vec![2]);
+}
+
+#[tokio::test]
+async fn one_target_slot_eventually_visits_healthy_b_after_a_fails() {
+    let s = memory();
+    let t = Instrumented::new();
+    t.reject.lock().unwrap().insert(target(0));
+    let h = RelayHandler {
+        budget: scan_budget(2, 1),
+        ..handler(t)
+    };
+    plant_schedule(&s, &[0, 1]).await;
+    let mut timer_value = Value::default();
+    for _ in 0..5 {
+        fire_with_value(&h, &s, &mut timer_value).await.unwrap();
+        if h.target
+            .get(&target(1), &order_key(2))
+            .await
+            .unwrap()
+            .is_some()
+        {
+            break;
+        }
+    }
+    assert!(
+        h.target
+            .get(&target(1), &order_key(2))
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(s.get(&source(), &keys::relay(1)).await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn two_failing_targets_cannot_starve_a_healthy_target_with_one_target_slot() {
+    let s = memory();
+    let t = Instrumented::new();
+    *t.reject.lock().unwrap() = [target(0), target(1)].into();
+    let h = RelayHandler {
+        budget: scan_budget(1, 1),
+        ..handler(t)
+    };
+    plant_schedule(&s, &[0, 0, 2, 2, 1]).await;
+    let mut timer_value = Value::default();
+    for _ in 0..20 {
+        fire_with_value(&h, &s, &mut timer_value).await.unwrap();
+        if committed_sequences(&h.target, &target(2)) == [3, 4] {
+            break;
+        }
+    }
+    assert_eq!(committed_sequences(&h.target, &target(2)), vec![3, 4]);
+    assert!(s.get(&source(), &keys::relay(1)).await.unwrap().is_some());
+    assert!(s.get(&source(), &keys::relay(5)).await.unwrap().is_some());
+}
+
+async fn fire_with_value<S: NamespaceStore, T: NamespaceStore, H: RelayHook>(
+    h: &RelayHandler<T, H>,
+    store: &S,
+    timer_value: &mut Value,
+) -> Result<Fired, StoreError> {
+    let outcome = h
+        .fire(
+            &TimerCtx {
+                store,
+                partition: &source(),
+                now_ms: 100,
+            },
+            &DueTimer {
+                due_at_ms: 100,
+                kind: kinds::RELAY,
+                reference: bytes::Bytes::default(),
+                value: timer_value.clone(),
+            },
+        )
+        .await?;
+    match &outcome {
+        Fired::Done(batch) => {
+            assert_eq!(
+                store.apply(&source(), batch.clone()).await?,
+                BatchOutcome::Committed
+            );
+        }
+        Fired::Reschedule { value, batch, .. } => {
+            assert_eq!(
+                store.apply(&source(), batch.clone()).await?,
+                BatchOutcome::Committed
+            );
+            *timer_value = value.clone();
+        }
+        Fired::Retry => {}
+    }
+    Ok(outcome)
+}
+
+proptest::proptest! {
+    #![proptest_config({
+        let mut cfg = proptest::prelude::ProptestConfig::with_cases(48);
+        cfg.failure_persistence = None;
+        cfg
+    })]
+    #[test]
+    fn random_relay_schedules_preserve_order_and_healthy_liveness(
+        schedule in proptest::collection::vec(0u16..5, 1..41),
+        permanently_failing in 0u16..3,
+        rows in 1u32..9,
+        targets in 1u32..5,
+    ) {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let s = memory();
+            let t = Instrumented::new();
+            *t.reject.lock().unwrap() = (0..permanently_failing).map(target).collect();
+            let h = RelayHandler { budget: scan_budget(rows, targets), ..handler(t) };
+            plant_schedule(&s, &schedule).await;
+            let mut timer_value = Value::default();
+            for _ in 0..240 {
+                fire_with_value(&h, &s, &mut timer_value).await.unwrap();
+                let pending = queued(&s).await;
+                for (key, value) in &pending {
+                    let Some(keys::ParsedKey::Relay(seq)) = keys::parse(key) else { panic!("bad fixture key") };
+                    let destination = codec::decode_relay(value).unwrap().target;
+                    let watermark = h.target.get(&destination, &keys::relay_high_water(&source()).unwrap())
+                        .await.unwrap().map_or(0, |v| codec::decode_u64(&v).unwrap());
+                    if watermark >= seq {
+                        assert!(h.target.get(&destination, &order_key(seq)).await.unwrap().is_some(),
+                            "target watermark passed an undelivered older row");
+                    }
+                }
+                if pending.iter().all(|(_, v)| {
+                    let p = codec::decode_relay(v).unwrap().target;
+                    h.target.reject.lock().unwrap().contains(&p)
+                }) { break; }
+            }
+            for destination in 0..5 {
+                let expected: Vec<_> = schedule.iter().enumerate()
+                    .filter(|(_, p)| **p == destination)
+                    .map(|(i, _)| i as u64 + 1).collect();
+                let actual = committed_sequences(&h.target, &target(destination));
+                if destination < permanently_failing {
+                    assert!(actual.is_empty());
+                } else {
+                    assert_eq!(actual, expected, "healthy target {destination} starved or reordered");
+                }
+            }
+        });
+    }
 }

@@ -1,5 +1,16 @@
 //! Source-side, at-least-once outbox delivery. Target watermarks make
 //! redelivery idempotent, including a crash before source cleanup.
+//!
+//! Each source persists one relay scan cycle in `rs`: the `os` snapshot at
+//! cycle start, the last inspected sequence, and up to 32 blocked targets.
+//! During an active cycle (`cursor < cycle_end`), every undelivered row with
+//! `seq <= cursor` has its target in `blocked`. A completed marker
+//! (`cursor == cycle_end`) is exempt: the next fire resets the cursor and
+//! blocked set before scanning from the head. Target batches apply each
+//! target's rows in ascending sequence. If an older row is behind the active
+//! cursor, its target is blocked; if it lies ahead, ascending scanning reaches
+//! it first. Thus no later row for a target is applied while an older one is
+//! undelivered. The cycle end excludes new rows until the next cycle.
 
 mod deliver;
 mod hook;
