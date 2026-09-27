@@ -19,11 +19,5 @@
   "packId": "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVU=",
   "createsNamespace": false,
   "createsRepo": false,
-  "newToRepoBytes": "8192",
-  "credentialHeaders": [
-    {
-      "name": "Payment-Authorization",
-      "value": "Payment fake-example-credential-not-valid"
-    }
-  ]
+  "newToRepoBytes": "8192"
 }

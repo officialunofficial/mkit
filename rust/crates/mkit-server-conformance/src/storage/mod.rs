@@ -94,6 +94,7 @@ pub mod blob;
 pub mod content_index;
 pub mod durability;
 pub mod kv;
+pub mod kv_cases;
 mod macros;
 
 /// How a case ended, when it did not fail.
@@ -108,7 +109,7 @@ pub enum CaseResult {
 /// A case's result: `Err` carries the failure message.
 pub type Outcome = Result<CaseResult, String>;
 
-/// A case, type-erased for runners that iterate [`kv_cases`] or
+/// A case, type-erased for runners that iterate [`kv_cases()`] or
 /// [`blob_cases`].
 pub type CaseFn<H> = fn(H) -> BoxFuture<'static, Outcome>;
 

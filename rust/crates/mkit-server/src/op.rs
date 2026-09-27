@@ -257,7 +257,7 @@ pub struct GrantRef {
 }
 
 /// Facts the Authorizer established, carried into `apply` as
-/// preconditions. Always the default in M0; M2 (WP-2.6) sets `grant` so the
+/// preconditions. M1 establishes `owner`; M2 (WP-2.6) sets `grant` so the
 /// pipeline can require `grant.epoch` when it commits.
 ///
 /// Non-exhaustive: start from `AuthzFacts::default()` and set fields.

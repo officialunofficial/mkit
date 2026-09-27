@@ -27,12 +27,15 @@ impl TimerKind {
 /// |---|---|
 /// | 0 | Invalid |
 /// | 1 | LEASE_SWEEP (WP-1.25) |
-/// | 2..=0xEF | Production, currently unallocated |
+/// | 2 | TICKET_EXPIRY (handler added in WP-1.14) |
+/// | 3..=0xEF | Production, unallocated |
 /// | 0xF0..=0xFE | Reserved for tests |
 /// | 0xFF | TEST (`test-faults` only) |
 pub mod kinds {
     /// Expired coordinator epoch-lease table rows.
     pub const LEASE_SWEEP: super::TimerKind = super::TimerKind::new(1);
+    /// Ticket expiry. Allocating the kind does not register a handler.
+    pub const TICKET_EXPIRY: super::TimerKind = super::TimerKind::new(2);
     /// Ref deletion used only by test drivers and directives.
     #[cfg(feature = "test-faults")]
     pub const TEST: super::TimerKind = super::TimerKind::new(0xFF);

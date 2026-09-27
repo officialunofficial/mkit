@@ -14,11 +14,17 @@ use super::{
 use crate::wire::client::{Rpc, frame};
 use crate::wire::sign::pack_commitment;
 
-fn identities(name_a: &str, name_b: &str) -> (String, String) {
-    (
-        format!("ed25519-{}/{name_a}", "a".repeat(64)),
-        format!("0x{}/{name_b}", "b".repeat(40)),
-    )
+pub(super) fn identities(
+    ctx: &Ctx,
+    name_a: &str,
+    name_b: &str,
+) -> Result<(String, String), Failure> {
+    let a = ctx.v2_signer("repository-a")?;
+    let b = ctx.v2_signer("repository-b")?;
+    Ok((
+        format!("ed25519-{}/{name_a}", a.public_key_hex()),
+        format!("ed25519-{}/{name_b}", b.public_key_hex()),
+    ))
 }
 
 fn read_headers(ctx: &Ctx, rpc: Rpc, body: &[u8], repository: &str) -> Vec<(String, String)> {
@@ -41,7 +47,7 @@ async fn list(
     ctx.client().unary(Rpc::ListRefs, body, &headers).await
 }
 
-async fn read(
+pub(super) async fn read(
     ctx: &Ctx,
     repository: &str,
     leaf: &str,
@@ -56,15 +62,21 @@ async fn read(
 }
 
 fn signed_update(ctx: &Ctx, repository: &str, leaf: &str, id: &[u8]) -> Result<Signed, Failure> {
+    let a = ctx.v2_signer("repository-a")?;
+    let label = if repository.starts_with(&format!("ed25519-{}/", a.public_key_hex())) {
+        "repository-a"
+    } else {
+        "repository-b"
+    };
     Ok(sign_unary(
-        &ctx.v2_signer(repository)?,
+        &ctx.v2_signer(label)?,
         Rpc::UpdateRef,
         &update_req(&ctx.head(leaf), Exp::Any, id),
         |env| repository.clone_into(&mut env.repository),
     ))
 }
 
-async fn set(ctx: &Ctx, repository: &str, leaf: &str, id: &[u8]) -> CaseResult {
+pub(super) async fn set(ctx: &Ctx, repository: &str, leaf: &str, id: &[u8]) -> CaseResult {
     want_ok(
         ctx.send::<UpdateRefResponse>(&signed_update(ctx, repository, leaf, id)?)
             .await?,
@@ -75,7 +87,7 @@ async fn set(ctx: &Ctx, repository: &str, leaf: &str, id: &[u8]) -> CaseResult {
 
 pub(super) async fn single_header_mismatch(ctx: Ctx) -> CaseResult {
     // Both bare and namespaced spellings are well formed in Single mode.
-    let (namespaced, _) = identities("other", "other");
+    let namespaced = format!("ed25519-{}/other", "a".repeat(64));
     for repository in ["conformance-other-repository".to_owned(), namespaced] {
         want_code(
             list(&ctx, &repository).await?,
@@ -120,7 +132,7 @@ pub(super) async fn single_signed_missing(ctx: Ctx) -> CaseResult {
 }
 
 async fn isolated_pair(ctx: &Ctx, name_a: &str, name_b: &str) -> CaseResult {
-    let (repo_a, repo_b) = identities(name_a, name_b);
+    let (repo_a, repo_b) = identities(ctx, name_a, name_b)?;
     set(ctx, &repo_a, "main", &A).await?;
     set(ctx, &repo_b, "main", &B).await?;
     set(ctx, &repo_a, "only-a", &A).await?;
@@ -176,7 +188,7 @@ pub(super) async fn isolation_refs(ctx: Ctx) -> CaseResult {
 }
 
 pub(super) async fn signature_mismatch(ctx: Ctx) -> CaseResult {
-    let (repo_a, repo_b) = identities("one", "two");
+    let (repo_a, repo_b) = identities(&ctx, "one", "two")?;
     set(&ctx, &repo_a, "main", &A).await?;
     set(&ctx, &repo_b, "main", &B).await?;
     let op = signed_update(&ctx, &repo_a, "main", &C)?.with_header("x-repository", &repo_b);
@@ -205,7 +217,7 @@ pub(super) async fn multi_invalid(ctx: Ctx) -> CaseResult {
             "invalid_argument",
             "Multi ListRefs without a valid identity",
         )?;
-        let mut op = signed_update(&ctx, &identities("one", "two").0, "main", &A)?;
+        let mut op = signed_update(&ctx, &identities(&ctx, "one", "two")?.0, "main", &A)?;
         op = op.with_header("x-repository", repository);
         want_code(
             ctx.send::<UpdateRefResponse>(&op).await?,
@@ -221,7 +233,7 @@ pub(super) async fn multi_invalid(ctx: Ctx) -> CaseResult {
         "invalid_argument",
         "Multi ListRefs with absent header",
     )?;
-    let mut op = signed_update(&ctx, &identities("one", "two").0, "main", &A)?;
+    let mut op = signed_update(&ctx, &identities(&ctx, "one", "two")?.0, "main", &A)?;
     op.headers.retain(|(name, _)| name != "x-repository");
     want_code(
         ctx.send::<UpdateRefResponse>(&op).await?,
@@ -233,7 +245,7 @@ pub(super) async fn multi_invalid(ctx: Ctx) -> CaseResult {
 
 pub(super) async fn read_missing_repo(ctx: Ctx) -> CaseResult {
     let name = format!("missing-{}", to_hex(&hash(ctx.ns().as_bytes())));
-    let (repository, _) = identities(&name, "unused");
+    let (repository, _) = identities(&ctx, &name, "unused")?;
     want_code(
         list(&ctx, &repository).await?,
         "not_found",
@@ -248,7 +260,7 @@ pub(super) async fn read_missing_repo(ctx: Ctx) -> CaseResult {
 }
 
 pub(super) async fn packs_need_membership(ctx: Ctx) -> CaseResult {
-    let (repository, _) = identities("packs", "unused");
+    let (repository, _) = identities(&ctx, "packs", "unused")?;
     set(&ctx, &repository, "main", &A).await?;
     let id = hash(b"multi-repository pack");
     let body = PackExistsRequest {
@@ -282,7 +294,7 @@ pub(super) async fn packs_need_membership(ctx: Ctx) -> CaseResult {
         "Multi DownloadPack: {reply:?}"
     );
     let pack = b"multi-repository pack";
-    let signer = ctx.v2_signer("pack")?;
+    let signer = ctx.v2_signer("repository-a")?;
     let mut envelope = signer.envelope(
         Rpc::UploadPack.procedure(),
         pack_commitment(&id, pack.len() as u64),

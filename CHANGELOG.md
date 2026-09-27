@@ -29,6 +29,19 @@ train).
 
 ### Changed
 
+- *(server)* Multi addressing now defaults to an empty namespace allowlist and
+  owner writes. Namespace denials and non-owner writes return `permission_denied`
+  before allocation. Authorizer hooks can be additional checks or explicit
+  authority sources, with owner facts passed to Authorize and Admit. Startup
+  refuses incompatible write policies, an open authority hook, and `any` with
+  default admission unless explicitly overridden (D27; WP-1.5). Embedders select
+  these policies in core; adapter multi-mode configuration follows in WP-1.30.
+- *(server)* Add pure ref-shard planners and strict version-1 codecs for upload
+  tickets, reservations, local pack membership and outcome/relay queues (WP-1.7).
+  Shared counters and outbox sequence/backlog edits carry snapshot guards;
+  ticket expiry kind 2 is allocated without an RPC or timer handler. Storage
+  layout version stays 1.
+
 - *(server)* Add native `--sharding single|d34` (default `single`) for SQLite
   metadata. D34 co-locates each branch head and canonical packmap in one ref
   shard and requires that pairing for `AdvanceRefs`, rejecting others before
@@ -195,6 +208,9 @@ train).
 
 ### Added
 
+- *(spec)* Add bounded admission credential headers to hooks.v1 `AdmitRequest` (WP-3.6b).
+- *(docs)* Add an unsupported TypeScript `mppx` admission Worker reference for
+  `mkit.server.hooks.v1`, with delayed settlement and optional signed hooks (WP-3.14).
 - *(core)* Add `pack::rewrite_excluding` and `pack::Rewritten` for budgeted
   pack rewrites: excluded objects are dropped, deltas with excluded direct
   bases become raw, and unchanged packs retain their exact bytes.

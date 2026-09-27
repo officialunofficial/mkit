@@ -125,6 +125,12 @@ pub enum Feature {
     MultiRepo,
     /// Epoch leases for D34 grant revocation (M1).
     EpochLeases,
+
+    /// Namespace allowlists and owner writes (M1). The profile's allowlist
+    /// admits each Multi case's derived `repository-a` and `repository-b`
+    /// keys and excludes `policy.non_allowlisted_namespace_denied`'s
+    /// `non-allowlisted` key (see [`super::sign::Signer::derive`]).
+    NamespacePolicy,
     /// Upload tickets and resumable parts (M1).
     Tickets,
     /// Write grants (M2).
@@ -147,7 +153,7 @@ pub enum Feature {
     Admin,
 }
 
-const FEATURE_NAMES: [(Feature, &str); 21] = [
+const FEATURE_NAMES: [(Feature, &str); 22] = [
     (Feature::Bearer, "bearer"),
     (Feature::AuthV2, "auth-v2"),
     (Feature::AtomicAdvance, "atomic-advance"),
@@ -159,6 +165,7 @@ const FEATURE_NAMES: [(Feature, &str); 21] = [
     (Feature::StrictGzipAuth, "strict-gzip-auth"),
     (Feature::MultiRepo, "multi-repo"),
     (Feature::EpochLeases, "epoch-leases"),
+    (Feature::NamespacePolicy, "namespace-policy"),
     (Feature::Tickets, "tickets"),
     (Feature::Grants, "grants"),
     (Feature::SignedReads, "signed-reads"),
