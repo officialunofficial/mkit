@@ -29,6 +29,11 @@ train).
   refuses incompatible write policies, an open authority hook, and `any` with
   default admission unless explicitly overridden (D27; WP-1.5). Embedders select
   these policies in core; adapter multi-mode configuration follows in WP-1.30.
+- *(server)* Add pure ref-shard planners and strict version-1 codecs for upload
+  tickets, reservations, local pack membership and outcome/relay queues (WP-1.7).
+  Shared counters and outbox sequence/backlog edits carry snapshot guards;
+  ticket expiry kind 2 is allocated without an RPC or timer handler. Storage
+  layout version stays 1.
 
 - *(server)* Add native `--sharding single|d34` (default `single`) for SQLite
   metadata. D34 co-locates each branch head and canonical packmap in one ref

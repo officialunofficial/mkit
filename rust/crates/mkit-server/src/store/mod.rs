@@ -17,8 +17,10 @@ mod error;
 pub mod keys;
 mod kv;
 mod maintenance;
+pub mod outbox;
 mod partition;
 pub mod read;
+pub mod tickets;
 
 pub use blob::{
     BlobBody, BlobKey, BlobMeta, BlobStore, ByteRange, CommitOutcome, MAX_BLOB_PIECE_BYTES,

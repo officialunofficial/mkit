@@ -1026,3 +1026,25 @@ SPEC-SERVER §6.2. `pipeline::tests::policy` covers the policy/principal/hook ma
 startup refusals, identical existing/missing repository denials, and empty
 coordinator/ref shards after every denial. Wire `policy.*` cases pin owner,
 non-owner and allowlist behavior. Grants and private reads remain M2.
+
+## Ticket, reservation and outbox rows keep exactly one outcome per reservation
+
+**Always:** a ticket has a reservation-derived id and a unique guarded `o` row.
+Only a still-Ticketed row can become terminal, in the same batch as ticket
+consumption, ref publication and local membership. Terminal outcomes stay
+durable until acknowledgement, which deletes their delivery index and subtracts
+the exact stored key/value byte count. Shared counters and sequence/backlog
+values are guarded once per batch.
+
+**Because:** consumption and expiry race; delivery may repeat or crash. An
+unguarded replacement could record two outcomes, erase a replacement ticket's
+index or lose membership while publishing refs.
+
+**If violated:** settlement can repeat, committed packs can disappear from
+repository membership, and backlog/caps can undercount durable obligations.
+
+**Enforced by:** `mkit-server/src/store/{tickets,outbox}.rs` pure planner tests,
+strict `store/codec.rs` decodes, and `mkit-server-conformance/src/storage/kv_cases.rs`
+creation, atomic publication, stale-ticket and acknowledgement cases over memory
+and SQLite. RPC composition and expiry are WP-1.9/1.10/1.14; WP-3.3 adds guarded
+Pending reservations, ReadServed, reconciliation and backlog enforcement.
