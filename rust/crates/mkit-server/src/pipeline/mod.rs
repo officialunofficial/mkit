@@ -38,12 +38,14 @@ use std::sync::Arc;
 
 use mkit_core::hash::{Hash, to_hex_bytes};
 use mkit_core::protocol::{AdvanceOutcome, PackKey};
+use mkit_core::repo_identity::Namespace;
 use mkit_core::write_auth::MAX_CLOCK_LEAD_MS;
 use tracing::Instrument;
 
 use crate::download::DOWNLOAD_CHUNK_MAX;
 use crate::error::{ADMISSION_CHALLENGE_TYPE, InvalidHeader, ServerError};
 use crate::op::{AuthzFacts, OpKind, Operation, Procedure, RefUpdate};
+use crate::policy::{AuthorizerRole, NamespacePolicy, WritePolicy};
 use crate::quota::{DEFAULT_WRITE_QUOTA, QuotaCharge, QuotaLimits, QuotaScope};
 use crate::refs::{self, strip_listed_prefix, validate_ref_name};
 use crate::replay::{ReplayDecision, StoredResult, UpdateRefResult, classify};
@@ -133,6 +135,10 @@ pub struct PipelineConfig {
     pub sharding: Sharding,
     /// How requests authenticate.
     pub auth: AuthMode,
+    /// Write authorization policy; Open for Single, Owner for Multi.
+    pub write_policy: WritePolicy,
+    /// Role of the authorizer hook, defaulting to an additional check.
+    pub authorizer_role: AuthorizerRole,
     /// Upload caps, supplied by the binding (used by M0-05b).
     pub upload_limits: UploadLimits,
     /// Largest download chunk (used by M0-05b).
@@ -154,7 +160,13 @@ impl PipelineConfig {
     #[must_use]
     pub fn new(addressing: Addressing, auth: AuthMode, upload_limits: UploadLimits) -> Self {
         let write_quota = matches!(auth, AuthMode::AuthV2(_)).then_some(DEFAULT_WRITE_QUOTA);
+        let write_policy = match &addressing {
+            Addressing::Single { .. } => WritePolicy::Open,
+            Addressing::Multi(_) => WritePolicy::Owner,
+        };
         Self {
+            write_policy,
+            authorizer_role: AuthorizerRole::Check,
             addressing,
             sharding: Sharding::Single,
             auth,
@@ -164,6 +176,18 @@ impl PipelineConfig {
             list_page_limit: DEFAULT_LIST_PAGE_LIMIT,
             max_apply_window: MAX_APPLY_WINDOW,
             redactor: Redactor::default(),
+        }
+    }
+
+    /// The namespace policy advertised by `GetServerInfo` (STC §2.1).
+    #[must_use]
+    pub fn advertised_namespace_policy(&self) -> &'static str {
+        match &self.addressing {
+            Addressing::Single { .. } => "single-repository",
+            Addressing::Multi(multi) => match &multi.namespace_policy {
+                NamespacePolicy::Allowlist(_) => "allowlist",
+                NamespacePolicy::Any { .. } => "any",
+            },
         }
     }
 }
@@ -279,7 +303,9 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// `FsLayoutStore` never runs auth v2); a store without atomic batches
     /// must report an implicit layout version; a store's layout version
     /// must be this binary's; the page limit and apply window must be
-    /// positive.
+    /// positive. Namespace/write policy combinations must be compatible;
+    /// `any` requires non-default admission or its explicit unsafe override,
+    /// and an authority authorizer must not be the open default.
     pub fn new(
         blobs: B,
         meta: N,
@@ -288,6 +314,35 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         clock: Arc<dyn Clock>,
         metrics: Arc<dyn Metrics>,
     ) -> Result<Self, ServerError> {
+        let policy_refusal = match (&cfg.addressing, cfg.write_policy) {
+            (Addressing::Multi(_), WritePolicy::Open) => {
+                Some("write_policy open is single-repository only (SPEC-TRANSPORT-CONNECT §7.5)")
+            }
+            (Addressing::Single { .. }, WritePolicy::Owner) => {
+                Some("write_policy owner needs multi-repository addressing")
+            }
+            (Addressing::Multi(multi), _)
+                if matches!(
+                    multi.namespace_policy,
+                    NamespacePolicy::Any {
+                        unsafe_without_admission: false
+                    }
+                ) && hooks.admission().is_default() =>
+            {
+                Some(
+                    "namespace_policy any needs a non-default admission step, or the explicit unsafe override (D27)",
+                )
+            }
+            _ => None,
+        };
+        if let Some(message) = policy_refusal {
+            return Err(ServerError::invalid_argument(message));
+        }
+        if cfg.authorizer_role == AuthorizerRole::Authority && hooks.authorizer().is_open() {
+            return Err(ServerError::invalid_argument(
+                "an authority authorizer must be a real authority source",
+            ));
+        }
         let caps = meta.capabilities();
         let full = caps.atomic_multi_key && caps.key_classes == KeyClasses::All;
         let refused = if matches!(cfg.auth, AuthMode::AuthV2(_)) && !full {
@@ -928,7 +983,32 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// Stage 2: the facts it returns become `op.authz` before admission.
     async fn authorize(&self, op: &Operation) -> Result<AuthzFacts, ServerError> {
         tracing::debug!(stage = "authorize");
-        self.hooks.authorizer().authorize(op).await
+        if !op.procedure().is_write() {
+            // TODO(WP-2.9): private read authorization.
+            return self.hooks.authorizer().authorize(op).await;
+        }
+        let Addressing::Multi(multi) = &self.cfg.addressing else {
+            return self.hooks.authorizer().authorize(op).await;
+        };
+        let namespace = Namespace::parse(op.repo.namespace.as_str())
+            .map_err(|_| internal("invalid resolved Multi namespace"))?;
+        if let NamespacePolicy::Allowlist(allowed) = &multi.namespace_policy
+            && !allowed.contains(&namespace)
+        {
+            return Err(ServerError::permission_denied("write not permitted"));
+        }
+        let owner = matches!(&namespace, Namespace::Ed25519(key)
+            if op.principal.ed25519() == Some(key));
+        // TODO(WP-2.6): rule 2 (grants).
+        if self.cfg.authorizer_role == AuthorizerRole::Check && !owner {
+            return Err(ServerError::permission_denied("write not permitted"));
+        }
+        let facts = AuthzFacts { owner, grant: None };
+        // Both Authorize and Admit see the established owner/grant facts (§6.2).
+        let mut authorized = op.clone();
+        authorized.authz = facts.clone();
+        self.hooks.authorizer().authorize(&authorized).await?;
+        Ok(facts)
     }
 
     /// Stage 3. A challenge is `permission_denied` "admission required" in

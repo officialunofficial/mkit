@@ -123,6 +123,11 @@ pub enum Feature {
     StrictGzipAuth,
     /// Multi-repository addressing (M1).
     MultiRepo,
+    /// Namespace allowlists and owner writes (M1). The profile's allowlist
+    /// admits each Multi case's derived `repository-a` and `repository-b`
+    /// keys and excludes `policy.non_allowlisted_namespace_denied`'s
+    /// `non-allowlisted` key (see [`super::sign::Signer::derive`]).
+    NamespacePolicy,
     /// Upload tickets and resumable parts (M1).
     Tickets,
     /// Write grants (M2).
@@ -145,7 +150,7 @@ pub enum Feature {
     Admin,
 }
 
-const FEATURE_NAMES: [(Feature, &str); 20] = [
+const FEATURE_NAMES: [(Feature, &str); 21] = [
     (Feature::Bearer, "bearer"),
     (Feature::AuthV2, "auth-v2"),
     (Feature::AtomicAdvance, "atomic-advance"),
@@ -156,6 +161,7 @@ const FEATURE_NAMES: [(Feature, &str); 20] = [
     (Feature::Health, "health"),
     (Feature::StrictGzipAuth, "strict-gzip-auth"),
     (Feature::MultiRepo, "multi-repo"),
+    (Feature::NamespacePolicy, "namespace-policy"),
     (Feature::Tickets, "tickets"),
     (Feature::Grants, "grants"),
     (Feature::SignedReads, "signed-reads"),

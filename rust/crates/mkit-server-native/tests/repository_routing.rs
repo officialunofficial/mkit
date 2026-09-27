@@ -5,9 +5,11 @@
 use std::sync::Arc;
 
 use mkit_core::protocol::{PackKey, RefWriteCondition};
+use mkit_core::repo_identity::Namespace;
 use mkit_server::auth_v2::AuthV2Config;
 use mkit_server::pipeline::Hooks;
 use mkit_server::pipeline::{AuthMode, Authenticated, Pipeline, PipelineConfig, RequestMeta};
+use mkit_server::policy::NamespacePolicy;
 use mkit_server::sql::SqlKvStore;
 use mkit_server::upload::UploadLimits;
 use mkit_server::{
@@ -56,10 +58,25 @@ fn update(name: &str, value: u8) -> RefUpdate {
     }
 }
 
+fn namespace(seed: u8) -> String {
+    format!(
+        "ed25519-{}",
+        Signer::new([seed; 32], AUDIENCE, "unused").public_key_hex()
+    )
+}
+
 async fn isolation<N: NamespaceStore + 'static>(meta: N) {
+    let ns_a = namespace(1);
+    let ns_b = namespace(2);
+    let policy = NamespacePolicy::Allowlist(
+        [&ns_a, &ns_b]
+            .into_iter()
+            .map(|ns| Namespace::parse(ns).unwrap())
+            .collect(),
+    );
     let auth = AuthMode::AuthV2(AuthV2Config::new(AUDIENCE, "").unwrap());
     let mut config = PipelineConfig::new(
-        Addressing::Multi(MultiAddressing::new()),
+        Addressing::Multi(MultiAddressing::new().with_namespace_policy(policy)),
         auth,
         UploadLimits {
             max_total_bytes: 1024,
@@ -76,8 +93,6 @@ async fn isolation<N: NamespaceStore + 'static>(meta: N) {
         Arc::new(NoopMetrics),
     )
     .unwrap();
-    let ns_a = format!("ed25519-{}", "a".repeat(64));
-    let ns_b = format!("0x{}", "b".repeat(40));
     for (name_a, name_b) in [("one", "two"), ("same", "same"), ("near", "neighbour")] {
         let a = format!("{ns_a}/{name_a}");
         // Also exercise different names inside the SAME namespace partition.
@@ -89,13 +104,18 @@ async fn isolation<N: NamespaceStore + 'static>(meta: N) {
 
 async fn isolated_pair<N: NamespaceStore>(pipe: &Pipeline<MemoryBlobStore, N>, a: &str, b: &str) {
     let writer_a = Signer::new([1; 32], AUDIENCE, a);
-    let writer_b = Signer::new([1; 32], AUDIENCE, b);
+    let writer_b = Signer::new(
+        [if b.starts_with(&namespace(1)) { 1 } else { 2 }; 32],
+        AUDIENCE,
+        b,
+    );
     let procedure = Procedure::UpdateRef;
     let mut envelope = writer_a.envelope(
         procedure.connect_path(),
         mkit_server_conformance::wire::sign::body_commitment(BODY),
     );
-    // Same signer/nonce across repositories must create independent replay rows.
+    // The same nonce must be isolated across repositories, including the same
+    // signer in the near/neighbour pair within one namespace.
     envelope.nonce = "c".repeat(64);
     envelope.digest = Some(mkit_core::hash::to_hex(&mkit_core::hash::hash(BODY)));
     let signed_a = writer_a.sign(&envelope);

@@ -102,9 +102,9 @@ pub const TAG_REPO_KNOWN: &str = "rk";
 /// Repo registry tag: one row per repo of the namespace, in its
 /// coordinator partition. Bounded by repos, not refs.
 pub const TAG_REPO_REGISTRY: &str = "rr";
-/// Namespace list tag (reserved; WP-1.5 lays it out): the deployment's
-/// namespaces, needed only under `namespace_policy = any`. A backend MAY
-/// keep this list in its own metadata instead.
+/// Namespace list tag, reserved until namespace enumeration under
+/// `namespace_policy = any` is needed (WP-1.29 backup). No M1 consumer
+/// or deployment-wide partition exists. A backend may keep its own metadata.
 pub const TAG_NAMESPACE_LIST: &str = "nl";
 
 /// Ticket row tag.

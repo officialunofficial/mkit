@@ -8,11 +8,13 @@ use std::sync::{
 };
 
 use mkit_core::protocol::RefWriteCondition;
+use mkit_core::repo_identity::Namespace;
 use mkit_server::auth_v2::AuthV2Config;
 use mkit_server::pipeline::{
     Admission, AdmissionDecision, AdmissionInput, AuthMode, Authenticated, Authorizer, D34Shards,
     Hooks, Pipeline, PipelineConfig, PreReceive, RequestMeta, ShardMap, Sharding, SinglePartition,
 };
+use mkit_server::policy::NamespacePolicy;
 use mkit_server::sql::SqlKvStore;
 use mkit_server::store::{
     Batch, BatchOutcome, BlobKey, Cursor, Key, Partition, PartitionStats, ScanPage,
@@ -254,11 +256,18 @@ fn pipeline<N: NamespaceStore>(
 }
 
 fn multi() -> Addressing {
-    Addressing::Multi(MultiAddressing::new())
+    Addressing::Multi(
+        MultiAddressing::new().with_namespace_policy(NamespacePolicy::Allowlist(
+            [Namespace::parse(identity("unused").split_once('/').unwrap().0).unwrap()].into(),
+        )),
+    )
 }
 
 fn identity(repo: &str) -> String {
-    format!("ed25519-{}/{repo}", "a".repeat(64))
+    format!(
+        "ed25519-{}/{repo}",
+        Signer::new([1; 32], AUDIENCE, "unused").public_key_hex()
+    )
 }
 
 fn signed<N: NamespaceStore>(pipe: &TestPipeline<N>, identity: &str) -> Authenticated {

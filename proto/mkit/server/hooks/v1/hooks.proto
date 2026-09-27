@@ -108,11 +108,13 @@ message GrantUsed {
   uint64 epoch = 2;
 }
 
-// Client response header permitted by the hook allowlist; SPEC-SERVER §6.6.
+// An HTTP header: a response pass-through header or a forwarded admission
+// credential header; SPEC-SERVER §6.3 and §6.6.
 message Header {
   // Header name, compared case-insensitively; SPEC-SERVER §6.6.
   string name = 1;
-  // At most 8,192 bytes of visible ASCII plus SP; SPEC-SERVER §6.6.
+  // At most 8,192 bytes: visible ASCII plus SP for response headers,
+  // visible ASCII plus SP and HTAB for credential headers; SPEC-SERVER §6.6.
   string value = 2;
 }
 
@@ -159,6 +161,8 @@ message AdmitRequest {
   bool creates_repo = 5;
   // Bytes new to the repository; absent when unknown, present zero when none; SPEC-SERVER §6.3.
   uint64 new_to_repo_bytes = 6;
+  // Admission credential headers the client attached; SPEC-SERVER §6.3.
+  repeated Header credential_headers = 7;
 }
 
 // Admission decision with no internal quota charges on the wire; SPEC-SERVER §6.3.
