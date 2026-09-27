@@ -124,9 +124,12 @@ for c in CanaryNoWindow CanaryNoLapFull; do qrun scrub.qnt scrub "$c" violation 
 qrun scrub.qnt mutIgnoreAge TimeBound violation 16
 qrun scrub.qnt mutWrapWithoutFull ActualPublishBound violation 16
 qrun scrub.qnt mutTrustInvalid InvalidForcesFull violation 16
+# finding 2 (MKIT-57, fixed): window path only when fewer than MAX_AGE elapsed;
+# the pre-fix `>` comparison is the mutant that must break it
+qrun scrub.qnt scrub WindowOnlyWhenFresh ok 16
+qrun scrub.qnt mutAgeInclusive WindowOnlyWhenFresh violation 16
 # findings: bounds the implementation does not meet
 qrun scrub.qnt scrub SpecPublishBound violation 16     # a lap is 65 publishes, not 64
-qrun scrub.qnt scrub WindowOnlyWhenFresh violation 16
 qrun scrub.qnt scrubLossy ActualPublishBound violation 16  # lost advisory scrub write
 qrun scrub.qnt scrubClockBack TimeBound violation 16
 
@@ -175,7 +178,8 @@ if [[ ${APALACHE:-0} == 1 ]]; then
   apa history.qnt mutSkipVerify IntentRootsRetained 7 violation
   apa history.qnt mutFinishAnyRef FinishOnlyFromRecorded 7 violation
   apa history.qnt mutWriteBeforeInvalidate CurrentMatchesRef 7 violation
-  apa scrub.qnt scrub ActualPublishBound,TimeBound,InvalidForcesFull 8 ok
+  apa scrub.qnt scrub ActualPublishBound,TimeBound,InvalidForcesFull,WindowOnlyWhenFresh 8 ok
+  apa scrub.qnt mutAgeInclusive WindowOnlyWhenFresh 8 violation
   apa scrub.qnt scrub SpecPublishBound 8 violation
   apa scrub.qnt mutTrustInvalid InvalidForcesFull 8 violation
   apa scrub.qnt scrubLossy ActualPublishBound 8 violation

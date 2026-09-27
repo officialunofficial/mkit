@@ -14,6 +14,7 @@ module scrubCore {
   const LOSSY_SCRUB_WRITES: bool  // crash before / ignored error in `let _ = write_scrub_state`
   const CLOCK_STEPS_BACK: bool    // wall clock may step backwards
   const BUG_IGNORE_AGE: bool      // mutant: no 7-day staleness check
+  const BUG_AGE_INCLUSIVE: bool   // mutant: pre-MKIT-57 `elapsed > MAX_AGE` (window at exactly 7 days)
   const BUG_WRAP_WITHOUT_FULL: bool  // mutant: lap end wraps without full walk
   const BUG_TRUST_INVALID: bool   // mutant: corrupt/foreign state read as valid
   const MAXPUB: int               // publish-count bound (simulation)
@@ -78,7 +79,8 @@ module scrubCore {
     val newLen = chainLen + k
     val elapsed = satSub(wall + dt + skew, scrub.lastFull)
     val stale = (not(scrub.valid) and not(BUG_TRUST_INVALID))
-                or (not(BUG_IGNORE_AGE) and elapsed > MAX_AGE)
+                or (not(BUG_IGNORE_AGE) and
+                    (if (BUG_AGE_INCLUSIVE) elapsed > MAX_AGE else elapsed >= MAX_AGE))
     val w = window(scrub.vt)
     val end = min(scrub.cursor + w, scrub.vt)
     // `end < verified_through` and the rollback guard `end <= prefix.len()`
@@ -165,20 +167,22 @@ module scrubCore {
   // fails if the wall clock steps back, as §4.5 now states).
   val TimeBound = lastMode != "init" implies
     leavesOf(chainLen).forall(i => real - lastReal.get(i) <= MAX_AGE)
-  // §4.5: the window path requires FEWER than MAX_AGE seconds elapsed. Still
-  // violated: the code takes the window path at exactly 604800 s (finding 2).
+  // §4.5: the window path requires FEWER than MAX_AGE seconds elapsed.
+  // Finding 2 (MKIT-57, fixed: `decide_chain` now uses `>=`); the pre-fix
+  // `>` is kept as `mutAgeInclusive`, which must violate this.
   val WindowOnlyWhenFresh = lastMode == "window" implies lastElapsed < MAX_AGE
   // §4.5: missing/corrupt/foreign-generation state always forces a full walk.
   val InvalidForcesFull = (lastMode == "window") implies lastScrubValid
 
   // ---- canaries (must be violated) ----------------------------------------------
   val CanaryNoWindow = lastMode != "window"
-  val CanaryNoLapFull = not(lastMode == "full" and lastScrubValid and lastElapsed <= MAX_AGE)
+  val CanaryNoLapFull = not(lastMode == "full" and lastScrubValid and lastElapsed < MAX_AGE)
 }
 
 module scrub {
   import scrubCore(LOSSY_SCRUB_WRITES = false, CLOCK_STEPS_BACK = false,
-                   BUG_IGNORE_AGE = false, BUG_WRAP_WITHOUT_FULL = false,
+                   BUG_IGNORE_AGE = false, BUG_AGE_INCLUSIVE = false,
+                   BUG_WRAP_WITHOUT_FULL = false,
                    BUG_TRUST_INVALID = false, MAXPUB = 12).*
 
   // Real constants (512, 64): publishes per lap, i.e. the longest gap between
@@ -203,32 +207,44 @@ module scrub {
 }
 module scrubLossy {
   import scrubCore(LOSSY_SCRUB_WRITES = true, CLOCK_STEPS_BACK = false,
-                   BUG_IGNORE_AGE = false, BUG_WRAP_WITHOUT_FULL = false,
+                   BUG_IGNORE_AGE = false, BUG_AGE_INCLUSIVE = false,
+                   BUG_WRAP_WITHOUT_FULL = false,
                    BUG_TRUST_INVALID = false, MAXPUB = 12).*
 }
 module scrubClockBack {
   import scrubCore(LOSSY_SCRUB_WRITES = false, CLOCK_STEPS_BACK = true,
-                   BUG_IGNORE_AGE = false, BUG_WRAP_WITHOUT_FULL = false,
+                   BUG_IGNORE_AGE = false, BUG_AGE_INCLUSIVE = false,
+                   BUG_WRAP_WITHOUT_FULL = false,
                    BUG_TRUST_INVALID = false, MAXPUB = 12).*
 }
 module mutIgnoreAge {        // violates TimeBound
   import scrubCore(LOSSY_SCRUB_WRITES = false, CLOCK_STEPS_BACK = false,
-                   BUG_IGNORE_AGE = true, BUG_WRAP_WITHOUT_FULL = false,
+                   BUG_IGNORE_AGE = true, BUG_AGE_INCLUSIVE = false,
+                   BUG_WRAP_WITHOUT_FULL = false,
                    BUG_TRUST_INVALID = false, MAXPUB = 12).*
 }
 module mutWrapWithoutFull {  // violates ActualPublishBound
   import scrubCore(LOSSY_SCRUB_WRITES = false, CLOCK_STEPS_BACK = false,
-                   BUG_IGNORE_AGE = false, BUG_WRAP_WITHOUT_FULL = true,
+                   BUG_IGNORE_AGE = false, BUG_AGE_INCLUSIVE = false,
+                   BUG_WRAP_WITHOUT_FULL = true,
                    BUG_TRUST_INVALID = false, MAXPUB = 12).*
 }
 module mutTrustInvalid {     // violates InvalidForcesFull
   import scrubCore(LOSSY_SCRUB_WRITES = false, CLOCK_STEPS_BACK = false,
-                   BUG_IGNORE_AGE = false, BUG_WRAP_WITHOUT_FULL = false,
+                   BUG_IGNORE_AGE = false, BUG_AGE_INCLUSIVE = false,
+                   BUG_WRAP_WITHOUT_FULL = false,
                    BUG_TRUST_INVALID = true, MAXPUB = 12).*
+}
+module mutAgeInclusive {     // violates WindowOnlyWhenFresh (pre-MKIT-57 code)
+  import scrubCore(LOSSY_SCRUB_WRITES = false, CLOCK_STEPS_BACK = false,
+                   BUG_IGNORE_AGE = false, BUG_AGE_INCLUSIVE = true,
+                   BUG_WRAP_WITHOUT_FULL = false,
+                   BUG_TRUST_INVALID = false, MAXPUB = 12).*
 }
 // Unbounded publish count, for TLC with the relative-age VIEW in README.md.
 module scrubUnbounded {
   import scrubCore(LOSSY_SCRUB_WRITES = false, CLOCK_STEPS_BACK = false,
-                   BUG_IGNORE_AGE = false, BUG_WRAP_WITHOUT_FULL = false,
+                   BUG_IGNORE_AGE = false, BUG_AGE_INCLUSIVE = false,
+                   BUG_WRAP_WITHOUT_FULL = false,
                    BUG_TRUST_INVALID = false, MAXPUB = 1000000000).*
 }

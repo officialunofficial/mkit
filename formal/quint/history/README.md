@@ -173,7 +173,7 @@ touch publication, recovery or the scrub, so no model change was needed.
 | `TimeBound`: after a publish, every leaf was read within `MAX_AGE` (7 days) | holds, including with lost writes; falsified by `mutIgnoreAge` and by `scrubClockBack` (wall clock steps back, now stated in §4.5) |
 | `InvalidForcesFull`: invalid, missing or foreign-generation scrub state always forces a full walk | holds; falsified by `mutTrustInvalid` |
 | `SpecPublishBound`: the superseded "64 fast-forward publishes" | **violated**, kept as a regression witness for finding 1 |
-| `WindowOnlyWhenFresh`: window only if "fewer than" 7 days elapsed | **violated** (finding 2, still open) |
+| `WindowOnlyWhenFresh`: window only if "fewer than" 7 days elapsed | holds since the MKIT-57 fix (finding 2); falsified by `mutAgeInclusive`, the pre-fix `elapsed > MAX_AGE` comparison |
 
 ## Commands and outcomes
 
@@ -199,6 +199,8 @@ quint run canaries x6, each mutant::its invariant x12                      viola
 quint run mutLoadIgnoresTx::ServedMatchesRef / ServedGenerationFresh        ok
 quint run mutRecoverSkipsPending::Safety                                  ok
 quint run scrub/scrubLossy/scrubClockBack/mut* (16 steps)                 as in the table
+quint run scrub::WindowOnlyWhenFresh (16 steps)                           ok (2026-09-27, after MKIT-57)
+quint run mutAgeInclusive::WindowOnlyWhenFresh (16 steps)                 violation
 tlc history::Safety                                   ok         200,388 distinct (VIEW), depth 37, 12s
 tlc history::IntentEventuallyCleared                  ok         400,776 distinct (VIEW + calm), under 1 min
 tlc history::IntentEventuallyCleared, no WF(RecoverAttempt)  liveness violation
@@ -230,7 +232,8 @@ apalache mutFreshGenOnFF::FastForwardRetainsGeneration length 8  violation 11s
 apalache mutSkipVerify::IntentRootsRetained     length 7   violation   7s
 apalache mutFinishAnyRef::FinishOnlyFromRecorded length 7  violation   9s
 apalache mutWriteBeforeInvalidate::CurrentMatchesRef length 7  violation 14s
-apalache scrub::ActualPublishBound,TimeBound,InvalidForcesFull length 8  NoError 39s
+apalache scrub::ActualPublishBound,TimeBound,InvalidForcesFull,WindowOnlyWhenFresh length 8  NoError 36s (2026-09-27, after MKIT-57)
+apalache mutAgeInclusive::WindowOnlyWhenFresh  length 8   violation   6s (2026-09-27)
 apalache scrub::SpecPublishBound                length 8   violation   4s
 apalache mutTrustInvalid::InvalidForcesFull     length 8   violation   3s
 apalache scrubLossy::ActualPublishBound         length 8   violation   5s
@@ -256,11 +259,21 @@ Status against the SPEC-HISTORY-PROOF text on this branch (including the
    maximum. Minimal scaled counterexample to the old claim (TLC, Apalache,
    quint): a full verify with `vt=7`, `w=2`, then 3 window publishes cover
    `[0,6)`, and leaf 6 is not read again until the 4th publish.
-2. **The 7-day boundary is off by one (open).** §4.5 permits the window path
-   only when *fewer than* 604800 s have elapsed. The code uses the window
-   path when `now - last_full_verify_unix <= 604800` (`stale` is
-   `> SCRUB_MAX_AGE_SECS`), so at exactly 604800 s it takes the window path.
-   Either the spec should say "at most" or the code should use `>=`.
+2. **The 7-day boundary was off by one (fixed, MKIT-57).** §4.5 permits the
+   window path only when *fewer than* 604800 s have elapsed. The code used
+   the window path when `now - last_full_verify_unix <= 604800` (`stale` was
+   `> SCRUB_MAX_AGE_SECS`), so at exactly 604800 s it took the window path.
+   `decide_chain` now uses `>= SCRUB_MAX_AGE_SECS` (regression test
+   `history::ancestry::tests::scrub_age_boundary_is_exclusive`), the model
+   uses `elapsed >= MAX_AGE`, and `WindowOnlyWhenFresh` is expected to hold.
+   The old comparison is kept as the `mutAgeInclusive` mutant
+   (`BUG_AGE_INCLUSIVE`), which must violate it. `CanaryNoLapFull` now uses
+   `lastElapsed < MAX_AGE` so it still witnesses a lap-end full walk rather
+   than an age-forced one. `WindowOnlyWhenFresh` is checked by quint
+   simulation and bounded Apalache (length 8) only, not by TLC: the MCS
+   `VIEW` omits `lastElapsed`, so TLC with that view would not be sound
+   for it. Full `APALACHE=1 HISTORY_DEPTH=8 ./check.sh` after the fix:
+   "all checks as expected", 9m46s (2026-09-27).
 3. **The publish bound depends on the scrub write landing.** Fixed in the
    spec: §4.5 now says the 65-publish bound does not hold when the advisory
    write is lost and only the 7-day bound applies. `write_scrub_state`'s
