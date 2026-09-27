@@ -28,10 +28,13 @@ impl TimerKind {
 /// | 0 | Invalid |
 /// | 1 | LEASE_SWEEP (WP-1.25) |
 /// | 2 | TICKET_EXPIRY (handler added in WP-1.14) |
-/// | 3..=0xEF | Production, unallocated |
+/// | 3 | RELAY (WP-1.23a) |
+/// | 4..=0xEF | Production, unallocated |
 /// | 0xF0..=0xFE | Reserved for tests |
 /// | 0xFF | TEST (`test-faults` only) |
 pub mod kinds {
+    /// Source-side outbox delivery.
+    pub const RELAY: super::TimerKind = super::TimerKind::new(3);
     /// Ticket expiry. Allocating the kind does not register a handler.
     pub const TICKET_EXPIRY: super::TimerKind = super::TimerKind::new(2);
     /// Ref deletion used only by test drivers and directives.
