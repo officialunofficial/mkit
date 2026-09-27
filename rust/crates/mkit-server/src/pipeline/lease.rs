@@ -34,6 +34,7 @@ pub(super) struct CoordinatorLease {
     epoch: Option<Value>,
     leased_epoch: u64,
     shard: Option<Value>,
+    observed_el: Option<codec::EpochLease>,
 }
 
 impl CoordinatorLease {
@@ -103,6 +104,14 @@ fn grant_batch(
         .map(codec::decode_leased_shard)
         .transpose()
         .map_err(meta_error)?;
+    if old.is_none_or(|lease| lease.expires_at_ms <= now) {
+        let expiry_bound = old.map_or(now, |lease| lease.expires_at_ms.max(now));
+        debug_assert!(
+            read.observed_el
+                .is_none_or(|lease| lease.expires_at_ms <= expiry_bound),
+            "absent or expired coordinator lease must fence every observed older shard lease"
+        );
+    }
     let shard = codec::LeasedShard {
         epoch,
         expires_at_ms: old
@@ -162,7 +171,6 @@ fn grant_batch(
         expires_at_ms: shard.expires_at_ms,
         config_version: namespace.config_version,
     };
-    debug_assert_eq!(value.expires_at_ms, shard.expires_at_ms);
     Ok(LeaseGrant {
         creation,
         value,
@@ -178,8 +186,12 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         ahead: Option<&Snapshot>,
     ) -> Result<LeaseObservation, ServerError> {
         let snap = ahead.ok_or_else(|| internal("D34 lease requires an atomic snapshot"))?;
-        if let Some(value) = snap.get(&keys::epoch_lease()) {
-            let lease = codec::decode_epoch_lease(value).map_err(meta_error)?;
+        let observed_el = snap
+            .get(&keys::epoch_lease())
+            .map(codec::decode_epoch_lease)
+            .transpose()
+            .map_err(meta_error)?;
+        if let Some(lease) = observed_el {
             let now = ms(self.clock.now_ms());
             let usable_until = lease.expires_at_ms.checked_sub(self.cfg.lease_margin_ms);
             if usable_until
@@ -189,13 +201,16 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 return Ok(LeaseObservation::Usable(lease));
             }
         }
-        Ok(LeaseObservation::Renew(self.read_lease(op, p).await?))
+        Ok(LeaseObservation::Renew(
+            self.read_lease(op, p, observed_el).await?,
+        ))
     }
 
     async fn read_lease(
         &self,
         op: &Operation,
         p: &Partition,
+        observed_el: Option<codec::EpochLease>,
     ) -> Result<CoordinatorLease, ServerError> {
         let wanted = [
             keys::namespace_record(),
@@ -234,6 +249,7 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .map_err(meta_error)?
                 .unwrap_or(0),
             shard: shard.clone(),
+            observed_el,
         };
         Ok(read)
     }
@@ -257,6 +273,8 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 },
             ));
         };
+        // TODO(WP-2.6): compare grant.epoch with the observed coordinator e before
+        // writing a lease grant, so stale-grant denial writes no state (STC §5.1).
         let coordinator = self.shards.coordinator(&op.repo.namespace);
         for _ in 0..super::coordinator::CREATION_ATTEMPTS {
             let now = ms(self.clock.now_ms());
@@ -282,7 +300,9 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                         },
                     ));
                 }
-                BatchOutcome::PreconditionFailed { .. } => read = self.read_lease(op, p).await?,
+                BatchOutcome::PreconditionFailed { .. } => {
+                    read = self.read_lease(op, p, read.observed_el).await?;
+                }
                 BatchOutcome::DeadlinePassed { .. } => {
                     return Err(internal("lease grant had no deadline"));
                 }

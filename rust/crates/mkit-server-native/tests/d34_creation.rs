@@ -653,6 +653,9 @@ async fn single_addressing<N: NamespaceStore>(backend: N, sharding: Sharding) {
     );
     assert_eq!(*observed.created.lock().unwrap(), vec![Creation::default()]);
     let p = coordinator(sharding, &auth);
+    // D34 needs nr/rr even with Single addressing: lease grants guard the
+    // registry rows and carry nr.config_version into el. Creation facts stay
+    // false because the configured repository already exists to the caller.
     for key in [
         keys::namespace_record(),
         keys::repo_record(&auth.repo().repo.name),

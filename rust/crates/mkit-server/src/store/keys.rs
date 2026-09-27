@@ -638,6 +638,14 @@ fn parse_reservation_id(bytes: &[u8]) -> Option<String> {
     validate_reservation_id(rid).then(|| rid.to_owned())
 }
 
+fn parse_leased_shard(body: &[u8]) -> Option<ParsedKey> {
+    let sep = body.iter().position(|&b| b == 0)?;
+    Some(ParsedKey::LeasedShard {
+        repo: RepoName::new(core::str::from_utf8(&body[..sep]).ok()?).ok()?,
+        shard_ref: core::str::from_utf8(&body[sep + 1..]).ok()?.to_owned(),
+    })
+}
+
 /// Decode a key of any laid-out class; `None` for a malformed key or a
 /// reserved class.
 #[must_use]
@@ -654,13 +662,7 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
         b"e" if body.is_empty() => ParsedKey::GrantEpoch,
         b"el" if body.is_empty() => ParsedKey::EpochLease,
         b"lr" if body.is_empty() => ParsedKey::LeaseRecovery,
-        b"ls" => {
-            let sep = body.iter().position(|&b| b == 0)?;
-            ParsedKey::LeasedShard {
-                repo: RepoName::new(text(&body[..sep])?).ok()?,
-                shard_ref: text(&body[sep + 1..])?,
-            }
-        }
+        b"ls" => parse_leased_shard(body)?,
         b"nr" if body.is_empty() => ParsedKey::NamespaceRecord,
         b"rr" => ParsedKey::RepoRecord(RepoName::new(text(body)?).ok()?),
         b"rk" => ParsedKey::RepoKnown(RepoName::new(text(body)?).ok()?),

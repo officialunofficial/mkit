@@ -196,7 +196,7 @@ async fn serve_sharding(
     auth: impl FnOnce(&str) -> AuthMode,
     quota: Option<ServerQuota>,
     mutant: Mutant,
-    multi: bool,
+    multi: Option<&Profile>,
     sharding: mkit_server::pipeline::Sharding,
 ) -> (String, Shared) {
     let (listener, origin) = common::listener().await;
@@ -491,7 +491,7 @@ async fn pipeline_d34_epoch_leases() {
     use mkit_server::pipeline::{D34Shards, ShardMap, Sharding};
     use mkit_server::store::{codec, keys};
 
-    let (origin, meta) = serve_sharding(authv2, None, Mutant::None, false, Sharding::D34).await;
+    let (origin, meta) = serve_sharding(authv2, None, Mutant::None, None, Sharding::D34).await;
     let mut profile = v2_profile(&origin);
     profile.quota = None;
     profile.derive_features();

@@ -320,3 +320,121 @@ planned under an older epoch commits.
 
 Call counts (B.3), "no state before admission", the Single path, the sweep timer (kind 1), and the out-of-scope list.
 If any of §1–§2 forces a call-count change, stop and report it.
+
+## Fix round 1
+
+# WP-1.25: review fix round 1 (PR #1150). These are orchestrator rulings; apply them all
+
+The adversarial review of PR #1150 (head 38c47407) found **no way to break SPEC-WRITE-GRANTS §5.6 or §5.4 in the
+implementation**. It held across renewal/push races, cancellation, expiry boundaries, stale revoke slices and the
+recovery marker, and the call counts, the Single path and the two-repo race all hold.
+
+The gaps are in the **tests**: one safety guard is untested, and the property test can't catch implementation bugs.
+The protocol does not change.
+
+Continue in the same worktree and branch (`.claude/worktrees/wp-1-25`, `mkit-server/wp-1-25-epoch-leases`), and push
+to the same PR. The definition of done is the fixes pushed to PR #1150. Fold these into
+`docs/plans/mkit-server/briefs/WP-1.25.md` under "Fix round 1".
+
+## 0. Merge the moved base first
+
+Merge `origin/feat/mkit-server` (2a730513 or later). It now includes:
+- **WP-1.5 (#1147):** Multi addressing defaults to `WritePolicy::Owner` with an empty allowlist.
+- **WP-1.7 (#1149):** new keys, codecs and `kinds::TICKET_EXPIRY = 2`; the kinds table already expects
+  `1 = LEASE_SWEEP`.
+- WP-3.6b and 3.14 (docs).
+
+Resolve by keeping both sides in:
+- `keys.rs`: the doc table union. `RESERVED_TAGS` is 1.7's list minus `"el"`.
+- `codec.rs` and `registry.rs`: keep both constants and the table.
+- `CHANGELOG.md`, `INVARIANTS.md`, `00-plan.md`: R rows in numeric order.
+- `profile.rs`: **both** `NamespacePolicy` and `EpochLeases`, making the feature list 22.
+- `wire/mod.rs`.
+
+**Your `epoch_leases.rs` tests use `AuthMode::Open` with Multi addressing.** WP-1.5 now refuses Multi + `Open` at
+startup and denies non-owners. Move them to `WritePolicy::Owner` with signers that own their namespaces
+(`ed25519-<hex(signer)>`), plus an allowlist holding them. That is the same pattern WP-1.5 used in `d34_creation.rs`.
+- Don't weaken any assertion.
+- After the merge, rerun WP-1.5's policy matrix: it runs under D34, so it now also checks that the lease path
+  allocates nothing on a denied write.
+
+## 1. Regression test for the ack guard (should-fix 1)
+
+Add the reviewer's schedule as a pipeline test over memory and SQLite, D34. The scratch patch is at
+`/private/tmp/claude-501/-Users-vitormarthendalnunes-Documents-21-Uno-04-Mkit-mkit/cdfd3c8e-a2c7-4777-b325-7d29f4530525/scratchpad/review-1150-scratch-test.patch`.
+The schedule:
+1. Bump to 1, and pause `revoke_step` after its push commits but before the ack.
+2. A write renews at 24_500, so `ls` and `el` become `{1, 54_500}`.
+3. Release the ack.
+4. Bump to 2, set the clock to 30_000, and run `revoke_step`.
+
+It must **not** return `Complete` while the shard's `el` is usable at epoch 1, and a batch planned under epoch 1
+must fail.
+
+**Verify the test has teeth:** temporarily remove the ack's `Equals(ls)` guard (`revocation.rs:381-383`), confirm
+the test fails, and restore it. Record the result in the PR body.
+
+## 2. Property test (should-fix 2)
+
+`lease_model_tests.rs` tests a protocol **model**, not the code. Keep it, and:
+- **(a) Coverage:** raise it to **≥ 10,000 cases** in the default lane, if it stays under about 30 s in a debug build.
+  Otherwise use 10,000 in an `#[ignore]` test that `just ci` runs in its ignored lane, and 1,000 in the default lane.
+  Bias the generator towards bumps, completion checks and near-expiry clock steps.
+- **(b) Fixed cases:** add fixed cases for:
+  - the push → renew → ack schedule (§1);
+  - both original escalation counterexamples.
+- **(c) A negative control:** a run with backend skew larger than `lease_margin_ms`, **expected to find a
+  violation**. Assert that it does. That proves the property and generator can detect a real failure.
+- **(d) Wording:** say in the test's module doc and in the PR body that it covers the protocol model, and that the
+  pipeline tests (§1, and the brief's §3 regression tests) are what protect the implementation.
+
+## 3. D34 with Single addressing creates coordinator records (should-fix 3)
+
+Keep the behaviour, and record it:
+- `grant_batch` creates `nr`/`rr` under D34 even with Single addressing, so every leased shard has the coordinator
+  records the lease guards (`Present(nr)`, `Present(rr)`) and `config_version` need.
+- Add it to the PR's "Executor decisions".
+- Add one INVARIANTS sentence.
+- Keep the adjusted `d34_creation.rs::single_addressing` test, with a comment explaining why the rows now exist.
+
+## 4. Nits (apply)
+
+- **The vacuous `debug_assert`** (`lease.rs:~165`) compares a value with itself. Replace it with a check of the
+  invariant the expired-row shortcut relies on: when renewing an absent or expired `ls` row, the `el` observed in
+  the read-ahead (if any) has `expires_at_ms <= max(observed ls.expires_at_ms, now)`. A `debug_assert` is fine.
+- **The clock assumption:**
+  - document on `PipelineConfig::lease_margin_ms` and in INVARIANTS that safety requires `lease_margin_ms` to exceed
+    the maximum skew between every pipeline instance's clock (grant, renewal, revoke), the sweep driver's clock and
+    every backend's clock. That is stronger than "the coordinator clock";
+  - `Pipeline::new` can't check it, so it's documentation only.
+- **Future denial ordering (latent until WP-2.6):** add `// TODO(WP-2.6)` at `admit_lease`: once grants exist, compare
+  `grant.epoch` with the observed `e` **before** writing a lease grant, so a stale-grant denial writes no state
+  (STC §5.1). Add it to the PR's carry-forwards.
+- **`test_bump_epoch`:** bound the loop by iterations as well as time, e.g. 10,000 `revoke_step` calls, so a frozen
+  `ManualClock` can't hang a test.
+- **`LeaseSweep`:** a malformed reference returns `Fired::Done(Batch::new())`, which deletes the unusable timer row,
+  plus a `warn!`. It no longer returns `Retry` forever.
+
+## 5. Gates, then push
+
+- the brief's gates (all four server crates, clippy, wasm32, and the native D34 wire suite);
+- WP-1.5's policy matrix after the merge;
+- the §1 teeth check.
+
+Push, and add a "Fix round 1" section to the PR body covering §0–§4.
+
+### Executor clarification: the prescribed raw-expiry assertion
+
+The exact §4 check fails in normal operation with clock skew smaller than the
+configured margin. A shard granted at 0 has `el`/`ls` expiry 30,000. At pipeline
+clock 29,999 and sweep/backend clock 30,000, `LeaseSweep` correctly deletes the
+expired coordinator row. The next write renews, but the assertion compares the
+observed `el.expires_at_ms = 30,000` with `max(absent ls expiry, now) = 29,999`
+and panics. The old batch already fails its 25,000 backend deadline.
+
+`normal_sweep_clock_skew_memory` and `normal_sweep_clock_skew_sqlite` reproduce
+this with separate `ManualClock` instances and expect the renewed write to
+commit with expiry 59,999. Both currently fail the requested assertion. The
+protocol and store-call counts need no change; the assertion needs a ruling
+that accounts for the documented clock skew. The exact requested check remains
+in place pending that ruling.

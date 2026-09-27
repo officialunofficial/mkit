@@ -410,7 +410,8 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// Test-only bump driver used by the `ListRefs` directive. No HTTP route.
     ///
     /// # Errors
-    /// The bump/step error, or `unavailable` if completion takes ten seconds.
+    /// The bump/step error, or `unavailable` after ten seconds or 10,000 steps.
+    /// The step cap also terminates when an injected clock stays frozen.
     #[cfg(feature = "test-faults")]
     pub async fn test_bump_epoch(
         &self,
@@ -419,7 +420,7 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     ) -> Result<(), ServerError> {
         self.bump_epoch(ns, new_epoch).await?;
         let start = ms(self.clock.now_ms());
-        loop {
+        for _ in 0..10_000 {
             if self.revoke_step(ns, &RevokeBudget::default()).await? == RevokeProgress::Complete {
                 return Ok(());
             }
@@ -439,5 +440,64 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             })
             .await;
         }
+        Err(ServerError::unavailable("epoch revocation pending; retry"))
+    }
+}
+
+#[cfg(all(test, feature = "memory", feature = "test-faults"))]
+mod tests {
+    use super::*;
+    use crate::pipeline::{AuthMode, Hooks, PipelineConfig, Sharding};
+    use crate::upload::UploadLimits;
+    use crate::{
+        Addressing, Clock, Code, ManualClock, MemoryBlobStore, MemoryKv, NoopMetrics, RepoId,
+        RepoName,
+    };
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn test_bump_epoch_terminates_with_a_frozen_clock_during_recovery() {
+        let clock = Arc::new(ManualClock::new(100_000));
+        let namespace = NamespaceKey::deployment_default();
+        let repo = RepoId {
+            namespace: namespace.clone(),
+            name: RepoName::new("room").expect("valid test repository"),
+        };
+        let mut cfg = PipelineConfig::new(
+            Addressing::Single { repo },
+            AuthMode::Open,
+            UploadLimits {
+                max_total_bytes: 64,
+                max_chunks: 16,
+            },
+        );
+        cfg.sharding = Sharding::D34;
+        let pipe = Pipeline::new(
+            MemoryBlobStore::default(),
+            MemoryKv::with_clock(clock.clone()),
+            Hooks::new(),
+            cfg,
+            clock.clone(),
+            Arc::new(NoopMetrics),
+        )
+        .expect("valid pipeline configuration");
+        pipe.mark_lease_table_recovered(&namespace)
+            .await
+            .expect("recovery marker commits");
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            pipe.test_bump_epoch(&namespace, 1),
+        )
+        .await
+        .expect("step cap must terminate despite frozen pipeline clock")
+        .expect_err("recovery holdoff cannot complete at frozen time");
+        assert_eq!(error.code(), Code::Unavailable);
+        assert_eq!(clock.now_ms(), 100_000);
+        assert_eq!(
+            pipe.revoke_step(&namespace, &RevokeBudget::default())
+                .await
+                .expect("revoke step succeeds"),
+            RevokeProgress::Pending { remaining: 1 },
+        );
     }
 }

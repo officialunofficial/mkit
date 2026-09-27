@@ -13,7 +13,16 @@ pub fn lease_reference(repo: &RepoName, shard_ref: &str) -> Bytes {
     Bytes::from([repo.as_str().as_bytes(), b"\0", shard_ref.as_bytes()].concat())
 }
 
+fn discard_malformed_reference(reason: &str) -> Fired {
+    tracing::warn!(
+        reason,
+        "discarding malformed epoch-lease sweep timer reference"
+    );
+    Fired::Done(Batch::new())
+}
+
 /// Deletes a coordinator lease-table row only once its actual expiry passes.
+/// Malformed references are warned about and drained without touching lease rows.
 #[derive(Debug)]
 pub struct LeaseSweep;
 
@@ -32,19 +41,19 @@ impl<S: NamespaceStore> TimerHandler<S> for LeaseSweep {
                 return Ok(Fired::Retry);
             }
             let Some(sep) = timer.reference.iter().position(|&byte| byte == 0) else {
-                return Ok(Fired::Retry);
+                return Ok(discard_malformed_reference("missing separator"));
             };
             let (Ok(repo), Ok(shard_ref)) = (
                 core::str::from_utf8(&timer.reference[..sep]),
                 core::str::from_utf8(&timer.reference[sep + 1..]),
             ) else {
-                return Ok(Fired::Retry);
+                return Ok(discard_malformed_reference("invalid UTF-8"));
             };
             let Ok(repo) = RepoName::new(repo) else {
-                return Ok(Fired::Retry);
+                return Ok(discard_malformed_reference("invalid repository name"));
             };
             if !crate::refs::validate_ref_name(shard_ref) {
-                return Ok(Fired::Retry);
+                return Ok(discard_malformed_reference("invalid shard ref"));
             }
             let key = keys::leased_shard(&repo, shard_ref);
             let Some(value) = ctx.store.get(ctx.partition, &key).await? else {
@@ -98,6 +107,52 @@ mod tests {
             epoch: 3,
             expires_at_ms,
             acked_epoch: 2,
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_references_are_drained_without_deleting_lease_rows() {
+        let malformed: &[&[u8]] = &[
+            b"roomrefs/heads/main",
+            b"\xff\0refs/heads/main",
+            b"room\0refs/heads/\xff",
+            b"\0refs/heads/main",
+            b"has space\0refs/heads/main",
+            b"room\0refs/heads/..",
+            b"room\0refs/heads/main\0extra",
+        ];
+        for reference in malformed {
+            let clock = Arc::new(ManualClock::new(100));
+            let store = MemoryKv::with_clock(clock.clone());
+            let partition = partition();
+            let timer = keys::timer(100, kinds::LEASE_SWEEP.get(), reference);
+            let live_lease = codec::encode_leased_shard(&lease(1_000));
+            store
+                .apply(
+                    &partition,
+                    Batch::new()
+                        .put(lease_key(), live_lease.clone())
+                        .put(timer.clone(), Value::default()),
+                )
+                .await
+                .unwrap();
+            let report = run_due(
+                &store,
+                &partition,
+                &TimerRegistry::new().register(LeaseSweep),
+                clock.as_ref(),
+                100,
+                &TickBudget::default(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(report.fired, 1, "malformed reference: {reference:?}");
+            assert_eq!(report.failed, 0, "malformed reference: {reference:?}");
+            assert!(store.get(&partition, &timer).await.unwrap().is_none());
+            assert_eq!(
+                store.get(&partition, &lease_key()).await.unwrap(),
+                Some(live_lease),
+            );
         }
     }
 

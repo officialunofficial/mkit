@@ -156,7 +156,9 @@ pub struct PipelineConfig {
     pub max_apply_window: Duration,
     /// Coordinator epoch lease duration, in milliseconds.
     pub epoch_lease_ms: u64,
-    /// Margin covering coordinator/backend clock skew, in milliseconds.
+    /// Safety margin in milliseconds. It must exceed the maximum clock skew
+    /// between every pipeline instance (grant, renewal and revoke), the sweep
+    /// driver, and every storage backend. The constructor cannot verify this.
     pub lease_margin_ms: u64,
     /// Minimum useful lease budget before renewing, in milliseconds.
     pub min_lease_budget_ms: u64,

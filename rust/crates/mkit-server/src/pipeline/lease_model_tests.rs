@@ -1,6 +1,7 @@
-//! Protocol model, separate from memory/SQLite pipeline regression tests.
-//! Each action is one partition transaction or one delayed observation;
-//! the scheduler can leave shard installation, push, and ack unfinished.
+//! Protocol model: this checks the acknowledgement/deadline protocol rather
+//! than executing production code. Memory/SQLite pipeline regressions protect
+//! the implementation. Each action is one partition transaction or delayed
+//! observation; installation, push, and ack can all remain unfinished.
 
 use crate::store::codec::{EpochLease, LeaseRecovery, LeasedShard};
 use proptest::prelude::*;
@@ -214,34 +215,103 @@ impl Model {
     }
 }
 
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(256))]
-    #[test]
-    fn completed_revocation_fences_every_older_planned_write(
-        actions in prop::collection::vec((0u8..10, any::<u8>(), 0u64..40_001), 1..500),
-        backend_skew_ms in prop::array::uniform2(-4_999i64..5_000),
-    ) {
-        let mut model = Model { backend_skew_ms, ..Model::default() };
-        for (action, selection, elapsed) in actions {
-            let selection = usize::from(selection);
-            let shard = selection % SHARDS;
-            match action {
-                0 => model.plan(shard),
-                1 => model.renew(shard, true),
-                2 => model.epoch += 1,
-                3 => model.observe_push(shard),
-                4 => model.apply_push(selection),
-                5 => model.ack(selection),
-                6 => prop_assert!(!model.apply(selection), "old-epoch write committed: {model:?}"),
-                7 => model.sweep(shard),
-                8 => model.now = model.now.saturating_add(elapsed),
-                _ => { model.complete(); }
+// Bias revocation and completion, and advance to both sides of the lease's
+// deadline/expiry instead of spending most schedules far past every lease.
+fn action_strategy() -> impl Strategy<Value = (u8, u8, u64)> {
+    // Integer buckets retain the weighted distribution without allocating a
+    // nested union strategy for each generated action.
+    (0u8..38, any::<u8>(), 0u64..40_001).prop_map(|(bucket, selection, elapsed)| {
+        let action = match bucket {
+            0..=3 => 0,   // Plan a write.
+            4..=7 => 1,   // Commit renewal; leave installation delayed.
+            8..=12 => 2,  // Bump.
+            13..=15 => 3, // Observe push.
+            16..=18 => 4, // Commit push CAS.
+            19..=21 => 5, // Ack CAS.
+            22..=25 => 6, // Apply a delayed write.
+            26 => 7,      // Sweep expired row.
+            27 => 8,      // Arbitrary clock advance.
+            28..=32 => 9, // Test Complete.
+            _ => 10,      // Advance close to deadline or expiry.
+        };
+        (action, selection, elapsed)
+    })
+}
+
+fn check_schedule(
+    actions: impl IntoIterator<Item = (u8, u8, u64)>,
+    backend_skew_ms: [i64; SHARDS],
+) -> Result<(), proptest::test_runner::TestCaseError> {
+    let mut model = Model {
+        backend_skew_ms,
+        ..Model::default()
+    };
+    for (action, selection, elapsed) in actions {
+        let selection = usize::from(selection);
+        let shard = selection % SHARDS;
+        match action {
+            0 => model.plan(shard),
+            1 => model.renew(shard, true),
+            2 => {
+                model.epoch += 1;
+                model.complete(); // Exercise completion immediately after bump too.
+            }
+            3 => model.observe_push(shard),
+            4 => model.apply_push(selection),
+            5 => model.ack(selection),
+            6 => prop_assert!(
+                !model.apply(selection),
+                "old-epoch write committed: {model:?}"
+            ),
+            7 => model.sweep(shard),
+            8 => model.now = model.now.saturating_add(elapsed),
+            9 => {
+                model.complete();
+            }
+            _ => {
+                if let Some(lease) = model.copies[shard] {
+                    let boundary = if selection.is_multiple_of(2) {
+                        lease.expires_at_ms
+                    } else {
+                        lease.expires_at_ms.saturating_sub(MARGIN_MS)
+                    };
+                    let offset = i64::try_from(elapsed % 3).unwrap() - 1;
+                    model.now = model.now.max(boundary.saturating_add_signed(offset));
+                    model.complete();
+                }
             }
         }
-        model.complete();
-        while !model.writes.is_empty() {
-            prop_assert!(!model.apply(0), "old-epoch write committed after final completion: {model:?}");
-        }
+    }
+    model.complete();
+    while !model.writes.is_empty() {
+        prop_assert!(
+            !model.apply(0),
+            "old-epoch write committed after final completion: {model:?}"
+        );
+    }
+    Ok(())
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(1_000))]
+    #[test]
+    fn completed_revocation_fences_every_older_planned_write(
+        actions in prop::collection::vec(action_strategy(), 1..500),
+        backend_skew_ms in prop::array::uniform2(-4_999i64..5_000),
+    ) {
+        check_schedule(actions, backend_skew_ms)?;
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10_000))]
+    #[test]
+    #[ignore = "10,000-case protocol exploration exceeds the 30-second debug budget"]
+    fn completed_revocation_fences_every_older_planned_write_10000_cases(
+        actions in prop::collection::vec(action_strategy(), 1..500),
+        backend_skew_ms in prop::array::uniform2(-4_999i64..5_000),
+    ) {
+        check_schedule(actions, backend_skew_ms)?;
     }
 }
 
@@ -345,4 +415,116 @@ fn raced_push_cannot_ack_until_a_new_observation_commits() {
     model.ack(0);
     assert!(model.complete());
     assert!(!model.apply(0));
+}
+
+#[test]
+fn push_then_delayed_renewal_then_ack_requires_repush() {
+    let mut model = Model::default();
+    model.renew(0, true);
+    assert!(!model.apply(0));
+    model.plan(0); // A retains an epoch-0 batch.
+    model.epoch = 1;
+    model.observe_push(0);
+    model.apply_push(0);
+    assert_eq!(model.copies[0].unwrap().epoch, 1);
+
+    model.now = 1;
+    model.renew(0, true); // B extends ls after the push but before its ack.
+    assert_eq!(model.rows[0].unwrap().acked_epoch, 0);
+    model.ack(0); // Equals(ls, old row) fails; no acknowledgement is installed.
+    assert_eq!(model.rows[0].unwrap().acked_epoch, 0);
+    assert!(!model.complete());
+
+    model.observe_push(0);
+    model.apply_push(0);
+    model.ack(0);
+    assert_eq!(model.rows[0].unwrap().acked_epoch, 1);
+    assert_eq!(
+        model.copies[0].unwrap().expires_at_ms,
+        model.rows[0].unwrap().expires_at_ms
+    );
+    assert!(model.complete());
+    assert!(
+        !model.apply(0),
+        "A cannot commit against the overwritten epoch-0 el"
+    );
+}
+
+#[test]
+fn push_then_installed_renewal_then_stale_ack_preserves_extended_lease() {
+    let mut model = Model::default();
+    model.renew(0, true);
+    assert!(!model.apply(0));
+    model.epoch = 1;
+    model.observe_push(0);
+    model.apply_push(0); // Epoch 1 push pauses before ack of the 30000 lease.
+
+    model.now = 24_500;
+    model.renew(0, true);
+    assert!(!model.apply(0)); // B durably installs the extension to 54500.
+    assert_eq!(model.copies[0].unwrap().expires_at_ms, 54_500);
+    model.ack(0); // The old ls observation cannot acknowledge this extension.
+    assert_eq!(model.rows[0].unwrap().acked_epoch, 0);
+    assert!(!model.complete());
+    model.observe_push(0);
+    model.apply_push(0);
+    model.ack(0);
+    assert_eq!(model.copies[0].unwrap().expires_at_ms, 54_500);
+    assert_eq!(model.rows[0].unwrap().expires_at_ms, 54_500);
+    assert!(model.complete());
+
+    model.plan(0); // Epoch 1 write remains within its 34500 deadline.
+    assert_eq!(model.writes[0].epoch, 1);
+    assert_eq!(model.writes[0].deadline, 34_500);
+    model.epoch = 2;
+    model.now = 30_000;
+    assert!(
+        !model.complete(),
+        "the extended lease is still live at the original expiry"
+    );
+    model.observe_push(0);
+    model.apply_push(0);
+    model.ack(0);
+    assert!(model.complete());
+    assert!(
+        !model.apply(0),
+        "epoch 1 write must fail el guard after epoch 2 Complete"
+    );
+}
+
+#[test]
+fn excessive_backend_skew_negative_control_finds_old_epoch_commit() {
+    use proptest::test_runner::{TestError, TestRunner};
+
+    // This run is expected to fail the safety property: a backend lagging by
+    // more than margin can still accept an old deadline at coordinator expiry.
+    // Disable persistence because this is an intentional failing experiment.
+    let mut runner = TestRunner::new(ProptestConfig {
+        cases: 128,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    });
+    let result = runner.run(&(5_001i64..10_001), |excessive_lag_ms| {
+        let mut model = Model {
+            backend_skew_ms: [-excessive_lag_ms, 0],
+            ..Model::default()
+        };
+        model.renew(0, true);
+        prop_assert!(!model.apply(0));
+        model.now = LEASE_MS - MARGIN_MS - MIN_BUDGET_MS;
+        model.plan(0);
+        prop_assert_eq!(model.writes.len(), 1);
+        model.epoch = 1;
+        model.now = LEASE_MS;
+        prop_assert!(model.complete());
+        prop_assert!(
+            !model.apply(0),
+            "negative control detected an old-epoch commit after Complete"
+        );
+        Ok(())
+    });
+    assert!(
+        matches!(result, Err(TestError::Fail(_, _))),
+        "the excessive-skew experiment must find a safety violation: {result:?}"
+    );
 }

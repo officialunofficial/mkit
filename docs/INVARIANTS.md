@@ -1012,7 +1012,13 @@ Live renewals preserve acknowledgement. Revocation pushes even to an absent
 coordinator batch. Every D34 ref batch guards `el` and starts with
 `NotAfter(min(plan_time + MAX_APPLY_WINDOW, expires - margin, replay cap))`.
 Creation and lease registration commit together only after authorization and
-admission. The Single path continues reading and guarding `e` directly.
+admission. D34 creates coordinator `nr`/`rr` records even with Single addressing,
+so every leased shard has the records its guards and `config_version` require.
+The Single sharding path continues reading and guarding `e` directly.
+Safety requires `lease_margin_ms` to exceed the maximum skew between every
+pipeline instance clock (grant, renewal and revoke), the sweep driver clock,
+and every backend clock; this deployment assumption is documented, not checked
+by `Pipeline::new`.
 
 **Because:** a coordinator acknowledgement before shard installation could
 report completion while a delayed old-epoch batch can still commit. Expiry
@@ -1022,8 +1028,9 @@ alone is safe only because the storage backend checks its own clock atomically.
 or denied/challenged requests can allocate lease state.
 
 **Enforced by:** `pipeline/lease.rs`, `pipeline/revocation.rs`, the pure write
-planner, native `tests/epoch_leases.rs` on memory and SQLite, and the Rust
-interleaving property model. `LeaseSweep` guards expired coordinator rows and
+planner, and native `tests/epoch_leases.rs` on memory and SQLite. The Rust
+interleaving property test covers the protocol model; pipeline regressions
+protect the implementation. `LeaseSweep` guards expired coordinator rows and
 moves its timer atomically with each renewal. Recovery is declared with the
 persistent `lr` marker; restore/rebuild procedures MUST call
 `mark_lease_table_recovered` before serving writes (WP-1.29). Completion waits
