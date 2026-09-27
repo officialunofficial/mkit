@@ -104,7 +104,7 @@ function paymentHeader(input: AdmitRequest, env: Env): string | undefined {
   let found: string | undefined;
   for (const header of headers) {
     if (typeof header.name !== 'string' || typeof header.value !== 'string' ||
-        header.value.length > 8192 || !/^[\x20-\x7e]*$/.test(header.value))
+        header.value.length > 8192 || !/^[\t\x20-\x7e]*$/.test(header.value))
       throw new Error('Invalid credential header');
     if (header.name.toLowerCase() !== acceptedName) continue;
     if (found !== undefined || !/^Payment /i.test(header.value)) throw new Error('Invalid payment header');

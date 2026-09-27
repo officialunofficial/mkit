@@ -5,8 +5,8 @@
 > server implementation, or payment policy.
 
 The example targets [`mkit.server.hooks.v1`](../../../proto/mkit/server/hooks/v1/hooks.proto)
-with WP-3.6b's `AdmitRequest.credential_headers = 7` (`credentialHeaders` in
-JSON). Merge that contract addition before or together with this example.
+including `AdmitRequest.credential_headers = 7` (`credentialHeaders` in JSON),
+the admission credential headers SPEC-SERVER §6.3 forwards.
 The exact JSON shapes are the [server-hooks goldens](../../../rust/tests/golden/server-hooks/).
 
 ## What it does
@@ -147,6 +147,14 @@ as their selected field, never as a `kind` or `decision` wrapper.
 
 ## Caveats
 
+- **Serialized calls:** one Durable Object handles every hook call in turn, so a
+  slow settlement RPC on an `Outcome` can delay a waiting `Admit` past mkit's
+  hook timeout (5 s by default), and mkit then fails that `Admit` closed with a
+  retryable `unavailable`. A production deployment shards reservations or moves
+  settlement off the admission path.
+- **Bundling:** `mppx`'s server entry dynamically imports
+  `@modelcontextprotocol/sdk`, an optional peer, so it is listed in
+  `package.json` for `wrangler deploy` to bundle.
 - **Q-M3-4:** payment methods that settle at verification time make `Aborted`
   a **refund**, rather than a release. This example selects pull transactions
   and calls the non-mutating API; substituting a method requires reviewing its
@@ -185,6 +193,8 @@ as their selected field, never as a `kind` or `decision` wrapper.
   implement x402 or select a facilitator.
 
 ## Verifying the example
+
+`npx wrangler@4 deploy --dry-run` checks that the Worker bundles.
 
 Optional local check from this directory; nothing is added to CI:
 
@@ -237,7 +247,7 @@ JS
 The Admit vector derives this exact body digest:
 
 ```text
-body:46487a726404f5fa774b0590efda97473efed29c28329200d2220f0ae461ccc8
+body:17c81ed8db9c87c80c09d2160f7d3c778b50aad8f2ab236717a19e3c233eb109
 ```
 
 Its canonical UTF-8 text has eight fields and **no final newline**:
@@ -247,14 +257,14 @@ mkit-hook:v1
 test-hook-2026-09
 https://hooks.example.test
 /mkit.server.hooks.v1.HooksService/Admit
-body:46487a726404f5fa774b0590efda97473efed29c28329200d2220f0ae461ccc8
+body:17c81ed8db9c87c80c09d2160f7d3c778b50aad8f2ab236717a19e3c233eb109
 1790424000000
 1790424300000
 b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1
 ```
 
 The canonical BLAKE3-32 is
-`7dbf6968a866f8ca2e51383ec40fcf41a0cd876c6a57ae8e060ca803f3ec4bdf`;
+`49c99ee1938a4747ae94fc8e29fdc89f864adb9890965ea9404b1434c45b66d7`;
 verification returns `verified: true`. The fixed test clock is necessary because
 this golden is not a current delivery. The `Set` is only a single-process scratch
 cache; the HTTP Worker uses the durable atomic callback. Never deploy the
