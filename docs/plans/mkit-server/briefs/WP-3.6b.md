@@ -105,3 +105,11 @@ CHANGELOG: one line under Unreleased / Added.
 - `cargo nextest run --locked -p mkit-server --test golden_server_hooks`
 - `bash scripts/check-spec-status.sh`
 - The goldens outside `server-hooks/` are unchanged.
+
+## Review fix (orchestrator, supersedes B.2's "repeated entries, in order")
+
+`Authorization` is forwarded only as exactly one field line with auth-scheme `Payment`, SP, token68 and no comma;
+configuration can't add `Authorization`. Any selected name appearing more than once or comma-joined, a value with
+bytes outside visible ASCII, SP and HTAB, or a breach of the bounds is an admission denial (`permission_denied`, no
+Admit call, no state). §6.6 separates request limits from response limits. The version-history change folds into
+the existing version 1 row.
