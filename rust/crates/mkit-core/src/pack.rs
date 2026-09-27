@@ -677,12 +677,19 @@ fn maybe_compress(_data: &[u8]) -> Option<Vec<u8>> {
 /// that claim, and the actual decompressed length is re-checked
 /// against the claim afterward.
 fn decompress_zstd_entry(payload: &[u8]) -> Result<Vec<u8>, PackError> {
-    decompress_zstd_entry_with(payload, zstd_decompress_capped)
+    let len = zstd_entry_len(payload)?;
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(len)
+        .map_err(|_| PackError::PackfileTooLarge)?;
+    decompress_zstd_into(payload, &mut output)?;
+    Ok(output)
 }
 
 /// [`decompress_zstd_entry`] over an explicit backend, so the
 /// differential tests can drive the C and pure-Rust decoders through the
 /// exact same claim / length checks.
+#[cfg(all(test, feature = "pack-ruzstd"))]
 fn decompress_zstd_entry_with(
     payload: &[u8],
     backend: fn(&[u8], usize) -> Result<Vec<u8>, PackError>,
@@ -709,6 +716,22 @@ fn zstd_claim(payload: &[u8]) -> Result<(usize, &[u8]), PackError> {
     }
     let frame = &payload[ZSTD_LEN_PREFIX..];
     Ok((uncompressed_len, frame))
+}
+
+fn zstd_entry_len(payload: &[u8]) -> Result<usize, PackError> {
+    zstd_claim(payload).map(|(len, _)| len)
+}
+
+/// Reserve and charge before calling this; neither backend grows or zero-fills
+/// the output. Shared by lazy unpack and buffered/window entry decoding.
+fn decompress_zstd_into(payload: &[u8], output: &mut Vec<u8>) -> Result<(), PackError> {
+    let (len, frame) = zstd_claim(payload)?;
+    output.clear();
+    zstd_decompress_into(frame, len, output)?;
+    if output.len() != len {
+        return Err(PackError::DecompressedSizeMismatch(len, output.len()));
+    }
+    Ok(())
 }
 
 /// RFC 8878 §3.1.1 Zstandard frame magic number, as it appears on the
@@ -739,7 +762,11 @@ fn require_zstd_frame_magic(frame: &[u8]) -> Result<(), PackError> {
 /// or hostile frame can't force an over-large allocation. The C decoder
 /// (`pack-zstd`) is selected whenever it is compiled in.
 #[cfg(feature = "pack-zstd")]
-fn zstd_decompress_capped(frame: &[u8], capacity: usize) -> Result<Vec<u8>, PackError> {
+fn zstd_decompress_into(
+    frame: &[u8],
+    capacity: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PackError> {
     require_zstd_frame_magic(frame)?;
     // `ZSTD_decompressDCtx` (behind `bulk::decompress`) would otherwise
     // decode concatenated frames and skip skippable ones.
@@ -757,28 +784,45 @@ fn zstd_decompress_capped(frame: &[u8], capacity: usize) -> Result<Vec<u8>, Pack
             ));
         }
     }
-    let size = zstd::bulk::Decompressor::upper_bound(frame)
-        .unwrap_or(capacity)
-        .min(capacity);
-    let mut out = Vec::new();
-    out.try_reserve_exact(size)
-        .map_err(|_| PackError::PackfileTooLarge)?;
     let mut decoder =
         zstd::bulk::Decompressor::new().map_err(|e| PackError::ZstdDecompress(e.to_string()))?;
     decoder
-        .decompress_to_buffer(frame, &mut out)
+        .decompress_to_buffer(frame, output)
         .map_err(|e| PackError::ZstdDecompress(e.to_string()))?;
-    Ok(out)
+    if output.len() > capacity {
+        return Err(PackError::ZstdDecompress(
+            "zstd frame exceeds its claim".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(all(feature = "pack-zstd", test))]
+fn zstd_decompress_capped(frame: &[u8], capacity: usize) -> Result<Vec<u8>, PackError> {
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(capacity)
+        .map_err(|_| PackError::PackfileTooLarge)?;
+    zstd_decompress_into(frame, capacity, &mut output)?;
+    Ok(output)
 }
 
 /// Without the C library, the pure-Rust decoder serves every read.
 #[cfg(all(not(feature = "pack-zstd"), feature = "pack-ruzstd"))]
-fn zstd_decompress_capped(frame: &[u8], capacity: usize) -> Result<Vec<u8>, PackError> {
-    ruzstd_decompress_capped(frame, capacity)
+fn zstd_decompress_into(
+    frame: &[u8],
+    capacity: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PackError> {
+    ruzstd_decompress_into(frame, capacity, output)
 }
 
 #[cfg(not(any(feature = "pack-zstd", feature = "pack-ruzstd")))]
-fn zstd_decompress_capped(_frame: &[u8], _capacity: usize) -> Result<Vec<u8>, PackError> {
+fn zstd_decompress_into(
+    _frame: &[u8],
+    _capacity: usize,
+    _output: &mut Vec<u8>,
+) -> Result<(), PackError> {
     Err(PackError::ZstdDecompress(
         "this build was compiled without the `pack-zstd` or `pack-ruzstd` feature".to_string(),
     ))
@@ -807,16 +851,11 @@ const RUZSTD_MIN_WINDOW_LIMIT: u64 = 8 << 20;
 /// short read; a content checksum, when present, must match; nothing
 /// may follow the frame. At most `capacity + 1` bytes are ever read out.
 ///
-/// Memory: `capacity` is attacker-chosen (up to 1 GiB) and is not
-/// pre-allocated; the output grows with the decoded bytes, so a frame
-/// that stops short costs only what it produced. A frame that really
-/// decodes to the claim peaks at about **3× the claim**, against about 1×
-/// on the C path: ruzstd's ring buffer rounds its capacity up to a power
-/// of two and holds up to one window (the whole frame, for single-segment
-/// frames) of not-yet-emitted output, plus an output `Vec` growing geometrically
-/// up to the claim. Output growth uses `try_reserve_exact` and never reserves
-/// past the claim. The window reader checks its caller-set budget first;
-/// that budget covers the carried payload and output, not the decoder's ring.
+/// Memory: the output is reserved fallibly to the claim without zero-filling.
+/// Unpack charges that reservation before allocation. The pure-Rust decoder's
+/// ring buffer is separate working memory (up to a power-of-two-rounded window),
+/// outside the owned-payload resident cap, just as for the window reader's
+/// carry/output budget. No output allocation grows past the admitted claim.
 ///
 /// With `pack-zstd` also on, only the differential tests call it.
 #[cfg(feature = "pack-ruzstd")]
@@ -825,6 +864,21 @@ pub(crate) fn ruzstd_decompress_capped(
     frame: &[u8],
     capacity: usize,
 ) -> Result<Vec<u8>, PackError> {
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(capacity)
+        .map_err(|_| PackError::PackfileTooLarge)?;
+    ruzstd_decompress_into(frame, capacity, &mut output)?;
+    Ok(output)
+}
+
+#[cfg(feature = "pack-ruzstd")]
+#[cfg_attr(all(feature = "pack-zstd", not(test)), allow(dead_code))]
+fn ruzstd_decompress_into(
+    frame: &[u8],
+    capacity: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PackError> {
     use ruzstd::decoding::{FrameDecoder, StreamingDecoder};
     use std::io::Read as _;
 
@@ -858,7 +912,8 @@ pub(crate) fn ruzstd_decompress_capped(
         )));
     }
 
-    let mut out = Vec::new();
+    let out = output;
+    out.clear();
     let mut chunk = [0; 8192];
     // ruzstd's in-memory decoder never yields Interrupted.
     loop {
@@ -873,15 +928,6 @@ pub(crate) fn ruzstd_decompress_capped(
             return Err(fail(format_args!(
                 "zstd frame decompresses past the claimed {capacity} bytes"
             )));
-        }
-        let needed = out
-            .len()
-            .checked_add(n)
-            .ok_or(PackError::PackfileTooLarge)?;
-        if needed > out.capacity() {
-            let target = out.capacity().saturating_mul(2).max(needed).min(capacity);
-            out.try_reserve_exact(target - out.len())
-                .map_err(|_| PackError::PackfileTooLarge)?;
         }
         out.extend_from_slice(&chunk[..n]);
     }
@@ -928,7 +974,7 @@ pub(crate) fn ruzstd_decompress_capped(
         )));
     }
     ruzstd_check_reserved_fields(frame).map_err(fail)?;
-    Ok(out)
+    Ok(())
 }
 
 /// Re-walk an already-decoded frame's blocks (RFC 8878 §3.1.1.2–3) for
@@ -1069,17 +1115,17 @@ pub fn delta_base_hashes(pack_bytes: &[u8]) -> Result<Vec<Hash>, PackError> {
     let mut seen = std::collections::HashSet::new();
     let mut pos = HEADER_LEN;
     for _ in 0..count {
-        if pos + ENTRY_FRAME_LEN > split {
+        if ENTRY_FRAME_LEN > split - pos {
             return Err(PackError::UnexpectedEof);
         }
         let etype = pack_bytes[pos];
-        pos += 1;
-        let payload_len =
-            u32::from_le_bytes(pack_bytes[pos..pos + 4].try_into().expect("4 bytes")) as usize;
-        pos += 4;
-        // `payload_len > split - pos`, not `pos + payload_len > split`: the
-        // sum overflows a 32-bit `usize` (wasm32) for `payload_len` near
-        // `u32::MAX`. The frame check above keeps `pos <= split`.
+        pos = pos.checked_add(1).ok_or(PackError::UnexpectedEof)?;
+        let payload_len = u32::from_le_bytes(
+            pack_bytes[pos..pos.checked_add(4).ok_or(PackError::UnexpectedEof)?]
+                .try_into()
+                .expect("4 bytes"),
+        ) as usize;
+        pos = pos.checked_add(4).ok_or(PackError::UnexpectedEof)?;
         if payload_len > split - pos {
             return Err(PackError::UnexpectedEof);
         }
@@ -1092,12 +1138,18 @@ pub fn delta_base_hashes(pack_bytes: &[u8]) -> Result<Vec<Hash>, PackError> {
                 return Err(PackError::DeltaEntryTruncated);
             }
             let mut base = [0u8; 32];
-            base.copy_from_slice(&pack_bytes[pos..pos + TRAILER_LEN]);
+            base.copy_from_slice(
+                &pack_bytes[pos..pos
+                    .checked_add(TRAILER_LEN)
+                    .ok_or(PackError::UnexpectedEof)?],
+            );
             if seen.insert(base) {
                 bases.push(base);
             }
         }
-        pos += payload_len;
+        pos = pos
+            .checked_add(payload_len)
+            .ok_or(PackError::UnexpectedEof)?;
     }
     Ok(bases)
 }
@@ -1148,8 +1200,8 @@ impl PackReader {
     /// freshly (as opposed to borrowing straight from the
     /// already-resident `pack_bytes`). Proves the streaming reader
     /// (issue #647) never re-copies a raw entry's bytes: only delta
-    /// targets — genuinely new bytes produced by `delta::decode`, which
-    /// cannot alias `pack_bytes` — increment this counter.
+    /// targets and successfully staged compressed raw payloads increment
+    /// this counter. Borrowed raw entries never increment it.
     #[cfg(test)]
     pub(crate) fn read_tracking_owned_bytes(
         pack_bytes: &[u8],
@@ -1165,124 +1217,46 @@ impl PackReader {
         payload_cap: u64,
         owned_bytes: Option<&AtomicU64>,
     ) -> Result<UnpackReport, PackError> {
-        // One frame parser: [`PackEntries`] owns header/trailer/cap/type
-        // validation and decompression.
-        let pack_entries = PackEntries::new_with_payload_cap(pack_bytes, payload_cap)?;
+        let budget = ResidentBudget::new(resident_bytes_cap(pack_bytes.len()), owned_bytes);
+        Self::read_with_budget(pack_bytes, store, payload_cap, &budget)
+    }
 
-        // Track entries resolved in *this* pack so delta entries can
-        // resolve their base from memory before falling back to the
-        // on-disk store: `WriteBatch::write_prehashed` stages bytes
-        // durably-pending but NOT visible until `commit()`, so a
-        // not-yet-committed entry can only be found here, never via
-        // `store`.
-        let mut in_pack: std::collections::HashMap<Hash, Cow<'_, [u8]>> =
-            std::collections::HashMap::new();
-
-        let batch = store.batch();
-        // The destination store is this reader's external delta-base
-        // source (SPEC-PACKFILE §3.2). Monomorphic: `&ObjectStore`'s
-        // `DeltaBaseSource` impl is the same `contains` + `read` pair as
-        // before the seam existed, so this path pays no dispatch cost.
-        let mut bases = store;
-
-        // Phase 1 (sequential, cheap relative to phase 2): drain
-        // `PackEntries` — already validated and decompressed — into one
-        // `Vec<Entry>` indexed by pack position. `PackEntries::new`
-        // already ran the framing/cap/type validation before yielding
-        // anything, so a malformed pack fails via the `?` above before
-        // any staging; a mid-stream error from `.next()` (re-running
-        // that same per-entry validation, since the iterator has to
-        // stay store-less/reusable — see `PackEntries`'s doc) surfaces
-        // here, equally before any staging.
-        let mut entries: Vec<Entry<'_>> = Vec::with_capacity(pack_entries.entry_count());
-        for entry in pack_entries {
-            entries.push(match entry? {
-                PackEntry::Raw { bytes } => Entry::Raw(bytes),
-                PackEntry::Delta { base, stream } => Entry::Delta { base, stream },
-            });
+    fn read_with_budget(
+        pack_bytes: &[u8],
+        store: &ObjectStore,
+        payload_cap: u64,
+        budget: &ResidentBudget<'_>,
+    ) -> Result<UnpackReport, PackError> {
+        let mut parser = PackEntries::new_with_payload_cap(pack_bytes, payload_cap)?;
+        // Phase 1 retains only borrowed wire frames. Count uses without
+        // decompressing, and remember the final position naming each base.
+        let mut entries = Vec::new();
+        entries
+            .try_reserve_exact(parser.entry_count())
+            .map_err(|_| PackError::PackfileTooLarge)?;
+        let mut uses: std::collections::HashMap<Hash, BaseUses> = std::collections::HashMap::new();
+        for position in 0..parser.entry_count() {
+            let entry = parser.next_encoded_entry()?;
+            if let Entry::Delta { base, .. } = entry {
+                let usage = uses.entry(base).or_default();
+                usage.remaining += 1;
+                usage.last_position = position;
+            }
+            entries.push(entry);
         }
-
-        // Phase 2: raw entries. Validate and hash each one — independent
-        // per entry, so on a native build with enough of them this fans
-        // out across a scoped thread pool instead of running one at a
-        // time on the calling thread (see `stage_raw_entries`). This is
-        // the read-side counterpart of `PackWriter::prepare_raw`/
-        // `push_prepared_raw` on the write side. Staging into `batch`
-        // also happens here (concurrently — `write_prehashed` is safe
-        // for that), but staging into `in_pack` is deferred to phase 3
-        // below: SPEC-PACKFILE §4 requires a delta's base to appear
-        // *earlier in the pack*, so a raw entry must only become
-        // visible to delta resolution once phase 3's scan actually
-        // reaches its pack position, not the instant phase 2 happens to
-        // finish computing it.
-        //
-        // Each raw entry's *own* validation is independent of every
-        // other entry, so phase 2 always runs it for the whole pack
-        // regardless of position — but a malformed raw entry at
-        // position 5 must not be reported ahead of, say, a delta at
-        // position 0 with a missing base: the old single-loop reader
-        // would have hit position 0 first and never looked at position
-        // 5 at all. `stage_raw_entries` never fails the whole batch on
-        // the first bad one — it returns every raw entry's own outcome,
-        // success or failure, in the same relative order `raw_frames`
-        // lists them in (both its sequential and parallel branch
-        // preserve that order — see its doc) — so phase 3 below only
-        // *reports* a raw entry's problem once its sequential scan
-        // actually reaches that entry, exactly like the old reader.
-        let raw_frames: Vec<&[u8]> = entries
+        let batch = store.batch();
+        // Phase 2 keeps the native fan-out. Each worker decompresses its
+        // current raw frame, stages it, and drops unneeded owned bytes.
+        let raw_frames: Vec<_> = entries
             .iter()
-            .filter_map(|e| match e {
-                Entry::Raw(payload) => Some(payload.as_ref()),
+            .enumerate()
+            .filter_map(|(position, entry)| match entry {
+                Entry::Raw(payload) => Some((position, *payload)),
                 Entry::Delta { .. } => None,
             })
             .collect();
-        let mut raw_results = stage_raw_entries(&batch, &raw_frames).into_iter();
-
-        // Phase 3 (sequential, single pass over `entries` in original
-        // pack order): replay every position exactly as the old
-        // single-loop reader did. A raw entry reports its
-        // phase-2-computed result (the CPU-heavy work is already done;
-        // this is just bookkeeping, and an `Err` surfaces here — at
-        // this position — instead of back in phase 2) and, on success,
-        // stages it into `in_pack`; a delta entry resolves its base
-        // from `in_pack`/`store` and stages the decoded target — so a
-        // delta can only ever see raw entries at strictly earlier
-        // positions, preserving the base-before-delta ordering rule.
-        let mut report = UnpackReport::default();
-        for entry in entries {
-            match entry {
-                Entry::Raw(payload) => {
-                    let stored_hash = raw_results
-                        .next()
-                        .expect("every Entry::Raw has a phase-2 result")?;
-                    if let (Cow::Owned(_), Some(c)) = (&payload, owned_bytes) {
-                        c.fetch_add(payload.len() as u64, Ordering::Relaxed);
-                    }
-                    in_pack.insert(stored_hash, payload);
-                    report.raw_count += 1;
-                    report.stored.push(stored_hash);
-                }
-                Entry::Delta { base, stream } => {
-                    let stored_hash = stage_delta_target(
-                        &mut bases,
-                        &batch,
-                        &mut in_pack,
-                        owned_bytes,
-                        base,
-                        stream.as_ref(),
-                    )?;
-                    report.delta_count += 1;
-                    report.stored.push(stored_hash);
-                }
-            }
-        }
-
-        // Batched durability: one full flush for the whole pack instead
-        // of one per object. The caller's ref update happens after
-        // `read` returns, so the commit-before-reference ordering holds.
-        batch.commit()?;
-
-        Ok(report)
+        let raw_results = stage_raw_entries(&batch, &raw_frames, &uses, budget);
+        finish_pack_read(entries, raw_results, uses, budget, store, batch)
     }
 }
 
@@ -1320,6 +1294,26 @@ pub trait DeltaBaseSource {
     /// A source failure (I/O, backend error) that is not an answer
     /// about `id`. It aborts the decode.
     fn base(&mut self, id: &Hash) -> Result<Option<Vec<u8>>, PackError>;
+
+    /// Fetch with allocation admission. The default charges after `base`
+    /// returns; sources that know the length first should override this to
+    /// call `admit` before allocating, as `&ObjectStore` does. Before
+    /// returning `Some(bytes)`, every override must successfully invoke
+    /// `admit` exactly once with `bytes.len()` and propagate its error.
+    ///
+    /// # Errors
+    /// Returns a source failure or the error from `admit`.
+    fn base_with_admission(
+        &mut self,
+        id: &Hash,
+        admit: impl FnOnce(usize) -> Result<(), PackError>,
+    ) -> Result<Option<Vec<u8>>, PackError> {
+        let Some(bytes) = self.base(id)? else {
+            return Ok(None);
+        };
+        admit(bytes.len())?;
+        Ok(Some(bytes))
+    }
 }
 
 /// A [`DeltaBaseSource`] with no external bases: a pack must be
@@ -1345,6 +1339,25 @@ impl DeltaBaseSource for &ObjectStore {
         } else {
             Ok(None)
         }
+    }
+
+    fn base_with_admission(
+        &mut self,
+        id: &Hash,
+        admit: impl FnOnce(usize) -> Result<(), PackError>,
+    ) -> Result<Option<Vec<u8>>, PackError> {
+        if !self.contains(id) {
+            return Ok(None);
+        }
+        self.read_with_allocator(id, |len| {
+            admit(len)?;
+            let mut bytes = Vec::new();
+            bytes
+                .try_reserve_exact(len)
+                .map_err(|_| PackError::PackfileTooLarge)?;
+            Ok(bytes)
+        })
+        .map(Some)
     }
 }
 
@@ -1431,6 +1444,9 @@ impl Default for DecodeLimits {
 
 /// Running total of a decode's claimed allocations against
 /// [`DecodeLimits::max_decoded_bytes`].
+// Distinct from ResidentBudget: compressed and delta claims accumulate over
+// the entire storeless decode; only external-base charges are credited on last
+// use, matching DecodeLimits. PackReader uses the peak resident cap instead.
 struct DecodeBudget {
     used: u64,
     max: u64,
@@ -1460,14 +1476,22 @@ impl<B: DeltaBaseSource> DeltaBaseSource for ChargedBases<'_, B> {
     const VERIFIED: bool = B::VERIFIED;
 
     fn base(&mut self, id: &Hash) -> Result<Option<Vec<u8>>, PackError> {
-        let Some(bytes) = self.inner.base(id)? else {
-            return Ok(None);
-        };
-        let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-        self.budget.charge(len)?;
-        let held = self.charged.entry(*id).or_default();
-        *held = held.saturating_add(len);
-        Ok(Some(bytes))
+        self.base_with_admission(id, |_| Ok(()))
+    }
+
+    fn base_with_admission(
+        &mut self,
+        id: &Hash,
+        admit: impl FnOnce(usize) -> Result<(), PackError>,
+    ) -> Result<Option<Vec<u8>>, PackError> {
+        self.inner.base_with_admission(id, |len| {
+            let charged_len = u64::try_from(len).map_err(|_| PackError::PackfileTooLarge)?;
+            self.budget.charge(charged_len)?;
+            admit(len)?;
+            let held = self.charged.entry(*id).or_default();
+            *held = held.saturating_add(charged_len);
+            Ok(())
+        })
     }
 }
 
@@ -1526,10 +1550,11 @@ fn charge_compressed_claims(pack: &[u8], budget: &mut DecodeBudget) -> Result<()
 /// in pack order, validates each raw payload as a storable canonical
 /// object, resolves each delta against an earlier entry or else
 /// `bases`, validates the reconstructed target, and hands every entry to
-/// `sink`. Given `&ObjectStore` as `bases`, and limits the pack fits in,
-/// it accepts and rejects exactly the packs `PackReader::read` does
-/// against that store, with the same errors in the same order, but
-/// writes nothing.
+/// `sink`, without writing to the store. Given `&ObjectStore` as `bases`
+/// and non-binding limits, it decodes the same valid objects as
+/// `PackReader::read`. Its cumulative-budget and decompression preflight
+/// precede object validation; lazy unpack instead reports errors as their
+/// pack positions are reached, so malformed packs can differ in error order.
 ///
 /// Memory is bounded by `limits` (see [`DecodeLimits`]): every
 /// compressed entry's claimed size is charged before anything is
@@ -1548,8 +1573,8 @@ fn charge_compressed_claims(pack: &[u8], budget: &mut DecodeBudget) -> Result<()
 /// [`PackError::PackfileTooLarge`] when the decoded size passes
 /// `limits.max_decoded_bytes`: claims are checked ahead of every
 /// per-entry error except framing, an external base when the delta that
-/// names it is reached. Otherwise the first [`PackError`] in pack order,
-/// or the first error `sink` returns. `sink` may already have seen earlier
+/// names it is reached. After preflight, the first [`PackError`] in pack
+/// order, or the first error `sink` returns. `sink` may already have seen earlier
 /// entries when an error is returned; a consumer staging them must
 /// discard that staging.
 pub fn decode_entries_with<B: DeltaBaseSource>(
@@ -1646,84 +1671,260 @@ pub fn decode_entries_with<B: DeltaBaseSource>(
     Ok(report)
 }
 
-/// One packfile entry, tracked through [`PackReader::read_inner`]'s
-/// three phases in the original pack order they were parsed in
-/// (`PackEntries` already validated framing/types and decompressed
-/// `0x03`/`0x04`, so there is nothing left to classify here beyond raw
-/// vs. delta). Phase 2 (see [`stage_raw_entries`]) computes each
-/// `Raw` entry's result — success or failure — into a queue
-/// (`raw_results` in `read_inner`) consumed in the same relative order
-/// this vec's `Raw` entries appear in, so there is nothing that can
-/// fall out of sync between the two.
-enum Entry<'p> {
-    Raw(Cow<'p, [u8]>),
-    Delta { base: Hash, stream: Cow<'p, [u8]> },
+/// Replay staging results in pack order; deferred admissions are strict here.
+fn finish_pack_read<'b>(
+    entries: Vec<Entry<'_>>,
+    raw_results: RawStageResults<'b>,
+    mut uses: std::collections::HashMap<Hash, BaseUses>,
+    budget: &'b ResidentBudget<'_>,
+    store: &ObjectStore,
+    batch: crate::batch::WriteBatch<'_>,
+) -> Result<UnpackReport, PackError> {
+    let mut bases = store;
+    let mut raw_results = raw_results.into_iter();
+    let mut in_pack = std::collections::HashMap::new();
+    let mut report = UnpackReport::default();
+    // Phase 3 exposes bases only at their pack position and releases
+    // them immediately after their last use, including cached store bases.
+    for (position, entry) in entries.into_iter().enumerate() {
+        match entry {
+            Entry::Raw(payload) => {
+                let (stored_hash, retained) = raw_results
+                    .next()
+                    .expect("raw frame result")
+                    .unwrap_or_else(|| {
+                        prepare_and_stage_raw(&batch, position, payload, &uses, budget)
+                    })?;
+                if has_remaining_uses(&uses, &stored_hash) {
+                    if let Some(bytes) = retained {
+                        in_pack.insert(stored_hash, ResidentBytes::Owned(bytes));
+                    } else if let EncodedPayload::Plain(bytes) = payload {
+                        in_pack.insert(stored_hash, ResidentBytes::Borrowed(bytes));
+                    }
+                }
+                report.raw_count += 1;
+                report.stored.push(stored_hash);
+            }
+            Entry::Delta { base, stream } => {
+                let stream = stream.decode(budget)?;
+                let stored_hash = stage_delta_target(
+                    &mut bases,
+                    &batch,
+                    &mut in_pack,
+                    &mut uses,
+                    budget,
+                    base,
+                    stream.as_ref(),
+                )?;
+                report.delta_count += 1;
+                report.stored.push(stored_hash);
+            }
+        }
+    }
+    batch.commit()?;
+    Ok(report)
 }
 
-/// Per-raw-entry results returned by
-/// [`stage_raw_entries`]/[`stage_raw_entries_parallel`], in the same
-/// relative order `frames` listed them in. A per-entry `Err` is data,
-/// not a reason to stop early: see [`stage_raw_entries`]'s doc for why
-/// the whole batch always runs to completion.
-type RawStageResults = Vec<Result<Hash, PackError>>;
+/// Owned payload cap: `max(2 * MAX_RAW_OBJECT_SIZE, 16 * pack_len)`.
+/// The 2 GiB floor covers a maximum-size base plus target; a compressed delta
+/// also charges its decoded stream, so a 1 GiB store base plus 1 GiB target
+/// from a small pack is refused while that stream is resident.
+/// Saturation avoids arithmetic traps on 32-bit hosts.
+fn resident_bytes_cap(pack_len: usize) -> usize {
+    MAX_RAW_OBJECT_SIZE
+        .saturating_mul(2)
+        .max(pack_len.saturating_mul(16))
+}
 
-/// Validate and hash every raw entry in `frames` — already decompressed
-/// by [`PackEntries`] — staging each one into `batch` as it's hashed.
-/// Independent per entry (`WriteBatch::write_prehashed` is documented
-/// safe to call concurrently — see its doc comment, which was written
-/// anticipating exactly this), so below a small-pack threshold this
-/// runs a plain sequential loop, and at or above it (native builds
-/// only — wasm32 has no threads) fans the work out across a scoped
-/// thread pool sized to the machine. This is the read-side counterpart
-/// of the write path's `PackWriter::prepare_raw`/`push_prepared_raw`
-/// split.
-///
-/// Never fails as a whole: every frame's own `Result` is returned,
-/// in `frames`' order, instead of short-circuiting the batch on the
-/// first bad one. A raw entry's validation can't depend on any other
-/// entry, so there's no correctness reason to stop early — and doing
-/// so would let a malformed raw entry at, say, pack position 5 preempt
-/// a delta at position 0 with a missing base, which the pre-fan-out
-/// single-loop reader would have rejected first (it never got past
-/// position 0). [`PackReader::read_inner`]'s phase 3 is what decides,
-/// in pack order, which entry's problem is actually reported.
-fn stage_raw_entries(batch: &crate::batch::WriteBatch<'_>, frames: &[&[u8]]) -> RawStageResults {
+/// Peak owned payload bytes, released with each reservation. Unlike
+/// `DecodeBudget`, this applies to `PackReader::read` and bounds live
+/// compressed output, delta targets and external bases rather than total work.
+struct ResidentBudget<'a> {
+    cap: usize,
+    used: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    peak: std::sync::atomic::AtomicUsize,
+    owned_bytes: Option<&'a AtomicU64>,
+}
+
+impl<'a> ResidentBudget<'a> {
+    fn new(cap: usize, owned_bytes: Option<&'a AtomicU64>) -> Self {
+        Self {
+            cap,
+            used: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            peak: std::sync::atomic::AtomicUsize::new(0),
+            owned_bytes,
+        }
+    }
+
+    fn charge(&self, len: usize) -> Result<Reservation<'_>, PackError> {
+        let previous = self
+            .used
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                used.checked_add(len).filter(|&total| total <= self.cap)
+            })
+            .map_err(|_| PackError::PackfileTooLarge)?;
+        #[cfg(test)]
+        self.peak.fetch_max(previous + len, Ordering::Relaxed);
+        #[cfg(not(test))]
+        let _ = previous;
+        Ok(Reservation { budget: self, len })
+    }
+
+    fn allocate(&self, len: usize) -> Result<OwnedBytes<'_>, PackError> {
+        self.charge(len)?.allocate()
+    }
+
+    fn record_owned(&self, len: usize) {
+        if let Some(counter) = self.owned_bytes {
+            counter.fetch_add(len as u64, Ordering::Relaxed);
+        }
+    }
+}
+
+struct Reservation<'a> {
+    budget: &'a ResidentBudget<'a>,
+    len: usize,
+}
+
+impl<'a> Reservation<'a> {
+    fn allocate(self) -> Result<OwnedBytes<'a>, PackError> {
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(self.len)
+            .map_err(|_| PackError::PackfileTooLarge)?;
+        Ok(OwnedBytes {
+            bytes,
+            _reservation: self,
+        })
+    }
+}
+
+impl Drop for Reservation<'_> {
+    fn drop(&mut self) {
+        self.budget.used.fetch_sub(self.len, Ordering::Relaxed);
+    }
+}
+
+struct OwnedBytes<'a> {
+    bytes: Vec<u8>,
+    _reservation: Reservation<'a>,
+}
+
+enum ResidentBytes<'p, 'b> {
+    Borrowed(&'p [u8]),
+    Owned(OwnedBytes<'b>),
+}
+
+impl AsRef<[u8]> for ResidentBytes<'_, '_> {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            Self::Borrowed(bytes) => bytes,
+            Self::Owned(bytes) => &bytes.bytes,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum EncodedPayload<'p> {
+    Plain(&'p [u8]),
+    Zstd(&'p [u8]),
+}
+
+impl<'p> EncodedPayload<'p> {
+    fn decode<'b>(
+        self,
+        budget: &'b ResidentBudget<'_>,
+    ) -> Result<ResidentBytes<'p, 'b>, PackError> {
+        match self {
+            Self::Plain(bytes) => Ok(ResidentBytes::Borrowed(bytes)),
+            Self::Zstd(payload) => {
+                let len = zstd_entry_len(payload)?;
+                let mut output = budget.allocate(len)?;
+                decompress_zstd_into(payload, &mut output.bytes)?;
+                Ok(ResidentBytes::Owned(output))
+            }
+        }
+    }
+
+    /// Only a failed admission is deferred; allocation and decode errors are permanent.
+    fn decode_for_staging<'b>(
+        self,
+        budget: &'b ResidentBudget<'_>,
+    ) -> Result<Option<ResidentBytes<'p, 'b>>, PackError> {
+        match self {
+            Self::Plain(bytes) => Ok(Some(ResidentBytes::Borrowed(bytes))),
+            Self::Zstd(payload) => {
+                let len = zstd_entry_len(payload)?;
+                let Ok(reservation) = budget.charge(len) else {
+                    return Ok(None);
+                };
+                let mut output = reservation.allocate()?;
+                decompress_zstd_into(payload, &mut output.bytes)?;
+                Ok(Some(ResidentBytes::Owned(output)))
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Entry<'p> {
+    Raw(EncodedPayload<'p>),
+    Delta {
+        base: Hash,
+        stream: EncodedPayload<'p>,
+    },
+}
+
+#[derive(Default)]
+struct BaseUses {
+    remaining: usize,
+    last_position: usize,
+}
+
+fn has_remaining_uses(uses: &std::collections::HashMap<Hash, BaseUses>, hash: &Hash) -> bool {
+    uses.get(hash).is_some_and(|usage| usage.remaining != 0)
+}
+
+// None marks deferred admission or work skipped after an earlier failure.
+type RawStageResult<'b> = Option<Result<(Hash, Option<OwnedBytes<'b>>), PackError>>;
+type RawStageResults<'b> = Vec<RawStageResult<'b>>;
+
+/// Validate, hash and stage independent raw frames, preserving result order.
+/// Errors stay in the result queue until phase 3 reaches that pack position.
+fn stage_raw_entries<'b>(
+    batch: &crate::batch::WriteBatch<'_>,
+    frames: &[(usize, EncodedPayload<'_>)],
+    uses: &std::collections::HashMap<Hash, BaseUses>,
+    budget: &'b ResidentBudget<'_>,
+) -> RawStageResults<'b> {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        // Below this many entries per available thread, thread-spawn
-        // overhead isn't worth it — the same sequential/parallel
-        // crossover shape `mkit-cli`'s own fan-outs use (see
-        // `fanout::threshold` there), tuned here by the
-        // `pack_unpack_fanout` bench.
         const ENTRIES_PER_THREAD: usize = 8;
         let threads = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
         if threads > 1 && frames.len() >= ENTRIES_PER_THREAD.saturating_mul(threads) {
-            return stage_raw_entries_parallel(batch, frames, threads);
+            return stage_raw_entries_parallel(batch, frames, uses, budget, threads);
         }
     }
+    let first_failure = std::sync::atomic::AtomicUsize::new(usize::MAX);
     frames
         .iter()
-        .map(|payload| prepare_and_stage_raw(batch, payload))
+        .map(|&(position, payload)| {
+            stage_raw_in_phase_two(batch, position, payload, uses, budget, &first_failure)
+        })
         .collect()
 }
 
-/// Parallel branch of [`stage_raw_entries`]: split `frames` into
-/// `threads` contiguous chunks and process each chunk sequentially on
-/// its own scoped thread, preserving `frames`' order in the returned
-/// `Vec` (chunks are joined in creation order, and each chunk's own
-/// results stay in its slice order). `std::thread::scope` (not a
-/// persistent pool) is deliberate — `mkit-core` stays
-/// dependency-neutral and wasm-clean (unlike `mkit-cli`, which already
-/// carries `rayon` for its own fan-outs — see that crate's
-/// `Cargo.toml`), and this call is already gated by
-/// [`stage_raw_entries`]'s threshold so the per-call spawn cost is only
-/// paid when there is enough work to amortize it.
 #[cfg(not(target_arch = "wasm32"))]
-fn stage_raw_entries_parallel(
+fn stage_raw_entries_parallel<'b>(
     batch: &crate::batch::WriteBatch<'_>,
-    frames: &[&[u8]],
+    frames: &[(usize, EncodedPayload<'_>)],
+    uses: &std::collections::HashMap<Hash, BaseUses>,
+    budget: &'b ResidentBudget<'_>,
     threads: usize,
-) -> RawStageResults {
+) -> RawStageResults<'b> {
+    let first_failure = &std::sync::atomic::AtomicUsize::new(usize::MAX);
     let chunk_size = frames.len().div_ceil(threads).max(1);
     let mut out = Vec::with_capacity(frames.len());
     std::thread::scope(|scope| {
@@ -1733,7 +1934,16 @@ fn stage_raw_entries_parallel(
                 scope.spawn(move || {
                     chunk
                         .iter()
-                        .map(|payload| prepare_and_stage_raw(batch, payload))
+                        .map(|&(position, payload)| {
+                            stage_raw_in_phase_two(
+                                batch,
+                                position,
+                                payload,
+                                uses,
+                                budget,
+                                first_failure,
+                            )
+                        })
                         .collect::<Vec<_>>()
                 })
             })
@@ -1745,25 +1955,62 @@ fn stage_raw_entries_parallel(
     out
 }
 
-/// Pure per-entry step shared by both branches of [`stage_raw_entries`]:
-/// validate `payload` (already decompressed by [`PackEntries`]) as a
-/// canonical storable object, compute its dispatched id, and stage it
-/// into `batch`. Touches no state shared across entries — `batch` is
-/// the one exception, and it is `&self`-based with its own internal
-/// locking specifically so this is safe to call from many threads at
-/// once.
-fn prepare_and_stage_raw(
+fn stage_raw_in_phase_two<'b>(
     batch: &crate::batch::WriteBatch<'_>,
-    payload: &[u8],
-) -> Result<Hash, PackError> {
-    let obj = validate_storable_object(payload)?;
-    // Address by the dispatched id (merkle root for Tree/ChunkedBlob,
-    // BLAKE3 otherwise) from the object we just decoded, so the
-    // unpacked object lands under the same key every sink uses without
-    // a second decode.
-    let stored_hash = crate::object::id_from_object(&obj, payload);
-    batch.write_prehashed(stored_hash, &[payload])?;
-    Ok(stored_hash)
+    position: usize,
+    payload: EncodedPayload<'_>,
+    uses: &std::collections::HashMap<Hash, BaseUses>,
+    budget: &'b ResidentBudget<'_>,
+    first_failure: &std::sync::atomic::AtomicUsize,
+) -> RawStageResult<'b> {
+    if position > first_failure.load(Ordering::Relaxed) {
+        return None;
+    }
+    let result = match payload.decode_for_staging(budget) {
+        Ok(Some(payload)) => stage_decoded_raw(batch, position, payload, uses, budget),
+        Ok(None) => return None,
+        Err(error) => Err(error),
+    };
+    if result.is_err() {
+        first_failure.fetch_min(position, Ordering::Relaxed);
+    }
+    Some(result)
+}
+
+fn prepare_and_stage_raw<'b>(
+    batch: &crate::batch::WriteBatch<'_>,
+    position: usize,
+    payload: EncodedPayload<'_>,
+    uses: &std::collections::HashMap<Hash, BaseUses>,
+    budget: &'b ResidentBudget<'_>,
+) -> Result<(Hash, Option<OwnedBytes<'b>>), PackError> {
+    stage_decoded_raw(batch, position, payload.decode(budget)?, uses, budget)
+}
+
+fn stage_decoded_raw<'b>(
+    batch: &crate::batch::WriteBatch<'_>,
+    position: usize,
+    payload: ResidentBytes<'_, 'b>,
+    uses: &std::collections::HashMap<Hash, BaseUses>,
+    budget: &'b ResidentBudget<'_>,
+) -> Result<(Hash, Option<OwnedBytes<'b>>), PackError> {
+    let obj = validate_storable_object(payload.as_ref())?;
+    let stored_hash = crate::object::id_from_object(&obj, payload.as_ref());
+    batch.write_prehashed(stored_hash, &[payload.as_ref()])?;
+    let retained = if let ResidentBytes::Owned(bytes) = payload {
+        budget.record_owned(bytes.bytes.len());
+        if uses
+            .get(&stored_hash)
+            .is_some_and(|usage| usage.last_position > position)
+        {
+            Some(bytes)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    Ok((stored_hash, retained))
 }
 
 /// SPEC-PACKFILE §1/§5/§8 steps 1-5: length sanity, magic, version,
@@ -1849,8 +2096,8 @@ pub enum PackEntry<'a> {
 /// ([`PackReader::read`] still rejects non-storable objects before
 /// they touch the store).
 ///
-/// [`PackReader::read`] consumes this iterator so there is one frame
-/// parser.
+/// [`PackReader::read`] consumes the same private frame parser, deferring
+/// decompression until validation/staging or delta application.
 #[derive(Debug)]
 pub struct PackEntries<'a> {
     bytes: &'a [u8],
@@ -1897,19 +2144,21 @@ impl<'a> PackEntries<'a> {
         let mut raw_only = true;
         let mut first_non_raw = None;
         for i in 0..count {
-            if pos + ENTRY_FRAME_LEN > split {
+            if ENTRY_FRAME_LEN > split - pos {
                 return Err(PackError::UnexpectedEof);
             }
             let etype = bytes[pos];
-            pos += 1;
-            let payload_len =
-                u32::from_le_bytes(bytes[pos..pos + 4].try_into().expect("4 bytes")) as usize;
-            pos += 4;
+            pos = pos.checked_add(1).ok_or(PackError::UnexpectedEof)?;
+            let payload_len = u32::from_le_bytes(
+                bytes[pos..pos.checked_add(4).ok_or(PackError::UnexpectedEof)?]
+                    .try_into()
+                    .expect("4 bytes"),
+            ) as usize;
+            pos = pos.checked_add(4).ok_or(PackError::UnexpectedEof)?;
             total_payload = total_payload.saturating_add(payload_len as u64);
             if total_payload > payload_cap {
                 return Err(PackError::PackfileTooLarge);
             }
-            // Overflow-free on 32-bit `usize`; see `delta_base_hashes`.
             if payload_len > split - pos {
                 return Err(PackError::UnexpectedEof);
             }
@@ -1942,7 +2191,9 @@ impl<'a> PackEntries<'a> {
                 0x01 => return Err(PackError::InvalidEntryType(0x01)),
                 other => return Err(PackError::InvalidEntryType(other)),
             }
-            pos += payload_len;
+            pos = pos
+                .checked_add(payload_len)
+                .ok_or(PackError::UnexpectedEof)?;
         }
         if pos != split {
             return Err(PackError::TrailingData);
@@ -1986,70 +2237,81 @@ impl<'a> PackEntries<'a> {
         self.last_payload_range.clone()
     }
 
-    fn next_entry(&mut self) -> Result<PackEntry<'a>, PackError> {
-        if self.pos + ENTRY_FRAME_LEN > self.split {
+    fn next_encoded_entry(&mut self) -> Result<Entry<'a>, PackError> {
+        if ENTRY_FRAME_LEN > self.split - self.pos {
             return Err(PackError::UnexpectedEof);
         }
         let etype = self.bytes[self.pos];
-        self.pos += 1;
+        self.pos = self.pos.checked_add(1).ok_or(PackError::UnexpectedEof)?;
         let payload_len = u32::from_le_bytes(
-            self.bytes[self.pos..self.pos + 4]
+            self.bytes[self.pos..self.pos.checked_add(4).ok_or(PackError::UnexpectedEof)?]
                 .try_into()
                 .expect("4 bytes"),
         ) as usize;
-        self.pos += 4;
-        // Overflow-free on 32-bit `usize`; see `delta_base_hashes`.
+        self.pos = self.pos.checked_add(4).ok_or(PackError::UnexpectedEof)?;
         if payload_len > self.split - self.pos {
             return Err(PackError::UnexpectedEof);
         }
         let payload_start = self.pos;
-        let payload_end = self.pos + payload_len;
+        let payload_end = self
+            .pos
+            .checked_add(payload_len)
+            .ok_or(PackError::UnexpectedEof)?;
         let payload = &self.bytes[payload_start..payload_end];
         self.last_payload_range = Some(payload_start..payload_end);
         self.pos = payload_end;
         self.yielded += 1;
-        decode_payload(etype, self.version, payload)
+        encoded_payload(etype, self.version, payload)
+    }
+
+    fn next_entry(&mut self) -> Result<PackEntry<'a>, PackError> {
+        decode_encoded_payload(self.next_encoded_entry()?)
     }
 }
 
-// Shared by the buffered and windowed readers; framing is checked by each caller.
-fn decode_payload(etype: u8, version: u32, payload: &[u8]) -> Result<PackEntry<'_>, PackError> {
+// One type/payload parser shared by buffered iteration, lazy unpack and windows.
+fn encoded_payload(etype: u8, version: u32, payload: &[u8]) -> Result<Entry<'_>, PackError> {
     match etype {
-        0x00 => Ok(PackEntry::Raw {
-            bytes: Cow::Borrowed(payload),
-        }),
-        0x02 => {
+        0x00 => Ok(Entry::Raw(EncodedPayload::Plain(payload))),
+        0x03 if version == VERSION_V2 => Ok(Entry::Raw(EncodedPayload::Zstd(payload))),
+        0x02 | 0x04 if etype == 0x02 || version == VERSION_V2 => {
             if payload.len() < hash::HASH_LEN {
                 return Err(PackError::DeltaEntryTruncated);
             }
-            let mut base = [0u8; hash::HASH_LEN];
-            base.copy_from_slice(&payload[..hash::HASH_LEN]);
-            Ok(PackEntry::Delta {
-                base,
-                stream: Cow::Borrowed(&payload[hash::HASH_LEN..]),
-            })
+            let base = payload[..hash::HASH_LEN].try_into().expect("32 bytes");
+            let bytes = &payload[hash::HASH_LEN..];
+            let stream = if etype == 0x02 {
+                EncodedPayload::Plain(bytes)
+            } else {
+                EncodedPayload::Zstd(bytes)
+            };
+            Ok(Entry::Delta { base, stream })
         }
-        0x03 if version == VERSION_V2 => {
-            let obj_bytes = decompress_zstd_entry(payload)?;
-            Ok(PackEntry::Raw {
-                bytes: Cow::Owned(obj_bytes),
-            })
-        }
-        0x04 if version == VERSION_V2 => {
-            if payload.len() < hash::HASH_LEN {
-                return Err(PackError::DeltaEntryTruncated);
-            }
-            let mut base = [0u8; hash::HASH_LEN];
-            base.copy_from_slice(&payload[..hash::HASH_LEN]);
-            let stream = decompress_zstd_entry(&payload[hash::HASH_LEN..])?;
-            Ok(PackEntry::Delta {
-                base,
-                stream: Cow::Owned(stream),
-            })
-        }
-        0x01 => Err(PackError::InvalidEntryType(0x01)),
         other => Err(PackError::InvalidEntryType(other)),
     }
+}
+
+fn decode_encoded_payload(entry: Entry<'_>) -> Result<PackEntry<'_>, PackError> {
+    fn decode(payload: EncodedPayload<'_>) -> Result<Cow<'_, [u8]>, PackError> {
+        match payload {
+            EncodedPayload::Plain(bytes) => Ok(Cow::Borrowed(bytes)),
+            EncodedPayload::Zstd(bytes) => Ok(Cow::Owned(decompress_zstd_entry(bytes)?)),
+        }
+    }
+    match entry {
+        Entry::Raw(bytes) => Ok(PackEntry::Raw {
+            bytes: decode(bytes)?,
+        }),
+        Entry::Delta { base, stream } => Ok(PackEntry::Delta {
+            base,
+            stream: decode(stream)?,
+        }),
+    }
+}
+
+// Framing is checked by each caller, payload interpretation is shared.
+fn decode_payload(etype: u8, version: u32, payload: &[u8]) -> Result<PackEntry<'_>, PackError> {
+    decode_encoded_payload(encoded_payload(etype, version, payload)?)
 }
 
 impl<'a> Iterator for PackEntries<'a> {
@@ -2070,30 +2332,50 @@ impl<'a> Iterator for PackEntries<'a> {
     }
 }
 
-/// Resolve a delta's base, decode `stream` against it, and stage the
-/// reconstructed target into `batch`/`in_pack`. `0x04` deltas differ
-/// from `0x02` only in how `stream` was sourced by [`PackEntries`]
-/// (decompressed vs. borrowed straight from `pack_bytes`), not in how
-/// base resolution, delta decoding, or staging work here. Returns the
-/// stored hash; `read_inner`'s phase 3 builds [`UnpackReport`] itself
-/// as it walks `entries` in pack order, so this function doesn't need
-/// to touch it.
-fn stage_delta_target<B: DeltaBaseSource>(
+/// Apply a delta while charging the stream, cached base and declared target
+/// before allocating. The use count is consumed before retaining the target,
+/// which also handles identity deltas whose target hash equals their base.
+fn stage_delta_target<'b, B: DeltaBaseSource>(
     bases: &mut B,
     batch: &crate::batch::WriteBatch<'_>,
-    in_pack: &mut std::collections::HashMap<Hash, Cow<'_, [u8]>>,
-    owned_bytes: Option<&AtomicU64>,
+    in_pack: &mut std::collections::HashMap<Hash, ResidentBytes<'_, 'b>>,
+    uses: &mut std::collections::HashMap<Hash, BaseUses>,
+    budget: &'b ResidentBudget<'_>,
     base_hash: Hash,
     stream: &[u8],
 ) -> Result<Hash, PackError> {
-    let resolved = resolve_delta_target(bases, in_pack, base_hash, stream)?;
-    let obj = validate_storable_object(&resolved)?;
-    let stored_hash = crate::object::id_from_object(&obj, &resolved);
-    batch.write_prehashed(stored_hash, &[&resolved])?;
-    if let Some(c) = owned_bytes {
-        c.fetch_add(resolved.len() as u64, Ordering::Relaxed);
+    if let std::collections::hash_map::Entry::Vacant(entry) = in_pack.entry(base_hash) {
+        let mut reservation = None;
+        let bytes = bases
+            .base_with_admission(&base_hash, |len| {
+                reservation = Some(budget.charge(len)?);
+                Ok(())
+            })?
+            .ok_or_else(|| PackError::DeltaBaseMissing(hash::to_hex(&base_hash)))?;
+        if !external_base_matches::<B>(&bytes, &base_hash)? {
+            return Err(PackError::DeltaBaseMissing(hash::to_hex(&base_hash)));
+        }
+        entry.insert(ResidentBytes::Owned(OwnedBytes {
+            bytes,
+            _reservation: reservation.expect("source admitted its buffer"),
+        }));
     }
-    in_pack.insert(stored_hash, Cow::Owned(resolved));
+    let result_len = validate_delta_result_size(stream)?;
+    let mut resolved = budget.allocate(result_len)?;
+    resolved.bytes =
+        delta::decode_preallocated(in_pack[&base_hash].as_ref(), stream, resolved.bytes)?;
+    let obj = validate_storable_object(&resolved.bytes)?;
+    let stored_hash = crate::object::id_from_object(&obj, &resolved.bytes);
+    batch.write_prehashed(stored_hash, &[&resolved.bytes])?;
+    budget.record_owned(resolved.bytes.len());
+    let usage = uses.get_mut(&base_hash).expect("counted delta base");
+    usage.remaining -= 1;
+    if usage.remaining == 0 {
+        in_pack.remove(&base_hash);
+    }
+    if has_remaining_uses(uses, &stored_hash) {
+        in_pack.insert(stored_hash, ResidentBytes::Owned(resolved));
+    }
     Ok(stored_hash)
 }
 
@@ -2152,14 +2434,16 @@ fn external_base<B: DeltaBaseSource>(
     let Some(bytes) = bases.base(id)? else {
         return Ok(None);
     };
+    Ok(external_base_matches::<B>(&bytes, id)?.then_some(bytes))
+}
+
+fn external_base_matches<B: DeltaBaseSource>(bytes: &[u8], id: &Hash) -> Result<bool, PackError> {
     if B::VERIFIED {
-        validate_storable_object(&bytes)?;
-        return Ok(Some(bytes));
+        validate_storable_object(bytes)?;
+        return Ok(true);
     }
-    match validate_storable_object(&bytes) {
-        Ok(obj) if crate::object::id_from_object(&obj, &bytes) == *id => Ok(Some(bytes)),
-        _ => Ok(None),
-    }
+    Ok(matches!(validate_storable_object(bytes),
+        Ok(obj) if crate::object::id_from_object(&obj, bytes) == *id))
 }
 
 /// Decode `bytes`, enforce the size and storability invariants, and hand back
@@ -2179,7 +2463,7 @@ fn validate_storable_object(bytes: &[u8]) -> Result<Object, PackError> {
     }
 }
 
-fn validate_delta_result_size(stream: &[u8]) -> Result<(), PackError> {
+fn validate_delta_result_size(stream: &[u8]) -> Result<usize, PackError> {
     if stream.len() < delta::HEADER_LEN {
         return Err(PackError::DeltaApply(MkitError::UnexpectedEof));
     }
@@ -2187,7 +2471,7 @@ fn validate_delta_result_size(stream: &[u8]) -> Result<(), PackError> {
     if result_len > MAX_RAW_OBJECT_SIZE {
         return Err(PackError::Store(crate::store::StoreError::ObjectTooLarge));
     }
-    Ok(())
+    Ok(result_len)
 }
 
 // =========================================================================
@@ -2247,6 +2531,804 @@ mod tests {
             chunk.copy_from_slice(&bytes[..chunk.len()]);
         }
         buf
+    }
+
+    #[test]
+    fn unreferenced_delta_targets_do_not_accumulate() {
+        let base = write_blob_via_serialize(&vec![b'a'; 64 * 1024]);
+        let base_hash = hash::hash(&base);
+        let mut writer = PackWriter::new();
+        writer.push_raw(base_hash, &base).unwrap();
+        for i in 0..8 {
+            let mut content = vec![b'a'; 256 * 1024];
+            content[0] = b'b' + i;
+            let target = write_blob_via_serialize(&content);
+            writer
+                .push_delta(&base_hash, &delta::encode(&base, &target).unwrap())
+                .unwrap();
+        }
+        let pack = writer.finish().unwrap();
+        let (_dir, store) = fresh_store();
+        let budget = ResidentBudget::new(resident_bytes_cap(pack.len()), None);
+        PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &budget).unwrap();
+        assert!(budget.peak.load(Ordering::Relaxed) <= 512 * 1024);
+        assert_eq!(budget.used.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn maximum_wire_lengths_return_framing_errors() {
+        for len in [u32::MAX, u32::MAX - 4] {
+            let mut body = Vec::from(MAGIC.as_slice());
+            body.extend_from_slice(&VERSION.to_le_bytes());
+            body.extend_from_slice(&1u32.to_le_bytes());
+            body.push(0x00);
+            body.extend_from_slice(&len.to_le_bytes());
+            let pack = finish_pack_body(body);
+            assert!(matches!(
+                PackEntries::new(&pack),
+                Err(PackError::UnexpectedEof)
+            ));
+            assert!(matches!(
+                delta_base_hashes(&pack),
+                Err(PackError::UnexpectedEof)
+            ));
+            let (_dir, store) = fresh_store();
+            assert!(matches!(
+                PackReader::read(&pack, &store),
+                Err(PackError::UnexpectedEof)
+            ));
+            // Also exercise the iterator's defensive check independently
+            // of the eager framing validation in its public constructor.
+            let mut parser = PackEntries {
+                bytes: &pack,
+                version: VERSION,
+                split: pack.len() - TRAILER_LEN,
+                count: 1,
+                pos: HEADER_LEN,
+                yielded: 0,
+                raw_only: true,
+                first_non_raw: None,
+                last_payload_range: None,
+                done: false,
+            };
+            assert!(matches!(parser.next(), Some(Err(PackError::UnexpectedEof))));
+        }
+    }
+
+    #[test]
+    #[cfg(any(feature = "pack-zstd", feature = "pack-ruzstd"))]
+    fn junk_zstd_claims_fail_without_zero_filling() {
+        for etype in [0x03, 0x04] {
+            for count in [16u32, 64, 256] {
+                let mut body = Vec::from(MAGIC.as_slice());
+                body.extend_from_slice(&VERSION_V2.to_le_bytes());
+                body.extend_from_slice(&count.to_le_bytes());
+                for _ in 0..count {
+                    body.push(etype);
+                    let base_len = if etype == 0x04 { hash::HASH_LEN } else { 0 };
+                    body.extend_from_slice(&u32::try_from(base_len + 5).unwrap().to_le_bytes());
+                    if etype == 0x04 {
+                        body.extend_from_slice(&[0; hash::HASH_LEN]);
+                    }
+                    body.extend_from_slice(
+                        &u32::try_from(MAX_RAW_OBJECT_SIZE).unwrap().to_le_bytes(),
+                    );
+                    body.push(0xAA);
+                }
+                let pack = finish_pack_body(body);
+                let (_dir, store) = fresh_store();
+                let started = std::time::Instant::now();
+                assert!(matches!(
+                    PackReader::read(&pack, &store),
+                    Err(PackError::ZstdDecompress(_))
+                ));
+                let elapsed = started.elapsed();
+                println!("junk zstd type=0x{etype:02x} N={count}: {elapsed:?}");
+                assert!(
+                    elapsed < std::time::Duration::from_secs(5),
+                    "junk frames must not initialize the claimed buffers: {elapsed:?}"
+                );
+                assert!(store.iter_object_hashes().unwrap().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn resident_and_decode_limits_are_independent() {
+        let base = write_blob_via_serialize(b"base payload");
+        let target = write_blob_via_serialize(b"target payload");
+        let mut writer = PackWriter::new();
+        writer.push_raw(hash::hash(&base), &base).unwrap();
+        let stream = delta::encode(&base, &target).unwrap();
+        for _ in 0..3 {
+            writer.push_delta(&hash::hash(&base), &stream).unwrap();
+        }
+        let pack = writer.finish().unwrap();
+        let (_dir, store) = fresh_store();
+        let resident = ResidentBudget::new(target.len(), None);
+        PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &resident).unwrap();
+        assert_eq!(resident.used.load(Ordering::Relaxed), 0);
+        // Each target fits simultaneously resident memory, but all three
+        // declared targets together exceed the cumulative DecodeLimits.
+        let low = DecodeLimits::default().with_max_decoded_bytes(target.len() as u64);
+        let mut seen = 0;
+        assert!(matches!(
+            decode_entries_with(&pack, &mut NoExternalBases, low, |_| {
+                seen += 1;
+                Ok(())
+            }),
+            Err(PackError::PackfileTooLarge)
+        ));
+        assert_eq!(seen, 0);
+        let high = DecodeLimits::default().with_max_decoded_bytes((3 * target.len()) as u64);
+        decode_entries_with(&pack, &mut NoExternalBases, high, |_| Ok(())).unwrap();
+        let (_dir, store) = fresh_store();
+        let resident = ResidentBudget::new(target.len() - 1, None);
+        assert!(matches!(
+            PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &resident),
+            Err(PackError::PackfileTooLarge)
+        ));
+        assert_eq!(resident.peak.load(Ordering::Relaxed), 0);
+        assert!(store.iter_object_hashes().unwrap().is_empty());
+    }
+
+    #[test]
+    fn external_base_admission_charges_both_budgets() {
+        let (_dir, store) = fresh_store();
+        let bytes = write_blob_via_serialize(b"external base");
+        let id = store.write(&bytes).unwrap();
+        for (decoded_cap, resident_cap) in [
+            (bytes.len() - 1, bytes.len()),
+            (bytes.len(), bytes.len() - 1),
+            (bytes.len(), bytes.len()),
+        ] {
+            let mut source = &store;
+            let mut bases = ChargedBases {
+                inner: &mut source,
+                budget: DecodeBudget {
+                    used: 0,
+                    max: decoded_cap as u64,
+                },
+                charged: std::collections::HashMap::new(),
+            };
+            let resident = ResidentBudget::new(resident_cap, None);
+            let mut reservation = None;
+            let result = bases.base_with_admission(&id, |len| {
+                reservation = Some(resident.charge(len)?);
+                Ok(())
+            });
+            if decoded_cap < bytes.len() || resident_cap < bytes.len() {
+                assert!(matches!(result, Err(PackError::PackfileTooLarge)));
+                assert!(reservation.is_none());
+                assert_eq!(resident.peak.load(Ordering::Relaxed), 0);
+            } else {
+                assert_eq!(result.unwrap(), Some(bytes.clone()));
+                assert_eq!(bases.budget.used, bytes.len() as u64);
+                assert_eq!(resident.used.load(Ordering::Relaxed), bytes.len());
+                bases.release(&id);
+                drop(reservation);
+                assert_eq!(bases.budget.used, 0);
+                assert_eq!(resident.used.load(Ordering::Relaxed), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn provided_base_admission_preserves_existing_sources() {
+        struct Source(Vec<u8>);
+        impl DeltaBaseSource for Source {
+            fn base(&mut self, _id: &Hash) -> Result<Option<Vec<u8>>, PackError> {
+                Ok(Some(self.0.clone()))
+            }
+        }
+        let mut source = Source(vec![1, 2, 3]);
+        let mut admitted = None;
+        assert_eq!(
+            source
+                .base_with_admission(&[0; 32], |len| {
+                    admitted = Some(len);
+                    Ok(())
+                })
+                .unwrap(),
+            Some(vec![1, 2, 3])
+        );
+        assert_eq!(admitted, Some(3));
+        assert!(matches!(
+            source.base_with_admission(&[0; 32], |_| Err(PackError::PackfileTooLarge)),
+            Err(PackError::PackfileTooLarge)
+        ));
+    }
+
+    #[test]
+    #[cfg(all(feature = "pack-zstd", not(target_arch = "wasm32")))]
+    fn phase_two_budget_contention_retries_sequentially() {
+        let bytes = write_blob_via_serialize(&vec![b'a'; 256 * 1024]);
+        let mut writer = PackWriter::new();
+        for _ in 0..16 {
+            writer.push_raw(hash::hash(&bytes), &bytes).unwrap();
+        }
+        let pack = writer.finish().unwrap();
+        let mut parser = PackEntries::new(&pack).unwrap();
+        let frames: Vec<_> = (0..parser.entry_count())
+            .map(|position| match parser.next_encoded_entry().unwrap() {
+                Entry::Raw(payload @ EncodedPayload::Zstd(_)) => (position, payload),
+                _ => panic!("expected compressed raw frame"),
+            })
+            .collect();
+        for threads in [1, 2, 4] {
+            let (_dir, store) = fresh_store();
+            let batch = store.batch();
+            let budget = ResidentBudget::new(bytes.len(), None);
+            let uses = std::collections::HashMap::new();
+            // Hold an in-flight worker's entire allowance until every other
+            // worker has attempted admission, avoiding scheduler-dependent races.
+            let in_flight = budget.allocate(bytes.len()).unwrap();
+            let first_failure = std::sync::atomic::AtomicUsize::new(usize::MAX);
+            assert!(
+                stage_raw_in_phase_two(
+                    &batch,
+                    frames[0].0,
+                    frames[0].1,
+                    &uses,
+                    &budget,
+                    &first_failure
+                )
+                .is_none()
+            );
+            assert_eq!(first_failure.load(Ordering::Relaxed), usize::MAX);
+            let results = stage_raw_entries_parallel(&batch, &frames, &uses, &budget, threads);
+            assert_eq!(results.len(), frames.len());
+            assert!(results.iter().all(Option::is_none));
+            drop(in_flight);
+
+            let entries = frames
+                .iter()
+                .map(|(_, payload)| Entry::Raw(*payload))
+                .collect();
+            let report = finish_pack_read(entries, results, uses, &budget, &store, batch).unwrap();
+            assert_eq!(report.raw_count, 16);
+            assert_eq!(report.delta_count, 0);
+            assert_eq!(report.stored, vec![hash::hash(&bytes); 16]);
+            assert_eq!(store.read(&hash::hash(&bytes)).unwrap(), bytes);
+            assert_eq!(budget.peak.load(Ordering::Relaxed), bytes.len());
+            assert_eq!(budget.used.load(Ordering::Relaxed), 0);
+        }
+    }
+
+    #[test]
+    fn phase_two_skips_after_the_first_permanent_failure() {
+        let (_dir, store) = fresh_store();
+        let batch = store.batch();
+        let uses = std::collections::HashMap::new();
+        let budget = ResidentBudget::new(1024, None);
+        let first_failure = std::sync::atomic::AtomicUsize::new(usize::MAX);
+        assert!(matches!(
+            stage_raw_in_phase_two(
+                &batch,
+                7,
+                EncodedPayload::Plain(b"garbage"),
+                &uses,
+                &budget,
+                &first_failure
+            ),
+            Some(Err(PackError::InvalidObject(_)))
+        ));
+        let invalid_claim = u32::MAX.to_le_bytes();
+        assert!(
+            stage_raw_in_phase_two(
+                &batch,
+                19,
+                EncodedPayload::Zstd(&invalid_claim),
+                &uses,
+                &budget,
+                &first_failure
+            )
+            .is_none()
+        );
+        assert_eq!(budget.peak.load(Ordering::Relaxed), 0);
+        let valid = write_blob_via_serialize(b"earlier pack position");
+        assert!(matches!(
+            stage_raw_in_phase_two(
+                &batch,
+                3,
+                EncodedPayload::Plain(&valid),
+                &uses,
+                &budget,
+                &first_failure
+            ),
+            Some(Ok(_))
+        ));
+        assert_eq!(first_failure.load(Ordering::Relaxed), 7);
+        for _ in 0..2 {
+            assert!(matches!(
+                stage_raw_in_phase_two(
+                    &batch,
+                    2,
+                    EncodedPayload::Plain(b"garbage"),
+                    &uses,
+                    &budget,
+                    &first_failure
+                ),
+                Some(Err(PackError::InvalidObject(_)))
+            ));
+            assert_eq!(first_failure.load(Ordering::Relaxed), 2);
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "pack-zstd")]
+    fn deferred_raw_error_precedes_a_later_staging_failure() {
+        let mut payload = 7u32.to_le_bytes().to_vec();
+        payload.extend_from_slice(&zstd::bulk::compress(b"garbage", 3).unwrap());
+        let over_cap = u32::try_from(MAX_RAW_OBJECT_SIZE + 1)
+            .unwrap()
+            .to_le_bytes();
+        let (_dir, store) = fresh_store();
+        let batch = store.batch();
+        let uses = std::collections::HashMap::new();
+        let budget = ResidentBudget::new(7, None);
+        let first_failure = std::sync::atomic::AtomicUsize::new(usize::MAX);
+        let in_flight = budget.allocate(7).unwrap();
+        let earlier = EncodedPayload::Zstd(&payload);
+        let later = EncodedPayload::Zstd(&over_cap);
+        let deferred = stage_raw_in_phase_two(&batch, 0, earlier, &uses, &budget, &first_failure);
+        assert!(deferred.is_none());
+        let failed = stage_raw_in_phase_two(&batch, 1, later, &uses, &budget, &first_failure);
+        assert!(matches!(
+            failed,
+            Some(Err(PackError::DecompressedSizeOverCap(_)))
+        ));
+        assert_eq!(first_failure.load(Ordering::Relaxed), 1);
+        drop(in_flight);
+        assert!(matches!(
+            finish_pack_read(
+                vec![Entry::Raw(earlier), Entry::Raw(later)],
+                vec![deferred, failed],
+                uses,
+                &budget,
+                &store,
+                batch
+            ),
+            Err(PackError::InvalidObject(MkitError::InvalidObjectType(103)))
+        ));
+        assert_eq!(budget.used.load(Ordering::Relaxed), 0);
+        assert!(!store.contains(&hash::hash(b"garbage")));
+    }
+
+    #[test]
+    fn resident_cap_saturates_and_allocation_failure_is_an_error() {
+        assert_eq!(resident_bytes_cap(0), 2 * MAX_RAW_OBJECT_SIZE);
+        assert_eq!(
+            resident_bytes_cap(MAX_RAW_OBJECT_SIZE),
+            MAX_RAW_OBJECT_SIZE.saturating_mul(16)
+        );
+        assert_eq!(resident_bytes_cap(usize::MAX), usize::MAX);
+        let budget = ResidentBudget::new(usize::MAX, None);
+        assert!(matches!(
+            budget.allocate(usize::MAX),
+            Err(PackError::PackfileTooLarge)
+        ));
+        assert_eq!(budget.used.load(Ordering::Relaxed), 0);
+        let _full = budget.charge(usize::MAX).unwrap();
+        assert!(matches!(budget.charge(1), Err(PackError::PackfileTooLarge)));
+    }
+
+    /// Build a canonical large Blob using a tiny COPY stream without ever
+    /// allocating its target in the fixture. The last byte distinguishes IDs.
+    #[cfg(feature = "pack-zstd")]
+    fn repeated_blob_delta(base_len: usize, target_len: usize, marker: u8) -> (Vec<u8>, Hash) {
+        let prologue = crate::serialize::blob_prologue(target_len - 10).unwrap();
+        let mut stream = vec![delta::STREAM_VERSION];
+        stream.extend_from_slice(&u32::try_from(base_len).unwrap().to_le_bytes());
+        stream.extend_from_slice(&u32::try_from(target_len).unwrap().to_le_bytes());
+        stream.push(10);
+        stream.extend_from_slice(&prologue);
+        let mut remaining = target_len - prologue.len() - 1;
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&prologue);
+        let block = vec![b'a'; usize::from(u16::MAX)];
+        while remaining != 0 {
+            let len = remaining.min(block.len());
+            stream.push(0x80);
+            stream.extend_from_slice(&10u32.to_le_bytes());
+            stream.extend_from_slice(&u16::try_from(len).unwrap().to_le_bytes());
+            hasher.update(&block[..len]);
+            remaining -= len;
+        }
+        stream.extend_from_slice(&[1, marker]);
+        hasher.update(&[marker]);
+        (stream, *hasher.finalize().as_bytes())
+    }
+
+    #[test]
+    #[cfg(feature = "pack-zstd")]
+    fn compressed_delta_bomb_releases_targets_and_checks_cap_before_allocation() {
+        const TARGET_LEN: usize = 128 * 1024 * 1024;
+        let base = write_blob_via_serialize(&vec![b'a'; 64 * 1024]);
+        let base_hash = hash::hash(&base);
+        for consume_targets in [false, true] {
+            let mut writer = PackWriter::new();
+            writer.push_raw(base_hash, &base).unwrap();
+            let mut expected = vec![base_hash];
+            for marker in 0..3 {
+                let (stream, target_hash) = repeated_blob_delta(base.len(), TARGET_LEN, marker);
+                writer.push_delta(&base_hash, &stream).unwrap();
+                expected.push(target_hash);
+                if consume_targets {
+                    // Consume each large target exactly once into a tiny
+                    // object, so it is released before the next expansion.
+                    let small = write_blob_via_serialize(&[marker]);
+                    let mut stream = vec![delta::STREAM_VERSION];
+                    stream.extend_from_slice(&u32::try_from(TARGET_LEN).unwrap().to_le_bytes());
+                    stream.extend_from_slice(&u32::try_from(small.len()).unwrap().to_le_bytes());
+                    stream.push(u8::try_from(small.len()).unwrap());
+                    stream.extend_from_slice(&small);
+                    writer.push_delta(&target_hash, &stream).unwrap();
+                    expected.push(hash::hash(&small));
+                }
+            }
+            let pack = writer.finish().unwrap();
+            assert!(
+                pack.len() < 2048,
+                "fixture must remain a small compressed pack"
+            );
+            let (_dir, store) = fresh_store();
+            let budget = ResidentBudget::new(resident_bytes_cap(pack.len()), None);
+            let report =
+                PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &budget).unwrap();
+            assert_eq!(report.stored, expected);
+            assert_eq!(report.raw_count, 1);
+            assert_eq!(report.delta_count, if consume_targets { 6 } else { 3 });
+            assert!(budget.peak.load(Ordering::Relaxed) < TARGET_LEN + 128 * 1024);
+            assert!(budget.peak.load(Ordering::Relaxed) <= budget.cap);
+            assert_eq!(budget.used.load(Ordering::Relaxed), 0);
+            for hash in expected {
+                assert!(store.contains(&hash));
+            }
+            // Inject a lower cap to exercise the same production admission
+            // check without allocating several GiB in the test suite.
+            let (_dir, store) = fresh_store();
+            let budget = ResidentBudget::new(TARGET_LEN - 1, None);
+            assert!(matches!(
+                PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &budget),
+                Err(PackError::PackfileTooLarge)
+            ));
+            assert!(
+                budget.peak.load(Ordering::Relaxed) < 128 * 1024,
+                "target allocation was not admitted"
+            );
+            assert_eq!(budget.used.load(Ordering::Relaxed), 0);
+            assert!(!store.contains(&base_hash));
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "pack-zstd")]
+    fn compressed_raw_bomb_is_bounded_by_workers_and_retained_bases() {
+        const CONTENT_LEN: usize = 4 * 1024 * 1024;
+        let threads = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        let count = 8 * threads;
+        let mut writer = PackWriter::new();
+        let mut content = vec![b'a'; CONTENT_LEN];
+        for i in 0..count {
+            content[..8].copy_from_slice(&(i as u64).to_le_bytes());
+            let blob = write_blob_via_serialize(&content);
+            writer.push_raw(hash::hash(&blob), &blob).unwrap();
+        }
+        let pack = writer.finish().unwrap();
+        assert!(pack.len() < count * 1024);
+        let (_dir, store) = fresh_store();
+        let budget = ResidentBudget::new(resident_bytes_cap(pack.len()), None);
+        let report =
+            PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &budget).unwrap();
+        assert_eq!(report.raw_count as usize, count);
+        assert!(budget.peak.load(Ordering::Relaxed) <= threads * (CONTENT_LEN + 10));
+        assert!(budget.peak.load(Ordering::Relaxed) <= budget.cap);
+        assert_eq!(budget.used.load(Ordering::Relaxed), 0);
+        let (_dir, store) = fresh_store();
+        let budget = ResidentBudget::new(CONTENT_LEN - 1, None);
+        assert!(matches!(
+            PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &budget),
+            Err(PackError::PackfileTooLarge)
+        ));
+        assert_eq!(
+            budget.peak.load(Ordering::Relaxed),
+            0,
+            "zstd claim must be rejected before allocation"
+        );
+        assert_eq!(budget.used.load(Ordering::Relaxed), 0);
+    }
+
+    /// Copy of the parent reader's ownership/ordering algorithm, deliberately
+    /// simple and unbounded; used only with small equivalence fixtures.
+    fn parent_reader(pack: &[u8], store: &ObjectStore) -> Result<UnpackReport, PackError> {
+        let entries: Vec<_> = PackEntries::new(pack)?.collect::<Result<_, _>>()?;
+        let batch = store.batch();
+        let mut in_pack: std::collections::HashMap<Hash, Cow<'_, [u8]>> =
+            std::collections::HashMap::new();
+        let mut report = UnpackReport::default();
+        for entry in entries {
+            let (bytes, is_delta) = match entry {
+                PackEntry::Raw { bytes } => (bytes, false),
+                PackEntry::Delta { base, stream } => {
+                    if let std::collections::hash_map::Entry::Vacant(entry) = in_pack.entry(base) {
+                        if !store.contains(&base) {
+                            return Err(PackError::DeltaBaseMissing(hash::to_hex(&base)));
+                        }
+                        let bytes = store.read(&base)?;
+                        validate_storable_object(&bytes)?;
+                        entry.insert(Cow::Owned(bytes));
+                    }
+                    validate_delta_result_size(&stream)?;
+                    (
+                        Cow::Owned(delta::decode(in_pack[&base].as_ref(), &stream)?),
+                        true,
+                    )
+                }
+            };
+            let obj = validate_storable_object(&bytes)?;
+            let hash = crate::object::id_from_object(&obj, &bytes);
+            batch.write_prehashed(hash, &[bytes.as_ref()])?;
+            in_pack.insert(hash, bytes);
+            if is_delta {
+                report.delta_count += 1;
+            } else {
+                report.raw_count += 1;
+            }
+            report.stored.push(hash);
+        }
+        batch.commit()?;
+        Ok(report)
+    }
+
+    #[test]
+    fn retention_matches_parent_for_chains_duplicates_and_shared_bases() {
+        let raw_base = write_blob_via_serialize(&vec![b'a'; 1024]);
+        let first_target = write_blob_via_serialize(&vec![b'b'; 1024]);
+        let second_target = write_blob_via_serialize(&vec![b'c'; 1024]);
+        let shared_target = write_blob_via_serialize(&vec![b'd'; 1024]);
+        let external = write_blob_via_serialize(b"external base");
+        let object_hash = |bytes: &[u8]| hash::hash(bytes);
+        let mut writer = PackWriter::new();
+        writer.push_raw(object_hash(&raw_base), &raw_base).unwrap();
+        writer
+            .push_delta(
+                &object_hash(&raw_base),
+                &delta::encode(&raw_base, &first_target).unwrap(),
+            )
+            .unwrap();
+        writer
+            .push_delta(
+                &object_hash(&raw_base),
+                &delta::encode(&raw_base, &second_target).unwrap(),
+            )
+            .unwrap();
+        writer
+            .push_delta(
+                &object_hash(&first_target),
+                &delta::encode(&first_target, &shared_target).unwrap(),
+            )
+            .unwrap();
+        // Raw duplicate after raw_base's final delta use must not re-retain raw_base.
+        writer.push_raw(object_hash(&raw_base), &raw_base).unwrap();
+        // Duplicate delta targets and identity targets share raw_base single key.
+        writer
+            .push_delta(
+                &object_hash(&second_target),
+                &delta::encode(&second_target, &shared_target).unwrap(),
+            )
+            .unwrap();
+        writer
+            .push_delta(
+                &object_hash(&shared_target),
+                &delta::encode(&shared_target, &shared_target).unwrap(),
+            )
+            .unwrap();
+        writer
+            .push_delta(
+                &object_hash(&shared_target),
+                &delta::encode(&shared_target, &first_target).unwrap(),
+            )
+            .unwrap();
+        writer
+            .push_delta(
+                &object_hash(&external),
+                &delta::encode(&external, &raw_base).unwrap(),
+            )
+            .unwrap();
+        writer
+            .push_delta(
+                &object_hash(&external),
+                &delta::encode(&external, &second_target).unwrap(),
+            )
+            .unwrap();
+        let pack = writer.finish().unwrap();
+        let (_old_dir, old_store) = fresh_store();
+        let (_new_dir, new_store) = fresh_store();
+        old_store.write(&external).unwrap();
+        new_store.write(&external).unwrap();
+        let old = parent_reader(&pack, &old_store).unwrap();
+        let budget = ResidentBudget::new(resident_bytes_cap(pack.len()), None);
+        let new =
+            PackReader::read_with_budget(&pack, &new_store, MAX_TOTAL_PAYLOAD, &budget).unwrap();
+        assert_eq!(new, old);
+        assert_eq!(new.stored.len(), 10);
+        assert_eq!(new_store.read_call_count(), 1);
+        assert_eq!(budget.used.load(Ordering::Relaxed), 0);
+        for bytes in [
+            raw_base,
+            first_target,
+            second_target,
+            shared_target,
+            external,
+        ] {
+            assert_eq!(
+                new_store.read(&object_hash(&bytes)).unwrap(),
+                old_store.read(&object_hash(&bytes)).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn store_base_is_charged_once_and_released_on_last_use() {
+        let (_dir, store) = fresh_store();
+        let base = write_blob_via_serialize(b"external base payload");
+        let target = write_blob_via_serialize(b"target payload");
+        let base_hash = store.write(&base).unwrap();
+        let target_hash = hash::hash(&target);
+        let stream = delta::encode(&base, &target).unwrap();
+        let budget = ResidentBudget::new(base.len() + target.len(), None);
+        let batch = store.batch();
+        let mut in_pack = std::collections::HashMap::new();
+        let mut uses = std::collections::HashMap::from([(
+            base_hash,
+            BaseUses {
+                remaining: 2,
+                last_position: 1,
+            },
+        )]);
+        for remaining in [1, 0] {
+            assert_eq!(
+                stage_delta_target(
+                    &mut &store,
+                    &batch,
+                    &mut in_pack,
+                    &mut uses,
+                    &budget,
+                    base_hash,
+                    &stream
+                )
+                .unwrap(),
+                target_hash
+            );
+            assert_eq!(uses[&base_hash].remaining, remaining);
+            assert_eq!(in_pack.contains_key(&base_hash), remaining != 0);
+            assert!(!in_pack.contains_key(&target_hash));
+            assert_eq!(
+                budget.used.load(Ordering::Relaxed),
+                if remaining == 0 { 0 } else { base.len() }
+            );
+        }
+        assert_eq!(store.read_call_count(), 1);
+        assert_eq!(budget.peak.load(Ordering::Relaxed), budget.cap);
+        // An insufficient base budget fails inside the store allocator,
+        // before any buffer exists, and leaves the cache empty.
+        drop(in_pack);
+        let budget = ResidentBudget::new(base.len() - 1, None);
+        let mut in_pack = std::collections::HashMap::new();
+        let mut uses = std::collections::HashMap::from([(
+            base_hash,
+            BaseUses {
+                remaining: 1,
+                last_position: 0,
+            },
+        )]);
+        assert!(matches!(
+            stage_delta_target(
+                &mut &store,
+                &batch,
+                &mut in_pack,
+                &mut uses,
+                &budget,
+                base_hash,
+                &stream
+            ),
+            Err(PackError::PackfileTooLarge)
+        ));
+        assert!(in_pack.is_empty());
+        assert_eq!(budget.peak.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    #[cfg(feature = "pack-zstd")]
+    fn retained_compressed_raw_bases_share_the_resident_cap() {
+        let first = write_blob_via_serialize(&vec![b'a'; 1024 * 1024]);
+        let second = write_blob_via_serialize(&vec![b'b'; 1024 * 1024]);
+        let mut writer = PackWriter::new();
+        for bytes in [&first, &second] {
+            writer.push_raw(hash::hash(bytes), bytes).unwrap();
+        }
+        for bytes in [&first, &second] {
+            writer
+                .push_delta(&hash::hash(bytes), &delta::encode(bytes, bytes).unwrap())
+                .unwrap();
+        }
+        let pack = writer.finish().unwrap();
+        let (_dir, store) = fresh_store();
+        let budget = ResidentBudget::new(first.len() + second.len() - 1, None);
+        assert!(matches!(
+            PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &budget),
+            Err(PackError::PackfileTooLarge)
+        ));
+        assert_eq!(budget.peak.load(Ordering::Relaxed), first.len());
+        assert_eq!(budget.used.load(Ordering::Relaxed), 0);
+        assert!(!store.contains(&hash::hash(&first)));
+        assert!(!store.contains(&hash::hash(&second)));
+    }
+
+    #[test]
+    #[ignore = "decodes more than 200 MiB; run in the serial ignored-lane"]
+    #[cfg(feature = "pack-zstd")]
+    fn large_mixed_pack_decodes_under_production_resident_cap() {
+        const GROUPS: u32 = 13;
+        const RAW_LEN: usize = 16 * 1024 * 1024;
+        const COMPRESSED_LEN: usize = 4 * 1024 * 1024;
+        let started = std::time::Instant::now();
+        let mut writer = PackWriter::new();
+        let mut expected = Vec::new();
+        // Model transfer-planner order: each raw base is immediately
+        // followed by its delta, alternating binary and text-like files.
+        for group in 0..GROUPS {
+            for content in [
+                incompressible_bytes(0xA000_0000 + u64::from(group), RAW_LEN),
+                vec![u8::try_from(group).unwrap(); COMPRESSED_LEN],
+            ] {
+                let base = write_blob_via_serialize(&content);
+                let base_hash = hash::hash(&base);
+                writer.push_raw(base_hash, &base).unwrap();
+                expected.push(base_hash);
+                let mut target = base.clone();
+                *target.last_mut().unwrap() ^= 0x80;
+                let target_hash = hash::hash(&target);
+                writer
+                    .push_delta(&base_hash, &delta::encode(&base, &target).unwrap())
+                    .unwrap();
+                expected.push(target_hash);
+            }
+        }
+        let pack = writer.finish().unwrap();
+        // Require at least 200 MiB on the wire as well as reconstructed
+        // content; highly compressed entries cannot satisfy this by claim.
+        assert!(pack.len() >= 200 * 1024 * 1024);
+        let mut parser = PackEntries::new(&pack).unwrap();
+        let (mut raw, mut zstd, mut deltas) = (0, 0, 0);
+        for _ in 0..parser.entry_count() {
+            match parser.next_encoded_entry().unwrap() {
+                Entry::Raw(EncodedPayload::Plain(_)) => raw += 1,
+                Entry::Raw(EncodedPayload::Zstd(_)) => zstd += 1,
+                Entry::Delta { .. } => deltas += 1,
+            }
+        }
+        assert_eq!((raw, zstd, deltas), (GROUPS, GROUPS, 2 * GROUPS));
+        let (_dir, store) = fresh_store();
+        let budget = ResidentBudget::new(resident_bytes_cap(pack.len()), None);
+        let report =
+            PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &budget).unwrap();
+        assert_eq!(report.raw_count, 2 * GROUPS);
+        assert_eq!(report.delta_count, 2 * GROUPS);
+        assert_eq!(report.stored, expected);
+        assert_eq!(budget.used.load(Ordering::Relaxed), 0);
+        assert!(budget.peak.load(Ordering::Relaxed) <= budget.cap);
+        // Verify every stored object through the real store identity check.
+        for id in report.stored {
+            store.read(&id).unwrap();
+        }
+        eprintln!(
+            "large mixed pack: {} wire bytes, {} peak owned bytes, {:?}",
+            pack.len(),
+            budget.peak.load(Ordering::Relaxed),
+            started.elapsed()
+        );
     }
 
     #[test]

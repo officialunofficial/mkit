@@ -21,6 +21,8 @@ curl mkit.sh | sh
 
 The script downloads the signed release binary for your platform, verifies its cosign signature, and installs `mkit` into `~/.local/bin`.
 
+Linux release archives require **glibc 2.39 or newer**; see [Linux requirements and workarounds](docs/INSTALL.md#from-github-releases).
+
 Other options:
 
 ```sh

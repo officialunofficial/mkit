@@ -32,6 +32,38 @@ describe('mkit-wasm wrapper', () => {
     expect(m.blake3_hex(view)).toBe(encoded.hash_hex)
   })
 
+  it.each([0xffffffff, 0xfffffffb])(
+    'verify_closure_packs rejects payload length %i without a wasm32 trap',
+    async (payloadLength) => {
+      const m = await mkit()
+      // A valid trailer reaches the 32-bit framing arithmetic, despite the
+      // declared payload being much larger than the bytes before the trailer.
+      const body = new Uint8Array(17)
+      body.set(new TextEncoder().encode('MKIT'))
+      const fields = new DataView(body.buffer)
+      fields.setUint32(4, 1, true)
+      fields.setUint32(8, 1, true)
+      fields.setUint32(13, payloadLength, true)
+      const digest = m.blake3_hex(body)
+      const pack = new Uint8Array(body.length + 32)
+      pack.set(body)
+      for (let i = 0; i < 32; i += 1) {
+        pack[body.length + i] = Number.parseInt(digest.slice(i * 2, i * 2 + 2), 16)
+      }
+
+      let rejection: unknown
+      try {
+        m.verify_closure_packs(ZERO_SEED, 'snapshot', pack, JSON.stringify([pack.length]))
+      } catch (error) {
+        rejection = error
+      }
+      // wasm-bindgen throws Result::Err(String) as a string; a trap is a
+      // WebAssembly.RuntimeError and must never satisfy this assertion.
+      expect(typeof rejection).toBe('string')
+      expect(rejection).toContain('entry payload extends past the trailer offset')
+    },
+  )
+
   it('keypair_from_seed is deterministic and distinct for distinct seeds', async () => {
     const m = await mkit()
     const a1 = m.keypair_from_seed(ZERO_SEED)

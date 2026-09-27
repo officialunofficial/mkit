@@ -511,13 +511,12 @@ exactly one RFC 8878 Zstandard frame (SPEC-PACKFILE §3.3). The C backend
 skippable or legacy frame magic, a second concatenated frame and any
 trailing byte, with `PackError::ZstdDecompress`. Both apply the same §3.3
 bomb guards (claim ≤ `MAX_RAW_OBJECT_SIZE` before decoding, output bounded
-to the claim, exact length re-check). The pure-Rust path does not
-pre-allocate the claim and reads out at most `claim + 1` bytes, but a
-frame that decodes to its claim peaks at about 3× the claim (C: about
-1×): ruzstd's ring buffer rounds up to a power of two and holds up to one
-window of pending output, and `read_to_end` grows the output by doubling
-(a 512 MiB claim measured about 1.55 GiB RSS). A decoded-size budget set
-by the caller is WP-4.8a's. The pure-Rust path also
+to the claim, exact length re-check). Both paths reserve output fallibly
+without zero-filling the claim; unpack charges the resident budget first.
+The pure-Rust path reads out at most `claim + 1` bytes and never grows the
+reserved output. Its separate decoder ring rounds up to a power of two
+and holds up to one window of pending output, outside the owned-payload
+resident cap and the window reader's carry/output budget. The pure-Rust path also
 checks what `ruzstd` skips and the C decoder enforces: the declared
 content size against the claim and the decoded length, the content
 checksum, the reserved descriptor and sequence-mode bits, and the
@@ -843,8 +842,12 @@ before it is materialised, and every external base from the
 `DeltaBaseSource` as it is fetched. An entry or external base stays
 resident only until the last delta that names it; an external base's
 charge is then credited back. The budget is per call: a server sizes it
-from its isolate limit and decode concurrency. `PackReader::read` has no
-such budget (tracked separately).
+from its isolate limit and decode concurrency. `PackReader::read` instead
+uses the separate peak resident cap below. Compressed and delta claims
+accumulate under `DecodeLimits`; resident reservations are released on
+last use. `ObjectStore` base admission charges before allocation through
+the provided `DeltaBaseSource` method; existing sources default to charging
+the bytes returned by `base()`.
 
 **Because:** PRD §6.5 forbids existence oracles. If a push could close its
 history, or resolve a delta, over objects held only by another repository or
@@ -1048,3 +1051,21 @@ strict `store/codec.rs` decodes, and `mkit-server-conformance/src/storage/kv_cas
 creation, atomic publication, stale-ticket and acknowledgement cases over memory
 and SQLite. RPC composition and expiry are WP-1.9/1.10/1.14; WP-3.3 adds guarded
 Pending reservations, ReadServed, reconciliation and backlog enforcement.
+## Pack unpack bounds owned payload residency
+
+**Always:** unpack charges decompressed payloads, delta targets and cached store
+bases before allocation against `max(2 × MAX_RAW_OBJECT_SIZE, 16 × pack_len)`.
+Raw wire payloads stay borrowed; a base is released after its final delta use.
+Decompression writes into reserved capacity without initializing the claimed
+size first. Raw staging skips positions after its earliest permanent failure;
+transient worker admission failures are retried strictly in pack order.
+Framing arithmetic rejects out-of-bounds lengths on native and wasm32 hosts.
+
+**Because:** authenticated or malicious packs must not exhaust memory through
+entry decompression or retained delta targets.
+
+**If violated:** fetch, clone, pull or wasm pack verification can deny service.
+
+**Enforced by:** `pack::tests` resident-peak, bomb, retention-equivalence and
+maximum-wire-length regressions; live wasm framing tests in
+`apps/web/src/lib/mkit.test.ts`.
