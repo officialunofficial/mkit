@@ -187,6 +187,8 @@ pub enum ReservationV1 {
 /// An idempotent relay of upserts to one partition. Deletions are excluded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelayV1 {
+    /// Writer plan-time lower bound on commit time. V1 changed in place before deployment.
+    pub at_ms: u64,
     /// Destination partition.
     pub target: Partition,
     /// Idempotent key/value upserts.
@@ -206,6 +208,7 @@ pub struct Backlog {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RelayDtoV1 {
+    at_ms: u64,
     target: String,
     puts: Vec<(String, String)>,
 }
@@ -524,6 +527,7 @@ fn hex_bytes(hex: &str) -> Result<Vec<u8>, StoreError> {
 /// Encode idempotent relay upserts. A malformed target returns Invalid.
 pub fn encode_relay(relay: &RelayV1) -> Result<Value, StoreError> {
     let value = encode_json(&RelayDtoV1 {
+        at_ms: relay.at_ms,
         target: to_hex_bytes(&relay.target.encode()?),
         puts: relay
             .puts
@@ -559,7 +563,11 @@ pub fn decode_relay(value: &Value) -> Result<RelayV1, StoreError> {
             Ok((Key::new(key), Value::new(value)))
         })
         .collect::<Result<_, StoreError>>()?;
-    Ok(RelayV1 { target, puts })
+    Ok(RelayV1 {
+        at_ms: dto.at_ms,
+        target,
+        puts,
+    })
 }
 
 /// Encode the terminal outcome backlog.
@@ -936,13 +944,14 @@ mod tests {
     #[test]
     fn relay_and_backlog_codec_golden_roundtrip_and_rejections() {
         let relay = RelayV1 {
+            at_ms: 123,
             target: Partition::Namespace(crate::repo::NamespaceKey::deployment_default()),
             puts: vec![(Key::new(b"m\0a\0".to_vec()), Value::new(vec![]))],
         };
         let encoded = encode_relay(&relay).unwrap();
         assert_eq!(
             encoded.as_bytes(),
-            b"\x01{\"target\":\"6e726f6f7400\",\"puts\":[[\"6d006100\",\"\"]]}"
+            b"\x01{\"at_ms\":123,\"target\":\"6e726f6f7400\",\"puts\":[[\"6d006100\",\"\"]]}"
         );
         assert_eq!(decode_relay(&encoded).unwrap(), relay);
         let backlog = Backlog { rows: 3, bytes: 72 };
@@ -954,12 +963,14 @@ mod tests {
             Backlog::default()
         );
         for json in [
-            serde_json::json!({"target":"bad","puts":[]}),
-            serde_json::json!({"target":"zz","puts":[]}),
-            serde_json::json!({"target":"00","puts":[]}),
-            serde_json::json!({"target":"6e726f6f7400","puts":[["gg",""]]}),
-            serde_json::json!({"target":"6e726f6f7400","puts":[],"extra":1}),
-            serde_json::json!({"target":"6e726f6f7400","puts":[["00".repeat(MAX_KEY_BYTES + 1),""]]}),
+            serde_json::json!({"target":"6e726f6f7400","puts":[]}),
+            serde_json::json!({"at_ms":-1,"target":"6e726f6f7400","puts":[]}),
+            serde_json::json!({"at_ms":123,"target":"bad","puts":[]}),
+            serde_json::json!({"at_ms":123,"target":"zz","puts":[]}),
+            serde_json::json!({"at_ms":123,"target":"00","puts":[]}),
+            serde_json::json!({"at_ms":123,"target":"6e726f6f7400","puts":[["gg",""]]}),
+            serde_json::json!({"at_ms":123,"target":"6e726f6f7400","puts":[],"extra":1}),
+            serde_json::json!({"at_ms":123,"target":"6e726f6f7400","puts":[["00".repeat(MAX_KEY_BYTES + 1),""]]}),
         ] {
             assert!(decode_relay(&json_value(&json)).is_err());
         }
@@ -981,6 +992,7 @@ mod tests {
             assert!(decode_relay(&value).is_err());
         }
         let oversized = RelayV1 {
+            at_ms: 123,
             target: relay.target,
             puts: vec![(Key::new(vec![0; MAX_KEY_BYTES + 1]), Value::new(vec![]))],
         };

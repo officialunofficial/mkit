@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Single sharding and M1 reads retain their existing behavior. Grant RPCs,
   read renewal, visibility, and backup restore integration follow in later WPs.
 
-- Add partition timers with guarded atomic handlers, fair tick budgets, SQLite timer heads, Durable Object alarm multiplexing and a native SQLite driver (WP-1.24). No production kind is registered yet.
+- Add partition timers with guarded atomic handlers, fair tick budgets, SQLite timer heads, Durable Object alarm multiplexing and a native SQLite driver (WP-1.24). Production handlers register as their work packages land.
 - The SQL store schema moves to version 2 (an index-only migration, applied on open to native databases and Durable Objects). A binary built before it refuses a migrated database, so roll back only to a version-2 binary.
 
 **Verifier kit.** First-class commit-hash verification for an untrusted
@@ -29,6 +29,20 @@ train).
 
 ### Changed
 
+- *(server)* Add source-side outbox relay kind 3, ordered target batches,
+  persistent per-source `rh` deduplication watermarks, atomic pre-delivery hooks,
+  bounded source cleanup and native driver registration (WP-1.23a). Relay
+  writers now call `relay_at(now_ms)` to stamp rows and commit their kick timer;
+  `RelayV1` gains mandatory `at_ms` in place before deployment. Writer chunking
+  keeps each row within target-batch limits, and the local relay watermark and
+  60-second lag warning prepare later readers. Worker registration and the
+  coordinator watermark follow in WP-1.23b.
+- *(server)* Implement unauthenticated `GetServerInfo` deployment discovery
+  with validated upload limits, namespace/admission policy, store capabilities
+  and private caching for 60 seconds. Repository headers never affect the
+  response; native bearer deployments also expose it without a token (WP-1.6).
+  `mkit-server serve` now refuses a `--max-pack-bytes` above the advertised
+  resumable-upload limit (8 MiB parts × 10,000 parts, about 78 GiB).
 - *(server)* Multi addressing now defaults to an empty namespace allowlist and
   owner writes. Namespace denials and non-owner writes return `permission_denied`
   before allocation. Authorizer hooks can be additional checks or explicit
@@ -208,6 +222,9 @@ train).
 
 ### Added
 
+- *(spec)* Indexed-mode server contract, D32 file extraction, repository-isolated
+  resolution, and additive `PendingVerification` detail and
+  `max_delta_chain_depth` discovery field (WP-4.4).
 - *(spec)* Add bounded admission credential headers to hooks.v1 `AdmitRequest` (WP-3.6b).
 - *(docs)* Add an unsupported TypeScript `mppx` admission Worker reference for
   `mkit.server.hooks.v1`, with delayed settlement and optional signed hooks (WP-3.14).

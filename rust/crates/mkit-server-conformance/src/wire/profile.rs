@@ -94,9 +94,9 @@ impl FromStr for Milestone {
     }
 }
 
-/// A capability a case may require. In M0 the runner derives the set from
-/// the profile; from M1 on it will come from `GetServerInfo` (WP-1.6)
-/// adjusted by `--features`.
+/// A capability a case may require. The runner derives the set from the
+/// profile, adjusted by `--features`. Switching to server-reported
+/// `GetServerInfo` features is a follow-up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Feature {
     /// Bearer-token authentication (from `--auth bearer`).

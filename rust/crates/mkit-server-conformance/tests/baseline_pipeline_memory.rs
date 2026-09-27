@@ -286,6 +286,7 @@ async fn stats(meta: Shared) -> axum::Json<serde_json::Value> {
 
 fn profile(auth: WireAuth) -> Profile {
     let mut p = Profile::new(auth);
+    p.milestone = mkit_server_conformance::wire::Milestone::M1;
     p.atomic_advance = true;
     p.max_pack_bytes = MAX_PACK;
     p.list_refs = 200;
@@ -322,7 +323,14 @@ async fn check(origin: String, profile: Profile) {
         base_url: origin.parse().unwrap(),
         profile,
     };
-    common::judge(&run(&target, None).await, PIPELINE_DIVERGENCES);
+    let report = run(&target, None).await;
+    common::judge(&report, PIPELINE_DIVERGENCES);
+    for name in ["info.shape_and_policy", "info.ignores_repository_header"] {
+        assert!(
+            matches!(report.verdict(name), Some(Verdict::Pass(_))),
+            "{name} did not run"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -374,6 +382,14 @@ async fn pipeline_multi_repository() {
     // carry repository identities and require the pack membership guard.
     let report = run(&target, Some("repo.")).await;
     let policy_report = run(&target, Some("policy.")).await;
+    let info_report = run(&target, Some("info.")).await;
+    common::judge(&info_report, PIPELINE_DIVERGENCES);
+    for name in ["info.shape_and_policy", "info.ignores_repository_header"] {
+        assert!(
+            matches!(info_report.verdict(name), Some(Verdict::Pass(_))),
+            "{name} did not run"
+        );
+    }
     common::judge(&report, PIPELINE_DIVERGENCES);
     common::judge(&policy_report, PIPELINE_DIVERGENCES);
     for case in mkit_server_conformance::wire::CASES

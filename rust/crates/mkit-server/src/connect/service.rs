@@ -27,7 +27,7 @@ use super::proto::mkit::transport::v1::{
 use super::{Shared, authenticated};
 use crate::error::ServerError;
 use crate::op::RefUpdate;
-use crate::pipeline::{Authenticated, DownloadChunk, HookSet, Pipeline};
+use crate::pipeline::{Authenticated, DownloadChunk, HookSet, Pipeline, ServerInfo};
 use crate::refs::{DigestField, UnusedExpectedId, condition_from_wire, hash_from_slice};
 use crate::replay::UpdateRefResult;
 use crate::rt::{send_wrap, send_wrap_stream};
@@ -36,8 +36,8 @@ use crate::upload::UploadError;
 
 /// `TransportService` over a [`Pipeline`]. Each handler takes the
 /// [`Authenticated`] that [`super::AuthInterceptor`] stored for existing RPCs;
-/// the M1 discovery and upload RPCs are unauthenticated stubs until their
-/// implementing WPs land.
+/// `GetServerInfo` is deliberately unauthenticated. The remaining M1 upload
+/// RPCs are stubs until WP-1.9 and WP-1.11 add authenticated procedures.
 pub struct ConnectTransport<B, N, H> {
     pipe: Shared<Pipeline<B, N, H>>,
 }
@@ -355,9 +355,10 @@ where
         _ctx: RequestContext,
         _request: ServiceRequest<'_, GetServerInfoRequest>,
     ) -> ServiceResult<GetServerInfoResponse> {
-        // SECURITY: GetServerInfo stays unauthenticated by SPEC-TRANSPORT-CONNECT §2.1.
-        // TODO(WP-1.6): implement deployment discovery and add an explicit Procedure variant.
-        Err(not_yet().into())
+        // SECURITY: deliberately unauthenticated and outside Procedure; it
+        // never resolves a repository or reads its state (STC §2.1).
+        let info = self.pipe.get().server_info();
+        Ok(Response::new(info.into()).with_header("cache-control", "private, max-age=60"))
     }
 
     async fn begin_upload(
@@ -388,6 +389,30 @@ where
         // SECURITY: unauthenticated until WP-1.11 adds a Procedure variant; the implementing WP MUST add it.
         // TODO(WP-1.11): implement multipart completion.
         Err(not_yet().into())
+    }
+}
+
+impl From<ServerInfo> for GetServerInfoResponse {
+    fn from(info: ServerInfo) -> Self {
+        Self {
+            protocol: Some(info.protocol.into()),
+            spec_version: Some(info.spec_version),
+            max_pack_bytes: Some(info.max_pack_bytes),
+            part_size: Some(info.part_size),
+            max_parts: Some(info.max_parts),
+            max_list_refs_page_size: Some(info.max_list_refs_page_size),
+            begin_upload_threshold_bytes: Some(info.begin_upload_threshold_bytes),
+            atomic_advance: Some(info.atomic_advance),
+            indexed_mode: Some(info.indexed_mode),
+            admission: Some(info.admission),
+            receipt_public_key: Some(info.receipt_public_key),
+            receipt_key_id: Some(info.receipt_key_id),
+            grant_schemes: info.grant_schemes,
+            namespace_policy: Some(info.namespace_policy.into()),
+            index_fanout: Some(info.index_fanout),
+            max_delta_chain_depth: Some(info.max_delta_chain_depth),
+            __buffa_unknown_fields: buffa::UnknownFields::default(),
+        }
     }
 }
 

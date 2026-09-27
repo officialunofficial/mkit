@@ -307,6 +307,7 @@ message GetServerInfoResponse {
   string namespace_policy = 14;
   // Fixed index prefix fan-out; default 4096 (SPEC-TRANSPORT-CONNECT §2.1, §7.9).
   uint32 index_fanout = 15;
+  uint32 max_delta_chain_depth = 16;   // SPEC-SERVER §9.8; 0 when indexed mode is off
 }
 
 // ----------------------------------------------------------------------------
@@ -383,3 +384,12 @@ message CompleteUploadRequest {
 
 // Empty body is successful completion (SPEC-TRANSPORT-CONNECT §7.6).
 message CompleteUploadResponse {}
+
+// ----------------------------------------------------------------------------
+// Errors/details.
+
+// Detail on an `unavailable` AdvanceRefs whose consumed pack is still under
+// verification (SPEC-TRANSPORT-CONNECT §7.6; SPEC-SERVER §9.5).
+message PendingVerification {
+  uint32 retry_after_ms = 1;   // server's suggested poll interval, 1000..=60000
+}

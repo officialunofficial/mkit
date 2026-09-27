@@ -1,5 +1,6 @@
 //! Pipeline tests over the memory stores and a `ManualClock`.
 
+mod info;
 mod policy;
 
 use std::future::Future;

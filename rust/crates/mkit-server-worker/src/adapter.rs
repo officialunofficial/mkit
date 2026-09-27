@@ -707,6 +707,7 @@ mod glue {
             worker::console_error!("{e}; using the Workers Free cap");
             free
         });
+        // TODO(WP-1.23b): register RelayHandler for RefShard with DoNamespaceStore<StubTransport>.
         let registry = mkit_server::timers::TimerRegistry::new()
             .register(mkit_server::timers::lease_sweep::LeaseSweep);
         #[cfg(feature = "test-faults")]
