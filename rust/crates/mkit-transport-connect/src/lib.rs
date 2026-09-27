@@ -39,7 +39,10 @@ pub mod proto {
     ::connectrpc::include_generated!();
 }
 
-pub use client::{ConnectTransport, PACK_TRANSFER_TIMEOUT, TOKEN_ENV, UNARY_TIMEOUT};
+pub use client::{
+    ConnectTransport, PACK_TRANSFER_TIMEOUT, ServerInfoView, TOKEN_ENV, UNARY_TIMEOUT,
+    UrlIdentityError, repository_identity_from_url,
+};
 pub use envelope::EnvelopeSigner;
 
 // Re-exported so integration tests (and in-tree servers and conformance

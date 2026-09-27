@@ -1194,6 +1194,24 @@ native `server_hardening` bearer/concurrency regression and wire cases
 `info.shape_and_policy` and `info.ignores_repository_header` on Single, Multi,
 native binary and Worker runners.
 
+## Client repository addressing and capabilities remain stable
+
+**Always:** the Connect client validates the literal remote path without repairing
+its spelling and sends the resulting identity on every RPC. Signed writes bind
+that same value. A transport caches its first capability discovery outcome and
+claims atomic advance only for a validated v2 advertisement with an explicit
+true value. Ref hints never enter the signed canonical string.
+
+**Because:** routing must agree with authentication, and a push must not reset a
+packmap based on an unsupported or changing atomicity assumption.
+
+**If violated:** a client can address an unintended repository or strand a head
+behind a packmap reset that was not committed atomically.
+
+**Enforced by:** Connect `client::tests::url_identity_table_preserves_literal_paths`,
+`envelope::tests::parity`, `tests/v2_client.rs` discovery and paging regressions,
+and CLI `tests/remote_dispatch_connect.rs` header capture.
+
 ## Pack unpack bounds owned payload residency
 
 **Always:** unpack charges decompressed payloads, delta targets and cached store
