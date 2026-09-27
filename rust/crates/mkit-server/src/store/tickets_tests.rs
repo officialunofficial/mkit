@@ -471,6 +471,7 @@ fn membership_is_local_under_single_and_relays_identical_deduplicated_upserts_un
         ),
     ] {
         let mut outbox = OutboxBuilder::new(None, None).unwrap();
+        outbox.relay_at(200);
         let mut batch = Batch::new();
         plan_membership(
             &spec.repo,
@@ -521,7 +522,7 @@ fn membership_is_local_under_single_and_relays_identical_deduplicated_upserts_un
 }
 
 #[test]
-fn seven_distinct_signers_and_relay_targets_fit_with_twenty_shared_operations() {
+fn seven_distinct_signers_and_relay_targets_fit_with_twenty_two_shared_operations() {
     let mut spec = spec();
     spec.repo = RepoName::new("r".repeat(255)).unwrap();
     spec.ref_name = format!("refs/heads/{}", "x".repeat(512 - "refs/heads/".len()));
@@ -533,6 +534,7 @@ fn seven_distinct_signers_and_relay_targets_fit_with_twenty_shared_operations() 
     let shared_counter = codec::encode_u64(MAX_TICKETS_PER_ADVANCE as u64);
     let mut batch = Batch::new();
     let mut outbox = OutboxBuilder::new(None, None).unwrap();
+    outbox.relay_at(200);
     for i in 0..MAX_TICKETS_PER_ADVANCE {
         spec.reservation_id = format!("reservation-{i}");
         spec.signer = hash(spec.reservation_id.as_bytes());
@@ -581,7 +583,7 @@ fn seven_distinct_signers_and_relay_targets_fit_with_twenty_shared_operations() 
     outbox
         .try_finish(&mut batch.preconditions, &mut batch.writes)
         .unwrap();
-    // Ref counter (2) and os/oc (4) already occupy six of the twenty shared ops.
+    // Ref counter (2), os/oc (4), and relay timer (1) occupy seven shared ops.
     for i in 0..7 {
         let key = layout::ref_key(&spec.repo, &format!("refs/heads/shared-{i}"));
         batch.preconditions.push(Precondition::Absent(key.clone()));
@@ -589,7 +591,8 @@ fn seven_distinct_signers_and_relay_targets_fit_with_twenty_shared_operations() 
             .writes
             .push(Write::Put(key, codec::encode_ref_id(&[3; 32])));
     }
-    assert_eq!(batch.preconditions.len() + batch.writes.len(), 97);
+    batch.preconditions.push(Precondition::NotAfter(500));
+    assert_eq!(batch.preconditions.len() + batch.writes.len(), 99);
     batch.validate(&StoreCapabilities::full()).unwrap();
     assert_eq!(batch.writes.iter().filter(|w| matches!(w, Write::Put(key, _) if matches!(layout::parse(key), Some(layout::ParsedKey::Relay(_))))).count(), 7);
     let tc = keys(&spec).per_ref;

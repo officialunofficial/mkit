@@ -261,6 +261,7 @@ fn relay_groups_by_target_sorts_deduplicates_and_excludes_backlog() {
     let a = (keys::reservation("a").unwrap(), ticketed());
     let b = (keys::reservation("b").unwrap(), ticketed());
     let mut builder = OutboxBuilder::new(None, None).unwrap();
+    builder.relay_at(200);
     builder.relay(&target, vec![b.clone(), a.clone()]);
     builder.relay(&target, vec![a.clone()]);
     builder.relay(&other, vec![a.clone()]);
@@ -365,16 +366,20 @@ fn malformed_fragments_and_overflow_leave_output_vectors_unchanged() {
     assert!(OutboxBuilder::new(None, Some(&Value::new(vec![1]))).is_err());
     let mut builders = vec![];
     let mut builder = OutboxBuilder::new(None, None).unwrap();
+    builder.relay_at(200);
     builder.reserve("bad id", [1; 32], None);
     builders.push(builder);
     let mut builder = OutboxBuilder::new(None, None).unwrap();
+    builder.relay_at(200);
     builder.reserve("duplicate", [1; 32], None);
     builder.reserve("duplicate", [2; 32], None);
     builders.push(builder);
     let mut builder = OutboxBuilder::new(None, None).unwrap();
+    builder.relay_at(200);
     builder.outcome("bad-prior", &Value::default(), expired());
     builders.push(builder);
     let mut builder = OutboxBuilder::new(Some(&codec::encode_u64(u64::MAX)), None).unwrap();
+    builder.relay_at(200);
     builder.outcome("overflow", &ticketed(), expired());
     builders.push(builder);
     let mut builder = OutboxBuilder::new(
@@ -385,9 +390,11 @@ fn malformed_fragments_and_overflow_leave_output_vectors_unchanged() {
         })),
     )
     .unwrap();
+    builder.relay_at(200);
     builder.outcome("overflow", &ticketed(), expired());
     builders.push(builder);
     let mut builder = OutboxBuilder::new(None, None).unwrap();
+    builder.relay_at(200);
     let key = keys::reservation("relay").unwrap();
     builder.relay(
         &partition(),
@@ -395,6 +402,7 @@ fn malformed_fragments_and_overflow_leave_output_vectors_unchanged() {
     );
     builders.push(builder);
     let mut builder = OutboxBuilder::new(Some(&codec::encode_u64(u64::MAX)), None).unwrap();
+    builder.relay_at(200);
     builder.relay(
         &partition(),
         vec![(keys::reservation("relay").unwrap(), Value::default())],
@@ -600,6 +608,7 @@ fn outcome_after_ack_rejects_stale_backlog_composition_without_outputs() {
 #[test]
 fn two_builders_cannot_allocate_the_same_sequence_in_one_batch() {
     let mut first = OutboxBuilder::new(None, None).unwrap();
+    first.relay_at(200);
     first.relay(
         &partition(),
         vec![(
@@ -610,6 +619,7 @@ fn two_builders_cannot_allocate_the_same_sequence_in_one_batch() {
     let mut batch = finish(first);
     let before = batch.clone();
     let mut second = OutboxBuilder::new(None, None).unwrap();
+    second.relay_at(200);
     second.relay(
         &partition(),
         vec![(

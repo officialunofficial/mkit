@@ -1048,3 +1048,26 @@ strict `store/codec.rs` decodes, and `mkit-server-conformance/src/storage/kv_cas
 creation, atomic publication, stale-ticket and acknowledgement cases over memory
 and SQLite. RPC composition and expiry are WP-1.9/1.10/1.14; WP-3.3 adds guarded
 Pending reservations, ReadServed, reconciliation and backlog enforcement.
+
+## Relay delivery advances durable per-source watermarks before source cleanup
+
+**Always:** relay rows for a source/target pair apply in sequence order. Each
+batch guards the target's `rh` and advances it atomically with the row upserts
+and pre-delivery hook effects. Duplicates never apply a target batch. Source
+cleanup guards each encoded row; draining the timer guards the originally
+observed `os`, so a same-millisecond writer cannot lose its wake-up. Writers
+stamp and chunk rows, and commit an immediate kind-3 timer with their outbox.
+Target watermarks are never pruned and are bounded by source shards.
+
+**Because:** target delivery and source cleanup cannot share a transaction.
+A crash, overlapping timer fires, or a concurrent writer can occur between them.
+
+**If violated:** re-delivery overwrites newer index values, hook effects detach
+from their membership writes, or newly queued rows lose their relay timer.
+Restoring an older source requires raising `os` above every target's `rh` for
+that source or re-keying it (R-102; WP-1.29).
+
+**Enforced by:** `mkit-server/src/relay/tests.rs` crash, contention, ordering,
+chunk-limit and wake-up tests; native SQLite driver tests; Worker Loopback host
+tests. Worker registration, membership reads and coordinator watermarks follow
+in WP-1.23b; writers in WP-1.9/1.10.
