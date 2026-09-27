@@ -105,11 +105,15 @@ fn grant_batch(
         .transpose()
         .map_err(meta_error)?;
     if old.is_none_or(|lease| lease.expires_at_ms <= now) {
-        let expiry_bound = old.map_or(now, |lease| lease.expires_at_ms.max(now));
+        let observed_ls_expires = old.map_or(0, |lease| lease.expires_at_ms);
+        // Safety relies on lease_margin_ms exceeding every clock skew
+        // (see PipelineConfig::lease_margin_ms).
         debug_assert!(
-            read.observed_el
-                .is_none_or(|lease| lease.expires_at_ms <= expiry_bound),
-            "absent or expired coordinator lease must fence every observed older shard lease"
+            read.observed_el.is_none_or(|el| el.expires_at_ms
+                <= observed_ls_expires
+                    .max(now)
+                    .saturating_add(cfg.lease_margin_ms)),
+            "an observed el outlives every ls it could have been granted under, beyond the skew margin"
         );
     }
     let shard = codec::LeasedShard {

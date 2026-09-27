@@ -1196,13 +1196,12 @@ backends!(
     renewal_between_push_and_ack
 );
 
-/// A sweep clock may lead a renewing pipeline clock by less than the margin.
-/// Removing an expired ls does not require the pipeline to observe raw expiry:
-/// the old shard deadline already passed on its independently clocked backend.
-async fn normal_sweep_clock_skew<N: NamespaceStore + 'static>(
+/// Sweep on its own clock, then renew on a pipeline clock lagging behind it.
+async fn swept_lease_renewal<N: NamespaceStore + 'static>(
     backend: N,
     clock: Arc<ManualClock>,
     store_clock: Arc<ManualClock>,
+    renewal_now_ms: i64,
 ) {
     use mkit_server::timers::lease_sweep::LeaseSweep;
     let store = Store::new(backend);
@@ -1217,7 +1216,7 @@ async fn normal_sweep_clock_skew<N: NamespaceStore + 'static>(
     let old = el(&store, &a, REF).await;
     assert_eq!(old.expires_at_ms, 30_000);
 
-    clock.set(29_999);
+    clock.set(renewal_now_ms);
     store_clock.set(30_000);
     let sweep_clock = ManualClock::new(30_000);
     let report = run_due(
@@ -1250,15 +1249,62 @@ async fn normal_sweep_clock_skew<N: NamespaceStore + 'static>(
             backend_now: 30_000
         }
     );
-    // The only skew is one millisecond, far below the configured 5000 margin.
-    // This authorized renewal must succeed even while raw el expiry is one
-    // millisecond ahead of the renewing pipeline's clock.
     committed(&pipe, &a, REF, 2).await;
-    assert_eq!(el(&store, &a, REF).await.expires_at_ms, 59_999);
-    assert_eq!(ls(&store, &a, REF).await.expires_at_ms, 59_999);
+    let expected_expiry = u64::try_from(renewal_now_ms).unwrap() + 30_000;
+    assert_eq!(el(&store, &a, REF).await.expires_at_ms, expected_expiry);
+    assert_eq!(ls(&store, &a, REF).await.expires_at_ms, expected_expiry);
+}
+
+/// One millisecond of skew is below the configured 5000 margin. Renewal must
+/// commit to expiry 59999 even though the old raw expiry is ahead of its clock.
+async fn normal_sweep_clock_skew<N: NamespaceStore + 'static>(
+    backend: N,
+    clock: Arc<ManualClock>,
+    store_clock: Arc<ManualClock>,
+) {
+    swept_lease_renewal(backend, clock, store_clock, 29_999).await;
 }
 backends!(
     normal_sweep_clock_skew_memory,
     normal_sweep_clock_skew_sqlite,
     normal_sweep_clock_skew
 );
+
+#[cfg(debug_assertions)]
+#[tokio::test]
+#[should_panic(
+    expected = "an observed el outlives every ls it could have been granted under, beyond the skew margin"
+)]
+async fn excessive_sweep_clock_skew_panics_memory() {
+    let pipeline_clock = Arc::new(ManualClock::new(0));
+    let store_clock = Arc::new(ManualClock::new(0));
+    // Sweep/backend 30000 minus pipeline 24999 exceeds margin5000 by one.
+    swept_lease_renewal(
+        MemoryKv::with_clock(store_clock.clone()),
+        pipeline_clock,
+        store_clock,
+        24_999,
+    )
+    .await;
+}
+
+#[cfg(debug_assertions)]
+#[tokio::test]
+#[should_panic(
+    expected = "an observed el outlives every ls it could have been granted under, beyond the skew margin"
+)]
+async fn excessive_sweep_clock_skew_panics_sqlite() {
+    let pipeline_clock = Arc::new(ManualClock::new(0));
+    let store_clock = Arc::new(ManualClock::new(0));
+    let dir = tempfile::tempdir().unwrap();
+    let conn = RusqliteConn::open(dir.path().join("meta.sqlite3"))
+        .unwrap()
+        .with_clock(store_clock.clone());
+    swept_lease_renewal(
+        Blocking::new(SqlKvStore::open(conn).unwrap()),
+        pipeline_clock,
+        store_clock,
+        24_999,
+    )
+    .await;
+}

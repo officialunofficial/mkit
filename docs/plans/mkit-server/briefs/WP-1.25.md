@@ -434,7 +434,28 @@ and panics. The old batch already fails its 25,000 backend deadline.
 
 `normal_sweep_clock_skew_memory` and `normal_sweep_clock_skew_sqlite` reproduce
 this with separate `ManualClock` instances and expect the renewed write to
-commit with expiry 59,999. Both currently fail the requested assertion. The
-protocol and store-call counts need no change; the assertion needs a ruling
-that accounts for the documented clock skew. The exact requested check remains
-in place pending that ruling.
+commit with expiry 59,999. Both failed the original requested assertion. Fix round 1 amendment 1 below
+replaces it with the clock-aware bound, keeping the protocol and store-call
+counts unchanged.
+
+## Fix round 1: Amendment 1
+
+The orchestrator accepted the 1 ms sweep/pipeline-skew counterexample and
+replaced fix round 1 §4's assertion with:
+
+```rust
+// Safety relies on lease_margin_ms exceeding every clock skew (see PipelineConfig::lease_margin_ms).
+debug_assert!(
+    observed_el.map_or(true, |el| el.expires_at_ms
+        <= observed_ls_expires.max(now_ms).saturating_add(self.cfg.lease_margin_ms)),
+    "an observed el outlives every ls it could have been granted under, beyond the skew margin"
+);
+```
+
+`observed_ls_expires` is 0 when `ls` is absent. The 1 ms-skew regression runs
+on memory and SQLite: renewal must commit without panic, and the old write must
+fail its backend deadline. Debug-only `#[should_panic]` regressions with skew
+`lease_margin_ms + 1` document the assertion's deployment clock assumption.
+Continue from local commit `46bb4c4f`, finish the remaining gates, push to PR
+#1150, and record this ruling in the PR body's "Fix round 1" section. Done means
+the fixes are pushed to that PR.
