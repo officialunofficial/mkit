@@ -1,5 +1,5 @@
 //! The `test-faults` seam (reconciliation R-11): [`FaultHooks`] called at
-//! five points of the pipeline, and per-request [`TestDirectives`] read
+//! six points of the pipeline, and per-request [`TestDirectives`] read
 //! from request headers.
 //!
 //! This module exists only with the `test-faults` feature, which no
@@ -28,6 +28,11 @@ pub const TIMER_MS_HEADER: &str = "x-mkit-test-timer-ms";
 /// Ref whose shard is ticked before `ListRefs`.
 pub const RUN_TIMERS_HEADER: &str = "x-mkit-test-run-timers";
 
+/// Epoch bump before `ListRefs`.
+pub const BUMP_EPOCH_HEADER: &str = "x-mkit-test-bump-epoch";
+/// Declare coordinator lease-table recovery before `ListRefs`.
+pub const LEASE_RECOVERED_HEADER: &str = "x-mkit-test-lease-recovered";
+
 /// Where the pipeline calls [`FaultHooks::at`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FaultPoint {
@@ -41,6 +46,8 @@ pub enum FaultPoint {
     /// `UploadPack`: after the blob committed, before the final batch
     /// (`vcs-worker`'s `after-put`).
     AfterBlobCommit,
+    /// After a durable lease grant, before the shard installs it.
+    AfterLeaseGrant,
     /// After the final batch is planned (its deadline fixed), before
     /// `apply`. Fires on every planning attempt.
     BeforeFinalApply,
@@ -97,6 +104,10 @@ pub struct TestDirectives {
     pub clock_skew_ms: i64,
     /// Test timer delay on a committed `UpdateRef`.
     pub timer_ms: Option<u64>,
+    /// Epoch to bump before `ListRefs`.
+    pub bump_epoch: Option<u64>,
+    /// Declare lease-table recovery before `ListRefs`.
+    pub lease_recovered: bool,
     /// Ref shard to tick before `ListRefs`.
     pub run_timers: Option<String>,
 }
@@ -106,7 +117,7 @@ impl TestDirectives {
     /// lowercase name.
     ///
     /// # Errors
-    /// `invalid_argument` for a skew that is not a decimal `i64`.
+    /// `invalid_argument` for a malformed skew, epoch, recovery, or timer directive.
     pub fn from_headers(get: impl Fn(&str) -> Option<String>) -> Result<Self, ServerError> {
         let clock_skew_ms = match get(CLOCK_SKEW_HEADER) {
             Some(v) => v.trim().parse().map_err(|_| {
@@ -130,7 +141,27 @@ impl TestDirectives {
                 "x-mkit-test-run-timers is not a ref name",
             ));
         }
+        let bump_epoch = get(BUMP_EPOCH_HEADER)
+            .map(|v| {
+                v.trim().parse::<u64>().map_err(|_| {
+                    ServerError::invalid_argument(
+                        "x-mkit-test-bump-epoch is not an unsigned integer",
+                    )
+                })
+            })
+            .transpose()?;
+        let lease_recovered = match get(LEASE_RECOVERED_HEADER).as_deref() {
+            None => false,
+            Some("1") => true,
+            Some(_) => {
+                return Err(ServerError::invalid_argument(
+                    "x-mkit-test-lease-recovered must be 1",
+                ));
+            }
+        };
         Ok(Self {
+            bump_epoch,
+            lease_recovered,
             timer_ms,
             run_timers,
             fault: get(FAULT_HEADER).filter(|f| !f.is_empty()),

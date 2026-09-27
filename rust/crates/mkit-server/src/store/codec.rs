@@ -32,6 +32,44 @@ pub struct RepoRecord {
     pub created_at_ms: u64,
 }
 
+/// The ref shard's durable copy of its coordinator epoch lease.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EpochLease {
+    /// Epoch against which the shard can authorize writes.
+    pub epoch: u64,
+    /// Lease expiry, Unix milliseconds from the pipeline clock.
+    pub expires_at_ms: u64,
+    /// Namespace configuration version at grant, starting at 1.
+    pub config_version: u64,
+}
+
+/// The coordinator's durable lease grant and installation acknowledgement.
+///
+/// `acked_epoch = n` means the shard durably holds epoch at least `n`, or
+/// every older-epoch write is already past its deadline. A live row's
+/// acknowledgement is preserved by renewal and raised only after a
+/// committed shard push. An absent or expired row may acknowledge its grant
+/// immediately because older writes are past their commit deadlines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LeasedShard {
+    /// Epoch granted by the most recent renewal.
+    pub epoch: u64,
+    /// Granted expiry; identical to the shard copy at grant.
+    pub expires_at_ms: u64,
+    /// Epoch whose installation in the shard has been acknowledged.
+    pub acked_epoch: u64,
+}
+
+/// Declared coordinator recovery, retained until a later recovery overwrites it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LeaseRecovery {
+    /// Recovery time, Unix milliseconds from the pipeline clock.
+    pub resumed_at_ms: u64,
+}
+
 /// Version byte of every structured value this binary writes.
 pub const CODEC_V1: u8 = 0x01;
 
@@ -161,6 +199,43 @@ pub fn encode_repo_record(record: &RepoRecord) -> Value {
 /// Decode a repository coordinator record.
 pub fn decode_repo_record(value: &Value) -> Result<RepoRecord, StoreError> {
     decode_json(value, "bad repo record")
+}
+
+/// Encode a ref shard epoch lease.
+#[must_use]
+pub fn encode_epoch_lease(lease: &EpochLease) -> Value {
+    encode_json(lease)
+}
+
+/// Decode an epoch lease; namespace configuration versions start at 1.
+pub fn decode_epoch_lease(value: &Value) -> Result<EpochLease, StoreError> {
+    let lease: EpochLease = decode_json(value, "bad epoch lease")?;
+    if lease.config_version == 0 {
+        return Err(corrupt("lease configuration version is zero"));
+    }
+    Ok(lease)
+}
+
+/// Encode a coordinator lease-table row.
+#[must_use]
+pub fn encode_leased_shard(lease: &LeasedShard) -> Value {
+    encode_json(lease)
+}
+
+/// Decode a coordinator lease-table row.
+pub fn decode_leased_shard(value: &Value) -> Result<LeasedShard, StoreError> {
+    decode_json(value, "bad leased shard")
+}
+
+/// Encode a declared lease-table recovery marker.
+#[must_use]
+pub fn encode_lease_recovery(recovery: &LeaseRecovery) -> Value {
+    encode_json(recovery)
+}
+
+/// Decode a declared lease-table recovery marker.
+pub fn decode_lease_recovery(value: &Value) -> Result<LeaseRecovery, StoreError> {
+    decode_json(value, "bad lease recovery")
 }
 
 /// Encode a replay record.
@@ -500,6 +575,82 @@ mod tests {
                 Err(StoreError::Corrupt(_))
             ));
         }
+    }
+
+    #[test]
+    fn lease_codecs_roundtrip_and_golden_bytes() {
+        let epoch = EpochLease {
+            epoch: 7,
+            expires_at_ms: 30000,
+            config_version: 2,
+        };
+        let shard = LeasedShard {
+            epoch: 7,
+            expires_at_ms: 30000,
+            acked_epoch: 6,
+        };
+        let recovery = LeaseRecovery {
+            resumed_at_ms: 100_000,
+        };
+        let epoch_value = encode_epoch_lease(&epoch);
+        let shard_value = encode_leased_shard(&shard);
+        let recovery_value = encode_lease_recovery(&recovery);
+        assert_eq!(
+            epoch_value.as_bytes(),
+            b"\x01{\"epoch\":7,\"expires_at_ms\":30000,\"config_version\":2}"
+        );
+        assert_eq!(
+            shard_value.as_bytes(),
+            b"\x01{\"epoch\":7,\"expires_at_ms\":30000,\"acked_epoch\":6}"
+        );
+        assert_eq!(recovery_value.as_bytes(), b"\x01{\"resumed_at_ms\":100000}");
+        assert_eq!(decode_epoch_lease(&epoch_value).unwrap(), epoch);
+        assert_eq!(decode_leased_shard(&shard_value).unwrap(), shard);
+        assert_eq!(decode_lease_recovery(&recovery_value).unwrap(), recovery);
+        for version in [0, 2, 255] {
+            for value in [&epoch_value, &shard_value, &recovery_value] {
+                let mut bytes = value.as_bytes().to_vec();
+                bytes[0] = version;
+                let bad = Value::new(bytes);
+                assert!(decode_epoch_lease(&bad).is_err());
+                assert!(decode_leased_shard(&bad).is_err());
+                assert!(decode_lease_recovery(&bad).is_err());
+            }
+        }
+        for body in [
+            "{\"epoch\":7,\"expires_at_ms\":30000,\"config_version\":2,\"extra\":0}",
+            "{\"epoch\":7,\"expires_at_ms\":30000,\"config_version\":0}",
+            "{\"epoch\":7,\"expires_at_ms\":30000}",
+        ] {
+            assert!(
+                decode_epoch_lease(&Value::new([&[CODEC_V1][..], body.as_bytes()].concat()))
+                    .is_err()
+            );
+        }
+        for body in [
+            "{\"epoch\":7,\"expires_at_ms\":30000,\"acked_epoch\":6,\"extra\":0}",
+            "{\"epoch\":7,\"expires_at_ms\":30000}",
+        ] {
+            assert!(
+                decode_leased_shard(&Value::new([&[CODEC_V1][..], body.as_bytes()].concat()))
+                    .is_err()
+            );
+        }
+        assert!(
+            decode_lease_recovery(&Value::new(
+                b"\x01{\"resumed_at_ms\":100000,\"extra\":0}".to_vec()
+            ))
+            .is_err()
+        );
+        assert!(
+            decode_lease_recovery(&Value::new(b"\x02{\"resumed_at_ms\":100000}".to_vec())).is_err()
+        );
+        assert!(
+            decode_leased_shard(&Value::new(
+                b"\x02{\"epoch\":7,\"expires_at_ms\":30000,\"acked_epoch\":6}".to_vec()
+            ))
+            .is_err()
+        );
     }
 
     #[test]

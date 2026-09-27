@@ -707,7 +707,8 @@ mod glue {
             worker::console_error!("{e}; using the Workers Free cap");
             free
         });
-        let registry = mkit_server::timers::TimerRegistry::new();
+        let registry = mkit_server::timers::TimerRegistry::new()
+            .register(mkit_server::timers::lease_sweep::LeaseSweep);
         #[cfg(feature = "test-faults")]
         let registry = registry.register(mkit_server::timers::test_kind::TestTimer);
         NsObject::new(state)

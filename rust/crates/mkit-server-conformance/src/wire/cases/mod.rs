@@ -29,6 +29,7 @@ mod concurrent;
 mod download;
 mod growth;
 mod health;
+mod leases;
 mod list;
 mod packs;
 mod quota;
@@ -152,6 +153,7 @@ macro_rules! cases {
 }
 
 cases! {
+    "leases.bump_completes_and_writes_continue" => leases::bump_completes_and_writes_continue, M1, [EpochLeases, TestFaults], [];
     "repo.single_header_mismatch_not_found" => repository::single_header_mismatch, M0, [], [MultiRepo];
     "repo.single_malformed_invalid_argument" => repository::single_malformed, M0, [], [MultiRepo];
     "repo.single_signed_missing_header_unauthenticated" => repository::single_signed_missing, M0, [AuthV2], [MultiRepo];

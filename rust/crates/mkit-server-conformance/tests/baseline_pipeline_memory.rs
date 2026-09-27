@@ -181,6 +181,23 @@ async fn serve_addressing(
     mutant: Mutant,
     multi: bool,
 ) -> (String, Shared) {
+    serve_sharding(
+        auth,
+        quota,
+        mutant,
+        multi,
+        mkit_server::pipeline::Sharding::Single,
+    )
+    .await
+}
+
+async fn serve_sharding(
+    auth: impl FnOnce(&str) -> AuthMode,
+    quota: Option<ServerQuota>,
+    mutant: Mutant,
+    multi: bool,
+    sharding: mkit_server::pipeline::Sharding,
+) -> (String, Shared) {
     let (listener, origin) = common::listener().await;
     let repo = RepoId {
         namespace: NamespaceKey::deployment_default(),
@@ -197,6 +214,7 @@ async fn serve_addressing(
     };
     let mut cfg = PipelineConfig::new(addressing, auth(&origin), limits);
     cfg.write_quota = quota;
+    cfg.sharding = sharding;
     let clock = Arc::new(SystemClock);
     let kv = Arc::new(MemoryKv::with_clock(clock.clone()));
     let meta = Shared(kv, mutant, Arc::default());
@@ -412,4 +430,51 @@ async fn mutant_no_prune_fails_growth() {
 async fn mutant_index_leak_fails_growth() {
     let target = serve_test_faults(Mutant::LeakIndex).await;
     must_fail(&target, &["growth.replay_and_quota_pruned"]).await;
+}
+
+/// The epoch-lease case runs through HTTP against real D34 partitions,
+/// with a stored lease check after both writes to prove the bumped epoch
+/// reached the ref shard.
+#[cfg(feature = "test-faults")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pipeline_d34_epoch_leases() {
+    use mkit_server::pipeline::{D34Shards, ShardMap, Sharding};
+    use mkit_server::store::{codec, keys};
+
+    let (origin, meta) = serve_sharding(authv2, None, Mutant::None, false, Sharding::D34).await;
+    let mut profile = v2_profile(&origin);
+    profile.quota = None;
+    profile.derive_features();
+    profile.milestone = Milestone::M1;
+    profile.sharding_d34 = true;
+    profile.features.insert(Feature::TestFaults);
+    profile.features.insert(Feature::EpochLeases);
+    let case = "leases.bump_completes_and_writes_continue";
+    let name = format!("refs/heads/conformance/{}/{case}/main", profile.run_id);
+    let target = WireTarget {
+        base_url: origin.parse().unwrap(),
+        profile,
+    };
+    let report = run(&target, Some(case)).await;
+    common::judge(&report, PIPELINE_DIVERGENCES);
+    assert_eq!(report.passes(), [case]);
+
+    let repo = RepoId {
+        namespace: NamespaceKey::deployment_default(),
+        name: RepoName::new(REPOSITORY).unwrap(),
+    };
+    let shard = D34Shards.ref_shard(&repo, &name);
+    let value = meta
+        .get(&shard, &keys::epoch_lease())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(codec::decode_epoch_lease(&value).unwrap().epoch, 1);
+    assert!(
+        meta.get(&Partition::Namespace(repo.namespace), &keys::epoch_lease())
+            .await
+            .unwrap()
+            .is_none(),
+        "D34 wire coverage must not use the Single partition"
+    );
 }

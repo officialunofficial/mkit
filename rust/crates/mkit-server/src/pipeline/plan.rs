@@ -122,6 +122,8 @@ pub(crate) struct WriteRequest<'a> {
     pub(crate) charges: &'a [QuotaCharge],
     /// The grant the write was authorized under (M2).
     pub(crate) grant: Option<GrantRef>,
+    /// D34 leased epoch and optional installation, guarded by the observed el.
+    pub(crate) lease: Option<super::lease::LeaseWrite>,
     /// Whether to guard the layout version key: false on stores that
     /// report an implicit layout version.
     pub(crate) layout_version: bool,
@@ -143,7 +145,9 @@ impl WriteRequest<'_> {
         if self.layout_version {
             out.push(keys::layout_version());
         }
-        if self.grant.is_some() {
+        if self.lease.is_some() {
+            out.push(keys::epoch_lease());
+        } else if self.grant.is_some() {
             out.push(keys::grant_epoch());
         }
         out.extend(self.charges.iter().map(|c| keys::quota(&c.scope)));
@@ -232,15 +236,33 @@ pub(crate) fn plan_write(
     let mut pre = vec![deadline.clone()];
     let mut puts = Vec::new();
 
+    if let Some(lease) = req.lease {
+        pre.push(guard(keys::epoch_lease(), snap));
+        if lease.install {
+            puts.push(Write::Put(
+                keys::epoch_lease(),
+                codec::encode_epoch_lease(&lease.value),
+            ));
+        }
+    }
     let epoch_index = match req.grant {
         Some(grant) => {
-            let key = keys::grant_epoch();
-            let stored = snap.get(&key).map(codec::decode_u64).transpose();
-            if stored.map_err(corrupt)?.unwrap_or(0) != grant.epoch {
-                return Err(epoch_moved());
+            if let Some(lease) = req.lease {
+                if lease.value.epoch != grant.epoch {
+                    return Err(epoch_moved());
+                }
+                // The el guard re-plans on failure, whereas Single's e guard
+                // maps directly to permission_denied.
+                None
+            } else {
+                let key = keys::grant_epoch();
+                let stored = snap.get(&key).map(codec::decode_u64).transpose();
+                if stored.map_err(corrupt)?.unwrap_or(0) != grant.epoch {
+                    return Err(epoch_moved());
+                }
+                pre.push(guard(key, snap));
+                Some(pre.len() - 1)
             }
-            pre.push(guard(key, snap));
-            Some(pre.len() - 1)
         }
         None => None,
     };

@@ -1,0 +1,1072 @@
+//! D34 epoch leases over both atomic metadata backends, including paused writes.
+#![cfg(all(feature = "sqlite", feature = "test-faults"))]
+#![allow(clippy::unwrap_used)]
+
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
+use std::time::Duration;
+
+use mkit_core::protocol::RefWriteCondition;
+use mkit_server::pipeline::{
+    Admission, AdmissionDecision, AdmissionInput, AuthMode, Authenticated, Authorizer, D34Shards,
+    FaultHooks, FaultPoint, Hooks, Pipeline, PipelineConfig, RequestMeta, RevokeBudget,
+    RevokeProgress, ShardMap, Sharding, TestDirectives,
+};
+use mkit_server::sql::SqlKvStore;
+use mkit_server::store::{
+    Batch, BatchOutcome, Cursor, Key, Partition, PartitionStats, Precondition, ScanPage,
+    StoreCapabilities, StoreError, Value, Write, codec, keys,
+};
+use mkit_server::timers::{TickBudget, TimerRegistry, run_due};
+use mkit_server::upload::UploadLimits;
+use mkit_server::{
+    Addressing, AuthzFacts, Code, ManualClock, MemoryBlobStore, MemoryKv, MultiAddressing,
+    NamespaceStore, NoopMetrics, Operation, Procedure, RefUpdate, ServerError, UpdateRefResult,
+};
+use mkit_server_native::{Blocking, RusqliteConn};
+use tokio::sync::Notify;
+
+const REF: &str = "refs/heads/a";
+
+#[derive(Clone, Debug)]
+enum Call {
+    Many(Partition, Vec<Key>),
+    Apply(Partition, Batch, BatchOutcome),
+    Other,
+}
+
+#[derive(Default)]
+struct Gate {
+    enabled: AtomicBool,
+    entered: Notify,
+    release: Notify,
+}
+impl Gate {
+    fn arm(&self) {
+        self.enabled.store(true, Ordering::SeqCst);
+    }
+    async fn pause(&self) {
+        if self.enabled.swap(false, Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+    }
+    async fn entered(&self) {
+        tokio::time::timeout(Duration::from_secs(5), self.entered.notified())
+            .await
+            .unwrap();
+    }
+    fn resume(&self) {
+        self.release.notify_one();
+    }
+}
+
+#[derive(Default)]
+struct Controls {
+    calls: Mutex<Vec<Call>>,
+    push: Gate,
+    scan_clock: Mutex<Option<Arc<ManualClock>>>,
+}
+struct Store<N> {
+    inner: Arc<N>,
+    controls: Arc<Controls>,
+}
+impl<N> Clone for Store<N> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            controls: self.controls.clone(),
+        }
+    }
+}
+impl<N> Store<N> {
+    fn new(inner: N) -> Self {
+        Self {
+            inner: Arc::new(inner),
+            controls: Arc::new(Controls::default()),
+        }
+    }
+    fn record(&self, call: Call) {
+        self.controls.calls.lock().unwrap().push(call);
+    }
+    fn take(&self) -> Vec<Call> {
+        std::mem::take(&mut *self.controls.calls.lock().unwrap())
+    }
+}
+impl<N: NamespaceStore> NamespaceStore for Store<N> {
+    fn capabilities(&self) -> StoreCapabilities {
+        self.inner.capabilities()
+    }
+    async fn get(&self, p: &Partition, k: &Key) -> Result<Option<Value>, StoreError> {
+        self.record(Call::Other);
+        self.inner.get(p, k).await
+    }
+    async fn get_many(&self, p: &Partition, ks: &[Key]) -> Result<Vec<Option<Value>>, StoreError> {
+        self.record(Call::Many(p.clone(), ks.to_vec()));
+        self.inner.get_many(p, ks).await
+    }
+    async fn scan(
+        &self,
+        p: &Partition,
+        start: &Key,
+        end: &Key,
+        after: Option<&Cursor>,
+        limit: u32,
+    ) -> Result<ScanPage, StoreError> {
+        self.record(Call::Other);
+        if start == &keys::class_range(keys::TAG_LEASED_SHARD).0
+            && let Some(clock) = self.controls.scan_clock.lock().unwrap().as_ref()
+        {
+            clock.advance(10);
+        }
+        self.inner.scan(p, start, end, after, limit).await
+    }
+    async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
+        if matches!(p, Partition::Ref { .. })
+            && batch
+                .writes
+                .iter()
+                .all(|w| matches!(w, Write::Put(k, _) if *k == keys::epoch_lease()))
+        {
+            self.controls.push.pause().await;
+        }
+        let outcome = self.inner.apply(p, batch.clone()).await?;
+        self.record(Call::Apply(p.clone(), batch, outcome.clone()));
+        Ok(outcome)
+    }
+    async fn stats(&self, p: &Partition) -> Result<PartitionStats, StoreError> {
+        self.record(Call::Other);
+        self.inner.stats(p).await
+    }
+    async fn probe(&self) -> Result<(), StoreError> {
+        self.record(Call::Other);
+        self.inner.probe().await
+    }
+}
+
+#[derive(Default)]
+struct Faults {
+    a: Gate,
+    b: Gate,
+    epochs: Mutex<Vec<Option<u64>>>,
+}
+struct FaultControl(Arc<Faults>);
+impl FaultHooks for FaultControl {
+    async fn at(
+        &self,
+        point: FaultPoint,
+        op: &Operation,
+        d: &TestDirectives,
+    ) -> Result<(), ServerError> {
+        if point == FaultPoint::BeforeFinalApply && d.fault.as_deref() == Some("a") {
+            self.0.epochs.lock().unwrap().push(op.leased_epoch);
+            self.0.a.pause().await;
+        }
+        if point == FaultPoint::AfterLeaseGrant && d.fault.as_deref() == Some("b") {
+            self.0.b.pause().await;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Reject {
+    Allow,
+    Challenge,
+    Deny,
+}
+struct Policy(Reject);
+impl Authorizer for Policy {
+    async fn authorize(&self, _: &Operation) -> Result<AuthzFacts, ServerError> {
+        if matches!(self.0, Reject::Deny) {
+            Err(ServerError::permission_denied("test denial"))
+        } else {
+            Ok(AuthzFacts::default())
+        }
+    }
+}
+impl Admission for Policy {
+    async fn admit(&self, _: &AdmissionInput<'_>) -> Result<AdmissionDecision, ServerError> {
+        if matches!(self.0, Reject::Challenge) {
+            Ok(AdmissionDecision::Challenge {
+                challenges: vec![],
+                description: "test challenge".into(),
+            })
+        } else {
+            Ok(AdmissionDecision::allow(vec![]))
+        }
+    }
+}
+type Pipe<N> = Pipeline<MemoryBlobStore, Store<N>, Hooks<Policy, Policy>>;
+fn pipeline<N: NamespaceStore>(
+    store: Store<N>,
+    clock: Arc<ManualClock>,
+    faults: Arc<Faults>,
+    rejection: Reject,
+) -> Arc<Pipe<N>> {
+    let defaults = Hooks::new();
+    let hooks = Hooks {
+        authorizer: Policy(rejection),
+        admission: Policy(rejection),
+        pre_receive: defaults.pre_receive,
+        receipts: defaults.receipts,
+        outcomes: defaults.outcomes,
+    };
+    let mut cfg = PipelineConfig::new(
+        Addressing::Multi(MultiAddressing::new()),
+        AuthMode::Open,
+        UploadLimits {
+            max_total_bytes: 1024,
+            max_chunks: 4,
+        },
+    );
+    cfg.sharding = Sharding::D34;
+    cfg.write_quota = None;
+    Arc::new(
+        Pipeline::new(
+            MemoryBlobStore::default(),
+            store,
+            hooks,
+            cfg,
+            clock,
+            Arc::new(NoopMetrics),
+        )
+        .unwrap()
+        .with_faults(FaultControl(faults)),
+    )
+}
+fn auth<N: NamespaceStore>(pipe: &Pipe<N>, token: Option<&str>) -> Authenticated {
+    let identity = format!("ed25519-{}/leases", "a".repeat(64));
+    pipe.authenticate(&RequestMeta {
+        procedure: Procedure::UpdateRef,
+        header: &|h| match h {
+            "x-repository" => Some(identity.clone()),
+            "x-mkit-test-fault" => token.map(str::to_owned),
+            "x-mkit-test-clock-skew-ms" if token == Some("skew") => Some("100000".into()),
+            _ => None,
+        },
+        unary_body: Some(b"lease test"),
+        transport_principal: None,
+    })
+    .unwrap()
+}
+fn update(name: &str, byte: u8) -> RefUpdate {
+    RefUpdate {
+        name: name.into(),
+        condition: RefWriteCondition::Any,
+        new: [byte; 32],
+    }
+}
+fn shard(a: &Authenticated, name: &str) -> Partition {
+    D34Shards.ref_shard(&a.repo().repo, name)
+}
+fn coordinator(a: &Authenticated) -> Partition {
+    D34Shards.coordinator(&a.repo().repo.namespace)
+}
+fn ls_key(a: &Authenticated, name: &str) -> Key {
+    let Partition::Ref { shard_ref, .. } = shard(a, name) else {
+        unreachable!()
+    };
+    keys::leased_shard(&a.repo().repo.name, &shard_ref)
+}
+async fn el<N: NamespaceStore>(
+    store: &Store<N>,
+    a: &Authenticated,
+    name: &str,
+) -> codec::EpochLease {
+    codec::decode_epoch_lease(
+        &store
+            .inner
+            .get(&shard(a, name), &keys::epoch_lease())
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap()
+}
+async fn ls<N: NamespaceStore>(
+    store: &Store<N>,
+    a: &Authenticated,
+    name: &str,
+) -> codec::LeasedShard {
+    codec::decode_leased_shard(
+        &store
+            .inner
+            .get(&coordinator(a), &ls_key(a, name))
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap()
+}
+async fn committed<N: NamespaceStore>(pipe: &Pipe<N>, a: &Authenticated, name: &str, byte: u8) {
+    assert_eq!(
+        pipe.update_ref(a, update(name, byte)).await.unwrap(),
+        UpdateRefResult::Committed
+    );
+}
+fn assert_cost(calls: &[Call], expected: usize) {
+    assert_eq!(calls.len(), expected, "{calls:?}");
+    assert!(
+        matches!(&calls[0], Call::Many(Partition::Ref { .. }, ks) if ks.contains(&keys::epoch_lease()) && !ks.contains(&keys::grant_epoch()))
+    );
+    if expected == 4 {
+        assert!(
+            matches!(&calls[1], Call::Many(Partition::Coordinator(_), ks) if ks.len() == 4 && ks.contains(&keys::grant_epoch()))
+        );
+        assert!(
+            matches!(&calls[2], Call::Apply(Partition::Coordinator(_), b, BatchOutcome::Committed) if !b.preconditions.iter().any(|p| matches!(p, Precondition::NotAfter(_))))
+        );
+    }
+    assert!(matches!(
+        calls.last(),
+        Some(Call::Apply(
+            Partition::Ref { .. },
+            _,
+            BatchOutcome::Committed
+        ))
+    ));
+}
+fn deadline(calls: &[Call]) -> u64 {
+    calls
+        .iter()
+        .find_map(|c| match c {
+            Call::Apply(Partition::Ref { .. }, b, _) => match b.preconditions.first() {
+                Some(Precondition::NotAfter(d)) => Some(*d),
+                _ => None,
+            },
+            _ => None,
+        })
+        .unwrap()
+}
+async fn lifecycle<N: NamespaceStore>(
+    backend: N,
+    pipeline_clock: Arc<ManualClock>,
+    store_clock: Arc<ManualClock>,
+) {
+    let store = Store::new(backend);
+    let pipe = pipeline(
+        store.clone(),
+        pipeline_clock.clone(),
+        Arc::new(Faults::default()),
+        Reject::Allow,
+    );
+    let a = auth(&pipe, None);
+    committed(&pipe, &a, REF, 1).await;
+    let calls = store.take();
+    assert_cost(&calls, 4);
+    assert_eq!(deadline(&calls), 10_000);
+    assert_eq!(el(&store, &a, REF).await.expires_at_ms, 30_000);
+    committed(&pipe, &a, REF, 2).await;
+    assert_cost(&store.take(), 2);
+    // Replay cap wins at the start; the lease cap wins late in the lease.
+    pipeline_clock.set(20_000);
+    store_clock.set(20_000);
+    committed(&pipe, &a, REF, 3).await;
+    let calls = store.take();
+    assert_cost(&calls, 2);
+    assert_eq!(deadline(&calls), 25_000);
+    // 999 ms is insufficient for a new plan, even though the lease is live.
+    pipeline_clock.set(24_001);
+    store_clock.set(24_001);
+    committed(&pipe, &a, REF, 4).await;
+    assert_cost(&store.take(), 4);
+    assert_eq!(el(&store, &a, REF).await.expires_at_ms, 54_001);
+    pipeline_clock.set(54_001);
+    store_clock.set(54_001);
+    committed(&pipe, &a, REF, 5).await;
+    assert_cost(&store.take(), 4);
+    assert_eq!(el(&store, &a, REF).await.expires_at_ms, 84_001);
+}
+
+async fn rejected_existing_repo<N: NamespaceStore>(
+    backend: N,
+    clock: Arc<ManualClock>,
+    store_clock: Arc<ManualClock>,
+) {
+    let store = Store::new(backend);
+    let faults = Arc::new(Faults::default());
+    let pipe = pipeline(store.clone(), clock.clone(), faults.clone(), Reject::Allow);
+    let a = auth(&pipe, None);
+    committed(&pipe, &a, REF, 1).await;
+    let original_el = el(&store, &a, REF).await;
+    let original_ls = ls(&store, &a, REF).await;
+    clock.set(30_000);
+    store_clock.set(30_000);
+    // Exercise both an unleased shard and an expired, unswept lease.
+    for rejection in [Reject::Challenge, Reject::Deny] {
+        let rejected = pipeline(store.clone(), clock.clone(), faults.clone(), rejection);
+        for name in ["refs/heads/new", REF] {
+            store.take();
+            assert_eq!(
+                rejected
+                    .update_ref(&auth(&rejected, None), update(name, 2))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                Code::PermissionDenied
+            );
+            let calls = store.take();
+            assert_eq!(calls.len(), 2, "{calls:?}");
+            assert!(calls.iter().all(|c| matches!(c, Call::Many(..))));
+            assert!(
+                store
+                    .inner
+                    .get(&shard(&a, "refs/heads/new"), &keys::epoch_lease())
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                store
+                    .inner
+                    .get(&coordinator(&a), &ls_key(&a, "refs/heads/new"))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(el(&store, &a, REF).await, original_el);
+            assert_eq!(ls(&store, &a, REF).await, original_ls);
+        }
+    }
+}
+
+fn old_batch(old_el: codec::EpochLease) -> Batch {
+    Batch::new()
+        .require(Precondition::NotAfter(old_el.expires_at_ms - 5_000))
+        .require(Precondition::Equals(
+            keys::epoch_lease(),
+            codec::encode_epoch_lease(&old_el),
+        ))
+        .put(Key::new(b"old-epoch-write".to_vec()), Value::default())
+}
+async fn renewal_counterexample<N: NamespaceStore + 'static>(
+    backend: N,
+    clock: Arc<ManualClock>,
+    store_clock: Arc<ManualClock>,
+    cancel_b: bool,
+) {
+    let store = Store::new(backend);
+    let faults = Arc::new(Faults::default());
+    let pipe = pipeline(store.clone(), clock.clone(), faults.clone(), Reject::Allow);
+    let initial = auth(&pipe, None);
+    committed(&pipe, &initial, REF, 1).await;
+    let old = el(&store, &initial, REF).await;
+    clock.set(23_999);
+    store_clock.set(23_999);
+    faults.a.arm();
+    let a_auth = auth(&pipe, Some("a"));
+    let a_pipe = pipe.clone();
+    let a = tokio::spawn(async move { a_pipe.update_ref(&a_auth, update(REF, 2)).await });
+    faults.a.entered().await;
+    pipe.bump_epoch(&initial.repo().repo.namespace, 1)
+        .await
+        .unwrap();
+    clock.set(24_501);
+    store_clock.set(24_501);
+    faults.b.arm();
+    let b_auth = auth(&pipe, Some("b"));
+    let b_pipe = pipe.clone();
+    let b = tokio::spawn(async move { b_pipe.update_ref(&b_auth, update(REF, 3)).await });
+    faults.b.entered().await;
+    let renewed = ls(&store, &initial, REF).await;
+    assert_eq!(renewed.epoch, 1);
+    assert_eq!(
+        renewed.acked_epoch, 0,
+        "renewal cannot acknowledge an uninstalled epoch"
+    );
+    assert_eq!(el(&store, &initial, REF).await, old);
+    if cancel_b {
+        b.abort();
+    }
+    store.controls.push.arm();
+    let revoke_pipe = pipe.clone();
+    let ns = initial.repo().repo.namespace.clone();
+    let revoke = tokio::spawn(async move {
+        revoke_pipe
+            .revoke_step(&ns, &RevokeBudget::new(10_000))
+            .await
+    });
+    store.controls.push.entered().await;
+    assert!(
+        !revoke.is_finished(),
+        "completion must wait for the shard installation"
+    );
+    assert_eq!(ls(&store, &initial, REF).await.acked_epoch, 0);
+    assert_eq!(el(&store, &initial, REF).await.epoch, 0);
+    store.controls.push.resume();
+    assert_eq!(revoke.await.unwrap().unwrap(), RevokeProgress::Complete);
+    assert_eq!(ls(&store, &initial, REF).await.acked_epoch, 1);
+    assert!(matches!(
+        store
+            .inner
+            .apply(&shard(&initial, REF), old_batch(old))
+            .await
+            .unwrap(),
+        BatchOutcome::PreconditionFailed { .. }
+    ));
+    faults.a.resume();
+    assert_eq!(a.await.unwrap().unwrap(), UpdateRefResult::Committed);
+    assert_eq!(*faults.epochs.lock().unwrap(), vec![Some(0), Some(1)]);
+    let a_key = keys::ref_key(&initial.repo().repo.name, REF);
+    let calls = store.take();
+    let attempts: Vec<_> = calls
+        .iter()
+        .filter_map(|call| match call {
+            Call::Apply(Partition::Ref { .. }, batch, outcome)
+                if batch
+                    .writes
+                    .contains(&Write::Put(a_key.clone(), Value::new(vec![2; 32]))) =>
+            {
+                Some(outcome)
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        matches!(
+            attempts.first(),
+            Some(BatchOutcome::PreconditionFailed { .. } | BatchOutcome::DeadlinePassed { .. })
+        ),
+        "the actual old A batch must fail: {calls:?}"
+    );
+    assert_eq!(attempts.last(), Some(&&BatchOutcome::Committed));
+    if !cancel_b {
+        faults.b.resume();
+        assert_eq!(b.await.unwrap().unwrap(), UpdateRefResult::Committed);
+    }
+    assert_eq!(el(&store, &initial, REF).await.epoch, 1);
+}
+async fn renewal_paused<N: NamespaceStore + 'static>(
+    backend: N,
+    c: Arc<ManualClock>,
+    s: Arc<ManualClock>,
+) {
+    renewal_counterexample(backend, c, s, false).await;
+}
+async fn renewal_cancelled<N: NamespaceStore + 'static>(
+    backend: N,
+    c: Arc<ManualClock>,
+    s: Arc<ManualClock>,
+) {
+    renewal_counterexample(backend, c, s, true).await;
+}
+
+async fn recovered_table<N: NamespaceStore>(
+    backend: N,
+    clock: Arc<ManualClock>,
+    _: Arc<ManualClock>,
+) {
+    let store = Store::new(backend);
+    let pipe = pipeline(
+        store.clone(),
+        clock.clone(),
+        Arc::new(Faults::default()),
+        Reject::Allow,
+    );
+    let a = auth(&pipe, None);
+    // A namespace's old creation timestamp cannot establish a recovery fence.
+    store
+        .inner
+        .apply(
+            &coordinator(&a),
+            Batch::new().put(
+                keys::namespace_record(),
+                codec::encode_namespace_record(&codec::NamespaceRecord {
+                    created_at_ms: 0,
+                    config_version: 1,
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+    clock.set(100_000);
+    assert_eq!(
+        pipe.revoke_step(&a.repo().repo.namespace, &RevokeBudget::new(1_000))
+            .await
+            .unwrap(),
+        RevokeProgress::Complete
+    );
+    pipe.mark_lease_table_recovered(&a.repo().repo.namespace)
+        .await
+        .unwrap();
+    let marker = store
+        .inner
+        .get(&coordinator(&a), &keys::lease_recovery())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        codec::decode_lease_recovery(&marker).unwrap().resumed_at_ms,
+        100_000
+    );
+    for now in [100_000, 134_999] {
+        clock.set(now);
+        assert!(matches!(
+            pipe.revoke_step(&a.repo().repo.namespace, &RevokeBudget::new(1_000))
+                .await
+                .unwrap(),
+            RevokeProgress::Pending { .. }
+        ));
+    }
+    clock.set(135_000);
+    assert_eq!(
+        pipe.revoke_step(&a.repo().repo.namespace, &RevokeBudget::new(1_000))
+            .await
+            .unwrap(),
+        RevokeProgress::Complete
+    );
+    assert_eq!(
+        store
+            .inner
+            .get(&coordinator(&a), &keys::lease_recovery())
+            .await
+            .unwrap(),
+        Some(marker)
+    );
+}
+
+async fn expired_row_renewal<N: NamespaceStore + 'static>(
+    backend: N,
+    clock: Arc<ManualClock>,
+    store_clock: Arc<ManualClock>,
+) {
+    let store = Store::new(backend);
+    let faults = Arc::new(Faults::default());
+    let pipe = pipeline(store.clone(), clock.clone(), faults.clone(), Reject::Allow);
+    let a = auth(&pipe, None);
+    committed(&pipe, &a, REF, 1).await;
+    let old = el(&store, &a, REF).await;
+    pipe.bump_epoch(&a.repo().repo.namespace, 1).await.unwrap();
+    clock.set(30_000);
+    store_clock.set(30_000);
+    faults.b.arm();
+    let b_auth = auth(&pipe, Some("b"));
+    let b_pipe = pipe.clone();
+    let b = tokio::spawn(async move { b_pipe.update_ref(&b_auth, update(REF, 2)).await });
+    faults.b.entered().await;
+    assert_eq!(el(&store, &a, REF).await, old);
+    assert_eq!(ls(&store, &a, REF).await.acked_epoch, 1);
+    assert_eq!(
+        store
+            .inner
+            .apply(&shard(&a, REF), old_batch(old))
+            .await
+            .unwrap(),
+        BatchOutcome::DeadlinePassed {
+            backend_now: 30_000
+        }
+    );
+    faults.b.resume();
+    b.await.unwrap().unwrap();
+    assert_eq!(el(&store, &a, REF).await.epoch, 1);
+}
+
+async fn push_race<N: NamespaceStore + 'static>(
+    backend: N,
+    clock: Arc<ManualClock>,
+    store_clock: Arc<ManualClock>,
+) {
+    let store = Store::new(backend);
+    let pipe = pipeline(
+        store.clone(),
+        clock.clone(),
+        Arc::new(Faults::default()),
+        Reject::Allow,
+    );
+    let a = auth(&pipe, None);
+    committed(&pipe, &a, REF, 1).await;
+    pipe.bump_epoch(&a.repo().repo.namespace, 1).await.unwrap();
+    clock.set(24_501);
+    store_clock.set(24_501);
+    store.take();
+    store.controls.push.arm();
+    let p = pipe.clone();
+    let ns = a.repo().repo.namespace.clone();
+    let revoke = tokio::spawn(async move { p.revoke_step(&ns, &RevokeBudget::new(10_000)).await });
+    store.controls.push.entered().await;
+    assert_eq!(ls(&store, &a, REF).await.acked_epoch, 0);
+    committed(&pipe, &a, REF, 2).await;
+    assert_eq!(el(&store, &a, REF).await.epoch, 1);
+    assert_eq!(ls(&store, &a, REF).await.acked_epoch, 0);
+    store.controls.push.resume();
+    assert_eq!(revoke.await.unwrap().unwrap(), RevokeProgress::Complete);
+    let calls = store.take();
+    let pushes: Vec<_> = calls
+        .iter()
+        .filter_map(|call| match call {
+            Call::Apply(Partition::Ref { .. }, batch, outcome)
+                if batch
+                    .writes
+                    .iter()
+                    .all(|w| matches!(w, Write::Put(k, _) if *k == keys::epoch_lease())) =>
+            {
+                Some(outcome)
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        matches!(
+            pushes.first(),
+            Some(BatchOutcome::PreconditionFailed { .. })
+        ),
+        "{calls:?}"
+    );
+    assert!(
+        pushes.contains(&&BatchOutcome::Committed),
+        "push retry must commit before ack: {calls:?}"
+    );
+    let committed_push_index = calls
+        .iter()
+        .position(|c| {
+            matches!(c,
+        Call::Apply(Partition::Ref { .. }, b, BatchOutcome::Committed)
+        if b.writes.iter().all(|w| matches!(w, Write::Put(k, _) if *k == keys::epoch_lease())))
+        })
+        .unwrap();
+    let ack_index = calls
+        .iter()
+        .position(|c| {
+            matches!(c,
+        Call::Apply(Partition::Coordinator(_), b, BatchOutcome::Committed)
+        if b.writes.iter().any(|w| matches!(w, Write::Put(k, v)
+            if *k == ls_key(&a, REF) && codec::decode_leased_shard(v).unwrap().acked_epoch == 1)))
+        })
+        .unwrap();
+    assert!(
+        committed_push_index < ack_index,
+        "ack cannot precede a committed push"
+    );
+    assert_eq!(ls(&store, &a, REF).await.acked_epoch, 1);
+    assert_eq!(
+        el(&store, &a, REF).await.expires_at_ms,
+        ls(&store, &a, REF).await.expires_at_ms
+    );
+}
+
+async fn absent_el_and_budget<N: NamespaceStore>(
+    backend: N,
+    clock: Arc<ManualClock>,
+    store_clock: Arc<ManualClock>,
+) {
+    let store = Store::new(backend);
+    let pipe = pipeline(
+        store.clone(),
+        clock.clone(),
+        Arc::new(Faults::default()),
+        Reject::Allow,
+    );
+    let a = auth(&pipe, None);
+    let names: Vec<_> = (0..6).map(|i| format!("refs/heads/{i}")).collect();
+    for name in &names {
+        committed(&pipe, &a, name, 1).await;
+    }
+    // A cancelled first write may leave a coordinator grant with no shard copy.
+    store
+        .inner
+        .apply(
+            &shard(&a, &names[0]),
+            Batch::new().delete(keys::epoch_lease()),
+        )
+        .await
+        .unwrap();
+    // Mark that row unacknowledged so a bump must install even an absent el.
+    pipe.bump_epoch(&a.repo().repo.namespace, 1).await.unwrap();
+    assert_eq!(
+        pipe.revoke_step(&a.repo().repo.namespace, &RevokeBudget::new(10_000))
+            .await
+            .unwrap(),
+        RevokeProgress::Pending { remaining: 2 }
+    );
+    assert_eq!(el(&store, &a, &names[0]).await.epoch, 1);
+    assert_eq!(
+        pipe.revoke_step(&a.repo().repo.namespace, &RevokeBudget::new(10_000))
+            .await
+            .unwrap(),
+        RevokeProgress::Complete
+    );
+    for name in &names {
+        assert_eq!(ls(&store, &a, name).await.acked_epoch, 1);
+    }
+    pipe.bump_epoch(&a.repo().repo.namespace, 2).await.unwrap();
+    clock.set(30_000);
+    store_clock.set(30_000);
+    assert_eq!(
+        pipe.revoke_step(&a.repo().repo.namespace, &RevokeBudget::new(10_000))
+            .await
+            .unwrap(),
+        RevokeProgress::Complete
+    );
+    for invalid in [2, 1, 1_027] {
+        assert_eq!(
+            pipe.bump_epoch(&a.repo().repo.namespace, invalid)
+                .await
+                .unwrap_err()
+                .code(),
+            Code::InvalidArgument
+        );
+    }
+}
+
+async fn sweep<N: NamespaceStore + 'static>(
+    backend: N,
+    clock: Arc<ManualClock>,
+    store_clock: Arc<ManualClock>,
+) {
+    use mkit_server::timers::{lease_sweep::LeaseSweep, registry::kinds};
+    let store = Store::new(backend);
+    let pipe = pipeline(
+        store.clone(),
+        clock.clone(),
+        Arc::new(Faults::default()),
+        Reject::Allow,
+    );
+    let a = auth(&pipe, None);
+    committed(&pipe, &a, REF, 1).await;
+    let reference = [
+        a.repo().repo.name.as_str().as_bytes(),
+        b"\0",
+        REF.as_bytes(),
+    ]
+    .concat();
+    let old_timer = keys::timer(30_000, kinds::LEASE_SWEEP.get(), &reference);
+    assert!(
+        store
+            .inner
+            .get(&coordinator(&a), &old_timer)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    clock.set(24_501);
+    store_clock.set(24_501);
+    store.take();
+    committed(&pipe, &a, REF, 2).await;
+    let new_timer = keys::timer(54_501, kinds::LEASE_SWEEP.get(), &reference);
+    let calls = store.take();
+    let moved = calls.iter().any(|c| matches!(c, Call::Apply(Partition::Coordinator(_), b, BatchOutcome::Committed)
+        if b.writes.contains(&Write::Delete(old_timer.clone())) && b.writes.iter().any(|w| matches!(w, Write::Put(k, _) if *k == new_timer))));
+    assert!(moved, "timer move must share the lease grant batch");
+    assert!(
+        store
+            .inner
+            .get(&coordinator(&a), &old_timer)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .inner
+            .get(&coordinator(&a), &new_timer)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    clock.set(54_501);
+    store_clock.set(54_501);
+    let report = run_due(
+        &store,
+        &coordinator(&a),
+        &TimerRegistry::new().register(LeaseSweep),
+        clock.as_ref(),
+        54_501,
+        &TickBudget::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.fired, 1);
+    assert!(
+        store
+            .inner
+            .get(&coordinator(&a), &ls_key(&a, REF))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .inner
+            .get(&coordinator(&a), &new_timer)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+async fn clocks_are_separate<N: NamespaceStore + 'static>(
+    backend: N,
+    clock: Arc<ManualClock>,
+    store_clock: Arc<ManualClock>,
+) {
+    let store = Store::new(backend);
+    let faults = Arc::new(Faults::default());
+    let pipe = pipeline(store.clone(), clock.clone(), faults.clone(), Reject::Allow);
+    let skewed = auth(&pipe, Some("skew"));
+    committed(&pipe, &skewed, REF, 1).await;
+    assert_eq!(deadline(&store.take()), 10_000);
+    assert_eq!(el(&store, &skewed, REF).await.expires_at_ms, 30_000);
+    clock.set(1_000);
+    faults.a.arm();
+    let a_auth = auth(&pipe, Some("a"));
+    let a_pipe = pipe.clone();
+    let a = tokio::spawn(async move { a_pipe.update_ref(&a_auth, update(REF, 2)).await });
+    faults.a.entered().await;
+    // Only the backend clock advances past the planned deadline. A retry
+    // gets one further attempt; a still-stale pipeline clock cannot commit it.
+    store_clock.set(11_001);
+    store.take();
+    faults.a.resume();
+    assert_eq!(a.await.unwrap().unwrap_err().code(), Code::Unavailable);
+    let misses = store
+        .take()
+        .iter()
+        .filter(|c| {
+            matches!(
+                c,
+                Call::Apply(
+                    _,
+                    _,
+                    BatchOutcome::DeadlinePassed {
+                        backend_now: 11_001
+                    }
+                )
+            )
+        })
+        .count();
+    assert_eq!(misses, 2);
+}
+
+async fn elapsed_budget_makes_progress<N: NamespaceStore + 'static>(
+    backend: N,
+    clock: Arc<ManualClock>,
+    _: Arc<ManualClock>,
+) {
+    let store = Store::new(backend);
+    let pipe = pipeline(
+        store.clone(),
+        clock.clone(),
+        Arc::new(Faults::default()),
+        Reject::Allow,
+    );
+    let a = auth(&pipe, None);
+    let names: Vec<_> = (0..9).map(|i| format!("refs/heads/{i:02}")).collect();
+    for name in &names {
+        committed(&pipe, &a, name, 1).await;
+    }
+    pipe.bump_epoch(&a.repo().repo.namespace, 1).await.unwrap();
+    // Simulate the already-committed push+ack prefix. Only the suffix needs
+    // work; restarting every slice at the prefix would starve it forever.
+    for name in &names[..8] {
+        let mut installed = el(&store, &a, name).await;
+        installed.epoch = 1;
+        store
+            .inner
+            .apply(
+                &shard(&a, name),
+                Batch::new().put(keys::epoch_lease(), codec::encode_epoch_lease(&installed)),
+            )
+            .await
+            .unwrap();
+        let mut acknowledged = ls(&store, &a, name).await;
+        acknowledged.acked_epoch = 1;
+        store
+            .inner
+            .apply(
+                &coordinator(&a),
+                Batch::new().put(ls_key(&a, name), codec::encode_leased_shard(&acknowledged)),
+            )
+            .await
+            .unwrap();
+    }
+    *store.controls.scan_clock.lock().unwrap() = Some(clock.clone());
+    let mut complete = false;
+    for _ in 0..10 {
+        if pipe
+            .revoke_step(&a.repo().repo.namespace, &RevokeBudget::new(15))
+            .await
+            .unwrap()
+            == RevokeProgress::Complete
+        {
+            complete = true;
+            break;
+        }
+    }
+    assert!(
+        complete,
+        "bounded slices must eventually reach the unacknowledged suffix"
+    );
+    assert_eq!(ls(&store, &a, &names[8]).await.acked_epoch, 1);
+    assert_eq!(el(&store, &a, &names[8]).await.epoch, 1);
+}
+
+macro_rules! backends {
+    ($memory:ident, $sqlite:ident, $scenario:ident) => {
+        #[tokio::test]
+        async fn $memory() {
+            let pipeline_clock = Arc::new(ManualClock::new(0));
+            let store_clock = Arc::new(ManualClock::new(0));
+            $scenario(
+                MemoryKv::with_clock(store_clock.clone()),
+                pipeline_clock,
+                store_clock,
+            )
+            .await;
+        }
+        #[tokio::test]
+        async fn $sqlite() {
+            let pipeline_clock = Arc::new(ManualClock::new(0));
+            let store_clock = Arc::new(ManualClock::new(0));
+            let dir = tempfile::tempdir().unwrap();
+            let conn = RusqliteConn::open(dir.path().join("meta.sqlite3"))
+                .unwrap()
+                .with_clock(store_clock.clone());
+            $scenario(
+                Blocking::new(SqlKvStore::open(conn).unwrap()),
+                pipeline_clock,
+                store_clock,
+            )
+            .await;
+        }
+    };
+}
+backends!(lifecycle_memory, lifecycle_sqlite, lifecycle);
+backends!(
+    rejected_existing_memory,
+    rejected_existing_sqlite,
+    rejected_existing_repo
+);
+backends!(renewal_paused_memory, renewal_paused_sqlite, renewal_paused);
+backends!(
+    renewal_cancelled_memory,
+    renewal_cancelled_sqlite,
+    renewal_cancelled
+);
+backends!(
+    recovered_table_memory,
+    recovered_table_sqlite,
+    recovered_table
+);
+backends!(expired_row_memory, expired_row_sqlite, expired_row_renewal);
+backends!(push_race_memory, push_race_sqlite, push_race);
+backends!(
+    absent_el_and_budget_memory,
+    absent_el_and_budget_sqlite,
+    absent_el_and_budget
+);
+backends!(sweep_memory, sweep_sqlite, sweep);
+
+backends!(
+    clocks_are_separate_memory,
+    clocks_are_separate_sqlite,
+    clocks_are_separate
+);
+
+backends!(
+    elapsed_budget_progress_memory,
+    elapsed_budget_progress_sqlite,
+    elapsed_budget_makes_progress
+);

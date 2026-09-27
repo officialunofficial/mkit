@@ -25,8 +25,10 @@ mod download;
 mod faults;
 mod gate;
 mod hooks;
+mod lease;
 mod outcome;
 mod plan;
+mod revocation;
 mod shard;
 #[cfg(test)]
 mod tests;
@@ -61,8 +63,8 @@ pub use auth::{AuthMode, Authenticated, RequestMeta};
 pub use download::{DownloadChunk, DownloadStream};
 #[cfg(feature = "test-faults")]
 pub use faults::{
-    CLOCK_SKEW_HEADER, FAULT_HEADER, FailOnce, FaultHooks, FaultPoint, RUN_TIMERS_HEADER,
-    TIMER_MS_HEADER, TestDirectives,
+    BUMP_EPOCH_HEADER, CLOCK_SKEW_HEADER, FAULT_HEADER, FailOnce, FaultHooks, FaultPoint,
+    LEASE_RECOVERED_HEADER, RUN_TIMERS_HEADER, TIMER_MS_HEADER, TestDirectives,
 };
 pub use hooks::{
     Admission, AdmissionDecision, AdmissionInput, Authorizer, Challenge, DefaultAdmission, HookSet,
@@ -74,6 +76,7 @@ use plan::{
     MAX_REPLAN, PRUNE_LIMIT, Plan, PlanClock, Planned, Snapshot, WriteKind, WriteRequest,
     plan_write, prune_sampled,
 };
+pub use revocation::{MAX_EPOCH_STEP, RevokeBudget, RevokeProgress};
 pub use shard::{D34Shards, ShardMap, SinglePartition};
 pub use upload::{UploadMode, UploadSession};
 
@@ -145,6 +148,12 @@ pub struct PipelineConfig {
     pub list_page_limit: u32,
     /// Commit deadline window; see [`MAX_APPLY_WINDOW`].
     pub max_apply_window: Duration,
+    /// Coordinator epoch lease duration, in milliseconds.
+    pub epoch_lease_ms: u64,
+    /// Margin covering coordinator/backend clock skew, in milliseconds.
+    pub lease_margin_ms: u64,
+    /// Minimum useful lease budget before renewing, in milliseconds.
+    pub min_lease_budget_ms: u64,
     /// Extra header names never to log.
     pub redactor: Redactor,
 }
@@ -163,6 +172,9 @@ impl PipelineConfig {
             write_quota,
             list_page_limit: DEFAULT_LIST_PAGE_LIMIT,
             max_apply_window: MAX_APPLY_WINDOW,
+            epoch_lease_ms: 30_000,
+            lease_margin_ms: 5_000,
+            min_lease_budget_ms: 1_000,
             redactor: Redactor::default(),
         }
     }
@@ -214,6 +226,7 @@ pub struct Pipeline<B, N, H = Hooks> {
     #[cfg(feature = "test-faults")]
     faults: Option<Arc<dyn faults::DynFaultHooks>>,
     gate: Option<Arc<gate::WriteGate>>,
+    revocation_cursors: Arc<revocation::RevokeCursors>,
 }
 
 impl<B, N, H> core::fmt::Debug for Pipeline<B, N, H> {
@@ -303,6 +316,10 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             .is_some_and(|v| v != keys::LAYOUT_VERSION)
         {
             "the store's layout version is not this server's"
+        } else if cfg.lease_margin_ms == 0
+            || cfg.epoch_lease_ms <= cfg.lease_margin_ms.saturating_add(cfg.min_lease_budget_ms)
+        {
+            "epoch lease must exceed its positive margin plus minimum budget"
         } else if cfg.list_page_limit == 0 || cfg.max_apply_window.is_zero() {
             "list page limit and apply window must be positive"
         } else {
@@ -326,6 +343,7 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             #[cfg(feature = "test-faults")]
             faults: None,
             gate: None,
+            revocation_cursors: Arc::default(),
         })
     }
 
@@ -356,7 +374,8 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// single-process server over a single-writer store (native `SQLite`,
     /// which commits one batch at a time anyway): concurrent writes that
     /// share a key, such as one signer's quota window, then never exhaust
-    /// the re-plan bound and fail `aborted`. Reads are not gated. Several
+    /// the re-plan bound and fail `aborted`. D34 lease-grant batches also
+    /// take this gate after admission. Reads are not gated. Several
     /// processes on one store still race, through the optimistic loop.
     #[must_use]
     pub fn with_write_gate(mut self) -> Self {
@@ -391,6 +410,7 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         )?;
         sibling.shards = Arc::clone(&self.shards);
         sibling.gate.clone_from(&self.gate);
+        sibling.revocation_cursors = Arc::clone(&self.revocation_cursors);
         #[cfg(feature = "test-faults")]
         sibling.faults.clone_from(&self.faults);
         Ok(sibling)
@@ -471,6 +491,15 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             let op = self.identify(a, kind)?;
             self.authorize(&op).await?;
             self.require_repository(&op.repo).await?;
+            #[cfg(feature = "test-faults")]
+            {
+                if a.test_directives().lease_recovered {
+                    self.mark_lease_table_recovered(&op.repo.namespace).await?;
+                }
+                if let Some(epoch) = a.test_directives().bump_epoch {
+                    self.test_bump_epoch(&op.repo.namespace, epoch).await?;
+                }
+            }
             let partitions = self.shards.ref_index_partitions(&op.repo);
             if partitions.len() != 1 {
                 // TODO(WP-1.28): read the eventually consistent ref-name index.
@@ -765,14 +794,43 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         if let Some(stored) = Self::replay_lookup(&op, ahead.as_ref())? {
             return Ok(stored);
         }
-        op.creation = self.creation_facts(&op, ahead.as_ref()).await?;
+        let lease = if self.cfg.sharding == Sharding::D34 {
+            let observed = self.observe_lease(&op, &p, ahead.as_ref()).await?;
+            op.creation = observed.creation(&self.cfg.addressing);
+            op.leased_epoch = Some(observed.epoch());
+            Some(observed)
+        } else {
+            op.creation = self.creation_facts(&op, ahead.as_ref()).await?;
+            None
+        };
         op.authz = self.authorize(&op).await?;
         fault!(self, AfterAuthorize, &op, a);
         let charges = self.admit(AdmissionInput::new(&op)).await?;
-        op.created = self.commit_creation(&op, a.business_skew_ms).await?;
+        let lease = if let Some(observed) = lease {
+            let (created, lease) = {
+                // The native gate serializes same-shard lease grants too.
+                // Read observations remain pre-admission; a waiter rebuilds
+                // a stale coordinator observation within the usual three tries.
+                let _grant_gate = match (&self.gate, &observed) {
+                    (Some(gate), lease::LeaseObservation::Renew(_)) => Some(gate.enter(&p).await),
+                    _ => None,
+                };
+                self.admit_lease(&op, &p, observed, a.business_skew_ms)
+                    .await?
+            };
+            op.created = created;
+            op.leased_epoch = Some(lease.value.epoch);
+            if lease.install {
+                fault!(self, AfterLeaseGrant, &op, a);
+            }
+            Some(lease)
+        } else {
+            op.created = self.commit_creation(&op, a.business_skew_ms).await?;
+            None
+        };
         self.pre_receive(&op).await?;
         let write = (kind, refs.as_slice(), charges.as_slice());
-        self.plan_and_apply(&op, a, &p, write, ahead).await
+        self.plan_and_apply(&op, a, &p, write, ahead, lease).await
     }
 
     /// Stage 1: the typed operation, for the procedure `a` was
@@ -874,10 +932,14 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         if matches!(self.cfg.addressing, Addressing::Multi(_)) {
             wanted.push(keys::repo_known(&op.repo.name));
         }
+        if self.cfg.sharding == Sharding::D34 {
+            wanted.push(keys::epoch_lease());
+        }
         if let Some(auth) = &op.auth {
             wanted.push(keys::replay(&auth.replay_scope));
-            // TODO(WP-1.25): propagate the coordinator epoch through leases.
-            wanted.push(keys::grant_epoch());
+            if self.cfg.sharding == Sharding::Single {
+                wanted.push(keys::grant_epoch());
+            }
             if self.cfg.write_quota.is_some() {
                 let scope = QuotaScope::for_signer(&op.repo.namespace, &auth.signer);
                 wanted.push(keys::quota(&scope));
@@ -960,6 +1022,7 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         p: &Partition,
         (kind, refs, charges): (WriteKind, &[RefUpdate], &[QuotaCharge]),
         ahead: Option<Snapshot>,
+        lease: Option<lease::LeaseWrite>,
     ) -> Result<StoredResult, ServerError> {
         let caps = self.meta.capabilities();
         let replay = upload::replay_guard(op);
@@ -970,6 +1033,7 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             replay,
             charges,
             grant: op.authz.grant,
+            lease,
             layout_version: caps.implicit_layout_version.is_none(),
             mark_repo_known: matches!(self.cfg.addressing, Addressing::Multi(_))
                 && ahead
@@ -1032,8 +1096,7 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         req: &WriteRequest<'_>,
         mut ahead: Option<Snapshot>,
     ) -> Result<StoredResult, ServerError> {
-        #[cfg(not(feature = "test-faults"))]
-        let _ = op;
+        let mut req = req.clone();
         // Held until the loop ends (see `with_write_gate`).
         let _gate = match &self.gate {
             Some(gate) => Some(gate.enter(p).await),
@@ -1041,11 +1104,21 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         };
         let skew_ms = a.business_skew_ms;
         let (mut replans, mut deadline_missed, mut prune_ok) = (0, false, true);
+        let mut first_attempt = true;
         loop {
-            let clock = self.plan_clock(skew_ms, req);
+            let mut clock = self.plan_clock(skew_ms, &req);
             let base = ahead.take().unwrap_or_default();
-            let snap = self.read_snapshot(p, req, &clock, base, prune_ok).await?;
-            let plan = match plan_write(req, &snap, &clock)? {
+            let snap = self.read_snapshot(p, &req, &clock, base, prune_ok).await?;
+            // Every retry re-reads el. Only the initial attempt uses a grant
+            // already committed after admission; later attempts renew if needed.
+            if req.lease.is_some() && !first_attempt {
+                let observed = self.observe_lease(op, p, Some(&snap)).await?;
+                let (_, renewed) = self.admit_lease(op, p, observed, skew_ms).await?;
+                req.lease = Some(renewed);
+                clock = self.plan_clock(skew_ms, &req);
+            }
+            first_attempt = false;
+            let plan = match plan_write(&req, &snap, &clock)? {
                 Planned::Done(result) => return Ok(result),
                 Planned::Apply(plan) => plan,
             };
@@ -1058,7 +1131,12 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 prune_from,
             } = plan;
             if req.kind != WriteKind::UploadReserve {
-                fault!(self, BeforeFinalApply, op, a);
+                #[cfg(feature = "test-faults")]
+                {
+                    let mut attempt = op.clone();
+                    attempt.leased_epoch = req.lease.map(|l| l.value.epoch);
+                    fault!(self, BeforeFinalApply, &attempt, a);
+                }
             }
             tracing::debug!(stage = "apply", replans);
             match self.meta.apply(p, batch).await {
@@ -1102,7 +1180,7 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 }
                 Ok(BatchOutcome::PreconditionFailed { index, observed }) => {
                     if Some(index) == replay_index {
-                        return replay_raced(req, observed.as_ref());
+                        return replay_raced(&req, observed.as_ref());
                     }
                     if Some(index) == epoch_index {
                         return Err(plan::epoch_moved());
@@ -1133,7 +1211,17 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             business_now_ms: now.saturating_add(skew_ms),
             max_apply_window_ms: u64::try_from(self.cfg.max_apply_window.as_millis())
                 .unwrap_or(u64::MAX),
-            deadline_cap: req.replay.map(|r| ms(r.expires_at_ms).saturating_add(lead)),
+            deadline_cap: match (
+                req.replay.map(|r| ms(r.expires_at_ms).saturating_add(lead)),
+                req.lease.map(|l| {
+                    l.value
+                        .expires_at_ms
+                        .saturating_sub(self.cfg.lease_margin_ms)
+                }),
+            ) {
+                (Some(replay), Some(lease)) => Some(replay.min(lease)),
+                (replay, lease) => replay.or(lease),
+            },
         }
     }
 

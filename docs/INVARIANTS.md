@@ -1002,3 +1002,29 @@ cancellation must not hide a durable timer from the native driver.
 
 **Enforced by:** `mkit-server/src/timers/tests.rs` race and atomicity tests,
 `mkit-server-native/tests/timers.rs`, and the worker's pure alarm tests.
+
+## Epoch lease acknowledgements describe durable shard state
+
+**Always:** `ls.acked_epoch = n` only if the shard's `el` durably holds epoch
+at least n, or every older-epoch write is already past its backend deadline.
+Live renewals preserve acknowledgement. Revocation pushes even to an absent
+`el`, guards the observed shard value, then acknowledges in a separate guarded
+coordinator batch. Every D34 ref batch guards `el` and starts with
+`NotAfter(min(plan_time + MAX_APPLY_WINDOW, expires - margin, replay cap))`.
+Creation and lease registration commit together only after authorization and
+admission. The Single path continues reading and guarding `e` directly.
+
+**Because:** a coordinator acknowledgement before shard installation could
+report completion while a delayed old-epoch batch can still commit. Expiry
+alone is safe only because the storage backend checks its own clock atomically.
+
+**If violated:** a revoked grant can mutate a ref after revocation completes,
+or denied/challenged requests can allocate lease state.
+
+**Enforced by:** `pipeline/lease.rs`, `pipeline/revocation.rs`, the pure write
+planner, native `tests/epoch_leases.rs` on memory and SQLite, and the Rust
+interleaving property model. `LeaseSweep` guards expired coordinator rows and
+moves its timer atomically with each renewal. Recovery is declared with the
+persistent `lr` marker; restore/rebuild procedures MUST call
+`mark_lease_table_recovered` before serving writes (WP-1.29). Completion waits
+`epoch_lease + margin` after that marker, independent of namespace creation time.

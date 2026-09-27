@@ -230,3 +230,93 @@ reads carry config. Add row `R-98`:
 - the wasm32 check of `mkit-server`; the build of `mkit-server-worker`
 - the native wire suite with `--sharding d34`
 - goldens unchanged except the new key and codec entries
+
+## Amendment 1
+
+Correct stop, and thank you for the executable counterexamples: both are real defects in the brief. This amendment
+replaces the named parts of B.3.5 and B.4. Everything else in the brief stands.
+
+Continue in the same worktree and branch (`.claude/worktrees/wp-1-25`, `mkit-server/wp-1-25-epoch-leases`). The
+definition of done is an **open PR**. Fold this into `docs/plans/mkit-server/briefs/WP-1.25.md` as "Amendment 1".
+Delete `docs/plans/mkit-server/WP-1.25-escalation.md` from the branch, and put its model and counterexamples into the
+PR body and into regression tests (§3).
+
+## 1. Acknowledgement means "installed in the shard" (replaces B.3.5's `acked_epoch` rule)
+
+**Invariant, to put in rustdoc and INVARIANTS:**
+- `ls.acked_epoch = n` only if either:
+  - the shard's `el` durably holds epoch ≥ n; or
+  - every write the shard could still commit under an older epoch is already past its deadline.
+
+**Renewal (B.3.5) `Put(ls, …)` sets `acked_epoch` as follows:**
+- **observed `ls` is present and live** (`observed.expires_at_ms > now`): `acked_epoch = observed.acked_epoch`. It is
+  **preserved, never raised by renewal**.
+- **observed `ls` is absent, or expired** (`observed.expires_at_ms <= now`): `acked_epoch = observed e`. This is
+  safe:
+  - any older `el` on that shard has `expires_at_ms <= ls.expires_at_ms <= now`;
+  - so every in-flight write guarded by it has a `NotAfter` deadline of at most `expires − margin < now`, and it
+    fails on the backend clock (margin ≥ skew, SPEC-WRITE-GRANTS §1.1).
+  - Rely on the invariant `el.expires_at_ms == ls.expires_at_ms` at grant. Revoke pushes keep `expires` unchanged.
+    Assert it in debug builds.
+
+**`ls.epoch`** still records the epoch granted by this renewal. B.3.6's `Put(el, …)` is unchanged.
+
+**Revocation (B.4) consequences:**
+- `revoke_step` pushes to every live row with `acked_epoch < e`, including a row a renewal just wrote with
+  `epoch == e` but a preserved lower `acked_epoch`. Re-pushing the same epoch is harmless: an `Equals`-guarded write
+  of the same value.
+- **Push race.** If the push's `Equals(el, read)` fails because a concurrent B.3.6 ref batch changed `el`, re-read
+  `el` and retry the push within the step's budget. Only after a push **commits** does the coordinator batch set
+  `acked_epoch = e`, guarded with `Equals(ls, read)`. On `PreconditionFailed`, re-read, and ack only if the row is
+  still live and still below `e`.
+- `Complete` iff every `ls` row has `acked_epoch == e` or `expires_at_ms <= now`, and the recovery hold-off (§2) has
+  passed.
+
+## 2. Lost-table recovery (replaces B.4's `nr.created_at_ms` check)
+
+A namespace record's creation time says nothing about when a coordinator resumed. Loss of the lease table only
+happens through restore or recovery; normal operation never loses committed rows. So recovery is **declared**, not
+inferred.
+
+- **New key** in the coordinator: `lr 00` → codec `LeaseRecovery { resumed_at_ms: u64 }`, versioned JSON with
+  `deny_unknown_fields`, plus a golden and `class_scans_never_overlap` coverage.
+- **`pub async fn mark_lease_table_recovered(&self, ns) -> Result<(), ServerError>`:** puts
+  `lr = { resumed_at_ms: now }`, overwriting.
+  - Rustdoc: any procedure that restores or rebuilds a coordinator partition MUST call it **before** serving writes
+    for that namespace.
+  - Also expose it under the `test-faults` directive set as `x-mkit-test-lease-recovered: 1` on `ListRefs`,
+    alongside `x-mkit-test-bump-epoch`.
+- **`revoke_step`:** if `lr` is present and `now < lr.resumed_at_ms + epoch_lease_ms + lease_margin_ms`, return
+  `Pending`, regardless of the rows (SPEC-WRITE-GRANTS §5.4).
+- The `lr` row is never deleted. It's one row per namespace, and a later recovery overwrites it.
+- Add row `R-100` to `00-plan.md`:
+
+  > WP-1.25: lease-table loss is declared through `mark_lease_table_recovered` (coordinator `lr 00` marker).
+  > WP-1.29's restore, and any coordinator rebuild, MUST call it before serving writes; revocation completion waits
+  > `epoch_lease + margin` after it (SPEC-WRITE-GRANTS §5.4).
+
+## 3. Regression tests (required, in addition to the brief's)
+
+1. **Your first counterexample, as a pipeline-level test** (memory and SQLite, D34), using `ManualClock` and the fault
+   hooks to pause A before apply and pause B between B.3.5 and B.3.6:
+   - `revoke_step` does **not** return `Complete` while A's `el` is still at the old epoch;
+   - A's batch fails (the `el` guard, or the deadline).
+   - Also the variant where B is cancelled after B.3.5 and never runs B.3.6: `revoke_step` pushes and acks, and A
+     fails.
+2. **Your second counterexample:** a namespace with `nr.created_at_ms = 0` and `mark_lease_table_recovered` at
+   `100000`:
+   - `revoke_step` is `Pending` until `135000` and `Complete` afterwards (with no live rows);
+   - without the marker, and with no rows, it is `Complete` immediately. That is correct: nothing was lost.
+3. **The expired-row renewal case:** an `ls` row expired but not yet swept → renewal sets `acked_epoch = e`, and an
+   in-flight write planned under the old `el` fails its deadline.
+4. **Push race:** a concurrent B.3.6 changes `el` during `revoke_step`'s push → the push retries, then acks, and never
+   acks without a committed push.
+
+Also port your Python protocol model to a Rust property test over random interleavings of {plan write, renew,
+bump, push, ack, apply, sweep, advance clock}. The property is SPEC-WRITE-GRANTS §5.6: once `Complete`, no write
+planned under an older epoch commits.
+
+## 4. Unchanged
+
+Call counts (B.3), "no state before admission", the Single path, the sweep timer (kind 1), and the out-of-scope list.
+If any of §1–§2 forces a call-count change, stop and report it.

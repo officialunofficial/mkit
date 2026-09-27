@@ -123,6 +123,8 @@ pub enum Feature {
     StrictGzipAuth,
     /// Multi-repository addressing (M1).
     MultiRepo,
+    /// Epoch leases for D34 grant revocation (M1).
+    EpochLeases,
     /// Upload tickets and resumable parts (M1).
     Tickets,
     /// Write grants (M2).
@@ -135,7 +137,7 @@ pub enum Feature {
     IndexedMode,
     /// Plain-HTTP object serving (M4).
     HttpObjects,
-    /// Epoch leases and GC (M5).
+    /// Lifecycle leases and GC (M5).
     Leases,
     /// Takedown (M5).
     Takedown,
@@ -145,7 +147,7 @@ pub enum Feature {
     Admin,
 }
 
-const FEATURE_NAMES: [(Feature, &str); 20] = [
+const FEATURE_NAMES: [(Feature, &str); 21] = [
     (Feature::Bearer, "bearer"),
     (Feature::AuthV2, "auth-v2"),
     (Feature::AtomicAdvance, "atomic-advance"),
@@ -156,6 +158,7 @@ const FEATURE_NAMES: [(Feature, &str); 20] = [
     (Feature::Health, "health"),
     (Feature::StrictGzipAuth, "strict-gzip-auth"),
     (Feature::MultiRepo, "multi-repo"),
+    (Feature::EpochLeases, "epoch-leases"),
     (Feature::Tickets, "tickets"),
     (Feature::Grants, "grants"),
     (Feature::SignedReads, "signed-reads"),

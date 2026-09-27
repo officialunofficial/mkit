@@ -21,6 +21,9 @@
 //! | repo record (`Coordinator`) | `rr 00 <repo>` | codec `RepoRecord` |
 //! | repo-known marker (ref shard) | `rk 00 <repo>` | empty |
 //! | grant epoch | `e 00` | be64; absent means 0, never written as 0 |
+//! | epoch lease (ref shard) | `el 00` | codec `EpochLease` |
+//! | leased shard (`Coordinator`) | `ls 00 <repo> 00 <shard_ref>` | codec `LeasedShard` |
+//! | lease recovery (`Coordinator`) | `lr 00` | codec `LeaseRecovery` |
 //! | timer (owned by `timers`) | `w 00 <due_at:be64> <kind:u8> <ref>` | codec per kind |
 //! | holder (`ContentShard`) | `h 00 <object:32> <ns> 00 <repo>` | empty |
 //! | GC hold (`ContentShard`) | `g 00 <object:32> <hold_id:32>` | codec `hold` |
@@ -31,7 +34,7 @@
 //! that adds it: tickets `t`, membership `m`, outbox `o` / `oq` / `os`,
 //! outbox backlog counter `oc`, relay high-water marks `rh`, object index
 //! `i`, leases `l`, published pointers `pp`, tombstones `tb`, verification
-//! cursors `vc`, epoch lease `el`, and the deployment's namespace list
+//! cursors `vc`, and the deployment's namespace list
 //! [`TAG_NAMESPACE_LIST`] (WP-1.5; see `Partition` for enumeration). A
 //! new row adds its layout here, with a golden test.
 //!
@@ -70,6 +73,12 @@ pub const TAG_QUOTA: &str = "q";
 pub const TAG_QUOTA_WINDOW: &str = "qx";
 /// Grant epoch tag.
 pub const TAG_GRANT_EPOCH: &str = "e";
+/// Ref shard's epoch lease tag.
+pub const TAG_EPOCH_LEASE: &str = "el";
+/// Coordinator's leased shard table tag.
+pub const TAG_LEASED_SHARD: &str = "ls";
+/// Coordinator's declared lease-table recovery marker tag.
+pub const TAG_LEASE_RECOVERY: &str = "lr";
 /// Timer tag (owned by `timers`).
 pub const TAG_TIMER: &str = "w";
 /// `ContentIndex` holder tag.
@@ -108,7 +117,6 @@ pub const RESERVED_TAGS: &[&str] = &[
     "l",
     "pp",
     "vc",
-    "el",
     TAG_NAMESPACE_LIST,
 ];
 
@@ -151,6 +159,17 @@ pub enum ParsedKey {
     },
     /// `e 00`.
     GrantEpoch,
+    /// `el 00`.
+    EpochLease,
+    /// `ls 00 <repo> 00 <shard_ref>`.
+    LeasedShard {
+        /// Repository whose ref shard holds the lease.
+        repo: RepoName,
+        /// The `Partition::Ref.shard_ref` identity.
+        shard_ref: String,
+    },
+    /// `lr 00`.
+    LeaseRecovery,
     /// `w 00 <due_at> <kind> <ref>`.
     Timer {
         /// Due time, Unix ms.
@@ -304,6 +323,27 @@ pub fn grant_epoch() -> Key {
     key(TAG_GRANT_EPOCH, &[])
 }
 
+/// `el 00`: the ref shard's epoch lease.
+#[must_use]
+pub fn epoch_lease() -> Key {
+    key(TAG_EPOCH_LEASE, &[])
+}
+
+/// `ls 00 <repo> 00 <shard_ref>`: a coordinator lease-table row.
+#[must_use]
+pub fn leased_shard(repo: &RepoName, shard_ref: &str) -> Key {
+    key(
+        TAG_LEASED_SHARD,
+        &[repo.as_str().as_bytes(), b"\0", shard_ref.as_bytes()],
+    )
+}
+
+/// `lr 00`: the coordinator's declared recovery time.
+#[must_use]
+pub fn lease_recovery() -> Key {
+    key(TAG_LEASE_RECOVERY, &[])
+}
+
 /// `w 00 <due_at> <kind> <reference>` (owned by `timers`).
 #[must_use]
 pub fn timer(due_at_ms: u64, kind: u8, reference: &[u8]) -> Key {
@@ -384,6 +424,15 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
     Some(match tag {
         b"v" if body.is_empty() => ParsedKey::LayoutVersion,
         b"e" if body.is_empty() => ParsedKey::GrantEpoch,
+        b"el" if body.is_empty() => ParsedKey::EpochLease,
+        b"lr" if body.is_empty() => ParsedKey::LeaseRecovery,
+        b"ls" => {
+            let sep = body.iter().position(|&b| b == 0)?;
+            ParsedKey::LeasedShard {
+                repo: RepoName::new(text(&body[..sep])?).ok()?,
+                shard_ref: text(&body[sep + 1..])?,
+            }
+        }
         b"nr" if body.is_empty() => ParsedKey::NamespaceRecord,
         b"rr" => ParsedKey::RepoRecord(RepoName::new(text(body)?).ok()?),
         b"rk" => ParsedKey::RepoKnown(RepoName::new(text(body)?).ok()?),
@@ -472,6 +521,9 @@ mod tests {
             TAG_QUOTA,
             TAG_QUOTA_WINDOW,
             TAG_GRANT_EPOCH,
+            TAG_EPOCH_LEASE,
+            TAG_LEASED_SHARD,
+            TAG_LEASE_RECOVERY,
             TAG_TIMER,
             TAG_HOLDER,
             TAG_HOLD,
@@ -509,6 +561,12 @@ mod tests {
                 [&b"qx\0"[..], &[0, 0, 0, 0, 0, 0, 1, 0], q.as_bytes()].concat(),
             ),
             (grant_epoch(), b"e\0".to_vec()),
+            (epoch_lease(), b"el\0".to_vec()),
+            (lease_recovery(), b"lr\0".to_vec()),
+            (
+                leased_shard(&repo("a"), "refs/heads/main"),
+                b"ls\0a\0refs/heads/main".to_vec(),
+            ),
             (
                 timer(1, 7, b"refs/heads/x"),
                 [&b"w\0"[..], &[0, 0, 0, 0, 0, 0, 0, 1, 7], b"refs/heads/x"].concat(),
@@ -613,6 +671,15 @@ mod tests {
                 },
             ),
             (grant_epoch(), ParsedKey::GrantEpoch),
+            (epoch_lease(), ParsedKey::EpochLease),
+            (lease_recovery(), ParsedKey::LeaseRecovery),
+            (
+                leased_shard(&repo("a"), "refs/heads/main"),
+                ParsedKey::LeasedShard {
+                    repo: repo("a"),
+                    shard_ref: "refs/heads/main".into(),
+                },
+            ),
             (namespace_record(), ParsedKey::NamespaceRecord),
             (repo_record(&repo("a")), ParsedKey::RepoRecord(repo("a"))),
             (repo_known(&repo("a")), ParsedKey::RepoKnown(repo("a"))),
@@ -651,7 +718,6 @@ mod tests {
             &b"p\0short"[..],
             b"v\0x",
             b"px\0\0",
-            b"el\0",
             b"no-terminator",
             b"c\0short",
             b"g\0short",
@@ -675,5 +741,16 @@ mod tests {
             holder(&s, &nul, &repo("a")),
             Err(StoreError::Invalid(_))
         ));
+    }
+    #[test]
+    fn lease_keys_reject_malformed_payloads() {
+        for bad in [
+            &b"el\0extra"[..],
+            b"lr\0extra",
+            b"ls\0no-separator",
+            b"ls\0\0refs/heads/main",
+        ] {
+            assert_eq!(parse(&Key::new(bad.to_vec())), None);
+        }
     }
 }

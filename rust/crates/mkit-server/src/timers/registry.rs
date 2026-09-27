@@ -26,10 +26,13 @@ impl TimerKind {
 /// | Numbers | Allocation |
 /// |---|---|
 /// | 0 | Invalid |
-/// | 1..=0xEF | Production, currently unallocated |
+/// | 1 | LEASE_SWEEP (WP-1.25) |
+/// | 2..=0xEF | Production, currently unallocated |
 /// | 0xF0..=0xFE | Reserved for tests |
 /// | 0xFF | TEST (`test-faults` only) |
 pub mod kinds {
+    /// Expired coordinator epoch-lease table rows.
+    pub const LEASE_SWEEP: super::TimerKind = super::TimerKind::new(1);
     /// Ref deletion used only by test drivers and directives.
     #[cfg(feature = "test-faults")]
     pub const TEST: super::TimerKind = super::TimerKind::new(0xFF);

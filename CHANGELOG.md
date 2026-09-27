@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server D34 ref writes now hold coordinator epoch leases, with backend commit
+  deadlines, guarded revocation pushes and kind-1 expiry sweeps. Creation and
+  renewal cost four store calls; usable leases keep steady writes at two.
+  Recovery explicitly records a lease-table holdoff before revocation completes.
+  Single sharding and M1 reads retain their existing behavior. Grant RPCs,
+  read renewal, visibility, and backup restore integration follow in later WPs.
+
 - Add partition timers with guarded atomic handlers, fair tick budgets, SQLite timer heads, Durable Object alarm multiplexing and a native SQLite driver (WP-1.24). No production kind is registered yet.
 - The SQL store schema moves to version 2 (an index-only migration, applied on open to native databases and Durable Objects). A binary built before it refuses a migrated database, so roll back only to a version-2 binary.
 

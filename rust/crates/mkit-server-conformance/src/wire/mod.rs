@@ -61,10 +61,11 @@
 //! # Cases
 //!
 //! Names are stable: a baseline or a divergence list may refer to them.
-//! Multi-repository cases are milestone M1; the rest are M0.
+//! Multi-repository and epoch-lease cases are milestone M1; the rest are M0.
 //!
 //! | Case | Requires | Asserts |
 //! |---|---|---|
+//! | `leases.bump_completes_and_writes_continue` | `epoch-leases`, `test-faults` | on a fresh target, a bump completes; repeating the epoch is rejected, then a second write succeeds (D34 listings remain deferred) |
 //! | `timers.directive_fires_due` | `test-faults` | a future timer remains; a skewed tick deletes only the due ref |
 //! | `timers.fire_on_schedule` | `test-faults`, `timers` | the driver deletes the ref within 20 s without a manual tick |
 //! | `timers.redelivery_is_idempotent` | `test-faults` | repeated ticks succeed with no further effects |

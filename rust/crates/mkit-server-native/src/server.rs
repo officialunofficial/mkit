@@ -553,7 +553,8 @@ where
             bind_database(&conn, &root_id, path)?;
             bind_sharding(&conn, cfg.pipeline.sharding, path)?;
             let meta = Blocking::new(TimerNotifying::new(meta));
-            let registry = mkit_server::timers::TimerRegistry::new();
+            let registry = mkit_server::timers::TimerRegistry::new()
+                .register(mkit_server::timers::lease_sweep::LeaseSweep);
             #[cfg(feature = "test-faults")]
             let registry = registry.register(mkit_server::timers::test_kind::TestTimer);
             let driver = TimerDriver::new(meta.clone(), registry, Arc::new(SystemClock));
