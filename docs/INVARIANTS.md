@@ -1003,6 +1003,64 @@ cancellation must not hide a durable timer from the native driver.
 **Enforced by:** `mkit-server/src/timers/tests.rs` race and atomicity tests,
 `mkit-server-native/tests/timers.rs`, and the worker's pure alarm tests.
 
+## Worker shard classes reject foreign partition kinds
+
+**Always:** each Durable Object class accepts only its assigned partition kinds
+before dispatching a store call. RepoIndexShard serves both repo and ref indexes.
+
+**Because:** the wire carries the partition, so a class must check the request's
+kind rather than trusting its caller's binding selection.
+
+**If violated:** an incorrectly routed request can write into a foreign class.
+
+**Enforced by:** `mkit-server-worker::ns_object::serve_reply` and the full
+class/partition cross-product in `mkit-server-worker/tests/stores.rs`.
+
+## Worker timer ticks retain alarms scheduled while awaiting I/O
+
+**Always:** after running due timers, the alarm handler re-reads the current
+alarm and retains the earlier of it and the tick's next wake. With default
+storage options and no intervening I/O, Cloudflare input gates protect this
+final read/write sequence from request delivery.
+
+**Because:** `getAlarm` returns null during an alarm handler unless `setAlarm`
+has been called since it started. A timer Apply interleaved while a handler
+awaits non-storage I/O may install a new alarm.
+
+**If violated:** the final tick reschedule or delete can overwrite that alarm,
+delaying or stranding a newly inserted timer.
+
+**Enforced by:** `NsObject::alarm`, `alarm_after_tick_with_current`, and its host
+regression tests. Gate semantics follow [Cloudflare's glossary](https://developers.cloudflare.com/durable-objects/reference/glossary/)
+and [storage transaction documentation](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/#transaction);
+the null behavior is documented in [the alarms API](https://developers.cloudflare.com/durable-objects/api/alarms/#getalarm).
+
+## Worker deployment sharding is bound before serving RPCs
+
+**Always:** a Worker isolate validates its configured sharding against `sm 00`
+in the root RefStore before serving RPCs. An unmarked root with rows is single.
+Each cold request runs its own check with its own store handle. The thread-local
+`RefCell<Option<Settled>>` caches only plain definitive data: success, mismatch
+or corruption. No future, promise or request handle crosses request contexts.
+Storage failures remain request-local and are retried by the next request.
+The cache is keyed by mode and jurisdiction; a changed key drops the cache and
+re-checks storage. A failed Absent uses its atomic observation; an absent
+observation or an undecodable marker refuses as corruption.
+
+**Because:** changing partition routing over existing data hides its refs;
+[Workers continuations](https://developers.cloudflare.com/workers/configuration/compatibility-flags/#handle-cross-request-promise-resolution-correctly)
+remain tied to their original request context; a transient backend
+outage must not permanently poison an isolate.
+
+**If violated:** cold requests can hang, deployments can appear empty, or a
+brief outage can strand all subsequent requests.
+
+**Enforced by:** `sharding_guard::{Settled, check_mode}`, the adapter's isolate-local
+cache, host interleaving/error/config regression tests, and 30 concurrent cold
+health checks before every Worker conformance phase. At most 3 DO calls per
+request arriving before the first definitive result is cached; 0 afterwards;
+never more than one check per request.
+
 ## Namespace and write policy decide before allocation and never read existence
 
 **Always:** Multi writes pass the namespace policy and owner/authority policy
@@ -1077,7 +1135,12 @@ in WP-1.23b; writers in WP-1.9/1.10.
 **Always:** GetServerInfo is unauthenticated, never resolves a repository and
 never reads the store. Its response depends only on deployment configuration,
 hook defaults and store capabilities, with the upload threshold zero for
-Multi addressing or admission.
+Multi addressing or admission. The one exception is the Worker's
+deployment-wide sharding guard (R-94), which runs before every RPC, this one
+included: until an isolate has settled the guard, a cold GetServerInfo may
+read the root marker, and a deployment whose marker mismatches answers
+`unavailable` instead of advertising capabilities it would then refuse. The
+guard is deployment-wide, so this never depends on a repository.
 
 **Because:** clients need capabilities before authenticating, and discovery
 must never expose whether a repository exists (STC §2.1).

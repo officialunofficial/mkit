@@ -42,6 +42,7 @@ pub trait NsTransport: MaybeSend + MaybeSync {
 #[derive(Debug, Clone)]
 pub struct DoNamespaceStore<T> {
     transport: T,
+    probe_partition: Partition,
 }
 
 fn op(call: &NsCall) -> &'static str {
@@ -70,8 +71,11 @@ fn blob(bytes: &[u8]) -> Blob {
 impl<T: NsTransport> DoNamespaceStore<T> {
     /// A store whose calls go through `transport`.
     #[must_use]
-    pub fn new(transport: T) -> Self {
-        Self { transport }
+    pub fn new(transport: T, probe_partition: Partition) -> Self {
+        Self {
+            transport,
+            probe_partition,
+        }
     }
 
     /// The transport.
@@ -192,11 +196,9 @@ impl<T: NsTransport> NamespaceStore for DoNamespaceStore<T> {
         }
     }
 
-    /// Probes the M0 partition's Durable Object (the deployment-default
-    /// namespace), which every request of an M0 deployment uses.
+    /// Probe the partition selected by the deployment adapter.
     async fn probe(&self) -> Result<(), StoreError> {
-        let root = Partition::Namespace(mkit_server::NamespaceKey::deployment_default());
-        match self.call(&root, NsCall::Probe).await? {
+        match self.call(&self.probe_partition, NsCall::Probe).await? {
             NsReply::Ok => Ok(()),
             other => Err(unexpected(&other)),
         }

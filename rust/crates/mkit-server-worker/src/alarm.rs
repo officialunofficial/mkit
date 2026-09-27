@@ -31,6 +31,20 @@ pub fn alarm_after_tick(next_wake: Option<u64>, now_ms: u64) -> AlarmAction {
     }
 }
 
+/// Retain an alarm installed while the tick awaited another handler.
+#[must_use]
+pub fn alarm_after_tick_with_current(
+    current: Option<i64>,
+    next_wake: Option<u64>,
+    now_ms: u64,
+) -> AlarmAction {
+    match (current, alarm_after_tick(next_wake, now_ms)) {
+        (Some(current), AlarmAction::Set(next)) => AlarmAction::Set(current.min(next)),
+        (Some(current), AlarmAction::Delete) => AlarmAction::Set(current),
+        (None, action) => action,
+    }
+}
+
 /// The latest instant a JavaScript `Date` can hold, Unix ms.
 const MAX_DATE_MS: i64 = 8_640_000_000_000_000;
 
@@ -43,6 +57,47 @@ mod tests {
     use mkit_server::{Batch, Value, store::keys};
 
     use super::*;
+
+    #[test]
+    fn tick_preserves_alarms_installed_by_interleaved_applies() {
+        let schedules = [None, Some(10), Some(200), Some(u64::MAX)];
+        let cases = [
+            (
+                None,
+                [
+                    AlarmAction::Delete,
+                    AlarmAction::Set(100),
+                    AlarmAction::Set(200),
+                    AlarmAction::Set(MAX_DATE_MS),
+                ],
+            ),
+            (Some(50), [AlarmAction::Set(50); 4]),
+            (Some(100), [AlarmAction::Set(100); 4]),
+            (
+                Some(150),
+                [
+                    AlarmAction::Set(150),
+                    AlarmAction::Set(100),
+                    AlarmAction::Set(150),
+                    AlarmAction::Set(150),
+                ],
+            ),
+            (
+                Some(300),
+                [
+                    AlarmAction::Set(300),
+                    AlarmAction::Set(100),
+                    AlarmAction::Set(200),
+                    AlarmAction::Set(300),
+                ],
+            ),
+        ];
+        for (current, expected) in cases {
+            for (next, expected) in schedules.into_iter().zip(expected) {
+                assert_eq!(alarm_after_tick_with_current(current, next, 100), expected);
+            }
+        }
+    }
 
     #[test]
     fn only_timer_puts_lower_the_alarm() {
