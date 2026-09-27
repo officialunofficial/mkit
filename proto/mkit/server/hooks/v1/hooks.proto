@@ -159,6 +159,8 @@ message AdmitRequest {
   bool creates_repo = 5;
   // Bytes new to the repository; absent when unknown, present zero when none; SPEC-SERVER §6.3.
   uint64 new_to_repo_bytes = 6;
+  // Admission credential headers the client attached; SPEC-SERVER §6.3.
+  repeated Header credential_headers = 7;
 }
 
 // Admission decision with no internal quota charges on the wire; SPEC-SERVER §6.3.

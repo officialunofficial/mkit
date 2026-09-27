@@ -219,9 +219,10 @@ reads; the deployment defines the corresponding read settlement.
 ## 6. Remote hooks: mkit.server.hooks.v1
 
 The service exchanges information about an operation and its decisions.
-Hook implementations do not receive arbitrary client credentials or
-object contents through this contract. The field definitions below
-use schema names; JSON uses their lowerCamelCase equivalents.
+Hooks MUST NOT receive client credentials except the admission credential
+headers specified in §6.3, and MUST NOT receive object contents through
+this contract. The field definitions below use schema names; JSON uses
+their lowerCamelCase equivalents.
 
 ### 6.1 Transport and codec
 
@@ -320,9 +321,10 @@ requires.
 | `transport_peer` | A `TransportPeer` whose `ed25519_public_key` is the authenticated 32-byte peer key. |
 | `ssh_forced_command` | An `SshForcedCommand` whose `ed25519_public_key` is 32 bytes, or empty when unknown. |
 
-The hook receives the established principal, not a credential to verify
-on the client's behalf. Request authenticity on the hook channel is
-checked separately under §7.
+Authorize receives the established principal, not a credential to verify
+on the client's behalf. Admit receives the admission credential headers
+specified in §6.3. Request authenticity on the hook channel is checked
+separately under §7.
 
 Each `RefChange` describes one intended ref write:
 
@@ -380,10 +382,46 @@ admission-specific fields:
 | `creates_namespace` | Whether the write creates its namespace. |
 | `creates_repo` | Whether the write creates its repository. |
 | `new_to_repo_bytes` | Bytes new to this repository, known from membership; absent when unknown. |
+| `credential_headers` | Admission credential request headers under the forwarding rules below; empty on a first attempt without credentials. |
 
 Creation signals and admission input are supplied as STC §5.1 requires.
 In particular, `new_to_repo_bytes` does not mean bytes new to the whole
 store. Presence MUST preserve the distinction between unknown and zero.
+
+**Credential headers.** The server MUST forward in `credential_headers`
+the request headers permitted from a client's admission helper by STC
+§5.1 and selected by the forwarding rules below. It MUST NOT forward
+any other request header.
+
+The default forwarded names are `Payment-Authorization`,
+`PAYMENT-SIGNATURE`, and `Authorization` only when its value's scheme
+token is `Payment`. Header names and that scheme token MUST be compared
+case-insensitively. A bearer token MUST NOT be forwarded. A deployment
+MAY configure additional forwarded names, but the server MUST NOT
+forward any STC §5.1 hard-reserved name, whatever its configuration.
+This includes `Authorization` when the client already sends it to that
+remote; STC §5.1's bearer-deployment and client allowlist rules still apply.
+
+The server MUST send header names as received. Repeated header fields
+MUST be sent as repeated entries, in the order received. The list MUST
+contain at most 8 entries, and each value MUST be at most 8,192 bytes.
+If the selected headers exceed either bound, the server MUST deny
+admission with `permission_denied` under STC §5's admission-denial row,
+without calling Admit or writing any state.
+
+An empty list means the request carried no admission credential. This
+is the normal first attempt, which the hook typically answers with a
+challenge.
+
+These headers are payment credentials. The server and the hook MUST
+keep them out of logs, traces, error messages, and analytics, as STC
+§5.1 “Redaction” requires. Their channel protection is specified in §7:
+signed requests over verified TLS (subject to §6.1's loopback exception),
+or service-binding isolation under §7.3.
+
+Informative: the §7.1 `body:` digest signs the request body, so admission
+credential headers carried in that body are covered by the hook-channel
+signature.
 
 `AdmitResponse.decision` selects `allow`, `challenge`, or `deny`.
 The response contains exactly one decision. No remote admission field
@@ -518,6 +556,9 @@ The server MUST validate hook responses before using them. A response
 violating any limit in this section is invalid and MUST be handled
 under §8. The specified `Deny` sanitation in §6.2 applies separately.
 
+- Forwarded `credential_headers` MUST contain at most 8 entries, each
+  value at most 8,192 bytes. An excess MUST be denied before calling
+  Admit or writing state, as §6.3 specifies.
 - A response body MUST be at most 65,536 bytes.
 - Challenge entries MUST meet the bounds STC §5.1 requires.
   Informative: those bounds are 1–8 entries, scheme token
@@ -742,6 +783,7 @@ Reserved: this section is specified with M5 (see the version history).
 | Version | Status | Change |
 |---|---|---|
 | 1 | draft | Initial M3 pipeline, durable outcome and remote-hook contract; M5 sections reserved. |
+| 1 | draft | Admission credential headers (§6.3). |
 
 ## 15. Test anchors
 
@@ -754,7 +796,8 @@ requires. These anchors are informative descriptions of those bytes.
 | `authorize.request.json` | Operation, signer principal, and intended ref changes (§6.2). |
 | `authorize-allow.response.json` | Empty Authorize allowance (§6.2). |
 | `authorize-deny.response.json` | Deliberate Authorize denial code and public message (§6.2). |
-| `admit.request.json` | BeginUpload pack id, declared bytes, authorization facts, and repository-byte presence (§6.3). |
+| `admit.request.json` | BeginUpload pack id, declared bytes, authorization facts, repository-byte presence, and a fake admission credential header (§6.3). |
+| `admit-first-attempt.request.json` | First-attempt Admit input with no credential headers (§6.3). |
 | `admit-allow.response.json` | Reservation id and allowed receipt pass-through (§6.3, §6.6). |
 | `admit-challenge.response.json` | Opaque challenge and example payment challenge header (§6.3, §6.6). |
 | `admit-deny.response.json` | Deliberate admission denial (§6.3). |
@@ -766,9 +809,9 @@ requires. These anchors are informative descriptions of those bytes.
 | `outcome-expired.request.json` | Unconsumed ticket expiry (§5, §6.5). |
 | `outcome-read-served.request.json` | Paid-read object and bytes served (§5, §6.5). |
 | `outcome.response.json` | Empty Outcome acknowledgement (§6.5, §8). |
-| `signature.json` | Admit and Outcome exact bodies, canonical signing strings, hashes, signatures, and full headers (§7.1). |
+| `signature.json` | Admit body including credential headers and Outcome body, with exact bytes, canonical signing strings, hashes, signatures, and full headers (§7.1). |
 | `key-list.json` | Public test key distribution document (§7.2). |
-| `MANIFEST.txt` | BLAKE3 hashes of the other golden files (SPEC-CONVENTIONS §5). |
+| `MANIFEST.txt` | BLAKE3 hashes of every other golden file, including both Admit attempts (SPEC-CONVENTIONS §5). |
 
 Informative: the signature vectors contain a clearly labelled test seed.
 It is public fixture material and is not a deployment signing key.
