@@ -181,7 +181,7 @@ fn enc_sibling_with_admission_starts() {
 
 #[test]
 fn multi_transport_identity_sibling_is_refused() {
-    let cfg = PipelineConfig::new(
+    let mut cfg = PipelineConfig::new(
         Addressing::Multi(MultiAddressing::new()),
         AuthMode::AuthV2(AuthV2Config::new("https://example.test", "").unwrap()),
         UploadLimits {
@@ -189,6 +189,7 @@ fn multi_transport_identity_sibling_is_refused() {
             max_chunks: 4,
         },
     );
+    cfg.ticket_keys = Some(TicketKeys::new(vec![("test".into(), [7; 32])]).unwrap());
     let http = Pipeline::new(
         MemoryBlobStore::default(),
         CountingCommit::default(),

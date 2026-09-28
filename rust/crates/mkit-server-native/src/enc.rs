@@ -100,6 +100,10 @@ pub struct EncOptions {
     pub max_handshakes: usize,
     /// After shutdown begins, how long sessions in flight may run.
     pub grace: Duration,
+    /// `--enc-repository`: the repository the listener binds under
+    /// `--addressing multi`, in its canonical `<ns>/<name>` form.
+    /// `None` under single addressing; the session wire-up is Part 2.
+    pub repository: Option<String>,
 }
 
 impl EncOptions {
@@ -116,6 +120,7 @@ impl EncOptions {
             max_sessions: 1024,
             max_handshakes: DEFAULT_MAX_HANDSHAKES,
             grace: Duration::from_secs(30),
+            repository: None,
         }
     }
 
@@ -147,14 +152,17 @@ impl EncOptions {
 pub(crate) fn resolve(args: &ServeArgs) -> Result<Option<EncOptions>, ConfigError> {
     let usage = |m: &str| ConfigError::new(exit::USAGE, format!("{PREFIX}: {m}"));
     let config = |m: String| ConfigError::new(exit::CONFIG_ERROR, format!("{PREFIX}: {m}"));
+    let multi = args.addressing == crate::config::AddressingArg::Multi;
     let Some(listen) = args.listen_enc else {
         if args.enc_authorized_peers.is_some()
             || args.enc_server_key.is_some()
+            || args.enc_repository.is_some()
             || args.unsafe_allow_any_enc_peer
         {
             return Err(usage(
-                "--enc-authorized-peers, --enc-server-key and --unsafe-allow-any-enc-peer \
-                 configure the enc listener; pass --listen-enc <ADDR>",
+                "--enc-authorized-peers, --enc-server-key, --enc-repository and \
+                 --unsafe-allow-any-enc-peer configure the enc listener; pass \
+                 --listen-enc <ADDR>",
             ));
         }
         return Ok(None);
@@ -162,6 +170,7 @@ pub(crate) fn resolve(args: &ServeArgs) -> Result<Option<EncOptions>, ConfigErro
     if args.enc_handshake_timeout_secs == 0 {
         return Err(usage("--enc-handshake-timeout-secs must be at least 1"));
     }
+    let repository = multi_repository(args, multi)?;
     // The peer policy comes only from these flags, never from the served
     // root's `.mkit/config`.
     let policy = match (&args.enc_authorized_peers, args.unsafe_allow_any_enc_peer) {
@@ -224,8 +233,43 @@ pub(crate) fn resolve(args: &ServeArgs) -> Result<Option<EncOptions>, ConfigErro
         max_sessions: args.max_connections,
         max_handshakes,
         grace: Duration::from_secs(args.shutdown_grace_secs),
+        repository,
         ..EncOptions::new(listen, policy, server_key)
     }))
+}
+
+/// The repository the enc listener binds under multi addressing.
+/// `--enc-repository` is required there and refused under single, and
+/// `--unsafe-allow-any-enc-peer` is refused under multi because an
+/// unauthorized-anywhere session has no repository to bind.
+fn multi_repository(args: &ServeArgs, multi: bool) -> Result<Option<String>, ConfigError> {
+    let usage = |m: &str| ConfigError::new(exit::USAGE, format!("{PREFIX}: {m}"));
+    let config = |m: String| ConfigError::new(exit::CONFIG_ERROR, format!("{PREFIX}: {m}"));
+    if multi && args.unsafe_allow_any_enc_peer {
+        return Err(config(
+            "--addressing multi refuses --unsafe-allow-any-enc-peer: an enc session needs \
+             the repository its peer is authorized for, which --enc-repository binds"
+                .to_owned(),
+        ));
+    }
+    if let Some(repository) = &args.enc_repository {
+        if !multi {
+            return Err(usage("--enc-repository requires --addressing multi"));
+        }
+        return Ok(Some(
+            mkit_core::repo_identity::RepositoryIdentity::parse(repository)
+                .map_err(|e| usage(&format!("--enc-repository {repository:?}: {e}")))?
+                .to_string(),
+        ));
+    }
+    if multi {
+        return Err(config(
+            "--addressing multi with --listen-enc requires --enc-repository <NS>/<NAME>: the \
+             listener binds the one repository its sessions may touch"
+                .to_owned(),
+        ));
+    }
+    Ok(None)
 }
 
 /// Parse an authorized-peers allowlist into raw 32-byte ed25519 public

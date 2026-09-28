@@ -15,6 +15,7 @@ use mkit_server::policy::NamespacePolicy;
 use mkit_server::sql::SqlKvStore;
 use mkit_server::store::{BlobKey, BlobStore, PackSink};
 use mkit_server::upload::UploadLimits;
+use mkit_server::upload::token::TicketKeys;
 use mkit_server::{
     Addressing, Code, MultiAddressing, NamespaceStore, NoopMetrics, Procedure, RefUpdate,
     SystemClock, UpdateRefResult,
@@ -87,6 +88,7 @@ async fn isolation<N: NamespaceStore + 'static>(meta: N) {
         },
     );
     config.write_quota = None;
+    config.ticket_keys = Some(TicketKeys::new(vec![("test".into(), [9; 32])]).unwrap());
     let blobs = MemoryBlobStore::default();
     let marker_content = b"marker bytes in the separate blob namespace";
     let marker_hash = hash(marker_content);
