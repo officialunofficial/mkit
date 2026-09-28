@@ -133,6 +133,8 @@ pub enum Feature {
     NamespacePolicy,
     /// Upload tickets and resumable parts (M1).
     Tickets,
+    /// Streaming multipart uploads through a capable blob backend (M1).
+    Multipart,
     /// Write grants (M2).
     Grants,
     /// Signed reads and private repositories (M2).
@@ -153,7 +155,7 @@ pub enum Feature {
     Admin,
 }
 
-const FEATURE_NAMES: [(Feature, &str); 22] = [
+const FEATURE_NAMES: [(Feature, &str); 23] = [
     (Feature::Bearer, "bearer"),
     (Feature::AuthV2, "auth-v2"),
     (Feature::AtomicAdvance, "atomic-advance"),
@@ -167,6 +169,7 @@ const FEATURE_NAMES: [(Feature, &str); 22] = [
     (Feature::EpochLeases, "epoch-leases"),
     (Feature::NamespacePolicy, "namespace-policy"),
     (Feature::Tickets, "tickets"),
+    (Feature::Multipart, "multipart"),
     (Feature::Grants, "grants"),
     (Feature::SignedReads, "signed-reads"),
     (Feature::Admission, "admission"),

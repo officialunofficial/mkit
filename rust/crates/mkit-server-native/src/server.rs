@@ -518,11 +518,16 @@ fn lock_root(root: &Path) -> Result<ServerLocks, ConfigError> {
 pub fn open(cfg: &ServeConfig) -> Result<Opened, ConfigError> {
     let locks = lock_root(&cfg.repo_root)?;
     let services = match &cfg.blob {
-        BlobChoice::Fs => with_meta(
-            Blocking::new(FsBlobStore::new(&cfg.repo_root)),
-            &cfg.pipeline.addressing,
-            cfg,
-        )?,
+        BlobChoice::Fs => {
+            let blobs = FsBlobStore::new(&cfg.repo_root);
+            let swept = blobs
+                .sweep_stale_uploads(Duration::from_hours(168))
+                .map_err(|e| config_error("sweeping filesystem uploads", e))?;
+            if swept > 0 {
+                tracing::warn!(swept, "removed stale filesystem uploads");
+            }
+            with_meta(Blocking::new(blobs), &cfg.pipeline.addressing, cfg)?
+        }
         #[cfg(feature = "s3")]
         BlobChoice::S3 {
             config,
@@ -585,6 +590,10 @@ where
                     target: meta.clone(),
                     hook: mkit_server::relay::NoHook,
                     budget: mkit_server::relay::RelayBudget::default(),
+                })
+                .register(mkit_server::timers::quota_rollup::QuotaRollup {
+                    coordinator: meta.clone(),
+                    metrics: MetricsBridge,
                 });
             #[cfg(feature = "test-faults")]
             let registry = registry.register(mkit_server::timers::test_kind::TestTimer);

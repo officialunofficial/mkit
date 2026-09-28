@@ -282,6 +282,18 @@ pub trait MultipartBlobStore: BlobStore {
         async { Err(StoreError::Unsupported("multipart uploads".into())) }
     }
 
+    /// Open a session for a known ticket. Backends that do not use the
+    /// ticket id as their storage session keep their existing session format.
+    fn begin_multipart_for_ticket(
+        &self,
+        key: BlobKey,
+        len: u64,
+        part_size: u64,
+        _ticket_id: [u8; 32],
+    ) -> impl Future<Output = Result<Vec<u8>, StoreError>> + MaybeSend {
+        self.begin_multipart(key, len, part_size)
+    }
+
     /// Start one part in an existing storage session.
     fn begin_part(
         &self,

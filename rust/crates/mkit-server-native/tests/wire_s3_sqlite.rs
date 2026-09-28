@@ -117,7 +117,8 @@ async fn wire_suite_s3_sqlite_auth_v2() {
     };
     let report = run(&target, None).await;
     common::judge(&report, DIVERGENCES);
-    // Fault injection and Multi mode are unavailable in the native wiring.
+    // Fault injection and Multi mode are unavailable here. S3 multipart
+    // joins this profile in WP-1.13.
     for skipped in report.skips() {
         assert!(
             skipped == "advance.nonatomic_packmap_first"
@@ -133,6 +134,7 @@ async fn wire_suite_s3_sqlite_auth_v2() {
                         | "growth.replay_and_quota_pruned"
                 )
                 || skipped.starts_with("auth.bearer")
+                || skipped.starts_with("multipart.")
                 || mkit_server_conformance::wire::CASES
                     .iter()
                     .any(|c| c.name == skipped && c.requires.contains(&Feature::MultiRepo)),

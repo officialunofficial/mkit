@@ -436,7 +436,7 @@ excludes.
 | Too many open upload tickets for the ref or the signer (§7.6) | `failed_precondition`, with public message `too many open upload tickets` |
 | An unresolved delta base after the relay-lag bound, in indexed mode (SPEC-SERVER §9.4) | `failed_precondition`, with public message `delta base not available in this repository` |
 | A part whose subtree hash or length differs from its commitment, or a completion whose merged root or total differs from the ticket (§7.6) | `invalid_argument` |
-| An invalid part receipt (malformed, unknown key id, or bad MAC; §7.6) | `invalid_argument` |
+| An invalid part receipt (malformed, unknown key id, bad MAC, or bound to another ticket; §7.6) | `invalid_argument` |
 | A pack still under verification in indexed mode (§7.6) | `unavailable` with exactly one `PendingVerification` detail |
 | A membership-dependent miss within the relay-lag bound, in indexed mode ([SPEC-SERVER §9.4](SPEC-SERVER.md#94-repository-isolated-membership-checks)) | `unavailable` with no detail; a retry with the same nonce is safe |
 | A decoded pushed file object is globally blocklisted (SPEC-SERVER §14.2) | `permission_denied`, exact message `object blocked`, with a repository-empty writer `RedactionNotice` detail whose rewrites are empty |
@@ -1029,7 +1029,7 @@ marked superseded rather than removed.
 
 **Auth modes** (mkit#699 follow-up, closing the gap this document
 originally flagged in "Reference implementation" above):
-`ConnectTransport` supports two independent, additive write-auth modes &mdash;
+`ConnectTransport` supports two independent, additive auth modes &mdash;
 a deployment can require either, both, or neither:
 
 - **Bearer token** (unchanged, #700/#701): `MKIT_API_TOKEN`, read from
@@ -1037,9 +1037,11 @@ a deployment can require either, both, or neither:
   <token>` on every call. This is `mkit-transport-http`'s scheme
   (SPEC-TRANSPORT §5.2) and is what `mkit-server serve --auth bearer`
   (§7.2) expects.
-- **Ed25519 write envelope**: `EnvelopeTransport` signs the auth v2 contract
-  in §7.1, with an exact request body commitment for unary writes and the
-  declared pack id and length for streaming writes. `transport_auth = envelope`
+- **Ed25519 envelope**: `EnvelopeTransport` signs the auth v2 contract
+  in §7.1 for reads and writes, with an exact request body commitment for
+  reads and unary writes, including the framed `DownloadPack` request, and
+  the declared pack id and length for streaming `UploadPack` writes.
+  `GetServerInfo` and the grant-epoch RPCs remain unsigned. `transport_auth = envelope`
   is user-scoped and repository-forbidden. The CLI requires exact user-scoped
   `trusted_remote_endpoint` approval before resolving the commit-signing
   Ed25519 identity, independently of bearer-token presence. Domain separation
@@ -1344,7 +1346,9 @@ server returns a **part receipt**: an opaque, server-authenticated value
 that binds the ticket id, index, subtree hash, length, and the storage
 backend's tag for the part. A part needs no admission decision, because
 admission happened at `BeginUpload`. Sending a part index again is
-idempotent.
+idempotent. A receipt bound to another ticket is an invalid receipt
+(`invalid_argument`), indistinguishable from a forged one, so receipts reveal
+nothing across tickets or repositories.
 
 A deployment MUST retain a rotated key id in the receipt verification set
 for at least seven days after rotation, the maximum ticket lifetime. Only
@@ -1658,6 +1662,7 @@ Explicitly deferred to sibling issues:
 
 | Version | Status | Changes |
 |---|---|---|
+| `2` (WP-1.11b) | draft | §5 and §7.6: a part receipt bound to another ticket is an invalid receipt (`invalid_argument`), with no cross-ticket oracle. |
 | `2` | draft | §7.9 defines absent or zero `page_size` as the advertised maximum and malformed or foreign page tokens as `invalid_argument` (WP-1.28a). |
 | `2` (WP-1.10) | draft | §7.6 requires canonical branch-head/packmap pairing for ticketed advances; §7.8 rejects deletion with tickets. |
 | `2` (WP-1.11a) | draft | §5 classifies invalid part receipts as `invalid_argument`; §7.6 permits storage-session abort after a root mismatch and retains rotated receipt keys for at least seven days. |

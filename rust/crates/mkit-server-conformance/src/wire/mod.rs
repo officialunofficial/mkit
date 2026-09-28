@@ -61,7 +61,7 @@
 //! # Cases
 //!
 //! Names are stable: a baseline or a divergence list may refer to them.
-//! Discovery, multi-repository, namespace-policy and epoch-lease cases are milestone M1;
+//! Discovery, multi-repository, namespace-policy, epoch-lease and multipart cases are milestone M1;
 //! the rest are M0.
 //!
 //! | Case | Requires | Asserts |
@@ -159,6 +159,10 @@
 //! | `tickets.advance_ticket_bindings` | `tickets`, `auth-v2`, `multi-repo` | unknown, mismatched ref and signer ticket bindings fail with exact errors |
 //! | `tickets.advance_other_repository` | `tickets`, `auth-v2`, `multi-repo` | a ticket cannot cross a repository boundary |
 //! | `tickets.advance_expired_ticket` | `tickets`, `auth-v2`, `test-faults` | an expired ticket fails with its exact error |
+//! | `multipart.three_parts` | `multipart`, `auth-v2`; excludes `multi-repo` | a roughly 17 MiB three-part pack at the minimum part size completes and becomes visible |
+//! | `multipart.resume_receipts` | `multipart`, `auth-v2`; excludes `multi-repo` | a client reconnects after partial upload, re-sends a part, and completes using old and new receipts |
+//! | `multipart.root_mismatch_invisible` | `multipart`, `auth-v2`; excludes `multi-repo` | a wrong completion root never makes the pack visible |
+//! | `multipart.cross_repository_no_oracle` | `multipart`, `auth-v2`, `multi-repo` | a foreign ticket fails, and foreign receipts use the same error code as garbage receipts; run on the memory multi-repo profile |
 //! | `growth.replay_and_quota_pruned` | `auth-v2`, `replay`, `quota`, `test-faults` | records answer before expiry; after validity + grace + window the partition shrinks back to an absolute bound (R-31); needs a quota window ≤ 60 s allowing 265 writes, and a disposable server |
 //! | `list.large_response_within_limit` | | follows tokens over `list_refs` long names; each response is at most 2 MiB |
 //! | `list.paging_wire` | | token round trip, invalid tokens, and page-size defaults and cap |
