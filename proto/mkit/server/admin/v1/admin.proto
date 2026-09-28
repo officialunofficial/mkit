@@ -1,0 +1,309 @@
+edition = "2023";
+package mkit.server.admin.v1;
+
+// Operator control plane; SPEC-SERVER §16. All calls use mkit-admin:v1.
+service AdminService {
+  rpc Takedown(TakedownRequest) returns (TakedownResponse);
+  rpc GetTakedown(GetTakedownRequest) returns (GetTakedownResponse);
+  rpc ListTakedowns(ListTakedownsRequest) returns (ListTakedownsResponse);
+  rpc Reinstate(ReinstateRequest) returns (ReinstateResponse);
+  rpc AddBlock(AddBlockRequest) returns (AddBlockResponse);
+  rpc RemoveBlock(RemoveBlockRequest) returns (RemoveBlockResponse);
+  rpc SetLegalHold(SetLegalHoldRequest) returns (SetLegalHoldResponse);
+  rpc ReadPreserved(ReadPreservedRequest) returns (stream ReadPreservedResponse);
+  rpc SetSuspension(SetSuspensionRequest) returns (SetSuspensionResponse);
+  rpc SetLease(SetLeaseRequest) returns (SetLeaseResponse);
+  rpc ReleaseHold(ReleaseHoldRequest) returns (ReleaseHoldResponse);
+  rpc Reinspect(ReinspectRequest) returns (ReinspectResponse);
+  rpc ReleaseFlag(ReleaseFlagRequest) returns (ReleaseFlagResponse);
+  rpc ResumeServing(ResumeServingRequest) returns (ResumeServingResponse);
+  rpc WaiveObligations(WaiveObligationsRequest) returns (WaiveObligationsResponse);
+  rpc RegisterSshGrant(RegisterSshGrantRequest) returns (RegisterSshGrantResponse);
+  rpc RemoveSshGrant(RemoveSshGrantRequest) returns (RemoveSshGrantResponse);
+  rpc ListSshGrants(ListSshGrantsRequest) returns (ListSshGrantsResponse);
+  rpc PurgeCache(PurgeCacheRequest) returns (PurgeCacheResponse);
+  rpc ReadAuditLog(ReadAuditLogRequest) returns (stream ReadAuditLogResponse);
+}
+
+// A repository or namespace selected for an administrative override.
+message Scope {
+  oneof target {
+    string repository = 1;
+    string namespace = 2;
+  }
+}
+
+enum TakedownLevel {
+  TAKEDOWN_LEVEL_UNSPECIFIED = 0;
+  TAKEDOWN_LEVEL_CONTENT = 1;
+  TAKEDOWN_LEVEL_REPOSITORY = 2;
+  TAKEDOWN_LEVEL_NAMESPACE = 3;
+}
+
+message TakedownRequest {
+  string operation_id = 1;
+  TakedownLevel level = 2;
+  // One to 256 blob or ChunkedBlob manifest ids for CONTENT; empty otherwise.
+  repeated bytes object_ids = 3;
+  string repository = 4;
+  string namespace = 5;
+  // Private audit text; never copied to notices, Events, or public responses.
+  string reason = 6;
+  // Optional signed operator label, covered by the request signature.
+  string operator_label = 7;
+  // Public reason from SPEC-SERVER §14.6; reason is private audit text.
+  string reason_token = 8;
+}
+message TakedownResponse {
+  // Repository/namespace lease receipts are read through GetReceipt (§15).
+  string takedown_id = 1;
+  bool complete = 2;
+}
+message GetTakedownRequest { string takedown_id = 1; }
+message TakedownRecord {
+  string takedown_id = 1;
+  TakedownLevel level = 2;
+  repeated bytes object_ids = 3;
+  string repository = 4;
+  string namespace = 5;
+  string reason = 6;
+  bool complete = 7;
+  int64 created_at_ms = 8;
+  int64 retention_until_ms = 9;
+  string reason_token = 10;
+}
+message GetTakedownResponse { TakedownRecord takedown = 1; }
+message ListTakedownsRequest {
+  Scope scope = 1;
+  uint32 page_size = 2;
+  string page_token = 3;
+}
+message ListTakedownsResponse {
+  repeated TakedownRecord takedowns = 1;
+  string next_page_token = 2;
+}
+message ReinstateRequest {
+  string operation_id = 1;
+  string takedown_id = 2;
+  string reason = 3;
+  string operator_label = 4;
+}
+// Repository/namespace lease receipts are read through GetReceipt (§15).
+message ReinstateResponse { bool complete = 1; }
+
+message AddBlockRequest {
+  bytes object_id = 1;
+  // Private audit text.
+  string reason = 2;
+  string operator_label = 3;
+  string operation_id = 4;
+  // Required when this action starts a takedown; otherwise optional.
+  string reason_token = 5;
+}
+message AddBlockResponse {
+  string block_action_id = 1;
+  // Populated if known holders start a takedown.
+  string takedown_id = 2;
+  bool takedown_complete = 3;
+}
+message RemoveBlockRequest {
+  // Identifies one manual action without a takedown id.
+  string block_action_id = 1;
+  string reason = 2;
+  string operator_label = 3;
+}
+message RemoveBlockResponse { bool removed = 1; }
+message SetLegalHoldRequest {
+  string takedown_id = 1;
+  bool enabled = 2;
+  string reason = 3;
+  string operator_label = 4;
+}
+message SetLegalHoldResponse { bool enabled = 1; }
+message ReadPreservedRequest {
+  string takedown_id = 1;
+  bytes object_id = 2;
+  uint64 offset = 3;
+}
+message ReadPreservedResponse {
+  bytes data = 1;
+  uint64 offset = 2;
+  bool last = 3;
+}
+
+message SetSuspensionRequest {
+  Scope scope = 1;
+  bool suspended = 2;
+  bool is_takedown = 3;
+  // Private audit text.
+  string reason = 4;
+  string operator_label = 5;
+  // Required when is_takedown starts a §14 takedown.
+  string operation_id = 6;
+  // Required only when is_takedown is true.
+  string reason_token = 7;
+}
+message SetSuspensionResponse {
+  bool suspended = 1;
+  // Populated for a takedown suspension.
+  string takedown_id = 2;
+  bool takedown_complete = 3;
+  // SPEC-SERVER §15; absent when receipts are disabled.
+  bytes receipt = 4;
+}
+
+message RepositoryLeaseScope { string repository = 1; }
+message RefLeaseScope {
+  string repository = 1;
+  string ref = 2;
+}
+message LeaseTerms {
+  int64 expires_at_ms = 1;
+  int64 grace_ms = 2;
+  int64 suspension_ms = 3;
+}
+message PermanentLease {}
+message RemoveLease {}
+enum LeaseChangeCause {
+  LEASE_CHANGE_CAUSE_UNSPECIFIED = 0;
+  reserved 1; // EXPIRY is never set by an administrator.
+  LEASE_CHANGE_CAUSE_RENEWAL = 2;
+  LEASE_CHANGE_CAUSE_POLICY = 3;
+  LEASE_CHANGE_CAUSE_ADMIN = 4;
+}
+message SetLeaseRequest {
+  oneof scope {
+    RepositoryLeaseScope repository = 1;
+    RefLeaseScope ref = 2;
+  }
+  oneof action {
+    LeaseTerms terms = 3;
+    PermanentLease permanent = 4;
+    RemoveLease remove = 5;
+  }
+  LeaseChangeCause cause = 6;
+  string operator_label = 7;
+}
+message SetLeaseResponse {
+  // DSSE lease receipt for the committed change when enabled; SPEC-SERVER §15.
+  bytes receipt = 1;
+}
+
+message ReleaseHoldRequest {
+  string repository = 1;
+  string inspector = 2;
+  string inspection_id = 3;
+  string reason = 4;
+  string operator_label = 5;
+}
+message ReleaseHoldResponse {
+  bool released = 1;
+  string new_inspection_id = 2;
+}
+message ReinspectRequest {
+  string repository = 1;
+  string inspector = 2;
+  string inspection_id = 3;
+  string reason = 4;
+  string operator_label = 5;
+}
+message ReinspectResponse { string new_inspection_id = 1; }
+message ReleaseFlagRequest {
+  string repository = 1;
+  bytes object_id = 2;
+  string reason = 3;
+  string operator_label = 4;
+}
+message ReleaseFlagResponse { uint64 holds_released = 1; }
+message ResumeServingRequest {
+  string repository = 1;
+  string inspection_id = 2;
+  string reason = 3;
+  string operator_label = 4;
+  string inspector = 5;
+}
+message ResumeServingResponse { bool resumed = 1; }
+message AdvanceTarget {
+  string ref = 1;
+  // Per-ref ordered advance sequence; must be positive.
+  uint64 sequence = 2;
+}
+message WaiveObligationsRequest {
+  string repository = 1;
+  string inspector = 2;
+  repeated AdvanceTarget advances = 3;
+  string reason = 4;
+  string operator_label = 5;
+}
+message WaiveObligationsResponse { uint64 obligations_waived = 1; }
+
+message RegisterSshGrantRequest {
+  bytes principal = 1;
+  bytes signed_grant = 2;
+  string operator_label = 3;
+}
+message RegisterSshGrantResponse { bytes grant_id = 1; }
+message RemoveSshGrantRequest {
+  bytes principal = 1;
+  bytes grant_id = 2;
+  string operator_label = 3;
+}
+message RemoveSshGrantResponse { bool removed = 1; }
+message ListSshGrantsRequest {
+  bytes principal = 1;
+  uint32 page_size = 2;
+  string page_token = 3;
+}
+message SshGrantRecord {
+  bytes principal = 1;
+  bytes grant_id = 2;
+  bytes signed_grant = 3;
+}
+message ListSshGrantsResponse {
+  repeated SshGrantRecord grants = 1;
+  string next_page_token = 2;
+}
+
+message PurgeCacheRequest {
+  string operation_id = 1;
+  string repository = 2;
+  repeated string url_paths = 3;
+  repeated bytes object_ids = 4;
+  repeated string refs = 5;
+  string reason = 6;
+  string operator_label = 7;
+  string namespace = 8;
+}
+message PurgeCacheResponse { string purge_id = 1; }
+
+message ReadAuditLogRequest {
+  uint64 from_seq = 1;
+  uint32 page_size = 2;
+}
+message AuditResult {
+  string code = 1;
+  string message = 2;
+}
+message AuditEntry {
+  uint64 seq = 1;
+  int64 recorded_at_ms = 2;
+  string actor = 3;
+  string operator_label = 4;
+  string procedure = 5;
+  string request_digest = 6;
+  string nonce = 7;
+  string operation_id = 8;
+  repeated string targets = 9;
+  AuditResult result = 10;
+  string details = 11;
+  bytes prev_hash = 12;
+  bytes entry_hash = 13;
+}
+message ReadAuditLogResponse {
+  repeated AuditEntry entries = 1;
+  uint64 next_seq = 2;
+  bytes chain_head = 3;
+  uint64 chain_head_seq = 4;
+  bytes checkpoint_hash = 5;
+  uint64 checkpoint_seq = 6;
+}
