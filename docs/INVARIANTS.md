@@ -222,6 +222,25 @@ delay, or a retry double-charges and locks out valid writes.
 **Enforced by:** `quota.rs` fixed-window math and batch planner, guarded
 `timers::quota_rollup`, and the memory-store rollup/denial/rollover tests.
 
+## Pending verification preserves the advance identity
+
+**Always:** a typed pending `AdvanceRefs` response causes a clamped poll, not
+a retry-ladder step. Every attempt keeps the same nonce, timestamps and
+signature while the envelope remains valid; before the next poll it is renewed
+when less than 30 s of validity remains (or the unary timeout, if longer). An
+ambiguous retry retains its identity until the envelope actually lapses.
+Polling ends before the consumed ticket expires.
+
+**Because:** a pending answer is never stored for replay, and the next attempt
+must observe verification progress without changing the logical operation.
+
+**If violated:** an advance can fail after the ordinary retry ladder, use an
+expired signature, or keep polling after its ticket is invalid.
+
+**Enforced by:** `ConnectTransport::advance_refs_with_deadline` and its pending
+response, renewal and deadline tests. The caller's real ticket deadline is
+pending WP-1.17; until then the helper uses the seven-day maximum lifetime.
+
 ## External signer capabilities precede signing material
 
 **Always:** the external signer returns compatible protocol, algorithm,
