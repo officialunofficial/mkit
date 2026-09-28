@@ -905,6 +905,7 @@ is `unauthenticated`. A signed read is idempotent: the server checks the
 validity window only, and records and looks up no replay entry, so the
 replay rules below apply to writes only. `GetServerInfo`,
 `GetGrantEpoch` and `SetGrantEpoch` stay unsigned.
+When a pending `SetGrantEpoch` or `SetRepoVisibility` call returns `unavailable`, its retry hint is a `Retry-After` response header in delay-seconds (SPEC-WRITE-GRANTS §5.3, §9.1).
 
 The validity interval MUST be positive and at most 300,000 ms; sender clocks
 may lead the server by at most 30,000 ms. Expired requests MUST be rejected,
@@ -1395,10 +1396,13 @@ naming the tickets it consumes. A ticket can be consumed only by an
 advance of the ref it names; any other advance is `failed_precondition`.
 A head-only `UpdateRef` consumes no tickets. Packlist nodes (`MKPL`) are
 uploads like any other pack, and need tickets too.
+An advance names at most seven tickets (§4; SPEC-SERVER §15.2).
 
 **Binding.** The ticket's audience, repository, and signer MUST equal
 the request's, and the ticket's `pack_id` and `bytes` MUST equal the
 request's commitment. Otherwise the request is `permission_denied`.
+An `AdvanceRefs` consuming tickets MUST pair `refs/heads/<x>` with
+`refs/mkit/packmap/<x>`; any other pairing is `invalid_argument`.
 
 **Errors.** An expired or unknown ticket, including a token that fails
 verification, is `failed_precondition`. A ticket, signer, or
@@ -1510,6 +1514,8 @@ id, is specified in [SPEC-SERVER](SPEC-SERVER.md).
   (§4), as for any advance.
 - A `delete` with any other expectation or a nonempty new id is
   `invalid_argument`.
+- A deletion with `ticket_ids` is `invalid_argument`; deletion consumes no
+  tickets.
 - Deleting an absent ref is a CAS conflict: `failed_precondition` on
   `UpdateRef`.
 
@@ -1582,7 +1588,9 @@ own permitted answers comes back, never widen the caller's view.
 request carries `page_size` and `page_token`, and the response carries
 `next_page_token`. An empty `next_page_token` ends the listing. The
 server MAY return fewer refs than `page_size`, and caps it at
-`max_list_refs_page_size` (§2.1). Every encoded response page MUST be
+`max_list_refs_page_size` (§2.1). An absent or zero `page_size` requests
+`max_list_refs_page_size`. A malformed or foreign page token is
+`invalid_argument`. Every encoded response page MUST be
 at most 2 MiB, so a page always fits under the common 4 MiB default
 client message limit. The pages concatenate to a listing in ref-name
 order ([SPEC-REFS §4.1](SPEC-REFS.md#41-ordering-and-duplicates)).
@@ -1650,6 +1658,8 @@ Explicitly deferred to sibling issues:
 
 | Version | Status | Changes |
 |---|---|---|
+| `2` | draft | §7.9 defines absent or zero `page_size` as the advertised maximum and malformed or foreign page tokens as `invalid_argument` (WP-1.28a). |
+| `2` (WP-1.10) | draft | §7.6 requires canonical branch-head/packmap pairing for ticketed advances; §7.8 rejects deletion with tickets. |
 | `2` (WP-1.11a) | draft | §5 classifies invalid part receipts as `invalid_argument`; §7.6 permits storage-session abort after a root mismatch and retains rotated receipt keys for at least seven days. |
 | `2` | draft | §7.4 repository addressing; §7.5 namespace and write policy (owner key); `GetServerInfo` (§2.1); §7.6 upload tickets and resumable parts; §7.8 ref deletion; §7.9 consistency and `ListRefs` paging; error-code split between `unauthenticated` and `permission_denied` (§5) (mkit#1084, mkit#1090); SPEC-WRITE-GRANTS (mkit#1085): signed reads and `X-Write-Grant` (§7.1), the M2 RPC rows (§2), and grant cross-references. §5.1 admission challenges: HTTP 402 with `permission_denied` and an opaque challenge list, raw MPP/x402 header pass-through, the header-returning `admission_helper` with its allowlist and hard-reserved set; §7.1 replay lookup after authentication and before authorization and admission, with signed reads outside the ledger; retryable `aborted` for in-flight operations (§5); §7.7 lifecycle per RPC (mkit#1086). The M0 server implementation still resumes an interrupted `UploadPack` through its `in_flight` replay record until M1 tickets land. M1: branch-sharded servers MAY require the canonical `AdvanceRefs` head/packmap pairing (§4; WP-1.22 amendment 1). Indexed mode: PendingVerification polling with a 1,000 ms floor (§5, §7.6), delta-base mapping and self-contained replanning in a new signed operation (§5, §7.6), packlist rebuilding (§7.6), advertised max_delta_chain_depth (§2.1), and the membership-dependent lag window and replay exclusion (§7.1, §7.9; SPEC-SERVER §9.4). BeginUpload open-ticket cap error and client no-retry carve-out (§5), and admission-free AlreadyPresent/live-ticket results (§7.6; WP-1.9a amendment 1). WP-4.11 scopes §7.4's Host/path/forwarded-selector prohibition to Connect RPCs and cross-links plain HTTP read admission (§5.1). |
 | `2` | draft | Additive `GetServerInfoResponse.leases = 17` (§2.1; SPEC-SERVER §12); §7.7 ticket-pack loss clarified as a defensive abort case. |

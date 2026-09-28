@@ -1,5 +1,5 @@
 # Transport golden vectors (deterministic)
-# Pins transport framing, repository grammar, and PendingVerification fixtures
+# Pins transport framing, repository grammar, PendingVerification, and AdmissionChallenge fixtures
 # Format: <binary stem (implicit .bin) or full filename> <blake3-hex-of-file-bytes>
 frame_hello 7d3f3d20fb6c4722b15a594f5c37db5398a8cce73833c9c37936d56a39b3b531
 frame_upload_pack ba7a0c2b3be073c9dac237e740e727c61666140cd7dbfcb4df64910746e4afcf
@@ -7,3 +7,6 @@ repository-grammar.json 7a93bfa0ba43c1367474c2d9c9a001b57dd85ed4a9757fd2be0644c2
 pending-verification.bin 97a6a7ec5a8bcfd52188e818d06ca050bbddf99d051c279924d14a2e7fc482d2
 pending-verification.json 7882f6f642ef8dd8f7be4a431813893f779ca820db104ba40d410803ff252714
 pending-verification-error.json c107c07dbd506f1d19cb61de9a5f3f97fac23c3ef9f2a1e8fec70efa42be92d2
+admission-challenge.bin f5ef1f7235f6317456007692cb5cffaedf0ccb79e4046251ad5f6e756ac17ee1
+admission-challenge.json 3551f764b2203eda7b60d081357f7ec01bf868629915a4c8b70237702b698bc0
+admission-challenge-error.json fcf794308d59af81e4eb8430a27039d75c18313de125a56f7774337a819ed0bd

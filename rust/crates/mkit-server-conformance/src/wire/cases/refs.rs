@@ -2,13 +2,70 @@
 //! SPEC-REFS §3–§4).
 
 use mkit_transport_connect::generated::{
-    AdvanceRefsResponse, ReadRefRequest, ReadRefResponse, RefExpectation,
+    AdvanceOutcome, AdvanceRefsResponse, ReadRefRequest, ReadRefResponse, RefExpectation,
+    UpdateRefResponse,
 };
 
-use super::{A, B, C, CaseResult, Ctx, Exp, advance_req, ensure, want_code, want_ok};
+use super::{
+    A, B, C, CaseResult, Ctx, Exp, advance_req, ensure, update_req, want_code, want_ok,
+    want_outcome,
+};
 use crate::wire::client::Rpc;
 
 const INVALID: &str = "invalid_argument";
+
+pub(super) async fn delete_pair(ctx: Ctx) -> CaseResult {
+    let branch = "delete";
+    let head = ctx.head(branch);
+    let pm = ctx.packmap(branch);
+    let mut absent = update_req(&head, Exp::Match(&A), &[]);
+    absent.delete = Some(true);
+    let missing: Result<UpdateRefResponse, _> = ctx.call(Rpc::UpdateRef, &absent).await?;
+    want_code(missing, "failed_precondition", "absent delete")?;
+    let mut invalid = update_req(&head, Exp::Any, &[]);
+    invalid.delete = Some(true);
+    let bad: Result<UpdateRefResponse, _> = ctx.call(Rpc::UpdateRef, &invalid).await?;
+    let err = want_code(bad, INVALID, "delete ANY")?;
+    ensure!(
+        err.message == "delete requires MATCH and an empty new_id",
+        "delete ANY message: {:?}",
+        err.message
+    );
+    invalid = update_req(&head, Exp::Match(&A), &B);
+    invalid.delete = Some(true);
+    let bad: Result<UpdateRefResponse, _> = ctx.call(Rpc::UpdateRef, &invalid).await?;
+    let err = want_code(bad, INVALID, "delete new_id")?;
+    ensure!(
+        err.message == "delete requires MATCH and an empty new_id",
+        "delete new_id message: {:?}",
+        err.message
+    );
+    let mut bad_advance = advance_req((&head, Exp::Missing, &A), (&pm, Exp::Missing, &B));
+    bad_advance.ticket_ids = vec![vec![1; 32]];
+    bad_advance.delete = Some(true);
+    let err = want_code(ctx.advance(&bad_advance).await?, INVALID, "delete tickets")?;
+    ensure!(
+        err.message == "delete consumes no tickets",
+        "delete tickets message: {:?}",
+        err.message
+    );
+    want_outcome(
+        ctx.advance(&advance_req(
+            (&head, Exp::Missing, &A),
+            (&pm, Exp::Missing, &B),
+        ))
+        .await?,
+        AdvanceOutcome::ADVANCE_OUTCOME_COMMITTED,
+    )?;
+    let mut remove = advance_req((&head, Exp::Match(&A), &[]), (&pm, Exp::Match(&B), &[]));
+    remove.delete = Some(true);
+    want_outcome(
+        ctx.advance(&remove).await?,
+        AdvanceOutcome::ADVANCE_OUTCOME_COMMITTED,
+    )?;
+    ctx.expect_ref(&head, None).await?;
+    ctx.expect_ref(&pm, None).await
+}
 
 pub(super) async fn read_missing(ctx: Ctx) -> CaseResult {
     ctx.expect_ref(&ctx.head("never-written"), None).await

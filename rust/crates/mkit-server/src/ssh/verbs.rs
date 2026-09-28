@@ -92,7 +92,7 @@ pub(super) fn decode_update_ref(req: &UpdateRef) -> Result<RefUpdate, VerbError>
     Ok(RefUpdate {
         name: req.name.clone().unwrap_or_default(),
         condition,
-        new,
+        new: Some(new),
     })
 }
 

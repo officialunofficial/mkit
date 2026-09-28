@@ -4,6 +4,8 @@
 use core::fmt;
 use std::sync::Arc;
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use buffa::Message as _;
 use bytes::Bytes;
 use connectrpc::{
     ConnectError, InboundStream, RequestContext, Response, ServiceRequest, ServiceResult,
@@ -26,6 +28,11 @@ use super::proto::mkit::transport::v1::{
     RefExpectation, TransportService, UpdateRefRequest, UpdateRefResponse, UploadPackRequest,
     UploadPackResponse, UploadPartRequest, UploadPartResponse, UploadTicket,
 };
+use super::proto::mkit::transport::v1::{
+    GetGrantEpochRequest, GetGrantEpochResponse, IssueObjectUrlRequest, IssueObjectUrlResponse,
+    SetGrantEpochRequest, SetGrantEpochResponse, SetRepoVisibilityRequest,
+    SetRepoVisibilityResponse,
+};
 use super::{Shared, authenticated};
 use crate::error::ServerError;
 use crate::op::RefUpdate;
@@ -38,7 +45,8 @@ use crate::upload::UploadError;
 
 /// `TransportService` over a [`Pipeline`]. Each handler takes the
 /// [`Authenticated`] that [`super::AuthInterceptor`] stored for existing RPCs;
-/// `GetServerInfo` is deliberately unauthenticated.
+/// `GetServerInfo` is deliberately unauthenticated. The M2 RPCs remain
+/// explicit stubs until their implementing WPs land.
 pub struct ConnectTransport<B, N, H> {
     pipe: Shared<Pipeline<B, N, H>>,
 }
@@ -66,14 +74,27 @@ fn ref_update(
     expectation: Option<buffa::EnumValue<RefExpectation>>,
     expected_id: Option<&[u8]>,
     new_id: Option<&[u8]>,
+    delete: bool,
 ) -> Result<RefUpdate, ServerError> {
     let expectation = expectation.map_or(0, |e| e.to_i32());
     let expected_id = expected_id.unwrap_or_default();
     let condition = condition_from_wire(expectation, expected_id, UnusedExpectedId::Reject)?;
+    let new = if delete {
+        if !matches!(condition, mkit_core::refs::RefWriteCondition::Match(_))
+            || !new_id.unwrap_or_default().is_empty()
+        {
+            return Err(ServerError::invalid_argument(
+                "delete requires MATCH and an empty new_id",
+            ));
+        }
+        None
+    } else {
+        Some(hash_from_slice(DigestField::NewId, new_id)?)
+    };
     Ok(RefUpdate {
         name: name.unwrap_or_default(),
         condition,
-        new: hash_from_slice(DigestField::NewId, new_id)?,
+        new,
     })
 }
 
@@ -249,24 +270,40 @@ where
     ) -> ServiceResult<ListRefsResponse> {
         let a = authenticated(&ctx)?;
         let m = request.to_owned_message();
-        if !m.page_token.as_deref().unwrap_or_default().is_empty() {
-            // TODO(WP-1.28): implement ListRefs continuation tokens.
-            return Err(not_yet().into());
-        }
-        // TODO(WP-1.28): honour page_size and caps
         let prefix = m.prefix.unwrap_or_default();
         let pipe = self.pipe.arc();
         send_wrap(async move {
-            let refs = pipe.list_refs(&a, &prefix).await?;
-            let refs = refs.into_iter().map(|entry| RefEntry {
+            let token = m
+                .page_token
+                .as_deref()
+                .filter(|t| !t.is_empty())
+                .map(|t| {
+                    if t.len() > 730 {
+                        return Err(ServerError::invalid_argument("invalid page token"));
+                    }
+                    URL_SAFE_NO_PAD
+                        .decode(t)
+                        .map_err(|_| ServerError::invalid_argument("invalid page token"))
+                })
+                .transpose()
+                .map_err(ConnectError::from)?;
+            let page = pipe
+                .list_refs_page(&a, &prefix, m.page_size, token.as_deref())
+                .await?;
+            let refs = page.refs.into_iter().map(|entry| RefEntry {
                 name: Some(entry.name),
                 object_id: Some(entry.id.to_vec()),
                 ..Default::default()
             });
-            Response::ok(ListRefsResponse {
+            let response = ListRefsResponse {
                 refs: refs.collect(),
+                next_page_token: page.next.map(|bytes| URL_SAFE_NO_PAD.encode(bytes)),
                 ..Default::default()
-            })
+            };
+            if response.encoded_len() > 2 * 1024 * 1024 {
+                return Err(ServerError::unavailable("ref listing unavailable").into());
+            }
+            Response::ok(response)
         })
         .await
     }
@@ -297,15 +334,12 @@ where
     ) -> ServiceResult<UpdateRefResponse> {
         let a = authenticated(&ctx)?;
         let m = request.to_owned_message();
-        if m.delete.unwrap_or(false) {
-            // TODO(WP-1.10): implement ref deletion.
-            return Err(not_yet().into());
-        }
         let upd = ref_update(
             m.name,
             m.expectation,
             m.expected_id.as_deref(),
             m.new_id.as_deref(),
+            m.delete.unwrap_or(false),
         )?;
         let pipe = self.pipe.arc();
         send_wrap(async move {
@@ -329,26 +363,45 @@ where
     ) -> ServiceResult<AdvanceRefsResponse> {
         let a = authenticated(&ctx)?;
         let m = request.to_owned_message();
-        if m.delete.unwrap_or(false) || !m.ticket_ids.is_empty() {
-            // TODO(WP-1.10): implement ticket consumption and ref deletion.
-            return Err(not_yet().into());
+        let delete = m.delete.unwrap_or(false);
+        if delete && !m.ticket_ids.is_empty() {
+            return Err(ServerError::invalid_argument("delete consumes no tickets").into());
+        }
+        if m.ticket_ids.len() > crate::store::outbox::MAX_TICKETS_PER_ADVANCE {
+            return Err(ServerError::invalid_argument("too many tickets in one advance").into());
+        }
+        let mut tickets = Vec::with_capacity(m.ticket_ids.len());
+        for raw in &m.ticket_ids {
+            let id: [u8; 32] = raw
+                .as_slice()
+                .try_into()
+                .map_err(|_| ServerError::invalid_argument("ticket id must be 32 bytes"))?;
+            if tickets.contains(&id) {
+                return Err(ServerError::invalid_argument("duplicate ticket id").into());
+            }
+            tickets.push(id);
         }
         let head = ref_update(
             m.head_ref,
             m.head_expectation,
             m.head_expected_id.as_deref(),
             m.head_new_id.as_deref(),
+            delete,
         )?;
         let packmap = ref_update(
             m.packmap_ref,
             m.packmap_expectation,
             m.packmap_expected_id.as_deref(),
             m.packmap_new_id.as_deref(),
+            delete,
         )?;
         let pipe = self.pipe.arc();
         send_wrap(async move {
             // A conflict is a typed outcome, never an error (§4).
-            let outcome = match pipe.advance_refs(&a, head, packmap).await? {
+            let outcome = match pipe
+                .advance_refs_with_tickets(&a, head, packmap, tickets)
+                .await?
+            {
                 AdvanceOutcome::Committed => WireOutcome::ADVANCE_OUTCOME_COMMITTED,
                 AdvanceOutcome::HeadConflict => WireOutcome::ADVANCE_OUTCOME_HEAD_CONFLICT,
                 AdvanceOutcome::PackmapConflict => WireOutcome::ADVANCE_OUTCOME_PACKMAP_CONFLICT,
@@ -522,6 +575,47 @@ where
         })
         .await
     }
+
+    async fn get_grant_epoch(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, GetGrantEpochRequest>,
+    ) -> ServiceResult<GetGrantEpochResponse> {
+        // SECURITY: unsigned by design; WP-2.8 MUST keep this outside auth-v2 Procedure.
+        // TODO(WP-2.8): return the namespace epoch without auth-v2 header verification.
+        Err(not_yet().into())
+    }
+
+    async fn set_grant_epoch(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, SetGrantEpochRequest>,
+    ) -> ServiceResult<SetGrantEpochResponse> {
+        // SECURITY: unsigned by design; the owner statement is its only authorization.
+        // WP-2.8 MUST keep this outside auth-v2 Procedure.
+        // TODO(WP-2.8): verify the owner statement and wait for revocation completion.
+        Err(not_yet().into())
+    }
+
+    async fn set_repo_visibility(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, SetRepoVisibilityRequest>,
+    ) -> ServiceResult<SetRepoVisibilityResponse> {
+        // SECURITY: this path bypasses auth; the implementing WP-2.9 MUST add mode-specific authorization.
+        // TODO(WP-2.9): verify auth v2 or the owner statement before changing visibility.
+        Err(not_yet().into())
+    }
+
+    async fn issue_object_url(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, IssueObjectUrlRequest>,
+    ) -> ServiceResult<IssueObjectUrlResponse> {
+        // SECURITY: this path bypasses auth; the implementing WP-2.11 MUST add signed-read authorization.
+        // TODO(WP-2.11): verify auth v2 and read access before minting a URL token.
+        Err(not_yet().into())
+    }
 }
 
 impl From<ServerInfo> for GetServerInfoResponse {
@@ -578,6 +672,29 @@ mod proto_roundtrip {
     }
 
     #[test]
+    fn admission_challenge_roundtrips_with_zero_one_and_eight_entries() {
+        for count in [0, 1, 8] {
+            let message = AdmissionChallenge {
+                challenges: (0..count)
+                    .map(|index| Challenge {
+                        scheme: Some(format!("scheme{index}")),
+                        value: Some(format!("opaque-{index}")),
+                        ..Default::default()
+                    })
+                    .collect(),
+                description: (count != 0).then(|| "Admission required".into()),
+                ..Default::default()
+            };
+            roundtrip(&message);
+            let json = serde_json::to_vec(&message).expect("serialize challenge");
+            assert_eq!(
+                serde_json::from_slice::<AdmissionChallenge>(&json).expect("parse challenge"),
+                message
+            );
+        }
+    }
+
+    #[test]
     fn discovery_messages_roundtrip() {
         // Empty messages have no declared fields to populate.
         roundtrip(&GetServerInfoRequest::default());
@@ -594,7 +711,7 @@ mod proto_roundtrip {
             admission: Some(true),
             receipt_public_key: Some(vec![0x34; 32]),
             receipt_key_id: Some("receipt-key".into()),
-            grant_schemes: vec!["ed25519".into(), "eip191-secp256k1".into()],
+            grant_schemes: vec!["ed25519".into(), "secp256k1-eip191".into()],
             namespace_policy: Some("allowlist".into()),
             index_fanout: Some(4096),
             ..Default::default()
@@ -647,6 +764,66 @@ mod proto_roundtrip {
             ..Default::default()
         });
         roundtrip(&CompleteUploadResponse::default());
+    }
+
+    #[test]
+    fn m2_messages_roundtrip() {
+        use super::super::proto::mkit::transport::v1::__buffa::oneof::issue_object_url_request::Target;
+        use super::super::proto::mkit::transport::v1::__buffa::oneof::set_repo_visibility_request::Mode;
+        use super::super::proto::mkit::transport::v1::{RefPath, RepoVisibility};
+
+        roundtrip(&GetGrantEpochRequest {
+            namespace: Some("namespace".into()),
+            ..Default::default()
+        });
+        roundtrip(&GetGrantEpochResponse {
+            epoch: Some(42),
+            ..Default::default()
+        });
+        roundtrip(&SetGrantEpochRequest {
+            signed_statement: Some("statement.scheme.blob".into()),
+            ..Default::default()
+        });
+        roundtrip(&SetGrantEpochResponse {
+            epoch: Some(43),
+            ..Default::default()
+        });
+        for visibility in [
+            RepoVisibility::Unspecified,
+            RepoVisibility::Public,
+            RepoVisibility::Private,
+        ] {
+            roundtrip(&SetRepoVisibilityRequest {
+                mode: Some(Mode::Visibility(visibility.into())),
+                ..Default::default()
+            });
+        }
+        roundtrip(&SetRepoVisibilityRequest {
+            mode: Some(Mode::SignedStatement("statement.scheme.blob".into())),
+            ..Default::default()
+        });
+        roundtrip(&SetRepoVisibilityResponse::default());
+        roundtrip(&IssueObjectUrlRequest {
+            target: Some(Target::ObjectId(vec![0x42; 32])),
+            ttl_seconds: Some(15),
+            ..Default::default()
+        });
+        let ref_path = RefPath {
+            r#ref: Some("refs/heads/main".into()),
+            path: Some("dir/file".into()),
+            ..Default::default()
+        };
+        roundtrip(&ref_path);
+        roundtrip(&IssueObjectUrlRequest {
+            target: Some(Target::RefPath(Box::new(ref_path))),
+            ttl_seconds: Some(20),
+            ..Default::default()
+        });
+        roundtrip(&IssueObjectUrlResponse {
+            token: Some("signed.token".into()),
+            expires_unix_ms: Some(1_700_000_000_000),
+            ..Default::default()
+        });
     }
 
     #[test]

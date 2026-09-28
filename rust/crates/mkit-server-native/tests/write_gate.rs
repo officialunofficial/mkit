@@ -300,7 +300,7 @@ async fn with_auth_sibling_shares_stores_and_the_write_gate() {
             let update = RefUpdate {
                 name: format!("refs/heads/b{i}"),
                 condition: RefWriteCondition::Missing,
-                new: [i; 32],
+                new: Some([i; 32]),
             };
             pipe.update_ref(&a, update).await.unwrap();
         }));
