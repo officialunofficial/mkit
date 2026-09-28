@@ -53,9 +53,9 @@ This file gives a coarse but complete WP list for **M3 (money)**, **M4 (indexed 
 | The `TransportError` enum is not `#[non_exhaustive]`. Retry happens inside `retrying` for every RPC, including `upload_pack`. | `protocol.rs:36`, `client.rs:494/705` | Adding the `AdmissionRequired`, `PendingVerification` and `Redacted` variants is a semver-visible change to published mkit-core. That's acceptable under the pre-production policy, but flag it in PRs. |
 | Config: `REPO_FORBIDDEN_KEYS` lists user-scoped-only keys. Trust is keyed by **exact endpoint** (`trusted_remote_endpoint`). Named remotes are repo-safe, meaning repo-controlled. | `mkit-cli/src/config.rs:71-93`, `:127`, `:593` `user_config_path`, `:1117` `enforce_trusted_remote_endpoint` | `admission_helper` config must be user-scoped and keyed by endpoint, never by remote name. |
 | Subprocess helper prior art with a timeout | `mkit-attest/src/signer_external.rs:209` (Command, stdin framing, timeout thread) | This is the pattern for the `admission_helper` exec (JSON over stdin/stdout). |
-| Attestation builders (in-toto statement, DSSE envelope, local store) compile for wasm, since mkit-wasm depends on mkit-attest. | `mkit-attest/src/statement.rs:67` `Statement`, `:89` `encode`, `:170` `for_commit` (needs the **commit bytes** for a sha256 subject). `envelope.rs:44/80` `Envelope`, `pae_of`. `verify.rs:62/125` `Registry`, `verify_envelope`. `store.rs:76` `save(layout, commit, bytes)`. | Receipts reuse these. An opaque-mode server has no commit bytes (Q-M5-4). |
+| Attestation builders (in-toto statement, DSSE envelope, local store) compile for wasm, since mkit-wasm depends on mkit-attest. | `mkit-attest/src/statement.rs:67` `Statement`, `:89` `encode`, `:170` `for_commit` (needs the **commit bytes** for a sha256 subject). `envelope.rs:44/80` `Envelope`, `pae_of`. `verify.rs:62/125` `Registry`, `verify_envelope`. `store.rs:76` `save(layout, commit, bytes)`. | Receipts reuse the statement/envelope encoding, with the additive blake3-only path in WP-5.8, but use a separate `.mkit/receipts/` store (R-119). |
 | Attestations are **not transported**: "Push/pull of attestations … not yet implemented" (planned). | `docs/specs/SPEC-ATTESTATIONS.md` §7.3 | Decided (D33): attestation-gated refs and attestation transport are a follow-up epic; M4 keeps only the generic `pre_receive` policy hook. |
-| Local GC treats `.mkit/attestations/<commit>/` as a **GC root**. | `docs/specs/SPEC-GC.md` roots table | Decided: client receipts are stored under attestations but are **not** object-GC roots (WP-5.12 amends SPEC-GC). |
+| Local GC treats `.mkit/attestations/<commit>/` as a **GC root**. | `docs/specs/SPEC-GC.md` roots table | R-119: client receipts use separate `.mkit/receipts/` storage and are not object-GC roots (WP-5.12 amends SPEC-GC). |
 | SPEC-GC is client-local only | `docs/specs/SPEC-GC.md` | Server GC needs its own normative section (WP-5.1a). |
 | vcs-worker: one DO does replay + quota + CAS in one SQLite transaction. There are **no alarms and no queues** anywhere in `apps/`. | `apps/vcs-worker/src/worker_impl/refstore.rs` (`mutate` ≈`:360`). `apps/mkit-worker-common/src/replay.rs:115` `reserve`, `:139` fingerprint check, `:169` `finish`. | Decided: WP-1.24 builds the timer facility (`(due_at, kind, ref)` per shard, DO alarm = min due_at, idempotent handlers, per-kind budgets); M3–M5 only register timer kinds. workers-rs 0.8 has `set_alarm` (`worker-0.8.6/src/durable.rs:508`). |
 | Workers limits: 128 MB memory per isolate. CPU is 30 s by default, configurable up to 5 min. Alarm and queue consumers have 15 min wall time. | Cloudflare docs (workers/platform/limits) | Pack verification on Workers must be range-streamed and checkpointed (Q-M4-1). |
@@ -1016,17 +1016,16 @@ Entry condition:
 - **Files:** `mkit-server/src/admin/ops.rs`, `mkit-server-native/src/bin/mkit-server/admin.rs`.
 - **Size:** L (~1100).
 
-### WP-5.12: Client: receipt storage (`.mkit/attestations/`), not pushed
+### WP-5.12: Client: receipt storage (`.mkit/receipts/`), not pushed
 - **Depends on:** WP-5.8.
 - **Goal:**
-  - On a committed push, store the returned DSSE receipt via `mkit_attest::store::save(layout, commit, bytes)` (`mkit-attest/src/store.rs:76`).
-  - `mkit verify-attest` recognizes the receipt predicate given a trust-root entry for the server key.
+  - On a committed push, store the returned DSSE receipt under `.mkit/receipts/`, separate from object attestations.
+  - Verify the receipt predicate under the pinned or explicitly unpinned server-key status in SPEC-SERVER §15.7, without treating it as an object attestation.
   - Receipts are never pushed.
   - The user sees the key id and a pointer to the receipt.
-- **Files:** `mkit-cli/src/remote_dispatch/mod.rs`, `mkit-cli/src/commands/verify_attest.rs`, `docs/CLI.md`.
+- **Files:** `mkit-cli/src/remote_dispatch/mod.rs`, a receipt-specific verification command, `docs/CLI.md`.
 - **Size:** S (~350).
-- **Decided:** receipts are stored under `.mkit/attestations/` but are **not** object-GC roots (adopted default);
-  amend SPEC-GC's roots table to exclude the storage-receipt predicate.
+- **Decided (R-119):** receipts are stored under `.mkit/receipts/`, never `.mkit/attestations/`, and are **not** object-GC roots; amend SPEC-GC's roots table to keep that separate store out of object roots.
 
 ### WP-5.13: Conformance: the lifecycle wire suite (M5 exit)
 - **Depends on:** WP-5.3b, WP-5.5, WP-5.7b, WP-5.9b, WP-5.10, WP-5.11b, WP-5.12.

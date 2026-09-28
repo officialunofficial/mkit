@@ -49,9 +49,10 @@ crate or CLI; consumers MUST NOT rely on them.
    body as a JSON object before pass-through, and (b) extract the
    `subject[].digest.blake3` field on the verify path. The canonical
    encoder never goes through `serde_json::to_string` &mdash; see §4.3. `sha2`
-   is an unconditional dependency (not feature-gated): every subject
-   carries a `sha256` digest alongside `blake3` (§4.2) regardless of
-   which signing-algorithm features are compiled in, so external
+   is an unconditional dependency (not feature-gated): native commit
+   attestation subjects carry a `sha256` digest alongside `blake3`
+   (§4.2) regardless of which signing-algorithm features are compiled
+   in, so external
    consumers (cosign, `gh attestation verify`, the SLSA verifier) that
    only understand the in-toto/SLSA DigestSet `sha256` key can still
    read mkit's subjects.
@@ -207,18 +208,27 @@ JCS-canonical key order. Note `predicate` precedes `predicateType`
 - Inside each subject entry, `"digest"` precedes the optional
   `"name"`; within `"digest"`, `"blake3"` precedes `"sha256"` (JCS
   codepoint sort). The encoder emits `name` only when set.
-- `subject[0].digest` is **mandatory** on both keys: every subject
-  carries both a `blake3` digest (mkit's own content-addressing hash)
-  and a `sha256` digest of the identical underlying bytes &mdash; never a
-  second, independent artifact reference, just an additional name for
+- A native commit attestation's `subject[0].digest` is **mandatory** on
+  both keys: it carries a `blake3` digest (mkit's own
+  content-addressing hash) and a `sha256` digest of the identical
+  underlying bytes &mdash; never a second, independent artifact
+  reference, just an additional name for
   the same one. `sha256` exists because it's the digest algorithm the
   in-toto/SLSA `DigestSet` convention &mdash; and every widely-deployed
   consumer (cosign, `gh attestation verify`, the SLSA verifier) &mdash;
   actually looks for; without it those tools cannot read a mkit
-  attestation's subjects at all.
-- `subject[0].digest.blake3` is the commit hash. Additional subjects
-  MAY appear (for example, a file within the commit's tree); implementations
-  MUST NOT require them.
+  attestation's subjects at all. A producer that does not hold the
+  subject bytes MUST NOT fabricate a `sha256` digest. Storage-receipt
+  advance subjects under [SPEC-SERVER §15](SPEC-SERVER.md#15-storage-receipts)
+  carry `blake3` only **by that predicate's rule** in both opaque and
+  indexed modes. An indexed server may hold the commit bytes; that does
+  not add `sha256` to a storage-receipt advance subject. The server
+  attests the recorded ref value, not an object attestation.
+  Storage-receipt lease subjects, whose scope bytes are known, carry
+  both digests.
+- For native commit attestations, `subject[0].digest.blake3` is the
+  commit hash. Additional subjects MAY appear (for example, a file
+  within the commit's tree); implementations MUST NOT require them.
 - `predicateType` is the URI that tells a consumer how to interpret
   `predicate`. §6.4 lists ecosystem conventions.
 - `predicate` is opaque to mkit. The caller hands the encoder
@@ -540,6 +550,9 @@ into):
 - `https://in-toto.io/attestation/vuln/v0.1` &mdash; vuln-scan results.
 - `https://github.com/officialunofficial/mkit/spec/predicate/review/v1`
   &mdash; code review sign-off **(planned; not yet defined)**.
+- `https://github.com/officialunofficial/mkit/spec/predicate/storage-receipt/v1`
+  &mdash; server-signed evidence of a committed live advance or lease
+  change ([SPEC-SERVER §15](SPEC-SERVER.md#15-storage-receipts)).
 - Third-party predicates (for example, a Makechain settlement predicate at
   a yet-to-be-provisioned URI such as
   `tag:github.com,2024:officialunofficial/mkit/settlement/v1`) are

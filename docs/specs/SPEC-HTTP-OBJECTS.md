@@ -179,7 +179,9 @@ For an object proof URL, `commit` MUST be reachable in the published view,
 and its decoded `path` MUST resolve to the requested object id. Either
 failure is 404. A ref proof uses its resolved commit. Informative: an
 MKDP/MKDS proof authenticates the path through trees to the commit and its
-signature; the ref-to-commit binding is the server's claim until M5 receipts.
+signature; the reader-side ref-to-commit binding remains the server's
+claim. SPEC-SERVER §15 storage receipts attest only live committed
+advances to writers. A signed reader-side binding is a later follow-up.
 
 ## 5. Representations, validators, and headers
 
@@ -305,6 +307,10 @@ The document MUST carry `Content-Type: application/json` and
 `Cache-Control: public, max-age=300`, MUST require neither bearer nor
 URL-token authentication nor payment, and MUST include the active and
 retained verification keys. The read CORS policy applies to this document.
+The separate storage receipt-and-notice key list at
+`/.well-known/mkit-receipt-keys.json` follows SPEC-SERVER §15.5: it is
+likewise public without bearer, URL-token authentication, or payment,
+and permits every CORS origin.
 
 ## 7. Authorization, admission, and durable read outcomes
 

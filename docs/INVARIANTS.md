@@ -5,6 +5,26 @@ single crate or spec. Each entry states the invariant, why it matters, and
 what breaks when it is violated. A regression test enforces each one; find
 it by the file path listed under "Enforced by".
 
+## Storage receipts attest recorded state without exposing inspection
+
+**Always:** a storage receipt binds a committed live advance or lease change
+to its issue-time terms and deployment role key. An advance receipt contains
+only the writer's ref and consumed-ticket facts, never publication, hold, inspection,
+or cross-repository physical-storage facts. Replays and later fetches return
+the same signed bytes.
+
+**Because:** changing the claim after commit defeats audit evidence, while
+publication or physical-storage details can expose inspection decisions or
+other repositories' holdings.
+
+**If violated:** a writer can use receipts to evade detection, infer another
+repository's packs, or receive contradictory evidence for one operation.
+
+**Enforced by:** `rust/crates/mkit-server/tests/golden_receipts.rs` pins the
+format, subject and key-window checks. Runtime issuance, replay and field
+exclusion are specified in SPEC-SERVER §15 and await WP-5.8 implementation
+and conformance coverage.
+
 ## Ticketed UploadPack touches no metadata and always leaves a marker
 
 **Always:** a ticketed UploadPack verifies the signed pack commitment and
