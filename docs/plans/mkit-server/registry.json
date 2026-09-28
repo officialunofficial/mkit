@@ -627,17 +627,52 @@
     ]
   },
   {
-    "id": "1.28",
-    "title": "Core: hash-bucketed ref-name index, ListRefs k-way merge pagination; flip Connect deployments to D34",
+    "id": "1.28a",
+    "title": "Core: ListRefs page tokens, caps and k-way merge engine",
     "milestone": "M1",
     "track": "core",
     "depends_on": [
-      "1.23",
-      "1.2",
+      "1.2"
+    ],
+    "size": "M",
+    "summary": "Serves single-sharding ListRefs with opaque page tokens, the advertised page-size cap and a 2 MiB encoded cap; the k-way merge core accepts multiple bucket sources.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native",
+      "conf-wrangler"
+    ]
+  },
+  {
+    "id": "1.28b",
+    "title": "Core: ref-name index, relay deletes and D34 ListRefs",
+    "milestone": "M1",
+    "track": "core",
+    "depends_on": [
+      "1.28a",
+      "1.10",
+      "1.23"
+    ],
+    "size": "M",
+    "summary": "Maintains the 16-bucket ref-name index through the relay, including deletes, and plugs D34 buckets into the ListRefs merge engine.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native",
+      "conf-wrangler"
+    ]
+  },
+  {
+    "id": "1.28c",
+    "title": "D34 default and stale-listing client tolerance",
+    "milestone": "M1",
+    "track": "core",
+    "depends_on": [
+      "1.28b",
       "1.8"
     ],
     "size": "M",
-    "summary": "Maintains a fixed-fan-out hash-bucketed ref-name index and serves ListRefs by k-way merge behind an opaque cursor with pages of at most 2 MiB. Flips native SQLite and Worker deployments to D34 sharding by default (needs WP-1.8's DO classes).",
+    "summary": "Flips native SQLite and Worker Connect deployments to D34 sharding by default and handles stale ListRefs packmap misses in the client.",
     "human_action": false,
     "area_gates": [
       "rust",
@@ -952,7 +987,7 @@
     "milestone": "M1",
     "track": "worker",
     "depends_on": [
-      "1.28",
+      "1.28b",
       "1.10",
       "1.8"
     ],
@@ -977,7 +1012,7 @@
       "1.14",
       "1.25",
       "1.26b",
-      "1.28"
+      "1.28c"
     ],
     "size": "L",
     "summary": "Adds M1 cases: isolation, namespace policy, target-ref tickets and caps, membership and ListRefs lag windows, D36 read-your-writes through X-Mkit-Ref, epoch-lease revocation races (incl. a paused write that reaches its shard after the lease expired), many-ref throughput in one repo, bounded growth, and ListRefs merge paging with pages <= 2 MiB.",

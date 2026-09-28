@@ -322,7 +322,7 @@ fn update(name: &str, value: u8) -> RefUpdate {
     RefUpdate {
         name: name.into(),
         condition: RefWriteCondition::Any,
-        new: [value; 32],
+        new: Some([value; 32]),
     }
 }
 
