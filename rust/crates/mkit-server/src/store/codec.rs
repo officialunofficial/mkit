@@ -715,15 +715,35 @@ pub fn decode_object_index(value: &Value) -> Result<IndexValue, StoreError> {
     }
     let base = match (bytes[30], bytes.len()) {
         (0, 31) => None,
-        (1, 63) => Some(bytes[31..63].try_into().expect("checked length")),
+        (1, 63) => Some(
+            bytes[31..63]
+                .try_into()
+                .map_err(|_| StoreError::Corrupt("bad object index base".into()))?,
+        ),
         _ => return Err(StoreError::Corrupt("bad object index base flag".into())),
     };
     let row = IndexValue {
-        frame_offset: u64::from_be_bytes(bytes[1..9].try_into().expect("checked length")),
-        frame_length: u64::from_be_bytes(bytes[9..17].try_into().expect("checked length")),
+        frame_offset: u64::from_be_bytes(
+            bytes[1..9]
+                .try_into()
+                .map_err(|_| StoreError::Corrupt("bad object index offset".into()))?,
+        ),
+        frame_length: u64::from_be_bytes(
+            bytes[9..17]
+                .try_into()
+                .map_err(|_| StoreError::Corrupt("bad object index length".into()))?,
+        ),
         wire_type: bytes[17],
-        decoded_size: u64::from_be_bytes(bytes[18..26].try_into().expect("checked length")),
-        chain_depth: u32::from_be_bytes(bytes[26..30].try_into().expect("checked length")),
+        decoded_size: u64::from_be_bytes(
+            bytes[18..26]
+                .try_into()
+                .map_err(|_| StoreError::Corrupt("bad object index size".into()))?,
+        ),
+        chain_depth: u32::from_be_bytes(
+            bytes[26..30]
+                .try_into()
+                .map_err(|_| StoreError::Corrupt("bad object index depth".into()))?,
+        ),
         delta_base: base,
     };
     row.validate()

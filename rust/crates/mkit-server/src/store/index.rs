@@ -150,7 +150,9 @@ pub fn plan_index_rows(
                     || encoded.is_err()
                     || bytes + size + 2 * (MAX_KEY_BYTES + 8) > MAX_BATCH_BYTES
                 {
-                    let last = row.puts.pop().expect("just pushed");
+                    let Some(last) = row.puts.pop() else {
+                        return Err(StoreError::Invalid("empty object index relay row".into()));
+                    };
                     if row.puts.is_empty() {
                         return Err(StoreError::Invalid(
                             "object index relay row too large".into(),
@@ -223,7 +225,7 @@ pub async fn locate_many<S: NamespaceStore>(
                 break;
             }
             let limit = SCAN_PAGE_ROWS
-                .min(u32::try_from(MAX_LOOKUP_ROWS - total).expect("lookup row cap fits u32"));
+                .min(u32::try_from(MAX_LOOKUP_ROWS - total).map_err(|_| budget_exceeded())?);
             let page = store
                 .scan(&partition, &start, &end, after.as_ref(), limit)
                 .await?;
@@ -480,7 +482,7 @@ mod tests {
         let entries: Vec<_> = (0..220)
             .map(|i| {
                 let mut object = [0; 32];
-                object[30..].copy_from_slice(&(i as u16).to_be_bytes());
+                object[30..].copy_from_slice(&u16::try_from(i).unwrap().to_be_bytes());
                 IndexEntry {
                     object,
                     value: raw(i),
@@ -540,8 +542,8 @@ mod tests {
         let entries: Vec<_> = (0..4096_u16)
             .map(|prefix| {
                 let mut object = [0; 32];
-                object[0] = (prefix >> 4) as u8;
-                object[1] = (prefix << 4) as u8;
+                object[0] = u8::try_from(prefix >> 4).unwrap();
+                object[1] = u8::try_from((prefix & 0x0f) << 4).unwrap();
                 IndexEntry {
                     object,
                     value: raw(u64::from(prefix)),
@@ -734,7 +736,7 @@ mod tests {
             let mut batch = Batch::new();
             for i in chunk {
                 let mut pack = [0; 32];
-                pack[28..].copy_from_slice(&(*i as u32).to_be_bytes());
+                pack[28..].copy_from_slice(&u32::try_from(*i).unwrap().to_be_bytes());
                 batch = batch.put(
                     keys::object_index(&r.name, &id, &pack),
                     codec::encode_object_index(&raw(5)).unwrap(),

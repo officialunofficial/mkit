@@ -1251,14 +1251,6 @@ mod tests {
             ),
             (block(&s), ParsedKey::Block(s)),
             (object_state(&s), ParsedKey::ObjectState(s)),
-            (
-                object_index(&repo("a"), &s, &[3; 32]),
-                ParsedKey::ObjectIndex {
-                    repo: repo("a"),
-                    object: s,
-                    pack_id: [3; 32],
-                },
-            ),
         ];
         for (key, parsed) in cases {
             assert_eq!(parse(&key), Some(parsed));
@@ -1292,6 +1284,21 @@ mod tests {
             holder(&s, &nul, &repo("a")),
             Err(StoreError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn object_index_parse_roundtrip() {
+        let object = [0x22; 32];
+        let pack_id = [3; 32];
+        let key = object_index(&repo("a"), &object, &pack_id);
+        assert_eq!(
+            parse(&key),
+            Some(ParsedKey::ObjectIndex {
+                repo: repo("a"),
+                object,
+                pack_id,
+            })
+        );
     }
     #[test]
     fn lease_keys_reject_malformed_payloads() {
