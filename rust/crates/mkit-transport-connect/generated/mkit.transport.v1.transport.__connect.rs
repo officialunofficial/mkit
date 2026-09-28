@@ -94,6 +94,38 @@ pub type OwnedCompleteUploadRequestView = ::buffa::view::OwnedView<
 pub type OwnedCompleteUploadResponseView = ::buffa::view::OwnedView<
     __buffa::view::CompleteUploadResponseView<'static>,
 >;
+///Shorthand for `OwnedView<GetGrantEpochRequestView<'static>>`.
+pub type OwnedGetGrantEpochRequestView = ::buffa::view::OwnedView<
+    __buffa::view::GetGrantEpochRequestView<'static>,
+>;
+///Shorthand for `OwnedView<GetGrantEpochResponseView<'static>>`.
+pub type OwnedGetGrantEpochResponseView = ::buffa::view::OwnedView<
+    __buffa::view::GetGrantEpochResponseView<'static>,
+>;
+///Shorthand for `OwnedView<SetGrantEpochRequestView<'static>>`.
+pub type OwnedSetGrantEpochRequestView = ::buffa::view::OwnedView<
+    __buffa::view::SetGrantEpochRequestView<'static>,
+>;
+///Shorthand for `OwnedView<SetGrantEpochResponseView<'static>>`.
+pub type OwnedSetGrantEpochResponseView = ::buffa::view::OwnedView<
+    __buffa::view::SetGrantEpochResponseView<'static>,
+>;
+///Shorthand for `OwnedView<SetRepoVisibilityRequestView<'static>>`.
+pub type OwnedSetRepoVisibilityRequestView = ::buffa::view::OwnedView<
+    __buffa::view::SetRepoVisibilityRequestView<'static>,
+>;
+///Shorthand for `OwnedView<SetRepoVisibilityResponseView<'static>>`.
+pub type OwnedSetRepoVisibilityResponseView = ::buffa::view::OwnedView<
+    __buffa::view::SetRepoVisibilityResponseView<'static>,
+>;
+///Shorthand for `OwnedView<IssueObjectUrlRequestView<'static>>`.
+pub type OwnedIssueObjectUrlRequestView = ::buffa::view::OwnedView<
+    __buffa::view::IssueObjectUrlRequestView<'static>,
+>;
+///Shorthand for `OwnedView<IssueObjectUrlResponseView<'static>>`.
+pub type OwnedIssueObjectUrlResponseView = ::buffa::view::OwnedView<
+    __buffa::view::IssueObjectUrlResponseView<'static>,
+>;
 impl ::connectrpc::Encodable<ListRefsResponse>
 for __buffa::view::ListRefsResponseView<'_> {
     fn encode(
@@ -478,6 +510,134 @@ for ::buffa::view::OwnedView<__buffa::view::CompleteUploadResponseView<'static>>
         )
     }
 }
+impl ::connectrpc::Encodable<GetGrantEpochResponse>
+for __buffa::view::GetGrantEpochResponseView<'_> {
+    fn encode(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body(self, codec)
+    }
+}
+impl ::connectrpc::Encodable<GetGrantEpochResponse>
+for ::buffa::view::OwnedView<__buffa::view::GetGrantEpochResponseView<'static>> {
+    fn encode(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body(self.reborrow(), codec)
+    }
+    /// An `OwnedView` still holds the buffer it was decoded from, so
+    /// its large fields can be handed to the response body by
+    /// reference count instead of copied. The bare view impl above
+    /// cannot do this: it has borrows but no buffer to name.
+    fn encode_segments(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::connectrpc::EncodedBody, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body_segments(
+            self.reborrow(),
+            self.bytes(),
+            codec,
+        )
+    }
+}
+impl ::connectrpc::Encodable<SetGrantEpochResponse>
+for __buffa::view::SetGrantEpochResponseView<'_> {
+    fn encode(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body(self, codec)
+    }
+}
+impl ::connectrpc::Encodable<SetGrantEpochResponse>
+for ::buffa::view::OwnedView<__buffa::view::SetGrantEpochResponseView<'static>> {
+    fn encode(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body(self.reborrow(), codec)
+    }
+    /// An `OwnedView` still holds the buffer it was decoded from, so
+    /// its large fields can be handed to the response body by
+    /// reference count instead of copied. The bare view impl above
+    /// cannot do this: it has borrows but no buffer to name.
+    fn encode_segments(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::connectrpc::EncodedBody, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body_segments(
+            self.reborrow(),
+            self.bytes(),
+            codec,
+        )
+    }
+}
+impl ::connectrpc::Encodable<SetRepoVisibilityResponse>
+for __buffa::view::SetRepoVisibilityResponseView<'_> {
+    fn encode(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body(self, codec)
+    }
+}
+impl ::connectrpc::Encodable<SetRepoVisibilityResponse>
+for ::buffa::view::OwnedView<__buffa::view::SetRepoVisibilityResponseView<'static>> {
+    fn encode(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body(self.reborrow(), codec)
+    }
+    /// An `OwnedView` still holds the buffer it was decoded from, so
+    /// its large fields can be handed to the response body by
+    /// reference count instead of copied. The bare view impl above
+    /// cannot do this: it has borrows but no buffer to name.
+    fn encode_segments(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::connectrpc::EncodedBody, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body_segments(
+            self.reborrow(),
+            self.bytes(),
+            codec,
+        )
+    }
+}
+impl ::connectrpc::Encodable<IssueObjectUrlResponse>
+for __buffa::view::IssueObjectUrlResponseView<'_> {
+    fn encode(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body(self, codec)
+    }
+}
+impl ::connectrpc::Encodable<IssueObjectUrlResponse>
+for ::buffa::view::OwnedView<__buffa::view::IssueObjectUrlResponseView<'static>> {
+    fn encode(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body(self.reborrow(), codec)
+    }
+    /// An `OwnedView` still holds the buffer it was decoded from, so
+    /// its large fields can be handed to the response body by
+    /// reference count instead of copied. The bare view impl above
+    /// cannot do this: it has borrows but no buffer to name.
+    fn encode_segments(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::connectrpc::EncodedBody, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body_segments(
+            self.reborrow(),
+            self.bytes(),
+            codec,
+        )
+    }
+}
 /// Full service name for this service.
 pub const TRANSPORT_SERVICE_SERVICE_NAME: &str = "mkit.transport.v1.TransportService";
 /// Static [`Spec`](::connectrpc::Spec) for the `ListRefs` RPC, as seen by the server; the generated client passes it with [`origin`](::connectrpc::Spec::origin) `Client` (compare across sides with [`Spec::same_method`](::connectrpc::Spec::same_method)).
@@ -549,6 +709,30 @@ pub const TRANSPORT_SERVICE_UPLOAD_PART_SPEC: ::connectrpc::Spec = ::connectrpc:
 /// Static [`Spec`](::connectrpc::Spec) for the `CompleteUpload` RPC, as seen by the server; the generated client passes it with [`origin`](::connectrpc::Spec::origin) `Client` (compare across sides with [`Spec::same_method`](::connectrpc::Spec::same_method)).
 pub const TRANSPORT_SERVICE_COMPLETE_UPLOAD_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
         "/mkit.transport.v1.TransportService/CompleteUpload",
+        ::connectrpc::StreamType::Unary,
+    )
+    .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
+/// Static [`Spec`](::connectrpc::Spec) for the `GetGrantEpoch` RPC, as seen by the server; the generated client passes it with [`origin`](::connectrpc::Spec::origin) `Client` (compare across sides with [`Spec::same_method`](::connectrpc::Spec::same_method)).
+pub const TRANSPORT_SERVICE_GET_GRANT_EPOCH_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
+        "/mkit.transport.v1.TransportService/GetGrantEpoch",
+        ::connectrpc::StreamType::Unary,
+    )
+    .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
+/// Static [`Spec`](::connectrpc::Spec) for the `SetGrantEpoch` RPC, as seen by the server; the generated client passes it with [`origin`](::connectrpc::Spec::origin) `Client` (compare across sides with [`Spec::same_method`](::connectrpc::Spec::same_method)).
+pub const TRANSPORT_SERVICE_SET_GRANT_EPOCH_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
+        "/mkit.transport.v1.TransportService/SetGrantEpoch",
+        ::connectrpc::StreamType::Unary,
+    )
+    .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
+/// Static [`Spec`](::connectrpc::Spec) for the `SetRepoVisibility` RPC, as seen by the server; the generated client passes it with [`origin`](::connectrpc::Spec::origin) `Client` (compare across sides with [`Spec::same_method`](::connectrpc::Spec::same_method)).
+pub const TRANSPORT_SERVICE_SET_REPO_VISIBILITY_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
+        "/mkit.transport.v1.TransportService/SetRepoVisibility",
+        ::connectrpc::StreamType::Unary,
+    )
+    .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
+/// Static [`Spec`](::connectrpc::Spec) for the `IssueObjectUrl` RPC, as seen by the server; the generated client passes it with [`origin`](::connectrpc::Spec::origin) `Client` (compare across sides with [`Spec::same_method`](::connectrpc::Spec::same_method)).
+pub const TRANSPORT_SERVICE_ISSUE_OBJECT_URL_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
+        "/mkit.transport.v1.TransportService/IssueObjectUrl",
         ::connectrpc::StreamType::Unary,
     )
     .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
@@ -832,6 +1016,80 @@ pub trait TransportService: Send + Sync + 'static {
     ) -> impl ::std::future::Future<
         Output = ::connectrpc::ServiceResult<
             impl ::connectrpc::Encodable<CompleteUploadResponse> + Send + use<'a, Self>,
+        >,
+    > + Send;
+    /// Namespace grant epoch RPCs (SPEC-WRITE-GRANTS §5.3).
+    ///
+    /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
+    ///
+    /// `request` is borrowed from the request body and is valid for the
+    /// duration of the call; message fields are read directly on it
+    /// (zero-copy). The response cannot borrow from `request` — use
+    /// `.to_owned_message()` (or copy the specific fields) for anything
+    /// returned, stored, or moved into `tokio::spawn`.
+    fn get_grant_epoch<'a>(
+        &'a self,
+        ctx: ::connectrpc::RequestContext,
+        request: ::connectrpc::ServiceRequest<'_, GetGrantEpochRequest>,
+    ) -> impl ::std::future::Future<
+        Output = ::connectrpc::ServiceResult<
+            impl ::connectrpc::Encodable<GetGrantEpochResponse> + Send + use<'a, Self>,
+        >,
+    > + Send;
+    /// Handle the SetGrantEpoch RPC.
+    ///
+    /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
+    ///
+    /// `request` is borrowed from the request body and is valid for the
+    /// duration of the call; message fields are read directly on it
+    /// (zero-copy). The response cannot borrow from `request` — use
+    /// `.to_owned_message()` (or copy the specific fields) for anything
+    /// returned, stored, or moved into `tokio::spawn`.
+    fn set_grant_epoch<'a>(
+        &'a self,
+        ctx: ::connectrpc::RequestContext,
+        request: ::connectrpc::ServiceRequest<'_, SetGrantEpochRequest>,
+    ) -> impl ::std::future::Future<
+        Output = ::connectrpc::ServiceResult<
+            impl ::connectrpc::Encodable<SetGrantEpochResponse> + Send + use<'a, Self>,
+        >,
+    > + Send;
+    /// Repository visibility and URL tokens (SPEC-WRITE-GRANTS §9.1, §9.4).
+    ///
+    /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
+    ///
+    /// `request` is borrowed from the request body and is valid for the
+    /// duration of the call; message fields are read directly on it
+    /// (zero-copy). The response cannot borrow from `request` — use
+    /// `.to_owned_message()` (or copy the specific fields) for anything
+    /// returned, stored, or moved into `tokio::spawn`.
+    fn set_repo_visibility<'a>(
+        &'a self,
+        ctx: ::connectrpc::RequestContext,
+        request: ::connectrpc::ServiceRequest<'_, SetRepoVisibilityRequest>,
+    ) -> impl ::std::future::Future<
+        Output = ::connectrpc::ServiceResult<
+            impl ::connectrpc::Encodable<
+                SetRepoVisibilityResponse,
+            > + Send + use<'a, Self>,
+        >,
+    > + Send;
+    /// Handle the IssueObjectUrl RPC.
+    ///
+    /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
+    ///
+    /// `request` is borrowed from the request body and is valid for the
+    /// duration of the call; message fields are read directly on it
+    /// (zero-copy). The response cannot borrow from `request` — use
+    /// `.to_owned_message()` (or copy the specific fields) for anything
+    /// returned, stored, or moved into `tokio::spawn`.
+    fn issue_object_url<'a>(
+        &'a self,
+        ctx: ::connectrpc::RequestContext,
+        request: ::connectrpc::ServiceRequest<'_, IssueObjectUrlRequest>,
+    ) -> impl ::std::future::Future<
+        Output = ::connectrpc::ServiceResult<
+            impl ::connectrpc::Encodable<IssueObjectUrlResponse> + Send + use<'a, Self>,
         >,
     > + Send;
 }
@@ -1155,6 +1413,106 @@ impl<S: TransportService> TransportServiceExt for S {
                 },
             )
             .with_spec(TRANSPORT_SERVICE_COMPLETE_UPLOAD_SPEC)
+            .route_view(
+                TRANSPORT_SERVICE_SERVICE_NAME,
+                "GetGrantEpoch",
+                {
+                    let svc = ::std::sync::Arc::clone(&self);
+                    ::connectrpc::view_handler_fn(move |
+                        ctx,
+                        req: ::buffa::view::OwnedView<
+                            __buffa::view::GetGrantEpochRequestView<'static>,
+                        >,
+                        format|
+                    {
+                        let svc = ::std::sync::Arc::clone(&svc);
+                        async move {
+                            let sreq = ::connectrpc::ServiceRequest::<
+                                GetGrantEpochRequest,
+                            >::from_parts(req.reborrow(), req.bytes());
+                            svc.get_grant_epoch(ctx, sreq)
+                                .await?
+                                .encode::<GetGrantEpochResponse>(format)
+                        }
+                    })
+                },
+            )
+            .with_spec(TRANSPORT_SERVICE_GET_GRANT_EPOCH_SPEC)
+            .route_view(
+                TRANSPORT_SERVICE_SERVICE_NAME,
+                "SetGrantEpoch",
+                {
+                    let svc = ::std::sync::Arc::clone(&self);
+                    ::connectrpc::view_handler_fn(move |
+                        ctx,
+                        req: ::buffa::view::OwnedView<
+                            __buffa::view::SetGrantEpochRequestView<'static>,
+                        >,
+                        format|
+                    {
+                        let svc = ::std::sync::Arc::clone(&svc);
+                        async move {
+                            let sreq = ::connectrpc::ServiceRequest::<
+                                SetGrantEpochRequest,
+                            >::from_parts(req.reborrow(), req.bytes());
+                            svc.set_grant_epoch(ctx, sreq)
+                                .await?
+                                .encode::<SetGrantEpochResponse>(format)
+                        }
+                    })
+                },
+            )
+            .with_spec(TRANSPORT_SERVICE_SET_GRANT_EPOCH_SPEC)
+            .route_view(
+                TRANSPORT_SERVICE_SERVICE_NAME,
+                "SetRepoVisibility",
+                {
+                    let svc = ::std::sync::Arc::clone(&self);
+                    ::connectrpc::view_handler_fn(move |
+                        ctx,
+                        req: ::buffa::view::OwnedView<
+                            __buffa::view::SetRepoVisibilityRequestView<'static>,
+                        >,
+                        format|
+                    {
+                        let svc = ::std::sync::Arc::clone(&svc);
+                        async move {
+                            let sreq = ::connectrpc::ServiceRequest::<
+                                SetRepoVisibilityRequest,
+                            >::from_parts(req.reborrow(), req.bytes());
+                            svc.set_repo_visibility(ctx, sreq)
+                                .await?
+                                .encode::<SetRepoVisibilityResponse>(format)
+                        }
+                    })
+                },
+            )
+            .with_spec(TRANSPORT_SERVICE_SET_REPO_VISIBILITY_SPEC)
+            .route_view(
+                TRANSPORT_SERVICE_SERVICE_NAME,
+                "IssueObjectUrl",
+                {
+                    let svc = ::std::sync::Arc::clone(&self);
+                    ::connectrpc::view_handler_fn(move |
+                        ctx,
+                        req: ::buffa::view::OwnedView<
+                            __buffa::view::IssueObjectUrlRequestView<'static>,
+                        >,
+                        format|
+                    {
+                        let svc = ::std::sync::Arc::clone(&svc);
+                        async move {
+                            let sreq = ::connectrpc::ServiceRequest::<
+                                IssueObjectUrlRequest,
+                            >::from_parts(req.reborrow(), req.bytes());
+                            svc.issue_object_url(ctx, sreq)
+                                .await?
+                                .encode::<IssueObjectUrlResponse>(format)
+                        }
+                    })
+                },
+            )
+            .with_spec(TRANSPORT_SERVICE_ISSUE_OBJECT_URL_SPEC)
     }
 }
 /// Type-inference marker used by [`Router::add_service`](::connectrpc::Router::add_service).
@@ -1279,6 +1637,30 @@ impl<T: TransportService> ::connectrpc::Dispatcher for TransportServiceServer<T>
                 Some(
                     ::connectrpc::dispatcher::codegen::MethodDescriptor::unary(false)
                         .with_spec(TRANSPORT_SERVICE_COMPLETE_UPLOAD_SPEC),
+                )
+            }
+            "GetGrantEpoch" => {
+                Some(
+                    ::connectrpc::dispatcher::codegen::MethodDescriptor::unary(false)
+                        .with_spec(TRANSPORT_SERVICE_GET_GRANT_EPOCH_SPEC),
+                )
+            }
+            "SetGrantEpoch" => {
+                Some(
+                    ::connectrpc::dispatcher::codegen::MethodDescriptor::unary(false)
+                        .with_spec(TRANSPORT_SERVICE_SET_GRANT_EPOCH_SPEC),
+                )
+            }
+            "SetRepoVisibility" => {
+                Some(
+                    ::connectrpc::dispatcher::codegen::MethodDescriptor::unary(false)
+                        .with_spec(TRANSPORT_SERVICE_SET_REPO_VISIBILITY_SPEC),
+                )
+            }
+            "IssueObjectUrl" => {
+                Some(
+                    ::connectrpc::dispatcher::codegen::MethodDescriptor::unary(false)
+                        .with_spec(TRANSPORT_SERVICE_ISSUE_OBJECT_URL_SPEC),
                 )
             }
             _ => None,
@@ -1446,6 +1828,78 @@ impl<T: TransportService> ::connectrpc::Dispatcher for TransportServiceServer<T>
                     svc.complete_upload(ctx, req)
                         .await?
                         .encode::<CompleteUploadResponse>(format)
+                })
+            }
+            "GetGrantEpoch" => {
+                let svc = ::std::sync::Arc::clone(&self.inner);
+                Box::pin(async move {
+                    let body = ::connectrpc::dispatcher::codegen::request_proto_bytes::<
+                        GetGrantEpochRequest,
+                    >(request.encoded()?, format)?;
+                    let req: __buffa::view::GetGrantEpochRequestView<'_> = ::connectrpc::dispatcher::codegen::decode_borrowed_request_view(
+                        &body,
+                        ctx.decode_options(),
+                    )?;
+                    let req = ::connectrpc::ServiceRequest::<
+                        GetGrantEpochRequest,
+                    >::from_parts(&req, &body);
+                    svc.get_grant_epoch(ctx, req)
+                        .await?
+                        .encode::<GetGrantEpochResponse>(format)
+                })
+            }
+            "SetGrantEpoch" => {
+                let svc = ::std::sync::Arc::clone(&self.inner);
+                Box::pin(async move {
+                    let body = ::connectrpc::dispatcher::codegen::request_proto_bytes::<
+                        SetGrantEpochRequest,
+                    >(request.encoded()?, format)?;
+                    let req: __buffa::view::SetGrantEpochRequestView<'_> = ::connectrpc::dispatcher::codegen::decode_borrowed_request_view(
+                        &body,
+                        ctx.decode_options(),
+                    )?;
+                    let req = ::connectrpc::ServiceRequest::<
+                        SetGrantEpochRequest,
+                    >::from_parts(&req, &body);
+                    svc.set_grant_epoch(ctx, req)
+                        .await?
+                        .encode::<SetGrantEpochResponse>(format)
+                })
+            }
+            "SetRepoVisibility" => {
+                let svc = ::std::sync::Arc::clone(&self.inner);
+                Box::pin(async move {
+                    let body = ::connectrpc::dispatcher::codegen::request_proto_bytes::<
+                        SetRepoVisibilityRequest,
+                    >(request.encoded()?, format)?;
+                    let req: __buffa::view::SetRepoVisibilityRequestView<'_> = ::connectrpc::dispatcher::codegen::decode_borrowed_request_view(
+                        &body,
+                        ctx.decode_options(),
+                    )?;
+                    let req = ::connectrpc::ServiceRequest::<
+                        SetRepoVisibilityRequest,
+                    >::from_parts(&req, &body);
+                    svc.set_repo_visibility(ctx, req)
+                        .await?
+                        .encode::<SetRepoVisibilityResponse>(format)
+                })
+            }
+            "IssueObjectUrl" => {
+                let svc = ::std::sync::Arc::clone(&self.inner);
+                Box::pin(async move {
+                    let body = ::connectrpc::dispatcher::codegen::request_proto_bytes::<
+                        IssueObjectUrlRequest,
+                    >(request.encoded()?, format)?;
+                    let req: __buffa::view::IssueObjectUrlRequestView<'_> = ::connectrpc::dispatcher::codegen::decode_borrowed_request_view(
+                        &body,
+                        ctx.decode_options(),
+                    )?;
+                    let req = ::connectrpc::ServiceRequest::<
+                        IssueObjectUrlRequest,
+                    >::from_parts(&req, &body);
+                    svc.issue_object_url(ctx, req)
+                        .await?
+                        .encode::<IssueObjectUrlResponse>(format)
                 })
             }
             _ => ::connectrpc::dispatcher::codegen::unimplemented_unary(path),
@@ -2111,6 +2565,158 @@ where
                 &self.transport,
                 &self.config,
                 TRANSPORT_SERVICE_COMPLETE_UPLOAD_SPEC
+                    .with_origin(::connectrpc::SpecOrigin::Client),
+                request,
+                options,
+            )
+            .await
+    }
+    /// Call the GetGrantEpoch RPC. Sends a request to /mkit.transport.v1.TransportService/GetGrantEpoch.
+    pub async fn get_grant_epoch(
+        &self,
+        request: GetGrantEpochRequest,
+    ) -> Result<
+        ::connectrpc::client::UnaryResponse<
+            ::buffa::view::OwnedView<__buffa::view::GetGrantEpochResponseView<'static>>,
+        >,
+        ::connectrpc::ConnectError,
+    > {
+        self.get_grant_epoch_with_options(
+                request,
+                ::connectrpc::client::CallOptions::default(),
+            )
+            .await
+    }
+    /// Call the GetGrantEpoch RPC with explicit per-call options. Options override [`ClientConfig`](::connectrpc::client::ClientConfig) defaults.
+    pub async fn get_grant_epoch_with_options(
+        &self,
+        request: GetGrantEpochRequest,
+        options: ::connectrpc::client::CallOptions,
+    ) -> Result<
+        ::connectrpc::client::UnaryResponse<
+            ::buffa::view::OwnedView<__buffa::view::GetGrantEpochResponseView<'static>>,
+        >,
+        ::connectrpc::ConnectError,
+    > {
+        ::connectrpc::client::call_unary(
+                &self.transport,
+                &self.config,
+                TRANSPORT_SERVICE_GET_GRANT_EPOCH_SPEC
+                    .with_origin(::connectrpc::SpecOrigin::Client),
+                request,
+                options,
+            )
+            .await
+    }
+    /// Call the SetGrantEpoch RPC. Sends a request to /mkit.transport.v1.TransportService/SetGrantEpoch.
+    pub async fn set_grant_epoch(
+        &self,
+        request: SetGrantEpochRequest,
+    ) -> Result<
+        ::connectrpc::client::UnaryResponse<
+            ::buffa::view::OwnedView<__buffa::view::SetGrantEpochResponseView<'static>>,
+        >,
+        ::connectrpc::ConnectError,
+    > {
+        self.set_grant_epoch_with_options(
+                request,
+                ::connectrpc::client::CallOptions::default(),
+            )
+            .await
+    }
+    /// Call the SetGrantEpoch RPC with explicit per-call options. Options override [`ClientConfig`](::connectrpc::client::ClientConfig) defaults.
+    pub async fn set_grant_epoch_with_options(
+        &self,
+        request: SetGrantEpochRequest,
+        options: ::connectrpc::client::CallOptions,
+    ) -> Result<
+        ::connectrpc::client::UnaryResponse<
+            ::buffa::view::OwnedView<__buffa::view::SetGrantEpochResponseView<'static>>,
+        >,
+        ::connectrpc::ConnectError,
+    > {
+        ::connectrpc::client::call_unary(
+                &self.transport,
+                &self.config,
+                TRANSPORT_SERVICE_SET_GRANT_EPOCH_SPEC
+                    .with_origin(::connectrpc::SpecOrigin::Client),
+                request,
+                options,
+            )
+            .await
+    }
+    /// Call the SetRepoVisibility RPC. Sends a request to /mkit.transport.v1.TransportService/SetRepoVisibility.
+    pub async fn set_repo_visibility(
+        &self,
+        request: SetRepoVisibilityRequest,
+    ) -> Result<
+        ::connectrpc::client::UnaryResponse<
+            ::buffa::view::OwnedView<
+                __buffa::view::SetRepoVisibilityResponseView<'static>,
+            >,
+        >,
+        ::connectrpc::ConnectError,
+    > {
+        self.set_repo_visibility_with_options(
+                request,
+                ::connectrpc::client::CallOptions::default(),
+            )
+            .await
+    }
+    /// Call the SetRepoVisibility RPC with explicit per-call options. Options override [`ClientConfig`](::connectrpc::client::ClientConfig) defaults.
+    pub async fn set_repo_visibility_with_options(
+        &self,
+        request: SetRepoVisibilityRequest,
+        options: ::connectrpc::client::CallOptions,
+    ) -> Result<
+        ::connectrpc::client::UnaryResponse<
+            ::buffa::view::OwnedView<
+                __buffa::view::SetRepoVisibilityResponseView<'static>,
+            >,
+        >,
+        ::connectrpc::ConnectError,
+    > {
+        ::connectrpc::client::call_unary(
+                &self.transport,
+                &self.config,
+                TRANSPORT_SERVICE_SET_REPO_VISIBILITY_SPEC
+                    .with_origin(::connectrpc::SpecOrigin::Client),
+                request,
+                options,
+            )
+            .await
+    }
+    /// Call the IssueObjectUrl RPC. Sends a request to /mkit.transport.v1.TransportService/IssueObjectUrl.
+    pub async fn issue_object_url(
+        &self,
+        request: IssueObjectUrlRequest,
+    ) -> Result<
+        ::connectrpc::client::UnaryResponse<
+            ::buffa::view::OwnedView<__buffa::view::IssueObjectUrlResponseView<'static>>,
+        >,
+        ::connectrpc::ConnectError,
+    > {
+        self.issue_object_url_with_options(
+                request,
+                ::connectrpc::client::CallOptions::default(),
+            )
+            .await
+    }
+    /// Call the IssueObjectUrl RPC with explicit per-call options. Options override [`ClientConfig`](::connectrpc::client::ClientConfig) defaults.
+    pub async fn issue_object_url_with_options(
+        &self,
+        request: IssueObjectUrlRequest,
+        options: ::connectrpc::client::CallOptions,
+    ) -> Result<
+        ::connectrpc::client::UnaryResponse<
+            ::buffa::view::OwnedView<__buffa::view::IssueObjectUrlResponseView<'static>>,
+        >,
+        ::connectrpc::ConnectError,
+    > {
+        ::connectrpc::client::call_unary(
+                &self.transport,
+                &self.config,
+                TRANSPORT_SERVICE_ISSUE_OBJECT_URL_SPEC
                     .with_origin(::connectrpc::SpecOrigin::Client),
                 request,
                 options,

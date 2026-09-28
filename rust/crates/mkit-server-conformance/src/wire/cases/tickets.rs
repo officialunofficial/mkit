@@ -4,11 +4,13 @@ use buffa::Message;
 use mkit_core::hash::hash;
 use mkit_transport_connect::generated::__buffa::oneof::begin_upload_response::Result as BeginResult;
 use mkit_transport_connect::generated::{
-    BeginUploadRequest, BeginUploadResponse, UploadPackRequest, UploadTicket,
+    AdvanceOutcome, AdvanceRefsRequest, BeginUploadRequest, BeginUploadResponse, UploadPackRequest,
+    UploadTicket,
 };
 
 use super::{
-    CaseResult, Commit, Ctx, Failure, ensure, sign_unary, upload_msgs, want_code, want_ok,
+    A, B, CaseResult, Commit, Ctx, Exp, Failure, advance_req, ensure, sign_unary, upload_msgs,
+    want_code, want_ok, want_outcome,
 };
 use crate::wire::client::Rpc;
 
@@ -154,6 +156,226 @@ async fn open_for_pack(ctx: &Ctx, pack: &[u8]) -> Result<UploadTicket, Failure> 
         ctx.call(Rpc::BeginUpload, &req).await?,
         "BeginUpload",
     )?)
+}
+
+fn ticket_advance(ctx: &Ctx, branch: &str, ids: Vec<Vec<u8>>) -> AdvanceRefsRequest {
+    let mut req = advance_req(
+        (&ctx.head(branch), Exp::Missing, &A),
+        (&ctx.packmap(branch), Exp::Missing, &B),
+    );
+    req.ticket_ids = ids;
+    req
+}
+
+fn exact(error: crate::wire::client::RpcError, message: &str) -> CaseResult {
+    ensure!(
+        error.message == message,
+        "message {:?}, want {message:?}",
+        error.message
+    );
+    Ok(())
+}
+
+pub(super) async fn advance_ticket_id_errors(ctx: Ctx) -> CaseResult {
+    let id = vec![7; 32];
+    let mut req = ticket_advance(&ctx, "ticket-errors", vec![vec![7; 31]]);
+    exact(
+        want_code(
+            ctx.advance(&req).await?,
+            "invalid_argument",
+            "short ticket id",
+        )?,
+        "ticket id must be 32 bytes",
+    )?;
+    req.ticket_ids = vec![id.clone(), id];
+    exact(
+        want_code(
+            ctx.advance(&req).await?,
+            "invalid_argument",
+            "duplicate ticket id",
+        )?,
+        "duplicate ticket id",
+    )?;
+    req.ticket_ids = (0..8).map(|i| vec![i; 32]).collect();
+    exact(
+        want_code(
+            ctx.advance(&req).await?,
+            "invalid_argument",
+            "eight tickets",
+        )?,
+        "too many tickets in one advance",
+    )
+}
+
+pub(super) async fn advance_marker_then_upload(ctx: Ctx) -> CaseResult {
+    let pack = b"ticket advance marker roundtrip";
+    let opened = open_for_pack(&ctx, pack).await?;
+    let id = opened
+        .id
+        .clone()
+        .ok_or_else(|| Failure::Fail("missing ticket id".into()))?;
+    let req = ticket_advance(&ctx, "ticketed", vec![id]);
+    exact(
+        want_code(
+            ctx.advance(&req).await?,
+            "failed_precondition",
+            "missing marker",
+        )?,
+        "upload not complete for ticket",
+    )?;
+    let pack_id = hash(pack);
+    let msgs = ticketed_msgs(pack, opened.token.unwrap_or_default());
+    let headers = ctx.auth_headers(Rpc::UploadPack, Commit::Pack(&pack_id, pack.len() as u64));
+    ensure!(
+        ctx.upload_with(&msgs, &headers).await?.is_none(),
+        "ticket upload failed"
+    );
+    want_outcome(
+        ctx.advance(&req).await?,
+        AdvanceOutcome::ADVANCE_OUTCOME_COMMITTED,
+    )
+}
+
+pub(super) async fn advance_conflicts_keep_ticket(ctx: Ctx) -> CaseResult {
+    let pack = b"ticket advance conflict pack";
+    let opened = open_for_pack(&ctx, pack).await?;
+    let id = opened
+        .id
+        .clone()
+        .ok_or_else(|| Failure::Fail("missing ticket id".into()))?;
+    let pack_id = hash(pack);
+    let msgs = ticketed_msgs(pack, opened.token.unwrap_or_default());
+    let headers = ctx.auth_headers(Rpc::UploadPack, Commit::Pack(&pack_id, pack.len() as u64));
+    ensure!(
+        ctx.upload_with(&msgs, &headers).await?.is_none(),
+        "ticket upload failed"
+    );
+
+    let head = ctx.head("ticketed");
+    let pm = ctx.packmap("ticketed");
+    let mut wrong_packmap = advance_req((&head, Exp::Missing, &A), (&pm, Exp::Match(&B), &B));
+    wrong_packmap.ticket_ids = vec![id.clone()];
+    want_outcome(
+        ctx.advance(&wrong_packmap).await?,
+        AdvanceOutcome::ADVANCE_OUTCOME_PACKMAP_CONFLICT,
+    )?;
+
+    let mut wrong_head = advance_req((&head, Exp::Match(&A), &A), (&pm, Exp::Missing, &B));
+    wrong_head.ticket_ids = vec![id.clone()];
+    want_outcome(
+        ctx.advance(&wrong_head).await?,
+        AdvanceOutcome::ADVANCE_OUTCOME_HEAD_CONFLICT,
+    )?;
+
+    want_outcome(
+        ctx.advance(&ticket_advance(&ctx, "ticketed", vec![id]))
+            .await?,
+        AdvanceOutcome::ADVANCE_OUTCOME_COMMITTED,
+    )
+}
+
+pub(super) async fn advance_ticket_bindings(ctx: Ctx) -> CaseResult {
+    let pack = b"ticket advance bindings";
+    let opened = open_for_pack(&ctx, pack).await?;
+    let id = opened
+        .id
+        .clone()
+        .ok_or_else(|| Failure::Fail("missing ticket id".into()))?;
+    let invalid = ticket_advance(&ctx, "ticketed", vec![vec![0xff; 32]]);
+    exact(
+        want_code(
+            ctx.advance(&invalid).await?,
+            "failed_precondition",
+            "unknown ticket",
+        )?,
+        "invalid or expired upload ticket",
+    )?;
+    let wrong_ref = ticket_advance(&ctx, "wrong-ref", vec![id.clone()]);
+    exact(
+        want_code(
+            ctx.advance(&wrong_ref).await?,
+            "failed_precondition",
+            "ticket ref mismatch",
+        )?,
+        "invalid or expired upload ticket",
+    )?;
+    let correct = ticket_advance(&ctx, "ticketed", vec![id]);
+    let response: Result<mkit_transport_connect::generated::AdvanceRefsResponse, _> = ctx
+        .call_as("other-signer", Rpc::AdvanceRefs, &correct)
+        .await?;
+    exact(
+        want_code(response, "permission_denied", "ticket signer mismatch")?,
+        "upload ticket binding mismatch",
+    )
+}
+
+pub(super) async fn advance_other_repository(ctx: Ctx) -> CaseResult {
+    let signer = ctx.v2_signer("repository-a")?;
+    let namespace = format!("ed25519-{}", signer.public_key_hex());
+    let repo_a = format!("{namespace}/ticket-a");
+    let repo_b = format!("{namespace}/ticket-b");
+    let pack = b"repository binding ticket";
+    let begin = BeginUploadRequest {
+        r#ref: Some(ctx.head("main")),
+        pack_id: Some(hash(pack).to_vec()),
+        bytes: Some(pack.len() as u64),
+        ..Default::default()
+    };
+    let opened: BeginUploadResponse = want_ok(
+        ctx.send(
+            &sign_unary(&signer, Rpc::BeginUpload, &begin, |env| {
+                env.repository.clone_from(&repo_a);
+            })
+            .with_header("x-repository", &repo_a),
+        )
+        .await?,
+        "BeginUpload repository A",
+    )?;
+    let id = ticket(opened)?
+        .id
+        .ok_or_else(|| Failure::Fail("missing ticket id".into()))?;
+    let req = ticket_advance(&ctx, "main", vec![id]);
+    let response: Result<mkit_transport_connect::generated::AdvanceRefsResponse, _> = ctx
+        .send(
+            &sign_unary(&signer, Rpc::AdvanceRefs, &req, |env| {
+                env.repository.clone_from(&repo_b);
+            })
+            .with_header("x-repository", &repo_b),
+        )
+        .await?;
+    exact(
+        want_code(
+            response,
+            "failed_precondition",
+            "ticket in another repository",
+        )?,
+        "invalid or expired upload ticket",
+    )
+}
+
+pub(super) async fn advance_expired_ticket(ctx: Ctx) -> CaseResult {
+    let pack = b"ticket advance expiry";
+    let opened = open_for_pack(&ctx, pack).await?;
+    let id = opened
+        .id
+        .ok_or_else(|| Failure::Fail("missing ticket id".into()))?;
+    let expires = opened
+        .expires_unix_ms
+        .ok_or_else(|| Failure::Fail("missing ticket expiry".into()))?;
+    let req = ticket_advance(&ctx, "ticketed", vec![id]);
+    let skew = expires - crate::wire::sign::now_ms() + 1_000;
+    let signer = ctx.v2_signer("main")?;
+    let envelope = sign_unary(&signer, Rpc::AdvanceRefs, &req, |env| {
+        env.created_at += skew;
+        env.expires_at += skew;
+    })
+    .with_header(crate::wire::CLOCK_SKEW_HEADER, skew.to_string());
+    let response: Result<mkit_transport_connect::generated::AdvanceRefsResponse, _> =
+        ctx.send(&envelope).await?;
+    exact(
+        want_code(response, "failed_precondition", "expired ticket")?,
+        "invalid or expired upload ticket",
+    )
 }
 
 pub(super) async fn upload_pack_ticketed(ctx: Ctx) -> CaseResult {

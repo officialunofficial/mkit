@@ -1,0 +1,1 @@
+{"challenges":[{"scheme":"mpp","value":"Payment id=\"fake-example-not-valid\", method=\"tempo\", intent=\"charge\", request=\"fake-example-request-not-valid\""},{"scheme":"x402","value":"fake-example-payment-required-not-valid"}],"description":"Example upload payment required."}

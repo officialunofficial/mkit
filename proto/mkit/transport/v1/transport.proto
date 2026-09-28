@@ -162,6 +162,14 @@ service TransportService {
 
   // Complete a multipart upload using its receipts (SPEC-TRANSPORT-CONNECT §7.6).
   rpc CompleteUpload(CompleteUploadRequest) returns (CompleteUploadResponse);
+
+  // Namespace grant epoch RPCs (SPEC-WRITE-GRANTS §5.3).
+  rpc GetGrantEpoch(GetGrantEpochRequest) returns (GetGrantEpochResponse);
+  rpc SetGrantEpoch(SetGrantEpochRequest) returns (SetGrantEpochResponse);
+
+  // Repository visibility and URL tokens (SPEC-WRITE-GRANTS §9.1, §9.4).
+  rpc SetRepoVisibility(SetRepoVisibilityRequest) returns (SetRepoVisibilityResponse);
+  rpc IssueObjectUrl(IssueObjectUrlRequest) returns (IssueObjectUrlResponse);
 }
 
 // ----------------------------------------------------------------------------
@@ -430,8 +438,85 @@ message CompleteUploadRequest {
 // Empty body is successful completion (SPEC-TRANSPORT-CONNECT §7.6).
 message CompleteUploadResponse {}
 
+// Grants, visibility and URL tokens (SPEC-WRITE-GRANTS).
+
+// Namespace RPC; it carries no X-Repository (SPEC-WRITE-GRANTS §5.3).
+message GetGrantEpochRequest {
+  string namespace = 1;
+}
+
+// An absent stored epoch is 0 (SPEC-WRITE-GRANTS §5.3).
+message GetGrantEpochResponse {
+  uint64 epoch = 1;
+}
+
+// The single §4.2-encoded owner statement is at most 8,192 bytes. No auth v2
+// envelope or replay entry applies (SPEC-WRITE-GRANTS §5.3).
+message SetGrantEpochRequest {
+  string signed_statement = 1;
+}
+
+// Stored epoch after revocation completion (SPEC-WRITE-GRANTS §5.3).
+message SetGrantEpochResponse {
+  uint64 epoch = 1;
+}
+
+enum RepoVisibility {
+  REPO_VISIBILITY_UNSPECIFIED = 0;
+  REPO_VISIBILITY_PUBLIC = 1;
+  REPO_VISIBILITY_PRIVATE = 2;
+}
+
+// Repository comes only from X-Repository (SPEC-TRANSPORT-CONNECT §7.4).
+// A grant never authorizes either mode (SPEC-WRITE-GRANTS §9.1).
+message SetRepoVisibilityRequest {
+  oneof mode {
+    // Auth v2 body: owner key or authority; UNSPECIFIED is invalid_argument.
+    RepoVisibility visibility = 1;
+    // Owner-signed mkit-repo-visibility:v1 in §4.2 encoding; no auth v2.
+    string signed_statement = 2;
+  }
+}
+
+message SetRepoVisibilityResponse {}
+
+// Signed read; repository comes only from X-Repository (§9.4; STC §7.4).
+message IssueObjectUrlRequest {
+  oneof target {
+    // 32-byte id maps to object:<64 lowercase hex>.
+    bytes object_id = 1;
+    // Maps to path:<ref>:<base64url(path)>.
+    RefPath ref_path = 2;
+  }
+  // 0 requests the default; otherwise clamped to url_token_ttl (§9.4).
+  uint32 ttl_seconds = 3;
+}
+
+// Full ref name and UTF-8 path of 0..1,024 bytes; empty names the root tree.
+message RefPath {
+  string ref = 1;
+  string path = 2;
+}
+
+message IssueObjectUrlResponse {
+  string token = 1;
+  int64 expires_unix_ms = 2;
+}
+
 // ----------------------------------------------------------------------------
 // Errors/details.
+
+// Detail on a challenged unary request (SPEC-TRANSPORT-CONNECT §5.1).
+message AdmissionChallenge {
+  repeated Challenge challenges = 1; // 1 to 8 entries, in the server's order of preference
+  string description = 2;            // text for a person; at most 512 bytes of UTF-8
+}
+
+// One opaque admission challenge (SPEC-TRANSPORT-CONNECT §5.1).
+message Challenge {
+  string scheme = 1; // lowercase token: [a-z0-9][a-z0-9.-]{0,63}
+  string value = 2;  // opaque to mkit; at most 8,192 bytes
+}
 
 // Detail on an `unavailable` AdvanceRefs whose consumed pack is still under
 // verification (SPEC-TRANSPORT-CONNECT §7.6; SPEC-SERVER §9.5).
