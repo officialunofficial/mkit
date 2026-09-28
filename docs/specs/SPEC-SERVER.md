@@ -1182,12 +1182,14 @@ without overflow; it MUST NOT silently substitute defaults.
 Indexed deployments MUST support per-ref storage leases. The ref shard
 holds the per-ref terms; the namespace coordinator holds the
 repository-level default and propagates changes with `config_version`.
-An explicit per-ref lease overrides that default; otherwise the ref uses
-the repository default. Opaque deployments support repository-level
+An explicit per-ref lease overrides that default while the repository
+remains undeleted; otherwise the ref uses the repository default. Opaque
+deployments support repository-level
 storage leases only and MUST NOT accept per-ref terms.
-A deleted repository-level lease invalidates repository membership under
-§12.2 even if a ref had explicit terms; per-ref terms do not restore
-the deleted repository generation.
+A deleted repository-level lease deletes every ref in the repository,
+including refs with explicit per-ref terms, and invalidates repository
+membership under §12.2. Per-ref terms do not restore the deleted
+repository generation.
 
 Repository-level changes MUST become effective within one epoch lease
 plus the configuration cache TTL. They MUST follow the visibility
@@ -1222,10 +1224,11 @@ For branch deletion, head and packmap MUST be removed together, along
 with the branch's published pointer. A storage-lease deletion is a
 publication deletion boundary under §10, with the same published-view
 effect as a ref deletion under STC §7.8; later verdicts MUST NOT restore
-the old ref value. A repository-level deletion applies to every ref
-governed by that lease. Delayed removal MUST NOT make a logically deleted
-ref accessible or a GC root; surviving advance membership remains a
-separate root under §13.2. Repository-level deletion MUST
+the old ref value. A repository-level deletion MUST remove every ref,
+including those with explicit per-ref terms, and each published pointer.
+Delayed removal MUST NOT make a logically deleted ref accessible or a
+GC root; §13.2 defines which advance membership remains a separate root
+after a per-ref deletion. Repository-level deletion MUST
 immediately invalidate the repository's existing membership as a single
 generation: reads and `AlreadyPresent` MUST see no old member, and a new
 lease MUST NOT restore old membership. A later verdict on an earlier
@@ -1238,9 +1241,7 @@ a new lease permits new writes only and MUST NOT restore removed refs,
 published pointers, or the old lease's data. A late renewal MUST NOT
 cancel deletion of the old lease merely because timer work is delayed.
 A write to a ref whose own lease is `deleted` is not ref creation. It MUST
-remain blocked with `permission_denied` and exactly
-`repository lease expired; writes blocked` until an
-administrator sets a new lease under §12.3.
+remain blocked until an administrator sets a new lease under §12.3.
 
 Administrative suspension is a separate override, including applicable
 repository, namespace, and takedown suspensions. The effective state MUST
@@ -1249,13 +1250,14 @@ be the more severe of storage-lease state and that override, in the order
 an administrative or takedown suspension.
 
 A write in `grace` MUST return `permission_denied` with exactly
-`repository lease expired; writes blocked`. Reads in `suspended` or
-`deleted` MUST return `not_found` to readers, without revealing
-repository existence; an authorized writer reading that repository
-instead receives `permission_denied` with exactly `lease suspended`.
-Writes blocked by suspension MUST also return that permission error.
-Writes to a ref whose own lease is `deleted` use the grace-write error
-specified above, even though reads of that ref are hidden.
+`repository lease expired; writes blocked`. A per-ref `suspended` or
+`deleted` state MUST hide that ref from readers; a write to that ref
+MUST return `permission_denied` with exactly `lease suspended`.
+Reads in a suspended or deleted repository MUST return `not_found` to
+readers, without revealing repository existence; an authorized writer
+reading that repository MUST instead receive `permission_denied` with
+exactly `lease suspended`. Other writes blocked by suspension MUST
+return that same permission error.
 For a reader, the suspended-or-deleted repository's `not_found` MUST be
 byte-identical to a nonexistent repository response in code, message,
 details, and headers, as [SPEC-WRITE-GRANTS §9.3](SPEC-WRITE-GRANTS.md#93-read-authorization)
@@ -1272,10 +1274,10 @@ Pack and object surfaces, including `PackExists`, `DownloadPack`, HTTP
 object serving, and signed URL tokens, MUST enforce the
 repository-level effective state. A per-ref `suspended` or `deleted`
 state MUST hide that ref from `ReadRef`, `ListRefs`, and `X-Mkit-Ref`,
-together with its published pointer. It MUST NOT hide membership shared
-with other refs. Informative: deployments billing storage per repository
-should use repository-level leases; per-ref leases govern ref visibility,
-not byte availability.
+together with its published pointer, as required above. It MUST NOT hide
+membership shared with other refs. Informative: deployments billing
+storage per repository should use repository-level leases; per-ref
+leases govern ref visibility, not byte availability.
 
 ### 12.3 Setting leases and transition work
 
@@ -1331,7 +1333,7 @@ under a valid epoch lease. They MUST NOT use cached lease terms.
 
 | Field | Meaning |
 |---|---|
-| `event_id = 1` | Idempotency key: 1–128 bytes of `[A-Za-z0-9._:-]`, unique per server audience. |
+| `event_id = 1` | Idempotency key: MUST be 1–128 bytes of `[A-Za-z0-9._:-]` and unique per server audience. |
 | `audience = 2` | The mkit server's canonical origin, distinct from the hook-channel signing audience. |
 | `repository = 3` | Full repository identity under STC §7.4. |
 | `occurred_unix_ms = 4` | Transition time as signed 64-bit Unix epoch milliseconds, independent of delivery time. |
@@ -1386,7 +1388,7 @@ deployment-internal cache-purge interface does not add a remote RPC.
 | `gc_grace` | Fixed: 7 d | Minimum time a repository candidate remains marked before removal. |
 | `relay_lag_bound` | Deployment configuration, default: 60 s | Membership-visibility retry bound under §9.4; elapsed time does not replace the GC watermark. |
 | `already_present_pin_window` | Minimum: the deployment's maximum ticket lifetime | Pack pin after an `AlreadyPresent` response. |
-| `MAX_APPLY_WINDOW`, `margin` | Fixed by SPEC-WRITE-GRANTS §1.1 | Commit-window parameters used in §13.3; this spec does not redefine them. |
+| `MAX_APPLY_WINDOW`, `margin` | Defined by SPEC-WRITE-GRANTS §1.1 (deployment parameters with defaults) | Commit-window parameters used in §13.3; this spec does not redefine them. |
 
 The commit-deadline and `NotAfter` obligation on every write batch is
 [SPEC-WRITE-GRANTS §5.5](SPEC-WRITE-GRANTS.md#55-commit-deadline).
@@ -1400,8 +1402,9 @@ Per-repository GC MUST include all of the following roots:
 - Every live ref value, including each branch's packmap chain.
 - Every published pointer, including its head and packmap.
 - Every advance value strictly after the published pointer through and
-  including the live value under §10, in any clearance state, with its
-  packmap chain, indexed closure packs, and packs that advance added.
+  including the live value under §10, in any clearance state while its
+  repository membership generation remains valid, with its packmap
+  chain, indexed closure packs, and packs that advance added.
   It remains a root until the published pointer reaches or passes its
   advance position.
 - Every `hit` advance's membership, packmap chain, closure packs, and
@@ -1412,6 +1415,11 @@ Per-repository GC MUST include all of the following roots:
 - Every unexpired hold.
 - Every takedown replacement pack (§14) not yet collected under §14's
   own rules.
+
+Repository-level lease deletion invalidates the old membership generation:
+pending advance membership in that generation is not a root and cannot
+become visible again. A `hit` advance remains a separate root until
+§14 takedown completes, including when its membership was invalidated.
 
 An `AlreadyPresent` answer is planner use. If the pack contains any id
 hidden in that repository by a flagged or held verdict under §11, the
@@ -1432,6 +1440,13 @@ closure is live: GC MUST retain at least one containing pack for each
 live object, specifically the pack the repository index uses to serve
 that object, along with its index row and any extracted serving copy.
 A non-branch advance's root also includes the packs that advance added.
+For every retained pack, GC MUST also retain every pack supplying an
+external delta base (§9.4) for an object in it, transitively. This
+includes the packs of every advance retained by §10's publication rule,
+regardless of that advance's clearance state. GC MUST retain the
+corresponding repository membership and serving index rows while that
+membership generation remains valid; an invalidated `hit` is preserved
+under §14 instead.
 Opaque mode cannot prove object closure; if a repository has any live
 non-branch ref, GC MUST retain all its member packs. An opaque-mode
 branch without a readable packmap chain MUST receive the same protection:
@@ -1442,9 +1457,11 @@ A planned but unapplied write is a pending advance covered by the wait
 phase below. An advance value between the published pointer and live
 value can become published under §10 even when its clearance state is
 `cleared` and it is no longer the live value. A lease-deleted ref is not
-itself a root, but surviving advance membership awaiting a verdict under
-§10 and `hit` membership awaiting §14 takedown remain roots across the
-deletion boundary. Preservation-store bytes and blocklist rows MUST NOT
+itself a root. After a per-ref deletion, surviving advance membership
+awaiting a verdict under §10 remains a root; after a repository-level
+deletion, its invalidated pending membership is not a root. `Hit`
+membership awaiting §14 takedown remains a root across either deletion
+boundary. Preservation-store bytes and blocklist rows MUST NOT
 be collected by
 server GC; their separate retention and purge rules are in §§14 and 16.
 
@@ -1460,7 +1477,9 @@ GC MUST perform these phases in order for each repository:
    source. The decision that a lease-deleted ref is not a root MUST use
    authoritative per-ref terms and the coordinator default at the
    current `config_version`, read under a valid epoch lease, never cached
-   terms. Surviving advance membership remains a root under §13.2.
+   terms. Apply §13.2's distinction between surviving advance membership
+   after per-ref deletion and invalidated membership after repository-level
+   deletion.
 2. **Wait.** Removal MUST wait until all three conditions hold:
    `now > mark + MAX_APPLY_WINDOW + margin`; the namespace relay
    watermark has passed that point; and `since + gc_grace ≤ now`.
@@ -1473,9 +1492,11 @@ GC MUST perform these phases in order for each repository:
    active-shard table, never the eventually consistent ref index alone.
    Re-check live refs, published pointers, all advance values between
    the published pointer and live value regardless of clearance state,
-   surviving advance membership across deletion boundaries, `hit`
+   surviving advance membership after per-ref deletion, `hit`
    advances, takedown replacement packs, unexpired tickets, holds,
-   pins, and object closure as applicable. Re-check authoritative
+   pins, object closure, and transitive external delta-base packs as
+   applicable. Do not root invalidated pending membership after a
+   repository-level deletion. Re-check authoritative
    per-ref lease terms and the coordinator default at the current
    `config_version` under a valid epoch lease, never from a cache.
    A candidate that became live or pinned, or whose mark changed,
@@ -1485,18 +1506,37 @@ GC MUST perform these phases in order for each repository:
    membership-addition records used by `X-Mkit-Ref`. Each removal MUST
    be guarded on the unchanged mark and last-change sequence so a
    concurrent unmark or new reference makes it fail without removal.
-   Remove this repository's holder only after membership and index-row
-   removal is durable, and only if the repository no longer holds that
-   member. GC MUST reconcile orphaned holders, which are safe but retain
-   bytes unnecessarily.
+   Remove this repository's holder only after membership, index-row,
+   and per-ref membership-addition removal is durable, and only if the
+   repository no longer holds that member. Every holder removal,
+   including orphan reconciliation, MUST be conditional on the holder's
+   unchanged change sequence. Every holder write MUST advance that
+   sequence, including a relay re-record of an existing holder. A
+   re-added member therefore defeats a previously planned removal. GC
+   MUST reconcile orphaned holders, which are safe but retain bytes
+   unnecessarily.
 
-A planner relying on a `gc_pending` member MUST unmark it before planning
-its use and MUST ensure the repository's holder exists. A new mark
-restarts the wait. This obligation and the commit deadlines cover
+A planner relying on a `gc_pending` member MUST clear its mark before
+planning the use and MUST ensure the repository's holder exists. More
+generally, a write that newly relies on an existing member MUST durably
+clear that member's GC mark before the write commits and MUST ensure its
+holder exists. New reliance means making a member reachable from a ref value
+where it was not before: a packmap chain or packlist reference, closure
+or external delta-base use (§§9.2–9.4), or a non-branch ref target.
+In opaque mode, a write referencing packs through new packmap nodes MUST
+apply this rule to every listed pack it did not upload in the same write;
+the server MUST decode those nodes as GC does. If the mark cannot be
+cleared because the member is `deleting` or gone, the write MUST NOT
+rely on it and MUST answer retryable `unavailable` or cause a re-upload.
+A new mark restarts the wait. This rule and the commit deadlines cover
 planned, unapplied advances without a cross-shard GC state precondition
-on ref apply. A planner encountering `deleting` MUST
+on ref apply. Without this rule, GC cannot safely drop membership: the
+drop guard sees changes only to the candidate member's own state, not a
+new ref that relies on it. A planner encountering `deleting` MUST
 return retryable `unavailable` or arrange a re-upload; it MUST NOT
 report a permanent absence merely because deletion is in progress.
+Informative: the detection mechanism and cost of finding newly relied-on
+members belong to the server GC implementation.
 
 ### 13.4 Global byte deletion
 
@@ -1506,10 +1546,15 @@ hold in this guard. Every path that writes or deduplicates bytes which
 may later gain a holder MUST create a durable hold before relying on
 those bytes. This includes ticket issue, upload completion, an
 un-ticketed `UploadPack`, extracted-object deduplication, and
-`AlreadyPresent`. The hold MUST remain until the holder durably covers
-the bytes or the path can no longer add a holder. The ticket's hold MUST
+`AlreadyPresent`. The hold MUST remain until the path can no longer add
+a holder and any committed membership is durably covered by holder
+accounting. The ticket's hold MUST
 be durable before ticket issue; the analogous hold for each other path
 MUST be durable before its bytes are reused or it reports success.
+A hold MUST be released only after its path can no longer add a holder,
+allowing for clock skew. A ticket hold MUST remain through ticket
+expiry plus `margin`, and longer if an in-flight path can still add a
+holder.
 
 Holder counts MUST conservatively cover holder additions still in
 flight; an incomplete holder addition MUST prevent deletion. A hold
@@ -1524,7 +1569,7 @@ entering `deleting`; then delete the bytes and clear the deletion state.
 This global byte step has no separate object-level mark; the change
 sequence invalidates a stale deletion attempt. Creating a hold while
 the object is `deleting` MUST fail with retryable `unavailable`. A
-re-upload or deduplication MAY be accepted only after `deleting` clears.
+re-upload or deduplication MUST NOT be accepted until `deleting` clears.
 Crashes MUST leave this step retryable without exposing partially deleted
 bytes as usable.
 No cross-namespace watermark is required: holds and conservative holder
@@ -1543,7 +1588,8 @@ not wire fields.
 GC MUST abort the run on any unreadable root source, unreadable lease terms
 or repository default, unreadable advance or clearance state, unknown
 record kind, unreadable watermark or active-shard table, undecodable
-packlist node, missing root or referenced object, or truncated walk.
+packlist node, unreadable external delta-base pack, missing root or
+referenced object, or truncated walk.
 The opaque-mode branch fallback in §13.2 applies only when the complete
 repository membership source is readable despite the branch's unreadable
 packmap chain; it does not permit a partial membership walk.

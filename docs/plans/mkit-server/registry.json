@@ -1946,11 +1946,10 @@
     "depends_on": [
       "5.2",
       "4.10",
-      "5.1a-2",
-      "1.23c"
+      "5.1a-2"
     ],
     "size": "L",
-    "summary": "Runtime-agnostic mark over D34 shards (indexed closure or opaque packmap chains) with pins and fail-closed truncation, marking candidates gc_pending. No cross-shard apply precondition: safety comes from mark -> wait > MAX_APPLY_WINDOW + relay watermark -> re-check roots from ref shards.",
+    "summary": "Runtime-agnostic mark over D34 shards (indexed closure or opaque packmap chains) with pins and fail-closed truncation, marking candidates gc_pending. No cross-shard apply precondition: safety comes from mark -> wait > MAX_APPLY_WINDOW + relay watermark -> re-check roots from ref shards. R-106's coordinator watermark is required before implementation; WP-5.3a designs detection of newly relied-on members and escalates if it adds more than one metadata read per newly referenced pack to the push path (R-115).",
     "human_action": false,
     "area_gates": [
       "rust",
