@@ -1105,13 +1105,18 @@ fn multipart_paths_are_authenticated_procedures() {
 }
 
 #[test]
+fn grant_epoch_paths_are_permanently_outside_procedure() {
+    // SPEC-WRITE-GRANTS §5.3, §9.2: the epoch RPCs are unsigned forever.
+    for rpc in ["GetGrantEpoch", "SetGrantEpoch"] {
+        let path = format!("/mkit.transport.v1.TransportService/{rpc}");
+        assert_eq!(Procedure::from_connect_path(&path), None, "{rpc}");
+    }
+}
+
+#[test]
 fn m2_stub_paths_are_not_authenticated_procedures_yet() {
-    for rpc in [
-        "GetGrantEpoch",
-        "SetGrantEpoch",
-        "SetRepoVisibility",
-        "IssueObjectUrl",
-    ] {
+    // WP-2.9 and WP-2.11 add procedures for these and replace this test.
+    for rpc in ["SetRepoVisibility", "IssueObjectUrl"] {
         let path = format!("/mkit.transport.v1.TransportService/{rpc}");
         assert_eq!(Procedure::from_connect_path(&path), None, "{rpc}");
     }

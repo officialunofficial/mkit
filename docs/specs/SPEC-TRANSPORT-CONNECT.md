@@ -905,7 +905,7 @@ is `unauthenticated`. A signed read is idempotent: the server checks the
 validity window only, and records and looks up no replay entry, so the
 replay rules below apply to writes only. `GetServerInfo`,
 `GetGrantEpoch` and `SetGrantEpoch` stay unsigned.
-Pending `SetGrantEpoch` and `SetRepoVisibility` calls return `unavailable` with a `Retry-After` response header (SPEC-WRITE-GRANTS §5.3, §9.1).
+When a pending `SetGrantEpoch` or `SetRepoVisibility` call returns `unavailable`, its retry hint is a `Retry-After` response header in delay-seconds (SPEC-WRITE-GRANTS §5.3, §9.1).
 
 The validity interval MUST be positive and at most 300,000 ms; sender clocks
 may lead the server by at most 30,000 ms. Expired requests MUST be rejected,

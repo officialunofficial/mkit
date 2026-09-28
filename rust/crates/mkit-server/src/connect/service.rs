@@ -534,9 +534,9 @@ where
         _ctx: RequestContext,
         _request: ServiceRequest<'_, GetGrantEpochRequest>,
     ) -> ServiceResult<GetGrantEpochResponse> {
-        // SECURITY: unauthenticated by design; WP-2.8 MUST keep this outside auth-v2 Procedure.
+        // SECURITY: unsigned by design; WP-2.8 MUST keep this outside auth-v2 Procedure.
         // TODO(WP-2.8): return the namespace epoch without auth-v2 header verification.
-        Err(ServerError::unimplemented("not implemented yet").into())
+        Err(not_yet().into())
     }
 
     async fn set_grant_epoch(
@@ -544,9 +544,10 @@ where
         _ctx: RequestContext,
         _request: ServiceRequest<'_, SetGrantEpochRequest>,
     ) -> ServiceResult<SetGrantEpochResponse> {
-        // SECURITY: unauthenticated by design; WP-2.8 MUST keep this outside auth-v2 Procedure.
+        // SECURITY: unsigned by design; the owner statement is its only authorization.
+        // WP-2.8 MUST keep this outside auth-v2 Procedure.
         // TODO(WP-2.8): verify the owner statement and wait for revocation completion.
-        Err(ServerError::unimplemented("not implemented yet").into())
+        Err(not_yet().into())
     }
 
     async fn set_repo_visibility(
@@ -556,7 +557,7 @@ where
     ) -> ServiceResult<SetRepoVisibilityResponse> {
         // SECURITY: this path bypasses auth; the implementing WP-2.9 MUST add mode-specific authorization.
         // TODO(WP-2.9): verify auth v2 or the owner statement before changing visibility.
-        Err(ServerError::unimplemented("not implemented yet").into())
+        Err(not_yet().into())
     }
 
     async fn issue_object_url(
@@ -566,7 +567,7 @@ where
     ) -> ServiceResult<IssueObjectUrlResponse> {
         // SECURITY: this path bypasses auth; the implementing WP-2.11 MUST add signed-read authorization.
         // TODO(WP-2.11): verify auth v2 and read access before minting a URL token.
-        Err(ServerError::unimplemented("not implemented yet").into())
+        Err(not_yet().into())
     }
 }
 
