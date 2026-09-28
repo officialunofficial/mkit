@@ -1011,7 +1011,7 @@ mod tests {
             &store,
             RestoreOptions {
                 allow_incomplete: true,
-                epoch_at_least: Some(99),
+                epoch_at_least: Some(EPOCH_RESTORE_JUMP + 99),
                 ..RestoreOptions::default()
             },
         ))
