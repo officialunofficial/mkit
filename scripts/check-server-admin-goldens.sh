@@ -20,6 +20,8 @@ types = {
     'takedown.response.json': 'TakedownResponse',
     'set-lease.request.json': 'SetLeaseRequest',
     'set-lease.response.json': 'SetLeaseResponse',
+    'set-suspension.request.json': 'SetSuspensionRequest',
+    'set-suspension.response.json': 'SetSuspensionResponse',
     'release-hold.request.json': 'ReleaseHoldRequest',
     'release-hold.response.json': 'ReleaseHoldResponse',
     'read-audit-log.request.json': 'ReadAuditLogRequest',
@@ -54,8 +56,17 @@ for name, message_type in types.items():
                            '--to', '-#format=json'], capture_output=True, check=True)
     check(source == json.loads(proc.stdout), f'proto JSON round-trip changed {name}')
 
+check('receipt' not in json.loads((root / 'set-lease.response.json').read_text()),
+      'lease receipt must be disabled in the fixture')
+check('receipt' not in json.loads((root / 'set-suspension.response.json').read_text()),
+      'suspension receipt must be disabled in the fixture')
+check(json.loads((root / 'takedown.request.json').read_text())['reasonToken'] == 'policy',
+      'takedown reason token missing')
+check(json.loads((root / 'set-suspension.request.json').read_text())['reasonToken'] == 'policy',
+      'suspension reason token missing')
+
 vectors = json.loads((root / 'signature.json').read_text())['vectors']
-check(len(vectors) == 2, 'expected two signature vectors')
+check(len(vectors) == 3, 'expected three signature vectors')
 with tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR')) as tmp:
     temp = Path(tmp)
     for v in vectors:
@@ -96,10 +107,18 @@ with tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR')) as tmp:
 chain = json.loads((root / 'audit-chain.json').read_text())
 entries = chain['entries']
 check(len(entries) == 3, 'expected three audit entries')
+check(entries[2]['actor'] == vectors[2]['key_id'] and
+      entries[2]['result']['code'] == 'permission_denied',
+      'wrong-role audit entry must use the lease key')
 prev = '00' * 32
 for seq, entry in enumerate(entries, 1):
     check(entry['seq'] == str(seq), 'audit sequence gap')
     check(entry['prevHash'] == prev, 'audit previous hash mismatch')
+    check(all(field in entry for field in ('actor', 'procedure', 'requestDigest',
+          'nonce', 'targets', 'result', 'details', 'prevHash')),
+          'required audit field missing')
+    check(all(field in entry['result'] for field in ('code', 'message')),
+          'audit result incomplete')
     payload = dict(entry)
     del payload['entryHash']
     jcs = json.dumps(payload, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()

@@ -401,7 +401,7 @@ message Event {
   string repository = 3;
   // Transition time in Unix epoch milliseconds, independent of delivery time.
   int64 occurred_unix_ms = 4;
-  // Strictly increasing per (repository, ref-or-repository) scope; stable on retry.
+  // Strictly increasing per (repository, ref-or-repository) or namespace scope; stable on retry.
   uint64 sequence = 5;
   // Exactly one transition kind; SPEC-SERVER §12.4.
   oneof kind {
@@ -423,7 +423,7 @@ message CachePurgeRequest {
   string repository = 3;
   // Reason for the purge.
   CachePurgeTrigger trigger = 4;
-  // Origin-relative URL paths, without query strings or fragments.
+  // Origin-relative URL paths matched by exact path, without query strings or fragments.
   repeated string url_paths = 5;
   // Raw 32-byte object ids.
   repeated bytes object_ids = 6;

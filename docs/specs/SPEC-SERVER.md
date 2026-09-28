@@ -41,9 +41,11 @@ policy, moderation policy, or the deployment's account model.
 their verification, and the preconditions they carry into apply.
 
 Sections 10–18 cover the M5 contracts: §§10–11 specify the published view
-and inspection, and §§12–13 specify storage leases, lifecycle events, and
-server garbage collection. The other M5 sections remain reserved. Inspection
+and inspection, §§12–13 specify storage leases, lifecycle events, and
+server garbage collection, and §16 specifies administration. Inspection
 fields extend the original hook shape additively.
+Section 16 applies to native and Workers deployments when an admin key
+list is configured; without that list its routes are absent.
 For a branch, its head and packmap share one publication sequence even
 when either is written through `UpdateRef` (§10.2).
 
@@ -268,6 +270,7 @@ HTTPS, subject to the loopback exception below. Its service name is
 | Inspect | `/mkit.server.hooks.v1.HooksService/Inspect` |
 | Outcome | `/mkit.server.hooks.v1.HooksService/Outcome` |
 | Event | `/mkit.server.hooks.v1.HooksService/Event` |
+| CachePurge | `/mkit.server.hooks.v1.HooksService/CachePurge` |
 
 Hook servers MUST support the JSON codec, `application/json`. They
 MAY also support the binary codec. The calling server MUST send JSON
@@ -282,7 +285,7 @@ Scalar fields use explicit presence. In particular, absence of
 `new_to_repo_bytes` means unknown; a present value of zero means the
 server knows that zero bytes are new to the repository.
 
-A deployment MAY implement any subset of the five RPCs. The calling
+A deployment MAY implement any subset of the six RPCs. The calling
 server MUST call only the hooks it is configured to use. Configuration
 of a subset does not change the semantics of a hook that is enabled.
 
@@ -664,7 +667,7 @@ client-visible response under STC.
 
 ### 7.1 Signed requests
 
-Every hook request, including Outcome and Event delivered as webhooks, MUST
+Every hook request, including Outcome, Event, and CachePurge delivery, MUST
 be signed with a deployment hook key, except on a channel configured
 under §7.3. Signing covers the exact request body bytes sent on that
 channel; it does not sign a reserialized representation.
@@ -701,6 +704,8 @@ paths on one origin share an audience. They SHOULD use distinct keys.
 
 `<full procedure>` is the exact Connect path from §6.1. A verifier
 MUST bind verification to the procedure receiving the request.
+For remote `CachePurge`, that path is
+`/mkit.server.hooks.v1.HooksService/CachePurge`.
 
 `<nonce>` MUST be 32 random bytes encoded as 64 lowercase hex digits.
 The created and expiry fields are decimal epoch milliseconds. They
@@ -823,10 +828,10 @@ Connect transport errors from failure handling.
 Timeouts are deployment configuration. Informative: a default hook
 timeout is 5 seconds.
 
-Outcome and Event delivery MUST retry with exponential backoff and
-jitter until acknowledged. The server MUST NOT drop either. Any 2xx Connect
-response to Outcome or Event is an acknowledgement. Transport errors,
-timeouts, and non-2xx responses leave the outcome or event awaiting
+Outcome, Event, and CachePurge delivery MUST retry with exponential backoff and
+jitter until acknowledged. The server MUST NOT drop any of them. Any 2xx Connect
+response to one of these procedures is an acknowledgement. Transport errors,
+timeouts, and non-2xx responses leave the delivery awaiting
 delivery.
 
 Informative: an initial retry interval of 1 second, a factor of 2,
@@ -1664,7 +1669,7 @@ MUST preserve the denial and MUST NOT expose suspended or deleted data
 through a cached successful response. Signed URL reads remain subject
 to these storage-lease checks and resolve only in the published view, as
 [SPEC-WRITE-GRANTS §9.4](SPEC-WRITE-GRANTS.md#94-signed-url-tokens) requires.
-Cache-purge wire details are reserved for §16.
+The remote cache-purge wire contract is in §16.7.
 
 Pack and object surfaces, including `PackExists`, `DownloadPack`, HTTP
 object serving, and signed URL tokens, MUST enforce the
@@ -1689,8 +1694,8 @@ Removing a repository default makes undeleted refs without per-ref
 terms permanent. Removing per-ref terms restores the repository default,
 or permanent retention if that default is absent. Both actions MUST NOT
 resurrect a deleted lease. Every SetLease action MUST be audited.
-The admin API wire, authentication, and audit-log details are reserved
-for §16; this section defines its semantics only.
+The admin API wire, authentication, and audit-log contract is in §16;
+this section defines the lease semantics.
 
 In indexed mode, the server MUST consult a deployment storage-lease
 policy hook only when creating a ref with no lease record. The decision
@@ -1770,6 +1775,8 @@ An administrative override emits exactly one event at the scope where it is set.
 For a namespace override that event has `namespace` set and `repository`
 empty; it MUST NOT be duplicated once per repository. An admin-caused
 lease transition uses `LEASE_CAUSE_ADMIN` (§16.5).
+By contrast, a content-level takedown emits one takedown transition per
+affected repository under §14 **Events and notices**.
 
 When an Event sink is configured, events MUST use the same durable outbox
 as outcomes (§5), be delivered at least once, and remain retained until
@@ -2028,18 +2035,25 @@ configured. An absent list disables every admin route; it MUST NOT
 fall back to write, hook, grant, receipt, or bearer authentication.
 
 A native deployment MUST expose the service on a listener separate from
-the client transport listener, defaulting to loopback. A Workers
+the client transport listener, defaulting to loopback. The native client
+listener MUST NOT serve admin paths. A Workers
 deployment MUST expose the canonical
 `/mkit.server.admin.v1.AdminService/<method>` paths, distinct from the
 client transport service paths, behind the deployment's network
 controls; it MUST NOT rewrite them before signature verification.
 Admin procedures are exempt from the client RPC bearer gate.
-A request carrying both auth-v2 and `X-Mkit-Admin-*` headers MUST be
+A request carrying both `X-Mkit-Admin-*` and any auth-v2 envelope header
+(`X-Public-Key`, `X-Signature`, `X-Digest`, `X-Created-At`,
+`X-Expires-At`, `X-Envelope-Version`, `X-Audience`, `X-Repository`,
+`X-Content-Commitment`, or `Idempotency-Key`), or `X-Write-Grant`, MUST be
 rejected with `invalid_argument` before either identity is used. Admin
 authorization is independent of repository visibility and of grants.
+An `Authorization: Bearer` header is ignored for admin authentication.
 
 Informative: the server holds public admin keys only. Private admin
-keys belong offline or in a hardware security module. Deployments
+keys belong offline or in a hardware security module. Informative: on
+Workers the admin path shares the origin with client paths and is
+protected by its signature. Deployments
 provide their own operator UI; this version exposes no public audit or
 preservation view. Repository owners learn about redaction through §14
 notices and takedown lifecycle Events.
@@ -2093,10 +2107,12 @@ MUST compare every supplied value to its canonical field:
 The verifier MUST select a current public key by key id, check its
 validity bounds, compare audience and procedure, check the time window
 and exact-body digest, and verify the signature before treating a
-request as authenticated. The body bytes are the actual received unary
-request bytes before decoding; reserializing protobuf JSON does not
-reconstruct them. A streamed response has no signing effect on its
-request. Responses are not signed; the caller MUST authenticate the
+request as authenticated. The digest covers the exact HTTP request body
+as received, including the Connect envelope prefix for streaming
+procedures and before decompression. Reserializing protobuf JSON does
+not reconstruct those bytes. The admin service MUST support the JSON
+codec and MAY support the binary codec. A streamed response has no
+signing effect on its request. Responses are not signed; the caller MUST authenticate the
 server through TLS, except for an isolated loopback channel.
 
 Malformed headers, unknown keys, expired envelopes, and invalid
@@ -2113,14 +2129,16 @@ nonempty `roles` array on each key. `version` is `1`; `keyId`, `alg`,
 grammar and meaning. Roles are `lease`, `moderation`, `grants`,
 `audit`, and `all`; duplicate and unknown roles and duplicate key ids
 MUST be rejected when loading the list.
+Each key's roles apply deployment-wide, with no per-key scope in this
+version; a matching role satisfies §12.3's authorization for that scope.
 The `all` role grants every procedure. A deployment MAY have several
 concurrent keys with different role sets. A key with only `lease` MUST
 NOT gain moderation authority through `SetLease`.
 
 | Procedures | Required role |
 |---|---|
-| `SetLease` with `RENEWAL` or `POLICY` | `lease` or `all` |
-| `SetLease` with `ADMIN` | `moderation` or `all` |
+| `SetLease` with `RENEWAL` or `POLICY`, where proposed terms do not yield `suspended` or `deleted` at apply | `lease` or `all` |
+| `SetLease` with `ADMIN`, including terms yielding `suspended` or `deleted` at apply | `moderation` or `all` |
 | `SetSuspension`, `Takedown`, `GetTakedown`, `ListTakedowns`, `Reinstate`, `AddBlock`, `RemoveBlock`, `SetLegalHold`, `ReadPreserved` | `moderation` or `all` |
 | `ReleaseHold`, `Reinspect`, `ReleaseFlag`, `ResumeServing`, `WaiveObligations`, `PurgeCache` | `moderation` or `all` |
 | `RegisterSshGrant`, `RemoveSshGrant`, `ListSshGrants` | `grants` or `all` |
@@ -2160,6 +2178,10 @@ pending result; reuse for different content or procedure MUST return
 `invalid_argument`. This ledger MUST persist for at least as long as
 the audit log is retained. It prevents a caller retry after its
 300-second signing window from starting a second rewrite or purge.
+The role check MUST precede the `operation_id` lookup. An identical
+logical request means the same full procedure and the same signed
+request digest. `Takedown` and takedown-flagged `SetSuspension` share
+this operation-id space; cross-procedure reuse is `invalid_argument`.
 
 The server MUST commit an accepted action and its audit entry durably
 before reporting success. A long-running action MAY report `complete`
@@ -2173,7 +2195,10 @@ procedure. All nonempty repository identities follow STC §7.4; refs
 follow SPEC-REFS §3, object and grant ids are 32 bytes, and reasons and
 operator labels are bounded UTF-8 without controls (512 and 128 bytes
 respectively). Invalid scope, enum, id, bound, or missing required
-field is `invalid_argument`. A target absent after authentication is
+field is `invalid_argument`. `reason_token` in `Takedown`, `AddBlock`, and
+`SetSuspension` MUST match §14 **Signed redaction notice** (§14.6). The
+free-text `reason` is private audit text and MUST NOT enter notices,
+Events, or any public surface. A target absent after authentication is
 `not_found`, unless the row says otherwise. Every authenticated call,
 including a read or failed attempt, is audited under §16.6. The
 listed error codes are in STC §5's Connect vocabulary; all procedures
@@ -2182,25 +2207,25 @@ also permit `unavailable` for a retryable backend failure and
 
 | Procedure: request → response | Required input and effect | Additional errors |
 |---|---|---|
-| `Takedown`: `TakedownRequest` → `TakedownResponse` | `operation_id`, non-UNSPECIFIED level, reason and target; CONTENT takes 1–256 distinct blob or ChunkedBlob manifest ids in indexed mode, with no repository or namespace field. REPOSITORY takes one repository and NAMESPACE one namespace, with no object ids (§14 **Terms, levels and scope**). It starts §14 **Lifecycle and completion** and returns its id and completion state. | `failed_precondition` for content level in opaque mode or a target of the wrong object kind; `aborted` for concurrent work. |
+| `Takedown`: `TakedownRequest` → `TakedownResponse` | `operation_id`, non-UNSPECIFIED level, `reason_token`, reason and target; CONTENT takes 1–256 distinct blob or ChunkedBlob manifest ids in indexed mode, with no repository or namespace field. REPOSITORY takes one repository and NAMESPACE one namespace, with no object ids (§14 **Terms, levels and scope**). It starts §14 **Lifecycle and completion** and returns its id and completion state. A REPOSITORY or NAMESPACE takedown is equivalent to `SetSuspension{is_takedown = true}` for the override, takedown record, Event, and cache effects. | `failed_precondition` for content level in opaque mode or a target of the wrong object kind; `aborted` for concurrent work. |
 | `GetTakedown`: `GetTakedownRequest` → `GetTakedownResponse` | `takedown_id`; returns the §14 lifecycle record without preserved bytes. | `not_found`. |
 | `ListTakedowns`: `ListTakedownsRequest` → `ListTakedownsResponse` | Optional repository or namespace scope (absent means all), `page_size` 1–100 and opaque page token; returns records and next token. | `invalid_argument` for a foreign or malformed token. |
 | `Reinstate`: `ReinstateRequest` → `ReinstateResponse` | `operation_id`, `takedown_id`, reason; performs §14 **Reinstatement** while preserving any legally held record. | `failed_precondition` if restoration is forbidden by another active takedown; `aborted` for concurrent work. |
-| `AddBlock`: `AddBlockRequest` → `AddBlockResponse` | Object id, reason and `operation_id`; installs §14 **Blocklist** entry, returning `already_present` for the same entry. A manual block with known holders starts the §14 takedown lifecycle; the response supplies its takedown id and completion state. | `failed_precondition` for a conflicting existing entry. |
-| `RemoveBlock`: `RemoveBlockRequest` → `RemoveBlockResponse` | Object id and reason; removes a block only when §14 **Reinstatement** permits it, and reports `removed`. | `failed_precondition` while takedown or hold still requires the block. |
+| `AddBlock`: `AddBlockRequest` → `AddBlockResponse` | Object id, `reason_token`, reason and `operation_id`; adds a distinct manual action under §14 **Blocklist**, even if other actions already block the id, and returns its `block_action_id`. A manual block with known holders starts the §14 takedown lifecycle; the response supplies its takedown id and completion state. | `aborted` for concurrent work. |
+| `RemoveBlock`: `RemoveBlockRequest` → `RemoveBlockResponse` | Object id, manual `block_action_id` and reason; removes that action under §14 **Blocklist** and reports `removed`. Other actions continue to block the id, and removing the action does not undo a takedown tombstone. | `failed_precondition` for a takedown-sourced action, which only §14 **Reinstatement** can lift. |
 | `SetLegalHold`: `SetLegalHoldRequest` → `SetLegalHoldResponse` | Takedown id, `enabled`, reason; changes preservation legal hold under §14 **Preservation store**. | `failed_precondition` if disabling would violate an active hold. |
 | `ReadPreserved`: `ReadPreservedRequest` → stream `ReadPreservedResponse` | Takedown id, object id and offset; returns ordered chunks with exact offsets and one `last`, solely from §14 **Preservation store**. | `not_found` if not preserved; `failed_precondition` if retention has ended. |
-| `SetSuspension`: `SetSuspensionRequest` → `SetSuspensionResponse` | Exactly one repository or namespace scope, `suspended`, `is_takedown`, reason; sets the separate §12.2 override and returns its state. With `is_takedown = true`, `suspended` MUST be true and `operation_id` is required; the call starts a §14 **Lifecycle and completion** takedown record and returns its id and completion state. That override can be lifted only through §14 **Reinstatement**. | `failed_precondition` for an attempted takedown bypass. |
-| `SetLease`: `SetLeaseRequest` → `SetLeaseResponse` | Exactly one scope and action, non-UNSPECIFIED cause; applies §12.3. `lease_receipt` MUST carry the §15 lease receipt when receipts are enabled and be empty otherwise. | `failed_precondition` for per-ref terms in opaque mode; `permission_denied` for an unauthorized scope or ADMIN cause on a lease-only key. |
-| `ReleaseHold`: `ReleaseHoldRequest` → `ReleaseHoldResponse` | Repository, inspector, inspection id, reason; overrides that prepublication deliberate hold after review. It MUST schedule a new QUARANTINE-phase re-inspection with a new id (§11.2), and MUST NOT release a flagged-id hold through this call. | `failed_precondition` for a hit or flagged-id hold. |
+| `SetSuspension`: `SetSuspensionRequest` → `SetSuspensionResponse` | Exactly one repository or namespace scope, `suspended`, `is_takedown`, `reason_token`, reason; sets the separate §12.2 override and returns its state. With `is_takedown = true`, `suspended` MUST be true and `operation_id` is required; the call starts a §14 **Lifecycle and completion** takedown record and returns its id and completion state. That override can be lifted only through §14 **Reinstatement**. `receipt` carries the §15 receipt when enabled and is empty otherwise. | `failed_precondition` for an attempted takedown bypass. |
+| `SetLease`: `SetLeaseRequest` → `SetLeaseResponse` | Exactly one scope and action, non-UNSPECIFIED cause; applies §12.3. `receipt` MUST carry the §15 lease receipt when receipts are enabled and be empty otherwise. | `failed_precondition` for per-ref terms in opaque mode; `permission_denied` for ADMIN cause or immediate suspension/deletion on a lease-only key. |
+| `ReleaseHold`: `ReleaseHoldRequest` → `ReleaseHoldResponse` | Repository, inspector, inspection id, reason; overrides and satisfies that held prepublication obligation after review. It MUST schedule a new non-blocking QUARANTINE-phase re-inspection (§11.2) and return its `new_inspection_id`. A later reject becomes a takedown as for a postpublication verdict. This call MUST NOT release a flagged-id hold. | `failed_precondition` for a hit or flagged-id hold. |
 | `Reinspect`: `ReinspectRequest` → `ReinspectResponse` | Repository, inspector, old inspection id, reason; schedules deliberate re-inspection and returns a new id, superseding the old logical call (§11.3). It does not itself waive or release a hold. | `failed_precondition` for a completed hit. |
 | `ReleaseFlag`: `ReleaseFlagRequest` → `ReleaseFlagResponse` | Repository, flagged object id, reason; admin review releases the flag and all holds derived solely from it, re-evaluates blocked advances (§11.3), and reports their count. It cannot undo a takedown. | `failed_precondition` for an active hit/takedown. |
-| `ResumeServing`: `ResumeServingRequest` → `ResumeServingResponse` | Repository, inspection id, reason; after review releases the postpublication quarantine serving stop (§11.3), unless another hold or takedown still applies. | `failed_precondition` while another stop applies. |
+| `ResumeServing`: `ResumeServingRequest` → `ResumeServingResponse` | Repository, inspector, inspection id, reason; after review releases the postpublication quarantine serving stop (§11.3), unless another hold or takedown still applies. | `failed_precondition` while another stop applies. |
 | `WaiveObligations`: `WaiveObligationsRequest` → `WaiveObligationsResponse` | Repository, inspector, nonempty distinct `(ref, sequence)` targets with positive per-ref §10.2 sequences, and reason; explicitly waives only that inspector's outstanding obligations for those advances and re-evaluates clearance (§§10.2, 11.3). Inspector removal alone has no effect. | `failed_precondition` for hit, flag, or another inspector's obligation. |
 | `RegisterSshGrant`: `RegisterSshGrantRequest` → `RegisterSshGrantResponse` | 32-byte principal and signed grant bytes; performs SPEC-WRITE-GRANTS §10 registration checks and returns the grant id. | `permission_denied` for a grant whose grantee differs from the principal; `failed_precondition` for a revoked epoch. |
 | `RemoveSshGrant`: `RemoveSshGrantRequest` → `RemoveSshGrantResponse` | Principal and grant id; removes the registration and reports `removed`; existing grant revocation rules still apply. | `not_found` for an unknown principal. |
 | `ListSshGrants`: `ListSshGrantsRequest` → `ListSshGrantsResponse` | Principal, `page_size` 1–100, opaque token; returns its registered grants and next token. | `invalid_argument` for a foreign or malformed token. |
-| `PurgeCache`: `PurgeCacheRequest` → `PurgeCacheResponse` | `operation_id`, repository, nonempty paths/object ids/refs selection and reason; schedules a manual §16.7 purge and returns its `purge_id`. | `failed_precondition` if no purge interface or sink is configured. |
+| `PurgeCache`: `PurgeCacheRequest` → `PurgeCacheResponse` | `operation_id`, exactly one repository or namespace, optional paths/object ids/refs selection and reason; schedules a manual §16.7 purge and returns its `purge_id`. Empty selectors mean a whole-repository or whole-namespace purge. | `failed_precondition` if no purge interface or sink is configured. |
 | `ReadAuditLog`: `ReadAuditLogRequest` → stream `ReadAuditLogResponse` | `from_seq` at least 1, `page_size` 1–100; streams pages of entries, next sequence, chain head and retained checkpoint (§16.6). | `invalid_argument` if the requested prefix was pruned. |
 
 `SetLease` accepts `terms` or `remove` for a repository default,
@@ -2219,6 +2244,9 @@ an authorized `SetLease` assigns new terms. `RENEWAL` maps to
 `ADMIN` at the scope where it is set. Lease receipts attest only a
 committed live state under §15; an accepted request is no promise of
 future retention.
+A `lease`-only key MUST NOT set terms whose effective state at apply
+is already `suspended` or `deleted`; such a change requires a
+`moderation` or `all` key with `cause = ADMIN`.
 
 `RegisterSshGrant` MUST verify SPEC-WRITE-GRANTS §7 steps 1, 3, 4,
 and 5, and MUST reject a grant whose grantee is not the transport
@@ -2245,9 +2273,17 @@ content. The log has no update or delete API.
 
 The canonical audit entry is a JSON object with lower-camel field
 names matching `AuditEntry`, excluding `entryHash`; byte strings are
-lowercase hex, integers are decimal JSON strings, and absent optional
-fields are omitted. `prevHash` is the previous 32-byte hash or 32 zero
-bytes for the first entry. For each entry the server MUST compute:
+lowercase hex and integers are decimal JSON strings. Every entry MUST
+contain `seq`, `recordedAtMs`, `actor`, `procedure`, `requestDigest`,
+`nonce`, `targets`, `result`, `details`, and `prevHash`. The
+`requestDigest` MUST include the `body:` prefix for an authenticated
+request. System entries use empty strings for `requestDigest` and
+`nonce`. Empty `targets` is `[]`; empty `details` and `result.message`
+are `""`. The `result` object always contains `code` and `message`.
+Success uses the audit-only code `ok`; failures use STC §5 codes.
+`operatorLabel` and `operationId` are omitted when empty and included
+otherwise. `prevHash` is the previous 32-byte hash or 32 zero bytes
+for the first entry. For each entry the server MUST compute:
 
 ```text
 entryHash = BLAKE3("mkit-admin-audit:v1" || JCS(entry including prevHash))
@@ -2256,11 +2292,12 @@ entryHash = BLAKE3("mkit-admin-audit:v1" || JCS(entry including prevHash))
 `mkit-admin-audit:v1` is a permanent hash domain under
 SPEC-CONVENTIONS §4. The concatenation has no separator beyond the
 literal domain bytes. The server MUST preserve sequence continuity
-and verify the chain on export. Every authenticated call, successful
-or failed, is logged with its result code, including wrong-role and
-invalid-argument requests after identity verification. Every
-takedown, reinstatement, block, legal hold, suspension, lease change,
-release, re-inspection, waiver, grant change, and purge is logged.
+and verify the chain on export. The server MUST append every
+authenticated call, successful or failed, with its result code, including
+wrong-role and invalid-argument requests after identity verification.
+Every takedown, reinstatement, block, legal hold, suspension, lease
+change, release, re-inspection, waiver, grant change, and purge MUST
+append an entry.
 Automatic inspector hits, timer transitions, relay late-holder
 takedowns, releases, and purges MUST also have system entries. An
 unauthenticated attempt MUST go to metrics only, never the audit log;
@@ -2272,10 +2309,19 @@ legal holds. A timer MUST audit preservation-byte purge when retention
 ends and no legal hold remains. Preservation bytes and blocklist entries remain outside
 §13 GC; their retention and purge are governed by §14 **Preservation
 store**, §14 **Blocklist**, and audited `SetLegalHold`, `RemoveBlock`,
-and `Reinstate` calls here. Pruning an eligible audit prefix MUST keep
+and `Reinstate` calls here. Active takedown and blocklist-action records
+MUST persist independently of audit-log pruning and survive snapshot
+restore. §14 **Interaction with GC, restore and caches** restore MUST
+read those active records to reapply takedown and block
+state. Pruning an eligible audit prefix MUST keep
 its final `(seq, entryHash)` as a checkpoint; the next retained
 entry's `prevHash` MUST equal that hash. Pruning MUST NOT remove an
-entry needed to verify an active preservation interval.
+entry needed to verify an active preservation interval. Before any
+pruning, the checkpoint is `(seq = 0, hash = 32 zero bytes)`; an empty
+log also has that chain head.
+
+Informative: an external, durable anchor of each exported chain head
+is needed to detect truncation of the tail by an actor who controls the log.
 
 `ReadAuditLog` is admin-only in v1. Each page MUST include the retained
 checkpoint and a chain head `(chain_head_seq, chain_head)` from one
@@ -2293,8 +2339,11 @@ delivers a `CachePurgeRequest` through §5's durable outbox, signed
 under §7.1. The request has an audience-unique `purge_id` using
 §6.6's reservation-id grammar; the mkit server audience, exactly one
 of repository identity or namespace identity, a non-UNSPECIFIED trigger,
-and at least one origin-relative URL path, 32-byte object id, or full
-ref name. Paths MUST begin with `/`, contain no query or fragment, and
+and optional origin-relative URL paths, 32-byte object ids, or full
+ref names. A repository selector with no paths, ids, or refs requests a
+whole-repository purge; the analogous namespace selector purges the
+whole namespace. URL paths are matched by exact path. Paths MUST begin
+with `/`, contain no query or fragment, and
 MUST NOT contain credentials. A delivery retry MUST retain the same
 body and purge id but use a fresh hook signing nonce. The response is
 empty. The receiver MUST deduplicate by `purge_id` and treat a repeat
@@ -2368,7 +2417,7 @@ requires. These anchors are informative descriptions of those bytes.
 | `event.response.json` | Empty Event acknowledgement (§12.4, §8). |
 | `cache-purge.request.json` | Manual remote purge with target paths, object ids and refs (§16.7). |
 | `cache-purge.response.json` | Empty purge acknowledgement (§16.7). |
-| `signature.json` | Admit body including credential headers, Outcome body, and Event body, with exact bytes, canonical signing strings, hashes, signatures, and full headers (§7.1). |
+| `signature.json` | Admit body including credential headers, Outcome, Event, and CachePurge bodies, with exact bytes, canonical signing strings, hashes, signatures, and full headers (§7.1). |
 | `key-list.json` | Public test key distribution document (§7.2). |
 | `MANIFEST.txt` | BLAKE3 hashes of every other golden file, including both Admit attempts (SPEC-CONVENTIONS §5). |
 
@@ -2376,8 +2425,11 @@ Informative: the signature vectors contain a clearly labelled test seed.
 It is public fixture material and is not a deployment signing key.
 
 The fixtures under `rust/tests/golden/admin/` pin the §16 envelope,
-role-bearing key list, representative admin procedures, and the
-three-entry audit chain. Their `MANIFEST.txt` pins each file's bytes.
+role-bearing key list, representative admin procedures (including empty
+lease and suspension receipts), and the three-entry audit chain. The
+lease-key `ReleaseHold` signature receives the chained wrong-role denial;
+the response fixture depicts an authorized moderator's call. Their
+`MANIFEST.txt` pins each file's bytes.
 
 The indexed-mode detail fixtures under `rust/tests/golden/transport/`
 pin STC §7.6 and SPEC-SERVER §9.5:

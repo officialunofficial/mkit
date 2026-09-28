@@ -47,9 +47,12 @@ message TakedownRequest {
   repeated bytes object_ids = 3;
   string repository = 4;
   string namespace = 5;
+  // Private audit text; never copied to notices, Events, or public responses.
   string reason = 6;
   // Optional signed operator label, covered by the request signature.
   string operator_label = 7;
+  // Public reason from SPEC-SERVER §14.6; reason is private audit text.
+  string reason_token = 8;
 }
 message TakedownResponse {
   string takedown_id = 1;
@@ -66,6 +69,7 @@ message TakedownRecord {
   bool complete = 7;
   int64 created_at_ms = 8;
   int64 retention_until_ms = 9;
+  string reason_token = 10;
 }
 message GetTakedownResponse { TakedownRecord takedown = 1; }
 message ListTakedownsRequest {
@@ -87,12 +91,14 @@ message ReinstateResponse { bool complete = 1; }
 
 message AddBlockRequest {
   bytes object_id = 1;
+  // Private audit text.
   string reason = 2;
   string operator_label = 3;
   string operation_id = 4;
+  string reason_token = 5;
 }
 message AddBlockResponse {
-  bool already_present = 1;
+  string block_action_id = 1;
   // Populated if known holders start a takedown.
   string takedown_id = 2;
   bool takedown_complete = 3;
@@ -101,6 +107,8 @@ message RemoveBlockRequest {
   bytes object_id = 1;
   string reason = 2;
   string operator_label = 3;
+  // Identifies the manual action; a takedown-sourced action cannot be removed here.
+  string block_action_id = 4;
 }
 message RemoveBlockResponse { bool removed = 1; }
 message SetLegalHoldRequest {
@@ -125,16 +133,20 @@ message SetSuspensionRequest {
   Scope scope = 1;
   bool suspended = 2;
   bool is_takedown = 3;
+  // Private audit text.
   string reason = 4;
   string operator_label = 5;
   // Required when is_takedown starts a §14 takedown.
   string operation_id = 6;
+  string reason_token = 7;
 }
 message SetSuspensionResponse {
   bool suspended = 1;
   // Populated for a takedown suspension.
   string takedown_id = 2;
   bool takedown_complete = 3;
+  // SPEC-SERVER §15; absent when receipts are disabled.
+  bytes receipt = 4;
 }
 
 message RepositoryLeaseScope { string repository = 1; }
@@ -151,9 +163,10 @@ message PermanentLease {}
 message RemoveLease {}
 enum LeaseChangeCause {
   LEASE_CHANGE_CAUSE_UNSPECIFIED = 0;
-  LEASE_CHANGE_CAUSE_RENEWAL = 1;
-  LEASE_CHANGE_CAUSE_POLICY = 2;
-  LEASE_CHANGE_CAUSE_ADMIN = 3;
+  reserved 1; // EXPIRY is never set by an administrator.
+  LEASE_CHANGE_CAUSE_RENEWAL = 2;
+  LEASE_CHANGE_CAUSE_POLICY = 3;
+  LEASE_CHANGE_CAUSE_ADMIN = 4;
 }
 message SetLeaseRequest {
   oneof scope {
@@ -170,7 +183,7 @@ message SetLeaseRequest {
 }
 message SetLeaseResponse {
   // DSSE lease receipt for the committed change when enabled; SPEC-SERVER §15.
-  bytes lease_receipt = 1;
+  bytes receipt = 1;
 }
 
 message ReleaseHoldRequest {
@@ -180,7 +193,10 @@ message ReleaseHoldRequest {
   string reason = 4;
   string operator_label = 5;
 }
-message ReleaseHoldResponse { bool released = 1; }
+message ReleaseHoldResponse {
+  bool released = 1;
+  string new_inspection_id = 2;
+}
 message ReinspectRequest {
   string repository = 1;
   string inspector = 2;
@@ -201,6 +217,7 @@ message ResumeServingRequest {
   string inspection_id = 2;
   string reason = 3;
   string operator_label = 4;
+  string inspector = 5;
 }
 message ResumeServingResponse { bool resumed = 1; }
 message AdvanceTarget {
@@ -252,6 +269,7 @@ message PurgeCacheRequest {
   repeated string refs = 5;
   string reason = 6;
   string operator_label = 7;
+  string namespace = 8;
 }
 message PurgeCacheResponse { string purge_id = 1; }
 
