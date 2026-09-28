@@ -223,15 +223,16 @@ caller lacks writer view, the ref lies outside a write-only grant, or
 the receipt is missing. The lease selector
 MUST remain available to an otherwise authorized writer for that
 scope while the repository is suspended or deleted; it reveals receipt
-history, not live content. The advance selector MUST apply §12.2:
-under repository or ref suspension it MUST return `permission_denied`
-with public message `lease suspended`.
+history, not live content. The write-only grant-scope check is part of authorization and runs
+before §12.2. The advance selector MUST then apply §12.2: under a
+suspended or deleted effective state of the repository or ref it MUST
+return `permission_denied` with public message `lease suspended`.
 `GetReceiptRequest` MUST select exactly one oneof arm:
 
 | Selector | Fields | Meaning |
 |---|---|---|
 | `advance = 1` | `ref` (full branch head or other ref name), `advance_sequence` (u64) | Retrieve that advance's storage receipt; `0` selects the latest committed advance sequence for the ref, including one whose signature is pending. The branch selector is `refs/heads/<x>` even if the requested write advanced its paired `refs/mkit/packmap/<x>`. |
-| `lease = 2` | `ref` (full ref or empty), `lease_version` (u64), `namespace_scope` (bool) | Retrieve that lease storage receipt. With `namespace_scope = true`, an empty ref selects the namespace of the signed repository identity. Otherwise an empty ref selects repository scope. `0` selects the latest retained version for that scope. |
+| `lease = 2` | `ref` (full ref or empty), `lease_version` (u64), `namespace_scope` (bool) | Retrieve that lease storage receipt. With `namespace_scope = true`, an empty ref selects the namespace of the signed repository identity. Otherwise an empty ref selects repository scope. `0` selects the latest committed `lease_version` for that scope, including one whose signature is pending. |
 
 An absent selector, an empty advance ref, an invalid nonempty ref,
 a packmap ref used as the selector, or `namespace_scope = true` with a
@@ -243,13 +244,13 @@ NOT reset after deletion, recreation, or repository-level deletion.
 JSON as bytes, identical to the bytes returned at issue or replay.
 If the selected committed receipt's signature is pending, the call
 MUST return retryable `unavailable`; `0` MUST NOT fall back to an older
-signed sequence. If receipts are disabled or the selected version was
+signed sequence or version. If receipts are disabled or the selected version was
 never issued or has passed the deployment's `receipt_retention`, the
 call MUST return `not_found`. The server MUST retain the latest
 receipt per ref, including a deletion, and per lease scope as
 SPEC-SERVER §15.6 requires. This read allocates no write replay entry and does not expose the reader's published-view
-state. Advance receipts expose `previous` and the paired `packmap`
-to the writer as part of its own write. SSH and enc clients receive
+state. Advance receipts expose `previous` and the paired `packmap` of a
+committed write on that ref to every caller entitled to the receipt. SSH and enc clients receive
 no storage receipts in M5; their wire schemas do not change.
 
 ---

@@ -3531,7 +3531,7 @@ pub struct AdvanceReceiptSelectorView<'a> {
     ///
     /// Field 1: `ref`
     pub r#ref: ::core::option::Option<&'a str>,
-    /// 0 selects the latest retained receipt
+    /// 0 selects the latest committed advance
     ///
     /// Field 2: `advance_sequence`
     pub advance_sequence: ::core::option::Option<u64>,
@@ -3776,7 +3776,7 @@ impl AdvanceReceiptSelectorOwnedView {
     pub fn r#ref(&self) -> ::core::option::Option<&'_ str> {
         self.0.reborrow().r#ref
     }
-    /// 0 selects the latest retained receipt
+    /// 0 selects the latest committed advance
     ///
     /// Field 2: `advance_sequence`
     #[must_use]
@@ -3820,7 +3820,7 @@ pub struct LeaseReceiptSelectorView<'a> {
     ///
     /// Field 1: `ref`
     pub r#ref: ::core::option::Option<&'a str>,
-    /// 0 selects the latest retained receipt
+    /// 0 selects the latest committed version
     ///
     /// Field 2: `lease_version`
     pub lease_version: ::core::option::Option<u64>,
@@ -4086,7 +4086,7 @@ impl LeaseReceiptSelectorOwnedView {
     pub fn r#ref(&self) -> ::core::option::Option<&'_ str> {
         self.0.reborrow().r#ref
     }
-    /// 0 selects the latest retained receipt
+    /// 0 selects the latest committed version
     ///
     /// Field 2: `lease_version`
     #[must_use]

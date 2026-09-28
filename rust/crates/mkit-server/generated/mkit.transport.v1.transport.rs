@@ -2815,7 +2815,7 @@ pub struct AdvanceReceiptSelector {
     /// Field 1: `ref`
     #[serde(rename = "ref", skip_serializing_if = "::core::option::Option::is_none")]
     pub r#ref: ::core::option::Option<::buffa::alloc::string::String>,
-    /// 0 selects the latest retained receipt
+    /// 0 selects the latest committed advance
     ///
     /// Field 2: `advance_sequence`
     #[serde(
@@ -2985,7 +2985,7 @@ pub struct LeaseReceiptSelector {
     /// Field 1: `ref`
     #[serde(rename = "ref", skip_serializing_if = "::core::option::Option::is_none")]
     pub r#ref: ::core::option::Option<::buffa::alloc::string::String>,
-    /// 0 selects the latest retained receipt
+    /// 0 selects the latest committed version
     ///
     /// Field 2: `lease_version`
     #[serde(

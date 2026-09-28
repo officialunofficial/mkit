@@ -237,12 +237,12 @@ message GetReceiptRequest {
 
 message AdvanceReceiptSelector {
   string ref = 1;                // full ref name
-  uint64 advance_sequence = 2;  // 0 selects the latest retained receipt
+  uint64 advance_sequence = 2;  // 0 selects the latest committed advance
 }
 
 message LeaseReceiptSelector {
   string ref = 1;            // empty selects the repository or namespace lease scope
-  uint64 lease_version = 2;  // 0 selects the latest retained receipt
+  uint64 lease_version = 2;  // 0 selects the latest committed version
   bool namespace_scope = 3;  // with empty ref, selects signed repository's namespace
 }
 

@@ -1249,7 +1249,7 @@ Each ref MUST have an ordered advance sequence. The branch head
 `refs/heads/<x>` and `refs/mkit/packmap/<x>` share one sequence: every
 successful `AdvanceRefs`, head-only `UpdateRef`, or packmap-only
 `UpdateRef` appends an advance to that sequence. Sequence numbers start
-at `1`; `0` selects the latest receipt in STC §2.2. The sequence MUST
+at `1`; `0` selects the latest committed advance in STC §2.2. The sequence MUST
 NOT reset on ref deletion, recreation, or repository-level deletion.
 The advance value is the live (head, packmap) pair, and the pair MUST
 be published together.
@@ -2186,7 +2186,7 @@ filter consumed tickets by whether the pack was already a member or was
 hidden by a hold or flag. Filtering would disclose that hidden state.
 Informative: packs uploaded through an un-ticketed `UploadPack` never
 appear in `added_packs`. The receipt's `previous` and paired
-`packmap` are visible to the writer; they describe that writer's own committed write, not a reader view. An
+`packmap` are visible to every caller entitled to the receipt; they describe a committed write on that ref, not a reader view. An
 advance with no deployment allowance has an empty `reservations`
 array, even if it consumes tickets; a ticketless write that ran Admit
 MUST include its deployment reservation. Entries in `added_packs` MUST
@@ -2277,7 +2277,8 @@ rotation, checks that it still includes its pinned key, and pins the
 newly published key before accepting signatures under it. This
 overlapping list is the continuity path for TOFU pins across rotation.
 A newly listed key under a user-supplied trust root remains `unpinned`
-until the user adds it to that root. A compromised key MUST
+until the user adds it to that root. A user-supplied trust root for an
+origin disables TOFU continuity for that origin. A compromised key MUST
 be removed from the list, thereby invalidating every receipt and notice it
 signed. No transparency log or trusted compromise timestamp is
 specified; a compromised signer can backdate its issue time.
@@ -2296,9 +2297,11 @@ whether a receipt exists. The SPEC-WRITE-GRANTS §9.3 read check MUST
 precede this writer-view check; STC §2.2 fixes the complete order and
 uniform error. A write-only grantee with a signed request has the writer
 view and MAY fetch advance receipts only for refs within that grant's
-ref scopes; a paired packmap maps to its branch for this check. An
-out-of-scope advance receipt MUST receive the uniform `not_found` of
-STC §2.2. Callers with `read` or `read,write` capability, owners, and
+ref scopes; a paired packmap maps to its branch for this check. The same limit
+applies to per-ref lease receipts; repository- and namespace-scope lease
+receipts are not limited. An out-of-scope advance or per-ref lease
+receipt MUST receive the uniform `not_found` of STC §2.2. The scope
+check is part of authorization and runs before §12.2. Callers with `read` or `read,write` capability, owners, and
 authorities are not subject to this grant-scope limit. The lease
 selector MUST remain available to an otherwise authorized writer
 while the repository is suspended or deleted, for receipts of that lease scope. The server MUST
@@ -2308,10 +2311,13 @@ for each repository or ref lease scope while its repository identity remains
 addressable, and each namespace lease scope while its namespace remains
 addressable, including while the effective state is `suspended` or
 `deleted`. This retention obligation begins when the pending signature
-is complete. Lease receipts from repository- or namespace-level
+is complete. The server MUST keep the key fixed at apply until every
+pending signature under it is complete. Disabling receipts stops new
+pending rows but not the completion of existing ones; if the key itself
+is removed, those receipts answer `not_found`. Lease receipts from repository- or namespace-level
 takedowns and reinstatements are available through `GetReceipt` only;
 the takedown and reinstatement admin responses carry no receipt. The advance selector MUST
-enforce §12.2 suspension with `permission_denied` and public message
+enforce a §12.2 suspended or deleted effective state with `permission_denied` and public message
 `lease suspended`; the lease selector remains available as above.
 The server MAY retain older versions for a deployment-set
 `receipt_retention` and MUST return `not_found` for a version it no
