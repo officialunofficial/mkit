@@ -1379,11 +1379,14 @@ async fn upload_part_stream_rejects_chunk_before_header_and_empty_chunk() {
 }
 
 #[tokio::test]
-async fn m1_ref_stubs_precede_validation_and_never_write() {
+async fn deletion_and_ticket_errors_precede_pipeline_writes() {
     for (rpc, extra) in [
         ("UpdateRef", serde_json::json!({ "delete": true })),
         ("AdvanceRefs", serde_json::json!({ "delete": true })),
-        ("AdvanceRefs", serde_json::json!({ "ticketIds": [b64(&A)] })),
+        (
+            "AdvanceRefs",
+            serde_json::json!({ "ticketIds": [b64(&A), b64(&A)] }),
+        ),
     ] {
         let mut config = setup(AuthMode::Open);
         config.meta = Some(
@@ -1391,8 +1394,10 @@ async fn m1_ref_stubs_precede_validation_and_never_write() {
                 .with_fault(MemoryFault::ApplyBefore),
         );
         let server = config.serve();
-        // Missing required legacy fields would fail validation if the stub were late.
-        assert_unimplemented(&server.json(rpc, &extra, &[]).await);
+        assert_eq!(
+            server.json(rpc, &extra, &[]).await.code(),
+            "invalid_argument"
+        );
         let mut valid = if rpc == "UpdateRef" {
             update_json(HEAD, "REF_EXPECTATION_ANY", &A)
         } else {
@@ -1405,14 +1410,17 @@ async fn m1_ref_stubs_precede_validation_and_never_write() {
             .as_object_mut()
             .unwrap()
             .extend(extra.as_object().unwrap().clone());
-        assert_unimplemented(&server.json(rpc, &valid, &[]).await);
+        assert_eq!(
+            server.json(rpc, &valid, &[]).await.code(),
+            "invalid_argument"
+        );
         assert_eq!(server.read(HEAD).await.exists, Some(false));
         assert_eq!(server.read(PACKMAP).await.exists, Some(false));
         assert!(
             server.codes(rpc).is_empty(),
-            "stub must not call the pipeline"
+            "wire validation must not call the pipeline"
         );
-        // The one-shot apply fault is still armed: neither stub reached a write.
+        // The one-shot apply fault is still armed: validation reached no write.
         let legacy = update_json(HEAD, "REF_EXPECTATION_ANY", &A);
         assert_eq!(
             server.json("UpdateRef", &legacy, &[]).await.code(),

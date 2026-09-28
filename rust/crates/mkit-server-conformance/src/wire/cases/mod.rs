@@ -165,6 +165,13 @@ cases! {
     "tickets.upload_pack_bad_token" => tickets::upload_pack_bad_token, M1, [Tickets, AuthV2], [];
     "tickets.upload_pack_binding_denied" => tickets::upload_pack_binding_denied, M1, [Tickets, AuthV2], [];
     "tickets.upload_pack_expired_token" => tickets::upload_pack_expired_token, M1, [Tickets, AuthV2, TestFaults], [];
+    "tickets.advance_ticket_id_errors" => tickets::advance_ticket_id_errors, M1, [Tickets, AuthV2], [];
+    "tickets.advance_marker_then_upload" => tickets::advance_marker_then_upload, M1, [Tickets, AuthV2], [];
+    "tickets.advance_conflicts_keep_ticket" => tickets::advance_conflicts_keep_ticket, M1, [Tickets, AuthV2], [];
+    "refs.delete_pair" => refs::delete_pair, M1, [], [];
+    "tickets.advance_ticket_bindings" => tickets::advance_ticket_bindings, M1, [Tickets, AuthV2], [MultiRepo];
+    "tickets.advance_other_repository" => tickets::advance_other_repository, M1, [Tickets, AuthV2, MultiRepo], [];
+    "tickets.advance_expired_ticket" => tickets::advance_expired_ticket, M1, [Tickets, AuthV2, TestFaults], [];
     "leases.bump_completes_and_writes_continue" => leases::bump_completes_and_writes_continue, M1, [EpochLeases, TestFaults], [];
     "info.shape_and_policy" => info::shape_and_policy, M1, [], [];
     "info.ignores_repository_header" => info::ignores_repository_header, M1, [], [];

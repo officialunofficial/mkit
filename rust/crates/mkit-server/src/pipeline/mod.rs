@@ -18,6 +18,7 @@
 //! `vcs-worker` (`AuthV2`: replay ledger, per-signer quota, atomic
 //! advance) and `mkit serve` over ssh (`TransportIdentity`).
 
+mod advance;
 mod auth;
 mod begin;
 mod coordinator;
@@ -724,6 +725,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     ) -> Result<UpdateRefResult, ServerError> {
         self.observe(a, async {
             check_ref_name(&upd.name)?;
+            if upd.new.is_none()
+                && !matches!(upd.condition, mkit_core::refs::RefWriteCondition::Match(_))
+            {
+                return Err(ServerError::invalid_argument(
+                    "delete requires MATCH and an empty new_id",
+                ));
+            }
             match self.write(a, OpKind::UpdateRef(upd)).await? {
                 StoredResult::UpdateRef(result) => Ok(result),
                 other => Err(stored_mismatch(&other)),
@@ -744,19 +752,72 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         head: RefUpdate,
         packmap: RefUpdate,
     ) -> Result<AdvanceOutcome, ServerError> {
+        self.advance_refs_with_tickets(a, head, packmap, Vec::new())
+            .await
+    }
+
+    /// Advance both refs while consuming the named upload tickets.
+    ///
+    /// # Errors
+    /// Invalid ticket bindings, incomplete uploads, authorization or storage errors.
+    pub async fn advance_refs_with_tickets(
+        &self,
+        a: &Authenticated,
+        head: RefUpdate,
+        packmap: RefUpdate,
+        tickets: Vec<Hash>,
+    ) -> Result<AdvanceOutcome, ServerError> {
         self.observe(a, async {
             check_ref_name(&head.name)?;
             check_ref_name(&packmap.name)?;
-            if self.cfg.sharding == Sharding::D34 {
+            if head.new.is_none() != packmap.new.is_none()
+                || (head.new.is_none()
+                    && (!matches!(head.condition, mkit_core::refs::RefWriteCondition::Match(_))
+                        || !matches!(
+                            packmap.condition,
+                            mkit_core::refs::RefWriteCondition::Match(_)
+                        )))
+            {
+                return Err(ServerError::invalid_argument(
+                    "delete requires MATCH and an empty new_id",
+                ));
+            }
+            if head.new.is_none() && !tickets.is_empty() {
+                return Err(ServerError::invalid_argument("delete consumes no tickets"));
+            }
+            if tickets.len() > crate::store::outbox::MAX_TICKETS_PER_ADVANCE {
+                return Err(ServerError::invalid_argument(
+                    "too many tickets in one advance",
+                ));
+            }
+            let mut distinct = std::collections::BTreeSet::new();
+            if tickets.iter().any(|id| !distinct.insert(id)) {
+                return Err(ServerError::invalid_argument("duplicate ticket id"));
+            }
+            if !tickets.is_empty() || self.cfg.sharding == Sharding::D34 {
                 let head_branch = head.name.strip_prefix("refs/heads/");
-                let packmap_branch = packmap.name.strip_prefix(mkit_core::refs::PACKMAP_REF_PREFIX);
+                let packmap_branch = packmap
+                    .name
+                    .strip_prefix(mkit_core::refs::PACKMAP_REF_PREFIX);
                 if head_branch.is_none() || head_branch != packmap_branch {
-                    return Err(ServerError::invalid_argument(
-                        "AdvanceRefs pairs refs/heads/<x> with refs/mkit/packmap/<x> on this server",
-                    ));
+                    return Err(ServerError::invalid_argument(if tickets.is_empty() {
+                        "AdvanceRefs pairs refs/heads/<x> with refs/mkit/packmap/<x> on this server"
+                    } else {
+                        "ticketed advance requires a branch head and its packmap"
+                    }));
                 }
             }
-            match self.write(a, OpKind::AdvanceRefs { head, packmap }).await? {
+            match self
+                .write(
+                    a,
+                    OpKind::AdvanceRefs {
+                        head,
+                        packmap,
+                        tickets,
+                    },
+                )
+                .await?
+            {
                 StoredResult::AdvanceRefs(outcome) => Ok(outcome),
                 other => Err(stored_mismatch(&other)),
             }
@@ -948,6 +1009,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// A signed or unsigned unary write, stage by stage. In steady state
     /// a signed write costs two backend calls: one `get_many` before any
     /// hook runs (the replay record and the snapshot) and one `apply`.
+    #[allow(clippy::too_many_lines)] // Stage order and multipart session cleanup share this entry point.
     async fn write(&self, a: &Authenticated, kind: OpKind) -> Result<StoredResult, ServerError> {
         let mut op = self.identify(a, kind)?;
         fault!(self, AfterAuthenticate, &op, a);
@@ -967,8 +1029,18 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         };
         op.authz = self.authorize(&op).await?;
         fault!(self, AfterAuthorize, &op, a);
+        let ticketed =
+            matches!(&op.kind, OpKind::AdvanceRefs { tickets, .. } if !tickets.is_empty());
+        if ticketed {
+            let snap = ahead
+                .as_mut()
+                .ok_or_else(|| internal("ticket advance requires atomic metadata"))?;
+            if let Some(stored) = self.ticket_decision(&op, a, &p, snap).await? {
+                return Ok(stored);
+            }
+        }
         let existing = self.begin_decision(&op, a, ahead.as_mut()).await?;
-        let allowance = if existing.is_some() {
+        let allowance = if existing.is_some() || ticketed {
             Allowance::default()
         } else {
             let mut input = AdmissionInput::new(&op);
@@ -979,6 +1051,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             }
             self.admit(input).await?
         };
+        if !matches!(op.kind, OpKind::BeginUpload { .. }) && allowance.reservation.is_some() {
+            return Err(ServerError::unimplemented(
+                "admission reservations on ref writes land with WP-3.3",
+            ));
+        }
         let mut begin = self.begin_write(&op, a, existing, allowance.reservation)?;
         let mut opened_session = None;
         if let Some(BeginWrite::Open(open)) = &mut begin
@@ -1163,7 +1240,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     ) -> Result<(WriteKind, Vec<RefUpdate>, Partition), ServerError> {
         let (kind, refs) = match &op.kind {
             OpKind::UpdateRef(u) => (WriteKind::UpdateRef, vec![u.clone()]),
-            OpKind::AdvanceRefs { head, packmap } => {
+            OpKind::AdvanceRefs { head, packmap, .. } => {
                 (WriteKind::AdvanceRefs, vec![packmap.clone(), head.clone()])
             }
             OpKind::BeginUpload { ref_name, .. } => {
@@ -1347,6 +1424,26 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     ) -> Result<StoredResult, ServerError> {
         let caps = self.meta.capabilities();
         let replay = upload::replay_guard(op);
+        let advance = match &op.kind {
+            OpKind::AdvanceRefs { head, tickets, .. } if !tickets.is_empty() => {
+                Some(advance::AdvanceWrite {
+                    ids: tickets,
+                    signer: op
+                        .auth
+                        .as_ref()
+                        .ok_or_else(|| {
+                            ServerError::failed_precondition("invalid or expired upload ticket")
+                        })?
+                        .signer,
+                    head_ref: &head.name,
+                    repo_id: &op.repo,
+                    repository: &a.repo().identity,
+                    source: p,
+                    shards: self.shards.as_ref(),
+                })
+            }
+            _ => None,
+        };
         let mut req = WriteRequest {
             repo: &op.repo.name,
             kind,
@@ -1362,6 +1459,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     .is_none_or(|snap| snap.get(&keys::repo_known(&op.repo.name)).is_none()),
             rejection: None,
             begin,
+            advance,
         };
         if caps.atomic_multi_key || replay.is_some() || !charges.is_empty() {
             return self.apply_atomic(op, a, p, &req, ahead).await;
@@ -1576,6 +1674,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let mut wanted = req.read_keys();
         wanted.extend(snap.stale_quotas.iter().map(|(_, quota)| quota.clone()));
         self.fill(p, &mut snap, wanted).await?;
+        if let Some(advance) = &req.advance {
+            let detail = advance::detail_keys(&snap, advance)?;
+            self.fill(p, &mut snap, detail).await?;
+        }
         if let Some(BeginWrite::Open(open)) = req.begin {
             begin::read_indexed(&self.meta, p, &open.spec, &mut snap).await?;
             let reservation = crate::store::tickets::keys(&open.spec).reservation;
