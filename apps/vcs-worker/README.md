@@ -8,7 +8,9 @@ normatively specified in
 [`docs/specs/SPEC-TRANSPORT-CONNECT.md`](../../docs/specs/SPEC-TRANSPORT-CONNECT.md))
 on Cloudflare Workers: what an `mkit+https://` remote talks to.
 
-One Worker deployment serves **one mkit repository**. Since WP-M0-17 this
+One Worker deployment serves **one mkit repository** by default;
+`ADDRESSING=multi` (below) serves every repository its namespace policy
+admits. Since WP-M0-17 this
 crate is a **thin deployment of
 [`mkit-server-worker`](../../rust/crates/mkit-server-worker)**: it holds no
 protocol logic and no generated code, only the `#[event(fetch)]` handler and
@@ -119,6 +121,29 @@ line; the first signs and every listed key verifies. Blank lines and `#`
 comments are allowed. `wrangler.dev.jsonc` carries a fake development key.
 Without keys, `BeginUpload` answers `unimplemented`.
 
+### Multi-repository addressing (`ADDRESSING=multi`)
+
+`ADDRESSING=multi` serves every repository the namespace policy admits:
+each request's `X-Repository <ns>/<name>` header selects the repository and
+`AUTH_REPOSITORY` is unused (the shipped `default` value is ignored). Multi
+requires `TICKET_KEYS` — a signed write names its repository, and uploads
+still need tickets — and writes are owner-only (STC §7.5): a signature may
+write only inside its own key's `ed25519-` namespace.
+
+- `NAMESPACE_POLICY=allowlist` (the default) admits only the namespaces in
+  `NAMESPACE_ALLOWLIST`: canonical namespaces (`ed25519-<64 hex>` or
+  `0x<40 hex>`) separated by newlines or commas, `#` comments and blank
+  entries ignored. A missing, malformed or empty allowlist refuses startup
+  (every RPC answers `unavailable` naming the var).
+- `NAMESPACE_POLICY=any` admits every self-certifying namespace and requires
+  `UNSAFE_OPEN_NAMESPACES=true`: without non-default admission (M3) any
+  fresh key resets its namespace's quota, so the open policy is an explicit
+  development opt-in (D27).
+
+The four vars are documented in `wrangler.jsonc`; for a local Multi
+deployment under `wrangler dev`, pass them as `--var` (the conformance
+script's `--multi` phase does exactly that).
+
 The replay record, the per-signer write quota (300 writes and 128 MiB per
 hour) and the effect commit in one batch. A retry returns its recorded
 result, including after a newer ref update; a nonce reused for a different
@@ -174,6 +199,7 @@ wrangler dev -c wrangler.dev.jsonc --var AUTH_AUDIENCE:http://127.0.0.1:8787 \
 # starts wrangler dev on a fresh state directory, runs mkit-server-conformance
 scripts/vcs-worker-conformance.sh
 scripts/vcs-worker-conformance.sh --test-faults   # + clock skew, quota, growth
+scripts/vcs-worker-conformance.sh --multi         # + the Multi-addressing wire cases
 ```
 
 The logic's tests live with it: `cargo nextest run -p mkit-server -p

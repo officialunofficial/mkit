@@ -71,6 +71,17 @@ pub const REPOSITORY_VAR: &str = "AUTH_REPOSITORY";
 pub const PLAN_VAR: &str = "WORKERS_PLAN";
 /// The deployment secret containing upload MAC keys.
 pub const TICKET_KEYS_VAR: &str = "TICKET_KEYS";
+/// The Worker var selecting `single` (default) or `multi` addressing.
+pub const ADDRESSING_VAR: &str = "ADDRESSING";
+/// The Worker var for a multi deployment's namespace policy: `allowlist`
+/// (default) or `any`.
+pub const NAMESPACE_POLICY_VAR: &str = "NAMESPACE_POLICY";
+/// The Worker var holding a multi deployment's namespace allowlist:
+/// namespaces separated by newlines or commas, `#` comments allowed.
+pub const NAMESPACE_ALLOWLIST_VAR: &str = "NAMESPACE_ALLOWLIST";
+/// The Worker var opting `NAMESPACE_POLICY=any` in; must be exactly
+/// `true` when set.
+pub const UNSAFE_OPEN_NAMESPACES_VAR: &str = "UNSAFE_OPEN_NAMESPACES";
 
 /// The largest pack one `UploadPack` may declare: 64 MiB, vcs-worker's
 /// cap. A documented M1 stopgap: resumable parts (WP-1.11) replace it.
@@ -96,8 +107,15 @@ pub struct WorkerConfig {
     /// `AUTH_AUDIENCE`: the canonical origin writes are signed for.
     pub audience: String,
     /// `AUTH_REPOSITORY`: the repository identity writes are signed for.
-    pub repository: String,
-    /// Upload MAC keys; missing keys disable `BeginUpload`.
+    /// `None` under `ADDRESSING=multi`, where it is neither required nor
+    /// read: each request's `X-Repository` selects its repository.
+    pub repository: Option<String>,
+    /// `ADDRESSING` and the namespace-policy vars: one configured
+    /// repository (default) or `X-Repository` routing across the
+    /// policy's namespaces.
+    pub addressing: mkit_server::Addressing,
+    /// Upload MAC keys; missing keys disable `BeginUpload` (and refuse a
+    /// multi deployment outright).
     pub ticket_keys: Option<TicketKeys>,
     /// `SHARDING`: single (default) or d34; guarded against changing existing data.
     pub sharding: Sharding,
@@ -148,21 +166,20 @@ impl WorkerConfig {
         use mkit_server::auth_v2::AuthV2Config;
         use mkit_server::pipeline::{AuthMode, PipelineConfig};
         use mkit_server::upload::UploadLimits;
-        use mkit_server::{Addressing, NamespaceKey, RepoId, RepoName};
 
         let bad = |e: &dyn core::fmt::Display| ConfigError(e.to_string());
-        let auth = AuthV2Config::new(&self.audience, &self.repository).map_err(|e| bad(&e))?;
-        let repo = RepoId {
-            namespace: NamespaceKey::deployment_default(),
-            name: RepoName::new(&self.repository).map_err(|e| bad(&e))?,
-        };
+        // Under multi addressing the signed repository is the request's,
+        // not a configured one: the empty bound the conformance baseline
+        // signs.
+        let auth = AuthV2Config::new(&self.audience, self.repository.as_deref().unwrap_or(""))
+            .map_err(|e| bad(&e))?;
         let limits = UploadLimits {
             max_total_bytes: MAX_PACK_BYTES,
             // vcs-worker had no chunk cap; the body cap bounds the count.
             max_chunks: u32::MAX,
         };
         let mut config =
-            PipelineConfig::new(Addressing::Single { repo }, AuthMode::AuthV2(auth), limits);
+            PipelineConfig::new(self.addressing.clone(), AuthMode::AuthV2(auth), limits);
         config.sharding = self.sharding;
         config.ticket_keys.clone_from(&self.ticket_keys);
         #[cfg(feature = "test-faults")]
@@ -176,15 +193,30 @@ impl WorkerConfig {
     ///
     /// # Errors
     /// A missing `AUTH_AUDIENCE` or `AUTH_REPOSITORY` (vcs-worker parity:
-    /// "`<VAR>` is not configured"), an invalid repository identity, or a malformed `TEST_QUOTA_*` var.
+    /// "`<VAR>` is not configured"; the latter is neither required nor
+    /// read under `ADDRESSING=multi`), an invalid repository identity, a
+    /// malformed `TEST_QUOTA_*` var, or an invalid multi-addressing
+    /// combination: `NAMESPACE_POLICY`/`NAMESPACE_ALLOWLIST`/
+    /// `UNSAFE_OPEN_NAMESPACES` and `TICKET_KEYS` rules.
     pub fn from_vars(var: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
         let required =
             |name: &str| var(name).ok_or_else(|| ConfigError(format!("{name} is not configured")));
         let audience = required(AUDIENCE_VAR)?;
-        let repository = required(REPOSITORY_VAR)?;
-        mkit_core::repo_identity::RepositoryIdentity::parse_bare_allowed(&repository).map_err(
-            |_| ConfigError("AUTH_REPOSITORY is invalid (SPEC-TRANSPORT-CONNECT §7.4)".into()),
-        )?;
+        let multi = match var(ADDRESSING_VAR).as_deref() {
+            None | Some("single") => false,
+            Some("multi") => true,
+            Some(_) => return Err(ConfigError("ADDRESSING must be single or multi".into())),
+        };
+        let repository = if multi {
+            // `wrangler.jsonc` ships a default; under multi it is ignored.
+            None
+        } else {
+            let repository = required(REPOSITORY_VAR)?;
+            mkit_core::repo_identity::RepositoryIdentity::parse_bare_allowed(&repository).map_err(
+                |_| ConfigError("AUTH_REPOSITORY is invalid (SPEC-TRANSPORT-CONNECT §7.4)".into()),
+            )?;
+            Some(repository)
+        };
         let ticket_keys = var(TICKET_KEYS_VAR)
             .map(|text| {
                 TicketKeys::parse_secret(text)
@@ -209,11 +241,14 @@ impl WorkerConfig {
             location_hint: var("NAMESPACE_LOCATION_HINT"),
             jurisdiction,
         };
+        let addressing =
+            resolve_addressing(&var, multi, repository.as_deref(), ticket_keys.is_some())?;
         Ok(Self {
             sharding,
             placement,
             audience,
             repository,
+            addressing,
             ticket_keys,
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
             blob_binding: crate::r2::STORAGE_BINDING,
@@ -239,6 +274,97 @@ impl WorkerConfig {
             }
         })
     }
+}
+
+/// The `Addressing` from the `ADDRESSING`/`NAMESPACE_*` vars: multi reads
+/// its namespace policy and requires `TICKET_KEYS`; single parses the
+/// repository name the caller already validated.
+fn resolve_addressing(
+    var: &impl Fn(&str) -> Option<String>,
+    multi: bool,
+    repository: Option<&str>,
+    has_ticket_keys: bool,
+) -> Result<mkit_server::Addressing, ConfigError> {
+    use mkit_server::policy::{NamespacePolicy, parse_namespace_allowlist};
+    use mkit_server::{MultiAddressing, NamespaceKey, RepoId, RepoName};
+
+    let namespace_policy = var(NAMESPACE_POLICY_VAR);
+    let allowlist = var(NAMESPACE_ALLOWLIST_VAR);
+    let unsafe_open = match var(UNSAFE_OPEN_NAMESPACES_VAR).as_deref() {
+        None => false,
+        Some("true") => true,
+        Some(_) => {
+            return Err(ConfigError(
+                "UNSAFE_OPEN_NAMESPACES must be `true` when set".into(),
+            ));
+        }
+    };
+    if !multi && (namespace_policy.is_some() || allowlist.is_some() || unsafe_open) {
+        return Err(ConfigError(
+            "NAMESPACE_POLICY, NAMESPACE_ALLOWLIST and UNSAFE_OPEN_NAMESPACES require \
+             ADDRESSING=multi"
+                .into(),
+        ));
+    }
+    if unsafe_open && namespace_policy.as_deref() != Some("any") {
+        return Err(ConfigError(
+            "UNSAFE_OPEN_NAMESPACES requires NAMESPACE_POLICY=any".into(),
+        ));
+    }
+    if !multi {
+        let repository = repository.unwrap_or_default();
+        return Ok(mkit_server::Addressing::Single {
+            repo: RepoId {
+                namespace: NamespaceKey::deployment_default(),
+                name: RepoName::new(repository).map_err(|e| ConfigError(e.to_string()))?,
+            },
+        });
+    }
+    let policy = match namespace_policy.as_deref().unwrap_or("allowlist") {
+        "allowlist" => {
+            let Some(text) = allowlist else {
+                return Err(ConfigError(
+                    "ADDRESSING=multi requires NAMESPACE_ALLOWLIST (or NAMESPACE_POLICY=any \
+                     with UNSAFE_OPEN_NAMESPACES=true)"
+                        .into(),
+                ));
+            };
+            NamespacePolicy::Allowlist(
+                parse_namespace_allowlist(&text)
+                    .map_err(|e| ConfigError(format!("NAMESPACE_ALLOWLIST is invalid: {e}")))?,
+            )
+        }
+        "any" => {
+            if allowlist.is_some() {
+                return Err(ConfigError(
+                    "NAMESPACE_ALLOWLIST and NAMESPACE_POLICY=any are mutually exclusive".into(),
+                ));
+            }
+            if !unsafe_open {
+                return Err(ConfigError(
+                    "NAMESPACE_POLICY=any requires UNSAFE_OPEN_NAMESPACES=true: the default \
+                     admission step cannot vet an open namespace set"
+                        .into(),
+                ));
+            }
+            NamespacePolicy::Any {
+                unsafe_without_admission: true,
+            }
+        }
+        _ => {
+            return Err(ConfigError(
+                "NAMESPACE_POLICY must be allowlist or any".into(),
+            ));
+        }
+    };
+    if !has_ticket_keys {
+        return Err(ConfigError(
+            "ADDRESSING=multi requires TICKET_KEYS: signed writes must mint upload tickets".into(),
+        ));
+    }
+    Ok(mkit_server::Addressing::Multi(
+        MultiAddressing::new().with_namespace_policy(policy),
+    ))
 }
 
 /// `TEST_QUOTA_*`: all three or none.
@@ -1092,7 +1218,7 @@ mod glue {
             };
             let repo = RepoId {
                 namespace: NamespaceKey::deployment_default(),
-                name: RepoName::new(&cfg.repository)
+                name: RepoName::new(cfg.repository.as_deref().unwrap_or("default"))
                     .map_err(|e| worker::Error::RustError(e.to_string()))?,
             };
             let reference = format!(
@@ -1175,7 +1301,7 @@ mod tests {
         ]))
         .unwrap();
         assert_eq!(cfg.audience, "https://vcs.example");
-        assert_eq!(cfg.repository, "default");
+        assert_eq!(cfg.repository.as_deref(), Some("default"));
         assert_eq!(cfg.max_body_bytes, DEFAULT_MAX_BODY_BYTES);
         assert_eq!(cfg.blob_binding, "STORAGE");
         assert_eq!(
@@ -1282,7 +1408,151 @@ mod tests {
             (REPOSITORY_VAR, &identity),
         ]))
         .unwrap();
-        assert_eq!(cfg.repository, identity);
+        assert_eq!(cfg.repository.as_deref(), Some(identity.as_str()));
+    }
+
+    fn ns(byte: u8) -> String {
+        format!("ed25519-{}{byte:02x}", "a".repeat(62))
+    }
+
+    /// `ADDRESSING=multi` with its allowlist: the pipeline addresses by
+    /// `X-Repository`, the allowlist's namespaces may write, and
+    /// `AUTH_REPOSITORY` is neither required nor read.
+    #[test]
+    fn multi_vars_build_a_multi_pipeline() {
+        use mkit_server::policy::NamespacePolicy;
+
+        let secret = "dev 1111111111111111111111111111111111111111111111111111111111111111";
+        let allowlist = format!("{},{}", ns(1), ns(2));
+        let pairs = [
+            (AUDIENCE_VAR, "https://vcs.example"),
+            (ADDRESSING_VAR, "multi"),
+            (NAMESPACE_ALLOWLIST_VAR, allowlist.as_str()),
+            (TICKET_KEYS_VAR, secret),
+        ];
+        let cfg = WorkerConfig::from_vars(vars(&pairs)).unwrap();
+        assert_eq!(cfg.repository, None);
+        let mkit_server::Addressing::Multi(multi) = &cfg.addressing else {
+            panic!("ADDRESSING=multi must select multi addressing");
+        };
+        let NamespacePolicy::Allowlist(namespaces) = &multi.namespace_policy else {
+            panic!("the default multi namespace policy is an allowlist");
+        };
+        assert_eq!(namespaces.len(), 2);
+        assert!(namespaces.contains(&mkit_core::repo_identity::Namespace::parse(&ns(1)).unwrap()));
+        let pipeline = cfg.pipeline_config().unwrap();
+        assert_eq!(pipeline.addressing, cfg.addressing);
+        assert_eq!(
+            pipeline.write_policy,
+            mkit_server::policy::WritePolicy::Owner
+        );
+    }
+
+    /// Every multi var combination the config must refuse.
+    #[test]
+    fn multi_vars_fail_closed() {
+        let secret = "dev 1111111111111111111111111111111111111111111111111111111111111111";
+        let namespace = ns(1);
+        let multi = [
+            (AUDIENCE_VAR, "https://vcs.example"),
+            (ADDRESSING_VAR, "multi"),
+            (NAMESPACE_ALLOWLIST_VAR, namespace.as_str()),
+            (TICKET_KEYS_VAR, secret),
+        ];
+        for (var, value, message) in [
+            ("ADDRESSING", "many", "ADDRESSING must be single or multi"),
+            (
+                NAMESPACE_ALLOWLIST_VAR,
+                "not a namespace",
+                "NAMESPACE_ALLOWLIST is invalid: line 1:",
+            ),
+        ] {
+            let mut pairs = multi.to_vec();
+            pairs.retain(|(k, _)| *k != var);
+            pairs.push((var, value));
+            let err = WorkerConfig::from_vars(vars(&pairs)).unwrap_err();
+            assert!(err.0.starts_with(message), "{var}={value}: {err}");
+        }
+        // Missing the allowlist or the ticket keys.
+        for (drop, message) in [
+            (
+                NAMESPACE_ALLOWLIST_VAR,
+                "ADDRESSING=multi requires NAMESPACE_ALLOWLIST",
+            ),
+            (TICKET_KEYS_VAR, "ADDRESSING=multi requires TICKET_KEYS"),
+        ] {
+            let mut pairs = multi.to_vec();
+            pairs.retain(|(k, _)| *k != drop);
+            let err = WorkerConfig::from_vars(vars(&pairs)).unwrap_err();
+            assert!(err.0.starts_with(message), "without {drop}: {err}");
+        }
+        // Namespace vars are multi-only.
+        for var in [
+            NAMESPACE_POLICY_VAR,
+            NAMESPACE_ALLOWLIST_VAR,
+            UNSAFE_OPEN_NAMESPACES_VAR,
+        ] {
+            let err = WorkerConfig::from_vars(vars(&[
+                (AUDIENCE_VAR, "https://vcs.example"),
+                (REPOSITORY_VAR, "default"),
+                (
+                    var,
+                    if var == UNSAFE_OPEN_NAMESPACES_VAR {
+                        "true"
+                    } else {
+                        "any"
+                    },
+                ),
+            ]))
+            .unwrap_err();
+            assert!(err.0.contains("ADDRESSING=multi"), "{var}: {err}");
+        }
+        // `any` needs the unsafe opt-in, and both options are exclusive.
+        let mut pairs = multi.to_vec();
+        pairs.retain(|(k, _)| *k != NAMESPACE_ALLOWLIST_VAR);
+        pairs.push((NAMESPACE_POLICY_VAR, "any"));
+        let err = WorkerConfig::from_vars(vars(&pairs)).unwrap_err();
+        assert_eq!(
+            err.0,
+            "NAMESPACE_POLICY=any requires UNSAFE_OPEN_NAMESPACES=true: the default \
+             admission step cannot vet an open namespace set"
+        );
+        pairs.push((UNSAFE_OPEN_NAMESPACES_VAR, "true"));
+        let cfg = WorkerConfig::from_vars(vars(&pairs)).unwrap();
+        assert!(matches!(cfg.addressing, mkit_server::Addressing::Multi(_)));
+        pairs.push((NAMESPACE_ALLOWLIST_VAR, namespace.as_str()));
+        assert!(WorkerConfig::from_vars(vars(&pairs)).is_err());
+        pairs.pop();
+        pairs.pop();
+        pairs.push((UNSAFE_OPEN_NAMESPACES_VAR, "1"));
+        assert_eq!(
+            WorkerConfig::from_vars(vars(&pairs)).unwrap_err().0,
+            "UNSAFE_OPEN_NAMESPACES must be `true` when set"
+        );
+        pairs.pop();
+        pairs.push((NAMESPACE_POLICY_VAR, "garbage"));
+        assert_eq!(
+            WorkerConfig::from_vars(vars(&pairs)).unwrap_err().0,
+            "NAMESPACE_POLICY must be allowlist or any"
+        );
+    }
+
+    /// Single addressing is the default and unchanged.
+    #[test]
+    fn single_is_the_default_addressing() {
+        let cfg = WorkerConfig::from_vars(vars(&[
+            (AUDIENCE_VAR, "https://vcs.example"),
+            (REPOSITORY_VAR, "default"),
+        ]))
+        .unwrap();
+        assert!(matches!(
+            cfg.addressing,
+            mkit_server::Addressing::Single { .. }
+        ));
+        assert!(matches!(
+            cfg.pipeline_config().unwrap().addressing,
+            mkit_server::Addressing::Single { .. }
+        ));
     }
 
     #[cfg(feature = "test-faults")]
