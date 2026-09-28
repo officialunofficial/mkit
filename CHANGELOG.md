@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server: add periodic per-Durable-Object logical snapshots to a dedicated R2
+  `BACKUPS` bucket, plus Fresh-only portable restore with epoch advancement,
+  relay re-keying and coordinator recovery. Native `export` and `restore`
+  commands move metadata between backends. In-place logical restore is deferred
+  to the admin API; use Workers PITR or native physical `backup` for recovery
+  of the same deployment.
 - Server: implement authenticated `BeginUpload` tickets with stateless BLAKE3 MAC
   tokens, rotation by key id, admission-free live-ticket/member results, open-ticket
   caps, and byte-identical replay. Configure native keys with `--ticket-key-file`

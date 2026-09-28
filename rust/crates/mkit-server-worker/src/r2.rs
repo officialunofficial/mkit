@@ -556,6 +556,25 @@ impl EnvBucket {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+impl crate::backup::BackupBucket for EnvBucket {
+    async fn put(&self, key: &str, bytes: &[u8], partition_hex: &str) -> Result<(), String> {
+        let metadata =
+            std::collections::HashMap::from([("partition".to_owned(), partition_hex.to_owned())]);
+        self.bucket()?
+            .put(key, bytes.to_vec())
+            .custom_metadata(metadata)
+            .only_if(worker::Conditional {
+                etag_does_not_match: Some("*".to_owned()),
+                ..Default::default()
+            })
+            .execute()
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+}
+
 /// The Workers blob store: packs in the `STORAGE` bucket.
 #[cfg(target_arch = "wasm32")]
 pub type WorkerBlobStore = R2BlobStore<EnvBucket>;

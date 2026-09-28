@@ -54,6 +54,10 @@ fn op(call: &NsCall) -> &'static str {
         NsCall::Stats => "stats",
         NsCall::Probe => "probe",
         NsCall::Export { .. } => "export",
+        #[cfg(feature = "test-faults")]
+        NsCall::TestSnapshot => "test_snapshot",
+        #[cfg(feature = "test-faults")]
+        NsCall::TestImport { .. } => "test_import",
     }
 }
 

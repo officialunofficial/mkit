@@ -20,6 +20,7 @@ mod maintenance;
 pub mod outbox;
 mod partition;
 pub mod read;
+pub mod restore;
 pub mod tickets;
 
 pub use blob::{

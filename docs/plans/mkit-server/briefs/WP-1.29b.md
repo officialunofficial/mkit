@@ -175,3 +175,26 @@ Options:
 - the wasm32 check and the worker build
 - `scripts/check-wasm-dep-graph.sh`
 - `scripts/vcs-worker-conformance.sh` (default phase, plus the round trip)
+
+## Amendment 1 (orchestrator, 2026-09-27)
+
+This amendment replaces B.3's Merge/in-place options, fixed relay jump,
+and the corresponding B.4 CLI and test clauses. Restore is Fresh-only in
+WP-1.29b. The driver and CLI have no Merge mode or `--merge` flag; an
+existing target is refused. Workers PITR and the native physical `backup`
+cover in-place recovery. In-place/Merge logical restore is deferred to
+WP-5.11b.
+
+The driver scans the complete supplied restore set before importing. For
+each ref-shard source S, it reads snapshot `os_S` and every supplied target's
+`rh[S]`, and computes `floor_S = max(snapshot_os_S, max supplied rh[S])`.
+It then imports in dependency order, re-keys each restored `or <seq>` row to
+`or <seq + floor_S>`, and writes `os_S = snapshot_os_S + floor_S`.
+Checked arithmetic refuses overflow. The target is Fresh, so a target absent
+from the set has no `rh[S]`; restored relay rows are upserts and can safely
+be delivered again. The epoch becomes snapshot + 1, or the larger
+`--epoch-at-least N` value. The native restore CLI accepts no `--merge`.
+
+Required regressions include a supplied `rh[S]` greater than snapshot `os_S`,
+an absent target, overflow refusal, epoch floor behavior, a non-empty target,
+and a CLI USAGE refusal for `--merge`. R-112 records this scope and formula.

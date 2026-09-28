@@ -47,6 +47,7 @@
 
 pub mod adapter;
 pub mod alarm;
+pub mod backup;
 pub mod classes;
 pub mod clock;
 pub mod do_sql;

@@ -78,6 +78,21 @@ pub struct LeaseRecovery {
     pub resumed_at_ms: u64,
 }
 
+/// The last consistent Worker snapshot of one partition. A zero export time
+/// and empty key mark a timer that has been seeded but has not fired yet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BackupStateV1 {
+    /// Time of the last snapshot attempt, Unix milliseconds.
+    pub last_export_ms: u64,
+    /// BLAKE3 of the last uploaded portable export.
+    pub digest: Hash,
+    /// R2 object key of the last upload.
+    pub r2_key: String,
+    /// Time of the last successful upload, Unix milliseconds.
+    pub last_upload_ms: u64,
+}
+
 /// An open upload ticket. Its audience is bound by the shard's deployment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -445,6 +460,17 @@ pub fn encode_lease_recovery(recovery: &LeaseRecovery) -> Value {
 /// Decode a declared lease-table recovery marker.
 pub fn decode_lease_recovery(value: &Value) -> Result<LeaseRecovery, StoreError> {
     decode_json(value, "bad lease recovery")
+}
+
+/// Encode a per-partition Worker backup state.
+#[must_use]
+pub fn encode_backup_state(state: &BackupStateV1) -> Value {
+    encode_json(state)
+}
+
+/// Decode a per-partition Worker backup state.
+pub fn decode_backup_state(value: &Value) -> Result<BackupStateV1, StoreError> {
+    decode_json(value, "bad backup state")
 }
 
 /// Validate ticket semantics before opening or after decoding a row.

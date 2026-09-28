@@ -429,19 +429,60 @@ Migrations run on open, so a backup from an older binary is brought forward.
 Restart with the same `--sharding` mode used by the backed-up database
 (R-93); its stored routing mode is checked on startup.
 
-This physical backup covers one native `SQLite` database. WP-1.29b will add
-portable snapshot export for Durable Objects, native `export`/`restore`,
-and a recovery runbook for disaster recovery and backend migration.
+This physical backup covers one native `SQLite` database.
+
+### Disaster recovery and backend moves
+
+For a Workers Durable Object incident within 30 days, use Cloudflare's
+point-in-time restore (PITR) first. For an older disaster, or to move metadata
+between backends, use the portable `.kvlog` snapshots. Export a live native
+`SQLite` database without stopping its writers:
+
+```sh
+mkit-server export --meta sqlite:/srv/mkit/meta.sqlite3 --out /srv/backups/export-2026-09-27
+```
+
+The output directory must be empty. A single `SQLite` read transaction covers
+partition enumeration and every page of every partition. Files are owner-only
+(0600), under `<kind>/<blake3-partition>/<export-ms>-<digest>.kvlog`. Each file
+also carries its partition identity in its records. The native exporter adds a
+root sharding marker from the database's recorded `single` or `d34` mode.
+
+With the destination server stopped, restore into a **new** database path:
+
+```sh
+mkit-server restore --meta sqlite:/srv/mkit/new-meta.sqlite3 \
+  --from /srv/backups/export-2026-09-27 --sharding d34
+```
+
+`--sharding` must match the archive marker. `--epoch-at-least N` can set a
+higher minimum grant epoch. Restore advances fresh coordinator epochs,
+marks their lease tables recovered, re-keys relay sequences and removes backup
+timers/state. Keep traffic off the destination until the command succeeds;
+the restore spans multiple partition transactions. An existing database is
+refused. For an in-place native recovery using a physical backup, follow the
+preceding physical backup instructions.
+
+On Workers, bind a dedicated `BACKUPS` R2 bucket and leave
+`BACKUP_INTERVAL_MS` at its daily default unless operations requires another
+cadence. Configure a 35-day lifecycle rule for the `backups/` prefix only.
+Never apply that rule to `packs/`, which holds live content. The bucket and
+lifecycle rule are deployment steps; inspect them before relying on periodic
+exports. A snapshot older than the maximum accepted envelope validity does
+not carry replay risk from still-valid old envelopes.
+
+Production Worker import and PITR control await the admin API (WP-5.11b).
+Exports above the per-object size cap await segmentation. Index reconciliation
+after restore, a post-restore replay fence, and a GC hold covering backup
+retention remain deferred.
 
 ### Portable logical backup
 
 `mkit_server::store::export_partition` streams one partition's rows in the
 backend-neutral export format, and `import_stream` restores them into any
-backend: another `SQLite` file, a Durable Object, the in-memory store. Use it
-to move between backends or to back up single partitions. It is not a
-snapshot: export a quiesced partition. `ImportMode::Fresh` restores into
-empty partitions; an interrupted import can be rerun with
-`ImportMode::Merge`.
+backend: another `SQLite` file, a Durable Object, the in-memory store. The
+stream alone does not guarantee a snapshot; use a quiesced partition or a
+single backend read transaction as the native command does.
 
 ### Capacity
 

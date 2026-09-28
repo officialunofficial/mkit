@@ -25,6 +25,7 @@
 //! | epoch lease (ref shard) | `el 00` | codec `EpochLease` |
 //! | leased shard (`Coordinator`) | `ls 00 <repo> 00 <shard_ref>` | codec `LeasedShard` |
 //! | lease recovery (`Coordinator`) | `lr 00` | codec `LeaseRecovery` |
+//! | backup state (Worker only; never pruned) | `bk 00` | codec `BackupStateV1` |
 //! | ticket | `t 00 <ticket_id:32>` | codec `TicketV1` |
 //! | ticket idempotency | `ti 00 <repo> 00 <ref> 00 <pack:32> <signer:32>` | raw ticket id |
 //! | open tickets per ref | `tc 00 <repo> 00 <ref>` | be64; absent means 0, deleted at 0 |
@@ -100,6 +101,8 @@ pub const TAG_EPOCH_LEASE: &str = "el";
 pub const TAG_LEASED_SHARD: &str = "ls";
 /// Coordinator's declared lease-table recovery marker tag.
 pub const TAG_LEASE_RECOVERY: &str = "lr";
+/// Per-partition Worker backup state. Never pruned.
+pub const TAG_BACKUP_STATE: &str = "bk";
 /// Timer tag (owned by `timers`).
 pub const TAG_TIMER: &str = "w";
 /// `ContentIndex` holder tag.
@@ -154,6 +157,8 @@ pub const RESERVED_TAGS: &[&str] = &["tb", "i", "l", "pp", "vc", TAG_NAMESPACE_L
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ParsedKey {
+    /// `bk 00`.
+    BackupState,
     /// `sm 00`: the Worker deployment sharding mode.
     ShardingMarker,
     /// `v 00`.
@@ -555,6 +560,12 @@ pub fn lease_recovery() -> Key {
     key(TAG_LEASE_RECOVERY, &[])
 }
 
+/// Per-partition Worker backup state.
+#[must_use]
+pub fn backup_state() -> Key {
+    key(TAG_BACKUP_STATE, &[])
+}
+
 /// `w 00 <due_at> <kind> <reference>` (owned by `timers`).
 #[must_use]
 pub fn timer(due_at_ms: u64, kind: u8, reference: &[u8]) -> Key {
@@ -671,6 +682,16 @@ fn parse_leased_shard(body: &[u8]) -> Option<ParsedKey> {
     })
 }
 
+fn parse_holder(body: &[u8]) -> Option<ParsedKey> {
+    let (object, rest) = body.split_first_chunk::<32>()?;
+    let sep = rest.iter().position(|&b| b == 0)?;
+    Some(ParsedKey::Holder {
+        object: *object,
+        ns: NamespaceKey::from_stored(String::from_utf8(rest[..sep].to_vec()).ok()?),
+        repo: RepoName::new(String::from_utf8(rest[sep + 1..].to_vec()).ok()?).ok()?,
+    })
+}
+
 /// Decode a key of any laid-out class; `None` for a malformed key or a
 /// reserved class.
 #[must_use]
@@ -688,6 +709,7 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
         b"e" if body.is_empty() => ParsedKey::GrantEpoch,
         b"el" if body.is_empty() => ParsedKey::EpochLease,
         b"lr" if body.is_empty() => ParsedKey::LeaseRecovery,
+        b"bk" if body.is_empty() => ParsedKey::BackupState,
         b"ls" => parse_leased_shard(body)?,
         b"nr" if body.is_empty() => ParsedKey::NamespaceRecord,
         b"rr" => ParsedKey::RepoRecord(RepoName::new(text(body)?).ok()?),
@@ -755,15 +777,7 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
                 reference: Bytes::copy_from_slice(reference),
             }
         }
-        b"h" => {
-            let (object, rest) = body.split_first_chunk::<32>()?;
-            let sep = rest.iter().position(|&b| b == 0)?;
-            ParsedKey::Holder {
-                object: *object,
-                ns: NamespaceKey::from_stored(text(&rest[..sep])?),
-                repo: RepoName::new(text(&rest[sep + 1..])?).ok()?,
-            }
-        }
+        b"h" => parse_holder(body)?,
         b"g" => {
             let (object, hold_id) = body.split_first_chunk::<32>()?;
             ParsedKey::Hold {
@@ -812,6 +826,7 @@ mod tests {
             TAG_EPOCH_LEASE,
             TAG_LEASED_SHARD,
             TAG_LEASE_RECOVERY,
+            TAG_BACKUP_STATE,
             TAG_TIMER,
             TAG_HOLDER,
             TAG_HOLD,
@@ -867,6 +882,7 @@ mod tests {
             (grant_epoch(), b"e\0".to_vec()),
             (epoch_lease(), b"el\0".to_vec()),
             (lease_recovery(), b"lr\0".to_vec()),
+            (backup_state(), b"bk\0".to_vec()),
             (
                 leased_shard(&repo("a"), "refs/heads/main"),
                 b"ls\0a\0refs/heads/main".to_vec(),

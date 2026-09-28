@@ -601,6 +601,7 @@ pub use glue::{fetch, ns_object, serve};
 #[cfg(target_arch = "wasm32")]
 mod glue {
     use std::sync::Arc;
+    use std::sync::Once;
 
     use crate::telemetry::{ConsoleMetrics, install};
     use mkit_server::auth_v2::CORS_ALLOW_HEADERS;
@@ -618,6 +619,7 @@ mod glue {
         PLAN_VAR, WorkerConfig, body_too_large_json, dispatch_oneshot_body, over_cap_response,
         plan_capacity, unavailable_json,
     };
+    use crate::backup::{BACKUPS_BINDING, BackupConfig, BackupHandler};
     use crate::clock::WorkerClock;
     use crate::ns_client::{StubTransport, WorkerNamespaceStore};
     use crate::ns_object::NsObject;
@@ -627,6 +629,8 @@ mod glue {
     thread_local! {
         static SHARDING_GUARD: std::cell::RefCell<Option<Settled>> = const { std::cell::RefCell::new(None) };
     }
+
+    static BACKUPS_MISSING_LOG: Once = Once::new();
 
     /// The pipeline a request runs on.
     type WorkerPipeline = Pipeline<WorkerBlobStore, WorkerNamespaceStore, Hooks>;
@@ -714,7 +718,7 @@ mod glue {
     ///
     /// # Errors
     /// Only when the runtime fails to build a response.
-    pub async fn serve(req: Request, env: Env, cfg: &WorkerConfig) -> worker::Result<Response> {
+    pub async fn serve(mut req: Request, env: Env, cfg: &WorkerConfig) -> worker::Result<Response> {
         install();
         if is_options_preflight(&req) {
             return cors_preflight_response(CORS_ALLOW_HEADERS, CORS_ALLOW_METHODS);
@@ -738,6 +742,10 @@ mod glue {
                 unavailable_json(error.public_message()),
                 503,
             )?));
+        }
+        #[cfg(feature = "test-faults")]
+        if let Some(response) = test::backup_round_trip(&mut req, &env, cfg).await? {
+            return Ok(with_cors(response));
         }
         #[cfg(feature = "test-faults")]
         if req.method() == worker::Method::Get && req.path() == test::STATS_PATH {
@@ -805,12 +813,39 @@ mod glue {
         } else {
             registry
         };
+        let backup = BackupConfig::from_vars(|name| env.var(name).ok().map(|v| v.to_string()))
+            .map_err(|error| crate::log_failure(&format!("backup config invalid: {error}")))
+            .ok()
+            .filter(|config| config.interval_ms != 0);
+        let backup = backup.and_then(|config| {
+            if env.bucket(BACKUPS_BINDING).is_ok() {
+                Some(config)
+            } else {
+                BACKUPS_MISSING_LOG.call_once(|| {
+                    crate::log_failure("BACKUPS R2 binding absent; backups disabled");
+                });
+                None
+            }
+        });
+        let registry = if let Some(config) = backup.clone() {
+            registry.register(BackupHandler::new(
+                EnvBucket::new(env.clone(), BACKUPS_BINDING),
+                config,
+            ))
+        } else {
+            registry
+        };
         #[cfg(feature = "test-faults")]
         let registry = registry.register(mkit_server::timers::test_kind::TestTimer);
-        NsObject::new(state, class)
+        let object = NsObject::new(state, class)
             .0
             .with_capacity(capacity)
-            .with_registry(registry)
+            .with_registry(registry);
+        if let Some(config) = backup {
+            object.with_backup_interval(config.interval_ms)
+        } else {
+            object
+        }
     }
 
     #[cfg(feature = "test-faults")]
@@ -818,13 +853,88 @@ mod glue {
         use std::sync::Arc;
 
         use mkit_server::{NamespaceKey, NamespaceStore, Partition};
-        use worker::{Env, Response};
+        use worker::{Env, Method, Request, Response};
 
         use super::super::faults::FaultState;
-        use crate::ns_client::{StubTransport, WorkerNamespaceStore};
+        use crate::naming::{DoTarget, REFSTORE, ROOT_INSTANCE};
+        use crate::ns_client::{NsTransport, StubTransport, WorkerNamespaceStore};
+        use crate::wire::{Blob, NsCall, NsReply, NsRequest};
 
         /// The wire suite's stats hook (M0-07).
         pub(super) const STATS_PATH: &str = "/__mkit_test/stats";
+        const SNAPSHOT_PATH: &str = "/__mkit_test/snapshot";
+        const RESTORE_PATH: &str = "/__mkit_test/restore";
+        const RESTORED_SNAPSHOT_PATH: &str = "/__mkit_test/restored-snapshot";
+        const RESTORED_INSTANCE: &str = "root-restore-test";
+
+        /// A wrangler-dev-only round trip between two `RefStore` instances.
+        pub(super) async fn backup_round_trip(
+            req: &mut Request,
+            env: &Env,
+            cfg: &super::WorkerConfig,
+        ) -> worker::Result<Option<Response>> {
+            let path = req.path();
+            if !matches!(
+                path.as_str(),
+                SNAPSHOT_PATH | RESTORE_PATH | RESTORED_SNAPSHOT_PATH
+            ) {
+                return Ok(None);
+            }
+            if cfg.sharding != mkit_server::pipeline::Sharding::Single {
+                return Response::error("snapshot test route is single-sharding only", 409)
+                    .map(Some);
+            }
+            let is_import = path == RESTORE_PATH;
+            if req.method() != if is_import { Method::Post } else { Method::Get } {
+                return Response::error("method not allowed", 405).map(Some);
+            }
+            let part = Partition::Namespace(NamespaceKey::deployment_default());
+            let target = DoTarget {
+                binding: REFSTORE,
+                name: if path == SNAPSHOT_PATH {
+                    ROOT_INSTANCE
+                } else {
+                    RESTORED_INSTANCE
+                }
+                .into(),
+            };
+            let call = if is_import {
+                let bytes = req.bytes().await?;
+                if bytes.len() > crate::backup::DEFAULT_MAX_BYTES {
+                    return Response::error("snapshot exceeds backup cap", 413).map(Some);
+                }
+                NsCall::TestImport { bytes: Blob(bytes) }
+            } else {
+                NsCall::TestSnapshot
+            };
+            let body = serde_json::to_string(
+                &NsRequest::new(&part, call)
+                    .map_err(|e| worker::Error::RustError(e.to_string()))?,
+            )
+            .map_err(|e| worker::Error::RustError(e.to_string()))?;
+            let transport = StubTransport::new(env.clone(), cfg.placement.clone());
+            let raw = match transport.call(&target, "test_backup", body).await {
+                Ok(raw) => raw,
+                Err(e) => return Response::error(e.to_string(), 503).map(Some),
+            };
+            let reply: NsReply =
+                serde_json::from_str(&raw).map_err(|e| worker::Error::RustError(e.to_string()))?;
+            let response = match reply {
+                NsReply::Snapshot { bytes } => {
+                    let mut response = Response::from_bytes(bytes.0)?;
+                    response
+                        .headers_mut()
+                        .set("Content-Type", "application/octet-stream")?;
+                    response
+                }
+                NsReply::Imported { records } => {
+                    Response::from_json(&serde_json::json!({ "records": records }))?
+                }
+                NsReply::Err { message, .. } => Response::error(message, 400)?,
+                _ => Response::error("unexpected test backup reply", 500)?,
+            };
+            Ok(Some(response))
+        }
 
         thread_local! {
             static FAULTS: Arc<FaultState> = Arc::default();

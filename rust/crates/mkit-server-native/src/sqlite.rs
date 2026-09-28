@@ -198,6 +198,36 @@ impl RusqliteConn {
         self
     }
 
+    /// Run a complete logical export against one WAL read snapshot. Every
+    /// clone of this connection shares the transaction while `f` runs, so
+    /// paged store reads cannot observe commits made between partitions.
+    /// A separate writer connection remains free to commit in WAL mode.
+    ///
+    /// # Errors
+    /// A transaction, callback, or commit error is returned after rollback.
+    pub fn read_transaction<T>(
+        &self,
+        f: impl FnOnce() -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
+        let shared = self.shared.lock();
+        let conn = &shared.conn;
+        if shared.in_tx.get() {
+            return Err(StoreError::unavailable("nested sqlite transaction"));
+        }
+        if !conn.is_autocommit() {
+            return Err(StoreError::unavailable("stale sqlite transaction"));
+        }
+        let tx = Transaction::new_unchecked(conn, TransactionBehavior::Deferred)
+            .map_err(|e| StoreError::from(map_err(conn, &e)))?;
+        shared.in_tx.set(true);
+        let flag = TxFlag(&shared.in_tx);
+        let out = f()?;
+        drop(flag);
+        tx.commit()
+            .map_err(|e| StoreError::from(map_err(conn, &e)))?;
+        Ok(out)
+    }
+
     fn pragma(&self, sql: &str) -> Result<u64, SqlError> {
         pragma(&self.shared.lock().conn, sql)
     }

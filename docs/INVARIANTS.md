@@ -1171,6 +1171,39 @@ chunk-limit and wake-up tests; native SQLite driver tests; Worker Loopback host
 tests. Worker registration, membership reads and coordinator watermarks follow
 in WP-1.23b; writers in WP-1.9/1.10.
 
+## Fresh restore preserves epoch and relay safety
+
+**Always:** logical restore imports into a newly empty store supplied by its
+caller. It imports the root
+sharding marker before other partitions, raises each restored namespace epoch
+above its snapshot value (or to the larger operator floor), and marks every
+restored coordinator lease table recovered before traffic. It drops backup
+state, kind-4 timers and relay scan state. Before importing, it reads every
+source `os` and every supplied target `rh[source]`. It discards restored
+ref-shard epoch leases, forcing the first write to renew against the raised
+coordinator epoch. For each source it sets
+`floor = max(snapshot os, max supplied rh[source])`, re-keys each relay row
+from `seq` to `seq + floor`, and sets `os` to `snapshot os + floor`, refusing
+overflow.
+
+**Because:** a Fresh target contains only the supplied partitions. A target
+absent from the set has no high-water mark. Every restored relay row and the
+source's next sequence therefore exceed every target's `rh[source]`.
+Relay rows currently contain upserts only, so replaying a row has the same
+effect; gaps are harmless because delivery compares sequences only with `rh`.
+Raising the epoch prevents a captured grant from becoming valid again.
+
+**If violated:** relay delivery can skip a required update, a restored grant
+can regain authority through an unexpired old shard lease, or revocation can
+complete while an old lease remains effective.
+
+**Enforced by:** the native CLI refuses an existing database;
+`mkit-server/src/store/restore.rs` checks every supplied target partition and
+validates and transforms the supplied set before import. Its memory and SQLite tests cover
+high-water marks, overflow, epoch changes, ordering and Fresh refusal.
+`mkit-server/src/relay/deliver.rs` guards target upserts and `rh` together.
+In-place and Merge restore require another proof and are deferred to WP-5.11b.
+
 ## Deployment discovery is public and repository-independent
 
 **Always:** GetServerInfo is unauthenticated, never resolves a repository and

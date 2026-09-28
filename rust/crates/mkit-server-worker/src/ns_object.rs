@@ -57,6 +57,8 @@ pub struct PressureStore<C> {
     class: ShardClass,
     clock: Arc<dyn Clock>,
     metrics: Arc<dyn Metrics>,
+    backup_interval_ms: Option<u64>,
+    seeded_due: Mutex<Option<u64>>,
 }
 
 impl<C> core::fmt::Debug for PressureStore<C> {
@@ -83,7 +85,24 @@ impl<C: SqlConn> PressureStore<C> {
             class,
             clock,
             metrics,
+            backup_interval_ms: None,
+            seeded_due: Mutex::default(),
         }
+    }
+
+    /// Seed a backup after the first committed Put in each partition.
+    #[must_use]
+    pub fn with_backup_interval(mut self, interval_ms: u64) -> Self {
+        self.backup_interval_ms = Some(interval_ms);
+        self
+    }
+
+    /// The earliest timer seeded by a committed batch since the last check.
+    pub fn take_seeded_due(&self) -> Option<u64> {
+        self.seeded_due
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
     }
 
     /// The underlying SQL connection.
@@ -133,6 +152,44 @@ impl<C: SqlConn> PressureStore<C> {
             Err(error) => tracing::warn!(error = %error, "storage pressure size read failed"),
         }
     }
+
+    async fn seed_backup_if_needed(&self, partition: &Partition) {
+        let Some(interval_ms) = self.backup_interval_ms else {
+            return;
+        };
+        match self
+            .inner
+            .get(partition, &mkit_server::store::keys::backup_state())
+            .await
+        {
+            Ok(Some(_)) => return,
+            Ok(None) => {}
+            Err(error) => {
+                crate::log_failure(&format!("backup seed state read failed: {error}"));
+                return;
+            }
+        }
+        let now_ms = u64::try_from(self.clock.now_ms()).unwrap_or(0);
+        let due = crate::backup::seeded_due(now_ms, interval_ms);
+        // Call the inner store directly: this batch itself holds Puts and
+        // must not recurse through the post-commit hook.
+        match self
+            .inner
+            .apply(partition, crate::backup::seed_batch(now_ms, interval_ms))
+            .await
+        {
+            Ok(BatchOutcome::Committed) => {
+                let mut pending = self
+                    .seeded_due
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                *pending = Some(pending.map_or(due, |old| old.min(due)));
+            }
+            Ok(BatchOutcome::PreconditionFailed { .. }) => {}
+            Ok(BatchOutcome::DeadlinePassed { .. }) => unreachable!("seed batch has no deadline"),
+            Err(error) => crate::log_failure(&format!("backup seed failed: {error}")),
+        }
+    }
 }
 
 impl<C: SqlConn> NamespaceStore for PressureStore<C> {
@@ -168,6 +225,7 @@ impl<C: SqlConn> NamespaceStore for PressureStore<C> {
         let outcome = self.inner.apply(partition, batch).await?;
         if has_put && outcome == BatchOutcome::Committed {
             self.observe_pressure();
+            self.seed_backup_if_needed(partition).await;
         }
         Ok(outcome)
     }
@@ -296,6 +354,26 @@ async fn dispatch<S: NamespaceStore>(
             .await?;
             NsReply::page(page)
         }
+        #[cfg(feature = "test-faults")]
+        NsCall::TestSnapshot => NsReply::Snapshot {
+            bytes: Blob(crate::backup::test_snapshot(store, p).await?),
+        },
+        #[cfg(feature = "test-faults")]
+        NsCall::TestImport { bytes } => {
+            use mkit_server::store::{ExportReader, ImportMode, Importer};
+            let (header, records) = ExportReader::new(&bytes.0)?;
+            let mut importer = Importer::new(store, &header, ImportMode::Fresh)?;
+            for record in records {
+                let record = record?;
+                if record.partition != *p {
+                    return Err(StoreError::Invalid("test import partition mismatch".into()));
+                }
+                importer.push(record).await?;
+            }
+            NsReply::Imported {
+                records: importer.finish().await?,
+            }
+        }
     };
     Ok((reply, None))
 }
@@ -357,7 +435,7 @@ pub use object::{DoConn, NsObject};
 
 #[cfg(target_arch = "wasm32")]
 mod object {
-    use std::cell::OnceCell;
+    use std::cell::{Cell, OnceCell};
     use std::sync::Arc;
 
     use mkit_server::Clock;
@@ -392,6 +470,9 @@ mod object {
         storage: Storage,
         clock: WorkerClock,
         registry: TimerRegistry<PressureStore<DoConn>>,
+        backup_interval_ms: Option<u64>,
+        /// A request committed a timer Put while an alarm handler awaited R2.
+        alarm_dirty: Cell<bool>,
     }
 
     impl core::fmt::Debug for NsObject {
@@ -423,6 +504,8 @@ mod object {
                 storage: state.storage(),
                 clock: WorkerClock,
                 registry: TimerRegistry::new(),
+                backup_interval_ms: None,
+                alarm_dirty: Cell::new(false),
             };
             (object, state)
         }
@@ -442,6 +525,13 @@ mod object {
             self
         }
 
+        /// Enable post-commit backup seeding for this object.
+        #[must_use]
+        pub fn with_backup_interval(mut self, interval_ms: u64) -> Self {
+            self.backup_interval_ms = Some(interval_ms);
+            self
+        }
+
         /// The store, opened on first use: migration runs once per
         /// instance.
         fn store(&self) -> Result<&PressureStore<DoConn>, mkit_server::StoreError> {
@@ -449,12 +539,15 @@ mod object {
                 return Ok(store);
             }
             let inner = SqlKvStore::open_with_capacity(self.conn.clone(), self.capacity)?;
-            let store = PressureStore::new(
+            let mut store = PressureStore::new(
                 inner,
                 self.class,
                 Arc::new(WorkerClock),
                 Arc::new(crate::telemetry::ConsoleMetrics::default()),
             );
+            if let Some(interval_ms) = self.backup_interval_ms {
+                store = store.with_backup_interval(interval_ms);
+            }
             Ok(self.store.get_or_init(|| store))
         }
 
@@ -481,6 +574,14 @@ mod object {
                     let (reply, earliest) = dispatch(store, &partition, call)
                         .await
                         .unwrap_or_else(|error| (failure(&error), None));
+                    let seeded = store.take_seeded_due();
+                    let earliest = match (earliest, seeded) {
+                        (Some(a), Some(b)) => Some(a.min(b)),
+                        (a, b) => a.or(b),
+                    };
+                    if earliest.is_some() {
+                        self.alarm_dirty.set(true);
+                    }
                     if let Some(earliest) = earliest
                         && let Err(error) = self.lower_alarm(earliest).await
                     {
@@ -522,6 +623,7 @@ mod object {
 
         /// Fire due timers and multiplex all partition heads onto one alarm.
         pub async fn alarm(&self) -> worker::Result<Response> {
+            self.alarm_dirty.set(false);
             let store = self.store().map_err(|error| alarm_error(&error))?;
             let heads = store.timer_heads().map_err(|error| alarm_error(&error))?;
             let now = self.now_ms();
@@ -541,15 +643,24 @@ mod object {
                     next_wake = Some(next_wake.map_or(next, |current: u64| current.min(next)));
                 }
             }
-            let result = match alarm_after_tick_with_current(
-                self.storage.get_alarm().await?,
-                next_wake,
-                now,
-            ) {
+            let current = self.storage.get_alarm().await?;
+            // A request can interleave while a backup awaits R2. Its timer
+            // Put must survive this handler's final set/delete decision.
+            let action = if self.alarm_dirty.get() {
+                AlarmAction::Set(i64::try_from(now).unwrap_or(i64::MAX))
+            } else {
+                alarm_after_tick_with_current(current, next_wake, now)
+            };
+            let result = match action {
                 AlarmAction::Set(next) => self.set_alarm(next).await,
                 AlarmAction::Delete => self.storage.delete_alarm().await,
             };
             if let Err(error) = result {
+                crate::log_failure(&format!("timer alarm update failed: {error}"));
+            }
+            if self.alarm_dirty.replace(false)
+                && let Err(error) = self.set_alarm(i64::try_from(now).unwrap_or(i64::MAX)).await
+            {
                 crate::log_failure(&format!("timer alarm update failed: {error}"));
             }
             Response::ok("timers processed")

@@ -4,6 +4,8 @@
 //! mkit-server serve [--listen <ADDR>] [--listen-enc <ADDR>] --repo-root <DIR> [...]
 //! mkit-server version
 //! mkit-server backup --meta sqlite:<PATH> --out <FILE>
+//! mkit-server export --meta sqlite:<PATH> --out <DIR>
+//! mkit-server restore --meta sqlite:<NEW PATH> --from <DIR>
 //! ```
 //!
 //! See the crate README for the operator guide.
@@ -13,9 +15,9 @@ use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
 use mkit_server::sql::SqlConn;
-use mkit_server_native::config::{MetaArg, ServeArgs, resolve};
+use mkit_server_native::config::{MetaArg, ServeArgs, ShardingArg, resolve};
 use mkit_server_native::telemetry::{DEFAULT_FILTER, init_tracing};
-use mkit_server_native::{RusqliteConn, Shutdown, exit, server, shutdown_signal};
+use mkit_server_native::{RusqliteConn, Shutdown, exit, portable, server, shutdown_signal};
 
 #[derive(Debug, Parser)]
 #[command(name = "mkit-server", version, about = "The mkit server")]
@@ -35,6 +37,10 @@ enum Command {
     Version,
     /// Write a consistent physical `SQLite` backup while the server runs.
     Backup(BackupArgs),
+    /// Write one portable snapshot per `SQLite` partition.
+    Export(ExportArgs),
+    /// Restore portable snapshots into a new `SQLite` database.
+    Restore(RestoreArgs),
 }
 
 #[derive(Debug, Args)]
@@ -45,6 +51,32 @@ struct BackupArgs {
     /// New output file; any existing path is refused.
     #[arg(long)]
     out: PathBuf,
+}
+
+#[derive(Debug, Args)]
+struct ExportArgs {
+    /// Existing `SQLite` metadata database: `sqlite:<PATH>`.
+    #[arg(long)]
+    meta: MetaArg,
+    /// Empty output directory.
+    #[arg(long)]
+    out: PathBuf,
+}
+
+#[derive(Debug, Args)]
+struct RestoreArgs {
+    /// New `SQLite` metadata database: `sqlite:<PATH>`.
+    #[arg(long)]
+    meta: MetaArg,
+    /// Directory containing per-partition `.kvlog` files.
+    #[arg(long)]
+    from: PathBuf,
+    /// Minimum restored namespace epoch.
+    #[arg(long)]
+    epoch_at_least: Option<u64>,
+    /// Metadata routing used by the restored deployment.
+    #[arg(long, value_enum, default_value_t)]
+    sharding: ShardingArg,
 }
 
 fn main() -> ExitCode {
@@ -68,6 +100,34 @@ fn main() -> ExitCode {
         }
         Command::Serve(args) => serve(&args),
         Command::Backup(args) => backup(&args),
+        Command::Export(args) => match portable::export(&args.meta, &args.out) {
+            Ok((partitions, bytes)) => {
+                println!(
+                    "{} ({partitions} partitions, {bytes} bytes)",
+                    args.out.display()
+                );
+                exit::OK
+            }
+            Err((code, error)) => {
+                eprintln!("mkit-server export: {error}");
+                code
+            }
+        },
+        Command::Restore(args) => {
+            match portable::restore(&args.meta, &args.from, args.epoch_at_least, args.sharding) {
+                Ok((partitions, records)) => {
+                    println!(
+                        "{} ({partitions} partitions, {records} records)",
+                        args.from.display()
+                    );
+                    exit::OK
+                }
+                Err((code, error)) => {
+                    eprintln!("mkit-server restore: {error}");
+                    code
+                }
+            }
+        }
     })
 }
 
