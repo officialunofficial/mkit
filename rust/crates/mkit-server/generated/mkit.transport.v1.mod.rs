@@ -66,6 +66,8 @@ pub mod __buffa {
         reg.register_json_any(super::__UPLOAD_PART_RESPONSE_JSON_ANY);
         reg.register_json_any(super::__COMPLETE_UPLOAD_REQUEST_JSON_ANY);
         reg.register_json_any(super::__COMPLETE_UPLOAD_RESPONSE_JSON_ANY);
+        reg.register_json_any(super::__ADMISSION_CHALLENGE_JSON_ANY);
+        reg.register_json_any(super::__CHALLENGE_JSON_ANY);
         reg.register_json_any(super::__PENDING_VERIFICATION_JSON_ANY);
         reg.register_json_any(super::__REDACTION_NOTICE_JSON_ANY);
     }
@@ -206,6 +208,14 @@ pub use self::__buffa::view::CompleteUploadRequestOwnedView;
 pub use self::__buffa::view::CompleteUploadResponseView;
 #[doc(inline)]
 pub use self::__buffa::view::CompleteUploadResponseOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::AdmissionChallengeView;
+#[doc(inline)]
+pub use self::__buffa::view::AdmissionChallengeOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::ChallengeView;
+#[doc(inline)]
+pub use self::__buffa::view::ChallengeOwnedView;
 #[doc(inline)]
 pub use self::__buffa::view::PendingVerificationView;
 #[doc(inline)]

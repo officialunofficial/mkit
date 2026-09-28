@@ -433,6 +433,18 @@ message CompleteUploadResponse {}
 // ----------------------------------------------------------------------------
 // Errors/details.
 
+// Detail on a challenged unary request (SPEC-TRANSPORT-CONNECT §5.1).
+message AdmissionChallenge {
+  repeated Challenge challenges = 1; // 1 to 8 entries, in the server's order of preference
+  string description = 2;            // text for a person; at most 512 bytes of UTF-8
+}
+
+// One opaque admission challenge (SPEC-TRANSPORT-CONNECT §5.1).
+message Challenge {
+  string scheme = 1; // lowercase token: [a-z0-9][a-z0-9.-]{0,63}
+  string value = 2;  // opaque to mkit; at most 8,192 bytes
+}
+
 // Detail on an `unavailable` AdvanceRefs whose consumed pack is still under
 // verification (SPEC-TRANSPORT-CONNECT §7.6; SPEC-SERVER §9.5).
 message PendingVerification {

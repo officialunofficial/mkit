@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Transport: add the `AdmissionChallenge` and `Challenge` error detail messages
+  with pinned binary, protobuf JSON, and Connect error goldens (WP-3.1).
 - Specify server takedown and redaction notices: global content blocklist,
   delta-safe ref and pack rewrites, tombstones, preservation and restore,
   signed DSSE notices on Connect and HTTP 451, and additive transport and
