@@ -66,14 +66,27 @@ fn ref_update(
     expectation: Option<buffa::EnumValue<RefExpectation>>,
     expected_id: Option<&[u8]>,
     new_id: Option<&[u8]>,
+    delete: bool,
 ) -> Result<RefUpdate, ServerError> {
     let expectation = expectation.map_or(0, |e| e.to_i32());
     let expected_id = expected_id.unwrap_or_default();
     let condition = condition_from_wire(expectation, expected_id, UnusedExpectedId::Reject)?;
+    let new = if delete {
+        if !matches!(condition, mkit_core::refs::RefWriteCondition::Match(_))
+            || !new_id.unwrap_or_default().is_empty()
+        {
+            return Err(ServerError::invalid_argument(
+                "delete requires MATCH and an empty new_id",
+            ));
+        }
+        None
+    } else {
+        Some(hash_from_slice(DigestField::NewId, new_id)?)
+    };
     Ok(RefUpdate {
         name: name.unwrap_or_default(),
         condition,
-        new: hash_from_slice(DigestField::NewId, new_id)?,
+        new,
     })
 }
 
@@ -226,15 +239,12 @@ where
     ) -> ServiceResult<UpdateRefResponse> {
         let a = authenticated(&ctx)?;
         let m = request.to_owned_message();
-        if m.delete.unwrap_or(false) {
-            // TODO(WP-1.10): implement ref deletion.
-            return Err(not_yet().into());
-        }
         let upd = ref_update(
             m.name,
             m.expectation,
             m.expected_id.as_deref(),
             m.new_id.as_deref(),
+            m.delete.unwrap_or(false),
         )?;
         let pipe = self.pipe.arc();
         send_wrap(async move {
@@ -258,26 +268,45 @@ where
     ) -> ServiceResult<AdvanceRefsResponse> {
         let a = authenticated(&ctx)?;
         let m = request.to_owned_message();
-        if m.delete.unwrap_or(false) || !m.ticket_ids.is_empty() {
-            // TODO(WP-1.10): implement ticket consumption and ref deletion.
-            return Err(not_yet().into());
+        let delete = m.delete.unwrap_or(false);
+        if delete && !m.ticket_ids.is_empty() {
+            return Err(ServerError::invalid_argument("delete consumes no tickets").into());
+        }
+        if m.ticket_ids.len() > crate::store::outbox::MAX_TICKETS_PER_ADVANCE {
+            return Err(ServerError::invalid_argument("too many tickets in one advance").into());
+        }
+        let mut tickets = Vec::with_capacity(m.ticket_ids.len());
+        for raw in &m.ticket_ids {
+            let id: [u8; 32] = raw
+                .as_slice()
+                .try_into()
+                .map_err(|_| ServerError::invalid_argument("ticket id must be 32 bytes"))?;
+            if tickets.contains(&id) {
+                return Err(ServerError::invalid_argument("duplicate ticket id").into());
+            }
+            tickets.push(id);
         }
         let head = ref_update(
             m.head_ref,
             m.head_expectation,
             m.head_expected_id.as_deref(),
             m.head_new_id.as_deref(),
+            delete,
         )?;
         let packmap = ref_update(
             m.packmap_ref,
             m.packmap_expectation,
             m.packmap_expected_id.as_deref(),
             m.packmap_new_id.as_deref(),
+            delete,
         )?;
         let pipe = self.pipe.arc();
         send_wrap(async move {
             // A conflict is a typed outcome, never an error (§4).
-            let outcome = match pipe.advance_refs(&a, head, packmap).await? {
+            let outcome = match pipe
+                .advance_refs_with_tickets(&a, head, packmap, tickets)
+                .await?
+            {
                 AdvanceOutcome::Committed => WireOutcome::ADVANCE_OUTCOME_COMMITTED,
                 AdvanceOutcome::HeadConflict => WireOutcome::ADVANCE_OUTCOME_HEAD_CONFLICT,
                 AdvanceOutcome::PackmapConflict => WireOutcome::ADVANCE_OUTCOME_PACKMAP_CONFLICT,

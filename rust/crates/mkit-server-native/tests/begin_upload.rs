@@ -2,6 +2,8 @@
 #![cfg(feature = "sqlite")]
 #![allow(clippy::unwrap_used)]
 
+#[cfg(feature = "test-faults")]
+use std::sync::atomic::AtomicBool;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
@@ -18,22 +20,28 @@ use mkit_server::pipeline::{
     DefaultAdmission, Hooks, Pipeline, PipelineConfig, RequestMeta, ShardMap, Sharding,
     SinglePartition,
 };
+#[cfg(feature = "test-faults")]
+use mkit_server::pipeline::{FaultHooks, FaultPoint, TestDirectives};
 use mkit_server::policy::{AuthorizerRole, NamespacePolicy};
 use mkit_server::quota::QuotaScope;
+use mkit_server::relay::{NoHook, RelayBudget, RelayHandler};
 use mkit_server::sql::SqlKvStore;
 use mkit_server::store::{
     Batch, BatchOutcome, BlobStore, Cursor, Key, PackSink, Partition, PartitionStats, Precondition,
     ScanPage, StoreCapabilities, StoreError, Value, Write, codec, keys,
 };
+use mkit_server::timers::{TickBudget, TimerRegistry, registry::kinds, run_due};
 use mkit_server::upload::{UploadLimits, token::TicketKeys};
 use mkit_server::{
     Addressing, AuthzFacts, BeginUploadResult, Code, ManualClock, MemoryBlobStore, MemoryKv,
     MultiAddressing, NamespaceKey, NamespaceStore, NoopMetrics, Operation, Principal, Procedure,
     RefUpdate, ReplayState, RepoId, RepoName, ServerError, StoredResult,
 };
-use mkit_server_conformance::wire::sign::{Signer, body_commitment};
+use mkit_server_conformance::wire::sign::{Signer, body_commitment, pack_commitment};
 use mkit_server_native::{Blocking, RusqliteConn};
 use tokio::sync::Barrier;
+#[cfg(feature = "test-faults")]
+use tokio::sync::Notify;
 
 const AUDIENCE: &str = "http://localhost:9876";
 const BODY: &[u8] = b"begin upload request";
@@ -314,10 +322,43 @@ fn auth<N: NamespaceStore, H: mkit_server::pipeline::HookSet>(
         }
     }
 }
+fn auth_other_repo<N: NamespaceStore>(
+    pipe: &Pipe<N>,
+    mode: Mode,
+    procedure: Procedure,
+) -> Authenticated {
+    let identity = mode.identity().replace("/tickets", "/other");
+    let signer = Signer::new([1; 32], AUDIENCE, &identity);
+    let mut envelope = signer.envelope(procedure.connect_path(), body_commitment(BODY));
+    envelope.created_at = 0;
+    envelope.expires_at = 240_000;
+    envelope.digest = Some(to_hex(&hash(BODY)));
+    let carriage = signer.sign(&envelope);
+    pipe.authenticate(&RequestMeta {
+        procedure,
+        header: &|h| {
+            carriage
+                .headers
+                .iter()
+                .find(|(name, _)| name == h)
+                .map(|(_, v)| v.clone())
+        },
+        unary_body: Some(BODY),
+        transport_principal: None,
+    })
+    .unwrap()
+}
 fn ticket_id(result: &BeginUploadResult) -> [u8; 32] {
     match result {
         BeginUploadResult::Ticket { id, .. } => *id,
         BeginUploadResult::AlreadyPresent => panic!("expected ticket, got {result:?}"),
+    }
+}
+fn upd(name: &str, condition: RefWriteCondition, new: [u8; 32]) -> RefUpdate {
+    RefUpdate {
+        name: name.into(),
+        condition,
+        new: Some(new),
     }
 }
 fn no_writes(calls: &[Call]) {
@@ -351,7 +392,7 @@ async fn warm<N: NamespaceStore>(pipe: &Pipe<N>, mode: Mode) {
         RefUpdate {
             name: REF.into(),
             condition: RefWriteCondition::Any,
-            new: [1; 32],
+            new: Some([1; 32]),
         },
     )
     .await
@@ -536,7 +577,7 @@ async fn present<N: NamespaceStore>(backend: N, clock: Arc<ManualClock>, mode: M
         blobs.clone(),
         spy.clone(),
         config(mode),
-        clock,
+        clock.clone(),
     );
     let a = auth(&pipe, mode, 1, Procedure::BeginUpload);
     let pack = mkit_core::hash::hash(b"present pack");
@@ -940,6 +981,654 @@ macro_rules! backends {
     };
 }
 backends!(lifecycle_memory, lifecycle_sqlite, lifecycle);
+
+fn upload_auth<N: NamespaceStore>(pipe: &Pipe<N>, mode: Mode, pack: &[u8]) -> Authenticated {
+    let signer = Signer::new([1; 32], AUDIENCE, &mode.identity());
+    let mut envelope = signer.envelope(
+        Procedure::UploadPack.connect_path(),
+        pack_commitment(&hash(pack), pack.len() as u64),
+    );
+    envelope.created_at = 0;
+    envelope.expires_at = 240_000;
+    let carriage = signer.sign(&envelope);
+    pipe.authenticate(&RequestMeta {
+        procedure: Procedure::UploadPack,
+        header: &|h| {
+            carriage
+                .headers
+                .iter()
+                .find(|(name, _)| name == h)
+                .map(|(_, v)| v.clone())
+        },
+        unary_body: None,
+        transport_principal: None,
+    })
+    .unwrap()
+}
+
+async fn upload_ticket<N: NamespaceStore>(
+    pipe: &Pipe<N>,
+    mode: Mode,
+    pack: &'static [u8],
+    token: &[u8],
+) {
+    let id = hash(pack);
+    let a = upload_auth(pipe, mode, pack);
+    let mut session = pipe
+        .open_ticketed_upload(&a, Some(&id), Some(pack.len() as u64), token)
+        .await
+        .unwrap();
+    session
+        .push(Some(&id), Some(0), Bytes::from_static(pack), true)
+        .await
+        .unwrap();
+    session.finish().await.unwrap();
+}
+
+async fn advance_flow<N: NamespaceStore + 'static>(
+    backend: N,
+    clock: Arc<ManualClock>,
+    mode: Mode,
+) {
+    const PACK_A: &[u8; 32] = b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const PACK_B: &[u8; 32] = b"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"; // opaque MKPL node
+    let store = Store::new(backend);
+    let blobs = MemoryBlobStore::default();
+    let spy = Arc::new(Spy::default());
+    let pipe = pipeline(
+        store.clone(),
+        blobs.clone(),
+        spy.clone(),
+        config(mode),
+        clock.clone(),
+    );
+    let mut ids = Vec::new();
+    let mut reservations = Vec::new();
+    for pack in [PACK_A.as_slice(), PACK_B.as_slice()] {
+        let begin = auth(&pipe, mode, 1, Procedure::BeginUpload);
+        let result = pipe
+            .begin_upload(&begin, REF, &hash(pack), pack.len() as u64)
+            .await
+            .unwrap();
+        let id = ticket_id(&result);
+        let raw = store
+            .inner
+            .get(&mode.partition(&begin, REF), &keys::ticket(&id))
+            .await
+            .unwrap()
+            .unwrap();
+        reservations.push(codec::decode_ticket(&raw).unwrap().reservation_id);
+        let BeginUploadResult::Ticket { token, .. } = result else {
+            panic!("expected ticket")
+        };
+        upload_ticket(&pipe, mode, pack, &token).await;
+        ids.push(id);
+    }
+    let admissions = spy.admissions.load(Ordering::SeqCst);
+    let advance = auth(&pipe, mode, 1, Procedure::AdvanceRefs);
+    let result = pipe
+        .advance_refs_with_tickets(
+            &advance,
+            upd(REF, RefWriteCondition::Missing, [3; 32]),
+            upd(
+                "refs/mkit/packmap/main",
+                RefWriteCondition::Missing,
+                [4; 32],
+            ),
+            ids.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result, mkit_core::protocol::AdvanceOutcome::Committed);
+    assert_eq!(spy.admissions.load(Ordering::SeqCst), admissions);
+    let partition = mode.partition(&advance, REF);
+    for (id, rid) in ids.iter().zip(&reservations) {
+        assert!(
+            store
+                .inner
+                .get(&partition, &keys::ticket(id))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let row = store
+            .inner
+            .get(&partition, &keys::reservation(rid).unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            codec::decode_reservation(&row).unwrap(),
+            codec::ReservationV1::Committed {
+                bytes_stored: 32,
+                ..
+            }
+        ));
+        assert!(
+            store
+                .inner
+                .get(
+                    &partition,
+                    &keys::ticket_index(
+                        &advance.repo().repo.name,
+                        REF,
+                        &hash(if id == &ids[0] {
+                            PACK_A.as_slice()
+                        } else {
+                            PACK_B.as_slice()
+                        }),
+                        &advance.auth.as_ref().unwrap().signer
+                    )
+                    .unwrap()
+                )
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .inner
+                .get(
+                    &partition,
+                    &keys::timer(TTL, kinds::TICKET_EXPIRY.get(), id)
+                )
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            store
+                .inner
+                .get(
+                    &partition,
+                    &keys::membership(
+                        &advance.repo().repo.name,
+                        &hash(if id == &ids[0] {
+                            PACK_A.as_slice()
+                        } else {
+                            PACK_B.as_slice()
+                        })
+                    )
+                )
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+    assert!(
+        store
+            .inner
+            .get(
+                &partition,
+                &keys::tickets_per_ref(&advance.repo().repo.name, REF).unwrap()
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let backlog = store
+        .inner
+        .get(&partition, &keys::outcome_backlog())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(codec::decode_backlog(&backlog).unwrap().rows, 2);
+    for (i, rid) in reservations.iter().enumerate() {
+        assert!(
+            store
+                .inner
+                .get(
+                    &partition,
+                    &keys::outcome_pending((i + 1) as u64, rid).unwrap()
+                )
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+    assert!(
+        store
+            .inner
+            .get(
+                &partition,
+                &keys::tickets_per_signer(
+                    &advance.repo().repo.name,
+                    REF,
+                    &advance.auth.as_ref().unwrap().signer
+                )
+                .unwrap()
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    if mode.multi {
+        let other_begin = auth_other_repo(&pipe, mode, Procedure::BeginUpload);
+        pipe.begin_upload(&other_begin, REF, &hash(b"other repo seed"), 32)
+            .await
+            .unwrap();
+        let other_exists = auth_other_repo(&pipe, mode, Procedure::PackExists);
+        assert!(
+            !pipe
+                .pack_exists(&other_exists, PackKey::new(hash(PACK_A)))
+                .await
+                .unwrap()
+        );
+        let other_download = auth_other_repo(&pipe, mode, Procedure::DownloadPack);
+        assert_eq!(
+            pipe.download(&other_download, PackKey::new(hash(PACK_A)))
+                .await
+                .unwrap_err()
+                .code(),
+            Code::NotFound
+        );
+    }
+    if mode.sharding == Sharding::D34 {
+        let registry = TimerRegistry::new().register(RelayHandler {
+            target: store.clone(),
+            hook: NoHook,
+            budget: RelayBudget::default(),
+        });
+        run_due(
+            &store,
+            &partition,
+            &registry,
+            clock.as_ref(),
+            0,
+            &TickBudget::default(),
+        )
+        .await
+        .unwrap();
+        for pack in [PACK_A.as_slice(), PACK_B.as_slice()] {
+            let id = hash(pack);
+            let target =
+                D34Shards.membership(&advance.repo().repo, &mkit_server::store::BlobKey::pack(id));
+            assert!(
+                store
+                    .inner
+                    .get(&target, &keys::membership(&advance.repo().repo.name, &id))
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(
+                mkit_server::store::read::is_member(
+                    &store,
+                    &D34Shards,
+                    &advance.repo().repo,
+                    &id,
+                    None
+                )
+                .await
+                .unwrap()
+            );
+            assert!(
+                mkit_server::store::read::is_member(
+                    &store,
+                    &D34Shards,
+                    &advance.repo().repo,
+                    &id,
+                    Some(REF)
+                )
+                .await
+                .unwrap()
+            );
+        }
+    }
+    let later = auth(&pipe, mode, 1, Procedure::BeginUpload);
+    assert!(matches!(
+        pipe.begin_upload(&later, REF, &hash(PACK_A), 32)
+            .await
+            .unwrap(),
+        BeginUploadResult::AlreadyPresent
+    ));
+}
+
+backends!(advance_flow_memory, advance_flow_sqlite, advance_flow);
+
+async fn missing_pack_aborts<N: NamespaceStore>(backend: N, clock: Arc<ManualClock>, mode: Mode) {
+    const PACK: &[u8; 32] = b"cccccccccccccccccccccccccccccccc";
+    let store = Store::new(backend);
+    let blobs = MemoryBlobStore::default();
+    let pipe = pipeline(
+        store.clone(),
+        blobs.clone(),
+        Arc::new(Spy::default()),
+        config(mode),
+        clock,
+    );
+    let begin = auth(&pipe, mode, 1, Procedure::BeginUpload);
+    let result = pipe
+        .begin_upload(&begin, REF, &hash(PACK), 32)
+        .await
+        .unwrap();
+    let id = ticket_id(&result);
+    let raw = store
+        .inner
+        .get(&mode.partition(&begin, REF), &keys::ticket(&id))
+        .await
+        .unwrap()
+        .unwrap();
+    let rid = codec::decode_ticket(&raw).unwrap().reservation_id;
+    let BeginUploadResult::Ticket { token, .. } = result else {
+        panic!("expected ticket")
+    };
+    upload_ticket(&pipe, mode, PACK, &token).await;
+    assert!(
+        blobs
+            .delete(&mkit_server::store::BlobKey::pack(hash(PACK)))
+            .await
+            .unwrap()
+    );
+    let advance = auth(&pipe, mode, 1, Procedure::AdvanceRefs);
+    let err = pipe
+        .advance_refs_with_tickets(
+            &advance,
+            upd(REF, RefWriteCondition::Missing, [3; 32]),
+            upd(
+                "refs/mkit/packmap/main",
+                RefWriteCondition::Missing,
+                [4; 32],
+            ),
+            vec![id],
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::FailedPrecondition);
+    assert_eq!(err.public_message(), "upload not complete for ticket");
+    let partition = mode.partition(&advance, REF);
+    assert!(
+        store
+            .inner
+            .get(&partition, &keys::ticket(&id))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let row = store
+        .inner
+        .get(&partition, &keys::reservation(&rid).unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        codec::decode_reservation(&row).unwrap(),
+        codec::ReservationV1::Aborted {
+            reason: codec::AbortReason::PackMissing,
+            ..
+        }
+    ));
+    let fresh = auth(&pipe, mode, 1, Procedure::BeginUpload);
+    let next = pipe
+        .begin_upload(&fresh, REF, &hash(PACK), 32)
+        .await
+        .unwrap();
+    assert_ne!(ticket_id(&next), id);
+}
+
+backends!(
+    missing_pack_aborts_memory,
+    missing_pack_aborts_sqlite,
+    missing_pack_aborts
+);
+
+async fn mixed_incomplete<N: NamespaceStore>(backend: N, clock: Arc<ManualClock>, mode: Mode) {
+    const LOST: &[u8; 32] = b"dddddddddddddddddddddddddddddddd";
+    const NOT_UPLOADED: &[u8; 32] = b"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    let store = Store::new(backend);
+    let blobs = MemoryBlobStore::default();
+    let pipe = pipeline(
+        store.clone(),
+        blobs.clone(),
+        Arc::new(Spy::default()),
+        config(mode),
+        clock,
+    );
+    let first = auth(&pipe, mode, 1, Procedure::BeginUpload);
+    let not_uploaded = pipe
+        .begin_upload(&first, REF, &hash(NOT_UPLOADED), 32)
+        .await
+        .unwrap();
+    let not_uploaded_id = ticket_id(&not_uploaded);
+    let second = auth(&pipe, mode, 1, Procedure::BeginUpload);
+    let lost = pipe
+        .begin_upload(&second, REF, &hash(LOST), 32)
+        .await
+        .unwrap();
+    let lost_id = ticket_id(&lost);
+    let BeginUploadResult::Ticket { token, .. } = lost else {
+        panic!("expected ticket")
+    };
+    upload_ticket(&pipe, mode, LOST, &token).await;
+    blobs
+        .delete(&mkit_server::store::BlobKey::pack(hash(LOST)))
+        .await
+        .unwrap();
+    let advance = auth(&pipe, mode, 1, Procedure::AdvanceRefs);
+    let err = pipe
+        .advance_refs_with_tickets(
+            &advance,
+            upd(REF, RefWriteCondition::Missing, [3; 32]),
+            upd(
+                "refs/mkit/packmap/main",
+                RefWriteCondition::Missing,
+                [4; 32],
+            ),
+            vec![not_uploaded_id, lost_id],
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::FailedPrecondition);
+    let p = mode.partition(&advance, REF);
+    assert!(
+        store
+            .inner
+            .get(&p, &keys::ticket(&not_uploaded_id))
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        store
+            .inner
+            .get(&p, &keys::ticket(&lost_id))
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+backends!(
+    mixed_incomplete_memory,
+    mixed_incomplete_sqlite,
+    mixed_incomplete
+);
+
+#[cfg(feature = "test-faults")]
+#[derive(Default)]
+struct AdvancePause {
+    armed: AtomicBool,
+    entered: Notify,
+    release: Notify,
+}
+
+#[cfg(feature = "test-faults")]
+struct PauseHook(Arc<AdvancePause>);
+
+#[cfg(feature = "test-faults")]
+impl FaultHooks for PauseHook {
+    async fn at(
+        &self,
+        point: FaultPoint,
+        op: &Operation,
+        _: &TestDirectives,
+    ) -> Result<(), ServerError> {
+        if point == FaultPoint::BeforeFinalApply
+            && op.procedure() == Procedure::AdvanceRefs
+            && self.0.armed.swap(false, Ordering::SeqCst)
+        {
+            self.0.entered.notify_one();
+            self.0.release.notified().await;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "test-faults")]
+fn paused_pipeline<N: NamespaceStore>(
+    store: Store<N>,
+    blobs: MemoryBlobStore,
+    clock: Arc<ManualClock>,
+    mode: Mode,
+    pause: Arc<AdvancePause>,
+) -> Arc<Pipe<N>> {
+    let defaults = Hooks::new();
+    let spy = Arc::new(Spy::default());
+    Arc::new(
+        Pipeline::new(
+            blobs,
+            store,
+            Hooks {
+                authorizer: Policy(spy.clone()),
+                admission: Policy(spy),
+                pre_receive: defaults.pre_receive,
+                receipts: defaults.receipts,
+                outcomes: defaults.outcomes,
+            },
+            config(mode),
+            clock,
+            Arc::new(NoopMetrics),
+        )
+        .unwrap()
+        .with_faults(PauseHook(pause)),
+    )
+}
+
+#[cfg(feature = "test-faults")]
+async fn consume_race<N: NamespaceStore + 'static>(
+    backend: N,
+    clock: Arc<ManualClock>,
+    mode: Mode,
+    same_nonce: bool,
+) {
+    const DATA: &[u8; 32] = b"ffffffffffffffffffffffffffffffff";
+    let store = Store::new(backend);
+    let pause = Arc::new(AdvancePause::default());
+    let pipe = paused_pipeline(
+        store.clone(),
+        MemoryBlobStore::default(),
+        clock,
+        mode,
+        pause.clone(),
+    );
+    let begin = auth(&pipe, mode, 1, Procedure::BeginUpload);
+    let ticket = pipe
+        .begin_upload(&begin, REF, &hash(DATA), 32)
+        .await
+        .unwrap();
+    let id = ticket_id(&ticket);
+    let rid = codec::decode_ticket(
+        &store
+            .inner
+            .get(&mode.partition(&begin, REF), &keys::ticket(&id))
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap()
+    .reservation_id;
+    let BeginUploadResult::Ticket { token, .. } = ticket else {
+        unreachable!()
+    };
+    upload_ticket(&pipe, mode, DATA, &token).await;
+    let first_auth = auth(&pipe, mode, 1, Procedure::AdvanceRefs);
+    let second_auth = if same_nonce {
+        first_auth.clone()
+    } else {
+        auth(&pipe, mode, 1, Procedure::AdvanceRefs)
+    };
+    pause.armed.store(true, Ordering::SeqCst);
+    let blocked = {
+        let pipe = pipe.clone();
+        tokio::spawn(async move {
+            pipe.advance_refs_with_tickets(
+                &first_auth,
+                upd(REF, RefWriteCondition::Missing, [3; 32]),
+                upd(
+                    "refs/mkit/packmap/main",
+                    RefWriteCondition::Missing,
+                    [4; 32],
+                ),
+                vec![id],
+            )
+            .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(5), pause.entered.notified())
+        .await
+        .unwrap();
+    assert_eq!(
+        pipe.advance_refs_with_tickets(
+            &second_auth,
+            upd(REF, RefWriteCondition::Missing, [3; 32]),
+            upd(
+                "refs/mkit/packmap/main",
+                RefWriteCondition::Missing,
+                [4; 32]
+            ),
+            vec![id],
+        )
+        .await
+        .unwrap(),
+        mkit_core::protocol::AdvanceOutcome::Committed
+    );
+    pause.release.notify_one();
+    let losing = blocked.await.unwrap();
+    if same_nonce {
+        assert_eq!(
+            losing.unwrap(),
+            mkit_core::protocol::AdvanceOutcome::Committed
+        );
+    } else {
+        assert_eq!(losing.unwrap_err().code(), Code::FailedPrecondition);
+    }
+    let p = mode.partition(&second_auth, REF);
+    assert!(matches!(
+        codec::decode_reservation(
+            &store
+                .inner
+                .get(&p, &keys::reservation(&rid).unwrap())
+                .await
+                .unwrap()
+                .unwrap()
+        )
+        .unwrap(),
+        codec::ReservationV1::Committed { .. }
+    ));
+    let backlog = store
+        .inner
+        .get(&p, &keys::outcome_backlog())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(codec::decode_backlog(&backlog).unwrap().rows, 1);
+}
+
+#[cfg(feature = "test-faults")]
+backends!(
+    consume_same_nonce_memory,
+    consume_same_nonce_sqlite,
+    consume_race,
+    true
+);
+#[cfg(feature = "test-faults")]
+backends!(
+    consume_different_nonce_memory,
+    consume_different_nonce_sqlite,
+    consume_race,
+    false
+);
+
 backends!(already_present_memory, already_present_sqlite, present);
 backends!(caps_memory, caps_sqlite, caps);
 backends!(

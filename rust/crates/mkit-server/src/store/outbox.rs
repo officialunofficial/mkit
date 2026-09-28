@@ -12,24 +12,18 @@ use super::{
     Precondition, StoreCapabilities, StoreError, Value, Write, keys,
 };
 
-/// Seven tickets fit even with a guarded index deletion for each ticket.
-/// Each ticket uses 9 ops (t guard/delete, ti guard/delete, o guard/put,
-/// oq put, membership put, relay share); each distinct signer uses 2
-/// (its `tu` guard and write).
-///
-/// The advance's shared ops, as `plan_write` builds them, are
-/// [`ADVANCE_SHARED_OPS`] = 22: `NotAfter` 1, grant epoch guard 1, layout
-/// version guard 1, default quota charge 4 (guard, put, window delete,
-/// window put), head and packmap CAS 4, replay 3 (`Absent` p, put p, put
-/// px), the per-ref `tc` counter 2, `os` 2, `oc` 2, the lease guard 1, and the relay kick timer 1:
-/// 7 * (9 + 2) + 22 = 99. WP-1.10 must reserve these ticket ops before
-/// sizing pruning (`plan_prune` fills the remaining budget), and must not
-/// add a second admission charge or an `rk` write to the advance without
-/// re-checking this sum.
+/// Each ticket costs at most nine ops: ticket guard/delete, index
+/// guard/delete, reservation guard/put, pending-outcome put, membership
+/// put and one relay-row share. An advance uses one signer and runs no
+/// admission, so `tu` and `tc` are each guarded/written once. Shared
+/// overhead is at most 21: deadline 1, lease/layout/grant/repo guards up to 4,
+/// two ref CAS pairs 4, replay 3, counters 4, outbox sequence/backlog 4,
+/// and relay kick 1. The real maximal planner batch is tested separately.
+/// Seven tickets cost `9 * 7 + 21 = 84` ops before opportunistic pruning.
 pub const MAX_TICKETS_PER_ADVANCE: usize = 7;
 /// The advance batch's ops outside the per-ticket and per-signer ones.
-pub const ADVANCE_SHARED_OPS: usize = 22;
-const _: () = assert!(MAX_TICKETS_PER_ADVANCE * (9 + 2) + ADVANCE_SHARED_OPS <= MAX_BATCH_OPS);
+pub const ADVANCE_SHARED_OPS: usize = 21;
+const _: () = assert!(MAX_TICKETS_PER_ADVANCE * 9 + ADVANCE_SHARED_OPS <= MAX_BATCH_OPS);
 
 /// Maximum upserts per relay row; two ops guard/advance rh, two remain for hooks.
 pub const MAX_RELAY_PUTS: usize = 96;

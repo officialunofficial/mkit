@@ -81,8 +81,10 @@ the pack exists globally.
 
 ### B.6 Marker present, pack missing
 
-The ticket stays open, and the answer is `failed_precondition` (the client re-uploads under the same ticket). There is
-no `Aborted(PACK_MISSING)` in M1. Record in R-122 that 5.3a revisits this.
+Amendment 1 replaces this section: a missing marker leaves the ticket open and returns `failed_precondition`.
+A present marker with a missing pack closes that ticket in a separate guarded transaction and writes
+`Aborted(PACK_MISSING)` before returning `failed_precondition`. On a lost guard race, re-plan the request.
+In a mixed request, abort only tickets whose marker exists but whose pack is missing.
 
 ### B.7 The consumption batch
 
@@ -150,7 +152,7 @@ Add row **R-122**:
 
 > WP-1.10.
 > - The packlist rule and the lag-window `unavailable` are indexed-only (§9.1) and are not in 1.10.
-> - A missing pack with a marker leaves the ticket open (no `PACK_MISSING` in M1; 5.3a revisits).
+> - A marker without a pack records `Aborted(PACK_MISSING)` in a separate transaction per STC §7.7.
 > - Direct-write reservations fail closed until 3.3.
 > - Ticketed advances write uncharged replay rows, and a live ticket can be reused across conflicting advances;
 >   WP-1.14 and WP-1.27 bound this (extends R-111(2)).

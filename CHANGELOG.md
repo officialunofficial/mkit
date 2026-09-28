@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server: `AdvanceRefs` consumes verified upload tickets atomically with ref
+  publication, outcomes and repository membership. Missing packs after upload
+  close their tickets with `Aborted(PACK_MISSING)`. `UpdateRef` and `AdvanceRefs`
+  now support conditional ref deletion; direct writes with admission
+  reservations fail closed until WP-3.3.
+
 - Server: ticketed `UploadPack` now verifies the ticket before reading data,
   streams the full pack without metadata writes, and leaves a content-addressed
   upload marker for later ticket consumption. The advertised BeginUpload

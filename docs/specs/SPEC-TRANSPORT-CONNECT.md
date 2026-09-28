@@ -1292,6 +1292,8 @@ naming the tickets it consumes. A ticket can be consumed only by an
 advance of the ref it names; any other advance is `failed_precondition`.
 A head-only `UpdateRef` consumes no tickets. Packlist nodes (`MKPL`) are
 uploads like any other pack, and need tickets too.
+A server MAY limit `ticket_ids` per advance; over the limit is
+`invalid_argument`.
 
 **Binding.** The ticket's audience, repository, and signer MUST equal
 the request's, and the ticket's `pack_id` and `bytes` MUST equal the
@@ -1407,6 +1409,8 @@ id, is specified in [SPEC-SERVER](SPEC-SERVER.md).
   (§4), as for any advance.
 - A `delete` with any other expectation or a nonempty new id is
   `invalid_argument`.
+- A deletion with `ticket_ids` is `invalid_argument`; deletion consumes no
+  tickets.
 - Deleting an absent ref is a CAS conflict: `failed_precondition` on
   `UpdateRef`.
 

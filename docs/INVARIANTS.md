@@ -1151,8 +1151,10 @@ non-owner and allowlist behavior. Grants and private reads remain M2.
 ## Ticket, reservation and outbox rows keep exactly one outcome per reservation
 
 **Always:** a ticket has a reservation-derived id and a unique guarded `o` row.
-Only a still-Ticketed row can become terminal, in the same batch as ticket
-consumption, ref publication and local membership. Terminal outcomes stay
+Only a still-Ticketed row can become terminal. Consumption commits its outcome
+with ref publication and local membership; a missing pack with a present upload
+marker records `Aborted(PACK_MISSING)` in a separate guarded batch before the
+advance fails. A missing marker leaves the ticket open. Terminal outcomes stay
 durable until acknowledgement, which deletes their delivery index and subtracts
 the exact stored key/value byte count. Shared counters and sequence/backlog
 values are guarded once per batch.
@@ -1167,7 +1169,8 @@ repository membership, and backlog/caps can undercount durable obligations.
 **Enforced by:** `mkit-server/src/store/{tickets,outbox}.rs` pure planner tests,
 strict `store/codec.rs` decodes, and `mkit-server-conformance/src/storage/kv_cases.rs`
 creation, atomic publication, stale-ticket and acknowledgement cases over memory
-and SQLite. RPC composition and expiry are WP-1.9/1.10/1.14; WP-3.3 adds guarded
+and SQLite. WP-1.10 exercises consumption and the defensive abort over native
+memory/SQLite and wire cases; expiry handling is WP-1.14. WP-3.3 adds guarded
 Pending reservations, ReadServed, reconciliation and backlog enforcement.
 ## Relay delivery advances durable per-source watermarks before source cleanup
 
@@ -1396,6 +1399,24 @@ retries charge admission again, or token results disappear with ticket rows.
 memory and SQLite (Single and D34), and the wire `tickets.*` cases.
 Ticket expiry cleanup and admission Pending/Aborted reconciliation remain
 WP-1.14 and WP-3.3 respectively.
+
+## Ticketed advance publishes only completed uploads
+
+**Always:** a ticketed advance checks the ticket row's repository, head ref,
+signer and expiry, then the ticket-specific upload marker and pack blob. It
+skips admission. A typed ref conflict preserves every ticket; a successful
+advance closes each ticket and writes exactly one committed outcome and local
+membership in the same guarded batch. The upload marker is checked before the
+pack so a globally present pack cannot satisfy another ticket.
+
+**Because:** an upload ticket alone does not prove bytes arrived, and a ref
+conflict must remain correctable while the ticket is live.
+
+**If violated:** a repository could claim another upload's pack, lose its
+payment outcome, or strand usable tickets after a CAS conflict.
+
+**Enforced by:** `mkit-server/src/pipeline/advance.rs`, native ticket advance
+flow/race tests, and `mkit-server-conformance` ticket wire cases.
 
 ## Storage pressure observes physical capacity after commit
 

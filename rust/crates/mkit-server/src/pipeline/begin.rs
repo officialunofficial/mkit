@@ -310,6 +310,13 @@ pub(super) fn plan(
         let BeginWrite::Return(answer) = begin else {
             unreachable!()
         };
+        if let BeginUploadResult::Ticket { id, .. } = answer {
+            let key = keys::ticket(id);
+            let raw = snap
+                .get(&key)
+                .ok_or_else(|| ServerError::aborted_retryable("upload ticket race"))?;
+            pre.push(crate::store::Precondition::Equals(key, raw.clone()));
+        }
         return Ok(StoredResult::BeginUpload(answer.clone()));
     };
     let mut spec = open.spec.clone();
@@ -347,9 +354,19 @@ pub(super) fn plan(
                 upload_session: vec![],
             }),
         })),
-        Err(TicketPlanError::Existing(ticket)) if !open.reserved => Ok(StoredResult::BeginUpload(
-            result(&open.keys, &open.audience, &open.repository, &ticket),
-        )),
+        Err(TicketPlanError::Existing(ticket)) if !open.reserved => {
+            let key = keys::ticket(&tickets::ticket_id(&ticket.reservation_id));
+            let raw = snap
+                .get(&key)
+                .ok_or_else(|| ServerError::aborted_retryable("upload ticket race"))?;
+            pre.push(crate::store::Precondition::Equals(key, raw.clone()));
+            Ok(StoredResult::BeginUpload(result(
+                &open.keys,
+                &open.audience,
+                &open.repository,
+                &ticket,
+            )))
+        }
         Err(TicketPlanError::CapExceeded { .. }) if !open.reserved => Ok(StoredResult::Rejected(
             StoredRejection::new(crate::Code::FailedPrecondition, CAP_MESSAGE)
                 .expect("final cap error"),

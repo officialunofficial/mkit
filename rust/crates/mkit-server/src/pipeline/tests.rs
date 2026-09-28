@@ -44,6 +44,153 @@ const A: Hash = [0xaa; 32];
 const B: Hash = [0xbb; 32];
 const C: Hash = [0xcc; 32];
 
+fn planned_ticket_advance(count: usize) -> Batch {
+    use crate::store::codec::{ReservationV1, TicketV1};
+    let repo = RepoId {
+        namespace: NamespaceKey::deployment_default(),
+        name: repo_name(),
+    };
+    let shards = D34Shards;
+    let source = shards.ref_shard(&repo, HEAD);
+    let signer = [7; 32];
+    let reservations: Vec<_> = (0..count).map(|i| format!("s:advance-{i}")).collect();
+    let ids: Vec<_> = reservations
+        .iter()
+        .map(|rid| crate::store::tickets::ticket_id(rid))
+        .collect();
+    let advance = advance::AdvanceWrite {
+        ids: &ids,
+        signer,
+        head_ref: HEAD,
+        repo_id: &repo,
+        repository: REPO,
+        source: &source,
+        shards: &shards,
+    };
+    let refs = [upd(PACKMAP, Missing, B), upd(HEAD, Missing, C)];
+    let replay = ReplayGuard {
+        scope: [1; 32],
+        fingerprint: [2; 32],
+        expires_at_ms: T0 + 60_000,
+    };
+    let req = WriteRequest {
+        repo: &repo.name,
+        kind: WriteKind::AdvanceRefs,
+        refs: &refs,
+        replay: Some(replay),
+        charges: &[],
+        grant: None,
+        lease: None,
+        layout_version: false,
+        mark_repo_known: false,
+        begin: None,
+        advance: Some(advance.clone()),
+        rejection: None,
+    };
+    let mut snap = snapshot(&req, &[]);
+    let tickets: Vec<_> = reservations
+        .iter()
+        .enumerate()
+        .map(|(i, rid)| {
+            let mut pack_id = [0; 32];
+            pack_id[0] = u8::try_from(i).unwrap() << 4;
+            TicketV1 {
+                repo: repo.name.clone(),
+                ref_name: HEAD.into(),
+                signer,
+                pack_id,
+                bytes: 32,
+                part_size: 8 * 1024 * 1024,
+                created_at_ms: (T0 - 1_000) as u64,
+                expires_at_ms: (T0 + 60_000) as u64,
+                reservation_id: rid.clone(),
+                upload_session: None,
+            }
+        })
+        .collect();
+    for (id, ticket) in ids.iter().zip(&tickets) {
+        snap.insert(keys::ticket(id), Some(codec::encode_ticket(ticket)));
+    }
+    for key in advance::detail_keys(&snap, &advance).unwrap() {
+        snap.insert(key, None);
+    }
+    for (id, ticket) in ids.iter().zip(&tickets) {
+        snap.insert(
+            keys::ticket_index(&repo.name, HEAD, &ticket.pack_id, &signer).unwrap(),
+            Some(codec::encode_ref_id(id)),
+        );
+        snap.insert(
+            keys::reservation(&ticket.reservation_id).unwrap(),
+            Some(codec::encode_reservation(&ReservationV1::Ticketed {
+                ticket_id: *id,
+            })),
+        );
+    }
+    snap.insert(
+        keys::tickets_per_ref(&repo.name, HEAD).unwrap(),
+        Some(codec::encode_u64(count as u64)),
+    );
+    snap.insert(
+        keys::tickets_per_signer(&repo.name, HEAD, &signer).unwrap(),
+        Some(codec::encode_u64(count as u64)),
+    );
+    let Planned::Apply(plan) = plan_write(&req, &snap, &clock_at(T0 as u64, None)).unwrap() else {
+        panic!("expected batch")
+    };
+    plan.batch.validate(&StoreCapabilities::full()).unwrap();
+    plan.batch
+}
+
+#[test]
+fn seven_ticket_advance_plans_a_valid_real_batch() {
+    let batch = planned_ticket_advance(7);
+    assert!(
+        batch.preconditions.len() + batch.writes.len()
+            <= crate::store::outbox::MAX_TICKETS_PER_ADVANCE * 9
+                + crate::store::outbox::ADVANCE_SHARED_OPS
+    );
+    assert_eq!(batch.writes.iter().filter(|w| matches!(w, Write::Put(k, _) if matches!(keys::parse(k), Some(keys::ParsedKey::OutcomePending { .. })))).count(), 7);
+}
+
+#[test]
+fn golden_two_ticket_advance_batch_keys() {
+    use std::fmt::Write as _;
+    let batch = planned_ticket_advance(2);
+    let mut actual = format!(
+        "ops={} pre={} writes={}\n",
+        batch.preconditions.len() + batch.writes.len(),
+        batch.preconditions.len(),
+        batch.writes.len()
+    );
+    for pre in &batch.preconditions {
+        match pre {
+            Precondition::NotAfter(_) => actual.push_str("pre NotAfter\n"),
+            Precondition::Absent(k) => {
+                writeln!(actual, "pre Absent {}", to_hex_bytes(k.as_bytes())).unwrap()
+            }
+            Precondition::Present(k) => {
+                writeln!(actual, "pre Present {}", to_hex_bytes(k.as_bytes())).unwrap()
+            }
+            Precondition::Equals(k, _) => {
+                writeln!(actual, "pre Equals {}", to_hex_bytes(k.as_bytes())).unwrap()
+            }
+        }
+    }
+    for write in &batch.writes {
+        match write {
+            Write::Put(k, _) => writeln!(actual, "put {}", to_hex_bytes(k.as_bytes())).unwrap(),
+            Write::Delete(k) => writeln!(actual, "delete {}", to_hex_bytes(k.as_bytes())).unwrap(),
+        }
+    }
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/golden/server/advance-two-ticket-batch.txt");
+    if std::env::var("UPDATE_GOLDEN").as_deref() == Ok("1") {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &actual).unwrap();
+    }
+    assert_eq!(std::fs::read_to_string(path).unwrap(), actual);
+}
+
 // ---------------------------------------------------------------- helpers
 
 /// Run a future that never waits (memory stores) to completion.
@@ -293,7 +440,7 @@ fn upd(name: &str, condition: RefWriteCondition, new: Hash) -> RefUpdate {
     RefUpdate {
         name: name.to_owned(),
         condition,
-        new,
+        new: Some(new),
     }
 }
 
@@ -992,6 +1139,7 @@ fn plan_cas_any_missing_match_on_snapshot() {
             lease: None,
             rejection: None,
             begin: None,
+            advance: None,
         };
         let values: Vec<_> = current.map(|id| ref_value(HEAD, id)).into_iter().collect();
         let planned = plan_write(&req, &snapshot(&req, &values), &clock_at(5, None)).unwrap();
@@ -1044,6 +1192,7 @@ fn plan_conflict_writes_only_the_replay_record() {
         lease: None,
         rejection: None,
         begin: None,
+        advance: None,
     };
     let values = [ref_value(PACKMAP, A), ref_value(HEAD, B)];
     let Planned::Apply(plan) =
@@ -1111,6 +1260,7 @@ fn plan_quota_exhaustion_yields_no_batch() {
         lease: None,
         rejection: None,
         begin: None,
+        advance: None,
     };
     let used = QuotaState {
         window_start: T0,
@@ -1161,6 +1311,7 @@ proptest! {
                     lease: None,
             rejection: None,
                     begin: None,
+            advance: None,
         };
         let mut values = Vec::new();
         for (name, current) in [(PACKMAP, currents.0), (HEAD, currents.1)] {
@@ -1779,6 +1930,7 @@ fn plan_signed_conflict_still_charges_quota() {
         lease: None,
         rejection: None,
         begin: None,
+        advance: None,
     };
     let values = [ref_value(HEAD, A)];
     let clock = clock_at(ms(T0), None);
@@ -1834,6 +1986,7 @@ fn plan_prune_fits_the_batch_op_cap() {
         lease: None,
         rejection: None,
         begin: None,
+        advance: None,
     };
     let mut snap = snapshot(&req, &[]);
     let limit = usize::try_from(PRUNE_LIMIT).unwrap();
@@ -1882,6 +2035,7 @@ fn prune_sampling_is_deterministic_one_in_eight() {
         lease: None,
         rejection: None,
         begin: None,
+        advance: None,
     };
     let sampled = (0u8..=255)
         .filter(|b| {
@@ -2344,6 +2498,7 @@ fn d34_prune_retry_refreshes_the_epoch_even_without_a_counted_replan() {
         }),
         rejection: None,
         begin: None,
+        advance: None,
     };
     let ahead = snapshot(
         &req,
@@ -2451,6 +2606,7 @@ fn leased_epoch_checks_use_the_granted_epoch_and_cap_replay_deadlines() {
             mark_repo_known: false,
             rejection: None,
             begin: None,
+            advance: None,
             lease: Some(lease::LeaseWrite {
                 value: codec::EpochLease {
                     epoch: 7,

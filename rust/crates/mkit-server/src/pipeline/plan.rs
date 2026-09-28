@@ -108,7 +108,7 @@ pub(crate) struct ReplayGuard {
 }
 
 /// A write to plan.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub(crate) struct WriteRequest<'a> {
     /// The repository whose refs are written.
@@ -133,6 +133,8 @@ pub(crate) struct WriteRequest<'a> {
     pub(crate) mark_repo_known: bool,
     /// Ticket opening or pre-admission answer.
     pub(crate) begin: Option<&'a super::begin::BeginWrite>,
+    /// Ticketed advance context; rows are re-read at each planning attempt.
+    pub(crate) advance: Option<super::advance::AdvanceWrite<'a>>,
     /// `UploadCommit` only: a final `pre_receive` rejection to store in
     /// place of `UploadPack`, so a retry is answered before re-streaming.
     pub(crate) rejection: Option<&'a StoredRejection>,
@@ -145,6 +147,16 @@ impl WriteRequest<'_> {
         let mut out = Vec::new();
         if let Some(super::begin::BeginWrite::Open(open)) = self.begin {
             out.extend(super::begin::open_keys(&open.spec));
+        }
+        if let Some(super::begin::BeginWrite::Return(crate::replay::BeginUploadResult::Ticket {
+            id,
+            ..
+        })) = self.begin
+        {
+            out.push(keys::ticket(id));
+        }
+        if let Some(advance) = &self.advance {
+            out.extend(advance.ids.iter().map(keys::ticket));
         }
         if self.mark_repo_known {
             out.push(keys::repo_known(self.repo));
@@ -159,8 +171,10 @@ impl WriteRequest<'_> {
         }
         out.extend(self.charges.iter().map(|c| keys::quota(&c.scope)));
         out.extend(self.refs.iter().map(|r| keys::ref_key(self.repo, &r.name)));
-        if let (WriteKind::UploadCommit | WriteKind::BeginUpload, Some(replay)) =
-            (self.kind, self.replay)
+        if let (
+            WriteKind::UploadCommit | WriteKind::BeginUpload | WriteKind::AdvanceRefs,
+            Some(replay),
+        ) = (self.kind, self.replay)
         {
             out.push(keys::replay(&replay.scope));
         }
@@ -243,9 +257,14 @@ pub(crate) fn plan_write(
 ) -> Result<Planned, ServerError> {
     // A racing retry may read ticket/reservation rows after its initial
     // replay observation. Resolve the committed answer before ticket planning.
-    if let Some(result) = replayed_begin_upload(req, snap)? {
+    if let Some(result) = replayed_write(req, snap)? {
         return Ok(Planned::Done(result));
     }
+    let tickets = req
+        .advance
+        .as_ref()
+        .map(|advance| super::advance::validate(snap, advance, clock.business_now_ms))
+        .transpose()?;
     let deadline = Precondition::NotAfter(clock.deadline());
     let mut pre = vec![deadline.clone()];
     let mut puts = Vec::new();
@@ -308,6 +327,11 @@ pub(crate) fn plan_write(
     }
     if !conflict {
         puts.extend(ref_puts);
+        if let (Some(advance), Some(tickets)) = (&req.advance, tickets.as_deref()) {
+            super::advance::plan_consumption(
+                snap, advance, tickets, req.refs, clock, &mut pre, &mut puts,
+            )?;
+        }
     }
 
     let replay_index = match req.replay {
@@ -345,11 +369,11 @@ pub(crate) fn plan_write(
     }))
 }
 
-fn replayed_begin_upload(
+fn replayed_write(
     req: &WriteRequest<'_>,
     snap: &Snapshot,
 ) -> Result<Option<StoredResult>, ServerError> {
-    if req.kind != WriteKind::BeginUpload {
+    if req.kind != WriteKind::BeginUpload && req.advance.is_none() {
         return Ok(None);
     }
     let Some(replay) = req.replay else {
@@ -528,7 +552,10 @@ fn decide_refs(
                 if update.condition != RefWriteCondition::Any {
                     pre.push(guard(key.clone(), snap));
                 }
-                puts.push(Write::Put(key, codec::encode_ref_id(&update.new)));
+                puts.push(match update.new {
+                    Some(id) => Write::Put(key, codec::encode_ref_id(&id)),
+                    None => Write::Delete(key),
+                });
             }
             CasDecision::Conflict(_) => {
                 pre.push(guard(key, snap));
