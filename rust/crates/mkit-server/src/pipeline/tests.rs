@@ -1158,8 +1158,8 @@ fn fresh_shard_uses_coordinator_total_in_lease_read_and_persists_view() {
     assert_eq!(err.code(), Code::ResourceExhausted);
     assert_eq!(
         env.pipe.meta.calls(),
-        2,
-        "read-ahead and lease get_many only"
+        3,
+        "read-ahead, source relay scan, and lease get_many"
     );
     assert!(env.pipe.meta.seen.lock().unwrap().contains(&qt));
     assert!(
@@ -1184,7 +1184,11 @@ fn fresh_shard_uses_coordinator_total_in_lease_read_and_persists_view() {
         now(env.pipe.update_ref(&a, update)).unwrap(),
         UpdateRefResult::Committed
     );
-    assert_eq!(env.pipe.meta.calls() - before, 4);
+    assert_eq!(
+        env.pipe.meta.calls() - before,
+        5,
+        "new shard adds one source relay scan"
+    );
     let stored = now(env.pipe.meta.inner.get(&shard, &keys::quota_view(window)))
         .unwrap()
         .expect("accepted first write seeds a durable view");
