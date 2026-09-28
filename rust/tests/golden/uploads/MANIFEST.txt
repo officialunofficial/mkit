@@ -4,3 +4,4 @@
 # Format: <name> <blake3-hex-of-file-bytes>
 subtree-merge.json 649acec4f73291e603f74d2822e29f776e4cdf1fead5c0b4e11ff6f2e5dbd159
 ticket-token-v1.json d7d10eac56669f62e89aebe8f004442c9d35d6baa106786d6c1bd0744f86a7bc
+upload-marker-v1.json 751bfbebbc005bcde26365e8af80185f005cd214fa04f5b520f3e32b37d739d4

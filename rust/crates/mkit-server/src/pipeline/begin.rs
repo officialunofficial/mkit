@@ -203,7 +203,7 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             snap.get(&ks[3]).is_some()
         } else {
             self.blobs
-                .head(key)
+                .head(&(*key).into())
                 .await
                 .map_err(|e| store_error(StorageOp::BlobHead, e))?
                 .is_some()

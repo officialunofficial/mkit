@@ -1175,7 +1175,7 @@ async fn m1_ref_stubs_precede_validation_and_never_write() {
 }
 
 #[tokio::test]
-async fn m1_ticketed_upload_pack_rejects_before_chunks_and_header_validation() {
+async fn m1_ticketed_upload_pack_validates_header_before_mode_and_never_reads_chunks() {
     let server = setup(AuthMode::Open).serve();
     let data = pack(8);
     let ticketed = UploadPackRequest {
@@ -1194,7 +1194,18 @@ async fn m1_ticketed_upload_pack_rejects_before_chunks_and_header_validation() {
         }))),
         ..Default::default()
     };
-    for msg in [ticketed, invalid] {
+    for (msg, code, message) in [
+        (
+            ticketed,
+            "unimplemented",
+            "ticketed UploadPack requires auth v2",
+        ),
+        (
+            invalid,
+            "invalid_argument",
+            "expected a 32-byte digest, got 0 bytes",
+        ),
+    ] {
         let mut body = frame(&msg);
         // If chunks were read, this truncated frame would fail decoding.
         body.extend([0, 0, 0, 0, 16, 1, 2]);
@@ -1208,11 +1219,14 @@ async fn m1_ticketed_upload_pack_rejects_before_chunks_and_header_validation() {
             .await;
         let (messages, end) = reply.frames();
         assert!(messages.is_empty());
-        assert_eq!(end["error"]["code"], "unimplemented");
-        assert_eq!(end["error"]["message"], "not implemented yet");
+        assert_eq!(end["error"]["code"], code);
+        assert_eq!(end["error"]["message"], message);
     }
     assert!(!server.exists(&hash(&data)).await);
-    assert!(server.codes("UploadPack").is_empty());
+    assert_eq!(
+        server.codes("UploadPack"),
+        ["unimplemented", "invalid_argument"]
+    );
 }
 
 #[tokio::test]

@@ -701,8 +701,8 @@
     ]
   },
   {
-    "id": "1.9",
-    "title": "Core: BeginUpload with target ref, stateless ticket token, ticketed UploadPack, ticket caps",
+    "id": "1.9a",
+    "title": "Core: BeginUpload with target ref, stateless ticket token and ticket caps (done)",
     "milestone": "M1",
     "track": "core",
     "depends_on": [
@@ -712,7 +712,24 @@
       "1.23"
     ],
     "size": "L",
-    "summary": "Implements BeginUpload in the target ref shard with admission, open-ticket caps per (ref, signer) and per ref, and a stateless signed ticket token; single-part UploadPack verifies the token before reading chunks.",
+    "summary": "Implements BeginUpload in the target ref shard with admission, open-ticket caps and stateless signed ticket tokens.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "conf-native",
+      "conf-wrangler"
+    ]
+  },
+  {
+    "id": "1.9b",
+    "title": "Core: ticketed UploadPack, upload markers and ticket threshold",
+    "milestone": "M1",
+    "track": "core",
+    "depends_on": [
+      "1.9a"
+    ],
+    "size": "L",
+    "summary": "Verifies tickets before UploadPack streaming, records content-addressed upload markers, and enforces the BeginUpload threshold.",
     "human_action": false,
     "area_gates": [
       "rust",
@@ -726,7 +743,7 @@
     "milestone": "M1",
     "track": "core",
     "depends_on": [
-      "1.9"
+      "1.9b"
     ],
     "size": "L",
     "summary": "AdvanceRefs consumes the ref's tickets in one ref-shard batch with local membership, relay outbox rows and one Committed row per ticket; failures write Aborted separately. A packlist-membership miss is retryable unavailable within the relay-lag bound. Adds ref deletion per S1.",
@@ -921,7 +938,7 @@
     "milestone": "M1",
     "track": "conformance",
     "depends_on": [
-      "1.9",
+      "1.9b",
       "1.10",
       "1.14",
       "1.25",

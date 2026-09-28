@@ -121,18 +121,14 @@ async fn upload<B: BlobStore, N: NamespaceStore, H: HookSet>(
         },
     };
     let header = header.map_err(ServerError::from)?;
-    if !header
-        .ticket_token
-        .as_deref()
-        .unwrap_or_default()
-        .is_empty()
-    {
-        // TODO(WP-1.9): implement ticketed UploadPack before reading chunks.
-        return Err(not_yet().into());
-    }
-    let mut session = pipe
-        .open_upload(a, header.pack_id.as_deref(), header.total_bytes)
-        .await?;
+    let token = header.ticket_token.as_deref().unwrap_or_default();
+    let mut session = if token.is_empty() {
+        pipe.open_upload(a, header.pack_id.as_deref(), header.total_bytes)
+            .await?
+    } else {
+        pipe.open_ticketed_upload(a, header.pack_id.as_deref(), header.total_bytes, token)
+            .await?
+    };
     while let Some(item) = requests.next().await {
         let chunk = match item.map(|m| m.to_owned_message().body) {
             Ok(Some(UploadBody::Chunk(chunk))) => *chunk,

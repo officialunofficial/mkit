@@ -28,6 +28,11 @@ impl Authorizer for PolicyHook {
 struct PolicyAdmission(Arc<Mutex<Vec<AuthzFacts>>>);
 
 impl Admission for PolicyAdmission {
+    fn is_default(&self) -> bool {
+        // This spy delegates its decision unchanged to DefaultAdmission.
+        true
+    }
+
     async fn admit(&self, input: &AdmissionInput<'_>) -> Result<AdmissionDecision, ServerError> {
         self.0.lock().unwrap().push(input.op.authz.clone());
         DefaultAdmission.admit(input).await
@@ -260,7 +265,17 @@ fn startup_policy_refusals_and_accepted_counterparts() {
         err.public_message(),
         "namespace_policy any needs a non-default admission step, or the explicit unsafe override (D27)"
     );
-    assert!(construct(policy_cfg(true, any), policy_hooks(false)).is_ok());
+    let mut admitted = policy_cfg(true, any);
+    admitted.auth = authv2();
+    admitted.ticket_keys =
+        Some(crate::upload::token::TicketKeys::new(vec![("test".into(), [7; 32])]).unwrap());
+    assert!(
+        construct(
+            admitted,
+            with_admission(Fixed(AdmissionDecision::allow(vec![])))
+        )
+        .is_ok()
+    );
     assert!(construct(policy_cfg(true, namespace_policy(2, &ns)), Hooks::new()).is_ok());
     let mut c = policy_cfg(true, namespace_policy(0, &ns));
     c.authorizer_role = AuthorizerRole::Authority;
@@ -273,7 +288,7 @@ fn startup_policy_refusals_and_accepted_counterparts() {
     assert!(construct(c, policy_hooks(false)).is_ok());
     assert!(DefaultAdmission.is_default());
     assert!(OpenAuthorizer.is_open());
-    assert!(!PolicyAdmission::default().is_default());
+    assert!(PolicyAdmission::default().is_default());
     assert!(!policy_hooks(false).authorizer.is_open());
 }
 

@@ -132,7 +132,7 @@ impl S3BlobStore {
         len: u64,
         sha256: &str,
     ) -> Result<CommitOutcome, StoreError> {
-        let path = self.object_path(key);
+        let path = self.object_path(key)?;
         let mut last = String::new();
         for attempt in 0..PUT_ATTEMPTS {
             match self.put_once(&path, &spool, len, sha256).await {

@@ -363,15 +363,18 @@ impl S3BlobStore {
         self
     }
 
-    /// The object key of `key`: `<prefix/><keyspace>/<hex>`.
-    #[must_use]
-    pub fn object_key(&self, key: &BlobKey) -> String {
-        let base = &self.object_base[self.bucket.len() + 2..];
-        format!("{base}{}", key.to_hex())
+    /// The object key of `key`: `<prefix/><keyspace>/<hex>` for packs,
+    /// or `<prefix/>upload-markers/v1/<hex>` for upload markers.
+    ///
+    /// # Errors
+    /// [`StoreError::Invalid`] for an unsupported blob namespace.
+    pub fn object_key(&self, key: &BlobKey) -> Result<String, StoreError> {
+        let pack_keyspace = self.object_base[self.bucket.len() + 2..].trim_end_matches('/');
+        key.relative_path(pack_keyspace)
     }
 
-    fn object_path(&self, key: &BlobKey) -> String {
-        format!("{}{}", self.object_base, key.to_hex())
+    fn object_path(&self, key: &BlobKey) -> Result<String, StoreError> {
+        Ok(format!("/{}/{}", self.bucket, self.object_key(key)?))
     }
 
     /// Send a bodiless request.
@@ -614,7 +617,7 @@ impl BlobStore for S3BlobStore {
         if range.is_some_and(|r| r.start > r.end_inclusive) {
             return Err(StoreError::Invalid("byte range start after its end".into()));
         }
-        let path = self.object_path(key);
+        let path = self.object_path(key)?;
         let mut headers = HeaderMap::new();
         if let Some(r) = range {
             let value = format!("bytes={}-{}", r.start, r.end_inclusive);
@@ -674,7 +677,7 @@ impl BlobStore for S3BlobStore {
 
     async fn head(&self, key: &BlobKey) -> Result<Option<BlobMeta>, StoreError> {
         Ok(self
-            .head_len(&self.object_path(key))
+            .head_len(&self.object_path(key)?)
             .await?
             .map(|len| BlobMeta { len }))
     }
@@ -718,7 +721,7 @@ impl BlobStore for S3BlobStore {
     /// A `HEAD` then a `DELETE`: S3's `DELETE` answers `204` whether or
     /// not the key existed.
     async fn delete(&self, key: &BlobKey) -> Result<bool, StoreError> {
-        let path = self.object_path(key);
+        let path = self.object_path(key)?;
         if self.head_len(&path).await?.is_none() {
             return Ok(false);
         }

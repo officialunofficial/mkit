@@ -13,6 +13,8 @@ use crate::replay::StoredRejection;
 use crate::store::{BlobBody, BlobKey, BlobMeta, ByteRange, CommitOutcome, PackSink};
 use crate::telemetry::{METRIC_UPLOAD_BYTES, NoopMetrics};
 use crate::upload::UploadError;
+use crate::upload::marker::upload_marker;
+use crate::upload::token::{TicketClaims, TicketKeys};
 
 // ---------------------------------------------------------------- helpers
 
@@ -74,7 +76,7 @@ fn replay_state<H: HookSet>(env: &Env<H>, req: &Req) -> Option<ReplayState> {
 }
 
 fn blob_present<H: HookSet>(env: &Env<H>, pack: &[u8]) -> bool {
-    let key = BlobKey::new(hash(pack));
+    let key = BlobKey::pack(hash(pack));
     now(env.pipe.blobs.head(&key)).unwrap().is_some()
 }
 
@@ -87,7 +89,7 @@ fn committed() -> ReplayState {
 fn store_blob(blobs: &MemoryBlobStore, bytes: &[u8]) -> PackKey {
     let key = PackKey::new(hash(bytes));
     now(async {
-        let mut sink = blobs.begin(key, bytes.len() as u64).await.unwrap();
+        let mut sink = blobs.begin(key.into(), bytes.len() as u64).await.unwrap();
         sink.write(Bytes::copy_from_slice(bytes)).await.unwrap();
         sink.commit().await.unwrap();
     });
@@ -100,6 +102,383 @@ fn collect(stream: &mut DownloadStream) -> Vec<Result<DownloadChunk, ServerError
         out.push(item);
     }
     out
+}
+
+fn ticket_env() -> Env {
+    let clock = clock();
+    let mut c = cfg(authv2());
+    c.ticket_keys = Some(TicketKeys::new(vec![("test".into(), [9; 32])]).unwrap());
+    build(c, Spy::new(store(&clock)), Hooks::new(), clock)
+}
+
+fn ticket_token<H: HookSet>(
+    env: &Env<H>,
+    signer: &SigningKey,
+    data: &[u8],
+    ticket_id: Hash,
+) -> Vec<u8> {
+    env.pipe
+        .cfg
+        .ticket_keys
+        .as_ref()
+        .unwrap()
+        .mint(&TicketClaims {
+            ticket_id,
+            audience: AUDIENCE.into(),
+            repository: REPO.into(),
+            signer: *signer.verifying_key().as_bytes(),
+            pack_id: hash(data),
+            bytes: data.len() as u64,
+            part_size: mkit_core::upload_parts::MIN_PART_SIZE,
+            expires_at_ms: ms(T0 + 60_000),
+            upload_session: Vec::new(),
+        })
+}
+
+fn ticketed_upload<H: HookSet>(
+    env: &Env<H>,
+    req: &Req,
+    data: &[u8],
+    token: &[u8],
+) -> Result<UploadMode, ServerError> {
+    let a = env.auth(req)?;
+    let id = hash(data);
+    block_on(async {
+        let mut session = env
+            .pipe
+            .open_ticketed_upload(&a, Some(&id), Some(data.len() as u64), token)
+            .await?;
+        let mode = session.mode();
+        session
+            .push(Some(&id), Some(0), Bytes::copy_from_slice(data), true)
+            .await?;
+        session.finish().await?;
+        Ok(mode)
+    })
+}
+
+#[test]
+fn ticketed_upload_no_metadata_and_marker() {
+    let env = ticket_env();
+    let data = pack(101);
+    let signer = key(7);
+    let ticket_id = [0x55; 32];
+    let token = ticket_token(&env, &signer, &data, ticket_id);
+    let (marker, _) = upload_marker(&ticket_id, &hash(&data));
+    for n in [1, 1, 2] {
+        let req = signed_upload(&signer, &data, n);
+        assert_eq!(
+            ticketed_upload(&env, &req, &data, &token).unwrap(),
+            UploadMode::Ticketed
+        );
+        assert!(blob_present(&env, &data));
+        assert!(now(env.pipe.blobs.head(&marker)).unwrap().is_some());
+        assert_eq!(env.pipe.meta.calls(), 0);
+        assert!(env.batches().is_empty());
+        assert!(env.rows().is_empty());
+    }
+    let read = env.auth(&Req::unsigned(Procedure::PackExists)).unwrap();
+    assert!(!block_on(env.pipe.pack_exists(&read, PackKey::new(*marker.hash()))).unwrap());
+    let read = env.auth(&Req::unsigned(Procedure::DownloadPack)).unwrap();
+    assert_eq!(
+        block_on(env.pipe.download(&read, PackKey::new(*marker.hash())))
+            .unwrap_err()
+            .code(),
+        Code::NotFound
+    );
+    assert_eq!(env.metrics.count(METRIC_UPLOAD_BYTES), 3);
+}
+
+#[test]
+fn upload_threshold_enforced_before_store_and_transport_identity_exempt() {
+    let single_clock = clock();
+    let mut c = cfg(authv2());
+    c.ticket_keys = Some(TicketKeys::new(vec![("test".into(), [9; 32])]).unwrap());
+    c.begin_upload_threshold_bytes = 8;
+    let env = build(
+        c,
+        Spy::new(store(&single_clock)),
+        Hooks::new(),
+        single_clock,
+    );
+    let small = pack(7);
+    assert_eq!(
+        upload(&env, &signed_upload(&key(7), &small, 1), &small, 7).unwrap(),
+        UploadMode::Fresh
+    );
+    let calls = env.pipe.meta.calls();
+    for len in [8, 9] {
+        let data = pack(len);
+        let a = env
+            .auth(&signed_upload(&key(7), &data, u32::try_from(len).unwrap()))
+            .unwrap();
+        let err = block_on(
+            env.pipe
+                .open_upload(&a, Some(&hash(&data)), Some(len as u64)),
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), Code::FailedPrecondition);
+        assert_eq!(
+            err.public_message(),
+            "upload requires a ticket from BeginUpload"
+        );
+        assert_eq!(env.pipe.meta.calls(), calls);
+    }
+
+    let zero_clock = clock();
+    let mut c = cfg(authv2());
+    c.ticket_keys = Some(TicketKeys::new(vec![("test".into(), [9; 32])]).unwrap());
+    c.begin_upload_threshold_bytes = 0;
+    let zero = build(c, Spy::new(store(&zero_clock)), Hooks::new(), zero_clock);
+    let a = zero.auth(&signed_upload(&key(7), b"", 1)).unwrap();
+    let err = block_on(zero.pipe.open_upload(&a, Some(&hash(b"")), Some(0))).unwrap_err();
+    assert_eq!(err.code(), Code::FailedPrecondition);
+    assert_eq!(zero.pipe.meta.calls(), 0);
+
+    let transport_clock = clock();
+    let mut c = cfg(AuthMode::TransportIdentity);
+    c.begin_upload_threshold_bytes = u64::MAX;
+    let env = build(
+        c,
+        Spy::new(store(&transport_clock)),
+        Hooks::new(),
+        transport_clock,
+    );
+    let mut req = Req::unsigned(Procedure::UploadPack);
+    req.principal = Some(Principal::Anonymous);
+    assert_eq!(upload(&env, &req, b"ssh", 3).unwrap(), UploadMode::Fresh);
+}
+
+#[test]
+fn multi_upload_without_ticket_fails_before_store() {
+    use crate::repo::MultiAddressing;
+    let clock = clock();
+    let mut c = cfg(AuthMode::Open);
+    c.addressing = Addressing::Multi(MultiAddressing::new().with_namespace_policy(
+        NamespacePolicy::Any {
+            unsafe_without_admission: true,
+        },
+    ));
+    c.write_policy = WritePolicy::Owner;
+    let env = build(c, Spy::new(store(&clock)), Hooks::new(), clock);
+    let repository = format!("ed25519-{}/demo", "11".repeat(32));
+    let req = Req::unsigned(Procedure::UploadPack).header("x-repository", &repository);
+    let a = env.auth(&req).unwrap();
+    let data = pack(5);
+    let err = block_on(env.pipe.open_upload(&a, Some(&hash(&data)), Some(5))).unwrap_err();
+    assert_eq!(err.code(), Code::FailedPrecondition);
+    assert_eq!(env.pipe.meta.calls(), 0);
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // One token failure matrix shares the same empty stores.
+fn ticketed_upload_failures_leave_no_marker() {
+    let env = ticket_env();
+    let data = pack(23);
+    let signer = key(7);
+    let req = signed_upload(&signer, &data, 1);
+    let good = ticket_token(&env, &signer, &data, [0x55; 32]);
+    let mut bad = good.clone();
+    *bad.last_mut().unwrap() ^= 1;
+    for (token, code) in [
+        (&[][..], Code::FailedPrecondition),
+        (bad.as_slice(), Code::FailedPrecondition),
+    ] {
+        let a = env.auth(&req).unwrap();
+        let err = block_on(env.pipe.open_ticketed_upload(
+            &a,
+            Some(&hash(&data)),
+            Some(data.len() as u64),
+            token,
+        ))
+        .unwrap_err();
+        assert_eq!(err.code(), code);
+    }
+    for (claims_signer, audience, repository, pack_id, bytes) in [
+        (
+            *key(8).verifying_key().as_bytes(),
+            AUDIENCE,
+            REPO,
+            hash(&data),
+            data.len() as u64,
+        ),
+        (
+            *signer.verifying_key().as_bytes(),
+            "https://other.test",
+            REPO,
+            hash(&data),
+            data.len() as u64,
+        ),
+        (
+            *signer.verifying_key().as_bytes(),
+            AUDIENCE,
+            "other",
+            hash(&data),
+            data.len() as u64,
+        ),
+        (
+            *signer.verifying_key().as_bytes(),
+            AUDIENCE,
+            REPO,
+            [8; 32],
+            data.len() as u64,
+        ),
+        (
+            *signer.verifying_key().as_bytes(),
+            AUDIENCE,
+            REPO,
+            hash(&data),
+            data.len() as u64 + 1,
+        ),
+    ] {
+        let token = env
+            .pipe
+            .cfg
+            .ticket_keys
+            .as_ref()
+            .unwrap()
+            .mint(&TicketClaims {
+                ticket_id: [0x55; 32],
+                audience: audience.into(),
+                repository: repository.into(),
+                signer: claims_signer,
+                pack_id,
+                bytes,
+                part_size: mkit_core::upload_parts::MIN_PART_SIZE,
+                expires_at_ms: ms(T0 + 60_000),
+                upload_session: Vec::new(),
+            });
+        let a = env.auth(&req).unwrap();
+        let err = block_on(env.pipe.open_ticketed_upload(
+            &a,
+            Some(&hash(&data)),
+            Some(data.len() as u64),
+            &token,
+        ))
+        .unwrap_err();
+        assert_eq!(err.code(), Code::PermissionDenied);
+    }
+    let a = env.auth(&req).unwrap();
+    let err = block_on(env.pipe.open_ticketed_upload(
+        &a,
+        Some(&hash(b"wrong")),
+        Some(data.len() as u64),
+        &bad,
+    ))
+    .unwrap_err();
+    assert_eq!(
+        err.code(),
+        Code::Unauthenticated,
+        "signed commitment precedes ticket verification"
+    );
+    env.clock.advance(60_000);
+    let good = ticket_token(&env, &signer, &data, [0x55; 32]);
+    let a = env.auth(&req).unwrap();
+    let err = block_on(env.pipe.open_ticketed_upload(
+        &a,
+        Some(&hash(&data)),
+        Some(data.len() as u64),
+        &good,
+    ))
+    .unwrap_err();
+    assert_eq!(err.code(), Code::FailedPrecondition);
+    assert_eq!(env.pipe.meta.calls(), 0);
+    assert!(!blob_present(&env, &data));
+    let (marker, _) = upload_marker(&[0x55; 32], &hash(&data));
+    assert!(now(env.pipe.blobs.head(&marker)).unwrap().is_none());
+}
+
+#[test]
+fn ticketed_upload_requires_auth_v2_and_keys_before_blob_access() {
+    let data = pack(11);
+    let id = hash(&data);
+    let open = env(AuthMode::Open);
+    let a = open.auth(&Req::unsigned(Procedure::UploadPack)).unwrap();
+    let err = block_on(
+        open.pipe
+            .open_ticketed_upload(&a, Some(&id), Some(11), b"token"),
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), Code::Unimplemented);
+    assert_eq!(err.public_message(), "ticketed UploadPack requires auth v2");
+    assert_eq!(open.pipe.meta.calls(), 0);
+    assert!(!blob_present(&open, &data));
+
+    let no_keys = env(authv2());
+    let signer = key(7);
+    let a = no_keys.auth(&signed_upload(&signer, &data, 1)).unwrap();
+    let err = block_on(
+        no_keys
+            .pipe
+            .open_ticketed_upload(&a, Some(&id), Some(11), b"token"),
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), Code::Unimplemented);
+    assert_eq!(err.public_message(), "upload tickets are not configured");
+    assert_eq!(no_keys.pipe.meta.calls(), 0);
+    assert!(!blob_present(&no_keys, &data));
+}
+
+#[test]
+fn ticketed_stream_error_aborts_without_pack_or_marker() {
+    let env = ticket_env();
+    let data = pack(13);
+    let id = hash(&data);
+    let ticket_id = [0x77; 32];
+    let signer = key(7);
+    let token = ticket_token(&env, &signer, &data, ticket_id);
+    let a = env.auth(&signed_upload(&signer, &data, 1)).unwrap();
+    block_on(async {
+        let mut session = env
+            .pipe
+            .open_ticketed_upload(&a, Some(&id), Some(13), &token)
+            .await
+            .unwrap();
+        let err = session
+            .push(Some(&id), Some(1), Bytes::copy_from_slice(&data), true)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), Code::InvalidArgument);
+        session.abort_with(&err).await;
+    });
+    let (marker, _) = upload_marker(&ticket_id, &id);
+    assert!(!blob_present(&env, &data));
+    assert!(now(env.pipe.blobs.head(&marker)).unwrap().is_none());
+    assert_eq!(env.pipe.meta.calls(), 0);
+}
+
+#[test]
+fn ticketed_wrong_digest_stores_neither_pack_nor_marker() {
+    let env = ticket_env();
+    let data = pack(19);
+    let mut wrong = data.clone();
+    wrong[0] ^= 1;
+    let id = hash(&data);
+    let ticket_id = [0x78; 32];
+    let signer = key(7);
+    let token = ticket_token(&env, &signer, &data, ticket_id);
+    let a = env.auth(&signed_upload(&signer, &data, 1)).unwrap();
+    let err = block_on(async {
+        let mut session = env
+            .pipe
+            .open_ticketed_upload(&a, Some(&id), Some(data.len() as u64), &token)
+            .await
+            .unwrap();
+        session
+            .push(Some(&id), Some(0), Bytes::from(wrong), true)
+            .await
+            .unwrap();
+        session.finish().await.unwrap_err()
+    });
+    assert_eq!(err.code(), Code::InvalidArgument);
+    assert_eq!(
+        err.public_message(),
+        "UploadPack: BLAKE3(received bytes) does not equal header.pack_id"
+    );
+    let (marker, _) = upload_marker(&ticket_id, &id);
+    assert!(!blob_present(&env, &data));
+    assert!(now(env.pipe.blobs.head(&marker)).unwrap().is_none());
+    assert_eq!(env.pipe.meta.calls(), 0);
 }
 
 // ------------------------------------------------------------- uploads
@@ -503,6 +882,52 @@ impl PreReceive for Refuse {
     }
 }
 
+struct DenyAuthorizer;
+
+impl Authorizer for DenyAuthorizer {
+    async fn authorize(&self, _: &Operation) -> Result<AuthzFacts, ServerError> {
+        Err(ServerError::permission_denied("authorizer denied"))
+    }
+}
+
+struct ChallengeAdmission(Arc<AtomicU32>);
+
+impl Admission for ChallengeAdmission {
+    async fn admit(&self, _: &AdmissionInput<'_>) -> Result<AdmissionDecision, ServerError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(AdmissionDecision::Challenge {
+            challenges: vec![],
+            description: "challenge".into(),
+        })
+    }
+}
+
+#[test]
+fn ticketed_upload_skips_authorizer_admission_and_pre_receive() {
+    let clock = clock();
+    let mut c = cfg(authv2());
+    c.ticket_keys = Some(TicketKeys::new(vec![("test".into(), [9; 32])]).unwrap());
+    let calls = Arc::new(AtomicU32::new(0));
+    let hooks = Hooks {
+        authorizer: DenyAuthorizer,
+        admission: ChallengeAdmission(calls.clone()),
+        pre_receive: Refuse(Code::PermissionDenied),
+        receipts: NoReceipts,
+        outcomes: NoOutcomes,
+    };
+    let env = build(c, Spy::new(store(&clock)), hooks, clock);
+    let data = pack(30);
+    let signer = key(7);
+    let token = ticket_token(&env, &signer, &data, [0x77; 32]);
+    let req = signed_upload(&signer, &data, 1);
+    assert_eq!(
+        ticketed_upload(&env, &req, &data, &token).unwrap(),
+        UploadMode::Ticketed
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(env.pipe.meta.calls(), 0);
+}
+
 fn refusing(code: Code) -> Env<Hooks<OpenAuthorizer, DefaultAdmission, Refuse>> {
     let clock = clock();
     let hooks = Hooks {
@@ -556,7 +981,7 @@ fn upload_replay_never_recreates_a_deleted_blob() {
     let req = signed_upload(&key(7), &data, 1);
     assert_eq!(upload(&env, &req, &data, 16).unwrap(), UploadMode::Fresh);
     // GC or a takedown removes the pack.
-    assert!(now(env.pipe.blobs.delete(&PackKey::new(hash(&data)))).unwrap());
+    assert!(now(env.pipe.blobs.delete(&PackKey::new(hash(&data)).into())).unwrap());
     assert_eq!(upload(&env, &req, &data, 16).unwrap(), UploadMode::Replay);
     assert!(!blob_present(&env, &data), "a replay writes no blob");
     // A replay still verifies the stream it is sent.
@@ -782,6 +1207,56 @@ mod faults {
             // One charge per operation, however often it resumed.
             assert_eq!(quota(&env).0, n);
         }
+    }
+
+    #[test]
+    fn ticketed_fault_after_blob_commit_then_retry_writes_marker() {
+        let env = with_faults(ticket_env(), FailOnce::new());
+        let data = pack(41);
+        let signer = key(7);
+        let id = [0x66; 32];
+        let token = ticket_token(&env, &signer, &data, id);
+        let req = signed_upload(&signer, &data, 1).header(FAULT_HEADER, "after-put");
+        let err = ticketed_upload(&env, &req, &data, &token).unwrap_err();
+        assert_eq!(err.code(), Code::Internal);
+        assert!(blob_present(&env, &data));
+        let (marker, _) = upload_marker(&id, &hash(&data));
+        assert!(now(env.pipe.blobs.head(&marker)).unwrap().is_none());
+        assert_eq!(
+            ticketed_upload(&env, &req, &data, &token).unwrap(),
+            UploadMode::Ticketed
+        );
+        assert!(now(env.pipe.blobs.head(&marker)).unwrap().is_some());
+        assert_eq!(env.pipe.meta.calls(), 0);
+    }
+
+    struct RecordPoints(Arc<Mutex<Vec<FaultPoint>>>);
+
+    impl FaultHooks for RecordPoints {
+        async fn at(
+            &self,
+            point: FaultPoint,
+            _: &Operation,
+            _: &TestDirectives,
+        ) -> Result<(), ServerError> {
+            self.0.lock().unwrap().push(point);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn ticketed_upload_uses_only_authenticate_and_blob_commit_faults() {
+        let points = Arc::new(Mutex::new(Vec::new()));
+        let env = with_faults(ticket_env(), RecordPoints(points.clone()));
+        let data = pack(19);
+        let signer = key(7);
+        let token = ticket_token(&env, &signer, &data, [0x88; 32]);
+        let req = signed_upload(&signer, &data, 1);
+        ticketed_upload(&env, &req, &data, &token).unwrap();
+        assert_eq!(
+            *points.lock().unwrap(),
+            [FaultPoint::AfterAuthenticate, FaultPoint::AfterBlobCommit]
+        );
     }
 
     /// Pauses the first request at `point` until the test releases it.

@@ -102,7 +102,7 @@ fn relay_uses_one_watermark_read_and_one_atomic_apply_per_target() {
                 .all(|target| target.binding == ShardClass::RepoIndexShard.binding())
         );
         for pack in &packs {
-            let partition = D34Shards.membership(&repo, &BlobKey::new(*pack));
+            let partition = D34Shards.membership(&repo, &BlobKey::pack(*pack));
             let key = keys::membership(&repo.name, pack);
             assert_eq!(
                 target.get(&partition, &key).await.unwrap(),
@@ -147,7 +147,7 @@ fn relay_uses_one_watermark_read_and_one_atomic_apply_per_target() {
             "only get rh per duplicate target"
         );
         for pack in &packs {
-            let partition = D34Shards.membership(&repo, &BlobKey::new(*pack));
+            let partition = D34Shards.membership(&repo, &BlobKey::pack(*pack));
             assert_eq!(
                 target
                     .get(&partition, &keys::membership(&repo.name, pack))
@@ -307,7 +307,7 @@ fn worker_relay_defers_chunks_after_two_target_calls_per_fire() {
             let source = source();
             let repo = repo();
             let partition = D34Shards.ref_shard(&repo, "refs/heads/main");
-            let destination = D34Shards.membership(&repo, &BlobKey::new([0x11; 32]));
+            let destination = D34Shards.membership(&repo, &BlobKey::pack([0x11; 32]));
             let mut batch = Batch::new()
                 .put(keys::outbox_sequence(), codec::encode_u64(3))
                 .put(keys::timer(100, kinds::RELAY.get(), b""), Value::default());

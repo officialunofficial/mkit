@@ -38,7 +38,7 @@ fn store(fake: &FakeS3) -> S3BlobStore {
 }
 
 fn key_of(bytes: &[u8]) -> BlobKey {
-    BlobKey::new(hash(bytes))
+    BlobKey::pack(hash(bytes))
 }
 
 fn object_key(bytes: &[u8]) -> String {
@@ -88,6 +88,26 @@ async fn put_uses_if_none_match_star() {
     assert_eq!(
         fake.object(DEFAULT_BUCKET, &object_key(b"hello")).unwrap(),
         "hello"
+    );
+}
+
+#[tokio::test]
+async fn upload_marker_uses_separate_key_under_prefix() {
+    let fake = FakeS3::start();
+    let s = store(&fake);
+    let content = b"marker bytes";
+    let marker = BlobKey::upload_marker(hash(content));
+    let mut sink = s.begin(marker, content.len() as u64).await.unwrap();
+    sink.write(Bytes::from_static(content)).await.unwrap();
+    sink.commit().await.unwrap();
+    let path = format!("{PREFIX}/upload-markers/v1/{}", marker.to_hex());
+    assert_eq!(s.object_key(&marker).unwrap(), path);
+    assert_eq!(fake.object(DEFAULT_BUCKET, &path).unwrap(), &content[..]);
+    assert!(
+        s.head(&BlobKey::pack(hash(content)))
+            .await
+            .unwrap()
+            .is_none()
     );
 }
 

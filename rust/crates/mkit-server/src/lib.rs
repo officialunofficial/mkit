@@ -69,11 +69,11 @@ pub use repo::{Addressing, MultiAddressing, NamespaceKey, RepoId, RepoName, Reso
 pub use rt::SystemClock;
 pub use rt::{BoxFuture, BoxStream, Clock, ManualClock, MaybeSend, MaybeSync, Spawner, send_wrap};
 pub use store::{
-    Batch, BatchOutcome, BlobBody, BlobKey, BlobMeta, BlobStore, BoxError, ByteRange,
-    CommitOutcome, ContentIndex, Cursor, Key, KeyClasses, MAX_BATCH_BYTES, MAX_BATCH_OPS,
-    MAX_KEY_BYTES, MAX_VALUE_BYTES, MembershipMode, NamespaceStore, PackSink, Partition,
-    PartitionStats, Precondition, ScanPage, StateCommitment, StoreCapabilities, StoreError,
-    StoreMaintenance, Value, Write,
+    Batch, BatchOutcome, BlobBody, BlobKey, BlobMeta, BlobNamespace, BlobStore, BoxError,
+    ByteRange, CommitOutcome, ContentIndex, Cursor, Key, KeyClasses, MAX_BATCH_BYTES,
+    MAX_BATCH_OPS, MAX_KEY_BYTES, MAX_VALUE_BYTES, MembershipMode, NamespaceStore, PackSink,
+    Partition, PartitionStats, Precondition, ScanPage, StateCommitment, StoreCapabilities,
+    StoreError, StoreMaintenance, Value, Write,
 };
 pub use telemetry::{
     METRIC_LATENCY, METRIC_REQUESTS, METRIC_UPLOAD_BYTES, Metrics, NEVER_ECHO, NEVER_LOG,

@@ -62,17 +62,34 @@ fn apply(store: &FsLayoutStore, batch: Batch) -> Result<BatchOutcome, StoreError
 
 fn put_blob(
     store: &FsBlobStore,
-    key: BlobKey,
+    key: impl Into<BlobKey>,
     len: u64,
     chunks: &[&[u8]],
 ) -> Result<CommitOutcome, StoreError> {
     block_on(async {
-        let mut sink = store.begin(key, len).await?;
+        let mut sink = store.begin(key.into(), len).await?;
         for chunk in chunks {
             sink.write(Bytes::copy_from_slice(chunk)).await?;
         }
         sink.commit().await
     })
+}
+
+#[test]
+fn upload_marker_blob_uses_separate_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let blobs = FsBlobStore::new(dir.path());
+    let content = b"marker bytes";
+    let digest = hash(content);
+    let marker = BlobKey::upload_marker(digest);
+    put_blob(&blobs, marker, content.len() as u64, &[content]).unwrap();
+    let path = dir.path().join("upload-markers/v1").join(marker.to_hex());
+    assert_eq!(std::fs::read(path).unwrap(), content);
+    assert!(
+        block_on(blobs.head(&BlobKey::pack(digest)))
+            .unwrap()
+            .is_none()
+    );
 }
 
 /// Every path under `root`, relative to it.
@@ -136,12 +153,12 @@ fn layout_interop_fsstores_read_what_filetransport_wrote() {
         .unwrap();
 
     let blobs = FsBlobStore::new(dir.path());
-    let Some(BlobBody::Bytes(got)) = block_on(blobs.get(&key, None)).unwrap() else {
+    let Some(BlobBody::Bytes(got)) = block_on(blobs.get(&key.into(), None)).unwrap() else {
         panic!("a small pack is one buffer");
     };
     assert_eq!(got, data);
     assert_eq!(
-        block_on(blobs.head(&key)).unwrap().map(|m| m.len),
+        block_on(blobs.head(&key.into())).unwrap().map(|m| m.len),
         Some(3000)
     );
 
@@ -250,7 +267,7 @@ fn blob_rejected_commit_leaves_no_file_and_no_temp() {
     }
     // Aborted and dropped uploads leave nothing either.
     block_on(async {
-        let mut sink = blobs.begin(key, 5).await.unwrap();
+        let mut sink = blobs.begin(key.into(), 5).await.unwrap();
         sink.write(Bytes::from_static(b"hel")).await.unwrap();
         assert_ne!(
             listing(dir.path()),
@@ -258,7 +275,7 @@ fn blob_rejected_commit_leaves_no_file_and_no_temp() {
             "the temp file exists mid-upload"
         );
         sink.abort().await;
-        let mut sink = blobs.begin(key, 5).await.unwrap();
+        let mut sink = blobs.begin(key.into(), 5).await.unwrap();
         sink.write(Bytes::from_static(b"hel")).await.unwrap();
         drop(sink);
     });
@@ -299,7 +316,7 @@ fn blob_get_range_streams_without_reading_whole_file() {
     let pieces: Vec<&[u8]> = data.chunks(300_000).collect();
     put_blob(&blobs, key, data.len() as u64, &pieces).unwrap();
     let read_all = |range| {
-        let body = block_on(blobs.get(&key, range)).unwrap().unwrap();
+        let body = block_on(blobs.get(&key.into(), range)).unwrap().unwrap();
         let BlobBody::Stream { len, mut stream } = body else {
             panic!("a body over 1 MiB is streamed");
         };
@@ -329,7 +346,7 @@ fn blob_get_range_streams_without_reading_whole_file() {
         start: 4 * 1024 * 1024,
         end_inclusive: 4 * 1024 * 1024 + 9,
     };
-    let Some(BlobBody::Bytes(got)) = block_on(blobs.get(&key, Some(small))).unwrap() else {
+    let Some(BlobBody::Bytes(got)) = block_on(blobs.get(&key.into(), Some(small))).unwrap() else {
         panic!("a small range is one buffer");
     };
     assert_eq!(got, &data[4 * 1024 * 1024..=4 * 1024 * 1024 + 9]);
@@ -887,8 +904,30 @@ fn sweep_removes_only_old_upload_temp_files() {
     }
     std::os::unix::fs::symlink(&old_other, &old_link).unwrap();
 
-    assert_eq!(store.sweep_stale_uploads(hour).unwrap(), 1);
+    let marker_content = b"a published marker";
+    let marker = BlobKey::upload_marker(hash(marker_content));
+    put_blob(
+        &store,
+        marker,
+        marker_content.len() as u64,
+        &[marker_content],
+    )
+    .unwrap();
+    let marker_dir = td.path().join("upload-markers/v1");
+    let marker_old = marker_dir.join(format!(".{}.tmp.77.0", marker.to_hex()));
+    let marker_fresh = marker_dir.join(format!(".{}.tmp.77.1", marker.to_hex()));
+    fs::write(&marker_old, b"partial").unwrap();
+    fs::write(&marker_fresh, b"partial").unwrap();
+    age_file(&marker_old, two_hours);
+
+    assert_eq!(store.sweep_stale_uploads(hour).unwrap(), 2);
     assert!(!old_tmp.exists(), "the old temp file is swept");
+    assert!(!marker_old.exists(), "the old marker temp file is swept");
+    assert!(marker_fresh.exists(), "a fresh marker temp file is kept");
+    assert_eq!(
+        fs::read(marker_dir.join(marker.to_hex())).unwrap(),
+        marker_content
+    );
     assert!(fresh_tmp.exists(), "a fresh temp file may be a live upload");
     assert!(old_other.exists(), "another name is never touched");
     assert!(

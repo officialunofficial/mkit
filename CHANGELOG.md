@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lease changes, with a published receipt-and-notice key list and writer-view
   retrieval. Add receipt fields to Connect ref-write responses and an optional
   admission `external_ref`; server signing and delivery follow in WP-5.8.
+- Server: ticketed `UploadPack` now verifies the ticket before reading data,
+  streams the full pack without metadata writes, and leaves a content-addressed
+  upload marker for later ticket consumption. The advertised BeginUpload
+  threshold is enforced; non-default admission requires auth v2 and ticket keys.
 - Server: add periodic per-Durable-Object logical snapshots to a dedicated R2
   `BACKUPS` bucket, plus Fresh-only portable restore with epoch advancement,
   relay re-keying and coordinator recovery. Native `export` and `restore`
