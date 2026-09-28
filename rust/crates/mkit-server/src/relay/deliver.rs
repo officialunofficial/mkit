@@ -46,7 +46,8 @@ struct TargetResult {
 }
 
 /// Pushes a source's queued rows to a separately supplied target store.
-/// Each source/key must have exactly one producer; target rh rows never expire.
+/// Distinct producers may upsert the same key when its value is identical.
+/// Target rh rows never expire.
 #[derive(Debug)]
 pub struct RelayHandler<T, H = NoHook> {
     /// Target store (may be a clone of the source store on native).

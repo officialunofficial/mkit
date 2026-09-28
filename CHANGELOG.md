@@ -30,6 +30,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Multipart BeginUpload tickets now carry opaque storage sessions. The blob-key
   API separates upload markers from pack keys; FS, R2 and S3 multipart storage
   follows in later work packages.
+- Server: default Multi-addressing quota now counts namespace-wide usage in
+  fixed windows: exact in each ref shard, reconciled every 60 seconds into the
+  coordinator and checked from an unguarded local view. Coordinator uploads
+  charge that total exactly. Single-addressing keeps its namespace cap off;
+  on D34 its signer quota is per signer and branch. With successful scheduled
+  rollups, other-shard lag is bounded by their admission rate times 3R.
+  Worker timer registration
+  and D34 quota conformance follow in WP-1.26b.
+- Server: add write-once repository object-index keys and binary values,
+  deterministic row planning, and membership-gated lookup APIs for indexed mode.
 - Server: ticketed `UploadPack` now verifies the ticket before reading data,
   streams the full pack without metadata writes, and leaves a content-addressed
   upload marker for later ticket consumption. The advertised BeginUpload

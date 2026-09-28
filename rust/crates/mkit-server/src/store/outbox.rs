@@ -15,7 +15,8 @@ use super::{
 /// Each ticket costs at most nine ops: ticket guard/delete, index
 /// guard/delete, reservation guard/put, pending-outcome put, membership
 /// put and one relay-row share. An advance uses one signer and runs no
-/// admission, so `tu` and `tc` are each guarded/written once. Shared
+/// admission (the quota planner asserts this in `pipeline::plan_namespace`),
+/// so `tu` and `tc` are each guarded/written once. Shared
 /// overhead is at most 23: deadline 1, lease guard/install 2, absent layout
 /// version guard/install 2, absent repo-known guard/install 2, two ref CAS
 /// pairs 4, replay 3, counters 4, outbox sequence/backlog 4, and relay kick

@@ -96,6 +96,7 @@ pub mod durability;
 pub mod kv;
 pub mod kv_cases;
 mod macros;
+pub mod object_index;
 
 /// How a case ended, when it did not fail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

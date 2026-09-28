@@ -14,6 +14,7 @@ mod blob;
 pub mod codec;
 mod content_index;
 mod error;
+pub mod index;
 pub mod keys;
 mod kv;
 mod maintenance;

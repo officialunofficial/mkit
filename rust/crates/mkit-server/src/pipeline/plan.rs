@@ -15,7 +15,7 @@ use mkit_core::refs::RefWriteCondition;
 
 use crate::error::ServerError;
 use crate::op::{GrantRef, RefUpdate};
-use crate::quota::{QuotaCharge, QuotaDecision, evaluate_quota};
+use crate::quota::{self, NamespaceCharge, QuotaCharge, QuotaDecision, evaluate_quota};
 use crate::refs::{CasDecision, evaluate_condition};
 use crate::replay::{
     ReplayDecision, ReplayRecord, ReplayState, StoredRejection, StoredResult, UpdateRefResult,
@@ -122,6 +122,8 @@ pub(crate) struct WriteRequest<'a> {
     pub(crate) replay: Option<ReplayGuard>,
     /// Quota charges from admission.
     pub(crate) charges: &'a [QuotaCharge],
+    /// Built-in namespace quota; absent for Single defaults and uncharged tickets.
+    pub(crate) namespace_charge: Option<NamespaceCharge>,
     /// The grant the write was authorized under (M2).
     pub(crate) grant: Option<GrantRef>,
     /// D34 leased epoch and optional installation, guarded by the observed el.
@@ -170,6 +172,13 @@ impl WriteRequest<'_> {
             out.push(keys::grant_epoch());
         }
         out.extend(self.charges.iter().map(|c| keys::quota(&c.scope)));
+        if let Some(charge) = self.namespace_charge {
+            let window = charge.window;
+            out.push(quota::counter_key(charge, window));
+            if charge.rollup {
+                out.push(keys::quota_view(window));
+            }
+        }
         out.extend(self.refs.iter().map(|r| keys::ref_key(self.repo, &r.name)));
         if let (
             WriteKind::UploadCommit | WriteKind::BeginUpload | WriteKind::AdvanceRefs,
@@ -187,6 +196,11 @@ impl WriteRequest<'_> {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Snapshot {
     values: BTreeMap<Key, Option<Value>>,
+    /// Fixed quota window selected by the request's read-ahead.
+    pub(crate) namespace_window: Option<u64>,
+    /// Coordinator total read with a new shard's lease, installed by the
+    /// accepted write so subsequent writes have a local view.
+    pub(crate) namespace_seed: Option<(u64, Value)>,
     /// `(index, record)` pairs of expired replay records.
     pub(crate) expired_replays: Vec<(Key, Key)>,
     /// `(index, quota)` pairs of ended quota windows; their quota keys are
@@ -248,6 +262,45 @@ pub(crate) enum Planned {
     Apply(Plan),
     /// Nothing to write: an unsigned write that conflicts on the snapshot.
     Done(StoredResult),
+}
+
+fn plan_namespace(
+    req: &WriteRequest<'_>,
+    snap: &Snapshot,
+    clock: &PlanClock,
+    pre: &mut Vec<Precondition>,
+    puts: &mut Vec<Write>,
+) -> Result<(), ServerError> {
+    let Some(charge) = req.namespace_charge else {
+        return Ok(());
+    };
+    debug_assert!(
+        req.advance.is_none(),
+        "ticketed advances must not charge quota"
+    );
+    let window = charge.window;
+    let view_key = keys::quota_view(window);
+    let stored_view = charge.rollup.then(|| snap.get(&view_key)).flatten();
+    let seed = snap
+        .namespace_seed
+        .as_ref()
+        .filter(|(seed_window, _)| *seed_window == window);
+    quota::plan_namespace_after_admission(
+        charge,
+        snap.get(&quota::counter_key(charge, window)),
+        stored_view.or_else(|| seed.map(|(_, value)| value)),
+        clock.business_now_ms,
+        clock.plan_time_ms,
+        req.lease.is_some(),
+        pre,
+        puts,
+    )?;
+    if stored_view.is_none()
+        && let Some((_, value)) = seed
+    {
+        puts.push(Write::Put(view_key, value.clone()));
+    }
+    Ok(())
 }
 
 /// Plan `req` on `snap` at `clock`.
@@ -326,6 +379,7 @@ pub(crate) fn plan_write(
     for charge in req.charges {
         plan_charge(charge, snap, clock.business_now_ms, &mut pre, &mut puts)?;
     }
+    plan_namespace(req, snap, clock, &mut pre, &mut puts)?;
 
     let (on_commit, ref_puts, conflict) =
         decide_write_result(req, snap, clock, &mut pre, &mut puts)?;
