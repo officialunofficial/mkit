@@ -175,7 +175,7 @@ fn golden_server_hooks() {
     let dir = golden_dir();
     let path = dir.join("signature.json");
     let mut file: SignatureFile = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    assert_eq!(file.vectors.len(), 3);
+    assert_eq!(file.vectors.len(), 4);
     assert_eq!(
         file.vectors[0].procedure,
         "/mkit.server.hooks.v1.HooksService/Admit"
@@ -187,6 +187,10 @@ fn golden_server_hooks() {
     assert_eq!(
         file.vectors[2].procedure,
         "/mkit.server.hooks.v1.HooksService/Event"
+    );
+    assert_eq!(
+        file.vectors[3].procedure,
+        "/mkit.server.hooks.v1.HooksService/CachePurge"
     );
     if std::env::var("UPDATE_GOLDEN").as_deref() == Ok("1") {
         file.vectors = file.vectors.iter().map(|v| rebuild(v, &dir)).collect();

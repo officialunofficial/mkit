@@ -439,6 +439,11 @@ excludes.
 | An invalid part receipt (malformed, unknown key id, or bad MAC; §7.6) | `invalid_argument` |
 | A pack still under verification in indexed mode (§7.6) | `unavailable` with exactly one `PendingVerification` detail |
 | A membership-dependent miss within the relay-lag bound, in indexed mode ([SPEC-SERVER §9.4](SPEC-SERVER.md#94-repository-isolated-membership-checks)) | `unavailable` with no detail; a retry with the same nonce is safe |
+| A decoded pushed file object is globally blocklisted (SPEC-SERVER §14.2) | `permission_denied`, exact message `object blocked`, with a repository-empty writer `RedactionNotice` detail whose rewrites are empty |
+| An `AdvanceRefs` closure contains a repository tombstone (SPEC-SERVER §14.5) | `invalid_argument`, exact message `open closure`, with applicable writer `RedactionNotice` details; the ordinary membership-lag interval does not apply |
+| A delta base is tombstoned in this repository (SPEC-SERVER §14.5) | `failed_precondition`, exact message `delta base not available in this repository`, with applicable writer `RedactionNotice` details and no lag interval; this is the existing self-contained replan case |
+| `DownloadPack` names a superseded pack (SPEC-SERVER §14.5) | `not_found` with the `RedactionNotice` details of the caller's view whose `rewrites` name the requested pack, before streaming; otherwise plain `not_found`; `PackExists` returns `false` |
+| A writer is denied by a repository- or namespace-level takedown (SPEC-SERVER §14.1) | `permission_denied`, exact existing message `lease suspended`, with applicable writer `RedactionNotice` details; readers keep §12.2's byte-identical absent answer |
 | A missed commit deadline (`NotAfter`), a full shard, or outbox backpressure. Nothing commits, and a retry with the same nonce is safe. | `unavailable`, never `resource_exhausted` |
 | Receipt signing fails after a successful apply (SPEC-SERVER §15.1). The advance remains committed; a same-nonce retry returns that result with its signed receipt. | Retryable `unavailable` |
 | A signed nonce already recorded with a different operation fingerprint (§7.1) | `invalid_argument` |
@@ -1583,6 +1588,18 @@ server MAY return fewer refs than `page_size`, and caps it at
 at most 2 MiB, so a page always fits under the common 4 MiB default
 client message limit. The pages concatenate to a listing in ref-name
 order ([SPEC-REFS §4.1](SPEC-REFS.md#41-ordering-and-duplicates)).
+
+`ReadRefResponse.redaction_notices = 3` attaches active signed notices
+for the caller's view only when the returned ref exists in that view.
+`ListRefsResponse.ref_redactions = 3` attaches `(ref, notice)` pairs for
+visible refs on that page, including their bytes in the 2 MiB bound;
+the `ref` is the full name. `RefEntry` retains its existing wire shape.
+The detail is `mkit.transport.v1.RedactionNotice { bytes envelope = 1; }`
+and its envelope and verification follow SPEC-SERVER §14.6. Hidden
+refs and repositories MUST NOT leak a notice through these fields.
+SSH and enc callers receive the same plain error codes and messages
+without a notice detail; their frozen protocols do not gain notice
+fields.
 
 **Advertised values.** `GetServerInfo` advertises `index_fanout` and
 the `ListRefs` page bound (§2.1).
