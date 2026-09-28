@@ -19,8 +19,9 @@ use crate::repo::RepoId;
 
 /// Maximum object ids accepted by one lookup, matching the takedown named-id cap.
 pub const MAX_LOOKUP_IDS: usize = 256;
-/// Maximum index candidates read for one object id. A truncated miss has a
-/// distinct, non-retryable per-id result.
+/// Maximum index candidates read for one object id. An id that reaches this
+/// many rows with more remaining, and has no member among them, gets
+/// [`LookupError::TooManyRows`].
 pub const MAX_LOOKUP_ROWS: usize = 4096;
 /// Maximum scan calls in one lookup, including legal empty continuation pages.
 pub const MAX_LOOKUP_PAGES: usize = 512;
@@ -168,6 +169,7 @@ pub fn plan_index_rows(
                     || encoded_bytes + addition + comma > MAX_VALUE_BYTES
                     || encoded_bytes + addition + comma + 2 * (MAX_KEY_BYTES + 8) > MAX_BATCH_BYTES
                 {
+                    // Validation only: the enqueuer encodes the row itself.
                     codec::encode_relay(&row)?;
                     plan.relay.push(row);
                     row = RelayV1 {
@@ -199,17 +201,24 @@ pub struct LocatedObject {
 }
 
 /// A bounded lookup that could not prove membership or absence for one id.
-/// These fail closed; §13 GC removes orphaned rows.
+/// Every variant fails closed for that id only; retryability differs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum LookupError {
-    /// More than [`MAX_LOOKUP_ROWS`] rows for this object. Retrying the same
-    /// lookup cannot resolve this id until §13 GC removes orphaned rows.
+    /// At least [`MAX_LOOKUP_ROWS`] rows for this object, with more
+    /// remaining, and none of those read belongs to a member pack. **Not
+    /// retryable**: it persists while the object has that many index rows in
+    /// this repository. Rows of packs that never became members are removed by
+    /// §13 GC (WP-5.3a); rows of member packs are not.
     #[error("object index row cap exceeded")]
     TooManyRows,
-    /// The call used all [`MAX_LOOKUP_PAGES`] scan pages.
+    /// The call used all [`MAX_LOOKUP_PAGES`] scan pages before this id's
+    /// scan finished. **Retryable** in a call with fewer ids.
     #[error("object index page cap exceeded")]
     TooManyPages,
-    /// Joining this id would exceed the call's membership-read budget.
+    /// The call's membership-read budget ran out before a member was found in
+    /// this id's candidates. **Retryable** in a call with fewer ids, unless the
+    /// id's own candidates span more than [`MAX_LOOKUP_MEMBERSHIP_READS`]
+    /// membership partitions before its first member.
     #[error("object index membership-read cap exceeded")]
     TooManyMembershipReads,
 }
@@ -219,59 +228,114 @@ pub type ObjectLookup = Result<Option<LocatedObject>, LookupError>;
 /// One object's membership answer.
 pub type PresenceLookup = Result<bool, LookupError>;
 
-async fn scan_one<S: NamespaceStore>(
+struct IdScan {
+    partition: Partition,
+    start: Key,
+    end: Key,
+    after: Option<super::Cursor>,
+    rows: Vec<(Hash, Value)>,
+    done: bool,
+    reason: Option<LookupError>,
+}
+
+/// Scan every distinct id's candidates round-robin: each id gets its first
+/// page before any id gets a second, so hot ids early in the request cannot
+/// spend the whole page budget.
+async fn scan_all<S: NamespaceStore>(
     store: &S,
     shards: &dyn ShardMap,
     repo: &RepoId,
-    id: &Hash,
-    pages: &mut usize,
-) -> Result<(Vec<(Hash, Value)>, Option<LookupError>), StoreError> {
-    let partition = shards.object_index(repo, id);
-    let (start, end) = keys::object_index_range(&repo.name, id);
-    let mut after = None;
-    let mut rows = Vec::new();
-    loop {
-        if rows.len() == MAX_LOOKUP_ROWS {
-            return Ok((rows, Some(LookupError::TooManyRows)));
+    ids: &[Hash],
+) -> Result<BTreeMap<Hash, IdScan>, StoreError> {
+    let mut scans: BTreeMap<Hash, IdScan> = BTreeMap::new();
+    let mut order = Vec::new();
+    for id in ids {
+        if scans.contains_key(id) {
+            continue;
         }
-        if *pages == MAX_LOOKUP_PAGES {
-            return Ok((rows, Some(LookupError::TooManyPages)));
-        }
-        let limit = SCAN_PAGE_ROWS.min(
-            u32::try_from(MAX_LOOKUP_ROWS - rows.len())
-                .map_err(|_| StoreError::Invalid("invalid lookup row cap".into()))?,
+        let (start, end) = keys::object_index_range(&repo.name, id);
+        scans.insert(
+            *id,
+            IdScan {
+                partition: shards.object_index(repo, id),
+                start,
+                end,
+                after: None,
+                rows: Vec::new(),
+                done: false,
+                reason: None,
+            },
         );
-        let page = store
-            .scan(&partition, &start, &end, after.as_ref(), limit)
-            .await?;
-        *pages += 1;
-        if page.entries.len() > limit as usize {
-            return Err(StoreError::Corrupt(
-                "object index scan exceeded limit".into(),
-            ));
-        }
-        for (key, value) in page.entries {
-            match keys::parse(&key) {
-                Some(ParsedKey::ObjectIndex {
-                    repo: found,
-                    object,
-                    pack_id,
-                }) if found == repo.name && object == *id => rows.push((pack_id, value)),
-                _ => return Err(StoreError::Corrupt("malformed object index key".into())),
+        order.push(*id);
+    }
+    let mut pages = 0;
+    loop {
+        let mut progressed = false;
+        for id in &order {
+            let Some(scan) = scans.get_mut(id) else {
+                continue;
+            };
+            if scan.done {
+                continue;
+            }
+            if scan.rows.len() >= MAX_LOOKUP_ROWS {
+                scan.done = true;
+                scan.reason = Some(LookupError::TooManyRows);
+                continue;
+            }
+            if pages == MAX_LOOKUP_PAGES {
+                scan.done = true;
+                scan.reason = Some(LookupError::TooManyPages);
+                continue;
+            }
+            let limit = SCAN_PAGE_ROWS.min(
+                u32::try_from(MAX_LOOKUP_ROWS - scan.rows.len())
+                    .map_err(|_| StoreError::Invalid("invalid lookup row cap".into()))?,
+            );
+            let page = store
+                .scan(
+                    &scan.partition,
+                    &scan.start,
+                    &scan.end,
+                    scan.after.as_ref(),
+                    limit,
+                )
+                .await?;
+            pages += 1;
+            progressed = true;
+            if page.entries.len() > limit as usize {
+                return Err(StoreError::Corrupt(
+                    "object index scan exceeded limit".into(),
+                ));
+            }
+            for (key, value) in page.entries {
+                match keys::parse(&key) {
+                    Some(ParsedKey::ObjectIndex {
+                        repo: found,
+                        object,
+                        pack_id,
+                    }) if found == repo.name && object == *id => scan.rows.push((pack_id, value)),
+                    _ => return Err(StoreError::Corrupt("malformed object index key".into())),
+                }
+            }
+            match page.next {
+                Some(cursor) => scan.after = Some(cursor),
+                None => scan.done = true,
             }
         }
-        match page.next {
-            Some(cursor) => after = Some(cursor),
-            None => return Ok((rows, None)),
+        if !progressed {
+            return Ok(scans);
         }
     }
 }
 
 /// Locate the first member pack, in pack-id order, for each requested id.
-/// Each object has its own row cap, while scan pages and membership reads have
-/// call-wide caps. A capped miss affects only its id. Membership keys are
-/// deduplicated, then read once per membership partition (the store's
-/// `get_many` is partition-scoped).
+/// Each object has its own row cap; scan pages and membership reads have
+/// call-wide caps. A capped miss affects only its id. Each id's candidates are
+/// admitted to the membership reads as a pack-id-order prefix that fits the
+/// remaining budget, so a member early in pack order is always found.
+/// Membership keys are deduplicated, then read once per membership partition
+/// (the store's `get_many` is partition-scoped).
 pub async fn locate_many<S: NamespaceStore>(
     store: &S,
     shards: &dyn ShardMap,
@@ -281,46 +345,34 @@ pub async fn locate_many<S: NamespaceStore>(
     if ids.len() > MAX_LOOKUP_IDS {
         return Err(StoreError::Invalid("too many object ids".into()));
     }
-    let mut candidates: BTreeMap<Hash, Vec<(Hash, Value)>> = BTreeMap::new();
-    let mut truncated = BTreeMap::new();
-    let mut pages = 0;
-    for id in ids {
-        if candidates.contains_key(id) {
-            continue;
-        }
-        let (rows, reason) = scan_one(store, shards, repo, id, &mut pages).await?;
-        if let Some(reason) = reason {
-            truncated.insert(*id, reason);
-        }
-        candidates.insert(*id, rows);
-    }
+    let scans = scan_all(store, shards, repo, ids).await?;
+    let mut truncated: BTreeMap<Hash, LookupError> = scans
+        .iter()
+        .filter_map(|(id, scan)| scan.reason.map(|reason| (*id, reason)))
+        .collect();
     // Admit smaller candidate sets first, so one hot id cannot consume the
     // membership budget needed to answer an ordinary id in the same call.
-    let mut order: Vec<_> = candidates.keys().copied().collect();
-    order.sort_by_key(|id| (candidates[id].len(), *id));
+    let mut order: Vec<_> = scans.keys().copied().collect();
+    order.sort_by_key(|id| (scans[id].rows.len(), *id));
     let mut packs: BTreeMap<Partition, BTreeSet<Hash>> = BTreeMap::new();
+    let mut admitted: BTreeMap<Hash, usize> = BTreeMap::new();
     for id in order {
-        let rows = &candidates[&id];
-        let partitions: BTreeSet<_> = rows
-            .iter()
-            .map(|(pack, _)| shards.membership(repo, &BlobKey::pack(*pack)))
-            .collect();
-        let new_reads = partitions
-            .iter()
-            .filter(|p| !packs.contains_key(*p))
-            .count();
-        if packs.len() + new_reads > MAX_LOOKUP_MEMBERSHIP_READS {
+        let rows = &scans[&id].rows;
+        let mut count = 0;
+        for (pack, _) in rows {
+            let partition = shards.membership(repo, &BlobKey::pack(*pack));
+            if !packs.contains_key(&partition) && packs.len() == MAX_LOOKUP_MEMBERSHIP_READS {
+                break;
+            }
+            packs.entry(partition).or_default().insert(*pack);
+            count += 1;
+        }
+        if count < rows.len() {
             truncated
                 .entry(id)
                 .or_insert(LookupError::TooManyMembershipReads);
-            continue;
         }
-        for (pack, _) in rows {
-            packs
-                .entry(shards.membership(repo, &BlobKey::pack(*pack)))
-                .or_default()
-                .insert(*pack);
-        }
+        admitted.insert(id, count);
     }
     let mut members = BTreeSet::new();
     for (partition, ids) in packs {
@@ -341,7 +393,11 @@ pub async fn locate_many<S: NamespaceStore>(
     }
     ids.iter()
         .map(|id| {
-            let found = candidates[id]
+            let rows = &scans[id].rows;
+            let prefix = &rows[..admitted.get(id).copied().unwrap_or(0).min(rows.len())];
+            // Rows are in pack-id order and every earlier row was checked, so
+            // the first member in the admitted prefix is the first overall.
+            let found = prefix
                 .iter()
                 .find(|(pack, _)| members.contains(pack))
                 .map(|(pack, value)| {
@@ -379,21 +435,23 @@ pub async fn contains_many<S: NamespaceStore>(
 /// Whether this repository holds any named id, for the takedown sweep. This
 /// currently performs one scan per id and does not satisfy §14.3/R-133's
 /// one-read-per-distinct-index-partition bound. WP-5.6 uses WP-4.6's batched
-/// per-partition read. A capped miss fails closed.
+/// per-partition read. A capped miss fails closed: with no hit, the first
+/// id's [`LookupError`] is returned so the caller can tell a data-dependent cap
+/// from a backend failure.
 pub async fn holds_any<S: NamespaceStore>(
     store: &S,
     shards: &dyn ShardMap,
     repo: &RepoId,
     ids: &[Hash],
-) -> Result<bool, StoreError> {
+) -> Result<PresenceLookup, StoreError> {
     let answers = contains_many(store, shards, repo, ids).await?;
     if answers.iter().any(|answer| matches!(answer, Ok(true))) {
-        return Ok(true);
+        return Ok(Ok(true));
     }
     if let Some(reason) = answers.into_iter().find_map(Result::err) {
-        return Err(StoreError::Invalid(reason.to_string().into()));
+        return Ok(Err(reason));
     }
-    Ok(false)
+    Ok(Ok(false))
 }
 
 #[cfg(test)]
@@ -671,6 +729,8 @@ mod tests {
     }
 
     #[tokio::test]
+    // The planner takes no store, so this only pins that its output ignores
+    // repository state; deriving `chain_depth` from pack bytes is WP-4.8's test.
     async fn planner_bytes_do_not_depend_on_repository_state() {
         let r = repo("a");
         let object = [0x12; 32];
@@ -775,8 +835,14 @@ mod tests {
                 value: raw(5)
             }))]
         );
-        assert!(holds_any(&store, shards, &a, &[id]).await.unwrap());
-        assert!(!holds_any(&store, shards, &b, &[id]).await.unwrap());
+        assert_eq!(
+            holds_any(&store, shards, &a, &[id]).await.unwrap(),
+            Ok(true)
+        );
+        assert_eq!(
+            holds_any(&store, shards, &b, &[id]).await.unwrap(),
+            Ok(false)
+        );
     }
 
     #[tokio::test]
@@ -942,15 +1008,16 @@ mod tests {
                 .unwrap(),
             [Err(LookupError::TooManyRows), Ok(true)]
         );
-        assert!(
+        assert_eq!(
             holds_any(&store, &D34Shards, &r, &[hot, normal])
                 .await
-                .unwrap()
+                .unwrap(),
+            Ok(true)
         );
-        assert!(matches!(
-            holds_any(&store, &D34Shards, &r, &[hot]).await,
-            Err(StoreError::Invalid(_))
-        ));
+        assert_eq!(
+            holds_any(&store, &D34Shards, &r, &[hot]).await.unwrap(),
+            Err(LookupError::TooManyRows)
+        );
         let first = [0; 32];
         assert_eq!(
             store
@@ -974,5 +1041,107 @@ mod tests {
                 Ok(normal_location)
             ]
         );
+    }
+
+    async fn put_rows(store: &MemoryKv, r: &RepoId, object: &Hash, packs: &[Hash]) {
+        let target = D34Shards.object_index(r, object);
+        for chunk in packs.chunks(100) {
+            let mut batch = Batch::new();
+            for pack in chunk {
+                batch = batch.put(
+                    keys::object_index(&r.name, object, pack),
+                    codec::encode_object_index(object, &raw(5)).unwrap(),
+                );
+            }
+            assert_eq!(
+                store.apply(&target, batch).await.unwrap(),
+                BatchOutcome::Committed
+            );
+        }
+    }
+
+    async fn make_member(store: &MemoryKv, r: &RepoId, pack: &Hash) {
+        assert_eq!(
+            store
+                .apply(
+                    &D34Shards.membership(r, &BlobKey::pack(*pack)),
+                    Batch::new().put(keys::membership(&r.name, pack), Value::default()),
+                )
+                .await
+                .unwrap(),
+            BatchOutcome::Committed
+        );
+    }
+
+    /// Candidate packs spread over more membership partitions than the call
+    /// budget: the first member in pack-id order is still found, and only a
+    /// miss inside the admitted prefix reports the cap.
+    #[tokio::test]
+    async fn spread_candidates_admit_a_pack_order_prefix() {
+        let store = MemoryKv::default();
+        let r = repo("a");
+        let object = [0x21; 32];
+        let mut packs: Vec<Hash> = (0u32..600)
+            .map(|i| mkit_core::hash::hash(&i.to_be_bytes()))
+            .collect();
+        packs.sort_unstable();
+        let partitions: BTreeSet<_> = packs
+            .iter()
+            .map(|pack| D34Shards.membership(&r, &BlobKey::pack(*pack)))
+            .collect();
+        assert!(partitions.len() > MAX_LOOKUP_MEMBERSHIP_READS);
+        put_rows(&store, &r, &object, &packs).await;
+        assert_eq!(
+            locate_many(&store, &D34Shards, &r, &[object])
+                .await
+                .unwrap(),
+            [Err(LookupError::TooManyMembershipReads)]
+        );
+        make_member(&store, &r, &packs[3]).await;
+        assert_eq!(
+            locate_many(&store, &D34Shards, &r, &[object])
+                .await
+                .unwrap(),
+            [Ok(Some(LocatedObject {
+                pack: packs[3],
+                value: raw(5)
+            }))]
+        );
+    }
+
+    /// Hot ids early in a request cannot spend the page budget before a later
+    /// ordinary id gets its first page.
+    #[tokio::test]
+    async fn page_budget_round_robins_across_ids() {
+        let store = MemoryKv::default();
+        let r = repo("a");
+        let mut hot = Vec::new();
+        for h in 0u8..16 {
+            let object = [h; 32];
+            let packs: Vec<Hash> = (0u32..=u32::try_from(MAX_LOOKUP_ROWS).unwrap())
+                .map(|i| {
+                    let mut pack = [0; 32];
+                    pack[28..].copy_from_slice(&i.to_be_bytes());
+                    pack
+                })
+                .collect();
+            put_rows(&store, &r, &object, &packs).await;
+            hot.push(object);
+        }
+        let normal = [0x77; 32];
+        let normal_pack = [0x99; 32];
+        put_rows(&store, &r, &normal, &[normal_pack]).await;
+        make_member(&store, &r, &normal_pack).await;
+        let mut ids = hot.clone();
+        ids.push(normal);
+        let answers = locate_many(&store, &D34Shards, &r, &ids).await.unwrap();
+        assert_eq!(
+            answers[16],
+            Ok(Some(LocatedObject {
+                pack: normal_pack,
+                value: raw(5)
+            }))
+        );
+        assert!(answers[..16].iter().all(Result::is_err));
     }
 }

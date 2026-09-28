@@ -74,11 +74,11 @@ async fn run<H: KvHarness>(h: H, shards: &dyn ShardMap) -> Outcome {
         }))]
     );
     ensure!(
-        ok!(index::holds_any(&s, shards, &a, &[id]).await),
+        ok!(ok!(index::holds_any(&s, shards, &a, &[id]).await)),
         "member absent"
     );
     ensure!(
-        !ok!(index::holds_any(&s, shards, &b, &[id]).await),
+        !ok!(ok!(index::holds_any(&s, shards, &b, &[id]).await)),
         "cross-repo member"
     );
     commit(
