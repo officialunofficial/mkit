@@ -200,16 +200,17 @@ async fn missing_and_pack_guards<N: NamespaceStore>(
         Code::NotFound
     );
     for identity in [existing, &missing] {
-        assert_eq!(
-            pipe.pack_exists(
+        let exists = pipe
+            .pack_exists(
                 &read_auth(pipe, Procedure::PackExists, identity),
-                PackKey([42; 32])
+                PackKey([42; 32]),
             )
-            .await
-            .unwrap_err()
-            .code(),
-            Code::Unimplemented
-        );
+            .await;
+        if identity == existing {
+            assert!(!exists.unwrap());
+        } else {
+            assert_eq!(exists.unwrap_err().code(), Code::NotFound);
+        }
         assert_eq!(
             pipe.download(
                 &read_auth(pipe, Procedure::DownloadPack, identity),
@@ -219,7 +220,7 @@ async fn missing_and_pack_guards<N: NamespaceStore>(
             .err()
             .unwrap()
             .code(),
-            Code::Unimplemented
+            Code::NotFound
         );
         let upload: SignedOp = Signer::new([1; 32], AUDIENCE, identity).sign_pack(
             Procedure::UploadPack.connect_path(),
