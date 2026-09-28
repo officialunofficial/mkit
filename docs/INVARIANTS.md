@@ -498,25 +498,40 @@ targets. All run in the workspace nextest (`just ci`, cloudbuild/ci.yaml).
 Simulated Durable Objects cannot show placement, Cloudflare's limits or
 point-in-time recovery; the M1 staging runs (WP-1.20) cover those.
 
-## M1 Connect surfaces remain explicit stubs until implementation
+## M1 Connect request fields remain explicit stubs until implementation
 
-**Always:** until their implementing WPs land, the four new discovery and
-upload RPCs return `unimplemented` ("not implemented yet"). Ref deletion,
-advance ticket ids, upload ticket tokens and ref-list continuation tokens
-are rejected before validation or pipeline writes. `page_size` is ignored
-and listings end with an empty `next_page_token`.
+**Always:** until WP-1.10 and WP-1.28 land, ref deletion, advance ticket ids
+and ref-list continuation tokens are rejected before validation or pipeline
+writes. `page_size` is ignored and listings end with an empty
+`next_page_token`.
 
-**Because:** the new RPC paths currently bypass authentication because
-`Procedure::from_connect_path` does not recognise them. WP-1.9 and WP-1.11
-must add authenticated procedures before enabling upload behavior;
-WP-1.6 must make discovery explicit while keeping it public by spec §2.1.
+**Because:** a new request field must not silently invoke legacy behavior
+before its implementing WP defines it.
 
-**If violated:** a new field can silently invoke legacy behavior, or an
-unauthenticated upload handler can mutate state.
+**If violated:** a deletion or ticketed advance can reach the legacy write
+path, or a listing can return a token no server honors.
 
 **Enforced by:** `mkit-server/tests/connect_dispatch.rs`'s `m1_*` tests
+and the TODO comments in `connect/service.rs`. WP-1.10 and WP-1.28 replace
+the relevant stub assertions with their behavior tests and trim this entry.
+
+## M2 Connect surfaces remain explicit stubs until implementation
+
+**Always:** `GetGrantEpoch`, `SetGrantEpoch`, `SetRepoVisibility` and
+`IssueObjectUrl` return `unimplemented` ("not implemented yet") until
+WP-2.8, WP-2.9 and WP-2.11 implement them. They write no state.
+
+**Because:** their paths currently bypass auth-v2 `Procedure` dispatch.
+WP-2.8 keeps both namespace epoch RPCs outside that path permanently, by
+spec §5.3 (`grant_epoch_paths_are_permanently_outside_procedure`).
+WP-2.9 and WP-2.11 must add mode-specific and signed-read authorization
+before enabling their repository RPCs.
+
+**If violated:** an unauthenticated repository RPC can mutate state or mint a token.
+
+**Enforced by:** `mkit-server/tests/connect_dispatch.rs`'s `m2_*` tests
 and the TODO and SECURITY comments in `connect/service.rs`. Implementing
-WPs replace the relevant stub assertions with their behavior and auth tests.
+WPs replace their stub assertions with behavior and auth tests.
 
 ## The native server and the reference Worker pass the black-box wire suite
 

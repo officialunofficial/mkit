@@ -26,6 +26,11 @@ use super::proto::mkit::transport::v1::{
     RefExpectation, TransportService, UpdateRefRequest, UpdateRefResponse, UploadPackRequest,
     UploadPackResponse, UploadPartRequest, UploadPartResponse, UploadTicket,
 };
+use super::proto::mkit::transport::v1::{
+    GetGrantEpochRequest, GetGrantEpochResponse, IssueObjectUrlRequest, IssueObjectUrlResponse,
+    SetGrantEpochRequest, SetGrantEpochResponse, SetRepoVisibilityRequest,
+    SetRepoVisibilityResponse,
+};
 use super::{Shared, authenticated};
 use crate::error::ServerError;
 use crate::op::RefUpdate;
@@ -38,7 +43,8 @@ use crate::upload::UploadError;
 
 /// `TransportService` over a [`Pipeline`]. Each handler takes the
 /// [`Authenticated`] that [`super::AuthInterceptor`] stored for existing RPCs;
-/// `GetServerInfo` is deliberately unauthenticated.
+/// `GetServerInfo` is deliberately unauthenticated. The M2 RPCs remain
+/// explicit stubs until their implementing WPs land.
 pub struct ConnectTransport<B, N, H> {
     pipe: Shared<Pipeline<B, N, H>>,
 }
@@ -551,6 +557,47 @@ where
         })
         .await
     }
+
+    async fn get_grant_epoch(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, GetGrantEpochRequest>,
+    ) -> ServiceResult<GetGrantEpochResponse> {
+        // SECURITY: unsigned by design; WP-2.8 MUST keep this outside auth-v2 Procedure.
+        // TODO(WP-2.8): return the namespace epoch without auth-v2 header verification.
+        Err(not_yet().into())
+    }
+
+    async fn set_grant_epoch(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, SetGrantEpochRequest>,
+    ) -> ServiceResult<SetGrantEpochResponse> {
+        // SECURITY: unsigned by design; the owner statement is its only authorization.
+        // WP-2.8 MUST keep this outside auth-v2 Procedure.
+        // TODO(WP-2.8): verify the owner statement and wait for revocation completion.
+        Err(not_yet().into())
+    }
+
+    async fn set_repo_visibility(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, SetRepoVisibilityRequest>,
+    ) -> ServiceResult<SetRepoVisibilityResponse> {
+        // SECURITY: this path bypasses auth; the implementing WP-2.9 MUST add mode-specific authorization.
+        // TODO(WP-2.9): verify auth v2 or the owner statement before changing visibility.
+        Err(not_yet().into())
+    }
+
+    async fn issue_object_url(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, IssueObjectUrlRequest>,
+    ) -> ServiceResult<IssueObjectUrlResponse> {
+        // SECURITY: this path bypasses auth; the implementing WP-2.11 MUST add signed-read authorization.
+        // TODO(WP-2.11): verify auth v2 and read access before minting a URL token.
+        Err(not_yet().into())
+    }
 }
 
 impl From<ServerInfo> for GetServerInfoResponse {
@@ -607,6 +654,29 @@ mod proto_roundtrip {
     }
 
     #[test]
+    fn admission_challenge_roundtrips_with_zero_one_and_eight_entries() {
+        for count in [0, 1, 8] {
+            let message = AdmissionChallenge {
+                challenges: (0..count)
+                    .map(|index| Challenge {
+                        scheme: Some(format!("scheme{index}")),
+                        value: Some(format!("opaque-{index}")),
+                        ..Default::default()
+                    })
+                    .collect(),
+                description: (count != 0).then(|| "Admission required".into()),
+                ..Default::default()
+            };
+            roundtrip(&message);
+            let json = serde_json::to_vec(&message).expect("serialize challenge");
+            assert_eq!(
+                serde_json::from_slice::<AdmissionChallenge>(&json).expect("parse challenge"),
+                message
+            );
+        }
+    }
+
+    #[test]
     fn discovery_messages_roundtrip() {
         // Empty messages have no declared fields to populate.
         roundtrip(&GetServerInfoRequest::default());
@@ -623,7 +693,7 @@ mod proto_roundtrip {
             admission: Some(true),
             receipt_public_key: Some(vec![0x34; 32]),
             receipt_key_id: Some("receipt-key".into()),
-            grant_schemes: vec!["ed25519".into(), "eip191-secp256k1".into()],
+            grant_schemes: vec!["ed25519".into(), "secp256k1-eip191".into()],
             namespace_policy: Some("allowlist".into()),
             index_fanout: Some(4096),
             ..Default::default()
@@ -676,6 +746,66 @@ mod proto_roundtrip {
             ..Default::default()
         });
         roundtrip(&CompleteUploadResponse::default());
+    }
+
+    #[test]
+    fn m2_messages_roundtrip() {
+        use super::super::proto::mkit::transport::v1::__buffa::oneof::issue_object_url_request::Target;
+        use super::super::proto::mkit::transport::v1::__buffa::oneof::set_repo_visibility_request::Mode;
+        use super::super::proto::mkit::transport::v1::{RefPath, RepoVisibility};
+
+        roundtrip(&GetGrantEpochRequest {
+            namespace: Some("namespace".into()),
+            ..Default::default()
+        });
+        roundtrip(&GetGrantEpochResponse {
+            epoch: Some(42),
+            ..Default::default()
+        });
+        roundtrip(&SetGrantEpochRequest {
+            signed_statement: Some("statement.scheme.blob".into()),
+            ..Default::default()
+        });
+        roundtrip(&SetGrantEpochResponse {
+            epoch: Some(43),
+            ..Default::default()
+        });
+        for visibility in [
+            RepoVisibility::Unspecified,
+            RepoVisibility::Public,
+            RepoVisibility::Private,
+        ] {
+            roundtrip(&SetRepoVisibilityRequest {
+                mode: Some(Mode::Visibility(visibility.into())),
+                ..Default::default()
+            });
+        }
+        roundtrip(&SetRepoVisibilityRequest {
+            mode: Some(Mode::SignedStatement("statement.scheme.blob".into())),
+            ..Default::default()
+        });
+        roundtrip(&SetRepoVisibilityResponse::default());
+        roundtrip(&IssueObjectUrlRequest {
+            target: Some(Target::ObjectId(vec![0x42; 32])),
+            ttl_seconds: Some(15),
+            ..Default::default()
+        });
+        let ref_path = RefPath {
+            r#ref: Some("refs/heads/main".into()),
+            path: Some("dir/file".into()),
+            ..Default::default()
+        };
+        roundtrip(&ref_path);
+        roundtrip(&IssueObjectUrlRequest {
+            target: Some(Target::RefPath(Box::new(ref_path))),
+            ttl_seconds: Some(20),
+            ..Default::default()
+        });
+        roundtrip(&IssueObjectUrlResponse {
+            token: Some("signed.token".into()),
+            expires_unix_ms: Some(1_700_000_000_000),
+            ..Default::default()
+        });
     }
 
     #[test]
