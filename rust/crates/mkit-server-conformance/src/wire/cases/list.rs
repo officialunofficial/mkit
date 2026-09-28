@@ -22,7 +22,7 @@ async fn create(
 ) -> Result<Result<UpdateRefResponse, RpcError>, String> {
     let id = hash(&i.to_be_bytes());
     let body = update_req(
-        &ctx.head(&format!("r{i:06}{}", "a".repeat(300))),
+        &ctx.head(&format!("{}/r{i:06}{}", "a".repeat(150), "b".repeat(150))),
         Exp::Missing,
         &id,
     )
@@ -183,7 +183,7 @@ pub(super) async fn large_response_within_limit(ctx: Ctx) -> CaseResult {
         for r in &resp.refs {
             let name = r.name.as_deref().unwrap_or("");
             ensure!(name > last.as_str(), "ListRefs names are not increasing");
-            last = name.to_owned();
+            name.clone_into(&mut last);
             count += 1;
         }
         match resp.next_page_token.filter(|s| !s.is_empty()) {
