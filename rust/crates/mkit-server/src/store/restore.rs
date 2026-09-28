@@ -13,6 +13,9 @@
 //! Already delivered rows no longer exist on the source. Re-keying cannot
 //! fill an older target's missing membership or index rows; R-116 requires
 //! post-restore reconciliation before GA.
+//! Restored coordinator `ls` maxima reset to zero; every restored ref shard
+//! with queued relay rows gets an expired, sweepable `ls` row. The recovery
+//! marker fences watermark reads until R-116 reconciliation completes.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -23,6 +26,8 @@ use super::{
     NamespaceStore, Partition, StoreError, export_page,
 };
 use crate::repo::NamespaceKey;
+use crate::timers::lease_sweep::lease_reference;
+use crate::timers::registry::kinds;
 
 /// Parameters for a restore into empty partitions.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -186,9 +191,10 @@ fn should_drop(record: &ExportRecord) -> bool {
     record.key == keys::backup_state()
         || record.key == keys::epoch_lease()
         || record.key == keys::relay_scan()
+        || record.key == keys::lease_reconcile()
         || matches!(
             keys::parse(&record.key),
-            Some(ParsedKey::Timer { kind, .. }) if kind == crate::timers::registry::kinds::BACKUP.get()
+            Some(ParsedKey::Timer { kind, .. }) if kind == kinds::BACKUP.get() || kind == kinds::LEASE_SWEEP.get()
         )
 }
 
@@ -200,7 +206,7 @@ pub async fn mark_lease_table_recovered<S: NamespaceStore>(
     partition: &Partition,
     recovered_at_ms: u64,
 ) -> Result<(), StoreError> {
-    let batch = Batch::new().put(
+    let batch = Batch::new().delete(keys::lease_reconcile()).put(
         keys::lease_recovery(),
         codec::encode_lease_recovery(&LeaseRecovery {
             resumed_at_ms: recovered_at_ms,
@@ -456,6 +462,26 @@ async fn import_one<S: NamespaceStore>(
                 _ => {}
             }
         }
+        if let Some(ParsedKey::LeasedShard { repo, shard_ref }) = keys::parse(&record.key) {
+            let mut row = codec::decode_leased_shard(&record.value)?;
+            row.expires_at_ms = opts.recovered_at_ms;
+            row.relay_watermark_ms = 0;
+            row.sweep_due_ms = opts.recovered_at_ms;
+            record.value = codec::encode_leased_shard(&row);
+            importer.push(record).await?;
+            importer
+                .push(ExportRecord::new(
+                    info.partition.clone(),
+                    keys::timer(
+                        opts.recovered_at_ms,
+                        kinds::LEASE_SWEEP.get(),
+                        &lease_reference(&repo, &shard_ref),
+                    ),
+                    super::Value::default(),
+                ))
+                .await?;
+            continue;
+        }
         importer.push(record).await?;
     }
     if mode.coordinator(&info.partition) {
@@ -545,6 +571,12 @@ pub async fn restore<S: NamespaceStore>(
         .iter()
         .map(|info| info.partition.clone())
         .collect();
+    let relay_sources: Vec<Partition> = plan
+        .infos
+        .iter()
+        .filter(|info| info.has_relay && matches!(info.partition, Partition::Ref { .. }))
+        .map(|info| info.partition.clone())
+        .collect();
     let mut report = RestoreReport::default();
     let mut wrote_missing_coordinators = false;
     let mut wrote_missing_sources = false;
@@ -592,6 +624,51 @@ pub async fn restore<S: NamespaceStore>(
     }
     if !wrote_missing_sources {
         create_missing_sources(target, &plan.missing_sources, &supplied, &mut report).await?;
+    }
+    for source in relay_sources {
+        let Partition::Ref {
+            ns,
+            repo,
+            shard_ref,
+        } = source
+        else {
+            unreachable!()
+        };
+        let coordinator = Partition::Coordinator(ns);
+        let key = keys::leased_shard(&repo, &shard_ref);
+        if target.get(&coordinator, &key).await?.is_some() {
+            continue;
+        }
+        let epoch = target
+            .get(&coordinator, &keys::grant_epoch())
+            .await?
+            .as_ref()
+            .map(codec::decode_u64)
+            .transpose()?
+            .unwrap_or(0);
+        let row = codec::LeasedShard {
+            epoch,
+            expires_at_ms: opts.recovered_at_ms,
+            acked_epoch: epoch,
+            relay_watermark_ms: 0,
+            sweep_due_ms: opts.recovered_at_ms,
+        };
+        let batch = Batch::new().put(key, codec::encode_leased_shard(&row)).put(
+            keys::timer(
+                opts.recovered_at_ms,
+                kinds::LEASE_SWEEP.get(),
+                &lease_reference(&repo, &shard_ref),
+            ),
+            super::Value::default(),
+        );
+        match target.apply(&coordinator, batch).await? {
+            BatchOutcome::Committed => report.records += 2,
+            _ => {
+                return Err(StoreError::Corrupt(
+                    "restored relay lease row did not commit".into(),
+                ));
+            }
+        }
     }
     Ok(report)
 }
@@ -806,7 +883,27 @@ mod tests {
         );
         let coordinator_snapshot = snapshot(
             &coordinator(),
-            vec![(keys::grant_epoch(), codec::encode_u64(7))],
+            vec![
+                (keys::grant_epoch(), codec::encode_u64(7)),
+                (
+                    keys::leased_shard(&RepoName::new("other").unwrap(), "refs/heads/main"),
+                    codec::encode_leased_shard(&codec::LeasedShard {
+                        epoch: 7,
+                        expires_at_ms: 999_999,
+                        acked_epoch: 7,
+                        relay_watermark_ms: 888_888,
+                        sweep_due_ms: 999_999,
+                    }),
+                ),
+                (
+                    keys::timer(
+                        999_999,
+                        kinds::LEASE_SWEEP.get(),
+                        &lease_reference(&RepoName::new("other").unwrap(), "refs/heads/main"),
+                    ),
+                    Value::default(),
+                ),
+            ],
         );
         let root_snapshot = snapshot(
             &root(),
@@ -835,6 +932,43 @@ mod tests {
         assert_eq!(
             codec::decode_lease_recovery(&lr).unwrap().resumed_at_ms,
             500
+        );
+        for name in ["other", "repo"] {
+            let repo = RepoName::new(name).unwrap();
+            let row = block_on(store.get(
+                &coordinator(),
+                &keys::leased_shard(&repo, "refs/heads/main"),
+            ))
+            .unwrap()
+            .unwrap();
+            let row = codec::decode_leased_shard(&row).unwrap();
+            assert_eq!(row.relay_watermark_ms, 0);
+            assert_eq!(row.expires_at_ms, 500);
+            assert_eq!(row.sweep_due_ms, 500);
+            assert!(
+                block_on(store.get(
+                    &coordinator(),
+                    &keys::timer(
+                        500,
+                        kinds::LEASE_SWEEP.get(),
+                        &lease_reference(&repo, "refs/heads/main")
+                    )
+                ))
+                .unwrap()
+                .is_some()
+            );
+        }
+        assert!(
+            block_on(store.get(
+                &coordinator(),
+                &keys::timer(
+                    999_999,
+                    kinds::LEASE_SWEEP.get(),
+                    &lease_reference(&RepoName::new("other").unwrap(), "refs/heads/main")
+                )
+            ))
+            .unwrap()
+            .is_none()
         );
         let writes = store.writes.lock().unwrap();
         let coordinator_write = writes.iter().position(|p| p == &coordinator()).unwrap();

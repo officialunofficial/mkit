@@ -238,6 +238,54 @@ fn ns() -> Partition {
     Partition::Namespace(NamespaceKey::deployment_default())
 }
 
+#[test]
+fn single_sharding_watermark_reads_namespace_outbox() {
+    let env = env(AuthMode::Open);
+    let namespace = NamespaceKey::deployment_default();
+    assert_eq!(
+        now(env.pipe.namespace_relay_watermark(&namespace)).unwrap(),
+        u64::try_from(T0).unwrap()
+    );
+    let row = codec::RelayV1 {
+        at_ms: u64::try_from(T0).unwrap() - 5,
+        target: ns(),
+        puts: vec![(Key::new(&b"x\0"[..]), Value::default())],
+    };
+    now(env.pipe.meta.apply(
+        &ns(),
+        Batch::new().put(keys::relay(1), codec::encode_relay(&row).unwrap()),
+    ))
+    .unwrap();
+    assert_eq!(
+        now(env.pipe.namespace_relay_watermark(&namespace)).unwrap(),
+        u64::try_from(T0).unwrap() - 6
+    );
+    let shards = now(env.pipe.active_shards(&namespace, None, 1)).unwrap();
+    assert_eq!(shards.shards, vec![ns()]);
+    now(env.pipe.meta.apply(&ns(), Batch::new().put(
+        keys::lease_recovery(), codec::encode_lease_recovery(&codec::LeaseRecovery { resumed_at_ms: u64::try_from(T0).unwrap() }),
+    ))).unwrap();
+    assert_eq!(now(env.pipe.namespace_relay_watermark(&namespace)).unwrap_err().code(), Code::Unavailable);
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn relay_delay_directive_commits_with_ref_write() {
+    let env = env(AuthMode::Open);
+    let req = Req::unsigned(Procedure::UpdateRef).header(RELAY_DELAY_MS_HEADER, "10000");
+    assert_eq!(
+        env.update(&req, &upd(HEAD, Missing, A)).unwrap(),
+        UpdateRefResult::Committed
+    );
+    let marker = now(env.pipe.meta.get(&ns(), &faults::relay_delay_key()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        codec::decode_u64(&marker).unwrap(),
+        u64::try_from(T0).unwrap() + 10_000
+    );
+}
+
 fn authv2() -> AuthMode {
     AuthMode::AuthV2(AuthV2Config::new(AUDIENCE, REPO).unwrap())
 }
@@ -2196,7 +2244,11 @@ fn d34_canonical_advance_commits_in_one_ref_partition() {
             .unwrap(),
         AdvanceOutcome::Committed
     );
-    assert_eq!(env.pipe.meta.calls(), 4);
+    assert_eq!(
+        env.pipe.meta.calls(),
+        5,
+        "renewal adds one source relay scan"
+    );
     let applied = partitions.lock().unwrap();
     let refs: Vec<_> = applied
         .iter()

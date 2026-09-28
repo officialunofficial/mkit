@@ -76,6 +76,21 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
         ctx: &TimerCtx<'_, S>,
         timer: &DueTimer,
     ) -> Result<Fired, StoreError> {
+        #[cfg(feature = "test-faults")]
+        if let Some(value) = ctx
+            .store
+            .get(ctx.partition, &crate::pipeline::faults::relay_delay_key())
+            .await?
+        {
+            let until = codec::decode_u64(&value)?;
+            if ctx.now_ms < until {
+                return Ok(Fired::Reschedule {
+                    due_at_ms: until.max(timer.due_at_ms.saturating_add(1)),
+                    value: timer.value.clone(),
+                    batch: Batch::new(),
+                });
+            }
+        }
         let os_key = keys::outbox_sequence();
         let sequence_value = ctx.store.get(ctx.partition, &os_key).await?;
         let os = sequence_value

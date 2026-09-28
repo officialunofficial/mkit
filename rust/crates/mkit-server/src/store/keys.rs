@@ -102,6 +102,8 @@ pub const TAG_EPOCH_LEASE: &str = "el";
 pub const TAG_LEASED_SHARD: &str = "ls";
 /// Coordinator's declared lease-table recovery marker tag.
 pub const TAG_LEASE_RECOVERY: &str = "lr";
+/// Coordinator's completed lease-table reconciliation marker tag.
+pub const TAG_LEASE_RECONCILE: &str = "lrc";
 /// Per-partition Worker backup state. Never pruned.
 pub const TAG_BACKUP_STATE: &str = "bk";
 /// Timer tag (owned by `timers`).
@@ -265,6 +267,8 @@ pub enum ParsedKey {
     },
     /// `lr 00`.
     LeaseRecovery,
+    /// `lrc 00`.
+    LeaseReconcile,
     /// `w 00 <due_at> <kind> <ref>`.
     Timer {
         /// Due time, Unix ms.
@@ -571,6 +575,12 @@ pub fn lease_recovery() -> Key {
     key(TAG_LEASE_RECOVERY, &[])
 }
 
+/// `lrc 00`: reconciliation completed after the declared recovery time.
+#[must_use]
+pub fn lease_reconcile() -> Key {
+    key(TAG_LEASE_RECONCILE, &[])
+}
+
 /// Per-partition Worker backup state.
 #[must_use]
 pub fn backup_state() -> Key {
@@ -732,6 +742,7 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
         b"e" if body.is_empty() => ParsedKey::GrantEpoch,
         b"el" if body.is_empty() => ParsedKey::EpochLease,
         b"lr" if body.is_empty() => ParsedKey::LeaseRecovery,
+        b"lrc" if body.is_empty() => ParsedKey::LeaseReconcile,
         b"bk" if body.is_empty() => ParsedKey::BackupState,
         b"ls" => parse_leased_shard(body)?,
         b"nr" if body.is_empty() => ParsedKey::NamespaceRecord,
@@ -898,6 +909,7 @@ mod tests {
             (grant_epoch(), b"e\0".to_vec()),
             (epoch_lease(), b"el\0".to_vec()),
             (lease_recovery(), b"lr\0".to_vec()),
+            (lease_reconcile(), b"lrc\0".to_vec()),
             (backup_state(), b"bk\0".to_vec()),
             (
                 leased_shard(&repo("a"), "refs/heads/main"),
@@ -1157,6 +1169,7 @@ mod tests {
             (grant_epoch(), ParsedKey::GrantEpoch),
             (epoch_lease(), ParsedKey::EpochLease),
             (lease_recovery(), ParsedKey::LeaseRecovery),
+            (lease_reconcile(), ParsedKey::LeaseReconcile),
             (
                 leased_shard(&repo("a"), "refs/heads/main"),
                 ParsedKey::LeasedShard {

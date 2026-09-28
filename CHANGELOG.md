@@ -87,6 +87,12 @@ train).
 
 ### Changed
 
+- *(server)* Track a coordinator relay watermark per ref shard, retain expired
+  lease rows while their outboxes are undelivered, and expose the namespace
+  minimum and active shard table for GC and takedown (WP-1.23c). Restore
+  resets maxima and fences watermark reads pending reconciliation. The
+  unshipped `LeasedShard` V1 encoding gains watermark and sweep due fields.
+
 - *(client)* Validate the remote URL path as a repository identity and carry
   `X-Repository` on every Connect RPC, including anonymous reads. Empty paths
   address `default`; reads against a different configured single-repository

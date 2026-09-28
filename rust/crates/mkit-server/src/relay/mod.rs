@@ -78,11 +78,28 @@ pub async fn relay_watermark<S: NamespaceStore>(
     p: &Partition,
     now_ms: u64,
 ) -> Result<u64, StoreError> {
+    Ok(source_relay_state(store, p, now_ms).await?.0)
+}
+
+/// Source lower bound and whether its relay outbox is empty, in one scan.
+pub async fn source_relay_state<S: NamespaceStore>(
+    store: &S,
+    p: &Partition,
+    now_ms: u64,
+) -> Result<(u64, bool), StoreError> {
     let (start, end) = keys::class_range(keys::TAG_RELAY);
     let page = store.scan(p, &start, &end, None, 1).await?;
     match page.entries.first() {
-        Some((_, value)) => Ok(codec::decode_relay(value)?.at_ms.saturating_sub(1)),
-        None => Ok(now_ms),
+        Some((key, value)) => {
+            if !matches!(keys::parse(key), Some(keys::ParsedKey::Relay(_))) {
+                return Err(StoreError::Corrupt("invalid relay key".into()));
+            }
+            Ok((codec::decode_relay(value)?.at_ms.saturating_sub(1), false))
+        }
+        None if page.next.is_none() => Ok((now_ms, true)),
+        None => Err(StoreError::Corrupt(
+            "relay scan returned an empty nonterminal page".into(),
+        )),
     }
 }
 

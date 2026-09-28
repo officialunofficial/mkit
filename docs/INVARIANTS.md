@@ -1274,6 +1274,23 @@ malformed hints an existence oracle.
 parsing, unit call-count/isolation tests and Multi wire membership cases.
 
 
+## Every relay source is covered by an epoch lease
+
+**Always:** a batch that appends relay rows carries an epoch lease on its
+source shard. Only ref shards are relay sources. A new relay source class
+requires its own coordinator watermark design before it can append rows.
+This binds WP-4.10, 5.3b, 5.6 and 5.7b.
+
+**Because:** the coordinator keeps an `ls` row until the source outbox drains.
+Without a lease, a new row could appear after the coordinator removed the
+source, and the namespace minimum could pass an undelivered commit.
+
+**If violated:** GC or takedown could complete before a relay row arrives.
+
+**Enforced by:** lease guarded ref writes, `LeaseSweep` source scans, and
+watermark model tests. Consumers add the lease clock margin; the watermark
+can decrease after recovery and remains unavailable until reconciliation.
+
 ## Fresh restore preserves epoch and relay safety
 
 **Always:** logical restore imports into a newly empty store supplied by its
@@ -1281,7 +1298,10 @@ caller. It imports the root
 sharding marker before other partitions, raises each restored namespace epoch
 to `max(snapshot epoch + 2^32, --epoch-at-least)`, refusing overflow, and marks every
 restored coordinator lease table recovered before traffic. It drops backup
-state, kind-4 timers and relay scan state. Before importing, it reads every
+state, kind-4 timers, old lease-sweep timers, reconciliation markers and relay
+scan state. It resets imported `ls` maxima to zero and seeds expired `ls`
+rows with sweep timers for restored ref shards that have relay backlog.
+Before importing, it reads every
 source `os` and every supplied target `rh[source]`. It discards restored
 ref-shard epoch leases, forcing the first write to renew against the raised
 coordinator epoch. For each source it sets

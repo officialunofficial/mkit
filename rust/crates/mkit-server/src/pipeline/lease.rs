@@ -8,6 +8,7 @@
 //! the lr hold-off fences completion until every surviving old deadline has passed.
 
 use crate::op::{Creation, Operation};
+use crate::relay::relay_watermark;
 use crate::repo::Addressing;
 use crate::store::{
     Batch, BatchOutcome, MultipartBlobStore, NamespaceStore, Partition, Precondition, Value, codec,
@@ -39,6 +40,7 @@ pub(super) struct CoordinatorLease {
     shard: Option<Value>,
     observed_el: Option<codec::EpochLease>,
     recovery: Option<codec::LeaseRecovery>,
+    relay_watermark_ms: u64,
 }
 
 impl CoordinatorLease {
@@ -136,6 +138,12 @@ fn grant_batch(
         acked_epoch: old
             .filter(|l| l.expires_at_ms > now)
             .map_or(epoch, |l| l.acked_epoch),
+        relay_watermark_ms: old
+            .map_or(0, |l| l.relay_watermark_ms)
+            .max(read.relay_watermark_ms),
+        sweep_due_ms: old
+            .map_or(0, |l| l.expires_at_ms)
+            .max(now.saturating_add(cfg.epoch_lease_ms)),
     };
     let creation = read.creation();
     let nr_key = keys::namespace_record();
@@ -171,7 +179,7 @@ fn grant_batch(
     }
     if let Some(old) = old {
         batch = batch.delete(keys::timer(
-            old.expires_at_ms,
+            old.sweep_due_ms,
             kinds::LEASE_SWEEP.get(),
             &reference,
         ));
@@ -179,7 +187,7 @@ fn grant_batch(
     batch = batch
         .put(ls_key.clone(), codec::encode_leased_shard(&shard))
         .put(
-            keys::timer(shard.expires_at_ms, kinds::LEASE_SWEEP.get(), &reference),
+            keys::timer(shard.sweep_due_ms, kinds::LEASE_SWEEP.get(), &reference),
             Value::default(),
         );
     let value = codec::EpochLease {
@@ -235,6 +243,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             keys::leased_shard(&op.repo.name, shard_ref(p)?),
             keys::lease_recovery(),
         ];
+        let reported = relay_watermark(&self.meta, p, ms(self.clock.now_ms()))
+            .await
+            .map_err(meta_error)?;
         let rows = self
             .meta
             .get_many(&self.shards.coordinator(&op.repo.namespace), &wanted)
@@ -272,6 +283,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .map(codec::decode_lease_recovery)
                 .transpose()
                 .map_err(meta_error)?,
+            relay_watermark_ms: reported,
         };
         Ok(read)
     }

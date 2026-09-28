@@ -23,7 +23,7 @@ mod begin;
 mod coordinator;
 mod download;
 #[cfg(feature = "test-faults")]
-mod faults;
+pub(crate) mod faults;
 mod gate;
 mod hooks;
 mod info;
@@ -36,6 +36,7 @@ mod shard;
 #[cfg(test)]
 mod tests;
 mod upload;
+mod watermark;
 
 use core::future::Future;
 use core::time::Duration;
@@ -71,7 +72,8 @@ pub use download::{DownloadChunk, DownloadStream};
 #[cfg(feature = "test-faults")]
 pub use faults::{
     BUMP_EPOCH_HEADER, CLOCK_SKEW_HEADER, FAULT_HEADER, FailOnce, FaultHooks, FaultPoint,
-    LEASE_RECOVERED_HEADER, RUN_TIMERS_HEADER, TIMER_MS_HEADER, TestDirectives,
+    LEASE_RECOVERED_HEADER, RELAY_DELAY_MS_HEADER, RUN_TIMERS_HEADER, TIMER_MS_HEADER,
+    TestDirectives,
 };
 pub use hooks::{
     Admission, AdmissionDecision, AdmissionInput, Authorizer, Challenge, DefaultAdmission, HookSet,
@@ -1452,6 +1454,17 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 prune,
                 prune_from,
             } = plan;
+            #[cfg(feature = "test-faults")]
+            let batch = if let Some(delay) = a.test_directives().relay_delay_ms
+                && matches!(op.kind, OpKind::UpdateRef(_))
+            {
+                batch.put(
+                    faults::relay_delay_key(),
+                    codec::encode_u64(ms(clock.business_now_ms).saturating_add(delay)),
+                )
+            } else {
+                batch
+            };
             if req.kind != WriteKind::UploadReserve {
                 #[cfg(feature = "test-faults")]
                 {
