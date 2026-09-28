@@ -177,7 +177,7 @@ thiserror = "2"
 # chain: serde_json is already in this binary's normal dependency graph
 # via mkit-attest (JCS tests) and the http/s3 transports (reqwest).
 serde_json = "1"
-serde = { version = "1", features = ["derive"], optional = true }
+serde = { version = "1", features = ["derive"] }
 # `mkit self update` (commands/self_update.rs): release download over
 # rustls (same feature set + version as mkit-transport-http — zero new
 # TLS supply chain), sha256 sidecar check, and single-member tar.gz
@@ -313,7 +313,7 @@ mcp-v2 = ["dep:rmcp", "dep:tokio", "dep:hyper", "dep:hyper-util", "dep:subtle", 
 # Default-off while experimental; flip after the mapping has survived
 # real mirrors. `git-export` is a back-compat alias from the bridge's
 # export-only era.
-git-bridge = ["dep:mkit-git-bridge", "dep:serde"]
+git-bridge = ["dep:mkit-git-bridge"]
 git-export = ["git-bridge"]
 # Verifiable sparse-checkout (issue #158). Pulls the
 # `mkit-core` sparse module and the matching transport-side fetchers
