@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Server Worker: stream verified multipart parts into CV-keyed R2 objects and
   verify the complete pack before publishing it; raise the ticketed pack cap
   to 4 GiB while retaining the 64 MiB single-upload limit (WP-1.12).
+- Server native: support S3 multipart with verified CV-keyed parts and
+  server-side `UploadPartCopy` assembly, plus a long CompleteUpload deadline
+  (WP-1.13).
 
 - Connect client: sign repository reads with auth v2 on each attempt, including
   the framed `DownloadPack` request. Add a grant-source API and local selection

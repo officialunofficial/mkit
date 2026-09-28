@@ -35,9 +35,8 @@
 //!   (`200`, the whole object), as RFC 9110 lets a server do.
 //! - **`HEAD` object / bucket**, **`DELETE` object** (`204`, present or
 //!   not).
-//! - **Not modeled** (`501 NotImplemented`): any query subresource,
-//!   multipart uploads included (resumable multipart arrives with M1),
-//!   listing, and every other bucket operation.
+//! - **Multipart and `ListObjectsV2`.** The private copy assembly path and
+//!   prefix listing are modeled strictly; other query operations are `501`.
 //!
 //! An error response carries an S3 XML error body (except for `HEAD`,
 //! which has none) and an `x-amz-request-id`. Every request is recorded
@@ -51,6 +50,7 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt::{self, Write as _};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 
@@ -62,6 +62,8 @@ use futures::StreamExt as _;
 use hmac::{Hmac, KeyInit, Mac as _};
 use mkit_server::Redactor;
 use sha2::{Digest as _, Sha256};
+
+mod multipart;
 
 /// The bucket [`FakeS3Options::default`] creates.
 pub const DEFAULT_BUCKET: &str = "mkit-test";
@@ -83,6 +85,8 @@ pub struct FakeS3Options {
     /// Whether `If-None-Match: *` is enforced (`false`: ignored, as by
     /// some older S3-compatibles).
     pub honor_if_none_match: bool,
+    /// Exclude the in-process fake's runtime threads from a test heap meter.
+    pub on_thread_start: Option<fn()>,
 }
 
 impl Default for FakeS3Options {
@@ -93,6 +97,7 @@ impl Default for FakeS3Options {
             region: "auto".to_owned(),
             buckets: vec![DEFAULT_BUCKET.to_owned()],
             honor_if_none_match: true,
+            on_thread_start: None,
         }
     }
 }
@@ -105,6 +110,7 @@ impl fmt::Debug for FakeS3Options {
             .field("region", &self.region)
             .field("buckets", &self.buckets)
             .field("honor_if_none_match", &self.honor_if_none_match)
+            .field("on_thread_start", &self.on_thread_start.is_some())
             .finish()
     }
 }
@@ -161,6 +167,7 @@ impl fmt::Debug for RecordedRequest {
 /// A queued fault for the next request matching `method`.
 struct Fault {
     method: Option<Method>,
+    query_contains: Option<String>,
     kind: FaultKind,
 }
 
@@ -176,6 +183,10 @@ enum FaultKind {
     AfterCommit(StatusCode),
     /// Never read the body and never answer.
     Stall,
+    /// A successful HTTP status with an embedded S3 `<Error>` body.
+    EmbeddedError,
+    /// Serve the request after a delay, exercising long RPC deadlines.
+    Delay(std::time::Duration, Arc<AtomicBool>),
 }
 
 #[derive(Default)]
@@ -186,6 +197,8 @@ struct Objects {
     requests: Vec<RecordedRequest>,
     faults: VecDeque<Fault>,
     next_request_id: u64,
+    uploads: HashMap<String, multipart::Upload>,
+    complete_conflict: Option<(String, String, Bytes)>,
 }
 
 struct Shared {
@@ -248,14 +261,19 @@ impl FakeS3 {
         });
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         let state = Arc::clone(&shared);
+        let on_thread_start = state.opts.on_thread_start;
         let thread = std::thread::Builder::new()
             .name("fake-s3".to_owned())
             .spawn(move || {
-                let runtime = tokio::runtime::Builder::new_multi_thread()
-                    .worker_threads(2)
-                    .enable_all()
-                    .build()
-                    .expect("the fake S3 runtime");
+                if let Some(exclude) = on_thread_start {
+                    exclude();
+                }
+                let mut builder = tokio::runtime::Builder::new_multi_thread();
+                builder.worker_threads(2).enable_all();
+                if let Some(exclude) = on_thread_start {
+                    builder.on_thread_start(exclude);
+                }
+                let runtime = builder.build().expect("the fake S3 runtime");
                 runtime.block_on(async move {
                     let listener =
                         tokio::net::TcpListener::from_std(listener).expect("a tokio listener");
@@ -327,8 +345,17 @@ impl FakeS3 {
             .insert(key.to_owned(), bytes);
     }
 
+    /// Race a verified writer into the final key just before a multipart completion.
+    pub fn conflict_on_next_complete(&self, bucket: &str, key: &str, bytes: Bytes) {
+        self.shared.lock().complete_conflict = Some((bucket.to_owned(), key.to_owned(), bytes));
+    }
+
     fn queue(&self, method: Option<Method>, kind: FaultKind) {
-        self.shared.lock().faults.push_back(Fault { method, kind });
+        self.shared.lock().faults.push_back(Fault {
+            method,
+            query_contains: None,
+            kind,
+        });
     }
 
     /// Answer the next request whose method is `method` (any, for `None`)
@@ -368,6 +395,37 @@ impl FakeS3 {
     /// `408`, and hangs until the client gives up or the fake stops.
     pub fn stall_next(&self, method: Option<Method>) {
         self.queue(method, FaultKind::Stall);
+    }
+
+    /// Return HTTP 200 with `<Error>` on the next matching request.
+    pub fn error_body_next(&self, method: Option<Method>) {
+        self.queue(method, FaultKind::EmbeddedError);
+    }
+
+    /// Return HTTP 200 with `<Error>` for the next matching query subresource.
+    pub fn error_body_next_query(&self, method: Method, query_contains: &str) {
+        self.shared.lock().faults.push_back(Fault {
+            method: Some(method),
+            query_contains: Some(query_contains.to_owned()),
+            kind: FaultKind::EmbeddedError,
+        });
+    }
+
+    /// Delay the next matching S3 query before serving it.
+    #[must_use]
+    pub fn delay_next_query(
+        &self,
+        method: Method,
+        query_contains: &str,
+        delay: std::time::Duration,
+    ) -> Arc<AtomicBool> {
+        let fired = Arc::new(AtomicBool::new(false));
+        self.shared.lock().faults.push_back(Fault {
+            method: Some(method),
+            query_contains: Some(query_contains.to_owned()),
+            kind: FaultKind::Delay(delay, Arc::clone(&fired)),
+        });
+        fired
     }
 }
 
@@ -450,6 +508,7 @@ impl Answer {
     }
 }
 
+#[allow(clippy::too_many_lines)] // Dispatch also records faults and every request for assertions.
 async fn handle(State(shared): State<Arc<Shared>>, request: Request<Body>) -> Response<Body> {
     let (parts, body) = request.into_parts();
     let path = parts.uri.path().to_owned();
@@ -457,10 +516,12 @@ async fn handle(State(shared): State<Arc<Shared>>, request: Request<Body>) -> Re
     let (request_id, fault) = {
         let mut objects = shared.lock();
         objects.next_request_id += 1;
-        let at = objects
-            .faults
-            .iter()
-            .position(|f| f.method.as_ref().is_none_or(|m| *m == parts.method));
+        let at = objects.faults.iter().position(|f| {
+            f.method.as_ref().is_none_or(|m| *m == parts.method)
+                && f.query_contains
+                    .as_deref()
+                    .is_none_or(|needle| query.as_deref().is_some_and(|q| q.contains(needle)))
+        });
         let fault = at.and_then(|i| objects.faults.remove(i));
         (format!("{:016X}", objects.next_request_id), fault)
     };
@@ -520,6 +581,27 @@ async fn handle(State(shared): State<Arc<Shared>>, request: Request<Body>) -> Re
                 )),
                 Err(e) => Err(e),
             }
+        }
+        Some(FaultKind::EmbeddedError) => {
+            received = drain(body).await;
+            Ok(Answer {
+                status: StatusCode::OK,
+                headers: HeaderMap::new(),
+                body: Bytes::from_static(b"<Error><Code>InternalError</Code></Error>"),
+            })
+        }
+        Some(FaultKind::Delay(delay, fired)) => {
+            fired.store(true, Ordering::SeqCst);
+            tokio::time::sleep(delay).await;
+            serve(
+                &shared,
+                &parts,
+                &path,
+                query.as_deref(),
+                body,
+                &mut received,
+            )
+            .await
         }
         None => {
             serve(
@@ -606,12 +688,6 @@ async fn serve(
         *received = drain(body).await;
         return Err(not_implemented("service-level operations"));
     }
-    if query.is_some_and(|q| !q.is_empty()) {
-        *received = drain(body).await;
-        return Err(not_implemented(
-            "query subresources (multipart, listing, ...)",
-        ));
-    }
     if !shared.lock().buckets.contains_key(bucket) {
         *received = drain(body).await;
         return Err(err(
@@ -619,6 +695,9 @@ async fn serve(
             "NoSuchBucket",
             "the bucket does not exist",
         ));
+    }
+    if let Some(query) = query.filter(|q| !q.is_empty()) {
+        return multipart::serve_query(shared, parts, bucket, key, query, body, received).await;
     }
     if key.is_empty() {
         *received = drain(body).await;

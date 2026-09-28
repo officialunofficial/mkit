@@ -350,6 +350,154 @@ impl PackSink for S3PackSink {
     async fn abort(self) {}
 }
 
+/// A part spooled and subtree-verified before its conditional object PUT.
+pub struct S3PartSink {
+    store: S3BlobStore,
+    path: String,
+    meta_path: String,
+    expected_meta: Vec<u8>,
+    prefix: String,
+    index: u32,
+    cv: [u8; 32],
+    hasher: mkit_core::upload_parts::PartHasher,
+    spool: Option<Spool>,
+    written: u64,
+    declared: u64,
+    failed: bool,
+    _reservation: Reservation,
+}
+
+impl fmt::Debug for S3PartSink {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("S3PartSink")
+            .field("index", &self.index)
+            .field("written", &self.written)
+            .finish_non_exhaustive()
+    }
+}
+
+pub(super) async fn begin_part(
+    store: &S3BlobStore,
+    path: String,
+    meta_path: String,
+    expected_meta: Vec<u8>,
+    prefix: String,
+    plan: &mkit_core::upload_parts::PartPlan,
+    index: u32,
+    cv: [u8; 32],
+) -> Result<S3PartSink, StoreError> {
+    let declared = plan
+        .expected_len(index)
+        .map_err(|e| StoreError::Invalid(e.to_string().into()))?;
+    let hasher = mkit_core::upload_parts::PartHasher::new(plan, index)
+        .map_err(|e| StoreError::Invalid(e.to_string().into()))?;
+    let reservation = store.spool.reserve(declared)?;
+    let dir = store.spool_dir.clone();
+    let file = on_pool(move || {
+        match dir {
+            Some(dir) => tempfile::tempfile_in(dir),
+            None => tempfile::tempfile(),
+        }
+        .map_err(|e| spool_error("creating a file", &e))
+    })
+    .await?;
+    Ok(S3PartSink {
+        store: store.clone(),
+        path,
+        meta_path,
+        expected_meta,
+        prefix,
+        index,
+        cv,
+        hasher,
+        spool: Some(Spool {
+            file,
+            blake3: Hasher::new(),
+            sha256: Sha256::new(),
+        }),
+        written: 0,
+        declared,
+        failed: false,
+        _reservation: reservation,
+    })
+}
+
+impl mkit_server::PartSink for S3PartSink {
+    async fn write(&mut self, chunk: Bytes) -> Result<(), StoreError> {
+        if self.failed {
+            return Err(StoreError::Invalid("write after a failed write".into()));
+        }
+        if chunk.is_empty() {
+            self.failed = true;
+            return Err(StoreError::Invalid("empty part chunk".into()));
+        }
+        if let Err(e) = self.hasher.update(&chunk) {
+            self.failed = true;
+            return Err(StoreError::Invalid(e.to_string().into()));
+        }
+        let Some(mut spool) = self.spool.take() else {
+            return Err(sink_gone());
+        };
+        let len = chunk.len() as u64;
+        let appended = on_pool(move || {
+            let result = spool.append(&chunk);
+            Ok((spool, result))
+        })
+        .await?;
+        match appended {
+            (spool, Ok(())) => {
+                self.spool = Some(spool);
+                self.written += len;
+                Ok(())
+            }
+            (_, Err(e)) => {
+                self.failed = true;
+                Err(spool_error("writing", &e))
+            }
+        }
+    }
+
+    async fn commit(mut self) -> Result<Vec<u8>, StoreError> {
+        if self.failed {
+            return Err(StoreError::Invalid("commit after a failed write".into()));
+        }
+        if self.written != self.declared {
+            return Err(StoreError::Invalid("part length mismatch".into()));
+        }
+        if self
+            .hasher
+            .finalize()
+            .map_err(|e| StoreError::Invalid(e.to_string().into()))?
+            != self.cv
+        {
+            return Err(StoreError::PartSubtreeMismatch);
+        }
+        let spool = self.spool.take().ok_or_else(sink_gone)?;
+        let sha256 = to_hex_bytes(&spool.sha256.finalize());
+        self.store
+            .check_meta(&self.meta_path, &self.expected_meta)
+            .await?;
+        self.store
+            .put_verified_path(&self.path, Arc::new(spool.file), self.declared, &sha256)
+            .await?;
+        self.store
+            .delete_siblings(&self.prefix, self.index, &self.path)
+            .await?;
+        if self
+            .store
+            .check_meta(&self.meta_path, &self.expected_meta)
+            .await
+            .is_err()
+        {
+            self.store.delete_path(&self.path).await?;
+            return Err(StoreError::SessionGone);
+        }
+        Ok(self.cv.to_vec())
+    }
+
+    async fn abort(self) {}
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

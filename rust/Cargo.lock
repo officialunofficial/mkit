@@ -3567,6 +3567,8 @@ dependencies = [
  "sha2 0.11.0",
  "subtle",
  "tempfile",
+ "testcontainers",
+ "testcontainers-modules",
  "tokio",
  "tower",
  "tower-http",

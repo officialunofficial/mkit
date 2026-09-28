@@ -82,6 +82,8 @@ const STREAMING: [Procedure; 3] = [
     Procedure::UploadPart,
     Procedure::DownloadPack,
 ];
+/// Unary procedures whose backend work can outlast the ordinary deadline.
+const LONG: [Procedure; 1] = [Procedure::CompleteUpload];
 
 /// The mkit server as an [`axum::Router`]: `mkit_server::connect::service`
 /// (the `mkit.transport.v1` Connect binding and `grpc.health.v1.Health`,
@@ -125,13 +127,16 @@ where
     };
     let unary = mkit_server::connect::service(Arc::clone(&pipeline))
         .with_deadline_policy(layers::deadline_policy(opts.unary_timeout, false));
-    let streaming = mkit_server::connect::service(pipeline)
+    let streaming = mkit_server::connect::service(Arc::clone(&pipeline))
         .with_deadline_policy(layers::deadline_policy(opts.stream_timeout, true));
+    let long = mkit_server::connect::service(pipeline)
+        .with_deadline_policy(layers::deadline_policy(opts.stream_timeout, false));
     let router = STREAMING
         .iter()
         .fold(axum::Router::new(), |router, procedure| {
             router.route_service(procedure.connect_path(), streaming.clone())
         })
+        .route_service(LONG[0].connect_path(), long)
         .fallback_service(unary);
     layers::apply(router, opts, bearer.as_deref())
 }
