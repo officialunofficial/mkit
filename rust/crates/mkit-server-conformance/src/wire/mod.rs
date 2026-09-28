@@ -160,7 +160,8 @@
 //! | `tickets.advance_other_repository` | `tickets`, `auth-v2`, `multi-repo` | a ticket cannot cross a repository boundary |
 //! | `tickets.advance_expired_ticket` | `tickets`, `auth-v2`, `test-faults` | an expired ticket fails with its exact error |
 //! | `growth.replay_and_quota_pruned` | `auth-v2`, `replay`, `quota`, `test-faults` | records answer before expiry; after validity + grace + window the partition shrinks back to an absolute bound (R-31); needs a quota window ≤ 60 s allowing 265 writes, and a disposable server |
-//! | `list.large_response_within_limit` | | records one `ListRefs` response over `list_refs` refs (M1 asserts the bound) |
+//! | `list.large_response_within_limit` | | follows tokens over `list_refs` long names; each response is at most 2 MiB |
+//! | `list.paging_wire` | | token round trip, invalid tokens, and page-size defaults and cap |
 //! | `repo.single_header_mismatch_not_found` | excludes `multi-repo` | Single reads with another identity give `not_found` |
 //! | `repo.single_malformed_invalid_argument` | excludes `multi-repo` | Single reads reject malformed identities |
 //! | `repo.single_signed_missing_header_unauthenticated` | `auth-v2`; excludes `multi-repo` | Single signed writes require X-Repository |
@@ -268,6 +269,7 @@ pub const D34_LIST_REFS_SKIPS: &[&str] = &[
     "refs.list_prefix_stripped",
     "refs.list_prefix_component_boundary",
     "list.large_response_within_limit",
+    "list.paging_wire",
     "repo.isolation_refs",
     // The unsigned-read case probes successful ListRefs as well as ReadRef.
     "auth.v2_reads_unsigned_ok",
@@ -369,7 +371,7 @@ mod tests {
             .map(|case| case.name)
             .collect();
         assert_eq!(skipped, D34_LIST_REFS_SKIPS.iter().copied().collect());
-        assert_eq!(skipped.len(), 8);
+        assert_eq!(skipped.len(), 9);
         for name in &skipped {
             assert!(
                 name.contains("list")

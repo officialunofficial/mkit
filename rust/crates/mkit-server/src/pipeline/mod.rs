@@ -29,6 +29,7 @@ mod gate;
 mod hooks;
 mod info;
 mod lease;
+mod list;
 mod outcome;
 mod parts;
 mod plan;
@@ -612,13 +613,36 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// # Errors
     /// `not_found` for a nonexistent Multi repository;
     /// `invalid_argument` for an invalid prefix or one over
-    /// [`refs::MAX_REF_NAME_BYTES`]; the authorizer's error; `internal`
-    /// for a storage failure.
+    /// [`refs::MAX_REF_NAME_BYTES`]; the authorizer's error; `unavailable`
+    /// for a bucket scan failure.
     pub async fn list_refs(
         &self,
         a: &Authenticated,
         prefix: &str,
     ) -> Result<Vec<RefEntry>, ServerError> {
+        let mut out = Vec::new();
+        let mut token = None;
+        loop {
+            let page = self
+                .list_refs_page(a, prefix, Some(self.cfg.list_page_limit), token.as_deref())
+                .await?;
+            out.extend(page.refs);
+            match page.next {
+                Some(next) => token = Some(next),
+                None => return Ok(out),
+            }
+        }
+    }
+
+    /// One bounded `ListRefs` page. The token is opaque core bytes; the
+    /// Connect binding encodes it as unpadded base64url.
+    pub(crate) async fn list_refs_page(
+        &self,
+        a: &Authenticated,
+        prefix: &str,
+        page_size: Option<u32>,
+        token: Option<&[u8]>,
+    ) -> Result<list::ListPage, ServerError> {
         let kind = OpKind::ListRefs {
             prefix: prefix.to_owned(),
         };
@@ -634,6 +658,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             let op = self.identify(a, kind)?;
             self.authorize(&op).await?;
             self.require_repository(&op.repo).await?;
+            let scan = refs::list_scan_prefix(prefix);
+            let last = token
+                .map(|bytes| {
+                    list::decode_token(&op.repo, &scan, bytes)
+                        .ok_or_else(|| ServerError::invalid_argument("invalid page token"))
+                })
+                .transpose()?;
             #[cfg(feature = "test-faults")]
             {
                 if a.test_directives().lease_recovered {
@@ -645,7 +676,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             }
             let partitions = self.shards.ref_index_partitions(&op.repo);
             if partitions.len() != 1 {
-                // TODO(WP-1.28): read the eventually consistent ref-name index.
+                // TODO(WP-1.28b): read the eventually consistent ref-name index.
                 return Err(ServerError::new(
                     crate::Code::Unimplemented,
                     "ListRefs under d34 sharding lands with WP-1.28",
@@ -665,24 +696,35 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 ms(self.clock.now_ms().saturating_add(a.business_skew_ms)),
             )
             .await?;
-            let scan = refs::list_scan_prefix(prefix);
-            let (mut out, mut after) = (Vec::new(), None);
-            loop {
-                let limit = self.cfg.list_page_limit;
-                let page =
-                    read::list_refs(&self.meta, &p, &op.repo.name, &scan, after.as_ref(), limit)
-                        .await
-                        .map_err(meta_error)?;
-                // Every scanned name starts with `scan`.
-                out.extend(page.refs.into_iter().filter_map(|(name, id)| {
-                    let name = strip_listed_prefix(&name, prefix)?.to_owned();
-                    Some(RefEntry { name, id })
-                }));
-                match page.next {
-                    Some(next) => after = Some(next),
-                    None => return Ok(out),
-                }
+            let requested = page_size.unwrap_or(0);
+            let limit = if requested == 0 {
+                self.cfg.max_list_refs_page_size
+            } else {
+                requested.min(self.cfg.max_list_refs_page_size)
+            };
+            let bucket = list::RefBucket {
+                store: &self.meta,
+                partition: &p,
+            };
+            let mut page = list::page(
+                &[bucket],
+                &op.repo,
+                &scan,
+                last.as_deref(),
+                limit,
+                list::MAX_RESPONSE_BYTES,
+            )
+            .await
+            .map_err(|err| {
+                tracing::warn!(detail = %err, "ref listing scan failed");
+                ServerError::unavailable("ref listing unavailable")
+            })?;
+            for entry in &mut page.refs {
+                entry.name = strip_listed_prefix(&entry.name, prefix)
+                    .ok_or_else(|| ServerError::unavailable("ref listing unavailable"))?
+                    .to_owned();
             }
+            Ok(page)
         })
         .await
     }

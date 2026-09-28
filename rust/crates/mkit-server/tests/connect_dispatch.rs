@@ -41,7 +41,7 @@ use mkit_server::pipeline::{
 };
 use mkit_server::store::{
     Batch, BatchOutcome, Cursor, Key, NamespaceStore, Partition, PartitionStats, ScanPage,
-    StoreCapabilities, StoreError, Value,
+    StoreCapabilities, StoreError, Value, codec, keys,
 };
 use mkit_server::upload::UploadLimits;
 use mkit_server::upload::token::{TicketClaims, TicketKeys};
@@ -126,6 +126,7 @@ struct Setup<H = Hooks> {
     hooks: H,
     meta: Option<MemoryKv>,
     chunk_max: usize,
+    list_cap: Option<u32>,
 }
 
 fn setup(auth: AuthMode) -> Setup {
@@ -134,6 +135,7 @@ fn setup(auth: AuthMode) -> Setup {
         hooks: Hooks::new(),
         meta: None,
         chunk_max: 4,
+        list_cap: None,
     }
 }
 
@@ -188,6 +190,9 @@ impl<H: HookSet + 'static> Setup<H> {
         };
         let mut cfg = PipelineConfig::new(Addressing::Single { repo }, self.auth, limits);
         cfg.download_chunk_max = self.chunk_max;
+        if let Some(cap) = self.list_cap {
+            cfg.max_list_refs_page_size = cap;
+        }
         let meta = self
             .meta
             .unwrap_or_else(|| MemoryKv::with_clock(clock.clone()));
@@ -976,6 +981,7 @@ async fn error_shaping_reaches_the_wire() {
         },
         meta: None,
         chunk_max: 4,
+        list_cap: None,
     }
     .serve();
     let reply = server
@@ -1489,9 +1495,11 @@ async fn m1_ticketed_upload_pack_validates_header_before_mode_and_never_reads_ch
 }
 
 #[tokio::test]
-async fn m1_list_refs_paging_token_rejected_and_page_size_ignored() {
-    let server = setup(AuthMode::Open).serve();
-    for (name, id) in [(HEAD, A), ("refs/heads/dev", B)] {
+async fn m1_list_refs_paging_tokens_and_page_sizes() {
+    let mut config = setup(AuthMode::Open);
+    config.list_cap = Some(2);
+    let server = config.serve();
+    for (name, id) in [(HEAD, A), ("refs/heads/dev", B), ("refs/heads/other", A)] {
         assert_eq!(
             server
                 .json(
@@ -1504,42 +1512,141 @@ async fn m1_list_refs_paging_token_rejected_and_page_size_ignored() {
             StatusCode::OK
         );
     }
-    // An invalid prefix must not reach validation when a token is supplied.
-    assert_unimplemented(
-        &server
+    let invalid = server
+        .unary(
+            "ListRefs",
+            &ListRefsRequest {
+                prefix: Some("refs/heads/".into()),
+                page_token: Some("next".into()),
+                ..Default::default()
+            },
+            &[],
+        )
+        .await;
+    assert_eq!(invalid.code(), "invalid_argument");
+    let original = list_heads_page(&server, None, None).await;
+    let bounded = list_heads_page(&server, Some(1), None).await;
+    assert_eq!(original.refs.len(), 2);
+    assert_eq!(bounded.refs.len(), 1);
+    assert!(bounded.next_page_token.is_some());
+    let second = list_heads_page(&server, Some(1), bounded.next_page_token.clone()).await;
+    assert_eq!(second.refs.len(), 1);
+    assert!(second.next_page_token.is_some());
+    assert!(bounded.refs[0].name < second.refs[0].name);
+    let third = list_heads_page(&server, Some(1), second.next_page_token.clone()).await;
+    assert_eq!(third.refs.len(), 1);
+    assert_eq!(third.next_page_token, None);
+    assert!(second.refs[0].name < third.refs[0].name);
+    let zero = list_heads_page(&server, Some(0), None).await;
+    let above = list_heads_page(&server, Some(100), None).await;
+    assert_eq!(original, zero);
+    assert_eq!(original, above);
+    for (prefix, token) in [
+        ("refs/tags/", bounded.next_page_token.clone().unwrap()),
+        ("refs/heads/", "A".repeat(800)),
+    ] {
+        let reply = server
             .unary(
                 "ListRefs",
                 &ListRefsRequest {
-                    prefix: Some("invalid".into()),
-                    page_token: Some("next".into()),
+                    prefix: Some(prefix.into()),
+                    page_token: Some(token),
                     ..Default::default()
                 },
                 &[],
             )
-            .await,
-    );
-    let list = |page_size| ListRefsRequest {
-        prefix: Some("refs/heads/".into()),
-        page_size,
-        ..Default::default()
-    };
-    let original = server
-        .unary("ListRefs", &list(None), &[])
-        .await
-        .decode::<ListRefsResponse>();
-    let bounded = server
-        .unary("ListRefs", &list(Some(1)), &[])
-        .await
-        .decode::<ListRefsResponse>();
-    assert_eq!(bounded, original);
-    assert_eq!(bounded.refs.len(), 2);
-    // Keep the legacy response bytes unchanged: absent means an empty token.
-    assert_eq!(bounded.next_page_token, None);
+            .await;
+        assert_eq!(reply.code(), "invalid_argument");
+    }
     let json = server
         .json("ListRefs", &serde_json::json!({ "pageSize": 1 }), &[])
         .await;
-    assert_eq!(json.json()["refs"].as_array().unwrap().len(), 2);
-    assert!(json.json().get("nextPageToken").is_none());
+    assert_eq!(json.json()["refs"].as_array().unwrap().len(), 1);
+    assert!(json.json().get("nextPageToken").is_some());
+}
+
+async fn list_heads_page(
+    server: &Server,
+    page_size: Option<u32>,
+    page_token: Option<String>,
+) -> ListRefsResponse {
+    server
+        .unary(
+            "ListRefs",
+            &ListRefsRequest {
+                prefix: Some("refs/heads/".into()),
+                page_size,
+                page_token,
+                ..Default::default()
+            },
+            &[],
+        )
+        .await
+        .decode()
+}
+
+#[tokio::test]
+async fn m1_list_refs_wire_pages_stop_at_two_mib() {
+    let meta = MemoryKv::default();
+    let repo = RepoName::new(REPO).unwrap();
+    let partition = Partition::Namespace(NamespaceKey::deployment_default());
+    for base in (0..5_000).step_by(100) {
+        let mut batch = Batch::new();
+        for i in base..base + 100 {
+            let name = format!("refs/heads/{i:05}{}", "a".repeat(490));
+            batch = batch.put(keys::ref_key(&repo, &name), codec::encode_ref_id(&A));
+        }
+        meta.apply(&partition, batch).await.unwrap();
+    }
+    let mut config = setup(AuthMode::Open);
+    config.list_cap = Some(10_000);
+    config.meta = Some(meta);
+    let server = config.serve();
+    let mut token = None;
+    let mut count = 0;
+    let mut pages = 0;
+    let mut last = String::new();
+    loop {
+        let reply = server
+            .unary(
+                "ListRefs",
+                &ListRefsRequest {
+                    prefix: Some("refs/heads/".into()),
+                    page_size: Some(10_000),
+                    page_token: token,
+                    ..Default::default()
+                },
+                &[],
+            )
+            .await;
+        assert!(reply.body.len() <= 2 * 1024 * 1024);
+        let page: ListRefsResponse = reply.decode();
+        pages += 1;
+        for entry in page.refs {
+            let name = entry.name.unwrap();
+            assert!(name > last);
+            last = name;
+            count += 1;
+        }
+        match page.next_page_token {
+            Some(next) => token = Some(next),
+            None => break,
+        }
+    }
+    assert_eq!(count, 5_000);
+    assert!(pages >= 2, "the encoded cap must cut a 5,000-ref page");
+    let json = server
+        .json(
+            "ListRefs",
+            &serde_json::json!({
+                "prefix": "refs/heads/", "pageSize": 10_000
+            }),
+            &[],
+        )
+        .await;
+    assert_eq!(json.status, StatusCode::OK);
+    assert!(json.body.len() <= 2 * 1024 * 1024);
+    assert!(json.json()["nextPageToken"].is_string());
 }
 
 #[tokio::test]

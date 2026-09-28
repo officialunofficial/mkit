@@ -93,7 +93,7 @@ touched wasm crates + `scripts/check-wasm-dep-graph.sh`; `proto` = `buf lint`, `
 
 ## 2. Work-package registry
 
-124 registry entries: P 2, S 3, M0 22, M1 28, M2 14, M3 14, M4 20, M5 20, plus WP-REL (the final merge-to-main release, filed
+131 registry entries: P 2, S 3, M0 22, M1 32, M2 15, M3 14, M4 20, M5 22, plus WP-REL (the final merge-to-main release, filed
 under M5). **Dropped:** M0-R (Q11 = no), WP-1.1 (folded into S1, Q18), WP-2.1 (folded into S2, Q19). **Added by
 consolidation:** 1.21–1.29 (D34 and coordinator inputs), 4.8a (windowed reader), 4.10a (ContentIndex shards), REL.
 **Split by review 01 (R-72):** M0-02 → M0-02a + M0-02b, M0-05 → M0-05a + M0-05b (the old ids no longer exist).
@@ -138,7 +138,9 @@ Sizes: S ≲ 400, M 400–900, L 900–1500 changed lines.
 | 1.6 | GetServerInfo (server) | M1 | core | 1.2, 1.5 | S | rust,conf-native,conf-wrangler | no |
 | 1.7 | Ref-shard rows: tickets, reservations, local membership, outbox (planners) | M1 | storage | 1.22, 1.24 | L | rust,conf-native | no |
 | 1.23 | Core: repo index shards and the outbox relay | M1 | core | 1.7, 1.24 | L | rust,conf-native,conf-wrangler | no |
-| 1.28 | Core: hash-bucketed ref-name index, ListRefs k-way merge pagination; flip Connect deployments to D34 | M1 | core | 1.23, 1.2, 1.8 | M | rust,conf-native,conf-wrangler | no |
+| 1.28a | Core: ListRefs page tokens, caps and k-way merge engine | M1 | core | 1.2 | M | rust,conf-native,conf-wrangler | no |
+| 1.28b | Core: ref-name index, relay deletes and D34 ListRefs | M1 | core | 1.28a, 1.10, 1.23 | M | rust,conf-native,conf-wrangler | no |
+| 1.28c | D34 default and stale-listing client tolerance | M1 | core | 1.28b, 1.8 | M | rust,conf-native,conf-wrangler | no |
 | 1.25 | Core: epoch leases (D34 revocation) | M1 | core | 1.22, 1.24 | L | rust,conf-native,conf-wrangler | no |
 | 1.26 | Core: default quota exact per ref shard, approximate per namespace | M1 | core | 1.22, 1.24, 1.25 | M | rust,conf-native | no |
 | 1.8 | Worker: Durable Object classes per shard kind | M1 | worker | 1.22, 1.24 | M | rust,wasm,workers,conf-wrangler | no |
@@ -155,8 +157,8 @@ Sizes: S ≲ 400, M 400–900, L 900–1500 changed lines.
 | 1.16 | Client: X-Repository everywhere, identity validation, GetServerInfo, ListRefs paging, ref hint | M1 | client | 1.2, 1.6 | M | rust,cli | no |
 | 1.17 | Client: BeginUpload with target ref, ticket threading, nonce/re-sign rule | M1 | client | 1.16, 1.10 | L | rust,cli | no |
 | 1.18 | Client: resumable part upload with client-held receipts | M1 | client | 1.17, 1.3, 1.11a | M | rust,cli | no |
-| 1.21 | Worker: published-view ref snapshots per ref-index bucket (R2/Cache, debounced) for readers | M1 | worker | 1.28, 1.10, 1.8 | M | rust,workers,conf-wrangler,staging | no |
-| 1.27 | M1 conformance: D34, tickets and growth cases (wire, storage, load) | M1 | conformance | 1.9b, 1.10, 1.14, 1.25, 1.26, 1.28 | L | rust,conf-native,conf-wrangler | no |
+| 1.21 | Worker: published-view ref snapshots per ref-index bucket (R2/Cache, debounced) for readers | M1 | worker | 1.28b, 1.10, 1.8 | M | rust,workers,conf-wrangler,staging | no |
+| 1.27 | M1 conformance: D34, tickets and growth cases (wire, storage, load) | M1 | conformance | 1.9b, 1.10, 1.14, 1.25, 1.26, 1.28c | L | rust,conf-native,conf-wrangler | no |
 | 1.19 | Staging vcs-worker deployment config and runbook | M1 | ops | 1.6, 1.8, 1.12, 1.14, 1.18, 1.21, 1.29 | S | workers,ci-yaml | yes |
 | 1.20 | CI: conformance and e2e against deployed staging (M1 exit) | M1 | conformance | 1.19, 1.27, 1.13, 1.15 | S | ci-yaml,staging | yes |
 | 2.2 | Proto additions for M2 | M2 | proto | S2, 1.2 | S | rust,proto,full | no |
@@ -274,10 +276,10 @@ its predecessors have merged; in practice cap concurrent executors at ~4 to keep
 | 13 | 1.22, 3.14, 4.4 | M1, M3, M4 |
 | 14 | 1.5, 1.7, 1.25, 1.8, 4.11, 5.1a | M1, M4, M5 |
 | 15 | 1.6, 1.23, 1.26, 1.29, 5.1b-1, 5.1b-2, 5.1c | M1, M5 |
-| 16 | 1.28, 1.9, 1.16 | M1 |
+| 16 | 1.28a, 1.9, 1.16 | M1 |
 | 17 | 1.10, 1.11 | M1 |
-| 18 | 1.12, 1.13, 1.15, 1.17, 1.21 | M1 |
-| 19 | 1.14, 1.18 | M1 |
+| 18 | 1.12, 1.13, 1.15, 1.17, 1.28b | M1 |
+| 19 | 1.14, 1.18, 1.21, 1.28c | M1 |
 | 20 | 1.27, 1.19 | M1 |
 | 21 | 1.20 | M1 |
 | 22 | 2.2, 2.10, 3.1, 4.5, 4.9, 4.10a | M2, M3, M4 |
@@ -552,6 +554,7 @@ ContentIndex/export/hooks → M0-02b, unary pipeline → M0-05a, streaming/fault
 | R-120 | WP-5.1b-2 admin API | The admin key list carries roles (user, 2026-09-28): `lease`, `moderation`, `grants`, `audit`, `all`. The admin envelope uses `mkit-admin:v1`; the audit hash chain uses `mkit-admin-audit:v1`. Native uses a loopback listener by default; Workers use a separate path. The audit log is admin-only in v1. Remote CachePurge uses the outbox (5.10 depends on 5.1b-2). Namespace-scoped events use `Event.namespace`. | 5.1b-2, 5.10 |
 | R-121 | M1 staging exit no longer gates M2–M4 code (user, 2026-09-28) | Proto, core and client WPs in M2–M4 depend on the specific M1 code WPs they build on, not on the M1 staging exit 1.20: 2.2 and 3.1 depend on 1.2 (M1 proto/codegen); 4.5 on 1.23 and 1.8; 4.10a on 1.8; 4.9 and 2.10 on 1.16. Staging and conformance WPs (1.20, 2.15, 3.13, 4.18 and each milestone exit) keep their staging edges, so staging-only problems surface at those exits. | 2.2, 2.10, 3.1, 4.5, 4.9, 4.10a |
 | R-122 | WP-1.10 advance ticket consumption | The packlist rule and lag-window `unavailable` are indexed-only (§9.1), outside 1.10. A marker without a pack records `Aborted(PACK_MISSING)` in a separate transaction per STC §7.7. Direct-write reservations fail closed until 3.3. Ticketed advances write uncharged replay rows, and a live ticket can be reused across conflicting advances; 1.14 and 1.27 bound this (extends R-111(2)). Committed `new_to_store` is an upper bound in opaque mode, refined by 3.3. The advance-batch op budget is `9n + 23` (86 at n=7, leaving 14 ops), correcting R-119's headroom note. UpdateRef carries no `ticket_ids`. WP-1.17 must plan at most seven tickets per advance, counting data packs and MKPL nodes (STC §4 and SPEC-SERVER §15.2); over the limit is `invalid_argument`. A re-signed retry after a real commit gets a ticket failure; the client resolves it via BeginUpload `AlreadyPresent` and ReadRef. Ticketless `UploadPack` still drops an admission reservation silently; WP-3.3 closes this. | 1.10, 1.14, 1.17, 1.27, 3.3 |
+| R-123 | WP-1.28 split | 1.28a is the paging engine; 1.28b is the ref-name index, relay deletes and D34 ListRefs after 1.10; 1.28c is the D34 default flip plus client tolerance. The ref-index fan-out is 16 and is not advertised. Index rows are `x 00 <repo> 00 <name>` with live values (M5 reserves a published-index class). Deletes are relayed by an optional `deletes` field on `RelayV1`, changed in place because nothing is deployed. The single→d34 migration promised in R-93/R-94 is dropped because nothing is published or deployed; a mismatched existing database is still refused. The ticket cap stays at 7: WP-1.10's real advance budget of 9n+21 leaves room for two index relay rows. GC's shard list misses ticket-only and deleted-ref shards, so WP-5.3a must cover them. The client's `PackmapMissing` on a stale listing is fixed in 1.28c. 1.28b owns the relay-delay fault needed by 1.27. | 1.28a, 1.28b, 1.28c, 1.21, 1.27, 5.3a |
 | R-124 | Transport field-number ownership | The service list is append-only. New messages number their fields from 1. A WP that adds a field to an existing transport message claims that number in a 00-plan R-row first. Next free numbers after #1179 and #1180: `GetServerInfoResponse` 19; `ReadRefResponse` 4; `ListRefsResponse` 4; `UpdateRefResponse` 2; `AdvanceRefsResponse` 3; `AdvanceRefsRequest` 11; `UpdateRefRequest` 6; `UploadPackHeader` 4; `BeginUploadRequest` 4; `UploadTicket` 5. Reviewers check label and oneof changes by hand (R-79). | 2.2, 3.1, every later transport proto WP |
 | R-125 | WP-2.2 message shapes | One `signed_statement` field; no repository fields; a `RepoVisibility` enum; a `RefPath` oneof; `Retry-After` for pending epoch and visibility updates; `grant_schemes` population is WP-2.6's. Carry-forwards, each checked before a full decode where possible and answered `invalid_argument`: **WP-2.8** `signed_statement` ≤ 8,192 bytes and the namespace grammar; **WP-2.9** an unset `mode`, `UNSPECIFIED` or an unknown enum value, and a statement ≤ 8,192 bytes; **WP-2.11** an unset `target`, an `object_id` that is not 32 bytes, and a path over 1,024 bytes or outside the SPEC-WRITE-GRANTS §9.4 grammar. WP-2.14 (`mkit epoch`) honors `Retry-After` on pending epoch updates; whichever WP adds a visibility client does the same. | 2.2, 2.6, 2.8, 2.9, 2.11, 2.14 |
 | R-131 | WP-4.10a holder sub-sharding deferred (user, 2026-09-28) | ContentIndex shards on Workers are already wired (WP-1.8). Holder sub-sharding is deferred: holders stay in the object's primary content shard. The trigger to revisit is an object whose holder count or content-shard size approaches a configured threshold (alert). WP-4.10 absorbs what is still needed: the holder value becomes `HolderV1 { seq, op_id }` so SPEC-SERVER §13.3's per-holder change sequence exists, and the hold is released in the same primary batch that records the holder (R-75 unchanged). Timer kind 6 stays reserved. | 4.10, 4.10a |

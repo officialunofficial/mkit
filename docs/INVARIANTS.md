@@ -5,6 +5,22 @@ single crate or spec. Each entry states the invariant, why it matters, and
 what breaks when it is violated. A regression test enforces each one; find
 it by the file path listed under "Enforced by".
 
+## ListRefs pages make bounded forward progress
+
+**Always:** a nonterminal ListRefs page contains at least one ref, its token
+binds the repository and normalized prefix to the last emitted full name,
+and every encoded page is at most 2 MiB. A failed bucket scan fails the
+entire page with `unavailable`.
+
+**Because:** clients reject repeated tokens and nonincreasing names; an
+unbounded response exceeds the Connect client message limit.
+
+**If violated:** a client loops or drops refs, or a partial merge appears to
+be a complete listing.
+
+**Enforced by:** `pipeline::list` property and large-list tests, the
+`connect_dispatch` paging wire test, and the Connect encoded-length guard.
+
 ## Storage receipts attest recorded state without exposing inspection
 
 **Always:** a storage receipt binds a committed live advance or lease change
@@ -497,21 +513,6 @@ mutation tests (`suite_selftest.rs`) prove each case fails the store bug it
 targets. All run in the workspace nextest (`just ci`, cloudbuild/ci.yaml).
 Simulated Durable Objects cannot show placement, Cloudflare's limits or
 point-in-time recovery; the M1 staging runs (WP-1.20) cover those.
-
-## M1 Connect request fields remain explicit stubs until implementation
-
-**Always:** until WP-1.28 lands, ref-list continuation tokens are rejected
-before validation or pipeline writes. `page_size` is ignored and listings
-end with an empty `next_page_token`.
-
-**Because:** a new request field must not silently invoke legacy behavior
-before its implementing WP defines it.
-
-**If violated:** a listing can return a token no server honors.
-
-**Enforced by:** `mkit-server/tests/connect_dispatch.rs`'s `m1_*` tests
-and the TODO comments in `connect/service.rs`. WP-1.28 replaces the stub
-assertions with its behavior tests and removes this entry.
 
 ## M2 Connect surfaces remain explicit stubs until implementation
 

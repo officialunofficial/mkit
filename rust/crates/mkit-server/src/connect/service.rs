@@ -4,6 +4,8 @@
 use core::fmt;
 use std::sync::Arc;
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use buffa::Message as _;
 use bytes::Bytes;
 use connectrpc::{
     ConnectError, InboundStream, RequestContext, Response, ServiceRequest, ServiceResult,
@@ -268,24 +270,40 @@ where
     ) -> ServiceResult<ListRefsResponse> {
         let a = authenticated(&ctx)?;
         let m = request.to_owned_message();
-        if !m.page_token.as_deref().unwrap_or_default().is_empty() {
-            // TODO(WP-1.28): implement ListRefs continuation tokens.
-            return Err(not_yet().into());
-        }
-        // TODO(WP-1.28): honour page_size and caps
         let prefix = m.prefix.unwrap_or_default();
         let pipe = self.pipe.arc();
         send_wrap(async move {
-            let refs = pipe.list_refs(&a, &prefix).await?;
-            let refs = refs.into_iter().map(|entry| RefEntry {
+            let token = m
+                .page_token
+                .as_deref()
+                .filter(|t| !t.is_empty())
+                .map(|t| {
+                    if t.len() > 730 {
+                        return Err(ServerError::invalid_argument("invalid page token"));
+                    }
+                    URL_SAFE_NO_PAD
+                        .decode(t)
+                        .map_err(|_| ServerError::invalid_argument("invalid page token"))
+                })
+                .transpose()
+                .map_err(ConnectError::from)?;
+            let page = pipe
+                .list_refs_page(&a, &prefix, m.page_size, token.as_deref())
+                .await?;
+            let refs = page.refs.into_iter().map(|entry| RefEntry {
                 name: Some(entry.name),
                 object_id: Some(entry.id.to_vec()),
                 ..Default::default()
             });
-            Response::ok(ListRefsResponse {
+            let response = ListRefsResponse {
                 refs: refs.collect(),
+                next_page_token: page.next.map(|bytes| URL_SAFE_NO_PAD.encode(bytes)),
                 ..Default::default()
-            })
+            };
+            if response.encoded_len() > 2 * 1024 * 1024 {
+                return Err(ServerError::unavailable("ref listing unavailable").into());
+            }
+            Response::ok(response)
         })
         .await
     }
