@@ -1,5 +1,7 @@
 //! Pipeline tests over the memory stores and a `ManualClock`.
 
+#[path = "tests_begin_parts.rs"]
+mod begin_parts;
 mod info;
 mod policy;
 

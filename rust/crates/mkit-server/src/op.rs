@@ -31,6 +31,10 @@ pub enum Procedure {
     AdvanceRefs,
     /// `BeginUpload` (unary ticket opening).
     BeginUpload,
+    /// `UploadPart` (client streaming).
+    UploadPart,
+    /// `CompleteUpload` (unary multipart completion).
+    CompleteUpload,
     /// `PackExists`.
     PackExists,
     /// `UploadPack` (client streaming).
@@ -50,6 +54,8 @@ impl Procedure {
             Self::UpdateRef => "/mkit.transport.v1.TransportService/UpdateRef",
             Self::AdvanceRefs => "/mkit.transport.v1.TransportService/AdvanceRefs",
             Self::BeginUpload => "/mkit.transport.v1.TransportService/BeginUpload",
+            Self::UploadPart => "/mkit.transport.v1.TransportService/UploadPart",
+            Self::CompleteUpload => "/mkit.transport.v1.TransportService/CompleteUpload",
             Self::PackExists => "/mkit.transport.v1.TransportService/PackExists",
             Self::UploadPack => "/mkit.transport.v1.TransportService/UploadPack",
             Self::DownloadPack => "/mkit.transport.v1.TransportService/DownloadPack",
@@ -65,6 +71,8 @@ impl Procedure {
             "UpdateRef" => Self::UpdateRef,
             "AdvanceRefs" => Self::AdvanceRefs,
             "BeginUpload" => Self::BeginUpload,
+            "UploadPart" => Self::UploadPart,
+            "CompleteUpload" => Self::CompleteUpload,
             "PackExists" => Self::PackExists,
             "UploadPack" => Self::UploadPack,
             "DownloadPack" => Self::DownloadPack,
@@ -78,14 +86,22 @@ impl Procedure {
     pub const fn is_write(self) -> bool {
         matches!(
             self,
-            Self::UpdateRef | Self::AdvanceRefs | Self::BeginUpload | Self::UploadPack
+            Self::UpdateRef
+                | Self::AdvanceRefs
+                | Self::BeginUpload
+                | Self::UploadPack
+                | Self::UploadPart
+                | Self::CompleteUpload
         )
     }
 
-    /// Whether the procedure streams: `UploadPack` and `DownloadPack`.
+    /// Whether the procedure streams: `UploadPack`, `UploadPart` and `DownloadPack`.
     #[must_use]
     pub const fn is_streaming(self) -> bool {
-        matches!(self, Self::UploadPack | Self::DownloadPack)
+        matches!(
+            self,
+            Self::UploadPack | Self::UploadPart | Self::DownloadPack
+        )
     }
 }
 
@@ -102,6 +118,17 @@ pub enum Commitment {
         /// Declared pack length in bytes.
         len: u64,
     },
+    /// `part:<ticket>:<index>:<subtree>:<len>`.
+    Part {
+        /// Ticket id.
+        ticket: Hash,
+        /// Zero-based part index.
+        index: u32,
+        /// BLAKE3 non-root subtree chaining value.
+        subtree: Hash,
+        /// Part length.
+        len: u64,
+    },
 }
 
 impl Commitment {
@@ -115,20 +142,38 @@ impl Commitment {
         if let Some(digest) = text.strip_prefix("body:") {
             return Ok(Self::Body(canonical_hash(digest).ok_or_else(invalid)?));
         }
+        if let Some(part) = text.strip_prefix("part:") {
+            let mut fields = part.split(':');
+            let ticket = canonical_hash(fields.next().ok_or_else(invalid)?).ok_or_else(invalid)?;
+            let index =
+                canonical_decimal::<u32>(fields.next().ok_or_else(invalid)?).ok_or_else(invalid)?;
+            let subtree = canonical_hash(fields.next().ok_or_else(invalid)?).ok_or_else(invalid)?;
+            let len =
+                canonical_decimal::<u64>(fields.next().ok_or_else(invalid)?).ok_or_else(invalid)?;
+            if fields.next().is_some() {
+                return Err(invalid());
+            }
+            return Ok(Self::Part {
+                ticket,
+                index,
+                subtree,
+                len,
+            });
+        }
         let (digest, len) = text
             .strip_prefix("pack:")
             .and_then(|pack| pack.split_once(':'))
             .ok_or_else(invalid)?;
-        let len = len
-            .parse::<u64>()
-            .ok()
-            .filter(|n| n.to_string() == len)
-            .ok_or_else(invalid)?;
+        let len = canonical_decimal::<u64>(len).ok_or_else(invalid)?;
         Ok(Self::Pack {
             id: canonical_hash(digest).ok_or_else(invalid)?,
             len,
         })
     }
+}
+
+fn canonical_decimal<T: core::str::FromStr + ToString>(text: &str) -> Option<T> {
+    text.parse::<T>().ok().filter(|n| n.to_string() == text)
 }
 
 /// Decode 64 lowercase hex characters; anything else is noncanonical.
@@ -358,12 +403,14 @@ mod tests {
     use crate::error::Code;
     use crate::repo::{NamespaceKey, RepoName};
 
-    const ALL: [(Procedure, &str); 8] = [
+    const ALL: [(Procedure, &str); 10] = [
         (Procedure::ListRefs, "ListRefs"),
         (Procedure::ReadRef, "ReadRef"),
         (Procedure::UpdateRef, "UpdateRef"),
         (Procedure::AdvanceRefs, "AdvanceRefs"),
         (Procedure::BeginUpload, "BeginUpload"),
+        (Procedure::UploadPart, "UploadPart"),
+        (Procedure::CompleteUpload, "CompleteUpload"),
         (Procedure::PackExists, "PackExists"),
         (Procedure::UploadPack, "UploadPack"),
         (Procedure::DownloadPack, "DownloadPack"),
@@ -405,6 +452,8 @@ mod tests {
                 Procedure::UpdateRef,
                 Procedure::AdvanceRefs,
                 Procedure::BeginUpload,
+                Procedure::UploadPart,
+                Procedure::CompleteUpload,
                 Procedure::UploadPack
             ]
         );
@@ -413,7 +462,14 @@ mod tests {
             .filter(|(p, _)| p.is_streaming())
             .map(|(p, _)| *p)
             .collect();
-        assert_eq!(streams, [Procedure::UploadPack, Procedure::DownloadPack]);
+        assert_eq!(
+            streams,
+            [
+                Procedure::UploadPart,
+                Procedure::UploadPack,
+                Procedure::DownloadPack
+            ]
+        );
     }
 
     fn golden() -> serde_json::Value {
@@ -531,6 +587,31 @@ mod tests {
         ] {
             let err = VerifiedAuth::try_from(&broken).unwrap_err();
             assert_eq!(err.code(), Code::Unauthenticated);
+        }
+    }
+
+    #[test]
+    fn part_commitment_parses_canonically() {
+        let text = format!("part:{}:2:{}:8388608", "ab".repeat(32), "cd".repeat(32));
+        assert_eq!(
+            Commitment::parse(&text).unwrap(),
+            Commitment::Part {
+                ticket: [0xab; 32],
+                index: 2,
+                subtree: [0xcd; 32],
+                len: 8_388_608,
+            }
+        );
+        for wrong in [
+            text.replace(":2:", ":02:"),
+            text.replace(":8388608", ":08388608"),
+            text.to_uppercase(),
+            format!("{text}:extra"),
+        ] {
+            assert_eq!(
+                Commitment::parse(&wrong).unwrap_err().code(),
+                Code::InvalidArgument
+            );
         }
     }
 

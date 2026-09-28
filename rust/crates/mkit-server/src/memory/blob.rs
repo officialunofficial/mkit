@@ -2,17 +2,19 @@
 
 use std::collections::BTreeMap;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
 use futures_core::Stream;
 use mkit_core::hash::Hasher;
+use mkit_core::upload_parts::{PartHasher, PartPlan, merge_to_root};
 
 use super::{MemoryFault, lock, take_fault};
 use crate::store::{
     BlobBody, BlobKey, BlobMeta, BlobStore, ByteRange, CommitOutcome, MAX_BLOB_PIECE_BYTES,
-    PackSink, StoreError,
+    MultipartBlobStore, PackSink, PartRef, PartSink, StoreError,
 };
 
 /// Bodies longer than this are streamed in pieces of this size
@@ -49,7 +51,23 @@ impl Stream for Chunks {
 #[derive(Debug, Default)]
 struct Shared {
     blobs: Mutex<BTreeMap<BlobKey, Bytes>>,
+    sessions: Mutex<BTreeMap<Vec<u8>, MemoryMultipart>>,
+    next_session: AtomicU64,
     fault: Mutex<Option<MemoryFault>>,
+}
+
+#[derive(Debug)]
+struct MemoryMultipart {
+    key: BlobKey,
+    len: u64,
+    part_size: u64,
+    parts: BTreeMap<u32, MemoryPart>,
+}
+
+#[derive(Debug)]
+struct MemoryPart {
+    bytes: Bytes,
+    cv: [u8; 32],
 }
 
 /// An in-memory [`BlobStore`] for one keyspace. Clones share the blobs.
@@ -67,6 +85,11 @@ impl Default for MemoryBlobStore {
 }
 
 impl MemoryBlobStore {
+    #[cfg(test)]
+    pub(crate) fn multipart_session_count(&self) -> usize {
+        lock(&self.shared.sessions).len()
+    }
+
     /// An empty store for `keyspace` (`packs` for pack uploads).
     #[must_use]
     pub fn new(keyspace: impl Into<String>) -> Self {
@@ -101,6 +124,184 @@ pub struct MemoryPackSink {
     hasher: Hasher,
     buf: Vec<u8>,
     writes: u32,
+}
+
+/// One attempted memory part. Its bytes are staged until its CV verifies.
+#[derive(Debug)]
+pub struct MemoryPartSink {
+    shared: Arc<Shared>,
+    key: BlobKey,
+    session: Vec<u8>,
+    index: u32,
+    expected_cv: [u8; 32],
+    hasher: PartHasher,
+    bytes: Vec<u8>,
+}
+
+impl MultipartBlobStore for MemoryBlobStore {
+    type PartSink = MemoryPartSink;
+    const MAX_PARTS: u32 = u32::MAX;
+
+    fn supports_multipart(&self) -> bool {
+        true
+    }
+
+    async fn begin_multipart(
+        &self,
+        key: BlobKey,
+        len: u64,
+        part_size: u64,
+    ) -> Result<Vec<u8>, StoreError> {
+        PartPlan::new(len, part_size, Self::MAX_PARTS)
+            .map_err(|e| StoreError::Invalid(e.to_string().into()))?;
+        let session = self
+            .shared
+            .next_session
+            .fetch_add(1, Ordering::Relaxed)
+            .to_be_bytes()
+            .to_vec();
+        lock(&self.shared.sessions).insert(
+            session.clone(),
+            MemoryMultipart {
+                key,
+                len,
+                part_size,
+                parts: BTreeMap::new(),
+            },
+        );
+        Ok(session)
+    }
+
+    async fn begin_part(
+        &self,
+        key: BlobKey,
+        session: &[u8],
+        plan: &PartPlan,
+        index: u32,
+        expected_cv: [u8; 32],
+    ) -> Result<MemoryPartSink, StoreError> {
+        let sessions = lock(&self.shared.sessions);
+        let upload = sessions.get(session).ok_or(StoreError::SessionGone)?;
+        if upload.key != key || upload.len != plan.total() || upload.part_size != plan.part_size() {
+            return Err(StoreError::SessionGone);
+        }
+        let hasher =
+            PartHasher::new(plan, index).map_err(|e| StoreError::Invalid(e.to_string().into()))?;
+        Ok(MemoryPartSink {
+            shared: Arc::clone(&self.shared),
+            key,
+            session: session.to_vec(),
+            index,
+            expected_cv,
+            hasher,
+            bytes: Vec::new(),
+        })
+    }
+
+    async fn complete(
+        &self,
+        key: BlobKey,
+        session: &[u8],
+        plan: &PartPlan,
+        parts: &[PartRef],
+    ) -> Result<CommitOutcome, StoreError> {
+        let mut sessions = lock(&self.shared.sessions);
+        let upload = sessions.get(session).ok_or(StoreError::SessionGone)?;
+        if upload.key != key || upload.len != plan.total() || upload.part_size != plan.part_size() {
+            return Err(StoreError::SessionGone);
+        }
+        if parts.len() != plan.count() as usize {
+            return Err(StoreError::Invalid("wrong number of parts".into()));
+        }
+        let mut cvs = Vec::with_capacity(parts.len());
+        let mut bytes = Vec::new();
+        for (i, part) in parts.iter().enumerate() {
+            let index = u32::try_from(i).map_err(|_| StoreError::Invalid("part index".into()))?;
+            let stored = upload.parts.get(&index).ok_or(StoreError::SessionGone)?;
+            if part.index != index
+                || part.len
+                    != plan
+                        .expected_len(index)
+                        .map_err(|e| StoreError::Invalid(e.to_string().into()))?
+                || part.tag.as_slice() != stored.cv
+                || part.len != stored.bytes.len() as u64
+            {
+                return Err(StoreError::Invalid(
+                    "part reference does not match stored part".into(),
+                ));
+            }
+            cvs.push(stored.cv);
+            bytes.extend_from_slice(&stored.bytes);
+        }
+        if bytes.len() as u64 != plan.total()
+            || merge_to_root(plan, &cvs).map_err(|e| StoreError::Invalid(e.to_string().into()))?
+                != *key.hash()
+        {
+            return Err(StoreError::Invalid(
+                "merged part root does not match key".into(),
+            ));
+        }
+        let mut blobs = lock(&self.shared.blobs);
+        let outcome = if let std::collections::btree_map::Entry::Vacant(entry) = blobs.entry(key) {
+            entry.insert(Bytes::from(bytes));
+            CommitOutcome::Created
+        } else {
+            CommitOutcome::AlreadyPresent
+        };
+        sessions.remove(session);
+        Ok(outcome)
+    }
+
+    async fn abort(&self, key: BlobKey, session: &[u8]) -> Result<(), StoreError> {
+        let mut sessions = lock(&self.shared.sessions);
+        if sessions
+            .get(session)
+            .is_some_and(|upload| upload.key == key)
+        {
+            sessions.remove(session);
+        }
+        Ok(())
+    }
+}
+
+impl PartSink for MemoryPartSink {
+    async fn write(&mut self, chunk: Bytes) -> Result<(), StoreError> {
+        if chunk.is_empty() {
+            return Err(StoreError::Invalid("empty part chunk".into()));
+        }
+        self.hasher
+            .update(&chunk)
+            .map_err(|e| StoreError::Invalid(e.to_string().into()))?;
+        self.bytes.extend_from_slice(&chunk);
+        Ok(())
+    }
+
+    async fn commit(self) -> Result<Vec<u8>, StoreError> {
+        let cv = self
+            .hasher
+            .finalize()
+            .map_err(|e| StoreError::Invalid(e.to_string().into()))?;
+        if cv != self.expected_cv {
+            return Err(StoreError::PartSubtreeMismatch);
+        }
+        let mut sessions = lock(&self.shared.sessions);
+        let upload = sessions
+            .get_mut(&self.session)
+            .ok_or(StoreError::SessionGone)?;
+        if upload.key != self.key {
+            return Err(StoreError::SessionGone);
+        }
+        upload.parts.insert(
+            self.index,
+            MemoryPart {
+                bytes: Bytes::from(self.bytes),
+                cv,
+            },
+        );
+        Ok(cv.to_vec())
+    }
+
+    async fn abort(self) {}
 }
 
 impl BlobStore for MemoryBlobStore {
@@ -188,6 +389,7 @@ impl PackSink for MemoryPackSink {
 mod tests {
     use futures_executor::block_on;
     use mkit_core::hash::hash;
+    use mkit_core::upload_parts::{MIN_PART_SIZE, PartPlan, part_subtree_cv};
 
     use super::*;
 
@@ -375,6 +577,112 @@ mod tests {
         assert_eq!(
             put(&store, key, 3, &[b"abc"]).unwrap(),
             CommitOutcome::Created
+        );
+    }
+
+    #[test]
+    fn multipart_parts_are_idempotent_and_bad_reupload_keeps_the_good_part() {
+        let store = MemoryBlobStore::default();
+        let mut data = vec![0x31; usize::try_from(MIN_PART_SIZE).unwrap()];
+        data.extend_from_slice(b"last part");
+        let key = key_of(&data);
+        let plan = PartPlan::new(data.len() as u64, MIN_PART_SIZE, 2).unwrap();
+        let session = block_on(store.begin_multipart(key, plan.total(), plan.part_size())).unwrap();
+        let first = &data[..usize::try_from(MIN_PART_SIZE).unwrap()];
+        let last = &data[usize::try_from(MIN_PART_SIZE).unwrap()..];
+        let cv0 = part_subtree_cv(&plan, 0, first).unwrap();
+        let cv1 = part_subtree_cv(&plan, 1, last).unwrap();
+
+        // Send the last part first, then the large part in bounded chunks.
+        let mut sink = block_on(store.begin_part(key, &session, &plan, 1, cv1)).unwrap();
+        block_on(sink.write(Bytes::copy_from_slice(last))).unwrap();
+        let tag1 = block_on(sink.commit()).unwrap();
+        let upload_first = || {
+            let mut sink = block_on(store.begin_part(key, &session, &plan, 0, cv0)).unwrap();
+            for chunk in first.chunks(MAX_BLOB_PIECE_BYTES) {
+                block_on(sink.write(Bytes::copy_from_slice(chunk))).unwrap();
+            }
+            block_on(sink.commit()).unwrap()
+        };
+        let tag0 = upload_first();
+        assert_eq!(upload_first(), tag0);
+
+        let mut bad = block_on(store.begin_part(key, &session, &plan, 0, cv0)).unwrap();
+        block_on(bad.write(Bytes::from(vec![
+            0x32;
+            usize::try_from(MIN_PART_SIZE).unwrap()
+        ])))
+        .unwrap();
+        assert!(matches!(
+            block_on(bad.commit()),
+            Err(StoreError::PartSubtreeMismatch)
+        ));
+        assert_eq!(block_on(store.head(&key)).unwrap(), None);
+
+        let parts = [
+            PartRef {
+                index: 0,
+                len: MIN_PART_SIZE,
+                tag: tag0,
+            },
+            PartRef {
+                index: 1,
+                len: last.len() as u64,
+                tag: tag1,
+            },
+        ];
+        assert_eq!(
+            block_on(store.complete(key, &session, &plan, &parts)).unwrap(),
+            CommitOutcome::Created
+        );
+        assert_eq!(
+            block_on(store.head(&key)).unwrap(),
+            Some(BlobMeta {
+                len: data.len() as u64
+            })
+        );
+        assert!(matches!(
+            block_on(store.complete(key, &session, &plan, &parts)),
+            Err(StoreError::SessionGone)
+        ));
+    }
+
+    #[test]
+    fn abort_and_unknown_sessions_are_gone() {
+        let store = MemoryBlobStore::default();
+        let plan = PartPlan::new(MIN_PART_SIZE + 1, MIN_PART_SIZE, 2).unwrap();
+        let key = key_of(b"absent");
+        let session = block_on(store.begin_multipart(key, plan.total(), plan.part_size())).unwrap();
+        assert!(matches!(
+            block_on(store.begin_part(key, b"unknown", &plan, 0, [0; 32])),
+            Err(StoreError::SessionGone)
+        ));
+        block_on(store.abort(key, &session)).unwrap();
+        block_on(store.abort(key, &session)).unwrap();
+        assert!(matches!(
+            block_on(store.begin_part(key, &session, &plan, 0, [0; 32])),
+            Err(StoreError::SessionGone)
+        ));
+        assert_eq!(block_on(store.head(&key)).unwrap(), None);
+    }
+
+    #[test]
+    fn marker_and_pack_hashes_have_separate_memory_keys() {
+        let store = MemoryBlobStore::default();
+        let content = b"marker";
+        let pack = key_of(content);
+        let marker = BlobKey::upload_marker(*pack.hash());
+        assert_ne!(pack, marker);
+        assert_eq!(
+            put(&store, marker, content.len() as u64, &[content]).unwrap(),
+            CommitOutcome::Created
+        );
+        assert_eq!(block_on(store.head(&pack)).unwrap(), None);
+        assert_eq!(
+            block_on(store.head(&marker)).unwrap(),
+            Some(BlobMeta {
+                len: content.len() as u64
+            })
         );
     }
 }

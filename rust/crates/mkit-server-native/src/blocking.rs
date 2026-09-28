@@ -8,11 +8,12 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use futures_executor::block_on;
 use futures_util::StreamExt as _;
+use mkit_core::upload_parts::PartPlan;
 use mkit_server::store::MAX_BLOB_PIECE_BYTES;
 use mkit_server::{
     Batch, BatchOutcome, BlobBody, BlobKey, BlobMeta, BlobStore, BoxStream, ByteRange,
-    CommitOutcome, Cursor, Key, NamespaceStore, PackSink, Partition, PartitionStats, ScanPage,
-    StoreCapabilities, StoreError, StoreMaintenance, Value,
+    CommitOutcome, Cursor, Key, MultipartBlobStore, NamespaceStore, PackSink, PartRef, PartSink,
+    Partition, PartitionStats, ScanPage, StoreCapabilities, StoreError, StoreMaintenance, Value,
 };
 
 /// How long a probe result answers later probes (see [`Blocking`]).
@@ -245,6 +246,34 @@ impl<K: PackSink + 'static> PackSink for BlockingSink<K> {
     }
 }
 
+impl<K: PartSink + 'static> PartSink for BlockingSink<K> {
+    async fn write(&mut self, chunk: Bytes) -> Result<(), StoreError> {
+        let mut sink = self.inner.take().ok_or_else(sink_gone)?;
+        let (sink, result) = on_pool(move || {
+            let result = block_on(PartSink::write(&mut sink, chunk));
+            Ok((sink, result))
+        })
+        .await?;
+        self.inner = Some(sink);
+        result
+    }
+
+    async fn commit(mut self) -> Result<Vec<u8>, StoreError> {
+        let sink = self.inner.take().ok_or_else(sink_gone)?;
+        on_pool(move || block_on(PartSink::commit(sink))).await
+    }
+
+    async fn abort(mut self) {
+        if let Some(sink) = self.inner.take() {
+            let _ = on_pool(move || {
+                block_on(PartSink::abort(sink));
+                Ok(())
+            })
+            .await;
+        }
+    }
+}
+
 /// `stream`, each piece read on a blocking thread.
 fn stream_on_pool(
     stream: BoxStream<'static, Result<Bytes, StoreError>>,
@@ -304,5 +333,63 @@ where
     async fn delete(&self, key: &BlobKey) -> Result<bool, StoreError> {
         let key = *key;
         self.run(move |s| block_on(s.delete(&key))).await
+    }
+}
+
+impl<S: MultipartBlobStore + Send + Sync + 'static> MultipartBlobStore for Blocking<S>
+where
+    S::Sink: 'static,
+    S::PartSink: 'static,
+{
+    type PartSink = BlockingSink<S::PartSink>;
+    const MAX_PARTS: u32 = S::MAX_PARTS;
+
+    fn supports_multipart(&self) -> bool {
+        self.inner.supports_multipart()
+    }
+
+    async fn begin_multipart(
+        &self,
+        key: BlobKey,
+        len: u64,
+        part_size: u64,
+    ) -> Result<Vec<u8>, StoreError> {
+        self.run(move |s| block_on(s.begin_multipart(key, len, part_size)))
+            .await
+    }
+
+    async fn begin_part(
+        &self,
+        key: BlobKey,
+        session: &[u8],
+        plan: &PartPlan,
+        index: u32,
+        expected_cv: [u8; 32],
+    ) -> Result<Self::PartSink, StoreError> {
+        let session = session.to_vec();
+        let plan = *plan;
+        let sink = self
+            .run(move |s| block_on(s.begin_part(key, &session, &plan, index, expected_cv)))
+            .await?;
+        Ok(BlockingSink { inner: Some(sink) })
+    }
+
+    async fn complete(
+        &self,
+        key: BlobKey,
+        session: &[u8],
+        plan: &PartPlan,
+        parts: &[PartRef],
+    ) -> Result<CommitOutcome, StoreError> {
+        let session = session.to_vec();
+        let plan = *plan;
+        let parts = parts.to_vec();
+        self.run(move |s| block_on(s.complete(key, &session, &plan, &parts)))
+            .await
+    }
+
+    async fn abort(&self, key: BlobKey, session: &[u8]) -> Result<(), StoreError> {
+        let session = session.to_vec();
+        self.run(move |s| block_on(s.abort(key, &session))).await
     }
 }

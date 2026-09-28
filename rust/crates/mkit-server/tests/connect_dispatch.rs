@@ -16,6 +16,7 @@ use ed25519_dalek::{Signer, SigningKey};
 use http::{HeaderMap, StatusCode};
 use http_body_util::{BodyExt, Full};
 use mkit_core::hash::{hash, to_hex, to_hex_bytes};
+use mkit_core::upload_parts::{MIN_PART_SIZE, PartPlan, part_subtree_cv};
 use mkit_core::write_auth::{Context as AuthContext, Operation as SignedOp};
 use mkit_server::Procedure;
 use mkit_server::auth_v2::AuthV2Config;
@@ -36,11 +37,13 @@ use mkit_server::pipeline::{
 };
 use mkit_server::store::{Batch, NamespaceStore, Partition, codec, keys};
 use mkit_server::upload::UploadLimits;
+use mkit_server::upload::token::{TicketClaims, TicketKeys};
 use mkit_server::{
     Addressing, AuthzFacts, ErrorDetail, METRIC_REQUESTS, ManualClock, MemoryBlobStore,
     MemoryFault, MemoryKv, Metrics, NamespaceKey, Operation, Redacted, RepoId, RepoName,
     ServerError,
 };
+use mkit_server::{BlobKey, MultipartBlobStore};
 use tower::ServiceExt;
 
 const AUDIENCE: &str = "https://api.example.test";
@@ -1008,7 +1011,7 @@ fn assert_unimplemented(reply: &Reply) {
 }
 
 #[test]
-fn m1_stub_paths_are_not_authenticated_procedures_yet() {
+fn multipart_paths_are_authenticated_procedures() {
     // GetServerInfo is permanently outside Procedure: no auth or resolution.
     assert_eq!(
         Procedure::from_connect_path("/mkit.transport.v1.TransportService/GetServerInfo"),
@@ -1018,21 +1021,24 @@ fn m1_stub_paths_are_not_authenticated_procedures_yet() {
         Procedure::from_connect_path("/mkit.transport.v1.TransportService/BeginUpload"),
         Some(Procedure::BeginUpload)
     );
-    // WP-1.11 still needs authenticated procedures for these stubs.
-    for rpc in ["UploadPart", "CompleteUpload"] {
-        let path = format!("/mkit.transport.v1.TransportService/{rpc}");
-        assert_eq!(Procedure::from_connect_path(&path), None, "{rpc}");
-    }
+    assert_eq!(
+        Procedure::from_connect_path("/mkit.transport.v1.TransportService/UploadPart"),
+        Some(Procedure::UploadPart)
+    );
+    assert_eq!(
+        Procedure::from_connect_path("/mkit.transport.v1.TransportService/CompleteUpload"),
+        Some(Procedure::CompleteUpload)
+    );
 }
 
 #[tokio::test]
-async fn m1_new_unary_rpcs_reach_stubs_without_auth_headers() {
+async fn complete_upload_requires_authentication() {
     let server = setup(AuthMode::Bearer {
         token: Redacted::new(TOKEN),
     })
     .serve();
-    assert_unimplemented(
-        &server
+    assert_eq!(
+        server
             .unary(
                 "CompleteUpload",
                 &CompleteUploadRequest {
@@ -1042,11 +1048,16 @@ async fn m1_new_unary_rpcs_reach_stubs_without_auth_headers() {
                 },
                 &[],
             )
-            .await,
+            .await
+            .code(),
+        "unauthenticated",
     );
     // Exercise JSON dispatch too.
     for rpc in ["CompleteUpload"] {
-        assert_unimplemented(&server.json(rpc, &serde_json::json!({}), &[]).await);
+        assert_eq!(
+            server.json(rpc, &serde_json::json!({}), &[]).await.code(),
+            "unauthenticated"
+        );
     }
 }
 
@@ -1098,7 +1109,7 @@ async fn begin_upload_requires_authentication_and_configured_keys() {
 }
 
 #[tokio::test]
-async fn m1_upload_part_stub_ignores_stream_contents_without_auth() {
+async fn upload_part_requires_authentication_before_stream_contents() {
     let server = setup(AuthMode::Bearer {
         token: Redacted::new(TOKEN),
     })
@@ -1117,7 +1128,7 @@ async fn m1_upload_part_stub_ignores_stream_contents_without_auth() {
     };
     let mut full = frame(&header);
     full.extend(frame(&chunk));
-    // Malformed frame, and no header at all: neither is validated by the handler.
+    // Authentication precedes all stream decoding.
     for body in [full, vec![], vec![0, 0, 0, 0, 16, 1, 2]] {
         let reply = server
             .post(
@@ -1129,9 +1140,92 @@ async fn m1_upload_part_stub_ignores_stream_contents_without_auth() {
             .await;
         let (messages, end) = reply.frames();
         assert!(messages.is_empty());
-        assert_eq!(end["error"]["code"], "unimplemented");
-        assert_eq!(end["error"]["message"], "not implemented yet");
+        assert_eq!(end["error"]["code"], "unauthenticated");
     }
+}
+
+#[tokio::test]
+async fn upload_part_stream_rejects_chunk_before_header_and_empty_chunk() {
+    let clock = Arc::new(ManualClock::new(T0));
+    let repo = RepoId {
+        namespace: NamespaceKey::deployment_default(),
+        name: RepoName::new(REPO).unwrap(),
+    };
+    let mut cfg = PipelineConfig::new(
+        Addressing::Single { repo },
+        authv2(),
+        UploadLimits {
+            max_total_bytes: 3 * MIN_PART_SIZE,
+            max_chunks: 1024,
+        },
+    );
+    let keys = TicketKeys::new(vec![("active".into(), [7; 32])]).unwrap();
+    cfg.ticket_keys = Some(keys.clone());
+    let blobs = MemoryBlobStore::default();
+    let data = vec![3; usize::try_from(MIN_PART_SIZE).unwrap() + 1];
+    let id = hash(&data);
+    let session = blobs
+        .begin_multipart(BlobKey::pack(id), data.len() as u64, MIN_PART_SIZE)
+        .await
+        .unwrap();
+    let claims = TicketClaims {
+        ticket_id: [0x11; 32],
+        audience: AUDIENCE.into(),
+        repository: REPO.into(),
+        signer: *SigningKey::from_bytes(&[7; 32]).verifying_key().as_bytes(),
+        pack_id: id,
+        bytes: data.len() as u64,
+        part_size: MIN_PART_SIZE,
+        expires_at_ms: T0 as u64 + 86_400_000,
+        upload_session: session,
+    };
+    let plan = PartPlan::new(claims.bytes, claims.part_size, 10_000).unwrap();
+    let cv = part_subtree_cv(&plan, 0, &data[..usize::try_from(MIN_PART_SIZE).unwrap()]).unwrap();
+    let commitment = format!(
+        "part:{}:0:{}:{MIN_PART_SIZE}",
+        to_hex(&claims.ticket_id),
+        to_hex(&cv)
+    );
+    let headers = signed(7, "UploadPart", &commitment, 219);
+    let pipe = Pipeline::new(
+        blobs,
+        MemoryKv::with_clock(clock.clone()),
+        Hooks::new(),
+        cfg,
+        clock,
+        Arc::new(Codes::default()),
+    )
+    .unwrap();
+    let server = Server {
+        svc: connect::service(Arc::new(pipe)),
+        codes: Arc::new(Codes::default()),
+    };
+    let header = UploadPartRequest {
+        msg: Some(PartMsg::Header(Box::new(UploadPartHeader {
+            ticket_token: Some(keys.mint(&claims)),
+            index: Some(0),
+            ..Default::default()
+        }))),
+        ..Default::default()
+    };
+    let empty = UploadPartRequest {
+        msg: Some(PartMsg::Chunk(Vec::new())),
+        ..Default::default()
+    };
+    let path = "mkit.transport.v1.TransportService/UploadPart";
+    let (_, end) = server
+        .post(path, STREAM, &headers, frame(&empty))
+        .await
+        .frames();
+    assert_eq!(end["error"]["code"], "invalid_argument");
+    assert_eq!(
+        end["error"]["message"],
+        "UploadPart: first message MUST be `header`"
+    );
+    let mut body = frame(&header);
+    body.extend(frame(&empty));
+    let (_, end) = server.post(path, STREAM, &headers, body).await.frames();
+    assert_eq!(end["error"]["code"], "invalid_argument");
 }
 
 #[tokio::test]

@@ -369,6 +369,7 @@ excludes.
 | Too many open upload tickets for the ref or the signer (§7.6) | `failed_precondition`, with public message `too many open upload tickets` |
 | An unresolved delta base after the relay-lag bound, in indexed mode (SPEC-SERVER §9.4) | `failed_precondition`, with public message `delta base not available in this repository` |
 | A part whose subtree hash or length differs from its commitment, or a completion whose merged root or total differs from the ticket (§7.6) | `invalid_argument` |
+| An invalid part receipt (malformed, unknown key id, or bad MAC; §7.6) | `invalid_argument` |
 | A pack still under verification in indexed mode (§7.6) | `unavailable` with exactly one `PendingVerification` detail |
 | A membership-dependent miss within the relay-lag bound, in indexed mode ([SPEC-SERVER §9.4](SPEC-SERVER.md#94-repository-isolated-membership-checks)) | `unavailable` with no detail; a retry with the same nonce is safe |
 | A missed commit deadline (`NotAfter`), a full shard, or outbox backpressure. Nothing commits, and a retry with the same nonce is safe. | `unavailable`, never `resource_exhausted` |
@@ -1260,6 +1261,11 @@ backend's tag for the part. A part needs no admission decision, because
 admission happened at `BeginUpload`. Sending a part index again is
 idempotent.
 
+A deployment MUST retain a rotated key id in the receipt verification set
+for at least seven days after rotation, the maximum ticket lifetime. Only
+then may it retire that id. An invalid receipt within this window indicates
+forgery, rather than ordinary key retirement.
+
 **Part path.** `UploadPart`, `CompleteUpload` and a ticketed `UploadPack`
 form the part path. They record no replay entry. They are idempotent by content, so
 the server checks only the validity window, the ticket token, and the
@@ -1272,8 +1278,9 @@ ticket expiry.
 signed write with a `body:` commitment. The server verifies every
 receipt and merges the subtree hashes into a root. It makes the pack
 visible in storage only if the root equals `pack_id` and the lengths sum
-to `bytes`. Otherwise it aborts the storage session and returns
-`invalid_argument`. Completion does not make the pack a member of the
+to `bytes`. Otherwise it returns `invalid_argument` and **MAY** abort the
+storage session. Reclamation follows the backend lifecycle rule and ticket expiry.
+Completion does not make the pack a member of the
 repository. Completing the same ticket again is idempotent: it returns the
 same result and changes nothing.
 
@@ -1550,6 +1557,7 @@ Explicitly deferred to sibling issues:
 | Version | Status | Changes |
 |---|---|---|
 | `2` | draft | §7.9 defines absent or zero `page_size` as the advertised maximum and malformed or foreign page tokens as `invalid_argument` (WP-1.28a). |
+| `2` (WP-1.11a) | draft | §5 classifies invalid part receipts as `invalid_argument`; §7.6 permits storage-session abort after a root mismatch and retains rotated receipt keys for at least seven days. |
 | `2` | draft | §7.4 repository addressing; §7.5 namespace and write policy (owner key); `GetServerInfo` (§2.1); §7.6 upload tickets and resumable parts; §7.8 ref deletion; §7.9 consistency and `ListRefs` paging; error-code split between `unauthenticated` and `permission_denied` (§5) (mkit#1084, mkit#1090); SPEC-WRITE-GRANTS (mkit#1085): signed reads and `X-Write-Grant` (§7.1), the M2 RPC rows (§2), and grant cross-references. §5.1 admission challenges: HTTP 402 with `permission_denied` and an opaque challenge list, raw MPP/x402 header pass-through, the header-returning `admission_helper` with its allowlist and hard-reserved set; §7.1 replay lookup after authentication and before authorization and admission, with signed reads outside the ledger; retryable `aborted` for in-flight operations (§5); §7.7 lifecycle per RPC (mkit#1086). The M0 server implementation still resumes an interrupted `UploadPack` through its `in_flight` replay record until M1 tickets land. M1: branch-sharded servers MAY require the canonical `AdvanceRefs` head/packmap pairing (§4; WP-1.22 amendment 1). Indexed mode: PendingVerification polling with a 1,000 ms floor (§5, §7.6), delta-base mapping and self-contained replanning in a new signed operation (§5, §7.6), packlist rebuilding (§7.6), advertised max_delta_chain_depth (§2.1), and the membership-dependent lag window and replay exclusion (§7.1, §7.9; SPEC-SERVER §9.4). BeginUpload open-ticket cap error and client no-retry carve-out (§5), and admission-free AlreadyPresent/live-ticket results (§7.6; WP-1.9a amendment 1). WP-4.11 scopes §7.4's Host/path/forwarded-selector prohibition to Connect RPCs and cross-links plain HTTP read admission (§5.1). |
 | `2` | draft | Additive `GetServerInfoResponse.leases = 17` (§2.1; SPEC-SERVER §12); §7.7 ticket-pack loss clarified as a defensive abort case. |
 | `2` | draft | Additive `GetServerInfoResponse.async_inspection = 18` (§2.1); published-view and quarantine rules in SPEC-SERVER §§10–11; §7.1 never stores a sync inspector `unavailable` for replay; §7.6 `AlreadyPresent` is never answered for a pack with hidden content. |
