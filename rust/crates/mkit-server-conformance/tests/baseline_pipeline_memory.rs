@@ -538,6 +538,7 @@ async fn pipeline_multi_repository() {
     let repository_report = run(&target, Some("repository.")).await;
     let multipart_report = run(&target, Some("multipart.")).await;
     let policy_report = run(&target, Some("policy.")).await;
+    let ticket_repo_report = run(&target, Some("tickets.advance_other_repository")).await;
     let info_report = run(&target, Some("info.")).await;
     common::judge(&info_report, PIPELINE_DIVERGENCES);
     for name in ["info.shape_and_policy", "info.ignores_repository_header"] {
@@ -554,6 +555,7 @@ async fn pipeline_multi_repository() {
         Some(Verdict::Pass(_))
     ));
     common::judge(&policy_report, PIPELINE_DIVERGENCES);
+    common::judge(&ticket_repo_report, PIPELINE_DIVERGENCES);
     for case in mkit_server_conformance::wire::CASES
         .iter()
         .filter(|c| c.requires.contains(&Feature::MultiRepo))
@@ -564,6 +566,8 @@ async fn pipeline_multi_repository() {
             &multipart_report
         } else if case.name.starts_with("repository.") {
             &repository_report
+        } else if case.name.starts_with("tickets.") {
+            &ticket_repo_report
         } else {
             &report
         };
@@ -741,7 +745,17 @@ async fn pipeline_d34_epoch_leases() {
     assert_eq!(report.passes(), [case]);
     let tickets = run(&target, Some("tickets.")).await;
     common::judge(&tickets, PIPELINE_DIVERGENCES);
-    assert_eq!(tickets.passes().len(), 8, "all ticket cases run under D34");
+    let applicable = mkit_server_conformance::wire::CASES
+        .iter()
+        .filter(|case| {
+            case.name.starts_with("tickets.") && case.skip_reason(&target.profile).is_none()
+        })
+        .count();
+    assert_eq!(
+        tickets.passes().len(),
+        applicable,
+        "all ticket cases run under D34"
+    );
 
     let repo = RepoId {
         namespace: NamespaceKey::deployment_default(),

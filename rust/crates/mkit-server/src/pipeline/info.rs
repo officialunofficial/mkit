@@ -90,7 +90,6 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             max_pack_bytes: self.cfg.upload_limits.max_total_bytes,
             part_size: self.cfg.part_size,
             max_parts: self.cfg.max_parts,
-            // TODO(WP-1.28): honour page_size up to this bound
             max_list_refs_page_size: self.cfg.max_list_refs_page_size,
             begin_upload_threshold_bytes: self.effective_threshold(),
             atomic_advance: self.capabilities().atomic_advance,

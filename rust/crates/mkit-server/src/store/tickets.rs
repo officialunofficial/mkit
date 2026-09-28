@@ -319,6 +319,8 @@ pub fn plan_ticket_open(
 pub enum CloseReason {
     /// Keep the timer for the expiry handler's missing-ticket no-op.
     Consumed,
+    /// A lost pack is terminal; keep the timer for the same missing-ticket no-op.
+    Aborted,
     /// Remove the timer along with the ticket.
     Expired,
 }

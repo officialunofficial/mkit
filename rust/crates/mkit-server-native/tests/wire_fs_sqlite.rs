@@ -105,6 +105,7 @@ async fn wire_suite_fs_sqlite_auth_v2() {
                         | "timers.redelivery_is_idempotent"
                         | "replay.expired_retry_rejected"
                         | "tickets.upload_pack_expired_token"
+                        | "tickets.advance_expired_ticket"
                         | "growth.replay_and_quota_pruned"
                 )
                 || skipped.starts_with("auth.bearer")
