@@ -6,7 +6,7 @@ use core::future::Future;
 use mkit_core::hash::Hash;
 
 use super::RefEntry;
-use crate::refs::{self, MAX_REF_NAME_BYTES};
+use crate::refs::MAX_REF_NAME_BYTES;
 use crate::repo::RepoId;
 use crate::rt::MaybeSend;
 use crate::store::{Key, NamespaceStore, Partition, StoreError, codec, keys};
@@ -30,7 +30,9 @@ pub(super) struct Scan {
 
 /// A source owns its key class and partition. It scans the normalized prefix
 /// range strictly after `last`, returning full names in key order. `more`
-/// means additional rows may remain beyond the last fetched key.
+/// means additional rows may remain beyond the last fetched key, and
+/// requires at least one row: a scan with `more` and no rows fails the page
+/// as `Corrupt`.
 pub(super) trait BucketSource {
     fn scan(
         &self,
@@ -114,7 +116,10 @@ pub(super) fn decode_token(repo: &RepoId, prefix: &str, bytes: &[u8]) -> Option<
         return None;
     }
     let name = core::str::from_utf8(&bytes[TOKEN_HEADER..]).ok()?;
-    if !refs::validate_ref_name(name) || !name.starts_with(prefix) {
+    // The name is only a scan position: a stored name that predates today's
+    // grammar must still page. Names never contain NUL (the resume key is
+    // `key(last) ‖ 00`).
+    if name.contains('\0') || !name.starts_with(prefix) {
         return None;
     }
     Some(name.to_owned())

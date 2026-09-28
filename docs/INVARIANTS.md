@@ -514,25 +514,23 @@ targets. All run in the workspace nextest (`just ci`, cloudbuild/ci.yaml).
 Simulated Durable Objects cannot show placement, Cloudflare's limits or
 point-in-time recovery; the M1 staging runs (WP-1.20) cover those.
 
-## M1 Connect surfaces remain explicit stubs until implementation
+## M2 Connect surfaces remain explicit stubs until implementation
 
-**Always:** until their implementing WPs land, the four new discovery and
-upload RPCs return `unimplemented` ("not implemented yet"). Ref deletion,
-advance ticket ids, upload ticket tokens and ref-list continuation tokens
-are rejected before validation or pipeline writes. `page_size` is ignored
-and listings end with an empty `next_page_token`.
+**Always:** `GetGrantEpoch`, `SetGrantEpoch`, `SetRepoVisibility` and
+`IssueObjectUrl` return `unimplemented` ("not implemented yet") until
+WP-2.8, WP-2.9 and WP-2.11 implement them. They write no state.
 
-**Because:** the new RPC paths currently bypass authentication because
-`Procedure::from_connect_path` does not recognise them. WP-1.9 and WP-1.11
-must add authenticated procedures before enabling upload behavior;
-WP-1.6 must make discovery explicit while keeping it public by spec §2.1.
+**Because:** their paths currently bypass auth-v2 `Procedure` dispatch.
+WP-2.8 keeps both namespace epoch RPCs outside that path permanently, by
+spec §5.3 (`grant_epoch_paths_are_permanently_outside_procedure`).
+WP-2.9 and WP-2.11 must add mode-specific and signed-read authorization
+before enabling their repository RPCs.
 
-**If violated:** a new field can silently invoke legacy behavior, or an
-unauthenticated upload handler can mutate state.
+**If violated:** an unauthenticated repository RPC can mutate state or mint a token.
 
-**Enforced by:** `mkit-server/tests/connect_dispatch.rs`'s `m1_*` tests
+**Enforced by:** `mkit-server/tests/connect_dispatch.rs`'s `m2_*` tests
 and the TODO and SECURITY comments in `connect/service.rs`. Implementing
-WPs replace the relevant stub assertions with their behavior and auth tests.
+WPs replace their stub assertions with behavior and auth tests.
 
 ## The native server and the reference Worker pass the black-box wire suite
 
@@ -1193,8 +1191,10 @@ non-owner and allowlist behavior. Grants and private reads remain M2.
 ## Ticket, reservation and outbox rows keep exactly one outcome per reservation
 
 **Always:** a ticket has a reservation-derived id and a unique guarded `o` row.
-Only a still-Ticketed row can become terminal, in the same batch as ticket
-consumption, ref publication and local membership. Terminal outcomes stay
+Only a still-Ticketed row can become terminal. Consumption commits its outcome
+with ref publication and local membership; a missing pack with a present upload
+marker records `Aborted(PACK_MISSING)` in a separate guarded batch before the
+advance fails. A missing marker leaves the ticket open. Terminal outcomes stay
 durable until acknowledgement, which deletes their delivery index and subtracts
 the exact stored key/value byte count. Shared counters and sequence/backlog
 values are guarded once per batch.
@@ -1209,7 +1209,8 @@ repository membership, and backlog/caps can undercount durable obligations.
 **Enforced by:** `mkit-server/src/store/{tickets,outbox}.rs` pure planner tests,
 strict `store/codec.rs` decodes, and `mkit-server-conformance/src/storage/kv_cases.rs`
 creation, atomic publication, stale-ticket and acknowledgement cases over memory
-and SQLite. RPC composition and expiry are WP-1.9/1.10/1.14; WP-3.3 adds guarded
+and SQLite. WP-1.10 exercises consumption and the defensive abort over native
+memory/SQLite and wire cases; expiry handling is WP-1.14. WP-3.3 adds guarded
 Pending reservations, ReadServed, reconciliation and backlog enforcement.
 ## Relay delivery advances durable per-source watermarks before source cleanup
 
@@ -1491,6 +1492,24 @@ retries charge admission again, or token results disappear with ticket rows.
 memory and SQLite (Single and D34), and the wire `tickets.*` cases.
 Ticket expiry cleanup and admission Pending/Aborted reconciliation remain
 WP-1.14 and WP-3.3 respectively.
+
+## Ticketed advance publishes only completed uploads
+
+**Always:** a ticketed advance checks the ticket row's repository, head ref,
+signer and expiry, then the ticket-specific upload marker and pack blob. It
+skips admission. A typed ref conflict preserves every ticket; a successful
+advance closes each ticket and writes exactly one committed outcome and local
+membership in the same guarded batch. The upload marker is checked before the
+pack so a globally present pack cannot satisfy another ticket.
+
+**Because:** an upload ticket alone does not prove bytes arrived, and a ref
+conflict must remain correctable while the ticket is live.
+
+**If violated:** a repository could claim another upload's pack, lose its
+payment outcome, or strand usable tickets after a CAS conflict.
+
+**Enforced by:** `mkit-server/src/pipeline/advance.rs`, native ticket advance
+flow/race tests, and `mkit-server-conformance` ticket wire cases.
 
 ## Multipart completion authenticates every part before publication
 
