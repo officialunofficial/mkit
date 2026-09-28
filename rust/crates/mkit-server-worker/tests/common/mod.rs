@@ -20,6 +20,8 @@
 //! [`R2BlobStore`]: mkit_server_worker::r2::R2BlobStore
 #![allow(dead_code, unreachable_pub)]
 
+pub mod multipart_allocator;
+
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::ops::Range;
@@ -40,7 +42,7 @@ use mkit_server_worker::do_sql::classify_error;
 use mkit_server_worker::naming::DoTarget;
 use mkit_server_worker::ns_client::{DoNamespaceStore, NsTransport};
 use mkit_server_worker::ns_object::serve;
-use mkit_server_worker::r2::{ObjectBucket, ObjectStream, PutBody, PutResult};
+use mkit_server_worker::r2::{ObjectBucket, ObjectPage, ObjectStream, PutBody, PutResult};
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
@@ -76,6 +78,10 @@ impl SimBucket {
         lock(&self.objects).len()
     }
 
+    pub fn replace_object(&self, key: &str, bytes: Bytes) {
+        lock(&self.objects).insert(key.to_owned(), bytes);
+    }
+
     /// A put's answer before it writes, if it does not write: a pending
     /// 429, or the key already present.
     fn refuse(&self, key: &str) -> Option<PutResult> {
@@ -94,6 +100,7 @@ impl ObjectBucket for SimBucket {
         let (tx, rx) = oneshot::channel();
         let this = self.clone();
         std::thread::spawn(move || {
+            multipart_allocator::exclude_current_thread();
             let result = block_on(async {
                 if this.early.load(Ordering::SeqCst)
                     && let Some(answer) = this.refuse(&key)
@@ -146,15 +153,42 @@ impl ObjectBucket for SimBucket {
             ),
             None => object,
         };
-        let pieces: Vec<Result<Bytes, String>> = body
-            .chunks(SIM_PIECE)
-            .map(|c| Ok(Bytes::copy_from_slice(c)))
-            .collect();
-        Ok(Some((size, Box::pin(futures::stream::iter(pieces)))))
+        let stream = futures::stream::unfold(body, |mut rest| async move {
+            if rest.is_empty() {
+                None
+            } else {
+                let n = rest.len().min(SIM_PIECE);
+                Some((Ok(rest.split_to(n)), rest))
+            }
+        });
+        Ok(Some((size, Box::pin(stream))))
     }
 
     async fn delete(&self, key: &str) -> Result<(), String> {
         lock(&self.objects).remove(key);
+        Ok(())
+    }
+
+    async fn list(&self, prefix: &str, cursor: Option<&str>) -> Result<ObjectPage, String> {
+        let objects = lock(&self.objects);
+        let keys: Vec<_> = objects
+            .keys()
+            .filter(|key| key.starts_with(prefix) && cursor.is_none_or(|c| key.as_str() > c))
+            .take(1001)
+            .cloned()
+            .collect();
+        let next = (keys.len() > 1000).then(|| keys[999].clone());
+        Ok(ObjectPage {
+            keys: keys.into_iter().take(1000).collect(),
+            cursor: next,
+        })
+    }
+
+    async fn delete_many(&self, keys: Vec<String>) -> Result<(), String> {
+        let mut objects = lock(&self.objects);
+        for key in keys {
+            objects.remove(&key);
+        }
         Ok(())
     }
 

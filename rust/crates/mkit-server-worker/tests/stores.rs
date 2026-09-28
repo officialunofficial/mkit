@@ -7,10 +7,11 @@ use bytes::Bytes;
 use common::{DoConfig, Loopback, SimBucket, SimDoConn, capacity_above_empty};
 use futures::executor::block_on;
 use mkit_core::hash::hash;
+use mkit_core::upload_parts::{MIN_PART_SIZE, PartPlan, part_subtree_cv};
 use mkit_server::sql::{Row, SqlConn, SqlError, SqlKvStore, SqlValue, TxFn};
 use mkit_server::{
-    Batch, BatchOutcome, BlobKey, BlobStore, CommitOutcome, Key, NamespaceKey, NamespaceStore,
-    PackSink, Partition, StoreError, StoreMaintenance, Value,
+    Batch, BatchOutcome, BlobKey, BlobStore, CommitOutcome, Key, MultipartBlobStore, NamespaceKey,
+    NamespaceStore, PackSink, PartRef, PartSink, Partition, StoreError, StoreMaintenance, Value,
 };
 use mkit_server_native::RusqliteConn;
 use mkit_server_worker::naming::{REFSTORE, ROOT_INSTANCE};
@@ -52,6 +53,54 @@ fn upload_marker_r2_key_is_not_a_pack_key() {
         prefixed.object_key(&marker).unwrap(),
         format!("tenant/a/upload-markers/v1/{}", marker.to_hex())
     );
+}
+
+#[test]
+fn r2_corrupted_part_cannot_publish_pack() {
+    let bucket = SimBucket::default();
+    let store = R2BlobStore::new(bucket.clone(), PACKS_KEYSPACE);
+    let data: Vec<u8> = (0_u8..=250)
+        .cycle()
+        .take(MIN_PART_SIZE as usize + 1)
+        .collect();
+    let key = BlobKey::pack(hash(&data));
+    let plan = PartPlan::new(data.len() as u64, MIN_PART_SIZE, 10_000).unwrap();
+    block_on(async {
+        let ticket = hash(b"r2 corrupt test ticket");
+        let session = store
+            .begin_multipart_for_ticket(key, plan.total(), plan.part_size(), ticket)
+            .await
+            .unwrap();
+        let mut parts = Vec::new();
+        for index in 0..plan.count() {
+            let start = plan.offset(index).unwrap() as usize;
+            let end = start + plan.expected_len(index).unwrap() as usize;
+            let cv = part_subtree_cv(&plan, index, &data[start..end]).unwrap();
+            let mut sink = store
+                .begin_part(key, &session, &plan, index, cv)
+                .await
+                .unwrap();
+            for chunk in data[start..end].chunks(64 * 1024) {
+                sink.write(Bytes::copy_from_slice(chunk)).await.unwrap();
+            }
+            parts.push(PartRef {
+                index,
+                len: (end - start) as u64,
+                tag: sink.commit().await.unwrap(),
+            });
+        }
+        let part_key = format!(
+            "server-uploads/{}/0-{}",
+            mkit_core::hash::to_hex_bytes(&session),
+            mkit_core::hash::to_hex_bytes(&parts[0].tag)
+        );
+        bucket.replace_object(&part_key, Bytes::from(vec![0x99; MIN_PART_SIZE as usize]));
+        assert!(matches!(
+            store.complete(key, &session, &plan, &parts).await,
+            Err(StoreError::Invalid(_))
+        ));
+        assert!(store.head(&key).await.unwrap().is_none());
+    });
 }
 
 /// A connection whose size counts free pages too: what the soft cap would

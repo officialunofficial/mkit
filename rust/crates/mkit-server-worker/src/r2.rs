@@ -62,11 +62,12 @@ use futures::channel::{mpsc, oneshot};
 use futures::future::{self, Either};
 use futures::{SinkExt as _, Stream, StreamExt as _};
 use mkit_core::hash::Hasher;
+use mkit_core::upload_parts::{PartHasher, PartPlan};
 use mkit_server::storage_error::StorageOp;
 use mkit_server::store::MAX_BLOB_PIECE_BYTES;
 use mkit_server::{
     BlobBody, BlobKey, BlobMeta, BlobStore, BoxStream, ByteRange, CommitOutcome, MaybeSend,
-    MaybeSync, MultipartBlobStore, PackSink, StoreError, UnsupportedPartSink,
+    MaybeSync, PackSink, StoreError,
 };
 
 use crate::backend_error;
@@ -77,6 +78,9 @@ pub const STORAGE_BINDING: &str = "STORAGE";
 pub const PACKS_KEYSPACE: &str = "packs";
 /// The default cap on one put's declared length (M1 stopgap).
 pub const DEFAULT_MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+mod multipart;
+pub use multipart::R2PartSink;
 
 /// Sent into a put body to fail it before its declared length.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +95,13 @@ pub type PutResult = Result<bool, String>;
 
 /// An object body as the backend delivers it.
 pub type ObjectStream = BoxStream<'static, Result<Bytes, String>>;
+
+/// A bounded page of object names and an opaque continuation cursor.
+#[derive(Debug)]
+pub struct ObjectPage {
+    pub keys: Vec<String>,
+    pub cursor: Option<String>,
+}
 
 /// The object-store operations [`R2BlobStore`] needs: R2 on Workers
 /// (`EnvBucket`, wasm32), a simulation in tests. Errors carry the backend's
@@ -115,6 +126,19 @@ pub trait ObjectBucket: MaybeSend + MaybeSync + Clone + 'static {
 
     /// Remove the object; absent is not an error.
     fn delete(&self, key: &str) -> impl Future<Output = Result<(), String>> + MaybeSend;
+
+    /// Return at most 1,000 keys with the given prefix.
+    fn list(
+        &self,
+        prefix: &str,
+        cursor: Option<&str>,
+    ) -> impl Future<Output = Result<ObjectPage, String>> + MaybeSend;
+
+    /// Remove at most 1,000 objects. Absent keys are harmless.
+    fn delete_many(
+        &self,
+        keys: Vec<String>,
+    ) -> impl Future<Output = Result<(), String>> + MaybeSend;
 
     /// A cheap reachability check.
     fn probe(&self) -> impl Future<Output = Result<(), String>> + MaybeSend;
@@ -174,22 +198,43 @@ impl<B: ObjectBucket> R2BlobStore<B> {
 /// releases only if the bytes verify.
 #[derive(Debug)]
 struct Withheld {
-    key: BlobKey,
+    expected: ExpectedHash,
     len: u64,
     received: u64,
-    hasher: Hasher,
     last: Option<Bytes>,
+}
+
+#[derive(Debug)]
+enum ExpectedHash {
+    Root { key: BlobKey, hasher: Hasher },
+    Part { cv: [u8; 32], hasher: PartHasher },
 }
 
 impl Withheld {
     fn new(key: BlobKey, len: u64) -> Self {
         Self {
-            key,
+            expected: ExpectedHash::Root {
+                key,
+                hasher: Hasher::new(),
+            },
             len,
             received: 0,
-            hasher: Hasher::new(),
             last: None,
         }
+    }
+
+    fn part(cv: [u8; 32], plan: &PartPlan, index: u32) -> Result<Self, StoreError> {
+        let len = plan
+            .expected_len(index)
+            .map_err(|e| StoreError::Invalid(e.to_string().into()))?;
+        let hasher =
+            PartHasher::new(plan, index).map_err(|e| StoreError::Invalid(e.to_string().into()))?;
+        Ok(Self {
+            expected: ExpectedHash::Part { cv, hasher },
+            len,
+            received: 0,
+            last: None,
+        })
     }
 
     /// Hash `chunk`; the part to forward now. The chunk that completes the
@@ -199,7 +244,14 @@ impl Withheld {
         if total > self.len {
             return Err(StoreError::Invalid("blob is longer than declared".into()));
         }
-        self.hasher.update(&chunk);
+        match &mut self.expected {
+            ExpectedHash::Root { hasher, .. } => {
+                hasher.update(&chunk);
+            }
+            ExpectedHash::Part { hasher, .. } => hasher
+                .update(&chunk)
+                .map_err(|e| StoreError::Invalid(e.to_string().into()))?,
+        }
         self.received = total;
         if total == self.len && !chunk.is_empty() {
             self.last = Some(chunk.split_off(chunk.len() - 1));
@@ -212,10 +264,22 @@ impl Withheld {
         if self.received != self.len {
             return Err(StoreError::Invalid("blob length does not match".into()));
         }
-        if self.hasher.finalize() != *self.key.hash() {
-            return Err(StoreError::Invalid(
-                "blob hash does not match its key".into(),
-            ));
+        match &mut self.expected {
+            ExpectedHash::Root { key, hasher } if hasher.finalize() != *key.hash() => {
+                return Err(StoreError::Invalid(
+                    "blob hash does not match its key".into(),
+                ));
+            }
+            ExpectedHash::Part { cv, hasher } => {
+                let actual = hasher
+                    .clone()
+                    .finalize()
+                    .map_err(|e| StoreError::Invalid(e.to_string().into()))?;
+                if actual != *cv {
+                    return Err(StoreError::PartSubtreeMismatch);
+                }
+            }
+            ExpectedHash::Root { .. } => {}
         }
         Ok(self.last.take())
     }
@@ -333,17 +397,7 @@ impl<B: ObjectBucket> BlobStore for R2BlobStore<B> {
                 "blob exceeds the store's size cap".into(),
             ));
         }
-        let object = self.object_key(&key)?;
-        let put = (len > 0).then(|| Running::spawn(&self.bucket, object.clone(), len));
-        Ok(R2PackSink {
-            bucket: self.bucket.clone(),
-            object,
-            core: Withheld::new(key, len),
-            put,
-            failed: false,
-            #[cfg(feature = "test-faults")]
-            fail_final: self.fail_final.clone(),
-        })
+        Ok(self.sink(self.object_key(&key)?, Withheld::new(key, len)))
     }
 
     async fn get(
@@ -403,12 +457,20 @@ impl<B: ObjectBucket> BlobStore for R2BlobStore<B> {
     }
 }
 
-impl<B: ObjectBucket> MultipartBlobStore for R2BlobStore<B> {
-    type PartSink = UnsupportedPartSink;
-    const MAX_PARTS: u32 = 10_000;
-}
-
 impl<B: ObjectBucket> R2BlobStore<B> {
+    fn sink(&self, object: String, core: Withheld) -> R2PackSink<B> {
+        let put = (core.len > 0).then(|| Running::spawn(&self.bucket, object.clone(), core.len));
+        R2PackSink {
+            bucket: self.bucket.clone(),
+            object,
+            core,
+            put,
+            failed: false,
+            #[cfg(feature = "test-faults")]
+            fail_final: self.fail_final.clone(),
+        }
+    }
+
     async fn head_len(&self, object: &str) -> Result<Option<u64>, StoreError> {
         self.bucket
             .head(object)
@@ -647,6 +709,26 @@ impl ObjectBucket for EnvBucket {
         self.bucket()?.delete(key).await.map_err(|e| e.to_string())
     }
 
+    async fn list(&self, prefix: &str, cursor: Option<&str>) -> Result<ObjectPage, String> {
+        let bucket = self.bucket()?;
+        let mut listing = bucket.list().prefix(prefix).limit(1000);
+        if let Some(cursor) = cursor {
+            listing = listing.cursor(cursor);
+        }
+        let page = listing.execute().await.map_err(|e| e.to_string())?;
+        Ok(ObjectPage {
+            keys: page.objects().iter().map(worker::Object::key).collect(),
+            cursor: page.cursor(),
+        })
+    }
+
+    async fn delete_many(&self, keys: Vec<String>) -> Result<(), String> {
+        self.bucket()?
+            .delete_multiple(keys)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     async fn probe(&self) -> Result<(), String> {
         if mkit_worker_common::health::r2_head_probe(&self.env, self.binding).await {
             Ok(())
@@ -774,6 +856,17 @@ mod tests {
         }
 
         async fn delete(&self, _key: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn list(&self, _prefix: &str, _cursor: Option<&str>) -> Result<ObjectPage, String> {
+            Ok(ObjectPage {
+                keys: Vec::new(),
+                cursor: None,
+            })
+        }
+
+        async fn delete_many(&self, _keys: Vec<String>) -> Result<(), String> {
             Ok(())
         }
 
