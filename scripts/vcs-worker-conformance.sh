@@ -5,7 +5,7 @@
 # apps/vcs-worker under a local `wrangler dev`: the M0 "nothing changes on
 # the wire" exit check for the vcs-worker port (WP-M0-17).
 #
-#   scripts/vcs-worker-conformance.sh [--test-faults] [--sharding single|d34] [-- <extra runner args>]
+#   scripts/vcs-worker-conformance.sh [--test-faults] [--sharding single|d34] [--multi] [-- <extra runner args>]
 #
 #   (default)      a release-feature build; the whole suite once.
 #   --test-faults  a `test-faults` build, in two phases, each on a fresh
@@ -24,6 +24,12 @@
 #   --sharding d34  D34 phase 1 only: quota is per ref shard and growth stats
 #                   are single-only. Add --test-faults to plant a RefShard
 #                   relay and verify RepoIndexShard delivery and queue drainage.
+#   --multi        add the Multi phase (WP-1.30): a fresh server started with
+#                  ADDRESSING=multi and the namespace allowlist the run's
+#                  fixed seed and run id derive, then the Multi wire cases
+#                  (repo., repository., policy., tickets.advance_other_repository,
+#                  info.). The planted-membership cases skip: they need the
+#                  in-process baseline's fixtures.
 #   -- ARGS        passed to every `mkit-server-conformance wire` run (e.g.
 #                  `-- --filter refs.`, `-- --list-refs 1000`).
 #
@@ -66,17 +72,19 @@ MAX_BUFFERED_BYTES=1048576
 
 test_faults=0
 sharding=single
+multi=0
 runner_args=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --test-faults) test_faults=1 ;;
+        --multi) multi=1 ;;
         --sharding)
             if [ $# -lt 2 ] || { [ "$2" != single ] && [ "$2" != d34 ]; }; then
                 echo "--sharding requires single or d34" >&2; exit 2
             fi
             sharding="$2"; shift ;;
         --) shift; runner_args=("$@"); break ;;
-        *) echo "usage: $0 [--test-faults] [--sharding single|d34] [-- <runner args>]" >&2; exit 2 ;;
+        *) echo "usage: $0 [--test-faults] [--sharding single|d34] [--multi] [-- <runner args>]" >&2; exit 2 ;;
     esac
     shift
 done
@@ -342,5 +350,40 @@ if [ "${test_faults}" -eq 1 ]; then
         echo "the adapter buffered more than ${MAX_BUFFERED_BYTES} bytes" >&2
         exit 1
     fi
+fi
+
+if [ "${multi}" -eq 1 ]; then
+    # The Multi phase (WP-1.30): a fixed seed and run id, so the namespace
+    # allowlist the deployment starts with is the one this run's signers
+    # derive. `--repository` is unused by a Multi deployment (requests route
+    # by X-Repository); the runner still derives signer keys with it, so the
+    # allowlist and wire runs must pass the same value.
+    multi_seed="5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e"
+    multi_run_id="worker-multi"
+    multi_features="health,strict-gzip-auth,tickets,multi-repo,namespace-policy"
+    allowlist="$("${runner}" allowlist --auth auth-v2 --audience "${ORIGIN}" \
+        --repository "${REPOSITORY}" --signer-seed-hex "${multi_seed}" \
+        --run-id "${multi_run_id}")"
+    # `--var` values are one line each; the var's parser takes commas too.
+    allowlist="$(printf '%s' "${allowlist}" | tr '\n' ',')"
+
+    start_server multi "${vars[@]}" \
+        --var "ADDRESSING:multi" --var "NAMESPACE_ALLOWLIST:${allowlist}"
+    for filter in repo. repository. policy. tickets.advance_other_repository info.; do
+        echo ">> running the Multi wire suite (features: ${multi_features}) --filter ${filter}"
+        status=0
+        "${runner}" wire --base-url "${ORIGIN}" --auth auth-v2 --audience "${ORIGIN}" \
+            --repository "${REPOSITORY}" --signer-seed-hex "${multi_seed}" \
+            --run-id "${multi_run_id}" --atomic-advance --fresh-target --milestone M1 \
+            --max-pack-bytes "${MAX_PACK_BYTES}" --features "${multi_features}" \
+            --sharding "${sharding}" --filter "${filter}" \
+            ${runner_args[@]+"${runner_args[@]}"} || status=$?
+        if [ "${status}" -ne 0 ]; then
+            echo "Multi wire suite failed (exit ${status}); wrangler log tail:" >&2
+            tail -n 80 "${log}" >&2
+            exit "${status}"
+        fi
+    done
+    stop_server
 fi
 echo ">> vcs-worker conformance passed"

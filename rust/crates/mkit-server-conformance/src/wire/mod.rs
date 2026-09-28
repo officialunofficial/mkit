@@ -176,12 +176,16 @@
 //! | `repo.membership_read_your_writes` | `multi-repo`, `auth-v2`; D34 | unrelayed membership is visible only with its ref hint |
 //! | `repo.malformed_membership_hint_no_op` | `multi-repo`, `auth-v2` | malformed, unserved and oversized hints are ignored |
 //!
-//! The three planted membership cases run against the in-process Multi baseline.
-//! The harness seeds blob bytes `conformance/<run_id>/<case>` and their BLAKE3
-//! membership in repository `packs`, owned by that case's `repository-a` signer.
-//! Isolation and malformed-hint fixtures populate the membership index and
-//! `refs/heads/main`; read-your-writes populates only that ref shard and requires
-//! D34. No relay runs while the read-your-writes case checks the lagging index.
+//! The three planted membership cases run only against a target whose
+//! harness seeds membership fixtures (`Profile::planted_membership`); on
+//! any served deployment they skip with "needs planted membership
+//! fixtures (in-process baseline only)". The in-process Multi baseline
+//! seeds blob bytes `conformance/<run_id>/<case>` and their BLAKE3
+//! membership in repository `packs`, owned by that case's `repository-a`
+//! signer. Isolation and malformed-hint fixtures populate the membership
+//! index and `refs/heads/main`; read-your-writes populates only that ref
+//! shard and requires D34 (its D34 skip comes first). No relay runs while
+//! the read-your-writes case checks the lagging index.
 //!
 //! # The `test-faults` contract
 //!
@@ -231,6 +235,7 @@ pub mod profile;
 pub mod report;
 pub mod sign;
 
+use std::collections::BTreeSet;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
@@ -281,6 +286,57 @@ pub const D34_LIST_REFS_SKIPS: &[&str] = &[
 fn sharding_skip_reason(case: &Case, profile: &Profile) -> Option<String> {
     (profile.sharding_d34 && D34_LIST_REFS_SKIPS.contains(&case.name))
         .then(|| "ListRefs under d34 sharding lands with WP-1.28".to_owned())
+}
+
+/// The namespace allowlist a Multi deployment needs for `profile`'s run:
+/// every Multi case's `repository-a` and `repository-b` owner namespace,
+/// derived exactly as the cases derive their signers, while
+/// `policy.non_allowlisted_namespace_denied`'s `non-allowlisted` key
+/// stays outside the set.
+///
+/// # Panics
+/// `profile`'s auth is not [`WireAuth::AuthV2`].
+#[must_use]
+pub fn multi_allowlist(profile: &Profile) -> BTreeSet<mkit_core::repo_identity::Namespace> {
+    let WireAuth::AuthV2 {
+        audience,
+        repository,
+        seed,
+    } = &profile.auth
+    else {
+        panic!("a Multi allowlist needs an auth v2 profile");
+    };
+    CASES
+        .iter()
+        .filter(|case| case.requires.contains(&Feature::MultiRepo))
+        .flat_map(|case| {
+            ["repository-a", "repository-b"].map(|label| {
+                let label = format!("{}/{label}", case.name);
+                let signer =
+                    sign::Signer::derive(seed, &profile.run_id, &label, audience, repository);
+                mkit_core::repo_identity::Namespace::parse(&format!(
+                    "ed25519-{}",
+                    signer.public_key_hex()
+                ))
+                .expect("a signer public key is a canonical namespace")
+            })
+        })
+        .collect()
+}
+
+/// [`multi_allowlist`] as allowlist text — one canonical namespace per
+/// line — which `mkit_server::policy::parse_namespace_allowlist` reads
+/// back: the native `--namespace-allowlist` file's and the Worker
+/// `NAMESPACE_ALLOWLIST` var's format.
+#[must_use]
+pub fn multi_allowlist_text(profile: &Profile) -> String {
+    let mut text = multi_allowlist(profile)
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    text.push('\n');
+    text
 }
 
 /// Run every case whose name contains `filter` (all when `None`) against

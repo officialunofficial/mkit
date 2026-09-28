@@ -11,7 +11,9 @@
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
-use mkit_server_conformance::wire::{CASES, ProfileSpec, WireTarget, run};
+use mkit_server_conformance::wire::{
+    CASES, ProfileSpec, WireAuth, WireTarget, multi_allowlist_text, run,
+};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -27,6 +29,11 @@ struct Cli {
 enum Command {
     /// Run the black-box wire suite against a `mkit.transport.v1` server.
     Wire(WireArgs),
+    /// Print the namespace allowlist a multi deployment needs for this
+    /// suite's derived signers (one canonical namespace per line): pass
+    /// the same auth-v2 profile flags `wire` runs with (`--audience`,
+    /// `--repository`, a signer seed and `--run-id`).
+    Allowlist(WireArgs),
 }
 
 #[derive(Debug, Args)]
@@ -159,6 +166,18 @@ fn list_cases() {
     }
 }
 
+fn build_profile(args: &WireArgs) -> Result<mkit_server_conformance::wire::Profile, String> {
+    let file = match &args.profile {
+        Some(path) => {
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| format!("--profile {}: {e}", path.display()))?;
+            ProfileSpec::from_toml(&text)?
+        }
+        None => ProfileSpec::default(),
+    };
+    file.merge(args.spec()).build(|var| std::env::var(var).ok())
+}
+
 fn wire(args: &WireArgs) -> Result<bool, String> {
     if args.list_cases {
         list_cases();
@@ -171,17 +190,7 @@ fn wire(args: &WireArgs) -> Result<bool, String> {
             base_url.scheme()
         ));
     }
-    let file = match &args.profile {
-        Some(path) => {
-            let text = std::fs::read_to_string(path)
-                .map_err(|e| format!("--profile {}: {e}", path.display()))?;
-            ProfileSpec::from_toml(&text)?
-        }
-        None => ProfileSpec::default(),
-    };
-    let profile = file
-        .merge(args.spec())
-        .build(|var| std::env::var(var).ok())?;
+    let profile = build_profile(args)?;
     let target = WireTarget { base_url, profile };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -193,13 +202,33 @@ fn wire(args: &WireArgs) -> Result<bool, String> {
 }
 
 fn main() -> ExitCode {
-    let Command::Wire(args) = Cli::parse().command;
-    match wire(&args) {
-        Ok(true) => ExitCode::SUCCESS,
-        Ok(false) => ExitCode::FAILURE,
-        Err(e) => {
-            eprintln!("mkit-server-conformance: {e}");
-            ExitCode::from(2)
+    match Cli::parse().command {
+        Command::Wire(args) => match wire(&args) {
+            Ok(true) => ExitCode::SUCCESS,
+            Ok(false) => ExitCode::FAILURE,
+            Err(e) => {
+                eprintln!("mkit-server-conformance: {e}");
+                ExitCode::from(2)
+            }
+        },
+        Command::Allowlist(args) => {
+            match build_profile(&args).map(|profile| {
+                if !matches!(profile.auth, WireAuth::AuthV2 { .. }) {
+                    return Err("a multi-deployment allowlist needs an auth v2 profile \
+                         (--auth auth-v2 --audience ... --repository ...)"
+                        .to_owned());
+                }
+                Ok(profile)
+            }) {
+                Ok(Ok(profile)) => {
+                    print!("{}", multi_allowlist_text(&profile));
+                    ExitCode::SUCCESS
+                }
+                Ok(Err(e)) | Err(e) => {
+                    eprintln!("mkit-server-conformance: {e}");
+                    ExitCode::from(2)
+                }
+            }
         }
     }
 }

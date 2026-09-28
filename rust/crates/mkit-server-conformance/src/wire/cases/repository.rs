@@ -445,7 +445,20 @@ async fn pack_read(ctx: &Ctx, repository: &str, hint: Option<&str>, member: bool
     Ok(())
 }
 
+/// The planted membership fixtures exist only where a harness seeds them
+/// (`Profile::planted_membership`): an in-process baseline, never a served
+/// deployment.
+fn planted(ctx: &Ctx) -> CaseResult {
+    if !ctx.profile().planted_membership {
+        return Err(Failure::Skip(
+            "needs planted membership fixtures (in-process baseline only)".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub(super) async fn isolation_packs(ctx: Ctx) -> CaseResult {
+    planted(&ctx)?;
     let (repo_a, repo_other_namespace) = identities(&ctx, "packs", "packs")?;
     let namespace = repo_a
         .split_once('/')
@@ -470,6 +483,7 @@ pub(super) async fn membership_read_your_writes(ctx: Ctx) -> CaseResult {
             "requires separate membership and ref shards (D34)".into(),
         ));
     }
+    planted(&ctx)?;
     let (repository, _) = identities(&ctx, "packs", "unused")?;
     set(&ctx, &repository, "main", &A).await?;
     // No relay runs in this baseline: only refs/heads/main holds membership.
@@ -482,6 +496,7 @@ pub(super) async fn membership_read_your_writes(ctx: Ctx) -> CaseResult {
 }
 
 pub(super) async fn malformed_membership_hint(ctx: Ctx) -> CaseResult {
+    planted(&ctx)?;
     let (repo_a, repo_b) = identities(&ctx, "packs", "packs")?;
     set(&ctx, &repo_a, "main", &A).await?;
     set(&ctx, &repo_b, "main", &B).await?;

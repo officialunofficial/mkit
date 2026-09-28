@@ -253,6 +253,11 @@ pub struct Profile {
     /// Off by default: on a long-lived server such a listing grows with
     /// every run (and a unary listing has no paging before M1, WP-1.27).
     pub fresh_target: bool,
+    /// The target seeds the membership fixtures the three `repo.*_packs`/
+    /// `membership` cases need (Multi uploads still require tickets, so a
+    /// pack cannot be planted over the wire). In-process baselines set it
+    /// and plant; a served deployment leaves it off and the cases skip.
+    pub planted_membership: bool,
 }
 
 impl Profile {
@@ -276,6 +281,7 @@ impl Profile {
             duplicate_retry_ms: DEFAULT_DUPLICATE_RETRY_MS,
             sign_reads: false,
             fresh_target: false,
+            planted_membership: false,
         };
         profile.derive_features();
         profile

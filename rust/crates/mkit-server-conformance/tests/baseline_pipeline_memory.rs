@@ -209,12 +209,12 @@ async fn serve_sharding(
         max_total_bytes: MAX_PACK,
         max_chunks: 64,
     };
-    let addressing = multi.map_or(Addressing::Single { repo }, |profile| {
-        Addressing::Multi(
-            MultiAddressing::new()
-                .with_namespace_policy(NamespacePolicy::Allowlist(multi_allowlist(profile))),
-        )
-    });
+    let addressing =
+        multi.map_or(Addressing::Single { repo }, |profile| {
+            Addressing::Multi(MultiAddressing::new().with_namespace_policy(
+                NamespacePolicy::Allowlist(mkit_server_conformance::wire::multi_allowlist(profile)),
+            ))
+        });
     let mut cfg = PipelineConfig::new(addressing, auth(&origin), limits);
     cfg.write_quota = quota;
     cfg.sharding = sharding;
@@ -332,40 +332,6 @@ async fn plant_membership(
     }
 }
 
-/// Every Multi case's repository owners are admitted, while the denial case's
-/// `non-allowlisted` label stays outside the set.
-fn multi_allowlist(profile: &Profile) -> BTreeSet<mkit_core::repo_identity::Namespace> {
-    let WireAuth::AuthV2 {
-        audience,
-        repository,
-        seed,
-    } = &profile.auth
-    else {
-        panic!("Multi baseline needs auth v2");
-    };
-    mkit_server_conformance::wire::CASES
-        .iter()
-        .filter(|case| case.requires.contains(&Feature::MultiRepo))
-        .flat_map(|case| {
-            ["repository-a", "repository-b"].map(|label| {
-                let label = format!("{}/{label}", case.name);
-                let signer = mkit_server_conformance::wire::sign::Signer::derive(
-                    seed,
-                    &profile.run_id,
-                    &label,
-                    audience,
-                    repository,
-                );
-                mkit_core::repo_identity::Namespace::parse(&format!(
-                    "ed25519-{}",
-                    signer.public_key_hex()
-                ))
-                .unwrap()
-            })
-        })
-        .collect()
-}
-
 /// `GET /__mkit_test/stats`: the single partition's stats.
 #[cfg(feature = "test-faults")]
 async fn stats(meta: Shared) -> axum::Json<serde_json::Value> {
@@ -478,6 +444,8 @@ async fn pipeline_multi_repository() {
     profile.features.insert(Feature::MultiRepo);
     profile.features.insert(Feature::NamespacePolicy);
     profile.features.insert(Feature::Tickets);
+    // This baseline plants the membership fixtures its cases read.
+    profile.planted_membership = true;
     let (origin, _) = serve_addressing(auth, None, Mutant::None, Some(&profile)).await;
     let WireAuth::AuthV2 { audience, .. } = &mut profile.auth else {
         unreachable!()
@@ -544,6 +512,8 @@ async fn pipeline_d34_multi_membership() {
     });
     profile.features.insert(Feature::MultiRepo);
     profile.sharding_d34 = true;
+    // This baseline plants the membership fixtures its cases read.
+    profile.planted_membership = true;
     let auth = |origin: &str| AuthMode::AuthV2(AuthV2Config::new(origin, "").unwrap());
     let (origin, _) = serve_sharding(
         auth,
