@@ -142,6 +142,7 @@ ci-proto baseline="origin/main":
     buf lint
     buf breaking --against '.git#branch={{ baseline }}'
     bash scripts/check-server-hooks-goldens.sh
+    python3 scripts/check-redaction-goldens.py
     bash scripts/check-server-admin-goldens.sh
 
 # Spec-status, proto schema, wasm dep-graph, mkit-wasm / mkit-server wasm32 checks, and

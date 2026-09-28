@@ -1,0 +1,6 @@
+{
+  "allow": {
+    "reservationId": "demo:upload-20260928-001",
+    "externalRef": "contract:order-17"
+  }
+}

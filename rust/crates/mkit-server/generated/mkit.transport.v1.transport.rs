@@ -1003,6 +1003,16 @@ pub struct ListRefsResponse {
         skip_serializing_if = "::core::option::Option::is_none"
     )]
     pub next_page_token: ::core::option::Option<::buffa::alloc::string::String>,
+    /// Active notices associated with visible refs on this page (SPEC-SERVER §14.6).
+    ///
+    /// Field 3: `ref_redactions`
+    #[serde(
+        rename = "refRedactions",
+        alias = "ref_redactions",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec",
+        deserialize_with = "::buffa::json_helpers::null_as_default"
+    )]
+    pub ref_redactions: ::buffa::alloc::vec::Vec<RefRedaction>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -1012,6 +1022,7 @@ impl ::core::fmt::Debug for ListRefsResponse {
         f.debug_struct("ListRefsResponse")
             .field("refs", &self.refs)
             .field("next_page_token", &self.next_page_token)
+            .field("ref_redactions", &self.ref_redactions)
             .finish()
     }
 }
@@ -1065,6 +1076,14 @@ impl ::buffa::Message for ListRefsResponse {
         if let Some(ref v) = self.next_page_token {
             size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
         }
+        for v in &self.ref_redactions {
+            let __slot = __cache.reserve();
+            let inner_size = v.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                    + inner_size as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -1085,6 +1104,14 @@ impl ::buffa::Message for ListRefsResponse {
         }
         if let Some(ref v) = self.next_page_token {
             ::buffa::types::put_string_field(2u32, v, buf);
+        }
+        for v in &self.ref_redactions {
+            ::buffa::types::put_len_delimited_header(
+                3u32,
+                u64::from(__cache.consume_next()),
+                buf,
+            );
+            v.write_to(__cache, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -1123,6 +1150,18 @@ impl ::buffa::Message for ListRefsResponse {
                     buf,
                 )?;
             }
+            3u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                let mut elem = ::core::default::Default::default();
+                ctx.register_element_memory(
+                    ::buffa::__private::element_footprint(&elem),
+                )?;
+                ::buffa::Message::merge_length_delimited(&mut elem, buf, ctx)?;
+                self.ref_redactions.push(elem);
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -1133,6 +1172,7 @@ impl ::buffa::Message for ListRefsResponse {
     fn clear(&mut self) {
         self.refs.clear();
         self.next_page_token = ::core::option::Option::None;
+        self.ref_redactions.clear();
         self.__buffa_unknown_fields.clear();
     }
 }
@@ -1163,6 +1203,178 @@ pub const __LIST_REFS_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = 
     type_url: "type.googleapis.com/mkit.transport.v1.ListRefsResponse",
     to_json: ::buffa::type_registry::any_to_json::<ListRefsResponse>,
     from_json: ::buffa::type_registry::any_from_json::<ListRefsResponse>,
+    is_wkt: false,
+};
+/// Notice associated with one visible ref; RefEntry's pinned wire layout is unchanged.
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize, ::serde::Deserialize)]
+#[serde(default)]
+pub struct RefRedaction {
+    /// Full ref name, not the prefix-stripped ListRefs display name.
+    ///
+    /// Field 1: `ref`
+    #[serde(rename = "ref", skip_serializing_if = "::core::option::Option::is_none")]
+    pub r#ref: ::core::option::Option<::buffa::alloc::string::String>,
+    /// Field 2: `notice`
+    #[serde(
+        rename = "notice",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_unset_message_field"
+    )]
+    pub notice: ::buffa::MessageField<RedactionNotice, ::buffa::Inline<RedactionNotice>>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for RefRedaction {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("RefRedaction")
+            .field("ref", &self.r#ref)
+            .field("notice", &self.notice)
+            .finish()
+    }
+}
+impl RefRedaction {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.RefRedaction";
+}
+impl RefRedaction {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets `ref` to `Some(value)`, consuming and returning `self`.
+    pub fn with_ref(mut self, value: impl Into<::buffa::alloc::string::String>) -> Self {
+        self.r#ref = Some(value.into());
+        self
+    }
+}
+::buffa::impl_default_instance!(RefRedaction);
+impl ::buffa::MessageName for RefRedaction {
+    const PACKAGE: &'static str = "mkit.transport.v1";
+    const NAME: &'static str = "RefRedaction";
+    const FULL_NAME: &'static str = "mkit.transport.v1.RefRedaction";
+    const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.RefRedaction";
+}
+impl ::buffa::Message for RefRedaction {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        if let Some(ref v) = self.r#ref {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
+        if self.notice.is_set() {
+            let __slot = __cache.reserve();
+            let inner_size = self.notice.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                    + inner_size as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        __cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let Some(ref v) = self.r#ref {
+            ::buffa::types::put_string_field(1u32, v, buf);
+        }
+        if self.notice.is_set() {
+            ::buffa::types::put_len_delimited_header(
+                2u32,
+                u64::from(__cache.consume_next()),
+                buf,
+            );
+            self.notice.write_to(__cache, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_string(
+                    self.r#ref.get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::Message::merge_length_delimited(
+                    self.notice.get_or_insert_default(),
+                    buf,
+                    ctx,
+                )?;
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.r#ref = ::core::option::Option::None;
+        self.notice = ::buffa::MessageField::none();
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for RefRedaction {
+    const PROTO_FQN: &'static str = "mkit.transport.v1.RefRedaction";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for RefRedaction {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __REF_REDACTION_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/mkit.transport.v1.RefRedaction",
+    to_json: ::buffa::type_registry::any_to_json::<RefRedaction>,
+    from_json: ::buffa::type_registry::any_from_json::<RefRedaction>,
     is_wkt: false,
 };
 #[derive(Clone, PartialEq, Default)]
@@ -1317,6 +1529,16 @@ pub struct ReadRefResponse {
         skip_serializing_if = "::core::option::Option::is_none"
     )]
     pub object_id: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
+    /// Active notices for this visible ref; empty when absent (SPEC-SERVER §14.6).
+    ///
+    /// Field 3: `redaction_notices`
+    #[serde(
+        rename = "redactionNotices",
+        alias = "redaction_notices",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec",
+        deserialize_with = "::buffa::json_helpers::null_as_default"
+    )]
+    pub redaction_notices: ::buffa::alloc::vec::Vec<RedactionNotice>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -1326,6 +1548,7 @@ impl ::core::fmt::Debug for ReadRefResponse {
         f.debug_struct("ReadRefResponse")
             .field("exists", &self.exists)
             .field("object_id", &self.object_id)
+            .field("redaction_notices", &self.redaction_notices)
             .finish()
     }
 }
@@ -1371,7 +1594,7 @@ impl ::buffa::Message for ReadRefResponse {
     /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
     /// points reject, never a silently wrapped size.
     #[allow(clippy::let_and_return)]
-    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+    fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         let mut size = 0u64;
@@ -1381,12 +1604,20 @@ impl ::buffa::Message for ReadRefResponse {
         if let Some(ref v) = self.object_id {
             size += 1u64 + ::buffa::types::bytes_encoded_len(v) as u64;
         }
+        for v in &self.redaction_notices {
+            let __slot = __cache.reserve();
+            let inner_size = v.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                    + inner_size as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
     fn write_to(
         &self,
-        _cache: &mut ::buffa::SizeCache,
+        __cache: &mut ::buffa::SizeCache,
         buf: &mut impl ::buffa::EncodeSink,
     ) {
         #[allow(unused_imports)]
@@ -1396,6 +1627,14 @@ impl ::buffa::Message for ReadRefResponse {
         }
         if let Some(ref v) = self.object_id {
             ::buffa::types::put_shared_bytes_field(2u32, v, buf);
+        }
+        for v in &self.redaction_notices {
+            ::buffa::types::put_len_delimited_header(
+                3u32,
+                u64::from(__cache.consume_next()),
+                buf,
+            );
+            v.write_to(__cache, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -1429,6 +1668,18 @@ impl ::buffa::Message for ReadRefResponse {
                     buf,
                 )?;
             }
+            3u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                let mut elem = ::core::default::Default::default();
+                ctx.register_element_memory(
+                    ::buffa::__private::element_footprint(&elem),
+                )?;
+                ::buffa::Message::merge_length_delimited(&mut elem, buf, ctx)?;
+                self.redaction_notices.push(elem);
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -1439,6 +1690,7 @@ impl ::buffa::Message for ReadRefResponse {
     fn clear(&mut self) {
         self.exists = ::core::option::Option::None;
         self.object_id = ::core::option::Option::None;
+        self.redaction_notices.clear();
         self.__buffa_unknown_fields.clear();
     }
 }
@@ -1749,19 +2001,27 @@ pub const __UPDATE_REF_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = 
     from_json: ::buffa::type_registry::any_from_json::<UpdateRefRequest>,
     is_wkt: false,
 };
-/// Empty body is success. CAS failure and validation failure are surfaced
-/// as Connect errors, not response fields — see SPEC-TRANSPORT-CONNECT §3.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct UpdateRefResponse {
+    /// DSSE storage-receipt envelope JSON; empty when receipts are disabled.
+    /// CAS and validation failures remain Connect errors (STC §3).
+    ///
+    /// Field 1: `receipt`
+    #[serde(
+        rename = "receipt",
+        with = "::buffa::json_helpers::opt_bytes",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub receipt: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
 impl ::core::fmt::Debug for UpdateRefResponse {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("UpdateRefResponse").finish()
+        f.debug_struct("UpdateRefResponse").field("receipt", &self.receipt).finish()
     }
 }
 impl UpdateRefResponse {
@@ -1770,6 +2030,18 @@ impl UpdateRefResponse {
     ///
     /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
     pub const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.UpdateRefResponse";
+}
+impl UpdateRefResponse {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::receipt`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_receipt(
+        mut self,
+        value: impl Into<::buffa::alloc::vec::Vec<u8>>,
+    ) -> Self {
+        self.receipt = Some(value.into());
+        self
+    }
 }
 ::buffa::impl_default_instance!(UpdateRefResponse);
 impl ::buffa::MessageName for UpdateRefResponse {
@@ -1791,6 +2063,9 @@ impl ::buffa::Message for UpdateRefResponse {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         let mut size = 0u64;
+        if let Some(ref v) = self.receipt {
+            size += 1u64 + ::buffa::types::bytes_encoded_len(v) as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -1801,6 +2076,9 @@ impl ::buffa::Message for UpdateRefResponse {
     ) {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
+        if let Some(ref v) = self.receipt {
+            ::buffa::types::put_shared_bytes_field(1u32, v, buf);
+        }
         self.__buffa_unknown_fields.write_to(buf);
     }
     fn merge_field(
@@ -1814,6 +2092,16 @@ impl ::buffa::Message for UpdateRefResponse {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_bytes(
+                    self.receipt.get_or_insert_with(::buffa::alloc::vec::Vec::new),
+                    buf,
+                )?;
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -1822,6 +2110,7 @@ impl ::buffa::Message for UpdateRefResponse {
         ::core::result::Result::Ok(())
     }
     fn clear(&mut self) {
+        self.receipt = ::core::option::Option::None;
         self.__buffa_unknown_fields.clear();
     }
 }
@@ -2323,13 +2612,25 @@ pub struct AdvanceRefsResponse {
         skip_serializing_if = "::core::option::Option::is_none"
     )]
     pub outcome: ::core::option::Option<::buffa::EnumValue<AdvanceOutcome>>,
+    /// DSSE storage-receipt envelope JSON; empty on conflict or when disabled.
+    ///
+    /// Field 2: `receipt`
+    #[serde(
+        rename = "receipt",
+        with = "::buffa::json_helpers::opt_bytes",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub receipt: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
 impl ::core::fmt::Debug for AdvanceRefsResponse {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("AdvanceRefsResponse").field("outcome", &self.outcome).finish()
+        f.debug_struct("AdvanceRefsResponse")
+            .field("outcome", &self.outcome)
+            .field("receipt", &self.receipt)
+            .finish()
     }
 }
 impl AdvanceRefsResponse {
@@ -2348,6 +2649,16 @@ impl AdvanceRefsResponse {
         value: impl Into<::buffa::EnumValue<AdvanceOutcome>>,
     ) -> Self {
         self.outcome = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::receipt`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_receipt(
+        mut self,
+        value: impl Into<::buffa::alloc::vec::Vec<u8>>,
+    ) -> Self {
+        self.receipt = Some(value.into());
         self
     }
 }
@@ -2374,6 +2685,9 @@ impl ::buffa::Message for AdvanceRefsResponse {
         if let Some(ref v) = self.outcome {
             size += 1u64 + ::buffa::types::int32_encoded_len(v.to_i32()) as u64;
         }
+        if let Some(ref v) = self.receipt {
+            size += 1u64 + ::buffa::types::bytes_encoded_len(v) as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -2386,6 +2700,9 @@ impl ::buffa::Message for AdvanceRefsResponse {
         use ::buffa::Enumeration as _;
         if let Some(ref v) = self.outcome {
             ::buffa::types::put_int32_field(1u32, v.to_i32(), buf);
+        }
+        if let Some(ref v) = self.receipt {
+            ::buffa::types::put_shared_bytes_field(2u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -2409,6 +2726,16 @@ impl ::buffa::Message for AdvanceRefsResponse {
                     ::buffa::EnumValue::from(::buffa::types::decode_int32(buf)?),
                 );
             }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_bytes(
+                    self.receipt.get_or_insert_with(::buffa::alloc::vec::Vec::new),
+                    buf,
+                )?;
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -2418,6 +2745,7 @@ impl ::buffa::Message for AdvanceRefsResponse {
     }
     fn clear(&mut self) {
         self.outcome = ::core::option::Option::None;
+        self.receipt = ::core::option::Option::None;
         self.__buffa_unknown_fields.clear();
     }
 }
@@ -2448,6 +2776,800 @@ pub const __ADVANCE_REFS_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry
     type_url: "type.googleapis.com/mkit.transport.v1.AdvanceRefsResponse",
     to_json: ::buffa::type_registry::any_to_json::<AdvanceRefsResponse>,
     from_json: ::buffa::type_registry::any_from_json::<AdvanceRefsResponse>,
+    is_wkt: false,
+};
+/// A signed, writer-view read. Exactly one selector is required (STC §2.2).
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize)]
+#[serde(default)]
+pub struct GetReceiptRequest {
+    #[serde(flatten)]
+    pub selector: ::core::option::Option<__buffa::oneof::get_receipt_request::Selector>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for GetReceiptRequest {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("GetReceiptRequest").field("selector", &self.selector).finish()
+    }
+}
+impl GetReceiptRequest {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.GetReceiptRequest";
+}
+::buffa::impl_default_instance!(GetReceiptRequest);
+impl ::buffa::MessageName for GetReceiptRequest {
+    const PACKAGE: &'static str = "mkit.transport.v1";
+    const NAME: &'static str = "GetReceiptRequest";
+    const FULL_NAME: &'static str = "mkit.transport.v1.GetReceiptRequest";
+    const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.GetReceiptRequest";
+}
+impl ::buffa::Message for GetReceiptRequest {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        if let ::core::option::Option::Some(ref v) = self.selector {
+            match v {
+                __buffa::oneof::get_receipt_request::Selector::Advance(x) => {
+                    let __slot = __cache.reserve();
+                    let inner = x.compute_size(__cache);
+                    __cache.set(__slot, inner);
+                    size
+                        += 1u64 + ::buffa::encoding::varint_len(inner as u64) as u64
+                            + inner as u64;
+                }
+                __buffa::oneof::get_receipt_request::Selector::Lease(x) => {
+                    let __slot = __cache.reserve();
+                    let inner = x.compute_size(__cache);
+                    __cache.set(__slot, inner);
+                    size
+                        += 1u64 + ::buffa::encoding::varint_len(inner as u64) as u64
+                            + inner as u64;
+                }
+            }
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        __cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let ::core::option::Option::Some(ref v) = self.selector {
+            match v {
+                __buffa::oneof::get_receipt_request::Selector::Advance(x) => {
+                    ::buffa::types::put_len_delimited_header(
+                        1u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    x.write_to(__cache, buf);
+                }
+                __buffa::oneof::get_receipt_request::Selector::Lease(x) => {
+                    ::buffa::types::put_len_delimited_header(
+                        2u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    x.write_to(__cache, buf);
+                }
+            }
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                if let ::core::option::Option::Some(
+                    __buffa::oneof::get_receipt_request::Selector::Advance(
+                        ref mut existing,
+                    ),
+                ) = self.selector
+                {
+                    ::buffa::Message::merge_length_delimited(&mut **existing, buf, ctx)?;
+                } else {
+                    let mut val = ::core::default::Default::default();
+                    ::buffa::Message::merge_length_delimited(&mut val, buf, ctx)?;
+                    self.selector = ::core::option::Option::Some(
+                        __buffa::oneof::get_receipt_request::Selector::Advance(
+                            ::buffa::alloc::boxed::Box::new(val),
+                        ),
+                    );
+                }
+            }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                if let ::core::option::Option::Some(
+                    __buffa::oneof::get_receipt_request::Selector::Lease(
+                        ref mut existing,
+                    ),
+                ) = self.selector
+                {
+                    ::buffa::Message::merge_length_delimited(&mut **existing, buf, ctx)?;
+                } else {
+                    let mut val = ::core::default::Default::default();
+                    ::buffa::Message::merge_length_delimited(&mut val, buf, ctx)?;
+                    self.selector = ::core::option::Option::Some(
+                        __buffa::oneof::get_receipt_request::Selector::Lease(
+                            ::buffa::alloc::boxed::Box::new(val),
+                        ),
+                    );
+                }
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.selector = ::core::option::Option::None;
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for GetReceiptRequest {
+    const PROTO_FQN: &'static str = "mkit.transport.v1.GetReceiptRequest";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl<'de> serde::Deserialize<'de> for GetReceiptRequest {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        struct _V;
+        impl<'de> serde::de::Visitor<'de> for _V {
+            type Value = GetReceiptRequest;
+            fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                f.write_str("struct GetReceiptRequest")
+            }
+            #[allow(clippy::field_reassign_with_default)]
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> ::core::result::Result<GetReceiptRequest, A::Error> {
+                let mut __oneof_selector: ::core::option::Option<
+                    __buffa::oneof::get_receipt_request::Selector,
+                > = None;
+                while let Some(key) = map.next_key::<::buffa::alloc::string::String>()? {
+                    match key.as_str() {
+                        "advance" => {
+                            let v: ::core::option::Option<AdvanceReceiptSelector> = map
+                                .next_value_seed(
+                                    ::buffa::json_helpers::NullableDeserializeSeed(
+                                        ::buffa::json_helpers::DefaultDeserializeSeed::<
+                                            AdvanceReceiptSelector,
+                                        >::new(),
+                                    ),
+                                )?;
+                            if let Some(v) = v {
+                                if __oneof_selector.is_some() {
+                                    return Err(
+                                        serde::de::Error::custom(
+                                            "multiple oneof fields set for 'selector'",
+                                        ),
+                                    );
+                                }
+                                __oneof_selector = Some(
+                                    __buffa::oneof::get_receipt_request::Selector::Advance(
+                                        ::buffa::alloc::boxed::Box::new(v),
+                                    ),
+                                );
+                            }
+                        }
+                        "lease" => {
+                            let v: ::core::option::Option<LeaseReceiptSelector> = map
+                                .next_value_seed(
+                                    ::buffa::json_helpers::NullableDeserializeSeed(
+                                        ::buffa::json_helpers::DefaultDeserializeSeed::<
+                                            LeaseReceiptSelector,
+                                        >::new(),
+                                    ),
+                                )?;
+                            if let Some(v) = v {
+                                if __oneof_selector.is_some() {
+                                    return Err(
+                                        serde::de::Error::custom(
+                                            "multiple oneof fields set for 'selector'",
+                                        ),
+                                    );
+                                }
+                                __oneof_selector = Some(
+                                    __buffa::oneof::get_receipt_request::Selector::Lease(
+                                        ::buffa::alloc::boxed::Box::new(v),
+                                    ),
+                                );
+                            }
+                        }
+                        _ => {
+                            map.next_value::<serde::de::IgnoredAny>()?;
+                        }
+                    }
+                }
+                let mut __r = <GetReceiptRequest as ::core::default::Default>::default();
+                __r.selector = __oneof_selector;
+                Ok(__r)
+            }
+        }
+        d.deserialize_map(_V)
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for GetReceiptRequest {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __GET_RECEIPT_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/mkit.transport.v1.GetReceiptRequest",
+    to_json: ::buffa::type_registry::any_to_json::<GetReceiptRequest>,
+    from_json: ::buffa::type_registry::any_from_json::<GetReceiptRequest>,
+    is_wkt: false,
+};
+pub mod get_receipt_request {
+    #[allow(unused_imports)]
+    use super::*;
+    #[doc(inline)]
+    pub use super::__buffa::oneof::get_receipt_request::Selector;
+    #[doc(inline)]
+    pub use super::__buffa::view::oneof::get_receipt_request::Selector as SelectorView;
+}
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize, ::serde::Deserialize)]
+#[serde(default)]
+pub struct AdvanceReceiptSelector {
+    /// full ref name
+    ///
+    /// Field 1: `ref`
+    #[serde(rename = "ref", skip_serializing_if = "::core::option::Option::is_none")]
+    pub r#ref: ::core::option::Option<::buffa::alloc::string::String>,
+    /// 0 selects the latest committed advance
+    ///
+    /// Field 2: `advance_sequence`
+    #[serde(
+        rename = "advanceSequence",
+        alias = "advance_sequence",
+        with = "::buffa::json_helpers::opt_uint64",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub advance_sequence: ::core::option::Option<u64>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for AdvanceReceiptSelector {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("AdvanceReceiptSelector")
+            .field("ref", &self.r#ref)
+            .field("advance_sequence", &self.advance_sequence)
+            .finish()
+    }
+}
+impl AdvanceReceiptSelector {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.AdvanceReceiptSelector";
+}
+impl AdvanceReceiptSelector {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets `ref` to `Some(value)`, consuming and returning `self`.
+    pub fn with_ref(mut self, value: impl Into<::buffa::alloc::string::String>) -> Self {
+        self.r#ref = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::advance_sequence`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_advance_sequence(mut self, value: u64) -> Self {
+        self.advance_sequence = Some(value);
+        self
+    }
+}
+::buffa::impl_default_instance!(AdvanceReceiptSelector);
+impl ::buffa::MessageName for AdvanceReceiptSelector {
+    const PACKAGE: &'static str = "mkit.transport.v1";
+    const NAME: &'static str = "AdvanceReceiptSelector";
+    const FULL_NAME: &'static str = "mkit.transport.v1.AdvanceReceiptSelector";
+    const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.AdvanceReceiptSelector";
+}
+impl ::buffa::Message for AdvanceReceiptSelector {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        if let Some(ref v) = self.r#ref {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
+        if let Some(v) = self.advance_sequence {
+            size += 1u64 + ::buffa::types::uint64_encoded_len(v) as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let Some(ref v) = self.r#ref {
+            ::buffa::types::put_string_field(1u32, v, buf);
+        }
+        if let Some(v) = self.advance_sequence {
+            ::buffa::types::put_uint64_field(2u32, v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_string(
+                    self.r#ref.get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.advance_sequence = ::core::option::Option::Some(
+                    ::buffa::types::decode_uint64(buf)?,
+                );
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.r#ref = ::core::option::Option::None;
+        self.advance_sequence = ::core::option::Option::None;
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for AdvanceReceiptSelector {
+    const PROTO_FQN: &'static str = "mkit.transport.v1.AdvanceReceiptSelector";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for AdvanceReceiptSelector {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __ADVANCE_RECEIPT_SELECTOR_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/mkit.transport.v1.AdvanceReceiptSelector",
+    to_json: ::buffa::type_registry::any_to_json::<AdvanceReceiptSelector>,
+    from_json: ::buffa::type_registry::any_from_json::<AdvanceReceiptSelector>,
+    is_wkt: false,
+};
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize, ::serde::Deserialize)]
+#[serde(default)]
+pub struct LeaseReceiptSelector {
+    /// empty selects the repository or namespace lease scope
+    ///
+    /// Field 1: `ref`
+    #[serde(rename = "ref", skip_serializing_if = "::core::option::Option::is_none")]
+    pub r#ref: ::core::option::Option<::buffa::alloc::string::String>,
+    /// 0 selects the latest committed version
+    ///
+    /// Field 2: `lease_version`
+    #[serde(
+        rename = "leaseVersion",
+        alias = "lease_version",
+        with = "::buffa::json_helpers::opt_uint64",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub lease_version: ::core::option::Option<u64>,
+    /// with empty ref, selects signed repository's namespace
+    ///
+    /// Field 3: `namespace_scope`
+    #[serde(
+        rename = "namespaceScope",
+        alias = "namespace_scope",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub namespace_scope: ::core::option::Option<bool>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for LeaseReceiptSelector {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("LeaseReceiptSelector")
+            .field("ref", &self.r#ref)
+            .field("lease_version", &self.lease_version)
+            .field("namespace_scope", &self.namespace_scope)
+            .finish()
+    }
+}
+impl LeaseReceiptSelector {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.LeaseReceiptSelector";
+}
+impl LeaseReceiptSelector {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets `ref` to `Some(value)`, consuming and returning `self`.
+    pub fn with_ref(mut self, value: impl Into<::buffa::alloc::string::String>) -> Self {
+        self.r#ref = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::lease_version`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_lease_version(mut self, value: u64) -> Self {
+        self.lease_version = Some(value);
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::namespace_scope`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_namespace_scope(mut self, value: bool) -> Self {
+        self.namespace_scope = Some(value);
+        self
+    }
+}
+::buffa::impl_default_instance!(LeaseReceiptSelector);
+impl ::buffa::MessageName for LeaseReceiptSelector {
+    const PACKAGE: &'static str = "mkit.transport.v1";
+    const NAME: &'static str = "LeaseReceiptSelector";
+    const FULL_NAME: &'static str = "mkit.transport.v1.LeaseReceiptSelector";
+    const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.LeaseReceiptSelector";
+}
+impl ::buffa::Message for LeaseReceiptSelector {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        if let Some(ref v) = self.r#ref {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
+        if let Some(v) = self.lease_version {
+            size += 1u64 + ::buffa::types::uint64_encoded_len(v) as u64;
+        }
+        if self.namespace_scope.is_some() {
+            size += 1u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let Some(ref v) = self.r#ref {
+            ::buffa::types::put_string_field(1u32, v, buf);
+        }
+        if let Some(v) = self.lease_version {
+            ::buffa::types::put_uint64_field(2u32, v, buf);
+        }
+        if let Some(v) = self.namespace_scope {
+            ::buffa::types::put_bool_field(3u32, v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_string(
+                    self.r#ref.get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.lease_version = ::core::option::Option::Some(
+                    ::buffa::types::decode_uint64(buf)?,
+                );
+            }
+            3u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.namespace_scope = ::core::option::Option::Some(
+                    ::buffa::types::decode_bool(buf)?,
+                );
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.r#ref = ::core::option::Option::None;
+        self.lease_version = ::core::option::Option::None;
+        self.namespace_scope = ::core::option::Option::None;
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for LeaseReceiptSelector {
+    const PROTO_FQN: &'static str = "mkit.transport.v1.LeaseReceiptSelector";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for LeaseReceiptSelector {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __LEASE_RECEIPT_SELECTOR_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/mkit.transport.v1.LeaseReceiptSelector",
+    to_json: ::buffa::type_registry::any_to_json::<LeaseReceiptSelector>,
+    from_json: ::buffa::type_registry::any_from_json::<LeaseReceiptSelector>,
+    is_wkt: false,
+};
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize, ::serde::Deserialize)]
+#[serde(default)]
+pub struct GetReceiptResponse {
+    /// complete DSSE storage-receipt envelope JSON
+    ///
+    /// Field 1: `receipt`
+    #[serde(
+        rename = "receipt",
+        with = "::buffa::json_helpers::opt_bytes",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub receipt: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for GetReceiptResponse {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("GetReceiptResponse").field("receipt", &self.receipt).finish()
+    }
+}
+impl GetReceiptResponse {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.GetReceiptResponse";
+}
+impl GetReceiptResponse {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::receipt`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_receipt(
+        mut self,
+        value: impl Into<::buffa::alloc::vec::Vec<u8>>,
+    ) -> Self {
+        self.receipt = Some(value.into());
+        self
+    }
+}
+::buffa::impl_default_instance!(GetReceiptResponse);
+impl ::buffa::MessageName for GetReceiptResponse {
+    const PACKAGE: &'static str = "mkit.transport.v1";
+    const NAME: &'static str = "GetReceiptResponse";
+    const FULL_NAME: &'static str = "mkit.transport.v1.GetReceiptResponse";
+    const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.GetReceiptResponse";
+}
+impl ::buffa::Message for GetReceiptResponse {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        if let Some(ref v) = self.receipt {
+            size += 1u64 + ::buffa::types::bytes_encoded_len(v) as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let Some(ref v) = self.receipt {
+            ::buffa::types::put_shared_bytes_field(1u32, v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_bytes(
+                    self.receipt.get_or_insert_with(::buffa::alloc::vec::Vec::new),
+                    buf,
+                )?;
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.receipt = ::core::option::Option::None;
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for GetReceiptResponse {
+    const PROTO_FQN: &'static str = "mkit.transport.v1.GetReceiptResponse";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for GetReceiptResponse {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __GET_RECEIPT_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/mkit.transport.v1.GetReceiptResponse",
+    to_json: ::buffa::type_registry::any_to_json::<GetReceiptResponse>,
+    from_json: ::buffa::type_registry::any_from_json::<GetReceiptResponse>,
     is_wkt: false,
 };
 /// ----------------------------------------------------------------------------
@@ -4079,7 +5201,7 @@ pub struct GetServerInfoResponse {
         skip_serializing_if = "::core::option::Option::is_none"
     )]
     pub admission: ::core::option::Option<bool>,
-    /// Storage receipt signing key; empty until M5 (SPEC-TRANSPORT-CONNECT §2.1).
+    /// Raw 32-byte current receipt+notice public key; empty only if unconfigured.
     ///
     /// Field 11: `receipt_public_key`
     #[serde(
@@ -4089,7 +5211,7 @@ pub struct GetServerInfoResponse {
         skip_serializing_if = "::core::option::Option::is_none"
     )]
     pub receipt_public_key: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
-    /// Storage receipt key identifier; empty until M5 (SPEC-TRANSPORT-CONNECT §2.1).
+    /// 64-hex BLAKE3 of receipt_public_key; empty only if unconfigured.
     ///
     /// Field 12: `receipt_key_id`
     #[serde(
@@ -6550,5 +7672,146 @@ pub const __PENDING_VERIFICATION_JSON_ANY: ::buffa::type_registry::JsonAnyEntry 
     type_url: "type.googleapis.com/mkit.transport.v1.PendingVerification",
     to_json: ::buffa::type_registry::any_to_json::<PendingVerification>,
     from_json: ::buffa::type_registry::any_from_json::<PendingVerification>,
+    is_wkt: false,
+};
+/// Signed takedown notice used as a Connect error detail and on visible refs.
+/// The sole field is the exact DSSE JSON envelope (SPEC-SERVER §14.6).
+#[derive(Clone, PartialEq, Default)]
+#[derive(::serde::Serialize, ::serde::Deserialize)]
+#[serde(default)]
+pub struct RedactionNotice {
+    /// Field 1: `envelope`
+    #[serde(
+        rename = "envelope",
+        with = "::buffa::json_helpers::opt_bytes",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub envelope: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for RedactionNotice {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("RedactionNotice").field("envelope", &self.envelope).finish()
+    }
+}
+impl RedactionNotice {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.RedactionNotice";
+}
+impl RedactionNotice {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::envelope`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_envelope(
+        mut self,
+        value: impl Into<::buffa::alloc::vec::Vec<u8>>,
+    ) -> Self {
+        self.envelope = Some(value.into());
+        self
+    }
+}
+::buffa::impl_default_instance!(RedactionNotice);
+impl ::buffa::MessageName for RedactionNotice {
+    const PACKAGE: &'static str = "mkit.transport.v1";
+    const NAME: &'static str = "RedactionNotice";
+    const FULL_NAME: &'static str = "mkit.transport.v1.RedactionNotice";
+    const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.RedactionNotice";
+}
+impl ::buffa::Message for RedactionNotice {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        if let Some(ref v) = self.envelope {
+            size += 1u64 + ::buffa::types::bytes_encoded_len(v) as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let Some(ref v) = self.envelope {
+            ::buffa::types::put_shared_bytes_field(1u32, v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_bytes(
+                    self.envelope.get_or_insert_with(::buffa::alloc::vec::Vec::new),
+                    buf,
+                )?;
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.envelope = ::core::option::Option::None;
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for RedactionNotice {
+    const PROTO_FQN: &'static str = "mkit.transport.v1.RedactionNotice";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+impl ::buffa::json_helpers::ProtoElemJson for RedactionNotice {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[doc(hidden)]
+pub const __REDACTION_NOTICE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/mkit.transport.v1.RedactionNotice",
+    to_json: ::buffa::type_registry::any_to_json::<RedactionNotice>,
+    from_json: ::buffa::type_registry::any_from_json::<RedactionNotice>,
     is_wkt: false,
 };

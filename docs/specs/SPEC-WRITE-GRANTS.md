@@ -809,7 +809,7 @@ enveloped request message. The required headers are the same as for a
 unary write.
 
 The read procedures are `ListRefs`, `ReadRef`, `PackExists`,
-`DownloadPack` and `IssueObjectUrl`.
+`DownloadPack`, `IssueObjectUrl`, and `GetReceipt` (STC §2.2).
 
 - A request that carries any auth v2 header (`X-Envelope-Version`,
   `X-Public-Key`, `X-Signature`) is signed, and the server MUST verify
@@ -848,6 +848,16 @@ For each read procedure on a repository:
   through §6 with the `read` capability. Any unauthorized read,
   including an anonymous one, a signer with no grant, and a grant that
   fails any §7 step, is `not_found`.
+
+`GetReceipt` is the narrow exception to the private-repository read
+capability rule: a signed caller with a valid `write`-only grant for the
+repository passes this read check for that RPC alone. It gains no
+`ListRefs`, `ReadRef`, pack, or object read access. SPEC-TRANSPORT-CONNECT
+§2.2 then requires the writer view, limits advance receipts to that
+grant's ref scopes, and specifies the uniform `not_found` response.
+For this read check, an addressable repository
+whose lease state is `suspended` or `deleted` remains an authorization
+subject for its lease receipts; this exception grants no content read.
 
 An unauthorized read of a private repository MUST be indistinguishable
 from a read of a repository that does not exist: the same Connect code,

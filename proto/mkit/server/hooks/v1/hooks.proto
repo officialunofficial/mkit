@@ -192,6 +192,9 @@ message AdmitAllow {
   string reservation_id = 1;
   // Only Payment-Receipt and PAYMENT-RESPONSE, within §6.6 limits; SPEC-SERVER §6.3.
   repeated Header response_headers = 2;
+  // Implementer contract/payment reference copied into a storage receipt;
+  // at most 256 bytes of visible ASCII and never a secret (SPEC-SERVER §6.6).
+  string external_ref = 3;
 }
 
 // Credential challenge passed to the client as STC §5.1 requires; SPEC-SERVER §6.3.
@@ -274,6 +277,9 @@ message InspectResponse {
   // Raw 32-byte ids from the inspected set, only with reject or quarantine;
   // nonempty for QUARANTINE-phase reject or quarantine (SPEC-SERVER §6.4).
   repeated bytes flagged_objects = 5;
+  // Registered §14.6 token for an async reject that becomes a takedown.
+  // Ignored on PRE_RECEIVE reject; invalid with pass, quarantine, or defer.
+  string takedown_reason = 6;
 }
 
 // Asynchronous re-poll suggestion; SPEC-SERVER §11.3.
@@ -397,20 +403,47 @@ message Event {
   string event_id = 1;
   // The mkit server's canonical origin, not the hook signing audience.
   string audience = 2;
-  // Full repository identity, empty only for a namespace-scoped event.
+  // Full repository identity under STC §7.4; empty for namespace scope.
   string repository = 3;
   // Transition time in Unix epoch milliseconds, independent of delivery time.
   int64 occurred_unix_ms = 4;
-  // Strictly increasing per (repository, ref-or-repository) or namespace scope; stable on retry.
+  // Strictly increasing per repository/ref or namespace scope; stable on retry.
   uint64 sequence = 5;
   // Exactly one transition kind; SPEC-SERVER §12.4.
   oneof kind {
     // Storage-lease or administrative transition.
     LeaseTransition lease = 6;
     // Field 7 is left for the publication transition (§10); not reserved in schema.
+    // A content, repository, or namespace takedown transition (§14).
+    TakedownTransition takedown = 8;
   }
-  // Namespace identity for a namespace-scoped override; SPEC-SERVER §12.4.
+  // Namespace identity for a namespace-scoped override; empty otherwise.
   string namespace = 9;
+}
+
+// A durable takedown state change. Namespace scope uses Event.namespace
+// and an empty Event.repository; content scope emits per repository (§12.4).
+message TakedownTransition {
+  string takedown_id = 1;
+  TakedownLevel level = 2;
+  TakedownState state = 3;
+  // Registered public token, never free text; SPEC-SERVER §14.6.
+  string reason = 4;
+}
+
+// Same level numbers as the admin TakedownLevel (§14.1, §16).
+enum TakedownLevel {
+  TAKEDOWN_LEVEL_UNSPECIFIED = 0;
+  TAKEDOWN_LEVEL_CONTENT = 1;
+  TAKEDOWN_LEVEL_REPOSITORY = 2;
+  TAKEDOWN_LEVEL_NAMESPACE = 3;
+}
+
+enum TakedownState {
+  TAKEDOWN_STATE_UNSPECIFIED = 0;
+  TAKEDOWN_STATE_BLOCKED = 1;
+  TAKEDOWN_STATE_COMPLETE = 2;
+  TAKEDOWN_STATE_REINSTATED = 3;
 }
 
 // Durable remote cache invalidation; SPEC-SERVER §16.7.
