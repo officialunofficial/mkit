@@ -1694,14 +1694,15 @@
       "1.8"
     ],
     "size": "M",
-    "summary": "Wires ContentShard partitions to ContentIndexShard DOs and sub-shards holder rows by (object, hash(holder)) with a safe-direction holder count, so one widely held object can't fill a shard.",
+    "summary": "Deferred (R-131): Workers content shards already wired by 1.8; holder sub-sharding deferred until an object nears a holder or size threshold; 4.10 absorbs HolderV1{seq, op_id}.",
     "human_action": false,
     "area_gates": [
       "rust",
       "wasm",
       "workers",
       "conf-wrangler"
-    ]
+    ],
+    "status": "dropped"
   },
   {
     "id": "4.10",
@@ -1709,8 +1710,7 @@
     "milestone": "M4",
     "track": "core",
     "depends_on": [
-      "4.7",
-      "4.10a"
+      "4.7"
     ],
     "size": "L",
     "summary": "Extracts blobs of at least 64 KiB and reassembles every ChunkedBlob by streaming into one object keyed by its manifest id in the objects keyspace, with whole-file dedup, holds before apply (released only in the relay step that records the holder row) and R2 429 treated as HEAD-then-verify.",
