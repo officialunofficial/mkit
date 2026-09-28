@@ -250,6 +250,7 @@ pub(crate) enum Planned {
 /// `resource_exhausted` when a quota charge is over budget (nothing is
 /// written), `permission_denied` when the grant epoch moved, and `internal`
 /// for an undecodable stored value or a newer layout version.
+#[allow(clippy::too_many_lines)] // The ref, ticket, replay and prune fragments form one atomic plan.
 pub(crate) fn plan_write(
     req: &WriteRequest<'_>,
     snap: &Snapshot,

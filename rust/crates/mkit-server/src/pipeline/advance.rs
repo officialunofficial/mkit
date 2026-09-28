@@ -184,6 +184,7 @@ pub(super) fn plan_consumption(
 impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// Check ticket rows and proof blobs before admission or lease grants.
     /// A lost pack with a surviving marker gets a separate defensive abort.
+    #[allow(clippy::too_many_lines)] // One bounded stage validates, heads and defensively aborts tickets.
     pub(super) async fn ticket_decision(
         &self,
         op: &Operation,

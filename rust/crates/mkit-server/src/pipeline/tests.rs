@@ -168,13 +168,13 @@ fn golden_two_ticket_advance_batch_keys() {
         match pre {
             Precondition::NotAfter(_) => actual.push_str("pre NotAfter\n"),
             Precondition::Absent(k) => {
-                writeln!(actual, "pre Absent {}", to_hex_bytes(k.as_bytes())).unwrap()
+                writeln!(actual, "pre Absent {}", to_hex_bytes(k.as_bytes())).unwrap();
             }
             Precondition::Present(k) => {
-                writeln!(actual, "pre Present {}", to_hex_bytes(k.as_bytes())).unwrap()
+                writeln!(actual, "pre Present {}", to_hex_bytes(k.as_bytes())).unwrap();
             }
             Precondition::Equals(k, _) => {
-                writeln!(actual, "pre Equals {}", to_hex_bytes(k.as_bytes())).unwrap()
+                writeln!(actual, "pre Equals {}", to_hex_bytes(k.as_bytes())).unwrap();
             }
         }
     }

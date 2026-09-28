@@ -370,7 +370,7 @@ pub(super) async fn advance_other_repository(ctx: Ctx) -> CaseResult {
     let opened: BeginUploadResponse = want_ok(
         ctx.send(
             &sign_unary(&signer, Rpc::BeginUpload, &begin, |env| {
-                env.repository = repo_a.clone();
+                env.repository.clone_from(&repo_a);
             })
             .with_header("x-repository", &repo_a),
         )
@@ -384,7 +384,7 @@ pub(super) async fn advance_other_repository(ctx: Ctx) -> CaseResult {
     let response: Result<mkit_transport_connect::generated::AdvanceRefsResponse, _> = ctx
         .send(
             &sign_unary(&signer, Rpc::AdvanceRefs, &req, |env| {
-                env.repository = repo_b.clone();
+                env.repository.clone_from(&repo_b);
             })
             .with_header("x-repository", &repo_b),
         )
@@ -411,13 +411,13 @@ pub(super) async fn advance_expired_ticket(ctx: Ctx) -> CaseResult {
     let req = ticket_advance(&ctx, "ticketed", vec![id]);
     let skew = expires - crate::wire::sign::now_ms() + 1_000;
     let signer = ctx.v2_signer("main")?;
-    let signed = sign_unary(&signer, Rpc::AdvanceRefs, &req, |env| {
+    let envelope = sign_unary(&signer, Rpc::AdvanceRefs, &req, |env| {
         env.created_at += skew;
         env.expires_at += skew;
     })
     .with_header(crate::wire::CLOCK_SKEW_HEADER, skew.to_string());
     let response: Result<mkit_transport_connect::generated::AdvanceRefsResponse, _> =
-        ctx.send(&signed).await?;
+        ctx.send(&envelope).await?;
     exact(
         want_code(response, "failed_precondition", "expired ticket")?,
         "invalid or expired upload ticket",

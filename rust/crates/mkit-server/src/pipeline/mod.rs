@@ -987,6 +987,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// A signed or unsigned unary write, stage by stage. In steady state
     /// a signed write costs two backend calls: one `get_many` before any
     /// hook runs (the replay record and the snapshot) and one `apply`.
+    #[allow(clippy::too_many_lines)] // Stage order and multipart session cleanup share this entry point.
     async fn write(&self, a: &Authenticated, kind: OpKind) -> Result<StoredResult, ServerError> {
         let mut op = self.identify(a, kind)?;
         fault!(self, AfterAuthenticate, &op, a);

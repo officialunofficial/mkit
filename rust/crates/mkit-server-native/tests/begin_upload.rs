@@ -1081,6 +1081,7 @@ async fn upload_ticket<N: NamespaceStore>(pipe: &Pipe<N>, mode: Mode, pack: &[u8
     session.finish().await.unwrap();
 }
 
+#[allow(clippy::too_many_lines)] // One lifecycle checks outcomes, counters, relay and repo isolation.
 async fn advance_flow<N: NamespaceStore + 'static>(
     backend: N,
     clock: Arc<ManualClock>,
@@ -1564,6 +1565,7 @@ fn paused_pipeline<N: NamespaceStore>(
 }
 
 #[cfg(feature = "test-faults")]
+#[allow(clippy::too_many_lines)] // The paused and winning advances share a full setup and row assertions.
 async fn consume_race<N: NamespaceStore + 'static>(
     backend: N,
     clock: Arc<ManualClock>,
@@ -1933,6 +1935,7 @@ backends!(
 );
 
 #[cfg(feature = "test-faults")]
+#[allow(clippy::too_many_lines)] // Simulates the future expiry handler's guarded terminal batch.
 async fn expired_close_races_consume<N: NamespaceStore + 'static>(
     backend: N,
     clock: Arc<ManualClock>,
@@ -1983,7 +1986,7 @@ async fn expired_close_races_consume<N: NamespaceStore + 'static>(
     tokio::time::timeout(Duration::from_secs(5), pause.entered.notified())
         .await
         .unwrap();
-    clock.advance(TTL as i64);
+    clock.advance(i64::try_from(TTL).unwrap());
     let index = keys::ticket_index(
         &ticket.repo,
         &ticket.ref_name,
