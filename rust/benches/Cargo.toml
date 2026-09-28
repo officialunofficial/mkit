@@ -263,6 +263,17 @@ harness = false
 name = "ignore_match"
 harness = false
 
+# Worktree-side cold-stat-cache walk (`build_tree_inner`'s cache-miss
+# file hashing) at increasing tracked-file counts — regression guard for
+# the per-directory fan-out that replaced the last remaining serial
+# per-file open+read+BLAKE3 loop (`status`/checkout-safety's worktree
+# snapshot; `status_snapshot.rs` above already covers the index-side
+# probe, a different, already-parallel step). No feature gate: worktree
+# hashing is always compiled.
+[[bench]]
+name = "worktree_walk_fanout"
+harness = false
+
 [features]
 default = []
 pack-shards = ["mkit-core/pack-shards"]
