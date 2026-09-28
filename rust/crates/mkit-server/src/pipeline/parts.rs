@@ -39,7 +39,10 @@ fn multipart_error(op: StorageOp, err: StoreError) -> ServerError {
         StoreError::PartSubtreeMismatch => {
             ServerError::invalid_argument("part subtree hash does not match its commitment")
         }
-        StoreError::Invalid(_) => ServerError::invalid_argument("invalid multipart upload state"),
+        StoreError::Invalid(detail) => {
+            tracing::warn!(%detail, "multipart storage rejected request");
+            ServerError::invalid_argument("invalid multipart upload state")
+        }
         other => store_error(op, other),
     }
 }
@@ -99,7 +102,6 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> PartUploadSession<'_,
                 "part data exceeds the part length",
             ));
         }
-        let count = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
         self.sink
             .as_mut()
             .ok_or_else(|| ServerError::internal("part stream is closed", "missing part sink"))?
@@ -107,7 +109,6 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> PartUploadSession<'_,
             .await
             .map_err(|e| multipart_error(StorageOp::MultipartPart, e))?;
         self.seen = next;
-        self.pipe.metrics.incr(METRIC_UPLOAD_BYTES, &[], count);
         Ok(())
     }
 
@@ -127,6 +128,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> PartUploadSession<'_,
             return Err(err);
         }
         let result = self.finish_inner().await;
+        if result.is_ok() {
+            self.pipe.metrics.incr(METRIC_UPLOAD_BYTES, &[], self.len);
+        }
         self.outcome.record(result.as_ref().map(|_| ()));
         result
     }

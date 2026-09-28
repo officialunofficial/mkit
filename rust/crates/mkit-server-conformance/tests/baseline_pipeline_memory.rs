@@ -24,9 +24,10 @@ use mkit_server::quota::QuotaLimits as ServerQuota;
 use mkit_server::store::keys::ParsedKey;
 use mkit_server::upload::UploadLimits;
 use mkit_server::{
-    Addressing, Batch, BatchOutcome, Cursor, Key, MemoryBlobStore, MemoryKv, MultiAddressing,
-    NamespaceKey, NamespaceStore, Partition, PartitionStats, Precondition, Redacted, RepoId,
-    RepoName, ScanPage, StoreCapabilities, StoreError, SystemClock, Value, Write,
+    Addressing, Batch, BatchOutcome, BlobKey, BlobStore, Cursor, Key, MemoryBlobStore, MemoryKv,
+    MultiAddressing, NamespaceKey, NamespaceStore, PackSink, Partition, PartitionStats,
+    Precondition, Redacted, RepoId, RepoName, ScanPage, StoreCapabilities, StoreError, SystemClock,
+    Value, Write,
 };
 use mkit_server_conformance::wire::{
     Feature, Milestone, Profile, QuotaLimits, Verdict, WireAuth, WireTarget, run,
@@ -227,8 +228,12 @@ async fn serve_sharding(
     let clock = Arc::new(SystemClock);
     let kv = Arc::new(MemoryKv::with_clock(clock.clone()));
     let meta = Shared(kv, mutant, Arc::default());
+    let blobs = MemoryBlobStore::default();
+    if let Some(profile) = multi {
+        plant_membership(&blobs, &meta, &cfg.addressing, sharding, profile).await;
+    }
     let pipe = Pipeline::new(
-        MemoryBlobStore::default(),
+        blobs,
         meta.clone(),
         Hooks::new(),
         cfg,
@@ -247,6 +252,84 @@ async fn serve_sharding(
     );
     tokio::spawn(async move { axum::serve(listener, app).await });
     (origin, meta)
+}
+
+/// Seed the wire fixtures directly, so Multi uploads keep their ticket guard.
+/// No timers/outbox rows are planted: ref-only membership remains unrelayed.
+async fn plant_membership(
+    blobs: &MemoryBlobStore,
+    meta: &Shared,
+    addressing: &Addressing,
+    sharding: mkit_server::pipeline::Sharding,
+    profile: &Profile,
+) {
+    use mkit_server::pipeline::{D34Shards, ShardMap, Sharding, SinglePartition};
+    use mkit_server::store::keys;
+
+    let WireAuth::AuthV2 {
+        audience,
+        repository,
+        seed,
+    } = &profile.auth
+    else {
+        panic!("Multi membership fixtures need auth v2");
+    };
+    let shards: &dyn ShardMap = match sharding {
+        Sharding::D34 => &D34Shards,
+        _ => &SinglePartition,
+    };
+    for case in [
+        "repo.isolation_packs",
+        "repo.membership_read_your_writes",
+        "repo.malformed_membership_hint_no_op",
+    ] {
+        let signer = mkit_server_conformance::wire::sign::Signer::derive(
+            seed,
+            &profile.run_id,
+            &format!("{case}/repository-a"),
+            audience,
+            repository,
+        );
+        let identity = format!("ed25519-{}/packs", signer.public_key_hex());
+        let repo = addressing.resolve(Some(&identity), false).unwrap().repo;
+        let bytes = bytes::Bytes::from(format!("conformance/{}/{case}", profile.run_id));
+        let id = mkit_core::hash::hash(&bytes);
+        let key = BlobKey::pack(id);
+        let mut sink = blobs.begin(key, bytes.len() as u64).await.unwrap();
+        sink.write(bytes).await.unwrap();
+        sink.commit().await.unwrap();
+        let source = shards.ref_shard(&repo, "refs/heads/main");
+        let index = shards.membership(&repo, &key);
+        let ref_only = case == "repo.membership_read_your_writes";
+        if ref_only && sharding == Sharding::D34 {
+            assert_ne!(source, index, "read-your-writes requires a lagging index");
+        }
+        let mut partitions = vec![source];
+        if !ref_only {
+            partitions.push(index.clone());
+        }
+        for partition in partitions {
+            let batch = Batch {
+                preconditions: vec![],
+                writes: vec![Write::Put(
+                    keys::membership(&repo.name, &id),
+                    Value::default(),
+                )],
+            };
+            assert_eq!(
+                meta.apply(&partition, batch).await.unwrap(),
+                BatchOutcome::Committed
+            );
+        }
+        if ref_only && sharding == Sharding::D34 {
+            assert!(
+                meta.get(&index, &keys::membership(&repo.name, &id))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
 }
 
 /// Every Multi case's repository owners are admitted, while the denial case's
@@ -339,6 +422,9 @@ async fn check(origin: String, profile: Profile) {
             "tickets.begin_upload_idempotent",
             "tickets.begin_upload_caps",
             "tickets.begin_upload_packmap_refused",
+            "tickets.upload_pack_ticketed",
+            "tickets.upload_pack_bad_token",
+            "tickets.upload_pack_binding_denied",
         ] {
             assert!(
                 matches!(report.verdict(name), Some(Verdict::Pass(_))),
@@ -391,6 +477,7 @@ async fn pipeline_multi_repository() {
     profile.milestone = Milestone::M1;
     profile.features.insert(Feature::MultiRepo);
     profile.features.insert(Feature::NamespacePolicy);
+    profile.features.insert(Feature::Tickets);
     let (origin, _) = serve_addressing(auth, None, Mutant::None, Some(&profile)).await;
     let WireAuth::AuthV2 { audience, .. } = &mut profile.auth else {
         unreachable!()
@@ -401,8 +488,9 @@ async fn pipeline_multi_repository() {
         profile,
     };
     // M0 cases exercise headerless reads and packs; the Multi cases
-    // carry repository identities and require the pack membership guard.
+    // carry repository identities and exercise repository-scoped membership.
     let report = run(&target, Some("repo.")).await;
+    let repository_report = run(&target, Some("repository.")).await;
     let policy_report = run(&target, Some("policy.")).await;
     let info_report = run(&target, Some("info.")).await;
     common::judge(&info_report, PIPELINE_DIVERGENCES);
@@ -413,6 +501,7 @@ async fn pipeline_multi_repository() {
         );
     }
     common::judge(&report, PIPELINE_DIVERGENCES);
+    common::judge(&repository_report, PIPELINE_DIVERGENCES);
     common::judge(&policy_report, PIPELINE_DIVERGENCES);
     for case in mkit_server_conformance::wire::CASES
         .iter()
@@ -420,14 +509,63 @@ async fn pipeline_multi_repository() {
     {
         let case_report = if case.name.starts_with("policy.") {
             &policy_report
+        } else if case.name.starts_with("repository.") {
+            &repository_report
         } else {
             &report
         };
-        assert!(
-            matches!(case_report.verdict(case.name), Some(Verdict::Pass(_))),
-            "{} did not run",
-            case.name
-        );
+        if case.name == "repo.membership_read_your_writes" {
+            assert!(
+                matches!(case_report.verdict(case.name), Some(Verdict::Skip(reason))
+                if reason == "requires separate membership and ref shards (D34)")
+            );
+        } else {
+            assert!(
+                matches!(case_report.verdict(case.name), Some(Verdict::Pass(_))),
+                "{} did not run",
+                case.name
+            );
+        }
+    }
+}
+
+/// D34 keeps the planted ref-shard membership separate from its lagging
+/// repository index. These cases make real HTTP requests to both pack reads.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pipeline_d34_multi_membership() {
+    let mut profile = profile(WireAuth::AuthV2 {
+        audience: "http://localhost".into(),
+        repository: "ignored-in-multi-mode".into(),
+        seed: [0x5e; 32],
+    });
+    profile.features.insert(Feature::MultiRepo);
+    profile.sharding_d34 = true;
+    let auth = |origin: &str| AuthMode::AuthV2(AuthV2Config::new(origin, "").unwrap());
+    let (origin, _) = serve_sharding(
+        auth,
+        None,
+        Mutant::None,
+        Some(&profile),
+        mkit_server::pipeline::Sharding::D34,
+    )
+    .await;
+    let WireAuth::AuthV2 { audience, .. } = &mut profile.auth else {
+        unreachable!()
+    };
+    audience.clone_from(&origin);
+    let target = WireTarget {
+        base_url: origin.parse().unwrap(),
+        profile,
+    };
+    for case in [
+        "repo.packs_need_membership",
+        "repo.isolation_packs",
+        "repo.membership_read_your_writes",
+        "repo.malformed_membership_hint_no_op",
+    ] {
+        let report = run(&target, Some(case)).await;
+        common::judge(&report, PIPELINE_DIVERGENCES);
+        assert_eq!(report.passes(), [case], "{case} did not run and pass");
     }
 }
 
@@ -548,7 +686,7 @@ async fn pipeline_d34_epoch_leases() {
     assert_eq!(report.passes(), [case]);
     let tickets = run(&target, Some("tickets.")).await;
     common::judge(&tickets, PIPELINE_DIVERGENCES);
-    assert_eq!(tickets.passes().len(), 4, "all ticket cases run under D34");
+    assert_eq!(tickets.passes().len(), 8, "all ticket cases run under D34");
 
     let repo = RepoId {
         namespace: NamespaceKey::deployment_default(),

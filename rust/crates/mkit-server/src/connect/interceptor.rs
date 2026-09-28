@@ -68,7 +68,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> AuthInterceptor<B, N,
         };
         let header = |name: &str| {
             ctx.header(name)
-                .and_then(|v| v.to_str().ok())
+                .and_then(|v| {
+                    if name == "x-mkit-ref" {
+                        core::str::from_utf8(v.as_bytes()).ok()
+                    } else {
+                        v.to_str().ok()
+                    }
+                })
                 .map(str::to_owned)
         };
         let meta = RequestMeta {

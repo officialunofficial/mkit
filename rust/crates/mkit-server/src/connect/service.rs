@@ -121,18 +121,14 @@ async fn upload<B: MultipartBlobStore, N: NamespaceStore, H: HookSet>(
         },
     };
     let header = header.map_err(ServerError::from)?;
-    if !header
-        .ticket_token
-        .as_deref()
-        .unwrap_or_default()
-        .is_empty()
-    {
-        // TODO(WP-1.9): implement ticketed UploadPack before reading chunks.
-        return Err(not_yet().into());
-    }
-    let mut session = pipe
-        .open_upload(a, header.pack_id.as_deref(), header.total_bytes)
-        .await?;
+    let token = header.ticket_token.as_deref().unwrap_or_default();
+    let mut session = if token.is_empty() {
+        pipe.open_upload(a, header.pack_id.as_deref(), header.total_bytes)
+            .await?
+    } else {
+        pipe.open_ticketed_upload(a, header.pack_id.as_deref(), header.total_bytes, token)
+            .await?
+    };
     while let Some(item) = requests.next().await {
         let chunk = match item.map(|m| m.to_owned_message().body) {
             Ok(Some(UploadBody::Chunk(chunk))) => *chunk,
@@ -538,6 +534,9 @@ impl From<ServerInfo> for GetServerInfoResponse {
             namespace_policy: Some(info.namespace_policy.into()),
             index_fanout: Some(info.index_fanout),
             max_delta_chain_depth: Some(info.max_delta_chain_depth),
+            leases: None, // Storage-lease enforcement lands in WP-5.2.
+            // Inspection is specified but not implemented yet (WP-5.1a-2).
+            async_inspection: Some(false),
             __buffa_unknown_fields: buffa::UnknownFields::default(),
         }
     }

@@ -1,49 +1,21 @@
-//! `UploadPack` as a session (PRD §5.4 stages 0–6, overview Q5).
+//! `UploadPack` streams into a verifying blob sink with bounded memory.
 //!
-//! [`Pipeline::open_upload`] checks the header and the signed `pack:`
-//! commitment, then reserves: one batch puts the replay record
-//! `InFlight { resumable: true }` with the quota charge, before any chunk
-//! is read (`vcs-worker` `service.rs:432-440`). Each
-//! [`UploadSession::push`] validates the chunk's framing and hands it
-//! straight to the blob sink, so the session holds at most one chunk.
-//! [`UploadSession::finish`] commits the blob (the sink verifies BLAKE3),
-//! runs `pre_receive` and commits the record `Committed(UploadPack)` in a
-//! second batch, guarded on the in-flight record it read and planned with a
-//! fresh deadline: the upload itself may take long, only plan-to-apply is
-//! bounded.
+//! [`Pipeline::open_ticketed_upload`] checks framing, the signed `pack:`
+//! commitment and the stateless ticket before reading chunks. It skips the
+//! replay ledger, authorization, admission, quota and `pre_receive`. After
+//! the full pack verifies and commits, it writes a content-addressed upload
+//! marker in a non-pack blob namespace. It touches no metadata shard.
 //!
-//! **Resume is legacy M0 behavior** (00-plan R-85). A retry of the same
-//! signed operation finds its record in flight and resumes: it re-streams
-//! and re-commits without a second charge (`vcs-worker` parity,
-//! `auth_v2.mjs --fault after-reserve|after-put`). SPEC-TRANSPORT-CONNECT
-//! §7.1 step 2 answers an in-flight record with `aborted` instead; this
-//! exception covers un-ticketed M0 uploads only and goes when WP-1.9 ships
-//! replay-exempt ticketed uploads.
-//!
-//! A retry of a committed operation opens no blob sink: it hashes and
-//! length-checks the stream without writing, and returns OK without any
-//! metadata write, so a replay never re-creates a pack that GC or a
-//! takedown deleted.
-//!
-//! `pre_receive` runs after the blob is visible, so it cannot prevent
-//! visibility: a rejected pack stays until GC reclaims it as unreferenced.
-//! A final (storable) rejection is committed as the operation's result, so
-//! a retry is answered at `open_upload` without re-streaming; any other
-//! error leaves the record in flight and resumable.
-//!
-//! An upload that outlives its envelope (past `expires_at +
-//! MAX_CLOCK_LEAD_MS`, which caps every signed batch's deadline) cannot
-//! commit its record. Once the blob verified and `pre_receive` passed, it
-//! returns OK without the record commit and leaves the in-flight record to
-//! the pruner: no retry of that nonce can authenticate any more, so replay
-//! protection is moot, and the quota stays charged exactly once. The same
-//! holds for a commit that fails `unavailable` after `expires_at`.
-//!
-//! Un-ticketed M0 uploads keep their replay record and quota in the
-//! namespace coordinator's partition (`ShardMap::coordinator`), which each
-//! upload writes twice (reserve and commit). Under a sharding `ShardMap`
-//! the quota is counted per partition, like every quota (PRD §5.4).
-//! Ticketed uploads move to their target ref shard in M1 (WP-1.9).
+//! [`Pipeline::open_upload`] remains for un-ticketed single-repository
+//! uploads below the advertised threshold, and for transport identity
+//! uploads. A fresh signed operation reserves a replay row and charges
+//! quota before streaming. The legacy STC §7.1 MAY (R-85) lets an in-flight
+//! retry with the same nonce re-read and commit the stream without charging
+//! again. A committed replay verifies the stream without writing a blob.
+//! `pre_receive` runs after the pack commit, followed by the replay commit.
+//! Rejection leaves an unreferenced pack for GC. If the envelope expires
+//! during the stream, the pack may succeed without the final replay write;
+//! the in-flight row is left for the pruner.
 
 use core::fmt;
 
@@ -55,7 +27,7 @@ use tracing::Instrument;
 use super::hooks::{AdmissionInput, PreReceive};
 use super::outcome::Outcome;
 use super::plan::{ReplayGuard, Snapshot, WriteKind, WriteRequest};
-use super::{Authenticated, HookSet, Pipeline, internal, meta_error, store_error};
+use super::{AuthMode, Authenticated, HookSet, Pipeline, internal, meta_error, ms, store_error};
 use crate::auth_v2::check_pack_commitment;
 use crate::error::{Code, ServerError};
 use crate::op::{OpKind, Operation};
@@ -65,7 +37,10 @@ use crate::store::{
     BlobStore, MultipartBlobStore, NamespaceStore, PackSink, Partition, StoreError, codec, keys,
 };
 use crate::telemetry::METRIC_UPLOAD_BYTES;
+use crate::upload::marker::write_upload_marker;
+use crate::upload::ticket_auth::verify_ticket;
 use crate::upload::{UploadError, UploadValidator};
+use mkit_core::hash::Hash;
 
 /// How an upload relates to its replay record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +54,8 @@ pub enum UploadMode {
     /// The operation already committed: verify the stream without writing
     /// it, then return OK without an apply.
     Replay,
+    /// A stateless ticket authorizes the stream; no metadata is touched.
+    Ticketed,
 }
 
 /// Where a session's bytes go: the blob sink, or (on a replay) only a
@@ -103,6 +80,7 @@ pub struct UploadSession<'p, B: BlobStore, N, H> {
     target: Option<Target<B::Sink>>,
     failed: Option<ServerError>,
     outcome: Outcome,
+    ticket_id: Option<Hash>,
 }
 
 impl<B: BlobStore, N, H> fmt::Debug for UploadSession<'_, B, N, H> {
@@ -121,6 +99,7 @@ struct Opened<S> {
     mode: UploadMode,
     validator: UploadValidator,
     target: Target<S>,
+    ticket_id: Option<Hash>,
 }
 
 /// The replay record a signed operation commits.
@@ -187,6 +166,7 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
                 target: Some(o.target),
                 failed: None,
                 outcome,
+                ticket_id: o.ticket_id,
             }),
             Err(err) => {
                 outcome.record(Err(&err));
@@ -201,8 +181,15 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
         pack_id: Option<&[u8]>,
         total_bytes: Option<u64>,
     ) -> Result<Opened<B::Sink>, ServerError> {
-        pipe.require_pack_membership()?;
         let validator = UploadValidator::new(pack_id, total_bytes, pipe.cfg.upload_limits)?;
+        if !matches!(pipe.cfg.auth, AuthMode::TransportIdentity)
+            && validator.declared() >= pipe.effective_threshold()
+        {
+            return Err(ServerError::new(
+                Code::FailedPrecondition,
+                "upload requires a ticket from BeginUpload",
+            ));
+        }
         let (key, declared) = (validator.key(), validator.declared());
         let kind = OpKind::UploadPack {
             key,
@@ -257,7 +244,95 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
             mode,
             validator,
             target,
+            ticket_id: None,
         })
+    }
+
+    /// Open a replay-exempt ticketed upload without consulting metadata.
+    pub(super) async fn begin_ticketed(
+        pipe: &'p Pipeline<B, N, H>,
+        a: &Authenticated,
+        pack_id: Option<&[u8]>,
+        total_bytes: Option<u64>,
+        token: &[u8],
+    ) -> Result<Self, ServerError> {
+        let mut outcome = pipe.outcome(a);
+        let opened = async {
+            let validator = UploadValidator::new(pack_id, total_bytes, pipe.cfg.upload_limits)?;
+            let AuthMode::AuthV2(cfg) = &pipe.cfg.auth else {
+                return Err(ServerError::new(
+                    Code::Unimplemented,
+                    "ticketed UploadPack requires auth v2",
+                ));
+            };
+            let keys = pipe.cfg.ticket_keys.as_ref().ok_or_else(|| {
+                ServerError::new(Code::Unimplemented, "upload tickets are not configured")
+            })?;
+            let key = validator.key();
+            let declared = validator.declared();
+            let op = pipe.identify(
+                a,
+                OpKind::UploadPack {
+                    key,
+                    declared_len: declared,
+                },
+            )?;
+            let auth = op
+                .auth
+                .as_ref()
+                .ok_or_else(|| internal("ticketed upload lacks auth"))?;
+            check_pack_commitment(auth, &key.0, declared)
+                .map_err(|e| ServerError::unauthenticated(e.to_string()))?;
+            let now_ms = ms(pipe.clock.now_ms().saturating_add(a.business_skew_ms));
+            let claims = verify_ticket(
+                keys,
+                token,
+                now_ms,
+                cfg.audience(),
+                &a.repo().identity,
+                &auth.signer,
+            )?;
+            if claims.pack_id != key.0 || claims.bytes != declared {
+                return Err(ServerError::new(
+                    Code::PermissionDenied,
+                    "upload ticket binding mismatch",
+                ));
+            }
+            super::fault!(pipe, AfterAuthenticate, &op, a);
+            let sink = pipe
+                .blobs
+                .begin(key.into(), declared)
+                .await
+                .map_err(|e| store_error(StorageOp::BlobPut, e))?;
+            Ok(Opened {
+                op,
+                p: pipe.shards.coordinator(&a.repo().repo.namespace),
+                mode: UploadMode::Ticketed,
+                validator,
+                target: Target::Sink(sink),
+                ticket_id: Some(claims.ticket_id),
+            })
+        }
+        .instrument(outcome.span.clone())
+        .await;
+        match opened {
+            Ok(o) => Ok(Self {
+                pipe,
+                a: a.clone(),
+                op: o.op,
+                p: o.p,
+                mode: o.mode,
+                validator: o.validator,
+                target: Some(o.target),
+                failed: None,
+                outcome,
+                ticket_id: o.ticket_id,
+            }),
+            Err(err) => {
+                outcome.record(Err(&err));
+                Err(err)
+            }
+        }
     }
 
     /// How this upload relates to its replay record.
@@ -341,6 +416,13 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
             None => return Err(internal("upload sink gone")),
         }
         super::fault!(pipe, AfterBlobCommit, &self.op, &self.a);
+        if let Some(ticket_id) = self.ticket_id {
+            write_upload_marker(&pipe.blobs, &ticket_id, &done.key.0)
+                .await
+                .map_err(|e| store_error(StorageOp::BlobPut, e))?;
+            pipe.metrics.incr(METRIC_UPLOAD_BYTES, &[], done.total);
+            return Ok(());
+        }
         if self.mode == UploadMode::Replay {
             return Ok(());
         }

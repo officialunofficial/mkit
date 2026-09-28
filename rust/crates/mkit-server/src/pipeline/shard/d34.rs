@@ -50,8 +50,8 @@ impl ShardMap for D34Shards {
     }
 
     fn membership(&self, repo: &RepoId, pack: &BlobKey) -> Partition {
-        let hash = pack.hash();
-        let p = &hash;
+        let p = pack.hash();
+
         Partition::RepoIndex {
             ns: repo.namespace.clone(),
             repo: repo.name.clone(),

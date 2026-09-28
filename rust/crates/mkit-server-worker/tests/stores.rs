@@ -24,6 +24,36 @@ fn root() -> Partition {
     Partition::Namespace(NamespaceKey::deployment_default())
 }
 
+#[test]
+fn upload_marker_r2_key_is_not_a_pack_key() {
+    let bucket = SimBucket::default();
+    let store = R2BlobStore::new(bucket, PACKS_KEYSPACE);
+    let content = b"marker bytes";
+    let marker = BlobKey::upload_marker(hash(content));
+    block_on(async {
+        let mut sink = store.begin(marker, content.len() as u64).await.unwrap();
+        sink.write(Bytes::from_static(content)).await.unwrap();
+        sink.commit().await.unwrap();
+        assert_eq!(
+            store.object_key(&marker).unwrap(),
+            format!("upload-markers/v1/{}", marker.to_hex())
+        );
+        assert!(store.head(&marker).await.unwrap().is_some());
+        assert!(
+            store
+                .head(&BlobKey::pack(hash(content)))
+                .await
+                .unwrap()
+                .is_none()
+        );
+    });
+    let prefixed = R2BlobStore::new(SimBucket::default(), "tenant/a/packs");
+    assert_eq!(
+        prefixed.object_key(&marker).unwrap(),
+        format!("tenant/a/upload-markers/v1/{}", marker.to_hex())
+    );
+}
+
 /// A connection whose size counts free pages too: what the soft cap would
 /// see if `databaseSize` included the freelist.
 #[derive(Debug, Clone)]
@@ -204,7 +234,7 @@ fn a_failed_put_is_already_present_only_if_the_key_now_exists() {
         Err(StoreError::Invalid(_))
     ));
     assert_eq!(
-        store.object_key(&BlobKey::pack([0xab; 32])),
+        store.object_key(&BlobKey::pack([0xab; 32])).unwrap(),
         format!("packs/{}", "ab".repeat(32))
     );
 }
@@ -498,6 +528,66 @@ fn committed_put_pressure_reads_physical_size_through_do_shim() {
         block_on(serve(&store, &request(call), ShardClass::RefStore));
     }
     assert_eq!(metrics.0.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn backup_seeds_only_after_first_committed_put_and_raises_alarm_hint() {
+    use mkit_server::ManualClock;
+    use mkit_server::store::codec::decode_backup_state;
+    use mkit_server::store::keys;
+    use mkit_server::timers::registry::kinds;
+    use mkit_server_worker::classes::ShardClass;
+    use mkit_server_worker::ns_object::PressureStore;
+    use std::sync::Arc;
+
+    let conn = SimDoConn(RusqliteConn::open_in_memory().unwrap());
+    let inner = SqlKvStore::open(conn).unwrap();
+    let clock = Arc::new(ManualClock::new(1_000));
+    let store = PressureStore::new(
+        inner,
+        ShardClass::RefStore,
+        clock.clone(),
+        Arc::new(PressureGauges::default()),
+    )
+    .with_backup_interval(100);
+    assert!(
+        block_on(store.get(&root(), &keys::backup_state()))
+            .unwrap()
+            .is_none()
+    );
+    assert!(block_on(store.stats(&root())).is_ok());
+    assert!(
+        block_on(store.get(&root(), &keys::timer(1_100, kinds::BACKUP.get(), b"")))
+            .unwrap()
+            .is_none()
+    );
+    let first = Batch::new().put(key(0), Value::new(vec![1]));
+    assert_eq!(
+        block_on(store.apply(&root(), first)).unwrap(),
+        BatchOutcome::Committed
+    );
+    let state = block_on(store.get(&root(), &keys::backup_state()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(decode_backup_state(&state).unwrap().last_export_ms, 0);
+    assert!(
+        block_on(store.get(&root(), &keys::timer(1_100, kinds::BACKUP.get(), b"")))
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(store.take_seeded_due(), Some(1_100));
+    assert_eq!(store.take_seeded_due(), None);
+    clock.set(1_050);
+    assert_eq!(
+        block_on(store.apply(&root(), Batch::new().put(key(1), Value::new(vec![2])))).unwrap(),
+        BatchOutcome::Committed
+    );
+    assert_eq!(store.take_seeded_due(), None);
+    assert!(
+        block_on(store.get(&root(), &keys::timer(1_150, kinds::BACKUP.get(), b"")))
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]

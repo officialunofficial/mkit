@@ -43,6 +43,8 @@
 //! partition's size, `TEST_QUOTA_*` vars replace the write quota, and each
 //! request logs the most body bytes the adapter held at once, with its
 //! path (`mkit-adapter peak-buffered-bytes <n> … path <path>`).
+//! Under D34, `POST /__mkit_test/relay/<pack>` plants a membership relay;
+//! `GET` on that path checks target membership and source queue drainage.
 
 use core::pin::Pin;
 use core::task::{Context, Poll};
@@ -277,6 +279,92 @@ pub fn plan_capacity(plan: Option<&str>) -> Result<Capacity, (ConfigError, Capac
             ConfigError(format!("{PLAN_VAR} `{p}` is neither `paid` nor `free`")),
             free,
         )),
+    }
+}
+
+/// The handlers installed by a Durable Object's deployment adapter.
+///
+/// Relay delivery belongs only to [`crate::classes::ShardClass::RefShard`].
+/// A configuration failure retains its relay timers for retry, rather than
+/// leaving them without a registered handler. `target` uses the deployment's
+/// placement and `plan` is its `WORKERS_PLAN` value.
+#[must_use]
+pub fn timer_registry<S, T>(
+    class: crate::classes::ShardClass,
+    target: Result<T, ConfigError>,
+    plan: Option<&str>,
+) -> mkit_server::timers::TimerRegistry<S>
+where
+    S: mkit_server::NamespaceStore,
+    T: mkit_server::NamespaceStore + 'static,
+{
+    use crate::classes::ShardClass;
+    use mkit_server::relay::{NoHook, RelayBudget, RelayHandler};
+    use mkit_server::timers::{TimerRegistry, lease_sweep::LeaseSweep};
+
+    let registry = TimerRegistry::new();
+    let registry = match class {
+        ShardClass::NsCoordinator => registry.register(LeaseSweep),
+        ShardClass::RefShard => {
+            let paid = plan.is_some_and(|p| p.trim().eq_ignore_ascii_case("paid"));
+            let max_per_tick = if paid { 4 } else { 2 };
+            // Paid: <= 4 fires x 8 targets x 2 calls = 64 per alarm,
+            // below Workers Paid's default 10,000 subrequests. Free:
+            // <= 2 fires x 8 targets x 2 calls = 32, below its limit of 50.
+            // The target-call cap also bounds chunking and contention retries.
+            let mut budget = RelayBudget::default();
+            budget.max_rows = 128;
+            budget.max_targets = 8;
+            budget.max_target_calls = Some(2);
+            let relay = match target {
+                Ok(target) => Some(RelayHandler {
+                    target,
+                    hook: NoHook,
+                    budget,
+                }),
+                Err(error) => {
+                    crate::log_failure(&format!("Worker relay configuration unavailable: {error}"));
+                    None
+                }
+            };
+            registry.register(WorkerRelay {
+                relay,
+                max_per_tick,
+            })
+        }
+        _ => registry,
+    };
+    #[cfg(feature = "test-faults")]
+    let registry = registry.register(mkit_server::timers::test_kind::TestTimer);
+    registry
+}
+
+struct WorkerRelay<T> {
+    relay: Option<mkit_server::relay::RelayHandler<T>>,
+    max_per_tick: u32,
+}
+
+impl<S: mkit_server::NamespaceStore, T: mkit_server::NamespaceStore>
+    mkit_server::timers::TimerHandler<S> for WorkerRelay<T>
+{
+    fn kind(&self) -> mkit_server::timers::TimerKind {
+        mkit_server::timers::registry::kinds::RELAY
+    }
+
+    fn max_per_tick(&self) -> Option<u32> {
+        Some(self.max_per_tick)
+    }
+
+    fn fire<'a>(
+        &'a self,
+        ctx: &'a mkit_server::timers::TimerCtx<'a, S>,
+        timer: &'a mkit_server::timers::DueTimer,
+    ) -> mkit_server::BoxFuture<'a, Result<mkit_server::timers::Fired, mkit_server::StoreError>>
+    {
+        match &self.relay {
+            Some(relay) => relay.fire(ctx, timer),
+            None => Box::pin(async { Ok(mkit_server::timers::Fired::Retry) }),
+        }
     }
 }
 
@@ -601,6 +689,7 @@ pub use glue::{fetch, ns_object, serve};
 #[cfg(target_arch = "wasm32")]
 mod glue {
     use std::sync::Arc;
+    use std::sync::Once;
 
     use crate::telemetry::{ConsoleMetrics, install};
     use mkit_server::auth_v2::CORS_ALLOW_HEADERS;
@@ -618,6 +707,7 @@ mod glue {
         PLAN_VAR, WorkerConfig, body_too_large_json, dispatch_oneshot_body, over_cap_response,
         plan_capacity, unavailable_json,
     };
+    use crate::backup::{BACKUPS_BINDING, BackupConfig, BackupDrain, BackupHandler};
     use crate::clock::WorkerClock;
     use crate::ns_client::{StubTransport, WorkerNamespaceStore};
     use crate::ns_object::NsObject;
@@ -627,6 +717,9 @@ mod glue {
     thread_local! {
         static SHARDING_GUARD: std::cell::RefCell<Option<Settled>> = const { std::cell::RefCell::new(None) };
     }
+
+    static BACKUPS_MISSING_LOG: Once = Once::new();
+    static BACKUPS_INVALID_LOG: Once = Once::new();
 
     /// The pipeline a request runs on.
     type WorkerPipeline = Pipeline<WorkerBlobStore, WorkerNamespaceStore, Hooks>;
@@ -715,6 +808,8 @@ mod glue {
     /// # Errors
     /// Only when the runtime fails to build a response.
     pub async fn serve(req: Request, env: Env, cfg: &WorkerConfig) -> worker::Result<Response> {
+        #[cfg(feature = "test-faults")]
+        let mut req = req;
         install();
         if is_options_preflight(&req) {
             return cors_preflight_response(CORS_ALLOW_HEADERS, CORS_ALLOW_METHODS);
@@ -740,8 +835,19 @@ mod glue {
             )?));
         }
         #[cfg(feature = "test-faults")]
+        if let Some(response) = test::backup_round_trip(&mut req, &env, cfg).await? {
+            return Ok(with_cors(response));
+        }
+        #[cfg(feature = "test-faults")]
         if req.method() == worker::Method::Get && req.path() == test::STATS_PATH {
             return Ok(with_cors(test::stats(&env, cfg).await?));
+        }
+        #[cfg(feature = "test-faults")]
+        {
+            let path = req.path();
+            if let Some(pack) = path.strip_prefix(test::RELAY_PATH_PREFIX) {
+                return Ok(with_cors(test::relay(req.method(), pack, &env, cfg).await?));
+            }
         }
         let length = req.headers().get("content-length").ok().flatten();
         if content_length_exceeds(length.as_deref(), cfg.max_body_bytes) {
@@ -796,35 +902,144 @@ mod glue {
             worker::console_error!("{e}; using the Workers Free cap");
             free
         });
-        // TODO(WP-1.23b): register RelayHandler for RefShard with DoNamespaceStore<StubTransport>.
-        let registry = mkit_server::timers::TimerRegistry::new();
-        // Lease-table rows and their sweep timers live only in coordinator
-        // partitions (WP-1.25).
-        let registry = if class == crate::classes::ShardClass::NsCoordinator {
-            registry.register(mkit_server::timers::lease_sweep::LeaseSweep)
+        let target = WorkerConfig::from_env(env).map(|cfg| {
+            let probe = cfg.probe_partition();
+            WorkerNamespaceStore::new(StubTransport::new(env.clone(), cfg.placement), probe)
+        });
+        let registry = super::timer_registry(class, target, plan.as_deref());
+        let backup = BackupConfig::from_vars(|name| env.var(name).ok().map(|v| v.to_string()))
+            .map_err(|error| {
+                BACKUPS_INVALID_LOG
+                    .call_once(|| crate::log_failure(&format!("backup config invalid: {error}")));
+            })
+            .ok()
+            .filter(|config| config.interval_ms != 0);
+        let backup = backup.and_then(|config| {
+            if env.bucket(BACKUPS_BINDING).is_ok() {
+                Some(config)
+            } else {
+                BACKUPS_MISSING_LOG.call_once(|| {
+                    crate::log_failure("BACKUPS R2 binding absent; backups disabled");
+                });
+                None
+            }
+        });
+        let registry = if let Some(config) = backup.clone() {
+            // Free-plan alarm budget: at most 32 relay calls plus this
+            // handler's single R2 put = 33 external subrequests, under 50.
+            registry.register(BackupHandler::new(
+                EnvBucket::new(env.clone(), BACKUPS_BINDING),
+                config,
+            ))
         } else {
-            registry
+            registry.register(BackupDrain)
         };
-        #[cfg(feature = "test-faults")]
-        let registry = registry.register(mkit_server::timers::test_kind::TestTimer);
-        NsObject::new(state, class)
+        let object = NsObject::new(state, class)
             .0
             .with_capacity(capacity)
-            .with_registry(registry)
+            .with_registry(registry);
+        if let Some(config) = backup {
+            object.with_backup_interval(config.interval_ms)
+        } else {
+            object
+        }
     }
 
     #[cfg(feature = "test-faults")]
     mod test {
         use std::sync::Arc;
 
-        use mkit_server::{NamespaceKey, NamespaceStore, Partition};
-        use worker::{Env, Response};
+        use mkit_server::pipeline::{D34Shards, ShardMap, Sharding};
+        use mkit_server::store::{keys, outbox::OutboxBuilder};
+        use mkit_server::{
+            Batch, BatchOutcome, BlobKey, Clock, NamespaceKey, NamespaceStore, Partition, RepoId,
+            RepoName, StoreError, Value,
+        };
+        use worker::{Env, Method, Request, Response};
 
         use super::super::faults::FaultState;
-        use crate::ns_client::{StubTransport, WorkerNamespaceStore};
+        use crate::naming::{DoTarget, REFSTORE, ROOT_INSTANCE};
+        use crate::ns_client::{NsTransport, StubTransport, WorkerNamespaceStore};
+        use crate::wire::{Blob, NsCall, NsReply, NsRequest};
 
         /// The wire suite's stats hook (M0-07).
         pub(super) const STATS_PATH: &str = "/__mkit_test/stats";
+        const SNAPSHOT_PATH: &str = "/__mkit_test/snapshot";
+        const RESTORE_PATH: &str = "/__mkit_test/restore";
+        const RESTORED_SNAPSHOT_PATH: &str = "/__mkit_test/restored-snapshot";
+        const RESTORED_INSTANCE: &str = "root-restore-test";
+
+        /// A wrangler-dev-only round trip between two `RefStore` instances.
+        pub(super) async fn backup_round_trip(
+            req: &mut Request,
+            env: &Env,
+            cfg: &super::WorkerConfig,
+        ) -> worker::Result<Option<Response>> {
+            let path = req.path();
+            if !matches!(
+                path.as_str(),
+                SNAPSHOT_PATH | RESTORE_PATH | RESTORED_SNAPSHOT_PATH
+            ) {
+                return Ok(None);
+            }
+            if cfg.sharding != mkit_server::pipeline::Sharding::Single {
+                return Response::error("snapshot test route is single-sharding only", 409)
+                    .map(Some);
+            }
+            let is_import = path == RESTORE_PATH;
+            if req.method() != if is_import { Method::Post } else { Method::Get } {
+                return Response::error("method not allowed", 405).map(Some);
+            }
+            let part = Partition::Namespace(NamespaceKey::deployment_default());
+            let target = DoTarget {
+                binding: REFSTORE,
+                name: if path == SNAPSHOT_PATH {
+                    ROOT_INSTANCE
+                } else {
+                    RESTORED_INSTANCE
+                }
+                .into(),
+            };
+            let call = if is_import {
+                let bytes = req.bytes().await?;
+                if bytes.len() > crate::backup::DEFAULT_MAX_BYTES {
+                    return Response::error("snapshot exceeds backup cap", 413).map(Some);
+                }
+                NsCall::TestImport { bytes: Blob(bytes) }
+            } else {
+                NsCall::TestSnapshot
+            };
+            let body = serde_json::to_string(
+                &NsRequest::new(&part, call)
+                    .map_err(|e| worker::Error::RustError(e.to_string()))?,
+            )
+            .map_err(|e| worker::Error::RustError(e.to_string()))?;
+            let transport = StubTransport::new(env.clone(), cfg.placement.clone());
+            let raw = match transport.call(&target, "test_backup", body).await {
+                Ok(raw) => raw,
+                Err(e) => return Response::error(e.to_string(), 503).map(Some),
+            };
+            let reply: NsReply =
+                serde_json::from_str(&raw).map_err(|e| worker::Error::RustError(e.to_string()))?;
+            let response = match reply {
+                NsReply::Snapshot { bytes } => {
+                    let mut response = Response::from_bytes(bytes.0)?;
+                    response
+                        .headers_mut()
+                        .set("Content-Type", "application/octet-stream")?;
+                    response
+                }
+                NsReply::Imported { records } => {
+                    Response::from_json(&serde_json::json!({ "records": records }))?
+                }
+                NsReply::Err { message, .. } => Response::error(message, 400)?,
+                _ => Response::error("unexpected test backup reply", 500)?,
+            };
+            Ok(Some(response))
+        }
+
+        /// Local conformance planting/probing of real RefShard relay alarms.
+        pub(super) const RELAY_PATH_PREFIX: &str = "/__mkit_test/relay/";
 
         thread_local! {
             static FAULTS: Arc<FaultState> = Arc::default();
@@ -854,6 +1069,68 @@ mod glue {
                     Response::from_json(&serde_json::json!({ "bytes": s.bytes, "keys": s.keys }))
                 }
                 Err(e) => Response::error(e.to_string(), 503),
+            }
+        }
+
+        /// Plant a ref-local member and its relay, or inspect target membership
+        /// and source queue drainage. The fixture id lives in the URL, so this
+        /// hook never reads or buffers a request body.
+        pub(super) async fn relay(
+            method: Method,
+            pack_hex: &str,
+            env: &Env,
+            cfg: &super::WorkerConfig,
+        ) -> worker::Result<Response> {
+            if cfg.sharding != Sharding::D34 {
+                return Response::error("relay hook is D34-sharding only", 409);
+            }
+            if !matches!(method, Method::Get | Method::Post) {
+                return Response::error("relay hook requires GET or POST", 405);
+            }
+            let Ok(pack) = mkit_core::hash::from_hex(pack_hex) else {
+                return Response::error("relay fixture must be a 64-character hex pack id", 400);
+            };
+            let repo = RepoId {
+                namespace: NamespaceKey::deployment_default(),
+                name: RepoName::new(&cfg.repository)
+                    .map_err(|e| worker::Error::RustError(e.to_string()))?,
+            };
+            let reference = format!(
+                "refs/heads/mkit-test-relay-{}",
+                mkit_core::hash::to_hex(&pack)
+            );
+            let source = D34Shards.ref_shard(&repo, &reference);
+            let target = D34Shards.membership(&repo, &BlobKey::pack(pack));
+            let key = keys::membership(&repo.name, &pack);
+            let store = WorkerNamespaceStore::new(
+                StubTransport::new(env.clone(), cfg.placement.clone()),
+                cfg.probe_partition(),
+            );
+            let result: Result<serde_json::Value, StoreError> = async {
+                if method == Method::Post {
+                    let observed = store.get(&source, &keys::outbox_sequence()).await?;
+                    let mut outbox = OutboxBuilder::new(observed.as_ref(), None)?;
+                    let now = u64::try_from(super::WorkerClock.now_ms()).unwrap_or(0);
+                    outbox.relay_at(now);
+                    outbox.relay(&target, vec![(key.clone(), Value::default())]);
+                    let mut batch = Batch::new().put(key, Value::default());
+                    outbox.try_finish(&mut batch.preconditions, &mut batch.writes)?;
+                    if store.apply(&source, batch).await? != BatchOutcome::Committed {
+                        return Err(StoreError::Invalid("relay fixture planting raced".into()));
+                    }
+                    Ok(serde_json::json!({ "planted": true }))
+                } else {
+                    let member = store.get(&target, &key).await?.is_some();
+                    let (start, end) = keys::class_range(keys::TAG_RELAY);
+                    let queue = store.scan(&source, &start, &end, None, 1).await?;
+                    let queued = !queue.entries.is_empty() || queue.next.is_some();
+                    Ok(serde_json::json!({ "member": member, "queued": queued }))
+                }
+            }
+            .await;
+            match result {
+                Ok(state) => Response::from_json(&state),
+                Err(error) => Response::error(error.to_string(), 503),
             }
         }
 

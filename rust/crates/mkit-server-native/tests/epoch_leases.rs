@@ -24,7 +24,7 @@ use mkit_server::store::{
     StoreCapabilities, StoreError, Value, Write, codec, keys,
 };
 use mkit_server::timers::{TickBudget, TimerRegistry, run_due};
-use mkit_server::upload::UploadLimits;
+use mkit_server::upload::{UploadLimits, token::TicketKeys};
 use mkit_server::{
     Addressing, AuthzFacts, Code, ManualClock, MemoryBlobStore, MemoryKv, MultiAddressing,
     NamespaceStore, NoopMetrics, Operation, Procedure, RefUpdate, ServerError, UpdateRefResult,
@@ -250,6 +250,7 @@ fn pipeline<N: NamespaceStore>(
     cfg.sharding = Sharding::D34;
     cfg.write_policy = WritePolicy::Owner;
     cfg.write_quota = None;
+    cfg.ticket_keys = Some(TicketKeys::new(vec![("test".into(), [9; 32])]).unwrap());
     Arc::new(
         Pipeline::new(
             MemoryBlobStore::default(),

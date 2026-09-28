@@ -1,77 +1,103 @@
 //! The blob contract (PRD §5.3): content-addressed, immutable bytes.
 //!
-//! Every concrete store is built for one keyspace: `packs` (today's
-//! `packs/<hex>`, where `BLAKE3(bytes) == key`) by default. M4 builds a
-//! second instance for the global object store (D32), so a new keyspace
-//! needs no trait change. Resumable multipart uploads are a sub-trait
-//! (`MultipartBlobStore`, WP-1.11).
+//! A [`BlobKey`] selects either `packs/<hex>` or the upload marker namespace;
+//! both require `BLAKE3(bytes) == key`. Pack RPCs construct only pack keys.
+//! Resumable multipart uploads are a sub-trait (`MultipartBlobStore`, WP-1.11).
 
 use core::fmt;
 use core::future::Future;
 
 use bytes::Bytes;
+use mkit_core::hash::{Hash, to_hex_bytes};
+use mkit_core::protocol::PackKey;
 use mkit_core::upload_parts::PartPlan;
 
 use super::error::StoreError;
 use crate::rt::{BoxStream, MaybeSend, MaybeSync};
 
-/// The independent blob namespaces served by one store.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[non_exhaustive]
-pub enum BlobNamespace {
-    /// Pack bytes, addressable by pack RPCs.
-    Pack,
-    /// Proof that a ticket holder uploaded a pack.
-    UploadMarker,
-}
-
-/// A content hash and its blob namespace.
+/// A blob's content hash and storage namespace. Pack RPCs construct only
+/// `Pack` keys, so an upload marker cannot be fetched as a pack.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BlobKey {
-    hash: [u8; 32],
+    hash: Hash,
     namespace: BlobNamespace,
 }
 
+/// The physical namespace of a content-addressed blob.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum BlobNamespace {
+    /// Pack bytes.
+    Pack,
+    /// Proof that a ticket holder streamed and verified a pack.
+    UploadMarker,
+}
+
 impl BlobKey {
-    /// A pack blob key.
+    /// Construct a pack key.
     #[must_use]
-    pub const fn pack(hash: [u8; 32]) -> Self {
+    pub const fn pack(hash: Hash) -> Self {
         Self {
             hash,
             namespace: BlobNamespace::Pack,
         }
     }
 
-    /// An upload marker blob key, outside the pack namespace.
+    /// Construct an upload marker key.
     #[must_use]
-    pub const fn upload_marker(hash: [u8; 32]) -> Self {
+    pub const fn upload_marker(hash: Hash) -> Self {
         Self {
             hash,
             namespace: BlobNamespace::UploadMarker,
         }
     }
 
-    /// The namespace of this key.
+    /// Content hash bytes.
+    #[must_use]
+    pub const fn hash(&self) -> &Hash {
+        &self.hash
+    }
+
+    /// Lowercase hexadecimal content hash.
+    #[must_use]
+    pub fn to_hex(&self) -> String {
+        to_hex_bytes(&self.hash)
+    }
+
+    /// Path relative to a blob root, given the pack keyspace (which may
+    /// include a deployment prefix). Markers use its sibling namespace.
+    ///
+    /// # Errors
+    /// [`StoreError::Invalid`] for a namespace this backend does not support.
+    pub fn relative_path(&self, pack_keyspace: &str) -> Result<String, StoreError> {
+        // The fallback handles future BlobNamespace variants without a backend panic.
+        #[allow(unreachable_patterns)]
+        let directory = match self.namespace {
+            BlobNamespace::Pack => pack_keyspace.to_owned(),
+            BlobNamespace::UploadMarker => {
+                let parent = pack_keyspace
+                    .rsplit_once('/')
+                    .map_or("", |(parent, _)| parent);
+                if parent.is_empty() {
+                    "upload-markers/v1".to_owned()
+                } else {
+                    format!("{parent}/upload-markers/v1")
+                }
+            }
+            _ => return Err(StoreError::Invalid("unsupported blob namespace".into())),
+        };
+        Ok(format!("{directory}/{}", self.to_hex()))
+    }
+
+    /// Physical namespace.
     #[must_use]
     pub const fn namespace(&self) -> BlobNamespace {
         self.namespace
     }
-
-    /// The content hash of this key.
-    #[must_use]
-    pub const fn hash(&self) -> [u8; 32] {
-        self.hash
-    }
-
-    /// The lowercase hexadecimal content hash.
-    #[must_use]
-    pub fn to_hex(&self) -> String {
-        mkit_core::protocol::PackKey(self.hash).to_hex()
-    }
 }
 
-impl From<mkit_core::protocol::PackKey> for BlobKey {
-    fn from(key: mkit_core::protocol::PackKey) -> Self {
+impl From<PackKey> for BlobKey {
+    fn from(key: PackKey) -> Self {
         Self::pack(key.0)
     }
 }

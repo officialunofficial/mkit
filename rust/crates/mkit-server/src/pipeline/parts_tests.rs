@@ -456,6 +456,34 @@ fn already_present_pack_aborts_session_and_writes_marker() {
 }
 
 #[test]
+fn gone_session_without_pack_is_failed_precondition() {
+    let blobs = MemoryBlobStore::default();
+    let keys = keys();
+    let signer = signer();
+    let data = data(2, 5);
+    let claims = claims(&blobs, &data, &signer);
+    let token = keys.mint(&claims);
+    let plan = PartPlan::new(claims.bytes, claims.part_size, 10_000).unwrap();
+    let pipe = pipe(blobs.clone(), keys, Arc::new(ManualClock::new(T0)));
+    let receipts = vec![
+        upload(&pipe, &signer, &claims, &token, &plan, &data, 0, 1),
+        upload(&pipe, &signer, &claims, &token, &plan, &data, 1, 2),
+    ];
+    block_on(blobs.abort(BlobKey::pack(claims.pack_id), &claims.upload_session)).unwrap();
+    let err = block_on(pipe.complete_upload(&complete_auth(&pipe, &signer, 3), &token, &receipts))
+        .unwrap_err();
+    assert_eq!(err.code(), Code::FailedPrecondition);
+    assert_eq!(err.public_message(), "invalid or expired upload ticket");
+    assert!(
+        block_on(blobs.head(&BlobKey::pack(claims.pack_id)))
+            .unwrap()
+            .is_none()
+    );
+    let (marker, _) = upload_marker(&claims.ticket_id, &claims.pack_id);
+    assert!(block_on(blobs.head(&marker)).unwrap().is_none());
+}
+
+#[test]
 fn resume_after_dropping_pipeline_state_with_held_receipts() {
     let blobs = MemoryBlobStore::default();
     let keys = keys();
@@ -813,6 +841,13 @@ fn part_outcome_records_each_request_once_and_counts_pushed_bytes() {
             .map(|(_, _, by)| by)
             .sum::<u64>(),
         bytes.len() as u64
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|(name, _, _)| *name == METRIC_UPLOAD_BYTES)
+            .count(),
+        1
     );
 }
 

@@ -1269,7 +1269,7 @@ async fn m1_ref_stubs_precede_validation_and_never_write() {
 }
 
 #[tokio::test]
-async fn m1_ticketed_upload_pack_rejects_before_chunks_and_header_validation() {
+async fn m1_ticketed_upload_pack_validates_header_before_mode_and_never_reads_chunks() {
     let server = setup(AuthMode::Open).serve();
     let data = pack(8);
     let ticketed = UploadPackRequest {
@@ -1288,7 +1288,18 @@ async fn m1_ticketed_upload_pack_rejects_before_chunks_and_header_validation() {
         }))),
         ..Default::default()
     };
-    for msg in [ticketed, invalid] {
+    for (msg, code, message) in [
+        (
+            ticketed,
+            "unimplemented",
+            "ticketed UploadPack requires auth v2",
+        ),
+        (
+            invalid,
+            "invalid_argument",
+            "expected a 32-byte digest, got 0 bytes",
+        ),
+    ] {
         let mut body = frame(&msg);
         // If chunks were read, this truncated frame would fail decoding.
         body.extend([0, 0, 0, 0, 16, 1, 2]);
@@ -1302,11 +1313,14 @@ async fn m1_ticketed_upload_pack_rejects_before_chunks_and_header_validation() {
             .await;
         let (messages, end) = reply.frames();
         assert!(messages.is_empty());
-        assert_eq!(end["error"]["code"], "unimplemented");
-        assert_eq!(end["error"]["message"], "not implemented yet");
+        assert_eq!(end["error"]["code"], code);
+        assert_eq!(end["error"]["message"], message);
     }
     assert!(!server.exists(&hash(&data)).await);
-    assert!(server.codes("UploadPack").is_empty());
+    assert_eq!(
+        server.codes("UploadPack"),
+        ["unimplemented", "invalid_argument"]
+    );
 }
 
 #[tokio::test]
@@ -1443,4 +1457,27 @@ async fn server_info_is_public_ignores_repository_and_sets_cache_header() {
         assert_eq!(json.headers["cache-control"], "private, max-age=60");
         assert!(server.codes.0.lock().unwrap().is_empty());
     }
+}
+
+#[tokio::test]
+async fn non_utf8_ref_hint_is_ignored_before_pack_reads() {
+    let server = setup(AuthMode::Open).serve();
+    let request = http::Request::builder()
+        .method(http::Method::POST)
+        .uri("http://localhost/mkit.transport.v1.TransportService/PackExists")
+        .header("content-type", JSON)
+        .header("connect-protocol-version", "1")
+        .header(
+            "x-mkit-ref",
+            http::HeaderValue::from_bytes(b"refs/heads/\xff").unwrap(),
+        )
+        .body(Full::new(Bytes::from(
+            serde_json::to_vec(&serde_json::json!({"packId": STANDARD.encode(A)})).unwrap(),
+        )))
+        .unwrap();
+    let reply = server.svc.oneshot(request).await.unwrap();
+    assert_eq!(reply.status(), StatusCode::OK);
+    let body = reply.into_body().collect().await.unwrap().to_bytes();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_ne!(value["exists"], true);
 }

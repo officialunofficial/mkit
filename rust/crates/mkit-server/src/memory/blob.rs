@@ -235,7 +235,7 @@ impl MultipartBlobStore for MemoryBlobStore {
         }
         if bytes.len() as u64 != plan.total()
             || merge_to_root(plan, &cvs).map_err(|e| StoreError::Invalid(e.to_string().into()))?
-                != key.hash()
+                != *key.hash()
         {
             return Err(StoreError::Invalid(
                 "merged part root does not match key".into(),
@@ -369,7 +369,8 @@ impl PackSink for MemoryPackSink {
         if self.buf.len() as u64 != self.len {
             return Err(StoreError::Invalid("blob length does not match".into()));
         }
-        if self.hasher.finalize() != self.key.hash() {
+
+        if self.hasher.finalize() != *self.key.hash() {
             return Err(StoreError::Invalid(
                 "blob hash does not match its key".into(),
             ));
@@ -671,7 +672,7 @@ mod tests {
         let store = MemoryBlobStore::default();
         let content = b"marker";
         let pack = key_of(content);
-        let marker = BlobKey::upload_marker(pack.hash());
+        let marker = BlobKey::upload_marker(*pack.hash());
         assert_ne!(pack, marker);
         assert_eq!(
             put(&store, marker, content.len() as u64, &[content]).unwrap(),

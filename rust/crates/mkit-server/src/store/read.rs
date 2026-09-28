@@ -8,9 +8,10 @@ use super::error::StoreError;
 use super::keys::{self, ParsedKey};
 use super::kv::{Cursor, Key, NamespaceStore};
 use super::partition::Partition;
+use crate::pipeline::ShardMap;
 use crate::quota::{QuotaScope, QuotaState};
 use crate::replay::{ReplayKey, ReplayRecord};
-use crate::repo::RepoName;
+use crate::repo::{RepoId, RepoName};
 
 /// One page of [`list_refs`].
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -58,6 +59,33 @@ pub async fn list_refs<S: NamespaceStore>(
         refs,
         next: page.next,
     })
+}
+
+/// Repository-scoped pack membership, with an optional read-your-writes ref.
+/// Unknown or malformed hints are ignored (STC §7.9). Membership is checked
+/// in this repository's index first, then in its strongly consistent ref shard.
+pub async fn is_member<S: NamespaceStore>(
+    store: &S,
+    shards: &dyn ShardMap,
+    repo: &RepoId,
+    pack: &Hash,
+    hint: Option<&str>,
+) -> Result<bool, StoreError> {
+    let key = keys::membership(&repo.name, pack);
+    let index = shards.membership(repo, &crate::store::BlobKey::pack(*pack));
+    if store.get(&index, &key).await?.is_some() {
+        return Ok(true);
+    }
+    if let Some(name) = hint
+        && crate::refs::validate_ref_name(name)
+        && crate::refs::is_served_ref_name(name)
+    {
+        return Ok(store
+            .get(&shards.ref_shard(repo, name), &key)
+            .await?
+            .is_some());
+    }
+    Ok(false)
 }
 
 /// The replay record for `scope`, if any (PRD §5.4 stage 0).
@@ -223,5 +251,133 @@ mod tests {
                 vec![(keys::quota_window(0, &scope), keys::quota(&scope))]
             );
         });
+    }
+}
+
+#[cfg(test)]
+mod membership_tests {
+    use super::*;
+    use crate::pipeline::D34Shards;
+    use crate::store::{Batch, BatchOutcome, PartitionStats, ScanPage, StoreCapabilities, Value};
+    use crate::{MemoryKv, NamespaceKey};
+    use futures_executor::block_on;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct Observed {
+        inner: MemoryKv,
+        gets: Mutex<Vec<(Partition, Key)>>,
+    }
+    impl NamespaceStore for Observed {
+        fn capabilities(&self) -> StoreCapabilities {
+            self.inner.capabilities()
+        }
+        async fn get(&self, p: &Partition, k: &Key) -> Result<Option<Value>, StoreError> {
+            self.gets.lock().unwrap().push((p.clone(), k.clone()));
+            self.inner.get(p, k).await
+        }
+        async fn scan(
+            &self,
+            p: &Partition,
+            start: &Key,
+            end: &Key,
+            after: Option<&Cursor>,
+            limit: u32,
+        ) -> Result<ScanPage, StoreError> {
+            self.inner.scan(p, start, end, after, limit).await
+        }
+        async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
+            self.inner.apply(p, batch).await
+        }
+        async fn stats(&self, p: &Partition) -> Result<PartitionStats, StoreError> {
+            self.inner.stats(p).await
+        }
+        async fn probe(&self) -> Result<(), StoreError> {
+            self.inner.probe().await
+        }
+    }
+    fn repo(name: &str) -> RepoId {
+        RepoId {
+            namespace: NamespaceKey::deployment_default(),
+            name: RepoName::new(name).unwrap(),
+        }
+    }
+    const PACK: Hash = [7; 32];
+    const REF: &str = "refs/heads/main";
+    fn plant(kv: &Observed, p: &Partition, repo: &RepoId) {
+        assert_eq!(
+            block_on(kv.inner.apply(
+                p,
+                Batch::new().put(keys::membership(&repo.name, &PACK), Value::default())
+            ))
+            .unwrap(),
+            BatchOutcome::Committed
+        );
+    }
+    #[test]
+    fn index_hit_needs_only_one_get() {
+        let kv = Observed::default();
+        let r = repo("a");
+        let shards = D34Shards;
+        plant(
+            &kv,
+            &shards.membership(&r, &crate::store::BlobKey::pack(PACK)),
+            &r,
+        );
+        assert!(block_on(is_member(&kv, &shards, &r, &PACK, Some(REF))).unwrap());
+        assert_eq!(kv.gets.lock().unwrap().len(), 1);
+    }
+    #[test]
+    fn ref_hint_sees_unrelayed_membership() {
+        let kv = Observed::default();
+        let r = repo("a");
+        let shards = D34Shards;
+        plant(&kv, &shards.ref_shard(&r, REF), &r);
+        assert!(!block_on(is_member(&kv, &shards, &r, &PACK, None)).unwrap());
+        kv.gets.lock().unwrap().clear();
+        assert!(block_on(is_member(&kv, &shards, &r, &PACK, Some(REF))).unwrap());
+        assert_eq!(kv.gets.lock().unwrap()[1].0, shards.ref_shard(&r, REF));
+    }
+    #[test]
+    fn missing_membership_and_unknown_hint_are_false() {
+        let kv = Observed::default();
+        let r = repo("a");
+        assert!(!block_on(is_member(&kv, &D34Shards, &r, &PACK, None)).unwrap());
+        assert!(!block_on(is_member(&kv, &D34Shards, &r, &PACK, Some(REF))).unwrap());
+    }
+    #[test]
+    fn invalid_and_unserved_hints_do_not_read_a_ref_shard() {
+        for hint in [
+            "bad ref",
+            "refs/heads/../main",
+            "main",
+            "refsx/heads/main",
+            "",
+        ] {
+            let kv = Observed::default();
+            let r = repo("a");
+            assert!(!block_on(is_member(&kv, &D34Shards, &r, &PACK, Some(hint))).unwrap());
+            // The mandatory index lookup still happens; the hint adds no call.
+            assert_eq!(kv.gets.lock().unwrap().len(), 1, "{hint}");
+        }
+    }
+    #[test]
+    fn index_and_ref_hint_never_cross_repository_or_namespace() {
+        let kv = Observed::default();
+        let a = repo("a");
+        let b = repo("b");
+        let shards = D34Shards;
+        plant(
+            &kv,
+            &shards.membership(&a, &crate::store::BlobKey::pack(PACK)),
+            &a,
+        );
+        plant(&kv, &shards.ref_shard(&a, REF), &a);
+        assert!(!block_on(is_member(&kv, &shards, &b, &PACK, Some(REF))).unwrap());
+        let other = RepoId {
+            namespace: NamespaceKey::from_stored(format!("ed25519-{}", "b".repeat(64))),
+            name: a.name.clone(),
+        };
+        assert!(!block_on(is_member(&kv, &shards, &other, &PACK, Some(REF))).unwrap());
     }
 }

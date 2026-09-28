@@ -5,6 +5,27 @@ single crate or spec. Each entry states the invariant, why it matters, and
 what breaks when it is violated. A regression test enforces each one; find
 it by the file path listed under "Enforced by".
 
+## Ticketed UploadPack touches no metadata and always leaves a marker
+
+**Always:** a ticketed UploadPack verifies the signed pack commitment and
+ticket before reading bytes, streams the complete pack through a verifying
+blob sink, and writes a content-addressed marker in the upload-marker
+namespace after the pack commit. It makes no `NamespaceStore` call, quota
+charge, replay row, authorization, admission or `pre_receive` call.
+
+**Because:** the marker proves that a holder of this ticket supplied and
+verified these pack bytes. WP-1.10 requires it with the pack blob before
+consuming the ticket, even when another repository already stored the pack.
+
+**If violated:** an advance could attach a globally present pack without an
+upload, or a ticketed stream could depend on another shard's metadata.
+
+**Enforced by:** `mkit-server` pipeline tests `ticketed_upload_no_metadata_and_marker`,
+`ticketed_upload_failures_leave_no_marker`, and `upload::marker::tests::golden_upload_marker_v1`;
+`mkit-server-native` tests `ticketed_memory_all_layouts_touch_no_metadata`
+and `ticketed_sqlite_all_layouts_touch_no_metadata` (including concurrent uploads);
+wire cases `tickets.upload_pack_ticketed` and `repository.ticketed_upload_multi`.
+
 ## Git audit establishes correspondence without a signing key
 
 **Always:** imported graph edges and translated unsigned fields are derived
@@ -1156,10 +1177,40 @@ and pre-delivery hook effects. Duplicates never apply a target batch. Source
 cleanup guards each encoded row; draining the timer guards the originally
 observed `os`, so a same-millisecond writer cannot lose its wake-up. Writers
 stamp and chunk rows, and commit an immediate kind-3 timer with their outbox.
-Target watermarks are never pruned and are bounded by source shards.
+Target watermarks and the one `rs 00` scan row per source are never pruned;
+watermarks are bounded by source shards.
+
+**Always:** during an active relay scan cycle, every undelivered row whose
+sequence is at or below the durable cursor has a target in the cycle's
+sorted, deduplicated blocked set. That set holds at most 32 targets. A cycle
+ending at its observed `os` ignores newer rows until the next cycle. The
+source atomically guards its previous scan state and commits the new state
+with any queue-row deletions; a guard conflict retries. Reaching the cycle
+end or the blocked-set cap starts the next fire at the head. Thus a target's
+later row cannot advance `rh` past its earlier undelivered row: an earlier
+row before the cursor blocks the target, and one after it is scanned first.
+Only delivery failure blocks a target; reaching `max_targets` pauses before
+the next target and resumes there on the next fire. Blocked targets are
+retried at each cycle start. While fewer than `MAX_BLOCKED_TARGETS`
+distinct failing targets precede it, every healthy target is eventually
+delivered: every fire that sees a deliverable row delivers at least one,
+delivered rows (including those past the checkpoint) are deleted in the
+same guarded checkpoint, and fires that deliver nothing back off. No
+closed-form fire bound is claimed; the relay throughput regressions pin
+fire counts for representative schedules. A row appended mid-cycle waits
+for the current cycle to finish. This can exceed `RELAY_LAG_BOUND_MS` in time;
+WP-1.23c's `namespace_relay_watermark` must tolerate it. A target's later
+row is never retried while its earlier row remains undelivered.
+At the SQL soft capacity limit, only a valid, guarded `rs` checkpoint, with
+any relay-row deletions, or a guarded kind-3 relay timer reschedule may use
+the reserved space; ordinary puts still fail. The timer exception preserves
+immediate rescheduling after progress on a full shard; without it the runner
+would wait for the 5-second retry backoff.
 
 **Because:** target delivery and source cleanup cannot share a transaction.
 A crash, overlapping timer fires, or a concurrent writer can occur between them.
+Source-head scans alone would indefinitely hide a healthy target behind more
+than one fire's inspection cap of permanently failing rows.
 
 **If violated:** re-delivery overwrites newer index values, hook effects detach
 from their membership writes, or newly queued rows lose their relay timer.
@@ -1167,9 +1218,79 @@ Restoring an older source requires raising `os` above every target's `rh` for
 that source or re-keying it (R-102; WP-1.29).
 
 **Enforced by:** `mkit-server/src/relay/tests.rs` crash, contention, ordering,
-chunk-limit and wake-up tests; native SQLite driver tests; Worker Loopback host
-tests. Worker registration, membership reads and coordinator watermarks follow
-in WP-1.23b; writers in WP-1.9/1.10.
+chunk-limit and wake-up tests; native SQLite driver and soft-limit checkpoint
+tests; Worker Loopback host
+tests. Worker RefShard registration uses
+plan-specific fire caps and two target calls per target per fire, including
+chunking and contention. Fires inspect up to four times their row delivery
+budget, persist bounded cycle progress in `rs 00`, and revisit blocked targets
+at the next cycle. A healthy target is reached when fewer than 32 distinct
+failing targets precede it; beyond the cap, the cycle resets. Corruption stops
+delivery after its decodable prefix. Coordinator watermarks follow in WP-1.23c;
+writers in WP-1.9/1.10.
+
+## Pack reads consult only the named repository's membership
+
+**Always:** Multi PackExists and DownloadPack authorize and check repository
+existence, then consult the repository's membership index before opening a
+blob. An optional X-Mkit-Ref checks only the same repository's ref shard;
+invalid, unserved, unknown or overlong hints never cause a public error.
+The hint is outside the auth v2 canonical string. Single reads treat stored
+packs as members. M1 has no quarantined view; later visibility checks must
+constrain both index and hinted answers to the caller's permitted view.
+
+**Because:** blobs may be shared globally, and index relay can lag a write.
+
+**If violated:** pack reads expose another repository's content or make
+malformed hints an existence oracle.
+
+**Enforced by:** store::read::is_member, pipeline pack reads and bounded hint
+parsing, unit call-count/isolation tests and Multi wire membership cases.
+
+
+## Fresh restore preserves epoch and relay safety
+
+**Always:** logical restore imports into a newly empty store supplied by its
+caller. It imports the root
+sharding marker before other partitions, raises each restored namespace epoch
+to `max(snapshot epoch + 2^32, --epoch-at-least)`, refusing overflow, and marks every
+restored coordinator lease table recovered before traffic. It drops backup
+state, kind-4 timers and relay scan state. Before importing, it reads every
+source `os` and every supplied target `rh[source]`. It discards restored
+ref-shard epoch leases, forcing the first write to renew against the raised
+coordinator epoch. For each source it sets
+`floor = max(snapshot os, max supplied rh[source])`, re-keys each relay row
+from `seq` to `seq + floor`, and sets `os` to `snapshot os + floor`, refusing
+overflow.
+
+**Because:** a Fresh target contains only supplied or explicitly reconstructed
+partitions. A target
+absent from the set has no high-water mark. Every restored relay row and the
+source's next sequence therefore exceed every target's `rh[source]`. Missing
+sources are refused or reconstructed at the supplied watermark; missing
+coordinators require an explicit epoch floor and are marked recovered.
+Relay rows currently contain upserts only, so replaying a row has the same
+effect; gaps are harmless because delivery compares sequences only with `rh`.
+The epoch jump prevents a grant issued and revoked after the snapshot from
+becoming valid again. Owners must re-issue grants after restore. Already
+delivered rows cannot be replayed from an older target's snapshot; index and
+membership reconciliation is required before GA (R-116).
+
+**If violated:** relay delivery can skip a required update, a restored grant
+can regain authority through an unexpired old shard lease, or revocation can
+complete while an old lease remains effective.
+
+**Enforced by:** the native CLI refuses an existing database;
+`mkit-server/src/store/restore.rs` checks every supplied target partition and
+validates and transforms the supplied set before import. Tests
+`missing_source_is_refused_or_reconstructed_above_target_watermark`,
+`missing_coordinator_requires_both_flags_and_is_recovered_before_ref`,
+`epoch_floor_and_overflow`, `older_target_cannot_recover_already_delivered_rows`,
+and `fresh_restore_orders_root_and_rewrites_recovery_epoch_and_relay` enforce
+the memory invariants; native `export_restore_roundtrip_and_usage_refusals`
+enforces Fresh refusal and SQLite import.
+`mkit-server/src/relay/deliver.rs` guards target upserts and `rh` together.
+In-place and Merge restore require another proof and are deferred to WP-5.11b.
 
 ## Deployment discovery is public and repository-independent
 
@@ -1231,6 +1352,29 @@ entry decompression or retained delta targets.
 maximum-wire-length regressions; live wasm framing tests in
 `apps/web/src/lib/mkit.test.ts`.
 
+## Inspection clearance bounds every reader surface (specified, implementation pending)
+
+**Always:** readers and anonymous callers see only published ref values and
+published repository membership. Every newly reachable file object and every
+file entry in a pack added by an advance is covered by the configured
+inspection obligations or the explicit unavailable-publish policy. A later
+pass cannot skip an earlier held or pending advance. A reused pack from
+another pending advance cannot satisfy published membership, even through
+`X-Mkit-Ref`. Held content is absent to every caller until release or
+takedown replacement; this includes all added content for a hold without
+flagged ids. Every advance after the published pointer through the live
+value remains a GC root in any clearance state; a hit and its replacement
+packs remain rooted through takedown.
+
+**Because:** whole-pack downloads, HTTP, URL tokens, snapshots and caches must
+not expose uninspected or uncleared content, including surplus pack entries.
+
+**If violated:** a reader can bypass quarantine through an alternate serving
+surface or another ref that reuses pending content.
+
+**Enforced by:** normative SPEC-SERVER §§10–11.
+Runtime enforcement and behavioral conformance remain for WP-5.4/5.5/5.13;
+the current goldens verify the additive hook wire contract only.
 ## BeginUpload decisions and replay share the write batch
 
 **Always:** BeginUpload authorizes before returning a live ticket or membership

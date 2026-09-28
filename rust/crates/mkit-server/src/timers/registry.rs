@@ -29,7 +29,8 @@ impl TimerKind {
 /// | 1 | LEASE_SWEEP (WP-1.25) |
 /// | 2 | TICKET_EXPIRY (handler added in WP-1.14) |
 /// | 3 | RELAY (WP-1.23a) |
-/// | 4..=0xEF | Production, unallocated |
+/// | 4 | BACKUP (Worker only, WP-1.29b) |
+/// | 5..=0xEF | Production, unallocated |
 /// | 0xF0..=0xFE | Reserved for tests |
 /// | 0xFF | TEST (`test-faults` only) |
 pub mod kinds {
@@ -39,6 +40,8 @@ pub mod kinds {
     pub const TICKET_EXPIRY: super::TimerKind = super::TimerKind::new(2);
     /// Source-side outbox delivery.
     pub const RELAY: super::TimerKind = super::TimerKind::new(3);
+    /// Per-partition Worker snapshot export.
+    pub const BACKUP: super::TimerKind = super::TimerKind::new(4);
     /// Ref deletion used only by test drivers and directives.
     #[cfg(feature = "test-faults")]
     pub const TEST: super::TimerKind = super::TimerKind::new(0xFF);

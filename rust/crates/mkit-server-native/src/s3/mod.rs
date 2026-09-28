@@ -81,8 +81,8 @@ use futures_util::{Stream, StreamExt as _};
 use mkit_server::storage_error::{StorageOp, describe_and_map};
 use mkit_server::store::MAX_BLOB_PIECE_BYTES;
 use mkit_server::{
-    BlobBody, BlobKey, BlobMeta, BlobNamespace, BlobStore, ByteRange, Clock, MultipartBlobStore,
-    Redactor, StoreError, UnsupportedPartSink,
+    BlobBody, BlobKey, BlobMeta, BlobStore, ByteRange, Clock, MultipartBlobStore, Redactor,
+    StoreError, UnsupportedPartSink,
 };
 use mkit_transport_s3::sigv4;
 pub use mkit_transport_s3::sigv4::Credentials;
@@ -245,7 +245,6 @@ pub struct S3BlobStore {
     bucket: String,
     /// `/<bucket>/<prefix/><keyspace>/`.
     object_base: String,
-    marker_base: String,
     credentials: Credentials,
     clock: Arc<dyn Clock>,
     spool_dir: Option<PathBuf>,
@@ -318,7 +317,6 @@ impl S3BlobStore {
             put_client,
             origin,
             object_base: format!("/{}/{prefix}{keyspace}/", cfg.bucket),
-            marker_base: format!("/{}/{prefix}upload-markers/v1/", cfg.bucket),
             bucket: cfg.bucket,
             credentials: cfg.credentials,
             clock,
@@ -368,25 +366,18 @@ impl S3BlobStore {
         self
     }
 
-    /// The object key of `key`: `<prefix/><keyspace>/<hex>`.
-    #[must_use]
-    pub fn object_key(&self, key: &BlobKey) -> String {
-        let path = match key.namespace() {
-            BlobNamespace::Pack => &self.object_base,
-            BlobNamespace::UploadMarker => &self.marker_base,
-            _ => unreachable!("unsupported blob namespace"),
-        };
-        let base = &path[self.bucket.len() + 2..];
-        format!("{base}{}", key.to_hex())
+    /// The object key of `key`: `<prefix/><keyspace>/<hex>` for packs,
+    /// or `<prefix/>upload-markers/v1/<hex>` for upload markers.
+    ///
+    /// # Errors
+    /// [`StoreError::Invalid`] for an unsupported blob namespace.
+    pub fn object_key(&self, key: &BlobKey) -> Result<String, StoreError> {
+        let pack_keyspace = self.object_base[self.bucket.len() + 2..].trim_end_matches('/');
+        key.relative_path(pack_keyspace)
     }
 
-    fn object_path(&self, key: &BlobKey) -> String {
-        let base = match key.namespace() {
-            BlobNamespace::Pack => &self.object_base,
-            BlobNamespace::UploadMarker => &self.marker_base,
-            _ => unreachable!("unsupported blob namespace"),
-        };
-        format!("{base}{}", key.to_hex())
+    fn object_path(&self, key: &BlobKey) -> Result<String, StoreError> {
+        Ok(format!("/{}/{}", self.bucket, self.object_key(key)?))
     }
 
     /// Send a bodiless request.
@@ -629,7 +620,7 @@ impl BlobStore for S3BlobStore {
         if range.is_some_and(|r| r.start > r.end_inclusive) {
             return Err(StoreError::Invalid("byte range start after its end".into()));
         }
-        let path = self.object_path(key);
+        let path = self.object_path(key)?;
         let mut headers = HeaderMap::new();
         if let Some(r) = range {
             let value = format!("bytes={}-{}", r.start, r.end_inclusive);
@@ -689,7 +680,7 @@ impl BlobStore for S3BlobStore {
 
     async fn head(&self, key: &BlobKey) -> Result<Option<BlobMeta>, StoreError> {
         Ok(self
-            .head_len(&self.object_path(key))
+            .head_len(&self.object_path(key)?)
             .await?
             .map(|len| BlobMeta { len }))
     }
@@ -733,7 +724,7 @@ impl BlobStore for S3BlobStore {
     /// A `HEAD` then a `DELETE`: S3's `DELETE` answers `204` whether or
     /// not the key existed.
     async fn delete(&self, key: &BlobKey) -> Result<bool, StoreError> {
-        let path = self.object_path(key);
+        let path = self.object_path(key)?;
         if self.head_len(&path).await?.is_none() {
             return Ok(false);
         }

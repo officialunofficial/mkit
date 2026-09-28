@@ -27,7 +27,7 @@ fn server_info_defaults_and_custom_limits_read_no_store() {
     c.max_parts = 1;
     c.upload_limits.max_total_bytes = c.part_size;
     c.max_list_refs_page_size = 10_000;
-    c.begin_upload_threshold_bytes = 123;
+    c.begin_upload_threshold_bytes = u64::MAX;
     let kv = store(&clock()).with_capabilities(StoreCapabilities::refs_only());
     let custom = build(c.clone(), Spy::new(kv), Hooks::new(), clock());
     let info = custom.pipe.server_info();
@@ -35,7 +35,7 @@ fn server_info_defaults_and_custom_limits_read_no_store() {
     assert_eq!(info.max_parts, 1);
     assert_eq!(info.max_pack_bytes, c.part_size);
     assert_eq!(info.max_list_refs_page_size, 10_000);
-    assert_eq!(info.begin_upload_threshold_bytes, 123);
+    assert_eq!(info.begin_upload_threshold_bytes, u64::MAX);
     assert!(!info.atomic_advance);
     assert_eq!(custom.pipe.meta.calls(), 0);
 }
@@ -44,7 +44,10 @@ fn server_info_defaults_and_custom_limits_read_no_store() {
 fn server_info_admission_and_multi_always_require_begin_upload() {
     for multi in [false, true] {
         for any in [false, true] {
-            let mut c = cfg(AuthMode::Open);
+            let mut c = cfg(authv2());
+            c.ticket_keys = Some(
+                crate::upload::token::TicketKeys::new(vec![("test".into(), [7; 32])]).unwrap(),
+            );
             c.begin_upload_threshold_bytes = 123;
             if multi {
                 let policy = if any {
@@ -89,6 +92,87 @@ fn server_info_admission_and_multi_always_require_begin_upload() {
     assert!(!e.pipe.server_info().admission);
     assert_eq!(e.pipe.server_info().begin_upload_threshold_bytes, 0);
     assert_eq!(e.pipe.meta.calls(), 0);
+}
+
+#[test]
+fn admission_requires_auth_v2_and_ticket_keys_at_startup() {
+    for auth in [AuthMode::Open, authv2()] {
+        let c = cfg(auth);
+        let err = Pipeline::new(
+            MemoryBlobStore::default(),
+            store(&clock()),
+            with_admission(Fixed(AdmissionDecision::Deny(
+                ServerError::permission_denied("unused"),
+            ))),
+            c,
+            clock(),
+            Arc::new(crate::NoopMetrics),
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), Code::InvalidArgument);
+        assert_eq!(
+            err.public_message(),
+            "admission requires auth v2 and upload ticket keys"
+        );
+    }
+}
+
+#[test]
+fn transport_identity_admission_starts() {
+    let c = cfg(AuthMode::TransportIdentity);
+    let enc = Pipeline::new(
+        MemoryBlobStore::default(),
+        store(&clock()),
+        with_admission(Fixed(AdmissionDecision::allow(Vec::new()))),
+        c,
+        clock(),
+        Arc::new(crate::NoopMetrics),
+    )
+    .unwrap();
+    assert_eq!(enc.server_info().begin_upload_threshold_bytes, 0);
+}
+
+#[test]
+fn finite_ticket_threshold_requires_auth_v2_and_keys() {
+    for auth in [AuthMode::Open, AuthMode::TransportIdentity, authv2()] {
+        let mut c = cfg(auth);
+        c.begin_upload_threshold_bytes = 8;
+        let err = Pipeline::new(
+            MemoryBlobStore::default(),
+            store(&clock()),
+            Hooks::new(),
+            c,
+            clock(),
+            Arc::new(crate::NoopMetrics),
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), Code::InvalidArgument);
+        assert_eq!(
+            err.public_message(),
+            "a ticket threshold requires auth v2 and upload ticket keys"
+        );
+    }
+}
+
+#[test]
+fn multi_transport_identity_is_refused_at_startup() {
+    let mut c = cfg(AuthMode::TransportIdentity);
+    c.addressing = Addressing::Multi(MultiAddressing::new());
+    c.write_policy = WritePolicy::Owner;
+    let err = Pipeline::new(
+        MemoryBlobStore::default(),
+        store(&clock()),
+        Hooks::new(),
+        c,
+        clock(),
+        Arc::new(crate::NoopMetrics),
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), Code::InvalidArgument);
+    assert_eq!(
+        err.public_message(),
+        "multi-repository deployments require auth v2 until transport identity carries tickets"
+    );
 }
 
 #[test]

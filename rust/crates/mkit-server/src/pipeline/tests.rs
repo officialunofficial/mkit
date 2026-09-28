@@ -258,7 +258,17 @@ fn store(clock: &Arc<ManualClock>) -> MemoryKv {
     MemoryKv::with_clock(clock.clone())
 }
 
-fn build<H: HookSet>(cfg: PipelineConfig, meta: Spy, hooks: H, clock: Arc<ManualClock>) -> Env<H> {
+fn build<H: HookSet>(
+    mut cfg: PipelineConfig,
+    meta: Spy,
+    hooks: H,
+    clock: Arc<ManualClock>,
+) -> Env<H> {
+    if !hooks.admission().is_default() && matches!(cfg.auth, AuthMode::AuthV2(_)) {
+        cfg.ticket_keys.get_or_insert_with(|| {
+            crate::upload::token::TicketKeys::new(vec![("test".into(), [7; 32])]).unwrap()
+        });
+    }
     let metrics = Arc::new(SpyMetrics::default());
     let pipe = Pipeline::new(
         MemoryBlobStore::default(),
@@ -2529,6 +2539,38 @@ fn lease_directives_parse_epochs_and_require_an_explicit_recovery_marker() {
             .unwrap_err();
         assert_eq!(error.code(), Code::InvalidArgument);
     }
+}
+
+#[test]
+fn ref_hint_is_bounded_and_outside_auth_v2_canonical_headers() {
+    let env = env(authv2());
+    let update = upd(HEAD, Any, A);
+    let signed = Req::update(&key(7), 1, &update, T0);
+    for hint in [
+        HEAD.to_owned(),
+        "bad ref".to_owned(),
+        "refs/heads/é".to_owned(),
+        "x".repeat(refs::MAX_REF_NAME_BYTES),
+    ] {
+        let a = env
+            .auth(&signed.clone().header("x-mkit-ref", &hint))
+            .unwrap();
+        assert_eq!(a.ref_hint.as_deref(), Some(hint.as_str()));
+        assert_eq!(a.auth, env.auth(&signed).unwrap().auth);
+    }
+    let long = "x".repeat(refs::MAX_REF_NAME_BYTES + 1);
+    assert_eq!(
+        env.auth(&signed.header("x-mkit-ref", &long))
+            .unwrap()
+            .ref_hint,
+        None
+    );
+    assert!(!crate::auth_v2::HEADER_NAMES.contains(&"x-mkit-ref"));
+    assert!(
+        crate::auth_v2::CORS_ALLOW_HEADERS
+            .split(',')
+            .any(|name| name.trim() == "x-mkit-ref")
+    );
 }
 
 #[test]

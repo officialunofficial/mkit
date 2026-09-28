@@ -5,7 +5,7 @@ use crate::error::ServerError;
 use crate::repo::NamespaceKey;
 use crate::store::{
     Batch, BatchOutcome, MultipartBlobStore, NamespaceStore, Partition, Precondition, Value, codec,
-    keys,
+    keys, restore::mark_lease_table_recovered,
 };
 
 use super::{HookSet, Pipeline, internal, lease::observed_guard, meta_error, ms};
@@ -153,21 +153,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// # Errors
     /// A mapped storage failure, or `internal` for an impossible batch outcome.
     pub async fn mark_lease_table_recovered(&self, ns: &NamespaceKey) -> Result<(), ServerError> {
-        let batch = Batch::new().put(
-            keys::lease_recovery(),
-            codec::encode_lease_recovery(&codec::LeaseRecovery {
-                resumed_at_ms: ms(self.clock.now_ms()),
-            }),
-        );
-        match self
-            .meta
-            .apply(&self.shards.coordinator(ns), batch)
-            .await
-            .map_err(meta_error)?
-        {
-            BatchOutcome::Committed => Ok(()),
-            _ => Err(internal("recovery marker batch unexpectedly failed")),
-        }
+        mark_lease_table_recovered(
+            &self.meta,
+            &self.shards.coordinator(ns),
+            ms(self.clock.now_ms()),
+        )
+        .await
+        .map_err(meta_error)
     }
 
     async fn coordinator_state(&self, p: &Partition) -> Result<CoordinatorState, ServerError> {

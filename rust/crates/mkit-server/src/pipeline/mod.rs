@@ -342,6 +342,35 @@ fn ms(ms: i64) -> u64 {
     u64::try_from(ms).unwrap_or(0)
 }
 
+fn validate_upload_ticket_config<H: HookSet>(
+    cfg: &PipelineConfig,
+    hooks: &H,
+) -> Result<(), ServerError> {
+    if matches!(cfg.addressing, Addressing::Multi(_))
+        && matches!(cfg.auth, AuthMode::TransportIdentity)
+    {
+        return Err(ServerError::invalid_argument(
+            "multi-repository deployments require auth v2 until transport identity carries tickets",
+        ));
+    }
+    if cfg.begin_upload_threshold_bytes != u64::MAX
+        && (!matches!(cfg.auth, AuthMode::AuthV2(_)) || cfg.ticket_keys.is_none())
+    {
+        return Err(ServerError::invalid_argument(
+            "a ticket threshold requires auth v2 and upload ticket keys",
+        ));
+    }
+    if !matches!(cfg.auth, AuthMode::TransportIdentity)
+        && !hooks.admission().is_default()
+        && (!matches!(cfg.auth, AuthMode::AuthV2(_)) || cfg.ticket_keys.is_none())
+    {
+        return Err(ServerError::invalid_argument(
+            "admission requires auth v2 and upload ticket keys",
+        ));
+    }
+    Ok(())
+}
+
 impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// A pipeline over `blobs` and `meta`, routed by `cfg.sharding`.
     ///
@@ -365,11 +394,15 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         metrics: Arc<dyn Metrics>,
     ) -> Result<Self, ServerError> {
         cfg.validate_server_info_limits()?;
+
         if cfg.max_parts > B::MAX_PARTS {
             return Err(ServerError::invalid_argument(
                 "max_parts exceeds storage backend capacity",
             ));
         }
+
+        validate_upload_ticket_config(&cfg, &hooks)?;
+
         if cfg.ticket_ttl_ms == 0
             || cfg.ticket_ttl_ms >= 604_800_000
             || cfg.ticket_caps.per_ref == 0
@@ -563,6 +596,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let skew = 0;
         let now = self.clock.now_ms().saturating_add(skew);
         let mut a = auth::authenticate(&self.cfg.auth, meta, now, repo, &expected_repository)?;
+        // Header adapters supply UTF-8 Strings; undecodable bytes are absent.
+        a.ref_hint =
+            (meta.header)("x-mkit-ref").filter(|name| name.len() <= refs::MAX_REF_NAME_BYTES);
         a.business_skew_ms = skew;
         #[cfg(feature = "test-faults")]
         a.set_test_directives(directives);
@@ -733,13 +769,18 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// Multi deployments require repository membership before serving packs.
     ///
     /// # Errors
-    /// `unimplemented` for Multi mode; the authorizer's error;
-    /// `internal` for a storage failure.
+    /// `not_found` for a nonexistent Multi repository; the authorizer's
+    /// error; `internal` for a storage failure.
     pub async fn pack_exists(&self, a: &Authenticated, key: PackKey) -> Result<bool, ServerError> {
         self.observe(a, async {
             let op = self.identify(a, OpKind::PackExists { key })?;
-            self.require_pack_membership()?;
             self.authorize(&op).await?;
+
+            self.require_repository(&op.repo).await?;
+            if !self.pack_is_member(a, &key).await? {
+                return Ok(false);
+            }
+
             let head = self.blobs.head(&key.into()).await;
             Ok(head
                 .map_err(|e| store_error(StorageOp::BlobHead, e))?
@@ -755,7 +796,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// stream before it returns.
     ///
     /// # Errors
-    /// `unimplemented` for Multi mode;
+    /// `failed_precondition` when the advertised threshold requires a ticket;
     /// the header's [`crate::upload::UploadError`]; `unauthenticated` when
     /// the header differs from the signed commitment; a stored or
     /// in-flight replay answer; a hook's error; the reservation's error.
@@ -768,11 +809,25 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         UploadSession::begin(self, a, pack_id, total_bytes).await
     }
 
+    /// Open a stateless ticketed `UploadPack` stream after checking the header,
+    /// signed commitment and token, before reading any body bytes.
+    ///
+    /// # Errors
+    /// Framing, authentication, binding and blob-store failures.
+    pub async fn open_ticketed_upload(
+        &self,
+        a: &Authenticated,
+        pack_id: Option<&[u8]>,
+        total_bytes: Option<u64>,
+        token: &[u8],
+    ) -> Result<UploadSession<'_, B, N, H>, ServerError> {
+        UploadSession::begin_ticketed(self, a, pack_id, total_bytes, token).await
+    }
+
     /// A pack's bytes as chunks of at most `download_chunk_max` bytes.
     ///
     /// # Errors
-    /// `unimplemented` for Multi mode;
-    /// `not_found` for a missing pack, before any chunk; the authorizer's
+    /// `not_found` for a missing repository or non-member pack, before any chunk; the authorizer's
     /// error; `internal` for a storage failure.
     ///
     /// The request is recorded `ok` when the `last` chunk is yielded, with
@@ -786,8 +841,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let mut outcome = self.outcome(a);
         let opened = async {
             let op = self.identify(a, OpKind::DownloadPack { key })?;
-            self.require_pack_membership()?;
             self.authorize(&op).await?;
+
+            self.require_repository(&op.repo).await?;
+            if !self.pack_is_member(a, &key).await? {
+                return Err(ServerError::not_found("pack not found"));
+            }
+
             let body = self.blobs.get(&key.into(), None).await;
             match body.map_err(|e| store_error(StorageOp::BlobGet, e))? {
                 Some(body) => Ok(body),
@@ -1085,16 +1145,19 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         Ok(())
     }
 
-    /// Multi packs must not consult the global blob store as an existence oracle.
-    fn require_pack_membership(&self) -> Result<(), ServerError> {
-        // TODO(WP-1.10): scope pack RPCs to repository membership.
-        if matches!(self.cfg.addressing, Addressing::Multi(_)) {
-            return Err(ServerError::new(
-                crate::Code::Unimplemented,
-                "pack RPCs need repository membership",
-            ));
+    async fn pack_is_member(&self, a: &Authenticated, key: &PackKey) -> Result<bool, ServerError> {
+        if matches!(self.cfg.addressing, Addressing::Single { .. }) {
+            return Ok(true);
         }
-        Ok(())
+        read::is_member(
+            &self.meta,
+            self.shards.as_ref(),
+            &a.repo().repo,
+            &key.0,
+            a.ref_hint.as_deref(),
+        )
+        .await
+        .map_err(meta_error)
     }
 
     /// A unary write's ref writes in decision order (packmap first) and

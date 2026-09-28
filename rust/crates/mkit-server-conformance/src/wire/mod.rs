@@ -148,6 +148,10 @@
 //! | `tickets.begin_upload_idempotent` | `tickets`, `auth-v2` | a fresh nonce returns the live ticket, replay returns identical bytes, and another signer gets its own ticket |
 //! | `tickets.begin_upload_caps` | `tickets`, `auth-v2` | the open-ticket cap has its exact public error and leaves no replay row |
 //! | `tickets.begin_upload_packmap_refused` | `tickets`, `auth-v2` | a packmap ref is an invalid target |
+//! | `tickets.upload_pack_ticketed` | `tickets`, `auth-v2` | a ticketed upload succeeds and can be repeated |
+//! | `tickets.upload_pack_bad_token` | `tickets`, `auth-v2` | an invalid token fails before a pack is stored |
+//! | `tickets.upload_pack_binding_denied` | `tickets`, `auth-v2` | a valid token for another pack is denied |
+//! | `tickets.upload_pack_expired_token` | `tickets`, `auth-v2`, `test-faults` | an expired token fails with `failed_precondition` |
 //! | `growth.replay_and_quota_pruned` | `auth-v2`, `replay`, `quota`, `test-faults` | records answer before expiry; after validity + grace + window the partition shrinks back to an absolute bound (R-31); needs a quota window ≤ 60 s allowing 265 writes, and a disposable server |
 //! | `list.large_response_within_limit` | | records one `ListRefs` response over `list_refs` refs (M1 asserts the bound) |
 //! | `repo.single_header_mismatch_not_found` | excludes `multi-repo` | Single reads with another identity give `not_found` |
@@ -157,7 +161,19 @@
 //! | `repo.signature_repository_mismatch_unauthenticated` | `multi-repo`, `auth-v2` | a signature for A sent to B is rejected |
 //! | `repo.missing_repository_invalid_argument` | `multi-repo`, `auth-v2` | absent, empty, bare and malformed identities are rejected |
 //! | `repo.read_missing_repo_not_found` | `multi-repo`, `auth-v2` | `ListRefs` and `ReadRef` of a nonexistent repo give `not_found` |
-//! | `repo.packs_need_membership_unimplemented` | `multi-repo`, `auth-v2` | all pack RPCs await repository membership |
+//! | `repo.packs_need_membership` | `multi-repo`, `auth-v2` | absent membership gives false / `not_found`; uploads still require tickets |
+//! | `repository.upload_needs_ticket` | `multi-repo`, `auth-v2` | an un-ticketed upload fails with `failed_precondition` |
+//! | `repository.ticketed_upload_multi` | `multi-repo`, `auth-v2`, `tickets` | a ticketed upload succeeds in Multi mode |
+//! | `repo.isolation_packs` | `multi-repo`, `auth-v2` | a planted member is invisible in other repositories, with and without a ref hint |
+//! | `repo.membership_read_your_writes` | `multi-repo`, `auth-v2`; D34 | unrelayed membership is visible only with its ref hint |
+//! | `repo.malformed_membership_hint_no_op` | `multi-repo`, `auth-v2` | malformed, unserved and oversized hints are ignored |
+//!
+//! The three planted membership cases run against the in-process Multi baseline.
+//! The harness seeds blob bytes `conformance/<run_id>/<case>` and their BLAKE3
+//! membership in repository `packs`, owned by that case's `repository-a` signer.
+//! Isolation and malformed-hint fixtures populate the membership index and
+//! `refs/heads/main`; read-your-writes populates only that ref shard and requires
+//! D34. No relay runs while the read-your-writes case checks the lagging index.
 //!
 //! # The `test-faults` contract
 //!
@@ -180,8 +196,7 @@
 //! their milestone and feature, so later milestones add them without
 //! renaming. None exists yet, so none can pass vacuously.
 //!
-// TODO(M1, multi-repo): `repo.isolation_packs`,
-//   `repo.isolation_replay`, `server_info.*` (GetServerInfo),
+// TODO(M1, multi-repo): `repo.isolation_replay`, `server_info.*` (GetServerInfo),
 //   `list.paging_*` and `list.page_within_2_mib` (§7.9), `refs.delete_*` (§7.8).
 // TODO(M1, multi-repo): `namespace.policy_allowlist`, `namespace.policy_owner`.
 // TODO(M1, tickets): `tickets.upload_part_*`,

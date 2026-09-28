@@ -4137,6 +4137,22 @@ pub struct GetServerInfoResponse {
         skip_serializing_if = "::core::option::Option::is_none"
     )]
     pub max_delta_chain_depth: ::core::option::Option<u32>,
+    /// Whether storage leases are enforced; STC §2.1 and SPEC-SERVER §12.
+    ///
+    /// Field 17: `leases`
+    #[serde(rename = "leases", skip_serializing_if = "::core::option::Option::is_none")]
+    pub leases: ::core::option::Option<bool>,
+    /// Whether async inspection is configured; writers MUST sign reads to see
+    /// non-held pending content. Held content is hidden from every caller,
+    /// including with sync holds when false (SPEC-SERVER §§10–11).
+    ///
+    /// Field 18: `async_inspection`
+    #[serde(
+        rename = "asyncInspection",
+        alias = "async_inspection",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub async_inspection: ::core::option::Option<bool>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -4160,6 +4176,8 @@ impl ::core::fmt::Debug for GetServerInfoResponse {
             .field("namespace_policy", &self.namespace_policy)
             .field("index_fanout", &self.index_fanout)
             .field("max_delta_chain_depth", &self.max_delta_chain_depth)
+            .field("leases", &self.leases)
+            .field("async_inspection", &self.async_inspection)
             .finish()
     }
 }
@@ -4288,6 +4306,20 @@ impl GetServerInfoResponse {
         self.max_delta_chain_depth = Some(value);
         self
     }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::leases`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_leases(mut self, value: bool) -> Self {
+        self.leases = Some(value);
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::async_inspection`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_async_inspection(mut self, value: bool) -> Self {
+        self.async_inspection = Some(value);
+        self
+    }
 }
 ::buffa::impl_default_instance!(GetServerInfoResponse);
 impl ::buffa::MessageName for GetServerInfoResponse {
@@ -4357,6 +4389,12 @@ impl ::buffa::Message for GetServerInfoResponse {
         if let Some(v) = self.max_delta_chain_depth {
             size += 2u64 + ::buffa::types::uint32_encoded_len(v) as u64;
         }
+        if self.leases.is_some() {
+            size += 2u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
+        }
+        if self.async_inspection.is_some() {
+            size += 2u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -4414,6 +4452,12 @@ impl ::buffa::Message for GetServerInfoResponse {
         }
         if let Some(v) = self.max_delta_chain_depth {
             ::buffa::types::put_uint32_field(16u32, v, buf);
+        }
+        if let Some(v) = self.leases {
+            ::buffa::types::put_bool_field(17u32, v, buf);
+        }
+        if let Some(v) = self.async_inspection {
+            ::buffa::types::put_bool_field(18u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -4586,6 +4630,24 @@ impl ::buffa::Message for GetServerInfoResponse {
                     ::buffa::types::decode_uint32(buf)?,
                 );
             }
+            17u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.leases = ::core::option::Option::Some(
+                    ::buffa::types::decode_bool(buf)?,
+                );
+            }
+            18u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.async_inspection = ::core::option::Option::Some(
+                    ::buffa::types::decode_bool(buf)?,
+                );
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -4610,6 +4672,8 @@ impl ::buffa::Message for GetServerInfoResponse {
         self.namespace_policy = ::core::option::Option::None;
         self.index_fanout = ::core::option::Option::None;
         self.max_delta_chain_depth = ::core::option::Option::None;
+        self.leases = ::core::option::Option::None;
+        self.async_inspection = ::core::option::Option::None;
         self.__buffa_unknown_fields.clear();
     }
 }

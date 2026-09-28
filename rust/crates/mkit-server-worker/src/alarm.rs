@@ -45,6 +45,22 @@ pub fn alarm_after_tick_with_current(
     }
 }
 
+/// A timer put committed while an alarm tick awaited a handler must wake a
+/// fresh tick. Otherwise use the stored head and currently armed alarm.
+#[must_use]
+pub fn alarm_after_tick_with_dirty(
+    current: Option<i64>,
+    next_wake: Option<u64>,
+    now_ms: u64,
+    dirty: bool,
+) -> AlarmAction {
+    if dirty {
+        AlarmAction::Set(alarm_time(now_ms))
+    } else {
+        alarm_after_tick_with_current(current, next_wake, now_ms)
+    }
+}
+
 /// The latest instant a JavaScript `Date` can hold, Unix ms.
 const MAX_DATE_MS: i64 = 8_640_000_000_000_000;
 
@@ -97,6 +113,18 @@ mod tests {
                 assert_eq!(alarm_after_tick_with_current(current, next, 100), expected);
             }
         }
+    }
+
+    #[test]
+    fn dirty_tick_wakes_now_and_clean_empty_tick_deletes() {
+        assert_eq!(
+            alarm_after_tick_with_dirty(Some(500), None, 100, true),
+            AlarmAction::Set(100)
+        );
+        assert_eq!(
+            alarm_after_tick_with_dirty(None, None, 100, false),
+            AlarmAction::Delete
+        );
     }
 
     #[test]

@@ -283,8 +283,8 @@ fn pipeline<N: NamespaceStore>(
         .unwrap(),
     )
 }
-fn auth<N: NamespaceStore>(
-    pipe: &Pipe<N>,
+fn auth<N: NamespaceStore, H: mkit_server::pipeline::HookSet>(
+    pipe: &Pipeline<MemoryBlobStore, Store<N>, H>,
     mode: Mode,
     seed: u8,
     procedure: Procedure,
@@ -749,13 +749,40 @@ async fn validation<N: NamespaceStore>(backend: N, clock: Arc<ManualClock>, mode
     assert_eq!(spy.admissions.load(Ordering::SeqCst), 0);
     let mut cfg = config(mode);
     cfg.ticket_keys = None;
-    let disabled = pipeline(
-        store.clone(),
+    let defaults = Hooks::new();
+    let disabled = Pipeline::new(
         MemoryBlobStore::default(),
-        spy.clone(),
+        store.clone(),
+        Hooks {
+            authorizer: Policy(spy.clone()),
+            admission: Policy(spy),
+            pre_receive: defaults.pre_receive,
+            receipts: defaults.receipts,
+            outcomes: defaults.outcomes,
+        },
         cfg,
         clock,
+        Arc::new(NoopMetrics),
     );
+    let error = disabled.unwrap_err();
+    assert_eq!(error.code(), Code::InvalidArgument);
+    assert_eq!(
+        error.public_message(),
+        "admission requires auth v2 and upload ticket keys"
+    );
+    assert!(store.take().is_empty());
+    let mut cfg = config(mode);
+    cfg.ticket_keys = None;
+    cfg.authorizer_role = AuthorizerRole::Check;
+    let disabled = Pipeline::new(
+        MemoryBlobStore::default(),
+        store.clone(),
+        Hooks::new(),
+        cfg,
+        Arc::new(ManualClock::new(0)),
+        Arc::new(NoopMetrics),
+    )
+    .unwrap();
     let a = auth(&disabled, mode, 1, Procedure::BeginUpload);
     let error = disabled
         .begin_upload(&a, REF, &PACK, BYTES)
@@ -1027,13 +1054,16 @@ async fn unsupported_auth_modes_have_no_metadata_effects() {
         let mut cfg = config(mode);
         cfg.auth = auth_mode;
         cfg.write_quota = None;
-        let pipe = pipeline(
-            store.clone(),
+        cfg.authorizer_role = AuthorizerRole::Check;
+        let pipe = Pipeline::new(
             MemoryBlobStore::default(),
-            Arc::new(Spy::default()),
+            store.clone(),
+            Hooks::new(),
             cfg,
             Arc::new(ManualClock::new(0)),
-        );
+            Arc::new(NoopMetrics),
+        )
+        .unwrap();
         let a = pipe
             .authenticate(&RequestMeta {
                 procedure: Procedure::BeginUpload,

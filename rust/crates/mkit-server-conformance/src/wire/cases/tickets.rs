@@ -3,9 +3,13 @@
 use buffa::Message;
 use mkit_core::hash::hash;
 use mkit_transport_connect::generated::__buffa::oneof::begin_upload_response::Result as BeginResult;
-use mkit_transport_connect::generated::{BeginUploadRequest, BeginUploadResponse, UploadTicket};
+use mkit_transport_connect::generated::{
+    BeginUploadRequest, BeginUploadResponse, UploadPackRequest, UploadTicket,
+};
 
-use super::{CaseResult, Ctx, Failure, ensure, sign_unary, want_code, want_ok};
+use super::{
+    CaseResult, Commit, Ctx, Failure, ensure, sign_unary, upload_msgs, want_code, want_ok,
+};
 use crate::wire::client::Rpc;
 
 fn request(name: String, salt: u64) -> BeginUploadRequest {
@@ -124,4 +128,100 @@ pub(super) async fn begin_upload_packmap_refused(ctx: Ctx) -> CaseResult {
     let result: Result<BeginUploadResponse, _> = ctx.call(Rpc::BeginUpload, &req).await?;
     want_code(result, "invalid_argument", "BeginUpload targeting packmap")?;
     Ok(())
+}
+
+fn ticketed_msgs(pack: &[u8], token: Vec<u8>) -> Vec<UploadPackRequest> {
+    let mut msgs = upload_msgs(pack, 2);
+    if let Some(
+        mkit_transport_connect::generated::__buffa::oneof::upload_pack_request::Body::Header(
+            header,
+        ),
+    ) = &mut msgs[0].body
+    {
+        header.ticket_token = Some(token);
+    }
+    msgs
+}
+
+async fn open_for_pack(ctx: &Ctx, pack: &[u8]) -> Result<UploadTicket, Failure> {
+    let req = BeginUploadRequest {
+        r#ref: Some(ctx.head("ticketed")),
+        pack_id: Some(hash(pack).to_vec()),
+        bytes: Some(pack.len() as u64),
+        ..Default::default()
+    };
+    ticket(want_ok(
+        ctx.call(Rpc::BeginUpload, &req).await?,
+        "BeginUpload",
+    )?)
+}
+
+pub(super) async fn upload_pack_ticketed(ctx: Ctx) -> CaseResult {
+    let pack = b"ticketed conformance pack";
+    let opened = open_for_pack(&ctx, pack).await?;
+    let id = hash(pack);
+    let msgs = ticketed_msgs(pack, opened.token.unwrap_or_default());
+    let headers = ctx.auth_headers(Rpc::UploadPack, Commit::Pack(&id, pack.len() as u64));
+    for _ in 0..2 {
+        let error = ctx.upload_with(&msgs, &headers).await?;
+        ensure!(error.is_none(), "ticketed UploadPack: {error:?}");
+    }
+    ctx.expect_exists(&id, true).await?;
+    Ok(())
+}
+
+pub(super) async fn upload_pack_bad_token(ctx: Ctx) -> CaseResult {
+    let pack = b"bad ticket token pack";
+    let id = hash(pack);
+    let msgs = ticketed_msgs(pack, vec![0x55; 16]);
+    let headers = ctx.auth_headers(Rpc::UploadPack, Commit::Pack(&id, pack.len() as u64));
+    let error = ctx.upload_with(&msgs, &headers).await?;
+    ensure!(
+        error.as_ref().map(|e| e.code.as_str()) == Some("failed_precondition"),
+        "bad ticket token: {error:?}"
+    );
+    ctx.expect_exists(&id, false).await
+}
+
+pub(super) async fn upload_pack_binding_denied(ctx: Ctx) -> CaseResult {
+    let pack = b"ticket binding original";
+    let opened = open_for_pack(&ctx, pack).await?;
+    let different = b"ticket binding altered";
+    let id = hash(different);
+    let msgs = ticketed_msgs(different, opened.token.unwrap_or_default());
+    let headers = ctx.auth_headers(Rpc::UploadPack, Commit::Pack(&id, different.len() as u64));
+    let error = ctx.upload_with(&msgs, &headers).await?;
+    ensure!(
+        error.as_ref().map(|e| e.code.as_str()) == Some("permission_denied"),
+        "ticket binding: {error:?}"
+    );
+    ctx.expect_exists(&id, false).await
+}
+
+pub(super) async fn upload_pack_expired_token(ctx: Ctx) -> CaseResult {
+    let pack = b"expired ticket token pack";
+    let opened = open_for_pack(&ctx, pack).await?;
+    let id = hash(pack);
+    let expires = opened
+        .expires_unix_ms
+        .ok_or_else(|| Failure::Fail("expired ticket case needs a ticket expiry".into()))?;
+    let msgs = ticketed_msgs(pack, opened.token.unwrap_or_default());
+    // The test directive shifts auth time too. Sign inside that shifted
+    // validity window so ticket expiry is the first failing check.
+    let skew = expires - crate::wire::sign::now_ms() + 1_000;
+    let signer = ctx.v2_signer("main")?;
+    let mut envelope = signer.envelope(
+        Rpc::UploadPack.procedure(),
+        crate::wire::sign::pack_commitment(&id, pack.len() as u64),
+    );
+    envelope.created_at += skew;
+    envelope.expires_at += skew;
+    let mut headers = signer.sign(&envelope).headers;
+    headers.push((crate::wire::CLOCK_SKEW_HEADER.into(), skew.to_string()));
+    let error = ctx.upload_with(&msgs, &headers).await?;
+    ensure!(
+        error.as_ref().map(|e| e.code.as_str()) == Some("failed_precondition"),
+        "expired ticket token: {error:?}"
+    );
+    ctx.expect_exists(&id, false).await
 }

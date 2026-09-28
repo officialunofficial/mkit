@@ -78,6 +78,21 @@ pub struct LeaseRecovery {
     pub resumed_at_ms: u64,
 }
 
+/// The last consistent Worker snapshot of one partition. A zero export time
+/// and empty key mark a timer that has been seeded but has not fired yet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BackupStateV1 {
+    /// Export time encoded in the last uploaded snapshot, Unix milliseconds.
+    pub last_export_ms: u64,
+    /// BLAKE3 of the last uploaded portable export.
+    pub digest: Hash,
+    /// R2 object key of the last upload.
+    pub r2_key: String,
+    /// Time of the last successful upload, Unix milliseconds.
+    pub last_upload_ms: u64,
+}
+
 /// An open upload ticket. Its audience is bound by the shard's deployment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -198,6 +213,31 @@ pub struct RelayV1 {
     pub puts: Vec<(Key, Value)>,
 }
 
+/// Maximum retained targets in a persistent relay scan cycle.
+pub const MAX_BLOCKED_TARGETS: usize = 32;
+
+/// Source-local scan progress. Every retained row at or below `cursor`
+/// belongs to a blocked target; new rows beyond `cycle_end` wait for the
+/// next cycle. The relay checkpoints this row under a guard on its prior value,
+/// atomically deleting delivered queue rows. Timer rescheduling is separate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelayScanV1 {
+    /// Source `os` observed when the scan cycle started.
+    pub cycle_end: u64,
+    /// Last inspected relay sequence, or zero before the first row.
+    pub cursor: u64,
+    /// Sorted, unique retained targets in [`Partition`] order.
+    pub blocked: Vec<Partition>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RelayScanDtoV1 {
+    cycle_end: u64,
+    cursor: u64,
+    blocked: Vec<String>,
+}
+
 /// Terminal outcome backlog. Relay rows are excluded.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -254,7 +294,7 @@ mod optional_hash_json {
 }
 
 mod optional_bytes_hex_json {
-    use super::{Deserialize, Serialize, to_hex_bytes};
+    use super::{Deserialize, Serialize, hex_nibble, to_hex_bytes};
 
     #[allow(clippy::ref_option)]
     pub(super) fn serialize<S: serde::Serializer>(
@@ -278,12 +318,26 @@ mod optional_bytes_hex_json {
                 s.as_bytes()
                     .chunks_exact(2)
                     .map(|pair| {
-                        let text = core::str::from_utf8(pair).map_err(serde::de::Error::custom)?;
-                        u8::from_str_radix(text, 16).map_err(serde::de::Error::custom)
+                        let high = hex_nibble(pair[0]).ok_or_else(|| {
+                            serde::de::Error::custom("invalid upload session hex")
+                        })?;
+                        let low = hex_nibble(pair[1]).ok_or_else(|| {
+                            serde::de::Error::custom("invalid upload session hex")
+                        })?;
+                        Ok((high << 4) | low)
                     })
                     .collect()
             })
             .transpose()
+    }
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
     }
 }
 
@@ -482,6 +536,17 @@ pub fn decode_lease_recovery(value: &Value) -> Result<LeaseRecovery, StoreError>
     decode_json(value, "bad lease recovery")
 }
 
+/// Encode a per-partition Worker backup state.
+#[must_use]
+pub fn encode_backup_state(state: &BackupStateV1) -> Value {
+    encode_json(state)
+}
+
+/// Decode a per-partition Worker backup state.
+pub fn decode_backup_state(value: &Value) -> Result<BackupStateV1, StoreError> {
+    decode_json(value, "bad backup state")
+}
+
 /// Validate ticket semantics before opening or after decoding a row.
 pub fn validate_ticket(ticket: &TicketV1) -> Result<(), StoreError> {
     let ttl = ticket.expires_at_ms.checked_sub(ticket.created_at_ms);
@@ -617,6 +682,64 @@ pub fn decode_relay(value: &Value) -> Result<RelayV1, StoreError> {
         target,
         puts,
     })
+}
+
+fn relay_scan_invalid(scan: &RelayScanV1) -> Option<&'static str> {
+    if scan.cursor > scan.cycle_end {
+        Some("relay scan cursor exceeds cycle end")
+    } else if scan.blocked.len() > MAX_BLOCKED_TARGETS {
+        Some("relay scan exceeds MAX_BLOCKED_TARGETS")
+    } else if scan.blocked.windows(2).any(|pair| pair[0] >= pair[1]) {
+        Some("relay scan targets are not sorted and unique")
+    } else {
+        None
+    }
+}
+
+/// Encode bounded, canonical source relay scan progress.
+pub fn encode_relay_scan(scan: &RelayScanV1) -> Result<Value, StoreError> {
+    if let Some(message) = relay_scan_invalid(scan) {
+        return Err(StoreError::Invalid(message.into()));
+    }
+    let blocked = scan
+        .blocked
+        .iter()
+        .map(|target| Ok(to_hex_bytes(&target.encode()?)))
+        .collect::<Result<_, StoreError>>()?;
+    let value = encode_json(&RelayScanDtoV1 {
+        cycle_end: scan.cycle_end,
+        cursor: scan.cursor,
+        blocked,
+    });
+    if value.as_bytes().len() > MAX_VALUE_BYTES {
+        return Err(StoreError::Invalid(
+            "relay scan exceeds MAX_VALUE_BYTES".into(),
+        ));
+    }
+    Ok(value)
+}
+
+/// Decode source relay scan progress, rejecting malformed or unbounded state.
+pub fn decode_relay_scan(value: &Value) -> Result<RelayScanV1, StoreError> {
+    check_value_limit(value)?;
+    let dto: RelayScanDtoV1 = decode_json(value, "bad relay scan")?;
+    if dto.blocked.len() > MAX_BLOCKED_TARGETS {
+        return Err(corrupt("relay scan exceeds MAX_BLOCKED_TARGETS"));
+    }
+    let blocked = dto
+        .blocked
+        .into_iter()
+        .map(|target| Partition::decode(&hex_bytes(&target)?))
+        .collect::<Result<_, _>>()?;
+    let scan = RelayScanV1 {
+        cycle_end: dto.cycle_end,
+        cursor: dto.cursor,
+        blocked,
+    };
+    if let Some(message) = relay_scan_invalid(&scan) {
+        return Err(corrupt(message));
+    }
+    Ok(scan)
 }
 
 /// Encode the terminal outcome backlog.
@@ -914,6 +1037,9 @@ mod tests {
             ("part_size", serde_json::json!(8_388_609)),
             ("part_size", serde_json::json!(1)),
             ("unknown", serde_json::json!(1)),
+            ("upload_session", serde_json::json!("+0")),
+            ("upload_session", serde_json::json!("0+")),
+            ("upload_session", serde_json::json!("é0")),
             ("reservation_id", serde_json::json!("bad/id")),
             ("reservation_id", serde_json::json!("")),
             ("reservation_id", serde_json::json!("a".repeat(129))),
@@ -1091,6 +1217,148 @@ mod tests {
             puts: vec![(Key::new(vec![0; MAX_KEY_BYTES + 1]), Value::new(vec![]))],
         };
         assert!(encode_relay(&oversized).is_err());
+    }
+
+    #[test]
+    fn relay_scan_codec_golden_and_roundtrip() {
+        let scan = RelayScanV1 {
+            cycle_end: 17,
+            cursor: 3,
+            blocked: vec![
+                Partition::Namespace(crate::repo::NamespaceKey::deployment_default()),
+                Partition::ContentShard(7),
+            ],
+        };
+        let encoded = encode_relay_scan(&scan).unwrap();
+        assert_eq!(
+            encoded.as_bytes(),
+            b"\x01{\"cycle_end\":17,\"cursor\":3,\"blocked\":[\"6e726f6f7400\",\"733700\"]}"
+        );
+        assert_eq!(decode_relay_scan(&encoded).unwrap(), scan);
+        for (cycle_end, cursor) in [(0, 0), (17, 0), (17, 17), (u64::MAX, u64::MAX)] {
+            let scan = RelayScanV1 {
+                cycle_end,
+                cursor,
+                blocked: vec![],
+            };
+            assert_eq!(
+                decode_relay_scan(&encode_relay_scan(&scan).unwrap()).unwrap(),
+                scan
+            );
+        }
+    }
+
+    #[test]
+    fn relay_scan_codec_rejects_invalid_progress_and_blocked_targets() {
+        let scans = [
+            RelayScanV1 {
+                cycle_end: 1,
+                cursor: 2,
+                blocked: vec![],
+            },
+            RelayScanV1 {
+                cycle_end: 1,
+                cursor: 0,
+                blocked: vec![Partition::ContentShard(2), Partition::ContentShard(1)],
+            },
+            RelayScanV1 {
+                cycle_end: 1,
+                cursor: 0,
+                blocked: vec![Partition::ContentShard(1), Partition::ContentShard(1)],
+            },
+            RelayScanV1 {
+                cycle_end: 1,
+                cursor: 0,
+                blocked: (0..=32u16).map(Partition::ContentShard).collect(),
+            },
+            RelayScanV1 {
+                cycle_end: 1,
+                cursor: 0,
+                blocked: vec![Partition::Namespace(
+                    crate::repo::NamespaceKey::from_stored("bad\0ns".into()),
+                )],
+            },
+        ];
+        for scan in scans {
+            assert!(matches!(
+                encode_relay_scan(&scan),
+                Err(StoreError::Invalid(_))
+            ));
+        }
+        for json in [
+            serde_json::json!({"cycle_end":1,"cursor":2,"blocked":[]}),
+            serde_json::json!({"cycle_end":1,"cursor":0,"blocked":["733200","733100"]}),
+            serde_json::json!({"cycle_end":1,"cursor":0,"blocked":["733100","733100"]}),
+            serde_json::json!({"cycle_end":1,"cursor":0,"blocked":(0..=32u16).map(|n| to_hex_bytes(&Partition::ContentShard(n).encode().unwrap())).collect::<Vec<_>>()}),
+            serde_json::json!({"cycle_end":1,"cursor":0,"blocked":["gg"]}),
+            serde_json::json!({"cycle_end":1,"cursor":0,"blocked":["0"]}),
+            serde_json::json!({"cycle_end":1,"cursor":0,"blocked":["00"]}),
+            serde_json::json!({"cycle_end":-1,"cursor":0,"blocked":[]}),
+            serde_json::json!({"cycle_end":1,"cursor":0}),
+            serde_json::json!({"cycle_end":1,"cursor":0,"blocked":[],"extra":1}),
+        ] {
+            assert!(matches!(
+                decode_relay_scan(&json_value(&json)),
+                Err(StoreError::Corrupt(_))
+            ));
+        }
+        for value in [
+            Value::new(vec![]),
+            Value::new(b"\x02{}".to_vec()),
+            Value::new(b"\x01{".to_vec()),
+            Value::new(vec![0; MAX_VALUE_BYTES + 1]),
+        ] {
+            assert!(matches!(
+                decode_relay_scan(&value),
+                Err(StoreError::Corrupt(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn relay_scan_32_maximum_partitions_fit_the_value_limit() {
+        use crate::refs::MAX_REF_NAME_BYTES;
+        use crate::repo::{MAX_REPO_NAME_BYTES, NamespaceKey};
+
+        assert_eq!(MAX_BLOCKED_TARGETS, 32);
+        let namespace = NamespaceKey::from_stored(format!("ed25519-{}", "a".repeat(64)));
+        let repo = RepoName::new("r".repeat(MAX_REPO_NAME_BYTES)).unwrap();
+        let base = format!(
+            "refs/heads/{}",
+            "a".repeat(MAX_REF_NAME_BYTES - "refs/heads/".len() - 2)
+        );
+        let blocked = (0..32)
+            .map(|n| {
+                let shard_ref = format!("{base}{n:02}");
+                assert_eq!(shard_ref.len(), MAX_REF_NAME_BYTES);
+                assert!(crate::refs::validate_ref_name(&shard_ref));
+                Partition::Ref {
+                    ns: namespace.clone(),
+                    repo: repo.clone(),
+                    shard_ref,
+                }
+            })
+            .collect();
+        let scan = RelayScanV1 {
+            cycle_end: u64::MAX,
+            cursor: u64::MAX,
+            blocked,
+        };
+        let encoded = encode_relay_scan(&scan).unwrap();
+        assert!(encoded.as_bytes().len() < MAX_VALUE_BYTES);
+        assert_eq!(decode_relay_scan(&encoded).unwrap(), scan);
+
+        let oversized = RelayScanV1 {
+            cycle_end: 1,
+            cursor: 0,
+            blocked: vec![Partition::Namespace(NamespaceKey::from_stored(
+                "a".repeat(MAX_VALUE_BYTES),
+            ))],
+        };
+        assert!(matches!(
+            encode_relay_scan(&oversized),
+            Err(StoreError::Invalid(_))
+        ));
     }
 
     fn records() -> Vec<ReplayRecord> {
