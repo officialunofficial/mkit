@@ -2,6 +2,7 @@
 
 #[path = "tests_begin_parts.rs"]
 mod begin_parts;
+mod grants;
 mod info;
 mod policy;
 
@@ -336,7 +337,7 @@ type ApplyHook = Box<dyn Fn(&MemoryKv, &Partition, &Batch) + Send + Sync>;
 /// A `MemoryKv` that records every key it sees and batch it applies, can
 /// run a hook before each apply and can yield at every call.
 struct Spy {
-    inner: MemoryKv,
+    inner: Arc<MemoryKv>,
     hook: Option<ApplyHook>,
     after_hook: Option<AfterApplyHook>,
     yields: bool,
@@ -348,7 +349,7 @@ struct Spy {
 impl Spy {
     fn new(inner: MemoryKv) -> Self {
         Self {
-            inner,
+            inner: Arc::new(inner),
             hook: None,
             after_hook: None,
             yields: false,
@@ -747,7 +748,7 @@ fn with_admission<Ad: Admission>(admission: Ad) -> Hooks<OpenAuthorizer, Ad> {
 fn replay_row(env: &Env, req: &Req) -> Option<crate::replay::ReplayRecord> {
     let scope = env.auth(req).unwrap().auth.unwrap().replay_scope;
     now(read::replay_lookup(
-        &env.pipe.meta.inner,
+        env.pipe.meta.inner.as_ref(),
         &ns(),
         &ReplayKey(scope),
     ))
@@ -879,7 +880,7 @@ fn authv2_expired_unauthenticated() {
 #[test]
 fn authv2_reads_need_no_signature() {
     let env = env(authv2());
-    seed(&env.pipe.meta.inner, &[(HEAD, A)]);
+    seed(env.pipe.meta.inner.as_ref(), &[(HEAD, A)]);
     let list = env.auth(&Req::unsigned(Procedure::ListRefs)).unwrap();
     assert_eq!(
         (&list.principal, &list.auth),
@@ -995,7 +996,7 @@ fn namespace_denial_before_lease_allocates_nothing_and_replay_stays_free() {
     let shard = env.pipe.shards.ref_shard(&a.repo().repo, ref_name);
     let coordinator = env.pipe.shards.coordinator(&a.repo().repo.namespace);
     let window = crate::quota::namespace_window(T0, 60_000);
-    seed_namespace_view(&env.pipe.meta.inner, &shard, window, 2, 0);
+    seed_namespace_view(env.pipe.meta.inner.as_ref(), &shard, window, 2, 0);
     let before = now(env.pipe.meta.inner.stats(&shard)).unwrap();
     let err = now(env.pipe.update_ref(&a, upd(ref_name, Missing, A))).unwrap_err();
     assert_eq!(err.code(), Code::ResourceExhausted);
@@ -1015,7 +1016,7 @@ fn namespace_denial_before_lease_allocates_nothing_and_replay_stays_free() {
             .unwrap()
             .is_none()
     );
-    seed_namespace_view(&env.pipe.meta.inner, &shard, window, 0, 0);
+    seed_namespace_view(env.pipe.meta.inner.as_ref(), &shard, window, 0, 0);
     let update = upd(ref_name, Missing, A);
     assert_eq!(
         now(env.pipe.update_ref(&a, update.clone())).unwrap(),
@@ -1023,7 +1024,7 @@ fn namespace_denial_before_lease_allocates_nothing_and_replay_stays_free() {
     );
     let counter = keys::quota_shard(window);
     let charged = now(env.pipe.meta.inner.get(&shard, &counter)).unwrap();
-    seed_namespace_view(&env.pipe.meta.inner, &shard, window, 2, 1);
+    seed_namespace_view(env.pipe.meta.inner.as_ref(), &shard, window, 2, 1);
     assert_eq!(
         now(env.pipe.update_ref(&a, update)).unwrap(),
         UpdateRefResult::Committed
@@ -1222,7 +1223,7 @@ fn advance_refs_atomic_store_conflict_leaves_both_untouched() {
     for auth in [AuthMode::Open, authv2()] {
         let env = env(auth);
         assert!(env.pipe.capabilities().atomic_advance);
-        seed(&env.pipe.meta.inner, &[(HEAD, A), (PACKMAP, A)]);
+        seed(env.pipe.meta.inner.as_ref(), &[(HEAD, A), (PACKMAP, A)]);
         let req = |n| {
             let r = Req::signed(
                 &key(7),
@@ -1274,7 +1275,7 @@ fn advance_refs_nonatomic_store_matches_trait_default_order() {
     let kv = store(&clock).with_capabilities(StoreCapabilities::refs_only());
     let env = build(cfg(AuthMode::Open), Spy::new(kv), Hooks::new(), clock);
     assert!(!env.pipe.capabilities().atomic_advance);
-    seed(&env.pipe.meta.inner, &[(HEAD, A), (PACKMAP, A)]);
+    seed(env.pipe.meta.inner.as_ref(), &[(HEAD, A), (PACKMAP, A)]);
     let req = Req::unsigned(Procedure::AdvanceRefs);
     // Head conflict: the packmap is already written (protocol.rs order).
     let (head, pm) = (upd(HEAD, Match(C), B), upd(PACKMAP, Match(A), B));
@@ -2033,7 +2034,7 @@ fn list_refs_strips_prefix_and_paginates() {
     let names = ["a", "b", "c", "d", "e"].map(|n| format!("refs/heads/{n}"));
     let mut refs: Vec<_> = names.iter().map(|n| (n.as_str(), A)).collect();
     refs.push(("refs/tags/v1", B));
-    seed(&env.pipe.meta.inner, &refs);
+    seed(env.pipe.meta.inner.as_ref(), &refs);
     let a = env.auth(&Req::unsigned(Procedure::ListRefs)).unwrap();
     let listed = block_on(env.pipe.list_refs(&a, "refs/heads/")).unwrap();
     let got: Vec<_> = listed.iter().map(|e| e.name.as_str()).collect();
@@ -2064,7 +2065,7 @@ fn list_refs_prefix_matches_at_component_boundaries() {
         ("refs/headsx/y", A),
         ("refs/tags/v1", B),
     ];
-    seed(&env.pipe.meta.inner, &refs);
+    seed(env.pipe.meta.inner.as_ref(), &refs);
     let a = env.auth(&Req::unsigned(Procedure::ListRefs)).unwrap();
     let list = |prefix: &str| -> Vec<String> {
         let listed = block_on(env.pipe.list_refs(&a, prefix)).unwrap();
@@ -2744,7 +2745,13 @@ fn d34_canonical_advance_commits_in_one_ref_partition() {
             codec::encode_ref_id(&id)
         )));
         assert_eq!(
-            now(read::read_ref(&env.pipe.meta.inner, p, &repo().name, name)).unwrap(),
+            now(read::read_ref(
+                env.pipe.meta.inner.as_ref(),
+                p,
+                &repo().name,
+                name
+            ))
+            .unwrap(),
             Some(id)
         );
     }
@@ -3030,7 +3037,7 @@ fn single_advance_preserves_noncanonical_served_pairing() {
     assert_eq!(env.batches().len(), 1);
     assert_eq!(
         now(read::read_ref(
-            &env.pipe.meta.inner,
+            env.pipe.meta.inner.as_ref(),
             &ns(),
             &repo().name,
             "refs/heads/f"
@@ -3040,7 +3047,7 @@ fn single_advance_preserves_noncanonical_served_pairing() {
     );
     assert_eq!(
         now(read::read_ref(
-            &env.pipe.meta.inner,
+            env.pipe.meta.inner.as_ref(),
             &ns(),
             &repo().name,
             "refs/packmaps/f"

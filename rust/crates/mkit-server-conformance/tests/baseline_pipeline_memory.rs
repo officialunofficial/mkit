@@ -17,6 +17,7 @@ mod common;
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
+use mkit_attest::grant::{AcceptedSchemes, OwnerScheme, RelyingParty};
 use mkit_server::auth_v2::AuthV2Config;
 use mkit_server::pipeline::{AuthMode, Hooks, Pipeline, PipelineConfig};
 use mkit_server::policy::NamespacePolicy;
@@ -216,6 +217,22 @@ async fn serve_sharding(
         )
     });
     let mut cfg = PipelineConfig::new(addressing, auth(&origin), limits);
+    if multi.is_some_and(|profile| profile.has(Feature::Grants)) {
+        cfg.grants = Some(
+            mkit_server::GrantConfig::new_allowing_loopback(
+                &origin,
+                AcceptedSchemes::of(&OwnerScheme::ALL),
+                vec![
+                    RelyingParty::new(
+                        mkit_server_conformance::wire::GRANT_RP_ID,
+                        [mkit_server_conformance::wire::GRANT_RP_ORIGIN],
+                    )
+                    .unwrap(),
+                ],
+            )
+            .unwrap(),
+        );
+    }
     cfg.write_quota = quota;
     cfg.sharding = sharding;
     cfg.ticket_keys = Some(
@@ -343,7 +360,7 @@ fn multi_allowlist(profile: &Profile) -> BTreeSet<mkit_core::repo_identity::Name
     else {
         panic!("Multi baseline needs auth v2");
     };
-    mkit_server_conformance::wire::CASES
+    let mut allowed: BTreeSet<_> = mkit_server_conformance::wire::CASES
         .iter()
         .filter(|case| case.requires.contains(&Feature::MultiRepo))
         .flat_map(|case| {
@@ -363,7 +380,11 @@ fn multi_allowlist(profile: &Profile) -> BTreeSet<mkit_core::repo_identity::Name
                 .unwrap()
             })
         })
-        .collect()
+        .collect();
+    if profile.has(Feature::Grants) {
+        allowed.extend(mkit_server_conformance::wire::grant_owner_namespaces());
+    }
+    allowed
 }
 
 /// `GET /__mkit_test/stats`: the single partition's stats.
@@ -570,6 +591,71 @@ async fn pipeline_d34_multi_membership() {
         let report = run(&target, Some(case)).await;
         common::judge(&report, PIPELINE_DIVERGENCES);
         assert_eq!(report.passes(), [case], "{case} did not run and pass");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pipeline_grants_single_and_d34() {
+    for sharding in [
+        mkit_server::pipeline::Sharding::Single,
+        mkit_server::pipeline::Sharding::D34,
+    ] {
+        let mut profile = profile(WireAuth::AuthV2 {
+            audience: "http://localhost".into(),
+            repository: "ignored-in-multi-mode".into(),
+            seed: [0x5e; 32],
+        });
+        profile.milestone = Milestone::M2;
+        profile
+            .features
+            .extend([Feature::MultiRepo, Feature::Grants]);
+        #[cfg(feature = "test-faults")]
+        profile.features.insert(Feature::TestFaults);
+        profile.sharding_d34 = sharding == mkit_server::pipeline::Sharding::D34;
+        let auth = |origin: &str| AuthMode::AuthV2(AuthV2Config::new(origin, "").unwrap());
+        let (origin, _) = serve_sharding(auth, None, Mutant::None, Some(&profile), sharding).await;
+        let WireAuth::AuthV2 { audience, .. } = &mut profile.auth else {
+            unreachable!()
+        };
+        audience.clone_from(&origin);
+        let target = WireTarget {
+            base_url: origin.parse().unwrap(),
+            profile,
+        };
+        for case in [
+            "grants.valid_ed25519",
+            "grants.valid_secp256k1_eip191",
+            "grants.valid_webauthn_p256",
+            "grants.push_flow",
+            "grants.part_path_ignores_header",
+            "grants.zero_x_without_grant_denied",
+            "grants.wrong_audience",
+            "grants.repository_out_of_scope",
+            "grants.namespace_scope_covers_new_repo",
+            "grants.grantee_mismatch",
+            "grants.read_only_grant_for_write",
+            "grants.ed25519_scheme_on_0x_denied",
+            "grants.webauthn_unconfigured_rp_denied",
+            "grants.epoch_above_stored",
+            "grants.owner_with_bad_grant_denied",
+            "grants.header_without_auth_unauthenticated",
+            "grants.duplicate_header_denied",
+            "grants.oversize_header_denied",
+            "grants.non_ascii_header_denied",
+            "grants.retry_with_changed_grant_returns_saved_result",
+            #[cfg(feature = "test-faults")]
+            "grants.expired",
+            #[cfg(feature = "test-faults")]
+            "grants.not_yet_valid",
+            #[cfg(feature = "test-faults")]
+            "grants.epoch_below_stored",
+            #[cfg(feature = "test-faults")]
+            "grants.new_epoch_grant_works",
+        ] {
+            let report = run(&target, Some(case)).await;
+            common::judge(&report, PIPELINE_DIVERGENCES);
+            assert_eq!(report.passes(), [case], "{case} did not run and pass");
+        }
     }
 }
 

@@ -1224,8 +1224,9 @@ these holds:
 1. `ns` has the `ed25519-` form and the auth v2 signer is that key.
 2. A valid grant authorizes the signer
    ([SPEC-WRITE-GRANTS §6](SPEC-WRITE-GRANTS.md#6-server-policy) and
-   [§7](SPEC-WRITE-GRANTS.md#7-verification-order)). Before the M2
-   implementation, only rules 1 and 3 apply (informative).
+   [§7](SPEC-WRITE-GRANTS.md#7-verification-order)). The Connect server
+   enforces this path for configured multi-repository deployments; the
+   remaining M2 grant scope and revocation work is tracked separately.
 3. A deployment-defined authority source authorizes the signer for the
    repository. An example is a ledger's delegated-key record, checked
    against verified state. The deployment MUST document the source and

@@ -41,6 +41,8 @@ pub enum Rpc {
     BeginUpload,
     /// `UploadPack` (client-streaming)
     UploadPack,
+    /// `UploadPart` (client-streaming)
+    UploadPart,
     /// `DownloadPack` (server-streaming)
     DownloadPack,
 }
@@ -57,6 +59,7 @@ impl Rpc {
             Self::PackExists => "/mkit.transport.v1.TransportService/PackExists",
             Self::BeginUpload => "/mkit.transport.v1.TransportService/BeginUpload",
             Self::UploadPack => "/mkit.transport.v1.TransportService/UploadPack",
+            Self::UploadPart => "/mkit.transport.v1.TransportService/UploadPart",
             Self::DownloadPack => "/mkit.transport.v1.TransportService/DownloadPack",
         }
     }
@@ -66,7 +69,11 @@ impl Rpc {
     pub fn is_write(self) -> bool {
         matches!(
             self,
-            Self::UpdateRef | Self::AdvanceRefs | Self::BeginUpload | Self::UploadPack
+            Self::UpdateRef
+                | Self::AdvanceRefs
+                | Self::BeginUpload
+                | Self::UploadPack
+                | Self::UploadPart
         )
     }
 }

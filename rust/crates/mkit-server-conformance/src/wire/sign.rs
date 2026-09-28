@@ -94,6 +94,11 @@ pub fn pack_commitment(id: &[u8], len: u64) -> String {
 }
 
 impl Signer {
+    /// Sign a test write-grant statement's BLAKE3 digest as its Ed25519 owner.
+    #[must_use]
+    pub fn sign_grant_statement(&self, statement: &[u8]) -> [u8; 64] {
+        self.key.sign(&hash(statement)).to_bytes()
+    }
     /// A signer with `seed`.
     #[must_use]
     pub fn new(seed: [u8; 32], audience: &str, repository: &str) -> Self {

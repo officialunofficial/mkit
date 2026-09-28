@@ -71,7 +71,7 @@ fn quota<H: HookSet>(env: &Env<H>) -> (u32, u64) {
 fn replay_state<H: HookSet>(env: &Env<H>, req: &Req) -> Option<ReplayState> {
     let scope = env.auth(req).unwrap().auth.unwrap().replay_scope;
     let record = now(read::replay_lookup(
-        &env.pipe.meta.inner,
+        env.pipe.meta.inner.as_ref(),
         &ns(),
         &ReplayKey(scope),
     ));
