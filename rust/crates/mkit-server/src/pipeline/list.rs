@@ -1,4 +1,4 @@
-//! Bounded, key-based ListRefs paging. The source seam also serves D34's
+//! Bounded, key-based `ListRefs` paging. The source seam also serves D34's
 //! sixteen ref-index buckets once their rows exist (WP-1.28b).
 
 use core::future::Future;
@@ -86,7 +86,7 @@ fn binding(repo: &RepoId, prefix: &str) -> [u8; 32] {
     let mut h = blake3::Hasher::new();
     h.update(b"mkit.list-refs-page-token.v1\0");
     for part in [repo.namespace.as_str(), repo.name.as_str(), prefix] {
-        h.update(&(part.len() as u32).to_be_bytes());
+        h.update(&u64::try_from(part.len()).unwrap_or(u64::MAX).to_be_bytes());
         h.update(part.as_bytes());
     }
     *h.finalize().as_bytes()
@@ -96,7 +96,7 @@ fn encode_token(repo: &RepoId, prefix: &str, last: &str) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(TOKEN_HEADER + last.len());
     bytes.push(TOKEN_VERSION);
     bytes.extend_from_slice(&binding(repo, prefix));
-    bytes.extend_from_slice(&(last.len() as u16).to_be_bytes());
+    bytes.extend_from_slice(&u16::try_from(last.len()).unwrap_or(u16::MAX).to_be_bytes());
     bytes.extend_from_slice(last.as_bytes());
     bytes
 }
