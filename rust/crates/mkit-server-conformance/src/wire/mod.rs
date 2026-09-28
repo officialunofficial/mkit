@@ -364,7 +364,7 @@ mod tests {
             .map(|case| case.name)
             .collect();
         assert_eq!(skipped, D34_LIST_REFS_SKIPS.iter().copied().collect());
-        assert_eq!(skipped.len(), 8);
+        assert_eq!(skipped.len(), 9);
         for name in &skipped {
             assert!(
                 name.contains("list")
