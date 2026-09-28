@@ -127,7 +127,7 @@ Split and dropped WPs keep their briefs for the record: [WP-M0-02](briefs/WP-M0-
 | 1.11b | G10 | FS multipart, native wiring and storage conformance (R-114) | [M1/M2](m1-m2-breakdown.md) | | planned |
 | 1.12 | G10 | Worker: R2 multipart with client-streamed parts through the Worker | [M1/M2](m1-m2-breakdown.md) | | planned |
 | 1.13 | G10 | Native: S3 multipart BlobStore | [M1/M2](m1-m2-breakdown.md) | | planned |
-| 1.14 | G10 | Ticket expiry and pre-M3 outbox retention | [M1/M2](m1-m2-breakdown.md) | | planned |
+| 1.14 | G10 | Ticket expiry | [M1/M2](m1-m2-breakdown.md) | | planned |
 | 1.29 | G12 | Ops: periodic DO backup export to R2 and per-shard storage alerts | [M1/M2](m1-m2-breakdown.md) | | planned |
 | 1.15 | G11 | ssh and enc: multi-repo addressing, --principal, implicit session tickets | [M1/M2](m1-m2-breakdown.md) | | planned |
 | 1.16 | G11 | Client: X-Repository everywhere, identity validation, GetServerInfo, ListRefs paging, ref hint | [M1/M2](m1-m2-breakdown.md) | | planned |

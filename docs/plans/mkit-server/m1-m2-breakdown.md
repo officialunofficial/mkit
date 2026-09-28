@@ -376,19 +376,19 @@ Folded into WP-S1 §7.6/§7.8/§7.9 (adopted Q18 default). Every former dependen
 ### WP-1.13 Native: S3 multipart `BlobStore`
 
 - **Depends on:** WP-1.11.
-- **Goal:** the multipart API on the M0 S3 store, reusing `mkit-transport-s3` multipart/SigV4; verification before
-  `CompleteMultipartUpload`; the upload id travels in the ticket token.
+- **Goal:** verified CV-keyed parts on the S3 store, a native-local signer using public `sigv4` helpers, and
+  server-side `UploadPartCopy` assembly with a private upload id kept within the completion request.
 - **Tests:** storage multipart suite against the M0 fake S3.
 - **Size:** M (~600).
 
-### WP-1.14 Ticket expiry and pre-M3 outbox retention
+### WP-1.14 Ticket expiry
 
 - **Depends on:** WP-1.10, WP-1.12, WP-1.24.
-- **Goal:** the ticket-expiry timer kind: one `Expired` row per unadvanced reservation, the multipart session
-  aborted, the ticket **deleted** (bounded growth), the pack GC-eligible (GC is M5). A built-in no-op `OutcomeSink`
-  acks and **deletes** outbox rows until M3 replaces it (Q-M1-6 default), keeping the `oc` backlog counter exact.
-- **Tests:** with the clock-skew directive: one `Expired` row; advancing an expired ticket is rejected; the R2/S3
-  session is aborted; ticket and outbox key counts return to baseline.
+- **Goal:** kind-2 expiry closes an unconsumed ticket with one guarded `Expired` outcome and a best-effort
+  session abort. Outcome delivery, reconcile, and pre-M3 retention are owned by WP-3.3; until then, durable
+  terminal rows accumulate undelivered and this bundle is not deployed.
+- **Tests:** one `Expired` row, no ticket or indexes, early reschedule, consumed no-op, consumption race,
+  abort failure, eight-ticket tick cap, and native and Worker timer registration.
 - **Size:** M (~700).
 
 ### WP-1.29 Ops: periodic backup export to R2 and per-shard storage alerts
