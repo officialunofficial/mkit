@@ -154,8 +154,11 @@ below depends on it.
 are content-addressed and idempotent. When the object's file already
 exists (for `BulkWriter::write`, with the same bytes),
 `ObjectStore::write`, `WriteBatch` and `BulkWriter::write` return without
-rewriting it, but set its `mtime` to the current time first; if they
-cannot, they rewrite the object instead (MKIT-55). An object that a
+rewriting it. `BulkWriter::write`, the writer git import uses, first sets
+the object's `mtime` to the current time, and rewrites the object if it
+cannot (MKIT-55). `ObjectStore::write` and `WriteBatch` leave `mtime`
+alone: their callers hold `worktree.lock`, which gc also takes, so they
+never race a sweep. An object that a
 writer does not write at all because it already has it (a git import
 skips every object its map cache already translated) is left with its
 old `mtime`. So when a concurrent writer's closure includes an object that
@@ -174,8 +177,8 @@ The published ref now dangles. The next `mkit gc` aborts with
 lost, but the deleted object is not recovered. The Quint model in
 `formal/quint/gc` reproduces this as the `gcPushFast` instance (a write
 that keeps the old `mtime`) and the `fastPushDedupLossTest` scenario;
-`gcPushFastFreshen`, a write that refreshes it as the object writers
-now do, is safe.
+`gcPushFastFreshen`, a write that refreshes it as `BulkWriter` now
+does, is safe.
 
 **Safety condition (normative).** Let a writer that does not hold gc's
 locks publish a ref at instant `T`. The publication cannot lose an object
@@ -201,8 +204,9 @@ delete an object at the boundary (the model's `mutBoundedLax` mutant and
   the writer relies on had its `mtime` set within that window.
 - `--grace-secs 0` is never safe against a concurrent writer outside gc's
   lock set.
-- The object writers refresh `mtime` on a dedup hit, so an object a
-  writer writes meets the condition when its write-to-publish window is
+- `BulkWriter`, the only object writer outside gc's lock set, refreshes
+  `mtime` on a dedup hit, so an object a git import writes meets the
+  condition when its write-to-publish window is
   shorter than `grace`, unless the refresh lands after gc's sweep read
   the old `mtime` and before it unlinks the object (`ops::gc::run_gc`
   does not do the two atomically). A git import does not write objects its map cache

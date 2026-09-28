@@ -56,8 +56,8 @@ use tempfile::TempPath;
 
 use crate::hash::Hash;
 use crate::store::{
-    MAX_RAW_OBJECT_SIZE, ObjectSink, ObjectStore, StoreError, StoreResult, refresh_mtime,
-    sync_parent_dir, temp_file_in,
+    MAX_RAW_OBJECT_SIZE, ObjectSink, ObjectStore, StoreError, StoreResult, sync_parent_dir,
+    temp_file_in,
 };
 
 /// When object writes become durable.
@@ -320,14 +320,12 @@ impl<'s> WriteBatch<'s> {
             }
             !st.created_shards.contains(&shard_dir)
         };
-        // Dedup hit: refresh the grace window (MKIT-55); on failure
-        // stage a rewrite rather than report a stale hit (see
-        // `store::refresh_mtime`).
-        if final_path.exists() && refresh_mtime(&final_path).is_ok() {
-            // The object is visible, but if another process renamed
-            // it and has not yet flushed the dirent, it may not be
-            // durable. We are about to reference it, so flush its
-            // shard dir at commit.
+        if final_path.exists() {
+            // Dedup hit: the object is visible, but if another process
+            // renamed it and has not yet flushed the dirent, it may not
+            // be durable. We are about to reference it, so flush its
+            // shard dir at commit. The `mtime` is left alone (see
+            // `store::refresh_mtime`).
             self.inner
                 .lock()
                 .expect("batch state mutex poisoned")

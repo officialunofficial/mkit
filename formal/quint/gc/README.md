@@ -81,11 +81,13 @@ workers, Apalache with `-Xmx4g`; one JVM at a time.
   5 is in the writer's closure, 7 is garbage nobody writes, so a gc can
   delete something while a writer is in flight. Writes are content-addressed:
   a dedup hit leaves the existing mtime unchanged unless `FRESHEN` is set.
-  `FRESHEN = true` is the implementation since MKIT-55: `ObjectStore::write`
-  (`final_path.exists()`), `WriteBatch` and `BulkWriter::write` (byte-equal
-  existing file) set the existing file's mtime to now on a dedup hit, and
-  rewrite the object if they cannot. `FRESHEN = false` is the implementation
-  before MKIT-55.
+  The model's writer is the one outside gc's lock set, git import.
+  `FRESHEN = true` is the implementation since MKIT-55: `BulkWriter::write`
+  (byte-equal existing file), the writer git import uses, sets the existing
+  file's mtime to now on a dedup hit, and rewrites the object if it cannot.
+  `FRESHEN = false` is the implementation before MKIT-55. `ObjectStore::write`
+  and `WriteBatch` do not refresh mtime; their callers hold `worktree.lock`,
+  which gc also takes, so they are not the model's writer.
 
 **Bounds:** 8 objects, 3 refs plus the recovery log, 1 producer, 1 writer,
 1 tag publisher, clock 0..6, `GRACE = 2` (0 in `gcGrace0`), `RETAIN = 2`,
@@ -304,7 +306,7 @@ every state with at most two producer rewrites and no corrupt source.
 | `ciHoldFirst::All`, `ciShortTtlGrace::All` | 16 | ok, 33 s, 36 s |
 | every `ci*` mutant and unsafe ordering above, `ciHoldFirst::CanaryNoDeleteThenPublish` | 10, 12 | violated, 5 to 9 s |
 
-**MKIT-55 re-run (2026-09-27)**, after the object writers began refreshing
+**MKIT-55 re-run (2026-09-27)**, after `BulkWriter` began refreshing
 mtime on a dedup hit (the model is unchanged; this confirms the instance the
 code now matches): `ONLY=gc SEL='^gcPushFast' APALACHE=1 ./check.sh` exits 0.
 All 8 gc `quint test` scenarios pass; `quint run` `gcPushFastFreshen::All` and

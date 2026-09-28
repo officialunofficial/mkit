@@ -196,7 +196,7 @@ after.
 
 | Issue | Finding | Found by | Fix |
 |---|---|---|---|
-| MKIT-55 | A dedup hit left an object's old mtime, so gc could delete an object that a concurrent git import was about to publish (SPEC-GC "Concurrent writers") | `gcPushFast::NoDangling` (Apalache length 8, TLC) | The three dedup paths (`ObjectStore::write`, `WriteBatch::write_prehashed`, `BulkWriter::write`) refresh mtime and rewrite the object if the refresh fails. Partially fixed: see the open gc findings below. |
+| MKIT-55 | A dedup hit left an object's old mtime, so gc could delete an object that a concurrent git import was about to publish (SPEC-GC "Concurrent writers") | `gcPushFast::NoDangling` (Apalache length 8, TLC) | `BulkWriter::write`, the git import writer and the only object writer outside gc's lock set, refreshes mtime on a dedup hit and rewrites the object if the refresh fails. `ObjectStore::write` and `WriteBatch` callers hold `worktree.lock`, so they skip the refresh (it cost ~280x on their dedup hits). Partially fixed: see the open gc findings below. |
 | MKIT-56 | The range-proof builder returned the all-default proof for `0..=0` of the empty Tree; SPEC-MERKLE-OBJECTS §5.4 requires a refusal | Kani `merkle_builder_empty_tree_refuses` | `BmtTree::range_proof` refuses every range of the empty tree |
 | MKIT-57 | The scrub took the window path at exactly 604800 s; SPEC-HISTORY-PROOF §4.5 says "fewer than" | `scrub::WindowOnlyWhenFresh` | `decide_chain` compares with `>=` |
 | MKIT-58 | A push reported NonFastForward for a head write that landed but whose response was lost; SPEC-TRANSPORT §7 requires a `read_ref` first | `ordered2_oldConflict::ConflictHonest` | `head_conflict` reads the head back on `HeadConflict` and `RefConflict` |
