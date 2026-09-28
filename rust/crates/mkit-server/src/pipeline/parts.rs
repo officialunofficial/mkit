@@ -6,10 +6,12 @@ use mkit_core::protocol::PackKey;
 use mkit_core::upload_parts::{PartPlan, merge_to_root};
 use mkit_core::write_auth::PartCommitment;
 
+use super::outcome::Outcome;
 use super::{AuthMode, Authenticated, HookSet, Pipeline, ServerError, StorageOp, ms, store_error};
 use crate::Code;
 use crate::op::{Commitment, Procedure};
 use crate::store::{BlobKey, MultipartBlobStore, NamespaceStore, PartRef, PartSink, StoreError};
+use crate::telemetry::METRIC_UPLOAD_BYTES;
 use crate::upload::marker::write_upload_marker;
 use crate::upload::receipt;
 use crate::upload::ticket_auth::verify_ticket;
@@ -34,7 +36,10 @@ fn part_error(err: mkit_core::upload_parts::PartError) -> ServerError {
 fn multipart_error(op: StorageOp, err: StoreError) -> ServerError {
     match err {
         StoreError::SessionGone => invalid_ticket(),
-        StoreError::Invalid(detail) => ServerError::invalid_argument(detail),
+        StoreError::PartSubtreeMismatch => {
+            ServerError::invalid_argument("part subtree hash does not match its commitment")
+        }
+        StoreError::Invalid(_) => ServerError::invalid_argument("invalid multipart upload state"),
         other => store_error(op, other),
     }
 }
@@ -49,6 +54,8 @@ pub struct PartUploadSession<'p, B: MultipartBlobStore, N, H> {
     len: u64,
     seen: u64,
     sink: Option<B::PartSink>,
+    failed: Option<ServerError>,
+    outcome: Outcome,
 }
 
 impl<B: MultipartBlobStore, N, H> core::fmt::Debug for PartUploadSession<'_, B, N, H> {
@@ -68,6 +75,18 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> PartUploadSession<'_,
     /// `invalid_argument` for an empty or overlong chunk; storage errors
     /// retain the fixed redacted message.
     pub async fn push(&mut self, chunk: Bytes) -> Result<(), ServerError> {
+        if let Some(err) = &self.failed {
+            return Err(err.clone());
+        }
+        let result = self.push_inner(chunk).await;
+        if let Err(err) = &result {
+            self.outcome.record(Err(err));
+            self.failed = Some(err.clone());
+        }
+        result
+    }
+
+    async fn push_inner(&mut self, chunk: Bytes) -> Result<(), ServerError> {
         if chunk.is_empty() {
             return Err(ServerError::invalid_argument("empty upload part chunk"));
         }
@@ -80,6 +99,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> PartUploadSession<'_,
                 "part data exceeds the part length",
             ));
         }
+        let count = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
         self.sink
             .as_mut()
             .ok_or_else(|| ServerError::internal("part stream is closed", "missing part sink"))?
@@ -87,6 +107,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> PartUploadSession<'_,
             .await
             .map_err(|e| multipart_error(StorageOp::MultipartPart, e))?;
         self.seen = next;
+        self.pipe.metrics.incr(METRIC_UPLOAD_BYTES, &[], count);
         Ok(())
     }
 
@@ -95,18 +116,28 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> PartUploadSession<'_,
     /// # Errors
     /// `invalid_argument` for a short part or mismatched subtree.
     pub async fn finish(mut self) -> Result<Vec<u8>, ServerError> {
-        if self.seen != self.len {
+        if let Some(err) = self.failed.take() {
             self.abort().await;
-            return Err(ServerError::invalid_argument(
-                "part data is shorter than the part length",
-            ));
+            return Err(err);
         }
+        if self.seen != self.len {
+            let err = ServerError::invalid_argument("part data is shorter than the part length");
+            self.outcome.record(Err(&err));
+            self.abort().await;
+            return Err(err);
+        }
+        let result = self.finish_inner().await;
+        self.outcome.record(result.as_ref().map(|_| ()));
+        result
+    }
+
+    async fn finish_inner(&mut self) -> Result<Vec<u8>, ServerError> {
         let sink = self
             .sink
             .take()
             .ok_or_else(|| ServerError::internal("part stream is closed", "missing part sink"))?;
         let tag = sink.commit().await.map_err(|e| match e {
-            StoreError::Invalid(_) => {
+            StoreError::PartSubtreeMismatch => {
                 ServerError::invalid_argument("part subtree hash does not match its commitment")
             }
             other => multipart_error(StorageOp::MultipartPart, other),
@@ -131,9 +162,19 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> PartUploadSession<'_,
             sink.abort().await;
         }
     }
+
+    /// Discard an incomplete stream and record the error returned to the client.
+    pub async fn abort_with(mut self, err: &ServerError) {
+        self.outcome.record(Err(err));
+        self.abort().await;
+    }
 }
 
 impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
+    pub(crate) fn record_part_error(&self, a: &Authenticated, err: &ServerError) {
+        self.outcome(a).record(Err(err));
+    }
+
     fn part_ticket(
         &self,
         a: &Authenticated,
@@ -183,51 +224,64 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         token: &[u8],
         index: u32,
     ) -> Result<PartUploadSession<'_, B, N, H>, ServerError> {
-        let claims = self.part_ticket(a, Procedure::UploadPart, token)?;
-        let Some(auth) = &a.auth else {
-            return Err(ServerError::unauthenticated(
-                "missing auth v2 authorization",
-            ));
-        };
-        let Commitment::Part {
-            ticket,
-            index: committed_index,
-            subtree,
-            len,
-        } = auth.commitment
-        else {
-            return Err(binding_mismatch());
-        };
-        if ticket != claims.ticket_id || committed_index != index {
-            return Err(binding_mismatch());
-        }
-        let plan = PartPlan::new(claims.bytes, claims.part_size, self.cfg.max_parts)
+        let mut outcome = self.outcome(a);
+        let opened = async {
+            let claims = self.part_ticket(a, Procedure::UploadPart, token)?;
+            let Some(auth) = &a.auth else {
+                return Err(ServerError::unauthenticated(
+                    "missing auth v2 authorization",
+                ));
+            };
+            let Commitment::Part {
+                ticket,
+                index: committed_index,
+                subtree,
+                len,
+            } = auth.commitment
+            else {
+                return Err(binding_mismatch());
+            };
+            if ticket != claims.ticket_id || committed_index != index {
+                return Err(binding_mismatch());
+            }
+            let plan = PartPlan::new(claims.bytes, claims.part_size, self.cfg.max_parts)
+                .map_err(part_error)?;
+            plan.check(&PartCommitment {
+                ticket,
+                index,
+                subtree,
+                len,
+            })
             .map_err(part_error)?;
-        plan.check(&PartCommitment {
-            ticket,
-            index,
-            subtree,
-            len,
-        })
-        .map_err(part_error)?;
-        if claims.upload_session.is_empty() {
-            return Err(invalid_ticket());
+            if claims.upload_session.is_empty() {
+                return Err(invalid_ticket());
+            }
+            let key: BlobKey = PackKey(claims.pack_id).into();
+            let sink = self
+                .blobs
+                .begin_part(key, &claims.upload_session, &plan, index, subtree)
+                .await
+                .map_err(|e| multipart_error(StorageOp::MultipartPart, e))?;
+            Ok((ticket, subtree, len, sink))
         }
-        let key: BlobKey = PackKey(claims.pack_id).into();
-        let sink = self
-            .blobs
-            .begin_part(key, &claims.upload_session, &plan, index, subtree)
-            .await
-            .map_err(|e| multipart_error(StorageOp::MultipartPart, e))?;
-        Ok(PartUploadSession {
-            pipe: self,
-            ticket,
-            index,
-            subtree,
-            len,
-            seen: 0,
-            sink: Some(sink),
-        })
+        .await;
+        match opened {
+            Ok((ticket, subtree, len, sink)) => Ok(PartUploadSession {
+                pipe: self,
+                ticket,
+                index,
+                subtree,
+                len,
+                seen: 0,
+                sink: Some(sink),
+                failed: None,
+                outcome,
+            }),
+            Err(err) => {
+                outcome.record(Err(&err));
+                Err(err)
+            }
+        }
     }
 
     /// Authenticate all receipts and the merged pack root before any store
@@ -300,15 +354,40 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .head(&key)
                 .await
                 .map_err(|e| multipart_error(StorageOp::BlobHead, e))?;
-            if present.is_some_and(|meta| meta.len == claims.bytes) {
+            if present.is_some_and(|meta| meta.len != claims.bytes) {
+                return Err(ServerError::invalid_argument(
+                    "stored pack length does not match the ticket",
+                ));
+            }
+            if present.is_some() {
                 if let Err(err) = self.blobs.abort(key, &claims.upload_session).await {
                     tracing::warn!(error = %err, "failed to abort completed multipart session");
                 }
             } else {
-                self.blobs
+                match self
+                    .blobs
                     .complete(key, &claims.upload_session, &plan, &parts)
                     .await
-                    .map_err(|e| multipart_error(StorageOp::MultipartSession, e))?;
+                {
+                    Ok(_) => {}
+                    Err(StoreError::SessionGone) => {
+                        let found = self
+                            .blobs
+                            .head(&key)
+                            .await
+                            .map_err(|e| multipart_error(StorageOp::BlobHead, e))?;
+                        match found {
+                            Some(meta) if meta.len == claims.bytes => {}
+                            Some(_) => {
+                                return Err(ServerError::invalid_argument(
+                                    "stored pack length does not match the ticket",
+                                ));
+                            }
+                            None => return Err(invalid_ticket()),
+                        }
+                    }
+                    Err(e) => return Err(multipart_error(StorageOp::MultipartSession, e)),
+                }
             }
             write_upload_marker(&self.blobs, &claims.ticket_id, &claims.pack_id)
                 .await

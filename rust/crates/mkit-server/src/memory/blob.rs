@@ -235,7 +235,7 @@ impl MultipartBlobStore for MemoryBlobStore {
         }
         if bytes.len() as u64 != plan.total()
             || merge_to_root(plan, &cvs).map_err(|e| StoreError::Invalid(e.to_string().into()))?
-                != key.0
+                != key.hash()
         {
             return Err(StoreError::Invalid(
                 "merged part root does not match key".into(),
@@ -282,9 +282,7 @@ impl PartSink for MemoryPartSink {
             .finalize()
             .map_err(|e| StoreError::Invalid(e.to_string().into()))?;
         if cv != self.expected_cv {
-            return Err(StoreError::Invalid(
-                "part subtree hash does not match its commitment".into(),
-            ));
+            return Err(StoreError::PartSubtreeMismatch);
         }
         let mut sessions = lock(&self.shared.sessions);
         let upload = sessions
@@ -293,21 +291,13 @@ impl PartSink for MemoryPartSink {
         if upload.key != self.key {
             return Err(StoreError::SessionGone);
         }
-        if let Some(existing) = upload.parts.get(&self.index) {
-            if existing.cv != cv {
-                return Err(StoreError::Invalid(
-                    "part index already holds different content".into(),
-                ));
-            }
-        } else {
-            upload.parts.insert(
-                self.index,
-                MemoryPart {
-                    bytes: Bytes::from(self.bytes),
-                    cv,
-                },
-            );
-        }
+        upload.parts.insert(
+            self.index,
+            MemoryPart {
+                bytes: Bytes::from(self.bytes),
+                cv,
+            },
+        );
         Ok(cv.to_vec())
     }
 
@@ -379,7 +369,7 @@ impl PackSink for MemoryPackSink {
         if self.buf.len() as u64 != self.len {
             return Err(StoreError::Invalid("blob length does not match".into()));
         }
-        if self.hasher.finalize() != self.key.0 {
+        if self.hasher.finalize() != self.key.hash() {
             return Err(StoreError::Invalid(
                 "blob hash does not match its key".into(),
             ));
@@ -404,7 +394,7 @@ mod tests {
     use super::*;
 
     fn key_of(bytes: &[u8]) -> BlobKey {
-        BlobKey::new(hash(bytes))
+        BlobKey::pack(hash(bytes))
     }
 
     fn put(
@@ -625,7 +615,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             block_on(bad.commit()),
-            Err(StoreError::Invalid(_))
+            Err(StoreError::PartSubtreeMismatch)
         ));
         assert_eq!(block_on(store.head(&key)).unwrap(), None);
 
@@ -681,7 +671,7 @@ mod tests {
         let store = MemoryBlobStore::default();
         let content = b"marker";
         let pack = key_of(content);
-        let marker = BlobKey::upload_marker(pack.0);
+        let marker = BlobKey::upload_marker(pack.hash());
         assert_ne!(pack, marker);
         assert_eq!(
             put(&store, marker, content.len() as u64, &[content]).unwrap(),

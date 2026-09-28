@@ -175,7 +175,14 @@ async fn upload_part<B: MultipartBlobStore, N: NamespaceStore, H: HookSet>(
     a: &Authenticated,
     mut requests: InboundStream<UploadPartRequest>,
 ) -> Result<Vec<u8>, ConnectError> {
-    let header = match requests.next().await.transpose()? {
+    let first = match requests.next().await.transpose() {
+        Ok(first) => first,
+        Err(err) => {
+            pipe.record_part_error(a, &recorded(&err));
+            return Err(err);
+        }
+    };
+    let header = match first {
         None => Err(UploadError::HeaderMissing { stream_empty: true }),
         Some(first) => match first.to_owned_message().msg {
             Some(PartMsg::Header(header)) => Ok(*header),
@@ -184,7 +191,16 @@ async fn upload_part<B: MultipartBlobStore, N: NamespaceStore, H: HookSet>(
             }),
         },
     }
-    .map_err(ServerError::from)?;
+    .map_err(|error| {
+        ServerError::invalid_argument(error.connect_message().replace("UploadPack", "UploadPart"))
+    });
+    let header = match header {
+        Ok(header) => header,
+        Err(err) => {
+            pipe.record_part_error(a, &err);
+            return Err(err.into());
+        }
+    };
     let mut session = pipe
         .open_part(
             a,
@@ -197,26 +213,26 @@ async fn upload_part<B: MultipartBlobStore, N: NamespaceStore, H: HookSet>(
             Ok(message) => match message.to_owned_message().msg {
                 Some(PartMsg::Chunk(chunk)) => chunk,
                 Some(PartMsg::Header(_)) => {
-                    session.abort().await;
-                    return Err(
-                        ServerError::from(UploadError::UnexpectedMessage { header: true }).into(),
-                    );
+                    let err =
+                        ServerError::invalid_argument("UploadPart: saw a second `header` message");
+                    session.abort_with(&err).await;
+                    return Err(err.into());
                 }
                 None => {
-                    session.abort().await;
-                    return Err(ServerError::from(UploadError::UnexpectedMessage {
-                        header: false,
-                    })
-                    .into());
+                    let err = ServerError::invalid_argument(
+                        "UploadPart: message with neither `header` nor `chunk` set",
+                    );
+                    session.abort_with(&err).await;
+                    return Err(err.into());
                 }
             },
             Err(err) => {
-                session.abort().await;
+                session.abort_with(&recorded(&err)).await;
                 return Err(err);
             }
         };
         if let Err(err) = session.push(Bytes::from(chunk)).await {
-            session.abort().await;
+            session.abort_with(&err).await;
             return Err(err.into());
         }
     }

@@ -84,7 +84,7 @@ impl FsBlobStore {
     }
 
     fn dir_for(&self, key: &BlobKey) -> PathBuf {
-        match key.1 {
+        match key.namespace() {
             BlobNamespace::Pack => self.dir(),
             BlobNamespace::UploadMarker => self.root.join("upload-markers/v1"),
         }
@@ -194,7 +194,7 @@ impl FsPackSink {
         if self.written != self.declared {
             return Err(StoreError::Invalid("blob length does not match".into()));
         }
-        if self.hasher.finalize() != self.key.0 {
+        if self.hasher.finalize() != self.key.hash() {
             return Err(StoreError::Invalid(
                 "blob hash does not match its key".into(),
             ));

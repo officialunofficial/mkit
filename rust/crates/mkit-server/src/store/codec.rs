@@ -104,6 +104,7 @@ pub struct TicketV1 {
     /// One durable outcome id, including synthetic ids for default admission.
     pub reservation_id: String,
     /// Backend multipart upload session, when allocated.
+    #[serde(with = "optional_bytes_hex_json")]
     pub upload_session: Option<Vec<u8>>,
 }
 
@@ -249,6 +250,40 @@ mod optional_hash_json {
             .map(from_hex)
             .transpose()
             .map_err(serde::de::Error::custom)
+    }
+}
+
+mod optional_bytes_hex_json {
+    use super::{Deserialize, Serialize, to_hex_bytes};
+
+    #[allow(clippy::ref_option)]
+    pub(super) fn serialize<S: serde::Serializer>(
+        bytes: &Option<Vec<u8>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        bytes
+            .as_ref()
+            .map(|value| to_hex_bytes(value))
+            .serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Vec<u8>>, D::Error> {
+        Option::<String>::deserialize(deserializer)?
+            .map(|s| {
+                if s.len() % 2 != 0 {
+                    return Err(serde::de::Error::custom("odd-length upload session hex"));
+                }
+                s.as_bytes()
+                    .chunks_exact(2)
+                    .map(|pair| {
+                        let text = core::str::from_utf8(pair).map_err(serde::de::Error::custom)?;
+                        u8::from_str_radix(text, 16).map_err(serde::de::Error::custom)
+                    })
+                    .collect()
+            })
+            .transpose()
     }
 }
 
@@ -861,6 +896,15 @@ mod tests {
         assert_eq!(decode_ticket(&encode_ticket(&ticket)).unwrap(), ticket);
         let mut session = ticket.clone();
         session.upload_session = Some(b"backend-session".to_vec());
+        let encoded = encode_ticket(&session);
+        let expected = golden.replace(
+            "\"upload_session\":null",
+            "\"upload_session\":\"6261636b656e642d73657373696f6e\"",
+        );
+        assert_eq!(
+            encoded.as_bytes(),
+            [&[CODEC_V1][..], expected.as_bytes()].concat()
+        );
         assert_eq!(decode_ticket(&encode_ticket(&session)).unwrap(), session);
         let base = serde_json::to_value(&ticket).unwrap();
         for (field, bad) in [

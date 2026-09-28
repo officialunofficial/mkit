@@ -133,7 +133,7 @@ fn relay_uses_one_watermark_read_and_one_atomic_apply_per_target() {
         }
         assert_eq!(target.transport().targets().len(), 2);
         for pack in &packs {
-            let partition = D34Shards.membership(&repo, &BlobKey::new(*pack));
+            let partition = D34Shards.membership(&repo, &BlobKey::pack(*pack));
             let key = keys::membership(&repo.name, pack);
             assert_eq!(
                 target.get(&partition, &key).await.unwrap(),
@@ -179,7 +179,7 @@ fn relay_uses_one_watermark_read_and_one_atomic_apply_per_target() {
             "only get rh per duplicate target"
         );
         for pack in &packs {
-            let partition = D34Shards.membership(&repo, &BlobKey::new(*pack));
+            let partition = D34Shards.membership(&repo, &BlobKey::pack(*pack));
             assert_eq!(
                 target
                     .get(&partition, &keys::membership(&repo.name, pack))

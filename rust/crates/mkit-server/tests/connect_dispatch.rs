@@ -1158,7 +1158,7 @@ async fn upload_part_stream_rejects_chunk_before_header_and_empty_chunk() {
     let data = vec![3; usize::try_from(MIN_PART_SIZE).unwrap() + 1];
     let id = hash(&data);
     let session = blobs
-        .begin_multipart(BlobKey::new(id), data.len() as u64, MIN_PART_SIZE)
+        .begin_multipart(BlobKey::pack(id), data.len() as u64, MIN_PART_SIZE)
         .await
         .unwrap();
     let claims = TicketClaims {
@@ -1213,7 +1213,7 @@ async fn upload_part_stream_rejects_chunk_before_header_and_empty_chunk() {
     assert_eq!(end["error"]["code"], "invalid_argument");
     assert_eq!(
         end["error"]["message"],
-        "UploadPack: first message MUST be `header`"
+        "UploadPart: first message MUST be `header`"
     );
     let mut body = frame(&header);
     body.extend(frame(&empty));

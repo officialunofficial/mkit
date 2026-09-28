@@ -77,7 +77,7 @@ fn replay_state<H: HookSet>(env: &Env<H>, req: &Req) -> Option<ReplayState> {
 }
 
 fn blob_present<H: HookSet>(env: &Env<H>, pack: &[u8]) -> bool {
-    let key = BlobKey::new(hash(pack));
+    let key = BlobKey::pack(hash(pack));
     now(env.pipe.blobs.head(&key)).unwrap().is_some()
 }
 

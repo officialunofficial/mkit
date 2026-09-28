@@ -21,7 +21,7 @@ use crate::store::{
     Batch, BatchOutcome, BlobBody, BlobMeta, BlobStore, ByteRange, CommitOutcome, Cursor, Key,
     PackSink, Partition, PartitionStats, ScanPage, StoreCapabilities, Value,
 };
-use crate::telemetry::NoopMetrics;
+use crate::telemetry::{METRIC_REQUESTS, METRIC_UPLOAD_BYTES, Metrics, NoopMetrics};
 use crate::upload::UploadLimits;
 use crate::upload::marker::upload_marker;
 use crate::upload::token::{TicketClaims, TicketKeys};
@@ -157,7 +157,7 @@ fn signed<B: MultipartBlobStore>(
 fn claims(blobs: &MemoryBlobStore, data: &[u8], signer: &SigningKey) -> TicketClaims {
     let pack_id = hash(data);
     let session =
-        block_on(blobs.begin_multipart(BlobKey::new(pack_id), data.len() as u64, MIN_PART_SIZE))
+        block_on(blobs.begin_multipart(BlobKey::pack(pack_id), data.len() as u64, MIN_PART_SIZE))
             .unwrap();
     TicketClaims {
         ticket_id: [0x11; 32],
@@ -202,7 +202,11 @@ fn part_auth<B: MultipartBlobStore>(
     signed(pipe, signer, Procedure::UploadPart, &commitment, nonce)
 }
 
-fn complete_auth(pipe: &TestPipe, signer: &SigningKey, nonce: u32) -> Authenticated {
+fn complete_auth<B: MultipartBlobStore>(
+    pipe: &Pipeline<B, NoMeta>,
+    signer: &SigningKey,
+    nonce: u32,
+) -> Authenticated {
     signed(
         pipe,
         signer,
@@ -259,7 +263,7 @@ fn out_of_order_duplicate_complete_twice_and_marker_without_metadata() {
     block_on(pipe.complete_upload(&a, &token, &receipts)).unwrap();
     block_on(pipe.complete_upload(&a, &token, &receipts)).unwrap();
     assert_eq!(
-        block_on(blobs.head(&BlobKey::new(claims.pack_id)))
+        block_on(blobs.head(&BlobKey::pack(claims.pack_id)))
             .unwrap()
             .unwrap()
             .len,
@@ -419,7 +423,7 @@ fn completion_rejects_receipts_and_wrong_root_before_store() {
         Code::InvalidArgument
     );
     assert!(
-        block_on(blobs.head(&BlobKey::new(claims.pack_id)))
+        block_on(blobs.head(&BlobKey::pack(claims.pack_id)))
             .unwrap()
             .is_none()
     );
@@ -439,7 +443,7 @@ fn already_present_pack_aborts_session_and_writes_marker() {
         upload(&pipe, &signer, &claims, &token, &plan, &data, 0, 1),
         upload(&pipe, &signer, &claims, &token, &plan, &data, 1, 2),
     ];
-    let mut sink = block_on(blobs.begin(BlobKey::new(claims.pack_id), claims.bytes)).unwrap();
+    let mut sink = block_on(blobs.begin(BlobKey::pack(claims.pack_id), claims.bytes)).unwrap();
     for chunk in data.chunks(64 * 1024) {
         block_on(sink.write(Bytes::copy_from_slice(chunk))).unwrap();
     }
@@ -476,9 +480,339 @@ fn resume_after_dropping_pipeline_state_with_held_receipts() {
     ];
     block_on(pipe.complete_upload(&complete_auth(&pipe, &signer, 4), &token, &receipts)).unwrap();
     assert!(
-        block_on(blobs.head(&BlobKey::new(claims.pack_id)))
+        block_on(blobs.head(&BlobKey::pack(claims.pack_id)))
             .unwrap()
             .is_some()
+    );
+}
+
+#[test]
+fn verified_reupload_replaces_part_and_old_receipt_cannot_complete() {
+    let blobs = MemoryBlobStore::default();
+    let keys = keys();
+    let pipe = pipe(blobs.clone(), keys.clone(), Arc::new(ManualClock::new(T0)));
+    let signer = signer();
+    let data = data(2, 5);
+    let claims = claims(&blobs, &data, &signer);
+    let token = keys.mint(&claims);
+    let plan = PartPlan::new(claims.bytes, claims.part_size, 10_000).unwrap();
+    let first = upload(&pipe, &signer, &claims, &token, &plan, &data, 0, 1);
+    let mut wrong = part(&plan, &data, 1).to_vec();
+    wrong[0] ^= 1;
+    let wrong_cv = part_subtree_cv(&plan, 1, &wrong).unwrap();
+    let a = part_auth(&pipe, &signer, &claims, 1, &wrong_cv, wrong.len() as u64, 2);
+    let mut session = block_on(pipe.open_part(&a, &token, 1)).unwrap();
+    block_on(session.push(Bytes::from(wrong))).unwrap();
+    let wrong_receipt = block_on(session.finish()).unwrap();
+    let completion = complete_auth(&pipe, &signer, 3);
+    assert_eq!(
+        code(block_on(pipe.complete_upload(
+            &completion,
+            &token,
+            &[first.clone(), wrong_receipt.clone()]
+        ))),
+        Code::InvalidArgument
+    );
+    assert!(
+        block_on(blobs.head(&BlobKey::pack(claims.pack_id)))
+            .unwrap()
+            .is_none()
+    );
+    let correct = upload(&pipe, &signer, &claims, &token, &plan, &data, 1, 4);
+    assert!(matches!(
+        block_on(blobs.complete(
+            BlobKey::pack(claims.pack_id),
+            &claims.upload_session,
+            &plan,
+            &[
+                PartRef {
+                    index: 0,
+                    len: MIN_PART_SIZE,
+                    tag: receipt::verify(&keys, &first).unwrap().tag
+                },
+                PartRef {
+                    index: 1,
+                    len: 5,
+                    tag: receipt::verify(&keys, &wrong_receipt).unwrap().tag
+                }
+            ]
+        )),
+        Err(StoreError::Invalid(_))
+    ));
+    block_on(pipe.complete_upload(&completion, &token, &[first, correct])).unwrap();
+    assert!(
+        block_on(blobs.head(&BlobKey::pack(claims.pack_id)))
+            .unwrap()
+            .is_some()
+    );
+}
+
+/// Simulate another completion consuming the session after our first head.
+struct ConcurrentComplete<const MAX: u32>(MemoryBlobStore);
+
+impl<const MAX: u32> BlobStore for ConcurrentComplete<MAX> {
+    type Sink = crate::memory::MemoryPackSink;
+    async fn begin(&self, key: BlobKey, len: u64) -> Result<Self::Sink, StoreError> {
+        self.0.begin(key, len).await
+    }
+    async fn get(
+        &self,
+        key: &BlobKey,
+        range: Option<ByteRange>,
+    ) -> Result<Option<BlobBody>, StoreError> {
+        self.0.get(key, range).await
+    }
+    async fn head(&self, key: &BlobKey) -> Result<Option<BlobMeta>, StoreError> {
+        self.0.head(key).await
+    }
+    async fn probe(&self) -> Result<(), StoreError> {
+        self.0.probe().await
+    }
+    async fn delete(&self, key: &BlobKey) -> Result<bool, StoreError> {
+        self.0.delete(key).await
+    }
+}
+
+impl<const MAX: u32> MultipartBlobStore for ConcurrentComplete<MAX> {
+    type PartSink = crate::memory::MemoryPartSink;
+    const MAX_PARTS: u32 = MAX;
+    fn supports_multipart(&self) -> bool {
+        true
+    }
+    async fn begin_multipart(
+        &self,
+        key: BlobKey,
+        len: u64,
+        part_size: u64,
+    ) -> Result<Vec<u8>, StoreError> {
+        self.0.begin_multipart(key, len, part_size).await
+    }
+    async fn begin_part(
+        &self,
+        key: BlobKey,
+        session: &[u8],
+        plan: &PartPlan,
+        index: u32,
+        expected_cv: [u8; 32],
+    ) -> Result<Self::PartSink, StoreError> {
+        self.0
+            .begin_part(key, session, plan, index, expected_cv)
+            .await
+    }
+    async fn complete(
+        &self,
+        key: BlobKey,
+        session: &[u8],
+        plan: &PartPlan,
+        parts: &[PartRef],
+    ) -> Result<CommitOutcome, StoreError> {
+        self.0.complete(key, session, plan, parts).await?;
+        Err(StoreError::SessionGone)
+    }
+    async fn abort(&self, key: BlobKey, session: &[u8]) -> Result<(), StoreError> {
+        self.0.abort(key, session).await
+    }
+}
+
+#[test]
+fn concurrent_completion_consumes_session_but_retry_succeeds() {
+    let blobs = MemoryBlobStore::default();
+    let keys = keys();
+    let signer = signer();
+    let data = data(2, 5);
+    let claims = claims(&blobs, &data, &signer);
+    let token = keys.mint(&claims);
+    let plan = PartPlan::new(claims.bytes, claims.part_size, 10_000).unwrap();
+    let upload_pipe = pipe(blobs.clone(), keys.clone(), Arc::new(ManualClock::new(T0)));
+    let receipts = vec![
+        upload(&upload_pipe, &signer, &claims, &token, &plan, &data, 0, 1),
+        upload(&upload_pipe, &signer, &claims, &token, &plan, &data, 1, 2),
+    ];
+    let concurrent = pipe_with(
+        ConcurrentComplete::<{ u32::MAX }>(blobs.clone()),
+        keys,
+        Arc::new(ManualClock::new(T0)),
+    );
+    let a = complete_auth(&concurrent, &signer, 3);
+    block_on(concurrent.complete_upload(&a, &token, &receipts)).unwrap();
+    let (marker, _) = upload_marker(&claims.ticket_id, &claims.pack_id);
+    assert!(block_on(blobs.head(&marker)).unwrap().is_some());
+    assert!(
+        block_on(blobs.head(&BlobKey::pack(claims.pack_id)))
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn configured_part_limit_must_fit_backend_capacity() {
+    let repo = RepoId {
+        namespace: NamespaceKey::deployment_default(),
+        name: RepoName::new(REPO).unwrap(),
+    };
+    let mut cfg = PipelineConfig::new(
+        Addressing::Single { repo },
+        AuthMode::AuthV2(AuthV2Config::new(AUDIENCE, REPO).unwrap()),
+        UploadLimits {
+            max_total_bytes: 2 * MIN_PART_SIZE,
+            max_chunks: 1024,
+        },
+    );
+    cfg.max_parts = 2;
+    let err = Pipeline::new(
+        ConcurrentComplete::<1>(MemoryBlobStore::default()),
+        NoMeta,
+        Hooks::new(),
+        cfg,
+        Arc::new(ManualClock::new(T0)),
+        Arc::new(NoopMetrics),
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), Code::InvalidArgument);
+    assert_eq!(
+        err.public_message(),
+        "max_parts exceeds storage backend capacity"
+    );
+}
+
+#[test]
+fn part_rpc_refusals_require_keys_and_auth_v2() {
+    let blobs = MemoryBlobStore::default();
+    let keys = keys();
+    let clock = Arc::new(ManualClock::new(T0));
+    let normal = pipe(blobs.clone(), keys.clone(), clock.clone());
+    let signer = signer();
+    let data = data(2, 1);
+    let claims = claims(&blobs, &data, &signer);
+    let token = keys.mint(&claims);
+    let plan = PartPlan::new(claims.bytes, claims.part_size, 10_000).unwrap();
+    let cv = part_subtree_cv(&plan, 0, part(&plan, &data, 0)).unwrap();
+    let a_part = part_auth(&normal, &signer, &claims, 0, &cv, MIN_PART_SIZE, 1);
+    let a_complete = complete_auth(&normal, &signer, 2);
+    let mut no_keys_cfg = normal.cfg.clone();
+    no_keys_cfg.ticket_keys = None;
+    let no_keys = Pipeline::new(
+        blobs.clone(),
+        NoMeta,
+        Hooks::new(),
+        no_keys_cfg,
+        clock.clone(),
+        Arc::new(NoopMetrics),
+    )
+    .unwrap();
+    let err = block_on(no_keys.open_part(&a_part, &token, 0)).unwrap_err();
+    assert_eq!(
+        (err.code(), err.public_message()),
+        (Code::Unimplemented, "upload tickets are not configured")
+    );
+    let err = block_on(no_keys.complete_upload(&a_complete, &token, &[])).unwrap_err();
+    assert_eq!(
+        (err.code(), err.public_message()),
+        (Code::Unimplemented, "upload tickets are not configured")
+    );
+    let mut open_cfg = normal.cfg.clone();
+    open_cfg.auth = AuthMode::Open;
+    let open = Pipeline::new(
+        blobs,
+        NoMeta,
+        Hooks::new(),
+        open_cfg,
+        clock,
+        Arc::new(NoopMetrics),
+    )
+    .unwrap();
+    let err = block_on(open.open_part(&a_part, &token, 0)).unwrap_err();
+    assert_eq!(
+        (err.code(), err.public_message()),
+        (Code::Unimplemented, "UploadPart requires auth v2")
+    );
+    let err = block_on(open.complete_upload(&a_complete, &token, &[])).unwrap_err();
+    assert_eq!(
+        (err.code(), err.public_message()),
+        (Code::Unimplemented, "CompleteUpload requires auth v2")
+    );
+}
+
+#[derive(Default)]
+struct PartMetrics(Mutex<Vec<(&'static str, String, u64)>>);
+
+impl Metrics for PartMetrics {
+    fn incr(&self, name: &'static str, labels: &[(&'static str, &str)], by: u64) {
+        let code = labels
+            .iter()
+            .find(|(key, _)| *key == "code")
+            .map_or("", |(_, value)| value);
+        self.0.lock().unwrap().push((name, code.to_owned(), by));
+    }
+    fn observe_ms(&self, _: &'static str, _: &[(&'static str, &str)], _: f64) {}
+}
+
+#[test]
+fn part_outcome_records_each_request_once_and_counts_pushed_bytes() {
+    let blobs = MemoryBlobStore::default();
+    let keys = keys();
+    let clock = Arc::new(ManualClock::new(T0));
+    let config_pipe = pipe(blobs.clone(), keys.clone(), clock.clone());
+    let metrics = Arc::new(PartMetrics::default());
+    let pipe = Pipeline::new(
+        blobs.clone(),
+        NoMeta,
+        Hooks::new(),
+        config_pipe.cfg.clone(),
+        clock,
+        metrics.clone(),
+    )
+    .unwrap();
+    let signer = signer();
+    let data = data(2, 1);
+    let claims = claims(&blobs, &data, &signer);
+    let token = keys.mint(&claims);
+    let plan = PartPlan::new(claims.bytes, claims.part_size, 10_000).unwrap();
+    let bytes = part(&plan, &data, 1);
+    let cv = part_subtree_cv(&plan, 1, bytes).unwrap();
+    let a = part_auth(&pipe, &signer, &claims, 1, &cv, bytes.len() as u64, 1);
+    assert_eq!(
+        code(block_on(pipe.open_part(&a, &token, 0))),
+        Code::PermissionDenied
+    );
+    assert_eq!(
+        code(block_on(pipe.open_part(&a, b"garbage", 1))),
+        Code::FailedPrecondition
+    );
+    let mut session = block_on(pipe.open_part(&a, &token, 1)).unwrap();
+    block_on(session.push(Bytes::copy_from_slice(bytes))).unwrap();
+    block_on(session.finish()).unwrap();
+    let mut invalid = block_on(pipe.open_part(&a, &token, 1)).unwrap();
+    assert_eq!(
+        code(block_on(invalid.push(Bytes::new()))),
+        Code::InvalidArgument
+    );
+    block_on(invalid.abort());
+    let session = block_on(pipe.open_part(&a, &token, 1)).unwrap();
+    drop(session);
+    let entries = metrics.0.lock().unwrap();
+    let requests: Vec<_> = entries
+        .iter()
+        .filter(|(name, _, _)| *name == METRIC_REQUESTS)
+        .map(|(_, code, _)| code.as_str())
+        .collect();
+    assert_eq!(
+        requests,
+        [
+            "permission_denied",
+            "failed_precondition",
+            "ok",
+            "invalid_argument",
+            "canceled"
+        ]
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|(name, _, _)| *name == METRIC_UPLOAD_BYTES)
+            .map(|(_, _, by)| by)
+            .sum::<u64>(),
+        bytes.len() as u64
     );
 }
 
@@ -610,4 +944,28 @@ fn part_pipeline_forwards_chunks_without_buffering_a_part() {
     );
     assert!(writes.iter().all(|size| *size <= 128 * 1024));
     assert!(writes.len() > 1);
+}
+
+#[test]
+fn unrelated_store_invalid_error_has_fixed_public_message() {
+    let inner = MemoryBlobStore::default();
+    let pipe = pipe_with(
+        CountingStore {
+            inner: inner.clone(),
+            seen: Arc::new(Mutex::new(Vec::new())),
+        },
+        keys(),
+        Arc::new(ManualClock::new(T0)),
+    );
+    let signer = signer();
+    let data = data(2, 1);
+    let claims = claims(&inner, &data, &signer);
+    let plan = PartPlan::new(claims.bytes, claims.part_size, 10_000).unwrap();
+    let bytes = part(&plan, &data, 1);
+    let auth = part_auth(&pipe, &signer, &claims, 1, &[0; 32], bytes.len() as u64, 1);
+    let mut session = block_on(pipe.open_part(&auth, &keys().mint(&claims), 1)).unwrap();
+    block_on(session.push(Bytes::copy_from_slice(bytes))).unwrap();
+    let err = block_on(session.finish()).unwrap_err();
+    assert_eq!(err.code(), Code::InvalidArgument);
+    assert_eq!(err.public_message(), "invalid multipart upload state");
 }

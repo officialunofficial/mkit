@@ -274,7 +274,7 @@ fn seed<B: MultipartBlobStore, N: NamespaceStore, H: HookSet>(
 }
 
 fn blob_present(blobs: &impl BlobStore, id: Hash) -> bool {
-    block_on(blobs.head(&BlobKey::new(id))).unwrap().is_some()
+    block_on(blobs.head(&BlobKey::pack(id))).unwrap().is_some()
 }
 
 fn valid_pack() -> (Vec<u8>, Hash) {

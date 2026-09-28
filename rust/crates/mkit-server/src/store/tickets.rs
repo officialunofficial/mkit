@@ -409,7 +409,7 @@ pub fn plan_membership(
         if !writes.contains(&put) {
             writes.push(put);
         }
-        let target = shards.membership(repo_id, &BlobKey::from_hash(*pack));
+        let target = shards.membership(repo_id, &BlobKey::pack(*pack));
         if target != *source {
             outbox.relay(&target, vec![(key, Value::default())]);
         }

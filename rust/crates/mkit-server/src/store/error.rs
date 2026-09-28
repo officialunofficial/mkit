@@ -24,6 +24,9 @@ pub enum StoreError {
     /// not match its key or declared length. Nothing was written.
     #[error("invalid storage request: {0}")]
     Invalid(Cow<'static, str>),
+    /// A staged part's subtree hash differs from its authenticated commitment.
+    #[error("part subtree hash does not match its commitment")]
+    PartSubtreeMismatch,
     /// A byte range starts at or past the end of a blob of `len` bytes
     /// (HTTP 416 on the serving path).
     #[error("byte range not satisfiable for a {len}-byte blob")]

@@ -514,7 +514,7 @@ fn membership_is_local_under_single_and_relays_identical_deduplicated_upserts_un
             assert_eq!(relays.len(), 1);
             assert_eq!(
                 relays[0].target,
-                shards.membership(&repo_id, &BlobKey::new(pack))
+                shards.membership(&repo_id, &BlobKey::pack(pack))
             );
             assert_eq!(relays[0].puts, vec![membership]);
         }

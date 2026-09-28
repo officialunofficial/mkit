@@ -1,7 +1,7 @@
 //! Shared stateless ticket verification for ticketed pack and part uploads.
 
 use super::token::{TicketClaims, TicketKeys};
-use crate::error::{Code, ServerError};
+use crate::error::ServerError;
 
 /// Verify a ticket token on the business clock and bind it to the caller.
 /// Checks audience, repository and signer only; callers check pack/bytes/part fields.
@@ -14,11 +14,6 @@ pub(crate) fn verify_ticket(
     signer: &[u8; 32],
 ) -> Result<TicketClaims, ServerError> {
     let claims = keys.verify(token, now_ms)?;
-    if claims.audience != audience || claims.repository != repository || claims.signer != *signer {
-        return Err(ServerError::new(
-            Code::PermissionDenied,
-            "upload ticket binding mismatch",
-        ));
-    }
+    claims.check_binding(audience, repository, signer, &claims.pack_id, claims.bytes)?;
     Ok(claims)
 }

@@ -17,6 +17,7 @@ use crate::rt::{BoxStream, MaybeSend, MaybeSync};
 
 /// The independent blob namespaces served by one store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub enum BlobNamespace {
     /// Pack bytes, addressable by pack RPCs.
     Pack,
@@ -26,37 +27,52 @@ pub enum BlobNamespace {
 
 /// A content hash and its blob namespace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct BlobKey(pub [u8; 32], pub BlobNamespace);
+pub struct BlobKey {
+    hash: [u8; 32],
+    namespace: BlobNamespace,
+}
 
 impl BlobKey {
     /// A pack blob key.
     #[must_use]
-    pub const fn new(hash: [u8; 32]) -> Self {
-        Self(hash, BlobNamespace::Pack)
-    }
-
-    /// A pack blob key.
-    #[must_use]
-    pub const fn from_hash(hash: [u8; 32]) -> Self {
-        Self::new(hash)
+    pub const fn pack(hash: [u8; 32]) -> Self {
+        Self {
+            hash,
+            namespace: BlobNamespace::Pack,
+        }
     }
 
     /// An upload marker blob key, outside the pack namespace.
     #[must_use]
     pub const fn upload_marker(hash: [u8; 32]) -> Self {
-        Self(hash, BlobNamespace::UploadMarker)
+        Self {
+            hash,
+            namespace: BlobNamespace::UploadMarker,
+        }
+    }
+
+    /// The namespace of this key.
+    #[must_use]
+    pub const fn namespace(&self) -> BlobNamespace {
+        self.namespace
+    }
+
+    /// The content hash of this key.
+    #[must_use]
+    pub const fn hash(&self) -> [u8; 32] {
+        self.hash
     }
 
     /// The lowercase hexadecimal content hash.
     #[must_use]
     pub fn to_hex(&self) -> String {
-        mkit_core::protocol::PackKey(self.0).to_hex()
+        mkit_core::protocol::PackKey(self.hash).to_hex()
     }
 }
 
 impl From<mkit_core::protocol::PackKey> for BlobKey {
     fn from(key: mkit_core::protocol::PackKey) -> Self {
-        Self::new(key.0)
+        Self::pack(key.0)
     }
 }
 
@@ -209,6 +225,8 @@ pub trait PartSink: MaybeSend {
     fn write(&mut self, chunk: Bytes) -> impl Future<Output = Result<(), StoreError>> + MaybeSend;
 
     /// Verify length and subtree CV, then return an opaque backend tag.
+    /// A CV mismatch is [`StoreError::PartSubtreeMismatch`]; other invalid
+    /// staged state is [`StoreError::Invalid`].
     fn commit(self) -> impl Future<Output = Result<Vec<u8>, StoreError>> + MaybeSend;
 
     /// Discard this attempted part.

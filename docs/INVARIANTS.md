@@ -1267,7 +1267,7 @@ part, publish a pack or create repository membership.
 **If violated:** a forged receipt can publish unverified content, or an
 upload can bypass BeginUpload's authorization and admission.
 
-**Enforced by:** `upload::receipt_tests` and `pipeline::tests::parts` (WP-1.11a).
+**Enforced by:** `upload::receipt::tests`, `pipeline::parts::tests`, and `pipeline::tests::begin_parts` (WP-1.11a).
 
 ## Storage pressure observes physical capacity after commit
 

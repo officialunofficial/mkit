@@ -95,7 +95,7 @@ impl Procedure {
         )
     }
 
-    /// Whether the procedure streams: `UploadPack` and `DownloadPack`.
+    /// Whether the procedure streams: `UploadPack`, `UploadPart` and `DownloadPack`.
     #[must_use]
     pub const fn is_streaming(self) -> bool {
         matches!(

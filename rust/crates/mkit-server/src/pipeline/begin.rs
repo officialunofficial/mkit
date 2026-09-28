@@ -364,7 +364,7 @@ pub(super) fn plan(
         )),
         Err(TicketPlanError::Existing(_) | TicketPlanError::CapExceeded { .. }) => {
             // TODO(WP-3.3): record Aborted via Pending.
-            Err(ServerError::unavailable("upload ticket race"))
+            Err(ServerError::aborted_retryable("upload ticket race"))
         }
         Err(TicketPlanError::Corrupt(err)) => Err(meta_error(err)),
         Err(TicketPlanError::Invalid(detail)) => Err(internal(detail)),

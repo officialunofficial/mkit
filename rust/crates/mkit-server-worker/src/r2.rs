@@ -155,9 +155,10 @@ impl<B: ObjectBucket> R2BlobStore<B> {
     /// The object key of `key`: `<keyspace>/<hex>`.
     #[must_use]
     pub fn object_key(&self, key: &BlobKey) -> String {
-        let namespace = match key.1 {
+        let namespace = match key.namespace() {
             BlobNamespace::Pack => self.keyspace,
             BlobNamespace::UploadMarker => "upload-markers/v1",
+            _ => unreachable!("unsupported blob namespace"),
         };
         format!("{namespace}/{}", key.to_hex())
     }
@@ -213,7 +214,7 @@ impl Withheld {
         if self.received != self.len {
             return Err(StoreError::Invalid("blob length does not match".into()));
         }
-        if self.hasher.finalize() != self.key.0 {
+        if self.hasher.finalize() != self.key.hash() {
             return Err(StoreError::Invalid(
                 "blob hash does not match its key".into(),
             ));
@@ -406,7 +407,7 @@ impl<B: ObjectBucket> BlobStore for R2BlobStore<B> {
 
 impl<B: ObjectBucket> MultipartBlobStore for R2BlobStore<B> {
     type PartSink = UnsupportedPartSink;
-    const MAX_PARTS: u32 = u32::MAX;
+    const MAX_PARTS: u32 = 10_000;
 }
 
 impl<B: ObjectBucket> R2BlobStore<B> {
@@ -650,7 +651,7 @@ mod tests {
     use super::*;
 
     fn key_of(bytes: &[u8]) -> BlobKey {
-        BlobKey::new(hash(bytes))
+        BlobKey::pack(hash(bytes))
     }
 
     #[test]

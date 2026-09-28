@@ -371,18 +371,20 @@ impl S3BlobStore {
     /// The object key of `key`: `<prefix/><keyspace>/<hex>`.
     #[must_use]
     pub fn object_key(&self, key: &BlobKey) -> String {
-        let path = match key.1 {
+        let path = match key.namespace() {
             BlobNamespace::Pack => &self.object_base,
             BlobNamespace::UploadMarker => &self.marker_base,
+            _ => unreachable!("unsupported blob namespace"),
         };
         let base = &path[self.bucket.len() + 2..];
         format!("{base}{}", key.to_hex())
     }
 
     fn object_path(&self, key: &BlobKey) -> String {
-        let base = match key.1 {
+        let base = match key.namespace() {
             BlobNamespace::Pack => &self.object_base,
             BlobNamespace::UploadMarker => &self.marker_base,
+            _ => unreachable!("unsupported blob namespace"),
         };
         format!("{base}{}", key.to_hex())
     }
@@ -752,5 +754,5 @@ impl BlobStore for S3BlobStore {
 
 impl MultipartBlobStore for S3BlobStore {
     type PartSink = UnsupportedPartSink;
-    const MAX_PARTS: u32 = u32::MAX;
+    const MAX_PARTS: u32 = 10_000;
 }

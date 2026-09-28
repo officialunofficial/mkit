@@ -38,7 +38,7 @@ fn store(fake: &FakeS3) -> S3BlobStore {
 }
 
 fn key_of(bytes: &[u8]) -> BlobKey {
-    BlobKey::new(hash(bytes))
+    BlobKey::pack(hash(bytes))
 }
 
 fn object_key(bytes: &[u8]) -> String {

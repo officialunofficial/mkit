@@ -31,7 +31,7 @@ fn repo() -> RepoId {
 async fn enqueue<S: NamespaceStore>(store: &S, pack: [u8; 32]) -> (Partition, Partition, u64) {
     let repo = repo();
     let source = D34Shards.ref_shard(&repo, "refs/heads/main");
-    let target = D34Shards.membership(&repo, &BlobKey::new(pack));
+    let target = D34Shards.membership(&repo, &BlobKey::pack(pack));
     let due = u64::try_from(SystemClock.now_ms()).unwrap();
     let mut outbox = OutboxBuilder::new(None, None).unwrap();
     outbox.relay_at(due);
@@ -308,7 +308,7 @@ async fn sqlite_crash_after_target_commit_retries_without_another_target_apply()
     let source = FaultSql::new(None);
     let target = FaultSql::new(None);
     let partition = D34Shards.ref_shard(&repo(), "refs/heads/main");
-    let destination = D34Shards.membership(&repo(), &BlobKey::new([1; 32]));
+    let destination = D34Shards.membership(&repo(), &BlobKey::pack([1; 32]));
     let key = keys::membership(&repo().name, &[1; 32]);
     queue(
         &source,
@@ -367,8 +367,8 @@ async fn sqlite_crash_after_target_commit_retries_without_another_target_apply()
 async fn sqlite_failing_target_keeps_its_later_rows_and_allows_other_targets() {
     let source = FaultSql::new(None);
     let partition = D34Shards.ref_shard(&repo(), "refs/heads/main");
-    let failing = D34Shards.membership(&repo(), &BlobKey::new([1; 32]));
-    let healthy = D34Shards.membership(&repo(), &BlobKey::new([2; 32]));
+    let failing = D34Shards.membership(&repo(), &BlobKey::pack([1; 32]));
+    let healthy = D34Shards.membership(&repo(), &BlobKey::pack([2; 32]));
     let target = FaultSql::new(Some(failing.clone()));
     let failed_key = Key::new(&b"r\0failing"[..]);
     let healthy_key = Key::new(&b"r\0healthy"[..]);
@@ -432,7 +432,7 @@ async fn sqlite_chunks_target_operations_and_source_cleanup_bytes() {
     let source = FaultSql::new(None);
     let target = FaultSql::new(None);
     let partition = D34Shards.ref_shard(&repo(), "refs/heads/main");
-    let destination = D34Shards.membership(&repo(), &BlobKey::new([1; 32]));
+    let destination = D34Shards.membership(&repo(), &BlobKey::pack([1; 32]));
     let puts: Vec<_> = (0..192u32)
         .map(|i| {
             (

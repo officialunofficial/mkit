@@ -1022,9 +1022,8 @@ prescribe a storage provider or a checkpoint encoding.
 Informative sequence for a successful asynchronous push:
 
 1. The client obtains a ticket and finishes uploading the pack under
-   STC §7.6. Completion writes no metadata row.
-2. The client attempts `AdvanceRefs` with that ticket. The server classifies
-   the pack and schedules verification. Verification
+   STC §7.6. The server classifies it and schedules verification.
+2. The client attempts `AdvanceRefs` with that ticket. Verification
    is pending, so the server returns `unavailable` with one
    `PendingVerification` detail and stores no replay result.
 3. The client waits the clamped `retry_after_ms` and polls. It reuses
