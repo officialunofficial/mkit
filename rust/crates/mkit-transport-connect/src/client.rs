@@ -22,8 +22,9 @@ use mkit_core::repo_identity::{IdentityError, RepositoryIdentity};
 use url::{Host, Url};
 
 use crate::envelope::{EnvelopeSigner, EnvelopeTransport, RetryIdentity};
-use crate::error::{ErrorContext, map_connect_error};
+use crate::error::{ErrorContext, map_connect_error, pending_verification_delay};
 use crate::executor::TokioExecutor;
+use crate::grant::{GrantCondition, GrantOperation, GrantRef, GrantRequest, GrantSource};
 use crate::proto::mkit::transport::v1::__buffa::oneof::download_pack_response::Body as DownloadBody;
 use crate::proto::mkit::transport::v1::{
     AdvanceOutcome as ProtoAdvanceOutcome, AdvanceRefsRequest, DownloadPackRequest,
@@ -139,6 +140,30 @@ const MAX_LIST_REFS_PAGES: usize = 100_000;
 /// cannot grow a paged listing without limit.
 const MAX_LIST_REFS_BYTES: usize = 128 * 1024 * 1024;
 
+const MAX_PENDING_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
+const MIN_RENEWAL_MARGIN_MS: i64 = 30_000;
+/// Returned when a pending observer asks the poll loop to stop.
+pub const PENDING_INTERRUPTED_MESSAGE: &str = "pending verification interrupted";
+
+/// Progress events for a ticket verification poll.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub enum PendingEvent {
+    /// Emitted before each sleep slice. Returning `false` stops polling.
+    Waiting { elapsed: Duration, next: Duration },
+    /// Emitted after polling ends, so progress UIs can finish their line.
+    Finished { elapsed: Duration, succeeded: bool },
+}
+
+fn advance_deadline_error(saw_pending: bool) -> TransportError {
+    let message = if saw_pending {
+        "pending verification ticket deadline expired"
+    } else {
+        "advance deadline expired"
+    };
+    TransportError::RemoteError(message.to_owned())
+}
+
 /// Environment variable consulted at [`ConnectTransport::connect`] time for
 /// an optional Bearer token — same name `mkit-transport-http` used
 /// (`MKIT_API_TOKEN`), so switching a deployment from the retired JSON
@@ -189,7 +214,8 @@ const CHUNK_SIZE: usize = 800 * 1024;
 /// (`update_ref`/`advance_refs`) are safe to wrap unconditionally because
 /// [`mkit_core::protocol::is_retryable`] already excludes
 /// `TransportError::RefConflict` — a CAS conflict is never retried here;
-/// retrying that is caller-level policy.
+/// retrying that is caller-level policy. A typed pending-verification reply
+/// from `AdvanceRefs` uses a separate bounded polling loop around that ladder.
 pub struct ConnectTransport {
     client: TransportServiceClient<EnvelopeTransport<HttpClient>>,
     executor: TokioExecutor,
@@ -197,6 +223,8 @@ pub struct ConnectTransport {
     repository: RepositoryIdentity,
     repository_text: String,
     origin: String,
+    signer_key: Option<String>,
+    grant_source: Option<Arc<dyn GrantSource>>,
     /// Per-call timeout applied to `ListRefs`/`ReadRef`/`UpdateRef`/
     /// `AdvanceRefs`/`PackExists`. See [`Self::with_unary_timeout`].
     unary_timeout: Duration,
@@ -209,6 +237,8 @@ pub struct ConnectTransport {
     /// Sleep hook between retry attempts. Production sleeps for the full
     /// delay; tests inject a no-op or recorder.
     sleep: fn(Duration),
+    now: fn() -> i64,
+    pending_observer: Option<Arc<dyn Fn(PendingEvent) -> bool + Send + Sync>>,
 }
 
 // Manual Debug: `HttpClient` doesn't implement it, and a bearer token (if
@@ -311,8 +341,8 @@ impl ConnectTransport {
         Self::connect_with_signer(url, None)
     }
 
-    /// Like [`Self::connect`], additionally signing every write RPC
-    /// (`UpdateRef`, `AdvanceRefs`, `UploadPack`) with a write envelope
+    /// Like [`Self::connect`], additionally signing repository reads and writes
+    /// with an auth v2 envelope
     /// (BLAKE3 digest + Ed25519 signature headers) when `signer` is
     /// `Some` — see the [`envelope`](crate::envelope) module. This is an
     /// ADDITIONAL auth mode alongside the bearer token read from
@@ -360,6 +390,7 @@ impl ConnectTransport {
             HttpClient::plaintext()
         };
         let repository_text = repository.to_string();
+        let signer_key = signer.as_ref().map(|signer| signer.public_key_hex());
         let transport =
             EnvelopeTransport::new(transport, signer, origin.clone(), repository_text.clone());
 
@@ -386,10 +417,14 @@ impl ConnectTransport {
             repository,
             repository_text,
             origin,
+            signer_key,
+            grant_source: None,
             unary_timeout: UNARY_TIMEOUT,
             pack_transfer_timeout: PACK_TRANSFER_TIMEOUT,
             backoff: BackoffIterator::new,
             sleep: thread::sleep,
+            now: crate::envelope::now_ms,
+            pending_observer: None,
         })
     }
 
@@ -425,6 +460,7 @@ impl ConnectTransport {
         let repository_text = repository.to_string();
         let config = ClientConfig::new(audience.parse().expect("test origin"))
             .with_default_timeout(Duration::from_secs(10));
+        let signer_key = signer.as_ref().map(|signer| signer.public_key_hex());
         Self {
             client: TransportServiceClient::new(
                 EnvelopeTransport::new(
@@ -440,10 +476,14 @@ impl ConnectTransport {
             repository,
             repository_text,
             origin: audience,
+            signer_key,
+            grant_source: None,
             unary_timeout: UNARY_TIMEOUT,
             pack_transfer_timeout: PACK_TRANSFER_TIMEOUT,
             backoff: test_backoff,
             sleep: no_sleep,
+            now: crate::envelope::now_ms,
+            pending_observer: None,
         }
     }
 
@@ -519,6 +559,253 @@ impl ConnectTransport {
         self
     }
 
+    /// Add a source of locally selected grants. The source is consulted only
+    /// for signed repository reads and writes by a non-owner key. The CLI
+    /// installs no source until its grant store is available.
+    #[must_use]
+    pub fn with_grant_source(mut self, source: Arc<dyn GrantSource>) -> Self {
+        self.grant_source = Some(source);
+        self
+    }
+
+    fn grant_options(&self, options: CallOptions, operation: GrantOperation<'_>) -> CallOptions {
+        if matches!(operation, GrantOperation::Part) {
+            return options;
+        }
+        let (Some(source), Some(key), Some(namespace)) = (
+            &self.grant_source,
+            &self.signer_key,
+            self.repository.namespace(),
+        ) else {
+            return options;
+        };
+        if namespace.to_string() == format!("ed25519-{key}") {
+            return options;
+        }
+        let request = GrantRequest::new(&self.origin, &self.repository_text, key, operation);
+        match source.select(&request) {
+            Some(grant) => options.with_header("x-write-grant", grant),
+            None => options,
+        }
+    }
+
+    fn read_options(&self, options: CallOptions) -> TransportResult<CallOptions> {
+        if self.signer_key.is_none() {
+            return Ok(options);
+        }
+        let identity = RetryIdentity::new().map_err(TransportError::RemoteError)?;
+        Ok(identity.apply(self.grant_options(options, GrantOperation::Read)))
+    }
+
+    /// Observe pending verification waits and completion. A `false` return
+    /// from a waiting event cancels polling before the next sleep slice.
+    #[must_use]
+    pub fn with_pending_observer(
+        mut self,
+        observer: impl Fn(PendingEvent) -> bool + Send + Sync + 'static,
+    ) -> Self {
+        self.pending_observer = Some(Arc::new(observer));
+        self
+    }
+
+    /// Inject a clock for deterministic polling tests.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_clock_for_test(mut self, now: fn() -> i64) -> Self {
+        self.now = now;
+        self
+    }
+
+    /// Inject retry and poll sleep hooks for deterministic client tests.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_retry_hooks_for_test(
+        mut self,
+        backoff: fn() -> BackoffIterator,
+        sleep: fn(Duration),
+    ) -> Self {
+        self.backoff = backoff;
+        self.sleep = sleep;
+        self
+    }
+
+    fn pending_finished(&self, start_ms: i64, succeeded: bool) {
+        if let Some(observer) = &self.pending_observer {
+            observer(PendingEvent::Finished {
+                elapsed: Duration::from_millis(
+                    u64::try_from((self.now)().saturating_sub(start_ms)).unwrap_or(0),
+                ),
+                succeeded,
+            });
+        }
+    }
+
+    /// Poll a ticket-consuming advance until it commits or `deadline` expires.
+    /// WP-1.17 passes the earliest consumed ticket expiry here. Until then,
+    /// the maximum seven-day ticket lifetime bounds calls with no deadline.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_refs_with_deadline(
+        &self,
+        head_ref: &str,
+        head_condition: RefWriteCondition,
+        head_value: &Hash,
+        packmap_ref: &str,
+        packmap_condition: RefWriteCondition,
+        packmap_value: &Hash,
+        deadline: Option<i64>,
+    ) -> TransportResult<CoreAdvanceOutcome> {
+        let (head_expectation, head_expected_id) = condition_to_wire(head_condition);
+        let (packmap_expectation, packmap_expected_id) = condition_to_wire(packmap_condition);
+        let start_ms = (self.now)();
+        let deadline = deadline.unwrap_or_else(|| start_ms.saturating_add(MAX_PENDING_MS));
+        let margin_ms = i64::try_from(self.unary_timeout.as_millis())
+            .unwrap_or(i64::MAX)
+            .max(MIN_RENEWAL_MARGIN_MS);
+        let mut identity = RetryIdentity::new_at(start_ms).map_err(TransportError::RemoteError)?;
+        let mut saw_pending = false;
+        let mut waiting_since_ms = start_ms;
+        let mut renewed_after_unauthenticated = false;
+        let refs = [
+            GrantRef::new(head_ref, grant_condition(head_condition)),
+            GrantRef::new(packmap_ref, grant_condition(packmap_condition)),
+        ];
+
+        loop {
+            // A pending reply is definitive: before its next poll, renew an
+            // identity that cannot cover the next unary attempt. An ambiguous
+            // failure inside the ladder retains its nonce until actual expiry.
+            if saw_pending {
+                let now = (self.now)();
+                if now < deadline && identity.expires_at_ms.saturating_sub(now) < margin_ms {
+                    identity = match RetryIdentity::new_at(now) {
+                        Ok(next) => next,
+                        Err(message) => {
+                            self.pending_finished(waiting_since_ms, false);
+                            return Err(TransportError::RemoteError(message));
+                        }
+                    };
+                }
+            }
+            let poll = self.retrying(|| {
+                loop {
+                    let now = (self.now)();
+                    if now >= deadline {
+                        return Err(advance_deadline_error(saw_pending));
+                    }
+                    if now >= identity.expires_at_ms {
+                        identity =
+                            RetryIdentity::new_at(now).map_err(TransportError::RemoteError)?;
+                    }
+                    let options = self.grant_options(
+                        identity.apply(CallOptions::default().with_timeout(self.unary_timeout)),
+                        GrantOperation::Write { refs: &refs },
+                    );
+                    let response = self
+                        .executor
+                        .block_on(self.client.advance_refs_with_options(
+                            AdvanceRefsRequest {
+                                head_ref: Some(head_ref.to_owned()),
+                                head_expectation: Some(head_expectation.into()),
+                                head_expected_id: head_expected_id.clone(),
+                                head_new_id: Some(head_value.to_vec()),
+                                packmap_ref: Some(packmap_ref.to_owned()),
+                                packmap_expectation: Some(packmap_expectation.into()),
+                                packmap_expected_id: packmap_expected_id.clone(),
+                                packmap_new_id: Some(packmap_value.to_vec()),
+                                ..Default::default()
+                            },
+                            options,
+                        ));
+                    match response {
+                        Ok(resp) => {
+                            let resp = resp.into_owned();
+                            let outcome = match resp.outcome.and_then(|o| o.as_known()) {
+                                Some(ProtoAdvanceOutcome::Committed) => {
+                                    CoreAdvanceOutcome::Committed
+                                }
+                                Some(ProtoAdvanceOutcome::HeadConflict) => {
+                                    CoreAdvanceOutcome::HeadConflict
+                                }
+                                Some(ProtoAdvanceOutcome::PackmapConflict) => {
+                                    CoreAdvanceOutcome::PackmapConflict
+                                }
+                                _ => return Err(TransportError::InvalidResponse),
+                            };
+                            return Ok(Ok(outcome));
+                        }
+                        Err(err) => {
+                            if let Some(delay) = pending_verification_delay(&err) {
+                                // This pending reply belongs to the re-signed
+                                // identity, which now has its own one-shot
+                                // unauthenticated recovery allowance.
+                                renewed_after_unauthenticated = false;
+                                return Ok(Err(delay));
+                            }
+                            if saw_pending
+                                && !renewed_after_unauthenticated
+                                && err.code == connectrpc::ErrorCode::Unauthenticated
+                            {
+                                renewed_after_unauthenticated = true;
+                                identity = RetryIdentity::new_at((self.now)())
+                                    .map_err(TransportError::RemoteError)?;
+                                continue;
+                            }
+                            return Err(map_connect_error(err, ErrorContext::Ref));
+                        }
+                    }
+                }
+            });
+            let delay = match poll {
+                Ok(Ok(outcome)) => {
+                    if saw_pending {
+                        self.pending_finished(waiting_since_ms, true);
+                    }
+                    return Ok(outcome);
+                }
+                Ok(Err(delay)) => {
+                    if !saw_pending {
+                        waiting_since_ms = (self.now)();
+                    }
+                    saw_pending = true;
+                    delay
+                }
+                Err(error) => {
+                    if saw_pending {
+                        self.pending_finished(waiting_since_ms, false);
+                    }
+                    return Err(error);
+                }
+            };
+            let mut remaining = delay;
+            while !remaining.is_zero() {
+                let now = (self.now)();
+                if now >= deadline {
+                    self.pending_finished(waiting_since_ms, false);
+                    return Err(advance_deadline_error(true));
+                }
+                let until_deadline =
+                    Duration::from_millis(u64::try_from(deadline.saturating_sub(now)).unwrap_or(0));
+                let slice = remaining.min(Duration::from_secs(1)).min(until_deadline);
+                if let Some(observer) = &self.pending_observer
+                    && !observer(PendingEvent::Waiting {
+                        elapsed: Duration::from_millis(
+                            u64::try_from(now.saturating_sub(waiting_since_ms)).unwrap_or(0),
+                        ),
+                        next: slice,
+                    })
+                {
+                    self.pending_finished(waiting_since_ms, false);
+                    return Err(TransportError::RemoteError(
+                        PENDING_INTERRUPTED_MESSAGE.to_owned(),
+                    ));
+                }
+                (self.sleep)(slice);
+                remaining -= slice;
+            }
+        }
+    }
+
     fn download_pack_with_hint(
         &self,
         key: &PackKey,
@@ -535,7 +822,9 @@ impl ConnectTransport {
         self.retrying(|| {
             self.executor.block_on_local(async {
                 let options = ref_hint(
-                    CallOptions::default().with_timeout(self.pack_transfer_timeout),
+                    self.read_options(
+                        CallOptions::default().with_timeout(self.pack_transfer_timeout),
+                    )?,
                     ref_name,
                 );
                 let mut stream = self
@@ -610,7 +899,7 @@ impl ConnectTransport {
         self.retrying(|| {
             self.executor.block_on(async {
                 let options = ref_hint(
-                    CallOptions::default().with_timeout(self.unary_timeout),
+                    self.read_options(CallOptions::default().with_timeout(self.unary_timeout))?,
                     ref_name,
                 );
                 let response = self
@@ -671,6 +960,14 @@ fn condition_to_wire(c: RefWriteCondition) -> (RefExpectation, Option<Vec<u8>>) 
         RefWriteCondition::Any => (RefExpectation::Any, None),
         RefWriteCondition::Missing => (RefExpectation::Missing, None),
         RefWriteCondition::Match(h) => (RefExpectation::Match, Some(h.to_vec())),
+    }
+}
+
+fn grant_condition(c: RefWriteCondition) -> GrantCondition {
+    match c {
+        RefWriteCondition::Missing => GrantCondition::Missing,
+        RefWriteCondition::Match(_) => GrantCondition::Match,
+        RefWriteCondition::Any => GrantCondition::Any,
     }
 }
 
@@ -752,6 +1049,7 @@ impl Transport for ConnectTransport {
                             bytes.len()
                         ),
                     );
+                let options = self.grant_options(options, GrantOperation::Write { refs: &[] });
                 self.client
                     .upload_pack_with_options(connectrpc::stream_iter(requests.clone()), options)
                     .await
@@ -793,10 +1091,13 @@ impl Transport for ConnectTransport {
     ) -> TransportResult<()> {
         let (expectation, expected_id) = condition_to_wire(condition);
         let identity = RetryIdentity::new().map_err(TransportError::RemoteError)?;
+        let refs = [GrantRef::new(name, grant_condition(condition))];
         self.retrying(|| {
             self.executor.block_on(async {
-                let options =
-                    identity.apply(CallOptions::default().with_timeout(self.unary_timeout));
+                let options = self.grant_options(
+                    identity.apply(CallOptions::default().with_timeout(self.unary_timeout)),
+                    GrantOperation::Write { refs: &refs },
+                );
                 self.client
                     .update_ref_with_options(
                         UpdateRefRequest {
@@ -818,7 +1119,8 @@ impl Transport for ConnectTransport {
     fn read_ref(&self, name: &str) -> TransportResult<Option<Hash>> {
         self.retrying(|| {
             self.executor.block_on(async {
-                let options = CallOptions::default().with_timeout(self.unary_timeout);
+                let options =
+                    self.read_options(CallOptions::default().with_timeout(self.unary_timeout))?;
                 let response = self
                     .client
                     .read_ref_with_options(
@@ -861,7 +1163,9 @@ impl Transport for ConnectTransport {
                                 // The server chooses its configured page cap (R-105).
                                 ..Default::default()
                             },
-                            CallOptions::default().with_timeout(self.unary_timeout),
+                            self.read_options(
+                                CallOptions::default().with_timeout(self.unary_timeout),
+                            )?,
                         )
                         .await
                         .map(|r| r.into_owned())
@@ -916,42 +1220,15 @@ impl Transport for ConnectTransport {
         packmap_condition: RefWriteCondition,
         packmap_value: &Hash,
     ) -> TransportResult<CoreAdvanceOutcome> {
-        let (head_expectation, head_expected_id) = condition_to_wire(head_condition);
-        let (packmap_expectation, packmap_expected_id) = condition_to_wire(packmap_condition);
-        let identity = RetryIdentity::new().map_err(TransportError::RemoteError)?;
-        self.retrying(|| {
-            self.executor.block_on(async {
-                let options =
-                    identity.apply(CallOptions::default().with_timeout(self.unary_timeout));
-                let resp = self
-                    .client
-                    .advance_refs_with_options(
-                        AdvanceRefsRequest {
-                            head_ref: Some(head_ref.to_owned()),
-                            head_expectation: Some(head_expectation.into()),
-                            head_expected_id: head_expected_id.clone(),
-                            head_new_id: Some(head_value.to_vec()),
-                            packmap_ref: Some(packmap_ref.to_owned()),
-                            packmap_expectation: Some(packmap_expectation.into()),
-                            packmap_expected_id: packmap_expected_id.clone(),
-                            packmap_new_id: Some(packmap_value.to_vec()),
-                            ..Default::default()
-                        },
-                        options,
-                    )
-                    .await
-                    .map_err(|e| map_connect_error(e, ErrorContext::Ref))?
-                    .into_owned();
-                match resp.outcome.and_then(|o| o.as_known()) {
-                    Some(ProtoAdvanceOutcome::Committed) => Ok(CoreAdvanceOutcome::Committed),
-                    Some(ProtoAdvanceOutcome::HeadConflict) => Ok(CoreAdvanceOutcome::HeadConflict),
-                    Some(ProtoAdvanceOutcome::PackmapConflict) => {
-                        Ok(CoreAdvanceOutcome::PackmapConflict)
-                    }
-                    _ => Err(TransportError::InvalidResponse),
-                }
-            })
-        })
+        self.advance_refs_with_deadline(
+            head_ref,
+            head_condition,
+            head_value,
+            packmap_ref,
+            packmap_condition,
+            packmap_value,
+            None,
+        )
     }
 
     fn supports_atomic_advance(&self) -> bool {
@@ -966,6 +1243,79 @@ impl Transport for ConnectTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TestSigner(&'static str);
+    impl EnvelopeSigner for TestSigner {
+        fn public_key_hex(&self) -> String {
+            self.0.into()
+        }
+        fn sign_hex(&self, _message: &[u8; 32]) -> Result<String, String> {
+            Ok("ab".repeat(64))
+        }
+    }
+    struct TestGrants;
+    impl GrantSource for TestGrants {
+        fn select(&self, _request: &GrantRequest<'_>) -> Option<String> {
+            Some("grant-value".into())
+        }
+    }
+
+    #[test]
+    fn grant_header_requires_non_owner_signer_and_non_part_path() {
+        let key = "ab".repeat(32);
+        let owner_url: Uri = format!("http://127.0.0.1/ed25519-{key}/photos")
+            .parse()
+            .unwrap();
+        let address_url: Uri = "http://127.0.0.1/0x8ba1f109551bd432803012645ac136ddd64dba72/photos"
+            .parse()
+            .unwrap();
+        let source: Arc<dyn GrantSource> = Arc::new(TestGrants);
+        let owner = ConnectTransport::connect_for_test_with_signer(
+            owner_url,
+            Some(Arc::new(TestSigner(
+                "abababababababababababababababababababababababababababababababab",
+            ))),
+        )
+        .with_grant_source(source.clone());
+        let unsigned = ConnectTransport::connect_for_test(address_url.clone())
+            .with_grant_source(source.clone());
+        assert!(
+            unsigned
+                .read_options(CallOptions::default())
+                .unwrap()
+                .headers()
+                .get("idempotency-key")
+                .is_none()
+        );
+        let grantee = ConnectTransport::connect_for_test_with_signer(
+            address_url,
+            Some(Arc::new(TestSigner(
+                "abababababababababababababababababababababababababababababababab",
+            ))),
+        )
+        .with_grant_source(source);
+        for tx in [&owner, &unsigned] {
+            assert!(
+                tx.grant_options(CallOptions::default(), GrantOperation::Read)
+                    .headers()
+                    .get("x-write-grant")
+                    .is_none()
+            );
+        }
+        assert!(
+            grantee
+                .grant_options(CallOptions::default(), GrantOperation::Part)
+                .headers()
+                .get("x-write-grant")
+                .is_none()
+        );
+        assert_eq!(
+            grantee
+                .grant_options(CallOptions::default(), GrantOperation::Read)
+                .headers()["x-write-grant"],
+            "grant-value"
+        );
+    }
 
     // -- connect() + URL parsing --------------------------------------
 

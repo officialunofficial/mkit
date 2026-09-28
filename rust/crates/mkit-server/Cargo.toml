@@ -36,6 +36,9 @@ blake3 = { version = "1", default-features = false }
 zeroize = "1"
 bytes = "1"
 futures-core = "0.3"
+# `join_all` for concurrent blob heads in the ticketed advance (pipeline::advance),
+# on every build, so not optional. `std` only: wasm-clean.
+futures = { version = "0.3", default-features = false, features = ["std"] }
 # The optional write gate's async mutex (`Pipeline::with_write_gate`):
 # `tokio::sync::Mutex` is strictly FIFO-fair, and the `sync` feature alone
 # needs no tokio runtime and no C code, so it stays runtime-agnostic and
@@ -56,7 +59,6 @@ subtle = { version = "2", default-features = false }
 connectrpc = { version = "0.9.1", default-features = false, features = ["gzip", "json"], optional = true }
 buffa = { version = "0.9.1", optional = true }
 http = { version = "1", optional = true }
-futures = { version = "0.3", default-features = false, features = ["std"], optional = true }
 # Connect error-detail values are unpadded standard base64.
 base64 = { version = "0.22", optional = true }
 # The ssh-frame wire types and framing (feature `ssh`).
@@ -72,7 +74,6 @@ connect = [
     "dep:connectrpc",
     "dep:buffa",
     "dep:http",
-    "dep:futures",
     "dep:base64",
     "dep:connectrpc-build",
 ]

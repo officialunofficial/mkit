@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `0x` namespaces, stored-epoch checks, and grant-scheme discovery. A
   conservative interim ref gate applies until WP-2.7; adapter grant flags
   follow in WP-1.30b.
+- Connect client: sign repository reads with auth v2 on each attempt, including
+  the framed `DownloadPack` request. Add a grant-source API and local selection
+  logic; the user grant store follows in WP-2.13.
 - Transport: add the `GetGrantEpoch`, `SetGrantEpoch`, `SetRepoVisibility` and
   `IssueObjectUrl` messages and RPCs; the server answers `unimplemented` until
   WP-2.8, WP-2.9 and WP-2.11 (WP-2.2).
@@ -42,6 +45,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rollups, other-shard lag is bounded by their admission rate times 3R.
   Worker timer registration
   and D34 quota conformance follow in WP-1.26b.
+- Server: add write-once repository object-index keys and binary values,
+  deterministic row planning, and membership-gated lookup APIs for indexed mode.
+- Connect client: poll typed pending AdvanceRefs verification replies with
+  clamped waits, nonce reuse and envelope renewal, progress and cancellation.
+  Ticket deadline threading follows in WP-1.17.
 - Server: ticketed `UploadPack` now verifies the ticket before reading data,
   streams the full pack without metadata writes, and leaves a content-addressed
   upload marker for later ticket consumption. The advertised BeginUpload

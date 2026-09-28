@@ -222,6 +222,25 @@ delay, or a retry double-charges and locks out valid writes.
 **Enforced by:** `quota.rs` fixed-window math and batch planner, guarded
 `timers::quota_rollup`, and the memory-store rollup/denial/rollover tests.
 
+## Pending verification preserves the advance identity
+
+**Always:** a typed pending `AdvanceRefs` response causes a clamped poll, not
+a retry-ladder step. Every attempt keeps the same nonce, timestamps and
+signature while the envelope remains valid; before the next poll it is renewed
+when less than 30 s of validity remains (or the unary timeout, if longer). An
+ambiguous retry retains its identity until the envelope actually lapses.
+Polling ends before the consumed ticket expires.
+
+**Because:** a pending answer is never stored for replay, and the next attempt
+must observe verification progress without changing the logical operation.
+
+**If violated:** an advance can fail after the ordinary retry ladder, use an
+expired signature, or keep polling after its ticket is invalid.
+
+**Enforced by:** `ConnectTransport::advance_refs_with_deadline` and its pending
+response, renewal and deadline tests. The caller's real ticket deadline is
+pending WP-1.17; until then the helper uses the seven-day maximum lifetime.
+
 ## External signer capabilities precede signing material
 
 **Always:** the external signer returns compatible protocol, algorithm,
@@ -1293,6 +1312,30 @@ failing targets precede it; beyond the cap, the cycle resets. Corruption stops
 delivery after its decodable prefix. Coordinator watermarks follow in WP-1.23c;
 writers in WP-1.9/1.10.
 
+## Object-index visibility follows repository membership (writer gate pending)
+
+**Always:** an `i` row is visible only while its pack has an `m` row in the
+same repository. For indexed advances, every index row of a consumed pack
+MUST be delivered before the advance commits membership and refs. Until
+delivery finishes, the advance returns `PendingVerification` without a replay
+result. Identical upserts from several sources may target the same index key.
+An index value MUST be a pure function of (pack bytes, entry), so every
+producer writes identical bytes (R-130). §13 GC removes index rows whose
+membership is absent and whose pack has no live ticket; WP-5.3a owns this
+pass. Until it lands, the per-id row cap bounds orphan damage.
+
+**Because:** relay lag can exceed the §9.4 window. Early index rows are safe
+only while membership keeps them invisible; committing membership first could
+make a later miss look permanent.
+
+**If violated:** closure, delta-base checks, object serving or takedown can
+miss a member or use an object from another repository.
+
+**Enforced by:** `store::index` repository-scoped lookups and conformance
+cases enforce the read-side membership join and isolation. WP-4.7 and WP-4.8
+must enforce the delivery-before-advance gate in their production writers.
+See R-130.
+
 ## Pack reads consult only the named repository's membership
 
 **Always:** Multi PackExists and DownloadPack authorize and check repository
@@ -1567,3 +1610,22 @@ flood logs while operators need the critical alert.
 **Enforced by:** `telemetry/pressure.rs` pure transition tests, Worker
 `ns_object::PressureStore` and `tests/stores.rs` over the DO SQL shim,
 console sink/subscriber tests, and native `pressure.rs` shutdown/size-task tests.
+
+## Connect read authentication is scoped to one attempt
+
+**Always:** a Connect client with a signer signs each repository read over
+the exact HTTP request body, including streaming-request framing. Each retry
+has fresh identity headers. Writes retain their logical-operation nonce, and
+the grant header stays outside the signed canonical string. Discovery and
+grant-epoch RPCs are never signed; grant-epoch RPCs carry no repository.
+
+**Because:** read authentication selects the writer or private-reader view,
+while replay protection applies only to writes. A grant is selected locally
+and may change without changing the authenticated operation.
+
+**If violated:** a private read can become anonymous, a retry can use an
+expired identity, or a write can silently mint a new nonce.
+
+**Enforced by:** the Connect procedure classification and envelope tests,
+client retry tests, and `mkit_core::write_auth::verify_headers` checks over
+captured request bodies.

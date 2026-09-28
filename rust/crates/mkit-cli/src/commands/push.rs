@@ -213,6 +213,7 @@ fn push_current(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpt
             "Writing objects",
             None,
             crate::progress::should_report(opts.quiet),
+            opts.quiet,
         );
         remote_dispatch::push_branch_tracked(
             layout.worktree_root(),
@@ -298,9 +299,13 @@ fn push_current(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpt
             }
             emit_err(&msg, exit::GENERAL_ERROR)
         }
-        Err(remote_dispatch::DispatchError::Interrupted) => {
-            emit_err_json("push: interrupted", exit::TEMPFAIL, json)
-        }
+        // TODO(WP-1.17): Add the BeginUpload ticket hint only when the
+        // interrupted operation actually consumed an upload ticket.
+        Err(remote_dispatch::DispatchError::Interrupted) => emit_err_json(
+            "push: interrupted; re-run push to resume",
+            exit::TEMPFAIL,
+            json,
+        ),
         Err(e) => emit_err_json(&format!("push: {e}"), exit::GENERAL_ERROR, json),
     }
 }
@@ -353,6 +358,7 @@ fn push_all(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpts) -
             "Writing objects",
             None,
             crate::progress::should_report(opts.quiet),
+            opts.quiet,
         );
         remote_dispatch::push_all_with(
             layout.worktree_root(),
@@ -396,9 +402,12 @@ fn push_all(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpts) -
             }
             emit_err(&msg, exit::GENERAL_ERROR)
         }
-        Err(remote_dispatch::DispatchError::Interrupted) => {
-            emit_err_json("push: interrupted", exit::TEMPFAIL, json)
-        }
+        // TODO(WP-1.17): Add the ticket-specific hint only on its pending path.
+        Err(remote_dispatch::DispatchError::Interrupted) => emit_err_json(
+            "push: interrupted; re-run push to resume",
+            exit::TEMPFAIL,
+            json,
+        ),
         Err(e) => emit_err_json(&format!("push: {e}"), exit::GENERAL_ERROR, json),
     }
 }

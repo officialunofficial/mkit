@@ -149,6 +149,7 @@ fn pull_one(
                     "Unpacking objects",
                     None,
                     crate::progress::should_report(quiet),
+                    quiet,
                 );
                 remote_dispatch::pull_all_with(
                     cwd,
