@@ -3539,6 +3539,7 @@ dependencies = [
  "commonware-codec",
  "commonware-cryptography",
  "connectrpc",
+ "ed25519-dalek",
  "futures",
  "futures-executor",
  "futures-util",
