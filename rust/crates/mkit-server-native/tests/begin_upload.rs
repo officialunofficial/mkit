@@ -1035,9 +1035,12 @@ async fn multipart_existing_race_aborts_losing_session() {
     assert!(losing_session_was_aborted);
 }
 
+/// The first BeginUpload pauses before its final apply (it will win); the
+/// second fails there at once, so its cleanup runs while the winner's ticket
+/// is not yet committed.
 #[cfg(feature = "test-faults")]
 struct FailFirstBegin {
-    armed: AtomicBool,
+    calls: AtomicUsize,
     entered: Notify,
     release: Notify,
 }
@@ -1053,13 +1056,15 @@ impl FaultHooks for FailFirstBeginHook {
         op: &Operation,
         _: &TestDirectives,
     ) -> Result<(), ServerError> {
-        if point == FaultPoint::BeforeFinalApply
-            && op.procedure() == Procedure::BeginUpload
-            && self.0.armed.swap(false, Ordering::SeqCst)
-        {
-            self.0.entered.notify_one();
-            self.0.release.notified().await;
-            return Err(ServerError::aborted_retryable("test losing begin"));
+        if point == FaultPoint::BeforeFinalApply && op.procedure() == Procedure::BeginUpload {
+            match self.0.calls.fetch_add(1, Ordering::SeqCst) {
+                0 => {
+                    self.0.entered.notify_one();
+                    self.0.release.notified().await;
+                }
+                1 => return Err(ServerError::aborted_retryable("test losing begin")),
+                _ => {}
+            }
         }
         Ok(())
     }
@@ -1077,7 +1082,7 @@ async fn fs_begin_race_loser_preserves_winning_session() {
     let mut cfg = config(mode);
     cfg.upload_limits.max_total_bytes = MIN_PART_SIZE + 1;
     let fault = Arc::new(FailFirstBegin {
-        armed: AtomicBool::new(true),
+        calls: AtomicUsize::new(0),
         entered: Notify::new(),
         release: Notify::new(),
     });
@@ -1111,12 +1116,14 @@ async fn fs_begin_race_loser_preserves_winning_session() {
     tokio::time::timeout(Duration::from_secs(5), fault.entered.notified())
         .await
         .unwrap();
-    let winner = pipe
+    // The loser fails and cleans up while the winner's ticket is uncommitted.
+    let loser = pipe
         .begin_upload(&authenticated, REF, &PACK, MIN_PART_SIZE + 1)
         .await
-        .unwrap();
+        .unwrap_err();
+    assert_eq!(loser.code(), Code::Aborted);
     fault.release.notify_one();
-    assert_eq!(first.await.unwrap().unwrap_err().code(), Code::Aborted);
+    let winner = first.await.unwrap().unwrap();
     let plan = PartPlan::new(MIN_PART_SIZE + 1, MIN_PART_SIZE, u32::MAX).unwrap();
     let id = ticket_id(&winner);
     blobs

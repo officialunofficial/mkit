@@ -314,6 +314,7 @@ pub(super) async fn cross_repository_no_oracle(ctx: Ctx) -> CaseResult {
         "permission_denied",
         "foreign ticket",
     )?;
+    let count = receipts_b.len();
     let foreign = complete(&ctx, &signer_a, Some(&repo_a), &ticket_a, receipts_b)
         .await?
         .err()
@@ -323,11 +324,16 @@ pub(super) async fn cross_repository_no_oracle(ctx: Ctx) -> CaseResult {
         &signer_a,
         Some(&repo_a),
         &ticket_a,
-        vec![b"garbage receipt".to_vec(); 3],
+        vec![b"garbage receipt".to_vec(); count],
     )
     .await?
     .err()
     .ok_or("garbage receipts were accepted")?;
+    ensure!(
+        foreign.code == "invalid_argument",
+        "foreign receipt code {} is not invalid_argument",
+        foreign.code
+    );
     ensure!(
         foreign.code == garbage.code,
         "foreign receipt code {} differs from garbage receipt code {}",

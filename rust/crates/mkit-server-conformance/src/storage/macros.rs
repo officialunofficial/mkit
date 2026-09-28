@@ -50,6 +50,8 @@ macro_rules! storage_suite {
 /// probe supplied by the test binary; streaming backends must pass the
 /// measured heap case. Only the in-memory reference store uses `buffered`.
 /// WP-1.12 and WP-1.13 add their R2 and S3 factories with the same contract.
+/// The heap probe is process-wide: run the suite under nextest (one test per
+/// process); under `cargo test`, other tests' threads can skew the peak.
 #[macro_export]
 macro_rules! multipart_suite {
     ($name:ident, store = $store:expr, heap = $probe:path $(,)?) => {
