@@ -1945,7 +1945,9 @@
     "track": "core",
     "depends_on": [
       "5.2",
-      "4.10"
+      "4.10",
+      "5.1a-2",
+      "1.23c"
     ],
     "size": "L",
     "summary": "Runtime-agnostic mark over D34 shards (indexed closure or opaque packmap chains) with pins and fail-closed truncation, marking candidates gc_pending. No cross-shard apply precondition: safety comes from mark -> wait > MAX_APPLY_WINDOW + relay watermark -> re-check roots from ref shards.",
@@ -2122,7 +2124,7 @@
       "5.2"
     ],
     "size": "S",
-    "summary": "An implementer-provided CachePurger delivered through the outbox, triggered on suspension, lease deletion and visibility change; WP-5.6 adds the takedown trigger (this WP lands first).",
+    "summary": "An implementer-provided CachePurger internal interface, triggered on suspension, lease deletion and visibility change; WP-5.6 adds the takedown trigger (this WP lands first).",
     "human_action": false,
     "area_gates": [
       "rust"

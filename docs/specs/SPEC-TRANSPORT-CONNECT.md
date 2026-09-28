@@ -195,8 +195,8 @@ headers or a bearer token. The response MAY be cached with
 | `grant_schemes` | The owner signature schemes the deployment accepts on grants and epoch statements ([SPEC-WRITE-GRANTS §4](SPEC-WRITE-GRANTS.md#4-owner-signature-schemes)). Empty on a deployment that accepts no grants. |
 | `namespace_policy` | `allowlist`, `any`, or `single-repository` (§7.5). `single-repository` is advertised, never configured. |
 | `index_fanout` | The fixed object-id-prefix fan-out of the deployment's repository index (§7.9). The default is 4096. |
-| `leases` | Whether the deployment enforces storage leases under SPEC-SERVER §12. |
 | `max_delta_chain_depth` | Delta-chain depth cap (SPEC-SERVER §9.8), default 50 in indexed mode; `0` when indexed mode is off. |
+| `leases` | Whether the deployment enforces storage leases under SPEC-SERVER §12. |
 
 A client MUST NOT assume atomic advance without `atomic_advance = true`
 from this call. `atomic_advance` replaces the client-side opt-in of v1

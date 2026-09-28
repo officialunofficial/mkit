@@ -360,7 +360,7 @@ message Event {
   oneof kind {
     // Storage-lease or administrative transition.
     LeaseTransition lease = 6;
-    // Field 7 is left for WP-5.1a-2's PublicationTransition; not reserved in schema.
+    // Field 7 is left for the publication transition (§10); not reserved in schema.
   }
 }
 
