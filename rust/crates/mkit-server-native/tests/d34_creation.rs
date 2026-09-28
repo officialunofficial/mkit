@@ -466,7 +466,10 @@ async fn creation_and_cost<N: NamespaceStore>(backend: N, sharding: Sharding) {
     pipe.update_ref(&second, update("refs/heads/a", 4))
         .await
         .unwrap();
-    assert_eq!(store.take_calls().len(), 4);
+    assert_eq!(
+        store.take_calls().len(),
+        if sharding == Sharding::D34 { 5 } else { 4 }
+    );
     registered(&store, sharding, &second).await;
     let expected = vec![
         facts(true, true),
