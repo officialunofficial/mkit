@@ -176,9 +176,13 @@ creation, independent of an authentication validity interval. The server MUST
 stop sending by that deadline. Completion, including partial transmission,
 MUST conditionally replace the pending read with `ReadServed` recording actual
 body bytes sent; successful HEAD records zero. A failure before the first byte
-MUST conditionally replace it with `Aborted(INTERNAL)`. Reconciliation after
-the deadline MUST conditionally record `Aborted(ABANDONED)` if it remains
-pending. These replacements use the same pending-record arbiter below.
+MUST conditionally replace it with `Aborted(INTERNAL)`. Reconciliation MUST
+run only after `deadline + read_reconcile_grace`, where
+`read_reconcile_grace` is a named deployment parameter defaulting to 60 s.
+A `ReadServed` arriving within that grace period MUST win over abandonment.
+After the grace period, reconciliation MUST conditionally record
+`Aborted(ABANDONED)` if the record remains pending. These replacements use
+the same pending-record arbiter below.
 [SPEC-HTTP-OBJECTS](SPEC-HTTP-OBJECTS.md) fixes read ordering and admission input.
 
 An unconsumed ticket that expires MUST produce `Expired`, as STC
@@ -1157,7 +1161,7 @@ Reserved: this section is specified with M5 (see the version history).
 
 | Version | Status | Change |
 |---|---|---|
-| 1 | draft | Initial M3 pipeline, durable outcome and remote-hook contract; M5 sections reserved. Admission credential headers (§6.3); indexed mode (§9). |
+| 1 | draft | Initial M3 pipeline, durable outcome and remote-hook contract; M5 sections reserved. Admission credential headers (§6.3); indexed mode (§9). HTTP read reservations and procedure strings (WP-4.11), amended with `read_reconcile_grace = 60 s` default and `ReadServed` priority within grace (fix round 1). |
 
 ## 16. Test anchors
 

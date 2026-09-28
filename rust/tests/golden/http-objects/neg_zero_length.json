@@ -7,6 +7,23 @@
     "reject_reason": "span_range_arithmetic"
   },
   "name": "neg_zero_length",
+  "recipe": {
+    "segments": [
+      {
+        "length": 52,
+        "offset": 0,
+        "source": "span_two_chunks.bin"
+      },
+      {
+        "hex": "00"
+      },
+      {
+        "length": 148089,
+        "offset": 53,
+        "source": "span_two_chunks.bin"
+      }
+    ]
+  },
   "schema_version": 1,
   "size": 148142
 }

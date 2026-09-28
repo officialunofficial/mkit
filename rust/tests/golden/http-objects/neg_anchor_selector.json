@@ -1,31 +1,31 @@
 {
-  "blake3": "b5a7ab4abb1049d7739682923afdf3706c23cc22e6c73f1dac63c8a6f82d92d7",
+  "blake3": "a4affe6327380bcf2976d18c4eed56d3b15b7b6a17850346d0ad4e21a7891752",
   "commit": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
   "expect": {
     "accept": false,
     "expand_to": null,
-    "reject_reason": "span_chunk_order"
+    "reject_reason": "span_anchor_selector"
   },
-  "name": "neg_noncontiguous",
+  "name": "neg_anchor_selector",
   "recipe": {
     "segments": [
       {
-        "length": 4050,
+        "length": 53,
         "offset": 0,
         "source": "span_two_chunks.bin"
       },
       {
-        "length": 76855,
-        "offset": 2303,
-        "source": "span_first_zero.bin"
+        "length": 69218,
+        "offset": 4050,
+        "source": "span_two_chunks.bin"
       },
       {
-        "length": 74874,
-        "offset": 73268,
+        "length": 144093,
+        "offset": 4049,
         "source": "span_two_chunks.bin"
       }
     ]
   },
   "schema_version": 1,
-  "size": 155779
+  "size": 213364
 }

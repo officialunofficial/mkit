@@ -675,6 +675,17 @@
         "parsed": null,
         "status": 400
       },
+      "name": "escape_with_sign",
+      "request": {
+        "single_repository": true,
+        "url": "/-/refs/heads/main/-/a%+1b"
+      }
+    },
+    {
+      "expect": {
+        "parsed": null,
+        "status": 400
+      },
       "name": "truncated_escape",
       "request": {
         "single_repository": true,

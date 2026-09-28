@@ -39,7 +39,7 @@ A verified disclosure does **not** prove:
 
 - **completeness.** That the disclosed path is the *only* thing under its
   parent, or that nothing else exists in the repository. A disclosure
-  bundle carries a proof of *inclusion*, never of *exclusion* &mdash; see §8
+  bundle carries a proof of *inclusion*, never of *exclusion* &mdash; see §9
   and issue [#1027](https://github.com/officialunofficial/mkit/issues/1027).
 - **signer identity.** `signer`/`signature_valid` report whether the
   commit's (or remix's) embedded Ed25519 signature verifies against its
@@ -477,16 +477,18 @@ The anchor MUST disclose content offset 0, length 1 of chunk `first`,
 with a complete preceding `chunk_len_proofs` set. For `first = 0` that
 set MUST be empty; for `first > 0` it MUST cover exactly `0..first`.
 The chunk vector MUST contain 2–1,000,000 bundles, with consecutive
-indices `first..last` in ascending order, inclusive. Each contains the
+indices `first..last` in ascending order, inclusive: for every adjacent
+pair, `index[i+1] = index[i] + 1`. Each contains the
 full canonical Blob bytes, including its prologue and length field.
 
 A decoder MUST reject an encoded container larger than 64 MiB before
 any decoding or allocation. It MUST bound each vector length by the
-remaining input and 64 MiB, and chunk count by the bound above, before
-allocation. It MUST reject trailing bytes, unknown magic or version,
-truncated fields, invalid varints, zero length, and offset-plus-length
-overflow. A deployment SHOULD also cap requested content, for example
-at 8 MiB; this service cap is separate from format validity.
+remaining input and 64 MiB, and chunk count to at most 1,000,000, before
+allocation. The verifier classifies a zero or one chunk count under §8.2.
+The decoder MUST reject trailing bytes, unknown magic or version,
+truncated fields, and invalid varints. A deployment SHOULD also cap
+requested content, for example at 8 MiB; this service cap is separate
+from format validity.
 
 ### 8.2 Verification and reject reasons
 
@@ -500,7 +502,7 @@ language-independent golden contract, not implementation type names.
 | Total encoded size at most 64 MiB | `span_too_large` |
 | Magic equals MKDS | `span_magic` |
 | Version equals 1 | `span_version` |
-| Fields and bounded vectors decode completely | `span_encoding` |
+| Fields and bounded vectors decode completely, including chunk count at most 1,000,000 | `span_encoding` |
 | No trailing bytes | `span_trailing_bytes` |
 | Embedded commit equals caller's trusted commit | `span_commit` |
 | Nonzero len and checked offset + len | `span_range_arithmetic` |
@@ -512,7 +514,7 @@ language-independent golden contract, not implementation type names.
 | Every chunk payload is Chunk | `span_chunk_selector` |
 | Anchor and every chunk share authenticated path and leaf id | `span_leaf_context` |
 | Every bundle shares total_size, chunk_size, and chunk inner root | `span_chunk_context` |
-| Chunk indices are first..last, consecutive and in order, starting at the anchor index | `span_chunk_order` |
+| Chunk indices are first..last, consecutive and in order (`index[i+1] = index[i] + 1`), starting at the anchor index | `span_chunk_order` |
 | Every Chunk's canonical bytes decode as a nonempty Blob; length comes from these verified bytes | `span_chunk_bytes` |
 | The first chunk's content begins with the anchor's disclosed byte and its canonical id equals the anchor's chunk id | `span_anchor_binding` |
 | Checked sum of lengths and anchor absolute offset fits total_size; requested [offset, offset+len) lies inside this span and starts inside the first chunk | `span_range_outside` |
@@ -525,6 +527,10 @@ absolute offset is the beginning of the first included chunk, not
 `first * chunk_size`: content-defined chunking has variable lengths.
 Canonical Blob lengths, not the metadata chunk-size marker, determine
 all following boundaries. Checked arithmetic MUST be used throughout.
+`span_chunk_context` and `span_anchor_binding` are defence-in-depth checks:
+the authenticated object and chunk proofs make those failures unreachable
+once all earlier checks pass. They remain distinct reject reasons for an
+independent verifier that receives inconsistent decoded proof data.
 
 On success the verifier MUST strip each Blob's canonical header,
 concatenate its content in order, and return the slice
@@ -538,9 +544,12 @@ that authenticated path and range against its request.
 
 [`rust/tests/golden/http-objects/`](../../rust/tests/golden/http-objects/)
 pins accept containers starting at both zero and nonzero chunk indices,
-and rejects for non-contiguous chunks, mixed commits, mismatched leaves,
-missing/incomplete anchors, ranges outside the span, an unnecessary last
-chunk, magic/version errors, trailing bytes, and oversize input.
+and rejects for gaps, duplicates, wrong selectors, mixed commits,
+mismatched leaves, missing/incomplete anchors, ranges outside the span,
+an unnecessary last chunk, magic/version errors, trailing bytes, and
+oversize input. Large reject bodies use sidecar byte-range copy and patch
+recipes over the accepted containers; each recipe reconstructs exact bytes
+before verification.
 The oversize vector uses a pinned small seed plus a sidecar expansion
 recipe to construct 64 MiB + 1 bytes without checking in a large zero file.
 Each reject sidecar names the exact reason in §8.2.

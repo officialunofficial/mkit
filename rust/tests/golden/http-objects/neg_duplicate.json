@@ -1,21 +1,18 @@
 {
-  "blake3": "feb9ec1adf62d39182579be74fcab23f36fcad1582a7f73d74b65c51427ed963",
+  "blake3": "ca1e652f17f7ec64d12857bcfd9d48af7f5b7aedeb3ba204c46e6cefea14a544",
   "commit": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
   "expect": {
     "accept": false,
     "expand_to": null,
-    "reject_reason": "span_chunk_count"
+    "reject_reason": "span_chunk_order"
   },
-  "name": "neg_one_chunk",
+  "name": "neg_duplicate",
   "recipe": {
     "segments": [
       {
-        "length": 4049,
+        "length": 148376,
         "offset": 0,
-        "source": "span_two_chunks.bin"
-      },
-      {
-        "hex": "01"
+        "source": "span_three_chunks.bin"
       },
       {
         "length": 69218,
@@ -25,5 +22,5 @@
     ]
   },
   "schema_version": 1,
-  "size": 73268
+  "size": 217594
 }

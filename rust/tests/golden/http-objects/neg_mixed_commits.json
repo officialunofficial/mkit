@@ -7,6 +7,39 @@
     "reject_reason": "span_inner_invalid"
   },
   "name": "neg_mixed_commits",
+  "recipe": {
+    "segments": [
+      {
+        "length": 73276,
+        "offset": 0,
+        "source": "span_two_chunks.bin"
+      },
+      {
+        "hex": "9ad689378ee86b1bf3baf714392f8ed03fc551cb21b0fa8aeeb07e47cc053f74"
+      },
+      {
+        "length": 113,
+        "offset": 92,
+        "source": "span_two_chunks.bin"
+      },
+      {
+        "hex": "61"
+      },
+      {
+        "length": 103,
+        "offset": 206,
+        "source": "span_two_chunks.bin"
+      },
+      {
+        "hex": "66f6242c547c84215dba1d3ceae7639f668e16076f7542e1ba82b1bede95d38b3f6eb9722f3ccac25b9ce7efcb6e230a2bfefdc184398cc5e2c3bd4aa8562702"
+      },
+      {
+        "length": 74553,
+        "offset": 73589,
+        "source": "span_two_chunks.bin"
+      }
+    ]
+  },
   "schema_version": 1,
   "size": 148142
 }

@@ -102,11 +102,13 @@ selector applicability, and proof caps are checked later as 416, not 400.
 Every 400 MUST depend only on URL text and the deployment's route grammar,
 never on stored state. An HTTP `Range` parse failure MUST NOT produce 400.
 
-The mandatory `/-/` distinguishes this namespace from `/.well-known/`,
-`/mkit.transport.v1.*`, and `/grpc.*`; their first segments cannot be a
-repository identity followed by `/-/`. The key document in §6 is a separate
-well-known route. Routers MUST retain the original escaped path until this
-parser runs; framework path decoding MUST NOT reinterpret delimiters.
+The mandatory `/-/` segment, which RPC service paths never contain,
+distinguishes this namespace from `/.well-known/`, `/mkit.transport.v1.*`,
+and `/grpc.*`. Routers MUST dispatch HTTP object routes by that segment,
+or RPCs by exact service path, never by a `/grpc.*` prefix glob. The key
+document in §6 is a separate well-known route. Routers MUST retain the
+original escaped path until this parser runs; framework path decoding
+MUST NOT reinterpret delimiters.
 
 ## 3. Response precedence
 
@@ -118,7 +120,7 @@ HEAD follows the same checks as GET but MUST send no body on every status.
 | 1 | OPTIONS preflight: 204, no authentication, authorization, or payment required. |
 | 2 | Method other than GET or HEAD: 405, `Allow: GET, HEAD, OPTIONS`. |
 | 3 | URL or query syntax fails §2: 400. |
-| 4 | Bearer-gated deployment: require the same bearer gate as RPCs; missing or invalid bearer yields 401. OPTIONS and the key document are exempt. |
+| 4 | Bearer-gated deployment: require the same bearer gate as RPCs; missing or invalid bearer yields 401. Every HTTP-objects response in such a deployment MUST be private. OPTIONS is unauthenticated but still private; the key document is exempt from the bearer gate and private caching rule. |
 | 5 | If a token is present, check its syntax and signature against the key set before repository lookup. Then check repository existence and private-token validity under §6. Missing repository, or missing/invalid private token: the same 404 response. A public repository ignores the token's result. |
 | 6 | Run the Authorizer for every read. Deny: 403, except 404 for a private repository or a hook `not_found`. A URL token does not bypass this hook. |
 | 7 | Resolve in the published view under §4. Missing ref, non-tree intermediate component, missing entry, unreachable proof commit, leaf/id mismatch, nonmember id, or unreachable id: 404. |
@@ -128,10 +130,12 @@ HEAD follows the same checks as GET but MUST send no body on every status.
 | 11 | Read Admission, when configured: challenge yields 402 under §7; deny yields 403. |
 | 12 | Serve 200 or ordinary-range 206; proofs always use 200. An enabled eligible redirect uses 302 under §8. |
 
-All errors MUST carry `Cache-Control: no-store`. The missing-repository and
+All errors MUST carry `no-store` in `Cache-Control`; in a bearer-gated
+deployment they MUST carry `private, no-store`. The missing-repository and
 missing/invalid-private-token 404s MUST be byte-identical in status, headers,
 and body for otherwise equivalent requests (including CORS and HEAD).
-Their response MUST NOT identify which check failed. Hooks and storage
+Their response MUST NOT identify which check failed. The missing-repository
+and private-repository 404 paths SHOULD take uniform time. Hooks and storage
 failures MUST fail closed under SPEC-SERVER; an infrastructure failure is
 503, never a fabricated success or content-dependent 400.
 
@@ -209,7 +213,16 @@ MKDP uses `application/vnd.mkit.disclosure`; MKDS uses
 `Accept-Ranges: none`, MUST ignore every HTTP Range/If-Range header, and
 MUST use 200 rather than 206. The 64 MiB encoded bundle cap applies.
 A deployment SHOULD configure a lower requested-content cap, for example
-8 MiB; exceeding either proof cap yields 416 before Admission.
+8 MiB. The requested-content range-length cap MUST be checked before the
+encoded-size cap; exceeding either yields 416 before Admission. A proof's
+`declared_bytes` MAY be computed exactly from indexed metadata without
+constructing the proof. The encoded-size cap MUST likewise be established
+from indexed metadata before Admission. The server MUST build the proof only
+after Admission allows it.
+Informative: complete preceding chunk-length proofs make ranges beyond
+roughly 30,000 preceding chunks (about 2 GiB of file) exceed the 64 MiB
+bundle cap and return 416. WP-4.14's boundary-aware builder is the planned
+mitigation.
 
 The proof ETag MUST be `"<commit>.<leaf>.<selector>"`, with lowercase
 64hex ids and selector `object` or `range-a-b` (minimal decimal inclusive
@@ -219,8 +232,10 @@ commit metadata headers from §5.1 also identify proof responses.
 ### 5.3 Cache and security headers
 
 The server MUST emit the following Cache-Control directives. Privacy
-requirements compose: private visibility, running Admission, or carrying
-a receipt overrides a public directive. Error no-store takes precedence.
+requirements compose: private visibility, bearer-gated deployment, running
+Admission, or carrying a receipt overrides a public directive without
+discarding the representation's freshness and revalidation directives.
+Error no-store takes precedence.
 
 | Representation | Cache-Control |
 |---|---|
@@ -228,13 +243,14 @@ a receipt overrides a public directive. Error no-store takes precedence.
 | Public ref path | `public, no-cache` |
 | Private object id | `private, max-age=n, immutable`, with integer seconds n no greater than the token's remaining lifetime (rounded down, never negative) |
 | Private ref path | `private, no-cache` |
-| Public commit-pinned proof | `public, immutable` |
+| Public commit-pinned proof | `public, max-age=31536000, immutable` |
 | Public ref-path proof | `public, no-cache` |
 | Private commit-pinned proof | `private, max-age=n, immutable`, bounded by token lifetime as above |
 | Private ref-path proof | `private, no-cache` |
-| Any success where read Admission ran, or a receipt is returned | MUST be `private`; retain applicable no-cache and lifetime limits |
-| 402 and every error | `no-store` |
-| 304 | MUST repeat the selected 200's ETag and Cache-Control; use the private policy when read Admission is configured, without actually calling it |
+| Any success where read Admission ran, or a receipt is returned | MUST be `private`; a public id URL retains `max-age=31536000, immutable`, a public ref path retains `no-cache`, and a public commit-pinned proof retains `max-age=31536000, immutable` |
+| Every HTTP-objects response in a bearer-gated deployment | MUST be `private`, including OPTIONS and 304, except the separately published key-set document; errors use `private, no-store` |
+| 402 and every error | `no-store`, or `private, no-store` in a bearer-gated deployment |
+| 304 | MUST repeat the selected 200's ETag, Cache-Control, `X-Mkit-Object`, `X-Mkit-Object-Type`, and, on ref paths, `X-Mkit-Commit`; select the same private policy when read Admission is configured, without actually calling it |
 
 Every serving response MUST carry `X-Content-Type-Options: nosniff`,
 `Content-Security-Policy: sandbox; default-src 'none'`, and
@@ -250,6 +266,8 @@ key retirement. A token MUST appear only in the `token=` query parameter.
 Header and cookie carriage is deferred (a future `X-Mkit-Url-Token`).
 Implementations MUST redact the token parameter from logs and traces,
 including raw request URLs and redirect/error diagnostics.
+Informative: CDN edge logs are outside this server-side redaction rule;
+operators must configure query redaction at the edge too.
 
 An id route maps to `object:<hex>`; a ref path maps to
 `path:<ref>:<unpadded base64url joined decoded path>`. An empty path maps
@@ -261,7 +279,9 @@ token target. Tokens MUST resolve in the published view.
 Step 5 prechecks syntax, key id, and signature before repository lookup,
 retaining the result until repository visibility is known. For a private
 repository the server MUST also verify every §9.4 request binding,
-audience, epoch, and expiry rule. Every verification failure on a private
+audience, epoch, and expiry rule. It MUST run the stateless audience,
+repository, target, and expiry checks before reading the stored epoch.
+Every verification failure on a private
 repository, including an unknown key, MUST produce the uniform 404. Public
 repositories MUST ignore the precheck result and all other token claims,
 and MUST still redact the supplied token.
@@ -283,6 +303,10 @@ including bearer and URL-token holders. `procedure` MUST be
 The operation MUST identify the selected repository and audience; it MUST
 NOT manufacture a signer, write grant, ref change, or idempotency key.
 No object-id field or token principal is added to the hook schema here.
+The HTTP read `AdmitRequest` MUST set `creates_namespace = false`,
+`creates_repo = false`, and `new_to_repo_bytes = 0`. Its
+`credential_headers` MUST contain the request's STC §5.1 credential
+headers under SPEC-SERVER §6.3's allowlist, bounds, and redaction rules.
 
 When reads are configured for Admission, GET and HEAD MUST be admitted
 alike. `declared_bytes` MUST be the selected GET body byte count after
@@ -292,11 +316,17 @@ credential forwarding and redaction MUST follow STC §5.1 and SPEC-SERVER
 §6.3/§6.6, including bearer/Payment header separation.
 
 A challenge MUST return 402, pass through `WWW-Authenticate` and
-`PAYMENT-REQUIRED`, and carry `Cache-Control: no-store`. Its body MUST be
+`PAYMENT-REQUIRED`, and carry `Cache-Control: no-store` (or
+`private, no-store` under a bearer gate). Its body MUST be
 the `AdmissionChallenge` message using canonical protobuf JSON, with
 `Content-Type: application/json` (HEAD omits the body). A success MUST pass
 through `Payment-Receipt` and `PAYMENT-RESPONSE` when supplied and MUST
 be private. Challenge and deny MUST allocate no reservation or replay state.
+A 402 MUST NOT carry `ETag`, any `X-Mkit-*` header, or `Content-Range`.
+Informative: because 304 and 416 precede Admission, a caller without payment
+can confirm a guessed ETag or learn the size N of paid public content. This is
+accepted by design: revalidation and unsatisfiable ranges are never charged.
+Private content is protected by the earlier token and Authorizer steps.
 
 An allowance with a reservation id MUST durably record the pending read
 before sending the first byte, as SPEC-SERVER §5 requires. `ReadServed`
@@ -312,8 +342,10 @@ Admission. Reads MUST NOT allocate auth v2 replay state.
 The server MUST serve directly by default. An option MAY enable 302 for a
 public ref-path GET or HEAD without `proof`. The redirect MUST use a
 relative object-id URL with the same explicit repository prefix, if any,
-and `Cache-Control: no-cache` (private when Admission ran). It MUST occur
-only after §3's earlier checks. Private and proof requests MUST NOT redirect.
+and `Cache-Control: no-cache` (`private, no-cache` in a bearer-gated
+deployment). It MUST occur only after §3's earlier checks.
+When read Admission is configured, redirects MUST be disabled and the content
+MUST be served directly. Private and proof requests MUST NOT redirect.
 
 Default CORS MUST use `Access-Control-Allow-Origin: *`. With configured
 origins, an allowed origin MUST be echoed. Every response under that
@@ -338,6 +370,9 @@ bodies with sidecars. In response rows, `expect.headers` is the required
 header subset and `absent_headers` lists forbidden headers. URL rows use
 status 200 to mean syntax accepted and continued, not that stored content
 exists. `MANIFEST.txt` pins BLAKE3 digests for every artifact.
+Negative span sidecars may describe byte-range copy and patch recipes over
+the accepted span containers; the check-mode test reconstructs the body and
+checks its pinned size and digest before applying the reference verifier.
 The independent test-local MKDS encoder and reference verifier are in
 [`golden_http_objects.rs`](../../rust/crates/mkit-core/tests/golden_http_objects.rs).
 `MKIT_WRITE_GOLDEN=1` regenerates the artifacts; check mode reads committed
@@ -348,10 +383,13 @@ follow M5. The product MKDS verifier, boundary-aware builder, and verifier
 bindings follow WP-4.14. Signed-read HTTP GETs and schema extensions for an
 object-id admission field or token principal require separate work.
 
-Version history: document version 1 introduces this HTTP contract and
-selects MKDP v2 or MKDS v1 without changing either object bytes or protobuf.
+## 10. Version history
 
-## 10. Invariants
+| Version | Status | Changes |
+|---|---|---|
+| 1 | draft | Initial HTTP contract, selecting MKDP v2 or MKDS v1 without changing object bytes or protobuf. Fix round 1 clarifies bearer and paid caching, proof-cost ordering, admission input, reservation grace, token timing, 402/304 headers, redirects, route dispatch, and vectors. |
+
+## 11. Invariants
 
 | Invariant | Enforced by |
 |---|---|

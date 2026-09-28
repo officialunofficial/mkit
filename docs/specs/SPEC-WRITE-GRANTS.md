@@ -926,6 +926,8 @@ byte for byte; `epoch` equals the stored epoch, read as §5.6 requires
 for reads; and `now < expiry`. Anything else is `not_found` for a
 private repository, as in §9.3. Serving always resolves the target in
 the published view.
+For HTTP serving, the stateless audience, repository, target, and expiry
+checks MUST precede the stored-epoch read, as SPEC-HTTP-OBJECTS §6 requires.
 
 **Response.** `IssueObjectUrl` returns the token and its expiry. The URL
 form MUST carry it only in a `token=` query parameter. Header and cookie
@@ -1175,7 +1177,7 @@ Landed so far (each pinned by BLAKE3 in the directory's `MANIFEST.txt`):
 
 | Version | Status | Changes |
 |---|---|---|
-| `1` | draft | Initial grant statement (audiences, ref scopes, capabilities), owner schemes, exact-epoch revocation with bounded epoch statements, epoch leases and the commit deadline, server policy, signed reads, private repositories and URL tokens, and server-side grants for ssh and enc (mkit#1085, mkit#1089). |
+| `1` | draft | Initial grant statement (audiences, ref scopes, capabilities), owner schemes, exact-epoch revocation with bounded epoch statements, epoch leases and the commit deadline, server policy, signed reads, private repositories and URL tokens, and server-side grants for ssh and enc (mkit#1085, mkit#1089). WP-4.11 adds the `token=` URL form and key-set publication, and amends token paths to 0–1024 bytes so an empty path names the root tree. Fix round 1 orders stateless token checks before the stored-epoch read. |
 
 ---
 

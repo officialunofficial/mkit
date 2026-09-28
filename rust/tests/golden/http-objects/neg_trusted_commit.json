@@ -7,6 +7,15 @@
     "reject_reason": "span_commit"
   },
   "name": "neg_trusted_commit",
+  "recipe": {
+    "segments": [
+      {
+        "length": 148142,
+        "offset": 0,
+        "source": "span_two_chunks.bin"
+      }
+    ]
+  },
   "schema_version": 1,
   "size": 148142
 }

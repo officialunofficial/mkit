@@ -7,6 +7,23 @@
     "reject_reason": "span_anchor_invalid"
   },
   "name": "neg_missing_anchor",
+  "recipe": {
+    "segments": [
+      {
+        "length": 53,
+        "offset": 0,
+        "source": "span_two_chunks.bin"
+      },
+      {
+        "hex": "00"
+      },
+      {
+        "length": 144093,
+        "offset": 4049,
+        "source": "span_two_chunks.bin"
+      }
+    ]
+  },
   "schema_version": 1,
   "size": 144147
 }

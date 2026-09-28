@@ -42,7 +42,11 @@ fn path(s: &str) -> Option<Vec<Vec<u8>>> {
         let mut i = 0;
         while i < raw.len() {
             if raw[i] == b'%' {
-                let h = std::str::from_utf8(raw.get(i + 1..i + 3)?).ok()?;
+                let digits = raw.get(i + 1..i + 3)?;
+                if !digits.iter().all(u8::is_ascii_hexdigit) {
+                    return None;
+                }
+                let h = std::str::from_utf8(digits).ok()?;
                 out.push(u8::from_str_radix(h, 16).ok()?);
                 i += 3;
             } else {
@@ -271,6 +275,7 @@ pub(super) fn urls() -> Value {
         ("path_trailing_slash", format!("{base}a/"), true),
         ("path_leading_slash", format!("{base}/a"), true),
         ("invalid_escape", format!("{base}a%GG"), true),
+        ("escape_with_sign", format!("{base}a%+1b"), true),
         ("truncated_escape", format!("{base}a%2"), true),
         ("decoded_slash", format!("{base}a%2Fb"), true),
         ("decoded_backslash", format!("{base}a%5Cb"), true),
@@ -344,7 +349,7 @@ pub(super) fn urls() -> Value {
 #[allow(clippy::too_many_lines)] // Declarative status/header matrix.
 pub(super) fn responses() -> Value {
     let h = "b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f";
-    let commit = "1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145d4";
+    let commit = "1d8c6225d142427a5791e289bb616393f299292880d59b43cbbebcb6d2c9b145";
     let etag = format!("\"{h}\"");
     let security = json!({"X-Content-Type-Options":"nosniff", "Content-Security-Policy":"sandbox; default-src 'none'", "Referrer-Policy":"no-referrer", "Access-Control-Allow-Origin":"*"});
     let mut cases = vec![];
@@ -359,7 +364,7 @@ pub(super) fn responses() -> Value {
         "preflight_before_auth",
         json!({"method":"OPTIONS","malformed_url":true,"bearer_required":true,"repository_missing":true,"admission":"challenge"}),
         204,
-        json!({"Access-Control-Allow-Methods":"GET, HEAD, OPTIONS","Access-Control-Allow-Headers":"Range, If-None-Match, If-Range, Payment-Authorization, PAYMENT-SIGNATURE, Authorization, Accept-Payment"}),
+        json!({"Access-Control-Allow-Methods":"GET, HEAD, OPTIONS","Access-Control-Allow-Headers":"Range, If-None-Match, If-Range, Payment-Authorization, PAYMENT-SIGNATURE, Authorization, Accept-Payment","Cache-Control":"private"}),
         json!(["Access-Control-Allow-Credentials"]),
     );
     add(
@@ -373,14 +378,14 @@ pub(super) fn responses() -> Value {
         "syntax_before_bearer",
         json!({"method":"GET","malformed_url":true,"bearer_required":true}),
         400,
-        json!({"Cache-Control":"no-store"}),
+        json!({"Cache-Control":"private, no-store"}),
         json!([]),
     );
     add(
         "bearer_before_repo",
         json!({"method":"GET","bearer_required":true,"repository_missing":true}),
         401,
-        json!({"Cache-Control":"no-store"}),
+        json!({"Cache-Control":"private, no-store"}),
         json!([]),
     );
     for (name, reason) in [
@@ -415,16 +420,23 @@ pub(super) fn responses() -> Value {
     );
     add(
         "not_modified_before_range_admission",
-        json!({"method":"GET","if_none_match":etag,"range":"bytes=200-300","size":100,"admission":"challenge"}),
+        json!({"method":"GET","route":"ref","if_none_match":etag,"range":"bytes=200-300","size":100,"admission":"challenge"}),
         304,
-        json!({"ETag":etag,"Cache-Control":"private, max-age=31536000, immutable"}),
+        json!({"ETag":etag,"Cache-Control":"private, no-cache","X-Mkit-Object":h,"X-Mkit-Object-Type":"blob","X-Mkit-Commit":commit}),
         json!(["PAYMENT-REQUIRED"]),
     );
     add(
         "not_modified_paid_policy",
         json!({"method":"GET","if_none_match":etag,"admission_configured":true,"admission_called":false}),
         304,
-        json!({"ETag":etag,"Cache-Control":"private, max-age=31536000, immutable"}),
+        json!({"ETag":etag,"Cache-Control":"private, max-age=31536000, immutable","X-Mkit-Object":h,"X-Mkit-Object-Type":"blob"}),
+        json!(["PAYMENT-REQUIRED"]),
+    );
+    add(
+        "not_modified_proof_paid_policy",
+        json!({"method":"GET","route":"object","proof":true,"if_none_match":format!("\"{commit}.{h}.object\""),"admission_configured":true,"admission_called":false}),
+        304,
+        json!({"ETag":format!("\"{commit}.{h}.object\""),"Cache-Control":"private, max-age=31536000, immutable","X-Mkit-Object":h,"X-Mkit-Object-Type":"chunked_blob","X-Mkit-Commit":commit}),
         json!(["PAYMENT-REQUIRED"]),
     );
     add(
@@ -439,6 +451,13 @@ pub(super) fn responses() -> Value {
         json!({"method":"GET","public":true,"token_valid":false}),
         200,
         json!({"Cache-Control":"public, max-age=31536000, immutable"}),
+        json!([]),
+    );
+    add(
+        "bearer_gated_public_id",
+        json!({"method":"GET","route":"object","public":true,"bearer_required":true,"bearer_valid":true}),
+        200,
+        json!({"ETag":etag,"Cache-Control":"private, max-age=31536000, immutable","X-Mkit-Object":h,"X-Mkit-Object-Type":"blob"}),
         json!([]),
     );
     add(
@@ -467,7 +486,14 @@ pub(super) fn responses() -> Value {
         json!({"method":"GET","admission":"challenge"}),
         402,
         json!({"Cache-Control":"no-store","Content-Type":"application/json","WWW-Authenticate":"Payment example","PAYMENT-REQUIRED":"opaque-challenge"}),
-        json!([]),
+        json!([
+            "ETag",
+            "X-Mkit-*",
+            "X-Mkit-Object",
+            "X-Mkit-Object-Type",
+            "X-Mkit-Commit",
+            "Content-Range"
+        ]),
     );
     add(
         "admission_deny",
@@ -515,18 +541,27 @@ pub(super) fn responses() -> Value {
         ),
         (
             "paid",
-            json!({"method":"GET","admission":"allow","public":true}),
+            json!({"method":"GET","route":"object","admission":"allow","public":true}),
             200,
-            "private",
+            "private, max-age=31536000, immutable",
+            "application/octet-stream",
+            100,
+            None,
+        ),
+        (
+            "paid_ref",
+            json!({"method":"GET","route":"ref","admission":"allow","public":true}),
+            200,
+            "private, no-cache",
             "application/octet-stream",
             100,
             None,
         ),
         (
             "head",
-            json!({"method":"HEAD","admission":"allow","declared_bytes":100,"bytes_served":0}),
+            json!({"method":"HEAD","route":"object","admission":"allow","declared_bytes":100,"bytes_served":0}),
             200,
-            "private",
+            "private, max-age=31536000, immutable",
             "application/octet-stream",
             100,
             None,
@@ -607,7 +642,7 @@ pub(super) fn responses() -> Value {
             "object",
             "MKDP",
             "object",
-            "public, immutable",
+            "public, max-age=31536000, immutable",
         ),
         ("proof_ref", "ref", "MKDP", "object", "public, no-cache"),
         (
@@ -622,7 +657,7 @@ pub(super) fn responses() -> Value {
             "object",
             "MKDS",
             "range-10-19",
-            "public, immutable",
+            "public, max-age=31536000, immutable",
         ),
         (
             "proof_private",
@@ -631,7 +666,13 @@ pub(super) fn responses() -> Value {
             "object",
             "private, max-age=60, immutable",
         ),
-        ("proof_paid", "object", "MKDS", "range-10-19", "private"),
+        (
+            "proof_paid",
+            "object",
+            "MKDS",
+            "range-10-19",
+            "private, max-age=31536000, immutable",
+        ),
     ] {
         add(
             name,
@@ -643,9 +684,9 @@ pub(super) fn responses() -> Value {
     }
     add(
         "receipt",
-        json!({"method":"GET","receipt":true}),
+        json!({"method":"GET","route":"object","receipt":true}),
         200,
-        json!({"Cache-Control":"private","Payment-Receipt":"opaque-receipt","PAYMENT-RESPONSE":"opaque-response"}),
+        json!({"Cache-Control":"private, max-age=31536000, immutable","Payment-Receipt":"opaque-receipt","PAYMENT-RESPONSE":"opaque-response"}),
         json!([]),
     );
     add(
@@ -654,6 +695,13 @@ pub(super) fn responses() -> Value {
         302,
         json!({"Location":format!("/-/objects/{h}"),"Cache-Control":"no-cache"}),
         json!([]),
+    );
+    add(
+        "admitted_ref_served_directly",
+        json!({"method":"GET","route":"ref","redirects":true,"public":true,"admission_configured":true,"admission":"allow"}),
+        200,
+        json!({"ETag":etag,"Cache-Control":"private, no-cache","X-Mkit-Object":h,"X-Mkit-Object-Type":"blob","X-Mkit-Commit":commit}),
+        json!(["Location"]),
     );
     add(
         "cors_configured",
@@ -690,7 +738,11 @@ pub(super) fn responses() -> Value {
     json!({"schema_version":1,"cases":cases,"notes":{"451":"Reserved for M5; never returned in M4.","opaque":"No object routes mounted.","uniform_404":"Missing repository and missing/invalid private token use identical headers and body.","402_body":"AdmissionChallenge canonical protobuf JSON; HEAD has no body."}})
 }
 
+#[allow(clippy::too_many_lines)] // Checks the full URL and response golden tables together.
 pub(super) fn check(dir: &std::path::Path) {
+    fn assert_id(value: &str) {
+        assert!(id(value), "expected 64 lowercase hex characters: {value}");
+    }
     let table: Value =
         serde_json::from_slice(&fs::read(dir.join("url-parse.json")).unwrap()).unwrap();
     assert_eq!(table["schema_version"], 1);
@@ -706,6 +758,13 @@ pub(super) fn check(dir: &std::path::Path) {
             row["name"]
         );
         assert_eq!(json!(got), row["expect"]["parsed"]);
+        let parsed = &row["expect"]["parsed"];
+        if let Some(value) = parsed["object"].as_str() {
+            assert_id(value);
+        }
+        if let Some(value) = parsed["query"]["commit"].as_str() {
+            assert_id(value);
+        }
     }
     let table: Value =
         serde_json::from_slice(&fs::read(dir.join("response-cases.json")).unwrap()).unwrap();
@@ -717,12 +776,50 @@ pub(super) fn check(dir: &std::path::Path) {
         assert_ne!(status, 451);
         let headers = &row["expect"]["headers"];
         if status >= 400 {
-            assert_eq!(headers["Cache-Control"], "no-store");
+            assert!(
+                headers["Cache-Control"]
+                    .as_str()
+                    .unwrap()
+                    .contains("no-store")
+            );
         }
         for absent in row["expect"]["absent_headers"].as_array().unwrap() {
-            assert!(headers.get(absent.as_str().unwrap()).is_none());
+            let name = absent.as_str().unwrap();
+            if let Some(prefix) = name.strip_suffix('*') {
+                assert!(
+                    headers
+                        .as_object()
+                        .unwrap()
+                        .keys()
+                        .all(|key| !key.starts_with(prefix))
+                );
+            } else {
+                assert!(headers.get(name).is_none());
+            }
         }
         assert_eq!(headers["X-Content-Type-Options"], "nosniff");
+        for name in ["X-Mkit-Object", "X-Mkit-Commit"] {
+            if let Some(value) = headers[name].as_str() {
+                assert_id(value);
+            }
+        }
+        if let Some(location) = headers["Location"].as_str() {
+            assert_id(location.rsplit('/').next().unwrap());
+        }
+        if let Some(value) = headers["ETag"].as_str() {
+            let inner = value.strip_prefix('"').unwrap().strip_suffix('"').unwrap();
+            let mut parts = inner.split('.');
+            assert_id(parts.next().unwrap());
+            if let Some(leaf) = parts.next() {
+                assert_id(leaf);
+                assert!(
+                    parts.next().is_some_and(
+                        |selector| selector == "object" || selector.starts_with("range-")
+                    )
+                );
+                assert!(parts.next().is_none());
+            }
+        }
     }
     let get = |name: &str| rows.iter().find(|r| r["name"] == name).unwrap();
     assert_eq!(
@@ -732,5 +829,26 @@ pub(super) fn check(dir: &std::path::Path) {
     assert_eq!(
         get("missing_repository")["expect"],
         get("private_invalid_token")["expect"]
+    );
+    for name in [
+        "paid",
+        "head",
+        "proof_paid",
+        "not_modified_paid_policy",
+        "not_modified_proof_paid_policy",
+    ] {
+        assert_eq!(
+            get(name)["expect"]["headers"]["Cache-Control"],
+            "private, max-age=31536000, immutable"
+        );
+    }
+    assert_eq!(
+        get("paid_ref")["expect"]["headers"]["Cache-Control"],
+        "private, no-cache"
+    );
+    assert_eq!(get("admitted_ref_served_directly")["expect"]["status"], 200);
+    assert_eq!(
+        get("bearer_gated_public_id")["expect"]["headers"]["Cache-Control"],
+        "private, max-age=31536000, immutable"
     );
 }

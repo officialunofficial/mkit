@@ -2,7 +2,12 @@
 //! Check mode consumes committed bytes; only `MKIT_WRITE_GOLDEN=1` builds fixtures.
 #![allow(clippy::unwrap_used)]
 
-use std::{collections::BTreeMap, fmt::Write as _, fs, path::PathBuf};
+use std::{
+    collections::{BTreeMap, HashMap},
+    fmt::Write as _,
+    fs,
+    path::PathBuf,
+};
 
 use commonware_codec::Write as _;
 use mkit_core::{
@@ -92,6 +97,104 @@ fn add_proof(
         format!("{name}.json"),
         serde_json::to_vec_pretty(&sidecar).unwrap(),
     );
+}
+
+struct RecipeIndex {
+    sources: Vec<(String, Vec<u8>)>,
+    positions: HashMap<[u8; 32], Vec<(usize, usize)>>,
+}
+
+impl RecipeIndex {
+    fn new(files: &BTreeMap<String, Vec<u8>>) -> Self {
+        let sources: Vec<_> = [
+            "span_two_chunks.bin",
+            "span_first_zero.bin",
+            "span_three_chunks.bin",
+        ]
+        .into_iter()
+        .map(|name| (name.to_owned(), files[name].clone()))
+        .collect();
+        let mut positions = HashMap::<[u8; 32], Vec<(usize, usize)>>::new();
+        for (source, (_, bytes)) in sources.iter().enumerate() {
+            for offset in 0..=bytes.len() - 32 {
+                let key: [u8; 32] = bytes[offset..offset + 32].try_into().unwrap();
+                let candidates = positions.entry(key).or_default();
+                if candidates.len() < 8 {
+                    candidates.push((source, offset));
+                }
+            }
+        }
+        Self { sources, positions }
+    }
+}
+
+fn compact_against_bases(files: &mut BTreeMap<String, Vec<u8>>, name: &str, index: &RecipeIndex) {
+    let bin_name = format!("{name}.bin");
+    let bin = files.remove(&bin_name).unwrap();
+    let mut segments = Vec::new();
+    let mut literal = Vec::new();
+    let mut cursor = 0;
+    while cursor < bin.len() {
+        let mut best = (0usize, 0usize, 0usize);
+        if let Some(window) = bin.get(cursor..cursor + 32) {
+            let key: [u8; 32] = window.try_into().unwrap();
+            if let Some(candidates) = index.positions.get(&key) {
+                for &(source, offset) in candidates {
+                    let bytes = &index.sources[source].1;
+                    let length = bin[cursor..]
+                        .iter()
+                        .zip(&bytes[offset..])
+                        .take_while(|(a, b)| a == b)
+                        .count();
+                    if length > best.2 {
+                        best = (source, offset, length);
+                    }
+                }
+            }
+        }
+        if best.2 >= 32 {
+            if !literal.is_empty() {
+                segments.push(json!({"hex":hex(&literal)}));
+                literal.clear();
+            }
+            segments
+                .push(json!({"source":index.sources[best.0].0,"offset":best.1,"length":best.2}));
+            cursor += best.2;
+        } else {
+            literal.push(bin[cursor]);
+            cursor += 1;
+        }
+    }
+    if !literal.is_empty() {
+        segments.push(json!({"hex":hex(&literal)}));
+    }
+    let json_name = format!("{name}.json");
+    let mut sidecar: Value = serde_json::from_slice(&files[&json_name]).unwrap();
+    sidecar["recipe"] = json!({"segments":segments});
+    files.insert(json_name, serde_json::to_vec_pretty(&sidecar).unwrap());
+}
+
+fn body_from_sidecar(dir: &std::path::Path, name: &str, sidecar: &Value) -> Vec<u8> {
+    let Some(recipe) = sidecar.get("recipe") else {
+        return fs::read(dir.join(format!("{name}.bin"))).unwrap();
+    };
+    let mut out = Vec::new();
+    for segment in recipe["segments"].as_array().unwrap() {
+        if let Some(source) = segment["source"].as_str() {
+            let base = fs::read(dir.join(source)).unwrap();
+            let offset = usize::try_from(segment["offset"].as_u64().unwrap()).unwrap();
+            let length = usize::try_from(segment["length"].as_u64().unwrap()).unwrap();
+            out.extend_from_slice(&base[offset..offset + length]);
+        } else {
+            let insert_hex = segment["hex"].as_str().unwrap();
+            assert_eq!(insert_hex.len() % 2, 0);
+            for pair in insert_hex.as_bytes().chunks_exact(2) {
+                assert!(pair.iter().all(u8::is_ascii_hexdigit));
+                out.push(u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap());
+            }
+        }
+    }
+    out
 }
 
 #[allow(clippy::too_many_lines)] // Declarative accept/reject fixture list.
@@ -247,6 +350,36 @@ fn fixture_files() -> BTreeMap<String, Vec<u8>> {
             None,
         ),
         (
+            "neg_gap",
+            fixture.commit_id,
+            encoded_span(
+                fixture.commit_id,
+                lengths[0] - 10,
+                20,
+                &anchor(fixture.commit_id, 0, true),
+                &[chunk(fixture.commit_id, 0), chunk(fixture.commit_id, 2)],
+            ),
+            Some("span_chunk_order"),
+            None,
+        ),
+        (
+            "neg_duplicate",
+            fixture.commit_id,
+            encoded_span(
+                fixture.commit_id,
+                lengths[0] - 10,
+                lengths[1] + 20,
+                &anchor(fixture.commit_id, 0, true),
+                &[
+                    chunk(fixture.commit_id, 0),
+                    chunk(fixture.commit_id, 1),
+                    chunk(fixture.commit_id, 1),
+                ],
+            ),
+            Some("span_chunk_order"),
+            None,
+        ),
+        (
             "neg_reordered",
             fixture.commit_id,
             encoded_span(
@@ -264,6 +397,32 @@ fn fixture_files() -> BTreeMap<String, Vec<u8>> {
             fixture.commit_id,
             encoded_span(fixture.commit_id, offset, 20, &[], &chunk_bundles),
             Some("span_anchor_invalid"),
+            None,
+        ),
+        (
+            "neg_anchor_selector",
+            fixture.commit_id,
+            encoded_span(
+                fixture.commit_id,
+                offset,
+                20,
+                &chunk_bundles[0],
+                &chunk_bundles,
+            ),
+            Some("span_anchor_selector"),
+            None,
+        ),
+        (
+            "neg_chunk_selector",
+            fixture.commit_id,
+            encoded_span(
+                fixture.commit_id,
+                offset,
+                20,
+                &anchor_bundle,
+                &[anchor_bundle.clone(), chunk_bundles[1].clone()],
+            ),
+            Some("span_chunk_selector"),
             None,
         ),
         (
@@ -286,6 +445,19 @@ fn fixture_files() -> BTreeMap<String, Vec<u8>> {
                 fixture.commit_id,
                 start - 1,
                 20,
+                &anchor_bundle,
+                &chunk_bundles,
+            ),
+            Some("span_range_outside"),
+            None,
+        ),
+        (
+            "neg_end_beyond_span",
+            fixture.commit_id,
+            encoded_span(
+                fixture.commit_id,
+                offset,
+                lengths[1] + lengths[2],
                 &anchor_bundle,
                 &chunk_bundles,
             ),
@@ -483,6 +655,18 @@ fn fixture_files() -> BTreeMap<String, Vec<u8>> {
         };
         add_proof(&mut files, name, trusted, bin, expected);
     }
+    let index = RecipeIndex::new(&files);
+    let negatives: Vec<String> = files
+        .keys()
+        .filter_map(|name| name.strip_suffix(".bin"))
+        .filter(|name| {
+            name.starts_with("neg_") && !["neg_oversize", "neg_truncated"].contains(name)
+        })
+        .map(str::to_owned)
+        .collect();
+    for name in negatives {
+        compact_against_bases(&mut files, &name, &index);
+    }
     for (name, table) in [
         ("url-parse.json", tables::urls()),
         ("response-cases.json", tables::responses()),
@@ -499,6 +683,16 @@ fn write_http_object_goldens_if_requested() {
     }
     let dir = directory();
     fs::create_dir_all(&dir).unwrap();
+    for entry in fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path
+            .extension()
+            .is_some_and(|ext| ext == "bin" || ext == "json")
+            || path.file_name().is_some_and(|name| name == "MANIFEST.txt")
+        {
+            fs::remove_file(path).unwrap();
+        }
+    }
     let files = fixture_files();
     let mut manifest = String::from(
         "# SPEC-HTTP-OBJECTS and MKDS v1; <artifact> <BLAKE3>\n# MKIT_WRITE_GOLDEN=1 cargo test -p mkit-core --test golden_http_objects\n",
@@ -526,18 +720,23 @@ fn committed_http_object_goldens_verify() {
         let bytes = fs::read(dir.join(name)).unwrap();
         assert_eq!(to_hex(&hash(&bytes)), digest, "{name}");
         count += 1;
-        if std::path::Path::new(name).extension() != Some(std::ffi::OsStr::new("bin")) {
+    }
+    for entry in fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension() != Some(std::ffi::OsStr::new("json")) {
             continue;
         }
-        let sidecar: Value =
-            serde_json::from_slice(&fs::read(dir.join(name.replace(".bin", ".json"))).unwrap())
-                .unwrap();
+        let name = path.file_stem().unwrap().to_str().unwrap();
+        if ["url-parse", "response-cases"].contains(&name) {
+            continue;
+        }
+        let sidecar: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let bytes = body_from_sidecar(&dir, name, &sidecar);
         assert_eq!(sidecar["size"], json!(bytes.len()));
-        assert_eq!(sidecar["blake3"], digest);
+        assert_eq!(sidecar["blake3"], to_hex(&hash(&bytes)));
         let trusted = mkit_core::hash::from_hex(sidecar["commit"].as_str().unwrap()).unwrap();
         let want = &sidecar["expect"];
-        if name.starts_with("object_")
-            || ["chunk.bin", "blob_range.bin", "in_chunk_range.bin"].contains(&name)
+        if name.starts_with("object_") || ["chunk", "blob_range", "in_chunk_range"].contains(&name)
         {
             let disclosed = verify_disclosure(&trusted, &bytes).unwrap();
             assert_eq!(summary(&disclosed), want["disclosed"], "{name}");

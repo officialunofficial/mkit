@@ -7,6 +7,25 @@
     "reject_reason": "span_chunk_order"
   },
   "name": "neg_reordered",
+  "recipe": {
+    "segments": [
+      {
+        "length": 4050,
+        "offset": 0,
+        "source": "span_two_chunks.bin"
+      },
+      {
+        "length": 74874,
+        "offset": 73268,
+        "source": "span_two_chunks.bin"
+      },
+      {
+        "length": 69218,
+        "offset": 4050,
+        "source": "span_two_chunks.bin"
+      }
+    ]
+  },
   "schema_version": 1,
   "size": 148142
 }

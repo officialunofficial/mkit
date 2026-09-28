@@ -1,22 +1,17 @@
 {
-  "blake3": "b5a7ab4abb1049d7739682923afdf3706c23cc22e6c73f1dac63c8a6f82d92d7",
+  "blake3": "b4a0df17aeb39534f9307419562a99e0cc931decaa56ffc99bfb496a5abf953e",
   "commit": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
   "expect": {
     "accept": false,
     "expand_to": null,
     "reject_reason": "span_chunk_order"
   },
-  "name": "neg_noncontiguous",
+  "name": "neg_gap",
   "recipe": {
     "segments": [
       {
-        "length": 4050,
+        "length": 79158,
         "offset": 0,
-        "source": "span_two_chunks.bin"
-      },
-      {
-        "length": 76855,
-        "offset": 2303,
         "source": "span_first_zero.bin"
       },
       {
@@ -27,5 +22,5 @@
     ]
   },
   "schema_version": 1,
-  "size": 155779
+  "size": 154032
 }
