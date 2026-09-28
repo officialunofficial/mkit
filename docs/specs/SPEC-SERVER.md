@@ -2089,8 +2089,11 @@ A **redaction notice** is the signed account of that action (§14.6).
 Content-level takedown is available only in indexed mode. It names 1–256
 whole plain-blob ids or ChunkedBlob manifest ids; an individual byte range
 cannot be removed. For a taken-down manifest, its chunks are removed from
-a repository only when they are not reachable from any §13.2 root there
-after substitution. The chunks MUST NOT themselves be blocklisted on
+a repository only when they are not **takedown-reachable** there after
+substitution: reachable, without descending through any blocked or
+taken-down manifest, from a live, published, or retained advance value
+after substitution. This takedown's own hit membership, superseded
+packs, holds, and replacement packs do not count as roots for this test. The chunks MUST NOT themselves be blocklisted on
 account of that manifest.
 Commits, trees, tags, and individual chunks cannot be taken down at
 content level. Use a repository- or namespace-level takedown for such
@@ -2208,8 +2211,9 @@ in force and MUST NOT report completion.
    ordinary seven-day grace.
 
 Holder discovery MUST first use pack-holder and extracted-object holder
-records. For small blobs without holder rows, each takedown MUST then
-run a resumable sweep across the deployment. After the safety cut, it
+records. Each takedown MUST then always run a resumable sweep across the
+deployment over all named ids, including ids that have holder rows; it
+is the only read that catches a holder recorded after discovery. After the safety cut, it
 MUST enumerate namespaces from the coordinator namespace registry. For
 each namespace, after its relay watermark has passed the cut, it MUST
 enumerate the union of that namespace's repository registry and the
@@ -2250,10 +2254,10 @@ the ids actually written.
 
 For a taken-down ChunkedBlob manifest, the rewrite MUST also remove
 repository membership and serving indexes for each chunk no longer
-reachable from any §13.2 root there after substitution. It MUST rewrite
+takedown-reachable there (§14.1) after substitution. It MUST rewrite
 or drop every pack containing such a chunk and substitute the affected
-packmaps in the same scope below. A chunk still reachable from another
-root keeps its membership; §14.5's serving stop applies until the
+packmaps in the same scope below. A chunk still takedown-reachable
+keeps its membership; §14.5's serving stop applies until the
 repository takedown completes. Chunks remain outside the global
 blocklist.
 
@@ -2304,10 +2308,10 @@ applicable writer notice details. A tombstoned delta base MUST use existing
 with the applicable writer details, without §9.4's membership-lag window. The tombstone
 check precedes that window. No new `failed_precondition` code is
 introduced for a ticketed `AdvanceRefs`. A `DownloadPack` of a
-superseded pack MUST return `not_found` with the notices for the caller's
-view, before sending any stream message, when the caller can see an
-affected ref value;
-otherwise it returns the ordinary plain `not_found`. `PackExists`
+superseded pack whose id appears in the `rewrites` of a notice for the
+caller's view MUST return `not_found` with exactly those notices before
+sending any stream message; otherwise it returns the ordinary plain
+`not_found`. `PackExists`
 MUST return `false`. The advance and delta-base details likewise require
 an authorized writer in the affected repository. SSH and enc callers
 receive the same plain error codes and messages without notice details.
@@ -2336,7 +2340,11 @@ superseded; otherwise that read returns §11.3's absent answer. A stale
 holder index is not proof. Until a repository's takedown completes,
 the serving stop also covers every chunk of a blocked manifest there;
 the per-read proof fails for any pack containing such a chunk, even
-though chunks are not blocklisted. This proof makes the
+though chunks are not blocklisted. The chunk-id set of a blocked
+manifest MUST be recorded with its blocklist action when that action is
+written, from the canonical manifest bytes. Whether a repository holds
+the manifest is decided from that repository's own membership, not from
+global holder rows. This proof makes the
 repository-specific serving stop effective immediately, independent of
 the holder sweep. Discovery
 MUST NOT impose a deployment-wide pack outage. Informative: without
@@ -2420,7 +2428,8 @@ trust root (§15.7), and check the expected origin, repository, and
 `blake3:` keyid and BLAKE3 of the selected raw public key.
 `issuedAtMs` MUST fall in that listed key's half-open validity
 window (§15.5). The client MUST refresh the same-origin key list within
-its 300-second max-age and refetch it on an unknown keyid before
+its 300-second max-age and refetch it once, ignoring its cache, on an
+unknown keyid before
 rejecting that key. A pinned key absent from the current list MUST fail
 verification even if its signature and issue-time window pass. A key
 learned only from `GetServerInfo` or the well-known URL is `unpinned`
@@ -2486,7 +2495,7 @@ NOT expose the object before all replacement state is durable.
 For a ChunkedBlob, reinstatement MUST also restore every preserved chunk
 whose repository membership was removed, using a separate single-object
 pack for each needed chunk before the manifest can become reachable.
-Chunks still reachable from any §13.2 root in that repository keep
+Chunks still takedown-reachable (§14.1) in that repository keep
 their existing member pack. The guarded packmap and index update MUST
 make the manifest and all its chunks usable together.
 For a repository- or namespace-level takedown, reinstatement removes

@@ -112,7 +112,7 @@ def main():
         assert (re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", payload["takedownId"])
                 or (prefix == "ingest" and payload["takedownId"] == ""))
         for field in ("takenDownAtMs", "issuedAtMs"):
-            assert isinstance(payload[field], str) and re.fullmatch(r"-?(0|[1-9][0-9]*)", payload[field])
+            assert isinstance(payload[field], str) and re.fullmatch(r"(0|-?[1-9][0-9]*)", payload[field])
             assert -(1 << 63) <= int(payload[field]) < (1 << 63)
         assert int(payload["takenDownAtMs"]) <= int(payload["issuedAtMs"])
         assert payload["rewrites"] == sorted(payload["rewrites"], key=lambda row: (row["type"], row["old"]))
