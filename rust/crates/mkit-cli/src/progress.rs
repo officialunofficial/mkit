@@ -40,8 +40,11 @@
 //! `--quiet` flag (forces off) or the `MKIT_PROGRESS` env var
 //! (`always`/`never`/`auto`, mirroring `NO_COLOR`/`CLICOLOR_FORCE`'s
 //! override convention) — `always` is how the CLI integration tests
-//! observe progress lines over a piped (non-tty) stderr.
+//! observe progress lines over a piped (non-tty) stderr. Verification waiting
+//! is an exception: a piped, non-quiet push gets one start and one completion
+//! line because the wait can last for minutes.
 
+use mkit_transport_connect::PendingEvent;
 use std::cell::RefCell;
 use std::io::{IsTerminal, Write};
 
@@ -145,6 +148,70 @@ impl Reporter {
 
 thread_local! {
     static REPORTER: RefCell<Option<Reporter>> = const { RefCell::new(None) };
+    static PENDING: RefCell<Option<PendingReporter>> = const { RefCell::new(None) };
+}
+
+struct PendingReporter {
+    quiet: bool,
+    interactive: bool,
+    active: bool,
+}
+
+impl PendingReporter {
+    fn new(quiet: bool, mode: Option<&str>, is_tty: bool) -> Self {
+        Self {
+            quiet: quiet || mode == Some("never"),
+            interactive: mode == Some("always") || is_tty,
+            active: false,
+        }
+    }
+
+    fn render(&mut self, event: PendingEvent) -> Option<String> {
+        if self.quiet {
+            return None;
+        }
+        match event {
+            PendingEvent::Waiting { elapsed, .. } if self.interactive => {
+                self.active = true;
+                Some(format!(
+                    "\rWaiting for server verification: {}s\x1b[K",
+                    elapsed.as_secs()
+                ))
+            }
+            PendingEvent::Waiting { .. } if !self.active => {
+                self.active = true;
+                Some("Waiting for server verification...\n".to_owned())
+            }
+            PendingEvent::Finished { elapsed, succeeded } if self.active => {
+                self.active = false;
+                if self.interactive {
+                    let status = if succeeded { "done" } else { "stopped" };
+                    Some(format!(
+                        "\rWaiting for server verification: {}s, {status}.\x1b[K\n",
+                        elapsed.as_secs()
+                    ))
+                } else if succeeded {
+                    Some("Server verification complete.\n".to_owned())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Report verification polling on the same caller thread as the transfer.
+pub fn pending_event(event: PendingEvent) {
+    PENDING.with(|slot| {
+        if let Some(reporter) = slot.borrow_mut().as_mut()
+            && let Some(line) = reporter.render(event)
+        {
+            let mut stderr = std::io::stderr().lock();
+            let _ = stderr.write_all(line.as_bytes());
+            let _ = stderr.flush();
+        }
+    });
 }
 
 /// RAII handle returned by [`start`]. Dropping it flushes a final
@@ -160,6 +227,9 @@ pub struct Guard {
 
 impl Drop for Guard {
     fn drop(&mut self) {
+        PENDING.with(|r| {
+            r.borrow_mut().take();
+        });
         REPORTER.with(|r| {
             if let Some(mut rep) = r.borrow_mut().take() {
                 rep.finish();
@@ -178,7 +248,15 @@ impl Drop for Guard {
 /// side, where the object count isn't known until each pack is
 /// downloaded) renders as a running count only — never a fabricated
 /// total.
-pub fn start(label: &'static str, total: Option<usize>, enabled: bool) -> Guard {
+pub fn start(label: &'static str, total: Option<usize>, enabled: bool, quiet: bool) -> Guard {
+    let progress_mode = std::env::var("MKIT_PROGRESS").ok();
+    PENDING.with(|r| {
+        *r.borrow_mut() = Some(PendingReporter::new(
+            quiet,
+            progress_mode.as_deref(),
+            std::io::stderr().is_terminal(),
+        ));
+    });
     REPORTER.with(|r| {
         *r.borrow_mut() = if enabled {
             Some(Reporter::new(label, total))
@@ -262,9 +340,49 @@ mod tests {
     /// `report` inside its scope is still the no-op path.
     #[test]
     fn disabled_guard_installs_no_reporter() {
-        let guard = start("Writing objects", Some(4), false);
+        let guard = start("Writing objects", Some(4), false, true);
         report(Event::ObjectsPacked(4));
         drop(guard);
+    }
+
+    #[test]
+    fn pending_stderr_lines_for_piped_forced_and_quiet_modes() {
+        let wait = PendingEvent::Waiting {
+            elapsed: std::time::Duration::from_secs(42),
+            next: std::time::Duration::from_secs(1),
+        };
+        let done = PendingEvent::Finished {
+            elapsed: std::time::Duration::from_secs(43),
+            succeeded: true,
+        };
+        let mut piped = PendingReporter::new(false, None, false);
+        assert_eq!(
+            piped.render(wait).as_deref(),
+            Some("Waiting for server verification...\n")
+        );
+        assert_eq!(piped.render(wait), None);
+        assert_eq!(
+            piped.render(done).as_deref(),
+            Some("Server verification complete.\n")
+        );
+
+        let mut forced = PendingReporter::new(false, Some("always"), false);
+        assert_eq!(
+            forced.render(wait).as_deref(),
+            Some("\rWaiting for server verification: 42s\x1b[K")
+        );
+        assert_eq!(
+            forced.render(done).as_deref(),
+            Some("\rWaiting for server verification: 43s, done.\x1b[K\n")
+        );
+
+        let mut quiet = PendingReporter::new(true, Some("always"), false);
+        assert_eq!(quiet.render(wait), None);
+        assert_eq!(quiet.render(done), None);
+
+        let mut never = PendingReporter::new(false, Some("never"), true);
+        assert_eq!(never.render(wait), None);
+        assert_eq!(never.render(done), None);
     }
 
     /// `should_report` precedence: `--quiet` wins outright, then

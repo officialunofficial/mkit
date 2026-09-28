@@ -112,6 +112,7 @@ struct TestService {
     inner: Arc<MemoryTransport>,
     calls: CapturedCalls,
     not_found: Vec<&'static str>,
+    pending_advance: bool,
 }
 
 impl TestService {
@@ -245,6 +246,16 @@ impl generated::TransportService for TestService {
         request: ServiceRequest<'_, generated::AdvanceRefsRequest>,
     ) -> ServiceResult<generated::AdvanceRefsResponse> {
         self.capture(&ctx, "AdvanceRefs")?;
+        if self.pending_advance {
+            return Err(
+                ConnectError::unavailable("verification pending").with_detail(
+                    connectrpc::ErrorDetail::from_message(
+                        "mkit.transport.v1.PendingVerification",
+                        &generated::PendingVerification::default().with_retry_after_ms(5_000),
+                    ),
+                ),
+            );
+        }
         let msg = request.to_owned_message();
         let head_ref = msg.head_ref.unwrap_or_default();
         let head_condition = wire_to_condition(msg.head_expectation, msg.head_expected_id)?;
@@ -448,6 +459,19 @@ fn spawn_server_with_errors(
     std::thread::JoinHandle<()>,
     CapturedCalls,
 ) {
+    spawn_server_with_behavior(backend, not_found, false)
+}
+
+fn spawn_server_with_behavior(
+    backend: Arc<MemoryTransport>,
+    not_found: Vec<&'static str>,
+    pending_advance: bool,
+) -> (
+    u16,
+    tokio::sync::oneshot::Sender<()>,
+    std::thread::JoinHandle<()>,
+    CapturedCalls,
+) {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let server_calls = Arc::clone(&calls);
     let (addr_tx, addr_rx) = mpsc::channel();
@@ -473,6 +497,7 @@ fn spawn_server_with_errors(
                 inner: backend,
                 calls: server_calls,
                 not_found,
+                pending_advance,
             });
             let router = Router::new().add_service(service);
 
@@ -606,6 +631,94 @@ fn push_then_pull_roundtrip_through_real_connect_server() {
     }
     let _ = shutdown.send(());
     handle.join().expect("server thread joins cleanly");
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_pending_interrupt_uses_configured_observer_and_exits_75() {
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    // Kills the push if the test panics before it exits, so no child outlives it.
+    struct KillOnDrop(std::process::Child);
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            if matches!(self.0.try_wait(), Ok(None)) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+    }
+
+    let (src, _) = source_repo_with_one_commit();
+    let (port, shutdown, handle, calls) =
+        spawn_server_with_behavior(Arc::new(MemoryTransport::new()), Vec::new(), true);
+    let url = format!("mkit+http://127.0.0.1:{port}/myproj");
+    // `remote add` intentionally restricts saved URLs to public schemes;
+    // this loopback-only fixture writes the same repo-scoped config shape.
+    let config_path = src.path().join(".mkit/config");
+    let mut config = std::fs::read_to_string(&config_path).unwrap_or_default();
+    config.push_str("\nremote.origin.url = ");
+    config.push_str(&url);
+    config.push_str("\nremote.origin.type = http\n");
+    std::fs::write(config_path, config).unwrap();
+
+    let xdg = tempfile::tempdir().unwrap();
+    let child = Command::new(mkit_bin())
+        .args(["push", "origin"])
+        .current_dir(src.path())
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("MKIT_PROGRESS", "always")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut child = KillOnDrop(child);
+
+    let started = Instant::now();
+    while !calls
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|call| call.procedure == "AdvanceRefs")
+    {
+        // Generous budgets: a debug `mkit push` on a loaded test runner.
+        assert!(
+            started.elapsed() <= Duration::from_secs(30),
+            "push did not reach AdvanceRefs"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let signalled = Command::new("kill")
+        .args(["-INT", &child.0.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(signalled.success(), "could not signal push process");
+    let interrupted_at = Instant::now();
+    while child.0.try_wait().unwrap().is_none() {
+        assert!(
+            interrupted_at.elapsed() <= Duration::from_secs(10),
+            "push did not stop within the polling slice"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let mut stderr = String::new();
+    std::io::Read::read_to_string(child.0.stderr.as_mut().unwrap(), &mut stderr).unwrap();
+    let status = child.0.wait().unwrap();
+    assert_eq!(status.code(), Some(75), "{stderr}");
+    assert!(
+        stderr.contains("Waiting for server verification"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("push: interrupted; re-run push to resume"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("BeginUpload"), "{stderr}");
+
+    let _ = shutdown.send(());
+    handle.join().unwrap();
 }
 
 #[test]

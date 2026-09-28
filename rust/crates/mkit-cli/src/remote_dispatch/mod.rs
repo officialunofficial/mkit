@@ -40,7 +40,9 @@ use mkit_core::protocol::{PackKey, Transport, TransportError};
 use mkit_core::refs::{self, Head};
 use mkit_core::store::{ObjectStore, StoreError};
 use mkit_core::transfer::{self, PackListError};
-use mkit_transport_connect::{ConnectTransport, repository_identity_from_url};
+use mkit_transport_connect::{
+    ConnectTransport, PENDING_INTERRUPTED_MESSAGE, repository_identity_from_url,
+};
 use mkit_transport_file::FileTransport;
 use mkit_transport_s3::S3Transport;
 use mkit_transport_ssh::{SshInitError, SshOptions, SshTransport, parse_mkit_ssh_url};
@@ -187,6 +189,10 @@ pub enum DispatchError {
 /// Interpret a missing result as a repository failure only for repository-level
 /// operations. Pack downloads retain their content-specific missing errors.
 fn repository_operation_error(tx: &dyn Transport, error: TransportError) -> DispatchError {
+    if matches!(&error, TransportError::RemoteError(message) if message == PENDING_INTERRUPTED_MESSAGE)
+    {
+        return DispatchError::Interrupted;
+    }
     if matches!(&error, TransportError::PackNotFound)
         && let Some(address) = tx.repository_address()
     {
@@ -251,6 +257,15 @@ pub(crate) fn open_with_config(
     } else {
         None
     };
+    if url.starts_with("mkit+https://") || url.starts_with("mkit+http://") {
+        validate_connect_repository(url)?;
+        let tx = ConnectTransport::connect_with_signer(url, envelope_signer)?
+            .with_pending_observer(|event| {
+                crate::progress::pending_event(event);
+                !crate::signal::is_shutdown()
+            });
+        return Ok(Arc::new(tx));
+    }
     open_with_ssh_options(url, &ssh_options_from_config(cfg), envelope_signer)
 }
 
@@ -350,9 +365,10 @@ pub fn open(url: &str) -> Result<Arc<dyn Transport>, DispatchError> {
 /// `ssh_options` (issue #389) into the spawned `ssh(1)` child via
 /// [`SshTransport::connect_with_options`], and the `mkit+https://`/
 /// `mkit+http://` branch threads `envelope_signer` (issue #699 follow-up)
-/// into [`ConnectTransport::connect_with_signer`]. Reached only via
-/// [`open`] (no config — both `None`/default) and [`open_with_config`]
-/// (config-derived).
+/// into [`ConnectTransport::connect_with_signer`]. Reached via [`open`]
+/// (no config — both `None`/default) and [`open_with_config`] for non-Connect
+/// schemes; `open_with_config` handles Connect URLs itself, so the Connect
+/// branch here is reached only from [`open`].
 fn open_with_ssh_options(
     url: &str,
     ssh_options: &SshOptions,
@@ -379,24 +395,14 @@ fn open_with_ssh_options(
         ));
     }
     if url.starts_with("mkit+https://") || url.starts_with("mkit+http://") {
-        repository_identity_from_url(url).map_err(|reason| {
-            let path = url
-                .split_once("://")
-                .and_then(|(_, rest)| rest.split_once('/'))
-                .map_or("", |(_, path)| path)
-                .split(['?', '#'])
-                .next()
-                .unwrap_or("")
-                .trim_matches('/');
-            DispatchError::MalformedUrl(format!("repository identity `{path}` in {url}: {reason}"))
-        })?;
+        validate_connect_repository(url)?;
         // ConnectTransport::connect_with_signer strips the `mkit+` prefix
         // itself and reads MKIT_API_TOKEN from the environment (mkit#701 —
         // the native mkit.transport.v1 ConnectRPC client, replacing the
         // retired mkit-transport-http JSON dialect as of
-        // SPEC-TRANSPORT-CONNECT verb parity). `envelope_signer` is `None`
-        // unless the caller resolved one via `open_with_config` (mkit#699
-        // follow-up: `transport_auth = envelope`) — bearer token and
+        // SPEC-TRANSPORT-CONNECT verb parity). Only the config-less `open`
+        // reaches this branch (`open_with_config` returns early for Connect
+        // URLs), so `envelope_signer` is always `None` here; bearer token and
         // envelope signing are independent, additive auth modes.
         let tx = ConnectTransport::connect_with_signer(url, envelope_signer)?;
         return Ok(Arc::new(tx));
@@ -424,6 +430,21 @@ fn open_with_ssh_options(
         return open_enc(url);
     }
     Err(DispatchError::MalformedUrl(url.to_string()))
+}
+
+fn validate_connect_repository(url: &str) -> Result<(), DispatchError> {
+    repository_identity_from_url(url).map_err(|reason| {
+        let path = url
+            .split_once("://")
+            .and_then(|(_, rest)| rest.split_once('/'))
+            .map_or("", |(_, path)| path)
+            .split(['?', '#'])
+            .next()
+            .unwrap_or("")
+            .trim_matches('/');
+        DispatchError::MalformedUrl(format!("repository identity `{path}` in {url}: {reason}"))
+    })?;
+    Ok(())
 }
 
 /// `mkit+enc://` dispatch (issue #156).
@@ -1708,6 +1729,23 @@ mod tests {
                 "trusted destination should reach key resolution: {error}"
             );
         }
+    }
+
+    #[test]
+    fn configured_connect_open_reports_malformed_repository_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(directory.path());
+        let url = "mkit+https://host/Uppercase";
+        let error = super::open_with_config(url, &Config::default(), &layout)
+            .err()
+            .expect("uppercase repository identity must be rejected");
+        assert!(
+            matches!(error, super::DispatchError::MalformedUrl(_)),
+            "expected malformed URL, got {error:?}"
+        );
+        let message = error.to_string();
+        assert!(message.contains("Uppercase"), "{message}");
+        assert!(!message.contains("invalid response"), "{message}");
     }
 
     #[test]

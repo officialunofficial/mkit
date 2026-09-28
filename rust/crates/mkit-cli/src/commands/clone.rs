@@ -172,6 +172,7 @@ pub fn run(args: &[String]) -> u8 {
                 "Unpacking objects",
                 None,
                 crate::progress::should_report(opts.quiet),
+                opts.quiet,
             );
             remote_dispatch::pull_all_with(
                 &target,

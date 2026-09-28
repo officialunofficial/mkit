@@ -29,14 +29,20 @@ pub(crate) struct RetryIdentity {
     nonce: String,
     created_at: String,
     expires_at: String,
+    pub(crate) expires_at_ms: i64,
 }
 impl RetryIdentity {
     pub(crate) fn new() -> Result<Self, String> {
-        let now = now_ms();
+        Self::new_at(now_ms())
+    }
+
+    pub(crate) fn new_at(now: i64) -> Result<Self, String> {
+        let expires_at_ms = now.saturating_add(MAX_VALIDITY_MS);
         Ok(Self {
             nonce: random_idempotency_key()?,
             created_at: now.to_string(),
-            expires_at: now.saturating_add(MAX_VALIDITY_MS).to_string(),
+            expires_at: expires_at_ms.to_string(),
+            expires_at_ms,
         })
     }
     pub(crate) fn apply(
@@ -98,7 +104,7 @@ fn procedure_auth(procedure: &str) -> Option<ProcedureAuth> {
     })
 }
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))

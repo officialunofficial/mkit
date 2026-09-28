@@ -56,6 +56,7 @@ connectrpc = { version = "0.9.0", default-features = false, features = [
     "json",
 ] }
 buffa = "0.9.1"
+base64 = "0.22"
 
 # Async runtime driving the ConnectRPC client. The `Transport` trait (mkit_core::protocol::Transport) is
 # synchronous; `mkit_core::protocol::async_shim::Executor` bridges the
