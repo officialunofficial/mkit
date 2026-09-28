@@ -11,6 +11,8 @@ service HooksService {
   rpc Inspect(InspectRequest) returns (InspectResponse);
   // Deliver a durable reservation outcome at least once; SPEC-SERVER §§5, 6.5.
   rpc Outcome(OutcomeRequest) returns (OutcomeResponse);
+  // Deliver a durable lifecycle event at least once; SPEC-SERVER §12.4.
+  rpc Event(EventRequest) returns (EventResponse);
 }
 
 // Verified operation context shared by decision hooks; SPEC-SERVER §6.2.
@@ -376,4 +378,75 @@ message ReadServed {
   bytes object = 1;
   // Number of bytes served to the client; SPEC-SERVER §6.5.
   uint64 bytes_served = 2;
+}
+
+// Durable lifecycle event delivery; SPEC-SERVER §12.4.
+message EventRequest {
+  // Required event, with exactly one kind; SPEC-SERVER §12.4.
+  Event event = 1;
+}
+
+// Empty acknowledgement of the delivered event; SPEC-SERVER §12.4 and §8.
+message EventResponse {}
+
+// Common lifecycle event envelope; SPEC-SERVER §12.4.
+message Event {
+  // Audience-unique idempotency key: 1–128 bytes of [A-Za-z0-9._:-].
+  string event_id = 1;
+  // The mkit server's canonical origin, not the hook signing audience.
+  string audience = 2;
+  // Full repository identity under STC §7.4.
+  string repository = 3;
+  // Transition time in Unix epoch milliseconds, independent of delivery time.
+  int64 occurred_unix_ms = 4;
+  // Strictly increasing per (repository, ref-or-repository) scope; stable on retry.
+  uint64 sequence = 5;
+  // Exactly one transition kind; SPEC-SERVER §12.4.
+  oneof kind {
+    // Storage-lease or administrative transition.
+    LeaseTransition lease = 6;
+    // Field 7 is left for the publication transition (§10); not reserved in schema.
+  }
+}
+
+// Effective storage-lease state transition; SPEC-SERVER §12.4.
+message LeaseTransition {
+  // Full ref name; empty means repository-level scope.
+  string ref = 1;
+  // Previous effective state; must not be UNSPECIFIED.
+  LeaseState from = 2;
+  // Resulting effective state; must not be UNSPECIFIED.
+  LeaseState to = 3;
+  // Applicable lease expiry; absent for permanent retention.
+  int64 lease_expires_unix_ms = 4;
+  // Transition cause; must not be UNSPECIFIED.
+  LeaseCause cause = 5;
+}
+
+// Storage-lease states ordered by severity; SPEC-SERVER §12.2.
+enum LeaseState {
+  // Invalid for emitted transitions.
+  LEASE_STATE_UNSPECIFIED = 0;
+  // Normal access.
+  LEASE_STATE_ACTIVE = 1;
+  // Writes blocked, reads allowed.
+  LEASE_STATE_GRACE = 2;
+  // Reads and writes blocked.
+  LEASE_STATE_SUSPENDED = 3;
+  // Terminal removal; objects await GC.
+  LEASE_STATE_DELETED = 4;
+}
+
+// Reason for a storage-lease transition; SPEC-SERVER §12.4.
+enum LeaseCause {
+  // Invalid for emitted transitions.
+  LEASE_CAUSE_UNSPECIFIED = 0;
+  // A time boundary was reached.
+  LEASE_CAUSE_EXPIRY = 1;
+  // Payment or policy renewal restored active storage terms.
+  LEASE_CAUSE_RENEWAL = 2;
+  // Deployment policy changed the storage terms.
+  LEASE_CAUSE_POLICY = 3;
+  // An administrative override changed the effective state.
+  LEASE_CAUSE_ADMIN = 4;
 }

@@ -5684,9 +5684,13 @@ pub struct GetServerInfoResponseView<'a> {
     ///
     /// Field 16: `max_delta_chain_depth`
     pub max_delta_chain_depth: ::core::option::Option<u32>,
-    /// Field 17 is reserved for lease discovery.
+    /// Whether storage leases are enforced; STC §2.1 and SPEC-SERVER §12.
+    ///
+    /// Field 17: `leases`
+    pub leases: ::core::option::Option<bool>,
     /// Whether async inspection is configured; writers MUST sign reads to see
-    /// pending or held content, including sync holds when false (SPEC-SERVER §10).
+    /// non-held pending content. Held content is hidden from every caller,
+    /// including with sync holds when false (SPEC-SERVER §§10–11).
     ///
     /// Field 18: `async_inspection`
     pub async_inspection: ::core::option::Option<bool>,
@@ -5831,6 +5835,13 @@ impl<'a> ::buffa::MessageView<'a> for GetServerInfoResponseView<'a> {
                     ::buffa::types::decode_uint32(&mut cur)?,
                 );
             }
+            17u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                view.leases = Some(::buffa::types::decode_bool(&mut cur)?);
+            }
             18u32 => {
                 ::buffa::encoding::check_wire_type(
                     tag,
@@ -5893,6 +5904,7 @@ impl<'a> ::buffa::MessageView<'a> for GetServerInfoResponseView<'a> {
             namespace_policy: self.namespace_policy.map(|s| s.to_string()),
             index_fanout: self.index_fanout,
             max_delta_chain_depth: self.max_delta_chain_depth,
+            leases: self.leases,
             async_inspection: self.async_inspection,
             __buffa_unknown_fields: self.__buffa_unknown_fields.to_owned()?.into(),
             ..::core::default::Default::default()
@@ -5952,6 +5964,9 @@ impl<'a> ::buffa::ViewEncode<'a> for GetServerInfoResponseView<'a> {
         }
         if let Some(v) = self.max_delta_chain_depth {
             size += 2u64 + ::buffa::types::uint32_encoded_len(v) as u64;
+        }
+        if self.leases.is_some() {
+            size += 2u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
         }
         if self.async_inspection.is_some() {
             size += 2u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
@@ -6014,6 +6029,9 @@ impl<'a> ::buffa::ViewEncode<'a> for GetServerInfoResponseView<'a> {
         }
         if let Some(v) = self.max_delta_chain_depth {
             ::buffa::types::put_uint32_field(16u32, v, buf);
+        }
+        if let Some(v) = self.leases {
+            ::buffa::types::put_bool_field(17u32, v, buf);
         }
         if let Some(v) = self.async_inspection {
             ::buffa::types::put_bool_field(18u32, v, buf);
@@ -6114,6 +6132,9 @@ impl<'__a> ::serde::Serialize for GetServerInfoResponseView<'__a> {
                     "maxDeltaChainDepth",
                     &::buffa::json_helpers::ProtoJson(&__v),
                 )?;
+        }
+        if let ::core::option::Option::Some(__v) = self.leases {
+            __map.serialize_entry("leases", &__v)?;
         }
         if let ::core::option::Option::Some(__v) = self.async_inspection {
             __map.serialize_entry("asyncInspection", &__v)?;
@@ -6325,9 +6346,16 @@ impl GetServerInfoResponseOwnedView {
     pub fn max_delta_chain_depth(&self) -> ::core::option::Option<u32> {
         self.0.reborrow().max_delta_chain_depth
     }
-    /// Field 17 is reserved for lease discovery.
+    /// Whether storage leases are enforced; STC §2.1 and SPEC-SERVER §12.
+    ///
+    /// Field 17: `leases`
+    #[must_use]
+    pub fn leases(&self) -> ::core::option::Option<bool> {
+        self.0.reborrow().leases
+    }
     /// Whether async inspection is configured; writers MUST sign reads to see
-    /// pending or held content, including sync holds when false (SPEC-SERVER §10).
+    /// non-held pending content. Held content is hidden from every caller,
+    /// including with sync holds when false (SPEC-SERVER §§10–11).
     ///
     /// Field 18: `async_inspection`
     #[must_use]

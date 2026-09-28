@@ -633,11 +633,11 @@ Entry condition: M1 is merged. The M4 private-serving WPs (4.15) need M2 read au
 - **Depends on:** WP-4.12, WP-4.3, WP-4.11.
 - **Goal:**
   - For ref/path URLs, build the disclosure bundle via `build_disclosure_from` (`Selector` per SPEC-DISCLOSURE) over the repo index.
-  - For Range requests within one chunk, use a Bao slice bundle; a range crossing chunk boundaries gets a
-    **multi-chunk proof bundle** in the encoding WP-4.11 fixes (adopted default).
+  - For `?proof=1&range=a-b`, use MKDP Range within one chunk; cross-chunk ranges use MKDS v1 over MKDP v2 (R-109).
+  - Add a boundary-aware builder and Workers in-memory `ObjectSource` prefetch using 4.10 chunk offsets.
   - Deliver it in the format WP-4.11 fixes.
   - Object-by-id URLs take proofs only with commit context (per spec).
-- **Files:** `mkit-server/src/http_objects/proof.rs`, `rust/crates/mkit-wasm/tests/` (node or wasm-bindgen-test verifying server-produced bundles with `verify_disclosure` / `blob_bao_verify_slice`), goldens.
+- **Files:** `mkit-server/src/http_objects/proof.rs`, `mkit-core/src/verify.rs` (MKDS verifier), `mkit-wasm/src/verify.rs` (MKDS binding), `rust/crates/mkit-wasm/tests/` (node or wasm-bindgen-test verifying server-produced bundles with `verify_disclosure` / `blob_bao_verify_slice`), goldens.
 - **Tests:**
   - The M4/M5 exit criterion "serving and proof round trips verify with `mkit-wasm`".
   - A tampered bundle is rejected.
@@ -650,8 +650,8 @@ Entry condition: M1 is merged. The M4 private-serving WPs (4.15) need M2 read au
   - M2:signed reads/visibility/read grants
   - M2:IssueObjectUrl + token verifier
 - **Goal:**
-  - Private repos: a request needs a valid signed URL token (or signed-read headers for API clients).
-  - `Cache-Control: private`, and never `public`/`immutable` on a private response.
+  - Private repos: a request needs a valid signed URL token; signed-read HTTP GETs are deferred (R-109).
+  - `Cache-Control: private`; id URLs may be immutable with max-age bounded by token lifetime (SPEC-HTTP-OBJECTS).
   - A visibility check at request time.
   - Wire the Workers/native adapters (WP-4.16) to not populate shared caches for private responses.
 - **Files:** `mkit-server/src/http_objects/auth.rs`.
@@ -663,7 +663,7 @@ Entry condition: M1 is merged. The M4 private-serving WPs (4.15) need M2 read au
 - **Goal:**
   - Native: an axum route mount in the `mkit-server` binary; FS/S3 range reads.
   - Workers: a fetch route in `mkit-server-worker`, R2 `get` with range, streaming response bodies.
-  - CORS for GET/HEAD with Range and ETag exposed.
+  - CORS for GET/HEAD/OPTIONS; add HEAD to native CORS and redact query strings in logs/traces (R-109).
 - **Files:** `mkit-server-native/src/http_objects.rs`, `mkit-server-worker/src/http_objects.rs`, `apps/vcs-worker/src/lib.rs`.
 - **Size:** M (~600).
 
