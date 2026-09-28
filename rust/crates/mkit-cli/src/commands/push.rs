@@ -299,8 +299,10 @@ fn push_current(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpt
             }
             emit_err(&msg, exit::GENERAL_ERROR)
         }
+        // TODO(WP-1.17): Add the BeginUpload ticket hint only when the
+        // interrupted operation actually consumed an upload ticket.
         Err(remote_dispatch::DispatchError::Interrupted) => emit_err_json(
-            "push: interrupted; pushing again gets the same ticket from BeginUpload",
+            "push: interrupted; re-run push to resume",
             exit::TEMPFAIL,
             json,
         ),
@@ -400,8 +402,9 @@ fn push_all(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpts) -
             }
             emit_err(&msg, exit::GENERAL_ERROR)
         }
+        // TODO(WP-1.17): Add the ticket-specific hint only on its pending path.
         Err(remote_dispatch::DispatchError::Interrupted) => emit_err_json(
-            "push: interrupted; pushing again gets the same ticket from BeginUpload",
+            "push: interrupted; re-run push to resume",
             exit::TEMPFAIL,
             json,
         ),

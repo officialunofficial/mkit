@@ -257,6 +257,7 @@ pub(crate) fn open_with_config(
         None
     };
     if url.starts_with("mkit+https://") || url.starts_with("mkit+http://") {
+        validate_connect_repository(url)?;
         let tx = ConnectTransport::connect_with_signer(url, envelope_signer)?
             .with_pending_observer(|event| {
                 crate::progress::pending_event(event);
@@ -392,17 +393,7 @@ fn open_with_ssh_options(
         ));
     }
     if url.starts_with("mkit+https://") || url.starts_with("mkit+http://") {
-        repository_identity_from_url(url).map_err(|reason| {
-            let path = url
-                .split_once("://")
-                .and_then(|(_, rest)| rest.split_once('/'))
-                .map_or("", |(_, path)| path)
-                .split(['?', '#'])
-                .next()
-                .unwrap_or("")
-                .trim_matches('/');
-            DispatchError::MalformedUrl(format!("repository identity `{path}` in {url}: {reason}"))
-        })?;
+        validate_connect_repository(url)?;
         // ConnectTransport::connect_with_signer strips the `mkit+` prefix
         // itself and reads MKIT_API_TOKEN from the environment (mkit#701 —
         // the native mkit.transport.v1 ConnectRPC client, replacing the
@@ -437,6 +428,21 @@ fn open_with_ssh_options(
         return open_enc(url);
     }
     Err(DispatchError::MalformedUrl(url.to_string()))
+}
+
+fn validate_connect_repository(url: &str) -> Result<(), DispatchError> {
+    repository_identity_from_url(url).map_err(|reason| {
+        let path = url
+            .split_once("://")
+            .and_then(|(_, rest)| rest.split_once('/'))
+            .map_or("", |(_, path)| path)
+            .split(['?', '#'])
+            .next()
+            .unwrap_or("")
+            .trim_matches('/');
+        DispatchError::MalformedUrl(format!("repository identity `{path}` in {url}: {reason}"))
+    })?;
+    Ok(())
 }
 
 /// `mkit+enc://` dispatch (issue #156).
@@ -1721,6 +1727,23 @@ mod tests {
                 "trusted destination should reach key resolution: {error}"
             );
         }
+    }
+
+    #[test]
+    fn configured_connect_open_reports_malformed_repository_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(directory.path());
+        let url = "mkit+https://host/Uppercase";
+        let error = super::open_with_config(url, &Config::default(), &layout)
+            .err()
+            .expect("uppercase repository identity must be rejected");
+        assert!(
+            matches!(error, super::DispatchError::MalformedUrl(_)),
+            "expected malformed URL, got {error:?}"
+        );
+        let message = error.to_string();
+        assert!(message.contains("Uppercase"), "{message}");
+        assert!(!message.contains("invalid response"), "{message}");
     }
 
     #[test]

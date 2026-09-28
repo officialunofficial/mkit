@@ -205,8 +205,10 @@ omit `test-faults`. Only auth v2 is accepted. Names use SQLite exclusively.
 
 **Always:** a typed pending `AdvanceRefs` response causes a clamped poll, not
 a retry-ladder step. Every attempt keeps the same nonce, timestamps and
-signature while the envelope remains valid; an expiring envelope is renewed
-before another attempt. Polling ends before the consumed ticket expires.
+signature while the envelope remains valid; before the next poll it is renewed
+when less than 30 s of validity remains (or the unary timeout, if longer). An
+ambiguous retry retains its identity until the envelope actually lapses.
+Polling ends before the consumed ticket expires.
 
 **Because:** a pending answer is never stored for replay, and the next attempt
 must observe verification progress without changing the logical operation.

@@ -160,7 +160,7 @@ struct PendingReporter {
 impl PendingReporter {
     fn new(quiet: bool, mode: Option<&str>, is_tty: bool) -> Self {
         Self {
-            quiet,
+            quiet: quiet || mode == Some("never"),
             interactive: mode == Some("always") || is_tty,
             active: false,
         }
@@ -174,7 +174,7 @@ impl PendingReporter {
             PendingEvent::Waiting { elapsed, .. } if self.interactive => {
                 self.active = true;
                 Some(format!(
-                    "\rWaiting for server verification: {}s",
+                    "\rWaiting for server verification: {}s\x1b[K",
                     elapsed.as_secs()
                 ))
             }
@@ -187,7 +187,7 @@ impl PendingReporter {
                 if self.interactive {
                     let status = if succeeded { "done" } else { "stopped" };
                     Some(format!(
-                        "\rWaiting for server verification: {}s, {status}.\n",
+                        "\rWaiting for server verification: {}s, {status}.\x1b[K\n",
                         elapsed.as_secs()
                     ))
                 } else if succeeded {
@@ -369,16 +369,20 @@ mod tests {
         let mut forced = PendingReporter::new(false, Some("always"), false);
         assert_eq!(
             forced.render(wait).as_deref(),
-            Some("\rWaiting for server verification: 42s")
+            Some("\rWaiting for server verification: 42s\x1b[K")
         );
         assert_eq!(
             forced.render(done).as_deref(),
-            Some("\rWaiting for server verification: 43s, done.\n")
+            Some("\rWaiting for server verification: 43s, done.\x1b[K\n")
         );
 
         let mut quiet = PendingReporter::new(true, Some("always"), false);
         assert_eq!(quiet.render(wait), None);
         assert_eq!(quiet.render(done), None);
+
+        let mut never = PendingReporter::new(false, Some("never"), true);
+        assert_eq!(never.render(wait), None);
+        assert_eq!(never.render(done), None);
     }
 
     /// `should_report` precedence: `--quiet` wins outright, then

@@ -146,11 +146,21 @@ pub const PENDING_INTERRUPTED_MESSAGE: &str = "pending verification interrupted"
 
 /// Progress events for a ticket verification poll.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub enum PendingEvent {
     /// Emitted before each sleep slice. Returning `false` stops polling.
     Waiting { elapsed: Duration, next: Duration },
     /// Emitted after polling ends, so progress UIs can finish their line.
     Finished { elapsed: Duration, succeeded: bool },
+}
+
+fn advance_deadline_error(saw_pending: bool) -> TransportError {
+    let message = if saw_pending {
+        "pending verification ticket deadline expired"
+    } else {
+        "advance deadline expired"
+    };
+    TransportError::RemoteError(message.to_owned())
 }
 
 /// Environment variable consulted at [`ConnectTransport::connect`] time for
@@ -586,6 +596,7 @@ impl ConnectTransport {
     /// Poll a ticket-consuming advance until it commits or `deadline` expires.
     /// WP-1.17 passes the earliest consumed ticket expiry here. Until then,
     /// the maximum seven-day ticket lifetime bounds calls with no deadline.
+    #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
     pub fn advance_refs_with_deadline(
         &self,
@@ -610,15 +621,28 @@ impl ConnectTransport {
         let mut renewed_after_unauthenticated = false;
 
         loop {
+            // A pending reply is definitive: before its next poll, renew an
+            // identity that cannot cover the next unary attempt. An ambiguous
+            // failure inside the ladder retains its nonce until actual expiry.
+            if saw_pending {
+                let now = (self.now)();
+                if now < deadline && identity.expires_at_ms.saturating_sub(now) < margin_ms {
+                    identity = match RetryIdentity::new_at(now) {
+                        Ok(next) => next,
+                        Err(message) => {
+                            self.pending_finished(waiting_since_ms, false);
+                            return Err(TransportError::RemoteError(message));
+                        }
+                    };
+                }
+            }
             let poll = self.retrying(|| {
                 loop {
                     let now = (self.now)();
                     if now >= deadline {
-                        return Err(TransportError::RemoteError(
-                            "pending verification ticket deadline expired".to_owned(),
-                        ));
+                        return Err(advance_deadline_error(saw_pending));
                     }
-                    if identity.expires_at_ms.saturating_sub(now) < margin_ms {
+                    if now >= identity.expires_at_ms {
                         identity =
                             RetryIdentity::new_at(now).map_err(TransportError::RemoteError)?;
                     }
@@ -659,6 +683,10 @@ impl ConnectTransport {
                         }
                         Err(err) => {
                             if let Some(delay) = pending_verification_delay(&err) {
+                                // This pending reply belongs to the re-signed
+                                // identity, which now has its own one-shot
+                                // unauthenticated recovery allowance.
+                                renewed_after_unauthenticated = false;
                                 return Ok(Err(delay));
                             }
                             if saw_pending
@@ -701,9 +729,7 @@ impl ConnectTransport {
                 let now = (self.now)();
                 if now >= deadline {
                     self.pending_finished(waiting_since_ms, false);
-                    return Err(TransportError::RemoteError(
-                        "pending verification ticket deadline expired".to_owned(),
-                    ));
+                    return Err(advance_deadline_error(true));
                 }
                 let until_deadline =
                     Duration::from_millis(u64::try_from(deadline.saturating_sub(now)).unwrap_or(0));

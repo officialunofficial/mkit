@@ -121,6 +121,8 @@ enum FailKind {
     PendingMalformed,
     Mixed,
     PendingThenUnauthenticated,
+    PendingThenTwoUnauthenticated,
+    PendingUnauthenticatedTwice,
 }
 
 impl FailKind {
@@ -147,6 +149,18 @@ impl FailKind {
                 ConnectError::unauthenticated("clock ahead")
             }
             FailKind::PendingThenUnauthenticated => {
+                FailKind::Pending(1_000).to_connect_error(n, fail_times)
+            }
+            FailKind::PendingThenTwoUnauthenticated if n > 0 => {
+                ConnectError::unauthenticated("clock ahead")
+            }
+            FailKind::PendingThenTwoUnauthenticated => {
+                FailKind::Pending(1_000).to_connect_error(n, fail_times)
+            }
+            FailKind::PendingUnauthenticatedTwice if n == 1 || n == 3 => {
+                ConnectError::unauthenticated("clock ahead")
+            }
+            FailKind::PendingUnauthenticatedTwice => {
                 FailKind::Pending(1_000).to_connect_error(n, fail_times)
             }
         }
@@ -984,6 +998,70 @@ fn unauthenticated_after_pending_renews_once() {
     shutdown(shutdown_tx, handle);
 }
 
+#[test]
+fn second_unauthenticated_without_new_pending_fails() {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (port, shutdown_tx, handle, calls) = spawn_flaky_server_internal(
+        Rpc::AdvanceRefs,
+        3,
+        FailKind::PendingThenTwoUnauthenticated,
+        Some(Arc::clone(&captured)),
+    );
+    let uri = format!("http://127.0.0.1:{port}").parse().unwrap();
+    let client = ConnectTransport::connect_for_test_with_retry(
+        uri,
+        one_retry_backoff,
+        no_sleep_for_pending_test,
+    );
+    assert!(matches!(
+        advance_for_pending_test(&client),
+        Err(TransportError::AccessDenied)
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    let headers = captured.lock().unwrap();
+    assert_eq!(
+        header(&headers[0], "idempotency-key"),
+        header(&headers[1], "idempotency-key")
+    );
+    assert_ne!(
+        header(&headers[1], "idempotency-key"),
+        header(&headers[2], "idempotency-key")
+    );
+    shutdown(shutdown_tx, handle);
+}
+
+#[test]
+fn new_pending_resets_unauthenticated_renewal_allowance() {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (port, shutdown_tx, handle, calls) = spawn_flaky_server_internal(
+        Rpc::AdvanceRefs,
+        4,
+        FailKind::PendingUnauthenticatedTwice,
+        Some(Arc::clone(&captured)),
+    );
+    let uri = format!("http://127.0.0.1:{port}").parse().unwrap();
+    let client = ConnectTransport::connect_for_test_with_retry(
+        uri,
+        one_retry_backoff,
+        no_sleep_for_pending_test,
+    );
+    assert_eq!(
+        advance_for_pending_test(&client).unwrap(),
+        AdvanceOutcome::Committed
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 5);
+    let headers = captured.lock().unwrap();
+    assert_eq!(
+        header(&headers[2], "idempotency-key"),
+        header(&headers[3], "idempotency-key")
+    );
+    assert_ne!(
+        header(&headers[3], "idempotency-key"),
+        header(&headers[4], "idempotency-key")
+    );
+    shutdown(shutdown_tx, handle);
+}
+
 struct TestSigner(SigningKey);
 
 impl EnvelopeSigner for TestSigner {
@@ -1095,6 +1173,103 @@ fn pending_reuses_signed_identity_then_renews_at_margin() {
     shutdown(shutdown_tx, handle);
 }
 
+static BOUNDARY_CLOCK: AtomicI64 = AtomicI64::new(1_700_000_000_000);
+static BOUNDARY_SLEEPS: AtomicUsize = AtomicUsize::new(0);
+
+fn boundary_now() -> i64 {
+    BOUNDARY_CLOCK.load(Ordering::SeqCst)
+}
+
+fn advance_boundary_clock(_: Duration) {
+    let advance = if BOUNDARY_SLEEPS.fetch_add(1, Ordering::SeqCst) == 0 {
+        270_000
+    } else {
+        1
+    };
+    BOUNDARY_CLOCK.fetch_add(advance, Ordering::SeqCst);
+}
+
+#[test]
+fn renewal_margin_is_strictly_less_than_thirty_seconds() {
+    BOUNDARY_CLOCK.store(1_700_000_000_000, Ordering::SeqCst);
+    BOUNDARY_SLEEPS.store(0, Ordering::SeqCst);
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (port, shutdown_tx, handle, calls) = spawn_flaky_server_internal(
+        Rpc::AdvanceRefs,
+        2,
+        FailKind::Pending(1_000),
+        Some(Arc::clone(&captured)),
+    );
+    let uri = format!("http://127.0.0.1:{port}").parse().unwrap();
+    let client = ConnectTransport::connect_for_test_with_signer(
+        uri,
+        Some(Arc::new(TestSigner(SigningKey::from_bytes(&[12; 32])))),
+    )
+    .with_clock_for_test(boundary_now)
+    .with_retry_hooks_for_test(one_retry_backoff, advance_boundary_clock);
+    assert_eq!(
+        advance_for_pending_test(&client).unwrap(),
+        AdvanceOutcome::Committed
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    let headers = captured.lock().unwrap();
+    assert_eq!(
+        header(&headers[0], "idempotency-key"),
+        header(&headers[1], "idempotency-key")
+    );
+    assert_ne!(
+        header(&headers[1], "idempotency-key"),
+        header(&headers[2], "idempotency-key")
+    );
+    shutdown(shutdown_tx, handle);
+}
+
+static AMBIGUOUS_CLOCK: AtomicI64 = AtomicI64::new(1_700_000_000_000);
+
+fn ambiguous_now() -> i64 {
+    AMBIGUOUS_CLOCK.load(Ordering::SeqCst)
+}
+
+fn advance_ambiguous_clock(delay: Duration) {
+    if delay == Duration::from_millis(9) {
+        AMBIGUOUS_CLOCK.fetch_add(280_000, Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn ambiguous_retry_keeps_identity_inside_renewal_margin() {
+    AMBIGUOUS_CLOCK.store(1_700_000_000_000, Ordering::SeqCst);
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (port, shutdown_tx, handle, calls) = spawn_flaky_server_internal(
+        Rpc::AdvanceRefs,
+        2,
+        FailKind::Mixed,
+        Some(Arc::clone(&captured)),
+    );
+    let uri = format!("http://127.0.0.1:{port}").parse().unwrap();
+    let client = ConnectTransport::connect_for_test_with_signer(
+        uri,
+        Some(Arc::new(TestSigner(SigningKey::from_bytes(&[13; 32])))),
+    )
+    .with_clock_for_test(ambiguous_now)
+    .with_retry_hooks_for_test(one_retry_backoff, advance_ambiguous_clock);
+    assert_eq!(
+        advance_for_pending_test(&client).unwrap(),
+        AdvanceOutcome::Committed
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    let headers = captured.lock().unwrap();
+    assert_eq!(
+        header(&headers[1], "idempotency-key"),
+        header(&headers[2], "idempotency-key")
+    );
+    assert_eq!(
+        header(&headers[1], "x-signature"),
+        header(&headers[2], "x-signature")
+    );
+    shutdown(shutdown_tx, handle);
+}
+
 static DEADLINE_CLOCK: AtomicI64 = AtomicI64::new(1_700_000_000_000);
 
 fn deadline_now() -> i64 {
@@ -1135,6 +1310,30 @@ fn pending_stops_at_deadline_without_another_attempt() {
 }
 
 #[test]
+fn deadline_before_any_pending_has_neutral_error() {
+    DEADLINE_CLOCK.store(1_700_000_000_000, Ordering::SeqCst);
+    let uri = "http://127.0.0.1:1".parse().unwrap();
+    let client = ConnectTransport::connect_for_test_with_retry(
+        uri,
+        one_retry_backoff,
+        no_sleep_for_pending_test,
+    )
+    .with_clock_for_test(deadline_now);
+    let result = client.advance_refs_with_deadline(
+        "refs/heads/feature",
+        RefWriteCondition::Missing,
+        &blake3_hash(b"head"),
+        "refs/packmaps/feature",
+        RefWriteCondition::Missing,
+        &blake3_hash(b"packmap"),
+        Some(1_700_000_000_000),
+    );
+    assert!(
+        matches!(result, Err(TransportError::RemoteError(message)) if message == "advance deadline expired")
+    );
+}
+
+#[test]
 fn pending_observer_cancel_is_checked_within_one_second() {
     let (port, shutdown_tx, handle, calls) =
         spawn_flaky_server_with_kind(Rpc::AdvanceRefs, 10, FailKind::Pending(5_000));
@@ -1146,6 +1345,7 @@ fn pending_observer_cancel_is_checked_within_one_second() {
         .with_pending_observer(move |event| match event {
             PendingEvent::Waiting { .. } => !for_observer.load(Ordering::SeqCst),
             PendingEvent::Finished { .. } => true,
+            _ => true,
         });
     let for_signal = Arc::clone(&cancelled);
     let signal = std::thread::spawn(move || {
