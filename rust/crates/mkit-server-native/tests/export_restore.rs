@@ -478,7 +478,7 @@ fn native_allow_incomplete_reconstructs_missing_source_and_coordinator() {
     assert_eq!(refused.status.code(), Some(i32::from(exit::DATAERR)));
     assert!(String::from_utf8_lossy(&refused.stderr).contains("missing namespace coordinators"));
     let restored = base()
-        .args(["--allow-incomplete", "--epoch-at-least", "42"])
+        .args(["--allow-incomplete", "--epoch-at-least", "4294967338"])
         .output()
         .unwrap();
     assert!(
@@ -501,7 +501,7 @@ fn native_allow_incomplete_reconstructs_missing_source_and_coordinator() {
     let coordinator = Partition::Coordinator(ns);
     assert_eq!(
         futures::executor::block_on(target_store.get(&coordinator, &keys::grant_epoch())).unwrap(),
-        Some(codec::encode_u64(42))
+        Some(codec::encode_u64(4_294_967_338))
     );
     assert!(
         futures::executor::block_on(target_store.get(&coordinator, &keys::lease_recovery()))

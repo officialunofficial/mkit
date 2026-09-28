@@ -468,7 +468,7 @@ Owners must re-issue grants after logical restore.
 
 Missing relay sources or namespace coordinators stop restore by default.
 `--allow-incomplete` reconstructs missing sources at their target watermark;
-missing coordinators additionally require `--epoch-at-least N`. The command
+missing coordinators additionally require `--epoch-at-least N` with N ≥ 2^32 (4294967296), above any epoch the lost coordinator could have issued. The command
 prints the missing partitions it reconstructed.
 
 On Workers, bind a dedicated `BACKUPS` R2 bucket and leave

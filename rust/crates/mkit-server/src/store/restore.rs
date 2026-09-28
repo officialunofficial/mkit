@@ -285,6 +285,20 @@ fn check_completeness(
     {
         return Err(StoreError::Invalid(format!("missing namespace coordinators (requires --allow-incomplete and --epoch-at-least): {missing_coordinators:?}").into()));
     }
+    // A missing coordinator's history is unknown, so the floor must exceed any
+    // epoch a namespace plausibly issued; grants compare epochs by equality.
+    if !missing_coordinators.is_empty()
+        && opts
+            .epoch_at_least
+            .is_some_and(|floor| floor < EPOCH_RESTORE_JUMP)
+    {
+        return Err(StoreError::Invalid(
+            format!(
+                "--epoch-at-least must be at least {EPOCH_RESTORE_JUMP} for missing coordinators"
+            )
+            .into(),
+        ));
+    }
     for partition in sources
         .iter()
         .chain(missing_sources.iter().map(|(partition, _)| partition))
@@ -1124,7 +1138,7 @@ mod tests {
             let err = block_on(restore(&archives, &store, opts)).unwrap_err();
             assert!(err.to_string().contains("missing namespace coordinators"));
         }
-        let report = block_on(restore(
+        let low = block_on(restore(
             &archives,
             &store,
             RestoreOptions {
@@ -1133,11 +1147,23 @@ mod tests {
                 ..RestoreOptions::default()
             },
         ))
+        .unwrap_err();
+        assert!(low.to_string().contains("must be at least"));
+        let floor = EPOCH_RESTORE_JUMP + 42;
+        let report = block_on(restore(
+            &archives,
+            &store,
+            RestoreOptions {
+                allow_incomplete: true,
+                epoch_at_least: Some(floor),
+                ..RestoreOptions::default()
+            },
+        ))
         .unwrap();
         assert_eq!(report.missing_coordinators, vec![coordinator()]);
         assert_eq!(
             block_on(store.get(&coordinator(), &keys::grant_epoch())).unwrap(),
-            Some(codec::encode_u64(42))
+            Some(codec::encode_u64(floor))
         );
         assert!(
             block_on(store.get(&coordinator(), &keys::lease_recovery()))

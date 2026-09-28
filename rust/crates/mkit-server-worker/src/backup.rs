@@ -273,8 +273,10 @@ impl<B: BackupBucket> BackupHandler<B> {
             match snapshot(ctx.store, ctx.partition, header_ms, self.config.max_bytes).await? {
                 Snapshot::Bytes(bytes) => bytes,
                 Snapshot::Empty(bytes) => {
+                    // Keep the header time the digest was computed with, so an
+                    // unchanged empty partition compares equal next time.
                     let state = BackupStateV1 {
-                        last_export_ms: ctx.now_ms,
+                        last_export_ms: header_ms,
                         digest: hash(&bytes),
                         r2_key: String::new(),
                         last_upload_ms: old.as_ref().map_or(0, |state| state.last_upload_ms),

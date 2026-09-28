@@ -91,7 +91,7 @@ validity cannot revive a replayable write envelope.
 
 Owners must re-issue grants after restore. Missing relay sources or coordinators
 are refused by default. `--allow-incomplete` reconstructs missing sources;
-missing coordinators additionally require `--epoch-at-least N`. Review the
+missing coordinators additionally require `--epoch-at-least N` with N ≥ 2^32 (4294967296), above any epoch the lost coordinator could have issued. Review the
 printed missing list. An older target can lack membership or index rows that
 the source had already delivered and removed; index reconcile is required
 before GA (R-116).
