@@ -205,24 +205,7 @@ async fn scenario<N: NamespaceStore>(backend: N, mode: Mode) {
     marker_content.extend_from_slice(&ticket_id);
     marker_content.extend_from_slice(&id);
     let marker = BlobKey::upload_marker(hash(&marker_content));
-    for _ in 0..2 {
-        stream(&pipe, &signer, pack, &token).await;
-        assert_eq!(
-            blobs
-                .head(&BlobKey::from(PackKey::new(id)))
-                .await
-                .unwrap()
-                .unwrap()
-                .len,
-            pack.len() as u64
-        );
-        assert_eq!(
-            blobs.head(&marker).await.unwrap().unwrap().len,
-            marker_content.len() as u64
-        );
-        assert!(blobs.head(&BlobKey::new(marker.0)).await.unwrap().is_none());
-    }
-    // Two writes can reach the put-if-absent store together. In Multi mode
+    // Two first writes can reach the put-if-absent store together. In Multi mode
     // each repository has its own ticket proof for the same global pack.
     let second_owner = Signer::new([2; 32], AUDIENCE, "unused");
     let other_repository = mode.repository(&second_owner);
@@ -247,6 +230,15 @@ async fn scenario<N: NamespaceStore>(backend: N, mode: Mode) {
         stream(&pipe, &signer, pack, &token),
         stream(&pipe, second, pack, second_token),
     );
+    assert_eq!(
+        blobs
+            .head(&BlobKey::from(PackKey::new(id)))
+            .await
+            .unwrap()
+            .unwrap()
+            .len,
+        pack.len() as u64
+    );
     assert!(blobs.head(&marker).await.unwrap().is_some());
     if mode.multi {
         assert_ne!(marker, other_marker);
@@ -257,6 +249,14 @@ async fn scenario<N: NamespaceStore>(backend: N, mode: Mode) {
             .await
             .unwrap_err();
         assert_eq!(err.code(), mkit_server::Code::PermissionDenied);
+    }
+    for _ in 0..2 {
+        stream(&pipe, &signer, pack, &token).await;
+        assert_eq!(
+            blobs.head(&marker).await.unwrap().unwrap().len,
+            marker_content.len() as u64
+        );
+        assert!(blobs.head(&BlobKey::new(marker.0)).await.unwrap().is_none());
     }
     assert!(
         blobs
