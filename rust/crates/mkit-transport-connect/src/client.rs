@@ -202,6 +202,7 @@ pub enum UploadEvent {
     PartsPlanned {
         parts: u32,
         resumed: u32,
+        saved_bytes: u64,
         bytes: u64,
     },
     PartSent {
@@ -1012,7 +1013,7 @@ impl ConnectTransport {
                         return response
                             .into_owned()
                             .receipt
-                            .filter(|receipt| !receipt.is_empty())
+                            .filter(|receipt| !receipt.is_empty() && receipt.len() <= 512)
                             .map(Ok)
                             .ok_or(TransportError::InvalidResponse);
                     }
@@ -1082,14 +1083,16 @@ impl ConnectTransport {
             ticket_id: ticket.id,
             audience: self.origin.clone(),
             repository: self.repository_text.clone(),
+            signer: self.signer_key.clone().unwrap_or_default(),
             head_ref: head_ref.to_owned(),
             pack_key: *key,
             bytes: bytes.len() as u64,
             part_size: ticket.part_size,
             expires_unix_ms: ticket.expires_unix_ms,
         };
-        if !self.receipts_swept.swap(true, Ordering::Relaxed) {
+        if !self.receipts_swept.load(Ordering::Relaxed) {
             self.receipts.sweep((self.now)())?;
+            self.receipts_swept.store(true, Ordering::Relaxed);
         }
         for invalid_retry in 0..2 {
             let mut parts = vec![None; plan.count() as usize];
@@ -1101,16 +1104,17 @@ impl ConnectTransport {
                 }
             }
             let resumed = parts.iter().filter(|part| part.is_some()).count() as u32;
+            let mut saved_bytes: u64 = parts.iter().flatten().map(|part| part.len).sum();
             self.upload_event(
                 UploadEvent::PartsPlanned {
                     parts: plan.count(),
                     resumed,
+                    saved_bytes,
                     bytes: bytes.len() as u64,
                 },
                 resumed,
                 plan.count(),
             )?;
-            let mut saved_bytes: u64 = parts.iter().flatten().map(|part| part.len).sum();
             for index in 0..plan.count() {
                 if parts[index as usize].is_some() {
                     continue;
@@ -1153,7 +1157,7 @@ impl ConnectTransport {
                         bytes: bytes.len() as u64,
                         resumed,
                     },
-                    index + 1,
+                    parts.iter().filter(|part| part.is_some()).count() as u32,
                     plan.count(),
                 )?;
             }
@@ -1293,12 +1297,16 @@ impl ConnectTransport {
         let (packmap_expectation, packmap_expected_id) = condition_to_wire(packmap_condition);
         let start_ms = (self.now)();
         let deadline = deadline.unwrap_or_else(|| start_ms.saturating_add(MAX_PENDING_MS));
-        let ladder_sleep_ms = (self.backoff)().fold(0_i64, |acc, delay| {
-            acc.saturating_add(i64::try_from(delay.as_millis()).unwrap_or(i64::MAX))
+        let (attempts, ladder_sleep_ms) = (self.backoff)().fold((1_i64, 0_i64), |acc, delay| {
+            (
+                acc.0.saturating_add(1),
+                acc.1
+                    .saturating_add(i64::try_from(delay.as_millis()).unwrap_or(i64::MAX)),
+            )
         });
         let margin_ms = i64::try_from(self.unary_timeout.as_millis())
             .unwrap_or(i64::MAX)
-            .saturating_mul(5)
+            .saturating_mul(attempts)
             .saturating_add(ladder_sleep_ms)
             .max(MIN_RENEWAL_MARGIN_MS);
         let mut identity = RetryIdentity::new_at(start_ms).map_err(TransportError::RemoteError)?;
@@ -1342,8 +1350,16 @@ impl ConnectTransport {
                         identity =
                             RetryIdentity::new_at(now).map_err(TransportError::RemoteError)?;
                     }
+                    let mut timeout_ms = deadline.saturating_sub(now);
+                    if let Some(lag_start) = lag_since_ms {
+                        timeout_ms = timeout_ms
+                            .min(60_000_i64.saturating_sub(now.saturating_sub(lag_start)));
+                    }
+                    let timeout = self.unary_timeout.min(Duration::from_millis(
+                        u64::try_from(timeout_ms).unwrap_or(0),
+                    ));
                     let options = self.grant_options(
-                        identity.apply(CallOptions::default().with_timeout(self.unary_timeout)),
+                        identity.apply(CallOptions::default().with_timeout(timeout)),
                         GrantOperation::Write { refs: &refs },
                     );
                     let response = self
@@ -2025,6 +2041,7 @@ impl Transport for ConnectTransport {
             ServerInfoView::V2(info) => UploadLimits {
                 max_pack_bytes: info.max_pack_bytes,
                 tickets_per_advance: Some(7),
+                ticket_threshold_bytes: Some(info.begin_upload_threshold_bytes.unwrap_or(0)),
             },
             ServerInfoView::Unknown
                 if self.signer_key.is_some()
@@ -2033,6 +2050,7 @@ impl Transport for ConnectTransport {
                 UploadLimits {
                     max_pack_bytes: None,
                     tickets_per_advance: Some(7),
+                    ticket_threshold_bytes: Some(0),
                 }
             }
             _ => UploadLimits::default(),

@@ -974,7 +974,6 @@ fn push_branch_once(
         plan,
         effective_cap,
         &format!("refs/heads/{branch}"),
-        limits.tickets_per_advance.is_some(),
         limits.max_pack_bytes,
     )?;
 
@@ -1038,17 +1037,16 @@ fn push_branch_once(
 /// just to satisfy ownership. The caller reads whatever it needs off
 /// `plan` (just `self_contained`) before making this call.
 fn effective_payload_cap(
-    plan: &transfer::PackPlan,
+    _plan: &transfer::PackPlan,
     requested: u64,
     advertised: Option<u64>,
 ) -> Result<u64, DispatchError> {
-    // Header, trailer, every possible five-byte entry frame, plus 1 KiB
-    // slack. The full plan's entry count is an upper bound for each pack.
-    let overhead = (pack::HEADER_LEN + pack::TRAILER_LEN + 1024) as u64
-        + (plan.object_count() as u64).saturating_mul(pack::ENTRY_FRAME_LEN as u64);
+    // Reserve up to 64 KiB per pack for header, trailer, entry frames and
+    // compression variance, capped at one quarter of a small server limit.
+    // The actual serialized size is checked by `seal_pack` before upload.
     let cap = requested.min(pack::MAX_TOTAL_PAYLOAD).min(
         advertised
-            .map(|limit| limit.saturating_sub(overhead))
+            .map(|limit| limit.saturating_sub((64 * 1024).min(limit / 4)))
             .unwrap_or(pack::MAX_TOTAL_PAYLOAD),
     );
     if cap == 0 {
@@ -1093,7 +1091,6 @@ fn build_and_upload_packs(
     plan: transfer::PackPlan,
     payload_cap: u64,
     head_ref: &str,
-    ticketed: bool,
     max_pack_bytes: Option<u64>,
 ) -> Result<Vec<Hash>, DispatchError> {
     let mut pack_keys = Vec::new();
@@ -1116,14 +1113,7 @@ fn build_and_upload_packs(
         start += len;
         for entry in prepare_raw_batch(store, chunk)? {
             if should_seal(&w, entry.conservative_len() as u64, payload_cap) {
-                seal_pack(
-                    tx,
-                    &mut w,
-                    &mut pack_keys,
-                    head_ref,
-                    ticketed,
-                    max_pack_bytes,
-                )?;
+                seal_pack(tx, &mut w, &mut pack_keys, head_ref, max_pack_bytes)?;
             }
             w.push_prepared_raw(entry)?;
             // Honest progress (#711): one real object just got staged into
@@ -1145,28 +1135,14 @@ fn build_and_upload_packs(
         let chunk: Vec<transfer::PlannedDelta> = deltas.drain(..len).collect();
         for entry in prepare_delta_batch(chunk) {
             if should_seal(&w, entry.conservative_len() as u64, payload_cap) {
-                seal_pack(
-                    tx,
-                    &mut w,
-                    &mut pack_keys,
-                    head_ref,
-                    ticketed,
-                    max_pack_bytes,
-                )?;
+                seal_pack(tx, &mut w, &mut pack_keys, head_ref, max_pack_bytes)?;
             }
             w.push_prepared_delta(entry)?;
             crate::progress::report(crate::progress::Event::ObjectsPacked(1));
         }
     }
 
-    seal_pack(
-        tx,
-        &mut w,
-        &mut pack_keys,
-        head_ref,
-        ticketed,
-        max_pack_bytes,
-    )?;
+    seal_pack(tx, &mut w, &mut pack_keys, head_ref, max_pack_bytes)?;
     Ok(pack_keys)
 }
 
@@ -1395,20 +1371,25 @@ fn seal_pack(
     w: &mut PackWriter,
     pack_keys: &mut Vec<Hash>,
     head_ref: &str,
-    ticketed: bool,
     max_pack_bytes: Option<u64>,
 ) -> Result<(), DispatchError> {
     if crate::signal::is_shutdown() {
         return Err(DispatchError::Interrupted);
     }
-    if ticketed && pack_keys.len() >= 6 {
+    let sealed = std::mem::replace(w, PackWriter::new());
+    let pack = sealed.finish()?;
+    let limits = tx.upload_limits();
+    if limits
+        .ticket_threshold_bytes
+        .or_else(|| limits.tickets_per_advance.map(|_| 0))
+        .is_some_and(|threshold| pack.len() as u64 >= threshold)
+        && pack_keys.len() >= 6
+    {
         return Err(DispatchError::PushTooLarge {
             packs: pack_keys.len() + 1,
             limit: 6,
         });
     }
-    let sealed = std::mem::replace(w, PackWriter::new());
-    let pack = sealed.finish()?;
     if max_pack_bytes.is_some_and(|limit| pack.len() as u64 > limit) {
         return Err(DispatchError::Transport(TransportError::PayloadTooLarge(
             pack.len(),

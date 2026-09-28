@@ -12,6 +12,7 @@ pub struct TicketMetadata {
     pub ticket_id: [u8; 32],
     pub audience: String,
     pub repository: String,
+    pub signer: String,
     pub head_ref: String,
     pub pack_key: PackKey,
     pub bytes: u64,

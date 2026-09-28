@@ -167,12 +167,14 @@ impl UploadReporter {
             UploadEvent::PartsPlanned {
                 parts,
                 resumed,
+                saved_bytes,
                 bytes,
             } => {
                 self.active = true;
                 if self.interactive {
                     Some(format!(
-                        "\rUploading pack: part {resumed}/{parts} (0/{} MiB), {resumed} resumed\x1b[K",
+                        "\rUploading pack: part {resumed}/{parts} ({}/{} MiB), {resumed} resumed\x1b[K",
+                        saved_bytes / (1024 * 1024),
                         bytes / (1024 * 1024)
                     ))
                 } else {
@@ -462,6 +464,50 @@ mod tests {
         let mut never = PendingReporter::new(false, Some("never"), true);
         assert_eq!(never.render(wait), None);
         assert_eq!(never.render(done), None);
+    }
+
+    #[test]
+    fn upload_progress_shows_resumed_bytes_on_tty_and_two_lines_when_piped() {
+        let start = UploadEvent::PartsPlanned {
+            parts: 12,
+            resumed: 4,
+            saved_bytes: 32 << 20,
+            bytes: 96 << 20,
+        };
+        let sent = UploadEvent::PartSent {
+            index: 4,
+            parts: 12,
+            saved_bytes: 40 << 20,
+            bytes: 96 << 20,
+            resumed: 4,
+        };
+        let mut tty = UploadReporter {
+            quiet: false,
+            interactive: true,
+            active: false,
+        };
+        assert!(tty.render(start).unwrap().contains("part 4/12 (32/96 MiB)"));
+        assert!(
+            tty.render(sent)
+                .unwrap()
+                .contains("part 5/12 (40/96 MiB), 4 resumed")
+        );
+        assert!(tty.render(UploadEvent::Finished).unwrap().contains("done."));
+
+        let mut piped = UploadReporter {
+            quiet: false,
+            interactive: false,
+            active: false,
+        };
+        assert_eq!(
+            piped.render(start).as_deref(),
+            Some("Uploading pack: 12 parts, 4 resumed.\n")
+        );
+        assert_eq!(piped.render(sent), None);
+        assert_eq!(
+            piped.render(UploadEvent::Finished).as_deref(),
+            Some("Upload complete.\n")
+        );
     }
 
     /// `should_report` precedence: `--quiet` wins outright, then

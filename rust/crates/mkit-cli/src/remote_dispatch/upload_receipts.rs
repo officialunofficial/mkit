@@ -13,7 +13,7 @@ use mkit_transport_connect::{PartReceiptStore, StoredPart, TicketMetadata};
 use serde::{Deserialize, Serialize};
 use tempfile::Builder;
 
-const VERSION: u8 = 1;
+const VERSION: u8 = 2;
 const MAX_RECORD_BYTES: u64 = 32 * 1024;
 
 #[derive(Serialize, Deserialize, PartialEq, Eq)]
@@ -22,6 +22,7 @@ struct TicketRecord {
     ticket_id: String,
     audience: String,
     repository: String,
+    signer: String,
     head_ref: String,
     pack_id: String,
     bytes: u64,
@@ -36,6 +37,7 @@ impl From<&TicketMetadata> for TicketRecord {
             ticket_id: to_hex(&ticket.ticket_id),
             audience: ticket.audience.clone(),
             repository: ticket.repository.clone(),
+            signer: ticket.signer.clone(),
             head_ref: ticket.head_ref.clone(),
             pack_id: ticket.pack_key.to_hex(),
             bytes: ticket.bytes,
@@ -111,10 +113,14 @@ impl FilePartReceiptStore {
             .map_err(io_error)
     }
 
-    fn remove_stale_same_pack(&self, ticket: &TicketMetadata) -> TransportResult<()> {
-        let Ok(entries) = fs::read_dir(&self.root) else {
-            return Ok(());
-        };
+    fn remove_replaced_ticket(&self, ticket: &TicketMetadata) -> TransportResult<()> {
+        match fs::symlink_metadata(&self.root) {
+            Ok(meta) if !meta.file_type().is_dir() => return Err(TransportError::ProtocolError),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(io_error(err)),
+            Ok(_) => {}
+        }
+        let entries = fs::read_dir(&self.root).map_err(io_error)?;
         let current = TicketRecord::from(ticket);
         for entry in entries {
             let entry = entry.map_err(io_error)?;
@@ -123,6 +129,7 @@ impl FilePartReceiptStore {
                 && let Some(other) = Self::read_record::<TicketRecord>(&entry.path().join("ticket"))
                 && other.audience == current.audience
                 && other.repository == current.repository
+                && other.signer == current.signer
                 && other.head_ref == current.head_ref
                 && other.pack_id == current.pack_id
             {
@@ -137,8 +144,17 @@ fn io_error(err: io::Error) -> TransportError {
     TransportError::RemoteError(format!("upload receipt cache: {err}"))
 }
 
+fn stale_tmp(path: &Path) -> bool {
+    fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+        .is_some_and(|age| age >= Duration::from_secs(60 * 60))
+}
+
 impl PartReceiptStore for FilePartReceiptStore {
     fn load(&self, ticket: &TicketMetadata, plan: &PartPlan) -> TransportResult<Vec<StoredPart>> {
+        self.remove_replaced_ticket(ticket)?;
         let dir = self.ticket_dir(&ticket.ticket_id);
         if Self::read_record::<TicketRecord>(&dir.join("ticket")) != Some(ticket.into()) {
             return Ok(Vec::new());
@@ -153,6 +169,7 @@ impl PartReceiptStore for FilePartReceiptStore {
                 && record.index == index
                 && plan.expected_len(index).is_ok_and(|len| len == record.len)
                 && !record.receipt.is_empty()
+                && record.receipt.len() <= 512
             {
                 parts.push(StoredPart {
                     index,
@@ -170,7 +187,7 @@ impl PartReceiptStore for FilePartReceiptStore {
             return Err(TransportError::ProtocolError);
         }
         Self::ensure_dir(&self.root).map_err(io_error)?;
-        self.remove_stale_same_pack(ticket)?;
+        self.remove_replaced_ticket(ticket)?;
         let dir = self.ticket_dir(&ticket.ticket_id);
         Self::ensure_dir(&dir).map_err(io_error)?;
         Self::write_record(&dir.join("ticket"), &TicketRecord::from(ticket))?;
@@ -200,8 +217,11 @@ impl PartReceiptStore for FilePartReceiptStore {
         if swept.contains(&self.root) {
             return Ok(());
         }
-        let Ok(entries) = fs::read_dir(&self.root) else {
-            return Ok(());
+        let entries = match fs::symlink_metadata(&self.root) {
+            Ok(meta) if meta.file_type().is_dir() => fs::read_dir(&self.root).map_err(io_error)?,
+            Ok(_) => return Err(TransportError::ProtocolError),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(io_error(err)),
         };
         for entry in entries {
             let entry = entry.map_err(io_error)?;
@@ -221,12 +241,14 @@ impl PartReceiptStore for FilePartReceiptStore {
                 } else if let Ok(files) = fs::read_dir(&path) {
                     for file in files {
                         let file = file.map_err(io_error)?;
-                        if file.file_name().to_string_lossy().ends_with(".tmp") {
+                        if file.file_name().to_string_lossy().ends_with(".tmp")
+                            && stale_tmp(&file.path())
+                        {
                             fs::remove_file(file.path()).map_err(io_error)?;
                         }
                     }
                 }
-            } else if path.extension().is_some_and(|ext| ext == "tmp") {
+            } else if path.extension().is_some_and(|ext| ext == "tmp") && stale_tmp(&path) {
                 fs::remove_file(path).map_err(io_error)?;
             }
         }
@@ -246,6 +268,7 @@ mod tests {
             ticket_id: [7; 32],
             audience: "https://example.test".into(),
             repository: "repo".into(),
+            signer: "signer".into(),
             head_ref: "refs/heads/main".into(),
             pack_key: PackKey::new([9; 32]),
             bytes: MIN_PART_SIZE + 1,
@@ -270,6 +293,11 @@ mod tests {
         let loaded = store.load(&meta, &plan).unwrap();
         assert_eq!(loaded.len(), 1);
         assert!(loaded[0].from_disk);
+        let restarted = FilePartReceiptStore::new(store.root.clone());
+        assert_eq!(
+            restarted.load(&meta, &plan).unwrap()[0].receipt,
+            part.receipt
+        );
         assert!(store.ticket_dir(&meta.ticket_id).join("ticket").exists());
         assert!(
             !fs::read_dir(store.ticket_dir(&meta.ticket_id))
@@ -281,22 +309,21 @@ mod tests {
                     .is_some_and(|ext| ext == "tmp"))
         );
 
-        fs::write(
-            store.ticket_dir(&meta.ticket_id).join("1.part.tmp"),
-            b"torn",
-        )
-        .unwrap();
+        let torn = store.ticket_dir(&meta.ticket_id).join("1.part.tmp");
+        fs::write(&torn, b"torn").unwrap();
         assert_eq!(store.load(&meta, &plan).unwrap().len(), 1);
         let mut changed = meta.clone();
         changed.pack_key = PackKey::new([8; 32]);
         assert!(store.load(&changed, &plan).unwrap().is_empty());
+        File::open(&torn)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(SystemTime::now() - Duration::from_secs(2 * 60 * 60)),
+            )
+            .unwrap();
         store.sweep(0).unwrap();
-        assert!(
-            !store
-                .ticket_dir(&meta.ticket_id)
-                .join("1.part.tmp")
-                .exists()
-        );
+        assert!(!torn.exists());
     }
 
     #[test]
@@ -324,5 +351,57 @@ mod tests {
         assert_eq!(store.load(&meta, &plan).unwrap().len(), 1);
         store.sweep(10).unwrap();
         assert!(store.load(&meta, &plan).unwrap().is_empty());
+    }
+
+    #[test]
+    fn replacement_ticket_forgets_old_receipts_but_other_signer_is_independent() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = FilePartReceiptStore::new(temp.path().join("upload-parts"));
+        let first = ticket();
+        let plan = PartPlan::new(first.bytes, first.part_size, 2).unwrap();
+        let part = StoredPart {
+            index: 0,
+            len: MIN_PART_SIZE,
+            receipt: vec![4],
+            from_disk: false,
+        };
+        store.put(&first, &part).unwrap();
+        let mut other_signer = first.clone();
+        other_signer.ticket_id = [8; 32];
+        other_signer.signer = "other".into();
+        store.put(&other_signer, &part).unwrap();
+        let mut replacement = first.clone();
+        replacement.ticket_id = [9; 32];
+        assert!(store.load(&replacement, &plan).unwrap().is_empty());
+        assert!(!store.ticket_dir(&first.ticket_id).exists());
+        assert!(store.ticket_dir(&other_signer.ticket_id).exists());
+    }
+
+    #[test]
+    fn sweeping_does_not_remove_an_active_writer_temp_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let store =
+            std::sync::Arc::new(FilePartReceiptStore::new(temp.path().join("upload-parts")));
+        let meta = ticket();
+        let part = StoredPart {
+            index: 0,
+            len: MIN_PART_SIZE,
+            receipt: vec![4],
+            from_disk: false,
+        };
+        std::thread::scope(|scope| {
+            let writer = store.clone();
+            let meta = meta.clone();
+            let part = part.clone();
+            scope.spawn(move || {
+                for _ in 0..20 {
+                    writer.put(&meta, &part).unwrap();
+                }
+            });
+            let sweeper = store.clone();
+            scope.spawn(move || sweeper.sweep(0).unwrap());
+        });
+        let plan = PartPlan::new(meta.bytes, meta.part_size, 2).unwrap();
+        assert_eq!(store.load(&meta, &plan).unwrap().len(), 1);
     }
 }

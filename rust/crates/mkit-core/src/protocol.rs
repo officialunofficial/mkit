@@ -752,6 +752,9 @@ pub struct UploadLimits {
     pub max_pack_bytes: Option<u64>,
     /// Maximum number of upload tickets one advance may consume.
     pub tickets_per_advance: Option<usize>,
+    /// First serialized pack size that requires a ticket, when known.
+    /// A transport may stop requiring tickets after discovery fallback.
+    pub ticket_threshold_bytes: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
