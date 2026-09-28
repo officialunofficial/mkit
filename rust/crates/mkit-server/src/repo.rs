@@ -134,7 +134,7 @@ pub enum Addressing {
         /// The configured repository.
         repo: RepoId,
     },
-    /// Routes by `X-Repository`; not deployable until WP-1.10 lands pack membership.
+    /// Routes by `X-Repository`; not deployable until WP-1.14 handles ticket expiry (R-111(1)).
     Multi(MultiAddressing),
 }
 

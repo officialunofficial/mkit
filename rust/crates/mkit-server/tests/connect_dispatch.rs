@@ -5,6 +5,7 @@
 //! error-shaping path.
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use base64::Engine as _;
@@ -30,10 +31,17 @@ use mkit_server::connect::proto::mkit::transport::v1::{
     PackExistsResponse, ReadRefRequest, ReadRefResponse, RefExpectation, UploadPackHeader,
     UploadPackRequest, UploadPartHeader, UploadPartRequest,
 };
+use mkit_server::connect::proto::mkit::transport::v1::{
+    GetGrantEpochRequest, IssueObjectUrlRequest, SetGrantEpochRequest, SetRepoVisibilityRequest,
+};
 use mkit_server::connect::{self};
 use mkit_server::pipeline::{
     AuthMode, Authorizer, DefaultAdmission, HookSet, Hooks, NoOutcomes, NoPreReceive, NoReceipts,
     Pipeline, PipelineConfig,
+};
+use mkit_server::store::{
+    Batch, BatchOutcome, Cursor, Key, NamespaceStore, Partition, PartitionStats, ScanPage,
+    StoreCapabilities, StoreError, Value, codec, keys,
 };
 use mkit_server::upload::UploadLimits;
 use mkit_server::upload::token::{TicketClaims, TicketKeys};
@@ -56,6 +64,40 @@ const B: [u8; 32] = [0xbb; 32];
 const JSON: &str = "application/json";
 const PROTO: &str = "application/proto";
 const STREAM: &str = "application/connect+proto";
+
+struct SpyStore {
+    inner: MemoryKv,
+    writes: Arc<AtomicUsize>,
+}
+
+impl NamespaceStore for SpyStore {
+    fn capabilities(&self) -> StoreCapabilities {
+        self.inner.capabilities()
+    }
+    async fn get(&self, p: &Partition, k: &Key) -> Result<Option<Value>, StoreError> {
+        self.inner.get(p, k).await
+    }
+    async fn scan(
+        &self,
+        p: &Partition,
+        start: &Key,
+        end: &Key,
+        after: Option<&Cursor>,
+        limit: u32,
+    ) -> Result<ScanPage, StoreError> {
+        self.inner.scan(p, start, end, after, limit).await
+    }
+    async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
+        self.writes.fetch_add(1, Ordering::SeqCst);
+        self.inner.apply(p, batch).await
+    }
+    async fn stats(&self, p: &Partition) -> Result<PartitionStats, StoreError> {
+        self.inner.stats(p).await
+    }
+    async fn probe(&self) -> Result<(), StoreError> {
+        self.inner.probe().await
+    }
+}
 
 // ------------------------------------------------------------- server
 
@@ -84,6 +126,7 @@ struct Setup<H = Hooks> {
     hooks: H,
     meta: Option<MemoryKv>,
     chunk_max: usize,
+    list_cap: Option<u32>,
 }
 
 fn setup(auth: AuthMode) -> Setup {
@@ -92,7 +135,46 @@ fn setup(auth: AuthMode) -> Setup {
         hooks: Hooks::new(),
         meta: None,
         chunk_max: 4,
+        list_cap: None,
     }
+}
+
+fn spy_server(auth: AuthMode) -> (Server, Arc<AtomicUsize>) {
+    let clock = Arc::new(ManualClock::new(T0));
+    let repo = RepoId {
+        namespace: NamespaceKey::deployment_default(),
+        name: RepoName::new(REPO).unwrap(),
+    };
+    let cfg = PipelineConfig::new(
+        Addressing::Single { repo },
+        auth,
+        UploadLimits {
+            max_total_bytes: 1 << 20,
+            max_chunks: 64,
+        },
+    );
+    let writes = Arc::new(AtomicUsize::new(0));
+    let meta = SpyStore {
+        inner: MemoryKv::with_clock(clock.clone()),
+        writes: writes.clone(),
+    };
+    let codes = Arc::new(Codes::default());
+    let pipe = Pipeline::new(
+        MemoryBlobStore::default(),
+        meta,
+        Hooks::new(),
+        cfg,
+        clock,
+        codes.clone(),
+    )
+    .unwrap();
+    (
+        Server {
+            svc: connect::service(Arc::new(pipe)),
+            codes,
+        },
+        writes,
+    )
 }
 
 impl<H: HookSet + 'static> Setup<H> {
@@ -108,6 +190,9 @@ impl<H: HookSet + 'static> Setup<H> {
         };
         let mut cfg = PipelineConfig::new(Addressing::Single { repo }, self.auth, limits);
         cfg.download_chunk_max = self.chunk_max;
+        if let Some(cap) = self.list_cap {
+            cfg.max_list_refs_page_size = cap;
+        }
         let meta = self
             .meta
             .unwrap_or_else(|| MemoryKv::with_clock(clock.clone()));
@@ -896,6 +981,7 @@ async fn error_shaping_reaches_the_wire() {
         },
         meta: None,
         chunk_max: 4,
+        list_cap: None,
     }
     .serve();
     let reply = server
@@ -1022,6 +1108,83 @@ fn multipart_paths_are_authenticated_procedures() {
         Procedure::from_connect_path("/mkit.transport.v1.TransportService/CompleteUpload"),
         Some(Procedure::CompleteUpload)
     );
+}
+
+#[test]
+fn grant_epoch_paths_are_permanently_outside_procedure() {
+    // SPEC-WRITE-GRANTS §5.3, §9.2: the epoch RPCs are unsigned forever.
+    for rpc in ["GetGrantEpoch", "SetGrantEpoch"] {
+        let path = format!("/mkit.transport.v1.TransportService/{rpc}");
+        assert_eq!(Procedure::from_connect_path(&path), None, "{rpc}");
+    }
+}
+
+#[test]
+fn m2_stub_paths_are_not_authenticated_procedures_yet() {
+    // WP-2.9 and WP-2.11 add procedures for these and replace this test.
+    for rpc in ["SetRepoVisibility", "IssueObjectUrl"] {
+        let path = format!("/mkit.transport.v1.TransportService/{rpc}");
+        assert_eq!(Procedure::from_connect_path(&path), None, "{rpc}");
+    }
+}
+
+#[tokio::test]
+async fn m2_stubs_reject_binary_and_json_without_writes_in_both_auth_modes() {
+    for auth in [
+        authv2(),
+        AuthMode::Bearer {
+            token: Redacted::new(TOKEN),
+        },
+    ] {
+        let (server, writes) = spy_server(auth);
+        assert_unimplemented(
+            &server
+                .unary(
+                    "GetGrantEpoch",
+                    &GetGrantEpochRequest {
+                        namespace: Some("namespace".into()),
+                        ..Default::default()
+                    },
+                    &[],
+                )
+                .await,
+        );
+        assert_unimplemented(
+            &server
+                .unary(
+                    "SetGrantEpoch",
+                    &SetGrantEpochRequest {
+                        signed_statement: Some("statement.scheme.blob".into()),
+                        ..Default::default()
+                    },
+                    &[],
+                )
+                .await,
+        );
+        assert_unimplemented(
+            &server
+                .unary(
+                    "SetRepoVisibility",
+                    &SetRepoVisibilityRequest::default(),
+                    &[],
+                )
+                .await,
+        );
+        assert_unimplemented(
+            &server
+                .unary("IssueObjectUrl", &IssueObjectUrlRequest::default(), &[])
+                .await,
+        );
+        for rpc in [
+            "GetGrantEpoch",
+            "SetGrantEpoch",
+            "SetRepoVisibility",
+            "IssueObjectUrl",
+        ] {
+            assert_unimplemented(&server.json(rpc, &serde_json::json!({}), &[]).await);
+        }
+        assert_eq!(writes.load(Ordering::SeqCst), 0);
+    }
 }
 
 #[tokio::test]
@@ -1222,11 +1385,14 @@ async fn upload_part_stream_rejects_chunk_before_header_and_empty_chunk() {
 }
 
 #[tokio::test]
-async fn m1_ref_stubs_precede_validation_and_never_write() {
+async fn deletion_and_ticket_errors_precede_pipeline_writes() {
     for (rpc, extra) in [
         ("UpdateRef", serde_json::json!({ "delete": true })),
         ("AdvanceRefs", serde_json::json!({ "delete": true })),
-        ("AdvanceRefs", serde_json::json!({ "ticketIds": [b64(&A)] })),
+        (
+            "AdvanceRefs",
+            serde_json::json!({ "ticketIds": [b64(&A), b64(&A)] }),
+        ),
     ] {
         let mut config = setup(AuthMode::Open);
         config.meta = Some(
@@ -1234,8 +1400,10 @@ async fn m1_ref_stubs_precede_validation_and_never_write() {
                 .with_fault(MemoryFault::ApplyBefore),
         );
         let server = config.serve();
-        // Missing required legacy fields would fail validation if the stub were late.
-        assert_unimplemented(&server.json(rpc, &extra, &[]).await);
+        assert_eq!(
+            server.json(rpc, &extra, &[]).await.code(),
+            "invalid_argument"
+        );
         let mut valid = if rpc == "UpdateRef" {
             update_json(HEAD, "REF_EXPECTATION_ANY", &A)
         } else {
@@ -1248,14 +1416,17 @@ async fn m1_ref_stubs_precede_validation_and_never_write() {
             .as_object_mut()
             .unwrap()
             .extend(extra.as_object().unwrap().clone());
-        assert_unimplemented(&server.json(rpc, &valid, &[]).await);
+        assert_eq!(
+            server.json(rpc, &valid, &[]).await.code(),
+            "invalid_argument"
+        );
         assert_eq!(server.read(HEAD).await.exists, Some(false));
         assert_eq!(server.read(PACKMAP).await.exists, Some(false));
         assert!(
             server.codes(rpc).is_empty(),
-            "stub must not call the pipeline"
+            "wire validation must not call the pipeline"
         );
-        // The one-shot apply fault is still armed: neither stub reached a write.
+        // The one-shot apply fault is still armed: validation reached no write.
         let legacy = update_json(HEAD, "REF_EXPECTATION_ANY", &A);
         assert_eq!(
             server.json("UpdateRef", &legacy, &[]).await.code(),
@@ -1324,9 +1495,11 @@ async fn m1_ticketed_upload_pack_validates_header_before_mode_and_never_reads_ch
 }
 
 #[tokio::test]
-async fn m1_list_refs_paging_token_rejected_and_page_size_ignored() {
-    let server = setup(AuthMode::Open).serve();
-    for (name, id) in [(HEAD, A), ("refs/heads/dev", B)] {
+async fn m1_list_refs_paging_tokens_and_page_sizes() {
+    let mut config = setup(AuthMode::Open);
+    config.list_cap = Some(2);
+    let server = config.serve();
+    for (name, id) in [(HEAD, A), ("refs/heads/dev", B), ("refs/heads/other", A)] {
         assert_eq!(
             server
                 .json(
@@ -1339,42 +1512,141 @@ async fn m1_list_refs_paging_token_rejected_and_page_size_ignored() {
             StatusCode::OK
         );
     }
-    // An invalid prefix must not reach validation when a token is supplied.
-    assert_unimplemented(
-        &server
+    let invalid = server
+        .unary(
+            "ListRefs",
+            &ListRefsRequest {
+                prefix: Some("refs/heads/".into()),
+                page_token: Some("next".into()),
+                ..Default::default()
+            },
+            &[],
+        )
+        .await;
+    assert_eq!(invalid.code(), "invalid_argument");
+    let original = list_heads_page(&server, None, None).await;
+    let bounded = list_heads_page(&server, Some(1), None).await;
+    assert_eq!(original.refs.len(), 2);
+    assert_eq!(bounded.refs.len(), 1);
+    assert!(bounded.next_page_token.is_some());
+    let second = list_heads_page(&server, Some(1), bounded.next_page_token.clone()).await;
+    assert_eq!(second.refs.len(), 1);
+    assert!(second.next_page_token.is_some());
+    assert!(bounded.refs[0].name < second.refs[0].name);
+    let third = list_heads_page(&server, Some(1), second.next_page_token.clone()).await;
+    assert_eq!(third.refs.len(), 1);
+    assert_eq!(third.next_page_token, None);
+    assert!(second.refs[0].name < third.refs[0].name);
+    let zero = list_heads_page(&server, Some(0), None).await;
+    let above = list_heads_page(&server, Some(100), None).await;
+    assert_eq!(original, zero);
+    assert_eq!(original, above);
+    for (prefix, token) in [
+        ("refs/tags/", bounded.next_page_token.clone().unwrap()),
+        ("refs/heads/", "A".repeat(800)),
+    ] {
+        let reply = server
             .unary(
                 "ListRefs",
                 &ListRefsRequest {
-                    prefix: Some("invalid".into()),
-                    page_token: Some("next".into()),
+                    prefix: Some(prefix.into()),
+                    page_token: Some(token),
                     ..Default::default()
                 },
                 &[],
             )
-            .await,
-    );
-    let list = |page_size| ListRefsRequest {
-        prefix: Some("refs/heads/".into()),
-        page_size,
-        ..Default::default()
-    };
-    let original = server
-        .unary("ListRefs", &list(None), &[])
-        .await
-        .decode::<ListRefsResponse>();
-    let bounded = server
-        .unary("ListRefs", &list(Some(1)), &[])
-        .await
-        .decode::<ListRefsResponse>();
-    assert_eq!(bounded, original);
-    assert_eq!(bounded.refs.len(), 2);
-    // Keep the legacy response bytes unchanged: absent means an empty token.
-    assert_eq!(bounded.next_page_token, None);
+            .await;
+        assert_eq!(reply.code(), "invalid_argument");
+    }
     let json = server
         .json("ListRefs", &serde_json::json!({ "pageSize": 1 }), &[])
         .await;
-    assert_eq!(json.json()["refs"].as_array().unwrap().len(), 2);
-    assert!(json.json().get("nextPageToken").is_none());
+    assert_eq!(json.json()["refs"].as_array().unwrap().len(), 1);
+    assert!(json.json().get("nextPageToken").is_some());
+}
+
+async fn list_heads_page(
+    server: &Server,
+    page_size: Option<u32>,
+    page_token: Option<String>,
+) -> ListRefsResponse {
+    server
+        .unary(
+            "ListRefs",
+            &ListRefsRequest {
+                prefix: Some("refs/heads/".into()),
+                page_size,
+                page_token,
+                ..Default::default()
+            },
+            &[],
+        )
+        .await
+        .decode()
+}
+
+#[tokio::test]
+async fn m1_list_refs_wire_pages_stop_at_two_mib() {
+    let meta = MemoryKv::default();
+    let repo = RepoName::new(REPO).unwrap();
+    let partition = Partition::Namespace(NamespaceKey::deployment_default());
+    for base in (0..5_000).step_by(100) {
+        let mut batch = Batch::new();
+        for i in base..base + 100 {
+            let name = format!("refs/heads/{i:05}{}", "a".repeat(490));
+            batch = batch.put(keys::ref_key(&repo, &name), codec::encode_ref_id(&A));
+        }
+        meta.apply(&partition, batch).await.unwrap();
+    }
+    let mut config = setup(AuthMode::Open);
+    config.list_cap = Some(10_000);
+    config.meta = Some(meta);
+    let server = config.serve();
+    let mut token = None;
+    let mut count = 0;
+    let mut pages = 0;
+    let mut last = String::new();
+    loop {
+        let reply = server
+            .unary(
+                "ListRefs",
+                &ListRefsRequest {
+                    prefix: Some("refs/heads/".into()),
+                    page_size: Some(10_000),
+                    page_token: token,
+                    ..Default::default()
+                },
+                &[],
+            )
+            .await;
+        assert!(reply.body.len() <= 2 * 1024 * 1024);
+        let page: ListRefsResponse = reply.decode();
+        pages += 1;
+        for entry in page.refs {
+            let name = entry.name.unwrap();
+            assert!(name > last);
+            last = name;
+            count += 1;
+        }
+        match page.next_page_token {
+            Some(next) => token = Some(next),
+            None => break,
+        }
+    }
+    assert_eq!(count, 5_000);
+    assert!(pages >= 2, "the encoded cap must cut a 5,000-ref page");
+    let json = server
+        .json(
+            "ListRefs",
+            &serde_json::json!({
+                "prefix": "refs/heads/", "pageSize": 10_000
+            }),
+            &[],
+        )
+        .await;
+    assert_eq!(json.status, StatusCode::OK);
+    assert!(json.body.len() <= 2 * 1024 * 1024);
+    assert!(json.json()["nextPageToken"].is_string());
 }
 
 #[tokio::test]

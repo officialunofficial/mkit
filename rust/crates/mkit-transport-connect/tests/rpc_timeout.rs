@@ -171,6 +171,46 @@ impl generated::TransportService for SlowService {
         };
         Response::stream_ok(futures::stream::iter([Ok(header), Ok(chunk)]))
     }
+
+    async fn get_grant_epoch(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, generated::GetGrantEpochRequest>,
+    ) -> ServiceResult<generated::GetGrantEpochResponse> {
+        Err(connectrpc::ConnectError::unimplemented(
+            "not implemented yet",
+        ))
+    }
+
+    async fn set_grant_epoch(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, generated::SetGrantEpochRequest>,
+    ) -> ServiceResult<generated::SetGrantEpochResponse> {
+        Err(connectrpc::ConnectError::unimplemented(
+            "not implemented yet",
+        ))
+    }
+
+    async fn set_repo_visibility(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, generated::SetRepoVisibilityRequest>,
+    ) -> ServiceResult<generated::SetRepoVisibilityResponse> {
+        Err(connectrpc::ConnectError::unimplemented(
+            "not implemented yet",
+        ))
+    }
+
+    async fn issue_object_url(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, generated::IssueObjectUrlRequest>,
+    ) -> ServiceResult<generated::IssueObjectUrlResponse> {
+        Err(connectrpc::ConnectError::unimplemented(
+            "not implemented yet",
+        ))
+    }
 }
 
 /// Bind a real Connect server on an ephemeral loopback port, whose

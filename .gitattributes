@@ -16,6 +16,7 @@
 # the full diff can pass `--text` explicitly.
 Cargo.lock -diff
 rust/tests/golden/redaction/*.bin -diff -text
+rust/tests/golden/transport/*.bin -diff -text
 
 # Files excluded from `git archive` tarballs. Release tarballs ship
 # only the buildable source tree; CI config, test fixtures, fuzz

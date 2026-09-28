@@ -302,7 +302,7 @@ fn update(name: &str, byte: u8) -> RefUpdate {
     RefUpdate {
         name: name.into(),
         condition: RefWriteCondition::Any,
-        new: [byte; 32],
+        new: Some([byte; 32]),
     }
 }
 fn shard(a: &Authenticated, name: &str) -> Partition {

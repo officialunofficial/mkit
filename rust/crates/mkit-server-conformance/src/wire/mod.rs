@@ -152,8 +152,16 @@
 //! | `tickets.upload_pack_bad_token` | `tickets`, `auth-v2` | an invalid token fails before a pack is stored |
 //! | `tickets.upload_pack_binding_denied` | `tickets`, `auth-v2` | a valid token for another pack is denied |
 //! | `tickets.upload_pack_expired_token` | `tickets`, `auth-v2`, `test-faults` | an expired token fails with `failed_precondition` |
+//! | `tickets.advance_ticket_id_errors` | `tickets`, `auth-v2` | malformed, duplicate and excessive ticket ids have exact errors |
+//! | `tickets.advance_marker_then_upload` | `tickets`, `auth-v2` | a missing marker leaves the ticket open for upload and retry |
+//! | `tickets.advance_conflicts_keep_ticket` | `tickets`, `auth-v2` | typed ref conflicts preserve tickets for a corrected advance |
+//! | `refs.delete_pair` | — | conditional deletion removes head and packmap together and rejects invalid inputs |
+//! | `tickets.advance_ticket_bindings` | `tickets`, `auth-v2`, `multi-repo` | unknown, mismatched ref and signer ticket bindings fail with exact errors |
+//! | `tickets.advance_other_repository` | `tickets`, `auth-v2`, `multi-repo` | a ticket cannot cross a repository boundary |
+//! | `tickets.advance_expired_ticket` | `tickets`, `auth-v2`, `test-faults` | an expired ticket fails with its exact error |
 //! | `growth.replay_and_quota_pruned` | `auth-v2`, `replay`, `quota`, `test-faults` | records answer before expiry; after validity + grace + window the partition shrinks back to an absolute bound (R-31); needs a quota window ≤ 60 s allowing 265 writes, and a disposable server |
-//! | `list.large_response_within_limit` | | records one `ListRefs` response over `list_refs` refs (M1 asserts the bound) |
+//! | `list.large_response_within_limit` | | follows tokens over `list_refs` long names; each response is at most 2 MiB |
+//! | `list.paging_wire` | | token round trip, invalid tokens, and page-size defaults and cap |
 //! | `repo.single_header_mismatch_not_found` | excludes `multi-repo` | Single reads with another identity give `not_found` |
 //! | `repo.single_malformed_invalid_argument` | excludes `multi-repo` | Single reads reject malformed identities |
 //! | `repo.single_signed_missing_header_unauthenticated` | `auth-v2`; excludes `multi-repo` | Single signed writes require X-Repository |
@@ -197,10 +205,10 @@
 //! renaming. None exists yet, so none can pass vacuously.
 //!
 // TODO(M1, multi-repo): `repo.isolation_replay`, `server_info.*` (GetServerInfo),
-//   `list.paging_*` and `list.page_within_2_mib` (§7.9), `refs.delete_*` (§7.8).
+//   `list.paging_*` and `list.page_within_2_mib` (§7.9).
 // TODO(M1, multi-repo): `namespace.policy_allowlist`, `namespace.policy_owner`.
 // TODO(M1, tickets): `tickets.upload_part_*`,
-//   `tickets.complete_upload_*`, `tickets.advance_consumes_ticket`,
+//   `tickets.complete_upload_*`,
 //   `growth.tickets_and_outbox_pruned` (WP-1.27).
 // TODO(M2, grants): `grants.write_*`, `grants.epoch_*`, `grants.revoked_*`.
 // TODO(M2, signed-reads): `reads.signed_verified_in_full`,
@@ -261,6 +269,7 @@ pub const D34_LIST_REFS_SKIPS: &[&str] = &[
     "refs.list_prefix_stripped",
     "refs.list_prefix_component_boundary",
     "list.large_response_within_limit",
+    "list.paging_wire",
     "repo.isolation_refs",
     // The unsigned-read case probes successful ListRefs as well as ReadRef.
     "auth.v2_reads_unsigned_ok",
@@ -362,7 +371,7 @@ mod tests {
             .map(|case| case.name)
             .collect();
         assert_eq!(skipped, D34_LIST_REFS_SKIPS.iter().copied().collect());
-        assert_eq!(skipped.len(), 8);
+        assert_eq!(skipped.len(), 9);
         for name in &skipped {
             assert!(
                 name.contains("list")

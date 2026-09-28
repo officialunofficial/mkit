@@ -1038,7 +1038,7 @@ mod glue {
             Ok(Some(response))
         }
 
-        /// Local conformance planting/probing of real RefShard relay alarms.
+        /// Local conformance planting/probing of real `RefShard` relay alarms.
         pub(super) const RELAY_PATH_PREFIX: &str = "/__mkit_test/relay/";
 
         thread_local! {

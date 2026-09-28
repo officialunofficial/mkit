@@ -237,7 +237,8 @@ pub struct RefUpdate {
     /// Compare-and-swap precondition.
     pub condition: RefWriteCondition,
     /// New target.
-    pub new: Hash,
+    /// New target, or `None` to delete the ref.
+    pub new: Option<Hash>,
 }
 
 /// What an operation does, with its decoded arguments.
@@ -262,6 +263,8 @@ pub enum OpKind {
         head: RefUpdate,
         /// The packmap update.
         packmap: RefUpdate,
+        /// Upload tickets consumed atomically with the ref advance.
+        tickets: Vec<Hash>,
     },
     /// Open an upload ticket for a target ref.
     BeginUpload {
@@ -619,7 +622,7 @@ mod tests {
         RefUpdate {
             name: name.to_owned(),
             condition: RefWriteCondition::Missing,
-            new: [1; 32],
+            new: Some([1; 32]),
         }
     }
 
@@ -647,6 +650,7 @@ mod tests {
                 OpKind::AdvanceRefs {
                     head: update("refs/heads/main"),
                     packmap: update("refs/packmap/main"),
+                    tickets: Vec::new(),
                 },
                 Procedure::AdvanceRefs,
             ),
