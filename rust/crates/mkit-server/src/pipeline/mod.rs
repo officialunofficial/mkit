@@ -340,6 +340,35 @@ fn ms(ms: i64) -> u64 {
     u64::try_from(ms).unwrap_or(0)
 }
 
+fn validate_upload_ticket_config<H: HookSet>(
+    cfg: &PipelineConfig,
+    hooks: &H,
+) -> Result<(), ServerError> {
+    if matches!(cfg.addressing, Addressing::Multi(_))
+        && matches!(cfg.auth, AuthMode::TransportIdentity)
+    {
+        return Err(ServerError::invalid_argument(
+            "multi-repository deployments require auth v2 until transport identity carries tickets",
+        ));
+    }
+    if cfg.begin_upload_threshold_bytes != u64::MAX
+        && (!matches!(cfg.auth, AuthMode::AuthV2(_)) || cfg.ticket_keys.is_none())
+    {
+        return Err(ServerError::invalid_argument(
+            "a ticket threshold requires auth v2 and upload ticket keys",
+        ));
+    }
+    if !matches!(cfg.auth, AuthMode::TransportIdentity)
+        && !hooks.admission().is_default()
+        && (!matches!(cfg.auth, AuthMode::AuthV2(_)) || cfg.ticket_keys.is_none())
+    {
+        return Err(ServerError::invalid_argument(
+            "admission requires auth v2 and upload ticket keys",
+        ));
+    }
+    Ok(())
+}
+
 impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// A pipeline over `blobs` and `meta`, routed by `cfg.sharding`.
     ///
@@ -363,28 +392,7 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         metrics: Arc<dyn Metrics>,
     ) -> Result<Self, ServerError> {
         cfg.validate_server_info_limits()?;
-        if matches!(cfg.addressing, Addressing::Multi(_))
-            && matches!(cfg.auth, AuthMode::TransportIdentity)
-        {
-            return Err(ServerError::invalid_argument(
-                "multi-repository deployments require auth v2 until transport identity carries tickets",
-            ));
-        }
-        if cfg.begin_upload_threshold_bytes != u64::MAX
-            && (!matches!(cfg.auth, AuthMode::AuthV2(_)) || cfg.ticket_keys.is_none())
-        {
-            return Err(ServerError::invalid_argument(
-                "a ticket threshold requires auth v2 and upload ticket keys",
-            ));
-        }
-        if !matches!(cfg.auth, AuthMode::TransportIdentity)
-            && !hooks.admission().is_default()
-            && (!matches!(cfg.auth, AuthMode::AuthV2(_)) || cfg.ticket_keys.is_none())
-        {
-            return Err(ServerError::invalid_argument(
-                "admission requires auth v2 and upload ticket keys",
-            ));
-        }
+        validate_upload_ticket_config(&cfg, &hooks)?;
         if cfg.ticket_ttl_ms == 0
             || cfg.ticket_ttl_ms >= 604_800_000
             || cfg.ticket_caps.per_ref == 0

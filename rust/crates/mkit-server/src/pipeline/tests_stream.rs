@@ -210,7 +210,7 @@ fn upload_threshold_enforced_before_store_and_transport_identity_exempt() {
     for len in [8, 9] {
         let data = pack(len);
         let a = env
-            .auth(&signed_upload(&key(7), &data, len as u32))
+            .auth(&signed_upload(&key(7), &data, u32::try_from(len).unwrap()))
             .unwrap();
         let err = block_on(
             env.pipe
