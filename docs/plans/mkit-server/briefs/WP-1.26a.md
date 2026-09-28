@@ -73,7 +73,7 @@ un-ticketed UploadPack path.
 
 ### B.6 Overshoot bound (documented, and tested in simulation)
 
-The overshoot is at most the writes each other active shard admits in 2R, and each shard is also capped by its exact
+The overshoot is at most the writes each other active shard admits in 3R (corrected from 2R in fix round 1; R-126 is authoritative), and each shard is also capped by its exact
 per-signer limits.
 
 ### B.7 Defaults
@@ -92,7 +92,7 @@ Add row **R-126**:
 >
 > - Namespace charges live in `qs` rows per window.
 > - Rollup timer kind 5 every R = 60 s writes the coordinator aggregates `qc` / `qt` and the local view `qv`.
-> - Overshoot is at most 2R of the other shards' admitted writes.
+> - Overshoot is at most 3R of the other shards' admitted writes (corrected from 2R; see R-126).
 > - Default namespace cap: equal to the per-signer limits in Multi; off in Single.
 > - On Single-addressing D34 the per-signer quota is per (signer, branch), which is accepted.
 > - The rollup adds one coordinator write per active shard per R, which lowers the R-76 ceiling by about a third;

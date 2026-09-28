@@ -130,6 +130,13 @@ async fn aggregate<T: NamespaceStore, M: Metrics>(
         }
         .checked_add(added)
         .ok_or_else(|| StoreError::Corrupt("namespace total overflow".into()))?;
+        // An inconsistent coordinator (a total below this source's own old
+        // contribution) must never leave the total below the local usage, or
+        // this shard's view would deny every write until the window ends.
+        let next = NamespaceUsage {
+            ops: next.ops.max(local.ops),
+            bytes: next.bytes.max(local.bytes),
+        };
         let batch = Batch::new()
             .require(guard(source_key.clone(), old_value))
             .require(guard(total_key.clone(), total_value))
@@ -864,6 +871,16 @@ mod tests {
                 .put(keys::quota_contribution(old, &shard).unwrap(), one.clone())
                 .put(keys::quota_total(old), one.clone());
         }
+        // Rows of the next window must survive the prune.
+        local_rows = local_rows
+            .put(keys::quota_shard(window + 1), one.clone())
+            .put(keys::quota_view(window + 1), view.clone());
+        coordinator_rows = coordinator_rows
+            .put(
+                keys::quota_contribution(window + 1, &shard).unwrap(),
+                one.clone(),
+            )
+            .put(keys::quota_total(window + 1), one.clone());
         let (timer_key, _) = timer(due, window);
         local_rows = local_rows.put(timer_key, codec::encode_u64(WINDOW_MS));
         assert_eq!(
@@ -905,11 +922,30 @@ mod tests {
         assert_eq!(report.fired, 1);
         assert_eq!(report.failed, 0);
         assert_eq!(report.next_wake_ms, None);
-        assert_eq!(local.stats(&shard).await.unwrap().keys, Some(0));
+        assert_eq!(local.stats(&shard).await.unwrap().keys, Some(2));
         assert_eq!(
             coordinator_store.stats(&coordinator()).await.unwrap().keys,
-            Some(0)
+            Some(2)
         );
+        let kept = local
+            .get_many(
+                &shard,
+                &[keys::quota_shard(window + 1), keys::quota_view(window + 1)],
+            )
+            .await
+            .unwrap();
+        assert!(kept.iter().all(Option::is_some));
+        let kept = coordinator_store
+            .get_many(
+                &coordinator(),
+                &[
+                    keys::quota_contribution(window + 1, &shard).unwrap(),
+                    keys::quota_total(window + 1),
+                ],
+            )
+            .await
+            .unwrap();
+        assert!(kept.iter().all(Option::is_some));
     }
 
     #[tokio::test]
