@@ -1,0 +1,66 @@
+{
+  "entries": [
+    {
+      "seq": "1",
+      "recordedAtMs": "1790424001000",
+      "actor": "test-admin-moderation-2026-09",
+      "procedure": "/mkit.server.admin.v1.AdminService/Takedown",
+      "targets": [
+        "object:1111111111111111111111111111111111111111111111111111111111111111"
+      ],
+      "result": {
+        "code": "ok",
+        "message": "accepted"
+      },
+      "details": "fixture entry",
+      "prevHash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "operatorLabel": "case-17",
+      "requestDigest": "body:810382733a47f208a068276c32c9a5fa829a709792798cb5aff7217658905090",
+      "nonce": "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+      "operationId": "admin:take:1",
+      "entryHash": "e8d5b7f683d716b016ab1dbd453ef065b349c9f16780e7340f2832a98319219e"
+    },
+    {
+      "seq": "2",
+      "recordedAtMs": "1790424002000",
+      "actor": "system:relay",
+      "procedure": "system:relay/takedown",
+      "targets": [
+        "object:1111111111111111111111111111111111111111111111111111111111111111"
+      ],
+      "result": {
+        "code": "ok",
+        "message": ""
+      },
+      "details": "",
+      "prevHash": "e8d5b7f683d716b016ab1dbd453ef065b349c9f16780e7340f2832a98319219e",
+      "requestDigest": "",
+      "nonce": "",
+      "operationId": "admin:take:1",
+      "entryHash": "4dca6bcc90a0e555f645df3fa355311b163c24bf0bb963bf669fc802752f7592"
+    },
+    {
+      "seq": "3",
+      "recordedAtMs": "1790424003000",
+      "actor": "test-admin-lease-2026-09",
+      "procedure": "/mkit.server.admin.v1.AdminService/ReleaseHold",
+      "targets": [
+        "ed25519-a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0/payments-demo"
+      ],
+      "result": {
+        "code": "permission_denied",
+        "message": "moderation role required"
+      },
+      "details": "",
+      "prevHash": "4dca6bcc90a0e555f645df3fa355311b163c24bf0bb963bf669fc802752f7592",
+      "operatorLabel": "reviewer-7",
+      "requestDigest": "body:91973e4892a430496bf944f3130acb8bdbd6bb59de6a93fe6c9919efbcad5171",
+      "nonce": "a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3",
+      "entryHash": "448e671c63568ee690589d55b52eb06769139e8a37a30f56011fe02cd83c642a"
+    }
+  ],
+  "chainHead": "448e671c63568ee690589d55b52eb06769139e8a37a30f56011fe02cd83c642a",
+  "chainHeadSeq": "3",
+  "checkpointHash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "checkpointSeq": "0"
+}

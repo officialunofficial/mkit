@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "keys": [
+    {
+      "keyId": "test-admin-lease-2026-09",
+      "alg": "ed25519",
+      "publicKey": "9f49439e9db095bc4111ed25d35795d831bc55a047f4b1d7f6aee3777bb41220",
+      "notBeforeMs": "1790423900000",
+      "notAfterMs": "1790424600000",
+      "roles": [
+        "lease"
+      ]
+    },
+    {
+      "keyId": "test-admin-moderation-2026-09",
+      "alg": "ed25519",
+      "publicKey": "c6822637c7d310ec57627be00ba259d253749f4aaf644470cffbe53a35f73242",
+      "notBeforeMs": "1790423900000",
+      "notAfterMs": "1790424600000",
+      "roles": [
+        "moderation",
+        "audit"
+      ]
+    }
+  ]
+}
