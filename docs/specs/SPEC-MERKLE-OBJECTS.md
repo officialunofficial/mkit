@@ -232,6 +232,20 @@ than emit one. `merkle::tests::verify_rejects_empty_element_set` pins
 this (no golden vector: every vector under `rust/tests/golden/proofs/`
 proves at least one position by construction).
 
+**A builder MUST refuse any position `>= leaf_count`**, in single-leaf,
+range and multi-leaf form. In particular, a BMT with zero leaves (the
+empty `Tree`, §4) has no provable position: the single `BLAKE3("")` node
+§1.1 starts it from is a placeholder, not a leaf. A builder asked for
+position 0 of an empty `Tree`, including the range `0..=0`, MUST refuse
+rather than return the all-default proof (`leaf_count: 0, siblings: []`).
+No verifier accepts any proof of a position against an empty `Tree`, so
+the default proof is never a valid answer to that request. This is
+stricter than the upstream Binary Merkle Tree builder of §5.7, whose
+range builder returns the default proof for that one case; the wire
+format and sibling selection are unaffected. (The empty `ChunkedBlob` is
+a 1-leaf tree, so its position 0, the metadata leaf, is provable as a
+BMT leaf; §5.5 still rejects it as a chunk.)
+
 **Normative — verify against the object id, never the bare root.**
 Every verification in this document is stated against the object's
 **id**, not the bare (pre-domain-wrap) value §1.1/§2 folds a leaf stream
@@ -324,6 +338,7 @@ this corpus are unaffected.
 | inclusion proof checked against the wrong object id (bare root, or another type's id) | the `domain_digest(TYPE_DOMAIN, …)` wrap in the comparison (§5.4) |
 | inclusion-proof sibling count forged to force large allocation | the `max_items * MAX_LEVELS` decode bound (§5.2) |
 | chunk proof of position 0 (the metadata leaf) accepted as a chunk | chunk verification rejects position 0 explicitly (§5.5) |
+| a proof built for a position the object does not have (including position 0 of the empty `Tree`) | builders refuse any position `>= leaf_count` (§5.4) |
 
 Roots are deterministic across machines (all length/position fields are
 fixed big- or little-endian as specified; no host-endian leakage).

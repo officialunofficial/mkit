@@ -324,7 +324,8 @@ impl<'s> WriteBatch<'s> {
             // Dedup hit: the object is visible, but if another process
             // renamed it and has not yet flushed the dirent, it may not
             // be durable. We are about to reference it, so flush its
-            // shard dir at commit.
+            // shard dir at commit. The `mtime` is left alone (see
+            // `store::refresh_mtime`).
             self.inner
                 .lock()
                 .expect("batch state mutex poisoned")
