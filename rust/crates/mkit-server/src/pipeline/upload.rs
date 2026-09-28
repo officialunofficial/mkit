@@ -1,6 +1,6 @@
 //! `UploadPack` as a session (PRD §5.4 stages 0–6, overview Q5).
 //!
-//! [`Pipeline::begin_upload`] checks the header and the signed `pack:`
+//! [`Pipeline::open_upload`] checks the header and the signed `pack:`
 //! commitment, then reserves: one batch puts the replay record
 //! `InFlight { resumable: true }` with the quota charge, before any chunk
 //! is read (`vcs-worker` `service.rs:432-440`). Each
@@ -28,7 +28,7 @@
 //! `pre_receive` runs after the blob is visible, so it cannot prevent
 //! visibility: a rejected pack stays until GC reclaims it as unreferenced.
 //! A final (storable) rejection is committed as the operation's result, so
-//! a retry is answered at `begin_upload` without re-streaming; any other
+//! a retry is answered at `open_upload` without re-streaming; any other
 //! error leaves the record in flight and resumable.
 //!
 //! An upload that outlives its envelope (past `expires_at +
@@ -68,7 +68,7 @@ use crate::upload::{UploadError, UploadValidator};
 /// How an upload relates to its replay record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UploadMode {
-    /// A new operation, reserved and charged by `begin_upload` (also every
+    /// A new operation, reserved and charged by `open_upload` (also every
     /// unsigned upload).
     Fresh,
     /// The same operation is in flight: re-stream and re-commit, with no
@@ -163,7 +163,7 @@ fn storable(err: &ServerError) -> Option<StoredRejection> {
 }
 
 impl<'p, B: BlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p, B, N, H> {
-    /// See [`Pipeline::begin_upload`].
+    /// See [`Pipeline::open_upload`].
     pub(super) async fn begin(
         pipe: &'p Pipeline<B, N, H>,
         a: &Authenticated,
@@ -224,7 +224,7 @@ impl<'p, B: BlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p, B, N, H>
             let mut input = AdmissionInput::new(&op);
             input.declared_bytes = declared;
             input.pack_id = Some(key);
-            let charges = pipe.admit(input).await?;
+            let charges = pipe.admit(input).await?.charges;
             if op.auth.is_some() || !charges.is_empty() {
                 let req = WriteRequest {
                     repo: &op.repo.name,
@@ -237,6 +237,7 @@ impl<'p, B: BlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p, B, N, H>
                     mark_repo_known: false,
                     lease: None,
                     rejection: None,
+                    begin: None,
                 };
                 pipe.apply_atomic(&op, a, &p, &req, ahead).await?;
             }
@@ -372,6 +373,7 @@ impl<'p, B: BlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p, B, N, H>
             mark_repo_known: false,
             lease: None,
             rejection: rejection.as_ref(),
+            begin: None,
         };
         match pipe
             .apply_atomic(&self.op, &self.a, &self.p, &req, None)

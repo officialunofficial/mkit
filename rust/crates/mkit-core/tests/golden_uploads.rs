@@ -212,6 +212,19 @@ fn write_all() {
     fs::create_dir_all(&dir).unwrap();
     let text = serde_json::to_string_pretty(&merge).unwrap() + "\n";
     fs::write(dir.join("subtree-merge.json"), &text).unwrap();
+    // Other crates own fixtures in this directory, including server ticket
+    // tokens. Regenerating subtree vectors must preserve their manifest pins.
+    let mut other_pins = String::new();
+    for line in fs::read_to_string(dir.join("MANIFEST.txt"))
+        .unwrap_or_default()
+        .lines()
+    {
+        if line.is_empty() || line.starts_with('#') || line.starts_with("subtree-merge.json ") {
+            continue;
+        }
+        other_pins.push_str(line);
+        other_pins.push('\n');
+    }
     fs::write(
         dir.join("MANIFEST.txt"),
         format!(
@@ -219,8 +232,9 @@ fn write_all() {
              # Produced by `MKIT_WRITE_GOLDEN=1 cargo test -p mkit-core --test golden_uploads`\n\
              # Cross-checked by `python3 scripts/golden/blake3_subtree_ref.py`\n\
              # Format: <name> <blake3-hex-of-file-bytes>\n\
-             subtree-merge.json {}\n",
-            to_hex(&hash(text.as_bytes()))
+             subtree-merge.json {}\n{}",
+            to_hex(&hash(text.as_bytes())),
+            other_pins
         ),
     )
     .unwrap();

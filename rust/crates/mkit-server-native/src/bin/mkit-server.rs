@@ -3,16 +3,19 @@
 //! ```text
 //! mkit-server serve [--listen <ADDR>] [--listen-enc <ADDR>] --repo-root <DIR> [...]
 //! mkit-server version
+//! mkit-server backup --meta sqlite:<PATH> --out <FILE>
 //! ```
 //!
 //! See the crate README for the operator guide.
 
+use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
-use mkit_server_native::config::{ServeArgs, resolve};
+use clap::{Args, Parser, Subcommand};
+use mkit_server::sql::SqlConn;
+use mkit_server_native::config::{MetaArg, ServeArgs, resolve};
 use mkit_server_native::telemetry::{DEFAULT_FILTER, init_tracing};
-use mkit_server_native::{Shutdown, exit, server, shutdown_signal};
+use mkit_server_native::{RusqliteConn, Shutdown, exit, server, shutdown_signal};
 
 #[derive(Debug, Parser)]
 #[command(name = "mkit-server", version, about = "The mkit server")]
@@ -30,6 +33,18 @@ enum Command {
     Serve(Box<ServeArgs>),
     /// Print the version.
     Version,
+    /// Write a consistent physical `SQLite` backup while the server runs.
+    Backup(BackupArgs),
+}
+
+#[derive(Debug, Args)]
+struct BackupArgs {
+    /// Existing `SQLite` metadata database: `sqlite:<PATH>`.
+    #[arg(long)]
+    meta: MetaArg,
+    /// New output file; any existing path is refused.
+    #[arg(long)]
+    out: PathBuf,
 }
 
 fn main() -> ExitCode {
@@ -52,7 +67,76 @@ fn main() -> ExitCode {
             exit::OK
         }
         Command::Serve(args) => serve(&args),
+        Command::Backup(args) => backup(&args),
     })
+}
+
+fn backup(args: &BackupArgs) -> u8 {
+    match write_backup(args) {
+        Ok(size) => {
+            println!("{} ({size} bytes)", args.out.display());
+            exit::OK
+        }
+        Err((code, error)) => {
+            eprintln!("mkit-server backup: {error}");
+            code
+        }
+    }
+}
+
+fn write_backup(args: &BackupArgs) -> Result<u64, (u8, String)> {
+    let MetaArg::Sqlite(source) = &args.meta else {
+        return Err((exit::USAGE, "--meta must be sqlite:<PATH>".to_owned()));
+    };
+    if !source.is_file() {
+        return Err((
+            exit::NOINPUT,
+            format!(
+                "--meta sqlite:{} is not an existing database file",
+                source.display()
+            ),
+        ));
+    }
+    let dest = args
+        .out
+        .to_str()
+        .ok_or_else(|| (exit::USAGE, "--out must be a UTF-8 path".to_owned()))?;
+    // Claim the output atomically: `create_new` refuses an existing path,
+    // including a planted symlink, and the file starts owner-only because the
+    // backup holds repository, ref and signer metadata. `VACUUM INTO` accepts
+    // an empty target file.
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    match options.open(&args.out) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err((
+                exit::USAGE,
+                format!("--out {} already exists", args.out.display()),
+            ));
+        }
+        Err(error) => {
+            return Err((
+                exit::USAGE,
+                format!("--out {}: {error}", args.out.display()),
+            ));
+        }
+    }
+    let fail = |error: String| {
+        // Never leave a partial file that a later run would mistake for a backup.
+        let _ = std::fs::remove_file(&args.out);
+        (exit::UNAVAILABLE, error)
+    };
+    // A separate WAL connection reads a consistent snapshot without
+    // acquiring the server's root locks or stopping its writers.
+    let conn = RusqliteConn::open(source).map_err(|error| fail(error.to_string()))?;
+    conn.backup_to(dest)
+        .map_err(|error| fail(error.to_string()))?;
+    std::fs::metadata(&args.out)
+        .map(|metadata| metadata.len())
+        .map_err(|error| fail(error.to_string()))
 }
 
 fn serve(args: &ServeArgs) -> u8 {

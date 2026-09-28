@@ -224,6 +224,9 @@ pub struct Profile {
     /// The largest pack the server accepts; the oversize case sends a
     /// header declaring one byte more.
     pub max_pack_bytes: u64,
+    /// Configured open-ticket cap per signer in one target-ref shard.
+    /// In-process baselines use a small cap to stay within their tiny write quota.
+    pub ticket_per_signer: u64,
     /// Enables the `quota.*` cases.
     pub quota: Option<QuotaLimits>,
     /// Random per run: every ref is `refs/heads/conformance/<run_id>/<case>/..`.
@@ -263,6 +266,7 @@ impl Profile {
             atomic_advance: false,
             sharding_d34: false,
             max_pack_bytes: mkit_core::protocol::PACK_BODY_LIMIT,
+            ticket_per_signer: 64,
             quota: None,
             run_id: random_hex::<8>(),
             milestone: Milestone::M0,

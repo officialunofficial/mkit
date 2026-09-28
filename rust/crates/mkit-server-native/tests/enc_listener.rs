@@ -1002,6 +1002,7 @@ impl Binary {
             .arg("serve")
             .args(flags)
             .env_remove("MKIT_API_TOKEN")
+            .env_remove("MKIT_TICKET_KEYS")
             .env_remove("MKIT_SERVE_ROOT")
             .env("RUST_LOG", "warn")
             .stdin(Stdio::null())

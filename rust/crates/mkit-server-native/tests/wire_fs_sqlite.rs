@@ -27,6 +27,11 @@ const DIVERGENCES: &[(&str, &str)] = &[];
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn wire_suite_fs_sqlite_auth_v2() {
     let root = common::repo_root();
+    let ticket_file = root.path().join("ticket.keys");
+    common::secret_file(
+        &ticket_file,
+        b"dev 1111111111111111111111111111111111111111111111111111111111111111\n",
+    );
     let db = root.path().join("meta.sqlite3");
     let (listener, origin) = common::listener().await;
     let max_pack = MAX_PACK.to_string();
@@ -39,6 +44,8 @@ async fn wire_suite_fs_sqlite_auth_v2() {
             common::s(root.path()),
             "--meta",
             &meta,
+            "--ticket-key-file",
+            common::s(&ticket_file),
             "--auth",
             "auth-v2",
             "--audience",
@@ -52,6 +59,7 @@ async fn wire_suite_fs_sqlite_auth_v2() {
     )
     .unwrap();
     cfg.pipeline.write_quota = Some(QUOTA);
+    cfg.pipeline.ticket_caps.per_signer = 4;
     let opened = server::open(&cfg).unwrap();
     let shutdown = Shutdown::new();
     let served = common::spawn_serve(listener, opened.router.clone(), &shutdown);
@@ -74,6 +82,8 @@ async fn wire_suite_fs_sqlite_auth_v2() {
     });
     profile.derive_features();
     profile.features.insert(Feature::Health);
+    profile.features.insert(Feature::Tickets);
+    profile.ticket_per_signer = 4;
     // The pipeline rejects a signature over gzip bytes (fails closed).
     profile.features.insert(Feature::StrictGzipAuth);
     let target = WireTarget {
