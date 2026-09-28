@@ -1275,12 +1275,16 @@ A recreated ref, or another ref reusing the packs, can clear when that
 membership becomes published. Later ref values are evaluated from the
 deletion boundary under the ordinary inspection and dependency rules.
 
-The server MUST retain every `pending` or `held` advance value beyond the
-published pointer that can still become published, together with its
-packmap chain and packs, and any takedown replacement packs. §13 makes
-these GC roots. The published pointer MUST be written in the same apply
-for an advance that starts `cleared` and has an eligible prefix. An
-advance starting `held` leaves the previous published value in place.
+The server MUST retain every `pending`, `held`, or `hit` advance value,
+together with its packmap chain, closure packs, and any takedown
+replacement packs. Retention lasts until the advance is `cleared`,
+`resolved`, or superseded. A `hit` advance MUST remain until its §14
+takedown completes, even if its ref value is superseded. §13 makes
+these GC roots.
+
+The published pointer MUST be written in the same apply for an advance
+that starts `cleared` and has an eligible prefix. An advance starting
+`held` leaves the previous published value in place.
 Published equals live exactly while no advance on that ref is held or
 pending (and no hit awaits resolution). A deployment with only
 synchronous inspectors MUST still maintain the published view.
