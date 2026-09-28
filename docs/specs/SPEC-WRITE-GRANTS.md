@@ -957,7 +957,7 @@ for their principals are registered server-side instead.
   key.
 - The deployment operator registers a signed grant (in the §4.2
   encoding) for a principal (informative: an operator command in M2,
-  which the M5 admin API later wraps). Registration verifies §7 steps
+  wrapped by [SPEC-SERVER §16.5](SPEC-SERVER.md#165-procedures)). Registration verifies §7 steps
   1, 3, 4 and 5 and rejects a grant whose grantee is not the principal.
 - No grant is carried on ssh and enc, so any of the three §6 paths may
   authorize a request: the owner key when the principal is the
