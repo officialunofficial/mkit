@@ -212,7 +212,6 @@ impl Withheld {
         if self.received != self.len {
             return Err(StoreError::Invalid("blob length does not match".into()));
         }
-
         if self.hasher.finalize() != *self.key.hash() {
             return Err(StoreError::Invalid(
                 "blob hash does not match its key".into(),

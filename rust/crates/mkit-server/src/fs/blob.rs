@@ -191,7 +191,6 @@ impl FsPackSink {
         if self.written != self.declared {
             return Err(StoreError::Invalid("blob length does not match".into()));
         }
-
         if self.hasher.finalize() != *self.key.hash() {
             return Err(StoreError::Invalid(
                 "blob hash does not match its key".into(),
@@ -294,7 +293,6 @@ impl BlobStore for FsBlobStore {
             .parent()
             .ok_or_else(|| StoreError::Invalid("blob path has no directory".into()))?;
         create_dir_all_durably(dir).map_err(io_error)?;
-
         let tmp = temp_path(&dest).map_err(io_error)?;
         let file = OpenOptions::new()
             .write(true)
@@ -370,11 +368,9 @@ impl BlobStore for FsBlobStore {
             Err(e) if e.kind() == ErrorKind::NotFound => return Ok(false),
             Err(e) => return Err(io_error(e)),
         }
-
         if let Some(dir) = path.parent() {
             sync_dir(dir).map_err(io_error)?;
         }
-
         Ok(true)
     }
 }

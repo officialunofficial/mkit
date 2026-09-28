@@ -960,7 +960,6 @@ async fn multipart_existing_race_aborts_losing_session() {
     .await;
     assert!(losing_session_was_aborted);
 }
-
 macro_rules! backends {
     ($memory:ident, $sqlite:ident, $scenario:ident $(, $arg:expr)*) => {
         #[tokio::test]

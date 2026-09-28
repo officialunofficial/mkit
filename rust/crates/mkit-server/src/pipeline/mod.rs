@@ -402,7 +402,6 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         }
 
         validate_upload_ticket_config(&cfg, &hooks)?;
-
         if cfg.ticket_ttl_ms == 0
             || cfg.ticket_ttl_ms >= 604_800_000
             || cfg.ticket_caps.per_ref == 0
@@ -775,12 +774,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         self.observe(a, async {
             let op = self.identify(a, OpKind::PackExists { key })?;
             self.authorize(&op).await?;
-
             self.require_repository(&op.repo).await?;
             if !self.pack_is_member(a, &key).await? {
                 return Ok(false);
             }
-
             let head = self.blobs.head(&key.into()).await;
             Ok(head
                 .map_err(|e| store_error(StorageOp::BlobHead, e))?
@@ -842,12 +839,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let opened = async {
             let op = self.identify(a, OpKind::DownloadPack { key })?;
             self.authorize(&op).await?;
-
             self.require_repository(&op.repo).await?;
             if !self.pack_is_member(a, &key).await? {
                 return Err(ServerError::not_found("pack not found"));
             }
-
             let body = self.blobs.get(&key.into(), None).await;
             match body.map_err(|e| store_error(StorageOp::BlobGet, e))? {
                 Some(body) => Ok(body),
