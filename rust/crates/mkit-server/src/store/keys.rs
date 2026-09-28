@@ -32,6 +32,7 @@
 //! | open tickets per signer | `tu 00 <repo> 00 <ref> 00 <signer:32>` | be64; same rules |
 //! | ticket expiry timer | `w 00 <expires_at:be64> 02 <ticket_id:32>` | empty |
 //! | local membership | `m 00 <repo> 00 <pack:32>` | empty |
+//! | repository object index | `i 00 <repo> 00 <object:32> <pack:32>` | binary `IndexValue` |
 //! | reservation and outcome | `o 00 <reservation_id>` | codec `ReservationV1` |
 //! | outcome pending index | `oq 00 <seq:be64> <reservation_id>` | empty |
 //! | relay high-water mark | `rh 00 <Partition::encode(source)>` | be64; never pruned, bounded by source shards |
@@ -46,8 +47,7 @@
 //! | object state (`ContentShard`) | `c 00 <object:32>` | codec `ObjectState` |
 //!
 //! Reserved tags ([`RESERVED_TAGS`]), each laid out by the work package
-//! that adds it: object index
-//! `i`, leases `l`, published pointers `pp`, tombstones `tb`, verification
+//! that adds it: leases `l`, published pointers `pp`, tombstones `tb`, verification
 //! cursors `vc`, and the deployment's namespace list
 //! [`TAG_NAMESPACE_LIST`] (WP-1.5; see `Partition` for enumeration). A
 //! new row adds its layout here, with a golden test.
@@ -138,6 +138,8 @@ pub const TAG_TICKETS_PER_REF: &str = "tc";
 pub const TAG_TICKETS_PER_SIGNER: &str = "tu";
 /// Local repository membership tag.
 pub const TAG_MEMBERSHIP: &str = "m";
+/// Repository-scoped object index tag.
+pub const TAG_OBJECT_INDEX: &str = "i";
 /// Reservation and terminal outcome tag.
 pub const TAG_RESERVATION: &str = "o";
 /// Undelivered terminal outcome index tag.
@@ -154,7 +156,7 @@ pub const TAG_OUTBOX_SEQUENCE: &str = "os";
 pub const TAG_OUTCOME_BACKLOG: &str = "oc";
 
 /// Tags whose layouts later work packages add. No M0 key uses them.
-pub const RESERVED_TAGS: &[&str] = &["tb", "i", "l", "pp", "vc", TAG_NAMESPACE_LIST];
+pub const RESERVED_TAGS: &[&str] = &["tb", "l", "pp", "vc", TAG_NAMESPACE_LIST];
 
 /// A key decoded by [`parse`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -232,6 +234,15 @@ pub enum ParsedKey {
     Membership {
         /// Repository.
         repo: RepoName,
+        /// Pack id.
+        pack_id: Hash,
+    },
+    /// `i 00 <repo> 00 <object> <pack>`.
+    ObjectIndex {
+        /// Repository.
+        repo: RepoName,
+        /// Object id.
+        object: Hash,
         /// Pack id.
         pack_id: Hash,
     },
@@ -499,6 +510,23 @@ pub fn membership(repo: &RepoName, pack: &Hash) -> Key {
     key(TAG_MEMBERSHIP, &[repo.as_str().as_bytes(), b"\0", pack])
 }
 
+/// `i 00 <repo> 00 <object> <pack>`.
+#[must_use]
+pub fn object_index(repo: &RepoName, object: &Hash, pack: &Hash) -> Key {
+    key(
+        TAG_OBJECT_INDEX,
+        &[repo.as_str().as_bytes(), b"\0", object, pack],
+    )
+}
+
+/// The exact range of index rows for one repository and object.
+#[must_use]
+pub fn object_index_range(repo: &RepoName, object: &Hash) -> (Key, Key) {
+    let start = key(TAG_OBJECT_INDEX, &[repo.as_str().as_bytes(), b"\0", object]);
+    let end = successor(&start);
+    (start, end)
+}
+
 /// `o 00 <reservation_id>`.
 pub fn reservation(rid: &str) -> Result<Key, StoreError> {
     if !validate_reservation_id(rid) {
@@ -755,6 +783,15 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
                 pack_id: hash(&body[sep + 1..])?,
             }
         }
+        b"i" => {
+            let sep = body.iter().position(|&b| b == 0)?;
+            let (object, pack_id) = body[sep + 1..].split_first_chunk::<32>()?;
+            ParsedKey::ObjectIndex {
+                repo: RepoName::new(text(&body[..sep])?).ok()?,
+                object: *object,
+                pack_id: hash(pack_id)?,
+            }
+        }
         b"o" => ParsedKey::Reservation(parse_reservation_id(body)?),
         b"oq" => parse_outcome_pending(body)?,
         b"or" => {
@@ -856,6 +893,7 @@ mod tests {
             TAG_TICKETS_PER_REF,
             TAG_TICKETS_PER_SIGNER,
             TAG_MEMBERSHIP,
+            TAG_OBJECT_INDEX,
             TAG_RESERVATION,
             TAG_OUTCOME_PENDING,
             TAG_RELAY,
@@ -917,11 +955,31 @@ mod tests {
             ),
             (block(&s), [&b"b\0"[..], &[0x11; 32]].concat()),
             (object_state(&s), [&b"c\0"[..], &[0x11; 32]].concat()),
+            (
+                object_index(&repo("a"), &s, &[0x22; 32]),
+                [&b"i\0a\0"[..], &[0x11; 32], &[0x22; 32]].concat(),
+            ),
         ];
         for (key, golden) in cases {
             assert_eq!(key.as_bytes(), golden.as_slice());
         }
         assert_eq!(LAYOUT_VERSION, 1);
+        assert!(!RESERVED_TAGS.contains(&TAG_OBJECT_INDEX));
+        let index = object_index(&repo("a"), &s, &[0x22; 32]);
+        assert_eq!(
+            parse(&index),
+            Some(ParsedKey::ObjectIndex {
+                repo: repo("a"),
+                object: s,
+                pack_id: [0x22; 32],
+            })
+        );
+        let (start, end) = object_index_range(&repo("a"), &s);
+        assert!(start <= index && index < end);
+        assert_eq!(
+            parse(&Key::new([&b"i\0a\0"[..], &[0x11; 63]].concat())),
+            None
+        );
         // Enumeration classes: their scan ranges remain pinned.
         for (tag, start, end) in [
             (TAG_REPO_REGISTRY, &b"rr\0"[..], &b"rr\x01"[..]),
@@ -1193,6 +1251,14 @@ mod tests {
             ),
             (block(&s), ParsedKey::Block(s)),
             (object_state(&s), ParsedKey::ObjectState(s)),
+            (
+                object_index(&repo("a"), &s, &[3; 32]),
+                ParsedKey::ObjectIndex {
+                    repo: repo("a"),
+                    object: s,
+                    pack_id: [3; 32],
+                },
+            ),
         ];
         for (key, parsed) in cases {
             assert_eq!(parse(&key), Some(parsed));

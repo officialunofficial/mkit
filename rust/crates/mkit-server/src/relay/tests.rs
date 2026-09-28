@@ -404,6 +404,86 @@ async fn crash_after_target_apply_retries_cleanup_without_reapplying() {
 }
 
 #[tokio::test]
+async fn identical_index_rows_from_two_sources_survive_redelivery() {
+    let s = Instrumented::new();
+    let h = handler(Instrumented::new());
+    let repo = RepoId {
+        namespace: NamespaceKey::deployment_default(),
+        name: RepoName::new("a").unwrap(),
+    };
+    let object = [0x12; 32];
+    let pack = [0x34; 32];
+    let target = D34Shards.object_index(&repo, &object);
+    let index_key = keys::object_index(&repo.name, &object, &pack);
+    let value = codec::encode_object_index(&crate::store::index::IndexValue {
+        frame_offset: 7,
+        frame_length: 19,
+        wire_type: 0,
+        decoded_size: 24,
+        chain_depth: 0,
+        delta_base: None,
+    })
+    .unwrap();
+    append(&s, &target, vec![(index_key.clone(), value.clone())], 50).await;
+    let second = Partition::Ref {
+        ns: repo.namespace.clone(),
+        repo: repo.name.clone(),
+        shard_ref: "refs/heads/second".into(),
+    };
+    let mut builder = OutboxBuilder::new(None, None).unwrap();
+    builder.relay_at(50);
+    builder.relay(&target, vec![(index_key.clone(), value.clone())]);
+    let mut batch = Batch::new();
+    builder
+        .try_finish(&mut batch.preconditions, &mut batch.writes)
+        .unwrap();
+    assert_eq!(
+        s.apply(&second, batch).await.unwrap(),
+        BatchOutcome::Committed
+    );
+    s.fail_delete.store(true, Ordering::SeqCst);
+    assert!(fire(&h, &s).await.is_err());
+    assert_eq!(h.target.applies.lock().unwrap().len(), 1);
+    s.fail_delete.store(false, Ordering::SeqCst);
+    fire(&h, &s).await.unwrap();
+    assert_eq!(h.target.applies.lock().unwrap().len(), 1);
+    h.fire(
+        &TimerCtx {
+            store: &s,
+            partition: &second,
+            now_ms: 100,
+        },
+        &DueTimer {
+            due_at_ms: 100,
+            kind: kinds::RELAY,
+            reference: bytes::Bytes::default(),
+            value: Value::default(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(h.target.applies.lock().unwrap().len(), 2);
+    assert_eq!(
+        h.target.get(&target, &index_key).await.unwrap(),
+        Some(value)
+    );
+    assert_eq!(
+        h.target
+            .get(&target, &keys::relay_high_water(&source()).unwrap())
+            .await
+            .unwrap(),
+        Some(codec::encode_u64(1))
+    );
+    assert_eq!(
+        h.target
+            .get(&target, &keys::relay_high_water(&second).unwrap())
+            .await
+            .unwrap(),
+        Some(codec::encode_u64(1))
+    );
+}
+
+#[tokio::test]
 async fn failed_target_retains_its_later_rows_while_other_targets_commit() {
     let s = memory();
     let mut t = Instrumented::new();

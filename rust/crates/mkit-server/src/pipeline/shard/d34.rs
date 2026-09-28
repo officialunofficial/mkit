@@ -1,6 +1,7 @@
 //! Fixed D34 routing: one branch shard, a namespace coordinator, and
 //! enumerable membership and ref-name index shards.
 
+use mkit_core::hash::Hash;
 use mkit_core::hash::hash;
 use mkit_core::refs::PACKMAP_REF_PREFIX;
 
@@ -57,6 +58,14 @@ impl ShardMap for D34Shards {
             prefix: (u16::from(p[0]) << 4) | u16::from(p[1] >> 4),
         }
     }
+
+    fn object_index(&self, repo: &RepoId, object: &Hash) -> Partition {
+        Partition::RepoIndex {
+            ns: repo.namespace.clone(),
+            repo: repo.name.clone(),
+            prefix: (u16::from(object[0]) << 4) | u16::from(object[1] >> 4),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -101,6 +110,7 @@ mod tests {
         pack_id: String,
         prefix: u16,
         membership_partition_hex: String,
+        object_index_partition_hex: String,
     }
 
     #[derive(Serialize)]
@@ -153,6 +163,7 @@ mod tests {
                 pack_id: to_hex(&id),
                 prefix,
                 membership_partition_hex: encoded(&D34Shards.membership(&r, &pack)),
+                object_index_partition_hex: encoded(&D34Shards.object_index(&r, &id)),
             }
         })
         .collect();
@@ -244,6 +255,7 @@ mod tests {
             prop_assert!(bucket < REF_INDEX_FANOUT);
             prop_assert!(prefix < INDEX_FANOUT);
             prop_assert_eq!(prefix, u16::from_be_bytes([id[0], id[1]]) >> 4);
+            prop_assert_eq!(D34Shards.object_index(&r, &id), D34Shards.membership(&r, &BlobKey::pack(id)));
         }
     }
 }
