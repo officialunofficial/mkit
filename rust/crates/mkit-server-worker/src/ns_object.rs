@@ -456,7 +456,7 @@ mod object {
     use worker::{Method, Request, Response, ScheduledTime, State, Storage};
 
     use super::{PressureStore, decode_request, dispatch, encode, failure};
-    use crate::alarm::{AlarmAction, alarm_after_put, alarm_after_tick_with_current};
+    use crate::alarm::{AlarmAction, alarm_after_put, alarm_after_tick_with_dirty};
     use crate::classes::ShardClass;
     use crate::clock::WorkerClock;
     use crate::do_sql::{DO_CAPACITY, DoSqlConn};
@@ -658,11 +658,8 @@ mod object {
             let current = self.storage.get_alarm().await?;
             // A request can interleave while a backup awaits R2. Its timer
             // Put must survive this handler's final set/delete decision.
-            let action = if self.alarm_dirty.get() {
-                AlarmAction::Set(i64::try_from(now).unwrap_or(i64::MAX))
-            } else {
-                alarm_after_tick_with_current(current, next_wake, now)
-            };
+            let action =
+                alarm_after_tick_with_dirty(current, next_wake, now, self.alarm_dirty.get());
             let result = match action {
                 AlarmAction::Set(next) => self.set_alarm(next).await,
                 AlarmAction::Delete => self.storage.delete_alarm().await,

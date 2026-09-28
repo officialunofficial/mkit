@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   commands move metadata between backends. In-place logical restore is deferred
   to the admin API; use Workers PITR or native physical `backup` for recovery
   of the same deployment.
+  Deploying this Worker now requires the private `mkit-vcs-backups` bucket
+  bound as `BACKUPS` and a 35-day `backups/` lifecycle rule.
 - Server: implement authenticated `BeginUpload` tickets with stateless BLAKE3 MAC
   tokens, rotation by key id, admission-free live-ticket/member results, open-ticket
   caps, and byte-identical replay. Configure native keys with `--ticket-key-file`

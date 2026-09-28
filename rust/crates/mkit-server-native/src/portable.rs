@@ -27,6 +27,27 @@ fn unavailable(error: impl std::fmt::Display) -> CliError {
     (exit::UNAVAILABLE, error.to_string())
 }
 
+fn dataerr(error: impl std::fmt::Display) -> CliError {
+    (exit::DATAERR, error.to_string())
+}
+
+fn archive_error(error: StoreError) -> CliError {
+    match error {
+        StoreError::Invalid(_) | StoreError::Corrupt(_) | StoreError::Unsupported(_) => {
+            dataerr(error)
+        }
+        _ => unavailable(error),
+    }
+}
+
+fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(path)
+}
+
 fn sqlite_path<'a>(meta: &'a MetaArg, command: &str) -> Result<&'a Path, CliError> {
     match meta {
         MetaArg::Sqlite(path) => Ok(path),
@@ -52,7 +73,7 @@ fn ensure_empty_dir(path: &Path) -> Result<(), CliError> {
             }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            fs::create_dir_all(path).map_err(unavailable)?;
+            create_private_dir(path).map_err(unavailable)?;
         }
         Err(_) if path.exists() => {
             return Err(usage(format!(
@@ -170,7 +191,7 @@ fn export_with_hook(
     }
     ensure_empty_dir(out)?;
     let conn = RusqliteConn::open(source).map_err(unavailable)?;
-    let store = SqlKvStore::open(conn.clone()).map_err(unavailable)?;
+    let store = SqlKvStore::open_existing(conn.clone()).map_err(dataerr)?;
     let now_ms = u64::try_from(SystemClock.now_ms()).unwrap_or(u64::MAX);
     conn.read_transaction(|| {
         let mut total_bytes = 0_u64;
@@ -183,7 +204,7 @@ fn export_with_hook(
         for (index, partition) in partitions.iter().enumerate() {
             let bytes = export_partition_bytes(&store, partition, now_ms, sharding)?;
             let path = out.join(relative_name(partition, &bytes, now_ms)?);
-            fs::create_dir_all(path.parent().expect("export name has a parent"))
+            create_private_dir(path.parent().expect("export name has a parent"))
                 .map_err(|e| StoreError::unavailable(e.to_string()))?;
             let mut file = writable_file(&path)?;
             file.write_all(&bytes)
@@ -196,8 +217,9 @@ fn export_with_hook(
     .map_err(unavailable)
 }
 
-fn read_snapshots(from: &Path) -> Result<Vec<Vec<u8>>, CliError> {
+fn read_snapshots(from: &Path) -> Result<(Vec<Vec<u8>>, Vec<PathBuf>), CliError> {
     let mut snapshots = Vec::new();
+    let mut skipped = Vec::new();
     let kinds = fs::read_dir(from).map_err(unavailable)?;
     for kind in kinds {
         let kind = kind.map_err(unavailable)?;
@@ -217,25 +239,28 @@ fn read_snapshots(from: &Path) -> Result<Vec<Vec<u8>>, CliError> {
                     return Err(usage("--from contains an unexpected entry"));
                 }
                 let bytes = fs::read(file.path()).map_err(unavailable)?;
-                let (_, reader) = ExportReader::new(&bytes).map_err(unavailable)?;
-                let mut records = reader.collect::<Result<Vec<_>, _>>().map_err(unavailable)?;
-                let first = records
-                    .pop()
-                    .ok_or_else(|| usage("empty partition export"))?;
+                let (_, reader) = ExportReader::new(&bytes).map_err(archive_error)?;
+                let mut records = reader
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(archive_error)?;
+                let Some(first) = records.pop() else {
+                    skipped.push(file.path());
+                    continue;
+                };
                 let expected = from.join(
                     relative_name(
                         &first.partition,
                         &bytes,
                         ExportReader::new(&bytes)
-                            .map_err(unavailable)?
+                            .map_err(archive_error)?
                             .0
                             .exported_at_ms,
                     )
-                    .map_err(unavailable)?,
+                    .map_err(archive_error)?,
                 );
                 if expected != file.path() || records.iter().any(|r| r.partition != first.partition)
                 {
-                    return Err(usage("--from contains a misplaced partition export"));
+                    return Err(dataerr("--from contains a misplaced partition export"));
                 }
                 snapshots.push(bytes);
             }
@@ -244,29 +269,29 @@ fn read_snapshots(from: &Path) -> Result<Vec<Vec<u8>>, CliError> {
     if snapshots.is_empty() {
         return Err(usage("--from contains no .kvlog files"));
     }
-    Ok(snapshots)
+    Ok((snapshots, skipped))
 }
 
 fn archive_sharding(snapshots: &[Vec<u8>]) -> Result<&'static str, CliError> {
     let root = Partition::Namespace(NamespaceKey::deployment_default());
     let mut mode = None;
     for bytes in snapshots {
-        let (_, reader) = ExportReader::new(bytes).map_err(unavailable)?;
+        let (_, reader) = ExportReader::new(bytes).map_err(archive_error)?;
         for record in reader {
-            let record = record.map_err(unavailable)?;
+            let record = record.map_err(archive_error)?;
             if record.partition == root && record.key == keys::sharding_marker() {
                 if mode.is_some() {
-                    return Err(usage("duplicate root sharding marker"));
+                    return Err(dataerr("duplicate root sharding marker"));
                 }
                 mode = Some(match record.value.as_bytes() {
                     b"single" => "single",
                     b"d34" => "d34",
-                    _ => return Err(usage("invalid root sharding marker")),
+                    _ => return Err(dataerr("invalid root sharding marker")),
                 });
             }
         }
     }
-    mode.ok_or_else(|| usage("--from has no root sharding marker"))
+    mode.ok_or_else(|| dataerr("--from has no root sharding marker"))
 }
 
 /// Restore portable snapshots into a new `SQLite` database.
@@ -278,8 +303,9 @@ pub fn restore(
     meta: &MetaArg,
     from: &Path,
     epoch_at_least: Option<u64>,
+    allow_incomplete: bool,
     sharding: ShardingArg,
-) -> Result<(usize, u64), CliError> {
+) -> Result<(mkit_server::store::restore::RestoreReport, Vec<PathBuf>), CliError> {
     let dest = sqlite_path(meta, "restore")?;
     if dest.exists() {
         return Err(usage(format!(
@@ -287,7 +313,7 @@ pub fn restore(
             dest.display()
         )));
     }
-    let snapshots = read_snapshots(from)?;
+    let (snapshots, skipped) = read_snapshots(from)?;
     let archived_mode = archive_sharding(&snapshots)?;
     let selected_mode = match sharding {
         ShardingArg::Single => "single",
@@ -323,10 +349,11 @@ pub fn restore(
             mkit_server::store::restore::RestoreOptions {
                 epoch_at_least,
                 recovered_at_ms: u64::try_from(SystemClock.now_ms()).unwrap_or(u64::MAX),
+                allow_incomplete,
             },
         ))
-        .map_err(unavailable)?;
-        Ok((report.partitions, report.records))
+        .map_err(archive_error)?;
+        Ok((report, skipped))
     })();
     if result.is_err() {
         let _ = fs::remove_file(dest);
@@ -379,7 +406,7 @@ mod tests {
         })
         .unwrap();
         assert!(wrote);
-        for bytes in read_snapshots(&out).unwrap() {
+        for bytes in read_snapshots(&out).unwrap().0 {
             let (_, reader) = ExportReader::new(&bytes).unwrap();
             let records = reader.collect::<Result<Vec<_>, _>>().unwrap();
             assert!(

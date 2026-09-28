@@ -558,11 +558,11 @@ impl EnvBucket {
 
 #[cfg(target_arch = "wasm32")]
 impl crate::backup::BackupBucket for EnvBucket {
-    async fn put(&self, key: &str, bytes: &[u8], partition_hex: &str) -> Result<(), String> {
+    async fn put(&self, key: &str, bytes: Vec<u8>, partition_hex: &str) -> Result<(), String> {
         let metadata =
             std::collections::HashMap::from([("partition".to_owned(), partition_hex.to_owned())]);
         self.bucket()?
-            .put(key, bytes.to_vec())
+            .put(key, bytes)
             .custom_metadata(metadata)
             .only_if(worker::Conditional {
                 etag_does_not_match: Some("*".to_owned()),

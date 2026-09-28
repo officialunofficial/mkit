@@ -619,7 +619,7 @@ mod glue {
         PLAN_VAR, WorkerConfig, body_too_large_json, dispatch_oneshot_body, over_cap_response,
         plan_capacity, unavailable_json,
     };
-    use crate::backup::{BACKUPS_BINDING, BackupConfig, BackupHandler};
+    use crate::backup::{BACKUPS_BINDING, BackupConfig, BackupDrain, BackupHandler};
     use crate::clock::WorkerClock;
     use crate::ns_client::{StubTransport, WorkerNamespaceStore};
     use crate::ns_object::NsObject;
@@ -631,6 +631,7 @@ mod glue {
     }
 
     static BACKUPS_MISSING_LOG: Once = Once::new();
+    static BACKUPS_INVALID_LOG: Once = Once::new();
 
     /// The pipeline a request runs on.
     type WorkerPipeline = Pipeline<WorkerBlobStore, WorkerNamespaceStore, Hooks>;
@@ -816,7 +817,10 @@ mod glue {
             registry
         };
         let backup = BackupConfig::from_vars(|name| env.var(name).ok().map(|v| v.to_string()))
-            .map_err(|error| crate::log_failure(&format!("backup config invalid: {error}")))
+            .map_err(|error| {
+                BACKUPS_INVALID_LOG
+                    .call_once(|| crate::log_failure(&format!("backup config invalid: {error}")));
+            })
             .ok()
             .filter(|config| config.interval_ms != 0);
         let backup = backup.and_then(|config| {
@@ -830,12 +834,14 @@ mod glue {
             }
         });
         let registry = if let Some(config) = backup.clone() {
+            // Free-plan alarm budget: at most 32 relay calls plus this
+            // handler's single R2 put = 33 external subrequests, under 50.
             registry.register(BackupHandler::new(
                 EnvBucket::new(env.clone(), BACKUPS_BINDING),
                 config,
             ))
         } else {
-            registry
+            registry.register(BackupDrain)
         };
         #[cfg(feature = "test-faults")]
         let registry = registry.register(mkit_server::timers::test_kind::TestTimer);

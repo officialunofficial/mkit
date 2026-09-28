@@ -7,8 +7,12 @@
 //! relay sources, a successful restore raises each queued sequence and `os`
 //! by `max(snapshot os, supplied target rh)`. Queued sequences then exceed
 //! supplied watermarks. If `os` was absent, the first future allocation is
-//! one above the restored watermark. The Fresh precondition makes the
-//! supplied target set complete for a newly created deployment.
+//! one above the restored watermark. Fresh targets contain only supplied
+//! partitions; missing relay sources and coordinators are rejected unless
+//! the operator explicitly requests their safe reconstruction.
+//! Already delivered rows no longer exist on the source. Re-keying cannot
+//! fill an older target's missing membership or index rows; R-116 requires
+//! post-restore reconciliation before GA.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -27,15 +31,22 @@ pub struct RestoreOptions {
     pub epoch_at_least: Option<u64>,
     /// The restore clock reading used for the lease-table recovery marker.
     pub recovered_at_ms: u64,
+    /// Reconstruct missing sources and coordinators (requires an epoch floor
+    /// for missing coordinators).
+    pub allow_incomplete: bool,
 }
 
 /// Counts committed by a successful restore.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RestoreReport {
     /// Number of distinct imported partitions.
     pub partitions: usize,
     /// Number of imported records, including the rewritten epoch and sequence.
     pub records: u64,
+    /// Missing relay sources reconstructed with a sequence floor.
+    pub missing_sources: Vec<Partition>,
+    /// Missing namespace coordinators reconstructed with a new epoch.
+    pub missing_coordinators: Vec<Partition>,
 }
 
 #[derive(Debug)]
@@ -47,6 +58,7 @@ struct SnapshotInfo {
     outbox_sequence: u64,
     has_outbox_sequence: bool,
     max_relay_sequence: u64,
+    has_relay: bool,
     sharding_marker: Option<ExportRecord>,
 }
 
@@ -98,6 +110,7 @@ fn inspect(
     let mut outbox_sequence = 0;
     let mut has_outbox_sequence = false;
     let mut max_relay_sequence = 0;
+    let mut has_relay = false;
     let mut sharding_marker = None;
     for record in reader {
         let record = record?;
@@ -115,6 +128,7 @@ fn inspect(
                 has_outbox_sequence = true;
             }
             Some(ParsedKey::Relay(seq)) => {
+                has_relay = true;
                 if seq == 0 {
                     return Err(corrupt("relay sequence is zero"));
                 }
@@ -163,6 +177,7 @@ fn inspect(
         outbox_sequence,
         has_outbox_sequence,
         max_relay_sequence,
+        has_relay,
         sharding_marker,
     })
 }
@@ -170,10 +185,10 @@ fn inspect(
 fn should_drop(record: &ExportRecord) -> bool {
     record.key == keys::backup_state()
         || record.key == keys::epoch_lease()
-        || record.key.as_bytes() == b"rs\0"
+        || record.key == keys::relay_scan()
         || matches!(
             keys::parse(&record.key),
-            Some(ParsedKey::Timer { kind: 4, .. })
+            Some(ParsedKey::Timer { kind, .. }) if kind == crate::timers::registry::kinds::BACKUP.get()
         )
 }
 
@@ -203,19 +218,104 @@ struct RestorePlan {
     infos: Vec<SnapshotInfo>,
     shifts: BTreeMap<Partition, u64>,
     mode: ShardingMode,
+    missing_sources: Vec<(Partition, u64)>,
+    missing_coordinators: Vec<Partition>,
+}
+
+const EPOCH_RESTORE_JUMP: u64 = 1 << 32;
+
+fn namespace(partition: &Partition) -> Option<&NamespaceKey> {
+    match partition {
+        Partition::Namespace(ns)
+        | Partition::Coordinator(ns)
+        | Partition::Ref { ns, .. }
+        | Partition::RefIndex { ns, .. }
+        | Partition::RepoIndex { ns, .. } => Some(ns),
+        Partition::ContentShard(_) => None,
+    }
+}
+
+struct Completeness {
+    sources: BTreeSet<Partition>,
+    missing_sources: Vec<(Partition, u64)>,
+    missing_coordinators: Vec<Partition>,
+}
+
+fn check_completeness(
+    infos: &[SnapshotInfo],
+    seen: &BTreeSet<Partition>,
+    watermarks: &BTreeMap<Partition, u64>,
+    mode: ShardingMode,
+    opts: RestoreOptions,
+) -> Result<Completeness, StoreError> {
+    let sources: BTreeSet<_> = infos
+        .iter()
+        .filter(|info| info.has_outbox_sequence || info.has_relay)
+        .map(|info| info.partition.clone())
+        .collect();
+    let missing_sources: Vec<_> = watermarks
+        .iter()
+        .filter(|(source, _)| !sources.contains(*source))
+        .map(|(source, floor)| (source.clone(), *floor))
+        .collect();
+    let required_coordinators: BTreeSet<_> = infos
+        .iter()
+        .map(|info| &info.partition)
+        .chain(missing_sources.iter().map(|(source, _)| source))
+        .filter(|partition| match mode {
+            ShardingMode::Single => matches!(partition, Partition::Namespace(_)),
+            ShardingMode::D34 => matches!(
+                partition,
+                Partition::Ref { .. } | Partition::RefIndex { .. } | Partition::RepoIndex { .. }
+            ),
+        })
+        .filter_map(namespace)
+        .map(|ns| match mode {
+            ShardingMode::Single => Partition::Namespace(ns.clone()),
+            ShardingMode::D34 => Partition::Coordinator(ns.clone()),
+        })
+        .collect();
+    let missing_coordinators: Vec<_> = required_coordinators.difference(seen).cloned().collect();
+    if !missing_sources.is_empty() && !opts.allow_incomplete {
+        return Err(StoreError::Invalid(
+            format!("missing relay sources: {missing_sources:?}").into(),
+        ));
+    }
+    if !missing_coordinators.is_empty() && (!opts.allow_incomplete || opts.epoch_at_least.is_none())
+    {
+        return Err(StoreError::Invalid(format!("missing namespace coordinators (requires --allow-incomplete and --epoch-at-least): {missing_coordinators:?}").into()));
+    }
+    for partition in sources
+        .iter()
+        .chain(missing_sources.iter().map(|(partition, _)| partition))
+    {
+        if !matches!(partition, Partition::Ref { .. }) {
+            return Err(invalid("relay high-water names a non-ref source"));
+        }
+    }
+    Ok(Completeness {
+        sources,
+        missing_sources,
+        missing_coordinators,
+    })
 }
 
 async fn prepare<S: NamespaceStore>(
     snapshots: &[Vec<u8>],
     target: &S,
+    opts: RestoreOptions,
 ) -> Result<RestorePlan, StoreError> {
     let mut seen = BTreeSet::new();
     let mut watermarks = BTreeMap::new();
-    let mut infos = snapshots
-        .iter()
-        .enumerate()
-        .map(|(index, bytes)| inspect(index, bytes, &mut seen, &mut watermarks))
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut infos = Vec::new();
+    for (index, bytes) in snapshots.iter().enumerate() {
+        let (_, mut reader) = ExportReader::new(bytes)?;
+        if reader.next().transpose()?.is_none() {
+            tracing::warn!(index, "skipping recordless restore archive");
+            continue;
+        }
+        infos.push(inspect(index, bytes, &mut seen, &mut watermarks)?);
+    }
     let marker = infos
         .iter()
         .find_map(|info| info.sharding_marker.as_ref())
@@ -225,6 +325,11 @@ async fn prepare<S: NamespaceStore>(
         b"d34" => ShardingMode::D34,
         _ => return Err(corrupt("invalid sharding marker")),
     };
+    let Completeness {
+        sources,
+        missing_sources,
+        missing_coordinators,
+    } = check_completeness(&infos, &seen, &watermarks, mode, opts)?;
     for info in &infos {
         let incompatible = match mode {
             ShardingMode::Single => matches!(
@@ -242,6 +347,16 @@ async fn prepare<S: NamespaceStore>(
             return Err(invalid("snapshot partition conflicts with sharding marker"));
         }
     }
+    for partition in missing_sources
+        .iter()
+        .map(|(p, _)| p)
+        .chain(missing_coordinators.iter())
+    {
+        let page = export_page(target, partition, None, 1).await?;
+        if !page.records.is_empty() {
+            return Err(invalid("restore target partition is not empty"));
+        }
+    }
 
     // Preflight every supplied partition before the first Importer batch.
     for info in &infos {
@@ -256,7 +371,7 @@ async fn prepare<S: NamespaceStore>(
     // future allocation then starts above the largest supplied target rh.
     let mut shifts = BTreeMap::new();
     for info in &infos {
-        if matches!(info.partition, Partition::Ref { .. }) {
+        if sources.contains(&info.partition) {
             let shift = info
                 .outbox_sequence
                 .max(*watermarks.get(&info.partition).unwrap_or(&0));
@@ -271,7 +386,7 @@ async fn prepare<S: NamespaceStore>(
         }
         if mode.coordinator(&info.partition) {
             info.epoch
-                .checked_add(1)
+                .checked_add(EPOCH_RESTORE_JUMP)
                 .ok_or_else(|| invalid("restore epoch overflow"))?;
         }
     }
@@ -281,6 +396,8 @@ async fn prepare<S: NamespaceStore>(
         infos,
         shifts,
         mode,
+        missing_sources,
+        missing_coordinators,
     })
 }
 
@@ -330,7 +447,7 @@ async fn import_one<S: NamespaceStore>(
     if mode.coordinator(&info.partition) {
         let epoch = info
             .epoch
-            .checked_add(1)
+            .checked_add(EPOCH_RESTORE_JUMP)
             .ok_or_else(|| invalid("restore epoch overflow"))?
             .max(opts.epoch_at_least.unwrap_or(0));
         importer
@@ -360,11 +477,43 @@ async fn import_one<S: NamespaceStore>(
     Ok(records)
 }
 
+async fn create_missing_sources<S: NamespaceStore>(
+    target: &S,
+    sources: &[(Partition, u64)],
+    supplied: &BTreeSet<Partition>,
+    report: &mut RestoreReport,
+) -> Result<(), StoreError> {
+    for (partition, floor) in sources {
+        if *floor > 0 {
+            match target
+                .apply(
+                    partition,
+                    Batch::new().put(keys::outbox_sequence(), codec::encode_u64(*floor)),
+                )
+                .await?
+            {
+                BatchOutcome::Committed => {}
+                _ => {
+                    return Err(StoreError::unavailable(
+                        "missing relay source creation did not commit",
+                    ));
+                }
+            }
+        }
+        report.records += u64::from(*floor > 0);
+        if !supplied.contains(partition) {
+            report.partitions += 1;
+        }
+        report.missing_sources.push(partition.clone());
+    }
+    Ok(())
+}
+
 /// Restore exports into a fresh store, in dependency order.
 ///
-/// Each export must contain exactly one partition and at least one record.
-/// The export format has no partition in its header, so a recordless export
-/// cannot identify the target partition. All input and all supplied target
+/// Each nonempty export must contain exactly one partition. Recordless
+/// exports are skipped with a warning because their header cannot identify
+/// a target partition. All input and all supplied target
 /// emptiness checks complete before any partition is written. This function
 /// is intended for an offline, newly empty target: imports span batches.
 ///
@@ -376,9 +525,46 @@ pub async fn restore<S: NamespaceStore>(
     target: &S,
     opts: RestoreOptions,
 ) -> Result<RestoreReport, StoreError> {
-    let plan = prepare(snapshots, target).await?;
+    let plan = prepare(snapshots, target, opts).await?;
+    let supplied: BTreeSet<_> = plan
+        .infos
+        .iter()
+        .map(|info| info.partition.clone())
+        .collect();
     let mut report = RestoreReport::default();
+    let mut wrote_missing_coordinators = false;
+    let mut wrote_missing_sources = false;
     for info in plan.infos {
+        if !wrote_missing_coordinators && priority(&info) > 2 {
+            for partition in &plan.missing_coordinators {
+                let epoch = opts
+                    .epoch_at_least
+                    .ok_or_else(|| invalid("missing coordinator epoch floor"))?;
+                match target
+                    .apply(
+                        partition,
+                        Batch::new().put(keys::grant_epoch(), codec::encode_u64(epoch)),
+                    )
+                    .await?
+                {
+                    BatchOutcome::Committed => {}
+                    _ => {
+                        return Err(StoreError::unavailable(
+                            "missing coordinator creation did not commit",
+                        ));
+                    }
+                }
+                mark_lease_table_recovered(target, partition, opts.recovered_at_ms).await?;
+                report.records += 2;
+                report.partitions += 1;
+                report.missing_coordinators.push(partition.clone());
+            }
+            wrote_missing_coordinators = true;
+        }
+        if !wrote_missing_sources && priority(&info) > 3 {
+            create_missing_sources(target, &plan.missing_sources, &supplied, &mut report).await?;
+            wrote_missing_sources = true;
+        }
         report.records += import_one(
             &snapshots[info.index],
             target,
@@ -389,6 +575,9 @@ pub async fn restore<S: NamespaceStore>(
         )
         .await?;
         report.partitions += 1;
+    }
+    if !wrote_missing_sources {
+        create_missing_sources(target, &plan.missing_sources, &supplied, &mut report).await?;
     }
     Ok(report)
 }
@@ -596,9 +785,9 @@ mod tests {
                 (keys::relay(2), relay.clone()),
                 (keys::relay(3), relay_to_empty.clone()),
                 (keys::epoch_lease(), old_lease()),
-                (Key::new(b"rs\0".to_vec()), Value::default()),
+                (keys::relay_scan(), Value::default()),
                 (keys::backup_state(), Value::default()),
-                (keys::timer(123, 4, b""), Value::default()),
+                (keys::timer(123, kinds::BACKUP.get(), b""), Value::default()),
             ],
         );
         let coordinator_snapshot = snapshot(
@@ -616,6 +805,7 @@ mod tests {
             RestoreOptions {
                 epoch_at_least: Some(11),
                 recovered_at_ms: 500,
+                allow_incomplete: false,
             },
         ))
         .unwrap();
@@ -623,7 +813,7 @@ mod tests {
         assert_eq!(store.writes.lock().unwrap().first(), Some(&root()));
         assert_eq!(
             block_on(store.get(&coordinator(), &keys::grant_epoch())).unwrap(),
-            Some(codec::encode_u64(11))
+            Some(codec::encode_u64(7 + EPOCH_RESTORE_JUMP))
         );
         let lr = block_on(store.get(&coordinator(), &keys::lease_recovery()))
             .unwrap()
@@ -632,6 +822,11 @@ mod tests {
             codec::decode_lease_recovery(&lr).unwrap().resumed_at_ms,
             500
         );
+        let writes = store.writes.lock().unwrap();
+        let coordinator_write = writes.iter().position(|p| p == &coordinator()).unwrap();
+        let ref_write = writes.iter().position(|p| p == &source()).unwrap();
+        assert!(coordinator_write < ref_write);
+        drop(writes);
         assert_eq!(
             block_on(store.get(&root(), &keys::grant_epoch())).unwrap(),
             None,
@@ -657,9 +852,9 @@ mod tests {
         for key in [
             keys::relay(2),
             keys::epoch_lease(),
-            Key::new(b"rs\0".to_vec()),
+            keys::relay_scan(),
             keys::backup_state(),
-            keys::timer(123, 4, b""),
+            keys::timer(123, kinds::BACKUP.get(), b""),
         ] {
             assert_eq!(block_on(store.get(&source(), &key)).unwrap(), None);
         }
@@ -729,14 +924,17 @@ mod tests {
             &source(),
             vec![(keys::outbox_sequence(), codec::encode_u64(u64::MAX))],
         );
-        assert!(matches!(
-            block_on(restore(
-                &[root_snapshot, overflowing],
-                &store,
-                RestoreOptions::default()
-            )),
-            Err(StoreError::Invalid(_))
-        ));
+        let coordinator_snapshot = snapshot(
+            &coordinator(),
+            vec![(keys::grant_epoch(), codec::encode_u64(1))],
+        );
+        let err = block_on(restore(
+            &[root_snapshot, coordinator_snapshot, overflowing],
+            &store,
+            RestoreOptions::default(),
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("restore relay sequence overflow"));
         assert_eq!(
             block_on(store.get(&root(), &keys::sharding_marker())).unwrap(),
             None
@@ -759,12 +957,13 @@ mod tests {
             RestoreOptions {
                 epoch_at_least: None,
                 recovered_at_ms: 44,
+                allow_incomplete: false,
             },
         ))
         .unwrap();
         assert_eq!(
             block_on(store.get(&root(), &keys::grant_epoch())).unwrap(),
-            Some(codec::encode_u64(8))
+            Some(codec::encode_u64(7 + EPOCH_RESTORE_JUMP))
         );
         let lr = block_on(store.get(&root(), &keys::lease_recovery()))
             .unwrap()
@@ -796,7 +995,11 @@ mod tests {
         block_on(restore(
             &[ref_snapshot, index_snapshot, root_snapshot],
             &store,
-            RestoreOptions::default(),
+            RestoreOptions {
+                allow_incomplete: true,
+                epoch_at_least: Some(99),
+                ..RestoreOptions::default()
+            },
         ))
         .unwrap();
         let os = block_on(store.get(&source(), &keys::outbox_sequence()))
@@ -804,5 +1007,225 @@ mod tests {
             .unwrap();
         assert_eq!(codec::decode_u64(&os).unwrap(), 5);
         assert!(codec::decode_u64(&os).unwrap() + 1 > 5);
+    }
+
+    #[test]
+    fn missing_source_is_refused_or_reconstructed_above_target_watermark() {
+        let archives = [
+            snapshot(
+                &root(),
+                vec![(keys::sharding_marker(), Value::new(b"d34".to_vec()))],
+            ),
+            snapshot(
+                &coordinator(),
+                vec![(keys::grant_epoch(), codec::encode_u64(1))],
+            ),
+            snapshot(
+                &target(),
+                vec![(
+                    keys::relay_high_water(&source()).unwrap(),
+                    codec::encode_u64(10),
+                )],
+            ),
+        ];
+        let store = RootFirst::default();
+        let err = block_on(restore(&archives, &store, RestoreOptions::default())).unwrap_err();
+        assert!(err.to_string().contains("missing relay sources"));
+        assert!(err.to_string().contains("refs/heads/main"));
+        let report = block_on(restore(
+            &archives,
+            &store,
+            RestoreOptions {
+                allow_incomplete: true,
+                ..RestoreOptions::default()
+            },
+        ))
+        .unwrap();
+        assert_eq!(report.missing_sources, vec![source()]);
+        assert_eq!(
+            block_on(store.get(&source(), &keys::outbox_sequence())).unwrap(),
+            Some(codec::encode_u64(10))
+        );
+        let relay = codec::encode_relay(&codec::RelayV1 {
+            at_ms: 100,
+            target: target(),
+            puts: vec![(
+                Key::new(b"m\0new".as_slice()),
+                Value::new(b"delivered".as_slice()),
+            )],
+        })
+        .unwrap();
+        block_on(
+            store.apply(
+                &source(),
+                Batch::new()
+                    .put(keys::outbox_sequence(), codec::encode_u64(11))
+                    .put(keys::relay(11), relay),
+            ),
+        )
+        .unwrap();
+        let handler = RelayHandler {
+            target: store,
+            hook: NoHook,
+            budget: RelayBudget::default(),
+        };
+        let ctx = TimerCtx {
+            store: &handler.target,
+            partition: &source(),
+            now_ms: 200,
+        };
+        let timer = DueTimer {
+            due_at_ms: 200,
+            kind: kinds::RELAY,
+            reference: bytes::Bytes::default(),
+            value: Value::default(),
+        };
+        block_on(handler.fire(&ctx, &timer)).unwrap();
+        assert_eq!(
+            block_on(
+                handler
+                    .target
+                    .get(&target(), &Key::new(b"m\0new".as_slice()))
+            )
+            .unwrap(),
+            Some(Value::new(b"delivered".as_slice()))
+        );
+        assert_eq!(
+            block_on(
+                handler
+                    .target
+                    .get(&target(), &keys::relay_high_water(&source()).unwrap())
+            )
+            .unwrap(),
+            Some(codec::encode_u64(11))
+        );
+    }
+
+    #[test]
+    fn missing_coordinator_requires_both_flags_and_is_recovered_before_ref() {
+        let archives = [
+            snapshot(
+                &root(),
+                vec![(keys::sharding_marker(), Value::new(b"d34".to_vec()))],
+            ),
+            snapshot(
+                &source(),
+                vec![(keys::outbox_sequence(), codec::encode_u64(1))],
+            ),
+        ];
+        let store = RootFirst::default();
+        for opts in [
+            RestoreOptions::default(),
+            RestoreOptions {
+                allow_incomplete: true,
+                ..RestoreOptions::default()
+            },
+        ] {
+            let err = block_on(restore(&archives, &store, opts)).unwrap_err();
+            assert!(err.to_string().contains("missing namespace coordinators"));
+        }
+        let report = block_on(restore(
+            &archives,
+            &store,
+            RestoreOptions {
+                allow_incomplete: true,
+                epoch_at_least: Some(42),
+                ..RestoreOptions::default()
+            },
+        ))
+        .unwrap();
+        assert_eq!(report.missing_coordinators, vec![coordinator()]);
+        assert_eq!(
+            block_on(store.get(&coordinator(), &keys::grant_epoch())).unwrap(),
+            Some(codec::encode_u64(42))
+        );
+        assert!(
+            block_on(store.get(&coordinator(), &keys::lease_recovery()))
+                .unwrap()
+                .is_some()
+        );
+        let writes = store.writes.lock().unwrap();
+        assert!(
+            writes.iter().position(|p| p == &coordinator()).unwrap()
+                < writes.iter().position(|p| p == &source()).unwrap()
+        );
+    }
+
+    #[test]
+    fn older_target_cannot_recover_already_delivered_rows() {
+        let archives = [
+            snapshot(
+                &root(),
+                vec![(keys::sharding_marker(), Value::new(b"d34".to_vec()))],
+            ),
+            snapshot(
+                &coordinator(),
+                vec![(keys::grant_epoch(), codec::encode_u64(1))],
+            ),
+            snapshot(
+                &source(),
+                vec![(keys::outbox_sequence(), codec::encode_u64(5))],
+            ),
+            snapshot(
+                &target(),
+                vec![(
+                    keys::relay_high_water(&source()).unwrap(),
+                    codec::encode_u64(2),
+                )],
+            ),
+        ];
+        let store = MemoryKv::default();
+        block_on(restore(&archives, &store, RestoreOptions::default())).unwrap();
+        let os = block_on(store.get(&source(), &keys::outbox_sequence()))
+            .unwrap()
+            .unwrap();
+        assert!(codec::decode_u64(&os).unwrap() > 2);
+        assert_eq!(
+            block_on(store.get(&target(), &Key::new(b"m\0already-delivered".as_slice()))).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn epoch_floor_and_overflow() {
+        let root_archive = snapshot(
+            &root(),
+            vec![
+                (keys::sharding_marker(), Value::new(b"single".to_vec())),
+                (keys::grant_epoch(), codec::encode_u64(7)),
+            ],
+        );
+        let store = MemoryKv::default();
+        block_on(restore(
+            &[root_archive],
+            &store,
+            RestoreOptions {
+                epoch_at_least: Some(EPOCH_RESTORE_JUMP + 100),
+                ..RestoreOptions::default()
+            },
+        ))
+        .unwrap();
+        assert_eq!(
+            block_on(store.get(&root(), &keys::grant_epoch())).unwrap(),
+            Some(codec::encode_u64(EPOCH_RESTORE_JUMP + 100))
+        );
+        let overflow = snapshot(
+            &root(),
+            vec![
+                (keys::sharding_marker(), Value::new(b"single".to_vec())),
+                (
+                    keys::grant_epoch(),
+                    codec::encode_u64(u64::MAX - EPOCH_RESTORE_JUMP + 1),
+                ),
+            ],
+        );
+        assert!(matches!(
+            block_on(restore(
+                &[overflow],
+                &MemoryKv::default(),
+                RestoreOptions::default()
+            )),
+            Err(StoreError::Invalid(_))
+        ));
     }
 }

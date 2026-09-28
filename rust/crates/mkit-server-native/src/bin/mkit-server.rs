@@ -74,6 +74,9 @@ struct RestoreArgs {
     /// Minimum restored namespace epoch.
     #[arg(long)]
     epoch_at_least: Option<u64>,
+    /// Reconstruct missing relay sources and coordinators (the latter requires --epoch-at-least).
+    #[arg(long)]
+    allow_incomplete: bool,
     /// Metadata routing used by the restored deployment.
     #[arg(long, value_enum, default_value_t)]
     sharding: ShardingArg,
@@ -114,12 +117,38 @@ fn main() -> ExitCode {
             }
         },
         Command::Restore(args) => {
-            match portable::restore(&args.meta, &args.from, args.epoch_at_least, args.sharding) {
-                Ok((partitions, records)) => {
+            match portable::restore(
+                &args.meta,
+                &args.from,
+                args.epoch_at_least,
+                args.allow_incomplete,
+                args.sharding,
+            ) {
+                Ok((report, skipped)) => {
+                    for path in skipped {
+                        eprintln!(
+                            "mkit-server restore: skipping recordless archive {}",
+                            path.display()
+                        );
+                    }
                     println!(
-                        "{} ({partitions} partitions, {records} records)",
-                        args.from.display()
+                        "{} ({} partitions, {} records)",
+                        args.from.display(),
+                        report.partitions,
+                        report.records
                     );
+                    if !report.missing_sources.is_empty() {
+                        eprintln!(
+                            "reconstructed missing relay sources: {:?}",
+                            report.missing_sources
+                        );
+                    }
+                    if !report.missing_coordinators.is_empty() {
+                        eprintln!(
+                            "reconstructed missing coordinators: {:?}",
+                            report.missing_coordinators
+                        );
+                    }
                     exit::OK
                 }
                 Err((code, error)) => {

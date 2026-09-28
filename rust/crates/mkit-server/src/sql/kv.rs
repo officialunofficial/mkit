@@ -85,12 +85,26 @@ impl<C: SqlConn> SqlKvStore<C> {
     /// this binary's; the engine's error otherwise.
     pub fn open(conn: C) -> Result<Self, StoreError> {
         let version = schema::migrate(&conn)?;
-        Ok(Self {
+        Ok(Self::from_checked_conn(conn, version))
+    }
+
+    /// Open an existing, matching schema without migrating or writing it.
+    /// Used by native export so a backup operation cannot mutate its source.
+    ///
+    /// # Errors
+    /// The existing schema must exactly match this binary's version.
+    pub fn open_existing(conn: C) -> Result<Self, StoreError> {
+        let version = schema::require_current(&conn)?;
+        Ok(Self::from_checked_conn(conn, version))
+    }
+
+    fn from_checked_conn(conn: C, version: u32) -> Self {
+        Self {
             conn,
             schema_version: AtomicU32::new(version),
             stats: Mutex::default(),
             capacity: None,
-        })
+        }
     }
 
     /// [`Self::open`], capped at `capacity`: the connection enforces the

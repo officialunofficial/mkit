@@ -442,9 +442,11 @@ between backends, use the portable `.kvlog` snapshots. Export a live native
 mkit-server export --meta sqlite:/srv/mkit/meta.sqlite3 --out /srv/backups/export-2026-09-27
 ```
 
-The output directory must be empty. A single `SQLite` read transaction covers
+The output directory must be empty. Export checks the existing schema version
+without migrating the live database. A single `SQLite` read transaction covers
 partition enumeration and every page of every partition. Files are owner-only
-(0600), under `<kind>/<blake3-partition>/<export-ms>-<digest>.kvlog`. Each file
+(0600) in owner-only directories (0700), under
+`<kind>/<blake3-partition>/<export-ms>-<digest>.kvlog`. Each file
 also carries its partition identity in its records. The native exporter adds a
 root sharding marker from the database's recorded `single` or `d34` mode.
 
@@ -456,12 +458,18 @@ mkit-server restore --meta sqlite:/srv/mkit/new-meta.sqlite3 \
 ```
 
 `--sharding` must match the archive marker. `--epoch-at-least N` can set a
-higher minimum grant epoch. Restore advances fresh coordinator epochs,
-marks their lease tables recovered, re-keys relay sequences and removes backup
+higher minimum grant epoch. Restore advances fresh coordinator epochs by at
+least 2^32, marks their lease tables recovered, re-keys relay sequences and removes backup
 timers/state. Keep traffic off the destination until the command succeeds;
 the restore spans multiple partition transactions. An existing database is
 refused. For an in-place native recovery using a physical backup, follow the
 preceding physical backup instructions.
+Owners must re-issue grants after logical restore.
+
+Missing relay sources or namespace coordinators stop restore by default.
+`--allow-incomplete` reconstructs missing sources at their target watermark;
+missing coordinators additionally require `--epoch-at-least N`. The command
+prints the missing partitions it reconstructed.
 
 On Workers, bind a dedicated `BACKUPS` R2 bucket and leave
 `BACKUP_INTERVAL_MS` at its daily default unless operations require another
@@ -470,6 +478,14 @@ Never apply that rule to `packs/`, which holds live content. The bucket and
 lifecycle rule are deployment steps; inspect them before relying on periodic
 exports. A snapshot older than the maximum accepted envelope validity does
 not carry replay risk from still-valid old envelopes.
+
+The bucket must be private, with no r2.dev or custom domain and only scoped
+tokens, and match `NAMESPACE_JURISDICTION`. Snapshots contain private ref
+names, signer keys, tickets and replay rows. Staging must use its own
+`BACKUP_PREFIX`. The first export runs one interval after the first committed
+put. Choose one object per `<kind>/<hash>/`, normally the newest; Worker
+snapshots are per partition rather than one consistent cut. An older target
+can lack membership or index rows until index reconciliation ships (R-116).
 
 Production Worker import and PITR control await the admin API (WP-5.11b).
 Exports above the per-object size cap await segmentation. Index reconciliation

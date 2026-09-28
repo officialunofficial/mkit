@@ -6,7 +6,8 @@ use mkit_core::hash::{hash, to_hex_bytes};
 use mkit_server::store::codec::{BackupStateV1, decode_backup_state, encode_backup_state};
 use mkit_server::store::keys::{self, ParsedKey};
 use mkit_server::store::{
-    EXPORT_END, encode_export_header, encode_export_record, export_header, export_page,
+    EXPORT_END, MAX_KEY_BYTES, MAX_VALUE_BYTES, encode_export_header, encode_export_record,
+    export_header, export_page,
 };
 use mkit_server::timers::registry::kinds;
 use mkit_server::timers::{DueTimer, Fired, TimerCtx, TimerHandler, TimerKind};
@@ -23,7 +24,11 @@ pub const DEFAULT_INTERVAL_MS: u64 = 24 * 60 * 60 * 1000;
 pub const DEFAULT_MAX_BYTES: usize = 16 * 1024 * 1024;
 /// Force a new R2 object before the default 35-day retention expires.
 pub const DEFAULT_FORCE_REUPLOAD_MS: u64 = 28 * 24 * 60 * 60 * 1000;
-const PAGE_SIZE: u32 = 256;
+// A page has at most 16 rows and each row is bounded by the store contract.
+// Even with maximum-size keys and values this is under 9 MiB.
+const PAGE_SIZE: u32 = 16;
+const PAGE_MAX_BYTES: usize = PAGE_SIZE as usize * (MAX_VALUE_BYTES + 2 * MAX_KEY_BYTES);
+const _: () = assert!(PAGE_MAX_BYTES < 9 * 1024 * 1024);
 const HEADER_EXPORTED_AT_OFFSET: usize = 8 + 1 + 4;
 
 /// A bucket capable of uploading a complete snapshot with custom metadata.
@@ -32,7 +37,7 @@ pub trait BackupBucket: Clone + MaybeSend + MaybeSync + 'static {
     fn put<'a>(
         &'a self,
         key: &'a str,
-        bytes: &'a [u8],
+        bytes: Vec<u8>,
         partition_hex: &'a str,
     ) -> impl Future<Output = Result<(), String>> + MaybeSend;
 }
@@ -91,9 +96,10 @@ impl BackupConfig {
             }
             config.prefix = prefix;
         }
-        if config.max_bytes == 0 || config.max_bytes > 64 * 1024 * 1024 {
-            return Err("BACKUP_MAX_BYTES must be in 1..=67108864".into());
+        if config.max_bytes == 0 {
+            return Err("BACKUP_MAX_BYTES must be positive".into());
         }
+        config.max_bytes = config.max_bytes.min(24 * 1024 * 1024);
         if config.force_reupload_ms == 0 {
             return Err("BACKUP_FORCE_REUPLOAD_MS must be positive".into());
         }
@@ -151,6 +157,7 @@ pub fn object_key(
 
 enum Snapshot {
     Bytes(Vec<u8>),
+    Empty(Vec<u8>),
     Oversize(usize),
 }
 
@@ -168,6 +175,7 @@ async fn snapshot<S: NamespaceStore>(
         return Ok(Snapshot::Oversize(out.len() + EXPORT_END.len()));
     }
     let mut after = None;
+    let mut has_records = false;
     loop {
         let page = export_page(store, p, after.as_ref(), PAGE_SIZE).await?;
         for record in page.records {
@@ -176,6 +184,7 @@ async fn snapshot<S: NamespaceStore>(
             {
                 continue;
             }
+            has_records = true;
             let encoded = encode_export_record(&record)?;
             let next = out
                 .len()
@@ -192,7 +201,11 @@ async fn snapshot<S: NamespaceStore>(
         }
     }
     out.extend_from_slice(&EXPORT_END);
-    Ok(Snapshot::Bytes(out))
+    Ok(if has_records {
+        Snapshot::Bytes(out)
+    } else {
+        Snapshot::Empty(out)
+    })
 }
 
 /// Test-only single-DO export, using the same uninterrupted read as the timer.
@@ -202,7 +215,7 @@ pub async fn test_snapshot<S: NamespaceStore>(
     p: &Partition,
 ) -> Result<Vec<u8>, StoreError> {
     match snapshot(store, p, 0, DEFAULT_MAX_BYTES).await? {
-        Snapshot::Bytes(bytes) => Ok(bytes),
+        Snapshot::Bytes(bytes) | Snapshot::Empty(bytes) => Ok(bytes),
         Snapshot::Oversize(_) => Err(StoreError::Invalid(
             "test snapshot exceeds backup cap".into(),
         )),
@@ -219,6 +232,25 @@ pub struct BackupHandler<B> {
     config: BackupConfig,
 }
 
+/// Drain stored backup timers when deployment backups are disabled. Removing
+/// `bk` allows a later enabled deployment to seed from its next committed put.
+#[derive(Debug, Clone, Copy)]
+pub struct BackupDrain;
+
+impl<S: NamespaceStore> TimerHandler<S> for BackupDrain {
+    fn kind(&self) -> TimerKind {
+        kinds::BACKUP
+    }
+
+    fn fire<'a>(
+        &'a self,
+        _ctx: &'a TimerCtx<'a, S>,
+        _timer: &'a DueTimer,
+    ) -> BoxFuture<'a, Result<Fired, StoreError>> {
+        Box::pin(async { Ok(Fired::Done(Batch::new().delete(keys::backup_state()))) })
+    }
+}
+
 impl<B: BackupBucket> BackupHandler<B> {
     /// Bind the bucket and settings at Durable Object construction.
     #[must_use]
@@ -233,16 +265,41 @@ impl<B: BackupBucket> BackupHandler<B> {
         let state_key = keys::backup_state();
         let old_value = ctx.store.get(ctx.partition, &state_key).await?;
         let old = old_value.as_ref().map(decode_backup_state).transpose()?;
+        let partition_hash = to_hex_bytes(&hash(&ctx.partition.encode()?));
         let header_ms = old
             .as_ref()
             .map_or(ctx.now_ms, |state| state.last_export_ms);
         let mut bytes =
             match snapshot(ctx.store, ctx.partition, header_ms, self.config.max_bytes).await? {
                 Snapshot::Bytes(bytes) => bytes,
+                Snapshot::Empty(bytes) => {
+                    let state = BackupStateV1 {
+                        last_export_ms: ctx.now_ms,
+                        digest: hash(&bytes),
+                        r2_key: String::new(),
+                        last_upload_ms: old.as_ref().map_or(0, |state| state.last_upload_ms),
+                    };
+                    if old.as_ref().is_some_and(|prior| {
+                        prior.digest == state.digest && prior.r2_key.is_empty()
+                    }) {
+                        return Ok(self.reschedule(Batch::new(), ctx.now_ms));
+                    }
+                    let guard = match old_value {
+                        Some(value) => Precondition::Equals(state_key.clone(), value),
+                        None => Precondition::Absent(state_key.clone()),
+                    };
+                    return Ok(self.reschedule(
+                        Batch::new()
+                            .require(guard)
+                            .put(state_key, encode_backup_state(&state)),
+                        ctx.now_ms,
+                    ));
+                }
                 Snapshot::Oversize(size) => {
                     tracing::warn!(
                         kind = ctx.partition.kind(),
                         bytes = size,
+                        partition_hash = %partition_hash,
                         "backup_skipped_oversize"
                     );
                     return Ok(self.reschedule(Batch::new(), ctx.now_ms));
@@ -261,8 +318,8 @@ impl<B: BackupBucket> BackupHandler<B> {
         let digest = hash(&bytes);
         let r2_key = object_key(&self.config.prefix, ctx.partition, ctx.now_ms, &digest)?;
         let partition_hex = to_hex_bytes(&ctx.partition.encode()?);
-        if let Err(error) = self.bucket.put(&r2_key, &bytes, &partition_hex).await {
-            tracing::warn!(detail = %error, "backup R2 upload failed");
+        if let Err(error) = self.bucket.put(&r2_key, bytes, &partition_hex).await {
+            tracing::warn!(detail = %error, partition_hash = %partition_hash, "backup R2 upload failed");
             return Ok(Fired::Retry);
         }
         let state = BackupStateV1 {
@@ -326,11 +383,11 @@ mod tests {
     }
 
     impl BackupBucket for Bucket {
-        async fn put(&self, key: &str, bytes: &[u8], partition_hex: &str) -> Result<(), String> {
+        async fn put(&self, key: &str, bytes: Vec<u8>, partition_hex: &str) -> Result<(), String> {
             self.objects
                 .lock()
                 .unwrap()
-                .push((key.into(), bytes.to_vec(), partition_hex.into()));
+                .push((key.into(), bytes, partition_hex.into()));
             let paused = self.pause.lock().unwrap().take();
             if let Some(receiver) = paused {
                 receiver.await.map_err(|_| "put canceled".to_owned())?;
@@ -429,7 +486,7 @@ mod tests {
     }
 
     #[test]
-    fn unchanged_digest_skips_until_force_reupload() {
+    fn digest_change_uploads_before_force_and_unchanged_forces_later() {
         let store = MemoryKv::default();
         put(&store, b"r\0a", b"value".to_vec());
         due(&store, 100);
@@ -446,12 +503,86 @@ mod tests {
         clock.set(110);
         tick(&store, &registry, &clock, 110);
         assert_eq!(bucket.objects.lock().unwrap().len(), 1);
+        put(&store, b"r\0b", b"changed".to_vec());
         clock.set(120);
         tick(&store, &registry, &clock, 120);
-        assert_eq!(bucket.objects.lock().unwrap().len(), 1);
+        assert_eq!(bucket.objects.lock().unwrap().len(), 2);
         clock.set(130);
         tick(&store, &registry, &clock, 130);
         assert_eq!(bucket.objects.lock().unwrap().len(), 2);
+        clock.set(140);
+        tick(&store, &registry, &clock, 140);
+        assert_eq!(bucket.objects.lock().unwrap().len(), 2);
+        clock.set(150);
+        tick(&store, &registry, &clock, 150);
+        assert_eq!(bucket.objects.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn empty_partition_records_digest_without_upload() {
+        let store = MemoryKv::default();
+        due(&store, 100);
+        let bucket = Bucket::default();
+        let registry = registry(
+            bucket.clone(),
+            BackupConfig {
+                interval_ms: 10,
+                ..BackupConfig::default()
+            },
+        );
+        let clock = ManualClock::new(100);
+        tick(&store, &registry, &clock, 100);
+        assert!(bucket.objects.lock().unwrap().is_empty());
+        let first = block_on(store.get(&part(), &keys::backup_state()))
+            .unwrap()
+            .unwrap();
+        let state = decode_backup_state(&first).unwrap();
+        assert_ne!(state.digest, [0; 32]);
+        clock.set(110);
+        tick(&store, &registry, &clock, 110);
+        assert!(bucket.objects.lock().unwrap().is_empty());
+        assert_eq!(
+            block_on(store.get(&part(), &keys::backup_state())).unwrap(),
+            Some(first)
+        );
+    }
+
+    #[test]
+    fn disabled_backup_drains_state_and_timer_without_retry_alarm() {
+        let store = MemoryKv::default();
+        put(
+            &store,
+            keys::backup_state().as_bytes(),
+            encode_backup_state(&BackupStateV1 {
+                last_export_ms: 1,
+                digest: [1; 32],
+                r2_key: "old".into(),
+                last_upload_ms: 1,
+            })
+            .as_bytes()
+            .to_vec(),
+        );
+        due(&store, 100);
+        let registry = TimerRegistry::new().register(BackupDrain);
+        let report = block_on(run_due(
+            &store,
+            &part(),
+            &registry,
+            &ManualClock::new(100),
+            100,
+            &TickBudget::default(),
+        ))
+        .unwrap();
+        assert_eq!(report.fired, 1);
+        assert_eq!(report.next_wake_ms, None);
+        assert_eq!(
+            block_on(store.get(&part(), &keys::backup_state())).unwrap(),
+            None
+        );
+        assert_eq!(
+            block_on(store.get(&part(), &keys::timer(100, kinds::BACKUP.get(), b""))).unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -494,6 +625,15 @@ mod tests {
     }
 
     #[test]
+    fn configured_cap_is_clamped_to_twenty_four_mebibytes() {
+        let config = BackupConfig::from_vars(|name| {
+            (name == "BACKUP_MAX_BYTES").then(|| (64 * 1024 * 1024).to_string())
+        })
+        .unwrap();
+        assert_eq!(config.max_bytes, 24 * 1024 * 1024);
+    }
+
+    #[test]
     fn sixteen_megabyte_host_snapshot_under_five_seconds() {
         let store = MemoryKv::default();
         for n in 0..32u8 {
@@ -509,6 +649,61 @@ mod tests {
         let bytes = bucket.objects.lock().unwrap()[0].1.len();
         eprintln!("16 MiB backup host fire: {bytes} bytes in {elapsed:?}");
         assert!(bytes > 15 * 1024 * 1024);
+        assert!(
+            elapsed.as_secs_f64() < 5.0,
+            "backup fire exceeded ~5 s budget: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn sqlite_eighty_thousand_small_rows_at_cap_under_five_seconds() {
+        use mkit_server::sql::{SqlConn, SqlKvStore, SqlValue};
+        use mkit_server_native::RusqliteConn;
+
+        let dir = tempfile::tempdir().unwrap();
+        let conn = RusqliteConn::open(dir.path().join("rows.sqlite3")).unwrap();
+        let store = SqlKvStore::open(conn.clone()).unwrap();
+        let partition = part();
+        let part_bytes = partition.encode().unwrap().to_vec();
+        conn.transaction(Box::new(move |tx| {
+            for n in 0..80_000_u32 {
+                let mut key = b"r\0".to_vec();
+                key.extend_from_slice(&n.to_be_bytes());
+                tx.exec(
+                    "INSERT INTO kv(part, key, value) VALUES (?1, ?2, ?3)",
+                    &[
+                        SqlValue::Blob(part_bytes.clone()),
+                        SqlValue::Blob(key),
+                        SqlValue::Blob(vec![b'x'; 188]),
+                    ],
+                )?;
+            }
+            Ok(())
+        }))
+        .unwrap();
+        block_on(store.apply(
+            &partition,
+            Batch::new().put(keys::timer(100, kinds::BACKUP.get(), b""), Value::default()),
+        ))
+        .unwrap();
+        let bucket = Bucket::default();
+        let registry = TimerRegistry::new()
+            .register(BackupHandler::new(bucket.clone(), BackupConfig::default()));
+        let start = Instant::now();
+        let report = block_on(run_due(
+            &store,
+            &partition,
+            &registry,
+            &ManualClock::new(100),
+            100,
+            &TickBudget::default(),
+        ))
+        .unwrap();
+        let elapsed = start.elapsed();
+        let bytes = bucket.objects.lock().unwrap()[0].1.len();
+        eprintln!("SQLite host backup: 80,000 rows, {bytes} encoded bytes in {elapsed:?}");
+        assert_eq!(report.fired, 1);
+        assert!(bytes > 15 * 1024 * 1024 && bytes <= DEFAULT_MAX_BYTES);
         assert!(
             elapsed.as_secs_f64() < 5.0,
             "backup fire exceeded ~5 s budget: {elapsed:?}"

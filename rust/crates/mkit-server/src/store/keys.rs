@@ -147,6 +147,8 @@ pub const TAG_RELAY: &str = "or";
 pub const TAG_RELAY_HIGH_WATER: &str = "rh";
 /// Last allocated outbox sequence tag.
 pub const TAG_OUTBOX_SEQUENCE: &str = "os";
+/// Relay scan cursor, discarded during a restore.
+pub const TAG_RELAY_SCAN: &str = "rs";
 /// Terminal outcome backlog tag.
 pub const TAG_OUTCOME_BACKLOG: &str = "oc";
 
@@ -159,6 +161,8 @@ pub const RESERVED_TAGS: &[&str] = &["tb", "i", "l", "pp", "vc", TAG_NAMESPACE_L
 pub enum ParsedKey {
     /// `bk 00`.
     BackupState,
+    /// `rs 00`: source-side relay scan cursor.
+    RelayScan,
     /// `sm 00`: the Worker deployment sharding mode.
     ShardingMarker,
     /// `v 00`.
@@ -566,6 +570,12 @@ pub fn backup_state() -> Key {
     key(TAG_BACKUP_STATE, &[])
 }
 
+/// `rs 00`: the source-side relay scan cursor.
+#[must_use]
+pub fn relay_scan() -> Key {
+    key(TAG_RELAY_SCAN, &[])
+}
+
 /// `w 00 <due_at> <kind> <reference>` (owned by `timers`).
 #[must_use]
 pub fn timer(due_at_ms: u64, kind: u8, reference: &[u8]) -> Key {
@@ -710,6 +720,7 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
         b"el" if body.is_empty() => ParsedKey::EpochLease,
         b"lr" if body.is_empty() => ParsedKey::LeaseRecovery,
         b"bk" if body.is_empty() => ParsedKey::BackupState,
+        b"rs" if body.is_empty() => ParsedKey::RelayScan,
         b"ls" => parse_leased_shard(body)?,
         b"nr" if body.is_empty() => ParsedKey::NamespaceRecord,
         b"rr" => ParsedKey::RepoRecord(RepoName::new(text(body)?).ok()?),
@@ -845,6 +856,7 @@ mod tests {
             TAG_OUTCOME_PENDING,
             TAG_RELAY,
             TAG_OUTBOX_SEQUENCE,
+            TAG_RELAY_SCAN,
             TAG_OUTCOME_BACKLOG,
         ];
         tags.extend_from_slice(RESERVED_TAGS);
@@ -883,6 +895,7 @@ mod tests {
             (epoch_lease(), b"el\0".to_vec()),
             (lease_recovery(), b"lr\0".to_vec()),
             (backup_state(), b"bk\0".to_vec()),
+            (relay_scan(), b"rs\0".to_vec()),
             (
                 leased_shard(&repo("a"), "refs/heads/main"),
                 b"ls\0a\0refs/heads/main".to_vec(),
@@ -1049,6 +1062,12 @@ mod tests {
             assert_eq!(parse(&Key::new(bad.to_vec())), None);
         }
         assert_eq!(parse(&Key::new(vec![b'x'; MAX_KEY_BYTES + 1])), None);
+    }
+
+    #[test]
+    fn backup_state_parse_roundtrip_and_malformed_suffix() {
+        assert_eq!(parse(&backup_state()), Some(ParsedKey::BackupState));
+        assert_eq!(parse(&Key::new(b"bk\0x".to_vec())), None);
     }
 
     #[test]

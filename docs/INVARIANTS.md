@@ -1176,7 +1176,7 @@ in WP-1.23b; writers in WP-1.9/1.10.
 **Always:** logical restore imports into a newly empty store supplied by its
 caller. It imports the root
 sharding marker before other partitions, raises each restored namespace epoch
-above its snapshot value (or to the larger operator floor), and marks every
+to `max(snapshot epoch + 2^32, --epoch-at-least)`, refusing overflow, and marks every
 restored coordinator lease table recovered before traffic. It drops backup
 state, kind-4 timers and relay scan state. Before importing, it reads every
 source `os` and every supplied target `rh[source]`. It discards restored
@@ -1186,12 +1186,18 @@ coordinator epoch. For each source it sets
 from `seq` to `seq + floor`, and sets `os` to `snapshot os + floor`, refusing
 overflow.
 
-**Because:** a Fresh target contains only the supplied partitions. A target
+**Because:** a Fresh target contains only supplied or explicitly reconstructed
+partitions. A target
 absent from the set has no high-water mark. Every restored relay row and the
-source's next sequence therefore exceed every target's `rh[source]`.
+source's next sequence therefore exceed every target's `rh[source]`. Missing
+sources are refused or reconstructed at the supplied watermark; missing
+coordinators require an explicit epoch floor and are marked recovered.
 Relay rows currently contain upserts only, so replaying a row has the same
 effect; gaps are harmless because delivery compares sequences only with `rh`.
-Raising the epoch prevents a captured grant from becoming valid again.
+The epoch jump prevents a grant issued and revoked after the snapshot from
+becoming valid again. Owners must re-issue grants after restore. Already
+delivered rows cannot be replayed from an older target's snapshot; index and
+membership reconciliation is required before GA (R-116).
 
 **If violated:** relay delivery can skip a required update, a restored grant
 can regain authority through an unexpired old shard lease, or revocation can
@@ -1199,8 +1205,13 @@ complete while an old lease remains effective.
 
 **Enforced by:** the native CLI refuses an existing database;
 `mkit-server/src/store/restore.rs` checks every supplied target partition and
-validates and transforms the supplied set before import. Its memory and SQLite tests cover
-high-water marks, overflow, epoch changes, ordering and Fresh refusal.
+validates and transforms the supplied set before import. Tests
+`missing_source_is_refused_or_reconstructed_above_target_watermark`,
+`missing_coordinator_requires_both_flags_and_is_recovered_before_ref`,
+`epoch_floor_and_overflow`, `older_target_cannot_recover_already_delivered_rows`,
+and `fresh_restore_orders_root_and_rewrites_recovery_epoch_and_relay` enforce
+the memory invariants; native `export_restore_roundtrip_and_usage_refusals`
+enforces Fresh refusal and SQLite import.
 `mkit-server/src/relay/deliver.rs` guards target upserts and `rh` together.
 In-place and Merge restore require another proof and are deferred to WP-5.11b.
 
