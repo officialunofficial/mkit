@@ -1177,10 +1177,40 @@ and pre-delivery hook effects. Duplicates never apply a target batch. Source
 cleanup guards each encoded row; draining the timer guards the originally
 observed `os`, so a same-millisecond writer cannot lose its wake-up. Writers
 stamp and chunk rows, and commit an immediate kind-3 timer with their outbox.
-Target watermarks are never pruned and are bounded by source shards.
+Target watermarks and the one `rs 00` scan row per source are never pruned;
+watermarks are bounded by source shards.
+
+**Always:** during an active relay scan cycle, every undelivered row whose
+sequence is at or below the durable cursor has a target in the cycle's
+sorted, deduplicated blocked set. That set holds at most 32 targets. A cycle
+ending at its observed `os` ignores newer rows until the next cycle. The
+source atomically guards its previous scan state and commits the new state
+with any queue-row deletions; a guard conflict retries. Reaching the cycle
+end or the blocked-set cap starts the next fire at the head. Thus a target's
+later row cannot advance `rh` past its earlier undelivered row: an earlier
+row before the cursor blocks the target, and one after it is scanned first.
+Only delivery failure blocks a target; reaching `max_targets` pauses before
+the next target and resumes there on the next fire. Blocked targets are
+retried at each cycle start. While fewer than `MAX_BLOCKED_TARGETS`
+distinct failing targets precede it, every healthy target is eventually
+delivered: every fire that sees a deliverable row delivers at least one,
+delivered rows (including those past the checkpoint) are deleted in the
+same guarded checkpoint, and fires that deliver nothing back off. No
+closed-form fire bound is claimed; the relay throughput regressions pin
+fire counts for representative schedules. A row appended mid-cycle waits
+for the current cycle to finish. This can exceed `RELAY_LAG_BOUND_MS` in time;
+WP-1.23c's `namespace_relay_watermark` must tolerate it. A target's later
+row is never retried while its earlier row remains undelivered.
+At the SQL soft capacity limit, only a valid, guarded `rs` checkpoint, with
+any relay-row deletions, or a guarded kind-3 relay timer reschedule may use
+the reserved space; ordinary puts still fail. The timer exception preserves
+immediate rescheduling after progress on a full shard; without it the runner
+would wait for the 5-second retry backoff.
 
 **Because:** target delivery and source cleanup cannot share a transaction.
 A crash, overlapping timer fires, or a concurrent writer can occur between them.
+Source-head scans alone would indefinitely hide a healthy target behind more
+than one fire's inspection cap of permanently failing rows.
 
 **If violated:** re-delivery overwrites newer index values, hook effects detach
 from their membership writes, or newly queued rows lose their relay timer.
@@ -1188,9 +1218,35 @@ Restoring an older source requires raising `os` above every target's `rh` for
 that source or re-keying it (R-102; WP-1.29).
 
 **Enforced by:** `mkit-server/src/relay/tests.rs` crash, contention, ordering,
-chunk-limit and wake-up tests; native SQLite driver tests; Worker Loopback host
-tests. Worker registration, membership reads and coordinator watermarks follow
-in WP-1.23b; writers in WP-1.9/1.10.
+chunk-limit and wake-up tests; native SQLite driver and soft-limit checkpoint
+tests; Worker Loopback host
+tests. Worker RefShard registration uses
+plan-specific fire caps and two target calls per target per fire, including
+chunking and contention. Fires inspect up to four times their row delivery
+budget, persist bounded cycle progress in `rs 00`, and revisit blocked targets
+at the next cycle. A healthy target is reached when fewer than 32 distinct
+failing targets precede it; beyond the cap, the cycle resets. Corruption stops
+delivery after its decodable prefix. Coordinator watermarks follow in WP-1.23c;
+writers in WP-1.9/1.10.
+
+## Pack reads consult only the named repository's membership
+
+**Always:** Multi PackExists and DownloadPack authorize and check repository
+existence, then consult the repository's membership index before opening a
+blob. An optional X-Mkit-Ref checks only the same repository's ref shard;
+invalid, unserved, unknown or overlong hints never cause a public error.
+The hint is outside the auth v2 canonical string. Single reads treat stored
+packs as members. M1 has no quarantined view; later visibility checks must
+constrain both index and hinted answers to the caller's permitted view.
+
+**Because:** blobs may be shared globally, and index relay can lag a write.
+
+**If violated:** pack reads expose another repository's content or make
+malformed hints an existence oracle.
+
+**Enforced by:** store::read::is_member, pipeline pack reads and bounded hint
+parsing, unit call-count/isolation tests and Multi wire membership cases.
+
 
 ## Deployment discovery is public and repository-independent
 

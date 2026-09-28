@@ -1364,3 +1364,26 @@ async fn server_info_is_public_ignores_repository_and_sets_cache_header() {
         assert!(server.codes.0.lock().unwrap().is_empty());
     }
 }
+
+#[tokio::test]
+async fn non_utf8_ref_hint_is_ignored_before_pack_reads() {
+    let server = setup(AuthMode::Open).serve();
+    let request = http::Request::builder()
+        .method(http::Method::POST)
+        .uri("http://localhost/mkit.transport.v1.TransportService/PackExists")
+        .header("content-type", JSON)
+        .header("connect-protocol-version", "1")
+        .header(
+            "x-mkit-ref",
+            http::HeaderValue::from_bytes(b"refs/heads/\xff").unwrap(),
+        )
+        .body(Full::new(Bytes::from(
+            serde_json::to_vec(&serde_json::json!({"packId": STANDARD.encode(A)})).unwrap(),
+        )))
+        .unwrap();
+    let reply = server.svc.oneshot(request).await.unwrap();
+    assert_eq!(reply.status(), StatusCode::OK);
+    let body = reply.into_body().collect().await.unwrap().to_bytes();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_ne!(value["exists"], true);
+}

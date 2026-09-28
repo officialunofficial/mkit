@@ -175,9 +175,12 @@ cases! {
     "repo.signature_repository_mismatch_unauthenticated" => repository::signature_mismatch, M1, [MultiRepo, AuthV2], [];
     "repo.missing_repository_invalid_argument" => repository::multi_invalid, M1, [MultiRepo, AuthV2], [];
     "repo.read_missing_repo_not_found" => repository::read_missing_repo, M1, [MultiRepo, AuthV2], [];
-    "repo.packs_need_membership_unimplemented" => repository::packs_need_membership, M1, [MultiRepo, AuthV2], [];
+    "repo.packs_need_membership" => repository::packs_need_membership, M1, [MultiRepo, AuthV2], [];
     "repository.upload_needs_ticket" => repository::upload_needs_ticket, M1, [MultiRepo, AuthV2], [];
     "repository.ticketed_upload_multi" => repository::ticketed_upload_multi, M1, [MultiRepo, AuthV2, Tickets], [];
+    "repo.isolation_packs" => repository::isolation_packs, M1, [MultiRepo, AuthV2], [];
+    "repo.membership_read_your_writes" => repository::membership_read_your_writes, M1, [MultiRepo, AuthV2], [];
+    "repo.malformed_membership_hint_no_op" => repository::malformed_membership_hint, M1, [MultiRepo, AuthV2], [];
     "policy.owner_write_allowed" => policy::owner_write_allowed, M1, [NamespacePolicy, MultiRepo, AuthV2], [];
     "policy.non_owner_write_denied" => policy::non_owner_write_denied, M1, [NamespacePolicy, MultiRepo, AuthV2], [];
     "policy.non_allowlisted_namespace_denied" => policy::non_allowlisted_namespace_denied, M1, [NamespacePolicy, MultiRepo, AuthV2], [];

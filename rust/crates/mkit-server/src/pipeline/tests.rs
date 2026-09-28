@@ -2540,6 +2540,38 @@ fn lease_directives_parse_epochs_and_require_an_explicit_recovery_marker() {
 }
 
 #[test]
+fn ref_hint_is_bounded_and_outside_auth_v2_canonical_headers() {
+    let env = env(authv2());
+    let update = upd(HEAD, Any, A);
+    let signed = Req::update(&key(7), 1, &update, T0);
+    for hint in [
+        HEAD.to_owned(),
+        "bad ref".to_owned(),
+        "refs/heads/é".to_owned(),
+        "x".repeat(refs::MAX_REF_NAME_BYTES),
+    ] {
+        let a = env
+            .auth(&signed.clone().header("x-mkit-ref", &hint))
+            .unwrap();
+        assert_eq!(a.ref_hint.as_deref(), Some(hint.as_str()));
+        assert_eq!(a.auth, env.auth(&signed).unwrap().auth);
+    }
+    let long = "x".repeat(refs::MAX_REF_NAME_BYTES + 1);
+    assert_eq!(
+        env.auth(&signed.header("x-mkit-ref", &long))
+            .unwrap()
+            .ref_hint,
+        None
+    );
+    assert!(!crate::auth_v2::HEADER_NAMES.contains(&"x-mkit-ref"));
+    assert!(
+        crate::auth_v2::CORS_ALLOW_HEADERS
+            .split(',')
+            .any(|name| name.trim() == "x-mkit-ref")
+    );
+}
+
+#[test]
 fn partition_full_counter_labels_every_partition_kind() {
     let env = env(authv2());
     let namespace = NamespaceKey::deployment_default();

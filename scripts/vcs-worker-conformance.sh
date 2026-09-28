@@ -22,7 +22,8 @@
 #                  held whole (1.2 MB at 30,000; the default 10,000-ref case
 #                  stays under) until WP-1.27 pages it.
 #   --sharding d34  D34 phase 1 only: quota is per ref shard and growth stats
-#                   are single-only. Add --test-faults to exercise RefShard alarms.
+#                   are single-only. Add --test-faults to plant a RefShard
+#                   relay and verify RepoIndexShard delivery and queue drainage.
 #   -- ARGS        passed to every `mkit-server-conformance wire` run (e.g.
 #                  `-- --filter refs.`, `-- --list-refs 1000`).
 #
@@ -215,6 +216,42 @@ run_suite() {
     fi
 }
 
+# Exercise actual RefShard registration and its alarm through test-only hooks.
+# Ordinary Single-mode pack reads bypass membership, so inspect the planted
+# membership row in the RepoIndexShard and the source's relay queue directly.
+check_relay_delivery() {
+    local fixture relay_url deadline
+    fixture="$(node -e "process.stdout.write(require('node:crypto').randomBytes(32).toString('hex'))")"
+    relay_url="${ORIGIN}/__mkit_test/relay/${fixture}"
+    echo ">> planting a RefShard membership relay and waiting for RepoIndexShard delivery (up to 20 s)"
+    if ! curl -fsS --max-time 10 -X POST "${relay_url}" >"${work}/suite/relay-plant.json"; then
+        echo "relay fixture planting failed; wrangler log tail:" >&2
+        tail -n 80 "${log}" >&2
+        exit 1
+    fi
+    deadline=$((SECONDS + 20))
+    until curl -fsS --max-time 2 "${relay_url}" >"${work}/suite/relay-state.json" \
+        2>"${work}/suite/relay-error" && node - "${work}/suite/relay-state.json" <<'NODE'
+const fs = require('node:fs');
+try {
+    const state = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+    process.exit(state.member === true && state.queued === false ? 0 : 1);
+} catch {
+    process.exit(1);
+}
+NODE
+    do
+        if ! kill -0 "${server_pid}" 2>/dev/null || [ "${SECONDS}" -ge "${deadline}" ]; then
+            echo "relay did not deliver and drain its queue within 20 s:" >&2
+            cat "${work}/suite/relay-state.json" "${work}/suite/relay-error" >&2
+            tail -n 80 "${log}" >&2
+            exit 1
+        fi
+        sleep 0.1
+    done
+    echo ">> Worker relay passed: target member=true, source queued=false"
+}
+
 # The pipeline serves grpc.health.v1 and rejects an auth v2 signature over
 # gzip-encoded bytes (fails closed, SPEC-WRITE-GRANTS §9.2 is open).
 features="health,strict-gzip-auth,tickets"
@@ -235,6 +272,9 @@ echo ">> building apps/vcs-worker (worker-build ${build_args[*]})"
 
 start_server suite "${vars[@]}"
 run_suite "${features}"
+if [ "${test_faults}" -eq 1 ] && [ "${sharding}" = d34 ]; then
+    check_relay_delivery
+fi
 stop_server
 
 if [ "${test_faults}" -eq 1 ]; then
