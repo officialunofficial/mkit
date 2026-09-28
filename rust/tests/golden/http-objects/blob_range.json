@@ -1,0 +1,26 @@
+{
+  "blake3": "db8b83b63eaa0a78f4a8cb0ce3caf07517623a010f8ac3ee04c51b1536776bd2",
+  "commit": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
+  "expect": {
+    "accept": true,
+    "disclosed": {
+      "bytes_blake3": "d865199280fb67f4dfe4486ce10668dd42e4c0121b34b757ff44d504f3400290",
+      "bytes_len": 16,
+      "commit": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
+      "leaf": "744699dd9c5f163a425b30cc78e871837300225da6d40af3635a97f196f63c51",
+      "path_hex": [
+        "72616e67652e62696e"
+      ],
+      "payload": {
+        "absolute_offset": 32,
+        "chunk": null,
+        "kind": "Range",
+        "offset_in_blob": 32
+      },
+      "signature_valid": true
+    }
+  },
+  "name": "blob_range",
+  "schema_version": 1,
+  "size": 1616
+}
