@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Specify the server's published view and quarantine, covering newly reachable
+  file objects and all file entries of added packs. Add inspection phase/id,
+  object kinds, deferral and flagged ids, authority writer-view classification,
+  and discovery field `async_inspection = 18`. These are additive spec/proto
+  contracts; the inspection implementation follows in later server work packages.
 - Specify storage leases, lifecycle Event webhooks, and fail-closed server GC
   in SPEC-SERVER; add `GetServerInfoResponse.leases` and Event proto goldens
   (WP-5.1a-1). Server enforcement follows in M5.

@@ -208,3 +208,63 @@ fn golden_server_hooks() {
     assert_eq!(keys["keys"][0]["keyId"], file.vectors[0].key_id);
     assert_eq!(keys["keys"][0]["publicKey"], file.vectors[0].public_key);
 }
+
+#[test]
+fn inspection_and_writer_view_goldens() {
+    let dir = golden_dir();
+    let read = |name: &str| -> serde_json::Value {
+        serde_json::from_slice(&fs::read(dir.join(name)).unwrap()).unwrap()
+    };
+    let request = read("inspect-quarantine-phase.request.json");
+    assert_eq!(request["phase"], "INSPECT_PHASE_QUARANTINE");
+    assert_eq!(request["inspectionId"], "inspection:main:1:scanner-a");
+    for ref_change in request["operation"]["refs"].as_array().unwrap() {
+        assert_eq!(ref_change["missing"], serde_json::json!({}));
+    }
+    let objects = request["objects"].as_array().unwrap();
+    let kinds: BTreeSet<_> = objects
+        .iter()
+        .map(|object| object["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        BTreeSet::from([
+            "INSPECT_OBJECT_KIND_BLOB",
+            "INSPECT_OBJECT_KIND_CHUNKED_FILE",
+            "INSPECT_OBJECT_KIND_CHUNK",
+        ])
+    );
+    let ids: BTreeSet<_> = objects
+        .iter()
+        .map(|object| object["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids.len(), objects.len());
+    for ref_change in request["operation"]["refs"].as_array().unwrap() {
+        assert!(!ids.contains(ref_change["new"].as_str().unwrap()));
+    }
+    for object in objects {
+        assert!(object["size"].as_str().unwrap().parse::<u64>().is_ok());
+    }
+    for (name, verdict) in [
+        ("inspect-quarantine.response.json", "quarantine"),
+        ("inspect-reject-flagged.response.json", "reject"),
+    ] {
+        let response = read(name);
+        assert!(response[verdict].is_object());
+        let flagged = response["flaggedObjects"].as_array().unwrap();
+        assert!(!flagged.is_empty());
+        for id in flagged {
+            assert!(ids.contains(id.as_str().unwrap()), "fixture: {name}");
+        }
+    }
+    assert_eq!(
+        read("inspect-defer.response.json")["defer"]["retryAfterMs"],
+        5000
+    );
+    assert_eq!(
+        read("authorize-writer-view.response.json")["allow"]["writerView"],
+        true
+    );
+    // Adding fixtures must also update the complete authoritative byte manifest.
+    assert_manifest(&dir);
+}
