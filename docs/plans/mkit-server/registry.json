@@ -648,22 +648,37 @@
     "title": "Core: ref-name index, relay deletes and D34 ListRefs",
     "milestone": "M1",
     "track": "core",
-    "depends_on": ["1.28a", "1.10", "1.23"],
+    "depends_on": [
+      "1.28a",
+      "1.10",
+      "1.23"
+    ],
     "size": "M",
     "summary": "Maintains the 16-bucket ref-name index through the relay, including deletes, and plugs D34 buckets into the ListRefs merge engine.",
     "human_action": false,
-    "area_gates": ["rust", "conf-native", "conf-wrangler"]
+    "area_gates": [
+      "rust",
+      "conf-native",
+      "conf-wrangler"
+    ]
   },
   {
     "id": "1.28c",
     "title": "D34 default and stale-listing client tolerance",
     "milestone": "M1",
     "track": "core",
-    "depends_on": ["1.28b", "1.8"],
+    "depends_on": [
+      "1.28b",
+      "1.8"
+    ],
     "size": "M",
     "summary": "Flips native SQLite and Worker Connect deployments to D34 sharding by default and handles stale ListRefs packmap misses in the client.",
     "human_action": false,
-    "area_gates": ["rust", "conf-native", "conf-wrangler"]
+    "area_gates": [
+      "rust",
+      "conf-native",
+      "conf-wrangler"
+    ]
   },
   {
     "id": "1.25",
