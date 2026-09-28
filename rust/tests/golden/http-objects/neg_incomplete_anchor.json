@@ -1,0 +1,73 @@
+{
+  "blake3": "09a0ac68fe8dbd9f59032c961206d187d89792b011560ff48bbd6f9c49233e3a",
+  "commit": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
+  "expect": {
+    "accept": false,
+    "expand_to": null,
+    "reject_reason": "span_anchor_invalid"
+  },
+  "name": "neg_incomplete_anchor",
+  "recipe": {
+    "segments": [
+      {
+        "length": 573,
+        "offset": 0,
+        "source": "span_two_chunks.bin"
+      },
+      {
+        "length": 33,
+        "offset": 73788,
+        "source": "span_two_chunks.bin"
+      },
+      {
+        "hex": "d257fd18a8bfec7e103616d8d49aaf9f25c47bc7c8209bacc8deee4a3d3eab0c"
+      },
+      {
+        "length": 197,
+        "offset": 73821,
+        "source": "span_two_chunks.bin"
+      },
+      {
+        "hex": "00000000000000200000000000000010c80b8921010000000000ad09d55959567d529f3c5834942e18cb3c7f697f63642f0372fd2814350ac33302ac1b07a3bda60336b32e06b2b79e0a92aa905ccbc9108779d0acd241f05507f990171693398e1e8a632769ce24a984628ca8388f9f502a3bb744da7e785562fa47d7f6b76140e7a6d421da5ca0f8f4bb115d4b917ac497c3f918941376a4f44b0dcc59031008f780447b885acc112802305f880a5cf9ef57fb26a11ef33aff5da1983e64291f99e6c65d2c15c14bf52ce263c18c5e78b79377de32b970937775c6905a3d47ce3a0278d179997e9a4c9232ab25cdb142b143615e4f9a39f7d1f3281992fc3b326b6a2babd1e15015348864eefa7e23ecf7b47e126458ddbae71f9d751d2c70bed2ac33e09c27befeeeeeb15ffec07847052047abd2a8d958ad846f0d3e207c80d3edebc6f85325c70e4a6969b5584f4399a7e55c9207543ebb58039d5cb984e8a2ab208ecfde773dfbc913275d319f44f01e3a8d22ce95419ed7adf82cfc98882df2ce5977fba62848f0489084c38d36dff6142ddd48bf7a88a6eb003b6e01003e1ebf31ce209cc1a86c3b8e3460dab72f938b5cab94a3fa5af37e693bcf3aa256ee0e0614a3e12a677e29e8ca240041529a41f00b441dbf6e"
+      },
+      {
+        "length": 1024,
+        "offset": 74021,
+        "source": "span_two_chunks.bin"
+      },
+      {
+        "hex": "0100000001"
+      },
+      {
+        "length": 37,
+        "offset": 606,
+        "source": "span_two_chunks.bin"
+      },
+      {
+        "length": 32,
+        "offset": 675,
+        "source": "span_two_chunks.bin"
+      },
+      {
+        "hex": "32820f8eebbd37c1325be1f1dbd4341a91da7104d77de5240cb8462da7f59640"
+      },
+      {
+        "length": 130,
+        "offset": 2439,
+        "source": "span_two_chunks.bin"
+      },
+      {
+        "length": 1480,
+        "offset": 853,
+        "source": "span_two_chunks.bin"
+      },
+      {
+        "length": 144093,
+        "offset": 4049,
+        "source": "span_two_chunks.bin"
+      }
+    ]
+  },
+  "schema_version": 1,
+  "size": 148142
+}

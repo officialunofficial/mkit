@@ -448,8 +448,9 @@ the deployment runs admission, `GetServerInfo` advertises
 `admission = true` and `begin_upload_threshold_bytes = 0`, so
 `BeginUpload` is mandatory for every upload (§7.6). §7.7 states which
 RPC of an upload is admitted. Paid bulk downloads are served over
-plain HTTP (informative: a forthcoming HTTP-serving specification),
-where a 402 is an ordinary response.
+plain HTTP under [SPEC-HTTP-OBJECTS](SPEC-HTTP-OBJECTS.md),
+where a 402 is an ordinary response. That specification fixes HTTP read
+authorization, admission, cache headers, and CORS.
 
 **Ordering.** For an operation the deployment authenticates, the
 server authenticates before it challenges. For a signed write it
@@ -1032,8 +1033,10 @@ repository RPC, read or write. The exceptions are `GetServerInfo`
 the header as the deployment kind below requires. On a signed request,
 `X-Repository` MUST equal the signed `<repository>` field byte for
 byte. Envelope verification
-detects a mismatch, so a mismatch is `unauthenticated`. Host, path, and
-forwarded headers MUST NOT select the repository.
+detects a mismatch, so a mismatch is `unauthenticated`. For Connect RPCs,
+Host, path, and forwarded headers MUST NOT select the repository. Plain HTTP
+object serving instead selects the repository by path and MUST ignore
+`X-Repository`, as [SPEC-HTTP-OBJECTS](SPEC-HTTP-OBJECTS.md) requires.
 
 **Single-repository deployments.** The deployment configures exactly
 one repository identity. It MAY be a bare name. A request without
@@ -1521,7 +1524,7 @@ Explicitly deferred to sibling issues:
 | Version | Status | Changes |
 |---|---|---|
 | `2` | draft | Additive `GetServerInfoResponse.leases = 17` (§2.1; SPEC-SERVER §12); §7.7 ticket-pack loss clarified as a defensive abort case. |
-| `2` | draft | §7.4 repository addressing; §7.5 namespace and write policy (owner key); `GetServerInfo` (§2.1); §7.6 upload tickets and resumable parts; §7.8 ref deletion; §7.9 consistency and `ListRefs` paging; error-code split between `unauthenticated` and `permission_denied` (§5) (mkit#1084, mkit#1090); SPEC-WRITE-GRANTS (mkit#1085): signed reads and `X-Write-Grant` (§7.1), the M2 RPC rows (§2), and grant cross-references. §5.1 admission challenges: HTTP 402 with `permission_denied` and an opaque challenge list, raw MPP/x402 header pass-through, the header-returning `admission_helper` with its allowlist and hard-reserved set; §7.1 replay lookup after authentication and before authorization and admission, with signed reads outside the ledger; retryable `aborted` for in-flight operations (§5); §7.7 lifecycle per RPC (mkit#1086). The M0 server implementation still resumes an interrupted `UploadPack` through its `in_flight` replay record until M1 tickets land. M1: branch-sharded servers MAY require the canonical `AdvanceRefs` head/packmap pairing (§4; WP-1.22 amendment 1). Indexed mode: PendingVerification polling with a 1,000 ms floor (§5, §7.6), delta-base mapping and self-contained replanning in a new signed operation (§5, §7.6), packlist rebuilding (§7.6), advertised max_delta_chain_depth (§2.1), and the membership-dependent lag window and replay exclusion (§7.1, §7.9; SPEC-SERVER §9.4). BeginUpload open-ticket cap error and client no-retry carve-out (§5), and admission-free AlreadyPresent/live-ticket results (§7.6; WP-1.9a amendment 1). |
+| `2` | draft | §7.4 repository addressing; §7.5 namespace and write policy (owner key); `GetServerInfo` (§2.1); §7.6 upload tickets and resumable parts; §7.8 ref deletion; §7.9 consistency and `ListRefs` paging; error-code split between `unauthenticated` and `permission_denied` (§5) (mkit#1084, mkit#1090); SPEC-WRITE-GRANTS (mkit#1085): signed reads and `X-Write-Grant` (§7.1), the M2 RPC rows (§2), and grant cross-references. §5.1 admission challenges: HTTP 402 with `permission_denied` and an opaque challenge list, raw MPP/x402 header pass-through, the header-returning `admission_helper` with its allowlist and hard-reserved set; §7.1 replay lookup after authentication and before authorization and admission, with signed reads outside the ledger; retryable `aborted` for in-flight operations (§5); §7.7 lifecycle per RPC (mkit#1086). The M0 server implementation still resumes an interrupted `UploadPack` through its `in_flight` replay record until M1 tickets land. M1: branch-sharded servers MAY require the canonical `AdvanceRefs` head/packmap pairing (§4; WP-1.22 amendment 1). Indexed mode: PendingVerification polling with a 1,000 ms floor (§5, §7.6), delta-base mapping and self-contained replanning in a new signed operation (§5, §7.6), packlist rebuilding (§7.6), advertised max_delta_chain_depth (§2.1), and the membership-dependent lag window and replay exclusion (§7.1, §7.9; SPEC-SERVER §9.4). BeginUpload open-ticket cap error and client no-retry carve-out (§5), and admission-free AlreadyPresent/live-ticket results (§7.6; WP-1.9a amendment 1). WP-4.11 scopes §7.4's Host/path/forwarded-selector prohibition to Connect RPCs and cross-links plain HTTP read admission (§5.1). |
 | `1` | draft | Initial `mkit.transport.v1` proto: 7 wire RPCs covering every `Transport` trait verb (§2), `PackChunk` reused byte-for-byte from `ssh.proto`, `RefExpectation`/`RefEntry` duplicated with pinned wire numbers pending mkit#679's shared-proto extraction. |
 
 ---

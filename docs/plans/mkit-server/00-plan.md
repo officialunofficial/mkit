@@ -202,9 +202,9 @@ Sizes: S ≲ 400, M 400–900, L 900–1500 changed lines.
 | 4.11 | Spec: HTTP serving and proofs (#1088) | M4 | spec | 4.4 | M | docs,golden | yes |
 | 4.12 | Server core: HTTP object serving (http-objects feature) | M4 | core | 4.11, 4.7, 4.10 | L | rust,wasm | no |
 | 4.13 | Admission on HTTP reads (paid downloads) with ReadServed outcomes | M4 | core | 4.12, 3.3 | S | rust | no |
-| 4.14 | Proofs: ?proof=1 inclusion and range disclosure; mkit-wasm round trip | M4 | core | 4.12, 4.3, 4.11 | M | rust,wasm,golden | no |
+| 4.14 | Proofs: query ranges, MKDS core/wasm verifier, boundary-aware builder and Workers prefetch (R-109) | M4 | core | 4.12, 4.3, 4.11 | M | rust,wasm,golden | no |
 | 4.15 | Private serving via M2 signed URLs and read auth | M4 | core | 4.12, 2.9, 2.11 | M | rust,conf-native | no |
-| 4.16 | Adapters: mount HTTP serving (axum and Workers fetch), Range reads, CORS | M4 | native | 4.12 | M | rust,wasm,workers | no |
+| 4.16 | Adapters: HTTP serving, Range, GET/HEAD CORS and query-string redaction (R-109) | M4 | native | 4.12 | M | rust,wasm,workers | no |
 | 4.17 | Pre-receive policy hooks: allowed signers per ref, fast-forward-only grants | M4 | core | 4.7, 4.4, 2.7 | M | rust,conf-native | no |
 | 4.18 | Conformance: indexed mode and serving wire suite (M4 exit) | M4 | conformance | 4.8, 4.9, 4.10, 4.14, 4.15, 4.16, 4.17 | L | rust,conf-native,conf-wrangler,staging | yes |
 | 5.1a | Spec: leases, lifecycle events, server GC, published view and quarantine (#1091 part 1) | M5 | spec | 3.6, 4.4 | M | docs,proto,golden | yes |
@@ -536,6 +536,7 @@ ContentIndex/export/hooks → M0-02b, unary pipeline → M0-05a, streaming/fault
 | R-105 | ListRefs default page cap | WP-1.28 defines an absent or 0 `page_size` as the server's `max_list_refs_page_size`, and adds that sentence to STC §7.9. The WP-1.16 client never sets `page_size`. | 1.16, 1.28 |
 | R-107 | WP-1.29 split | **1.29a:** observability (Worker console sinks, `Metrics::gauge`, storage-pressure alerts at 70%/90% of the physical soft limit on the write path (Worker) and every 60 s (native), P-24 labelled by kind) and native `backup`. **1.29b** (depends on 1.25 and 1.23a, both merged): a per-DO snapshot export to a `BACKUPS` R2 bucket via timer kind 4, seeded on the first committed put, as a synchronous single-`fire` snapshot capped by size, keyed by the BLAKE3 of `Partition::encode`; plus a core restore driver in dependency order (root `sm` first, coordinators with `mark_lease_table_recovered` (R-100) and epoch non-decrease, ref shards with `os` re-keyed above targets' `rh` (R-102)), native `export`/`restore`, and a runbook. PITR is the primary in-place restore within 30 days; the export covers disaster recovery and backend migration. | 1.29a, 1.29b |
 | R-108 | WP-5.1a split | 5.1a-1 owns §12 storage leases and events, §13 GC, the `Event` RPC, `GetServerInfo.leases`, and section renumbering; 5.1a-2 owns §10 published view and §11 quarantine. Remote `CachePurge` is deferred to 5.1b; WP-5.10 is a Rust trait only. Pack holders and holds are normative; the implementation gap belongs to 5.3a with 4.10. The `gc_pending` and `AlreadyPresent` pin fields are implementation state for 5.3a. | 5.1a-1, 5.1a-2, 5.1b, 5.3a, 4.10, 5.10 |
+| R-109 | WP-4.11 decisions | **M4-a:** query-selected proof ranges; **M4-b:** MKDS over unchanged MKDP v2 (user, 2026-09-27). URL-token paths may be empty (root tree). HTTP selects repository by path; STC §7.4 is scoped to Connect RPCs. Indexed mode only; bearer gate applies. Deferred: signed-read HTTP GETs; an object-id field on `AdmitRequest` and a token `Principal` (both need a proto WP); an O(1)-offset proof builder (4.10 records chunk offsets, 4.14 adds a boundary-aware builder and in-memory `ObjectSource` prefetch on Workers). 4.14 adds mkit-core/mkit-wasm MKDS verification; 4.16 adds HEAD to native CORS and redacts query strings. | 4.10, 4.11, 4.14, 4.15, 4.16 |
 
 ---
 
