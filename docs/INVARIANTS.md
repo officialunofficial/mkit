@@ -201,6 +201,27 @@ web/spammer envelope tests. Keys failure injection after name and result writes
 rolls back both; saved results survive a full Worker restart. Production builds
 omit `test-faults`. Only auth v2 is accepted. Names use SQLite exclusively.
 
+## Namespace quota charges and rollups
+
+**Always:** an admitted default-quota write charges its fixed-window namespace
+counter in the same batch as its write and signer charge. A ref shard guards its
+local `qs` counter; a coordinator or Single partition guards its exact `qt`
+total. The kind-5 rollup applies only the increase since that source's guarded
+`qc` cumulative value, or re-baselines a decreased restored contribution, then installs an unguarded local `qv` view. A new shard seeds `qv` from the coordinator total read with its lease. A missing or
+stale view permits writes only up to the local exact cap and increments a
+fallback metric. Replays and admission-free ticket answers charge neither.
+
+**Because:** a retry or crash after the coordinator apply must not count the
+same shard usage twice, and a view refresh must not force every write to
+re-plan. With scheduled rollups succeeding, the local estimate can lag other
+active shards by at most their admission rate times three 60-second intervals (3R).
+
+**If violated:** an author can exceed the namespace cap without a bounded
+delay, or a retry double-charges and locks out valid writes.
+
+**Enforced by:** `quota.rs` fixed-window math and batch planner, guarded
+`timers::quota_rollup`, and the memory-store rollup/denial/rollover tests.
+
 ## Pending verification preserves the advance identity
 
 **Always:** a typed pending `AdvanceRefs` response causes a clamped poll, not
@@ -1290,6 +1311,30 @@ at the next cycle. A healthy target is reached when fewer than 32 distinct
 failing targets precede it; beyond the cap, the cycle resets. Corruption stops
 delivery after its decodable prefix. Coordinator watermarks follow in WP-1.23c;
 writers in WP-1.9/1.10.
+
+## Object-index visibility follows repository membership (writer gate pending)
+
+**Always:** an `i` row is visible only while its pack has an `m` row in the
+same repository. For indexed advances, every index row of a consumed pack
+MUST be delivered before the advance commits membership and refs. Until
+delivery finishes, the advance returns `PendingVerification` without a replay
+result. Identical upserts from several sources may target the same index key.
+An index value MUST be a pure function of (pack bytes, entry), so every
+producer writes identical bytes (R-130). §13 GC removes index rows whose
+membership is absent and whose pack has no live ticket; WP-5.3a owns this
+pass. Until it lands, the per-id row cap bounds orphan damage.
+
+**Because:** relay lag can exceed the §9.4 window. Early index rows are safe
+only while membership keeps them invisible; committing membership first could
+make a later miss look permanent.
+
+**If violated:** closure, delta-base checks, object serving or takedown can
+miss a member or use an object from another repository.
+
+**Enforced by:** `store::index` repository-scoped lookups and conformance
+cases enforce the read-side membership join and isolation. WP-4.7 and WP-4.8
+must enforce the delivery-before-advance gate in their production writers.
+See R-130.
 
 ## Pack reads consult only the named repository's membership
 

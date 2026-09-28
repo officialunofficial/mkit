@@ -18,6 +18,10 @@
 //! | replay expiry index | `px 00 <expires_at:be64> <scope:32>` | empty |
 //! | quota state | `q 00 <scope>` | codec `QuotaState` |
 //! | quota window index | `qx 00 <window_start:be64> <scope>` | empty |
+//! | ref-shard namespace usage | `qs 00 <window:be64>` | codec `NamespaceUsage` |
+//! | local namespace view | `qv 00 <window:be64>` | codec `NamespaceView` |
+//! | coordinator source cumulative | `qc 00 <window:be64> <Partition::encode(source)>` | codec `NamespaceUsage` |
+//! | coordinator namespace total | `qt 00 <window:be64>` | codec `NamespaceUsage` |
 //! | namespace record (`Coordinator`) | `nr 00` | codec `NamespaceRecord` |
 //! | repo record (`Coordinator`) | `rr 00 <repo>` | codec `RepoRecord` |
 //! | repo-known marker (ref shard) | `rk 00 <repo>` | empty |
@@ -32,6 +36,7 @@
 //! | open tickets per signer | `tu 00 <repo> 00 <ref> 00 <signer:32>` | be64; same rules |
 //! | ticket expiry timer | `w 00 <expires_at:be64> 02 <ticket_id:32>` | empty |
 //! | local membership | `m 00 <repo> 00 <pack:32>` | empty |
+//! | repository object index | `i 00 <repo> 00 <object:32> <pack:32>` | binary `IndexValue` |
 //! | reservation and outcome | `o 00 <reservation_id>` | codec `ReservationV1` |
 //! | outcome pending index | `oq 00 <seq:be64> <reservation_id>` | empty |
 //! | relay high-water mark | `rh 00 <Partition::encode(source)>` | be64; never pruned, bounded by source shards |
@@ -46,8 +51,7 @@
 //! | object state (`ContentShard`) | `c 00 <object:32>` | codec `ObjectState` |
 //!
 //! Reserved tags ([`RESERVED_TAGS`]), each laid out by the work package
-//! that adds it: object index
-//! `i`, leases `l`, published pointers `pp`, tombstones `tb`, verification
+//! that adds it: leases `l`, published pointers `pp`, tombstones `tb`, verification
 //! cursors `vc`, and the deployment's namespace list
 //! [`TAG_NAMESPACE_LIST`] (WP-1.5; see `Partition` for enumeration). A
 //! new row adds its layout here, with a golden test.
@@ -94,6 +98,14 @@ pub const TAG_REPLAY_EXPIRY: &str = "px";
 pub const TAG_QUOTA: &str = "q";
 /// Quota window index tag.
 pub const TAG_QUOTA_WINDOW: &str = "qx";
+/// Ref-shard cumulative namespace usage.
+pub const TAG_QUOTA_SHARD: &str = "qs";
+/// Ref-shard local aggregate view.
+pub const TAG_QUOTA_VIEW: &str = "qv";
+/// Coordinator source contribution.
+pub const TAG_QUOTA_CONTRIBUTION: &str = "qc";
+/// Coordinator namespace total, also charged directly there.
+pub const TAG_QUOTA_TOTAL: &str = "qt";
 /// Grant epoch tag.
 pub const TAG_GRANT_EPOCH: &str = "e";
 /// Ref shard's epoch lease tag.
@@ -138,6 +150,8 @@ pub const TAG_TICKETS_PER_REF: &str = "tc";
 pub const TAG_TICKETS_PER_SIGNER: &str = "tu";
 /// Local repository membership tag.
 pub const TAG_MEMBERSHIP: &str = "m";
+/// Repository-scoped object index tag.
+pub const TAG_OBJECT_INDEX: &str = "i";
 /// Reservation and terminal outcome tag.
 pub const TAG_RESERVATION: &str = "o";
 /// Undelivered terminal outcome index tag.
@@ -154,7 +168,7 @@ pub const TAG_OUTBOX_SEQUENCE: &str = "os";
 pub const TAG_OUTCOME_BACKLOG: &str = "oc";
 
 /// Tags whose layouts later work packages add. No M0 key uses them.
-pub const RESERVED_TAGS: &[&str] = &["tb", "i", "l", "pp", "vc", TAG_NAMESPACE_LIST];
+pub const RESERVED_TAGS: &[&str] = &["tb", "l", "pp", "vc", TAG_NAMESPACE_LIST];
 
 /// A key decoded by [`parse`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -199,6 +213,14 @@ pub enum ParsedKey {
         /// Quota scope.
         scope: String,
     },
+    /// `qs 00 <window>`.
+    QuotaShard(u64),
+    /// `qv 00 <window>`.
+    QuotaView(u64),
+    /// `qc 00 <window> <source>`.
+    QuotaContribution { window: u64, source: Partition },
+    /// `qt 00 <window>`.
+    QuotaTotal(u64),
     /// `t 00 <ticket_id>`.
     Ticket(Hash),
     /// `ti 00 <repo> 00 <ref> 00 <pack> <signer>`.
@@ -232,6 +254,15 @@ pub enum ParsedKey {
     Membership {
         /// Repository.
         repo: RepoName,
+        /// Pack id.
+        pack_id: Hash,
+    },
+    /// `i 00 <repo> 00 <object> <pack>`.
+    ObjectIndex {
+        /// Repository.
+        repo: RepoName,
+        /// Object id.
+        object: Hash,
         /// Pack id.
         pack_id: Hash,
     },
@@ -418,6 +449,52 @@ pub fn quota_window_before(before_ms: u64) -> (Key, Key) {
     (start, key(TAG_QUOTA_WINDOW, &[&before_ms.to_be_bytes()]))
 }
 
+/// `qs 00 <window:be64>`.
+#[must_use]
+pub fn quota_shard(window: u64) -> Key {
+    key(TAG_QUOTA_SHARD, &[&window.to_be_bytes()])
+}
+
+/// `qv 00 <window:be64>`.
+#[must_use]
+pub fn quota_view(window: u64) -> Key {
+    key(TAG_QUOTA_VIEW, &[&window.to_be_bytes()])
+}
+
+/// `qc 00 <window:be64> <source>`.
+pub fn quota_contribution(window: u64, source: &Partition) -> Result<Key, StoreError> {
+    if !matches!(source, Partition::Ref { .. }) {
+        return Err(StoreError::Invalid(
+            "quota source is not a ref shard".into(),
+        ));
+    }
+    checked_key(
+        TAG_QUOTA_CONTRIBUTION,
+        &[&window.to_be_bytes(), &source.encode()?],
+    )
+}
+
+/// `qt 00 <window:be64>`.
+#[must_use]
+pub fn quota_total(window: u64) -> Key {
+    key(TAG_QUOTA_TOTAL, &[&window.to_be_bytes()])
+}
+
+/// The ordered range of namespace rows strictly before `window`.
+#[must_use]
+pub fn quota_namespace_before(tag: &str, window: u64) -> (Key, Key) {
+    (key(tag, &[]), key(tag, &[&window.to_be_bytes()]))
+}
+
+/// Every row of a fixed namespace window in one ordered class.
+#[must_use]
+pub fn quota_namespace_window(tag: &str, window: u64) -> (Key, Key) {
+    (
+        key(tag, &[&window.to_be_bytes()]),
+        key(tag, &[&window.saturating_add(1).to_be_bytes()]),
+    )
+}
+
 /// Whether an id satisfies SPEC-SERVER §6.6: 1–128 ASCII bytes.
 #[must_use]
 pub fn validate_reservation_id(rid: &str) -> bool {
@@ -497,6 +574,23 @@ pub fn tickets_per_signer(repo: &RepoName, name: &str, signer: &Hash) -> Result<
 #[must_use]
 pub fn membership(repo: &RepoName, pack: &Hash) -> Key {
     key(TAG_MEMBERSHIP, &[repo.as_str().as_bytes(), b"\0", pack])
+}
+
+/// `i 00 <repo> 00 <object> <pack>`.
+#[must_use]
+pub fn object_index(repo: &RepoName, object: &Hash, pack: &Hash) -> Key {
+    key(
+        TAG_OBJECT_INDEX,
+        &[repo.as_str().as_bytes(), b"\0", object, pack],
+    )
+}
+
+/// The exact range of index rows for one repository and object.
+#[must_use]
+pub fn object_index_range(repo: &RepoName, object: &Hash) -> (Key, Key) {
+    let start = key(TAG_OBJECT_INDEX, &[repo.as_str().as_bytes(), b"\0", object]);
+    let end = successor(&start);
+    (start, end)
 }
 
 /// `o 00 <reservation_id>`.
@@ -715,6 +809,21 @@ fn parse_holder(body: &[u8]) -> Option<ParsedKey> {
     })
 }
 
+fn parse_namespace_quota(tag: &[u8], body: &[u8]) -> Option<ParsedKey> {
+    let (window, rest) = be64(body)?;
+    match tag {
+        b"qs" if rest.is_empty() => Some(ParsedKey::QuotaShard(window)),
+        b"qv" if rest.is_empty() => Some(ParsedKey::QuotaView(window)),
+        b"qt" if rest.is_empty() => Some(ParsedKey::QuotaTotal(window)),
+        b"qc" => {
+            let source = Partition::decode(rest).ok()?;
+            matches!(source, Partition::Ref { .. })
+                .then_some(ParsedKey::QuotaContribution { window, source })
+        }
+        _ => None,
+    }
+}
+
 /// Decode a key of any laid-out class; `None` for a malformed key or a
 /// reserved class.
 #[must_use]
@@ -755,6 +864,15 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
                 pack_id: hash(&body[sep + 1..])?,
             }
         }
+        b"i" => {
+            let sep = body.iter().position(|&b| b == 0)?;
+            let (object, pack_id) = body[sep + 1..].split_first_chunk::<32>()?;
+            ParsedKey::ObjectIndex {
+                repo: RepoName::new(text(&body[..sep])?).ok()?,
+                object: *object,
+                pack_id: hash(pack_id)?,
+            }
+        }
         b"o" => ParsedKey::Reservation(parse_reservation_id(body)?),
         b"oq" => parse_outcome_pending(body)?,
         b"or" => {
@@ -782,6 +900,7 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
                 scope: text(rest)?,
             }
         }
+        b"qs" | b"qv" | b"qt" | b"qc" => parse_namespace_quota(tag, body)?,
         b"w" => {
             let (due_at_ms, rest) = be64(body)?;
             let (&kind, reference) = rest.split_first()?;
@@ -836,6 +955,10 @@ mod tests {
             TAG_REPLAY_EXPIRY,
             TAG_QUOTA,
             TAG_QUOTA_WINDOW,
+            TAG_QUOTA_SHARD,
+            TAG_QUOTA_VIEW,
+            TAG_QUOTA_CONTRIBUTION,
+            TAG_QUOTA_TOTAL,
             TAG_GRANT_EPOCH,
             TAG_EPOCH_LEASE,
             TAG_LEASED_SHARD,
@@ -856,6 +979,7 @@ mod tests {
             TAG_TICKETS_PER_REF,
             TAG_TICKETS_PER_SIGNER,
             TAG_MEMBERSHIP,
+            TAG_OBJECT_INDEX,
             TAG_RESERVATION,
             TAG_OUTCOME_PENDING,
             TAG_RELAY,
@@ -917,11 +1041,31 @@ mod tests {
             ),
             (block(&s), [&b"b\0"[..], &[0x11; 32]].concat()),
             (object_state(&s), [&b"c\0"[..], &[0x11; 32]].concat()),
+            (
+                object_index(&repo("a"), &s, &[0x22; 32]),
+                [&b"i\0a\0"[..], &[0x11; 32], &[0x22; 32]].concat(),
+            ),
         ];
         for (key, golden) in cases {
             assert_eq!(key.as_bytes(), golden.as_slice());
         }
         assert_eq!(LAYOUT_VERSION, 1);
+        assert!(!RESERVED_TAGS.contains(&TAG_OBJECT_INDEX));
+        let index = object_index(&repo("a"), &s, &[0x22; 32]);
+        assert_eq!(
+            parse(&index),
+            Some(ParsedKey::ObjectIndex {
+                repo: repo("a"),
+                object: s,
+                pack_id: [0x22; 32],
+            })
+        );
+        let (start, end) = object_index_range(&repo("a"), &s);
+        assert!(start <= index && index < end);
+        assert_eq!(
+            parse(&Key::new([&b"i\0a\0"[..], &[0x11; 63]].concat())),
+            None
+        );
         // Enumeration classes: their scan ranges remain pinned.
         for (tag, start, end) in [
             (TAG_REPO_REGISTRY, &b"rr\0"[..], &b"rr\x01"[..]),
@@ -1227,6 +1371,21 @@ mod tests {
             Err(StoreError::Invalid(_))
         ));
     }
+
+    #[test]
+    fn object_index_parse_roundtrip() {
+        let object = [0x22; 32];
+        let pack_id = [3; 32];
+        let key = object_index(&repo("a"), &object, &pack_id);
+        assert_eq!(
+            parse(&key),
+            Some(ParsedKey::ObjectIndex {
+                repo: repo("a"),
+                object,
+                pack_id,
+            })
+        );
+    }
     #[test]
     fn lease_keys_reject_malformed_payloads() {
         for bad in [
@@ -1237,5 +1396,60 @@ mod tests {
         ] {
             assert_eq!(parse(&Key::new(bad.to_vec())), None);
         }
+    }
+
+    #[test]
+    fn namespace_quota_key_goldens_and_ranges() {
+        let window: u64 = 0x0102_0304_0506_0708;
+        let suffix = window.to_be_bytes();
+        assert_eq!(
+            quota_shard(window).as_bytes(),
+            [&b"qs\0"[..], &suffix].concat()
+        );
+        assert_eq!(
+            quota_view(window).as_bytes(),
+            [&b"qv\0"[..], &suffix].concat()
+        );
+        assert_eq!(
+            quota_total(window).as_bytes(),
+            [&b"qt\0"[..], &suffix].concat()
+        );
+        let source = Partition::Ref {
+            ns: NamespaceKey::deployment_default(),
+            repo: repo("room"),
+            shard_ref: "refs/heads/main".into(),
+        };
+        let contribution = quota_contribution(window, &source).unwrap();
+        let next = quota_contribution(window + 1, &source).unwrap();
+        assert_eq!(
+            contribution.as_bytes(),
+            [&b"qc\0"[..], &suffix, &source.encode().unwrap()].concat()
+        );
+        assert_eq!(
+            parse(&contribution),
+            Some(ParsedKey::QuotaContribution { window, source })
+        );
+        assert_eq!(
+            parse(&quota_shard(window)),
+            Some(ParsedKey::QuotaShard(window))
+        );
+        assert_eq!(
+            parse(&quota_view(window)),
+            Some(ParsedKey::QuotaView(window))
+        );
+        assert_eq!(
+            parse(&quota_total(window)),
+            Some(ParsedKey::QuotaTotal(window))
+        );
+        let (start, end) = quota_namespace_window(TAG_QUOTA_CONTRIBUTION, window);
+        assert!(start <= contribution && contribution < end);
+        assert!(!(start <= next && next < end));
+        assert!(matches!(
+            quota_contribution(
+                window,
+                &Partition::Coordinator(NamespaceKey::deployment_default())
+            ),
+            Err(StoreError::Invalid(_))
+        ));
     }
 }

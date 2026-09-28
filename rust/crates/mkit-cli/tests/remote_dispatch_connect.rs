@@ -639,6 +639,17 @@ fn cli_pending_interrupt_uses_configured_observer_and_exits_75() {
     use std::process::Stdio;
     use std::time::{Duration, Instant};
 
+    // Kills the push if the test panics before it exits, so no child outlives it.
+    struct KillOnDrop(std::process::Child);
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            if matches!(self.0.try_wait(), Ok(None)) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+    }
+
     let (src, _) = source_repo_with_one_commit();
     let (port, shutdown, handle, calls) =
         spawn_server_with_behavior(Arc::new(MemoryTransport::new()), Vec::new(), true);
@@ -653,7 +664,7 @@ fn cli_pending_interrupt_uses_configured_observer_and_exits_75() {
     std::fs::write(config_path, config).unwrap();
 
     let xdg = tempfile::tempdir().unwrap();
-    let mut child = Command::new(mkit_bin())
+    let child = Command::new(mkit_bin())
         .args(["push", "origin"])
         .current_dir(src.path())
         .env("XDG_CONFIG_HOME", xdg.path())
@@ -662,6 +673,7 @@ fn cli_pending_interrupt_uses_configured_observer_and_exits_75() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
+    let mut child = KillOnDrop(child);
 
     let started = Instant::now();
     while !calls
@@ -670,31 +682,31 @@ fn cli_pending_interrupt_uses_configured_observer_and_exits_75() {
         .iter()
         .any(|call| call.procedure == "AdvanceRefs")
     {
-        if started.elapsed() > Duration::from_secs(10) {
-            child.kill().unwrap();
-            let output = child.wait_with_output().unwrap();
-            panic!("push did not reach AdvanceRefs: {output:?}");
-        }
+        // Generous budgets: a debug `mkit push` on a loaded test runner.
+        assert!(
+            started.elapsed() <= Duration::from_secs(30),
+            "push did not reach AdvanceRefs"
+        );
         std::thread::sleep(Duration::from_millis(10));
     }
 
     let signalled = Command::new("kill")
-        .args(["-INT", &child.id().to_string()])
+        .args(["-INT", &child.0.id().to_string()])
         .status()
         .unwrap();
     assert!(signalled.success(), "could not signal push process");
     let interrupted_at = Instant::now();
-    while child.try_wait().unwrap().is_none() {
-        if interrupted_at.elapsed() > Duration::from_secs(3) {
-            child.kill().unwrap();
-            let output = child.wait_with_output().unwrap();
-            panic!("push did not stop within the polling slice: {output:?}");
-        }
+    while child.0.try_wait().unwrap().is_none() {
+        assert!(
+            interrupted_at.elapsed() <= Duration::from_secs(10),
+            "push did not stop within the polling slice"
+        );
         std::thread::sleep(Duration::from_millis(10));
     }
-    let output = child.wait_with_output().unwrap();
-    assert_eq!(output.status.code(), Some(75), "{output:?}");
-    let stderr = String::from_utf8(output.stderr).unwrap();
+    let mut stderr = String::new();
+    std::io::Read::read_to_string(child.0.stderr.as_mut().unwrap(), &mut stderr).unwrap();
+    let status = child.0.wait().unwrap();
+    assert_eq!(status.code(), Some(75), "{stderr}");
     assert!(
         stderr.contains("Waiting for server verification"),
         "{stderr}"

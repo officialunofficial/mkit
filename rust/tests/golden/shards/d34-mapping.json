@@ -65,21 +65,24 @@
       "repo": "a",
       "pack_id": "0000000000000000000000000000000000000000000000000000000000000000",
       "prefix": 0,
-      "membership_partition_hex": "69726f6f740061003000"
+      "membership_partition_hex": "69726f6f740061003000",
+      "object_index_partition_hex": "69726f6f740061003000"
     },
     {
       "namespace": "root",
       "repo": "a",
       "pack_id": "ffff000000000000000000000000000000000000000000000000000000000000",
       "prefix": 4095,
-      "membership_partition_hex": "69726f6f740061003430393500"
+      "membership_partition_hex": "69726f6f740061003430393500",
+      "object_index_partition_hex": "69726f6f740061003430393500"
     },
     {
       "namespace": "root",
       "repo": "a",
       "pack_id": "123f000000000000000000000000000000000000000000000000000000000000",
       "prefix": 291,
-      "membership_partition_hex": "69726f6f7400610032393100"
+      "membership_partition_hex": "69726f6f7400610032393100",
+      "object_index_partition_hex": "69726f6f7400610032393100"
     }
   ],
   "coordinator_partition_hex": "63726f6f7400",

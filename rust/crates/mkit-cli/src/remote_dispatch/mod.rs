@@ -364,9 +364,10 @@ pub fn open(url: &str) -> Result<Arc<dyn Transport>, DispatchError> {
 /// `ssh_options` (issue #389) into the spawned `ssh(1)` child via
 /// [`SshTransport::connect_with_options`], and the `mkit+https://`/
 /// `mkit+http://` branch threads `envelope_signer` (issue #699 follow-up)
-/// into [`ConnectTransport::connect_with_signer`]. Reached only via
-/// [`open`] (no config — both `None`/default) and [`open_with_config`]
-/// (config-derived).
+/// into [`ConnectTransport::connect_with_signer`]. Reached via [`open`]
+/// (no config — both `None`/default) and [`open_with_config`] for non-Connect
+/// schemes; `open_with_config` handles Connect URLs itself, so the Connect
+/// branch here is reached only from [`open`].
 fn open_with_ssh_options(
     url: &str,
     ssh_options: &SshOptions,
@@ -398,9 +399,9 @@ fn open_with_ssh_options(
         // itself and reads MKIT_API_TOKEN from the environment (mkit#701 —
         // the native mkit.transport.v1 ConnectRPC client, replacing the
         // retired mkit-transport-http JSON dialect as of
-        // SPEC-TRANSPORT-CONNECT verb parity). `envelope_signer` is `None`
-        // unless the caller resolved one via `open_with_config` (mkit#699
-        // follow-up: `transport_auth = envelope`) — bearer token and
+        // SPEC-TRANSPORT-CONNECT verb parity). Only the config-less `open`
+        // reaches this branch (`open_with_config` returns early for Connect
+        // URLs), so `envelope_signer` is always `None` here; bearer token and
         // envelope signing are independent, additive auth modes.
         let tx = ConnectTransport::connect_with_signer(url, envelope_signer)?;
         return Ok(Arc::new(tx));
