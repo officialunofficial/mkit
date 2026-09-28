@@ -8,6 +8,7 @@ cd "$repo_root"
 golden_dir="rust/tests/golden/server-hooks"
 
 # Filename-to-message table. Keep in sync with SPEC-SERVER §16.
+# inspect.request.json is a legacy non-conforming pre-M5 wire example.
 message_type() {
   local fixture_name="$1" name type
   while read -r name type; do
@@ -25,7 +26,6 @@ admit-first-attempt.request.json AdmitRequest
 admit-allow.response.json AdmitResponse
 admit-challenge.response.json AdmitResponse
 admit-deny.response.json AdmitResponse
-# Legacy non-conforming pre-M5 example; retained as a wire golden.
 inspect.request.json InspectRequest
 inspect-pass.response.json InspectResponse
 inspect-quarantine-phase.request.json InspectRequest

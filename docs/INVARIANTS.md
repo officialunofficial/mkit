@@ -1239,10 +1239,11 @@ file entry in a pack added by an advance is covered by the configured
 inspection obligations or the explicit unavailable-publish policy. A later
 pass cannot skip an earlier held or pending advance. A reused pack from
 another pending advance cannot satisfy published membership, even through
-`X-Mkit-Ref`. Flagged objects and their containing packs are absent to
-every caller until release or takedown replacement. Advance values in
-`pending`, `held`, or `hit` state and their packs remain GC roots until
-their obligations are discharged; a hit remains rooted through takedown.
+`X-Mkit-Ref`. Held content is absent to every caller until release or
+takedown replacement; this includes all added content for a hold without
+flagged ids. Every advance after the published pointer through the live
+value remains a GC root in any clearance state; a hit and its replacement
+packs remain rooted through takedown.
 
 **Because:** whole-pack downloads, HTTP, URL tokens, snapshots and caches must
 not expose uninspected or uncleared content, including surplus pack entries.

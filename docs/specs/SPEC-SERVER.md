@@ -1188,7 +1188,8 @@ view even if the caller possesses a write key. Clients with a signer MUST
 sign reads to be seen as writers (SPEC-WRITE-GRANTS §9.2).
 
 A writer sees live ref values and live repository membership, including
-all pending advances in the repository. Readers and anonymous callers
+all pending advances in the repository, subject to the serving stop for
+held content in §11.3. Readers and anonymous callers
 see published ref values and published membership only. These rules
 apply on every serving surface, including HTTP consumers of this
 abstract view.
@@ -1214,9 +1215,9 @@ Each advance has a clearance state:
 |---|---|
 | `pending` | Inspection, dependency clearance, or both remain outstanding. |
 | `cleared` | Its inspection obligations and membership dependencies permit publication. |
-| `held` | A quarantine verdict awaits re-inspection or admin release. |
+| `held` | A quarantine verdict or an already-flagged id awaits re-inspection or admin release under §11.3. |
 | `hit` | A rejection awaits takedown completion. |
-| `resolved` | Takedown has completed and all non-hit obligations are satisfied; it no longer blocks the publication prefix. |
+| `resolved` | Takedown, non-hit obligations, and §10.2 membership dependencies are complete; it no longer blocks the publication prefix. |
 
 The published value MUST be the value at the largest sequence number
 *k* for which every advance up to *k* is `cleared` or `resolved`.
@@ -1246,8 +1247,17 @@ An advance *k* clears only when all of these conditions hold:
    or is added by *k* itself. For a non-branch ref, every object in its
    reachable closure MUST be contained in at least one published pack,
    counting *k*'s additions in the same atomic clearance.
+   External delta bases used by its packs (§9.4) MUST already be in
+   published membership; *k*'s additions do not satisfy that external
+   dependency.
 3. No flagged id in the repository occurs in its inspected set or its
-   packs (§11.3).
+   packs. Such an advance is `held` under §11.3, not merely `pending`.
+
+A `hit` advance becomes `resolved` only when its §14 takedown is complete,
+all non-hit obligations are satisfied, and condition 2 holds for its
+post-takedown packmap chain and replacement packs. Its own replacement
+packs can publish atomically with resolution; other packs and external
+delta bases must already be in published membership.
 
 Clearing *k* MUST atomically publish its added membership and update the
 published ref pointer to the largest eligible prefix. Completion out of
@@ -1255,9 +1265,10 @@ order can make membership eligible, but MUST NOT expose a ref value
 beyond that prefix. A branch's head and packmap MUST remain a pair in
 both live and published views. Publishing membership MUST durably
 schedule re-evaluation of every advance previously blocked on that
-membership in any ref. The scheduled work MUST be retained until
-completed and MUST run within a bounded time. The same rule applies when
-takedown replacement packs become published.
+membership, including an external delta-base dependency, in any ref.
+The scheduled work MUST be retained until completed and MUST run within
+a bounded time. The same rule applies when takedown replacement packs
+become published.
 
 A pack added by another advance that has not cleared or resolved blocks
 clearance. `AlreadyPresent` establishes live membership, not published
@@ -1266,8 +1277,9 @@ publish it; neither can a tag pointing at a commit whose containing pack
 is pending. The advance's own additions qualify in the same atomic
 clearance, so initial publication has no circular membership dependency.
 
-Deletions MUST publish immediately under STC §7.8 and MUST NOT wait for
-inspection. They establish a ref-value publication boundary: later
+Deletions under STC §7.8 or lease deletion under §12 MUST publish
+immediately and MUST NOT wait for inspection. They establish a ref-value
+publication boundary: later
 verdicts on older advances MUST NOT change or resurrect that ref value.
 Those verdicts still govern membership the older advances added: a pass
 publishes it, a hold keeps it unpublished, and a hit takes it down.
@@ -1275,12 +1287,13 @@ A recreated ref, or another ref reusing the packs, can clear when that
 membership becomes published. Later ref values are evaluated from the
 deletion boundary under the ordinary inspection and dependency rules.
 
-The server MUST retain every `pending`, `held`, or `hit` advance value,
-together with its packmap chain, closure packs, and any takedown
-replacement packs. Retention lasts until the advance is `cleared`,
-`resolved`, or superseded. A `hit` advance MUST remain until its §14
-takedown completes, even if its ref value is superseded. §13 makes
-these GC roots.
+The server MUST retain every advance value strictly after the published
+pointer through the live value, in any clearance state, together with
+its packmap chain, closure packs, and packs. Retention lasts until the
+published pointer reaches or passes the advance. A `hit` advance and
+its takedown replacement packs MUST additionally be retained until its
+§14 takedown completes, including when a deletion has moved the ref's
+publication boundary past that advance. §13 makes these GC roots.
 
 The published pointer MUST be written in the same apply for an advance
 that starts `cleared` and has an eligible prefix. An advance starting
@@ -1299,6 +1312,8 @@ or return `not_found`, as the surface's ordinary absent response requires.
 An existing published ref continues to return its previous published value.
 Reader responses MUST NOT expose live targets, pending pack ids, or
 inspection state through alternate metadata or errors.
+`AlreadyPresent` MUST NOT be answered for a pack containing an id hidden
+by a flag or hold; the server MUST answer as if the pack were absent.
 
 Published packlist nodes and delta bases MUST NOT reference unpublished
 or pending ids. Informative: when every ref is pending, a reader sees an
@@ -1319,9 +1334,9 @@ membership from this section before returning object bytes or proofs.
 
 `GetServerInfoResponse.async_inspection` MUST report whether any asynchronous
 inspector is configured, independently of repository existence. Writers
-MUST sign reads to see their pending or held content. A false value does
-not exempt synchronous quarantine from that rule or from the published
-view.
+MUST sign reads to see their own pending content that is not held. Held
+content is hidden from every caller, even when this field is false
+because only synchronous inspectors are configured.
 
 ## 11. Quarantine and inspection
 
@@ -1363,14 +1378,15 @@ not inspected; they remain a residual content channel.
 An inspected set larger than `inspect_batch_max_objects` MUST be sent
 in multiple Inspect calls of at most that many objects each. This named
 parameter defaults to 10,000. Each inspector has a separate obligation
-for each batch, and its advance-level obligation is satisfied only when
-all its batches pass or each receives an explicit release under §11.3.
+for each batch. Its advance-level obligation is satisfied only when
+every batch passes or its unflagged objects count as passed and its
+flagged objects are released or taken down under §11.3.
 A failure caused by the request's own size or §6.6 limits MUST NOT be
 eligible for unavailable-publish: its obligation remains `pending` and
 the server MUST use compliant batches before clearance.
 
-Rationale: inspecting all newly reachable file objects also covers
-surplus file entries in added packs. §9.3(c) permits entries outside the
+Rationale: the added-pack set extends inspection beyond newly reachable
+file objects to surplus entries. §9.3(c) permits entries outside the
 closure; a published whole-pack download could otherwise reveal them.
 Packs MUST NOT be rejected merely for surplus entries.
 
@@ -1419,10 +1435,16 @@ server MUST ignore verdicts for a superseded `inspection_id`. Hook
 authentication uses a fresh envelope under §7 as needed; its nonce is
 distinct from the inspection id.
 
+A `reject` or `quarantine` verdict satisfies that inspector's obligation
+for the batch's unflagged objects: they count as passed by that inspector.
+The flagged objects remain subject to the serving stop and review or
+takedown below. Other inspectors' obligations are unaffected.
+
 Before publication, the advance state is derived from its obligations
 with precedence `hit > held > pending > cleared`. A hit becomes
-`resolved` only after takedown completes **and** every non-hit
-obligation is satisfied; until then it blocks the publication prefix.
+`resolved` only after takedown completes, every non-hit obligation is
+satisfied, and §10.2's membership-dependency condition holds; until then
+it blocks the publication prefix.
 Publication of advance *k* occurs when *k* clears under §10.2. A
 verdict arriving afterward is post-publication even if another advance
 still blocks the ref pointer. It MUST NOT un-publish a ref value.
@@ -1442,20 +1464,31 @@ becomes `resolved` and its published membership is the replacement set.
 A post-publication `quarantine` records a separate serving suspension;
 the advance remains published while that suspension is reviewed.
 
-On a hit or any QUARANTINE-phase `quarantine`, before or after
-publication, the server MUST immediately stop serving every flagged
-object and every pack containing one to **all** callers, including
-writers. This applies to `DownloadPack`, `PackExists`, HTTP, extracted
-copies, and use as a delta base. Each surface MUST give the same
-`not_found` or absent answer as for an absent object or pack. Serving
-MUST stop before any rewrite. Writers retain access to the rest of
-their pending content. Under namespace policy `any`, an owner can mint
-grants freely; serving flagged content to writers would make quarantine
-a distribution channel. A flagged id MUST block clearance of every
-advance in the repository whose inspected set or packs contain it,
-including a re-push. The server MUST re-evaluate all pending advances
-in the repository when a flag is released or its takedown replacement
-membership is published.
+On a hit or a `quarantine` in either phase, before or after publication,
+the server MUST immediately stop serving every flagged object and every
+pack containing one to **all** callers, including writers. If a
+`quarantine` verdict carries no flagged ids, the server MUST
+hide every pack and object added by that advance from every caller.
+Writers still see the live ref value and the rest of their pending
+content that is not held. The serving stop covers `DownloadPack`,
+`PackExists`, snapshots, URL-token and HTTP responses, extracted copies,
+server-side reader caches, and use as a delta base. Each surface MUST
+give the same `not_found` or absent answer as for an absent object or
+pack. The server MUST invalidate server-side cached copies at once and
+MUST trigger a purge of shared caches through §14 or the deployment's
+purge interface. Serving MUST stop before any rewrite. Informative:
+removal from a shared cache takes effect within the deployment's purge
+latency. Under namespace policy `any`, an owner can mint grants freely;
+serving held content to writers would make quarantine a distribution
+channel.
+
+An advance whose inspected set or packs contain an id already flagged
+in the repository MUST become `held`, with those ids as its flagged
+objects, including on a re-push. Only admin review under §16 MAY release
+this hold; an unavailable-publish deadline MUST NOT release it. The
+server MUST re-evaluate all advances in the repository blocked on that
+flag when it is released or its takedown replacement membership is
+published.
 
 The server MUST clamp `retry_after_ms` to 1,000–60,000 milliseconds, with
 an absent or zero value meaning 1,000, as with PendingVerification (§9.5).
@@ -1469,7 +1502,7 @@ commit to the deadline at which continued eligible unavailability
 permits clearance for that inspector. mkit specifies no default. The
 deadline MUST survive restarts; reattempts MUST NOT reset it. A
 request-size or §6.6-limit failure is never eligible (§11.1). A
-deadline MUST NOT release a deliberate hold, hit, flagged-id block, or
+deadline MUST NOT release a deliberate hold, hit, flagged-id hold, or
 dependency on another unpublished advance. Reaching it MUST NOT cancel
 scheduled follow-up inspection; a later verdict still requires action.
 

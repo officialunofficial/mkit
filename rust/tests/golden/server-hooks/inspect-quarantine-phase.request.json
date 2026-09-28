@@ -17,7 +17,7 @@
       },
       {
         "name": "refs/mkit/packmap/main",
-        "any": {},
+        "missing": {},
         "new": "ZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmY="
       }
     ],
@@ -45,5 +45,5 @@
     }
   ],
   "phase": "INSPECT_PHASE_QUARANTINE",
-  "inspectionId": "inspection:main:7:scanner-a"
+  "inspectionId": "inspection:main:1:scanner-a"
 }

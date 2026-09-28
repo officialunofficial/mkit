@@ -259,7 +259,8 @@ message InspectResponse {
   oneof verdict {
     // Accept this inspector's inspected content; SPEC-SERVER §11.
     InspectPass pass = 1;
-    // Hold the advance pending re-inspection or admin release; SPEC-SERVER §11.
+    // Hold before publication, or suspend flagged content after publication,
+    // pending re-inspection or admin release; SPEC-SERVER §11.
     InspectQuarantine quarantine = 2;
     // Pre-receive denial or post-commit takedown hit; SPEC-SERVER §11.
     Deny reject = 3;

@@ -213,7 +213,10 @@ fn inspection_and_writer_view_goldens() {
     };
     let request = read("inspect-quarantine-phase.request.json");
     assert_eq!(request["phase"], "INSPECT_PHASE_QUARANTINE");
-    assert!(!request["inspectionId"].as_str().unwrap().is_empty());
+    assert_eq!(request["inspectionId"], "inspection:main:1:scanner-a");
+    for ref_change in request["operation"]["refs"].as_array().unwrap() {
+        assert_eq!(ref_change["missing"], serde_json::json!({}));
+    }
     let objects = request["objects"].as_array().unwrap();
     let kinds: BTreeSet<_> = objects
         .iter()

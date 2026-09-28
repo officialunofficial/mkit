@@ -310,7 +310,8 @@ message GetServerInfoResponse {
   uint32 max_delta_chain_depth = 16;   // SPEC-SERVER §9.8; 0 when indexed mode is off
   // Field 17 is reserved for lease discovery.
   // Whether async inspection is configured; writers MUST sign reads to see
-  // pending or held content, including sync holds when false (SPEC-SERVER §10).
+  // non-held pending content. Held content is hidden from every caller,
+  // including with sync holds when false (SPEC-SERVER §§10–11).
   bool async_inspection = 18;
 }
 

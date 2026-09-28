@@ -196,7 +196,7 @@ headers or a bearer token. The response MAY be cached with
 | `namespace_policy` | `allowlist`, `any`, or `single-repository` (§7.5). `single-repository` is advertised, never configured. |
 | `index_fanout` | The fixed object-id-prefix fan-out of the deployment's repository index (§7.9). The default is 4096. |
 | `max_delta_chain_depth` | Delta-chain depth cap (SPEC-SERVER §9.8), default 50 in indexed mode; `0` when indexed mode is off. |
-| `async_inspection` | Whether any asynchronous inspector is configured (SPEC-SERVER §10–§11). Writers MUST sign reads to see pending or held content, including a synchronous hold when this field is false. |
+| `async_inspection` | Whether any asynchronous inspector is configured (SPEC-SERVER §10–§11). Writers MUST sign reads to see their own pending content that is not held. Held content is hidden from every caller, including when this field is false and a synchronous inspector holds it. |
 
 A client MUST NOT assume atomic advance without `atomic_advance = true`
 from this call. `atomic_advance` replaces the client-side opt-in of v1
@@ -868,8 +868,9 @@ A server processes a signed write in this order:
 
 For a unary write, steps 4 to 6 commit together in the one transaction
 required above. §7.7 states what each RPC's apply writes. A challenge,
-a `PendingVerification` answer (§7.6), and a membership-lag `unavailable`
-(SPEC-SERVER §9.4) are never stored as replay results: the
+a `PendingVerification` answer (§7.6), a membership-lag `unavailable`
+(SPEC-SERVER §9.4), and a synchronous inspector's `fail_closed`
+`unavailable` (SPEC-SERVER §11.2) MUST NOT be stored as replay results: the
 server leaves no record for the attempt, and removes any `in_flight` record it
 inserted, so a retry with the same nonce is evaluated again from step 2.
 
@@ -1163,6 +1164,9 @@ same upload session, never `AlreadyPresent`. Membership is eventually
 consistent (§7.9), so a server MAY return a ticket for a pack that is
 already a member. That costs only a re-upload.
 `AlreadyPresent` and a returned live ticket run no admission.
+When inspection hides a pack because it contains a flagged or held id,
+`BeginUpload` MUST NOT return `AlreadyPresent` for it and MUST answer as
+if the pack were absent (SPEC-SERVER §10.3).
 
 **Ticket token.** `token` is an opaque, server-authenticated value that
 binds the ticket id, audience, repository, signer, `pack_id`, `bytes`,
