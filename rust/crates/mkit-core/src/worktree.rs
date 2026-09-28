@@ -425,7 +425,7 @@ fn hash_pending_files<S: ObjectSink + Sync + ?Sized>(
 ) -> WorktreeResult<()> {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let threads = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        let threads = available_threads();
         if threads > 1 && misses.len() >= FILE_HASH_MISSES_PER_THREAD.saturating_mul(threads) {
             let results = hash_pending_files_parallel(sink, source, misses, threads)?;
             apply_hash_results(misses, results, entries, observations);
@@ -472,10 +472,8 @@ fn hash_one_pending_file<S: ObjectSink + ?Sized>(
     Ok((h, entry_mode_from_file_metadata(&opened_meta), observation))
 }
 
-/// Parallel branch of [`hash_pending_files`]: split `misses` into
-/// `threads` contiguous chunks and hash each chunk sequentially on its
-/// own scoped thread, exactly [`probe_staged_objects_parallel`]'s
-/// chunking shape.
+/// Parallel branch of [`hash_pending_files`]: [`chunked_scoped_map`]
+/// over `misses`, hashing each one via [`hash_one_pending_file`].
 #[cfg(not(target_arch = "wasm32"))]
 fn hash_pending_files_parallel<S: ObjectSink + Sync + ?Sized>(
     sink: &S,
@@ -483,51 +481,7 @@ fn hash_pending_files_parallel<S: ObjectSink + Sync + ?Sized>(
     misses: &[PendingFileHash<'_>],
     threads: usize,
 ) -> WorktreeResult<Vec<(Hash, EntryMode, Option<StatObservation>)>> {
-    let chunk_size = misses.len().div_ceil(threads).max(1);
-    let mut out: Vec<Option<(Hash, EntryMode, Option<StatObservation>)>> =
-        (0..misses.len()).map(|_| None).collect();
-    let mut first_err: Option<WorktreeError> = None;
-
-    std::thread::scope(|scope| {
-        let handles: Vec<_> = misses
-            .chunks(chunk_size)
-            .enumerate()
-            .map(|(chunk_idx, chunk)| {
-                let base = chunk_idx * chunk_size;
-                scope.spawn(move || {
-                    let mut results = Vec::with_capacity(chunk.len());
-                    for m in chunk {
-                        match hash_one_pending_file(sink, source, m) {
-                            Ok(r) => results.push(r),
-                            Err(e) => return (base, results, Some(e)),
-                        }
-                    }
-                    (base, results, None)
-                })
-            })
-            .collect();
-        for handle in handles {
-            let (base, results, err) = handle
-                .join()
-                .expect("file-hash worker thread panicked");
-            for (i, r) in results.into_iter().enumerate() {
-                out[base + i] = Some(r);
-            }
-            if let Some(e) = err
-                && first_err.is_none()
-            {
-                first_err = Some(e);
-            }
-        }
-    });
-
-    match first_err {
-        Some(e) => Err(e),
-        None => Ok(out
-            .into_iter()
-            .map(|o| o.expect("every slot filled when no error was reported"))
-            .collect()),
-    }
+    chunked_scoped_map(misses, threads, |m| hash_one_pending_file(sink, source, m))
 }
 
 /// Write [`hash_pending_files`]'s per-miss results back into `entries`
@@ -795,6 +749,103 @@ pub fn build_tree_from_index_with<S: ObjectSink + ?Sized>(
     write_node(sink, &root)
 }
 
+/// `std::thread::available_parallelism()`, cached process-wide — the
+/// core count never changes during a process's lifetime, so every
+/// native fan-out crossover check in this module (there are several,
+/// and [`build_tree_inner`]'s recurses once per directory) shares one
+/// syscall instead of paying it again at every call site/recursion.
+#[cfg(not(target_arch = "wasm32"))]
+fn available_threads() -> usize {
+    static THREADS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *THREADS.get_or_init(|| {
+        std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+    })
+}
+
+/// Shared chunk+scoped-thread+join scaffolding behind this module's two
+/// order-preserving, short-circuit-on-first-error native fan-outs
+/// ([`probe_staged_objects_parallel`], [`hash_pending_files_parallel`]):
+/// split `items` into `threads` contiguous chunks, run each chunk's
+/// items through `f` sequentially on its own scoped thread, and join.
+/// `std::thread::scope` (not a persistent pool) keeps `mkit-core`
+/// dependency-neutral and wasm-clean.
+///
+/// (`pack::stage_raw_entries_parallel` looks similar but isn't folded
+/// in here: it *defers* rather than short-circuits on an item error, via
+/// a `first_failure` atomic shared across every chunk so a later pack
+/// position can still be skipped once an earlier one fails — genuinely
+/// different result semantics from this helper's per-chunk
+/// short-circuit, not just a different call shape.)
+///
+/// Every item's `f` output lands in the returned `Vec` at that item's
+/// original index in `items`, regardless of which thread computed it.
+/// A chunk stops calling `f` on its own remaining items as soon as one
+/// of them errors, but a concurrently-running chunk is not signalled to
+/// stop early; on any error, which chunk's is the one returned is
+/// unspecified — the same accepted nondeterminism
+/// `probe_staged_objects_parallel` had before this helper existed.
+///
+/// # Panics
+/// Propagates a worker thread's panic once `std::thread::scope` joins
+/// it, rather than swallowing it.
+#[cfg(not(target_arch = "wasm32"))]
+fn chunked_scoped_map<T, U, E>(
+    items: &[T],
+    threads: usize,
+    f: impl Fn(&T) -> Result<U, E> + Sync,
+) -> Result<Vec<U>, E>
+where
+    T: Sync,
+    U: Send,
+    E: Send,
+{
+    let chunk_size = items.len().div_ceil(threads).max(1);
+    let mut out: Vec<Option<U>> = (0..items.len()).map(|_| None).collect();
+    let mut first_err: Option<E> = None;
+
+    std::thread::scope(|scope| {
+        let f = &f;
+        let handles: Vec<_> = items
+            .chunks(chunk_size)
+            .enumerate()
+            .map(|(chunk_idx, chunk)| {
+                let base = chunk_idx * chunk_size;
+                scope.spawn(move || {
+                    let mut results = Vec::with_capacity(chunk.len());
+                    for it in chunk {
+                        match f(it) {
+                            Ok(u) => results.push(u),
+                            Err(e) => return (base, results, Some(e)),
+                        }
+                    }
+                    (base, results, None)
+                })
+            })
+            .collect();
+        for handle in handles {
+            let (base, results, err) = handle
+                .join()
+                .expect("chunked fan-out worker thread panicked");
+            for (i, u) in results.into_iter().enumerate() {
+                out[base + i] = Some(u);
+            }
+            if let Some(e) = err
+                && first_err.is_none()
+            {
+                first_err = Some(e);
+            }
+        }
+    });
+
+    match first_err {
+        Some(e) => Err(e),
+        None => Ok(out
+            .into_iter()
+            .map(|o| o.expect("every slot filled when no error was reported"))
+            .collect()),
+    }
+}
+
 /// Staged-object check for every `(path, mode, hash)` triple in
 /// `entries`, in order — [`build_tree_from_index_with`]'s batched pass-2
 /// step. Below a small-batch threshold this runs a plain sequential
@@ -818,7 +869,7 @@ fn probe_staged_objects(
         // `pack::stage_raw_entries`, tuned here by the
         // `status_snapshot` bench.
         const ENTRIES_PER_THREAD: usize = 32;
-        let threads = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        let threads = available_threads();
         if threads > 1 && entries.len() >= ENTRIES_PER_THREAD.saturating_mul(threads) {
             return probe_staged_objects_parallel(store, entries, verify, threads);
         }
@@ -828,11 +879,17 @@ fn probe_staged_objects(
     })
 }
 
-/// Parallel branch of [`probe_staged_objects`]: split `entries` into
-/// `threads` contiguous chunks and check each chunk sequentially on its
-/// own scoped thread. `std::thread::scope` (not a persistent pool)
-/// mirrors `pack::stage_raw_entries_parallel`'s choice for the same
-/// reason: `mkit-core` stays dependency-neutral and wasm-clean.
+/// Parallel branch of [`probe_staged_objects`]: [`chunked_scoped_map`]
+/// over `entries`, checking each one via [`check_one_staged_object`] and
+/// discarding its (unit) results — only whether any entry errored
+/// matters here.
+///
+/// On an index with more than one entry pointing at a missing,
+/// malformed, or wrong-shape object, the specific error surfaced here
+/// depends on chunk/thread scheduling, not index position —
+/// `chunked_scoped_map`'s accepted nondeterminism. The tree build is
+/// rejected either way; only which error is reported can vary between
+/// runs.
 #[cfg(not(target_arch = "wasm32"))]
 fn probe_staged_objects_parallel(
     store: &ObjectStore,
@@ -840,40 +897,10 @@ fn probe_staged_objects_parallel(
     verify: bool,
     threads: usize,
 ) -> WorktreeResult<()> {
-    let chunk_size = entries.len().div_ceil(threads).max(1);
-    // On an index with more than one entry pointing at a missing,
-    // malformed, or wrong-shape object, the specific error surfaced
-    // here depends on chunk/thread scheduling, not index position —
-    // the same accepted nondeterminism as `mkit-cli`'s
-    // `try_map_seq_or_par` fan-outs and `pack::stage_raw_entries_parallel`.
-    // The tree build is rejected either way; only which error is
-    // reported can vary between runs.
-    let mut first_err: Option<WorktreeError> = None;
-    std::thread::scope(|scope| {
-        let handles: Vec<_> = entries
-            .chunks(chunk_size)
-            .map(|chunk| {
-                scope.spawn(move || {
-                    chunk.iter().find_map(|&(path, mode, hash)| {
-                        check_one_staged_object(store, path, mode, hash, verify).err()
-                    })
-                })
-            })
-            .collect();
-        for handle in handles {
-            if let Some(e) = handle
-                .join()
-                .expect("staged-object check worker thread panicked")
-                && first_err.is_none()
-            {
-                first_err = Some(e);
-            }
-        }
-    });
-    match first_err {
-        Some(e) => Err(e),
-        None => Ok(()),
-    }
+    chunked_scoped_map(entries, threads, |&(path, mode, hash)| {
+        check_one_staged_object(store, path, mode, hash, verify)
+    })
+    .map(|_: Vec<()>| ())
 }
 
 // Pure per-entry step shared by both branches of
@@ -2956,6 +2983,59 @@ mod tests {
         fs::write(f2_dir.path().join("locked.txt"), b"cached content").unwrap();
         let plain = build_tree(&store2, f2_dir.path()).unwrap();
         assert_eq!(plain, tree_h, "cache hit must not change tree hashes");
+    }
+
+    /// `hash_pending_files_parallel`'s fan-out branch only fires once a
+    /// single directory has at least `FILE_HASH_MISSES_PER_THREAD *`
+    /// the machine's thread count worth of cache-miss files — every
+    /// other `build_tree` test in this module stays well under that, so
+    /// none of them ever exercise it. 4096 distinct-content files is
+    /// comfortably above that threshold on any real machine (including
+    /// CI runners with far more than 4 cores), forcing the parallel
+    /// branch to run rather than just its sequential fallback.
+    ///
+    /// Every file's expected content is unique and includes its index,
+    /// so a slot/result misalignment in the parallel path (a chunk's
+    /// results landing at the wrong base offset, or `entries`/`misses`
+    /// getting out of step) would surface here as an entry whose hash
+    /// belongs to a different file than its name says.
+    #[test]
+    fn build_tree_parallel_fanout_assigns_each_hash_to_the_right_file() {
+        const N: usize = 4096;
+
+        let (_sd, store) = fresh_store();
+        let work = TempDir::new().unwrap();
+        for i in 0..N {
+            fs::write(work.path().join(format!("f{i:04}.txt")), format!("content {i}")).unwrap();
+        }
+
+        // No index passed: every file is untracked, so every one is a
+        // cache miss (never a stat-match short-circuit) regardless of
+        // stat-cache behavior.
+        let h = build_tree(&store, work.path()).unwrap();
+        let Object::Tree(t) = store.read_object(&h).unwrap() else {
+            panic!("expected tree");
+        };
+        assert_eq!(t.entries.len(), N);
+
+        let mut seen_hashes = std::collections::HashSet::with_capacity(N);
+        for (i, entry) in t.entries.iter().enumerate() {
+            // Tree entries are sorted by name, and zero-padded decimal
+            // names sort in the same order as their numeric index.
+            let expected_name = format!("f{i:04}.txt");
+            assert_eq!(entry.name, expected_name.as_bytes(), "entry {i} out of order");
+
+            let expected_content = format!("content {i}");
+            let expected_hash = hash_file_object(expected_content.as_bytes()).unwrap();
+            assert_eq!(
+                entry.object_hash, expected_hash,
+                "entry {i} ({expected_name}) has the wrong hash — parallel slot misalignment?"
+            );
+            assert!(
+                seen_hashes.insert(entry.object_hash),
+                "entry {i} repeats another entry's hash (or the ZERO placeholder)"
+            );
+        }
     }
 
     /// Replace-by-rename with preserved mtime+size must be caught by
