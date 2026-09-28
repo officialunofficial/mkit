@@ -1,0 +1,29 @@
+{
+  "blake3": "b3f0ec074b7f08aa9c5999c4fbb5d9033a2b05b965636ffd8cb0fb45d77965ba",
+  "commit": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
+  "expect": {
+    "accept": false,
+    "expand_to": null,
+    "reject_reason": "span_range_outside"
+  },
+  "name": "neg_end_beyond_span",
+  "recipe": {
+    "segments": [
+      {
+        "length": 50,
+        "offset": 0,
+        "source": "span_two_chunks.bin"
+      },
+      {
+        "hex": "022ce6"
+      },
+      {
+        "length": 148089,
+        "offset": 53,
+        "source": "span_two_chunks.bin"
+      }
+    ]
+  },
+  "schema_version": 1,
+  "size": 148142
+}
