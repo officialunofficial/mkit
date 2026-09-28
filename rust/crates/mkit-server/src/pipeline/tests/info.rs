@@ -44,7 +44,10 @@ fn server_info_defaults_and_custom_limits_read_no_store() {
 fn server_info_admission_and_multi_always_require_begin_upload() {
     for multi in [false, true] {
         for any in [false, true] {
-            let mut c = cfg(AuthMode::Open);
+            let mut c = cfg(authv2());
+            c.ticket_keys = Some(
+                crate::upload::token::TicketKeys::new(vec![("test".into(), [7; 32])]).unwrap(),
+            );
             c.begin_upload_threshold_bytes = 123;
             if multi {
                 let policy = if any {
@@ -89,6 +92,29 @@ fn server_info_admission_and_multi_always_require_begin_upload() {
     assert!(!e.pipe.server_info().admission);
     assert_eq!(e.pipe.server_info().begin_upload_threshold_bytes, 0);
     assert_eq!(e.pipe.meta.calls(), 0);
+}
+
+#[test]
+fn admission_requires_auth_v2_and_ticket_keys_at_startup() {
+    for auth in [AuthMode::Open, authv2()] {
+        let c = cfg(auth);
+        let err = Pipeline::new(
+            MemoryBlobStore::default(),
+            store(&clock()),
+            with_admission(Fixed(AdmissionDecision::Deny(
+                ServerError::permission_denied("unused"),
+            ))),
+            c,
+            clock(),
+            Arc::new(crate::NoopMetrics),
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), Code::InvalidArgument);
+        assert_eq!(
+            err.public_message(),
+            "admission requires auth v2 and upload ticket keys"
+        );
+    }
 }
 
 #[test]

@@ -24,6 +24,36 @@ fn root() -> Partition {
     Partition::Namespace(NamespaceKey::deployment_default())
 }
 
+#[test]
+fn upload_marker_r2_key_is_not_a_pack_key() {
+    let bucket = SimBucket::default();
+    let store = R2BlobStore::new(bucket, PACKS_KEYSPACE);
+    let content = b"marker bytes";
+    let marker = BlobKey::upload_marker(hash(content));
+    block_on(async {
+        let mut sink = store.begin(marker, content.len() as u64).await.unwrap();
+        sink.write(Bytes::from_static(content)).await.unwrap();
+        sink.commit().await.unwrap();
+        assert_eq!(
+            store.object_key(&marker),
+            format!("upload-markers/v1/{}", marker.to_hex())
+        );
+        assert!(store.head(&marker).await.unwrap().is_some());
+        assert!(
+            store
+                .head(&BlobKey::new(hash(content)))
+                .await
+                .unwrap()
+                .is_none()
+        );
+    });
+    let prefixed = R2BlobStore::new(SimBucket::default(), "tenant/a/packs");
+    assert_eq!(
+        prefixed.object_key(&marker),
+        format!("tenant/a/upload-markers/v1/{}", marker.to_hex())
+    );
+}
+
 /// A connection whose size counts free pages too: what the soft cap would
 /// see if `databaseSize` included the freelist.
 #[derive(Debug, Clone)]

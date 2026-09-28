@@ -1,21 +1,76 @@
 //! The blob contract (PRD §5.3): content-addressed, immutable bytes.
 //!
-//! Every concrete store is built for one keyspace: `packs` (today's
-//! `packs/<hex>`, where `BLAKE3(bytes) == key`) by default. M4 builds a
-//! second instance for the global object store (D32), so a new keyspace
-//! needs no trait change. Resumable multipart uploads are a sub-trait
-//! (`MultipartBlobStore`, WP-1.11).
+//! A [`BlobKey`] selects either `packs/<hex>` or the upload marker namespace;
+//! both require `BLAKE3(bytes) == key`. Pack RPCs construct only pack keys.
+//! Resumable multipart uploads are a sub-trait (`MultipartBlobStore`, WP-1.11).
 
 use core::fmt;
 use core::future::Future;
 
 use bytes::Bytes;
+use mkit_core::hash::{Hash, to_hex_bytes};
+use mkit_core::protocol::PackKey;
 
 use super::error::StoreError;
 use crate::rt::{BoxStream, MaybeSend, MaybeSync};
 
-/// A blob's key.
-pub type BlobKey = mkit_core::protocol::PackKey;
+/// A blob's content hash and storage namespace. Pack RPCs construct only
+/// `Pack` keys, so an upload marker cannot be fetched as a pack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BlobKey(pub Hash, BlobNamespace);
+
+/// The physical namespace of a content-addressed blob.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum BlobNamespace {
+    /// Pack bytes.
+    Pack,
+    /// Proof that a ticket holder streamed and verified a pack.
+    UploadMarker,
+}
+
+impl BlobKey {
+    /// Construct a pack key.
+    #[must_use]
+    pub const fn new(hash: Hash) -> Self {
+        Self(hash, BlobNamespace::Pack)
+    }
+
+    /// Construct a pack key.
+    #[must_use]
+    pub const fn from_hash(hash: Hash) -> Self {
+        Self::new(hash)
+    }
+
+    /// Construct an upload marker key.
+    #[must_use]
+    pub const fn upload_marker(hash: Hash) -> Self {
+        Self(hash, BlobNamespace::UploadMarker)
+    }
+
+    /// Content hash bytes.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &Hash {
+        &self.0
+    }
+
+    /// Lowercase hexadecimal content hash.
+    #[must_use]
+    pub fn to_hex(&self) -> String {
+        to_hex_bytes(&self.0)
+    }
+
+    /// Physical namespace.
+    #[must_use]
+    pub const fn namespace(&self) -> BlobNamespace {
+        self.1
+    }
+}
+
+impl From<PackKey> for BlobKey {
+    fn from(key: PackKey) -> Self {
+        Self::new(key.0)
+    }
+}
 
 /// An inclusive byte range, as in HTTP `Range`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

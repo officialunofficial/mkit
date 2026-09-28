@@ -233,7 +233,7 @@ async fn missing_and_pack_guards<N: NamespaceStore>(
                 .err()
                 .unwrap()
                 .code(),
-            Code::Unimplemented
+            Code::FailedPrecondition
         );
     }
 }

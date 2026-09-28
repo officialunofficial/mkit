@@ -16,15 +16,16 @@ use mkit_transport_file::{create_dir_all_durably, sync_dir, temp_path};
 
 use super::{io_error, unavailable};
 use crate::store::{
-    BlobBody, BlobKey, BlobMeta, BlobStore, ByteRange, CommitOutcome, MAX_BLOB_PIECE_BYTES,
-    PackSink, StoreError,
+    BlobBody, BlobKey, BlobMeta, BlobNamespace, BlobStore, ByteRange, CommitOutcome,
+    MAX_BLOB_PIECE_BYTES, PackSink, StoreError,
 };
 
 /// The size of each piece of a streamed body.
 pub(super) const READ_BLOCK: usize = 64 * 1024;
 
-/// A [`BlobStore`] over one keyspace directory, `<root>/<keyspace>/<64-hex>`
-/// (`packs` by default). An upload streams into a temp file in that
+/// A [`BlobStore`] over `<root>/<keyspace>/<64-hex>` for packs (`packs` by
+/// default), and `<root>/upload-markers/v1/<64-hex>` for upload markers.
+/// An upload streams into a temp file in its destination
 /// directory (named like `FileTransport`'s own, `.<hex>.tmp.<pid>.<seq>`)
 /// while hashing it, and becomes visible only once its BLAKE3 and length
 /// verify: fsync, rename over the destination, fsync the directory. A
@@ -84,7 +85,11 @@ impl FsBlobStore {
     }
 
     fn path(&self, key: &BlobKey) -> PathBuf {
-        self.dir().join(key.to_hex())
+        match key.namespace() {
+            BlobNamespace::Pack => self.dir(),
+            BlobNamespace::UploadMarker => self.root.join("upload-markers/v1"),
+        }
+        .join(key.to_hex())
     }
 
     /// Remove the temp files crashed uploads left in the keyspace
@@ -284,7 +289,10 @@ impl BlobStore for FsBlobStore {
     type Sink = FsPackSink;
 
     async fn begin(&self, key: BlobKey, len: u64) -> Result<FsPackSink, StoreError> {
-        let dir = self.dir();
+        let dir = match key.namespace() {
+            BlobNamespace::Pack => self.dir(),
+            BlobNamespace::UploadMarker => self.root.join("upload-markers/v1"),
+        };
         create_dir_all_durably(&dir).map_err(io_error)?;
         let dest = self.path(&key);
         let tmp = temp_path(&dest).map_err(io_error)?;
@@ -361,7 +369,9 @@ impl BlobStore for FsBlobStore {
             Err(e) if e.kind() == ErrorKind::NotFound => return Ok(false),
             Err(e) => return Err(io_error(e)),
         }
-        sync_dir(&self.dir()).map_err(io_error)?;
+        if let Some(dir) = self.path(key).parent() {
+            sync_dir(dir).map_err(io_error)?;
+        }
         Ok(true)
     }
 }

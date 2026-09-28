@@ -152,10 +152,24 @@ impl<B: ObjectBucket> R2BlobStore<B> {
         self
     }
 
-    /// The object key of `key`: `<keyspace>/<hex>`.
+    /// The object key of `key`: `<keyspace>/<hex>` for packs, or the sibling
+    /// `upload-markers/v1/<hex>` namespace for upload markers.
     #[must_use]
     pub fn object_key(&self, key: &BlobKey) -> String {
-        format!("{}/{}", self.keyspace, key.to_hex())
+        match key.namespace() {
+            mkit_server::BlobNamespace::Pack => format!("{}/{}", self.keyspace, key.to_hex()),
+            mkit_server::BlobNamespace::UploadMarker => {
+                let prefix = self
+                    .keyspace
+                    .rsplit_once('/')
+                    .map_or("", |(prefix, _)| prefix);
+                if prefix.is_empty() {
+                    format!("upload-markers/v1/{}", key.to_hex())
+                } else {
+                    format!("{prefix}/upload-markers/v1/{}", key.to_hex())
+                }
+            }
+        }
     }
 
     /// Fail the next commit at its withheld final byte, after the hash

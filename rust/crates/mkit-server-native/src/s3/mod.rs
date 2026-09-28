@@ -80,7 +80,9 @@ use bytes::{Bytes, BytesMut};
 use futures_util::{Stream, StreamExt as _};
 use mkit_server::storage_error::{StorageOp, describe_and_map};
 use mkit_server::store::MAX_BLOB_PIECE_BYTES;
-use mkit_server::{BlobBody, BlobKey, BlobMeta, BlobStore, ByteRange, Clock, Redactor, StoreError};
+use mkit_server::{
+    BlobBody, BlobKey, BlobMeta, BlobNamespace, BlobStore, ByteRange, Clock, Redactor, StoreError,
+};
 use mkit_transport_s3::sigv4;
 pub use mkit_transport_s3::sigv4::Credentials;
 use reqwest::header::{self, HeaderMap, HeaderName, HeaderValue};
@@ -363,15 +365,22 @@ impl S3BlobStore {
         self
     }
 
-    /// The object key of `key`: `<prefix/><keyspace>/<hex>`.
+    /// The object key of `key`: `<prefix/><keyspace>/<hex>` for packs,
+    /// or `<prefix/>upload-markers/v1/<hex>` for upload markers.
     #[must_use]
     pub fn object_key(&self, key: &BlobKey) -> String {
-        let base = &self.object_base[self.bucket.len() + 2..];
-        format!("{base}{}", key.to_hex())
+        self.object_path(key)[self.bucket.len() + 2..].to_owned()
     }
 
     fn object_path(&self, key: &BlobKey) -> String {
-        format!("{}{}", self.object_base, key.to_hex())
+        match key.namespace() {
+            BlobNamespace::Pack => format!("{}{}", self.object_base, key.to_hex()),
+            BlobNamespace::UploadMarker => {
+                let base = self.object_base.trim_end_matches('/');
+                let root = base.rsplit_once('/').map_or(base, |(root, _)| root);
+                format!("{root}/upload-markers/v1/{}", key.to_hex())
+            }
+        }
     }
 
     /// Send a bodiless request.

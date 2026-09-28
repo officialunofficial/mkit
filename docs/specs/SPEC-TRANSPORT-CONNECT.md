@@ -852,10 +852,13 @@ A server processes a signed write in this order:
      `invalid_argument`;
    - a `committed` operation returns its stored result;
    - an `in_flight` operation returns a retryable `aborted`, without
-     reaching admission.
+     reaching admission. A single-repository deployment MAY resume an
+     un-ticketed `UploadPack` with the same signed nonce by re-reading its
+     stream instead.
 
-   Only a new operation continues. So a retry never presents a spent payment
-   credential again, and one signer's result is never served to another.
+   Only a new operation continues beyond this step, apart from the scoped
+   upload resume above. So a retry never presents a spent payment credential
+   again, and one signer's result is never served to another.
 3. **Authorize** the write (§7.5), then run **admission** (§5.1)
    (for `BeginUpload`, after the live-ticket check of §7.7). A
    challenge or a denial allocates nothing. Because the lookup precedes
@@ -876,9 +879,10 @@ inserted, so a retry with the same nonce is evaluated again from step 2.
 ("Signed reads" above): a read is idempotent, so the server checks only the
 signature and the validity window.
 
-An upload no longer resumes through its replay record. An interrupted upload
-resumes through its ticket and part receipts (§7.6), under the per-RPC
-lifecycle of §7.7. An unreachable ledger or failed quota read fails closed.
+A ticketed upload resumes through its ticket and part receipts (§7.6),
+under the per-RPC lifecycle of §7.7. The single-repository un-ticketed
+`UploadPack` exception above may resume through its replay record. An
+unreachable ledger or failed quota read fails closed.
 
 `AUTH_AUDIENCE` must be explicitly configured for every deployment and local
 development origin.
@@ -1268,6 +1272,8 @@ deployment, packs under the threshold MAY skip `BeginUpload`; a stored
 pack is a member. When the deployment runs admission, the threshold is
 0. An upload that needs a ticket and carries none is
 `failed_precondition`.
+With a threshold of 0, even an empty pack needs a ticket; `BeginUpload`
+refuses zero bytes. Clients never upload empty packs.
 
 **Membership.** On a multi-repository deployment, a pack becomes a
 member of the repository only at the `AdvanceRefs` apply that consumes
@@ -1553,7 +1559,7 @@ reference Worker).
 | Every `TransportError` variant a server can raise has exactly one Connect code it maps to; a client's inverse mapping is mechanical, not heuristic. | §5's table. |
 | No RPC on one repository reads or changes another repository's refs, pack membership, or replay records. | §7.4 isolation; the `X-Repository` carriage rule. |
 | A write is authorized, or rejected with nothing allocated, before any quota or replay state is touched. | §7.5 order. |
-| A retry of a committed signed write returns the stored result and never reaches admission; a retry of an in-flight one gets a retryable `aborted`. | §7.1 order: authenticate, look up, then authorize and admit. |
+| A retry of a committed signed write returns the stored result and never reaches admission; a retry of an in-flight one gets a retryable `aborted`, except that a single-repository deployment MAY resume an un-ticketed `UploadPack` by re-reading its stream. | §7.1 order and its scoped upload exception. |
 | A challenged or denied request changes no state, and no challenge or `PendingVerification` answer is stored as a replay result. | §5.1 "No state on challenge"; §7.1. |
 | A challenge is HTTP 402 with `permission_denied`, only on a unary RPC, and is never retried automatically. | §5.1; §5; SPEC-TRANSPORT §7. |
 | A client attaches only allowlisted helper headers and never a hard-reserved one, whatever the configuration says. | §5.1 header allowlist and hard-reserved headers. |

@@ -66,6 +66,17 @@ impl PipelineConfig {
 }
 
 impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
+    /// Threshold used by discovery and un-ticketed `UploadPack` enforcement.
+    pub(super) fn effective_threshold(&self) -> u64 {
+        if !self.hooks.admission().is_default()
+            || matches!(self.cfg.addressing, Addressing::Multi(_))
+        {
+            0
+        } else {
+            self.cfg.begin_upload_threshold_bytes
+        }
+    }
+
     /// Configured deployment information. Never resolves a repository or
     /// reads a store; the atomic flag comes from store capabilities only.
     #[must_use]
@@ -79,13 +90,7 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             max_parts: self.cfg.max_parts,
             // TODO(WP-1.28): honour page_size up to this bound
             max_list_refs_page_size: self.cfg.max_list_refs_page_size,
-            begin_upload_threshold_bytes: if admission
-                || matches!(self.cfg.addressing, Addressing::Multi(_))
-            {
-                0
-            } else {
-                self.cfg.begin_upload_threshold_bytes
-            },
+            begin_upload_threshold_bytes: self.effective_threshold(),
             atomic_advance: self.capabilities().atomic_advance,
             indexed_mode: false,
             admission,

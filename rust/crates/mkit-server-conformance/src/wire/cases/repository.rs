@@ -303,8 +303,67 @@ pub(super) async fn packs_need_membership(ctx: Ctx) -> CaseResult {
     let headers = signer.sign(&envelope).headers;
     let error = ctx.upload_with(&upload_msgs(pack, 2), &headers).await?;
     ensure!(
-        error.as_ref().map(|e| e.code.as_str()) == Some("unimplemented"),
+        error.as_ref().map(|e| e.code.as_str()) == Some("failed_precondition"),
         "Multi UploadPack: {error:?}"
     );
+    Ok(())
+}
+
+pub(super) async fn upload_needs_ticket(ctx: Ctx) -> CaseResult {
+    let (repository, _) = identities(&ctx, "needs-ticket", "unused")?;
+    let pack = b"multi needs ticket";
+    let id = hash(pack);
+    let signer = ctx.v2_signer("repository-a")?;
+    let mut envelope = signer.envelope(
+        Rpc::UploadPack.procedure(),
+        pack_commitment(&id, pack.len() as u64),
+    );
+    repository.clone_into(&mut envelope.repository);
+    let headers = signer.sign(&envelope).headers;
+    let error = ctx.upload_with(&upload_msgs(pack, 2), &headers).await?;
+    ensure!(
+        error.as_ref().map(|e| e.code.as_str()) == Some("failed_precondition"),
+        "Multi upload without ticket: {error:?}"
+    );
+    Ok(())
+}
+
+pub(super) async fn ticketed_upload_multi(ctx: Ctx) -> CaseResult {
+    use mkit_transport_connect::generated::__buffa::oneof::{
+        begin_upload_response::Result as BeginResult, upload_pack_request::Body as UploadBody,
+    };
+    use mkit_transport_connect::generated::{BeginUploadRequest, BeginUploadResponse};
+    let (repository, _) = identities(&ctx, "ticketed", "unused")?;
+    let pack = b"multi ticketed conformance pack";
+    let id = hash(pack);
+    let signer = ctx.v2_signer("repository-a")?;
+    let req = BeginUploadRequest {
+        r#ref: Some(ctx.head("main")),
+        pack_id: Some(id.to_vec()),
+        bytes: Some(pack.len() as u64),
+        ..Default::default()
+    };
+    let signed_begin = sign_unary(&signer, Rpc::BeginUpload, &req, |env| {
+        repository.clone_into(&mut env.repository);
+    });
+    let response: BeginUploadResponse =
+        want_ok(ctx.send(&signed_begin).await?, "Multi BeginUpload")?;
+    let Some(BeginResult::Ticket(ticket)) = response.result else {
+        return Err(Failure::Fail(
+            "Multi BeginUpload did not return a ticket".into(),
+        ));
+    };
+    let mut msgs = upload_msgs(pack, 2);
+    if let Some(UploadBody::Header(header)) = &mut msgs[0].body {
+        header.ticket_token = ticket.token;
+    }
+    let mut envelope = signer.envelope(
+        Rpc::UploadPack.procedure(),
+        pack_commitment(&id, pack.len() as u64),
+    );
+    repository.clone_into(&mut envelope.repository);
+    let headers = signer.sign(&envelope).headers;
+    let error = ctx.upload_with(&msgs, &headers).await?;
+    ensure!(error.is_none(), "Multi ticketed UploadPack: {error:?}");
     Ok(())
 }

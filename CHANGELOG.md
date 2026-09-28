@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server: ticketed `UploadPack` now verifies the ticket before reading data,
+  streams the full pack without metadata writes, and leaves a content-addressed
+  upload marker for later ticket consumption. The advertised BeginUpload
+  threshold is enforced; non-default admission requires auth v2 and ticket keys.
+
 - Server: implement authenticated `BeginUpload` tickets with stateless BLAKE3 MAC
   tokens, rotation by key id, admission-free live-ticket/member results, open-ticket
   caps, and byte-identical replay. Configure native keys with `--ticket-key-file`
