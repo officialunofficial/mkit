@@ -993,46 +993,56 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         }
         .await;
         if let Some((key, session, fresh_id)) = opened_session {
-            // A raced Existing ticket can have the same reservation-derived
-            // id but a different storage session. Compare the authenticated
-            // session in the answer before deciding that this one was stored.
-            let committed_fresh = match &write_result {
-                Ok(StoredResult::BeginUpload(BeginUploadResult::Ticket { id, token, .. }))
-                    if *id == fresh_id =>
-                {
-                    self.cfg
-                        .ticket_keys
-                        .as_ref()
-                        .and_then(|keys| keys.verify(token, 0).ok())
-                        .is_some_and(|claims| claims.upload_session == session)
-                }
-                _ => false,
-            };
-            // An apply can commit and then lose its acknowledgement. Check the
-            // row before reclaiming the session; if the check itself fails,
-            // retain the session for the backend lifecycle cleanup.
-            let stored_fresh = if write_result.is_err() {
-                match self.meta.get(&p, &keys::ticket(&fresh_id)).await {
-                    Ok(Some(raw)) => codec::decode_ticket(&raw).ok().is_none_or(|ticket| {
-                        ticket.upload_session.as_deref() == Some(session.as_slice())
-                    }),
-                    Ok(None) => false,
-                    Err(err) => {
-                        tracing::warn!(error = %err, "could not confirm multipart ticket after failed write");
-                        true
-                    }
-                }
-            } else {
-                false
-            };
-            if !committed_fresh
-                && !stored_fresh
-                && let Err(err) = self.blobs.abort(key, &session).await
-            {
-                tracing::warn!(error = %err, "failed to abort unused multipart session");
-            }
+            self.cleanup_opened_session(&p, &write_result, key, &session, fresh_id)
+                .await;
         }
         write_result
+    }
+
+    async fn cleanup_opened_session(
+        &self,
+        partition: &Partition,
+        result: &Result<StoredResult, ServerError>,
+        key: crate::store::BlobKey,
+        session: &[u8],
+        fresh_id: Hash,
+    ) {
+        // A raced Existing ticket can have the same reservation-derived id
+        // with a different session. Compare the authenticated answer.
+        let committed_fresh = match result {
+            Ok(StoredResult::BeginUpload(BeginUploadResult::Ticket { id, token, .. }))
+                if *id == fresh_id =>
+            {
+                self.cfg
+                    .ticket_keys
+                    .as_ref()
+                    .and_then(|keys| keys.verify(token, 0).ok())
+                    .is_some_and(|claims| claims.upload_session == session)
+            }
+            _ => false,
+        };
+        // An apply can commit and then lose its acknowledgement. Check the
+        // row before reclaiming; an unavailable or corrupt read is ambiguous.
+        let stored_fresh = if result.is_err() {
+            match self.meta.get(partition, &keys::ticket(&fresh_id)).await {
+                Ok(Some(raw)) => codec::decode_ticket(&raw)
+                    .ok()
+                    .is_none_or(|ticket| ticket.upload_session.as_deref() == Some(session)),
+                Ok(None) => false,
+                Err(err) => {
+                    tracing::warn!(error = %err, "could not confirm multipart ticket after failed write");
+                    true
+                }
+            }
+        } else {
+            false
+        };
+        if !committed_fresh
+            && !stored_fresh
+            && let Err(err) = self.blobs.abort(key, session).await
+        {
+            tracing::warn!(error = %err, "failed to abort unused multipart session");
+        }
     }
 
     /// Stage 1: the typed operation, for the procedure `a` was

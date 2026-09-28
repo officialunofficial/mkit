@@ -242,11 +242,11 @@ impl MultipartBlobStore for MemoryBlobStore {
             ));
         }
         let mut blobs = lock(&self.shared.blobs);
-        let outcome = if blobs.contains_key(&key) {
-            CommitOutcome::AlreadyPresent
-        } else {
-            blobs.insert(key, Bytes::from(bytes));
+        let outcome = if let std::collections::btree_map::Entry::Vacant(entry) = blobs.entry(key) {
+            entry.insert(Bytes::from(bytes));
             CommitOutcome::Created
+        } else {
+            CommitOutcome::AlreadyPresent
         };
         sessions.remove(session);
         Ok(outcome)
@@ -593,13 +593,13 @@ mod tests {
     #[test]
     fn multipart_parts_are_idempotent_and_bad_reupload_keeps_the_good_part() {
         let store = MemoryBlobStore::default();
-        let mut data = vec![0x31; MIN_PART_SIZE as usize];
+        let mut data = vec![0x31; usize::try_from(MIN_PART_SIZE).unwrap()];
         data.extend_from_slice(b"last part");
         let key = key_of(&data);
         let plan = PartPlan::new(data.len() as u64, MIN_PART_SIZE, 2).unwrap();
         let session = block_on(store.begin_multipart(key, plan.total(), plan.part_size())).unwrap();
-        let first = &data[..MIN_PART_SIZE as usize];
-        let last = &data[MIN_PART_SIZE as usize..];
+        let first = &data[..usize::try_from(MIN_PART_SIZE).unwrap()];
+        let last = &data[usize::try_from(MIN_PART_SIZE).unwrap()..];
         let cv0 = part_subtree_cv(&plan, 0, first).unwrap();
         let cv1 = part_subtree_cv(&plan, 1, last).unwrap();
 
@@ -618,7 +618,11 @@ mod tests {
         assert_eq!(upload_first(), tag0);
 
         let mut bad = block_on(store.begin_part(key, &session, &plan, 0, cv0)).unwrap();
-        block_on(bad.write(Bytes::from(vec![0x32; MIN_PART_SIZE as usize]))).unwrap();
+        block_on(bad.write(Bytes::from(vec![
+            0x32;
+            usize::try_from(MIN_PART_SIZE).unwrap()
+        ])))
+        .unwrap();
         assert!(matches!(
             block_on(bad.commit()),
             Err(StoreError::Invalid(_))

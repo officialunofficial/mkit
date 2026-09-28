@@ -41,13 +41,21 @@ pub(crate) fn mint(
     }
     let (id, key) = keys.receipt_signing_key();
     let mut out = Vec::with_capacity(2 + id.len() + 32 + 4 + 32 + 8 + 2 + tag.len() + 32);
-    out.extend_from_slice(&[VERSION, id.len() as u8]); // validated key id <= 32
+    let id_len = u8::try_from(id.len()).map_err(|_| {
+        ServerError::internal(
+            "invalid upload receipt signing key",
+            "key id exceeds wire limit",
+        )
+    })?;
+    out.extend_from_slice(&[VERSION, id_len]);
     out.extend_from_slice(id.as_bytes());
     out.extend_from_slice(ticket_id);
     out.extend_from_slice(&index.to_be_bytes());
     out.extend_from_slice(subtree);
     out.extend_from_slice(&len.to_be_bytes());
-    out.extend_from_slice(&(tag.len() as u16).to_be_bytes());
+    let tag_len = u16::try_from(tag.len())
+        .map_err(|_| ServerError::internal("upload part tag exceeds receipt limit", tag.len()))?;
+    out.extend_from_slice(&tag_len.to_be_bytes());
     out.extend_from_slice(tag);
     let mac = blake3::keyed_hash(&key, &out);
     out.extend_from_slice(mac.as_bytes());

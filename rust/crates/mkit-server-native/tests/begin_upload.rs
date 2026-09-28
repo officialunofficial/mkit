@@ -553,7 +553,10 @@ async fn present<N: NamespaceStore>(backend: N, clock: Arc<ManualClock>, mode: M
             .await
             .unwrap();
     } else {
-        let mut sink = blobs.begin(PackKey::from_hash(pack), 12).await.unwrap();
+        let mut sink = blobs
+            .begin(PackKey::from_hash(pack).into(), 12)
+            .await
+            .unwrap();
         sink.write(Bytes::from_static(b"present pack"))
             .await
             .unwrap();
@@ -825,7 +828,7 @@ async fn race<N: NamespaceStore + 'static>(
         );
     } else if reserved {
         let error = loser.unwrap_err();
-        assert_eq!(error.code(), Code::Aborted);
+        assert_eq!(error.code(), Code::Unavailable);
         assert_eq!(error.public_message(), "upload ticket race");
         assert!(error.code().is_retryable());
         assert_eq!(replay(&store, mode, loser_auth).await, None);

@@ -82,7 +82,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> PartUploadSession<'_,
         }
         self.sink
             .as_mut()
-            .expect("part sink is held until finish or abort")
+            .ok_or_else(|| ServerError::internal("part stream is closed", "missing part sink"))?
             .write(chunk)
             .await
             .map_err(|e| multipart_error(StorageOp::MultipartPart, e))?;
@@ -101,19 +101,21 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> PartUploadSession<'_,
                 "part data is shorter than the part length",
             ));
         }
-        let sink = self.sink.take().expect("part sink is held until finish");
+        let sink = self
+            .sink
+            .take()
+            .ok_or_else(|| ServerError::internal("part stream is closed", "missing part sink"))?;
         let tag = sink.commit().await.map_err(|e| match e {
             StoreError::Invalid(_) => {
                 ServerError::invalid_argument("part subtree hash does not match its commitment")
             }
             other => multipart_error(StorageOp::MultipartPart, other),
         })?;
+        let keys = self.pipe.cfg.ticket_keys.as_ref().ok_or_else(|| {
+            ServerError::internal("upload tickets are not configured", "ticket keys vanished")
+        })?;
         receipt::mint(
-            self.pipe
-                .cfg
-                .ticket_keys
-                .as_ref()
-                .expect("validated at open"),
+            keys,
             &self.ticket,
             self.index,
             &self.subtree,
@@ -248,11 +250,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     "wrong number of upload part receipts",
                 ));
             }
-            let keys = self
-                .cfg
-                .ticket_keys
-                .as_ref()
-                .expect("validated ticket keys");
+            let keys = self.cfg.ticket_keys.as_ref().ok_or_else(|| {
+                ServerError::internal("upload tickets are not configured", "ticket keys vanished")
+            })?;
             let mut cvs = Vec::with_capacity(receipts.len());
             let mut parts = Vec::with_capacity(receipts.len());
             let mut sum = 0_u64;

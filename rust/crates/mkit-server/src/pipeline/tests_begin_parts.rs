@@ -1,4 +1,4 @@
-//! BeginUpload session lifecycle and capability checks.
+//! `BeginUpload` session lifecycle and capability checks.
 
 use super::stream::Counting;
 use super::*;

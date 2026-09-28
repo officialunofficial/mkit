@@ -175,13 +175,13 @@ fn claims(blobs: &MemoryBlobStore, data: &[u8], signer: &SigningKey) -> TicketCl
 fn data(parts: usize, tail: usize) -> Vec<u8> {
     (0..=250_u8)
         .cycle()
-        .take((parts - 1) * MIN_PART_SIZE as usize + tail)
+        .take((parts - 1) * usize::try_from(MIN_PART_SIZE).unwrap() + tail)
         .collect()
 }
 
 fn part<'a>(plan: &PartPlan, data: &'a [u8], index: u32) -> &'a [u8] {
-    let start = plan.offset(index).unwrap() as usize;
-    let len = plan.expected_len(index).unwrap() as usize;
+    let start = usize::try_from(plan.offset(index).unwrap()).unwrap();
+    let len = usize::try_from(plan.expected_len(index).unwrap()).unwrap();
     &data[start..start + len]
 }
 
@@ -316,8 +316,7 @@ fn upload_part_rejects_binding_geometry_stream_and_token_errors() {
     assert_eq!(
         code(block_on(session.push(Bytes::from(vec![
             1;
-            MIN_PART_SIZE
-                as usize
+            usize::try_from(MIN_PART_SIZE).unwrap()
                 + 1
         ])))),
         Code::InvalidArgument
@@ -605,7 +604,10 @@ fn part_pipeline_forwards_chunks_without_buffering_a_part() {
     }
     block_on(session.finish()).unwrap();
     let writes = seen.lock().unwrap();
-    assert_eq!(writes.iter().sum::<usize>(), MIN_PART_SIZE as usize);
+    assert_eq!(
+        writes.iter().sum::<usize>(),
+        usize::try_from(MIN_PART_SIZE).unwrap()
+    );
     assert!(writes.iter().all(|size| *size <= 128 * 1024));
     assert!(writes.len() > 1);
 }

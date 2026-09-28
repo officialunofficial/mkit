@@ -1155,7 +1155,7 @@ async fn upload_part_stream_rejects_chunk_before_header_and_empty_chunk() {
     let keys = TicketKeys::new(vec![("active".into(), [7; 32])]).unwrap();
     cfg.ticket_keys = Some(keys.clone());
     let blobs = MemoryBlobStore::default();
-    let data = vec![3; MIN_PART_SIZE as usize + 1];
+    let data = vec![3; usize::try_from(MIN_PART_SIZE).unwrap() + 1];
     let id = hash(&data);
     let session = blobs
         .begin_multipart(BlobKey::new(id), data.len() as u64, MIN_PART_SIZE)
@@ -1173,7 +1173,7 @@ async fn upload_part_stream_rejects_chunk_before_header_and_empty_chunk() {
         upload_session: session,
     };
     let plan = PartPlan::new(claims.bytes, claims.part_size, 10_000).unwrap();
-    let cv = part_subtree_cv(&plan, 0, &data[..MIN_PART_SIZE as usize]).unwrap();
+    let cv = part_subtree_cv(&plan, 0, &data[..usize::try_from(MIN_PART_SIZE).unwrap()]).unwrap();
     let commitment = format!(
         "part:{}:0:{}:{MIN_PART_SIZE}",
         to_hex(&claims.ticket_id),

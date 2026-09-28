@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use http::{HeaderName, HeaderValue};
 use mkit_server::pipeline::{AuthMode, HookSet, Pipeline};
-use mkit_server::{BlobStore, NamespaceStore, Procedure, Redactor};
+use mkit_server::{MultipartBlobStore, NamespaceStore, Procedure, Redactor};
 
 use crate::layers;
 
@@ -32,7 +32,7 @@ pub struct RouterOptions {
     /// byte to the response. A client's `Connect-Timeout-Ms` may shorten
     /// it, never extend it.
     pub unary_timeout: Duration,
-    /// Deadline of `UploadPack` and `DownloadPack`, covering the whole
+    /// Deadline of `UploadPack`, `UploadPart` and `DownloadPack`, covering the whole
     /// stream.
     pub stream_timeout: Duration,
     /// Requests in flight at once, counted until each response body ends
@@ -115,7 +115,7 @@ const STREAMING: [Procedure; 3] = [
 /// terminate TLS: put a reverse proxy in front.
 pub fn build_router<B, N, H>(pipeline: Arc<Pipeline<B, N, H>>, opts: &RouterOptions) -> axum::Router
 where
-    B: BlobStore + 'static,
+    B: MultipartBlobStore + 'static,
     N: NamespaceStore + 'static,
     H: HookSet + 'static,
 {

@@ -8,7 +8,7 @@ use crate::store::{BlobKey, BlobStore, PackSink, StoreError};
 /// Versioned marker content domain, separate from packs.
 pub(crate) const UPLOAD_MARKER_DOMAIN: &[u8] = b"mkit-upload-marker:v1\0";
 
-/// Marker content: DOMAIN || ticket_id(32) || pack_id(32). Its blob key is BLAKE3(content).
+/// Marker content: domain || `ticket_id` || `pack_id`. Its blob key is BLAKE3 of those bytes.
 pub(crate) fn upload_marker(ticket_id: &[u8; 32], pack_id: &Hash) -> (BlobKey, Vec<u8>) {
     let mut bytes = Vec::with_capacity(UPLOAD_MARKER_DOMAIN.len() + 64);
     bytes.extend_from_slice(UPLOAD_MARKER_DOMAIN);
