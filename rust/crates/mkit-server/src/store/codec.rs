@@ -13,7 +13,7 @@ use super::keys::validate_reservation_id;
 use super::kv::{Key, MAX_KEY_BYTES, MAX_VALUE_BYTES, Value};
 use super::partition::Partition;
 use crate::error::Code;
-use crate::quota::QuotaState;
+use crate::quota::{NamespaceUsage, NamespaceView, QuotaState};
 use crate::refs::is_served_ref_name;
 use crate::replay::{
     BeginUploadResult, ReplayRecord, ReplayState, StoredRejection, StoredResult, UpdateRefResult,
@@ -890,6 +890,73 @@ pub fn decode_quota_state(value: &Value) -> Result<QuotaState, StoreError> {
     })
 }
 
+/// Two big-endian u64 counters, ops then bytes. Used by qs, qc and qt.
+#[must_use]
+pub fn encode_namespace_usage(usage: NamespaceUsage) -> Value {
+    Value::new([usage.ops.to_be_bytes(), usage.bytes.to_be_bytes()].concat())
+}
+
+/// Decode a fixed-width namespace counter, rejecting malformed rows.
+pub fn decode_namespace_usage(value: &Value) -> Result<NamespaceUsage, StoreError> {
+    let (ops, bytes) = value
+        .as_bytes()
+        .split_first_chunk::<8>()
+        .ok_or_else(|| corrupt("bad namespace usage"))?;
+    let bytes: [u8; 8] = bytes
+        .try_into()
+        .map_err(|_| corrupt("bad namespace usage"))?;
+    Ok(NamespaceUsage {
+        ops: u64::from_be_bytes(*ops),
+        bytes: u64::from_be_bytes(bytes),
+    })
+}
+
+/// Three usage fields and a read timestamp, each big-endian u64.
+#[must_use]
+pub fn encode_namespace_view(view: NamespaceView) -> Value {
+    Value::new(
+        [
+            view.total.ops.to_be_bytes(),
+            view.total.bytes.to_be_bytes(),
+            view.pushed.ops.to_be_bytes(),
+            view.pushed.bytes.to_be_bytes(),
+            view.observed_at_ms.to_be_bytes(),
+        ]
+        .concat(),
+    )
+}
+
+/// Decode a view and reject a contribution larger than the aggregate.
+pub fn decode_namespace_view(value: &Value) -> Result<NamespaceView, StoreError> {
+    let bytes: [u8; 40] = value
+        .as_bytes()
+        .try_into()
+        .map_err(|_| corrupt("bad namespace view"))?;
+    let word = |i| -> Result<u64, StoreError> {
+        let chunk: [u8; 8] = bytes
+            .get(i..i + 8)
+            .ok_or_else(|| corrupt("bad namespace view"))?
+            .try_into()
+            .map_err(|_| corrupt("bad namespace view"))?;
+        Ok(u64::from_be_bytes(chunk))
+    };
+    let view = NamespaceView {
+        total: NamespaceUsage {
+            ops: word(0)?,
+            bytes: word(8)?,
+        },
+        pushed: NamespaceUsage {
+            ops: word(16)?,
+            bytes: word(24)?,
+        },
+        observed_at_ms: word(32)?,
+    };
+    if view.total.delta_from(view.pushed).is_none() {
+        return Err(corrupt("namespace view exceeds total"));
+    }
+    Ok(view)
+}
+
 /// Encode a `ContentIndex` GC hold: its expiry, Unix ms.
 #[must_use]
 pub fn encode_hold(expires_at_ms: u64) -> Value {
@@ -1671,6 +1738,45 @@ mod tests {
         ));
         assert!(matches!(
             decode_u64(&Value::new(vec![0; 4])),
+            Err(StoreError::Corrupt(_))
+        ));
+    }
+
+    #[test]
+    fn namespace_quota_binary_goldens_and_corruption() {
+        let usage = NamespaceUsage { ops: 2, bytes: 258 };
+        assert_eq!(
+            encode_namespace_usage(usage).as_bytes(),
+            b"\0\0\0\0\0\0\0\x02\0\0\0\0\0\0\x01\x02"
+        );
+        assert_eq!(
+            decode_namespace_usage(&encode_namespace_usage(usage)).unwrap(),
+            usage
+        );
+        let view = NamespaceView {
+            total: usage,
+            pushed: NamespaceUsage { ops: 1, bytes: 1 },
+            observed_at_ms: 60_000,
+        };
+        assert_eq!(encode_namespace_view(view).as_bytes().len(), 40);
+        assert_eq!(
+            decode_namespace_view(&encode_namespace_view(view)).unwrap(),
+            view
+        );
+        assert!(matches!(
+            decode_namespace_usage(&Value::new(vec![0; 15])),
+            Err(StoreError::Corrupt(_))
+        ));
+        assert!(matches!(
+            decode_namespace_view(&Value::new(vec![0; 39])),
+            Err(StoreError::Corrupt(_))
+        ));
+        let invalid = NamespaceView {
+            pushed: NamespaceUsage { ops: 3, bytes: 1 },
+            ..view
+        };
+        assert!(matches!(
+            decode_namespace_view(&encode_namespace_view(invalid)),
             Err(StoreError::Corrupt(_))
         ));
     }

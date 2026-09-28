@@ -569,6 +569,10 @@ where
                     target: meta.clone(),
                     hook: mkit_server::relay::NoHook,
                     budget: mkit_server::relay::RelayBudget::default(),
+                })
+                .register(mkit_server::timers::quota_rollup::QuotaRollup {
+                    coordinator: meta.clone(),
+                    metrics: MetricsBridge,
                 });
             #[cfg(feature = "test-faults")]
             let registry = registry.register(mkit_server::timers::test_kind::TestTimer);
