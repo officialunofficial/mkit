@@ -1360,62 +1360,21 @@ async fn m1_list_refs_paging_tokens_and_page_sizes() {
         )
         .await;
     assert_eq!(invalid.code(), "invalid_argument");
-    let list = |page_size| ListRefsRequest {
-        prefix: Some("refs/heads/".into()),
-        page_size,
-        ..Default::default()
-    };
-    let original = server
-        .unary("ListRefs", &list(None), &[])
-        .await
-        .decode::<ListRefsResponse>();
-    let bounded = server
-        .unary("ListRefs", &list(Some(1)), &[])
-        .await
-        .decode::<ListRefsResponse>();
+    let original = list_heads_page(&server, None, None).await;
+    let bounded = list_heads_page(&server, Some(1), None).await;
     assert_eq!(original.refs.len(), 2);
     assert_eq!(bounded.refs.len(), 1);
     assert!(bounded.next_page_token.is_some());
-    let second = server
-        .unary(
-            "ListRefs",
-            &ListRefsRequest {
-                prefix: Some("refs/heads/".into()),
-                page_size: Some(1),
-                page_token: bounded.next_page_token.clone(),
-                ..Default::default()
-            },
-            &[],
-        )
-        .await
-        .decode::<ListRefsResponse>();
+    let second = list_heads_page(&server, Some(1), bounded.next_page_token.clone()).await;
     assert_eq!(second.refs.len(), 1);
     assert!(second.next_page_token.is_some());
     assert!(bounded.refs[0].name < second.refs[0].name);
-    let third = server
-        .unary(
-            "ListRefs",
-            &ListRefsRequest {
-                prefix: Some("refs/heads/".into()),
-                page_size: Some(1),
-                page_token: second.next_page_token.clone(),
-                ..Default::default()
-            },
-            &[],
-        )
-        .await
-        .decode::<ListRefsResponse>();
+    let third = list_heads_page(&server, Some(1), second.next_page_token.clone()).await;
     assert_eq!(third.refs.len(), 1);
     assert_eq!(third.next_page_token, None);
     assert!(second.refs[0].name < third.refs[0].name);
-    let zero = server
-        .unary("ListRefs", &list(Some(0)), &[])
-        .await
-        .decode::<ListRefsResponse>();
-    let above = server
-        .unary("ListRefs", &list(Some(100)), &[])
-        .await
-        .decode::<ListRefsResponse>();
+    let zero = list_heads_page(&server, Some(0), None).await;
+    let above = list_heads_page(&server, Some(100), None).await;
     assert_eq!(original, zero);
     assert_eq!(original, above);
     for (prefix, token) in [
@@ -1440,6 +1399,26 @@ async fn m1_list_refs_paging_tokens_and_page_sizes() {
         .await;
     assert_eq!(json.json()["refs"].as_array().unwrap().len(), 1);
     assert!(json.json().get("nextPageToken").is_some());
+}
+
+async fn list_heads_page(
+    server: &Server,
+    page_size: Option<u32>,
+    page_token: Option<String>,
+) -> ListRefsResponse {
+    server
+        .unary(
+            "ListRefs",
+            &ListRefsRequest {
+                prefix: Some("refs/heads/".into()),
+                page_size,
+                page_token,
+                ..Default::default()
+            },
+            &[],
+        )
+        .await
+        .decode()
 }
 
 #[tokio::test]

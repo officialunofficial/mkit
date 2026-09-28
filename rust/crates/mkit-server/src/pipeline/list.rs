@@ -263,7 +263,7 @@ mod tests {
                 };
                 usize::from(bucket)
             };
-            parts[bucket].push((name.clone(), [bucket as u8; 32]));
+            parts[bucket].push((name.clone(), [u8::try_from(bucket).unwrap_or(u8::MAX); 32]));
         }
         parts
             .into_iter()
@@ -347,7 +347,7 @@ mod tests {
             next_page_token: page.next.as_ref().map(|t| URL_SAFE_NO_PAD.encode(t)),
             ..Default::default()
         };
-        assert!(response.encoded_len() <= MAX_RESPONSE_BYTES as u32);
+        assert!(response.encoded_len() <= u32::try_from(MAX_RESPONSE_BYTES).unwrap_or(u32::MAX));
         assert!(serde_json::to_vec(&response).unwrap().len() <= MAX_RESPONSE_BYTES);
     }
 
