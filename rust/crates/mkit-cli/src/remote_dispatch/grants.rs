@@ -20,6 +20,7 @@ fn permits(flags: RefFlags, condition: GrantCondition) -> bool {
         }
         GrantCondition::Any => flags.contains(RefFlags::FORCE),
         GrantCondition::Delete => flags.contains(RefFlags::DELETE),
+        _ => false,
     }
 }
 
@@ -54,14 +55,13 @@ impl LocalGrants {
                 if grant.namespace != *namespace
                     || !grant.scope.covers(namespace, &repository)
                     || grant.grantee != key
-                    || !grant.audiences.iter().any(|a| a == request.origin)
+                    || !grant.audiences.iter().any(|a| a == request.audience)
                     || grant.created_ms > now.saturating_add(30_000)
                     || now >= grant.expiry_ms
                 {
                     return None;
                 }
                 let (capability_rank, ref_rank) = match request.operation {
-                    GrantOperation::Part => return None,
                     GrantOperation::Read => {
                         let rank = match grant.capabilities {
                             Capabilities::ReadWrite => 3,
@@ -80,8 +80,12 @@ impl LocalGrants {
                         let scopes = grant.ref_scopes.as_ref()?;
                         let mut rank = usize::MAX;
                         for reference in refs {
-                            let head = packmap_head(reference.name);
-                            let name = head.as_deref().unwrap_or(reference.name);
+                            // Packmap refs are covered through the head ref. Their own
+                            // condition does not impose a second flag requirement.
+                            if packmap_head(reference.name).is_some() {
+                                continue;
+                            }
+                            let name = reference.name;
                             if !permits(scopes.effective_flags(name), reference.condition) {
                                 return None;
                             }
@@ -103,6 +107,8 @@ impl LocalGrants {
                         }
                         (0, if refs.is_empty() { 0 } else { rank })
                     }
+                    // Part and any future operation are ineligible.
+                    _ => return None,
                 };
                 let repo_rank = usize::from(matches!(grant.scope, RepoScope::Repository(_)));
                 Some((
@@ -110,6 +116,8 @@ impl LocalGrants {
                     (capability_rank, repo_rank, ref_rank, grant.expiry_ms),
                 ))
             })
+            // Equal capability, scope, specificity and expiry select the last
+            // grant in source order.
             .max_by_key(|(_, rank)| *rank)
             .map(|(candidate, _)| candidate.header.clone())
     }
@@ -158,12 +166,12 @@ mod tests {
     }
 
     fn request(operation: GrantOperation<'_>) -> GrantRequest<'_> {
-        GrantRequest {
-            origin: "https://git.example.com",
-            repository: "0x8ba1f109551bd432803012645ac136ddd64dba72/photos",
-            public_key_hex: KEY,
+        GrantRequest::new(
+            "https://git.example.com",
+            "0x8ba1f109551bd432803012645ac136ddd64dba72/photos",
+            KEY,
             operation,
-        }
+        )
     }
 
     #[test]
@@ -240,6 +248,20 @@ mod tests {
         assert_eq!(
             LocalGrants::from_headers(candidates).select_at(&request(GrantOperation::Read), NOW),
             Some(good)
+        );
+        let boundary = header(
+            &format!("{NS}/photos"),
+            "read",
+            "-",
+            NOW + 30_000,
+            NOW + 100_000,
+            "https://git.example.com",
+            KEY,
+        );
+        assert_eq!(
+            LocalGrants::from_headers(vec![boundary.clone()])
+                .select_at(&request(GrantOperation::Read), NOW),
+            Some(boundary)
         );
     }
 
@@ -339,10 +361,7 @@ mod tests {
             (GrantCondition::Any, broad.as_str()),
             (GrantCondition::Delete, broad.as_str()),
         ] {
-            let refs = [GrantRef {
-                name: "refs/heads/main",
-                condition,
-            }];
+            let refs = [GrantRef::new("refs/heads/main", condition)];
             assert_eq!(
                 source
                     .select_at(&request(GrantOperation::Write { refs: &refs }), NOW)
@@ -350,10 +369,10 @@ mod tests {
                 Some(expected)
             );
         }
-        let refs = [GrantRef {
-            name: "refs/mkit/packmap/main",
-            condition: GrantCondition::Match,
-        }];
+        let refs = [GrantRef::new(
+            "refs/mkit/packmap/main",
+            GrantCondition::Match,
+        )];
         assert_eq!(
             source.select_at(&request(GrantOperation::Write { refs: &refs }), NOW),
             Some(exact)
@@ -376,10 +395,7 @@ mod tests {
             "https://git.example.com",
             KEY,
         );
-        let refs = [GrantRef {
-            name: "refs/heads/main",
-            condition: GrantCondition::Any,
-        }];
+        let refs = [GrantRef::new("refs/heads/main", GrantCondition::Any)];
         assert_eq!(
             LocalGrants::from_headers(vec![irrelevant_exact, relevant_prefix.clone()])
                 .select_at(&request(GrantOperation::Write { refs: &refs }), NOW),
@@ -389,6 +405,74 @@ mod tests {
             source
                 .select_at(&request(GrantOperation::Part), NOW)
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn packmap_condition_does_not_add_a_flag_requirement() {
+        for (flag, head_condition, packmap_condition) in [
+            ("u", GrantCondition::Match, GrantCondition::Missing),
+            ("c", GrantCondition::Missing, GrantCondition::Match),
+        ] {
+            let grant = header(
+                &format!("{NS}/photos"),
+                "write",
+                &format!("refs/heads/main={flag}"),
+                NOW,
+                NOW + 100_000,
+                "https://git.example.com",
+                KEY,
+            );
+            let refs = [
+                GrantRef::new("refs/heads/main", head_condition),
+                GrantRef::new("refs/mkit/packmap/main", packmap_condition),
+            ];
+            assert_eq!(
+                LocalGrants::from_headers(vec![grant.clone()])
+                    .select_at(&request(GrantOperation::Write { refs: &refs }), NOW),
+                Some(grant),
+            );
+        }
+    }
+
+    #[test]
+    fn write_ranking_expiry_then_last_source_entry_on_full_tie() {
+        let earlier = header(
+            &format!("{NS}/photos"),
+            "write",
+            "refs/heads/main=u",
+            NOW,
+            NOW + 40_000,
+            "https://git.example.com",
+            KEY,
+        );
+        let later = header(
+            &format!("{NS}/photos"),
+            "write",
+            "refs/heads/main=u",
+            NOW,
+            NOW + 50_000,
+            "https://git.example.com",
+            KEY,
+        );
+        let tied = header(
+            &format!("{NS}/photos"),
+            "write",
+            "refs/heads/main=u",
+            NOW - 1,
+            NOW + 50_000,
+            "https://git.example.com",
+            KEY,
+        );
+        let refs = [GrantRef::new("refs/heads/main", GrantCondition::Match)];
+        let request = request(GrantOperation::Write { refs: &refs });
+        assert_eq!(
+            LocalGrants::from_headers(vec![later.clone(), earlier]).select_at(&request, NOW),
+            Some(later.clone()),
+        );
+        assert_eq!(
+            LocalGrants::from_headers(vec![later, tied.clone()]).select_at(&request, NOW),
+            Some(tied),
         );
     }
 }

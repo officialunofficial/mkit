@@ -85,15 +85,12 @@ fn procedure_auth(procedure: &str) -> Option<ProcedureAuth> {
     let method = procedure.strip_prefix("/mkit.transport.v1.TransportService/")?;
     Some(match method {
         "ListRefs" | "ReadRef" | "PackExists" | "DownloadPack" | "IssueObjectUrl"
-        | "GetReceipt" | "UpdateRef" | "AdvanceRefs" | "BeginUpload" | "CompleteUpload" => {
-            ProcedureAuth::Body
-        }
+        | "GetReceipt" | "UpdateRef" | "AdvanceRefs" | "BeginUpload" | "CompleteUpload"
+        | "SetRepoVisibility" => ProcedureAuth::Body,
         "UploadPack" => ProcedureAuth::Commitment("pack:"),
         "UploadPart" => ProcedureAuth::Commitment("part:"),
         "GetServerInfo" => ProcedureAuth::Unsigned { repository: true },
         "GetGrantEpoch" | "SetGrantEpoch" => ProcedureAuth::Unsigned { repository: false },
-        // TODO(WP-2.13/2.14): SetRepoVisibility has owner-key and
-        // owner-statement forms; classify it when its client is added.
         _ => return None,
     })
 }
@@ -653,17 +650,19 @@ mod tests {
                 .filter_map(|line| line.trim().strip_prefix('"')?.strip_suffix("\","))
                 .filter(|path| path.starts_with("/mkit.transport.v1.TransportService/"))
                 .collect();
-            assert_eq!(procedures.len(), 12);
+            assert_eq!(procedures.len(), 16);
             for procedure in procedures {
                 let method = procedure.rsplit('/').next().unwrap();
                 let expected = match method {
                     "ListRefs" | "ReadRef" | "PackExists" | "DownloadPack" | "GetReceipt"
-                    | "UpdateRef" | "AdvanceRefs" | "BeginUpload" | "CompleteUpload" => {
-                        ProcedureAuth::Body
-                    }
+                    | "IssueObjectUrl" | "UpdateRef" | "AdvanceRefs" | "BeginUpload"
+                    | "CompleteUpload" | "SetRepoVisibility" => ProcedureAuth::Body,
                     "UploadPack" => ProcedureAuth::Commitment("pack:"),
                     "UploadPart" => ProcedureAuth::Commitment("part:"),
                     "GetServerInfo" => ProcedureAuth::Unsigned { repository: true },
+                    "GetGrantEpoch" | "SetGrantEpoch" => {
+                        ProcedureAuth::Unsigned { repository: false }
+                    }
                     _ => panic!("new generated procedure requires classification: {procedure}"),
                 };
                 assert_eq!(procedure_auth(procedure), Some(expected), "{procedure}");
@@ -800,12 +799,18 @@ mod tests {
             for method in ["GetServerInfo", "GetGrantEpoch", "SetGrantEpoch"] {
                 let procedure = format!("/mkit.transport.v1.TransportService/{method}");
                 let mut request = build_request(&procedure, b"");
+                // The shared builder seeds a pack commitment for streaming
+                // tests; discovery and epoch calls do not supply one.
+                request.headers_mut().remove("x-content-commitment");
                 request
                     .headers_mut()
                     .insert("x-repository", HeaderValue::from_static("wrong"));
                 futures::executor::block_on(transport.send(request)).unwrap();
                 let got = captured.lock().unwrap().take().unwrap();
                 assert!(got.headers.get("x-signature").is_none());
+                assert!(got.headers.get("x-public-key").is_none());
+                assert!(got.headers.get("x-envelope-version").is_none());
+                assert!(got.headers.get("x-content-commitment").is_none());
                 assert_eq!(
                     got.headers.get("x-repository").is_some(),
                     method == "GetServerInfo"

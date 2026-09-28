@@ -551,12 +551,7 @@ impl ConnectTransport {
         if namespace.to_string() == format!("ed25519-{key}") {
             return options;
         }
-        let request = GrantRequest {
-            origin: &self.origin,
-            repository: &self.repository_text,
-            public_key_hex: key,
-            operation,
-        };
+        let request = GrantRequest::new(&self.origin, &self.repository_text, key, operation);
         match source.select(&request) {
             Some(grant) => options.with_header("x-write-grant", grant),
             None => options,
@@ -856,10 +851,7 @@ impl Transport for ConnectTransport {
     ) -> TransportResult<()> {
         let (expectation, expected_id) = condition_to_wire(condition);
         let identity = RetryIdentity::new().map_err(TransportError::RemoteError)?;
-        let refs = [GrantRef {
-            name,
-            condition: grant_condition(condition),
-        }];
+        let refs = [GrantRef::new(name, grant_condition(condition))];
         self.retrying(|| {
             self.executor.block_on(async {
                 let options = self.grant_options(
@@ -992,14 +984,8 @@ impl Transport for ConnectTransport {
         let (packmap_expectation, packmap_expected_id) = condition_to_wire(packmap_condition);
         let identity = RetryIdentity::new().map_err(TransportError::RemoteError)?;
         let refs = [
-            GrantRef {
-                name: head_ref,
-                condition: grant_condition(head_condition),
-            },
-            GrantRef {
-                name: packmap_ref,
-                condition: grant_condition(packmap_condition),
-            },
+            GrantRef::new(head_ref, grant_condition(head_condition)),
+            GrantRef::new(packmap_ref, grant_condition(packmap_condition)),
         ];
         self.retrying(|| {
             self.executor.block_on(async {

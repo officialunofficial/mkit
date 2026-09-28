@@ -2,6 +2,7 @@
 
 /// The condition a write asks the server to apply to one ref.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum GrantCondition {
     Missing,
     Match,
@@ -11,13 +12,21 @@ pub enum GrantCondition {
 
 /// One ref whose scope must be covered by a write grant.
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct GrantRef<'a> {
     pub name: &'a str,
     pub condition: GrantCondition,
 }
 
+impl<'a> GrantRef<'a> {
+    pub fn new(name: &'a str, condition: GrantCondition) -> Self {
+        Self { name, condition }
+    }
+}
+
 /// The operation for which a grant is requested.
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub enum GrantOperation<'a> {
     Read,
     Write {
@@ -30,11 +39,28 @@ pub enum GrantOperation<'a> {
 /// Local context for choosing a grant. All strings are canonical values
 /// already used by the Connect client for addressing and signing.
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct GrantRequest<'a> {
-    pub origin: &'a str,
+    pub audience: &'a str,
     pub repository: &'a str,
     pub public_key_hex: &'a str,
     pub operation: GrantOperation<'a>,
+}
+
+impl<'a> GrantRequest<'a> {
+    pub fn new(
+        audience: &'a str,
+        repository: &'a str,
+        public_key_hex: &'a str,
+        operation: GrantOperation<'a>,
+    ) -> Self {
+        Self {
+            audience,
+            repository,
+            public_key_hex,
+            operation,
+        }
+    }
 }
 
 /// Supplies one encoded `X-Write-Grant` value, if any. Implementations
