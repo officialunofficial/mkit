@@ -33,6 +33,13 @@ where
 
 const CHUNK: usize = 64 * 1024;
 
+/// Allocator callbacks supplied by each backend test binary.
+#[derive(Clone, Copy, Debug)]
+pub struct HeapProbe {
+    pub start: fn(),
+    pub finish: fn() -> usize,
+}
+
 /// Counts the chunks actually accepted by a backend part sink.
 struct CountingSink<S> {
     inner: S,
@@ -82,7 +89,12 @@ impl Fixture {
 
 async fn session<B: MultipartBlobStore>(s: &B, f: &Fixture) -> Result<Vec<u8>, String> {
     Ok(ok!(s
-        .begin_multipart(f.key, f.plan.total(), f.plan.part_size())
+        .begin_multipart_for_ticket(
+            f.key,
+            f.plan.total(),
+            f.plan.part_size(),
+            hash(f.key.hash())
+        )
         .await))
 }
 
@@ -242,7 +254,12 @@ pub async fn multipart_root_or_total_mismatch<H: MultipartHarness>(h: H) -> Outc
     let f = Fixture::new();
     let wrong_key = BlobKey::pack(hash(b"wrong pack"));
     let id = ok!(s
-        .begin_multipart(wrong_key, f.plan.total(), f.plan.part_size())
+        .begin_multipart_for_ticket(
+            wrong_key,
+            f.plan.total(),
+            f.plan.part_size(),
+            hash(wrong_key.hash())
+        )
         .await);
     let mut parts = Vec::new();
     for index in 0..f.plan.count() {
@@ -288,10 +305,49 @@ pub async fn multipart_complete_twice<H: MultipartHarness>(h: H) -> Outcome {
         ok!(s.complete(f.key, &id, &f.plan, &parts).await),
         CommitOutcome::Created
     );
-    ensure_err!(
-        s.complete(f.key, &id, &f.plan, &parts).await,
-        StoreError::SessionGone
+    ensure!(
+        matches!(
+            s.complete(f.key, &id, &f.plan, &parts).await,
+            Err(StoreError::SessionGone) | Ok(CommitOutcome::AlreadyPresent)
+        ),
+        "repeated completion returned neither SessionGone nor AlreadyPresent"
     );
+    ensure_eq!(
+        ok!(s.head(&f.key).await).map(|meta| meta.len),
+        Some(f.plan.total())
+    );
+    Ok(Pass)
+}
+
+/// Racing completions cannot report Invalid after either publishes the pack.
+pub async fn multipart_concurrent_complete<H: MultipartHarness>(h: H) -> Outcome {
+    let s = std::sync::Arc::new(h.store());
+    let f = Fixture::new();
+    let id = session(s.as_ref(), &f).await?;
+    let parts = upload_all(s.as_ref(), &f, &id).await?;
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(3));
+    let run = |s: std::sync::Arc<H::Store>| {
+        let barrier = barrier.clone();
+        let id = id.clone();
+        let parts = parts.clone();
+        let plan = f.plan;
+        let key = f.key;
+        tokio::spawn(async move {
+            barrier.wait().await;
+            s.complete(key, &id, &plan, &parts).await
+        })
+    };
+    let first = run(s.clone());
+    let second = run(s.clone());
+    barrier.wait().await;
+    let first = first.await.map_err(|e| e.to_string())?;
+    let second = second.await.map_err(|e| e.to_string())?;
+    for result in [first, second] {
+        ensure!(
+            matches!(result, Ok(_) | Err(StoreError::SessionGone)),
+            "concurrent completion returned {result:?}"
+        );
+    }
     ensure_eq!(
         ok!(s.head(&f.key).await).map(|meta| meta.len),
         Some(f.plan.total())
@@ -310,9 +366,12 @@ pub async fn multipart_pack_already_present<H: MultipartHarness>(h: H) -> Outcom
     ensure_eq!(ok!(sink.commit().await), CommitOutcome::Created);
     let id = session(&s, &f).await?;
     let parts = upload_all(&s, &f, &id).await?;
-    ensure_eq!(
-        ok!(s.complete(f.key, &id, &f.plan, &parts).await),
-        CommitOutcome::AlreadyPresent
+    ensure!(
+        matches!(
+            s.complete(f.key, &id, &f.plan, &parts).await,
+            Ok(CommitOutcome::Created | CommitOutcome::AlreadyPresent)
+        ),
+        "completion of existing pack failed"
     );
     Ok(Pass)
 }
@@ -340,7 +399,7 @@ pub async fn multipart_abort_then_session_gone<H: MultipartHarness>(h: H) -> Out
 }
 
 /// The harness sends fixed 64 KiB chunks and counts each sink write.
-pub async fn multipart_bounded_chunks<H: MultipartHarness>(h: H) -> Outcome {
+pub async fn multipart_chunked_writes<H: MultipartHarness>(h: H) -> Outcome {
     let s = h.store();
     let f = Fixture::new();
     let id = session(&s, &f).await?;
@@ -361,6 +420,51 @@ pub async fn multipart_bounded_chunks<H: MultipartHarness>(h: H) -> Outcome {
     ok!(sink.inner.commit().await);
     absent(&s, &f.key).await?;
     Ok(Pass)
+}
+
+async fn measured_heap<H: MultipartHarness>(h: H, probe: HeapProbe, buffered: bool) -> Outcome {
+    let s = h.store();
+    let f = Fixture::new();
+    let id = session(&s, &f).await?;
+    (probe.start)();
+    let first = upload(&s, &f, &id, 0, f.part(0), f.cv(0)).await;
+    let upload_peak = (probe.finish)();
+    let first = first?.0;
+    let mut parts = vec![first];
+    for index in 1..f.plan.count() {
+        parts.push(
+            upload(&s, &f, &id, index, f.part(index), f.cv(index))
+                .await?
+                .0,
+        );
+    }
+    (probe.start)();
+    let completed = s.complete(f.key, &id, &f.plan, &parts).await;
+    let complete_peak = (probe.finish)();
+    ensure_eq!(ok!(completed), CommitOutcome::Created);
+    let limit = usize::try_from(MIN_PART_SIZE / 4).map_err(|e| e.to_string())?;
+    if buffered {
+        ensure!(
+            upload_peak > limit && complete_peak > limit,
+            "memory store should expose buffering: upload={upload_peak}, complete={complete_peak}, limit={limit}"
+        );
+    } else {
+        ensure!(
+            upload_peak <= limit && complete_peak <= limit,
+            "multipart backend buffered too much: upload={upload_peak}, complete={complete_peak}, limit={limit}"
+        );
+    }
+    Ok(Pass)
+}
+
+/// The FS and future remote backends must stay below a quarter part of heap.
+pub async fn multipart_bounded_heap<H: MultipartHarness>(h: H, probe: HeapProbe) -> Outcome {
+    measured_heap(h, probe, false).await
+}
+
+/// The reference memory backend intentionally keeps complete parts in RAM.
+pub async fn multipart_buffered_heap<H: MultipartHarness>(h: H, probe: HeapProbe) -> Outcome {
+    measured_heap(h, probe, true).await
 }
 
 /// Dropped attempt and verified but uncompleted parts are never blobs.

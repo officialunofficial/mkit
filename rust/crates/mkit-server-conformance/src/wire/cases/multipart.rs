@@ -208,12 +208,58 @@ pub(super) async fn resume_receipts(ctx: Ctx) -> CaseResult {
     let bytes = pack(&ctx);
     let id = hash(&bytes);
     let ticket = begin(&ctx, &ctx.v2_signer("main")?, None, &id, bytes.len()).await?;
-    let receipts = parts(&ctx, &ctx.v2_signer("main")?, None, &ticket, &bytes).await?;
+    let plan =
+        PartPlan::new(bytes.len() as u64, MIN_PART_SIZE, u32::MAX).map_err(|e| e.to_string())?;
+    let signer = ctx.v2_signer("main")?;
+    let first_end = usize::try_from(MIN_PART_SIZE).map_err(|e| e.to_string())?;
+    let second_end = usize::try_from(2 * MIN_PART_SIZE).map_err(|e| e.to_string())?;
+    let first = part(&ctx, &signer, None, &ticket, &plan, 0, &bytes[..first_end]).await?;
+    let old_second = part(
+        &ctx,
+        &signer,
+        None,
+        &ticket,
+        &plan,
+        1,
+        &bytes[first_end..second_end],
+    )
+    .await?;
     let fresh = ctx.reconnect()?;
     drop(ctx);
     let signer = fresh.v2_signer("main")?;
+    let new_second = part(
+        &fresh,
+        &signer,
+        None,
+        &ticket,
+        &plan,
+        1,
+        &bytes[first_end..second_end],
+    )
+    .await?;
+    ensure!(
+        old_second == new_second,
+        "resending a verified part changed its receipt"
+    );
+    let last = part(
+        &fresh,
+        &signer,
+        None,
+        &ticket,
+        &plan,
+        2,
+        &bytes[second_end..],
+    )
+    .await?;
     want_ok(
-        complete(&fresh, &signer, None, &ticket, receipts).await?,
+        complete(
+            &fresh,
+            &signer,
+            None,
+            &ticket,
+            vec![first, new_second, last],
+        )
+        .await?,
         "resumed CompleteUpload",
     )?;
     fresh.expect_exists(&id, true).await
@@ -268,11 +314,26 @@ pub(super) async fn cross_repository_no_oracle(ctx: Ctx) -> CaseResult {
         "permission_denied",
         "foreign ticket",
     )?;
-    want_code(
-        complete(&ctx, &signer_a, Some(&repo_a), &ticket_a, receipts_b).await?,
-        "permission_denied",
-        "foreign receipts",
-    )?;
+    let foreign = complete(&ctx, &signer_a, Some(&repo_a), &ticket_a, receipts_b)
+        .await?
+        .err()
+        .ok_or("foreign receipts were accepted")?;
+    let garbage = complete(
+        &ctx,
+        &signer_a,
+        Some(&repo_a),
+        &ticket_a,
+        vec![b"garbage receipt".to_vec(); 3],
+    )
+    .await?
+    .err()
+    .ok_or("garbage receipts were accepted")?;
+    ensure!(
+        foreign.code == garbage.code,
+        "foreign receipt code {} differs from garbage receipt code {}",
+        foreign.code,
+        garbage.code
+    );
     ensure!(
         !exists_in_repo(&ctx, &repo_a, &id).await?,
         "foreign receipts made the pack a member"

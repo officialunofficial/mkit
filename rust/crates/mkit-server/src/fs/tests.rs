@@ -916,6 +916,29 @@ fn multipart_retries_ticket_after_crash_before_metadata() {
 }
 
 #[test]
+fn multipart_replaces_unissued_session_after_part_size_change() {
+    let td = TempDir::new().unwrap();
+    let store = FsBlobStore::new(td.path());
+    let ticket = hash(b"unissued ticket");
+    let key = BlobKey::pack(hash(b"pack"));
+    let total = MIN_PART_SIZE * 2 + 1;
+    block_on(store.begin_multipart_for_ticket(key, total, MIN_PART_SIZE, ticket)).unwrap();
+    let dir = td
+        .path()
+        .join("server-uploads")
+        .join(mkit_core::hash::to_hex_bytes(&ticket));
+    fs::write(dir.join("orphan"), b"attempt that did not issue a ticket").unwrap();
+    let changed_size = MIN_PART_SIZE * 2;
+    assert_eq!(
+        block_on(store.begin_multipart_for_ticket(key, total, changed_size, ticket)).unwrap(),
+        ticket
+    );
+    assert!(!dir.join("orphan").exists());
+    let plan = PartPlan::new(total, changed_size, u32::MAX).unwrap();
+    assert!(block_on(store.begin_part(key, &ticket, &plan, 0, [0; 32])).is_ok());
+}
+
+#[test]
 fn multipart_orphan_new_file_does_not_revoke_old_receipt() {
     let td = TempDir::new().unwrap();
     let store = FsBlobStore::new(td.path());

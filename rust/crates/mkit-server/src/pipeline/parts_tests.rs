@@ -394,7 +394,7 @@ fn completion_rejects_receipts_and_wrong_root_before_store() {
     foreign[0] = receipt::mint(&keys, &[0x99; 32], 0, &cv, MIN_PART_SIZE, &cv).unwrap();
     assert_eq!(
         code(block_on(pipe.complete_upload(&a, &token, &foreign))),
-        Code::PermissionDenied
+        Code::InvalidArgument
     );
     let mut wrong_len = receipts.clone();
     wrong_len[0] = receipt::mint(&keys, &claims.ticket_id, 0, &cv, MIN_PART_SIZE - 1, &cv).unwrap();

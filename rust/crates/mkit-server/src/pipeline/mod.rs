@@ -1178,6 +1178,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         session: &[u8],
         fresh_id: Hash,
     ) {
+        // A ticket-derived storage id can be shared by two attempts in the
+        // same replay scope. The loser must leave it for the winning ticket;
+        // if neither commits, the session contains only meta until the sweep.
+        if session == fresh_id {
+            return;
+        }
         // A raced Existing ticket can have the same reservation-derived id
         // with a different session. Compare the authenticated answer.
         let committed_fresh = match result {

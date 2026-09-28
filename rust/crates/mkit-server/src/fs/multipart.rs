@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use mkit_core::hash::{hash, to_hex_bytes};
 use mkit_core::upload_parts::{PartHasher, PartPlan, merge_to_root};
 use mkit_transport_file::{create_dir_all_durably, sync_dir, temp_path};
@@ -21,14 +21,27 @@ use crate::store::{
 const UPLOADS_DIR: &str = "server-uploads";
 const META: &str = "meta";
 const META_MAGIC: &[u8; 5] = b"MKUP1";
-const SESSION_AGE: Duration = Duration::from_hours(168);
+const SESSION_AGE: Duration = Duration::from_hours(169);
 static NEXT_SESSION: AtomicU64 = AtomicU64::new(0);
 
-fn lock(store: &FsBlobStore) -> std::sync::MutexGuard<'_, ()> {
-    store
-        .multipart_lock
+fn session_lock(
+    store: &FsBlobStore,
+    session: &[u8],
+) -> Result<std::sync::Arc<tokio::sync::Mutex<()>>, StoreError> {
+    let id: [u8; 32] = session.try_into().map_err(|_| StoreError::SessionGone)?;
+    let mut locks = store
+        .multipart_locks
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if locks.len() >= 1024 {
+        locks.retain(|_, weak| weak.strong_count() > 0);
+    }
+    if let Some(lock) = locks.get(&id).and_then(std::sync::Weak::upgrade) {
+        return Ok(lock);
+    }
+    let lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(id, std::sync::Arc::downgrade(&lock));
+    Ok(lock)
 }
 
 fn uploads(root: &Path) -> PathBuf {
@@ -63,7 +76,7 @@ fn verify_session(dir: &Path, expected: &[u8]) -> Result<(), StoreError> {
     }
 }
 
-fn create_session(
+async fn create_session(
     store: &FsBlobStore,
     key: BlobKey,
     len: u64,
@@ -75,15 +88,13 @@ fn create_session(
     let expected = session_meta(key, len, part_size)?;
     let dir = session_dir(store, session)?;
     let parent = uploads(&store.root);
-    let _guard = lock(store);
+    let lock = session_lock(store, session)?;
+    let _guard = lock.lock().await;
     create_dir_all_durably(&parent).map_err(io_error)?;
     match fs::symlink_metadata(&dir) {
         Ok(info) if !info.is_dir() => return Err(StoreError::SessionGone),
         Ok(_) => match fs::read(dir.join(META)) {
             Ok(actual) if actual == expected => return Ok(session.to_vec()),
-            Ok(actual) if actual.len() == expected.len() && actual.starts_with(META_MAGIC) => {
-                return Err(StoreError::SessionGone);
-            }
             Ok(_) => {}
             Err(e) if e.kind() == ErrorKind::NotFound => {}
             Err(e) => return Err(io_error(e)),
@@ -92,8 +103,9 @@ fn create_session(
         Err(e) => return Err(io_error(e)),
     }
     if dir.exists() {
-        // A crash before the metadata rename cannot strand a deterministic
-        // ticket id. No ticket was issued for this incomplete directory.
+        // An attempt that never issued a ticket may leave an incomplete or
+        // mismatched directory, including after a part-size configuration
+        // change. This open reservation replaces that orphan.
         fs::remove_dir_all(&dir).map_err(io_error)?;
         sync_dir(&parent).map_err(io_error)?;
     }
@@ -167,7 +179,7 @@ fn is_part_name(name: &str, index: u32) -> bool {
 /// A staged file and incremental subtree hasher. Dropping it removes only
 /// this attempt's temp file; the prior verified part remains intact.
 pub struct FsPartSink {
-    store: FsBlobStore,
+    session_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
     file: Option<File>,
     tmp: PathBuf,
     dir: PathBuf,
@@ -200,15 +212,18 @@ impl PartSink for FsPartSink {
             return Err(StoreError::Invalid("empty part chunk".into()));
         }
         let hasher = self.hasher.as_mut().ok_or(StoreError::SessionGone)?;
-        let mut next = hasher.clone();
-        next.update(&chunk)
+        hasher
+            .update(&chunk)
             .map_err(|e| StoreError::Invalid(e.to_string().into()))?;
-        self.file
+        if let Err(e) = self
+            .file
             .as_mut()
             .ok_or(StoreError::SessionGone)?
             .write_all(&chunk)
-            .map_err(io_error)?;
-        *hasher = next;
+        {
+            self.file = None;
+            return Err(io_error(e));
+        }
         Ok(())
     }
 
@@ -225,7 +240,7 @@ impl PartSink for FsPartSink {
         let file = self.file.take().ok_or(StoreError::SessionGone)?;
         file.sync_all().map_err(io_error)?;
         drop(file);
-        let _guard = lock(&self.store);
+        let _guard = self.session_lock.lock().await;
         verify_session(&self.dir, &self.meta)?;
         // The new file is durable before the pointer changes. A crash before
         // that change leaves the old receipt valid; a crash after it leaves
@@ -269,7 +284,7 @@ impl MultipartBlobStore for FsBlobStore {
         for _ in 0..8 {
             let session = fresh_session(key);
             if !session_dir(self, &session)?.exists() {
-                return create_session(self, key, len, part_size, &session);
+                return create_session(self, key, len, part_size, &session).await;
             }
         }
         Err(StoreError::unavailable(io::Error::other(
@@ -284,7 +299,7 @@ impl MultipartBlobStore for FsBlobStore {
         part_size: u64,
         ticket_id: [u8; 32],
     ) -> Result<Vec<u8>, StoreError> {
-        create_session(self, key, len, part_size, &ticket_id)
+        create_session(self, key, len, part_size, &ticket_id).await
     }
 
     async fn begin_part(
@@ -300,7 +315,8 @@ impl MultipartBlobStore for FsBlobStore {
         let hasher =
             PartHasher::new(plan, index).map_err(|e| StoreError::Invalid(e.to_string().into()))?;
         let name = part_name(index, &expected_cv);
-        let _guard = lock(self);
+        let session_lock = session_lock(self, session)?;
+        let _guard = session_lock.lock().await;
         verify_session(&dir, &meta)?;
         let tmp = temp_path(&dir.join(&name)).map_err(io_error)?;
         let file = OpenOptions::new()
@@ -309,7 +325,7 @@ impl MultipartBlobStore for FsBlobStore {
             .open(&tmp)
             .map_err(io_error)?;
         Ok(FsPartSink {
-            store: self.clone(),
+            session_lock: session_lock.clone(),
             file: Some(file),
             tmp,
             dir,
@@ -330,6 +346,8 @@ impl MultipartBlobStore for FsBlobStore {
     ) -> Result<CommitOutcome, StoreError> {
         let meta = session_meta(key, plan.total(), plan.part_size())?;
         let dir = session_dir(self, session)?;
+        let session_lock = session_lock(self, session)?;
+        let _guard = session_lock.lock().await;
         verify_session(&dir, &meta)?;
         if parts.len() != plan.count() as usize {
             return Err(StoreError::Invalid("wrong number of parts".into()));
@@ -363,13 +381,14 @@ impl MultipartBlobStore for FsBlobStore {
             return Err(StoreError::Invalid("merged part root mismatch".into()));
         }
         let mut sink = self.begin(key, plan.total()).await?;
-        let mut buf = vec![0_u8; READ_BLOCK];
+        let mut buf = BytesMut::with_capacity(READ_BLOCK);
         for part in parts {
             let tag = std::str::from_utf8(&part.tag)
                 .map_err(|_| StoreError::Invalid("invalid part tag".into()))?;
             let active = match fs::read(current_path(&dir, part.index)) {
                 Ok(active) => active,
                 Err(e) if e.kind() == ErrorKind::NotFound => {
+                    verify_session(&dir, &meta)?;
                     return Err(StoreError::Invalid("part tag is not current".into()));
                 }
                 Err(e) => return Err(io_error(e)),
@@ -380,6 +399,7 @@ impl MultipartBlobStore for FsBlobStore {
             let mut file = match File::open(dir.join(tag)) {
                 Ok(file) => file,
                 Err(e) if e.kind() == ErrorKind::NotFound => {
+                    verify_session(&dir, &meta)?;
                     // The session exists, but this receipt's tag no longer
                     // names its selected part (for example after replacement).
                     return Err(StoreError::Invalid("part tag has no stored file".into()));
@@ -392,15 +412,15 @@ impl MultipartBlobStore for FsBlobStore {
             let mut remaining = part.len;
             while remaining > 0 {
                 let n = usize::try_from(remaining).map_or(READ_BLOCK, |n| n.min(READ_BLOCK));
+                buf.resize(n, 0);
                 file.read_exact(&mut buf[..n]).map_err(io_error)?;
-                sink.write(Bytes::copy_from_slice(&buf[..n])).await?;
+                sink.write(buf.split().freeze()).await?;
                 remaining -= n as u64;
             }
         }
         let outcome = sink.commit().await?;
         // The pack is durable. Cleanup failure is harmless; startup sweep
         // reclaims the directory after the ticket lifetime.
-        let _guard = lock(self);
         if let Err(e) = fs::remove_dir_all(&dir).and_then(|()| sync_dir(&uploads(&self.root))) {
             tracing::warn!(error = %e, "completed multipart session cleanup failed");
         }
@@ -409,7 +429,8 @@ impl MultipartBlobStore for FsBlobStore {
 
     async fn abort(&self, key: BlobKey, session: &[u8]) -> Result<(), StoreError> {
         let dir = session_dir(self, session)?;
-        let _guard = lock(self);
+        let session_lock = session_lock(self, session)?;
+        let _guard = session_lock.lock().await;
         let meta = match fs::read(dir.join(META)) {
             Ok(meta) => meta,
             Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),

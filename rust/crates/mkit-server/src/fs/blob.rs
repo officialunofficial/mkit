@@ -1,12 +1,13 @@
 //! `FsBlobStore`: content-addressed blobs as files, `<root>/packs/<64-hex>`
 //! by default, the layout `FileTransport::upload_pack` writes.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind, Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime};
 
@@ -23,6 +24,8 @@ use crate::store::{
 
 /// The size of each piece of a streamed body.
 pub(super) const READ_BLOCK: usize = 64 * 1024;
+
+type MultipartLocks = Arc<Mutex<HashMap<[u8; 32], Weak<tokio::sync::Mutex<()>>>>>;
 
 /// A [`BlobStore`] over `<root>/<keyspace>/<64-hex>` for packs (`packs` by
 /// default), and `<root>/upload-markers/v1/<64-hex>` for upload markers.
@@ -43,7 +46,7 @@ pub(super) const READ_BLOCK: usize = 64 * 1024;
 pub struct FsBlobStore {
     pub(super) root: PathBuf,
     keyspace: &'static str,
-    pub(super) multipart_lock: Arc<Mutex<()>>,
+    pub(super) multipart_locks: MultipartLocks,
 }
 
 impl FsBlobStore {
@@ -68,7 +71,7 @@ impl FsBlobStore {
         Self {
             root: root.into(),
             keyspace,
-            multipart_lock: Arc::new(Mutex::new(())),
+            multipart_locks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -98,8 +101,9 @@ impl FsBlobStore {
     /// `FileTransport::upload_pack`) last modified at least `min_age` ago.
     /// Nothing else is touched: no blob, no symlink, no other name, no file
     /// modified in the future. It also removes `server-uploads` session
-    /// directories whose last modification is at least seven days old,
-    /// independently of `min_age`. Returns how many files and directories
+    /// directories whose immutable `meta` file's mtime is at least seven days
+    /// plus one hour old, independently of `min_age`. An incomplete session
+    /// without `meta` uses the directory mtime. Returns how many entries
     /// were removed; an entry that cannot be inspected or removed is skipped.
     ///
     /// A live upload keeps its temp file's modification time fresh as it

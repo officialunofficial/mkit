@@ -15,6 +15,9 @@ use mkit_server::{
 use mkit_server_conformance::storage::KvHarness;
 use mkit_server_conformance::{multipart_suite, storage_suite};
 
+#[path = "support/multipart_allocator.rs"]
+mod multipart_allocator;
+
 /// [`MemoryKv`]s with `caps`: injectable clock, capacity cap and reopen.
 struct Memory {
     caps: StoreCapabilities,
@@ -126,7 +129,12 @@ storage_suite!(
     },
     blob = MemoryBlobStore::default,
 );
-multipart_suite!(memory_multipart, store = MemoryBlobStore::default);
+multipart_suite!(
+    memory_multipart,
+    store = MemoryBlobStore::default,
+    heap = multipart_allocator::probe,
+    buffered
+);
 storage_suite!(
     memory_refs_only,
     kv = Memory {

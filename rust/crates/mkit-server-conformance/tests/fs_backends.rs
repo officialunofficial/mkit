@@ -24,6 +24,9 @@ use mkit_server::{
 use mkit_server_conformance::storage::KvHarness;
 use mkit_server_conformance::{multipart_suite, storage_suite};
 
+#[path = "support/multipart_allocator.rs"]
+mod multipart_allocator;
+
 /// A fresh directory under the system temp dir, removed on drop.
 struct TempDir(PathBuf);
 
@@ -244,6 +247,18 @@ impl MultipartBlobStore for TempBlobs {
         self.store.begin_multipart(key, len, part_size).await
     }
 
+    async fn begin_multipart_for_ticket(
+        &self,
+        key: BlobKey,
+        len: u64,
+        part_size: u64,
+        ticket_id: [u8; 32],
+    ) -> Result<Vec<u8>, StoreError> {
+        self.store
+            .begin_multipart_for_ticket(key, len, part_size, ticket_id)
+            .await
+    }
+
     async fn begin_part(
         &self,
         key: BlobKey,
@@ -273,4 +288,8 @@ impl MultipartBlobStore for TempBlobs {
 }
 
 storage_suite!(fs, kv = Fs, blob = temp_blobs);
-multipart_suite!(fs_multipart, store = temp_blobs);
+multipart_suite!(
+    fs_multipart,
+    store = temp_blobs,
+    heap = multipart_allocator::probe
+);

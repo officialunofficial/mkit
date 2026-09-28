@@ -40,7 +40,7 @@ the native server.
   - Removes the session directory afterwards.
   - A tag that doesn't match a stored file → `SessionGone` or `Invalid`. Choose which, and document it (C).
 - **`abort`:** removes the session directory. It is idempotent.
-- **`MAX_PARTS` stays `u32::MAX`.
+- **`MAX_PARTS` stays `u32::MAX`.**
 
 ### B2. Sweep
 
