@@ -42,6 +42,10 @@ pub mod __buffa {
         reg.register_json_any(super::__UPDATE_REF_RESPONSE_JSON_ANY);
         reg.register_json_any(super::__ADVANCE_REFS_REQUEST_JSON_ANY);
         reg.register_json_any(super::__ADVANCE_REFS_RESPONSE_JSON_ANY);
+        reg.register_json_any(super::__GET_RECEIPT_REQUEST_JSON_ANY);
+        reg.register_json_any(super::__ADVANCE_RECEIPT_SELECTOR_JSON_ANY);
+        reg.register_json_any(super::__LEASE_RECEIPT_SELECTOR_JSON_ANY);
+        reg.register_json_any(super::__GET_RECEIPT_RESPONSE_JSON_ANY);
         reg.register_json_any(super::__PACK_EXISTS_REQUEST_JSON_ANY);
         reg.register_json_any(super::__PACK_EXISTS_RESPONSE_JSON_ANY);
         reg.register_json_any(super::__UPLOAD_PACK_HEADER_JSON_ANY);
@@ -104,6 +108,22 @@ pub use self::__buffa::view::AdvanceRefsRequestOwnedView;
 pub use self::__buffa::view::AdvanceRefsResponseView;
 #[doc(inline)]
 pub use self::__buffa::view::AdvanceRefsResponseOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::GetReceiptRequestView;
+#[doc(inline)]
+pub use self::__buffa::view::GetReceiptRequestOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::AdvanceReceiptSelectorView;
+#[doc(inline)]
+pub use self::__buffa::view::AdvanceReceiptSelectorOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::LeaseReceiptSelectorView;
+#[doc(inline)]
+pub use self::__buffa::view::LeaseReceiptSelectorOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::GetReceiptResponseView;
+#[doc(inline)]
+pub use self::__buffa::view::GetReceiptResponseOwnedView;
 #[doc(inline)]
 pub use self::__buffa::view::PackExistsRequestView;
 #[doc(inline)]
