@@ -7,11 +7,13 @@
 use crate::error::ServerError;
 use crate::op::{Creation, Operation};
 use crate::repo::Addressing;
-use crate::store::{Batch, BatchOutcome, BlobStore, NamespaceStore, Precondition, codec, keys};
+use crate::store::{
+    Batch, BatchOutcome, MultipartBlobStore, NamespaceStore, Precondition, codec, keys,
+};
 
 use super::{HookSet, Pipeline, Snapshot, internal, meta_error, ms};
 
-impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
+impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     pub(super) async fn creation_facts(
         &self,
         op: &Operation,

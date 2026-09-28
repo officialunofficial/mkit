@@ -25,7 +25,7 @@ pub mod tickets;
 
 pub use blob::{
     BlobBody, BlobKey, BlobMeta, BlobNamespace, BlobStore, ByteRange, CommitOutcome,
-    MAX_BLOB_PIECE_BYTES, PackSink,
+    MAX_BLOB_PIECE_BYTES, MultipartBlobStore, PackSink, PartRef, PartSink, UnsupportedPartSink,
 };
 pub use content_index::{
     BlockEntry, ContentIndex, GcPlan, HoldOutcome, Holder, HolderOutcome, HolderPage, INDEX_FANOUT,

@@ -17,7 +17,7 @@ use mkit_transport_file::{create_dir_all_durably, sync_dir, temp_path};
 use super::{io_error, unavailable};
 use crate::store::{
     BlobBody, BlobKey, BlobMeta, BlobStore, ByteRange, CommitOutcome, MAX_BLOB_PIECE_BYTES,
-    PackSink, StoreError,
+    MultipartBlobStore, PackSink, StoreError, UnsupportedPartSink,
 };
 
 /// The size of each piece of a streamed body.
@@ -373,4 +373,9 @@ impl BlobStore for FsBlobStore {
         }
         Ok(true)
     }
+}
+
+impl MultipartBlobStore for FsBlobStore {
+    type PartSink = UnsupportedPartSink;
+    const MAX_PARTS: u32 = u32::MAX;
 }

@@ -95,6 +95,10 @@ impl TicketKey {
     fn mac_key(&self) -> Zeroizing<Hash> {
         Zeroizing::new(blake3::derive_key(TICKET_TOKEN_CONTEXT, &*self.secret))
     }
+
+    fn receipt_mac_key(&self) -> Zeroizing<Hash> {
+        Zeroizing::new(blake3::derive_key(PART_RECEIPT_CONTEXT, &*self.secret))
+    }
 }
 
 /// Signing and accepted keys. The first key signs and every listed key verifies.
@@ -121,6 +125,21 @@ impl fmt::Debug for TicketKeys {
 pub struct TicketKeyError;
 
 impl TicketKeys {
+    /// The active key id and a domain-separated receipt MAC key. The source
+    /// secret is never exposed; the derived key is wiped after use.
+    pub(crate) fn receipt_signing_key(&self) -> (&str, Zeroizing<Hash>) {
+        let key = &self.keys[0];
+        (&key.id, key.receipt_mac_key())
+    }
+
+    /// A domain-separated receipt MAC key for an accepted key id.
+    pub(crate) fn receipt_verification_key(&self, id: &[u8]) -> Option<Zeroizing<Hash>> {
+        self.keys
+            .iter()
+            .find(|key| key.id.as_bytes() == id)
+            .map(TicketKey::receipt_mac_key)
+    }
+
     /// Validate an ordered key set. It must be nonempty; ids must be unique,
     /// 1–32 ASCII bytes from `[A-Za-z0-9._-]`.
     pub fn new(keys: Vec<(String, Hash)>) -> Result<Self, TicketKeyError> {

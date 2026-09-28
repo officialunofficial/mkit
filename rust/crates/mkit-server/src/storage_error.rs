@@ -31,6 +31,10 @@ pub enum StorageOp {
     BlobRead,
     /// A blob existence check failed.
     BlobHead,
+    /// Starting or completing a multipart storage session failed.
+    MultipartSession,
+    /// Streaming or committing a multipart part failed.
+    MultipartPart,
     /// Resolving the metadata store (for example a Durable Object binding)
     /// failed.
     MetaBinding,
@@ -54,12 +58,14 @@ pub enum StorageOp {
 
 impl StorageOp {
     /// Every variant, for exhaustive checks.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 15] = [
         Self::BlobBinding,
         Self::BlobPut,
         Self::BlobGet,
         Self::BlobRead,
         Self::BlobHead,
+        Self::MultipartSession,
+        Self::MultipartPart,
         Self::MetaBinding,
         Self::MetaStub,
         Self::MetaRequest,
@@ -78,6 +84,8 @@ impl StorageOp {
             Self::BlobGet => "blob get",
             Self::BlobRead => "blob read",
             Self::BlobHead => "blob head",
+            Self::MultipartSession => "multipart session",
+            Self::MultipartPart => "multipart part",
             Self::MetaBinding => "metadata store binding",
             Self::MetaStub => "metadata store stub",
             Self::MetaRequest => "metadata store request build",
@@ -94,9 +102,13 @@ impl StorageOp {
     #[must_use]
     pub const fn public_message(self) -> &'static str {
         match self {
-            Self::BlobBinding | Self::BlobPut | Self::BlobGet | Self::BlobRead | Self::BlobHead => {
-                "object storage request failed"
-            }
+            Self::BlobBinding
+            | Self::BlobPut
+            | Self::BlobGet
+            | Self::BlobRead
+            | Self::BlobHead
+            | Self::MultipartSession
+            | Self::MultipartPart => "object storage request failed",
             Self::MetaBinding
             | Self::MetaStub
             | Self::MetaRequest

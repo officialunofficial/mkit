@@ -36,7 +36,7 @@ pub struct TicketSpec {
     /// Admission id, or the synthetic replay-scope id.
     pub reservation_id: String,
     /// Optional backend multipart session identifier.
-    pub upload_session: Option<String>,
+    pub upload_session: Option<Vec<u8>>,
 }
 
 impl TicketSpec {
