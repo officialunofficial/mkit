@@ -61,6 +61,9 @@ struct PushOpts {
     /// non-fast-forward (CAS) rejection.
     #[arg(long, value_enum, default_value = "default")]
     format: PushFormat,
+    /// Alias for `--format json`.
+    #[arg(long)]
+    json: bool,
     /// Suppress transfer progress output on stderr (#711).
     #[arg(short = 'q', long)]
     quiet: bool,
@@ -101,7 +104,7 @@ pub fn run(args: &[String]) -> u8 {
 /// Default push: current branch → its upstream, CAS-protected.
 #[allow(clippy::too_many_lines)] // linear flow: resolve + no-op + push + report
 fn push_current(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpts) -> u8 {
-    let json = matches!(opts.format, PushFormat::Json);
+    let json = opts.json || matches!(opts.format, PushFormat::Json);
     let branch = match mkit_core::refs::read_head(layout) {
         Ok(mkit_core::refs::Head::Branch(b)) => b,
         Ok(mkit_core::refs::Head::Detached(_)) => {
@@ -194,6 +197,7 @@ fn push_current(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpt
 
     let tx = match remote_dispatch::open_trusted(
         &resolved.endpoint,
+        &resolved.name,
         resolved.repo_chosen,
         cfg,
         layout,
@@ -306,13 +310,13 @@ fn push_current(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpt
             exit::TEMPFAIL,
             json,
         ),
-        Err(e) => emit_err_json(&format!("push: {e}"), exit::GENERAL_ERROR, json),
+        Err(e) => emit_push_error(e, json),
     }
 }
 
 /// `--all`: mirror every local branch to the remote (CAS-safe).
 fn push_all(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpts) -> u8 {
-    let json = matches!(opts.format, PushFormat::Json);
+    let json = opts.json || matches!(opts.format, PushFormat::Json);
     let remote_name = opts
         .remote
         .clone()
@@ -343,6 +347,7 @@ fn push_all(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpts) -
     }
     let tx = match remote_dispatch::open_trusted(
         &resolved.endpoint,
+        &resolved.name,
         resolved.repo_chosen,
         cfg,
         layout,
@@ -408,7 +413,7 @@ fn push_all(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpts) -
             exit::TEMPFAIL,
             json,
         ),
-        Err(e) => emit_err_json(&format!("push: {e}"), exit::GENERAL_ERROR, json),
+        Err(e) => emit_push_error(e, json),
     }
 }
 
@@ -426,9 +431,34 @@ fn emit_err_json(msg: &str, code: u8, json: bool) -> u8 {
     if json {
         let mut obj = JsonObject::new();
         obj.field_bool("ok", false).field_str("error", msg);
+        if code == exit::NOPERM {
+            obj.field_bool("admission_required", true);
+        }
         emit_json_stdout(obj);
     }
     emit_err(msg, code)
+}
+
+fn emit_push_error(error: remote_dispatch::DispatchError, json: bool) -> u8 {
+    match error {
+        remote_dispatch::DispatchError::Transport(
+            mkit_core::protocol::TransportError::AdmissionRequired(required),
+        ) => emit_err_json(
+            &format!(
+                "push: {required}\nhint: configure admission_helper and trust this remote with mkit config trusted_remote_endpoint"
+            ),
+            exit::NOPERM,
+            json,
+        ),
+        remote_dispatch::DispatchError::Transport(
+            mkit_core::protocol::TransportError::AdmissionConfiguration(message),
+        ) => emit_err_json(
+            &format!("push: admission configuration: {message}"),
+            exit::CONFIG_ERROR,
+            json,
+        ),
+        other => emit_err_json(&format!("push: {other}"), exit::GENERAL_ERROR, json),
+    }
 }
 
 fn lease_for(opts: &PushOpts) -> PushLease {

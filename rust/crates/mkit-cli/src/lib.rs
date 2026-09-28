@@ -20,6 +20,7 @@
 // SAFETY comment on the block.
 #![deny(unsafe_code)]
 
+mod admission_helper;
 pub mod clap_shim;
 pub mod cli;
 pub mod commands;
