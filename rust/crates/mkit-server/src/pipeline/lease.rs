@@ -8,6 +8,7 @@
 //! the lr hold-off fences completion until every surviving old deadline has passed.
 
 use crate::op::{Creation, Operation};
+use crate::quota::NamespaceUsage;
 use crate::repo::Addressing;
 use crate::store::{
     Batch, BatchOutcome, MultipartBlobStore, NamespaceStore, Partition, Precondition, Value, codec,
@@ -39,6 +40,7 @@ pub(super) struct CoordinatorLease {
     shard: Option<Value>,
     observed_el: Option<codec::EpochLease>,
     recovery: Option<codec::LeaseRecovery>,
+    quota_seed: Option<(u64, NamespaceUsage)>,
 }
 
 impl CoordinatorLease {
@@ -55,6 +57,13 @@ impl CoordinatorLease {
 }
 
 impl LeaseObservation {
+    pub(super) fn quota_seed(&self) -> Option<(u64, NamespaceUsage)> {
+        match self {
+            Self::Renew(read) => read.quota_seed,
+            Self::Usable(_) => None,
+        }
+    }
+
     pub(super) fn creation(&self, addressing: &Addressing) -> Creation {
         match self {
             Self::Renew(read) if matches!(addressing, Addressing::Multi(_)) => read.creation(),
@@ -202,6 +211,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         ahead: Option<&Snapshot>,
     ) -> Result<LeaseObservation, ServerError> {
         let snap = ahead.ok_or_else(|| internal("D34 lease requires an atomic snapshot"))?;
+        let seed_window = snap.namespace_window.filter(|window| {
+            let key = keys::quota_view(*window);
+            snap.contains(&key) && snap.get(&key).is_none()
+        });
         let observed_el = snap
             .get(&keys::epoch_lease())
             .map(codec::decode_epoch_lease)
@@ -218,7 +231,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             }
         }
         Ok(LeaseObservation::Renew(
-            self.read_lease(op, p, observed_el).await?,
+            self.read_lease(op, p, observed_el, seed_window).await?,
         ))
     }
 
@@ -227,22 +240,39 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         op: &Operation,
         p: &Partition,
         observed_el: Option<codec::EpochLease>,
+        seed_window: Option<u64>,
     ) -> Result<CoordinatorLease, ServerError> {
-        let wanted = [
+        let mut wanted = vec![
             keys::namespace_record(),
             keys::repo_record(&op.repo.name),
             keys::grant_epoch(),
             keys::leased_shard(&op.repo.name, shard_ref(p)?),
             keys::lease_recovery(),
         ];
+        if let Some(window) = seed_window {
+            wanted.push(keys::quota_total(window));
+        }
         let rows = self
             .meta
             .get_many(&self.shards.coordinator(&op.repo.namespace), &wanted)
             .await
             .map_err(meta_error)?;
-        let [namespace, repo, epoch, shard, recovery] = rows.as_slice() else {
+        if rows.len() != wanted.len() {
+            return Err(internal("lease get_many returned the wrong row count"));
+        }
+        let [namespace, repo, epoch, shard, recovery] = &rows[..5] else {
             return Err(internal("lease get_many returned the wrong row count"));
         };
+        let quota_seed = seed_window
+            .map(|window| {
+                rows[5]
+                    .as_ref()
+                    .map(codec::decode_namespace_usage)
+                    .transpose()
+                    .map(|total| (window, total.unwrap_or_default()))
+                    .map_err(meta_error)
+            })
+            .transpose()?;
         if let Some(value) = namespace {
             codec::decode_namespace_record(value).map_err(meta_error)?;
         }
@@ -272,6 +302,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .map(codec::decode_lease_recovery)
                 .transpose()
                 .map_err(meta_error)?,
+            quota_seed,
         };
         Ok(read)
     }
@@ -323,7 +354,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     ));
                 }
                 BatchOutcome::PreconditionFailed { .. } => {
-                    read = self.read_lease(op, p, read.observed_el).await?;
+                    read = self
+                        .read_lease(op, p, read.observed_el, read.quota_seed.map(|(w, _)| w))
+                        .await?;
                 }
                 BatchOutcome::DeadlinePassed { .. } => {
                     return Err(internal("lease grant had no deadline"));
