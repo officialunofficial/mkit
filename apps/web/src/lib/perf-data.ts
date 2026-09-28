@@ -192,6 +192,45 @@ export const transferBenchmarks: TransferBenchmark[] = [
   },
 ]
 
+/**
+ * Criterion microbenchmarks of one mkit core path, before vs after a change. Unlike the rows above there is no Git
+ * baseline: these track mkit against its own previous commit. Medians in milliseconds, copied from criterion's
+ * `--baseline` comparison output.
+ */
+export type MicroBenchmark = {
+  id: string
+  name: string
+  description: string
+  beforeMs: number
+  afterMs: number
+  note?: string
+}
+
+export const microBenchmarks: MicroBenchmark[] = [
+  {
+    id: 'list-refs-100',
+    name: 'List 100 branch refs',
+    description: 'list_refs over 100 ref files on a warm page cache.',
+    beforeMs: 0.2203,
+    afterMs: 0.1699,
+  },
+  {
+    id: 'list-refs-1k',
+    name: 'List 1,000 branch refs',
+    description: 'list_refs over 1,000 ref files on a warm page cache.',
+    beforeMs: 2.5926,
+    afterMs: 2.2149,
+  },
+  {
+    id: 'list-refs-10k',
+    name: 'List 10,000 branch refs',
+    description: 'list_refs over 10,000 ref files on a warm page cache.',
+    beforeMs: 28.943,
+    afterMs: 22.236,
+    note: 'Measured 2026-09-28 with cargo bench -p mkit-benches --bench refs_ops on the same class of 4-core container as the methodology below. Each ref file is now read with one stack-buffer read (open, read, close) instead of fs::read, which adds a size-hint statx and an end-of-file probe read. About 23% faster at 10,000 refs and 25% at 100; the 1,000-ref run shows 15%.',
+  },
+]
+
 export const methodology = {
   date: '2026-09-02',
   /**
