@@ -11,7 +11,8 @@ audience: implementers of mkit.transport.v1 servers and of deployment business l
 
 This specification defines server-internal pipeline guarantees, durable
 outcomes and lifecycle events, storage leases, server garbage collection,
-and the contract between a server and deployment business logic.
+takedown and redaction notices, and the contract between a server and
+deployment business logic.
 An independent hook implementation can use this contract and the
 `mkit.server.hooks.v1` schema without using a server implementation.
 
@@ -41,8 +42,9 @@ policy, moderation policy, or the deployment's account model.
 their verification, and the preconditions they carry into apply.
 
 Sections 10–18 cover the M5 contracts: §§10–11 specify the published view
-and inspection, and §§12–13 specify storage leases, lifecycle events, and
-server garbage collection. The other M5 sections remain reserved. Inspection
+and inspection, §§12–13 specify storage leases, lifecycle events, and
+server garbage collection, and §14 specifies takedown. The other M5
+sections remain reserved. Inspection
 fields extend the original hook shape additively.
 For a branch, its head and packmap share one publication sequence even
 when either is written through `UpdateRef` (§10.2).
@@ -72,7 +74,9 @@ as STC §7.1 requires; this list names server-internal extension points.
    ticket and part rules STC §7.6 requires. Durably record a pending
    reservation when §5 requires it before the guarded apply.
 5. **Pre-receive checks.** Run content verification and policy checks,
-   including inspection configured to run synchronously before apply.
+   including the built-in §14.2 blocklist check on every decoded pushed
+   file object in indexed mode, whether or not an inspector is configured,
+   and inspection configured to run synchronously before apply.
 6. **Atomic apply.** Apply the operation with its preconditions and
    applicable outbox rows in the atomic unit specified by §3 and §5.
 7. **Receipt signing.** Produce a receipt when the deployment enables
@@ -559,6 +563,10 @@ the response invalid under §6.6. Every QUARANTINE-phase `reject` or
 response is invalid under §6.6. A PRE_RECEIVE verdict MAY leave the list
 empty because it governs the entire push. §11.3 immediately suspends
 serving flagged objects, and §14 defines the takedown rewrite mechanics.
+`InspectResponse.takedown_reason`, when present, MUST be a §14.6 token
+and is valid only with `reject`. An invalid token or use with another
+verdict invalidates the response under §6.6. For an asynchronous hit it
+becomes the notice reason; absent means `policy`.
 
 ### 6.5 Outcome
 
@@ -687,6 +695,10 @@ body:<64 lowercase hex BLAKE3 of the exact request body bytes>
 [SPEC-CONVENTIONS §4](SPEC-CONVENTIONS.md#4-domain-separator-and-namespace-naming)
 requires. A hook key MUST NOT be any key used for `mkit-write:v2`,
 grants, or receipts. Distinct roles MUST use distinct keys.
+The DSSE `payloadType` `application/vnd.mkit.redaction-notice.v1+json`
+is separately registered for §14.6 notices. It distinguishes those
+messages from the §15 storage-receipt use of the shared receipt-and-notice
+key; verifiers MUST check the exact type before interpreting a payload.
 
 `<key id>` identifies a key in §7.2's list. It MUST be 1–64 bytes of
 `[A-Za-z0-9._-]` and is chosen by the deployment.
@@ -962,6 +974,10 @@ as [SPEC-PACKFILE §4](SPEC-PACKFILE.md#4-ordering-rule) requires for
 in-pack resolution, or from verified members of the same repository.
 A server MUST NOT resolve a base from another repository or from the
 global content store.
+
+The global blocklist in §14.2 is a denial check, not a membership or
+delta-base source. Its lookup MAY deny an object in any repository, but
+MUST NOT reveal whether that object is held in another repository.
 
 Whether a push is accepted or rejected, and its public error text,
 MUST NOT depend on whether the object exists anywhere outside the
@@ -1734,7 +1750,7 @@ under a valid epoch lease. They MUST NOT use cached lease terms.
 | `repository = 3` | Full repository identity under STC §7.4. |
 | `occurred_unix_ms = 4` | Transition time as signed 64-bit Unix epoch milliseconds, independent of delivery time. |
 | `sequence = 5` | Unsigned 64-bit sequence, strictly increasing per `(repository, scope)` for distinct events of every kind. |
-| `kind` | Exactly one transition kind; `lease = 6` is defined here. Other kinds can extend the same envelope. |
+| `kind` | Exactly one transition kind; `lease = 6` and `takedown = 8` are defined here. Field 7 remains available for publication. |
 
 `LeaseTransition` has these fields:
 
@@ -1762,7 +1778,17 @@ override, or time-derived state changed. A repository-default change emits
 one repository-scope event; refs inheriting that default MUST NOT emit
 separate per-ref events, and receivers derive their effective state from
 the repository transition.
-An administrative override emits at the scope where it is set.
+An administrative override emits at the scope where it is set, except
+for the §14 namespace takedown fan-out below.
+For a namespace-level takedown, the server MUST emit one
+`TakedownTransition` per affected repository so the required Event
+repository is populated; each retains the namespace level. The
+transition carries takedown id, level (`content`, `repository`, or
+`namespace`), state (`blocked`, `completed`, or `reinstated`), and the
+§14.6 reason token. It is subject to the same outbox, deduplication,
+sequence, and signing rules as a lease transition. An event for a
+content takedown is recorded at per-repository completion; §16 defines
+the global audit record.
 
 When an Event sink is configured, events MUST use the same durable outbox
 as outcomes (§5), be delivered at least once, and remain retained until
@@ -1943,8 +1969,17 @@ members belong to the server GC implementation.
 ### 13.4 Global byte deletion
 
 Global pack or extracted-object bytes MUST be deleted only with zero
-holders and zero live holds. An `AlreadyPresent` pin counts as a live
-hold in this guard. Every path that writes or deduplicates bytes which
+holders and zero live holds, except for the completed §14 takedown of
+blocked bytes. That path MUST first durably remove or substitute every
+affected holder and prevent new holders through the blocklist; it MAY
+then delete the blocked extracted copy and superseded packs despite
+stale holder counts or holds that cannot be released until relay delivery.
+It MUST NOT delete a pack still relied on by an unaffected repository.
+The §14 path is also exempt from §13.3's `gc_grace` wait for superseded
+packs: those bytes are deleted at takedown completion, not seven days
+later. All other §13 safety checks still apply.
+An `AlreadyPresent` pin counts as a live
+hold in the ordinary guard. Every path that writes or deduplicates bytes which
 may later gain a holder MUST create a durable hold before relying on
 those bytes. This includes ticket issue, upload completion, an
 un-ticketed `UploadPack`, extracted-object deduplication, and
@@ -2001,9 +2036,348 @@ fail-closed principles as [SPEC-GC](SPEC-GC.md#fail-closed-requirement), applied
 server roots. A failure in the re-check MUST also abort removal; it
 MUST NOT reuse the earlier mark's liveness verdict.
 
-## 14. Takedown and redaction notices (reserved, M5)
+## 14. Takedown and redaction notices
 
-Reserved: this section is specified with M5 (see the version history).
+### 14.1 Terms, levels and scope
+
+A **takedown** is a durable denial of content or of a repository or
+namespace, initiated by an authorized administrative action (§16) or an
+inspector rejection (§11.3). A **tombstone** records that an object was
+removed from a particular repository; it does not change the object's id.
+A **redaction notice** is the signed account of that action (§14.6).
+
+Content-level takedown is available only in indexed mode. It names 1–256
+whole plain-blob ids or ChunkedBlob manifest ids; an individual byte range
+cannot be removed. For a taken-down manifest, its chunks are removed from
+a repository only when no other live object there references them. The
+chunks MUST NOT themselves be blocklisted on account of that manifest.
+Commits, trees, tags, and individual chunks cannot be taken down at
+content level. Use a repository- or namespace-level takedown for such
+content. In opaque mode, only these two levels are available. Informative:
+commit and tag messages and tree entry names remain a residual content
+channel even in indexed mode.
+
+A repository- or namespace-level takedown is a §12 administrative
+suspension override marked as a takedown. It reuses the existing lease
+states, but payment renewal MUST NOT lift it. Reader answers, including
+HTTP, MUST remain the byte-identical §12.2 `not_found`/404 answers; they
+MUST NOT carry a notice or return 451. Authorized writers receive the
+existing `lease suspended` public message and a §14.6 notice detail;
+the message text is unchanged. A namespace override applies to every
+repository in that namespace. §16 defines `Takedown` and the suspension
+operation; §14 defines their serving and notice consequences.
+
+An inspector `reject` that becomes a takedown MUST initiate a global
+content takedown of its flagged ids in every namespace holding them,
+including repositories unrelated to the rejected advance. A subsequent
+reinstatement under §14.8 is the remedy for a mistaken hit. Informative:
+one false-positive inspector verdict can make the same object unavailable
+across many namespaces.
+
+### 14.2 Blocklist
+
+The server MUST maintain a strongly consistent global blocklist with
+one row per object id. The row records a takedown id (empty for a manual
+block), source `takedown` or `manual`, a §14.6 reason token, and the time
+the block began in Unix milliseconds. An object covered by several active
+actions remains blocked until all are lifted. §16 defines `AddBlock` and
+`RemoveBlock`; a manual block of an id with known holders becomes a
+takedown of those holders. `RemoveBlock` alone MUST NOT undo the
+resulting repository tombstones; that requires §14.8 reinstatement.
+
+In indexed mode, stage 5 MUST check every decoded pushed file object
+against the blocklist independent of configured inspectors. Extraction
+deduplication and its holds, and the relay when recording a new holder,
+MUST also check it. A newly recorded holder of a blocked object MUST
+schedule takedown for that repository (§13.4). Extracted-object and HTTP
+serving MUST read the blocklist at serve time with per-object strong
+consistency. A blocked object MUST NOT be used as a delta base. These
+checks enforce §11.3's serving stop before any repository rewrite.
+
+A push containing a blocklisted object MUST be rejected with
+`permission_denied`, exact public message `object blocked`, and the
+§14.6 detail with an empty repository and no rewrites. It MUST NOT
+disclose whether a different repository holds the object. A blocklist
+check failure MUST fail closed rather than treating the object as
+unblocked. The blocklist is a denial source, never a deduplication,
+serving, or membership source.
+
+### 14.3 Lifecycle and completion
+
+For each content takedown, the server MUST perform the following durable,
+restart-resumable steps in order. A failed step leaves the serving stop
+in force and MUST NOT report completion.
+
+1. Record the blocklist action and immediately apply §11.3's serving
+   stop to all callers and all serving surfaces. Invalidate local caches.
+2. Copy canonical object bytes into the restricted preservation store
+   (§14.7) and verify them against the id. For a ChunkedBlob, preserve
+   and verify its manifest and every chunk against the manifest. An
+   unreadable or mismatched source fails closed; no later step may make
+   unverified bytes available as a replacement.
+3. For each holder repository, complete the rewrite and substitution in
+   §14.4, then write its tombstones and ref notice flags and durably
+   store its signed notice. Its old packs remain unavailable throughout.
+   Durably enqueue that repository's purge as part of this completion;
+   another repository's work MUST NOT delay this enqueue.
+4. Delete the extracted serving copy under §13.4's takedown exemption.
+   Delete superseded pack bytes at the completion of their last affected
+   repository under the `gc_grace` exemption, after every repository
+   holding them has substituted or dropped them. The holder sweep and
+   relay watermark MUST first prove that no undiscovered holder can
+   still rely on the pack. A pack lacking that proof remains blocked
+   and deletion is retried when proof becomes available. Once proven,
+   deletion MUST NOT wait for the ordinary seven-day grace.
+5. Ensure a cache purge has been enqueued on **every** takedown,
+   including a suspension, using §16's `CachePurge` delivery contract.
+   Per-repository purges enqueued in step 3 need not wait for deletion
+   of packs shared elsewhere. Shared-cache removal follows that
+   interface's delivery latency.
+6. Wait for the affected namespaces' relay watermarks to pass the
+   takedown time and complete the holder sweep below. A late relay
+   holder schedules the same work; the watermark prevents declaring a
+   lagging namespace complete prematurely.
+
+Holder discovery MUST first use pack-holder and extracted-object holder
+records. For small blobs without holder rows, each takedown MUST then
+run a resumable sweep across the deployment, making one index-shard
+point read per repository that checks all named ids. The sweep records its
+position durably and MUST revisit any repository whose lookup failed.
+Completeness is guaranteed for extracted objects, pack holders, and
+swept repositories. Global completion MUST wait for the sweep, all
+holder repositories, and the relay watermarks. It is used for reporting
+and §16's audit log; it does not block an unrelated repository's
+publication.
+
+A repository's takedown is **complete** once its affected values,
+membership, indexes, tombstones, and notices are durable, its old packs
+are unservable there, its cache purge is enqueued, and its namespace relay
+watermark has passed the takedown time. A `hit` advance resolves on this
+per-repository completion only when the post-takedown chain also passes
+§10.2 condition 2 and its other obligations are met. The hit and
+its replacement packs remain §13.2 roots until then, even across a
+deletion boundary. A post-publication reject creates a separate
+takedown obligation without rewinding the published pointer. It leaves
+published membership as the replacement set after completion.
+
+### 14.4 Rewrite, replacement and ref-value substitution
+
+For each affected repository, the server MUST rewrite every pack that
+contains a taken-down object or whose delta chain passes through it,
+including packs that use the object as an external base. It MUST remove
+the object and make every surviving dependent entry independently
+decodable. A delta needs rawification when its **direct** base is
+excluded; an unchanged direct base can remain a delta after its own
+safe rewrite. A packlist chain MUST be rebuilt to omit old packs and
+reference actual replacement ids. New pack ids are content hashes of
+the produced bytes, not fixed across implementations; the notice records
+the ids actually written.
+
+Before writing replacement bytes or reusing an existing replacement,
+the server MUST create durable holds under §13.4. It MUST apply §13.3's
+new-reliance rule to every newly relied-on member, clearing a GC mark
+before commit, and use a guarded write with `NotAfter`. An in-progress
+`deleting` member produces retryable `unavailable`; a stale plan MUST
+re-plan rather than publish a partial chain. The server MUST pair each
+branch's unchanged head with its new packmap. It MUST substitute the
+packmap in one guarded ref-shard batch in the live value, the published
+value, and **every retained intermediate advance value** (§10.2).
+Sequence numbers and inspection decisions MUST remain unchanged.
+
+That substitution MUST also update repository membership, serving index
+rows, and each affected ref's membership-addition records used by
+`X-Mkit-Ref` (§13.3). It MUST write a tombstone per removed id and a
+per-ref flag for every ref value whose closure or packlist is affected.
+These changes MUST become visible atomically to repository readers.
+Replacement packs inherit the published status of the packs they
+replace. A `hit` advance's own replacement packs MAY publish atomically
+with its resolution; packs supplied by other advances or external bases
+still satisfy §10.2's dependency test. Publication of replacements MUST
+durably schedule re-evaluation of blocked advances, including those
+blocked on external bases. An advance blocked only on a removed pack
+MUST be re-evaluated against its replacements. These server writes are
+not advances: they take no sequence number and add no inspection duty.
+
+### 14.5 Tombstones and caller answers
+
+Before a repository's tombstone is written, every caller MUST receive
+§11.3's ordinary absent, `not_found`, or 404 answer for blocked content,
+including extracted copies, pack reads, HTTP, and delta-base lookup.
+Afterward, an authorized caller who can see an affected ref value MUST
+receive its active notice on `ReadRef` or `ListRefs`; an absent or hidden
+ref MUST NOT reveal one. §14.6 defines the additive fields. A notice
+flag is calculated for each affected ref at takedown time and followed
+through subsequent ref moves until the affected value is no longer
+visible. A returned notice MUST correspond to the returned value.
+
+An `AdvanceRefs` whose permitted closure contains a tombstoned object
+MUST use existing `invalid_argument` / `open closure` and attach the
+notice detail. A tombstoned delta base MUST use existing
+`failed_precondition` / `delta base not available in this repository`
+with the detail, without §9.4's membership-lag window. The tombstone
+check precedes that window. No new `failed_precondition` code is
+introduced for a ticketed `AdvanceRefs`. A `DownloadPack` of a
+superseded pack MUST return `not_found` with the detail, before sending
+any stream message, when the caller can see an affected ref value;
+otherwise it returns the ordinary plain `not_found`. `PackExists`
+MUST return `false`. The advance and delta-base details likewise require
+an authorized writer in the affected repository.
+
+HTTP 451 is permitted only for an id reachable by the published tree
+walk when this repository has its tombstone. All preceding privacy,
+authorization, unrelated membership, and reachability 404 checks still apply.
+The tombstone is a candidate that lets a removed id pass the ordinary
+membership-miss check solely to test published-tree reachability; it
+does not restore membership or authorize serving bytes. A failed walk
+remains 404.
+In particular, a chunk reachable only through a tombstoned manifest
+returns 404. The 451 check precedes 304 and Admission. §14.6 and
+[SPEC-HTTP-OBJECTS §§3–4](SPEC-HTTP-OBJECTS.md#3-response-precedence)
+define its response. Repository and namespace suspensions instead use
+§12.2's byte-identical read denials, never 451.
+
+No caller-selected view, including the writer view, can bypass a
+content takedown or administrative suspension. The strongly consistent
+serve-time blocklist check stops extracted and
+HTTP serving immediately. A pack read after the blocklist write MUST
+prove that its indexed entries contain no blocked id, or fail closed
+with §11.3's absent answer; a stale holder index is not proof. Thus
+packs containing a flagged id stop serving at once to all callers,
+before rewrite. Every holder repository MUST also install its
+repository-specific pack stop no later than the configured §9.4
+relay-lag bound after the blocklist write; a known holder installs it
+at once. If discovery has not checked a repository by that bound, all
+its pack reads MUST fail closed until safety is proved. Informative: without
+clone-with-holes support, a branch whose history contains a taken-down
+object is unfetchable until its owner rewrites history.
+
+### 14.6 Signed redaction notice
+
+The server MUST sign one immutable notice per (takedown, repository) at
+takedown time; an ingest rejection uses a repository-empty notice per
+blocklist action with no rewrites. The bytes are a DSSE JSON envelope with exactly
+one Ed25519 signature under the receipt-and-notice key of §15. Its
+`payloadType` is `application/vnd.mkit.redaction-notice.v1+json`; the
+payload is JCS JSON, **not** an in-toto Statement. This distinct
+`payloadType` is the notice signing domain. `keyId` is the lowercase
+64-hex BLAKE3 digest of the raw public key; the DSSE `keyid` is
+`blake3:<keyId>`. §15 defines key publication at
+`/.well-known/mkit-receipt-keys.json` and retains retired keys forever
+so old notices remain verifiable.
+
+The payload is an object with exactly these fields:
+
+| Field | Contract |
+|---|---|
+| `version` | Integer `1`. |
+| `noticeId`, `takedownId` | `noticeId` is a nonempty, deployment-unique opaque identifier of this signed notice. `takedownId` is the action id, empty only for a manual block's ingest notice. |
+| `origin` | Canonical server origin, also the 451 blocking entity. |
+| `repository` | Full repository identity, or empty only for an ingest rejection. |
+| `objects` | Array of `{id,kind}`, sorted by id, with lowercase 64-hex id and kind `blob` or `chunked_blob`. Nonempty for content takedown and ingest rejection; empty for a repository or namespace suspension. |
+| `reason` | One registered token below or a deployment token; never free text. |
+| `takenDownAtMs`, `issuedAtMs` | Integer Unix epoch milliseconds; issuance is no earlier than the takedown. |
+| `keyId` | Receipt-and-notice key id described above. |
+| `rewrites` | Array of `{type,old,new}`, sorted by `type`, then `old`; `type` is `pack` or `packlist`, `old` is a lowercase 64-hex id, and `new` is a lowercase 64-hex id or empty when removed without replacement. Empty for ingest rejection. |
+
+Registered reasons are `legal`, `policy`, `malware`, `abuse`, and
+`manual`. A deployment token MUST use `x-` followed by 1–62 lowercase
+ASCII letters, digits, dots, or hyphens. Deployments SHOULD map a
+sensitive category to `legal` instead of disclosing it in a public
+notice. No reason field contains free text. The encoded envelope MUST
+be at most 262,144 bytes. The server MUST fail closed if the bounds
+cannot be met; it MUST NOT truncate an object or rewrite list.
+For a repository notice, `objects` and `rewrites` MUST name only ids and
+packs affected in that repository, even if the global takedown names
+more ids. An ingest notice names only submitted blocked ids. Neither
+notice may disclose another repository's membership.
+
+The Connect detail is `mkit.transport.v1.RedactionNotice` and carries
+only `bytes envelope = 1`, the exact DSSE envelope bytes. `ReadRef`
+returns active notices in `redaction_notices = 3`. `ListRefs` returns
+`ref_redactions = 3`, pairs of full ref name and notice, without
+changing `RefEntry`; the pairs count toward STC §7.9's page byte bound.
+The server MAY shorten a page to fit all of a returned ref's notices;
+it MUST NOT silently omit a notice. If one ref plus its notices cannot
+fit in a page, `ListRefs` MUST fail closed with `resource_exhausted`.
+For a ref affected by several active takedowns, the server MUST include
+each notice in ascending `noticeId` order; duplicate pairs are forbidden.
+Reinstatement withdraws the affected active notice (§14.8). A client
+MUST verify the DSSE signature against §15's key list and the expected
+origin and repository before relying on the notice.
+
+HTTP 451 MUST use the detail's canonical protobuf JSON as its body,
+`Content-Type: application/json`, and `Cache-Control: no-store` (or
+`private, no-store` with a bearer gate). It MUST omit `ETag`, every
+`X-Mkit-*` header, and `Content-Range`; HEAD omits the body. It MUST
+include `Link: <origin>; rel="blocked-by"` as in
+[RFC 7725](https://www.rfc-editor.org/rfc/rfc7725), and expose `Link`
+through CORS. It MUST NOT include preserved bytes or free-text reasons.
+
+### 14.7 Preservation store
+
+The preservation store MUST be a restricted storage keyspace separate
+from serving and deduplication. It is reachable only through the audited
+§16 `ReadPreserved` admin operation. It MUST NOT serve clients, supply a
+delta base, satisfy deduplication, or be collected by §13 GC. The record
+MUST include the verified canonical bytes (manifest and chunks for a
+ChunkedBlob), takedown id, object ids, kinds and sizes, reason and time,
+holders at completion, and per repository the affected old pack ids and
+known advancing signer keys. The record remains accessible to authorized
+admin review even when serving is stopped.
+
+When takedown is enabled, `preservation_retention` is REQUIRED
+deployment configuration; startup without it MUST be refused. mkit
+defines no default. `retain_until` is takedown time plus that duration.
+A legal hold suspends timed purge until audited `SetLegalHold` release
+under §16. A timer MUST purge expired records without an active hold,
+and the purge MUST be audited. Reinstatement marks the record
+reinstated but retains it until retention ends.
+
+### 14.8 Reinstatement
+
+The §16 `Reinstate` operation MUST perform a server-side rewrite from
+verified preserved bytes for every id covered by that takedown in each
+affected repository. It MUST restore each object, append a
+single-object pack for each restored object, and compare-and-swap each
+affected packmap with its head unchanged. It MUST lift that action's
+blocklist coverage only after the replacements and indexes are durable,
+and only when no other active takedown covers the id. The server MUST
+restore repository membership and serving indexes under the same §13
+holds, new-reliance, and `NotAfter` rules as §14.4. In a repository, it
+MUST withdraw the immutable notice
+only after every id that notice covers has been reinstated there; until
+then its tombstones and notice remain active. On success it MUST delete
+the corresponding tombstones and ref flags. It MUST audit the
+action. A failed or partial reinstatement MUST leave denial in force;
+it MUST NOT expose the object before all replacement state is durable.
+For a ChunkedBlob, reinstatement MUST also restore every preserved chunk
+whose repository membership was removed, using a separate single-object
+pack for each needed chunk before the manifest can become reachable.
+Chunks still shared by another live object keep their existing member
+pack. The guarded packmap and index update MUST make the manifest and
+all its chunks usable together.
+For a repository- or namespace-level takedown, reinstatement removes
+the administrative suspension override under §12, withdraws its
+per-repository notices, and is audited; no content pack rewrite is
+needed unless a separate content takedown remains active.
+
+### 14.9 Interaction with GC, restore and caches
+
+§13.2 retains hit membership, including invalidated membership, and
+replacement packs until per-repository completion. §13.4 permits
+deletion of blocked extracted bytes and
+superseded packs after the substitution, without ordinary zero-holder
+or `gc_grace` waits. Preservation records and active blocklist actions
+follow §§14.2 and 14.7, not server GC.
+
+A portable restore MUST re-apply every takedown recorded in the §16
+admin store after the snapshot time before serving a restored shard.
+Restoring an older content or repository index MUST NOT resurrect
+tombstoned membership, an extracted copy, or a blocklist absence. An
+incomplete or unreadable takedown record fails restore closed. Cached
+walks and serving copies MUST honor the current blocklist and
+tombstones immediately; every takedown enqueues §16 `CachePurge` as
+§14.3 requires.
 
 ## 15. Storage receipts (reserved, M5)
 
@@ -2027,6 +2401,7 @@ Reserved: this section is specified with M5 (see the version history).
 |---|---|---|
 | 1 | draft | Additive M5 storage leases and lifecycle Event (§12), server GC (§13), and section renumbering (§§19–20); `GetServerInfo.leases` in STC §2.1. |
 | 1 | draft | Additive M5 published view (§10), per-advance inspection and quarantine (§11), including surplus pack entries; additive Inspect phase/id/kind/defer/flagged ids and Authorize writer_view (§6); `GetServerInfo.async_inspection` in STC §2.1. |
+| 1 | draft | §14 content, repository, and namespace takedown; signed notices, preservation and restore; additive transport notices and hook transition/reason. |
 | 1 | draft | Initial M3 pipeline, durable outcome and remote-hook contract; M5 sections reserved. Admission credential headers (§6.3); indexed mode (§9). HTTP read reservations and procedure strings (WP-4.11), amended with `read_reconcile_grace = 60 s` default and `ReadServed` priority within grace (fix round 1). |
 
 ## 20. Test anchors
@@ -2050,6 +2425,7 @@ requires. These anchors are informative descriptions of those bytes.
 | `inspect-quarantine-phase.request.json` | Quarantine phase, stable inspection id, and blob/manifest/chunk metadata (§6.4, §11). |
 | `inspect-quarantine.response.json` | Hold verdict and flagged object ids (§6.4, §11). |
 | `inspect-reject-flagged.response.json` | Reject/hit verdict with flagged ids (§6.4, §11). |
+| `event-takedown.request.json` | Per-repository takedown transition (§12.4, §14). |
 | `inspect-defer.response.json` | Async retry-after suggestion (§6.4, §11.3). |
 | `authorize-writer-view.response.json` | Authority-source writer classification (§6.2, §10.1). |
 | `outcome-committed.request.json` | Committed byte accounting and refs (§5, §6.5). |
@@ -2067,6 +2443,14 @@ requires. These anchors are informative descriptions of those bytes.
 
 Informative: the signature vectors contain a clearly labelled test seed.
 It is public fixture material and is not a deployment signing key.
+
+[`rust/tests/golden/redaction/`](../../rust/tests/golden/redaction/)
+pins the §14 JCS payload, DSSE envelope from a test seed, protobuf
+detail binary and JSON, four Connect error bodies, and `ReadRef` and
+`ListRefs` responses. Its ingest pair pins empty repository and rewrites.
+`MANIFEST.txt` pins BLAKE3 digests; `scripts/check-redaction-goldens.py`
+verifies the signature and protobuf round trips. The HTTP 451 response
+rows are in `rust/tests/golden/http-objects/response-cases.json`.
 
 The indexed-mode detail fixtures under `rust/tests/golden/transport/`
 pin STC §7.6 and SPEC-SERVER §9.5:

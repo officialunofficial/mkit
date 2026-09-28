@@ -429,6 +429,112 @@
     {
       "expect": {
         "absent_headers": [
+          "ETag",
+          "X-Mkit-*",
+          "Content-Range"
+        ],
+        "body_bytes": 1815,
+        "body_fixture": "redaction/detail.json",
+        "headers": {
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "no-store",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Content-Type": "application/json",
+          "Link": "<https://vcs.example.test>; rel=\"blocked-by\"",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff"
+        },
+        "status": 451
+      },
+      "name": "tombstone_before_304_and_admission",
+      "request": {
+        "admission": "challenge",
+        "if_none_match": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
+        "method": "GET",
+        "published_reachable": true,
+        "repository_tombstone": true,
+        "route": "ref"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "ETag",
+          "X-Mkit-*",
+          "Content-Range"
+        ],
+        "body_bytes": 0,
+        "headers": {
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "no-store",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Content-Type": "application/json",
+          "Link": "<https://vcs.example.test>; rel=\"blocked-by\"",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff"
+        },
+        "status": 451
+      },
+      "name": "tombstone_head_no_body",
+      "request": {
+        "method": "HEAD",
+        "published_reachable": true,
+        "repository_tombstone": true,
+        "route": "object"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "ETag",
+          "X-Mkit-*"
+        ],
+        "body_equivalence_group": "uniform_404",
+        "headers": {
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "no-store",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff"
+        },
+        "status": 404
+      },
+      "name": "global_block_without_repository_tombstone",
+      "request": {
+        "global_block": true,
+        "method": "GET",
+        "published_reachable": true,
+        "repository_tombstone": false,
+        "route": "object"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "ETag",
+          "X-Mkit-*"
+        ],
+        "body_equivalence_group": "uniform_404",
+        "headers": {
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "no-store",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff"
+        },
+        "status": 404
+      },
+      "name": "chunk_only_under_tombstoned_manifest",
+      "request": {
+        "chunk_only_under_tombstoned_manifest": true,
+        "method": "GET",
+        "repository_tombstone": false,
+        "route": "object"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
           "PAYMENT-REQUIRED"
         ],
         "body_bytes": 0,
@@ -1378,7 +1484,7 @@
         ],
         "headers": {
           "Access-Control-Allow-Origin": "https://viewer.example",
-          "Access-Control-Expose-Headers": "ETag, Content-Range, Accept-Ranges, Content-Length, X-Mkit-Commit, X-Mkit-Object, X-Mkit-Object-Type, WWW-Authenticate, Payment-Receipt, PAYMENT-REQUIRED, PAYMENT-RESPONSE",
+          "Access-Control-Expose-Headers": "ETag, Content-Range, Accept-Ranges, Content-Length, X-Mkit-Commit, X-Mkit-Object, X-Mkit-Object-Type, WWW-Authenticate, Payment-Receipt, PAYMENT-REQUIRED, PAYMENT-RESPONSE, Link",
           "Content-Security-Policy": "sandbox; default-src 'none'",
           "Referrer-Policy": "no-referrer",
           "Vary": "Origin",
@@ -1415,7 +1521,7 @@
   ],
   "notes": {
     "402_body": "AdmissionChallenge canonical protobuf JSON; HEAD has no body.",
-    "451": "Reserved for M5; never returned in M4.",
+    "451": "Only a repository tombstone with published-tree reachability returns 451; prior 404 checks win.",
     "opaque": "No object routes mounted.",
     "uniform_404": "Missing repository and missing/invalid private token use identical headers and body."
   },

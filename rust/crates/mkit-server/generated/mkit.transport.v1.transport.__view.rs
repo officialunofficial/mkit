@@ -922,6 +922,13 @@ pub struct ListRefsResponseView<'a> {
     ///
     /// Field 2: `next_page_token`
     pub next_page_token: ::core::option::Option<&'a str>,
+    /// Active notices associated with visible refs on this page (SPEC-SERVER §14.6).
+    ///
+    /// Field 3: `ref_redactions`
+    pub ref_redactions: ::buffa::RepeatedView<
+        'a,
+        super::super::__buffa::view::RefRedactionView<'a>,
+    >,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
 }
 impl<'a> ::buffa::MessageView<'a> for ListRefsResponseView<'a> {
@@ -977,6 +984,26 @@ impl<'a> ::buffa::MessageView<'a> for ListRefsResponseView<'a> {
                         )?,
                     );
             }
+            3u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                let __sub_ctx = ctx.descend()?;
+                let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                ctx.register_element_memory(
+                    ::core::mem::size_of::<
+                        super::super::__buffa::view::RefRedactionView,
+                    >(),
+                )?;
+                view.ref_redactions
+                    .push(
+                        <super::super::__buffa::view::RefRedactionView as ::buffa::MessageView>::decode_view_ctx(
+                            sub,
+                            __sub_ctx,
+                        )?,
+                    );
+            }
             _ => {
                 ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
                 let span_len = before_tag.len() - cur.len();
@@ -1005,6 +1032,11 @@ impl<'a> ::buffa::MessageView<'a> for ListRefsResponseView<'a> {
                 .map(|v| v.to_owned_from_source(__buffa_src))
                 .collect::<::core::result::Result<_, ::buffa::DecodeError>>()?,
             next_page_token: self.next_page_token.map(|s| s.to_string()),
+            ref_redactions: self
+                .ref_redactions
+                .iter()
+                .map(|v| v.to_owned_from_source(__buffa_src))
+                .collect::<::core::result::Result<_, ::buffa::DecodeError>>()?,
             __buffa_unknown_fields: self.__buffa_unknown_fields.to_owned()?.into(),
             ..::core::default::Default::default()
         })
@@ -1027,6 +1059,14 @@ impl<'a> ::buffa::ViewEncode<'a> for ListRefsResponseView<'a> {
         if let Some(ref v) = self.next_page_token {
             size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
         }
+        for v in &self.ref_redactions {
+            let __slot = __cache.reserve();
+            let inner_size = v.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                    + inner_size as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -1048,6 +1088,14 @@ impl<'a> ::buffa::ViewEncode<'a> for ListRefsResponseView<'a> {
         }
         if let Some(ref v) = self.next_page_token {
             ::buffa::types::put_string_field(2u32, v, buf);
+        }
+        for v in &self.ref_redactions {
+            ::buffa::types::put_len_delimited_header(
+                3u32,
+                u64::from(__cache.consume_next()),
+                buf,
+            );
+            v.write_to(__cache, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -1075,6 +1123,9 @@ impl<'__a> ::serde::Serialize for ListRefsResponseView<'__a> {
         }
         if let ::core::option::Option::Some(__v) = self.next_page_token {
             __map.serialize_entry("nextPageToken", __v)?;
+        }
+        if !self.ref_redactions.is_empty() {
+            __map.serialize_entry("refRedactions", &*self.ref_redactions)?;
         }
         __map.end()
     }
@@ -1183,6 +1234,15 @@ impl ListRefsResponseOwnedView {
     pub fn next_page_token(&self) -> ::core::option::Option<&'_ str> {
         self.0.reborrow().next_page_token
     }
+    /// Active notices associated with visible refs on this page (SPEC-SERVER §14.6).
+    ///
+    /// Field 3: `ref_redactions`
+    #[must_use]
+    pub fn ref_redactions(
+        &self,
+    ) -> &::buffa::RepeatedView<'_, super::super::__buffa::view::RefRedactionView<'_>> {
+        &self.0.reborrow().ref_redactions
+    }
 }
 impl ::core::convert::From<::buffa::OwnedView<ListRefsResponseView<'static>>>
 for ListRefsResponseOwnedView {
@@ -1207,6 +1267,318 @@ impl ::buffa::HasMessageView for super::super::ListRefsResponse {
     type ViewHandle = ListRefsResponseOwnedView;
 }
 impl ::serde::Serialize for ListRefsResponseOwnedView {
+    fn serialize<__S: ::serde::Serializer>(
+        &self,
+        __s: __S,
+    ) -> ::core::result::Result<__S::Ok, __S::Error> {
+        ::serde::Serialize::serialize(&self.0, __s)
+    }
+}
+/// Notice associated with one visible ref; RefEntry's pinned wire layout is unchanged.
+#[derive(Clone, Debug, Default)]
+pub struct RefRedactionView<'a> {
+    /// Full ref name, not the prefix-stripped ListRefs display name.
+    ///
+    /// Field 1: `ref`
+    pub r#ref: ::core::option::Option<&'a str>,
+    /// Field 2: `notice`
+    pub notice: ::buffa::MessageFieldView<
+        super::super::__buffa::view::RedactionNoticeView<'a>,
+    >,
+    pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+}
+impl<'a> ::buffa::MessageView<'a> for RefRedactionView<'a> {
+    type Owned = super::super::RefRedaction;
+    fn decode_view(buf: &'a [u8]) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        let __limit = ::core::cell::Cell::new(::buffa::DEFAULT_UNKNOWN_FIELD_LIMIT);
+        <Self as ::buffa::MessageView>::decode_view_ctx(
+            buf,
+            ::buffa::DecodeContext::new(::buffa::RECURSION_LIMIT, &__limit),
+        )
+    }
+    fn decode_view_with_ctx(
+        buf: &'a [u8],
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        <Self as ::buffa::MessageView>::decode_view_ctx(buf, ctx)
+    }
+    #[inline]
+    fn merge_view_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        cur: &'a [u8],
+        before_tag: &'a [u8],
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<&'a [u8], ::buffa::DecodeError> {
+        let _ = ctx;
+        #[allow(unused_variables)]
+        let view = self;
+        let mut cur = cur;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                view.r#ref = Some(::buffa::types::borrow_str(&mut cur)?);
+            }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                let __sub_ctx = ctx.descend()?;
+                let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                match view.notice.as_mut() {
+                    Some(existing) => {
+                        ::buffa::MessageView::merge_into_view(existing, sub, __sub_ctx)?
+                    }
+                    None => {
+                        view.notice = ::buffa::MessageFieldView::set(
+                            <super::super::__buffa::view::RedactionNoticeView as ::buffa::MessageView>::decode_view_ctx(
+                                sub,
+                                __sub_ctx,
+                            )?,
+                        );
+                    }
+                }
+            }
+            _ => {
+                ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
+                let span_len = before_tag.len() - cur.len();
+                view.__buffa_unknown_fields.push_record(before_tag, span_len, ctx)?;
+            }
+        }
+        ::core::result::Result::Ok(cur)
+    }
+    fn to_owned_message(
+        &self,
+    ) -> ::core::result::Result<super::super::RefRedaction, ::buffa::DecodeError> {
+        self.to_owned_from_source(None)
+    }
+    #[allow(clippy::useless_conversion, clippy::needless_update)]
+    fn to_owned_from_source(
+        &self,
+        __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
+    ) -> ::core::result::Result<super::super::RefRedaction, ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::alloc::string::ToString as _;
+        let _ = __buffa_src;
+        ::core::result::Result::Ok(super::super::RefRedaction {
+            r#ref: self.r#ref.map(|s| s.to_string()),
+            notice: match self.notice.as_option() {
+                Some(v) => {
+                    ::buffa::MessageField::<
+                        super::super::RedactionNotice,
+                        ::buffa::Inline<super::super::RedactionNotice>,
+                    >::some(v.to_owned_from_source(__buffa_src)?)
+                }
+                None => ::buffa::MessageField::none(),
+            },
+            __buffa_unknown_fields: self.__buffa_unknown_fields.to_owned()?.into(),
+            ..::core::default::Default::default()
+        })
+    }
+}
+impl<'a> ::buffa::ViewEncode<'a> for RefRedactionView<'a> {
+    #[allow(clippy::needless_borrow, clippy::let_and_return)]
+    fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        if let Some(ref v) = self.r#ref {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
+        if self.notice.is_set() {
+            let __slot = __cache.reserve();
+            let inner_size = self.notice.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                    + inner_size as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    #[allow(clippy::needless_borrow)]
+    fn write_to(
+        &self,
+        __cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let Some(ref v) = self.r#ref {
+            ::buffa::types::put_string_field(1u32, v, buf);
+        }
+        if self.notice.is_set() {
+            ::buffa::types::put_len_delimited_header(
+                2u32,
+                u64::from(__cache.consume_next()),
+                buf,
+            );
+            self.notice.write_to(__cache, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+}
+/// Serializes this view as protobuf JSON.
+///
+/// Implicit-presence fields with default values are omitted, `required`
+/// fields are always emitted, explicit-presence (`optional`) fields are
+/// emitted only when set, bytes fields are base64-encoded, and enum
+/// values are their proto name strings.
+///
+/// This impl uses `serialize_map(None)` because the number of emitted
+/// fields depends on default-omission rules; serializers that require
+/// known map lengths (e.g. `bincode`) will return a runtime error.
+/// Use the owned message type for those formats.
+impl<'__a> ::serde::Serialize for RefRedactionView<'__a> {
+    fn serialize<__S: ::serde::Serializer>(
+        &self,
+        __s: __S,
+    ) -> ::core::result::Result<__S::Ok, __S::Error> {
+        use ::serde::ser::SerializeMap as _;
+        let mut __map = __s.serialize_map(::core::option::Option::None)?;
+        if let ::core::option::Option::Some(__v) = self.r#ref {
+            __map.serialize_entry("ref", __v)?;
+        }
+        {
+            if let ::core::option::Option::Some(__v) = self.notice.as_option() {
+                __map.serialize_entry("notice", __v)?;
+            }
+        }
+        __map.end()
+    }
+}
+impl<'a> ::buffa::MessageName for RefRedactionView<'a> {
+    const PACKAGE: &'static str = "mkit.transport.v1";
+    const NAME: &'static str = "RefRedaction";
+    const FULL_NAME: &'static str = "mkit.transport.v1.RefRedaction";
+    const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.RefRedaction";
+}
+::buffa::impl_default_view_instance!(RefRedactionView);
+::buffa::impl_view_reborrow!(RefRedactionView);
+/** Self-contained, `'static` owned view of a `RefRedaction` message.
+
+ Wraps [`::buffa::OwnedView`]`<`[`RefRedactionView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
+
+ Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`RefRedactionView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.*/
+#[derive(Clone, Debug)]
+pub struct RefRedactionOwnedView(::buffa::OwnedView<RefRedactionView<'static>>);
+impl RefRedactionOwnedView {
+    /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
+    ///
+    /// The view borrows directly from the buffer's data; the buffer is
+    /// retained inside the returned handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the buffer contains invalid
+    /// protobuf data.
+    pub fn decode(
+        bytes: ::buffa::bytes::Bytes,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            RefRedactionOwnedView(::buffa::OwnedView::decode(bytes)?),
+        )
+    }
+    /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
+    /// max message size).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the buffer is invalid or
+    /// exceeds the configured limits.
+    pub fn decode_with_options(
+        bytes: ::buffa::bytes::Bytes,
+        opts: &::buffa::DecodeOptions,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            RefRedactionOwnedView(::buffa::OwnedView::decode_with_options(bytes, opts)?),
+        )
+    }
+    /// Build from an owned message via an encode → decode round-trip.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError::MessageTooLarge`] if the
+    /// message's encoded size exceeds the 2 GiB protobuf limit, or
+    /// another [`::buffa::DecodeError`] if the re-encoded bytes are
+    /// somehow invalid (should not happen for well-formed messages).
+    pub fn from_owned(
+        msg: &super::super::RefRedaction,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            RefRedactionOwnedView(::buffa::OwnedView::from_owned(msg)?),
+        )
+    }
+    /// Borrow the full [`RefRedactionView`] with its lifetime tied to `&self`.
+    #[must_use]
+    pub fn view(&self) -> &RefRedactionView<'_> {
+        self.0.reborrow()
+    }
+    /// Convert to the owned message type.
+    ///
+    /// Infallible: this type's constructors wire-decode their
+    /// buffer, and a view produced by wire decoding always
+    /// converts. Delegates to [`::buffa::OwnedView::to_owned_message`],
+    /// whose contract also governs handles converted from a raw
+    /// [`::buffa::OwnedView`].
+    #[must_use]
+    pub fn to_owned_message(&self) -> super::super::RefRedaction {
+        self.0.to_owned_message()
+    }
+    /// The underlying bytes buffer.
+    #[must_use]
+    pub fn bytes(&self) -> &::buffa::bytes::Bytes {
+        self.0.bytes()
+    }
+    /// Consume the handle, returning the underlying bytes buffer.
+    #[must_use]
+    pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
+        self.0.into_bytes()
+    }
+    /// Full ref name, not the prefix-stripped ListRefs display name.
+    ///
+    /// Field 1: `ref`
+    #[must_use]
+    pub fn r#ref(&self) -> ::core::option::Option<&'_ str> {
+        self.0.reborrow().r#ref
+    }
+    /// Field 2: `notice`
+    #[must_use]
+    pub fn notice(
+        &self,
+    ) -> &::buffa::MessageFieldView<
+        super::super::__buffa::view::RedactionNoticeView<'_>,
+    > {
+        &self.0.reborrow().notice
+    }
+}
+impl ::core::convert::From<::buffa::OwnedView<RefRedactionView<'static>>>
+for RefRedactionOwnedView {
+    fn from(inner: ::buffa::OwnedView<RefRedactionView<'static>>) -> Self {
+        RefRedactionOwnedView(inner)
+    }
+}
+impl ::core::convert::From<RefRedactionOwnedView>
+for ::buffa::OwnedView<RefRedactionView<'static>> {
+    fn from(wrapper: RefRedactionOwnedView) -> Self {
+        wrapper.0
+    }
+}
+impl ::core::convert::AsRef<::buffa::OwnedView<RefRedactionView<'static>>>
+for RefRedactionOwnedView {
+    fn as_ref(&self) -> &::buffa::OwnedView<RefRedactionView<'static>> {
+        &self.0
+    }
+}
+impl ::buffa::HasMessageView for super::super::RefRedaction {
+    type View<'a> = RefRedactionView<'a>;
+    type ViewHandle = RefRedactionOwnedView;
+}
+impl ::serde::Serialize for RefRedactionOwnedView {
     fn serialize<__S: ::serde::Serializer>(
         &self,
         __s: __S,
@@ -1467,6 +1839,13 @@ pub struct ReadRefResponseView<'a> {
     ///
     /// Field 2: `object_id`
     pub object_id: ::core::option::Option<&'a [u8]>,
+    /// Active notices for this visible ref; empty when absent (SPEC-SERVER §14.6).
+    ///
+    /// Field 3: `redaction_notices`
+    pub redaction_notices: ::buffa::RepeatedView<
+        'a,
+        super::super::__buffa::view::RedactionNoticeView<'a>,
+    >,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
 }
 impl<'a> ::buffa::MessageView<'a> for ReadRefResponseView<'a> {
@@ -1511,6 +1890,26 @@ impl<'a> ::buffa::MessageView<'a> for ReadRefResponseView<'a> {
                 )?;
                 view.object_id = Some(::buffa::types::borrow_bytes(&mut cur)?);
             }
+            3u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                let __sub_ctx = ctx.descend()?;
+                let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                ctx.register_element_memory(
+                    ::core::mem::size_of::<
+                        super::super::__buffa::view::RedactionNoticeView,
+                    >(),
+                )?;
+                view.redaction_notices
+                    .push(
+                        <super::super::__buffa::view::RedactionNoticeView as ::buffa::MessageView>::decode_view_ctx(
+                            sub,
+                            __sub_ctx,
+                        )?,
+                    );
+            }
             _ => {
                 ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
                 let span_len = before_tag.len() - cur.len();
@@ -1535,6 +1934,11 @@ impl<'a> ::buffa::MessageView<'a> for ReadRefResponseView<'a> {
         ::core::result::Result::Ok(super::super::ReadRefResponse {
             exists: self.exists,
             object_id: self.object_id.map(|b| (b).to_vec()),
+            redaction_notices: self
+                .redaction_notices
+                .iter()
+                .map(|v| v.to_owned_from_source(__buffa_src))
+                .collect::<::core::result::Result<_, ::buffa::DecodeError>>()?,
             __buffa_unknown_fields: self.__buffa_unknown_fields.to_owned()?.into(),
             ..::core::default::Default::default()
         })
@@ -1542,7 +1946,7 @@ impl<'a> ::buffa::MessageView<'a> for ReadRefResponseView<'a> {
 }
 impl<'a> ::buffa::ViewEncode<'a> for ReadRefResponseView<'a> {
     #[allow(clippy::needless_borrow, clippy::let_and_return)]
-    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+    fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         let mut size = 0u64;
@@ -1552,13 +1956,21 @@ impl<'a> ::buffa::ViewEncode<'a> for ReadRefResponseView<'a> {
         if let Some(ref v) = self.object_id {
             size += 1u64 + ::buffa::types::bytes_encoded_len(v) as u64;
         }
+        for v in &self.redaction_notices {
+            let __slot = __cache.reserve();
+            let inner_size = v.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                    + inner_size as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
     #[allow(clippy::needless_borrow)]
     fn write_to(
         &self,
-        _cache: &mut ::buffa::SizeCache,
+        __cache: &mut ::buffa::SizeCache,
         buf: &mut impl ::buffa::EncodeSink,
     ) {
         #[allow(unused_imports)]
@@ -1568,6 +1980,14 @@ impl<'a> ::buffa::ViewEncode<'a> for ReadRefResponseView<'a> {
         }
         if let Some(ref v) = self.object_id {
             ::buffa::types::put_shared_bytes_field(2u32, v, buf);
+        }
+        for v in &self.redaction_notices {
+            ::buffa::types::put_len_delimited_header(
+                3u32,
+                u64::from(__cache.consume_next()),
+                buf,
+            );
+            v.write_to(__cache, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -1595,6 +2015,9 @@ impl<'__a> ::serde::Serialize for ReadRefResponseView<'__a> {
         }
         if let ::core::option::Option::Some(__v) = self.object_id {
             __map.serialize_entry("objectId", &::buffa::json_helpers::BytesJson(__v))?;
+        }
+        if !self.redaction_notices.is_empty() {
+            __map.serialize_entry("redactionNotices", &*self.redaction_notices)?;
         }
         __map.end()
     }
@@ -1700,6 +2123,18 @@ impl ReadRefResponseOwnedView {
     #[must_use]
     pub fn object_id(&self) -> ::core::option::Option<&'_ [u8]> {
         self.0.reborrow().object_id
+    }
+    /// Active notices for this visible ref; empty when absent (SPEC-SERVER §14.6).
+    ///
+    /// Field 3: `redaction_notices`
+    #[must_use]
+    pub fn redaction_notices(
+        &self,
+    ) -> &::buffa::RepeatedView<
+        '_,
+        super::super::__buffa::view::RedactionNoticeView<'_>,
+    > {
+        &self.0.reborrow().redaction_notices
     }
 }
 impl ::core::convert::From<::buffa::OwnedView<ReadRefResponseView<'static>>>
@@ -9319,6 +9754,253 @@ impl ::buffa::HasMessageView for super::super::PendingVerification {
     type ViewHandle = PendingVerificationOwnedView;
 }
 impl ::serde::Serialize for PendingVerificationOwnedView {
+    fn serialize<__S: ::serde::Serializer>(
+        &self,
+        __s: __S,
+    ) -> ::core::result::Result<__S::Ok, __S::Error> {
+        ::serde::Serialize::serialize(&self.0, __s)
+    }
+}
+/// Signed takedown notice used as a Connect error detail and on visible refs.
+/// The sole field is the exact DSSE JSON envelope (SPEC-SERVER §14.6).
+#[derive(Clone, Debug, Default)]
+pub struct RedactionNoticeView<'a> {
+    /// Field 1: `envelope`
+    pub envelope: ::core::option::Option<&'a [u8]>,
+    pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+}
+impl<'a> ::buffa::MessageView<'a> for RedactionNoticeView<'a> {
+    type Owned = super::super::RedactionNotice;
+    fn decode_view(buf: &'a [u8]) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        let __limit = ::core::cell::Cell::new(::buffa::DEFAULT_UNKNOWN_FIELD_LIMIT);
+        <Self as ::buffa::MessageView>::decode_view_ctx(
+            buf,
+            ::buffa::DecodeContext::new(::buffa::RECURSION_LIMIT, &__limit),
+        )
+    }
+    fn decode_view_with_ctx(
+        buf: &'a [u8],
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        <Self as ::buffa::MessageView>::decode_view_ctx(buf, ctx)
+    }
+    #[inline]
+    fn merge_view_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        cur: &'a [u8],
+        before_tag: &'a [u8],
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<&'a [u8], ::buffa::DecodeError> {
+        let _ = ctx;
+        #[allow(unused_variables)]
+        let view = self;
+        let mut cur = cur;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                view.envelope = Some(::buffa::types::borrow_bytes(&mut cur)?);
+            }
+            _ => {
+                ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
+                let span_len = before_tag.len() - cur.len();
+                view.__buffa_unknown_fields.push_record(before_tag, span_len, ctx)?;
+            }
+        }
+        ::core::result::Result::Ok(cur)
+    }
+    fn to_owned_message(
+        &self,
+    ) -> ::core::result::Result<super::super::RedactionNotice, ::buffa::DecodeError> {
+        self.to_owned_from_source(None)
+    }
+    #[allow(clippy::useless_conversion, clippy::needless_update)]
+    fn to_owned_from_source(
+        &self,
+        __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
+    ) -> ::core::result::Result<super::super::RedactionNotice, ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::alloc::string::ToString as _;
+        let _ = __buffa_src;
+        ::core::result::Result::Ok(super::super::RedactionNotice {
+            envelope: self.envelope.map(|b| (b).to_vec()),
+            __buffa_unknown_fields: self.__buffa_unknown_fields.to_owned()?.into(),
+            ..::core::default::Default::default()
+        })
+    }
+}
+impl<'a> ::buffa::ViewEncode<'a> for RedactionNoticeView<'a> {
+    #[allow(clippy::needless_borrow, clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        if let Some(ref v) = self.envelope {
+            size += 1u64 + ::buffa::types::bytes_encoded_len(v) as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    #[allow(clippy::needless_borrow)]
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let Some(ref v) = self.envelope {
+            ::buffa::types::put_shared_bytes_field(1u32, v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+}
+/// Serializes this view as protobuf JSON.
+///
+/// Implicit-presence fields with default values are omitted, `required`
+/// fields are always emitted, explicit-presence (`optional`) fields are
+/// emitted only when set, bytes fields are base64-encoded, and enum
+/// values are their proto name strings.
+///
+/// This impl uses `serialize_map(None)` because the number of emitted
+/// fields depends on default-omission rules; serializers that require
+/// known map lengths (e.g. `bincode`) will return a runtime error.
+/// Use the owned message type for those formats.
+impl<'__a> ::serde::Serialize for RedactionNoticeView<'__a> {
+    fn serialize<__S: ::serde::Serializer>(
+        &self,
+        __s: __S,
+    ) -> ::core::result::Result<__S::Ok, __S::Error> {
+        use ::serde::ser::SerializeMap as _;
+        let mut __map = __s.serialize_map(::core::option::Option::None)?;
+        if let ::core::option::Option::Some(__v) = self.envelope {
+            __map.serialize_entry("envelope", &::buffa::json_helpers::BytesJson(__v))?;
+        }
+        __map.end()
+    }
+}
+impl<'a> ::buffa::MessageName for RedactionNoticeView<'a> {
+    const PACKAGE: &'static str = "mkit.transport.v1";
+    const NAME: &'static str = "RedactionNotice";
+    const FULL_NAME: &'static str = "mkit.transport.v1.RedactionNotice";
+    const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.RedactionNotice";
+}
+::buffa::impl_default_view_instance!(RedactionNoticeView);
+::buffa::impl_view_reborrow!(RedactionNoticeView);
+/** Self-contained, `'static` owned view of a `RedactionNotice` message.
+
+ Wraps [`::buffa::OwnedView`]`<`[`RedactionNoticeView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
+
+ Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`RedactionNoticeView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.*/
+#[derive(Clone, Debug)]
+pub struct RedactionNoticeOwnedView(::buffa::OwnedView<RedactionNoticeView<'static>>);
+impl RedactionNoticeOwnedView {
+    /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
+    ///
+    /// The view borrows directly from the buffer's data; the buffer is
+    /// retained inside the returned handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the buffer contains invalid
+    /// protobuf data.
+    pub fn decode(
+        bytes: ::buffa::bytes::Bytes,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            RedactionNoticeOwnedView(::buffa::OwnedView::decode(bytes)?),
+        )
+    }
+    /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
+    /// max message size).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the buffer is invalid or
+    /// exceeds the configured limits.
+    pub fn decode_with_options(
+        bytes: ::buffa::bytes::Bytes,
+        opts: &::buffa::DecodeOptions,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            RedactionNoticeOwnedView(
+                ::buffa::OwnedView::decode_with_options(bytes, opts)?,
+            ),
+        )
+    }
+    /// Build from an owned message via an encode → decode round-trip.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError::MessageTooLarge`] if the
+    /// message's encoded size exceeds the 2 GiB protobuf limit, or
+    /// another [`::buffa::DecodeError`] if the re-encoded bytes are
+    /// somehow invalid (should not happen for well-formed messages).
+    pub fn from_owned(
+        msg: &super::super::RedactionNotice,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            RedactionNoticeOwnedView(::buffa::OwnedView::from_owned(msg)?),
+        )
+    }
+    /// Borrow the full [`RedactionNoticeView`] with its lifetime tied to `&self`.
+    #[must_use]
+    pub fn view(&self) -> &RedactionNoticeView<'_> {
+        self.0.reborrow()
+    }
+    /// Convert to the owned message type.
+    ///
+    /// Infallible: this type's constructors wire-decode their
+    /// buffer, and a view produced by wire decoding always
+    /// converts. Delegates to [`::buffa::OwnedView::to_owned_message`],
+    /// whose contract also governs handles converted from a raw
+    /// [`::buffa::OwnedView`].
+    #[must_use]
+    pub fn to_owned_message(&self) -> super::super::RedactionNotice {
+        self.0.to_owned_message()
+    }
+    /// The underlying bytes buffer.
+    #[must_use]
+    pub fn bytes(&self) -> &::buffa::bytes::Bytes {
+        self.0.bytes()
+    }
+    /// Consume the handle, returning the underlying bytes buffer.
+    #[must_use]
+    pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
+        self.0.into_bytes()
+    }
+    /// Field 1: `envelope`
+    #[must_use]
+    pub fn envelope(&self) -> ::core::option::Option<&'_ [u8]> {
+        self.0.reborrow().envelope
+    }
+}
+impl ::core::convert::From<::buffa::OwnedView<RedactionNoticeView<'static>>>
+for RedactionNoticeOwnedView {
+    fn from(inner: ::buffa::OwnedView<RedactionNoticeView<'static>>) -> Self {
+        RedactionNoticeOwnedView(inner)
+    }
+}
+impl ::core::convert::From<RedactionNoticeOwnedView>
+for ::buffa::OwnedView<RedactionNoticeView<'static>> {
+    fn from(wrapper: RedactionNoticeOwnedView) -> Self {
+        wrapper.0
+    }
+}
+impl ::core::convert::AsRef<::buffa::OwnedView<RedactionNoticeView<'static>>>
+for RedactionNoticeOwnedView {
+    fn as_ref(&self) -> &::buffa::OwnedView<RedactionNoticeView<'static>> {
+        &self.0
+    }
+}
+impl ::buffa::HasMessageView for super::super::RedactionNotice {
+    type View<'a> = RedactionNoticeView<'a>;
+    type ViewHandle = RedactionNoticeOwnedView;
+}
+impl ::serde::Serialize for RedactionNoticeOwnedView {
     fn serialize<__S: ::serde::Serializer>(
         &self,
         __s: __S,

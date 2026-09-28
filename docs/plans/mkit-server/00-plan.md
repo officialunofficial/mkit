@@ -208,25 +208,26 @@ Sizes: S ≲ 400, M 400–900, L 900–1500 changed lines.
 | 4.17 | Pre-receive policy hooks: allowed signers per ref, fast-forward-only grants | M4 | core | 4.7, 4.4, 2.7 | M | rust,conf-native | no |
 | 4.18 | Conformance: indexed mode and serving wire suite (M4 exit) | M4 | conformance | 4.8, 4.9, 4.10, 4.14, 4.15, 4.16, 4.17 | L | rust,conf-native,conf-wrangler,staging | yes |
 | 5.1a | Spec: leases, lifecycle events, server GC, published view and quarantine (#1091 part 1) | M5 | spec | 3.6, 4.4 | M | docs,proto,golden | yes |
-| 5.1b | Spec: takedown, RedactionNotice, preservation store, admin API and audit log (#1091 part 2) | M5 | spec | 5.1a | L | docs,proto,golden | yes |
+| 5.1b-1 | Spec: takedown, tombstones, preservation and signed notices (#1091 part 2a) | M5 | spec | 5.1a-2, 5.1c | M | docs,proto,golden | no |
+| 5.1b-2 | Spec: admin API, audit log and remote CachePurge (#1091 part 2b) | M5 | spec | 5.1b-1 | M | docs,proto,golden | no |
 | 5.1c | Spec: storage receipts predicate (#1092) | M5 | spec | 5.1a | M | docs,proto,golden | yes |
 | 5.2 | Leases and lifecycle states: model, enforcement, events | M5 | core | 5.1a, 3.5, 4.18, 2.15 | L | rust,conf-native,conf-wrangler | no |
 | 5.3a | GC mark: roots, pins, grace, gc_pending; mark → wait → re-check protocol | M5 | core | 5.2, 4.10 | L | rust,conf-native | no |
 | 5.3b | GC sweep: membership drop, holder removal, zero-holder deletion, adapters | M5 | core | 5.3a | L | rust,conf-native,conf-wrangler | no |
 | 5.4 | Published view: (head, packmap) pointer storage and caller view on every read path | M5 | core | 5.2 | L | rust,conf-native,conf-wrangler | no |
 | 5.5 | ContentInspector: sync checks, async quarantine, clearance, hit -> takedown | M5 | core | 5.4, 3.7, 5.6 | L | rust,conf-native | no |
-| 5.6 | Takedown core: tombstones, blocklist (checked by the relay), preservation store, per-repo views, suspension | M5 | core | 5.1b, 4.10, 5.2, 5.10 | L | rust,conf-native,conf-wrangler | yes |
+| 5.6 | Takedown core: tombstones, blocklist (checked by the relay), preservation store, per-repo views, suspension | M5 | core | 5.1b-1, 4.10, 5.2, 5.10 | L | rust,conf-native,conf-wrangler | yes |
 | 5.7a | mkit-core: delta-safe pack rewrite primitive | M5 | core | 4.2 | M | rust,wasm | no |
 | 5.7b | Server: rewrite orchestration, packlist chain rebuild, packmap CAS | M5 | core | 5.7a, 5.6 | L | rust,conf-native | no |
 | 5.8 | Storage receipts: ReceiptSigner, receipt key, key list, AdvanceRefs field | M5 | core | 5.1c, 5.2 | L | rust,conf-native,golden | yes |
-| 5.9a | Server: RedactionNotice detail, HTTP 451, notice signing | M5 | core | 5.7b, 5.8 | M | rust,conf-native | no |
+| 5.9a | Server: RedactionNotice detail, HTTP 451, notice signing | M5 | core | 5.7b, 5.8, 5.1b-1 | M | rust,conf-native | no |
 | 5.9b | Client: redaction-aware fetch and push re-plan | M5 | client | 5.9a | M | rust,cli | no |
-| 5.10 | CachePurger hook and purge triggers (before takedown) | M5 | core | 5.2 | S | rust | no |
-| 5.11a | Admin API framework: signed envelope, replay protection, audit log | M5 | core | 5.1b, 4.18, 2.15 | L | rust,proto,conf-native | yes |
+| 5.10 | CachePurger hook and purge triggers, remote delivery after admin spec | M5 | core | 5.2, 5.1b-2 | S | rust | no |
+| 5.11a | Admin API framework: signed envelope, replay protection, audit log | M5 | core | 5.1b-2, 4.18, 2.15 | L | rust,proto,conf-native | yes |
 | 5.11b | Admin operations and the mkit-server admin CLI | M5 | native | 5.11a, 5.6, 5.2, 5.14 | L | rust,conf-native | no |
 | 5.12 | Client: receipt storage under .mkit/attestations (not GC roots, not pushed) | M5 | client | 5.8 | S | rust,cli,docs | no |
 | 5.13 | Conformance: lifecycle wire suite (M5 exit) | M5 | conformance | 5.3b, 5.5, 5.7b, 5.9b, 5.10, 5.11b, 5.12 | L | rust,conf-native,conf-wrangler,staging | yes |
-| 5.14 | Reinstatement via server-side pack rewrite | M5 | core | 5.6, 5.7b | M | rust,conf-native | no |
+| 5.14 | Reinstatement via server-side pack rewrite | M5 | core | 5.6, 5.7b, 5.1b-1 | M | rust,conf-native | no |
 | REL | Final merge to main: 0.5.0 bump, publish mkit-server crates, first server release | M5 | release | 1.20, 2.15, 3.13, 3.14, 4.13, 4.18, 5.13 | S | full,ci-yaml | yes |
 
 ---
@@ -271,7 +272,7 @@ its predecessors have merged; in practice cap concurrent executors at ~4 to keep
 | 12 | 1.2, 1.4, 1.24, 3.6 | M1, M3 |
 | 13 | 1.22, 3.14, 4.4 | M1, M3, M4 |
 | 14 | 1.5, 1.7, 1.25, 1.8, 4.11, 5.1a | M1, M4, M5 |
-| 15 | 1.6, 1.23, 1.26, 1.29, 5.1b, 5.1c | M1, M5 |
+| 15 | 1.6, 1.23, 1.26, 1.29, 5.1b-1, 5.1b-2, 5.1c | M1, M5 |
 | 16 | 1.28, 1.9, 1.16 | M1 |
 | 17 | 1.10, 1.11 | M1 |
 | 18 | 1.12, 1.13, 1.15, 1.17, 1.21 | M1 |
@@ -358,8 +359,8 @@ as soon as their deps allow (they are off the implementation chain); land the pu
 | M4-a | Proof HTTP format | Decided in the #1088 spec WP (4.11) | User | 4.11, 4.14 |
 | M4-b | Cross-chunk disclosure ranges | Multi-chunk proof bundle; encoding decided in 4.11 | User | 4.11, 4.14 |
 | M5-a | Opaque-mode receipts | Cover refs + pack ids only | User | 5.1c, 5.8 |
-| M5-b | Preservation store | Separate restricted bucket/prefix (R2) or dir (FS), admin-API-only | User | 5.1b, 5.6 |
-| M5-c | Keys | Distinct keys per role — receipt+notice signing, admin, hook channel, URL tokens (+ the M1 ticket/receipt MAC key) — each with a key id and rotation via a published key list | User | S1, S2, 3.6, 5.1b, 5.8, 5.11a |
+| M5-b | Preservation store | Separate restricted bucket/prefix (R2) or dir (FS), admin-API-only | User | 5.1b-1, 5.6 |
+| M5-c | Keys | Distinct keys per role — receipt+notice signing, role-scoped admin, hook channel, URL tokens (+ the M1 ticket/receipt MAC key) — each with a key id and rotation via a published key list | User | S1, S2, 3.6, 5.1b-1, 5.1b-2, 5.8, 5.11a |
 | M5-d | Reinstatement | Re-add the object via server-side pack rewrite | User | 5.14 |
 | M5-e | Client receipts | Stored under `.mkit/attestations/`, not object-GC roots | User | 5.12 |
 | M3-b | Paid HTTP reads | Produce an outcome: `ReadServed` variant defined in 3.3, emitted by 4.13 | User | 3.3, 4.13 |
@@ -389,7 +390,7 @@ as soon as their deps allow (they are off the implementation chain); land the pu
 | P-24 | Full partition | A backend at its storage cap (DO: `SQLITE_FULL`; reads and `DELETE` keep working) returns `StoreError::Full`; the pipeline fails the write closed with retryable `unavailable` ("storage partition full"), never `resource_exhausted`, and raises a critical alert; pruning still runs | Planner | M0-02a, M0-09, M0-16, 1.29 |
 | P-18 | Grants UX | Selection "most specific scope, latest expiry"; native signing for ed25519 and keystore secp256k1, wallet/WebAuthn by import; single trusted signing remote; WebAuthn fails closed without RP pinning; `GetServerInfo` unsigned | Planner | 2.10, 2.13 |
 | P-19 | Delta chains | Server-side chain cap 50, advertised | Planner | 4.7 |
-| P-20 | M5 values | GC grace 7 days; no default lease periods (a `LeasePolicy` must set them); preservation retention must be configured when takedown is on; single admin key with key-list rotation (threshold deferred, PRD Q4); ssh/enc principals treated as writers for the published view | Planner | 5.1a/b, 5.2, 5.3a, 5.6, 5.11a |
+| P-20 | M5 values | GC grace 7 days; no default lease periods (a `LeasePolicy` must set them); preservation retention must be configured when takedown is on; admin key list with roles (user, 2026-09-28; threshold deferred); ssh/enc principals treated as writers for the published view | Planner | 5.1a, 5.1b-1, 5.1b-2, 5.2, 5.3a, 5.6, 5.11a |
 
 ---
 
@@ -471,7 +472,7 @@ Every change made to the inputs during consolidation. "Briefs" = `docs/plans/mki
 | R | Change | Files |
 |---|---|---|
 | R-45 | "Tokio-free baseline" replaced by the server-free CLI criterion everywhere | M0-08, M0-13, M0-20, overview, 1.15–1.17, 2.12, 2.13, 3.11, M3–M5 gates |
-| R-46 | Keys per role with key ids and a published key list (incl. the M1 ticket/receipt MAC key) | S1, S2, 3.6, 5.1b, 5.8, 5.11a |
+| R-46 | Keys per role with key ids and a published key list (incl. the M1 ticket/receipt MAC key) | S1, S2, 3.6, 5.1b-1, 5.1b-2, 5.8, 5.11a |
 | R-47 | Q2: publish and bump at the new WP-REL; wording fixed in M0-01/10/13/15/18/19 | briefs, REL |
 | R-48 | Deleted the `feat/scoped-workspaces` notes (G23, Q-X-1, the P1 untracked-dir note) | M1/M2, P1 |
 | R-54 | Ref deletion added (S1 §7.8, proto 1.2, server 1.10, grant `d` flag 2.7) so the kept `delete` flag governs something | S1, S2, 1.2, 1.10, 2.7 |
@@ -535,13 +536,15 @@ ContentIndex/export/hooks → M0-02b, unary pipeline → M0-05a, streaming/fault
 | R-105 | ListRefs default page cap | WP-1.28 defines an absent or 0 `page_size` as the server's `max_list_refs_page_size`, and adds that sentence to STC §7.9. The WP-1.16 client never sets `page_size`. | 1.16, 1.28 |
 | R-106 | WP-1.23 coordinator watermark split | WP-1.23b ships the Worker relay, R-103 liveness and membership reads. The coordinator watermark (P-23) becomes WP-1.23c, which must land before WP-5.3a (GC) and WP-5.6 (takedown), its only consumers. It covers: the renewal payload carrying each shard's relay watermark; `ls` retention while a shard's outbox is undelivered (this changes `LeaseSweep`); and `namespace_relay_watermark()` as the minimum, with the coordinator keeping the running maximum per shard (the WP-1.23a lower bound can move backwards). | 1.23b, 1.23c, 5.3a, 5.6 |
 | R-107 | WP-1.29 split | **1.29a:** observability (Worker console sinks, `Metrics::gauge`, storage-pressure alerts at 70%/90% of the physical soft limit on the write path (Worker) and every 60 s (native), P-24 labelled by kind) and native `backup`. **1.29b** (depends on 1.25 and 1.23a, both merged): a per-DO snapshot export to a `BACKUPS` R2 bucket via timer kind 4, seeded on the first committed put, as a synchronous single-`fire` snapshot capped by size, keyed by the BLAKE3 of `Partition::encode`; plus a core restore driver in dependency order (root `sm` first, coordinators with `mark_lease_table_recovered` (R-100) and epoch non-decrease, ref shards with `os` re-keyed above targets' `rh` (R-102)), native `export`/`restore`, and a runbook. PITR is the primary in-place restore within 30 days; the export covers disaster recovery and backend migration. | 1.29a, 1.29b |
-| R-108 | WP-5.1a split | 5.1a-1 owns §12 storage leases and events, §13 GC, the `Event` RPC, `GetServerInfo.leases`, and section renumbering; 5.1a-2 owns §10 published view and §11 quarantine. Remote `CachePurge` is deferred to 5.1b; WP-5.10 is a Rust trait only. Pack holders and holds are normative; the implementation gap belongs to 5.3a with 4.10. The `gc_pending` and `AlreadyPresent` pin fields are implementation state for 5.3a. | 5.1a-1, 5.1a-2, 5.1b, 5.3a, 4.10, 5.10 |
+| R-108 | WP-5.1a split | 5.1a-1 owns §12 storage leases and events, §13 GC, the `Event` RPC, `GetServerInfo.leases`, and section renumbering; 5.1a-2 owns §10 published view and §11 quarantine. Remote `CachePurge` is deferred to 5.1b-2; WP-5.10 first lands the Rust trait. Pack holders and holds are normative; the implementation gap belongs to 5.3a with 4.10. The `gc_pending` and `AlreadyPresent` pin fields are implementation state for 5.3a. | 5.1a-1, 5.1a-2, 5.1b-2, 5.3a, 4.10, 5.10 |
 | R-109 | WP-4.11 decisions | **M4-a:** query-selected proof ranges; **M4-b:** MKDS over unchanged MKDP v2 (user, 2026-09-27). URL-token paths may be empty (root tree). HTTP selects repository by path; STC §7.4 is scoped to Connect RPCs. Indexed mode only; bearer gate applies. Deferred: signed-read HTTP GETs; an object-id field on `AdmitRequest` and a token `Principal` (both need a proto WP); an O(1)-offset proof builder (4.10 records chunk offsets, 4.14 adds a boundary-aware builder and in-memory `ObjectSource` prefetch on Workers). 4.14 adds mkit-core/mkit-wasm MKDS verification; 4.16 adds HEAD to native CORS and redacts query strings. | 4.10, 4.11, 4.14, 4.15, 4.16 |
 | R-110 | WP-1.23b relay liveness | The source keeps a durable scan state (`rs 00`: cycle end, cursor, and at most 32 blocked targets), so a failing target's backlog cannot hide a healthy target beyond the per-fire inspection budget. Only failed targets are blocked; reaching `max_targets` pauses the scan. Blocked targets are retried at the start of each cycle. While fewer than `MAX_BLOCKED_TARGETS` distinct failing targets precede it, every healthy target is eventually delivered: every fire that sees a deliverable row delivers at least one, and delivered rows are deleted in the same guarded checkpoint. No closed-form fire bound is claimed (two orchestrator formulas failed verification); the relay throughput regressions pin fire counts for representative schedules. A mid-cycle append first waits for the next cycle. Fires that deliver nothing back off. A target's later row is not retried ahead of its earlier undelivered row. This can exceed `RELAY_LAG_BOUND_MS`; WP-1.23c's `namespace_relay_watermark` must tolerate it. Beyond the cap, the cycle resets. This supersedes R-103's liveness wording. | 1.23b |
 | R-111 | WP-1.9a review carry-forwards | (1) Kind-2 ticket-expiry timer rows have no handler until WP-1.14, so an expired ticket re-arms its shard's alarm every 5 s and counts against the tick scan budget: no deployment of this branch before WP-1.14 lands. (2) Live-ticket and `AlreadyPresent` answers write replay rows with no quota charge (STC §7.7); WP-1.14/1.27 bound replay-row growth per signer (R-31). (3) WP-1.10: the live-ticket answer must guard the ticket row, so a concurrent consume cannot return a just-consumed ticket. | 1.10, 1.14, 1.27 |
 | R-112 | WP-1.29b restore invariants | Restore is Fresh-only. Import the root `sm` first; mark coordinators recovered (R-100); set each namespace epoch to `max(snapshot + 2^32, --epoch-at-least)` and drop old ref-shard `el` leases so old grants cannot write. For each relay source, compute `floor = max(snapshot os, max supplied rh)`, re-key restored relay rows by `floor`, and set `os = snapshot os + floor`; refuse overflow. Reject missing relay sources and namespace coordinators by default. `--allow-incomplete` reconstructs missing sources at `os = floor`; missing coordinators additionally require `--epoch-at-least`, and receive that epoch and `lr`. Drop restored `rs`, `bk` and kind-4 timer rows. In-place/Merge restore and a production Worker restore/PITR admin route are deferred to WP-5.11b; segmented export above the size cap, post-restore index reconcile (R-116, after 1.28), a replay fence, and a GC hold at least as long as backup retention (M5) are also deferred. | 1.29b, 5.11b |
 | R-115 | WP-5.1a-1 fix-2: reliance on existing members | Writes that newly rely on an existing member MUST durably clear its GC mark before commit; in opaque mode this covers every non-uploaded pack listed in new packmap nodes. WP-5.3a designs the detection mechanism and its cost, and escalates to the user if it adds more than one metadata read per newly referenced pack to the push path. | 5.1a-1, 5.3a |
 | R-116 | Post-restore index reconcile | Rebuilding index and membership rows from restored ref shards is required before GA; it runs after WP-1.28. Per-partition snapshots do not form one consistent cut, and relay rows already delivered before a target's snapshot are gone from the source, so an older target can retain missing rows after restore. | 1.28, 1.29b |
+| R-117 | Restore re-applies takedowns | A restore must re-apply takedowns recorded after the snapshot; the admin store's takedown records are the source. Owner: the admin implementation (5.11a/b), with a 1.29b follow-up. | 5.11a, 5.11b, 1.29b |
+| R-118 | WP-5.1b split | 5.1b-1 defines §14 and notices; 5.1b-2 defines §16 and remote CachePurge. A global inspector hit takes down content (user, 2026-09-28); resolution is per repository; a holder sweep finds small blobs; superseded packs are deleted at completion; notices use a custom DSSE payloadType; writers are told of repository- and namespace-level takedowns. | 5.1b-1, 5.1b-2, 5.6, 5.9a, 5.10, 5.14 |
 
 ---
 
@@ -552,7 +555,7 @@ ContentIndex/export/hooks → M0-02b, unary pipeline → M0-05a, streaming/fault
 | Before P1 | P0 | ~~Cloud Build PR triggers~~: dropped (no CI on the feature branch) | — |
 | Before P1 | P0 | ~~GitHub ruleset for `feat/mkit-server`~~: dropped (no CI on the feature branch) | — |
 | P1 | P1 | ~~Confirm the checks appear on a throwaway PR~~: dropped (no CI on the branch) | — |
-| Specs | S1, S2, S3, 3.6, 4.4, 4.11, 5.1a, 5.1b, 5.1c | Approve the normative text; close #1087 with the credit comment when S1–S3 have merged | User |
+| Specs | S1, S2, S3 | Approve the normative text; close #1087 with the credit comment when S1–S3 have merged. Later spec PRs, including 5.1b-1/2, merge under local gates and adversarial review. | User |
 | Before M0-16 | M0-16 | Confirm the Cloudflare account is on **Workers Paid** (10 GB SQLite per Durable Object, CPU configurable to 5 min, 10,000 subrequests per invocation); the plan's limits assume it (Free caps DOs at 1 GB) | Cloudflare account admin |
 | M1 | 1.19 | **Resolved (D35):** `staging-vcs.mkit.sh` on the `mkit.sh` zone, in the same account as the other mkit workers, as `env.staging` of `vcs-worker`. Dedicated staging R2 buckets and DO classes. Data can be reset at any time (no retention promise; CI may wipe it). One dedicated staging CI Ed25519 signer (GitHub secret) whose namespace is the only allowlist entry. Resources are created through the Cloudflare MCP with the user's OK. | Coordinator (with user OK) |
 | M1 | 1.19 | Create a Cloudflare API token scoped to Workers Scripts:Edit, Workers Routes:Edit, R2:Edit, Durable Objects; verify scopes (a previous deploy failed with APIError 7403 on a token lacking D1 scope) | Cloudflare account admin |

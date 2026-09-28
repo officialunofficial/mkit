@@ -176,6 +176,14 @@ message ListRefsResponse {
   repeated RefEntry refs = 1;
   // Empty ends the listing (SPEC-TRANSPORT-CONNECT §7.9).
   string next_page_token = 2;
+  // Active notices associated with visible refs on this page (SPEC-SERVER §14.6).
+  repeated RefRedaction ref_redactions = 3;
+}
+
+// Notice associated with one visible ref; RefEntry's pinned wire layout is unchanged.
+message RefRedaction {
+  string ref = 1;  // Full ref name, not the prefix-stripped ListRefs display name.
+  RedactionNotice notice = 2;
 }
 
 message ReadRefRequest {
@@ -185,6 +193,8 @@ message ReadRefRequest {
 message ReadRefResponse {
   bool exists = 1;
   bytes object_id = 2;  // 32-byte BLAKE3 digest; meaningful only when exists
+  // Active notices for this visible ref; empty when absent (SPEC-SERVER §14.6).
+  repeated RedactionNotice redaction_notices = 3;
 }
 
 message UpdateRefRequest {
@@ -398,4 +408,10 @@ message CompleteUploadResponse {}
 // verification (SPEC-TRANSPORT-CONNECT §7.6; SPEC-SERVER §9.5).
 message PendingVerification {
   uint32 retry_after_ms = 1;   // server's suggested poll interval, 1000..=60000
+}
+
+// Signed takedown notice used as a Connect error detail and on visible refs.
+// The sole field is the exact DSSE JSON envelope (SPEC-SERVER §14.6).
+message RedactionNotice {
+  bytes envelope = 1;
 }

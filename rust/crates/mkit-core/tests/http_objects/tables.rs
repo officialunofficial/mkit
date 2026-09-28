@@ -419,6 +419,34 @@ pub(super) fn responses() -> Value {
         json!([]),
     );
     add(
+        "tombstone_before_304_and_admission",
+        json!({"method":"GET","route":"ref","published_reachable":true,"repository_tombstone":true,"if_none_match":etag,"admission":"challenge"}),
+        451,
+        json!({"Content-Type":"application/json","Cache-Control":"no-store","Link":"<https://vcs.example.test>; rel=\"blocked-by\""}),
+        json!(["ETag", "X-Mkit-*", "Content-Range"]),
+    );
+    add(
+        "tombstone_head_no_body",
+        json!({"method":"HEAD","route":"object","published_reachable":true,"repository_tombstone":true}),
+        451,
+        json!({"Content-Type":"application/json","Cache-Control":"no-store","Link":"<https://vcs.example.test>; rel=\"blocked-by\""}),
+        json!(["ETag", "X-Mkit-*", "Content-Range"]),
+    );
+    add(
+        "global_block_without_repository_tombstone",
+        json!({"method":"GET","route":"object","published_reachable":true,"global_block":true,"repository_tombstone":false}),
+        404,
+        json!({"Cache-Control":"no-store"}),
+        json!(["ETag", "X-Mkit-*"]),
+    );
+    add(
+        "chunk_only_under_tombstoned_manifest",
+        json!({"method":"GET","route":"object","chunk_only_under_tombstoned_manifest":true,"repository_tombstone":false}),
+        404,
+        json!({"Cache-Control":"no-store"}),
+        json!(["ETag", "X-Mkit-*"]),
+    );
+    add(
         "not_modified_before_range_admission",
         json!({"method":"GET","route":"ref","if_none_match":etag,"range":"bytes=200-300","size":100,"admission":"challenge"}),
         304,
@@ -707,7 +735,7 @@ pub(super) fn responses() -> Value {
         "cors_configured",
         json!({"method":"GET","origin":"https://viewer.example"}),
         200,
-        json!({"Access-Control-Allow-Origin":"https://viewer.example","Vary":"Origin","Access-Control-Expose-Headers":"ETag, Content-Range, Accept-Ranges, Content-Length, X-Mkit-Commit, X-Mkit-Object, X-Mkit-Object-Type, WWW-Authenticate, Payment-Receipt, PAYMENT-REQUIRED, PAYMENT-RESPONSE"}),
+        json!({"Access-Control-Allow-Origin":"https://viewer.example","Vary":"Origin","Access-Control-Expose-Headers":"ETag, Content-Range, Accept-Ranges, Content-Length, X-Mkit-Commit, X-Mkit-Object, X-Mkit-Object-Type, WWW-Authenticate, Payment-Receipt, PAYMENT-REQUIRED, PAYMENT-RESPONSE, Link"}),
         json!(["Access-Control-Allow-Credentials"]),
     );
     add(
@@ -726,6 +754,11 @@ pub(super) fn responses() -> Value {
         {
             row["expect"]["body_bytes"] = json!(0);
         }
+        if row["expect"]["status"] == 451 && row["request"]["method"] == "GET" {
+            row["expect"]["body_fixture"] = json!("redaction/detail.json");
+            row["expect"]["body_bytes"] =
+                json!(include_bytes!("../../../../tests/golden/redaction/detail.json").len());
+        }
         if row["name"] == "head" {
             row["expect"]["outcome"] = json!({"kind":"ReadServed","bytes_served":0});
         }
@@ -735,7 +768,7 @@ pub(super) fn responses() -> Value {
             row["expect"]["body_json"] = body;
         }
     }
-    json!({"schema_version":1,"cases":cases,"notes":{"451":"Reserved for M5; never returned in M4.","opaque":"No object routes mounted.","uniform_404":"Missing repository and missing/invalid private token use identical headers and body.","402_body":"AdmissionChallenge canonical protobuf JSON; HEAD has no body."}})
+    json!({"schema_version":1,"cases":cases,"notes":{"451":"Only a repository tombstone with published-tree reachability returns 451; prior 404 checks win.","opaque":"No object routes mounted.","uniform_404":"Missing repository and missing/invalid private token use identical headers and body.","402_body":"AdmissionChallenge canonical protobuf JSON; HEAD has no body."}})
 }
 
 #[allow(clippy::too_many_lines)] // Checks the full URL and response golden tables together.
@@ -773,8 +806,26 @@ pub(super) fn check(dir: &std::path::Path) {
     assert!(rows.len() >= 40);
     for row in rows {
         let status = row["expect"]["status"].as_u64().unwrap();
-        assert_ne!(status, 451);
         let headers = &row["expect"]["headers"];
+        if status == 451 {
+            assert_eq!(row["request"]["repository_tombstone"], true);
+            assert_eq!(row["request"]["published_reachable"], true);
+            assert_eq!(headers["Content-Type"], "application/json");
+            assert_eq!(
+                headers["Link"],
+                "<https://vcs.example.test>; rel=\"blocked-by\""
+            );
+            assert_eq!(headers["Cache-Control"], "no-store");
+            if row["request"]["method"] == "HEAD" {
+                assert_eq!(row["expect"]["body_bytes"], 0);
+            } else {
+                assert_eq!(row["expect"]["body_fixture"], "redaction/detail.json");
+                assert_eq!(
+                    row["expect"]["body_bytes"],
+                    include_bytes!("../../../../tests/golden/redaction/detail.json").len()
+                );
+            }
+        }
         if status >= 400 {
             assert!(
                 headers["Cache-Control"]

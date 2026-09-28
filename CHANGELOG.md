@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Specify server takedown and redaction notices: global content blocklist,
+  delta-safe ref and pack rewrites, tombstones, preservation and restore,
+  signed DSSE notices on Connect and HTTP 451, and additive transport and
+  hook fields. Runtime enforcement follows in later server work packages.
 - Server: add periodic per-Durable-Object logical snapshots to a dedicated R2
   `BACKUPS` bucket, plus Fresh-only portable restore with epoch advancement,
   relay re-keying and coordinator recovery. Native `export` and `restore`

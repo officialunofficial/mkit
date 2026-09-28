@@ -272,6 +272,9 @@ message InspectResponse {
   // Raw 32-byte ids from the inspected set, only with reject or quarantine;
   // nonempty for QUARANTINE-phase reject or quarantine (SPEC-SERVER §6.4).
   repeated bytes flagged_objects = 5;
+  // Optional registered §14.6 reason token for a reject that becomes a takedown.
+  // Invalid with pass, quarantine, or defer; no free text.
+  string takedown_reason = 6;
 }
 
 // Asynchronous re-poll suggestion; SPEC-SERVER §11.3.
@@ -406,7 +409,21 @@ message Event {
     // Storage-lease or administrative transition.
     LeaseTransition lease = 6;
     // Field 7 is left for the publication transition (§10); not reserved in schema.
+    // A content, repository, or namespace takedown transition (§14).
+    TakedownTransition takedown = 8;
   }
+}
+
+// A durable takedown state change; repository is the affected repository.
+// For namespace scope, one event is sent per affected repository (§14.1).
+message TakedownTransition {
+  string takedown_id = 1;
+  // "content", "repository", or "namespace"; SPEC-SERVER §14.1.
+  string level = 2;
+  // "blocked", "completed", or "reinstated"; SPEC-SERVER §14.3.
+  string state = 3;
+  // Registered public token, never free text; SPEC-SERVER §14.6.
+  string reason = 4;
 }
 
 // Effective storage-lease state transition; SPEC-SERVER §12.4.
