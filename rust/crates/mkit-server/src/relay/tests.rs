@@ -415,14 +415,17 @@ async fn identical_index_rows_from_two_sources_survive_redelivery() {
     let pack = [0x34; 32];
     let target = D34Shards.object_index(&repo, &object);
     let index_key = keys::object_index(&repo.name, &object, &pack);
-    let value = codec::encode_object_index(&crate::store::index::IndexValue {
-        frame_offset: 7,
-        frame_length: 19,
-        wire_type: 0,
-        decoded_size: 24,
-        chain_depth: 0,
-        delta_base: None,
-    })
+    let value = codec::encode_object_index(
+        &object,
+        &crate::store::index::IndexValue {
+            frame_offset: 7,
+            frame_length: 19,
+            wire_type: 0,
+            decoded_size: 24,
+            chain_depth: 0,
+            delta_base: None,
+        },
+    )
     .unwrap();
     append(&s, &target, vec![(index_key.clone(), value.clone())], 50).await;
     let second = Partition::Ref {

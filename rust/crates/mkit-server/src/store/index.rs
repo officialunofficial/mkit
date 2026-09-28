@@ -5,25 +5,30 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use mkit_core::hash::Hash;
+use mkit_core::store::MAX_RAW_OBJECT_SIZE;
 
 use super::codec::{self, RelayV1};
 use super::keys::{self, ParsedKey};
 use super::outbox::MAX_RELAY_PUTS;
 use super::{
-    BlobKey, Key, MAX_BATCH_BYTES, MAX_BATCH_OPS, MAX_KEY_BYTES, MAX_VALUE_BYTES, NamespaceStore,
-    Partition, StoreError, Value,
+    BlobKey, Key, MAX_BATCH_BYTES, MAX_KEY_BYTES, MAX_VALUE_BYTES, NamespaceStore, Partition,
+    StoreError, Value,
 };
 use crate::pipeline::ShardMap;
 use crate::repo::RepoId;
 
 /// Maximum object ids accepted by one lookup, matching the takedown named-id cap.
 pub const MAX_LOOKUP_IDS: usize = 256;
-/// Maximum index candidates read in one call. A truncated miss fails closed;
-/// no missing result is inferred from a truncated scan.
+/// Maximum index candidates read for one object id. A truncated miss has a
+/// distinct, non-retryable per-id result.
 pub const MAX_LOOKUP_ROWS: usize = 4096;
 /// Maximum scan calls in one lookup, including legal empty continuation pages.
-pub const MAX_LOOKUP_PAGES: usize = 8192;
+pub const MAX_LOOKUP_PAGES: usize = 512;
+/// At most 487 partition-scoped membership reads accompany 512 scan pages:
+/// the whole call uses at most 999 Worker subrequests.
+pub const MAX_LOOKUP_MEMBERSHIP_READS: usize = 487;
 const SCAN_PAGE_ROWS: u32 = 128;
+const _: () = assert!(MAX_LOOKUP_PAGES + MAX_LOOKUP_MEMBERSHIP_READS < 1000);
 
 /// The immutable location and decoded metadata of one pack entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,19 +41,25 @@ pub struct IndexValue {
     pub wire_type: u8,
     /// Reconstructed object size in bytes.
     pub decoded_size: u64,
-    /// Delta depth of the entry, with a raw entry at zero.
+    /// In-pack delta hops to the first non-in-pack-delta entry: zero for a
+    /// full object, one for an external base, otherwise one plus the base's
+    /// in-pack depth. Verification follows external bases for total depth.
     pub chain_depth: u32,
     /// Base id for delta entry types only.
     pub delta_base: Option<Hash>,
 }
 
 impl IndexValue {
-    pub(crate) fn validate(&self) -> Result<(), StoreError> {
+    pub(crate) fn validate(&self, object: &Hash) -> Result<(), StoreError> {
         if self.frame_length == 0
+            || self.frame_length > u64::from(u32::MAX) + 5
             || self.frame_offset.checked_add(self.frame_length).is_none()
             || self.decoded_size == 0
+            || self.decoded_size > MAX_RAW_OBJECT_SIZE as u64
+            || self.chain_depth > u32::from(u16::MAX)
+            || self.delta_base == Some(*object)
         {
-            return Err(StoreError::Invalid("invalid object index lengths".into()));
+            return Err(StoreError::Invalid("invalid object index metadata".into()));
         }
         match (self.wire_type, self.delta_base, self.chain_depth) {
             (0x00 | 0x03, None, 0) | (0x02 | 0x04, Some(_), 1..) => Ok(()),
@@ -105,7 +116,7 @@ pub fn plan_index_rows(
         let key = keys::object_index(&repo.name, &entry.object, pack);
         let group = grouped.entry(target).or_default();
         if let std::collections::btree_map::Entry::Vacant(slot) = group.entry(key) {
-            slot.insert(codec::encode_object_index(&entry.value)?);
+            slot.insert(codec::encode_object_index(&entry.object, &entry.value)?);
         }
     }
     let mut plan = IndexPlan::default();
@@ -115,10 +126,13 @@ pub fn plan_index_rows(
             let mut bytes = 0;
             for (key, value) in rows {
                 let size = key.as_bytes().len() + value.as_bytes().len();
-                if size > MAX_BATCH_BYTES || key.as_bytes().len() > MAX_KEY_BYTES {
+                if size > MAX_BATCH_BYTES
+                    || key.as_bytes().len() > MAX_KEY_BYTES
+                    || value.as_bytes().len() > MAX_VALUE_BYTES
+                {
                     return Err(StoreError::Invalid("object index row too large".into()));
                 }
-                if puts.len() == MAX_BATCH_OPS || bytes + size > MAX_BATCH_BYTES {
+                if puts.len() == MAX_RELAY_PUTS || bytes + size > MAX_BATCH_BYTES {
                     plan.direct.push(DirectIndexBatch {
                         target: target.clone(),
                         puts: std::mem::take(&mut puts),
@@ -134,39 +148,40 @@ pub fn plan_index_rows(
         } else {
             let mut row = RelayV1 {
                 at_ms,
-                target,
+                target: target.clone(),
                 puts: Vec::new(),
             };
-            let mut bytes = 0;
+            let base_bytes = codec::encode_relay(&row)?.as_bytes().len();
+            let mut encoded_bytes = base_bytes;
             for (key, value) in rows {
-                let size = key.as_bytes().len() + value.as_bytes().len();
-                if key.as_bytes().len() > MAX_KEY_BYTES || value.as_bytes().len() > MAX_VALUE_BYTES
+                // Relay JSON renders key and value as hex strings.
+                let addition = 7 + 2 * (key.as_bytes().len() + value.as_bytes().len());
+                if key.as_bytes().len() > MAX_KEY_BYTES
+                    || value.as_bytes().len() > MAX_VALUE_BYTES
+                    || base_bytes + addition > MAX_VALUE_BYTES
+                    || base_bytes + addition + 2 * (MAX_KEY_BYTES + 8) > MAX_BATCH_BYTES
                 {
                     return Err(StoreError::Invalid("object index row too large".into()));
                 }
-                row.puts.push((key, value));
-                let encoded = codec::encode_relay(&row);
-                if row.puts.len() > MAX_RELAY_PUTS
-                    || encoded.is_err()
-                    || bytes + size + 2 * (MAX_KEY_BYTES + 8) > MAX_BATCH_BYTES
+                let comma = usize::from(!row.puts.is_empty());
+                if row.puts.len() == MAX_RELAY_PUTS
+                    || encoded_bytes + addition + comma > MAX_VALUE_BYTES
+                    || encoded_bytes + addition + comma + 2 * (MAX_KEY_BYTES + 8) > MAX_BATCH_BYTES
                 {
-                    let Some(last) = row.puts.pop() else {
-                        return Err(StoreError::Invalid("empty object index relay row".into()));
-                    };
-                    if row.puts.is_empty() {
-                        return Err(StoreError::Invalid(
-                            "object index relay row too large".into(),
-                        ));
-                    }
-                    plan.relay.push(row.clone());
-                    row.puts.clear();
-                    row.puts.push(last);
                     codec::encode_relay(&row)?;
-                    bytes = 0;
+                    plan.relay.push(row);
+                    row = RelayV1 {
+                        at_ms,
+                        target: target.clone(),
+                        puts: Vec::new(),
+                    };
+                    encoded_bytes = base_bytes;
                 }
-                bytes += size;
+                encoded_bytes += addition + usize::from(!row.puts.is_empty());
+                row.puts.push((key, value));
             }
             if !row.puts.is_empty() {
+                codec::encode_relay(&row)?;
                 plan.relay.push(row);
             }
         }
@@ -183,78 +198,123 @@ pub struct LocatedObject {
     pub value: IndexValue,
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("object index lookup budget exceeded")]
-struct LookupBudgetExceeded;
+/// A bounded lookup that could not prove membership or absence for one id.
+/// These fail closed; §13 GC removes orphaned rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum LookupError {
+    /// More than [`MAX_LOOKUP_ROWS`] rows for this object. Retrying the same
+    /// lookup cannot resolve this id until §13 GC removes orphaned rows.
+    #[error("object index row cap exceeded")]
+    TooManyRows,
+    /// The call used all [`MAX_LOOKUP_PAGES`] scan pages.
+    #[error("object index page cap exceeded")]
+    TooManyPages,
+    /// Joining this id would exceed the call's membership-read budget.
+    #[error("object index membership-read cap exceeded")]
+    TooManyMembershipReads,
+}
 
-fn budget_exceeded() -> StoreError {
-    StoreError::unavailable(LookupBudgetExceeded)
+/// One object's result. Backend failures still fail the whole call.
+pub type ObjectLookup = Result<Option<LocatedObject>, LookupError>;
+/// One object's membership answer.
+pub type PresenceLookup = Result<bool, LookupError>;
+
+async fn scan_one<S: NamespaceStore>(
+    store: &S,
+    shards: &dyn ShardMap,
+    repo: &RepoId,
+    id: &Hash,
+    pages: &mut usize,
+) -> Result<(Vec<(Hash, Value)>, Option<LookupError>), StoreError> {
+    let partition = shards.object_index(repo, id);
+    let (start, end) = keys::object_index_range(&repo.name, id);
+    let mut after = None;
+    let mut rows = Vec::new();
+    loop {
+        if rows.len() == MAX_LOOKUP_ROWS {
+            return Ok((rows, Some(LookupError::TooManyRows)));
+        }
+        if *pages == MAX_LOOKUP_PAGES {
+            return Ok((rows, Some(LookupError::TooManyPages)));
+        }
+        let limit = SCAN_PAGE_ROWS.min(
+            u32::try_from(MAX_LOOKUP_ROWS - rows.len())
+                .map_err(|_| StoreError::Invalid("invalid lookup row cap".into()))?,
+        );
+        let page = store
+            .scan(&partition, &start, &end, after.as_ref(), limit)
+            .await?;
+        *pages += 1;
+        if page.entries.len() > limit as usize {
+            return Err(StoreError::Corrupt(
+                "object index scan exceeded limit".into(),
+            ));
+        }
+        for (key, value) in page.entries {
+            match keys::parse(&key) {
+                Some(ParsedKey::ObjectIndex {
+                    repo: found,
+                    object,
+                    pack_id,
+                }) if found == repo.name && object == *id => rows.push((pack_id, value)),
+                _ => return Err(StoreError::Corrupt("malformed object index key".into())),
+            }
+        }
+        match page.next {
+            Some(cursor) => after = Some(cursor),
+            None => return Ok((rows, None)),
+        }
+    }
 }
 
 /// Locate the first member pack, in pack-id order, for each requested id.
-/// Each object scan and the call as a whole are bounded. Membership keys are
+/// Each object has its own row cap, while scan pages and membership reads have
+/// call-wide caps. A capped miss affects only its id. Membership keys are
 /// deduplicated, then read once per membership partition (the store's
-/// `get_many` is partition-scoped). A truncated miss fails closed.
+/// `get_many` is partition-scoped).
 pub async fn locate_many<S: NamespaceStore>(
     store: &S,
     shards: &dyn ShardMap,
     repo: &RepoId,
     ids: &[Hash],
-) -> Result<Vec<Option<LocatedObject>>, StoreError> {
+) -> Result<Vec<ObjectLookup>, StoreError> {
     if ids.len() > MAX_LOOKUP_IDS {
         return Err(StoreError::Invalid("too many object ids".into()));
     }
     let mut candidates: BTreeMap<Hash, Vec<(Hash, Value)>> = BTreeMap::new();
-    let mut truncated = BTreeSet::new();
-    let mut total = 0;
+    let mut truncated = BTreeMap::new();
     let mut pages = 0;
     for id in ids {
         if candidates.contains_key(id) {
             continue;
         }
-        let partition = shards.object_index(repo, id);
-        let (start, end) = keys::object_index_range(&repo.name, id);
-        let mut after = None;
-        let mut rows = Vec::new();
-        loop {
-            if total == MAX_LOOKUP_ROWS || pages == MAX_LOOKUP_PAGES {
-                if rows.is_empty() {
-                    return Err(budget_exceeded());
-                }
-                truncated.insert(*id);
-                break;
-            }
-            let limit = SCAN_PAGE_ROWS
-                .min(u32::try_from(MAX_LOOKUP_ROWS - total).map_err(|_| budget_exceeded())?);
-            let page = store
-                .scan(&partition, &start, &end, after.as_ref(), limit)
-                .await?;
-            pages += 1;
-            if page.entries.len() > limit as usize {
-                return Err(StoreError::Corrupt(
-                    "object index scan exceeded limit".into(),
-                ));
-            }
-            total += page.entries.len();
-            for (key, value) in page.entries {
-                match keys::parse(&key) {
-                    Some(ParsedKey::ObjectIndex {
-                        repo: found,
-                        object,
-                        pack_id,
-                    }) if found == repo.name && object == *id => rows.push((pack_id, value)),
-                    _ => return Err(StoreError::Corrupt("malformed object index key".into())),
-                }
-            }
-            match page.next {
-                Some(cursor) => after = Some(cursor),
-                None => break,
-            }
+        let (rows, reason) = scan_one(store, shards, repo, id, &mut pages).await?;
+        if let Some(reason) = reason {
+            truncated.insert(*id, reason);
         }
         candidates.insert(*id, rows);
     }
+    // Admit smaller candidate sets first, so one hot id cannot consume the
+    // membership budget needed to answer an ordinary id in the same call.
+    let mut order: Vec<_> = candidates.keys().copied().collect();
+    order.sort_by_key(|id| (candidates[id].len(), *id));
     let mut packs: BTreeMap<Partition, BTreeSet<Hash>> = BTreeMap::new();
-    for rows in candidates.values() {
+    for id in order {
+        let rows = &candidates[&id];
+        let partitions: BTreeSet<_> = rows
+            .iter()
+            .map(|(pack, _)| shards.membership(repo, &BlobKey::pack(*pack)))
+            .collect();
+        let new_reads = partitions
+            .iter()
+            .filter(|p| !packs.contains_key(*p))
+            .count();
+        if packs.len() + new_reads > MAX_LOOKUP_MEMBERSHIP_READS {
+            truncated
+                .entry(id)
+                .or_insert(LookupError::TooManyMembershipReads);
+            continue;
+        }
         for (pack, _) in rows {
             packs
                 .entry(shards.membership(repo, &BlobKey::pack(*pack)))
@@ -287,14 +347,16 @@ pub async fn locate_many<S: NamespaceStore>(
                 .map(|(pack, value)| {
                     Ok::<LocatedObject, StoreError>(LocatedObject {
                         pack: *pack,
-                        value: codec::decode_object_index(value)?,
+                        value: codec::decode_object_index(id, value)?,
                     })
                 })
                 .transpose()?;
-            if found.is_none() && truncated.contains(id) {
-                Err(budget_exceeded())
+            if found.is_none()
+                && let Some(reason) = truncated.get(id)
+            {
+                Ok(Err(*reason))
             } else {
-                Ok(found)
+                Ok(Ok(found))
             }
         })
         .collect()
@@ -306,25 +368,32 @@ pub async fn contains_many<S: NamespaceStore>(
     shards: &dyn ShardMap,
     repo: &RepoId,
     ids: &[Hash],
-) -> Result<Vec<bool>, StoreError> {
+) -> Result<Vec<PresenceLookup>, StoreError> {
     Ok(locate_many(store, shards, repo, ids)
         .await?
         .into_iter()
-        .map(|location| location.is_some())
+        .map(|location| location.map(|location| location.is_some()))
         .collect())
 }
 
-/// Whether this repository holds any named id, for the takedown sweep.
+/// Whether this repository holds any named id, for the takedown sweep. This
+/// currently performs one scan per id and does not satisfy §14.3/R-133's
+/// one-read-per-distinct-index-partition bound. WP-5.6 uses WP-4.6's batched
+/// per-partition read. A capped miss fails closed.
 pub async fn holds_any<S: NamespaceStore>(
     store: &S,
     shards: &dyn ShardMap,
     repo: &RepoId,
     ids: &[Hash],
 ) -> Result<bool, StoreError> {
-    Ok(contains_many(store, shards, repo, ids)
-        .await?
-        .into_iter()
-        .any(|yes| yes))
+    let answers = contains_many(store, shards, repo, ids).await?;
+    if answers.iter().any(|answer| matches!(answer, Ok(true))) {
+        return Ok(true);
+    }
+    if let Some(reason) = answers.into_iter().find_map(Result::err) {
+        return Err(StoreError::Invalid(reason.to_string().into()));
+    }
+    Ok(false)
 }
 
 #[cfg(test)]
@@ -416,6 +485,7 @@ mod tests {
 
     #[test]
     fn binary_value_golden_and_validation() {
+        let object = [0x12; 32];
         let row = IndexValue {
             frame_offset: 0x0102_0304_0506_0708,
             frame_length: 17,
@@ -424,7 +494,7 @@ mod tests {
             chain_depth: 3,
             delta_base: Some([0x33; 32]),
         };
-        let value = codec::encode_object_index(&row).unwrap();
+        let value = codec::encode_object_index(&object, &row).unwrap();
         let golden = [
             &b"\x01\x01\x02\x03\x04\x05\x06\x07\x08"[..],
             &17_u64.to_be_bytes(),
@@ -436,10 +506,13 @@ mod tests {
         ]
         .concat();
         assert_eq!(value.as_bytes(), golden);
-        assert_eq!(codec::decode_object_index(&value).unwrap(), row);
-        let raw_value = codec::encode_object_index(&raw(0)).unwrap();
+        assert_eq!(codec::decode_object_index(&object, &value).unwrap(), row);
+        let raw_value = codec::encode_object_index(&object, &raw(0)).unwrap();
         assert_eq!(raw_value.as_bytes().len(), 31);
-        assert_eq!(codec::decode_object_index(&raw_value).unwrap(), raw(0));
+        assert_eq!(
+            codec::decode_object_index(&object, &raw_value).unwrap(),
+            raw(0)
+        );
         for bad in [
             Value::new(vec![]),
             Value::new([&[2], &golden[1..]].concat()),
@@ -447,22 +520,28 @@ mod tests {
             Value::new([&golden[..30], &[0], &golden[31..]].concat()),
         ] {
             assert!(matches!(
-                codec::decode_object_index(&bad),
+                codec::decode_object_index(&object, &bad),
                 Err(StoreError::Corrupt(_))
             ));
         }
         assert!(
-            codec::encode_object_index(&IndexValue {
-                wire_type: 1,
-                ..raw(0)
-            })
+            codec::encode_object_index(
+                &object,
+                &IndexValue {
+                    wire_type: 1,
+                    ..raw(0)
+                }
+            )
             .is_err()
         );
         assert!(
-            codec::encode_object_index(&IndexValue {
-                frame_length: 0,
-                ..raw(0)
-            })
+            codec::encode_object_index(
+                &object,
+                &IndexValue {
+                    frame_length: 0,
+                    ..raw(0)
+                }
+            )
             .is_err()
         );
         let deep = IndexValue {
@@ -470,9 +549,33 @@ mod tests {
             ..row
         };
         assert_eq!(
-            codec::decode_object_index(&codec::encode_object_index(&deep).unwrap()).unwrap(),
+            codec::decode_object_index(
+                &object,
+                &codec::encode_object_index(&object, &deep).unwrap()
+            )
+            .unwrap(),
             deep
         );
+        for invalid in [
+            IndexValue {
+                decoded_size: MAX_RAW_OBJECT_SIZE as u64 + 1,
+                ..raw(0)
+            },
+            IndexValue {
+                frame_length: u64::from(u32::MAX) + 6,
+                ..raw(0)
+            },
+            IndexValue {
+                chain_depth: u32::from(u16::MAX) + 1,
+                ..deep
+            },
+            IndexValue {
+                delta_base: Some(object),
+                ..row
+            },
+        ] {
+            assert!(codec::encode_object_index(&object, &invalid).is_err());
+        }
     }
 
     #[test]
@@ -506,11 +609,11 @@ mod tests {
                 .iter()
                 .map(|batch| batch.puts.len())
                 .collect::<Vec<_>>(),
-            [100, 100, 20]
+            [96, 96, 28]
         );
         assert_eq!(
             plan.direct[0].puts[0].1,
-            codec::encode_object_index(&raw(0)).unwrap()
+            codec::encode_object_index(&entries[0].object, &raw(0)).unwrap()
         );
         for batch in &plan.direct {
             let bytes: usize = batch
@@ -567,13 +670,64 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn planner_bytes_do_not_depend_on_repository_state() {
+        let r = repo("a");
+        let object = [0x12; 32];
+        let pack = [0x34; 32];
+        let entry = IndexEntry {
+            object,
+            value: IndexValue {
+                frame_offset: 10,
+                frame_length: 20,
+                wire_type: 2,
+                decoded_size: 42,
+                chain_depth: 1,
+                delta_base: Some([0x56; 32]),
+            },
+        };
+        let source = source();
+        let empty = MemoryKv::default();
+        let member = MemoryKv::default();
+        let index_target = D34Shards.object_index(&r, &object);
+        let index_key = keys::object_index(&r.name, &object, &pack);
+        let index_value = codec::encode_object_index(&object, &entry.value).unwrap();
+        for store in [&empty, &member] {
+            store
+                .apply(
+                    &index_target,
+                    Batch::new().put(index_key.clone(), index_value.clone()),
+                )
+                .await
+                .unwrap();
+        }
+        member
+            .apply(
+                &D34Shards.membership(&r, &BlobKey::pack(pack)),
+                Batch::new().put(keys::membership(&r.name, &pack), Value::default()),
+            )
+            .await
+            .unwrap();
+        assert_ne!(
+            contains_many(&empty, &D34Shards, &r, &[object])
+                .await
+                .unwrap(),
+            contains_many(&member, &D34Shards, &r, &[object])
+                .await
+                .unwrap()
+        );
+        let first = plan_index_rows(&D34Shards, &r, &source, &pack, &[entry], 7).unwrap();
+        let second = plan_index_rows(&D34Shards, &r, &source, &pack, &[entry], 7).unwrap();
+        assert_eq!(first, second);
+    }
+
     async fn membership_gate(shards: &dyn ShardMap) {
         let store = MemoryKv::default();
         let a = repo("a");
         let b = repo("b");
         let id = [0x12; 32];
         let pack = [0x34; 32];
-        let row = codec::encode_object_index(&raw(5)).unwrap();
+        let row = codec::encode_object_index(&id, &raw(5)).unwrap();
         let key = keys::object_index(&a.name, &id, &pack);
         let target = shards.object_index(&a, &id);
         assert_eq!(
@@ -590,7 +744,7 @@ mod tests {
                     &other_target,
                     Batch::new().put(
                         keys::object_index(&b.name, &id, &pack),
-                        codec::encode_object_index(&raw(5)).unwrap(),
+                        codec::encode_object_index(&id, &raw(5)).unwrap(),
                     ),
                 )
                 .await
@@ -599,11 +753,11 @@ mod tests {
         );
         assert_eq!(
             contains_many(&store, shards, &a, &[id, id]).await.unwrap(),
-            [false, false]
+            [Ok(false), Ok(false)]
         );
         assert_eq!(
             contains_many(&store, shards, &b, &[id]).await.unwrap(),
-            [false]
+            [Ok(false)]
         );
         let member = keys::membership(&a.name, &pack);
         let partition = shards.membership(&a, &BlobKey::pack(pack));
@@ -616,10 +770,10 @@ mod tests {
         );
         assert_eq!(
             locate_many(&store, shards, &a, &[id]).await.unwrap(),
-            [Some(LocatedObject {
+            [Ok(Some(LocatedObject {
                 pack,
                 value: raw(5)
-            })]
+            }))]
         );
         assert!(holds_any(&store, shards, &a, &[id]).await.unwrap());
         assert!(!holds_any(&store, shards, &b, &[id]).await.unwrap());
@@ -648,7 +802,7 @@ mod tests {
                 pack[30..].copy_from_slice(&i.to_be_bytes());
                 batch = batch.put(
                     keys::object_index(&r.name, &id, &pack),
-                    codec::encode_object_index(&raw(u64::from(*i))).unwrap(),
+                    codec::encode_object_index(&id, &raw(u64::from(*i))).unwrap(),
                 );
             }
             assert_eq!(
@@ -671,10 +825,10 @@ mod tests {
         );
         assert_eq!(
             locate_many(&store, &D34Shards, &r, &[id]).await.unwrap(),
-            [Some(LocatedObject {
+            [Ok(Some(LocatedObject {
                 pack: last,
                 value: raw(129)
-            })]
+            }))]
         );
     }
 
@@ -697,7 +851,7 @@ mod tests {
                         &target,
                         Batch::new().put(
                             keys::object_index(&r.name, &id, &pack),
-                            codec::encode_object_index(&raw(5)).unwrap()
+                            codec::encode_object_index(&id, &raw(5)).unwrap()
                         )
                     )
                     .await
@@ -718,28 +872,30 @@ mod tests {
         store.empty_once.store(true, Ordering::SeqCst);
         assert_eq!(
             locate_many(&store, &D34Shards, &r, &[id]).await.unwrap(),
-            [Some(LocatedObject {
+            [Ok(Some(LocatedObject {
                 pack: member,
                 value: raw(5)
-            })]
+            }))]
         );
         assert_eq!(store.get_many_calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
-    async fn lookup_budget_fails_closed() {
+    async fn hot_object_cap_does_not_hide_another_id() {
         let store = MemoryKv::default();
         let r = repo("a");
-        let id = [0x12; 32];
-        let target = D34Shards.object_index(&r, &id);
+        let hot = [0x12; 32];
+        let normal = [0x13; 32];
+        let normal_pack = [0x55; 32];
+        let target = D34Shards.object_index(&r, &hot);
         for chunk in (0..=MAX_LOOKUP_ROWS).collect::<Vec<_>>().chunks(100) {
             let mut batch = Batch::new();
             for i in chunk {
                 let mut pack = [0; 32];
                 pack[28..].copy_from_slice(&u32::try_from(*i).unwrap().to_be_bytes());
                 batch = batch.put(
-                    keys::object_index(&r.name, &id, &pack),
-                    codec::encode_object_index(&raw(5)).unwrap(),
+                    keys::object_index(&r.name, &hot, &pack),
+                    codec::encode_object_index(&hot, &raw(5)).unwrap(),
                 );
             }
             assert_eq!(
@@ -747,9 +903,53 @@ mod tests {
                 BatchOutcome::Committed
             );
         }
+        assert_eq!(
+            store
+                .apply(
+                    &D34Shards.object_index(&r, &normal),
+                    Batch::new().put(
+                        keys::object_index(&r.name, &normal, &normal_pack),
+                        codec::encode_object_index(&normal, &raw(7)).unwrap(),
+                    ),
+                )
+                .await
+                .unwrap(),
+            BatchOutcome::Committed
+        );
+        assert_eq!(
+            store
+                .apply(
+                    &D34Shards.membership(&r, &BlobKey::pack(normal_pack)),
+                    Batch::new().put(keys::membership(&r.name, &normal_pack), Value::default(),),
+                )
+                .await
+                .unwrap(),
+            BatchOutcome::Committed
+        );
+        let normal_location = Some(LocatedObject {
+            pack: normal_pack,
+            value: raw(7),
+        });
+        assert_eq!(
+            locate_many(&store, &D34Shards, &r, &[hot, normal])
+                .await
+                .unwrap(),
+            [Err(LookupError::TooManyRows), Ok(normal_location)]
+        );
+        assert_eq!(
+            contains_many(&store, &D34Shards, &r, &[hot, normal])
+                .await
+                .unwrap(),
+            [Err(LookupError::TooManyRows), Ok(true)]
+        );
+        assert!(
+            holds_any(&store, &D34Shards, &r, &[hot, normal])
+                .await
+                .unwrap()
+        );
         assert!(matches!(
-            locate_many(&store, &D34Shards, &r, &[id]).await,
-            Err(StoreError::Unavailable(_))
+            holds_any(&store, &D34Shards, &r, &[hot]).await,
+            Err(StoreError::Invalid(_))
         ));
         let first = [0; 32];
         assert_eq!(
@@ -763,11 +963,16 @@ mod tests {
             BatchOutcome::Committed
         );
         assert_eq!(
-            locate_many(&store, &D34Shards, &r, &[id]).await.unwrap(),
-            [Some(LocatedObject {
-                pack: first,
-                value: raw(5)
-            })]
+            locate_many(&store, &D34Shards, &r, &[hot, normal])
+                .await
+                .unwrap(),
+            [
+                Ok(Some(LocatedObject {
+                    pack: first,
+                    value: raw(5)
+                })),
+                Ok(normal_location)
+            ]
         );
     }
 }

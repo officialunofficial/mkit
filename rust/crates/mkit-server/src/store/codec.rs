@@ -688,8 +688,8 @@ pub fn decode_relay(value: &Value) -> Result<RelayV1, StoreError> {
 /// Encode a repository object-index value. All integers are big-endian.
 /// Layout: version, frame offset/length (u64 each), wire type (u8),
 /// decoded size (u64), chain depth (u32), base-present (u8), optional base id.
-pub fn encode_object_index(row: &IndexValue) -> Result<Value, StoreError> {
-    row.validate()?;
+pub fn encode_object_index(object: &Hash, row: &IndexValue) -> Result<Value, StoreError> {
+    row.validate(object)?;
     let mut bytes = Vec::with_capacity(63);
     bytes.push(CODEC_V1);
     bytes.extend_from_slice(&row.frame_offset.to_be_bytes());
@@ -708,7 +708,7 @@ pub fn encode_object_index(row: &IndexValue) -> Result<Value, StoreError> {
 }
 
 /// Decode and validate a repository object-index value.
-pub fn decode_object_index(value: &Value) -> Result<IndexValue, StoreError> {
+pub fn decode_object_index(object: &Hash, value: &Value) -> Result<IndexValue, StoreError> {
     let bytes = value.as_bytes();
     if !matches!(bytes.len(), 31 | 63) || bytes[0] != CODEC_V1 {
         return Err(StoreError::Corrupt("bad object index value".into()));
@@ -746,7 +746,7 @@ pub fn decode_object_index(value: &Value) -> Result<IndexValue, StoreError> {
         ),
         delta_base: base,
     };
-    row.validate()
+    row.validate(object)
         .map_err(|_| StoreError::Corrupt("invalid object index value".into()))?;
     Ok(row)
 }

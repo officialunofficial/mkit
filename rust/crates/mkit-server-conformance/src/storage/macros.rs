@@ -138,6 +138,7 @@ macro_rules! __with_kv_cases {
             object_index::{
                 idx_object_membership_gate_single,
                 idx_object_membership_gate_d34,
+                idx_object_paging_and_membership_delete,
             }
         }
     };

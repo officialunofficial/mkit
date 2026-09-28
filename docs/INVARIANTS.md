@@ -1279,6 +1279,10 @@ same repository. For indexed advances, every index row of a consumed pack
 MUST be delivered before the advance commits membership and refs. Until
 delivery finishes, the advance returns `PendingVerification` without a replay
 result. Identical upserts from several sources may target the same index key.
+An index value MUST be a pure function of (pack bytes, entry), so every
+producer writes identical bytes (R-130). §13 GC removes index rows whose
+membership is absent and whose pack has no live ticket; WP-5.3a owns this
+pass. Until it lands, the per-id row cap bounds orphan damage.
 
 **Because:** relay lag can exceed the §9.4 window. Early index rows are safe
 only while membership keeps them invisible; committing membership first could
@@ -1290,6 +1294,7 @@ miss a member or use an object from another repository.
 **Enforced by:** `store::index` repository-scoped lookups and conformance
 cases enforce the read-side membership join and isolation. WP-4.7 and WP-4.8
 must enforce the delivery-before-advance gate in their production writers.
+See R-130.
 
 ## Pack reads consult only the named repository's membership
 
