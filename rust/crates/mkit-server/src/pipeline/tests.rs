@@ -1,5 +1,7 @@
 //! Pipeline tests over the memory stores and a `ManualClock`.
 
+#[path = "tests_begin_parts.rs"]
+mod begin_parts;
 mod info;
 mod policy;
 
@@ -1265,7 +1267,7 @@ fn single_partition_maps_everything_to_the_namespace() {
     assert_eq!(shards.ref_shard(&repo, PACKMAP), expected);
     assert_eq!(shards.coordinator(&repo.namespace), expected);
     assert_eq!(shards.ref_index(&repo, HEAD), expected);
-    assert_eq!(shards.membership(&repo, &PackKey::new(A)), expected);
+    assert_eq!(shards.membership(&repo, &PackKey::new(A).into()), expected);
 }
 
 // ----------------------------------------------- deadline and re-plans

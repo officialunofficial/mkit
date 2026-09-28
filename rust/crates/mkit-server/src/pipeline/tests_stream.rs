@@ -10,7 +10,10 @@ use super::*;
 use crate::download::chunk_plan;
 use crate::memory::MemoryPackSink;
 use crate::replay::StoredRejection;
-use crate::store::{BlobBody, BlobKey, BlobMeta, ByteRange, CommitOutcome, PackSink};
+use crate::store::{
+    BlobBody, BlobKey, BlobMeta, BlobStore, ByteRange, CommitOutcome, MultipartBlobStore, PackSink,
+    UnsupportedPartSink,
+};
 use crate::telemetry::{METRIC_UPLOAD_BYTES, NoopMetrics};
 use crate::upload::UploadError;
 
@@ -87,7 +90,7 @@ fn committed() -> ReplayState {
 fn store_blob(blobs: &MemoryBlobStore, bytes: &[u8]) -> PackKey {
     let key = PackKey::new(hash(bytes));
     now(async {
-        let mut sink = blobs.begin(key, bytes.len() as u64).await.unwrap();
+        let mut sink = blobs.begin(key.into(), bytes.len() as u64).await.unwrap();
         sink.write(Bytes::copy_from_slice(bytes)).await.unwrap();
         sink.commit().await.unwrap();
     });
@@ -278,12 +281,12 @@ fn upload_oversize_declared_is_resource_exhausted() {
 
 /// Blobs whose sinks record every write's length.
 #[derive(Default)]
-struct Counting {
+pub(super) struct Counting {
     inner: MemoryBlobStore,
     writes: Arc<Mutex<Vec<usize>>>,
 }
 
-struct CountingSink(MemoryPackSink, Arc<Mutex<Vec<usize>>>);
+pub(super) struct CountingSink(MemoryPackSink, Arc<Mutex<Vec<usize>>>);
 
 impl BlobStore for Counting {
     type Sink = CountingSink;
@@ -307,6 +310,11 @@ impl BlobStore for Counting {
     async fn delete(&self, key: &BlobKey) -> Result<bool, StoreError> {
         self.inner.delete(key).await
     }
+}
+
+impl MultipartBlobStore for Counting {
+    type PartSink = UnsupportedPartSink;
+    const MAX_PARTS: u32 = u32::MAX;
 }
 
 impl PackSink for CountingSink {
@@ -556,7 +564,7 @@ fn upload_replay_never_recreates_a_deleted_blob() {
     let req = signed_upload(&key(7), &data, 1);
     assert_eq!(upload(&env, &req, &data, 16).unwrap(), UploadMode::Fresh);
     // GC or a takedown removes the pack.
-    assert!(now(env.pipe.blobs.delete(&PackKey::new(hash(&data)))).unwrap());
+    assert!(now(env.pipe.blobs.delete(&PackKey::new(hash(&data)).into())).unwrap());
     assert_eq!(upload(&env, &req, &data, 16).unwrap(), UploadMode::Replay);
     assert!(!blob_present(&env, &data), "a replay writes no blob");
     // A replay still verifies the stream it is sent.

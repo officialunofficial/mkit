@@ -19,6 +19,10 @@ fn invalid_ticket() -> ServerError {
     ServerError::failed_precondition("invalid or expired upload ticket")
 }
 
+#[cfg(test)]
+#[path = "parts_tests.rs"]
+mod tests;
+
 fn binding_mismatch() -> ServerError {
     ServerError::new(Code::PermissionDenied, "upload ticket binding mismatch")
 }

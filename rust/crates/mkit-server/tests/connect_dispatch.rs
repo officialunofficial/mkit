@@ -16,6 +16,7 @@ use ed25519_dalek::{Signer, SigningKey};
 use http::{HeaderMap, StatusCode};
 use http_body_util::{BodyExt, Full};
 use mkit_core::hash::{hash, to_hex, to_hex_bytes};
+use mkit_core::upload_parts::{MIN_PART_SIZE, PartPlan, part_subtree_cv};
 use mkit_core::write_auth::{Context as AuthContext, Operation as SignedOp};
 use mkit_server::Procedure;
 use mkit_server::auth_v2::AuthV2Config;
@@ -35,11 +36,13 @@ use mkit_server::pipeline::{
     Pipeline, PipelineConfig,
 };
 use mkit_server::upload::UploadLimits;
+use mkit_server::upload::token::{TicketClaims, TicketKeys};
 use mkit_server::{
     Addressing, AuthzFacts, ErrorDetail, METRIC_REQUESTS, ManualClock, MemoryBlobStore,
     MemoryFault, MemoryKv, Metrics, NamespaceKey, Operation, Redacted, RepoId, RepoName,
     ServerError,
 };
+use mkit_server::{BlobKey, MultipartBlobStore};
 use tower::ServiceExt;
 
 const AUDIENCE: &str = "https://api.example.test";
@@ -1132,6 +1135,90 @@ async fn upload_part_requires_authentication_before_stream_contents() {
         assert!(messages.is_empty());
         assert_eq!(end["error"]["code"], "unauthenticated");
     }
+}
+
+#[tokio::test]
+async fn upload_part_stream_rejects_chunk_before_header_and_empty_chunk() {
+    let clock = Arc::new(ManualClock::new(T0));
+    let repo = RepoId {
+        namespace: NamespaceKey::deployment_default(),
+        name: RepoName::new(REPO).unwrap(),
+    };
+    let mut cfg = PipelineConfig::new(
+        Addressing::Single { repo },
+        authv2(),
+        UploadLimits {
+            max_total_bytes: 3 * MIN_PART_SIZE,
+            max_chunks: 1024,
+        },
+    );
+    let keys = TicketKeys::new(vec![("active".into(), [7; 32])]).unwrap();
+    cfg.ticket_keys = Some(keys.clone());
+    let blobs = MemoryBlobStore::default();
+    let data = vec![3; MIN_PART_SIZE as usize + 1];
+    let id = hash(&data);
+    let session = blobs
+        .begin_multipart(BlobKey::new(id), data.len() as u64, MIN_PART_SIZE)
+        .await
+        .unwrap();
+    let claims = TicketClaims {
+        ticket_id: [0x11; 32],
+        audience: AUDIENCE.into(),
+        repository: REPO.into(),
+        signer: *SigningKey::from_bytes(&[7; 32]).verifying_key().as_bytes(),
+        pack_id: id,
+        bytes: data.len() as u64,
+        part_size: MIN_PART_SIZE,
+        expires_at_ms: T0 as u64 + 86_400_000,
+        upload_session: session,
+    };
+    let plan = PartPlan::new(claims.bytes, claims.part_size, 10_000).unwrap();
+    let cv = part_subtree_cv(&plan, 0, &data[..MIN_PART_SIZE as usize]).unwrap();
+    let commitment = format!(
+        "part:{}:0:{}:{MIN_PART_SIZE}",
+        to_hex(&claims.ticket_id),
+        to_hex(&cv)
+    );
+    let headers = signed(7, "UploadPart", &commitment, 219);
+    let pipe = Pipeline::new(
+        blobs,
+        MemoryKv::with_clock(clock.clone()),
+        Hooks::new(),
+        cfg,
+        clock,
+        Arc::new(Codes::default()),
+    )
+    .unwrap();
+    let server = Server {
+        svc: connect::service(Arc::new(pipe)),
+        codes: Arc::new(Codes::default()),
+    };
+    let header = UploadPartRequest {
+        msg: Some(PartMsg::Header(Box::new(UploadPartHeader {
+            ticket_token: Some(keys.mint(&claims)),
+            index: Some(0),
+            ..Default::default()
+        }))),
+        ..Default::default()
+    };
+    let empty = UploadPartRequest {
+        msg: Some(PartMsg::Chunk(Vec::new())),
+        ..Default::default()
+    };
+    let path = "mkit.transport.v1.TransportService/UploadPart";
+    let (_, end) = server
+        .post(path, STREAM, &headers, frame(&empty))
+        .await
+        .frames();
+    assert_eq!(end["error"]["code"], "invalid_argument");
+    assert_eq!(
+        end["error"]["message"],
+        "UploadPack: first message MUST be `header`"
+    );
+    let mut body = frame(&header);
+    body.extend(frame(&empty));
+    let (_, end) = server.post(path, STREAM, &headers, body).await.frames();
+    assert_eq!(end["error"]["code"], "invalid_argument");
 }
 
 #[tokio::test]

@@ -59,7 +59,7 @@ use crate::rt::Clock;
 use crate::storage_error::{StorageOp, describe_and_map};
 use crate::store::tickets::TicketCaps;
 use crate::store::{
-    Batch, BatchOutcome, BlobStore, Key, KeyClasses, MultipartBlobStore, NamespaceStore, Partition,
+    Batch, BatchOutcome, Key, KeyClasses, MultipartBlobStore, NamespaceStore, Partition,
     StoreError, Value, codec, keys, read,
 };
 use crate::telemetry::{Metrics, Redactor};
@@ -1008,7 +1008,27 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 }
                 _ => false,
             };
-            if !committed_fresh && let Err(err) = self.blobs.abort(key, &session).await {
+            // An apply can commit and then lose its acknowledgement. Check the
+            // row before reclaiming the session; if the check itself fails,
+            // retain the session for the backend lifecycle cleanup.
+            let stored_fresh = if write_result.is_err() {
+                match self.meta.get(&p, &keys::ticket(&fresh_id)).await {
+                    Ok(Some(raw)) => codec::decode_ticket(&raw).ok().is_none_or(|ticket| {
+                        ticket.upload_session.as_deref() == Some(session.as_slice())
+                    }),
+                    Ok(None) => false,
+                    Err(err) => {
+                        tracing::warn!(error = %err, "could not confirm multipart ticket after failed write");
+                        true
+                    }
+                }
+            } else {
+                false
+            };
+            if !committed_fresh
+                && !stored_fresh
+                && let Err(err) = self.blobs.abort(key, &session).await
+            {
                 tracing::warn!(error = %err, "failed to abort unused multipart session");
             }
         }

@@ -85,6 +85,11 @@ impl Default for MemoryBlobStore {
 }
 
 impl MemoryBlobStore {
+    #[cfg(test)]
+    pub(crate) fn multipart_session_count(&self) -> usize {
+        lock(&self.shared.sessions).len()
+    }
+
     /// An empty store for `keyspace` (`packs` for pack uploads).
     #[must_use]
     pub fn new(keyspace: impl Into<String>) -> Self {
@@ -394,6 +399,7 @@ impl PackSink for MemoryPackSink {
 mod tests {
     use futures_executor::block_on;
     use mkit_core::hash::hash;
+    use mkit_core::upload_parts::{MIN_PART_SIZE, PartPlan, part_subtree_cv};
 
     use super::*;
 
@@ -581,6 +587,108 @@ mod tests {
         assert_eq!(
             put(&store, key, 3, &[b"abc"]).unwrap(),
             CommitOutcome::Created
+        );
+    }
+
+    #[test]
+    fn multipart_parts_are_idempotent_and_bad_reupload_keeps_the_good_part() {
+        let store = MemoryBlobStore::default();
+        let mut data = vec![0x31; MIN_PART_SIZE as usize];
+        data.extend_from_slice(b"last part");
+        let key = key_of(&data);
+        let plan = PartPlan::new(data.len() as u64, MIN_PART_SIZE, 2).unwrap();
+        let session = block_on(store.begin_multipart(key, plan.total(), plan.part_size())).unwrap();
+        let first = &data[..MIN_PART_SIZE as usize];
+        let last = &data[MIN_PART_SIZE as usize..];
+        let cv0 = part_subtree_cv(&plan, 0, first).unwrap();
+        let cv1 = part_subtree_cv(&plan, 1, last).unwrap();
+
+        // Send the last part first, then the large part in bounded chunks.
+        let mut sink = block_on(store.begin_part(key, &session, &plan, 1, cv1)).unwrap();
+        block_on(sink.write(Bytes::copy_from_slice(last))).unwrap();
+        let tag1 = block_on(sink.commit()).unwrap();
+        let upload_first = || {
+            let mut sink = block_on(store.begin_part(key, &session, &plan, 0, cv0)).unwrap();
+            for chunk in first.chunks(MAX_BLOB_PIECE_BYTES) {
+                block_on(sink.write(Bytes::copy_from_slice(chunk))).unwrap();
+            }
+            block_on(sink.commit()).unwrap()
+        };
+        let tag0 = upload_first();
+        assert_eq!(upload_first(), tag0);
+
+        let mut bad = block_on(store.begin_part(key, &session, &plan, 0, cv0)).unwrap();
+        block_on(bad.write(Bytes::from(vec![0x32; MIN_PART_SIZE as usize]))).unwrap();
+        assert!(matches!(
+            block_on(bad.commit()),
+            Err(StoreError::Invalid(_))
+        ));
+        assert_eq!(block_on(store.head(&key)).unwrap(), None);
+
+        let parts = [
+            PartRef {
+                index: 0,
+                len: MIN_PART_SIZE,
+                tag: tag0,
+            },
+            PartRef {
+                index: 1,
+                len: last.len() as u64,
+                tag: tag1,
+            },
+        ];
+        assert_eq!(
+            block_on(store.complete(key, &session, &plan, &parts)).unwrap(),
+            CommitOutcome::Created
+        );
+        assert_eq!(
+            block_on(store.head(&key)).unwrap(),
+            Some(BlobMeta {
+                len: data.len() as u64
+            })
+        );
+        assert!(matches!(
+            block_on(store.complete(key, &session, &plan, &parts)),
+            Err(StoreError::SessionGone)
+        ));
+    }
+
+    #[test]
+    fn abort_and_unknown_sessions_are_gone() {
+        let store = MemoryBlobStore::default();
+        let plan = PartPlan::new(MIN_PART_SIZE + 1, MIN_PART_SIZE, 2).unwrap();
+        let key = key_of(b"absent");
+        let session = block_on(store.begin_multipart(key, plan.total(), plan.part_size())).unwrap();
+        assert!(matches!(
+            block_on(store.begin_part(key, b"unknown", &plan, 0, [0; 32])),
+            Err(StoreError::SessionGone)
+        ));
+        block_on(store.abort(key, &session)).unwrap();
+        block_on(store.abort(key, &session)).unwrap();
+        assert!(matches!(
+            block_on(store.begin_part(key, &session, &plan, 0, [0; 32])),
+            Err(StoreError::SessionGone)
+        ));
+        assert_eq!(block_on(store.head(&key)).unwrap(), None);
+    }
+
+    #[test]
+    fn marker_and_pack_hashes_have_separate_memory_keys() {
+        let store = MemoryBlobStore::default();
+        let content = b"marker";
+        let pack = key_of(content);
+        let marker = BlobKey::upload_marker(pack.0);
+        assert_ne!(pack, marker);
+        assert_eq!(
+            put(&store, marker, content.len() as u64, &[content]).unwrap(),
+            CommitOutcome::Created
+        );
+        assert_eq!(block_on(store.head(&pack)).unwrap(), None);
+        assert_eq!(
+            block_on(store.head(&marker)).unwrap(),
+            Some(BlobMeta {
+                len: content.len() as u64
+            })
         );
     }
 }

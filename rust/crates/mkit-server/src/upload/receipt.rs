@@ -11,7 +11,7 @@ const MAX_TAG: usize = 128;
 
 /// Fields authenticated by a part receipt. The backend tag is opaque.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PartReceipt {
+pub(crate) struct PartReceipt {
     /// Ticket that authorized the part.
     pub ticket_id: Hash,
     /// Zero-based part index.

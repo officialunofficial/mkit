@@ -62,12 +62,12 @@ fn apply(store: &FsLayoutStore, batch: Batch) -> Result<BatchOutcome, StoreError
 
 fn put_blob(
     store: &FsBlobStore,
-    key: BlobKey,
+    key: impl Into<BlobKey>,
     len: u64,
     chunks: &[&[u8]],
 ) -> Result<CommitOutcome, StoreError> {
     block_on(async {
-        let mut sink = store.begin(key, len).await?;
+        let mut sink = store.begin(key.into(), len).await?;
         for chunk in chunks {
             sink.write(Bytes::copy_from_slice(chunk)).await?;
         }
@@ -136,12 +136,12 @@ fn layout_interop_fsstores_read_what_filetransport_wrote() {
         .unwrap();
 
     let blobs = FsBlobStore::new(dir.path());
-    let Some(BlobBody::Bytes(got)) = block_on(blobs.get(&key, None)).unwrap() else {
+    let Some(BlobBody::Bytes(got)) = block_on(blobs.get(&key.into(), None)).unwrap() else {
         panic!("a small pack is one buffer");
     };
     assert_eq!(got, data);
     assert_eq!(
-        block_on(blobs.head(&key)).unwrap().map(|m| m.len),
+        block_on(blobs.head(&key.into())).unwrap().map(|m| m.len),
         Some(3000)
     );
 
@@ -250,7 +250,7 @@ fn blob_rejected_commit_leaves_no_file_and_no_temp() {
     }
     // Aborted and dropped uploads leave nothing either.
     block_on(async {
-        let mut sink = blobs.begin(key, 5).await.unwrap();
+        let mut sink = blobs.begin(key.into(), 5).await.unwrap();
         sink.write(Bytes::from_static(b"hel")).await.unwrap();
         assert_ne!(
             listing(dir.path()),
@@ -258,7 +258,7 @@ fn blob_rejected_commit_leaves_no_file_and_no_temp() {
             "the temp file exists mid-upload"
         );
         sink.abort().await;
-        let mut sink = blobs.begin(key, 5).await.unwrap();
+        let mut sink = blobs.begin(key.into(), 5).await.unwrap();
         sink.write(Bytes::from_static(b"hel")).await.unwrap();
         drop(sink);
     });
@@ -299,7 +299,7 @@ fn blob_get_range_streams_without_reading_whole_file() {
     let pieces: Vec<&[u8]> = data.chunks(300_000).collect();
     put_blob(&blobs, key, data.len() as u64, &pieces).unwrap();
     let read_all = |range| {
-        let body = block_on(blobs.get(&key, range)).unwrap().unwrap();
+        let body = block_on(blobs.get(&key.into(), range)).unwrap().unwrap();
         let BlobBody::Stream { len, mut stream } = body else {
             panic!("a body over 1 MiB is streamed");
         };
@@ -329,7 +329,7 @@ fn blob_get_range_streams_without_reading_whole_file() {
         start: 4 * 1024 * 1024,
         end_inclusive: 4 * 1024 * 1024 + 9,
     };
-    let Some(BlobBody::Bytes(got)) = block_on(blobs.get(&key, Some(small))).unwrap() else {
+    let Some(BlobBody::Bytes(got)) = block_on(blobs.get(&key.into(), Some(small))).unwrap() else {
         panic!("a small range is one buffer");
     };
     assert_eq!(got, &data[4 * 1024 * 1024..=4 * 1024 * 1024 + 9]);
