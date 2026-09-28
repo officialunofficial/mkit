@@ -712,10 +712,11 @@ fn cli_pending_interrupt_uses_configured_observer_and_exits_75() {
         "{stderr}"
     );
     assert!(
-        stderr.contains("push: interrupted; re-run push to resume"),
+        stderr.contains(
+            "push: interrupted; if BeginUpload issued a ticket, re-run push to resume the upload"
+        ),
         "{stderr}"
     );
-    assert!(!stderr.contains("BeginUpload"), "{stderr}");
 
     let _ = shutdown.send(());
     handle.join().unwrap();

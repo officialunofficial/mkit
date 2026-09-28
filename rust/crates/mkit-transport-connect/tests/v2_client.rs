@@ -16,9 +16,14 @@ use generated::__buffa::oneof::begin_upload_response::Result as BeginResult;
 use generated::__buffa::oneof::upload_pack_request::Body as UploadBody;
 use generated::__buffa::oneof::upload_part_request::Msg as PartBody;
 use mkit_core::hash::hash;
-use mkit_core::protocol::{CommitOutcome, PackKey, RefWriteCondition, Transport, TransportError};
+use mkit_core::protocol::{
+    AdvanceOutcome, CommitOutcome, PackKey, RefWriteCondition, Transport, TransportError,
+    TransportResult,
+};
+use mkit_core::upload_parts::PartPlan;
 use mkit_transport_connect::{
-    ConnectTransport, GrantRequest, GrantSource, MemoryPartReceiptStore, ServerInfoView, generated,
+    ConnectTransport, GrantRequest, GrantSource, MemoryPartReceiptStore, PartReceiptStore,
+    ServerInfoView, StoredPart, TicketMetadata, UploadEvent, generated,
 };
 
 const DATA: &[u8] = b"v2 pack bytes";
@@ -75,13 +80,17 @@ struct State {
     update_failures: usize,
     requests: Vec<Captured>,
     begin_modes: VecDeque<BeginMode>,
+    begin_expiries: VecDeque<i64>,
     upload_ticket_failure_once: bool,
     advance_errors: VecDeque<(ErrorCode, String)>,
+    advance_outcomes: VecDeque<generated::AdvanceOutcome>,
     advance_pending_once: bool,
     part_fail_once: Option<u32>,
+    part_ticket_fail_once: Option<u32>,
     complete_invalid_once: bool,
     completed_receipts: Vec<Vec<u8>>,
     ticket_id: [u8; 32],
+    ticket_ids: VecDeque<[u8; 32]>,
 }
 
 impl Default for State {
@@ -96,13 +105,17 @@ impl Default for State {
             update_failures: 0,
             requests: Vec::new(),
             begin_modes: VecDeque::new(),
+            begin_expiries: VecDeque::new(),
             upload_ticket_failure_once: false,
             advance_errors: VecDeque::new(),
+            advance_outcomes: VecDeque::new(),
             advance_pending_once: false,
             part_fail_once: None,
+            part_ticket_fail_once: None,
             complete_invalid_once: false,
             completed_receipts: Vec::new(),
             ticket_id: [7; 32],
+            ticket_ids: VecDeque::new(),
         }
     }
 }
@@ -309,7 +322,13 @@ impl generated::TransportService for TestService {
             return Err(ConnectError::new(code, message));
         }
         Ok(Response::new(generated::AdvanceRefsResponse {
-            outcome: Some(generated::AdvanceOutcome::Committed.into()),
+            outcome: Some(
+                state
+                    .advance_outcomes
+                    .pop_front()
+                    .unwrap_or(generated::AdvanceOutcome::Committed)
+                    .into(),
+            ),
             ..Default::default()
         }))
     }
@@ -372,9 +391,15 @@ impl generated::TransportService for TestService {
             )),
             BeginMode::Ticket => Ok(Response::new(generated::BeginUploadResponse {
                 result: Some(BeginResult::Ticket(Box::new(generated::UploadTicket {
-                    id: Some(state.ticket_id.to_vec()),
+                    id: Some(
+                        state
+                            .ticket_ids
+                            .pop_front()
+                            .unwrap_or(state.ticket_id)
+                            .to_vec(),
+                    ),
                     part_size: Some(8 << 20),
-                    expires_unix_ms: Some(i64::MAX),
+                    expires_unix_ms: Some(state.begin_expiries.pop_front().unwrap_or(i64::MAX)),
                     token: Some(vec![8, 9]),
                     ..Default::default()
                 }))),
@@ -408,6 +433,13 @@ impl generated::TransportService for TestService {
         }
         let mut state = self.0.lock().unwrap();
         state.requests.last_mut().unwrap().part_index = Some(index);
+        if state.part_ticket_fail_once == Some(index) {
+            state.part_ticket_fail_once = None;
+            return Err(ConnectError::new(
+                ErrorCode::FailedPrecondition,
+                "ticket expired",
+            ));
+        }
         if state.part_fail_once == Some(index) {
             state.part_fail_once = None;
             return Err(ConnectError::permission_denied("injected part failure"));
@@ -590,11 +622,18 @@ fn atomic_advance_uses_cached_advertisement() {
 
 #[test]
 fn begin_upload_ticket_and_advance_commit_set() {
-    let served = Served::new(State::default());
+    let served = Served::new(State {
+        ticket_ids: [[7; 32], [8; 32]].into(),
+        ..Default::default()
+    });
     let client = served.signed_client();
     let key = PackKey::new(hash(DATA));
     client
         .upload_pack_via_ref(DATA, &key, "refs/heads/main")
+        .unwrap();
+    let stale = PackKey::new(hash(b"stale packmap node"));
+    client
+        .upload_blob_via_ref(b"stale packmap node", &stale, "refs/heads/main")
         .unwrap();
     let state = served.state.lock().unwrap();
     let begin = state
@@ -662,6 +701,67 @@ fn begin_upload_ticket_and_advance_commit_set() {
         advances[1].ticket_ids.is_empty(),
         "committed ticket was evicted"
     );
+    drop(state);
+    client
+        .advance_refs_committing(
+            "refs/heads/main",
+            RefWriteCondition::Missing,
+            &hash(b"head"),
+            "refs/mkit/packmap/main",
+            RefWriteCondition::Missing,
+            &hash(b"map"),
+            &[stale],
+        )
+        .unwrap();
+    let state = served.state.lock().unwrap();
+    assert_eq!(
+        state
+            .requests
+            .iter()
+            .filter_map(|r| r.advance.as_ref())
+            .last()
+            .unwrap()
+            .ticket_ids,
+        vec![vec![8; 32]],
+    );
+}
+
+#[test]
+fn ticket_is_retained_after_typed_conflict() {
+    let served = Served::new(State {
+        advance_outcomes: [generated::AdvanceOutcome::PackmapConflict].into(),
+        ..Default::default()
+    });
+    let client = served.signed_client();
+    let key = PackKey::new(hash(DATA));
+    client
+        .upload_pack_via_ref(DATA, &key, "refs/heads/main")
+        .unwrap();
+    for expected in [AdvanceOutcome::PackmapConflict, AdvanceOutcome::Committed] {
+        assert_eq!(
+            client
+                .advance_refs_committing(
+                    "refs/heads/main",
+                    RefWriteCondition::Missing,
+                    &hash(b"head"),
+                    "refs/mkit/packmap/main",
+                    RefWriteCondition::Missing,
+                    &hash(b"map"),
+                    &[key],
+                )
+                .unwrap(),
+            CommitOutcome::Advanced(expected),
+        );
+    }
+    let state = served.state.lock().unwrap();
+    let advances: Vec<_> = state
+        .requests
+        .iter()
+        .filter_map(|r| r.advance.as_ref())
+        .collect();
+    assert_eq!(advances.len(), 2);
+    assert_eq!(advances[0].ticket_ids, vec![vec![7; 32]]);
+    assert_eq!(advances[1].ticket_ids, vec![vec![7; 32]]);
 }
 
 #[test]
@@ -797,6 +897,125 @@ fn multipart_receipts_resume_after_part_two() {
 }
 
 #[test]
+fn upload_part_ticket_failure_restarts_with_one_new_ticket() {
+    let served = Served::new(State {
+        ticket_ids: [[7; 32], [8; 32]].into(),
+        part_ticket_fail_once: Some(0),
+        ..Default::default()
+    });
+    let bytes = vec![4; (8 << 20) + 1];
+    let key = PackKey::new(hash(&bytes));
+    served
+        .signed_client()
+        .upload_pack_via_ref(&bytes, &key, "refs/heads/main")
+        .unwrap();
+    assert_eq!(served.calls("BeginUpload"), 2);
+    let indices: Vec<_> = served
+        .state
+        .lock()
+        .unwrap()
+        .requests
+        .iter()
+        .filter_map(|r| r.part_index)
+        .collect();
+    assert_eq!(indices, [0, 0, 1]);
+}
+
+#[test]
+fn exact_part_boundary_uses_upload_pack_and_excess_respects_max_parts() {
+    let bytes = vec![4; 8 << 20];
+    let key = PackKey::new(hash(&bytes));
+    let served = Served::new(State::default());
+    served
+        .signed_client()
+        .upload_pack_via_ref(&bytes, &key, "refs/heads/main")
+        .unwrap();
+    assert_eq!(served.calls("UploadPack"), 1);
+    assert_eq!(served.calls("UploadPart"), 0);
+
+    let mut limited = info(Some(true));
+    limited.max_parts = Some(1);
+    let served = Served::new(State {
+        discovery: Discovery::Response(Box::new(limited)),
+        ..Default::default()
+    });
+    let excess = vec![4; (8 << 20) + 1];
+    let key = PackKey::new(hash(&excess));
+    let error = served
+        .signed_client()
+        .upload_pack_via_ref(&excess, &key, "refs/heads/main")
+        .unwrap_err();
+    assert!(error.to_string().contains("maximum number of upload parts"));
+    assert_eq!(served.calls("UploadPack"), 0);
+    assert_eq!(served.calls("UploadPart"), 0);
+}
+
+#[derive(Default)]
+struct RestartedReceiptStore(MemoryPartReceiptStore);
+
+impl PartReceiptStore for RestartedReceiptStore {
+    fn load(&self, ticket: &TicketMetadata, plan: &PartPlan) -> TransportResult<Vec<StoredPart>> {
+        let mut parts = self.0.load(ticket, plan)?;
+        for part in &mut parts {
+            part.from_disk = true;
+        }
+        Ok(parts)
+    }
+    fn put(&self, ticket: &TicketMetadata, part: &StoredPart) -> TransportResult<()> {
+        self.0.put(ticket, part)
+    }
+    fn forget(&self, ticket_id: &[u8; 32]) -> TransportResult<()> {
+        self.0.forget(ticket_id)
+    }
+    fn sweep(&self, now_ms: i64) -> TransportResult<()> {
+        self.0.sweep(now_ms)
+    }
+}
+
+#[test]
+fn disk_receipt_invalid_argument_resends_all_but_fresh_receipt_fails() {
+    let served = Served::new(State {
+        complete_invalid_once: true,
+        ..Default::default()
+    });
+    let bytes = vec![4; (8 << 20) + 1];
+    let key = PackKey::new(hash(&bytes));
+    let store = Arc::new(RestartedReceiptStore::default());
+    let first = served
+        .signed_client()
+        .with_receipt_store(store.clone())
+        .with_upload_observer(|event| !matches!(event, UploadEvent::PartSent { index: 0, .. }));
+    assert!(
+        first
+            .upload_pack_via_ref(&bytes, &key, "refs/heads/main")
+            .is_err()
+    );
+    let restarted = served.signed_client().with_receipt_store(store);
+    restarted
+        .upload_pack_via_ref(&bytes, &key, "refs/heads/main")
+        .unwrap();
+    let indices: Vec<_> = served
+        .state
+        .lock()
+        .unwrap()
+        .requests
+        .iter()
+        .filter_map(|r| r.part_index)
+        .collect();
+    assert_eq!(indices, [0, 1, 0, 1]);
+
+    let served = Served::new(State {
+        complete_invalid_once: true,
+        ..Default::default()
+    });
+    let err = served
+        .signed_client()
+        .upload_pack_via_ref(&bytes, &key, "refs/heads/main")
+        .unwrap_err();
+    assert!(matches!(err, TransportError::ProtocolError));
+}
+
+#[test]
 fn discovery_fallback_matrix_latches_unknown_only() {
     let key = PackKey::new(hash(DATA));
     let served = Served::new(State::default());
@@ -809,6 +1028,19 @@ fn discovery_fallback_matrix_latches_unknown_only() {
             .contains("transport_auth = envelope")
     );
     assert_eq!(served.calls("BeginUpload"), 0);
+
+    let mut below_threshold = info(Some(true));
+    below_threshold.begin_upload_threshold_bytes = Some(1024);
+    let served = Served::new(State {
+        discovery: Discovery::Response(Box::new(below_threshold)),
+        ..Default::default()
+    });
+    served
+        .client()
+        .upload_pack_via_ref(DATA, &key, "refs/heads/main")
+        .unwrap();
+    assert_eq!(served.calls("BeginUpload"), 0);
+    assert_eq!(served.calls("UploadPack"), 1);
 
     let served = Served::new(State {
         discovery: Discovery::Error(ErrorCode::Unimplemented),
@@ -898,6 +1130,166 @@ fn short_backoff() -> mkit_core::protocol::BackoffIterator {
         std::time::Duration::from_millis(1),
         5,
     )
+}
+
+static LAG_CLOCK: AtomicI64 = AtomicI64::new(1_700_000_000_000);
+fn lag_now() -> i64 {
+    LAG_CLOCK.load(Ordering::SeqCst)
+}
+fn lag_sleep(duration: std::time::Duration) {
+    LAG_CLOCK.fetch_add(duration.as_millis() as i64, Ordering::SeqCst);
+}
+
+#[test]
+fn membership_lag_polls_same_nonce_and_honors_sixty_second_limit() {
+    let lag = || {
+        (
+            ErrorCode::Unavailable,
+            "repository membership not yet visible".to_owned(),
+        )
+    };
+    LAG_CLOCK.store(1_700_000_000_000, Ordering::SeqCst);
+    let served = Served::new(State {
+        advance_errors: [lag(), lag()].into(),
+        ..Default::default()
+    });
+    let client = served
+        .signed_client()
+        .with_clock_for_test(lag_now)
+        .with_retry_hooks_for_test(short_backoff, lag_sleep);
+    let bytes = b"lag pack";
+    let key = PackKey::new(hash(bytes));
+    client
+        .upload_pack_via_ref(bytes, &key, "refs/heads/main")
+        .unwrap();
+    let outcome = client
+        .advance_refs_committing(
+            "refs/heads/main",
+            RefWriteCondition::Missing,
+            &hash(b"tip"),
+            "refs/mkit/packmap/main",
+            RefWriteCondition::Missing,
+            &hash(b"node"),
+            &[key],
+        )
+        .unwrap();
+    assert_eq!(outcome, CommitOutcome::Advanced(AdvanceOutcome::Committed));
+    let state = served.state.lock().unwrap();
+    let calls: Vec<_> = state
+        .requests
+        .iter()
+        .filter(|r| r.rpc == "AdvanceRefs")
+        .collect();
+    assert_eq!(calls.len(), 3);
+    assert!(
+        calls
+            .windows(2)
+            .all(|pair| pair[0].signed.as_ref().unwrap()[3] == pair[1].signed.as_ref().unwrap()[3])
+    );
+    assert_eq!(LAG_CLOCK.load(Ordering::SeqCst), 1_700_000_004_000);
+    drop(state);
+
+    LAG_CLOCK.store(1_700_000_000_000, Ordering::SeqCst);
+    let served = Served::new(State {
+        advance_errors: (0..32).map(|_| lag()).collect(),
+        ..Default::default()
+    });
+    let client = served
+        .signed_client()
+        .with_clock_for_test(lag_now)
+        .with_retry_hooks_for_test(short_backoff, lag_sleep);
+    client
+        .upload_pack_via_ref(bytes, &key, "refs/heads/main")
+        .unwrap();
+    let error = client
+        .advance_refs_committing(
+            "refs/heads/main",
+            RefWriteCondition::Missing,
+            &hash(b"tip"),
+            "refs/mkit/packmap/main",
+            RefWriteCondition::Missing,
+            &hash(b"node"),
+            &[key],
+        )
+        .unwrap_err();
+    assert!(
+        matches!(error, TransportError::RemoteError(message) if message.contains("60 seconds"))
+    );
+    assert_eq!(LAG_CLOCK.load(Ordering::SeqCst), 1_700_000_060_000);
+
+    LAG_CLOCK.store(1_700_000_000_000, Ordering::SeqCst);
+    let served = Served::new(State {
+        advance_errors: [lag()].into(),
+        ..Default::default()
+    });
+    let client = served
+        .signed_client()
+        .with_clock_for_test(lag_now)
+        .with_retry_hooks_for_test(short_backoff, lag_sleep)
+        .with_pending_observer(|_| false);
+    client
+        .upload_pack_via_ref(bytes, &key, "refs/heads/main")
+        .unwrap();
+    assert!(client
+        .advance_refs_committing(
+            "refs/heads/main",
+            RefWriteCondition::Missing,
+            &hash(b"tip"),
+            "refs/mkit/packmap/main",
+            RefWriteCondition::Missing,
+            &hash(b"node"),
+            &[key],
+        )
+        .is_err());
+    assert_eq!(served.calls("AdvanceRefs"), 1);
+    assert_eq!(LAG_CLOCK.load(Ordering::SeqCst), 1_700_000_000_000);
+}
+
+#[test]
+fn advance_deadline_uses_earliest_ticket_expiry() {
+    let start = 1_700_000_000_000;
+    LAG_CLOCK.store(start, Ordering::SeqCst);
+    let served = Served::new(State {
+        begin_expiries: [start + 5_000, start + 3_000].into(),
+        ticket_ids: [[7; 32], [8; 32]].into(),
+        advance_errors: (0..4)
+            .map(|_| {
+                (
+                    ErrorCode::Unavailable,
+                    "repository membership not yet visible".to_owned(),
+                )
+            })
+            .collect(),
+        ..Default::default()
+    });
+    let client = served
+        .signed_client()
+        .with_clock_for_test(lag_now)
+        .with_retry_hooks_for_test(short_backoff, lag_sleep);
+    let first = PackKey::new(hash(b"first"));
+    let second = PackKey::new(hash(b"second"));
+    client
+        .upload_pack_via_ref(b"first", &first, "refs/heads/main")
+        .unwrap();
+    client
+        .upload_pack_via_ref(b"second", &second, "refs/heads/main")
+        .unwrap();
+    let error = client
+        .advance_refs_committing(
+            "refs/heads/main",
+            RefWriteCondition::Missing,
+            &hash(b"tip"),
+            "refs/mkit/packmap/main",
+            RefWriteCondition::Missing,
+            &hash(b"node"),
+            &[first, second],
+        )
+        .unwrap_err();
+    assert!(
+        matches!(error, TransportError::RemoteError(message) if message.contains("deadline expired"))
+    );
+    assert_eq!(LAG_CLOCK.load(Ordering::SeqCst), start + 3_000);
+    assert_eq!(served.calls("AdvanceRefs"), 2);
 }
 
 #[test]

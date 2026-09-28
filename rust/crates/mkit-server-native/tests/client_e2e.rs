@@ -11,18 +11,22 @@
 
 mod common;
 
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 
 use buffa::Message as _;
 use ed25519_dalek::{Signer as _, SigningKey};
 use mkit_core::hash::hash;
 use mkit_core::protocol::{
-    AdvanceOutcome, PackKey, RefWriteCondition, Transport as _, TransportError,
+    AdvanceOutcome, CommitOutcome, PackKey, RefWriteCondition, Transport as _, TransportError,
 };
+use mkit_core::transfer;
 use mkit_server_conformance::wire::client::{Client, Rpc, UNARY_JSON};
 use mkit_server_native::{Shutdown, server};
 use mkit_transport_connect::generated::{UpdateRefRequest, UpdateRefResponse};
-use mkit_transport_connect::{ConnectTransport, EnvelopeSigner, ServerInfoView};
+use mkit_transport_connect::{ConnectTransport, EnvelopeSigner, ServerInfoView, UploadEvent};
 
 struct ReadSigner(SigningKey);
 
@@ -97,6 +101,65 @@ impl Served {
         }
     }
 
+    fn start_ticketed() -> Self {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let root = common::repo_root();
+        let ticket_file = root.path().join("ticket.keys");
+        common::secret_file(
+            &ticket_file,
+            b"dev 1111111111111111111111111111111111111111111111111111111111111111\n",
+        );
+        let (listener, origin) = runtime.block_on(common::listener());
+        let meta = format!("sqlite:{}", common::s(&root.path().join("meta.sqlite3")));
+        let mut cfg = common::resolve_with(
+            &[
+                "--listen",
+                "127.0.0.1:0",
+                "--repo-root",
+                common::s(root.path()),
+                "--meta",
+                &meta,
+                "--ticket-key-file",
+                common::s(&ticket_file),
+                "--auth",
+                "auth-v2",
+                "--audience",
+                &origin,
+                "--max-pack-bytes",
+                "67108864",
+            ],
+            &[],
+        )
+        .unwrap();
+        cfg.pipeline.begin_upload_threshold_bytes = 0;
+        let opened = server::open(&cfg).unwrap();
+        let shutdown = Shutdown::new();
+        let task = {
+            let _guard = runtime.enter();
+            common::spawn_serve(listener, opened.router.clone(), &shutdown)
+        };
+        Self {
+            runtime,
+            origin,
+            shutdown,
+            task: Some(task),
+            _opened: opened,
+            root,
+        }
+    }
+
+    fn signed_client(&self) -> ConnectTransport {
+        ConnectTransport::connect_with_signer(
+            &format!("mkit+{}", self.origin),
+            Some(Arc::new(ReadSigner(SigningKey::from_bytes(&[42; 32])))),
+        )
+        .unwrap()
+    }
+
     /// The `mkit+http://` client `mkit` builds for this server's URL.
     fn client(&self) -> ConnectTransport {
         ConnectTransport::connect(&format!("mkit+{}", self.origin)).unwrap()
@@ -106,6 +169,75 @@ impl Served {
     fn raw(&self) -> Client {
         Client::new(&self.origin.parse().unwrap()).unwrap()
     }
+}
+
+#[test]
+fn ticketed_fs_parts_resume_and_three_pack_advance() {
+    let served = Served::start_ticketed();
+    let seen = Arc::new(AtomicUsize::new(0));
+    let interrupted = Arc::new(AtomicBool::new(false));
+    let observer_seen = seen.clone();
+    let observer_interrupted = interrupted.clone();
+    let client = served.signed_client().with_upload_observer(move |event| {
+        if matches!(event, UploadEvent::PartSent { .. }) {
+            observer_seen.fetch_add(1, Ordering::SeqCst);
+        }
+        if matches!(event, UploadEvent::BeforePart)
+            && observer_seen.load(Ordering::SeqCst) == 2
+            && !observer_interrupted.swap(true, Ordering::SeqCst)
+        {
+            return false;
+        }
+        true
+    });
+    let info = client.server_info();
+    let part_size = match info {
+        ServerInfoView::V2(info) => info.part_size.unwrap() as usize,
+        other => panic!("expected V2 server: {other:?}"),
+    };
+    let big = vec![0x83; part_size * 2 + 17];
+    let big_key = PackKey::new(hash(&big));
+    let head = "refs/heads/main";
+    let error = client
+        .upload_pack_via_ref(&big, &big_key, head)
+        .unwrap_err();
+    assert!(matches!(error, TransportError::RemoteError(_)), "{error:?}");
+    assert_eq!(seen.load(Ordering::SeqCst), 2);
+    client.upload_pack_via_ref(&big, &big_key, head).unwrap();
+    assert_eq!(
+        seen.load(Ordering::SeqCst),
+        3,
+        "only the final part was sent"
+    );
+    assert_eq!(client.download_pack(&big_key).unwrap(), big);
+
+    let small_a = b"native ticketed pack A".to_vec();
+    let small_b = b"native ticketed pack B".to_vec();
+    let a = PackKey::new(hash(&small_a));
+    let b = PackKey::new(hash(&small_b));
+    client.upload_pack_via_ref(&small_a, &a, head).unwrap();
+    client.upload_pack_via_ref(&small_b, &b, head).unwrap();
+    let node =
+        transfer::encode_packlist(None, &[*big_key.as_bytes(), *a.as_bytes(), *b.as_bytes()])
+            .unwrap();
+    let node_key = PackKey::new(hash(&node));
+    client.upload_blob_via_ref(&node, &node_key, head).unwrap();
+    let tip = hash(b"native ticketed tip");
+    assert_eq!(
+        client
+            .advance_refs_committing(
+                head,
+                RefWriteCondition::Missing,
+                &tip,
+                "refs/mkit/packmap/main",
+                RefWriteCondition::Missing,
+                node_key.as_bytes(),
+                &[big_key, a, b, node_key],
+            )
+            .unwrap(),
+        CommitOutcome::Advanced(AdvanceOutcome::Committed),
+    );
+    assert_eq!(client.read_ref(head).unwrap(), Some(tip));
 }
 
 impl Drop for Served {
