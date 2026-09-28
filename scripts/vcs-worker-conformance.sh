@@ -216,6 +216,36 @@ run_suite() {
     fi
 }
 
+# The test-faults routes export one DO in a single synchronous snapshot,
+# import it into a separate fresh DO, then export that DO again. The header's
+# export timestamp changes; the portable records and end marker must match.
+snapshot_round_trip() {
+    local source="${work}/suite/source.kvlog"
+    local restored="${work}/suite/restored.kvlog"
+    local result="${work}/suite/restore.json"
+    echo ">> [suite] test-faults Durable Object snapshot round trip"
+    curl -fsS "${ORIGIN}/__mkit_test/snapshot" -o "${source}"
+    curl -fsS -X POST "${ORIGIN}/__mkit_test/restore" \
+        -H 'content-type: application/octet-stream' --data-binary "@${source}" \
+        -o "${result}"
+    curl -fsS "${ORIGIN}/__mkit_test/restored-snapshot" -o "${restored}"
+    node - "${source}" "${restored}" "${result}" <<'NODE'
+const fs = require('node:fs');
+const assert = require('node:assert/strict');
+const [sourcePath, restoredPath, resultPath] = process.argv.slice(2);
+const source = fs.readFileSync(sourcePath);
+const restored = fs.readFileSync(restoredPath);
+const headerLength = 8 + 1 + 4 + 8;
+for (const bytes of [source, restored]) {
+    assert.ok(bytes.length > headerLength + 2, 'snapshot has no records');
+    assert.equal(bytes.subarray(0, 8).toString(), 'mkitexp\0');
+    assert.equal(bytes[8], 1);
+}
+assert.deepEqual(restored.subarray(headerLength), source.subarray(headerLength));
+assert.ok(JSON.parse(fs.readFileSync(resultPath, 'utf8')).records > 0);
+NODE
+}
+
 # Exercise actual RefShard registration and its alarm through test-only hooks.
 # Ordinary Single-mode pack reads bypass membership, so inspect the planted
 # membership row in the RepoIndexShard and the source's relay queue directly.
@@ -272,6 +302,9 @@ echo ">> building apps/vcs-worker (worker-build ${build_args[*]})"
 
 start_server suite "${vars[@]}"
 run_suite "${features}"
+if [ "${test_faults}" -eq 1 ] && [ "${sharding}" = single ]; then
+    snapshot_round_trip
+fi
 if [ "${test_faults}" -eq 1 ] && [ "${sharding}" = d34 ]; then
     check_relay_delivery
 fi

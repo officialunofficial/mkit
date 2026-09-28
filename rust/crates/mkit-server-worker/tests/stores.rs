@@ -531,6 +531,66 @@ fn committed_put_pressure_reads_physical_size_through_do_shim() {
 }
 
 #[test]
+fn backup_seeds_only_after_first_committed_put_and_raises_alarm_hint() {
+    use mkit_server::ManualClock;
+    use mkit_server::store::codec::decode_backup_state;
+    use mkit_server::store::keys;
+    use mkit_server::timers::registry::kinds;
+    use mkit_server_worker::classes::ShardClass;
+    use mkit_server_worker::ns_object::PressureStore;
+    use std::sync::Arc;
+
+    let conn = SimDoConn(RusqliteConn::open_in_memory().unwrap());
+    let inner = SqlKvStore::open(conn).unwrap();
+    let clock = Arc::new(ManualClock::new(1_000));
+    let store = PressureStore::new(
+        inner,
+        ShardClass::RefStore,
+        clock.clone(),
+        Arc::new(PressureGauges::default()),
+    )
+    .with_backup_interval(100);
+    assert!(
+        block_on(store.get(&root(), &keys::backup_state()))
+            .unwrap()
+            .is_none()
+    );
+    assert!(block_on(store.stats(&root())).is_ok());
+    assert!(
+        block_on(store.get(&root(), &keys::timer(1_100, kinds::BACKUP.get(), b"")))
+            .unwrap()
+            .is_none()
+    );
+    let first = Batch::new().put(key(0), Value::new(vec![1]));
+    assert_eq!(
+        block_on(store.apply(&root(), first)).unwrap(),
+        BatchOutcome::Committed
+    );
+    let state = block_on(store.get(&root(), &keys::backup_state()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(decode_backup_state(&state).unwrap().last_export_ms, 0);
+    assert!(
+        block_on(store.get(&root(), &keys::timer(1_100, kinds::BACKUP.get(), b"")))
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(store.take_seeded_due(), Some(1_100));
+    assert_eq!(store.take_seeded_due(), None);
+    clock.set(1_050);
+    assert_eq!(
+        block_on(store.apply(&root(), Batch::new().put(key(1), Value::new(vec![2])))).unwrap(),
+        BatchOutcome::Committed
+    );
+    assert_eq!(store.take_seeded_due(), None);
+    assert!(
+        block_on(store.get(&root(), &keys::timer(1_150, kinds::BACKUP.get(), b"")))
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
 fn timer_reschedule_put_observes_pressure_through_do_shim() {
     use mkit_server::store::keys;
     use mkit_server::timers::{
