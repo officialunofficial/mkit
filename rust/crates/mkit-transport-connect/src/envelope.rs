@@ -54,6 +54,15 @@ impl RetryIdentity {
             .with_header("x-expires-at", self.expires_at.as_str())
             .with_header(header::IDEMPOTENCY_KEY, self.nonce.as_str())
     }
+
+    /// Start a fresh signed operation before an attempt whose remaining
+    /// validity is too short. Callers pass their retry safety margin.
+    pub(crate) fn renew_if_lapsing(&mut self, now: i64, margin_ms: i64) -> Result<(), String> {
+        if self.expires_at_ms.saturating_sub(now) < margin_ms {
+            *self = Self::new_at(now)?;
+        }
+        Ok(())
+    }
 }
 
 /// A signer able to produce the Ed25519 material an auth v2 envelope needs:

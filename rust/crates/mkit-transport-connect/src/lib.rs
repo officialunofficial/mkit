@@ -28,6 +28,7 @@ pub mod envelope;
 mod error;
 mod executor;
 pub mod grant;
+mod receipts;
 
 /// Generated `mkit.transport.v1` message + Connect service types, compiled
 /// directly from the canonical `<repo-root>/proto/mkit/transport/v1/transport.proto`
@@ -42,10 +43,12 @@ pub mod proto {
 
 pub use client::{
     ConnectTransport, PACK_TRANSFER_TIMEOUT, PENDING_INTERRUPTED_MESSAGE, PendingEvent,
-    ServerInfoView, TOKEN_ENV, UNARY_TIMEOUT, UrlIdentityError, repository_identity_from_url,
+    ServerInfoView, TOKEN_ENV, UNARY_TIMEOUT, UploadEvent, UrlIdentityError,
+    repository_identity_from_url,
 };
 pub use envelope::EnvelopeSigner;
 pub use grant::{GrantCondition, GrantOperation, GrantRef, GrantRequest, GrantSource};
+pub use receipts::{MemoryPartReceiptStore, PartReceiptStore, StoredPart, TicketMetadata};
 
 // Re-exported so integration tests (and in-tree servers and conformance
 // suites) can build request/response messages and register the generated

@@ -29,6 +29,11 @@ impl<'a> GrantRef<'a> {
 #[non_exhaustive]
 pub enum GrantOperation<'a> {
     Read,
+    /// BeginUpload needs write capability and a scope matching the target
+    /// ref with any ref flag; it does not itself create or move the ref.
+    BeginUpload {
+        ref_name: &'a str,
+    },
     Write {
         refs: &'a [GrantRef<'a>],
     },
