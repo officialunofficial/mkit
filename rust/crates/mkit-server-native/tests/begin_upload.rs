@@ -877,8 +877,6 @@ async fn race_with_bytes<N: NamespaceStore + 'static>(
 ) -> bool {
     let store = Store::new(backend);
     let spy = Arc::new(Spy::default());
-    spy.reservation
-        .store(usize::from(reserved), Ordering::SeqCst);
     let mut cfg = config(mode);
     if cap {
         cfg.ticket_caps.per_ref = 1;
@@ -887,6 +885,8 @@ async fn race_with_bytes<N: NamespaceStore + 'static>(
     let blobs = MemoryBlobStore::default();
     let pipe = pipeline(store.clone(), blobs.clone(), spy.clone(), cfg, clock);
     warm(&pipe, mode).await;
+    spy.reservation
+        .store(usize::from(reserved), Ordering::SeqCst);
     spy.admissions.store(0, Ordering::SeqCst);
     store.take();
     store.arm_race();

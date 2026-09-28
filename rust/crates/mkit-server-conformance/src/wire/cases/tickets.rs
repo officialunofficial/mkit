@@ -356,7 +356,7 @@ pub(super) async fn advance_ticket_bindings(ctx: Ctx) -> CaseResult {
 }
 
 pub(super) async fn advance_other_repository(ctx: Ctx) -> CaseResult {
-    let signer = ctx.v2_signer("main")?;
+    let signer = ctx.v2_signer("repository-a")?;
     let namespace = format!("ed25519-{}", signer.public_key_hex());
     let repo_a = format!("{namespace}/ticket-a");
     let repo_b = format!("{namespace}/ticket-b");
