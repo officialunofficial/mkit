@@ -433,7 +433,7 @@
           "X-Mkit-*",
           "Content-Range"
         ],
-        "body_bytes": 1559,
+        "body_bytes": 1583,
         "body_fixture": "redaction/reader-followup-detail.json",
         "headers": {
           "Access-Control-Allow-Origin": "*",
@@ -555,6 +555,32 @@
         "chunk_only_under_tombstoned_manifest": true,
         "method": "GET",
         "repository_tombstone": false,
+        "route": "object"
+      }
+    },
+    {
+      "expect": {
+        "absent_headers": [
+          "ETag",
+          "X-Mkit-*"
+        ],
+        "body_equivalence_group": "uniform_404",
+        "headers": {
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "no-store",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff"
+        },
+        "status": 404
+      },
+      "name": "chunk_only_under_blocked_untombstoned_manifest",
+      "request": {
+        "chunk_only_under_blocked_manifest": true,
+        "if_none_match": "\"b0145b689c72cfb1b8b1e7ec756c2c4a1e0b4f0469393e4ff4a30d8c3d6a0d6f\"",
+        "manifest_globally_blocked": true,
+        "manifest_tombstone": false,
+        "method": "GET",
         "route": "object"
       }
     },

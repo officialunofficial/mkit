@@ -5,6 +5,7 @@ import base64
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 
@@ -59,7 +60,7 @@ def verify_signature(payload_bytes, envelope):
     assert envelope["signatures"][0]["keyid"] == "blake3:" + key_id
     payload = json.loads(payload_bytes)
     assert payload["keyId"] == key_id
-    assert int(listed["notBeforeMs"]) <= payload["issuedAtMs"] < int(listed["notAfterMs"])
+    assert int(listed["notBeforeMs"]) <= int(payload["issuedAtMs"]) < int(listed["notAfterMs"])
     private_der = bytes.fromhex("302e020100300506032b657004220420") + seed
     public_der = bytes.fromhex("302a300506032b6570032100") + public
     derived = run("openssl", "pkey", "-inform", "DER", "-pubout", "-outform", "DER", input_bytes=private_der)
@@ -107,6 +108,13 @@ def main():
         assert len(envelope["signatures"]) == 1
         assert len(envelope_bytes) <= 262144
         assert payload["view"] == view
+        assert re.fullmatch(r"[0-9a-f]{32}", payload["noticeId"])
+        assert (re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", payload["takedownId"])
+                or (prefix == "ingest" and payload["takedownId"] == ""))
+        for field in ("takenDownAtMs", "issuedAtMs"):
+            assert isinstance(payload[field], str) and re.fullmatch(r"-?(0|[1-9][0-9]*)", payload[field])
+            assert -(1 << 63) <= int(payload[field]) < (1 << 63)
+        assert int(payload["takenDownAtMs"]) <= int(payload["issuedAtMs"])
         assert payload["rewrites"] == sorted(payload["rewrites"], key=lambda row: (row["type"], row["old"]))
         verify_signature(payload_bytes, envelope)
         if prefix == "ingest":
@@ -147,19 +155,21 @@ def main():
         {"ref": "refs/heads/main", "notice": row}
         for row in (detail, writer_followup_detail)]
     newest = max(("reader", "reader-followup"),
-                 key=lambda prefix: (read_json(prefix + "-payload.jcs.json")["issuedAtMs"],
+                 key=lambda prefix: (int(read_json(prefix + "-payload.jcs.json")["issuedAtMs"]),
                                      read_json(prefix + "-payload.jcs.json")["noticeId"]))
     assert newest == "reader-followup"
     for name, code, message in (("ingest-blocked", "permission_denied", "object blocked"),
                                 ("open-closure", "invalid_argument", "open closure"),
                                 ("delta-base", "failed_precondition", "delta base not available in this repository"),
-                                ("superseded-pack", "not_found", "pack not found")):
+                                ("superseded-pack", "not_found", "pack not found"),
+                                ("superseded-pack-reader", "not_found", "pack not found")):
         body = read_json("error-" + name + ".json")
-        detail_file = "ingest-detail.bin" if name == "ingest-blocked" else "detail.bin"
+        detail_file = ("ingest-detail.bin" if name == "ingest-blocked" else
+                       "reader-detail.bin" if name == "superseded-pack-reader" else "detail.bin")
         detail_b64 = base64.b64encode((GOLDEN / detail_file).read_bytes()).decode().rstrip("=")
         assert body == {"code": code, "message": message,
                         "details": [{"type": DETAIL_TYPE, "value": detail_b64}]}, name
-    print("check-redaction-goldens: 35 artifacts, view scopes, signatures, protobuf and Connect bodies verified")
+    print("check-redaction-goldens: 36 artifacts, view scopes, signatures, protobuf and Connect bodies verified")
 
 
 if __name__ == "__main__":

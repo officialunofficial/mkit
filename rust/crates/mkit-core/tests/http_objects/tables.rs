@@ -454,6 +454,13 @@ pub(super) fn responses() -> Value {
         json!(["ETag", "X-Mkit-*"]),
     );
     add(
+        "chunk_only_under_blocked_untombstoned_manifest",
+        json!({"method":"GET","route":"object","chunk_only_under_blocked_manifest":true,"manifest_globally_blocked":true,"manifest_tombstone":false,"if_none_match":etag}),
+        404,
+        json!({"Cache-Control":"no-store"}),
+        json!(["ETag", "X-Mkit-*"]),
+    );
+    add(
         "not_modified_before_range_admission",
         json!({"method":"GET","route":"ref","if_none_match":etag,"range":"bytes=200-300","size":100,"admission":"challenge"}),
         304,
@@ -923,6 +930,15 @@ pub(super) fn check(dir: &std::path::Path) {
     );
     assert!(
         get("blocked_before_tombstone_before_304")["request"]["if_none_match"]
+            .as_str()
+            .is_some()
+    );
+    assert_eq!(
+        get("chunk_only_under_blocked_untombstoned_manifest")["expect"]["status"],
+        404
+    );
+    assert!(
+        get("chunk_only_under_blocked_untombstoned_manifest")["request"]["if_none_match"]
             .as_str()
             .is_some()
     );

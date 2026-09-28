@@ -1385,11 +1385,16 @@ the current goldens verify the additive hook wire contract only.
 ## Takedown denial precedes rewrites (specified, implementation pending)
 
 **Always:** a global blocklist write stops extracted and HTTP serving at
-once. Every pack read proves that the pack contains no blocked id and is
-not superseded, or answers absent. The serving stop is immediate,
-independent of holder discovery; the sweep does not impose a
-deployment-wide pack outage. The holder sweep and relay watermark use
-the cut at takedown time plus `MAX_APPLY_WINDOW + margin`.
+once. Until a repository's takedown completes, chunks of its blocked
+manifest are also unservable, although chunks are not blocklisted.
+Every pack read proves that the pack contains no blocked id or such
+chunk and is not superseded, or answers absent. HTTP reachability does
+not descend through a blocked or tombstoned manifest. The serving stop
+is immediate, independent of holder discovery; the sweep does not
+impose a deployment-wide pack outage. Every blocklist check gating a
+membership, index, or holder write is at or after its `plan_time`.
+After the cut at takedown time plus `MAX_APPLY_WINDOW + margin`, each
+namespace's relay watermark passes the cut before its sweep reads it.
 No replacement or preserved bytes become a serving or delta-base source until
 that repository's guarded rewrite and ref-value substitution complete. Live,
 published and retained intermediate values, membership and ref-addition records
