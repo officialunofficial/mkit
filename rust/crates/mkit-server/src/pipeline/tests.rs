@@ -1,5 +1,7 @@
 //! Pipeline tests over the memory stores and a `ManualClock`.
 
+#[path = "tests_begin_parts.rs"]
+mod begin_parts;
 mod info;
 mod policy;
 
@@ -256,7 +258,17 @@ fn store(clock: &Arc<ManualClock>) -> MemoryKv {
     MemoryKv::with_clock(clock.clone())
 }
 
-fn build<H: HookSet>(cfg: PipelineConfig, meta: Spy, hooks: H, clock: Arc<ManualClock>) -> Env<H> {
+fn build<H: HookSet>(
+    mut cfg: PipelineConfig,
+    meta: Spy,
+    hooks: H,
+    clock: Arc<ManualClock>,
+) -> Env<H> {
+    if !hooks.admission().is_default() && matches!(cfg.auth, AuthMode::AuthV2(_)) {
+        cfg.ticket_keys.get_or_insert_with(|| {
+            crate::upload::token::TicketKeys::new(vec![("test".into(), [7; 32])]).unwrap()
+        });
+    }
     let metrics = Arc::new(SpyMetrics::default());
     let pipe = Pipeline::new(
         MemoryBlobStore::default(),
@@ -1265,7 +1277,7 @@ fn single_partition_maps_everything_to_the_namespace() {
     assert_eq!(shards.ref_shard(&repo, PACKMAP), expected);
     assert_eq!(shards.coordinator(&repo.namespace), expected);
     assert_eq!(shards.ref_index(&repo, HEAD), expected);
-    assert_eq!(shards.membership(&repo, &PackKey::new(A)), expected);
+    assert_eq!(shards.membership(&repo, &PackKey::new(A).into()), expected);
 }
 
 // ----------------------------------------------- deadline and re-plans

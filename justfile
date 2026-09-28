@@ -212,3 +212,222 @@ _version-contract:
       echo "mkit version contract violated — stdout is not exactly 'mkit <X.Y.Z>'" >&2
       exit 1
     fi
+
+# ---------------------------------------------------------------------------
+# Formal verification (docs/FORMAL.md, epic MKIT-17). Unlike the ci-*
+# recipes above, these are the source: .github/workflows/formal.yml (nightly
+# + workflow_dispatch) calls them, so change them here, not there. Every
+# script prints one "<check> <expected outcome>" line per check and exits 1
+# on any unexpected outcome (a holding invariant that should be violated
+# counts, so a vacuous property fails the run).
+#
+#   just formal              PR-sized subset: formal-quint + formal-lean +
+#                            formal-conformance
+#   just formal-quint        every formal/quint/*/check.sh in its default
+#                            mode (quint typecheck/test/run, plus TLC where
+#                            the script runs it by default); `all` adds
+#                            gc's TLC=1 runs
+#   just formal-apalache     the bounded Apalache runs (APALACHE=1)
+#   just formal-lean         lake build + both Lean difftests
+#   just formal-kani         every Kani harness, one at a time (~1.5 h)
+#   just formal-conformance  the MKIT-22 ITF replay (cargo test, offline)
+#   just formal-fixtures     re-derive the MKIT-22 fixtures from the model
+#                            and diff them (needs quint + jq)
+#   just formal-setup-apalache  fetch + verify the pinned Apalache
+#
+# Tool pins (MKIT-17). Java 21 is also what TLC runs on: TLC is the
+# tlc2.TLC class inside the Apalache jar, so formal-quint needs the
+# Apalache install too. Lean comes from formal/lean/lean-toolchain via elan.
+formal_quint_version := "0.32.0"
+formal_apalache_version := "0.62.2"
+formal_apalache_tgz_sha256 := "765f610537281a0f25b8c30f2554f19523e2859c824e80e62276653ee23c10e2"
+formal_apalache_jar_sha256 := "079b6c2320252469dcf79afec6886b8255d3dd1b34a9484433c88986752efaa8"
+formal_java_version := "21"
+formal_lean_toolchain_file := "formal/lean/lean-toolchain"
+formal_kani_version := "0.68.0"
+
+# PR-sized formal subset: Quint default mode, Lean, conformance replay.
+formal: formal-quint formal-lean formal-conformance
+
+# Fail early, with the fix, when a pinned tool is missing or off-pin.
+_formal-pins *layers:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    fv=${FV_HOME:-$HOME/.local/share/mkit-fv}
+    jar=${APALACHE_MC:-$fv/apalache-{{ formal_apalache_version }}/bin/apalache-mc}
+    jar=$(dirname "$jar")/../lib/apalache.jar
+    sha256() { if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1; }
+    for layer in {{ layers }}; do
+      case $layer in
+        quint)
+          qv=$(quint --version 2>/dev/null) || { echo "error: quint not on PATH (npm i -g @informalsystems/quint@{{ formal_quint_version }})" >&2; exit 2; }
+          [[ $qv == {{ formal_quint_version }} ]] || { echo "error: quint $qv, pin is {{ formal_quint_version }}" >&2; exit 2; } ;;
+        apalache)
+          [[ -f $jar ]] || { echo "error: no Apalache at $jar (just formal-setup-apalache, or set FV_HOME / APALACHE_MC)" >&2; exit 2; }
+          [[ $(sha256 "$jar") == {{ formal_apalache_jar_sha256 }} ]] ||
+            { echo "error: $jar is not Apalache {{ formal_apalache_version }} (sha256 mismatch)" >&2; exit 2; } ;;
+        lean)
+          command -v lake >/dev/null || { echo "error: lake not on PATH (install elan; it reads {{ formal_lean_toolchain_file }})" >&2; exit 2; } ;;
+        kani)
+          kv=$(cargo kani --version 2>/dev/null) || { echo "error: cargo kani missing (cargo install --locked kani-verifier --version {{ formal_kani_version }} && cargo kani setup)" >&2; exit 2; }
+          kv=${kv%%$'\n'*}
+          [[ $kv == *" {{ formal_kani_version }} "* ]] || { echo "error: $kv, pin is Kani {{ formal_kani_version }}" >&2; exit 2; } ;;
+      esac
+    done
+    # Java {{ formal_java_version }}: each check.sh finds it (JAVA_HOME, java_home -v 21,
+    # Homebrew's openjdk@21) and exits 2 when it cannot.
+
+# Checks both the release tarball's and the jar's sha256; a no-op when the
+# verified jar is already there.
+# Download the pinned Apalache into $FV_HOME.
+formal-setup-apalache:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    fv=${FV_HOME:-$HOME/.local/share/mkit-fv}
+    v={{ formal_apalache_version }}
+    sha256() { if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1; }
+    jar=$fv/apalache-$v/lib/apalache.jar
+    if [[ -f $jar && $(sha256 "$jar") == {{ formal_apalache_jar_sha256 }} ]]; then
+      echo "Apalache $v already at $fv/apalache-$v"; exit 0
+    fi
+    tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+    curl -sSfL -o "$tmp/a.tgz" "https://github.com/apalache-mc/apalache/releases/download/v$v/apalache-$v.tgz"
+    [[ $(sha256 "$tmp/a.tgz") == {{ formal_apalache_tgz_sha256 }} ]] ||
+      { echo "error: apalache-$v.tgz sha256 mismatch" >&2; exit 1; }
+    tar -xzf "$tmp/a.tgz" -C "$tmp"
+    [[ $(sha256 "$tmp/apalache-$v/lib/apalache.jar") == {{ formal_apalache_jar_sha256 }} ]] ||
+      { echo "error: apalache.jar sha256 mismatch" >&2; exit 1; }
+    mkdir -p "$fv"; rm -rf "$fv/apalache-$v"; mv "$tmp/apalache-$v" "$fv/"
+    echo "Apalache $v installed at $fv/apalache-$v"
+
+# Runs every model even after a failure, then fails if any did. `just
+# formal-quint all` also turns on the TLC runs a script leaves off by
+# default (gc's exhaustive instances, ~50 min).
+# Every formal/quint/*/check.sh in its default mode (quint, plus TLC where default).
+formal-quint tlc="default": (_formal-pins "quint" "apalache")
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{ tlc }}" in
+      default) tlc= ;;
+      all) tlc=TLC=1 ;;
+      *) echo "formal-quint: tlc must be default or all" >&2; exit 2 ;;
+    esac
+    failed=()
+    log=$(mktemp); trap 'rm -f "$log"' EXIT
+    # A check.sh ends with "all checks as expected" or "<n> unexpected". A
+    # non-zero exit without either line is an abort (set -e inside a helper
+    # function, e.g. a failed `quint compile`), which the script cannot
+    # report itself; say so instead of failing silently.
+    _verdict() {
+      if [[ $2 == 0 ]]; then return 0; fi
+      if ! tail -n 1 "$log" | grep -Eq '^(all checks as expected|[0-9]+ unexpected)$'; then
+        echo "=== $1 aborted (exit $2) before its verdict; last lines above" >&2
+      fi
+      return 1
+    }
+    for s in formal/quint/*/check.sh; do
+      echo "=== $s (default mode${tlc:+, $tlc})"
+      t0=$SECONDS
+      rc=0; env -u APALACHE -u TLC -u QUINT -u ONLY -u SEL $tlc bash "$s" | tee "$log" || rc=$?
+      _verdict "$s" "$rc" || failed+=("$s")
+      echo "=== $s: $((SECONDS - t0)) s"
+    done
+    if (( ${#failed[@]} )); then echo "formal-quint: FAILED: ${failed[*]}" >&2; exit 1; fi
+
+# Lengths are each script's defaults, overridable per script (GC_DEPTH,
+# HISTORY_DEPTH, REFS_DEPTH, ...). QUINT=0 TLC=0 skip what formal-quint
+# already covers where a script allows it (gc and history always re-run
+# their quint tests; history also re-runs its TLC checks).
+# Bounded Apalache runs of every Quint model (APALACHE=1).
+formal-apalache: (_formal-pins "quint" "apalache")
+    #!/usr/bin/env bash
+    set -euo pipefail
+    failed=()
+    log=$(mktemp); trap 'rm -f "$log"' EXIT
+    # A check.sh ends with "all checks as expected" or "<n> unexpected". A
+    # non-zero exit without either line is an abort (set -e inside a helper
+    # function, e.g. a failed `quint compile`), which the script cannot
+    # report itself; say so instead of failing silently.
+    _verdict() {
+      if [[ $2 == 0 ]]; then return 0; fi
+      if ! tail -n 1 "$log" | grep -Eq '^(all checks as expected|[0-9]+ unexpected)$'; then
+        echo "=== $1 aborted (exit $2) before its verdict; last lines above" >&2
+      fi
+      return 1
+    }
+    for s in formal/quint/*/check.sh; do
+      echo "=== $s (APALACHE=1)"
+      t0=$SECONDS
+      rc=0; APALACHE=1 QUINT=0 TLC=0 bash "$s" | tee "$log" || rc=$?
+      _verdict "$s" "$rc" || failed+=("$s")
+      echo "=== $s: $((SECONDS - t0)) s"
+    done
+    if (( ${#failed[@]} )); then echo "formal-apalache: FAILED: ${failed[*]}" >&2; exit 1; fi
+
+# Each difftest re-runs the axiom audit and its canaries against
+# Rust-exported vectors.
+# Lean: lake build (proofs, canaries, #guard replays), then both difftests.
+formal-lean: (_formal-pins "lean")
+    #!/usr/bin/env bash
+    set -euo pipefail
+    want=$(cat {{ formal_lean_toolchain_file }})
+    ( cd formal/lean && have=$(elan show active-toolchain 2>/dev/null | cut -d' ' -f1 || true) &&
+      if [[ -n $have && $have != "$want" ]]; then echo "warning: elan reports $have, pin is $want" >&2; fi &&
+      lake build )
+    bash formal/lean/scripts/difftest-merkle.sh
+    bash formal/lean/scripts/difftest-delta.sh
+
+# One CBMC run at a time (peak ~5.4 GB). Harnesses are discovered from the
+# #[kani::proof] items in the files formal/kani/README.md lists, so a new
+# harness in one of them runs automatically; flags per that README's
+# "Running". KANI_FILTER=regex restricts the run to matching harness names.
+# Every Kani harness with its pinned flags (about 1.5 h).
+formal-kani: (_formal-pins "kani")
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd rust
+    files="crates/mkit-core/src/delta.rs crates/mkit-core/src/merkle.rs crates/mkit-core/src/pack.rs
+      crates/mkit-core/src/serialize.rs crates/mkit-keystore/src/encrypted_record.rs crates/mkit-rpc/src/framing.rs"
+    harnesses() { awk '/#\[kani::proof\]/{p=1} p && /fn [a-z0-9_]+/{match($0,/fn [a-z0-9_]+/); print substr($0,RSTART+3,RLENGTH-3); p=0}' "$1"; }
+    failed=() n=0
+    run() { # label, then the cargo kani arguments
+      local label=$1 t0=$SECONDS out; shift
+      n=$((n + 1))
+      if out=$(cargo kani "$@" 2>&1) && grep -q 'VERIFICATION:- SUCCESSFUL' <<<"$out" &&
+         ! grep -q 'VERIFICATION:- FAILED' <<<"$out"; then
+        printf '%-64s ok %ss\n' "$label" "$((SECONDS - t0))"
+      else
+        printf '%-64s UNEXPECTED %ss\n' "$label" "$((SECONDS - t0))"
+        tail -n 40 <<<"$out"; failed+=("$label")
+      fi
+    }
+    for f in $files; do
+      crate=$(cut -d/ -f2 <<<"$f")
+      for h in $(harnesses "$f"); do
+        [[ -n ${KANI_FILTER:-} && ! $h =~ $KANI_FILTER ]] && continue
+        case $crate:$h in
+          mkit-core:merkle_verify_*|mkit-core:merkle_roundtrip_*|mkit-core:merkle_canary_*|mkit-core:pack_*)
+            run "$crate::$h" -p "$crate" --no-default-features -Z stubbing --harness "$h" \
+              -Z unstable-options --cbmc-args --unwindset memcmp.0:33 ;;
+          mkit-core:*) run "$crate::$h" -p "$crate" --no-default-features -Z stubbing --harness "$h" ;;
+          mkit-keystore:software_key_record_rejects_algorithm_4)
+            run "$crate::$h" -p "$crate" -Z stubbing --harness "$h"
+            run "$crate::$h (bls-threshold)" -p "$crate" --features bls-threshold -Z stubbing --harness "$h" ;;
+          mkit-keystore:*) run "$crate::$h" -p "$crate" -Z stubbing --harness "$h" ;;
+          *) run "$crate::$h" -p "$crate" --harness "$h" ;;
+        esac
+      done
+    done
+    echo "formal-kani: $n runs, ${#failed[@]} unexpected"
+    if (( ${#failed[@]} )); then printf '  %s\n' "${failed[@]}" >&2; exit 1; fi
+
+# Targets: mkit_core::refs, ops::recovery, FileTransport, MemoryTransport.
+# MKIT-22: replay the checked-in refs_mbt.qnt ITF traces against the code.
+formal-conformance:
+    ( cd rust && cargo test --locked -p mkit-formal-conformance )
+
+# A quint upgrade that reshuffles its RNG shows up here, not as a
+# conformance failure.
+# Re-derive the MKIT-22 fixtures with the pinned quint and diff them.
+formal-fixtures: (_formal-pins "quint")
+    CHECK=1 bash formal/scripts/gen-refs-traces.sh

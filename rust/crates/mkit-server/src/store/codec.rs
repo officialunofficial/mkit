@@ -119,7 +119,8 @@ pub struct TicketV1 {
     /// One durable outcome id, including synthetic ids for default admission.
     pub reservation_id: String,
     /// Backend multipart upload session, when allocated.
-    pub upload_session: Option<String>,
+    #[serde(with = "optional_bytes_hex_json")]
+    pub upload_session: Option<Vec<u8>>,
 }
 
 /// The hooks protocol's terminal abort reasons.
@@ -289,6 +290,54 @@ mod optional_hash_json {
             .map(from_hex)
             .transpose()
             .map_err(serde::de::Error::custom)
+    }
+}
+
+mod optional_bytes_hex_json {
+    use super::{Deserialize, Serialize, hex_nibble, to_hex_bytes};
+
+    #[allow(clippy::ref_option)]
+    pub(super) fn serialize<S: serde::Serializer>(
+        bytes: &Option<Vec<u8>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        bytes
+            .as_ref()
+            .map(|value| to_hex_bytes(value))
+            .serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Vec<u8>>, D::Error> {
+        Option::<String>::deserialize(deserializer)?
+            .map(|s| {
+                if s.len() % 2 != 0 {
+                    return Err(serde::de::Error::custom("odd-length upload session hex"));
+                }
+                s.as_bytes()
+                    .chunks_exact(2)
+                    .map(|pair| {
+                        let high = hex_nibble(pair[0]).ok_or_else(|| {
+                            serde::de::Error::custom("invalid upload session hex")
+                        })?;
+                        let low = hex_nibble(pair[1]).ok_or_else(|| {
+                            serde::de::Error::custom("invalid upload session hex")
+                        })?;
+                        Ok((high << 4) | low)
+                    })
+                    .collect()
+            })
+            .transpose()
+    }
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
     }
 }
 
@@ -969,7 +1018,16 @@ mod tests {
         );
         assert_eq!(decode_ticket(&encode_ticket(&ticket)).unwrap(), ticket);
         let mut session = ticket.clone();
-        session.upload_session = Some("backend-session".into());
+        session.upload_session = Some(b"backend-session".to_vec());
+        let encoded = encode_ticket(&session);
+        let expected = golden.replace(
+            "\"upload_session\":null",
+            "\"upload_session\":\"6261636b656e642d73657373696f6e\"",
+        );
+        assert_eq!(
+            encoded.as_bytes(),
+            [&[CODEC_V1][..], expected.as_bytes()].concat()
+        );
         assert_eq!(decode_ticket(&encode_ticket(&session)).unwrap(), session);
         let base = serde_json::to_value(&ticket).unwrap();
         for (field, bad) in [
@@ -979,6 +1037,9 @@ mod tests {
             ("part_size", serde_json::json!(8_388_609)),
             ("part_size", serde_json::json!(1)),
             ("unknown", serde_json::json!(1)),
+            ("upload_session", serde_json::json!("+0")),
+            ("upload_session", serde_json::json!("0+")),
+            ("upload_session", serde_json::json!("é0")),
             ("reservation_id", serde_json::json!("bad/id")),
             ("reservation_id", serde_json::json!("")),
             ("reservation_id", serde_json::json!("a".repeat(129))),

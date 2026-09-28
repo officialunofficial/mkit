@@ -72,7 +72,7 @@ pub async fn is_member<S: NamespaceStore>(
     hint: Option<&str>,
 ) -> Result<bool, StoreError> {
     let key = keys::membership(&repo.name, pack);
-    let index = shards.membership(repo, &crate::store::BlobKey::new(*pack));
+    let index = shards.membership(repo, &crate::store::BlobKey::pack(*pack));
     if store.get(&index, &key).await?.is_some() {
         return Ok(true);
     }
@@ -321,7 +321,7 @@ mod membership_tests {
         let shards = D34Shards;
         plant(
             &kv,
-            &shards.membership(&r, &crate::store::BlobKey::new(PACK)),
+            &shards.membership(&r, &crate::store::BlobKey::pack(PACK)),
             &r,
         );
         assert!(block_on(is_member(&kv, &shards, &r, &PACK, Some(REF))).unwrap());
@@ -369,7 +369,7 @@ mod membership_tests {
         let shards = D34Shards;
         plant(
             &kv,
-            &shards.membership(&a, &crate::store::BlobKey::new(PACK)),
+            &shards.membership(&a, &crate::store::BlobKey::pack(PACK)),
             &a,
         );
         plant(&kv, &shards.ref_shard(&a, REF), &a);

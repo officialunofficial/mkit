@@ -38,7 +38,7 @@ fn store(fake: &FakeS3) -> S3BlobStore {
 }
 
 fn key_of(bytes: &[u8]) -> BlobKey {
-    BlobKey::new(hash(bytes))
+    BlobKey::pack(hash(bytes))
 }
 
 fn object_key(bytes: &[u8]) -> String {
@@ -88,6 +88,26 @@ async fn put_uses_if_none_match_star() {
     assert_eq!(
         fake.object(DEFAULT_BUCKET, &object_key(b"hello")).unwrap(),
         "hello"
+    );
+}
+
+#[tokio::test]
+async fn upload_marker_uses_separate_key_under_prefix() {
+    let fake = FakeS3::start();
+    let s = store(&fake);
+    let content = b"marker bytes";
+    let marker = BlobKey::upload_marker(hash(content));
+    let mut sink = s.begin(marker, content.len() as u64).await.unwrap();
+    sink.write(Bytes::from_static(content)).await.unwrap();
+    sink.commit().await.unwrap();
+    let path = format!("{PREFIX}/upload-markers/v1/{}", marker.to_hex());
+    assert_eq!(s.object_key(&marker).unwrap(), path);
+    assert_eq!(fake.object(DEFAULT_BUCKET, &path).unwrap(), &content[..]);
+    assert!(
+        s.head(&BlobKey::pack(hash(content)))
+            .await
+            .unwrap()
+            .is_none()
     );
 }
 
@@ -358,7 +378,12 @@ async fn retry_after_and_request_timeout_are_honored() {
 #[tokio::test]
 async fn stalled_put_is_abandoned_and_retried() {
     let fake = FakeS3::start();
-    let s = store(&fake).with_stall_timeout(std::time::Duration::from_millis(300));
+    // The stall timeout also covers the wait for the answer, and the fake
+    // verifies the whole 8 MiB body before it answers. 300 ms was shorter
+    // than that on a loaded runner, so the successful retry was abandoned
+    // too and the put ended as AlreadyPresent. 3 s keeps a wide margin and
+    // stays well inside the 20 s bound below.
+    let s = store(&fake).with_stall_timeout(std::time::Duration::from_secs(3));
     // A small body fits the socket buffers, so the stall is the missing
     // answer; an 8 MiB one stops moving while the bucket does not read.
     let big: Vec<u8> = (0..8 << 20_u32)

@@ -12,7 +12,9 @@ use mkit_core::repo_lock::{self, LockError, RepoLock};
 use mkit_server::fs::{FsBlobStore, FsLayoutStore, META_MARKER};
 use mkit_server::pipeline::{Hooks, Pipeline, Sharding};
 use mkit_server::sql::{SqlConn, SqlError, SqlKvStore, SqlValue, TxFn};
-use mkit_server::{Addressing, BlobStore, NamespaceStore, RepoId, StoreError, SystemClock};
+use mkit_server::{
+    Addressing, MultipartBlobStore, NamespaceStore, RepoId, StoreError, SystemClock,
+};
 use mkit_transport_file::{FileTransport, sync_dir};
 use tokio::net::TcpListener;
 
@@ -437,7 +439,7 @@ pub fn bind_database(conn: &RusqliteConn, root_id: &str, db: &Path) -> Result<()
 /// stores, same write gate).
 fn build_services<B, N>(blobs: B, meta: N, cfg: &ServeConfig) -> Result<Services, ConfigError>
 where
-    B: BlobStore + Clone + 'static,
+    B: MultipartBlobStore + Clone + 'static,
     N: NamespaceStore + Clone + 'static,
 {
     let pipeline = Pipeline::new(
@@ -544,7 +546,7 @@ pub fn open(cfg: &ServeConfig) -> Result<Opened, ConfigError> {
 /// The services over `blobs` and the metadata store `cfg` names.
 fn with_meta<B>(blobs: B, repo: &RepoId, cfg: &ServeConfig) -> Result<Services, ConfigError>
 where
-    B: BlobStore + Clone + 'static,
+    B: MultipartBlobStore + Clone + 'static,
 {
     match &cfg.meta {
         MetaChoice::FsLayout => {

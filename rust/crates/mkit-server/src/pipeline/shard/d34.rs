@@ -50,7 +50,7 @@ impl ShardMap for D34Shards {
     }
 
     fn membership(&self, repo: &RepoId, pack: &BlobKey) -> Partition {
-        let p = pack.as_bytes();
+        let p = pack.hash();
         Partition::RepoIndex {
             ns: repo.namespace.clone(),
             repo: repo.name.clone(),
@@ -146,7 +146,7 @@ mod tests {
         .map(|(first, second, prefix)| {
             let mut id = [0; 32];
             id[..2].copy_from_slice(&[first, second]);
-            let pack = BlobKey::new(id);
+            let pack = BlobKey::pack(id);
             PackMapping {
                 namespace: "root".into(),
                 repo: "a".into(),
@@ -238,7 +238,7 @@ mod tests {
             let Partition::RefIndex { bucket, .. } = D34Shards.ref_index(&r, &name) else {
                 unreachable!("D34 ref-name index is a RefIndex");
             };
-            let Partition::RepoIndex { prefix, .. } = D34Shards.membership(&r, &BlobKey::new(id)) else {
+            let Partition::RepoIndex { prefix, .. } = D34Shards.membership(&r, &BlobKey::pack(id)) else {
                 unreachable!("D34 membership index is a RepoIndex");
             };
             prop_assert!(bucket < REF_INDEX_FANOUT);

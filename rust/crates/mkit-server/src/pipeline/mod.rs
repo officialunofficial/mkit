@@ -29,6 +29,7 @@ mod hooks;
 mod info;
 mod lease;
 mod outcome;
+mod parts;
 mod plan;
 mod revocation;
 mod shard;
@@ -58,8 +59,8 @@ use crate::rt::Clock;
 use crate::storage_error::{StorageOp, describe_and_map};
 use crate::store::tickets::TicketCaps;
 use crate::store::{
-    Batch, BatchOutcome, BlobStore, Key, KeyClasses, NamespaceStore, Partition, StoreError, Value,
-    codec, keys, read,
+    Batch, BatchOutcome, Key, KeyClasses, MultipartBlobStore, NamespaceStore, Partition,
+    StoreError, Value, codec, keys, read,
 };
 use crate::telemetry::{Metrics, Redactor};
 use crate::upload::{UploadLimits, token::TicketKeys};
@@ -79,6 +80,7 @@ pub use hooks::{
 };
 pub use info::ServerInfo;
 use outcome::Outcome;
+pub use parts::PartUploadSession;
 use plan::{
     MAX_REPLAN, PRUNE_LIMIT, Plan, PlanClock, Planned, Snapshot, WriteKind, WriteRequest,
     plan_write, prune_sampled,
@@ -340,7 +342,36 @@ fn ms(ms: i64) -> u64 {
     u64::try_from(ms).unwrap_or(0)
 }
 
-impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
+fn validate_upload_ticket_config<H: HookSet>(
+    cfg: &PipelineConfig,
+    hooks: &H,
+) -> Result<(), ServerError> {
+    if matches!(cfg.addressing, Addressing::Multi(_))
+        && matches!(cfg.auth, AuthMode::TransportIdentity)
+    {
+        return Err(ServerError::invalid_argument(
+            "multi-repository deployments require auth v2 until transport identity carries tickets",
+        ));
+    }
+    if cfg.begin_upload_threshold_bytes != u64::MAX
+        && (!matches!(cfg.auth, AuthMode::AuthV2(_)) || cfg.ticket_keys.is_none())
+    {
+        return Err(ServerError::invalid_argument(
+            "a ticket threshold requires auth v2 and upload ticket keys",
+        ));
+    }
+    if !matches!(cfg.auth, AuthMode::TransportIdentity)
+        && !hooks.admission().is_default()
+        && (!matches!(cfg.auth, AuthMode::AuthV2(_)) || cfg.ticket_keys.is_none())
+    {
+        return Err(ServerError::invalid_argument(
+            "admission requires auth v2 and upload ticket keys",
+        ));
+    }
+    Ok(())
+}
+
+impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// A pipeline over `blobs` and `meta`, routed by `cfg.sharding`.
     ///
     /// # Errors
@@ -363,6 +394,14 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         metrics: Arc<dyn Metrics>,
     ) -> Result<Self, ServerError> {
         cfg.validate_server_info_limits()?;
+
+        if cfg.max_parts > B::MAX_PARTS {
+            return Err(ServerError::invalid_argument(
+                "max_parts exceeds storage backend capacity",
+            ));
+        }
+
+        validate_upload_ticket_config(&cfg, &hooks)?;
         if cfg.ticket_ttl_ms == 0
             || cfg.ticket_ttl_ms >= 604_800_000
             || cfg.ticket_caps.per_ref == 0
@@ -739,7 +778,7 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             if !self.pack_is_member(a, &key).await? {
                 return Ok(false);
             }
-            let head = self.blobs.head(&key).await;
+            let head = self.blobs.head(&key.into()).await;
             Ok(head
                 .map_err(|e| store_error(StorageOp::BlobHead, e))?
                 .is_some())
@@ -754,7 +793,7 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// stream before it returns.
     ///
     /// # Errors
-    /// `unimplemented` for Multi mode;
+    /// `failed_precondition` when the advertised threshold requires a ticket;
     /// the header's [`crate::upload::UploadError`]; `unauthenticated` when
     /// the header differs from the signed commitment; a stored or
     /// in-flight replay answer; a hook's error; the reservation's error.
@@ -765,6 +804,21 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         total_bytes: Option<u64>,
     ) -> Result<UploadSession<'_, B, N, H>, ServerError> {
         UploadSession::begin(self, a, pack_id, total_bytes).await
+    }
+
+    /// Open a stateless ticketed `UploadPack` stream after checking the header,
+    /// signed commitment and token, before reading any body bytes.
+    ///
+    /// # Errors
+    /// Framing, authentication, binding and blob-store failures.
+    pub async fn open_ticketed_upload(
+        &self,
+        a: &Authenticated,
+        pack_id: Option<&[u8]>,
+        total_bytes: Option<u64>,
+        token: &[u8],
+    ) -> Result<UploadSession<'_, B, N, H>, ServerError> {
+        UploadSession::begin_ticketed(self, a, pack_id, total_bytes, token).await
     }
 
     /// A pack's bytes as chunks of at most `download_chunk_max` bytes.
@@ -789,7 +843,7 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             if !self.pack_is_member(a, &key).await? {
                 return Err(ServerError::not_found("pack not found"));
             }
-            let body = self.blobs.get(&key, None).await;
+            let body = self.blobs.get(&key.into(), None).await;
             match body.map_err(|e| store_error(StorageOp::BlobGet, e))? {
                 Some(body) => Ok(body),
                 None => Err(ServerError::not_found("pack not found")),
@@ -925,34 +979,125 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             }
             self.admit(input).await?
         };
-        let begin = self.begin_write(&op, a, existing, allowance.reservation)?;
-        let charges = allowance.charges;
-        let lease = if let Some(observed) = lease {
-            let (created, lease) = {
-                // The native gate serializes same-shard lease grants too.
-                // Read observations remain pre-admission; a waiter rebuilds
-                // a stale coordinator observation within the usual three tries.
-                let _grant_gate = match (&self.gate, &observed) {
-                    (Some(gate), lease::LeaseObservation::Renew(_)) => Some(gate.enter(&p).await),
-                    _ => None,
-                };
-                self.admit_lease(&op, &p, observed, a.business_skew_ms)
-                    .await?
-            };
-            op.created = created;
-            op.leased_epoch = Some(lease.value.epoch);
-            if lease.install {
-                fault!(self, AfterLeaseGrant, &op, a);
+        let mut begin = self.begin_write(&op, a, existing, allowance.reservation)?;
+        let mut opened_session = None;
+        if let Some(BeginWrite::Open(open)) = &mut begin
+            && open.spec.bytes > open.spec.part_size
+        {
+            let key = PackKey(open.spec.pack_id).into();
+            let session = self
+                .blobs
+                .begin_multipart(key, open.spec.bytes, open.spec.part_size)
+                .await
+                .map_err(|e| {
+                    if open.reserved() {
+                        // TODO(WP-3.3): record Aborted via Pending when admission
+                        // supplied a reservation but session creation failed.
+                        tracing::warn!(error = %e, "reserved multipart session creation failed");
+                        ServerError::unavailable("multipart session creation failed; retry")
+                    } else {
+                        store_error(StorageOp::MultipartSession, e)
+                    }
+                })?;
+            if session.is_empty() || session.len() > u16::MAX as usize {
+                if let Err(err) = self.blobs.abort(key, &session).await {
+                    tracing::warn!(error = %err, "failed to abort invalid multipart session");
+                }
+                return Err(ServerError::internal(
+                    "object storage request failed",
+                    "multipart store returned an invalid session identifier",
+                ));
             }
-            Some(lease)
-        } else {
-            op.created = self.commit_creation(&op, a.business_skew_ms).await?;
-            None
+            opened_session = Some((
+                key,
+                session.clone(),
+                crate::store::tickets::ticket_id(&open.spec.reservation_id),
+            ));
+            open.spec.upload_session = Some(session);
+        }
+        let write_result = async {
+            let charges = allowance.charges;
+            let lease = if let Some(observed) = lease {
+                let (created, lease) = {
+                    // The native gate serializes same-shard lease grants too.
+                    // Read observations remain pre-admission; a waiter rebuilds
+                    // a stale coordinator observation within the usual three tries.
+                    let _grant_gate = match (&self.gate, &observed) {
+                        (Some(gate), lease::LeaseObservation::Renew(_)) => {
+                            Some(gate.enter(&p).await)
+                        }
+                        _ => None,
+                    };
+                    self.admit_lease(&op, &p, observed, a.business_skew_ms)
+                        .await?
+                };
+                op.created = created;
+                op.leased_epoch = Some(lease.value.epoch);
+                if lease.install {
+                    fault!(self, AfterLeaseGrant, &op, a);
+                }
+                Some(lease)
+            } else {
+                op.created = self.commit_creation(&op, a.business_skew_ms).await?;
+                None
+            };
+            self.pre_receive(&op).await?;
+            let write = (kind, refs.as_slice(), charges.as_slice());
+            self.plan_and_apply(&op, a, &p, write, ahead, (lease, begin.as_ref()))
+                .await
+        }
+        .await;
+        if let Some((key, session, fresh_id)) = opened_session {
+            self.cleanup_opened_session(&p, &write_result, key, &session, fresh_id)
+                .await;
+        }
+        write_result
+    }
+
+    async fn cleanup_opened_session(
+        &self,
+        partition: &Partition,
+        result: &Result<StoredResult, ServerError>,
+        key: crate::store::BlobKey,
+        session: &[u8],
+        fresh_id: Hash,
+    ) {
+        // A raced Existing ticket can have the same reservation-derived id
+        // with a different session. Compare the authenticated answer.
+        let committed_fresh = match result {
+            Ok(StoredResult::BeginUpload(BeginUploadResult::Ticket { id, token, .. }))
+                if *id == fresh_id =>
+            {
+                self.cfg
+                    .ticket_keys
+                    .as_ref()
+                    .and_then(|keys| keys.verify(token, 0).ok())
+                    .is_some_and(|claims| claims.upload_session == session)
+            }
+            _ => false,
         };
-        self.pre_receive(&op).await?;
-        let write = (kind, refs.as_slice(), charges.as_slice());
-        self.plan_and_apply(&op, a, &p, write, ahead, (lease, begin.as_ref()))
-            .await
+        // An apply can commit and then lose its acknowledgement. Check the
+        // row before reclaiming; an unavailable or corrupt read is ambiguous.
+        let stored_fresh = if result.is_err() {
+            match self.meta.get(partition, &keys::ticket(&fresh_id)).await {
+                Ok(Some(raw)) => codec::decode_ticket(&raw)
+                    .ok()
+                    .is_none_or(|ticket| ticket.upload_session.as_deref() == Some(session)),
+                Ok(None) => false,
+                Err(err) => {
+                    tracing::warn!(error = %err, "could not confirm multipart ticket after failed write");
+                    true
+                }
+            }
+        } else {
+            false
+        };
+        if !committed_fresh
+            && !stored_fresh
+            && let Err(err) = self.blobs.abort(key, session).await
+        {
+            tracing::warn!(error = %err, "failed to abort unused multipart session");
+        }
     }
 
     /// Stage 1: the typed operation, for the procedure `a` was
@@ -1008,18 +1153,6 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         )
         .await
         .map_err(meta_error)
-    }
-
-    /// Multi packs must not consult the global blob store as an existence oracle.
-    fn require_pack_membership(&self) -> Result<(), ServerError> {
-        // TODO(WP-1.9b): wire ticketed uploads in Multi mode.
-        if matches!(self.cfg.addressing, Addressing::Multi(_)) {
-            return Err(ServerError::new(
-                crate::Code::Unimplemented,
-                "pack RPCs need repository membership",
-            ));
-        }
-        Ok(())
     }
 
     /// A unary write's ref writes in decision order (packmap first) and

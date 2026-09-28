@@ -357,7 +357,7 @@ fn tickets_open_guard_rejects_changed_ticket_and_writes_nothing() {
     );
     let closing = close(&spec.record(), 1, CloseReason::Consumed);
     let mut changed = spec.record();
-    changed.upload_session = Some("new-session".into());
+    changed.upload_session = Some(b"new-session".to_vec());
     let changed_value = codec::encode_ticket(&changed);
     assert_eq!(
         apply(
@@ -514,7 +514,7 @@ fn membership_is_local_under_single_and_relays_identical_deduplicated_upserts_un
             assert_eq!(relays.len(), 1);
             assert_eq!(
                 relays[0].target,
-                shards.membership(&repo_id, &BlobKey::new(pack))
+                shards.membership(&repo_id, &BlobKey::pack(pack))
             );
             assert_eq!(relays[0].puts, vec![membership]);
         }

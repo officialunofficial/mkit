@@ -1100,7 +1100,7 @@ mod glue {
                 mkit_core::hash::to_hex(&pack)
             );
             let source = D34Shards.ref_shard(&repo, &reference);
-            let target = D34Shards.membership(&repo, &BlobKey::from_hash(pack));
+            let target = D34Shards.membership(&repo, &BlobKey::pack(pack));
             let key = keys::membership(&repo.name, &pack);
             let store = WorkerNamespaceStore::new(
                 StubTransport::new(env.clone(), cfg.placement.clone()),

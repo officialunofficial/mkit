@@ -161,6 +161,10 @@ cases! {
     "tickets.begin_upload_idempotent" => tickets::begin_upload_idempotent, M1, [Tickets, AuthV2], [];
     "tickets.begin_upload_caps" => tickets::begin_upload_caps, M1, [Tickets, AuthV2], [];
     "tickets.begin_upload_packmap_refused" => tickets::begin_upload_packmap_refused, M1, [Tickets, AuthV2], [];
+    "tickets.upload_pack_ticketed" => tickets::upload_pack_ticketed, M1, [Tickets, AuthV2], [];
+    "tickets.upload_pack_bad_token" => tickets::upload_pack_bad_token, M1, [Tickets, AuthV2], [];
+    "tickets.upload_pack_binding_denied" => tickets::upload_pack_binding_denied, M1, [Tickets, AuthV2], [];
+    "tickets.upload_pack_expired_token" => tickets::upload_pack_expired_token, M1, [Tickets, AuthV2, TestFaults], [];
     "leases.bump_completes_and_writes_continue" => leases::bump_completes_and_writes_continue, M1, [EpochLeases, TestFaults], [];
     "info.shape_and_policy" => info::shape_and_policy, M1, [], [];
     "info.ignores_repository_header" => info::ignores_repository_header, M1, [], [];
@@ -172,6 +176,8 @@ cases! {
     "repo.missing_repository_invalid_argument" => repository::multi_invalid, M1, [MultiRepo, AuthV2], [];
     "repo.read_missing_repo_not_found" => repository::read_missing_repo, M1, [MultiRepo, AuthV2], [];
     "repo.packs_need_membership" => repository::packs_need_membership, M1, [MultiRepo, AuthV2], [];
+    "repository.upload_needs_ticket" => repository::upload_needs_ticket, M1, [MultiRepo, AuthV2], [];
+    "repository.ticketed_upload_multi" => repository::ticketed_upload_multi, M1, [MultiRepo, AuthV2, Tickets], [];
     "repo.isolation_packs" => repository::isolation_packs, M1, [MultiRepo, AuthV2], [];
     "repo.membership_read_your_writes" => repository::membership_read_your_writes, M1, [MultiRepo, AuthV2], [];
     "repo.malformed_membership_hint_no_op" => repository::malformed_membership_hint, M1, [MultiRepo, AuthV2], [];

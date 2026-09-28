@@ -229,17 +229,20 @@ client-consumed), `UpdateRefResponse` on this service carries **no**
 current-value field at all: a CAS failure is a Connect error
 (`failed_precondition`), full stop. This is a deliberate
 simplification, not an oversight &mdash; SPEC-TRANSPORT §7 already requires
-callers to disambiguate a possibly-lost write with a follow-up
-`read_ref` after any ambiguous failure (timeout, retry), so a second
-value-carrying channel on the CAS-conflict path adds a field no
-conforming client is allowed to trust as authoritative on its own.
-`ReadRef` is the one source of truth for "what is the ref's current
-value," called explicitly, every time.
+a caller that gets `RefConflict` to call `read_ref` before reporting a
+conflict, because the retry ladder can re-issue a write whose first
+attempt landed. A second value-carrying channel on the CAS-conflict path
+would add a field no conforming client is allowed to trust as
+authoritative on its own. `ReadRef` is the one source of truth for "what
+is the ref's current value," called explicitly, every time.
 
-`update_ref`'s trait doc requires: "callers retrying after a network
-timeout MUST follow up with `read_ref` to disambiguate whether the
-first attempt landed before treating `RefConflict` as a true
-conflict." This document reuses that requirement unchanged.
+This document reuses SPEC-TRANSPORT §7's caller obligations unchanged,
+for `UpdateRef` and for `AdvanceRefs`' conflict outcomes (§4). A
+deployment with the auth v2 replay ledger (§7.1) answers a re-issue
+that carries the same nonce with the stored result, so a re-issue within
+one call's retry ladder reports the true outcome there (§7.3); the
+`read_ref` obligation still applies to any other deployment and to a
+caller that invokes the operation again.
 
 ---
 
@@ -366,6 +369,7 @@ excludes.
 | Too many open upload tickets for the ref or the signer (§7.6) | `failed_precondition`, with public message `too many open upload tickets` |
 | An unresolved delta base after the relay-lag bound, in indexed mode (SPEC-SERVER §9.4) | `failed_precondition`, with public message `delta base not available in this repository` |
 | A part whose subtree hash or length differs from its commitment, or a completion whose merged root or total differs from the ticket (§7.6) | `invalid_argument` |
+| An invalid part receipt (malformed, unknown key id, or bad MAC; §7.6) | `invalid_argument` |
 | A pack still under verification in indexed mode (§7.6) | `unavailable` with exactly one `PendingVerification` detail |
 | A membership-dependent miss within the relay-lag bound, in indexed mode ([SPEC-SERVER §9.4](SPEC-SERVER.md#94-repository-isolated-membership-checks)) | `unavailable` with no detail; a retry with the same nonce is safe |
 | A missed commit deadline (`NotAfter`), a full shard, or outbox backpressure. Nothing commits, and a retry with the same nonce is safe. | `unavailable`, never `resource_exhausted` |
@@ -855,10 +859,13 @@ A server processes a signed write in this order:
      `invalid_argument`;
    - a `committed` operation returns its stored result;
    - an `in_flight` operation returns a retryable `aborted`, without
-     reaching admission.
+     reaching admission. A single-repository deployment MAY resume an
+     un-ticketed `UploadPack` with the same signed nonce by re-reading its
+     stream instead.
 
-   Only a new operation continues. So a retry never presents a spent payment
-   credential again, and one signer's result is never served to another.
+   Only a new operation continues beyond this step, apart from the scoped
+   upload resume above. So a retry never presents a spent payment credential
+   again, and one signer's result is never served to another.
 3. **Authorize** the write (§7.5), then run **admission** (§5.1)
    (for `BeginUpload`, after the live-ticket check of §7.7). A
    challenge or a denial allocates nothing. Because the lookup precedes
@@ -880,9 +887,10 @@ inserted, so a retry with the same nonce is evaluated again from step 2.
 ("Signed reads" above): a read is idempotent, so the server checks only the
 signature and the validity window.
 
-An upload no longer resumes through its replay record. An interrupted upload
-resumes through its ticket and part receipts (§7.6), under the per-RPC
-lifecycle of §7.7. An unreachable ledger or failed quota read fails closed.
+A ticketed upload resumes through its ticket and part receipts (§7.6),
+under the per-RPC lifecycle of §7.7. The single-repository un-ticketed
+`UploadPack` exception above may resume through its replay record. An
+unreachable ledger or failed quota read fails closed.
 
 `AUTH_AUDIENCE` must be explicitly configured for every deployment and local
 development origin.
@@ -976,10 +984,19 @@ SPEC-TRANSPORT §7's `is_retryable` classification, read off the
 `TransportError` §5's client-side mapping produces rather than directly
 off an HTTP status. Each retry re-issues the whole RPC from scratch
 (including, for `DownloadPack`, a fresh stream) &mdash; nothing from a failed
-prior attempt is reused. Mutating CAS ops (`UpdateRef`/`AdvanceRefs`) are
-safe to retry unconditionally because `is_retryable` excludes
-`TransportError::RefConflict`; a CAS conflict is never retried here &mdash; that
-stays caller-level policy.
+prior attempt is reused, except the signed-write identity: `update_ref` and
+`advance_refs` allocate one nonce and validity window per logical call
+(`RetryIdentity`) and send them on every attempt. The ladder re-issues
+`UpdateRef` and `AdvanceRefs` after a retryable failure. A re-issue never
+applies a write twice: a landed first attempt falsifies the precondition
+the re-issue carries, and a server with the replay ledger returns the
+stored result for the reused nonce (§7.1). A CAS conflict itself is never
+retried here (`is_retryable` excludes `TransportError::RefConflict`, and
+`AdvanceRefs` reports conflicts as successful responses, §4); that stays
+caller-level policy. Against a deployment without the replay ledger
+(`mkit-server`'s `Open`, `Bearer` and `TransportIdentity` modes), a
+re-issue can report a conflict for a write that landed, so the caller
+follows SPEC-TRANSPORT §7's `read_ref` rule.
 
 The regression tests
 (`rust/crates/mkit-transport-connect/tests/roundtrip.rs`,
@@ -1244,6 +1261,11 @@ backend's tag for the part. A part needs no admission decision, because
 admission happened at `BeginUpload`. Sending a part index again is
 idempotent.
 
+A deployment MUST retain a rotated key id in the receipt verification set
+for at least seven days after rotation, the maximum ticket lifetime. Only
+then may it retire that id. An invalid receipt within this window indicates
+forgery, rather than ordinary key retirement.
+
 **Part path.** `UploadPart`, `CompleteUpload` and a ticketed `UploadPack`
 form the part path. They record no replay entry. They are idempotent by content, so
 the server checks only the validity window, the ticket token, and the
@@ -1256,8 +1278,9 @@ ticket expiry.
 signed write with a `body:` commitment. The server verifies every
 receipt and merges the subtree hashes into a root. It makes the pack
 visible in storage only if the root equals `pack_id` and the lengths sum
-to `bytes`. Otherwise it aborts the storage session and returns
-`invalid_argument`. Completion does not make the pack a member of the
+to `bytes`. Otherwise it returns `invalid_argument` and **MAY** abort the
+storage session. Reclamation follows the backend lifecycle rule and ticket expiry.
+Completion does not make the pack a member of the
 repository. Completing the same ticket again is idempotent: it returns the
 same result and changes nothing.
 
@@ -1278,6 +1301,8 @@ pack is a member. When the deployment runs admission or configures an
 inspector
 (SPEC-SERVER §11.1), the threshold is 0. An upload that needs a ticket
 and carries none is `failed_precondition`.
+With a threshold of 0, even an empty pack needs a ticket; `BeginUpload`
+refuses zero bytes. Clients never upload empty packs.
 
 **Membership.** On a multi-repository deployment, a pack becomes a
 member of the repository only at the `AdvanceRefs` apply that consumes
@@ -1356,7 +1381,7 @@ policy.
 | RPC | Admission | What its apply writes |
 |---|---|---|
 | `BeginUpload` (unary; names its target ref) | Yes | In the target ref's shard: the replay record, a reservation row, and the ticket. |
-| `UploadPart`, `CompleteUpload`, and a ticketed `UploadPack` (the part path, §7.6) | No | Pack or part bytes only, authorized by the stateless ticket token. The part path writes nothing to a metadata shard. The ticket's audience, repository, and signer MUST equal the request's, and for a ticketed `UploadPack` its `pack_id` and byte count MUST equal the request's `pack:` commitment; otherwise the request is `permission_denied` (§7.6). |
+| `UploadPart`, `CompleteUpload`, and a ticketed `UploadPack` (the part path, §7.6) | No | Pack or part bytes, authorized by the stateless ticket token. A ticketed `UploadPack` MAY also write server-internal content-addressed blobs, including its upload marker (R-113). The part path writes nothing to a metadata shard. The ticket's audience, repository, and signer MUST equal the request's, and for a ticketed `UploadPack` its `pack_id` and byte count MUST equal the request's `pack:` commitment; otherwise the request is `permission_denied` (§7.6). |
 | `AdvanceRefs` | No; it consumes tickets | In the same ref shard: the head and the packmap, the ref's membership additions, which the server propagates to the repository index shards at least once, and one `Committed` outcome for each ticket it consumes. Tickets are local to the ref shard, so there is no cross-shard handoff. |
 
 - **Membership.** A pack becomes a member of the repository only at the
@@ -1529,9 +1554,11 @@ Explicitly deferred to sibling issues:
 
 | Version | Status | Changes |
 |---|---|---|
+| `2` (WP-1.11a) | draft | §5 classifies invalid part receipts as `invalid_argument`; §7.6 permits storage-session abort after a root mismatch and retains rotated receipt keys for at least seven days. |
 | `2` | draft | §7.4 repository addressing; §7.5 namespace and write policy (owner key); `GetServerInfo` (§2.1); §7.6 upload tickets and resumable parts; §7.8 ref deletion; §7.9 consistency and `ListRefs` paging; error-code split between `unauthenticated` and `permission_denied` (§5) (mkit#1084, mkit#1090); SPEC-WRITE-GRANTS (mkit#1085): signed reads and `X-Write-Grant` (§7.1), the M2 RPC rows (§2), and grant cross-references. §5.1 admission challenges: HTTP 402 with `permission_denied` and an opaque challenge list, raw MPP/x402 header pass-through, the header-returning `admission_helper` with its allowlist and hard-reserved set; §7.1 replay lookup after authentication and before authorization and admission, with signed reads outside the ledger; retryable `aborted` for in-flight operations (§5); §7.7 lifecycle per RPC (mkit#1086). The M0 server implementation still resumes an interrupted `UploadPack` through its `in_flight` replay record until M1 tickets land. M1: branch-sharded servers MAY require the canonical `AdvanceRefs` head/packmap pairing (§4; WP-1.22 amendment 1). Indexed mode: PendingVerification polling with a 1,000 ms floor (§5, §7.6), delta-base mapping and self-contained replanning in a new signed operation (§5, §7.6), packlist rebuilding (§7.6), advertised max_delta_chain_depth (§2.1), and the membership-dependent lag window and replay exclusion (§7.1, §7.9; SPEC-SERVER §9.4). BeginUpload open-ticket cap error and client no-retry carve-out (§5), and admission-free AlreadyPresent/live-ticket results (§7.6; WP-1.9a amendment 1). WP-4.11 scopes §7.4's Host/path/forwarded-selector prohibition to Connect RPCs and cross-links plain HTTP read admission (§5.1). |
 | `2` | draft | Additive `GetServerInfoResponse.leases = 17` (§2.1; SPEC-SERVER §12); §7.7 ticket-pack loss clarified as a defensive abort case. |
 | `2` | draft | Additive `GetServerInfoResponse.async_inspection = 18` (§2.1); published-view and quarantine rules in SPEC-SERVER §§10–11; §7.1 never stores a sync inspector `unavailable` for replay; §7.6 `AlreadyPresent` is never answered for a pack with hidden content. |
+| `2` | draft | Editorial: §3 and §7.3 retry obligations for `UpdateRef`/`AdvanceRefs` reconciled with SPEC-TRANSPORT §7 (MKIT-17). |
 | `1` | draft | Initial `mkit.transport.v1` proto: 7 wire RPCs covering every `Transport` trait verb (§2), `PackChunk` reused byte-for-byte from `ssh.proto`, `RefExpectation`/`RefEntry` duplicated with pinned wire numbers pending mkit#679's shared-proto extraction. |
 
 ---
@@ -1567,7 +1594,7 @@ reference Worker).
 | Every `TransportError` variant a server can raise has exactly one Connect code it maps to; a client's inverse mapping is mechanical, not heuristic. | §5's table. |
 | No RPC on one repository reads or changes another repository's refs, pack membership, or replay records. | §7.4 isolation; the `X-Repository` carriage rule. |
 | A write is authorized, or rejected with nothing allocated, before any quota or replay state is touched. | §7.5 order. |
-| A retry of a committed signed write returns the stored result and never reaches admission; a retry of an in-flight one gets a retryable `aborted`. | §7.1 order: authenticate, look up, then authorize and admit. |
+| A retry of a committed signed write returns the stored result and never reaches admission; a retry of an in-flight one gets a retryable `aborted`, except that a single-repository deployment MAY resume an un-ticketed `UploadPack` by re-reading its stream. | §7.1 order and its scoped upload exception. |
 | A challenged or denied request changes no state, and no challenge or `PendingVerification` answer is stored as a replay result. | §5.1 "No state on challenge"; §7.1. |
 | A challenge is HTTP 402 with `permission_denied`, only on a unary RPC, and is never retried automatically. | §5.1; §5; SPEC-TRANSPORT §7. |
 | A client attaches only allowlisted helper headers and never a hard-reserved one, whatever the configuration says. | §5.1 header allowlist and hard-reserved headers. |

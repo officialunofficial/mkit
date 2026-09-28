@@ -30,7 +30,9 @@ use crate::pipeline::{AuthMode, HookSet, Hooks, Pipeline, PipelineConfig};
 use crate::principal::Principal;
 use crate::repo::{Addressing, NamespaceKey, RepoId, RepoName};
 use crate::rt::ManualClock;
-use crate::store::{BlobKey, BlobStore, Key, NamespaceStore, Partition};
+use crate::store::{
+    BlobKey, BlobStore, Key, MultipartBlobStore, NamespaceStore, Partition, UnsupportedPartSink,
+};
 use crate::telemetry::NoopMetrics;
 use crate::upload::UploadError;
 use crate::{MemoryBlobStore, MemoryFault, MemoryKv};
@@ -100,7 +102,11 @@ fn cfg(auth: AuthMode) -> PipelineConfig {
     PipelineConfig::new(Addressing::Single { repo: repo() }, auth, upload_limits())
 }
 
-fn pipeline<B: BlobStore, N: NamespaceStore>(blobs: B, meta: N, auth: AuthMode) -> Pipeline<B, N> {
+fn pipeline<B: MultipartBlobStore, N: NamespaceStore>(
+    blobs: B,
+    meta: N,
+    auth: AuthMode,
+) -> Pipeline<B, N> {
     let clock = Arc::new(ManualClock::new(T0));
     let metrics = Arc::new(NoopMetrics);
     Pipeline::new(blobs, meta, Hooks::new(), cfg(auth), clock, metrics).unwrap()
@@ -119,7 +125,7 @@ fn principal() -> Principal {
     Principal::SshForcedCommand { key: None }
 }
 
-fn serve<B: BlobStore, N: NamespaceStore, H: HookSet>(
+fn serve<B: MultipartBlobStore, N: NamespaceStore, H: HookSet>(
     pipe: &Pipeline<B, N, H>,
     mut src: VecSource,
     sink: &mut VecSink,
@@ -130,7 +136,7 @@ fn serve<B: BlobStore, N: NamespaceStore, H: HookSet>(
 
 /// Run a session: `Hello`, then `bodies`. Returns how it ended and every
 /// frame after the `HelloResponse`, which it checks.
-fn run<B: BlobStore, N: NamespaceStore, H: HookSet>(
+fn run<B: MultipartBlobStore, N: NamespaceStore, H: HookSet>(
     pipe: &Pipeline<B, N, H>,
     bodies: impl IntoIterator<Item = Option<Body>>,
 ) -> (SessionEnd, Vec<SshFrame>) {
@@ -242,7 +248,7 @@ fn pack_bytes(len: usize, seed: u8) -> Vec<u8> {
 
 /// Seed `pipe` through the ssh session itself: `refs` with `ANY` and the
 /// packs, each in one chunk.
-fn seed<B: BlobStore, N: NamespaceStore, H: HookSet>(
+fn seed<B: MultipartBlobStore, N: NamespaceStore, H: HookSet>(
     pipe: &Pipeline<B, N, H>,
     refs: &[(&str, Hash)],
     packs: &[&[u8]],
@@ -268,7 +274,7 @@ fn seed<B: BlobStore, N: NamespaceStore, H: HookSet>(
 }
 
 fn blob_present(blobs: &impl BlobStore, id: Hash) -> bool {
-    block_on(blobs.head(&BlobKey::new(id))).unwrap().is_some()
+    block_on(blobs.head(&BlobKey::pack(id))).unwrap().is_some()
 }
 
 fn valid_pack() -> (Vec<u8>, Hash) {
@@ -1314,6 +1320,11 @@ fn download_read_failure_after_header_is_internal() {
         }
     }
 
+    impl MultipartBlobStore for Failing {
+        type PartSink = UnsupportedPartSink;
+        const MAX_PARTS: u32 = u32::MAX;
+    }
+
     let clock = Arc::new(ManualClock::new(T0));
     let meta = MemoryKv::with_clock(clock);
     let pipe = pipeline(
@@ -1540,7 +1551,7 @@ const GOLDEN_OUT: &[u8] = include_bytes!("../../../../tests/golden/ssh-serve/ses
 
 /// Seed `pipe` like the capture, replay the script over the blocking
 /// `std::io` adapters and return the bytes written.
-fn replay_golden<B: BlobStore, N: NamespaceStore>(pipe: &Pipeline<B, N>) -> Vec<u8> {
+fn replay_golden<B: MultipartBlobStore, N: NamespaceStore>(pipe: &Pipeline<B, N>) -> Vec<u8> {
     let g = golden();
     assert_eq!(
         g.input, GOLDEN_IN,
@@ -1643,7 +1654,7 @@ const GOLDEN_2_IN: &[u8] = include_bytes!("../../../../tests/golden/ssh-serve/se
 const GOLDEN_2_OUT: &[u8] = include_bytes!("../../../../tests/golden/ssh-serve/session-2.bin");
 
 /// Replay `session-2` on an already seeded `pipe`.
-fn replay_golden_2<B: BlobStore, N: NamespaceStore>(pipe: &Pipeline<B, N>) -> Vec<u8> {
+fn replay_golden_2<B: MultipartBlobStore, N: NamespaceStore>(pipe: &Pipeline<B, N>) -> Vec<u8> {
     let input = golden2().input;
     assert_eq!(
         input, GOLDEN_2_IN,

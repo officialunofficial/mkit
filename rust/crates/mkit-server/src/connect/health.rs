@@ -14,7 +14,7 @@ use super::proto::mkit::transport::v1::TRANSPORT_SERVICE_SERVICE_NAME;
 use crate::error::ServerError;
 use crate::pipeline::{HookSet, Pipeline};
 use crate::rt::send_wrap;
-use crate::store::{BlobStore, NamespaceStore};
+use crate::store::{MultipartBlobStore, NamespaceStore};
 
 /// `Check` answers for the whole server (`""`) and for
 /// `mkit.transport.v1.TransportService`: `SERVING` when both stores answer
@@ -43,7 +43,7 @@ impl<B, N, H> ConnectHealth<B, N, H> {
 #[allow(refining_impl_trait)]
 impl<B, N, H> Health for ConnectHealth<B, N, H>
 where
-    B: BlobStore + 'static,
+    B: MultipartBlobStore + 'static,
     N: NamespaceStore + 'static,
     H: HookSet + 'static,
 {

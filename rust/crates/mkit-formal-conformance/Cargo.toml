@@ -1,0 +1,32 @@
+# Model-based conformance of the formal models against the real code
+# (Linear MKIT-22, epic MKIT-17). Test-only: the crate's library is empty
+# and everything lives in `tests/`. A separate crate, not a `mkit-core`
+# integration test, because the refs model's lock domains include the
+# file transport (`mkit-transport-file`) and the memory transport
+# (`mkit-transport-memory`), both of which depend on `mkit-core`.
+#
+# `publish = false`, never a dependency of anything. No third-party
+# dependency beyond what the workspace already uses (`serde_json`,
+# `tempfile`, both MIT OR Apache-2.0).
+[package]
+name = "mkit-formal-conformance"
+description = "Replays ITF traces of mkit's Quint models against the real implementation"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+mkit-core = { path = "../mkit-core" }
+mkit-transport-file = { path = "../mkit-transport-file" }
+mkit-transport-memory = { path = "../mkit-transport-memory" }
+serde_json = "1"
+tempfile = "3"

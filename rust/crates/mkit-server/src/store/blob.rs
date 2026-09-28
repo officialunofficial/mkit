@@ -1,21 +1,106 @@
 //! The blob contract (PRD §5.3): content-addressed, immutable bytes.
 //!
-//! Every concrete store is built for one keyspace: `packs` (today's
-//! `packs/<hex>`, where `BLAKE3(bytes) == key`) by default. M4 builds a
-//! second instance for the global object store (D32), so a new keyspace
-//! needs no trait change. Resumable multipart uploads are a sub-trait
-//! (`MultipartBlobStore`, WP-1.11).
+//! A [`BlobKey`] selects either `packs/<hex>` or the upload marker namespace;
+//! both require `BLAKE3(bytes) == key`. Pack RPCs construct only pack keys.
+//! Resumable multipart uploads are a sub-trait (`MultipartBlobStore`, WP-1.11).
 
 use core::fmt;
 use core::future::Future;
 
 use bytes::Bytes;
+use mkit_core::hash::{Hash, to_hex_bytes};
+use mkit_core::protocol::PackKey;
+use mkit_core::upload_parts::PartPlan;
 
 use super::error::StoreError;
 use crate::rt::{BoxStream, MaybeSend, MaybeSync};
 
-/// A blob's key.
-pub type BlobKey = mkit_core::protocol::PackKey;
+/// A blob's content hash and storage namespace. Pack RPCs construct only
+/// `Pack` keys, so an upload marker cannot be fetched as a pack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BlobKey {
+    hash: Hash,
+    namespace: BlobNamespace,
+}
+
+/// The physical namespace of a content-addressed blob.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum BlobNamespace {
+    /// Pack bytes.
+    Pack,
+    /// Proof that a ticket holder streamed and verified a pack.
+    UploadMarker,
+}
+
+impl BlobKey {
+    /// Construct a pack key.
+    #[must_use]
+    pub const fn pack(hash: Hash) -> Self {
+        Self {
+            hash,
+            namespace: BlobNamespace::Pack,
+        }
+    }
+
+    /// Construct an upload marker key.
+    #[must_use]
+    pub const fn upload_marker(hash: Hash) -> Self {
+        Self {
+            hash,
+            namespace: BlobNamespace::UploadMarker,
+        }
+    }
+
+    /// Content hash bytes.
+    #[must_use]
+    pub const fn hash(&self) -> &Hash {
+        &self.hash
+    }
+
+    /// Lowercase hexadecimal content hash.
+    #[must_use]
+    pub fn to_hex(&self) -> String {
+        to_hex_bytes(&self.hash)
+    }
+
+    /// Path relative to a blob root, given the pack keyspace (which may
+    /// include a deployment prefix). Markers use its sibling namespace.
+    ///
+    /// # Errors
+    /// [`StoreError::Invalid`] for a namespace this backend does not support.
+    pub fn relative_path(&self, pack_keyspace: &str) -> Result<String, StoreError> {
+        // The fallback handles future BlobNamespace variants without a backend panic.
+        #[allow(unreachable_patterns)]
+        let directory = match self.namespace {
+            BlobNamespace::Pack => pack_keyspace.to_owned(),
+            BlobNamespace::UploadMarker => {
+                let parent = pack_keyspace
+                    .rsplit_once('/')
+                    .map_or("", |(parent, _)| parent);
+                if parent.is_empty() {
+                    "upload-markers/v1".to_owned()
+                } else {
+                    format!("{parent}/upload-markers/v1")
+                }
+            }
+            _ => return Err(StoreError::Invalid("unsupported blob namespace".into())),
+        };
+        Ok(format!("{directory}/{}", self.to_hex()))
+    }
+
+    /// Physical namespace.
+    #[must_use]
+    pub const fn namespace(&self) -> BlobNamespace {
+        self.namespace
+    }
+}
+
+impl From<PackKey> for BlobKey {
+    fn from(key: PackKey) -> Self {
+        Self::pack(key.0)
+    }
+}
 
 /// An inclusive byte range, as in HTTP `Range`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,4 +231,102 @@ pub trait PackSink: MaybeSend {
 
     /// Discard the upload; nothing becomes visible.
     fn abort(self) -> impl Future<Output = ()> + MaybeSend;
+}
+
+/// A stored part reference recovered from a server-authenticated receipt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartRef {
+    /// Zero-based part index.
+    pub index: u32,
+    /// Number of part bytes.
+    pub len: u64,
+    /// Opaque backend tag, at most 128 bytes on the wire.
+    pub tag: Vec<u8>,
+}
+
+/// A verified, staged part. `commit` makes only this part durable; the pack
+/// remains invisible until [`MultipartBlobStore::complete`].
+pub trait PartSink: MaybeSend {
+    /// Append a non-empty chunk without exceeding the part's expected length.
+    fn write(&mut self, chunk: Bytes) -> impl Future<Output = Result<(), StoreError>> + MaybeSend;
+
+    /// Verify length and subtree CV, then return an opaque backend tag.
+    /// A CV mismatch is [`StoreError::PartSubtreeMismatch`]; other invalid
+    /// staged state is [`StoreError::Invalid`].
+    fn commit(self) -> impl Future<Output = Result<Vec<u8>, StoreError>> + MaybeSend;
+
+    /// Discard this attempted part.
+    fn abort(self) -> impl Future<Output = ()> + MaybeSend;
+}
+
+/// A resumable blob store with opaque storage sessions and verified parts.
+pub trait MultipartBlobStore: BlobStore {
+    /// The upload handle returned by [`Self::begin_part`].
+    type PartSink: PartSink;
+
+    /// Maximum part count accepted by this backend.
+    const MAX_PARTS: u32;
+
+    /// Whether this backend can start a multipart upload now.
+    fn supports_multipart(&self) -> bool {
+        false
+    }
+
+    /// Open a new storage session for a pack.
+    fn begin_multipart(
+        &self,
+        _key: BlobKey,
+        _len: u64,
+        _part_size: u64,
+    ) -> impl Future<Output = Result<Vec<u8>, StoreError>> + MaybeSend {
+        async { Err(StoreError::Unsupported("multipart uploads".into())) }
+    }
+
+    /// Start one part in an existing storage session.
+    fn begin_part(
+        &self,
+        _key: BlobKey,
+        _session: &[u8],
+        _plan: &PartPlan,
+        _index: u32,
+        _expected_cv: [u8; 32],
+    ) -> impl Future<Output = Result<Self::PartSink, StoreError>> + MaybeSend {
+        async { Err(StoreError::Unsupported("multipart uploads".into())) }
+    }
+
+    /// Atomically make the verified pack visible.
+    fn complete(
+        &self,
+        _key: BlobKey,
+        _session: &[u8],
+        _plan: &PartPlan,
+        _parts: &[PartRef],
+    ) -> impl Future<Output = Result<CommitOutcome, StoreError>> + MaybeSend {
+        async { Err(StoreError::Unsupported("multipart uploads".into())) }
+    }
+
+    /// Reclaim an incomplete session. Repeated aborts succeed.
+    fn abort(
+        &self,
+        _key: BlobKey,
+        _session: &[u8],
+    ) -> impl Future<Output = Result<(), StoreError>> + MaybeSend {
+        async { Err(StoreError::Unsupported("multipart uploads".into())) }
+    }
+}
+
+/// The sink type for backends whose multipart support arrives later.
+#[derive(Debug)]
+pub struct UnsupportedPartSink;
+
+impl PartSink for UnsupportedPartSink {
+    async fn write(&mut self, _chunk: Bytes) -> Result<(), StoreError> {
+        Err(StoreError::Unsupported("multipart uploads".into()))
+    }
+
+    async fn commit(self) -> Result<Vec<u8>, StoreError> {
+        Err(StoreError::Unsupported("multipart uploads".into()))
+    }
+
+    async fn abort(self) {}
 }

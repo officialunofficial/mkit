@@ -4,6 +4,9 @@ The authoritative wire-format, on-disk, and subsystem specifications.
 Each spec carries its own `status` (stable / normative / draft) in its
 front matter.
 
+[FORMAL.md](../FORMAL.md) maps spec clauses to the formal models and
+proofs that check them, with each result's bounds.
+
 - [SPEC-ATTESTATIONS](SPEC-ATTESTATIONS.md) &mdash; native attestations: in-toto v1 statements in DSSE envelopes.
 - [SPEC-CONCURRENCY](SPEC-CONCURRENCY.md) &mdash; the total mkit lock order across worktree, ref-history, and CAS locks.
 - [SPEC-CONFIG-SECURITY](SPEC-CONFIG-SECURITY.md) &mdash; user-vs-repo config trust boundary and key classification rules.
