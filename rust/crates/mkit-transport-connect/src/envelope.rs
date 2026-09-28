@@ -84,8 +84,10 @@ enum ProcedureAuth {
 fn procedure_auth(procedure: &str) -> Option<ProcedureAuth> {
     let method = procedure.strip_prefix("/mkit.transport.v1.TransportService/")?;
     Some(match method {
-        "ListRefs" | "ReadRef" | "PackExists" | "DownloadPack" | "IssueObjectUrl" | "UpdateRef"
-        | "AdvanceRefs" | "BeginUpload" | "CompleteUpload" => ProcedureAuth::Body,
+        "ListRefs" | "ReadRef" | "PackExists" | "DownloadPack" | "IssueObjectUrl"
+        | "GetReceipt" | "UpdateRef" | "AdvanceRefs" | "BeginUpload" | "CompleteUpload" => {
+            ProcedureAuth::Body
+        }
         "UploadPack" => ProcedureAuth::Commitment("pack:"),
         "UploadPart" => ProcedureAuth::Commitment("part:"),
         "GetServerInfo" => ProcedureAuth::Unsigned { repository: true },
@@ -651,12 +653,14 @@ mod tests {
                 .filter_map(|line| line.trim().strip_prefix('"')?.strip_suffix("\","))
                 .filter(|path| path.starts_with("/mkit.transport.v1.TransportService/"))
                 .collect();
-            assert_eq!(procedures.len(), 11);
+            assert_eq!(procedures.len(), 12);
             for procedure in procedures {
                 let method = procedure.rsplit('/').next().unwrap();
                 let expected = match method {
-                    "ListRefs" | "ReadRef" | "PackExists" | "DownloadPack" | "UpdateRef"
-                    | "AdvanceRefs" | "BeginUpload" | "CompleteUpload" => ProcedureAuth::Body,
+                    "ListRefs" | "ReadRef" | "PackExists" | "DownloadPack" | "GetReceipt"
+                    | "UpdateRef" | "AdvanceRefs" | "BeginUpload" | "CompleteUpload" => {
+                        ProcedureAuth::Body
+                    }
                     "UploadPack" => ProcedureAuth::Commitment("pack:"),
                     "UploadPart" => ProcedureAuth::Commitment("part:"),
                     "GetServerInfo" => ProcedureAuth::Unsigned { repository: true },

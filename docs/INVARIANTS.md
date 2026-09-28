@@ -5,6 +5,26 @@ single crate or spec. Each entry states the invariant, why it matters, and
 what breaks when it is violated. A regression test enforces each one; find
 it by the file path listed under "Enforced by".
 
+## Storage receipts attest recorded state without exposing inspection
+
+**Always:** a storage receipt binds a committed live advance or lease change
+to its issue-time terms and deployment role key. An advance receipt contains
+only the writer's ref and consumed-ticket facts, never publication, hold, inspection,
+or cross-repository physical-storage facts. Replays and later fetches return
+the same signed bytes.
+
+**Because:** changing the claim after commit defeats audit evidence, while
+publication or physical-storage details can expose inspection decisions or
+other repositories' holdings.
+
+**If violated:** a writer can use receipts to evade detection, infer another
+repository's packs, or receive contradictory evidence for one operation.
+
+**Enforced by:** `rust/crates/mkit-server/tests/golden_receipts.rs` pins the
+format, subject and key-window checks. Runtime issuance, replay and field
+exclusion are specified in SPEC-SERVER §15 and await WP-5.8 implementation
+and conformance coverage.
+
 ## Ticketed UploadPack touches no metadata and always leaves a marker
 
 **Always:** a ticketed UploadPack verifies the signed pack commitment and
@@ -1381,6 +1401,59 @@ surface or another ref that reuses pending content.
 **Enforced by:** normative SPEC-SERVER §§10–11.
 Runtime enforcement and behavioral conformance remain for WP-5.4/5.5/5.13;
 the current goldens verify the additive hook wire contract only.
+
+## Takedown denial precedes rewrites (specified, implementation pending)
+
+**Always:** a global blocklist write stops extracted and HTTP serving at
+once. Until a repository's takedown completes, chunks of its blocked
+manifest are also unservable, although chunks are not blocklisted.
+Every pack read proves that the pack contains no blocked id or such
+chunk and is not superseded, or answers absent. HTTP reachability does
+not descend through a blocked or tombstoned manifest. The serving stop
+is immediate, independent of holder discovery; the sweep does not
+impose a deployment-wide pack outage. Every blocklist check gating a
+membership, index, or holder write is at or after its `plan_time`.
+After the cut at takedown time plus `MAX_APPLY_WINDOW + margin`, each
+namespace's relay watermark passes the cut before its sweep reads it.
+No replacement or preserved bytes become a serving or delta-base source until
+that repository's guarded rewrite and ref-value substitution complete. Live,
+published and retained intermediate values, membership and ref-addition records
+all name the same replacement packmap after membership becomes visible
+and then ref values are substituted. A hit resolves on its repository's
+completion; the safety-cut sweep and watermark govern completion.
+
+**Because:** a lagging index or an intermediate advance can otherwise serve
+blocked bytes or resurrect a removed pack after a later publication.
+
+**If violated:** a reader or writer can recover taken-down content, or a
+replacement corrupts an unrelated branch's closure.
+
+**Enforced by:** normative SPEC-SERVER §14 and the redaction wire goldens.
+Runtime enforcement remains for the takedown, rewrite, and serving WPs.
+
+## Admin authority and audit continuity (specified, implementation pending)
+
+**Always:** administrative effects require a valid `mkit-admin:v1` signature
+from a key whose deployment-wide roles permit the procedure. A `RENEWAL` or
+`POLICY` change cannot bring lease-derived suspension or deletion earlier
+than the configured minimum notice through any `SetLease` action, and can
+always extend a lease, even while an override suspends the repository. A nonce cannot authorize
+different request bytes, and a repeated long-running operation id cannot
+start a second action. Every authenticated result and automatic redaction,
+release, waiver or purge appends one gapless hash-chained audit entry.
+Unauthenticated attempts never enter the durable log. Pruning preserves a
+checkpoint through the longest active preservation retention.
+
+**Because:** lease-only billing authority must not grant moderation power,
+and operators need verifiable evidence of changes that affect serving or
+preserved bytes.
+
+**If violated:** a replay or wrong-role key changes protected content, or a
+missing audit segment conceals an administrative action.
+
+**Enforced by:** normative SPEC-SERVER §16 and its admin goldens. Runtime
+enforcement and behavioral conformance remain pending.
+
 ## BeginUpload decisions and replay share the write batch
 
 **Always:** BeginUpload authorizes before returning a live ticket or membership

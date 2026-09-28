@@ -62,6 +62,14 @@ pub type OwnedGetServerInfoRequestView = ::buffa::view::OwnedView<
 pub type OwnedGetServerInfoResponseView = ::buffa::view::OwnedView<
     __buffa::view::GetServerInfoResponseView<'static>,
 >;
+///Shorthand for `OwnedView<GetReceiptRequestView<'static>>`.
+pub type OwnedGetReceiptRequestView = ::buffa::view::OwnedView<
+    __buffa::view::GetReceiptRequestView<'static>,
+>;
+///Shorthand for `OwnedView<GetReceiptResponseView<'static>>`.
+pub type OwnedGetReceiptResponseView = ::buffa::view::OwnedView<
+    __buffa::view::GetReceiptResponseView<'static>,
+>;
 ///Shorthand for `OwnedView<BeginUploadRequestView<'static>>`.
 pub type OwnedBeginUploadRequestView = ::buffa::view::OwnedView<
     __buffa::view::BeginUploadRequestView<'static>,
@@ -342,6 +350,38 @@ for ::buffa::view::OwnedView<__buffa::view::GetServerInfoResponseView<'static>> 
         )
     }
 }
+impl ::connectrpc::Encodable<GetReceiptResponse>
+for __buffa::view::GetReceiptResponseView<'_> {
+    fn encode(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body(self, codec)
+    }
+}
+impl ::connectrpc::Encodable<GetReceiptResponse>
+for ::buffa::view::OwnedView<__buffa::view::GetReceiptResponseView<'static>> {
+    fn encode(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body(self.reborrow(), codec)
+    }
+    /// An `OwnedView` still holds the buffer it was decoded from, so
+    /// its large fields can be handed to the response body by
+    /// reference count instead of copied. The bare view impl above
+    /// cannot do this: it has borrows but no buffer to name.
+    fn encode_segments(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::connectrpc::EncodedBody, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body_segments(
+            self.reborrow(),
+            self.bytes(),
+            codec,
+        )
+    }
+}
 impl ::connectrpc::Encodable<BeginUploadResponse>
 for __buffa::view::BeginUploadResponseView<'_> {
     fn encode(
@@ -485,6 +525,12 @@ pub const TRANSPORT_SERVICE_DOWNLOAD_PACK_SPEC: ::connectrpc::Spec = ::connectrp
 /// Static [`Spec`](::connectrpc::Spec) for the `GetServerInfo` RPC, as seen by the server; the generated client passes it with [`origin`](::connectrpc::Spec::origin) `Client` (compare across sides with [`Spec::same_method`](::connectrpc::Spec::same_method)).
 pub const TRANSPORT_SERVICE_GET_SERVER_INFO_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
         "/mkit.transport.v1.TransportService/GetServerInfo",
+        ::connectrpc::StreamType::Unary,
+    )
+    .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
+/// Static [`Spec`](::connectrpc::Spec) for the `GetReceipt` RPC, as seen by the server; the generated client passes it with [`origin`](::connectrpc::Spec::origin) `Client` (compare across sides with [`Spec::same_method`](::connectrpc::Spec::same_method)).
+pub const TRANSPORT_SERVICE_GET_RECEIPT_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
+        "/mkit.transport.v1.TransportService/GetReceipt",
         ::connectrpc::StreamType::Unary,
     )
     .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
@@ -715,6 +761,24 @@ pub trait TransportService: Send + Sync + 'static {
     ) -> impl ::std::future::Future<
         Output = ::connectrpc::ServiceResult<
             impl ::connectrpc::Encodable<GetServerInfoResponse> + Send + use<'a, Self>,
+        >,
+    > + Send;
+    /// Fetch a retained writer-view storage receipt (SPEC-SERVER §15).
+    ///
+    /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
+    ///
+    /// `request` is borrowed from the request body and is valid for the
+    /// duration of the call; message fields are read directly on it
+    /// (zero-copy). The response cannot borrow from `request` — use
+    /// `.to_owned_message()` (or copy the specific fields) for anything
+    /// returned, stored, or moved into `tokio::spawn`.
+    fn get_receipt<'a>(
+        &'a self,
+        ctx: ::connectrpc::RequestContext,
+        request: ::connectrpc::ServiceRequest<'_, GetReceiptRequest>,
+    ) -> impl ::std::future::Future<
+        Output = ::connectrpc::ServiceResult<
+            impl ::connectrpc::Encodable<GetReceiptResponse> + Send + use<'a, Self>,
         >,
     > + Send;
     /// Reserve an upload for a ref (SPEC-TRANSPORT-CONNECT §7.6).
@@ -999,6 +1063,31 @@ impl<S: TransportService> TransportServiceExt for S {
             .with_spec(TRANSPORT_SERVICE_GET_SERVER_INFO_SPEC)
             .route_view(
                 TRANSPORT_SERVICE_SERVICE_NAME,
+                "GetReceipt",
+                {
+                    let svc = ::std::sync::Arc::clone(&self);
+                    ::connectrpc::view_handler_fn(move |
+                        ctx,
+                        req: ::buffa::view::OwnedView<
+                            __buffa::view::GetReceiptRequestView<'static>,
+                        >,
+                        format|
+                    {
+                        let svc = ::std::sync::Arc::clone(&svc);
+                        async move {
+                            let sreq = ::connectrpc::ServiceRequest::<
+                                GetReceiptRequest,
+                            >::from_parts(req.reborrow(), req.bytes());
+                            svc.get_receipt(ctx, sreq)
+                                .await?
+                                .encode::<GetReceiptResponse>(format)
+                        }
+                    })
+                },
+            )
+            .with_spec(TRANSPORT_SERVICE_GET_RECEIPT_SPEC)
+            .route_view(
+                TRANSPORT_SERVICE_SERVICE_NAME,
                 "BeginUpload",
                 {
                     let svc = ::std::sync::Arc::clone(&self);
@@ -1168,6 +1257,12 @@ impl<T: TransportService> ::connectrpc::Dispatcher for TransportServiceServer<T>
                         .with_spec(TRANSPORT_SERVICE_GET_SERVER_INFO_SPEC),
                 )
             }
+            "GetReceipt" => {
+                Some(
+                    ::connectrpc::dispatcher::codegen::MethodDescriptor::unary(false)
+                        .with_spec(TRANSPORT_SERVICE_GET_RECEIPT_SPEC),
+                )
+            }
             "BeginUpload" => {
                 Some(
                     ::connectrpc::dispatcher::codegen::MethodDescriptor::unary(false)
@@ -1299,6 +1394,22 @@ impl<T: TransportService> ::connectrpc::Dispatcher for TransportServiceServer<T>
                     svc.get_server_info(ctx, req)
                         .await?
                         .encode::<GetServerInfoResponse>(format)
+                })
+            }
+            "GetReceipt" => {
+                let svc = ::std::sync::Arc::clone(&self.inner);
+                Box::pin(async move {
+                    let body = ::connectrpc::dispatcher::codegen::request_proto_bytes::<
+                        GetReceiptRequest,
+                    >(request.encoded()?, format)?;
+                    let req: __buffa::view::GetReceiptRequestView<'_> = ::connectrpc::dispatcher::codegen::decode_borrowed_request_view(
+                        &body,
+                        ctx.decode_options(),
+                    )?;
+                    let req = ::connectrpc::ServiceRequest::<
+                        GetReceiptRequest,
+                    >::from_parts(&req, &body);
+                    svc.get_receipt(ctx, req).await?.encode::<GetReceiptResponse>(format)
                 })
             }
             "BeginUpload" => {
@@ -1826,6 +1937,43 @@ where
                 &self.transport,
                 &self.config,
                 TRANSPORT_SERVICE_GET_SERVER_INFO_SPEC
+                    .with_origin(::connectrpc::SpecOrigin::Client),
+                request,
+                options,
+            )
+            .await
+    }
+    /// Call the GetReceipt RPC. Sends a request to /mkit.transport.v1.TransportService/GetReceipt.
+    pub async fn get_receipt(
+        &self,
+        request: GetReceiptRequest,
+    ) -> Result<
+        ::connectrpc::client::UnaryResponse<
+            ::buffa::view::OwnedView<__buffa::view::GetReceiptResponseView<'static>>,
+        >,
+        ::connectrpc::ConnectError,
+    > {
+        self.get_receipt_with_options(
+                request,
+                ::connectrpc::client::CallOptions::default(),
+            )
+            .await
+    }
+    /// Call the GetReceipt RPC with explicit per-call options. Options override [`ClientConfig`](::connectrpc::client::ClientConfig) defaults.
+    pub async fn get_receipt_with_options(
+        &self,
+        request: GetReceiptRequest,
+        options: ::connectrpc::client::CallOptions,
+    ) -> Result<
+        ::connectrpc::client::UnaryResponse<
+            ::buffa::view::OwnedView<__buffa::view::GetReceiptResponseView<'static>>,
+        >,
+        ::connectrpc::ConnectError,
+    > {
+        ::connectrpc::client::call_unary(
+                &self.transport,
+                &self.config,
+                TRANSPORT_SERVICE_GET_RECEIPT_SPEC
                     .with_origin(::connectrpc::SpecOrigin::Client),
                 request,
                 options,

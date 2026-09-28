@@ -1,0 +1,10 @@
+{
+  "operationId": "admin:take:1",
+  "level": "TAKEDOWN_LEVEL_CONTENT",
+  "reason": "reviewed violation",
+  "operatorLabel": "case-17",
+  "objectIds": [
+    "ERERERERERERERERERERERERERERERERERERERERERE="
+  ],
+  "reasonToken": "policy"
+}
