@@ -1017,7 +1017,7 @@
     "track": "proto",
     "depends_on": [
       "S2",
-      "1.20"
+      "1.2"
     ],
     "size": "S",
     "summary": "Adds GetGrantEpoch, SetGrantEpoch, IssueObjectUrl and SetRepoVisibility to mkit.transport.v1 additively with regenerated code and unimplemented stubs.",
@@ -1177,7 +1177,7 @@
     "track": "client",
     "depends_on": [
       "2.4b",
-      "1.20"
+      "1.16"
     ],
     "size": "M",
     "summary": "The client signs every RPC to its trusted remote (GetServerInfo stays unsigned) and attaches the matching grant header from the user grant store.",
@@ -1285,7 +1285,7 @@
     "track": "proto",
     "depends_on": [
       "S3",
-      "1.20"
+      "1.2"
     ],
     "size": "S",
     "summary": "Adds the opaque AdmissionChallenge{challenges, description} detail with golden binary and JSON 402 bodies.",
@@ -1597,7 +1597,8 @@
     "track": "core",
     "depends_on": [
       "4.4",
-      "1.20"
+      "1.23",
+      "1.8"
     ],
     "size": "M",
     "summary": "Stores object-index rows in fixed-fan-out repo index shards through the relay, with repo-scoped batch lookups and no cross-repo query API.",
@@ -1688,7 +1689,7 @@
     "track": "client",
     "depends_on": [
       "4.4",
-      "1.20"
+      "1.16"
     ],
     "size": "M",
     "summary": "The push loop polls AdvanceRefs until the ticket expires, honoring retry_after and re-signing after 300 s, outside the generic retry ladder.",
@@ -1705,17 +1706,18 @@
     "track": "storage",
     "depends_on": [
       "4.4",
-      "1.20"
+      "1.8"
     ],
     "size": "M",
-    "summary": "Wires ContentShard partitions to ContentIndexShard DOs and sub-shards holder rows by (object, hash(holder)) with a safe-direction holder count, so one widely held object can't fill a shard.",
+    "summary": "Deferred (R-131): Workers content shards already wired by 1.8; holder sub-sharding deferred until an object nears a holder or size threshold; 4.10 absorbs HolderV1{seq, op_id}.",
     "human_action": false,
     "area_gates": [
       "rust",
       "wasm",
       "workers",
       "conf-wrangler"
-    ]
+    ],
+    "status": "dropped"
   },
   {
     "id": "4.10",
@@ -1723,8 +1725,7 @@
     "milestone": "M4",
     "track": "core",
     "depends_on": [
-      "4.7",
-      "4.10a"
+      "4.7"
     ],
     "size": "L",
     "summary": "Extracts blobs of at least 64 KiB and reassembles every ChunkedBlob by streaming into one object keyed by its manifest id in the objects keyspace, with whole-file dedup, holds before apply (released only in the relay step that records the holder row) and R2 429 treated as HEAD-then-verify.",

@@ -229,17 +229,20 @@ client-consumed), `UpdateRefResponse` on this service carries **no**
 current-value field at all: a CAS failure is a Connect error
 (`failed_precondition`), full stop. This is a deliberate
 simplification, not an oversight &mdash; SPEC-TRANSPORT §7 already requires
-callers to disambiguate a possibly-lost write with a follow-up
-`read_ref` after any ambiguous failure (timeout, retry), so a second
-value-carrying channel on the CAS-conflict path adds a field no
-conforming client is allowed to trust as authoritative on its own.
-`ReadRef` is the one source of truth for "what is the ref's current
-value," called explicitly, every time.
+a caller that gets `RefConflict` to call `read_ref` before reporting a
+conflict, because the retry ladder can re-issue a write whose first
+attempt landed. A second value-carrying channel on the CAS-conflict path
+would add a field no conforming client is allowed to trust as
+authoritative on its own. `ReadRef` is the one source of truth for "what
+is the ref's current value," called explicitly, every time.
 
-`update_ref`'s trait doc requires: "callers retrying after a network
-timeout MUST follow up with `read_ref` to disambiguate whether the
-first attempt landed before treating `RefConflict` as a true
-conflict." This document reuses that requirement unchanged.
+This document reuses SPEC-TRANSPORT §7's caller obligations unchanged,
+for `UpdateRef` and for `AdvanceRefs`' conflict outcomes (§4). A
+deployment with the auth v2 replay ledger (§7.1) answers a re-issue
+that carries the same nonce with the stored result, so a re-issue within
+one call's retry ladder reports the true outcome there (§7.3); the
+`read_ref` obligation still applies to any other deployment and to a
+caller that invokes the operation again.
 
 ---
 
@@ -981,10 +984,19 @@ SPEC-TRANSPORT §7's `is_retryable` classification, read off the
 `TransportError` §5's client-side mapping produces rather than directly
 off an HTTP status. Each retry re-issues the whole RPC from scratch
 (including, for `DownloadPack`, a fresh stream) &mdash; nothing from a failed
-prior attempt is reused. Mutating CAS ops (`UpdateRef`/`AdvanceRefs`) are
-safe to retry unconditionally because `is_retryable` excludes
-`TransportError::RefConflict`; a CAS conflict is never retried here &mdash; that
-stays caller-level policy.
+prior attempt is reused, except the signed-write identity: `update_ref` and
+`advance_refs` allocate one nonce and validity window per logical call
+(`RetryIdentity`) and send them on every attempt. The ladder re-issues
+`UpdateRef` and `AdvanceRefs` after a retryable failure. A re-issue never
+applies a write twice: a landed first attempt falsifies the precondition
+the re-issue carries, and a server with the replay ledger returns the
+stored result for the reused nonce (§7.1). A CAS conflict itself is never
+retried here (`is_retryable` excludes `TransportError::RefConflict`, and
+`AdvanceRefs` reports conflicts as successful responses, §4); that stays
+caller-level policy. Against a deployment without the replay ledger
+(`mkit-server`'s `Open`, `Bearer` and `TransportIdentity` modes), a
+re-issue can report a conflict for a write that landed, so the caller
+follows SPEC-TRANSPORT §7's `read_ref` rule.
 
 The regression tests
 (`rust/crates/mkit-transport-connect/tests/roundtrip.rs`,
@@ -1546,6 +1558,7 @@ Explicitly deferred to sibling issues:
 | `2` | draft | §7.4 repository addressing; §7.5 namespace and write policy (owner key); `GetServerInfo` (§2.1); §7.6 upload tickets and resumable parts; §7.8 ref deletion; §7.9 consistency and `ListRefs` paging; error-code split between `unauthenticated` and `permission_denied` (§5) (mkit#1084, mkit#1090); SPEC-WRITE-GRANTS (mkit#1085): signed reads and `X-Write-Grant` (§7.1), the M2 RPC rows (§2), and grant cross-references. §5.1 admission challenges: HTTP 402 with `permission_denied` and an opaque challenge list, raw MPP/x402 header pass-through, the header-returning `admission_helper` with its allowlist and hard-reserved set; §7.1 replay lookup after authentication and before authorization and admission, with signed reads outside the ledger; retryable `aborted` for in-flight operations (§5); §7.7 lifecycle per RPC (mkit#1086). The M0 server implementation still resumes an interrupted `UploadPack` through its `in_flight` replay record until M1 tickets land. M1: branch-sharded servers MAY require the canonical `AdvanceRefs` head/packmap pairing (§4; WP-1.22 amendment 1). Indexed mode: PendingVerification polling with a 1,000 ms floor (§5, §7.6), delta-base mapping and self-contained replanning in a new signed operation (§5, §7.6), packlist rebuilding (§7.6), advertised max_delta_chain_depth (§2.1), and the membership-dependent lag window and replay exclusion (§7.1, §7.9; SPEC-SERVER §9.4). BeginUpload open-ticket cap error and client no-retry carve-out (§5), and admission-free AlreadyPresent/live-ticket results (§7.6; WP-1.9a amendment 1). WP-4.11 scopes §7.4's Host/path/forwarded-selector prohibition to Connect RPCs and cross-links plain HTTP read admission (§5.1). |
 | `2` | draft | Additive `GetServerInfoResponse.leases = 17` (§2.1; SPEC-SERVER §12); §7.7 ticket-pack loss clarified as a defensive abort case. |
 | `2` | draft | Additive `GetServerInfoResponse.async_inspection = 18` (§2.1); published-view and quarantine rules in SPEC-SERVER §§10–11; §7.1 never stores a sync inspector `unavailable` for replay; §7.6 `AlreadyPresent` is never answered for a pack with hidden content. |
+| `2` | draft | Editorial: §3 and §7.3 retry obligations for `UpdateRef`/`AdvanceRefs` reconciled with SPEC-TRANSPORT §7 (MKIT-17). |
 | `1` | draft | Initial `mkit.transport.v1` proto: 7 wire RPCs covering every `Transport` trait verb (§2), `PackChunk` reused byte-for-byte from `ssh.proto`, `RefExpectation`/`RefEntry` duplicated with pinned wire numbers pending mkit#679's shared-proto extraction. |
 
 ---
