@@ -157,7 +157,7 @@ mod tests {
         .unwrap()
     }
 
-    fn request<'a>(operation: GrantOperation<'a>) -> GrantRequest<'a> {
+    fn request(operation: GrantOperation<'_>) -> GrantRequest<'_> {
         GrantRequest {
             origin: "https://git.example.com",
             repository: "0x8ba1f109551bd432803012645ac136ddd64dba72/photos",
