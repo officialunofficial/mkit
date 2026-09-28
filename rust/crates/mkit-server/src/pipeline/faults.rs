@@ -42,6 +42,7 @@ pub(crate) fn relay_delay_key() -> crate::Key {
 }
 
 /// Attach a delivery hold to the same batch as a test `UpdateRef` commit.
+/// WP-1.28b extends this directive to `AdvanceRefs` relay commits.
 pub(crate) fn delay_relay_batch(
     batch: Batch,
     directives: &TestDirectives,

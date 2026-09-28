@@ -3560,6 +3560,7 @@ dependencies = [
  "mkit-transport-file",
  "mkit-transport-s3",
  "parking_lot",
+ "proptest",
  "reqwest",
  "rusqlite",
  "serde_json",

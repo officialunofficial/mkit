@@ -1,7 +1,9 @@
 ## Purpose
 
 GC (SPEC-SERVER §13.3) and takedown (§14) wait until the **namespace relay watermark** passes a point in time. The
-watermark is the time before which every relay row, from every shard of the namespace, has been delivered.
+watermark bounds the commit time of every undelivered relay row in the namespace from below. Consumers compare it
+against `T + MAX_APPLY_WINDOW + margin`; a new shard's first report can be stale-low, so the result can decrease even
+without recovery.
 
 This WP makes the coordinator track that watermark:
 - per shard, as a running maximum;
@@ -70,7 +72,8 @@ Further rules:
   - It returns an error on any undecodable row.
 - Add a pipeline wrapper plus `active_shards(ns, cursor, limit)`.
 - **Single sharding:** the watermark is `relay_watermark(Namespace partition)`.
-- **Docs must state:** consumers add `margin`, and the result is **not** monotonic across recovery.
+- **Docs must state:** consumers compare against `T + MAX_APPLY_WINDOW + margin`, and the result can decrease even
+  without recovery when a new shard enters with a stale-low report.
 
 ### B.6 Recovery fence
 
@@ -90,7 +93,7 @@ Add row **R-127**:
 > - `ls` rows are kept while an outbox is undelivered.
 > - The API is `namespace_relay_watermark` / `active_shards`; consumers add `margin`.
 > - The watermark is unavailable after lease-table recovery until R-116.
-> - **Invariant, binding on WP-4.10, 5.3b, 5.6 and 5.7b:** a batch that appends relay rows MUST carry an epoch lease
+> - **Invariant, binding on WP-1.10 (#1188), 4.10, 5.3b, 5.6 and 5.7b:** a batch that appends relay rows MUST carry an epoch lease
 >   on its source shard, and only ref shards are relay sources. A new relay source needs its own watermark design.
 
 Add an INVARIANTS entry for the same invariant, and a CHANGELOG entry.

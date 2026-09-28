@@ -46,6 +46,20 @@ const A: Hash = [0xaa; 32];
 const B: Hash = [0xbb; 32];
 const C: Hash = [0xcc; 32];
 
+#[test]
+fn d34_relay_batch_requires_source_lease() {
+    let relay = Batch::new().put(keys::relay(1), Value::default());
+    assert_eq!(
+        require_relay_source_lease(Sharding::D34, false, &relay)
+            .unwrap_err()
+            .code(),
+        Code::Internal
+    );
+    assert!(require_relay_source_lease(Sharding::D34, true, &relay).is_ok());
+    assert!(require_relay_source_lease(Sharding::Single, false, &relay).is_ok());
+    assert!(require_relay_source_lease(Sharding::D34, false, &Batch::new()).is_ok());
+}
+
 fn planned_ticket_advance(count: usize) -> Batch {
     planned_ticket_advance_mode(count, true)
 }

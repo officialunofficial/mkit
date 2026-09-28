@@ -31,6 +31,7 @@ use mkit_server::{
 };
 use mkit_server_conformance::wire::sign::{Signer, body_commitment};
 use mkit_server_native::{Blocking, RusqliteConn};
+use proptest::prelude::*;
 use tokio::sync::Notify;
 
 const REF: &str = "refs/heads/a";
@@ -988,6 +989,174 @@ async fn sweep<N: NamespaceStore + 'static>(
     );
 }
 
+#[tokio::test]
+async fn corrupt_relay_row_does_not_block_lease_renewal() {
+    let clock = Arc::new(ManualClock::new(1_000));
+    let store = Store::new(MemoryKv::with_clock(clock.clone()));
+    let pipe = pipeline(
+        store.clone(),
+        clock.clone(),
+        Arc::new(Faults::default()),
+        Reject::Allow,
+    );
+    let a = auth(&pipe, None);
+    committed(&pipe, &a, REF, 1).await;
+    assert_eq!(ls(&store, &a, REF).await.relay_watermark_ms, 1_000);
+
+    clock.set(1_100);
+    store
+        .apply(
+            &shard(&a, REF),
+            Batch::new().put(keys::relay(1), Value::new(&b"corrupt relay"[..])),
+        )
+        .await
+        .unwrap();
+    clock.set(26_000);
+    committed(&pipe, &a, REF, 2).await;
+    assert_eq!(ls(&store, &a, REF).await.relay_watermark_ms, 1_000);
+    let watermark =
+        mkit_server::store::watermark::namespace_relay_watermark(&store, &coordinator(&a), 26_000)
+            .await
+            .unwrap();
+    assert!(watermark < 1_100, "corrupt undelivered row is held");
+}
+
+const MODEL_REFS: [&str; 3] = ["refs/heads/a", "refs/heads/b", "refs/heads/c"];
+
+async fn append_model_relay(
+    store: &Store<MemoryKv>,
+    a: &Authenticated,
+    name: &str,
+    seq: u64,
+    at_ms: u64,
+    commit_ms: u64,
+) {
+    use mkit_server::timers::registry::kinds;
+
+    let source = shard(a, name);
+    let lease_value = store
+        .get(&source, &keys::epoch_lease())
+        .await
+        .unwrap()
+        .unwrap();
+    let lease = codec::decode_epoch_lease(&lease_value).unwrap();
+    let row = codec::RelayV1 {
+        at_ms,
+        target: coordinator(a),
+        puts: vec![(Key::new(&b"x\0"[..]), codec::encode_u64(seq))],
+    };
+    let batch = Batch::new()
+        .require(Precondition::Equals(keys::epoch_lease(), lease_value))
+        .require(Precondition::NotAfter(lease.expires_at_ms - 5_000))
+        .put(keys::relay(seq), codec::encode_relay(&row).unwrap())
+        .put(keys::outbox_sequence(), codec::encode_u64(seq))
+        .put(
+            keys::timer(commit_ms, kinds::RELAY.get(), b""),
+            Value::default(),
+        );
+    assert_eq!(
+        store.apply(&source, batch).await.unwrap(),
+        BatchOutcome::Committed
+    );
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(24))]
+    #[test]
+    fn real_relay_lease_interleavings_bound_undelivered_commits(
+        actions in prop::collection::vec((0u8..5, 0u8..3, 1u8..8), 25..70)
+    ) {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            use mkit_server::relay::{NoHook, RelayBudget, RelayHandler};
+            use mkit_server::store::watermark::namespace_relay_watermark;
+            use mkit_server::timers::lease_sweep::LeaseSweep;
+
+            let clock = Arc::new(ManualClock::new(100));
+            let store = Store::new(MemoryKv::with_clock(clock.clone()));
+            let pipe = pipeline(store.clone(), clock.clone(), Arc::new(Faults::default()), Reject::Allow);
+            let a = auth(&pipe, None);
+            let mut now = 101u64;
+            let mut next_seq = [0u64; 3];
+            let mut undelivered = Vec::<(usize, u64, u64)>::new();
+
+            // Invariant: every undelivered relay row committed after report r
+            // has commit time >= r. A later row may carry a stale at_ms.
+            committed(&pipe, &a, MODEL_REFS[0], 1).await;
+            let r = ls(&store, &a, MODEL_REFS[0]).await.relay_watermark_ms;
+            prop_assert_eq!(r, 100);
+            clock.set(101);
+            next_seq[0] = 1;
+            append_model_relay(&store, &a, MODEL_REFS[0], 1, 50, now).await;
+            undelivered.push((0, 1, now));
+            prop_assert!(now >= r, "commit time must follow the prior report");
+            now = ls(&store, &a, MODEL_REFS[0]).await.expires_at_ms + 1;
+            clock.set(i64::try_from(now).unwrap());
+            let sweep = TimerRegistry::new().register(LeaseSweep::new(store.clone()));
+            let swept = run_due(&store, &coordinator(&a), &sweep, clock.as_ref(), now, &TickBudget::default()).await.unwrap();
+            prop_assert!(swept.fired > 0, "the real lease sweep must fire on an undelivered row");
+            committed(&pipe, &a, MODEL_REFS[0], 2).await;
+            prop_assert_eq!(ls(&store, &a, MODEL_REFS[0]).await.relay_watermark_ms, r,
+                "a stale lower source report cannot erase the running maximum");
+
+            for (index, (action, shard_index, step)) in actions.into_iter().enumerate() {
+                now += u64::from(step);
+                clock.set(i64::try_from(now).unwrap());
+                let n = usize::from(shard_index);
+                let name = MODEL_REFS[n];
+                let source = shard(&a, name);
+                let key = ls_key(&a, name);
+                let before = store.get(&coordinator(&a), &key).await.unwrap()
+                    .map(|v| codec::decode_leased_shard(&v).unwrap());
+                match action {
+                    0 => {
+                        committed(&pipe, &a, name, u8::try_from(index % 250 + 3).unwrap()).await;
+                        next_seq[n] += 1;
+                        let seq = next_seq[n];
+                        append_model_relay(&store, &a, name, seq, now.saturating_sub(u64::from(step) + 1), now).await;
+                        undelivered.push((n, seq, now));
+                    }
+                    1 if now < 180_000 => {
+                        if let Some(old) = before {
+                            now = now.max(old.expires_at_ms.saturating_sub(5_000).saturating_add(1));
+                            clock.set(i64::try_from(now).unwrap());
+                        }
+                        committed(&pipe, &a, name, u8::try_from(index % 250 + 3).unwrap()).await;
+                    }
+                    2 => {
+                        let registry = TimerRegistry::new().register(RelayHandler {
+                            target: store.clone(), hook: NoHook, budget: RelayBudget::default(),
+                        });
+                        run_due(&store, &source, &registry, clock.as_ref(), now, &TickBudget::default()).await.unwrap();
+                    }
+                    3 => {
+                        let registry = TimerRegistry::new().register(LeaseSweep::new(store.clone()));
+                        run_due(&store, &coordinator(&a), &registry, clock.as_ref(), now, &TickBudget::default()).await.unwrap();
+                    }
+                    _ => {}
+                }
+                let after = store.get(&coordinator(&a), &key).await.unwrap()
+                    .map(|v| codec::decode_leased_shard(&v).unwrap());
+                if let (Some(old), Some(new)) = (before, after) {
+                    prop_assert!(new.relay_watermark_ms >= old.relay_watermark_ms,
+                        "shard {n} maximum fell from {} to {}", old.relay_watermark_ms, new.relay_watermark_ms);
+                }
+                let watermark = namespace_relay_watermark(&store, &coordinator(&a), now).await.unwrap();
+                let mut remaining = Vec::new();
+                for (shard_id, seq, committed_at) in undelivered {
+                    if store.get(&shard(&a, MODEL_REFS[shard_id]), &keys::relay(seq)).await.unwrap().is_some() {
+                        prop_assert!(watermark <= committed_at,
+                            "watermark {watermark} passed undelivered commit {committed_at}");
+                        remaining.push((shard_id, seq, committed_at));
+                    }
+                }
+                undelivered = remaining;
+            }
+            Ok(())
+        })?;
+    }
+}
+
 async fn plant_delayed_relay_and_expired_lease(
     store: &Store<MemoryKv>,
     source: &Partition,
@@ -1124,6 +1293,14 @@ async fn expired_lease_is_kept_until_source_outbox_drains() {
     .unwrap();
     assert_eq!(drained.fired, 1);
     assert!(store.get(&source, &keys::relay(1)).await.unwrap().is_none());
+    assert!(
+        store
+            .get(&source, &Key::new(&b"tdr\0"[..]))
+            .await
+            .unwrap()
+            .is_none(),
+        "the delay marker is consumed when delivery resumes"
+    );
     let report = run_due(
         &store,
         &coordinator,

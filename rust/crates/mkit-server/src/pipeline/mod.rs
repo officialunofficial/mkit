@@ -139,6 +139,22 @@ pub enum Sharding {
     D34,
 }
 
+fn require_relay_source_lease(
+    sharding: Sharding,
+    has_lease: bool,
+    batch: &Batch,
+) -> Result<(), ServerError> {
+    if sharding == Sharding::D34
+        && !has_lease
+        && batch.writes.iter().any(|write| {
+            matches!(write, crate::store::Write::Put(key, _) if matches!(keys::parse(key), Some(keys::ParsedKey::Relay(_))))
+        })
+    {
+        return Err(internal("D34 relay batch lacks source epoch lease"));
+    }
+    Ok(())
+}
+
 /// A deployment's pipeline settings. Start from [`PipelineConfig::new`].
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -1594,6 +1610,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 prune,
                 prune_from,
             } = plan;
+            require_relay_source_lease(self.cfg.sharding, req.lease.is_some(), &batch)?;
             #[cfg(feature = "test-faults")]
             let batch = faults::delay_relay_batch(
                 batch,

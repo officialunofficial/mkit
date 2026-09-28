@@ -1,12 +1,14 @@
 //! Expired epoch-lease table cleanup, confined to the coordinator partition.
 
 use bytes::Bytes;
+use std::sync::Arc;
 
 use super::{DueTimer, Fired, TimerCtx, TimerHandler, TimerKind, registry::kinds};
-use crate::relay::source_relay_state;
+use crate::relay::{RELAY_LAG_BOUND_MS, source_relay_state};
 use crate::repo::RepoName;
 use crate::rt::BoxFuture;
 use crate::store::{Batch, NamespaceStore, Partition, Precondition, StoreError, codec, keys};
+use crate::telemetry::{METRIC_RELAY_LEASE_LAG, Metrics, NoopMetrics};
 
 /// Reference shared by the lease grant's timer and its sweep handler.
 #[must_use]
@@ -25,18 +27,39 @@ fn discard_malformed_reference(reason: &str) -> Fired {
 /// Deletes a coordinator lease-table row only once its actual expiry passes
 /// and its source outbox is empty.
 /// Malformed references are warned about and drained without touching lease rows.
-#[derive(Debug)]
 pub struct LeaseSweep<T> {
     /// Client for reading ref shards. Absence keeps expired rows.
     pub source: Option<T>,
+    metrics: Arc<dyn Metrics>,
+}
+
+impl<T: core::fmt::Debug> core::fmt::Debug for LeaseSweep<T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("LeaseSweep")
+            .field("source", &self.source)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<T> LeaseSweep<T> {
     /// Use a source store to inspect ref-shard outboxes at expiry.
     pub fn new(source: T) -> Self {
+        Self::optional(Some(source))
+    }
+
+    /// Retain rows when the shard client is unavailable.
+    pub fn optional(source: Option<T>) -> Self {
         Self {
-            source: Some(source),
+            source,
+            metrics: Arc::new(NoopMetrics),
         }
+    }
+
+    /// Attach the deployment's metrics sink for overdue kept rows.
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: Arc<dyn Metrics>) -> Self {
+        self.metrics = metrics;
+        self
     }
 }
 
@@ -95,6 +118,11 @@ impl<S: NamespaceStore, T: NamespaceStore> TimerHandler<S> for LeaseSweep<T> {
                 if empty {
                     Ok(Fired::Done(batch.delete(key)))
                 } else {
+                    let kept_age_ms = ctx.now_ms.saturating_sub(lease.expires_at_ms);
+                    if kept_age_ms > RELAY_LAG_BOUND_MS {
+                        tracing::warn!(shard = ?shard, kept_age_ms, "relay backlog kept lease row beyond lag bound");
+                        self.metrics.incr(METRIC_RELAY_LEASE_LAG, &[], 1);
+                    }
                     let due = ctx
                         .now_ms
                         .saturating_add(10_000)
@@ -128,7 +156,22 @@ mod tests {
     use crate::store::{Cursor, Key, PartitionStats, ScanPage, StoreCapabilities};
     use crate::timers::{TickBudget, TimerRegistry, run_due};
     use crate::{ManualClock, MemoryKv, NamespaceKey};
-    use std::sync::Arc;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    };
+
+    #[derive(Default)]
+    struct CountMetrics(AtomicU64);
+
+    impl Metrics for CountMetrics {
+        fn incr(&self, name: &'static str, _: &[(&'static str, &str)], by: u64) {
+            if name == METRIC_RELAY_LEASE_LAG {
+                self.0.fetch_add(by, Ordering::SeqCst);
+            }
+        }
+        fn observe_ms(&self, _: &'static str, _: &[(&'static str, &str)], _: f64) {}
+    }
 
     fn partition() -> Partition {
         Partition::Coordinator(NamespaceKey::deployment_default())
@@ -248,6 +291,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn overdue_kept_row_emits_lag_metric() {
+        let clock = Arc::new(ManualClock::new(60_102));
+        let coordinator = MemoryKv::with_clock(clock.clone());
+        let source = MemoryKv::with_clock(clock.clone());
+        let shard = Partition::Ref {
+            ns: NamespaceKey::deployment_default(),
+            repo: repo(),
+            shard_ref: "refs/heads/main".into(),
+        };
+        source
+            .apply(
+                &shard,
+                Batch::new().put(
+                    keys::relay(1),
+                    codec::encode_relay(&codec::RelayV1 {
+                        at_ms: 50,
+                        target: partition(),
+                        puts: vec![(Key::new(&b"x\0"[..]), Value::default())],
+                    })
+                    .unwrap(),
+                ),
+            )
+            .await
+            .unwrap();
+        coordinator
+            .apply(
+                &partition(),
+                Batch::new()
+                    .put(lease_key(), codec::encode_leased_shard(&lease(100)))
+                    .put(timer_key(100), Value::default()),
+            )
+            .await
+            .unwrap();
+        let metrics = Arc::new(CountMetrics::default());
+        let registry =
+            TimerRegistry::new().register(LeaseSweep::new(source).with_metrics(metrics.clone()));
+        let report = run_due(
+            &coordinator,
+            &partition(),
+            &registry,
+            clock.as_ref(),
+            60_102,
+            &TickBudget::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.fired, 1);
+        assert_eq!(metrics.0.load(Ordering::SeqCst), 1);
+        assert!(
+            coordinator
+                .get(&partition(), &lease_key())
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
     async fn renewal_race_prevents_deletion_and_early_timer_moves_to_expiry() {
         let store = MemoryKv::default();
         let old_value = codec::encode_leased_shard(&lease(100));
@@ -349,7 +450,7 @@ mod tests {
             now_ms: 100,
         };
         assert!(matches!(
-            LeaseSweep::<MemoryKv> { source: None }
+            LeaseSweep::<MemoryKv>::optional(None)
                 .fire(&ctx, &timer)
                 .await
                 .unwrap(),

@@ -11,8 +11,8 @@ use crate::op::{Creation, Operation};
 use crate::relay::relay_watermark;
 use crate::repo::Addressing;
 use crate::store::{
-    Batch, BatchOutcome, MultipartBlobStore, NamespaceStore, Partition, Precondition, Value, codec,
-    keys,
+    Batch, BatchOutcome, MultipartBlobStore, NamespaceStore, Partition, Precondition, StoreError,
+    Value, codec, keys,
 };
 use crate::timers::lease_sweep::lease_reference;
 use crate::timers::registry::kinds;
@@ -243,9 +243,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             keys::leased_shard(&op.repo.name, shard_ref(p)?),
             keys::lease_recovery(),
         ];
-        let reported = relay_watermark(&self.meta, p, ms(self.clock.now_ms()))
-            .await
-            .map_err(meta_error)?;
+        let reported = match relay_watermark(&self.meta, p, ms(self.clock.now_ms())).await {
+            Ok(value) => value,
+            Err(StoreError::Corrupt(reason)) => {
+                tracing::warn!(shard = ?p, %reason, "renewal cannot decode relay outbox; reporting zero");
+                0
+            }
+            Err(error) => return Err(meta_error(error)),
+        };
         let rows = self
             .meta
             .get_many(&self.shards.coordinator(&op.repo.namespace), &wanted)

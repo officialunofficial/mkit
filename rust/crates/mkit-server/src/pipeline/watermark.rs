@@ -1,4 +1,5 @@
-//! Internal safety reads for GC and takedown consumers.
+//! Internal safety reads for native GC and takedown consumers. Workers use
+//! `store::watermark::namespace_relay_watermark_step` to resume bounded scans.
 
 use crate::error::ServerError;
 use crate::repo::NamespaceKey;
@@ -17,8 +18,10 @@ fn map_watermark(error: WatermarkError) -> ServerError {
 }
 
 impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
-    /// Namespace relay lower bound for GC and takedown. Consumers add the
-    /// lease clock margin to their threshold. Recovery may lower this value;
+    /// Namespace lower bound on commit time of undelivered relay rows for
+    /// native GC and takedown. Consumers compare it against
+    /// `T + MAX_APPLY_WINDOW + margin`. Workers use the resumable store step.
+    /// A new shard's stale-low first report or recovery can lower the value;
     /// it is unavailable until the recovered lease table is reconciled.
     ///
     /// # Errors
@@ -31,7 +34,7 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             }
             let partition = Partition::Namespace(ns.clone());
             if self.meta.capabilities().key_classes == KeyClasses::All {
-                watermark::check_recovery(&self.meta, &partition)
+                watermark::check_recovery(&self.meta, &partition, None)
                     .await
                     .map_err(map_watermark)?;
             }
@@ -57,7 +60,7 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     ) -> Result<ActiveShardsPage, ServerError> {
         if self.cfg.sharding == Sharding::Single {
             if self.meta.capabilities().key_classes == KeyClasses::All {
-                watermark::check_recovery(&self.meta, &Partition::Namespace(ns.clone()))
+                watermark::check_recovery(&self.meta, &Partition::Namespace(ns.clone()), None)
                     .await
                     .map_err(map_watermark)?;
             }

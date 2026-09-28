@@ -320,7 +320,8 @@ where
                 16
             };
             registry.register(WorkerLeaseSweep {
-                sweep: LeaseSweep { source },
+                sweep: LeaseSweep::optional(source)
+                    .with_metrics(Arc::new(crate::telemetry::ConsoleMetrics::default())),
                 max_per_tick,
             })
         }

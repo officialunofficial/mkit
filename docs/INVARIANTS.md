@@ -1296,7 +1296,9 @@ parsing, unit call-count/isolation tests and Multi wire membership cases.
 **Always:** a batch that appends relay rows carries an epoch lease on its
 source shard. Only ref shards are relay sources. A new relay source class
 requires its own coordinator watermark design before it can append rows.
-This binds WP-4.10, 5.3b, 5.6 and 5.7b.
+This binds WP-1.10 (#1188), 4.10, 5.3b, 5.6 and 5.7b. The namespace
+watermark bounds every undelivered relay row's **commit time** from below;
+consumers compare it against `T + MAX_APPLY_WINDOW + margin`.
 
 **Because:** the coordinator keeps an `ls` row until the source outbox drains.
 Without a lease, a new row could appear after the coordinator removed the
@@ -1304,9 +1306,11 @@ source, and the namespace minimum could pass an undelivered commit.
 
 **If violated:** GC or takedown could complete before a relay row arrives.
 
-**Enforced by:** lease guarded ref writes, `LeaseSweep` source scans, and
-watermark model tests. Consumers add the lease clock margin; the watermark
-can decrease after recovery and remains unavailable until reconciliation.
+**Enforced by:** lease guarded ref writes (including `AdvanceRefs`), the D34
+apply-loop relay guard, `LeaseSweep` source scans, and real-path watermark
+property tests. A new shard's first report can be stale-low, so the namespace
+result can decrease even without recovery. It remains unavailable after
+recovery until reconciliation.
 
 ## Fresh restore preserves epoch and relay safety
 
