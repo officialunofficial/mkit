@@ -1,5 +1,5 @@
 //! Pins the indexed-mode detail and Connect error bytes (STC §7.6,
-//! SPEC-SERVER §9.5 and §16). `UPDATE_GOLDEN=1` updates only these fixtures
+//! SPEC-SERVER §9.5 and §20). `UPDATE_GOLDEN=1` updates only these fixtures
 //! and their manifest entries; the pre-existing transport vectors stay fixed.
 #![cfg(feature = "connect")]
 #![allow(clippy::unwrap_used)] // Fixture failures are assertions.
