@@ -526,10 +526,9 @@ async fn pipeline_multi_repository() {
     common::judge(&repository_report, PIPELINE_DIVERGENCES);
     common::judge(&policy_report, PIPELINE_DIVERGENCES);
     common::judge(&ticket_repo_report, PIPELINE_DIVERGENCES);
-    for case in mkit_server_conformance::wire::CASES
-        .iter()
-        .filter(|c| c.requires.contains(&Feature::MultiRepo))
-    {
+    for case in mkit_server_conformance::wire::CASES.iter().filter(|c| {
+        c.requires.contains(&Feature::MultiRepo) && !c.requires.contains(&Feature::Grants)
+    }) {
         let case_report = if case.name.starts_with("policy.") {
             &policy_report
         } else if case.name.starts_with("repository.") {

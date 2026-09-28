@@ -1606,9 +1606,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         };
         let namespace = Namespace::parse(op.repo.namespace.as_str())
             .map_err(|_| internal("invalid resolved Multi namespace"))?;
-        if (matches!(namespace, Namespace::Address(_))
-            && !matches!(&multi.namespace_policy, NamespacePolicy::Allowlist(allowed) if allowed.contains(&namespace)))
-            || matches!(&multi.namespace_policy, NamespacePolicy::Allowlist(allowed) if !allowed.contains(&namespace))
+        if let NamespacePolicy::Allowlist(allowed) = &multi.namespace_policy
+            && !allowed.contains(&namespace)
+        {
+            return Err(ServerError::permission_denied("write not permitted"));
+        }
+        if op.write_grant.is_some()
+            && matches!(namespace, Namespace::Address(_))
+            && !matches!(&multi.namespace_policy, NamespacePolicy::Allowlist(_))
         {
             return Err(ServerError::permission_denied("write not permitted"));
         }
