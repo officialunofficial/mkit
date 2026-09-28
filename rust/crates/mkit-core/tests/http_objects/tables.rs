@@ -440,6 +440,13 @@ pub(super) fn responses() -> Value {
         json!(["ETag", "X-Mkit-*"]),
     );
     add(
+        "blocked_before_tombstone_before_304",
+        json!({"method":"GET","route":"object","published_reachable":true,"global_block":true,"repository_tombstone":false,"if_none_match":etag}),
+        404,
+        json!({"Cache-Control":"no-store"}),
+        json!(["ETag", "X-Mkit-*"]),
+    );
+    add(
         "chunk_only_under_tombstoned_manifest",
         json!({"method":"GET","route":"object","chunk_only_under_tombstoned_manifest":true,"repository_tombstone":false}),
         404,
@@ -755,9 +762,11 @@ pub(super) fn responses() -> Value {
             row["expect"]["body_bytes"] = json!(0);
         }
         if row["expect"]["status"] == 451 && row["request"]["method"] == "GET" {
-            row["expect"]["body_fixture"] = json!("redaction/detail.json");
-            row["expect"]["body_bytes"] =
-                json!(include_bytes!("../../../../tests/golden/redaction/detail.json").len());
+            row["expect"]["body_fixture"] = json!("redaction/reader-followup-detail.json");
+            row["expect"]["body_bytes"] = json!(
+                include_bytes!("../../../../tests/golden/redaction/reader-followup-detail.json")
+                    .len()
+            );
         }
         if row["name"] == "head" {
             row["expect"]["outcome"] = json!({"kind":"ReadServed","bytes_served":0});
@@ -819,10 +828,16 @@ pub(super) fn check(dir: &std::path::Path) {
             if row["request"]["method"] == "HEAD" {
                 assert_eq!(row["expect"]["body_bytes"], 0);
             } else {
-                assert_eq!(row["expect"]["body_fixture"], "redaction/detail.json");
+                assert_eq!(
+                    row["expect"]["body_fixture"],
+                    "redaction/reader-followup-detail.json"
+                );
                 assert_eq!(
                     row["expect"]["body_bytes"],
-                    include_bytes!("../../../../tests/golden/redaction/detail.json").len()
+                    include_bytes!(
+                        "../../../../tests/golden/redaction/reader-followup-detail.json"
+                    )
+                    .len()
                 );
             }
         }
@@ -901,5 +916,14 @@ pub(super) fn check(dir: &std::path::Path) {
     assert_eq!(
         get("bearer_gated_public_id")["expect"]["headers"]["Cache-Control"],
         "private, max-age=31536000, immutable"
+    );
+    assert_eq!(
+        get("blocked_before_tombstone_before_304")["expect"]["status"],
+        404
+    );
+    assert!(
+        get("blocked_before_tombstone_before_304")["request"]["if_none_match"]
+            .as_str()
+            .is_some()
     );
 }

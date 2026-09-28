@@ -51,7 +51,7 @@ and one PR per WP. A group is done when all of its WPs have merged.
 | G18 | M3 Admission | M3: client 402 handling, admission_helper and M3 exit | 3.10, 3.11, 3.12, 3.13 |
 | G19 | M4 Indexed mode | M4: indexed ingestion, verification and D32 extraction | 4.1, 4.2, 4.4, 4.5, 4.6, 4.7, 4.8, 4.8a, 4.9, 4.10, 4.10a, 4.17 |
 | G20 | M4 Indexed mode | M4: HTTP serving, proofs, paid/private reads and M4 exit | 4.3, 4.11, 4.12, 4.13, 4.14, 4.15, 4.16, 4.18 |
-| G21 | M5 Lifecycle | M5: lifecycle specs, leases and GC | 5.1a, 5.1b, 5.1c, 5.2, 5.3a, 5.3b |
+| G21 | M5 Lifecycle | M5: lifecycle specs, leases and GC | 5.1a, 5.1b-1, 5.1b-2, 5.1c, 5.2, 5.3a, 5.3b |
 | G22 | M5 Lifecycle | M5: published view and quarantine (ContentInspector) | 5.4, 5.5 |
 | G23 | M5 Lifecycle | M5: storage receipts (server signing and client storage) | 5.8, 5.12 |
 | G24 | M5 Lifecycle | M5: takedown, redaction notices, cache purge, admin API, reinstatement | 5.6, 5.7a, 5.7b, 5.9a, 5.9b, 5.10, 5.11a, 5.11b, 5.14 |
@@ -186,7 +186,7 @@ Split and dropped WPs keep their briefs for the record: [WP-M0-02](briefs/WP-M0-
 | 4.17 | G19 | Pre-receive policy hooks: allowed signers per ref, fast-forward-only grants | [M3–M5](m3-m5-breakdown.md) | | planned |
 | 4.18 | G20 | Conformance: indexed mode and serving wire suite (M4 exit) | [M3–M5](m3-m5-breakdown.md) | | planned |
 | 5.1a | G21 | Spec: leases, lifecycle events, server GC, published view and quarantine (#1091 part 1) | [M3–M5](m3-m5-breakdown.md) | | planned |
-| 5.1b | G21 | Spec: takedown, RedactionNotice, preservation store, admin API and audit log (#1091 part 2) | [M3–M5](m3-m5-breakdown.md) | | planned |
+| 5.1b-1 and 5.1b-2 | G21 | Specs: takedown and RedactionNotice; admin API and audit log (#1091 parts 2a–2b) | [M3–M5](m3-m5-breakdown.md) | | planned |
 | 5.1c | G21 | Spec: storage receipts predicate (#1092) | [M3–M5](m3-m5-breakdown.md) | | planned |
 | 5.2 | G21 | Leases and lifecycle states: model, enforcement, events | [M3–M5](m3-m5-breakdown.md) | | planned |
 | 5.3a | G21 | GC mark: roots, pins, grace, gc_pending; mark → wait → re-check protocol | [M3–M5](m3-m5-breakdown.md) | | planned |

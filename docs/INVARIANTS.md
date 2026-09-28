@@ -1357,13 +1357,18 @@ the current goldens verify the additive hook wire contract only.
 
 ## Takedown denial precedes rewrites (specified, implementation pending)
 
-**Always:** a global blocklist write stops extracted and HTTP serving at once.
-Pack serving stops in each repository within the configured relay-lag bound.
+**Always:** a global blocklist write stops extracted and HTTP serving at
+once. Every pack read proves that the pack contains no blocked id and is
+not superseded, or answers absent. The serving stop is immediate,
+independent of holder discovery; the sweep does not impose a
+deployment-wide pack outage. The holder sweep and relay watermark use
+the cut at takedown time plus `MAX_APPLY_WINDOW + margin`.
 No replacement or preserved bytes become a serving or delta-base source until
 that repository's guarded rewrite and ref-value substitution complete. Live,
 published and retained intermediate values, membership and ref-addition records
-all name the same replacement packmap. A hit resolves on its repository's
-completion; global holder sweep and watermarks govern global reporting.
+all name the same replacement packmap after membership becomes visible
+and then ref values are substituted. A hit resolves on its repository's
+completion; the safety-cut sweep and watermark govern completion.
 
 **Because:** a lagging index or an intermediate advance can otherwise serve
 blocked bytes or resurrect a removed pack after a later publication.

@@ -1,14 +1,14 @@
 {
   "event": {
-    "eventId": "takedown:example:1:complete",
+    "eventId": "takedown:example:1:blocked",
     "audience": "https://vcs.example.test",
     "repository": "ed25519-a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0/payments-demo",
-    "occurredUnixMs": "1790600000010",
-    "sequence": "2",
+    "occurredUnixMs": "1790600000000",
+    "sequence": "1",
     "takedown": {
       "takedownId": "takedown:example:1",
       "level": "TAKEDOWN_LEVEL_CONTENT",
-      "state": "TAKEDOWN_STATE_COMPLETE",
+      "state": "TAKEDOWN_STATE_BLOCKED",
       "reason": "policy"
     }
   }

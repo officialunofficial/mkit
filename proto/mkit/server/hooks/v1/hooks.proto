@@ -272,8 +272,8 @@ message InspectResponse {
   // Raw 32-byte ids from the inspected set, only with reject or quarantine;
   // nonempty for QUARANTINE-phase reject or quarantine (SPEC-SERVER §6.4).
   repeated bytes flagged_objects = 5;
-  // Optional registered §14.6 reason token for a reject that becomes a takedown.
-  // Invalid with pass, quarantine, or defer; no free text.
+  // Registered §14.6 token for an async reject that becomes a takedown.
+  // Ignored on PRE_RECEIVE reject; invalid with pass, quarantine, or defer.
   string takedown_reason = 6;
 }
 
@@ -398,11 +398,11 @@ message Event {
   string event_id = 1;
   // The mkit server's canonical origin, not the hook signing audience.
   string audience = 2;
-  // Full repository identity under STC §7.4.
+  // Full repository identity under STC §7.4; empty for namespace scope.
   string repository = 3;
   // Transition time in Unix epoch milliseconds, independent of delivery time.
   int64 occurred_unix_ms = 4;
-  // Strictly increasing per (repository, ref-or-repository) scope; stable on retry.
+  // Strictly increasing per repository/ref or namespace scope; stable on retry.
   uint64 sequence = 5;
   // Exactly one transition kind; SPEC-SERVER §12.4.
   oneof kind {
@@ -412,18 +412,33 @@ message Event {
     // A content, repository, or namespace takedown transition (§14).
     TakedownTransition takedown = 8;
   }
+  // Namespace identity for a namespace-scoped override; empty otherwise.
+  string namespace = 9;
 }
 
-// A durable takedown state change; repository is the affected repository.
-// For namespace scope, one event is sent per affected repository (§14.1).
+// A durable takedown state change. Namespace scope uses Event.namespace
+// and an empty Event.repository; content scope emits per repository (§12.4).
 message TakedownTransition {
   string takedown_id = 1;
-  // "content", "repository", or "namespace"; SPEC-SERVER §14.1.
-  string level = 2;
-  // "blocked", "completed", or "reinstated"; SPEC-SERVER §14.3.
-  string state = 3;
+  TakedownLevel level = 2;
+  TakedownState state = 3;
   // Registered public token, never free text; SPEC-SERVER §14.6.
   string reason = 4;
+}
+
+// Same level numbers as the admin TakedownLevel (§14.1, §16).
+enum TakedownLevel {
+  TAKEDOWN_LEVEL_UNSPECIFIED = 0;
+  TAKEDOWN_LEVEL_CONTENT = 1;
+  TAKEDOWN_LEVEL_REPOSITORY = 2;
+  TAKEDOWN_LEVEL_NAMESPACE = 3;
+}
+
+enum TakedownState {
+  TAKEDOWN_STATE_UNSPECIFIED = 0;
+  TAKEDOWN_STATE_BLOCKED = 1;
+  TAKEDOWN_STATE_COMPLETE = 2;
+  TAKEDOWN_STATE_REINSTATED = 3;
 }
 
 // Effective storage-lease state transition; SPEC-SERVER §12.4.
