@@ -319,7 +319,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             for (position, raw) in receipts.iter().enumerate() {
                 let receipt = receipt::verify(keys, raw)?;
                 if receipt.ticket_id != claims.ticket_id {
-                    return Err(binding_mismatch());
+                    // Keep a valid receipt for another ticket indistinguishable
+                    // from an untrusted receipt with an invalid MAC.
+                    return Err(ServerError::invalid_argument("invalid upload part receipt"));
                 }
                 let index = u32::try_from(position).map_err(|_| {
                     ServerError::invalid_argument("wrong number of upload part receipts")

@@ -16,6 +16,8 @@ use mkit_core::protocol::{PackKey, RefWriteCondition};
 use mkit_core::repo_identity::Namespace;
 use mkit_core::upload_parts::{MIN_PART_SIZE, PartPlan};
 use mkit_server::auth_v2::AuthV2Config;
+#[cfg(feature = "test-faults")]
+use mkit_server::fs::FsBlobStore;
 use mkit_server::pipeline::{
     Admission, AdmissionDecision, AdmissionInput, AuthMode, Authenticated, Authorizer, D34Shards,
     DefaultAdmission, Hooks, Pipeline, PipelineConfig, RequestMeta, ShardMap, Sharding,
@@ -322,8 +324,8 @@ fn pipeline<N: NamespaceStore>(
         .unwrap(),
     )
 }
-fn auth<N: NamespaceStore, H: mkit_server::pipeline::HookSet>(
-    pipe: &Pipeline<MemoryBlobStore, Store<N>, H>,
+fn auth<B: MultipartBlobStore, N: NamespaceStore, H: mkit_server::pipeline::HookSet>(
+    pipe: &Pipeline<B, Store<N>, H>,
     mode: Mode,
     seed: u8,
     procedure: Procedure,
@@ -1031,6 +1033,103 @@ async fn multipart_existing_race_aborts_losing_session() {
     )
     .await;
     assert!(losing_session_was_aborted);
+}
+
+/// The first `BeginUpload` pauses before its final apply (it will win); the
+/// second fails there at once, so its cleanup runs while the winner's ticket
+/// is not yet committed.
+#[cfg(feature = "test-faults")]
+struct FailFirstBegin {
+    calls: AtomicUsize,
+    entered: Notify,
+    release: Notify,
+}
+
+#[cfg(feature = "test-faults")]
+struct FailFirstBeginHook(Arc<FailFirstBegin>);
+
+#[cfg(feature = "test-faults")]
+impl FaultHooks for FailFirstBeginHook {
+    async fn at(
+        &self,
+        point: FaultPoint,
+        op: &Operation,
+        _: &TestDirectives,
+    ) -> Result<(), ServerError> {
+        if point == FaultPoint::BeforeFinalApply && op.procedure() == Procedure::BeginUpload {
+            match self.0.calls.fetch_add(1, Ordering::SeqCst) {
+                0 => {
+                    self.0.entered.notify_one();
+                    self.0.release.notified().await;
+                }
+                1 => return Err(ServerError::aborted_retryable("test losing begin")),
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "test-faults")]
+#[tokio::test]
+async fn fs_begin_race_loser_preserves_winning_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let blobs = FsBlobStore::new(dir.path());
+    let clock = Arc::new(ManualClock::new(0));
+    let mode = MODES[0];
+    let defaults = Hooks::new();
+    let spy = Arc::new(Spy::default());
+    let mut cfg = config(mode);
+    cfg.upload_limits.max_total_bytes = MIN_PART_SIZE + 1;
+    let fault = Arc::new(FailFirstBegin {
+        calls: AtomicUsize::new(0),
+        entered: Notify::new(),
+        release: Notify::new(),
+    });
+    let pipe = Arc::new(
+        Pipeline::new(
+            blobs.clone(),
+            Store::new(MemoryKv::with_clock(clock.clone())),
+            Hooks {
+                authorizer: Policy(spy.clone()),
+                admission: Policy(spy),
+                pre_receive: defaults.pre_receive,
+                receipts: defaults.receipts,
+                outcomes: defaults.outcomes,
+            },
+            cfg,
+            clock,
+            Arc::new(NoopMetrics),
+        )
+        .unwrap()
+        .with_faults(FailFirstBeginHook(fault.clone())),
+    );
+    let authenticated = auth(&pipe, mode, 1, Procedure::BeginUpload);
+    let first = {
+        let pipe = pipe.clone();
+        let authenticated = authenticated.clone();
+        tokio::spawn(async move {
+            pipe.begin_upload(&authenticated, REF, &PACK, MIN_PART_SIZE + 1)
+                .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(5), fault.entered.notified())
+        .await
+        .unwrap();
+    // The loser fails and cleans up while the winner's ticket is uncommitted.
+    let loser = pipe
+        .begin_upload(&authenticated, REF, &PACK, MIN_PART_SIZE + 1)
+        .await
+        .unwrap_err();
+    assert_eq!(loser.code(), Code::Aborted);
+    fault.release.notify_one();
+    let winner = first.await.unwrap().unwrap();
+    let plan = PartPlan::new(MIN_PART_SIZE + 1, MIN_PART_SIZE, u32::MAX).unwrap();
+    let id = ticket_id(&winner);
+    blobs
+        .begin_part(BlobKey::pack(PACK), &id, &plan, 0, [0; 32])
+        .await
+        .unwrap();
 }
 macro_rules! backends {
     ($memory:ident, $sqlite:ident, $scenario:ident $(, $arg:expr)*) => {

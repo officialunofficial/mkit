@@ -122,7 +122,8 @@ Use the crate's existing async-trait style.
 2. `PartPlan::new`, then `receipts.len() == plan.count()`; otherwise `invalid_argument`.
 3. **For each receipt:**
    - check the MAC (B.4);
-   - its ticket id must equal the claims' ticket id → `permission_denied` "upload ticket binding mismatch";
+   - its ticket id must equal the claims' ticket id → `permission_denied` "upload ticket binding mismatch"
+     (superseded by WP-1.11b: `invalid_argument`, indistinguishable from a garbage receipt; STC §5, §7.6);
    - its index must equal its position, and `len == expected_len(i)` → `invalid_argument`.
 4. The length sum must equal `bytes`, then `merge_to_root == pack_id`; otherwise `invalid_argument`
    "merged part root does not match the ticket".

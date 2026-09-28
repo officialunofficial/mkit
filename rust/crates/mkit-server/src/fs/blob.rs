@@ -1,11 +1,13 @@
 //! `FsBlobStore`: content-addressed blobs as files, `<root>/packs/<64-hex>`
 //! by default, the layout `FileTransport::upload_pack` writes.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind, Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::{Arc, Mutex, Weak};
 use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime};
 
@@ -17,11 +19,13 @@ use mkit_transport_file::{create_dir_all_durably, sync_dir, temp_path};
 use super::{io_error, unavailable};
 use crate::store::{
     BlobBody, BlobKey, BlobMeta, BlobStore, ByteRange, CommitOutcome, MAX_BLOB_PIECE_BYTES,
-    MultipartBlobStore, PackSink, StoreError, UnsupportedPartSink,
+    PackSink, StoreError,
 };
 
 /// The size of each piece of a streamed body.
 pub(super) const READ_BLOCK: usize = 64 * 1024;
+
+type MultipartLocks = Arc<Mutex<HashMap<[u8; 32], Weak<tokio::sync::Mutex<()>>>>>;
 
 /// A [`BlobStore`] over `<root>/<keyspace>/<64-hex>` for packs (`packs` by
 /// default), and `<root>/upload-markers/v1/<64-hex>` for upload markers.
@@ -40,8 +44,9 @@ pub(super) const READ_BLOCK: usize = 64 * 1024;
 /// [`FsBlobStore::sweep_stale_uploads`] removes old ones.
 #[derive(Debug, Clone)]
 pub struct FsBlobStore {
-    root: PathBuf,
+    pub(super) root: PathBuf,
     keyspace: &'static str,
+    pub(super) multipart_locks: MultipartLocks,
 }
 
 impl FsBlobStore {
@@ -66,6 +71,7 @@ impl FsBlobStore {
         Self {
             root: root.into(),
             keyspace,
+            multipart_locks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -94,8 +100,11 @@ impl FsBlobStore {
     /// (the names [`temp_path`] gives an upload, from this store or
     /// `FileTransport::upload_pack`) last modified at least `min_age` ago.
     /// Nothing else is touched: no blob, no symlink, no other name, no file
-    /// modified in the future. Returns how many were removed; a file that
-    /// cannot be inspected or removed is skipped.
+    /// modified in the future. It also removes `server-uploads` session
+    /// directories whose immutable `meta` file's mtime is at least seven days
+    /// plus one hour old, independently of `min_age`. An incomplete session
+    /// without `meta` uses the directory mtime. Returns how many entries
+    /// were removed; an entry that cannot be inspected or removed is skipped.
     ///
     /// A live upload keeps its temp file's modification time fresh as it
     /// writes, so a `min_age` well above any pause between two writes of
@@ -135,7 +144,7 @@ impl FsBlobStore {
                 }
             }
         }
-        Ok(removed)
+        Ok(removed + super::multipart::sweep_sessions(&self.root, now)?)
     }
 }
 
@@ -373,9 +382,4 @@ impl BlobStore for FsBlobStore {
         }
         Ok(true)
     }
-}
-
-impl MultipartBlobStore for FsBlobStore {
-    type PartSink = UnsupportedPartSink;
-    const MAX_PARTS: u32 = u32::MAX;
 }
