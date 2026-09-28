@@ -46,6 +46,42 @@ macro_rules! storage_suite {
     };
 }
 
+/// Run the shared multipart suite on a store factory. WP-1.12 and WP-1.13
+/// add their R2 and S3 factories with the same invocation.
+#[macro_export]
+macro_rules! multipart_suite {
+    ($name:ident, store = $store:expr $(,)?) => {
+        #[allow(unused_imports)]
+        mod $name {
+            use super::*;
+            $crate::__with_multipart_cases!(__storage_tests { $store, no_skips });
+        }
+    };
+}
+
+/// The single source of multipart case names for the macro and registry.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __with_multipart_cases {
+    ($callback:ident { $($args:tt)* }) => {
+        $crate::$callback! { $($args)* ;
+            multipart::{
+                multipart_out_of_order,
+                multipart_duplicate_part,
+                multipart_replace_verified_part,
+                multipart_cv_mismatch_keeps_old,
+                multipart_short_or_long_part,
+                multipart_root_or_total_mismatch,
+                multipart_complete_twice,
+                multipart_pack_already_present,
+                multipart_abort_then_session_gone,
+                multipart_bounded_chunks,
+                multipart_crash_leftovers_invisible,
+            }
+        }
+    };
+}
+
 /// A test that every skip the kv harness declares names a case.
 #[doc(hidden)]
 #[macro_export]

@@ -96,6 +96,7 @@ pub mod durability;
 pub mod kv;
 pub mod kv_cases;
 mod macros;
+pub mod multipart;
 
 /// How a case ended, when it did not fail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -224,6 +225,12 @@ pub fn kv_cases<H: KvHarness>() -> Vec<Case<H>> {
 #[must_use]
 pub fn blob_cases<H: BlobHarness>() -> Vec<Case<H>> {
     crate::__with_blob_cases!(__case_registry { H })
+}
+
+/// Every multipart case, by name.
+#[must_use]
+pub fn multipart_cases<H: multipart::MultipartHarness>() -> Vec<Case<H>> {
+    crate::__with_multipart_cases!(__case_registry { H })
 }
 
 /// The prefix of every key the generic cases write: the ref class, so the

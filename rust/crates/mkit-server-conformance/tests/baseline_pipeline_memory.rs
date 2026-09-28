@@ -36,6 +36,7 @@ use mkit_server_conformance::wire::{
 const REPOSITORY: &str = "default";
 const TOKEN: &str = "conformance-bearer-token";
 const MAX_PACK: u64 = 4 << 20;
+const MULTIPART_MAX_PACK: u64 = 24 << 20;
 const QUOTA: ServerQuota = ServerQuota {
     window_ms: 3_600_000,
     max_ops: 6,
@@ -189,6 +190,7 @@ async fn serve_addressing(
         mutant,
         multi,
         mkit_server::pipeline::Sharding::Single,
+        multi.map_or(MAX_PACK, |profile| profile.max_pack_bytes),
     )
     .await
 }
@@ -199,6 +201,7 @@ async fn serve_sharding(
     mutant: Mutant,
     multi: Option<&Profile>,
     sharding: mkit_server::pipeline::Sharding,
+    max_pack: u64,
 ) -> (String, Shared) {
     let (listener, origin) = common::listener().await;
     let repo = RepoId {
@@ -206,7 +209,7 @@ async fn serve_sharding(
         name: RepoName::new(REPOSITORY).unwrap(),
     };
     let limits = UploadLimits {
-        max_total_bytes: MAX_PACK,
+        max_total_bytes: max_pack,
         max_chunks: 64,
     };
     let addressing = multi.map_or(Addressing::Single { repo }, |profile| {
@@ -465,6 +468,46 @@ async fn pipeline_auth_v2_quota_atomic() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pipeline_memory_multipart() {
+    let (origin, _) = serve_sharding(
+        authv2,
+        None,
+        Mutant::None,
+        None,
+        mkit_server::pipeline::Sharding::Single,
+        MULTIPART_MAX_PACK,
+    )
+    .await;
+    let mut profile = profile(WireAuth::AuthV2 {
+        audience: origin.clone(),
+        repository: REPOSITORY.to_owned(),
+        seed: [0x5e; 32],
+    });
+    profile.max_pack_bytes = MULTIPART_MAX_PACK;
+    profile.features.insert(Feature::Tickets);
+    profile.features.insert(Feature::Multipart);
+    let report = run(
+        &WireTarget {
+            base_url: origin.parse().unwrap(),
+            profile,
+        },
+        Some("multipart."),
+    )
+    .await;
+    common::judge(&report, PIPELINE_DIVERGENCES);
+    for name in [
+        "multipart.three_parts",
+        "multipart.resume_receipts",
+        "multipart.root_mismatch_invisible",
+    ] {
+        assert!(
+            matches!(report.verdict(name), Some(Verdict::Pass(_))),
+            "{name} did not pass"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pipeline_multi_repository() {
     let auth = |origin: &str| AuthMode::AuthV2(AuthV2Config::new(origin, "").unwrap());
     // Key derivation is independent of the audience; fix the run id before
@@ -478,6 +521,8 @@ async fn pipeline_multi_repository() {
     profile.features.insert(Feature::MultiRepo);
     profile.features.insert(Feature::NamespacePolicy);
     profile.features.insert(Feature::Tickets);
+    profile.features.insert(Feature::Multipart);
+    profile.max_pack_bytes = MULTIPART_MAX_PACK;
     let (origin, _) = serve_addressing(auth, None, Mutant::None, Some(&profile)).await;
     let WireAuth::AuthV2 { audience, .. } = &mut profile.auth else {
         unreachable!()
@@ -491,6 +536,7 @@ async fn pipeline_multi_repository() {
     // carry repository identities and exercise repository-scoped membership.
     let report = run(&target, Some("repo.")).await;
     let repository_report = run(&target, Some("repository.")).await;
+    let multipart_report = run(&target, Some("multipart.")).await;
     let policy_report = run(&target, Some("policy.")).await;
     let info_report = run(&target, Some("info.")).await;
     common::judge(&info_report, PIPELINE_DIVERGENCES);
@@ -502,6 +548,11 @@ async fn pipeline_multi_repository() {
     }
     common::judge(&report, PIPELINE_DIVERGENCES);
     common::judge(&repository_report, PIPELINE_DIVERGENCES);
+    common::judge(&multipart_report, PIPELINE_DIVERGENCES);
+    assert!(matches!(
+        multipart_report.verdict("multipart.cross_repository_no_oracle"),
+        Some(Verdict::Pass(_))
+    ));
     common::judge(&policy_report, PIPELINE_DIVERGENCES);
     for case in mkit_server_conformance::wire::CASES
         .iter()
@@ -509,6 +560,8 @@ async fn pipeline_multi_repository() {
     {
         let case_report = if case.name.starts_with("policy.") {
             &policy_report
+        } else if case.name.starts_with("multipart.") {
+            &multipart_report
         } else if case.name.starts_with("repository.") {
             &repository_report
         } else {
@@ -547,6 +600,7 @@ async fn pipeline_d34_multi_membership() {
         Mutant::None,
         Some(&profile),
         mkit_server::pipeline::Sharding::D34,
+        MAX_PACK,
     )
     .await;
     let WireAuth::AuthV2 { audience, .. } = &mut profile.auth else {
@@ -667,7 +721,8 @@ async fn pipeline_d34_epoch_leases() {
     use mkit_server::pipeline::{D34Shards, ShardMap, Sharding};
     use mkit_server::store::{codec, keys};
 
-    let (origin, meta) = serve_sharding(authv2, None, Mutant::None, None, Sharding::D34).await;
+    let (origin, meta) =
+        serve_sharding(authv2, None, Mutant::None, None, Sharding::D34, MAX_PACK).await;
     let mut profile = v2_profile(&origin);
     profile.quota = None;
     profile.derive_features();

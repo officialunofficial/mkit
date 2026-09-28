@@ -18,8 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Server: add stateless `UploadPart` and `CompleteUpload`, authenticated part
   receipts, and a multipart blob-store interface with a working memory backend.
   Multipart BeginUpload tickets now carry opaque storage sessions. The blob-key
-  API separates upload markers from pack keys; FS, R2 and S3 multipart storage
-  follows in later work packages.
+  API separates upload markers from pack keys. FS multipart storage now stages
+  verified parts durably, completes through the verifying pack sink and sweeps
+  seven-day-old sessions; R2 and S3 follow in later work packages. The trait
+  adds `begin_multipart_for_ticket` so the FS session directory uses the ticket id.
 - Server: ticketed `UploadPack` now verifies the ticket before reading data,
   streams the full pack without metadata writes, and leaves a content-addressed
   upload marker for later ticket consumption. The advertised BeginUpload

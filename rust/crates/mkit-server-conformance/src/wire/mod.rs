@@ -61,7 +61,7 @@
 //! # Cases
 //!
 //! Names are stable: a baseline or a divergence list may refer to them.
-//! Discovery, multi-repository, namespace-policy and epoch-lease cases are milestone M1;
+//! Discovery, multi-repository, namespace-policy, epoch-lease and multipart cases are milestone M1;
 //! the rest are M0.
 //!
 //! | Case | Requires | Asserts |
@@ -152,6 +152,10 @@
 //! | `tickets.upload_pack_bad_token` | `tickets`, `auth-v2` | an invalid token fails before a pack is stored |
 //! | `tickets.upload_pack_binding_denied` | `tickets`, `auth-v2` | a valid token for another pack is denied |
 //! | `tickets.upload_pack_expired_token` | `tickets`, `auth-v2`, `test-faults` | an expired token fails with `failed_precondition` |
+//! | `multipart.three_parts` | `multipart`, `auth-v2`; excludes `multi-repo` | a roughly 17 MiB three-part pack at the minimum part size completes and becomes visible |
+//! | `multipart.resume_receipts` | `multipart`, `auth-v2`; excludes `multi-repo` | client-held receipts complete after a fresh client reconnects |
+//! | `multipart.root_mismatch_invisible` | `multipart`, `auth-v2`; excludes `multi-repo` | a wrong completion root never makes the pack visible |
+//! | `multipart.cross_repository_no_oracle` | `multipart`, `auth-v2`, `multi-repo` | a foreign repository's ticket and receipts cannot complete an upload |
 //! | `growth.replay_and_quota_pruned` | `auth-v2`, `replay`, `quota`, `test-faults` | records answer before expiry; after validity + grace + window the partition shrinks back to an absolute bound (R-31); needs a quota window ≤ 60 s allowing 265 writes, and a disposable server |
 //! | `list.large_response_within_limit` | | records one `ListRefs` response over `list_refs` refs (M1 asserts the bound) |
 //! | `repo.single_header_mismatch_not_found` | excludes `multi-repo` | Single reads with another identity give `not_found` |

@@ -985,9 +985,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             && open.spec.bytes > open.spec.part_size
         {
             let key = PackKey(open.spec.pack_id).into();
+            let ticket_id = crate::store::tickets::ticket_id(&open.spec.reservation_id);
             let session = self
                 .blobs
-                .begin_multipart(key, open.spec.bytes, open.spec.part_size)
+                .begin_multipart_for_ticket(key, open.spec.bytes, open.spec.part_size, ticket_id)
                 .await
                 .map_err(|e| {
                     if open.reserved() {
@@ -1008,11 +1009,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     "multipart store returned an invalid session identifier",
                 ));
             }
-            opened_session = Some((
-                key,
-                session.clone(),
-                crate::store::tickets::ticket_id(&open.spec.reservation_id),
-            ));
+            opened_session = Some((key, session.clone(), ticket_id));
             open.spec.upload_session = Some(session);
         }
         let write_result = async {

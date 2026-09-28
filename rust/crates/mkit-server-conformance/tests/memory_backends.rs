@@ -13,7 +13,7 @@ use mkit_server::{
     PartitionStats, ScanPage, StoreCapabilities, StoreError, Value,
 };
 use mkit_server_conformance::storage::KvHarness;
-use mkit_server_conformance::storage_suite;
+use mkit_server_conformance::{multipart_suite, storage_suite};
 
 /// [`MemoryKv`]s with `caps`: injectable clock, capacity cap and reopen.
 struct Memory {
@@ -126,6 +126,7 @@ storage_suite!(
     },
     blob = MemoryBlobStore::default,
 );
+multipart_suite!(memory_multipart, store = MemoryBlobStore::default);
 storage_suite!(
     memory_refs_only,
     kv = Memory {

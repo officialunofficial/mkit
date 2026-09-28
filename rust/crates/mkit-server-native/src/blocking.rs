@@ -358,6 +358,17 @@ where
             .await
     }
 
+    async fn begin_multipart_for_ticket(
+        &self,
+        key: BlobKey,
+        len: u64,
+        part_size: u64,
+        ticket_id: [u8; 32],
+    ) -> Result<Vec<u8>, StoreError> {
+        self.run(move |s| block_on(s.begin_multipart_for_ticket(key, len, part_size, ticket_id)))
+            .await
+    }
+
     async fn begin_part(
         &self,
         key: BlobKey,
