@@ -256,7 +256,13 @@ async fn scenario<N: NamespaceStore>(backend: N, mode: Mode) {
             blobs.head(&marker).await.unwrap().unwrap().len,
             marker_content.len() as u64
         );
-        assert!(blobs.head(&BlobKey::new(marker.0)).await.unwrap().is_none());
+        assert!(
+            blobs
+                .head(&BlobKey::pack(*marker.hash()))
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
     assert!(
         blobs

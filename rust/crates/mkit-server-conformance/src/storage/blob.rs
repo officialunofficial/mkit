@@ -15,7 +15,7 @@ use super::{BlobHarness, Outcome};
 const MAX_PIECE: usize = MAX_BLOB_PIECE_BYTES;
 
 fn key_of(bytes: &[u8]) -> BlobKey {
-    BlobKey::new(hash(bytes))
+    BlobKey::pack(hash(bytes))
 }
 
 /// Upload `chunks` under `key`, declaring `len` bytes.

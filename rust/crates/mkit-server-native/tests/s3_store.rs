@@ -38,7 +38,7 @@ fn store(fake: &FakeS3) -> S3BlobStore {
 }
 
 fn key_of(bytes: &[u8]) -> BlobKey {
-    BlobKey::new(hash(bytes))
+    BlobKey::pack(hash(bytes))
 }
 
 fn object_key(bytes: &[u8]) -> String {
@@ -104,7 +104,7 @@ async fn upload_marker_uses_separate_key_under_prefix() {
     assert_eq!(s.object_key(&marker), path);
     assert_eq!(fake.object(DEFAULT_BUCKET, &path).unwrap(), &content[..]);
     assert!(
-        s.head(&BlobKey::new(hash(content)))
+        s.head(&BlobKey::pack(hash(content)))
             .await
             .unwrap()
             .is_none()

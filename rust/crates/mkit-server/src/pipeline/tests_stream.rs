@@ -76,7 +76,7 @@ fn replay_state<H: HookSet>(env: &Env<H>, req: &Req) -> Option<ReplayState> {
 }
 
 fn blob_present<H: HookSet>(env: &Env<H>, pack: &[u8]) -> bool {
-    let key = BlobKey::new(hash(pack));
+    let key = BlobKey::pack(hash(pack));
     now(env.pipe.blobs.head(&key)).unwrap().is_some()
 }
 
@@ -178,10 +178,10 @@ fn ticketed_upload_no_metadata_and_marker() {
         assert!(env.rows().is_empty());
     }
     let read = env.auth(&Req::unsigned(Procedure::PackExists)).unwrap();
-    assert!(!block_on(env.pipe.pack_exists(&read, PackKey::new(marker.0))).unwrap());
+    assert!(!block_on(env.pipe.pack_exists(&read, PackKey::new(*marker.hash()))).unwrap());
     let read = env.auth(&Req::unsigned(Procedure::DownloadPack)).unwrap();
     assert_eq!(
-        block_on(env.pipe.download(&read, PackKey::new(marker.0)))
+        block_on(env.pipe.download(&read, PackKey::new(*marker.hash())))
             .unwrap_err()
             .code(),
         Code::NotFound

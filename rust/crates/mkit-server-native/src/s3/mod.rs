@@ -380,6 +380,7 @@ impl S3BlobStore {
                 let root = base.rsplit_once('/').map_or(base, |(root, _)| root);
                 format!("{root}/upload-markers/v1/{}", key.to_hex())
             }
+            _ => unreachable!("unsupported blob namespace"),
         }
     }
 

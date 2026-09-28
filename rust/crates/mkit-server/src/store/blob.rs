@@ -17,9 +17,13 @@ use crate::rt::{BoxStream, MaybeSend, MaybeSync};
 /// A blob's content hash and storage namespace. Pack RPCs construct only
 /// `Pack` keys, so an upload marker cannot be fetched as a pack.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct BlobKey(pub Hash, BlobNamespace);
+pub struct BlobKey {
+    hash: Hash,
+    namespace: BlobNamespace,
+}
 
 /// The physical namespace of a content-addressed blob.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum BlobNamespace {
     /// Pack bytes.
@@ -31,44 +35,44 @@ pub enum BlobNamespace {
 impl BlobKey {
     /// Construct a pack key.
     #[must_use]
-    pub const fn new(hash: Hash) -> Self {
-        Self(hash, BlobNamespace::Pack)
-    }
-
-    /// Construct a pack key.
-    #[must_use]
-    pub const fn from_hash(hash: Hash) -> Self {
-        Self::new(hash)
+    pub const fn pack(hash: Hash) -> Self {
+        Self {
+            hash,
+            namespace: BlobNamespace::Pack,
+        }
     }
 
     /// Construct an upload marker key.
     #[must_use]
     pub const fn upload_marker(hash: Hash) -> Self {
-        Self(hash, BlobNamespace::UploadMarker)
+        Self {
+            hash,
+            namespace: BlobNamespace::UploadMarker,
+        }
     }
 
     /// Content hash bytes.
     #[must_use]
-    pub const fn as_bytes(&self) -> &Hash {
-        &self.0
+    pub const fn hash(&self) -> &Hash {
+        &self.hash
     }
 
     /// Lowercase hexadecimal content hash.
     #[must_use]
     pub fn to_hex(&self) -> String {
-        to_hex_bytes(&self.0)
+        to_hex_bytes(&self.hash)
     }
 
     /// Physical namespace.
     #[must_use]
     pub const fn namespace(&self) -> BlobNamespace {
-        self.1
+        self.namespace
     }
 }
 
 impl From<PackKey> for BlobKey {
     fn from(key: PackKey) -> Self {
-        Self::new(key.0)
+        Self::pack(key.0)
     }
 }
 

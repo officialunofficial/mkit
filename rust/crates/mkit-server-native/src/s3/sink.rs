@@ -333,7 +333,7 @@ impl PackSink for S3PackSink {
         }
         let spool = self.spool.take().ok_or_else(sink_gone)?;
         // Verify first: nothing is sent for bytes that do not match.
-        if spool.blake3.finalize() != self.key.0 {
+        if spool.blake3.finalize() != *self.key.hash() {
             return Err(StoreError::Invalid(
                 "blob hash does not match its key".into(),
             ));

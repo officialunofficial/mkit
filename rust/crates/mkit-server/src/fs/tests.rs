@@ -86,7 +86,7 @@ fn upload_marker_blob_uses_separate_directory() {
     let path = dir.path().join("upload-markers/v1").join(marker.to_hex());
     assert_eq!(std::fs::read(path).unwrap(), content);
     assert!(
-        block_on(blobs.head(&BlobKey::new(digest)))
+        block_on(blobs.head(&BlobKey::pack(digest)))
             .unwrap()
             .is_none()
     );
