@@ -549,6 +549,60 @@ async fn create_missing_sources<S: NamespaceStore>(
     Ok(())
 }
 
+async fn seed_relay_leases<S: NamespaceStore>(
+    target: &S,
+    sources: Vec<Partition>,
+    recovered_at_ms: u64,
+    report: &mut RestoreReport,
+) -> Result<(), StoreError> {
+    for source in sources {
+        let Partition::Ref {
+            ns,
+            repo,
+            shard_ref,
+        } = source
+        else {
+            unreachable!("relay sources were filtered to ref shards")
+        };
+        let coordinator = Partition::Coordinator(ns);
+        let key = keys::leased_shard(&repo, &shard_ref);
+        if target.get(&coordinator, &key).await?.is_some() {
+            continue;
+        }
+        let epoch = target
+            .get(&coordinator, &keys::grant_epoch())
+            .await?
+            .as_ref()
+            .map(codec::decode_u64)
+            .transpose()?
+            .unwrap_or(0);
+        let row = codec::LeasedShard {
+            epoch,
+            expires_at_ms: recovered_at_ms,
+            acked_epoch: epoch,
+            relay_watermark_ms: 0,
+            sweep_due_ms: recovered_at_ms,
+        };
+        let batch = Batch::new().put(key, codec::encode_leased_shard(&row)).put(
+            keys::timer(
+                recovered_at_ms,
+                kinds::LEASE_SWEEP.get(),
+                &lease_reference(&repo, &shard_ref),
+            ),
+            super::Value::default(),
+        );
+        match target.apply(&coordinator, batch).await? {
+            BatchOutcome::Committed => report.records += 2,
+            _ => {
+                return Err(StoreError::Corrupt(
+                    "restored relay lease row did not commit".into(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Restore exports into a fresh store, in dependency order.
 ///
 /// Each nonempty export must contain exactly one partition. Recordless
@@ -625,51 +679,7 @@ pub async fn restore<S: NamespaceStore>(
     if !wrote_missing_sources {
         create_missing_sources(target, &plan.missing_sources, &supplied, &mut report).await?;
     }
-    for source in relay_sources {
-        let Partition::Ref {
-            ns,
-            repo,
-            shard_ref,
-        } = source
-        else {
-            unreachable!()
-        };
-        let coordinator = Partition::Coordinator(ns);
-        let key = keys::leased_shard(&repo, &shard_ref);
-        if target.get(&coordinator, &key).await?.is_some() {
-            continue;
-        }
-        let epoch = target
-            .get(&coordinator, &keys::grant_epoch())
-            .await?
-            .as_ref()
-            .map(codec::decode_u64)
-            .transpose()?
-            .unwrap_or(0);
-        let row = codec::LeasedShard {
-            epoch,
-            expires_at_ms: opts.recovered_at_ms,
-            acked_epoch: epoch,
-            relay_watermark_ms: 0,
-            sweep_due_ms: opts.recovered_at_ms,
-        };
-        let batch = Batch::new().put(key, codec::encode_leased_shard(&row)).put(
-            keys::timer(
-                opts.recovered_at_ms,
-                kinds::LEASE_SWEEP.get(),
-                &lease_reference(&repo, &shard_ref),
-            ),
-            super::Value::default(),
-        );
-        match target.apply(&coordinator, batch).await? {
-            BatchOutcome::Committed => report.records += 2,
-            _ => {
-                return Err(StoreError::Corrupt(
-                    "restored relay lease row did not commit".into(),
-                ));
-            }
-        }
-    }
+    seed_relay_leases(target, relay_sources, opts.recovered_at_ms, &mut report).await?;
     Ok(report)
 }
 
@@ -848,6 +858,85 @@ mod tests {
         );
     }
 
+    fn assert_restored_lease_rows(store: &RootFirst) {
+        for name in ["other", "repo"] {
+            let repo = RepoName::new(name).expect("test repository name");
+            let row = block_on(store.get(
+                &coordinator(),
+                &keys::leased_shard(&repo, "refs/heads/main"),
+            ))
+            .expect("read restored lease")
+            .expect("restored lease exists");
+            let row = codec::decode_leased_shard(&row).expect("decode restored lease");
+            assert_eq!(row.relay_watermark_ms, 0);
+            assert_eq!(row.expires_at_ms, 500);
+            assert_eq!(row.sweep_due_ms, 500);
+            assert!(
+                block_on(store.get(
+                    &coordinator(),
+                    &keys::timer(
+                        500,
+                        kinds::LEASE_SWEEP.get(),
+                        &lease_reference(&repo, "refs/heads/main")
+                    )
+                ))
+                .expect("read restored sweep timer")
+                .is_some()
+            );
+        }
+        assert!(
+            block_on(store.get(
+                &coordinator(),
+                &keys::timer(
+                    999_999,
+                    kinds::LEASE_SWEEP.get(),
+                    &lease_reference(
+                        &RepoName::new("other").expect("test repository name"),
+                        "refs/heads/main"
+                    )
+                )
+            ))
+            .expect("read old sweep timer")
+            .is_none()
+        );
+    }
+
+    fn assert_restored_source_rows(
+        store: RootFirst,
+        relay: Value,
+        relay_to_empty: Value,
+        shift: u64,
+    ) {
+        assert_eq!(
+            block_on(store.get(&source(), &keys::outbox_sequence()))
+                .expect("read restored source sequence"),
+            Some(codec::encode_u64(3 + shift))
+        );
+        assert_eq!(
+            block_on(store.get(&source(), &keys::relay(2 + shift)))
+                .expect("read first restored relay"),
+            Some(relay)
+        );
+        assert_eq!(
+            block_on(store.get(&source(), &keys::relay(3 + shift)))
+                .expect("read second restored relay"),
+            Some(relay_to_empty)
+        );
+        for key in [
+            keys::relay(2),
+            keys::epoch_lease(),
+            keys::relay_scan(),
+            keys::backup_state(),
+            keys::timer(123, kinds::BACKUP.get(), b""),
+        ] {
+            assert_eq!(
+                block_on(store.get(&source(), &key)).expect("read discarded source row"),
+                None
+            );
+        }
+        assert_delivers_once(store, shift);
+    }
+
     #[test]
     fn fresh_restore_orders_root_and_rewrites_recovery_epoch_and_relay() {
         let index = snapshot(
@@ -933,43 +1022,7 @@ mod tests {
             codec::decode_lease_recovery(&lr).unwrap().resumed_at_ms,
             500
         );
-        for name in ["other", "repo"] {
-            let repo = RepoName::new(name).unwrap();
-            let row = block_on(store.get(
-                &coordinator(),
-                &keys::leased_shard(&repo, "refs/heads/main"),
-            ))
-            .unwrap()
-            .unwrap();
-            let row = codec::decode_leased_shard(&row).unwrap();
-            assert_eq!(row.relay_watermark_ms, 0);
-            assert_eq!(row.expires_at_ms, 500);
-            assert_eq!(row.sweep_due_ms, 500);
-            assert!(
-                block_on(store.get(
-                    &coordinator(),
-                    &keys::timer(
-                        500,
-                        kinds::LEASE_SWEEP.get(),
-                        &lease_reference(&repo, "refs/heads/main")
-                    )
-                ))
-                .unwrap()
-                .is_some()
-            );
-        }
-        assert!(
-            block_on(store.get(
-                &coordinator(),
-                &keys::timer(
-                    999_999,
-                    kinds::LEASE_SWEEP.get(),
-                    &lease_reference(&RepoName::new("other").unwrap(), "refs/heads/main")
-                )
-            ))
-            .unwrap()
-            .is_none()
-        );
+        assert_restored_lease_rows(&store);
         let writes = store.writes.lock().unwrap();
         let coordinator_write = writes.iter().position(|p| p == &coordinator()).unwrap();
         let ref_write = writes.iter().position(|p| p == &source()).unwrap();
@@ -984,30 +1037,7 @@ mod tests {
             block_on(store.get(&root(), &keys::lease_recovery())).unwrap(),
             None
         );
-        let shift = 10;
-        assert_eq!(
-            block_on(store.get(&source(), &keys::outbox_sequence())).unwrap(),
-            Some(codec::encode_u64(3 + shift))
-        );
-        assert_eq!(
-            block_on(store.get(&source(), &keys::relay(2 + shift))).unwrap(),
-            Some(relay)
-        );
-        assert_eq!(
-            block_on(store.get(&source(), &keys::relay(3 + shift))).unwrap(),
-            Some(relay_to_empty)
-        );
-        for key in [
-            keys::relay(2),
-            keys::epoch_lease(),
-            keys::relay_scan(),
-            keys::backup_state(),
-            keys::timer(123, kinds::BACKUP.get(), b""),
-        ] {
-            assert_eq!(block_on(store.get(&source(), &key)).unwrap(), None);
-        }
-
-        assert_delivers_once(store, shift);
+        assert_restored_source_rows(store, relay, relay_to_empty, 10);
     }
 
     #[test]

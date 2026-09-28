@@ -867,6 +867,29 @@ async fn absent_el_and_budget<N: NamespaceStore>(
     }
 }
 
+fn assert_renewal_ops(calls: &[Call], old_timer: &Key, new_timer: &Key) {
+    let moved = calls.iter().any(|c| matches!(c, Call::Apply(Partition::Coordinator(_), b, BatchOutcome::Committed)
+        if b.writes.contains(&Write::Delete((*old_timer).clone())) && b.writes.iter().any(|w| matches!(w, Write::Put(k, _) if k == new_timer))));
+    assert!(moved, "timer move must share the lease grant batch");
+    assert!(calls.iter().any(|c| matches!(c, Call::Apply(Partition::Coordinator(_), b, BatchOutcome::Committed)
+        if b.writes.contains(&Write::Delete((*old_timer).clone())) && b.writes.len() == 3 && b.preconditions.len() == 4)),
+        "renewal still uses four guards and three writes");
+    let renewal_ref_ops = calls
+        .iter()
+        .find_map(|c| match c {
+            Call::Apply(Partition::Ref { .. }, b, BatchOutcome::Committed) => {
+                Some((b.preconditions.len(), b.writes.len()))
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        renewal_ref_ops,
+        (4, 4),
+        "the ref batch keeps its lease installation and three other writes"
+    );
+}
+
 async fn sweep<N: NamespaceStore + 'static>(
     backend: N,
     clock: Arc<ManualClock>,
@@ -917,26 +940,7 @@ async fn sweep<N: NamespaceStore + 'static>(
     );
     let new_timer = keys::timer(54_501, kinds::LEASE_SWEEP.get(), &reference);
     let calls = store.take();
-    let moved = calls.iter().any(|c| matches!(c, Call::Apply(Partition::Coordinator(_), b, BatchOutcome::Committed)
-        if b.writes.contains(&Write::Delete(old_timer.clone())) && b.writes.iter().any(|w| matches!(w, Write::Put(k, _) if *k == new_timer))));
-    assert!(moved, "timer move must share the lease grant batch");
-    assert!(calls.iter().any(|c| matches!(c, Call::Apply(Partition::Coordinator(_), b, BatchOutcome::Committed)
-        if b.writes.contains(&Write::Delete(old_timer.clone())) && b.writes.len() == 3 && b.preconditions.len() == 4)),
-        "renewal still uses four guards and three writes");
-    let renewal_ref_ops = calls
-        .iter()
-        .find_map(|c| match c {
-            Call::Apply(Partition::Ref { .. }, b, BatchOutcome::Committed) => {
-                Some((b.preconditions.len(), b.writes.len()))
-            }
-            _ => None,
-        })
-        .unwrap();
-    assert_eq!(
-        renewal_ref_ops,
-        (4, 4),
-        "the ref batch keeps its lease installation and three other writes"
-    );
+    assert_renewal_ops(&calls, &old_timer, &new_timer);
     assert!(
         store
             .inner
@@ -984,6 +988,59 @@ async fn sweep<N: NamespaceStore + 'static>(
     );
 }
 
+async fn plant_delayed_relay_and_expired_lease(
+    store: &Store<MemoryKv>,
+    source: &Partition,
+    coordinator: &Partition,
+    repo: &mkit_server::RepoName,
+    shard_ref: &str,
+) {
+    use mkit_server::timers::{lease_sweep::lease_reference, registry::kinds};
+
+    let lease = codec::LeasedShard {
+        epoch: 1,
+        expires_at_ms: 100,
+        acked_epoch: 1,
+        relay_watermark_ms: 0,
+        sweep_due_ms: 100,
+    };
+    let relay = codec::RelayV1 {
+        at_ms: 90,
+        target: coordinator.clone(),
+        puts: vec![(Key::new(&b"x\0"[..]), Value::default())],
+    };
+    store
+        .apply(
+            source,
+            Batch::new()
+                .put(keys::relay(1), codec::encode_relay(&relay).unwrap())
+                .put(keys::outbox_sequence(), codec::encode_u64(1))
+                .put(keys::timer(100, kinds::RELAY.get(), b""), Value::default())
+                .put(Key::new(&b"tdr\0"[..]), codec::encode_u64(10_100)),
+        )
+        .await
+        .unwrap();
+    store
+        .apply(
+            coordinator,
+            Batch::new()
+                .put(
+                    keys::leased_shard(repo, shard_ref),
+                    codec::encode_leased_shard(&lease),
+                )
+                .put(
+                    keys::timer(
+                        100,
+                        kinds::LEASE_SWEEP.get(),
+                        &lease_reference(repo, shard_ref),
+                    ),
+                    Value::default(),
+                ),
+        )
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn expired_lease_is_kept_until_source_outbox_drains() {
     use mkit_server::relay::{NoHook, RelayBudget, RelayHandler};
@@ -1004,48 +1061,12 @@ async fn expired_lease_is_kept_until_source_outbox_drains() {
     };
     let coordinator = Partition::Coordinator(ns);
     let ls_key = keys::leased_shard(&repo, shard_ref);
-    let timer100 = keys::timer(
-        100,
-        kinds::LEASE_SWEEP.get(),
-        &lease_reference(&repo, shard_ref),
-    );
     let timer10100 = keys::timer(
         10_100,
         kinds::LEASE_SWEEP.get(),
         &lease_reference(&repo, shard_ref),
     );
-    let lease = codec::LeasedShard {
-        epoch: 1,
-        expires_at_ms: 100,
-        acked_epoch: 1,
-        relay_watermark_ms: 0,
-        sweep_due_ms: 100,
-    };
-    let relay = codec::RelayV1 {
-        at_ms: 90,
-        target: coordinator.clone(),
-        puts: vec![(Key::new(&b"x\0"[..]), Value::default())],
-    };
-    store
-        .apply(
-            &source,
-            Batch::new()
-                .put(keys::relay(1), codec::encode_relay(&relay).unwrap())
-                .put(keys::outbox_sequence(), codec::encode_u64(1))
-                .put(keys::timer(100, kinds::RELAY.get(), b""), Value::default())
-                .put(Key::new(&b"tdr\0"[..]), codec::encode_u64(10_100)),
-        )
-        .await
-        .unwrap();
-    store
-        .apply(
-            &coordinator,
-            Batch::new()
-                .put(ls_key.clone(), codec::encode_leased_shard(&lease))
-                .put(timer100, Value::default()),
-        )
-        .await
-        .unwrap();
+    plant_delayed_relay_and_expired_lease(&store, &source, &coordinator, &repo, shard_ref).await;
     let relay_registry = TimerRegistry::new().register(RelayHandler {
         target: store.clone(),
         hook: NoHook,

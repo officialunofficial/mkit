@@ -374,6 +374,31 @@ async fn registered<N: NamespaceStore>(
     assert!(repo.created_at_ms > 0);
 }
 
+fn assert_fresh_shard_calls(calls: &[Call], sharding: Sharding) {
+    assert_eq!(
+        calls.len(),
+        if sharding == Sharding::D34 { 5 } else { 3 },
+        "{sharding:?}: {calls:?}"
+    );
+    if sharding == Sharding::D34 {
+        assert!(matches!(
+            calls,
+            [
+                Call::Many(..),
+                Call::Scan(Partition::Ref { .. }),
+                Call::Many(..),
+                Call::Apply(..),
+                Call::Apply(..)
+            ]
+        ));
+    } else {
+        assert!(matches!(
+            calls,
+            [Call::Many(..), Call::Many(..), Call::Apply(..)]
+        ));
+    }
+}
+
 async fn creation_and_cost<N: NamespaceStore>(backend: N, sharding: Sharding) {
     let store = TestStore::new(backend);
     let (pipe, observed) = pipeline(store.clone(), sharding, multi(), false, false);
@@ -442,25 +467,7 @@ async fn creation_and_cost<N: NamespaceStore>(backend: N, sharding: Sharding) {
         .await
         .unwrap();
     let calls = store.take_calls();
-    let expected_calls = if sharding == Sharding::D34 { 5 } else { 3 };
-    assert_eq!(calls.len(), expected_calls, "{sharding:?}: {calls:?}");
-    if sharding == Sharding::D34 {
-        assert!(matches!(
-            calls.as_slice(),
-            [
-                Call::Many(..),
-                Call::Scan(Partition::Ref { .. }),
-                Call::Many(..),
-                Call::Apply(..),
-                Call::Apply(..)
-            ]
-        ));
-    } else {
-        assert!(matches!(
-            calls.as_slice(),
-            [Call::Many(..), Call::Many(..), Call::Apply(..)]
-        ));
-    }
+    assert_fresh_shard_calls(&calls, sharding);
 
     let second = signed(&pipe, &identity("second"));
     pipe.update_ref(&second, update("refs/heads/a", 4))

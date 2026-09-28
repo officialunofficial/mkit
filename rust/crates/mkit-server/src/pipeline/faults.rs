@@ -13,8 +13,9 @@ use std::sync::Mutex;
 use mkit_core::hash::Hash;
 
 use crate::error::ServerError;
-use crate::op::Operation;
+use crate::op::{OpKind, Operation};
 use crate::rt::{BoxFuture, MaybeSend, MaybeSync};
+use crate::store::{Batch, codec};
 
 /// Header naming a fault for this request, e.g. `after-reserve`.
 pub const FAULT_HEADER: &str = "x-mkit-test-fault";
@@ -38,6 +39,25 @@ pub const RELAY_DELAY_MS_HEADER: &str = "x-mkit-test-relay-delay-ms";
 /// Source-local test marker. A release build cannot read or write it.
 pub(crate) fn relay_delay_key() -> crate::Key {
     crate::Key::new(&b"tdr\0"[..])
+}
+
+/// Attach a delivery hold to the same batch as a test `UpdateRef` commit.
+pub(crate) fn delay_relay_batch(
+    batch: Batch,
+    directives: &TestDirectives,
+    op: &Operation,
+    now_ms: u64,
+) -> Batch {
+    if let Some(delay) = directives.relay_delay_ms
+        && matches!(op.kind, OpKind::UpdateRef(_))
+    {
+        batch.put(
+            relay_delay_key(),
+            codec::encode_u64(now_ms.saturating_add(delay)),
+        )
+    } else {
+        batch
+    }
 }
 
 /// Where the pipeline calls [`FaultHooks::at`].

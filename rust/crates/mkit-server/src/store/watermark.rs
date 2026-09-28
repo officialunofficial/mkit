@@ -33,6 +33,9 @@ pub struct WatermarkCheckpoint {
 impl WatermarkCheckpoint {
     /// Stable binary form: version, partition length and bytes, scan ceiling,
     /// partial minimum, then opaque cursor bytes.
+    ///
+    /// # Panics
+    /// A checkpoint created for an invalid or oversized partition cannot encode.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
         let partition = self
@@ -66,10 +69,22 @@ impl WatermarkCheckpoint {
         if bytes.len() <= end {
             return Err(StoreError::Invalid("truncated watermark checkpoint".into()));
         }
-        let coordinator = Partition::decode(&bytes[3..3 + part_len])?;
-        let ceiling_ms =
-            u64::from_be_bytes(bytes[end - 16..end - 8].try_into().expect("eight bytes"));
-        let minimum_ms = u64::from_be_bytes(bytes[end - 8..end].try_into().expect("eight bytes"));
+        let partition = bytes
+            .get(3..3 + part_len)
+            .ok_or_else(|| StoreError::Invalid("truncated coordinator identity".into()))?;
+        let coordinator = Partition::decode(partition)?;
+        let ceiling_ms = u64::from_be_bytes(
+            bytes
+                .get(end - 16..end - 8)
+                .and_then(|slice| slice.try_into().ok())
+                .ok_or_else(|| StoreError::Invalid("truncated watermark ceiling".into()))?,
+        );
+        let minimum_ms = u64::from_be_bytes(
+            bytes
+                .get(end - 8..end)
+                .and_then(|slice| slice.try_into().ok())
+                .ok_or_else(|| StoreError::Invalid("truncated watermark minimum".into()))?,
+        );
         if minimum_ms > ceiling_ms {
             return Err(StoreError::Invalid("invalid watermark minimum".into()));
         }
@@ -295,7 +310,7 @@ mod tests {
         Partition::Coordinator(NamespaceKey::deployment_default())
     }
     fn repo(n: u8) -> RepoName {
-        RepoName::new(format!("r{n}")).unwrap()
+        RepoName::new(format!("r{n}")).expect("test repository name")
     }
     fn source(n: u8) -> Partition {
         Partition::Ref {
@@ -323,7 +338,7 @@ mod tests {
                 ),
             )
             .await
-            .unwrap();
+            .expect("insert test lease");
     }
     async fn put_relay(store: &MemoryKv, n: u8, seq: u64, at_ms: u64) {
         let value = codec::encode_relay(&codec::RelayV1 {
@@ -331,11 +346,11 @@ mod tests {
             target: coordinator(),
             puts: vec![(Key::new(&b"x\0"[..]), Value::default())],
         })
-        .unwrap();
+        .expect("encode test relay");
         store
             .apply(&source(n), Batch::new().put(keys::relay(seq), value))
             .await
-            .unwrap();
+            .expect("insert test relay");
     }
 
     #[tokio::test]

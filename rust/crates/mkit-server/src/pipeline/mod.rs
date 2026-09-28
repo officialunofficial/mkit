@@ -1455,16 +1455,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 prune_from,
             } = plan;
             #[cfg(feature = "test-faults")]
-            let batch = if let Some(delay) = a.test_directives().relay_delay_ms
-                && matches!(op.kind, OpKind::UpdateRef(_))
-            {
-                batch.put(
-                    faults::relay_delay_key(),
-                    codec::encode_u64(ms(clock.business_now_ms).saturating_add(delay)),
-                )
-            } else {
-                batch
-            };
+            let batch = faults::delay_relay_batch(
+                batch,
+                a.test_directives(),
+                op,
+                ms(clock.business_now_ms),
+            );
             if req.kind != WriteKind::UploadReserve {
                 #[cfg(feature = "test-faults")]
                 {
@@ -1477,23 +1473,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             match self.meta.apply(p, batch).await {
                 Ok(BatchOutcome::Committed) => {
                     #[cfg(feature = "test-faults")]
-                    if let OpKind::UpdateRef(upd) = &op.kind
-                        && matches!(
-                            on_commit,
-                            StoredResult::UpdateRef(UpdateRefResult::Committed)
-                        )
-                    {
-                        let timer_partition = self.shards.ref_shard(&op.repo, &upd.name);
-                        faults::schedule_timer(
-                            a.test_directives(),
-                            &self.meta,
-                            &timer_partition,
-                            &op.repo.name,
-                            &upd.name,
-                            ms(clock.business_now_ms),
-                        )
+                    self.schedule_test_ref_timer(op, a, &on_commit, ms(clock.business_now_ms))
                         .await?;
-                    }
                     return Ok(on_commit);
                 }
                 Ok(BatchOutcome::DeadlinePassed { backend_now }) => {
@@ -1533,6 +1514,34 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 Err(e) => return Err(meta_error(e)),
             }
         }
+    }
+
+    #[cfg(feature = "test-faults")]
+    async fn schedule_test_ref_timer(
+        &self,
+        op: &Operation,
+        a: &Authenticated,
+        on_commit: &StoredResult,
+        now_ms: u64,
+    ) -> Result<(), ServerError> {
+        if let OpKind::UpdateRef(upd) = &op.kind
+            && matches!(
+                on_commit,
+                StoredResult::UpdateRef(UpdateRefResult::Committed)
+            )
+        {
+            let timer_partition = self.shards.ref_shard(&op.repo, &upd.name);
+            faults::schedule_timer(
+                a.test_directives(),
+                &self.meta,
+                &timer_partition,
+                &op.repo.name,
+                &upd.name,
+                now_ms,
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     /// The deadline uses the injected clock unshifted; business time adds
