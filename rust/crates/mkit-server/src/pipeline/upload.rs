@@ -202,7 +202,7 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
         }
         super::fault!(pipe, AfterAuthenticate, &op, a);
         let p = pipe.shards.coordinator(&op.repo.namespace);
-        let ahead = pipe.read_ahead(&op, &p, &[]).await?;
+        let ahead = pipe.read_ahead(&op, &p, &[], a.business_skew_ms).await?;
         let mode = upload_mode(&op, ahead.as_ref())?;
         tracing::debug!(stage = "replay_lookup", ?mode);
         if mode != UploadMode::Replay {
@@ -221,6 +221,11 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
                     refs: &[],
                     replay: replay_guard(&op),
                     charges: &charges,
+                    namespace_charge: pipe.namespace_charge(
+                        &p,
+                        &charges,
+                        ahead.as_ref().and_then(|s| s.namespace_window),
+                    )?,
                     grant: op.authz.grant,
                     layout_version: pipe.meta.capabilities().implicit_layout_version.is_none(),
                     mark_repo_known: false,
@@ -453,6 +458,7 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
             refs: &[],
             replay: Some(replay),
             charges: &[],
+            namespace_charge: None,
             grant: self.op.authz.grant,
             layout_version: pipe.meta.capabilities().implicit_layout_version.is_none(),
             mark_repo_known: false,

@@ -699,8 +699,8 @@
     ]
   },
   {
-    "id": "1.26",
-    "title": "Core: default quota exact per ref shard, approximate per namespace",
+    "id": "1.26a",
+    "title": "Core and native: default quota exact per ref shard, approximate per namespace",
     "milestone": "M1",
     "track": "core",
     "depends_on": [
@@ -708,12 +708,31 @@
       "1.24",
       "1.25"
     ],
-    "size": "M",
-    "summary": "Charges the default abuse quota exactly inside each ref shard and reconciles per-shard counters into an approximate namespace total served through the lease, with pruned quota windows.",
+    "size": "L",
+    "summary": "Adds fixed-window shard usage and a 60-second rollup into guarded coordinator source and total counters, plus local unguarded views, exact coordinator charging and pruning.",
     "human_action": false,
     "area_gates": [
       "rust",
-      "conf-native"
+      "conf-native",
+      "wasm"
+    ]
+  },
+  {
+    "id": "1.26b",
+    "title": "Worker: quota rollup registration and D34 conformance",
+    "milestone": "M1",
+    "track": "worker",
+    "depends_on": [
+      "1.26a",
+      "1.8"
+    ],
+    "size": "S",
+    "summary": "Registers kind-5 rollup in Worker shards, adapts quota conformance to D34 and enables the skipped Worker quota phase.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "workers",
+      "conf-wrangler"
     ]
   },
   {
@@ -992,7 +1011,7 @@
       "1.10",
       "1.14",
       "1.25",
-      "1.26",
+      "1.26b",
       "1.28c"
     ],
     "size": "L",

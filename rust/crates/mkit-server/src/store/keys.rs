@@ -18,6 +18,10 @@
 //! | replay expiry index | `px 00 <expires_at:be64> <scope:32>` | empty |
 //! | quota state | `q 00 <scope>` | codec `QuotaState` |
 //! | quota window index | `qx 00 <window_start:be64> <scope>` | empty |
+//! | ref-shard namespace usage | `qs 00 <window:be64>` | codec `NamespaceUsage` |
+//! | local namespace view | `qv 00 <window:be64>` | codec `NamespaceView` |
+//! | coordinator source cumulative | `qc 00 <window:be64> <Partition::encode(source)>` | codec `NamespaceUsage` |
+//! | coordinator namespace total | `qt 00 <window:be64>` | codec `NamespaceUsage` |
 //! | namespace record (`Coordinator`) | `nr 00` | codec `NamespaceRecord` |
 //! | repo record (`Coordinator`) | `rr 00 <repo>` | codec `RepoRecord` |
 //! | repo-known marker (ref shard) | `rk 00 <repo>` | empty |
@@ -94,6 +98,14 @@ pub const TAG_REPLAY_EXPIRY: &str = "px";
 pub const TAG_QUOTA: &str = "q";
 /// Quota window index tag.
 pub const TAG_QUOTA_WINDOW: &str = "qx";
+/// Ref-shard cumulative namespace usage.
+pub const TAG_QUOTA_SHARD: &str = "qs";
+/// Ref-shard local aggregate view.
+pub const TAG_QUOTA_VIEW: &str = "qv";
+/// Coordinator source contribution.
+pub const TAG_QUOTA_CONTRIBUTION: &str = "qc";
+/// Coordinator namespace total, also charged directly there.
+pub const TAG_QUOTA_TOTAL: &str = "qt";
 /// Grant epoch tag.
 pub const TAG_GRANT_EPOCH: &str = "e";
 /// Ref shard's epoch lease tag.
@@ -201,6 +213,14 @@ pub enum ParsedKey {
         /// Quota scope.
         scope: String,
     },
+    /// `qs 00 <window>`.
+    QuotaShard(u64),
+    /// `qv 00 <window>`.
+    QuotaView(u64),
+    /// `qc 00 <window> <source>`.
+    QuotaContribution { window: u64, source: Partition },
+    /// `qt 00 <window>`.
+    QuotaTotal(u64),
     /// `t 00 <ticket_id>`.
     Ticket(Hash),
     /// `ti 00 <repo> 00 <ref> 00 <pack> <signer>`.
@@ -427,6 +447,52 @@ pub fn quota_window(window_start_ms: u64, scope: &QuotaScope) -> Key {
 pub fn quota_window_before(before_ms: u64) -> (Key, Key) {
     let (start, _) = class_range(TAG_QUOTA_WINDOW);
     (start, key(TAG_QUOTA_WINDOW, &[&before_ms.to_be_bytes()]))
+}
+
+/// `qs 00 <window:be64>`.
+#[must_use]
+pub fn quota_shard(window: u64) -> Key {
+    key(TAG_QUOTA_SHARD, &[&window.to_be_bytes()])
+}
+
+/// `qv 00 <window:be64>`.
+#[must_use]
+pub fn quota_view(window: u64) -> Key {
+    key(TAG_QUOTA_VIEW, &[&window.to_be_bytes()])
+}
+
+/// `qc 00 <window:be64> <source>`.
+pub fn quota_contribution(window: u64, source: &Partition) -> Result<Key, StoreError> {
+    if !matches!(source, Partition::Ref { .. }) {
+        return Err(StoreError::Invalid(
+            "quota source is not a ref shard".into(),
+        ));
+    }
+    checked_key(
+        TAG_QUOTA_CONTRIBUTION,
+        &[&window.to_be_bytes(), &source.encode()?],
+    )
+}
+
+/// `qt 00 <window:be64>`.
+#[must_use]
+pub fn quota_total(window: u64) -> Key {
+    key(TAG_QUOTA_TOTAL, &[&window.to_be_bytes()])
+}
+
+/// The ordered range of namespace rows strictly before `window`.
+#[must_use]
+pub fn quota_namespace_before(tag: &str, window: u64) -> (Key, Key) {
+    (key(tag, &[]), key(tag, &[&window.to_be_bytes()]))
+}
+
+/// Every row of a fixed namespace window in one ordered class.
+#[must_use]
+pub fn quota_namespace_window(tag: &str, window: u64) -> (Key, Key) {
+    (
+        key(tag, &[&window.to_be_bytes()]),
+        key(tag, &[&window.saturating_add(1).to_be_bytes()]),
+    )
 }
 
 /// Whether an id satisfies SPEC-SERVER §6.6: 1–128 ASCII bytes.
@@ -743,6 +809,21 @@ fn parse_holder(body: &[u8]) -> Option<ParsedKey> {
     })
 }
 
+fn parse_namespace_quota(tag: &[u8], body: &[u8]) -> Option<ParsedKey> {
+    let (window, rest) = be64(body)?;
+    match tag {
+        b"qs" if rest.is_empty() => Some(ParsedKey::QuotaShard(window)),
+        b"qv" if rest.is_empty() => Some(ParsedKey::QuotaView(window)),
+        b"qt" if rest.is_empty() => Some(ParsedKey::QuotaTotal(window)),
+        b"qc" => {
+            let source = Partition::decode(rest).ok()?;
+            matches!(source, Partition::Ref { .. })
+                .then_some(ParsedKey::QuotaContribution { window, source })
+        }
+        _ => None,
+    }
+}
+
 /// Decode a key of any laid-out class; `None` for a malformed key or a
 /// reserved class.
 #[must_use]
@@ -819,6 +900,7 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
                 scope: text(rest)?,
             }
         }
+        b"qs" | b"qv" | b"qt" | b"qc" => parse_namespace_quota(tag, body)?,
         b"w" => {
             let (due_at_ms, rest) = be64(body)?;
             let (&kind, reference) = rest.split_first()?;
@@ -873,6 +955,10 @@ mod tests {
             TAG_REPLAY_EXPIRY,
             TAG_QUOTA,
             TAG_QUOTA_WINDOW,
+            TAG_QUOTA_SHARD,
+            TAG_QUOTA_VIEW,
+            TAG_QUOTA_CONTRIBUTION,
+            TAG_QUOTA_TOTAL,
             TAG_GRANT_EPOCH,
             TAG_EPOCH_LEASE,
             TAG_LEASED_SHARD,
@@ -1310,5 +1396,60 @@ mod tests {
         ] {
             assert_eq!(parse(&Key::new(bad.to_vec())), None);
         }
+    }
+
+    #[test]
+    fn namespace_quota_key_goldens_and_ranges() {
+        let window: u64 = 0x0102_0304_0506_0708;
+        let suffix = window.to_be_bytes();
+        assert_eq!(
+            quota_shard(window).as_bytes(),
+            [&b"qs\0"[..], &suffix].concat()
+        );
+        assert_eq!(
+            quota_view(window).as_bytes(),
+            [&b"qv\0"[..], &suffix].concat()
+        );
+        assert_eq!(
+            quota_total(window).as_bytes(),
+            [&b"qt\0"[..], &suffix].concat()
+        );
+        let source = Partition::Ref {
+            ns: NamespaceKey::deployment_default(),
+            repo: repo("room"),
+            shard_ref: "refs/heads/main".into(),
+        };
+        let contribution = quota_contribution(window, &source).unwrap();
+        let next = quota_contribution(window + 1, &source).unwrap();
+        assert_eq!(
+            contribution.as_bytes(),
+            [&b"qc\0"[..], &suffix, &source.encode().unwrap()].concat()
+        );
+        assert_eq!(
+            parse(&contribution),
+            Some(ParsedKey::QuotaContribution { window, source })
+        );
+        assert_eq!(
+            parse(&quota_shard(window)),
+            Some(ParsedKey::QuotaShard(window))
+        );
+        assert_eq!(
+            parse(&quota_view(window)),
+            Some(ParsedKey::QuotaView(window))
+        );
+        assert_eq!(
+            parse(&quota_total(window)),
+            Some(ParsedKey::QuotaTotal(window))
+        );
+        let (start, end) = quota_namespace_window(TAG_QUOTA_CONTRIBUTION, window);
+        assert!(start <= contribution && contribution < end);
+        assert!(!(start <= next && next < end));
+        assert!(matches!(
+            quota_contribution(
+                window,
+                &Partition::Coordinator(NamespaceKey::deployment_default())
+            ),
+            Err(StoreError::Invalid(_))
+        ));
     }
 }
