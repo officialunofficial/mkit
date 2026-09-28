@@ -666,7 +666,15 @@ async fn pipeline_grants_single_and_d34() {
         profile.features.insert(Feature::TestFaults);
         profile.sharding_d34 = sharding == mkit_server::pipeline::Sharding::D34;
         let auth = |origin: &str| AuthMode::AuthV2(AuthV2Config::new(origin, "").unwrap());
-        let (origin, _) = serve_sharding(auth, None, Mutant::None, Some(&profile), sharding).await;
+        let (origin, _) = serve_sharding(
+            auth,
+            None,
+            Mutant::None,
+            Some(&profile),
+            sharding,
+            profile.max_pack_bytes,
+        )
+        .await;
         let WireAuth::AuthV2 { audience, .. } = &mut profile.auth else {
             unreachable!()
         };
