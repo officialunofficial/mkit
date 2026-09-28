@@ -25,6 +25,7 @@ admit-first-attempt.request.json AdmitRequest
 admit-allow.response.json AdmitResponse
 admit-challenge.response.json AdmitResponse
 admit-deny.response.json AdmitResponse
+# Legacy non-conforming pre-M5 example; retained as a wire golden.
 inspect.request.json InspectRequest
 inspect-pass.response.json InspectResponse
 inspect-quarantine-phase.request.json InspectRequest

@@ -29,12 +29,12 @@
   },
   "objects": [
     {
-      "id": "MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM=",
+      "id": "ERERERERERERERERERERERERERERERERERERERERERE=",
       "size": "8192",
       "kind": "INSPECT_OBJECT_KIND_BLOB"
     },
     {
-      "id": "ZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmY=",
+      "id": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
       "size": "256",
       "kind": "INSPECT_OBJECT_KIND_CHUNKED_FILE"
     },

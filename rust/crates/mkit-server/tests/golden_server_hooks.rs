@@ -231,6 +231,10 @@ fn inspection_and_writer_view_goldens() {
         .iter()
         .map(|object| object["id"].as_str().unwrap())
         .collect();
+    assert_eq!(ids.len(), objects.len());
+    for ref_change in request["operation"]["refs"].as_array().unwrap() {
+        assert!(!ids.contains(ref_change["new"].as_str().unwrap()));
+    }
     for object in objects {
         assert!(object["size"].as_str().unwrap().parse::<u64>().is_ok());
     }

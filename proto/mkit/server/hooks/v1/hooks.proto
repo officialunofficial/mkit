@@ -248,7 +248,8 @@ enum InspectObjectKind {
   INSPECT_OBJECT_KIND_BLOB = 1;
   // Chunked-file manifest; its chunks are also inspected.
   INSPECT_OBJECT_KIND_CHUNKED_FILE = 2;
-  // Chunk referenced by a newly reachable chunked file.
+  // A chunk of a newly reachable chunked file or of an added pack; a blob
+  // also used as a chunk is reported once as BLOB.
   INSPECT_OBJECT_KIND_CHUNK = 3;
 }
 
@@ -265,7 +266,8 @@ message InspectResponse {
     // Re-poll an asynchronous inspection; invalid in PRE_RECEIVE; SPEC-SERVER §11.3.
     InspectDefer defer = 4;
   }
-  // Raw 32-byte ids from the inspected set, only with reject or quarantine; SPEC-SERVER §6.4.
+  // Raw 32-byte ids from the inspected set, only with reject or quarantine;
+  // nonempty for QUARANTINE-phase reject or quarantine (SPEC-SERVER §6.4).
   repeated bytes flagged_objects = 5;
 }
 

@@ -1237,9 +1237,11 @@ maximum-wire-length regressions; live wasm framing tests in
 published repository membership. Every newly reachable file object and every
 file entry in a pack added by an advance is covered by the configured
 inspection obligations or the explicit unavailable-publish policy. A later
-pass cannot skip
-an earlier held or pending advance. A reused pack from another pending advance
-cannot satisfy published membership, even through `X-Mkit-Ref`.
+pass cannot skip an earlier held or pending advance. A reused pack from
+another pending advance cannot satisfy published membership, even through
+`X-Mkit-Ref`. Flagged objects and their containing packs are absent to
+every caller until release or takedown replacement. Pending and held
+advance values and their packs remain GC roots while publishable.
 
 **Because:** whole-pack downloads, HTTP, URL tokens, snapshots and caches must
 not expose uninspected or uncleared content, including surplus pack entries.
@@ -1247,7 +1249,7 @@ not expose uninspected or uncleared content, including surplus pack entries.
 **If violated:** a reader can bypass quarantine through an alternate serving
 surface or another ref that reuses pending content.
 
-**Enforced by:** normative SPEC-SERVER §§10–11 (WP-5.1a-2 amendment 1).
+**Enforced by:** normative SPEC-SERVER §§10–11.
 Runtime enforcement and behavioral conformance remain for WP-5.4/5.5/5.13;
 the current goldens verify the additive hook wire contract only.
 ## BeginUpload decisions and replay share the write batch

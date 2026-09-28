@@ -4137,8 +4137,9 @@ pub struct GetServerInfoResponse {
         skip_serializing_if = "::core::option::Option::is_none"
     )]
     pub max_delta_chain_depth: ::core::option::Option<u32>,
-    /// Field 17 belongs to leases (WP-5.1a-1).
-    /// Whether async inspection is configured; writers sign reads to see pending content (SPEC-SERVER §10).
+    /// Field 17 is reserved for lease discovery.
+    /// Whether async inspection is configured; writers MUST sign reads to see
+    /// pending or held content, including sync holds when false (SPEC-SERVER §10).
     ///
     /// Field 18: `async_inspection`
     #[serde(

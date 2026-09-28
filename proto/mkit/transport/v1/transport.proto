@@ -308,8 +308,9 @@ message GetServerInfoResponse {
   // Fixed index prefix fan-out; default 4096 (SPEC-TRANSPORT-CONNECT §2.1, §7.9).
   uint32 index_fanout = 15;
   uint32 max_delta_chain_depth = 16;   // SPEC-SERVER §9.8; 0 when indexed mode is off
-  // Field 17 belongs to leases (WP-5.1a-1).
-  // Whether async inspection is configured; writers sign reads to see pending content (SPEC-SERVER §10).
+  // Field 17 is reserved for lease discovery.
+  // Whether async inspection is configured; writers MUST sign reads to see
+  // pending or held content, including sync holds when false (SPEC-SERVER §10).
   bool async_inspection = 18;
 }
 

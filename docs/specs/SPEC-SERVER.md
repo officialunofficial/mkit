@@ -27,9 +27,11 @@ The encoding, domain-separator, and golden-vector conventions of that
 specification apply throughout this document.
 
 A server that runs remote hooks MUST implement §5–§8. A server without
-remote hooks MUST still implement §2–§5 and §10. A deployment implements the
-business decisions exposed by hooks; the server implements the pipeline,
-validation, durable recording, and delivery guarantees specified here.
+remote hooks MUST still implement §2–§5 and §10. Every configured inspector,
+including an in-process inspector without a remote hook, is bound by §11.
+A deployment implements the business decisions exposed by hooks; the server
+implements the pipeline, validation, durable recording, and delivery
+guarantees specified here.
 
 The contract does not define prices, payment verification, settlement
 policy, moderation policy, or the deployment's account model.
@@ -39,6 +41,8 @@ their verification, and the preconditions they carry into apply.
 Sections 10–11 define the published view and inspection. Sections 12–14
 reserve the remaining M5 contracts. Inspection fields extend the original
 hook shape additively.
+For a branch, its head and packmap share one publication sequence even
+when either is written through `UpdateRef` (§10.2).
 
 ## 2. Pipeline order
 
@@ -353,6 +357,9 @@ permits the operation to continue. Its `writer_view` boolean lets an
 §10.1. A `check` hook MUST NOT confer writer status through this field.
 An allowance does not itself perform admission, authorize a private read,
 or commit a write.
+For an otherwise authorized public read, an `authority` hook consulted
+solely for writer-view classification cannot deny the read: a denial or
+hook failure selects the reader view (§10.1).
 
 `Deny.code` is a Connect code name. For Authorize, the allowed names
 are exactly `permission_denied`, `not_found`, and `unauthenticated`.
@@ -477,7 +484,8 @@ Inspection follows §11, with the caller's published view defined in §10.
 as an override of a deliberate verdict.
 
 `InspectRequest.operation` is the operation defined in §6.2.
-`InspectRequest.objects` MUST enumerate the inspected set in §11.1.
+Across an inspector's batches, `InspectRequest.objects` MUST enumerate
+the inspected set in §11.1; each call contains its assigned batch.
 The listed objects are decoded pack entries in indexed mode, including
 file objects newly reachable from previously added packs.
 Each `InspectObject.id` is a 32-byte object id; `size` is its unsigned
@@ -500,7 +508,7 @@ That private channel MUST be accessible only to authorized inspectors.
 | Alternative | Meaning |
 |---|---|
 | `pass` | This inspector permits the inspected content. |
-| `quarantine` | Hold the advance until re-inspection or admin release (§11). |
+| `quarantine` | Hold an unpublished advance or suspend serving flagged content after publication (§11). |
 | `reject` | Pre-receive denial, or an asynchronous hit requiring takedown (§11). |
 | `defer` | Asynchronous re-poll with `retry_after_ms` (§11.3); invalid in pre-receive. |
 
@@ -513,11 +521,11 @@ says. Its public message follows §6.2's sanitation rule. An asynchronous
 `flagged_objects` contains raw 32-byte object ids and is meaningful only
 with `reject` or `quarantine`. Each listed id MUST belong to the request's
 inspected set. Invalid ids or a nonempty list on `pass` or `defer` make
-the response invalid under §6.6. An asynchronous `reject`, and a
-`quarantine` after publication, MUST identify at least one flagged object
-for takedown; otherwise the response is invalid under §6.6. An
-asynchronous hit's takedown targets these ids; the whole-file takedown contract and admin wire are specified
-by the later takedown contract, not by this inspection verdict.
+the response invalid under §6.6. Every QUARANTINE-phase `reject` or
+`quarantine` MUST identify at least one flagged object; otherwise the
+response is invalid under §6.6. A PRE_RECEIVE verdict MAY leave the list
+empty because it governs the entire push. §11.3 immediately suspends
+serving flagged objects, and §14 defines the takedown rewrite mechanics.
 
 ### 6.5 Outcome
 
@@ -768,6 +776,9 @@ Authorize and Admit MUST fail closed. A transport error, timeout,
 non-2xx status, Connect error other than Authorize's deliberate Deny,
 or invalid response under §6.6 MUST deny the operation with retryable
 `unavailable` and MUST write no state.
+The exception is an otherwise authorized public read for which an
+authority hook is consulted solely to classify the writer view (§6.2):
+its denial or failure selects the reader view without an error.
 
 A deliberate `deny` in a 2xx hook response is not a hook failure.
 It uses the decision semantics of §6.2 or §6.3. Authorize's Deny is
@@ -788,8 +799,10 @@ continues to apply regardless of the number of attempts.
 
 Inspect transport errors, timeouts, non-2xx responses, Connect errors,
 and invalid responses are inspector unavailability. They MUST follow
-that inspector's `on_unavailable` setting under §11. Deliberate verdicts
-MUST follow their phase-specific semantics regardless of that setting.
+that inspector's `on_unavailable` setting under §11, except that a
+request-size or §6.6-limit failure is never eligible for `publish`.
+Deliberate verdicts MUST follow their phase-specific semantics regardless
+of that setting.
 Synchronous `fail_closed` unavailability returns retryable `unavailable`;
 asynchronous unavailability never rejects the committed push.
 
@@ -1162,6 +1175,12 @@ restricted to one ref can establish the repository's writer view; it does
 not authorize writes to other refs. SSH/enc uses the authenticated signed
 transport identity under SPEC-WRITE-GRANTS §10.
 
+With `write_policy = open`, any valid signed writer is a writer for this
+purpose; §11.1 therefore forbids inspection with that policy. For a public
+repository, the authority hook is consulted only for this classification:
+its denial or failure gives the reader view, not a read error. A bearer
+token by itself MUST NOT establish the writer view.
+
 All other authorized callers receive the reader view. An unauthenticated
 caller has `caller_view = anonymous` and receives the same published view
 where public reads are allowed. An unsigned request receives the reader
@@ -1169,29 +1188,35 @@ view even if the caller possesses a write key. Clients with a signer MUST
 sign reads to be seen as writers (SPEC-WRITE-GRANTS §9.2).
 
 A writer sees live ref values and live repository membership, including
-its pending advances. Readers and anonymous callers see published ref
-values and published membership only. These rules apply on every serving
-surface, including HTTP consumers of this abstract view.
+all pending advances in the repository. Readers and anonymous callers
+see published ref values and published membership only. These rules
+apply on every serving surface, including HTTP consumers of this
+abstract view.
 
 ### 10.2 Per-ref clearance and publication
 
-Each ref MUST have an ordered advance sequence. Every successful ref
-write, including `UpdateRef`, increments that sequence in apply. A head-only
-`UpdateRef` inherits its branch's unchanged live packmap; before apply, the
-server MUST verify that this packmap reconstructs the new head's closure
-(STC §4), and §10.2 still gates the inherited chain on published
-membership. A branch advance's value is the atomic (head, packmap)
-pair; a non-branch ref's value is its target. Failed writes do not append advances.
+Each ref MUST have an ordered advance sequence. The branch head
+`refs/heads/<x>` and `refs/mkit/packmap/<x>` share one sequence: every
+successful `AdvanceRefs`, head-only `UpdateRef`, or packmap-only
+`UpdateRef` appends an advance to that sequence. The advance value is
+the live (head, packmap) pair, and the pair MUST be published together.
+Other refs have their own sequences and target values. Failed writes do
+not append advances. In indexed mode with an inspector configured, a
+head-only `UpdateRef` MUST verify before apply that its unchanged packmap
+reconstructs the new head's closure; a packmap-only `UpdateRef` MUST
+verify the resulting pair too (§9.3; STC §4 defines the paired advance).
+This extra check is unnecessary in opaque mode or without inspectors,
+where the published view equals the live view.
 
-Each advance has one clearance state:
+Each advance has a clearance state:
 
 | State | Meaning |
 |---|---|
 | `pending` | Inspection, dependency clearance, or both remain outstanding. |
 | `cleared` | Its inspection obligations and membership dependencies permit publication. |
 | `held` | A quarantine verdict awaits re-inspection or admin release. |
-| `hit` | An asynchronous rejection awaits takedown completion. |
-| `resolved` | The hit's takedown has completed; it no longer blocks the publication prefix. |
+| `hit` | A rejection awaits takedown completion. |
+| `resolved` | Takedown has completed and all non-hit obligations are satisfied; it no longer blocks the publication prefix. |
 
 The published value MUST be the value at the largest sequence number
 *k* for which every advance up to *k* is `cleared` or `resolved`.
@@ -1200,52 +1225,65 @@ pass MUST NOT skip an earlier `pending`, `held`, or `hit` advance. A
 `resolved` advance uses the value subject to completed takedown, never
 restores flagged content through its original value.
 
-**Published membership** means repository membership added by a cleared
-advance, subject to deletion, suspension, and takedown restrictions.
+**Published membership** is repository membership added by a `cleared`
+or `resolved` advance, subject to deletion, suspension, and takedown.
+For a `resolved` advance, it is the post-takedown membership of
+replacement packs, not the removed packs. §14 defines the rewrite
+mechanics. Server-initiated takedown pack rewrites and packmap updates
+are not advances: they take no advance sequence number and carry no new
+inspection obligation. An advance blocked only on a taken-down pack
+MUST be re-evaluated against the replacement packs.
+
 When no inspector is configured, a single-repository unticketed upload
 permitted by STC §7.6 has no inspection obligation: its membership is
-published with its storage commit, preserving STC's existing immediate
-membership rule. An inspection-enabled deployment cannot use that path
-(§11.1).
-An advance *k* clears only when both conditions hold:
+published with its storage commit, preserving STC's immediate membership
+rule. An inspection-enabled deployment cannot use that path (§11.1).
+An advance *k* clears only when all of these conditions hold:
 
-1. Its own inspection passes under §11, including every configured
-   inspector's obligation (or that inspector's explicit unavailable-publish
-   deadline or admin release).
-2. Every pack its packmap chain lists is either already in published
-   membership or added by *k* itself. For a non-branch ref, apply this rule
-   to the packs containing its target and reachable closure.
+1. Its own inspection obligations pass under §11, or each receives its
+   explicit unavailable-publish deadline or audited admin release.
+2. Every pack on its packmap chain is already in published membership
+   or is added by *k* itself. For a non-branch ref, every object in its
+   reachable closure MUST be contained in at least one published pack,
+   counting *k*'s additions in the same atomic clearance.
+3. No flagged id in the repository occurs in its inspected set or its
+   packs (§11.3).
 
 Clearing *k* MUST atomically publish its added membership and update the
-published ref pointer to the largest eligible prefix above. Completion out
-of order can make membership eligible, but MUST NOT expose a ref value
-beyond that prefix. A branch's head and packmap MUST remain a pair in both
-live and published views.
+published ref pointer to the largest eligible prefix. Completion out of
+order can make membership eligible, but MUST NOT expose a ref value
+beyond that prefix. A branch's head and packmap MUST remain a pair in
+both live and published views. Publishing membership MUST durably
+schedule re-evaluation of every advance previously blocked on that
+membership in any ref. The scheduled work MUST be retained until
+completed and MUST run within a bounded time. The same rule applies when
+takedown replacement packs become published.
 
-A pack added by another advance that has not cleared blocks clearance.
-`AlreadyPresent` establishes live membership, not published membership.
-Thus branch B reusing a pack from pending branch A cannot publish it;
-neither can a tag pointing at a commit whose containing pack is pending.
-The advance's own additions qualify in the same atomic clearance, so
-initial publication has no circular membership dependency.
+A pack added by another advance that has not cleared or resolved blocks
+clearance. `AlreadyPresent` establishes live membership, not published
+membership. Thus branch B reusing a pack from pending branch A cannot
+publish it; neither can a tag pointing at a commit whose containing pack
+is pending. The advance's own additions qualify in the same atomic
+clearance, so initial publication has no circular membership dependency.
 
 Deletions MUST publish immediately under STC §7.8 and MUST NOT wait for
-inspection. Completion of older work MUST NOT resurrect a deleted ref.
-A deletion establishes a new publication boundary: earlier unfinished
-inspection work cannot change it. After deletion, the eligible prefix is
-evaluated only over later advances; older unfinished advances cannot block
-recreation or publish their values or membership. A later recreation
-still follows this section's clearance and pack-dependency rules.
+inspection. They establish a ref-value publication boundary: later
+verdicts on older advances MUST NOT change or resurrect that ref value.
+Those verdicts still govern membership the older advances added: a pass
+publishes it, a hold keeps it unpublished, and a hit takes it down.
+A recreated ref, or another ref reusing the packs, can clear when that
+membership becomes published. Later ref values are evaluated from the
+deletion boundary under the ordinary inspection and dependency rules.
 
-The published pointer MUST be written in the same apply for advances that
-start `cleared`, including no-inspector or synchronous-pass advances whose
-membership dependencies permit clearance and whose prefix is eligible.
-An advance starting `held` leaves the previous published value in place.
-Published equals live while no advance on that ref is held, pending, or
-awaiting hit resolution. Holds and pending advances preserve the older
-published value even when no asynchronous inspector is configured. A
-deployment with only synchronous inspectors MUST still maintain the
-published view.
+The server MUST retain every `pending` or `held` advance value beyond the
+published pointer that can still become published, together with its
+packmap chain and packs, and any takedown replacement packs. §13 makes
+these GC roots. The published pointer MUST be written in the same apply
+for an advance that starts `cleared` and has an eligible prefix. An
+advance starting `held` leaves the previous published value in place.
+Published equals live exactly while no advance on that ref is held or
+pending (and no hit awaits resolution). A deployment with only
+synchronous inspectors MUST still maintain the published view.
 
 ### 10.3 Every reader surface uses the published view
 
@@ -1257,6 +1295,11 @@ or return `not_found`, as the surface's ordinary absent response requires.
 An existing published ref continues to return its previous published value.
 Reader responses MUST NOT expose live targets, pending pack ids, or
 inspection state through alternate metadata or errors.
+
+Published packlist nodes and delta bases MUST NOT reference unpublished
+or pending ids. Informative: when every ref is pending, a reader sees an
+existing empty repository. This is an accepted consequence of the
+published view.
 
 `X-Mkit-Ref` MUST NOT widen this view (STC §7.9). Snapshots and reader
 caches MUST be built only from published values and membership. Writer
@@ -1271,43 +1314,61 @@ published one. HTTP serving MUST use visible ref values and visible
 membership from this section before returning object bytes or proofs.
 
 `GetServerInfoResponse.async_inspection` MUST report whether any asynchronous
-inspector is configured, independently of repository existence. When true,
-a writer must sign reads to see pending content. A false value does not
-exempt synchronous quarantine from the published-view rules.
+inspector is configured, independently of repository existence. Writers
+MUST sign reads to see their pending or held content. A false value does
+not exempt synchronous quarantine from that rule or from the published
+view.
 
 ## 11. Quarantine and inspection
 
 ### 11.1 Configuration and inspected set
 
-Each configured inspector has a phase, `sync` or `async`, and an
-`on_unavailable` setting, `fail_closed` or `publish`. These settings govern
-only unavailability (§8); they MUST NOT override `reject`, `quarantine`,
-or `defer`. A deployment in opaque mode MUST refuse startup with any
-inspector, synchronous or asynchronous: it cannot enumerate pack objects.
+Each configured inspector, remote or in-process, has a phase, `sync` or
+`async`, and an `on_unavailable` setting, `fail_closed` or `publish`.
+These settings govern only unavailability (§8); they MUST NOT override
+`reject`, `quarantine`, or `defer`. A deployment MUST refuse startup if
+opaque mode or `write_policy = open` is combined with any inspector.
+Opaque mode cannot enumerate pack objects; open writes let any signer
+obtain the writer view (§10.1). An async inspector or an inspector with
+`on_unavailable = publish` MUST configure
+`inspection_clear_deadline_ms`; otherwise startup MUST be refused.
+
 An inspection-enabled deployment MUST require ticketed uploads and
 advertise `begin_upload_threshold_bytes = 0` (STC §7.6), including in
-single-repository mode. This ensures added pack membership is associated
-with an advance whose entire added-pack file set can be inspected.
-Storage completion alone MUST NOT establish published membership.
+single-repository mode. This associates all added pack entries with an
+advance. Storage completion alone MUST NOT establish published
+membership.
 
 A file object is a plain blob of any size, a ChunkedBlob manifest, or a
 chunk. The inspected set of each advance MUST be the union of:
 
-1. every file object newly reachable from the advanced ref value,
-   including manifests and their chunks and extracted objects; and
+1. every file object reachable from the advanced ref value but not
+   contained in the repository's published membership, including
+   manifests, their chunks, and extracted objects; and
 2. every file entry of every pack that the advance adds to repository
    membership, whether reachable or not.
 
-The same set MUST be inspected in both phases. No configuration option
-may narrow it by size, extraction status, or reachability within an added
-pack. Duplicate object ids need only one entry in the set. Extraction
-creates a serving copy, not an exemption from inspection.
+The server MUST NOT permit any configuration to narrow this set by size,
+extraction status, or reachability within an added pack. The same set
+MUST be inspected in both phases. Duplicate object ids need only one
+entry; a blob used both as a file and as a chunk is reported once as a
+`BLOB`. Extraction creates a serving copy, not an exemption from
+inspection. Commit, tag and remix messages and tree entry names are
+not inspected; they remain a residual content channel.
 
-Rationale: this extends the decision to inspect every newly reachable file
-object to cover surplus pack entries; it does not narrow that decision.
-§9.3(c) allows packs to carry entries outside the closure. Downloading a
-published pack would otherwise reveal uninspected surplus entries. Packs
-with surplus entries MUST NOT be rejected merely for having those entries.
+An inspected set larger than `inspect_batch_max_objects` MUST be sent
+in multiple Inspect calls of at most that many objects each. This named
+parameter defaults to 10,000. Each inspector has a separate obligation
+for each batch, and its advance-level obligation is satisfied only when
+all its batches pass or each receives an explicit release under §11.3.
+A failure caused by the request's own size or §6.6 limits MUST NOT be
+eligible for unavailable-publish: its obligation remains `pending` and
+the server MUST use compliant batches before clearance.
+
+Rationale: inspecting all newly reachable file objects also covers
+surplus file entries in added packs. §9.3(c) permits entries outside the
+closure; a published whole-pack download could otherwise reveal them.
+Packs MUST NOT be rejected merely for surplus entries.
 
 ### 11.2 Synchronous checks
 
@@ -1316,45 +1377,81 @@ At stage 5, the server MUST call each synchronous inspector with
 
 | Result | Effect |
 |---|---|
-| `pass` | Continue toward apply. |
+| `pass` | Satisfy this inspector's obligation and continue. |
 | `reject` | Reject with `permission_denied` (HTTP 403); do not commit the advance. |
 | `quarantine` | Commit the push, but start the advance `held`. |
 | Unavailable, `fail_closed` | Return retryable `unavailable`; do not commit the advance. |
-| Unavailable, `publish` | Permit apply without this inspector's clearance; other inspectors and §10 still apply. |
+| Unavailable, `publish` | Commit with this obligation `pending`, schedule a QUARANTINE-phase inspection of the same set, and apply its configured clear deadline under §11.3. |
 
-`defer` is an asynchronous verdict and MUST be treated as an invalid
-response in this phase. A reject from any synchronous inspector MUST deny the operation even if
-another inspector returned quarantine. A pass by one inspector MUST NOT
-override another inspector's quarantine or rejection. A synchronous hold persists even
-when no asynchronous inspector is configured, until re-inspection or
-admin release. With no hold and asynchronous obligations remaining, the
-committed advance starts `pending`; otherwise §10 determines clearance.
+`defer` is invalid in this phase. A reject from any synchronous
+inspector MUST deny the operation even if another returned quarantine.
+A pass by one inspector MUST NOT override another's quarantine or
+rejection. A synchronous hold persists even with no asynchronous
+inspector until QUARANTINE-phase re-inspection or admin release. The
+server MUST schedule that re-inspection on an admin release request or
+retry schedule. If no hold remains but async or unavailable-publish
+obligations remain, the committed advance starts `pending`; otherwise
+§10 determines clearance.
+
+A synchronous `fail_closed` `unavailable` is excluded from replay
+storage by STC §7.1. A retry therefore re-runs the pre-receive check.
 
 ### 11.3 Asynchronous checks and resolution
 
-Stage 6 commits live ref values, added membership, clearance obligations,
-and durable scheduling of asynchronous work in the same apply. Stage 9
-calls MUST be scheduled from the outbox or a timer, resumable across
-restarts, and retried with backoff. `AdvanceRefs` succeeds and records its
-applicable `Committed` outcomes under §3–§5; only the reader view lags.
-Asynchronous inspection MUST NOT change that outcome to a rejection,
-`Aborted`, or `Expired`.
+Stage 6 commits live ref values, added membership, obligations, and
+durable scheduling in the same apply. Stage 9 calls MUST be scheduled
+from the outbox or a timer, resumable across restarts, and retried with
+backoff. `AdvanceRefs` succeeds and records its applicable `Committed`
+outcomes under §3–§5; subsequent inspection MUST NOT change that outcome
+to `Aborted`, `Expired`, or rejection of the committed push.
 
-Each logical call MUST use a stable, nonempty `inspection_id`, unique
-within the deployment for its inspector, advance, phase, and inspected
-set. Retries MUST preserve the id and inspected set; the inspector MUST
-handle them idempotently. A deliberate re-inspection is a new logical
-call with a new id. Hook authentication uses a fresh envelope as needed
-under §7; its nonce is distinct from the inspection id.
+Each configured inspector gives each advance its own obligation, split
+into batches under §11.1. Each logical call MUST use a stable, nonempty
+`inspection_id`, unique within the deployment for its inspector,
+advance, phase, and inspected batch. Retries MUST preserve the id and
+batch; the inspector MUST handle them idempotently. Deliberate
+re-inspection uses a new id and supersedes the old logical call. The
+server MUST ignore verdicts for a superseded `inspection_id`. Hook
+authentication uses a fresh envelope under §7 as needed; its nonce is
+distinct from the inspection id.
 
-| Result | Effect |
+Before publication, the advance state is derived from its obligations
+with precedence `hit > held > pending > cleared`. A hit becomes
+`resolved` only after takedown completes **and** every non-hit
+obligation is satisfied; until then it blocks the publication prefix.
+Publication of advance *k* occurs when *k* clears under §10.2. A
+verdict arriving afterward is post-publication even if another advance
+still blocks the ref pointer. It MUST NOT un-publish a ref value.
+
+| QUARANTINE-phase result | Effect |
 |---|---|
-| `pass` | Satisfy this inspector's obligation; clear the advance when all obligations and §10 dependencies permit it. |
-| `quarantine` | Before publication, hold the advance until re-inspection or admin release. After publication, treat flagged objects as a takedown hit without downgrading clearance. |
-| `reject` | Before publication, record a hit and perform takedown of `flagged_objects`; change `hit` to `resolved` only after takedown completes. After publication, schedule takedown without downgrading clearance. |
-| `defer` | Re-poll after the clamped `retry_after_ms`; leave clearance outstanding. |
-| Unavailable, `fail_closed` | Keep the advance `pending` and retry. |
-| Unavailable, `publish` | Satisfy this inspector's obligation after its configured clear deadline; other obligations and §10 still apply. |
+| `pass` | Satisfy this inspector's batch obligation; clear when all obligations and §10 dependencies permit. |
+| `quarantine` | Before publication, hold until re-inspection or admin release. After publication, suspend serving the flagged content until review; release resumes serving. |
+| `reject` | Before publication, record a hit and perform takedown; resolve only after takedown and other obligations complete. After publication, perform takedown without rewinding the published pointer. |
+| `defer` | Re-poll after clamped `retry_after_ms`; leave the obligation outstanding. |
+| Unavailable, `fail_closed` | Leave the obligation `pending` and retry. |
+| Unavailable, `publish` | Satisfy this obligation only after its configured clear deadline; continue follow-up inspection. |
+
+A post-publication `reject` records a separate takedown obligation while
+the advance remains published. Once the rewrite completes, its state
+becomes `resolved` and its published membership is the replacement set.
+A post-publication `quarantine` records a separate serving suspension;
+the advance remains published while that suspension is reviewed.
+
+On a hit or any QUARANTINE-phase `quarantine`, before or after
+publication, the server MUST immediately stop serving every flagged
+object and every pack containing one to **all** callers, including
+writers. This applies to `DownloadPack`, `PackExists`, HTTP, extracted
+copies, and use as a delta base. Each surface MUST give the same
+`not_found` or absent answer as for an absent object or pack. Serving
+MUST stop before any rewrite. Writers retain access to the rest of
+their pending content. Under namespace policy `any`, an owner can mint
+grants freely; serving flagged content to writers would make quarantine
+a distribution channel. A flagged id MUST block clearance of every
+advance in the repository whose inspected set or packs contain it,
+including a re-push. The server MUST re-evaluate all pending advances
+in the repository when a flag is released or its takedown replacement
+membership is published.
 
 The server MUST clamp `retry_after_ms` to 1,000–60,000 milliseconds, with
 an absent or zero value meaning 1,000, as with PendingVerification (§9.5).
@@ -1362,27 +1459,23 @@ A deferred verdict is not unavailability and MUST NOT trigger the
 unavailable-publish deadline.
 
 `inspection_clear_deadline_ms` is a REQUIRED nonnegative deployment
-parameter for each asynchronous inspector using `on_unavailable = publish`.
-It is the elapsed time from the advance's commit to the deadline at which
-continued unavailability permits clearance for that inspector. mkit
-specifies no default. This deadline MUST survive restarts; reattempts MUST
-NOT reset it. It MUST NOT release a deliberate hold or a dependency on
-another unpublished advance. Reaching the deadline MUST NOT cancel the
-scheduled inspection; a later verdict still requires action.
+parameter for each asynchronous inspector and each inspector with
+`on_unavailable = publish`. It is the elapsed time from the advance's
+commit to the deadline at which continued eligible unavailability
+permits clearance for that inspector. mkit specifies no default. The
+deadline MUST survive restarts; reattempts MUST NOT reset it. A
+request-size or §6.6-limit failure is never eligible (§11.1). A
+deadline MUST NOT release a deliberate hold, hit, flagged-id block, or
+dependency on another unpublished advance. Reaching it MUST NOT cancel
+scheduled follow-up inspection; a later verdict still requires action.
 
-A later hit after deadline-based publication MUST become a takedown,
-never a retroactive un-publish or rollback of the committed push. A
-post-publication quarantine MUST initiate takedown of `flagged_objects`,
-not rewind the published pointer or downgrade the advance's clearance
-state. Later verdicts MUST NOT re-block a prefix that has already published.
-Pre-publication hits block the prefix until takedown completes. Multiple
-inspectors MUST all satisfy their obligations; one pass or unavailable
-publication allowance cannot release another inspector's hold or hit.
-
-Re-inspection may clear a held advance subject to §10. Admin release and
-the takedown wire are specified by the later admin/takedown contract
-(WP-5.1b); takedown execution follows WP-5.6. This section defines when
-clearance is allowed, not those wire shapes or preservation mechanics.
+A post-publication `quarantine` suspends serving under the rule above
+until review. An admin release (§16) resumes serving; a later `reject`
+becomes a takedown under §14. Neither verdict rewinds the pointer.
+Removing an inspector with outstanding obligations MUST NOT silently
+waive them. Only an audited admin action under §16 MAY waive them;
+until then they remain outstanding. §14 defines takedown rewrite
+mechanics, while §16 defines the admin release and audit contract.
 
 ## 12. Admin API and audit log (reserved, M5)
 
@@ -1400,7 +1493,7 @@ Reserved: this section is specified with M5 (see the version history).
 
 | Version | Status | Change |
 |---|---|---|
-| 1 | draft | Initial M3 pipeline, durable outcome and remote-hook contract; M5 sections reserved. Admission credential headers (§6.3); indexed mode (§9). Published view (§10), per-advance inspection and quarantine (§11), including surplus pack entries (WP-5.1a-2 amendment 1); additive Inspect phase/id/kind/defer/flagged ids and Authorize writer_view (§6). |
+| 1 | draft | Initial M3 pipeline, durable outcome and remote-hook contract; M5 sections reserved. Admission credential headers (§6.3); indexed mode (§9). Published view (§10), per-advance inspection and quarantine (§11), including surplus pack entries; additive Inspect phase/id/kind/defer/flagged ids and Authorize writer_view (§6). |
 
 ## 16. Test anchors
 
@@ -1418,7 +1511,7 @@ requires. These anchors are informative descriptions of those bytes.
 | `admit-allow.response.json` | Reservation id and allowed receipt pass-through (§6.3, §6.6). |
 | `admit-challenge.response.json` | Opaque challenge and example payment challenge header (§6.3, §6.6). |
 | `admit-deny.response.json` | Deliberate admission denial (§6.3). |
-| `inspect.request.json` | Original additive inspection operation and object metadata (§6.4). |
+| `inspect.request.json` | Legacy non-conforming pre-M5 example, retained to pin the additive wire shape (§6.4). |
 | `inspect-pass.response.json` | Empty inspection pass verdict (§6.4). |
 | `inspect-quarantine-phase.request.json` | Quarantine phase, stable inspection id, and blob/manifest/chunk metadata (§6.4, §11). |
 | `inspect-quarantine.response.json` | Hold verdict and flagged object ids (§6.4, §11). |
