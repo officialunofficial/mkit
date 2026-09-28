@@ -1230,8 +1230,9 @@ Delayed removal MUST NOT make a logically deleted ref accessible or a
 GC root; §13.2 defines which advance membership remains a separate root
 after a per-ref deletion. Repository-level deletion MUST
 immediately invalidate the repository's existing membership as a single
-generation: reads and `AlreadyPresent` MUST see no old member, and a new
-lease MUST NOT restore old membership. A later verdict on an earlier
+generation: reads and `AlreadyPresent` MUST see no old member, the
+invalidated membership MUST NOT satisfy the §§9.2–9.4 checks or the §13.3
+reliance rule, and a new lease MUST NOT restore old membership. A later verdict on an earlier
 advance MUST NOT make that invalidated membership visible again. §13
 later reclaims its data.
 
@@ -1521,13 +1522,19 @@ planning the use and MUST ensure the repository's holder exists. More
 generally, a write that newly relies on an existing member MUST durably
 clear that member's GC mark before the write commits and MUST ensure its
 holder exists. New reliance means making a member reachable from a ref value
-where it was not before: a packmap chain or packlist reference, closure
-or external delta-base use (§§9.2–9.4), or a non-branch ref target.
-In opaque mode, a write referencing packs through new packmap nodes MUST
-apply this rule to every listed pack it did not upload in the same write;
-the server MUST decode those nodes as GC does. If the mark cannot be
-cleared because the member is `deleting` or gone, the write MUST NOT
-rely on it and MUST answer retryable `unavailable` or cause a re-upload.
+where it was not before, directly or transitively: every pack and packlist
+node newly reachable from the new ref value, including through `prev` links
+to existing packlist nodes, closure objects and the packs containing them,
+and external delta bases (§§9.2–9.4). Any ref target counts, including a
+head-only branch update, together with its closure (indexed mode) or its
+packmap chain (opaque mode). In opaque mode, a write that introduces new
+packmap nodes MUST apply this rule to every pack and node reachable from
+them, including through `prev` links, except packs the same write uploaded
+that were not already members; the server MUST decode those nodes as GC
+does. If the mark cannot be cleared because the member is `deleting`, the
+write MUST NOT rely on it and MUST answer retryable `unavailable` or cause a
+re-upload. If the member is gone, the write MUST NOT rely on it and answers
+as §9.4 answers a missing member; opaque mode uses the same responses.
 A new mark restarts the wait. This rule and the commit deadlines cover
 planned, unapplied advances without a cross-shard GC state precondition
 on ref apply. Without this rule, GC cannot safely drop membership: the
