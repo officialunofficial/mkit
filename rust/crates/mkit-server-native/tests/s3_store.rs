@@ -1000,6 +1000,44 @@ async fn multipart_abort_follows_list_continuation() {
     assert_eq!(plan.count(), 2);
 }
 
+#[tokio::test]
+async fn cancelled_completion_aborts_private_upload() {
+    use mkit_server::MultipartBlobStore;
+    let fake = FakeS3::start();
+    let s = store(&fake);
+    let (_, key, plan, session, parts) = Box::pin(staged_multipart(&s)).await;
+    fake.stall_next_query(Method::POST, "uploadId=");
+    let task = tokio::spawn(async move { s.complete(key, &session, &plan, &parts).await });
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if fake.requests().iter().any(|r| {
+                r.method == Method::POST
+                    && r.query.as_deref().is_some_and(|q| q.contains("uploadId="))
+            }) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    task.abort();
+    let _ = task.await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if fake.requests().iter().any(|r| {
+                r.method == Method::DELETE
+                    && r.query.as_deref().is_some_and(|q| q.contains("uploadId="))
+            }) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
 #[test]
 #[ignore = "requires a running Docker daemon"]
 fn real_minio_multipart_copy_roundtrip() {

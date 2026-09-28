@@ -15,6 +15,9 @@ effort, and a process can stop between ticket creation and expiry. Set the
 rule on every deployment prefix that contains `server-uploads/`. Do not
 expire `packs/` or `upload-markers/v1/` with this rule. The filesystem
 backend keeps its startup sweep for old `server-uploads/` directories.
+On S3, also configure `AbortIncompleteMultipartUpload` after **8 days**.
+Completion aborts its private upload on errors and attempts an abort on
+request cancellation, but process termination can interrupt that cleanup.
 Until the 3.2+3.3 outcome-outbox bundle lands, kind-2 expiry writes durable
 `Expired` rows but does not deliver them. Do not deploy this bundle alone.
 

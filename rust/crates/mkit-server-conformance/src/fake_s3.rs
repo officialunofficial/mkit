@@ -397,6 +397,15 @@ impl FakeS3 {
         self.queue(method, FaultKind::Stall);
     }
 
+    /// Stall the next matching S3 query after recording the request.
+    pub fn stall_next_query(&self, method: Method, query_contains: &str) {
+        self.shared.lock().faults.push_back(Fault {
+            method: Some(method),
+            query_contains: Some(query_contains.to_owned()),
+            kind: FaultKind::Stall,
+        });
+    }
+
     /// Return HTTP 200 with `<Error>` on the next matching request.
     pub fn error_body_next(&self, method: Option<Method>) {
         self.queue(method, FaultKind::EmbeddedError);

@@ -21,6 +21,45 @@ const COPY_CONCURRENCY: usize = 8;
 const RESPONSE_LIMIT: usize = 256 * 1024;
 const MAX_LIST_KEYS: usize = 20_000;
 
+/// Abort the private MPU if a client disconnect or deadline drops completion.
+struct PrivateUploadGuard {
+    store: S3BlobStore,
+    path: String,
+    id: String,
+    armed: bool,
+}
+
+impl PrivateUploadGuard {
+    fn new(store: S3BlobStore, path: String, id: String) -> Self {
+        Self {
+            store,
+            path,
+            id,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PrivateUploadGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let (store, path, id) = (self.store.clone(), self.path.clone(), self.id.clone());
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                if let Err(error) = store.abort_upload(&path, &id).await {
+                    tracing::warn!(%error, "S3 cancelled private multipart abort failed");
+                }
+            });
+        }
+    }
+}
+
 fn meta(key: BlobKey, plan: &PartPlan) -> Vec<u8> {
     let mut out = Vec::with_capacity(META_LEN);
     out.extend_from_slice(META_MAGIC);
@@ -528,6 +567,8 @@ impl MultipartBlobStore for S3BlobStore {
         }
         let final_path = self.object_path(&key)?;
         let upload_id = self.create_upload(&final_path).await?;
+        let mut cleanup =
+            PrivateUploadGuard::new(self.clone(), final_path.clone(), upload_id.clone());
         let result = async {
             let path = final_path.as_str();
             let id = upload_id.as_str();
@@ -544,10 +585,13 @@ impl MultipartBlobStore for S3BlobStore {
             self.complete_upload(&final_path, &upload_id, &etags).await
         }
         .await;
-        if (result.is_err() || matches!(result, Ok(CommitOutcome::AlreadyPresent)))
-            && let Err(e) = self.abort_upload(&final_path, &upload_id).await
-        {
-            tracing::warn!(error = %e, "S3 private multipart abort failed");
+        if result.is_err() || matches!(result, Ok(CommitOutcome::AlreadyPresent)) {
+            match self.abort_upload(&final_path, &upload_id).await {
+                Ok(()) => cleanup.disarm(),
+                Err(error) => tracing::warn!(%error, "S3 private multipart abort failed"),
+            }
+        } else {
+            cleanup.disarm();
         }
         let outcome = match result {
             Err(StoreError::Invalid(_)) if self.read_meta(&meta_path).await?.is_none() => {
