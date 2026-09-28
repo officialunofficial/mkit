@@ -1612,6 +1612,16 @@ upload can bypass BeginUpload's authorization and admission.
 
 **Enforced by:** `upload::receipt::tests`, `pipeline::parts::tests`, and `pipeline::tests::begin_parts` (WP-1.11a).
 
+## Filesystem multipart staging is separate from pack visibility
+
+**Always:** a filesystem part appears under `server-uploads/<ticket-id>/<index>-<cv>` only after its subtree CV verifies. An invalid re-upload leaves the prior verified part intact. A durable per-index pointer selects the current verified file, so a crash during replacement preserves either the old or new receipt. Completion streams the selected part files through the verifying pack sink, so only an exact total and BLAKE3 root can publish a pack. A missing or stale part tag is invalid while the session exists; a completed session reports `SessionGone`. Sessions older than seven days plus one hour, measured from meta mtime, are swept at startup without touching younger sessions. FS part upload and completion each keep peak live heap growth below one quarter of an 8 MiB part in the shared suite; the memory reference backend buffers parts.
+
+**Because:** receipts must identify durable, verified part bytes while crashes and retries cannot make incomplete bytes visible as packs.
+
+**If violated:** a stale receipt could select replaced bytes, or a crash could expose a partial pack or discard a live session.
+
+**Enforced by:** `mkit-server-conformance/src/storage/multipart.rs` on memory and FS; `mkit-server/src/fs/tests.rs` ticket-layout, restart and seven-day sweep tests; `Feature::Multipart` wire cases on memory and native FS + SQLite.
+
 ## Storage pressure observes physical capacity after commit
 
 **Always:** Worker pressure samples use the local physical database size only

@@ -15,6 +15,7 @@ use bytes::Bytes;
 use futures_executor::block_on;
 use mkit_core::hash::hash;
 use mkit_core::protocol::{PackKey, RefWriteCondition, Transport as _};
+use mkit_core::upload_parts::{MIN_PART_SIZE, PartPlan, part_subtree_cv};
 use mkit_transport_file::FileTransport;
 use tempfile::TempDir;
 
@@ -29,8 +30,8 @@ use crate::repo::{NamespaceKey, RepoId, RepoName};
 use crate::rt::{Clock, ManualClock};
 use crate::store::{
     Batch, BatchOutcome, BlobBody, BlobKey, BlobStore, ByteRange, CommitOutcome, Cursor, Key,
-    NamespaceStore, PackSink, Partition, Precondition, ScanPage, StoreCapabilities, StoreError,
-    Value, codec, keys, read,
+    MultipartBlobStore, NamespaceStore, PackSink, PartRef, PartSink, Partition, Precondition,
+    ScanPage, StoreCapabilities, StoreError, Value, codec, keys, read,
 };
 
 fn repo() -> RepoId {
@@ -849,6 +850,184 @@ fn age_file(path: &Path, age: std::time::Duration) {
         .unwrap()
         .set_modified(when)
         .unwrap();
+}
+
+fn age_dir(path: &Path, age: std::time::Duration) {
+    fs::File::open(path)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - age)
+        .unwrap();
+}
+
+#[test]
+fn multipart_ticket_directory_and_reopen_keep_uncompleted_pack_invisible() {
+    let td = TempDir::new().unwrap();
+    let ticket = hash(b"ticket id");
+    let data = vec![0x42; usize::try_from(MIN_PART_SIZE).unwrap() + 17];
+    let key = BlobKey::pack(hash(&data));
+    let plan = PartPlan::new(data.len() as u64, MIN_PART_SIZE, u32::MAX).unwrap();
+    let store = FsBlobStore::new(td.path());
+    let session =
+        block_on(store.begin_multipart_for_ticket(key, plan.total(), plan.part_size(), ticket))
+            .unwrap();
+    assert_eq!(session, ticket);
+    let directory = td
+        .path()
+        .join("server-uploads")
+        .join(mkit_core::hash::to_hex_bytes(&ticket));
+    assert!(directory.join("meta").exists());
+    let cv = part_subtree_cv(&plan, 0, &data[..usize::try_from(MIN_PART_SIZE).unwrap()]).unwrap();
+    let mut sink = block_on(store.begin_part(key, &session, &plan, 0, cv)).unwrap();
+    for chunk in data[..usize::try_from(MIN_PART_SIZE).unwrap()].chunks(64 * 1024) {
+        block_on(sink.write(Bytes::copy_from_slice(chunk))).unwrap();
+    }
+    let tag = block_on(sink.commit()).unwrap();
+    let filename = format!("0-{}", mkit_core::hash::to_hex_bytes(&cv));
+    assert_eq!(tag, filename.as_bytes());
+    assert!(directory.join(filename).exists());
+    assert_eq!(fs::read(directory.join("0.current")).unwrap(), tag);
+    drop(store);
+    let reopened = FsBlobStore::new(td.path());
+    assert_eq!(block_on(reopened.head(&key)).unwrap(), None);
+    assert!(matches!(
+        block_on(reopened.complete(key, &session, &plan, &[])),
+        Err(StoreError::Invalid(_))
+    ));
+}
+
+#[test]
+fn multipart_retries_ticket_after_crash_before_metadata() {
+    let td = TempDir::new().unwrap();
+    let store = FsBlobStore::new(td.path());
+    let ticket = hash(b"crashed ticket");
+    let directory = td
+        .path()
+        .join("server-uploads")
+        .join(mkit_core::hash::to_hex_bytes(&ticket));
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(directory.join(".meta.tmp.1.1"), b"partial").unwrap();
+    let key = BlobKey::pack(hash(b"pack"));
+    let session =
+        block_on(store.begin_multipart_for_ticket(key, MIN_PART_SIZE + 1, MIN_PART_SIZE, ticket))
+            .unwrap();
+    assert_eq!(session, ticket);
+    assert!(directory.join("meta").exists());
+    assert!(!directory.join(".meta.tmp.1.1").exists());
+}
+
+#[test]
+fn multipart_replaces_unissued_session_after_part_size_change() {
+    let td = TempDir::new().unwrap();
+    let store = FsBlobStore::new(td.path());
+    let ticket = hash(b"unissued ticket");
+    let key = BlobKey::pack(hash(b"pack"));
+    let total = MIN_PART_SIZE * 2 + 1;
+    block_on(store.begin_multipart_for_ticket(key, total, MIN_PART_SIZE, ticket)).unwrap();
+    let dir = td
+        .path()
+        .join("server-uploads")
+        .join(mkit_core::hash::to_hex_bytes(&ticket));
+    fs::write(dir.join("orphan"), b"attempt that did not issue a ticket").unwrap();
+    let changed_size = MIN_PART_SIZE * 2;
+    assert_eq!(
+        block_on(store.begin_multipart_for_ticket(key, total, changed_size, ticket)).unwrap(),
+        ticket
+    );
+    assert!(!dir.join("orphan").exists());
+    let plan = PartPlan::new(total, changed_size, u32::MAX).unwrap();
+    assert!(block_on(store.begin_part(key, &ticket, &plan, 0, [0; 32])).is_ok());
+}
+
+#[test]
+fn multipart_orphan_new_file_does_not_revoke_old_receipt() {
+    let td = TempDir::new().unwrap();
+    let store = FsBlobStore::new(td.path());
+    let mut data = vec![0x42; usize::try_from(MIN_PART_SIZE).unwrap()];
+    data.extend_from_slice(b"last");
+    let key = BlobKey::pack(hash(&data));
+    let plan = PartPlan::new(data.len() as u64, MIN_PART_SIZE, u32::MAX).unwrap();
+    let session = block_on(store.begin_multipart(key, plan.total(), plan.part_size())).unwrap();
+    let mut parts = Vec::new();
+    for index in 0..plan.count() {
+        let start = usize::try_from(plan.offset(index).unwrap()).unwrap();
+        let len = usize::try_from(plan.expected_len(index).unwrap()).unwrap();
+        let part = &data[start..start + len];
+        let cv = part_subtree_cv(&plan, index, part).unwrap();
+        let mut sink = block_on(store.begin_part(key, &session, &plan, index, cv)).unwrap();
+        for chunk in part.chunks(64 * 1024) {
+            block_on(sink.write(Bytes::copy_from_slice(chunk))).unwrap();
+        }
+        parts.push(PartRef {
+            index,
+            len: len as u64,
+            tag: block_on(sink.commit()).unwrap(),
+        });
+    }
+    let dir = td
+        .path()
+        .join("server-uploads")
+        .join(mkit_core::hash::to_hex_bytes(&session));
+    let alternative = vec![0x91; usize::try_from(MIN_PART_SIZE).unwrap()];
+    let alternative_cv = part_subtree_cv(&plan, 0, &alternative).unwrap();
+    let orphan = dir.join(format!(
+        "0-{}",
+        mkit_core::hash::to_hex_bytes(&alternative_cv)
+    ));
+    fs::write(orphan, alternative).unwrap();
+    drop(store);
+    let reopened = FsBlobStore::new(td.path());
+    assert_eq!(
+        block_on(reopened.complete(key, &session, &plan, &parts)).unwrap(),
+        CommitOutcome::Created
+    );
+    assert_eq!(
+        block_on(reopened.head(&key)).unwrap().map(|meta| meta.len),
+        Some(data.len() as u64)
+    );
+}
+
+#[test]
+fn multipart_sweep_keeps_young_sessions_and_removes_only_old_sessions() {
+    let td = TempDir::new().unwrap();
+    let store = FsBlobStore::new(td.path());
+    let len = MIN_PART_SIZE + 1;
+    let key = BlobKey::pack(hash(b"uncompleted"));
+    let young_id = hash(b"young session");
+    let old_id = hash(b"old session");
+    block_on(store.begin_multipart_for_ticket(key, len, MIN_PART_SIZE, young_id)).unwrap();
+    block_on(store.begin_multipart_for_ticket(key, len, MIN_PART_SIZE, old_id)).unwrap();
+    let parent = td.path().join("server-uploads");
+    let young = parent.join(mkit_core::hash::to_hex_bytes(&young_id));
+    let old = parent.join(mkit_core::hash::to_hex_bytes(&old_id));
+    let six_days = std::time::Duration::from_hours(144);
+    let eight_days = std::time::Duration::from_hours(192);
+    age_dir(&young, six_days);
+    age_dir(&old, eight_days);
+    age_file(&young.join("meta"), six_days);
+    age_file(&old.join("meta"), eight_days);
+    fs::write(old.join("crashed-attempt"), b"incomplete").unwrap();
+    let unrelated = parent.join("unrelated");
+    fs::create_dir(&unrelated).unwrap();
+    age_dir(&unrelated, eight_days);
+    assert_eq!(
+        store
+            .sweep_stale_uploads(std::time::Duration::from_hours(1))
+            .unwrap(),
+        1
+    );
+    assert!(young.exists());
+    assert!(!old.exists());
+    assert!(unrelated.exists());
+    assert!(matches!(
+        block_on(store.begin_part(
+            key,
+            &old_id,
+            &PartPlan::new(len, MIN_PART_SIZE, u32::MAX).unwrap(),
+            0,
+            [0; 32]
+        )),
+        Err(StoreError::SessionGone)
+    ));
 }
 
 #[test]

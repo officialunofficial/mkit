@@ -26,6 +26,7 @@ use mkit_server_conformance::wire::{
 
 const BIN: &str = env!("CARGO_BIN_EXE_mkit-server");
 const MAX_PACK: u64 = 4 << 20;
+const MULTIPART_MAX_PACK: u64 = 24 << 20;
 
 /// Cases the binary fails, each with the reason. Target: none.
 const DIVERGENCES: &[(&str, &str)] = &[];
@@ -130,6 +131,18 @@ async fn check(origin: &str, profile: Profile) {
             );
         }
     }
+    if target.profile.has(Feature::Multipart) {
+        for name in [
+            "multipart.three_parts",
+            "multipart.resume_receipts",
+            "multipart.root_mismatch_invisible",
+        ] {
+            assert!(
+                matches!(report.verdict(name), Some(Verdict::Pass(_))),
+                "{name} did not pass"
+            );
+        }
+    }
     if target.profile.has(Feature::EpochLeases) {
         assert!(matches!(
             report.verdict("leases.bump_completes_and_writes_continue"),
@@ -205,15 +218,25 @@ async fn binary_fs_layout_bearer() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn binary_fs_sqlite_auth_v2() {
-    fs_sqlite_auth_v2("single").await;
+    fs_sqlite_auth_v2("single", false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn binary_fs_sqlite_auth_v2_d34() {
-    fs_sqlite_auth_v2("d34").await;
+    fs_sqlite_auth_v2("d34", false).await;
 }
 
-async fn fs_sqlite_auth_v2(sharding: &str) {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn binary_fs_sqlite_multipart() {
+    fs_sqlite_auth_v2("single", true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn binary_fs_sqlite_multipart_d34() {
+    fs_sqlite_auth_v2("d34", true).await;
+}
+
+async fn fs_sqlite_auth_v2(sharding: &str, multipart: bool) {
     let root = common::repo_root();
     let ticket_file = root.path().join("ticket.keys");
     common::secret_file(
@@ -223,7 +246,12 @@ async fn fs_sqlite_auth_v2(sharding: &str) {
     let port = free_port();
     let origin = format!("http://127.0.0.1:{port}");
     let meta = format!("sqlite:{}", common::s(&root.path().join("meta.sqlite3")));
-    let max_pack = MAX_PACK.to_string();
+    let max_pack = if multipart {
+        MULTIPART_MAX_PACK
+    } else {
+        MAX_PACK
+    }
+    .to_string();
     let server = Server::start(
         port,
         root.path(),
@@ -252,6 +280,10 @@ async fn fs_sqlite_auth_v2(sharding: &str) {
     );
     profile.features.insert(Feature::StrictGzipAuth);
     profile.features.insert(Feature::Tickets);
+    if multipart {
+        profile.features.insert(Feature::Multipart);
+        profile.max_pack_bytes = MULTIPART_MAX_PACK;
+    }
     profile.sharding_d34 = sharding == "d34";
     profile.features.insert(Feature::Timers);
     #[cfg(feature = "test-faults")]
@@ -262,7 +294,26 @@ async fn fs_sqlite_auth_v2(sharding: &str) {
             profile.features.insert(Feature::EpochLeases);
         }
     }
-    check(&origin, profile).await;
+    if multipart {
+        let target = WireTarget {
+            base_url: origin.parse().unwrap(),
+            profile,
+        };
+        let report = run(&target, Some("multipart.")).await;
+        common::judge(&report, DIVERGENCES);
+        for name in [
+            "multipart.three_parts",
+            "multipart.resume_receipts",
+            "multipart.root_mismatch_invisible",
+        ] {
+            assert!(
+                matches!(report.verdict(name), Some(Verdict::Pass(_))),
+                "{name} did not pass"
+            );
+        }
+    } else {
+        check(&origin, profile).await;
+    }
     assert!(server.stop().success());
 }
 

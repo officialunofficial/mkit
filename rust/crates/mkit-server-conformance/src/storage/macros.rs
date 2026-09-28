@@ -46,6 +46,70 @@ macro_rules! storage_suite {
     };
 }
 
+/// Run the shared multipart suite on a store factory. `heap` is an allocator
+/// probe supplied by the test binary; streaming backends must pass the
+/// measured heap case. Only the in-memory reference store uses `buffered`.
+/// WP-1.12 and WP-1.13 add their R2 and S3 factories with the same contract.
+/// The heap probe is process-wide: run the suite under nextest (one test per
+/// process); under `cargo test`, other tests' threads can skew the peak.
+#[macro_export]
+macro_rules! multipart_suite {
+    ($name:ident, store = $store:expr, heap = $probe:path $(,)?) => {
+        #[allow(unused_imports)]
+        mod $name {
+            use super::*;
+            $crate::__with_multipart_cases!(__storage_tests { $store, no_skips });
+            #[test]
+            fn multipart_bounded_heap() {
+                $crate::__private::run(
+                    "multipart_bounded_heap",
+                    &[],
+                    $crate::storage::multipart::multipart_bounded_heap($store, $probe()),
+                );
+            }
+        }
+    };
+    ($name:ident, store = $store:expr, heap = $probe:path, buffered $(,)?) => {
+        #[allow(unused_imports)]
+        mod $name {
+            use super::*;
+            $crate::__with_multipart_cases!(__storage_tests { $store, no_skips });
+            #[test]
+            fn multipart_buffered_heap() {
+                $crate::__private::run(
+                    "multipart_buffered_heap",
+                    &[],
+                    $crate::storage::multipart::multipart_buffered_heap($store, $probe()),
+                );
+            }
+        }
+    };
+}
+
+/// The single source of multipart case names for the macro and registry.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __with_multipart_cases {
+    ($callback:ident { $($args:tt)* }) => {
+        $crate::$callback! { $($args)* ;
+            multipart::{
+                multipart_out_of_order,
+                multipart_duplicate_part,
+                multipart_replace_verified_part,
+                multipart_cv_mismatch_keeps_old,
+                multipart_short_or_long_part,
+                multipart_root_or_total_mismatch,
+                multipart_complete_twice,
+                multipart_concurrent_complete,
+                multipart_pack_already_present,
+                multipart_abort_then_session_gone,
+                multipart_chunked_writes,
+                multipart_crash_leftovers_invisible,
+            }
+        }
+    };
+}
+
 /// A test that every skip the kv harness declares names a case.
 #[doc(hidden)]
 #[macro_export]
