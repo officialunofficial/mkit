@@ -170,6 +170,7 @@ cases! {
     "tickets.advance_conflicts_keep_ticket" => tickets::advance_conflicts_keep_ticket, M1, [Tickets, AuthV2], [];
     "tickets.deletion" => tickets::deletion, M1, [Tickets, AuthV2], [];
     "tickets.advance_ticket_bindings" => tickets::advance_ticket_bindings, M1, [Tickets, AuthV2], [MultiRepo];
+    "tickets.advance_other_repository" => tickets::advance_other_repository, M1, [Tickets, AuthV2, MultiRepo], [];
     "tickets.advance_expired_ticket" => tickets::advance_expired_ticket, M1, [Tickets, AuthV2, TestFaults], [];
     "leases.bump_completes_and_writes_continue" => leases::bump_completes_and_writes_continue, M1, [EpochLeases, TestFaults], [];
     "info.shape_and_policy" => info::shape_and_policy, M1, [], [];

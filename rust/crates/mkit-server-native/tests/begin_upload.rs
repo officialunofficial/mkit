@@ -107,6 +107,8 @@ struct Controls {
     calls: Mutex<Vec<Call>>,
     barrier: Mutex<Option<Arc<Barrier>>>,
     barrier_reads: AtomicUsize,
+    #[cfg(feature = "test-faults")]
+    abort_pause: Mutex<Option<Arc<AdvancePause>>>,
 }
 struct Store<N> {
     inner: Arc<N>,
@@ -133,6 +135,10 @@ impl<N> Store<N> {
     fn arm_race(&self) {
         self.controls.barrier_reads.store(0, Ordering::SeqCst);
         *self.controls.barrier.lock().unwrap() = Some(Arc::new(Barrier::new(2)));
+    }
+    #[cfg(feature = "test-faults")]
+    fn arm_abort(&self, pause: Arc<AdvancePause>) {
+        *self.controls.abort_pause.lock().unwrap() = Some(pause);
     }
 }
 impl<N: NamespaceStore> NamespaceStore for Store<N> {
@@ -173,6 +179,20 @@ impl<N: NamespaceStore> NamespaceStore for Store<N> {
         self.inner.scan(p, start, end, after, limit).await
     }
     async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
+        #[cfg(feature = "test-faults")]
+        if batch.writes.iter().any(|w| match w {
+            Write::Put(k, v) if k.as_bytes().starts_with(b"o\0") => matches!(
+                codec::decode_reservation(v),
+                Ok(codec::ReservationV1::Aborted { .. })
+            ),
+            _ => false,
+        }) {
+            let pause = self.controls.abort_pause.lock().unwrap().take();
+            if let Some(pause) = pause {
+                pause.entered.notify_one();
+                pause.release.notified().await;
+            }
+        }
         let outcome = self.inner.apply(p, batch.clone()).await?;
         self.controls
             .calls
@@ -1047,12 +1067,7 @@ fn upload_auth<N: NamespaceStore>(pipe: &Pipe<N>, mode: Mode, pack: &[u8]) -> Au
     .unwrap()
 }
 
-async fn upload_ticket<N: NamespaceStore>(
-    pipe: &Pipe<N>,
-    mode: Mode,
-    pack: &'static [u8],
-    token: &[u8],
-) {
+async fn upload_ticket<N: NamespaceStore>(pipe: &Pipe<N>, mode: Mode, pack: &[u8], token: &[u8]) {
     let id = hash(pack);
     let a = upload_auth(pipe, mode, pack);
     let mut session = pipe
@@ -1060,7 +1075,7 @@ async fn upload_ticket<N: NamespaceStore>(
         .await
         .unwrap();
     session
-        .push(Some(&id), Some(0), Bytes::from_static(pack), true)
+        .push(Some(&id), Some(0), Bytes::copy_from_slice(pack), true)
         .await
         .unwrap();
     session.finish().await.unwrap();
@@ -1489,6 +1504,7 @@ backends!(
 #[derive(Default)]
 struct AdvancePause {
     armed: AtomicBool,
+    pause_begin: AtomicBool,
     entered: Notify,
     release: Notify,
 }
@@ -1505,7 +1521,9 @@ impl FaultHooks for PauseHook {
         _: &TestDirectives,
     ) -> Result<(), ServerError> {
         if point == FaultPoint::BeforeFinalApply
-            && op.procedure() == Procedure::AdvanceRefs
+            && (op.procedure() == Procedure::AdvanceRefs
+                || (op.procedure() == Procedure::BeginUpload
+                    && self.0.pause_begin.load(Ordering::SeqCst)))
             && self.0.armed.swap(false, Ordering::SeqCst)
         {
             self.0.entered.notify_one();
@@ -1668,6 +1686,456 @@ backends!(
     consume_different_nonce_sqlite,
     consume_race,
     false
+);
+
+#[cfg(feature = "test-faults")]
+async fn live_begin_races_consume<N: NamespaceStore + 'static>(
+    backend: N,
+    clock: Arc<ManualClock>,
+    mode: Mode,
+) {
+    const DATA: &[u8; 32] = b"iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii";
+    let store = Store::new(backend);
+    let pause = Arc::new(AdvancePause::default());
+    let pipe = paused_pipeline(
+        store.clone(),
+        MemoryBlobStore::default(),
+        clock,
+        mode,
+        pause.clone(),
+    );
+    let initial = auth(&pipe, mode, 1, Procedure::BeginUpload);
+    let ticket = pipe
+        .begin_upload(&initial, REF, &hash(DATA), 32)
+        .await
+        .unwrap();
+    let id = ticket_id(&ticket);
+    let BeginUploadResult::Ticket { token, .. } = ticket else {
+        unreachable!()
+    };
+    pause.pause_begin.store(true, Ordering::SeqCst);
+    pause.armed.store(true, Ordering::SeqCst);
+    let returning = auth(&pipe, mode, 1, Procedure::BeginUpload);
+    let blocked = {
+        let pipe = pipe.clone();
+        tokio::spawn(async move { pipe.begin_upload(&returning, REF, &hash(DATA), 32).await })
+    };
+    tokio::time::timeout(Duration::from_secs(5), pause.entered.notified())
+        .await
+        .unwrap();
+    upload_ticket(&pipe, mode, DATA, &token).await;
+    let advance = auth(&pipe, mode, 1, Procedure::AdvanceRefs);
+    assert_eq!(
+        pipe.advance_refs_with_tickets(
+            &advance,
+            upd(REF, RefWriteCondition::Missing, [3; 32]),
+            upd(
+                "refs/mkit/packmap/main",
+                RefWriteCondition::Missing,
+                [4; 32]
+            ),
+            vec![id],
+        )
+        .await
+        .unwrap(),
+        mkit_core::protocol::AdvanceOutcome::Committed
+    );
+    pause.release.notify_one();
+    let error = blocked.await.unwrap().unwrap_err();
+    assert_eq!(error.code(), Code::Aborted);
+    assert_eq!(error.public_message(), "upload ticket race");
+}
+
+#[cfg(feature = "test-faults")]
+backends!(
+    live_begin_races_consume_memory,
+    live_begin_races_consume_sqlite,
+    live_begin_races_consume
+);
+
+#[cfg(feature = "test-faults")]
+async fn existing_begin_races_consume<N: NamespaceStore + 'static>(
+    backend: N,
+    clock: Arc<ManualClock>,
+    mode: Mode,
+) {
+    const DATA: &[u8; 32] = b"jjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj";
+    let store = Store::new(backend);
+    let pause = Arc::new(AdvancePause::default());
+    let pipe = paused_pipeline(
+        store.clone(),
+        MemoryBlobStore::default(),
+        clock,
+        mode,
+        pause.clone(),
+    );
+    pause.pause_begin.store(true, Ordering::SeqCst);
+    pause.armed.store(true, Ordering::SeqCst);
+    let first_auth = auth(&pipe, mode, 1, Procedure::BeginUpload);
+    let blocked = {
+        let pipe = pipe.clone();
+        tokio::spawn(async move { pipe.begin_upload(&first_auth, REF, &hash(DATA), 32).await })
+    };
+    tokio::time::timeout(Duration::from_secs(5), pause.entered.notified())
+        .await
+        .unwrap();
+    let second_auth = auth(&pipe, mode, 1, Procedure::BeginUpload);
+    let opened = pipe
+        .begin_upload(&second_auth, REF, &hash(DATA), 32)
+        .await
+        .unwrap();
+    let id = ticket_id(&opened);
+    let BeginUploadResult::Ticket { token, .. } = opened else {
+        unreachable!()
+    };
+    // The paused opener loses its first apply, then plans Existing on the
+    // winner's row and pauses at its second BeforeFinalApply.
+    pause.armed.store(true, Ordering::SeqCst);
+    pause.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), pause.entered.notified())
+        .await
+        .unwrap();
+    upload_ticket(&pipe, mode, DATA, &token).await;
+    let advance = auth(&pipe, mode, 1, Procedure::AdvanceRefs);
+    assert_eq!(
+        pipe.advance_refs_with_tickets(
+            &advance,
+            upd(REF, RefWriteCondition::Missing, [3; 32]),
+            upd("refs/mkit/packmap/main", RefWriteCondition::Missing, [4; 32]),
+            vec![id],
+        )
+        .await
+        .unwrap(),
+        mkit_core::protocol::AdvanceOutcome::Committed
+    );
+    pause.release.notify_one();
+    match blocked.await.unwrap() {
+        Ok(BeginUploadResult::Ticket { id: answer, .. }) => assert_ne!(answer, id),
+        Ok(BeginUploadResult::AlreadyPresent) => {}
+        Err(error) => assert_eq!(error.code(), Code::Aborted),
+    }
+}
+
+#[cfg(feature = "test-faults")]
+backends!(
+    existing_begin_races_consume_memory,
+    existing_begin_races_consume_sqlite,
+    existing_begin_races_consume
+);
+
+#[cfg(feature = "test-faults")]
+async fn abort_races_consume<N: NamespaceStore + 'static>(
+    backend: N,
+    clock: Arc<ManualClock>,
+    mode: Mode,
+) {
+    const DATA: &[u8; 32] = b"gggggggggggggggggggggggggggggggg";
+    let store = Store::new(backend);
+    let blobs = MemoryBlobStore::default();
+    let pause = Arc::new(AdvancePause::default());
+    let pipe = paused_pipeline(store.clone(), blobs.clone(), clock, mode, pause.clone());
+    let begin = auth(&pipe, mode, 1, Procedure::BeginUpload);
+    let ticket = pipe
+        .begin_upload(&begin, REF, &hash(DATA), 32)
+        .await
+        .unwrap();
+    let id = ticket_id(&ticket);
+    let rid = codec::decode_ticket(
+        &store
+            .inner
+            .get(&mode.partition(&begin, REF), &keys::ticket(&id))
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap()
+    .reservation_id;
+    let BeginUploadResult::Ticket { token, .. } = ticket else {
+        unreachable!()
+    };
+    upload_ticket(&pipe, mode, DATA, &token).await;
+    blobs
+        .delete(&mkit_server::store::BlobKey::pack(hash(DATA)))
+        .await
+        .unwrap();
+    store.arm_abort(pause.clone());
+    let first_auth = auth(&pipe, mode, 1, Procedure::AdvanceRefs);
+    let blocked = {
+        let pipe = pipe.clone();
+        tokio::spawn(async move {
+            pipe.advance_refs_with_tickets(
+                &first_auth,
+                upd(REF, RefWriteCondition::Missing, [3; 32]),
+                upd(
+                    "refs/mkit/packmap/main",
+                    RefWriteCondition::Missing,
+                    [4; 32],
+                ),
+                vec![id],
+            )
+            .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(5), pause.entered.notified())
+        .await
+        .unwrap();
+    upload_ticket(&pipe, mode, DATA, &token).await;
+    let consume = auth(&pipe, mode, 1, Procedure::AdvanceRefs);
+    assert_eq!(
+        pipe.advance_refs_with_tickets(
+            &consume,
+            upd(REF, RefWriteCondition::Missing, [3; 32]),
+            upd(
+                "refs/mkit/packmap/main",
+                RefWriteCondition::Missing,
+                [4; 32]
+            ),
+            vec![id],
+        )
+        .await
+        .unwrap(),
+        mkit_core::protocol::AdvanceOutcome::Committed
+    );
+    pause.release.notify_one();
+    assert_eq!(
+        blocked.await.unwrap().unwrap_err().code(),
+        Code::FailedPrecondition
+    );
+    let p = mode.partition(&consume, REF);
+    let row = store
+        .inner
+        .get(&p, &keys::reservation(&rid).unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        codec::decode_reservation(&row).unwrap(),
+        codec::ReservationV1::Committed { .. }
+    ));
+    let backlog = store
+        .inner
+        .get(&p, &keys::outcome_backlog())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(codec::decode_backlog(&backlog).unwrap().rows, 1);
+}
+
+#[cfg(feature = "test-faults")]
+backends!(
+    abort_races_consume_memory,
+    abort_races_consume_sqlite,
+    abort_races_consume
+);
+
+#[cfg(feature = "test-faults")]
+async fn expired_close_races_consume<N: NamespaceStore + 'static>(
+    backend: N,
+    clock: Arc<ManualClock>,
+    mode: Mode,
+) {
+    const DATA: &[u8; 32] = b"hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh";
+    let store = Store::new(backend);
+    let pause = Arc::new(AdvancePause::default());
+    let pipe = paused_pipeline(
+        store.clone(),
+        MemoryBlobStore::default(),
+        clock.clone(),
+        mode,
+        pause.clone(),
+    );
+    let begin = auth(&pipe, mode, 1, Procedure::BeginUpload);
+    let ticket = pipe
+        .begin_upload(&begin, REF, &hash(DATA), 32)
+        .await
+        .unwrap();
+    let id = ticket_id(&ticket);
+    let BeginUploadResult::Ticket { token, .. } = ticket else {
+        unreachable!()
+    };
+    upload_ticket(&pipe, mode, DATA, &token).await;
+    let advance = auth(&pipe, mode, 1, Procedure::AdvanceRefs);
+    let p = mode.partition(&advance, REF);
+    let ticket_key = keys::ticket(&id);
+    let raw = store.inner.get(&p, &ticket_key).await.unwrap().unwrap();
+    let ticket = codec::decode_ticket(&raw).unwrap();
+    pause.armed.store(true, Ordering::SeqCst);
+    let blocked = {
+        let pipe = pipe.clone();
+        tokio::spawn(async move {
+            pipe.advance_refs_with_tickets(
+                &advance,
+                upd(REF, RefWriteCondition::Missing, [3; 32]),
+                upd(
+                    "refs/mkit/packmap/main",
+                    RefWriteCondition::Missing,
+                    [4; 32],
+                ),
+                vec![id],
+            )
+            .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(5), pause.entered.notified())
+        .await
+        .unwrap();
+    clock.advance(TTL as i64);
+    let index = keys::ticket_index(
+        &ticket.repo,
+        &ticket.ref_name,
+        &ticket.pack_id,
+        &ticket.signer,
+    )
+    .unwrap();
+    let tc = keys::tickets_per_ref(&ticket.repo, &ticket.ref_name).unwrap();
+    let tu = keys::tickets_per_signer(&ticket.repo, &ticket.ref_name, &ticket.signer).unwrap();
+    let mut batch = Batch::new();
+    mkit_server::store::tickets::plan_ticket_close(
+        &id,
+        &ticket,
+        &raw,
+        store.inner.get(&p, &index).await.unwrap().as_ref(),
+        store.inner.get(&p, &tc).await.unwrap().as_ref(),
+        store.inner.get(&p, &tu).await.unwrap().as_ref(),
+        mkit_server::store::tickets::CloseReason::Expired,
+        &mut batch.preconditions,
+        &mut batch.writes,
+    )
+    .unwrap();
+    let reservation_key = keys::reservation(&ticket.reservation_id).unwrap();
+    let prior = store
+        .inner
+        .get(&p, &reservation_key)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut outbox = mkit_server::store::outbox::OutboxBuilder::new(
+        store
+            .inner
+            .get(&p, &keys::outbox_sequence())
+            .await
+            .unwrap()
+            .as_ref(),
+        store
+            .inner
+            .get(&p, &keys::outcome_backlog())
+            .await
+            .unwrap()
+            .as_ref(),
+    )
+    .unwrap();
+    outbox.outcome(
+        &ticket.reservation_id,
+        &prior,
+        mkit_server::store::outbox::Terminal::new(codec::ReservationV1::Expired {
+            repository: mode.identity(),
+            occurred_at_ms: TTL,
+        })
+        .unwrap(),
+    );
+    outbox
+        .try_finish(&mut batch.preconditions, &mut batch.writes)
+        .unwrap();
+    assert_eq!(
+        store.inner.apply(&p, batch).await.unwrap(),
+        BatchOutcome::Committed
+    );
+    pause.release.notify_one();
+    assert_eq!(
+        blocked.await.unwrap().unwrap_err().code(),
+        Code::FailedPrecondition
+    );
+    let row = store
+        .inner
+        .get(&p, &reservation_key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        codec::decode_reservation(&row).unwrap(),
+        codec::ReservationV1::Expired { .. }
+    ));
+    let backlog = store
+        .inner
+        .get(&p, &keys::outcome_backlog())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(codec::decode_backlog(&backlog).unwrap().rows, 1);
+}
+
+#[cfg(feature = "test-faults")]
+backends!(
+    expired_close_races_consume_memory,
+    expired_close_races_consume_sqlite,
+    expired_close_races_consume
+);
+
+async fn seven_tickets_commit<N: NamespaceStore>(backend: N, clock: Arc<ManualClock>, mode: Mode) {
+    let store = Store::new(backend);
+    let pipe = pipeline(
+        store.clone(),
+        MemoryBlobStore::default(),
+        Arc::new(Spy::default()),
+        config(mode),
+        clock,
+    );
+    let mut ids = Vec::new();
+    for n in 0_u8..7 {
+        let data = [n + 20; 32];
+        let begin = auth(&pipe, mode, 1, Procedure::BeginUpload);
+        let ticket = pipe
+            .begin_upload(&begin, REF, &hash(&data), 32)
+            .await
+            .unwrap();
+        ids.push(ticket_id(&ticket));
+        let BeginUploadResult::Ticket { token, .. } = ticket else {
+            unreachable!()
+        };
+        upload_ticket(&pipe, mode, &data, &token).await;
+    }
+    store.take();
+    let advance = auth(&pipe, mode, 1, Procedure::AdvanceRefs);
+    assert_eq!(
+        pipe.advance_refs_with_tickets(
+            &advance,
+            upd(REF, RefWriteCondition::Missing, [3; 32]),
+            upd(
+                "refs/mkit/packmap/main",
+                RefWriteCondition::Missing,
+                [4; 32]
+            ),
+            ids,
+        )
+        .await
+        .unwrap(),
+        mkit_core::protocol::AdvanceOutcome::Committed
+    );
+    let calls = store.take();
+    let batch = calls
+        .iter()
+        .find_map(|call| match call {
+            Call::Apply(_, batch, BatchOutcome::Committed)
+                if batch
+                    .writes
+                    .iter()
+                    .filter(|w| matches!(w, Write::Delete(k) if k.as_bytes().starts_with(b"t\0")))
+                    .count()
+                    == 7 =>
+            {
+                Some(batch)
+            }
+            _ => None,
+        })
+        .expect("seven-ticket commit batch");
+    batch.validate(&store.capabilities()).unwrap();
+    assert!(batch.preconditions.len() + batch.writes.len() <= mkit_server::store::MAX_BATCH_OPS);
+}
+
+backends!(
+    seven_tickets_commit_memory,
+    seven_tickets_commit_sqlite,
+    seven_tickets_commit
 );
 
 backends!(already_present_memory, already_present_sqlite, present);

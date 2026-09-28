@@ -4,15 +4,16 @@ use futures::future::join_all;
 use mkit_core::hash::Hash;
 
 use super::{
-    Authenticated, BlobStore, HookSet, NamespaceStore, OpKind, Operation, Partition, Pipeline,
-    PlanClock, ServerError, ShardMap, Snapshot, StorageOp, codec, internal, keys, meta_error, ms,
-    store_error,
+    Authenticated, HookSet, NamespaceStore, OpKind, Operation, Partition, Pipeline, PlanClock,
+    ServerError, ShardMap, Snapshot, StorageOp, codec, internal, keys, meta_error, ms, store_error,
 };
 use crate::repo::RepoId;
 use crate::store::codec::{AbortReason, OutcomeRef, ReservationV1, TicketV1};
 use crate::store::outbox::{OutboxBuilder, Terminal};
 use crate::store::tickets::{self, CloseReason};
-use crate::store::{Batch, BatchOutcome, BlobKey, Key, Precondition, Value, Write};
+use crate::store::{
+    Batch, BatchOutcome, BlobKey, Key, MultipartBlobStore, Precondition, Value, Write,
+};
 use crate::upload::marker::upload_marker;
 
 const INVALID: &str = "invalid or expired upload ticket";
@@ -180,7 +181,7 @@ pub(super) fn plan_consumption(
     outbox.try_finish(pre, writes).map_err(meta_error)
 }
 
-impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
+impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// Check ticket rows and proof blobs before admission or lease grants.
     /// A lost pack with a surviving marker gets a separate defensive abort.
     pub(super) async fn ticket_decision(
@@ -230,6 +231,8 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             let detail = detail_keys(snap, &advance)?;
             self.fill(p, snap, detail).await?;
 
+            // TODO(WP-5.3a): remove a pack's GC mark before accepting its ticket.
+            // TODO(WP-4.x): schedule verification and enforce §9.2 MKPL checks in indexed mode.
             // All marker heads run together; only marker-present packs are headed.
             let markers = join_all(ids.iter().zip(&tickets).map(|(id, t)| async move {
                 let (key, _) = upload_marker(id, &t.pack_id);

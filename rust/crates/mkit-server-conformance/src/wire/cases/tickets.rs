@@ -355,6 +355,46 @@ pub(super) async fn advance_ticket_bindings(ctx: Ctx) -> CaseResult {
     )
 }
 
+pub(super) async fn advance_other_repository(ctx: Ctx) -> CaseResult {
+    let signer = ctx.v2_signer("main")?;
+    let namespace = format!("ed25519-{}", signer.public_key_hex());
+    let repo_a = format!("{namespace}/ticket-a");
+    let repo_b = format!("{namespace}/ticket-b");
+    let pack = b"repository binding ticket";
+    let begin = BeginUploadRequest {
+        r#ref: Some(ctx.head("main")),
+        pack_id: Some(hash(pack).to_vec()),
+        bytes: Some(pack.len() as u64),
+        ..Default::default()
+    };
+    let opened: BeginUploadResponse = want_ok(
+        ctx.send(
+            &sign_unary(&signer, Rpc::BeginUpload, &begin, |env| {
+                env.repository = repo_a.clone();
+            })
+            .with_header("x-repository", &repo_a),
+        )
+        .await?,
+        "BeginUpload repository A",
+    )?;
+    let id = ticket(opened)?
+        .id
+        .ok_or_else(|| Failure::Fail("missing ticket id".into()))?;
+    let req = ticket_advance(&ctx, "main", vec![id]);
+    let response: Result<mkit_transport_connect::generated::AdvanceRefsResponse, _> = ctx
+        .send(
+            &sign_unary(&signer, Rpc::AdvanceRefs, &req, |env| {
+                env.repository = repo_b.clone();
+            })
+            .with_header("x-repository", &repo_b),
+        )
+        .await?;
+    exact(
+        want_code(response, "failed_precondition", "ticket in another repository")?,
+        "invalid or expired upload ticket",
+    )
+}
+
 pub(super) async fn advance_expired_ticket(ctx: Ctx) -> CaseResult {
     let pack = b"ticket advance expiry";
     let opened = open_for_pack(&ctx, pack).await?;
