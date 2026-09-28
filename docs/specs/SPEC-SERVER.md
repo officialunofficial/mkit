@@ -1324,8 +1324,12 @@ Per-repository GC MUST include all of the following roots:
 
 - Every live ref value, including each branch's packmap chain.
 - Every published pointer, including its head and packmap.
+- Every advance value after the published pointer that can still become
+  published under §10 (pending or held), including its packmap chain.
 - Every unexpired ticket's pack or packlist node.
 - Every unexpired hold.
+- Every takedown replacement pack (§14) not yet collected under §14's
+  own rules.
 
 An `AlreadyPresent` answer MUST pin its pack against repository removal
 and byte deletion for `already_present_pin_window`, beginning at the
@@ -1341,11 +1345,11 @@ cannot prove object closure; if a repository has any live non-branch
 ref, GC MUST retain all its member packs.
 
 A planned but unapplied write is a pending advance covered by the wait
-phase below. An advance awaiting inspection clearance has already
-committed a live ref and MUST remain a root. A lease-deleted ref is not
-a root. Preservation-store bytes and blocklist rows MUST NOT be
-collected by server GC; their separate retention and purge rules are
-reserved for §§14 and 16 (WP-5.1b).
+phase below. An advance awaiting inspection clearance can still become
+published under §10 and MUST remain a root even when it is no longer the
+live ref. A lease-deleted ref is not a root. Preservation-store bytes and
+blocklist rows MUST NOT be collected by server GC; their separate retention
+and purge rules are reserved for §§14 and 16 (WP-5.1b).
 
 ### 13.3 Per-repository mark, wait, re-check and drop
 
