@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server: add periodic per-Durable-Object logical snapshots to a dedicated R2
+  `BACKUPS` bucket, plus Fresh-only portable restore with epoch advancement,
+  relay re-keying and coordinator recovery. Native `export` and `restore`
+  commands move metadata between backends. In-place logical restore is deferred
+  to the admin API; use Workers PITR or native physical `backup` for recovery
+  of the same deployment.
+  Deploying this Worker now requires the private `mkit-vcs-backups` bucket
+  bound as `BACKUPS` and a 35-day `backups/` lifecycle rule.
 - Specify the server's published view and quarantine, covering newly reachable
   file objects and all file entries of added packs. Add inspection phase/id,
   object kinds, deferral and flagged ids, authority writer-view classification,

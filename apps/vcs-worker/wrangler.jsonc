@@ -45,7 +45,11 @@
 
   // R2 object store for content-addressed packs. Key layout:
   // packs/{hex(pack_id)}.
-  "r2_buckets": [{ "binding": "STORAGE", "bucket_name": "mkit-vcs-objects" }],
+  "r2_buckets": [
+    { "binding": "STORAGE", "bucket_name": "mkit-vcs-objects" },
+    // Create this bucket and its backups/-only lifecycle rule before deploy.
+    { "binding": "BACKUPS", "bucket_name": "mkit-vcs-backups" }
+  ],
 
   // Single deployments use RefStore (instance "root"). D34 routes each
   // partition kind to its class; repo and ref-name indexes share a binding.

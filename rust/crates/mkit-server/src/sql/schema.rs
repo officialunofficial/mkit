@@ -71,6 +71,31 @@ fn stored_version<C: SqlConn>(conn: &C) -> Result<u32, SqlError> {
     }
 }
 
+/// Check an existing database without applying migrations or writing schema rows.
+///
+/// # Errors
+/// The database's version is not exactly this binary's, or it cannot be read.
+pub fn require_current<C: SqlConn>(conn: &C) -> Result<u32, StoreError> {
+    if conn
+        .query(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'mkit_schema'",
+            &[],
+        )?
+        .is_empty()
+    {
+        return Err(StoreError::Unsupported(format!(
+            "database schema version 0 differs from binary version {SCHEMA_VERSION}; export with a matching binary"
+        ).into()));
+    }
+    let version = stored_version(conn)?;
+    if version != SCHEMA_VERSION {
+        return Err(StoreError::Unsupported(format!(
+            "database schema version {version} differs from binary version {SCHEMA_VERSION}; export with a matching binary"
+        ).into()));
+    }
+    Ok(version)
+}
+
 enum Step {
     Applied,
     Done(u32),

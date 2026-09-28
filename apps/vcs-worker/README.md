@@ -49,6 +49,59 @@ preconditions (including `NotAfter` deadlines, on its own clock) and runs no
 pipeline logic. CAS, the two-ref `AdvanceRefs` transaction, the replay
 ledger and the quota are each one atomic batch planned by the pipeline.
 
+## Backup and disaster recovery
+
+For an incident within 30 days, use Cloudflare Durable Object point-in-time
+restore (PITR) first. Each writable Durable Object also exports a portable
+logical snapshot to the `BACKUPS` R2 binding after its first committed put and
+then daily by default. The snapshot covers one partition and is written under
+`backups/v1/<prefix>/<kind>/<partition-hash>/<time>-<digest>.kvlog`. The
+`BACKUP_PREFIX` var can separate deployments sharing a bucket; its default is
+this Worker's name, `mkit-vcs-worker`. Staging must set its own `BACKUP_PREFIX`.
+The first export runs one interval after the first committed put, not at the
+time of that put. `BACKUP_INTERVAL_MS=0` disables the timer; `BACKUP_MAX_BYTES`
+defaults to 16 MiB and cannot exceed 24 MiB. A partition above that cap is
+logged and remains covered by PITR until segmented export is implemented.
+Unchanged partitions skip uploads until `BACKUP_FORCE_REUPLOAD_MS` (28 days
+by default); keep that interval shorter than the bucket's lifecycle retention.
+
+Before deploying, create a separate `mkit-vcs-backups` bucket and bind it as
+`BACKUPS` (as in `wrangler.jsonc`). Install an R2 lifecycle rule for the
+`backups/` prefix with a **35-day default retention**. Check the rule's prefix:
+it must never cover `packs/` or any other content-addressed objects. This
+bucket and lifecycle rule are manual deployment steps (WP-1.19 checklist).
+The bucket MUST be private: disable r2.dev and custom domains, and use only
+scoped tokens. Its jurisdiction must match `NAMESPACE_JURISDICTION` for data
+residency. Snapshots contain private ref names, signer keys, tickets and replay
+rows. Confirm the bucket's access policy before the first deployment.
+Keep `WORKERS_PLAN=free` on a Free account.
+
+For a backend move or recovery beyond PITR, collect a complete, compatible
+set of `.kvlog` partition snapshots from R2 into the native export directory
+layout. Select exactly one object for each `<kind>/<partition-hash>/`, normally
+the newest. These snapshots are per partition and do not form one consistent
+cut. Keep the target offline, and run `mkit-server restore --meta
+sqlite:<NEW PATH> --from <DIR> --sharding single|d34`. Restore accepts only a
+new database, advances grant epochs by at least 2^32, re-keys relay rows from
+the supplied watermarks and marks coordinators recovered. A native deployment can create a
+consistent portable set directly with `mkit-server export --meta
+sqlite:<PATH> --out <DIR>`; `mkit-server backup` is the physical in-place
+recovery option. A snapshot older than auth v2's maximum 300,000 ms envelope
+validity cannot revive a replayable write envelope.
+
+Owners must re-issue grants after restore. Missing relay sources or coordinators
+are refused by default. `--allow-incomplete` reconstructs missing sources;
+missing coordinators additionally require `--epoch-at-least N` with N ≥ 2^32 (4294967296), above any epoch the lost coordinator could have issued. Review the
+printed missing list. An older target can lack membership or index rows that
+the source had already delivered and removed; index reconcile is required
+before GA (R-116).
+
+Production Worker restore and PITR administration are deferred to WP-5.11b.
+Logical in-place/Merge restore, segmented export above 16 MiB, index
+reconciliation after restore, a post-restore replay fence and a GC hold at
+least as long as backup retention are also deferred. The `test-faults` import
+route exists only for local conformance and must not be enabled in deployment.
+
 ## Auth v2 (open write, no allow-list)
 
 All writes (`UpdateRef`, `AdvanceRefs`, `BeginUpload`, `UploadPack`) require the
@@ -141,6 +194,10 @@ build has none of:
 - `x-mkit-test-clock-skew-ms`, `GET /__mkit_test/stats` (`{bytes, keys}` of
   the partition) and the `TEST_QUOTA_OPS`/`TEST_QUOTA_BYTES`/
   `TEST_QUOTA_WINDOW_MS` vars, for the wire suite.
+- `GET /__mkit_test/snapshot`, `POST /__mkit_test/restore` and
+  `GET /__mkit_test/restored-snapshot` export the default single-shard DO,
+  import into a separate fresh test DO, and verify a wrangler-dev round trip.
+  These routes do not compile into a production build.
 
 Manual harnesses (need `apps/web/vendor/mkit-wasm/pkg`, see apps/web):
 `node tests/auth_v2_golden.mjs`, and against a running test-faults Worker
