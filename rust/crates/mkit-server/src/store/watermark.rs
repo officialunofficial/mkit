@@ -24,17 +24,29 @@ pub enum WatermarkError {
 /// the ceiling and minimum preserve the original scan-time bound.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WatermarkCheckpoint {
+    coordinator: Partition,
     cursor: Cursor,
     ceiling_ms: u64,
     minimum_ms: u64,
 }
 
 impl WatermarkCheckpoint {
-    /// Stable binary form: version, scan ceiling, partial minimum, cursor bytes.
+    /// Stable binary form: version, partition length and bytes, scan ceiling,
+    /// partial minimum, then opaque cursor bytes.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(17 + self.cursor.as_bytes().len());
+        let partition = self
+            .coordinator
+            .encode()
+            .expect("coordinator identity encodes");
+        let mut bytes = Vec::with_capacity(19 + partition.len() + self.cursor.as_bytes().len());
         bytes.push(1);
+        bytes.extend_from_slice(
+            &u16::try_from(partition.len())
+                .expect("partition length fits")
+                .to_be_bytes(),
+        );
+        bytes.extend_from_slice(&partition);
         bytes.extend_from_slice(&self.ceiling_ms.to_be_bytes());
         bytes.extend_from_slice(&self.minimum_ms.to_be_bytes());
         bytes.extend_from_slice(self.cursor.as_bytes());
@@ -43,16 +55,27 @@ impl WatermarkCheckpoint {
 
     /// Decode a checkpoint supplied by the previous scan step.
     pub fn decode(bytes: &[u8]) -> Result<Self, StoreError> {
-        if bytes.len() <= 17 || bytes[0] != 1 {
+        if bytes.len() < 20 || bytes[0] != 1 {
             return Err(StoreError::Invalid("invalid watermark checkpoint".into()));
         }
-        let ceiling_ms = u64::from_be_bytes(bytes[1..9].try_into().expect("eight bytes"));
-        let minimum_ms = u64::from_be_bytes(bytes[9..17].try_into().expect("eight bytes"));
+        let part_len = usize::from(u16::from_be_bytes([bytes[1], bytes[2]]));
+        let end = 3usize
+            .checked_add(part_len)
+            .and_then(|n| n.checked_add(16))
+            .ok_or_else(|| StoreError::Invalid("invalid watermark checkpoint length".into()))?;
+        if bytes.len() <= end {
+            return Err(StoreError::Invalid("truncated watermark checkpoint".into()));
+        }
+        let coordinator = Partition::decode(&bytes[3..3 + part_len])?;
+        let ceiling_ms =
+            u64::from_be_bytes(bytes[end - 16..end - 8].try_into().expect("eight bytes"));
+        let minimum_ms = u64::from_be_bytes(bytes[end - 8..end].try_into().expect("eight bytes"));
         if minimum_ms > ceiling_ms {
             return Err(StoreError::Invalid("invalid watermark minimum".into()));
         }
         Ok(Self {
-            cursor: Cursor::new(bytes[17..].to_vec()),
+            coordinator,
+            cursor: Cursor::new(bytes[end..].to_vec()),
             ceiling_ms,
             minimum_ms,
         })
@@ -183,7 +206,12 @@ pub async fn namespace_relay_watermark_step<S: NamespaceStore>(
     check_recovery(store, coordinator).await?;
     let (start, end) = keys::class_range(keys::TAG_LEASED_SHARD);
     let (cursor, ceiling_ms, mut minimum_ms) = match checkpoint {
-        Some(c) => (Some(c.cursor), c.ceiling_ms, c.minimum_ms),
+        Some(c) if c.coordinator == *coordinator => (Some(c.cursor), c.ceiling_ms, c.minimum_ms),
+        Some(_) => {
+            return Err(WatermarkError::Store(StoreError::Invalid(
+                "watermark checkpoint belongs to another coordinator".into(),
+            )));
+        }
         None => (None, now_ms, now_ms),
     };
     let page = store
@@ -194,6 +222,7 @@ pub async fn namespace_relay_watermark_step<S: NamespaceStore>(
     }
     Ok(match page.next {
         Some(cursor) => WatermarkStep::Pending(WatermarkCheckpoint {
+            coordinator: coordinator.clone(),
             cursor,
             ceiling_ms,
             minimum_ms,
@@ -323,6 +352,11 @@ mod tests {
         };
         let encoded = checkpoint.encode();
         let checkpoint = WatermarkCheckpoint::decode(&encoded).unwrap();
+        let other = Partition::Coordinator(NamespaceKey::from_stored("another".into()));
+        assert!(matches!(
+            namespace_relay_watermark_step(&store, &other, 150, Some(checkpoint.clone()), 1).await,
+            Err(WatermarkError::Store(StoreError::Invalid(_)))
+        ));
         put_lease(&store, 1, 70, 200).await;
         let WatermarkStep::Pending(checkpoint) =
             namespace_relay_watermark_step(&store, &coordinator(), 150, Some(checkpoint), 1)
