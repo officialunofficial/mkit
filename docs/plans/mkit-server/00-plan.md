@@ -159,7 +159,7 @@ Sizes: S ≲ 400, M 400–900, L 900–1500 changed lines.
 | 1.27 | M1 conformance: D34, tickets and growth cases (wire, storage, load) | M1 | conformance | 1.9b, 1.10, 1.14, 1.25, 1.26, 1.28 | L | rust,conf-native,conf-wrangler | no |
 | 1.19 | Staging vcs-worker deployment config and runbook | M1 | ops | 1.6, 1.8, 1.12, 1.14, 1.18, 1.21, 1.29 | S | workers,ci-yaml | yes |
 | 1.20 | CI: conformance and e2e against deployed staging (M1 exit) | M1 | conformance | 1.19, 1.27, 1.13, 1.15 | S | ci-yaml,staging | yes |
-| 2.2 | Proto additions for M2 | M2 | proto | S2, 1.20 | S | rust,proto,full | no |
+| 2.2 | Proto additions for M2 | M2 | proto | S2, 1.2 | S | rust,proto,full | no |
 | 2.3 | mkit-attest: Keccak-256, EIP-191, secp256k1 recovery, address derivation | M2 | crypto | S2 | M | rust,wasm,sec,golden | no |
 | 2.4a | mkit-attest: grant and epoch statement codec plus the ed25519 scheme | M2 | crypto | S2 | L | rust,wasm,golden | no | (split, see briefs/WP-2.4.md)
 | 2.4b | mkit-attest: grant and epoch statement codec plus the ed25519 scheme | M2 | crypto | 2.4a | L | rust,wasm,golden | no | (split)
@@ -168,13 +168,13 @@ Sizes: S ≲ 400, M 400–900, L 900–1500 changed lines.
 | 2.7 | Server: ref scopes, packmap coverage and the delete flag | M2 | core | 2.6 | M | rust,conf-native | no |
 | 2.8 | Epoch: GetGrantEpoch/SetGrantEpoch over epoch leases; revoke races | M2 | core | 2.6, 2.2 | M | rust,conf-native,conf-wrangler,staging | no |
 | 2.9 | Server: signed reads, visibility via SetRepoVisibility, read grants, not_found | M2 | core | 2.6, 2.2 | L | rust,conf-native,conf-wrangler | no |
-| 2.10 | Client: signed reads and grant header | M2 | client | 2.4, 1.20 | M | rust,cli | no |
+| 2.10 | Client: signed reads and grant header | M2 | client | 2.4, 1.16 | M | rust,cli | no |
 | 2.11 | IssueObjectUrl and signed URL tokens (mint and verify) | M2 | core | 2.9 | M | rust,conf-native,golden | no |
 | 2.12 | ssh and enc: server-side grant registry (mkit-server grant register) | M2 | native | 2.6, 2.8 | M | rust,cli | no |
 | 2.13 | CLI: mkit grant create/add/list and the client grant store | M2 | cli | 2.5, 2.10 | L | rust,cli,docs | no |
 | 2.14 | CLI: mkit grant revoke and mkit epoch | M2 | cli | 2.13, 2.8 | M | rust,cli,docs | no |
 | 2.15 | Staging: enable M2 features and run M2 conformance (M2 exit) | M2 | ops | 2.7, 2.8, 2.9, 2.11, 2.12, 2.14 | S | ci-yaml,staging | yes |
-| 3.1 | Proto: AdmissionChallenge error detail and goldens | M3 | proto | S3, 1.20 | S | rust,proto,wasm,golden | no |
+| 3.1 | Proto: AdmissionChallenge error detail and goldens | M3 | proto | S3, 1.2 | S | rust,proto,wasm,golden | no |
 | 3.2 | Core: two-phase Admission (Allow/Challenge/Deny), 402 mapping, GetServerInfo fields | M3 | core | 3.1 | M | rust,wasm | no |
 | 3.3 | Core: outcome outbox, OutcomeSink, exactly-one-outcome, backpressure, read outcomes | M3 | core | 3.2 | L | rust,conf-native | no |
 | 3.4 | Native adapter: outbox delivery task, CORS/redaction, ssh/enc 'use mkit+https' | M3 | native | 3.3 | M | rust,conf-native | no |
@@ -192,13 +192,13 @@ Sizes: S ≲ 400, M 400–900, L 900–1500 changed lines.
 | 4.2 | mkit-core: repo-isolated delta-base seam and incremental push verification | M4 | core | P1 | L | rust,wasm,full | no |
 | 4.3 | mkit-core: build_disclosure over a generic object source | M4 | core | P1 | S | rust,wasm,golden | no |
 | 4.4 | Spec: indexed mode, D32 extraction, PendingVerification detail | M4 | spec | 3.6 | M | docs,proto,golden | yes |
-| 4.5 | Server: per-repo object index in repo index shards | M4 | core | 4.4, 1.20 | M | rust,conf-native | no |
+| 4.5 | Server: per-repo object index in repo index shards | M4 | core | 4.4, 1.23, 1.8 | M | rust,conf-native | no |
 | 4.6 | Worker: object index in RepoIndexShard DOs (limits, batching, alerts) | M4 | worker | 4.5 | S | rust,wasm,workers,conf-wrangler | no |
 | 4.7 | Server: indexed ingestion and pre-receive verification (native/inline) | M4 | core | 4.1, 4.2, 4.5 | L | rust,conf-native | no |
 | 4.8a | mkit-core: windowed, streaming pack reader | M4 | core | 4.1, 4.2 | M | rust,wasm | no |
 | 4.8 | Worker: async verification as checkpointed alarm slices | M4 | worker | 4.7, 4.6, 4.8a | L | rust,wasm,workers,conf-wrangler,staging | yes |
-| 4.9 | Client: PendingVerification polling | M4 | client | 4.4, 1.20 | M | rust,cli | no |
-| 4.10a | ContentIndex shards on Workers and holder sub-sharding | M4 | storage | 4.4, 1.20 | M | rust,wasm,workers,conf-wrangler | no |
+| 4.9 | Client: PendingVerification polling | M4 | client | 4.4, 1.16 | M | rust,cli | no |
+| 4.10a | ContentIndex shards on Workers and holder sub-sharding | M4 | storage | 4.4, 1.8 | M | rust,wasm,workers,conf-wrangler | no |
 | 4.10 | Server: D32 extraction into the global object CAS, holds and holders | M4 | core | 4.7, 4.10a | L | rust,conf-native | no |
 | 4.11 | Spec: HTTP serving and proofs (#1088) | M4 | spec | 4.4 | M | docs,golden | yes |
 | 4.12 | Server core: HTTP object serving (http-objects feature) | M4 | core | 4.11, 4.7, 4.10 | L | rust,wasm | no |
@@ -545,6 +545,7 @@ ContentIndex/export/hooks → M0-02b, unary pipeline → M0-05a, streaming/fault
 | R-115 | WP-5.1a-1 fix-2: reliance on existing members | Writes that newly rely on an existing member MUST durably clear its GC mark before commit; in opaque mode this covers every non-uploaded pack listed in new packmap nodes. WP-5.3a designs the detection mechanism and its cost, and escalates to the user if it adds more than one metadata read per newly referenced pack to the push path. | 5.1a-1, 5.3a |
 | R-116 | Post-restore index reconcile | Rebuilding index and membership rows from restored ref shards is required before GA; it runs after WP-1.28. Per-partition snapshots do not form one consistent cut, and relay rows already delivered before a target's snapshot are gone from the source, so an older target can retain missing rows after restore. | 1.28, 1.29b |
 | R-119 | WP-5.1c storage receipts | Receipts are evidence at issue time, not a promise, and attest the live committed advance only (user, 2026-09-28). Subjects are blake3-only (SPEC-ATTESTATIONS §4.2 amendment); WP-5.8 adds an additive blake3-only encode path to published `mkit-attest`, without a field-type change. Keys use `blake3:<64hex>` DSSE ids, a well-known key list kept forever, and compromise by removal. `AdmitAllow.external_ref` carries the implementer's reference. The advance batch has one op of headroom (`outbox.rs`), so WP-5.8 must budget the receipt row against the published pointer (WP-5.4). WP-5.12 stores receipts under `.mkit/receipts/`, not `.mkit/attestations/`. SSH and enc clients receive no storage receipts in M5; transport integration is a follow-up. | 5.1c, 5.8, 5.12 |
+| R-121 | M1 staging exit no longer gates M2–M4 code (user, 2026-09-28) | Proto, core and client WPs in M2–M4 depend on the specific M1 code WPs they build on, not on the M1 staging exit 1.20: 2.2 and 3.1 depend on 1.2 (M1 proto/codegen); 4.5 on 1.23 and 1.8; 4.10a on 1.8; 4.9 and 2.10 on 1.16. Staging and conformance WPs (1.20, 2.15, 3.13, 4.18 and each milestone exit) keep their staging edges, so staging-only problems surface at those exits. | 2.2, 2.10, 3.1, 4.5, 4.9, 4.10a |
 
 ---
 
