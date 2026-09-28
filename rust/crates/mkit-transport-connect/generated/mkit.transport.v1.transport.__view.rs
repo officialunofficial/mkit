@@ -2095,10 +2095,13 @@ impl ::serde::Serialize for UpdateRefRequestOwnedView {
         ::serde::Serialize::serialize(&self.0, __s)
     }
 }
-/// Empty body is success. CAS failure and validation failure are surfaced
-/// as Connect errors, not response fields — see SPEC-TRANSPORT-CONNECT §3.
 #[derive(Clone, Debug, Default)]
 pub struct UpdateRefResponseView<'a> {
+    /// DSSE storage-receipt envelope JSON; empty when receipts are disabled.
+    /// CAS and validation failures remain Connect errors (STC §3).
+    ///
+    /// Field 1: `receipt`
+    pub receipt: ::core::option::Option<&'a [u8]>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
 }
 impl<'a> ::buffa::MessageView<'a> for UpdateRefResponseView<'a> {
@@ -2129,6 +2132,13 @@ impl<'a> ::buffa::MessageView<'a> for UpdateRefResponseView<'a> {
         let view = self;
         let mut cur = cur;
         match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                view.receipt = Some(::buffa::types::borrow_bytes(&mut cur)?);
+            }
             _ => {
                 ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
                 let span_len = before_tag.len() - cur.len();
@@ -2151,6 +2161,7 @@ impl<'a> ::buffa::MessageView<'a> for UpdateRefResponseView<'a> {
         use ::buffa::alloc::string::ToString as _;
         let _ = __buffa_src;
         ::core::result::Result::Ok(super::super::UpdateRefResponse {
+            receipt: self.receipt.map(|b| (b).to_vec()),
             __buffa_unknown_fields: self.__buffa_unknown_fields.to_owned()?.into(),
             ..::core::default::Default::default()
         })
@@ -2162,6 +2173,9 @@ impl<'a> ::buffa::ViewEncode<'a> for UpdateRefResponseView<'a> {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         let mut size = 0u64;
+        if let Some(ref v) = self.receipt {
+            size += 1u64 + ::buffa::types::bytes_encoded_len(v) as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -2173,6 +2187,9 @@ impl<'a> ::buffa::ViewEncode<'a> for UpdateRefResponseView<'a> {
     ) {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
+        if let Some(ref v) = self.receipt {
+            ::buffa::types::put_shared_bytes_field(1u32, v, buf);
+        }
         self.__buffa_unknown_fields.write_to(buf);
     }
 }
@@ -2194,6 +2211,9 @@ impl<'__a> ::serde::Serialize for UpdateRefResponseView<'__a> {
     ) -> ::core::result::Result<__S::Ok, __S::Error> {
         use ::serde::ser::SerializeMap as _;
         let mut __map = __s.serialize_map(::core::option::Option::None)?;
+        if let ::core::option::Option::Some(__v) = self.receipt {
+            __map.serialize_entry("receipt", &::buffa::json_helpers::BytesJson(__v))?;
+        }
         __map.end()
     }
 }
@@ -2288,6 +2308,14 @@ impl UpdateRefResponseOwnedView {
     #[must_use]
     pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
         self.0.into_bytes()
+    }
+    /// DSSE storage-receipt envelope JSON; empty when receipts are disabled.
+    /// CAS and validation failures remain Connect errors (STC §3).
+    ///
+    /// Field 1: `receipt`
+    #[must_use]
+    pub fn receipt(&self) -> ::core::option::Option<&'_ [u8]> {
+        self.0.reborrow().receipt
     }
 }
 impl ::core::convert::From<::buffa::OwnedView<UpdateRefResponseView<'static>>>
@@ -2829,6 +2857,10 @@ pub struct AdvanceRefsResponseView<'a> {
     pub outcome: ::core::option::Option<
         ::buffa::EnumValue<super::super::AdvanceOutcome>,
     >,
+    /// DSSE storage-receipt envelope JSON; empty on conflict or when disabled.
+    ///
+    /// Field 2: `receipt`
+    pub receipt: ::core::option::Option<&'a [u8]>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
 }
 impl<'a> ::buffa::MessageView<'a> for AdvanceRefsResponseView<'a> {
@@ -2868,6 +2900,13 @@ impl<'a> ::buffa::MessageView<'a> for AdvanceRefsResponseView<'a> {
                     ::buffa::EnumValue::from(::buffa::types::decode_int32(&mut cur)?),
                 );
             }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                view.receipt = Some(::buffa::types::borrow_bytes(&mut cur)?);
+            }
             _ => {
                 ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
                 let span_len = before_tag.len() - cur.len();
@@ -2897,6 +2936,7 @@ impl<'a> ::buffa::MessageView<'a> for AdvanceRefsResponseView<'a> {
         let _ = __buffa_src;
         ::core::result::Result::Ok(super::super::AdvanceRefsResponse {
             outcome: self.outcome,
+            receipt: self.receipt.map(|b| (b).to_vec()),
             __buffa_unknown_fields: self.__buffa_unknown_fields.to_owned()?.into(),
             ..::core::default::Default::default()
         })
@@ -2911,6 +2951,9 @@ impl<'a> ::buffa::ViewEncode<'a> for AdvanceRefsResponseView<'a> {
         if let Some(ref v) = self.outcome {
             size += 1u64 + ::buffa::types::int32_encoded_len(v.to_i32()) as u64;
         }
+        if let Some(ref v) = self.receipt {
+            size += 1u64 + ::buffa::types::bytes_encoded_len(v) as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -2924,6 +2967,9 @@ impl<'a> ::buffa::ViewEncode<'a> for AdvanceRefsResponseView<'a> {
         use ::buffa::Enumeration as _;
         if let Some(ref v) = self.outcome {
             ::buffa::types::put_int32_field(1u32, v.to_i32(), buf);
+        }
+        if let Some(ref v) = self.receipt {
+            ::buffa::types::put_shared_bytes_field(2u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -2948,6 +2994,9 @@ impl<'__a> ::serde::Serialize for AdvanceRefsResponseView<'__a> {
         let mut __map = __s.serialize_map(::core::option::Option::None)?;
         if let ::core::option::Option::Some(ref __v) = self.outcome {
             __map.serialize_entry("outcome", __v)?;
+        }
+        if let ::core::option::Option::Some(__v) = self.receipt {
+            __map.serialize_entry("receipt", &::buffa::json_helpers::BytesJson(__v))?;
         }
         __map.end()
     }
@@ -3051,6 +3100,13 @@ impl AdvanceRefsResponseOwnedView {
     ) -> ::core::option::Option<::buffa::EnumValue<super::super::AdvanceOutcome>> {
         self.0.reborrow().outcome
     }
+    /// DSSE storage-receipt envelope JSON; empty on conflict or when disabled.
+    ///
+    /// Field 2: `receipt`
+    #[must_use]
+    pub fn receipt(&self) -> ::core::option::Option<&'_ [u8]> {
+        self.0.reborrow().receipt
+    }
 }
 impl ::core::convert::From<::buffa::OwnedView<AdvanceRefsResponseView<'static>>>
 for AdvanceRefsResponseOwnedView {
@@ -3075,6 +3131,1250 @@ impl ::buffa::HasMessageView for super::super::AdvanceRefsResponse {
     type ViewHandle = AdvanceRefsResponseOwnedView;
 }
 impl ::serde::Serialize for AdvanceRefsResponseOwnedView {
+    fn serialize<__S: ::serde::Serializer>(
+        &self,
+        __s: __S,
+    ) -> ::core::result::Result<__S::Ok, __S::Error> {
+        ::serde::Serialize::serialize(&self.0, __s)
+    }
+}
+/// A signed, writer-view read. Exactly one selector is required (STC §2.2).
+#[derive(Clone, Debug, Default)]
+pub struct GetReceiptRequestView<'a> {
+    pub selector: ::core::option::Option<
+        super::super::__buffa::view::oneof::get_receipt_request::Selector<'a>,
+    >,
+    pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+}
+impl<'a> ::buffa::MessageView<'a> for GetReceiptRequestView<'a> {
+    type Owned = super::super::GetReceiptRequest;
+    fn decode_view(buf: &'a [u8]) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        let __limit = ::core::cell::Cell::new(::buffa::DEFAULT_UNKNOWN_FIELD_LIMIT);
+        <Self as ::buffa::MessageView>::decode_view_ctx(
+            buf,
+            ::buffa::DecodeContext::new(::buffa::RECURSION_LIMIT, &__limit),
+        )
+    }
+    fn decode_view_with_ctx(
+        buf: &'a [u8],
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        <Self as ::buffa::MessageView>::decode_view_ctx(buf, ctx)
+    }
+    #[inline]
+    fn merge_view_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        cur: &'a [u8],
+        before_tag: &'a [u8],
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<&'a [u8], ::buffa::DecodeError> {
+        let _ = ctx;
+        #[allow(unused_variables)]
+        let view = self;
+        let mut cur = cur;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                let __sub_ctx = ctx.descend()?;
+                let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                if let Some(
+                    super::super::__buffa::view::oneof::get_receipt_request::Selector::Advance(
+                        ref mut existing,
+                    ),
+                ) = view.selector
+                {
+                    ::buffa::MessageView::merge_into_view(
+                        &mut **existing,
+                        sub,
+                        __sub_ctx,
+                    )?;
+                } else {
+                    view.selector = Some(
+                        super::super::__buffa::view::oneof::get_receipt_request::Selector::Advance(
+                            ::buffa::alloc::boxed::Box::new(
+                                <super::super::__buffa::view::AdvanceReceiptSelectorView as ::buffa::MessageView>::decode_view_ctx(
+                                    sub,
+                                    __sub_ctx,
+                                )?,
+                            ),
+                        ),
+                    );
+                }
+            }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                let __sub_ctx = ctx.descend()?;
+                let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                if let Some(
+                    super::super::__buffa::view::oneof::get_receipt_request::Selector::Lease(
+                        ref mut existing,
+                    ),
+                ) = view.selector
+                {
+                    ::buffa::MessageView::merge_into_view(
+                        &mut **existing,
+                        sub,
+                        __sub_ctx,
+                    )?;
+                } else {
+                    view.selector = Some(
+                        super::super::__buffa::view::oneof::get_receipt_request::Selector::Lease(
+                            ::buffa::alloc::boxed::Box::new(
+                                <super::super::__buffa::view::LeaseReceiptSelectorView as ::buffa::MessageView>::decode_view_ctx(
+                                    sub,
+                                    __sub_ctx,
+                                )?,
+                            ),
+                        ),
+                    );
+                }
+            }
+            _ => {
+                ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
+                let span_len = before_tag.len() - cur.len();
+                view.__buffa_unknown_fields.push_record(before_tag, span_len, ctx)?;
+            }
+        }
+        ::core::result::Result::Ok(cur)
+    }
+    fn to_owned_message(
+        &self,
+    ) -> ::core::result::Result<super::super::GetReceiptRequest, ::buffa::DecodeError> {
+        self.to_owned_from_source(None)
+    }
+    #[allow(clippy::useless_conversion, clippy::needless_update)]
+    fn to_owned_from_source(
+        &self,
+        __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
+    ) -> ::core::result::Result<super::super::GetReceiptRequest, ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::alloc::string::ToString as _;
+        let _ = __buffa_src;
+        ::core::result::Result::Ok(super::super::GetReceiptRequest {
+            selector: match self.selector.as_ref() {
+                ::core::option::Option::Some(v) => {
+                    ::core::option::Option::Some(
+                        match v {
+                            super::super::__buffa::view::oneof::get_receipt_request::Selector::Advance(
+                                v,
+                            ) => {
+                                super::super::__buffa::oneof::get_receipt_request::Selector::Advance(
+                                    ::buffa::alloc::boxed::Box::new(
+                                        v.to_owned_from_source(__buffa_src)?,
+                                    ),
+                                )
+                            }
+                            super::super::__buffa::view::oneof::get_receipt_request::Selector::Lease(
+                                v,
+                            ) => {
+                                super::super::__buffa::oneof::get_receipt_request::Selector::Lease(
+                                    ::buffa::alloc::boxed::Box::new(
+                                        v.to_owned_from_source(__buffa_src)?,
+                                    ),
+                                )
+                            }
+                        },
+                    )
+                }
+                ::core::option::Option::None => ::core::option::Option::None,
+            },
+            __buffa_unknown_fields: self.__buffa_unknown_fields.to_owned()?.into(),
+            ..::core::default::Default::default()
+        })
+    }
+}
+impl<'a> ::buffa::ViewEncode<'a> for GetReceiptRequestView<'a> {
+    #[allow(clippy::needless_borrow, clippy::let_and_return)]
+    fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        if let ::core::option::Option::Some(ref v) = self.selector {
+            match v {
+                super::super::__buffa::view::oneof::get_receipt_request::Selector::Advance(
+                    x,
+                ) => {
+                    let __slot = __cache.reserve();
+                    let inner = x.compute_size(__cache);
+                    __cache.set(__slot, inner);
+                    size
+                        += 1u64 + ::buffa::encoding::varint_len(inner as u64) as u64
+                            + inner as u64;
+                }
+                super::super::__buffa::view::oneof::get_receipt_request::Selector::Lease(
+                    x,
+                ) => {
+                    let __slot = __cache.reserve();
+                    let inner = x.compute_size(__cache);
+                    __cache.set(__slot, inner);
+                    size
+                        += 1u64 + ::buffa::encoding::varint_len(inner as u64) as u64
+                            + inner as u64;
+                }
+            }
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    #[allow(clippy::needless_borrow)]
+    fn write_to(
+        &self,
+        __cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let ::core::option::Option::Some(ref v) = self.selector {
+            match v {
+                super::super::__buffa::view::oneof::get_receipt_request::Selector::Advance(
+                    x,
+                ) => {
+                    ::buffa::types::put_len_delimited_header(
+                        1u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    x.write_to(__cache, buf);
+                }
+                super::super::__buffa::view::oneof::get_receipt_request::Selector::Lease(
+                    x,
+                ) => {
+                    ::buffa::types::put_len_delimited_header(
+                        2u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    x.write_to(__cache, buf);
+                }
+            }
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+}
+/// Serializes this view as protobuf JSON.
+///
+/// Implicit-presence fields with default values are omitted, `required`
+/// fields are always emitted, explicit-presence (`optional`) fields are
+/// emitted only when set, bytes fields are base64-encoded, and enum
+/// values are their proto name strings.
+///
+/// This impl uses `serialize_map(None)` because the number of emitted
+/// fields depends on default-omission rules; serializers that require
+/// known map lengths (e.g. `bincode`) will return a runtime error.
+/// Use the owned message type for those formats.
+impl<'__a> ::serde::Serialize for GetReceiptRequestView<'__a> {
+    fn serialize<__S: ::serde::Serializer>(
+        &self,
+        __s: __S,
+    ) -> ::core::result::Result<__S::Ok, __S::Error> {
+        use ::serde::ser::SerializeMap as _;
+        let mut __map = __s.serialize_map(::core::option::Option::None)?;
+        if let ::core::option::Option::Some(ref __ov) = self.selector {
+            match __ov {
+                super::super::__buffa::view::oneof::get_receipt_request::Selector::Advance(
+                    v,
+                ) => {
+                    __map.serialize_entry("advance", v)?;
+                }
+                super::super::__buffa::view::oneof::get_receipt_request::Selector::Lease(
+                    v,
+                ) => {
+                    __map.serialize_entry("lease", v)?;
+                }
+            }
+        }
+        __map.end()
+    }
+}
+impl<'a> ::buffa::MessageName for GetReceiptRequestView<'a> {
+    const PACKAGE: &'static str = "mkit.transport.v1";
+    const NAME: &'static str = "GetReceiptRequest";
+    const FULL_NAME: &'static str = "mkit.transport.v1.GetReceiptRequest";
+    const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.GetReceiptRequest";
+}
+::buffa::impl_default_view_instance!(GetReceiptRequestView);
+::buffa::impl_view_reborrow!(GetReceiptRequestView);
+/** Self-contained, `'static` owned view of a `GetReceiptRequest` message.
+
+ Wraps [`::buffa::OwnedView`]`<`[`GetReceiptRequestView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
+
+ Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`GetReceiptRequestView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.*/
+#[derive(Clone, Debug)]
+pub struct GetReceiptRequestOwnedView(
+    ::buffa::OwnedView<GetReceiptRequestView<'static>>,
+);
+impl GetReceiptRequestOwnedView {
+    /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
+    ///
+    /// The view borrows directly from the buffer's data; the buffer is
+    /// retained inside the returned handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the buffer contains invalid
+    /// protobuf data.
+    pub fn decode(
+        bytes: ::buffa::bytes::Bytes,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            GetReceiptRequestOwnedView(::buffa::OwnedView::decode(bytes)?),
+        )
+    }
+    /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
+    /// max message size).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the buffer is invalid or
+    /// exceeds the configured limits.
+    pub fn decode_with_options(
+        bytes: ::buffa::bytes::Bytes,
+        opts: &::buffa::DecodeOptions,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            GetReceiptRequestOwnedView(
+                ::buffa::OwnedView::decode_with_options(bytes, opts)?,
+            ),
+        )
+    }
+    /// Build from an owned message via an encode → decode round-trip.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError::MessageTooLarge`] if the
+    /// message's encoded size exceeds the 2 GiB protobuf limit, or
+    /// another [`::buffa::DecodeError`] if the re-encoded bytes are
+    /// somehow invalid (should not happen for well-formed messages).
+    pub fn from_owned(
+        msg: &super::super::GetReceiptRequest,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            GetReceiptRequestOwnedView(::buffa::OwnedView::from_owned(msg)?),
+        )
+    }
+    /// Borrow the full [`GetReceiptRequestView`] with its lifetime tied to `&self`.
+    #[must_use]
+    pub fn view(&self) -> &GetReceiptRequestView<'_> {
+        self.0.reborrow()
+    }
+    /// Convert to the owned message type.
+    ///
+    /// Infallible: this type's constructors wire-decode their
+    /// buffer, and a view produced by wire decoding always
+    /// converts. Delegates to [`::buffa::OwnedView::to_owned_message`],
+    /// whose contract also governs handles converted from a raw
+    /// [`::buffa::OwnedView`].
+    #[must_use]
+    pub fn to_owned_message(&self) -> super::super::GetReceiptRequest {
+        self.0.to_owned_message()
+    }
+    /// The underlying bytes buffer.
+    #[must_use]
+    pub fn bytes(&self) -> &::buffa::bytes::Bytes {
+        self.0.bytes()
+    }
+    /// Consume the handle, returning the underlying bytes buffer.
+    #[must_use]
+    pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
+        self.0.into_bytes()
+    }
+    /// Oneof `selector`.
+    #[must_use]
+    pub fn selector(
+        &self,
+    ) -> ::core::option::Option<
+        &super::super::__buffa::view::oneof::get_receipt_request::Selector<'_>,
+    > {
+        self.0.reborrow().selector.as_ref()
+    }
+}
+impl ::core::convert::From<::buffa::OwnedView<GetReceiptRequestView<'static>>>
+for GetReceiptRequestOwnedView {
+    fn from(inner: ::buffa::OwnedView<GetReceiptRequestView<'static>>) -> Self {
+        GetReceiptRequestOwnedView(inner)
+    }
+}
+impl ::core::convert::From<GetReceiptRequestOwnedView>
+for ::buffa::OwnedView<GetReceiptRequestView<'static>> {
+    fn from(wrapper: GetReceiptRequestOwnedView) -> Self {
+        wrapper.0
+    }
+}
+impl ::core::convert::AsRef<::buffa::OwnedView<GetReceiptRequestView<'static>>>
+for GetReceiptRequestOwnedView {
+    fn as_ref(&self) -> &::buffa::OwnedView<GetReceiptRequestView<'static>> {
+        &self.0
+    }
+}
+impl ::buffa::HasMessageView for super::super::GetReceiptRequest {
+    type View<'a> = GetReceiptRequestView<'a>;
+    type ViewHandle = GetReceiptRequestOwnedView;
+}
+impl ::serde::Serialize for GetReceiptRequestOwnedView {
+    fn serialize<__S: ::serde::Serializer>(
+        &self,
+        __s: __S,
+    ) -> ::core::result::Result<__S::Ok, __S::Error> {
+        ::serde::Serialize::serialize(&self.0, __s)
+    }
+}
+#[derive(Clone, Debug, Default)]
+pub struct AdvanceReceiptSelectorView<'a> {
+    /// full ref name
+    ///
+    /// Field 1: `ref`
+    pub r#ref: ::core::option::Option<&'a str>,
+    /// 0 selects the latest committed advance
+    ///
+    /// Field 2: `advance_sequence`
+    pub advance_sequence: ::core::option::Option<u64>,
+    pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+}
+impl<'a> ::buffa::MessageView<'a> for AdvanceReceiptSelectorView<'a> {
+    type Owned = super::super::AdvanceReceiptSelector;
+    fn decode_view(buf: &'a [u8]) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        let __limit = ::core::cell::Cell::new(::buffa::DEFAULT_UNKNOWN_FIELD_LIMIT);
+        <Self as ::buffa::MessageView>::decode_view_ctx(
+            buf,
+            ::buffa::DecodeContext::new(::buffa::RECURSION_LIMIT, &__limit),
+        )
+    }
+    fn decode_view_with_ctx(
+        buf: &'a [u8],
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        <Self as ::buffa::MessageView>::decode_view_ctx(buf, ctx)
+    }
+    #[inline]
+    fn merge_view_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        cur: &'a [u8],
+        before_tag: &'a [u8],
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<&'a [u8], ::buffa::DecodeError> {
+        let _ = ctx;
+        #[allow(unused_variables)]
+        let view = self;
+        let mut cur = cur;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                view.r#ref = Some(::buffa::types::borrow_str(&mut cur)?);
+            }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                view.advance_sequence = Some(::buffa::types::decode_uint64(&mut cur)?);
+            }
+            _ => {
+                ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
+                let span_len = before_tag.len() - cur.len();
+                view.__buffa_unknown_fields.push_record(before_tag, span_len, ctx)?;
+            }
+        }
+        ::core::result::Result::Ok(cur)
+    }
+    fn to_owned_message(
+        &self,
+    ) -> ::core::result::Result<
+        super::super::AdvanceReceiptSelector,
+        ::buffa::DecodeError,
+    > {
+        self.to_owned_from_source(None)
+    }
+    #[allow(clippy::useless_conversion, clippy::needless_update)]
+    fn to_owned_from_source(
+        &self,
+        __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
+    ) -> ::core::result::Result<
+        super::super::AdvanceReceiptSelector,
+        ::buffa::DecodeError,
+    > {
+        #[allow(unused_imports)]
+        use ::buffa::alloc::string::ToString as _;
+        let _ = __buffa_src;
+        ::core::result::Result::Ok(super::super::AdvanceReceiptSelector {
+            r#ref: self.r#ref.map(|s| s.to_string()),
+            advance_sequence: self.advance_sequence,
+            __buffa_unknown_fields: self.__buffa_unknown_fields.to_owned()?.into(),
+            ..::core::default::Default::default()
+        })
+    }
+}
+impl<'a> ::buffa::ViewEncode<'a> for AdvanceReceiptSelectorView<'a> {
+    #[allow(clippy::needless_borrow, clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        if let Some(ref v) = self.r#ref {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
+        if let Some(v) = self.advance_sequence {
+            size += 1u64 + ::buffa::types::uint64_encoded_len(v) as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    #[allow(clippy::needless_borrow)]
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let Some(ref v) = self.r#ref {
+            ::buffa::types::put_string_field(1u32, v, buf);
+        }
+        if let Some(v) = self.advance_sequence {
+            ::buffa::types::put_uint64_field(2u32, v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+}
+/// Serializes this view as protobuf JSON.
+///
+/// Implicit-presence fields with default values are omitted, `required`
+/// fields are always emitted, explicit-presence (`optional`) fields are
+/// emitted only when set, bytes fields are base64-encoded, and enum
+/// values are their proto name strings.
+///
+/// This impl uses `serialize_map(None)` because the number of emitted
+/// fields depends on default-omission rules; serializers that require
+/// known map lengths (e.g. `bincode`) will return a runtime error.
+/// Use the owned message type for those formats.
+impl<'__a> ::serde::Serialize for AdvanceReceiptSelectorView<'__a> {
+    fn serialize<__S: ::serde::Serializer>(
+        &self,
+        __s: __S,
+    ) -> ::core::result::Result<__S::Ok, __S::Error> {
+        use ::serde::ser::SerializeMap as _;
+        let mut __map = __s.serialize_map(::core::option::Option::None)?;
+        if let ::core::option::Option::Some(__v) = self.r#ref {
+            __map.serialize_entry("ref", __v)?;
+        }
+        if let ::core::option::Option::Some(__v) = self.advance_sequence {
+            __map
+                .serialize_entry(
+                    "advanceSequence",
+                    &::buffa::json_helpers::ProtoJson(&__v),
+                )?;
+        }
+        __map.end()
+    }
+}
+impl<'a> ::buffa::MessageName for AdvanceReceiptSelectorView<'a> {
+    const PACKAGE: &'static str = "mkit.transport.v1";
+    const NAME: &'static str = "AdvanceReceiptSelector";
+    const FULL_NAME: &'static str = "mkit.transport.v1.AdvanceReceiptSelector";
+    const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.AdvanceReceiptSelector";
+}
+::buffa::impl_default_view_instance!(AdvanceReceiptSelectorView);
+::buffa::impl_view_reborrow!(AdvanceReceiptSelectorView);
+/** Self-contained, `'static` owned view of a `AdvanceReceiptSelector` message.
+
+ Wraps [`::buffa::OwnedView`]`<`[`AdvanceReceiptSelectorView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
+
+ Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`AdvanceReceiptSelectorView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.*/
+#[derive(Clone, Debug)]
+pub struct AdvanceReceiptSelectorOwnedView(
+    ::buffa::OwnedView<AdvanceReceiptSelectorView<'static>>,
+);
+impl AdvanceReceiptSelectorOwnedView {
+    /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
+    ///
+    /// The view borrows directly from the buffer's data; the buffer is
+    /// retained inside the returned handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the buffer contains invalid
+    /// protobuf data.
+    pub fn decode(
+        bytes: ::buffa::bytes::Bytes,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            AdvanceReceiptSelectorOwnedView(::buffa::OwnedView::decode(bytes)?),
+        )
+    }
+    /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
+    /// max message size).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the buffer is invalid or
+    /// exceeds the configured limits.
+    pub fn decode_with_options(
+        bytes: ::buffa::bytes::Bytes,
+        opts: &::buffa::DecodeOptions,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            AdvanceReceiptSelectorOwnedView(
+                ::buffa::OwnedView::decode_with_options(bytes, opts)?,
+            ),
+        )
+    }
+    /// Build from an owned message via an encode → decode round-trip.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError::MessageTooLarge`] if the
+    /// message's encoded size exceeds the 2 GiB protobuf limit, or
+    /// another [`::buffa::DecodeError`] if the re-encoded bytes are
+    /// somehow invalid (should not happen for well-formed messages).
+    pub fn from_owned(
+        msg: &super::super::AdvanceReceiptSelector,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            AdvanceReceiptSelectorOwnedView(::buffa::OwnedView::from_owned(msg)?),
+        )
+    }
+    /// Borrow the full [`AdvanceReceiptSelectorView`] with its lifetime tied to `&self`.
+    #[must_use]
+    pub fn view(&self) -> &AdvanceReceiptSelectorView<'_> {
+        self.0.reborrow()
+    }
+    /// Convert to the owned message type.
+    ///
+    /// Infallible: this type's constructors wire-decode their
+    /// buffer, and a view produced by wire decoding always
+    /// converts. Delegates to [`::buffa::OwnedView::to_owned_message`],
+    /// whose contract also governs handles converted from a raw
+    /// [`::buffa::OwnedView`].
+    #[must_use]
+    pub fn to_owned_message(&self) -> super::super::AdvanceReceiptSelector {
+        self.0.to_owned_message()
+    }
+    /// The underlying bytes buffer.
+    #[must_use]
+    pub fn bytes(&self) -> &::buffa::bytes::Bytes {
+        self.0.bytes()
+    }
+    /// Consume the handle, returning the underlying bytes buffer.
+    #[must_use]
+    pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
+        self.0.into_bytes()
+    }
+    /// full ref name
+    ///
+    /// Field 1: `ref`
+    #[must_use]
+    pub fn r#ref(&self) -> ::core::option::Option<&'_ str> {
+        self.0.reborrow().r#ref
+    }
+    /// 0 selects the latest committed advance
+    ///
+    /// Field 2: `advance_sequence`
+    #[must_use]
+    pub fn advance_sequence(&self) -> ::core::option::Option<u64> {
+        self.0.reborrow().advance_sequence
+    }
+}
+impl ::core::convert::From<::buffa::OwnedView<AdvanceReceiptSelectorView<'static>>>
+for AdvanceReceiptSelectorOwnedView {
+    fn from(inner: ::buffa::OwnedView<AdvanceReceiptSelectorView<'static>>) -> Self {
+        AdvanceReceiptSelectorOwnedView(inner)
+    }
+}
+impl ::core::convert::From<AdvanceReceiptSelectorOwnedView>
+for ::buffa::OwnedView<AdvanceReceiptSelectorView<'static>> {
+    fn from(wrapper: AdvanceReceiptSelectorOwnedView) -> Self {
+        wrapper.0
+    }
+}
+impl ::core::convert::AsRef<::buffa::OwnedView<AdvanceReceiptSelectorView<'static>>>
+for AdvanceReceiptSelectorOwnedView {
+    fn as_ref(&self) -> &::buffa::OwnedView<AdvanceReceiptSelectorView<'static>> {
+        &self.0
+    }
+}
+impl ::buffa::HasMessageView for super::super::AdvanceReceiptSelector {
+    type View<'a> = AdvanceReceiptSelectorView<'a>;
+    type ViewHandle = AdvanceReceiptSelectorOwnedView;
+}
+impl ::serde::Serialize for AdvanceReceiptSelectorOwnedView {
+    fn serialize<__S: ::serde::Serializer>(
+        &self,
+        __s: __S,
+    ) -> ::core::result::Result<__S::Ok, __S::Error> {
+        ::serde::Serialize::serialize(&self.0, __s)
+    }
+}
+#[derive(Clone, Debug, Default)]
+pub struct LeaseReceiptSelectorView<'a> {
+    /// empty selects the repository or namespace lease scope
+    ///
+    /// Field 1: `ref`
+    pub r#ref: ::core::option::Option<&'a str>,
+    /// 0 selects the latest committed version
+    ///
+    /// Field 2: `lease_version`
+    pub lease_version: ::core::option::Option<u64>,
+    /// with empty ref, selects signed repository's namespace
+    ///
+    /// Field 3: `namespace_scope`
+    pub namespace_scope: ::core::option::Option<bool>,
+    pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+}
+impl<'a> ::buffa::MessageView<'a> for LeaseReceiptSelectorView<'a> {
+    type Owned = super::super::LeaseReceiptSelector;
+    fn decode_view(buf: &'a [u8]) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        let __limit = ::core::cell::Cell::new(::buffa::DEFAULT_UNKNOWN_FIELD_LIMIT);
+        <Self as ::buffa::MessageView>::decode_view_ctx(
+            buf,
+            ::buffa::DecodeContext::new(::buffa::RECURSION_LIMIT, &__limit),
+        )
+    }
+    fn decode_view_with_ctx(
+        buf: &'a [u8],
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        <Self as ::buffa::MessageView>::decode_view_ctx(buf, ctx)
+    }
+    #[inline]
+    fn merge_view_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        cur: &'a [u8],
+        before_tag: &'a [u8],
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<&'a [u8], ::buffa::DecodeError> {
+        let _ = ctx;
+        #[allow(unused_variables)]
+        let view = self;
+        let mut cur = cur;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                view.r#ref = Some(::buffa::types::borrow_str(&mut cur)?);
+            }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                view.lease_version = Some(::buffa::types::decode_uint64(&mut cur)?);
+            }
+            3u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                view.namespace_scope = Some(::buffa::types::decode_bool(&mut cur)?);
+            }
+            _ => {
+                ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
+                let span_len = before_tag.len() - cur.len();
+                view.__buffa_unknown_fields.push_record(before_tag, span_len, ctx)?;
+            }
+        }
+        ::core::result::Result::Ok(cur)
+    }
+    fn to_owned_message(
+        &self,
+    ) -> ::core::result::Result<
+        super::super::LeaseReceiptSelector,
+        ::buffa::DecodeError,
+    > {
+        self.to_owned_from_source(None)
+    }
+    #[allow(clippy::useless_conversion, clippy::needless_update)]
+    fn to_owned_from_source(
+        &self,
+        __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
+    ) -> ::core::result::Result<
+        super::super::LeaseReceiptSelector,
+        ::buffa::DecodeError,
+    > {
+        #[allow(unused_imports)]
+        use ::buffa::alloc::string::ToString as _;
+        let _ = __buffa_src;
+        ::core::result::Result::Ok(super::super::LeaseReceiptSelector {
+            r#ref: self.r#ref.map(|s| s.to_string()),
+            lease_version: self.lease_version,
+            namespace_scope: self.namespace_scope,
+            __buffa_unknown_fields: self.__buffa_unknown_fields.to_owned()?.into(),
+            ..::core::default::Default::default()
+        })
+    }
+}
+impl<'a> ::buffa::ViewEncode<'a> for LeaseReceiptSelectorView<'a> {
+    #[allow(clippy::needless_borrow, clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        if let Some(ref v) = self.r#ref {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
+        if let Some(v) = self.lease_version {
+            size += 1u64 + ::buffa::types::uint64_encoded_len(v) as u64;
+        }
+        if self.namespace_scope.is_some() {
+            size += 1u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    #[allow(clippy::needless_borrow)]
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let Some(ref v) = self.r#ref {
+            ::buffa::types::put_string_field(1u32, v, buf);
+        }
+        if let Some(v) = self.lease_version {
+            ::buffa::types::put_uint64_field(2u32, v, buf);
+        }
+        if let Some(v) = self.namespace_scope {
+            ::buffa::types::put_bool_field(3u32, v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+}
+/// Serializes this view as protobuf JSON.
+///
+/// Implicit-presence fields with default values are omitted, `required`
+/// fields are always emitted, explicit-presence (`optional`) fields are
+/// emitted only when set, bytes fields are base64-encoded, and enum
+/// values are their proto name strings.
+///
+/// This impl uses `serialize_map(None)` because the number of emitted
+/// fields depends on default-omission rules; serializers that require
+/// known map lengths (e.g. `bincode`) will return a runtime error.
+/// Use the owned message type for those formats.
+impl<'__a> ::serde::Serialize for LeaseReceiptSelectorView<'__a> {
+    fn serialize<__S: ::serde::Serializer>(
+        &self,
+        __s: __S,
+    ) -> ::core::result::Result<__S::Ok, __S::Error> {
+        use ::serde::ser::SerializeMap as _;
+        let mut __map = __s.serialize_map(::core::option::Option::None)?;
+        if let ::core::option::Option::Some(__v) = self.r#ref {
+            __map.serialize_entry("ref", __v)?;
+        }
+        if let ::core::option::Option::Some(__v) = self.lease_version {
+            __map
+                .serialize_entry(
+                    "leaseVersion",
+                    &::buffa::json_helpers::ProtoJson(&__v),
+                )?;
+        }
+        if let ::core::option::Option::Some(__v) = self.namespace_scope {
+            __map.serialize_entry("namespaceScope", &__v)?;
+        }
+        __map.end()
+    }
+}
+impl<'a> ::buffa::MessageName for LeaseReceiptSelectorView<'a> {
+    const PACKAGE: &'static str = "mkit.transport.v1";
+    const NAME: &'static str = "LeaseReceiptSelector";
+    const FULL_NAME: &'static str = "mkit.transport.v1.LeaseReceiptSelector";
+    const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.LeaseReceiptSelector";
+}
+::buffa::impl_default_view_instance!(LeaseReceiptSelectorView);
+::buffa::impl_view_reborrow!(LeaseReceiptSelectorView);
+/** Self-contained, `'static` owned view of a `LeaseReceiptSelector` message.
+
+ Wraps [`::buffa::OwnedView`]`<`[`LeaseReceiptSelectorView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
+
+ Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`LeaseReceiptSelectorView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.*/
+#[derive(Clone, Debug)]
+pub struct LeaseReceiptSelectorOwnedView(
+    ::buffa::OwnedView<LeaseReceiptSelectorView<'static>>,
+);
+impl LeaseReceiptSelectorOwnedView {
+    /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
+    ///
+    /// The view borrows directly from the buffer's data; the buffer is
+    /// retained inside the returned handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the buffer contains invalid
+    /// protobuf data.
+    pub fn decode(
+        bytes: ::buffa::bytes::Bytes,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            LeaseReceiptSelectorOwnedView(::buffa::OwnedView::decode(bytes)?),
+        )
+    }
+    /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
+    /// max message size).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the buffer is invalid or
+    /// exceeds the configured limits.
+    pub fn decode_with_options(
+        bytes: ::buffa::bytes::Bytes,
+        opts: &::buffa::DecodeOptions,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            LeaseReceiptSelectorOwnedView(
+                ::buffa::OwnedView::decode_with_options(bytes, opts)?,
+            ),
+        )
+    }
+    /// Build from an owned message via an encode → decode round-trip.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError::MessageTooLarge`] if the
+    /// message's encoded size exceeds the 2 GiB protobuf limit, or
+    /// another [`::buffa::DecodeError`] if the re-encoded bytes are
+    /// somehow invalid (should not happen for well-formed messages).
+    pub fn from_owned(
+        msg: &super::super::LeaseReceiptSelector,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            LeaseReceiptSelectorOwnedView(::buffa::OwnedView::from_owned(msg)?),
+        )
+    }
+    /// Borrow the full [`LeaseReceiptSelectorView`] with its lifetime tied to `&self`.
+    #[must_use]
+    pub fn view(&self) -> &LeaseReceiptSelectorView<'_> {
+        self.0.reborrow()
+    }
+    /// Convert to the owned message type.
+    ///
+    /// Infallible: this type's constructors wire-decode their
+    /// buffer, and a view produced by wire decoding always
+    /// converts. Delegates to [`::buffa::OwnedView::to_owned_message`],
+    /// whose contract also governs handles converted from a raw
+    /// [`::buffa::OwnedView`].
+    #[must_use]
+    pub fn to_owned_message(&self) -> super::super::LeaseReceiptSelector {
+        self.0.to_owned_message()
+    }
+    /// The underlying bytes buffer.
+    #[must_use]
+    pub fn bytes(&self) -> &::buffa::bytes::Bytes {
+        self.0.bytes()
+    }
+    /// Consume the handle, returning the underlying bytes buffer.
+    #[must_use]
+    pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
+        self.0.into_bytes()
+    }
+    /// empty selects the repository or namespace lease scope
+    ///
+    /// Field 1: `ref`
+    #[must_use]
+    pub fn r#ref(&self) -> ::core::option::Option<&'_ str> {
+        self.0.reborrow().r#ref
+    }
+    /// 0 selects the latest committed version
+    ///
+    /// Field 2: `lease_version`
+    #[must_use]
+    pub fn lease_version(&self) -> ::core::option::Option<u64> {
+        self.0.reborrow().lease_version
+    }
+    /// with empty ref, selects signed repository's namespace
+    ///
+    /// Field 3: `namespace_scope`
+    #[must_use]
+    pub fn namespace_scope(&self) -> ::core::option::Option<bool> {
+        self.0.reborrow().namespace_scope
+    }
+}
+impl ::core::convert::From<::buffa::OwnedView<LeaseReceiptSelectorView<'static>>>
+for LeaseReceiptSelectorOwnedView {
+    fn from(inner: ::buffa::OwnedView<LeaseReceiptSelectorView<'static>>) -> Self {
+        LeaseReceiptSelectorOwnedView(inner)
+    }
+}
+impl ::core::convert::From<LeaseReceiptSelectorOwnedView>
+for ::buffa::OwnedView<LeaseReceiptSelectorView<'static>> {
+    fn from(wrapper: LeaseReceiptSelectorOwnedView) -> Self {
+        wrapper.0
+    }
+}
+impl ::core::convert::AsRef<::buffa::OwnedView<LeaseReceiptSelectorView<'static>>>
+for LeaseReceiptSelectorOwnedView {
+    fn as_ref(&self) -> &::buffa::OwnedView<LeaseReceiptSelectorView<'static>> {
+        &self.0
+    }
+}
+impl ::buffa::HasMessageView for super::super::LeaseReceiptSelector {
+    type View<'a> = LeaseReceiptSelectorView<'a>;
+    type ViewHandle = LeaseReceiptSelectorOwnedView;
+}
+impl ::serde::Serialize for LeaseReceiptSelectorOwnedView {
+    fn serialize<__S: ::serde::Serializer>(
+        &self,
+        __s: __S,
+    ) -> ::core::result::Result<__S::Ok, __S::Error> {
+        ::serde::Serialize::serialize(&self.0, __s)
+    }
+}
+#[derive(Clone, Debug, Default)]
+pub struct GetReceiptResponseView<'a> {
+    /// complete DSSE storage-receipt envelope JSON
+    ///
+    /// Field 1: `receipt`
+    pub receipt: ::core::option::Option<&'a [u8]>,
+    pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+}
+impl<'a> ::buffa::MessageView<'a> for GetReceiptResponseView<'a> {
+    type Owned = super::super::GetReceiptResponse;
+    fn decode_view(buf: &'a [u8]) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        let __limit = ::core::cell::Cell::new(::buffa::DEFAULT_UNKNOWN_FIELD_LIMIT);
+        <Self as ::buffa::MessageView>::decode_view_ctx(
+            buf,
+            ::buffa::DecodeContext::new(::buffa::RECURSION_LIMIT, &__limit),
+        )
+    }
+    fn decode_view_with_ctx(
+        buf: &'a [u8],
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        <Self as ::buffa::MessageView>::decode_view_ctx(buf, ctx)
+    }
+    #[inline]
+    fn merge_view_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        cur: &'a [u8],
+        before_tag: &'a [u8],
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<&'a [u8], ::buffa::DecodeError> {
+        let _ = ctx;
+        #[allow(unused_variables)]
+        let view = self;
+        let mut cur = cur;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                view.receipt = Some(::buffa::types::borrow_bytes(&mut cur)?);
+            }
+            _ => {
+                ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
+                let span_len = before_tag.len() - cur.len();
+                view.__buffa_unknown_fields.push_record(before_tag, span_len, ctx)?;
+            }
+        }
+        ::core::result::Result::Ok(cur)
+    }
+    fn to_owned_message(
+        &self,
+    ) -> ::core::result::Result<super::super::GetReceiptResponse, ::buffa::DecodeError> {
+        self.to_owned_from_source(None)
+    }
+    #[allow(clippy::useless_conversion, clippy::needless_update)]
+    fn to_owned_from_source(
+        &self,
+        __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
+    ) -> ::core::result::Result<super::super::GetReceiptResponse, ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::alloc::string::ToString as _;
+        let _ = __buffa_src;
+        ::core::result::Result::Ok(super::super::GetReceiptResponse {
+            receipt: self.receipt.map(|b| (b).to_vec()),
+            __buffa_unknown_fields: self.__buffa_unknown_fields.to_owned()?.into(),
+            ..::core::default::Default::default()
+        })
+    }
+}
+impl<'a> ::buffa::ViewEncode<'a> for GetReceiptResponseView<'a> {
+    #[allow(clippy::needless_borrow, clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        if let Some(ref v) = self.receipt {
+            size += 1u64 + ::buffa::types::bytes_encoded_len(v) as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    #[allow(clippy::needless_borrow)]
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let Some(ref v) = self.receipt {
+            ::buffa::types::put_shared_bytes_field(1u32, v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+}
+/// Serializes this view as protobuf JSON.
+///
+/// Implicit-presence fields with default values are omitted, `required`
+/// fields are always emitted, explicit-presence (`optional`) fields are
+/// emitted only when set, bytes fields are base64-encoded, and enum
+/// values are their proto name strings.
+///
+/// This impl uses `serialize_map(None)` because the number of emitted
+/// fields depends on default-omission rules; serializers that require
+/// known map lengths (e.g. `bincode`) will return a runtime error.
+/// Use the owned message type for those formats.
+impl<'__a> ::serde::Serialize for GetReceiptResponseView<'__a> {
+    fn serialize<__S: ::serde::Serializer>(
+        &self,
+        __s: __S,
+    ) -> ::core::result::Result<__S::Ok, __S::Error> {
+        use ::serde::ser::SerializeMap as _;
+        let mut __map = __s.serialize_map(::core::option::Option::None)?;
+        if let ::core::option::Option::Some(__v) = self.receipt {
+            __map.serialize_entry("receipt", &::buffa::json_helpers::BytesJson(__v))?;
+        }
+        __map.end()
+    }
+}
+impl<'a> ::buffa::MessageName for GetReceiptResponseView<'a> {
+    const PACKAGE: &'static str = "mkit.transport.v1";
+    const NAME: &'static str = "GetReceiptResponse";
+    const FULL_NAME: &'static str = "mkit.transport.v1.GetReceiptResponse";
+    const TYPE_URL: &'static str = "type.googleapis.com/mkit.transport.v1.GetReceiptResponse";
+}
+::buffa::impl_default_view_instance!(GetReceiptResponseView);
+::buffa::impl_view_reborrow!(GetReceiptResponseView);
+/** Self-contained, `'static` owned view of a `GetReceiptResponse` message.
+
+ Wraps [`::buffa::OwnedView`]`<`[`GetReceiptResponseView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
+
+ Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`GetReceiptResponseView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.*/
+#[derive(Clone, Debug)]
+pub struct GetReceiptResponseOwnedView(
+    ::buffa::OwnedView<GetReceiptResponseView<'static>>,
+);
+impl GetReceiptResponseOwnedView {
+    /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
+    ///
+    /// The view borrows directly from the buffer's data; the buffer is
+    /// retained inside the returned handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the buffer contains invalid
+    /// protobuf data.
+    pub fn decode(
+        bytes: ::buffa::bytes::Bytes,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            GetReceiptResponseOwnedView(::buffa::OwnedView::decode(bytes)?),
+        )
+    }
+    /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
+    /// max message size).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the buffer is invalid or
+    /// exceeds the configured limits.
+    pub fn decode_with_options(
+        bytes: ::buffa::bytes::Bytes,
+        opts: &::buffa::DecodeOptions,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            GetReceiptResponseOwnedView(
+                ::buffa::OwnedView::decode_with_options(bytes, opts)?,
+            ),
+        )
+    }
+    /// Build from an owned message via an encode → decode round-trip.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError::MessageTooLarge`] if the
+    /// message's encoded size exceeds the 2 GiB protobuf limit, or
+    /// another [`::buffa::DecodeError`] if the re-encoded bytes are
+    /// somehow invalid (should not happen for well-formed messages).
+    pub fn from_owned(
+        msg: &super::super::GetReceiptResponse,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            GetReceiptResponseOwnedView(::buffa::OwnedView::from_owned(msg)?),
+        )
+    }
+    /// Borrow the full [`GetReceiptResponseView`] with its lifetime tied to `&self`.
+    #[must_use]
+    pub fn view(&self) -> &GetReceiptResponseView<'_> {
+        self.0.reborrow()
+    }
+    /// Convert to the owned message type.
+    ///
+    /// Infallible: this type's constructors wire-decode their
+    /// buffer, and a view produced by wire decoding always
+    /// converts. Delegates to [`::buffa::OwnedView::to_owned_message`],
+    /// whose contract also governs handles converted from a raw
+    /// [`::buffa::OwnedView`].
+    #[must_use]
+    pub fn to_owned_message(&self) -> super::super::GetReceiptResponse {
+        self.0.to_owned_message()
+    }
+    /// The underlying bytes buffer.
+    #[must_use]
+    pub fn bytes(&self) -> &::buffa::bytes::Bytes {
+        self.0.bytes()
+    }
+    /// Consume the handle, returning the underlying bytes buffer.
+    #[must_use]
+    pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
+        self.0.into_bytes()
+    }
+    /// complete DSSE storage-receipt envelope JSON
+    ///
+    /// Field 1: `receipt`
+    #[must_use]
+    pub fn receipt(&self) -> ::core::option::Option<&'_ [u8]> {
+        self.0.reborrow().receipt
+    }
+}
+impl ::core::convert::From<::buffa::OwnedView<GetReceiptResponseView<'static>>>
+for GetReceiptResponseOwnedView {
+    fn from(inner: ::buffa::OwnedView<GetReceiptResponseView<'static>>) -> Self {
+        GetReceiptResponseOwnedView(inner)
+    }
+}
+impl ::core::convert::From<GetReceiptResponseOwnedView>
+for ::buffa::OwnedView<GetReceiptResponseView<'static>> {
+    fn from(wrapper: GetReceiptResponseOwnedView) -> Self {
+        wrapper.0
+    }
+}
+impl ::core::convert::AsRef<::buffa::OwnedView<GetReceiptResponseView<'static>>>
+for GetReceiptResponseOwnedView {
+    fn as_ref(&self) -> &::buffa::OwnedView<GetReceiptResponseView<'static>> {
+        &self.0
+    }
+}
+impl ::buffa::HasMessageView for super::super::GetReceiptResponse {
+    type View<'a> = GetReceiptResponseView<'a>;
+    type ViewHandle = GetReceiptResponseOwnedView;
+}
+impl ::serde::Serialize for GetReceiptResponseOwnedView {
     fn serialize<__S: ::serde::Serializer>(
         &self,
         __s: __S,
@@ -5660,11 +6960,11 @@ pub struct GetServerInfoResponseView<'a> {
     ///
     /// Field 10: `admission`
     pub admission: ::core::option::Option<bool>,
-    /// Storage receipt signing key; empty until M5 (SPEC-TRANSPORT-CONNECT §2.1).
+    /// Raw 32-byte current receipt+notice public key; empty only if unconfigured.
     ///
     /// Field 11: `receipt_public_key`
     pub receipt_public_key: ::core::option::Option<&'a [u8]>,
-    /// Storage receipt key identifier; empty until M5 (SPEC-TRANSPORT-CONNECT §2.1).
+    /// 64-hex BLAKE3 of receipt_public_key; empty only if unconfigured.
     ///
     /// Field 12: `receipt_key_id`
     pub receipt_key_id: ::core::option::Option<&'a str>,
@@ -6304,14 +7604,14 @@ impl GetServerInfoResponseOwnedView {
     pub fn admission(&self) -> ::core::option::Option<bool> {
         self.0.reborrow().admission
     }
-    /// Storage receipt signing key; empty until M5 (SPEC-TRANSPORT-CONNECT §2.1).
+    /// Raw 32-byte current receipt+notice public key; empty only if unconfigured.
     ///
     /// Field 11: `receipt_public_key`
     #[must_use]
     pub fn receipt_public_key(&self) -> ::core::option::Option<&'_ [u8]> {
         self.0.reborrow().receipt_public_key
     }
-    /// Storage receipt key identifier; empty until M5 (SPEC-TRANSPORT-CONNECT §2.1).
+    /// 64-hex BLAKE3 of receipt_public_key; empty only if unconfigured.
     ///
     /// Field 12: `receipt_key_id`
     #[must_use]

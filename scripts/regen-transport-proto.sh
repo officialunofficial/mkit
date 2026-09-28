@@ -39,13 +39,15 @@ cd "$(dirname "$0")/.."
 refresh() {
     local label="$1" gen_dir="$2" build_glob="$3" marker="$4"
     local out
-    out=$(ls -dt $build_glob 2>/dev/null | while read -r d; do
-        if [ -f "$d/$marker" ]; then echo "$d"; break; fi
-    done)
+    # Reusing an OUT_DIR updates the marker, not necessarily its directory
+    # mtime. Select by marker mtime so an older directory with fresh codegen
+    # wins over a newer directory containing stale output.
+    out=$(ls -t $build_glob/$marker 2>/dev/null | head -n 1)
     if [ -z "${out}" ]; then
         echo "error: no codegen output found for $label under: $build_glob" >&2
         exit 1
     fi
+    out="${out%/$marker}"
     rm -f "$gen_dir"/*.rs
     mkdir -p "$gen_dir"
     cp "$out"/*.rs "$gen_dir/"
