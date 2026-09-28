@@ -124,7 +124,7 @@ pub struct StatObservation {
 ///
 /// # Errors
 /// See [`WorktreeError`].
-pub fn build_tree<S: ObjectSink + ?Sized>(sink: &S, dir: &Path) -> WorktreeResult<Hash> {
+pub fn build_tree<S: ObjectSink + Sync + ?Sized>(sink: &S, dir: &Path) -> WorktreeResult<Hash> {
     build_tree_filtered(sink, dir, None)
 }
 
@@ -136,7 +136,7 @@ pub fn build_tree<S: ObjectSink + ?Sized>(sink: &S, dir: &Path) -> WorktreeResul
 ///
 /// # Errors
 /// See [`WorktreeError`].
-pub fn build_tree_filtered<S: ObjectSink + ?Sized>(
+pub fn build_tree_filtered<S: ObjectSink + Sync + ?Sized>(
     sink: &S,
     dir: &Path,
     index: Option<&Index>,
@@ -151,7 +151,7 @@ pub fn build_tree_filtered<S: ObjectSink + ?Sized>(
 ///
 /// # Errors
 /// See [`WorktreeError`].
-pub fn build_tree_filtered_observed<S: ObjectSink + ?Sized>(
+pub fn build_tree_filtered_observed<S: ObjectSink + Sync + ?Sized>(
     sink: &S,
     dir: &Path,
     index: Option<&Index>,
@@ -166,9 +166,9 @@ pub fn build_tree_filtered_observed<S: ObjectSink + ?Sized>(
 ///
 /// # Errors
 /// See [`WorktreeError`]; unreadable staged content is an error.
-pub fn build_tree_filtered_observed_with_source<S: ObjectSink + ?Sized>(
+pub fn build_tree_filtered_observed_with_source<S: ObjectSink + Sync + ?Sized>(
     sink: &S,
-    source: &dyn crate::store::ObjectSource,
+    source: &(dyn crate::store::ObjectSource + Sync),
     dir: &Path,
     index: Option<&Index>,
     observations: &mut Vec<StatObservation>,
@@ -176,9 +176,9 @@ pub fn build_tree_filtered_observed_with_source<S: ObjectSink + ?Sized>(
     build_tree_observed_impl(sink, Some(source), dir, index, observations)
 }
 
-fn build_tree_observed_impl<S: ObjectSink + ?Sized>(
+fn build_tree_observed_impl<S: ObjectSink + Sync + ?Sized>(
     sink: &S,
-    source: Option<&dyn crate::store::ObjectSource>,
+    source: Option<&(dyn crate::store::ObjectSource + Sync)>,
     dir: &Path,
     index: Option<&Index>,
     observations: &mut Vec<StatObservation>,
@@ -221,7 +221,7 @@ fn build_tree_observed_impl<S: ObjectSink + ?Sized>(
 }
 
 fn retained_content_hash(
-    source: Option<&dyn crate::store::ObjectSource>,
+    source: Option<&(dyn crate::store::ObjectSource + Sync)>,
     indexed: Option<&crate::index::IndexEntry>,
     fresh: Hash,
 ) -> WorktreeResult<Hash> {
@@ -240,9 +240,9 @@ fn retained_content_hash(
 /// ancestor directory is ignored (git "everything under an excluded dir is
 /// excluded"); `index` is the tracked set used to exempt tracked content.
 #[allow(clippy::too_many_arguments)]
-fn build_tree_inner<S: ObjectSink + ?Sized>(
+fn build_tree_inner<S: ObjectSink + Sync + ?Sized>(
     sink: &S,
-    source: Option<&dyn crate::store::ObjectSource>,
+    source: Option<&(dyn crate::store::ObjectSource + Sync)>,
     dir: &Path,
     rel_dir: &str,
     ignores: &IgnoreList,
@@ -252,6 +252,10 @@ fn build_tree_inner<S: ObjectSink + ?Sized>(
     observations: &mut Vec<StatObservation>,
 ) -> WorktreeResult<Hash> {
     let mut entries: Vec<TreeEntry> = Vec::new();
+    // Cache-miss regular files collected during the walk below, hashed
+    // together (sequentially or fanned out) once the walk finishes —
+    // see `hash_pending_files`.
+    let mut misses: Vec<PendingFileHash<'_>> = Vec::new();
 
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
@@ -293,35 +297,29 @@ fn build_tree_inner<S: ObjectSink + ?Sized>(
             // `add` time, so the tree reference stays resolvable.
             let indexed = by_path.get(rel_path.as_str()).copied();
             let cached = indexed.filter(|e| stat_matches(e, &meta));
-            let (object_hash, mode) = if let Some(e) = cached {
-                (e.object_hash, entry_mode_from_file_metadata(&meta))
+            if let Some(e) = cached {
+                entries.push(TreeEntry {
+                    name: name_str.into_bytes(),
+                    mode: entry_mode_from_file_metadata(&meta),
+                    object_hash: e.object_hash,
+                });
             } else {
-                let (mut h, opened_meta) = hash_file_with_metadata(sink, &entry.path())?;
-                h = retained_content_hash(source, indexed, h)?;
-                // Cache miss that re-hashed back to the staged hash:
-                // report the observation (stat captured from the opened
-                // fd BEFORE the content read) so callers can heal the
-                // racy-smudged cache soundly.
-                if let Some(e) = indexed
-                    && e.object_hash == h
-                {
-                    let (mtime_ns, size, ino, ctime_ns) = stat_cache_fields(&opened_meta);
-                    observations.push(StatObservation {
-                        path: rel_path.clone(),
-                        object_hash: h,
-                        mtime_ns,
-                        size,
-                        ino,
-                        ctime_ns,
-                    });
-                }
-                (h, entry_mode_from_file_metadata(&opened_meta))
-            };
-            entries.push(TreeEntry {
-                name: name_str.into_bytes(),
-                mode,
-                object_hash,
-            });
+                // Placeholder, overwritten by `hash_pending_files` below
+                // once every miss in this directory has been hashed —
+                // its slot is this entry's fixed position in `entries`.
+                let slot = entries.len();
+                entries.push(TreeEntry {
+                    name: name_str.into_bytes(),
+                    mode: EntryMode::Blob,
+                    object_hash: crate::hash::ZERO,
+                });
+                misses.push(PendingFileHash {
+                    slot,
+                    abs_path: entry.path(),
+                    rel_path,
+                    indexed,
+                });
+            }
         } else if meta.file_type().is_dir() {
             // A directory on disk at a path tracked as a *file* shadows that
             // tracked entry. git reports only the tracked-side deletion and
@@ -369,10 +367,138 @@ fn build_tree_inner<S: ObjectSink + ?Sized>(
         }
     }
 
+    if !misses.is_empty() {
+        hash_pending_files(sink, source, &misses, &mut entries, observations)?;
+    }
+
     entries.sort_by(|a, b| a.name.cmp(&b.name));
     let tree = Object::Tree(Tree { entries });
     let bytes = serialize::serialize(&tree)?;
     Ok(sink.put(&bytes)?)
+}
+
+/// One cache-miss regular file discovered by [`build_tree_inner`]'s walk
+/// (its stat cache was absent or racy-smudged): still needs
+/// [`hash_file_with_metadata`], off the main walk thread once there's
+/// enough of them in one directory to amortize the dispatch. `'e`
+/// borrows from the same [`Index`] `by_path` does.
+struct PendingFileHash<'e> {
+    /// This miss's fixed position in `build_tree_inner`'s `entries` —
+    /// stable regardless of how the batch below is chunked or ordered,
+    /// so results always land back on the right entry.
+    slot: usize,
+    abs_path: PathBuf,
+    rel_path: String,
+    indexed: Option<&'e crate::index::IndexEntry>,
+}
+
+/// Below this many cache-miss files per available thread, hashing them
+/// in [`build_tree_inner`]'s own loop wins over thread-spawn overhead —
+/// same crossover shape as [`probe_staged_objects`]. The value borrows
+/// `mkit-cli`'s `commands::add::HASH_FANOUT_FILES_PER_THREAD`
+/// (measured on PR #951's Slack thread): both fan out the exact same
+/// per-item cost, `hash_file_with_metadata`'s open+read+BLAKE3, so the
+/// same crossover point applies here. `worktree_walk_fanout` is this
+/// path's own regression guard, not a from-scratch tuning.
+#[cfg(not(target_arch = "wasm32"))]
+const FILE_HASH_MISSES_PER_THREAD: usize = 8;
+
+/// Hash every cache-miss file in `misses` (see [`PendingFileHash`]),
+/// filling in `entries[slot]` and pushing a [`StatObservation`] for each
+/// one whose fresh hash proves the stat cache healable. Sequential
+/// below a thread-count-scaled threshold, fanned out across scoped
+/// worker threads at or above it — [`probe_staged_objects_parallel`]'s
+/// shape (`mkit-core` stays dependency-neutral and wasm-clean, so this
+/// uses `std::thread::scope` directly rather than rayon). Every file's
+/// hash result is written back to `entries`/`observations` in `misses`'
+/// original directory-walk order regardless of which thread computed
+/// it, so the output is byte-identical to the old fully-sequential
+/// loop; only which of several simultaneous I/O errors is reported can
+/// vary between runs — the same accepted nondeterminism
+/// `probe_staged_objects_parallel` already has.
+fn hash_pending_files<S: ObjectSink + Sync + ?Sized>(
+    sink: &S,
+    source: Option<&(dyn crate::store::ObjectSource + Sync)>,
+    misses: &[PendingFileHash<'_>],
+    entries: &mut [TreeEntry],
+    observations: &mut Vec<StatObservation>,
+) -> WorktreeResult<()> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let threads = available_threads();
+        if threads > 1 && misses.len() >= FILE_HASH_MISSES_PER_THREAD.saturating_mul(threads) {
+            let results = hash_pending_files_parallel(sink, source, misses, threads)?;
+            apply_hash_results(misses, results, entries, observations);
+            return Ok(());
+        }
+    }
+    let results = misses
+        .iter()
+        .map(|m| hash_one_pending_file(sink, source, m))
+        .collect::<WorktreeResult<Vec<_>>>()?;
+    apply_hash_results(misses, results, entries, observations);
+    Ok(())
+}
+
+/// Hash one [`PendingFileHash`]: pure function of `sink`/`source` and
+/// the miss itself, safe to call concurrently across a batch — shared
+/// by [`hash_pending_files`]'s sequential loop and
+/// [`hash_pending_files_parallel`]'s worker threads.
+fn hash_one_pending_file<S: ObjectSink + ?Sized>(
+    sink: &S,
+    source: Option<&(dyn crate::store::ObjectSource + Sync)>,
+    m: &PendingFileHash<'_>,
+) -> WorktreeResult<(Hash, EntryMode, Option<StatObservation>)> {
+    let (mut h, opened_meta) = hash_file_with_metadata(sink, &m.abs_path)?;
+    h = retained_content_hash(source, m.indexed, h)?;
+    // Cache miss that re-hashed back to the staged hash: report the
+    // observation (stat captured from the opened fd BEFORE the content
+    // read) so callers can heal the racy-smudged cache soundly.
+    let observation = if let Some(e) = m.indexed
+        && e.object_hash == h
+    {
+        let (mtime_ns, size, ino, ctime_ns) = stat_cache_fields(&opened_meta);
+        Some(StatObservation {
+            path: m.rel_path.clone(),
+            object_hash: h,
+            mtime_ns,
+            size,
+            ino,
+            ctime_ns,
+        })
+    } else {
+        None
+    };
+    Ok((h, entry_mode_from_file_metadata(&opened_meta), observation))
+}
+
+/// Parallel branch of [`hash_pending_files`]: [`chunked_scoped_map`]
+/// over `misses`, hashing each one via [`hash_one_pending_file`].
+#[cfg(not(target_arch = "wasm32"))]
+fn hash_pending_files_parallel<S: ObjectSink + Sync + ?Sized>(
+    sink: &S,
+    source: Option<&(dyn crate::store::ObjectSource + Sync)>,
+    misses: &[PendingFileHash<'_>],
+    threads: usize,
+) -> WorktreeResult<Vec<(Hash, EntryMode, Option<StatObservation>)>> {
+    chunked_scoped_map(misses, threads, |m| hash_one_pending_file(sink, source, m))
+}
+
+/// Write [`hash_pending_files`]'s per-miss results back into `entries`
+/// and `observations`, in `misses`' original directory-walk order.
+fn apply_hash_results(
+    misses: &[PendingFileHash<'_>],
+    results: Vec<(Hash, EntryMode, Option<StatObservation>)>,
+    entries: &mut [TreeEntry],
+    observations: &mut Vec<StatObservation>,
+) {
+    for (m, (hash, mode, observation)) in misses.iter().zip(results) {
+        entries[m.slot].object_hash = hash;
+        entries[m.slot].mode = mode;
+        if let Some(obs) = observation {
+            observations.push(obs);
+        }
+    }
 }
 
 /// Build a tree object from an [`Index`] (the staging area).
@@ -623,6 +749,102 @@ pub fn build_tree_from_index_with<S: ObjectSink + ?Sized>(
     write_node(sink, &root)
 }
 
+/// `std::thread::available_parallelism()`, cached process-wide — the
+/// core count never changes during a process's lifetime, so every
+/// native fan-out crossover check in this module (there are several,
+/// and [`build_tree_inner`]'s recurses once per directory) shares one
+/// syscall instead of paying it again at every call site/recursion.
+#[cfg(not(target_arch = "wasm32"))]
+fn available_threads() -> usize {
+    static THREADS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *THREADS
+        .get_or_init(|| std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get))
+}
+
+/// Shared chunk+scoped-thread+join scaffolding behind this module's two
+/// order-preserving, short-circuit-on-first-error native fan-outs
+/// ([`probe_staged_objects_parallel`], [`hash_pending_files_parallel`]):
+/// split `items` into `threads` contiguous chunks, run each chunk's
+/// items through `f` sequentially on its own scoped thread, and join.
+/// `std::thread::scope` (not a persistent pool) keeps `mkit-core`
+/// dependency-neutral and wasm-clean.
+///
+/// (`pack::stage_raw_entries_parallel` looks similar but isn't folded
+/// in here: it *defers* rather than short-circuits on an item error, via
+/// a `first_failure` atomic shared across every chunk so a later pack
+/// position can still be skipped once an earlier one fails — genuinely
+/// different result semantics from this helper's per-chunk
+/// short-circuit, not just a different call shape.)
+///
+/// Every item's `f` output lands in the returned `Vec` at that item's
+/// original index in `items`, regardless of which thread computed it.
+/// A chunk stops calling `f` on its own remaining items as soon as one
+/// of them errors, but a concurrently-running chunk is not signalled to
+/// stop early; on any error, which chunk's is the one returned is
+/// unspecified — the same accepted nondeterminism
+/// `probe_staged_objects_parallel` had before this helper existed.
+///
+/// # Panics
+/// Propagates a worker thread's panic once `std::thread::scope` joins
+/// it, rather than swallowing it.
+#[cfg(not(target_arch = "wasm32"))]
+fn chunked_scoped_map<T, U, E>(
+    items: &[T],
+    threads: usize,
+    f: impl Fn(&T) -> Result<U, E> + Sync,
+) -> Result<Vec<U>, E>
+where
+    T: Sync,
+    U: Send,
+    E: Send,
+{
+    let chunk_size = items.len().div_ceil(threads).max(1);
+    let mut out: Vec<Option<U>> = (0..items.len()).map(|_| None).collect();
+    let mut first_err: Option<E> = None;
+
+    std::thread::scope(|scope| {
+        let f = &f;
+        let handles: Vec<_> = items
+            .chunks(chunk_size)
+            .enumerate()
+            .map(|(chunk_idx, chunk)| {
+                let base = chunk_idx * chunk_size;
+                scope.spawn(move || {
+                    let mut results = Vec::with_capacity(chunk.len());
+                    for it in chunk {
+                        match f(it) {
+                            Ok(u) => results.push(u),
+                            Err(e) => return (base, results, Some(e)),
+                        }
+                    }
+                    (base, results, None)
+                })
+            })
+            .collect();
+        for handle in handles {
+            let (base, results, err) = handle
+                .join()
+                .expect("chunked fan-out worker thread panicked");
+            for (i, u) in results.into_iter().enumerate() {
+                out[base + i] = Some(u);
+            }
+            if let Some(e) = err
+                && first_err.is_none()
+            {
+                first_err = Some(e);
+            }
+        }
+    });
+
+    match first_err {
+        Some(e) => Err(e),
+        None => Ok(out
+            .into_iter()
+            .map(|o| o.expect("every slot filled when no error was reported"))
+            .collect()),
+    }
+}
+
 /// Staged-object check for every `(path, mode, hash)` triple in
 /// `entries`, in order — [`build_tree_from_index_with`]'s batched pass-2
 /// step. Below a small-batch threshold this runs a plain sequential
@@ -646,7 +868,7 @@ fn probe_staged_objects(
         // `pack::stage_raw_entries`, tuned here by the
         // `status_snapshot` bench.
         const ENTRIES_PER_THREAD: usize = 32;
-        let threads = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        let threads = available_threads();
         if threads > 1 && entries.len() >= ENTRIES_PER_THREAD.saturating_mul(threads) {
             return probe_staged_objects_parallel(store, entries, verify, threads);
         }
@@ -656,11 +878,17 @@ fn probe_staged_objects(
     })
 }
 
-/// Parallel branch of [`probe_staged_objects`]: split `entries` into
-/// `threads` contiguous chunks and check each chunk sequentially on its
-/// own scoped thread. `std::thread::scope` (not a persistent pool)
-/// mirrors `pack::stage_raw_entries_parallel`'s choice for the same
-/// reason: `mkit-core` stays dependency-neutral and wasm-clean.
+/// Parallel branch of [`probe_staged_objects`]: [`chunked_scoped_map`]
+/// over `entries`, checking each one via [`check_one_staged_object`] and
+/// discarding its (unit) results — only whether any entry errored
+/// matters here.
+///
+/// On an index with more than one entry pointing at a missing,
+/// malformed, or wrong-shape object, the specific error surfaced here
+/// depends on chunk/thread scheduling, not index position —
+/// `chunked_scoped_map`'s accepted nondeterminism. The tree build is
+/// rejected either way; only which error is reported can vary between
+/// runs.
 #[cfg(not(target_arch = "wasm32"))]
 fn probe_staged_objects_parallel(
     store: &ObjectStore,
@@ -668,40 +896,10 @@ fn probe_staged_objects_parallel(
     verify: bool,
     threads: usize,
 ) -> WorktreeResult<()> {
-    let chunk_size = entries.len().div_ceil(threads).max(1);
-    // On an index with more than one entry pointing at a missing,
-    // malformed, or wrong-shape object, the specific error surfaced
-    // here depends on chunk/thread scheduling, not index position —
-    // the same accepted nondeterminism as `mkit-cli`'s
-    // `try_map_seq_or_par` fan-outs and `pack::stage_raw_entries_parallel`.
-    // The tree build is rejected either way; only which error is
-    // reported can vary between runs.
-    let mut first_err: Option<WorktreeError> = None;
-    std::thread::scope(|scope| {
-        let handles: Vec<_> = entries
-            .chunks(chunk_size)
-            .map(|chunk| {
-                scope.spawn(move || {
-                    chunk.iter().find_map(|&(path, mode, hash)| {
-                        check_one_staged_object(store, path, mode, hash, verify).err()
-                    })
-                })
-            })
-            .collect();
-        for handle in handles {
-            if let Some(e) = handle
-                .join()
-                .expect("staged-object check worker thread panicked")
-                && first_err.is_none()
-            {
-                first_err = Some(e);
-            }
-        }
-    });
-    match first_err {
-        Some(e) => Err(e),
-        None => Ok(()),
-    }
+    chunked_scoped_map(entries, threads, |&(path, mode, hash)| {
+        check_one_staged_object(store, path, mode, hash, verify)
+    })
+    .map(|_: Vec<()>| ())
 }
 
 // Pure per-entry step shared by both branches of
@@ -2784,6 +2982,67 @@ mod tests {
         fs::write(f2_dir.path().join("locked.txt"), b"cached content").unwrap();
         let plain = build_tree(&store2, f2_dir.path()).unwrap();
         assert_eq!(plain, tree_h, "cache hit must not change tree hashes");
+    }
+
+    /// `hash_pending_files_parallel`'s fan-out branch only fires once a
+    /// single directory has at least `FILE_HASH_MISSES_PER_THREAD *`
+    /// the machine's thread count worth of cache-miss files — every
+    /// other `build_tree` test in this module stays well under that, so
+    /// none of them ever exercise it. 4096 distinct-content files is
+    /// comfortably above that threshold on any real machine (including
+    /// CI runners with far more than 4 cores), forcing the parallel
+    /// branch to run rather than just its sequential fallback.
+    ///
+    /// Every file's expected content is unique and includes its index,
+    /// so a slot/result misalignment in the parallel path (a chunk's
+    /// results landing at the wrong base offset, or `entries`/`misses`
+    /// getting out of step) would surface here as an entry whose hash
+    /// belongs to a different file than its name says.
+    #[test]
+    fn build_tree_parallel_fanout_assigns_each_hash_to_the_right_file() {
+        const N: usize = 4096;
+
+        let (_sd, store) = fresh_store();
+        let work = TempDir::new().unwrap();
+        for i in 0..N {
+            fs::write(
+                work.path().join(format!("f{i:04}.txt")),
+                format!("content {i}"),
+            )
+            .unwrap();
+        }
+
+        // No index passed: every file is untracked, so every one is a
+        // cache miss (never a stat-match short-circuit) regardless of
+        // stat-cache behavior.
+        let h = build_tree(&store, work.path()).unwrap();
+        let Object::Tree(t) = store.read_object(&h).unwrap() else {
+            panic!("expected tree");
+        };
+        assert_eq!(t.entries.len(), N);
+
+        let mut seen_hashes = std::collections::HashSet::with_capacity(N);
+        for (i, entry) in t.entries.iter().enumerate() {
+            // Tree entries are sorted by name, and zero-padded decimal
+            // names sort in the same order as their numeric index.
+            let expected_name = format!("f{i:04}.txt");
+            assert_eq!(
+                entry.name,
+                expected_name.as_bytes(),
+                "entry {i} out of order"
+            );
+
+            let expected_content = format!("content {i}");
+            let expected_hash = hash_file_object(expected_content.as_bytes()).unwrap();
+            assert_eq!(
+                entry.object_hash, expected_hash,
+                "entry {i} ({expected_name}) has the wrong hash — parallel slot misalignment?"
+            );
+            assert!(
+                seen_hashes.insert(entry.object_hash),
+                "entry {i} repeats another entry's hash (or the ZERO placeholder)"
+            );
+        }
     }
 
     /// Replace-by-rename with preserved mtime+size must be caught by
