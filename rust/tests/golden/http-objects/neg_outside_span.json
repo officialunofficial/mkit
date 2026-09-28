@@ -1,0 +1,29 @@
+{
+  "blake3": "fee8a78a431a00030889eea99bbd1b5592f6915317a2aa28b424f30c01096860",
+  "commit": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
+  "expect": {
+    "accept": false,
+    "expand_to": null,
+    "reject_reason": "span_range_outside"
+  },
+  "name": "neg_outside_span",
+  "recipe": {
+    "segments": [
+      {
+        "length": 44,
+        "offset": 0,
+        "source": "span_first_zero.bin"
+      },
+      {
+        "hex": "5b"
+      },
+      {
+        "length": 148097,
+        "offset": 45,
+        "source": "span_two_chunks.bin"
+      }
+    ]
+  },
+  "schema_version": 1,
+  "size": 148142
+}

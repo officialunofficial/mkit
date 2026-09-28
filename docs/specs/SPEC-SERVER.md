@@ -169,6 +169,22 @@ The interval is the one STC §7.1 requires, bounded by 300,000 ms.
 This rule covers a crash between recording the pending reservation
 and recording either a successful apply result or an abort.
 
+For an admitted HTTP read with a reservation id, the server MUST durably
+record a pending read before sending the first response byte. Its abandonment
+deadline MUST be a deployment-configured bound measured from reservation
+creation, independent of an authentication validity interval. The server MUST
+stop sending by that deadline. Completion, including partial transmission,
+MUST conditionally replace the pending read with `ReadServed` recording actual
+body bytes sent; successful HEAD records zero. A failure before the first byte
+MUST conditionally replace it with `Aborted(INTERNAL)`. Reconciliation MUST
+run only after `deadline + read_reconcile_grace`, where
+`read_reconcile_grace` is a named deployment parameter defaulting to 60 s.
+A `ReadServed` arriving within that grace period MUST win over abandonment.
+After the grace period, reconciliation MUST conditionally record
+`Aborted(ABANDONED)` if the record remains pending. These replacements use
+the same pending-record arbiter below.
+[SPEC-HTTP-OBJECTS](SPEC-HTTP-OBJECTS.md) fixes read ordering and admission input.
+
 An unconsumed ticket that expires MUST produce `Expired`, as STC
 §7.7 requires. The periodic reconcile pass MUST produce `Expired`
 for a ticket-backed reservation with no outcome once its ticket has
@@ -304,6 +320,12 @@ requires; remote Allow does not bypass them.
 | `refs` | The intended ref changes, in decision order. |
 | `owner` | Whether the principal owns the namespace under STC §7.5 rule 1; set on both Authorize and Admit requests. |
 | `grant` | The write grant used under STC §7.5 rule 2, if any, and its checked epoch; set on both Authorize and Admit requests. |
+
+For plain HTTP reads, `procedure` MUST be `/mkit.http.v1/GetObject` or
+`/mkit.http.v1/GetRefPath`, and `principal` MUST be `anonymous`, as
+[SPEC-HTTP-OBJECTS](SPEC-HTTP-OBJECTS.md) requires. These are hook operation
+identifiers, not additional Connect RPCs; HTTP admission follows that
+specification rather than the unary-RPC eligibility rule of STC §5.1.
 
 `owner` and `grant` carry the result of STC §7.5 rules 1–2 on both
 Authorize and Admit requests. An absent grant means no write grant
@@ -539,7 +561,7 @@ the 32-byte committed target, or empty when `deleted` is true.
 | `ABORT_REASON_PACK_MISSING` | 3 | A required pack is missing. |
 | `ABORT_REASON_REPLAY_RACE` | 4 | A replay reservation race prevents apply. |
 | `ABORT_REASON_INTERNAL` | 5 | An internal apply failure. |
-| `ABORT_REASON_ABANDONED` | 6 | Reconcile found a pending reservation after the operation's authentication validity interval, without a recorded result. |
+| `ABORT_REASON_ABANDONED` | 6 | Reconcile found a pending reservation without a recorded result after the operation's authentication validity interval, or, for an HTTP read, after its deadline plus `read_reconcile_grace` (§5). |
 
 The typed-conflict exception for ticket-consuming `AdvanceRefs` remains
 as STC §7.7 requires. `ABORT_REASON_REF_CONFLICT` does not convert that
@@ -1139,7 +1161,7 @@ Reserved: this section is specified with M5 (see the version history).
 
 | Version | Status | Change |
 |---|---|---|
-| 1 | draft | Initial M3 pipeline, durable outcome and remote-hook contract; M5 sections reserved. Admission credential headers (§6.3); indexed mode (§9). |
+| 1 | draft | Initial M3 pipeline, durable outcome and remote-hook contract; M5 sections reserved. Admission credential headers (§6.3); indexed mode (§9). HTTP read reservations and procedure strings (WP-4.11), amended with `read_reconcile_grace = 60 s` default and `ReadServed` priority within grace (fix round 1). |
 
 ## 16. Test anchors
 
