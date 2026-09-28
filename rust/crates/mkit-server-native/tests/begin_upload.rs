@@ -1035,7 +1035,7 @@ async fn multipart_existing_race_aborts_losing_session() {
     assert!(losing_session_was_aborted);
 }
 
-/// The first BeginUpload pauses before its final apply (it will win); the
+/// The first `BeginUpload` pauses before its final apply (it will win); the
 /// second fails there at once, so its cleanup runs while the winner's ticket
 /// is not yet committed.
 #[cfg(feature = "test-faults")]
