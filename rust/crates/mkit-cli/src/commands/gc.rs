@@ -82,10 +82,10 @@ pub fn run(args: &[String]) -> u8 {
     // invoking one, plus other gc runs. Acquisition order is
     // deterministic (main first, then registry ids ascending, from
     // `all_state_layouts`) so concurrent multi-lock takers cannot
-    // deadlock. It still does NOT serialize against the non-worktree
-    // root publishers (`tag`, `fetch`, `attest`) — those don't take
-    // this lock (#267); the grace window protects their in-flight
-    // objects, exactly as in the single-tree case.
+    // deadlock. The root publishers `tag`, `fetch` and `attest` take
+    // their tree's worktree.lock (#267), so they serialize against gc;
+    // the grace window protects only writers outside gc's lock set
+    // (SPEC-GC "Concurrent writers and the grace window").
     // Registry lock FIRST (global lock order: worktrees.lock before
     // any per-tree worktree.lock, see SPEC-WORKTREE §4.3): freezes the
     // worktree set for the whole run, so a `worktree add` cannot

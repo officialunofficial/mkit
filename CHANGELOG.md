@@ -11,6 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   delta-safe ref and pack rewrites, tombstones, preservation and restore,
   signed DSSE notices on Connect and HTTP 451, and additive transport and
   hook fields. Runtime enforcement follows in later server work packages.
+- Server: add stateless `UploadPart` and `CompleteUpload`, authenticated part
+  receipts, and a multipart blob-store interface with a working memory backend.
+  Multipart BeginUpload tickets now carry opaque storage sessions. The blob-key
+  API separates upload markers from pack keys; FS, R2 and S3 multipart storage
+  follows in later work packages.
+- Server: ticketed `UploadPack` now verifies the ticket before reading data,
+  streams the full pack without metadata writes, and leaves a content-addressed
+  upload marker for later ticket consumption. The advertised BeginUpload
+  threshold is enforced; non-default admission requires auth v2 and ticket keys.
 - Server: add periodic per-Durable-Object logical snapshots to a dedicated R2
   `BACKUPS` bucket, plus Fresh-only portable restore with epoch advancement,
   relay re-keying and coordinator recovery. Native `export` and `restore`

@@ -23,7 +23,7 @@ fn r2_final_chunk_fault_fails_once_and_publishes_nothing() {
     let store = R2BlobStore::new(bucket.clone(), PACKS_KEYSPACE);
     let put = || {
         block_on(async {
-            let mut sink = store.begin(BlobKey::new(hash(b"pack")), 4).await?;
+            let mut sink = store.begin(BlobKey::pack(hash(b"pack")), 4).await?;
             sink.write(Bytes::from_static(b"pa")).await?;
             sink.write(Bytes::from_static(b"ck")).await?;
             sink.commit().await
@@ -33,7 +33,7 @@ fn r2_final_chunk_fault_fails_once_and_publishes_nothing() {
     assert!(matches!(put(), Err(StoreError::Unavailable(_))));
     assert_eq!(bucket.objects(), 0);
     assert_eq!(
-        block_on(store.head(&BlobKey::new(hash(b"pack")))).unwrap(),
+        block_on(store.head(&BlobKey::pack(hash(b"pack")))).unwrap(),
         None
     );
     assert_eq!(put().unwrap(), CommitOutcome::Created);

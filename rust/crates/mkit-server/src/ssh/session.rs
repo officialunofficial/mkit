@@ -12,7 +12,7 @@ use crate::error::Redacted;
 use crate::pipeline::{AuthMode, HookSet, Pipeline};
 use crate::principal::Principal;
 use crate::rt::MaybeSend;
-use crate::store::{BlobStore, NamespaceStore};
+use crate::store::{MultipartBlobStore, NamespaceStore};
 
 /// Why a frame could not be read or written.
 #[derive(Debug)]
@@ -192,7 +192,7 @@ pub async fn serve_session<B, N, H, S, K>(
     cfg: &SessionConfig,
 ) -> SessionEnd
 where
-    B: BlobStore,
+    B: MultipartBlobStore,
     N: NamespaceStore,
     H: HookSet,
     S: FrameSource,

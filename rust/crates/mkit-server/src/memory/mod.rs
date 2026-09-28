@@ -8,6 +8,8 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use crate::store::StoreError;
 
+#[cfg(test)]
+pub(crate) use blob::MemoryPartSink;
 pub use blob::{MemoryBlobStore, MemoryPackSink};
 pub use kv::MemoryKv;
 

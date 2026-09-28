@@ -20,7 +20,7 @@ use mkit_server::store::{
     Batch, BatchOutcome, BlobKey, Cursor, Key, Partition, PartitionStats, ScanPage,
     StoreCapabilities, StoreError, Value, Write, codec, keys,
 };
-use mkit_server::upload::UploadLimits;
+use mkit_server::upload::{UploadLimits, token::TicketKeys};
 use mkit_server::{
     Addressing, Code, MemoryBlobStore, MemoryKv, MultiAddressing, NamespaceStore, NoopMetrics,
     Procedure, RefUpdate, ServerError, SystemClock, UpdateRefResult,
@@ -249,6 +249,7 @@ fn pipeline<N: NamespaceStore>(
     );
     cfg.sharding = sharding;
     cfg.write_quota = None;
+    cfg.ticket_keys = Some(TicketKeys::new(vec![("test".into(), [9; 32])]).unwrap());
     let pipe = Pipeline::new(
         MemoryBlobStore::default(),
         store,

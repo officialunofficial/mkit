@@ -31,7 +31,7 @@ use mkit_rpc::mkit::rpc::v1::ssh::SshFrame;
 use mkit_rpc::mkit::rpc::v1::ssh::ssh_frame;
 use mkit_server::pipeline::{HookSet, Pipeline};
 use mkit_server::ssh::{FrameIoError, FrameSink, FrameSource, SessionConfig, serve_session};
-use mkit_server::{BlobStore, BoxFuture, NamespaceStore, Principal, Redacted};
+use mkit_server::{BoxFuture, MultipartBlobStore, NamespaceStore, Principal, Redacted};
 use mkit_transport_enc::tokio_io::{TokioSink, TokioStream};
 use mkit_transport_enc::{
     EncHandshakeBounds, EncInitError, EncReceiver, EncSender, EncSession, ListenerLimits,
@@ -346,7 +346,7 @@ pub fn session_fn<B, N, H>(
     idle_timeout: Option<Duration>,
 ) -> SessionFn
 where
-    B: BlobStore + 'static,
+    B: MultipartBlobStore + 'static,
     N: NamespaceStore + 'static,
     H: HookSet + 'static,
 {

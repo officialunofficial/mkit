@@ -294,7 +294,7 @@ async fn plant_membership(
         let repo = addressing.resolve(Some(&identity), false).unwrap().repo;
         let bytes = bytes::Bytes::from(format!("conformance/{}/{case}", profile.run_id));
         let id = mkit_core::hash::hash(&bytes);
-        let key = BlobKey::from_hash(id);
+        let key = BlobKey::pack(id);
         let mut sink = blobs.begin(key, bytes.len() as u64).await.unwrap();
         sink.write(bytes).await.unwrap();
         sink.commit().await.unwrap();
@@ -422,6 +422,9 @@ async fn check(origin: String, profile: Profile) {
             "tickets.begin_upload_idempotent",
             "tickets.begin_upload_caps",
             "tickets.begin_upload_packmap_refused",
+            "tickets.upload_pack_ticketed",
+            "tickets.upload_pack_bad_token",
+            "tickets.upload_pack_binding_denied",
         ] {
             assert!(
                 matches!(report.verdict(name), Some(Verdict::Pass(_))),
@@ -474,6 +477,7 @@ async fn pipeline_multi_repository() {
     profile.milestone = Milestone::M1;
     profile.features.insert(Feature::MultiRepo);
     profile.features.insert(Feature::NamespacePolicy);
+    profile.features.insert(Feature::Tickets);
     let (origin, _) = serve_addressing(auth, None, Mutant::None, Some(&profile)).await;
     let WireAuth::AuthV2 { audience, .. } = &mut profile.auth else {
         unreachable!()
@@ -486,6 +490,7 @@ async fn pipeline_multi_repository() {
     // M0 cases exercise headerless reads and packs; the Multi cases
     // carry repository identities and exercise repository-scoped membership.
     let report = run(&target, Some("repo.")).await;
+    let repository_report = run(&target, Some("repository.")).await;
     let policy_report = run(&target, Some("policy.")).await;
     let info_report = run(&target, Some("info.")).await;
     common::judge(&info_report, PIPELINE_DIVERGENCES);
@@ -496,6 +501,7 @@ async fn pipeline_multi_repository() {
         );
     }
     common::judge(&report, PIPELINE_DIVERGENCES);
+    common::judge(&repository_report, PIPELINE_DIVERGENCES);
     common::judge(&policy_report, PIPELINE_DIVERGENCES);
     for case in mkit_server_conformance::wire::CASES
         .iter()
@@ -503,6 +509,8 @@ async fn pipeline_multi_repository() {
     {
         let case_report = if case.name.starts_with("policy.") {
             &policy_report
+        } else if case.name.starts_with("repository.") {
+            &repository_report
         } else {
             &report
         };
@@ -678,7 +686,7 @@ async fn pipeline_d34_epoch_leases() {
     assert_eq!(report.passes(), [case]);
     let tickets = run(&target, Some("tickets.")).await;
     common::judge(&tickets, PIPELINE_DIVERGENCES);
-    assert_eq!(tickets.passes().len(), 4, "all ticket cases run under D34");
+    assert_eq!(tickets.passes().len(), 8, "all ticket cases run under D34");
 
     let repo = RepoId {
         namespace: NamespaceKey::deployment_default(),

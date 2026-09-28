@@ -40,7 +40,7 @@ and one PR per WP. A group is done when all of its WPs have merged.
 | G07 | M0 Foundation | M0: release pipeline, container image and M0 exit | M0-18, M0-19, M0-20 |
 | G08 | M1 Addressing & uploads | M1: proto, part commitments and multi-repo addressing | 1.2, 1.3, 1.4 |
 | G09 | M1 Addressing & uploads | M1: D34 sharding (DO classes, relay, timers, ref index), epoch leases, policies, GetServerInfo, quota | 1.5, 1.6, 1.7, 1.8, 1.22, 1.23, 1.24, 1.25, 1.26, 1.28 |
-| G10 | M1 Addressing & uploads | M1: BeginUpload tickets, client-streaming parts (R2/S3 multipart), AdvanceRefs consumption | 1.9, 1.10, 1.11, 1.12, 1.13, 1.14 |
+| G10 | M1 Addressing & uploads | M1: BeginUpload tickets, client-streaming parts (R2/S3 multipart), AdvanceRefs consumption (R-114) | 1.9, 1.10, 1.11a, 1.11b, 1.12, 1.13, 1.14 |
 | G11 | M1 Addressing & uploads | M1: client changes, ssh/enc multi-repo and published-view snapshots | 1.15, 1.16, 1.17, 1.18, 1.21 |
 | G12 | M1 Addressing & uploads | M1: staging, ops (backups, alerts) and M1 exit conformance | 1.19, 1.20, 1.27, 1.29 |
 | G13 | M2 Identity | M2: grant and epoch formats and verifiers (mkit-attest) | 2.2, 2.3, 2.4, 2.5 |
@@ -123,7 +123,8 @@ Split and dropped WPs keep their briefs for the record: [WP-M0-02](briefs/WP-M0-
 | 1.8 | G09 | Worker: Durable Object classes per shard kind | [M1/M2](m1-m2-breakdown.md) | | planned |
 | 1.9 | G10 | Core: BeginUpload with target ref, stateless ticket token, ticketed UploadPack, ticket caps | [M1/M2](m1-m2-breakdown.md) | | planned |
 | 1.10 | G10 | Core: AdvanceRefs consumes tickets, outcomes rows, ref deletion | [M1/M2](m1-m2-breakdown.md) | | planned |
-| 1.11 | G10 | Core: stateless client-streaming UploadPart/CompleteUpload, part receipts, MultipartBlobStore, FS backend | [M1/M2](m1-m2-breakdown.md) | | planned |
+| 1.11a | G10 | Core: stateless UploadPart/CompleteUpload, receipts, MultipartBlobStore and memory backend (R-114) | [M1/M2](m1-m2-breakdown.md) | | in progress |
+| 1.11b | G10 | FS multipart, native wiring and storage conformance (R-114) | [M1/M2](m1-m2-breakdown.md) | | planned |
 | 1.12 | G10 | Worker: R2 multipart with client-streamed parts through the Worker | [M1/M2](m1-m2-breakdown.md) | | planned |
 | 1.13 | G10 | Native: S3 multipart BlobStore | [M1/M2](m1-m2-breakdown.md) | | planned |
 | 1.14 | G10 | Ticket expiry and pre-M3 outbox retention | [M1/M2](m1-m2-breakdown.md) | | planned |

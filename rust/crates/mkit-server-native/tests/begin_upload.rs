@@ -12,6 +12,7 @@ use bytes::Bytes;
 use mkit_core::hash::{hash, to_hex};
 use mkit_core::protocol::{PackKey, RefWriteCondition};
 use mkit_core::repo_identity::Namespace;
+use mkit_core::upload_parts::{MIN_PART_SIZE, PartPlan};
 use mkit_server::auth_v2::AuthV2Config;
 use mkit_server::pipeline::{
     Admission, AdmissionDecision, AdmissionInput, AuthMode, Authenticated, Authorizer, D34Shards,
@@ -22,8 +23,9 @@ use mkit_server::policy::{AuthorizerRole, NamespacePolicy};
 use mkit_server::quota::QuotaScope;
 use mkit_server::sql::SqlKvStore;
 use mkit_server::store::{
-    Batch, BatchOutcome, BlobStore, Cursor, Key, PackSink, Partition, PartitionStats, Precondition,
-    ScanPage, StoreCapabilities, StoreError, Value, Write, codec, keys,
+    Batch, BatchOutcome, BlobKey, BlobStore, Cursor, Key, MultipartBlobStore, PackSink, Partition,
+    PartitionStats, Precondition, ScanPage, StoreCapabilities, StoreError, Value, Write, codec,
+    keys,
 };
 use mkit_server::upload::{UploadLimits, token::TicketKeys};
 use mkit_server::{
@@ -200,9 +202,9 @@ impl Admission for Policy {
     async fn admit(&self, input: &AdmissionInput<'_>) -> Result<AdmissionDecision, ServerError> {
         let sequence = self.0.admissions.fetch_add(1, Ordering::SeqCst);
         if input.op.procedure() == Procedure::BeginUpload {
-            assert_eq!(input.declared_bytes, BYTES);
+            assert!(input.declared_bytes >= BYTES);
             assert!(input.pack_id.is_some());
-            assert_eq!(input.new_to_repo_bytes, Some(BYTES));
+            assert_eq!(input.new_to_repo_bytes, Some(input.declared_bytes));
         }
         match self.0.rejection.load(Ordering::SeqCst) {
             2 => Ok(AdmissionDecision::Challenge {
@@ -281,8 +283,8 @@ fn pipeline<N: NamespaceStore>(
         .unwrap(),
     )
 }
-fn auth<N: NamespaceStore>(
-    pipe: &Pipe<N>,
+fn auth<N: NamespaceStore, H: mkit_server::pipeline::HookSet>(
+    pipe: &Pipeline<MemoryBlobStore, Store<N>, H>,
     mode: Mode,
     seed: u8,
     procedure: Procedure,
@@ -553,7 +555,10 @@ async fn present<N: NamespaceStore>(backend: N, clock: Arc<ManualClock>, mode: M
             .await
             .unwrap();
     } else {
-        let mut sink = blobs.begin(PackKey::from_hash(pack), 12).await.unwrap();
+        let mut sink = blobs
+            .begin(PackKey::from_hash(pack).into(), 12)
+            .await
+            .unwrap();
         sink.write(Bytes::from_static(b"present pack"))
             .await
             .unwrap();
@@ -744,13 +749,40 @@ async fn validation<N: NamespaceStore>(backend: N, clock: Arc<ManualClock>, mode
     assert_eq!(spy.admissions.load(Ordering::SeqCst), 0);
     let mut cfg = config(mode);
     cfg.ticket_keys = None;
-    let disabled = pipeline(
-        store.clone(),
+    let defaults = Hooks::new();
+    let disabled = Pipeline::new(
         MemoryBlobStore::default(),
-        spy.clone(),
+        store.clone(),
+        Hooks {
+            authorizer: Policy(spy.clone()),
+            admission: Policy(spy),
+            pre_receive: defaults.pre_receive,
+            receipts: defaults.receipts,
+            outcomes: defaults.outcomes,
+        },
         cfg,
         clock,
+        Arc::new(NoopMetrics),
     );
+    let error = disabled.unwrap_err();
+    assert_eq!(error.code(), Code::InvalidArgument);
+    assert_eq!(
+        error.public_message(),
+        "admission requires auth v2 and upload ticket keys"
+    );
+    assert!(store.take().is_empty());
+    let mut cfg = config(mode);
+    cfg.ticket_keys = None;
+    cfg.authorizer_role = AuthorizerRole::Check;
+    let disabled = Pipeline::new(
+        MemoryBlobStore::default(),
+        store.clone(),
+        Hooks::new(),
+        cfg,
+        Arc::new(ManualClock::new(0)),
+        Arc::new(NoopMetrics),
+    )
+    .unwrap();
     let a = auth(&disabled, mode, 1, Procedure::BeginUpload);
     let error = disabled
         .begin_upload(&a, REF, &PACK, BYTES)
@@ -761,7 +793,6 @@ async fn validation<N: NamespaceStore>(backend: N, clock: Arc<ManualClock>, mode
     assert!(store.take().is_empty());
 }
 
-#[allow(clippy::too_many_lines)] // The barrier and both race outcomes form one scenario.
 async fn race<N: NamespaceStore + 'static>(
     backend: N,
     clock: Arc<ManualClock>,
@@ -770,6 +801,19 @@ async fn race<N: NamespaceStore + 'static>(
     cap: bool,
     same_nonce: bool,
 ) {
+    let _ = race_with_bytes(backend, clock, mode, reserved, cap, same_nonce, BYTES).await;
+}
+
+#[allow(clippy::too_many_lines)] // The barrier and both race outcomes form one scenario.
+async fn race_with_bytes<N: NamespaceStore + 'static>(
+    backend: N,
+    clock: Arc<ManualClock>,
+    mode: Mode,
+    reserved: bool,
+    cap: bool,
+    same_nonce: bool,
+    bytes: u64,
+) -> bool {
     let store = Store::new(backend);
     let spy = Arc::new(Spy::default());
     spy.reservation
@@ -778,13 +822,9 @@ async fn race<N: NamespaceStore + 'static>(
     if cap {
         cfg.ticket_caps.per_ref = 1;
     }
-    let pipe = pipeline(
-        store.clone(),
-        MemoryBlobStore::default(),
-        spy.clone(),
-        cfg,
-        clock,
-    );
+    cfg.upload_limits.max_total_bytes = bytes;
+    let blobs = MemoryBlobStore::default();
+    let pipe = pipeline(store.clone(), blobs.clone(), spy.clone(), cfg, clock);
     warm(&pipe, mode).await;
     spy.admissions.store(0, Ordering::SeqCst);
     store.take();
@@ -801,10 +841,10 @@ async fn race<N: NamespaceStore + 'static>(
     let b_copy = b.clone();
     let second_pack = if cap { [8; 32] } else { PACK };
     let one =
-        tokio::spawn(async move { first_pipe.begin_upload(&a_copy, REF, &PACK, BYTES).await });
+        tokio::spawn(async move { first_pipe.begin_upload(&a_copy, REF, &PACK, bytes).await });
     let two = tokio::spawn(async move {
         second_pipe
-            .begin_upload(&b_copy, REF, &second_pack, BYTES)
+            .begin_upload(&b_copy, REF, &second_pack, bytes)
             .await
     });
     let (one, two) = tokio::time::timeout(Duration::from_secs(10), async {
@@ -871,9 +911,9 @@ async fn race<N: NamespaceStore + 'static>(
     assert_eq!(
         quota.bytes,
         if reserved || same_nonce {
-            BYTES
+            bytes
         } else {
-            BYTES * 2
+            bytes * 2
         }
     );
     let calls = store.take();
@@ -888,6 +928,37 @@ async fn race<N: NamespaceStore + 'static>(
     }
     let ticket_batches = calls.iter().filter(|c| matches!(c, Call::Apply(_, b, BatchOutcome::Committed) if b.writes.iter().any(|w| matches!(w, Write::Put(k, _) if k.as_bytes().starts_with(b"t\0"))))).count();
     assert_eq!(ticket_batches, 1);
+    if bytes <= MIN_PART_SIZE {
+        return true;
+    }
+    let plan = PartPlan::new(bytes, MIN_PART_SIZE, u32::MAX).unwrap();
+    let mut active = 0;
+    for id in [0_u64, 1] {
+        match blobs
+            .begin_part(BlobKey::pack(PACK), &id.to_be_bytes(), &plan, 0, [0; 32])
+            .await
+        {
+            Ok(_) => active += 1,
+            Err(StoreError::SessionGone) => {}
+            Err(err) => panic!("unexpected part-session probe error: {err}"),
+        }
+    }
+    active == 1
+}
+#[tokio::test]
+async fn multipart_existing_race_aborts_losing_session() {
+    let clock = Arc::new(ManualClock::new(0));
+    let losing_session_was_aborted = race_with_bytes(
+        MemoryKv::with_clock(clock.clone()),
+        clock,
+        MODES[0],
+        true,
+        false,
+        false,
+        MIN_PART_SIZE + 1,
+    )
+    .await;
+    assert!(losing_session_was_aborted);
 }
 macro_rules! backends {
     ($memory:ident, $sqlite:ident, $scenario:ident $(, $arg:expr)*) => {
@@ -982,13 +1053,16 @@ async fn unsupported_auth_modes_have_no_metadata_effects() {
         let mut cfg = config(mode);
         cfg.auth = auth_mode;
         cfg.write_quota = None;
-        let pipe = pipeline(
-            store.clone(),
+        cfg.authorizer_role = AuthorizerRole::Check;
+        let pipe = Pipeline::new(
             MemoryBlobStore::default(),
-            Arc::new(Spy::default()),
+            store.clone(),
+            Hooks::new(),
             cfg,
             Arc::new(ManualClock::new(0)),
-        );
+            Arc::new(NoopMetrics),
+        )
+        .unwrap();
         let a = pipe
             .authenticate(&RequestMeta {
                 procedure: Procedure::BeginUpload,

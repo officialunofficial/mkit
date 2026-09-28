@@ -128,6 +128,7 @@ async fn wire_suite_s3_sqlite_auth_v2() {
                         | "timers.fire_on_schedule"
                         | "timers.redelivery_is_idempotent"
                         | "replay.expired_retry_rejected"
+                        | "tickets.upload_pack_expired_token"
                         | "growth.replay_and_quota_pruned"
                 )
                 || skipped.starts_with("auth.bearer")
@@ -140,12 +141,14 @@ async fn wire_suite_s3_sqlite_auth_v2() {
 
     shutdown.trigger();
     served.await.unwrap().unwrap();
-    // The packs live in the bucket under the prefix, none on disk; every
-    // key is `<prefix>/packs/<64-hex>`.
+    // Packs and upload markers use distinct namespaces under the prefix.
     let keys = fake.keys(DEFAULT_BUCKET);
     assert!(!keys.is_empty());
     for key in &keys {
-        let hex = key.strip_prefix("wire/run/packs/").unwrap();
+        let hex = key
+            .strip_prefix("wire/run/packs/")
+            .or_else(|| key.strip_prefix("wire/run/upload-markers/v1/"))
+            .unwrap();
         assert!(
             hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()),
             "{key}"

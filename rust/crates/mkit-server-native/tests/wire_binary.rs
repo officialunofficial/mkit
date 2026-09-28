@@ -120,6 +120,9 @@ async fn check(origin: &str, profile: Profile) {
             "tickets.begin_upload_idempotent",
             "tickets.begin_upload_caps",
             "tickets.begin_upload_packmap_refused",
+            "tickets.upload_pack_ticketed",
+            "tickets.upload_pack_bad_token",
+            "tickets.upload_pack_binding_denied",
         ] {
             assert!(
                 matches!(report.verdict(name), Some(Verdict::Pass(_))),
