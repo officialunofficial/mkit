@@ -481,6 +481,29 @@ mod proto_roundtrip {
     }
 
     #[test]
+    fn admission_challenge_roundtrips_with_zero_one_and_eight_entries() {
+        for count in [0, 1, 8] {
+            let message = AdmissionChallenge {
+                challenges: (0..count)
+                    .map(|index| Challenge {
+                        scheme: Some(format!("scheme{index}")),
+                        value: Some(format!("opaque-{index}")),
+                        ..Default::default()
+                    })
+                    .collect(),
+                description: (count != 0).then(|| "Admission required".into()),
+                ..Default::default()
+            };
+            roundtrip(&message);
+            let json = serde_json::to_vec(&message).expect("serialize challenge");
+            assert_eq!(
+                serde_json::from_slice::<AdmissionChallenge>(&json).expect("parse challenge"),
+                message
+            );
+        }
+    }
+
+    #[test]
     fn discovery_messages_roundtrip() {
         // Empty messages have no declared fields to populate.
         roundtrip(&GetServerInfoRequest::default());
