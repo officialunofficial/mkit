@@ -1801,7 +1801,11 @@ async fn existing_begin_races_consume<N: NamespaceStore + 'static>(
         pipe.advance_refs_with_tickets(
             &advance,
             upd(REF, RefWriteCondition::Missing, [3; 32]),
-            upd("refs/mkit/packmap/main", RefWriteCondition::Missing, [4; 32]),
+            upd(
+                "refs/mkit/packmap/main",
+                RefWriteCondition::Missing,
+                [4; 32]
+            ),
             vec![id],
         )
         .await

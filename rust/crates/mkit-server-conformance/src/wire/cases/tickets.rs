@@ -390,7 +390,11 @@ pub(super) async fn advance_other_repository(ctx: Ctx) -> CaseResult {
         )
         .await?;
     exact(
-        want_code(response, "failed_precondition", "ticket in another repository")?,
+        want_code(
+            response,
+            "failed_precondition",
+            "ticket in another repository",
+        )?,
         "invalid or expired upload ticket",
     )
 }
