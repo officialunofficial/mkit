@@ -548,7 +548,10 @@ fn head_conflict(
     tip: &Hash,
     branch: &str,
 ) -> Result<(), DispatchError> {
-    if tx.read_ref(head_name)? == Some(*tip) {
+    let current = tx
+        .read_ref(head_name)
+        .map_err(|error| super::repository_operation_error(tx, error))?;
+    if current == Some(*tip) {
         return Ok(());
     }
     Err(DispatchError::NonFastForwardPush {
