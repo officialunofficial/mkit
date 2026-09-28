@@ -1268,8 +1268,8 @@ to these storage-lease checks and resolve only in the published view, as
 [SPEC-WRITE-GRANTS §9.4](SPEC-WRITE-GRANTS.md#94-signed-url-tokens) requires.
 Cache-purge wire details are reserved for §16.
 
-Pack and object surfaces that name no ref, including `PackExists`,
-`DownloadPack`, HTTP objects, and signed URL tokens, MUST follow the
+Pack and object surfaces, including `PackExists`, `DownloadPack`, HTTP
+object serving, and signed URL tokens, MUST enforce the
 repository-level effective state. A per-ref `suspended` or `deleted`
 state MUST hide that ref from `ReadRef`, `ListRefs`, and `X-Mkit-Ref`,
 together with its published pointer. It MUST NOT hide membership shared
