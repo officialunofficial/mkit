@@ -9,7 +9,11 @@
   "main": "build/worker/shim.mjs",
   "compatibility_date": "2026-09-09",
   "build": { "command": "true" },
-  "vars": { "WORKERS_PLAN": "free" },
+  "vars": {
+    "WORKERS_PLAN": "free",
+    // Clearly fake local-development secret. Never use this key in a deployment.
+    "TICKET_KEYS": "fake-dev 1111111111111111111111111111111111111111111111111111111111111111"
+  },
   "r2_buckets": [{ "binding": "STORAGE", "bucket_name": "mkit-vcs-objects" }],
   "durable_objects": { "bindings": [
     { "name": "REFSTORE", "class_name": "RefStore" },

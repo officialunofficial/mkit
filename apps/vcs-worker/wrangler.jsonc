@@ -18,6 +18,7 @@
   },
 
   "observability": { "enabled": true },
+  // Install the deployment upload MAC keys with `wrangler secret put TICKET_KEYS` (WP-1.19).
   // Override AUTH_AUDIENCE with the exact published origin before deployment.
   // WORKERS_PLAN caps each Durable Object's SQLite store for the account's
   // plan: `free` (1 GB, the safe default) or `paid` (10 GB). Set `paid` only

@@ -1230,3 +1230,45 @@ entry decompression or retained delta targets.
 **Enforced by:** `pack::tests` resident-peak, bomb, retention-equivalence and
 maximum-wire-length regressions; live wasm framing tests in
 `apps/web/src/lib/mkit.test.ts`.
+
+## BeginUpload decisions and replay share the write batch
+
+**Always:** BeginUpload authorizes before returning a live ticket or membership
+result. Those results skip admission and quota but persist a replay record.
+A new ticket, its counters, expiry timer, Ticketed reservation, quota and replay
+commit in the target ref shard's one guarded batch. D34 uses the common epoch
+lease stages, el guard and capped deadline. Replay stores the complete token.
+
+**Because:** repeat operations must allocate neither extra reservations nor cap
+slots, and a retry must still return identical token bytes after consumption or
+key rotation. Membership decisions in Multi may consult only the local repo row.
+
+**If violated:** a denied request allocates state, racing opens exceed the caps,
+retries charge admission again, or token results disappear with ticket rows.
+
+**Enforced by:** `mkit-server/tests/golden_ticket_token.rs`
+(`golden_ticket_token_v1`), `mkit-server/tests/begin_upload_codec.rs`, native
+`tests/begin_upload.rs` (`lifecycle_*`, `caps_*`, `race_*`, `rejected_*`) over
+memory and SQLite (Single and D34), and the wire `tickets.*` cases.
+Ticket expiry cleanup and admission Pending/Aborted reconciliation remain
+WP-1.14 and WP-3.3 respectively.
+
+## Storage pressure observes physical capacity after commit
+
+**Always:** Worker pressure samples use the local physical database size only
+following a committed batch containing a put, before alarm I/O. Native SQLite
+samples the database-wide physical size every 60 seconds and stops on shutdown.
+Alerts use the put soft limit, 70%/90% thresholds and five-point hysteresis;
+per-instance ten-minute limits survive clearing and re-entry. Only the highest
+active severity emits. Counters and gauges are never sampled; Worker latency
+observations are sampled once per hundred calls across the isolate.
+
+**Because:** logical row bytes do not measure the physical storage cap, and
+pre-commit or unsampled latency logging can mislead or overwhelm operators.
+
+**If violated:** capacity exhaustion becomes invisible, or repeated writes
+flood logs while operators need the critical alert.
+
+**Enforced by:** `telemetry/pressure.rs` pure transition tests, Worker
+`ns_object::PressureStore` and `tests/stores.rs` over the DO SQL shim,
+console sink/subscriber tests, and native `pressure.rs` shutdown/size-task tests.

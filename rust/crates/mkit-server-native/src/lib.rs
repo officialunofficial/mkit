@@ -16,6 +16,8 @@ pub mod layers;
 #[cfg(feature = "http")]
 mod listen;
 #[cfg(feature = "http")]
+pub mod pressure;
+#[cfg(feature = "http")]
 mod router;
 #[cfg(feature = "s3")]
 pub mod s3;

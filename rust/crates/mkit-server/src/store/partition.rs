@@ -82,6 +82,19 @@ pub enum Partition {
 }
 
 impl Partition {
+    /// Stable, low-cardinality partition kind for metrics and alerts.
+    #[must_use]
+    pub const fn kind(&self) -> &'static str {
+        match self {
+            Self::Namespace(_) => "namespace",
+            Self::Coordinator(_) => "coordinator",
+            Self::Ref { .. } => "ref",
+            Self::RepoIndex { .. } => "repo_index",
+            Self::RefIndex { .. } => "ref_index",
+            Self::ContentShard(_) => "content",
+        }
+    }
+
     /// The portable encoding: one kind tag byte (`n` namespace, `c`
     /// coordinator, `r` ref, `i` repo index, `x` ref index, `s` content
     /// shard), then each component followed by `0x00`. Strings are their
