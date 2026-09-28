@@ -83,7 +83,7 @@ pub struct LeaseRecovery {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BackupStateV1 {
-    /// Time of the last snapshot attempt, Unix milliseconds.
+    /// Export time encoded in the last uploaded snapshot, Unix milliseconds.
     pub last_export_ms: u64,
     /// BLAKE3 of the last uploaded portable export.
     pub digest: Hash,

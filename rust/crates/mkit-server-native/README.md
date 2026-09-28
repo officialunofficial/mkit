@@ -464,7 +464,7 @@ refused. For an in-place native recovery using a physical backup, follow the
 preceding physical backup instructions.
 
 On Workers, bind a dedicated `BACKUPS` R2 bucket and leave
-`BACKUP_INTERVAL_MS` at its daily default unless operations requires another
+`BACKUP_INTERVAL_MS` at its daily default unless operations require another
 cadence. Configure a 35-day lifecycle rule for the `backups/` prefix only.
 Never apply that rule to `packs/`, which holds live content. The bucket and
 lifecycle rule are deployment steps; inspect them before relying on periodic

@@ -18,6 +18,7 @@ use mkit_server::telemetry::{
     Metrics,
     pressure::{self, PressureState},
 };
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use mkit_server::{
@@ -58,6 +59,7 @@ pub struct PressureStore<C> {
     clock: Arc<dyn Clock>,
     metrics: Arc<dyn Metrics>,
     backup_interval_ms: Option<u64>,
+    backup_seeded: AtomicBool,
     seeded_due: Mutex<Option<u64>>,
 }
 
@@ -86,6 +88,7 @@ impl<C: SqlConn> PressureStore<C> {
             clock,
             metrics,
             backup_interval_ms: None,
+            backup_seeded: AtomicBool::new(false),
             seeded_due: Mutex::default(),
         }
     }
@@ -157,12 +160,18 @@ impl<C: SqlConn> PressureStore<C> {
         let Some(interval_ms) = self.backup_interval_ms else {
             return;
         };
+        if self.backup_seeded.load(Ordering::Relaxed) {
+            return;
+        }
         match self
             .inner
             .get(partition, &mkit_server::store::keys::backup_state())
             .await
         {
-            Ok(Some(_)) => return,
+            Ok(Some(_)) => {
+                self.backup_seeded.store(true, Ordering::Relaxed);
+                return;
+            }
             Ok(None) => {}
             Err(error) => {
                 crate::log_failure(&format!("backup seed state read failed: {error}"));
@@ -179,13 +188,16 @@ impl<C: SqlConn> PressureStore<C> {
             .await
         {
             Ok(BatchOutcome::Committed) => {
+                self.backup_seeded.store(true, Ordering::Relaxed);
                 let mut pending = self
                     .seeded_due
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner);
                 *pending = Some(pending.map_or(due, |old| old.min(due)));
             }
-            Ok(BatchOutcome::PreconditionFailed { .. }) => {}
+            Ok(BatchOutcome::PreconditionFailed { .. }) => {
+                self.backup_seeded.store(true, Ordering::Relaxed);
+            }
             Ok(BatchOutcome::DeadlinePassed { .. }) => unreachable!("seed batch has no deadline"),
             Err(error) => crate::log_failure(&format!("backup seed failed: {error}")),
         }

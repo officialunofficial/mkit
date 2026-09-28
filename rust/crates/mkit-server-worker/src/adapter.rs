@@ -718,7 +718,9 @@ mod glue {
     ///
     /// # Errors
     /// Only when the runtime fails to build a response.
-    pub async fn serve(mut req: Request, env: Env, cfg: &WorkerConfig) -> worker::Result<Response> {
+    pub async fn serve(req: Request, env: Env, cfg: &WorkerConfig) -> worker::Result<Response> {
+        #[cfg(feature = "test-faults")]
+        let mut req = req;
         install();
         if is_options_preflight(&req) {
             return cors_preflight_response(CORS_ALLOW_HEADERS, CORS_ALLOW_METHODS);
