@@ -192,7 +192,8 @@ fn ticketed_upload_no_metadata_and_marker() {
 #[test]
 fn upload_threshold_enforced_before_store_and_transport_identity_exempt() {
     let single_clock = clock();
-    let mut c = cfg(AuthMode::Open);
+    let mut c = cfg(authv2());
+    c.ticket_keys = Some(TicketKeys::new(vec![("test".into(), [9; 32])]).unwrap());
     c.begin_upload_threshold_bytes = 8;
     let env = build(
         c,
@@ -202,7 +203,7 @@ fn upload_threshold_enforced_before_store_and_transport_identity_exempt() {
     );
     let small = pack(7);
     assert_eq!(
-        upload(&env, &Req::unsigned(Procedure::UploadPack), &small, 7).unwrap(),
+        upload(&env, &signed_upload(&key(7), &small, 1), &small, 7).unwrap(),
         UploadMode::Fresh
     );
     let calls = env.pipe.meta.calls();
@@ -223,7 +224,8 @@ fn upload_threshold_enforced_before_store_and_transport_identity_exempt() {
     }
 
     let zero_clock = clock();
-    let mut c = cfg(AuthMode::Open);
+    let mut c = cfg(authv2());
+    c.ticket_keys = Some(TicketKeys::new(vec![("test".into(), [9; 32])]).unwrap());
     c.begin_upload_threshold_bytes = 0;
     let zero = build(c, Spy::new(store(&zero_clock)), Hooks::new(), zero_clock);
     let a = zero.auth(&Req::unsigned(Procedure::UploadPack)).unwrap();
@@ -233,7 +235,7 @@ fn upload_threshold_enforced_before_store_and_transport_identity_exempt() {
 
     let transport_clock = clock();
     let mut c = cfg(AuthMode::TransportIdentity);
-    c.begin_upload_threshold_bytes = 0;
+    c.begin_upload_threshold_bytes = u64::MAX;
     let env = build(
         c,
         Spy::new(store(&transport_clock)),
@@ -437,6 +439,40 @@ fn ticketed_stream_error_aborts_without_pack_or_marker() {
         assert_eq!(err.code(), Code::InvalidArgument);
         session.abort_with(&err).await;
     });
+    let (marker, _) = upload_marker(&ticket_id, &id);
+    assert!(!blob_present(&env, &data));
+    assert!(now(env.pipe.blobs.head(&marker)).unwrap().is_none());
+    assert_eq!(env.pipe.meta.calls(), 0);
+}
+
+#[test]
+fn ticketed_wrong_digest_stores_neither_pack_nor_marker() {
+    let env = ticket_env();
+    let data = pack(19);
+    let mut wrong = data.clone();
+    wrong[0] ^= 1;
+    let id = hash(&data);
+    let ticket_id = [0x78; 32];
+    let signer = key(7);
+    let token = ticket_token(&env, &signer, &data, ticket_id);
+    let a = env.auth(&signed_upload(&signer, &data, 1)).unwrap();
+    let err = block_on(async {
+        let mut session = env
+            .pipe
+            .open_ticketed_upload(&a, Some(&id), Some(data.len() as u64), &token)
+            .await
+            .unwrap();
+        session
+            .push(Some(&id), Some(0), Bytes::from(wrong), true)
+            .await
+            .unwrap();
+        session.finish().await.unwrap_err()
+    });
+    assert_eq!(err.code(), Code::InvalidArgument);
+    assert_eq!(
+        err.public_message(),
+        "UploadPack: BLAKE3(received bytes) does not equal header.pack_id"
+    );
     let (marker, _) = upload_marker(&ticket_id, &id);
     assert!(!blob_present(&env, &data));
     assert!(now(env.pipe.blobs.head(&marker)).unwrap().is_none());

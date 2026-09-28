@@ -63,6 +63,29 @@ impl BlobKey {
         to_hex_bytes(&self.hash)
     }
 
+    /// Path relative to a blob root, given the pack keyspace (which may
+    /// include a deployment prefix). Markers use its sibling namespace.
+    ///
+    /// # Errors
+    /// [`StoreError::Invalid`] for a namespace this backend does not support.
+    pub fn relative_path(&self, pack_keyspace: &str) -> Result<String, StoreError> {
+        let directory = match self.namespace {
+            BlobNamespace::Pack => pack_keyspace.to_owned(),
+            BlobNamespace::UploadMarker => {
+                let parent = pack_keyspace
+                    .rsplit_once('/')
+                    .map_or("", |(parent, _)| parent);
+                if parent.is_empty() {
+                    "upload-markers/v1".to_owned()
+                } else {
+                    format!("{parent}/upload-markers/v1")
+                }
+            }
+            _ => return Err(StoreError::Invalid("unsupported blob namespace".into())),
+        };
+        Ok(format!("{directory}/{}", self.to_hex()))
+    }
+
     /// Physical namespace.
     #[must_use]
     pub const fn namespace(&self) -> BlobNamespace {

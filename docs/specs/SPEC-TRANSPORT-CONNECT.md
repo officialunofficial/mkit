@@ -1362,7 +1362,7 @@ policy.
 | RPC | Admission | What its apply writes |
 |---|---|---|
 | `BeginUpload` (unary; names its target ref) | Yes | In the target ref's shard: the replay record, a reservation row, and the ticket. |
-| `UploadPart`, `CompleteUpload`, and a ticketed `UploadPack` (the part path, §7.6) | No | Pack or part bytes only, authorized by the stateless ticket token. The part path writes nothing to a metadata shard. The ticket's audience, repository, and signer MUST equal the request's, and for a ticketed `UploadPack` its `pack_id` and byte count MUST equal the request's `pack:` commitment; otherwise the request is `permission_denied` (§7.6). |
+| `UploadPart`, `CompleteUpload`, and a ticketed `UploadPack` (the part path, §7.6) | No | Pack or part bytes, authorized by the stateless ticket token. A ticketed `UploadPack` MAY also write server-internal content-addressed blobs, including its upload marker (R-113). The part path writes nothing to a metadata shard. The ticket's audience, repository, and signer MUST equal the request's, and for a ticketed `UploadPack` its `pack_id` and byte count MUST equal the request's `pack:` commitment; otherwise the request is `permission_denied` (§7.6). |
 | `AdvanceRefs` | No; it consumes tickets | In the same ref shard: the head and the packmap, the ref's membership additions, which the server propagates to the repository index shards at least once, and one `Committed` outcome for each ticket it consumes. Tickets are local to the ref shard, so there is no cross-shard handoff. |
 
 - **Membership.** A pack becomes a member of the repository only at the

@@ -205,6 +205,17 @@ async fn scenario<N: NamespaceStore>(backend: N, mode: Mode) {
     marker_content.extend_from_slice(&ticket_id);
     marker_content.extend_from_slice(&id);
     let marker = BlobKey::upload_marker(hash(&marker_content));
+    if mode.multi {
+        let other_repository = repository.replace("/demo", "/other");
+        let other_token = mint_token(&keys, &signer, &other_repository, pack, [0x44; 32]);
+        let a = authenticated(&pipe, &signer, pack);
+        let err = pipe
+            .open_ticketed_upload(&a, Some(&id), Some(pack.len() as u64), &other_token)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), mkit_server::Code::PermissionDenied);
+        assert!(blobs.head(&BlobKey::pack(id)).await.unwrap().is_none());
+    }
     // Two first writes can reach the put-if-absent store together. In Multi mode
     // each repository has its own ticket proof for the same global pack.
     let second_owner = Signer::new([2; 32], AUDIENCE, "unused");

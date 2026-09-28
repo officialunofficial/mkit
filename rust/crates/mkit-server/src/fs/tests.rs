@@ -904,8 +904,30 @@ fn sweep_removes_only_old_upload_temp_files() {
     }
     std::os::unix::fs::symlink(&old_other, &old_link).unwrap();
 
-    assert_eq!(store.sweep_stale_uploads(hour).unwrap(), 1);
+    let marker_content = b"a published marker";
+    let marker = BlobKey::upload_marker(hash(marker_content));
+    put_blob(
+        &store,
+        marker,
+        marker_content.len() as u64,
+        &[marker_content],
+    )
+    .unwrap();
+    let marker_dir = td.path().join("upload-markers/v1");
+    let marker_old = marker_dir.join(format!(".{}.tmp.77.0", marker.to_hex()));
+    let marker_fresh = marker_dir.join(format!(".{}.tmp.77.1", marker.to_hex()));
+    fs::write(&marker_old, b"partial").unwrap();
+    fs::write(&marker_fresh, b"partial").unwrap();
+    age_file(&marker_old, two_hours);
+
+    assert_eq!(store.sweep_stale_uploads(hour).unwrap(), 2);
     assert!(!old_tmp.exists(), "the old temp file is swept");
+    assert!(!marker_old.exists(), "the old marker temp file is swept");
+    assert!(marker_fresh.exists(), "a fresh marker temp file is kept");
+    assert_eq!(
+        fs::read(marker_dir.join(marker.to_hex())).unwrap(),
+        marker_content
+    );
     assert!(fresh_tmp.exists(), "a fresh temp file may be a live upload");
     assert!(old_other.exists(), "another name is never touched");
     assert!(

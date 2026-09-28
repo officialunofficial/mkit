@@ -202,10 +202,13 @@ pub(super) async fn upload_pack_expired_token(ctx: Ctx) -> CaseResult {
     let pack = b"expired ticket token pack";
     let opened = open_for_pack(&ctx, pack).await?;
     let id = hash(pack);
+    let expires = opened
+        .expires_unix_ms
+        .ok_or_else(|| Failure::Fail("expired ticket case needs a ticket expiry".into()))?;
     let msgs = ticketed_msgs(pack, opened.token.unwrap_or_default());
     // The test directive shifts auth time too. Sign inside that shifted
     // validity window so ticket expiry is the first failing check.
-    let skew = 100_000_000_i64;
+    let skew = expires - crate::wire::sign::now_ms() + 1_000;
     let signer = ctx.v2_signer("main")?;
     let mut envelope = signer.envelope(
         Rpc::UploadPack.procedure(),

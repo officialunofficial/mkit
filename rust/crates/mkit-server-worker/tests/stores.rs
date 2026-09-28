@@ -35,7 +35,7 @@ fn upload_marker_r2_key_is_not_a_pack_key() {
         sink.write(Bytes::from_static(content)).await.unwrap();
         sink.commit().await.unwrap();
         assert_eq!(
-            store.object_key(&marker),
+            store.object_key(&marker).unwrap(),
             format!("upload-markers/v1/{}", marker.to_hex())
         );
         assert!(store.head(&marker).await.unwrap().is_some());
@@ -49,7 +49,7 @@ fn upload_marker_r2_key_is_not_a_pack_key() {
     });
     let prefixed = R2BlobStore::new(SimBucket::default(), "tenant/a/packs");
     assert_eq!(
-        prefixed.object_key(&marker),
+        prefixed.object_key(&marker).unwrap(),
         format!("tenant/a/upload-markers/v1/{}", marker.to_hex())
     );
 }
@@ -234,7 +234,7 @@ fn a_failed_put_is_already_present_only_if_the_key_now_exists() {
         Err(StoreError::Invalid(_))
     ));
     assert_eq!(
-        store.object_key(&BlobKey::pack([0xab; 32])),
+        store.object_key(&BlobKey::pack([0xab; 32])).unwrap(),
         format!("packs/{}", "ab".repeat(32))
     );
 }

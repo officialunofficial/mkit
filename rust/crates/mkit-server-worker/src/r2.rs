@@ -154,23 +154,11 @@ impl<B: ObjectBucket> R2BlobStore<B> {
 
     /// The object key of `key`: `<keyspace>/<hex>` for packs, or the sibling
     /// `upload-markers/v1/<hex>` namespace for upload markers.
-    #[must_use]
-    pub fn object_key(&self, key: &BlobKey) -> String {
-        match key.namespace() {
-            mkit_server::BlobNamespace::Pack => format!("{}/{}", self.keyspace, key.to_hex()),
-            mkit_server::BlobNamespace::UploadMarker => {
-                let prefix = self
-                    .keyspace
-                    .rsplit_once('/')
-                    .map_or("", |(prefix, _)| prefix);
-                if prefix.is_empty() {
-                    format!("upload-markers/v1/{}", key.to_hex())
-                } else {
-                    format!("{prefix}/upload-markers/v1/{}", key.to_hex())
-                }
-            }
-            _ => unreachable!("unsupported blob namespace"),
-        }
+    ///
+    /// # Errors
+    /// [`StoreError::Invalid`] for an unsupported blob namespace.
+    pub fn object_key(&self, key: &BlobKey) -> Result<String, StoreError> {
+        key.relative_path(self.keyspace)
     }
 
     /// Fail the next commit at its withheld final byte, after the hash
@@ -345,7 +333,7 @@ impl<B: ObjectBucket> BlobStore for R2BlobStore<B> {
                 "blob exceeds the store's size cap".into(),
             ));
         }
-        let object = self.object_key(&key);
+        let object = self.object_key(&key)?;
         let put = (len > 0).then(|| Running::spawn(&self.bucket, object.clone(), len));
         Ok(R2PackSink {
             bucket: self.bucket.clone(),
@@ -363,7 +351,7 @@ impl<B: ObjectBucket> BlobStore for R2BlobStore<B> {
         key: &BlobKey,
         range: Option<ByteRange>,
     ) -> Result<Option<BlobBody>, StoreError> {
-        let object = self.object_key(key);
+        let object = self.object_key(key)?;
         let span = match range {
             None => None,
             Some(range) => {
@@ -390,7 +378,7 @@ impl<B: ObjectBucket> BlobStore for R2BlobStore<B> {
 
     async fn head(&self, key: &BlobKey) -> Result<Option<BlobMeta>, StoreError> {
         Ok(self
-            .head_len(&self.object_key(key))
+            .head_len(&self.object_key(key)?)
             .await?
             .map(|len| BlobMeta { len }))
     }
@@ -403,7 +391,7 @@ impl<B: ObjectBucket> BlobStore for R2BlobStore<B> {
     }
 
     async fn delete(&self, key: &BlobKey) -> Result<bool, StoreError> {
-        let object = self.object_key(key);
+        let object = self.object_key(key)?;
         if self.head_len(&object).await?.is_none() {
             return Ok(false);
         }

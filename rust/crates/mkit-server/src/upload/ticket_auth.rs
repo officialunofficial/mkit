@@ -14,6 +14,6 @@ pub(crate) fn verify_ticket(
     signer: &[u8; 32],
 ) -> Result<TicketClaims, ServerError> {
     let claims = keys.verify(token, now_ms)?;
-    claims.check_binding(audience, repository, signer, &claims.pack_id, claims.bytes)?;
+    claims.check_principal(audience, repository, signer)?;
     Ok(claims)
 }

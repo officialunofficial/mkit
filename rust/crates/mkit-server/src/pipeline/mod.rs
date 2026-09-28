@@ -363,7 +363,22 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         metrics: Arc<dyn Metrics>,
     ) -> Result<Self, ServerError> {
         cfg.validate_server_info_limits()?;
-        if !hooks.admission().is_default()
+        if matches!(cfg.addressing, Addressing::Multi(_))
+            && matches!(cfg.auth, AuthMode::TransportIdentity)
+        {
+            return Err(ServerError::invalid_argument(
+                "multi-repository deployments require auth v2 until transport identity carries tickets",
+            ));
+        }
+        if cfg.begin_upload_threshold_bytes != u64::MAX
+            && (!matches!(cfg.auth, AuthMode::AuthV2(_)) || cfg.ticket_keys.is_none())
+        {
+            return Err(ServerError::invalid_argument(
+                "a ticket threshold requires auth v2 and upload ticket keys",
+            ));
+        }
+        if !matches!(cfg.auth, AuthMode::TransportIdentity)
+            && !hooks.admission().is_default()
             && (!matches!(cfg.auth, AuthMode::AuthV2(_)) || cfg.ticket_keys.is_none())
         {
             return Err(ServerError::invalid_argument(

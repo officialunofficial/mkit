@@ -101,7 +101,7 @@ async fn upload_marker_uses_separate_key_under_prefix() {
     sink.write(Bytes::from_static(content)).await.unwrap();
     sink.commit().await.unwrap();
     let path = format!("{PREFIX}/upload-markers/v1/{}", marker.to_hex());
-    assert_eq!(s.object_key(&marker), path);
+    assert_eq!(s.object_key(&marker).unwrap(), path);
     assert_eq!(fake.object(DEFAULT_BUCKET, &path).unwrap(), &content[..]);
     assert!(
         s.head(&BlobKey::pack(hash(content)))
