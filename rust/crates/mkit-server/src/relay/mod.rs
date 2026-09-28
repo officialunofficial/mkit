@@ -13,11 +13,16 @@
 //! undelivered. The cycle end excludes new rows until the next cycle.
 //! Only delivery failures block targets; reaching the target budget pauses
 //! the cursor before the next target. Blocked targets are retried at each
-//! cycle start. With fewer than 32 failing targets preceding it, a healthy
-//! target is attempted within ⌈F / `max_targets`⌉ + ⌈R / (4 × `max_rows`)⌉ + 1
-//! fires, where F counts distinct targets and R counts rows ahead. Fires
-//! without delivery back off. This can exceed `RELAY_LAG_BOUND_MS` in time;
-//! WP-1.23c's `namespace_relay_watermark` must tolerate that lag.
+//! cycle start. A healthy target T is attempted within
+//! `⌈F / max_targets⌉ + ⌈R / (4 × max_rows)⌉ + ⌈Rₘₐₓ / b⌉ + 1` fires of the
+//! first cycle including T's row, while fewer than `MAX_BLOCKED_TARGETS`
+//! distinct failing targets precede it. F counts distinct targets ahead,
+//! R counts rows ahead, and Rₘₐₓ is the largest undelivered backlog of one
+//! preceding target. Under the Worker call cap, b is 96 rows per target per
+//! fire, or fewer for large rows. A mid-cycle append first waits for the
+//! next cycle. Fires without delivery back off. This can exceed
+//! `RELAY_LAG_BOUND_MS` in time; WP-1.23c's `namespace_relay_watermark`
+//! must tolerate that lag.
 
 mod deliver;
 mod hook;
@@ -40,8 +45,10 @@ pub struct RelayBudget {
     /// Maximum distinct targets attempted (default 16). Later targets pause
     /// the scan without joining the failed-target blocked set.
     pub max_targets: u32,
-    /// Optional maximum target store calls per target per fire. Workers use
-    /// two (one watermark get and one apply); native defaults to no cap.
+    /// Optional maximum target store calls per target per fire, clamped to
+    /// at least two. Workers use two (one watermark get and one apply), and
+    /// total calls per fire are bounded by this times `max_targets`; native
+    /// defaults to no cap.
     pub max_target_calls: Option<u32>,
 }
 impl Default for RelayBudget {

@@ -109,11 +109,20 @@ fn sql_soft_limit_reserves_space_for_guarded_relay_timer_reschedule() {
     let conn = RusqliteConn::open_in_memory().unwrap();
     let source = source();
     let old_timer = keys::timer(1, 3, b"");
+    let legacy_timer = keys::timer(4, 3, b"");
     let uncapped = SqlKvStore::open(conn.clone()).unwrap();
     assert_eq!(
         block_on(uncapped.apply(
             &source,
             Batch::new().put(old_timer.clone(), Value::default())
+        ))
+        .unwrap(),
+        BatchOutcome::Committed
+    );
+    assert_eq!(
+        block_on(uncapped.apply(
+            &source,
+            Batch::new().put(legacy_timer.clone(), codec::encode_u64(2))
         ))
         .unwrap(),
         BatchOutcome::Committed
@@ -149,6 +158,21 @@ fn sql_soft_limit_reserves_space_for_guarded_relay_timer_reschedule() {
                     .require(Precondition::Equals(next_timer.clone(), Value::default()))
                     .delete(next_timer)
                     .put(keys::timer(3, 2, b""), codec::encode_u64(2))
+            )
+        ),
+        Err(StoreError::Full)
+    ));
+    assert!(matches!(
+        block_on(
+            capped.apply(
+                &source,
+                Batch::new()
+                    .require(Precondition::Equals(
+                        legacy_timer.clone(),
+                        codec::encode_u64(2)
+                    ))
+                    .delete(legacy_timer)
+                    .put(keys::timer(5, 3, b""), Value::default())
             )
         ),
         Err(StoreError::Full)

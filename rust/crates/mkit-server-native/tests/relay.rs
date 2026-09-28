@@ -971,7 +971,7 @@ async fn sqlite_scan_state_guard_conflict_retries_without_deleting_rows() {
 }
 
 #[tokio::test]
-async fn sqlite_full_source_relay_timer_still_advances_past_a_failing_target() {
+async fn sqlite_full_source_relay_timer_reschedules_immediately_after_progress() {
     let conn = RusqliteConn::open_in_memory().unwrap();
     let source = FaultSql::with_store(SqlKvStore::open(conn.clone()).unwrap(), None);
     let partition = D34Shards.ref_shard(&repo(), "refs/heads/main");
@@ -989,8 +989,8 @@ async fn sqlite_full_source_relay_timer_still_advances_past_a_failing_target() {
     )
     .await;
     drop(source);
-    // Soft limit zero forbids ordinary puts. Relay cursor checkpoints and
-    // rescheduling must still progress within the hard-limit reserve.
+    // Soft limit zero forbids ordinary puts. The timer-move reserve keeps a
+    // successful relay fire on its immediate schedule after an earlier retry.
     let source = FaultSql::with_store(
         SqlKvStore::open_with_capacity(conn, Capacity::new(1 << 20).with_reserve(1 << 20)).unwrap(),
         None,
@@ -1014,6 +1014,11 @@ async fn sqlite_full_source_relay_timer_still_advances_past_a_failing_target() {
         .await
         .unwrap();
         if target.get(&b, &b_key).await.unwrap().is_some() {
+            assert_eq!(
+                report.next_wake_ms,
+                Some(now + 1),
+                "full-shard timer move must preserve the immediate next fire"
+            );
             break;
         }
         now = report.next_wake_ms.unwrap_or(now + 5_000).max(now + 1);

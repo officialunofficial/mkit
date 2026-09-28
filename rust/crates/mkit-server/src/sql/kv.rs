@@ -51,8 +51,9 @@ pub(super) fn get_many_sql(n: usize) -> String {
 /// [`StoreError::Full`] once the database uses [`Capacity::soft_limit`] bytes
 /// or more, checked inside its transaction. Delete-only batches and bounded,
 /// guarded relay-scan checkpoints and relay timer reschedules may use the
-/// reserve above that limit; a full ref shard must still be able to advance
-/// past a failed relay target.
+/// reserve above that limit. The timer exception preserves immediate relay
+/// rescheduling after progress on a full shard; without it the timer runner
+/// would retry after its 5-second backoff.
 /// An engine `Full` on a delete-only batch is reported as
 /// [`StoreError::Unavailable`], never `Full`.
 ///
@@ -238,9 +239,10 @@ fn is_relay_scan_checkpoint(batch: &Batch) -> bool {
     guarded && only_cleanup && scan_puts == 1
 }
 
-// A relay timer still has to reschedule on a full source, even when all
-// visible targets failed. The guarded old row is deleted before the empty
-// replacement; this exception cannot create another timer or write data.
+// Moving a relay timer after progress on a full source keeps its next fire
+// immediate instead of taking the runner's 5-second retry backoff. The
+// guarded old row is deleted before the empty replacement; this exception
+// cannot create another timer or write data.
 fn is_relay_timer_reschedule(batch: &Batch) -> bool {
     let (
         [Precondition::Equals(old_key, old_value)],
@@ -249,10 +251,7 @@ fn is_relay_timer_reschedule(batch: &Batch) -> bool {
     else {
         return false;
     };
-    if old_key != deleted
-        || (!old_value.as_bytes().is_empty() && codec::decode_u64(old_value).is_err())
-        || !new_value.as_bytes().is_empty()
-    {
+    if old_key != deleted || !old_value.as_bytes().is_empty() || !new_value.as_bytes().is_empty() {
         return false;
     }
     let (

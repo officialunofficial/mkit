@@ -18,7 +18,7 @@ use crate::timers::{
 // 128 MiB limit, even when rows approach MAX_VALUE_BYTES. The row/target budget
 // remains an upper bound; leftover rows schedule another tick.
 const MAX_FIRE_BYTES: usize = 4 * 1024 * 1024;
-const SCAN_PAGE_ROWS: u32 = 4;
+const SCAN_PAGE_ROWS: u32 = 64;
 
 type QueuedRow = (u64, RelayV1, Key, Value);
 type TargetRows = (Partition, Vec<QueuedRow>);
@@ -36,6 +36,13 @@ struct Dispatch {
     block: BTreeSet<Partition>,
     pause_at: Option<u64>,
     overflow_at: Option<u64>,
+}
+
+struct TargetResult {
+    completed: usize,
+    failed: bool,
+    selected: bool,
+    calls: u32,
 }
 
 /// Pushes a source's queued rows to a separately supplied target store.
@@ -152,7 +159,13 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
             pause_at: None,
             overflow_at: None,
         };
-        let mut selected = 0usize;
+        let mut selected = 0u32;
+        let mut calls = 0u32;
+        let max_targets = self.budget.max_targets.max(1);
+        // A duplicate-only group consumes a watermark read but no target
+        // slot. Keep those reads within the Worker's alarm subrequest budget.
+        let per_target_calls = self.budget.max_target_calls.map(|cap| cap.max(2));
+        let total_call_cap = per_target_calls.map(|cap| cap.saturating_mul(max_targets));
         // Groups are ordered by their first sequence. Reaching the target
         // budget pauses at the next new target without marking it blocked.
         for (target, rows) in groups {
@@ -162,33 +175,43 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
             if blocked.binary_search(target).is_ok() {
                 continue;
             }
-            if selected >= self.budget.max_targets.max(1) as usize {
+            let call_limit = match (per_target_calls, total_call_cap) {
+                (Some(per_target), Some(total)) => {
+                    Some(per_target.min(total.saturating_sub(calls)))
+                }
+                _ => None,
+            };
+            if call_limit == Some(0) {
                 progress.pause_at = Some(rows[0].0);
                 break;
             }
-            selected += 1;
             let target_rows = rows
                 .iter()
                 .map(|(seq, row, _, _)| (*seq, row.clone()))
                 .collect::<Vec<_>>();
-            let (count, failed) = self.deliver_target(target, rh, &target_rows).await;
-            progress
-                .delivered
-                .extend(rows.iter().take(count).map(|(seq, _, _, _)| *seq));
-            if failed {
+            let result = self
+                .deliver_target(target, rh, &target_rows, call_limit, selected < max_targets)
+                .await;
+            calls = calls.saturating_add(result.calls);
+            selected += u32::from(result.selected);
+            progress.delivered.extend(
+                rows.iter()
+                    .take(result.completed)
+                    .map(|(seq, _, _, _)| *seq),
+            );
+            if result.failed {
                 if blocked.len() + progress.block.len() == MAX_BLOCKED_TARGETS {
-                    progress.overflow_at = Some(rows[count].0);
+                    progress.overflow_at = Some(rows[result.completed].0);
                     break;
                 }
                 progress.block.insert(target.clone());
-            } else if count < rows.len() {
+            } else if result.completed < rows.len() {
                 // A healthy target cut by a row or Worker-call budget resumes
                 // at its own first unattempted row on the next fire.
-                progress.pause_at = Some(
-                    progress
-                        .pause_at
-                        .map_or(rows[count].0, |at| at.min(rows[count].0)),
-                );
+                progress.pause_at =
+                    Some(progress.pause_at.map_or(rows[result.completed].0, |at| {
+                        at.min(rows[result.completed].0)
+                    }));
             }
         }
         progress
@@ -200,16 +223,22 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
         target: &Partition,
         rh: &Key,
         rows: &[(u64, RelayV1)],
-    ) -> (usize, bool) {
-        let mut completed = 0;
-        let mut calls = 0u32;
-        while completed < rows.len() {
+        call_limit: Option<u32>,
+        allow_apply: bool,
+    ) -> TargetResult {
+        let mut result = TargetResult {
+            completed: 0,
+            failed: false,
+            selected: false,
+            calls: 0,
+        };
+        while result.completed < rows.len() {
             let mut committed = false;
             for _ in 0..2 {
-                if self.budget.max_target_calls.is_some_and(|cap| calls >= cap) {
-                    return (completed, false);
+                if call_limit.is_some_and(|cap| result.calls >= cap) {
+                    return result;
                 }
-                calls = calls.saturating_add(1);
+                result.calls = result.calls.saturating_add(1);
                 let snapshot = async {
                     let observed = self.target.get(target, rh).await?;
                     let hw = observed
@@ -224,82 +253,99 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
                     Ok(snapshot) => snapshot,
                     Err(error) => {
                         tracing::warn!(?target, %error, "relay watermark read failed");
-                        return (completed, true);
+                        result.failed = true;
+                        result.selected = true;
+                        return result;
                     }
                 };
-                while completed < rows.len() && rows[completed].0 <= hw {
-                    completed += 1;
+                while result.completed < rows.len() && rows[result.completed].0 <= hw {
+                    result.completed += 1;
                 }
-                if completed == rows.len() {
-                    return (completed, false);
+                if result.completed == rows.len() || !allow_apply {
+                    return result;
                 }
-                let mut batch = Batch::new().require(match observed {
-                    Some(value) => Precondition::Equals(rh.clone(), value),
-                    None => Precondition::Absent(rh.clone()),
-                });
-                let mut end = completed + fitting_prefix(&batch, rh, &rows[completed..]);
-                if end == completed {
-                    tracing::warn!(
-                        seq = rows[completed].0,
-                        "relay row cannot fit one target batch; delivery to this target is stalled"
-                    );
-                    return (completed, true);
-                }
-                // A hook can use more space than the remaining headroom. Shrink
-                // a combined group rather than stalling rows that fit individually.
-                loop {
-                    let snapshot = match &batch.preconditions[0] {
-                        Precondition::Equals(_, value) => Some(value),
-                        _ => None,
-                    };
-                    let mut extended = target_batch(rh, snapshot, &rows[completed..end]);
-                    if let Err(error) = self
-                        .hook
-                        .before_apply(
-                            target,
-                            &rows[completed..end],
-                            &mut extended.preconditions,
-                            &mut extended.writes,
-                        )
-                        .await
-                    {
-                        tracing::warn!(?target, %error, "relay hook failed");
-                        return (completed, true);
-                    }
-                    if let Err(error) = extended.validate(&self.target.capabilities()) {
-                        if matches!(error, StoreError::Invalid(_)) && end > completed + 1 {
-                            end = completed + (end - completed) / 2;
-                            continue;
-                        }
-                        tracing::warn!(?target, %error, "relay target batch invalid");
-                        return (completed, true);
-                    }
-                    batch = extended;
-                    break;
-                }
+                result.selected = true;
+                let Some((batch, end)) = self
+                    .prepare_target_batch(target, rh, rows, observed.as_ref(), result.completed)
+                    .await
+                else {
+                    result.failed = true;
+                    return result;
+                };
                 // Hook additions share the apply's atomicity and size boundary.
-                if self.budget.max_target_calls.is_some_and(|cap| calls >= cap) {
-                    return (completed, false);
+                if call_limit.is_some_and(|cap| result.calls >= cap) {
+                    return result;
                 }
-                calls = calls.saturating_add(1);
+                result.calls = result.calls.saturating_add(1);
                 match self.target.apply(target, batch).await {
                     Ok(BatchOutcome::Committed) => {
-                        completed = end;
+                        result.completed = end;
                         committed = true;
                         break;
                     }
                     Ok(BatchOutcome::PreconditionFailed { .. }) => {}
                     other => {
                         tracing::warn!(?target, ?other, "relay target apply failed");
-                        return (completed, true);
+                        result.failed = true;
+                        return result;
                     }
                 }
             }
             if !committed {
-                return (completed, true);
+                result.failed = true;
+                return result;
             }
         }
-        (completed, false)
+        result
+    }
+
+    async fn prepare_target_batch(
+        &self,
+        target: &Partition,
+        rh: &Key,
+        rows: &[(u64, RelayV1)],
+        observed: Option<&Value>,
+        start: usize,
+    ) -> Option<(Batch, usize)> {
+        let base = Batch::new().require(match observed {
+            Some(value) => Precondition::Equals(rh.clone(), value.clone()),
+            None => Precondition::Absent(rh.clone()),
+        });
+        let mut end = start + fitting_prefix(&base, rh, &rows[start..]);
+        if end == start {
+            tracing::warn!(
+                seq = rows[start].0,
+                "relay row cannot fit one target batch; delivery to this target is stalled"
+            );
+            return None;
+        }
+        // A hook can use more space than the remaining headroom. Shrink a
+        // combined group rather than stalling rows that fit individually.
+        loop {
+            let mut batch = target_batch(rh, observed, &rows[start..end]);
+            if let Err(error) = self
+                .hook
+                .before_apply(
+                    target,
+                    &rows[start..end],
+                    &mut batch.preconditions,
+                    &mut batch.writes,
+                )
+                .await
+            {
+                tracing::warn!(?target, %error, "relay hook failed");
+                return None;
+            }
+            if let Err(error) = batch.validate(&self.target.capabilities()) {
+                if matches!(error, StoreError::Invalid(_)) && end > start + 1 {
+                    end = start + (end - start) / 2;
+                    continue;
+                }
+                tracing::warn!(?target, %error, "relay target batch invalid");
+                return None;
+            }
+            return Some((batch, end));
+        }
     }
 }
 
@@ -424,6 +470,7 @@ async fn checkpoint_window<S: NamespaceStore>(
         }
         staged = next;
     }
+    let stopped_after = staged.cursor;
     if overflow {
         // Terminal marker: the next fire starts from the head with an empty
         // blocked set. The row that would exceed the cap is retained.
@@ -432,6 +479,38 @@ async fn checkpoint_window<S: NamespaceStore>(
         // No more queued rows exist in this cycle's bounded sequence range;
         // missing sequence numbers are holes left by prior cleanup.
         staged.cursor = staged.cycle_end;
+    }
+    // Target batches can contain rows beyond a later target's pause or
+    // overflow point. Their target watermark already covers those rows, so
+    // delete them now instead of spending another fire on duplicate groups.
+    // The cursor still stops before the uninspected row.
+    for (seq, _, key, value) in &window.rows {
+        if *seq <= stopped_after || !dispatch.delivered.contains(seq) {
+            continue;
+        }
+        let mut candidate = deletions.clone();
+        candidate.push((key.clone(), value.clone()));
+        if checkpoint_batch(rs_key, observed.as_ref(), &staged, &candidate)?
+            .validate(&ctx.store.capabilities())
+            .is_err()
+        {
+            if deletions.is_empty()
+                || !apply_checkpoint(ctx, rs_key, observed, &staged, &deletions).await?
+            {
+                return Ok(false);
+            }
+            deletions.clear();
+            checkpoint_batch(
+                rs_key,
+                observed.as_ref(),
+                &staged,
+                &[(key.clone(), value.clone())],
+            )?
+            .validate(&ctx.store.capabilities())?;
+            deletions.push((key.clone(), value.clone()));
+        } else {
+            deletions = candidate;
+        }
     }
     if !apply_checkpoint(ctx, rs_key, observed, &staged, &deletions).await? {
         return Ok(false);

@@ -74,13 +74,15 @@ train).
   the same repository's ref shard. Invalid hints are ignored; Single reads and
   the Multi upload guard retain their behavior (WP-1.23b).
 - *(worker)* Register relay delivery on RefShard, with bounded target calls
-  and plan-specific alarm budgets. Relay fires inspect past blocked targets,
-  pause at the target budget, and deliver the decodable prefix before corruption.
-  Coordinator relay watermarks follow in WP-1.23c (R-106).
+  and plan-specific alarm budgets. Coordinator relay watermarks follow in
+  WP-1.23c (R-106).
 - *(server)* Persist source relay scan progress in `rs 00`, with a cap of 32
-  failed targets per cycle. Guarded scan checkpoints and exact relay timer
-  reschedules can use SQL's soft-capacity reserve so a full shard can drain
-  and retry; ordinary puts still fail at the cap.
+  failed targets per cycle. Relay fires inspect past blocked targets, pause at
+  the target budget, delete every delivered row in the guarded checkpoint,
+  and deliver the decodable prefix before corruption. Guarded scan checkpoints
+  and exact empty-value relay timer reschedules can use SQL's soft-capacity
+  reserve; the timer exception keeps the next fire immediate after progress
+  on a full shard. Ordinary puts still fail at the cap.
 
 - *(server)* Add source-side outbox relay kind 3, ordered target batches,
   persistent per-source `rh` deduplication watermarks, atomic pre-delivery hooks,
