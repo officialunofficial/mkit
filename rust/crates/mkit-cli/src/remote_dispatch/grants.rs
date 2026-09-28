@@ -81,8 +81,13 @@ impl LocalGrants {
                         let mut rank = usize::MAX;
                         for reference in refs {
                             // Packmap refs are covered through the head ref. Their own
-                            // condition does not impose a second flag requirement.
-                            if packmap_head(reference.name).is_some() {
+                            // condition does not impose a second flag requirement, but
+                            // the head must be in the same request (§8.3: the server
+                            // denies a packmap write without its head).
+                            if let Some(head) = packmap_head(reference.name) {
+                                if !refs.iter().any(|other| other.name == head) {
+                                    return None;
+                                }
                                 continue;
                             }
                             let name = reference.name;
@@ -116,9 +121,10 @@ impl LocalGrants {
                     (capability_rank, repo_rank, ref_rank, grant.expiry_ms),
                 ))
             })
-            // Equal capability, scope, specificity and expiry select the last
-            // grant in source order.
-            .max_by_key(|(_, rank)| *rank)
+            // Equal capability, scope, specificity and expiry fall back to the
+            // greater header bytes, so the choice never depends on the store's
+            // iteration order.
+            .max_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.header.cmp(&b.0.header)))
             .map(|(candidate, _)| candidate.header.clone())
     }
 }
@@ -373,6 +379,15 @@ mod tests {
             "refs/mkit/packmap/main",
             GrantCondition::Match,
         )];
+        // A packmap write without its head is never sent with a grant (§8.3).
+        assert_eq!(
+            source.select_at(&request(GrantOperation::Write { refs: &refs }), NOW),
+            None
+        );
+        let refs = [
+            GrantRef::new("refs/heads/main", GrantCondition::Match),
+            GrantRef::new("refs/mkit/packmap/main", GrantCondition::Match),
+        ];
         assert_eq!(
             source.select_at(&request(GrantOperation::Write { refs: &refs }), NOW),
             Some(exact)
@@ -436,7 +451,7 @@ mod tests {
     }
 
     #[test]
-    fn write_ranking_expiry_then_last_source_entry_on_full_tie() {
+    fn write_ranking_expiry_then_header_bytes_on_full_tie() {
         let earlier = header(
             &format!("{NS}/photos"),
             "write",
@@ -470,9 +485,15 @@ mod tests {
             LocalGrants::from_headers(vec![later.clone(), earlier]).select_at(&request, NOW),
             Some(later.clone()),
         );
+        // A full tie picks the greater header bytes in either source order.
+        let winner = std::cmp::max(later.clone(), tied.clone());
         assert_eq!(
-            LocalGrants::from_headers(vec![later, tied.clone()]).select_at(&request, NOW),
-            Some(tied),
+            LocalGrants::from_headers(vec![later.clone(), tied.clone()]).select_at(&request, NOW),
+            Some(winner.clone()),
+        );
+        assert_eq!(
+            LocalGrants::from_headers(vec![tied, later]).select_at(&request, NOW),
+            Some(winner),
         );
     }
 }

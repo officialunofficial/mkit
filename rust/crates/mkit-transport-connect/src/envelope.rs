@@ -86,6 +86,9 @@ fn procedure_auth(procedure: &str) -> Option<ProcedureAuth> {
     Some(match method {
         "ListRefs" | "ReadRef" | "PackExists" | "DownloadPack" | "IssueObjectUrl"
         | "GetReceipt" | "UpdateRef" | "AdvanceRefs" | "BeginUpload" | "CompleteUpload"
+        // TODO(WP-2.9 client): SetRepoVisibility's `signed_statement` mode
+        // carries no auth v2 envelope (SPEC-WRITE-GRANTS §9.1); its client must
+        // make this mode-aware or send statements through an unsigned transport.
         | "SetRepoVisibility" => ProcedureAuth::Body,
         "UploadPack" => ProcedureAuth::Commitment("pack:"),
         "UploadPart" => ProcedureAuth::Commitment("part:"),
