@@ -118,11 +118,9 @@ fn admission_requires_auth_v2_and_ticket_keys_at_startup() {
 }
 
 #[test]
-fn transport_identity_admission_sibling_starts() {
-    let mut c = cfg(authv2());
-    c.ticket_keys =
-        Some(crate::upload::token::TicketKeys::new(vec![("test".into(), [7; 32])]).unwrap());
-    let http = Pipeline::new(
+fn transport_identity_admission_starts() {
+    let c = cfg(AuthMode::TransportIdentity);
+    let enc = Pipeline::new(
         MemoryBlobStore::default(),
         store(&clock()),
         with_admission(Fixed(AdmissionDecision::allow(Vec::new()))),
@@ -131,7 +129,6 @@ fn transport_identity_admission_sibling_starts() {
         Arc::new(crate::NoopMetrics),
     )
     .unwrap();
-    let enc = http.with_auth(AuthMode::TransportIdentity).unwrap();
     assert_eq!(enc.server_info().begin_upload_threshold_bytes, 0);
 }
 
@@ -158,7 +155,7 @@ fn finite_ticket_threshold_requires_auth_v2_and_keys() {
 }
 
 #[test]
-fn multi_transport_identity_is_refused_directly_and_as_a_sibling() {
+fn multi_transport_identity_is_refused_at_startup() {
     let mut c = cfg(AuthMode::TransportIdentity);
     c.addressing = Addressing::Multi(MultiAddressing::new());
     c.write_policy = WritePolicy::Owner;
@@ -166,30 +163,11 @@ fn multi_transport_identity_is_refused_directly_and_as_a_sibling() {
         MemoryBlobStore::default(),
         store(&clock()),
         Hooks::new(),
-        c.clone(),
-        clock(),
-        Arc::new(crate::NoopMetrics),
-    )
-    .unwrap_err();
-    assert_eq!(err.code(), Code::InvalidArgument);
-    assert_eq!(
-        err.public_message(),
-        "multi-repository deployments require auth v2 until transport identity carries tickets"
-    );
-
-    c.auth = AuthMode::AuthV2(AuthV2Config::new(AUDIENCE, "").unwrap());
-    c.ticket_keys =
-        Some(crate::upload::token::TicketKeys::new(vec![("test".into(), [7; 32])]).unwrap());
-    let http = Pipeline::new(
-        MemoryBlobStore::default(),
-        store(&clock()),
-        Hooks::new(),
         c,
         clock(),
         Arc::new(crate::NoopMetrics),
     )
-    .unwrap();
-    let err = http.with_auth(AuthMode::TransportIdentity).unwrap_err();
+    .unwrap_err();
     assert_eq!(err.code(), Code::InvalidArgument);
     assert_eq!(
         err.public_message(),

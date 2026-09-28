@@ -69,6 +69,8 @@ impl BlobKey {
     /// # Errors
     /// [`StoreError::Invalid`] for a namespace this backend does not support.
     pub fn relative_path(&self, pack_keyspace: &str) -> Result<String, StoreError> {
+        // The fallback handles future BlobNamespace variants without a backend panic.
+        #[allow(unreachable_patterns)]
         let directory = match self.namespace {
             BlobNamespace::Pack => pack_keyspace.to_owned(),
             BlobNamespace::UploadMarker => {

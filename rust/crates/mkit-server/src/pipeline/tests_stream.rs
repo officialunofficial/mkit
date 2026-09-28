@@ -209,7 +209,9 @@ fn upload_threshold_enforced_before_store_and_transport_identity_exempt() {
     let calls = env.pipe.meta.calls();
     for len in [8, 9] {
         let data = pack(len);
-        let a = env.auth(&Req::unsigned(Procedure::UploadPack)).unwrap();
+        let a = env
+            .auth(&signed_upload(&key(7), &data, len as u32))
+            .unwrap();
         let err = block_on(
             env.pipe
                 .open_upload(&a, Some(&hash(&data)), Some(len as u64)),
@@ -228,7 +230,7 @@ fn upload_threshold_enforced_before_store_and_transport_identity_exempt() {
     c.ticket_keys = Some(TicketKeys::new(vec![("test".into(), [9; 32])]).unwrap());
     c.begin_upload_threshold_bytes = 0;
     let zero = build(c, Spy::new(store(&zero_clock)), Hooks::new(), zero_clock);
-    let a = zero.auth(&Req::unsigned(Procedure::UploadPack)).unwrap();
+    let a = zero.auth(&signed_upload(&key(7), b"", 1)).unwrap();
     let err = block_on(zero.pipe.open_upload(&a, Some(&hash(b"")), Some(0))).unwrap_err();
     assert_eq!(err.code(), Code::FailedPrecondition);
     assert_eq!(zero.pipe.meta.calls(), 0);

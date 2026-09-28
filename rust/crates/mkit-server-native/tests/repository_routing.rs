@@ -4,6 +4,8 @@
 
 use std::sync::Arc;
 
+use bytes::Bytes;
+use mkit_core::hash::hash;
 use mkit_core::protocol::{PackKey, RefWriteCondition};
 use mkit_core::repo_identity::Namespace;
 use mkit_server::auth_v2::AuthV2Config;
@@ -11,6 +13,7 @@ use mkit_server::pipeline::Hooks;
 use mkit_server::pipeline::{AuthMode, Authenticated, Pipeline, PipelineConfig, RequestMeta};
 use mkit_server::policy::NamespacePolicy;
 use mkit_server::sql::SqlKvStore;
+use mkit_server::store::{BlobKey, BlobStore, PackSink};
 use mkit_server::upload::UploadLimits;
 use mkit_server::{
     Addressing, Code, MultiAddressing, NamespaceStore, NoopMetrics, Procedure, RefUpdate,
@@ -84,8 +87,22 @@ async fn isolation<N: NamespaceStore + 'static>(meta: N) {
         },
     );
     config.write_quota = None;
+    let blobs = MemoryBlobStore::default();
+    let marker_content = b"marker bytes in the separate blob namespace";
+    let marker_hash = hash(marker_content);
+    let mut sink = blobs
+        .begin(
+            BlobKey::upload_marker(marker_hash),
+            marker_content.len() as u64,
+        )
+        .await
+        .unwrap();
+    sink.write(Bytes::from_static(marker_content))
+        .await
+        .unwrap();
+    sink.commit().await.unwrap();
     let pipe = Pipeline::new(
-        MemoryBlobStore::default(),
+        blobs,
         meta,
         Hooks::new(),
         config,
@@ -98,7 +115,7 @@ async fn isolation<N: NamespaceStore + 'static>(meta: N) {
         // Also exercise different names inside the SAME namespace partition.
         let b = format!("{}/{name_b}", if name_a == "near" { &ns_a } else { &ns_b });
         isolated_pair(&pipe, &a, &b).await;
-        missing_and_pack_guards(&pipe, &ns_a, &a).await;
+        missing_and_pack_guards(&pipe, &ns_a, &a, marker_hash).await;
     }
 }
 
@@ -180,6 +197,7 @@ async fn missing_and_pack_guards<N: NamespaceStore>(
     pipe: &Pipeline<MemoryBlobStore, N>,
     ns_a: &str,
     existing: &str,
+    marker_hash: [u8; 32],
 ) {
     let missing = format!("{ns_a}/missing");
     assert_eq!(
@@ -237,6 +255,26 @@ async fn missing_and_pack_guards<N: NamespaceStore>(
             Code::FailedPrecondition
         );
     }
+    let marker_key = PackKey(marker_hash);
+    assert!(
+        !pipe
+            .pack_exists(
+                &read_auth(pipe, Procedure::PackExists, existing),
+                marker_key
+            )
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        pipe.download(
+            &read_auth(pipe, Procedure::DownloadPack, existing),
+            marker_key,
+        )
+        .await
+        .unwrap_err()
+        .code(),
+        Code::NotFound
+    );
 }
 
 #[tokio::test]
