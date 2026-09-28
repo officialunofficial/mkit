@@ -1071,6 +1071,15 @@ Remote / sync:
   "up_to_date":<bool>}` on success, or `{"ok":false,"rejected":true,
   "branch":"...","error":"..."}` on a non-fast-forward (CAS) rejection
   (`{"ok":false,"error":"..."}` for any other failure).
+  On a V2 Connect remote, pushes at or above its advertised upload threshold
+  open a signed ticket for each data pack and packmap node, then consume those
+  tickets with the branch advance. A single advance can carry six data packs;
+  a larger push asks you to push an ancestor commit first or have the operator
+  raise `max_pack_bytes`. Large packs upload in parts. Receipt files in the
+  repository's common `upload-parts/` cache let the next `mkit push` resume
+  the parts already accepted, provided the regenerated push plan is identical.
+  After an interruption, run `mkit push` again to resume; the message reports
+  how many parts were saved. Legacy Connect remotes use the existing upload path.
 - **Transfer progress (#711).** `clone`/`push`/`pull`/`fetch` stream a
   live, honest progress line on stderr while the network transfer runs &mdash;
   `Writing objects: N objects, B bytes` while building/uploading the

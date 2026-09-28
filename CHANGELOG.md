@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Connect push: BeginUpload tickets now follow each pack into AdvanceRefs, with
+  bounded membership polling, nonce renewal, a six-data-pack advance limit,
+  and a one-time re-plan for ticket, packlist, or delta-base failures (WP-1.17).
+- Connect push: large ticketed packs stream resumable parts with locally saved
+  receipts, progress and an interruption hint; non-multipart deployments now
+  advertise a compatible pack limit (WP-1.18).
+
 - Connect client: sign repository reads with auth v2 on each attempt, including
   the framed `DownloadPack` request. Add a grant-source API and local selection
   logic; the user grant store follows in WP-2.13.
