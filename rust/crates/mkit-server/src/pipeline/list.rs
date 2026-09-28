@@ -28,6 +28,9 @@ pub(super) struct Scan {
     pub more: bool,
 }
 
+/// A source owns its key class and partition. It scans the normalized prefix
+/// range strictly after `last`, returning full names in key order. `more`
+/// means additional rows may remain beyond the last fetched key.
 pub(super) trait BucketSource {
     fn scan(
         &self,
