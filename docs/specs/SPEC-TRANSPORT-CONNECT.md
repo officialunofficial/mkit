@@ -138,6 +138,7 @@ same trait `mkit-transport-http`/`-s3`/`-ssh`/`-enc` implement today.
 | `upload_blob(bytes, key)` (default impl: delegates to `upload_pack`) | *(none &mdash; client calls `UploadPack`)* | &mdash; |
 | `download_blob(key)` (default impl: delegates to `download_pack`) | *(none &mdash; client calls `DownloadPack`)* | &mdash; |
 | *(none &mdash; deployment discovery, M1)* | `GetServerInfo` (§2.1) | unary |
+| *(none &mdash; retained storage receipt, M5)* | `GetReceipt` (§2.2) | unary |
 | *(none &mdash; upload ticket, M1)* | `BeginUpload` (§7.6) | unary |
 | *(none &mdash; one part of a ticketed upload, M1)* | `UploadPart` (§7.6) | client-streaming |
 | *(none &mdash; completes a multipart upload, M1)* | `CompleteUpload` (§7.6) | unary |
@@ -191,7 +192,7 @@ headers or a bearer token. The response MAY be cached with
 | `atomic_advance` | Whether `AdvanceRefs` commits the head and packmap atomically (§4). |
 | `indexed_mode` | Whether the deployment decodes and verifies pushed packs before refs move. |
 | `admission` | Whether the deployment runs an admission step that can challenge a request (§5.1). When it is true, `begin_upload_threshold_bytes` is `0`. |
-| `receipt_public_key`, `receipt_key_id` | The key that signs storage receipts, and its key id. Empty until storage receipts are specified. |
+| `receipt_public_key`, `receipt_key_id` | Raw 32-byte current receipt-and-notice signing public key and its 64-lowercase-hex BLAKE3 key id (SPEC-SERVER §15.5). Both empty when receipts are disabled. Historical keys are in the well-known list, not this response. |
 | `grant_schemes` | The owner signature schemes the deployment accepts on grants and epoch statements ([SPEC-WRITE-GRANTS §4](SPEC-WRITE-GRANTS.md#4-owner-signature-schemes)). Empty on a deployment that accepts no grants. |
 | `namespace_policy` | `allowlist`, `any`, or `single-repository` (§7.5). `single-repository` is advertised, never configured. |
 | `index_fanout` | The fixed object-id-prefix fan-out of the deployment's repository index (§7.9). The default is 4096. |
@@ -202,6 +203,33 @@ headers or a bearer token. The response MAY be cached with
 A client MUST NOT assume atomic advance without `atomic_advance = true`
 from this call. `atomic_advance` replaces the client-side opt-in of v1
 (§7.3): a client reads it here instead of from local configuration.
+
+### 2.2 `GetReceipt`
+
+`GetReceipt` is a signed read (STC §7.1) that requires the
+[SPEC-SERVER §10.1](SPEC-SERVER.md#101-callers-view) writer view for the
+repository selected under §7.4. A caller without that view receives
+`not_found`, byte-identical to a missing receipt. It remains subject to
+ordinary authorization, lease, suspension, and takedown enforcement.
+`GetReceiptRequest` MUST select exactly one oneof arm:
+
+| Selector | Fields | Meaning |
+|---|---|---|
+| `advance = 1` | `ref` (full ref name), `advance_sequence` (u64) | Retrieve that advance's storage receipt; `0` selects the latest retained advance receipt for the ref. |
+| `lease = 2` | `ref` (full ref or empty), `lease_version` (u64) | Retrieve that lease storage receipt; empty ref selects repository scope and `0` selects the latest retained version for that scope. |
+
+An absent selector, an empty advance ref, or an invalid nonempty ref is
+`invalid_argument`.
+`GetReceiptResponse.receipt = 1` contains the complete DSSE envelope
+JSON as bytes, identical to the bytes returned at issue or replay.
+If receipts are disabled or the selected version was never issued or
+has passed the deployment's `receipt_retention`, the call returns
+`not_found`. The server MUST retain the latest receipt per ref,
+including a deletion, and per lease scope as SPEC-SERVER §15.6
+requires. This read allocates no
+write replay entry and does not expose the reader's published-view
+state. SSH and enc clients use this Connect RPC to fetch storage
+receipts; their own wire schemas do not change.
 
 ---
 
@@ -226,7 +254,7 @@ Unlike the SSH wire's `Error.details` (an opaque, not-client-consumed
 carrier for the current ref value, per SPEC-TRANSPORT §4.2.1) and
 `mkit.repo.v1.UpdateRefResponse.current_id` (which *is*
 client-consumed), `UpdateRefResponse` on this service carries **no**
-current-value field at all: a CAS failure is a Connect error
+current-value field: a CAS failure is a Connect error
 (`failed_precondition`), full stop. This is a deliberate
 simplification, not an oversight &mdash; SPEC-TRANSPORT §7 already requires
 callers to disambiguate a possibly-lost write with a follow-up
@@ -235,6 +263,12 @@ value-carrying channel on the CAS-conflict path adds a field no
 conforming client is allowed to trust as authoritative on its own.
 `ReadRef` is the one source of truth for "what is the ref's current
 value," called explicitly, every time.
+
+On a committed update, `UpdateRefResponse.receipt = 1` contains the
+complete §15 storage-receipt DSSE envelope JSON bytes. It is empty
+when receipts are disabled. A CAS or validation failure returns a
+Connect error, so no receipt is issued. The field attests the live
+advance, including deletion, and says nothing about publication.
 
 `update_ref`'s trait doc requires: "callers retrying after a network
 timeout MUST follow up with `read_ref` to disambiguate whether the
@@ -283,6 +317,13 @@ than a boolean success/CAS-conflict split (see
 `protocol.rs`'s `AdvanceOutcome`), so the wire follows the same shape
 instead of forcing a three-way outcome through a two-way (success /
 error) channel.
+
+`AdvanceRefsResponse.receipt = 2` contains the complete §15
+storage-receipt DSSE envelope JSON bytes on a committed outcome. It
+MUST be empty on either conflict and when receipts are disabled. The
+receipt attests the live committed pair; it reveals no inspection or
+publication state. On authenticated replay of a committed operation,
+the server returns the identical receipt envelope bytes.
 
 Per `Transport::supports_atomic_advance`'s doc comment, a server
 backed by a transactional ref store (a single Durable Object
@@ -820,7 +861,8 @@ and the signature does not bind it.
 
 **Signed reads.** The same contract signs read RPCs
 ([SPEC-WRITE-GRANTS §9.2](SPEC-WRITE-GRANTS.md#92-signed-reads)):
-`ListRefs`, `ReadRef`, `PackExists`, `DownloadPack` and `IssueObjectUrl`,
+`ListRefs`, `ReadRef`, `PackExists`, `DownloadPack`, `IssueObjectUrl`,
+and `GetReceipt`,
 each with a `body:` commitment over the exact request body. A client
 that has a signer for a remote MUST sign every read RPC to it. A request that carries any auth v2 header MUST verify in full, or it
 is `unauthenticated`. A signed read is idempotent: the server checks the
@@ -1532,6 +1574,7 @@ Explicitly deferred to sibling issues:
 | `2` | draft | §7.4 repository addressing; §7.5 namespace and write policy (owner key); `GetServerInfo` (§2.1); §7.6 upload tickets and resumable parts; §7.8 ref deletion; §7.9 consistency and `ListRefs` paging; error-code split between `unauthenticated` and `permission_denied` (§5) (mkit#1084, mkit#1090); SPEC-WRITE-GRANTS (mkit#1085): signed reads and `X-Write-Grant` (§7.1), the M2 RPC rows (§2), and grant cross-references. §5.1 admission challenges: HTTP 402 with `permission_denied` and an opaque challenge list, raw MPP/x402 header pass-through, the header-returning `admission_helper` with its allowlist and hard-reserved set; §7.1 replay lookup after authentication and before authorization and admission, with signed reads outside the ledger; retryable `aborted` for in-flight operations (§5); §7.7 lifecycle per RPC (mkit#1086). The M0 server implementation still resumes an interrupted `UploadPack` through its `in_flight` replay record until M1 tickets land. M1: branch-sharded servers MAY require the canonical `AdvanceRefs` head/packmap pairing (§4; WP-1.22 amendment 1). Indexed mode: PendingVerification polling with a 1,000 ms floor (§5, §7.6), delta-base mapping and self-contained replanning in a new signed operation (§5, §7.6), packlist rebuilding (§7.6), advertised max_delta_chain_depth (§2.1), and the membership-dependent lag window and replay exclusion (§7.1, §7.9; SPEC-SERVER §9.4). BeginUpload open-ticket cap error and client no-retry carve-out (§5), and admission-free AlreadyPresent/live-ticket results (§7.6; WP-1.9a amendment 1). WP-4.11 scopes §7.4's Host/path/forwarded-selector prohibition to Connect RPCs and cross-links plain HTTP read admission (§5.1). |
 | `2` | draft | Additive `GetServerInfoResponse.leases = 17` (§2.1; SPEC-SERVER §12); §7.7 ticket-pack loss clarified as a defensive abort case. |
 | `2` | draft | Additive `GetServerInfoResponse.async_inspection = 18` (§2.1); published-view and quarantine rules in SPEC-SERVER §§10–11; §7.1 never stores a sync inspector `unavailable` for replay; §7.6 `AlreadyPresent` is never answered for a pack with hidden content. |
+| `2` | draft | Additive `GetReceipt` signed writer-view read (§2.2), storage-receipt fields on `UpdateRefResponse` and `AdvanceRefsResponse` (§§3–4), and current receipt-and-notice key semantics in `GetServerInfo` (§2.1); SPEC-SERVER §15. |
 | `1` | draft | Initial `mkit.transport.v1` proto: 7 wire RPCs covering every `Transport` trait verb (§2), `PackChunk` reused byte-for-byte from `ssh.proto`, `RefExpectation`/`RefEntry` duplicated with pinned wire numbers pending mkit#679's shared-proto extraction. |
 
 ---

@@ -94,6 +94,14 @@ impl TestService {
 
 #[allow(refining_impl_trait)]
 impl generated::TransportService for TestService {
+    async fn get_receipt(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, generated::GetReceiptRequest>,
+    ) -> ServiceResult<generated::GetReceiptResponse> {
+        Err(ConnectError::unimplemented("not implemented yet"))
+    }
+
     async fn get_server_info(
         &self,
         ctx: RequestContext,

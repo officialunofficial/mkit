@@ -41,9 +41,10 @@ policy, moderation policy, or the deployment's account model.
 their verification, and the preconditions they carry into apply.
 
 Sections 10–18 cover the M5 contracts: §§10–11 specify the published view
-and inspection, and §§12–13 specify storage leases, lifecycle events, and
-server garbage collection. The other M5 sections remain reserved. Inspection
-fields extend the original hook shape additively.
+and inspection, §§12–13 specify storage leases, lifecycle events, and
+server garbage collection, and §15 specifies storage receipts. The other M5
+sections remain reserved. Inspection and receipt fields extend the original
+hook and transport shapes additively.
 For a branch, its head and packmap share one publication sequence even
 when either is written through `UpdateRef` (§10.2).
 
@@ -75,8 +76,8 @@ as STC §7.1 requires; this list names server-internal extension points.
    including inspection configured to run synchronously before apply.
 6. **Atomic apply.** Apply the operation with its preconditions and
    applicable outbox rows in the atomic unit specified by §3 and §5.
-7. **Receipt signing.** Produce a receipt when the deployment enables
-   receipt signing for the committed operation.
+7. **Storage receipt signing.** Produce the §15 storage receipt when the
+   deployment enables receipt signing for the committed operation.
 8. **Outcome delivery.** Deliver the durable outcome to the configured
    sink under §5 and, for remote hooks, §6.5 and §8.
 9. **Asynchronous inspection and lifecycle events.** Run configured
@@ -98,7 +99,8 @@ identity, authorization, and optional admission decisions use the
 applicable stages without allocating replay state.
 
 Informative: stage 6 is the commit point for the operation's guarded
-effects. Receipt signing and delivery may happen later. An outcome
+effects. Storage receipt signing and delivery may happen later; §15 fixes
+the statement bytes at apply. An outcome
 delivery failure does not undo an already committed operation.
 
 ## 3. Per-RPC lifecycle
@@ -484,6 +486,9 @@ returns internal quota charges; a remote admission returns none.
 identifies the deployment reservation that the server records and uses
 to key its terminal outcome. `AdmitAllow.response_headers` contains
 the allowed receipt headers defined in §6.6.
+`AdmitAllow.external_ref` is an optional implementer-supplied reference
+to its own contract or payment receipt. The server carries it beside the
+reservation id in a later storage receipt (§15); it does not interpret it.
 
 `AdmitChallenge.challenges` contains the deployment's opaque challenges
 in order of preference. Each `Challenge.scheme` names the external
@@ -652,6 +657,10 @@ violating any response limit below is invalid and MUST be handled under
   different operation or for a retry of the same one, it MUST treat the
   response as invalid under §8. A hook MUST return a fresh id for each
   allowance.
+- `AdmitAllow.external_ref`, when present, MUST be at most 256 bytes of
+  visible ASCII (`0x21`–`0x7e`). The implementer MUST keep credentials,
+  bearer tokens, and other secrets out of it: it is copied into a
+  client-visible storage receipt (§15).
 - `InspectQuarantine.reason` MUST be at most 512 bytes.
 - Inspect responses MUST satisfy the phase and flagged-id rules of §6.4.
 
@@ -1689,8 +1698,10 @@ Removing a repository default makes undeleted refs without per-ref
 terms permanent. Removing per-ref terms restores the repository default,
 or permanent retention if that default is absent. Both actions MUST NOT
 resurrect a deleted lease. Every SetLease action MUST be audited.
-The admin API wire, authentication, and audit-log details are reserved
-for §16; this section defines its semantics only.
+Changes to terms or overrides issue a §15 lease storage receipt; an
+`EXPIRY` transition does not. The admin API wire, authentication, and
+audit-log details are reserved for §16; this section defines its
+semantics only.
 
 In indexed mode, the server MUST consult a deployment storage-lease
 policy hook only when creating a ref with no lease record. The decision
@@ -2005,9 +2016,244 @@ MUST NOT reuse the earlier mark's liveness verdict.
 
 Reserved: this section is specified with M5 (see the version history).
 
-## 15. Storage receipts (reserved, M5)
+## 15. Storage receipts
 
-Reserved: this section is specified with M5 (see the version history).
+### 15.1 Meaning and issuance
+
+A **storage receipt** is a server-signed statement of the live committed
+advance or the storage-lease terms and effective state recorded at its
+`issued_unix_ms`. It is evidence of that record at issue time, **not a
+promise** of future retention or availability. An administrator can shorten
+a lease (§12.3), and takedown can remove content (§14). The implementer
+owns any payment receipt, price, availability contract, and the contents of
+`external_ref`; mkit owns the storage receipt. An `external_ref` can link
+the two without making the implementer's contract part of this predicate.
+
+When receipt signing is enabled, the server MUST issue one advance storage
+receipt for every committed `AdvanceRefs` or `UpdateRef` advance, including
+deletion and an advance that later fails inspection. A conflict, failed
+write, or disabled receipt signer MUST issue none. The advance storage
+receipt attests the **live** committed advance only. It MUST NOT expose
+the published value, pending/held/hit/cleared state, inspection verdict,
+or any other publication or hold state. A signed reader-side ref-to-commit
+binding is outside this contract. The receipt does not make content
+visible to a reader, bypass §10's caller view, or alter §13's roots.
+
+The server MUST issue a lease storage receipt for every committed change
+to a scope's terms or administrative override, with cause `POLICY`,
+`RENEWAL`, or `ADMIN` as in §12.4. It MUST NOT issue one for a
+time-derived `EXPIRY` transition; §12.4 Events describe those. A lease
+set by creation policy MUST appear in the creation advance's
+`storage_lease`. A separate lease storage receipt is also issued if that
+policy action changes the lease scope's terms. The §16
+`SetLeaseResponse.receipt` field carries the lease storage receipt for
+an administrative `SetLease` action.
+
+Receipt statement bytes, including `issued_unix_ms`, `key_id`, and all
+predicate fields, MUST be fixed in the guarded apply. The server MUST
+reproduce those bytes verbatim on replay and on `GetReceipt` (STC §7.1),
+even if signing and delivery occur after apply. Ed25519 signing is
+deterministic, so the same key and statement bytes MUST yield an identical
+envelope. Individual receipts are never revoked; a later §14 redaction notice signed
+by the same role key maps old to replacement pack ids. Neither a receipt
+nor its retention is a server GC root (§13).
+
+Informative rationale: A paid-storage implementer can use the receipt as
+evidence of what the server recorded, while its own contract defines any
+promise and remedy. Stating a retention guarantee here would conflict
+with administrator shortening and takedown. Limiting advance receipts to
+the live writer view avoids exposing inspection or hold timing as a
+detection-evasion signal.
+
+### 15.2 Envelope, predicate, and subject
+
+The receipt is a DSSE v1 envelope as in
+[SPEC-ATTESTATIONS §4](SPEC-ATTESTATIONS.md#4-envelope-format):
+`payloadType` MUST be exactly `application/vnd.in-toto+json`; the
+payload MUST be a JCS-canonical in-toto Statement v1; and it MUST have
+exactly one strict Ed25519 signature over the DSSE PAE. The entire
+envelope JSON MUST be at most 65,536 bytes. Its `predicateType` MUST be
+exactly
+`https://github.com/officialunofficial/mkit/spec/predicate/storage-receipt/v1`.
+The predicate MUST be a JSON object with `kind` equal to `advance` or
+`lease`. Unknown or malformed fields fail receipt verification; a
+producer MUST NOT put another kind in this predicate version. All u64
+and i64 values in the predicate and key-list validity bounds MUST be
+decimal strings, without a sign or leading zero for nonnegative values
+(except `0`), so JS and wasm consumers retain exact integer values.
+
+The Statement MUST have exactly one subject. An advance subject MUST be
+`{"name":"target","digest":{"blake3":"<target>"}}`, with no
+`sha256`, in both opaque and indexed modes. `target` is 64 lowercase
+hex digits. For a deletion, `target` and the subject digest are the
+removed previous value; `deleted: true` says the new ref value is absent.
+A lease subject MUST have `name: "scope"` and both `blake3` and
+`sha256` digests of the **same** UTF-8 byte string
+`<repository>\n<ref-or-empty>`, where an empty ref selects the
+repository scope. The order and digest encoding follow
+SPEC-ATTESTATIONS §4.2. A storage receipt is not an object attestation
+and MUST NOT be pushed as one; a client may store it locally under its
+attestation directory, without treating it as an object GC root.
+
+The shared receipt-and-notice role key signs both predicates. The
+permanent domain for a storage receipt under that key is its exact
+`predicateType`; §14 notices have a different `payloadType` and their
+own predicate. A verifier MUST check both before interpreting signed
+bytes. This gives each application of the shared key a distinct named
+domain as [SPEC-CONVENTIONS §4](SPEC-CONVENTIONS.md#4-domain-separator-and-namespace-naming)
+requires. DSSE's `DSSEv1` PAE prefix also separates these signatures
+from non-DSSE signing protocols.
+
+### 15.3 Advance predicate
+
+For `kind: "advance"`, the predicate MUST contain these fields:
+
+| Field | Meaning |
+|---|---|
+| `origin` | Server's canonical audience origin (STC §7.1). |
+| `repository` | Full STC §7.4 repository identity. |
+| `ref` | Full ref name advanced. For `AdvanceRefs`, the branch head. |
+| `advance_sequence` | This ref's committed §10.2 sequence, a u64 decimal string. |
+| `target` | New ref value as 64 lowercase hex; for deletion, the removed value. |
+| `packmap` | Resulting paired packmap value as 64 lowercase hex for a branch; on branch deletion, the prior paired packmap value. Absent for other refs. |
+| `previous` | Prior value as 64 lowercase hex; absent on creation. On deletion it equals `target`. |
+| `deleted` | Boolean; true means the resulting ref value is absent. |
+| `mode` | Exactly `opaque` or `indexed` at apply. |
+| `closure_verified` | Boolean; true only when indexed closure was verified. |
+| `added_packs` | Array of `{id, bytes}` for packs added to repository membership by this advance. `id` is 64 lowercase hex; `bytes` is a u64 decimal string. |
+| `added_bytes` | Sum of `added_packs[].bytes`, a u64 decimal string. |
+| `storage_lease` | Terms effective for this ref at apply, in the form below. |
+| `reservations` | Array of `{id, external_ref?}` for deployment-supplied reservations associated with this advance. |
+| `issued_unix_ms` | Signed i64 epoch milliseconds at issue, as a decimal string. |
+| `key_id` | Key-list `keyId` of the signing key (§15.5). |
+
+For a branch `UpdateRef` changing only one side of the pair, `packmap`
+is the resulting live paired packmap; for a write directly to the
+packmap ref, `ref` and `target` describe that requested ref and
+`packmap` equals its resulting value. On a deletion the old value is
+attested as `target`, and a branch's prior packmap value remains in
+`packmap`, while `deleted` unambiguously records absence. An advance
+with no membership additions has an empty `added_packs` array. An
+advance with no deployment allowance has an empty `reservations`
+array, even if it consumes tickets; a ticketless write that ran Admit
+MUST include its deployment reservation. Entries in `added_packs` MUST be in ascending id
+order with no duplicate id, and `reservations` MUST be in ascending id
+order with no duplicate id. A reservation id MUST be the deployment's
+§6.3 allowance id; the server MUST NOT substitute a synthetic quota or
+outcome id. `external_ref` MUST be copied only from that allowance and
+MUST satisfy §6.6. The implementer MUST keep secrets out of it.
+
+`storage_lease` MUST be either `{ "permanent": true }` or an object
+with `scope` (`repository` or `ref`) and `expires_unix_ms`, `grace_ms`,
+and `suspension_ms` as decimal strings. The terms describe the
+applicable recorded lease, including an inherited repository default;
+they do not make a per-ref lease govern byte availability (§12.2).
+
+An advance receipt MUST NOT contain `new_to_store`, physical or
+deduplicated byte counts, or any other fact that exposes holdings of
+other repositories (STC §5.1). It MUST NOT contain logical or
+uncompressed byte counts, which opaque mode cannot establish. It MUST
+NOT contain publication, hold, or inspection state. Informative: the
+PRD's proposed logical/stored byte pair is replaced by `added_bytes`,
+the sum of newly added membership pack sizes. It is not a claim about
+physical storage or billing.
+
+### 15.4 Lease predicate
+
+For `kind: "lease"`, the predicate MUST contain `origin`, `scope`,
+`terms`, `effective_state`, `cause`, `lease_version`,
+`issued_unix_ms`, and `key_id`. `origin` is the canonical audience.
+`scope` is `{ "repository": "<full identity>", "ref": "<full ref or empty>" }`;
+an empty `ref` means repository scope. `terms` is either
+`{ "permanent": true }` or `{ "expires_unix_ms": "<i64>",
+"grace_ms": "<u64>", "suspension_ms": "<u64>" }`.
+`effective_state` is one of `active`, `grace`, `suspended`, or
+`deleted`, after applying §12.2's administrative override at issue
+time. `cause` is exactly `POLICY`, `RENEWAL`, or `ADMIN` (§12.4).
+`lease_version` is a u64 decimal string, strictly increasing for
+every committed terms or override change at that scope, including
+across restart, renewal, and ref recreation. The issued time and key
+id have the same meaning as for an advance receipt. A repository
+default change issues one repository-scope receipt, not a separate
+receipt for each inheriting ref.
+
+### 15.5 Signing key, publication, and rotation
+
+A deployment MUST use one receipt-and-notice Ed25519 role key for
+storage receipts and §14 redaction notices. That role key MUST be
+distinct from hook-channel, admin, URL-token, write, and upload MAC
+keys. The key-list `keyId` is the 64-lowercase-hex BLAKE3 digest of
+the raw 32-byte public key. The DSSE signature's `keyid` is exactly
+`blake3:` followed by that `keyId`; predicate `key_id` and
+`GetServerInfo.receipt_key_id` are exactly the unprefixed `keyId`.
+`GetServerInfo.receipt_public_key` is the current signing key's raw
+32-byte public key. Both info fields MUST be empty when receipts are
+disabled.
+
+The deployment MUST publish `GET /.well-known/mkit-receipt-keys.json`
+in the §7.2 key-list shape, with `version: 1`, `alg: "ed25519"`, and
+the `keyId` convention above. It MUST return `Cache-Control: public,
+max-age=300`, allow CORS from any origin, and require no bearer,
+signed URL token, or payment. §14 notices use the same document.
+During rotation the deployment MUST set `notAfterMs` on the old key
+and MUST retain that retired key in the list forever. A verifier MUST
+accept a listed key only when its `issued_unix_ms` is within the
+half-open interval `notBeforeMs ≤ issued_unix_ms < notAfterMs`, with
+an absent bound open on that side. A compromised key MUST be removed
+from the list, thereby invalidating every receipt and notice it
+signed. No transparency log or trusted compromise timestamp is
+specified; a compromised signer can backdate its issue time.
+
+### 15.6 Delivery, retrieval, and retention
+
+The Connect receipt fields and `GetReceipt` wire are in STC §§2–4.
+The receipt fields contain the complete envelope JSON bytes and are
+empty for conflicts or when receipts are disabled. `GetReceipt` is a
+signed read and MUST require the §10.1 writer view for the requested
+repository; all other callers receive `not_found`, with no indication
+whether a receipt exists. It MUST honor ordinary repository access,
+lease, suspension, and takedown rules. The server MUST retain the
+latest receipt for each ref, including its terminal deletion receipt,
+while the repository exists, and the latest receipt for each lease
+scope while that scope exists. It MAY retain older versions for a deployment-set
+`receipt_retention` and MUST return `not_found` for a version it no
+longer holds. This retention does not make receipts server GC roots.
+SSH and enc clients retrieve receipts only through Connect
+`GetReceipt`; their frozen protos gain no receipt field.
+
+### 15.7 Client verification
+
+Before storing a storage receipt, a client MUST:
+
+1. Decode the envelope strictly, enforce the 65,536-byte cap, and
+   check the exact `payloadType`, Statement type, and `predicateType`.
+2. Verify the strict Ed25519 signature against a pinned trust root
+   supplied by user trust roots or trust on first use. A key learned
+   only from `GetServerInfo` or the well-known URL MUST be reported
+   as `unpinned`, not silently promoted to trusted.
+3. Check that predicate `key_id` equals the body of the DSSE
+   `blake3:` keyid, equals BLAKE3 of the selected public key, and
+   that `issued_unix_ms` lies inside that listed key's validity window.
+4. For an advance, check `origin`, `repository`, `ref`, `target`,
+   `packmap`, and `previous` against the operation the client sent,
+   wherever the operation supplies that value; an absent branch
+   packmap or creation previous MUST remain absent. With an `ANY`
+   update, the client has no sent previous value to compare. Every
+   `added_packs` entry MUST be a pack the client ticketed. For a
+   deletion, the sent expected old value is its `target`.
+5. Check `subject[0].digest.blake3` equals `target` for an advance;
+   for a lease, check both digests against the canonical scope bytes.
+
+If any check fails, the client MUST warn and MUST NOT store the
+receipt. A receipt-verification failure MUST NOT turn an otherwise
+committed push into an error unless the user explicitly opts in to
+requiring a valid receipt. Clients MUST NOT log complete storage
+receipts. Storage receipts are kept client-side and MUST NOT be pushed
+by default; they are not object-GC roots.
+
+Informative: the labelled vectors under `rust/tests/golden/receipts/`
+pin canonical payload and envelope bytes, signature, subject binding,
+key-list bytes, and three verification failures (§20).
 
 ## 16. Admin API and audit log (reserved, M5)
 
@@ -2026,6 +2272,7 @@ Reserved: this section is specified with M5 (see the version history).
 | Version | Status | Change |
 |---|---|---|
 | 1 | draft | Additive M5 storage leases and lifecycle Event (§12), server GC (§13), and section renumbering (§§19–20); `GetServerInfo.leases` in STC §2.1. |
+| 1 | draft | Storage receipts (§15): live advances and lease changes, shared receipt/notice key list, verifier rules and goldens; additive receipt fields and retrieval in STC, and `AdmitAllow.external_ref` (§6). |
 | 1 | draft | Additive M5 published view (§10), per-advance inspection and quarantine (§11), including surplus pack entries; additive Inspect phase/id/kind/defer/flagged ids and Authorize writer_view (§6); `GetServerInfo.async_inspection` in STC §2.1. |
 | 1 | draft | Initial M3 pipeline, durable outcome and remote-hook contract; M5 sections reserved. Admission credential headers (§6.3); indexed mode (§9). HTTP read reservations and procedure strings (WP-4.11), amended with `read_reconcile_grace = 60 s` default and `ReadServed` priority within grace (fix round 1). |
 
@@ -2077,3 +2324,16 @@ pin STC §7.6 and SPEC-SERVER §9.5:
 | `pending-verification.json` | Canonical protobuf JSON for that detail. |
 | `pending-verification-error.json` | Full Connect `unavailable` error with exactly one typed detail. |
 | `MANIFEST.txt` | BLAKE3 hashes of the transport golden files. |
+
+The storage-receipt fixtures under `rust/tests/golden/receipts/` pin §15:
+
+| Golden file | Contract pinned |
+|---|---|
+| `advance-opaque.statement.json`, `advance-opaque.dsse.json` | Live opaque advance, blake3-only subject, reservation reference. |
+| `advance-indexed.statement.json`, `advance-indexed.dsse.json` | Verified indexed advance and added membership. |
+| `deletion.statement.json`, `deletion.dsse.json` | Deleted ref with prior target as subject. |
+| `lease.statement.json`, `lease.dsse.json` | Lease change and two-digest scope subject. |
+| `key-list.json` | Current and retired receipt-and-notice role keys. |
+| `wrong-predicate.dsse.json`, `subject-mismatch.dsse.json`, `key-outside-window.dsse.json` | Distinct signed verification refusals. |
+| `test-seed.json` | Public, labelled test-only Ed25519 seeds. |
+| `MANIFEST.txt` | BLAKE3 hash of every other receipt fixture. |

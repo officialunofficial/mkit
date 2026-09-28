@@ -190,6 +190,9 @@ message AdmitAllow {
   string reservation_id = 1;
   // Only Payment-Receipt and PAYMENT-RESPONSE, within §6.6 limits; SPEC-SERVER §6.3.
   repeated Header response_headers = 2;
+  // Implementer contract/payment reference copied into a storage receipt;
+  // at most 256 bytes of visible ASCII and never a secret (SPEC-SERVER §6.6).
+  string external_ref = 3;
 }
 
 // Credential challenge passed to the client as STC §5.1 requires; SPEC-SERVER §6.3.

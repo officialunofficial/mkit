@@ -19,11 +19,11 @@ use super::proto::mkit::transport::v1::__buffa::oneof::upload_pack_request::Body
 use super::proto::mkit::transport::v1::{
     AdvanceOutcome as WireOutcome, AdvanceRefsRequest, AdvanceRefsResponse, BeginUploadRequest,
     BeginUploadResponse, CompleteUploadRequest, CompleteUploadResponse, DownloadPackHeader,
-    DownloadPackRequest, DownloadPackResponse, GetServerInfoRequest, GetServerInfoResponse,
-    ListRefsRequest, ListRefsResponse, PackChunk, PackExistsRequest, PackExistsResponse,
-    ReadRefRequest, ReadRefResponse, RefEntry, RefExpectation, TransportService, UpdateRefRequest,
-    UpdateRefResponse, UploadPackRequest, UploadPackResponse, UploadPartRequest,
-    UploadPartResponse, UploadTicket,
+    DownloadPackRequest, DownloadPackResponse, GetReceiptRequest, GetReceiptResponse,
+    GetServerInfoRequest, GetServerInfoResponse, ListRefsRequest, ListRefsResponse, PackChunk,
+    PackExistsRequest, PackExistsResponse, ReadRefRequest, ReadRefResponse, RefEntry,
+    RefExpectation, TransportService, UpdateRefRequest, UpdateRefResponse, UploadPackRequest,
+    UploadPackResponse, UploadPartRequest, UploadPartResponse, UploadTicket,
 };
 use super::{Shared, authenticated};
 use crate::error::ServerError;
@@ -360,6 +360,15 @@ where
         // never resolves a repository or reads its state (STC §2.1).
         let info = self.pipe.get().server_info();
         Ok(Response::new(info.into()).with_header("cache-control", "private, max-age=60"))
+    }
+
+    async fn get_receipt(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, GetReceiptRequest>,
+    ) -> ServiceResult<GetReceiptResponse> {
+        // WP-5.8 implements receipt retention and writer-view retrieval.
+        Err(not_yet().into())
     }
 
     async fn begin_upload(

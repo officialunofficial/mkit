@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Specify server-signed storage receipts for committed live ref advances and
+  lease changes, with a published receipt-and-notice key list and writer-view
+  retrieval. Add receipt fields to Connect ref-write responses and an optional
+  admission `external_ref`; server signing and delivery follow in WP-5.8.
 - Server: add periodic per-Durable-Object logical snapshots to a dedicated R2
   `BACKUPS` bucket, plus Fresh-only portable restore with epoch advancement,
   relay re-keying and coordinator recovery. Native `export` and `restore`

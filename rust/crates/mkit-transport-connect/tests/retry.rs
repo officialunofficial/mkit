@@ -156,6 +156,14 @@ impl FlakyService {
 
 #[allow(refining_impl_trait)]
 impl generated::TransportService for FlakyService {
+    async fn get_receipt(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, generated::GetReceiptRequest>,
+    ) -> ServiceResult<generated::GetReceiptResponse> {
+        Err(ConnectError::unimplemented("not implemented yet"))
+    }
+
     // WP-1.2: compile-only stubs for the additive M1 trait methods.
     async fn get_server_info(
         &self,
