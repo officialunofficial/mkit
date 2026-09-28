@@ -62,8 +62,9 @@ check('receipt' not in json.loads((root / 'set-suspension.response.json').read_t
       'suspension receipt must be disabled in the fixture')
 check(json.loads((root / 'takedown.request.json').read_text())['reasonToken'] == 'policy',
       'takedown reason token missing')
-check(json.loads((root / 'set-suspension.request.json').read_text())['reasonToken'] == 'policy',
-      'suspension reason token missing')
+ordinary_suspension = json.loads((root / 'set-suspension.request.json').read_text())
+check(not ordinary_suspension['isTakedown'] and 'reasonToken' not in ordinary_suspension,
+      'ordinary suspension must demonstrate optional reason token')
 
 vectors = json.loads((root / 'signature.json').read_text())['vectors']
 check(len(vectors) == 3, 'expected three signature vectors')

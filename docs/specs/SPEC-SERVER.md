@@ -1774,9 +1774,11 @@ the repository transition.
 An administrative override emits exactly one event at the scope where it is set.
 For a namespace override that event has `namespace` set and `repository`
 empty; it MUST NOT be duplicated once per repository. An admin-caused
-lease transition uses `LEASE_CAUSE_ADMIN` (§16.5).
+lease transition uses `LEASE_CAUSE_ADMIN` (§16.5). A takedown suspension
+emits only a `TakedownTransition`, never an additional `LeaseTransition`
+with `LEASE_CAUSE_ADMIN`.
 By contrast, a content-level takedown emits one takedown transition per
-affected repository under §14 **Events and notices**.
+affected repository under §14.6 **Signed redaction notice**.
 
 When an Event sink is configured, events MUST use the same durable outbox
 as outcomes (§5), be delivered at least once, and remain retained until
@@ -2114,6 +2116,10 @@ not reconstruct those bytes. The admin service MUST support the JSON
 codec and MAY support the binary codec. A streamed response has no
 signing effect on its request. Responses are not signed; the caller MUST authenticate the
 server through TLS, except for an isolated loopback channel.
+An admin request body MUST be at most 1,048,576 bytes (1 MiB) on the
+wire; a larger body receives `invalid_argument`. A validly signed
+oversize request is an authenticated failure and MUST be audited.
+This request cap does not bound streaming response bytes.
 
 Malformed headers, unknown keys, expired envelopes, and invalid
 signatures receive `unauthenticated`. They are unauthenticated attempts
@@ -2137,12 +2143,26 @@ NOT gain moderation authority through `SetLease`.
 
 | Procedures | Required role |
 |---|---|
-| `SetLease` with `RENEWAL` or `POLICY`, where proposed terms do not yield `suspended` or `deleted` at apply | `lease` or `all` |
-| `SetLease` with `ADMIN`, including terms yielding `suspended` or `deleted` at apply | `moderation` or `all` |
+| `SetLease` with `RENEWAL` or `POLICY`; every action satisfies the `lease_role_min_notice` rule below | `lease` or `all` |
+| `SetLease` with `ADMIN`; any resulting effective state, including earlier suspension or deletion | `moderation` or `all` |
 | `SetSuspension`, `Takedown`, `GetTakedown`, `ListTakedowns`, `Reinstate`, `AddBlock`, `RemoveBlock`, `SetLegalHold`, `ReadPreserved` | `moderation` or `all` |
 | `ReleaseHold`, `Reinspect`, `ReleaseFlag`, `ResumeServing`, `WaiveObligations`, `PurgeCache` | `moderation` or `all` |
 | `RegisterSshGrant`, `RemoveSshGrant`, `ListSshGrants` | `grants` or `all` |
 | `ReadAuditLog` | `audit` or `all` |
+
+`lease_role_min_notice` is a deployment parameter with a default of
+24 hours (86,400,000 ms). It MUST be a positive duration. For a
+`lease`-role key, the server MUST evaluate the resulting effective
+state at apply using the backend clock, proposed terms, inheritance,
+and applicable overrides. For every affected scope, the first instant
+at or after apply when that resulting state is `suspended` or `deleted`
+MUST be no earlier than `now + lease_role_min_notice`; a state already
+`suspended` or `deleted` at apply fails this check. This check
+applies to every `SetLease` action: setting terms, setting permanent,
+removing terms, and changes to a repository default that affect
+inheriting refs. A violation MUST return audited `permission_denied`
+without applying any change. A `moderation` or `all` key MAY produce
+any resulting effective state with `cause = ADMIN`.
 
 An admin public key MUST be distinct from every key used for another
 role, including hook, write authentication, grant, receipt and notice,
@@ -2195,10 +2215,14 @@ procedure. All nonempty repository identities follow STC §7.4; refs
 follow SPEC-REFS §3, object and grant ids are 32 bytes, and reasons and
 operator labels are bounded UTF-8 without controls (512 and 128 bytes
 respectively). Invalid scope, enum, id, bound, or missing required
-field is `invalid_argument`. `reason_token` in `Takedown`, `AddBlock`, and
-`SetSuspension` MUST match §14 **Signed redaction notice** (§14.6). The
-free-text `reason` is private audit text and MUST NOT enter notices,
-Events, or any public surface. A target absent after authentication is
+field is `invalid_argument`. A supplied `reason_token` in `Takedown`,
+`AddBlock`, or `SetSuspension` MUST match §14.6 **Signed redaction
+notice**. It is REQUIRED for `Takedown`, for `SetSuspension` when
+`is_takedown` is true, and for `AddBlock` when it starts a takedown.
+Otherwise it is optional; a manual block without a token records the
+registered `manual` token for a later takedown. The free-text `reason`
+is private audit text and MUST NOT enter notices, Events, or any public
+surface. A target absent after authentication is
 `not_found`, unless the row says otherwise. Every authenticated call,
 including a read or failed attempt, is audited under §16.6. The
 listed error codes are in STC §5's Connect vocabulary; all procedures
@@ -2207,19 +2231,19 @@ also permit `unavailable` for a retryable backend failure and
 
 | Procedure: request → response | Required input and effect | Additional errors |
 |---|---|---|
-| `Takedown`: `TakedownRequest` → `TakedownResponse` | `operation_id`, non-UNSPECIFIED level, `reason_token`, reason and target; CONTENT takes 1–256 distinct blob or ChunkedBlob manifest ids in indexed mode, with no repository or namespace field. REPOSITORY takes one repository and NAMESPACE one namespace, with no object ids (§14 **Terms, levels and scope**). It starts §14 **Lifecycle and completion** and returns its id and completion state. A REPOSITORY or NAMESPACE takedown is equivalent to `SetSuspension{is_takedown = true}` for the override, takedown record, Event, and cache effects. | `failed_precondition` for content level in opaque mode or a target of the wrong object kind; `aborted` for concurrent work. |
+| `Takedown`: `TakedownRequest` → `TakedownResponse` | `operation_id`, non-UNSPECIFIED level, `reason_token`, reason and target; CONTENT takes 1–256 distinct blob or ChunkedBlob manifest ids in indexed mode, with no repository or namespace field. REPOSITORY takes one repository and NAMESPACE one namespace, with no object ids (§14 **Terms, levels and scope**). It starts §14 **Lifecycle and completion** and returns its id and completion state. A REPOSITORY or NAMESPACE takedown is equivalent to `SetSuspension{is_takedown = true}` for the override, takedown record, Event, and cache effects. Any lease receipt produced under §15 is available only through `GetReceipt`; this response carries none. | `failed_precondition` for content level in opaque mode or a target of the wrong object kind; `aborted` for concurrent work. |
 | `GetTakedown`: `GetTakedownRequest` → `GetTakedownResponse` | `takedown_id`; returns the §14 lifecycle record without preserved bytes. | `not_found`. |
 | `ListTakedowns`: `ListTakedownsRequest` → `ListTakedownsResponse` | Optional repository or namespace scope (absent means all), `page_size` 1–100 and opaque page token; returns records and next token. | `invalid_argument` for a foreign or malformed token. |
-| `Reinstate`: `ReinstateRequest` → `ReinstateResponse` | `operation_id`, `takedown_id`, reason; performs §14 **Reinstatement** while preserving any legally held record. | `failed_precondition` if restoration is forbidden by another active takedown; `aborted` for concurrent work. |
-| `AddBlock`: `AddBlockRequest` → `AddBlockResponse` | Object id, `reason_token`, reason and `operation_id`; adds a distinct manual action under §14 **Blocklist**, even if other actions already block the id, and returns its `block_action_id`. A manual block with known holders starts the §14 takedown lifecycle; the response supplies its takedown id and completion state. | `aborted` for concurrent work. |
-| `RemoveBlock`: `RemoveBlockRequest` → `RemoveBlockResponse` | Object id, manual `block_action_id` and reason; removes that action under §14 **Blocklist** and reports `removed`. Other actions continue to block the id, and removing the action does not undo a takedown tombstone. | `failed_precondition` for a takedown-sourced action, which only §14 **Reinstatement** can lift. |
+| `Reinstate`: `ReinstateRequest` → `ReinstateResponse` | `operation_id`, `takedown_id`, reason; performs §14 **Reinstatement** while preserving any legally held record. For repository or namespace reinstatement, any lease receipt produced under §15 is available only through `GetReceipt`; this response carries none. | `failed_precondition` if restoration is forbidden by another active takedown; `aborted` for concurrent work. |
+| `AddBlock`: `AddBlockRequest` → `AddBlockResponse` | Object id, reason and `operation_id`, plus `reason_token` if it starts a takedown; adds a distinct manual action under §14 **Blocklist**, even if other actions already block the id, and returns the new `block_action_id`. A manual block with known holders starts the §14 takedown lifecycle; the response supplies its takedown id and completion state. | `aborted` for concurrent work. |
+| `RemoveBlock`: `RemoveBlockRequest` → `RemoveBlockResponse` | `block_action_id` and reason; removes only that manual action with no takedown id under §14 **Blocklist** and reports `removed`. Other actions continue to block the id, and removing the action does not undo a takedown tombstone. | `failed_precondition` for a takedown-sourced action, which only §14 **Reinstatement** can lift. |
 | `SetLegalHold`: `SetLegalHoldRequest` → `SetLegalHoldResponse` | Takedown id, `enabled`, reason; changes preservation legal hold under §14 **Preservation store**. | `failed_precondition` if disabling would violate an active hold. |
 | `ReadPreserved`: `ReadPreservedRequest` → stream `ReadPreservedResponse` | Takedown id, object id and offset; returns ordered chunks with exact offsets and one `last`, solely from §14 **Preservation store**. | `not_found` if not preserved; `failed_precondition` if retention has ended. |
-| `SetSuspension`: `SetSuspensionRequest` → `SetSuspensionResponse` | Exactly one repository or namespace scope, `suspended`, `is_takedown`, `reason_token`, reason; sets the separate §12.2 override and returns its state. With `is_takedown = true`, `suspended` MUST be true and `operation_id` is required; the call starts a §14 **Lifecycle and completion** takedown record and returns its id and completion state. That override can be lifted only through §14 **Reinstatement**. `receipt` carries the §15 receipt when enabled and is empty otherwise. | `failed_precondition` for an attempted takedown bypass. |
-| `SetLease`: `SetLeaseRequest` → `SetLeaseResponse` | Exactly one scope and action, non-UNSPECIFIED cause; applies §12.3. `receipt` MUST carry the §15 lease receipt when receipts are enabled and be empty otherwise. | `failed_precondition` for per-ref terms in opaque mode; `permission_denied` for ADMIN cause or immediate suspension/deletion on a lease-only key. |
-| `ReleaseHold`: `ReleaseHoldRequest` → `ReleaseHoldResponse` | Repository, inspector, inspection id, reason; overrides and satisfies that held prepublication obligation after review. It MUST schedule a new non-blocking QUARANTINE-phase re-inspection (§11.2) and return its `new_inspection_id`. A later reject becomes a takedown as for a postpublication verdict. This call MUST NOT release a flagged-id hold. | `failed_precondition` for a hit or flagged-id hold. |
+| `SetSuspension`: `SetSuspensionRequest` → `SetSuspensionResponse` | Exactly one repository or namespace scope, `suspended`, `is_takedown`, reason, and `reason_token` when `is_takedown` is true; sets the separate §12.2 override and returns its state. With `is_takedown = true`, `suspended` MUST be true and `operation_id` is required; the call starts a §14 **Lifecycle and completion** takedown record and returns its id and completion state. That override can be lifted only through §14 **Reinstatement**. `receipt` carries the §15 receipt when enabled and is empty otherwise. | `failed_precondition` for an attempted takedown bypass. |
+| `SetLease`: `SetLeaseRequest` → `SetLeaseResponse` | Exactly one scope and action, non-UNSPECIFIED cause; applies §12.3. `receipt` MUST carry the §15 lease receipt when receipts are enabled and be empty otherwise. | `failed_precondition` for per-ref terms in opaque mode; audited `permission_denied` for ADMIN cause or a §16.3 notice-window violation on a lease-only key. |
+| `ReleaseHold`: `ReleaseHoldRequest` → `ReleaseHoldResponse` | Repository, inspector, inspection id, reason; overrides and satisfies that held prepublication obligation after review. It MUST schedule a new non-blocking QUARANTINE-phase re-inspection (§11.2) and return its `new_inspection_id`. A later reject becomes a takedown as for a postpublication verdict. This call MUST NOT release a hold whose verdict carries flagged ids. | `failed_precondition` for a hit or a hold whose verdict carries flagged ids; use `ReleaseFlag` for the latter. |
 | `Reinspect`: `ReinspectRequest` → `ReinspectResponse` | Repository, inspector, old inspection id, reason; schedules deliberate re-inspection and returns a new id, superseding the old logical call (§11.3). It does not itself waive or release a hold. | `failed_precondition` for a completed hit. |
-| `ReleaseFlag`: `ReleaseFlagRequest` → `ReleaseFlagResponse` | Repository, flagged object id, reason; admin review releases the flag and all holds derived solely from it, re-evaluates blocked advances (§11.3), and reports their count. It cannot undo a takedown. | `failed_precondition` for an active hit/takedown. |
+| `ReleaseFlag`: `ReleaseFlagRequest` → `ReleaseFlagResponse` | Repository, flagged object id, reason; admin review releases the flag and all holds derived solely from it, schedules §11.2 re-inspection on release, re-evaluates blocked advances (§11.3), and reports their count. It cannot undo a takedown. | `failed_precondition` for an active hit/takedown. |
 | `ResumeServing`: `ResumeServingRequest` → `ResumeServingResponse` | Repository, inspector, inspection id, reason; after review releases the postpublication quarantine serving stop (§11.3), unless another hold or takedown still applies. | `failed_precondition` while another stop applies. |
 | `WaiveObligations`: `WaiveObligationsRequest` → `WaiveObligationsResponse` | Repository, inspector, nonempty distinct `(ref, sequence)` targets with positive per-ref §10.2 sequences, and reason; explicitly waives only that inspector's outstanding obligations for those advances and re-evaluates clearance (§§10.2, 11.3). Inspector removal alone has no effect. | `failed_precondition` for hit, flag, or another inspector's obligation. |
 | `RegisterSshGrant`: `RegisterSshGrantRequest` → `RegisterSshGrantResponse` | 32-byte principal and signed grant bytes; performs SPEC-WRITE-GRANTS §10 registration checks and returns the grant id. | `permission_denied` for a grant whose grantee differs from the principal; `failed_precondition` for a revoked epoch. |
@@ -2240,13 +2264,15 @@ none exists. Neither operation resurrects a deleted lease, ref,
 pointer, or membership. A ref deleted by lease remains blocked until
 an authorized `SetLease` assigns new terms. `RENEWAL` maps to
 `LEASE_CAUSE_RENEWAL`, `POLICY` to `LEASE_CAUSE_POLICY`, and `ADMIN` to
-`LEASE_CAUSE_ADMIN` in §12.4. A direct administrative suspension emits
-`ADMIN` at the scope where it is set. Lease receipts attest only a
+`LEASE_CAUSE_ADMIN` in §12.4. A direct administrative suspension without
+a takedown emits `ADMIN` at the scope where it is set. A takedown suspension or its
+reinstatement emits only a `TakedownTransition`, never an additional
+`ADMIN` `LeaseTransition` (§12.4). Lease receipts attest only a
 committed live state under §15; an accepted request is no promise of
 future retention.
-A `lease`-only key MUST NOT set terms whose effective state at apply
-is already `suspended` or `deleted`; such a change requires a
-`moderation` or `all` key with `cause = ADMIN`.
+The §16.3 `lease_role_min_notice` check applies to every `SetLease`
+action and every affected inheriting ref. An earlier suspension or
+deletion requires `moderation` or `all` with `cause = ADMIN`.
 
 `RegisterSshGrant` MUST verify SPEC-WRITE-GRANTS §7 steps 1, 3, 4,
 and 5, and MUST reject a grant whose grantee is not the transport
@@ -2309,10 +2335,12 @@ legal holds. A timer MUST audit preservation-byte purge when retention
 ends and no legal hold remains. Preservation bytes and blocklist entries remain outside
 §13 GC; their retention and purge are governed by §14 **Preservation
 store**, §14 **Blocklist**, and audited `SetLegalHold`, `RemoveBlock`,
-and `Reinstate` calls here. Active takedown and blocklist-action records
-MUST persist independently of audit-log pruning and survive snapshot
-restore. §14 **Interaction with GC, restore and caches** restore MUST
-read those active records to reapply takedown and block
+and `Reinstate` calls here. Takedown and reinstatement action records
+needed to replay after any restorable snapshot, and active blocklist
+actions, MUST persist independently of audit-log pruning and survive
+snapshot restore. Restore under §14.9 **Interaction with GC, restore and caches**
+MUST read those action records and replay takedowns and reinstatements
+recorded after the snapshot, in action order, before serving restored
 state. Pruning an eligible audit prefix MUST keep
 its final `(seq, entryHash)` as a checkpoint; the next retained
 entry's `prevHash` MUST equal that hash. Pruning MUST NOT remove an

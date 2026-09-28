@@ -1385,7 +1385,9 @@ the current goldens verify the additive hook wire contract only.
 ## Admin authority and audit continuity (specified, implementation pending)
 
 **Always:** administrative effects require a valid `mkit-admin:v1` signature
-from a key whose deployment-wide roles permit the procedure. A nonce cannot authorize
+from a key whose deployment-wide roles permit the procedure. A lease-only
+key cannot bring suspension or deletion inside the configured minimum
+notice window through any `SetLease` action. A nonce cannot authorize
 different request bytes, and a repeated long-running operation id cannot
 start a second action. Every authenticated result and automatic redaction,
 release, waiver or purge appends one gapless hash-chained audit entry.

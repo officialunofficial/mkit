@@ -55,6 +55,7 @@ message TakedownRequest {
   string reason_token = 8;
 }
 message TakedownResponse {
+  // Repository/namespace lease receipts are read through GetReceipt (§15).
   string takedown_id = 1;
   bool complete = 2;
 }
@@ -87,6 +88,7 @@ message ReinstateRequest {
   string reason = 3;
   string operator_label = 4;
 }
+// Repository/namespace lease receipts are read through GetReceipt (§15).
 message ReinstateResponse { bool complete = 1; }
 
 message AddBlockRequest {
@@ -95,6 +97,7 @@ message AddBlockRequest {
   string reason = 2;
   string operator_label = 3;
   string operation_id = 4;
+  // Required when this action starts a takedown; otherwise optional.
   string reason_token = 5;
 }
 message AddBlockResponse {
@@ -104,11 +107,10 @@ message AddBlockResponse {
   bool takedown_complete = 3;
 }
 message RemoveBlockRequest {
-  bytes object_id = 1;
+  // Identifies one manual action without a takedown id.
+  string block_action_id = 1;
   string reason = 2;
   string operator_label = 3;
-  // Identifies the manual action; a takedown-sourced action cannot be removed here.
-  string block_action_id = 4;
 }
 message RemoveBlockResponse { bool removed = 1; }
 message SetLegalHoldRequest {
@@ -138,6 +140,7 @@ message SetSuspensionRequest {
   string operator_label = 5;
   // Required when is_takedown starts a §14 takedown.
   string operation_id = 6;
+  // Required only when is_takedown is true.
   string reason_token = 7;
 }
 message SetSuspensionResponse {
