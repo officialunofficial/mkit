@@ -51,7 +51,10 @@ use crate::download::DOWNLOAD_CHUNK_MAX;
 use crate::error::{ADMISSION_CHALLENGE_TYPE, InvalidHeader, ServerError};
 use crate::op::{AuthzFacts, OpKind, Operation, Procedure, RefUpdate};
 use crate::policy::{AuthorizerRole, NamespacePolicy, WritePolicy};
-use crate::quota::{DEFAULT_WRITE_QUOTA, QuotaCharge, QuotaLimits, QuotaScope};
+use crate::quota::{
+    self, DEFAULT_WRITE_QUOTA, NamespaceCharge, NamespaceDecision, QuotaCharge, QuotaLimits,
+    QuotaScope, ViewStatus,
+};
 use crate::refs::{self, strip_listed_prefix, validate_ref_name};
 use crate::replay::{BeginUploadResult, ReplayDecision, StoredResult, UpdateRefResult, classify};
 use crate::repo::Addressing;
@@ -171,7 +174,7 @@ pub struct PipelineConfig {
     pub download_chunk_max: usize,
     /// The default write quota: `Some(DEFAULT_WRITE_QUOTA)` for auth v2
     /// deployments (`vcs-worker` parity). Under D34 it counts per ref shard;
-    /// the namespace aggregate lands with WP-1.26.
+    /// Multi-addressing deployments also use it as the default namespace cap.
     pub write_quota: Option<QuotaLimits>,
     /// `ListRefs` scan page size, at least 1.
     pub list_page_limit: u32,
@@ -952,7 +955,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let mut op = self.identify(a, kind)?;
         fault!(self, AfterAuthenticate, &op, a);
         let (kind, refs, p) = self.ref_writes(&op)?;
-        let mut ahead = self.read_ahead(&op, &p, &refs).await?;
+        let mut ahead = self.read_ahead(&op, &p, &refs, a.business_skew_ms).await?;
         if let Some(stored) = Self::replay_lookup(&op, ahead.as_ref())? {
             return Ok(stored);
         }
@@ -980,6 +983,62 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             self.admit(input).await?
         };
         let mut begin = self.begin_write(&op, a, existing, allowance.reservation)?;
+        let charges = allowance.charges;
+        let namespace_charge = self.namespace_charge(
+            &p,
+            &charges,
+            ahead.as_ref().and_then(|s| s.namespace_window),
+        )?;
+        if let Some(mut charge) = namespace_charge {
+            let now = self.clock.now_ms().saturating_add(a.business_skew_ms);
+            let window = quota::namespace_window(now, charge.limits.window_ms);
+            if window != charge.window && window != charge.window.saturating_add(1) {
+                return Err(ServerError::aborted_retryable(
+                    "namespace quota window advanced; retry",
+                ));
+            }
+            charge.window = window;
+            let snap = ahead
+                .as_ref()
+                .ok_or_else(|| internal("namespace quota needs atomic reads"))?;
+            let decision = quota::check_namespace(
+                snap.get(&quota::counter_key(charge, window)),
+                if charge.rollup {
+                    snap.get(&keys::quota_view(window))
+                } else {
+                    None
+                },
+                now,
+                charge,
+            )?;
+            match decision {
+                NamespaceDecision::Exhausted => {
+                    return Err(ServerError::resource_exhausted(
+                        "namespace write op/byte quota exceeded for this window; try again later",
+                    ));
+                }
+                NamespaceDecision::Allowed {
+                    view: ViewStatus::Missing,
+                    ..
+                } => self.metrics.incr(
+                    crate::telemetry::METRIC_NAMESPACE_QUOTA_VIEW_FALLBACK,
+                    &[("state", "missing")],
+                    1,
+                ),
+                NamespaceDecision::Allowed {
+                    view: ViewStatus::Stale,
+                    ..
+                } => self.metrics.incr(
+                    crate::telemetry::METRIC_NAMESPACE_QUOTA_VIEW_FALLBACK,
+                    &[("state", "stale")],
+                    1,
+                ),
+                _ => {}
+            }
+            if let Some(snap) = ahead.as_mut() {
+                snap.namespace_window = Some(window);
+            }
+        }
         let mut opened_session = None;
         if let Some(BeginWrite::Open(open)) = &mut begin
             && open.spec.bytes > open.spec.part_size
@@ -1016,7 +1075,6 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             open.spec.upload_session = Some(session);
         }
         let write_result = async {
-            let charges = allowance.charges;
             let lease = if let Some(observed) = lease {
                 let (created, lease) = {
                     // The native gate serializes same-shard lease grants too.
@@ -1194,11 +1252,24 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         op: &Operation,
         p: &Partition,
         refs: &[RefUpdate],
+        business_skew_ms: i64,
     ) -> Result<Option<Snapshot>, ServerError> {
         let caps = self.meta.capabilities();
         if !caps.atomic_multi_key {
             return Ok(None);
         }
+        let namespace_window = if matches!(self.cfg.addressing, Addressing::Multi(_))
+            && self.hooks.admission().is_default()
+        {
+            self.cfg.write_quota.map(|limits| {
+                quota::namespace_window(
+                    self.clock.now_ms().saturating_add(business_skew_ms),
+                    limits.window_ms,
+                )
+            })
+        } else {
+            None
+        };
         let mut wanted: Vec<Key> = refs
             .iter()
             .map(|r| keys::ref_key(&op.repo.name, &r.name))
@@ -1221,6 +1292,29 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 let scope = QuotaScope::for_signer(&op.repo.namespace, &auth.signer);
                 wanted.push(keys::quota(&scope));
             }
+            if matches!(self.cfg.addressing, Addressing::Multi(_))
+                && self.hooks.admission().is_default()
+                && let Some(limits) = self.cfg.write_quota
+            {
+                let window = namespace_window.expect("namespace quota window computed");
+                let charge = NamespaceCharge {
+                    limits,
+                    window,
+                    bytes: 0,
+                    rollup: matches!(p, Partition::Ref { .. }),
+                };
+                wanted.push(quota::counter_key(charge, window));
+                if charge.rollup {
+                    wanted.push(keys::quota_view(window));
+                }
+                // Admission may run after the current window ends. Fetch the
+                // next window in the same read-ahead call, before any lease.
+                let next = window.saturating_add(1);
+                wanted.push(quota::counter_key(charge, next));
+                if charge.rollup {
+                    wanted.push(keys::quota_view(next));
+                }
+            }
         }
         if let OpKind::BeginUpload { ref_name, key, .. } = &op.kind {
             let signer = op
@@ -1236,8 +1330,32 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             )?);
         }
         let mut snap = Snapshot::default();
+        snap.namespace_window = namespace_window;
         self.fill(p, &mut snap, wanted).await?;
         Ok(Some(snap))
+    }
+
+    fn namespace_charge(
+        &self,
+        p: &Partition,
+        charges: &[QuotaCharge],
+        window: Option<u64>,
+    ) -> Result<Option<NamespaceCharge>, ServerError> {
+        if !matches!(self.cfg.addressing, Addressing::Multi(_))
+            || !self.hooks.admission().is_default()
+        {
+            return Ok(None);
+        }
+        let Some(charge) = charges.first() else {
+            return Ok(None);
+        };
+        let window = window.ok_or_else(|| internal("namespace quota read-ahead missing"))?;
+        Ok(Some(NamespaceCharge {
+            limits: charge.limits,
+            window,
+            bytes: charge.bytes,
+            rollup: matches!(p, Partition::Ref { .. }),
+        }))
     }
 
     /// Read every key of `wanted` that `snap` lacks, in one `get_many`.
@@ -1353,6 +1471,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             refs,
             replay,
             charges,
+            namespace_charge: self.namespace_charge(
+                p,
+                charges,
+                ahead.as_ref().and_then(|s| s.namespace_window),
+            )?,
             grant: op.authz.grant,
             lease,
             layout_version: caps.implicit_layout_version.is_none(),

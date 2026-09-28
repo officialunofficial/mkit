@@ -15,7 +15,7 @@ use mkit_core::refs::RefWriteCondition;
 
 use crate::error::ServerError;
 use crate::op::{GrantRef, RefUpdate};
-use crate::quota::{QuotaCharge, QuotaDecision, evaluate_quota};
+use crate::quota::{self, NamespaceCharge, QuotaCharge, QuotaDecision, evaluate_quota};
 use crate::refs::{CasDecision, evaluate_condition};
 use crate::replay::{
     ReplayDecision, ReplayRecord, ReplayState, StoredRejection, StoredResult, UpdateRefResult,
@@ -122,6 +122,8 @@ pub(crate) struct WriteRequest<'a> {
     pub(crate) replay: Option<ReplayGuard>,
     /// Quota charges from admission.
     pub(crate) charges: &'a [QuotaCharge],
+    /// Built-in namespace quota; absent for Single defaults and uncharged tickets.
+    pub(crate) namespace_charge: Option<NamespaceCharge>,
     /// The grant the write was authorized under (M2).
     pub(crate) grant: Option<GrantRef>,
     /// D34 leased epoch and optional installation, guarded by the observed el.
@@ -158,6 +160,13 @@ impl WriteRequest<'_> {
             out.push(keys::grant_epoch());
         }
         out.extend(self.charges.iter().map(|c| keys::quota(&c.scope)));
+        if let Some(charge) = self.namespace_charge {
+            let window = charge.window;
+            out.push(quota::counter_key(charge, window));
+            if charge.rollup {
+                out.push(keys::quota_view(window));
+            }
+        }
         out.extend(self.refs.iter().map(|r| keys::ref_key(self.repo, &r.name)));
         if let (WriteKind::UploadCommit | WriteKind::BeginUpload, Some(replay)) =
             (self.kind, self.replay)
@@ -173,6 +182,8 @@ impl WriteRequest<'_> {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Snapshot {
     values: BTreeMap<Key, Option<Value>>,
+    /// Fixed quota window selected by the request's read-ahead.
+    pub(crate) namespace_window: Option<u64>,
     /// `(index, record)` pairs of expired replay records.
     pub(crate) expired_replays: Vec<(Key, Key)>,
     /// `(index, quota)` pairs of ended quota windows; their quota keys are
@@ -299,6 +310,36 @@ pub(crate) fn plan_write(
     }
     for charge in req.charges {
         plan_charge(charge, snap, clock.business_now_ms, &mut pre, &mut puts)?;
+    }
+    if let Some(charge) = req.namespace_charge {
+        if quota::namespace_window(clock.business_now_ms, charge.limits.window_ms) != charge.window
+        {
+            return Err(ServerError::aborted_retryable(
+                "namespace quota window advanced; retry",
+            ));
+        }
+        let window = charge.window;
+        let counter = quota::counter_key(charge, window);
+        quota::plan_namespace_charge(
+            charge,
+            snap.get(&counter),
+            charge
+                .rollup
+                .then(|| snap.get(&keys::quota_view(window)))
+                .flatten(),
+            clock.business_now_ms,
+            &mut pre,
+            &mut puts,
+        )
+        .map_err(|error| {
+            // Admission checked before the lease. A raced quota change is a
+            // retry, never a quota denial after lease state was committed.
+            if req.lease.is_some() && error.code() == crate::Code::ResourceExhausted {
+                ServerError::aborted_retryable("namespace quota changed; retry")
+            } else {
+                error
+            }
+        })?;
     }
 
     let (on_commit, ref_puts, conflict) =

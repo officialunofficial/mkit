@@ -7,7 +7,7 @@ mod policy;
 
 use std::future::Future;
 use std::pin::{Pin, pin};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
@@ -702,6 +702,189 @@ fn retry_after_quota_exhaustion_still_returns_stored_result() {
     );
 }
 
+#[test]
+fn namespace_denial_before_lease_allocates_nothing_and_replay_stays_free() {
+    use crate::repo::MultiAddressing;
+
+    let signer = [7; 32];
+    let namespace = Namespace::Ed25519(signer);
+    let clock = clock();
+    let mut config = cfg(AuthMode::Open);
+    config.addressing = Addressing::Multi(
+        MultiAddressing::new()
+            .with_namespace_policy(NamespacePolicy::Allowlist([namespace].into())),
+    );
+    config.write_policy = WritePolicy::Owner;
+    config.sharding = Sharding::D34;
+    config.write_quota = Some(QuotaLimits {
+        window_ms: 60_000,
+        max_ops: 2,
+        max_bytes: 0,
+    });
+    let env = build(config, Spy::new(store(&clock)), Hooks::new(), clock);
+    let identity = format!("{namespace}/{REPO}");
+    let request = Req::unsigned(Procedure::UpdateRef).header("x-repository", &identity);
+    let mut a = env.auth(&request).unwrap();
+    a.principal = Principal::Signer { ed25519: signer };
+    a.auth = Some(VerifiedAuth {
+        signer,
+        replay_scope: [3; 32],
+        fingerprint: [4; 32],
+        nonce: nonce(1),
+        commitment: crate::op::Commitment::Body(A),
+        expires_at_ms: T0 + 300_000,
+    });
+    let ref_name = "refs/heads/fresh";
+    let shard = env.pipe.shards.ref_shard(&a.repo().repo, ref_name);
+    let coordinator = env.pipe.shards.coordinator(&a.repo().repo.namespace);
+    let window = crate::quota::namespace_window(T0, 60_000);
+    now(env.pipe.meta.inner.apply(
+        &shard,
+        Batch::new().put(
+            keys::quota_view(window),
+            codec::encode_namespace_view(crate::quota::NamespaceView {
+                total: crate::quota::NamespaceUsage { ops: 2, bytes: 0 },
+                pushed: crate::quota::NamespaceUsage::default(),
+                observed_at_ms: T0 as u64,
+            }),
+        ),
+    ))
+    .unwrap();
+    let before = now(env.pipe.meta.inner.stats(&shard)).unwrap();
+    let err = now(env.pipe.update_ref(&a, upd(ref_name, Missing, A))).unwrap_err();
+    assert_eq!(err.code(), Code::ResourceExhausted);
+    assert_eq!(
+        err.public_message(),
+        "namespace write op/byte quota exceeded for this window; try again later"
+    );
+    assert_eq!(now(env.pipe.meta.inner.stats(&shard)).unwrap(), before);
+    assert_eq!(
+        now(env.pipe.meta.inner.stats(&coordinator)).unwrap().keys,
+        Some(0)
+    );
+    assert!(env.batches().is_empty(), "no lease, replay, or quota batch");
+
+    assert!(
+        now(env.pipe.meta.inner.get(&shard, &keys::replay(&[3; 32])))
+            .unwrap()
+            .is_none()
+    );
+    now(env.pipe.meta.inner.apply(
+        &shard,
+        Batch::new().put(
+            keys::quota_view(window),
+            codec::encode_namespace_view(crate::quota::NamespaceView {
+                total: crate::quota::NamespaceUsage::default(),
+                pushed: crate::quota::NamespaceUsage::default(),
+                observed_at_ms: T0 as u64,
+            }),
+        ),
+    ))
+    .unwrap();
+    let update = upd(ref_name, Missing, A);
+    assert_eq!(
+        now(env.pipe.update_ref(&a, update.clone())).unwrap(),
+        UpdateRefResult::Committed
+    );
+    let counter = keys::quota_shard(window);
+    let charged = now(env.pipe.meta.inner.get(&shard, &counter)).unwrap();
+    now(env.pipe.meta.inner.apply(
+        &shard,
+        Batch::new().put(
+            keys::quota_view(window),
+            codec::encode_namespace_view(crate::quota::NamespaceView {
+                total: crate::quota::NamespaceUsage { ops: 2, bytes: 0 },
+                pushed: crate::quota::NamespaceUsage { ops: 1, bytes: 0 },
+                observed_at_ms: T0 as u64,
+            }),
+        ),
+    ))
+    .unwrap();
+    assert_eq!(
+        now(env.pipe.update_ref(&a, update)).unwrap(),
+        UpdateRefResult::Committed
+    );
+    assert_eq!(
+        now(env.pipe.meta.inner.get(&shard, &counter)).unwrap(),
+        charged
+    );
+}
+
+#[test]
+fn namespace_race_after_lease_is_retryable_instead_of_a_late_denial() {
+    use crate::repo::MultiAddressing;
+
+    let signer = [7; 32];
+    let namespace = Namespace::Ed25519(signer);
+    let clock = clock();
+    let mut config = cfg(AuthMode::Open);
+    config.addressing = Addressing::Multi(
+        MultiAddressing::new()
+            .with_namespace_policy(NamespacePolicy::Allowlist([namespace].into())),
+    );
+    config.write_policy = WritePolicy::Owner;
+    config.sharding = Sharding::D34;
+    config.write_quota = Some(QuotaLimits {
+        window_ms: 60_000,
+        max_ops: 2,
+        max_bytes: 0,
+    });
+    let window = crate::quota::namespace_window(T0, 60_000);
+    let shard = Partition::Ref {
+        ns: NamespaceKey::from_namespace(&namespace),
+        repo: RepoName::new(REPO).unwrap(),
+        shard_ref: HEAD.to_owned(),
+    };
+    let raced_shard = shard.clone();
+    let injected = Arc::new(AtomicBool::new(false));
+    let once = injected.clone();
+    let mut meta = Spy::new(store(&clock));
+    meta.after_hook = Some(Box::new(move |store, partition, _batch, outcome| {
+        if !matches!(partition, Partition::Coordinator(_))
+            || !matches!(outcome, BatchOutcome::Committed)
+            || once.swap(true, Ordering::SeqCst)
+        {
+            return;
+        }
+        now(store.apply(
+            &raced_shard,
+            Batch::new().put(
+                keys::quota_shard(window),
+                codec::encode_namespace_usage(crate::quota::NamespaceUsage { ops: 2, bytes: 0 }),
+            ),
+        ))
+        .unwrap();
+    }));
+    let env = build(config, meta, Hooks::new(), clock);
+    let identity = format!("{namespace}/{REPO}");
+    let request = Req::unsigned(Procedure::UpdateRef).header("x-repository", &identity);
+    let mut a = env.auth(&request).unwrap();
+    a.principal = Principal::Signer { ed25519: signer };
+    a.auth = Some(VerifiedAuth {
+        signer,
+        replay_scope: [3; 32],
+        fingerprint: [4; 32],
+        nonce: nonce(1),
+        commitment: crate::op::Commitment::Body(A),
+        expires_at_ms: T0 + 300_000,
+    });
+    assert_eq!(env.pipe.shards.ref_shard(&a.repo().repo, HEAD), shard);
+    let err = now(env.pipe.update_ref(&a, upd(HEAD, Missing, A))).unwrap_err();
+    assert!(injected.load(Ordering::SeqCst));
+    assert_eq!(err.code(), Code::Aborted);
+    assert_eq!(
+        now(env.pipe.meta.inner.get(&shard, &keys::quota_shard(window))).unwrap(),
+        Some(codec::encode_namespace_usage(
+            crate::quota::NamespaceUsage { ops: 2, bytes: 0 }
+        ))
+    );
+    assert!(
+        now(env.pipe.meta.inner.get(&shard, &keys::replay(&[3; 32])))
+            .unwrap()
+            .is_none()
+    );
+}
+
 // --------------------------------------------------------- advance refs
 
 #[test]
@@ -988,6 +1171,7 @@ fn plan_cas_any_missing_match_on_snapshot() {
             refs: &refs,
             replay: None,
             charges: &[],
+            namespace_charge: None,
             grant: None,
             layout_version: false,
             mark_repo_known: false,
@@ -1040,6 +1224,7 @@ fn plan_conflict_writes_only_the_replay_record() {
         refs: &refs,
         replay: Some(replay()),
         charges: &[],
+        namespace_charge: None,
         grant: None,
         layout_version: false,
         mark_repo_known: false,
@@ -1107,6 +1292,7 @@ fn plan_quota_exhaustion_yields_no_batch() {
         refs: &refs,
         replay: Some(replay()),
         charges: &charges,
+        namespace_charge: None,
         grant: None,
         layout_version: true,
         mark_repo_known: false,
@@ -1157,6 +1343,7 @@ proptest! {
             refs,
             replay: signed.then(replay),
             charges: &charges,
+            namespace_charge: None,
             grant: None,
             layout_version: layout.is_some(),
             mark_repo_known: false,
@@ -1775,6 +1962,7 @@ fn plan_signed_conflict_still_charges_quota() {
         refs: &refs,
         replay: Some(replay()),
         charges: &charges,
+        namespace_charge: None,
         grant: None,
         layout_version: false,
         mark_repo_known: false,
@@ -1830,6 +2018,7 @@ fn plan_prune_fits_the_batch_op_cap() {
         refs: &refs,
         replay: Some(replay()),
         charges: &charges,
+        namespace_charge: None,
         grant: None,
         layout_version: true,
         mark_repo_known: false,
@@ -1878,6 +2067,7 @@ fn prune_sampling_is_deterministic_one_in_eight() {
         refs: &refs,
         replay,
         charges: &[],
+        namespace_charge: None,
         grant: None,
         layout_version: false,
         mark_repo_known: false,
@@ -2334,6 +2524,7 @@ fn d34_prune_retry_refreshes_the_epoch_even_without_a_counted_replan() {
             expires_at_ms: T0 + 100_000,
         }),
         charges: &charges,
+        namespace_charge: None,
         grant: Some(crate::op::GrantRef {
             id: [9; 32],
             epoch: 0,
@@ -2445,6 +2636,7 @@ fn leased_epoch_checks_use_the_granted_epoch_and_cap_replay_deadlines() {
                 ..replay()
             }),
             charges: &[],
+            namespace_charge: None,
             grant: Some(crate::op::GrantRef {
                 id: [9; 32],
                 epoch: 7,
