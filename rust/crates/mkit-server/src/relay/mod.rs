@@ -14,7 +14,7 @@
 //! Only delivery failures block targets; reaching the target budget pauses
 //! the cursor before the next target. Blocked targets are retried at each
 //! cycle start. With fewer than 32 failing targets preceding it, a healthy
-//! target is attempted within ⌈F / max_targets⌉ + ⌈R / (4 × max_rows)⌉ + 1
+//! target is attempted within ⌈F / `max_targets`⌉ + ⌈R / (4 × `max_rows`)⌉ + 1
 //! fires, where F counts distinct targets and R counts rows ahead. Fires
 //! without delivery back off. This can exceed `RELAY_LAG_BOUND_MS` in time;
 //! WP-1.23c's `namespace_relay_watermark` must tolerate that lag.

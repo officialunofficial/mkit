@@ -1053,23 +1053,17 @@ async fn target_sequence_order_survives_target_pauses_across_fires() {
     }
     assert!(queued(&s).await.is_empty());
     let applies = applies.lock().unwrap();
-    for (p, expected) in [(target(1), vec![1, 3, 5]), (target(0), vec![2, 4])] {
+    for (p, expected) in [(target(1), vec![1u8, 3, 5]), (target(0), vec![2u8, 4])] {
         let seen: Vec<_> = applies
             .iter()
             .filter(|(target, _)| target == &p)
             .flat_map(|(_, batch)| batch.writes.iter())
             .filter_map(|write| match write {
-                Write::Put(k, v) if k == &key() => Some(v.as_bytes()[0] as u64),
+                Write::Put(k, v) if k == &key() => Some(v.as_bytes()[0]),
                 _ => None,
             })
             .collect();
-        assert_eq!(
-            seen,
-            expected
-                .into_iter()
-                .map(|seq| seq as u64)
-                .collect::<Vec<_>>()
-        );
+        assert_eq!(seen, expected);
     }
 }
 
@@ -1834,14 +1828,14 @@ async fn corrupt_scan_state_restarts_under_its_observed_value_guard() {
     let mut timer_value = Value::default();
     fire_with_value(&h, &s, &mut timer_value).await.unwrap();
     assert!(queued(&s).await.is_empty());
-    let checkpoints = s.successful.lock().unwrap();
-    assert!(checkpoints.iter().any(|(p, batch)| {
+    let guarded_replacement = s.successful.lock().unwrap().iter().any(|(p, batch)| {
         p == &source()
             && batch.preconditions.iter().any(|pre| {
                 matches!(pre, Precondition::Equals(key, value)
                     if key == &keys::relay_scan() && value == &corrupt)
             })
-    }));
+    });
+    assert!(guarded_replacement);
     assert!(
         codec::decode_relay_scan(
             &s.get(&source(), &keys::relay_scan())
@@ -1936,7 +1930,7 @@ proptest::proptest! {
             ).unwrap();
             assert_eq!(state.cycle_end, original_end);
             for seq in original_end + 1..=expected_schedule.len() as u64 {
-                let destination = target(expected_schedule[seq as usize - 1]);
+                let destination = target(expected_schedule[usize::try_from(seq).unwrap() - 1]);
                 assert!(h.target.get(&destination, &order_key(seq)).await.unwrap().is_none(),
                     "row appended beyond cycle_end was delivered inside the old cycle");
             }
