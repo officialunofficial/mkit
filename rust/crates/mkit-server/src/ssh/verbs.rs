@@ -52,7 +52,7 @@ use crate::refs::{
     DigestField, MAX_REF_NAME_BYTES, REF_NAME_OUTSIDE_REFS, REF_NAME_TOO_LONG, RefWireError,
     UnusedExpectedId, condition_from_wire, hash_from_slice, is_served_ref_name, validate_ref_name,
 };
-use crate::store::{BlobStore, NamespaceStore};
+use crate::store::{MultipartBlobStore, NamespaceStore};
 use crate::upload::{UploadError, UploadLimits, UploadValidator};
 
 /// A verb's fixed rejection: the code and message of its error frame.
@@ -158,7 +158,7 @@ pub(super) struct Verbs<'p, B, N, H> {
     principal: Principal,
 }
 
-impl<'p, B: BlobStore, N: NamespaceStore, H: HookSet> Verbs<'p, B, N, H> {
+impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Verbs<'p, B, N, H> {
     pub(super) fn new(pipe: &'p Pipeline<B, N, H>, principal: Principal) -> Self {
         Self { pipe, principal }
     }
@@ -410,7 +410,7 @@ impl<'p, B: BlobStore, N: NamespaceStore, H: HookSet> Verbs<'p, B, N, H> {
 }
 
 /// Discard an upload's pack sink, if one is open.
-async fn abort<B: BlobStore, N: NamespaceStore, H: HookSet>(
+async fn abort<B: MultipartBlobStore, N: NamespaceStore, H: HookSet>(
     session: Option<UploadSession<'_, B, N, H>>,
 ) {
     if let Some(session) = session {

@@ -24,6 +24,9 @@ pub enum StoreError {
     /// not match its key or declared length. Nothing was written.
     #[error("invalid storage request: {0}")]
     Invalid(Cow<'static, str>),
+    /// A staged part's subtree hash differs from its authenticated commitment.
+    #[error("part subtree hash does not match its commitment")]
+    PartSubtreeMismatch,
     /// A byte range starts at or past the end of a blob of `len` bytes
     /// (HTTP 416 on the serving path).
     #[error("byte range not satisfiable for a {len}-byte blob")]
@@ -36,6 +39,9 @@ pub enum StoreError {
     /// without `atomic_multi_key`. Nothing was written.
     #[error("unsupported by this store: {0}")]
     Unsupported(Cow<'static, str>),
+    /// The multipart storage session was aborted, completed or reclaimed.
+    #[error("multipart upload session no longer exists")]
+    SessionGone,
     /// A stored value failed to decode (unknown codec version, wrong length).
     #[error("corrupt stored value: {0}")]
     Corrupt(Cow<'static, str>),

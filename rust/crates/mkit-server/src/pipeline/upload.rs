@@ -33,7 +33,9 @@ use crate::error::{Code, ServerError};
 use crate::op::{OpKind, Operation};
 use crate::replay::{ReplayDecision, StoredRejection, StoredResult, classify};
 use crate::storage_error::StorageOp;
-use crate::store::{BlobStore, NamespaceStore, PackSink, Partition, StoreError, codec, keys};
+use crate::store::{
+    BlobStore, MultipartBlobStore, NamespaceStore, PackSink, Partition, StoreError, codec, keys,
+};
 use crate::telemetry::METRIC_UPLOAD_BYTES;
 use crate::upload::marker::write_upload_marker;
 use crate::upload::ticket_auth::verify_ticket;
@@ -141,7 +143,7 @@ fn storable(err: &ServerError) -> Option<StoredRejection> {
     }
 }
 
-impl<'p, B: BlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p, B, N, H> {
+impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p, B, N, H> {
     /// See [`Pipeline::open_upload`].
     pub(super) async fn begin(
         pipe: &'p Pipeline<B, N, H>,
