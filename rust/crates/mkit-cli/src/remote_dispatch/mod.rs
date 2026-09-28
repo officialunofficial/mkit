@@ -701,9 +701,11 @@ pub fn push_branch_tracked(
 /// CAS attempt does not have to walk the chain a second time (#521 perf
 /// fix).
 ///
-/// On a CAS failure ([`TransportError::RefConflict`]) this returns
-/// [`DispatchError::NonFastForwardPush`] so callers can render an
-/// actionable fetch-then-retry hint. Does NOT touch local
+/// On a CAS failure ([`TransportError::RefConflict`]) this reads the head
+/// back first (SPEC-TRANSPORT §7: a retried write can report a conflict for
+/// its own landed attempt); a head already at `tip` is success, anything
+/// else returns [`DispatchError::NonFastForwardPush`] so callers can render
+/// an actionable fetch-then-retry hint. Does NOT touch local
 /// remote-tracking refs — the caller decides when to advance them.
 pub fn push_branch(
     tx: &dyn Transport,

@@ -55,8 +55,10 @@ enum Slot<'k> {
 /// [`FileTransport`]'s strict reads, and every write is its CAS (`Missing`
 /// for an `Absent` guard, `Match` for an `Equals` guard, `Any` otherwise)
 /// and its atomic write, under its ref lock (`<root>/.mkit/refs/.lock`), so
-/// local `mkit` commands, `mkit+file://` remotes and this store see the
-/// same files and serialize on the same lock. A ref's value is its 32-byte
+/// `mkit+file://` remotes and this store see the same files and serialize
+/// on the same lock. Local `mkit` commands use their own per-ref
+/// `refs-<digest>.lock` and are not coordinated with it
+/// (SPEC-CONCURRENCY §3.1). A ref's value is its 32-byte
 /// id. A ref file that does not decode is [`StoreError::Corrupt`] on a
 /// read or a precondition, never absent; a scan skips it with a warning,
 /// like a ref file whose name is over [`refs::MAX_REF_NAME_BYTES`] (written
