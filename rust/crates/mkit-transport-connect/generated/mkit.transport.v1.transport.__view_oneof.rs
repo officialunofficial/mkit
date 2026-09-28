@@ -82,3 +82,25 @@ pub mod upload_part_request {
         Chunk(&'a [u8]),
     }
 }
+pub mod set_repo_visibility_request {
+    #[allow(unused_imports)]
+    use super::*;
+    #[derive(Clone, Debug)]
+    pub enum Mode<'a> {
+        Visibility(::buffa::EnumValue<super::super::super::super::RepoVisibility>),
+        SignedStatement(&'a str),
+    }
+}
+pub mod issue_object_url_request {
+    #[allow(unused_imports)]
+    use super::*;
+    #[derive(Clone, Debug)]
+    pub enum Target<'a> {
+        ObjectId(&'a [u8]),
+        RefPath(
+            ::buffa::alloc::boxed::Box<
+                super::super::super::super::__buffa::view::RefPathView<'a>,
+            >,
+        ),
+    }
+}

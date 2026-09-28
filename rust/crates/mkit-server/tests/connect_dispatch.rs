@@ -5,6 +5,7 @@
 //! error-shaping path.
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use base64::Engine as _;
@@ -30,10 +31,17 @@ use mkit_server::connect::proto::mkit::transport::v1::{
     PackExistsResponse, ReadRefRequest, ReadRefResponse, RefExpectation, UploadPackHeader,
     UploadPackRequest, UploadPartHeader, UploadPartRequest,
 };
+use mkit_server::connect::proto::mkit::transport::v1::{
+    GetGrantEpochRequest, IssueObjectUrlRequest, SetGrantEpochRequest, SetRepoVisibilityRequest,
+};
 use mkit_server::connect::{self};
 use mkit_server::pipeline::{
     AuthMode, Authorizer, DefaultAdmission, HookSet, Hooks, NoOutcomes, NoPreReceive, NoReceipts,
     Pipeline, PipelineConfig,
+};
+use mkit_server::store::{
+    Batch, BatchOutcome, Cursor, Key, NamespaceStore, Partition, PartitionStats, ScanPage,
+    StoreCapabilities, StoreError, Value,
 };
 use mkit_server::upload::UploadLimits;
 use mkit_server::upload::token::{TicketClaims, TicketKeys};
@@ -56,6 +64,40 @@ const B: [u8; 32] = [0xbb; 32];
 const JSON: &str = "application/json";
 const PROTO: &str = "application/proto";
 const STREAM: &str = "application/connect+proto";
+
+struct SpyStore {
+    inner: MemoryKv,
+    writes: Arc<AtomicUsize>,
+}
+
+impl NamespaceStore for SpyStore {
+    fn capabilities(&self) -> StoreCapabilities {
+        self.inner.capabilities()
+    }
+    async fn get(&self, p: &Partition, k: &Key) -> Result<Option<Value>, StoreError> {
+        self.inner.get(p, k).await
+    }
+    async fn scan(
+        &self,
+        p: &Partition,
+        start: &Key,
+        end: &Key,
+        after: Option<&Cursor>,
+        limit: u32,
+    ) -> Result<ScanPage, StoreError> {
+        self.inner.scan(p, start, end, after, limit).await
+    }
+    async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
+        self.writes.fetch_add(1, Ordering::SeqCst);
+        self.inner.apply(p, batch).await
+    }
+    async fn stats(&self, p: &Partition) -> Result<PartitionStats, StoreError> {
+        self.inner.stats(p).await
+    }
+    async fn probe(&self) -> Result<(), StoreError> {
+        self.inner.probe().await
+    }
+}
 
 // ------------------------------------------------------------- server
 
@@ -93,6 +135,44 @@ fn setup(auth: AuthMode) -> Setup {
         meta: None,
         chunk_max: 4,
     }
+}
+
+fn spy_server(auth: AuthMode) -> (Server, Arc<AtomicUsize>) {
+    let clock = Arc::new(ManualClock::new(T0));
+    let repo = RepoId {
+        namespace: NamespaceKey::deployment_default(),
+        name: RepoName::new(REPO).unwrap(),
+    };
+    let cfg = PipelineConfig::new(
+        Addressing::Single { repo },
+        auth,
+        UploadLimits {
+            max_total_bytes: 1 << 20,
+            max_chunks: 64,
+        },
+    );
+    let writes = Arc::new(AtomicUsize::new(0));
+    let meta = SpyStore {
+        inner: MemoryKv::with_clock(clock.clone()),
+        writes: writes.clone(),
+    };
+    let codes = Arc::new(Codes::default());
+    let pipe = Pipeline::new(
+        MemoryBlobStore::default(),
+        meta,
+        Hooks::new(),
+        cfg,
+        clock,
+        codes.clone(),
+    )
+    .unwrap();
+    (
+        Server {
+            svc: connect::service(Arc::new(pipe)),
+            codes,
+        },
+        writes,
+    )
 }
 
 impl<H: HookSet + 'static> Setup<H> {
@@ -1022,6 +1102,83 @@ fn multipart_paths_are_authenticated_procedures() {
         Procedure::from_connect_path("/mkit.transport.v1.TransportService/CompleteUpload"),
         Some(Procedure::CompleteUpload)
     );
+}
+
+#[test]
+fn grant_epoch_paths_are_permanently_outside_procedure() {
+    // SPEC-WRITE-GRANTS §5.3, §9.2: the epoch RPCs are unsigned forever.
+    for rpc in ["GetGrantEpoch", "SetGrantEpoch"] {
+        let path = format!("/mkit.transport.v1.TransportService/{rpc}");
+        assert_eq!(Procedure::from_connect_path(&path), None, "{rpc}");
+    }
+}
+
+#[test]
+fn m2_stub_paths_are_not_authenticated_procedures_yet() {
+    // WP-2.9 and WP-2.11 add procedures for these and replace this test.
+    for rpc in ["SetRepoVisibility", "IssueObjectUrl"] {
+        let path = format!("/mkit.transport.v1.TransportService/{rpc}");
+        assert_eq!(Procedure::from_connect_path(&path), None, "{rpc}");
+    }
+}
+
+#[tokio::test]
+async fn m2_stubs_reject_binary_and_json_without_writes_in_both_auth_modes() {
+    for auth in [
+        authv2(),
+        AuthMode::Bearer {
+            token: Redacted::new(TOKEN),
+        },
+    ] {
+        let (server, writes) = spy_server(auth);
+        assert_unimplemented(
+            &server
+                .unary(
+                    "GetGrantEpoch",
+                    &GetGrantEpochRequest {
+                        namespace: Some("namespace".into()),
+                        ..Default::default()
+                    },
+                    &[],
+                )
+                .await,
+        );
+        assert_unimplemented(
+            &server
+                .unary(
+                    "SetGrantEpoch",
+                    &SetGrantEpochRequest {
+                        signed_statement: Some("statement.scheme.blob".into()),
+                        ..Default::default()
+                    },
+                    &[],
+                )
+                .await,
+        );
+        assert_unimplemented(
+            &server
+                .unary(
+                    "SetRepoVisibility",
+                    &SetRepoVisibilityRequest::default(),
+                    &[],
+                )
+                .await,
+        );
+        assert_unimplemented(
+            &server
+                .unary("IssueObjectUrl", &IssueObjectUrlRequest::default(), &[])
+                .await,
+        );
+        for rpc in [
+            "GetGrantEpoch",
+            "SetGrantEpoch",
+            "SetRepoVisibility",
+            "IssueObjectUrl",
+        ] {
+            assert_unimplemented(&server.json(rpc, &serde_json::json!({}), &[]).await);
+        }
+        assert_eq!(writes.load(Ordering::SeqCst), 0);
+    }
 }
 
 #[tokio::test]

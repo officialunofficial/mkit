@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Transport: add the `GetGrantEpoch`, `SetGrantEpoch`, `SetRepoVisibility` and
+  `IssueObjectUrl` messages and RPCs; the server answers `unimplemented` until
+  WP-2.8, WP-2.9 and WP-2.11 (WP-2.2).
 - Transport: add the `AdmissionChallenge` and `Challenge` error detail messages
   with pinned binary, protobuf JSON, and Connect error goldens (WP-3.1).
 - Specify server takedown and redaction notices: global content blocklist,
