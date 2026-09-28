@@ -41,6 +41,9 @@ outcome-read-served.request.json OutcomeRequest
 outcome.response.json OutcomeResponse
 event-lease-grace.request.json EventRequest
 event-lease-deleted.request.json EventRequest
+event-takedown-blocked.request.json EventRequest
+event-takedown-namespace.request.json EventRequest
+event-takedown.request.json EventRequest
 event.response.json EventResponse
 TABLE
   echo "check-server-hooks-goldens: no message type for $fixture_name" >&2
@@ -70,8 +73,8 @@ for file in "$golden_dir"/*.request.json "$golden_dir"/*.response.json; do
   count=$((count + 1))
 done
 
-if [[ "$count" -ne 25 ]]; then
-  echo "check-server-hooks-goldens: expected 25 mapped fixtures, found $count" >&2
+if [[ "$count" -ne 28 ]]; then
+  echo "check-server-hooks-goldens: expected 28 mapped fixtures, found $count" >&2
   exit 1
 fi
 echo "check-server-hooks-goldens: all $count fixtures preserve canonical protobuf JSON"

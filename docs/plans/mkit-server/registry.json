@@ -1918,16 +1918,34 @@
     ]
   },
   {
-    "id": "5.1b",
-    "title": "Spec: takedown, RedactionNotice, preservation store, admin API and audit log (#1091 part 2)",
+    "id": "5.1b-1",
+    "title": "Spec: takedown and redaction notices (#1091 part 2a)",
     "milestone": "M5",
     "track": "spec",
     "depends_on": [
-      "5.1a-2"
+      "5.1a-2",
+      "5.1c"
     ],
-    "size": "L",
-    "summary": "Normative takedown levels, whole-object tombstones, delta-safe rewrite with packmap CAS, signed notices, the admin-only preservation store, per-role keys and the admin API with audit log. Requires spec approval.",
-    "human_action": true,
+    "size": "M",
+    "summary": "SPEC-SERVER §14 takedown, tombstones, delta-safe rewrite, preservation, signed notices, additive transport and hooks proto and goldens.",
+    "human_action": false,
+    "area_gates": [
+      "docs",
+      "proto",
+      "golden"
+    ]
+  },
+  {
+    "id": "5.1b-2",
+    "title": "Spec: admin API and audit log (#1091 part 2b)",
+    "milestone": "M5",
+    "track": "spec",
+    "depends_on": [
+      "5.1b-1"
+    ],
+    "size": "M",
+    "summary": "SPEC-SERVER §16 admin procedures, role-separated keys, audited preservation access and remote CachePurge wire.",
+    "human_action": false,
     "area_gates": [
       "docs",
       "proto",
@@ -2049,13 +2067,13 @@
     "milestone": "M5",
     "track": "core",
     "depends_on": [
-      "5.1b",
+      "5.1b-1",
       "4.10",
       "5.2",
       "5.10"
     ],
     "size": "L",
-    "summary": "Content/repo/namespace takedown with holder discovery, tombstone views in repo index shards, a global blocklist that the relay also checks on delivery, completion only after the relay watermark passes the takedown point, and a restricted preservation store reachable only through the admin API. Invokes WP-5.10's CachePurger. The human creates the preservation bucket.",
+    "summary": "Content/repo/namespace takedown with holder discovery, tombstone views in repo index shards, a global blocklist that the relay also checks on delivery, completion only after the relay watermark passes the takedown point, and a restricted preservation store reachable only through the admin API. Invokes WP-5.10's CachePurger. The human creates the preservation bucket. The blocklist row codec moves to V2.",
     "human_action": true,
     "area_gates": [
       "rust",
@@ -2121,7 +2139,8 @@
     "track": "core",
     "depends_on": [
       "5.7b",
-      "5.8"
+      "5.8",
+      "5.1b-1"
     ],
     "size": "M",
     "summary": "Signed notices on reads and on pushes whose delta base is tombstoned, per-branch flags computed at takedown, and 404-before-451 on HTTP.",
@@ -2153,10 +2172,11 @@
     "milestone": "M5",
     "track": "core",
     "depends_on": [
-      "5.2"
+      "5.2",
+      "5.1b-2"
     ],
     "size": "S",
-    "summary": "An implementer-provided CachePurger internal interface, triggered on suspension, lease deletion and visibility change; WP-5.6 adds the takedown trigger (this WP lands first).",
+    "summary": "An implementer-provided CachePurger internal interface, triggered on suspension, lease deletion and visibility change; WP-5.6 adds the takedown trigger; remote CachePurge delivery follows the admin spec.",
     "human_action": false,
     "area_gates": [
       "rust"
@@ -2168,7 +2188,7 @@
     "milestone": "M5",
     "track": "core",
     "depends_on": [
-      "5.1b",
+      "5.1b-2",
       "4.18",
       "2.15"
     ],
@@ -2248,7 +2268,8 @@
     "track": "core",
     "depends_on": [
       "5.6",
-      "5.7b"
+      "5.7b",
+      "5.1b-1"
     ],
     "size": "M",
     "summary": "Reverses a tombstone from the preservation store, lifts the blocklist entry and re-adds the object to affected chains by server-side pack rewrite, audited.",

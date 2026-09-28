@@ -123,8 +123,8 @@ HEAD follows the same checks as GET but MUST send no body on every status.
 | 4 | Bearer-gated deployment: require the same bearer gate as RPCs; missing or invalid bearer yields 401. Every HTTP-objects response in such a deployment MUST be private. OPTIONS is unauthenticated but still private; the key document is exempt from the bearer gate and private caching rule. |
 | 5 | If a token is present, check its syntax and signature against the key set before repository lookup. Then check repository existence and private-token validity under §6. Missing repository, or missing/invalid private token: the same 404 response. A public repository ignores the token's result. |
 | 6 | Run the Authorizer for every read. Deny: 403, except 404 for a private repository or a hook `not_found`. A URL token does not bypass this hook. |
-| 7 | Resolve in the published view under §4. Missing ref, non-tree intermediate component, missing entry, unreachable proof commit, leaf/id mismatch, nonmember id, or unreachable id: 404. |
-| 8 | 451 is reserved for M5 tombstones, after the preceding 404 checks. M4 MUST NOT return 451. Reachability MUST NOT descend through tombstoned objects. |
+| 7 | Resolve in the published view under §4. Missing ref, non-tree intermediate component, missing entry, unreachable proof commit, leaf/id mismatch, nonmember id without this repository's tombstone, unreachable id, an id blocked but not yet tombstoned, or any chunk of a blocked manifest before this repository's takedown completes: 404. A tombstone is only a candidate for step 8 after published-tree reachability is proven. This 404 precedes 304. |
+| 8 | If the requested id is reachable in the published tree walk and this repository has a tombstone for it, return 451 with the §9 notice body. Otherwise continue. This check follows every preceding 404 check and precedes 304 and Admission. Reachability MUST NOT descend through a blocked or tombstoned manifest; a chunk reachable only through it receives 404. |
 | 9 | Matching `If-None-Match`: 304, no admission or charge. |
 | 10 | Unsatisfiable ordinary byte Range, or out-of-bounds/unsupported/over-cap proof range: 416. Ordinary byte ranges include `Content-Range: bytes */N`, where N is the full representation size. |
 | 11 | Read Admission, when configured: challenge yields 402 under §7; deny yields 403. |
@@ -149,10 +149,21 @@ its tree by exact decoded entry bytes. Symlinks MUST be served as blob
 content; they MUST NOT be followed as filesystem paths.
 
 A ref path is reachable by construction. For an id URL, the server MUST
-check repository membership first, with a cheap uniform 404 on a miss,
-then prove reachability from a published ref value. The walk follows
-repository-local object references, including parents and chunk manifests;
+check repository membership first, with a cheap uniform 404 on a miss
+unless this repository has a tombstone for that exact id. A tombstone
+candidate MUST then prove reachability from a published ref value before
+step 8 can return 451; a failed proof is the same 404 as any other miss.
+Ordinary member ids also prove reachability. The walk follows
+repository-local object references, including parents and chunk manifests,
+but MUST NOT descend through a blocked or tombstoned manifest;
 it MUST NOT follow foreign remix sources or pack-only delta bases.
+An id blocked globally but not yet tombstoned in this repository MUST
+return 404 at step 7, even when a cached reachability result or matching
+`If-None-Match` would otherwise produce 304.
+The walk MUST use current tombstones even when its reachability result
+was cached. A global blocklist entry alone is not permission to answer
+451: the id MUST be reachable in this repository's published tree walk
+and have this repository's tombstone (SPEC-SERVER §14.5).
 The global content store MUST NOT be consulted during HTTP resolution or
 serving.
 Extracted copies keyed by object id (SPEC-SERVER §9.6) MUST NOT constitute
@@ -365,7 +376,7 @@ Preflight MUST use 204 without auth or payment and allow these values:
 |---|---|
 | `Access-Control-Allow-Methods` | `GET, HEAD, OPTIONS` |
 | `Access-Control-Allow-Headers` | `Range, If-None-Match, If-Range, Payment-Authorization, PAYMENT-SIGNATURE, Authorization, Accept-Payment` |
-| `Access-Control-Expose-Headers` | `ETag, Content-Range, Accept-Ranges, Content-Length, X-Mkit-Commit, X-Mkit-Object, X-Mkit-Object-Type, WWW-Authenticate, Payment-Receipt, PAYMENT-REQUIRED, PAYMENT-RESPONSE` |
+| `Access-Control-Expose-Headers` | `ETag, Content-Range, Accept-Ranges, Content-Length, X-Mkit-Commit, X-Mkit-Object, X-Mkit-Object-Type, WWW-Authenticate, Payment-Receipt, PAYMENT-REQUIRED, PAYMENT-RESPONSE, Link` |
 
 ## 9. Vectors and deferred work
 
@@ -386,8 +397,18 @@ The independent test-local MKDS encoder and reference verifier are in
 `MKIT_WRITE_GOLDEN=1` regenerates the artifacts; check mode reads committed
 vectors. Reject sidecars name the exact span rejection reason.
 
-Token-bearing URL vectors follow WP-2.11/4.15. Tombstone response bodies
-follow M5. The product MKDS verifier, boundary-aware builder, and verifier
+An HTTP 451 body MUST be the canonical protobuf JSON of the newest
+applicable reader-view `mkit.transport.v1.RedactionNotice`
+(SPEC-SERVER §14.6), with
+`Content-Type: application/json`, `Cache-Control: no-store` (or
+`private, no-store` under a bearer gate), and
+`Link: <origin>; rel="blocked-by"`. It MUST omit `ETag`, every
+`X-Mkit-*` header, and `Content-Range`; HEAD sends no body. The
+`response-cases.json` rows pin 404 for a blocked but not yet
+tombstoned id ahead of 304, and 451 precedence against 304 and
+Admission, including the tombstoned-manifest chunk case.
+
+Token-bearing URL vectors follow WP-2.11/4.15. The product MKDS verifier, boundary-aware builder, and verifier
 bindings follow WP-4.14. Signed-read HTTP GETs and schema extensions for an
 object-id admission field or token principal require separate work.
 
