@@ -5,6 +5,27 @@ single crate or spec. Each entry states the invariant, why it matters, and
 what breaks when it is violated. A regression test enforces each one; find
 it by the file path listed under "Enforced by".
 
+## Ticketed UploadPack touches no metadata and always leaves a marker
+
+**Always:** a ticketed UploadPack verifies the signed pack commitment and
+ticket before reading bytes, streams the complete pack through a verifying
+blob sink, and writes a content-addressed marker in the upload-marker
+namespace after the pack commit. It makes no `NamespaceStore` call, quota
+charge, replay row, authorization, admission or `pre_receive` call.
+
+**Because:** the marker proves that a holder of this ticket supplied and
+verified these pack bytes. WP-1.10 requires it with the pack blob before
+consuming the ticket, even when another repository already stored the pack.
+
+**If violated:** an advance could attach a globally present pack without an
+upload, or a ticketed stream could depend on another shard's metadata.
+
+**Enforced by:** `mkit-server` pipeline tests `ticketed_upload_no_metadata_and_marker`,
+`ticketed_upload_failures_leave_no_marker`, and `upload::marker::tests::golden_upload_marker_v1`;
+`mkit-server-native` tests `ticketed_memory_all_layouts_touch_no_metadata`
+and `ticketed_sqlite_all_layouts_touch_no_metadata` (including concurrent uploads);
+wire cases `tickets.upload_pack_ticketed` and `repository.ticketed_upload_multi`.
+
 ## Git audit establishes correspondence without a signing key
 
 **Always:** imported graph edges and translated unsigned fields are derived

@@ -168,7 +168,7 @@ impl PackSink for MemoryPackSink {
         if self.buf.len() as u64 != self.len {
             return Err(StoreError::Invalid("blob length does not match".into()));
         }
-        if self.hasher.finalize() != self.key.0 {
+        if self.hasher.finalize() != *self.key.hash() {
             return Err(StoreError::Invalid(
                 "blob hash does not match its key".into(),
             ));
@@ -192,7 +192,7 @@ mod tests {
     use super::*;
 
     fn key_of(bytes: &[u8]) -> BlobKey {
-        BlobKey::new(hash(bytes))
+        BlobKey::pack(hash(bytes))
     }
 
     fn put(

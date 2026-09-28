@@ -340,6 +340,35 @@ fn ms(ms: i64) -> u64 {
     u64::try_from(ms).unwrap_or(0)
 }
 
+fn validate_upload_ticket_config<H: HookSet>(
+    cfg: &PipelineConfig,
+    hooks: &H,
+) -> Result<(), ServerError> {
+    if matches!(cfg.addressing, Addressing::Multi(_))
+        && matches!(cfg.auth, AuthMode::TransportIdentity)
+    {
+        return Err(ServerError::invalid_argument(
+            "multi-repository deployments require auth v2 until transport identity carries tickets",
+        ));
+    }
+    if cfg.begin_upload_threshold_bytes != u64::MAX
+        && (!matches!(cfg.auth, AuthMode::AuthV2(_)) || cfg.ticket_keys.is_none())
+    {
+        return Err(ServerError::invalid_argument(
+            "a ticket threshold requires auth v2 and upload ticket keys",
+        ));
+    }
+    if !matches!(cfg.auth, AuthMode::TransportIdentity)
+        && !hooks.admission().is_default()
+        && (!matches!(cfg.auth, AuthMode::AuthV2(_)) || cfg.ticket_keys.is_none())
+    {
+        return Err(ServerError::invalid_argument(
+            "admission requires auth v2 and upload ticket keys",
+        ));
+    }
+    Ok(())
+}
+
 impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// A pipeline over `blobs` and `meta`, routed by `cfg.sharding`.
     ///
@@ -363,6 +392,7 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         metrics: Arc<dyn Metrics>,
     ) -> Result<Self, ServerError> {
         cfg.validate_server_info_limits()?;
+        validate_upload_ticket_config(&cfg, &hooks)?;
         if cfg.ticket_ttl_ms == 0
             || cfg.ticket_ttl_ms >= 604_800_000
             || cfg.ticket_caps.per_ref == 0
@@ -739,7 +769,7 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             if !self.pack_is_member(a, &key).await? {
                 return Ok(false);
             }
-            let head = self.blobs.head(&key).await;
+            let head = self.blobs.head(&key.into()).await;
             Ok(head
                 .map_err(|e| store_error(StorageOp::BlobHead, e))?
                 .is_some())
@@ -754,7 +784,7 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// stream before it returns.
     ///
     /// # Errors
-    /// `unimplemented` for Multi mode;
+    /// `failed_precondition` when the advertised threshold requires a ticket;
     /// the header's [`crate::upload::UploadError`]; `unauthenticated` when
     /// the header differs from the signed commitment; a stored or
     /// in-flight replay answer; a hook's error; the reservation's error.
@@ -765,6 +795,21 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         total_bytes: Option<u64>,
     ) -> Result<UploadSession<'_, B, N, H>, ServerError> {
         UploadSession::begin(self, a, pack_id, total_bytes).await
+    }
+
+    /// Open a stateless ticketed `UploadPack` stream after checking the header,
+    /// signed commitment and token, before reading any body bytes.
+    ///
+    /// # Errors
+    /// Framing, authentication, binding and blob-store failures.
+    pub async fn open_ticketed_upload(
+        &self,
+        a: &Authenticated,
+        pack_id: Option<&[u8]>,
+        total_bytes: Option<u64>,
+        token: &[u8],
+    ) -> Result<UploadSession<'_, B, N, H>, ServerError> {
+        UploadSession::begin_ticketed(self, a, pack_id, total_bytes, token).await
     }
 
     /// A pack's bytes as chunks of at most `download_chunk_max` bytes.
@@ -789,7 +834,7 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             if !self.pack_is_member(a, &key).await? {
                 return Err(ServerError::not_found("pack not found"));
             }
-            let body = self.blobs.get(&key, None).await;
+            let body = self.blobs.get(&key.into(), None).await;
             match body.map_err(|e| store_error(StorageOp::BlobGet, e))? {
                 Some(body) => Ok(body),
                 None => Err(ServerError::not_found("pack not found")),
@@ -1008,18 +1053,6 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         )
         .await
         .map_err(meta_error)
-    }
-
-    /// Multi packs must not consult the global blob store as an existence oracle.
-    fn require_pack_membership(&self) -> Result<(), ServerError> {
-        // TODO(WP-1.9b): wire ticketed uploads in Multi mode.
-        if matches!(self.cfg.addressing, Addressing::Multi(_)) {
-            return Err(ServerError::new(
-                crate::Code::Unimplemented,
-                "pack RPCs need repository membership",
-            ));
-        }
-        Ok(())
     }
 
     /// A unary write's ref writes in decision order (packmap first) and

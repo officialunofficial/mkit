@@ -24,6 +24,36 @@ fn root() -> Partition {
     Partition::Namespace(NamespaceKey::deployment_default())
 }
 
+#[test]
+fn upload_marker_r2_key_is_not_a_pack_key() {
+    let bucket = SimBucket::default();
+    let store = R2BlobStore::new(bucket, PACKS_KEYSPACE);
+    let content = b"marker bytes";
+    let marker = BlobKey::upload_marker(hash(content));
+    block_on(async {
+        let mut sink = store.begin(marker, content.len() as u64).await.unwrap();
+        sink.write(Bytes::from_static(content)).await.unwrap();
+        sink.commit().await.unwrap();
+        assert_eq!(
+            store.object_key(&marker).unwrap(),
+            format!("upload-markers/v1/{}", marker.to_hex())
+        );
+        assert!(store.head(&marker).await.unwrap().is_some());
+        assert!(
+            store
+                .head(&BlobKey::pack(hash(content)))
+                .await
+                .unwrap()
+                .is_none()
+        );
+    });
+    let prefixed = R2BlobStore::new(SimBucket::default(), "tenant/a/packs");
+    assert_eq!(
+        prefixed.object_key(&marker).unwrap(),
+        format!("tenant/a/upload-markers/v1/{}", marker.to_hex())
+    );
+}
+
 /// A connection whose size counts free pages too: what the soft cap would
 /// see if `databaseSize` included the freelist.
 #[derive(Debug, Clone)]
@@ -181,7 +211,7 @@ fn a_failed_put_is_already_present_only_if_the_key_now_exists() {
     let put = |bytes: &'static [u8]| {
         block_on(async {
             let mut sink = store
-                .begin(BlobKey::new(hash(bytes)), bytes.len() as u64)
+                .begin(BlobKey::pack(hash(bytes)), bytes.len() as u64)
                 .await?;
             sink.write(Bytes::from_static(bytes)).await?;
             sink.commit().await
@@ -200,11 +230,11 @@ fn a_failed_put_is_already_present_only_if_the_key_now_exists() {
     // Over the size cap: refused at begin.
     let small = R2BlobStore::new(bucket, PACKS_KEYSPACE).with_max_bytes(4);
     assert!(matches!(
-        block_on(small.begin(BlobKey::new(hash(b"hello")), 5)),
+        block_on(small.begin(BlobKey::pack(hash(b"hello")), 5)),
         Err(StoreError::Invalid(_))
     ));
     assert_eq!(
-        store.object_key(&BlobKey::new([0xab; 32])),
+        store.object_key(&BlobKey::pack([0xab; 32])).unwrap(),
         format!("packs/{}", "ab".repeat(32))
     );
 }
@@ -232,7 +262,7 @@ fn early_put_answers_never_hang_and_still_verify() {
     let bucket = SimBucket::default().answer_early();
     let store = R2BlobStore::new(bucket.clone(), PACKS_KEYSPACE);
     let data: Vec<u8> = (0..64 * 4096_u32).map(|i| i.to_le_bytes()[1]).collect();
-    let key = BlobKey::new(hash(&data));
+    let key = BlobKey::pack(hash(&data));
     assert_eq!(upload(&store, key, &data).unwrap(), CommitOutcome::Created);
     // Early 412: the key exists.
     assert_eq!(
@@ -254,7 +284,7 @@ fn early_put_answers_never_hang_and_still_verify() {
     );
     // Early 429 on an absent key: a retryable failure, nothing visible.
     let other: Vec<u8> = data.iter().map(|b| b.wrapping_add(1)).collect();
-    let other_key = BlobKey::new(hash(&other));
+    let other_key = BlobKey::pack(hash(&other));
     bucket.fail_next_puts(1);
     assert!(matches!(
         upload(&store, other_key, &other),

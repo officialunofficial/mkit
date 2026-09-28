@@ -23,8 +23,9 @@ use crate::store::{
 /// The size of each piece of a streamed body.
 pub(super) const READ_BLOCK: usize = 64 * 1024;
 
-/// A [`BlobStore`] over one keyspace directory, `<root>/<keyspace>/<64-hex>`
-/// (`packs` by default). An upload streams into a temp file in that
+/// A [`BlobStore`] over `<root>/<keyspace>/<64-hex>` for packs (`packs` by
+/// default), and `<root>/upload-markers/v1/<64-hex>` for upload markers.
+/// An upload streams into a temp file in its destination
 /// directory (named like `FileTransport`'s own, `.<hex>.tmp.<pid>.<seq>`)
 /// while hashing it, and becomes visible only once its BLAKE3 and length
 /// verify: fsync, rename over the destination, fsync the directory. A
@@ -34,8 +35,9 @@ pub(super) const READ_BLOCK: usize = 64 * 1024;
 /// [`StoreError::Full`].
 ///
 /// A process that crashes mid-upload leaves its temp file,
-/// `<keyspace>/.<64-hex>.tmp.<pid>.<seq>`, behind. It is never visible as
-/// a blob; [`FsBlobStore::sweep_stale_uploads`] removes old ones.
+/// `<keyspace>/.<64-hex>.tmp.<pid>.<seq>` or a corresponding marker temp
+/// file, behind. Neither is visible as a blob;
+/// [`FsBlobStore::sweep_stale_uploads`] removes old ones.
 #[derive(Debug, Clone)]
 pub struct FsBlobStore {
     root: PathBuf,
@@ -83,12 +85,12 @@ impl FsBlobStore {
         self.root.join(self.keyspace)
     }
 
-    fn path(&self, key: &BlobKey) -> PathBuf {
-        self.dir().join(key.to_hex())
+    fn path(&self, key: &BlobKey) -> Result<PathBuf, StoreError> {
+        Ok(self.root.join(key.relative_path(self.keyspace)?))
     }
 
-    /// Remove the temp files crashed uploads left in the keyspace
-    /// directory: regular files named exactly `.<64-hex>.tmp.<pid>.<seq>`
+    /// Remove temp files crashed uploads left in the pack and marker
+    /// directories: regular files named exactly `.<64-hex>.tmp.<pid>.<seq>`
     /// (the names [`temp_path`] gives an upload, from this store or
     /// `FileTransport::upload_pack`) last modified at least `min_age` ago.
     /// Nothing else is touched: no blob, no symlink, no other name, no file
@@ -106,29 +108,31 @@ impl FsBlobStore {
     /// # Errors
     /// I/O listing the directory; a missing directory sweeps nothing.
     pub fn sweep_stale_uploads(&self, min_age: Duration) -> io::Result<usize> {
-        let entries = match fs::read_dir(self.dir()) {
-            Ok(entries) => entries,
-            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(0),
-            Err(e) => return Err(e),
-        };
         let now = SystemTime::now();
         let mut removed = 0;
-        for entry in entries {
-            let Ok(entry) = entry else { continue };
-            let name = entry.file_name();
-            if !name.to_str().is_some_and(is_upload_temp_name) {
-                continue;
-            }
-            // `DirEntry::metadata` does not follow a symlink.
-            let Ok(meta) = entry.metadata() else { continue };
-            let stale = meta.is_file()
-                && meta
-                    .modified()
-                    .ok()
-                    .and_then(|m| now.duration_since(m).ok())
-                    .is_some_and(|age| age >= min_age);
-            if stale && fs::remove_file(entry.path()).is_ok() {
-                removed += 1;
+        for dir in [self.dir(), self.root.join("upload-markers/v1")] {
+            let entries = match fs::read_dir(dir) {
+                Ok(entries) => entries,
+                Err(e) if e.kind() == ErrorKind::NotFound => continue,
+                Err(e) => return Err(e),
+            };
+            for entry in entries {
+                let Ok(entry) = entry else { continue };
+                let name = entry.file_name();
+                if !name.to_str().is_some_and(is_upload_temp_name) {
+                    continue;
+                }
+                // `DirEntry::metadata` does not follow a symlink.
+                let Ok(meta) = entry.metadata() else { continue };
+                let stale = meta.is_file()
+                    && meta
+                        .modified()
+                        .ok()
+                        .and_then(|m| now.duration_since(m).ok())
+                        .is_some_and(|age| age >= min_age);
+                if stale && fs::remove_file(entry.path()).is_ok() {
+                    removed += 1;
+                }
             }
         }
         Ok(removed)
@@ -187,7 +191,7 @@ impl FsPackSink {
         if self.written != self.declared {
             return Err(StoreError::Invalid("blob length does not match".into()));
         }
-        if self.hasher.finalize() != self.key.0 {
+        if self.hasher.finalize() != *self.key.hash() {
             return Err(StoreError::Invalid(
                 "blob hash does not match its key".into(),
             ));
@@ -284,9 +288,11 @@ impl BlobStore for FsBlobStore {
     type Sink = FsPackSink;
 
     async fn begin(&self, key: BlobKey, len: u64) -> Result<FsPackSink, StoreError> {
-        let dir = self.dir();
-        create_dir_all_durably(&dir).map_err(io_error)?;
-        let dest = self.path(&key);
+        let dest = self.path(&key)?;
+        let dir = dest
+            .parent()
+            .ok_or_else(|| StoreError::Invalid("blob path has no directory".into()))?;
+        create_dir_all_durably(dir).map_err(io_error)?;
         let tmp = temp_path(&dest).map_err(io_error)?;
         let file = OpenOptions::new()
             .write(true)
@@ -309,7 +315,7 @@ impl BlobStore for FsBlobStore {
         key: &BlobKey,
         range: Option<ByteRange>,
     ) -> Result<Option<BlobBody>, StoreError> {
-        let mut file = match File::open(self.path(key)) {
+        let mut file = match File::open(self.path(key)?) {
             Ok(file) => file,
             Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(io_error(e)),
@@ -337,7 +343,7 @@ impl BlobStore for FsBlobStore {
     }
 
     async fn head(&self, key: &BlobKey) -> Result<Option<BlobMeta>, StoreError> {
-        match fs::metadata(self.path(key)) {
+        match fs::metadata(self.path(key)?) {
             Ok(meta) => Ok(Some(BlobMeta { len: meta.len() })),
             Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
             Err(e) => Err(io_error(e)),
@@ -356,12 +362,15 @@ impl BlobStore for FsBlobStore {
     }
 
     async fn delete(&self, key: &BlobKey) -> Result<bool, StoreError> {
-        match fs::remove_file(self.path(key)) {
+        let path = self.path(key)?;
+        match fs::remove_file(&path) {
             Ok(()) => {}
             Err(e) if e.kind() == ErrorKind::NotFound => return Ok(false),
             Err(e) => return Err(io_error(e)),
         }
-        sync_dir(&self.dir()).map_err(io_error)?;
+        if let Some(dir) = path.parent() {
+            sync_dir(dir).map_err(io_error)?;
+        }
         Ok(true)
     }
 }

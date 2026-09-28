@@ -40,6 +40,22 @@ pub struct TicketClaims {
 }
 
 impl TicketClaims {
+    /// Bind the ticket to the caller before an RPC checks its own payload fields.
+    pub fn check_principal(
+        &self,
+        audience: &str,
+        repository: &str,
+        signer: &Hash,
+    ) -> Result<(), ServerError> {
+        if self.audience != audience || self.repository != repository || self.signer != *signer {
+            return Err(ServerError::new(
+                Code::PermissionDenied,
+                "upload ticket binding mismatch",
+            ));
+        }
+        Ok(())
+    }
+
     /// Check the request binding after token verification. Ticket, part and
     /// receipt-specific commitments are checked by their respective RPCs.
     pub fn check_binding(
@@ -50,12 +66,8 @@ impl TicketClaims {
         pack_id: &Hash,
         bytes: u64,
     ) -> Result<(), ServerError> {
-        if self.audience != audience
-            || self.repository != repository
-            || self.signer != *signer
-            || self.pack_id != *pack_id
-            || self.bytes != bytes
-        {
+        self.check_principal(audience, repository, signer)?;
+        if self.pack_id != *pack_id || self.bytes != bytes {
             return Err(ServerError::new(
                 Code::PermissionDenied,
                 "upload ticket binding mismatch",

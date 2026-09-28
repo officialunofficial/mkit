@@ -15,12 +15,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use mkit_server::auth_v2::AuthV2Config;
-use mkit_server::pipeline::{AuthMode, Hooks, Pipeline, PipelineConfig};
+use mkit_server::pipeline::{
+    Admission, AdmissionDecision, AdmissionInput, AuthMode, DefaultAdmission, Hooks, Pipeline,
+    PipelineConfig,
+};
 use mkit_server::upload::UploadLimits;
+use mkit_server::upload::token::TicketKeys;
 use mkit_server::{
-    Addressing, Batch, BatchOutcome, Cursor, Key, MemoryBlobStore, MemoryKv, NamespaceKey,
-    NamespaceStore, NoopMetrics, Partition, PartitionStats, RepoId, RepoName, ScanPage,
-    StoreCapabilities, StoreError, SystemClock, Value,
+    Addressing, Batch, BatchOutcome, Cursor, Key, MemoryBlobStore, MemoryKv, MultiAddressing,
+    NamespaceKey, NamespaceStore, NoopMetrics, Partition, PartitionStats, RepoId, RepoName,
+    ScanPage, StoreCapabilities, StoreError, SystemClock, Value,
 };
 use mkit_server_conformance::wire::{Profile, Verdict, WireAuth, WireTarget, run};
 use mkit_server_native::{RouterOptions, Shutdown, build_router};
@@ -125,6 +129,81 @@ struct CountingCommit {
     kv: Arc<MemoryKv>,
     now: Arc<std::sync::atomic::AtomicUsize>,
     max: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[derive(Clone, Copy)]
+struct NonDefaultAdmission;
+
+impl Admission for NonDefaultAdmission {
+    async fn admit(
+        &self,
+        input: &AdmissionInput<'_>,
+    ) -> Result<AdmissionDecision, mkit_server::ServerError> {
+        DefaultAdmission.admit(input).await
+    }
+}
+
+#[test]
+fn enc_sibling_with_admission_starts() {
+    let repo = RepoId {
+        namespace: NamespaceKey::deployment_default(),
+        name: RepoName::new("default").unwrap(),
+    };
+    let mut cfg = PipelineConfig::new(
+        Addressing::Single { repo },
+        AuthMode::AuthV2(AuthV2Config::new("https://example.test", "default").unwrap()),
+        UploadLimits {
+            max_total_bytes: 1024,
+            max_chunks: 4,
+        },
+    );
+    cfg.ticket_keys = Some(TicketKeys::new(vec![("test".into(), [7; 32])]).unwrap());
+    let defaults = Hooks::new();
+    let hooks = Hooks {
+        authorizer: defaults.authorizer,
+        admission: NonDefaultAdmission,
+        pre_receive: defaults.pre_receive,
+        receipts: defaults.receipts,
+        outcomes: defaults.outcomes,
+    };
+    let http = Pipeline::new(
+        MemoryBlobStore::default(),
+        CountingCommit::default(),
+        hooks,
+        cfg,
+        Arc::new(SystemClock),
+        Arc::new(NoopMetrics),
+    )
+    .unwrap();
+    let enc = http.with_auth(AuthMode::TransportIdentity).unwrap();
+    assert_eq!(enc.server_info().begin_upload_threshold_bytes, 0);
+}
+
+#[test]
+fn multi_transport_identity_sibling_is_refused() {
+    let cfg = PipelineConfig::new(
+        Addressing::Multi(MultiAddressing::new()),
+        AuthMode::AuthV2(AuthV2Config::new("https://example.test", "").unwrap()),
+        UploadLimits {
+            max_total_bytes: 1024,
+            max_chunks: 4,
+        },
+    );
+    let http = Pipeline::new(
+        MemoryBlobStore::default(),
+        CountingCommit::default(),
+        Hooks::new(),
+        cfg,
+        Arc::new(SystemClock),
+        Arc::new(NoopMetrics),
+    )
+    .unwrap();
+    let err = http.with_auth(AuthMode::TransportIdentity).unwrap_err();
+    assert_eq!(err.code(), mkit_server::Code::InvalidArgument);
+    assert_eq!(
+        err.public_message(),
+        "multi-repository deployments require auth v2 until transport identity carries tickets"
+    );
 }
 
 impl NamespaceStore for CountingCommit {

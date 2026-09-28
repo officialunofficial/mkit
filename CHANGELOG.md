@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server: ticketed `UploadPack` now verifies the ticket before reading data,
+  streams the full pack without metadata writes, and leaves a content-addressed
+  upload marker for later ticket consumption. The advertised BeginUpload
+  threshold is enforced; non-default admission requires auth v2 and ticket keys.
 - Server: add periodic per-Durable-Object logical snapshots to a dedicated R2
   `BACKUPS` bucket, plus Fresh-only portable restore with epoch advancement,
   relay re-keying and coordinator recovery. Native `export` and `restore`
