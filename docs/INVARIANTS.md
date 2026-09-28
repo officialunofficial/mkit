@@ -1401,6 +1401,36 @@ surface or another ref that reuses pending content.
 **Enforced by:** normative SPEC-SERVER §§10–11.
 Runtime enforcement and behavioral conformance remain for WP-5.4/5.5/5.13;
 the current goldens verify the additive hook wire contract only.
+
+## Takedown denial precedes rewrites (specified, implementation pending)
+
+**Always:** a global blocklist write stops extracted and HTTP serving at
+once. Until a repository's takedown completes, chunks of its blocked
+manifest are also unservable, although chunks are not blocklisted.
+Every pack read proves that the pack contains no blocked id or such
+chunk and is not superseded, or answers absent. HTTP reachability does
+not descend through a blocked or tombstoned manifest. The serving stop
+is immediate, independent of holder discovery; the sweep does not
+impose a deployment-wide pack outage. Every blocklist check gating a
+membership, index, or holder write is at or after its `plan_time`.
+After the cut at takedown time plus `MAX_APPLY_WINDOW + margin`, each
+namespace's relay watermark passes the cut before its sweep reads it.
+No replacement or preserved bytes become a serving or delta-base source until
+that repository's guarded rewrite and ref-value substitution complete. Live,
+published and retained intermediate values, membership and ref-addition records
+all name the same replacement packmap after membership becomes visible
+and then ref values are substituted. A hit resolves on its repository's
+completion; the safety-cut sweep and watermark govern completion.
+
+**Because:** a lagging index or an intermediate advance can otherwise serve
+blocked bytes or resurrect a removed pack after a later publication.
+
+**If violated:** a reader or writer can recover taken-down content, or a
+replacement corrupts an unrelated branch's closure.
+
+**Enforced by:** normative SPEC-SERVER §14 and the redaction wire goldens.
+Runtime enforcement remains for the takedown, rewrite, and serving WPs.
+
 ## BeginUpload decisions and replay share the write batch
 
 **Always:** BeginUpload authorizes before returning a live ticket or membership

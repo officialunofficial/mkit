@@ -36,6 +36,7 @@ pub mod __buffa {
         reg.register_json_any(super::__PACK_CHUNK_JSON_ANY);
         reg.register_json_any(super::__LIST_REFS_REQUEST_JSON_ANY);
         reg.register_json_any(super::__LIST_REFS_RESPONSE_JSON_ANY);
+        reg.register_json_any(super::__REF_REDACTION_JSON_ANY);
         reg.register_json_any(super::__READ_REF_REQUEST_JSON_ANY);
         reg.register_json_any(super::__READ_REF_RESPONSE_JSON_ANY);
         reg.register_json_any(super::__UPDATE_REF_REQUEST_JSON_ANY);
@@ -68,6 +69,7 @@ pub mod __buffa {
         reg.register_json_any(super::__ADMISSION_CHALLENGE_JSON_ANY);
         reg.register_json_any(super::__CHALLENGE_JSON_ANY);
         reg.register_json_any(super::__PENDING_VERIFICATION_JSON_ANY);
+        reg.register_json_any(super::__REDACTION_NOTICE_JSON_ANY);
     }
 }
 #[doc(inline)]
@@ -86,6 +88,10 @@ pub use self::__buffa::view::ListRefsRequestOwnedView;
 pub use self::__buffa::view::ListRefsResponseView;
 #[doc(inline)]
 pub use self::__buffa::view::ListRefsResponseOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::RefRedactionView;
+#[doc(inline)]
+pub use self::__buffa::view::RefRedactionOwnedView;
 #[doc(inline)]
 pub use self::__buffa::view::ReadRefRequestView;
 #[doc(inline)]
@@ -214,6 +220,10 @@ pub use self::__buffa::view::ChallengeOwnedView;
 pub use self::__buffa::view::PendingVerificationView;
 #[doc(inline)]
 pub use self::__buffa::view::PendingVerificationOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::RedactionNoticeView;
+#[doc(inline)]
+pub use self::__buffa::view::RedactionNoticeOwnedView;
 #[doc(inline)]
 pub use self::__buffa::register_types;
 include!("mkit.transport.v1.transport.__connect.rs");
