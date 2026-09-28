@@ -279,12 +279,12 @@ async fn missing_and_pack_guards<N: NamespaceStore>(
 
 #[tokio::test]
 async fn multi_repository_isolation_memory() {
-    isolation(MemoryKv::default()).await;
+    Box::pin(isolation(MemoryKv::default())).await;
 }
 
 #[tokio::test]
 async fn multi_repository_isolation_sqlite() {
     let dir = tempfile::tempdir().unwrap();
     let conn = RusqliteConn::open(dir.path().join("meta.sqlite3")).unwrap();
-    isolation(Blocking::new(SqlKvStore::open(conn).unwrap())).await;
+    Box::pin(isolation(Blocking::new(SqlKvStore::open(conn).unwrap()))).await;
 }

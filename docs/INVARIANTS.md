@@ -265,11 +265,14 @@ for its entire lifetime: `mkit serve <path>` (stdin SSH-frame, its only
 mode) and `mkit-server serve --repo-root <path>` (HTTP and `mkit+enc://`
 listeners; it also holds `<common_dir>/server.lock` exclusively, so one
 `mkit-server` serves a root at a time). Every command that acquires `worktree.lock`
-or `worktrees.lock` (`mkit-cli`'s `acquire_worktree_lock` /
-`acquire_worktrees_registry_lock`) immediately probes that same
-`serve.lock` non-blocking-exclusive (`mkit_core::repo_lock::probe_exclusive`)
-and, if it finds the lock busy, prints a warning to stderr naming the
-served root before proceeding. The one exclusive holder: at startup
+or `worktrees.lock` immediately probes that same `serve.lock`
+non-blocking-exclusive (`mkit_core::repo_lock::probe_exclusive`) and, if it
+finds the lock busy, prints a warning to stderr naming the served root
+before proceeding. Most commands do this through `mkit-cli`'s
+`acquire_worktree_lock` / `acquire_worktrees_registry_lock`; the paths
+that take `worktree.lock` directly (the `fetch`/`pull` phases in
+`remote_dispatch` and `status`'s index refresh) call the same
+`warn_if_served` probe (SPEC-CONCURRENCY §3.1). The one exclusive holder: at startup
 `mkit serve` tries `serve.lock` exclusively without waiting, and only
 while it holds it (no other server is up) sweeps the temp files crashed
 uploads left in `packs/` (`.<hex>.tmp.<pid>.<seq>`, at least an hour
@@ -294,7 +297,10 @@ not coordination: a direct `mkit push mkit+file:///path` (bypassing
 `mkit serve`) and a `serve` that starts *during* an already-in-flight
 local critical section both remain undetected — see SPEC-CONCURRENCY
 §3.1 for the full statement of what this warning does and does not
-cover.
+cover. Detection does not make a concurrent `gc` safe: SPEC-GC
+("Concurrent writers and the grace window") states the condition a
+writer outside gc's lock set must meet, which a dedup hit on an old
+unreachable object does not meet today.
 
 **Enforced by:** `mkit-cli/tests/serve_guard.rs`;
 `mkit-server-native/tests/server_basics.rs`
@@ -1416,6 +1422,22 @@ retries charge admission again, or token results disappear with ticket rows.
 memory and SQLite (Single and D34), and the wire `tickets.*` cases.
 Ticket expiry cleanup and admission Pending/Aborted reconciliation remain
 WP-1.14 and WP-3.3 respectively.
+
+## Multipart completion authenticates every part before publication
+
+**Always:** UploadPart verifies the ticket, signed commitment and geometry
+before storing bytes. A part counts only after its subtree value matches.
+CompleteUpload verifies every receipt, total length and merged BLAKE3 root
+before making the pack visible. Both paths bypass metadata and admission;
+success writes a content-addressed marker in the upload-marker namespace.
+
+**Because:** an unauthenticated or incomplete part must not replace a good
+part, publish a pack or create repository membership.
+
+**If violated:** a forged receipt can publish unverified content, or an
+upload can bypass BeginUpload's authorization and admission.
+
+**Enforced by:** `upload::receipt::tests`, `pipeline::parts::tests`, and `pipeline::tests::begin_parts` (WP-1.11a).
 
 ## Storage pressure observes physical capacity after commit
 

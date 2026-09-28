@@ -3368,6 +3368,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mkit-formal-conformance"
+version = "0.4.2"
+dependencies = [
+ "mkit-core",
+ "mkit-transport-file",
+ "mkit-transport-memory",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "mkit-fuzz"
 version = "0.0.0"
 dependencies = [

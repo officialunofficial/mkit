@@ -10,7 +10,10 @@ use super::*;
 use crate::download::chunk_plan;
 use crate::memory::MemoryPackSink;
 use crate::replay::StoredRejection;
-use crate::store::{BlobBody, BlobKey, BlobMeta, ByteRange, CommitOutcome, PackSink};
+use crate::store::{
+    BlobBody, BlobKey, BlobMeta, BlobStore, ByteRange, CommitOutcome, MultipartBlobStore, PackSink,
+    UnsupportedPartSink,
+};
 use crate::telemetry::{METRIC_UPLOAD_BYTES, NoopMetrics};
 use crate::upload::UploadError;
 use crate::upload::marker::upload_marker;
@@ -657,12 +660,12 @@ fn upload_oversize_declared_is_resource_exhausted() {
 
 /// Blobs whose sinks record every write's length.
 #[derive(Default)]
-struct Counting {
+pub(super) struct Counting {
     inner: MemoryBlobStore,
     writes: Arc<Mutex<Vec<usize>>>,
 }
 
-struct CountingSink(MemoryPackSink, Arc<Mutex<Vec<usize>>>);
+pub(super) struct CountingSink(MemoryPackSink, Arc<Mutex<Vec<usize>>>);
 
 impl BlobStore for Counting {
     type Sink = CountingSink;
@@ -686,6 +689,11 @@ impl BlobStore for Counting {
     async fn delete(&self, key: &BlobKey) -> Result<bool, StoreError> {
         self.inner.delete(key).await
     }
+}
+
+impl MultipartBlobStore for Counting {
+    type PartSink = UnsupportedPartSink;
+    const MAX_PARTS: u32 = u32::MAX;
 }
 
 impl PackSink for CountingSink {

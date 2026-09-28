@@ -223,3 +223,112 @@ mod tests {
         }
     }
 }
+
+/// Kani proof harnesses (`cargo kani -p mkit-rpc --harness rpc_`) for the
+/// framing layer the `rpc_decode` fuzz target's frames travel through.
+/// Decoding any buffa-generated message (`SignerFrame`, `SshFrame`, even
+/// the one-field `PinPrompt`) is out of reach: buffa's recursive
+/// `UnknownFields` drop glue exhausts CBMC's memory or the 15-min budget
+/// at a single symbolic byte, so that property stays with the fuzz target
+/// and the body is decoded as the opaque `Opaque` message below.
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+    use buffa::bytes::Buf;
+    use buffa::encoding::Tag;
+    use buffa::{DecodeContext, DecodeError, DefaultInstance, EncodeSink, SizeCache};
+
+    /// A message that accepts any body by consuming it whole: the framing
+    /// logic under test is message-independent.
+    #[derive(Clone, Debug, Default, PartialEq)]
+    struct Opaque;
+
+    impl DefaultInstance for Opaque {
+        fn default_instance() -> &'static Self {
+            &Opaque
+        }
+    }
+
+    impl Message for Opaque {
+        fn compute_size(&self, _cache: &mut SizeCache) -> u32 {
+            0
+        }
+        fn write_to(&self, _cache: &mut SizeCache, _buf: &mut impl EncodeSink) {}
+        fn merge(
+            &mut self,
+            buf: &mut impl Buf,
+            _ctx: DecodeContext<'_>,
+        ) -> Result<(), DecodeError> {
+            buf.advance(buf.remaining());
+            Ok(())
+        }
+        fn merge_field(
+            &mut self,
+            _tag: Tag,
+            _buf: &mut impl Buf,
+            _ctx: DecodeContext<'_>,
+        ) -> Result<(), DecodeError> {
+            Ok(())
+        }
+        fn clear(&mut self) {}
+    }
+
+    /// Calls `$f::<N>()` for each listed literal `N` (concrete lengths
+    /// let CBMC constant-fold slice lengths).
+    macro_rules! each_len {
+        ($f:ident; $($n:literal)*) => { $( $f::<$n>(); )* };
+    }
+
+    fn read_at<const N: usize>() {
+        let buf: [u8; N] = kani::any();
+        let b: &[u8] = &buf;
+        let prefix: Option<u32> = b
+            .get(..4)
+            .map(|p| u32::from_le_bytes(p.try_into().expect("4")));
+        let mut r = std::io::Cursor::new(b);
+        let got = read_frame::<_, Opaque>(&mut r);
+        // Accepted iff a full prefix, an in-cap length and a full body.
+        let expect_ok = prefix.is_some_and(|l| l <= MAX_FRAME_BYTES && l as usize <= N - 4);
+        assert_eq!(got.is_ok(), expect_ok);
+        match got {
+            Err(FrameError::LengthTruncated) => {
+                assert!(N < 4);
+            }
+            Err(FrameError::LengthTooLarge(l)) => {
+                assert!(l > MAX_FRAME_BYTES);
+            }
+            Err(FrameError::BodyTruncated { expected, actual }) => {
+                assert!(actual < expected as usize && actual == N - 4);
+            }
+            Err(FrameError::DecodeFailed | FrameError::Io(_)) => {
+                panic!("an opaque body over an in-memory reader cannot fail to decode");
+            }
+            Ok(_) => {}
+        }
+    }
+
+    /// `read_frame` over every <= 6-byte stream (4-byte length prefix +
+    /// <= 2 body bytes): never panics, rejects an over-cap length prefix
+    /// before allocating, and reports a short body with the true received
+    /// count; a complete body is handed to the decoder (`Ok`).
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn rpc_read_frame_no_panic() {
+        each_len!(read_at; 0 1 2 3 4 5 6);
+    }
+
+    /// Canary: the checker must falsify "an over-cap length prefix is
+    /// accepted", showing the `LengthTooLarge` arm asserted above is
+    /// reachable (the prefix is fully symbolic, body empty).
+    #[kani::proof]
+    #[kani::unwind(5)]
+    #[kani::should_panic]
+    fn rpc_canary_over_cap_length_accepted() {
+        let buf: [u8; 4] = kani::any();
+        let mut r = std::io::Cursor::new(&buf[..]);
+        assert!(!matches!(
+            read_frame::<_, Opaque>(&mut r),
+            Err(FrameError::LengthTooLarge(_))
+        ));
+    }
+}

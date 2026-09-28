@@ -44,7 +44,7 @@ pub use interceptor::AuthInterceptor;
 pub use service::ConnectTransport;
 
 use crate::pipeline::{Authenticated, HookSet, Pipeline};
-use crate::store::{BlobStore, NamespaceStore};
+use crate::store::{MultipartBlobStore, NamespaceStore};
 
 /// The generated `mkit.transport.v1` and `grpc.health.v1` messages and
 /// service traits, vendored under `generated/` (refresh with
@@ -63,7 +63,7 @@ pub mod proto {
 /// [`service`] unless another layer installs [`AuthInterceptor`].
 pub fn router<B, N, H>(pipeline: Arc<Pipeline<B, N, H>>) -> Router
 where
-    B: BlobStore + 'static,
+    B: MultipartBlobStore + 'static,
     N: NamespaceStore + 'static,
     H: HookSet + 'static,
 {
@@ -78,7 +78,7 @@ where
 /// deployment limits with `ConnectRpcService::with_limits`.
 pub fn service<B, N, H>(pipeline: Arc<Pipeline<B, N, H>>) -> ConnectRpcService
 where
-    B: BlobStore + 'static,
+    B: MultipartBlobStore + 'static,
     N: NamespaceStore + 'static,
     H: HookSet + 'static,
 {

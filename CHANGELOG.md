@@ -11,6 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lease changes, with a published receipt-and-notice key list and writer-view
   retrieval. Add receipt fields to Connect ref-write responses and an optional
   admission `external_ref`; server signing and delivery follow in WP-5.8.
+- Server: add stateless `UploadPart` and `CompleteUpload`, authenticated part
+  receipts, and a multipart blob-store interface with a working memory backend.
+  Multipart BeginUpload tickets now carry opaque storage sessions. The blob-key
+  API separates upload markers from pack keys; FS, R2 and S3 multipart storage
+  follows in later work packages.
 - Server: ticketed `UploadPack` now verifies the ticket before reading data,
   streams the full pack without metadata writes, and leaves a content-addressed
   upload marker for later ticket consumption. The advertised BeginUpload
