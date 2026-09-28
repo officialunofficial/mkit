@@ -1610,3 +1610,22 @@ flood logs while operators need the critical alert.
 **Enforced by:** `telemetry/pressure.rs` pure transition tests, Worker
 `ns_object::PressureStore` and `tests/stores.rs` over the DO SQL shim,
 console sink/subscriber tests, and native `pressure.rs` shutdown/size-task tests.
+
+## Connect read authentication is scoped to one attempt
+
+**Always:** a Connect client with a signer signs each repository read over
+the exact HTTP request body, including streaming-request framing. Each retry
+has fresh identity headers. Writes retain their logical-operation nonce, and
+the grant header stays outside the signed canonical string. Discovery and
+grant-epoch RPCs are never signed; grant-epoch RPCs carry no repository.
+
+**Because:** read authentication selects the writer or private-reader view,
+while replay protection applies only to writes. A grant is selected locally
+and may change without changing the authenticated operation.
+
+**If violated:** a private read can become anonymous, a retry can use an
+expired identity, or a write can silently mint a new nonce.
+
+**Enforced by:** the Connect procedure classification and envelope tests,
+client retry tests, and `mkit_core::write_auth::verify_headers` checks over
+captured request bodies.

@@ -11,7 +11,10 @@
 
 mod common;
 
+use std::sync::Arc;
+
 use buffa::Message as _;
+use ed25519_dalek::{Signer as _, SigningKey};
 use mkit_core::hash::hash;
 use mkit_core::protocol::{
     AdvanceOutcome, PackKey, RefWriteCondition, Transport as _, TransportError,
@@ -19,7 +22,21 @@ use mkit_core::protocol::{
 use mkit_server_conformance::wire::client::{Client, Rpc, UNARY_JSON};
 use mkit_server_native::{Shutdown, server};
 use mkit_transport_connect::generated::{UpdateRefRequest, UpdateRefResponse};
-use mkit_transport_connect::{ConnectTransport, ServerInfoView};
+use mkit_transport_connect::{ConnectTransport, EnvelopeSigner, ServerInfoView};
+
+struct ReadSigner(SigningKey);
+
+impl EnvelopeSigner for ReadSigner {
+    fn public_key_hex(&self) -> String {
+        mkit_core::hash::to_hex_bytes(&self.0.verifying_key().to_bytes())
+    }
+
+    fn sign_hex(&self, message: &[u8; 32]) -> Result<String, String> {
+        Ok(mkit_core::hash::to_hex_bytes(
+            &self.0.sign(message).to_bytes(),
+        ))
+    }
+}
 
 /// A running `mkit-server serve --unsafe-allow-any-peer` over a temp root.
 struct Served {
@@ -137,6 +154,31 @@ fn push_then_pull_round_trip() {
             .is_file()
     );
     assert!(root.join("refs/heads/main").is_file());
+}
+
+#[test]
+fn signed_client_can_clone_from_current_server() {
+    let served = Served::start();
+    let writer = served.client();
+    let payload = b"signed clone pack".to_vec();
+    let pack = PackKey::new(hash(&payload));
+    writer.upload_pack(&payload, &pack).unwrap();
+    let commit = hash(b"signed clone tip");
+    writer
+        .update_ref("refs/heads/main", RefWriteCondition::Missing, &commit)
+        .unwrap();
+
+    // These are the Connect reads a clone makes to discover and fetch the
+    // advertised branch. The current server must still accept their envelopes.
+    let reader = ConnectTransport::connect_with_signer(
+        &format!("mkit+{}", served.origin),
+        Some(Arc::new(ReadSigner(SigningKey::from_bytes(&[42; 32])))),
+    )
+    .unwrap();
+    assert_eq!(reader.read_ref("refs/heads/main").unwrap(), Some(commit));
+    assert_eq!(reader.list_refs("").unwrap()[0].name, "refs/heads/main");
+    assert!(reader.pack_exists(&pack).unwrap());
+    assert_eq!(reader.download_pack(&pack).unwrap(), payload);
 }
 
 #[test]
