@@ -781,6 +781,21 @@ fn parse_holder(body: &[u8]) -> Option<ParsedKey> {
     })
 }
 
+fn parse_namespace_quota(tag: &[u8], body: &[u8]) -> Option<ParsedKey> {
+    let (window, rest) = be64(body)?;
+    match tag {
+        b"qs" if rest.is_empty() => Some(ParsedKey::QuotaShard(window)),
+        b"qv" if rest.is_empty() => Some(ParsedKey::QuotaView(window)),
+        b"qt" if rest.is_empty() => Some(ParsedKey::QuotaTotal(window)),
+        b"qc" => {
+            let source = Partition::decode(rest).ok()?;
+            matches!(source, Partition::Ref { .. })
+                .then_some(ParsedKey::QuotaContribution { window, source })
+        }
+        _ => None,
+    }
+}
+
 /// Decode a key of any laid-out class; `None` for a malformed key or a
 /// reserved class.
 #[must_use]
@@ -848,25 +863,7 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
                 scope: text(rest)?,
             }
         }
-        b"qs" | b"qv" | b"qt" => {
-            let (window, rest) = be64(body)?;
-            if !rest.is_empty() {
-                return None;
-            }
-            match tag {
-                b"qs" => ParsedKey::QuotaShard(window),
-                b"qv" => ParsedKey::QuotaView(window),
-                _ => ParsedKey::QuotaTotal(window),
-            }
-        }
-        b"qc" => {
-            let (window, source) = be64(body)?;
-            let source = Partition::decode(source).ok()?;
-            if !matches!(source, Partition::Ref { .. }) {
-                return None;
-            }
-            ParsedKey::QuotaContribution { window, source }
-        }
+        b"qs" | b"qv" | b"qt" | b"qc" => parse_namespace_quota(tag, body)?,
         b"w" => {
             let (due_at_ms, rest) = be64(body)?;
             let (&kind, reference) = rest.split_first()?;

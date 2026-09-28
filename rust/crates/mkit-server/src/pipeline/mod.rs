@@ -983,62 +983,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             self.admit(input).await?
         };
         let mut begin = self.begin_write(&op, a, existing, allowance.reservation)?;
-        let charges = allowance.charges;
-        let namespace_charge = self.namespace_charge(
-            &p,
-            &charges,
-            ahead.as_ref().and_then(|s| s.namespace_window),
-        )?;
-        if let Some(mut charge) = namespace_charge {
-            let now = self.clock.now_ms().saturating_add(a.business_skew_ms);
-            let window = quota::namespace_window(now, charge.limits.window_ms);
-            if window != charge.window && window != charge.window.saturating_add(1) {
-                return Err(ServerError::aborted_retryable(
-                    "namespace quota window advanced; retry",
-                ));
-            }
-            charge.window = window;
-            let snap = ahead
-                .as_ref()
-                .ok_or_else(|| internal("namespace quota needs atomic reads"))?;
-            let decision = quota::check_namespace(
-                snap.get(&quota::counter_key(charge, window)),
-                if charge.rollup {
-                    snap.get(&keys::quota_view(window))
-                } else {
-                    None
-                },
-                now,
-                charge,
-            )?;
-            match decision {
-                NamespaceDecision::Exhausted => {
-                    return Err(ServerError::resource_exhausted(
-                        "namespace write op/byte quota exceeded for this window; try again later",
-                    ));
-                }
-                NamespaceDecision::Allowed {
-                    view: ViewStatus::Missing,
-                    ..
-                } => self.metrics.incr(
-                    crate::telemetry::METRIC_NAMESPACE_QUOTA_VIEW_FALLBACK,
-                    &[("state", "missing")],
-                    1,
-                ),
-                NamespaceDecision::Allowed {
-                    view: ViewStatus::Stale,
-                    ..
-                } => self.metrics.incr(
-                    crate::telemetry::METRIC_NAMESPACE_QUOTA_VIEW_FALLBACK,
-                    &[("state", "stale")],
-                    1,
-                ),
-                _ => {}
-            }
-            if let Some(snap) = ahead.as_mut() {
-                snap.namespace_window = Some(window);
-            }
-        }
+        self.precheck_namespace(&p, &allowance.charges, &mut ahead, a.business_skew_ms)?;
         let mut opened_session = None;
         if let Some(BeginWrite::Open(open)) = &mut begin
             && open.spec.bytes > open.spec.part_size
@@ -1100,7 +1045,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 None
             };
             self.pre_receive(&op).await?;
-            let write = (kind, refs.as_slice(), charges.as_slice());
+            let write = (kind, refs.as_slice(), allowance.charges.as_slice());
             self.plan_and_apply(&op, a, &p, write, ahead, (lease, begin.as_ref()))
                 .await
         }
@@ -1356,6 +1301,74 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             bytes: charge.bytes,
             rollup: matches!(p, Partition::Ref { .. }),
         }))
+    }
+
+    /// Reject a namespace cap before a lease or multipart session is made.
+    /// The planner repeats the guarded check when it commits the write.
+    fn precheck_namespace(
+        &self,
+        p: &Partition,
+        charges: &[QuotaCharge],
+        ahead: &mut Option<Snapshot>,
+        business_skew_ms: i64,
+    ) -> Result<(), ServerError> {
+        let Some(mut charge) = self.namespace_charge(
+            p,
+            charges,
+            ahead
+                .as_ref()
+                .and_then(|snapshot| snapshot.namespace_window),
+        )?
+        else {
+            return Ok(());
+        };
+        let now = self.clock.now_ms().saturating_add(business_skew_ms);
+        let window = quota::namespace_window(now, charge.limits.window_ms);
+        if window != charge.window && window != charge.window.saturating_add(1) {
+            return Err(ServerError::aborted_retryable(
+                "namespace quota window advanced; retry",
+            ));
+        }
+        charge.window = window;
+        let snap = ahead
+            .as_mut()
+            .ok_or_else(|| internal("namespace quota needs atomic reads"))?;
+        let decision = quota::check_namespace(
+            snap.get(&quota::counter_key(charge, window)),
+            if charge.rollup {
+                snap.get(&keys::quota_view(window))
+            } else {
+                None
+            },
+            now,
+            charge,
+        )?;
+        match decision {
+            NamespaceDecision::Exhausted => {
+                return Err(ServerError::resource_exhausted(
+                    "namespace write op/byte quota exceeded for this window; try again later",
+                ));
+            }
+            NamespaceDecision::Allowed {
+                view: ViewStatus::Missing,
+                ..
+            } => self.metrics.incr(
+                crate::telemetry::METRIC_NAMESPACE_QUOTA_VIEW_FALLBACK,
+                &[("state", "missing")],
+                1,
+            ),
+            NamespaceDecision::Allowed {
+                view: ViewStatus::Stale,
+                ..
+            } => self.metrics.incr(
+                crate::telemetry::METRIC_NAMESPACE_QUOTA_VIEW_FALLBACK,
+                &[("state", "stale")],
+                1,
+            ),
+            NamespaceDecision::Allowed { .. } => {}
+        }
+        snap.namespace_window = Some(window);
+        Ok(())
     }
 
     /// Read every key of `wanted` that `snap` lacks, in one `get_many`.

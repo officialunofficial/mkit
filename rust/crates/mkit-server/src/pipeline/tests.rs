@@ -738,18 +738,7 @@ fn namespace_denial_before_lease_allocates_nothing_and_replay_stays_free() {
     let shard = env.pipe.shards.ref_shard(&a.repo().repo, ref_name);
     let coordinator = env.pipe.shards.coordinator(&a.repo().repo.namespace);
     let window = crate::quota::namespace_window(T0, 60_000);
-    now(env.pipe.meta.inner.apply(
-        &shard,
-        Batch::new().put(
-            keys::quota_view(window),
-            codec::encode_namespace_view(crate::quota::NamespaceView {
-                total: crate::quota::NamespaceUsage { ops: 2, bytes: 0 },
-                pushed: crate::quota::NamespaceUsage::default(),
-                observed_at_ms: T0 as u64,
-            }),
-        ),
-    ))
-    .unwrap();
+    seed_namespace_view(&env.pipe.meta.inner, &shard, window, 2, 0);
     let before = now(env.pipe.meta.inner.stats(&shard)).unwrap();
     let err = now(env.pipe.update_ref(&a, upd(ref_name, Missing, A))).unwrap_err();
     assert_eq!(err.code(), Code::ResourceExhausted);
@@ -769,18 +758,7 @@ fn namespace_denial_before_lease_allocates_nothing_and_replay_stays_free() {
             .unwrap()
             .is_none()
     );
-    now(env.pipe.meta.inner.apply(
-        &shard,
-        Batch::new().put(
-            keys::quota_view(window),
-            codec::encode_namespace_view(crate::quota::NamespaceView {
-                total: crate::quota::NamespaceUsage::default(),
-                pushed: crate::quota::NamespaceUsage::default(),
-                observed_at_ms: T0 as u64,
-            }),
-        ),
-    ))
-    .unwrap();
+    seed_namespace_view(&env.pipe.meta.inner, &shard, window, 0, 0);
     let update = upd(ref_name, Missing, A);
     assert_eq!(
         now(env.pipe.update_ref(&a, update.clone())).unwrap(),
@@ -788,18 +766,7 @@ fn namespace_denial_before_lease_allocates_nothing_and_replay_stays_free() {
     );
     let counter = keys::quota_shard(window);
     let charged = now(env.pipe.meta.inner.get(&shard, &counter)).unwrap();
-    now(env.pipe.meta.inner.apply(
-        &shard,
-        Batch::new().put(
-            keys::quota_view(window),
-            codec::encode_namespace_view(crate::quota::NamespaceView {
-                total: crate::quota::NamespaceUsage { ops: 2, bytes: 0 },
-                pushed: crate::quota::NamespaceUsage { ops: 1, bytes: 0 },
-                observed_at_ms: T0 as u64,
-            }),
-        ),
-    ))
-    .unwrap();
+    seed_namespace_view(&env.pipe.meta.inner, &shard, window, 2, 1);
     assert_eq!(
         now(env.pipe.update_ref(&a, update)).unwrap(),
         UpdateRefResult::Committed
@@ -808,6 +775,27 @@ fn namespace_denial_before_lease_allocates_nothing_and_replay_stays_free() {
         now(env.pipe.meta.inner.get(&shard, &counter)).unwrap(),
         charged
     );
+}
+
+fn seed_namespace_view(store: &MemoryKv, shard: &Partition, window: u64, total: u64, pushed: u64) {
+    now(store.apply(
+        shard,
+        Batch::new().put(
+            keys::quota_view(window),
+            codec::encode_namespace_view(crate::quota::NamespaceView {
+                total: crate::quota::NamespaceUsage {
+                    ops: total,
+                    bytes: 0,
+                },
+                pushed: crate::quota::NamespaceUsage {
+                    ops: pushed,
+                    bytes: 0,
+                },
+                observed_at_ms: T0 as u64,
+            }),
+        ),
+    ))
+    .expect("seed quota view");
 }
 
 #[test]

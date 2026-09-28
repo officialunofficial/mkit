@@ -932,17 +932,24 @@ pub fn decode_namespace_view(value: &Value) -> Result<NamespaceView, StoreError>
         .as_bytes()
         .try_into()
         .map_err(|_| corrupt("bad namespace view"))?;
-    let word = |i| u64::from_be_bytes(bytes[i..i + 8].try_into().expect("fixed slice"));
+    let word = |i| -> Result<u64, StoreError> {
+        let chunk: [u8; 8] = bytes
+            .get(i..i + 8)
+            .ok_or_else(|| corrupt("bad namespace view"))?
+            .try_into()
+            .map_err(|_| corrupt("bad namespace view"))?;
+        Ok(u64::from_be_bytes(chunk))
+    };
     let view = NamespaceView {
         total: NamespaceUsage {
-            ops: word(0),
-            bytes: word(8),
+            ops: word(0)?,
+            bytes: word(8)?,
         },
         pushed: NamespaceUsage {
-            ops: word(16),
-            bytes: word(24),
+            ops: word(16)?,
+            bytes: word(24)?,
         },
-        observed_at_ms: word(32),
+        observed_at_ms: word(32)?,
     };
     if view.total.delta_from(view.pushed).is_none() {
         return Err(corrupt("namespace view exceeds total"));

@@ -87,7 +87,7 @@ async fn aggregate<T: NamespaceStore>(
             .put(total_key.clone(), codec::encode_namespace_usage(next));
         match target.apply(coordinator, batch).await? {
             BatchOutcome::Committed => return Ok(next),
-            BatchOutcome::PreconditionFailed { .. } => continue,
+            BatchOutcome::PreconditionFailed { .. } => {}
             BatchOutcome::DeadlinePassed { .. } => unreachable!("no timer deadline"),
         }
     }
@@ -137,6 +137,47 @@ async fn prune_coordinator<T: NamespaceStore>(
             Err(StoreError::Invalid("namespace prune contention".into()))
         }
         BatchOutcome::DeadlinePassed { .. } => unreachable!("no timer deadline"),
+    }
+}
+
+async fn fire_exact<S: NamespaceStore>(
+    ctx: &TimerCtx<'_, S>,
+    timer: &DueTimer,
+    window: u64,
+    end: u64,
+    expired: bool,
+) -> Result<Fired, StoreError> {
+    let key = keys::quota_total(window);
+    let value = ctx.store.get(ctx.partition, &key).await?;
+    if expired {
+        let batch = Batch::new()
+            .require(guard(key.clone(), value.as_ref()))
+            .delete(key);
+        let batch = prune_older(
+            ctx.store,
+            ctx.partition,
+            keys::TAG_QUOTA_TOTAL,
+            window,
+            batch,
+        )
+        .await?;
+        let batch = prune_older(
+            ctx.store,
+            ctx.partition,
+            keys::TAG_QUOTA_CONTRIBUTION,
+            window,
+            batch,
+        )
+        .await?;
+        Ok(Fired::Done(batch))
+    } else {
+        Ok(Fired::Reschedule {
+            due_at_ms: end
+                .saturating_add(CLOCK_GRACE_MS)
+                .max(timer.due_at_ms.saturating_add(1)),
+            value: timer.value.clone(),
+            batch: Batch::new().require(guard(key, value.as_ref())),
+        })
     }
 }
 
@@ -219,38 +260,7 @@ impl<S: NamespaceStore, T: NamespaceStore> TimerHandler<S> for QuotaRollup<T> {
                     }
                 }
                 Partition::Coordinator(_) | Partition::Namespace(_) => {
-                    let key = keys::quota_total(window);
-                    let value = ctx.store.get(ctx.partition, &key).await?;
-                    if expired {
-                        let batch = Batch::new()
-                            .require(guard(key.clone(), value.as_ref()))
-                            .delete(key);
-                        let batch = prune_older(
-                            ctx.store,
-                            ctx.partition,
-                            keys::TAG_QUOTA_TOTAL,
-                            window,
-                            batch,
-                        )
-                        .await?;
-                        let batch = prune_older(
-                            ctx.store,
-                            ctx.partition,
-                            keys::TAG_QUOTA_CONTRIBUTION,
-                            window,
-                            batch,
-                        )
-                        .await?;
-                        Ok(Fired::Done(batch))
-                    } else {
-                        Ok(Fired::Reschedule {
-                            due_at_ms: end
-                                .saturating_add(CLOCK_GRACE_MS)
-                                .max(timer.due_at_ms.saturating_add(1)),
-                            value: timer.value.clone(),
-                            batch: Batch::new().require(guard(key, value.as_ref())),
-                        })
-                    }
+                    fire_exact(ctx, timer, window, end, expired).await
                 }
                 _ => Ok(Fired::Retry),
             }
@@ -273,7 +283,7 @@ mod tests {
     fn source(i: usize) -> Partition {
         Partition::Ref {
             ns: NamespaceKey::deployment_default(),
-            repo: RepoName::new("room").unwrap(),
+            repo: RepoName::new("room").expect("valid test repository"),
             shard_ref: format!("refs/heads/b{i}"),
         }
     }
@@ -300,11 +310,11 @@ mod tests {
         store
             .get(p, &key)
             .await
-            .unwrap()
+            .expect("read usage")
             .as_ref()
             .map(codec::decode_namespace_usage)
             .transpose()
-            .unwrap()
+            .expect("decode usage")
             .unwrap_or_default()
     }
 

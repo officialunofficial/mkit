@@ -241,6 +241,31 @@ pub(crate) enum Planned {
     Done(StoredResult),
 }
 
+fn plan_namespace(
+    req: &WriteRequest<'_>,
+    snap: &Snapshot,
+    clock: &PlanClock,
+    pre: &mut Vec<Precondition>,
+    puts: &mut Vec<Write>,
+) -> Result<(), ServerError> {
+    let Some(charge) = req.namespace_charge else {
+        return Ok(());
+    };
+    let window = charge.window;
+    quota::plan_namespace_after_admission(
+        charge,
+        snap.get(&quota::counter_key(charge, window)),
+        charge
+            .rollup
+            .then(|| snap.get(&keys::quota_view(window)))
+            .flatten(),
+        clock.business_now_ms,
+        req.lease.is_some(),
+        pre,
+        puts,
+    )
+}
+
 /// Plan `req` on `snap` at `clock`.
 ///
 /// # Errors
@@ -311,36 +336,7 @@ pub(crate) fn plan_write(
     for charge in req.charges {
         plan_charge(charge, snap, clock.business_now_ms, &mut pre, &mut puts)?;
     }
-    if let Some(charge) = req.namespace_charge {
-        if quota::namespace_window(clock.business_now_ms, charge.limits.window_ms) != charge.window
-        {
-            return Err(ServerError::aborted_retryable(
-                "namespace quota window advanced; retry",
-            ));
-        }
-        let window = charge.window;
-        let counter = quota::counter_key(charge, window);
-        quota::plan_namespace_charge(
-            charge,
-            snap.get(&counter),
-            charge
-                .rollup
-                .then(|| snap.get(&keys::quota_view(window)))
-                .flatten(),
-            clock.business_now_ms,
-            &mut pre,
-            &mut puts,
-        )
-        .map_err(|error| {
-            // Admission checked before the lease. A raced quota change is a
-            // retry, never a quota denial after lease state was committed.
-            if req.lease.is_some() && error.code() == crate::Code::ResourceExhausted {
-                ServerError::aborted_retryable("namespace quota changed; retry")
-            } else {
-                error
-            }
-        })?;
-    }
+    plan_namespace(req, snap, clock, &mut pre, &mut puts)?;
 
     let (on_commit, ref_puts, conflict) =
         decide_write_result(req, snap, clock, &mut pre, &mut puts)?;

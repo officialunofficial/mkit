@@ -304,6 +304,31 @@ pub(crate) fn plan_namespace_charge(
     Ok(())
 }
 
+/// Plan the post-admission charge. A changed window or a quota race after a
+/// lease grant asks the client to retry instead of denying after allocation.
+pub(crate) fn plan_namespace_after_admission(
+    charge: NamespaceCharge,
+    current: Option<&Value>,
+    view: Option<&Value>,
+    now_ms: i64,
+    lease_committed: bool,
+    pre: &mut Vec<Precondition>,
+    puts: &mut Vec<Write>,
+) -> Result<(), ServerError> {
+    if namespace_window(now_ms, charge.limits.window_ms) != charge.window {
+        return Err(ServerError::aborted_retryable(
+            "namespace quota window advanced; retry",
+        ));
+    }
+    plan_namespace_charge(charge, current, view, now_ms, pre, puts).map_err(|error| {
+        if lease_committed && error.code() == crate::Code::ResourceExhausted {
+            ServerError::aborted_retryable("namespace quota changed; retry")
+        } else {
+            error
+        }
+    })
+}
+
 /// The outcome of charging one write against a quota.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuotaDecision {
@@ -659,7 +684,7 @@ mod tests {
             evaluate_namespace(
                 NamespaceUsage { ops: 3, bytes: 0 },
                 Some(view),
-                (2 * QUOTA_ROLLUP_MS + 1) as i64,
+                (2 * QUOTA_ROLLUP_MS + 1).cast_signed(),
                 charge
             ),
             NamespaceDecision::Allowed {
@@ -711,7 +736,7 @@ mod tests {
             }
             for shard in 0..SHARDS {
                 if let NamespaceDecision::Allowed { usage, .. } =
-                    evaluate_namespace(local[shard], views[shard], now as i64, charge)
+                    evaluate_namespace(local[shard], views[shard], now.cast_signed(), charge)
                 {
                     local[shard] = usage;
                     writes.push((now, shard));
