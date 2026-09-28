@@ -500,20 +500,18 @@ point-in-time recovery; the M1 staging runs (WP-1.20) cover those.
 
 ## M1 Connect request fields remain explicit stubs until implementation
 
-**Always:** until WP-1.10 and WP-1.28 land, ref deletion, advance ticket ids
-and ref-list continuation tokens are rejected before validation or pipeline
-writes. `page_size` is ignored and listings end with an empty
-`next_page_token`.
+**Always:** until WP-1.28 lands, ref-list continuation tokens are rejected
+before validation or pipeline writes. `page_size` is ignored and listings
+end with an empty `next_page_token`.
 
 **Because:** a new request field must not silently invoke legacy behavior
 before its implementing WP defines it.
 
-**If violated:** a deletion or ticketed advance can reach the legacy write
-path, or a listing can return a token no server honors.
+**If violated:** a listing can return a token no server honors.
 
 **Enforced by:** `mkit-server/tests/connect_dispatch.rs`'s `m1_*` tests
-and the TODO comments in `connect/service.rs`. WP-1.10 and WP-1.28 replace
-the relevant stub assertions with their behavior tests and trim this entry.
+and the TODO comments in `connect/service.rs`. WP-1.28 replaces the stub
+assertions with its behavior tests and removes this entry.
 
 ## M2 Connect surfaces remain explicit stubs until implementation
 
