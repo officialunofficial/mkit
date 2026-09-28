@@ -489,7 +489,8 @@ the allowed receipt headers defined in §6.6.
 `AdmitAllow.external_ref` is an optional implementer-supplied reference
 to its own contract or payment receipt. The server carries it beside the
 reservation id in a later storage receipt (§15); it does not interpret it.
-Every writer of that repository can fetch the receipt and see this value.
+Writers can fetch and see this value through `GetReceipt` subject to
+the advance-receipt ref-scope rule in §15.6.
 
 `AdmitChallenge.challenges` contains the deployment's opaque challenges
 in order of preference. Each `Challenge.scheme` names the external
@@ -661,8 +662,9 @@ violating any response limit below is invalid and MUST be handled under
 - `AdmitAllow.external_ref`, when present, MUST be at most 256 bytes of
   visible ASCII (`0x21`–`0x7e`). The implementer MUST keep credentials,
   bearer tokens, and other secrets out of it: it is copied into a
-  storage receipt visible to every writer of the repository through
-  `GetReceipt` (§15). An empty value is omitted from the receipt.
+  storage receipt visible through `GetReceipt` to authorized writers
+  under §15.6, including its write-only grant ref-scope limit. An empty
+  value is omitted from the receipt.
 - `InspectQuarantine.reason` MUST be at most 512 bytes.
 - Inspect responses MUST satisfy the phase and flagged-id rules of §6.4.
 
@@ -2057,8 +2059,12 @@ carries one for an override change (§16).
 
 Receipt statement bytes, including `issued_unix_ms`, `key_id`, and all
 predicate fields, and the signing key identity MUST be fixed in the guarded
-apply. The server MUST persist the **signed envelope** and return those
-envelope bytes verbatim on replay and on `GetReceipt` (STC §7.1).
+apply. That apply MUST also durably record a pending-signature row for
+each receipt it issues. The server MUST finish pending signatures on its
+own, without waiting for a client retry, then persist the **signed
+envelope** and return those envelope bytes verbatim on replay and on
+`GetReceipt` (STC §7.1). A request for a still-pending receipt MUST
+return retryable `unavailable`.
 Signing after apply MUST use the key fixed at apply even if rotation occurs
 in between. If signing fails after a successful apply, the server MUST
 return retryable `unavailable`; a same-nonce retry MUST complete or retrieve
@@ -2097,9 +2103,9 @@ decimal strings, without a sign or leading zero for nonnegative values
 
 The 65,536-byte limit MUST be guaranteed before apply, never handled by
 committing an advance and then dropping its receipt. An advance MUST
-consume at most seven tickets; more than seven is `invalid_argument`
-before apply. Each consumed ticket contributes at most one deployment
-reservation, and a ticketless write contributes at most one. A deployment
+consume at most seven tickets; more than seven MUST be rejected with
+`invalid_argument` before apply. Each consumed ticket contributes at
+most one deployment reservation, and a ticketless write contributes at most one. A deployment
 with a receipt-and-notice key configured MUST reject startup if its
 canonical origin exceeds 2,048 UTF-8 bytes. The existing limits are
 173 bytes for repository identity (STC §7.4), 512 bytes for a ref
@@ -2178,8 +2184,9 @@ remains in `packmap`, while `deleted` unambiguously records absence.
 no tickets MUST have an empty `added_packs` array; the server MUST NOT
 filter consumed tickets by whether the pack was already a member or was
 hidden by a hold or flag. Filtering would disclose that hidden state.
-The receipt's `previous` and paired `packmap` are visible to the writer;
-they describe that writer's own committed write, not a reader view. An
+Informative: packs uploaded through an un-ticketed `UploadPack` never
+appear in `added_packs`. The receipt's `previous` and paired
+`packmap` are visible to the writer; they describe that writer's own committed write, not a reader view. An
 advance with no deployment allowance has an empty `reservations`
 array, even if it consumes tickets; a ticketless write that ran Admit
 MUST include its deployment reservation. Entries in `added_packs` MUST
@@ -2189,8 +2196,9 @@ order with no duplicate id. A reservation id MUST be the deployment's
 §6.3 allowance id; the server MUST NOT substitute a synthetic quota or
 outcome id. `external_ref` MUST be copied only from that allowance and
 MUST satisfy §6.6; an empty value MUST be omitted. Every writer of the
-repository can fetch and see it through `GetReceipt`. The implementer
-MUST keep secrets out of it.
+repository can fetch and see it through `GetReceipt`, subject to the
+write-only grant ref-scope limit in §15.6. The implementer MUST keep
+secrets out of it.
 
 `storage_lease` MUST be either `{ "permanent": true }` or an object
 with `scope` (`repository` or `ref`) and `expires_at_ms`, `grace_ms`,
@@ -2256,17 +2264,20 @@ the `keyId` convention above. It MUST return `Cache-Control: public,
 max-age=300`, allow CORS from any origin, and require no bearer,
 signed URL token, or payment. §14 notices use the same document.
 During rotation the deployment MUST publish the new key in this list
-at least 300 seconds before its first signature. It MUST set
+at least 600 seconds before its first signature, covering two
+300-second max-age periods. It MUST set
 `notAfterMs` on the old key and MUST retain that retired key in the
 list forever. A verifier MUST accept a listed key only when the signed
 statement's issue time is within the
 half-open interval `notBeforeMs ≤ issue_time < notAfterMs`, with
 an absent bound open on that side. For storage receipts the issue time
 is `issued_unix_ms`; for redaction notices it is `issuedAtMs` (§14).
-A pinned client refreshes the same-origin key list during rotation,
-checks that it still includes its pinned key, and pins the newly
-published key before accepting signatures under it. This overlapping
-list is the continuity path across rotation. A compromised key MUST
+A client with a TOFU pin refreshes the same-origin key list during
+rotation, checks that it still includes its pinned key, and pins the
+newly published key before accepting signatures under it. This
+overlapping list is the continuity path for TOFU pins across rotation.
+A newly listed key under a user-supplied trust root remains `unpinned`
+until the user adds it to that root. A compromised key MUST
 be removed from the list, thereby invalidating every receipt and notice it
 signed. No transparency log or trusted compromise timestamp is
 specified; a compromised signer can backdate its issue time.
@@ -2284,15 +2295,25 @@ repository; all other callers receive `not_found`, with no indication
 whether a receipt exists. The SPEC-WRITE-GRANTS §9.3 read check MUST
 precede this writer-view check; STC §2.2 fixes the complete order and
 uniform error. A write-only grantee with a signed request has the writer
-view and MAY fetch its own receipts. The lease selector MUST remain
-available to an otherwise authorized writer while the repository is
-suspended or deleted, for receipts of that lease scope. The server MUST
-retain the latest receipt for each ref, including its terminal deletion
-receipt, while the repository exists, and the latest receipt for each
-repository or ref lease scope while its repository identity remains
+view and MAY fetch advance receipts only for refs within that grant's
+ref scopes; a paired packmap maps to its branch for this check. An
+out-of-scope advance receipt MUST receive the uniform `not_found` of
+STC §2.2. Callers with `read` or `read,write` capability, owners, and
+authorities are not subject to this grant-scope limit. The lease
+selector MUST remain available to an otherwise authorized writer
+while the repository is suspended or deleted, for receipts of that lease scope. The server MUST
+retain the latest signed receipt for each ref, including its terminal
+deletion receipt, while the repository exists, and the latest receipt
+for each repository or ref lease scope while its repository identity remains
 addressable, and each namespace lease scope while its namespace remains
 addressable, including while the effective state is `suspended` or
-`deleted`. It MAY retain older versions for a deployment-set
+`deleted`. This retention obligation begins when the pending signature
+is complete. Lease receipts from repository- or namespace-level
+takedowns and reinstatements are available through `GetReceipt` only;
+the takedown and reinstatement admin responses carry no receipt. The advance selector MUST
+enforce §12.2 suspension with `permission_denied` and public message
+`lease suspended`; the lease selector remains available as above.
+The server MAY retain older versions for a deployment-set
 `receipt_retention` and MUST return `not_found` for a version it no
 longer holds. This retention does not make receipts server GC roots.
 SSH and enc clients receive no storage receipts in M5; their frozen
@@ -2314,11 +2335,15 @@ Before storing a storage receipt, a client MUST:
 3. Check that predicate `key_id` equals the body of the DSSE
    `blake3:` keyid, equals BLAKE3 of the selected public key, and
    that `issued_unix_ms` lies inside that listed key's validity window.
-   The client MUST refresh the key list within its 300-second max-age;
-   a pinned key absent from the current list fails verification even if
-   its signature and issue-time window otherwise pass. The overlapping
-   key list in §15.5 permits a pinned client to pin the replacement
-   key before the old key stops signing.
+   The client MUST refresh the key list within its 300-second max-age.
+   On an unknown `keyid`, it MUST refetch the list once, ignoring its
+   cache, before deciding whether the key is listed. A pinned key absent from
+   the current list fails verification even if its signature and
+   issue-time window otherwise pass. The overlapping
+   key list in §15.5 permits a client with a TOFU pin to pin the
+   replacement key before the old key stops signing. A key newly
+   published under a user-supplied root remains `unpinned` until the
+   user adds it.
 4. For an advance, check `origin`, `repository`, `ref`, `target`,
    `packmap`, and `previous` against the operation the client sent,
    wherever the operation supplies that value; an absent branch
@@ -2337,8 +2362,8 @@ signature check; clients MUST warn that it lacks a pinned trust root.
 A receipt-verification failure MUST NOT turn an otherwise
 committed push into an error unless the user explicitly opts in to
 requiring a valid receipt. Clients MUST NOT log complete storage
-receipts. Storage receipts are kept client-side and MUST NOT be pushed
-by default; they are not object-GC roots. Client storage MUST use a
+receipts. Storage receipts are kept client-side and MUST NOT be pushed;
+they are not object-GC roots. Client storage MUST use a
 separate `.mkit/receipts/` store, never `.mkit/attestations/`.
 
 Informative: the labelled vectors under `rust/tests/golden/receipts/`

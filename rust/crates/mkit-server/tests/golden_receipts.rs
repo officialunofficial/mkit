@@ -467,7 +467,7 @@ fn golden_receipts() {
     let no_upper_bound: Value =
         serde_json::from_slice(&files["key-list-absent-bound.json"]).unwrap();
     assert_eq!(
-        verify(&files["advance-opaque.dsse.json"], &no_upper_bound),
+        verify(&files["key-outside-window.dsse.json"], &no_upper_bound),
         Ok(())
     );
     for (name, error) in [

@@ -853,8 +853,9 @@ For each read procedure on a repository:
 capability rule: a signed caller with a valid `write`-only grant for the
 repository passes this read check for that RPC alone. It gains no
 `ListRefs`, `ReadRef`, pack, or object read access. SPEC-TRANSPORT-CONNECT
-§2.2 then requires the writer view and specifies the uniform
-`not_found` response. For this read check, an addressable repository
+§2.2 then requires the writer view, limits advance receipts to that
+grant's ref scopes, and specifies the uniform `not_found` response.
+For this read check, an addressable repository
 whose lease state is `suspended` or `deleted` remains an authorization
 subject for its lease receipts; this exception grants no content read.
 
