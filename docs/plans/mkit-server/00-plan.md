@@ -198,8 +198,8 @@ Sizes: S ≲ 400, M 400–900, L 900–1500 changed lines.
 | 4.8a | mkit-core: windowed, streaming pack reader | M4 | core | 4.1, 4.2 | M | rust,wasm | no |
 | 4.8 | Worker: async verification as checkpointed alarm slices | M4 | worker | 4.7, 4.6, 4.8a | L | rust,wasm,workers,conf-wrangler,staging | yes |
 | 4.9 | Client: PendingVerification polling | M4 | client | 4.4, 1.16 | M | rust,cli | no |
-| 4.10a | ContentIndex shards on Workers and holder sub-sharding | M4 | storage | 4.4, 1.8 | M | rust,wasm,workers,conf-wrangler | no |
-| 4.10 | Server: D32 extraction into the global object CAS, holds and holders | M4 | core | 4.7, 4.10a | L | rust,conf-native | no |
+| 4.10a | ~~ContentIndex shards on Workers and holder sub-sharding~~ Deferred (R-131) | M4 | storage | 4.4, 1.8 | M | rust,wasm,workers,conf-wrangler | no |
+| 4.10 | Server: D32 extraction into the global object CAS, holds and holders | M4 | core | 4.7 | L | rust,conf-native | no |
 | 4.11 | Spec: HTTP serving and proofs (#1088) | M4 | spec | 4.4 | M | docs,golden | yes |
 | 4.12 | Server core: HTTP object serving (http-objects feature) | M4 | core | 4.11, 4.7, 4.10 | L | rust,wasm | no |
 | 4.13 | Admission on HTTP reads (paid downloads) with ReadServed outcomes | M4 | core | 4.12, 3.3 | S | rust | no |
@@ -545,6 +545,7 @@ ContentIndex/export/hooks → M0-02b, unary pipeline → M0-05a, streaming/fault
 | R-115 | WP-5.1a-1 fix-2: reliance on existing members | Writes that newly rely on an existing member MUST durably clear its GC mark before commit; in opaque mode this covers every non-uploaded pack listed in new packmap nodes. WP-5.3a designs the detection mechanism and its cost, and escalates to the user if it adds more than one metadata read per newly referenced pack to the push path. | 5.1a-1, 5.3a |
 | R-116 | Post-restore index reconcile | Rebuilding index and membership rows from restored ref shards is required before GA; it runs after WP-1.28. Per-partition snapshots do not form one consistent cut, and relay rows already delivered before a target's snapshot are gone from the source, so an older target can retain missing rows after restore. | 1.28, 1.29b |
 | R-121 | M1 staging exit no longer gates M2–M4 code (user, 2026-09-28) | Proto, core and client WPs in M2–M4 depend on the specific M1 code WPs they build on, not on the M1 staging exit 1.20: 2.2 and 3.1 depend on 1.2 (M1 proto/codegen); 4.5 on 1.23 and 1.8; 4.10a on 1.8; 4.9 and 2.10 on 1.16. Staging and conformance WPs (1.20, 2.15, 3.13, 4.18 and each milestone exit) keep their staging edges, so staging-only problems surface at those exits. | 2.2, 2.10, 3.1, 4.5, 4.9, 4.10a |
+| R-131 | WP-4.10a holder sub-sharding deferred (user, 2026-09-28) | ContentIndex shards on Workers are already wired (WP-1.8). Holder sub-sharding is deferred: holders stay in the object's primary content shard. The trigger to revisit is an object whose holder count or content-shard size approaches a configured threshold (alert). WP-4.10 absorbs what is still needed: the holder value becomes `HolderV1 { seq, op_id }` so SPEC-SERVER §13.3's per-holder change sequence exists, and the hold is released in the same primary batch that records the holder (R-75 unchanged). Timer kind 6 stays reserved. | 4.10, 4.10a |
 
 ---
 
