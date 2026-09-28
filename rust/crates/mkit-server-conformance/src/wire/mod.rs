@@ -144,6 +144,10 @@
 //! | `quota.bytes_exhaustion_resource_exhausted` | `auth-v2`, `quota` | refused at the header |
 //! | `quota.exhaustion_allocates_no_replay` | `auth-v2`, `replay`, `quota` | the nonce stays unspent |
 //! | `quota.replay_not_charged` | `auth-v2`, `replay`, `quota` | |
+//! | `tickets.begin_upload_new` | `tickets`, `auth-v2` | a new ticket has an id, part geometry, expiry and token |
+//! | `tickets.begin_upload_idempotent` | `tickets`, `auth-v2` | a fresh nonce returns the live ticket, replay returns identical bytes, and another signer gets its own ticket |
+//! | `tickets.begin_upload_caps` | `tickets`, `auth-v2` | the open-ticket cap has its exact public error and leaves no replay row |
+//! | `tickets.begin_upload_packmap_refused` | `tickets`, `auth-v2` | a packmap ref is an invalid target |
 //! | `growth.replay_and_quota_pruned` | `auth-v2`, `replay`, `quota`, `test-faults` | records answer before expiry; after validity + grace + window the partition shrinks back to an absolute bound (R-31); needs a quota window ≤ 60 s allowing 265 writes, and a disposable server |
 //! | `list.large_response_within_limit` | | records one `ListRefs` response over `list_refs` refs (M1 asserts the bound) |
 //! | `repo.single_header_mismatch_not_found` | excludes `multi-repo` | Single reads with another identity give `not_found` |
@@ -180,7 +184,7 @@
 //   `repo.isolation_replay`, `server_info.*` (GetServerInfo),
 //   `list.paging_*` and `list.page_within_2_mib` (§7.9), `refs.delete_*` (§7.8).
 // TODO(M1, multi-repo): `namespace.policy_allowlist`, `namespace.policy_owner`.
-// TODO(M1, tickets): `tickets.begin_upload_*`, `tickets.upload_part_*`,
+// TODO(M1, tickets): `tickets.upload_part_*`,
 //   `tickets.complete_upload_*`, `tickets.advance_consumes_ticket`,
 //   `growth.tickets_and_outbox_pruned` (WP-1.27).
 // TODO(M2, grants): `grants.write_*`, `grants.epoch_*`, `grants.revoked_*`.

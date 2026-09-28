@@ -13,6 +13,7 @@ use futures::{StreamExt, stream};
 use mkit_core::protocol::{AdvanceOutcome, PackKey};
 
 use super::error::recorded;
+use super::proto::mkit::transport::v1::__buffa::oneof::begin_upload_response::Result as BeginResult;
 use super::proto::mkit::transport::v1::__buffa::oneof::download_pack_response::Body as DownloadBody;
 use super::proto::mkit::transport::v1::__buffa::oneof::upload_pack_request::Body as UploadBody;
 use super::proto::mkit::transport::v1::{
@@ -22,14 +23,14 @@ use super::proto::mkit::transport::v1::{
     ListRefsRequest, ListRefsResponse, PackChunk, PackExistsRequest, PackExistsResponse,
     ReadRefRequest, ReadRefResponse, RefEntry, RefExpectation, TransportService, UpdateRefRequest,
     UpdateRefResponse, UploadPackRequest, UploadPackResponse, UploadPartRequest,
-    UploadPartResponse,
+    UploadPartResponse, UploadTicket,
 };
 use super::{Shared, authenticated};
 use crate::error::ServerError;
 use crate::op::RefUpdate;
 use crate::pipeline::{Authenticated, DownloadChunk, HookSet, Pipeline, ServerInfo};
 use crate::refs::{DigestField, UnusedExpectedId, condition_from_wire, hash_from_slice};
-use crate::replay::UpdateRefResult;
+use crate::replay::{BeginUploadResult, UpdateRefResult};
 use crate::rt::{send_wrap, send_wrap_stream};
 use crate::store::{BlobStore, NamespaceStore};
 use crate::upload::UploadError;
@@ -37,7 +38,7 @@ use crate::upload::UploadError;
 /// `TransportService` over a [`Pipeline`]. Each handler takes the
 /// [`Authenticated`] that [`super::AuthInterceptor`] stored for existing RPCs;
 /// `GetServerInfo` is deliberately unauthenticated. The remaining M1 upload
-/// RPCs are stubs until WP-1.9 and WP-1.11 add authenticated procedures.
+/// RPCs are stubs until WP-1.11 adds authenticated procedures.
 pub struct ConnectTransport<B, N, H> {
     pipe: Shared<Pipeline<B, N, H>>,
 }
@@ -130,7 +131,7 @@ async fn upload<B: BlobStore, N: NamespaceStore, H: HookSet>(
         return Err(not_yet().into());
     }
     let mut session = pipe
-        .begin_upload(a, header.pack_id.as_deref(), header.total_bytes)
+        .open_upload(a, header.pack_id.as_deref(), header.total_bytes)
         .await?;
     while let Some(item) = requests.next().await {
         let chunk = match item.map(|m| m.to_owned_message().body) {
@@ -363,12 +364,50 @@ where
 
     async fn begin_upload(
         &self,
-        _ctx: RequestContext,
-        _request: ServiceRequest<'_, BeginUploadRequest>,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, BeginUploadRequest>,
     ) -> ServiceResult<BeginUploadResponse> {
-        // SECURITY: unauthenticated until WP-1.9 adds a Procedure variant; the implementing WP MUST add it.
-        // TODO(WP-1.9): implement upload tickets.
-        Err(not_yet().into())
+        let a = authenticated(&ctx)?;
+        let message = request.to_owned_message();
+        let pipe = self.pipe.arc();
+        send_wrap(async move {
+            let result = pipe
+                .begin_upload(
+                    &a,
+                    &message.r#ref.unwrap_or_default(),
+                    message.pack_id.as_deref().unwrap_or_default(),
+                    message.bytes.unwrap_or_default(),
+                )
+                .await?;
+            let result = match result {
+                BeginUploadResult::AlreadyPresent => BeginResult::AlreadyPresent(Box::default()),
+                BeginUploadResult::Ticket {
+                    id,
+                    part_size,
+                    expires_at_ms,
+                    token,
+                } => {
+                    let expires_unix_ms = i64::try_from(expires_at_ms).map_err(|_| {
+                        ServerError::internal(
+                            "upload ticket expiry exceeds wire clock",
+                            expires_at_ms,
+                        )
+                    })?;
+                    BeginResult::Ticket(Box::new(UploadTicket {
+                        id: Some(id.to_vec()),
+                        part_size: Some(part_size),
+                        expires_unix_ms: Some(expires_unix_ms),
+                        token: Some(token),
+                        ..Default::default()
+                    }))
+                }
+            };
+            Response::ok(BeginUploadResponse {
+                result: Some(result),
+                ..Default::default()
+            })
+        })
+        .await
     }
 
     async fn upload_part(

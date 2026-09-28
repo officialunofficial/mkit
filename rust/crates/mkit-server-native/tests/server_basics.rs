@@ -483,6 +483,7 @@ fn serve_lock_is_held_while_running() {
         .arg("--repo-root")
         .arg(root.path())
         .env_remove("MKIT_API_TOKEN")
+        .env_remove("MKIT_TICKET_KEYS")
         .env_remove("MKIT_SERVE_ROOT")
         .env("RUST_LOG", "warn")
         .stderr(Stdio::piped())
@@ -560,6 +561,7 @@ fn refuses_to_bind_without_auth_choice() {
         .args(["serve", "--listen", "127.0.0.1:0", "--repo-root"])
         .arg(root.path())
         .env_remove("MKIT_API_TOKEN")
+        .env_remove("MKIT_TICKET_KEYS")
         .env_remove("MKIT_SERVE_ROOT")
         .output()
         .unwrap();

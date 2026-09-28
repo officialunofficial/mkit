@@ -410,3 +410,166 @@ fn probe_targets_follow_the_deployment_sharding() {
         );
     }
 }
+
+#[derive(Default)]
+struct PressureGauges(std::sync::Mutex<Vec<(String, String, f64)>>);
+
+impl mkit_server::Metrics for PressureGauges {
+    fn incr(&self, _: &'static str, _: &[(&'static str, &str)], _: u64) {}
+    fn observe_ms(&self, _: &'static str, _: &[(&'static str, &str)], _: f64) {}
+    fn gauge(&self, name: &'static str, labels: &[(&'static str, &str)], value: f64) {
+        assert_eq!(labels[0].0, "kind");
+        self.0.lock().expect("pressure gauge capture lock").push((
+            name.into(),
+            labels[0].1.into(),
+            value,
+        ));
+    }
+}
+
+#[test]
+fn committed_put_pressure_reads_physical_size_through_do_shim() {
+    use mkit_server::ManualClock;
+    use mkit_server_worker::classes::ShardClass;
+    use mkit_server_worker::ns_object::{PressureStore, serve};
+    use mkit_server_worker::wire::{Blob, NsCall, NsReply, NsRequest, WireBatch, WireOutcome};
+    use std::sync::Arc;
+
+    let config = capacity_above_empty(64 * 1024);
+    let conn = SimDoConn(RusqliteConn::open_in_memory().unwrap());
+    let inner = SqlKvStore::open_with_capacity(conn, config.capacity).unwrap();
+    let clock = Arc::new(ManualClock::new(0));
+    let metrics = Arc::new(PressureGauges::default());
+    let store = PressureStore::new(inner, ShardClass::RefStore, clock.clone(), metrics.clone());
+    let request = |call| {
+        serde_json::to_string(&NsRequest {
+            part: Blob(root().encode().unwrap().to_vec()),
+            call,
+        })
+        .unwrap()
+    };
+    let batch = Batch::new().put(key(0), Value::new(vec![1; 55 * 1024]));
+    let body = request(NsCall::Apply {
+        batch: WireBatch::from(batch),
+    });
+    let reply: NsReply =
+        serde_json::from_str(&block_on(serve(&store, &body, ShardClass::RefStore))).unwrap();
+    assert_eq!(
+        reply,
+        NsReply::Outcome {
+            outcome: WireOutcome::Committed
+        }
+    );
+    let physical = store.conn().size_bytes().unwrap();
+    let logical = block_on(store.stats(&root())).unwrap().bytes;
+    assert_ne!(
+        physical, logical,
+        "gauge must measure the physical cap input"
+    );
+    assert!(u128::from(physical) * 100 >= u128::from(config.capacity.soft_limit()) * 70);
+    #[allow(clippy::cast_precision_loss)]
+    let expected = physical as f64;
+    assert_eq!(
+        *metrics.0.lock().unwrap(),
+        vec![(
+            "mkit_server_partition_bytes".into(),
+            "namespace".into(),
+            expected
+        )]
+    );
+    // A conflict with a put, a read, an empty batch and a committed delete
+    // must not publish a write-path sample.
+    clock.set(1);
+    for call in [
+        NsCall::Apply {
+            batch: Batch::new()
+                .require(mkit_server::Precondition::Absent(key(0)))
+                .put(key(1), Value::default())
+                .into(),
+        },
+        NsCall::Stats,
+        NsCall::Apply {
+            batch: Batch::new().into(),
+        },
+        NsCall::Apply {
+            batch: Batch::new().delete(key(0)).into(),
+        },
+    ] {
+        block_on(serve(&store, &request(call), ShardClass::RefStore));
+    }
+    assert_eq!(metrics.0.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn timer_reschedule_put_observes_pressure_through_do_shim() {
+    use mkit_server::store::keys;
+    use mkit_server::timers::{
+        DueTimer, Fired, TickBudget, TimerCtx, TimerHandler, TimerKind, TimerRegistry, run_due,
+    };
+    use mkit_server::{BoxFuture, ManualClock};
+    use mkit_server_worker::classes::ShardClass;
+    use mkit_server_worker::ns_object::PressureStore;
+    use std::sync::Arc;
+
+    struct Reschedule;
+    impl<S: NamespaceStore> TimerHandler<S> for Reschedule {
+        fn kind(&self) -> TimerKind {
+            TimerKind::new(0xF0)
+        }
+        fn fire<'a>(
+            &'a self,
+            _: &'a TimerCtx<'a, S>,
+            _: &'a DueTimer,
+        ) -> BoxFuture<'a, Result<Fired, StoreError>> {
+            Box::pin(async {
+                Ok(Fired::Reschedule {
+                    due_at_ms: 100,
+                    value: Value::new(vec![1; 55 * 1024]),
+                    batch: Batch::new(),
+                })
+            })
+        }
+    }
+    let config = capacity_above_empty(64 * 1024);
+    let conn = SimDoConn(RusqliteConn::open_in_memory().unwrap());
+    let inner = SqlKvStore::open_with_capacity(conn, config.capacity).unwrap();
+    let old_key = keys::timer(0, 0xF0, b"pressure");
+    assert_eq!(
+        block_on(inner.apply(&root(), Batch::new().put(old_key.clone(), Value::default())))
+            .unwrap(),
+        BatchOutcome::Committed
+    );
+    let clock = Arc::new(ManualClock::new(0));
+    let metrics = Arc::new(PressureGauges::default());
+    let store = PressureStore::new(inner, ShardClass::RefStore, clock.clone(), metrics.clone());
+    let registry = TimerRegistry::new().register(Reschedule);
+    let report = block_on(run_due(
+        &store,
+        &root(),
+        &registry,
+        clock.as_ref(),
+        0,
+        &TickBudget::default(),
+    ))
+    .unwrap();
+    assert_eq!(report.fired, 1);
+    assert_eq!(report.next_wake_ms, Some(100));
+    assert!(block_on(store.get(&root(), &old_key)).unwrap().is_none());
+    assert!(
+        block_on(store.get(&root(), &keys::timer(100, 0xF0, b"pressure")))
+            .unwrap()
+            .is_some()
+    );
+    let physical = store.conn().size_bytes().unwrap();
+    assert!(u128::from(physical) * 100 >= u128::from(config.capacity.soft_limit()) * 70);
+    #[allow(clippy::cast_precision_loss)]
+    let expected = physical as f64;
+    assert_eq!(
+        *metrics.0.lock().unwrap(),
+        vec![(
+            "mkit_server_partition_bytes".into(),
+            "namespace".into(),
+            expected
+        )]
+    );
+}
