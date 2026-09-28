@@ -40,6 +40,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and D34 quota conformance follow in WP-1.26b.
 - Server: add write-once repository object-index keys and binary values,
   deterministic row planning, and membership-gated lookup APIs for indexed mode.
+- Connect client: poll typed pending AdvanceRefs verification replies with
+  clamped waits, nonce reuse and envelope renewal, progress and cancellation.
+  Ticket deadline threading follows in WP-1.17.
 - Server: ticketed `UploadPack` now verifies the ticket before reading data,
   streams the full pack without metadata writes, and leaves a content-addressed
   upload marker for later ticket consumption. The advertised BeginUpload
