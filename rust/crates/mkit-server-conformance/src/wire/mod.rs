@@ -153,7 +153,8 @@
 //! | `tickets.upload_pack_binding_denied` | `tickets`, `auth-v2` | a valid token for another pack is denied |
 //! | `tickets.upload_pack_expired_token` | `tickets`, `auth-v2`, `test-faults` | an expired token fails with `failed_precondition` |
 //! | `growth.replay_and_quota_pruned` | `auth-v2`, `replay`, `quota`, `test-faults` | records answer before expiry; after validity + grace + window the partition shrinks back to an absolute bound (R-31); needs a quota window ≤ 60 s allowing 265 writes, and a disposable server |
-//! | `list.large_response_within_limit` | | records one `ListRefs` response over `list_refs` refs (M1 asserts the bound) |
+//! | `list.large_response_within_limit` | | follows tokens over `list_refs` long names; each response is at most 2 MiB |
+//! | `list.paging_wire` | | token round trip, invalid tokens, and page-size defaults and cap |
 //! | `repo.single_header_mismatch_not_found` | excludes `multi-repo` | Single reads with another identity give `not_found` |
 //! | `repo.single_malformed_invalid_argument` | excludes `multi-repo` | Single reads reject malformed identities |
 //! | `repo.single_signed_missing_header_unauthenticated` | `auth-v2`; excludes `multi-repo` | Single signed writes require X-Repository |
@@ -261,6 +262,7 @@ pub const D34_LIST_REFS_SKIPS: &[&str] = &[
     "refs.list_prefix_stripped",
     "refs.list_prefix_component_boundary",
     "list.large_response_within_limit",
+    "list.paging_wire",
     "repo.isolation_refs",
     // The unsigned-read case probes successful ListRefs as well as ReadRef.
     "auth.v2_reads_unsigned_ok",

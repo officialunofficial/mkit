@@ -5,6 +5,22 @@ single crate or spec. Each entry states the invariant, why it matters, and
 what breaks when it is violated. A regression test enforces each one; find
 it by the file path listed under "Enforced by".
 
+## ListRefs pages make bounded forward progress
+
+**Always:** a nonterminal ListRefs page contains at least one ref, its token
+binds the repository and normalized prefix to the last emitted full name,
+and every encoded page is at most 2 MiB. A failed bucket scan fails the
+entire page with `unavailable`.
+
+**Because:** clients reject repeated tokens and nonincreasing names; an
+unbounded response exceeds the Connect client message limit.
+
+**If violated:** a client loops or drops refs, or a partial merge appears to
+be a complete listing.
+
+**Enforced by:** `pipeline::list` property and large-list tests, the
+`connect_dispatch` paging wire test, and the Connect encoded-length guard.
+
 ## Ticketed UploadPack touches no metadata and always leaves a marker
 
 **Always:** a ticketed UploadPack verifies the signed pack commitment and

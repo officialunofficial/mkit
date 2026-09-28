@@ -258,6 +258,7 @@ cases! {
     "quota.replay_not_charged" => quota::replay_not_charged, M0, [AuthV2, Replay, Quota], [];
     "growth.replay_and_quota_pruned" => growth::replay_and_quota_pruned, M0, [AuthV2, Replay, Quota, TestFaults], [];
     "list.large_response_within_limit" => list::large_response_within_limit, M0, [], [];
+    "list.paging_wire" => list::paging_wire, M0, [], [];
 }
 
 /// The context one case runs in.
