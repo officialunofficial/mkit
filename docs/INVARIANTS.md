@@ -1250,7 +1250,8 @@ repository membership, and backlog/caps can undercount durable obligations.
 strict `store/codec.rs` decodes, and `mkit-server-conformance/src/storage/kv_cases.rs`
 creation, atomic publication, stale-ticket and acknowledgement cases over memory
 and SQLite. WP-1.10 exercises consumption and the defensive abort over native
-memory/SQLite and wire cases; expiry handling is WP-1.14. WP-3.3 adds guarded
+memory/SQLite and wire cases; the kind-2 expiry handler closes tickets with
+one guarded `Expired` row and best-effort session abort. WP-3.3 adds guarded
 Pending reservations, ReadServed, reconciliation and backlog enforcement.
 ## Relay delivery advances durable per-source watermarks before source cleanup
 
@@ -1554,8 +1555,8 @@ retries charge admission again, or token results disappear with ticket rows.
 (`golden_ticket_token_v1`), `mkit-server/tests/begin_upload_codec.rs`, native
 `tests/begin_upload.rs` (`lifecycle_*`, `caps_*`, `race_*`, `rejected_*`) over
 memory and SQLite (Single and D34), and the wire `tickets.*` cases.
-Ticket expiry cleanup and admission Pending/Aborted reconciliation remain
-WP-1.14 and WP-3.3 respectively.
+Kind-2 ticket expiry closes unconsumed tickets; admission Pending/Aborted
+reconciliation and terminal outcome delivery belong to WP-3.3.
 
 ## Ticketed advance publishes only completed uploads
 

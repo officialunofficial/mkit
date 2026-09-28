@@ -1428,7 +1428,9 @@ retries in a new operation.
 **Expiry.** A ticket expires less than 7 days after `BeginUpload`. A
 ticket that expires before an advance consumes it produces an `Expired`
 outcome for its reservation, and its pack becomes eligible for garbage
-collection.
+collection. The server best-effort aborts the ticket's upload session when
+it closes the expired ticket; backend lifecycle rules reclaim sessions
+left by an abort failure or interrupted cleanup.
 
 **Retries.** A client that retries a signed request reuses its nonce and
 timestamps while the envelope is valid (at most 300 seconds, §7.1).

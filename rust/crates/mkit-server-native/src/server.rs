@@ -573,6 +573,9 @@ where
             bind_sharding(&conn, cfg.pipeline.sharding, path)?;
             let meta = Blocking::new(TimerNotifying::new(meta));
             let registry = mkit_server::timers::TimerRegistry::new()
+                .register(mkit_server::timers::ticket_expiry::TicketExpiry {
+                    blobs: blobs.clone(),
+                })
                 .register(mkit_server::timers::lease_sweep::LeaseSweep)
                 .register(mkit_server::relay::RelayHandler {
                     target: meta.clone(),

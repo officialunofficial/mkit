@@ -152,7 +152,7 @@ Sizes: S ≲ 400, M 400–900, L 900–1500 changed lines.
 | 1.11b | FS multipart, native wiring, shared storage suite and conf-native wire cases | M1 | native | 1.11a | M | rust,conf-native | no |
 | 1.12 | Worker: R2 multipart with client-streamed parts through the Worker | M1 | worker | 1.11b, 1.8 | M | rust,wasm,workers,conf-wrangler | no |
 | 1.13 | Native: S3 multipart BlobStore | M1 | native | 1.11b | M | rust,conf-native | no |
-| 1.14 | Ticket expiry and pre-M3 outbox retention | M1 | core | 1.10, 1.12, 1.24 | M | rust,conf-native,conf-wrangler | no |
+| 1.14 | Ticket expiry | M1 | core | 1.10, 1.12, 1.24 | M | rust,conf-native,conf-wrangler | no |
 | 1.29 | Ops: periodic DO backup export to R2 and per-shard storage alerts | M1 | ops | 1.24, 1.8, 1.25, 1.23a | M | rust,workers,conf-wrangler | no |
 | 1.15 | ssh and enc: multi-repo addressing, --principal, implicit session tickets | M1 | cli | 1.5, 1.10 | M | rust,cli | no |
 | 1.16 | Client: X-Repository everywhere, identity validation, GetServerInfo, ListRefs paging, ref hint | M1 | client | 1.2, 1.6 | M | rust,cli | no |
@@ -379,7 +379,7 @@ as soon as their deps allow (they are off the implementation chain); land the pu
 | P-6 | Upload threshold | `BeginUpload` threshold 0 on multi-repo deployments (every upload ticketed, so membership is always recorded in a ref shard); single-repo unchanged | Planner | 1.6, 1.9 |
 | P-7 | Part size | 8 MiB advertised, 32 MiB max | Planner | 1.11, 1.12 |
 | P-8 | Single-part packs | `UploadPack` with the ticket token and `pack:` commitment | Planner | S1, 1.9 |
-| P-9 | Outbox before M3 | Built-in no-op sink acks and deletes rows | Planner | 1.14 |
+| P-9 | Outbox before M3 | Built-in no-op sink acks and deletes rows | Planner | 3.3 |
 | P-10 | Atomic advance | Client auto-enables it from `GetServerInfo` | Planner | 1.16 |
 | P-11 | Epoch step | `MAX_EPOCH_STEP` = 1024 | Planner | S2, 2.8 |
 | P-12 | Lease safety margin | Shards stop using an epoch lease 5 s before expiry; the margin must exceed the worst clock skew between the coordinator and any ref shard's storage backend | Planner | 1.25, S2 |
@@ -567,6 +567,7 @@ ContentIndex/export/hooks → M0-02b, unary pipeline → M0-05a, streaming/fault
 | R-133 | WP-5.6 takedown sweep enumeration | WP-5.6 builds the `nl` namespace registry that the takedown sweep enumerates, and WP-5.6's sweep uses at most one read per distinct index partition per repository. A namespace MUST be registered in `nl` before any write into it commits, and the sweep reads `nl` only after that registry's own watermark passes the cut. | 5.6 |
 | R-144 | WP-1.12 R2 multipart | R2 stages verified parts at CV-keyed `server-uploads/<ticket>/<index>-<cv>` objects and assembles through a full-pack BLAKE3-verifying conditional put. Native R2 multipart is not used for client parts: its MD5 ETag is not an integrity proof and a failed replacement can lose a good part. The Worker advertises 8 MiB parts, allows at most 32 MiB parts, and defaults to a 4 GiB ticketed-pack cap (`MAX_PACK_BYTES`, ceiling 4.995 GiB). `UploadPack` keeps its 64 MiB single-put cap. A same-index concurrent part race may require re-upload. Workers Paid with raised `limits.cpu_ms` is required; WP-1.19 applies the measured CPU budget and bucket lifecycle rule. | 1.12, 1.19 |
 | R-145 | WP-1.13 native S3 multipart | Native S3 stages verified parts under the same CV-keyed layout. A completion verifies the merged BLAKE3 root from those verified part CVs, then uses up to eight concurrent server-side `UploadPartCopy` calls in a private multipart upload. `CompleteMultipartUpload` uses `If-None-Match: *`; 200 responses carrying `<Error>` fail closed and abort the private upload. The signer is native-local and signs canonical queries plus `x-amz-copy-source`, without changing `mkit-transport-s3`. Native `CompleteUpload` uses the long stream deadline; WP-1.18 must give its client the matching long timeout. R2 and S3 bucket lifecycle rules expire `server-uploads/` after eight days. A same-index concurrent part race may require re-upload. | 1.13, 1.18, 1.19 |
+| R-146 | WP-1.14 ticket expiry | Kind-2 expiry closes the guarded ticket and its indexes, writes exactly one terminal `Expired` reservation and pending-outcome row, and best-effort aborts its upload session. Each Worker tick handles at most eight tickets. Outcome delivery (kind 8), reconciliation (kind 9), and pre-M3 outbox retention belong to the 3.2+3.3 bundle; until it lands, `Expired` rows remain undelivered. This bundle is not deployed. | 1.14, 3.3 |
 
 ---
 

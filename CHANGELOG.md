@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Server native: support S3 multipart with verified CV-keyed parts and
   server-side `UploadPartCopy` assembly, plus a long CompleteUpload deadline
   (WP-1.13).
+- Server: expire unconsumed upload tickets with one guarded `Expired` outcome
+  and best-effort upload-session cleanup (WP-1.14).
 
 - Connect client: sign repository reads with auth v2 on each attempt, including
   the framed `DownloadPack` request. Add a grant-source API and local selection

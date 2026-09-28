@@ -354,6 +354,28 @@ where
     registry
 }
 
+/// Register kind-2 expiry on the classes that own ticket rows.
+#[must_use]
+pub fn timer_registry_with_blobs<S, T, B>(
+    class: crate::classes::ShardClass,
+    target: Result<T, ConfigError>,
+    plan: Option<&str>,
+    blobs: B,
+) -> mkit_server::timers::TimerRegistry<S>
+where
+    S: mkit_server::NamespaceStore,
+    T: mkit_server::NamespaceStore + 'static,
+    B: mkit_server::MultipartBlobStore + 'static,
+{
+    let registry = timer_registry(class, target, plan);
+    match class {
+        crate::classes::ShardClass::RefStore | crate::classes::ShardClass::RefShard => {
+            registry.register(mkit_server::timers::ticket_expiry::TicketExpiry { blobs })
+        }
+        _ => registry,
+    }
+}
+
 struct WorkerRelay<T> {
     relay: Option<mkit_server::relay::RelayHandler<T>>,
     max_per_tick: u32,
@@ -921,7 +943,15 @@ mod glue {
             let probe = cfg.probe_partition();
             WorkerNamespaceStore::new(StubTransport::new(env.clone(), cfg.placement), probe)
         });
-        let registry = super::timer_registry(class, target, plan.as_deref());
+        let registry = super::timer_registry_with_blobs(
+            class,
+            target,
+            plan.as_deref(),
+            R2BlobStore::new(
+                EnvBucket::new(env.clone(), crate::r2::STORAGE_BINDING),
+                PACKS_KEYSPACE,
+            ),
+        );
         let backup = BackupConfig::from_vars(|name| env.var(name).ok().map(|v| v.to_string()))
             .map_err(|error| {
                 BACKUPS_INVALID_LOG
