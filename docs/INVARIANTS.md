@@ -1354,6 +1354,27 @@ surface or another ref that reuses pending content.
 **Enforced by:** normative SPEC-SERVER §§10–11.
 Runtime enforcement and behavioral conformance remain for WP-5.4/5.5/5.13;
 the current goldens verify the additive hook wire contract only.
+
+## Admin authority and audit continuity (specified, implementation pending)
+
+**Always:** administrative effects require a valid `mkit-admin:v1` signature
+from a key whose roles permit the procedure and scope. A nonce cannot authorize
+different request bytes, and a repeated long-running operation id cannot
+start a second action. Every authenticated result and automatic redaction,
+release, waiver or purge appends one gapless hash-chained audit entry.
+Unauthenticated attempts never enter the durable log. Pruning preserves a
+checkpoint through the longest active preservation retention.
+
+**Because:** lease-only billing authority must not grant moderation power,
+and operators need verifiable evidence of changes that affect serving or
+preserved bytes.
+
+**If violated:** a replay or wrong-role key changes protected content, or a
+missing audit segment conceals an administrative action.
+
+**Enforced by:** normative SPEC-SERVER §16 and its admin goldens. Runtime
+enforcement and behavioral conformance remain pending.
+
 ## BeginUpload decisions and replay share the write batch
 
 **Always:** BeginUpload authorizes before returning a live ticket or membership

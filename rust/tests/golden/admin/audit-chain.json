@@ -1,0 +1,66 @@
+{
+  "entries": [
+    {
+      "seq": "1",
+      "recordedAtMs": "1790424001000",
+      "actor": "test-admin-moderation-2026-09",
+      "procedure": "/mkit.server.admin.v1.AdminService/Takedown",
+      "targets": [
+        "object:1111111111111111111111111111111111111111111111111111111111111111"
+      ],
+      "result": {
+        "code": "ok",
+        "message": "accepted"
+      },
+      "details": "fixture entry",
+      "prevHash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "operatorLabel": "case-17",
+      "requestDigest": "body:a1af743377d68b3913ce9d89f6e04e403b785caffcde587d727ae47aee88f23d",
+      "nonce": "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+      "operationId": "admin:take:1",
+      "entryHash": "dc3e973db6264cce18e88dccfa9a7757654116e37e495a8307b2b781a75a2894"
+    },
+    {
+      "seq": "2",
+      "recordedAtMs": "1790424002000",
+      "actor": "system:relay",
+      "procedure": "system:relay/takedown",
+      "targets": [
+        "object:1111111111111111111111111111111111111111111111111111111111111111"
+      ],
+      "result": {
+        "code": "ok",
+        "message": "accepted"
+      },
+      "details": "fixture entry",
+      "prevHash": "dc3e973db6264cce18e88dccfa9a7757654116e37e495a8307b2b781a75a2894",
+      "requestDigest": "",
+      "nonce": "",
+      "operationId": "admin:take:1",
+      "entryHash": "1b9a161a328f6ea9fb0fcc9091909a29034f328ca27868d626cdb42d2adcfd7a"
+    },
+    {
+      "seq": "3",
+      "recordedAtMs": "1790424003000",
+      "actor": "test-admin-moderation-2026-09",
+      "procedure": "/mkit.server.admin.v1.AdminService/ReleaseHold",
+      "targets": [
+        "ed25519-a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0/payments-demo"
+      ],
+      "result": {
+        "code": "permission_denied",
+        "message": "review required"
+      },
+      "details": "fixture entry",
+      "prevHash": "1b9a161a328f6ea9fb0fcc9091909a29034f328ca27868d626cdb42d2adcfd7a",
+      "operatorLabel": "case-17",
+      "requestDigest": "body:91973e4892a430496bf944f3130acb8bdbd6bb59de6a93fe6c9919efbcad5171",
+      "nonce": "a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3",
+      "entryHash": "0363cab20762d470ebc4dc2d43a62f36f1952ed91564f62ae2fea5284f428632"
+    }
+  ],
+  "chainHead": "0363cab20762d470ebc4dc2d43a62f36f1952ed91564f62ae2fea5284f428632",
+  "chainHeadSeq": "3",
+  "checkpointHash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "checkpointSeq": "0"
+}

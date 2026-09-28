@@ -225,17 +225,17 @@ be at least once, using the reservation id as the idempotency key.
 There is no ordering guarantee between reservations. A receiver MUST
 treat a repeated outcome for the same reservation as the same result.
 
-The durable outbox holds outcomes and, when an Event sink is configured,
-§12 lifecycle events awaiting acknowledgement. Events use `event_id`
+The durable outbox holds outcomes and, when configured, §12 lifecycle
+events and §16 cache purges awaiting acknowledgement. Events use `event_id`
 as their idempotency key; event acknowledgement does not acknowledge an
 outcome or another event. Delivery
 attempts and process restarts MUST NOT discard an unacknowledged row.
 Acknowledging one reservation does not acknowledge another reservation.
 
 A server MAY refuse new admitted writes with retryable `unavailable`
-while its combined undelivered outcome and event backlog exceeds a
-configured bound. Events MUST count toward that bound. The server MUST
-NOT drop outcomes or events to relieve that backlog. Reads and writes
+while its combined undelivered outcome, event, and cache-purge backlog exceeds a
+configured bound. Events and cache purges MUST count toward that bound. The server MUST
+NOT drop outcomes, events, or cache purges to relieve that backlog. Reads and writes
 that do not run admission MUST be unaffected by this backpressure.
 
 `new_to_store` bytes appear only in `Committed`, as STC §5.1 requires
@@ -686,7 +686,7 @@ body:<64 lowercase hex BLAKE3 of the exact request body bytes>
 `mkit-hook:v1` is the literal domain separator for this key use, as
 [SPEC-CONVENTIONS §4](SPEC-CONVENTIONS.md#4-domain-separator-and-namespace-naming)
 requires. A hook key MUST NOT be any key used for `mkit-write:v2`,
-grants, or receipts. Distinct roles MUST use distinct keys.
+grants, receipts, or administration (§16). Distinct roles MUST use distinct keys.
 
 `<key id>` identifies a key in §7.2's list. It MUST be 1–64 bytes of
 `[A-Za-z0-9._-]` and is chosen by the deployment.
@@ -1731,10 +1731,11 @@ under a valid epoch lease. They MUST NOT use cached lease terms.
 |---|---|
 | `event_id = 1` | Idempotency key: MUST be 1–128 bytes of `[A-Za-z0-9._:-]` and unique per server audience. |
 | `audience = 2` | The mkit server's canonical origin, distinct from the hook-channel signing audience. |
-| `repository = 3` | Full repository identity under STC §7.4. |
+| `repository = 3` | Full repository identity under STC §7.4; empty only for a namespace-scoped event. |
 | `occurred_unix_ms = 4` | Transition time as signed 64-bit Unix epoch milliseconds, independent of delivery time. |
-| `sequence = 5` | Unsigned 64-bit sequence, strictly increasing per `(repository, scope)` for distinct events of every kind. |
+| `sequence = 5` | Unsigned 64-bit sequence, strictly increasing per repository/ref scope or per namespace for distinct events of every kind. |
 | `kind` | Exactly one transition kind; `lease = 6` is defined here. Other kinds can extend the same envelope. |
+| `namespace = 9` | Namespace identity when the event is namespace-scoped; empty otherwise. |
 
 `LeaseTransition` has these fields:
 
@@ -1751,10 +1752,13 @@ under a valid epoch lease. They MUST NOT use cached lease terms.
 `LeaseCause` numbers are `LEASE_CAUSE_UNSPECIFIED = 0`,
 `LEASE_CAUSE_EXPIRY = 1`, `LEASE_CAUSE_RENEWAL = 2`,
 `LEASE_CAUSE_POLICY = 3`, and `LEASE_CAUSE_ADMIN = 4`.
-Senders MUST populate every shared Event field and exactly one kind,
+Senders MUST populate every applicable shared Event field and exactly one kind,
 and MUST supply known, non-unspecified states and a non-unspecified
-cause. Retries MUST retain the event id, sequence, scope, and body.
-Sequences MUST NOT reset on restart, renewal, or ref recreation. Future
+cause. Exactly one of `repository` and `namespace` MUST be nonempty.
+Retries MUST retain the event id, sequence, scope, and body.
+For a namespace event, the sequence is strictly increasing per namespace;
+for a repository or ref event, it is strictly increasing per
+`(repository, scope)`. Sequences MUST NOT reset on restart, renewal, or ref recreation. Future
 event kinds MUST share the same sequence space for their scope.
 
 An Event MUST describe the scope whose own lease terms, administrative
@@ -1762,7 +1766,10 @@ override, or time-derived state changed. A repository-default change emits
 one repository-scope event; refs inheriting that default MUST NOT emit
 separate per-ref events, and receivers derive their effective state from
 the repository transition.
-An administrative override emits at the scope where it is set.
+An administrative override emits exactly one event at the scope where it is set.
+For a namespace override that event has `namespace` set and `repository`
+empty; it MUST NOT be duplicated once per repository. An admin-caused
+lease transition uses `LEASE_CAUSE_ADMIN` (§16.5).
 
 When an Event sink is configured, events MUST use the same durable outbox
 as outcomes (§5), be delivered at least once, and remain retained until
@@ -1772,7 +1779,7 @@ has no ordering guarantee. Receivers MUST deduplicate by `event_id` and use
 MUST NOT roll back a newer state. Signing follows §7.1 and retry follows
 §8. Events count toward §5's combined backlog bound.
 
-The remote `CachePurge` contract is reserved for §16. A
+The remote `CachePurge` contract is in §16.7. A
 deployment-internal cache-purge interface does not add a remote RPC.
 
 ## 13. Server garbage collection
@@ -2009,9 +2016,306 @@ Reserved: this section is specified with M5 (see the version history).
 
 Reserved: this section is specified with M5 (see the version history).
 
-## 16. Admin API and audit log (reserved, M5)
+## 16. Admin API and audit log
 
-Reserved: this section is specified with M5 (see the version history).
+### 16.1 Service, exposure and off-by-default
+
+`mkit.server.admin.v1.AdminService` is the operator control plane. Its
+procedures are Connect unary calls except `ReadPreserved` and
+`ReadAuditLog`, which have one signed request and stream responses. The
+service MUST be mounted only when a nonempty admin key list (§16.3) is
+configured. An absent list disables every admin route; it MUST NOT
+fall back to write, hook, grant, receipt, or bearer authentication.
+
+A native deployment MUST expose the service on a listener separate from
+the client transport listener, defaulting to loopback. A Workers
+deployment MUST expose the canonical
+`/mkit.server.admin.v1.AdminService/<method>` paths, distinct from the
+client transport service paths, behind the deployment's network
+controls; it MUST NOT rewrite them before signature verification.
+Admin procedures are exempt from the client RPC bearer gate.
+A request carrying both auth-v2 and `X-Mkit-Admin-*` headers MUST be
+rejected with `invalid_argument` before either identity is used. Admin
+authorization is independent of repository visibility and of grants.
+
+Informative: the server holds public admin keys only. Private admin
+keys belong offline or in a hardware security module. Deployments
+provide their own operator UI; this version exposes no public audit or
+preservation view. Repository owners learn about redaction through §14
+notices and takedown lifecycle Events.
+
+### 16.2 The `mkit-admin:v1` envelope
+
+Every admin request MUST carry a strict Ed25519 signature over the
+32-byte BLAKE3 digest of these eight newline-separated UTF-8 fields,
+with no final newline:
+
+```text
+mkit-admin:v1
+<key id>
+<audience>
+<full procedure>
+body:<64 lowercase hex BLAKE3 of the exact request body bytes>
+<created epoch milliseconds>
+<expiry epoch milliseconds>
+<nonce>
+```
+
+`mkit-admin:v1` is a permanent domain separator distinct from
+`mkit-hook:v1` and `mkit-write:v2` under
+[SPEC-CONVENTIONS §4](SPEC-CONVENTIONS.md#4-domain-separator-and-namespace-naming).
+The key id follows §7.1's 1–64 byte `[A-Za-z0-9._-]` grammar.
+The audience is the server's canonical origin under STC §7.1, even on
+the separate admin listener or path; it MUST equal the configured
+server origin. The procedure is the exact receiving Connect path,
+`/mkit.server.admin.v1.AdminService/<method>`. The nonce is 32 random
+bytes encoded as 64 lowercase hex digits. Times are unsigned decimal
+epoch milliseconds with no sign or leading zero, except `0`. The
+interval MUST be positive and at most 300,000 ms; the created time MAY
+lead the backend clock by at most 30,000 ms and the expiry MUST be in
+the future when accepted.
+
+All eight headers below are REQUIRED, each exactly once. The server
+MUST reject a missing or non-`1` version before reading the body and
+MUST compare every supplied value to its canonical field:
+
+| Header | Value |
+|---|---|
+| `X-Mkit-Admin-Version` | `1` |
+| `X-Mkit-Admin-Key-Id` | Key id. |
+| `X-Mkit-Admin-Audience` | Canonical server origin. |
+| `X-Mkit-Admin-Created-At` | Created milliseconds. |
+| `X-Mkit-Admin-Expires-At` | Expiry milliseconds. |
+| `X-Mkit-Admin-Nonce` | Lowercase hex nonce. |
+| `X-Mkit-Admin-Digest` | `body:` plus the exact-body BLAKE3 hex. |
+| `X-Mkit-Admin-Signature` | Strict Ed25519 signature, 128 lowercase hex digits. |
+
+The verifier MUST select a current public key by key id, check its
+validity bounds, compare audience and procedure, check the time window
+and exact-body digest, and verify the signature before treating a
+request as authenticated. The body bytes are the actual received unary
+request bytes before decoding; reserializing protobuf JSON does not
+reconstruct them. A streamed response has no signing effect on its
+request. Responses are not signed; the caller MUST authenticate the
+server through TLS, except for an isolated loopback channel.
+
+Malformed headers, unknown keys, expired envelopes, and invalid
+signatures receive `unauthenticated`. They are unauthenticated attempts
+for §16.6 even when they contain a plausible key id. A valid signature
+for a key lacking the required role receives `permission_denied` and
+is audited.
+
+### 16.3 Admin key list, roles, rotation and separation
+
+The configured admin key list has §7.2's JSON shape, with a REQUIRED
+nonempty `roles` array on each key. `version` is `1`; `keyId`, `alg`,
+`publicKey`, `notBeforeMs`, and `notAfterMs` have exactly §7.2's
+grammar and meaning. Roles are `lease`, `moderation`, `grants`,
+`audit`, and `all`; duplicate and unknown roles and duplicate key ids
+MUST be rejected when loading the list.
+The `all` role grants every procedure. A deployment MAY have several
+concurrent keys with different role sets. A key with only `lease` MUST
+NOT gain moderation authority through `SetLease`.
+
+| Procedures | Required role |
+|---|---|
+| `SetLease` with `RENEWAL` or `POLICY` | `lease` or `all` |
+| `SetLease` with `ADMIN` | `moderation` or `all` |
+| `SetSuspension`, `Takedown`, `GetTakedown`, `ListTakedowns`, `Reinstate`, `AddBlock`, `RemoveBlock`, `SetLegalHold`, `ReadPreserved` | `moderation` or `all` |
+| `ReleaseHold`, `Reinspect`, `ReleaseFlag`, `ResumeServing`, `WaiveObligations`, `PurgeCache` | `moderation` or `all` |
+| `RegisterSshGrant`, `RemoveSshGrant`, `ListSshGrants` | `grants` or `all` |
+| `ReadAuditLog` | `audit` or `all` |
+
+An admin public key MUST be distinct from every key used for another
+role, including hook, write authentication, grant, receipt and notice,
+URL token, and message authentication. There is no threshold signing
+in this version. Rotation uses overlapping `notBeforeMs` and
+`notAfterMs` bounds: a deployment adds a new key, changes signers,
+then retires the old key after its outstanding envelope validity and
+replay records expire. Retiring a key MUST NOT erase audit entries.
+The private key and the list are distributed through deployment
+configuration, not through an unauthenticated discovery endpoint.
+
+### 16.4 Replay and idempotency
+
+The server MUST maintain a durable replay ledger keyed by
+`(audience, key id, nonce)` until at least the envelope expiry.
+After envelope authentication, the server MUST first look up that key.
+For the same key, digest, and procedure, a completed retry returns the
+stored result, including its response or error, even if the key's roles
+have since changed. A different digest or procedure returns
+`invalid_argument`; an in-flight retry returns `aborted`. For a new
+nonce, it MUST atomically reserve the key with the exact-body digest
+and full procedure before checking roles or applying effects. It MUST
+store an authenticated wrong-role denial as the terminal result and
+audit it once. The stored result MUST survive restart. A retry cannot
+substitute a later signature to change the original actor or label.
+
+`Takedown`, `Reinstate`, `AddBlock`, `PurgeCache`, and a takedown-flagged
+`SetSuspension` additionally require a client
+`operation_id` of 1–128 bytes in `[A-Za-z0-9._:-]` (§6.6). Across
+different nonces, the same operation id and identical logical request
+MUST return the first operation's identity and result, including a
+pending result; reuse for different content or procedure MUST return
+`invalid_argument`. This ledger MUST persist for at least as long as
+the audit log is retained. It prevents a caller retry after its
+300-second signing window from starting a second rewrite or purge.
+
+The server MUST commit an accepted action and its audit entry durably
+before reporting success. A long-running action MAY report `complete`
+as false; its id identifies follow-up status. A retried operation MUST
+NOT append another action entry or repeat already committed effects.
+
+### 16.5 Procedures
+
+The following table names the request and response message for every
+procedure. All nonempty repository identities follow STC §7.4; refs
+follow SPEC-REFS §3, object and grant ids are 32 bytes, and reasons and
+operator labels are bounded UTF-8 without controls (512 and 128 bytes
+respectively). Invalid scope, enum, id, bound, or missing required
+field is `invalid_argument`. A target absent after authentication is
+`not_found`, unless the row says otherwise. Every authenticated call,
+including a read or failed attempt, is audited under §16.6. The
+listed error codes are in STC §5's Connect vocabulary; all procedures
+also permit `unavailable` for a retryable backend failure and
+`internal` for a failure that cannot safely be classified.
+
+| Procedure: request → response | Required input and effect | Additional errors |
+|---|---|---|
+| `Takedown`: `TakedownRequest` → `TakedownResponse` | `operation_id`, non-UNSPECIFIED level, reason and target; CONTENT takes 1–256 distinct blob or ChunkedBlob manifest ids in indexed mode, with no repository or namespace field. REPOSITORY takes one repository and NAMESPACE one namespace, with no object ids (§14 **Terms, levels and scope**). It starts §14 **Lifecycle and completion** and returns its id and completion state. | `failed_precondition` for content level in opaque mode or a target of the wrong object kind; `aborted` for concurrent work. |
+| `GetTakedown`: `GetTakedownRequest` → `GetTakedownResponse` | `takedown_id`; returns the §14 lifecycle record without preserved bytes. | `not_found`. |
+| `ListTakedowns`: `ListTakedownsRequest` → `ListTakedownsResponse` | Optional repository or namespace scope (absent means all), `page_size` 1–100 and opaque page token; returns records and next token. | `invalid_argument` for a foreign or malformed token. |
+| `Reinstate`: `ReinstateRequest` → `ReinstateResponse` | `operation_id`, `takedown_id`, reason; performs §14 **Reinstatement** while preserving any legally held record. | `failed_precondition` if restoration is forbidden by another active takedown; `aborted` for concurrent work. |
+| `AddBlock`: `AddBlockRequest` → `AddBlockResponse` | Object id, reason and `operation_id`; installs §14 **Blocklist** entry, returning `already_present` for the same entry. A manual block with known holders starts the §14 takedown lifecycle; the response supplies its takedown id and completion state. | `failed_precondition` for a conflicting existing entry. |
+| `RemoveBlock`: `RemoveBlockRequest` → `RemoveBlockResponse` | Object id and reason; removes a block only when §14 **Reinstatement** permits it, and reports `removed`. | `failed_precondition` while takedown or hold still requires the block. |
+| `SetLegalHold`: `SetLegalHoldRequest` → `SetLegalHoldResponse` | Takedown id, `enabled`, reason; changes preservation legal hold under §14 **Preservation store**. | `failed_precondition` if disabling would violate an active hold. |
+| `ReadPreserved`: `ReadPreservedRequest` → stream `ReadPreservedResponse` | Takedown id, object id and offset; returns ordered chunks with exact offsets and one `last`, solely from §14 **Preservation store**. | `not_found` if not preserved; `failed_precondition` if retention has ended. |
+| `SetSuspension`: `SetSuspensionRequest` → `SetSuspensionResponse` | Exactly one repository or namespace scope, `suspended`, `is_takedown`, reason; sets the separate §12.2 override and returns its state. With `is_takedown = true`, `suspended` MUST be true and `operation_id` is required; the call starts a §14 **Lifecycle and completion** takedown record and returns its id and completion state. That override can be lifted only through §14 **Reinstatement**. | `failed_precondition` for an attempted takedown bypass. |
+| `SetLease`: `SetLeaseRequest` → `SetLeaseResponse` | Exactly one scope and action, non-UNSPECIFIED cause; applies §12.3. `lease_receipt` MUST carry the §15 lease receipt when receipts are enabled and be empty otherwise. | `failed_precondition` for per-ref terms in opaque mode; `permission_denied` for an unauthorized scope or ADMIN cause on a lease-only key. |
+| `ReleaseHold`: `ReleaseHoldRequest` → `ReleaseHoldResponse` | Repository, inspector, inspection id, reason; overrides that prepublication deliberate hold after review. It MUST schedule a new QUARANTINE-phase re-inspection with a new id (§11.2), and MUST NOT release a flagged-id hold through this call. | `failed_precondition` for a hit or flagged-id hold. |
+| `Reinspect`: `ReinspectRequest` → `ReinspectResponse` | Repository, inspector, old inspection id, reason; schedules deliberate re-inspection and returns a new id, superseding the old logical call (§11.3). It does not itself waive or release a hold. | `failed_precondition` for a completed hit. |
+| `ReleaseFlag`: `ReleaseFlagRequest` → `ReleaseFlagResponse` | Repository, flagged object id, reason; admin review releases the flag and all holds derived solely from it, re-evaluates blocked advances (§11.3), and reports their count. It cannot undo a takedown. | `failed_precondition` for an active hit/takedown. |
+| `ResumeServing`: `ResumeServingRequest` → `ResumeServingResponse` | Repository, inspection id, reason; after review releases the postpublication quarantine serving stop (§11.3), unless another hold or takedown still applies. | `failed_precondition` while another stop applies. |
+| `WaiveObligations`: `WaiveObligationsRequest` → `WaiveObligationsResponse` | Repository, inspector, nonempty distinct `(ref, sequence)` targets with positive per-ref §10.2 sequences, and reason; explicitly waives only that inspector's outstanding obligations for those advances and re-evaluates clearance (§§10.2, 11.3). Inspector removal alone has no effect. | `failed_precondition` for hit, flag, or another inspector's obligation. |
+| `RegisterSshGrant`: `RegisterSshGrantRequest` → `RegisterSshGrantResponse` | 32-byte principal and signed grant bytes; performs SPEC-WRITE-GRANTS §10 registration checks and returns the grant id. | `permission_denied` for a grant whose grantee differs from the principal; `failed_precondition` for a revoked epoch. |
+| `RemoveSshGrant`: `RemoveSshGrantRequest` → `RemoveSshGrantResponse` | Principal and grant id; removes the registration and reports `removed`; existing grant revocation rules still apply. | `not_found` for an unknown principal. |
+| `ListSshGrants`: `ListSshGrantsRequest` → `ListSshGrantsResponse` | Principal, `page_size` 1–100, opaque token; returns its registered grants and next token. | `invalid_argument` for a foreign or malformed token. |
+| `PurgeCache`: `PurgeCacheRequest` → `PurgeCacheResponse` | `operation_id`, repository, nonempty paths/object ids/refs selection and reason; schedules a manual §16.7 purge and returns its `purge_id`. | `failed_precondition` if no purge interface or sink is configured. |
+| `ReadAuditLog`: `ReadAuditLogRequest` → stream `ReadAuditLogResponse` | `from_seq` at least 1, `page_size` 1–100; streams pages of entries, next sequence, chain head and retained checkpoint (§16.6). | `invalid_argument` if the requested prefix was pruned. |
+
+`SetLease` accepts `terms` or `remove` for a repository default,
+and `terms`, `permanent`, or `remove` for a ref. `permanent` is an
+explicit per-ref override distinct from inheritance. Terms require a
+nonnegative grace and suspension duration and a valid expiry. The
+server MUST allow shortening, evaluate the new effective state
+without waiting for a timer, and obey §12.1's repository completion
+bound. Removing a default makes undeleted inheriting refs permanent;
+removing per-ref terms restores the default or permanent retention if
+none exists. Neither operation resurrects a deleted lease, ref,
+pointer, or membership. A ref deleted by lease remains blocked until
+an authorized `SetLease` assigns new terms. `RENEWAL` maps to
+`LEASE_CAUSE_RENEWAL`, `POLICY` to `LEASE_CAUSE_POLICY`, and `ADMIN` to
+`LEASE_CAUSE_ADMIN` in §12.4. A direct administrative suspension emits
+`ADMIN` at the scope where it is set. Lease receipts attest only a
+committed live state under §15; an accepted request is no promise of
+future retention.
+
+`RegisterSshGrant` MUST verify SPEC-WRITE-GRANTS §7 steps 1, 3, 4,
+and 5, and MUST reject a grant whose grantee is not the transport
+principal. Registration is server-side; no grant header is added to
+ssh or enc. Grant listing and removal affect registrations, not the
+owner-signed grant or namespace epoch.
+
+### 16.6 Audit log
+
+The admin audit log is append-only and tamper-evident. Each entry has a
+gapless unsigned `seq`, backend `recordedAtMs`, `actor`, optional
+`operatorLabel`, `procedure`, lowercase `requestDigest`, `nonce`,
+optional `operationId`, target identities, `result` (`code` and bounded
+message), `details`, `prevHash`, and `entryHash`. An authenticated
+request's actor is its admin key id and its procedure is the full
+Connect path; its operator label is optional text in the signed body
+and MUST NOT be used as authorization. Automatic actors are exactly
+`system:inspector`, `system:timer`, or `system:relay`, with a stable
+`system:<actor>/<action>` procedure and empty nonce and request digest. Targets MUST be
+stable canonical identities, not content bytes. Messages and details
+MUST each be at most 512 bytes of UTF-8; details MUST contain no
+credentials, private keys, bearer tokens, preserved bytes, or object
+content. The log has no update or delete API.
+
+The canonical audit entry is a JSON object with lower-camel field
+names matching `AuditEntry`, excluding `entryHash`; byte strings are
+lowercase hex, integers are decimal JSON strings, and absent optional
+fields are omitted. `prevHash` is the previous 32-byte hash or 32 zero
+bytes for the first entry. For each entry the server MUST compute:
+
+```text
+entryHash = BLAKE3("mkit-admin-audit:v1" || JCS(entry including prevHash))
+```
+
+`mkit-admin-audit:v1` is a permanent hash domain under
+SPEC-CONVENTIONS §4. The concatenation has no separator beyond the
+literal domain bytes. The server MUST preserve sequence continuity
+and verify the chain on export. Every authenticated call, successful
+or failed, is logged with its result code, including wrong-role and
+invalid-argument requests after identity verification. Every
+takedown, reinstatement, block, legal hold, suspension, lease change,
+release, re-inspection, waiver, grant change, and purge is logged.
+Automatic inspector hits, timer transitions, relay late-holder
+takedowns, releases, and purges MUST also have system entries. An
+unauthenticated attempt MUST go to metrics only, never the audit log;
+otherwise unauthenticated callers could flood durable audit storage.
+
+The log MUST be retained at least through the longest active
+preservation retention under §14 **Preservation store**, including
+legal holds. A timer MUST audit preservation-byte purge when retention
+ends and no legal hold remains. Preservation bytes and blocklist entries remain outside
+§13 GC; their retention and purge are governed by §14 **Preservation
+store**, §14 **Blocklist**, and audited `SetLegalHold`, `RemoveBlock`,
+and `Reinstate` calls here. Pruning an eligible audit prefix MUST keep
+its final `(seq, entryHash)` as a checkpoint; the next retained
+entry's `prevHash` MUST equal that hash. Pruning MUST NOT remove an
+entry needed to verify an active preservation interval.
+
+`ReadAuditLog` is admin-only in v1. Each page MUST include the retained
+checkpoint and a chain head `(chain_head_seq, chain_head)` from one
+consistent snapshot, so an exporter can verify continuity and detect
+truncation. Pages MUST be ordered by seq and `next_seq` MUST identify
+the first entry not in the page. A request at the current head plus one
+returns an empty page with the head; `from_seq <= checkpoint_seq`
+returns `invalid_argument`. Reading the log is itself audited, after its
+snapshot is fixed, so it cannot change the head reported by that read.
+
+### 16.7 Remote cache purge
+
+When a remote purge sink is configured, `HooksService/CachePurge`
+delivers a `CachePurgeRequest` through §5's durable outbox, signed
+under §7.1. The request has an audience-unique `purge_id` using
+§6.6's reservation-id grammar; the mkit server audience, exactly one
+of repository identity or namespace identity, a non-UNSPECIFIED trigger,
+and at least one origin-relative URL path, 32-byte object id, or full
+ref name. Paths MUST begin with `/`, contain no query or fragment, and
+MUST NOT contain credentials. A delivery retry MUST retain the same
+body and purge id but use a fresh hook signing nonce. The response is
+empty. The receiver MUST deduplicate by `purge_id` and treat a repeat
+as the same purge. Delivery is at least once, has no ordering guarantee,
+is counted in §5's combined backlog, and remains pending until
+acknowledged. Delivery failure follows §8's retry behavior.
+
+The triggers are `TAKEDOWN`, `SUSPENSION`, `LEASE_DELETION`,
+`VISIBILITY_CHANGE`, and `MANUAL`. A hit or quarantine serving stop
+under §11.3, a §14 takedown, an administrative suspension, lease
+deletion, and visibility change MUST invalidate server-side caches
+immediately and request a shared-cache purge before stale bytes may
+again be served. Where shared caches exist, the server MUST use the configured remote sink or the
+deployment's internal purge interface. A deployment with shared caches
+requiring invalidation MUST fail closed if neither is configured. A
+deployment without shared caches still invalidates its server-side
+caches and needs no remote sink. No remote outbox row is needed when no remote sink is
+configured. A quarantine serving stop uses `SUSPENSION` and an
+inspection hit uses `TAKEDOWN`. `PurgeCache` selects the `MANUAL` trigger and is audited;
+automatic purges are audited with their system actor. §14
+**Interaction with GC, restore and caches** governs takedown ordering.
 
 ## 17. Custom backends, backup and migrations (reserved, M5)
 
@@ -2025,6 +2329,7 @@ Reserved: this section is specified with M5 (see the version history).
 
 | Version | Status | Change |
 |---|---|---|
+| 1 | draft | Additive admin service, signed envelope, role-bearing key list, replay contract, audit log (§16), and remote CachePurge (§16.7); namespace-scoped Event (§12.4). |
 | 1 | draft | Additive M5 storage leases and lifecycle Event (§12), server GC (§13), and section renumbering (§§19–20); `GetServerInfo.leases` in STC §2.1. |
 | 1 | draft | Additive M5 published view (§10), per-advance inspection and quarantine (§11), including surplus pack entries; additive Inspect phase/id/kind/defer/flagged ids and Authorize writer_view (§6); `GetServerInfo.async_inspection` in STC §2.1. |
 | 1 | draft | Initial M3 pipeline, durable outcome and remote-hook contract; M5 sections reserved. Admission credential headers (§6.3); indexed mode (§9). HTTP read reservations and procedure strings (WP-4.11), amended with `read_reconcile_grace = 60 s` default and `ReadServed` priority within grace (fix round 1). |
@@ -2061,12 +2366,18 @@ requires. These anchors are informative descriptions of those bytes.
 | `event-lease-grace.request.json` | Ref-level expiry into grace, sequence and lease terms (§12.4). |
 | `event-lease-deleted.request.json` | Repository-level expiry into deletion (§12.4). |
 | `event.response.json` | Empty Event acknowledgement (§12.4, §8). |
+| `cache-purge.request.json` | Manual remote purge with target paths, object ids and refs (§16.7). |
+| `cache-purge.response.json` | Empty purge acknowledgement (§16.7). |
 | `signature.json` | Admit body including credential headers, Outcome body, and Event body, with exact bytes, canonical signing strings, hashes, signatures, and full headers (§7.1). |
 | `key-list.json` | Public test key distribution document (§7.2). |
 | `MANIFEST.txt` | BLAKE3 hashes of every other golden file, including both Admit attempts (SPEC-CONVENTIONS §5). |
 
 Informative: the signature vectors contain a clearly labelled test seed.
 It is public fixture material and is not a deployment signing key.
+
+The fixtures under `rust/tests/golden/admin/` pin the §16 envelope,
+role-bearing key list, representative admin procedures, and the
+three-entry audit chain. Their `MANIFEST.txt` pins each file's bytes.
 
 The indexed-mode detail fixtures under `rust/tests/golden/transport/`
 pin STC §7.6 and SPEC-SERVER §9.5:

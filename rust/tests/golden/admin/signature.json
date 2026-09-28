@@ -1,0 +1,58 @@
+{
+  "vectors": [
+    {
+      "test_key_label": "TEST KEY ONLY: dedicated admin role, never use in a deployment",
+      "test_seed_hex": "5454545454545454545454545454545454545454545454545454545454545454",
+      "key_id": "test-admin-lease-2026-09",
+      "audience": "https://vcs.example.test",
+      "procedure": "/mkit.server.admin.v1.AdminService/SetLease",
+      "created_at_ms": "1790424000000",
+      "expires_at_ms": "1790424300000",
+      "nonce": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "body_file": "set-lease.request.json",
+      "body_utf8": "{\n  \"ref\": {\n    \"repository\": \"ed25519-a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0/payments-demo\",\n    \"ref\": \"refs/heads/main\"\n  },\n  \"terms\": {\n    \"expiresAtMs\": \"1790500000000\",\n    \"graceMs\": \"86400000\",\n    \"suspensionMs\": \"86400000\"\n  },\n  \"cause\": \"LEASE_CHANGE_CAUSE_RENEWAL\",\n  \"operatorLabel\": \"billing-job\"\n}\n",
+      "body_digest": "body:2964653c2fe3dede1c78928cb1d7872ad98dda7a7cf8d69c8c2c4f6aacb46436",
+      "canonical": "mkit-admin:v1\ntest-admin-lease-2026-09\nhttps://vcs.example.test\n/mkit.server.admin.v1.AdminService/SetLease\nbody:2964653c2fe3dede1c78928cb1d7872ad98dda7a7cf8d69c8c2c4f6aacb46436\n1790424000000\n1790424300000\na1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "canonical_blake3": "5d83727dbfe8f1eceafcdcf62cfc9703ddf80a9c473f91dc0965d25850324787",
+      "public_key": "9f49439e9db095bc4111ed25d35795d831bc55a047f4b1d7f6aee3777bb41220",
+      "signature": "20cbd70b361d2783f45d627c8697512958dc8f2dcfe4d9107cd2fddcd5349a7d63e93bd27a17c38766434f3b90180de62d73ef142c97fcd0f9fe0fd09265a20d",
+      "headers": {
+        "X-Mkit-Admin-Version": "1",
+        "X-Mkit-Admin-Key-Id": "test-admin-lease-2026-09",
+        "X-Mkit-Admin-Audience": "https://vcs.example.test",
+        "X-Mkit-Admin-Created-At": "1790424000000",
+        "X-Mkit-Admin-Expires-At": "1790424300000",
+        "X-Mkit-Admin-Nonce": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "X-Mkit-Admin-Digest": "body:2964653c2fe3dede1c78928cb1d7872ad98dda7a7cf8d69c8c2c4f6aacb46436",
+        "X-Mkit-Admin-Signature": "20cbd70b361d2783f45d627c8697512958dc8f2dcfe4d9107cd2fddcd5349a7d63e93bd27a17c38766434f3b90180de62d73ef142c97fcd0f9fe0fd09265a20d"
+      }
+    },
+    {
+      "test_key_label": "TEST KEY ONLY: dedicated admin role, never use in a deployment",
+      "test_seed_hex": "5555555555555555555555555555555555555555555555555555555555555555",
+      "key_id": "test-admin-moderation-2026-09",
+      "audience": "https://vcs.example.test",
+      "procedure": "/mkit.server.admin.v1.AdminService/Takedown",
+      "created_at_ms": "1790424000000",
+      "expires_at_ms": "1790424300000",
+      "nonce": "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+      "body_file": "takedown.request.json",
+      "body_utf8": "{\n  \"operationId\": \"admin:take:1\",\n  \"level\": \"TAKEDOWN_LEVEL_CONTENT\",\n  \"reason\": \"reviewed violation\",\n  \"operatorLabel\": \"case-17\",\n  \"objectIds\": [\n    \"ERERERERERERERERERERERERERERERERERERERERERE=\"\n  ]\n}\n",
+      "body_digest": "body:a1af743377d68b3913ce9d89f6e04e403b785caffcde587d727ae47aee88f23d",
+      "canonical": "mkit-admin:v1\ntest-admin-moderation-2026-09\nhttps://vcs.example.test\n/mkit.server.admin.v1.AdminService/Takedown\nbody:a1af743377d68b3913ce9d89f6e04e403b785caffcde587d727ae47aee88f23d\n1790424000000\n1790424300000\na2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+      "canonical_blake3": "b857b6a7a2981400aaa79ffe53fcf9b023e93f3f9e82b433f3c702105d1a73d9",
+      "public_key": "c6822637c7d310ec57627be00ba259d253749f4aaf644470cffbe53a35f73242",
+      "signature": "3141f3ce1aafd06ee403f03b4cf59477917611995db27b21f116a4acdea51eaadb93cb9fb8ba38a33a775ead7de2bdb81cb53569fa7b7df32100e0cb6c63c70e",
+      "headers": {
+        "X-Mkit-Admin-Version": "1",
+        "X-Mkit-Admin-Key-Id": "test-admin-moderation-2026-09",
+        "X-Mkit-Admin-Audience": "https://vcs.example.test",
+        "X-Mkit-Admin-Created-At": "1790424000000",
+        "X-Mkit-Admin-Expires-At": "1790424300000",
+        "X-Mkit-Admin-Nonce": "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+        "X-Mkit-Admin-Digest": "body:a1af743377d68b3913ce9d89f6e04e403b785caffcde587d727ae47aee88f23d",
+        "X-Mkit-Admin-Signature": "3141f3ce1aafd06ee403f03b4cf59477917611995db27b21f116a4acdea51eaadb93cb9fb8ba38a33a775ead7de2bdb81cb53569fa7b7df32100e0cb6c63c70e"
+      }
+    }
+  ]
+}

@@ -13,6 +13,8 @@ service HooksService {
   rpc Outcome(OutcomeRequest) returns (OutcomeResponse);
   // Deliver a durable lifecycle event at least once; SPEC-SERVER §12.4.
   rpc Event(EventRequest) returns (EventResponse);
+  // Deliver a durable cache purge at least once; SPEC-SERVER §16.7.
+  rpc CachePurge(CachePurgeRequest) returns (CachePurgeResponse);
 }
 
 // Verified operation context shared by decision hooks; SPEC-SERVER §6.2.
@@ -395,7 +397,7 @@ message Event {
   string event_id = 1;
   // The mkit server's canonical origin, not the hook signing audience.
   string audience = 2;
-  // Full repository identity under STC §7.4.
+  // Full repository identity, empty only for a namespace-scoped event.
   string repository = 3;
   // Transition time in Unix epoch milliseconds, independent of delivery time.
   int64 occurred_unix_ms = 4;
@@ -407,6 +409,40 @@ message Event {
     LeaseTransition lease = 6;
     // Field 7 is left for the publication transition (§10); not reserved in schema.
   }
+  // Namespace identity for a namespace-scoped override; SPEC-SERVER §12.4.
+  string namespace = 9;
+}
+
+// Durable remote cache invalidation; SPEC-SERVER §16.7.
+message CachePurgeRequest {
+  // Unique per server audience, stable across delivery retries.
+  string purge_id = 1;
+  // The mkit server's canonical origin, not the hook signing audience.
+  string audience = 2;
+  // Full repository identity, empty for a namespace-wide purge.
+  string repository = 3;
+  // Reason for the purge.
+  CachePurgeTrigger trigger = 4;
+  // Origin-relative URL paths, without query strings or fragments.
+  repeated string url_paths = 5;
+  // Raw 32-byte object ids.
+  repeated bytes object_ids = 6;
+  // Full ref names.
+  repeated string refs = 7;
+  // Namespace identity when repository is empty for a namespace-wide purge.
+  string namespace = 8;
+}
+
+// Empty acknowledgement; a retry of the same purge id is idempotent.
+message CachePurgeResponse {}
+
+enum CachePurgeTrigger {
+  CACHE_PURGE_TRIGGER_UNSPECIFIED = 0;
+  CACHE_PURGE_TRIGGER_TAKEDOWN = 1;
+  CACHE_PURGE_TRIGGER_SUSPENSION = 2;
+  CACHE_PURGE_TRIGGER_LEASE_DELETION = 3;
+  CACHE_PURGE_TRIGGER_VISIBILITY_CHANGE = 4;
+  CACHE_PURGE_TRIGGER_MANUAL = 5;
 }
 
 // Effective storage-lease state transition; SPEC-SERVER §12.4.
