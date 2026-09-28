@@ -235,3 +235,72 @@ pub mod upload_part_request {
         }
     }
 }
+pub mod set_repo_visibility_request {
+    #[allow(unused_imports)]
+    use super::*;
+    #[derive(Clone, PartialEq, Debug)]
+    pub enum Mode {
+        Visibility(::buffa::EnumValue<super::super::super::RepoVisibility>),
+        SignedStatement(::buffa::alloc::string::String),
+    }
+    impl ::buffa::Oneof for Mode {}
+    impl serde::Serialize for Mode {
+        fn serialize<S: serde::Serializer>(
+            &self,
+            s: S,
+        ) -> ::core::result::Result<S::Ok, S::Error> {
+            use serde::ser::SerializeMap;
+            let mut map = s.serialize_map(Some(1))?;
+            match self {
+                Self::Visibility(v) => {
+                    map.serialize_entry("visibility", v)?;
+                }
+                Self::SignedStatement(v) => {
+                    map.serialize_entry("signedStatement", v)?;
+                }
+            }
+            map.end()
+        }
+    }
+}
+pub mod issue_object_url_request {
+    #[allow(unused_imports)]
+    use super::*;
+    #[derive(Clone, PartialEq, Debug)]
+    pub enum Target {
+        ObjectId(::buffa::alloc::vec::Vec<u8>),
+        RefPath(::buffa::alloc::boxed::Box<super::super::super::RefPath>),
+    }
+    impl ::buffa::Oneof for Target {}
+    impl From<super::super::super::RefPath> for Target {
+        fn from(v: super::super::super::RefPath) -> Self {
+            Self::RefPath(::buffa::alloc::boxed::Box::new(v))
+        }
+    }
+    impl From<super::super::super::RefPath> for ::core::option::Option<Target> {
+        fn from(v: super::super::super::RefPath) -> Self {
+            Self::Some(Target::from(v))
+        }
+    }
+    impl serde::Serialize for Target {
+        fn serialize<S: serde::Serializer>(
+            &self,
+            s: S,
+        ) -> ::core::result::Result<S::Ok, S::Error> {
+            use serde::ser::SerializeMap;
+            let mut map = s.serialize_map(Some(1))?;
+            match self {
+                Self::ObjectId(v) => {
+                    map.serialize_entry(
+                        "objectId",
+                        &::buffa::json_helpers::ProtoJson(v),
+                    )?;
+                }
+                Self::RefPath(v) => {
+                    map.serialize_entry("refPath", v)?;
+                }
+            }
+            map.end()
+        }
+    }
+}

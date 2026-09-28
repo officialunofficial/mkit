@@ -66,6 +66,15 @@ pub mod __buffa {
         reg.register_json_any(super::__UPLOAD_PART_RESPONSE_JSON_ANY);
         reg.register_json_any(super::__COMPLETE_UPLOAD_REQUEST_JSON_ANY);
         reg.register_json_any(super::__COMPLETE_UPLOAD_RESPONSE_JSON_ANY);
+        reg.register_json_any(super::__GET_GRANT_EPOCH_REQUEST_JSON_ANY);
+        reg.register_json_any(super::__GET_GRANT_EPOCH_RESPONSE_JSON_ANY);
+        reg.register_json_any(super::__SET_GRANT_EPOCH_REQUEST_JSON_ANY);
+        reg.register_json_any(super::__SET_GRANT_EPOCH_RESPONSE_JSON_ANY);
+        reg.register_json_any(super::__SET_REPO_VISIBILITY_REQUEST_JSON_ANY);
+        reg.register_json_any(super::__SET_REPO_VISIBILITY_RESPONSE_JSON_ANY);
+        reg.register_json_any(super::__ISSUE_OBJECT_URL_REQUEST_JSON_ANY);
+        reg.register_json_any(super::__REF_PATH_JSON_ANY);
+        reg.register_json_any(super::__ISSUE_OBJECT_URL_RESPONSE_JSON_ANY);
         reg.register_json_any(super::__PENDING_VERIFICATION_JSON_ANY);
         reg.register_json_any(super::__REDACTION_NOTICE_JSON_ANY);
     }
@@ -206,6 +215,42 @@ pub use self::__buffa::view::CompleteUploadRequestOwnedView;
 pub use self::__buffa::view::CompleteUploadResponseView;
 #[doc(inline)]
 pub use self::__buffa::view::CompleteUploadResponseOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::GetGrantEpochRequestView;
+#[doc(inline)]
+pub use self::__buffa::view::GetGrantEpochRequestOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::GetGrantEpochResponseView;
+#[doc(inline)]
+pub use self::__buffa::view::GetGrantEpochResponseOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::SetGrantEpochRequestView;
+#[doc(inline)]
+pub use self::__buffa::view::SetGrantEpochRequestOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::SetGrantEpochResponseView;
+#[doc(inline)]
+pub use self::__buffa::view::SetGrantEpochResponseOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::SetRepoVisibilityRequestView;
+#[doc(inline)]
+pub use self::__buffa::view::SetRepoVisibilityRequestOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::SetRepoVisibilityResponseView;
+#[doc(inline)]
+pub use self::__buffa::view::SetRepoVisibilityResponseOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::IssueObjectUrlRequestView;
+#[doc(inline)]
+pub use self::__buffa::view::IssueObjectUrlRequestOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::RefPathView;
+#[doc(inline)]
+pub use self::__buffa::view::RefPathOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::IssueObjectUrlResponseView;
+#[doc(inline)]
+pub use self::__buffa::view::IssueObjectUrlResponseOwnedView;
 #[doc(inline)]
 pub use self::__buffa::view::PendingVerificationView;
 #[doc(inline)]
