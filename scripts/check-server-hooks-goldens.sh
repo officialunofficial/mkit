@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT OR Apache-2.0
-# Validate SPEC-SERVER §16 fixtures against the hooks schema and canonical JSON.
+# Validate SPEC-SERVER §20 fixtures against the hooks schema and canonical JSON.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 golden_dir="rust/tests/golden/server-hooks"
 
-# Filename-to-message table. Keep in sync with SPEC-SERVER §16.
+# Filename-to-message table. Keep in sync with SPEC-SERVER §20.
 message_type() {
   local fixture_name="$1" name type
   while read -r name type; do
@@ -32,6 +32,9 @@ outcome-abandoned.request.json OutcomeRequest
 outcome-expired.request.json OutcomeRequest
 outcome-read-served.request.json OutcomeRequest
 outcome.response.json OutcomeResponse
+event-lease-grace.request.json EventRequest
+event-lease-deleted.request.json EventRequest
+event.response.json EventResponse
 TABLE
   echo "check-server-hooks-goldens: no message type for $fixture_name" >&2
   return 1
@@ -60,8 +63,8 @@ for file in "$golden_dir"/*.request.json "$golden_dir"/*.response.json; do
   count=$((count + 1))
 done
 
-if [[ "$count" -ne 16 ]]; then
-  echo "check-server-hooks-goldens: expected 16 mapped fixtures, found $count" >&2
+if [[ "$count" -ne 19 ]]; then
+  echo "check-server-hooks-goldens: expected 19 mapped fixtures, found $count" >&2
   exit 1
 fi
 echo "check-server-hooks-goldens: all $count fixtures preserve canonical protobuf JSON"

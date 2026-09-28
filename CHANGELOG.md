@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Specify storage leases, lifecycle Event webhooks, and fail-closed server GC
+  in SPEC-SERVER; add `GetServerInfoResponse.leases` and Event proto goldens
+  (WP-5.1a-1). Server enforcement follows in M5.
 - Server: implement authenticated `BeginUpload` tickets with stateless BLAKE3 MAC
   tokens, rotation by key id, admission-free live-ticket/member results, open-ticket
   caps, and byte-identical replay. Configure native keys with `--ticket-key-file`

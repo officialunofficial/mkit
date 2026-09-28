@@ -1,4 +1,4 @@
-//! Authoritative bytes for SPEC-SERVER §§6–7 and §16.
+//! Authoritative bytes for SPEC-SERVER §§6–7 and §20.
 //! Read-only by default; `UPDATE_GOLDEN=1` deliberately rebuilds signatures
 //! and the complete manifest from the checked-in request bodies and fields.
 #![allow(clippy::unwrap_used)] // Test failures are assertions.
@@ -175,7 +175,7 @@ fn golden_server_hooks() {
     let dir = golden_dir();
     let path = dir.join("signature.json");
     let mut file: SignatureFile = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    assert_eq!(file.vectors.len(), 2);
+    assert_eq!(file.vectors.len(), 3);
     assert_eq!(
         file.vectors[0].procedure,
         "/mkit.server.hooks.v1.HooksService/Admit"
@@ -183,6 +183,10 @@ fn golden_server_hooks() {
     assert_eq!(
         file.vectors[1].procedure,
         "/mkit.server.hooks.v1.HooksService/Outcome"
+    );
+    assert_eq!(
+        file.vectors[2].procedure,
+        "/mkit.server.hooks.v1.HooksService/Event"
     );
     if std::env::var("UPDATE_GOLDEN").as_deref() == Ok("1") {
         file.vectors = file.vectors.iter().map(|v| rebuild(v, &dir)).collect();
