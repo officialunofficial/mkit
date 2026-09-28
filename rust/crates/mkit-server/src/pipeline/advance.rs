@@ -41,10 +41,14 @@ fn ticket(
         .get(&keys::ticket(id))
         .ok_or_else(|| ServerError::failed_precondition(INVALID))?;
     let value = codec::decode_ticket(raw).map_err(meta_error)?;
+    if tickets::ticket_id(&value.reservation_id) != *id {
+        return Err(internal("ticket reservation id mismatch"));
+    }
+    keys::reservation(&value.reservation_id)
+        .map_err(|_| internal("invalid ticket reservation id"))?;
     if value.repo != advance.repo_id.name
         || value.ref_name != advance.head_ref
         || value.expires_at_ms <= ms(now)
-        || tickets::ticket_id(&value.reservation_id) != *id
     {
         return Err(ServerError::failed_precondition(INVALID));
     }
@@ -74,23 +78,36 @@ pub(super) fn detail_keys(
     snap: &Snapshot,
     advance: &AdvanceWrite<'_>,
 ) -> Result<Vec<Key>, ServerError> {
-    let mut out = vec![keys::outbox_sequence(), keys::outcome_backlog()];
+    let mut tickets = Vec::new();
     for id in advance.ids {
         if let Some(raw) = snap.get(&keys::ticket(id)) {
-            let t = codec::decode_ticket(raw).map_err(meta_error)?;
-            out.push(
-                keys::ticket_index(&t.repo, &t.ref_name, &t.pack_id, &t.signer)
-                    .map_err(meta_error)?,
-            );
-            out.push(keys::reservation(&t.reservation_id).map_err(meta_error)?);
-            out.push(keys::membership(&t.repo, &t.pack_id));
-            out.push(keys::tickets_per_ref(&t.repo, &t.ref_name).map_err(meta_error)?);
-            out.push(
-                keys::tickets_per_signer(&t.repo, &t.ref_name, &t.signer).map_err(meta_error)?,
-            );
+            tickets.push(codec::decode_ticket(raw).map_err(meta_error)?);
         }
     }
+    detail_keys_for(tickets.iter())
+}
+
+fn detail_keys_for<'a>(
+    tickets: impl IntoIterator<Item = &'a TicketV1>,
+) -> Result<Vec<Key>, ServerError> {
+    let mut out = vec![keys::outbox_sequence(), keys::outcome_backlog()];
+    for t in tickets {
+        out.push(
+            keys::ticket_index(&t.repo, &t.ref_name, &t.pack_id, &t.signer).map_err(meta_error)?,
+        );
+        out.push(keys::reservation(&t.reservation_id).map_err(meta_error)?);
+        out.push(keys::membership(&t.repo, &t.pack_id));
+        out.push(keys::tickets_per_ref(&t.repo, &t.ref_name).map_err(meta_error)?);
+        out.push(keys::tickets_per_signer(&t.repo, &t.ref_name, &t.signer).map_err(meta_error)?);
+    }
     Ok(out)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Proof {
+    Ready,
+    MarkerMissing,
+    PackMissing,
 }
 
 fn reservation<'a>(snap: &'a Snapshot, id: &Hash, t: &TicketV1) -> Result<&'a Value, ServerError> {
@@ -201,97 +218,125 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         if ids.is_empty() {
             return Ok(None);
         }
-        let signer = op
+        let auth = op
             .auth
             .as_ref()
-            .ok_or_else(|| internal("ticket advance lacks signer"))?
-            .signer;
+            .ok_or_else(|| ServerError::failed_precondition(INVALID))?;
         let advance = AdvanceWrite {
             ids,
-            signer,
+            signer: auth.signer,
             head_ref: &head.name,
             repo_id: &op.repo,
             repository: &a.repo().identity,
             source: p,
             shards: self.shards.as_ref(),
         };
+        // A re-plan keeps proofs for unchanged ticket rows. Only a guard race
+        // involving a ticket invalidates that ticket's blob observations.
+        let mut proofs: Vec<Option<(TicketV1, Result<Proof, ServerError>)>> = vec![None; ids.len()];
         for _ in 0..super::MAX_REPLAN {
             let mut first = ids.iter().map(keys::ticket).collect::<Vec<_>>();
-            if let Some(auth) = &op.auth {
-                first.push(keys::replay(&auth.replay_scope));
-            }
-            self.fill(p, snap, first).await?;
+            first.push(keys::replay(&auth.replay_scope));
+            self.fill(p, snap, first.clone()).await?;
             if let Some(stored) = Self::replay_lookup(op, Some(snap))? {
                 return Ok(Some(stored));
             }
-            let tickets = validate(
-                snap,
-                &advance,
-                self.clock.now_ms().saturating_add(a.business_skew_ms),
-            )?;
-            let detail = detail_keys(snap, &advance)?;
-            self.fill(p, snap, detail).await?;
+            let business_now = self.clock.now_ms().saturating_add(a.business_skew_ms);
+            let rows = ids
+                .iter()
+                .map(|id| ticket(snap, id, &advance, business_now))
+                .collect::<Vec<_>>();
+            let detail = detail_keys_for(rows.iter().filter_map(|row| row.as_ref().ok()))?;
+            self.fill(p, snap, detail.clone()).await?;
 
             // TODO(WP-5.3a): remove a pack's GC mark before accepting its ticket.
             // TODO(WP-4.x): schedule verification and enforce §9.2 MKPL checks in indexed mode.
-            // All marker heads run together; only marker-present packs are headed.
-            let markers = join_all(ids.iter().zip(&tickets).map(|(id, t)| async move {
-                let (key, _) = upload_marker(id, &t.pack_id);
-                self.blobs.head(&key).await
-            }))
-            .await;
-            let mut present = Vec::with_capacity(ids.len());
-            for result in markers {
-                present.push(
-                    result
-                        .map_err(|e| store_error(StorageOp::BlobHead, e))?
-                        .is_some(),
-                );
-            }
-            let packs = join_all(tickets.iter().zip(&present).map(|(t, marker)| async move {
-                if *marker {
-                    self.blobs
+            // One future per valid ticket preserves marker-before-pack order,
+            // while all eligible tickets run concurrently (at most 2n heads).
+            let pending = rows
+                .iter()
+                .enumerate()
+                .filter_map(|(i, row)| {
+                    let t = row.as_ref().ok()?;
+                    if proofs[i].as_ref().is_some_and(|(prior, _)| prior == t) {
+                        None
+                    } else {
+                        Some((i, t))
+                    }
+                })
+                .collect::<Vec<_>>();
+            for (i, t, proof) in join_all(pending.into_iter().map(|(i, t)| async move {
+                let (marker_key, _) = upload_marker(&ids[i], &t.pack_id);
+                let proof = match self.blobs.head(&marker_key).await {
+                    Err(e) => Err(store_error(StorageOp::BlobHead, e)),
+                    Ok(None) => Ok(Proof::MarkerMissing),
+                    Ok(Some(_)) => self
+                        .blobs
                         .head(&BlobKey::pack(t.pack_id))
                         .await
-                        .map(|v| v.is_some())
-                } else {
-                    Ok(false)
-                }
-            }))
-            .await;
-            let mut lost = Vec::new();
-            let mut incomplete = false;
-            for (i, result) in packs.into_iter().enumerate() {
-                let pack = result.map_err(|e| store_error(StorageOp::BlobHead, e))?;
-                if !present[i] {
-                    incomplete = true;
-                } else if !pack {
-                    lost.push(i);
-                    incomplete = true;
-                }
-            }
-            if lost.is_empty() {
-                return if incomplete {
-                    Err(ServerError::failed_precondition(INCOMPLETE))
-                } else {
-                    Ok(None)
+                        .map(|pack| {
+                            if pack.is_some() {
+                                Proof::Ready
+                            } else {
+                                Proof::PackMissing
+                            }
+                        })
+                        .map_err(|e| store_error(StorageOp::BlobHead, e)),
                 };
+                (i, t.clone(), proof)
+            }))
+            .await
+            {
+                proofs[i] = Some((t, proof));
             }
-            let now = ms(self.clock.now_ms().saturating_add(a.business_skew_ms));
-            let mut batch =
-                Batch::new().require(Precondition::NotAfter(now.saturating_add(30_000)));
+            let first_failure = (0..ids.len()).find_map(|i| {
+                if let Err(err) = &rows[i] {
+                    return Some((i, err.clone()));
+                }
+                match &proofs[i].as_ref().expect("valid ticket has a proof").1 {
+                    Ok(Proof::Ready) => None,
+                    Ok(Proof::MarkerMissing | Proof::PackMissing) => {
+                        Some((i, ServerError::failed_precondition(INCOMPLETE)))
+                    }
+                    Err(err) => Some((i, err.clone())),
+                }
+            });
+            let Some((first_failure, answer)) = first_failure else {
+                return Ok(None);
+            };
+            // Later tickets cannot supersede the first request-order failure.
+            let lost = (0..=first_failure)
+                .filter(|&i| matches!(proofs[i].as_ref(), Some((_, Ok(Proof::PackMissing)))))
+                .collect::<Vec<_>>();
+            if lost.is_empty() {
+                return Err(answer);
+            }
+            let plan_time = self.clock.now_ms();
+            let clock = PlanClock {
+                plan_time_ms: ms(plan_time),
+                business_now_ms: plan_time.saturating_add(a.business_skew_ms),
+                max_apply_window_ms: u64::try_from(self.cfg.max_apply_window.as_millis())
+                    .unwrap_or(u64::MAX),
+                deadline_cap: Some(
+                    ms(auth.expires_at_ms).saturating_add(super::MAX_CLOCK_LEAD_MS.unsigned_abs()),
+                ),
+            };
+            let now = ms(clock.business_now_ms);
+            let mut batch = Batch::new().require(Precondition::NotAfter(clock.deadline()));
             let mut outbox = OutboxBuilder::new(
                 snap.get(&keys::outbox_sequence()),
                 snap.get(&keys::outcome_backlog()),
             )
             .map_err(meta_error)?;
+            let mut ticket_guards = Vec::new();
             for i in lost {
-                let (id, t) = (&ids[i], &tickets[i]);
+                let (id, t) = (&ids[i], rows[i].as_ref().expect("lost pack has a ticket"));
                 let index = keys::ticket_index(&t.repo, &t.ref_name, &t.pack_id, &t.signer)
                     .map_err(meta_error)?;
                 let tc = keys::tickets_per_ref(&t.repo, &t.ref_name).map_err(meta_error)?;
                 let tu = keys::tickets_per_signer(&t.repo, &t.ref_name, &t.signer)
                     .map_err(meta_error)?;
+                let guard_start = batch.preconditions.len();
                 tickets::plan_ticket_close(
                     id,
                     t,
@@ -305,6 +350,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     &mut batch.writes,
                 )
                 .map_err(meta_error)?;
+                ticket_guards.push((i, guard_start..batch.preconditions.len()));
                 outbox.outcome(
                     &t.reservation_id,
                     reservation(snap, id, t)?,
@@ -320,12 +366,25 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             outbox
                 .try_finish(&mut batch.preconditions, &mut batch.writes)
                 .map_err(meta_error)?;
+            // This separate transaction changes only ticket and outcome rows.
+            // Equals(t) and Equals(o) arbitrate its terminal result, so lease,
+            // grant and layout guards needed for a ref write are unnecessary.
             match self.meta.apply(p, batch).await.map_err(meta_error)? {
-                BatchOutcome::Committed => {
-                    return Err(ServerError::failed_precondition(INCOMPLETE));
+                BatchOutcome::Committed => return Err(answer),
+                BatchOutcome::DeadlinePassed { .. } => {
+                    return Err(ServerError::unavailable("commit deadline passed; retry"));
                 }
-                BatchOutcome::PreconditionFailed { .. } | BatchOutcome::DeadlinePassed { .. } => {
-                    *snap = Snapshot::default();
+                BatchOutcome::PreconditionFailed { index, .. } => {
+                    for (i, range) in ticket_guards {
+                        if range.contains(&index) {
+                            proofs[i] = None;
+                        }
+                    }
+                    // Refresh only ticket-dependent observations. Preserve
+                    // ref, lease, grant and layout read-ahead for plan_write.
+                    for key in first.into_iter().chain(detail) {
+                        snap.remove(&key);
+                    }
                 }
             }
         }

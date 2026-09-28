@@ -47,12 +47,19 @@ const B: Hash = [0xbb; 32];
 const C: Hash = [0xcc; 32];
 
 fn planned_ticket_advance(count: usize) -> Batch {
+    planned_ticket_advance_mode(count, true)
+}
+
+#[allow(clippy::too_many_lines)] // A full ticket snapshot and its expected maximal planner shape.
+fn planned_ticket_advance_mode(count: usize, d34: bool) -> Batch {
     use crate::store::codec::{ReservationV1, TicketV1};
     let repo = RepoId {
         namespace: NamespaceKey::deployment_default(),
         name: repo_name(),
     };
-    let shards = D34Shards;
+    let d34_shards = D34Shards;
+    let single_shards = SinglePartition;
+    let shards: &dyn ShardMap = if d34 { &d34_shards } else { &single_shards };
     let source = shards.ref_shard(&repo, HEAD);
     let signer = [7; 32];
     let reservations: Vec<_> = (0..count).map(|i| format!("s:advance-{i}")).collect();
@@ -67,7 +74,7 @@ fn planned_ticket_advance(count: usize) -> Batch {
         repo_id: &repo,
         repository: REPO,
         source: &source,
-        shards: &shards,
+        shards,
     };
     let refs = [upd(PACKMAP, Missing, B), upd(HEAD, Missing, C)];
     let replay = ReplayGuard {
@@ -81,10 +88,20 @@ fn planned_ticket_advance(count: usize) -> Batch {
         refs: &refs,
         replay: Some(replay),
         charges: &[],
-        grant: None,
-        lease: None,
-        layout_version: false,
-        mark_repo_known: false,
+        grant: Some(crate::op::GrantRef {
+            id: [9; 32],
+            epoch: u64::from(d34),
+        }),
+        lease: d34.then_some(lease::LeaseWrite {
+            value: codec::EpochLease {
+                epoch: 1,
+                expires_at_ms: ms(T0) + 30_000,
+                config_version: 1,
+            },
+            install: true,
+        }),
+        layout_version: true,
+        mark_repo_known: true,
         begin: None,
         advance: Some(advance.clone()),
         rejection: None,
@@ -146,12 +163,92 @@ fn planned_ticket_advance(count: usize) -> Batch {
 #[test]
 fn seven_ticket_advance_plans_a_valid_real_batch() {
     let batch = planned_ticket_advance(7);
-    assert!(
-        batch.preconditions.len() + batch.writes.len()
-            <= crate::store::outbox::MAX_TICKETS_PER_ADVANCE * 9
-                + crate::store::outbox::ADVANCE_SHARED_OPS
+    let ops = batch.preconditions.len() + batch.writes.len();
+    assert_eq!(ops, 86);
+    for key in [
+        keys::epoch_lease(),
+        keys::layout_version(),
+        keys::repo_known(&repo_name()),
+    ] {
+        assert!(
+            batch
+                .preconditions
+                .iter()
+                .any(|p| matches!(p, Precondition::Absent(k) if *k == key))
+        );
+        assert!(
+            batch
+                .writes
+                .iter()
+                .any(|w| matches!(w, Write::Put(k, _) if *k == key))
+        );
+    }
+    assert_eq!(
+        ops,
+        crate::store::outbox::MAX_TICKETS_PER_ADVANCE * 9
+            + crate::store::outbox::ADVANCE_SHARED_OPS
     );
     assert_eq!(batch.writes.iter().filter(|w| matches!(w, Write::Put(k, _) if matches!(keys::parse(k), Some(keys::ParsedKey::OutcomePending { .. })))).count(), 7);
+}
+
+#[test]
+fn single_ticket_advance_guards_the_grant_epoch() {
+    let batch = planned_ticket_advance_mode(7, false);
+    assert!(batch.preconditions.iter().any(|guard| matches!(guard,
+        Precondition::Absent(key) if *key == keys::grant_epoch()
+    )));
+    assert_eq!(batch.preconditions.len() + batch.writes.len(), 77);
+}
+
+#[test]
+fn unsigned_ticketed_advance_is_a_ticket_failure() {
+    let env = env(AuthMode::Open);
+    let a = env.auth(&Req::unsigned(Procedure::AdvanceRefs)).unwrap();
+    let err = block_on(env.pipe.advance_refs_with_tickets(
+        &a,
+        upd(HEAD, Missing, A),
+        upd(PACKMAP, Missing, B),
+        vec![[1; 32]],
+    ))
+    .unwrap_err();
+    assert_eq!(err.code(), Code::FailedPrecondition);
+    assert_eq!(err.public_message(), "invalid or expired upload ticket");
+}
+
+#[test]
+fn ticket_reservation_id_mismatch_is_corruption() {
+    let repo = repo();
+    let shards = SinglePartition;
+    let source = shards.ref_shard(&repo, HEAD);
+    let id = [3; 32];
+    let ids = [id];
+    let advance = advance::AdvanceWrite {
+        ids: &ids,
+        signer: [7; 32],
+        head_ref: HEAD,
+        repo_id: &repo,
+        repository: REPO,
+        source: &source,
+        shards: &shards,
+    };
+    let mut snap = Snapshot::default();
+    snap.insert(
+        keys::ticket(&id),
+        Some(codec::encode_ticket(&codec::TicketV1 {
+            repo: repo.name.clone(),
+            ref_name: HEAD.into(),
+            signer: [7; 32],
+            pack_id: A,
+            bytes: 32,
+            part_size: 8 * 1024 * 1024,
+            created_at_ms: ms(T0 - 1_000),
+            expires_at_ms: ms(T0 + 60_000),
+            reservation_id: "s:other".into(),
+            upload_session: None,
+        })),
+    );
+    let err = advance::validate(&snap, &advance, T0).unwrap_err();
+    assert_eq!(err.code(), Code::Internal);
 }
 
 #[test]

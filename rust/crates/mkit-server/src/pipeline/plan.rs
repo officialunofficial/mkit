@@ -200,6 +200,12 @@ impl Snapshot {
         self.values.insert(key, value);
     }
 
+    /// Make a guard-raced key eligible for a fresh `get_many` while retaining
+    /// unrelated read-ahead values needed by the later planner.
+    pub(crate) fn remove(&mut self, key: &Key) {
+        self.values.remove(key);
+    }
+
     /// Whether `key` was read.
     #[must_use]
     pub(crate) fn contains(&self, key: &Key) -> bool {
@@ -374,6 +380,9 @@ fn replayed_write(
     req: &WriteRequest<'_>,
     snap: &Snapshot,
 ) -> Result<Option<StoredResult>, ServerError> {
+    // A same-nonce retry returns the stored commit before ticket validation.
+    // A re-signed retry after that commit instead sees a closed ticket; the
+    // client resolves it through BeginUpload AlreadyPresent and ReadRef.
     if req.kind != WriteKind::BeginUpload && req.advance.is_none() {
         return Ok(None);
     }

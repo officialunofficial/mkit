@@ -771,31 +771,53 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             check_ref_name(&head.name)?;
             check_ref_name(&packmap.name)?;
             if head.new.is_none() != packmap.new.is_none()
-                || (head.new.is_none() && (!matches!(head.condition, mkit_core::refs::RefWriteCondition::Match(_))
-                    || !matches!(packmap.condition, mkit_core::refs::RefWriteCondition::Match(_))))
+                || (head.new.is_none()
+                    && (!matches!(head.condition, mkit_core::refs::RefWriteCondition::Match(_))
+                        || !matches!(
+                            packmap.condition,
+                            mkit_core::refs::RefWriteCondition::Match(_)
+                        )))
             {
-                return Err(ServerError::invalid_argument("delete requires MATCH and an empty new_id"));
+                return Err(ServerError::invalid_argument(
+                    "delete requires MATCH and an empty new_id",
+                ));
             }
             if head.new.is_none() && !tickets.is_empty() {
                 return Err(ServerError::invalid_argument("delete consumes no tickets"));
             }
             if tickets.len() > crate::store::outbox::MAX_TICKETS_PER_ADVANCE {
-                return Err(ServerError::invalid_argument("too many tickets in one advance"));
+                return Err(ServerError::invalid_argument(
+                    "too many tickets in one advance",
+                ));
             }
             let mut distinct = std::collections::BTreeSet::new();
             if tickets.iter().any(|id| !distinct.insert(id)) {
                 return Err(ServerError::invalid_argument("duplicate ticket id"));
             }
-            if self.cfg.sharding == Sharding::D34 {
+            if !tickets.is_empty() || self.cfg.sharding == Sharding::D34 {
                 let head_branch = head.name.strip_prefix("refs/heads/");
-                let packmap_branch = packmap.name.strip_prefix(mkit_core::refs::PACKMAP_REF_PREFIX);
+                let packmap_branch = packmap
+                    .name
+                    .strip_prefix(mkit_core::refs::PACKMAP_REF_PREFIX);
                 if head_branch.is_none() || head_branch != packmap_branch {
-                    return Err(ServerError::invalid_argument(
-                        "AdvanceRefs pairs refs/heads/<x> with refs/mkit/packmap/<x> on this server",
-                    ));
+                    return Err(ServerError::invalid_argument(if tickets.is_empty() {
+                        "AdvanceRefs pairs refs/heads/<x> with refs/mkit/packmap/<x> on this server"
+                    } else {
+                        "ticketed advance requires a branch head and its packmap"
+                    }));
                 }
             }
-            match self.write(a, OpKind::AdvanceRefs { head, packmap, tickets }).await? {
+            match self
+                .write(
+                    a,
+                    OpKind::AdvanceRefs {
+                        head,
+                        packmap,
+                        tickets,
+                    },
+                )
+                .await?
+            {
                 StoredResult::AdvanceRefs(outcome) => Ok(outcome),
                 other => Err(stored_mismatch(&other)),
             }
@@ -1409,7 +1431,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     signer: op
                         .auth
                         .as_ref()
-                        .ok_or_else(|| internal("ticket advance lacks signer"))?
+                        .ok_or_else(|| {
+                            ServerError::failed_precondition("invalid or expired upload ticket")
+                        })?
                         .signer,
                     head_ref: &head.name,
                     repo_id: &op.repo,

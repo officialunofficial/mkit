@@ -4,13 +4,13 @@ use buffa::Message;
 use mkit_core::hash::hash;
 use mkit_transport_connect::generated::__buffa::oneof::begin_upload_response::Result as BeginResult;
 use mkit_transport_connect::generated::{
-    AdvanceOutcome, AdvanceRefsRequest, BeginUploadRequest, BeginUploadResponse, UpdateRefResponse,
-    UploadPackRequest, UploadTicket,
+    AdvanceOutcome, AdvanceRefsRequest, BeginUploadRequest, BeginUploadResponse, UploadPackRequest,
+    UploadTicket,
 };
 
 use super::{
-    A, B, CaseResult, Commit, Ctx, Exp, Failure, advance_req, ensure, sign_unary, update_req,
-    upload_msgs, want_code, want_ok, want_outcome,
+    A, B, CaseResult, Commit, Ctx, Exp, Failure, advance_req, ensure, sign_unary, upload_msgs,
+    want_code, want_ok, want_outcome,
 };
 use crate::wire::client::Rpc;
 
@@ -205,52 +205,6 @@ pub(super) async fn advance_ticket_id_errors(ctx: Ctx) -> CaseResult {
         )?,
         "too many tickets in one advance",
     )
-}
-
-pub(super) async fn deletion(ctx: Ctx) -> CaseResult {
-    let branch = "delete";
-    let head = ctx.head(branch);
-    let pm = ctx.packmap(branch);
-    let mut absent = update_req(&head, Exp::Match(&A), &[]);
-    absent.delete = Some(true);
-    let missing: Result<UpdateRefResponse, _> = ctx.call(Rpc::UpdateRef, &absent).await?;
-    want_code(missing, "failed_precondition", "absent delete")?;
-    let mut invalid = update_req(&head, Exp::Any, &[]);
-    invalid.delete = Some(true);
-    let bad: Result<UpdateRefResponse, _> = ctx.call(Rpc::UpdateRef, &invalid).await?;
-    exact(
-        want_code(bad, "invalid_argument", "delete ANY")?,
-        "delete requires MATCH and an empty new_id",
-    )?;
-    invalid = update_req(&head, Exp::Match(&A), &B);
-    invalid.delete = Some(true);
-    let bad: Result<UpdateRefResponse, _> = ctx.call(Rpc::UpdateRef, &invalid).await?;
-    exact(
-        want_code(bad, "invalid_argument", "delete new_id")?,
-        "delete requires MATCH and an empty new_id",
-    )?;
-    let mut bad_advance = ticket_advance(&ctx, branch, vec![vec![1; 32]]);
-    bad_advance.delete = Some(true);
-    exact(
-        want_code(
-            ctx.advance(&bad_advance).await?,
-            "invalid_argument",
-            "delete tickets",
-        )?,
-        "delete consumes no tickets",
-    )?;
-    want_outcome(
-        ctx.advance(&ticket_advance(&ctx, branch, vec![])).await?,
-        AdvanceOutcome::ADVANCE_OUTCOME_COMMITTED,
-    )?;
-    let mut remove = advance_req((&head, Exp::Match(&A), &[]), (&pm, Exp::Match(&B), &[]));
-    remove.delete = Some(true);
-    want_outcome(
-        ctx.advance(&remove).await?,
-        AdvanceOutcome::ADVANCE_OUTCOME_COMMITTED,
-    )?;
-    ctx.expect_ref(&head, None).await?;
-    ctx.expect_ref(&pm, None).await
 }
 
 pub(super) async fn advance_marker_then_upload(ctx: Ctx) -> CaseResult {

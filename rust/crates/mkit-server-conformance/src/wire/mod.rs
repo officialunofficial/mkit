@@ -155,7 +155,7 @@
 //! | `tickets.advance_ticket_id_errors` | `tickets`, `auth-v2` | malformed, duplicate and excessive ticket ids have exact errors |
 //! | `tickets.advance_marker_then_upload` | `tickets`, `auth-v2` | a missing marker leaves the ticket open for upload and retry |
 //! | `tickets.advance_conflicts_keep_ticket` | `tickets`, `auth-v2` | typed ref conflicts preserve tickets for a corrected advance |
-//! | `tickets.deletion` | `tickets`, `auth-v2` | conditional deletion removes head and packmap together and rejects invalid inputs |
+//! | `refs.delete_pair` | — | conditional deletion removes head and packmap together and rejects invalid inputs |
 //! | `tickets.advance_ticket_bindings` | `tickets`, `auth-v2`, `multi-repo` | unknown, mismatched ref and signer ticket bindings fail with exact errors |
 //! | `tickets.advance_other_repository` | `tickets`, `auth-v2`, `multi-repo` | a ticket cannot cross a repository boundary |
 //! | `tickets.advance_expired_ticket` | `tickets`, `auth-v2`, `test-faults` | an expired ticket fails with its exact error |
@@ -204,7 +204,7 @@
 //! renaming. None exists yet, so none can pass vacuously.
 //!
 // TODO(M1, multi-repo): `repo.isolation_replay`, `server_info.*` (GetServerInfo),
-//   `list.paging_*` and `list.page_within_2_mib` (§7.9), `refs.delete_*` (§7.8).
+//   `list.paging_*` and `list.page_within_2_mib` (§7.9).
 // TODO(M1, multi-repo): `namespace.policy_allowlist`, `namespace.policy_owner`.
 // TODO(M1, tickets): `tickets.upload_part_*`,
 //   `tickets.complete_upload_*`,

@@ -16,13 +16,15 @@ use super::{
 /// guard/delete, reservation guard/put, pending-outcome put, membership
 /// put and one relay-row share. An advance uses one signer and runs no
 /// admission, so `tu` and `tc` are each guarded/written once. Shared
-/// overhead is at most 21: deadline 1, lease/layout/grant/repo guards up to 4,
-/// two ref CAS pairs 4, replay 3, counters 4, outbox sequence/backlog 4,
-/// and relay kick 1. The real maximal planner batch is tested separately.
-/// Seven tickets cost `9 * 7 + 21 = 84` ops before opportunistic pruning.
+/// overhead is at most 23: deadline 1, lease guard/install 2, absent layout
+/// version guard/install 2, absent repo-known guard/install 2, two ref CAS
+/// pairs 4, replay 3, counters 4, outbox sequence/backlog 4, and relay kick
+/// 1. On Single, a grant guard replaces the lease pair. The real maximal
+/// planner batch is tested separately. Seven tickets cost `9 * 7 + 23 = 86`
+/// ops before opportunistic pruning.
 pub const MAX_TICKETS_PER_ADVANCE: usize = 7;
 /// The advance batch's ops outside the per-ticket and per-signer ones.
-pub const ADVANCE_SHARED_OPS: usize = 21;
+pub const ADVANCE_SHARED_OPS: usize = 23;
 const _: () = assert!(MAX_TICKETS_PER_ADVANCE * 9 + ADVANCE_SHARED_OPS <= MAX_BATCH_OPS);
 
 /// Maximum upserts per relay row; two ops guard/advance rh, two remain for hooks.
