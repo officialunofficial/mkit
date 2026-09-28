@@ -207,14 +207,14 @@ omit `test-faults`. Only auth v2 is accepted. Names use SQLite exclusively.
 counter in the same batch as its write and signer charge. A ref shard guards its
 local `qs` counter; a coordinator or Single partition guards its exact `qt`
 total. The kind-5 rollup applies only the increase since that source's guarded
-`qc` cumulative value, then installs an unguarded local `qv` view. A missing or
+`qc` cumulative value, or re-baselines a decreased restored contribution, then installs an unguarded local `qv` view. A new shard seeds `qv` from the coordinator total read with its lease. A missing or
 stale view permits writes only up to the local exact cap and increments a
 fallback metric. Replays and admission-free ticket answers charge neither.
 
 **Because:** a retry or crash after the coordinator apply must not count the
 same shard usage twice, and a view refresh must not force every write to
 re-plan. With scheduled rollups succeeding, the local estimate can lag other
-active shards by at most their admitted writes in two 60-second intervals.
+active shards by at most their admission rate times three 60-second intervals (3R).
 
 **If violated:** an author can exceed the namespace cap without a bounded
 delay, or a retry double-charges and locks out valid writes.

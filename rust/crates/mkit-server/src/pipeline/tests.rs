@@ -88,6 +88,7 @@ fn planned_ticket_advance_mode(count: usize, d34: bool) -> Batch {
         refs: &refs,
         replay: Some(replay),
         charges: &[],
+        namespace_charge: None,
         grant: Some(crate::op::GrantRef {
             id: [9; 32],
             epoch: u64::from(d34),
@@ -189,6 +190,18 @@ fn seven_ticket_advance_plans_a_valid_real_batch() {
             + crate::store::outbox::ADVANCE_SHARED_OPS
     );
     assert_eq!(batch.writes.iter().filter(|w| matches!(w, Write::Put(k, _) if matches!(keys::parse(k), Some(keys::ParsedKey::OutcomePending { .. })))).count(), 7);
+    assert!(batch.writes.iter().all(|write| {
+        let (Write::Put(key, _) | Write::Delete(key)) = write;
+        !matches!(
+            keys::parse(key),
+            Some(
+                keys::ParsedKey::QuotaShard(_)
+                    | keys::ParsedKey::QuotaView(_)
+                    | keys::ParsedKey::QuotaTotal(_)
+                    | keys::ParsedKey::Timer { kind: 5, .. }
+            )
+        )
+    }));
 }
 
 #[test]
@@ -1019,6 +1032,91 @@ fn namespace_denial_before_lease_allocates_nothing_and_replay_stays_free() {
         now(env.pipe.meta.inner.get(&shard, &counter)).unwrap(),
         charged
     );
+}
+
+#[test]
+fn fresh_shard_uses_coordinator_total_in_lease_read_and_persists_view() {
+    use crate::repo::MultiAddressing;
+
+    let signer = [7; 32];
+    let namespace = Namespace::Ed25519(signer);
+    let clock = clock();
+    let mut config = cfg(AuthMode::Open);
+    config.addressing = Addressing::Multi(
+        MultiAddressing::new()
+            .with_namespace_policy(NamespacePolicy::Allowlist([namespace].into())),
+    );
+    config.write_policy = WritePolicy::Owner;
+    config.sharding = Sharding::D34;
+    config.write_quota = Some(QuotaLimits {
+        window_ms: 60_000,
+        max_ops: 2,
+        max_bytes: 0,
+    });
+    let env = build(config, Spy::new(store(&clock)), Hooks::new(), clock);
+    let identity = format!("{namespace}/{REPO}");
+    let request = Req::unsigned(Procedure::UpdateRef).header("x-repository", &identity);
+    let mut a = env.auth(&request).unwrap();
+    a.principal = Principal::Signer { ed25519: signer };
+    a.auth = Some(VerifiedAuth {
+        signer,
+        replay_scope: [3; 32],
+        fingerprint: [4; 32],
+        nonce: nonce(1),
+        commitment: crate::op::Commitment::Body(A),
+        expires_at_ms: T0 + 300_000,
+    });
+    let ref_name = "refs/heads/new-shard";
+    let shard = env.pipe.shards.ref_shard(&a.repo().repo, ref_name);
+    let coordinator = env.pipe.shards.coordinator(&a.repo().repo.namespace);
+    let window = crate::quota::namespace_window(T0, 60_000);
+    let qt = keys::quota_total(window);
+    now(env.pipe.meta.inner.apply(
+        &coordinator,
+        Batch::new().put(
+            qt.clone(),
+            codec::encode_namespace_usage(crate::quota::NamespaceUsage { ops: 2, bytes: 0 }),
+        ),
+    ))
+    .unwrap();
+    let update = upd(ref_name, Missing, A);
+    let err = now(env.pipe.update_ref(&a, update.clone())).unwrap_err();
+    assert_eq!(err.code(), Code::ResourceExhausted);
+    assert_eq!(
+        env.pipe.meta.calls(),
+        2,
+        "read-ahead and lease get_many only"
+    );
+    assert!(env.pipe.meta.seen.lock().unwrap().contains(&qt));
+    assert!(
+        env.batches().is_empty(),
+        "denial allocated no lease or ref state"
+    );
+    assert_eq!(
+        now(env.pipe.meta.inner.stats(&shard)).unwrap().keys,
+        Some(0)
+    );
+
+    now(env.pipe.meta.inner.apply(
+        &coordinator,
+        Batch::new().put(
+            qt,
+            codec::encode_namespace_usage(crate::quota::NamespaceUsage { ops: 1, bytes: 0 }),
+        ),
+    ))
+    .unwrap();
+    let before = env.pipe.meta.calls();
+    assert_eq!(
+        now(env.pipe.update_ref(&a, update)).unwrap(),
+        UpdateRefResult::Committed
+    );
+    assert_eq!(env.pipe.meta.calls() - before, 4);
+    let stored = now(env.pipe.meta.inner.get(&shard, &keys::quota_view(window)))
+        .unwrap()
+        .expect("accepted first write seeds a durable view");
+    let view = codec::decode_namespace_view(&stored).unwrap();
+    assert_eq!(view.total.ops, 1);
+    assert_eq!(view.pushed.ops, 0);
 }
 
 fn seed_namespace_view(store: &MemoryKv, shard: &Partition, window: u64, total: u64, pushed: u64) {

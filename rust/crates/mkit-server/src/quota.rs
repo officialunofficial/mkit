@@ -79,10 +79,9 @@ pub const DEFAULT_WRITE_QUOTA: QuotaLimits = QuotaLimits {
 /// How often an active ref shard reconciles its fixed-window usage.
 pub const QUOTA_ROLLUP_MS: u64 = 60_000;
 
-// The advance's maximum seven ticket paths skip admission entirely. The
-// largest admitted advance uses only its shared operations, plus a new
-// window's qs guard/put/timer (three operations).
-const _: () = assert!(crate::store::outbox::ADVANCE_SHARED_OPS + 3 <= crate::store::MAX_BATCH_OPS);
+// plan_namespace asserts that ticketed advances have no namespace charge.
+// An admitted write may add a qs guard/put, timer, and initial view seed.
+const _: () = assert!(crate::store::outbox::ADVANCE_SHARED_OPS + 4 <= crate::store::MAX_BATCH_OPS);
 
 /// A fixed-window namespace counter. `u64` also holds sums across shards.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -268,6 +267,7 @@ pub(crate) fn plan_namespace_charge(
     current: Option<&Value>,
     view: Option<&Value>,
     now_ms: i64,
+    server_now_ms: u64,
     pre: &mut Vec<Precondition>,
     puts: &mut Vec<Write>,
 ) -> Result<(), ServerError> {
@@ -287,9 +287,7 @@ pub(crate) fn plan_namespace_charge(
     if current.is_none() {
         let window_ms = u64::try_from(charge.limits.window_ms.max(1)).unwrap_or(1);
         let due = if charge.rollup {
-            u64::try_from(now_ms)
-                .unwrap_or(0)
-                .saturating_add(QUOTA_ROLLUP_MS)
+            server_now_ms.saturating_add(QUOTA_ROLLUP_MS)
         } else {
             window
                 .saturating_add(1)
@@ -311,6 +309,7 @@ pub(crate) fn plan_namespace_after_admission(
     current: Option<&Value>,
     view: Option<&Value>,
     now_ms: i64,
+    server_now_ms: u64,
     lease_committed: bool,
     pre: &mut Vec<Precondition>,
     puts: &mut Vec<Write>,
@@ -320,13 +319,15 @@ pub(crate) fn plan_namespace_after_admission(
             "namespace quota window advanced; retry",
         ));
     }
-    plan_namespace_charge(charge, current, view, now_ms, pre, puts).map_err(|error| {
-        if lease_committed && error.code() == crate::Code::ResourceExhausted {
-            ServerError::aborted_retryable("namespace quota changed; retry")
-        } else {
-            error
-        }
-    })
+    plan_namespace_charge(charge, current, view, now_ms, server_now_ms, pre, puts).map_err(
+        |error| {
+            if lease_committed && error.code() == crate::Code::ResourceExhausted {
+                ServerError::aborted_retryable("namespace quota changed; retry")
+            } else {
+                error
+            }
+        },
+    )
 }
 
 /// The outcome of charging one write against a quota.
@@ -703,7 +704,7 @@ mod tests {
     }
 
     #[test]
-    fn simulated_overshoot_is_bounded_by_other_shards_last_two_periods() {
+    fn simulated_overshoot_is_bounded_by_other_shards_last_three_periods() {
         const SHARDS: usize = 5;
         const CAP: u32 = 80;
         let charge = NamespaceCharge {
@@ -744,7 +745,7 @@ mod tests {
                     let other_recent = writes
                         .iter()
                         .filter(|(at, source)| {
-                            *source != shard && now.saturating_sub(*at) <= 2 * QUOTA_ROLLUP_MS
+                            *source != shard && now.saturating_sub(*at) <= 3 * QUOTA_ROLLUP_MS
                         })
                         .count();
                     assert!(
@@ -758,6 +759,36 @@ mod tests {
             writes.len() > CAP as usize,
             "simulation must exercise overshoot"
         );
+    }
+
+    #[test]
+    fn rollup_timer_uses_server_time_even_with_business_clock_skew() {
+        let business_now_ms = 180_000;
+        let server_now_ms = 1_000;
+        let charge = NamespaceCharge {
+            limits: QuotaLimits {
+                window_ms: 60_000,
+                max_ops: 2,
+                max_bytes: 0,
+            },
+            window: namespace_window(business_now_ms, 60_000),
+            bytes: 0,
+            rollup: true,
+        };
+        let (mut pre, mut writes) = (Vec::new(), Vec::new());
+        plan_namespace_charge(
+            charge,
+            None,
+            None,
+            business_now_ms,
+            server_now_ms,
+            &mut pre,
+            &mut writes,
+        )
+        .unwrap();
+        assert!(writes.iter().any(|write| matches!(write,
+            Write::Put(key, _) if matches!(keys::parse(key), Some(keys::ParsedKey::Timer { due_at_ms: 61_000, kind: 5, .. }))
+        )));
     }
 
     #[cfg(feature = "memory")]
@@ -786,7 +817,7 @@ mod tests {
             for _ in 0..2 {
                 let current = block_on(store.get(&partition, &key)).unwrap();
                 let (mut pre, mut writes) = (Vec::new(), Vec::new());
-                plan_namespace_charge(charge, current.as_ref(), None, 0, &mut pre, &mut writes)
+                plan_namespace_charge(charge, current.as_ref(), None, 0, 0, &mut pre, &mut writes)
                     .unwrap();
                 assert_eq!(
                     block_on(store.apply(
@@ -803,7 +834,7 @@ mod tests {
             let current = block_on(store.get(&partition, &key)).unwrap();
             let (mut pre, mut writes) = (Vec::new(), Vec::new());
             assert_eq!(
-                plan_namespace_charge(charge, current.as_ref(), None, 0, &mut pre, &mut writes)
+                plan_namespace_charge(charge, current.as_ref(), None, 0, 0, &mut pre, &mut writes)
                     .unwrap_err()
                     .code(),
                 crate::Code::ResourceExhausted

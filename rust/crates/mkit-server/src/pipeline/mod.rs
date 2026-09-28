@@ -54,8 +54,8 @@ use crate::error::{ADMISSION_CHALLENGE_TYPE, InvalidHeader, ServerError};
 use crate::op::{AuthzFacts, OpKind, Operation, Procedure, RefUpdate};
 use crate::policy::{AuthorizerRole, NamespacePolicy, WritePolicy};
 use crate::quota::{
-    self, DEFAULT_WRITE_QUOTA, NamespaceCharge, NamespaceDecision, QuotaCharge, QuotaLimits,
-    QuotaScope, ViewStatus,
+    self, DEFAULT_WRITE_QUOTA, NamespaceCharge, NamespaceDecision, NamespaceView, QuotaCharge,
+    QuotaLimits, QuotaScope, ViewStatus,
 };
 use crate::refs::{self, strip_listed_prefix, validate_ref_name};
 use crate::replay::{BeginUploadResult, ReplayDecision, StoredResult, UpdateRefResult, classify};
@@ -1065,6 +1065,18 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         }
         let lease = if self.cfg.sharding == Sharding::D34 {
             let observed = self.observe_lease(&op, &p, ahead.as_ref()).await?;
+            if let Some((window, total)) = observed.quota_seed()
+                && let Some(snapshot) = ahead.as_mut()
+            {
+                snapshot.namespace_seed = Some((
+                    window,
+                    codec::encode_namespace_view(NamespaceView {
+                        total,
+                        pushed: crate::quota::NamespaceUsage::default(),
+                        observed_at_ms: ms(self.clock.now_ms()),
+                    }),
+                ));
+            }
             op.creation = observed.creation(&self.cfg.addressing);
             op.leased_epoch = Some(observed.epoch());
             Some(observed)
@@ -1356,11 +1368,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 let scope = QuotaScope::for_signer(&op.repo.namespace, &auth.signer);
                 wanted.push(keys::quota(&scope));
             }
-            if matches!(self.cfg.addressing, Addressing::Multi(_))
-                && self.hooks.admission().is_default()
-                && let Some(limits) = self.cfg.write_quota
-            {
-                let window = namespace_window.expect("namespace quota window computed");
+            if let (Some(window), Some(limits)) = (namespace_window, self.cfg.write_quota) {
                 let charge = NamespaceCharge {
                     limits,
                     window,
@@ -1452,13 +1460,18 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let snap = ahead
             .as_mut()
             .ok_or_else(|| internal("namespace quota needs atomic reads"))?;
+        let stored_view = charge
+            .rollup
+            .then(|| snap.get(&keys::quota_view(window)))
+            .flatten();
+        let seeded_view = snap
+            .namespace_seed
+            .as_ref()
+            .filter(|(seed_window, _)| *seed_window == window)
+            .map(|(_, value)| value);
         let decision = quota::check_namespace(
             snap.get(&quota::counter_key(charge, window)),
-            if charge.rollup {
-                snap.get(&keys::quota_view(window))
-            } else {
-                None
-            },
+            stored_view.or(seeded_view),
             now,
             charge,
         )?;

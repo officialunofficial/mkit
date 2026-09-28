@@ -572,6 +572,7 @@ where
                 })
                 .register(mkit_server::timers::quota_rollup::QuotaRollup {
                     coordinator: meta.clone(),
+                    metrics: MetricsBridge,
                 });
             #[cfg(feature = "test-faults")]
             let registry = registry.register(mkit_server::timers::test_kind::TestTimer);
