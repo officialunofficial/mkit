@@ -4,6 +4,8 @@
 
 mod d34;
 
+use mkit_core::hash::Hash;
+
 pub use d34::D34Shards;
 
 use crate::repo::{NamespaceKey, RepoId};
@@ -28,6 +30,9 @@ pub trait ShardMap: MaybeSend + MaybeSync {
 
     /// The membership shard of `pack`.
     fn membership(&self, repo: &RepoId, pack: &BlobKey) -> Partition;
+
+    /// The repository-scoped index shard for an object id.
+    fn object_index(&self, repo: &RepoId, object: &Hash) -> Partition;
 }
 
 /// Every row of a namespace in one partition: M0, and the fs-layout and
@@ -53,6 +58,10 @@ impl ShardMap for SinglePartition {
     }
 
     fn membership(&self, repo: &RepoId, _pack: &BlobKey) -> Partition {
+        Partition::Namespace(repo.namespace.clone())
+    }
+
+    fn object_index(&self, repo: &RepoId, _object: &Hash) -> Partition {
         Partition::Namespace(repo.namespace.clone())
     }
 }

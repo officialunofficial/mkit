@@ -143,6 +143,7 @@ fn fetch_one(
                     "Unpacking objects",
                     None,
                     crate::progress::should_report(quiet),
+                    quiet,
                 );
                 remote_dispatch::fetch_all_with(cwd, tx.as_ref(), &resolved.name, require_signed)
             };

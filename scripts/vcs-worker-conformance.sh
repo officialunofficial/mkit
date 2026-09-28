@@ -21,8 +21,11 @@
 #                  one frame, so a `ListRefs` of N refs is about 45*N bytes
 #                  held whole (1.2 MB at 30,000; the default 10,000-ref case
 #                  stays under) until WP-1.27 pages it.
-#   --sharding d34  D34 phase 1 only: quota is per ref shard and growth stats
-#                   are single-only. Add --test-faults to plant a RefShard
+#   --sharding d34  D34 phase 1 only: WP-1.26b adapts quota conformance and
+#                   registers its rollup timer; the Worker uses Single addressing
+#                   today, so its namespace cap is off. D34 quota.ops_exhaustion
+#                   becomes per-(signer, branch); growth stats are single-only.
+#                   Add --test-faults to plant a RefShard
 #                   relay and verify RepoIndexShard delivery and queue drainage.
 #   -- ARGS        passed to every `mkit-server-conformance wire` run (e.g.
 #                  `-- --filter refs.`, `-- --list-refs 1000`).
@@ -312,7 +315,7 @@ stop_server
 
 if [ "${test_faults}" -eq 1 ]; then
     if [ "${sharding}" = d34 ]; then
-        echo ">> skipping phase 2: D34 quota counts per ref shard until WP-1.26; the growth stats hook is single-sharding only"
+        echo ">> skipping phase 2: D34 quota.ops_exhaustion adaptation to per-(signer, branch) and Worker rollup registration wait for WP-1.26b; Worker Single addressing has its namespace cap off; the growth stats hook is single-sharding only"
     else
     quota_args=(--quota-ops "${TEST_QUOTA_OPS}" --quota-bytes "${TEST_QUOTA_BYTES}"
         --quota-window-ms "${TEST_QUOTA_WINDOW_MS}")

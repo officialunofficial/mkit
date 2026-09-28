@@ -199,6 +199,11 @@ macro_rules! __with_kv_cases {
                 idx_hold_extension_keeps_max,
                 idx_expired_holds_pruned_on_mutation,
             }
+            object_index::{
+                idx_object_membership_gate_single,
+                idx_object_membership_gate_d34,
+                idx_object_paging_and_membership_delete,
+            }
         }
     };
 }
