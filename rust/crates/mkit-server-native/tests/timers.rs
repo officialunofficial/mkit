@@ -391,6 +391,7 @@ async fn fs_layout_serves_without_starting_timer_driver() {
     .unwrap();
     let opened = server::open(&cfg).unwrap();
     assert!(opened.timers.is_none());
+    assert!(opened.pressure.is_none());
     let (listener, origin) = common::listener().await;
     let shutdown = Shutdown::new();
     let task = common::spawn_serve(listener, opened.router.clone(), &shutdown);

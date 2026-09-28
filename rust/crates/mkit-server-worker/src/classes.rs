@@ -20,6 +20,19 @@ pub enum ShardClass {
 }
 
 impl ShardClass {
+    /// Stable class label for physical storage pressure. Both index kinds
+    /// share the repository-index class and therefore its pressure label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::RefStore => "namespace",
+            Self::NsCoordinator => "coordinator",
+            Self::RefShard => "ref",
+            Self::RepoIndexShard => "repo_index",
+            Self::ContentIndexShard => "content",
+        }
+    }
+
     /// Whether this class serves the partition kind.
     #[must_use]
     pub fn accepts(self, p: &Partition) -> bool {

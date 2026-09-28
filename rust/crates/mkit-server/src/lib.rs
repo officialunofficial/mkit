@@ -46,7 +46,7 @@ pub mod sql;
 pub mod ssh;
 pub mod storage_error;
 pub mod store;
-mod telemetry;
+pub mod telemetry;
 pub mod timers;
 pub mod upload;
 
@@ -61,8 +61,8 @@ pub use op::{
 };
 pub use principal::Principal;
 pub use replay::{
-    ReplayDecision, ReplayKey, ReplayRecord, ReplayState, StoredRejection, StoredResult,
-    UpdateRefResult, classify,
+    BeginUploadResult, ReplayDecision, ReplayKey, ReplayRecord, ReplayState, StoredRejection,
+    StoredResult, UpdateRefResult, classify,
 };
 pub use repo::{Addressing, MultiAddressing, NamespaceKey, RepoId, RepoName, ResolvedRepo};
 #[cfg(not(target_arch = "wasm32"))]

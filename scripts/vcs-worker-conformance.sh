@@ -254,7 +254,7 @@ NODE
 
 # The pipeline serves grpc.health.v1 and rejects an auth v2 signature over
 # gzip-encoded bytes (fails closed, SPEC-WRITE-GRANTS §9.2 is open).
-features="health,strict-gzip-auth"
+features="health,strict-gzip-auth,tickets"
 build_args=(--dev)
 vars=(--var "AUTH_AUDIENCE:${ORIGIN}" --var "AUTH_REPOSITORY:${REPOSITORY}" --var "SHARDING:${sharding}")
 if [ "${test_faults}" -eq 1 ]; then

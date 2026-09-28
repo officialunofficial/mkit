@@ -51,7 +51,7 @@ ledger and the quota are each one atomic batch planned by the pipeline.
 
 ## Auth v2 (open write, no allow-list)
 
-All writes (`UpdateRef`, `AdvanceRefs`, `UploadPack`) require the
+All writes (`UpdateRef`, `AdvanceRefs`, `BeginUpload`, `UploadPack`) require the
 destination-bound [auth v2 contract](../../docs/specs/SPEC-TRANSPORT-CONNECT.md#auth-v2-contract),
 verified by `mkit-server`'s auth stage. The signature binds audience,
 repository, procedure, exact body or pack content, creation/expiry
@@ -59,6 +59,12 @@ timestamps, and a mandatory random nonce. Reads are unsigned. Configure
 `AUTH_AUDIENCE` to the exact public origin (override it for local
 development) and `AUTH_REPOSITORY`, default `default`; with either missing or
 malformed, every RPC answers `unavailable` naming it.
+
+For upload tickets, provision the `TICKET_KEYS` secret with `wrangler secret
+put TICKET_KEYS` (WP-1.19). Its content has one `<key-id> <64 hex>` key per
+line; the first signs and every listed key verifies. Blank lines and `#`
+comments are allowed. `wrangler.dev.jsonc` carries a fake development key.
+Without keys, `BeginUpload` answers `unimplemented`.
 
 The replay record, the per-signer write quota (300 writes and 128 MiB per
 hour) and the effect commit in one batch. A retry returns its recorded

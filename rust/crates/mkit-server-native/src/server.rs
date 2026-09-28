@@ -17,6 +17,7 @@ use mkit_transport_file::{FileTransport, sync_dir};
 use tokio::net::TcpListener;
 
 use crate::config::{BlobChoice, ConfigError, MetaChoice, ServeConfig};
+use crate::pressure::PressureMonitor;
 use crate::telemetry::MetricsBridge;
 use crate::timers::{TimerDriver, TimerNotifying};
 use crate::{Blocking, RusqliteConn, Shutdown, build_router, exit, serve};
@@ -67,6 +68,8 @@ pub struct Services {
     pub enc: Option<crate::enc::EncService>,
     /// Prepared `SQLite` timer driver, started by [`serve_services`].
     pub timers: Option<TimerDriver>,
+    /// Physical database pressure monitor, absent for filesystem metadata.
+    pub pressure: Option<PressureMonitor>,
 }
 
 /// A server ready to bind: its services, and the root's locks.
@@ -79,6 +82,8 @@ pub struct Opened {
     pub enc: Option<crate::enc::EncService>,
     /// Prepared timer driver; absent for filesystem metadata.
     pub timers: Option<TimerDriver>,
+    /// Prepared physical database pressure monitor.
+    pub pressure: Option<PressureMonitor>,
     locks: ServerLocks,
 }
 
@@ -93,6 +98,7 @@ impl Opened {
             #[cfg(feature = "enc")]
             enc: self.enc,
             timers: self.timers,
+            pressure: self.pressure,
         };
         (services, self.locks)
     }
@@ -464,6 +470,7 @@ where
         #[cfg(feature = "enc")]
         enc,
         timers: None,
+        pressure: None,
     })
 }
 
@@ -529,6 +536,7 @@ pub fn open(cfg: &ServeConfig) -> Result<Opened, ConfigError> {
         #[cfg(feature = "enc")]
         enc: services.enc,
         timers: services.timers,
+        pressure: services.pressure,
         locks,
     })
 }
@@ -565,6 +573,7 @@ where
             let driver = TimerDriver::new(meta.clone(), registry, Arc::new(SystemClock));
             let mut services = build_services(blobs, meta, cfg)?;
             services.timers = Some(driver);
+            services.pressure = Some(PressureMonitor::new(conn, *capacity));
             Ok(services)
         }
     }
@@ -645,6 +654,9 @@ pub async fn serve_services(
         ),
         None => None,
     };
+    let pressure_task = services
+        .pressure
+        .map(|monitor| monitor.start(shutdown.clone()));
     let root = cfg.repo_root.display();
     let stop_on_error = |result: Result<(), ConfigError>| {
         if result.is_err() {
@@ -690,6 +702,10 @@ pub async fn serve_services(
     shutdown.trigger();
     if let Some(task) = timer_task {
         task.await.map_err(|e| config_error("timer driver", e))?;
+    }
+    if let Some(task) = pressure_task {
+        task.await
+            .map_err(|e| config_error("storage pressure monitor", e))?;
     }
     tracing::info!("stopped");
     http_result.and(enc_result)

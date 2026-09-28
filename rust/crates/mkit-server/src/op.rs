@@ -29,6 +29,8 @@ pub enum Procedure {
     UpdateRef,
     /// `AdvanceRefs`.
     AdvanceRefs,
+    /// `BeginUpload` (unary ticket opening).
+    BeginUpload,
     /// `PackExists`.
     PackExists,
     /// `UploadPack` (client streaming).
@@ -47,6 +49,7 @@ impl Procedure {
             Self::ReadRef => "/mkit.transport.v1.TransportService/ReadRef",
             Self::UpdateRef => "/mkit.transport.v1.TransportService/UpdateRef",
             Self::AdvanceRefs => "/mkit.transport.v1.TransportService/AdvanceRefs",
+            Self::BeginUpload => "/mkit.transport.v1.TransportService/BeginUpload",
             Self::PackExists => "/mkit.transport.v1.TransportService/PackExists",
             Self::UploadPack => "/mkit.transport.v1.TransportService/UploadPack",
             Self::DownloadPack => "/mkit.transport.v1.TransportService/DownloadPack",
@@ -61,6 +64,7 @@ impl Procedure {
             "ReadRef" => Self::ReadRef,
             "UpdateRef" => Self::UpdateRef,
             "AdvanceRefs" => Self::AdvanceRefs,
+            "BeginUpload" => Self::BeginUpload,
             "PackExists" => Self::PackExists,
             "UploadPack" => Self::UploadPack,
             "DownloadPack" => Self::DownloadPack,
@@ -72,7 +76,10 @@ impl Procedure {
     /// `UploadPack`.
     #[must_use]
     pub const fn is_write(self) -> bool {
-        matches!(self, Self::UpdateRef | Self::AdvanceRefs | Self::UploadPack)
+        matches!(
+            self,
+            Self::UpdateRef | Self::AdvanceRefs | Self::BeginUpload | Self::UploadPack
+        )
     }
 
     /// Whether the procedure streams: `UploadPack` and `DownloadPack`.
@@ -211,6 +218,15 @@ pub enum OpKind {
         /// The packmap update.
         packmap: RefUpdate,
     },
+    /// Open an upload ticket for a target ref.
+    BeginUpload {
+        /// Branch or tag to advance.
+        ref_name: String,
+        /// Pack commitment.
+        key: PackKey,
+        /// Declared byte count.
+        bytes: u64,
+    },
     /// Check whether a pack is present.
     PackExists {
         /// Pack digest.
@@ -239,6 +255,7 @@ impl OpKind {
             Self::ReadRef { .. } => Procedure::ReadRef,
             Self::UpdateRef(_) => Procedure::UpdateRef,
             Self::AdvanceRefs { .. } => Procedure::AdvanceRefs,
+            Self::BeginUpload { .. } => Procedure::BeginUpload,
             Self::PackExists { .. } => Procedure::PackExists,
             Self::UploadPack { .. } => Procedure::UploadPack,
             Self::DownloadPack { .. } => Procedure::DownloadPack,
@@ -341,11 +358,12 @@ mod tests {
     use crate::error::Code;
     use crate::repo::{NamespaceKey, RepoName};
 
-    const ALL: [(Procedure, &str); 7] = [
+    const ALL: [(Procedure, &str); 8] = [
         (Procedure::ListRefs, "ListRefs"),
         (Procedure::ReadRef, "ReadRef"),
         (Procedure::UpdateRef, "UpdateRef"),
         (Procedure::AdvanceRefs, "AdvanceRefs"),
+        (Procedure::BeginUpload, "BeginUpload"),
         (Procedure::PackExists, "PackExists"),
         (Procedure::UploadPack, "UploadPack"),
         (Procedure::DownloadPack, "DownloadPack"),
@@ -386,6 +404,7 @@ mod tests {
             [
                 Procedure::UpdateRef,
                 Procedure::AdvanceRefs,
+                Procedure::BeginUpload,
                 Procedure::UploadPack
             ]
         );

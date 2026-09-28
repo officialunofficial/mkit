@@ -11,10 +11,19 @@
 
 use core::future::Future;
 use mkit_server::sql::SqlError;
+use mkit_server::sql::{SqlConn, SqlKvStore};
 use mkit_server::storage_error::StorageOp;
 use mkit_server::store::export_page;
+use mkit_server::telemetry::{
+    Metrics,
+    pressure::{self, PressureState},
+};
+use std::sync::{Arc, Mutex, PoisonError};
 
-use mkit_server::{Cursor, Key, NamespaceStore, Partition, ScanPage, StoreError};
+use mkit_server::{
+    Batch, BatchOutcome, Clock, Cursor, Key, NamespaceStore, Partition, PartitionStats, ScanPage,
+    StoreCapabilities, StoreError, Value,
+};
 
 use crate::classes::ShardClass;
 use crate::wire::{Blob, NsCall, NsErrKind, NsReply, NsRequest, WireOutcome};
@@ -37,6 +46,138 @@ async fn serve_reply<S: NamespaceStore>(
             .await
             .unwrap_or_else(|error| (failure(&error), None)),
         Err(reply) => (reply, None),
+    }
+}
+
+/// The SQL store of one Durable Object. Every committed put batch,
+/// including timer effects, observes physical pressure before returning.
+pub struct PressureStore<C> {
+    inner: SqlKvStore<C>,
+    state: Mutex<PressureState>,
+    class: ShardClass,
+    clock: Arc<dyn Clock>,
+    metrics: Arc<dyn Metrics>,
+}
+
+impl<C> core::fmt::Debug for PressureStore<C> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PressureStore")
+            .field("inner", &self.inner)
+            .field("class", &self.class)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<C: SqlConn> PressureStore<C> {
+    /// Attach per-instance alerts and metrics to a SQL store.
+    #[must_use]
+    pub fn new(
+        inner: SqlKvStore<C>,
+        class: ShardClass,
+        clock: Arc<dyn Clock>,
+        metrics: Arc<dyn Metrics>,
+    ) -> Self {
+        Self {
+            inner,
+            state: Mutex::default(),
+            class,
+            clock,
+            metrics,
+        }
+    }
+
+    /// The underlying SQL connection.
+    #[must_use]
+    pub fn conn(&self) -> &C {
+        self.inner.conn()
+    }
+
+    /// Earliest timer per partition for the Durable Object alarm driver.
+    ///
+    /// # Errors
+    /// Failed queries or corrupt timer rows.
+    pub fn timer_heads(&self) -> Result<Vec<(Partition, u64)>, StoreError> {
+        self.inner.timer_heads()
+    }
+
+    /// Forget logical stats cached by the underlying store.
+    pub fn clear_stats_cache(&self) {
+        self.inner.clear_stats_cache();
+    }
+
+    fn observe_pressure(&self) {
+        // The SQL apply future finishes on its first poll. This local,
+        // synchronous size read follows commit without opening the input gate.
+        match self.conn().size_bytes() {
+            Ok(bytes) => {
+                #[allow(clippy::cast_precision_loss)]
+                self.metrics.gauge(
+                    pressure::METRIC_PARTITION_BYTES,
+                    &[("kind", self.class.label())],
+                    bytes as f64,
+                );
+                if let Some(capacity) = self.inner.capacity() {
+                    let limit = capacity.soft_limit();
+                    let now_ms = u64::try_from(self.clock.now_ms()).unwrap_or(0);
+                    let levels = {
+                        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+                        let (next, levels) = pressure::observe(*state, bytes, limit, now_ms);
+                        *state = next;
+                        levels
+                    };
+                    for level in levels {
+                        pressure::emit(level, self.class.label(), bytes, limit);
+                    }
+                }
+            }
+            Err(error) => tracing::warn!(error = %error, "storage pressure size read failed"),
+        }
+    }
+}
+
+impl<C: SqlConn> NamespaceStore for PressureStore<C> {
+    fn capabilities(&self) -> StoreCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn get(&self, partition: &Partition, key: &Key) -> Result<Option<Value>, StoreError> {
+        self.inner.get(partition, key).await
+    }
+
+    async fn get_many(
+        &self,
+        partition: &Partition,
+        keys: &[Key],
+    ) -> Result<Vec<Option<Value>>, StoreError> {
+        self.inner.get_many(partition, keys).await
+    }
+
+    async fn scan(
+        &self,
+        partition: &Partition,
+        start: &Key,
+        end: &Key,
+        after: Option<&Cursor>,
+        limit: u32,
+    ) -> Result<ScanPage, StoreError> {
+        self.inner.scan(partition, start, end, after, limit).await
+    }
+
+    async fn apply(&self, partition: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
+        let has_put = batch.has_put();
+        let outcome = self.inner.apply(partition, batch).await?;
+        if has_put && outcome == BatchOutcome::Committed {
+            self.observe_pressure();
+        }
+        Ok(outcome)
+    }
+
+    async fn stats(&self, partition: &Partition) -> Result<PartitionStats, StoreError> {
+        self.inner.stats(partition).await
+    }
+
+    async fn probe(&self) -> Result<(), StoreError> {
+        self.inner.probe().await
     }
 }
 
@@ -217,13 +358,14 @@ pub use object::{DoConn, NsObject};
 #[cfg(target_arch = "wasm32")]
 mod object {
     use std::cell::OnceCell;
+    use std::sync::Arc;
 
     use mkit_server::Clock;
     use mkit_server::sql::{Capacity, SqlKvStore};
     use mkit_server::timers::{TickBudget, TimerRegistry, run_due};
     use worker::{Method, Request, Response, ScheduledTime, State, Storage};
 
-    use super::{decode_request, dispatch, encode, failure};
+    use super::{PressureStore, decode_request, dispatch, encode, failure};
     use crate::alarm::{AlarmAction, alarm_after_put, alarm_after_tick_with_current};
     use crate::classes::ShardClass;
     use crate::clock::WorkerClock;
@@ -246,10 +388,10 @@ mod object {
         class: ShardClass,
         conn: DoConn,
         capacity: Capacity,
-        store: OnceCell<SqlKvStore<DoConn>>,
+        store: OnceCell<PressureStore<DoConn>>,
         storage: Storage,
         clock: WorkerClock,
-        registry: TimerRegistry<SqlKvStore<DoConn>>,
+        registry: TimerRegistry<PressureStore<DoConn>>,
     }
 
     impl core::fmt::Debug for NsObject {
@@ -295,18 +437,24 @@ mod object {
 
         /// Install the handlers built by the deployment adapter at startup.
         #[must_use]
-        pub fn with_registry(mut self, registry: TimerRegistry<SqlKvStore<DoConn>>) -> Self {
+        pub fn with_registry(mut self, registry: TimerRegistry<PressureStore<DoConn>>) -> Self {
             self.registry = registry;
             self
         }
 
         /// The store, opened on first use: migration runs once per
         /// instance.
-        fn store(&self) -> Result<&SqlKvStore<DoConn>, mkit_server::StoreError> {
+        fn store(&self) -> Result<&PressureStore<DoConn>, mkit_server::StoreError> {
             if let Some(store) = self.store.get() {
                 return Ok(store);
             }
-            let store = SqlKvStore::open_with_capacity(self.conn.clone(), self.capacity)?;
+            let inner = SqlKvStore::open_with_capacity(self.conn.clone(), self.capacity)?;
+            let store = PressureStore::new(
+                inner,
+                self.class,
+                Arc::new(WorkerClock),
+                Arc::new(crate::telemetry::ConsoleMetrics::default()),
+            );
             Ok(self.store.get_or_init(|| store))
         }
 

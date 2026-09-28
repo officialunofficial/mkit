@@ -1007,8 +1007,12 @@ fn m1_stub_paths_are_not_authenticated_procedures_yet() {
         Procedure::from_connect_path("/mkit.transport.v1.TransportService/GetServerInfo"),
         None
     );
-    // WP-1.9 and WP-1.11 still need authenticated procedures for these stubs.
-    for rpc in ["BeginUpload", "UploadPart", "CompleteUpload"] {
+    assert_eq!(
+        Procedure::from_connect_path("/mkit.transport.v1.TransportService/BeginUpload"),
+        Some(Procedure::BeginUpload)
+    );
+    // WP-1.11 still needs authenticated procedures for these stubs.
+    for rpc in ["UploadPart", "CompleteUpload"] {
         let path = format!("/mkit.transport.v1.TransportService/{rpc}");
         assert_eq!(Procedure::from_connect_path(&path), None, "{rpc}");
     }
@@ -1023,20 +1027,6 @@ async fn m1_new_unary_rpcs_reach_stubs_without_auth_headers() {
     assert_unimplemented(
         &server
             .unary(
-                "BeginUpload",
-                &BeginUploadRequest {
-                    r#ref: Some(HEAD.into()),
-                    pack_id: Some(A.to_vec()),
-                    bytes: Some(8),
-                    ..Default::default()
-                },
-                &[],
-            )
-            .await,
-    );
-    assert_unimplemented(
-        &server
-            .unary(
                 "CompleteUpload",
                 &CompleteUploadRequest {
                     ticket_token: Some(vec![1]),
@@ -1048,9 +1038,56 @@ async fn m1_new_unary_rpcs_reach_stubs_without_auth_headers() {
             .await,
     );
     // Exercise JSON dispatch too.
-    for rpc in ["BeginUpload", "CompleteUpload"] {
+    for rpc in ["CompleteUpload"] {
         assert_unimplemented(&server.json(rpc, &serde_json::json!({}), &[]).await);
     }
+}
+
+#[tokio::test]
+async fn begin_upload_requires_authentication_and_configured_keys() {
+    let request = BeginUploadRequest {
+        r#ref: Some(HEAD.into()),
+        pack_id: Some(A.to_vec()),
+        bytes: Some(8),
+        ..Default::default()
+    };
+    for auth in [
+        authv2(),
+        AuthMode::Bearer {
+            token: Redacted::new(TOKEN),
+        },
+    ] {
+        let server = setup(auth).serve();
+        assert_eq!(
+            server.unary("BeginUpload", &request, &[]).await.code(),
+            "unauthenticated"
+        );
+        assert_eq!(
+            server
+                .json("BeginUpload", &serde_json::json!({}), &[])
+                .await
+                .code(),
+            "unauthenticated"
+        );
+    }
+    let server = setup(authv2()).serve();
+    let auth = signed_body(7, "BeginUpload", &request.encode_to_vec(), 91);
+    let reply = server.unary("BeginUpload", &request, &auth).await;
+    assert_eq!(reply.code(), "unimplemented");
+    assert_eq!(reply.json()["message"], "upload tickets are not configured");
+    let server = setup(AuthMode::Bearer {
+        token: Redacted::new(TOKEN),
+    })
+    .serve();
+    let reply = server
+        .unary(
+            "BeginUpload",
+            &request,
+            &[("authorization", format!("Bearer {TOKEN}"))],
+        )
+        .await;
+    assert_eq!(reply.code(), "unimplemented");
+    assert_eq!(reply.json()["message"], "BeginUpload requires auth v2");
 }
 
 #[tokio::test]

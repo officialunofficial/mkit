@@ -2,7 +2,8 @@
 //!
 //! Every case talks to the server only through [`Ctx`]'s client, names its
 //! refs under `refs/heads/conformance/<run_id>/<case>/`, and asserts Connect
-//! codes and typed outcomes, never message text or chunk counts.
+//! codes and typed outcomes. Message text is checked only when the spec fixes
+//! it, such as the `BeginUpload` cap error; chunk counts are not prescribed.
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -38,6 +39,7 @@ mod quota;
 mod refs;
 mod replay;
 mod repository;
+mod tickets;
 mod timers;
 mod upload;
 
@@ -155,6 +157,10 @@ macro_rules! cases {
 }
 
 cases! {
+    "tickets.begin_upload_new" => tickets::begin_upload_new, M1, [Tickets, AuthV2], [];
+    "tickets.begin_upload_idempotent" => tickets::begin_upload_idempotent, M1, [Tickets, AuthV2], [];
+    "tickets.begin_upload_caps" => tickets::begin_upload_caps, M1, [Tickets, AuthV2], [];
+    "tickets.begin_upload_packmap_refused" => tickets::begin_upload_packmap_refused, M1, [Tickets, AuthV2], [];
     "leases.bump_completes_and_writes_continue" => leases::bump_completes_and_writes_continue, M1, [EpochLeases, TestFaults], [];
     "info.shape_and_policy" => info::shape_and_policy, M1, [], [];
     "info.ignores_repository_header" => info::ignores_repository_header, M1, [], [];

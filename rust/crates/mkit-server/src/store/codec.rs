@@ -15,7 +15,9 @@ use super::partition::Partition;
 use crate::error::Code;
 use crate::quota::QuotaState;
 use crate::refs::is_served_ref_name;
-use crate::replay::{ReplayRecord, ReplayState, StoredRejection, StoredResult, UpdateRefResult};
+use crate::replay::{
+    BeginUploadResult, ReplayRecord, ReplayState, StoredRejection, StoredResult, UpdateRefResult,
+};
 use crate::repo::RepoName;
 use mkit_core::repo_identity::RepositoryIdentity;
 use mkit_core::upload_parts::MIN_PART_SIZE;
@@ -312,12 +314,24 @@ enum StateV1 {
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum ResultV1 {
     UpdateRefCommitted,
-    UpdateRefConflict { current: Option<String> },
+    UpdateRefConflict {
+        current: Option<String>,
+    },
     AdvanceCommitted,
     AdvanceHeadConflict,
     AdvancePackmapConflict,
     UploadPack,
-    Rejected { code: String, message: String },
+    BeginUploadAlreadyPresent,
+    BeginUploadTicket {
+        id: String,
+        part_size: u64,
+        expires_at_ms: u64,
+        token_hex: String,
+    },
+    Rejected {
+        code: String,
+        message: String,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -691,6 +705,20 @@ pub fn encode_replay_record(record: &ReplayRecord) -> Value {
                 StoredResult::AdvanceRefs(AdvanceOutcome::PackmapConflict) => {
                     ResultV1::AdvancePackmapConflict
                 }
+                StoredResult::BeginUpload(BeginUploadResult::AlreadyPresent) => {
+                    ResultV1::BeginUploadAlreadyPresent
+                }
+                StoredResult::BeginUpload(BeginUploadResult::Ticket {
+                    id,
+                    part_size,
+                    expires_at_ms,
+                    token,
+                }) => ResultV1::BeginUploadTicket {
+                    id: to_hex(id),
+                    part_size: *part_size,
+                    expires_at_ms: *expires_at_ms,
+                    token_hex: to_hex_bytes(token),
+                },
                 StoredResult::UploadPack => ResultV1::UploadPack,
                 StoredResult::Rejected(r) => ResultV1::Rejected {
                     code: r.code().as_str().to_owned(),
@@ -724,6 +752,28 @@ pub fn decode_replay_record(value: &Value) -> Result<ReplayRecord, StoreError> {
             }
             ResultV1::AdvancePackmapConflict => {
                 StoredResult::AdvanceRefs(AdvanceOutcome::PackmapConflict)
+            }
+            ResultV1::BeginUploadAlreadyPresent => {
+                StoredResult::BeginUpload(BeginUploadResult::AlreadyPresent)
+            }
+            ResultV1::BeginUploadTicket {
+                id,
+                part_size,
+                expires_at_ms,
+                token_hex,
+            } => {
+                if part_size < mkit_core::upload_parts::MIN_PART_SIZE
+                    || !part_size.is_power_of_two()
+                    || token_hex.is_empty()
+                {
+                    return Err(corrupt("invalid stored ticket result"));
+                }
+                StoredResult::BeginUpload(BeginUploadResult::Ticket {
+                    id: hash_from(&id)?,
+                    part_size,
+                    expires_at_ms,
+                    token: hex_bytes(&token_hex)?,
+                })
             }
             ResultV1::UploadPack => StoredResult::UploadPack,
             ResultV1::Rejected { code, message } => {

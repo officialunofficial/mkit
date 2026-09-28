@@ -229,7 +229,7 @@ async fn missing_and_pack_guards<N: NamespaceStore>(
         );
         let authenticated = authenticate(pipe, Procedure::UploadPack, &upload.headers).unwrap();
         assert_eq!(
-            pipe.begin_upload(&authenticated, Some(&[42; 32]), Some(0))
+            pipe.open_upload(&authenticated, Some(&[42; 32]), Some(0))
                 .await
                 .err()
                 .unwrap()
