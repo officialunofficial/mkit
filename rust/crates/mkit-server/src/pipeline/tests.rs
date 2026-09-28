@@ -262,10 +262,22 @@ fn single_sharding_watermark_reads_namespace_outbox() {
     );
     let shards = now(env.pipe.active_shards(&namespace, None, 1)).unwrap();
     assert_eq!(shards.shards, vec![ns()]);
-    now(env.pipe.meta.apply(&ns(), Batch::new().put(
-        keys::lease_recovery(), codec::encode_lease_recovery(&codec::LeaseRecovery { resumed_at_ms: u64::try_from(T0).unwrap() }),
-    ))).unwrap();
-    assert_eq!(now(env.pipe.namespace_relay_watermark(&namespace)).unwrap_err().code(), Code::Unavailable);
+    now(env.pipe.meta.apply(
+        &ns(),
+        Batch::new().put(
+            keys::lease_recovery(),
+            codec::encode_lease_recovery(&codec::LeaseRecovery {
+                resumed_at_ms: u64::try_from(T0).unwrap(),
+            }),
+        ),
+    ))
+    .unwrap();
+    assert_eq!(
+        now(env.pipe.namespace_relay_watermark(&namespace))
+            .unwrap_err()
+            .code(),
+        Code::Unavailable
+    );
 }
 
 #[cfg(feature = "test-faults")]

@@ -385,16 +385,33 @@ async fn creation_and_cost<N: NamespaceStore>(backend: N, sharding: Sharding) {
         UpdateRefResult::Committed
     );
     let calls = store.take_calls();
-    assert_eq!(calls.len(), 4, "{sharding:?}: {calls:?}");
-    assert!(matches!(
-        calls.as_slice(),
-        [
-            Call::Many(..),
-            Call::Many(..),
-            Call::Apply(..),
-            Call::Apply(..)
-        ]
-    ));
+    assert_eq!(
+        calls.len(),
+        if sharding == Sharding::D34 { 5 } else { 4 },
+        "{sharding:?}: {calls:?}"
+    );
+    assert!(if sharding == Sharding::D34 {
+        matches!(
+            calls.as_slice(),
+            [
+                Call::Many(..),
+                Call::Scan(Partition::Ref { .. }),
+                Call::Many(..),
+                Call::Apply(..),
+                Call::Apply(..)
+            ]
+        )
+    } else {
+        matches!(
+            calls.as_slice(),
+            [
+                Call::Many(..),
+                Call::Many(..),
+                Call::Apply(..),
+                Call::Apply(..)
+            ]
+        )
+    });
     registered(&store, sharding, &first).await;
 
     let steady = signed(&pipe, &identity("first"));
@@ -425,13 +442,14 @@ async fn creation_and_cost<N: NamespaceStore>(backend: N, sharding: Sharding) {
         .await
         .unwrap();
     let calls = store.take_calls();
-    let expected_calls = if sharding == Sharding::D34 { 4 } else { 3 };
+    let expected_calls = if sharding == Sharding::D34 { 5 } else { 3 };
     assert_eq!(calls.len(), expected_calls, "{sharding:?}: {calls:?}");
     if sharding == Sharding::D34 {
         assert!(matches!(
             calls.as_slice(),
             [
                 Call::Many(..),
+                Call::Scan(Partition::Ref { .. }),
                 Call::Many(..),
                 Call::Apply(..),
                 Call::Apply(..)
@@ -540,8 +558,12 @@ async fn no_state_on_rejection<N: NamespaceStore>(backend: N, sharding: Sharding
             Code::PermissionDenied
         );
         let calls = store.take_calls();
-        assert_eq!(calls.len(), 2);
-        assert!(calls.iter().all(|call| matches!(call, Call::Many(..))));
+        assert_eq!(calls.len(), if sharding == Sharding::D34 { 3 } else { 2 });
+        assert!(
+            calls
+                .iter()
+                .all(|call| matches!(call, Call::Many(..) | Call::Scan(..)))
+        );
         let p = coordinator(sharding, &auth);
         for key in [
             keys::namespace_record(),
@@ -647,7 +669,7 @@ async fn single_addressing<N: NamespaceStore>(backend: N, sharding: Sharding) {
         .unwrap();
     assert_eq!(
         store.take_calls().len(),
-        if sharding == Sharding::D34 { 4 } else { 2 }
+        if sharding == Sharding::D34 { 5 } else { 2 }
     );
     assert_eq!(
         *observed.admitted.lock().unwrap(),

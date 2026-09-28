@@ -462,8 +462,11 @@ async fn rejected_existing_repo<N: NamespaceStore>(
                 Code::PermissionDenied
             );
             let calls = store.take();
-            assert_eq!(calls.len(), 2, "{calls:?}");
-            assert!(calls.iter().all(|c| matches!(c, Call::Many(..))));
+            assert_eq!(calls.len(), 3, "{calls:?}");
+            assert!(matches!(
+                calls.as_slice(),
+                [Call::Many(..), Call::Other, Call::Many(..)]
+            ));
             assert!(
                 store
                     .inner
@@ -920,16 +923,20 @@ async fn sweep<N: NamespaceStore + 'static>(
     assert!(calls.iter().any(|c| matches!(c, Call::Apply(Partition::Coordinator(_), b, BatchOutcome::Committed)
         if b.writes.contains(&Write::Delete(old_timer.clone())) && b.writes.len() == 3 && b.preconditions.len() == 4)),
         "renewal still uses four guards and three writes");
-    let renewal_ref_ops = calls.iter().find_map(|c| match c {
-        Call::Apply(Partition::Ref { .. }, b, BatchOutcome::Committed) => Some((b.preconditions.len(), b.writes.len())),
-        _ => None,
-    }).unwrap();
-    committed(&pipe, &a, REF, 3).await;
-    let steady_ref_ops = store.take().iter().find_map(|c| match c {
-        Call::Apply(Partition::Ref { .. }, b, BatchOutcome::Committed) => Some((b.preconditions.len(), b.writes.len())),
-        _ => None,
-    }).unwrap();
-    assert_eq!(renewal_ref_ops, steady_ref_ops, "the watermark adds no ref batch ops");
+    let renewal_ref_ops = calls
+        .iter()
+        .find_map(|c| match c {
+            Call::Apply(Partition::Ref { .. }, b, BatchOutcome::Committed) => {
+                Some((b.preconditions.len(), b.writes.len()))
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        renewal_ref_ops,
+        (4, 4),
+        "the ref batch keeps its lease installation and three other writes"
+    );
     assert!(
         store
             .inner
@@ -1024,6 +1031,7 @@ async fn expired_lease_is_kept_until_source_outbox_drains() {
             &source,
             Batch::new()
                 .put(keys::relay(1), codec::encode_relay(&relay).unwrap())
+                .put(keys::outbox_sequence(), codec::encode_u64(1))
                 .put(keys::timer(100, kinds::RELAY.get(), b""), Value::default())
                 .put(Key::new(&b"tdr\0"[..]), codec::encode_u64(10_100)),
         )
