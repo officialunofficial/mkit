@@ -18,11 +18,13 @@
 
 mod blob;
 mod layout;
+mod multipart;
 #[cfg(test)]
 mod tests;
 
 pub use blob::{FsBlobStore, FsPackSink};
 pub use layout::{FsLayoutStore, META_MARKER};
+pub use multipart::FsPartSink;
 use std::io::{self, ErrorKind};
 
 use mkit_transport_file::RefFileError;

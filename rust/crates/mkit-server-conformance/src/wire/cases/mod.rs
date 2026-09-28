@@ -34,6 +34,7 @@ mod health;
 mod info;
 mod leases;
 mod list;
+mod multipart;
 mod packs;
 mod policy;
 mod quota;
@@ -182,6 +183,10 @@ cases! {
     "grants.oversize_header_denied" => grants::oversize_header_denied, M2, [Grants, MultiRepo, AuthV2], [];
     "grants.non_ascii_header_denied" => grants::non_ascii_header_denied, M2, [Grants, MultiRepo, AuthV2], [];
     "grants.retry_with_changed_grant_returns_saved_result" => grants::retry_with_changed_grant_returns_saved_result, M2, [Grants, MultiRepo, AuthV2], [];
+    "multipart.three_parts" => multipart::three_parts, M1, [Multipart, AuthV2], [MultiRepo];
+    "multipart.resume_receipts" => multipart::resume_receipts, M1, [Multipart, AuthV2], [MultiRepo];
+    "multipart.root_mismatch_invisible" => multipart::root_mismatch_invisible, M1, [Multipart, AuthV2], [MultiRepo];
+    "multipart.cross_repository_no_oracle" => multipart::cross_repository_no_oracle, M1, [Multipart, AuthV2, MultiRepo], [];
     "tickets.begin_upload_new" => tickets::begin_upload_new, M1, [Tickets, AuthV2], [];
     "tickets.begin_upload_idempotent" => tickets::begin_upload_idempotent, M1, [Tickets, AuthV2], [];
     "tickets.begin_upload_caps" => tickets::begin_upload_caps, M1, [Tickets, AuthV2], [];
@@ -517,6 +522,15 @@ impl Ctx {
 
     pub(crate) fn client(&self) -> &Client {
         &self.client
+    }
+
+    pub(crate) fn reconnect(&self) -> Result<Self, String> {
+        Ok(Self {
+            client: self.client.reconnect()?,
+            profile: self.profile.clone(),
+            case: self.case,
+            note: self.note.clone(),
+        })
     }
 
     /// Attach a note to a passing verdict (e.g. a measured size).

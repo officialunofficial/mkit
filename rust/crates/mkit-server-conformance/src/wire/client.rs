@@ -39,10 +39,12 @@ pub enum Rpc {
     PackExists,
     /// `BeginUpload`
     BeginUpload,
-    /// `UploadPack` (client-streaming)
-    UploadPack,
     /// `UploadPart` (client-streaming)
     UploadPart,
+    /// `CompleteUpload`
+    CompleteUpload,
+    /// `UploadPack` (client-streaming)
+    UploadPack,
     /// `DownloadPack` (server-streaming)
     DownloadPack,
 }
@@ -58,8 +60,9 @@ impl Rpc {
             Self::AdvanceRefs => "/mkit.transport.v1.TransportService/AdvanceRefs",
             Self::PackExists => "/mkit.transport.v1.TransportService/PackExists",
             Self::BeginUpload => "/mkit.transport.v1.TransportService/BeginUpload",
-            Self::UploadPack => "/mkit.transport.v1.TransportService/UploadPack",
             Self::UploadPart => "/mkit.transport.v1.TransportService/UploadPart",
+            Self::CompleteUpload => "/mkit.transport.v1.TransportService/CompleteUpload",
+            Self::UploadPack => "/mkit.transport.v1.TransportService/UploadPack",
             Self::DownloadPack => "/mkit.transport.v1.TransportService/DownloadPack",
         }
     }
@@ -72,8 +75,9 @@ impl Rpc {
             Self::UpdateRef
                 | Self::AdvanceRefs
                 | Self::BeginUpload
-                | Self::UploadPack
                 | Self::UploadPart
+                | Self::CompleteUpload
+                | Self::UploadPack
         )
     }
 }
@@ -246,6 +250,11 @@ impl Client {
             http,
             base: Arc::from(base),
         })
+    }
+
+    /// A new HTTP client for the same server, with no connection state.
+    pub fn reconnect(&self) -> Result<Self, String> {
+        Self::new(&Url::parse(&self.base).map_err(|e| e.to_string())?)
     }
 
     async fn send(&self, req: http::Request<Bytes>) -> Result<Reply, String> {
