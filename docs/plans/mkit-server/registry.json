@@ -1778,7 +1778,7 @@
       "4.11"
     ],
     "size": "M",
-    "summary": "Builds inclusion and byte-range disclosure proofs, including multi-chunk bundles for ranges across chunk boundaries, verified by mkit-wasm.",
+    "summary": "Query proof ranges: MKDP v2 within a chunk, MKDS v1 across chunks; mkit-core/mkit-wasm span verifiers, boundary-aware builder and Workers in-memory ObjectSource prefetch (R-109).",
     "human_action": false,
     "area_gates": [
       "rust",
@@ -1797,7 +1797,7 @@
       "2.11"
     ],
     "size": "M",
-    "summary": "Private repos require a valid URL token or signed-read headers, get Cache-Control: private, and are checked for visibility per request.",
+    "summary": "Private HTTP requires valid URL tokens and private caching bounded by expiry; visibility checked per request. Signed-read HTTP GETs are deferred (R-109).",
     "human_action": false,
     "area_gates": [
       "rust",
@@ -1813,7 +1813,7 @@
       "4.12"
     ],
     "size": "M",
-    "summary": "Mounts HTTP serving natively and on Workers with FS/S3/R2 range reads, streaming bodies and CORS for GET/HEAD.",
+    "summary": "HTTP serving with FS/S3/R2 ranges, streaming, GET/HEAD/OPTIONS CORS including native HEAD, and query-string redaction (R-109).",
     "human_action": false,
     "area_gates": [
       "rust",
