@@ -1,0 +1,9 @@
+{
+  "reject": {
+    "code": "permission_denied",
+    "message": "content policy hit"
+  },
+  "flaggedObjects": [
+    "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI="
+  ]
+}

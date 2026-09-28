@@ -10,7 +10,8 @@ audience: implementers of mkit.transport.v1 servers and of deployment business l
 ## 1. Scope and relation to SPEC-TRANSPORT-CONNECT
 
 This specification defines server-internal pipeline guarantees, durable
-outcomes, and the contract between a server and deployment business logic.
+outcomes and lifecycle events, storage leases, server garbage collection,
+and the contract between a server and deployment business logic.
 An independent hook implementation can use this contract and the
 `mkit.server.hooks.v1` schema without using a server implementation.
 
@@ -27,7 +28,10 @@ The encoding, domain-separator, and golden-vector conventions of that
 specification apply throughout this document.
 
 A server that runs remote hooks MUST implement §5–§8. A server without
-remote hooks MUST still implement §2–§5. A deployment implements the
+remote hooks MUST still implement §2–§5 and §10. Every configured inspector,
+including an in-process inspector without a remote hook, is bound by §11.
+Servers MUST also implement the applicable indexed-mode, storage-lease, and
+server-GC requirements of §§9, 12, and 13. A deployment implements the
 business decisions exposed by hooks; the server implements the pipeline,
 validation, durable recording, and delivery guarantees specified here.
 
@@ -36,8 +40,12 @@ policy, moderation policy, or the deployment's account model.
 [SPEC-WRITE-GRANTS](SPEC-WRITE-GRANTS.md) remains authoritative for grants,
 their verification, and the preconditions they carry into apply.
 
-Sections 10–14 reserve the M5 contracts. Inspection in §6.4 is provisional:
-the call shape is fixed, and M5 may add fields additively.
+Sections 10–18 cover the M5 contracts: §§10–11 specify the published view
+and inspection, and §§12–13 specify storage leases, lifecycle events, and
+server garbage collection. The other M5 sections remain reserved. Inspection
+fields extend the original hook shape additively.
+For a branch, its head and packmap share one publication sequence even
+when either is written through `UpdateRef` (§10.2).
 
 ## 2. Pipeline order
 
@@ -71,8 +79,10 @@ as STC §7.1 requires; this list names server-internal extension points.
    receipt signing for the committed operation.
 8. **Outcome delivery.** Deliver the durable outcome to the configured
    sink under §5 and, for remote hooks, §6.5 and §8.
-9. **Asynchronous inspection and lease events.** Run configured
-   asynchronous inspection and lease-policy events after apply.
+9. **Asynchronous inspection and lifecycle events.** Run configured
+   asynchronous inspection after apply. Storage-lease timers perform
+   transition side effects and durably record configured events under §12; request
+   enforcement evaluates storage leases independently of those timers.
 
 Stages before stage 4 MUST NOT write server state. Admission may plan a
 default quota reservation, but that reservation MUST be committed with
@@ -135,13 +145,14 @@ A conforming server MUST enforce these rules:
 - An unknown scheduled-work kind MUST be retained, never discarded.
 - Startup with `namespace_policy = any` and default admission MUST be
   refused unless explicitly overridden, as STC §7.5 requires.
-- An outcome MUST NOT be dropped. It remains durable until acknowledged.
+- An outcome or lifecycle event MUST NOT be dropped. It remains durable
+  until acknowledged.
 
 Unknown scheduled work remains available for a version that understands
 it. Treating that work as successfully completed would discard an
 obligation that the current server cannot interpret.
 
-## 5. Outcomes and the outbox
+## 5. Outcomes, lifecycle events and the outbox
 
 Every reservation granted by admission MUST get exactly one terminal
 outcome: `Committed`, `Aborted`, or `Expired`; a paid read instead uses
@@ -214,13 +225,17 @@ be at least once, using the reservation id as the idempotency key.
 There is no ordering guarantee between reservations. A receiver MUST
 treat a repeated outcome for the same reservation as the same result.
 
-The durable outbox holds outcomes awaiting acknowledgement. Delivery
+The durable outbox holds outcomes and, when an Event sink is configured,
+§12 lifecycle events awaiting acknowledgement. Events use `event_id`
+as their idempotency key; event acknowledgement does not acknowledge an
+outcome or another event. Delivery
 attempts and process restarts MUST NOT discard an unacknowledged row.
 Acknowledging one reservation does not acknowledge another reservation.
 
 A server MAY refuse new admitted writes with retryable `unavailable`
-while its undelivered outcome backlog exceeds a configured bound.
-It MUST NOT drop outcomes to relieve that backlog. Reads and writes
+while its combined undelivered outcome and event backlog exceeds a
+configured bound. Events MUST count toward that bound. The server MUST
+NOT drop outcomes or events to relieve that backlog. Reads and writes
 that do not run admission MUST be unaffected by this backpressure.
 
 `new_to_store` bytes appear only in `Committed`, as STC §5.1 requires
@@ -252,6 +267,7 @@ HTTPS, subject to the loopback exception below. Its service name is
 | Admit | `/mkit.server.hooks.v1.HooksService/Admit` |
 | Inspect | `/mkit.server.hooks.v1.HooksService/Inspect` |
 | Outcome | `/mkit.server.hooks.v1.HooksService/Outcome` |
+| Event | `/mkit.server.hooks.v1.HooksService/Event` |
 
 Hook servers MUST support the JSON codec, `application/json`. They
 MAY also support the binary codec. The calling server MUST send JSON
@@ -266,7 +282,7 @@ Scalar fields use explicit presence. In particular, absence of
 `new_to_repo_bytes` means unknown; a present value of zero means the
 server knows that zero bytes are new to the repository.
 
-A deployment MAY implement any subset of the four RPCs. The calling
+A deployment MAY implement any subset of the five RPCs. The calling
 server MUST call only the hooks it is configured to use. Configuration
 of a subset does not change the semantics of a hook that is enabled.
 
@@ -369,8 +385,14 @@ precondition under the client RPC's STC contract.
 Neither field carries the grant statement or its signature.
 
 `AuthorizeResponse.result` selects `allow` or `deny`. `AuthorizeAllow`
-is an empty message permitting the operation to continue. An allowance
-does not itself perform admission or commit a write.
+permits the operation to continue. Its `writer_view` boolean lets an
+`authority` hook classify a signed caller as a repository writer under
+§10.1. A `check` hook MUST NOT confer writer status through this field.
+An allowance does not itself perform admission, authorize a private read,
+or commit a write.
+For an otherwise authorized public read, an `authority` hook consulted
+solely for writer-view classification cannot deny the read: a denial or
+hook failure selects the reader view (§10.1).
 
 `Deny.code` is a Connect code name. For Authorize, the allowed names
 are exactly `permission_denied`, `not_found`, and `unauthenticated`.
@@ -386,7 +408,7 @@ Code fallback and message replacement are the specified sanitization
 of a deliberate denial, not hook transport failures.
 
 The same `Deny` message shape is used by Admit and Inspect. For either
-hook's denial, the server MUST answer `permission_denied` with HTTP 403,
+hook's pre-commit denial, the server MUST answer `permission_denied` with HTTP 403,
 never 402, whatever `Deny.code` says, as STC §5 requires for an
 admission denial. The public-message sanitation rule above applies
 to denials from all three hooks.
@@ -488,39 +510,55 @@ payment authorization, quota hold, or another external obligation.
 The reservation id lets the later outcome discharge that obligation
 without exposing the deployment's internal account identifiers.
 
-### 6.4 Inspect (provisional)
+### 6.4 Inspect
 
-This section is provisional. Its call shape is fixed; M5 may add fields
-additively. Inspection follows the configured fail-closed or publish
-mode, with failure handling defined in §8.
+Inspection follows §11, with the caller's published view defined in §10.
+`publish` and `fail_closed` apply only to inspector unavailability, never
+as an override of a deliberate verdict.
 
 `InspectRequest.operation` is the operation defined in §6.2.
-`InspectRequest.objects` lists the objects selected for inspection.
-Each `InspectObject.id` is a 32-byte object id; `InspectObject.size`
-is its unsigned size in bytes.
+Across an inspector's batches, `InspectRequest.objects` MUST enumerate
+the inspected set in §11.1; each call contains its assigned batch.
+The listed objects are decoded pack entries in indexed mode, including
+file objects newly reachable from previously added packs.
+Each `InspectObject.id` is a 32-byte object id; `size` is its unsigned
+object size in bytes. `kind` identifies `BLOB`, `CHUNKED_FILE` (the
+ChunkedBlob manifest), or `CHUNK` under `InspectObjectKind`.
 
-Object bytes MUST NOT be sent in the Inspect request. The request
-contains identifiers and sizes only. Informative: an inspector that
-needs content fetches it out of band through the deployment's object
-serving facilities.
+`InspectRequest.phase` MUST be `INSPECT_PHASE_PRE_RECEIVE` at stage 5 or
+`INSPECT_PHASE_QUARANTINE` at stage 9. `inspection_id` MUST be nonempty
+and identify the logical inspection under §11.3. New callers MUST send
+explicit phases and kinds; `UNSPECIFIED` is retained for the original
+additive wire shape, not permission to omit the inspected set.
 
-`InspectResponse.verdict` selects one of these alternatives:
+Object bytes MUST NOT be sent in the Inspect request. Inspectors that
+need bytes MUST fetch them through a deployment-private channel, never
+through the public serving path, which serves only published content.
+That private channel MUST be accessible only to authorized inspectors.
+
+`InspectResponse.verdict` selects one alternative:
 
 | Alternative | Meaning |
 |---|---|
-| `pass` | An `InspectPass` empty message: inspection permits the content. |
-| `quarantine` | An `InspectQuarantine` message: the content should be quarantined under the configured inspection mode. |
-| `reject` | A `Deny` message: inspection rejects the operation, subject to the configured mode. |
+| `pass` | This inspector permits the inspected content. |
+| `quarantine` | Hold an unpublished advance or suspend serving flagged content after publication (§11). |
+| `reject` | Pre-receive denial, or an asynchronous hit requiring takedown (§11). |
+| `defer` | Asynchronous re-poll with `retry_after_ms` (§11.3); invalid in pre-receive. |
 
-`InspectQuarantine.reason` explains the quarantine verdict. It is
-inspection-policy text, at most 512 bytes under §6.6, not an object
-body. An Inspect `reject` is answered as `permission_denied` with
-HTTP 403, never 402, whatever `reject.code` says, as STC §5 requires.
-`reject.message` follows §6.2's public-message sanitation rule.
+`InspectQuarantine.reason` is inspection-policy text, at most 512 bytes
+under §6.6, not an object body. A synchronous `reject` returns
+`permission_denied` with HTTP 403, never 402, whatever `reject.code`
+says. Its public message follows §6.2's sanitation rule. An asynchronous
+`reject` cannot reject an already committed push or replace `Committed`.
 
-An asynchronous verdict cannot reverse a ref write already committed.
-In publish mode, later inspection can lead to quarantine. The reserved
-M5 sections define the published-view and quarantine contracts.
+`flagged_objects` contains raw 32-byte object ids and is meaningful only
+with `reject` or `quarantine`. Each listed id MUST belong to the request's
+inspected set. Invalid ids or a nonempty list on `pass` or `defer` make
+the response invalid under §6.6. Every QUARANTINE-phase `reject` or
+`quarantine` MUST identify at least one flagged object; otherwise the
+response is invalid under §6.6. A PRE_RECEIVE verdict MAY leave the list
+empty because it governs the entire push. §11.3 immediately suspends
+serving flagged objects, and §14 defines the takedown rewrite mechanics.
 
 ### 6.5 Outcome
 
@@ -615,6 +653,7 @@ violating any response limit below is invalid and MUST be handled under
   response as invalid under §8. A hook MUST return a fresh id for each
   allowance.
 - `InspectQuarantine.reason` MUST be at most 512 bytes.
+- Inspect responses MUST satisfy the phase and flagged-id rules of §6.4.
 
 The applicable response oneof MUST select a decision or verdict.
 An absent decision does not constitute permission to continue.
@@ -625,7 +664,7 @@ client-visible response under STC.
 
 ### 7.1 Signed requests
 
-Every hook request, including Outcome delivered as a webhook, MUST
+Every hook request, including Outcome and Event delivered as webhooks, MUST
 be signed with a deployment hook key, except on a channel configured
 under §7.3. Signing covers the exact request body bytes sent on that
 channel; it does not sign a reserialized representation.
@@ -654,7 +693,8 @@ grants, or receipts. Distinct roles MUST use distinct keys.
 
 `<audience>` is the hook endpoint's canonical origin, using the same
 origin rules as STC §7.1 requires for its audience. It is not the
-`operation.audience` or `outcome.audience` carried inside the body.
+`operation.audience`, `outcome.audience`, or `event.audience` carried
+inside the body.
 
 Informative: the audience is an origin, so hook services at different
 paths on one origin share an audience. They SHOULD use distinct keys.
@@ -698,12 +738,13 @@ The hook server MUST:
    the exact received request body bytes.
 5. Reject replay of a nonce within the validity window.
 
-Outcome processing MUST additionally be idempotent by `reservation_id`.
+Outcome processing MUST additionally be idempotent by `reservation_id`;
+Event processing MUST be idempotent by `event_id`.
 Repeated logical delivery does not permit nonce replay to bypass the
 channel authentication check.
 
 Informative: a fresh signed delivery attempt can carry the same
-durable Outcome body with a fresh hook nonce and validity window.
+durable Outcome or Event body with a fresh hook nonce and validity window.
 Body whitespace and JSON field order affect its digest even when the
 decoded protobuf message is the same.
 
@@ -770,6 +811,9 @@ Authorize and Admit MUST fail closed. A transport error, timeout,
 non-2xx status, Connect error other than Authorize's deliberate Deny,
 or invalid response under §6.6 MUST deny the operation with retryable
 `unavailable` and MUST write no state.
+The exception is an otherwise authorized public read for which an
+authority hook is consulted solely to classify the writer view (§6.2):
+its denial or failure selects the reader view without an error.
 
 A deliberate `deny` in a 2xx hook response is not a hook failure.
 It uses the decision semantics of §6.2 or §6.3. Authorize's Deny is
@@ -779,18 +823,24 @@ Connect transport errors from failure handling.
 Timeouts are deployment configuration. Informative: a default hook
 timeout is 5 seconds.
 
-Outcome delivery MUST retry with exponential backoff and jitter until
-acknowledged. It MUST never be dropped. Any 2xx Connect response to
-Outcome is an acknowledgement. Transport errors, timeouts, and
-non-2xx responses leave the outcome awaiting delivery.
+Outcome and Event delivery MUST retry with exponential backoff and
+jitter until acknowledged. The server MUST NOT drop either. Any 2xx Connect
+response to Outcome or Event is an acknowledgement. Transport errors,
+timeouts, and non-2xx responses leave the outcome or event awaiting
+delivery.
 
 Informative: an initial retry interval of 1 second, a factor of 2,
 and a cap of 15 minutes are example settings. The §5 retention rule
 continues to apply regardless of the number of attempts.
 
-Inspect MUST follow the inspector's configured mode. In fail-closed
-mode, inspection failure rejects the push. In publish mode, publication
-proceeds and inspection can quarantine the content later.
+Inspect transport errors, timeouts, non-2xx responses, Connect errors,
+and invalid responses are inspector unavailability. They MUST follow
+that inspector's `on_unavailable` setting under §11, except that a
+request-size or §6.6-limit failure is never eligible for `publish`.
+Deliberate verdicts MUST follow their phase-specific semantics regardless
+of that setting.
+Synchronous `fail_closed` unavailability returns retryable `unavailable`;
+asynchronous unavailability never rejects the committed push.
 
 ## 9. Indexed mode
 
@@ -1137,33 +1187,849 @@ The pack-size and chain-depth limits are distinct. A pack below the
 size limit can still exceed the chain-depth cap. Neither limit changes
 repository-isolated resolution or permits global-existence disclosure.
 
-## 10. Published view (reserved, M5)
+## 10. Published view
+
+### 10.1 Caller's view
+
+A **caller's view** is the pair of visible ref values and visible repository
+membership used to answer that request. View selection MUST NOT grant
+read authorization or override repository privacy, suspension, or takedown.
+In particular, a `write`-only grant does not imply `read` of a private
+repository (SPEC-WRITE-GRANTS §6).
+
+`caller_view` is `writer`, `reader`, or `anonymous`. A caller is a writer
+only when its signed request establishes one of these for the repository:
+
+- an owner key;
+- a verified grant with `write` or `read,write` capability covering the
+  repository, with any ref scope;
+- an authenticated ssh/enc principal authorized to write; or
+- an authority source's Authorize allowance with `writer_view = true`.
+
+Writer classification is per repository, not per requested ref. A grant
+restricted to one ref can establish the repository's writer view; it does
+not authorize writes to other refs. SSH/enc uses the authenticated signed
+transport identity under SPEC-WRITE-GRANTS §10.
+
+With `write_policy = open`, any valid signed writer is a writer for this
+purpose; §11.1 therefore forbids inspection with that policy. For a public
+repository, the authority hook is consulted only for this classification:
+its denial or failure gives the reader view, not a read error. A bearer
+token by itself MUST NOT establish the writer view.
+
+All other authorized callers receive the reader view. An unauthenticated
+caller has `caller_view = anonymous` and receives the same published view
+where public reads are allowed. An unsigned request receives the reader
+view even if the caller possesses a write key. Clients with a signer MUST
+sign reads to be seen as writers (SPEC-WRITE-GRANTS §9.2).
+
+A writer sees live ref values and live repository membership, including
+all pending advances in the repository, subject to the serving stop for
+held content in §11.3. Readers and anonymous callers
+see published ref values and published membership only. These rules
+apply on every serving surface, including HTTP consumers of this
+abstract view.
+
+### 10.2 Per-ref clearance and publication
+
+Each ref MUST have an ordered advance sequence. The branch head
+`refs/heads/<x>` and `refs/mkit/packmap/<x>` share one sequence: every
+successful `AdvanceRefs`, head-only `UpdateRef`, or packmap-only
+`UpdateRef` appends an advance to that sequence. The advance value is
+the live (head, packmap) pair, and the pair MUST be published together.
+Other refs have their own sequences and target values. Failed writes do
+not append advances. In indexed mode with an inspector configured, a
+head-only `UpdateRef` MUST verify before apply that its unchanged packmap
+reconstructs the new head's closure; a packmap-only `UpdateRef` MUST
+verify the resulting pair too (§9.3; STC §4 defines the paired advance).
+This extra check is unnecessary in opaque mode or without inspectors,
+where the published view equals the live view.
+
+Each advance has a clearance state:
+
+| State | Meaning |
+|---|---|
+| `pending` | Inspection, dependency clearance, or both remain outstanding. |
+| `cleared` | Its inspection obligations and membership dependencies permit publication. |
+| `held` | A quarantine verdict awaits re-inspection or admin release under §11.3; a hold on an already-flagged id is released only by admin review (§16). |
+| `hit` | A rejection awaits takedown completion. |
+| `resolved` | Takedown, non-hit obligations, and §10.2 membership dependencies are complete; it no longer blocks the publication prefix. |
+
+The published value MUST be the value at the largest sequence number
+*k* for which every advance up to *k* is `cleared` or `resolved`.
+Until the first such value exists, the ref is absent to readers. A later
+pass MUST NOT skip an earlier `pending`, `held`, or `hit` advance. A
+`resolved` advance uses the value subject to completed takedown, never
+restores flagged content through its original value.
+
+**Published membership** is repository membership added by a `cleared`
+or `resolved` advance, subject to deletion, suspension, and takedown.
+For a `resolved` advance, it is the post-takedown membership of
+replacement packs, not the removed packs. §14 defines the rewrite
+mechanics. Server-initiated takedown pack rewrites and packmap updates
+are not advances: they take no advance sequence number and carry no new
+inspection obligation. An advance blocked only on a taken-down pack
+MUST be re-evaluated against the replacement packs.
+
+When no inspector is configured, a single-repository unticketed upload
+permitted by STC §7.6 has no inspection obligation: its membership is
+published with its storage commit, preserving STC's immediate membership
+rule. An inspection-enabled deployment cannot use that path (§11.1).
+An advance *k* clears only when all of these conditions hold:
+
+1. Its own inspection obligations pass under §11, or each receives its
+   explicit unavailable-publish deadline or audited admin release.
+2. Every pack on its packmap chain is already in published membership
+   or is added by *k* itself. For a non-branch ref, every object in its
+   reachable closure MUST be contained in at least one published pack,
+   counting *k*'s additions in the same atomic clearance.
+   External delta bases used by its packs (§9.4) MUST already be in
+   published membership; *k*'s additions do not satisfy that external
+   dependency.
+3. No flagged id in the repository occurs in its inspected set or its
+   packs. Such an advance is `held` under §11.3, not merely `pending`.
+
+A `hit` advance becomes `resolved` only when its §14 takedown is complete,
+all non-hit obligations are satisfied, and condition 2 holds for its
+post-takedown packmap chain and replacement packs. Its own replacement
+packs can publish atomically with resolution; other packs and external
+delta bases must already be in published membership.
+
+Clearing *k* MUST atomically publish its added membership and update the
+published ref pointer to the largest eligible prefix. Completion out of
+order can make membership eligible, but MUST NOT expose a ref value
+beyond that prefix. A branch's head and packmap MUST remain a pair in
+both live and published views. Publishing membership MUST durably
+schedule re-evaluation of every advance previously blocked on that
+membership, including an external delta-base dependency, in any ref.
+The scheduled work MUST be retained until completed and MUST run within
+a bounded time. The same rule applies when takedown replacement packs
+become published.
+
+A pack added by another advance that has not cleared or resolved blocks
+clearance. `AlreadyPresent` establishes live membership, not published
+membership. Thus branch B reusing a pack from pending branch A cannot
+publish it; neither can a tag pointing at a commit whose containing pack
+is pending. The advance's own additions qualify in the same atomic
+clearance, so initial publication has no circular membership dependency.
+
+Deletions under STC §7.8 or lease deletion under §12 MUST publish
+immediately and MUST NOT wait for inspection. They establish a ref-value
+publication boundary: later
+verdicts on older advances MUST NOT change or resurrect that ref value.
+Those verdicts still govern membership the older advances added: a pass
+publishes it, a hold keeps it unpublished, and a hit takes it down,
+except that membership invalidated by a repository-level lease deletion
+(§12.2) MUST NOT become visible again under any later verdict. Until its
+verdict arrives, such surviving membership is retained as §13.2 roots it.
+A recreated ref, or another ref reusing the packs, can clear when that
+membership becomes published. Later ref values are evaluated from the
+deletion boundary under the ordinary inspection and dependency rules.
+
+While its repository membership generation remains valid (§12.2), the
+server MUST retain every advance value strictly after the published
+pointer through the live value, in any clearance state, together with
+its packmap chain, closure packs, packs, and, transitively, the packs
+supplying external delta bases (§9.4) its packs use. Retention lasts until the
+published pointer reaches or passes the advance. A `hit` advance and
+its takedown replacement packs MUST additionally be retained until its
+§14 takedown completes, including when a deletion has moved the ref's
+publication boundary past that advance. §13 makes these GC roots.
+
+The published pointer MUST be written in the same apply for an advance
+that starts `cleared` and has an eligible prefix. An advance starting
+`held` leaves the previous published value in place.
+Published equals live exactly while no advance on that ref is held or
+pending (and no hit awaits resolution). A deployment with only
+synchronous inspectors MUST still maintain the published view.
+
+### 10.3 Every reader surface uses the published view
+
+`ListRefs`, `ReadRef`, `PackExists`, `DownloadPack`, `X-Mkit-Ref`, snapshots,
+URL tokens, HTTP object serving, and caches MUST answer from the caller's
+view. A pending ref value or unpublished pack MUST behave exactly like
+an absent value or pack: omit it from listings, return `exists = false`,
+or return `not_found`, as the surface's ordinary absent response requires.
+An existing published ref continues to return its previous published value.
+Reader responses MUST NOT expose live targets, pending pack ids, or
+inspection state through alternate metadata or errors.
+`AlreadyPresent` MUST NOT be answered for a pack containing an id hidden
+by a flag or hold; the server MUST answer as if the pack were absent.
+
+Published packlist nodes and delta bases MUST NOT reference unpublished
+or pending ids. Informative: when every ref is pending, a reader sees an
+existing empty repository. This is an accepted consequence of the
+published view.
+
+`X-Mkit-Ref` MUST NOT widen this view (STC §7.9). Snapshots and reader
+caches MUST be built only from published values and membership. Writer
+responses containing pending content MUST NOT enter a reader-visible
+cache. Index lag can delay publication but MUST NOT expose live membership
+to readers. A public serving copy or global byte reuse is not evidence of
+published membership in this repository.
+
+URL tokens MUST resolve in the published view even when issued by a writer
+(SPEC-WRITE-GRANTS §9.4). A token MUST NOT turn a pending object into a
+published one. HTTP serving MUST use visible ref values and visible
+membership from this section before returning object bytes or proofs.
+
+`GetServerInfoResponse.async_inspection` MUST report whether any asynchronous
+inspector is configured, independently of repository existence. Writers
+MUST sign reads to see their own pending content that is not held. Held
+content is hidden from every caller, even when this field is false
+because only synchronous inspectors are configured.
+
+## 11. Quarantine and inspection
+
+### 11.1 Configuration and inspected set
+
+Each configured inspector, remote or in-process, has a phase, `sync` or
+`async`, and an `on_unavailable` setting, `fail_closed` or `publish`.
+These settings govern only unavailability (§8); they MUST NOT override
+`reject`, `quarantine`, or `defer`. A deployment MUST refuse startup if
+opaque mode or `write_policy = open` is combined with any inspector.
+Opaque mode cannot enumerate pack objects; open writes let any signer
+obtain the writer view (§10.1). An async inspector or an inspector with
+`on_unavailable = publish` MUST configure
+`inspection_clear_deadline_ms`; otherwise startup MUST be refused.
+
+An inspection-enabled deployment MUST require ticketed uploads and
+advertise `begin_upload_threshold_bytes = 0` (STC §7.6), including in
+single-repository mode. This associates all added pack entries with an
+advance. Storage completion alone MUST NOT establish published
+membership.
+
+A file object is a plain blob of any size, a ChunkedBlob manifest, or a
+chunk. The inspected set of each advance MUST be the union of:
+
+1. every file object reachable from the advanced ref value but not
+   contained in the repository's published membership, including
+   manifests, their chunks, and extracted objects; and
+2. every file entry of every pack that the advance adds to repository
+   membership, whether reachable or not.
+
+The server MUST NOT permit any configuration to narrow this set by size,
+extraction status, or reachability within an added pack. The same set
+MUST be inspected in both phases. Duplicate object ids need only one
+entry; a blob used both as a file and as a chunk is reported once as a
+`BLOB`. Extraction creates a serving copy, not an exemption from
+inspection. Commit, tag and remix messages and tree entry names are
+not inspected; they remain a residual content channel.
+
+An inspected set larger than `inspect_batch_max_objects` MUST be sent
+in multiple Inspect calls of at most that many objects each. This named
+parameter defaults to 10,000. Each inspector has a separate obligation
+for each batch. Its advance-level obligation is satisfied only when
+every batch passes or its unflagged objects count as passed and its
+flagged objects are released or taken down under §11.3.
+A failure caused by the request's own size or §6.6 limits MUST NOT be
+eligible for unavailable-publish: its obligation remains `pending` and
+the server MUST use compliant batches before clearance.
+
+Rationale: the added-pack set extends inspection beyond newly reachable
+file objects to surplus entries. §9.3(c) permits entries outside the
+closure; a published whole-pack download could otherwise reveal them.
+Packs MUST NOT be rejected merely for surplus entries.
+
+### 11.2 Synchronous checks
+
+At stage 5, the server MUST call each synchronous inspector with
+`phase = INSPECT_PHASE_PRE_RECEIVE` before apply:
+
+| Result | Effect |
+|---|---|
+| `pass` | Satisfy this inspector's obligation and continue. |
+| `reject` | Reject with `permission_denied` (HTTP 403); do not commit the advance. |
+| `quarantine` | Commit the push, but start the advance `held`. |
+| Unavailable, `fail_closed` | Return retryable `unavailable`; do not commit the advance. |
+| Unavailable, `publish` | Commit with this obligation `pending`, schedule a QUARANTINE-phase inspection of the same set, and apply its configured clear deadline under §11.3. |
+
+`defer` is invalid in this phase. A reject from any synchronous
+inspector MUST deny the operation even if another returned quarantine.
+A pass by one inspector MUST NOT override another's quarantine or
+rejection. A synchronous hold persists even with no asynchronous
+inspector until QUARANTINE-phase re-inspection or admin release. The
+server MUST schedule that re-inspection on an admin release request or
+retry schedule. If no hold remains but async or unavailable-publish
+obligations remain, the committed advance starts `pending`; otherwise
+§10 determines clearance.
+
+A synchronous `fail_closed` `unavailable` is excluded from replay
+storage by STC §7.1. A retry therefore re-runs the pre-receive check.
+
+### 11.3 Asynchronous checks and resolution
+
+Stage 6 commits live ref values, added membership, obligations, and
+durable scheduling in the same apply. Stage 9 calls MUST be scheduled
+from the outbox or a timer, resumable across restarts, and retried with
+backoff. `AdvanceRefs` succeeds and records its applicable `Committed`
+outcomes under §3–§5; subsequent inspection MUST NOT change that outcome
+to `Aborted`, `Expired`, or rejection of the committed push.
+
+Each configured inspector gives each advance its own obligation, split
+into batches under §11.1. Each logical call MUST use a stable, nonempty
+`inspection_id`, unique within the deployment for its inspector,
+advance, phase, and inspected batch. Retries MUST preserve the id and
+batch; the inspector MUST handle them idempotently. Deliberate
+re-inspection uses a new id and supersedes the old logical call. The
+server MUST ignore verdicts for a superseded `inspection_id`. Hook
+authentication uses a fresh envelope under §7 as needed; its nonce is
+distinct from the inspection id.
+
+A `reject` or `quarantine` verdict satisfies that inspector's obligation
+for the batch's unflagged objects: they count as passed by that inspector.
+The flagged objects remain subject to the serving stop and review or
+takedown below. Other inspectors' obligations are unaffected.
+
+Before publication, the advance state is derived from its obligations
+with precedence `hit > held > pending > cleared`. A hit becomes
+`resolved` only after takedown completes, every non-hit obligation is
+satisfied, and §10.2's membership-dependency condition holds; until then
+it blocks the publication prefix.
+Publication of advance *k* occurs when *k* clears under §10.2. A
+verdict arriving afterward is post-publication even if another advance
+still blocks the ref pointer. It MUST NOT un-publish a ref value.
+
+| QUARANTINE-phase result | Effect |
+|---|---|
+| `pass` | Satisfy this inspector's batch obligation; clear when all obligations and §10 dependencies permit. |
+| `quarantine` | Before publication, hold until re-inspection or admin release. After publication, suspend serving the flagged content until review; release resumes serving. |
+| `reject` | Before publication, record a hit and perform takedown; resolve only after takedown and other obligations complete. After publication, perform takedown without rewinding the published pointer. |
+| `defer` | Re-poll after clamped `retry_after_ms`; leave the obligation outstanding. |
+| Unavailable, `fail_closed` | Leave the obligation `pending` and retry. |
+| Unavailable, `publish` | Satisfy this obligation only after its configured clear deadline; continue follow-up inspection. |
+
+A post-publication `reject` records a separate takedown obligation while
+the advance remains published. Once the rewrite completes, its state
+becomes `resolved` and its published membership is the replacement set.
+A post-publication `quarantine` records a separate serving suspension;
+the advance remains published while that suspension is reviewed.
+
+On a hit or a `quarantine` in either phase, before or after publication,
+the server MUST immediately stop serving every flagged object and every
+pack containing one to **all** callers, including writers. If a
+`quarantine` verdict carries no flagged ids, the server MUST
+hide every pack and object added by that advance from every caller.
+Writers still see the live ref value and the rest of their pending
+content that is not held. The serving stop covers `DownloadPack`,
+`PackExists`, snapshots, URL-token and HTTP responses, extracted copies,
+server-side reader caches, and use as a delta base. Each surface MUST
+give the same `not_found` or absent answer as for an absent object or
+pack. The server MUST invalidate server-side cached copies at once and
+MUST trigger a purge of shared caches through §16 or the deployment's
+purge interface. Serving MUST stop before any rewrite. Informative:
+removal from a shared cache takes effect within the deployment's purge
+latency. Under namespace policy `any`, an owner can mint grants freely;
+serving held content to writers would make quarantine a distribution
+channel.
+
+An advance whose inspected set or packs contain an id already flagged
+in the repository MUST become `held`, with those ids as its flagged
+objects, including on a re-push. Only admin review under §16 MAY release
+this hold; an unavailable-publish deadline MUST NOT release it. The
+server MUST re-evaluate all advances in the repository blocked on that
+flag when it is released or its takedown replacement membership is
+published. Releasing a flagged id releases the holds derived from it,
+subject to their other obligations.
+
+The server MUST clamp `retry_after_ms` to 1,000–60,000 milliseconds, with
+an absent or zero value meaning 1,000, as with PendingVerification (§9.5).
+A deferred verdict is not unavailability and MUST NOT trigger the
+unavailable-publish deadline.
+
+`inspection_clear_deadline_ms` is a REQUIRED nonnegative deployment
+parameter for each asynchronous inspector and each inspector with
+`on_unavailable = publish`. It is the elapsed time from the advance's
+commit to the deadline at which continued eligible unavailability
+permits clearance for that inspector. mkit specifies no default. The
+deadline MUST survive restarts; reattempts MUST NOT reset it. A
+request-size or §6.6-limit failure is never eligible (§11.1). A
+deadline MUST NOT release a deliberate hold, hit, flagged-id hold, or
+dependency on another unpublished advance. Reaching it MUST NOT cancel
+scheduled follow-up inspection; a later verdict still requires action.
+
+A post-publication `quarantine` suspends serving under the rule above
+until review. An admin release (§16) resumes serving; a later `reject`
+becomes a takedown under §14. Neither verdict rewinds the pointer.
+Removing an inspector with outstanding obligations MUST NOT silently
+waive them. Only an audited admin action under §16 MAY waive them;
+until then they remain outstanding. §14 defines takedown rewrite
+mechanics, while §16 defines the admin release and audit contract.
+
+## 12. Storage leases and lifecycle events
+
+### 12.1 Terms and scope
+
+Storage leases govern retention and access. They are unrelated to the
+namespace epoch leases of
+[SPEC-WRITE-GRANTS §5.4](SPEC-WRITE-GRANTS.md#54-epoch-leases-and-the-apply-check).
+Lease terms, prices, and renewal endpoints belong to deployment policy.
+mkit defines no default storage-lease durations. No storage lease means
+permanent retention, subject to separate administrative policy.
+
+A storage lease has `{expires_at_ms, grace_ms, suspension_ms}`.
+`expires_at_ms` is an absolute Unix epoch time in milliseconds;
+`grace_ms` and `suspension_ms` are nonnegative durations in milliseconds.
+Policy MUST explicitly set all three terms when assigning a lease.
+The server MUST reject terms whose state boundaries cannot be represented
+without overflow; it MUST NOT silently substitute defaults.
+
+Indexed deployments MUST support per-ref storage leases. The ref shard
+holds the per-ref terms; the namespace coordinator holds the
+repository-level default and propagates changes with `config_version`.
+An explicit per-ref lease overrides that default while the repository
+remains undeleted; otherwise the ref uses the repository default. Opaque
+deployments support repository-level
+storage leases only and MUST NOT accept per-ref terms.
+A deleted repository-level lease deletes every ref in the repository,
+including refs with explicit per-ref terms, and invalidates repository
+membership under §12.2. Per-ref terms do not restore the deleted
+repository generation.
+
+Repository-level changes MUST become effective within one epoch lease
+plus the configuration cache TTL. They MUST follow the visibility
+completion rule of
+[SPEC-WRITE-GRANTS §9.1](SPEC-WRITE-GRANTS.md#91-visibility): completion
+requires leased shards to acknowledge the change or lose their leases,
+and every other cached copy to expire or be invalidated.
+
+### 12.2 State and request enforcement
+
+For an undeleted lease, let `e = expires_at_ms`, `g = grace_ms`,
+`s = suspension_ms`, and `now` be the storage backend's time. State is a
+pure function of those terms and `now`:
+
+| State | Time interval | Effect |
+|---|---|---|
+| `active` | `now < e` | Normal reads and writes. |
+| `grace` | `e ≤ now < e + g` | Writes blocked; reads allowed. |
+| `suspended` | `e + g ≤ now < e + g + s` | Reads and writes blocked. |
+| `deleted` | `e + g + s ≤ now` | Terminal for this lease: remove the ref and its published pointer; objects await §13 GC. |
+
+An absent lease has state `active` without a time limit. Zero-length
+intervals are empty. The server MUST evaluate the effective storage-lease
+state on every repository request after authorization succeeds; access
+enforcement MUST NOT wait for a timer. An unauthorized caller MUST receive
+the ordinary authorization denial, byte-identical whether the lease exists
+or not. Repository-independent deployment discovery remains as STC
+§2.1 requires: it MUST NOT resolve a repository or depend on its
+storage-lease state.
+An expired state MUST NOT be served as active from a stale state cache.
+For branch deletion, head and packmap MUST be removed together, along
+with the branch's published pointer. A storage-lease deletion is a
+publication deletion boundary under §10, with the same published-view
+effect as a ref deletion under STC §7.8; later verdicts MUST NOT restore
+the old ref value. A repository-level deletion MUST remove every ref,
+including those with explicit per-ref terms, and each published pointer.
+Delayed removal MUST NOT make a logically deleted ref accessible or a
+GC root; §13.2 defines which advance membership remains a separate root
+after a per-ref deletion. Repository-level deletion MUST
+immediately invalidate the repository's existing membership as a single
+generation: reads and `AlreadyPresent` MUST see no old member, the
+invalidated membership MUST NOT satisfy the §§9.2–9.4 checks or the §13.3
+reliance rule, and a new lease MUST NOT restore old membership. A later verdict on an earlier
+advance MUST NOT make that invalidated membership visible again. §13
+later reclaims its data.
+
+Renewal during `grace` or `suspended`, with terms placing the lease in
+`active` at backend time, MUST restore `active`. `deleted` is terminal:
+a new lease permits new writes only and MUST NOT restore removed refs,
+published pointers, or the old lease's data. A late renewal MUST NOT
+cancel deletion of the old lease merely because timer work is delayed.
+A write to a ref whose own lease is `deleted` is not ref creation. It MUST
+remain blocked until an administrator sets a new lease under §12.3.
+
+Administrative suspension is a separate override, including applicable
+repository, namespace, and takedown suspensions. The effective state MUST
+be the more severe of storage-lease state and that override, in the order
+`active < grace < suspended < deleted`. Payment renewal MUST NOT lift
+an administrative or takedown suspension.
+
+A write in `grace` MUST return `permission_denied` with exactly
+`repository lease expired; writes blocked`. A per-ref `suspended` or
+`deleted` state MUST hide that ref from readers; a write to that ref
+MUST return `permission_denied` with exactly `lease suspended`.
+Reads in a suspended or deleted repository MUST return `not_found` to
+readers, without revealing repository existence; an authorized writer
+reading that repository MUST instead receive `permission_denied` with
+exactly `lease suspended`. Other writes blocked by suspension MUST
+return that same permission error.
+For a reader, the suspended-or-deleted repository's `not_found` MUST be
+byte-identical to a nonexistent repository response in code, message,
+details, and headers, as [SPEC-WRITE-GRANTS §9.3](SPEC-WRITE-GRANTS.md#93-read-authorization)
+requires for private reads.
+These storage-lease denials MUST NOT use `failed_precondition`, which
+would cause clients to restart `BeginUpload`. Read responses and caches
+MUST preserve the denial and MUST NOT expose suspended or deleted data
+through a cached successful response. Signed URL reads remain subject
+to these storage-lease checks and resolve only in the published view, as
+[SPEC-WRITE-GRANTS §9.4](SPEC-WRITE-GRANTS.md#94-signed-url-tokens) requires.
+Cache-purge wire details are reserved for §16.
+
+Pack and object surfaces, including `PackExists`, `DownloadPack`, HTTP
+object serving, and signed URL tokens, MUST enforce the
+repository-level effective state. A per-ref `suspended` or `deleted`
+state MUST hide that ref from `ReadRef`, `ListRefs`, and `X-Mkit-Ref`,
+together with its published pointer, as required above. It MUST NOT hide
+membership shared with other refs. Informative: deployments billing
+storage per repository should use repository-level leases; per-ref
+leases govern ref visibility, not byte availability.
+
+### 12.3 Setting leases and transition work
+
+`SetLease` assigns, replaces, or removes storage-lease terms for a
+repository default or, in indexed mode, an individual ref. The server
+MUST reject `SetLease` from any caller other than an administrator
+authorized for that scope. This authority includes shortening a lease.
+The server MUST evaluate shortened terms
+without waiting for a timer, subject to §12.1's completion bound for
+repository defaults. This includes transitions directly to suspension
+or deletion.
+Removing a repository default makes undeleted refs without per-ref
+terms permanent. Removing per-ref terms restores the repository default,
+or permanent retention if that default is absent. Both actions MUST NOT
+resurrect a deleted lease. Every SetLease action MUST be audited.
+The admin API wire, authentication, and audit-log details are reserved
+for §16; this section defines its semantics only.
+
+In indexed mode, the server MUST consult a deployment storage-lease
+policy hook only when creating a ref with no lease record. The decision
+MUST be one of explicit terms, inheritance of the repository default,
+or explicit permanent retention. These last two are distinct: inheritance
+follows later default changes, while explicit permanent retention does not.
+In opaque mode, the hook MUST run at repository creation and MUST choose
+repository-level terms or permanent retention; it MUST NOT set per-ref
+terms.
+Failure to obtain that policy decision MUST fail closed and MUST NOT
+create a permanently retained ref by treating failure as an absent lease.
+This is a policy obligation, not a remote-hook wire addition.
+`AdmitAllow.lease` is deferred; admission does not assign lease terms
+through the current hooks schema.
+
+Timers MUST durably perform transition side effects and, when an Event
+sink is configured, record one event for each transition due to expiry,
+renewal, policy change, or administrative change. Work MUST survive
+restart and MUST NOT record the same logical transition as distinct
+events. Without an Event sink, no Event outbox row is required. Timer delay
+never delays request enforcement. Expiry work MUST be conditional on
+the applicable lease instance and terms, so old work cannot delete a
+renewed ref. Once a lease is deleted, its pending deletion MUST target
+only that lease's ref incarnation; a new lease MUST treat those old refs
+as absent even before cleanup finishes. Delayed work MUST NOT delete a
+ref created under the new lease.
+Deletion side effects MUST use authoritative per-ref terms and the
+coordinator's repository default at the current `config_version`, read
+under a valid epoch lease. They MUST NOT use cached lease terms.
+
+### 12.4 Event messages and delivery
+
+`HooksService/Event(EventRequest)` delivers a lifecycle event.
+`EventRequest.event` is REQUIRED; `EventResponse` is empty. The shared
+`Event` fields are:
+
+| Field | Meaning |
+|---|---|
+| `event_id = 1` | Idempotency key: MUST be 1–128 bytes of `[A-Za-z0-9._:-]` and unique per server audience. |
+| `audience = 2` | The mkit server's canonical origin, distinct from the hook-channel signing audience. |
+| `repository = 3` | Full repository identity under STC §7.4. |
+| `occurred_unix_ms = 4` | Transition time as signed 64-bit Unix epoch milliseconds, independent of delivery time. |
+| `sequence = 5` | Unsigned 64-bit sequence, strictly increasing per `(repository, scope)` for distinct events of every kind. |
+| `kind` | Exactly one transition kind; `lease = 6` is defined here. Other kinds can extend the same envelope. |
+
+`LeaseTransition` has these fields:
+
+| Field | Meaning |
+|---|---|
+| `ref = 1` | Full ref name; empty means repository-level scope. |
+| `from = 2`, `to = 3` | Previous and resulting effective lease states. |
+| `lease_expires_unix_ms = 4` | Applicable storage lease's expiry; absent for permanent retention. |
+| `cause = 5` | `EXPIRY`, `RENEWAL`, `POLICY`, or `ADMIN`. |
+
+`LeaseState` numbers are `LEASE_STATE_UNSPECIFIED = 0`,
+`LEASE_STATE_ACTIVE = 1`, `LEASE_STATE_GRACE = 2`,
+`LEASE_STATE_SUSPENDED = 3`, and `LEASE_STATE_DELETED = 4`.
+`LeaseCause` numbers are `LEASE_CAUSE_UNSPECIFIED = 0`,
+`LEASE_CAUSE_EXPIRY = 1`, `LEASE_CAUSE_RENEWAL = 2`,
+`LEASE_CAUSE_POLICY = 3`, and `LEASE_CAUSE_ADMIN = 4`.
+Senders MUST populate every shared Event field and exactly one kind,
+and MUST supply known, non-unspecified states and a non-unspecified
+cause. Retries MUST retain the event id, sequence, scope, and body.
+Sequences MUST NOT reset on restart, renewal, or ref recreation. Future
+event kinds MUST share the same sequence space for their scope.
+
+An Event MUST describe the scope whose own lease terms, administrative
+override, or time-derived state changed. A repository-default change emits
+one repository-scope event; refs inheriting that default MUST NOT emit
+separate per-ref events, and receivers derive their effective state from
+the repository transition.
+An administrative override emits at the scope where it is set.
+
+When an Event sink is configured, events MUST use the same durable outbox
+as outcomes (§5), be delivered at least once, and remain retained until
+acknowledged. Without a configured sink, no Event is recorded. Delivery
+has no ordering guarantee. Receivers MUST deduplicate by `event_id` and use
+`sequence` to order events within their scope; an older late delivery
+MUST NOT roll back a newer state. Signing follows §7.1 and retry follows
+§8. Events count toward §5's combined backlog bound.
+
+The remote `CachePurge` contract is reserved for §16. A
+deployment-internal cache-purge interface does not add a remote RPC.
+
+## 13. Server garbage collection
+
+### 13.1 Named parameters
+
+| Parameter | Value or constraint | Meaning |
+|---|---|---|
+| `gc_grace` | Fixed: 7 d | Minimum time a repository candidate remains marked before removal. |
+| `relay_lag_bound` | Deployment configuration, default: 60 s | Membership-visibility retry bound under §9.4; elapsed time does not replace the GC watermark. |
+| `already_present_pin_window` | Minimum: the deployment's maximum ticket lifetime | Pack pin after an `AlreadyPresent` response. |
+| `MAX_APPLY_WINDOW`, `margin` | Defined by SPEC-WRITE-GRANTS §1.1 (deployment parameters with defaults) | Commit-window parameters used in §13.3; this spec does not redefine them. |
+
+The commit-deadline and `NotAfter` obligation on every write batch is
+[SPEC-WRITE-GRANTS §5.5](SPEC-WRITE-GRANTS.md#55-commit-deadline).
+The parameter definitions are in
+[SPEC-WRITE-GRANTS §1.1](SPEC-WRITE-GRANTS.md#11-named-parameters).
+
+### 13.2 Roots and liveness
+
+Per-repository GC MUST include all of the following roots:
+
+- Every live ref value, including each branch's packmap chain.
+- Every published pointer, including its head and packmap.
+- Every advance value strictly after the published pointer through and
+  including the live value under §10, in any clearance state while its
+  repository membership generation remains valid, with its packmap
+  chain, indexed closure packs, and packs that advance added.
+  It remains a root until the published pointer reaches or passes its
+  advance position.
+- Every `hit` advance's membership, packmap chain, closure packs, and
+  replacement packs until §14 takedown completes: flagged bytes are
+  preserved and replacements are durable. This remains a root behind
+  a later value and after ref or storage-lease deletion.
+- Every unexpired ticket's pack or packlist node.
+- Every unexpired hold.
+- Every takedown replacement pack (§14) not yet collected under §14's
+  own rules.
+
+Repository-level lease deletion invalidates the old membership generation:
+pending advance membership in that generation is not a root and cannot
+become visible again. A `hit` advance remains a separate root until
+§14 takedown completes, including when its membership was invalidated.
+
+An `AlreadyPresent` answer is planner use. If the pack contains any id
+hidden in that repository by a flagged or held verdict under §11, the
+server MUST answer as if the pack were absent and MUST NOT answer
+`AlreadyPresent`. Otherwise, it MUST conditionally unmark and pin a
+member that still exists and whose pack is not `deleting`. The pin MUST
+be durable before the answer and protect its pack against repository
+removal and byte deletion for `already_present_pin_window`, beginning at
+the answer. Repeated answers extend protection to cover each answer's
+window. Pins remain effective throughout the removal protocol. If the
+conditional unmark and pin cannot succeed, the server MUST issue a ticket
+or answer retryable `unavailable`; it MUST NOT answer `AlreadyPresent`.
+
+Every pack and packlist node on a root's packmap chain MUST remain live
+in both indexed and opaque modes: clients fail closed when a packmap
+pack is missing. In indexed mode, a pack containing an object in a live
+closure is live: GC MUST retain at least one containing pack for each
+live object, specifically the pack the repository index uses to serve
+that object, along with its index row and any extracted serving copy.
+A non-branch advance's root also includes the packs that advance added.
+For every retained pack, GC MUST also retain every pack supplying an
+external delta base (§9.4) for an object in it, transitively. This
+includes the packs of every advance retained by §10's publication rule,
+regardless of that advance's clearance state. GC MUST retain the
+corresponding repository membership and serving index rows while that
+membership generation remains valid; an invalidated `hit` is preserved
+under §14 instead.
+Opaque mode cannot prove object closure; if a repository has any live
+non-branch ref, GC MUST retain all its member packs. An opaque-mode
+branch without a readable packmap chain MUST receive the same protection:
+retain all member packs when the membership source is readable. An
+unreadable membership source still aborts the run under §13.5.
+
+A planned but unapplied write is a pending advance covered by the wait
+phase below. An advance value between the published pointer and live
+value can become published under §10 even when its clearance state is
+`cleared` and it is no longer the live value. A lease-deleted ref is not
+itself a root. After a per-ref deletion, surviving advance membership
+awaiting a verdict under §10 remains a root; after a repository-level
+deletion, its invalidated pending membership is not a root. `Hit`
+membership awaiting §14 takedown remains a root across either deletion
+boundary. Preservation-store bytes and blocklist rows MUST NOT
+be collected by
+server GC; their separate retention and purge rules are in §§14 and 16.
+
+### 13.3 Per-repository mark, wait, re-check and drop
+
+GC MUST perform these phases in order for each repository:
+
+1. **Mark.** Compute the complete live set and mark only unreachable,
+   unpinned candidates `gc_pending(since)`. `since` is the backend time
+   at which this mark was established; `mark` below denotes that time.
+   The mark clock and `now` in the wait phase MUST be within `margin`
+   of every shard backend's clock; the coordinator clock is one suitable
+   source. The decision that a lease-deleted ref is not a root MUST use
+   authoritative per-ref terms and the coordinator default at the
+   current `config_version`, read under a valid epoch lease, never cached
+   terms. Apply §13.2's distinction between surviving advance membership
+   after per-ref deletion and invalidated membership after repository-level
+   deletion.
+2. **Wait.** Removal MUST wait until all three conditions hold:
+   `now > mark + MAX_APPLY_WINDOW + margin`; the namespace relay
+   watermark has passed that point; and `since + gc_grace ≤ now`.
+   The watermark is the namespace's completed-relay frontier, including
+   outstanding work from active shards. A fixed sleep or a lagging
+   index MUST NOT substitute for that frontier.
+3. **Re-check.** Re-read the complete roots from strongly consistent
+   ref shards. The shard list MUST be the union of the ref index read
+   after the watermark condition holds and the coordinator's
+   active-shard table, never the eventually consistent ref index alone.
+   Re-check live refs, published pointers, all advance values between
+   the published pointer and live value regardless of clearance state,
+   surviving advance membership after per-ref deletion, `hit`
+   advances, takedown replacement packs, unexpired tickets, holds,
+   pins, object closure, and transitive external delta-base packs as
+   applicable. Do not root invalidated pending membership after a
+   repository-level deletion. Re-check authoritative
+   per-ref lease terms and the coordinator default at the current
+   `config_version` under a valid epoch lease, never from a cache.
+   A candidate that became live or pinned, or whose mark changed,
+   MUST NOT be removed.
+4. **Drop.** Only after that re-check, remove the candidate's repository
+   membership, associated repository index rows, and per-ref
+   membership-addition records used by `X-Mkit-Ref`. Each removal MUST
+   be guarded on the unchanged mark and last-change sequence so a
+   concurrent unmark or new reference makes it fail without removal.
+   Remove this repository's holder only after membership, index-row,
+   and per-ref membership-addition removal is durable, and only if the
+   repository no longer holds that member. Every holder removal,
+   including orphan reconciliation, MUST be conditional on the holder's
+   unchanged change sequence. Every holder write MUST advance that
+   sequence, including a relay re-record of an existing holder. A
+   re-added member therefore defeats a previously planned removal. GC
+   MUST reconcile orphaned holders, which are safe but retain bytes
+   unnecessarily.
+
+A planner relying on a `gc_pending` member MUST clear its mark before
+planning the use and MUST ensure the repository's holder exists. More
+generally, a write that newly relies on an existing member MUST durably
+clear that member's GC mark before the write commits and MUST ensure its
+holder exists. New reliance means making a member reachable from a ref value
+where it was not before, directly or transitively: every pack and packlist
+node newly reachable from the new ref value, including through `prev` links
+to existing packlist nodes, closure objects and the packs containing them,
+and external delta bases (§§9.2–9.4). Any ref target counts, including a
+head-only branch update, together with its closure (indexed mode) or its
+packmap chain (opaque mode). In opaque mode, a write that introduces new
+packmap nodes MUST apply this rule to every pack and node reachable from
+them, including through `prev` links, except packs the same write uploaded
+that were not already members; the server MUST decode those nodes as GC
+does. If the mark cannot be cleared because the member is `deleting`, the
+write MUST NOT rely on it and MUST answer retryable `unavailable` or cause a
+re-upload. If the member is gone, the write MUST NOT rely on it and answers
+as §9.4 answers a missing member; opaque mode uses the same responses.
+A new mark restarts the wait. This rule and the commit deadlines cover
+planned, unapplied advances without a cross-shard GC state precondition
+on ref apply. Without this rule, GC cannot safely drop membership: the
+drop guard sees changes only to the candidate member's own state, not a
+new ref that relies on it. A planner encountering `deleting` MUST
+return retryable `unavailable` or arrange a re-upload; it MUST NOT
+report a permanent absence merely because deletion is in progress.
+Informative: the detection mechanism and cost of finding newly relied-on
+members belong to the server GC implementation.
+
+### 13.4 Global byte deletion
+
+Global pack or extracted-object bytes MUST be deleted only with zero
+holders and zero live holds. An `AlreadyPresent` pin counts as a live
+hold in this guard. Every path that writes or deduplicates bytes which
+may later gain a holder MUST create a durable hold before relying on
+those bytes. This includes ticket issue, upload completion, an
+un-ticketed `UploadPack`, extracted-object deduplication, and
+`AlreadyPresent`. The hold MUST remain until the path can no longer add
+a holder and any committed membership is durably covered by holder
+accounting. The ticket's hold MUST
+be durable before ticket issue; the analogous hold for each other path
+MUST be durable before its bytes are reused or it reports success.
+A hold MUST be released only after its path can no longer add a holder,
+allowing for clock skew. A ticket hold MUST remain through ticket
+expiry plus `margin`, and longer if an in-flight path can still add a
+holder.
+
+Holder counts MUST conservatively cover holder additions still in
+flight; an incomplete holder addition MUST prevent deletion. A hold
+MUST continue protecting the bytes until the
+holder is durably covered by holder accounting. This closes the relay
+lag hole for a holder whose membership has committed but whose holder
+record is still in flight.
+
+Byte deletion MUST use a per-object guarded step: atomically verify the
+object's last-change sequence, zero holders, and zero live holds while
+entering `deleting`; then delete the bytes and clear the deletion state.
+This global byte step has no separate object-level mark; the change
+sequence invalidates a stale deletion attempt. Creating a hold while
+the object is `deleting` MUST fail with retryable `unavailable`. A
+re-upload or deduplication MUST NOT be accepted until `deleting` clears.
+Crashes MUST leave this step retryable without exposing partially deleted
+bytes as usable.
+No cross-namespace watermark is required: holds and conservative holder
+accounting protect holders still in flight across namespaces.
+
+Content-index holders and holds are a normative obligation for packs
+as well as extracted objects. Without pack holders and holds, GC MAY
+drop unreachable repository membership after §13.3, but MUST NOT delete
+pack bytes.
+
+Informative: `gc_pending` and the `AlreadyPresent` pin are server state,
+not wire fields.
+
+### 13.5 Fail-closed collection
+
+GC MUST abort the run on any unreadable root source, unreadable lease terms
+or repository default, unreadable advance or clearance state, unknown
+record kind, unreadable watermark or active-shard table, undecodable
+packlist node, unreadable external delta-base pack, missing root or
+referenced object, or truncated walk.
+The opaque-mode branch fallback in §13.2 applies only when the complete
+repository membership source is readable despite the branch's unreadable
+packmap chain; it does not permit a partial membership walk.
+It MUST NOT remove membership, index rows, holders, or bytes on the
+strength of a partial root set or incomplete closure. These are the same
+fail-closed principles as [SPEC-GC](SPEC-GC.md#fail-closed-requirement), applied to
+server roots. A failure in the re-check MUST also abort removal; it
+MUST NOT reuse the earlier mark's liveness verdict.
+
+## 14. Takedown and redaction notices (reserved, M5)
 
 Reserved: this section is specified with M5 (see the version history).
 
-## 11. Quarantine (reserved, M5)
+## 15. Storage receipts (reserved, M5)
 
 Reserved: this section is specified with M5 (see the version history).
 
-## 12. Admin API and audit log (reserved, M5)
+## 16. Admin API and audit log (reserved, M5)
 
 Reserved: this section is specified with M5 (see the version history).
 
-## 13. Custom backends, backup and migrations (reserved, M5)
+## 17. Custom backends, backup and migrations (reserved, M5)
 
 Reserved: this section is specified with M5 (see the version history).
 
-## 14. Conformance scope (reserved, M5)
+## 18. Conformance scope (reserved, M5)
 
 Reserved: this section is specified with M5 (see the version history).
 
-## 15. Version history
+## 19. Version history
 
 | Version | Status | Change |
 |---|---|---|
+| 1 | draft | Additive M5 storage leases and lifecycle Event (§12), server GC (§13), and section renumbering (§§19–20); `GetServerInfo.leases` in STC §2.1. |
+| 1 | draft | Additive M5 published view (§10), per-advance inspection and quarantine (§11), including surplus pack entries; additive Inspect phase/id/kind/defer/flagged ids and Authorize writer_view (§6); `GetServerInfo.async_inspection` in STC §2.1. |
 | 1 | draft | Initial M3 pipeline, durable outcome and remote-hook contract; M5 sections reserved. Admission credential headers (§6.3); indexed mode (§9). HTTP read reservations and procedure strings (WP-4.11), amended with `read_reconcile_grace = 60 s` default and `ReadServed` priority within grace (fix round 1). |
 
-## 16. Test anchors
+## 20. Test anchors
 
 The fixtures under `rust/tests/golden/server-hooks/` are the authoritative
 pinned bytes, as [SPEC-CONVENTIONS §5](SPEC-CONVENTIONS.md#5-golden-vectors-and-conformance-tests)
@@ -1179,15 +2045,23 @@ requires. These anchors are informative descriptions of those bytes.
 | `admit-allow.response.json` | Reservation id and allowed receipt pass-through (§6.3, §6.6). |
 | `admit-challenge.response.json` | Opaque challenge and example payment challenge header (§6.3, §6.6). |
 | `admit-deny.response.json` | Deliberate admission denial (§6.3). |
-| `inspect.request.json` | Provisional inspection operation and object metadata (§6.4). |
+| `inspect.request.json` | Legacy non-conforming pre-M5 example, retained to pin the additive wire shape (§6.4). |
 | `inspect-pass.response.json` | Empty inspection pass verdict (§6.4). |
+| `inspect-quarantine-phase.request.json` | Quarantine phase, stable inspection id, and blob/manifest/chunk metadata (§6.4, §11). |
+| `inspect-quarantine.response.json` | Hold verdict and flagged object ids (§6.4, §11). |
+| `inspect-reject-flagged.response.json` | Reject/hit verdict with flagged ids (§6.4, §11). |
+| `inspect-defer.response.json` | Async retry-after suggestion (§6.4, §11.3). |
+| `authorize-writer-view.response.json` | Authority-source writer classification (§6.2, §10.1). |
 | `outcome-committed.request.json` | Committed byte accounting and refs (§5, §6.5). |
 | `outcome-aborted.request.json` | Apply-failure abort reason and operator detail (§5, §6.5). |
 | `outcome-abandoned.request.json` | Pending reservation reconciled with ABANDONED (§5, §6.5). |
 | `outcome-expired.request.json` | Unconsumed ticket expiry (§5, §6.5). |
 | `outcome-read-served.request.json` | Paid-read object and bytes served (§5, §6.5). |
 | `outcome.response.json` | Empty Outcome acknowledgement (§6.5, §8). |
-| `signature.json` | Admit body including credential headers and Outcome body, with exact bytes, canonical signing strings, hashes, signatures, and full headers (§7.1). |
+| `event-lease-grace.request.json` | Ref-level expiry into grace, sequence and lease terms (§12.4). |
+| `event-lease-deleted.request.json` | Repository-level expiry into deletion (§12.4). |
+| `event.response.json` | Empty Event acknowledgement (§12.4, §8). |
+| `signature.json` | Admit body including credential headers, Outcome body, and Event body, with exact bytes, canonical signing strings, hashes, signatures, and full headers (§7.1). |
 | `key-list.json` | Public test key distribution document (§7.2). |
 | `MANIFEST.txt` | BLAKE3 hashes of every other golden file, including both Admit attempts (SPEC-CONVENTIONS §5). |
 

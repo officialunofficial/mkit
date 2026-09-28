@@ -15,6 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of the same deployment.
   Deploying this Worker now requires the private `mkit-vcs-backups` bucket
   bound as `BACKUPS` and a 35-day `backups/` lifecycle rule.
+- Specify the server's published view and quarantine, covering newly reachable
+  file objects and all file entries of added packs. Add inspection phase/id,
+  object kinds, deferral and flagged ids, authority writer-view classification,
+  and discovery field `async_inspection = 18`. These are additive spec/proto
+  contracts; the inspection implementation follows in later server work packages.
+- Specify storage leases, lifecycle Event webhooks, and fail-closed server GC
+  in SPEC-SERVER; add `GetServerInfoResponse.leases` and Event proto goldens
+  (WP-5.1a-1). Server enforcement follows in M5.
 - Server: implement authenticated `BeginUpload` tickets with stateless BLAKE3 MAC
   tokens, rotation by key id, admission-free live-ticket/member results, open-ticket
   caps, and byte-identical replay. Configure native keys with `--ticket-key-file`
@@ -77,6 +85,20 @@ train).
   remote error context.
 - *(client)* Retry Connect `aborted` responses as temporary failures (503).
   Missing ref reads return `None`; missing pack checks return `false`.
+- *(server)* Scope Multi `PackExists` and `DownloadPack` to repository membership,
+  with the optional unsigned `X-Mkit-Ref` hint resolving unrelayed additions in
+  the same repository's ref shard. Invalid hints are ignored; Single reads and
+  the Multi upload guard retain their behavior (WP-1.23b).
+- *(worker)* Register relay delivery on RefShard, with bounded target calls
+  and plan-specific alarm budgets. Coordinator relay watermarks follow in
+  WP-1.23c (R-106).
+- *(server)* Persist source relay scan progress in `rs 00`, with a cap of 32
+  failed targets per cycle. Relay fires inspect past blocked targets, pause at
+  the target budget, delete every delivered row in the guarded checkpoint,
+  and deliver the decodable prefix before corruption. Guarded scan checkpoints
+  and exact empty-value relay timer reschedules can use SQL's soft-capacity
+  reserve; the timer exception keeps the next fire immediate after progress
+  on a full shard. Ordinary puts still fail at the cap.
 
 - *(server)* Add source-side outbox relay kind 3, ordered target batches,
   persistent per-source `rh` deduplication watermarks, atomic pre-delivery hooks,
@@ -84,8 +106,8 @@ train).
   writers now call `relay_at(now_ms)` to stamp rows and commit their kick timer;
   `RelayV1` gains mandatory `at_ms` in place before deployment. Writer chunking
   keeps each row within target-batch limits, and the local relay watermark and
-  60-second lag warning prepare later readers. Worker registration and the
-  coordinator watermark follow in WP-1.23b.
+  60-second lag warning prepare later readers. Worker registration follows in WP-1.23b;
+  the coordinator watermark follows in WP-1.23c.
 - *(server)* Implement unauthenticated `GetServerInfo` deployment discovery
   with validated upload limits, namespace/admission policy, store capabilities
   and private caching for 60 seconds. Repository headers never affect the

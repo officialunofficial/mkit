@@ -157,7 +157,17 @@
 //! | `repo.signature_repository_mismatch_unauthenticated` | `multi-repo`, `auth-v2` | a signature for A sent to B is rejected |
 //! | `repo.missing_repository_invalid_argument` | `multi-repo`, `auth-v2` | absent, empty, bare and malformed identities are rejected |
 //! | `repo.read_missing_repo_not_found` | `multi-repo`, `auth-v2` | `ListRefs` and `ReadRef` of a nonexistent repo give `not_found` |
-//! | `repo.packs_need_membership_unimplemented` | `multi-repo`, `auth-v2` | all pack RPCs await repository membership |
+//! | `repo.packs_need_membership` | `multi-repo`, `auth-v2` | absent membership gives false / `not_found`; uploads still require tickets |
+//! | `repo.isolation_packs` | `multi-repo`, `auth-v2` | a planted member is invisible in other repositories, with and without a ref hint |
+//! | `repo.membership_read_your_writes` | `multi-repo`, `auth-v2`; D34 | unrelayed membership is visible only with its ref hint |
+//! | `repo.malformed_membership_hint_no_op` | `multi-repo`, `auth-v2` | malformed, unserved and oversized hints are ignored |
+//!
+//! The three planted membership cases run against the in-process Multi baseline.
+//! The harness seeds blob bytes `conformance/<run_id>/<case>` and their BLAKE3
+//! membership in repository `packs`, owned by that case's `repository-a` signer.
+//! Isolation and malformed-hint fixtures populate the membership index and
+//! `refs/heads/main`; read-your-writes populates only that ref shard and requires
+//! D34. No relay runs while the read-your-writes case checks the lagging index.
 //!
 //! # The `test-faults` contract
 //!
@@ -180,8 +190,7 @@
 //! their milestone and feature, so later milestones add them without
 //! renaming. None exists yet, so none can pass vacuously.
 //!
-// TODO(M1, multi-repo): `repo.isolation_packs`,
-//   `repo.isolation_replay`, `server_info.*` (GetServerInfo),
+// TODO(M1, multi-repo): `repo.isolation_replay`, `server_info.*` (GetServerInfo),
 //   `list.paging_*` and `list.page_within_2_mib` (§7.9), `refs.delete_*` (§7.8).
 // TODO(M1, multi-repo): `namespace.policy_allowlist`, `namespace.policy_owner`.
 // TODO(M1, tickets): `tickets.upload_part_*`,

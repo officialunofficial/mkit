@@ -70,6 +70,8 @@ pub struct Authenticated {
     pub principal: Principal,
     /// The verified auth v2 authorization of a signed request.
     pub auth: Option<VerifiedAuth>,
+    /// Optional repository-local read-your-writes hint (outside auth v2).
+    pub ref_hint: Option<String>,
     procedure: Procedure,
     repo: ResolvedRepo,
     /// Added to the business clock for this request only: the test
@@ -153,6 +155,7 @@ pub(crate) fn authenticate(
         auth,
         procedure,
         repo,
+        ref_hint: None,
         business_skew_ms: 0,
         #[cfg(feature = "test-faults")]
         directives: super::TestDirectives::default(),

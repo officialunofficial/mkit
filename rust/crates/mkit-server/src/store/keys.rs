@@ -36,6 +36,7 @@
 //! | outcome pending index | `oq 00 <seq:be64> <reservation_id>` | empty |
 //! | relay high-water mark | `rh 00 <Partition::encode(source)>` | be64; never pruned, bounded by source shards |
 //! | relay queue | `or 00 <seq:be64>` | codec `RelayV1` |
+//! | relay scan progress (source shard) | `rs 00` | codec `RelayScanV1`; one per source, never pruned |
 //! | outbox sequence | `os 00` | be64; last allocated, starts at 1, never deleted |
 //! | outcome backlog | `oc 00` | codec `Backlog`; absent means zero |
 //! | timer (owned by `timers`) | `w 00 <due_at:be64> <kind:u8> <ref>` | codec per kind |
@@ -145,10 +146,10 @@ pub const TAG_OUTCOME_PENDING: &str = "oq";
 pub const TAG_RELAY: &str = "or";
 /// Per-source relay deduplication watermark in the target.
 pub const TAG_RELAY_HIGH_WATER: &str = "rh";
+/// Persistent source relay scan progress tag.
+pub const TAG_RELAY_SCAN: &str = "rs";
 /// Last allocated outbox sequence tag.
 pub const TAG_OUTBOX_SEQUENCE: &str = "os";
-/// Relay scan cursor, discarded during a restore.
-pub const TAG_RELAY_SCAN: &str = "rs";
 /// Terminal outcome backlog tag.
 pub const TAG_OUTCOME_BACKLOG: &str = "oc";
 
@@ -161,8 +162,6 @@ pub const RESERVED_TAGS: &[&str] = &["tb", "i", "l", "pp", "vc", TAG_NAMESPACE_L
 pub enum ParsedKey {
     /// `bk 00`.
     BackupState,
-    /// `rs 00`: source-side relay scan cursor.
-    RelayScan,
     /// `sm 00`: the Worker deployment sharding mode.
     ShardingMarker,
     /// `v 00`.
@@ -247,6 +246,8 @@ pub enum ParsedKey {
     },
     /// `or 00 <seq>`.
     Relay(u64),
+    /// `rs 00`: persistent source relay scan progress.
+    RelayScan,
     /// `os 00`.
     OutboxSequence,
     /// `oc 00`.
@@ -525,6 +526,12 @@ pub fn relay_high_water(source: &Partition) -> Result<Key, StoreError> {
     checked_key(TAG_RELAY_HIGH_WATER, &[&source.encode()?])
 }
 
+/// `rs 00`: one scan-progress row per source shard, never pruned.
+#[must_use]
+pub fn relay_scan() -> Key {
+    key(TAG_RELAY_SCAN, &[])
+}
+
 /// `os 00`.
 #[must_use]
 pub fn outbox_sequence() -> Key {
@@ -568,12 +575,6 @@ pub fn lease_recovery() -> Key {
 #[must_use]
 pub fn backup_state() -> Key {
     key(TAG_BACKUP_STATE, &[])
-}
-
-/// `rs 00`: the source-side relay scan cursor.
-#[must_use]
-pub fn relay_scan() -> Key {
-    key(TAG_RELAY_SCAN, &[])
 }
 
 /// `w 00 <due_at> <kind> <reference>` (owned by `timers`).
@@ -684,6 +685,18 @@ fn parse_reservation_id(bytes: &[u8]) -> Option<String> {
     validate_reservation_id(rid).then(|| rid.to_owned())
 }
 
+fn parse_outcome_pending(body: &[u8]) -> Option<ParsedKey> {
+    let (seq, rest) = be64(body)?;
+    let reservation_id = parse_reservation_id(rest)?;
+    if seq == 0 {
+        return None;
+    }
+    Some(ParsedKey::OutcomePending {
+        seq,
+        reservation_id,
+    })
+}
+
 fn parse_leased_shard(body: &[u8]) -> Option<ParsedKey> {
     let sep = body.iter().position(|&b| b == 0)?;
     Some(ParsedKey::LeasedShard {
@@ -720,11 +733,11 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
         b"el" if body.is_empty() => ParsedKey::EpochLease,
         b"lr" if body.is_empty() => ParsedKey::LeaseRecovery,
         b"bk" if body.is_empty() => ParsedKey::BackupState,
-        b"rs" if body.is_empty() => ParsedKey::RelayScan,
         b"ls" => parse_leased_shard(body)?,
         b"nr" if body.is_empty() => ParsedKey::NamespaceRecord,
         b"rr" => ParsedKey::RepoRecord(RepoName::new(text(body)?).ok()?),
         b"rh" => ParsedKey::RelayHighWater(Partition::decode(body).ok()?),
+        b"rs" if body.is_empty() => ParsedKey::RelayScan,
         b"rk" => ParsedKey::RepoKnown(RepoName::new(text(body)?).ok()?),
         b"r" => {
             let sep = body.iter().position(|&b| b == 0)?;
@@ -743,17 +756,7 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
             }
         }
         b"o" => ParsedKey::Reservation(parse_reservation_id(body)?),
-        b"oq" => {
-            let (seq, rest) = be64(body)?;
-            let reservation_id = parse_reservation_id(rest)?;
-            if seq == 0 {
-                return None;
-            }
-            ParsedKey::OutcomePending {
-                seq,
-                reservation_id,
-            }
-        }
+        b"oq" => parse_outcome_pending(body)?,
         b"or" => {
             let (seq, rest) = be64(body)?;
             if !rest.is_empty() {
@@ -847,6 +850,7 @@ mod tests {
             TAG_REPO_REGISTRY,
             TAG_REPO_KNOWN,
             TAG_RELAY_HIGH_WATER,
+            TAG_RELAY_SCAN,
             TAG_TICKET,
             TAG_TICKET_INDEX,
             TAG_TICKETS_PER_REF,
@@ -856,7 +860,6 @@ mod tests {
             TAG_OUTCOME_PENDING,
             TAG_RELAY,
             TAG_OUTBOX_SEQUENCE,
-            TAG_RELAY_SCAN,
             TAG_OUTCOME_BACKLOG,
         ];
         tags.extend_from_slice(RESERVED_TAGS);
@@ -870,6 +873,7 @@ mod tests {
         let cases: Vec<(Key, Vec<u8>)> = vec![
             (sharding_marker(), b"sm\0".to_vec()),
             (layout_version(), b"v\0".to_vec()),
+            (relay_scan(), b"rs\0".to_vec()),
             (
                 relay_high_water(&Partition::ContentShard(7)).unwrap(),
                 b"rh\0s7\0".to_vec(),
@@ -895,7 +899,6 @@ mod tests {
             (epoch_lease(), b"el\0".to_vec()),
             (lease_recovery(), b"lr\0".to_vec()),
             (backup_state(), b"bk\0".to_vec()),
-            (relay_scan(), b"rs\0".to_vec()),
             (
                 leased_shard(&repo("a"), "refs/heads/main"),
                 b"ls\0a\0refs/heads/main".to_vec(),
@@ -995,6 +998,7 @@ mod tests {
                 [&b"or\0"[..], &[1, 2, 3, 4, 5, 6, 7, 8]].concat(),
                 ParsedKey::Relay(seq),
             ),
+            (relay_scan(), b"rs\0".to_vec(), ParsedKey::RelayScan),
             (
                 outbox_sequence(),
                 b"os\0".to_vec(),
@@ -1019,6 +1023,12 @@ mod tests {
             assert_eq!(key.as_bytes(), golden);
             assert_eq!(parse(&key), Some(parsed));
         }
+        assert_eq!(parse(&Key::new(b"rs\0extra".to_vec())), None);
+        let (start, end) = class_range(TAG_RELAY_SCAN);
+        assert_eq!(
+            (start.as_bytes(), end.as_bytes()),
+            (&b"rs\0"[..], &b"rs\x01"[..])
+        );
     }
 
     #[test]
