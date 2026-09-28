@@ -669,9 +669,10 @@ pub trait Transport: Send + Sync {
 pub enum AdvanceOutcome {
     /// Both refs were updated.
     Committed,
-    /// The head precondition did not hold (the branch moved under us). An
-    /// atomic transport leaves nothing changed; callers treat this as a
-    /// non-fast-forward.
+    /// The head precondition did not hold. An atomic transport leaves
+    /// nothing changed. Callers re-read the head (SPEC-TRANSPORT §7): if it
+    /// already holds their target, a retried write landed and the advance
+    /// succeeded; otherwise the branch moved under them (non-fast-forward).
     HeadConflict,
     /// The packmap precondition did not hold (a concurrent pusher advanced
     /// the chain). Callers re-read the packmap and retry.

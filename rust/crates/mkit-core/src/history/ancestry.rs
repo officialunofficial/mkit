@@ -846,7 +846,7 @@ fn decide_chain(
     // publish isn't extending.
     let scrub = read_scrub_state(dir).filter(|s| s.generation == d.generation);
     let stale =
-        scrub.is_none_or(|s| now.saturating_sub(s.last_full_verify_unix) > SCRUB_MAX_AGE_SECS);
+        scrub.is_none_or(|s| now.saturating_sub(s.last_full_verify_unix) >= SCRUB_MAX_AGE_SECS);
     if !stale {
         let scrub = scrub.expect("`stale` is false only when `scrub` is Some");
         let window = scrub_window(scrub.verified_through);
@@ -1895,6 +1895,41 @@ mod tests {
             scrub.last_full_verify_unix,
             1_000_000 + SCRUB_MAX_AGE_SECS + 1
         );
+        clear_now();
+    }
+
+    /// SPEC-HISTORY-PROOF: the bounded-window path is taken only when
+    /// *fewer than* `SCRUB_MAX_AGE_SECS` have elapsed since the last full
+    /// verification. One second short of the bound still scrubs a window;
+    /// exactly at the bound the schedule is stale and a full walk runs
+    /// (MKIT-57).
+    #[test]
+    fn scrub_age_boundary_is_exclusive() {
+        // One second before the bound: the rotating window advances.
+        let (_dir, layout, store) = repo();
+        let tips = build_chain(&store, 1500);
+        set_now(1_000_000);
+        update(&layout, &store, "main", tips[1499]);
+        let dir = ancestry_state::branch_dir(layout.common_dir(), "refs/heads/main");
+        set_now(1_000_000 + SCRUB_MAX_AGE_SECS - 1);
+        let step = commit(&store, vec![tips[1499]], b"1500");
+        update(&layout, &store, "main", step);
+        let scrub = read_scrub_state(&dir).unwrap();
+        assert_eq!(scrub.cursor, 512, "age < bound takes the window path");
+        assert_eq!(scrub.last_full_verify_unix, 1_000_000);
+
+        // Exactly at the bound: stale, so a full walk resets the cursor.
+        let (_dir, layout, store) = repo();
+        let tips = build_chain(&store, 1500);
+        set_now(1_000_000);
+        update(&layout, &store, "main", tips[1499]);
+        let dir = ancestry_state::branch_dir(layout.common_dir(), "refs/heads/main");
+        set_now(1_000_000 + SCRUB_MAX_AGE_SECS);
+        let step = commit(&store, vec![tips[1499]], b"1500");
+        update(&layout, &store, "main", step);
+        let scrub = read_scrub_state(&dir).unwrap();
+        assert_eq!(scrub.cursor, 0, "age == bound forces a full walk");
+        assert_eq!(scrub.last_full_verify_unix, 1_000_000 + SCRUB_MAX_AGE_SECS);
         clear_now();
     }
 

@@ -90,10 +90,10 @@ this same `PackChunk` shape on the wire. Until a Connect client lands,
 - `Match(expected)` &mdash; write only if the ref currently contains `expected`.
 
 CAS failure (`Missing` on an existing ref, or `Match` on a mismatched
-hash) returns `TransportError::RefConflict`. Per §6, callers retrying
-after a network timeout MUST follow up with `read_ref` to disambiguate
-whether the first attempt landed before treating `RefConflict` as a
-true conflict.
+hash) returns `TransportError::RefConflict`. Because the §7 retry ladder
+can re-issue a write whose first attempt landed, a caller MUST follow
+up a `RefConflict` with `read_ref` before treating it as a true conflict
+(§7).
 
 ---
 
@@ -361,8 +361,8 @@ that finds the connection `closed` first respawns `ssh` from the
 original `target`/`options` and redoes the `Hello` handshake before
 re-issuing the verb against the fresh child. `upload_pack` is
 content-addressed and safe to resend in full on the new connection;
-`update_ref` is not idempotent across retries per §7, so a retried CAS
-write that returns `RefConflict` still requires the caller's `read_ref`
+`update_ref` is not idempotent across retries per §7, so a CAS write
+that returns `RefConflict` still requires the caller's `read_ref`
 disambiguation.
 
 The encrypted transport (`mkit-transport-enc`) applies the identical
@@ -663,11 +663,40 @@ fresh request per attempt; connection-oriented transports (SSH, enc)
 MUST reconnect before re-attempting once a prior attempt has left the
 connection in a possibly-desynced state &mdash; see §4.5.
 
-`update_ref` with `Missing` or `Match` is NOT idempotent across
-retries: a network timeout after the server applied the write looks
-identical to a write that never landed. After a retried `update_ref`
-returns `RefConflict`, callers MUST follow up with `read_ref` to
-disambiguate.
+`update_ref` with `Missing` or `Match`, and `advance_refs`, are NOT
+idempotent across retries: a network timeout after the server applied
+the write looks identical to a write that never landed. The network
+transports' clients still send them through the ladder above (HTTP,
+SSH, enc and Connect through `mkit_core::protocol::retrying`; S3 through
+its own loop over `BackoffIterator` and `is_retryable`), so a call can be
+re-issued after its first attempt landed. The re-issue cannot apply the write twice: the
+landed attempt has already falsified the precondition the re-issue
+carries (a `Missing` ref now exists; a `Match(h)` ref no longer holds
+`h`). It can, however, report a conflict for the caller's own write, and
+the caller cannot observe whether the ladder re-issued the call. The
+caller obligations are therefore:
+
+- On `RefConflict` from `update_ref`, the caller MUST call `read_ref`
+  on that ref before reporting a conflict. If the ref holds the value
+  the caller wrote, the caller MUST treat the write as having landed.
+- On `HeadConflict` or `PackmapConflict` from `advance_refs`, the caller
+  MUST likewise read the ref whose precondition failed. A packmap that
+  already holds the caller's node means only the head write remains; a
+  head that already holds the caller's value means the advance landed.
+- `update_ref` with `Any` may be re-issued freely: it writes the same
+  value again. Like any `Any` write, it can overwrite a value another
+  writer stored between the two attempts.
+
+The one case where a re-issue reports the true outcome is a Connect
+deployment that keeps the auth v2 replay ledger
+([SPEC-TRANSPORT-CONNECT §7.1](SPEC-TRANSPORT-CONNECT.md#71-reference-worker)):
+`mkit-transport-connect` reuses one nonce and validity window for every
+attempt of one logical call (`RetryIdentity`), so the server returns the
+committed attempt's stored result. That covers only re-issues within one
+call's ladder, inside the signed validity window. A caller that invokes
+the operation again gets a fresh nonce, and the obligations above apply.
+A caller MAY skip the `read_ref` only when it knows the remote keeps
+that ledger.
 
 `upload_pack` IS idempotent (content-addressed: re-uploading the
 same bytes produces the same digest and is a no-op on the server
@@ -752,7 +781,7 @@ These hold for every conformant transport, regardless of scheme:
 | Stored pack bytes match their announced digest | SSH: server verifies `BLAKE3(received) == pack_id` before storing (§4.2); HTTP: client cross-checks the server-returned key against its pre-computed digest → `InvalidResponse` (§5.1) |
 | A rejected upload never creates or overwrites the destination pack | SSH upload-stream validation: `total_bytes` required and capped, `pack_id` match, contiguous offsets, exact end (§4.2) |
 | Ref CAS conflicts surface, never silently clobber | `Missing`/`Match` encodings per transport (§4.2.1, §5.3, §6.3); conflict → `RefConflict`; 409/412 never retried (§5.3, §6.5, §7.1) |
-| A retry never duplicates a conditional ref write | 4xx is not retryable; after a retried `update_ref` returns `RefConflict`, callers MUST `read_ref` to disambiguate (§7) |
+| A retry never duplicates a conditional ref write | a landed attempt falsifies the precondition its re-issue carries; 4xx is not retryable; on `RefConflict` (or an `advance_refs` conflict outcome) callers MUST `read_ref` before reporting a conflict (§7) |
 | `upload_pack` is idempotent across retries | content-addressed keys: same bytes → same digest → server-side no-op (§7) |
 | A misbehaving peer cannot exhaust memory | `MAX_FRAME_BYTES` 1 MiB, `MAX_FRAMES_PER_CONN`, `MAX_BYTES_PER_CONN` shared by the SSH and enc-listener frame loops (§4.4); `PACK_BODY_LIMIT` 4 GiB with pre-check and running-total streaming counters (§4.4, §5.4, §6.4); ref/list body caps (§6.4) |
 | `*_streaming` is additive &mdash; no transport is forced to implement real streaming | default trait impls express both streaming verbs in terms of the existing whole-buffer verbs (§1.1) |
