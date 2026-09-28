@@ -1,5 +1,6 @@
 //! Auth v2 client adapter: signs a configured destination and content commitment.
-//! The logical RPC allocates nonce/times once; transport retries reuse them.
+//! Writes allocate nonce/times once per logical operation; reads allocate
+//! them on each attempt.
 //! Upload metadata is known before streaming and no body is collected here.
 
 use std::sync::Arc;
@@ -21,7 +22,8 @@ mod header {
     pub const IDEMPOTENCY_KEY: &str = "idempotency-key";
 }
 
-/// One logical operation's retry identity, allocated outside its retry loop.
+/// One request identity. Write callers retain it across retries; read callers
+/// allocate it inside each attempt.
 #[derive(Clone)]
 pub(crate) struct RetryIdentity {
     nonce: String,
@@ -48,7 +50,7 @@ impl RetryIdentity {
     }
 }
 
-/// A signer able to produce the Ed25519 material a write envelope needs:
+/// A signer able to produce the Ed25519 material an auth v2 envelope needs:
 /// the raw public key (for `X-Public-Key`) and a raw signature over an
 /// arbitrary 32-byte digest (no domain prefix — see module docs).
 ///
@@ -70,24 +72,28 @@ pub trait EnvelopeSigner: Send + Sync {
     fn sign_hex(&self, message: &[u8; 32]) -> Result<String, String>;
 }
 
-/// `true` for the unary write procedures (`UpdateRef`, `AdvanceRefs`) that
-/// need the body-bound envelope: the procedures `mkit-server`'s auth v2
-/// stage signs as unary writes.
-fn requires_unary_write_auth(procedure: &str) -> bool {
-    procedure.ends_with("/UpdateRef") || procedure.ends_with("/AdvanceRefs")
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProcedureAuth {
+    Body,
+    Commitment(&'static str),
+    Unsigned { repository: bool },
 }
 
-/// `true` for the streaming write procedure (`UploadPack`) that needs the
-/// signed pack-id and length commitment, as `mkit-server`'s auth v2 stage
-/// requires.
-fn requires_stream_write_auth(procedure: &str) -> bool {
-    procedure.ends_with("/UploadPack")
-}
-
-/// Every current procedure carries repository addressing. M2 will exclude
-/// GetGrantEpoch/SetGrantEpoch, which carry no repository (STC §7.4).
-fn carries_repository(_procedure: &str) -> bool {
-    true
+/// Exhaustive for the generated service. Future client methods must be
+/// classified here before they can send authenticated requests.
+fn procedure_auth(procedure: &str) -> Option<ProcedureAuth> {
+    let method = procedure.strip_prefix("/mkit.transport.v1.TransportService/")?;
+    Some(match method {
+        "ListRefs" | "ReadRef" | "PackExists" | "DownloadPack" | "IssueObjectUrl" | "UpdateRef"
+        | "AdvanceRefs" | "BeginUpload" | "CompleteUpload" => ProcedureAuth::Body,
+        "UploadPack" => ProcedureAuth::Commitment("pack:"),
+        "UploadPart" => ProcedureAuth::Commitment("part:"),
+        "GetServerInfo" => ProcedureAuth::Unsigned { repository: true },
+        "GetGrantEpoch" | "SetGrantEpoch" => ProcedureAuth::Unsigned { repository: false },
+        // TODO(WP-2.13/2.14): SetRepoVisibility has owner-key and
+        // owner-statement forms; classify it when its client is added.
+        _ => return None,
+    })
 }
 
 fn now_ms() -> i64 {
@@ -111,9 +117,8 @@ fn insert_header(headers: &mut HeaderMap, name: &'static str, value: &str) -> Re
     Ok(())
 }
 
-/// [`ClientTransport`] wrapper that signs write RPCs with a write envelope
-/// before delegating to `inner`. Every call carries repository addressing; reads and unsigned
-/// calls require no signing — this is the SAME transport type used
+/// [`ClientTransport`] wrapper that signs read and write RPCs with an auth v2
+/// envelope before delegating to `inner`. This is the same transport type used
 /// whether or not envelope auth is configured, so the bearer-token-only
 /// path (`ConnectTransport::connect`, #700/#701) pays no signing overhead
 /// beyond one `Option` check per call.
@@ -160,7 +165,7 @@ pub enum EnvelopeTransportError<E> {
 impl<E: std::fmt::Display> std::fmt::Display for EnvelopeTransportError<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Sign(s) => write!(f, "sign write envelope: {s}"),
+            Self::Sign(s) => write!(f, "sign auth v2 envelope: {s}"),
             Self::Inner(e) => write!(f, "{e}"),
         }
     }
@@ -183,7 +188,16 @@ impl<T: ClientTransport> ClientTransport for EnvelopeTransport<T> {
         &self,
         mut request: Request<ClientBody>,
     ) -> BoxFuture<'static, Result<Response<Self::ResponseBody>, Self::Error>> {
-        if carries_repository(request.uri().path()) {
+        let Some(auth) = procedure_auth(request.uri().path()) else {
+            return Box::pin(async {
+                Err(EnvelopeTransportError::Sign(
+                    "unknown Connect procedure".into(),
+                ))
+            });
+        };
+        if matches!(auth, ProcedureAuth::Unsigned { repository: false }) {
+            request.headers_mut().remove("x-repository");
+        } else {
             let header = match &self.repository_header {
                 Ok(header) => header.clone(),
                 Err(error) => {
@@ -206,7 +220,7 @@ impl<T: ClientTransport> ClientTransport for EnvelopeTransport<T> {
         };
         Box::pin(async move {
             let procedure = request.uri().path().to_owned();
-            if requires_unary_write_auth(&procedure) {
+            if auth == ProcedureAuth::Body {
                 let (mut parts, body) = request.into_parts();
                 let body_bytes = body
                     .collect()
@@ -228,20 +242,20 @@ impl<T: ClientTransport> ClientTransport for EnvelopeTransport<T> {
                     .map_err(EnvelopeTransportError::Sign)?;
                 let req = Request::from_parts(parts, full_body(body_bytes));
                 inner.send(req).await.map_err(EnvelopeTransportError::Inner)
-            } else if requires_stream_write_auth(&procedure) {
+            } else if let ProcedureAuth::Commitment(prefix) = auth {
                 let (mut parts, body) = request.into_parts();
                 let commitment = parts
                     .headers
                     .get("x-content-commitment")
                     .and_then(|v| v.to_str().ok())
                     .ok_or_else(|| {
-                        EnvelopeTransportError::Sign("missing upload commitment".into())
+                        EnvelopeTransportError::Sign("missing streaming commitment".into())
                     })?
                     .to_owned();
-                if !commitment.starts_with("pack:") {
-                    return Err(EnvelopeTransportError::Sign(
-                        "upload requires pack commitment".into(),
-                    ));
+                if !commitment.starts_with(prefix) {
+                    return Err(EnvelopeTransportError::Sign(format!(
+                        "request requires {prefix} commitment"
+                    )));
                 }
                 sign_headers(
                     &mut parts.headers,
@@ -560,7 +574,7 @@ mod tests {
         }
 
         #[test]
-        fn read_only_procedures_are_never_signed() {
+        fn reads_are_signed_over_the_exact_request_body() {
             let sk = SigningKey::from_bytes(&[17u8; 32]);
             let signer: Arc<dyn EnvelopeSigner> = Arc::new(DalekSigner(sk));
             let captured = Arc::new(Mutex::new(None));
@@ -579,17 +593,162 @@ mod tests {
                 "/mkit.transport.v1.TransportService/ReadRef",
                 "/mkit.transport.v1.TransportService/PackExists",
                 "/mkit.transport.v1.TransportService/DownloadPack",
-                "/mkit.transport.v1.TransportService/GetServerInfo",
             ] {
-                let req = build_request(procedure, b"read-body");
+                let body: &'static [u8] = if procedure.ends_with("/DownloadPack") {
+                    b"\0\0\0\0\x03abc"
+                } else {
+                    b"read-body"
+                };
+                let mut req = build_request(procedure, body);
+                let now = now_ms();
+                req.headers_mut()
+                    .insert("x-created-at", now.to_string().parse().unwrap());
+                req.headers_mut().insert(
+                    "x-expires-at",
+                    now.saturating_add(300_000).to_string().parse().unwrap(),
+                );
                 futures::executor::block_on(transport.send(req)).expect("send ok");
                 let got = captured.lock().unwrap().take().expect("request captured");
+                let field = |name| got.headers.get(name).unwrap().to_str().unwrap().to_owned();
+                let digest = to_hex(&hash(&got.body));
+                let commitment = format!("body:{digest}");
+                let headers = mkit_core::write_auth::Headers {
+                    version: Some(field("x-envelope-version")),
+                    audience: Some(field("x-audience")),
+                    repository: Some(field("x-repository")),
+                    public_key: Some(field("x-public-key")),
+                    signature: Some(field("x-signature")),
+                    digest: Some(field("x-digest")),
+                    commitment: Some(field("x-content-commitment")),
+                    created_at: Some(field("x-created-at")),
+                    expires_at: Some(field("x-expires-at")),
+                    idempotency_key: Some(field("idempotency-key")),
+                };
                 assert!(
-                    got.headers.get(header::PUBLIC_KEY).is_none(),
-                    "{procedure} must not be signed"
+                    mkit_core::write_auth::verify_headers(
+                        Context {
+                            audience: "https://example.invalid",
+                            repository: "default"
+                        },
+                        procedure,
+                        Some(&commitment),
+                        now,
+                        &headers,
+                    )
+                    .is_ok(),
+                    "{procedure}"
                 );
-                assert!(got.headers.get(header::SIGNATURE).is_none());
+                assert_ne!(to_hex(&hash(b"abc")), digest, "framing is signed");
                 assert_eq!(got.headers["x-repository"], "default");
+            }
+        }
+
+        #[test]
+        fn generated_procedures_are_all_classified() {
+            let generated = include_str!("../generated/mkit.transport.v1.transport.__connect.rs");
+            let procedures: std::collections::HashSet<_> = generated
+                .lines()
+                .filter_map(|line| line.trim().strip_prefix('"')?.strip_suffix("\","))
+                .filter(|path| path.starts_with("/mkit.transport.v1.TransportService/"))
+                .collect();
+            assert_eq!(procedures.len(), 11);
+            for procedure in procedures {
+                let method = procedure.rsplit('/').next().unwrap();
+                let expected = match method {
+                    "ListRefs" | "ReadRef" | "PackExists" | "DownloadPack" | "UpdateRef"
+                    | "AdvanceRefs" | "BeginUpload" | "CompleteUpload" => ProcedureAuth::Body,
+                    "UploadPack" => ProcedureAuth::Commitment("pack:"),
+                    "UploadPart" => ProcedureAuth::Commitment("part:"),
+                    "GetServerInfo" => ProcedureAuth::Unsigned { repository: true },
+                    _ => panic!("new generated procedure requires classification: {procedure}"),
+                };
+                assert_eq!(procedure_auth(procedure), Some(expected), "{procedure}");
+            }
+            assert_eq!(
+                procedure_auth("/mkit.transport.v1.TransportService/GetGrantEpoch"),
+                Some(ProcedureAuth::Unsigned { repository: false })
+            );
+            assert_eq!(
+                procedure_auth("/mkit.transport.v1.TransportService/SetGrantEpoch"),
+                Some(ProcedureAuth::Unsigned { repository: false })
+            );
+            assert_eq!(
+                procedure_auth("/mkit.transport.v1.TransportService/IssueObjectUrl"),
+                Some(ProcedureAuth::Body)
+            );
+        }
+
+        #[test]
+        fn signed_read_goldens_verify_in_core() {
+            use crate::generated::{DownloadPackRequest, ReadRefRequest};
+            use buffa::Message as _;
+            let golden = include_str!("../../../tests/golden/auth-v2/read.json");
+            let manifest = include_str!("../../../tests/golden/auth-v2/MANIFEST.txt");
+            assert!(manifest.contains(&format!("read.json {}", to_hex(&hash(golden.as_bytes())))));
+            let vectors: Vec<serde_json::Value> = serde_json::from_str(golden).unwrap();
+            assert_eq!(vectors.len(), 2);
+            for vector in vectors {
+                let string = |key| vector[key].as_str().unwrap();
+                let body = hex::decode(string("body_hex")).unwrap();
+                let expected = if string("procedure").ends_with("/ReadRef") {
+                    ReadRefRequest {
+                        name: Some("refs/heads/main".into()),
+                        ..Default::default()
+                    }
+                    .encode_to_vec()
+                } else {
+                    let message = DownloadPackRequest {
+                        pack_id: Some(vec![0xcd; 32]),
+                        ..Default::default()
+                    }
+                    .encode_to_vec();
+                    let mut framed = vec![0];
+                    framed.extend_from_slice(&u32::try_from(message.len()).unwrap().to_be_bytes());
+                    framed.extend_from_slice(&message);
+                    framed
+                };
+                assert_eq!(body, expected);
+                let digest = to_hex(&hash(&body));
+                assert_eq!(digest, string("body_digest"));
+                let op = Operation {
+                    context: Context {
+                        audience: string("audience"),
+                        repository: string("repository"),
+                    },
+                    procedure: string("procedure"),
+                    commitment: string("commitment"),
+                    created_at: vector["created_at"].as_i64().unwrap(),
+                    expires_at: vector["expires_at"].as_i64().unwrap(),
+                    nonce: string("nonce"),
+                };
+                assert_eq!(op.canonical().unwrap(), string("canonical"));
+                assert_eq!(to_hex(&op.digest().unwrap()), string("signing_digest"));
+                let headers = mkit_core::write_auth::Headers {
+                    version: Some("2".into()),
+                    audience: Some(string("audience").into()),
+                    repository: Some(string("repository").into()),
+                    public_key: Some(string("public_key").into()),
+                    signature: Some(string("signature").into()),
+                    digest: Some(digest),
+                    commitment: Some(string("commitment").into()),
+                    created_at: Some(op.created_at.to_string()),
+                    expires_at: Some(op.expires_at.to_string()),
+                    idempotency_key: Some(string("nonce").into()),
+                };
+                assert!(
+                    mkit_core::write_auth::verify_headers(
+                        op.context,
+                        op.procedure,
+                        Some(op.commitment),
+                        op.created_at + 1,
+                        &headers
+                    )
+                    .is_ok()
+                );
+                if op.procedure.ends_with("/DownloadPack") {
+                    assert_eq!(&body[..5], &[0, 0, 0, 0, 34]);
+                    assert_ne!(to_hex(&hash(&body[5..])), string("body_digest"));
+                }
             }
         }
 
@@ -619,6 +778,34 @@ mod tests {
                 let got = captured.lock().unwrap().take().unwrap();
                 assert_eq!(got.headers["x-repository"], "default");
                 assert_eq!(got.headers.get_all("x-repository").iter().count(), 1);
+                assert!(got.headers.get("x-signature").is_none());
+            }
+        }
+
+        #[test]
+        fn discovery_and_epoch_paths_are_never_signed() {
+            let captured = Arc::new(Mutex::new(None));
+            let transport = EnvelopeTransport::new(
+                CapturingTransport {
+                    captured: captured.clone(),
+                },
+                Some(Arc::new(DalekSigner(SigningKey::from_bytes(&[19; 32])))),
+                "https://example.invalid".into(),
+                "default".into(),
+            );
+            for method in ["GetServerInfo", "GetGrantEpoch", "SetGrantEpoch"] {
+                let procedure = format!("/mkit.transport.v1.TransportService/{method}");
+                let mut request = build_request(&procedure, b"");
+                request
+                    .headers_mut()
+                    .insert("x-repository", HeaderValue::from_static("wrong"));
+                futures::executor::block_on(transport.send(request)).unwrap();
+                let got = captured.lock().unwrap().take().unwrap();
+                assert!(got.headers.get("x-signature").is_none());
+                assert_eq!(
+                    got.headers.get("x-repository").is_some(),
+                    method == "GetServerInfo"
+                );
             }
         }
 
@@ -639,6 +826,8 @@ mod tests {
             let mut req = build_request(procedure, b"write-body");
             req.headers_mut()
                 .insert("x-mkit-ref", HeaderValue::from_static("refs/heads/main"));
+            req.headers_mut()
+                .insert("x-write-grant", HeaderValue::from_static("grant-one"));
             futures::executor::block_on(transport.send(req)).unwrap();
             let mut got = captured.lock().unwrap().take().unwrap();
             assert_eq!(got.headers["x-mkit-ref"], "refs/heads/main");
@@ -650,6 +839,8 @@ mod tests {
             ));
             got.headers
                 .insert("x-mkit-ref", HeaderValue::from_static("refs/heads/other"));
+            got.headers
+                .insert("x-write-grant", HeaderValue::from_static("grant-two"));
             assert!(verify_unary_from_headers(
                 procedure,
                 &got.headers,

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Connect client: sign repository reads with auth v2 on each attempt, including
+  the framed `DownloadPack` request. Add a grant-source API and local selection
+  logic; the user grant store follows in WP-2.13.
+
 - Server: ticketed `UploadPack` now verifies the ticket before reading data,
   streams the full pack without metadata writes, and leaves a content-addressed
   upload marker for later ticket consumption. The advertised BeginUpload

@@ -1,0 +1,34 @@
+[
+  {
+    "procedure": "/mkit.transport.v1.TransportService/ReadRef",
+    "body_hex": "0a0f726566732f68656164732f6d61696e",
+    "audience": "https://api.example.test",
+    "repository": "ed25519-ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c/photos",
+    "created_at": 1700000000000,
+    "expires_at": 1700000300000,
+    "nonce": "abababababababababababababababababababababababababababababababab",
+    "seed": "0707070707070707070707070707070707070707070707070707070707070707",
+    "body_digest": "bcaec51c2ec429dd86984d0ed38849653747a2730565d82443f7cc91986e3bb0",
+    "commitment": "body:bcaec51c2ec429dd86984d0ed38849653747a2730565d82443f7cc91986e3bb0",
+    "canonical": "mkit-write:v2\nhttps://api.example.test\ned25519-ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c/photos\n/mkit.transport.v1.TransportService/ReadRef\nbody:bcaec51c2ec429dd86984d0ed38849653747a2730565d82443f7cc91986e3bb0\n1700000000000\n1700000300000\nabababababababababababababababababababababababababababababababab",
+    "signing_digest": "7c99150b4bf8fc2deee2e7db107cfbc082ae0f775ff6ea6d8e9ca5c5780dbf75",
+    "public_key": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+    "signature": "038fbe9ce6a2e2c6b997dcecfb06e8f1aee0385134161102c6518199eeb2fdb17e92eceba6bcc8a14f5876eb65c5c98402bc0d9b71864841181442c7a3cea805"
+  },
+  {
+    "procedure": "/mkit.transport.v1.TransportService/DownloadPack",
+    "body_hex": "00000000220a20cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+    "audience": "https://api.example.test",
+    "repository": "ed25519-ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c/photos",
+    "created_at": 1700000000000,
+    "expires_at": 1700000300000,
+    "nonce": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+    "seed": "0707070707070707070707070707070707070707070707070707070707070707",
+    "body_digest": "9eaf1c2525d8f118708de4c87ec89bb968540c26fdbb96476bd80b501616752a",
+    "commitment": "body:9eaf1c2525d8f118708de4c87ec89bb968540c26fdbb96476bd80b501616752a",
+    "canonical": "mkit-write:v2\nhttps://api.example.test\ned25519-ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c/photos\n/mkit.transport.v1.TransportService/DownloadPack\nbody:9eaf1c2525d8f118708de4c87ec89bb968540c26fdbb96476bd80b501616752a\n1700000000000\n1700000300000\ncdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+    "signing_digest": "3a8bd6086812edb0d648a30de56b5f3fcca608a5431e69f9083f7b47f3a9decd",
+    "public_key": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+    "signature": "e742e191e9a96e0901d62f5a1c87c37b03875c3ec4e309d873eea664b5b49a417b8c6ef1c780346b60cb25dd95529e3ef5f0706ba468b70e237a2f15ced4ba07"
+  }
+]

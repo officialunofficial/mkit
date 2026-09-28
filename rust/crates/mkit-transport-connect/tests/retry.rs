@@ -14,6 +14,7 @@
 //! expected delay.
 
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -23,12 +24,13 @@ use connectrpc::{
     ConnectError, ErrorCode, RequestContext, Response, Router, ServiceRequest, ServiceResult,
     ServiceStream,
 };
+use ed25519_dalek::{Signer as _, SigningKey};
 use futures::StreamExt;
 use mkit_core::hash::hash as blake3_hash;
 use mkit_core::protocol::{
     AdvanceOutcome, BackoffIterator, PackKey, RefWriteCondition, Transport, TransportError,
 };
-use mkit_transport_connect::{ConnectTransport, generated};
+use mkit_transport_connect::{ConnectTransport, EnvelopeSigner, generated};
 use mkit_transport_memory::MemoryTransport;
 
 use generated::__buffa::oneof::upload_pack_request::Body as UploadBody;
@@ -135,9 +137,59 @@ struct FlakyService {
     fail_times: usize,
     fail_kind: FailKind,
     calls: Arc<AtomicUsize>,
+    read_nonces: Option<Arc<Mutex<Vec<String>>>>,
 }
 
 impl FlakyService {
+    fn capture_read_auth(&self, ctx: &RequestContext, method: &str) -> Result<(), ConnectError> {
+        let Some(nonces) = &self.read_nonces else {
+            return Ok(());
+        };
+        let get = |name| {
+            ctx.headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_owned()
+        };
+        let headers = mkit_core::write_auth::Headers {
+            version: Some(get("x-envelope-version")),
+            audience: Some(get("x-audience")),
+            repository: Some(get("x-repository")),
+            public_key: Some(get("x-public-key")),
+            signature: Some(get("x-signature")),
+            digest: Some(get("x-digest")),
+            commitment: Some(get("x-content-commitment")),
+            created_at: Some(get("x-created-at")),
+            expires_at: Some(get("x-expires-at")),
+            idempotency_key: Some(get("idempotency-key")),
+        };
+        let audience = headers.audience.as_deref().unwrap();
+        let commitment = headers.commitment.as_deref().unwrap();
+        let now = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap();
+        mkit_core::write_auth::verify_headers(
+            mkit_core::write_auth::Context {
+                audience,
+                repository: "default",
+            },
+            &format!("/mkit.transport.v1.TransportService/{method}"),
+            Some(commitment),
+            now,
+            &headers,
+        )
+        .map_err(|e| ConnectError::unauthenticated(e.to_string()))?;
+        nonces
+            .lock()
+            .unwrap()
+            .push(headers.idempotency_key.unwrap());
+        Ok(())
+    }
     /// Returns `Some(err)` if `rpc` is the targeted RPC and it should still
     /// fail on this call (bumping `calls` regardless of the RPC). Returns
     /// `None` when the call should proceed to the real backend.
@@ -199,9 +251,10 @@ impl generated::TransportService for FlakyService {
 
     async fn list_refs(
         &self,
-        _ctx: RequestContext,
+        ctx: RequestContext,
         request: ServiceRequest<'_, generated::ListRefsRequest>,
     ) -> ServiceResult<generated::ListRefsResponse> {
+        self.capture_read_auth(&ctx, "ListRefs")?;
         if let Some(e) = self.maybe_fail(Rpc::ListRefs) {
             return Err(e);
         }
@@ -223,9 +276,10 @@ impl generated::TransportService for FlakyService {
 
     async fn read_ref(
         &self,
-        _ctx: RequestContext,
+        ctx: RequestContext,
         request: ServiceRequest<'_, generated::ReadRefRequest>,
     ) -> ServiceResult<generated::ReadRefResponse> {
+        self.capture_read_auth(&ctx, "ReadRef")?;
         if let Some(e) = self.maybe_fail(Rpc::ReadRef) {
             return Err(e);
         }
@@ -298,9 +352,10 @@ impl generated::TransportService for FlakyService {
 
     async fn pack_exists(
         &self,
-        _ctx: RequestContext,
+        ctx: RequestContext,
         request: ServiceRequest<'_, generated::PackExistsRequest>,
     ) -> ServiceResult<generated::PackExistsResponse> {
+        self.capture_read_auth(&ctx, "PackExists")?;
         if let Some(e) = self.maybe_fail(Rpc::PackExists) {
             return Err(e);
         }
@@ -375,9 +430,10 @@ impl generated::TransportService for FlakyService {
 
     async fn download_pack(
         &self,
-        _ctx: RequestContext,
+        ctx: RequestContext,
         request: ServiceRequest<'_, generated::DownloadPackRequest>,
     ) -> ServiceResult<ServiceStream<generated::DownloadPackResponse>> {
+        self.capture_read_auth(&ctx, "DownloadPack")?;
         if let Some(e) = self.maybe_fail(Rpc::DownloadPack) {
             return Err(e);
         }
@@ -447,6 +503,20 @@ fn spawn_flaky_server_with_kind(
     std::thread::JoinHandle<()>,
     Arc<AtomicUsize>,
 ) {
+    spawn_flaky_server_with_capture(target, fail_times, fail_kind, None)
+}
+
+fn spawn_flaky_server_with_capture(
+    target: Rpc,
+    fail_times: usize,
+    fail_kind: FailKind,
+    read_nonces: Option<Arc<Mutex<Vec<String>>>>,
+) -> (
+    u16,
+    tokio::sync::oneshot::Sender<()>,
+    std::thread::JoinHandle<()>,
+    Arc<AtomicUsize>,
+) {
     let (addr_tx, addr_rx) = mpsc::channel();
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     let calls = Arc::new(AtomicUsize::new(0));
@@ -474,6 +544,7 @@ fn spawn_flaky_server_with_kind(
                 fail_times,
                 fail_kind,
                 calls: calls_for_server,
+                read_nonces,
             });
             let router = Router::new().add_service(service);
 
@@ -499,6 +570,65 @@ fn connect_to(port: u16) -> ConnectTransport {
     // `ConnectTransport::connect_for_test_with_signer`'s doc comment) —
     // plenty of headroom for these tests' 1-2 induced failures.
     ConnectTransport::connect_for_test(uri)
+}
+
+struct TestSigner(SigningKey);
+impl EnvelopeSigner for TestSigner {
+    fn public_key_hex(&self) -> String {
+        mkit_core::hash::to_hex_bytes(&self.0.verifying_key().to_bytes())
+    }
+    fn sign_hex(&self, message: &[u8; 32]) -> Result<String, String> {
+        Ok(mkit_core::hash::to_hex_bytes(
+            &self.0.sign(message).to_bytes(),
+        ))
+    }
+}
+
+#[test]
+fn signed_read_retries_use_fresh_valid_nonces() {
+    for target in [
+        Rpc::ListRefs,
+        Rpc::ReadRef,
+        Rpc::PackExists,
+        Rpc::DownloadPack,
+    ] {
+        let nonces = Arc::new(Mutex::new(Vec::new()));
+        let (port, shutdown_tx, handle, calls) =
+            spawn_flaky_server_with_capture(target, 2, FailKind::Unavailable, Some(nonces.clone()));
+        let uri: http::Uri = format!("http://127.0.0.1:{port}").parse().unwrap();
+        let client = ConnectTransport::connect_for_test_with_signer(
+            uri,
+            Some(Arc::new(TestSigner(SigningKey::from_bytes(&[7; 32])))),
+        );
+        let key = PackKey::new(blake3_hash(b"missing-pack"));
+        match target {
+            Rpc::ListRefs => assert!(client.list_refs("").unwrap().is_empty()),
+            Rpc::ReadRef => assert_eq!(client.read_ref("refs/heads/main").unwrap(), None),
+            Rpc::PackExists => assert!(!client.pack_exists(&key).unwrap()),
+            Rpc::DownloadPack => assert!(matches!(
+                client.download_pack(&key),
+                Err(TransportError::PackNotFound)
+            )),
+            _ => unreachable!(),
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 3, "{target:?}");
+        let nonces = nonces.lock().unwrap();
+        assert_eq!(nonces.len(), 3, "{target:?}");
+        assert!(
+            nonces
+                .iter()
+                .all(|nonce| mkit_core::write_auth::is_hex(nonce, 32))
+        );
+        assert_eq!(
+            nonces
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            3
+        );
+        drop(nonces);
+        shutdown(shutdown_tx, handle);
+    }
 }
 
 fn shutdown(shutdown_tx: tokio::sync::oneshot::Sender<()>, handle: std::thread::JoinHandle<()>) {

@@ -3611,6 +3611,7 @@ dependencies = [
  "mkit-transport-memory",
  "rustls",
  "serde",
+ "serde_json",
  "tokio",
  "url",
  "webpki-roots",

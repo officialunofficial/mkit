@@ -940,7 +940,7 @@ marked superseded rather than removed.
 
 **Auth modes** (mkit#699 follow-up, closing the gap this document
 originally flagged in "Reference implementation" above):
-`ConnectTransport` supports two independent, additive write-auth modes &mdash;
+`ConnectTransport` supports two independent, additive auth modes &mdash;
 a deployment can require either, both, or neither:
 
 - **Bearer token** (unchanged, #700/#701): `MKIT_API_TOKEN`, read from
@@ -948,9 +948,11 @@ a deployment can require either, both, or neither:
   <token>` on every call. This is `mkit-transport-http`'s scheme
   (SPEC-TRANSPORT §5.2) and is what `mkit-server serve --auth bearer`
   (§7.2) expects.
-- **Ed25519 write envelope**: `EnvelopeTransport` signs the auth v2 contract
-  in §7.1, with an exact request body commitment for unary writes and the
-  declared pack id and length for streaming writes. `transport_auth = envelope`
+- **Ed25519 envelope**: `EnvelopeTransport` signs the auth v2 contract
+  in §7.1 for reads and writes, with an exact request body commitment for
+  reads and unary writes, including the framed `DownloadPack` request, and
+  the declared pack id and length for streaming `UploadPack` writes.
+  `GetServerInfo` and the grant-epoch RPCs remain unsigned. `transport_auth = envelope`
   is user-scoped and repository-forbidden. The CLI requires exact user-scoped
   `trusted_remote_endpoint` approval before resolving the commit-signing
   Ed25519 identity, independently of bearer-token presence. Domain separation
