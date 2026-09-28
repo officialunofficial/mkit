@@ -345,55 +345,66 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     "merged part root does not match the ticket",
                 ));
             }
-            if claims.upload_session.is_empty() {
-                return Err(invalid_ticket());
-            }
-            let key: BlobKey = PackKey(claims.pack_id).into();
-            let present = self
-                .blobs
-                .head(&key)
-                .await
-                .map_err(|e| multipart_error(StorageOp::BlobHead, e))?;
-            if present.is_some_and(|meta| meta.len != claims.bytes) {
-                return Err(ServerError::invalid_argument(
-                    "stored pack length does not match the ticket",
-                ));
-            }
-            if present.is_some() {
-                if let Err(err) = self.blobs.abort(key, &claims.upload_session).await {
-                    tracing::warn!(error = %err, "failed to abort completed multipart session");
-                }
-            } else {
-                match self
-                    .blobs
-                    .complete(key, &claims.upload_session, &plan, &parts)
-                    .await
-                {
-                    Ok(_) => {}
-                    Err(StoreError::SessionGone) => {
-                        let found = self
-                            .blobs
-                            .head(&key)
-                            .await
-                            .map_err(|e| multipart_error(StorageOp::BlobHead, e))?;
-                        match found {
-                            Some(meta) if meta.len == claims.bytes => {}
-                            Some(_) => {
-                                return Err(ServerError::invalid_argument(
-                                    "stored pack length does not match the ticket",
-                                ));
-                            }
-                            None => return Err(invalid_ticket()),
-                        }
-                    }
-                    Err(e) => return Err(multipart_error(StorageOp::MultipartSession, e)),
-                }
-            }
-            write_upload_marker(&self.blobs, &claims.ticket_id, &claims.pack_id)
-                .await
-                .map_err(|e| store_error(StorageOp::BlobPut, e))?;
-            Ok(())
+            self.publish_verified_upload(&claims, &plan, &parts).await
         })
         .await
+    }
+
+    /// Called only after every receipt, the total length and the merged root
+    /// have been checked without accessing storage.
+    async fn publish_verified_upload(
+        &self,
+        claims: &TicketClaims,
+        plan: &PartPlan,
+        parts: &[PartRef],
+    ) -> Result<(), ServerError> {
+        if claims.upload_session.is_empty() {
+            return Err(invalid_ticket());
+        }
+        let key: BlobKey = PackKey(claims.pack_id).into();
+        let present = self
+            .blobs
+            .head(&key)
+            .await
+            .map_err(|e| multipart_error(StorageOp::BlobHead, e))?;
+        if present.is_some_and(|meta| meta.len != claims.bytes) {
+            return Err(ServerError::invalid_argument(
+                "stored pack length does not match the ticket",
+            ));
+        }
+        if present.is_some() {
+            if let Err(err) = self.blobs.abort(key, &claims.upload_session).await {
+                tracing::warn!(error = %err, "failed to abort completed multipart session");
+            }
+        } else {
+            match self
+                .blobs
+                .complete(key, &claims.upload_session, plan, parts)
+                .await
+            {
+                Ok(_) => {}
+                Err(StoreError::SessionGone) => {
+                    let found = self
+                        .blobs
+                        .head(&key)
+                        .await
+                        .map_err(|e| multipart_error(StorageOp::BlobHead, e))?;
+                    match found {
+                        Some(meta) if meta.len == claims.bytes => {}
+                        Some(_) => {
+                            return Err(ServerError::invalid_argument(
+                                "stored pack length does not match the ticket",
+                            ));
+                        }
+                        None => return Err(invalid_ticket()),
+                    }
+                }
+                Err(e) => return Err(multipart_error(StorageOp::MultipartSession, e)),
+            }
+        }
+        write_upload_marker(&self.blobs, &claims.ticket_id, &claims.pack_id)
+            .await
+            .map_err(|e| store_error(StorageOp::BlobPut, e))?;
+        Ok(())
     }
 }
