@@ -84,10 +84,22 @@ forest topology differs from MMR's) is unchanged.
 
 Its public fields, normatively:
 
-| Field     | Type                | Meaning                                   |
-| --------- | ------------------- | ----------------------------------------- |
-| `leaves`  | `Location` (u64)    | Total leaf count of the MMB at proof time |
-| `digests` | `Vec<Blake3Digest>` | Authentication path, fold-prefix layout   |
+| Field            | Type                | Meaning                                   |
+| ---------------- | ------------------- | ----------------------------------------- |
+| `leaves`         | `Location` (u64)    | Total leaf count of the MMB at proof time |
+| `inactive_peaks` | `usize`             | Number of leading peaks the proof commits to as inactive; always `0` in mkit |
+| `digests`        | `Vec<Blake3Digest>` | Authentication path, fold-prefix layout   |
+
+mkit has no inactivity floor: producers (`CommitHistory::root`,
+`CommitHistory::prove`) pass zero inactive peaks, so every proof mkit
+emits has `inactive_peaks = 0`. A verifier MUST reject a proof whose
+`inactive_peaks` is nonzero. With commonware-storage 2026.9.0 this
+follows from the root computation rather than from a separate check:
+the decoder accepts any value, but a nonzero `inactive_peaks` adds
+`u64_be(inactive_peaks)` to the root preimage (commonware's
+`Hasher::root_with_folded_peaks`), so the reconstructed root can never
+equal an mkit root computed with zero inactive peaks (§2.3), and
+`verify_inclusion` returns `false`.
 
 The `digests` layout is the **fold-based** layout documented in
 commonware-storage `merkle::proof`:
@@ -115,14 +127,19 @@ commonware-codec's `Write` / `Read` impls for `Proof`. In summary:
 
 ```text
 InclusionProof ::= varint(leaves)
+                || varint(inactive_peaks)
                 || varint(digests.len())
                 || digests.len() × digest32
 ```
 
 &mdash; where `varint` is the commonware-codec variable-length `u64` encoding
-and `digest32` is the raw 32 bytes of a BLAKE3 digest. Mkit does NOT
-re-frame this; consumers MUST use commonware-codec at the same pinned
-version.
+and `digest32` is the raw 32 bytes of a BLAKE3 digest. Because mkit
+always writes `inactive_peaks = 0`, that field is the single byte `0x00`
+immediately after the `leaves` varint. For example, a proof of position
+0 in a 2-leaf history encodes as `02 00 01` followed by one 32-byte
+digest (35 bytes). Mkit does NOT re-frame this; consumers MUST use
+commonware-codec at the same pinned version (2026.9.0, pinned in
+`rust/Cargo.toml`).
 
 ### 2.3 Root
 
@@ -138,7 +155,9 @@ same fold formula an MMR root used, just over an MMB's peaks. For an
 **empty** MMB (no commits appended yet) the iteration is empty and the
 root degenerates to `Blake3(u64::to_be_bytes(0))`. This value is
 deterministic and well-defined; `mkit-core::history::CommitHistory::open().root()`
-returns it.
+returns it. The formula is commonware's root with zero inactive peaks;
+a nonzero inactive-peak count would add a `u64_be(inactive_peaks)` term
+between the two parts, which mkit never uses (§2.2).
 
 mkit pins commonware's peak-bagging policy to `Bagging::ForwardFold`
 for both producers (`CommitHistory::root` / `CommitHistory::prove`) and
@@ -203,6 +222,7 @@ history-v1/branches/<ref-key>/
   transaction                          # durable publication intent, below
   pending-snapshot                     # prepared target snapshot
   generations/<generation>.snapshot    # latest ancestry for this generation
+  scrub                                # advisory re-verification schedule, §4.5
 ```
 
 `ref-key` is lowercase BLAKE3 hex of the UTF-8 full ref name. The snapshot and
@@ -309,11 +329,19 @@ store. What it does not do on every publish is re-read and re-hash the
 per branch in an advisory auxiliary file, `scrub`, alongside `current`:
 
 ```text
-"MKSC" || u8(1)
+"MKSC" || u8(2)
+generation[32]
 u64(cursor) || u64(verified_through) || u64(last_full_verify_unix)
 BLAKE3(all preceding bytes)[32]
 ```
 
+The file is exactly 93 bytes, and its integers are little-endian (§4.2).
+`generation` is the generation the state was computed against. A file
+whose `generation` differs from the generation being fast-forwarded is
+treated as missing, so a scrub state left behind by a rewrite that
+crashed before the scrub write cannot be applied to a different chain.
+A version-1 file (no `generation`) fails the length and magic checks and
+is also treated as missing.
 `cursor` is the next scrub window's start index into the prefix.
 `verified_through` is the prefix length as of the last full verification —
 the range `cursor` rotates through; leaves published after that were each
@@ -326,8 +354,11 @@ matches, and fewer than 604800 seconds (7 days) have elapsed since
 verified_through)]` from the store, where `window` is
 `max(512, verified_through / 64)`, and persist the advanced cursor once the
 publish durably succeeds. When that window would reach `verified_through`
-(a completed rotation), or the file is missing, fails to parse, fails its
-checksum, or the 7-day bound has elapsed, verify the complete first-parent
+(a completed rotation), or the window's end exceeds the generation's
+stored prefix length (for example, a rolled-back snapshot paired with a
+newer `scrub` file), or the file is missing, fails to parse, fails its
+checksum, belongs to another generation, or the 7-day bound has elapsed,
+verify the complete first-parent
 ancestry instead, exactly as a non-fast-forward publish does, and persist a
 reset `scrub` reflecting that fresh full verification (`cursor` 0,
 `verified_through` the new chain length, `last_full_verify_unix` now). Either
@@ -336,9 +367,38 @@ much of an already-published prefix gets re-verified against the live store
 on a given publish, never what gets published. A missing, corrupt, or stale
 `scrub` file MUST always be treated as "no prior full verification on
 record" — implementations MUST fail closed toward more verification, never
-less. This bounds the maximum interval before any given leaf is re-verified
-at 64 fast-forward publishes or 7 days of wall-clock time, whichever comes
-first; it does not, and is not intended to, defend against deliberate
+less.
+
+A rotation started at `verified_through = vt` takes
+`floor((vt - 1) / window)` window publishes followed by one publish that
+walks the whole chain again, so `floor((vt - 1) / window) + 1` fast-forward
+publishes in all. The largest value of that count is 65, not 64: for
+example, `vt = 32769` has `window = 512` and needs 64 window publishes plus
+the full walk. Every leaf appended during a rotation is verified when it is
+appended and again by the full walk that ends the rotation. So, when every
+advisory `scrub` write lands, no leaf goes more than 65 fast-forward
+publishes, or more than 7 days of wall-clock time as measured at a
+publish, without being re-read from the store, whichever comes first.
+
+Both bounds are evaluated only when a fast-forward publish runs. An idle
+branch is not re-verified in the background, and a publish is the only
+event that checks the 7-day bound. Proof serving does not depend on the
+scrub: `AncestrySnapshot::load` re-walks the whole chain from the store
+on every verified load.
+
+The publish-count bound does **not** hold when the advisory `scrub` write
+is lost. The write is best-effort and not synced: an I/O failure is
+ignored, and a crash after the publish commits but before the write
+reaches disk leaves the previous `cursor` in place. The next fast-forward
+then re-reads the same window, and repeated loss can defer the rest of the
+rotation indefinitely. In that case only the 7-day bound applies. It fails
+toward more verification, because a lost write after a full walk leaves
+the older `last_full_verify_unix` on disk. The 7-day bound also assumes a
+wall clock that does not step backwards: elapsed time is computed with a
+saturating subtraction, so a `last_full_verify_unix` in the future counts
+as zero elapsed seconds and delays the full walk.
+
+The schedule does not, and is not intended to, defend against deliberate
 same-process tampering (out of scope per the threat model) — only against
 accidental local corruption (bit rot, a bad GC, a torn write) between two
 publications, which content addressing guarantees is always detectable,
