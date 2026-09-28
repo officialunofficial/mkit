@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use super::content_index::{BlockEntry, ObjectState};
 use super::error::StoreError;
+use super::index::IndexValue;
 use super::keys::validate_reservation_id;
 use super::kv::{Key, MAX_KEY_BYTES, MAX_VALUE_BYTES, Value};
 use super::partition::Partition;
@@ -682,6 +683,72 @@ pub fn decode_relay(value: &Value) -> Result<RelayV1, StoreError> {
         target,
         puts,
     })
+}
+
+/// Encode a repository object-index value. All integers are big-endian.
+/// Layout: version, frame offset/length (u64 each), wire type (u8),
+/// decoded size (u64), chain depth (u32), base-present (u8), optional base id.
+pub fn encode_object_index(object: &Hash, row: &IndexValue) -> Result<Value, StoreError> {
+    row.validate(object)?;
+    let mut bytes = Vec::with_capacity(63);
+    bytes.push(CODEC_V1);
+    bytes.extend_from_slice(&row.frame_offset.to_be_bytes());
+    bytes.extend_from_slice(&row.frame_length.to_be_bytes());
+    bytes.push(row.wire_type);
+    bytes.extend_from_slice(&row.decoded_size.to_be_bytes());
+    bytes.extend_from_slice(&row.chain_depth.to_be_bytes());
+    match row.delta_base {
+        Some(base) => {
+            bytes.push(1);
+            bytes.extend_from_slice(&base);
+        }
+        None => bytes.push(0),
+    }
+    Ok(Value::new(bytes))
+}
+
+/// Decode and validate a repository object-index value.
+pub fn decode_object_index(object: &Hash, value: &Value) -> Result<IndexValue, StoreError> {
+    let bytes = value.as_bytes();
+    if !matches!(bytes.len(), 31 | 63) || bytes[0] != CODEC_V1 {
+        return Err(StoreError::Corrupt("bad object index value".into()));
+    }
+    let base = match (bytes[30], bytes.len()) {
+        (0, 31) => None,
+        (1, 63) => Some(
+            bytes[31..63]
+                .try_into()
+                .map_err(|_| StoreError::Corrupt("bad object index base".into()))?,
+        ),
+        _ => return Err(StoreError::Corrupt("bad object index base flag".into())),
+    };
+    let row = IndexValue {
+        frame_offset: u64::from_be_bytes(
+            bytes[1..9]
+                .try_into()
+                .map_err(|_| StoreError::Corrupt("bad object index offset".into()))?,
+        ),
+        frame_length: u64::from_be_bytes(
+            bytes[9..17]
+                .try_into()
+                .map_err(|_| StoreError::Corrupt("bad object index length".into()))?,
+        ),
+        wire_type: bytes[17],
+        decoded_size: u64::from_be_bytes(
+            bytes[18..26]
+                .try_into()
+                .map_err(|_| StoreError::Corrupt("bad object index size".into()))?,
+        ),
+        chain_depth: u32::from_be_bytes(
+            bytes[26..30]
+                .try_into()
+                .map_err(|_| StoreError::Corrupt("bad object index depth".into()))?,
+        ),
+        delta_base: base,
+    };
+    row.validate(object)
+        .map_err(|_| StoreError::Corrupt("invalid object index value".into()))?;
+    Ok(row)
 }
 
 fn relay_scan_invalid(scan: &RelayScanV1) -> Option<&'static str> {

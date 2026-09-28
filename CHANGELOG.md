@@ -38,6 +38,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rollups, other-shard lag is bounded by their admission rate times 3R.
   Worker timer registration
   and D34 quota conformance follow in WP-1.26b.
+- Server: add write-once repository object-index keys and binary values,
+  deterministic row planning, and membership-gated lookup APIs for indexed mode.
 - Server: ticketed `UploadPack` now verifies the ticket before reading data,
   streams the full pack without metadata writes, and leaves a content-addressed
   upload marker for later ticket consumption. The advertised BeginUpload
