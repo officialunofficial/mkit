@@ -36,6 +36,9 @@ pub enum StoreError {
     /// without `atomic_multi_key`. Nothing was written.
     #[error("unsupported by this store: {0}")]
     Unsupported(Cow<'static, str>),
+    /// The multipart storage session was aborted, completed or reclaimed.
+    #[error("multipart upload session no longer exists")]
+    SessionGone,
     /// A stored value failed to decode (unknown codec version, wrong length).
     #[error("corrupt stored value: {0}")]
     Corrupt(Cow<'static, str>),

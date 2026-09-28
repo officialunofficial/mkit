@@ -61,7 +61,9 @@ use crate::error::{Code, ServerError};
 use crate::op::{OpKind, Operation};
 use crate::replay::{ReplayDecision, StoredRejection, StoredResult, classify};
 use crate::storage_error::StorageOp;
-use crate::store::{BlobStore, NamespaceStore, PackSink, Partition, StoreError, codec, keys};
+use crate::store::{
+    BlobStore, MultipartBlobStore, NamespaceStore, PackSink, Partition, StoreError, codec, keys,
+};
 use crate::telemetry::METRIC_UPLOAD_BYTES;
 use crate::upload::{UploadError, UploadValidator};
 
@@ -162,7 +164,7 @@ fn storable(err: &ServerError) -> Option<StoredRejection> {
     }
 }
 
-impl<'p, B: BlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p, B, N, H> {
+impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p, B, N, H> {
     /// See [`Pipeline::open_upload`].
     pub(super) async fn begin(
         pipe: &'p Pipeline<B, N, H>,
@@ -246,7 +248,7 @@ impl<'p, B: BlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p, B, N, H>
         let target = if mode == UploadMode::Replay {
             Target::Verify(Box::default())
         } else {
-            let sink = pipe.blobs.begin(key, declared).await;
+            let sink = pipe.blobs.begin(key.into(), declared).await;
             Target::Sink(sink.map_err(|e| store_error(StorageOp::BlobPut, e))?)
         };
         Ok(Opened {
@@ -347,7 +349,7 @@ impl<'p, B: BlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p, B, N, H>
         let checked = pipe
             .hooks
             .pre_receive()
-            .check(&self.op, Some(&done.key))
+            .check(&self.op, Some(&done.key.into()))
             .await;
         let Some(replay) = replay_guard(&self.op) else {
             return checked;

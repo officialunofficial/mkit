@@ -16,8 +16,8 @@ use mkit_transport_file::{create_dir_all_durably, sync_dir, temp_path};
 
 use super::{io_error, unavailable};
 use crate::store::{
-    BlobBody, BlobKey, BlobMeta, BlobStore, ByteRange, CommitOutcome, MAX_BLOB_PIECE_BYTES,
-    PackSink, StoreError,
+    BlobBody, BlobKey, BlobMeta, BlobNamespace, BlobStore, ByteRange, CommitOutcome,
+    MAX_BLOB_PIECE_BYTES, MultipartBlobStore, PackSink, StoreError, UnsupportedPartSink,
 };
 
 /// The size of each piece of a streamed body.
@@ -83,8 +83,15 @@ impl FsBlobStore {
         self.root.join(self.keyspace)
     }
 
+    fn dir_for(&self, key: &BlobKey) -> PathBuf {
+        match key.1 {
+            BlobNamespace::Pack => self.dir(),
+            BlobNamespace::UploadMarker => self.root.join("upload-markers/v1"),
+        }
+    }
+
     fn path(&self, key: &BlobKey) -> PathBuf {
-        self.dir().join(key.to_hex())
+        self.dir_for(key).join(key.to_hex())
     }
 
     /// Remove the temp files crashed uploads left in the keyspace
@@ -284,7 +291,7 @@ impl BlobStore for FsBlobStore {
     type Sink = FsPackSink;
 
     async fn begin(&self, key: BlobKey, len: u64) -> Result<FsPackSink, StoreError> {
-        let dir = self.dir();
+        let dir = self.dir_for(&key);
         create_dir_all_durably(&dir).map_err(io_error)?;
         let dest = self.path(&key);
         let tmp = temp_path(&dest).map_err(io_error)?;
@@ -361,7 +368,12 @@ impl BlobStore for FsBlobStore {
             Err(e) if e.kind() == ErrorKind::NotFound => return Ok(false),
             Err(e) => return Err(io_error(e)),
         }
-        sync_dir(&self.dir()).map_err(io_error)?;
+        sync_dir(&self.dir_for(key)).map_err(io_error)?;
         Ok(true)
     }
+}
+
+impl MultipartBlobStore for FsBlobStore {
+    type PartSink = UnsupportedPartSink;
+    const MAX_PARTS: u32 = u32::MAX;
 }

@@ -65,8 +65,8 @@ use mkit_core::hash::Hasher;
 use mkit_server::storage_error::StorageOp;
 use mkit_server::store::MAX_BLOB_PIECE_BYTES;
 use mkit_server::{
-    BlobBody, BlobKey, BlobMeta, BlobStore, BoxStream, ByteRange, CommitOutcome, MaybeSend,
-    MaybeSync, PackSink, StoreError,
+    BlobBody, BlobKey, BlobMeta, BlobNamespace, BlobStore, BoxStream, ByteRange, CommitOutcome,
+    MaybeSend, MaybeSync, MultipartBlobStore, PackSink, StoreError, UnsupportedPartSink,
 };
 
 use crate::backend_error;
@@ -155,7 +155,11 @@ impl<B: ObjectBucket> R2BlobStore<B> {
     /// The object key of `key`: `<keyspace>/<hex>`.
     #[must_use]
     pub fn object_key(&self, key: &BlobKey) -> String {
-        format!("{}/{}", self.keyspace, key.to_hex())
+        let namespace = match key.1 {
+            BlobNamespace::Pack => self.keyspace,
+            BlobNamespace::UploadMarker => "upload-markers/v1",
+        };
+        format!("{namespace}/{}", key.to_hex())
     }
 
     /// Fail the next commit at its withheld final byte, after the hash
@@ -398,6 +402,11 @@ impl<B: ObjectBucket> BlobStore for R2BlobStore<B> {
             .map_err(|e| backend_error(StorageOp::BlobPut, e))?;
         Ok(true)
     }
+}
+
+impl<B: ObjectBucket> MultipartBlobStore for R2BlobStore<B> {
+    type PartSink = UnsupportedPartSink;
+    const MAX_PARTS: u32 = u32::MAX;
 }
 
 impl<B: ObjectBucket> R2BlobStore<B> {

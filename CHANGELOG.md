@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server: add stateless `UploadPart` and `CompleteUpload`, authenticated part
+  receipts, and a multipart blob-store interface with a working memory backend.
+  Multipart BeginUpload tickets now carry opaque storage sessions. The blob-key
+  API separates upload markers from pack keys; FS, R2 and S3 multipart storage
+  follows in later work packages.
+
 - Server: implement authenticated `BeginUpload` tickets with stateless BLAKE3 MAC
   tokens, rotation by key id, admission-free live-ticket/member results, open-ticket
   caps, and byte-identical replay. Configure native keys with `--ticket-key-file`

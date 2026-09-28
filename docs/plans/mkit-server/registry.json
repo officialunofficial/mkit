@@ -738,16 +738,31 @@
     ]
   },
   {
-    "id": "1.11",
-    "title": "Core: stateless client-streaming UploadPart/CompleteUpload, part receipts, MultipartBlobStore, FS backend",
+    "id": "1.11a",
+    "title": "Core: stateless UploadPart/CompleteUpload, receipts, MultipartBlobStore and memory backend",
     "milestone": "M1",
     "track": "core",
     "depends_on": [
-      "1.3",
-      "1.9"
+      "1.9a"
     ],
     "size": "L",
-    "summary": "Adds the MultipartBlobStore sub-trait and stateless client-streaming part handlers that verify the ticket token, hash each part as a subtree while streaming it (never buffered whole) and return signed receipts, completing only when the merged root equals the pack id. Part requests touch no metadata shard.",
+    "summary": "Adds stateless part handlers, server-MACed receipts, the multipart trait and memory implementation, and BeginUpload storage sessions. Completion writes an upload marker without metadata.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm"
+    ]
+  },
+  {
+    "id": "1.11b",
+    "title": "FS multipart, native wiring and shared storage multipart suite",
+    "milestone": "M1",
+    "track": "native",
+    "depends_on": [
+      "1.11a"
+    ],
+    "size": "M",
+    "summary": "Implements the FS backend, native wiring, shared multipart storage suite and conf-native wire cases under Feature::Multipart.",
     "human_action": false,
     "area_gates": [
       "rust",
@@ -760,7 +775,7 @@
     "milestone": "M1",
     "track": "worker",
     "depends_on": [
-      "1.11",
+      "1.11b",
       "1.8"
     ],
     "size": "M",
@@ -779,7 +794,7 @@
     "milestone": "M1",
     "track": "native",
     "depends_on": [
-      "1.11"
+      "1.11b"
     ],
     "size": "M",
     "summary": "Implements the multipart API on the S3 store with verification before CompleteMultipartUpload and the upload id carried in the ticket token.",
@@ -885,7 +900,7 @@
     "depends_on": [
       "1.17",
       "1.3",
-      "1.11"
+      "1.11a"
     ],
     "size": "M",
     "summary": "Uploads large packs as signed parts, keeps the server's part receipts to resume after interruption, and completes the upload without a second whole-pack copy.",

@@ -10,7 +10,8 @@
 use crate::op::{Creation, Operation};
 use crate::repo::Addressing;
 use crate::store::{
-    Batch, BatchOutcome, BlobStore, NamespaceStore, Partition, Precondition, Value, codec, keys,
+    Batch, BatchOutcome, MultipartBlobStore, NamespaceStore, Partition, Precondition, Value, codec,
+    keys,
 };
 use crate::timers::lease_sweep::lease_reference;
 use crate::timers::registry::kinds;
@@ -193,7 +194,7 @@ fn grant_batch(
     })
 }
 
-impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
+impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     pub(super) async fn observe_lease(
         &self,
         op: &Operation,

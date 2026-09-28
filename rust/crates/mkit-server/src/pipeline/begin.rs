@@ -1,6 +1,6 @@
 //! `BeginUpload`'s pre-admission decisions and pure ref-shard fragment.
 use super::{
-    Addressing, AuthMode, Authenticated, BeginUploadResult, BlobStore, HookSet, Key,
+    Addressing, AuthMode, Authenticated, BeginUploadResult, HookSet, Key, MultipartBlobStore,
     NamespaceStore, OpKind, Operation, PackKey, Partition, Pipeline, PlanClock, ServerError,
     Sharding, Snapshot, StorageOp, StoredResult, TicketCaps, check_ref_name, codec, internal, keys,
     meta_error, ms, store_error, stored_mismatch,
@@ -27,6 +27,12 @@ pub(super) struct TicketOpen {
     audience: String,
     repository: String,
     reserved: bool,
+}
+
+impl TicketOpen {
+    pub(super) fn reserved(&self) -> bool {
+        self.reserved
+    }
 }
 
 pub(super) fn decision_keys(
@@ -82,10 +88,7 @@ fn result(
         bytes: ticket.bytes,
         part_size: ticket.part_size,
         expires_at_ms: ticket.expires_at_ms,
-        upload_session: ticket
-            .upload_session
-            .as_ref()
-            .map_or_else(Vec::new, |s| s.as_bytes().to_vec()),
+        upload_session: ticket.upload_session.clone().unwrap_or_default(),
     };
     BeginUploadResult::Ticket {
         id,
@@ -95,7 +98,7 @@ fn result(
     }
 }
 
-impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
+impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// Open a stateless authenticated upload ticket in the target ref shard.
     ///
     /// # Errors
@@ -138,6 +141,11 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 return Err(ServerError::new(
                     crate::Code::Unimplemented,
                     "upload tickets are not configured",
+                ));
+            }
+            if bytes > self.cfg.part_size && !self.blobs.supports_multipart() {
+                return Err(ServerError::unimplemented(
+                    "multipart uploads are not supported by this storage backend",
                 ));
             }
             match self
@@ -203,7 +211,7 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             snap.get(&ks[3]).is_some()
         } else {
             self.blobs
-                .head(key)
+                .head(&(*key).into())
                 .await
                 .map_err(|e| store_error(StorageOp::BlobHead, e))?
                 .is_some()
@@ -344,7 +352,7 @@ pub(super) fn plan(
                 bytes: spec.bytes,
                 part_size: spec.part_size,
                 expires_at_ms: spec.expires_at_ms,
-                upload_session: vec![],
+                upload_session: spec.upload_session.clone().unwrap_or_default(),
             }),
         })),
         Err(TicketPlanError::Existing(ticket)) if !open.reserved => Ok(StoredResult::BeginUpload(
@@ -356,7 +364,7 @@ pub(super) fn plan(
         )),
         Err(TicketPlanError::Existing(_) | TicketPlanError::CapExceeded { .. }) => {
             // TODO(WP-3.3): record Aborted via Pending.
-            Err(ServerError::aborted_retryable("upload ticket race"))
+            Err(ServerError::unavailable("upload ticket race"))
         }
         Err(TicketPlanError::Corrupt(err)) => Err(meta_error(err)),
         Err(TicketPlanError::Invalid(detail)) => Err(internal(detail)),

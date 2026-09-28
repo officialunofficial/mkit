@@ -104,7 +104,7 @@ pub struct TicketV1 {
     /// One durable outcome id, including synthetic ids for default admission.
     pub reservation_id: String,
     /// Backend multipart upload session, when allocated.
-    pub upload_session: Option<String>,
+    pub upload_session: Option<Vec<u8>>,
 }
 
 /// The hooks protocol's terminal abort reasons.
@@ -860,7 +860,7 @@ mod tests {
         );
         assert_eq!(decode_ticket(&encode_ticket(&ticket)).unwrap(), ticket);
         let mut session = ticket.clone();
-        session.upload_session = Some("backend-session".into());
+        session.upload_session = Some(b"backend-session".to_vec());
         assert_eq!(decode_ticket(&encode_ticket(&session)).unwrap(), session);
         let base = serde_json::to_value(&ticket).unwrap();
         for (field, bad) in [

@@ -364,6 +364,7 @@ excludes.
 | Too many open upload tickets for the ref or the signer (§7.6) | `failed_precondition`, with public message `too many open upload tickets` |
 | An unresolved delta base after the relay-lag bound, in indexed mode (SPEC-SERVER §9.4) | `failed_precondition`, with public message `delta base not available in this repository` |
 | A part whose subtree hash or length differs from its commitment, or a completion whose merged root or total differs from the ticket (§7.6) | `invalid_argument` |
+| An invalid part receipt (malformed, unknown key id, or bad MAC; §7.6) | `invalid_argument` |
 | A pack still under verification in indexed mode (§7.6) | `unavailable` with exactly one `PendingVerification` detail |
 | A membership-dependent miss within the relay-lag bound, in indexed mode ([SPEC-SERVER §9.4](SPEC-SERVER.md#94-repository-isolated-membership-checks)) | `unavailable` with no detail; a retry with the same nonce is safe |
 | A missed commit deadline (`NotAfter`), a full shard, or outbox backpressure. Nothing commits, and a retry with the same nonce is safe. | `unavailable`, never `resource_exhausted` |
@@ -1235,6 +1236,11 @@ backend's tag for the part. A part needs no admission decision, because
 admission happened at `BeginUpload`. Sending a part index again is
 idempotent.
 
+A deployment MUST retain a rotated key id in the receipt verification set
+for at least seven days after rotation, the maximum ticket lifetime. Only
+then may it retire that id. An invalid receipt within this window indicates
+forgery, rather than ordinary key retirement.
+
 **Part path.** `UploadPart`, `CompleteUpload` and a ticketed `UploadPack`
 form the part path. They record no replay entry. They are idempotent by content, so
 the server checks only the validity window, the ticket token, and the
@@ -1247,8 +1253,9 @@ ticket expiry.
 signed write with a `body:` commitment. The server verifies every
 receipt and merges the subtree hashes into a root. It makes the pack
 visible in storage only if the root equals `pack_id` and the lengths sum
-to `bytes`. Otherwise it aborts the storage session and returns
-`invalid_argument`. Completion does not make the pack a member of the
+to `bytes`. Otherwise it returns `invalid_argument` and **MAY** abort the
+storage session. Reclamation follows the backend lifecycle rule and ticket expiry.
+Completion does not make the pack a member of the
 repository. Completing the same ticket again is idempotent: it returns the
 same result and changes nothing.
 

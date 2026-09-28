@@ -16,6 +16,7 @@ use super::error::recorded;
 use super::proto::mkit::transport::v1::__buffa::oneof::begin_upload_response::Result as BeginResult;
 use super::proto::mkit::transport::v1::__buffa::oneof::download_pack_response::Body as DownloadBody;
 use super::proto::mkit::transport::v1::__buffa::oneof::upload_pack_request::Body as UploadBody;
+use super::proto::mkit::transport::v1::__buffa::oneof::upload_part_request::Msg as PartMsg;
 use super::proto::mkit::transport::v1::{
     AdvanceOutcome as WireOutcome, AdvanceRefsRequest, AdvanceRefsResponse, BeginUploadRequest,
     BeginUploadResponse, CompleteUploadRequest, CompleteUploadResponse, DownloadPackHeader,
@@ -32,13 +33,12 @@ use crate::pipeline::{Authenticated, DownloadChunk, HookSet, Pipeline, ServerInf
 use crate::refs::{DigestField, UnusedExpectedId, condition_from_wire, hash_from_slice};
 use crate::replay::{BeginUploadResult, UpdateRefResult};
 use crate::rt::{send_wrap, send_wrap_stream};
-use crate::store::{BlobStore, NamespaceStore};
+use crate::store::{MultipartBlobStore, NamespaceStore};
 use crate::upload::UploadError;
 
 /// `TransportService` over a [`Pipeline`]. Each handler takes the
 /// [`Authenticated`] that [`super::AuthInterceptor`] stored for existing RPCs;
-/// `GetServerInfo` is deliberately unauthenticated. The remaining M1 upload
-/// RPCs are stubs until WP-1.11 adds authenticated procedures.
+/// `GetServerInfo` is deliberately unauthenticated.
 pub struct ConnectTransport<B, N, H> {
     pipe: Shared<Pipeline<B, N, H>>,
 }
@@ -106,7 +106,7 @@ fn chunk_message(pack_id: &[u8], chunk: &DownloadChunk) -> DownloadPackResponse 
 /// up to the `last` one, then `finish`. The caller keeps the pipeline
 /// alive across the stream. Reading stops at `last`; connectrpc drains
 /// what follows within its bounds.
-async fn upload<B: BlobStore, N: NamespaceStore, H: HookSet>(
+async fn upload<B: MultipartBlobStore, N: NamespaceStore, H: HookSet>(
     pipe: &Pipeline<B, N, H>,
     a: &Authenticated,
     mut requests: InboundStream<UploadPackRequest>,
@@ -168,10 +168,65 @@ async fn upload<B: BlobStore, N: NamespaceStore, H: HookSet>(
     Ok(())
 }
 
+/// Read one part's header before opening its sink, then forward nonempty
+/// chunks without buffering the part in the Connect layer.
+async fn upload_part<B: MultipartBlobStore, N: NamespaceStore, H: HookSet>(
+    pipe: &Pipeline<B, N, H>,
+    a: &Authenticated,
+    mut requests: InboundStream<UploadPartRequest>,
+) -> Result<Vec<u8>, ConnectError> {
+    let header = match requests.next().await.transpose()? {
+        None => Err(UploadError::HeaderMissing { stream_empty: true }),
+        Some(first) => match first.to_owned_message().msg {
+            Some(PartMsg::Header(header)) => Ok(*header),
+            _ => Err(UploadError::HeaderMissing {
+                stream_empty: false,
+            }),
+        },
+    }
+    .map_err(ServerError::from)?;
+    let mut session = pipe
+        .open_part(
+            a,
+            header.ticket_token.as_deref().unwrap_or_default(),
+            header.index.unwrap_or_default(),
+        )
+        .await?;
+    while let Some(item) = requests.next().await {
+        let chunk = match item {
+            Ok(message) => match message.to_owned_message().msg {
+                Some(PartMsg::Chunk(chunk)) => chunk,
+                Some(PartMsg::Header(_)) => {
+                    session.abort().await;
+                    return Err(
+                        ServerError::from(UploadError::UnexpectedMessage { header: true }).into(),
+                    );
+                }
+                None => {
+                    session.abort().await;
+                    return Err(ServerError::from(UploadError::UnexpectedMessage {
+                        header: false,
+                    })
+                    .into());
+                }
+            },
+            Err(err) => {
+                session.abort().await;
+                return Err(err);
+            }
+        };
+        if let Err(err) = session.push(Bytes::from(chunk)).await {
+            session.abort().await;
+            return Err(err.into());
+        }
+    }
+    session.finish().await.map_err(Into::into)
+}
+
 #[allow(refining_impl_trait)]
 impl<B, N, H> TransportService for ConnectTransport<B, N, H>
 where
-    B: BlobStore + 'static,
+    B: MultipartBlobStore + 'static,
     N: NamespaceStore + 'static,
     H: HookSet + 'static,
 {
@@ -412,22 +467,39 @@ where
 
     async fn upload_part(
         &self,
-        _ctx: RequestContext,
-        _requests: InboundStream<UploadPartRequest>,
+        ctx: RequestContext,
+        requests: InboundStream<UploadPartRequest>,
     ) -> ServiceResult<UploadPartResponse> {
-        // SECURITY: unauthenticated until WP-1.11 adds a Procedure variant; the implementing WP MUST add it.
-        // TODO(WP-1.11): implement part uploads; only connectrpc may read this stream for now.
-        Err(not_yet().into())
+        let a = authenticated(&ctx)?;
+        let pipe = self.pipe.arc();
+        send_wrap(async move {
+            let receipt = upload_part(&pipe, &a, requests).await?;
+            Response::ok(UploadPartResponse {
+                receipt: Some(receipt),
+                ..Default::default()
+            })
+        })
+        .await
     }
 
     async fn complete_upload(
         &self,
-        _ctx: RequestContext,
-        _request: ServiceRequest<'_, CompleteUploadRequest>,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, CompleteUploadRequest>,
     ) -> ServiceResult<CompleteUploadResponse> {
-        // SECURITY: unauthenticated until WP-1.11 adds a Procedure variant; the implementing WP MUST add it.
-        // TODO(WP-1.11): implement multipart completion.
-        Err(not_yet().into())
+        let a = authenticated(&ctx)?;
+        let message = request.to_owned_message();
+        let pipe = self.pipe.arc();
+        send_wrap(async move {
+            pipe.complete_upload(
+                &a,
+                message.ticket_token.as_deref().unwrap_or_default(),
+                &message.receipts,
+            )
+            .await?;
+            Response::ok(CompleteUploadResponse::default())
+        })
+        .await
     }
 }
 

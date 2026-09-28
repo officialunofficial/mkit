@@ -12,10 +12,12 @@
 //! WP-M0-17. `apps/repo-worker` keeps its own copy (planner decision Q11).
 
 use mkit_core::hash::{hash, to_hex};
-use mkit_core::write_auth::{AuthError, Context, Headers, validate_audience, verify_headers};
+use mkit_core::write_auth::{
+    AuthError, Context, ExpectedCommitment, Headers, validate_audience, verify_headers_with,
+};
 
 use crate::error::ServerError;
-use crate::op::{Commitment, VerifiedAuth};
+use crate::op::{Commitment, Procedure, VerifiedAuth};
 
 /// The auth v2 request headers, lowercase, in [`Headers`] field order.
 pub const HEADER_NAMES: [&str; 10] = [
@@ -169,10 +171,17 @@ fn verify(
     now_ms: i64,
     headers: &Headers,
 ) -> Result<VerifiedAuth, ServerError> {
-    let authorized = verify_headers(
+    let expected = if let Some(text) = commitment {
+        ExpectedCommitment::Exact(text)
+    } else if procedure_path == Procedure::UploadPart.connect_path() {
+        ExpectedCommitment::PartStream
+    } else {
+        ExpectedCommitment::PackStream
+    };
+    let authorized = verify_headers_with(
         cfg.context(repository),
         procedure_path,
-        commitment,
+        expected,
         now_ms,
         headers,
     )
@@ -326,6 +335,14 @@ mod tests {
     /// Headers for an `UploadPack` signed with the fixture's key over
     /// `commitment`.
     fn signed_stream(fixture: &serde_json::Value, commitment: &str) -> Headers {
+        signed_stream_for(fixture, UPLOAD, commitment)
+    }
+
+    fn signed_stream_for(
+        fixture: &serde_json::Value,
+        procedure: &str,
+        commitment: &str,
+    ) -> Headers {
         let (audience, repository) = (field(fixture, "audience"), field(fixture, "repository"));
         let nonce = field(fixture, "nonce");
         let (created_at, expires_at) = (
@@ -337,7 +354,7 @@ mod tests {
                 audience: &audience,
                 repository: &repository,
             },
-            procedure: UPLOAD,
+            procedure,
             commitment,
             created_at,
             expires_at,
@@ -411,6 +428,31 @@ mod tests {
         assert_eq!(
             check_pack_commitment(&unary, &PACK_ID, 12),
             Err(PackCommitmentMismatch)
+        );
+    }
+
+    #[test]
+    fn upload_part_selects_part_stream_commitment() {
+        let fixture = golden();
+        let now = fixture["created_at"].as_i64().unwrap() + 1;
+        let part = format!("part:{}:1:{}:8388608", "ab".repeat(32), "cd".repeat(32));
+        let path = Procedure::UploadPart.connect_path();
+        let headers = signed_stream_for(&fixture, path, &part);
+        let auth = verify_stream(&golden_config(&fixture), path, now, &headers).unwrap();
+        assert!(matches!(
+            auth.commitment,
+            Commitment::Part {
+                index: 1,
+                len: 8_388_608,
+                ..
+            }
+        ));
+        let wrong = signed_stream_for(&fixture, path, &format!("pack:{}:8388608", "cd".repeat(32)));
+        assert_eq!(
+            verify_stream(&golden_config(&fixture), path, now, &wrong)
+                .unwrap_err()
+                .public_message(),
+            "stream requires a part commitment"
         );
     }
 

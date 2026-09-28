@@ -1253,6 +1253,22 @@ memory and SQLite (Single and D34), and the wire `tickets.*` cases.
 Ticket expiry cleanup and admission Pending/Aborted reconciliation remain
 WP-1.14 and WP-3.3 respectively.
 
+## Multipart completion authenticates every part before publication
+
+**Always:** UploadPart verifies the ticket, signed commitment and geometry
+before storing bytes. A part counts only after its subtree value matches.
+CompleteUpload verifies every receipt, total length and merged BLAKE3 root
+before making the pack visible. Both paths bypass metadata and admission;
+success writes a content-addressed marker in the upload-marker namespace.
+
+**Because:** an unauthenticated or incomplete part must not replace a good
+part, publish a pack or create repository membership.
+
+**If violated:** a forged receipt can publish unverified content, or an
+upload can bypass BeginUpload's authorization and admission.
+
+**Enforced by:** `upload::receipt_tests` and `pipeline::tests::parts` (WP-1.11a).
+
 ## Storage pressure observes physical capacity after commit
 
 **Always:** Worker pressure samples use the local physical database size only

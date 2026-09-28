@@ -77,7 +77,11 @@ impl Default for RouterOptions {
 }
 
 /// The streaming procedures, which get [`RouterOptions::stream_timeout`].
-const STREAMING: [Procedure; 2] = [Procedure::UploadPack, Procedure::DownloadPack];
+const STREAMING: [Procedure; 3] = [
+    Procedure::UploadPack,
+    Procedure::UploadPart,
+    Procedure::DownloadPack,
+];
 
 /// The mkit server as an [`axum::Router`]: `mkit_server::connect::service`
 /// (the `mkit.transport.v1` Connect binding and `grpc.health.v1.Health`,

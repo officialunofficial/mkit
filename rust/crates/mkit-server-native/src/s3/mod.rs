@@ -80,7 +80,10 @@ use bytes::{Bytes, BytesMut};
 use futures_util::{Stream, StreamExt as _};
 use mkit_server::storage_error::{StorageOp, describe_and_map};
 use mkit_server::store::MAX_BLOB_PIECE_BYTES;
-use mkit_server::{BlobBody, BlobKey, BlobMeta, BlobStore, ByteRange, Clock, Redactor, StoreError};
+use mkit_server::{
+    BlobBody, BlobKey, BlobMeta, BlobNamespace, BlobStore, ByteRange, Clock, MultipartBlobStore,
+    Redactor, StoreError, UnsupportedPartSink,
+};
 use mkit_transport_s3::sigv4;
 pub use mkit_transport_s3::sigv4::Credentials;
 use reqwest::header::{self, HeaderMap, HeaderName, HeaderValue};
@@ -242,6 +245,7 @@ pub struct S3BlobStore {
     bucket: String,
     /// `/<bucket>/<prefix/><keyspace>/`.
     object_base: String,
+    marker_base: String,
     credentials: Credentials,
     clock: Arc<dyn Clock>,
     spool_dir: Option<PathBuf>,
@@ -314,6 +318,7 @@ impl S3BlobStore {
             put_client,
             origin,
             object_base: format!("/{}/{prefix}{keyspace}/", cfg.bucket),
+            marker_base: format!("/{}/{prefix}upload-markers/v1/", cfg.bucket),
             bucket: cfg.bucket,
             credentials: cfg.credentials,
             clock,
@@ -366,12 +371,20 @@ impl S3BlobStore {
     /// The object key of `key`: `<prefix/><keyspace>/<hex>`.
     #[must_use]
     pub fn object_key(&self, key: &BlobKey) -> String {
-        let base = &self.object_base[self.bucket.len() + 2..];
+        let path = match key.1 {
+            BlobNamespace::Pack => &self.object_base,
+            BlobNamespace::UploadMarker => &self.marker_base,
+        };
+        let base = &path[self.bucket.len() + 2..];
         format!("{base}{}", key.to_hex())
     }
 
     fn object_path(&self, key: &BlobKey) -> String {
-        format!("{}{}", self.object_base, key.to_hex())
+        let base = match key.1 {
+            BlobNamespace::Pack => &self.object_base,
+            BlobNamespace::UploadMarker => &self.marker_base,
+        };
+        format!("{base}{}", key.to_hex())
     }
 
     /// Send a bodiless request.
@@ -735,4 +748,9 @@ impl BlobStore for S3BlobStore {
             _ => Err(status_error(StorageOp::BlobPut, "DELETE", resp).await),
         }
     }
+}
+
+impl MultipartBlobStore for S3BlobStore {
+    type PartSink = UnsupportedPartSink;
+    const MAX_PARTS: u32 = u32::MAX;
 }

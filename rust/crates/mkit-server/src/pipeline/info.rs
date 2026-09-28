@@ -5,7 +5,7 @@ use mkit_core::upload_parts::MIN_PART_SIZE;
 use super::{Admission, HookSet, Pipeline, PipelineConfig};
 use crate::ServerError;
 use crate::repo::Addressing;
-use crate::store::{BlobStore, INDEX_FANOUT, NamespaceStore};
+use crate::store::{INDEX_FANOUT, MultipartBlobStore, NamespaceStore};
 
 /// Deployment capabilities and limits, independent of any repository.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,7 +65,7 @@ impl PipelineConfig {
     }
 }
 
-impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
+impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// Configured deployment information. Never resolves a repository or
     /// reads a store; the atomic flag comes from store capabilities only.
     #[must_use]

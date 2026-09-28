@@ -117,6 +117,9 @@ The listener fails closed, as `mkit serve --http` did:
   `--meta sqlite:`. To serve `BeginUpload`, set `--ticket-key-file <PATH>`
   or `MKIT_TICKET_KEYS` to one `<key-id> <64 hex>` entry per line. The
   first key signs; all listed keys verify, so prepend a new key to rotate.
+  Keep every retired key id in the verify set for at least seven days after
+  rotation. Outstanding multipart part receipts use the same key ids and
+  remain valid for the maximum ticket lifetime.
   Blank lines and `#` comments are allowed. The file follows the same
   owner-only, no-symlink rule as the bearer secret; invalid keys fail with
   `USAGE`. Without keys, `BeginUpload` answers `unimplemented`.

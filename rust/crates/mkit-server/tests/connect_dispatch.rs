@@ -1001,7 +1001,7 @@ fn assert_unimplemented(reply: &Reply) {
 }
 
 #[test]
-fn m1_stub_paths_are_not_authenticated_procedures_yet() {
+fn multipart_paths_are_authenticated_procedures() {
     // GetServerInfo is permanently outside Procedure: no auth or resolution.
     assert_eq!(
         Procedure::from_connect_path("/mkit.transport.v1.TransportService/GetServerInfo"),
@@ -1011,21 +1011,24 @@ fn m1_stub_paths_are_not_authenticated_procedures_yet() {
         Procedure::from_connect_path("/mkit.transport.v1.TransportService/BeginUpload"),
         Some(Procedure::BeginUpload)
     );
-    // WP-1.11 still needs authenticated procedures for these stubs.
-    for rpc in ["UploadPart", "CompleteUpload"] {
-        let path = format!("/mkit.transport.v1.TransportService/{rpc}");
-        assert_eq!(Procedure::from_connect_path(&path), None, "{rpc}");
-    }
+    assert_eq!(
+        Procedure::from_connect_path("/mkit.transport.v1.TransportService/UploadPart"),
+        Some(Procedure::UploadPart)
+    );
+    assert_eq!(
+        Procedure::from_connect_path("/mkit.transport.v1.TransportService/CompleteUpload"),
+        Some(Procedure::CompleteUpload)
+    );
 }
 
 #[tokio::test]
-async fn m1_new_unary_rpcs_reach_stubs_without_auth_headers() {
+async fn complete_upload_requires_authentication() {
     let server = setup(AuthMode::Bearer {
         token: Redacted::new(TOKEN),
     })
     .serve();
-    assert_unimplemented(
-        &server
+    assert_eq!(
+        server
             .unary(
                 "CompleteUpload",
                 &CompleteUploadRequest {
@@ -1035,11 +1038,16 @@ async fn m1_new_unary_rpcs_reach_stubs_without_auth_headers() {
                 },
                 &[],
             )
-            .await,
+            .await
+            .code(),
+        "unauthenticated",
     );
     // Exercise JSON dispatch too.
     for rpc in ["CompleteUpload"] {
-        assert_unimplemented(&server.json(rpc, &serde_json::json!({}), &[]).await);
+        assert_eq!(
+            server.json(rpc, &serde_json::json!({}), &[]).await.code(),
+            "unauthenticated"
+        );
     }
 }
 
@@ -1091,7 +1099,7 @@ async fn begin_upload_requires_authentication_and_configured_keys() {
 }
 
 #[tokio::test]
-async fn m1_upload_part_stub_ignores_stream_contents_without_auth() {
+async fn upload_part_requires_authentication_before_stream_contents() {
     let server = setup(AuthMode::Bearer {
         token: Redacted::new(TOKEN),
     })
@@ -1110,7 +1118,7 @@ async fn m1_upload_part_stub_ignores_stream_contents_without_auth() {
     };
     let mut full = frame(&header);
     full.extend(frame(&chunk));
-    // Malformed frame, and no header at all: neither is validated by the handler.
+    // Authentication precedes all stream decoding.
     for body in [full, vec![], vec![0, 0, 0, 0, 16, 1, 2]] {
         let reply = server
             .post(
@@ -1122,8 +1130,7 @@ async fn m1_upload_part_stub_ignores_stream_contents_without_auth() {
             .await;
         let (messages, end) = reply.frames();
         assert!(messages.is_empty());
-        assert_eq!(end["error"]["code"], "unimplemented");
-        assert_eq!(end["error"]["message"], "not implemented yet");
+        assert_eq!(end["error"]["code"], "unauthenticated");
     }
 }
 
