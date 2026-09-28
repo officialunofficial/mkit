@@ -3609,6 +3609,7 @@ version = "0.4.2"
 name = "mkit-transport-connect"
 version = "0.4.2"
 dependencies = [
+ "base64 0.22.1",
  "buffa",
  "bytes",
  "connectrpc",
@@ -3623,6 +3624,7 @@ dependencies = [
  "mkit-transport-memory",
  "rustls",
  "serde",
+ "serde_json",
  "tokio",
  "url",
  "webpki-roots",

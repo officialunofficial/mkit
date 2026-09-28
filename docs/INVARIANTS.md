@@ -185,6 +185,23 @@ web/spammer envelope tests. Keys failure injection after name and result writes
 rolls back both; saved results survive a full Worker restart. Production builds
 omit `test-faults`. Only auth v2 is accepted. Names use SQLite exclusively.
 
+## Pending verification preserves the advance identity
+
+**Always:** a typed pending `AdvanceRefs` response causes a clamped poll, not
+a retry-ladder step. Every attempt keeps the same nonce, timestamps and
+signature while the envelope remains valid; an expiring envelope is renewed
+before another attempt. Polling ends before the consumed ticket expires.
+
+**Because:** a pending answer is never stored for replay, and the next attempt
+must observe verification progress without changing the logical operation.
+
+**If violated:** an advance can fail after the ordinary retry ladder, use an
+expired signature, or keep polling after its ticket is invalid.
+
+**Enforced by:** `ConnectTransport::advance_refs_with_deadline` and its pending
+response, renewal and deadline tests. The caller's real ticket deadline is
+pending WP-1.17; until then the helper uses the seven-day maximum lifetime.
+
 ## External signer capabilities precede signing material
 
 **Always:** the external signer returns compatible protocol, algorithm,

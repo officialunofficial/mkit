@@ -28,8 +28,36 @@
 //! 503 }` exactly like `ConnectionFailed` (both retryable), so retry
 //! behavior is identical either way.
 
+use base64::Engine as _;
+use buffa::Message as _;
 use connectrpc::{ConnectError, ErrorCode};
 use mkit_core::protocol::TransportError;
+
+use crate::proto::mkit::transport::v1::PendingVerification;
+
+/// Recognise only a typed `AdvanceRefs` unavailable response. Malformed
+/// details deliberately fall back to the ordinary retry ladder.
+pub(crate) fn pending_verification_delay(err: &ConnectError) -> Option<std::time::Duration> {
+    if err.code != ErrorCode::Unavailable {
+        return None;
+    }
+    let detail = err.details.iter().find(|detail| {
+        detail
+            .type_url
+            .strip_prefix("type.googleapis.com/")
+            .unwrap_or(&detail.type_url)
+            == "mkit.transport.v1.PendingVerification"
+    })?;
+    let value = detail.value.as_deref().unwrap_or("");
+    let bytes = base64::engine::general_purpose::STANDARD_NO_PAD
+        .decode(value)
+        .or_else(|_| base64::engine::general_purpose::STANDARD.decode(value))
+        .ok()?;
+    let pending = PendingVerification::decode_from_slice(&bytes).ok()?;
+    Some(std::time::Duration::from_millis(u64::from(
+        pending.retry_after_ms.unwrap_or(0).clamp(1_000, 60_000),
+    )))
+}
 
 /// Which RPC family raised the error — needed to disambiguate
 /// `invalid_argument` (see module docs).
@@ -77,6 +105,66 @@ pub(crate) fn map_connect_error(err: ConnectError, ctx: ErrorContext) -> Transpo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pending_error(value: Option<String>) -> ConnectError {
+        ConnectError::unavailable("verification pending").with_detail(connectrpc::ErrorDetail {
+            type_url: "mkit.transport.v1.PendingVerification".to_owned(),
+            value,
+            debug: None,
+        })
+    }
+
+    #[test]
+    fn pending_delay_clamps_all_boundaries() {
+        for (value, expected) in [
+            (None, 1_000),
+            (Some(0), 1_000),
+            (Some(500), 1_000),
+            (Some(5_000), 5_000),
+            (Some(120_000), 60_000),
+            (Some(u32::MAX), 60_000),
+        ] {
+            let bytes = buffa::Message::encode_to_vec(&PendingVerification {
+                retry_after_ms: value,
+                ..Default::default()
+            });
+            let error = pending_error(Some(
+                base64::engine::general_purpose::STANDARD_NO_PAD.encode(bytes),
+            ));
+            assert_eq!(
+                pending_verification_delay(&error),
+                Some(std::time::Duration::from_millis(expected))
+            );
+        }
+        assert_eq!(
+            pending_verification_delay(&pending_error(None)),
+            Some(std::time::Duration::from_millis(1_000))
+        );
+    }
+
+    #[test]
+    fn golden_pending_error_decodes_to_five_seconds() {
+        let json = include_str!("../../../tests/golden/transport/pending-verification-error.json");
+        let error: ConnectError = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            pending_verification_delay(&error),
+            Some(std::time::Duration::from_secs(5))
+        );
+    }
+
+    #[test]
+    fn malformed_and_other_code_details_are_plain_errors() {
+        let mut malformed = pending_error(Some("%%%".to_owned()));
+        assert_eq!(pending_verification_delay(&malformed), None);
+        malformed.code = ErrorCode::Aborted;
+        assert_eq!(pending_verification_delay(&malformed), None);
+        let mut other_type = pending_error(None);
+        other_type.details[0].type_url = "mkit.transport.v1.SomethingElse".to_owned();
+        assert_eq!(pending_verification_delay(&other_type), None);
+        let mut prefixed = pending_error(None);
+        prefixed.details[0].type_url = PendingVerification::TYPE_URL.to_owned();
+        assert!(pending_verification_delay(&prefixed).is_some());
+    }
 
     #[test]
     fn aborted_is_retryable() {

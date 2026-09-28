@@ -20,6 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Multipart BeginUpload tickets now carry opaque storage sessions. The blob-key
   API separates upload markers from pack keys; FS, R2 and S3 multipart storage
   follows in later work packages.
+- Connect client: poll typed pending AdvanceRefs verification replies with
+  clamped waits, nonce reuse and envelope renewal, progress and cancellation.
+  Ticket deadline threading follows in WP-1.17.
 - Server: ticketed `UploadPack` now verifies the ticket before reading data,
   streams the full pack without metadata writes, and leaves a content-addressed
   upload marker for later ticket consumption. The advertised BeginUpload

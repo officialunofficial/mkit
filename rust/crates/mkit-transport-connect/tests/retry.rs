@@ -13,9 +13,9 @@
 //! the injected sleep hook is actually invoked between attempts with the
 //! expected delay.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use connectrpc::server::Server;
@@ -23,12 +23,13 @@ use connectrpc::{
     ConnectError, ErrorCode, RequestContext, Response, Router, ServiceRequest, ServiceResult,
     ServiceStream,
 };
+use ed25519_dalek::{Signer as _, SigningKey};
 use futures::StreamExt;
 use mkit_core::hash::hash as blake3_hash;
 use mkit_core::protocol::{
     AdvanceOutcome, BackoffIterator, PackKey, RefWriteCondition, Transport, TransportError,
 };
-use mkit_transport_connect::{ConnectTransport, generated};
+use mkit_transport_connect::{ConnectTransport, EnvelopeSigner, PendingEvent, generated};
 use mkit_transport_memory::MemoryTransport;
 
 use generated::__buffa::oneof::upload_pack_request::Body as UploadBody;
@@ -116,6 +117,10 @@ enum Rpc {
 enum FailKind {
     Unavailable,
     NotFound,
+    Pending(u32),
+    PendingMalformed,
+    Mixed,
+    PendingThenUnauthenticated,
 }
 
 impl FailKind {
@@ -125,6 +130,25 @@ impl FailKind {
                 ConnectError::unavailable(format!("flaky failure #{} of {}", n + 1, fail_times))
             }
             FailKind::NotFound => ConnectError::not_found("flaky not-found failure"),
+            FailKind::Pending(delay) => ConnectError::unavailable("verification pending")
+                .with_detail(connectrpc::ErrorDetail::from_message(
+                    "mkit.transport.v1.PendingVerification",
+                    &generated::PendingVerification::default().with_retry_after_ms(delay),
+                )),
+            FailKind::PendingMalformed => ConnectError::unavailable("verification pending")
+                .with_detail(connectrpc::ErrorDetail {
+                    type_url: "mkit.transport.v1.PendingVerification".to_owned(),
+                    value: Some("%%%".to_owned()),
+                    debug: None,
+                }),
+            FailKind::Mixed if n == 1 => ConnectError::new(ErrorCode::Aborted, "in flight"),
+            FailKind::Mixed => FailKind::Pending(1_000).to_connect_error(n, fail_times),
+            FailKind::PendingThenUnauthenticated if n == 1 => {
+                ConnectError::unauthenticated("clock ahead")
+            }
+            FailKind::PendingThenUnauthenticated => {
+                FailKind::Pending(1_000).to_connect_error(n, fail_times)
+            }
         }
     }
 }
@@ -135,6 +159,7 @@ struct FlakyService {
     fail_times: usize,
     fail_kind: FailKind,
     calls: Arc<AtomicUsize>,
+    advance_headers: Option<Arc<Mutex<Vec<http::HeaderMap>>>>,
 }
 
 impl FlakyService {
@@ -267,9 +292,12 @@ impl generated::TransportService for FlakyService {
 
     async fn advance_refs(
         &self,
-        _ctx: RequestContext,
+        ctx: RequestContext,
         request: ServiceRequest<'_, generated::AdvanceRefsRequest>,
     ) -> ServiceResult<generated::AdvanceRefsResponse> {
+        if let Some(headers) = &self.advance_headers {
+            headers.lock().unwrap().push(ctx.headers().clone());
+        }
         if let Some(e) = self.maybe_fail(Rpc::AdvanceRefs) {
             return Err(e);
         }
@@ -455,6 +483,20 @@ fn spawn_flaky_server_with_kind(
     std::thread::JoinHandle<()>,
     Arc<AtomicUsize>,
 ) {
+    spawn_flaky_server_internal(target, fail_times, fail_kind, None)
+}
+
+fn spawn_flaky_server_internal(
+    target: Rpc,
+    fail_times: usize,
+    fail_kind: FailKind,
+    advance_headers: Option<Arc<Mutex<Vec<http::HeaderMap>>>>,
+) -> (
+    u16,
+    tokio::sync::oneshot::Sender<()>,
+    std::thread::JoinHandle<()>,
+    Arc<AtomicUsize>,
+) {
     let (addr_tx, addr_rx) = mpsc::channel();
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     let calls = Arc::new(AtomicUsize::new(0));
@@ -482,6 +524,7 @@ fn spawn_flaky_server_with_kind(
                 fail_times,
                 fail_kind,
                 calls: calls_for_server,
+                advance_headers,
             });
             let router = Router::new().add_service(service);
 
@@ -754,5 +797,328 @@ fn retry_uses_injected_backoff_and_sleep_hook() {
     assert_eq!(RECORDED_SLEEP_COUNT.load(Ordering::SeqCst), 1);
     assert_eq!(RECORDED_SLEEP_MILLIS.load(Ordering::SeqCst), 9);
 
+    shutdown(shutdown_tx, handle);
+}
+
+static PENDING_SLEEPS: Mutex<Vec<Duration>> = Mutex::new(Vec::new());
+static MIXED_SLEEPS: Mutex<Vec<Duration>> = Mutex::new(Vec::new());
+
+fn record_pending_sleep(delay: Duration) {
+    PENDING_SLEEPS.lock().unwrap().push(delay);
+}
+
+fn record_mixed_sleep(delay: Duration) {
+    MIXED_SLEEPS.lock().unwrap().push(delay);
+}
+
+fn advance_for_pending_test(client: &ConnectTransport) -> Result<AdvanceOutcome, TransportError> {
+    client.advance_refs(
+        "refs/heads/feature",
+        RefWriteCondition::Missing,
+        &blake3_hash(b"pending head"),
+        "refs/packmaps/feature",
+        RefWriteCondition::Missing,
+        &blake3_hash(b"pending packmap"),
+    )
+}
+
+#[test]
+fn pending_polls_past_the_ladder_with_clamped_sliced_waits() {
+    PENDING_SLEEPS.lock().unwrap().clear();
+    let (port, shutdown_tx, handle, calls) =
+        spawn_flaky_server_with_kind(Rpc::AdvanceRefs, 2, FailKind::Pending(1_500));
+    let uri = format!("http://127.0.0.1:{port}").parse().unwrap();
+    let client =
+        ConnectTransport::connect_for_test_with_retry(uri, one_retry_backoff, record_pending_sleep);
+    assert_eq!(
+        advance_for_pending_test(&client).unwrap(),
+        AdvanceOutcome::Committed
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        3,
+        "pending must not consume the one-retry ladder"
+    );
+    assert_eq!(
+        PENDING_SLEEPS.lock().unwrap().as_slice(),
+        [
+            Duration::from_secs(1),
+            Duration::from_millis(500),
+            Duration::from_secs(1),
+            Duration::from_millis(500)
+        ]
+    );
+    shutdown(shutdown_tx, handle);
+}
+
+#[test]
+fn undecodable_pending_detail_uses_the_ladder() {
+    let (port, shutdown_tx, handle, calls) =
+        spawn_flaky_server_with_kind(Rpc::AdvanceRefs, 2, FailKind::PendingMalformed);
+    let uri = format!("http://127.0.0.1:{port}").parse().unwrap();
+    let client = ConnectTransport::connect_for_test_with_retry(
+        uri,
+        one_retry_backoff,
+        no_sleep_for_pending_test,
+    );
+    assert!(matches!(
+        advance_for_pending_test(&client),
+        Err(TransportError::ServerError { status: 503 })
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    shutdown(shutdown_tx, handle);
+}
+
+fn no_sleep_for_pending_test(_: Duration) {}
+
+#[test]
+fn pending_detail_on_another_rpc_is_ordinary_unavailable() {
+    let (port, shutdown_tx, handle, calls) =
+        spawn_flaky_server_with_kind(Rpc::ReadRef, 1, FailKind::Pending(5_000));
+    let client = connect_to(port);
+    assert_eq!(client.read_ref("refs/heads/main").unwrap(), None);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    shutdown(shutdown_tx, handle);
+}
+
+#[test]
+fn pending_then_aborted_then_pending_still_commits() {
+    MIXED_SLEEPS.lock().unwrap().clear();
+    let (port, shutdown_tx, handle, calls) =
+        spawn_flaky_server_with_kind(Rpc::AdvanceRefs, 3, FailKind::Mixed);
+    let uri = format!("http://127.0.0.1:{port}").parse().unwrap();
+    let client =
+        ConnectTransport::connect_for_test_with_retry(uri, one_retry_backoff, record_mixed_sleep);
+    assert_eq!(
+        advance_for_pending_test(&client).unwrap(),
+        AdvanceOutcome::Committed
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 4);
+    let sleeps = MIXED_SLEEPS.lock().unwrap();
+    assert_eq!(
+        sleeps
+            .iter()
+            .filter(|d| **d == Duration::from_secs(1))
+            .count(),
+        2
+    );
+    assert_eq!(
+        sleeps
+            .iter()
+            .filter(|d| **d == Duration::from_millis(9))
+            .count(),
+        1
+    );
+    shutdown(shutdown_tx, handle);
+}
+
+#[test]
+fn unauthenticated_after_pending_renews_once() {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (port, shutdown_tx, handle, calls) = spawn_flaky_server_internal(
+        Rpc::AdvanceRefs,
+        2,
+        FailKind::PendingThenUnauthenticated,
+        Some(Arc::clone(&captured)),
+    );
+    let uri = format!("http://127.0.0.1:{port}").parse().unwrap();
+    let client = ConnectTransport::connect_for_test_with_retry(
+        uri,
+        one_retry_backoff,
+        no_sleep_for_pending_test,
+    );
+    assert_eq!(
+        advance_for_pending_test(&client).unwrap(),
+        AdvanceOutcome::Committed
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    let headers = captured.lock().unwrap();
+    assert_eq!(
+        header(&headers[0], "idempotency-key"),
+        header(&headers[1], "idempotency-key")
+    );
+    assert_ne!(
+        header(&headers[1], "idempotency-key"),
+        header(&headers[2], "idempotency-key")
+    );
+    shutdown(shutdown_tx, handle);
+}
+
+struct TestSigner(SigningKey);
+
+impl EnvelopeSigner for TestSigner {
+    fn public_key_hex(&self) -> String {
+        hex::encode(self.0.verifying_key().to_bytes())
+    }
+
+    fn sign_hex(&self, message: &[u8; 32]) -> Result<String, String> {
+        Ok(hex::encode(self.0.sign(message).to_bytes()))
+    }
+}
+
+fn header(headers: &http::HeaderMap, name: &str) -> String {
+    headers.get(name).unwrap().to_str().unwrap().to_owned()
+}
+
+fn test_auth_headers(headers: &http::HeaderMap) -> mkit_core::write_auth::Headers {
+    let get = |name| Some(header(headers, name));
+    mkit_core::write_auth::Headers {
+        version: get("x-envelope-version"),
+        audience: get("x-audience"),
+        repository: get("x-repository"),
+        public_key: get("x-public-key"),
+        signature: get("x-signature"),
+        digest: get("x-digest"),
+        commitment: get("x-content-commitment"),
+        created_at: get("x-created-at"),
+        expires_at: get("x-expires-at"),
+        idempotency_key: get("idempotency-key"),
+    }
+}
+
+static RENEWAL_CLOCK: AtomicI64 = AtomicI64::new(1_700_000_000_000);
+static RENEWAL_SLEEPS: AtomicUsize = AtomicUsize::new(0);
+
+fn renewal_now() -> i64 {
+    RENEWAL_CLOCK.load(Ordering::SeqCst)
+}
+
+fn advance_renewal_clock(_: Duration) {
+    if RENEWAL_SLEEPS.fetch_add(1, Ordering::SeqCst) == 1 {
+        RENEWAL_CLOCK.fetch_add(280_000, Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn pending_reuses_signed_identity_then_renews_at_margin() {
+    RENEWAL_CLOCK.store(1_700_000_000_000, Ordering::SeqCst);
+    RENEWAL_SLEEPS.store(0, Ordering::SeqCst);
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (port, shutdown_tx, handle, calls) = spawn_flaky_server_internal(
+        Rpc::AdvanceRefs,
+        2,
+        FailKind::Pending(1_000),
+        Some(Arc::clone(&captured)),
+    );
+    let uri: http::Uri = format!("http://127.0.0.1:{port}").parse().unwrap();
+    let client = ConnectTransport::connect_for_test_with_signer(
+        uri,
+        Some(Arc::new(TestSigner(SigningKey::from_bytes(&[11; 32])))),
+    )
+    .with_clock_for_test(renewal_now)
+    .with_retry_hooks_for_test(one_retry_backoff, advance_renewal_clock);
+    assert_eq!(
+        advance_for_pending_test(&client).unwrap(),
+        AdvanceOutcome::Committed
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    let headers = captured.lock().unwrap();
+    assert_eq!(headers.len(), 3);
+    assert_eq!(
+        header(&headers[0], "idempotency-key"),
+        header(&headers[1], "idempotency-key")
+    );
+    assert_eq!(
+        header(&headers[0], "x-signature"),
+        header(&headers[1], "x-signature")
+    );
+    assert_ne!(
+        header(&headers[1], "idempotency-key"),
+        header(&headers[2], "idempotency-key")
+    );
+    assert_ne!(
+        header(&headers[1], "x-created-at"),
+        header(&headers[2], "x-created-at")
+    );
+    assert_ne!(
+        header(&headers[1], "x-expires-at"),
+        header(&headers[2], "x-expires-at")
+    );
+    for headers in headers.iter() {
+        let auth = test_auth_headers(headers);
+        let audience = auth.audience.as_deref().unwrap();
+        let repository = auth.repository.as_deref().unwrap();
+        let commitment = auth.commitment.as_deref().unwrap();
+        let at = auth.created_at.as_ref().unwrap().parse::<i64>().unwrap() + 1_000;
+        mkit_core::write_auth::verify_headers(
+            mkit_core::write_auth::Context {
+                audience,
+                repository,
+            },
+            "/mkit.transport.v1.TransportService/AdvanceRefs",
+            Some(commitment),
+            at,
+            &auth,
+        )
+        .unwrap();
+    }
+    shutdown(shutdown_tx, handle);
+}
+
+static DEADLINE_CLOCK: AtomicI64 = AtomicI64::new(1_700_000_000_000);
+
+fn deadline_now() -> i64 {
+    DEADLINE_CLOCK.load(Ordering::SeqCst)
+}
+
+fn deadline_sleep(duration: Duration) {
+    DEADLINE_CLOCK.fetch_add(
+        i64::try_from(duration.as_millis()).unwrap(),
+        Ordering::SeqCst,
+    );
+}
+
+#[test]
+fn pending_stops_at_deadline_without_another_attempt() {
+    DEADLINE_CLOCK.store(1_700_000_000_000, Ordering::SeqCst);
+    let (port, shutdown_tx, handle, calls) =
+        spawn_flaky_server_with_kind(Rpc::AdvanceRefs, 10, FailKind::Pending(5_000));
+    let uri = format!("http://127.0.0.1:{port}").parse().unwrap();
+    let client =
+        ConnectTransport::connect_for_test_with_retry(uri, one_retry_backoff, deadline_sleep)
+            .with_clock_for_test(deadline_now);
+    let result = client.advance_refs_with_deadline(
+        "refs/heads/feature",
+        RefWriteCondition::Missing,
+        &blake3_hash(b"head"),
+        "refs/packmaps/feature",
+        RefWriteCondition::Missing,
+        &blake3_hash(b"packmap"),
+        Some(1_700_000_002_500),
+    );
+    assert!(
+        matches!(result, Err(TransportError::RemoteError(message)) if message.contains("deadline expired"))
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(deadline_now(), 1_700_000_002_500);
+    shutdown(shutdown_tx, handle);
+}
+
+#[test]
+fn pending_observer_cancel_is_checked_within_one_second() {
+    let (port, shutdown_tx, handle, calls) =
+        spawn_flaky_server_with_kind(Rpc::AdvanceRefs, 10, FailKind::Pending(5_000));
+    let uri = format!("http://127.0.0.1:{port}").parse().unwrap();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let for_observer = Arc::clone(&cancelled);
+    let client = ConnectTransport::connect_for_test(uri)
+        .with_retry_hooks_for_test(one_retry_backoff, std::thread::sleep)
+        .with_pending_observer(move |event| match event {
+            PendingEvent::Waiting { .. } => !for_observer.load(Ordering::SeqCst),
+            PendingEvent::Finished { .. } => true,
+        });
+    let for_signal = Arc::clone(&cancelled);
+    let signal = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        for_signal.store(true, Ordering::SeqCst);
+    });
+    let started = std::time::Instant::now();
+    let result = advance_for_pending_test(&client);
+    signal.join().unwrap();
+    assert!(
+        matches!(result, Err(TransportError::RemoteError(message)) if message == mkit_transport_connect::PENDING_INTERRUPTED_MESSAGE)
+    );
+    assert!(started.elapsed() < Duration::from_millis(1_200));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
     shutdown(shutdown_tx, handle);
 }

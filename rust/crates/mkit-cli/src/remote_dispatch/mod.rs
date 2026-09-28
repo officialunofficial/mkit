@@ -39,7 +39,9 @@ use mkit_core::protocol::{PackKey, Transport, TransportError};
 use mkit_core::refs::{self, Head};
 use mkit_core::store::{ObjectStore, StoreError};
 use mkit_core::transfer::{self, PackListError};
-use mkit_transport_connect::{ConnectTransport, repository_identity_from_url};
+use mkit_transport_connect::{
+    ConnectTransport, PENDING_INTERRUPTED_MESSAGE, repository_identity_from_url,
+};
 use mkit_transport_file::FileTransport;
 use mkit_transport_s3::S3Transport;
 use mkit_transport_ssh::{SshInitError, SshOptions, SshTransport, parse_mkit_ssh_url};
@@ -186,6 +188,10 @@ pub enum DispatchError {
 /// Interpret a missing result as a repository failure only for repository-level
 /// operations. Pack downloads retain their content-specific missing errors.
 fn repository_operation_error(tx: &dyn Transport, error: TransportError) -> DispatchError {
+    if matches!(&error, TransportError::RemoteError(message) if message == PENDING_INTERRUPTED_MESSAGE)
+    {
+        return DispatchError::Interrupted;
+    }
     if matches!(&error, TransportError::PackNotFound)
         && let Some(address) = tx.repository_address()
     {
@@ -250,6 +256,14 @@ pub(crate) fn open_with_config(
     } else {
         None
     };
+    if url.starts_with("mkit+https://") || url.starts_with("mkit+http://") {
+        let tx = ConnectTransport::connect_with_signer(url, envelope_signer)?
+            .with_pending_observer(|event| {
+                crate::progress::pending_event(event);
+                !crate::signal::is_shutdown()
+            });
+        return Ok(Arc::new(tx));
+    }
     open_with_ssh_options(url, &ssh_options_from_config(cfg), envelope_signer)
 }
 
