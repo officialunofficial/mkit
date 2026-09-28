@@ -561,7 +561,7 @@ the 32-byte committed target, or empty when `deleted` is true.
 | `ABORT_REASON_PACK_MISSING` | 3 | A required pack is missing. |
 | `ABORT_REASON_REPLAY_RACE` | 4 | A replay reservation race prevents apply. |
 | `ABORT_REASON_INTERNAL` | 5 | An internal apply failure. |
-| `ABORT_REASON_ABANDONED` | 6 | Reconcile found a pending reservation after the operation's authentication validity interval, without a recorded result. |
+| `ABORT_REASON_ABANDONED` | 6 | Reconcile found a pending reservation without a recorded result after the operation's authentication validity interval, or, for an HTTP read, after its deadline plus `read_reconcile_grace` (§5). |
 
 The typed-conflict exception for ticket-consuming `AdvanceRefs` remains
 as STC §7.7 requires. `ABORT_REASON_REF_CONFLICT` does not convert that

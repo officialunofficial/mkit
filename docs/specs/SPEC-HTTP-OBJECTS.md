@@ -250,7 +250,7 @@ Error no-store takes precedence.
 | Any success where read Admission ran, or a receipt is returned | MUST be `private`; a public id URL retains `max-age=31536000, immutable`, a public ref path retains `no-cache`, and a public commit-pinned proof retains `max-age=31536000, immutable` |
 | Every HTTP-objects response in a bearer-gated deployment | MUST be `private`, including OPTIONS and 304, except the separately published key-set document; errors use `private, no-store` |
 | 402 and every error | `no-store`, or `private, no-store` in a bearer-gated deployment |
-| 304 | MUST repeat the selected 200's ETag, Cache-Control, `X-Mkit-Object`, `X-Mkit-Object-Type`, and, on ref paths, `X-Mkit-Commit`; select the same private policy when read Admission is configured, without actually calling it |
+| 304 | MUST repeat the selected 200's ETag, Cache-Control, `X-Mkit-Object`, `X-Mkit-Object-Type`, and `X-Mkit-Commit` whenever the selected 200 carries it (ref paths and proofs); select the same private policy when read Admission is configured, without actually calling it |
 
 Every serving response MUST carry `X-Content-Type-Options: nosniff`,
 `Content-Security-Policy: sandbox; default-src 'none'`, and
@@ -367,7 +367,9 @@ Preflight MUST use 204 without auth or payment and allow these values:
 pins versioned JSON tables (`schema_version: 1`, `cases`) for URL parsing
 and response expectations, MKDP proof bodies, and MKDS accept/reject
 bodies with sidecars. In response rows, `expect.headers` is the required
-header subset and `absent_headers` lists forbidden headers. URL rows use
+header subset and `absent_headers` lists forbidden headers. Header names
+compare case-insensitively, and an `absent_headers` entry ending in `*` forbids
+every header with that prefix. URL rows use
 status 200 to mean syntax accepted and continued, not that stored content
 exists. `MANIFEST.txt` pins BLAKE3 digests for every artifact.
 Negative span sidecars may describe byte-range copy and patch recipes over
