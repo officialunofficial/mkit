@@ -241,8 +241,9 @@ message AdvanceReceiptSelector {
 }
 
 message LeaseReceiptSelector {
-  string ref = 1;            // empty selects the repository lease scope
+  string ref = 1;            // empty selects the repository or namespace lease scope
   uint64 lease_version = 2;  // 0 selects the latest retained receipt
+  bool namespace_scope = 3;  // with empty ref, selects signed repository's namespace
 }
 
 message GetReceiptResponse {
@@ -325,9 +326,9 @@ message GetServerInfoResponse {
   bool indexed_mode = 9;
   // Whether admission can challenge requests (SPEC-TRANSPORT-CONNECT §2.1, §5.1).
   bool admission = 10;
-  // Raw 32-byte current receipt+notice public key; empty when disabled.
+  // Raw 32-byte current receipt+notice public key; empty only if unconfigured.
   bytes receipt_public_key = 11;
-  // 64-hex BLAKE3 of receipt_public_key; empty when disabled.
+  // 64-hex BLAKE3 of receipt_public_key; empty only if unconfigured.
   string receipt_key_id = 12;
   // Accepted owner signature schemes; empty until M2 (SPEC-TRANSPORT-CONNECT §2.1).
   repeated string grant_schemes = 13;

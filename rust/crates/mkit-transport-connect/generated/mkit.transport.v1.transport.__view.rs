@@ -3816,7 +3816,7 @@ impl ::serde::Serialize for AdvanceReceiptSelectorOwnedView {
 }
 #[derive(Clone, Debug, Default)]
 pub struct LeaseReceiptSelectorView<'a> {
-    /// empty selects the repository lease scope
+    /// empty selects the repository or namespace lease scope
     ///
     /// Field 1: `ref`
     pub r#ref: ::core::option::Option<&'a str>,
@@ -3824,6 +3824,10 @@ pub struct LeaseReceiptSelectorView<'a> {
     ///
     /// Field 2: `lease_version`
     pub lease_version: ::core::option::Option<u64>,
+    /// with empty ref, selects signed repository's namespace
+    ///
+    /// Field 3: `namespace_scope`
+    pub namespace_scope: ::core::option::Option<bool>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
 }
 impl<'a> ::buffa::MessageView<'a> for LeaseReceiptSelectorView<'a> {
@@ -3868,6 +3872,13 @@ impl<'a> ::buffa::MessageView<'a> for LeaseReceiptSelectorView<'a> {
                 )?;
                 view.lease_version = Some(::buffa::types::decode_uint64(&mut cur)?);
             }
+            3u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                view.namespace_scope = Some(::buffa::types::decode_bool(&mut cur)?);
+            }
             _ => {
                 ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
                 let span_len = before_tag.len() - cur.len();
@@ -3898,6 +3909,7 @@ impl<'a> ::buffa::MessageView<'a> for LeaseReceiptSelectorView<'a> {
         ::core::result::Result::Ok(super::super::LeaseReceiptSelector {
             r#ref: self.r#ref.map(|s| s.to_string()),
             lease_version: self.lease_version,
+            namespace_scope: self.namespace_scope,
             __buffa_unknown_fields: self.__buffa_unknown_fields.to_owned()?.into(),
             ..::core::default::Default::default()
         })
@@ -3915,6 +3927,9 @@ impl<'a> ::buffa::ViewEncode<'a> for LeaseReceiptSelectorView<'a> {
         if let Some(v) = self.lease_version {
             size += 1u64 + ::buffa::types::uint64_encoded_len(v) as u64;
         }
+        if self.namespace_scope.is_some() {
+            size += 1u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -3931,6 +3946,9 @@ impl<'a> ::buffa::ViewEncode<'a> for LeaseReceiptSelectorView<'a> {
         }
         if let Some(v) = self.lease_version {
             ::buffa::types::put_uint64_field(2u32, v, buf);
+        }
+        if let Some(v) = self.namespace_scope {
+            ::buffa::types::put_bool_field(3u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -3962,6 +3980,9 @@ impl<'__a> ::serde::Serialize for LeaseReceiptSelectorView<'__a> {
                     "leaseVersion",
                     &::buffa::json_helpers::ProtoJson(&__v),
                 )?;
+        }
+        if let ::core::option::Option::Some(__v) = self.namespace_scope {
+            __map.serialize_entry("namespaceScope", &__v)?;
         }
         __map.end()
     }
@@ -4058,7 +4079,7 @@ impl LeaseReceiptSelectorOwnedView {
     pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
         self.0.into_bytes()
     }
-    /// empty selects the repository lease scope
+    /// empty selects the repository or namespace lease scope
     ///
     /// Field 1: `ref`
     #[must_use]
@@ -4071,6 +4092,13 @@ impl LeaseReceiptSelectorOwnedView {
     #[must_use]
     pub fn lease_version(&self) -> ::core::option::Option<u64> {
         self.0.reborrow().lease_version
+    }
+    /// with empty ref, selects signed repository's namespace
+    ///
+    /// Field 3: `namespace_scope`
+    #[must_use]
+    pub fn namespace_scope(&self) -> ::core::option::Option<bool> {
+        self.0.reborrow().namespace_scope
     }
 }
 impl ::core::convert::From<::buffa::OwnedView<LeaseReceiptSelectorView<'static>>>
@@ -6932,11 +6960,11 @@ pub struct GetServerInfoResponseView<'a> {
     ///
     /// Field 10: `admission`
     pub admission: ::core::option::Option<bool>,
-    /// Raw 32-byte current receipt+notice public key; empty when disabled.
+    /// Raw 32-byte current receipt+notice public key; empty only if unconfigured.
     ///
     /// Field 11: `receipt_public_key`
     pub receipt_public_key: ::core::option::Option<&'a [u8]>,
-    /// 64-hex BLAKE3 of receipt_public_key; empty when disabled.
+    /// 64-hex BLAKE3 of receipt_public_key; empty only if unconfigured.
     ///
     /// Field 12: `receipt_key_id`
     pub receipt_key_id: ::core::option::Option<&'a str>,
@@ -7576,14 +7604,14 @@ impl GetServerInfoResponseOwnedView {
     pub fn admission(&self) -> ::core::option::Option<bool> {
         self.0.reborrow().admission
     }
-    /// Raw 32-byte current receipt+notice public key; empty when disabled.
+    /// Raw 32-byte current receipt+notice public key; empty only if unconfigured.
     ///
     /// Field 11: `receipt_public_key`
     #[must_use]
     pub fn receipt_public_key(&self) -> ::core::option::Option<&'_ [u8]> {
         self.0.reborrow().receipt_public_key
     }
-    /// 64-hex BLAKE3 of receipt_public_key; empty when disabled.
+    /// 64-hex BLAKE3 of receipt_public_key; empty only if unconfigured.
     ///
     /// Field 12: `receipt_key_id`
     #[must_use]

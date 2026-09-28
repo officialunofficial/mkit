@@ -9,7 +9,7 @@ it by the file path listed under "Enforced by".
 
 **Always:** a storage receipt binds a committed live advance or lease change
 to its issue-time terms and deployment role key. An advance receipt contains
-only the writer's ref and membership facts, never publication, hold, inspection,
+only the writer's ref and consumed-ticket facts, never publication, hold, inspection,
 or cross-repository physical-storage facts. Replays and later fetches return
 the same signed bytes.
 

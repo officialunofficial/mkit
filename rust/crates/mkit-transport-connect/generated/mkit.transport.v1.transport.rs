@@ -2980,7 +2980,7 @@ pub const __ADVANCE_RECEIPT_SELECTOR_JSON_ANY: ::buffa::type_registry::JsonAnyEn
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct LeaseReceiptSelector {
-    /// empty selects the repository lease scope
+    /// empty selects the repository or namespace lease scope
     ///
     /// Field 1: `ref`
     #[serde(rename = "ref", skip_serializing_if = "::core::option::Option::is_none")]
@@ -2995,6 +2995,15 @@ pub struct LeaseReceiptSelector {
         skip_serializing_if = "::core::option::Option::is_none"
     )]
     pub lease_version: ::core::option::Option<u64>,
+    /// with empty ref, selects signed repository's namespace
+    ///
+    /// Field 3: `namespace_scope`
+    #[serde(
+        rename = "namespaceScope",
+        alias = "namespace_scope",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub namespace_scope: ::core::option::Option<bool>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -3004,6 +3013,7 @@ impl ::core::fmt::Debug for LeaseReceiptSelector {
         f.debug_struct("LeaseReceiptSelector")
             .field("ref", &self.r#ref)
             .field("lease_version", &self.lease_version)
+            .field("namespace_scope", &self.namespace_scope)
             .finish()
     }
 }
@@ -3027,6 +3037,13 @@ impl LeaseReceiptSelector {
     ///Sets [`Self::lease_version`] to `Some(value)`, consuming and returning `self`.
     pub fn with_lease_version(mut self, value: u64) -> Self {
         self.lease_version = Some(value);
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::namespace_scope`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_namespace_scope(mut self, value: bool) -> Self {
+        self.namespace_scope = Some(value);
         self
     }
 }
@@ -3056,6 +3073,9 @@ impl ::buffa::Message for LeaseReceiptSelector {
         if let Some(v) = self.lease_version {
             size += 1u64 + ::buffa::types::uint64_encoded_len(v) as u64;
         }
+        if self.namespace_scope.is_some() {
+            size += 1u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -3071,6 +3091,9 @@ impl ::buffa::Message for LeaseReceiptSelector {
         }
         if let Some(v) = self.lease_version {
             ::buffa::types::put_uint64_field(2u32, v, buf);
+        }
+        if let Some(v) = self.namespace_scope {
+            ::buffa::types::put_bool_field(3u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -3104,6 +3127,15 @@ impl ::buffa::Message for LeaseReceiptSelector {
                     ::buffa::types::decode_uint64(buf)?,
                 );
             }
+            3u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.namespace_scope = ::core::option::Option::Some(
+                    ::buffa::types::decode_bool(buf)?,
+                );
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -3114,6 +3146,7 @@ impl ::buffa::Message for LeaseReceiptSelector {
     fn clear(&mut self) {
         self.r#ref = ::core::option::Option::None;
         self.lease_version = ::core::option::Option::None;
+        self.namespace_scope = ::core::option::Option::None;
         self.__buffa_unknown_fields.clear();
     }
 }
@@ -4916,7 +4949,7 @@ pub struct GetServerInfoResponse {
         skip_serializing_if = "::core::option::Option::is_none"
     )]
     pub admission: ::core::option::Option<bool>,
-    /// Raw 32-byte current receipt+notice public key; empty when disabled.
+    /// Raw 32-byte current receipt+notice public key; empty only if unconfigured.
     ///
     /// Field 11: `receipt_public_key`
     #[serde(
@@ -4926,7 +4959,7 @@ pub struct GetServerInfoResponse {
         skip_serializing_if = "::core::option::Option::is_none"
     )]
     pub receipt_public_key: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
-    /// 64-hex BLAKE3 of receipt_public_key; empty when disabled.
+    /// 64-hex BLAKE3 of receipt_public_key; empty only if unconfigured.
     ///
     /// Field 12: `receipt_key_id`
     #[serde(

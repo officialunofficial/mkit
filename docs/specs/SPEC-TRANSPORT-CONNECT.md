@@ -192,7 +192,7 @@ headers or a bearer token. The response MAY be cached with
 | `atomic_advance` | Whether `AdvanceRefs` commits the head and packmap atomically (§4). |
 | `indexed_mode` | Whether the deployment decodes and verifies pushed packs before refs move. |
 | `admission` | Whether the deployment runs an admission step that can challenge a request (§5.1). When it is true, `begin_upload_threshold_bytes` is `0`. |
-| `receipt_public_key`, `receipt_key_id` | Raw 32-byte current receipt-and-notice signing public key and its 64-lowercase-hex BLAKE3 key id (SPEC-SERVER §15.5). Both empty when receipts are disabled. Historical keys are in the well-known list, not this response. |
+| `receipt_public_key`, `receipt_key_id` | Raw 32-byte current receipt-and-notice signing public key and its 64-lowercase-hex BLAKE3 key id (SPEC-SERVER §15.5). Both empty only when that role key is not configured. Historical keys are in the well-known list, not this response. |
 | `grant_schemes` | The owner signature schemes the deployment accepts on grants and epoch statements ([SPEC-WRITE-GRANTS §4](SPEC-WRITE-GRANTS.md#4-owner-signature-schemes)). Empty on a deployment that accepts no grants. |
 | `namespace_policy` | `allowlist`, `any`, or `single-repository` (§7.5). `single-repository` is advertised, never configured. |
 | `index_fanout` | The fixed object-id-prefix fan-out of the deployment's repository index (§7.9). The default is 4096. |
@@ -206,20 +206,33 @@ from this call. `atomic_advance` replaces the client-side opt-in of v1
 
 ### 2.2 `GetReceipt`
 
-`GetReceipt` is a signed read (STC §7.1) that requires the
-[SPEC-SERVER §10.1](SPEC-SERVER.md#101-callers-view) writer view for the
-repository selected under §7.4. A caller without that view receives
-`not_found`, byte-identical to a missing receipt. It remains subject to
-ordinary authorization, lease, suspension, and takedown enforcement.
+`GetReceipt` is a signed read (STC §7.1). The server MUST first validate
+the `invalid_argument` cases below, then perform the
+[SPEC-WRITE-GRANTS §9.3](SPEC-WRITE-GRANTS.md#93-read-authorization)
+read check (including its receipt-only write-grantee exception), then
+require the [SPEC-SERVER §10.1](SPEC-SERVER.md#101-callers-view) writer
+view. A write-only grantee establishes that view through its signed grant
+and MAY retrieve receipts for the repository. A failure at either access
+check MUST be `not_found`. Every `not_found` from this RPC MUST have
+byte-identical Connect code, message, details, and response headers,
+whether the repository is nonexistent, private and unauthorized, the
+caller lacks writer view, or the receipt is missing. The lease selector
+MUST remain available to an otherwise authorized writer for that
+scope while the repository is suspended or deleted; it reveals receipt
+history, not live content.
 `GetReceiptRequest` MUST select exactly one oneof arm:
 
 | Selector | Fields | Meaning |
 |---|---|---|
-| `advance = 1` | `ref` (full ref name), `advance_sequence` (u64) | Retrieve that advance's storage receipt; `0` selects the latest retained advance receipt for the ref. |
-| `lease = 2` | `ref` (full ref or empty), `lease_version` (u64) | Retrieve that lease storage receipt; empty ref selects repository scope and `0` selects the latest retained version for that scope. |
+| `advance = 1` | `ref` (full branch head or other ref name), `advance_sequence` (u64) | Retrieve that advance's storage receipt; `0` selects the latest retained advance receipt for the ref. The branch selector is `refs/heads/<x>` even if the requested write advanced its paired `refs/mkit/packmap/<x>`. |
+| `lease = 2` | `ref` (full ref or empty), `lease_version` (u64), `namespace_scope` (bool) | Retrieve that lease storage receipt. With `namespace_scope = true`, an empty ref selects the namespace of the signed repository identity. Otherwise an empty ref selects repository scope. `0` selects the latest retained version for that scope. |
 
-An absent selector, an empty advance ref, or an invalid nonempty ref is
-`invalid_argument`.
+An absent selector, an empty advance ref, an invalid nonempty ref,
+a packmap ref used as the selector, or `namespace_scope = true` with a
+nonempty lease ref MUST receive `invalid_argument`. The
+`advance_sequence` starts at `1`; `0` is reserved for latest. The
+branch head and paired packmap share that sequence (SPEC-SERVER §10.2), which MUST
+NOT reset after deletion, recreation, or repository-level deletion.
 `GetReceiptResponse.receipt = 1` contains the complete DSSE envelope
 JSON as bytes, identical to the bytes returned at issue or replay.
 If receipts are disabled or the selected version was never issued or
@@ -228,8 +241,9 @@ has passed the deployment's `receipt_retention`, the call returns
 including a deletion, and per lease scope as SPEC-SERVER §15.6
 requires. This read allocates no
 write replay entry and does not expose the reader's published-view
-state. SSH and enc clients use this Connect RPC to fetch storage
-receipts; their own wire schemas do not change.
+state. Advance receipts expose `previous` and the paired `packmap`
+to the writer as part of its own write. SSH and enc clients receive
+no storage receipts in M5; their wire schemas do not change.
 
 ---
 
@@ -324,6 +338,10 @@ MUST be empty on either conflict and when receipts are disabled. The
 receipt attests the live committed pair; it reveals no inspection or
 publication state. On authenticated replay of a committed operation,
 the server returns the identical receipt envelope bytes.
+The `max_tickets_per_advance` limit is seven: an `AdvanceRefs` with
+more than seven `ticket_ids` MUST receive `invalid_argument` before
+apply. SPEC-SERVER §15.2 uses this bound to guarantee the receipt's
+65,536-byte envelope cap.
 
 Per `Transport::supports_atomic_advance`'s doc comment, a server
 backed by a transactional ref store (a single Durable Object
@@ -410,6 +428,7 @@ excludes.
 | A pack still under verification in indexed mode (§7.6) | `unavailable` with exactly one `PendingVerification` detail |
 | A membership-dependent miss within the relay-lag bound, in indexed mode ([SPEC-SERVER §9.4](SPEC-SERVER.md#94-repository-isolated-membership-checks)) | `unavailable` with no detail; a retry with the same nonce is safe |
 | A missed commit deadline (`NotAfter`), a full shard, or outbox backpressure. Nothing commits, and a retry with the same nonce is safe. | `unavailable`, never `resource_exhausted` |
+| Receipt signing fails after a successful apply (SPEC-SERVER §15.1). The advance remains committed; a same-nonce retry returns that result with its signed receipt. | Retryable `unavailable` |
 | A signed nonce already recorded with a different operation fingerprint (§7.1) | `invalid_argument` |
 | A signed nonce whose operation is still `in_flight` (§7.1). The request never reaches admission. | `aborted` (retryable) |
 | A new operation that the admission step challenges (§5.1) | `permission_denied` with HTTP status 402 and one `AdmissionChallenge` detail |
@@ -895,7 +914,11 @@ A server processes a signed write in this order:
 2. **Look up the replay record** for (audience, repository, signer, nonce):
    - a stored fingerprint that differs from the request's is
      `invalid_argument`;
-   - a `committed` operation returns its stored result;
+   - a `committed` operation returns its stored result, except that a
+     committed write awaiting its §15 receipt MUST finish signing with
+     the key selected at apply, persist the signed envelope, and then
+     return that same result with the receipt. If signing still fails,
+     it returns retryable `unavailable` without applying again;
    - an `in_flight` operation returns a retryable `aborted`, without
      reaching admission. A single-repository deployment MAY resume an
      un-ticketed `UploadPack` with the same signed nonce by re-reading its
@@ -920,6 +943,10 @@ a `PendingVerification` answer (§7.6), a membership-lag `unavailable`
 `unavailable` (SPEC-SERVER §11.2) MUST NOT be stored as replay results: the
 server leaves no record for the attempt, and removes any `in_flight` record it
 inserted, so a retry with the same nonce is evaluated again from step 2.
+When receipt signing is enabled, that transaction also fixes the
+statement bytes and signing key. A post-apply signing failure is the
+committed-result exception above; it MUST NOT discard the replay
+record or create a second commit.
 
 **Signed reads** skip the replay ledger and this order's steps 2 and 4 to 6
 ("Signed reads" above): a read is idempotent, so the server checks only the

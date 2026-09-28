@@ -489,6 +489,7 @@ the allowed receipt headers defined in §6.6.
 `AdmitAllow.external_ref` is an optional implementer-supplied reference
 to its own contract or payment receipt. The server carries it beside the
 reservation id in a later storage receipt (§15); it does not interpret it.
+Every writer of that repository can fetch the receipt and see this value.
 
 `AdmitChallenge.challenges` contains the deployment's opaque challenges
 in order of preference. Each `Challenge.scheme` names the external
@@ -660,7 +661,8 @@ violating any response limit below is invalid and MUST be handled under
 - `AdmitAllow.external_ref`, when present, MUST be at most 256 bytes of
   visible ASCII (`0x21`–`0x7e`). The implementer MUST keep credentials,
   bearer tokens, and other secrets out of it: it is copied into a
-  client-visible storage receipt (§15).
+  storage receipt visible to every writer of the repository through
+  `GetReceipt` (§15). An empty value is omitted from the receipt.
 - `InspectQuarantine.reason` MUST be at most 512 bytes.
 - Inspect responses MUST satisfy the phase and flagged-id rules of §6.4.
 
@@ -1244,8 +1246,11 @@ abstract view.
 Each ref MUST have an ordered advance sequence. The branch head
 `refs/heads/<x>` and `refs/mkit/packmap/<x>` share one sequence: every
 successful `AdvanceRefs`, head-only `UpdateRef`, or packmap-only
-`UpdateRef` appends an advance to that sequence. The advance value is
-the live (head, packmap) pair, and the pair MUST be published together.
+`UpdateRef` appends an advance to that sequence. Sequence numbers start
+at `1`; `0` selects the latest receipt in STC §2.2. The sequence MUST
+NOT reset on ref deletion, recreation, or repository-level deletion.
+The advance value is the live (head, packmap) pair, and the pair MUST
+be published together.
 Other refs have their own sequences and target values. Failed writes do
 not append advances. In indexed mode with an inspector configured, a
 head-only `UpdateRef` MUST verify before apply that its unchanged packmap
@@ -2047,16 +2052,24 @@ set by creation policy MUST appear in the creation advance's
 `storage_lease`. A separate lease storage receipt is also issued if that
 policy action changes the lease scope's terms. The §16
 `SetLeaseResponse.receipt` field carries the lease storage receipt for
-an administrative `SetLease` action.
+an administrative `SetLease` action; `SetSuspensionResponse.receipt`
+carries one for an override change (§16).
 
 Receipt statement bytes, including `issued_unix_ms`, `key_id`, and all
-predicate fields, MUST be fixed in the guarded apply. The server MUST
-reproduce those bytes verbatim on replay and on `GetReceipt` (STC §7.1),
-even if signing and delivery occur after apply. Ed25519 signing is
-deterministic, so the same key and statement bytes MUST yield an identical
-envelope. Individual receipts are never revoked; a later §14 redaction notice signed
-by the same role key maps old to replacement pack ids. Neither a receipt
-nor its retention is a server GC root (§13).
+predicate fields, and the signing key identity MUST be fixed in the guarded
+apply. The server MUST persist the **signed envelope** and return those
+envelope bytes verbatim on replay and on `GetReceipt` (STC §7.1).
+Signing after apply MUST use the key fixed at apply even if rotation occurs
+in between. If signing fails after a successful apply, the server MUST
+return retryable `unavailable`; a same-nonce retry MUST complete or retrieve
+the signed envelope for that committed result without applying a second
+advance. Ed25519 signing is deterministic, so the same key and statement
+bytes yield the same envelope. Removal of a compromised key does not rewrite
+stored envelopes: replay MUST return the original envelope unchanged, and
+clients reject it under §15.7. Individual receipts are never revoked;
+a later §14 redaction notice signed by the same role key maps old to
+replacement pack ids. Neither a receipt nor its retention is a server
+GC root (§13).
 
 Informative rationale: A paid-storage implementer can use the receipt as
 evidence of what the server recorded, while its own contract defines any
@@ -2082,6 +2095,27 @@ and i64 values in the predicate and key-list validity bounds MUST be
 decimal strings, without a sign or leading zero for nonnegative values
 (except `0`), so JS and wasm consumers retain exact integer values.
 
+The 65,536-byte limit MUST be guaranteed before apply, never handled by
+committing an advance and then dropping its receipt. An advance MUST
+consume at most seven tickets; more than seven is `invalid_argument`
+before apply. Each consumed ticket contributes at most one deployment
+reservation, and a ticketless write contributes at most one. A deployment
+with a receipt-and-notice key configured MUST reject startup if its
+canonical origin exceeds 2,048 UTF-8 bytes. The existing limits are
+173 bytes for repository identity (STC §7.4), 512 bytes for a ref
+(SPEC-REFS §3), 128 bytes for a reservation id (§6.6), and 256 bytes
+for `external_ref` (§6.6). A conservative JCS statement bound, allowing
+six JSON bytes per origin/repository/ref byte and two per visible-ASCII
+`external_ref` byte, is
+`6×2048 + 6×173 + 6×512 + 7×(64+20+32) +
+7×(128+2×256+64) + 4096 = 26,234` bytes. The 4,096-byte remainder
+covers all fixed fields, digest strings, punctuation, and decimal
+integer strings; a lease statement has fewer variable entries.
+Base64 and at most 1,024 bytes of DSSE envelope syntax give
+`4×ceil(26,234/3)+1,024 = 36,004` bytes, below 65,536. Producers
+MUST still check the encoded envelope before delivery and MUST refuse
+any configuration or input that could violate this bound before apply.
+
 The Statement MUST have exactly one subject. An advance subject MUST be
 `{"name":"target","digest":{"blake3":"<target>"}}`, with no
 `sha256`, in both opaque and indexed modes. `target` is 64 lowercase
@@ -2090,10 +2124,13 @@ removed previous value; `deleted: true` says the new ref value is absent.
 A lease subject MUST have `name: "scope"` and both `blake3` and
 `sha256` digests of the **same** UTF-8 byte string
 `<repository>\n<ref-or-empty>`, where an empty ref selects the
-repository scope. The order and digest encoding follow
+repository scope. For a namespace scope the byte string is
+`<namespace>\n`; namespace identities have no repository-name suffix,
+so the two forms cannot collide. The order and digest encoding follow
 SPEC-ATTESTATIONS §4.2. A storage receipt is not an object attestation
-and MUST NOT be pushed as one; a client may store it locally under its
-attestation directory, without treating it as an object GC root.
+and MUST NOT be pushed as one; a client MAY store it locally under
+`.mkit/receipts/`, separate from `.mkit/attestations/`, without treating
+it as an object GC root.
 
 The shared receipt-and-notice role key signs both predicates. The
 permanent domain for a storage receipt under that key is its exact
@@ -2113,14 +2150,14 @@ For `kind: "advance"`, the predicate MUST contain these fields:
 | `origin` | Server's canonical audience origin (STC §7.1). |
 | `repository` | Full STC §7.4 repository identity. |
 | `ref` | Full ref name advanced. For `AdvanceRefs`, the branch head. |
-| `advance_sequence` | This ref's committed §10.2 sequence, a u64 decimal string. |
+| `advance_sequence` | This ref's committed §10.2 sequence, a u64 decimal string starting at `1`. |
 | `target` | New ref value as 64 lowercase hex; for deletion, the removed value. |
 | `packmap` | Resulting paired packmap value as 64 lowercase hex for a branch; on branch deletion, the prior paired packmap value. Absent for other refs. |
 | `previous` | Prior value as 64 lowercase hex; absent on creation. On deletion it equals `target`. |
 | `deleted` | Boolean; true means the resulting ref value is absent. |
 | `mode` | Exactly `opaque` or `indexed` at apply. |
-| `closure_verified` | Boolean; true only when indexed closure was verified. |
-| `added_packs` | Array of `{id, bytes}` for packs added to repository membership by this advance. `id` is 64 lowercase hex; `bytes` is a u64 decimal string. |
+| `closure_verified` | Boolean; true only when indexed closure was verified; false on deletion. |
+| `added_packs` | Array of `{id, bytes}` for packs whose tickets this advance consumed, regardless of prior or hidden membership. `id` is 64 lowercase hex; `bytes` is a u64 decimal string. |
 | `added_bytes` | Sum of `added_packs[].bytes`, a u64 decimal string. |
 | `storage_lease` | Terms effective for this ref at apply, in the form below. |
 | `reservations` | Array of `{id, external_ref?}` for deployment-supplied reservations associated with this advance. |
@@ -2130,21 +2167,33 @@ For `kind: "advance"`, the predicate MUST contain these fields:
 For a branch `UpdateRef` changing only one side of the pair, `packmap`
 is the resulting live paired packmap; for a write directly to the
 packmap ref, `ref` and `target` describe that requested ref and
-`packmap` equals its resulting value. On a deletion the old value is
-attested as `target`, and a branch's prior packmap value remains in
-`packmap`, while `deleted` unambiguously records absence. An advance
-with no membership additions has an empty `added_packs` array. An
+`packmap` equals its resulting value. The branch head and
+`refs/mkit/packmap/<x>` share one sequence; `GetReceipt` selects either
+one through `refs/heads/<x>` (STC §2.2). `advance_sequence` MUST begin
+at `1` and MUST NOT reset on ref deletion, recreation, or
+repository-level deletion. On a deletion the old
+head value is attested as `target`, and a branch's prior packmap value
+remains in `packmap`, while `deleted` unambiguously records absence.
+`closure_verified` MUST be false on deletion. An advance that consumes
+no tickets MUST have an empty `added_packs` array; the server MUST NOT
+filter consumed tickets by whether the pack was already a member or was
+hidden by a hold or flag. Filtering would disclose that hidden state.
+The receipt's `previous` and paired `packmap` are visible to the writer;
+they describe that writer's own committed write, not a reader view. An
 advance with no deployment allowance has an empty `reservations`
 array, even if it consumes tickets; a ticketless write that ran Admit
-MUST include its deployment reservation. Entries in `added_packs` MUST be in ascending id
-order with no duplicate id, and `reservations` MUST be in ascending id
+MUST include its deployment reservation. Entries in `added_packs` MUST
+be in ascending id order with no duplicate id, and `reservations` MUST
+be in ascending id
 order with no duplicate id. A reservation id MUST be the deployment's
 §6.3 allowance id; the server MUST NOT substitute a synthetic quota or
 outcome id. `external_ref` MUST be copied only from that allowance and
-MUST satisfy §6.6. The implementer MUST keep secrets out of it.
+MUST satisfy §6.6; an empty value MUST be omitted. Every writer of the
+repository can fetch and see it through `GetReceipt`. The implementer
+MUST keep secrets out of it.
 
 `storage_lease` MUST be either `{ "permanent": true }` or an object
-with `scope` (`repository` or `ref`) and `expires_unix_ms`, `grace_ms`,
+with `scope` (`repository` or `ref`) and `expires_at_ms`, `grace_ms`,
 and `suspension_ms` as decimal strings. The terms describe the
 applicable recorded lease, including an inherited repository default;
 they do not make a per-ref lease govern byte availability (§12.2).
@@ -2155,7 +2204,7 @@ other repositories (STC §5.1). It MUST NOT contain logical or
 uncompressed byte counts, which opaque mode cannot establish. It MUST
 NOT contain publication, hold, or inspection state. Informative: the
 PRD's proposed logical/stored byte pair is replaced by `added_bytes`,
-the sum of newly added membership pack sizes. It is not a claim about
+the sum of consumed-ticket pack sizes. It is not a claim about
 physical storage or billing.
 
 ### 15.4 Lease predicate
@@ -2163,19 +2212,28 @@ physical storage or billing.
 For `kind: "lease"`, the predicate MUST contain `origin`, `scope`,
 `terms`, `effective_state`, `cause`, `lease_version`,
 `issued_unix_ms`, and `key_id`. `origin` is the canonical audience.
-`scope` is `{ "repository": "<full identity>", "ref": "<full ref or empty>" }`;
-an empty `ref` means repository scope. `terms` is either
-`{ "permanent": true }` or `{ "expires_unix_ms": "<i64>",
-"grace_ms": "<u64>", "suspension_ms": "<u64>" }`.
+`scope` is either `{ "repository": "<full identity>", "ref": "<full ref or empty>" }`
+or `{ "namespace": "<self-certifying namespace>" }`; an empty `ref`
+means repository scope. `terms` is exactly one of finite terms
+`{ "expires_at_ms": "<i64>", "grace_ms": "<u64>",
+"suspension_ms": "<u64>" }`, `{ "permanent": true }`,
+`{ "inherit": true }`, or `{ "not_applicable": true }`.
+`inherit` records removal of explicit per-ref terms so that §12.1's
+repository default governs; removing a repository default records
+`permanent`. `not_applicable` is used only for a namespace-level
+suspension override, which has no storage-lease terms. An override
+change that leaves terms intact repeats those terms in the receipt.
 `effective_state` is one of `active`, `grace`, `suspended`, or
 `deleted`, after applying §12.2's administrative override at issue
 time. `cause` is exactly `POLICY`, `RENEWAL`, or `ADMIN` (§12.4).
-`lease_version` is a u64 decimal string, strictly increasing for
-every committed terms or override change at that scope, including
-across restart, renewal, and ref recreation. The issued time and key
+`lease_version` is a u64 decimal string, starting at `1` and increasing
+by exactly `1` for every receipt-producing terms or override change at
+that scope, including across restart, renewal, and ref recreation. The issued time and key
 id have the same meaning as for an advance receipt. A repository
 default change issues one repository-scope receipt, not a separate
-receipt for each inheriting ref.
+receipt for each inheriting ref. A namespace override change issues one
+namespace-scope receipt, not one per repository. A terms removal and a
+namespace override change therefore both issue receipts.
 
 ### 15.5 Signing key, publication, and rotation
 
@@ -2187,39 +2245,59 @@ the raw 32-byte public key. The DSSE signature's `keyid` is exactly
 `blake3:` followed by that `keyId`; predicate `key_id` and
 `GetServerInfo.receipt_key_id` are exactly the unprefixed `keyId`.
 `GetServerInfo.receipt_public_key` is the current signing key's raw
-32-byte public key. Both info fields MUST be empty when receipts are
-disabled.
+32-byte public key. Both info fields MUST be empty only when the
+receipt-and-notice key is not configured. A deployment that enables
+takedown MUST configure this key and publish its key list, or MUST
+refuse startup (§14).
 
 The deployment MUST publish `GET /.well-known/mkit-receipt-keys.json`
 in the §7.2 key-list shape, with `version: 1`, `alg: "ed25519"`, and
 the `keyId` convention above. It MUST return `Cache-Control: public,
 max-age=300`, allow CORS from any origin, and require no bearer,
 signed URL token, or payment. §14 notices use the same document.
-During rotation the deployment MUST set `notAfterMs` on the old key
-and MUST retain that retired key in the list forever. A verifier MUST
-accept a listed key only when its `issued_unix_ms` is within the
-half-open interval `notBeforeMs ≤ issued_unix_ms < notAfterMs`, with
-an absent bound open on that side. A compromised key MUST be removed
-from the list, thereby invalidating every receipt and notice it
+During rotation the deployment MUST publish the new key in this list
+at least 300 seconds before its first signature. It MUST set
+`notAfterMs` on the old key and MUST retain that retired key in the
+list forever. A verifier MUST accept a listed key only when the signed
+statement's issue time is within the
+half-open interval `notBeforeMs ≤ issue_time < notAfterMs`, with
+an absent bound open on that side. For storage receipts the issue time
+is `issued_unix_ms`; for redaction notices it is `issuedAtMs` (§14).
+A pinned client refreshes the same-origin key list during rotation,
+checks that it still includes its pinned key, and pins the newly
+published key before accepting signatures under it. This overlapping
+list is the continuity path across rotation. A compromised key MUST
+be removed from the list, thereby invalidating every receipt and notice it
 signed. No transparency log or trusted compromise timestamp is
 specified; a compromised signer can backdate its issue time.
 
 ### 15.6 Delivery, retrieval, and retention
 
 The Connect receipt fields and `GetReceipt` wire are in STC §§2–4.
+Its namespace lease selector derives the namespace from the signed
+repository identity; it does not accept a caller-supplied different
+namespace.
 The receipt fields contain the complete envelope JSON bytes and are
 empty for conflicts or when receipts are disabled. `GetReceipt` is a
 signed read and MUST require the §10.1 writer view for the requested
 repository; all other callers receive `not_found`, with no indication
-whether a receipt exists. It MUST honor ordinary repository access,
-lease, suspension, and takedown rules. The server MUST retain the
-latest receipt for each ref, including its terminal deletion receipt,
-while the repository exists, and the latest receipt for each lease
-scope while that scope exists. It MAY retain older versions for a deployment-set
+whether a receipt exists. The SPEC-WRITE-GRANTS §9.3 read check MUST
+precede this writer-view check; STC §2.2 fixes the complete order and
+uniform error. A write-only grantee with a signed request has the writer
+view and MAY fetch its own receipts. The lease selector MUST remain
+available to an otherwise authorized writer while the repository is
+suspended or deleted, for receipts of that lease scope. The server MUST
+retain the latest receipt for each ref, including its terminal deletion
+receipt, while the repository exists, and the latest receipt for each
+repository or ref lease scope while its repository identity remains
+addressable, and each namespace lease scope while its namespace remains
+addressable, including while the effective state is `suspended` or
+`deleted`. It MAY retain older versions for a deployment-set
 `receipt_retention` and MUST return `not_found` for a version it no
 longer holds. This retention does not make receipts server GC roots.
-SSH and enc clients retrieve receipts only through Connect
-`GetReceipt`; their frozen protos gain no receipt field.
+SSH and enc clients receive no storage receipts in M5; their frozen
+protos gain no receipt field. A future client integration is a separate
+follow-up.
 
 ### 15.7 Client verification
 
@@ -2227,33 +2305,45 @@ Before storing a storage receipt, a client MUST:
 
 1. Decode the envelope strictly, enforce the 65,536-byte cap, and
    check the exact `payloadType`, Statement type, and `predicateType`.
-2. Verify the strict Ed25519 signature against a pinned trust root
-   supplied by user trust roots or trust on first use. A key learned
-   only from `GetServerInfo` or the well-known URL MUST be reported
-   as `unpinned`, not silently promoted to trusted.
+2. Verify the strict Ed25519 signature. A user-supplied trust root is
+   pinned. When the user selects trust on first use (TOFU), the client
+   MUST pin the accepted key on first use and treat it as pinned
+   thereafter. Without that selection, a key learned only from
+   `GetServerInfo` or the well-known URL MUST be reported and stored
+   with status `unpinned`, not silently promoted to pinned.
 3. Check that predicate `key_id` equals the body of the DSSE
    `blake3:` keyid, equals BLAKE3 of the selected public key, and
    that `issued_unix_ms` lies inside that listed key's validity window.
+   The client MUST refresh the key list within its 300-second max-age;
+   a pinned key absent from the current list fails verification even if
+   its signature and issue-time window otherwise pass. The overlapping
+   key list in §15.5 permits a pinned client to pin the replacement
+   key before the old key stops signing.
 4. For an advance, check `origin`, `repository`, `ref`, `target`,
    `packmap`, and `previous` against the operation the client sent,
    wherever the operation supplies that value; an absent branch
    packmap or creation previous MUST remain absent. With an `ANY`
-   update, the client has no sent previous value to compare. Every
-   `added_packs` entry MUST be a pack the client ticketed. For a
+   update, the client has no sent previous value to compare. The
+   `added_packs` ids and byte counts MUST equal the full set of tickets
+   this advance consumed; none may be omitted because a pack was
+   already present or hidden. For a
    deletion, the sent expected old value is its `target`.
 5. Check `subject[0].digest.blake3` equals `target` for an advance;
    for a lease, check both digests against the canonical scope bytes.
 
 If any check fails, the client MUST warn and MUST NOT store the
-receipt. A receipt-verification failure MUST NOT turn an otherwise
+receipt. `unpinned` is a stored verification status, not a failed
+signature check; clients MUST warn that it lacks a pinned trust root.
+A receipt-verification failure MUST NOT turn an otherwise
 committed push into an error unless the user explicitly opts in to
 requiring a valid receipt. Clients MUST NOT log complete storage
 receipts. Storage receipts are kept client-side and MUST NOT be pushed
-by default; they are not object-GC roots.
+by default; they are not object-GC roots. Client storage MUST use a
+separate `.mkit/receipts/` store, never `.mkit/attestations/`.
 
 Informative: the labelled vectors under `rust/tests/golden/receipts/`
 pin canonical payload and envelope bytes, signature, subject binding,
-key-list bytes, and three verification failures (§20).
+key-list bytes, and four verification failures (§20).
 
 ## 16. Admin API and audit log (reserved, M5)
 
@@ -2290,6 +2380,7 @@ requires. These anchors are informative descriptions of those bytes.
 | `admit.request.json` | BeginUpload pack id, declared bytes, authorization facts, repository-byte presence, and a fake admission credential header (§6.3). |
 | `admit-first-attempt.request.json` | First-attempt Admit input with no credential headers (§6.3). |
 | `admit-allow.response.json` | Reservation id and allowed receipt pass-through (§6.3, §6.6). |
+| `admit-allow-external-ref.response.json` | Optional implementer reference carried into a storage receipt (§6.3, §15). |
 | `admit-challenge.response.json` | Opaque challenge and example payment challenge header (§6.3, §6.6). |
 | `admit-deny.response.json` | Deliberate admission denial (§6.3). |
 | `inspect.request.json` | Legacy non-conforming pre-M5 example, retained to pin the additive wire shape (§6.4). |

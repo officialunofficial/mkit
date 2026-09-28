@@ -220,8 +220,10 @@ JCS-canonical key order. Note `predicate` precedes `predicateType`
   attestation's subjects at all. A producer that does not hold the
   subject bytes MUST NOT fabricate a `sha256` digest. Storage-receipt
   advance subjects under [SPEC-SERVER §15](SPEC-SERVER.md#15-storage-receipts)
-  therefore carry `blake3` only in both opaque and indexed modes;
-  their server attests the recorded ref value, not commit bytes.
+  carry `blake3` only **by that predicate's rule** in both opaque and
+  indexed modes. An indexed server may hold the commit bytes; that does
+  not add `sha256` to a storage-receipt advance subject. The server
+  attests the recorded ref value, not an object attestation.
   Storage-receipt lease subjects, whose scope bytes are known, carry
   both digests.
 - For native commit attestations, `subject[0].digest.blake3` is the

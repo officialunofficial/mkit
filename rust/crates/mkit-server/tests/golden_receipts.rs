@@ -23,8 +23,11 @@ const SEED: [u8; 32] = [0x42; 32];
 const RETIRED_SEED: [u8; 32] = [0x43; 32];
 const REPOSITORY: &str =
     "ed25519-2222222222222222222222222222222222222222222222222222222222222222/demo";
+const OPAQUE_REPOSITORY: &str =
+    "ed25519-2222222222222222222222222222222222222222222222222222222222222222/opaque-demo";
 const ORIGIN: &str = "https://store.example.test";
 const REF: &str = "refs/heads/main";
+const NAMESPACE: &str = "ed25519-2222222222222222222222222222222222222222222222222222222222222222";
 const TARGET: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const PREVIOUS: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const PACKMAP: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
@@ -88,13 +91,13 @@ fn advance(predicate: &Value, subject: &str) -> Value {
 fn statements() -> BTreeMap<&'static str, Value> {
     let opaque = advance(
         &json!({
-            "kind": "advance", "origin": ORIGIN, "repository": REPOSITORY,
+            "kind": "advance", "origin": ORIGIN, "repository": OPAQUE_REPOSITORY,
             "ref": REF, "advance_sequence": "1", "target": TARGET,
             "packmap": PACKMAP, "deleted": false, "mode": "opaque",
             "closure_verified": false,
             "added_packs": [{"id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "bytes": "2048"}],
             "added_bytes": "2048",
-            "storage_lease": {"scope": "repository", "expires_unix_ms": "1760000000000", "grace_ms": "86400000", "suspension_ms": "604800000"},
+            "storage_lease": {"scope": "repository", "expires_at_ms": "1760000000000", "grace_ms": "86400000", "suspension_ms": "604800000"},
             "reservations": [{"id": "res-opaque-1", "external_ref": "contract:order-17"}],
             "issued_unix_ms": "1750000000000", "key_id": key_id(SEED)
         }),
@@ -103,16 +106,16 @@ fn statements() -> BTreeMap<&'static str, Value> {
     let indexed = advance(
         &json!({
             "kind": "advance", "origin": ORIGIN, "repository": REPOSITORY,
-            "ref": REF, "advance_sequence": "2", "target": PREVIOUS,
+            "ref": REF, "advance_sequence": "1", "target": PREVIOUS,
             "packmap": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-            "previous": TARGET, "deleted": false, "mode": "indexed",
+            "deleted": false, "mode": "indexed",
             "closure_verified": true,
             "added_packs": [
                 {"id": "1111111111111111111111111111111111111111111111111111111111111111", "bytes": "1000"},
                 {"id": "2222222222222222222222222222222222222222222222222222222222222222", "bytes": "3000"}
             ],
             "added_bytes": "4000",
-            "storage_lease": {"scope": "ref", "expires_unix_ms": "1770000000000", "grace_ms": "0", "suspension_ms": "86400000"},
+            "storage_lease": {"scope": "ref", "expires_at_ms": "1770000000000", "grace_ms": "0", "suspension_ms": "86400000"},
             "reservations": [{"id": "res-indexed-1"}],
             "issued_unix_ms": "1750000000001", "key_id": key_id(SEED)
         }),
@@ -121,10 +124,11 @@ fn statements() -> BTreeMap<&'static str, Value> {
     let deletion = advance(
         &json!({
             "kind": "advance", "origin": ORIGIN, "repository": REPOSITORY,
-            "ref": REF, "advance_sequence": "3", "target": PREVIOUS, "packmap": PACKMAP,
-            "previous": PREVIOUS, "deleted": true, "mode": "opaque",
+            "ref": REF, "advance_sequence": "2", "target": PREVIOUS,
+            "packmap": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "previous": PREVIOUS, "deleted": true, "mode": "indexed",
             "closure_verified": false, "added_packs": [], "added_bytes": "0",
-            "storage_lease": {"permanent": true}, "reservations": [],
+            "storage_lease": {"scope": "ref", "expires_at_ms": "1770000000000", "grace_ms": "0", "suspension_ms": "86400000"}, "reservations": [],
             "issued_unix_ms": "1750000000002", "key_id": key_id(SEED)
         }),
         PREVIOUS,
@@ -135,9 +139,9 @@ fn statements() -> BTreeMap<&'static str, Value> {
         "predicate": {
             "kind": "lease", "origin": ORIGIN,
             "scope": {"repository": REPOSITORY, "ref": REF},
-            "terms": {"expires_unix_ms": "1770000000000", "grace_ms": "0", "suspension_ms": "86400000"},
-            "effective_state": "active", "cause": "RENEWAL", "lease_version": "4",
-            "issued_unix_ms": "1750000000003", "key_id": key_id(SEED)
+            "terms": {"expires_at_ms": "1770000000000", "grace_ms": "0", "suspension_ms": "86400000"},
+            "effective_state": "active", "cause": "POLICY", "lease_version": "1",
+            "issued_unix_ms": "1750000000000", "key_id": key_id(SEED)
         },
         "predicateType": PREDICATE_TYPE,
         "subject": [{
@@ -145,22 +149,60 @@ fn statements() -> BTreeMap<&'static str, Value> {
             "name": "scope"
         }]
     });
+    let inherited_scope = scope_bytes(REPOSITORY, "refs/heads/feature");
+    let lease_inherit = json!({
+        "_type": STATEMENT_TYPE,
+        "predicate": {
+            "kind": "lease", "origin": ORIGIN,
+            "scope": {"repository": REPOSITORY, "ref": "refs/heads/feature"},
+            "terms": {"inherit": true}, "effective_state": "active",
+            "cause": "ADMIN", "lease_version": "2",
+            "issued_unix_ms": "1750000000003", "key_id": key_id(SEED)
+        },
+        "predicateType": PREDICATE_TYPE,
+        "subject": [{"digest": {
+            "blake3": to_hex(&hash(&inherited_scope)),
+            "sha256": to_hex_bytes(&Sha256::digest(&inherited_scope))
+        }, "name": "scope"}]
+    });
+    let namespace_scope = scope_bytes(NAMESPACE, "");
+    let lease_namespace = json!({
+        "_type": STATEMENT_TYPE,
+        "predicate": {
+            "kind": "lease", "origin": ORIGIN,
+            "scope": {"namespace": NAMESPACE},
+            "terms": {"not_applicable": true}, "effective_state": "suspended",
+            "cause": "ADMIN", "lease_version": "1",
+            "issued_unix_ms": "1750000000004", "key_id": key_id(SEED)
+        },
+        "predicateType": PREDICATE_TYPE,
+        "subject": [{"digest": {
+            "blake3": to_hex(&hash(&namespace_scope)),
+            "sha256": to_hex_bytes(&Sha256::digest(&namespace_scope))
+        }, "name": "scope"}]
+    });
     BTreeMap::from([
         ("advance-opaque", opaque),
         ("advance-indexed", indexed),
         ("deletion", deletion),
         ("lease", lease),
+        ("lease-inherit", lease_inherit),
+        ("lease-namespace", lease_namespace),
     ])
 }
 
 fn envelope(statement: &Value) -> Vec<u8> {
+    envelope_with_seed(statement, SEED)
+}
+
+fn envelope_with_seed(statement: &Value, seed: [u8; 32]) -> Vec<u8> {
     let payload = jcs(statement);
-    let signature = SigningKey::from_bytes(&SEED).sign(&pae(payload.as_bytes()));
+    let signature = SigningKey::from_bytes(&seed).sign(&pae(payload.as_bytes()));
     let value = json!({
         "payload": STANDARD.encode(payload.as_bytes()),
         "payloadType": PAYLOAD_TYPE,
         "signatures": [{
-            "keyid": format!("blake3:{}", key_id(SEED)),
+            "keyid": format!("blake3:{}", key_id(seed)),
             "sig": STANDARD.encode(signature.to_bytes())
         }]
     });
@@ -204,7 +246,30 @@ fn fixtures() -> BTreeMap<String, Vec<u8>> {
     let mut expired = statements()["advance-opaque"].clone();
     expired["predicate"]["issued_unix_ms"] = json!("1900000000000");
     files.insert("key-outside-window.dsse.json".into(), envelope(&expired));
+    let mut retired = statements()["advance-opaque"].clone();
+    retired["predicate"]["issued_unix_ms"] = json!("1650000000000");
+    retired["predicate"]["key_id"] = json!(key_id(RETIRED_SEED));
+    files.insert(
+        "retired-key-inside-window.dsse.json".into(),
+        envelope_with_seed(&retired, RETIRED_SEED),
+    );
+    let mut sha256_subject = statements()["advance-opaque"].clone();
+    sha256_subject["subject"][0]["digest"]["sha256"] =
+        json!("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+    files.insert(
+        "advance-sha256-subject.dsse.json".into(),
+        envelope(&sha256_subject),
+    );
     files.insert("key-list.json".into(), jcs(&key_list()).into_bytes());
+    let mut unbounded = key_list();
+    unbounded["keys"][1]
+        .as_object_mut()
+        .unwrap()
+        .remove("notAfterMs");
+    files.insert(
+        "key-list-absent-bound.json".into(),
+        jcs(&unbounded).into_bytes(),
+    );
     files.insert(
         "test-seed.json".into(),
         (serde_json::to_string_pretty(&json!({
@@ -270,12 +335,20 @@ fn verify(bytes: &[u8], keys: &Value) -> Result<(), &'static str> {
         .ok_or("issued")?
         .parse()
         .map_err(|_| "issued")?;
-    let before: i64 = key["notBeforeMs"]
-        .as_str()
-        .ok_or("before")?
-        .parse()
-        .unwrap();
-    let after: i64 = key["notAfterMs"].as_str().ok_or("after")?.parse().unwrap();
+    let before: Option<i64> = key
+        .get("notBeforeMs")
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or("before")?
+                .parse()
+                .map_err(|_| "before")
+        })
+        .transpose()?;
+    let after: Option<i64> = key
+        .get("notAfterMs")
+        .map(|value| value.as_str().ok_or("after")?.parse().map_err(|_| "after"))
+        .transpose()?;
     let public = hex_bytes(key["publicKey"].as_str().ok_or("public key")?);
     if to_hex(&hash(&public)) != body {
         return Err("key id digest");
@@ -294,7 +367,7 @@ fn verify(bytes: &[u8], keys: &Value) -> Result<(), &'static str> {
     if statement["_type"] != STATEMENT_TYPE || statement["predicateType"] != PREDICATE_TYPE {
         return Err("predicate type");
     }
-    if issued < before || issued >= after {
+    if before.is_some_and(|bound| issued < bound) || after.is_some_and(|bound| issued >= bound) {
         return Err("key window");
     }
     let subject = &statement["subject"][0]["digest"];
@@ -306,9 +379,13 @@ fn verify(bytes: &[u8], keys: &Value) -> Result<(), &'static str> {
             }
         }
         "lease" => {
-            let repository = predicate["scope"]["repository"].as_str().ok_or("scope")?;
-            let ref_name = predicate["scope"]["ref"].as_str().ok_or("scope")?;
-            let scope = scope_bytes(repository, ref_name);
+            let scope = if let Some(namespace) = predicate["scope"]["namespace"].as_str() {
+                scope_bytes(namespace, "")
+            } else {
+                let repository = predicate["scope"]["repository"].as_str().ok_or("scope")?;
+                let ref_name = predicate["scope"]["ref"].as_str().ok_or("scope")?;
+                scope_bytes(repository, ref_name)
+            };
             if subject["blake3"] != to_hex(&hash(&scope))
                 || subject["sha256"] != to_hex_bytes(&Sha256::digest(&scope))
             {
@@ -331,6 +408,24 @@ fn hex_bytes(hex: &str) -> Vec<u8> {
 fn golden_receipts() {
     let dir = directory();
     let files = fixtures();
+    let cases = statements();
+    let indexed = &cases["advance-indexed"]["predicate"];
+    let deletion = &cases["deletion"]["predicate"];
+    let lease = &cases["lease"]["predicate"];
+    assert_ne!(
+        cases["advance-opaque"]["predicate"]["repository"],
+        indexed["repository"]
+    );
+    assert_eq!(indexed["mode"], deletion["mode"]);
+    assert_eq!(indexed["packmap"], deletion["packmap"]);
+    assert_eq!(indexed["target"], deletion["previous"]);
+    assert_eq!(
+        indexed["storage_lease"]["expires_at_ms"],
+        lease["terms"]["expires_at_ms"]
+    );
+    assert!(
+        lease["issued_unix_ms"].as_str().unwrap() < indexed["issued_unix_ms"].as_str().unwrap()
+    );
     let expected_manifest = manifest(&files);
     if std::env::var_os("UPDATE_GOLDEN").is_some() {
         fs::create_dir_all(&dir).unwrap();
@@ -358,13 +453,28 @@ fn golden_receipts() {
     );
 
     let keys = key_list();
-    for name in ["advance-opaque", "advance-indexed", "deletion", "lease"] {
+    for name in [
+        "advance-opaque",
+        "advance-indexed",
+        "deletion",
+        "lease",
+        "lease-inherit",
+        "lease-namespace",
+        "retired-key-inside-window",
+    ] {
         assert_eq!(verify(&files[&format!("{name}.dsse.json")], &keys), Ok(()));
     }
+    let no_upper_bound: Value =
+        serde_json::from_slice(&files["key-list-absent-bound.json"]).unwrap();
+    assert_eq!(
+        verify(&files["advance-opaque.dsse.json"], &no_upper_bound),
+        Ok(())
+    );
     for (name, error) in [
         ("wrong-predicate", "predicate type"),
         ("subject-mismatch", "subject binding"),
         ("key-outside-window", "key window"),
+        ("advance-sha256-subject", "subject binding"),
     ] {
         assert_eq!(
             verify(&files[&format!("{name}.dsse.json")], &keys),
