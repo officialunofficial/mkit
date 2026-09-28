@@ -134,6 +134,10 @@ fn golden_admission_challenge() {
     assert_eq!(decoded_error.details.len(), 1);
     let detail = &decoded_error.details[0];
     assert_eq!(detail.type_url, ADMISSION_CHALLENGE_TYPE); // bare name, no type.googleapis.com/ prefix
+    assert_eq!(
+        ADMISSION_CHALLENGE_TYPE,
+        <AdmissionChallenge as buffa::MessageName>::FULL_NAME
+    );
     let payload = STANDARD_NO_PAD
         .decode(detail.value.as_ref().unwrap())
         .unwrap();
@@ -175,7 +179,10 @@ fn absent_description_is_the_empty_client_value() {
         None
     );
     assert!(
-        serde_json::to_value(&message).unwrap()["description"].is_null(),
+        serde_json::to_value(&message)
+            .unwrap()
+            .get("description")
+            .is_none(),
         "an unset description is omitted from protobuf JSON"
     );
 }
