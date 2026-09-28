@@ -44,3 +44,9 @@ invariant. A cycle resets after its observed `os` or when its 32-target blocked
 set fills. With fewer than 32 distinct failing targets ahead of a healthy
 target, a blocked backlog cannot hide that target indefinitely. Repair failing
 destinations when the cap is reached; the next cycle retries their rows.
+
+Only failed destinations join the blocked set. A fire that reaches its target
+budget pauses before the next target, and a fire with no delivery backs off.
+Deleting the source's `rs 00` scan row is always safe: the next fire starts a
+fresh cycle from the head. The relay also replaces a corrupt `rs 00` value
+under a guard and logs a warning.

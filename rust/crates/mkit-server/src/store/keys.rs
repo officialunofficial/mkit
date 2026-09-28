@@ -835,6 +835,7 @@ mod tests {
             TAG_REPO_REGISTRY,
             TAG_REPO_KNOWN,
             TAG_RELAY_HIGH_WATER,
+            TAG_RELAY_SCAN,
             TAG_TICKET,
             TAG_TICKET_INDEX,
             TAG_TICKETS_PER_REF,

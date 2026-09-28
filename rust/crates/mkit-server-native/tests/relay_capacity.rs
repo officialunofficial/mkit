@@ -122,7 +122,7 @@ fn sql_soft_limit_reserves_space_for_guarded_relay_timer_reschedule() {
     let capped =
         SqlKvStore::open_with_capacity(conn, Capacity::new(1 << 20).with_reserve(1 << 20)).unwrap();
     let next_timer = keys::timer(2, 3, b"");
-    let next_turn = codec::encode_u64(1);
+    let next_value = Value::default();
     assert_eq!(
         block_on(
             capped.apply(
@@ -130,7 +130,7 @@ fn sql_soft_limit_reserves_space_for_guarded_relay_timer_reschedule() {
                 Batch::new()
                     .require(Precondition::Equals(old_timer.clone(), Value::default()))
                     .delete(old_timer.clone())
-                    .put(next_timer.clone(), next_turn.clone())
+                    .put(next_timer.clone(), next_value.clone())
             )
         )
         .unwrap(),
@@ -139,17 +139,14 @@ fn sql_soft_limit_reserves_space_for_guarded_relay_timer_reschedule() {
     assert_eq!(block_on(capped.get(&source, &old_timer)).unwrap(), None);
     assert_eq!(
         block_on(capped.get(&source, &next_timer)).unwrap(),
-        Some(next_turn)
+        Some(next_value)
     );
     assert!(matches!(
         block_on(
             capped.apply(
                 &source,
                 Batch::new()
-                    .require(Precondition::Equals(
-                        next_timer.clone(),
-                        codec::encode_u64(1)
-                    ))
+                    .require(Precondition::Equals(next_timer.clone(), Value::default()))
                     .delete(next_timer)
                     .put(keys::timer(3, 2, b""), codec::encode_u64(2))
             )

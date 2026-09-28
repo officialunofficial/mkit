@@ -458,10 +458,7 @@ async fn sqlite_failing_target_keeps_its_later_rows_and_allows_other_targets() {
     .await
     .unwrap();
     assert_eq!(report.fired, 1);
-    assert_eq!(
-        report.next_wake_ms,
-        Some(100 + mkit_server::timers::RETRY_BACKOFF_MS)
-    );
+    assert_eq!(report.next_wake_ms, Some(101));
     let remaining = pending(&source, &partition).await;
     assert_eq!(remaining.len(), 2);
     assert!(
@@ -626,7 +623,7 @@ async fn sqlite_failing_backlog_does_not_fill_the_delivery_window() {
 }
 
 #[tokio::test]
-async fn sqlite_full_failing_target_budget_rotates_to_next_target() {
+async fn sqlite_full_failing_target_budget_resumes_at_next_target() {
     let source = FaultSql::new(None);
     let partition = D34Shards.ref_shard(&repo(), "refs/heads/main");
     let mut target = FaultSql::new(None);
@@ -668,7 +665,7 @@ async fn sqlite_full_failing_target_budget_rotates_to_next_target() {
 }
 
 #[tokio::test]
-async fn sqlite_target_sequence_order_survives_timer_rotation() {
+async fn sqlite_target_sequence_order_survives_target_pause() {
     let source = FaultSql::new(None);
     let partition = D34Shards.ref_shard(&repo(), "refs/heads/main");
     let target = FaultSql::new(None);
@@ -702,18 +699,17 @@ async fn sqlite_target_sequence_order_survives_timer_rotation() {
         .unwrap();
     }
     assert!(pending(&source, &partition).await.is_empty());
-    let rh = keys::relay_high_water(&partition).unwrap();
-    let watermarks: Vec<_> = target
+    let applied: Vec<_> = target
         .batches()
         .iter()
         .flat_map(|batch| batch.writes.iter())
         .filter_map(|write| match write {
-            Write::Put(k, value) if k == &rh => Some(codec::decode_u64(value).unwrap()),
+            Write::Put(k, value) if k == &key => Some(value.as_bytes()[0]),
             _ => None,
         })
         .collect();
     assert_eq!(
-        watermarks
+        applied
             .iter()
             .copied()
             .filter(|seq| seq % 2 == 1)
@@ -722,7 +718,7 @@ async fn sqlite_target_sequence_order_survives_timer_rotation() {
         "odd rows must commit in order within their target"
     );
     assert_eq!(
-        watermarks
+        applied
             .iter()
             .copied()
             .filter(|seq| seq % 2 == 0)

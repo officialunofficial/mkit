@@ -36,7 +36,6 @@ struct Dispatch {
     block: BTreeSet<Partition>,
     pause_at: Option<u64>,
     overflow_at: Option<u64>,
-    failed: bool,
 }
 
 /// Pushes a source's queued rows to a separately supplied target store.
@@ -81,8 +80,17 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
         let mut scan_value = ctx.store.get(ctx.partition, &rs_key).await?;
         let mut scan = scan_value
             .as_ref()
-            .map(codec::decode_relay_scan)
-            .transpose()?
+            .and_then(|value| match codec::decode_relay_scan(value) {
+                Ok(state) => Some(state),
+                Err(error) => {
+                    tracing::warn!(
+                        source = ?ctx.partition,
+                        %error,
+                        "corrupt relay scan state; restarting from source head"
+                    );
+                    None
+                }
+            })
             .filter(|state| state.cursor < state.cycle_end)
             .unwrap_or(RelayScanV1 {
                 cycle_end: os,
@@ -92,18 +100,8 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
         let max_rows = self.budget.max_rows.max(1);
         let (rows, exhausted) = read_rows(ctx, &scan, max_rows.saturating_mul(4)).await?;
         let window = decode_window(ctx.partition, ctx.now_ms, rows, exhausted);
-        // The timer's turn rotates target selection between completed scan
-        // cycles. A last-target cursor can starve a target when that target
-        // falls in an earlier scan window than the last attempted target.
-        let turn = if timer.value.as_bytes().is_empty() {
-            0
-        } else {
-            codec::decode_u64(&timer.value)?
-        };
         let rh = keys::relay_high_water(ctx.partition)?;
-        let dispatch = self
-            .dispatch(&window.groups, &scan.blocked, &rh, turn, max_rows)
-            .await;
+        let dispatch = self.dispatch(&window.groups, &scan.blocked, &rh).await;
         if !checkpoint_window(ctx, &rs_key, &mut scan_value, &mut scan, &window, &dispatch).await? {
             return Ok(Fired::Retry);
         }
@@ -125,7 +123,7 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
         if has_remaining {
             let due = ctx
                 .now_ms
-                .saturating_add(if dispatch.failed && scan.cursor >= scan.cycle_end {
+                .saturating_add(if dispatch.delivered.is_empty() {
                     RETRY_BACKOFF_MS
                 } else {
                     0
@@ -133,9 +131,7 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
                 .max(timer.due_at_ms.saturating_add(1));
             Ok(Fired::Reschedule {
                 due_at_ms: due,
-                value: codec::encode_u64(
-                    turn.wrapping_add(u64::from(scan.cursor >= scan.cycle_end)),
-                ),
+                value: Value::default(),
                 batch: Batch::new(),
             })
         } else {
@@ -149,76 +145,36 @@ impl<T: NamespaceStore, H: RelayHook> RelayHandler<T, H> {
         }
     }
 
-    async fn dispatch(
-        &self,
-        groups: &[TargetRows],
-        blocked: &[Partition],
-        rh: &Key,
-        turn: u64,
-        max_rows: u32,
-    ) -> Dispatch {
-        let mut eligible = groups
-            .iter()
-            .filter(|(target, _)| blocked.binary_search(target).is_err())
-            .collect::<Vec<_>>();
-        if !eligible.is_empty() {
-            let count = u64::try_from(eligible.len()).unwrap_or(u64::MAX);
-            let start = usize::try_from(turn % count).unwrap_or(0);
-            eligible.rotate_left(start);
-        }
-        let selected = eligible
-            .into_iter()
-            .take(self.budget.max_targets.max(1) as usize)
-            .map(|(target, _)| target.clone())
-            .collect::<BTreeSet<_>>();
+    async fn dispatch(&self, groups: &[TargetRows], blocked: &[Partition], rh: &Key) -> Dispatch {
         let mut progress = Dispatch {
             delivered: BTreeSet::new(),
             block: BTreeSet::new(),
             pause_at: None,
             overflow_at: None,
-            failed: false,
         };
-        // Process selected groups in first-seq order, regardless of the
-        // rotated selection, so a blocked-set overflow stops later targets.
-        for (i, (target, rows)) in groups.iter().enumerate() {
+        let mut selected = 0usize;
+        // Groups are ordered by their first sequence. Reaching the target
+        // budget pauses at the next new target without marking it blocked.
+        for (target, rows) in groups {
             if progress.pause_at.is_some_and(|at| rows[0].0 >= at) {
                 break;
             }
             if blocked.binary_search(target).is_ok() {
                 continue;
             }
-            if !selected.contains(target) {
-                if blocked.len() + progress.block.len() == MAX_BLOCKED_TARGETS {
-                    progress.overflow_at = Some(rows[0].0);
-                    break;
-                }
-                progress.block.insert(target.clone());
-                continue;
-            }
-            if progress.delivered.len() >= max_rows as usize {
+            if selected >= self.budget.max_targets.max(1) as usize {
                 progress.pause_at = Some(rows[0].0);
                 break;
             }
-            // Do not apply this target's later rows across another target's
-            // first row: that later target may overflow the blocked set.
-            let next_target = groups.get(i + 1).map(|(_, rows)| rows[0].0);
-            let until = next_target
-                .into_iter()
-                .chain(progress.pause_at)
-                .min()
-                .unwrap_or(u64::MAX);
-            let budget = max_rows as usize - progress.delivered.len();
+            selected += 1;
             let target_rows = rows
                 .iter()
-                .take_while(|(seq, _, _, _)| *seq < until)
-                .take(budget)
                 .map(|(seq, row, _, _)| (*seq, row.clone()))
                 .collect::<Vec<_>>();
             let (count, failed) = self.deliver_target(target, rh, &target_rows).await;
             progress
                 .delivered
                 .extend(rows.iter().take(count).map(|(seq, _, _, _)| *seq));
-            progress.failed |= failed;
             if failed {
                 if blocked.len() + progress.block.len() == MAX_BLOCKED_TARGETS {
                     progress.overflow_at = Some(rows[count].0);

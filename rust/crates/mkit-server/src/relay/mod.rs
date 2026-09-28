@@ -11,6 +11,13 @@
 //! cursor, its target is blocked; if it lies ahead, ascending scanning reaches
 //! it first. Thus no later row for a target is applied while an older one is
 //! undelivered. The cycle end excludes new rows until the next cycle.
+//! Only delivery failures block targets; reaching the target budget pauses
+//! the cursor before the next target. Blocked targets are retried at each
+//! cycle start. With fewer than 32 failing targets preceding it, a healthy
+//! target is attempted within ⌈F / max_targets⌉ + ⌈R / (4 × max_rows)⌉ + 1
+//! fires, where F counts distinct targets and R counts rows ahead. Fires
+//! without delivery back off. This can exceed `RELAY_LAG_BOUND_MS` in time;
+//! WP-1.23c's `namespace_relay_watermark` must tolerate that lag.
 
 mod deliver;
 mod hook;
@@ -27,10 +34,11 @@ pub const RELAY_LAG_BOUND_MS: u64 = 60_000;
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub struct RelayBudget {
-    /// Maximum queue rows delivered (default 256); up to four times as many
-    /// are inspected to find work behind blocked targets.
+    /// Base row budget (default 256). A fire inspects at most four times this
+    /// many rows; selected targets may receive every row in that scan window.
     pub max_rows: u32,
-    /// Maximum distinct targets visited (default 16).
+    /// Maximum distinct targets attempted (default 16). Later targets pause
+    /// the scan without joining the failed-target blocked set.
     pub max_targets: u32,
     /// Optional maximum target store calls per target per fire. Workers use
     /// two (one watermark get and one apply); native defaults to no cap.

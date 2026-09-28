@@ -1168,6 +1168,15 @@ with any queue-row deletions; a guard conflict retries. Reaching the cycle
 end or the blocked-set cap starts the next fire at the head. Thus a target's
 later row cannot advance `rh` past its earlier undelivered row: an earlier
 row before the cursor blocks the target, and one after it is scanned first.
+Only delivery failure blocks a target; reaching `max_targets` pauses before
+the next target and resumes there on the next fire. Blocked targets are
+retried at each cycle start. With fewer than 32 failing targets preceding it,
+a healthy target is attempted within
+⌈F / max_targets⌉ + ⌈R / (4 × max_rows)⌉ + 1 fires, where F is the
+distinct targets and R is the rows ahead. Fires
+without delivery back off. This can exceed `RELAY_LAG_BOUND_MS` in time;
+WP-1.23c's `namespace_relay_watermark` must tolerate it. A target's later
+row is never retried while its earlier row remains undelivered.
 At the SQL soft capacity limit, only a valid, guarded `rs` checkpoint, with
 any relay-row deletions, or a guarded kind-3 relay timer reschedule may use
 the reserved space; ordinary puts still fail.
