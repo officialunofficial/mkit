@@ -197,8 +197,8 @@ fallback metric. Replays and admission-free ticket answers charge neither.
 
 **Because:** a retry or crash after the coordinator apply must not count the
 same shard usage twice, and a view refresh must not force every write to
-re-plan. The local estimate can lag other active shards by at most their
-admitted writes in two 60-second rollup intervals.
+re-plan. With scheduled rollups succeeding, the local estimate can lag other
+active shards by at most their admitted writes in two 60-second intervals.
 
 **If violated:** an author can exceed the namespace cap without a bounded
 delay, or a retry double-charges and locks out valid writes.
