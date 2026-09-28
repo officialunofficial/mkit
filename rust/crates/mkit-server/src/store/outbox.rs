@@ -19,9 +19,11 @@ use super::{
 /// overhead is at most 23: deadline 1, lease guard/install 2, absent layout
 /// version guard/install 2, absent repo-known guard/install 2, two ref CAS
 /// pairs 4, replay 3, counters 4, outbox sequence/backlog 4, and relay kick
-/// 1. On Single, a grant guard replaces the lease pair. The real maximal
-/// planner batch is tested separately. Seven tickets cost `9 * 7 + 23 = 86`
-/// ops before opportunistic pruning.
+/// 1. These figures are D34's. On Single, a grant guard replaces the lease
+/// pair and there is no relay share or relay kick, so seven tickets cost
+/// `8 * 7 + 21 = 77`. The real maximal planner batches are tested
+/// separately. On D34, seven tickets cost `9 * 7 + 23 = 86` ops before
+/// opportunistic pruning.
 pub const MAX_TICKETS_PER_ADVANCE: usize = 7;
 /// The advance batch's ops outside the per-ticket and per-signer ones.
 pub const ADVANCE_SHARED_OPS: usize = 23;

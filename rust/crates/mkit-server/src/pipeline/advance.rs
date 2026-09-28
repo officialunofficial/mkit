@@ -306,7 +306,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             };
             // Later tickets cannot supersede the first request-order failure.
             let lost = (0..=first_failure)
-                .filter(|&i| matches!(proofs[i].as_ref(), Some((_, Ok(Proof::PackMissing)))))
+                .filter(|&i| {
+                    // A row that failed validation this pass may keep a stale proof from an
+                    // earlier pass; only a currently valid ticket can be aborted.
+                    rows[i].is_ok()
+                        && matches!(proofs[i].as_ref(), Some((_, Ok(Proof::PackMissing))))
+                })
                 .collect::<Vec<_>>();
             if lost.is_empty() {
                 return Err(answer);
