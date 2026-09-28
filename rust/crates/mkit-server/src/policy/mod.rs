@@ -3,5 +3,5 @@
 mod namespace;
 mod write;
 
-pub use namespace::NamespacePolicy;
+pub use namespace::{NamespacePolicy, parse_namespace_allowlist};
 pub use write::{AuthorizerRole, WritePolicy};

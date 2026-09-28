@@ -370,6 +370,14 @@ fn validate_upload_ticket_config<H: HookSet>(
             "admission requires auth v2 and upload ticket keys",
         ));
     }
+    if matches!(cfg.addressing, Addressing::Multi(_))
+        && matches!(cfg.auth, AuthMode::AuthV2(_))
+        && cfg.ticket_keys.is_none()
+    {
+        return Err(ServerError::invalid_argument(
+            "multi-repository auth v2 deployments require upload ticket keys",
+        ));
+    }
     Ok(())
 }
 

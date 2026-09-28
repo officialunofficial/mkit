@@ -176,6 +176,38 @@ fn multi_transport_identity_is_refused_at_startup() {
 }
 
 #[test]
+fn multi_auth_v2_without_ticket_keys_is_refused_at_startup() {
+    let mut c = cfg(authv2());
+    c.addressing = Addressing::Multi(MultiAddressing::new());
+    c.write_policy = WritePolicy::Owner;
+    let err = Pipeline::new(
+        MemoryBlobStore::default(),
+        store(&clock()),
+        Hooks::new(),
+        c.clone(),
+        clock(),
+        Arc::new(crate::NoopMetrics),
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), Code::InvalidArgument);
+    assert_eq!(
+        err.public_message(),
+        "multi-repository auth v2 deployments require upload ticket keys"
+    );
+    c.ticket_keys =
+        Some(crate::upload::token::TicketKeys::new(vec![("test".into(), [7; 32])]).unwrap());
+    Pipeline::new(
+        MemoryBlobStore::default(),
+        store(&clock()),
+        Hooks::new(),
+        c,
+        clock(),
+        Arc::new(crate::NoopMetrics),
+    )
+    .unwrap();
+}
+
+#[test]
 fn server_info_limits_are_validated_at_startup() {
     let reject = |c: PipelineConfig| {
         let err = Pipeline::new(
