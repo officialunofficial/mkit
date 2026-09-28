@@ -220,6 +220,8 @@ git diff --stat origin/feat/mkit-server -- proto/ rust/            # must be emp
 
 ## Risks / gotchas
 
+Correction for WP-2.2 and WP-2.9: a grant never sets visibility (SPEC-WRITE-GRANTS §9.1); the table above's grant-with-`write` authorization is superseded.
+
 - If S1's section numbers change during review, rebase and fix the cross-links.
 - `spec-index.test.tsx` fails the web gate if the icon map and the list disagree.
 - Don't let the capability or ref-scope encoding collide with characters allowed in ref names. Today's validator
