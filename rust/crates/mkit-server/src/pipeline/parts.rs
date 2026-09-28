@@ -175,6 +175,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> PartUploadSession<'_,
 }
 
 impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
+    /// Records a part-path error the Connect handlers raise outside the pipeline.
+    #[cfg(feature = "connect")]
     pub(crate) fn record_part_error(&self, a: &Authenticated, err: &ServerError) {
         self.outcome(a).record(Err(err));
     }
