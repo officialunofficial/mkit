@@ -61,7 +61,7 @@ fn r2_corrupted_part_cannot_publish_pack() {
     let store = R2BlobStore::new(bucket.clone(), PACKS_KEYSPACE);
     let data: Vec<u8> = (0_u8..=250)
         .cycle()
-        .take(MIN_PART_SIZE as usize + 1)
+        .take(usize::try_from(MIN_PART_SIZE).unwrap() + 1)
         .collect();
     let key = BlobKey::pack(hash(&data));
     let plan = PartPlan::new(data.len() as u64, MIN_PART_SIZE, 10_000).unwrap();
@@ -73,8 +73,8 @@ fn r2_corrupted_part_cannot_publish_pack() {
             .unwrap();
         let mut parts = Vec::new();
         for index in 0..plan.count() {
-            let start = plan.offset(index).unwrap() as usize;
-            let end = start + plan.expected_len(index).unwrap() as usize;
+            let start = usize::try_from(plan.offset(index).unwrap()).unwrap();
+            let end = start + usize::try_from(plan.expected_len(index).unwrap()).unwrap();
             let cv = part_subtree_cv(&plan, index, &data[start..end]).unwrap();
             let mut sink = store
                 .begin_part(key, &session, &plan, index, cv)
@@ -94,7 +94,10 @@ fn r2_corrupted_part_cannot_publish_pack() {
             mkit_core::hash::to_hex_bytes(&session),
             mkit_core::hash::to_hex_bytes(&parts[0].tag)
         );
-        bucket.replace_object(&part_key, Bytes::from(vec![0x99; MIN_PART_SIZE as usize]));
+        bucket.replace_object(
+            &part_key,
+            Bytes::from(vec![0x99; usize::try_from(MIN_PART_SIZE).unwrap()]),
+        );
         assert!(matches!(
             store.complete(key, &session, &plan, &parts).await,
             Err(StoreError::Invalid(_))

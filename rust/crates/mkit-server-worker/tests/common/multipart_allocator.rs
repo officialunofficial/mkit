@@ -37,6 +37,7 @@ fn add(size: usize) {
     }
 }
 
+#[allow(clippy::cast_ptr_alignment)] // System allocates the base at max(layout, Header) alignment.
 unsafe impl GlobalAlloc for Meter {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let offset = size_of::<Header>().div_ceil(layout.align()) * layout.align();
@@ -51,11 +52,9 @@ unsafe impl GlobalAlloc for Meter {
         if base.is_null() {
             return base;
         }
-        let counted = !EXCLUDED
-            .try_with(|excluded| excluded.get())
-            .unwrap_or(false);
+        let counted = !EXCLUDED.try_with(Cell::get).unwrap_or(false);
         unsafe {
-            (base as *mut Header).write(Header {
+            base.cast::<Header>().write(Header {
                 size: layout.size(),
                 offset,
                 align,
@@ -68,16 +67,16 @@ unsafe impl GlobalAlloc for Meter {
         unsafe { base.add(offset) }
     }
 
-    unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         if ptr.is_null() {
             return;
         }
         // The offset is stored at the base. Read it from the fixed header
         // immediately before the returned pointer's alignment padding.
         // Header location is recovered from the original layout alignment.
-        let offset = size_of::<Header>().div_ceil(_layout.align()) * _layout.align();
+        let offset = size_of::<Header>().div_ceil(layout.align()) * layout.align();
         let base = unsafe { ptr.sub(offset) };
-        let header = unsafe { (base as *const Header).read() };
+        let header = unsafe { base.cast::<Header>().read() };
         if header.counted {
             LIVE.fetch_sub(header.size, Ordering::Relaxed);
         }

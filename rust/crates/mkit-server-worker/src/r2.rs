@@ -32,12 +32,11 @@
 //! ever holds verified bytes, a failed put of verified bytes whose key is
 //! then present is `AlreadyPresent`; otherwise it is `Unavailable`, and the
 //! client retries.
-//! `max_bytes` (64 MiB by default) caps one put's declared length: a
-//! **documented M1 stopgap** (PRD §8 M0), a counter and not a buffer. M1
-//! replaces it with resumable multipart parts (WP-1.11), which carry R2's
-//! own rules: every part but the last at least 5 MiB and all the same size,
-//! incomplete uploads aborted by a 7-day lifecycle rule, and the upload
-//! completed only after verification (PRD §5.3).
+//! `max_bytes` (64 MiB by default) caps the single-part `UploadPack` put's
+//! declared length. Ticketed multipart bypasses that cap and uses verified
+//! 8–32 MiB CV-keyed part objects, then rehashes the complete pack through
+//! a conditional put. A bucket lifecycle rule removes leftover staging
+//! objects after eight days.
 //!
 //! **Get.** A body is always a [`BlobBody::Stream`] over the R2 object
 //! body, re-chunked to pieces of at most [`MAX_BLOB_PIECE_BYTES`] and
