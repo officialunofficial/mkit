@@ -151,6 +151,9 @@ service TransportService {
   // Discover deployment capabilities without authentication (SPEC-TRANSPORT-CONNECT §2.1).
   rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse);
 
+  // Fetch a retained writer-view storage receipt (SPEC-SERVER §15).
+  rpc GetReceipt(GetReceiptRequest) returns (GetReceiptResponse);
+
   // Reserve an upload for a ref (SPEC-TRANSPORT-CONNECT §7.6).
   rpc BeginUpload(BeginUploadRequest) returns (BeginUploadResponse);
 
@@ -197,8 +200,9 @@ message UpdateRefRequest {
 }
 
 message UpdateRefResponse {
-  // Empty body is success. CAS failure and validation failure are surfaced
-  // as Connect errors, not response fields — see SPEC-TRANSPORT-CONNECT §3.
+  // DSSE storage-receipt envelope JSON; empty when receipts are disabled.
+  // CAS and validation failures remain Connect errors (STC §3).
+  bytes receipt = 1;
 }
 
 message AdvanceRefsRequest {
@@ -219,6 +223,31 @@ message AdvanceRefsRequest {
 
 message AdvanceRefsResponse {
   AdvanceOutcome outcome = 1;
+  // DSSE storage-receipt envelope JSON; empty on conflict or when disabled.
+  bytes receipt = 2;
+}
+
+// A signed, writer-view read. Exactly one selector is required (STC §2.2).
+message GetReceiptRequest {
+  oneof selector {
+    AdvanceReceiptSelector advance = 1;
+    LeaseReceiptSelector lease = 2;
+  }
+}
+
+message AdvanceReceiptSelector {
+  string ref = 1;                // full ref name
+  uint64 advance_sequence = 2;  // 0 selects the latest committed advance
+}
+
+message LeaseReceiptSelector {
+  string ref = 1;            // empty selects the repository or namespace lease scope
+  uint64 lease_version = 2;  // 0 selects the latest committed version
+  bool namespace_scope = 3;  // with empty ref, selects signed repository's namespace
+}
+
+message GetReceiptResponse {
+  bytes receipt = 1; // complete DSSE storage-receipt envelope JSON
 }
 
 // ----------------------------------------------------------------------------
@@ -297,9 +326,9 @@ message GetServerInfoResponse {
   bool indexed_mode = 9;
   // Whether admission can challenge requests (SPEC-TRANSPORT-CONNECT §2.1, §5.1).
   bool admission = 10;
-  // Storage receipt signing key; empty until M5 (SPEC-TRANSPORT-CONNECT §2.1).
+  // Raw 32-byte current receipt+notice public key; empty only if unconfigured.
   bytes receipt_public_key = 11;
-  // Storage receipt key identifier; empty until M5 (SPEC-TRANSPORT-CONNECT §2.1).
+  // 64-hex BLAKE3 of receipt_public_key; empty only if unconfigured.
   string receipt_key_id = 12;
   // Accepted owner signature schemes; empty until M2 (SPEC-TRANSPORT-CONNECT §2.1).
   repeated string grant_schemes = 13;
