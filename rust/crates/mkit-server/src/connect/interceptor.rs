@@ -13,7 +13,7 @@ use crate::error::ServerError;
 use crate::op::Procedure;
 use crate::pipeline::{HookSet, Pipeline, RequestMeta};
 use crate::principal::Principal;
-use crate::store::{BlobStore, NamespaceStore};
+use crate::store::{MultipartBlobStore, NamespaceStore};
 
 /// Runs [`Pipeline::authenticate`] once per call, before any message
 /// reaches a handler, and stores the resulting
@@ -47,7 +47,7 @@ impl<B, N, H> fmt::Debug for AuthInterceptor<B, N, H> {
     }
 }
 
-impl<B: BlobStore, N: NamespaceStore, H: HookSet> AuthInterceptor<B, N, H> {
+impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> AuthInterceptor<B, N, H> {
     /// An interceptor authenticating against `pipeline`'s auth mode.
     #[must_use]
     pub fn new(pipeline: Arc<Pipeline<B, N, H>>) -> Self {
@@ -92,7 +92,7 @@ impl<B: BlobStore, N: NamespaceStore, H: HookSet> AuthInterceptor<B, N, H> {
 #[async_trait]
 impl<B, N, H> Interceptor for AuthInterceptor<B, N, H>
 where
-    B: BlobStore + 'static,
+    B: MultipartBlobStore + 'static,
     N: NamespaceStore + 'static,
     H: HookSet + 'static,
 {

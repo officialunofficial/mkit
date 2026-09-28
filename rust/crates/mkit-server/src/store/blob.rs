@@ -10,6 +10,7 @@ use core::future::Future;
 use bytes::Bytes;
 use mkit_core::hash::{Hash, to_hex_bytes};
 use mkit_core::protocol::PackKey;
+use mkit_core::upload_parts::PartPlan;
 
 use super::error::StoreError;
 use crate::rt::{BoxStream, MaybeSend, MaybeSync};
@@ -230,4 +231,102 @@ pub trait PackSink: MaybeSend {
 
     /// Discard the upload; nothing becomes visible.
     fn abort(self) -> impl Future<Output = ()> + MaybeSend;
+}
+
+/// A stored part reference recovered from a server-authenticated receipt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartRef {
+    /// Zero-based part index.
+    pub index: u32,
+    /// Number of part bytes.
+    pub len: u64,
+    /// Opaque backend tag, at most 128 bytes on the wire.
+    pub tag: Vec<u8>,
+}
+
+/// A verified, staged part. `commit` makes only this part durable; the pack
+/// remains invisible until [`MultipartBlobStore::complete`].
+pub trait PartSink: MaybeSend {
+    /// Append a non-empty chunk without exceeding the part's expected length.
+    fn write(&mut self, chunk: Bytes) -> impl Future<Output = Result<(), StoreError>> + MaybeSend;
+
+    /// Verify length and subtree CV, then return an opaque backend tag.
+    /// A CV mismatch is [`StoreError::PartSubtreeMismatch`]; other invalid
+    /// staged state is [`StoreError::Invalid`].
+    fn commit(self) -> impl Future<Output = Result<Vec<u8>, StoreError>> + MaybeSend;
+
+    /// Discard this attempted part.
+    fn abort(self) -> impl Future<Output = ()> + MaybeSend;
+}
+
+/// A resumable blob store with opaque storage sessions and verified parts.
+pub trait MultipartBlobStore: BlobStore {
+    /// The upload handle returned by [`Self::begin_part`].
+    type PartSink: PartSink;
+
+    /// Maximum part count accepted by this backend.
+    const MAX_PARTS: u32;
+
+    /// Whether this backend can start a multipart upload now.
+    fn supports_multipart(&self) -> bool {
+        false
+    }
+
+    /// Open a new storage session for a pack.
+    fn begin_multipart(
+        &self,
+        _key: BlobKey,
+        _len: u64,
+        _part_size: u64,
+    ) -> impl Future<Output = Result<Vec<u8>, StoreError>> + MaybeSend {
+        async { Err(StoreError::Unsupported("multipart uploads".into())) }
+    }
+
+    /// Start one part in an existing storage session.
+    fn begin_part(
+        &self,
+        _key: BlobKey,
+        _session: &[u8],
+        _plan: &PartPlan,
+        _index: u32,
+        _expected_cv: [u8; 32],
+    ) -> impl Future<Output = Result<Self::PartSink, StoreError>> + MaybeSend {
+        async { Err(StoreError::Unsupported("multipart uploads".into())) }
+    }
+
+    /// Atomically make the verified pack visible.
+    fn complete(
+        &self,
+        _key: BlobKey,
+        _session: &[u8],
+        _plan: &PartPlan,
+        _parts: &[PartRef],
+    ) -> impl Future<Output = Result<CommitOutcome, StoreError>> + MaybeSend {
+        async { Err(StoreError::Unsupported("multipart uploads".into())) }
+    }
+
+    /// Reclaim an incomplete session. Repeated aborts succeed.
+    fn abort(
+        &self,
+        _key: BlobKey,
+        _session: &[u8],
+    ) -> impl Future<Output = Result<(), StoreError>> + MaybeSend {
+        async { Err(StoreError::Unsupported("multipart uploads".into())) }
+    }
+}
+
+/// The sink type for backends whose multipart support arrives later.
+#[derive(Debug)]
+pub struct UnsupportedPartSink;
+
+impl PartSink for UnsupportedPartSink {
+    async fn write(&mut self, _chunk: Bytes) -> Result<(), StoreError> {
+        Err(StoreError::Unsupported("multipart uploads".into()))
+    }
+
+    async fn commit(self) -> Result<Vec<u8>, StoreError> {
+        Err(StoreError::Unsupported("multipart uploads".into()))
+    }
+
+    async fn abort(self) {}
 }

@@ -1,0 +1,188 @@
+name: "Nightly: Formal verification"
+
+# The formal-verification layers of docs/FORMAL.md (epic MKIT-17), one job
+# per layer. Every job calls a `just formal-*` recipe, so the justfile is the
+# single source of what runs (`just formal` locally is the quint + lean +
+# conformance subset). Nightly and on demand, not per PR: the Quint job runs
+# exhaustive TLC instances and the Kani job runs ~40 CBMC harnesses one at a
+# time, which is too long to gate every PR on.
+#
+# Tool pins (same values as the justfile's formal_* variables; change both):
+#   Quint 0.32.0 (npm), Apalache 0.62.2 (release tarball, sha256-checked by
+#   `just formal-setup-apalache`), Java 21 (Temurin), Lean from
+#   formal/lean/lean-toolchain via elan 4.2.4, Kani 0.68.0, Rust from
+#   RUST_VERSION below (rust/rust-toolchain.toml).
+#
+# Every result these jobs report is bounded or sampled unless docs/FORMAL.md
+# lists it as proved (the Lean theorems); a green run is not a proof.
+
+on:
+  schedule:
+    # 05:00 UTC daily: after fuzz.yml's 04:00 slot.
+    - cron: '0 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: "1.95.0"
+  QUINT_VERSION: "0.32.0"
+  KANI_VERSION: "0.68.0"
+  ELAN_VERSION: "4.2.4"
+  ELAN_SHA256: "42b94d4244e8353142c456ec0e4ca6528fd898a6c604d4059f494e706e431f63"
+
+jobs:
+  quint:
+    name: quint + TLC (check.sh default mode, plus gc TLC=1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6  # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: '22'
+
+      - name: Install quint
+        run: npm install -g "@informalsystems/quint@${QUINT_VERSION}"
+
+      - uses: taiki-e/install-action@4076c08d76dba979c11a7285295b0716c1d67908  # v2
+        with:
+          tool: just
+
+      # TLC is the tlc2.TLC class inside the Apalache jar, so this job needs
+      # Apalache even though it runs no Apalache check.
+      - name: Install Apalache (sha256-verified)
+        run: just formal-setup-apalache
+
+      - name: Quint models (quint typecheck/test/run + every TLC run)
+        run: just formal-quint all
+
+      - name: MKIT-22 fixtures reproduce from the model
+        run: just formal-fixtures
+
+  # Bounded symbolic runs at each script's default length. Several of them
+  # take 5-30 min on a developer machine, and a shared runner can be slower
+  # or run out of memory at the 4 GB heap the scripts use. A failure here is
+  # surfaced on the Actions tab without failing the nightly, the same
+  # posture as fuzz.yml; the exhaustive TLC checks in the `quint` job and
+  # the pinned quint tests remain blocking. Tighten once run times on the
+  # runner are known.
+  apalache:
+    name: apalache (APALACHE=1, bounded)
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6  # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: '22'
+
+      - name: Install quint
+        run: npm install -g "@informalsystems/quint@${QUINT_VERSION}"
+
+      - uses: taiki-e/install-action@4076c08d76dba979c11a7285295b0716c1d67908  # v2
+        with:
+          tool: just
+
+      - name: Install Apalache (sha256-verified)
+        run: just formal-setup-apalache
+
+      - name: Apalache bounded runs
+        run: just formal-apalache
+
+  lean:
+    name: lean (proofs + difftests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      # The difftests export their vectors with `cargo test -p mkit-core`.
+      - name: Set up Rust and cache
+        uses: ./.github/actions/setup-rust
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          cache-prefix: "formal-lean"
+          protoc: "false"
+
+      - uses: taiki-e/install-action@4076c08d76dba979c11a7285295b0716c1d67908  # v2
+        with:
+          tool: just
+
+      # elan fetches the Lean named by formal/lean/lean-toolchain on first
+      # use (`lake build`), so the Lean pin lives in that one file.
+      - name: Install elan
+        run: |
+          curl -sSfL -o elan.tgz \
+            "https://github.com/leanprover/elan/releases/download/v${ELAN_VERSION}/elan-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${ELAN_SHA256}  elan.tgz" | sha256sum -c -
+          tar -xzf elan.tgz
+          ./elan-init -y --default-toolchain none
+          rm -f elan.tgz elan-init
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      - name: Lean build and difftests
+        run: just formal-lean
+
+  kani:
+    name: kani (all harnesses)
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      # protoc: the mkit-rpc harnesses build mkit-rpc (buffa-build).
+      - name: Set up Rust and cache
+        uses: ./.github/actions/setup-rust
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          cache-prefix: "formal-kani"
+          protoc: "true"
+
+      - uses: taiki-e/install-action@4076c08d76dba979c11a7285295b0716c1d67908  # v2
+        with:
+          tool: just
+
+      - name: Install Kani
+        run: |
+          cargo install --locked kani-verifier --version "${KANI_VERSION}"
+          cargo kani setup
+
+      - name: Kani harnesses
+        run: just formal-kani
+
+  conformance:
+    name: conformance (MKIT-22 ITF replay)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Rust and cache
+        uses: ./.github/actions/setup-rust
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          cache-prefix: "formal-conformance"
+          protoc: "false"
+
+      - uses: taiki-e/install-action@4076c08d76dba979c11a7285295b0716c1d67908  # v2
+        with:
+          tool: just
+
+      - name: Replay the refs traces
+        run: just formal-conformance

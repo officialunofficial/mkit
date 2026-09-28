@@ -66,7 +66,7 @@ use mkit_server::storage_error::StorageOp;
 use mkit_server::store::MAX_BLOB_PIECE_BYTES;
 use mkit_server::{
     BlobBody, BlobKey, BlobMeta, BlobStore, BoxStream, ByteRange, CommitOutcome, MaybeSend,
-    MaybeSync, PackSink, StoreError,
+    MaybeSync, MultipartBlobStore, PackSink, StoreError, UnsupportedPartSink,
 };
 
 use crate::backend_error;
@@ -401,6 +401,11 @@ impl<B: ObjectBucket> BlobStore for R2BlobStore<B> {
             .map_err(|e| backend_error(StorageOp::BlobPut, e))?;
         Ok(true)
     }
+}
+
+impl<B: ObjectBucket> MultipartBlobStore for R2BlobStore<B> {
+    type PartSink = UnsupportedPartSink;
+    const MAX_PARTS: u32 = 10_000;
 }
 
 impl<B: ObjectBucket> R2BlobStore<B> {

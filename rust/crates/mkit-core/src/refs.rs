@@ -20,11 +20,18 @@
 //!
 //! CAS variants for [`update_ref`] follow SPEC-REFS §5: `Any` (clobber),
 //! `Missing` (fail if it exists), `Match(H)` (fail if current value !=
-//! H). As of #637, the local-filesystem `Match` read-compare-write is
-//! serialized under a shared `refs.lock` in the common dir (the same
-//! blocking kernel-lock primitive `repo_lock` uses elsewhere), so it is
-//! atomic across processes regardless of what other locks each caller
-//! holds — this closes the v1 gap previously documented here.
+//! H). Every local-filesystem ref mutation (all three write conditions,
+//! conditional and unconditional deletes, tags, remote-tracking refs and
+//! [`RemoteRefBatch`] writes) runs its critical section under a per-ref
+//! `refs-<digest>.lock` in the common dir, where `<digest>` is the
+//! lowercase BLAKE3 hex of the ref's path relative to the common dir
+//! (`cas_lock_name`; SPEC-CONCURRENCY §2). It uses the same blocking
+//! kernel-lock primitive as `repo_lock` elsewhere, so a mutation is atomic
+//! across processes regardless of what other locks each caller holds, and
+//! mutations of different refs never contend. #637 introduced the lock as
+//! one repo-wide `refs.lock`; it is now keyed per ref. History-aware
+//! branch writers take `refs-history-<digest>.lock` first
+//! (SPEC-CONCURRENCY §4).
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -717,7 +724,7 @@ pub fn delete_ref_safe(layout: &RepoLayout, branch: &str) -> RefResult<()> {
 /// success, rename reports success, and the commit becomes unreachable.
 ///
 /// This closes that gap by making the delete itself compare-and-swap:
-/// it acquires the SAME per-ref lock `cas_write`'s `Match` arm takes
+/// it acquires the SAME per-ref lock every `cas_write` condition takes
 /// (via `cas_lock_name`, keyed off the ref's path so it can never
 /// collide with an unrelated ref of the same bare name), reads the
 /// current value under that lock, and only removes the file if it is
@@ -2049,9 +2056,10 @@ mod tests {
     /// iterations because the race window is a handful of syscalls wide
     /// and is not guaranteed to be hit on any single attempt.
     ///
-    /// Before the #637 fix (no shared `refs.lock` around the `Match`
-    /// arm) this reliably reproduces a "both succeeded" iteration within
-    /// a few hundred attempts. After the fix, the shared lock makes the
+    /// Before the #637 fix (no lock around the `Match` arm) this
+    /// reliably reproduces a "both succeeded" iteration within a few
+    /// hundred attempts. After the fix, the per-ref
+    /// `refs-<digest>.lock` both callers share makes the
     /// read-compare-write atomic across both callers, so this must
     /// never happen — exactly one of the two racing writers may
     /// succeed.
@@ -2301,8 +2309,9 @@ mod tests {
     /// Normal-case companion to the race test above: with no
     /// contention, a sequence of `Match` CAS writes on the same ref must
     /// still succeed every time and never wedge (guards against the
-    /// `refs.lock` acquire/release added for #637 leaking or
-    /// deadlocking across repeated calls from the same layout).
+    /// per-ref `refs-<digest>.lock` acquire/release, added for #637,
+    /// leaking or deadlocking across repeated calls from the same
+    /// layout).
     #[test]
     fn cas_match_succeeds_repeatedly_when_uncontended() {
         let (_dir, mkit) = fresh_repo();
@@ -2479,8 +2488,8 @@ mod tests {
         );
     }
 
-    /// Cross-ref counterpart to the race test above: `refs.lock` used
-    /// to be one repo-wide lock, so a `Match` CAS on branch "other"
+    /// Cross-ref counterpart to the race test above: the #637 lock
+    /// was first one repo-wide `refs.lock`, so a `Match` CAS on branch "other"
     /// would block one on unrelated branch "main" for no reason —
     /// nothing about this CAS invariant spans refs. Now keyed per ref
     /// via [`cas_lock_name`]; proves an externally-held lock on

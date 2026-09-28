@@ -4,8 +4,8 @@
 use crate::error::ServerError;
 use crate::repo::NamespaceKey;
 use crate::store::{
-    Batch, BatchOutcome, BlobStore, NamespaceStore, Partition, Precondition, Value, codec, keys,
-    restore::mark_lease_table_recovered,
+    Batch, BatchOutcome, MultipartBlobStore, NamespaceStore, Partition, Precondition, Value, codec,
+    keys, restore::mark_lease_table_recovered,
 };
 
 use super::{HookSet, Pipeline, internal, lease::observed_guard, meta_error, ms};
@@ -105,7 +105,7 @@ struct CoordinatorState {
     recovery: Option<codec::LeaseRecovery>,
 }
 
-impl<B: BlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
+impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// Advance the coordinator epoch, serialized with every epoch lease grant.
     /// The grant RPC and its owner-signature verification are WP-2.8.
     ///

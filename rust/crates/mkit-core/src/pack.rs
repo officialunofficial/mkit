@@ -5108,3 +5108,349 @@ mod tests {
         assert_eq!(entries.first_non_raw_index(), Some(1));
     }
 }
+
+/// Kani proof harnesses (`cargo kani -p mkit-core --no-default-features
+/// -Z stubbing --harness pack_`, see `delta.rs`; the reader-side zstd
+/// call is stubbed either way and the writer never compresses below
+/// `MIN_COMPRESS_LEN`, so the feature does not change what is checked),
+/// the model-checked counterparts of the `pack` and `pack_entries` fuzz
+/// targets.
+///
+/// BLAKE3 is stubbed with a cheap deterministic `toy_hash`: the trailer
+/// bytes stay fully symbolic, so both the §8 trailer-match and -mismatch
+/// paths are explored, and the writer/reader round-trip still agrees on
+/// one function. zstd (C FFI, not modelable) is stubbed with a
+/// nondeterministic "fail, or return any <= 2-byte buffer" — a sound
+/// over-approximation for panic-freedom of the surrounding framing code.
+/// `PackReader::read` itself needs an on-disk `ObjectStore`, which Kani
+/// cannot model. A store-free harness over its per-entry steps (entry
+/// parsing + the storability gate) ran out of memory even for one 5-byte
+/// entry frame: CBMC's symbolic execution of the `PackError` →
+/// `StoreError` → `std::io::Error` drop glue dominates (~13 min), so
+/// that composition is left to the `pack` fuzz target.
+///
+/// The `pack_window_cursor_*` harnesses cover the one new decoder surface
+/// of the windowed reader (SPEC-PACKFILE §11): the persisted resumable
+/// cursor (`window::WindowCursor::from_bytes`). Its framing path shares
+/// `decode_payload` with `PackEntries`; `rewrite::rewrite_excluding`
+/// parses through `PackEntries`/`decode_entries_with` and adds no decoder.
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    /// Loop-free deterministic stand-in for BLAKE3: the first and last
+    /// 16 bytes of `data` plus its length (loop-free so it does not
+    /// interact with the global unwind bound).
+    fn toy_hash(data: &[u8]) -> Hash {
+        let mut h = [0u8; hash::HASH_LEN];
+        let n = data.len().min(16);
+        h[..n].copy_from_slice(&data[..n]);
+        h[16..16 + n].copy_from_slice(&data[data.len() - n..]);
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            h[31] ^= data.len() as u8;
+        }
+        h
+    }
+
+    fn stub_zstd(_frame: &[u8], _capacity: usize) -> Result<Vec<u8>, PackError> {
+        if kani::any() {
+            return Err(PackError::ZstdDecompress(String::new()));
+        }
+        let buf: [u8; 2] = kani::any();
+        let n: usize = kani::any_where(|&n| n <= 2);
+        Ok(buf[..n].to_vec())
+    }
+
+    /// Symbolic pack with an entry area of exactly `BODY` bytes (header,
+    /// body and trailer all symbolic). Harnesses call this once per
+    /// concrete `BODY` so CBMC can constant-fold the pack length.
+    fn any_pack<const BODY: usize>() -> Vec<u8> {
+        let head: [u8; HEADER_LEN] = kani::any();
+        let body: [u8; BODY] = kani::any();
+        let trailer: [u8; TRAILER_LEN] = kani::any();
+        let mut v = Vec::with_capacity(HEADER_LEN + BODY + TRAILER_LEN);
+        v.extend_from_slice(&head);
+        v.extend_from_slice(&body);
+        v.extend_from_slice(&trailer);
+        v
+    }
+
+    fn entries_at<const BODY: usize>() {
+        let bytes = any_pack::<BODY>();
+        let parsed = PackEntries::new(&bytes);
+        let Ok(mut entries) = parsed else {
+            kani::cover!(
+                matches!(parsed, Err(PackError::PackfileCorrupted)),
+                "bad_trailer"
+            );
+            kani::cover!(matches!(parsed, Err(PackError::TrailingData)), "trailing");
+            return;
+        };
+        let split = bytes.len() - TRAILER_LEN;
+        assert_eq!(&bytes[..4], MAGIC.as_slice());
+        assert!(entries.version == VERSION || entries.version == VERSION_V2);
+        assert_eq!(toy_hash(&bytes[..split]).as_slice(), &bytes[split..]);
+        let count = entries.count;
+        let raw_only = entries.is_raw_only();
+        let v1 = entries.version == VERSION;
+        let mut ok = 0u32;
+        let mut failed = false;
+        while let Some(item) = entries.next() {
+            let r = entries.last_payload_range().expect("set after an item");
+            assert!(HEADER_LEN + ENTRY_FRAME_LEN <= r.start && r.end <= split);
+            match item {
+                Ok(PackEntry::Raw { bytes: b }) => {
+                    assert!(!v1 || matches!(b, Cow::Borrowed(_)));
+                    ok += 1;
+                }
+                Ok(PackEntry::Delta { .. }) => {
+                    assert!(!raw_only);
+                    ok += 1;
+                }
+                Err(_) => {
+                    assert!(!v1, "a v1 pack accepted by new() must iterate cleanly");
+                    failed = true;
+                }
+            }
+        }
+        if !failed {
+            assert_eq!(ok, count);
+            assert_eq!(entries.pos, split);
+        }
+        kani::cover!(count == 2 && ok == 2, "two_entries");
+        kani::cover!(!raw_only && ok >= 1, "delta_or_zstd_entry");
+    }
+
+    /// `pack_entries` target, 5-byte entry area (exactly one entry frame
+    /// — type + length — with an empty payload, or a truncated/oversized
+    /// one), header, frame and trailer all symbolic (so any magic,
+    /// version, `entry_count` and trailer): `PackEntries::new` and full
+    /// iteration never panic/overflow/read OOB. On `Ok`: magic/version
+    /// valid (§1), trailer equals the hash of the preceding bytes (§8), a
+    /// v1 pack yields exactly `entry_count` `Ok` items ending at the
+    /// trailer with no gap (§3, §6), every payload range lies inside the
+    /// entry area (§2), and `is_raw_only` ⇒ no delta item.
+    ///
+    /// Run with `-Z unstable-options --cbmc-args --unwindset memcmp.0:33`
+    /// (the 32-byte trailer comparison); every other loop is bounded by
+    /// the global unwind of 4, which keeps CBMC from unrolling the
+    /// symbolic-`entry_count` loop 33 times. Unwinding assertions stay
+    /// on, so a too-small bound fails loudly. One entry-area length per
+    /// harness: 0..=6 (and 0..=12) in one harness did not finish within
+    /// 15 min, and the empty (0-byte) area alone ran out of memory.
+    #[kani::proof]
+    #[kani::stub(crate::hash::hash, toy_hash)]
+    #[kani::stub(zstd_decompress_capped, stub_zstd)]
+    #[kani::unwind(4)]
+    fn pack_entries_one_frame() {
+        entries_at::<5>();
+    }
+
+    /// As above for a 10-byte entry area: two empty-payload entries (or
+    /// one with a 5-byte payload).
+    #[kani::proof]
+    #[kani::stub(crate::hash::hash, toy_hash)]
+    #[kani::stub(zstd_decompress_capped, stub_zstd)]
+    #[kani::unwind(4)]
+    fn pack_entries_two_entries() {
+        entries_at::<10>();
+    }
+
+    fn writer_rt<const R: usize, const S: usize>(with_delta: bool) {
+        let raw: [u8; R] = kani::any();
+        let base: Hash = kani::any();
+        let stream: [u8; S] = kani::any();
+
+        let mut w = PackWriter::new();
+        w.push_raw(hash::ZERO, &raw).expect("raw fits caps");
+        if with_delta {
+            w.push_delta(&base, &stream).expect("delta fits caps");
+        }
+        let pack = w.finish().expect("finish");
+
+        let mut it = PackEntries::new(&pack).expect("own pack parses");
+        assert_eq!(it.version, VERSION);
+        assert_eq!(it.is_raw_only(), !with_delta);
+        match it.next() {
+            Some(Ok(PackEntry::Raw { bytes })) => {
+                assert_eq!(bytes.as_ref(), raw);
+            }
+            _ => panic!("first entry must be the pushed raw payload"),
+        }
+        if with_delta {
+            match it.next() {
+                Some(Ok(PackEntry::Delta {
+                    base: b,
+                    stream: st,
+                })) => {
+                    assert_eq!(b, base);
+                    assert_eq!(st.as_ref(), stream);
+                }
+                _ => panic!("second entry must be the pushed delta"),
+            }
+            assert_eq!(it.first_non_raw_index(), Some(1));
+        }
+        assert!(it.next().is_none());
+    }
+
+    /// Writer → reader round-trip (SPEC-PACKFILE §1–§3): a pack built by
+    /// `PackWriter` from one raw entry of 1 symbolic byte is accepted by
+    /// `PackEntries::new` as v1 (no compression below `MIN_COMPRESS_LEN`)
+    /// and yields exactly the pushed entry. CBMC's symbolic execution of
+    /// the `PackError` → `StoreError` → `std::io::Error` drop glue costs
+    /// ~4 min per writer/reader pass here, so the bound is one entry
+    /// shape (0..=2 bytes in one harness, and a raw + delta pack, ran out
+    /// of memory; the delta writer path is covered by the unit tests).
+    #[kani::proof]
+    #[kani::stub(crate::hash::hash, toy_hash)]
+    // Run with `-Z unstable-options --cbmc-args --unwindset memcmp.0:33`
+    // (32-byte trailer / base-hash comparisons); <= 2 entries otherwise.
+    #[kani::unwind(4)]
+    fn pack_writer_roundtrip_raw() {
+        writer_rt::<1, 0>(false);
+    }
+
+    /// Canary: with the trailer check in place, a single flipped body
+    /// byte must be detectable — the checker has to falsify "every
+    /// single-byte mutation of a valid pack still parses".
+    #[kani::proof]
+    #[kani::stub(crate::hash::hash, toy_hash)]
+    // As above: `--cbmc-args --unwindset memcmp.0:33`.
+    #[kani::unwind(4)]
+    #[kani::should_panic]
+    fn pack_canary_mutation_still_parses() {
+        let mut w = PackWriter::new_raw_only();
+        w.push_raw(hash::ZERO, b"ab").expect("raw fits caps");
+        let mut pack = w.finish().expect("finish");
+        let i: usize = kani::any_where(|&i| i < pack.len());
+        let flip: u8 = kani::any_where(|&f| f != 0);
+        pack[i] ^= flip;
+        assert!(PackEntries::new(&pack).is_ok());
+    }
+
+    /// A checksum-valid symbolic cursor encoding (canonical v1 field
+    /// order: see the `window::cursor` module doc) of `N` body bytes, all
+    /// symbolic except the option tags (0/1) at the concrete `(offset,
+    /// present)` positions in `tags` and the two tree depth bytes at
+    /// `depths`, which are 0. A symbolic tag or depth byte (even one
+    /// restricted to "valid or rejected") makes CBMC explore every
+    /// layout after it (the reader's `Result` is merged at each return,
+    /// so later field offsets become symbolic); that did not finish within
+    /// 10 min. The (toy) checksum is appended
+    /// so the checksum gate passes and every field parser and the
+    /// geometry validation run on attacker-chosen values.
+    fn cursor_bytes<const N: usize>(tags: &[(usize, bool)], depths: [usize; 2]) -> Vec<u8> {
+        let mut body: [u8; N] = kani::any();
+        for &(at, present) in tags {
+            body[at] = u8::from(present);
+        }
+        for at in depths {
+            body[at] = 0;
+        }
+        let mut out = Vec::with_capacity(N + hash::HASH_LEN);
+        out.extend_from_slice(&body);
+        out.extend_from_slice(&toy_hash(&body));
+        out
+    }
+
+    /// Layout A (125-byte body): first-window boundary bound to the
+    /// trailer anchor, no pack id requested, no first-non-raw index;
+    /// current-window prefix commitment present; both trees empty.
+    /// Offsets: version 0, four u64 + three u32 at 1..45, tags at 45
+    /// (first-non-raw), 54 (expected), 55 (anchor) + digest, 88 (prefix)
+    /// + digest, trees at 121/122 and 123/124.
+    fn cursor_anchor() -> Vec<u8> {
+        cursor_bytes::<125>(
+            &[
+                (45, false),
+                (54, false),
+                (55, true),
+                (88, true),
+                (122, false),
+                (124, false),
+            ],
+            [121, 123],
+        )
+    }
+
+    /// Resumable-cursor decoder (`window::WindowCursor::from_bytes`, the
+    /// persisted state of the SPEC-PACKFILE §11 windowed reader) on a
+    /// checksum-valid layout-A encoding whose every numeric field and
+    /// digest is symbolic: decoding (field parsing, trailing-byte check,
+    /// geometry validation) never panics, overflows
+    /// or reads out of bounds; `cover` shows acceptance is reachable.
+    /// (Also asserting that an accepted cursor re-encodes byte-exactly
+    /// via `to_bytes`, and the pack-id-bound layout, each did not finish
+    /// within 15 min; the round-trip stays with the `window` unit tests.)
+    #[kani::proof]
+    #[kani::stub(crate::hash::hash, toy_hash)]
+    // Run with `-Z unstable-options --cbmc-args --unwindset memcmp.0:33`
+    // (checksum comparison); the tree loops read no CVs.
+    #[kani::unwind(7)]
+    fn pack_window_cursor_decode() {
+        let got = window::WindowCursor::from_bytes(&cursor_anchor());
+        let ok = got.is_ok();
+        // Skip the harness-side `PackError` drop glue (`Store` →
+        // `std::io::Error`); nothing about dropping is checked here.
+        core::mem::forget(got);
+        kani::cover!(ok, "accepted_anchor_cursor");
+    }
+
+    /// A concrete, valid layout-A cursor (100-byte pack, 64 KiB windows,
+    /// boundary right after the header, no entries; symbolic anchor and
+    /// prefix digests) with `mask` XORed into the low byte of `pack_len`
+    /// (offset 1, inside the checksummed body) after the checksum is
+    /// computed. Every flipped `pack_len` in 44..=255 is still valid
+    /// geometry for this cursor, so for those only the checksum rejects.
+    fn flipped_cursor(mask: u8) -> Vec<u8> {
+        let mut body = [0u8; 125];
+        body[0] = 1; // cursor encoding version
+        body[1..9].copy_from_slice(&100u64.to_le_bytes()); // pack_len
+        body[9..17].copy_from_slice(&(64u64 << 10).to_le_bytes()); // window
+        body[17..25].copy_from_slice(&12u64.to_le_bytes()); // pos
+        body[33..37].copy_from_slice(&1u32.to_le_bytes()); // pack version
+        body[55] = 1; // anchor present
+        body[56..88].copy_from_slice(&kani::any::<Hash>());
+        body[88] = 1; // window prefix present
+        body[89..121].copy_from_slice(&kani::any::<Hash>());
+        let mut out = body.to_vec();
+        out.extend_from_slice(&toy_hash(&body));
+        out[1] ^= mask;
+        out
+    }
+
+    /// Checksum gate: the concrete cursor above decodes iff it is
+    /// unmodified, i.e. every single-byte change to its `pack_len` field
+    /// (most of which leave a still-valid cursor) is rejected. One
+    /// `from_bytes` call per harness: each costs ~7 min of CBMC symbolic
+    /// execution (~6.8M steps, much of it `PackError` → `StoreError` →
+    /// `std::io::Error` machinery), so two calls did not finish within
+    /// 15 min.
+    #[kani::proof]
+    #[kani::stub(crate::hash::hash, toy_hash)]
+    // As above: `--cbmc-args --unwindset memcmp.0:33`.
+    #[kani::unwind(7)]
+    fn pack_window_cursor_flip_rejected() {
+        let mask: u8 = kani::any();
+        let got = window::WindowCursor::from_bytes(&flipped_cursor(mask));
+        let ok = got.is_ok();
+        core::mem::forget(got);
+        assert_eq!(ok, mask == 0);
+    }
+
+    /// Canary: the checker must falsify "a flipped `pack_len` byte still
+    /// decodes" (the negation of the property above).
+    #[kani::proof]
+    #[kani::stub(crate::hash::hash, toy_hash)]
+    // As above: `--cbmc-args --unwindset memcmp.0:33`.
+    #[kani::unwind(7)]
+    #[kani::should_panic]
+    fn pack_window_cursor_canary_flip_accepted() {
+        let got =
+            window::WindowCursor::from_bytes(&flipped_cursor(kani::any_where(|&m: &u8| m != 0)));
+        let ok = got.is_ok();
+        core::mem::forget(got);
+        assert!(ok);
+    }
+}
