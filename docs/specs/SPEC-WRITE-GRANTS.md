@@ -895,7 +895,7 @@ mkit-url-token:v1
 |---|---|
 | `audience` | The issuing deployment's auth v2 audience. |
 | `repository` | The full repository identity (§7.4). |
-| `target` | `object:<64 lowercase hex object id>`, or `path:<ref>:<path>` where `<ref>` is a full ref name valid under SPEC-REFS §3 and `<path>` is the unpadded base64url of the UTF-8 path. The path is 1 to 1,024 bytes of tree entry names joined by `/`, with no leading, trailing or repeated `/` and no `.` or `..` entry. Ref names contain no `:`, so the field splits at its first two `:`. |
+| `target` | `object:<64 lowercase hex object id>`, or `path:<ref>:<path>` where `<ref>` is a full ref name valid under SPEC-REFS §3 and `<path>` is the unpadded base64url of the UTF-8 path. The path is 0 to 1,024 bytes; an empty path names the root tree. A nonempty path consists of tree entry names joined by `/`, with no leading, trailing or repeated `/` and no `.` or `..` entry. Ref names contain no `:`, so the field splits at its first two `:`. |
 | `epoch` | The namespace's stored epoch when the token was issued (§5). |
 | `issued`, `expiry` | Decimal millisecond timestamps, `issued < expiry`, `expiry - issued` at most `url_token_ttl`. |
 | `key id` | The first 16 bytes of the BLAKE3 of the signing key's 32-byte public key, as 32 lowercase hexadecimal digits. |
@@ -912,8 +912,10 @@ an Ed25519 key used for nothing else. It MUST NOT be the receipt key,
 the hook key, the admin key, or any key that signs auth v2. The
 deployment rotates it by key id. It keeps a retired key in its
 verification set for at least `url_token_ttl` after retirement, and
-publishes the set with key ids (the publication format is specified
-with HTTP serving, M4).
+publishes the set with key ids at `GET /.well-known/mkit-url-token-keys.json`,
+with `Cache-Control: public, max-age=300`, using SPEC-SERVER §7.2's key-list
+JSON shape and this section's 32hex `keyId`, as
+[SPEC-HTTP-OBJECTS](SPEC-HTTP-OBJECTS.md) requires.
 
 **Verification** (the interface HTTP serving calls). A verifier accepts
 a token for a request only if it decodes by the §4.2 base64url rules;
@@ -924,10 +926,13 @@ byte for byte; `epoch` equals the stored epoch, read as §5.6 requires
 for reads; and `now < expiry`. Anything else is `not_found` for a
 private repository, as in §9.3. Serving always resolves the target in
 the published view.
+For HTTP serving, the stateless audience, repository, target, and expiry
+checks MUST precede the stored-epoch read, as SPEC-HTTP-OBJECTS §6 requires.
 
 **Response.** `IssueObjectUrl` returns the token and its expiry. The URL
-form that carries a token, and cache headers, are specified with HTTP
-serving (M4).
+form MUST carry it only in a `token=` query parameter. Header and cookie
+forms are deferred. Cache headers, target mapping, key publication, and
+query redaction are specified in [SPEC-HTTP-OBJECTS](SPEC-HTTP-OBJECTS.md).
 
 ---
 
@@ -1172,7 +1177,7 @@ Landed so far (each pinned by BLAKE3 in the directory's `MANIFEST.txt`):
 
 | Version | Status | Changes |
 |---|---|---|
-| `1` | draft | Initial grant statement (audiences, ref scopes, capabilities), owner schemes, exact-epoch revocation with bounded epoch statements, epoch leases and the commit deadline, server policy, signed reads, private repositories and URL tokens, and server-side grants for ssh and enc (mkit#1085, mkit#1089). |
+| `1` | draft | Initial grant statement (audiences, ref scopes, capabilities), owner schemes, exact-epoch revocation with bounded epoch statements, epoch leases and the commit deadline, server policy, signed reads, private repositories and URL tokens, and server-side grants for ssh and enc (mkit#1085, mkit#1089). WP-4.11 adds the `token=` URL form and key-set publication, and amends token paths to 0–1024 bytes so an empty path names the root tree. Fix round 1 orders stateless token checks before the stored-epoch read. |
 
 ---
 

@@ -1,0 +1,31 @@
+{
+  "blake3": "7130651d0d1e52cf9b3e93bd9af64c8bb9247a9ffa8a990c55ff35b88e881048",
+  "commit": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
+  "expect": {
+    "accept": false,
+    "expand_to": null,
+    "reject_reason": "span_chunk_selector"
+  },
+  "name": "neg_chunk_selector",
+  "recipe": {
+    "segments": [
+      {
+        "length": 4050,
+        "offset": 0,
+        "source": "span_two_chunks.bin"
+      },
+      {
+        "length": 3996,
+        "offset": 53,
+        "source": "span_two_chunks.bin"
+      },
+      {
+        "length": 74874,
+        "offset": 73268,
+        "source": "span_two_chunks.bin"
+      }
+    ]
+  },
+  "schema_version": 1,
+  "size": 82920
+}
