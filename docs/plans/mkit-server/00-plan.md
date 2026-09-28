@@ -153,13 +153,14 @@ Sizes: S ≲ 400, M 400–900, L 900–1500 changed lines.
 | 1.13 | Native: S3 multipart BlobStore | M1 | native | 1.11b | M | rust,conf-native | no |
 | 1.14 | Ticket expiry and pre-M3 outbox retention | M1 | core | 1.10, 1.12, 1.24 | M | rust,conf-native,conf-wrangler | no |
 | 1.29 | Ops: periodic DO backup export to R2 and per-shard storage alerts | M1 | ops | 1.24, 1.8, 1.25, 1.23a | M | rust,workers,conf-wrangler | no |
-| 1.15 | ssh and enc: multi-repo addressing, --principal, implicit session tickets | M1 | cli | 1.5, 1.10 | M | rust,cli | no |
+| 1.15 | ssh and enc: multi-repo addressing, --principal, implicit session tickets | M1 | cli | 1.5, 1.10, 1.30 | M | rust,cli | no |
 | 1.16 | Client: X-Repository everywhere, identity validation, GetServerInfo, ListRefs paging, ref hint | M1 | client | 1.2, 1.6 | M | rust,cli | no |
 | 1.17 | Client: BeginUpload with target ref, ticket threading, nonce/re-sign rule | M1 | client | 1.16, 1.10 | L | rust,cli | no |
 | 1.18 | Client: resumable part upload with client-held receipts | M1 | client | 1.17, 1.3, 1.11a | M | rust,cli | no |
 | 1.21 | Worker: published-view ref snapshots per ref-index bucket (R2/Cache, debounced) for readers | M1 | worker | 1.28b, 1.10, 1.8 | M | rust,workers,conf-wrangler,staging | no |
 | 1.27 | M1 conformance: D34, tickets and growth cases (wire, storage, load) | M1 | conformance | 1.9b, 1.10, 1.14, 1.25, 1.26, 1.28c | L | rust,conf-native,conf-wrangler | no |
-| 1.19 | Staging vcs-worker deployment config and runbook | M1 | ops | 1.6, 1.8, 1.12, 1.14, 1.18, 1.21, 1.29 | S | workers,ci-yaml | yes |
+| 1.30 | Adapters: Multi addressing mode and policy flags | M1 | native | 1.5, 1.10 | M | rust,wasm,workers,conf-native,conf-wrangler | no |
+| 1.19 | Staging vcs-worker deployment config and runbook | M1 | ops | 1.6, 1.8, 1.12, 1.14, 1.18, 1.21, 1.29, 1.30 | S | workers,ci-yaml | yes |
 | 1.20 | CI: conformance and e2e against deployed staging (M1 exit) | M1 | conformance | 1.19, 1.27, 1.13, 1.15 | S | ci-yaml,staging | yes |
 | 2.2 | Proto additions for M2 | M2 | proto | S2, 1.2 | S | rust,proto,full | no |
 | 2.3 | mkit-attest: Keccak-256, EIP-191, secp256k1 recovery, address derivation | M2 | crypto | S2 | M | rust,wasm,sec,golden | no |
@@ -176,6 +177,7 @@ Sizes: S ≲ 400, M 400–900, L 900–1500 changed lines.
 | 2.13 | CLI: mkit grant create/add/list and the client grant store | M2 | cli | 2.5, 2.10 | L | rust,cli,docs | no |
 | 2.14 | CLI: mkit grant revoke and mkit epoch | M2 | cli | 2.13, 2.8 | M | rust,cli,docs | no |
 | 2.15 | Staging: enable M2 features and run M2 conformance (M2 exit) | M2 | ops | 2.7, 2.8, 2.9, 2.11, 2.12, 2.14 | S | ci-yaml,staging | yes |
+| 1.30b | Adapters: grant flags and relying-party config | M2 | native | 1.30, 2.6 | M | rust,wasm,workers,conf-native,conf-wrangler | no |
 | 3.1 | Proto: AdmissionChallenge error detail and goldens | M3 | proto | S3, 1.2 | S | rust,proto,wasm,golden | no |
 | 3.2 | Core: two-phase Admission (Allow/Challenge/Deny), 402 mapping, GetServerInfo fields | M3 | core | 3.1 | M | rust,wasm | no |
 | 3.3 | Core: outcome outbox, OutcomeSink, exactly-one-outcome, backpressure, read outcomes | M3 | core | 3.2 | L | rust,conf-native | no |
@@ -278,13 +280,13 @@ its predecessors have merged; in practice cap concurrent executors at ~4 to keep
 | 15 | 1.6, 1.23, 1.26, 1.29, 5.1b-1, 5.1b-2, 5.1c | M1, M5 |
 | 16 | 1.28a, 1.9, 1.16 | M1 |
 | 17 | 1.10, 1.11 | M1 |
-| 18 | 1.12, 1.13, 1.15, 1.17, 1.28b | M1 |
+| 18 | 1.12, 1.13, 1.15, 1.17, 1.28b, 1.30 | M1 |
 | 19 | 1.14, 1.18, 1.21, 1.28c | M1 |
 | 20 | 1.27, 1.19 | M1 |
 | 21 | 1.20 | M1 |
 | 22 | 2.2, 2.10, 3.1, 4.5, 4.9, 4.10a | M2, M3, M4 |
 | 23 | 2.6, 2.13, 3.2, 3.10, 4.6, 4.7 | M2, M3, M4 |
-| 24 | 2.7, 2.8, 2.9, 3.3, 3.11, 4.8, 4.10 | M2, M3, M4 |
+| 24 | 2.7, 2.8, 2.9, 3.3, 3.11, 4.8, 4.10, 1.30b | M2, M3, M4 |
 | 25 | 2.11, 2.12, 2.14, 3.4, 3.5, 3.7, 4.12, 4.17 | M2, M3, M4 |
 | 26 | 2.15, 3.8, 3.9, 4.13, 4.14, 4.15, 4.16 | M2, M3, M4 |
 | 27 | 3.12, 4.18 | M3, M4 |
@@ -559,6 +561,7 @@ ContentIndex/export/hooks → M0-02b, unary pipeline → M0-05a, streaming/fault
 | R-125 | WP-2.2 message shapes | One `signed_statement` field; no repository fields; a `RepoVisibility` enum; a `RefPath` oneof; `Retry-After` for pending epoch and visibility updates; `grant_schemes` population is WP-2.6's. Carry-forwards, each checked before a full decode where possible and answered `invalid_argument`: **WP-2.8** `signed_statement` ≤ 8,192 bytes and the namespace grammar; **WP-2.9** an unset `mode`, `UNSPECIFIED` or an unknown enum value, and a statement ≤ 8,192 bytes; **WP-2.11** an unset `target`, an `object_id` that is not 32 bytes, and a path over 1,024 bytes or outside the SPEC-WRITE-GRANTS §9.4 grammar. WP-2.14 (`mkit epoch`) honors `Retry-After` on pending epoch updates; whichever WP adds a visibility client does the same. | 2.2, 2.6, 2.8, 2.9, 2.11, 2.14 |
 | R-131 | WP-4.10a holder sub-sharding deferred (user, 2026-09-28) | ContentIndex shards on Workers are already wired (WP-1.8). Holder sub-sharding is deferred: holders stay in the object's primary content shard. The trigger to revisit is an object whose holder count or content-shard size approaches a configured threshold (alert). WP-4.10 absorbs what is still needed: the holder value becomes `HolderV1 { seq, op_id }` so SPEC-SERVER §13.3's per-holder change sequence exists, and the hold is released in the same primary batch that records the holder (R-75 unchanged). Timer kind 6 stays reserved. | 4.10, 4.10a |
 | R-133 | WP-5.6 takedown sweep enumeration | WP-5.6 builds the `nl` namespace registry that the takedown sweep enumerates, and WP-5.6's sweep uses at most one read per distinct index partition per repository. A namespace MUST be registered in `nl` before any write into it commits, and the sweep reads `nl` only after that registry's own watermark passes the cut. | 5.6 |
+| R-136 | WP-1.30 adapter Multi mode | WP-1.30 turns multi-repository serving on in the adapters (R-96). Native: `--addressing single\|multi` (default single), `--namespace-policy allowlist\|any` (multi-only; default allowlist), `--namespace-allowlist <FILE>` (required under the allowlist policy; mutually exclusive with `any`), `--unsafe-open-namespaces` (required with `any`, multi-only) and `--enc-repository <ns>/<name>` (required when `--listen-enc` meets multi; WP-1.15 wires it into the session). Worker: `ADDRESSING`, `NAMESPACE_POLICY`, `NAMESPACE_ALLOWLIST` and `UNSAFE_OPEN_NAMESPACES` vars with the same rules. The allowlist format is namespaces separated by newlines or commas, `#` comments to end of line, canonical `ed25519-<64hex>`/`0x<40hex>` only, duplicates and an empty list refused. Multi requires auth v2 with upload ticket keys and, on native, `--meta sqlite:<PATH>`; there is no `--write-policy` flag (Owner is derived for Multi, Open with Multi stays refused in the pipeline). `--repository` is single-only (`AuthV2Config` gets `""` under multi); `AUTH_REPOSITORY` is ignored under multi on the Worker. The three planted-membership wire cases skip on a served deployment (`Profile::planted_membership`). WP-1.30b splits M2's grant flags and relying-party config out of it (deps 1.30, 2.6). With adapter Multi live, WP-1.26b can exercise the namespace cap on the Worker. | 1.30, 1.30b, 1.15, 1.19 |
 
 ---
 

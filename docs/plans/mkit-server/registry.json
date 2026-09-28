@@ -900,7 +900,8 @@
     "track": "cli",
     "depends_on": [
       "1.5",
-      "1.10"
+      "1.10",
+      "1.30"
     ],
     "size": "M",
     "summary": "Adds mkit serve --principal and per-repo FsLayoutStore directories under a root (no SQLite, so the CLI stays server-free), enc peer principals, owner policy and implicit per-session tickets.",
@@ -1005,6 +1006,26 @@
     ]
   },
   {
+    "id": "1.30",
+    "title": "Adapters: Multi addressing mode and policy flags",
+    "milestone": "M1",
+    "track": "native",
+    "depends_on": [
+      "1.5",
+      "1.10"
+    ],
+    "size": "M",
+    "summary": "Enables multi-repository deployments on the native and Worker adapters: the native --addressing multi, --namespace-policy, --namespace-allowlist and --unsafe-open-namespaces flags plus the --enc-repository compatibility flag, the Worker ADDRESSING/NAMESPACE_POLICY/NAMESPACE_ALLOWLIST/UNSAFE_OPEN_NAMESPACES vars, the shared allowlist parser, the Multi-without-ticket-keys startup refusal, and the Multi wire cases against both adapters.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm",
+      "workers",
+      "conf-native",
+      "conf-wrangler"
+    ]
+  },
+  {
     "id": "1.19",
     "title": "Staging vcs-worker deployment config and runbook",
     "milestone": "M1",
@@ -1016,7 +1037,8 @@
       "1.14",
       "1.18",
       "1.21",
-      "1.29"
+      "1.29",
+      "1.30"
     ],
     "size": "S",
     "summary": "Adds env.staging (route, audience, allowlist, R2 buckets, DO migration v2, CPU limit, placement vars) and a deploy/backup/restore runbook. The human creates Cloudflare resources and runs the first deploy and smoke test.",
@@ -1311,6 +1333,26 @@
     "area_gates": [
       "ci-yaml",
       "staging"
+    ]
+  },
+  {
+    "id": "1.30b",
+    "title": "Adapters: grant flags and relying-party config",
+    "milestone": "M2",
+    "track": "native",
+    "depends_on": [
+      "1.30",
+      "2.6"
+    ],
+    "size": "M",
+    "summary": "Carries M2's grant-based authorization into the adapters' configuration surface: the native flags and Worker vars for grant policy and the WebAuthn relying party, paralleling WP-1.30's namespace-policy plumbing.",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm",
+      "workers",
+      "conf-native",
+      "conf-wrangler"
     ]
   },
   {

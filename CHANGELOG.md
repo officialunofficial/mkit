@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server: the native and Worker adapters can serve multi-repository
+  deployments (`mkit-server serve --addressing multi` with
+  `--namespace-policy`/`--namespace-allowlist`/`--unsafe-open-namespaces`,
+  or the Worker's `ADDRESSING`/`NAMESPACE_POLICY`/`NAMESPACE_ALLOWLIST`/
+  `UNSAFE_OPEN_NAMESPACES` vars). Multi requires auth v2 with upload ticket
+  keys — a deployment without them now refuses to start — and, natively,
+  `--meta sqlite:<PATH>` (WP-1.30).
 - Transport: add the `GetGrantEpoch`, `SetGrantEpoch`, `SetRepoVisibility` and
   `IssueObjectUrl` messages and RPCs; the server answers `unimplemented` until
   WP-2.8, WP-2.9 and WP-2.11 (WP-2.2).
