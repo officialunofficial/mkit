@@ -24,6 +24,7 @@ use url::{Host, Url};
 use crate::envelope::{EnvelopeSigner, EnvelopeTransport, RetryIdentity};
 use crate::error::{ErrorContext, map_connect_error, pending_verification_delay};
 use crate::executor::TokioExecutor;
+use crate::grant::{GrantCondition, GrantOperation, GrantRef, GrantRequest, GrantSource};
 use crate::proto::mkit::transport::v1::__buffa::oneof::download_pack_response::Body as DownloadBody;
 use crate::proto::mkit::transport::v1::{
     AdvanceOutcome as ProtoAdvanceOutcome, AdvanceRefsRequest, DownloadPackRequest,
@@ -222,6 +223,8 @@ pub struct ConnectTransport {
     repository: RepositoryIdentity,
     repository_text: String,
     origin: String,
+    signer_key: Option<String>,
+    grant_source: Option<Arc<dyn GrantSource>>,
     /// Per-call timeout applied to `ListRefs`/`ReadRef`/`UpdateRef`/
     /// `AdvanceRefs`/`PackExists`. See [`Self::with_unary_timeout`].
     unary_timeout: Duration,
@@ -338,8 +341,8 @@ impl ConnectTransport {
         Self::connect_with_signer(url, None)
     }
 
-    /// Like [`Self::connect`], additionally signing every write RPC
-    /// (`UpdateRef`, `AdvanceRefs`, `UploadPack`) with a write envelope
+    /// Like [`Self::connect`], additionally signing repository reads and writes
+    /// with an auth v2 envelope
     /// (BLAKE3 digest + Ed25519 signature headers) when `signer` is
     /// `Some` — see the [`envelope`](crate::envelope) module. This is an
     /// ADDITIONAL auth mode alongside the bearer token read from
@@ -387,6 +390,7 @@ impl ConnectTransport {
             HttpClient::plaintext()
         };
         let repository_text = repository.to_string();
+        let signer_key = signer.as_ref().map(|signer| signer.public_key_hex());
         let transport =
             EnvelopeTransport::new(transport, signer, origin.clone(), repository_text.clone());
 
@@ -413,6 +417,8 @@ impl ConnectTransport {
             repository,
             repository_text,
             origin,
+            signer_key,
+            grant_source: None,
             unary_timeout: UNARY_TIMEOUT,
             pack_transfer_timeout: PACK_TRANSFER_TIMEOUT,
             backoff: BackoffIterator::new,
@@ -454,6 +460,7 @@ impl ConnectTransport {
         let repository_text = repository.to_string();
         let config = ClientConfig::new(audience.parse().expect("test origin"))
             .with_default_timeout(Duration::from_secs(10));
+        let signer_key = signer.as_ref().map(|signer| signer.public_key_hex());
         Self {
             client: TransportServiceClient::new(
                 EnvelopeTransport::new(
@@ -469,6 +476,8 @@ impl ConnectTransport {
             repository,
             repository_text,
             origin: audience,
+            signer_key,
+            grant_source: None,
             unary_timeout: UNARY_TIMEOUT,
             pack_transfer_timeout: PACK_TRANSFER_TIMEOUT,
             backoff: test_backoff,
@@ -550,6 +559,44 @@ impl ConnectTransport {
         self
     }
 
+    /// Add a source of locally selected grants. The source is consulted only
+    /// for signed repository reads and writes by a non-owner key. The CLI
+    /// installs no source until its grant store is available.
+    #[must_use]
+    pub fn with_grant_source(mut self, source: Arc<dyn GrantSource>) -> Self {
+        self.grant_source = Some(source);
+        self
+    }
+
+    fn grant_options(&self, options: CallOptions, operation: GrantOperation<'_>) -> CallOptions {
+        if matches!(operation, GrantOperation::Part) {
+            return options;
+        }
+        let (Some(source), Some(key), Some(namespace)) = (
+            &self.grant_source,
+            &self.signer_key,
+            self.repository.namespace(),
+        ) else {
+            return options;
+        };
+        if namespace.to_string() == format!("ed25519-{key}") {
+            return options;
+        }
+        let request = GrantRequest::new(&self.origin, &self.repository_text, key, operation);
+        match source.select(&request) {
+            Some(grant) => options.with_header("x-write-grant", grant),
+            None => options,
+        }
+    }
+
+    fn read_options(&self, options: CallOptions) -> TransportResult<CallOptions> {
+        if self.signer_key.is_none() {
+            return Ok(options);
+        }
+        let identity = RetryIdentity::new().map_err(TransportError::RemoteError)?;
+        Ok(identity.apply(self.grant_options(options, GrantOperation::Read)))
+    }
+
     /// Observe pending verification waits and completion. A `false` return
     /// from a waiting event cancels polling before the next sleep slice.
     #[must_use]
@@ -619,6 +666,10 @@ impl ConnectTransport {
         let mut saw_pending = false;
         let mut waiting_since_ms = start_ms;
         let mut renewed_after_unauthenticated = false;
+        let refs = [
+            GrantRef::new(head_ref, grant_condition(head_condition)),
+            GrantRef::new(packmap_ref, grant_condition(packmap_condition)),
+        ];
 
         loop {
             // A pending reply is definitive: before its next poll, renew an
@@ -646,8 +697,10 @@ impl ConnectTransport {
                         identity =
                             RetryIdentity::new_at(now).map_err(TransportError::RemoteError)?;
                     }
-                    let options =
-                        identity.apply(CallOptions::default().with_timeout(self.unary_timeout));
+                    let options = self.grant_options(
+                        identity.apply(CallOptions::default().with_timeout(self.unary_timeout)),
+                        GrantOperation::Write { refs: &refs },
+                    );
                     let response = self
                         .executor
                         .block_on(self.client.advance_refs_with_options(
@@ -769,7 +822,9 @@ impl ConnectTransport {
         self.retrying(|| {
             self.executor.block_on_local(async {
                 let options = ref_hint(
-                    CallOptions::default().with_timeout(self.pack_transfer_timeout),
+                    self.read_options(
+                        CallOptions::default().with_timeout(self.pack_transfer_timeout),
+                    )?,
                     ref_name,
                 );
                 let mut stream = self
@@ -844,7 +899,7 @@ impl ConnectTransport {
         self.retrying(|| {
             self.executor.block_on(async {
                 let options = ref_hint(
-                    CallOptions::default().with_timeout(self.unary_timeout),
+                    self.read_options(CallOptions::default().with_timeout(self.unary_timeout))?,
                     ref_name,
                 );
                 let response = self
@@ -905,6 +960,14 @@ fn condition_to_wire(c: RefWriteCondition) -> (RefExpectation, Option<Vec<u8>>) 
         RefWriteCondition::Any => (RefExpectation::Any, None),
         RefWriteCondition::Missing => (RefExpectation::Missing, None),
         RefWriteCondition::Match(h) => (RefExpectation::Match, Some(h.to_vec())),
+    }
+}
+
+fn grant_condition(c: RefWriteCondition) -> GrantCondition {
+    match c {
+        RefWriteCondition::Missing => GrantCondition::Missing,
+        RefWriteCondition::Match(_) => GrantCondition::Match,
+        RefWriteCondition::Any => GrantCondition::Any,
     }
 }
 
@@ -986,6 +1049,7 @@ impl Transport for ConnectTransport {
                             bytes.len()
                         ),
                     );
+                let options = self.grant_options(options, GrantOperation::Write { refs: &[] });
                 self.client
                     .upload_pack_with_options(connectrpc::stream_iter(requests.clone()), options)
                     .await
@@ -1027,10 +1091,13 @@ impl Transport for ConnectTransport {
     ) -> TransportResult<()> {
         let (expectation, expected_id) = condition_to_wire(condition);
         let identity = RetryIdentity::new().map_err(TransportError::RemoteError)?;
+        let refs = [GrantRef::new(name, grant_condition(condition))];
         self.retrying(|| {
             self.executor.block_on(async {
-                let options =
-                    identity.apply(CallOptions::default().with_timeout(self.unary_timeout));
+                let options = self.grant_options(
+                    identity.apply(CallOptions::default().with_timeout(self.unary_timeout)),
+                    GrantOperation::Write { refs: &refs },
+                );
                 self.client
                     .update_ref_with_options(
                         UpdateRefRequest {
@@ -1052,7 +1119,8 @@ impl Transport for ConnectTransport {
     fn read_ref(&self, name: &str) -> TransportResult<Option<Hash>> {
         self.retrying(|| {
             self.executor.block_on(async {
-                let options = CallOptions::default().with_timeout(self.unary_timeout);
+                let options =
+                    self.read_options(CallOptions::default().with_timeout(self.unary_timeout))?;
                 let response = self
                     .client
                     .read_ref_with_options(
@@ -1095,7 +1163,9 @@ impl Transport for ConnectTransport {
                                 // The server chooses its configured page cap (R-105).
                                 ..Default::default()
                             },
-                            CallOptions::default().with_timeout(self.unary_timeout),
+                            self.read_options(
+                                CallOptions::default().with_timeout(self.unary_timeout),
+                            )?,
                         )
                         .await
                         .map(|r| r.into_owned())
@@ -1173,6 +1243,79 @@ impl Transport for ConnectTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TestSigner(&'static str);
+    impl EnvelopeSigner for TestSigner {
+        fn public_key_hex(&self) -> String {
+            self.0.into()
+        }
+        fn sign_hex(&self, _message: &[u8; 32]) -> Result<String, String> {
+            Ok("ab".repeat(64))
+        }
+    }
+    struct TestGrants;
+    impl GrantSource for TestGrants {
+        fn select(&self, _request: &GrantRequest<'_>) -> Option<String> {
+            Some("grant-value".into())
+        }
+    }
+
+    #[test]
+    fn grant_header_requires_non_owner_signer_and_non_part_path() {
+        let key = "ab".repeat(32);
+        let owner_url: Uri = format!("http://127.0.0.1/ed25519-{key}/photos")
+            .parse()
+            .unwrap();
+        let address_url: Uri = "http://127.0.0.1/0x8ba1f109551bd432803012645ac136ddd64dba72/photos"
+            .parse()
+            .unwrap();
+        let source: Arc<dyn GrantSource> = Arc::new(TestGrants);
+        let owner = ConnectTransport::connect_for_test_with_signer(
+            owner_url,
+            Some(Arc::new(TestSigner(
+                "abababababababababababababababababababababababababababababababab",
+            ))),
+        )
+        .with_grant_source(source.clone());
+        let unsigned = ConnectTransport::connect_for_test(address_url.clone())
+            .with_grant_source(source.clone());
+        assert!(
+            unsigned
+                .read_options(CallOptions::default())
+                .unwrap()
+                .headers()
+                .get("idempotency-key")
+                .is_none()
+        );
+        let grantee = ConnectTransport::connect_for_test_with_signer(
+            address_url,
+            Some(Arc::new(TestSigner(
+                "abababababababababababababababababababababababababababababababab",
+            ))),
+        )
+        .with_grant_source(source);
+        for tx in [&owner, &unsigned] {
+            assert!(
+                tx.grant_options(CallOptions::default(), GrantOperation::Read)
+                    .headers()
+                    .get("x-write-grant")
+                    .is_none()
+            );
+        }
+        assert!(
+            grantee
+                .grant_options(CallOptions::default(), GrantOperation::Part)
+                .headers()
+                .get("x-write-grant")
+                .is_none()
+        );
+        assert_eq!(
+            grantee
+                .grant_options(CallOptions::default(), GrantOperation::Read)
+                .headers()["x-write-grant"],
+            "grant-value"
+        );
+    }
 
     // -- connect() + URL parsing --------------------------------------
 

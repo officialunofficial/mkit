@@ -526,7 +526,16 @@ pub fn open(cfg: &ServeConfig) -> Result<Opened, ConfigError> {
         ));
     };
     let services = match &cfg.blob {
-        BlobChoice::Fs => with_meta(Blocking::new(FsBlobStore::new(&cfg.repo_root)), repo, cfg)?,
+        BlobChoice::Fs => {
+            let blobs = FsBlobStore::new(&cfg.repo_root);
+            let swept = blobs
+                .sweep_stale_uploads(Duration::from_hours(168))
+                .map_err(|e| config_error("sweeping filesystem uploads", e))?;
+            if swept > 0 {
+                tracing::warn!(swept, "removed stale filesystem uploads");
+            }
+            with_meta(Blocking::new(blobs), repo, cfg)?
+        }
         #[cfg(feature = "s3")]
         BlobChoice::S3 {
             config,

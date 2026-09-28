@@ -22,6 +22,7 @@
 // the record's lifecycle ops (#545); everything else stays module-private.
 pub(crate) mod applied_packs;
 mod envelope_signer;
+pub(crate) mod grants;
 mod packmap;
 
 use mkit_core::layout::RepoLayout;

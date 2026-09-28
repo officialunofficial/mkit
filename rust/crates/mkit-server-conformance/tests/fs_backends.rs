@@ -14,14 +14,18 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use mkit_server::fs::{FsBlobStore, FsLayoutStore, FsPackSink};
+use mkit_core::upload_parts::PartPlan;
+use mkit_server::fs::{FsBlobStore, FsLayoutStore, FsPackSink, FsPartSink};
 use mkit_server::{
-    Batch, BatchOutcome, BlobBody, BlobKey, BlobMeta, BlobStore, ByteRange, Clock, Cursor, Key,
-    NamespaceStore, Partition, PartitionStats, RepoName, ScanPage, StoreCapabilities, StoreError,
-    Value,
+    Batch, BatchOutcome, BlobBody, BlobKey, BlobMeta, BlobStore, ByteRange, Clock, CommitOutcome,
+    Cursor, Key, MultipartBlobStore, NamespaceStore, PartRef, Partition, PartitionStats, RepoName,
+    ScanPage, StoreCapabilities, StoreError, Value,
 };
 use mkit_server_conformance::storage::KvHarness;
-use mkit_server_conformance::storage_suite;
+use mkit_server_conformance::{multipart_suite, storage_suite};
+
+#[path = "support/multipart_allocator.rs"]
+mod multipart_allocator;
 
 /// A fresh directory under the system temp dir, removed on drop.
 struct TempDir(PathBuf);
@@ -226,4 +230,66 @@ impl BlobStore for TempBlobs {
     }
 }
 
+impl MultipartBlobStore for TempBlobs {
+    type PartSink = FsPartSink;
+    const MAX_PARTS: u32 = FsBlobStore::MAX_PARTS;
+
+    fn supports_multipart(&self) -> bool {
+        self.store.supports_multipart()
+    }
+
+    async fn begin_multipart(
+        &self,
+        key: BlobKey,
+        len: u64,
+        part_size: u64,
+    ) -> Result<Vec<u8>, StoreError> {
+        self.store.begin_multipart(key, len, part_size).await
+    }
+
+    async fn begin_multipart_for_ticket(
+        &self,
+        key: BlobKey,
+        len: u64,
+        part_size: u64,
+        ticket_id: [u8; 32],
+    ) -> Result<Vec<u8>, StoreError> {
+        self.store
+            .begin_multipart_for_ticket(key, len, part_size, ticket_id)
+            .await
+    }
+
+    async fn begin_part(
+        &self,
+        key: BlobKey,
+        session: &[u8],
+        plan: &PartPlan,
+        index: u32,
+        expected_cv: [u8; 32],
+    ) -> Result<FsPartSink, StoreError> {
+        self.store
+            .begin_part(key, session, plan, index, expected_cv)
+            .await
+    }
+
+    async fn complete(
+        &self,
+        key: BlobKey,
+        session: &[u8],
+        plan: &PartPlan,
+        parts: &[PartRef],
+    ) -> Result<CommitOutcome, StoreError> {
+        self.store.complete(key, session, plan, parts).await
+    }
+
+    async fn abort(&self, key: BlobKey, session: &[u8]) -> Result<(), StoreError> {
+        self.store.abort(key, session).await
+    }
+}
+
 storage_suite!(fs, kv = Fs, blob = temp_blobs);
+multipart_suite!(
+    fs_multipart,
+    store = temp_blobs,
+    heap = multipart_allocator::probe
+);

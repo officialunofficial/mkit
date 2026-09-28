@@ -139,6 +139,7 @@ zeroize = { version = "1", optional = true }
 libc = "0.2"
 
 [dev-dependencies]
+ed25519-dalek = { version = "3", default-features = false, features = ["alloc"] }
 proptest = "1"
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "time", "net", "io-util"] }
 tempfile = "3"
