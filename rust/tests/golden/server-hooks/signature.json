@@ -53,6 +53,33 @@
         "X-Mkit-Hook-Signature": "8beaeafe4c821ebdcc98f771f96648d012f69479ab5b196c3bb7cd90aea309cdd76726519e807f2721319cb1d63bbf582a7738a6516da9fcfbcfe438d6df310e",
         "X-Mkit-Hook-Version": "1"
       }
+    },
+    {
+      "test_key_label": "TEST KEY ONLY: dedicated hook role, never use in a deployment",
+      "test_seed_hex": "5353535353535353535353535353535353535353535353535353535353535353",
+      "key_id": "test-hook-2026-09",
+      "audience": "https://hooks.example.test",
+      "procedure": "/mkit.server.hooks.v1.HooksService/Event",
+      "created_at_ms": "1790424000000",
+      "expires_at_ms": "1790424300000",
+      "nonce": "3333333333333333333333333333333333333333333333333333333333333333",
+      "body_file": "event-lease-grace.request.json",
+      "body_utf8": "{\n  \"event\": {\n    \"eventId\": \"lease:grace:example:main:1\",\n    \"audience\": \"https://vcs.example.test\",\n    \"repository\": \"ed25519-a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0/payments-demo\",\n    \"occurredUnixMs\": \"1790424000000\",\n    \"sequence\": \"1\",\n    \"lease\": {\n      \"ref\": \"refs/heads/main\",\n      \"from\": \"LEASE_STATE_ACTIVE\",\n      \"to\": \"LEASE_STATE_GRACE\",\n      \"leaseExpiresUnixMs\": \"1790424000000\",\n      \"cause\": \"LEASE_CAUSE_EXPIRY\"\n    }\n  }\n}\n",
+      "body_digest": "body:b47a112800872da36698b15442caeb0137953e4f677519e0360a946d8e77a8b0",
+      "canonical": "mkit-hook:v1\ntest-hook-2026-09\nhttps://hooks.example.test\n/mkit.server.hooks.v1.HooksService/Event\nbody:b47a112800872da36698b15442caeb0137953e4f677519e0360a946d8e77a8b0\n1790424000000\n1790424300000\n3333333333333333333333333333333333333333333333333333333333333333",
+      "canonical_blake3": "2843a21946fdfaa51fa3f1f638be01fd6ddcc03a8909469c49b6ab05184f64d6",
+      "public_key": "f80cccdce4ae1c07ae208a2adf99a310ae4207e0306fa0236110b06827bbb8d0",
+      "signature": "c5477e1dc8ace330d8fa87aaeeaf93c8b9f90efa5d2630f0373ca6632528d5f5d0dde70977088e4d24954f947ad24a33fc15c25934658326bc21043d5b28a900",
+      "headers": {
+        "X-Mkit-Hook-Audience": "https://hooks.example.test",
+        "X-Mkit-Hook-Created-At": "1790424000000",
+        "X-Mkit-Hook-Digest": "body:b47a112800872da36698b15442caeb0137953e4f677519e0360a946d8e77a8b0",
+        "X-Mkit-Hook-Expires-At": "1790424300000",
+        "X-Mkit-Hook-Key-Id": "test-hook-2026-09",
+        "X-Mkit-Hook-Nonce": "3333333333333333333333333333333333333333333333333333333333333333",
+        "X-Mkit-Hook-Signature": "c5477e1dc8ace330d8fa87aaeeaf93c8b9f90efa5d2630f0373ca6632528d5f5d0dde70977088e4d24954f947ad24a33fc15c25934658326bc21043d5b28a900",
+        "X-Mkit-Hook-Version": "1"
+      }
     }
   ]
 }
