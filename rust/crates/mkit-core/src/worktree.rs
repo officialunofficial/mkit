@@ -757,9 +757,8 @@ pub fn build_tree_from_index_with<S: ObjectSink + ?Sized>(
 #[cfg(not(target_arch = "wasm32"))]
 fn available_threads() -> usize {
     static THREADS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *THREADS.get_or_init(|| {
-        std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
-    })
+    *THREADS
+        .get_or_init(|| std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get))
 }
 
 /// Shared chunk+scoped-thread+join scaffolding behind this module's two
@@ -3006,7 +3005,11 @@ mod tests {
         let (_sd, store) = fresh_store();
         let work = TempDir::new().unwrap();
         for i in 0..N {
-            fs::write(work.path().join(format!("f{i:04}.txt")), format!("content {i}")).unwrap();
+            fs::write(
+                work.path().join(format!("f{i:04}.txt")),
+                format!("content {i}"),
+            )
+            .unwrap();
         }
 
         // No index passed: every file is untracked, so every one is a
@@ -3023,7 +3026,11 @@ mod tests {
             // Tree entries are sorted by name, and zero-padded decimal
             // names sort in the same order as their numeric index.
             let expected_name = format!("f{i:04}.txt");
-            assert_eq!(entry.name, expected_name.as_bytes(), "entry {i} out of order");
+            assert_eq!(
+                entry.name,
+                expected_name.as_bytes(),
+                "entry {i} out of order"
+            );
 
             let expected_content = format!("content {i}");
             let expected_hash = hash_file_object(expected_content.as_bytes()).unwrap();
