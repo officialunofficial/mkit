@@ -202,8 +202,8 @@ cases! {
     "epochs.get_bad_namespace_invalid_argument" => epochs::get_bad_namespace_invalid_argument, M2, [Grants, MultiRepo], [];
     "epochs.set_advances_and_get_reflects" => epochs::set_advances_and_get_reflects, M2, [Grants, MultiRepo], [];
     "epochs.set_retry_same_epoch" => epochs::set_retry_same_epoch, M2, [Grants, MultiRepo], [];
-    "epochs.set_over_step" => epochs::set_over_step, M2, [Grants, MultiRepo], [];
-    "epochs.set_decrease" => epochs::set_decrease, M2, [Grants, MultiRepo], [];
+    "epochs.set_over_step_denied" => epochs::set_over_step_denied, M2, [Grants, MultiRepo], [];
+    "epochs.set_decrease_denied" => epochs::set_decrease_denied, M2, [Grants, MultiRepo], [];
     "epochs.wrong_audience" => epochs::wrong_audience, M2, [Grants, MultiRepo], [];
     "epochs.expired" => epochs::expired, M2, [Grants, MultiRepo], [];
     "epochs.not_yet_valid" => epochs::not_yet_valid, M2, [Grants, MultiRepo], [];

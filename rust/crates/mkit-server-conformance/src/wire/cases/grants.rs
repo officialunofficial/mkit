@@ -33,7 +33,11 @@ pub const RP_ID: &str = "example.test";
 /// The origin configured for [`RP_ID`].
 pub const RP_ORIGIN: &str = "https://example.test";
 
+/// Fixed secp256k1 owner seed. It owns a real `0x` namespace: never
+/// allowlist it on a shared or staging deployment.
 const K1_SEED: [u8; 32] = [0x21; 32];
+/// Fixed P-256 owner seed. It owns a real `0x` namespace: never allowlist
+/// it on a shared or staging deployment.
 const P256_SEED: [u8; 32] = [0x31; 32];
 
 pub(super) enum Owner {
@@ -139,6 +143,9 @@ pub(super) fn web_owner() -> Owner {
 }
 
 /// Fixed `0x` namespaces the in-process allowlist must admit for grant cases.
+///
+/// Their keys are public test seeds: never allowlist these namespaces on a
+/// shared or staging deployment.
 #[must_use]
 pub fn owner_namespaces() -> [Namespace; 2] {
     [k1_owner().namespace(), web_owner().namespace()]
@@ -176,6 +183,19 @@ pub(super) fn grant(ctx: &Ctx, owner: &Owner, repo: &str, grantee: &Signer) -> G
     }
 }
 
+/// [`grant`] at the owner's stored epoch, for the fixed `0x` owners whose
+/// epoch the epoch cases advance (SPEC-WRITE-GRANTS §8.2).
+pub(super) async fn grant_at_epoch(
+    ctx: &Ctx,
+    owner: &Owner,
+    repo: &str,
+    grantee: &Signer,
+) -> Result<Grant, Failure> {
+    let mut statement = grant(ctx, owner, repo, grantee);
+    statement.epoch = super::epochs::current(ctx, owner).await?;
+    Ok(statement)
+}
+
 pub(super) fn signed_update(
     ctx: &Ctx,
     grantee: &Signer,
@@ -199,7 +219,7 @@ pub(super) fn signed_update(
 async fn valid(ctx: Ctx, owner: Owner) -> CaseResult {
     let grantee = ctx.v2_signer("grant-grantee")?;
     let repo = repo(&ctx, &owner);
-    let header = owner.signed_header(&grant(&ctx, &owner, &repo, &grantee));
+    let header = owner.signed_header(&grant_at_epoch(&ctx, &owner, &repo, &grantee).await?);
     let signed = signed_update(&ctx, &grantee, &repo, Some(&header));
     want_ok(
         ctx.send::<UpdateRefResponse>(&signed).await?,
@@ -465,7 +485,8 @@ pub(super) async fn ed25519_scheme_on_0x_denied(ctx: Ctx) -> CaseResult {
     let ed_signer = ctx.v2_signer("repository-a")?;
     let grantee = ctx.v2_signer("grant-grantee")?;
     let repo = repo(&ctx, &owner);
-    let statement = grant(&ctx, &owner, &repo, &grantee)
+    let statement = grant_at_epoch(&ctx, &owner, &repo, &grantee)
+        .await?
         .encode()
         .expect("valid grant fixture");
     let header = SignedHeader {
@@ -488,7 +509,7 @@ pub(super) async fn webauthn_unconfigured_rp_denied(ctx: Ctx) -> CaseResult {
     let owner = web_owner();
     let grantee = ctx.v2_signer("grant-grantee")?;
     let repo = repo(&ctx, &owner);
-    let statement = grant(&ctx, &owner, &repo, &grantee);
+    let statement = grant_at_epoch(&ctx, &owner, &repo, &grantee).await?;
     let mut signed_header =
         SignedHeader::parse(&owner.signed_header(&statement)).expect("valid grant fixture");
     let mut assertion = WebAuthnAssertion::parse(&signed_header.blob).expect("valid grant fixture");

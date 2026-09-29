@@ -2179,6 +2179,13 @@ async fn pending_retry_completes<N: NamespaceStore + 'static>(
     store_clock.set(36_000);
     assert_eq!(pipe.set_grant_epoch(&statement).await.unwrap(), 1);
     let granted = granted_auth(&pipe, None, 0);
+    assert_eq!(
+        pipe.update_ref(&granted, update(REF, 2))
+            .await
+            .unwrap_err()
+            .code(),
+        Code::PermissionDenied
+    );
     assert_grant_write_uncommitted(&store, &granted, REF).await;
 }
 backends!(

@@ -1161,8 +1161,6 @@ document's rules, independently of the Rust code.
   round to the largest finite binary64 value: `1.7976931348623158e308`
   and the integer 2^1024 − 2^970 − 1).
 
-The fixed secp256k1 and P-256 test seeds own real `0x` namespaces.
-Never allowlist those namespaces on a shared or staging deployment.
 - `reject/verify-secp256k1-*.json`, `reject/verify-webauthn-*.json`:
   signed statements that fail one §4, §4.1, §4.3 or §4.4 rule each,
   re-signed where needed so that only that rule fails: a high-`s`
@@ -1181,6 +1179,9 @@ Never allowlist those namespaces on a shared or staging deployment.
   rounds to infinity); a signature by
   another key or over a reserialized `clientDataJSON`; and a byte after
   the fourth blob field.
+
+The fixed secp256k1 and P-256 test seeds own real `0x` namespaces.
+Never allowlist those namespaces on a shared or staging deployment.
 
 Planned, with the implementations that need them: fixtures under
 `rust/tests/golden/url-token/` and `rust/tests/golden/grants/` covering

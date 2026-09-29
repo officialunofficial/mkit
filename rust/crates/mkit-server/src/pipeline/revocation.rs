@@ -156,7 +156,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 }
             }
         }
-        Err(ServerError::unavailable("epoch contention; retry"))
+        Err(ServerError::unavailable("epoch contention; retry").with_header("Retry-After", "1"))
     }
 
     /// Declare lease-table recovery using the real pipeline clock.

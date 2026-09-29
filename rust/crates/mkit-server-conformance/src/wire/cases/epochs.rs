@@ -9,7 +9,7 @@ use mkit_transport_connect::generated::{
 };
 
 use super::grants::{self, Owner};
-use super::{CaseResult, Ctx, ensure, want_code, want_ok};
+use super::{CaseResult, Ctx, Failure, ensure, want_code, want_ok};
 use crate::wire::client::{Rpc, RpcError};
 use crate::wire::profile::WireAuth;
 use crate::wire::sign::now_ms;
@@ -66,6 +66,18 @@ async fn set(
             &[],
         )
         .await
+}
+
+/// The owner's stored grant epoch. The fixed `0x` owners are shared by every
+/// case and every run against a deployment, so their epoch is not known to
+/// be zero.
+pub(super) async fn current(ctx: &Ctx, owner: &Owner) -> Result<u64, Failure> {
+    want_ok(
+        get(ctx, &owner.namespace().to_string(), &[]).await?,
+        "current GetGrantEpoch",
+    )?
+    .epoch
+    .ok_or_else(|| Failure::Fail("GetGrantEpoch omitted the epoch".into()))
 }
 
 fn epoch_is(response: SetGrantEpochResponse, expected: u64) -> CaseResult {
@@ -147,7 +159,7 @@ pub(super) async fn set_retry_same_epoch(ctx: Ctx) -> CaseResult {
     )
 }
 
-pub(super) async fn set_over_step(ctx: Ctx) -> CaseResult {
+pub(super) async fn set_over_step_denied(ctx: Ctx) -> CaseResult {
     let owner = grants::ed_owner(&ctx)?;
     want_code(
         set(&ctx, &signed(&owner, &statement(&ctx, &owner, 1_025))).await?,
@@ -157,7 +169,7 @@ pub(super) async fn set_over_step(ctx: Ctx) -> CaseResult {
     Ok(())
 }
 
-pub(super) async fn set_decrease(ctx: Ctx) -> CaseResult {
+pub(super) async fn set_decrease_denied(ctx: Ctx) -> CaseResult {
     let owner = grants::ed_owner(&ctx)?;
     epoch_is(
         want_ok(
@@ -247,23 +259,25 @@ pub(super) async fn oversize_statement(ctx: Ctx) -> CaseResult {
 
 pub(super) async fn zero_x_secp256k1_statement(ctx: Ctx) -> CaseResult {
     let owner = grants::k1_owner();
+    let next = current(&ctx, &owner).await? + 1;
     epoch_is(
         want_ok(
-            set(&ctx, &signed(&owner, &statement(&ctx, &owner, 1))).await?,
+            set(&ctx, &signed(&owner, &statement(&ctx, &owner, next))).await?,
             "0x secp epoch",
         )?,
-        1,
+        next,
     )
 }
 
 pub(super) async fn zero_x_webauthn_statement(ctx: Ctx) -> CaseResult {
     let owner = grants::web_owner();
+    let next = current(&ctx, &owner).await? + 1;
     epoch_is(
         want_ok(
-            set(&ctx, &signed(&owner, &statement(&ctx, &owner, 1))).await?,
+            set(&ctx, &signed(&owner, &statement(&ctx, &owner, next))).await?,
             "0x WebAuthn epoch",
         )?,
-        1,
+        next,
     )
 }
 

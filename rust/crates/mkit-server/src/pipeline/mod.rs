@@ -909,7 +909,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     .name
                     .strip_prefix(mkit_core::refs::PACKMAP_REF_PREFIX);
                 if head_branch.is_none() || head_branch != packmap_branch {
-                    if a.write_grant.is_some() {
+                    if a.write_grant.is_some()
+                        && self.cfg.grants.is_some()
+                        && matches!(self.cfg.addressing, Addressing::Multi(_))
+                    {
                         return Err(ServerError::permission_denied(
                             "write grant rejected: ref scope",
                         ));

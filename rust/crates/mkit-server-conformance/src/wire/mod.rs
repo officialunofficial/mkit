@@ -107,8 +107,8 @@
 //! | `epochs.get_bad_namespace_invalid_argument` | `grants`, `multi-repo` | get bad namespace invalid argument |
 //! | `epochs.set_advances_and_get_reflects` | `grants`, `multi-repo` | set advances and get reflects |
 //! | `epochs.set_retry_same_epoch` | `grants`, `multi-repo` | set retry same epoch |
-//! | `epochs.set_over_step` | `grants`, `multi-repo` | set over step |
-//! | `epochs.set_decrease` | `grants`, `multi-repo` | set decrease |
+//! | `epochs.set_over_step_denied` | `grants`, `multi-repo` | set over step |
+//! | `epochs.set_decrease_denied` | `grants`, `multi-repo` | set decrease |
 //! | `epochs.wrong_audience` | `grants`, `multi-repo` | wrong audience |
 //! | `epochs.expired` | `grants`, `multi-repo` | expired |
 //! | `epochs.not_yet_valid` | `grants`, `multi-repo` | not yet valid |
