@@ -192,6 +192,24 @@ slow-timeout = { period = "300s", terminate-after = 1 }
 filter = 'test(=pack::tests::compressed_delta_bomb_releases_targets_and_checks_cap_before_allocation)'
 slow-timeout = { period = "300s", terminate-after = 1 }
 
+# Memory-bounding tests. multipart_bounded_heap / multipart_buffered_heap
+# (mkit-server-conformance's fs, s3 and memory binaries, mkit-server-worker's
+# conformance binary) meter the allocator over a window and assert a peak.
+# They failed under parallel load and passed alone (#1210, #1212, #1218), so
+# the group runs one at a time across the whole run. The meter stays
+# process-global (the store work runs on runtime threads, so it can't be
+# narrowed to the test's own thread); serialization is the fix, no test change.
+[test-groups]
+heap-bounds = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'test(/multipart_(bounded|buffered)_heap$/)'
+test-group = 'heap-bounds'
+
+[[profile.ci.overrides]]
+filter = 'test(/multipart_(bounded|buffered)_heap$/)'
+test-group = 'heap-bounds'
+
 [profile.ignored-lane]
 # #505 PR 5/5: a handful of irreducibly-real tests (subprocess sleeps,
 # real localhost TCP, the ~5s worktree-lock wait, a real `ssh` connect
