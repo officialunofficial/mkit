@@ -122,6 +122,40 @@ impl<C: SqlConn> SqlKvStore<C> {
         Ok(store)
     }
 
+    /// Apply with a synchronous target-local extension inside the guarded transaction.
+    /// The extension reads local keys and appends writes only after all input guards hold.
+    ///
+    /// # Errors
+    /// Invalid batches, extension errors, or backend failures roll back every effect.
+    pub fn apply_extended<F>(
+        &self,
+        p: &Partition,
+        batch: Batch,
+        extend: F,
+    ) -> Result<BatchOutcome, StoreError>
+    where
+        F: FnOnce(
+                &dyn Fn(&Key) -> Result<Option<Value>, SqlError>,
+                &mut Batch,
+                u64,
+            ) -> Result<(), SqlError>
+            + 'static,
+    {
+        batch.validate(&self.capabilities())?;
+        let part = part(p)?;
+        let adds = batch.has_put();
+        let soft_limit = self.capacity.map(|c| c.soft_limit());
+        match self.conn.transaction(Box::new(move |conn| {
+            check_and_write_extended(&conn, &part, batch, soft_limit, extend)
+        })) {
+            Ok(outcome) => Ok(outcome),
+            Err(SqlError::Full) if !adds => Err(StoreError::unavailable(
+                "database full during a delete-only batch",
+            )),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     /// Earliest timer due in each partition, using the timer partial index.
     ///
     /// # Errors
@@ -189,6 +223,23 @@ fn check_and_write<C: SqlConn>(
     batch: Batch,
     soft_limit: Option<u64>,
 ) -> Result<BatchOutcome, SqlError> {
+    check_and_write_extended(conn, part, batch, soft_limit, |_, _, _| Ok(()))
+}
+
+fn check_and_write_extended<C: SqlConn, F>(
+    conn: &C,
+    part: &SqlValue,
+    mut batch: Batch,
+    soft_limit: Option<u64>,
+    extend: F,
+) -> Result<BatchOutcome, SqlError>
+where
+    F: FnOnce(
+        &dyn Fn(&Key) -> Result<Option<Value>, SqlError>,
+        &mut Batch,
+        u64,
+    ) -> Result<(), SqlError>,
+{
     // Rule 8: the backend's own clock, read inside the transaction.
     let now = conn.now_ms();
     for (index, pre) in batch.preconditions.iter().enumerate() {
@@ -211,6 +262,10 @@ fn check_and_write<C: SqlConn>(
             return Ok(BatchOutcome::PreconditionFailed { index, observed });
         }
     }
+    extend(&|key| read(conn, part, key), &mut batch, now)?;
+    batch
+        .validate(&StoreCapabilities::full())
+        .map_err(|_| SqlError::Corrupt("extended batch exceeds limits"))?;
     if let Some(limit) = soft_limit
         && batch.has_put()
         && !is_relay_scan_checkpoint(&batch)
