@@ -1837,7 +1837,9 @@ pub fn fetch_all_with(
 /// survived), the very first symptom is exactly this closure check
 /// failing, not a download/unpack error — the retry has to cover both.
 ///
-/// Both ends fail loudly: an absent packmap is [`DispatchError::PackmapMissing`]
+/// Both ends fail loudly: an absent packmap beside a present head is
+/// [`DispatchError::PackmapMissing`] (a head absent too is a stale listing,
+/// STC §7.9: the branch is skipped and its tracking ref left untouched)
 /// and a present-but-incomplete packmap (even after the self-heal retry) is
 /// [`DispatchError::RemoteMissingObject`]. We never publish a
 /// remote-tracking ref to a closure we couldn't fully materialise locally.
@@ -1927,8 +1929,24 @@ fn fetch_objects_inner(
             // a format we degrade to: the push path ALWAYS advertises a packmap
             // before moving the branch ref. A real transport error (network blip,
             // auth) propagates unchanged — only `Ok(None)` is the explicit
-            // "no packmap" verdict, and it is now an error.
+            // "no packmap" verdict.
+            //
+            // The one exception is a stale listing (STC §7.9): `ListRefs` is
+            // eventual, so under D34 a branch deleted since the listing can
+            // still be named. Re-read the head strongly: absent too means the
+            // listing is stale, so skip the branch and write no tracking ref;
+            // present means corruption (a head and its packmap share a shard),
+            // which stays `PackmapMissing`. A transport error on the re-read
+            // propagates and never becomes a skip.
             let Some(chain_head) = tx.read_ref(&packmap_ref(&r.name))? else {
+                if tx.read_ref(&format!("refs/heads/{}", r.name))?.is_none() {
+                    eprintln!(
+                        "fetch: skipping branch `{}`: listed by an eventual ListRefs but \
+                         no longer present (deleted since the listing)",
+                        r.name
+                    );
+                    continue;
+                }
                 return Err(DispatchError::PackmapMissing(r.name.clone()));
             };
 

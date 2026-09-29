@@ -68,6 +68,8 @@ async fn wire_suite_s3_sqlite_auth_v2() {
             common::s(root.path()),
             "--meta",
             &meta,
+            "--sharding",
+            "single",
             "--blob",
             &blob,
             "--s3-endpoint",

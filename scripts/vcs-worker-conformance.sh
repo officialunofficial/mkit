@@ -75,13 +75,13 @@ TEST_QUOTA_WINDOW_MS=60000
 MAX_BUFFERED_BYTES=1048576
 
 test_faults=0
-sharding=single
+sharding=d34
 multi=0
 runner_args=()
 # Under D34 a ListRefs page scans 16 buckets and each lag poll re-lists, so the
 # 10,000-ref case would take many minutes in miniflare; 1,000 exercises paging
 # (R-134).
-d34_list_args=()
+d34_list_args=(--list-refs 1000)
 while [ $# -gt 0 ]; do
     case "$1" in
         --test-faults) test_faults=1 ;;
@@ -91,6 +91,7 @@ while [ $# -gt 0 ]; do
                 echo "--sharding requires single or d34" >&2; exit 2
             fi
             sharding="$2"; shift
+            d34_list_args=()
             if [ "${sharding}" = d34 ]; then d34_list_args=(--list-refs 1000); fi ;;
         --) shift; runner_args=("$@"); break ;;
         *) echo "usage: $0 [--test-faults] [--sharding single|d34] [--multi] [-- <runner args>]" >&2; exit 2 ;;

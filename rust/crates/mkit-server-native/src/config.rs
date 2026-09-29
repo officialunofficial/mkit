@@ -154,10 +154,11 @@ pub enum NamespacePolicyArg {
 }
 
 /// `--sharding`: `SQLite` metadata routing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum ShardingArg {
-    /// Keep all namespace rows together.
-    #[default]
+    /// Keep all namespace rows together (the default without
+    /// `--meta sqlite:<PATH>`; pin it for a database written before D34
+    /// became the default).
     Single,
     /// Route refs per branch and configuration to the coordinator.
     D34,
@@ -224,9 +225,12 @@ pub struct ServeArgs {
     /// bearer and unsafe auth) or `sqlite:<PATH>` (required for auth v2).
     #[arg(long, value_name = "fs-layout|sqlite:<PATH>")]
     pub meta: Option<MetaArg>,
-    /// Metadata partition routing. `d34` requires `--meta sqlite:<PATH>`.
-    #[arg(long, value_enum, default_value = "single")]
-    pub sharding: ShardingArg,
+    /// Metadata partition routing. Defaults to `d34` with `--meta
+    /// sqlite:<PATH>` and to `single` otherwise; an explicit `d34` requires
+    /// `--meta sqlite:<PATH>`. A database written `single` is refused under
+    /// the d34 default: pass `--sharding single` (there is no migration).
+    #[arg(long, value_enum)]
+    pub sharding: Option<ShardingArg>,
     /// Where packs live: `fs` (`<DIR>/packs`) or `s3://<BUCKET>[/<PREFIX>]`,
     /// an S3-compatible bucket that honors `If-None-Match: *` (needs
     /// `--s3-endpoint`, `--meta sqlite:<PATH>`, and credentials from
@@ -1215,10 +1219,12 @@ fn resolve_max_pack(args: &ServeArgs) -> Result<u64, ConfigError> {
 }
 
 fn resolve_sharding(args: &ServeArgs) -> Result<Sharding, ConfigError> {
+    let sqlite = matches!(args.meta, Some(MetaArg::Sqlite(_)));
     match args.sharding {
-        ShardingArg::Single => Ok(Sharding::Single),
-        ShardingArg::D34 if matches!(args.meta, Some(MetaArg::Sqlite(_))) => Ok(Sharding::D34),
-        ShardingArg::D34 => Err(ConfigError::new(
+        None if sqlite => Ok(Sharding::D34),
+        None | Some(ShardingArg::Single) => Ok(Sharding::Single),
+        Some(ShardingArg::D34) if sqlite => Ok(Sharding::D34),
+        Some(ShardingArg::D34) => Err(ConfigError::new(
             exit::USAGE,
             format!("{PREFIX}: --sharding d34 requires --meta sqlite:<PATH>"),
         )),

@@ -66,6 +66,8 @@ async fn wire_suite_multi_sqlite_auth_v2() {
             common::s(&allowlist),
             "--meta",
             &meta,
+            "--sharding",
+            "single",
             "--ticket-key-file",
             common::s(&ticket_file),
             "--auth",

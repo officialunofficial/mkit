@@ -126,6 +126,15 @@ line; the first signs and every listed key verifies. Blank lines and `#`
 comments are allowed. `wrangler.dev.jsonc` carries a fake development key.
 Without keys, `BeginUpload` answers `unimplemented`.
 
+### Sharding (`SHARDING`)
+
+`SHARDING` is `d34` by default (unset means `d34`; `wrangler.jsonc` sets it
+explicitly): metadata is sharded per (repository, ref) and `ListRefs` reads the
+eventual ref-name index. **Breaking change (WP-1.28c):** a deployment that
+holds single-sharded data answers 503 to every RPC until `SHARDING="single"` is
+pinned; there is no migration (R-123). Under Single addressing, quota becomes
+per (signer, branch) by default.
+
 ### Multi-repository addressing (`ADDRESSING=multi`)
 
 `ADDRESSING=multi` serves every repository the namespace policy admits:

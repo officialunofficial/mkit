@@ -48,6 +48,8 @@ struct Served {
     origin: String,
     shutdown: Shutdown,
     task: Option<tokio::task::JoinHandle<std::io::Result<()>>>,
+    /// The timer driver (relay delivery), when the metadata has one.
+    timers: Option<tokio::task::JoinHandle<()>>,
     /// Holds the root's locks; dropped after `runtime` (field order).
     _opened: server::Opened,
     root: tempfile::TempDir,
@@ -84,9 +86,13 @@ impl Served {
             &[],
         )
         .unwrap();
-        let opened = server::open(&cfg).unwrap();
+        let mut opened = server::open(&cfg).unwrap();
         let shutdown = Shutdown::new();
         let (listener, origin) = runtime.block_on(common::listener());
+        let timers = opened
+            .timers
+            .take()
+            .map(|driver| runtime.block_on(driver.start(shutdown.clone())).unwrap());
         let task = {
             let _guard = runtime.enter();
             common::spawn_serve(listener, opened.router.clone(), &shutdown)
@@ -96,6 +102,7 @@ impl Served {
             origin,
             shutdown,
             task: Some(task),
+            timers,
             _opened: opened,
             root,
         }
@@ -147,6 +154,7 @@ impl Served {
             origin,
             shutdown,
             task: Some(task),
+            timers: None,
             _opened: opened,
             root,
         }
@@ -243,6 +251,9 @@ fn ticketed_fs_parts_resume_and_three_pack_advance() {
 impl Drop for Served {
     fn drop(&mut self) {
         self.shutdown.trigger();
+        if let Some(timers) = self.timers.take() {
+            let _ = self.runtime.block_on(timers);
+        }
         if let Some(task) = self.task.take() {
             let result = self.runtime.block_on(task);
             if !std::thread::panicking() {
@@ -286,6 +297,44 @@ fn push_then_pull_round_trip() {
             .is_file()
     );
     assert!(root.join("refs/heads/main").is_file());
+}
+
+/// `--meta sqlite` shards per (repository, ref) by default (D34): a push is
+/// readable at once by name, and its branch appears in `ListRefs` within
+/// the relay bound. The wait is a bounded poll, never a fixed sleep.
+#[test]
+fn push_then_pull_round_trip_under_the_d34_default() {
+    use mkit_server::relay::RELAY_LAG_BOUND_MS;
+
+    let served = Served::start_with_sqlite(true);
+    let client = served.client();
+    let payload = b"d34 default pack".to_vec();
+    let key = PackKey::new(hash(&payload));
+    client.upload_pack(&payload, &key).unwrap();
+    let commit = hash(b"d34 default tip");
+    client
+        .update_ref("refs/heads/main", RefWriteCondition::Missing, &commit)
+        .unwrap();
+    // Strongly consistent by name.
+    assert_eq!(client.read_ref("refs/heads/main").unwrap(), Some(commit));
+    assert_eq!(client.download_pack(&key).unwrap(), payload);
+    // Eventual by listing.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(RELAY_LAG_BOUND_MS);
+    let refs = loop {
+        let refs = client.list_refs("").unwrap();
+        if !refs.is_empty() || std::time::Instant::now() >= deadline {
+            break refs;
+        }
+        std::thread::yield_now();
+        std::thread::park_timeout(std::time::Duration::from_millis(20));
+    };
+    assert_eq!(
+        refs.len(),
+        1,
+        "the listing catches up within the relay bound"
+    );
+    assert_eq!(refs[0].name, "refs/heads/main");
+    assert_eq!(refs[0].hash, Some(commit));
 }
 
 #[test]

@@ -281,6 +281,7 @@ fn d34_archive_creates_root_marker_and_checks_restore_mode() {
     let mismatch = Command::new(BIN)
         .args(["restore", "--meta", &target_meta, "--from"])
         .arg(&out)
+        .args(["--sharding", "single"])
         .output()
         .unwrap();
     assert_eq!(mismatch.status.code(), Some(i32::from(exit::USAGE)));
@@ -288,7 +289,6 @@ fn d34_archive_creates_root_marker_and_checks_restore_mode() {
     let restored = Command::new(BIN)
         .args(["restore", "--meta", &target_meta, "--from"])
         .arg(&out)
-        .args(["--sharding", "d34"])
         .output()
         .unwrap();
     assert!(

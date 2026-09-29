@@ -77,9 +77,10 @@ struct RestoreArgs {
     /// Reconstruct missing relay sources and coordinators (the latter requires --epoch-at-least).
     #[arg(long)]
     allow_incomplete: bool,
-    /// Metadata routing used by the restored deployment.
-    #[arg(long, value_enum, default_value_t)]
-    sharding: ShardingArg,
+    /// Metadata routing used by the restored deployment. Defaults to the
+    /// mode the export records; a flag that disagrees with it is refused.
+    #[arg(long, value_enum)]
+    sharding: Option<ShardingArg>,
 }
 
 fn main() -> ExitCode {

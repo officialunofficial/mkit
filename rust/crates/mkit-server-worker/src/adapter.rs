@@ -124,7 +124,9 @@ pub struct WorkerConfig {
     pub ticket_keys: Option<TicketKeys>,
     /// Maximum ticketed pack size from `MAX_PACK_BYTES`.
     pub max_pack_bytes: u64,
-    /// `SHARDING`: single (default) or d34; guarded against changing existing data.
+    /// `SHARDING`: d34 (default) or single; guarded against changing existing data.
+    /// A deployment holding single-sharded data must pin `SHARDING=single`:
+    /// the guard answers 503 until then (there is no migration, R-123).
     pub sharding: Sharding,
     /// Deployment-wide placement. Jurisdiction must remain fixed for its lifetime:
     /// changing it maps every name to new, empty objects.
@@ -246,8 +248,8 @@ impl WorkerConfig {
                 .ok_or_else(|| ConfigError("MAX_PACK_BYTES must be 1..=4.995 GiB".into()))
         })?;
         let sharding = match var("SHARDING").as_deref() {
-            None | Some("single") => Sharding::Single,
-            Some("d34") => Sharding::D34,
+            Some("single") => Sharding::Single,
+            None | Some("d34") => Sharding::D34,
             Some(_) => return Err(ConfigError("SHARDING must be single or d34".into())),
         };
         let jurisdiction = var("NAMESPACE_JURISDICTION");
@@ -1534,7 +1536,7 @@ mod tests {
             (REPOSITORY_VAR, "default"),
         ];
         for (value, expected) in [
-            (None, Sharding::Single),
+            (None, Sharding::D34),
             (Some("single"), Sharding::Single),
             (Some("d34"), Sharding::D34),
         ] {

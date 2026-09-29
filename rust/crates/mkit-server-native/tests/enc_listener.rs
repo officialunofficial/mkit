@@ -728,6 +728,9 @@ fn multi_enc_start(
         common::s(&tickets),
         "--meta",
         meta.as_str(),
+        // Enc reads carry no ref hint, so D34 membership (eventual) would lag.
+        "--sharding",
+        "single",
         "--enc-authorized-peers",
         common::s(&peers),
         "--enc-server-key",

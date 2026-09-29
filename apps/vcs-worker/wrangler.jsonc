@@ -32,7 +32,9 @@
     "AUTH_REPOSITORY": "default",
     "WORKERS_PLAN": "free",
     // The root RefStore sharding marker refuses changes over existing data (R-94).
-    "SHARDING": "single"
+    // d34 is the default; a deployment holding single-sharded data must pin
+    // "single" (there is no migration, R-123), or every RPC answers 503.
+    "SHARDING": "d34"
     // ADDRESSING=multi serves every namespace its policy admits and
     // requires TICKET_KEYS. Like SHARDING, ADDRESSING installs a root marker
     // (`am 00`) on the first request; changing it over existing data is
