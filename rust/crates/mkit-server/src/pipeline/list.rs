@@ -117,6 +117,7 @@ impl<N: NamespaceStore> BucketSource for IndexBucket<'_, N> {
                     repo: row_repo,
                     name,
                 }) if row_repo == repo.name
+                    && crate::refs::validate_ref_name(&name)
                     && D34Shards.ref_index(repo, &name) == *self.partition =>
                 {
                     Ok((name, codec::decode_ref_id(value)?))
@@ -539,6 +540,31 @@ mod tests {
         let source = IndexBucket {
             store: &store,
             partition: &wrong,
+        };
+        assert!(matches!(
+            block_on(page(&[source], &repo, "", None, 10, 2048)),
+            Err(StoreError::Corrupt(_))
+        ));
+    }
+
+    #[test]
+    fn invalid_ref_name_in_index_is_corrupt() {
+        use crate::store::{Batch, NamespaceStore};
+        let store = crate::MemoryKv::default();
+        let repo = repo("a");
+        let name = "not-a-ref";
+        let partition = D34Shards.ref_index(&repo, name);
+        block_on(store.apply(
+            &partition,
+            Batch::new().put(
+                keys::ref_index_key(&repo.name, name),
+                codec::encode_ref_id(&[1; 32]),
+            ),
+        ))
+        .unwrap();
+        let source = IndexBucket {
+            store: &store,
+            partition: &partition,
         };
         assert!(matches!(
             block_on(page(&[source], &repo, "", None, 10, 2048)),
