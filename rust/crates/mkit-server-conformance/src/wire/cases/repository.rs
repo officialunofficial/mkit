@@ -32,7 +32,12 @@ pub(super) fn identities(
     ))
 }
 
-fn read_headers(ctx: &Ctx, rpc: Rpc, body: &[u8], repository: &str) -> Vec<(String, String)> {
+pub(super) fn read_headers(
+    ctx: &Ctx,
+    rpc: Rpc,
+    body: &[u8],
+    repository: &str,
+) -> Vec<(String, String)> {
     let mut headers = ctx.auth_headers(rpc, Commit::Body(body));
     headers.retain(|(name, _)| name != "x-repository");
     headers.push(("x-repository".to_owned(), repository.to_owned()));
@@ -66,7 +71,12 @@ pub(super) async fn read(
     ctx.client().unary(Rpc::ReadRef, body, &headers).await
 }
 
-fn signed_update(ctx: &Ctx, repository: &str, leaf: &str, id: &[u8]) -> Result<Signed, Failure> {
+pub(super) fn signed_update(
+    ctx: &Ctx,
+    repository: &str,
+    leaf: &str,
+    id: &[u8],
+) -> Result<Signed, Failure> {
     let a = ctx.v2_signer("repository-a")?;
     let label = if repository.starts_with(&format!("ed25519-{}/", a.public_key_hex())) {
         "repository-a"

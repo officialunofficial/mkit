@@ -501,6 +501,87 @@ async fn pipeline_auth_v2_quota_atomic() {
     check(origin, profile).await;
 }
 
+/// D34 counts the write quota per (signer, branch): the `quota.` cases spend
+/// one branch through a CAS chain, show another branch is unaffected and that
+/// a rejection allocates no replay row (WP-1.26b).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pipeline_d34_quota_per_branch() {
+    let (origin, _) = serve_sharding(
+        authv2,
+        Some(QUOTA),
+        Mutant::None,
+        None,
+        mkit_server::pipeline::Sharding::D34,
+        MAX_PACK,
+    )
+    .await;
+    let mut profile = v2_profile(&origin);
+    profile.sharding_d34 = true;
+    let target = WireTarget {
+        base_url: origin.parse().unwrap(),
+        profile,
+    };
+    let report = run(&target, Some("quota.")).await;
+    common::judge(&report, PIPELINE_DIVERGENCES);
+    for case in [
+        "quota.ops_exhaustion_resource_exhausted",
+        "quota.bytes_exhaustion_resource_exhausted",
+        "quota.exhaustion_allocates_no_replay",
+        "quota.replay_not_charged",
+    ] {
+        assert!(
+            report.passes().contains(&case),
+            "{case} did not run and pass under D34"
+        );
+    }
+}
+
+/// Multi + D34: half the owner's namespace budget goes to one branch, its
+/// shard is rolled up under clock skew, and a fresh shard reads that total,
+/// so the namespace cap refuses a write across branches (WP-1.26b).
+#[cfg(feature = "test-faults")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pipeline_d34_multi_namespace_cap_after_rollup() {
+    let auth = |origin: &str| AuthMode::AuthV2(AuthV2Config::new(origin, "").unwrap());
+    let mut profile = profile(WireAuth::AuthV2 {
+        audience: "http://localhost".into(),
+        repository: "ignored-in-multi-mode".into(),
+        seed: [0x5e; 32],
+    });
+    profile.milestone = Milestone::M1;
+    profile.quota = Some(QuotaLimits {
+        max_ops: QUOTA.max_ops,
+        max_bytes: QUOTA.max_bytes,
+        window_ms: QUOTA.window_ms,
+    });
+    profile.derive_features();
+    profile.features.insert(Feature::MultiRepo);
+    profile.features.insert(Feature::NamespacePolicy);
+    profile.features.insert(Feature::TestFaults);
+    profile.sharding_d34 = true;
+    let (origin, _) = serve_sharding(
+        auth,
+        Some(QUOTA),
+        Mutant::None,
+        Some(&profile),
+        mkit_server::pipeline::Sharding::D34,
+        MAX_PACK,
+    )
+    .await;
+    let WireAuth::AuthV2 { audience, .. } = &mut profile.auth else {
+        unreachable!()
+    };
+    audience.clone_from(&origin);
+    let target = WireTarget {
+        base_url: origin.parse().unwrap(),
+        profile,
+    };
+    let case = "quota.namespace_cap_after_rollup";
+    let report = run(&target, Some(case)).await;
+    common::judge(&report, PIPELINE_DIVERGENCES);
+    assert_eq!(report.passes(), [case], "{case} did not run and pass");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pipeline_memory_multipart() {
     let (origin, _) = serve_sharding(

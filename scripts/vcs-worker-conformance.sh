@@ -21,12 +21,14 @@
 #                  one frame, so a `ListRefs` of N refs is about 45*N bytes
 #                  held whole (1.2 MB at 30,000; the default 10,000-ref case
 #                  stays under) until WP-1.27 pages it.
-#   --sharding d34  D34 phase 1 only: WP-1.26b adapts quota conformance and
-#                   registers its rollup timer; the Worker uses Single addressing
-#                   today, so its namespace cap is off. D34 quota.ops_exhaustion
-#                   becomes per-(signer, branch); growth stats are single-only.
-#                   Add --test-faults to plant a RefShard
-#                   relay and verify RepoIndexShard delivery and queue drainage.
+#   --sharding d34  the default (WP-1.28c; `--sharding single` pins the old
+#                   routing). D34 quota cases spend one branch (quota is per
+#                   (signer, branch) under Single addressing); the growth case
+#                   waits for WP-1.27's partition-scoped stats hook. With
+#                   --test-faults it plants a RefShard relay and verifies
+#                   RepoIndexShard delivery and queue drainage; with --multi
+#                   too, a Multi + D34 quota phase forces a rollup under clock
+#                   skew and checks the namespace cap across branches.
 #   --multi        add the Multi phase (WP-1.30): a fresh server started with
 #                  ADDRESSING=multi and the namespace allowlist the run's
 #                  fixed seed and run id derive, then the Multi wire cases
@@ -340,20 +342,22 @@ fi
 stop_server
 
 if [ "${test_faults}" -eq 1 ]; then
-    if [ "${sharding}" = d34 ]; then
-        echo ">> skipping phase 2: D34 quota.ops_exhaustion adaptation to per-(signer, branch) and Worker rollup registration wait for WP-1.26b; Worker Single addressing has its namespace cap off; the growth stats hook is single-sharding only"
-    else
     quota_args=(--quota-ops "${TEST_QUOTA_OPS}" --quota-bytes "${TEST_QUOTA_BYTES}"
         --quota-window-ms "${TEST_QUOTA_WINDOW_MS}")
     start_server quota "${vars[@]}" \
         --var "TEST_QUOTA_OPS:${TEST_QUOTA_OPS}" \
         --var "TEST_QUOTA_BYTES:${TEST_QUOTA_BYTES}" \
         --var "TEST_QUOTA_WINDOW_MS:${TEST_QUOTA_WINDOW_MS}"
-    run_suite "${features}" "${quota_args[@]}" --filter growth.
+    if [ "${sharding}" = d34 ]; then
+        # The growth case reads the single-partition stats hook; WP-1.27 adds a
+        # partition-scoped one. D34 quota cases spend one branch (per-branch
+        # quota) and run below.
+        echo ">> skipping growth.replay_and_quota_pruned under D34: the stats hook is single-partition until WP-1.27"
+    else
+        run_suite "${features}" "${quota_args[@]}" --filter growth.
+    fi
     run_suite "${features}" "${quota_args[@]}" --filter quota.
     stop_server
-
-    fi
 
     # A test-faults build logs `mkit-adapter peak-buffered-bytes <n> ...
     # path <path>` per request: the most body bytes the adapter held at
@@ -406,5 +410,35 @@ if [ "${multi}" -eq 1 ]; then
         fi
     done
     stop_server
+
+    if [ "${test_faults}" -eq 1 ] && [ "${sharding}" = d34 ]; then
+        # The Multi + D34 quota phase: the namespace cap across branches after
+        # a forced rollup. The quota window (1 h) is far longer than the 60 s
+        # rollup period the case skews past; ops are few enough to exhaust.
+        multi_quota_ops=6
+        multi_quota_window_ms=3600000
+        start_server multi-quota "${vars[@]}" \
+            --var "ADDRESSING:multi" --var "NAMESPACE_ALLOWLIST:${allowlist}" \
+            --var "TEST_QUOTA_OPS:${multi_quota_ops}" \
+            --var "TEST_QUOTA_BYTES:${TEST_QUOTA_BYTES}" \
+            --var "TEST_QUOTA_WINDOW_MS:${multi_quota_window_ms}"
+        echo ">> running the Multi + D34 quota wire case"
+        status=0
+        "${runner}" wire --base-url "${ORIGIN}" --auth auth-v2 --audience "${ORIGIN}" \
+            --repository "${REPOSITORY}" --signer-seed-hex "${multi_seed}" \
+            --run-id "${multi_run_id}" --atomic-advance --fresh-target --milestone M1 \
+            --max-pack-bytes "${MAX_PACK_BYTES}" \
+            --features "${multi_features},test-faults,timers" --sharding d34 \
+            --quota-ops "${multi_quota_ops}" --quota-bytes "${TEST_QUOTA_BYTES}" \
+            --quota-window-ms "${multi_quota_window_ms}" \
+            --filter quota.namespace_cap_after_rollup \
+            ${runner_args[@]+"${runner_args[@]}"} || status=$?
+        if [ "${status}" -ne 0 ]; then
+            echo "Multi + D34 quota case failed (exit ${status}); wrangler log tail:" >&2
+            tail -n 80 "${log}" >&2
+            exit "${status}"
+        fi
+        stop_server
+    fi
 fi
 echo ">> vcs-worker conformance passed"
