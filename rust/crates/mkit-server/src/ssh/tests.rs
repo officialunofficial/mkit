@@ -1893,6 +1893,8 @@ struct AdmissionSpy {
     seen: Arc<Mutex<Vec<Procedure>>>,
     /// The reservation `admit` reports, when the test wants one.
     reservation: Option<String>,
+    /// Answer with a payment challenge instead of an allowance.
+    challenge: bool,
 }
 
 impl Admission for AdmissionSpy {
@@ -1902,6 +1904,15 @@ impl Admission for AdmissionSpy {
 
     async fn admit(&self, input: &AdmissionInput<'_>) -> Result<AdmissionDecision, ServerError> {
         self.seen.lock().unwrap().push(input.op.procedure());
+        if self.challenge {
+            return Ok(AdmissionDecision::challenge(
+                vec![crate::pipeline::Challenge {
+                    scheme: "payment".into(),
+                    value: "id=\"c1\"".into(),
+                }],
+                "pay to write",
+            ));
+        }
         Ok(AdmissionDecision::Allow {
             charges: Vec::new(),
             reservation: self.reservation.clone(),
@@ -2573,7 +2584,13 @@ fn reserving_admission_fails_the_upload_closed() {
         ],
     );
     assert_eq!(end, SessionEnd::Clean);
-    assert_error(&frames[0], ErrorCode::Internal, "upload failed");
+    // The reservation cannot be settled over ssh/enc: the client is told
+    // to use https, and the frame is not a denied write or a ref conflict.
+    assert_error(
+        &frames[0],
+        ErrorCode::InvalidRequest,
+        "payment required: use mkit+https",
+    );
     let Some(Body::PackExistsResponse(resp)) = &frames[1].body else {
         panic!("expected PackExistsResponse, got {:?}", frames[1].body);
     };
@@ -2593,6 +2610,75 @@ fn reserving_admission_fails_the_upload_closed() {
         crate::store::codec::decode_reservation(&rows[0].1).unwrap(),
         crate::store::codec::ReservationV1::Aborted { .. }
     ));
+}
+
+fn challenging_hooks() -> Hooks<OpenAuthorizer, AdmissionSpy> {
+    spy_hooks(AdmissionSpy {
+        challenge: true,
+        ..AdmissionSpy::default()
+    })
+}
+
+/// A payment challenge under transport identity answers the one fixed
+/// frame, for a unary `UpdateRef` (both CAS and non-CAS) and for a
+/// streamed `UploadPack` (after its chunks drain), and writes nothing.
+/// The client reads it as a non-retryable `RemoteError`, never a conflict.
+#[test]
+fn a_payment_challenge_answers_use_https() {
+    use mkit_core::protocol::{RefWriteCondition, TransportError, is_retryable};
+    const FRAME: &str = "payment required: use mkit+https";
+    let (pipe, blobs, kv) = multi_pipeline(
+        [Namespace::Ed25519(OWNER)],
+        Sharding::Single,
+        challenging_hooks(),
+    );
+    let repo = peer_repo(OWNER, "room-a");
+    let repo_id = peer_repo_id(OWNER, "room-a");
+    let (data, data_id) = valid_pack();
+    let (end, frames) = peer_run(
+        &pipe,
+        OWNER,
+        &repo,
+        [
+            update(BRANCH, &[7; 32], Some(RefExpectation::Missing), None),
+            update(BRANCH, &[7; 32], Some(RefExpectation::Any), None),
+            update(
+                BRANCH,
+                &[8; 32],
+                Some(RefExpectation::Match),
+                Some(&[7; 32]),
+            ),
+            upload_header(&data_id, Some(data.len() as u64)),
+            chunk(&data_id, Some(0), &data, true),
+            exists(&data_id),
+        ],
+    );
+    assert_eq!(end, SessionEnd::Clean);
+    for f in &frames[..4] {
+        assert_error(f, ErrorCode::InvalidRequest, FRAME);
+    }
+    // The upload's stream drained before the frame: the next verb answers.
+    let Some(Body::PackExistsResponse(resp)) = &frames[4].body else {
+        panic!("expected PackExistsResponse, got {:?}", frames[4].body);
+    };
+    assert_eq!(resp.exists, Some(false));
+    assert!(!blob_present(&blobs, data_id));
+    assert!(
+        kv.read(
+            &root(&repo_id.namespace),
+            &keys::ref_key(&repo_id.name, BRANCH)
+        )
+        .is_none()
+    );
+    // Client side: empty details is never a CAS conflict, and no retry.
+    for condition in [RefWriteCondition::Match([7; 32]), RefWriteCondition::Any] {
+        let err = mkit_rpc::map_update_ref_error(error(&frames[0]).clone(), condition, "ssh");
+        assert!(
+            matches!(&err, TransportError::RemoteError(m) if m.contains(FRAME)),
+            "{err:?}"
+        );
+        assert!(!is_retryable(&err));
+    }
 }
 
 /// B10 across a reconnect (Test 11): packs uploaded in session 1 are not

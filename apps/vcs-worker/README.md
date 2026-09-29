@@ -109,6 +109,26 @@ reconciliation after restore, a post-restore replay fence and a GC hold at
 least as long as backup retention are also deferred. The `test-faults` import
 route exists only for local conformance and must not be enabled in deployment.
 
+## Outcome delivery, CORS and logs
+
+Kind 8 (terminal outcome delivery) calls its sink at most once per row and
+stops a fire at the first failure or 5 s timeout. It is budgeted by
+`WORKERS_PLAN` (unset means Free): at most 8 sink calls per alarm on Free
+(relay 32 + backup 1 + outcome 8 + quota rollup at most 8 of the 50
+subrequests) and 64 on Paid.
+This deployment still uses the local `NoOutcomes` sink.
+
+Browsers may send `Authorization`, `Payment-Authorization`,
+`PAYMENT-SIGNATURE` and `Accept-Payment`, and every response exposes
+`WWW-Authenticate`, `PAYMENT-REQUIRED`, `Payment-Receipt` and
+`PAYMENT-RESPONSE`. A response with several `WWW-Authenticate` challenges
+keeps all of them.
+
+The Worker never logs request headers, and a test checks that credential
+values do not reach its tracing. **Check the platform's invocation-log
+capture (Workers Logs, Logpush, tail) at staging before accepting payment
+credentials:** it is outside this code (D15).
+
 ## Auth v2 (open write, no allow-list)
 
 All writes (`UpdateRef`, `AdvanceRefs`, `BeginUpload`, `UploadPack`) require the

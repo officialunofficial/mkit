@@ -1,19 +1,21 @@
 //! Bounded, at-least-once terminal outcome delivery.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::pipeline::{Outcome, OutcomeSink};
-use crate::rt::BoxFuture;
+use crate::rt::{BoxFuture, Clock, Sleep, with_timeout};
 use crate::store::codec;
 use crate::store::outbox::{guard, plan_ack};
 use crate::store::{Batch, Cursor, NamespaceStore, StoreError, Value, keys};
 use crate::telemetry::Metrics;
 use crate::timers::{DueTimer, Fired, TimerCtx, TimerHandler, TimerKind, registry::kinds};
 
-const MAX_DELIVERY_ROWS: usize = 16;
-// The scan cursor names the last examined row. Scanning past the delivery
-// budget would strand the unexamined suffix until a full rotation.
-const SCAN_ROWS: u32 = 16;
+/// Default rows examined per fire.
+pub const DEFAULT_MAX_ROWS: usize = 16;
+/// Default bound on one sink call.
+pub const DEFAULT_SINK_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_ROWS_CEILING: usize = 1_024;
 const MAX_CURSOR_BYTES: usize = 4_096;
 const MAX_BACKOFF_MS: u64 = 900_000;
 
@@ -25,6 +27,69 @@ pub struct OutcomeDelivery<O> {
     pub audience: String,
     /// Rows/bytes gauges and synthetic-row counter.
     pub metrics: Arc<dyn Metrics>,
+    /// Timer for the per-call sink bound.
+    pub sleep: Arc<dyn Sleep>,
+    /// Bound on one sink call; a timeout is a [`DeliveryError`](crate::pipeline::DeliveryError).
+    pub sink_timeout: Duration,
+    /// Rows examined (and so sink calls attempted) per fire, at least 1.
+    pub max_rows: usize,
+    /// Wall clock for the per-fire bound; without one a fire is bounded only
+    /// by `max_rows` and `sink_timeout`.
+    pub clock: Option<Arc<dyn Clock>>,
+    /// Wall-clock bound on one fire; `None` means twice `sink_timeout`. Once
+    /// exceeded the fire makes no further sink call and reschedules now, so a
+    /// slow-but-successful sink cannot hold a driver.
+    pub fire_budget: Option<Duration>,
+}
+
+impl<O> OutcomeDelivery<O> {
+    /// A driver with the default 5 s sink timeout and 16 rows per fire.
+    #[must_use]
+    pub fn new(
+        sink: O,
+        audience: String,
+        metrics: Arc<dyn Metrics>,
+        sleep: Arc<dyn Sleep>,
+    ) -> Self {
+        Self {
+            sink,
+            audience,
+            metrics,
+            sleep,
+            sink_timeout: DEFAULT_SINK_TIMEOUT,
+            max_rows: DEFAULT_MAX_ROWS,
+            clock: None,
+            fire_budget: None,
+        }
+    }
+
+    /// Bound each fire's wall-clock time (default twice the sink timeout).
+    #[must_use]
+    pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.clock = Some(clock);
+        self
+    }
+
+    /// Override the per-fire wall-clock bound; needs [`Self::with_clock`].
+    #[must_use]
+    pub fn with_fire_budget(mut self, budget: Duration) -> Self {
+        self.fire_budget = Some(budget);
+        self
+    }
+
+    /// Override the per-call sink timeout.
+    #[must_use]
+    pub fn with_sink_timeout(mut self, timeout: Duration) -> Self {
+        self.sink_timeout = timeout;
+        self
+    }
+
+    /// Override the rows per fire (clamped to 1..=1024).
+    #[must_use]
+    pub fn with_max_rows(mut self, rows: usize) -> Self {
+        self.max_rows = rows.clamp(1, MAX_ROWS_CEILING);
+        self
+    }
 }
 
 impl<O> core::fmt::Debug for OutcomeDelivery<O> {
@@ -135,23 +200,42 @@ impl<O: OutcomeSink> OutcomeDelivery<O> {
         }
         let (attempt, cursor) = decode_timer(&timer.value)?;
         let (start, end) = keys::class_range(keys::TAG_OUTCOME_PENDING);
+        // The scan cursor names the last examined row. Scanning past the
+        // delivery budget would strand the unexamined suffix until a full
+        // rotation, so the scan page is the budget.
+        let max_rows = self.max_rows.clamp(1, MAX_ROWS_CEILING);
+        let scan_rows = u32::try_from(max_rows).unwrap_or(u32::MAX);
+        let mut after = cursor.as_ref();
         let mut page = ctx
             .store
-            .scan(ctx.partition, &start, &end, cursor.as_ref(), SCAN_ROWS)
+            .scan(ctx.partition, &start, &end, after, scan_rows)
             .await?;
-        if page.entries.is_empty() && cursor.is_some() && page.next.is_none() {
+        if page.entries.is_empty() && after.is_some() && page.next.is_none() {
+            after = None;
             page = ctx
                 .store
-                .scan(ctx.partition, &start, &end, None, SCAN_ROWS)
+                .scan(ctx.partition, &start, &end, after, scan_rows)
                 .await?;
         }
         let mut batch = Batch::new();
         let mut delivered = 0u64;
         let mut sink_retry_ms = 0u64;
+        // Index in `page` of the row whose delivery failed or timed out.
+        let mut stopped_at: Option<usize> = None;
+        // Index of the first row not tried because the fire's wall-clock
+        // budget ran out.
+        let mut cut_at: Option<usize> = None;
+        let started_ms = self.clock.as_ref().map(|clock| clock.now_ms());
+        let budget_ms = i64::try_from(
+            self.fire_budget
+                .unwrap_or_else(|| self.sink_timeout.saturating_mul(2))
+                .as_millis(),
+        )
+        .unwrap_or(i64::MAX);
         // Acknowledged rows are planned after the sink loop, against a fresh
         // `oc`, so slow sink awaits sit outside the read-modify-write window.
         let mut acked: Vec<(String, Value, u64)> = Vec::new();
-        for (key, _) in page.entries.iter().take(MAX_DELIVERY_ROWS) {
+        for (index, (key, _)) in page.entries.iter().enumerate().take(max_rows) {
             let Some(keys::ParsedKey::OutcomePending {
                 seq,
                 reservation_id: rid,
@@ -188,19 +272,37 @@ impl<O: OutcomeSink> OutcomeDelivery<O> {
                     .incr("mkit_server_synthetic_outcomes_acked", &[], 1);
                 true
             } else {
-                match self.sink.deliver(&outcome).await {
-                    Ok(()) => true,
-                    Err(err) => {
+                if let (Some(clock), Some(started)) = (&self.clock, started_ms)
+                    && clock.now_ms().saturating_sub(started) >= budget_ms
+                {
+                    cut_at = Some(index);
+                    break;
+                }
+                match with_timeout(&*self.sleep, self.sink_timeout, self.sink.deliver(&outcome))
+                    .await
+                {
+                    Ok(Ok(())) => true,
+                    Ok(Err(err)) => {
                         sink_retry_ms = sink_retry_ms.max(err.retry_after.map_or(0, |hint| {
                             u64::try_from(hint.as_millis()).unwrap_or(u64::MAX)
                         }));
                         tracing::warn!(reason = %err.reason, "outcome delivery failed");
+                        stopped_at = Some(index);
+                        false
+                    }
+                    Err(_) => {
+                        tracing::warn!("outcome delivery timed out");
+                        stopped_at = Some(index);
                         false
                     }
                 }
             };
             if acknowledged {
                 acked.push((rid, value, seq));
+            }
+            // A failing or hung sink is not asked again in this fire.
+            if stopped_at.is_some() {
+                break;
             }
         }
         let fresh_oc = if acked.is_empty() {
@@ -226,10 +328,37 @@ impl<O: OutcomeSink> OutcomeDelivery<O> {
         if delivered == backlog.rows {
             return Ok(Fired::Done(batch));
         }
+        // The next fire resumes just after the failed row. Resuming after the
+        // page instead would, when the page reached the end of the range, wrap
+        // to the head and retry the same failing row first forever, starving
+        // every row behind it. The page's cursor is opaque, so ask the store
+        // for the one after the failed row.
+        let resume = match (stopped_at, cut_at) {
+            (Some(index), _) => {
+                let limit = u32::try_from(index + 1).unwrap_or(u32::MAX);
+                ctx.store
+                    .scan(ctx.partition, &start, &end, after, limit)
+                    .await?
+                    .next
+            }
+            // Resume at the first untried row: after the one before it.
+            (None, Some(index)) if index > 0 => {
+                let limit = u32::try_from(index).unwrap_or(u32::MAX);
+                ctx.store
+                    .scan(ctx.partition, &start, &end, after, limit)
+                    .await?
+                    .next
+            }
+            (None, _) => page.next,
+        };
+        // Only a failed or hung sink call backs off. A page that delivered
+        // nothing because every row was junk or synthetic is not a sink fault.
         let next_attempt = if delivered > 0 {
             0
-        } else {
+        } else if stopped_at.is_some() {
             attempt.saturating_add(1)
+        } else {
+            attempt
         };
         let delay = if delivered > 0 {
             0
@@ -244,7 +373,7 @@ impl<O: OutcomeSink> OutcomeDelivery<O> {
             .max(timer.due_at_ms.saturating_add(1));
         Ok(Fired::Reschedule {
             due_at_ms,
-            value: encode_timer(next_attempt, page.next.as_ref())?,
+            value: encode_timer(next_attempt, resume.as_ref())?,
             batch,
         })
     }
@@ -256,7 +385,7 @@ mod tests {
     use crate::memory::MemoryKv;
     use crate::pipeline::{DeliveryError, OutcomeKind};
     use crate::repo::NamespaceKey;
-    use crate::rt::ManualClock;
+    use crate::rt::{ManualClock, ManualSleep};
     use crate::store::codec::{Backlog, ReservationV1};
     use crate::store::outbox::{OutboxBuilder, Terminal};
     use crate::store::{BatchOutcome, Partition, Write};
@@ -330,11 +459,12 @@ mod tests {
         sink: Arc<impl OutcomeSink>,
         now: u64,
     ) -> crate::timers::RunReport {
-        let registry = TimerRegistry::new().register(OutcomeDelivery {
+        let registry = TimerRegistry::new().register(OutcomeDelivery::new(
             sink,
-            audience: "https://example.test".into(),
-            metrics: Arc::new(NoopMetrics),
-        });
+            "https://example.test".into(),
+            Arc::new(NoopMetrics),
+            Arc::new(ManualSleep::new()),
+        ));
         run_due(
             store,
             &partition(),
@@ -470,6 +600,292 @@ mod tests {
             .unwrap(),
             Backlog { rows: 1, .. }
         ));
+    }
+
+    /// A sink that never answers.
+    struct Hang(Mutex<u32>);
+    impl OutcomeSink for Hang {
+        async fn deliver(&self, _: &Outcome) -> Result<(), DeliveryError> {
+            *self.0.lock().unwrap() += 1;
+            futures::future::pending().await
+        }
+    }
+
+    async fn backlog_rows(store: &MemoryKv) -> u64 {
+        store
+            .get(&partition(), &keys::outcome_backlog())
+            .await
+            .unwrap()
+            .map_or(0, |v| codec::decode_backlog(&v).unwrap().rows)
+    }
+
+    async fn timer_due(store: &MemoryKv) -> u64 {
+        let (start, end) = keys::class_range(keys::TAG_TIMER);
+        let page = store
+            .scan(&partition(), &start, &end, None, 10)
+            .await
+            .unwrap();
+        page.entries
+            .iter()
+            .find_map(|(key, _)| match keys::parse(key) {
+                Some(keys::ParsedKey::Timer {
+                    kind: 8, due_at_ms, ..
+                }) => Some(due_at_ms),
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    /// A sink that succeeds, but only after the clock advances by `step_ms`.
+    struct Slow {
+        clock: Arc<ManualClock>,
+        step_ms: i64,
+        seen: Mutex<Vec<String>>,
+    }
+    impl OutcomeSink for Slow {
+        async fn deliver(&self, outcome: &Outcome) -> Result<(), DeliveryError> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(outcome.reservation_id.clone());
+            self.clock.set(self.clock.now_ms() + self.step_ms);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_slow_but_successful_sink_is_cut_at_the_fire_budget() {
+        let clock = Arc::new(ManualClock::new(100));
+        let store = MemoryKv::with_clock(clock.clone());
+        seed(&store, &["a", "b", "c", "d"]).await;
+        let sink = Arc::new(Slow {
+            clock: clock.clone(),
+            step_ms: 400,
+            seen: Mutex::new(Vec::new()),
+        });
+        // Budget 2 x 250 ms: two 400 ms calls exhaust it.
+        let delivery = OutcomeDelivery::new(
+            sink.clone(),
+            "https://example.test".into(),
+            Arc::new(NoopMetrics),
+            Arc::new(ManualSleep::new()),
+        )
+        .with_sink_timeout(Duration::from_millis(250))
+        .with_clock(clock.clone());
+        fire_with(&store, &clock, delivery, 100).await;
+        assert_eq!(*sink.seen.lock().unwrap(), ["a", "b"]);
+        assert_eq!(backlog_rows(&store).await, 2);
+        // Rescheduled now (not backed off), resuming at the untried rows.
+        let due = timer_due(&store).await;
+        assert!(due <= 101, "due {due}");
+        clock.set(i64::try_from(due).unwrap());
+        let delivery = OutcomeDelivery::new(
+            sink.clone(),
+            "https://example.test".into(),
+            Arc::new(NoopMetrics),
+            Arc::new(ManualSleep::new()),
+        );
+        fire_with(&store, &clock, delivery, due).await;
+        assert_eq!(*sink.seen.lock().unwrap(), ["a", "b", "c", "d"]);
+        assert_eq!(backlog_rows(&store).await, 0);
+    }
+
+    #[tokio::test]
+    async fn an_undeliverable_page_does_not_raise_the_backoff() {
+        let clock = Arc::new(ManualClock::new(100));
+        let store = MemoryKv::with_clock(clock.clone());
+        seed(&store, &["poison"]).await;
+        store
+            .apply(
+                &partition(),
+                Batch::new().put(
+                    keys::reservation("poison").unwrap(),
+                    Value::new(b"bad".to_vec()),
+                ),
+            )
+            .await
+            .unwrap();
+        let sink = Arc::new(Capture::default());
+        let mut now = 100u64;
+        let mut dues = Vec::new();
+        for _ in 0..3 {
+            clock.set(i64::try_from(now).unwrap());
+            fire(&store, &clock, sink.clone(), now).await;
+            let due = timer_due(&store).await;
+            dues.push(due - now);
+            now = due;
+        }
+        assert!(sink.seen.lock().unwrap().is_empty());
+        // No sink call failed, so the delay stays at the first backoff step.
+        assert!(dues.iter().all(|gap| *gap <= 1_200), "{dues:?}");
+    }
+
+    async fn fire_with(
+        store: &MemoryKv,
+        clock: &ManualClock,
+        delivery: OutcomeDelivery<Arc<impl OutcomeSink>>,
+        now: u64,
+    ) {
+        let registry = TimerRegistry::new().register(delivery);
+        run_due(
+            store,
+            &partition(),
+            &registry,
+            clock,
+            now,
+            &TickBudget::default(),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_hanging_sink_is_cut_at_the_timeout_and_stops_the_fire() {
+        let clock = Arc::new(ManualClock::new(100));
+        let store = MemoryKv::with_clock(clock.clone());
+        seed(&store, &["a", "b", "c"]).await;
+        let sink = Arc::new(Hang(Mutex::new(0)));
+        let sleeper = ManualSleep::elapsed();
+        let delivery = OutcomeDelivery::new(
+            sink.clone(),
+            "https://example.test".into(),
+            Arc::new(NoopMetrics),
+            Arc::new(sleeper.clone()),
+        )
+        .with_sink_timeout(Duration::from_millis(250));
+        fire_with(&store, &clock, delivery, 100).await;
+        // One call, cut by the 250 ms timer; the other rows are not tried.
+        assert_eq!(*sink.0.lock().unwrap(), 1);
+        assert_eq!(sleeper.requested(), [Duration::from_millis(250)]);
+        assert_eq!(backlog_rows(&store).await, 3);
+        // Backed off: the retry is later than now.
+        assert!(timer_due(&store).await >= 1_100);
+    }
+
+    #[tokio::test]
+    async fn first_failure_stops_the_fire_and_no_row_is_lost() {
+        let clock = Arc::new(ManualClock::new(100));
+        let store = MemoryKv::with_clock(clock.clone());
+        seed(&store, &["a", "b", "c"]).await;
+        let failing = Arc::new(Capture {
+            fail: true,
+            ..Capture::default()
+        });
+        fire(&store, &clock, failing.clone(), 100).await;
+        assert_eq!(failing.seen.lock().unwrap().len(), 1);
+        assert_eq!(backlog_rows(&store).await, 3);
+        // Backed off: the retry is later than now.
+        assert!(timer_due(&store).await >= 1_100);
+        // A healthy sink later delivers every row.
+        let ok = Arc::new(Capture::default());
+        let (start, end) = keys::class_range(keys::TAG_TIMER);
+        let page = store
+            .scan(&partition(), &start, &end, None, 10)
+            .await
+            .unwrap();
+        let due = page
+            .entries
+            .iter()
+            .find_map(|(key, _)| match keys::parse(key) {
+                Some(keys::ParsedKey::Timer {
+                    kind: 8, due_at_ms, ..
+                }) => Some(due_at_ms),
+                _ => None,
+            })
+            .unwrap();
+        clock.set(i64::try_from(due).unwrap());
+        // The fire resumes after the failed row `a`, so `b` and `c` go first;
+        // `a` follows once the cursor wraps.
+        fire(&store, &clock, ok.clone(), due).await;
+        assert_eq!(ok.seen.lock().unwrap().len(), 2);
+        assert_eq!(backlog_rows(&store).await, 1);
+        let (start, end) = keys::class_range(keys::TAG_TIMER);
+        let page = store
+            .scan(&partition(), &start, &end, None, 10)
+            .await
+            .unwrap();
+        let due = page
+            .entries
+            .iter()
+            .find_map(|(key, _)| match keys::parse(key) {
+                Some(keys::ParsedKey::Timer {
+                    kind: 8, due_at_ms, ..
+                }) => Some(due_at_ms),
+                _ => None,
+            })
+            .unwrap();
+        clock.set(i64::try_from(due).unwrap());
+        fire(&store, &clock, ok.clone(), due).await;
+        assert_eq!(ok.seen.lock().unwrap().len(), 3);
+        assert_eq!(backlog_rows(&store).await, 0);
+    }
+
+    /// A sink that rejects one reservation id and takes the rest.
+    struct Picky(Mutex<Vec<String>>);
+    impl OutcomeSink for Picky {
+        async fn deliver(&self, outcome: &Outcome) -> Result<(), DeliveryError> {
+            if outcome.reservation_id == "b" {
+                return Err(DeliveryError::new("rejected", None));
+            }
+            self.0.lock().unwrap().push(outcome.reservation_id.clone());
+            Ok(())
+        }
+    }
+
+    /// A row the sink keeps refusing does not starve the rows behind it: the
+    /// fire stops at it, and the next fire resumes after it rather than
+    /// retrying it first again.
+    #[tokio::test]
+    async fn a_refused_row_does_not_starve_the_rows_behind_it() {
+        let clock = Arc::new(ManualClock::new(100));
+        let store = MemoryKv::with_clock(clock.clone());
+        seed(&store, &["a", "b", "c", "d"]).await;
+        let sink = Arc::new(Picky(Mutex::new(Vec::new())));
+        let mut now = 100u64;
+        for _ in 0..3 {
+            fire_with(
+                &store,
+                &clock,
+                OutcomeDelivery::new(
+                    sink.clone(),
+                    "https://example.test".into(),
+                    Arc::new(NoopMetrics),
+                    Arc::new(ManualSleep::new()),
+                ),
+                now,
+            )
+            .await;
+            now += 1_000_000;
+            clock.set(i64::try_from(now).unwrap());
+        }
+        assert_eq!(*sink.0.lock().unwrap(), ["a", "c", "d"]);
+        assert_eq!(backlog_rows(&store).await, 1, "only b remains");
+    }
+
+    #[tokio::test]
+    async fn max_rows_bounds_one_fire_and_the_cursor_rotates() {
+        let clock = Arc::new(ManualClock::new(100));
+        let store = MemoryKv::with_clock(clock.clone());
+        seed(&store, &["a", "b", "c", "d", "e"]).await;
+        let sink = Arc::new(Capture::default());
+        let mk = |sink: Arc<Capture>| {
+            OutcomeDelivery::new(
+                sink,
+                "https://example.test".into(),
+                Arc::new(NoopMetrics),
+                Arc::new(ManualSleep::new()),
+            )
+            .with_max_rows(2)
+        };
+        fire_with(&store, &clock, mk(sink.clone()), 100).await;
+        assert_eq!(sink.seen.lock().unwrap().len(), 2);
+        assert_eq!(backlog_rows(&store).await, 3);
+        clock.set(101);
+        fire_with(&store, &clock, mk(sink.clone()), 101).await;
+        clock.set(102);
+        fire_with(&store, &clock, mk(sink.clone()), 102).await;
+        assert_eq!(sink.seen.lock().unwrap().len(), 5);
+        assert_eq!(backlog_rows(&store).await, 0);
     }
 
     #[cfg(feature = "remote-hooks")]

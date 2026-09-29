@@ -300,6 +300,110 @@ async fn cors_preflight_ok_without_auth() {
     assert_eq!(err.code, "unauthenticated");
 }
 
+/// An admission hook that counts calls and always answers with a payment
+/// challenge.
+#[derive(Clone, Default)]
+struct CountingAdmission(Arc<AtomicUsize>);
+
+impl mkit_server::pipeline::Admission for CountingAdmission {
+    async fn admit(
+        &self,
+        _input: &mkit_server::pipeline::AdmissionInput<'_>,
+    ) -> Result<mkit_server::pipeline::AdmissionDecision, mkit_server::ServerError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(mkit_server::pipeline::AdmissionDecision::challenge(
+            vec![mkit_server::pipeline::Challenge {
+                scheme: "payment".to_owned(),
+                value: "id=\"c1\"".to_owned(),
+            }],
+            "pay",
+        ))
+    }
+}
+
+#[tokio::test]
+async fn cors_preflight_allows_payment_headers_and_never_reaches_admission() {
+    let counting = CountingAdmission::default();
+    let hooks = Hooks {
+        authorizer: mkit_server::pipeline::OpenAuthorizer,
+        admission: counting.clone(),
+        pre_receive: mkit_server::pipeline::NoPreReceive,
+        receipts: mkit_server::pipeline::NoReceipts,
+        outcomes: mkit_server::pipeline::NoOutcomes,
+    };
+    let repo = RepoId {
+        namespace: NamespaceKey::deployment_default(),
+        name: RepoName::new("default").unwrap(),
+    };
+    // A non-default admission needs auth v2 and ticket keys.
+    let mut cfg = PipelineConfig::new(
+        Addressing::Single { repo },
+        AuthMode::AuthV2(
+            mkit_server::auth_v2::AuthV2Config::new("http://localhost:9876", "default").unwrap(),
+        ),
+        UploadLimits {
+            max_total_bytes: 1 << 20,
+            max_chunks: 64,
+        },
+    );
+    cfg.ticket_keys =
+        Some(mkit_server::upload::token::TicketKeys::new(vec![("test".into(), [9; 32])]).unwrap());
+    let pipe = Pipeline::new(
+        MemoryBlobStore::default(),
+        MemoryKv::default(),
+        hooks,
+        cfg,
+        Arc::new(SystemClock),
+        Arc::new(NoopMetrics),
+    )
+    .unwrap();
+    let mut opts = RouterOptions::default();
+    opts.cors = CorsPolicy::AllowAny;
+    opts.cors_extra_allow_headers = vec![http::HeaderName::from_static("x-extra-cred")];
+    let router = build_router(Arc::new(pipe), &opts);
+    let preflight = Request::options(READ_REF)
+        .header("origin", "https://app.example")
+        .header("access-control-request-method", "POST")
+        .header(
+            "access-control-request-headers",
+            "payment-authorization,payment-signature,accept-payment,x-extra-cred,authorization",
+        )
+        .body(Body::empty())
+        .unwrap();
+    let resp = router.clone().oneshot(preflight).await.unwrap();
+    assert!(resp.status().is_success(), "{}", resp.status());
+    let allowed = resp.headers()["access-control-allow-headers"]
+        .to_str()
+        .unwrap()
+        .to_ascii_lowercase();
+    for name in [
+        "payment-authorization",
+        "payment-signature",
+        "accept-payment",
+        "x-extra-cred",
+        "authorization",
+    ] {
+        assert!(allowed.contains(name), "{name} not in {allowed}");
+    }
+    assert_eq!(counting.0.load(Ordering::SeqCst), 0);
+
+    // A real response exposes the admission headers to the browser.
+    let resp = router
+        .oneshot(read_ref_request(&[("origin", "https://app.example")]))
+        .await
+        .unwrap();
+    let exposed = resp.headers()["access-control-expose-headers"]
+        .to_str()
+        .unwrap()
+        .to_ascii_lowercase();
+    for name in mkit_server::pipeline::ADMISSION_EXPOSE_HEADERS {
+        assert!(
+            exposed.contains(&name.to_ascii_lowercase()),
+            "{name} not in {exposed}"
+        );
+    }
+}
+
 /// A `tracing` writer into a shared buffer.
 #[derive(Clone, Default)]
 struct Captured(Arc<Mutex<Vec<u8>>>);
@@ -893,5 +997,41 @@ fn repository_configuration_uses_addressing_grammar() {
         };
         assert_eq!(repo.namespace.as_str(), "root");
         assert_eq!(repo.name.as_str(), repository);
+    }
+}
+
+#[tokio::test]
+async fn payment_credentials_and_configured_extras_never_reach_traces() {
+    let captured = Captured::default();
+    let writer = captured.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || writer.clone())
+        .with_max_level(tracing::Level::TRACE)
+        .with_ansi(false)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let mut opts = RouterOptions::default();
+    opts.redactor = mkit_server::Redactor::new(["X-Extra-Cred"]);
+    let router = build_router(pipeline(MemoryKv::default(), AuthMode::Open), &opts);
+    let resp = router
+        .oneshot(read_ref_request(&[
+            ("payment-authorization", "pay-secret-0123"),
+            ("payment-signature", "paysig-secret-0123"),
+            ("authorization", "Payment auth-scheme-secret-0123"),
+            ("x-extra-cred", "extra-secret-0123"),
+            ("x-trace-marker", "visible-marker-0123"),
+        ]))
+        .await
+        .unwrap();
+    drop(resp);
+    let out = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+    assert!(out.contains("visible-marker-0123"), "{out}");
+    for secret in [
+        "pay-secret-0123",
+        "paysig-secret-0123",
+        "auth-scheme-secret-0123",
+        "extra-secret-0123",
+    ] {
+        assert!(!out.contains(secret), "{secret} leaked:\n{out}");
     }
 }

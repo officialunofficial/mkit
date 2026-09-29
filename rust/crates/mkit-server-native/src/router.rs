@@ -49,11 +49,14 @@ pub struct RouterOptions {
     pub max_body_bytes: u64,
     /// Cross-origin access.
     pub cors: CorsPolicy,
-    /// Extra CORS request headers (reconciliation R-15). M0 passes none; M3
-    /// (WP-3.4) adds the payment request headers.
+    /// Extra CORS request headers, added to the built-in list (auth v2,
+    /// `Authorization`, and the payment request headers `Payment-Authorization`,
+    /// `PAYMENT-SIGNATURE` and `Accept-Payment`). `mkit-server serve` passes the
+    /// configured admission credential headers.
     pub cors_extra_allow_headers: Vec<HeaderName>,
-    /// Response headers exposed to browsers. M0 passes none; M3 exposes
-    /// `WWW-Authenticate`, `Payment-Receipt` and `PAYMENT-*`.
+    /// Response headers exposed to browsers besides
+    /// [`mkit_server::pipeline::ADMISSION_EXPOSE_HEADERS`], which are always
+    /// exposed when CORS is enabled.
     pub cors_expose_headers: Vec<HeaderName>,
     /// Headers whose values never reach a trace: [`mkit_server::NEVER_LOG`]
     /// plus the deployment's extras.

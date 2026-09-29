@@ -2003,11 +2003,12 @@ fn reserved_commit_conflict_backpressure_and_recovery() {
     assert_eq!(env.read(HEAD), Some(A));
 
     let registry = crate::timers::TimerRegistry::new().register(
-        crate::timers::outcome_delivery::OutcomeDelivery {
-            sink: NoOutcomes,
-            audience: AUDIENCE.into(),
-            metrics: Arc::new(crate::NoopMetrics),
-        },
+        crate::timers::outcome_delivery::OutcomeDelivery::new(
+            NoOutcomes,
+            AUDIENCE.into(),
+            Arc::new(crate::NoopMetrics),
+            Arc::new(crate::rt::ManualSleep::new()),
+        ),
     );
     let report = now(crate::timers::run_due(
         &env.pipe.meta,

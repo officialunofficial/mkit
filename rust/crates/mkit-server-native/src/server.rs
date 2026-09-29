@@ -10,8 +10,9 @@ use std::time::Duration;
 use mkit_core::protocol::Transport as _;
 use mkit_core::repo_lock::{self, LockError, RepoLock};
 use mkit_server::fs::{FsBlobStore, FsLayoutStore, META_MARKER};
-use mkit_server::pipeline::{Hooks, Pipeline, Sharding};
+use mkit_server::pipeline::{Hooks, NoOutcomes, OutcomeSink, Pipeline, Sharding};
 use mkit_server::sql::{SqlConn, SqlError, SqlKvStore, SqlValue, TxFn};
+use mkit_server::timers::outcome_delivery::OutcomeDelivery;
 use mkit_server::{Addressing, MultipartBlobStore, NamespaceStore, StoreError, SystemClock};
 use mkit_transport_file::{FileTransport, sync_dir};
 use tokio::net::TcpListener;
@@ -19,7 +20,7 @@ use tokio::net::TcpListener;
 use crate::config::{BlobChoice, ConfigError, MetaChoice, ServeConfig};
 use crate::pressure::PressureMonitor;
 use crate::telemetry::MetricsBridge;
-use crate::timers::{TimerDriver, TimerNotifying, TimerStore};
+use crate::timers::{TimerDriver, TimerNotifying, TimerStore, TokioSleep};
 use crate::{Blocking, RusqliteConn, Shutdown, build_router, exit, serve};
 
 /// The lock every live server holds **shared** under `<root>/.mkit`, so
@@ -520,6 +521,84 @@ fn lock_root(root: &Path) -> Result<ServerLocks, ConfigError> {
 /// elsewhere or that is bound to another database (R-81), or a store that
 /// does not open; `TEMPFAIL` when the serve lock is not granted in time.
 pub fn open(cfg: &ServeConfig) -> Result<Opened, ConfigError> {
+    open_inner(
+        cfg,
+        Delivery {
+            sink: NoOutcomes,
+            real: false,
+            options: SinkOptions::default(),
+        },
+    )
+}
+
+/// Kind-8 delivery bounds for [`open_with_sink`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SinkOptions {
+    /// Bound on one sink call.
+    pub timeout: Duration,
+    /// Rows examined (and so sink calls attempted) per fire.
+    pub max_rows: usize,
+}
+
+impl Default for SinkOptions {
+    fn default() -> Self {
+        Self {
+            timeout: mkit_server::timers::outcome_delivery::DEFAULT_SINK_TIMEOUT,
+            max_rows: mkit_server::timers::outcome_delivery::DEFAULT_MAX_ROWS,
+        }
+    }
+}
+
+/// The sink and its bounds as they travel through `open`.
+struct Delivery<O> {
+    sink: O,
+    /// A caller-supplied sink, not the local acknowledger.
+    real: bool,
+    options: SinkOptions,
+}
+
+/// [`open`], delivering terminal outcomes (kind 8) to `sink` instead of
+/// acknowledging them locally. For embedders: the binary keeps the local
+/// sink until its hook flags land (WP-3.8, which wires `options` to flags).
+/// Each call is bounded by `options.timeout` (default 5 s) and a fire also by
+/// twice that in wall-clock time, a failure or timeout ends the fire and
+/// retries with backoff, and the shutdown drain (`--shutdown-drain-secs`) delivers what is due before
+/// exit. A sink that names the server's audience (a `RemoteOutcomes` client's
+/// `server_audience`) must take it from [`outcome_audience`].
+///
+/// # Errors
+/// As [`open`], and `CONFIG_ERROR` for `--meta fs-layout`, which has no
+/// timer driver to deliver from.
+pub fn open_with_sink<O: OutcomeSink + 'static>(
+    cfg: &ServeConfig,
+    sink: O,
+    options: SinkOptions,
+) -> Result<Opened, ConfigError> {
+    open_inner(
+        cfg,
+        Delivery {
+            sink,
+            real: true,
+            options,
+        },
+    )
+}
+
+/// The audience stamped on delivered outcomes: the auth-v2 audience, empty
+/// without auth v2. Derive a hook client's `server_audience` from this same
+/// value (R-162).
+#[must_use]
+pub fn outcome_audience(cfg: &ServeConfig) -> String {
+    match &cfg.pipeline.auth {
+        mkit_server::pipeline::AuthMode::AuthV2(config) => config.audience().to_owned(),
+        _ => String::new(),
+    }
+}
+
+fn open_inner<O: OutcomeSink + 'static>(
+    cfg: &ServeConfig,
+    delivery: Delivery<O>,
+) -> Result<Opened, ConfigError> {
     let locks = lock_root(&cfg.repo_root)?;
     let services = match &cfg.blob {
         BlobChoice::Fs => {
@@ -530,7 +609,12 @@ pub fn open(cfg: &ServeConfig) -> Result<Opened, ConfigError> {
             if swept > 0 {
                 tracing::warn!(swept, "removed stale filesystem uploads");
             }
-            with_meta(Blocking::new(blobs), &cfg.pipeline.addressing, cfg)?
+            with_meta(
+                Blocking::new(blobs),
+                &cfg.pipeline.addressing,
+                cfg,
+                delivery,
+            )?
         }
         #[cfg(feature = "s3")]
         BlobChoice::S3 {
@@ -540,6 +624,7 @@ pub fn open(cfg: &ServeConfig) -> Result<Opened, ConfigError> {
             open_s3(config, *spool_max_bytes, cfg)?,
             &cfg.pipeline.addressing,
             cfg,
+            delivery,
         )?,
     };
     Ok(Opened {
@@ -555,16 +640,25 @@ pub fn open(cfg: &ServeConfig) -> Result<Opened, ConfigError> {
 /// The services over `blobs` and the metadata store `cfg` names. The
 /// fs-layout store names its one repository from the addressing; `SQLite`
 /// serves every namespace's partitions.
-fn with_meta<B>(
+fn with_meta<B, O>(
     blobs: B,
     addressing: &Addressing,
     cfg: &ServeConfig,
+    delivery: Delivery<O>,
 ) -> Result<Services, ConfigError>
 where
     B: MultipartBlobStore + Clone + 'static,
+    O: OutcomeSink + 'static,
 {
     match &cfg.meta {
         MetaChoice::FsLayout => {
+            if delivery.real {
+                return Err(config_error(
+                    "--meta fs-layout",
+                    "outcome delivery needs the timer driver, which fs-layout metadata does \
+                     not have; use --meta sqlite:<PATH>",
+                ));
+            }
             // `resolve` already refuses this combination; keep it a
             // config error rather than a panic if a config arrives
             // without going through it.
@@ -588,11 +682,17 @@ where
             bind_database(&conn, &root_id, path)?;
             bind_sharding(&conn, cfg.pipeline.sharding, path)?;
             let meta = Blocking::new(TimerNotifying::new(meta));
-            let audience = match &cfg.pipeline.auth {
-                mkit_server::pipeline::AuthMode::AuthV2(config) => config.audience().to_owned(),
-                _ => String::new(),
-            };
-            let registry = sqlite_timer_registry(blobs.clone(), meta.clone(), audience);
+            let Delivery { sink, options, .. } = delivery;
+            let outcomes = OutcomeDelivery::new(
+                sink,
+                outcome_audience(cfg),
+                Arc::new(MetricsBridge),
+                Arc::new(TokioSleep),
+            )
+            .with_sink_timeout(options.timeout)
+            .with_max_rows(options.max_rows)
+            .with_clock(Arc::new(SystemClock));
+            let registry = sqlite_timer_registry_with(blobs.clone(), meta.clone(), outcomes);
             let driver = TimerDriver::new(meta.clone(), registry, Arc::new(SystemClock));
             let mut services = build_services(blobs, meta, cfg)?;
             services.timers = Some(driver);
@@ -604,14 +704,40 @@ where
 
 /// The exact timer registry installed by the native `SQLite` server.
 ///
-/// Kinds 8 and 9 run for every partition of the one store. Delivery uses the
-/// in-tree `NoOutcomes` sink, which acknowledges locally; `audience` is the
-/// canonical origin stamped on delivered outcomes (empty without auth v2).
-pub fn sqlite_timer_registry<B: MultipartBlobStore + Clone + 'static>(
+/// Kinds 8 and 9 run for every partition of the one store. Delivery goes to
+/// `sink` (`NoOutcomes` acknowledges locally); `audience` is the canonical
+/// origin stamped on delivered outcomes (empty without auth v2).
+pub fn sqlite_timer_registry<B, O>(
     blobs: B,
     meta: TimerStore,
     audience: String,
-) -> mkit_server::timers::TimerRegistry<'static, TimerStore> {
+    sink: O,
+) -> mkit_server::timers::TimerRegistry<'static, TimerStore>
+where
+    B: MultipartBlobStore + Clone + 'static,
+    O: OutcomeSink + 'static,
+{
+    let delivery = OutcomeDelivery::new(
+        sink,
+        audience,
+        Arc::new(MetricsBridge),
+        Arc::new(TokioSleep),
+    )
+    .with_clock(Arc::new(SystemClock));
+    sqlite_timer_registry_with(blobs, meta, delivery)
+}
+
+/// [`sqlite_timer_registry`] with a caller-built kind-8 driver, for a
+/// different sink timeout or row budget.
+pub fn sqlite_timer_registry_with<B, O>(
+    blobs: B,
+    meta: TimerStore,
+    delivery: OutcomeDelivery<O>,
+) -> mkit_server::timers::TimerRegistry<'static, TimerStore>
+where
+    B: MultipartBlobStore + Clone + 'static,
+    O: OutcomeSink + 'static,
+{
     let registry = mkit_server::timers::TimerRegistry::new()
         .register(mkit_server::timers::ticket_expiry::TicketExpiry { blobs })
         .register(
@@ -623,11 +749,7 @@ pub fn sqlite_timer_registry<B: MultipartBlobStore + Clone + 'static>(
             hook: mkit_server::relay::NoHook,
             budget: mkit_server::relay::RelayBudget::default(),
         })
-        .register(mkit_server::timers::outcome_delivery::OutcomeDelivery {
-            sink: mkit_server::pipeline::NoOutcomes,
-            audience,
-            metrics: Arc::new(MetricsBridge),
-        })
+        .register(delivery)
         .register(mkit_server::timers::reservation_reconcile::ReservationReconcile)
         .register(mkit_server::timers::quota_rollup::QuotaRollup {
             coordinator: meta,
@@ -704,10 +826,13 @@ pub async fn serve_services(
         (Some(opts), Some(service)) => Some((bind(opts.listen, "--listen-enc").await?, service)),
         _ => None,
     };
+    // The driver stops on its own switch, after the listeners drain, so an
+    // outcome committed by a draining request is still delivered.
+    let timer_stop = Shutdown::new();
     let timer_task = match services.timers {
         Some(driver) => Some(
             driver
-                .start(shutdown.clone())
+                .start_with_drain(timer_stop.clone(), cfg.shutdown_drain)
                 .await
                 .map_err(|e| config_error("timer directory", e))?,
         ),
@@ -759,6 +884,7 @@ pub async fn serve_services(
         stop_on_error(enc_run.await)
     },);
     shutdown.trigger();
+    timer_stop.trigger();
     if let Some(task) = timer_task {
         task.await.map_err(|e| config_error("timer driver", e))?;
     }

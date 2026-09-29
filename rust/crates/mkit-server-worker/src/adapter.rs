@@ -116,6 +116,57 @@ pub const DEFAULT_MAX_BODY_BYTES: usize = SINGLE_PUT_MAX_BYTES as usize + FRAMIN
 /// `Access-Control-Allow-Methods`.
 pub const CORS_ALLOW_METHODS: &str = "POST, GET, OPTIONS";
 
+/// Request headers a browser may send besides
+/// [`mkit_server::auth_v2::CORS_ALLOW_HEADERS`]: a bearer or payment
+/// credential and the payment preference (SPEC-TRANSPORT-CONNECT §5.1).
+pub const CORS_PAYMENT_ALLOW_HEADERS: [&str; 4] = [
+    "authorization",
+    "payment-authorization",
+    "payment-signature",
+    "accept-payment",
+];
+
+/// `Access-Control-Allow-Headers` of a preflight: the auth v2 list plus
+/// [`CORS_PAYMENT_ALLOW_HEADERS`], each name once.
+#[must_use]
+pub fn cors_allow_headers() -> String {
+    let base = mkit_server::auth_v2::CORS_ALLOW_HEADERS;
+    let extra = CORS_PAYMENT_ALLOW_HEADERS.iter().filter(|name| {
+        !base
+            .split(',')
+            .any(|have| have.trim().eq_ignore_ascii_case(name))
+    });
+    core::iter::once(base)
+        .chain(extra.copied())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// `Access-Control-Expose-Headers` of every response: the admission
+/// challenge and receipt headers a browser client must read.
+#[must_use]
+pub fn cors_expose_headers() -> String {
+    mkit_server::pipeline::ADMISSION_EXPOSE_HEADERS.join(", ")
+}
+
+/// How to copy `headers` onto a runtime response: `(name, value, append)`.
+/// A name's first value is `set` (replacing anything the runtime added) and
+/// each further value of the same name is appended, so repeated fields such
+/// as several `WWW-Authenticate` challenges all reach the client. Values that
+/// are not UTF-8 are skipped.
+#[must_use]
+pub fn response_header_plan(headers: &http::HeaderMap) -> Vec<(String, String, bool)> {
+    let mut seen = std::collections::BTreeSet::new();
+    headers
+        .iter()
+        .filter_map(|(name, value)| {
+            let value = value.to_str().ok()?;
+            let append = !seen.insert(name.as_str().to_owned());
+            Some((name.as_str().to_owned(), value.to_owned(), append))
+        })
+        .collect()
+}
+
 /// Deployment settings read from the Worker's vars.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -629,18 +680,86 @@ where
     }
 }
 
-/// Register the outcome kinds on every class that holds `o`/`oq` rows:
-/// kind 8 (delivery, in-tree `NoOutcomes` sink that acknowledges locally)
-/// and kind 9 (reconcile). Both make no subrequests, so the Free-plan alarm
-/// budget below is unchanged. A missing audience retains kind-8 rows.
+/// What kind-8 may spend in one Durable Object alarm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutcomeBudget {
+    /// Kind-8 fires per alarm.
+    pub fires_per_alarm: u32,
+    /// Rows (sink calls) per fire.
+    pub rows_per_fire: usize,
+}
+
+impl OutcomeBudget {
+    /// The most sink calls one alarm can make.
+    #[must_use]
+    pub fn sink_calls_per_alarm(self) -> u32 {
+        self.fires_per_alarm
+            .saturating_mul(u32::try_from(self.rows_per_fire).unwrap_or(u32::MAX))
+    }
+}
+
+/// Bound on one kind-8 sink call on a Worker (the wall-clock bound on a whole
+/// fire is twice this).
+pub const OUTCOME_SINK_TIMEOUT: core::time::Duration = core::time::Duration::from_secs(5);
+/// Kind-8 rows (sink calls) per fire on the Free plan.
+pub const FREE_OUTCOME_ROWS_PER_FIRE: usize = 8;
+/// Kind-8 fires per alarm on the Free plan.
+pub const FREE_OUTCOME_FIRES_PER_ALARM: u32 = 1;
+/// Kind-8 rows (sink calls) per fire on the Paid plan.
+pub const PAID_OUTCOME_ROWS_PER_FIRE: usize = 16;
+/// Kind-8 fires per alarm on the Paid plan.
+pub const PAID_OUTCOME_FIRES_PER_ALARM: u32 = 4;
+
+/// The audience stamped on delivered outcomes: the deployment's canonical
+/// origin, as on native (`outcome_audience`). A hook client's
+/// `server_audience` must be taken from this value (R-162).
 #[must_use]
-pub fn with_outcome_timers<S>(
+pub fn outcome_audience(cfg: &WorkerConfig) -> String {
+    cfg.audience.clone()
+}
+
+/// The kind-8 budget for `plan` (`WORKERS_PLAN`), always applied: Free makes
+/// at most 8 sink calls per alarm (one fire of 8 rows), Paid at most 64 (four
+/// fires of 16). A sink call may be a subrequest, and a Free alarm allows 50.
+/// The Free split is fixed: relay 32 + backup 1 + outcome 8 + quota rollup
+/// at most 8 = 49 (`RefShard`, the class with all of them). The rollup is
+/// registered by WP-1.26b; until then those 8 are headroom.
+#[must_use]
+pub fn outcome_budget(plan: Option<&str>) -> OutcomeBudget {
+    let paid = plan.is_some_and(|p| p.trim().eq_ignore_ascii_case("paid"));
+    if paid {
+        OutcomeBudget {
+            fires_per_alarm: PAID_OUTCOME_FIRES_PER_ALARM,
+            rows_per_fire: PAID_OUTCOME_ROWS_PER_FIRE,
+        }
+    } else {
+        OutcomeBudget {
+            fires_per_alarm: FREE_OUTCOME_FIRES_PER_ALARM,
+            rows_per_fire: FREE_OUTCOME_ROWS_PER_FIRE,
+        }
+    }
+}
+
+/// Register the outcome kinds on every class that holds `o`/`oq` rows:
+/// kind 8 (delivery to `sink`; `NoOutcomes` acknowledges locally) and kind 9
+/// (reconcile). Each sink call is bounded by 5 s through `sleep`
+/// (`WorkerSleep` on Workers; `clock` bounds a whole fire), a fire stops at
+/// its first failure, and the fire budget follows `plan` ([`outcome_budget`]). A missing audience retains
+/// kind-8 rows. A sink that names the server's audience (a hook client's
+/// `server_audience`) must take it from the same `audience` value (R-162).
+#[must_use]
+pub fn with_outcome_timers<S, O>(
     registry: mkit_server::timers::TimerRegistry<'static, S>,
     class: crate::classes::ShardClass,
     audience: Result<String, ConfigError>,
+    plan: Option<&str>,
+    sink: O,
+    sleep: Arc<dyn mkit_server::Sleep>,
+    clock: Arc<dyn mkit_server::Clock>,
 ) -> mkit_server::timers::TimerRegistry<'static, S>
 where
     S: mkit_server::NamespaceStore,
+    O: mkit_server::pipeline::OutcomeSink + 'static,
 {
     use crate::classes::ShardClass;
     if !matches!(
@@ -649,12 +768,19 @@ where
     ) {
         return registry;
     }
+    let budget = outcome_budget(plan);
     let delivery = match audience {
-        Ok(audience) => Some(mkit_server::timers::outcome_delivery::OutcomeDelivery {
-            sink: mkit_server::pipeline::NoOutcomes,
-            audience,
-            metrics: Arc::new(crate::telemetry::ConsoleMetrics::default()),
-        }),
+        Ok(audience) => Some(
+            mkit_server::timers::outcome_delivery::OutcomeDelivery::new(
+                sink,
+                audience,
+                Arc::new(crate::telemetry::ConsoleMetrics::default()),
+                sleep,
+            )
+            .with_max_rows(budget.rows_per_fire)
+            .with_sink_timeout(OUTCOME_SINK_TIMEOUT)
+            .with_clock(clock),
+        ),
         Err(error) => {
             crate::log_failure(&format!(
                 "Worker outcome delivery configuration unavailable: {error}"
@@ -663,26 +789,29 @@ where
         }
     };
     registry
-        .register(WorkerOutcomeDelivery { delivery })
+        .register(WorkerOutcomeDelivery {
+            delivery,
+            max_per_tick: budget.fires_per_alarm,
+        })
         .register(mkit_server::timers::reservation_reconcile::ReservationReconcile)
 }
 
-struct WorkerOutcomeDelivery {
-    delivery: Option<
-        mkit_server::timers::outcome_delivery::OutcomeDelivery<mkit_server::pipeline::NoOutcomes>,
-    >,
+struct WorkerOutcomeDelivery<O> {
+    delivery: Option<mkit_server::timers::outcome_delivery::OutcomeDelivery<O>>,
+    max_per_tick: u32,
 }
 
-impl<S: mkit_server::NamespaceStore> mkit_server::timers::TimerHandler<S>
-    for WorkerOutcomeDelivery
+impl<S, O> mkit_server::timers::TimerHandler<S> for WorkerOutcomeDelivery<O>
+where
+    S: mkit_server::NamespaceStore,
+    O: mkit_server::pipeline::OutcomeSink,
 {
     fn kind(&self) -> mkit_server::timers::TimerKind {
         mkit_server::timers::registry::kinds::OUTCOME_DELIVERY
     }
 
-    // Each fire delivers at most 16 rows locally; no subrequests.
     fn max_per_tick(&self) -> Option<u32> {
-        Some(4)
+        Some(self.max_per_tick)
     }
 
     fn fire<'a>(
@@ -1279,20 +1408,19 @@ mod glue {
     use std::sync::Once;
 
     use crate::telemetry::{ConsoleMetrics, install};
-    use mkit_server::auth_v2::CORS_ALLOW_HEADERS;
     use mkit_server::pipeline::{Hooks, Pipeline};
     use mkit_worker_common::adapter::{
-        copy_headers_filtered, copy_response_headers, is_deadline_header, respond_streamed,
-        to_http_method,
+        copy_headers_filtered, is_deadline_header, respond_streamed, to_http_method,
     };
     use mkit_worker_common::body_cap::content_length_exceeds;
-    use mkit_worker_common::cors::{cors_preflight_response, is_options_preflight, with_cors};
+    use mkit_worker_common::cors::{cors_preflight_response, is_options_preflight};
     use worker::{Env, Request, Response, State};
 
     use super::{
         BodyWatch, CORS_ALLOW_METHODS, ConfigError, LimitedBody, MeasuredBody, PLAN_VAR,
-        SINGLE_PUT_MAX_BYTES, WorkerConfig, body_too_large_json, dispatch_oneshot_body,
-        over_cap_response, plan_capacity, unavailable_json,
+        SINGLE_PUT_MAX_BYTES, WorkerConfig, body_too_large_json, cors_allow_headers,
+        cors_expose_headers, dispatch_oneshot_body, over_cap_response, plan_capacity,
+        response_header_plan, unavailable_json,
     };
     use crate::backup::{BACKUPS_BINDING, BackupConfig, BackupDrain, BackupHandler};
     use crate::clock::WorkerClock;
@@ -1310,6 +1438,28 @@ mod glue {
 
     /// The pipeline a request runs on.
     type WorkerPipeline = Pipeline<WorkerBlobStore, WorkerNamespaceStore, Hooks>;
+
+    /// `Access-Control-Allow-Origin` and the admission `Expose-Headers` on
+    /// every response, so a browser reads a challenge or a receipt.
+    fn cors(resp: Response) -> Response {
+        let mut resp = mkit_worker_common::cors::with_cors(resp);
+        let _ = resp
+            .headers_mut()
+            .set("Access-Control-Expose-Headers", &cors_expose_headers());
+        resp
+    }
+
+    /// Copy `headers` onto `out`, appending repeated fields.
+    fn copy_response_headers(headers: &http::HeaderMap, out: &mut Response) {
+        let out_headers = out.headers_mut();
+        for (name, value, append) in response_header_plan(headers) {
+            let _ = if append {
+                out_headers.append(&name, &value)
+            } else {
+                out_headers.set(&name, &value)
+            };
+        }
+    }
 
     fn json_response(body: String, status: u16) -> worker::Result<Response> {
         let mut response = Response::error(body, status)?;
@@ -1384,9 +1534,9 @@ mod glue {
         match WorkerConfig::from_env(&env) {
             Ok(cfg) => serve(req, env, &cfg).await,
             Err(_) if is_options_preflight(&req) => {
-                cors_preflight_response(CORS_ALLOW_HEADERS, CORS_ALLOW_METHODS)
+                cors_preflight_response(&cors_allow_headers(), CORS_ALLOW_METHODS)
             }
-            Err(e) => Ok(with_cors(json_response(unavailable_json(&e.0), 503)?)),
+            Err(e) => Ok(cors(json_response(unavailable_json(&e.0), 503)?)),
         }
     }
 
@@ -1399,7 +1549,7 @@ mod glue {
         let mut req = req;
         install();
         if is_options_preflight(&req) {
-            return cors_preflight_response(CORS_ALLOW_HEADERS, CORS_ALLOW_METHODS);
+            return cors_preflight_response(&cors_allow_headers(), CORS_ALLOW_METHODS);
         }
         let meta = WorkerNamespaceStore::new(
             StubTransport::new(env.clone(), cfg.placement.clone()),
@@ -1421,34 +1571,34 @@ mod glue {
                 .with(|cache| Settled::finish(cache, cfg.sharding, multi, jurisdiction, result))
         };
         if let Err(error) = checked {
-            return Ok(with_cors(json_response(
+            return Ok(cors(json_response(
                 unavailable_json(error.public_message()),
                 503,
             )?));
         }
         #[cfg(feature = "test-faults")]
         if let Some(response) = test::backup_round_trip(&mut req, &env, cfg).await? {
-            return Ok(with_cors(response));
+            return Ok(cors(response));
         }
         #[cfg(feature = "test-faults")]
         if req.method() == worker::Method::Get && req.path() == test::STATS_PATH {
-            return Ok(with_cors(test::stats(&env, cfg).await?));
+            return Ok(cors(test::stats(&env, cfg).await?));
         }
         #[cfg(feature = "test-faults")]
         {
             let path = req.path();
             if let Some(pack) = path.strip_prefix(test::RELAY_PATH_PREFIX) {
-                return Ok(with_cors(test::relay(req.method(), pack, &env, cfg).await?));
+                return Ok(cors(test::relay(req.method(), pack, &env, cfg).await?));
             }
         }
         let length = req.headers().get("content-length").ok().flatten();
         if content_length_exceeds(length.as_deref(), cfg.max_body_bytes) {
             let body = body_too_large_json(cfg.max_body_bytes);
-            return Ok(with_cors(json_response(body, 400)?));
+            return Ok(cors(json_response(body, 400)?));
         }
         let pipe = match pipeline(&env, cfg) {
             Ok(pipe) => pipe,
-            Err(e) => return Ok(with_cors(json_response(unavailable_json(&e.0), 503)?)),
+            Err(e) => return Ok(cors(json_response(unavailable_json(&e.0), 503)?)),
         };
         let watch = BodyWatch::default();
         let http_req = http_request(&req, cfg.max_body_bytes, &watch)?;
@@ -1461,7 +1611,7 @@ mod glue {
         // answered, before connectrpc returns its response: a body that
         // ran past the cap has tripped the watch by now.
         if let Some((status, body)) = over_cap_response(&watch, cfg.max_body_bytes) {
-            return Ok(with_cors(json_response(body, status)?));
+            return Ok(cors(json_response(body, status)?));
         }
         let status = http_resp.status().as_u16();
         let headers = http_resp.headers().clone();
@@ -1481,7 +1631,7 @@ mod glue {
             out = out.with_encode_body(worker::EncodeBody::Manual);
         }
         copy_response_headers(&headers, &mut out);
-        Ok(with_cors(out))
+        Ok(cors(out))
     }
 
     /// The Durable Object of a partition for `state`: its store capped for
@@ -1510,7 +1660,11 @@ mod glue {
         let registry = super::with_outcome_timers(
             registry,
             class,
-            WorkerConfig::from_env(env).map(|cfg| cfg.audience),
+            WorkerConfig::from_env(env).map(|cfg| super::outcome_audience(&cfg)),
+            plan.as_deref(),
+            mkit_server::pipeline::NoOutcomes,
+            Arc::new(crate::sleep::WorkerSleep),
+            Arc::new(WorkerClock),
         );
         let backup = BackupConfig::from_vars(|name| env.var(name).ok().map(|v| v.to_string()))
             .map_err(|error| {
@@ -1530,9 +1684,10 @@ mod glue {
             }
         });
         let registry = if let Some(config) = backup.clone() {
-            // Free-plan alarm budget: at most 32 relay calls plus this
-            // handler's single R2 put = 33 external subrequests, under 50.
-            // Kinds 8 and 9 (NoOutcomes, reconcile) make no external calls.
+            // Free-plan alarm budget (50 subrequests), fixed split: relay 32,
+            // this handler's single R2 put 1, kind-8 sink calls 8
+            // (`outcome_budget`), and the quota rollup (WP-1.26b) at most 8.
+            // Kind 9 makes no external calls, and `NoOutcomes` makes none.
             registry.register(BackupHandler::new(
                 EnvBucket::new(env.clone(), BACKUPS_BINDING),
                 config,
@@ -2407,6 +2562,75 @@ mod tests {
         }
     }
 
+    /// An admission that answers every write with a payment challenge, or
+    /// (`deny`) a refusal.
+    #[derive(Clone)]
+    struct Gate {
+        deny: bool,
+    }
+
+    impl mkit_server::pipeline::Admission for Gate {
+        async fn admit(
+            &self,
+            _: &mkit_server::pipeline::AdmissionInput<'_>,
+        ) -> Result<mkit_server::pipeline::AdmissionDecision, mkit_server::ServerError> {
+            if self.deny {
+                return Err(mkit_server::ServerError::permission_denied("no writes"));
+            }
+            Ok(mkit_server::pipeline::AdmissionDecision::challenge(
+                vec![mkit_server::pipeline::Challenge {
+                    scheme: "payment".to_owned(),
+                    value: "id=\"c1\"".to_owned(),
+                }],
+                "pay",
+            ))
+        }
+    }
+
+    /// The Connect binding with `admission` in front of writes.
+    fn gated_service(admission: Gate) -> connectrpc::ConnectRpcService {
+        use mkit_server::pipeline::{AuthMode, Hooks, Pipeline, PipelineConfig};
+        use mkit_server::upload::UploadLimits;
+        use mkit_server::{
+            Addressing, MemoryBlobStore, MemoryKv, NamespaceKey, NoopMetrics, RepoId, RepoName,
+            SystemClock,
+        };
+        let repo = RepoId {
+            namespace: NamespaceKey::deployment_default(),
+            name: RepoName::new("default").unwrap(),
+        };
+        let mut cfg = PipelineConfig::new(
+            Addressing::Single { repo },
+            AuthMode::AuthV2(
+                mkit_server::auth_v2::AuthV2Config::new("http://localhost", "default").unwrap(),
+            ),
+            UploadLimits {
+                max_total_bytes: 1 << 20,
+                max_chunks: 64,
+            },
+        );
+        cfg.ticket_keys = Some(
+            mkit_server::upload::token::TicketKeys::new(vec![("test".into(), [9; 32])]).unwrap(),
+        );
+        let hooks = Hooks {
+            authorizer: mkit_server::pipeline::OpenAuthorizer,
+            admission,
+            pre_receive: mkit_server::pipeline::NoPreReceive,
+            receipts: mkit_server::pipeline::NoReceipts,
+            outcomes: mkit_server::pipeline::NoOutcomes,
+        };
+        let pipe = Pipeline::new(
+            MemoryBlobStore::default(),
+            MemoryKv::default(),
+            hooks,
+            cfg,
+            Arc::new(SystemClock),
+            Arc::new(NoopMetrics),
+        )
+        .unwrap();
+        mkit_server::connect::service(Arc::new(pipe))
+    }
+
     /// The Connect binding over memory stores, open auth, 1 MiB packs.
     fn open_service() -> connectrpc::ConnectRpcService {
         use mkit_server::pipeline::{AuthMode, Hooks, Pipeline, PipelineConfig};
@@ -2537,5 +2761,88 @@ mod tests {
         assert_eq!(v["code"], "resource_exhausted");
         // Under the cap nothing is replaced.
         assert_eq!(over_cap_response(&BodyWatch::default(), LIMIT), None);
+    }
+
+    /// Every event and span field value, `Debug`-printed, in one buffer.
+    #[derive(Clone, Default)]
+    struct Captured(Arc<std::sync::Mutex<String>>);
+
+    impl tracing::field::Visit for Captured {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn core::fmt::Debug) {
+            use core::fmt::Write as _;
+            let _ = write!(self.0.lock().unwrap(), " {}={value:?}", field.name());
+        }
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Captured {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            event.record(&mut self.clone());
+        }
+
+        fn on_new_span(
+            &self,
+            attrs: &tracing::span::Attributes<'_>,
+            _: &tracing::span::Id,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            attrs.record(&mut self.clone());
+        }
+    }
+
+    /// A write carrying payment credentials, answered by a challenging or a
+    /// denying admission (402 / 403), leaves none of the credential values in
+    /// any event or span field. Platform invocation logs are outside this test.
+    #[test]
+    fn credentials_never_reach_the_adapters_tracing() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+        let captured = Captured::default();
+        let subscriber = tracing_subscriber::registry().with(captured.clone());
+        let _guard = tracing::subscriber::set_default(subscriber);
+        // The capture works: an event of ours shows up in it.
+        tracing::info!(marker = "capture-works");
+        for (deny, expected) in [(false, 402u16), (true, 403)] {
+            let procedure = "/mkit.transport.v1.TransportService/UpdateRef";
+            let json = br#"{"name":"refs/heads/x","expectation":"REF_EXPECTATION_ANY","newId":"BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="}"#;
+            let signed = mkit_server_conformance::wire::sign::Signer::new(
+                [5; 32],
+                "http://localhost",
+                "default",
+            )
+            .sign_body(procedure, json);
+            let mut builder = http::Request::builder()
+                .method(http::Method::POST)
+                .uri(format!("http://w.example{procedure}"))
+                .header("content-type", "application/json")
+                .header("connect-protocol-version", "1")
+                .header("payment-authorization", "pay-secret-0123")
+                .header("payment-signature", "paysig-secret-0123")
+                .header("authorization", "Payment scheme-secret-0123");
+            for (name, value) in &signed.headers {
+                builder = builder.header(name, value);
+            }
+            let req = builder
+                .body(LimitedBody::new(
+                    frames(&[json]),
+                    1024,
+                    BodyWatch::default(),
+                ))
+                .unwrap();
+            let runtime = runtime();
+            let resp = runtime.block_on(dispatch_oneshot_body(gated_service(Gate { deny }), req));
+            assert_eq!(resp.status().as_u16(), expected);
+            let _ = runtime.block_on(resp.into_body().collect());
+        }
+        let out = captured.0.lock().unwrap().clone();
+        for secret in [
+            "pay-secret-0123",
+            "paysig-secret-0123",
+            "scheme-secret-0123",
+        ] {
+            assert!(!out.contains(secret), "{secret} leaked: {out}");
+        }
     }
 }

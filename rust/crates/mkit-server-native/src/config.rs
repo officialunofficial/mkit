@@ -8,7 +8,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use clap::{Args, ValueEnum};
-use http::HeaderValue;
+use http::{HeaderName, HeaderValue};
 use mkit_server::auth_v2::AuthV2Config;
 #[cfg(feature = "test-faults")]
 use mkit_server::indexed::IndexedConfig;
@@ -383,6 +383,10 @@ pub struct ServeArgs {
     /// are dropped.
     #[arg(long, value_name = "SECS", default_value_t = 30)]
     pub shutdown_grace_secs: u64,
+    /// After the listeners drain, how long the timer driver may keep running
+    /// due timers (outcome delivery) before exit. 0 disables the drain.
+    #[arg(long, value_name = "SECS", default_value_t = 10)]
+    pub shutdown_drain_secs: u64,
     /// `SQLite` metadata: the database's hard size cap. Writes that add data
     /// stop at a reserve below it; reads and pruning keep working.
     #[arg(long, value_name = "N", default_value_t = DEFAULT_SQLITE_MAX_BYTES)]
@@ -492,6 +496,8 @@ pub struct ServeConfig {
     /// The listener: connection cap, header-read timeout, HTTP/2
     /// keepalive and the shutdown grace period.
     pub serve: ServeOptions,
+    /// Timer drain after the listeners stop; zero disables it.
+    pub shutdown_drain: Duration,
     /// Log line format.
     pub log_format: LogFormat,
 }
@@ -1322,6 +1328,34 @@ fn resolve_sharding(args: &ServeArgs) -> Result<Sharding, ConfigError> {
     }
 }
 
+/// The router's redactor and CORS request headers for the configured extra
+/// admission credential headers. `Pipeline::new` adds those names to its own
+/// redactor copy, so `pipeline.redactor` does not have them yet: without
+/// this an extra credential header would print in HTTP traces. The same
+/// list is what a browser may send.
+///
+/// # Errors
+/// `USAGE` when a name is not a valid header name.
+fn credential_router_parts(
+    pipeline: &PipelineConfig,
+) -> Result<(mkit_server::Redactor, Vec<HeaderName>), ConfigError> {
+    let mut redactor = pipeline.redactor.clone();
+    redactor.add_names(&pipeline.admission_credential_headers);
+    let headers = pipeline
+        .admission_credential_headers
+        .iter()
+        .map(|name| {
+            HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+                ConfigError::new(
+                    exit::USAGE,
+                    format!("{PREFIX}: credential header {name:?} is not a header name"),
+                )
+            })
+        })
+        .collect::<Result<_, _>>()?;
+    Ok((redactor, headers))
+}
+
 /// Resolve `args`, reading environment variables through `env`. Nothing
 /// is opened or written: [`crate::server::open`] does that.
 ///
@@ -1427,6 +1461,7 @@ pub fn resolve(
         }
         pipeline.indexed = Some(indexed);
     }
+    let (redactor, cors_extra_allow_headers) = credential_router_parts(&pipeline)?;
     let router = RouterOptions {
         unary_timeout: Duration::from_secs(args.unary_timeout_secs),
         stream_timeout: Duration::from_secs(args.stream_timeout_secs),
@@ -1434,7 +1469,8 @@ pub fn resolve(
         queue_timeout: Duration::from_secs(args.queue_timeout_secs),
         max_body_bytes: body_limit_for(max_pack),
         cors: cors_policy(&args.cors_allow_origin)?,
-        redactor: pipeline.redactor.clone(),
+        redactor,
+        cors_extra_allow_headers,
         ..RouterOptions::default()
     };
     let serve = ServeOptions {
@@ -1455,6 +1491,35 @@ pub fn resolve(
         router,
         unsafe_loopback_grants: args.unsafe_allow_loopback_grants,
         serve,
+        shutdown_drain: Duration::from_secs(args.shutdown_drain_secs),
         log_format: args.log_format,
     })
+}
+
+#[cfg(test)]
+mod credential_tests {
+    use super::*;
+
+    #[test]
+    fn extra_credential_headers_reach_the_redactor_and_cors() {
+        let repo = RepoId {
+            namespace: NamespaceKey::deployment_default(),
+            name: RepoName::new("default").unwrap(),
+        };
+        let mut pipeline = PipelineConfig::new(
+            Addressing::Single { repo },
+            AuthMode::TransportIdentity,
+            UploadLimits {
+                max_total_bytes: 1,
+                max_chunks: 1,
+            },
+        );
+        pipeline.admission_credential_headers = vec!["X-Extra-Cred".to_owned()];
+        assert!(!pipeline.redactor.redacts("x-extra-cred"));
+        let (redactor, allow) = credential_router_parts(&pipeline).unwrap();
+        assert!(redactor.redacts("x-extra-cred"));
+        assert_eq!(allow, [HeaderName::from_static("x-extra-cred")]);
+        pipeline.admission_credential_headers = vec!["bad name".to_owned()];
+        assert!(credential_router_parts(&pipeline).is_err());
+    }
 }

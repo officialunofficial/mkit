@@ -16,7 +16,8 @@
 //! - [`ns_client`]: [`DoNamespaceStore`], the Worker-side
 //!   [`NamespaceStore`] that routes each [`Partition`] to its own Durable
 //!   Object ([`naming`]).
-//! - [`wire`]: the JSON between the two; [`clock`]: the Worker clock.
+//! - [`wire`]: the JSON between the two; [`clock`]: the Worker clock;
+//!   [`sleep`]: the Worker sleep behind the kind-8 sink timeout.
 //! - [`adapter`]: what a deployment's `#[event(fetch)]` and
 //!   `#[durable_object]` call: the pipeline's Connect binding over these
 //!   stores, streaming both bodies.
@@ -58,6 +59,7 @@ pub mod ns_client;
 pub mod ns_object;
 pub mod r2;
 pub mod sharding_guard;
+pub mod sleep;
 pub mod telemetry;
 pub mod wire;
 
@@ -111,6 +113,7 @@ mod tests {
             include_str!("ns_client.rs"),
             include_str!("ns_object.rs"),
             include_str!("r2.rs"),
+            include_str!("sleep.rs"),
             include_str!("wire.rs"),
             include_str!("faults.rs"),
         ];

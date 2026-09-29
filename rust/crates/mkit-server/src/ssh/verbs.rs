@@ -13,12 +13,14 @@
 //! | `UpdateRef` | a name over 512 bytes | `INVALID_REQUEST "ref name too long"` |
 //! | `UpdateRef` | a valid name outside `refs/` | `INVALID_REQUEST`, [`REF_NAME_OUTSIDE_REFS`] |
 //! | `UpdateRef` | a CAS conflict | [`cas_conflict_body`] |
+//! | `UpdateRef` | admission wants a payment ([`ServerError::is_transport_admission_required`]) | `INVALID_REQUEST`, [`PAYMENT_REQUIRED_FRAME`], empty `details` |
 //! | `UpdateRef` | `permission_denied` | `INVALID_REQUEST "write not permitted"` |
 //! | `UpdateRef` | a packmap's node, `prev` or a listed pack unknown (B10) | `INVALID_REQUEST`, [`IMPLICIT_PACKMAP_UNKNOWN`] |
 //! | `UpdateRef` | any other | `INVALID_REQUEST "update ref failed"` |
 //! | `ListRefs` | any | `INTERNAL "list refs failed"` |
 //! | `DownloadPack` | any, before the header | `KEY_NOT_FOUND "pack not found"` |
 //! | `DownloadPack` | a body read, after the header | `INTERNAL "pack read failed"` |
+//! | `UploadPack` | admission wants a payment or a reservation (same marker) | `INVALID_REQUEST`, [`PAYMENT_REQUIRED_FRAME`] |
 //! | `UploadPack` | `permission_denied` | `INVALID_REQUEST "write not permitted"` |
 //! | `UploadPack` | the eighth distinct pack before a packmap | `INVALID_REQUEST "too many packs uploaded before a packmap update"` |
 //! | `UploadPack` | bytes that do not hash to `pack_id` | `INVALID_REQUEST`, [`UploadError::ssh_message`] |
@@ -163,7 +165,9 @@ fn is_digest_mismatch(err: &ServerError) -> bool {
 /// `UpdateRef`'s failure mapping: a denied write and the B10 refusal are
 /// pinned, and everything else stays `update ref failed`.
 fn update_ref_error(err: &ServerError) -> VerbError {
-    if err.code() == Code::PermissionDenied {
+    if err.is_transport_admission_required() {
+        (ErrorCode::InvalidRequest, PAYMENT_REQUIRED_FRAME)
+    } else if err.code() == Code::PermissionDenied {
         (ErrorCode::InvalidRequest, "write not permitted")
     } else if err.code() == Code::FailedPrecondition
         && err.public_message() == IMPLICIT_PACKMAP_UNKNOWN
@@ -177,9 +181,19 @@ fn update_ref_error(err: &ServerError) -> VerbError {
 /// `UploadPack`'s refusal on a denied open; any other open failure keeps
 /// `upload failed`.
 fn upload_open_error(err: &ServerError) -> Option<VerbError> {
-    (err.code() == Code::PermissionDenied)
-        .then_some((ErrorCode::InvalidRequest, "write not permitted"))
+    if err.is_transport_admission_required() {
+        Some((ErrorCode::InvalidRequest, PAYMENT_REQUIRED_FRAME))
+    } else {
+        (err.code() == Code::PermissionDenied)
+            .then_some((ErrorCode::InvalidRequest, "write not permitted"))
+    }
 }
+
+/// The frame message for a write whose admission needs a payment or a
+/// reservation: ssh and enc cannot carry either, so the client is told to use
+/// HTTPS. Sent as `INVALID_REQUEST` with empty `details`, so a client never
+/// reads it as a ref conflict; the frozen `ErrorCode` set is unchanged.
+pub const PAYMENT_REQUIRED_FRAME: &str = "payment required: use mkit+https";
 
 /// The verbs of one session: its pipeline, the principal every verb runs
 /// as, the repository the transport bound the session to, and the
