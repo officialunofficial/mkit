@@ -950,12 +950,14 @@ mod tests {
             at_ms: 100,
             target: target(),
             puts: vec![(Key::new(b"m\0x".to_vec()), Value::default())],
+            deletes: Vec::new(),
         })
         .unwrap();
         let relay_to_empty = codec::encode_relay(&codec::RelayV1 {
             at_ms: 100,
             target: empty_target(),
             puts: vec![(Key::new(b"m\0y".to_vec()), Value::default())],
+            deletes: Vec::new(),
         })
         .unwrap();
         let ref_shard = snapshot(
@@ -1231,6 +1233,7 @@ mod tests {
                 Key::new(b"m\0new".as_slice()),
                 Value::new(b"delivered".as_slice()),
             )],
+            deletes: Vec::new(),
         })
         .unwrap();
         block_on(

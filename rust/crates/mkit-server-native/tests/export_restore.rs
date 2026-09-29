@@ -121,6 +121,7 @@ fn seed_d34_invariants(store: &SqlKvStore<RusqliteConn>) -> (Partition, Partitio
             Key::new(b"ri\0item".as_slice()),
             Value::new(b"present".as_slice()),
         )],
+        deletes: Vec::new(),
     };
     put(
         store,

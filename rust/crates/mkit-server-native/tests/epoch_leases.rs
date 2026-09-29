@@ -1044,6 +1044,7 @@ async fn append_model_relay(
         at_ms,
         target: coordinator(a),
         puts: vec![(Key::new(&b"x\0"[..]), codec::encode_u64(seq))],
+        deletes: Vec::new(),
     };
     let batch = Batch::new()
         .require(Precondition::Equals(keys::epoch_lease(), lease_value))
@@ -1177,6 +1178,7 @@ async fn plant_delayed_relay_and_expired_lease(
         at_ms: 90,
         target: coordinator.clone(),
         puts: vec![(Key::new(&b"x\0"[..]), Value::default())],
+        deletes: Vec::new(),
     };
     store
         .apply(
@@ -1335,6 +1337,7 @@ async fn revocation_completes_with_expired_kept_row() {
         at_ms: 1,
         target: coordinator(&a),
         puts: vec![(Key::new(&b"x\0"[..]), Value::default())],
+        deletes: Vec::new(),
     };
     store
         .apply(
@@ -1643,6 +1646,7 @@ async fn swept_lease_renewal<N: NamespaceStore + 'static>(
     store_clock: Arc<ManualClock>,
     renewal_now_ms: i64,
 ) {
+    use mkit_server::relay::{NoHook, RelayBudget, RelayHandler};
     use mkit_server::timers::lease_sweep::LeaseSweep;
     let store = Store::new(backend);
     let pipe = pipeline(
@@ -1655,6 +1659,24 @@ async fn swept_lease_renewal<N: NamespaceStore + 'static>(
     committed(&pipe, &a, REF, 1).await;
     let old = el(&store, &a, REF).await;
     assert_eq!(old.expires_at_ms, 30_000);
+
+    // The ref write now leaves an index relay row. Drain it so this case
+    // isolates lease clock skew rather than the sweep's outbox hold-off.
+    let relay_report = run_due(
+        &store,
+        &shard(&a, REF),
+        &TimerRegistry::new().register(RelayHandler {
+            target: store.clone(),
+            hook: NoHook,
+            budget: RelayBudget::default(),
+        }),
+        clock.as_ref(),
+        0,
+        &TickBudget::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(relay_report.fired, 1);
 
     clock.set(renewal_now_ms);
     store_clock.set(30_000);

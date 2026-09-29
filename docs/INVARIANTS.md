@@ -1255,13 +1255,26 @@ Pending reservations, ReadServed, reconciliation and backlog enforcement.
 ## Relay delivery advances durable per-source watermarks before source cleanup
 
 **Always:** relay rows for a source/target pair apply in sequence order. Each
-batch guards the target's `rh` and advances it atomically with the row upserts
-and pre-delivery hook effects. Duplicates never apply a target batch. Source
+batch guards the target's `rh` and advances it atomically with the row upserts,
+deletes, and pre-delivery hook effects. Duplicates never apply a target batch. Source
 cleanup guards each encoded row; draining the timer guards the originally
 observed `os`, so a same-millisecond writer cannot lose its wake-up. Writers
 stamp and chunk rows, and commit an immediate kind-3 timer with their outbox.
 Target watermarks and the one `rs 00` scan row per source are never pruned;
 watermarks are bounded by source shards.
+
+**Always:** a key that is ever relay-deleted has exactly one producer. Its
+source `os` sequence orders every upsert and delete. Identical upserts from
+several producers remain valid for never-deleted keys, including object-index
+`i` rows (R-130).
+
+**Because:** one target `rh` per source deduplicates rows, but cannot order
+conflicting operations from distinct sources on a deleted key.
+
+**If violated:** a delayed upsert can resurrect a deleted ref-index row.
+
+**Enforced by:** D34 ref-index routing from one ref shard, the disjoint
+put/delete relay codec and outbox validation, and ordered relay delivery tests.
 
 **Always:** during an active relay scan cycle, every undelivered row whose
 sequence is at or below the durable cursor has a target in the cycle's
@@ -1357,8 +1370,10 @@ parsing, unit call-count/isolation tests and Multi wire membership cases.
 
 ## Every relay source is covered by an epoch lease
 
-**Always:** a batch that appends relay rows carries an epoch lease on its
-source shard. Only ref shards are relay sources. A new relay source class
+**Always:** a production batch that appends relay rows carries an epoch lease
+on its source shard. Only ref shards are relay sources. The test-only `TestTimer`
+kind may append a ref-index delete without a lease: it is compiled out of
+release builds and can fire after the lease expires. A new relay source class
 requires its own coordinator watermark design before it can append rows.
 This binds WP-1.10 (#1188), 4.7, 4.8, 4.10, 5.3b, 5.6 and 5.7b. The namespace
 watermark bounds every undelivered relay row's **commit time** from below;

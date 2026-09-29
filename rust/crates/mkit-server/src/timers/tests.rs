@@ -12,6 +12,84 @@ fn memory() -> MemoryKv {
     MemoryKv::with_clock(Arc::new(ManualClock::new(100)))
 }
 
+#[cfg(feature = "test-faults")]
+#[tokio::test]
+async fn test_timer_d34_deletes_ref_and_enqueues_index_delete_without_lease() {
+    use crate::pipeline::{D34Shards, ShardMap};
+    use crate::repo::{RepoId, RepoName};
+    use crate::store::codec;
+    let store = memory();
+    let repo = RepoId {
+        namespace: NamespaceKey::deployment_default(),
+        name: RepoName::new("a").unwrap(),
+    };
+    let name = "refs/heads/main";
+    let source = D34Shards.ref_shard(&repo, name);
+    store
+        .apply(
+            &source,
+            Batch::new()
+                .put(keys::outbox_sequence(), codec::encode_u64(5))
+                .put(
+                    keys::ref_key(&repo.name, name),
+                    codec::encode_ref_id(&[1; 32]),
+                ),
+        )
+        .await
+        .unwrap();
+    let reference = [repo.name.as_str().as_bytes(), b"\0", name.as_bytes()].concat();
+    let due = DueTimer {
+        due_at_ms: 100,
+        kind: registry::kinds::TEST,
+        reference: reference.into(),
+        value: Value::default(),
+    };
+    let fired = test_kind::TestTimer
+        .fire(
+            &TimerCtx {
+                store: &store,
+                partition: &source,
+                now_ms: 100,
+            },
+            &due,
+        )
+        .await
+        .unwrap();
+    let Fired::Done(batch) = fired else {
+        panic!("test timer must commit")
+    };
+    assert!(batch.preconditions.contains(&Precondition::Equals(
+        keys::outbox_sequence(),
+        codec::encode_u64(5)
+    )));
+    assert!(
+        !batch
+            .preconditions
+            .iter()
+            .any(|pre| matches!(pre, Precondition::Equals(key, _) if *key == keys::epoch_lease()))
+    );
+    assert!(
+        batch
+            .writes
+            .contains(&Write::Delete(keys::ref_key(&repo.name, name)))
+    );
+    assert!(batch.writes.iter().any(|write| matches!(write, Write::Put(key, _) if *key == keys::timer(100, registry::kinds::RELAY.get(), b""))));
+    let row = batch
+        .writes
+        .iter()
+        .find_map(|write| match write {
+            Write::Put(key, value)
+                if matches!(keys::parse(key), Some(keys::ParsedKey::Relay(_))) =>
+            {
+                Some(codec::decode_relay(value).unwrap())
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(row.target, D34Shards.ref_index(&repo, name));
+    assert_eq!(row.deletes, vec![keys::ref_index_key(&repo.name, name)]);
+}
+
 fn partition() -> Partition {
     Partition::Namespace(NamespaceKey::deployment_default())
 }
@@ -91,7 +169,7 @@ impl<S: NamespaceStore> TimerHandler<S> for Handler {
 }
 async fn tick<S: NamespaceStore>(
     store: &S,
-    registry: &TimerRegistry<S>,
+    registry: &TimerRegistry<'static, S>,
     clock: &ManualClock,
     budget: &TickBudget,
 ) -> RunReport {
@@ -413,12 +491,13 @@ async fn changed_timer_row_loses_guard_and_does_not_apply_effects() {
 #[test]
 #[should_panic(expected = "zero")]
 fn registry_rejects_zero() {
-    let _: TimerRegistry<MemoryKv> = TimerRegistry::new().register(Handler(0, Action::Done, None));
+    let _: TimerRegistry<'static, MemoryKv> =
+        TimerRegistry::new().register(Handler(0, Action::Done, None));
 }
 #[test]
 #[should_panic(expected = "already")]
 fn registry_rejects_duplicate() {
-    let _: TimerRegistry<MemoryKv> = TimerRegistry::new()
+    let _: TimerRegistry<'static, MemoryKv> = TimerRegistry::new()
         .register(Handler(1, Action::Done, None))
         .register(Handler(1, Action::Done, None));
 }

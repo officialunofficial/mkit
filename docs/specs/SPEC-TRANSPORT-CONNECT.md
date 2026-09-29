@@ -1564,6 +1564,8 @@ of these:
 
 A lag never exposes another repository's data and never acts as an
 existence oracle (§7.4).
+An index lags per bucket, so a listing need not reflect a single instant;
+a branch head and its packmap may appear at different ages.
 
 **Read-your-writes for packs.** `PackExists` and `DownloadPack` MAY
 carry an optional header naming a ref of the same repository whose
@@ -1662,6 +1664,7 @@ Explicitly deferred to sibling issues:
 
 | Version | Status | Changes |
 |---|---|---|
+| `2` (WP-1.28b) | draft | §7.9 clarifies per-bucket ListRefs index lag and head/packmap age differences. |
 | `2` (WP-1.11b) | draft | §5 and §7.6: a part receipt bound to another ticket is an invalid receipt (`invalid_argument`), with no cross-ticket oracle. |
 | `2` | draft | §7.9 defines absent or zero `page_size` as the advertised maximum and malformed or foreign page tokens as `invalid_argument` (WP-1.28a). |
 | `2` (WP-1.10) | draft | §7.6 requires canonical branch-head/packmap pairing for ticketed advances; §7.8 rejects deletion with tickets. |

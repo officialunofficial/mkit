@@ -41,8 +41,7 @@ pub(crate) fn relay_delay_key() -> crate::Key {
     crate::Key::new(&b"tdr\0"[..])
 }
 
-/// Attach a delivery hold to the same batch as a test `UpdateRef` commit.
-/// WP-1.28b extends this directive to `AdvanceRefs` relay commits.
+/// Attach a delivery hold to the same batch as a test ref commit.
 pub(crate) fn delay_relay_batch(
     batch: Batch,
     directives: &TestDirectives,
@@ -50,7 +49,7 @@ pub(crate) fn delay_relay_batch(
     now_ms: u64,
 ) -> Batch {
     if let Some(delay) = directives.relay_delay_ms
-        && matches!(op.kind, OpKind::UpdateRef(_))
+        && matches!(op.kind, OpKind::UpdateRef(_) | OpKind::AdvanceRefs { .. })
     {
         batch.put(
             relay_delay_key(),
@@ -288,6 +287,49 @@ pub(crate) async fn schedule_timer<S: crate::NamespaceStore>(
         )),
     }
 }
+/// Borrow the pipeline's store as a relay target without cloning a Worker
+/// adapter or changing its partition routing.
+struct BorrowedStore<'a, S>(&'a S);
+
+impl<S: crate::NamespaceStore> crate::NamespaceStore for BorrowedStore<'_, S> {
+    fn capabilities(&self) -> crate::StoreCapabilities {
+        self.0.capabilities()
+    }
+    async fn get(
+        &self,
+        p: &crate::Partition,
+        k: &crate::Key,
+    ) -> Result<Option<crate::Value>, crate::StoreError> {
+        self.0.get(p, k).await
+    }
+    async fn scan(
+        &self,
+        p: &crate::Partition,
+        start: &crate::Key,
+        end: &crate::Key,
+        after: Option<&crate::Cursor>,
+        limit: u32,
+    ) -> Result<crate::ScanPage, crate::StoreError> {
+        self.0.scan(p, start, end, after, limit).await
+    }
+    async fn apply(
+        &self,
+        p: &crate::Partition,
+        batch: Batch,
+    ) -> Result<crate::BatchOutcome, crate::StoreError> {
+        self.0.apply(p, batch).await
+    }
+    async fn stats(
+        &self,
+        p: &crate::Partition,
+    ) -> Result<crate::PartitionStats, crate::StoreError> {
+        self.0.stats(p).await
+    }
+    async fn probe(&self) -> Result<(), crate::StoreError> {
+        self.0.probe().await
+    }
+}
+
 /// Tick the requested ref shard before the ordinary listing.
 pub(crate) async fn run_timers<S: crate::NamespaceStore>(
     directives: &TestDirectives,
@@ -297,18 +339,35 @@ pub(crate) async fn run_timers<S: crate::NamespaceStore>(
     clock: &dyn crate::Clock,
     business_now: u64,
 ) -> Result<(), ServerError> {
+    use crate::relay::{NoHook, RelayBudget, RelayHandler};
     use crate::timers::{TickBudget, TimerRegistry, run_due, test_kind::TestTimer};
     if let Some(name) = &directives.run_timers {
-        run_due(
-            store,
-            &shards.ref_shard(repo, name),
-            &TimerRegistry::new().register(TestTimer),
-            clock,
-            business_now,
-            &TickBudget::default(),
-        )
-        .await
-        .map_err(|e| ServerError::internal("test timer tick failed", e))?;
+        let partition = shards.ref_shard(repo, name);
+        let registry = TimerRegistry::new()
+            .register(TestTimer)
+            .register(RelayHandler {
+                target: BorrowedStore(store),
+                hook: NoHook,
+                budget: RelayBudget::default(),
+            });
+        loop {
+            let report = run_due(
+                store,
+                &partition,
+                &registry,
+                clock,
+                business_now,
+                &TickBudget::default(),
+            )
+            .await
+            .map_err(|e| ServerError::internal("test timer tick failed", e))?;
+            if report.fired == 0 {
+                if report.failed > 0 || report.raced > 0 || report.stopped_on_budget {
+                    return Err(ServerError::unavailable("test timer tick did not drain"));
+                }
+                return Ok(());
+            }
+        }
     }
     Ok(())
 }

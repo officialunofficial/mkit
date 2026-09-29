@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server: maintain D34's 16-bucket ref-name index through relay upserts and
+  deletes, and serve eventual paged ListRefs from it (WP-1.28b).
+
 - Connect client: sign repository reads with auth v2 on each attempt, including
   the framed `DownloadPack` request. Add a grant-source API and local selection
   logic; the user grant store follows in WP-2.13.

@@ -1,11 +1,10 @@
-//! Bounded, key-based `ListRefs` paging. The source seam also serves D34's
-//! sixteen ref-index buckets once their rows exist (WP-1.28b).
+//! Bounded, key-based `ListRefs` paging over direct refs or D34 index buckets.
 
 use core::future::Future;
 
 use mkit_core::hash::Hash;
 
-use super::RefEntry;
+use super::{D34Shards, RefEntry, ShardMap};
 use crate::refs::MAX_REF_NAME_BYTES;
 use crate::repo::RepoId;
 use crate::rt::MaybeSend;
@@ -75,6 +74,56 @@ impl<N: NamespaceStore> BucketSource for RefBucket<'_, N> {
             .map(|(key, value)| match keys::parse(key) {
                 Some(keys::ParsedKey::Ref { name, .. }) => Ok((name, codec::decode_ref_id(value)?)),
                 _ => Err(StoreError::Corrupt("malformed ref key".into())),
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(Scan {
+            rows,
+            more: page.next.is_some(),
+        })
+    }
+}
+
+pub(super) struct IndexBucket<'a, N> {
+    pub store: &'a N,
+    pub partition: &'a Partition,
+}
+
+impl<N: NamespaceStore> BucketSource for IndexBucket<'_, N> {
+    async fn scan(
+        &self,
+        repo: &RepoId,
+        prefix: &str,
+        last: Option<&str>,
+        limit: u32,
+    ) -> Result<Scan, StoreError> {
+        let (prefix_start, end) = keys::ref_index_prefix_range(&repo.name, prefix);
+        let start = last.map_or_else(
+            || prefix_start.clone(),
+            |name| {
+                let mut bytes = keys::ref_index_key(&repo.name, name).as_bytes().to_vec();
+                bytes.push(0);
+                std::cmp::max(prefix_start.clone(), Key::new(bytes))
+            },
+        );
+        let page = self
+            .store
+            .scan(self.partition, &start, &end, None, limit)
+            .await?;
+        let rows = page
+            .entries
+            .iter()
+            .map(|(key, value)| match keys::parse(key) {
+                Some(keys::ParsedKey::RefIndexEntry {
+                    repo: row_repo,
+                    name,
+                }) if row_repo == repo.name
+                    && D34Shards.ref_index(repo, &name) == *self.partition =>
+                {
+                    Ok((name, codec::decode_ref_id(value)?))
+                }
+                _ => Err(StoreError::Corrupt(
+                    "malformed or misrouted ref index row".into(),
+                )),
             })
             .collect::<Result<_, _>>()?;
         Ok(Scan {
@@ -331,6 +380,32 @@ mod tests {
         }
     }
 
+    fn real_index_pages(
+        store: &crate::MemoryKv,
+        repo: &RepoId,
+        prefix: &str,
+        n: u32,
+    ) -> Vec<String> {
+        let partitions = D34Shards.ref_index_partitions(repo);
+        let sources = partitions
+            .iter()
+            .map(|partition| IndexBucket { store, partition })
+            .collect::<Vec<_>>();
+        let mut token = None;
+        let mut names = Vec::new();
+        loop {
+            let last = token
+                .as_deref()
+                .map(|bytes| decode_token(repo, prefix, bytes).unwrap());
+            let result = block_on(page(&sources, repo, prefix, last.as_deref(), n, 8192)).unwrap();
+            names.extend(result.refs.into_iter().map(|entry| entry.name));
+            match result.next {
+                Some(next) => token = Some(next),
+                None => return names,
+            }
+        }
+    }
+
     #[cfg(feature = "connect")]
     fn assert_encoded_bounds(page: &ListPage) {
         use crate::connect::proto::mkit::transport::v1::{
@@ -442,6 +517,36 @@ mod tests {
     }
 
     #[test]
+    fn misrouted_index_row_is_corrupt() {
+        use crate::store::{Batch, NamespaceStore};
+        let store = crate::MemoryKv::default();
+        let repo = repo("a");
+        let name = "refs/heads/main";
+        let proper = D34Shards.ref_index(&repo, name);
+        let wrong = D34Shards
+            .ref_index_partitions(&repo)
+            .into_iter()
+            .find(|p| p != &proper)
+            .unwrap();
+        block_on(store.apply(
+            &wrong,
+            Batch::new().put(
+                keys::ref_index_key(&repo.name, name),
+                codec::encode_ref_id(&[1; 32]),
+            ),
+        ))
+        .unwrap();
+        let source = IndexBucket {
+            store: &store,
+            partition: &wrong,
+        };
+        assert!(matches!(
+            block_on(page(&[source], &repo, "", None, 10, 2048)),
+            Err(StoreError::Corrupt(_))
+        ));
+    }
+
+    #[test]
     fn inserts_and_deletes_between_pages_preserve_stable_names_once() {
         let names: Vec<_> = (0..20).map(|i| format!("refs/heads/n{i:03}")).collect();
         let sources = buckets(&names, 16);
@@ -496,6 +601,26 @@ mod tests {
                 let sources = buckets(&names, count);
                 prop_assert_eq!(all_pages(&sources, &a, "", n, budget), names.clone());
             }
+        }
+
+        #[test]
+        fn real_memory_index_pages_equal_sorted_listing(ids in proptest::collection::vec(0u16..150, 0..50), n in 1u32..25) {
+            use crate::store::{Batch, NamespaceStore};
+            let store = crate::MemoryKv::default();
+            let a = repo("a");
+            let b = repo("b");
+            let mut names = ids.into_iter().map(|id| format!("refs/heads/n{id:04}")).collect::<Vec<_>>();
+            names.sort(); names.dedup();
+            for name in &names {
+                let target = D34Shards.ref_index(&a, name);
+                block_on(store.apply(&target, Batch::new().put(keys::ref_index_key(&a.name, name), codec::encode_ref_id(&[1;32])))).unwrap();
+                let foreign = D34Shards.ref_index(&b, name);
+                block_on(store.apply(&foreign, Batch::new().put(keys::ref_index_key(&b.name, name), codec::encode_ref_id(&[2;32])))).unwrap();
+            }
+            prop_assert_eq!(real_index_pages(&store, &a, "", n), names.clone());
+            prop_assert_eq!(real_index_pages(&store, &b, "", n), names.clone());
+            let expected = names.iter().filter(|name| name.starts_with("refs/heads/n0")).cloned().collect::<Vec<_>>();
+            prop_assert_eq!(real_index_pages(&store, &a, "refs/heads/n0", n), expected);
         }
     }
 }

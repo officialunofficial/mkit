@@ -418,11 +418,16 @@ mod tests {
         );
     }
 
-    fn registry(bucket: Bucket, config: BackupConfig) -> TimerRegistry<MemoryKv> {
+    fn registry(bucket: Bucket, config: BackupConfig) -> TimerRegistry<'static, MemoryKv> {
         TimerRegistry::new().register(BackupHandler::new(bucket, config))
     }
 
-    fn tick(store: &MemoryKv, registry: &TimerRegistry<MemoryKv>, clock: &ManualClock, now: u64) {
+    fn tick(
+        store: &MemoryKv,
+        registry: &TimerRegistry<'static, MemoryKv>,
+        clock: &ManualClock,
+        now: u64,
+    ) {
         assert_eq!(
             block_on(run_due(
                 store,

@@ -200,7 +200,7 @@ async fn fire_timer<S: NamespaceStore>(
 pub async fn run_due<S: NamespaceStore>(
     store: &S,
     p: &Partition,
-    registry: &TimerRegistry<S>,
+    registry: &TimerRegistry<'_, S>,
     clock: &dyn Clock,
     now_ms: u64,
     budget: &TickBudget,

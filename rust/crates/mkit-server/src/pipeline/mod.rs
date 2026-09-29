@@ -695,18 +695,6 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     self.test_bump_epoch(&op.repo.namespace, epoch).await?;
                 }
             }
-            let partitions = self.shards.ref_index_partitions(&op.repo);
-            if partitions.len() != 1 {
-                // TODO(WP-1.28b): read the eventually consistent ref-name index.
-                return Err(ServerError::new(
-                    crate::Code::Unimplemented,
-                    "ListRefs under d34 sharding lands with WP-1.28",
-                ));
-            }
-            let p = partitions
-                .into_iter()
-                .next()
-                .ok_or_else(|| internal("missing ref index"))?;
             #[cfg(feature = "test-faults")]
             faults::run_timers(
                 a.test_directives(),
@@ -723,20 +711,40 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             } else {
                 requested.min(self.cfg.max_list_refs_page_size)
             };
-            let bucket = list::RefBucket {
-                store: &self.meta,
-                partition: &p,
+            let partitions = self.shards.ref_index_partitions(&op.repo);
+            let result = if partitions.len() == 1 {
+                let bucket = list::RefBucket {
+                    store: &self.meta,
+                    partition: &partitions[0],
+                };
+                list::page(
+                    &[bucket],
+                    &op.repo,
+                    &scan,
+                    last.as_deref(),
+                    limit,
+                    list::MAX_RESPONSE_BYTES,
+                )
+                .await
+            } else {
+                let buckets = partitions
+                    .iter()
+                    .map(|partition| list::IndexBucket {
+                        store: &self.meta,
+                        partition,
+                    })
+                    .collect::<Vec<_>>();
+                list::page(
+                    &buckets,
+                    &op.repo,
+                    &scan,
+                    last.as_deref(),
+                    limit,
+                    list::MAX_RESPONSE_BYTES,
+                )
+                .await
             };
-            let mut page = list::page(
-                &[bucket],
-                &op.repo,
-                &scan,
-                last.as_deref(),
-                limit,
-                list::MAX_RESPONSE_BYTES,
-            )
-            .await
-            .map_err(|err| {
+            let mut page = result.map_err(|err| {
                 tracing::warn!(detail = %err, "ref listing scan failed");
                 ServerError::unavailable("ref listing unavailable")
             })?;
@@ -1379,6 +1387,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         }
         if self.cfg.sharding == Sharding::D34 {
             wanted.push(keys::epoch_lease());
+            if !refs.is_empty() {
+                wanted.extend([keys::outbox_sequence(), keys::outcome_backlog()]);
+            }
         }
         if let Some(auth) = &op.auth {
             wanted.push(keys::replay(&auth.replay_scope));
@@ -1655,6 +1666,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             repo: &op.repo.name,
             kind,
             refs,
+            ref_index: (self.cfg.sharding == Sharding::D34 && !refs.is_empty()).then_some((
+                &op.repo,
+                p,
+                self.shards.as_ref(),
+            )),
             replay,
             charges,
             namespace_charge: self.namespace_charge(

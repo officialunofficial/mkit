@@ -73,10 +73,10 @@ pub trait TimerHandler<S: NamespaceStore>: MaybeSend + MaybeSync {
 }
 
 /// Handlers registered once at driver startup, indexed by stable kind number.
-pub struct TimerRegistry<S> {
-    handlers: BTreeMap<TimerKind, Box<dyn TimerHandler<S>>>,
+pub struct TimerRegistry<'a, S> {
+    handlers: BTreeMap<TimerKind, Box<dyn TimerHandler<S> + 'a>>,
 }
-impl<S: NamespaceStore> TimerRegistry<S> {
+impl<'a, S: NamespaceStore> TimerRegistry<'a, S> {
     /// An empty registry; unknown kinds remain stored for newer binaries.
     #[must_use]
     pub fn new() -> Self {
@@ -89,7 +89,7 @@ impl<S: NamespaceStore> TimerRegistry<S> {
     /// # Panics
     /// If its kind is already registered or is zero (a startup programming error).
     #[must_use]
-    pub fn register(mut self, handler: impl TimerHandler<S> + 'static) -> Self {
+    pub fn register(mut self, handler: impl TimerHandler<S> + 'a) -> Self {
         let kind = handler.kind();
         assert_ne!(kind.get(), 0, "timer kind zero is invalid");
         assert!(
@@ -103,13 +103,13 @@ impl<S: NamespaceStore> TimerRegistry<S> {
         self.handlers.get(&kind).map(Box::as_ref)
     }
 }
-impl<S: NamespaceStore> Default for TimerRegistry<S> {
+impl<S: NamespaceStore> Default for TimerRegistry<'_, S> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<S> core::fmt::Debug for TimerRegistry<S> {
+impl<S> core::fmt::Debug for TimerRegistry<'_, S> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("TimerRegistry")
             .field("kinds", &self.handlers.keys().collect::<Vec<_>>())

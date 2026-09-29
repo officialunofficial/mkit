@@ -75,6 +75,12 @@ fn planned_ticket_advance_mode(count: usize, d34: bool) -> Batch {
     let single_shards = SinglePartition;
     let shards: &dyn ShardMap = if d34 { &d34_shards } else { &single_shards };
     let source = shards.ref_shard(&repo, HEAD);
+    if d34 {
+        assert_ne!(
+            shards.ref_index(&repo, HEAD),
+            shards.ref_index(&repo, PACKMAP)
+        );
+    }
     let signer = [7; 32];
     let reservations: Vec<_> = (0..count).map(|i| format!("s:advance-{i}")).collect();
     let ids: Vec<_> = reservations
@@ -100,6 +106,7 @@ fn planned_ticket_advance_mode(count: usize, d34: bool) -> Batch {
         repo: &repo.name,
         kind: WriteKind::AdvanceRefs,
         refs: &refs,
+        ref_index: d34.then_some((&repo, &source, shards)),
         replay: Some(replay),
         charges: &[],
         namespace_charge: None,
@@ -179,7 +186,7 @@ fn planned_ticket_advance_mode(count: usize, d34: bool) -> Batch {
 fn seven_ticket_advance_plans_a_valid_real_batch() {
     let batch = planned_ticket_advance(7);
     let ops = batch.preconditions.len() + batch.writes.len();
-    assert_eq!(ops, 86);
+    assert_eq!(ops, 88);
     for key in [
         keys::epoch_lease(),
         keys::layout_version(),
@@ -203,6 +210,23 @@ fn seven_ticket_advance_plans_a_valid_real_batch() {
         crate::store::outbox::MAX_TICKETS_PER_ADVANCE * 9
             + crate::store::outbox::ADVANCE_SHARED_OPS
     );
+    assert_eq!(
+        batch
+            .preconditions
+            .iter()
+            .filter(|p| matches!(p, Precondition::Absent(k) if *k == keys::outbox_sequence()))
+            .count(),
+        1
+    );
+    assert_eq!(
+        batch
+            .writes
+            .iter()
+            .filter(|w| matches!(w, Write::Put(k, _) if *k == keys::outbox_sequence()))
+            .count(),
+        1
+    );
+    assert_eq!(batch.writes.iter().filter(|w| matches!(w, Write::Put(k, _) if matches!(keys::parse(k), Some(keys::ParsedKey::Timer { kind: 3, .. })))).count(), 1);
     assert_eq!(batch.writes.iter().filter(|w| matches!(w, Write::Put(k, _) if matches!(keys::parse(k), Some(keys::ParsedKey::OutcomePending { .. })))).count(), 7);
     assert!(batch.writes.iter().all(|write| {
         let (Write::Put(key, _) | Write::Delete(key)) = write;
@@ -521,6 +545,7 @@ fn single_sharding_watermark_reads_namespace_outbox() {
         at_ms: u64::try_from(T0).unwrap() - 5,
         target: ns(),
         puts: vec![(Key::new(&b"x\0"[..]), Value::default())],
+        deletes: Vec::new(),
     };
     now(env.pipe.meta.apply(
         &ns(),
@@ -560,6 +585,22 @@ fn relay_delay_directive_commits_with_ref_write() {
         env.update(&req, &upd(HEAD, Missing, A)).unwrap(),
         UpdateRefResult::Committed
     );
+    let marker = now(env.pipe.meta.get(&ns(), &faults::relay_delay_key()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        codec::decode_u64(&marker).unwrap(),
+        u64::try_from(T0).unwrap() + 10_000
+    );
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn relay_delay_directive_commits_with_advance() {
+    let env = env(AuthMode::Open);
+    let req = Req::unsigned(Procedure::AdvanceRefs).header(RELAY_DELAY_MS_HEADER, "10000");
+    env.advance(&req, &upd(HEAD, Missing, A), &upd(PACKMAP, Missing, B))
+        .unwrap();
     let marker = now(env.pipe.meta.get(&ns(), &faults::relay_delay_key()))
         .unwrap()
         .unwrap();
@@ -1555,6 +1596,142 @@ fn snapshot(req: &WriteRequest<'_>, values: &[(Key, Value)]) -> Snapshot {
     snap
 }
 
+fn simple_index_batch(
+    repo: &RepoId,
+    source: &Partition,
+    shards: &dyn ShardMap,
+    refs: &[RefUpdate],
+    values: &[(Key, Value)],
+    index: bool,
+) -> Planned {
+    let req = WriteRequest {
+        repo: &repo.name,
+        kind: if refs.len() == 1 {
+            WriteKind::UpdateRef
+        } else {
+            WriteKind::AdvanceRefs
+        },
+        refs,
+        ref_index: index.then_some((repo, source, shards)),
+        replay: None,
+        charges: &[],
+        namespace_charge: None,
+        grant: None,
+        lease: None,
+        layout_version: false,
+        mark_repo_known: false,
+        begin: None,
+        advance: None,
+        rejection: None,
+    };
+    plan_write(&req, &snapshot(&req, values), &clock_at(5, None)).unwrap()
+}
+
+fn index_relays(batch: &Batch) -> Vec<codec::RelayV1> {
+    batch
+        .writes
+        .iter()
+        .filter_map(|write| match write {
+            Write::Put(key, value)
+                if matches!(keys::parse(key), Some(keys::ParsedKey::Relay(_))) =>
+            {
+                Some(codec::decode_relay(value).unwrap())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn planner_relays_every_d34_ref_form_and_no_conflict_or_single() {
+    let repo = repo();
+    let shards = D34Shards;
+    let head = upd(HEAD, Missing, A);
+    let source = shards.ref_shard(&repo, HEAD);
+    let Planned::Apply(update) =
+        simple_index_batch(&repo, &source, &shards, &[head.clone()], &[], true)
+    else {
+        panic!("update")
+    };
+    let rows = index_relays(&update.batch);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].target, shards.ref_index(&repo, HEAD));
+    assert_eq!(
+        rows[0].puts,
+        vec![(
+            keys::ref_index_key(&repo.name, HEAD),
+            codec::encode_ref_id(&A)
+        )]
+    );
+    assert_eq!(
+        update
+            .batch
+            .preconditions
+            .iter()
+            .filter(
+                |pre| matches!(pre, Precondition::Absent(key) if *key == keys::outbox_sequence())
+            )
+            .count(),
+        1
+    );
+    assert_eq!(update.batch.writes.iter().filter(|write| matches!(write, Write::Put(key, _) if matches!(keys::parse(key), Some(keys::ParsedKey::Timer { kind: 3, .. })))).count(), 1);
+
+    let pair = [upd(PACKMAP, Missing, B), head.clone()];
+    let Planned::Apply(different) = simple_index_batch(&repo, &source, &shards, &pair, &[], true)
+    else {
+        panic!("advance")
+    };
+    assert_ne!(
+        shards.ref_index(&repo, HEAD),
+        shards.ref_index(&repo, PACKMAP)
+    );
+    assert_eq!(index_relays(&different.batch).len(), 2);
+    let same_branch = (0..1000)
+        .find_map(|i| {
+            let name = format!("refs/heads/b{i}");
+            let pm = format!("refs/mkit/packmap/b{i}");
+            (shards.ref_index(&repo, &name) == shards.ref_index(&repo, &pm)).then_some((name, pm))
+        })
+        .unwrap();
+    let same_source = shards.ref_shard(&repo, &same_branch.0);
+    let same_pair = [
+        upd(&same_branch.1, Missing, B),
+        upd(&same_branch.0, Missing, A),
+    ];
+    let Planned::Apply(same) =
+        simple_index_batch(&repo, &same_source, &shards, &same_pair, &[], true)
+    else {
+        panic!("same bucket")
+    };
+    assert_eq!(index_relays(&same.batch).len(), 1);
+    assert_eq!(index_relays(&same.batch)[0].puts.len(), 2);
+
+    let deletion = RefUpdate {
+        new: None,
+        condition: Match(A),
+        ..head.clone()
+    };
+    let prior = [ref_value(HEAD, A)];
+    let Planned::Apply(deleted) =
+        simple_index_batch(&repo, &source, &shards, &[deletion], &prior, true)
+    else {
+        panic!("delete")
+    };
+    assert_eq!(
+        index_relays(&deleted.batch)[0].deletes,
+        vec![keys::ref_index_key(&repo.name, HEAD)]
+    );
+    assert!(matches!(
+        simple_index_batch(&repo, &source, &shards, &[head.clone()], &prior, true),
+        Planned::Done(_)
+    ));
+    let Planned::Apply(single) = simple_index_batch(&repo, &source, &shards, &[head], &[], false)
+    else {
+        panic!("single")
+    };
+    assert!(index_relays(&single.batch).is_empty());
+}
+
 fn ref_value(name: &str, id: Hash) -> (Key, Value) {
     (keys::ref_key(&repo_name(), name), codec::encode_ref_id(&id))
 }
@@ -1577,6 +1754,7 @@ fn plan_cas_any_missing_match_on_snapshot() {
             repo: &name,
             kind: WriteKind::UpdateRef,
             refs: &refs,
+            ref_index: None,
             replay: None,
             charges: &[],
             namespace_charge: None,
@@ -1631,6 +1809,7 @@ fn plan_conflict_writes_only_the_replay_record() {
         repo: &name,
         kind: WriteKind::AdvanceRefs,
         refs: &refs,
+        ref_index: None,
         replay: Some(replay()),
         charges: &[],
         namespace_charge: None,
@@ -1700,6 +1879,7 @@ fn plan_quota_exhaustion_yields_no_batch() {
         repo: &name,
         kind: WriteKind::UpdateRef,
         refs: &refs,
+        ref_index: None,
         replay: Some(replay()),
         charges: &charges,
         namespace_charge: None,
@@ -1752,6 +1932,7 @@ proptest! {
             repo: &name,
             kind: if advance { WriteKind::AdvanceRefs } else { WriteKind::UpdateRef },
             refs,
+            ref_index: None,
             replay: signed.then(replay),
             charges: &charges,
             namespace_charge: None,
@@ -2372,6 +2553,7 @@ fn plan_signed_conflict_still_charges_quota() {
         repo: &name,
         kind: WriteKind::UpdateRef,
         refs: &refs,
+        ref_index: None,
         replay: Some(replay()),
         charges: &charges,
         namespace_charge: None,
@@ -2429,6 +2611,7 @@ fn plan_prune_fits_the_batch_op_cap() {
         repo: &name,
         kind: WriteKind::AdvanceRefs,
         refs: &refs,
+        ref_index: None,
         replay: Some(replay()),
         charges: &charges,
         namespace_charge: None,
@@ -2479,6 +2662,7 @@ fn prune_sampling_is_deterministic_one_in_eight() {
         repo: &name,
         kind: WriteKind::UpdateRef,
         refs: &refs,
+        ref_index: None,
         replay,
         charges: &[],
         namespace_charge: None,
@@ -2839,6 +3023,8 @@ fn d34_canonical_advance_commits_in_one_ref_partition() {
         .is_some()
     );
     // Replay lookup returns before any hooks or extra store calls.
+    let prior_batches = applied.len();
+    drop(applied);
     let before = env.pipe.meta.calls();
     assert_eq!(
         env.advance(&request, &upd(head, Missing, A), &upd(packmap, Missing, B))
@@ -2846,6 +3032,7 @@ fn d34_canonical_advance_commits_in_one_ref_partition() {
         AdvanceOutcome::Committed
     );
     assert_eq!(env.pipe.meta.calls() - before, 1);
+    assert_eq!(partitions.lock().unwrap().len(), prior_batches);
 }
 
 fn prune_race_then_push(kv: MemoryKv, pushed: codec::EpochLease) -> Spy {
@@ -2937,6 +3124,7 @@ fn d34_prune_retry_refreshes_the_epoch_even_without_a_counted_replan() {
         repo: &repo_name(),
         kind: WriteKind::UpdateRef,
         refs: &refs,
+        ref_index: None,
         replay: Some(ReplayGuard {
             scope: [0; 32],
             fingerprint: [1; 32],
@@ -3051,6 +3239,7 @@ fn leased_epoch_checks_use_the_granted_epoch_and_cap_replay_deadlines() {
             repo: &name,
             kind: WriteKind::UpdateRef,
             refs: &refs,
+            ref_index: None,
             replay: Some(ReplayGuard {
                 expires_at_ms: T0 - MAX_CLOCK_LEAD_MS + 2_500,
                 ..replay()
