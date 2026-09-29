@@ -27,6 +27,10 @@ pub const UNARY_JSON: &str = "application/json";
 /// A `mkit.transport.v1.TransportService` procedure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rpc {
+    /// Unsigned namespace epoch read.
+    GetGrantEpoch,
+    /// Unsigned owner-statement epoch change.
+    SetGrantEpoch,
     /// `ListRefs`
     ListRefs,
     /// `ReadRef`
@@ -54,6 +58,8 @@ impl Rpc {
     #[must_use]
     pub fn procedure(self) -> &'static str {
         match self {
+            Self::GetGrantEpoch => "/mkit.transport.v1.TransportService/GetGrantEpoch",
+            Self::SetGrantEpoch => "/mkit.transport.v1.TransportService/SetGrantEpoch",
             Self::ListRefs => "/mkit.transport.v1.TransportService/ListRefs",
             Self::ReadRef => "/mkit.transport.v1.TransportService/ReadRef",
             Self::UpdateRef => "/mkit.transport.v1.TransportService/UpdateRef",

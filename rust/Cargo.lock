@@ -3558,6 +3558,7 @@ dependencies = [
  "hyper-util",
  "libc",
  "metrics",
+ "mkit-attest",
  "mkit-core",
  "mkit-rpc",
  "mkit-server",

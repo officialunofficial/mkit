@@ -23,6 +23,7 @@ mod auth;
 mod begin;
 mod coordinator;
 mod download;
+mod epoch;
 #[cfg(feature = "test-faults")]
 pub(crate) mod faults;
 mod gate;

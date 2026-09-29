@@ -2,7 +2,7 @@
 
 use mkit_attest::grant::{
     AcceptedSchemes, Capability, GrantError, GrantRequest, RelyingParty, RepositoryIdentity,
-    VerifiedGrant, VerifierConfig, verify_grant_owner,
+    VerifiedEpoch, VerifiedGrant, VerifierConfig, verify_epoch_statement, verify_grant_owner,
 };
 
 use crate::error::ServerError;
@@ -81,6 +81,15 @@ impl GrantConfig {
                 },
             )
             .map_err(rejected)
+    }
+
+    /// §5.2 checks 1–5. This time-dependent result is never cached.
+    pub(crate) fn verify_epoch(
+        &self,
+        header: &str,
+        now_ms: i64,
+    ) -> Result<VerifiedEpoch, GrantError> {
+        verify_epoch_statement(&self.verifier, header, now_ms)
     }
 }
 

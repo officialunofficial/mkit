@@ -43,7 +43,7 @@ pub(super) enum Owner {
 }
 
 impl Owner {
-    fn namespace(&self) -> Namespace {
+    pub(super) fn namespace(&self) -> Namespace {
         match self {
             Self::Ed(signer) => {
                 Namespace::Ed25519(from_hex(&signer.public_key_hex()).expect("valid grant fixture"))
@@ -75,6 +75,10 @@ impl Owner {
 
     pub(super) fn signed_header(&self, grant: &Grant) -> String {
         let statement = grant.encode().expect("valid grant fixture");
+        self.signed_statement(&statement)
+    }
+
+    pub(super) fn signed_statement(&self, statement: &[u8]) -> String {
         let (scheme, blob) = match self {
             Self::Ed(signer) => (
                 OwnerScheme::Ed25519,
@@ -118,7 +122,7 @@ impl Owner {
             }
         };
         SignedHeader {
-            statement,
+            statement: statement.to_vec(),
             scheme,
             blob,
         }
@@ -127,10 +131,10 @@ impl Owner {
     }
 }
 
-fn k1_owner() -> Owner {
+pub(super) fn k1_owner() -> Owner {
     Owner::K1(K1Key::from_slice(&K1_SEED).expect("valid grant fixture"))
 }
-fn web_owner() -> Owner {
+pub(super) fn web_owner() -> Owner {
     Owner::Web(P256Key::from_slice(&P256_SEED).expect("valid grant fixture"))
 }
 
@@ -172,7 +176,12 @@ pub(super) fn grant(ctx: &Ctx, owner: &Owner, repo: &str, grantee: &Signer) -> G
     }
 }
 
-fn signed_update(ctx: &Ctx, grantee: &Signer, repo: &str, header: Option<&str>) -> Signed {
+pub(super) fn signed_update(
+    ctx: &Ctx,
+    grantee: &Signer,
+    repo: &str,
+    header: Option<&str>,
+) -> Signed {
     let mut signed = sign_unary(
         grantee,
         Rpc::UpdateRef,
