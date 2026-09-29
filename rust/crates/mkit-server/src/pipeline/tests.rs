@@ -6,6 +6,8 @@ mod grants;
 mod indexed;
 mod info;
 mod policy;
+#[cfg(feature = "remote-hooks")]
+mod remote_hooks;
 mod url_token;
 mod visibility;
 

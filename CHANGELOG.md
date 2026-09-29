@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- CLI: a Connect push that needs more than six data packs per advance is now
+  split automatically along the branch's first-parent history instead of
+  failing with `PushTooLarge` after uploading six packs. Every intermediate
+  commit is a published state; the tracking ref follows each advance, so a
+  re-run resumes, and later advances always compare-and-swap on the previous
+  one. For a split push, stored write grants are checked for every advance before
+  anything is uploaded, and an unsplittable oversize commit or merge is refused before any
+  upload. `--format=json` reports `steps` (WP-1.17b).
 - Server: `mkit serve --root <DIR>` serves the repositories under `<DIR>`
   addressed by `<NAMESPACE>/<NAME>` (from the path argument or a strict
   `SSH_ORIGINAL_COMMAND`), one repository per process, with writes
@@ -31,6 +39,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Server: durably arbitrate admitted reservations with pending and terminal
   outcomes, reconcile abandoned reservations, deliver through a retrying
   outcome sink and apply per-shard outbox backpressure (WP-3.3).
+- Server (WP-3.7): add the default-off `remote-hooks` feature to `mkit-server`:
+  Authorize, Admit and Outcome over `mkit.server.hooks.v1` on a
+  transport-agnostic `HookChannel`, with Ed25519-signed requests, fail-closed
+  mapping and response bounds. Adds the `Sleep` timeout seam, and
+  `scripts/regen-hooks-proto.sh` for the vendored codegen.
 
 - CLI: add `mkit grant create|add|list` and a user grant store under
   `$XDG_CONFIG_HOME/mkit/grants/` (never repository-scoped). Owners sign with the

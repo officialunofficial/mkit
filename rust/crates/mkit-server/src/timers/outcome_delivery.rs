@@ -327,7 +327,7 @@ mod tests {
     async fn fire(
         store: &MemoryKv,
         clock: &ManualClock,
-        sink: Arc<Capture>,
+        sink: Arc<impl OutcomeSink>,
         now: u64,
     ) -> crate::timers::RunReport {
         let registry = TimerRegistry::new().register(OutcomeDelivery {
@@ -470,5 +470,86 @@ mod tests {
             .unwrap(),
             Backlog { rows: 1, .. }
         ));
+    }
+
+    #[cfg(feature = "remote-hooks")]
+    async fn rows(store: &MemoryKv) -> u64 {
+        codec::decode_backlog(
+            &store
+                .get(&partition(), &keys::outcome_backlog())
+                .await
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap()
+        .rows
+    }
+
+    /// A remote sink that cannot reach its hook leaves the row queued, and each
+    /// retry is signed afresh (new nonce and validity window).
+    #[cfg(feature = "remote-hooks")]
+    #[tokio::test]
+    async fn a_failing_remote_hook_keeps_the_row_and_each_retry_is_signed_afresh() {
+        use crate::hooks::HookClient;
+        use crate::hooks::RemoteOutcomes;
+        use crate::hooks::tests::{MockChannel, Step, channel_of, signer};
+        use crate::rt::{Clock, ManualSleep};
+
+        let clock = Arc::new(ManualClock::new(100));
+        let store = MemoryKv::with_clock(clock.clone());
+        seed(&store, &["retry"]).await;
+        // The client shares the test clock, so a retry's window moves.
+        let hook = Arc::new(
+            HookClient::new(
+                MockChannel::new(Step::Fail(crate::hooks::ChannelError::Timeout)),
+                "https://example.test",
+                Some(signer()),
+                clock.clone() as Arc<dyn Clock>,
+                Arc::new(ManualSleep::new()),
+            )
+            .unwrap(),
+        );
+        let sink = Arc::new(RemoteOutcomes::new(hook.clone()));
+        assert_eq!(fire(&store, &clock, sink.clone(), 100).await.fired, 1);
+        assert_eq!(rows(&store).await, 1);
+        let (start, end) = keys::class_range(keys::TAG_TIMER);
+        let page = store
+            .scan(&partition(), &start, &end, None, 10)
+            .await
+            .unwrap();
+        let due = page
+            .entries
+            .iter()
+            .find_map(|(key, _)| match keys::parse(key) {
+                Some(keys::ParsedKey::Timer {
+                    kind: 8, due_at_ms, ..
+                }) => Some(due_at_ms),
+                _ => None,
+            })
+            .unwrap();
+        clock.set(i64::try_from(due).unwrap());
+        assert_eq!(fire(&store, &clock, sink, due).await.fired, 1);
+        assert_eq!(rows(&store).await, 1);
+
+        let seen = channel_of(&hook).seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        let header = |i: usize, name: &str| {
+            seen[i]
+                .headers
+                .iter()
+                .find(|(n, _)| *n == name)
+                .unwrap()
+                .1
+                .clone()
+        };
+        assert_ne!(
+            header(0, "X-Mkit-Hook-Nonce"),
+            header(1, "X-Mkit-Hook-Nonce")
+        );
+        assert_ne!(
+            header(0, "X-Mkit-Hook-Created-At"),
+            header(1, "X-Mkit-Hook-Created-At")
+        );
+        assert_eq!(seen[0].body, seen[1].body);
     }
 }

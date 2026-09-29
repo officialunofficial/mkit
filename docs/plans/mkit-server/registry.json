@@ -984,7 +984,7 @@
   },
   {
     "id": "1.17b",
-    "title": "Client: split large pushes along first-parent history",
+    "title": "Client: split large pushes along first-parent history (R-164; Stage 2, R-154)",
     "milestone": "M1",
     "track": "client",
     "depends_on": ["1.17"],
@@ -1515,7 +1515,7 @@
       "3.3"
     ],
     "size": "M",
-    "summary": "Implements Authorizer, Admission, ContentInspector (call shape) and OutcomeSink by calling hooks.v1 over an abstract channel with signing, timeouts, fail-closed mapping and response bounds.",
+    "summary": "Implements Authorizer, Admission and OutcomeSink by calling hooks.v1 over an abstract channel with signing, timeouts, fail-closed mapping and response bounds; Inspect, Event and CachePurge are deferred to 5.5, 5.2 and 5.10 (R-162).",
     "human_action": false,
     "area_gates": [
       "rust",
