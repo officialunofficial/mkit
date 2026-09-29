@@ -586,7 +586,7 @@ where
 pub fn sqlite_timer_registry<B: MultipartBlobStore + Clone + 'static>(
     blobs: B,
     meta: TimerStore,
-) -> mkit_server::timers::TimerRegistry<TimerStore> {
+) -> mkit_server::timers::TimerRegistry<'static, TimerStore> {
     let registry = mkit_server::timers::TimerRegistry::new()
         .register(mkit_server::timers::ticket_expiry::TicketExpiry { blobs })
         .register(

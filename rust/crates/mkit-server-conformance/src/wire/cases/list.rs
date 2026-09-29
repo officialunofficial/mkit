@@ -171,6 +171,7 @@ pub(super) async fn paging_wire(ctx: Ctx) -> CaseResult {
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)] // One case: paced fixture, lag wait and paged assertions.
 pub(super) async fn large_response_within_limit(ctx: Ctx) -> CaseResult {
     let n = ctx.profile().list_refs;
     if n == 0 {
