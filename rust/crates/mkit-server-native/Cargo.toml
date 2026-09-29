@@ -24,7 +24,7 @@ authors.workspace = true
 workspace = true
 
 [features]
-default = ["sqlite", "http", "s3", "enc"]
+default = ["sqlite", "http", "s3", "enc", "hooks"]
 # Test-only timer handlers and pipeline directives; absent from release builds.
 test-faults = ["mkit-server/test-faults"]
 # `S3BlobStore`: content-addressed blobs in an S3-compatible bucket, signed
@@ -62,6 +62,17 @@ http = [
     "tokio/net",
     "tokio/signal",
     "tokio/macros",
+    "tokio/time",
+]
+# `mkit-server serve --hook-*-url`: the `mkit.server.hooks.v1` remote hooks
+# (SPEC-SERVER §§6-8) over signed HTTPS (`hooks::HttpChannel`, reqwest with
+# rustls), and the `hook-key-list` command.
+hooks = [
+    "http",
+    "dep:reqwest",
+    "dep:url",
+    "dep:zeroize",
+    "mkit-server/remote-hooks",
     "tokio/time",
 ]
 # `mkit-server serve --listen-enc`: the `mkit+enc://` listener, each
@@ -146,7 +157,7 @@ tokio = { version = "1", default-features = false, features = ["rt-multi-thread"
 tempfile = "3"
 futures = "0.3"
 mkit-server = { version = "0.4", path = "../mkit-server", features = ["memory"] }
-mkit-server-conformance = { path = "../mkit-server-conformance", features = ["fake-s3"] }
+mkit-server-conformance = { path = "../mkit-server-conformance", features = ["fake-s3", "stubs"] }
 # The generated `mkit.transport.v1` messages, and `ConnectTransport`, the
 # `mkit+http://` client (tests/client_e2e.rs).
 mkit-transport-connect = { version = "0.4", path = "../mkit-transport-connect" }
@@ -160,6 +171,8 @@ hyper = { version = "1", features = ["client", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 serde_json = "1"
 url = "2"
+# tests/hook_channel.rs: a TLS server with a self-signed certificate.
+tokio-rustls = "0.26"
 testcontainers = { version = "0.27", features = ["blocking"] }
 testcontainers-modules = { version = "0.15", features = ["minio", "blocking"] }
 
@@ -219,3 +232,15 @@ required-features = ["s3"]
 [[test]]
 name = "enc_listener"
 required-features = ["enc"]
+
+[[test]]
+name = "hook_channel"
+required-features = ["hooks"]
+
+[[test]]
+name = "hook_config"
+required-features = ["hooks"]
+
+[[test]]
+name = "hook_e2e"
+required-features = ["hooks"]

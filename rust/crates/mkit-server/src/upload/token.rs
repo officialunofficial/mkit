@@ -200,6 +200,7 @@ impl TicketKeys {
     /// `Pipeline::new` refuses a URL-token key that repeats one
     /// (SPEC-WRITE-GRANTS §9.4's dedicated-key rule), and the native adapter
     /// refuses a hook seed that does (SPEC-SERVER §7.1).
+    #[must_use]
     pub fn contains_secret(&self, secret: &[u8; 32]) -> bool {
         self.keys
             .iter()

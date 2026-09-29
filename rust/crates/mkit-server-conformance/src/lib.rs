@@ -72,6 +72,8 @@
 #[cfg(feature = "fake-s3")]
 pub mod fake_s3;
 pub mod storage;
+#[cfg(feature = "stubs")]
+pub mod stubs;
 pub mod wire;
 
 #[doc(hidden)]

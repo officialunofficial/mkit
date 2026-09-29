@@ -3,6 +3,7 @@
 //! ```text
 //! mkit-server serve [--listen <ADDR>] [--listen-enc <ADDR>] --repo-root <DIR> [...]
 //! mkit-server version
+//! mkit-server hook-key-list --hook-key-file <PATH>
 //! mkit-server backup --meta sqlite:<PATH> --out <FILE>
 //! mkit-server export --meta sqlite:<PATH> --out <DIR>
 //! mkit-server restore --meta sqlite:<NEW PATH> --from <DIR>
@@ -41,6 +42,18 @@ enum Command {
     Export(ExportArgs),
     /// Restore portable snapshots into a new `SQLite` database.
     Restore(RestoreArgs),
+    /// Print the SPEC-SERVER §7.2 public key list of the hook signing key,
+    /// for the hook service's configuration.
+    #[cfg(feature = "hooks")]
+    HookKeyList(HookKeyListArgs),
+}
+
+#[cfg(feature = "hooks")]
+#[derive(Debug, Args)]
+struct HookKeyListArgs {
+    /// The hook signing key file: one line `<key-id> <64 hex seed>`.
+    #[arg(long, value_name = "PATH")]
+    hook_key_file: PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -102,6 +115,19 @@ fn main() -> ExitCode {
             exit::OK
         }
         Command::Serve(args) => serve(&args),
+        #[cfg(feature = "hooks")]
+        Command::HookKeyList(args) => {
+            match mkit_server_native::hooks::config::key_list_for(&args.hook_key_file) {
+                Ok(json) => {
+                    print!("{json}");
+                    exit::OK
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    e.code
+                }
+            }
+        }
         Command::Backup(args) => backup(&args),
         Command::Export(args) => match portable::export(&args.meta, &args.out) {
             Ok((partitions, bytes)) => {

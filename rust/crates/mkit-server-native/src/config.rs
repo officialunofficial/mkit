@@ -329,6 +329,10 @@ pub struct ServeArgs {
     #[cfg(feature = "test-faults")]
     #[arg(long, value_name = "MS")]
     pub indexed_relay_lag_bound_ms: Option<u64>,
+    /// Remote hooks (`--hook-*-url`, `--hook-key-file`, ...).
+    #[cfg(feature = "hooks")]
+    #[command(flatten)]
+    pub hooks: crate::hooks::config::HookArgs,
     /// Deadline of a unary RPC.
     #[arg(long, value_name = "SECS", default_value_t = 30)]
     pub unary_timeout_secs: u64,
@@ -468,6 +472,10 @@ pub struct ServeConfig {
     pub pipeline: PipelineConfig,
     /// The router's layers.
     pub router: RouterOptions,
+    /// Remote hooks (`--hook-*-url`), if any role is remote. Its `Debug` never
+    /// prints a URL or key.
+    #[cfg(feature = "hooks")]
+    pub hooks: Option<crate::hooks::config::HookSettings>,
     /// The listener: connection cap, header-read timeout, HTTP/2
     /// keepalive and the shutdown grace period.
     pub serve: ServeOptions,
@@ -592,7 +600,11 @@ fn read_token(path: &Path) -> Result<String, ConfigError> {
 /// as described at [`read_token`] ([`read_checked`] with
 /// [`ReadRule::SECRET`]); `env_hint` names the environment alternative.
 /// Error messages never quote its contents.
-fn read_secret_file(path: &Path, flag: &str, env_hint: &str) -> Result<String, ConfigError> {
+pub(crate) fn read_secret_file(
+    path: &Path,
+    flag: &str,
+    env_hint: &str,
+) -> Result<String, ConfigError> {
     let symlink = format!(
         "is a symlink; point the flag at the file itself, or pass a symlinked secret mount \
          (e.g. Kubernetes) through {env_hint}"
@@ -1362,6 +1374,14 @@ pub fn resolve(
         }
         pipeline.indexed = Some(indexed);
     }
+    #[cfg(feature = "hooks")]
+    let hooks = crate::hooks::config::resolve(
+        &args.hooks,
+        &mut pipeline,
+        &meta,
+        Duration::from_secs(args.unary_timeout_secs),
+        env,
+    )?;
     let (redactor, cors_extra_allow_headers) = credential_router_parts(&pipeline)?;
     let router = RouterOptions {
         unary_timeout: Duration::from_secs(args.unary_timeout_secs),
@@ -1390,6 +1410,8 @@ pub fn resolve(
         blob,
         pipeline,
         router,
+        #[cfg(feature = "hooks")]
+        hooks,
         serve,
         shutdown_drain: Duration::from_secs(args.shutdown_drain_secs),
         log_format: args.log_format,

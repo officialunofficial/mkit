@@ -10,7 +10,7 @@ use std::time::Duration;
 use mkit_core::protocol::Transport as _;
 use mkit_core::repo_lock::{self, LockError, RepoLock};
 use mkit_server::fs::{FsBlobStore, FsLayoutStore, META_MARKER};
-use mkit_server::pipeline::{Hooks, NoOutcomes, OutcomeSink, Pipeline, Sharding};
+use mkit_server::pipeline::{HookSet, Hooks, OutcomeSink, Pipeline, Sharding};
 use mkit_server::sql::{SqlConn, SqlError, SqlKvStore, SqlValue, TxFn};
 use mkit_server::timers::outcome_delivery::OutcomeDelivery;
 use mkit_server::{Addressing, MultipartBlobStore, NamespaceStore, StoreError, SystemClock};
@@ -436,15 +436,21 @@ pub fn bind_database(conn: &RusqliteConn, root_id: &str, db: &Path) -> Result<()
 /// The pipeline over `blobs` and `meta` as a router and, with an enc
 /// listener, the enc service over its `TransportIdentity` sibling (same
 /// stores, same write gate).
-fn build_services<B, N>(blobs: B, meta: N, cfg: &ServeConfig) -> Result<Services, ConfigError>
+fn build_services<B, N, H>(
+    blobs: B,
+    meta: N,
+    cfg: &ServeConfig,
+    hooks: H,
+) -> Result<Services, ConfigError>
 where
     B: MultipartBlobStore + Clone + 'static,
     N: NamespaceStore + Clone + 'static,
+    H: HookSet + Clone + 'static,
 {
     let pipeline = Pipeline::new(
         blobs,
         meta,
-        Hooks::new(),
+        hooks,
         cfg.pipeline.clone(),
         Arc::new(SystemClock),
         Arc::new(MetricsBridge),
@@ -461,6 +467,12 @@ where
                 .with_auth(mkit_server::pipeline::AuthMode::TransportIdentity)
                 .map_err(|e| config_error("pipeline", e))?;
             let key = crate::enc::load_server_key(&opts.server_key)?;
+            // The enc key may be created on first run, so this is the first
+            // place its public half is known (SPEC-SERVER §7.1).
+            #[cfg(feature = "hooks")]
+            if let Some(settings) = &cfg.hooks {
+                crate::hooks::build::check_enc_separation(settings, &key)?;
+            }
             let session = crate::enc::session_fn(
                 Arc::new(sibling),
                 opts.repository.clone(),
@@ -521,10 +533,31 @@ fn lock_root(root: &Path) -> Result<ServerLocks, ConfigError> {
 /// elsewhere or that is bound to another database (R-81), or a store that
 /// does not open; `TEMPFAIL` when the serve lock is not granted in time.
 pub fn open(cfg: &ServeConfig) -> Result<Opened, ConfigError> {
+    #[cfg(feature = "hooks")]
+    {
+        let built = crate::hooks::build::build(cfg.hooks.as_ref(), &outcome_audience(cfg))?;
+        let mut options = SinkOptions::default();
+        if let Some(settings) = &cfg.hooks {
+            // The kind-8 sink call is bounded by the hook timeout, or a
+            // timeout above the 5 s default would be cut short.
+            options.timeout = settings.timeout;
+        }
+        open_inner(
+            cfg,
+            built.hooks,
+            Delivery {
+                sink: built.sink,
+                real: built.remote_sink,
+                options,
+            },
+        )
+    }
+    #[cfg(not(feature = "hooks"))]
     open_inner(
         cfg,
+        Hooks::new(),
         Delivery {
-            sink: NoOutcomes,
+            sink: mkit_server::pipeline::NoOutcomes,
             real: false,
             options: SinkOptions::default(),
         },
@@ -558,8 +591,8 @@ struct Delivery<O> {
 }
 
 /// [`open`], delivering terminal outcomes (kind 8) to `sink` instead of
-/// acknowledging them locally. For embedders: the binary keeps the local
-/// sink until its hook flags land (WP-3.8, which wires `options` to flags).
+/// acknowledging them locally. For embedders: the binary builds its sink
+/// from `--hook-outcome-url` (see [`open`]).
 /// Each call is bounded by `options.timeout` (default 5 s) and a fire also by
 /// twice that in wall-clock time, a failure or timeout ends the fire and
 /// retries with backoff, and the shutdown drain (`--shutdown-drain-secs`) delivers what is due before
@@ -574,8 +607,40 @@ pub fn open_with_sink<O: OutcomeSink + 'static>(
     sink: O,
     options: SinkOptions,
 ) -> Result<Opened, ConfigError> {
+    open_with(cfg, Hooks::new(), sink, options)
+}
+
+/// [`open_with_sink`] with the pipeline's hooks supplied too, for embedders
+/// that run their own authorizer or admission. `cfg`'s remote-hook flags
+/// (`--hook-*-url`) are refused here: the hooks come from the arguments, and
+/// two sources for one stage would be ambiguous.
+///
+/// # Errors
+/// As [`open_with_sink`], and `CONFIG_ERROR` when `cfg` configures remote hooks.
+pub fn open_with<H, O>(
+    cfg: &ServeConfig,
+    hooks: H,
+    sink: O,
+    options: SinkOptions,
+) -> Result<Opened, ConfigError>
+where
+    H: HookSet + Clone + 'static,
+    O: OutcomeSink + 'static,
+{
+    #[cfg(feature = "hooks")]
+    if cfg
+        .hooks
+        .as_ref()
+        .is_some_and(crate::hooks::config::HookSettings::any)
+    {
+        return Err(config_error(
+            "--hook-*-url",
+            "remote hooks cannot be combined with hooks or a sink supplied by the embedder              (open_with, open_with_sink): each stage would have two sources",
+        ));
+    }
     open_inner(
         cfg,
+        hooks,
         Delivery {
             sink,
             real: true,
@@ -595,10 +660,15 @@ pub fn outcome_audience(cfg: &ServeConfig) -> String {
     }
 }
 
-fn open_inner<O: OutcomeSink + 'static>(
+fn open_inner<H, O>(
     cfg: &ServeConfig,
+    hooks: H,
     delivery: Delivery<O>,
-) -> Result<Opened, ConfigError> {
+) -> Result<Opened, ConfigError>
+where
+    H: HookSet + Clone + 'static,
+    O: OutcomeSink + 'static,
+{
     let locks = lock_root(&cfg.repo_root)?;
     let services = match &cfg.blob {
         BlobChoice::Fs => {
@@ -613,6 +683,7 @@ fn open_inner<O: OutcomeSink + 'static>(
                 Blocking::new(blobs),
                 &cfg.pipeline.addressing,
                 cfg,
+                hooks,
                 delivery,
             )?
         }
@@ -624,6 +695,7 @@ fn open_inner<O: OutcomeSink + 'static>(
             open_s3(config, *spool_max_bytes, cfg)?,
             &cfg.pipeline.addressing,
             cfg,
+            hooks,
             delivery,
         )?,
     };
@@ -640,14 +712,16 @@ fn open_inner<O: OutcomeSink + 'static>(
 /// The services over `blobs` and the metadata store `cfg` names. The
 /// fs-layout store names its one repository from the addressing; `SQLite`
 /// serves every namespace's partitions.
-fn with_meta<B, O>(
+fn with_meta<B, H, O>(
     blobs: B,
     addressing: &Addressing,
     cfg: &ServeConfig,
+    hooks: H,
     delivery: Delivery<O>,
 ) -> Result<Services, ConfigError>
 where
     B: MultipartBlobStore + Clone + 'static,
+    H: HookSet + Clone + 'static,
     O: OutcomeSink + 'static,
 {
     match &cfg.meta {
@@ -671,7 +745,7 @@ where
             };
             let meta = FsLayoutStore::open(&cfg.repo_root, repo)
                 .map_err(|e| config_error("--meta fs-layout", e))?;
-            build_services(blobs, Blocking::new(meta), cfg)
+            build_services(blobs, Blocking::new(meta), cfg, hooks)
         }
         MetaChoice::Sqlite { path, capacity } => {
             let root_id = claim_root_for_sqlite(&cfg.repo_root, path)?;
@@ -694,7 +768,7 @@ where
             .with_clock(Arc::new(SystemClock));
             let registry = sqlite_timer_registry_with(blobs.clone(), meta.clone(), outcomes);
             let driver = TimerDriver::new(meta.clone(), registry, Arc::new(SystemClock));
-            let mut services = build_services(blobs, meta, cfg)?;
+            let mut services = build_services(blobs, meta, cfg, hooks)?;
             services.timers = Some(driver);
             services.pressure = Some(PressureMonitor::new(conn, *capacity));
             Ok(services)
