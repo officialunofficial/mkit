@@ -48,6 +48,8 @@ pub struct AdmitRequest<'a> {
     pub ref_path: bool,
     /// The selected GET body length, after ordinary Range selection.
     pub declared_bytes: u64,
+    /// Selected payment credentials; never contains Bearer credentials.
+    pub credential_headers: &'a [crate::pipeline::CredentialHeader],
 }
 
 /// What an admitted read adds to its 200 or 206.
@@ -203,6 +205,8 @@ impl ProofServer for UnsupportedProofs {
 pub struct HttpSeams {
     /// §3 step 5 (WP-4.15).
     pub tokens: Arc<dyn TokenGate>,
+    /// Retains asynchronous read finalization on cancellation. Required for reservations.
+    pub read_runtime: Option<super::HttpReadRuntime>,
     /// §3 step 11 (WP-4.13).
     pub admission: Arc<dyn HttpAdmission>,
     /// §3 steps 7-8 (WP-5.9a).
@@ -219,6 +223,7 @@ impl HttpSeams {
     pub fn new(cfg: &HttpObjectsConfig) -> Self {
         Self {
             tokens: Arc::new(NoTokens),
+            read_runtime: None,
             admission: Arc::new(NoAdmission),
             takedown: Arc::new(NoTakedown),
             proofs: Arc::new(UnsupportedProofs),

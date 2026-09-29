@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server (Stage 2, inert): programmatic `HttpObjectsConfig::admit_reads`
+  enables paid GET and HEAD reads, canonical JSON 402s, private admitted
+  responses, durable pending reads before transmission, deadline enforcement
+  and retained asynchronous byte accounting (WP-4.13, R-177). The shared
+  credential selector now denies comma-joined selected payment headers,
+  correcting #1212; non-Payment Authorization remains excluded.
+
 - Server: built-in ref policy (SPEC-SERVER §9.7, programmatic, Stage 2):
   `PipelineConfig::ref_policy` with per-ref allowed operation signers (both
   modes) and fast-forward-only rules (indexed mode). In indexed mode a

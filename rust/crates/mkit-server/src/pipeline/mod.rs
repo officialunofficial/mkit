@@ -33,6 +33,8 @@ mod gate;
 mod hooks;
 #[cfg(feature = "http-objects")]
 mod http;
+#[cfg(feature = "http-objects")]
+mod http_admission;
 mod implicit;
 mod info;
 mod lease;

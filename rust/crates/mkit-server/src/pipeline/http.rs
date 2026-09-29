@@ -30,7 +30,7 @@ const ALLOW: &str = "GET, HEAD, OPTIONS";
 /// The ref namespace of packmaps: never a published tip.
 const PACKMAP_PREFIX: &str = "refs/mkit/packmap/";
 
-impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
+impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pipeline<B, N, H> {
     /// Replace the inert seams of an HTTP-objects pipeline: admission
     /// (WP-4.13), proofs (WP-4.14b), tokens (WP-4.15), takedown (WP-5.9a) or
     /// a maintained reachable set (WP-5.3a). A pipeline built without
@@ -242,7 +242,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
 
         // A configured Admission makes every success private, a 304
         // included, without calling it for the 304 (§5.3).
-        let private_policy = seams.admission.is_configured();
+        let private_policy = cfg.admit_reads || seams.admission.is_configured();
 
         // §3 step 9: a matching validator, before Range and Admission.
         if range::if_none_match(&values("if-none-match"), &etag) {
@@ -280,24 +280,49 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let selected_len = window.map_or(leaf.len, |(a, b)| b - a + 1);
 
         // §3 step 11: read Admission, when configured.
-        let admitted = match seams
-            .admission
-            .admit(&AdmitRequest {
-                repo,
-                procedure: if ref_path {
-                    Procedure::HttpGetRefPath
-                } else {
-                    Procedure::HttpGetObject
-                },
-                head,
-                ref_path,
-                declared_bytes: selected_len,
-            })
-            .await
-            .map_err(|error| Fail::from_server_error(&error))?
-        {
-            AdmitDecision::Allow(admitted) => admitted,
-            AdmitDecision::Respond(response) => return Ok(response),
+        let first = |name: &str| (req.headers)(name).into_iter().next();
+        let meta = super::RequestMeta {
+            procedure: op.procedure(),
+            header: &first,
+            header_values: Some(req.headers),
+            unary_body: None,
+            transport_principal: None,
+        };
+        let credentials = if private_policy {
+            super::admission::validate_credentials(&super::admission::capture_credentials(
+                &meta,
+                &self.cfg.admission_credential_headers,
+            ))
+            .map_err(|e| Fail::from_server_error(&e))?
+        } else {
+            Vec::new()
+        };
+        let request = AdmitRequest {
+            repo,
+            procedure: op.procedure(),
+            head,
+            ref_path,
+            declared_bytes: selected_len,
+            credential_headers: &credentials,
+        };
+        let (admitted, mut finalizer) = if cfg.admit_reads {
+            match self.admit_http_read(seams, &op, &request, leaf_id).await {
+                Ok(result) => result,
+                Err(error) if error.http_status() == Some(402) => {
+                    return Ok(super::http_admission::challenge_response(&error, head));
+                }
+                Err(error) => return Err(Fail::from_server_error(&error)),
+            }
+        } else {
+            match seams
+                .admission
+                .admit(&request)
+                .await
+                .map_err(|e| Fail::from_server_error(&e))?
+            {
+                AdmitDecision::Allow(admitted) => (admitted, None),
+                AdmitDecision::Respond(response) => return Ok(response),
+            }
         };
 
         // §3 step 12: 200 or 206.
@@ -306,6 +331,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             if let Some(hook) = hook.take() {
                 hook(0, Ok(()));
             }
+            if let Some(finalizer) = finalizer.take() {
+                finalizer.complete(true).await;
+            }
             HttpBody::Empty
         } else {
             match resolve::open_body(&self.blobs, &leaf, window, &mut hook).await {
@@ -313,6 +341,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 Err(miss) => {
                     if let Some(hook) = hook.take() {
                         hook(0, Err(&ServerError::unavailable("object unavailable")));
+                    }
+                    if let Some(finalizer) = finalizer.take() {
+                        finalizer.complete(false).await;
                     }
                     return Err(miss.into());
                 }
@@ -332,7 +363,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         }
         response.headers.extend(success);
         response.headers.extend(admitted.headers);
-        response.body = body;
+        response.body = match finalizer {
+            Some(f) => f.wrap(body),
+            None => body,
+        };
         Ok(response)
     }
 

@@ -123,7 +123,7 @@ pub(super) fn capture_credentials(
 }
 
 /// Validate the captured headers into what admission sees. Only
-/// `Authorization` must be comma-free (brief B6); a non-Payment or malformed
+/// All selected values must be comma-free (R-177 corrects R-138); a non-Payment or malformed
 /// one is silently not forwarded, an oversized Payment one is denied.
 pub(super) fn validate_credentials(
     captured: &[CapturedCredential],
@@ -144,7 +144,8 @@ pub(super) fn validate_credentials(
             if !valid_token68(value) {
                 continue;
             }
-        } else if value.len() > MAX_CREDENTIAL_VALUE
+        } else if value.contains(',')
+            || value.len() > MAX_CREDENTIAL_VALUE
             || !value
                 .bytes()
                 .all(|b| b == b'\t' || (0x20..=0x7e).contains(&b))
@@ -247,6 +248,30 @@ fn deny(err: &ServerError) -> ServerError {
     .with_http_status(403)
 }
 
+#[cfg(feature = "http-objects")]
+fn http_challenge_json(
+    challenges: &[super::Challenge],
+    description: &str,
+) -> Result<Vec<u8>, ServerError> {
+    let entries: Vec<_> = challenges
+        .iter()
+        .map(|c| {
+            let mut entry = serde_json::Map::new();
+            entry.insert("scheme".into(), c.scheme.clone().into());
+            if !c.value.is_empty() {
+                entry.insert("value".into(), c.value.clone().into());
+            }
+            serde_json::Value::Object(entry)
+        })
+        .collect();
+    let mut message = serde_json::Map::new();
+    message.insert("challenges".into(), entries.into());
+    if !description.is_empty() {
+        message.insert("description".into(), description.into());
+    }
+    serde_json::to_vec(&message).map_err(|_| invalid("challenge encoding"))
+}
+
 impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     pub(super) async fn check_outbox_backpressure(
         &self,
@@ -284,20 +309,29 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     }
 
     pub(super) async fn admit(&self, input: AdmissionInput<'_>) -> Result<Allowance, ServerError> {
-        self.admit_for(input, true).await
+        self.admit_for(input, true, false).await
+    }
+
+    #[cfg(feature = "http-objects")]
+    pub(super) async fn admit_http(
+        &self,
+        input: AdmissionInput<'_>,
+    ) -> Result<Allowance, ServerError> {
+        self.admit_for(input, true, true).await
     }
 
     pub(super) async fn admit_streaming(
         &self,
         input: AdmissionInput<'_>,
     ) -> Result<Allowance, ServerError> {
-        self.admit_for(input, false).await
+        self.admit_for(input, false, false).await
     }
 
     async fn admit_for(
         &self,
         mut input: AdmissionInput<'_>,
         unary: bool,
+        http_json: bool,
     ) -> Result<Allowance, ServerError> {
         tracing::debug!(stage = "admission");
         input.write_quota = self.cfg.write_quota;
@@ -344,6 +378,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     .map(|c| (c.scheme.as_str(), c.value.as_str()))
                     .collect();
                 let bytes = encode_admission_challenge(&pairs, &description);
+                #[cfg(feature = "http-objects")]
+                let bytes = if http_json {
+                    http_challenge_json(&challenges, &description)?
+                } else {
+                    bytes
+                };
+                #[cfg(not(feature = "http-objects"))]
+                let _ = http_json;
                 let mut error = ServerError::admission_challenge(Bytes::from(bytes));
                 for (name, value) in response_headers {
                     error = error
@@ -536,18 +578,14 @@ mod tests {
     }
 
     #[test]
-    fn commas_are_allowed_except_in_authorization() {
+    fn comma_joined_selected_values_are_denied() {
         let extras = ["X-Extra".to_owned()];
-        let selected = select(
-            &[
-                ("Payment-Authorization", &["a,b"]),
-                ("PAYMENT-SIGNATURE", &["c,d"]),
-                ("X-Extra", &["e,f"]),
-            ],
-            &extras,
-        )
-        .unwrap();
-        assert_eq!(selected.len(), 3);
+        for name in ["Payment-Authorization", "PAYMENT-SIGNATURE", "X-Extra"] {
+            assert_eq!(
+                select(&[(name, &["a,b"])], &extras).unwrap_err().code(),
+                crate::Code::PermissionDenied
+            );
+        }
         // Authorization must stay comma-free and single-line, and be Payment.
         for authorization in [
             &["Payment a,b"][..],

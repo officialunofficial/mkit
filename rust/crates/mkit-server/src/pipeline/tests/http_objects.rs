@@ -170,7 +170,7 @@ fn scripted(az: &Arc<Scripted>) -> Scripts {
 }
 
 struct Fx<H: HookSet = Hooks> {
-    pipe: Pipeline<SpyBlobs, Spy, H>,
+    pipe: Pipeline<SpyBlobs, Arc<Spy>, H>,
     clock: Arc<ManualClock>,
     metrics: Arc<SpyMetrics>,
     owner: SigningKey,
@@ -221,7 +221,7 @@ fn fixture_tweaked<H: HookSet>(
             reads: Arc::default(),
             produced: Arc::default(),
         },
-        Spy::new(store(&clock)),
+        Arc::new(Spy::new(store(&clock))),
         hooks,
         config,
         clock.clone(),
@@ -1956,7 +1956,16 @@ fn the_feature_needs_indexed_mode_and_sane_limits() {
     assert!(build(config).is_ok());
     // Without the configuration a pipeline answers no route at all.
     let plain = env(AuthMode::Open);
-    let response = block_on(plain.pipe.serve_http_object(&HttpObjectRequest {
+    let pipe = Pipeline::new(
+        plain.pipe.blobs,
+        Arc::new(plain.pipe.meta),
+        plain.pipe.hooks,
+        plain.pipe.cfg,
+        plain.pipe.clock,
+        plain.pipe.metrics,
+    )
+    .unwrap();
+    let response = block_on(pipe.serve_http_object(&HttpObjectRequest {
         method: "GET",
         raw_path: "/-/refs/heads/main/-/",
         raw_query: None,
@@ -2435,3 +2444,5 @@ fn a_configured_admission_makes_the_200_and_its_304_private_alike() {
         assert_eq!(ok.header("Cache-Control"), cached.header("Cache-Control"));
     }
 }
+
+mod paid_reads;

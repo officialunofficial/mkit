@@ -1814,3 +1814,20 @@ difference, or reads consume replay capacity.
 the pipeline `private_repository_reads_return_the_missing_repository_error`
 and `a_signed_read_writes_no_replay_rows` tests; the connect_dispatch and
 wire `reads.private_not_found_byte_identical` cases.
+
+## Paid HTTP reads reserve durably and settle once
+
+**Always:** a reservation-bearing HTTP read records Pending(Read) before
+returning a body; transmission stops at the configured creation-based deadline.
+Completion and reconciliation conditionally replace the same pending bytes.
+Partial transmission records ReadServed(actual bytes handed to the stream),
+and a zero-byte failure records Aborted(INTERNAL); HEAD succeeds with zero bytes.
+
+**Because:** charging without a durable obligation loses accounting on a crash,
+and independent terminal writes can charge one reservation twice.
+
+**If violated:** a paid stream can escape accounting or create duplicate outcomes.
+
+**Enforced by:** `pipeline/http_admission.rs`, `http_objects/paid.rs`,
+`timers/reservation_reconcile.rs` and the focused `http_objects/paid_reads` tests.
+Stage 2 only; adapters must retain the injected spawner's tasks (WP-4.16).
