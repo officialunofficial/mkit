@@ -85,7 +85,11 @@ pub(crate) async fn suite(extra: &[String], filters: &[&str]) {
     for filter in filters {
         let report = run(&target, Some(filter)).await;
         super::judge(&report, &[]);
-        assert!(report.skips().is_empty(), "M3 case unexpectedly skipped");
+        assert!(
+            report.skips().is_empty(),
+            "M3 case unexpectedly skipped\n{}",
+            report.tap()
+        );
         assert!(
             !report.tap().contains("Payment "),
             "credentials entered the case report"

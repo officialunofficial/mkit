@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Record the blocked M3 exit and held-admission duplicate diagnostic; the
+  conformance case explicitly skips the shared pipeline gap (WP-3.13, incomplete).
+
 - Server conformance: MPP stub, loopback controls, real native binary/exec-helper
   push tests and a shared admission commit case; isolated Worker forwarder
   calls the same Rust fixture (WP-3.12). Release guards reject `stubs`.

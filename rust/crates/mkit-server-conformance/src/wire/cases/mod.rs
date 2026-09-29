@@ -194,6 +194,7 @@ macro_rules! cases {
 }
 
 cases! {
+    "admission.in_flight_aborted" => admission::in_flight_aborted, M3, [Admission, HookStub, AuthV2], [];
     "admission.helper_flow_commit" => admission::helper_flow_commit, M3, [Admission, HookStub, AuthV2, Tickets, Timers], [];
     "grants.valid_ed25519" => grants::valid_ed25519, M2, [Grants, MultiRepo, AuthV2], [];
     "grants.valid_secp256k1_eip191" => grants::valid_secp256k1_eip191, M2, [Grants, MultiRepo, AuthV2], [];

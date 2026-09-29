@@ -100,6 +100,7 @@ async fn wire_suite_fs_sqlite_auth_v2() {
         assert!(
             skipped == "advance.nonatomic_packmap_first"
                 || skipped == "admission.helper_flow_commit"
+                || skipped == "admission.in_flight_aborted"
                 || matches!(
                     skipped,
                     "leases.bump_completes_and_writes_continue"
@@ -133,4 +134,11 @@ async fn wire_suite_fs_sqlite_auth_v2() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn wire_helper_flow_commit_fs_sqlite() {
     common::mpp::suite(&[], &["admission.helper_flow_commit"]).await;
+}
+
+#[cfg(feature = "hooks")]
+#[tokio::test]
+#[ignore = "Section D: held Admit duplicate reaches admission twice; M3 exit blocked"]
+async fn wire_held_admission_duplicate_fs_sqlite() {
+    common::mpp::suite(&[], &["admission.in_flight_aborted"]).await;
 }

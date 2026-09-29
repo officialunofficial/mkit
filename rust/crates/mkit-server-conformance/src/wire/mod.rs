@@ -66,6 +66,7 @@
 //!
 //! | Case | Requires | Asserts |
 //! |---|---|---|
+//! | `admission.in_flight_aborted` | `admission`, `hook-stub`, `auth-v2` | Explicit Section D skip for a duplicate during held Admit; diagnostic and evidence in the M3 exit report |
 //! | `admission.helper_flow_commit` | `admission`, `hook-stub`, `auth-v2`, `tickets`, `timers` | MPP helper flow commits and settles one outcome per reservation |
 //! | `grants.valid_ed25519` | `grants`, `multi-repo`, `auth-v2` | an ed25519 owner grants a write |
 //! | `grants.valid_secp256k1_eip191` | `grants`, `multi-repo`, `auth-v2` | a 0x secp256k1 owner grants a write |

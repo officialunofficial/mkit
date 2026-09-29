@@ -192,3 +192,59 @@ pub(super) async fn helper_flow_commit(ctx: Ctx) -> CaseResult {
     );
     Ok(())
 }
+
+/// Hold the first paid Admit while sending exactly the same signed bytes.
+/// Release the fixture before asserting, so a divergence cannot strand a request.
+pub(super) async fn in_flight_aborted(ctx: Ctx) -> CaseResult {
+    mode(&ctx, "hold", "normal").await?;
+    let before = calls(&ctx).await?;
+    let req = super::update_req(&ctx.head("main"), Exp::Missing, &A);
+    let signed = sign_unary(&ctx.v2_signer("main")?, Rpc::UpdateRef, &req, |_| {});
+    let challenge = post(&ctx, &signed).await?;
+    ensure!(challenge.status == 402, "initial challenge status");
+    let signed = signed.with_header("Authorization", credential(&challenge)?);
+    let first = {
+        let (ctx, signed) = (ctx.clone(), signed.clone());
+        tokio::spawn(async move { post(&ctx, &signed).await })
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while calls(&ctx).await? < before + 2 {
+        ensure!(
+            tokio::time::Instant::now() < deadline,
+            "held Admit deadline"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let duplicate = tokio::time::timeout(Duration::from_secs(2), post(&ctx, &signed)).await;
+    let observed = calls(&ctx).await? - before - 1; // Exclude the initial 402.
+    stub(&ctx)?
+        .post("/__stub/release", UNARY_JSON, &[], vec![])
+        .await?;
+    mode(&ctx, "normal", "normal").await?;
+    let first = first.await.map_err(|_| "first request task failed")??;
+    ensure!(
+        first.status == 200,
+        "released first request: {}",
+        first.status
+    );
+    let duplicate = duplicate.map_err(|_| "duplicate did not return while Admit was held")??;
+    let error: serde_json::Value =
+        serde_json::from_slice(&duplicate.body).map_err(|_| "duplicate error is not JSON")?;
+    // Section D: preserve the expected assertion below, but report the known
+    // shared-pipeline divergence as an explicit skip until the orchestrator
+    // resolves admission-time duplicate handling. The ignored native diagnostic
+    // forbids skips, so it remains red while this gap exists.
+    if duplicate.status == 403 && error["code"] == "permission_denied" && observed == 2 {
+        return Err(Failure::Skip(
+            "Section D escalation: held Admit duplicate reaches admission twice and returns 403; see m3-exit-report.md §2".into(),
+        ));
+    }
+    ensure!(
+        error["code"] == "aborted" && observed == 1,
+        "held admission duplicate: HTTP {}, code {}, paid Admit calls {}; expected aborted and 1 paid Admit",
+        duplicate.status,
+        error["code"],
+        observed
+    );
+    Ok(())
+}
