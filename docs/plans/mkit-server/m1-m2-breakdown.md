@@ -58,6 +58,11 @@ The M1 exit criteria:
   revocation (revoke during an in-flight write, a paused write reaching its shard after lease expiry, an idle shard
   waking after a revocation, lease expiry racing an ack), many-ref write throughput in one repo,
   `BeginUpload` with a target ref, ticket caps, ListRefs merge pagination under the RPC limit, and bounded growth.
+  **Satisfied locally with exceptions (WP-1.27, R-160):** each case runs on the lanes the report's matrix names (native lanes and
+  `wrangler dev`; the 75,000-ref listing is native only, and bounded ticket growth runs on `wrangler dev` only),
+  with the in-crate races (revoke during a write, R-63, the paused write, expiry racing an ack) cited; the report
+  retains failed Worker proxy attempts and the exact wire-ack deviation. The results
+  are in [`m1-exit-report.md`](m1-exit-report.md).
 - ~~A real `mkit` push and clone works against staging.~~ **Superseded (R-154, R-159):** Stage 1's exit evidence is
   local runs (`m1-exit-report.md`); staging is ops work after REL-1.
 - ~~Conformance runs against deployed staging (not only `wrangler dev`, whose DO bindings are always local). During the

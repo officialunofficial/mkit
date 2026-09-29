@@ -536,9 +536,10 @@ Grants and admission both stack on addressing and can run in parallel. The admis
 - Deploy a staging `vcs-worker`: a route, the real `AUTH_AUDIENCE`, and an R2 bucket with a Durable Object namespace.
 
 **Exit:**
-- The conformance tests for multi-repo isolation, namespace policy and tickets pass on both adapters.
-- A real `mkit` push and clone round trip works against staging.
-- CI runs the conformance suite against staging.
+- The conformance tests for multi-repo isolation, namespace policy and tickets pass on both adapters. **Satisfied locally with
+  exceptions (WP-1.27, R-160):** see [`m1-exit-report.md`](m1-exit-report.md).
+- A real `mkit` push and clone round trip works against staging. **Deferred (R-154):** staging is ops work after REL-1.
+- CI runs the conformance suite against staging. **Deferred (R-154):** the staging run belongs to WP-1.19 and WP-1.20.
 
 ### Track Identity: M2
 
