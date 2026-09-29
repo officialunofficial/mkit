@@ -111,6 +111,7 @@ struct CapturedCall {
 }
 
 type CapturedCalls = Arc<Mutex<Vec<CapturedCall>>>;
+type PartBuffers = HashMap<Vec<u8>, BTreeMap<u32, Vec<u8>>>;
 
 #[derive(Default)]
 struct PartGate {
@@ -126,7 +127,7 @@ struct TestService {
     pending_advance: bool,
     admission_required: bool,
     ticketed: bool,
-    part_buffers: Mutex<HashMap<Vec<u8>, BTreeMap<u32, Vec<u8>>>>,
+    part_buffers: Mutex<PartBuffers>,
     part_gate: Option<Arc<PartGate>>,
 }
 
@@ -281,7 +282,10 @@ impl generated::TransportService for TestService {
             }
         }
         Ok(Response::new(generated::UploadPartResponse {
-            receipt: Some(vec![index as u8, 1]),
+            receipt: Some(vec![
+                u8::try_from(index).map_err(|_| ConnectError::invalid_argument("part index"))?,
+                1,
+            ]),
             ..Default::default()
         }))
     }
@@ -746,9 +750,9 @@ fn cli_push_uses_begin_upload_and_ticketed_advance() {
     let url = format!("mkit+http://127.0.0.1:{port}/myproj");
     let config_path = src.path().join(".mkit/config");
     let mut config = std::fs::read_to_string(&config_path).unwrap_or_default();
-    config.push_str(&format!(
-        "\nremote.origin.url = {url}\nremote.origin.type = http\n"
-    ));
+    config.push_str("\nremote.origin.url = ");
+    config.push_str(&url);
+    config.push_str("\nremote.origin.type = http\n");
     std::fs::write(config_path, config).unwrap();
     let xdg = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(xdg.path().join("mkit")).unwrap();
@@ -1156,6 +1160,7 @@ fn cli_admission_helper_trust_filter_json_and_exit_codes() {
 
 #[cfg(unix)]
 #[test]
+#[allow(clippy::too_many_lines)] // One subprocess lifetime covers interrupt, receipt, and resume assertions.
 fn cli_part_upload_interrupts_with_exit_75_and_resumes_from_file_receipts() {
     use std::process::Stdio;
     use std::sync::atomic::Ordering;
@@ -1178,7 +1183,7 @@ fn cli_part_upload_interrupts_with_exit_75_and_resumes_from_file_receipts() {
         random ^= random << 13;
         random ^= random >> 17;
         random ^= random << 5;
-        *byte = random as u8;
+        *byte = random.to_le_bytes()[0];
     }
     std::fs::write(src.path().join("large.bin"), &big).unwrap();
     assert!(run_in(src.path(), &["add", "large.bin"]).status.success());
@@ -1196,9 +1201,9 @@ fn cli_part_upload_interrupts_with_exit_75_and_resumes_from_file_receipts() {
     let url = format!("mkit+http://127.0.0.1:{port}/myproj");
     let config_path = src.path().join(".mkit/config");
     let mut config = std::fs::read_to_string(&config_path).unwrap_or_default();
-    config.push_str(&format!(
-        "\nremote.origin.url = {url}\nremote.origin.type = http\n"
-    ));
+    config.push_str("\nremote.origin.url = ");
+    config.push_str(&url);
+    config.push_str("\nremote.origin.type = http\n");
     std::fs::write(config_path, config).unwrap();
     let xdg = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(xdg.path().join("mkit")).unwrap();
