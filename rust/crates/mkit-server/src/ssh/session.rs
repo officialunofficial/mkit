@@ -68,6 +68,11 @@ pub struct SessionConfig {
     /// `mkit serve`'s `MKIT_SERVE_TEST_DIE_AFTER_HELLO` harness sets it; a
     /// production caller never does.
     pub stop_after_hello: bool,
+    /// The repository every verb's request carries as `x-repository`:
+    /// only the enc listener sets it, under Multi addressing, from its
+    /// `--enc-repository`. `mkit serve` resolves its repository from the
+    /// path, and a client can never name one over the wire.
+    pub repository: Option<String>,
 }
 
 impl SessionConfig {
@@ -77,6 +82,7 @@ impl SessionConfig {
         Self {
             server_id: server_id.into(),
             stop_after_hello: false,
+            repository: None,
         }
     }
 }
@@ -208,7 +214,7 @@ where
     if cfg.stop_after_hello {
         return SessionEnd::Clean;
     }
-    let verbs = verbs::Verbs::new(pipeline, principal);
+    let mut verbs = verbs::Verbs::new(pipeline, principal, cfg.repository.clone());
     let mut budget = Budget::default();
     loop {
         let frame = match src.next_frame().await {

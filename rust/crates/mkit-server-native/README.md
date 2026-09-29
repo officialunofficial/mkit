@@ -38,6 +38,9 @@ mkit-server serve [--listen <ADDR>] [--listen-enc <ADDR>] --repo-root <DIR>
     [--bearer-token-file <PATH>]          # or MKIT_API_TOKEN
     [--ticket-key-file <PATH>]            # or MKIT_TICKET_KEYS
     [--audience <ORIGIN>] [--repository <ID>]
+    [--addressing single|multi]
+    [--namespace-policy allowlist|any] [--namespace-allowlist <PATH>]
+    [--unsafe-open-namespaces] [--enc-repository <NS>/<NAME>]
     [--max-pack-bytes N] [--unary-timeout-secs 30] [--stream-timeout-secs 3600]
     [--max-concurrency 256] [--queue-timeout-secs 5]
     [--max-connections 1024] [--header-read-timeout-secs 10] [--idle-timeout-secs 60]
@@ -142,6 +145,42 @@ result is cached for one second, so health checks cannot load the stores.
 These flags configure the HTTP listener; without `--listen` they are
 refused (and `MKIT_API_TOKEN` is ignored).
 
+### Multi-repository addressing
+
+`--addressing single` (the default) serves one repository, named by
+`--repository`. `--addressing multi` serves every repository its namespace
+policy admits: each request's `X-Repository <ns>/<name>` header selects the
+repository, and `--repository` is refused. A Multi deployment requires
+`--listen` with `--auth auth-v2`, upload ticket keys (`--ticket-key-file`
+or `MKIT_TICKET_KEYS`: a signed write names its repository, and uploads
+still need tickets) and `--meta sqlite:<PATH>` (per-namespace partitions
+need a transactional store). Encrypted-only Multi is deliberately
+unsupported — Multi requires the auth-v2 HTTP listener; an enc listener
+can only join a Multi deployment as the bound `--enc-repository` session
+below. Writes are owner-only (STC §7.5): a signature
+may write only inside its own key's `ed25519-` namespace.
+
+The namespace policy selects which owner namespaces may write:
+
+- `--namespace-policy allowlist` (the Multi default) admits only the
+  namespaces in `--namespace-allowlist <PATH>`: canonical namespaces
+  (`ed25519-<64 hex>` or `0x<40 hex>`) separated by newlines or commas,
+  with `#` comments and blank entries ignored. Malformed or duplicate
+  entries and an empty file are refused at startup. The file is security
+  configuration, read with the same checks as `--enc-authorized-peers`:
+  a regular file, no symlink, owned by the server's user, writable by no
+  one else.
+- `--namespace-policy any` admits every self-certifying namespace and
+  requires `--unsafe-open-namespaces`: without non-default admission (M3),
+  any fresh key resets its namespace's quota, so the open policy is an
+  explicit development opt-in (D27). `any` and `--namespace-allowlist`
+  are mutually exclusive.
+
+Under `--addressing multi`, `--listen-enc` requires `--enc-repository
+<NS>/<NAME>` naming the one repository the listener's sessions bind
+(SPEC-TRANSPORT-CONNECT §7.4), and `--unsafe-allow-any-enc-peer` is
+refused: an enc session needs the repository its peer is authorized for.
+
 ### The enc listener (`mkit+enc://`)
 
 `--listen-enc <ADDR>` serves `mkit+enc://` clients (SPEC-TRANSPORT-ENC):
@@ -166,11 +205,21 @@ flags, messages and the `mkit serve-enc/<version>` server id are those of
   bearer token or auth v2, since it would let any client around them.
 - With neither, or both, the server refuses to start.
 
+Under `--addressing multi` the listener also needs `--enc-repository
+<NS>/<NAME>` (see "Multi-repository addressing" above); its sessions then
+serve only that repository.
+
 > **Authorization (M0).** An enc peer is a `TransportPeer` principal: the
 > handshake authenticates its key, and the allowlist is the whole of its
-> authorization. It may write any ref, like an ssh forced command. Enc
-> peers are NOT subject to the M2 write grants until M2 wires the grant
-> check into the transport-identity path.
+> authorization. Under `--addressing single` it may write any ref, like
+> an ssh forced command. Under `multi` the write policy is the owner
+> rule: only a peer whose key is the bound repository's `ed25519-`
+> namespace may write (every other peer reads). Packs a session uploads
+> and verifies may be published by that session's packmap write — the
+> implicit form of upload tickets — and a packmap whose node, `prev`
+> node or listed pack is neither pending nor a member is refused. Enc
+> peers are NOT subject to the M2 write grants until M2
+> wires the grant check into the transport-identity path.
 
 The server's static key is the raw 32-byte ed25519 seed in
 `--enc-server-key`, created on first run (`0600`, missing directories

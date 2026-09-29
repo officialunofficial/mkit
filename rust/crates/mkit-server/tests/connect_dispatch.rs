@@ -204,7 +204,10 @@ impl<H: HookSet + 'static> Setup<H> {
             cfg.write_policy = mkit_server::policy::WritePolicy::Owner;
         }
         cfg.download_chunk_max = self.chunk_max;
-        if !self.hooks.admission().is_default() && matches!(cfg.auth, AuthMode::AuthV2(_)) {
+        if matches!(cfg.auth, AuthMode::AuthV2(_))
+            && (!self.hooks.admission().is_default()
+                || matches!(cfg.addressing, Addressing::Multi(_)))
+        {
             cfg.ticket_keys = Some(TicketKeys::new(vec![("test".into(), [7; 32])]).unwrap());
         }
         if let Some(cap) = self.list_cap {

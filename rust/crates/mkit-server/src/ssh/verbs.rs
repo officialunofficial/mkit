@@ -13,10 +13,14 @@
 //! | `UpdateRef` | a name over 512 bytes | `INVALID_REQUEST "ref name too long"` |
 //! | `UpdateRef` | a valid name outside `refs/` | `INVALID_REQUEST`, [`REF_NAME_OUTSIDE_REFS`] |
 //! | `UpdateRef` | a CAS conflict | [`cas_conflict_body`] |
+//! | `UpdateRef` | `permission_denied` | `INVALID_REQUEST "write not permitted"` |
+//! | `UpdateRef` | a packmap's node, `prev` or a listed pack unknown (B10) | `INVALID_REQUEST`, [`IMPLICIT_PACKMAP_UNKNOWN`] |
 //! | `UpdateRef` | any other | `INVALID_REQUEST "update ref failed"` |
 //! | `ListRefs` | any | `INTERNAL "list refs failed"` |
 //! | `DownloadPack` | any, before the header | `KEY_NOT_FOUND "pack not found"` |
 //! | `DownloadPack` | a body read, after the header | `INTERNAL "pack read failed"` |
+//! | `UploadPack` | `permission_denied` | `INVALID_REQUEST "write not permitted"` |
+//! | `UploadPack` | the eighth distinct pack before a packmap | `INVALID_REQUEST "too many packs uploaded before a packmap update"` |
 //! | `UploadPack` | bytes that do not hash to `pack_id` | `INVALID_REQUEST`, [`UploadError::ssh_message`] |
 //! | `UploadPack` | any other | `INTERNAL "upload failed"` |
 //!
@@ -36,6 +40,7 @@ use core::future::poll_fn;
 use bytes::Bytes;
 use mkit_core::hash::Hash;
 use mkit_core::protocol::PackKey;
+use mkit_core::refs::PACKMAP_REF_PREFIX;
 use mkit_rpc::mkit::common::v1::RefEntry;
 use mkit_rpc::mkit::rpc::v1::ssh::{
     DownloadPack, DownloadPackHeader, ListRefsResponse, PackChunk, PackExistsResponse,
@@ -44,14 +49,18 @@ use mkit_rpc::mkit::rpc::v1::ssh::{
 use mkit_rpc::mkit::rpc::v1::{Error as RpcError, ErrorCode};
 
 use super::session::{FrameIoError, FrameSink, FrameSource, Stop, emit_error, send_body};
-use crate::error::ServerError;
+use crate::error::{Code, ServerError};
 use crate::op::{Procedure, RefUpdate};
-use crate::pipeline::{Authenticated, HookSet, Pipeline, RequestMeta, UploadSession};
+use crate::pipeline::{
+    Authenticated, HookSet, IMPLICIT_PACKMAP_UNKNOWN, PendingPack, Pipeline, RequestMeta,
+    UploadSession,
+};
 use crate::principal::Principal;
 use crate::refs::{
     DigestField, MAX_REF_NAME_BYTES, REF_NAME_OUTSIDE_REFS, REF_NAME_TOO_LONG, RefWireError,
     UnusedExpectedId, condition_from_wire, hash_from_slice, is_served_ref_name, validate_ref_name,
 };
+use crate::store::outbox::MAX_TICKETS_PER_ADVANCE;
 use crate::store::{MultipartBlobStore, NamespaceStore};
 use crate::upload::{UploadError, UploadLimits, UploadValidator};
 
@@ -151,24 +160,70 @@ fn is_digest_mismatch(err: &ServerError) -> bool {
     err.code() == want.code() && err.public_message() == want.public_message()
 }
 
-/// The verbs of one session: its pipeline and the principal every verb
-/// runs as.
+/// `UpdateRef`'s failure mapping: a denied write and the B10 refusal are
+/// pinned, and everything else stays `update ref failed`.
+fn update_ref_error(err: &ServerError) -> VerbError {
+    if err.code() == Code::PermissionDenied {
+        (ErrorCode::InvalidRequest, "write not permitted")
+    } else if err.code() == Code::FailedPrecondition
+        && err.public_message() == IMPLICIT_PACKMAP_UNKNOWN
+    {
+        (ErrorCode::InvalidRequest, IMPLICIT_PACKMAP_UNKNOWN)
+    } else {
+        (ErrorCode::InvalidRequest, "update ref failed")
+    }
+}
+
+/// `UploadPack`'s refusal on a denied open; any other open failure keeps
+/// `upload failed`.
+fn upload_open_error(err: &ServerError) -> Option<VerbError> {
+    (err.code() == Code::PermissionDenied)
+        .then_some((ErrorCode::InvalidRequest, "write not permitted"))
+}
+
+/// The verbs of one session: its pipeline, the principal every verb runs
+/// as, the repository the transport bound the session to, and the
+/// session's implicit pending set.
 pub(super) struct Verbs<'p, B, N, H> {
     pipe: &'p Pipeline<B, N, H>,
     principal: Principal,
+    /// `x-repository` on each request; `None` on an unbound session.
+    repository: Option<String>,
+    /// Packs uploaded and verified this session, pending membership
+    /// (`Some` iff the pipeline consumes implicit tickets).
+    pending: Option<Vec<PendingPack>>,
 }
 
 impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Verbs<'p, B, N, H> {
-    pub(super) fn new(pipe: &'p Pipeline<B, N, H>, principal: Principal) -> Self {
-        Self { pipe, principal }
+    pub(super) fn new(
+        pipe: &'p Pipeline<B, N, H>,
+        principal: Principal,
+        repository: Option<String>,
+    ) -> Self {
+        Self {
+            pipe,
+            principal,
+            repository,
+            pending: pipe.implicit_tickets().then(Vec::new),
+        }
     }
 
-    /// Stage 0 for `procedure`: the transport's principal, no headers.
-    fn auth(&self, procedure: Procedure) -> Result<Authenticated, ServerError> {
-        let no_headers = |_: &str| -> Option<String> { None };
+    /// Stage 0 for `procedure`: the transport's principal, and the bound
+    /// repository as `x-repository`. Only the enc listener binds a
+    /// repository; a client can never name one. No other header is
+    /// answered, so a transport-identity write can never carry a grant.
+    pub(super) fn auth(&self, procedure: Procedure) -> Result<Authenticated, ServerError> {
+        let repository = self.repository.clone();
+        let header = move |name: &str| -> Option<String> {
+            if name == "x-repository" {
+                repository.clone()
+            } else {
+                None
+            }
+        };
         self.pipe.authenticate(&RequestMeta {
             procedure,
-            header: &no_headers,
+            header: &header,
             header_values: None,
             unary_body: None,
             transport_principal: Some(self.principal.clone()),
@@ -181,7 +236,7 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Verbs<'p, B, N, H
     /// # Errors
     /// [`Stop`] when the sink fails or the source times out mid-upload.
     pub(super) async fn dispatch<S: FrameSource, K: FrameSink>(
-        &self,
+        &mut self,
         body: Option<Body>,
         src: &mut S,
         sink: &mut K,
@@ -210,7 +265,7 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Verbs<'p, B, N, H
     }
 
     /// The one-frame verbs; `None` for any other body.
-    pub(super) async fn simple(&self, body: &Body) -> Option<Result<Body, VerbError>> {
+    pub(super) async fn simple(&mut self, body: &Body) -> Option<Result<Body, VerbError>> {
         Some(match body {
             Body::PackExists(req) => match pack_key(req.pack_id.as_deref()) {
                 Ok(key) => {
@@ -250,7 +305,26 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Verbs<'p, B, N, H
                 if let Err(e) = check_name(&update.name) {
                     return Some(Err(e));
                 }
+                // A packmap write on an implicit session consumes its
+                // pending set (B9); any other name is an ordinary write.
+                let consuming = self.pending.is_some()
+                    && update.name.starts_with(PACKMAP_REF_PREFIX)
+                    && update.new.is_some();
                 let result = match self.auth(Procedure::UpdateRef) {
+                    Ok(a) if consuming => {
+                        let pending = self.pending.take().unwrap_or_default();
+                        let result = self
+                            .pipe
+                            .update_packmap_consuming(&a, update, &pending)
+                            .await;
+                        // A commit consumes the set; a conflict or an
+                        // error keeps it for the corrected write.
+                        self.pending = Some(match result {
+                            Ok(crate::UpdateRefResult::Committed) => Vec::new(),
+                            _ => pending,
+                        });
+                        result
+                    }
                     Ok(a) => self.pipe.update_ref(&a, update).await,
                     Err(e) => Err(e),
                 };
@@ -261,7 +335,7 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Verbs<'p, B, N, H
                     Ok(crate::UpdateRefResult::Conflict { current }) => {
                         Ok(cas_conflict_body(current))
                     }
-                    Err(_) => Err((ErrorCode::InvalidRequest, "update ref failed")),
+                    Err(e) => Err(update_ref_error(&e)),
                 }
             }
             Body::ListRefs(req) => {
@@ -338,7 +412,7 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Verbs<'p, B, N, H
     /// failure does not end the stream early: the rest of it is read and
     /// checked, then answered with `upload failed`, as `mkit serve` did.
     async fn upload<S: FrameSource, K: FrameSink>(
-        &self,
+        &mut self,
         header: &UploadPack,
         src: &mut S,
         sink: &mut K,
@@ -349,10 +423,31 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Verbs<'p, B, N, H
             Ok(framing) => framing,
             Err(e) => return emit_error(sink, ErrorCode::InvalidRequest, e.ssh_message()).await,
         };
-        let mut session = match self.auth(Procedure::UploadPack) {
-            Ok(a) => self.pipe.open_upload(&a, pack_id, total).await.ok(),
-            Err(_) => None,
+        // A session with implicit tickets admits at most
+        // MAX_TICKETS_PER_ADVANCE distinct packs before a packmap consumes
+        // them; the refusal drains the stream like a failed open.
+        let mut failed_open: Option<VerbError> = self
+            .pending
+            .as_ref()
+            .filter(|pending| {
+                pending.len() >= MAX_TICKETS_PER_ADVANCE
+                    && !pending.iter().any(|p| p.pack == framing.key().0)
+            })
+            .map(|_| {
+                (
+                    ErrorCode::InvalidRequest,
+                    "too many packs uploaded before a packmap update",
+                )
+            });
+        let mut session = if failed_open.is_some() {
+            None
+        } else {
+            self.open_upload_session(pack_id, total, &mut failed_open)
+                .await
         };
+        // The pack's first four bytes, accumulated across chunks: they
+        // tell B10 whether the pending upload is an MKPL node.
+        let mut magic = Vec::with_capacity(4);
         loop {
             let frame = match src.next_frame().await {
                 Ok(frame) => frame,
@@ -381,6 +476,10 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Verbs<'p, B, N, H
                     return emit_error(sink, ErrorCode::InvalidRequest, e.ssh_message()).await;
                 }
             };
+            if magic.len() < 4 && chunk.offset == Some(magic.len() as u64) {
+                let take = data.len().min(4 - magic.len());
+                magic.extend_from_slice(&data[..take]);
+            }
             if let Some(s) = session.as_mut()
                 && s.push(id, chunk.offset, Bytes::from(data), last)
                     .await
@@ -392,12 +491,26 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Verbs<'p, B, N, H
                 break;
             }
         }
-        let finished = match session {
-            Some(s) => s.finish().await,
-            None => return emit_error(sink, ErrorCode::Internal, "upload failed").await,
+        let Some(s) = session else {
+            let (code, message) = failed_open.unwrap_or((ErrorCode::Internal, "upload failed"));
+            return emit_error(sink, code, message).await;
         };
+        let finished = s.finish().await;
         match finished {
             Ok(()) => {
+                // A verified upload joins the pending set, deduplicated;
+                // the session's next packmap consumes it.
+                if let Some(pending) = &mut self.pending {
+                    let pack = framing.key().0;
+                    if !pending.iter().any(|p| p.pack == pack) {
+                        pending.push(PendingPack {
+                            pack,
+                            bytes: framing.declared(),
+                            packlist: magic.as_slice()
+                                == mkit_core::transfer::PACKLIST_MAGIC.as_slice(),
+                        });
+                    }
+                }
                 let resp = Body::UploadPackResponse(Box::<UploadPackResponse>::default());
                 send_body(sink, resp).await
             }
@@ -406,6 +519,29 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Verbs<'p, B, N, H
                 emit_error(sink, ErrorCode::InvalidRequest, message).await
             }
             Err(_) => emit_error(sink, ErrorCode::Internal, "upload failed").await,
+        }
+    }
+
+    /// Open the upload's pack session after authorization; a refusal is
+    /// recorded in `failed_open` so the stream still drains.
+    async fn open_upload_session(
+        &mut self,
+        pack_id: Option<&[u8]>,
+        total: Option<u64>,
+        failed_open: &mut Option<VerbError>,
+    ) -> Option<UploadSession<'p, B, N, H>> {
+        match self.auth(Procedure::UploadPack) {
+            Ok(a) => match self.pipe.open_upload(&a, pack_id, total).await {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    *failed_open = upload_open_error(&e);
+                    None
+                }
+            },
+            Err(e) => {
+                *failed_open = upload_open_error(&e);
+                None
+            }
         }
     }
 }
