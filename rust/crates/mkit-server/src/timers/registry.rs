@@ -37,7 +37,7 @@ impl TimerKind {
 pub mod kinds {
     /// Expired coordinator epoch-lease table rows.
     pub const LEASE_SWEEP: super::TimerKind = super::TimerKind::new(1);
-    /// Ticket expiry. Allocating the kind does not register a handler.
+    /// Ticket expiry.
     pub const TICKET_EXPIRY: super::TimerKind = super::TimerKind::new(2);
     /// Source-side outbox delivery.
     pub const RELAY: super::TimerKind = super::TimerKind::new(3);

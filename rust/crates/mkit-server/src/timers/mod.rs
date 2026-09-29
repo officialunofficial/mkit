@@ -7,6 +7,7 @@ pub mod registry;
 pub mod test_kind;
 #[cfg(test)]
 mod tests;
+pub mod ticket_expiry;
 
 use crate::rt::Clock;
 use crate::store::{

@@ -181,7 +181,11 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
         pack_id: Option<&[u8]>,
         total_bytes: Option<u64>,
     ) -> Result<Opened<B::Sink>, ServerError> {
-        let validator = UploadValidator::new(pack_id, total_bytes, pipe.cfg.upload_limits)?;
+        let mut limits = pipe.cfg.upload_limits;
+        if let Some(cap) = pipe.cfg.single_upload_max_bytes {
+            limits.max_total_bytes = limits.max_total_bytes.min(cap);
+        }
+        let validator = UploadValidator::new(pack_id, total_bytes, limits)?;
         if !matches!(pipe.cfg.auth, AuthMode::TransportIdentity)
             && validator.declared() >= pipe.effective_threshold()
         {

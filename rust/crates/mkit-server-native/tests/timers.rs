@@ -7,10 +7,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use mkit_server::sql::{SqlConn, SqlKvStore};
-use mkit_server::store::keys;
+use mkit_server::store::{codec, keys, tickets};
 use mkit_server::timers::{DueTimer, Fired, TimerCtx, TimerHandler, TimerKind, TimerRegistry};
 use mkit_server::{
-    Batch, BoxFuture, Clock, Key, NamespaceStore, Partition, StoreError, SystemClock, Value,
+    Batch, BoxFuture, Clock, Key, MemoryBlobStore, NamespaceKey, NamespaceStore, Partition,
+    RepoName, StoreError, SystemClock, Value,
 };
 use mkit_server_native::timers::{TimerDriver, TimerNotifying, TimerStore};
 use mkit_server_native::{Blocking, RusqliteConn, Shutdown, server};
@@ -102,6 +103,92 @@ fn driver(store: &TimerStore) -> TimerDriver {
         TimerRegistry::new().register(Complete),
         Arc::new(SystemClock),
     )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sqlite_driver_fires_ticket_expiry() {
+    let root = tempfile::tempdir().unwrap();
+    let store = open(&root.path().join("expiry.sqlite3"));
+    let p = Partition::Namespace(NamespaceKey::deployment_default());
+    let repo = RepoName::new("repo").unwrap();
+    let ref_name = "refs/heads/main".to_owned();
+    let rid = "s:2222222222222222222222222222222222222222222222222222222222222222";
+    let id = tickets::ticket_id(rid);
+    let due = now();
+    let ticket = codec::TicketV1 {
+        repo: repo.clone(),
+        ref_name: ref_name.clone(),
+        signer: [1; 32],
+        pack_id: [2; 32],
+        bytes: 8 * 1024 * 1024 + 1,
+        part_size: 8 * 1024 * 1024,
+        expires_at_ms: due,
+        created_at_ms: due - 1,
+        reservation_id: rid.into(),
+        upload_session: None,
+    };
+    store
+        .apply(
+            &p,
+            Batch::new()
+                .put(keys::ticket(&id), codec::encode_ticket(&ticket))
+                .put(
+                    keys::reservation(rid).unwrap(),
+                    codec::encode_reservation(&codec::ReservationV1::Ticketed { ticket_id: id }),
+                )
+                .put(
+                    keys::ticket_index(&repo, &ref_name, &ticket.pack_id, &ticket.signer).unwrap(),
+                    codec::encode_ref_id(&id),
+                )
+                .put(
+                    keys::tickets_per_ref(&repo, &ref_name).unwrap(),
+                    codec::encode_u64(1),
+                )
+                .put(
+                    keys::tickets_per_signer(&repo, &ref_name, &ticket.signer).unwrap(),
+                    codec::encode_u64(1),
+                )
+                .put(
+                    keys::timer(
+                        due,
+                        mkit_server::timers::registry::kinds::TICKET_EXPIRY.get(),
+                        &id,
+                    ),
+                    Value::default(),
+                ),
+        )
+        .await
+        .unwrap();
+    let shutdown = Shutdown::new();
+    let task = TimerDriver::new(
+        store.clone(),
+        server::sqlite_timer_registry(MemoryBlobStore::default(), store.clone()),
+        Arc::new(SystemClock),
+    )
+    .start(shutdown.clone())
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let row = store
+                .get(&p, &keys::reservation(rid).unwrap())
+                .await
+                .unwrap();
+            if row.is_some_and(|v| {
+                matches!(
+                    codec::decode_reservation(&v),
+                    Ok(codec::ReservationV1::Expired { .. })
+                )
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    shutdown.trigger();
+    task.await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
