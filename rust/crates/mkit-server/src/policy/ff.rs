@@ -11,6 +11,7 @@ use crate::indexed::{
 };
 use crate::pipeline::ShardMap;
 use crate::repo::RepoId;
+use crate::store::index::ObjectLookup;
 use crate::telemetry::{METRIC_REF_POLICY_ANCESTRY_UNCHECKED, Metrics};
 use crate::{BlobStore, Clock, NamespaceStore, ServerError};
 use mkit_core::hash::Hash;
@@ -45,6 +46,14 @@ pub(crate) struct Walk<'a, B, S> {
     pub metrics: &'a dyn Metrics,
 }
 
+/// What reading one member commit yielded.
+enum Step {
+    Parents(Vec<Hash>),
+    /// Not (yet) visible in this repository.
+    Missed,
+    Stop(Verdict),
+}
+
 impl<B: BlobStore, S: NamespaceStore> Walk<'_, B, S> {
     fn unchecked(&self, reason: &'static str) -> Verdict {
         tracing::warn!(reason, "fast-forward ancestry unchecked");
@@ -54,6 +63,59 @@ impl<B: BlobStore, S: NamespaceStore> Walk<'_, B, S> {
             1,
         );
         Verdict::Unchecked
+    }
+
+    /// The parents of member commit `id` as located, or why there are none.
+    async fn member_parents(
+        &self,
+        id: Hash,
+        located: Option<&ObjectLookup>,
+        budget: u64,
+        memo: &mut resolve::MemberCache,
+    ) -> Result<Step, ServerError> {
+        let located = match located {
+            Some(Ok(Some(located))) => *located,
+            Some(Err(_)) => return Ok(Step::Stop(self.unchecked("lookup"))),
+            _ => return Ok(Step::Missed),
+        };
+        let resolved = resolve::member_object(
+            self.blobs,
+            self.store,
+            self.shards,
+            self.repo,
+            id,
+            located,
+            self.cfg.max_delta_chain_depth,
+            budget,
+            memo,
+            &mut BTreeSet::new(),
+            self.metrics,
+        )
+        .await;
+        let bytes = match resolved {
+            Ok((bytes, _)) => bytes,
+            Err(resolve::ResolveFailure::Missing) => return Ok(Step::Missed),
+            Err(resolve::ResolveFailure::Capped) => {
+                return Ok(Step::Stop(self.unchecked("lookup")));
+            }
+            Err(resolve::ResolveFailure::Other(error))
+                if error.code() == crate::Code::Unavailable =>
+            {
+                return Err(error);
+            }
+            Err(resolve::ResolveFailure::Other(_)) => {
+                return Ok(Step::Stop(self.unchecked("budget")));
+            }
+        };
+        Ok(
+            match mkit_core::serialize::deserialize(&bytes)
+                .ok()
+                .and_then(|object| history_parents(&object))
+            {
+                Some(parents) => Step::Parents(parents),
+                None => Step::Stop(self.unchecked("corrupt")),
+            },
+        )
     }
 
     /// Whether `to` is `from` or descends from it. Staged commits cost
@@ -103,53 +165,13 @@ impl<B: BlobStore, S: NamespaceStore> Walk<'_, B, S> {
                 )
                 .await?;
                 for id in member {
-                    let located = match found.get(&id) {
-                        Some(Ok(Some(located))) => *located,
-                        Some(Err(_)) => return Ok(self.unchecked("lookup")),
-                        _ => {
-                            missed = true;
-                            continue;
-                        }
-                    };
-                    let mut visiting = BTreeSet::new();
-                    let resolved = resolve::member_object(
-                        self.blobs,
-                        self.store,
-                        self.shards,
-                        self.repo,
-                        id,
-                        located,
-                        self.cfg.max_delta_chain_depth,
-                        budget,
-                        &mut memo,
-                        &mut visiting,
-                        self.metrics,
-                    )
-                    .await;
-                    let bytes = match resolved {
-                        Ok((bytes, _)) => bytes,
-                        Err(resolve::ResolveFailure::Missing) => {
-                            missed = true;
-                            continue;
-                        }
-                        Err(resolve::ResolveFailure::Capped) => {
-                            return Ok(self.unchecked("lookup"));
-                        }
-                        Err(resolve::ResolveFailure::Other(error))
-                            if error.code() == crate::Code::Unavailable =>
-                        {
-                            return Err(error);
-                        }
-                        Err(resolve::ResolveFailure::Other(_)) => {
-                            return Ok(self.unchecked("budget"));
-                        }
-                    };
-                    let parents = mkit_core::serialize::deserialize(&bytes)
-                        .ok()
-                        .and_then(|object| history_parents(&object));
-                    match parents {
-                        Some(parents) => edges.extend(parents),
-                        None => return Ok(self.unchecked("corrupt")),
+                    match self
+                        .member_parents(id, found.get(&id), budget, &mut memo)
+                        .await?
+                    {
+                        Step::Parents(parents) => edges.extend(parents),
+                        Step::Missed => missed = true,
+                        Step::Stop(verdict) => return Ok(verdict),
                     }
                 }
             }

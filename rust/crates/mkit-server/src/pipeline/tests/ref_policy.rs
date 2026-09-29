@@ -17,7 +17,7 @@ use std::collections::BTreeSet;
 const FF_MESSAGE: &str = "non-fast-forward update not allowed on this ref";
 const SIGNER_MESSAGE: &str = "signer not allowed for this ref";
 const NOT_VISIBLE: &str = "repository membership not yet visible";
-const LAG_MS: i64 = crate::relay::RELAY_LAG_BOUND_MS as i64;
+const LAG_MS: i64 = crate::relay::RELAY_LAG_BOUND_MS.cast_signed();
 
 fn rule(pattern: &str, signers: Option<&[&SigningKey]>, ff: bool) -> RefRule {
     RefRule {
