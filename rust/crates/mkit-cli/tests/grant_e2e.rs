@@ -921,12 +921,13 @@ impl Site {
     }
 }
 
-fn assert_not_found(out: &Output, what: &str) {
+fn assert_not_found(out: &Output, ns: &str, what: &str) {
     assert!(!out.status.success(), "{what}: the clone must fail");
     let text = stderr(out).to_lowercase();
+    let expected = format!("repository `{}/site` not found at", ns.to_lowercase());
     assert!(
-        text.contains("not_found") || text.contains("not found"),
-        "{what}: expected not_found, got: {text}"
+        text.contains(&expected),
+        "{what}: expected `{expected}`, got: {text}"
     );
     for hint in ["permission", "denied"] {
         assert!(
@@ -968,7 +969,11 @@ fn visibility_set_makes_a_repository_private_and_public_in_envelope_mode() {
         out.trim(),
         format!("{}/site is now private", site.owner.namespace())
     );
-    assert_not_found(&clone("private-0"), "anonymous, private");
+    assert_not_found(
+        &clone("private-0"),
+        &site.owner.namespace(),
+        "anonymous, private",
+    );
 
     // The owner still reads it.
     let own = site.clone_as(&site.owner, "owner-0");
@@ -996,7 +1001,11 @@ fn visibility_set_statement_mode_flips_visibility_with_an_ed25519_owner() {
         out.trim(),
         format!("{}/site is now private", site.owner.namespace())
     );
-    assert_not_found(&site.clone_as(&anon, "private-0"), "anonymous, private");
+    assert_not_found(
+        &site.clone_as(&anon, "private-0"),
+        &site.owner.namespace(),
+        "anonymous, private",
+    );
 
     // A later statement (created is strictly newer) restores it.
     std::thread::sleep(Duration::from_millis(5));
@@ -1010,14 +1019,14 @@ fn visibility_set_statement_mode_flips_visibility_with_an_ed25519_owner() {
     let ok = site.clone_as(&anon, "public-0");
     assert!(ok.status.success(), "{}", stderr(&ok));
 
-    // The CLI refuses to sign for a namespace the key does not own.
+    // The CLI refuses client-side to sign for a namespace the key does not
+    // own. The server-side rule is covered by the server unit test
+    // `statement_mode_rejects_mismatch_oversize_and_signed_requests`.
     let stranger = site.party(0x33);
     let denied = stranger.run(&["visibility", "set", "origin", "private", "--statement"]);
     assert!(!denied.status.success(), "{}", stderr(&denied));
     let text = stderr(&denied).to_lowercase();
     assert!(text.contains("the signing key owns namespace"), "{text}");
-    let ok = site.clone_as(&anon, "public-1");
-    assert!(ok.status.success(), "the repository must still be public");
 }
 
 #[test]
@@ -1033,9 +1042,13 @@ fn a_private_repository_is_cloned_by_the_owner_and_a_read_grantee_only() {
     assert_eq!(Site::cloned_file(&site.owner, "owner"), "owner\n");
 
     // A signed stranger with no grant, and anonymous, both see not_found.
-    assert_not_found(&site.clone_as(&reader, "reader-none"), "no grant");
+    assert_not_found(
+        &site.clone_as(&reader, "reader-none"),
+        &site.owner.namespace(),
+        "no grant",
+    );
     let (_anon, out) = site.clone_anonymously("anon");
-    assert_not_found(&out, "anonymous");
+    assert_not_found(&out, &site.owner.namespace(), "anonymous");
 
     // A read grant from the store.
     let header = grant(&site.owner, &reader, "read", &[]);
@@ -1054,7 +1067,11 @@ fn a_private_repository_is_cloned_by_the_owner_and_a_read_grantee_only() {
     );
     let out = writer.ok(&["grant", "add", &grant_file(&writer, "write.txt", &header)]);
     assert!(out.starts_with("added grant "), "{out}");
-    assert_not_found(&site.clone_as(&writer, "writer"), "write-only grant");
+    assert_not_found(
+        &site.clone_as(&writer, "writer"),
+        &site.owner.namespace(),
+        "write-only grant",
+    );
 }
 
 #[test]
@@ -1069,7 +1086,11 @@ fn an_epoch_bump_revokes_a_read_grant_and_a_reissue_at_the_new_epoch_works() {
 
     let bumped = site.owner.ok(&["epoch", "bump", "origin"]);
     assert!(bumped.contains("epoch     1 (was 0)"), "{bumped}");
-    assert_not_found(&site.clone_as(&reader, "revoked"), "stale-epoch read grant");
+    assert_not_found(
+        &site.clone_as(&reader, "revoked"),
+        &site.owner.namespace(),
+        "stale-epoch read grant",
+    );
 
     let header = grant(&site.owner, &reader, "read", &[]);
     let fresh =
@@ -1116,7 +1137,11 @@ fn an_older_unsubmitted_public_statement_cannot_undo_a_later_envelope_flip() {
     // A later envelope write makes the repository private.
     std::thread::sleep(Duration::from_millis(20));
     site.owner.ok(&["visibility", "set", "origin", "private"]);
-    assert_not_found(&site.clone_as(&anon, "private"), "after the envelope flip");
+    assert_not_found(
+        &site.clone_as(&anon, "private"),
+        &site.owner.namespace(),
+        "after the envelope flip",
+    );
 
     // Submitting the older statement now is refused and changes nothing.
     let response = reqwest::blocking::Client::new()
@@ -1138,6 +1163,7 @@ fn an_older_unsubmitted_public_statement_cannot_undo_a_later_envelope_flip() {
     );
     assert_not_found(
         &site.clone_as(&anon, "still-private"),
+        &site.owner.namespace(),
         "after the stale statement",
     );
 }
