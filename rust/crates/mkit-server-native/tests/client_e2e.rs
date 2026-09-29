@@ -119,7 +119,7 @@ impl Served {
     }
 
     /// A ticketed auth-v2 server advertising `max_pack_bytes`, with
-    /// `--sharding` set when given (the SQLite default is D34).
+    /// `--sharding` set when given (the `SQLite` default is D34).
     fn start_ticketed_with(max_pack_bytes: &str, sharding: Option<&str>) -> Self {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)

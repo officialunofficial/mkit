@@ -313,7 +313,7 @@ pub(crate) async fn run_timers<S: crate::NamespaceStore>(
             // Kind 5: the ref shard's namespace quota rollup, so a Multi
             // conformance case can force one after skewing the clock.
             .register(crate::timers::quota_rollup::QuotaRollup {
-                coordinator: BorrowedStore(store),
+                coordinator: crate::store::BorrowedStore(store),
                 metrics: crate::telemetry::NoopMetrics,
             });
         // Bounded: rows this registry doesn't know (for example other timer
