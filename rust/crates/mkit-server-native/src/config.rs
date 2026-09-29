@@ -13,7 +13,10 @@ use mkit_server::auth_v2::AuthV2Config;
 #[cfg(feature = "test-faults")]
 use mkit_server::indexed::IndexedConfig;
 use mkit_server::pipeline::{AuthMode, PipelineConfig, Sharding};
-use mkit_server::policy::{NamespacePolicy, parse_namespace_allowlist};
+use mkit_server::policy::{
+    GrantSettings, NamespacePolicy, parse_grant_schemes, parse_namespace_allowlist,
+    parse_relying_party,
+};
 use mkit_server::sql::Capacity;
 use mkit_server::upload::UploadLimits;
 use mkit_server::upload::token::TicketKeys;
@@ -154,10 +157,11 @@ pub enum NamespacePolicyArg {
 }
 
 /// `--sharding`: `SQLite` metadata routing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum ShardingArg {
-    /// Keep all namespace rows together.
-    #[default]
+    /// Keep all namespace rows together (the default without
+    /// `--meta sqlite:<PATH>`; pin it for a database written before D34
+    /// became the default).
     Single,
     /// Route refs per branch and configuration to the coordinator.
     D34,
@@ -224,9 +228,15 @@ pub struct ServeArgs {
     /// bearer and unsafe auth) or `sqlite:<PATH>` (required for auth v2).
     #[arg(long, value_name = "fs-layout|sqlite:<PATH>")]
     pub meta: Option<MetaArg>,
-    /// Metadata partition routing. `d34` requires `--meta sqlite:<PATH>`.
-    #[arg(long, value_enum, default_value = "single")]
-    pub sharding: ShardingArg,
+    /// Metadata partition routing. Defaults to `d34` with `--meta
+    /// sqlite:<PATH>` and to `single` otherwise, and to `single` for
+    /// `--addressing multi` with `--listen-enc` (ssh/enc sessions carry no
+    /// ref hint, so under D34 their membership reads are eventual, up to
+    /// the relay lag bound); an explicit `d34` requires `--meta
+    /// sqlite:<PATH>`. A database written `single` is refused under the d34
+    /// default: pass `--sharding single` (there is no migration).
+    #[arg(long, value_enum)]
+    pub sharding: Option<ShardingArg>,
     /// Where packs live: `fs` (`<DIR>/packs`) or `s3://<BUCKET>[/<PREFIX>]`,
     /// an S3-compatible bucket that honors `If-None-Match: *` (needs
     /// `--s3-endpoint`, `--meta sqlite:<PATH>`, and credentials from
@@ -301,6 +311,21 @@ pub struct ServeArgs {
     /// Development only.
     #[arg(long)]
     pub unsafe_open_namespaces: bool,
+    /// Multi + auth v2: the owner schemes write grants accept,
+    /// comma-separated tokens (`ed25519`, `secp256k1-eip191`,
+    /// `webauthn-p256`; SPEC-WRITE-GRANTS §4). Absent: write grants are off.
+    /// The grant audience is `--audience`.
+    #[arg(long, value_name = "TOKENS")]
+    pub grant_schemes: Option<String>,
+    /// Write grants: a `WebAuthn` relying party, `id=origin[,origin...]`
+    /// (repeatable). `webauthn-p256` requires one.
+    #[arg(long, value_name = "ID=ORIGINS")]
+    pub webauthn_rp: Vec<String>,
+    /// Development only: accept a loopback `--audience` or relying party for
+    /// write grants (any local deployment shares them, SPEC-WRITE-GRANTS
+    /// §3.2). Prints a warning banner.
+    #[arg(long)]
+    pub unsafe_allow_loopback_grants: bool,
     /// Multi + `--listen-enc`: the one repository the enc listener binds
     /// to, as `<ns>/<name>` (SPEC-TRANSPORT-CONNECT §7.4). Required then;
     /// refused under single addressing.
@@ -476,6 +501,9 @@ pub struct ServeConfig {
     /// prints a URL or key.
     #[cfg(feature = "hooks")]
     pub hooks: Option<crate::hooks::config::HookSettings>,
+    /// `--unsafe-allow-loopback-grants` was passed: the grant verifier
+    /// accepts loopback origins. [`UNSAFE_LOOPBACK_GRANTS_BANNER`] warns.
+    pub unsafe_loopback_grants: bool,
     /// The listener: connection cap, header-read timeout, HTTP/2
     /// keepalive and the shutdown grace period.
     pub serve: ServeOptions,
@@ -509,6 +537,9 @@ impl ServeConfig {
         {
             banners.push(crate::enc::UNSAFE_ENC_BANNER);
         }
+        if self.unsafe_loopback_grants {
+            banners.push(UNSAFE_LOOPBACK_GRANTS_BANNER);
+        }
         banners
     }
 }
@@ -521,6 +552,16 @@ WARNING: mkit-server serve --unsafe-allow-any-peer
 This HTTP listener accepts ANY caller with NO authentication.
 Every RPC — including ref writes and pack uploads — is open.
 Use this only for local development, NEVER in production.
+============================================================";
+
+/// The banner `--unsafe-allow-loopback-grants` prints.
+pub const UNSAFE_LOOPBACK_GRANTS_BANNER: &str = "\
+============================================================
+WARNING: mkit-server serve --unsafe-allow-loopback-grants
+Write grants accept a loopback audience or relying party.
+Every local deployment shares one, so a grant for one would
+verify at all of them. Use this only for local development,
+NEVER in production.
 ============================================================";
 
 pub(crate) const PREFIX: &str = "mkit-server serve";
@@ -640,6 +681,64 @@ fn resolve_ticket_keys(
         })
     })
     .transpose()
+}
+
+/// The write-grant settings (`--grant-schemes`, `--webauthn-rp`,
+/// `--unsafe-allow-loopback-grants`): `None` when none is given. Every
+/// partial or bad value is a startup refusal, never "grants off", and the
+/// verifier rules (loopback audience or relying party without the opt-in,
+/// `webauthn-p256` without a relying party, duplicate ids) are
+/// `mkit-attest`'s.
+fn resolve_grants(
+    args: &ServeArgs,
+    auth: &AuthMode,
+    multi: bool,
+) -> Result<Option<mkit_server::GrantConfig>, ConfigError> {
+    let usage = |m: String| ConfigError::new(exit::USAGE, format!("{PREFIX}: {m}"));
+    let schemes = args
+        .grant_schemes
+        .as_deref()
+        .map(parse_grant_schemes)
+        .transpose()
+        .map_err(|e| usage(format!("--grant-schemes: {e}")))?;
+    let parties = args
+        .webauthn_rp
+        .iter()
+        .map(|entry| parse_relying_party(entry))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| usage(format!("--webauthn-rp: {e}")))?;
+    let Some(settings) =
+        GrantSettings::from_parts(schemes, parties, args.unsafe_allow_loopback_grants).map_err(
+            |e| {
+                usage(format!(
+                    "--webauthn-rp and --unsafe-allow-loopback-grants: {e}"
+                ))
+            },
+        )?
+    else {
+        return Ok(None);
+    };
+    let AuthMode::AuthV2(v2) = auth else {
+        return Err(ConfigError::new(
+            exit::CONFIG_ERROR,
+            format!(
+                "{PREFIX}: write grants (--grant-schemes) require --auth auth-v2 on the HTTP \
+                 listener: the grant audience is its --audience"
+            ),
+        ));
+    };
+    if !multi {
+        return Err(ConfigError::new(
+            exit::CONFIG_ERROR,
+            format!("{PREFIX}: write grants (--grant-schemes) require --addressing multi"),
+        ));
+    }
+    settings.build(v2.audience()).map(Some).map_err(|e| {
+        ConfigError::new(
+            exit::CONFIG_ERROR,
+            format!("{PREFIX}: {}", e.public_message()),
+        )
+    })
 }
 
 /// The `--addressing multi` namespace policy: the `--namespace-allowlist`
@@ -1232,11 +1331,18 @@ fn resolve_max_pack(args: &ServeArgs) -> Result<u64, ConfigError> {
     Ok(max_pack)
 }
 
-fn resolve_sharding(args: &ServeArgs) -> Result<Sharding, ConfigError> {
+fn resolve_sharding(args: &ServeArgs, multi: bool) -> Result<Sharding, ConfigError> {
+    let sqlite = matches!(args.meta, Some(MetaArg::Sqlite(_)));
+    // ssh/enc sessions carry no ref hint, so under D34 their membership reads
+    // are eventual (up to RELAY_LAG_BOUND_MS): multi-repo with an enc listener
+    // defaults to `single` unless `--sharding d34` is explicit (R-157).
+    if args.sharding.is_none() && multi && args.listen_enc.is_some() {
+        return Ok(Sharding::Single);
+    }
     match args.sharding {
-        ShardingArg::Single => Ok(Sharding::Single),
-        ShardingArg::D34 if matches!(args.meta, Some(MetaArg::Sqlite(_))) => Ok(Sharding::D34),
-        ShardingArg::D34 => Err(ConfigError::new(
+        None | Some(ShardingArg::D34) if sqlite => Ok(Sharding::D34),
+        None | Some(ShardingArg::Single) => Ok(Sharding::Single),
+        Some(ShardingArg::D34) => Err(ConfigError::new(
             exit::USAGE,
             format!("{PREFIX}: --sharding d34 requires --meta sqlite:<PATH>"),
         )),
@@ -1311,7 +1417,7 @@ pub fn resolve(
             format!("{PREFIX}: --listen-enc needs the `enc` cargo feature; rebuild with it"),
         ));
     }
-    let sharding = resolve_sharding(args)?;
+    let sharding = resolve_sharding(args, multi)?;
     let repository = args.repository.as_deref().unwrap_or(DEFAULT_REPOSITORY);
     let auth = pipeline_auth(args, env, if multi { "" } else { repository })?;
     #[cfg(feature = "enc")]
@@ -1338,6 +1444,7 @@ pub fn resolve(
     let repo_root = resolve_repo_root(&args.repo_root, env)?;
     let ticket_keys = resolve_ticket_keys(args, env)?;
     let addressing = build_addressing(args, repository, ticket_keys.as_ref())?;
+    let grants = resolve_grants(args, &auth, multi)?;
     let max_pack = resolve_max_pack(args)?;
     let limits = UploadLimits {
         max_total_bytes: max_pack,
@@ -1347,6 +1454,7 @@ pub fn resolve(
     let mut pipeline = PipelineConfig::new(addressing, auth, limits);
     pipeline.sharding = sharding;
     pipeline.ticket_keys = ticket_keys;
+    pipeline.grants = grants;
     // The enc listener's sibling pipeline consumes implicitly and cannot
     // run ticketed verification, so `Pipeline::new` refuses `indexed` with
     // it (R-137); refuse here, before any pipeline is built.
@@ -1412,6 +1520,7 @@ pub fn resolve(
         router,
         #[cfg(feature = "hooks")]
         hooks,
+        unsafe_loopback_grants: args.unsafe_allow_loopback_grants,
         serve,
         shutdown_drain: Duration::from_secs(args.shutdown_drain_secs),
         log_format: args.log_format,

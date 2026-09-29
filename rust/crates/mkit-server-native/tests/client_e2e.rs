@@ -48,6 +48,8 @@ struct Served {
     origin: String,
     shutdown: Shutdown,
     task: Option<tokio::task::JoinHandle<std::io::Result<()>>>,
+    /// The timer driver (relay delivery), when the metadata has one.
+    timers: Option<tokio::task::JoinHandle<()>>,
     /// Holds the root's locks; dropped after `runtime` (field order).
     _opened: server::Opened,
     root: tempfile::TempDir,
@@ -84,9 +86,13 @@ impl Served {
             &[],
         )
         .unwrap();
-        let opened = server::open(&cfg).unwrap();
+        let mut opened = server::open(&cfg).unwrap();
         let shutdown = Shutdown::new();
         let (listener, origin) = runtime.block_on(common::listener());
+        let timers = opened
+            .timers
+            .take()
+            .map(|driver| runtime.block_on(driver.start(shutdown.clone())).unwrap());
         let task = {
             let _guard = runtime.enter();
             common::spawn_serve(listener, opened.router.clone(), &shutdown)
@@ -96,17 +102,25 @@ impl Served {
             origin,
             shutdown,
             task: Some(task),
+            timers,
             _opened: opened,
             root,
         }
     }
 
     fn start_ticketed() -> Self {
-        Self::start_ticketed_capped("67108864")
+        Self::start_ticketed_with("67108864", None)
     }
 
-    /// A ticketed auth-v2 server advertising `max_pack_bytes`.
+    /// The D34 default: `ListRefs` is eventual, so callers poll it (bounded)
+    /// before a listing-driven fetch.
     fn start_ticketed_capped(max_pack_bytes: &str) -> Self {
+        Self::start_ticketed_with(max_pack_bytes, None)
+    }
+
+    /// A ticketed auth-v2 server advertising `max_pack_bytes`, with
+    /// `--sharding` set when given (the `SQLite` default is D34).
+    fn start_ticketed_with(max_pack_bytes: &str, sharding: Option<&str>) -> Self {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -120,29 +134,34 @@ impl Served {
         );
         let (listener, origin) = runtime.block_on(common::listener());
         let meta = format!("sqlite:{}", common::s(&root.path().join("meta.sqlite3")));
-        let mut cfg = common::resolve_with(
-            &[
-                "--listen",
-                "127.0.0.1:0",
-                "--repo-root",
-                common::s(root.path()),
-                "--meta",
-                &meta,
-                "--ticket-key-file",
-                common::s(&ticket_file),
-                "--auth",
-                "auth-v2",
-                "--audience",
-                &origin,
-                "--max-pack-bytes",
-                max_pack_bytes,
-            ],
-            &[],
-        )
-        .unwrap();
+        let mut flags = vec![
+            "--listen",
+            "127.0.0.1:0",
+            "--repo-root",
+            common::s(root.path()),
+            "--meta",
+            &meta,
+            "--ticket-key-file",
+            common::s(&ticket_file),
+            "--auth",
+            "auth-v2",
+            "--audience",
+            &origin,
+            "--max-pack-bytes",
+            max_pack_bytes,
+        ];
+        if let Some(sharding) = sharding {
+            flags.extend(["--sharding", sharding]);
+        }
+        let mut cfg = common::resolve_with(&flags, &[]).unwrap();
         cfg.pipeline.begin_upload_threshold_bytes = 0;
-        let opened = server::open(&cfg).unwrap();
+        let mut opened = server::open(&cfg).unwrap();
         let shutdown = Shutdown::new();
+        // The relay driver delivers D34's ref-name index.
+        let timers = opened
+            .timers
+            .take()
+            .map(|driver| runtime.block_on(driver.start(shutdown.clone())).unwrap());
         let task = {
             let _guard = runtime.enter();
             common::spawn_serve(listener, opened.router.clone(), &shutdown)
@@ -152,6 +171,7 @@ impl Served {
             origin,
             shutdown,
             task: Some(task),
+            timers,
             _opened: opened,
             root,
         }
@@ -306,6 +326,79 @@ fn local_repo() -> tempfile::TempDir {
     dir
 }
 
+/// Poll `ListRefs` until `refs/heads/main` lists `head`, for at most
+/// `RELAY_LAG_BOUND_MS`.
+fn wait_for_listed_head(client: &ConnectTransport, head: mkit_core::hash::Hash) {
+    use mkit_server::relay::RELAY_LAG_BOUND_MS;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(RELAY_LAG_BOUND_MS);
+    loop {
+        let listed = client.list_refs("refs/heads/").unwrap();
+        if listed
+            .iter()
+            .any(|r| r.name == "main" && r.hash == Some(head))
+        {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the listing never named the pushed head within the relay bound"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// A real push, then a `-b` pull (what `clone -b` runs) straight away under
+/// the D34 default: the listing may not name the branch yet, so the client
+/// strongly reads it by name; an absent branch is `RemoteBranchMissing`,
+/// never an empty exit-0 clone. A later plain fetch, after the bounded
+/// listing poll, lands the same tip.
+#[test]
+fn push_then_clone_and_fetch_under_the_d34_default() {
+    use mkit_cli::remote_dispatch::{
+        DispatchError, PushControl, fetch_all, pull_all_with, push_branch_steps,
+    };
+    use mkit_core::layout::RepoLayout;
+
+    let served = Served::start_ticketed_capped("67108864");
+    let (source, tip) = signed_history(3, 2000);
+    let source_store =
+        mkit_core::store::ObjectStore::open(&RepoLayout::single(source.path())).unwrap();
+    let client = served.signed_client();
+    push_branch_steps(
+        &client,
+        &source_store,
+        "main",
+        tip,
+        RefWriteCondition::Missing,
+        0,
+        mkit_core::pack::MAX_TOTAL_PAYLOAD,
+        &PushControl::default(),
+        &mut |_| Ok(()),
+    )
+    .unwrap();
+
+    let missing = local_repo();
+    let err = pull_all_with(missing.path(), &client, "origin", Some("nope"), true).unwrap_err();
+    assert!(matches!(err, DispatchError::RemoteBranchMissing(b) if b == "nope"));
+
+    let clone = local_repo();
+    let clone_layout = RepoLayout::single(clone.path());
+    pull_all_with(clone.path(), &client, "origin", Some("main"), true).unwrap();
+    assert_eq!(
+        mkit_core::refs::read_ref(&clone_layout, "main").unwrap(),
+        Some(tip)
+    );
+
+    wait_for_listed_head(&client, tip);
+    let fetched = local_repo();
+    fetch_all(fetched.path(), &client, "origin").unwrap();
+    assert_eq!(
+        mkit_core::refs::read_remote_ref(&RepoLayout::single(fetched.path()), "origin", "main")
+            .unwrap(),
+        Some(tip)
+    );
+}
+
 #[test]
 fn oversized_push_splits_along_history_and_a_clone_verifies_it() {
     use mkit_cli::remote_dispatch::{PushControl, fetch_all, push_branch_steps};
@@ -333,7 +426,10 @@ fn oversized_push_splits_along_history_and_a_clone_verifies_it() {
         mkit_core::pack::MAX_TOTAL_PAYLOAD,
         &PushControl::default(),
         &mut |head| {
-            // Every intermediate state is a complete, verifiable branch.
+            // Every intermediate state is a complete, verifiable branch. The
+            // listing is eventual under D34: wait (bounded) until it names
+            // this head, then fetch.
+            wait_for_listed_head(&client, head);
             fetch_all(clone.path(), &client, "origin").unwrap();
             assert_eq!(
                 mkit_core::refs::read_remote_ref(&clone_layout, "origin", "main").unwrap(),
@@ -358,6 +454,9 @@ fn oversized_push_splits_along_history_and_a_clone_verifies_it() {
 impl Drop for Served {
     fn drop(&mut self) {
         self.shutdown.trigger();
+        if let Some(timers) = self.timers.take() {
+            let _ = self.runtime.block_on(timers);
+        }
         if let Some(task) = self.task.take() {
             let result = self.runtime.block_on(task);
             if !std::thread::panicking() {
@@ -401,6 +500,44 @@ fn push_then_pull_round_trip() {
             .is_file()
     );
     assert!(root.join("refs/heads/main").is_file());
+}
+
+/// `--meta sqlite` shards per (repository, ref) by default (D34): a push is
+/// readable at once by name, and its branch appears in `ListRefs` within
+/// the relay bound. The wait is a bounded poll, never a fixed sleep.
+#[test]
+fn push_then_pull_round_trip_under_the_d34_default() {
+    use mkit_server::relay::RELAY_LAG_BOUND_MS;
+
+    let served = Served::start_with_sqlite(true);
+    let client = served.client();
+    let payload = b"d34 default pack".to_vec();
+    let key = PackKey::new(hash(&payload));
+    client.upload_pack(&payload, &key).unwrap();
+    let commit = hash(b"d34 default tip");
+    client
+        .update_ref("refs/heads/main", RefWriteCondition::Missing, &commit)
+        .unwrap();
+    // Strongly consistent by name.
+    assert_eq!(client.read_ref("refs/heads/main").unwrap(), Some(commit));
+    assert_eq!(client.download_pack(&key).unwrap(), payload);
+    // Eventual by listing.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(RELAY_LAG_BOUND_MS);
+    let refs = loop {
+        let refs = client.list_refs("").unwrap();
+        if !refs.is_empty() || std::time::Instant::now() >= deadline {
+            break refs;
+        }
+        std::thread::yield_now();
+        std::thread::park_timeout(std::time::Duration::from_millis(20));
+    };
+    assert_eq!(
+        refs.len(),
+        1,
+        "the listing catches up within the relay bound"
+    );
+    assert_eq!(refs[0].name, "refs/heads/main");
+    assert_eq!(refs[0].hash, Some(commit));
 }
 
 #[test]

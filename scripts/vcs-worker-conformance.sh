@@ -21,19 +21,24 @@
 #                  one frame, so a `ListRefs` of N refs is about 45*N bytes
 #                  held whole (1.2 MB at 30,000; the default 10,000-ref case
 #                  stays under) until WP-1.27 pages it.
-#   --sharding d34  D34 phase 1 only: WP-1.26b adapts quota conformance and
-#                   registers its rollup timer; the Worker uses Single addressing
-#                   today, so its namespace cap is off. D34 quota.ops_exhaustion
-#                   becomes per-(signer, branch); growth stats are single-only.
-#                   Add --test-faults to plant a RefShard
-#                   relay and verify RepoIndexShard delivery and queue drainage.
+#   --sharding d34  the default (WP-1.28c; `--sharding single` pins the old
+#                   routing). D34 quota cases spend one branch (quota is per
+#                   (signer, branch) under Single addressing); the growth case
+#                   waits for WP-1.27's partition-scoped stats hook. With
+#                   --test-faults it plants a RefShard relay and verifies
+#                   RepoIndexShard delivery and queue drainage; with --multi
+#                   too, a Multi + D34 quota phase forces a rollup under clock
+#                   skew and checks the namespace cap across branches.
 #   --multi        add the Multi phase (WP-1.30): a fresh server started with
 #                  ADDRESSING=multi and the namespace allowlist the run's
 #                  fixed seed and run id derive, then the Multi wire cases
 #                  (repo., repository., policy., tickets.advance_other_repository,
 #                  info.). The membership cases seed their fixture over the
 #                  wire; only repo.membership_read_your_writes still skips —
-#                  its membership index must stay undelivered.
+#                  its membership index must stay undelivered. With
+#                  --test-faults, a grant phase (WP-1.30b) configures
+#                  GRANT_SCHEMES, WEBAUTHN_RPS and UNSAFE_LOOPBACK_GRANTS and
+#                  runs the grants., ref_scopes. and epochs. cases at M2.
 #   -- ARGS        passed to every `mkit-server-conformance wire` run (e.g.
 #                  `-- --filter refs.`, `-- --list-refs 1000`).
 #
@@ -75,13 +80,13 @@ TEST_QUOTA_WINDOW_MS=60000
 MAX_BUFFERED_BYTES=1048576
 
 test_faults=0
-sharding=single
+sharding=d34
 multi=0
 runner_args=()
 # Under D34 a ListRefs page scans 16 buckets and each lag poll re-lists, so the
 # 10,000-ref case would take many minutes in miniflare; 1,000 exercises paging
 # (R-134).
-d34_list_args=()
+d34_list_args=(--list-refs 1000)
 while [ $# -gt 0 ]; do
     case "$1" in
         --test-faults) test_faults=1 ;;
@@ -91,6 +96,7 @@ while [ $# -gt 0 ]; do
                 echo "--sharding requires single or d34" >&2; exit 2
             fi
             sharding="$2"; shift
+            d34_list_args=()
             if [ "${sharding}" = d34 ]; then d34_list_args=(--list-refs 1000); fi ;;
         --) shift; runner_args=("$@"); break ;;
         *) echo "usage: $0 [--test-faults] [--sharding single|d34] [--multi] [-- <runner args>]" >&2; exit 2 ;;
@@ -339,20 +345,22 @@ fi
 stop_server
 
 if [ "${test_faults}" -eq 1 ]; then
-    if [ "${sharding}" = d34 ]; then
-        echo ">> skipping phase 2: D34 quota.ops_exhaustion adaptation to per-(signer, branch) and Worker rollup registration wait for WP-1.26b; Worker Single addressing has its namespace cap off; the growth stats hook is single-sharding only"
-    else
     quota_args=(--quota-ops "${TEST_QUOTA_OPS}" --quota-bytes "${TEST_QUOTA_BYTES}"
         --quota-window-ms "${TEST_QUOTA_WINDOW_MS}")
     start_server quota "${vars[@]}" \
         --var "TEST_QUOTA_OPS:${TEST_QUOTA_OPS}" \
         --var "TEST_QUOTA_BYTES:${TEST_QUOTA_BYTES}" \
         --var "TEST_QUOTA_WINDOW_MS:${TEST_QUOTA_WINDOW_MS}"
-    run_suite "${features}" "${quota_args[@]}" --filter growth.
+    if [ "${sharding}" = d34 ]; then
+        # The growth case reads the single-partition stats hook; WP-1.27 adds a
+        # partition-scoped one. D34 quota cases spend one branch (per-branch
+        # quota) and run below.
+        echo ">> skipping growth.replay_and_quota_pruned under D34: the stats hook is single-partition until WP-1.27"
+    else
+        run_suite "${features}" "${quota_args[@]}" --filter growth.
+    fi
     run_suite "${features}" "${quota_args[@]}" --filter quota.
     stop_server
-
-    fi
 
     # A test-faults build logs `mkit-adapter peak-buffered-bytes <n> ...
     # path <path>` per request: the most body bytes the adapter held at
@@ -405,5 +413,70 @@ if [ "${multi}" -eq 1 ]; then
         fi
     done
     stop_server
+
+    if [ "${test_faults}" -eq 1 ]; then
+        # The Multi grant phase (WP-1.30b): every owner scheme, the
+        # conformance relying party, and the loopback opt-in the local
+        # origin needs (honoured only by a test-faults build). The allowlist
+        # adds the grant cases' fixed test-seed owner namespaces, which are
+        # public seeds: never in a shipped config.
+        grant_allowlist="$("${runner}" allowlist --auth auth-v2 --audience "${ORIGIN}" \
+            --repository "${REPOSITORY}" --signer-seed-hex "${multi_seed}" \
+            --run-id "${multi_run_id}" --grant-owners)"
+        grant_allowlist="$(printf '%s' "${grant_allowlist}" | tr '\n' ',')"
+        grant_features="${multi_features},grants,test-faults,timers"
+        start_server multi-grants "${vars[@]}" \
+            --var "ADDRESSING:multi" --var "NAMESPACE_ALLOWLIST:${grant_allowlist}" \
+            --var "GRANT_SCHEMES:ed25519,secp256k1-eip191,webauthn-p256" \
+            --var "WEBAUTHN_RPS:example.test=https://example.test" \
+            --var "UNSAFE_LOOPBACK_GRANTS:true"
+        for filter in info.shape_and_policy grants. ref_scopes. epochs.; do
+            echo ">> running the Multi grant wire suite (features: ${grant_features}) --filter ${filter}"
+            status=0
+            "${runner}" wire --base-url "${ORIGIN}" --auth auth-v2 --audience "${ORIGIN}" \
+                --repository "${REPOSITORY}" --signer-seed-hex "${multi_seed}" \
+                --run-id "${multi_run_id}" --atomic-advance --fresh-target --milestone M2 \
+                --max-pack-bytes "${MAX_PACK_BYTES}" --features "${grant_features}" \
+                --sharding "${sharding}" --filter "${filter}" \
+                ${d34_list_args[@]+"${d34_list_args[@]}"} \
+                ${runner_args[@]+"${runner_args[@]}"} || status=$?
+            if [ "${status}" -ne 0 ]; then
+                echo "Multi grant wire suite failed (exit ${status}); wrangler log tail:" >&2
+                tail -n 80 "${log}" >&2
+                exit "${status}"
+            fi
+        done
+        stop_server
+    fi
+
+    if [ "${test_faults}" -eq 1 ] && [ "${sharding}" = d34 ]; then
+        # The Multi + D34 quota phase: the namespace cap across branches after
+        # a forced rollup. The quota window (1 h) is far longer than the 60 s
+        # rollup period the case skews past; ops are few enough to exhaust.
+        multi_quota_ops=6
+        multi_quota_window_ms=3600000
+        start_server multi-quota "${vars[@]}" \
+            --var "ADDRESSING:multi" --var "NAMESPACE_ALLOWLIST:${allowlist}" \
+            --var "TEST_QUOTA_OPS:${multi_quota_ops}" \
+            --var "TEST_QUOTA_BYTES:${TEST_QUOTA_BYTES}" \
+            --var "TEST_QUOTA_WINDOW_MS:${multi_quota_window_ms}"
+        echo ">> running the Multi + D34 quota wire case"
+        status=0
+        "${runner}" wire --base-url "${ORIGIN}" --auth auth-v2 --audience "${ORIGIN}" \
+            --repository "${REPOSITORY}" --signer-seed-hex "${multi_seed}" \
+            --run-id "${multi_run_id}" --atomic-advance --fresh-target --milestone M1 \
+            --max-pack-bytes "${MAX_PACK_BYTES}" \
+            --features "${multi_features},test-faults,timers" --sharding d34 \
+            --quota-ops "${multi_quota_ops}" --quota-bytes "${TEST_QUOTA_BYTES}" \
+            --quota-window-ms "${multi_quota_window_ms}" \
+            --filter quota.namespace_cap_after_rollup \
+            ${runner_args[@]+"${runner_args[@]}"} || status=$?
+        if [ "${status}" -ne 0 ]; then
+            echo "Multi + D34 quota case failed (exit ${status}); wrangler log tail:" >&2
+            tail -n 80 "${log}" >&2
+            exit "${status}"
+        fi
+        stop_server
+    fi
 fi
 echo ">> vcs-worker conformance passed"
