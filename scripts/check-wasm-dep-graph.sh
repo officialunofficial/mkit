@@ -94,6 +94,10 @@ check_tree "mkit-server" "rust/crates/mkit-server" "" "" blst zstd-sys commonwar
 # no connectrpc client, so the feature must stay wasm-clean.
 check_tree "mkit-server (remote-hooks)" "rust/crates/mkit-server" "--features remote-hooks" "buffa ed25519-dalek getrandom" \
   blst zstd-sys commonware-runtime commonware-storage
+# HTTP object serving (WP-4.12): no new dependencies, so the feature must stay
+# wasm-clean. Stage 2 and inert in Stage 1 (R-154, R-169).
+check_tree "mkit-server (http-objects)" "rust/crates/mkit-server" "--features http-objects" "" \
+  blst zstd-sys commonware-runtime commonware-storage
 check_tree "mkit-server-worker" "rust/crates/mkit-server-worker" "" "" blst zstd-sys commonware-runtime commonware-storage
 # apps/vcs-worker is a thin deployment of mkit-server-worker (WP-M0-17),
 # built by worker-build from its own Cargo.lock.

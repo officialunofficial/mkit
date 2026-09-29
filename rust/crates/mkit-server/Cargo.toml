@@ -116,6 +116,12 @@ remote-hooks = [
     "dep:buffa-build",
 ]
 
+# Runtime-agnostic HTTP object serving (`Pipeline::serve_http_object`,
+# SPEC-HTTP-OBJECTS; WP-4.12). No new dependencies, wasm-clean. Stage 2 and
+# inert in Stage 1 (R-154, R-169): off by default, enabled by no adapter, and
+# it needs `PipelineConfig::http_objects`, which requires indexed mode.
+http-objects = []
+
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # `fs` delegates ref CAS, the ref lock and atomic writes to FileTransport, so
 # the files stay byte-identical to what `mkit` and `mkit+file://` read.

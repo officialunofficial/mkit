@@ -1905,7 +1905,7 @@
       "4.10"
     ],
     "size": "L",
-    "summary": "A runtime-agnostic HTTP handler that resolves ref paths, checks reachability and authorization, and serves extracted objects by direct Range reads or small objects from pack entries.",
+    "summary": "Stage 2, inert (R-169): a runtime-agnostic HTTP handler behind the default-off http-objects feature that resolves ref paths, proves reachability for id URLs, authorizes as anonymous, and serves extracted objects by direct Range reads or small objects from this repository's pack entries; seams for admission, proofs, tokens and takedown.",
     "human_action": false,
     "area_gates": [
       "rust",
@@ -1948,7 +1948,7 @@
   },
   {
     "id": "4.14b",
-    "title": "HTTP proof query ranges and Workers prefetch",
+    "title": "Every HTTP proof=1 representation and Workers prefetch",
     "milestone": "M4",
     "track": "core",
     "depends_on": [
@@ -1958,7 +1958,7 @@
       "4.14a"
     ],
     "size": "M",
-    "summary": "Stage 2: serve MKDP/MKDS query ranges with 416 mapping and proof ETag; establish encoded size and declared_bytes before Admission, then use in-memory ObjectSource prefetch on Workers (R-161).",
+    "summary": "Stage 2: serve every proof=1 response (MKDP object bundles and MKDP/MKDS query ranges) through 4.12's ProofServer seam with 416 mapping and the proof ETag; establish encoded size and declared_bytes before Admission, then use in-memory ObjectSource prefetch on Workers (R-161, R-169).",
     "human_action": false,
     "area_gates": [
       "rust",

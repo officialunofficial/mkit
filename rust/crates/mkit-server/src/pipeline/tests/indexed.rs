@@ -39,7 +39,7 @@ fn environment_with_sharding(sharding: Sharding) -> (Env, SigningKey, String) {
     )
 }
 
-fn signed(owner: &SigningKey, identity: &str, procedure: Procedure, number: u32) -> Req {
+pub(super) fn signed(owner: &SigningKey, identity: &str, procedure: Procedure, number: u32) -> Req {
     let body = b"indexed-pipeline".to_vec();
     let digest = to_hex(&hash(&body));
     let commitment = format!("body:{digest}");
