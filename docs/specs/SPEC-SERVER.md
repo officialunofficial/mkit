@@ -943,14 +943,17 @@ commit under the existing atomic lifecycle in §3 and STC §7.7.
 Before an `AdvanceRefs` that consumes a pack commits, the server MUST
 have verified all of the following:
 
+An indexed server verifies (a)–(c) for every object in the packs an advance
+consumes, not only objects reachable from the new tips.
+
 - **(a) Object identity.** Every object's id agrees with its content under
   [SPEC-OBJECTS §10](SPEC-OBJECTS.md#10-storage), including the
   type-specific identity rules referenced there.
-- **(b) Signatures.** Every commit, remix, and tag signature reachable
-  from the new tips verifies under
+- **(b) Signatures.** Every commit, remix, and tag signature in the
+  consumed packs verifies under
   [SPEC-SIGNING §3–§4a and §6](SPEC-SIGNING.md#6-verification-algorithm).
-- **(c) Closure.** Every object reachable from the advanced head is in
-  the consumed packs or is already a verified member of the same
+- **(c) Closure.** Every child referenced by an object in a consumed pack,
+  and every advanced head, is in the consumed packs or is already a verified member of the same
   repository. A membership-dependent miss follows §9.4's lag window
   before it is a permanent `open closure` failure. Object references
   follow the corresponding object layouts in
@@ -974,8 +977,9 @@ rule):
 |---|---|
 | Object id does not match its content | `object hash mismatch` |
 | Commit, remix, or tag signature does not verify | `bad signature` |
-| Reachable object is absent from the permitted closure after §9.4's lag window | `open closure` |
+| Object is absent from the permitted closure after §9.4's lag window | `open closure` |
 | Delta chain exceeds the advertised cap | `delta chain too deep` |
+| An object-index lookup limit is exceeded during closure or packlist checks | `object index limit exceeded` |
 
 These are permanent failures. Clients MUST NOT retry the rejected
 upload as though polling or backoff could make its content valid.
@@ -3284,6 +3288,7 @@ Reserved: this section is specified with M5 (see the version history).
 | 1 | draft | Additive M5 published view (§10), per-advance inspection and quarantine (§11), including surplus pack entries; additive Inspect phase/id/kind/defer/flagged ids and Authorize writer_view (§6); `GetServerInfo.async_inspection` in STC §2.1. |
 | 1 | draft | Additive M5 storage leases and lifecycle Event (§12), server GC (§13), and section renumbering (§§19–20); `GetServerInfo.leases` in STC §2.1. |
 | 1 | draft | Initial M3 pipeline, durable outcome and remote-hook contract; M5 sections reserved. Admission credential headers (§6.3); indexed mode (§9). HTTP read reservations and procedure strings (WP-4.11), amended with `read_reconcile_grace = 60 s` default and `ReadServed` priority within grace (fix round 1). |
+| 1 | draft | Indexed ingestion verifies every consumed object, including unreachable entries; closure and packlist index caps have the `object index limit exceeded` error (§9.3; WP-4.7). |
 
 ## 20. Test anchors
 

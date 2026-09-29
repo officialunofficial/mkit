@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server (WP-4.6): batch repository object-index range reads on Workers,
+  add bounded relay enqueue and delivery checks, increase paid relay
+  throughput, and report index pressure, lag, backlog, and lookup caps.
+- Server (WP-4.7): opt-in native indexed ingestion verifies ticketed packs
+  before ref publication, resolves member-only thin delta bases, checks all
+  consumed objects and packlists, and writes index rows before membership.
+- Core: expose decoded pack frame metadata and single-frame decoding for
+  repository-scoped external base reconstruction.
+
 - Connect client: sign repository reads with auth v2 on each attempt, including
   the framed `DownloadPack` request. Add a grant-source API and local selection
   logic; the user grant store follows in WP-2.13.
