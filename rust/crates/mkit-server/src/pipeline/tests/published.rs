@@ -93,6 +93,26 @@ fn anonymous_only_after_authorization_signed_bypass_and_private_transition() {
         Code::Unavailable
     );
     assert_eq!(source.calls.load(Ordering::SeqCst), before);
+    // Inspection keeps writers live and refuses signed readers as well.
+    for (signer, expected) in [(&owner, true), (&key(2), false)] {
+        let request = Req::signed_for(signer, Procedure::ListRefs, &wire_repo, b"r", &nonce(3), T0);
+        let auth = e.auth(&request).unwrap();
+        let page = block_on(e.pipe.list_refs(&auth, ""));
+        if expected {
+            assert_eq!(page.unwrap()[0].id, A);
+        } else {
+            assert_eq!(page.unwrap_err().code(), Code::Unavailable);
+        }
+        let request = Req::signed_for(signer, Procedure::ReadRef, &wire_repo, b"r", &nonce(4), T0);
+        let auth = e.auth(&request).unwrap();
+        let value = block_on(e.pipe.read_ref(&auth, HEAD));
+        if expected {
+            assert_eq!(value.unwrap(), Some(A));
+        } else {
+            assert_eq!(value.unwrap_err().code(), Code::Unavailable);
+        }
+    }
+    assert_eq!(source.calls.load(Ordering::SeqCst), before);
     // Malformed signed requests never become anonymous snapshot reads.
     let malformed = anonymous.header("x-signature", "bad");
     assert!(e.auth(&malformed).is_err());

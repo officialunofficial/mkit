@@ -971,7 +971,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 ));
             }
             let op = self.identify(a, kind)?;
-            self.authorize_read(&op).await?;
+            let authorized = self.authorize_read(&op).await?;
+            #[cfg(not(feature = "published-view"))]
+            let _ = authorized;
             let scan = refs::list_scan_prefix(prefix);
             let last = token
                 .map(|bytes| {
@@ -1016,6 +1018,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .published
                 .as_ref()
                 .is_some_and(|s| s.inspection_configured())
+                && authorized.facts.caller_view != CallerView::Writer
             {
                 return Err(ServerError::unavailable("published view unavailable"));
             }
@@ -1101,10 +1104,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         self.observe(a, async {
             check_ref_name(name)?;
             let op = self.identify(a, kind)?;
-            self.authorize_read(&op).await?;
+            let authorized = self.authorize_read(&op).await?;
+            #[cfg(not(feature = "published-view"))]
+            let _ = authorized;
             #[cfg(feature = "published-view")]
             if let Some(source) = &self.published {
-                if source.inspection_configured() {
+                if source.inspection_configured()
+                    && authorized.facts.caller_view != CallerView::Writer
+                {
                     return Err(ServerError::unavailable("published view unavailable"));
                 }
                 if self.visibility_gates_reads()
