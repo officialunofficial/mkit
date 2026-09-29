@@ -31,8 +31,9 @@ specification apply throughout this document.
 A server that runs remote hooks MUST implement §5–§8. A server without
 remote hooks MUST still implement §2–§5 and §10. Every configured inspector,
 including an in-process inspector without a remote hook, is bound by §11.
-Servers MUST also implement the applicable indexed-mode, storage-lease, and
-server-GC requirements of §§9, 12, and 13. A deployment implements the
+Which of the indexed-mode, published-view, lifecycle, takedown, receipt and
+admin sections (§§9–16) a server implements depends on its conformance
+profile (§18). A deployment implements the
 business decisions exposed by hooks; the server implements the pipeline,
 validation, durable recording, and delivery guarantees specified here.
 
@@ -3274,14 +3275,43 @@ automatic purges are audited with their system actor. §14
 
 Reserved: this section is specified with M5 (see the version history).
 
-## 18. Conformance scope (reserved, M5)
+## 18. Conformance scope
 
-Reserved: this section is specified with M5 (see the version history).
+A server conforms to one of two profiles and advertises which through
+`GetServerInfo` (STC §2.1). A client MUST NOT assume a feature of the full
+profile unless the server advertises it.
+
+**Core profile.** The server implements §2–§8 (a server without remote hooks
+implements §2–§5) and:
+
+- **Published view (§10).** It configures no inspector, so nothing is ever
+  held or pending and every caller's view is the live view; §10 holds
+  trivially. It MUST NOT accept inspector configuration (§11) and advertises
+  `async_inspection = false`.
+- **Storage leases (§12).** It enforces no storage leases and advertises
+  `leases = false`. Content is retained permanently (§12.1). It MUST NOT
+  accept lease terms.
+- **Garbage collection (§13).** It deletes no repository content, so §13
+  does not apply. Unreferenced upload bytes may accumulate until a full-profile
+  server collects them.
+- **Indexed mode (§9).** It does not offer indexed mode and advertises
+  `indexed_mode = false`, because §12.1 requires per-ref storage leases in
+  indexed deployments.
+- **Takedown, receipts and admin (§14–§16).** It offers none of them: its
+  receipt key fields are empty (§15.5), it issues no redaction notices, and it
+  mounts no admin service (§16.1).
+
+**Full profile.** The server implements every section that applies to its
+configuration, including §9–§16. An indexed deployment MUST support per-ref
+storage leases (§12.1).
+
+The mapping of profiles to conformance-suite cases is specified with M5.
 
 ## 19. Version history
 
 | Version | Status | Change |
 |---|---|---|
+| 1 | draft | §18 conformance scope: a core profile (§2–§8; no inspectors, storage leases, GC, indexed mode, takedown, receipts or admin service) and a full profile; §1 defers the §§9–16 obligations to the profile. |
 | 1 | draft | Additive admin service, signed envelope, role-bearing key list, replay contract, audit log (§16), and remote CachePurge (§16.7); namespace-scoped Event (§12.4). |
 | 1 | draft | §14 content, repository, and namespace takedown; signed notices, preservation and restore; additive transport notices and hook transition/reason. |
 | 1 | draft | Storage receipts (§15): live advances and lease changes, shared receipt/notice key list, verifier rules and goldens; additive receipt fields and retrieval in STC, and `AdmitAllow.external_ref` (§6). |

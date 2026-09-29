@@ -30,6 +30,7 @@ workspace = true
 # the wasm32 graph. Inter-workspace deps need explicit version + path so
 # `cargo publish` accepts them.
 mkit-core = { version = "0.4", path = "../mkit-core", default-features = false }
+mkit-attest = { version = "0.4", path = "../mkit-attest", default-features = false, features = ["grants"] }
 thiserror = "2"
 blake3 = { version = "1", default-features = false }
 zeroize = "1"
@@ -117,6 +118,8 @@ futures-executor = "0.3"
 # Signs auth v2 test envelopes with the golden fixture's seed.
 ed25519-dalek = { version = "3", default-features = false, features = ["alloc"] }
 sha2 = "0.10"
+# Mints secp256k1 EIP-191 owner grants for the `0x` namespace pipeline test.
+k256 = { version = "0.14", default-features = false, features = ["ecdsa", "std"] }
 proptest = "1"
 # Temp roots for the `fs` store tests.
 tempfile = "3"

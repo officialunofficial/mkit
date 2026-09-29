@@ -21,6 +21,7 @@ async fn discover(ctx: &Ctx, headers: &[(String, String)]) -> Result<Reply, supe
     Ok(reply)
 }
 
+#[allow(clippy::too_many_lines)] // One discovery response is checked against its full advertised contract.
 pub(super) async fn shape_and_policy(ctx: Ctx) -> CaseResult {
     let reply = discover(&ctx, &[]).await?;
     let info = want_ok(
@@ -91,7 +92,18 @@ pub(super) async fn shape_and_policy(ctx: Ctx) -> CaseResult {
         info.receipt_key_id.as_deref() == Some(""),
         "receipt_key_id must be empty"
     );
-    ensure!(info.grant_schemes.is_empty(), "grant_schemes must be empty");
+    // A `Grants` profile assumes every scheme is configured; a deployment that
+    // advertises fewer schemes needs a profile listing its own tokens.
+    let expected = if ctx.profile().has(Feature::Grants) {
+        vec!["ed25519", "secp256k1-eip191", "webauthn-p256"]
+    } else {
+        vec![]
+    };
+    ensure!(
+        info.grant_schemes == expected,
+        "grant_schemes disagrees with the grants profile: {:?}",
+        info.grant_schemes
+    );
     let cache = reply
         .headers
         .get("cache-control")

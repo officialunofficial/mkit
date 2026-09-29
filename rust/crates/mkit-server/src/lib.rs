@@ -60,6 +60,7 @@ pub use op::{
     AuthzFacts, Commitment, Creation, GrantRef, OpKind, Operation, Procedure, RefUpdate,
     VerifiedAuth,
 };
+pub use policy::GrantConfig;
 pub use principal::Principal;
 pub use replay::{
     BeginUploadResult, ReplayDecision, ReplayKey, ReplayRecord, ReplayState, StoredRejection,

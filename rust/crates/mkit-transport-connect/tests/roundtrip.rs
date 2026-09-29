@@ -55,6 +55,7 @@ fn to_connect_error(err: TransportError) -> ConnectError {
             ErrorCode::Internal,
             "unexpected client-only error surfaced server-side",
         ),
+        _ => ConnectError::new(ErrorCode::Internal, "unexpected transport error"),
     }
 }
 
