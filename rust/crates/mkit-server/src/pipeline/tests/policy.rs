@@ -162,6 +162,7 @@ fn check_policy_case(
         nonce: nonce(1),
         commitment: crate::op::Commitment::Body(A),
         expires_at_ms: T0 + 300_000,
+        created_at_ms: 0,
     });
     let namespace_passes = !multi || policy_kind != 1;
     let hook_called = namespace_passes && (!multi || owner || role == AuthorizerRole::Authority);

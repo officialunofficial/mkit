@@ -161,8 +161,8 @@ pub(crate) struct WriteRequest<'a> {
     pub(crate) advance: Option<super::advance::AdvanceWrite<'a>>,
     /// Implicit session-ticket consumption (Multi only), also re-planned.
     pub(crate) implicit: Option<ImplicitConsume<'a>>,
-    /// `UploadCommit` only: a final `pre_receive` rejection to store in
-    /// place of `UploadPack`, so a retry is answered before re-streaming.
+    /// A final rejection: upload `pre_receive`, or a replay-only built-in
+    /// policy denial with no refs or other mutable effects.
     pub(crate) rejection: Option<&'a StoredRejection>,
     /// A separately committed admission reservation, if one was granted.
     pub(crate) pending: Option<&'a super::reservation::PendingGuard>,
@@ -217,10 +217,11 @@ impl WriteRequest<'_> {
             out.push(pending.key.clone());
             out.extend([keys::outbox_sequence(), keys::outcome_backlog()]);
         }
-        if let (
-            WriteKind::UploadCommit | WriteKind::BeginUpload | WriteKind::AdvanceRefs,
-            Some(replay),
-        ) = (self.kind, self.replay)
+        if let Some(replay) = self.replay
+            && (matches!(
+                self.kind,
+                WriteKind::UploadCommit | WriteKind::BeginUpload | WriteKind::AdvanceRefs
+            ) || self.rejection.is_some())
         {
             out.push(keys::replay(&replay.scope));
         }
@@ -583,7 +584,10 @@ fn replayed_write(
     // A same-nonce retry returns the stored commit before ticket validation.
     // A re-signed retry after that commit instead sees a closed ticket; the
     // client resolves it through BeginUpload AlreadyPresent and ReadRef.
-    if req.kind != WriteKind::BeginUpload && req.advance.is_none() {
+    if req.kind != WriteKind::BeginUpload
+        && req.advance.is_none()
+        && (req.rejection.is_none() || req.kind == WriteKind::UploadCommit)
+    {
         return Ok(None);
     }
     let Some(replay) = req.replay else {
@@ -605,6 +609,11 @@ fn decide_write_result(
     pre: &mut Vec<Precondition>,
     puts: &mut Vec<Write>,
 ) -> Result<(StoredResult, Vec<Write>, bool), ServerError> {
+    if req.kind != WriteKind::UploadCommit
+        && let Some(rejection) = req.rejection
+    {
+        return Ok((StoredResult::Rejected(rejection.clone()), Vec::new(), false));
+    }
     // Quota IS charged on a CAS conflict, as in vcs-worker, where the
     // charge commits in the same transaction as the replay row: a conflict
     // still costs an operation and a ledger row, so the charge bounds

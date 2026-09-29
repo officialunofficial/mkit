@@ -970,6 +970,18 @@ have verified all of the following:
 An indexed server verifies (a)–(c) for every object in the packs an advance
 consumes, not only objects reachable from the new tips.
 
+An indexed server also applies (c) to a ticketless `AdvanceRefs` and to an
+`UpdateRef` that is not a deletion and does not name a packmap ref: the new
+head MUST be a commit, remix or tag that is a verified member of the same
+repository. A miss follows §9.4's lag window, measured from the request's
+signed `x-created-at` (clamped to the server's clock) because no ticket
+exists, and is then the permanent `open closure` failure, byte-identical
+whether or not the object exists in another repository. A capped lookup is
+`object index limit exceeded`. Reconstructing the head follows §9.4's
+delta-base rules. Opaque mode does not check the head. An indexed server
+also requires a ticketless `AdvanceRefs` to pair `refs/heads/<x>` with
+`refs/mkit/packmap/<x>`.
+
 Object identity is checked on the reconstructed object, not on an
 unverified claim in an entry. A transport-level pack commitment does
 not replace the object identity or signature checks.
@@ -1190,8 +1202,11 @@ using the grammar of
 - **(b) Fast-forward-only.** A matching ref may only move to a descendant
   of its current value.
 
-Both policies are checked at pre-receive (§2 stage 5), after
-verification in indexed mode. A policy violation MUST fail with
+The fast-forward-only policy is checked at pre-receive (§2 stage 5),
+after verification in indexed mode. The allowed-signer set needs no
+verified content, so a server MAY check it earlier, before verification
+and at `BeginUpload` (whose ticket is bound to the ref and the signer), and
+the result MUST be the same. A policy violation MUST fail with
 `permission_denied` and the corresponding public message:
 
 | Policy violated | Public message |
@@ -1204,9 +1219,39 @@ operation signer. Valid signatures on reachable commits do not
 independently authorize that signer to move the ref. Grant and
 namespace authorization remain subject to STC and SPEC-WRITE-GRANTS.
 
+Every matching rule applies: allowed-signer sets of overlapping patterns
+intersect, and any matching fast-forward-only rule binds. A matching
+allowed-signer set with no auth v2 signer (a bearer, ssh or enc identity,
+or none) denies. The namespace owner and authority-approved writers are
+not exempt from either policy. Patterns never name a packmap ref
+(SPEC-WRITE-GRANTS §3.3); a packmap ref is covered through its head
+([SPEC-WRITE-GRANTS §8.3](SPEC-WRITE-GRANTS.md#83-packmap-coverage)), so an
+allowed-signer set on `refs/heads/<x>` also governs `refs/mkit/packmap/<x>`,
+and fast-forward-only is evaluated on the head alone.
+
 Fast-forward-only requires indexed mode because the server needs the
 commit graph. An opaque-mode deployment MUST refuse to start with a
 fast-forward-only rule configured.
+
+**Ancestry.** A new value descends from the current value when it equals
+it or reaches it through the `parents` of commits and remixes; a remix's
+`sources` are never followed, and a tag is a descendant only of itself.
+The check reads only this repository's verified membership and the
+objects staged by the advance (§9.4), never another repository or the
+global content store. A deployment bounds the member commits one check
+reads and the bytes it decodes. A check that cannot prove the ancestry
+within those bounds fails closed as the policy's `permission_denied`. A
+membership-dependent miss inside §9.4's lag window, with no other path to
+the current value, is the retryable `unavailable`
+`repository membership not yet visible` and is not stored; after the
+window it is the policy denial. The window runs from the creation of the earliest consumed
+ticket, or from the signed `x-created-at` (clamped to now)
+when the write consumes no ticket. `REF_EXPECTATION_ANY` on a present
+fast-forward-only ref is checked against the value the server observed and
+commits as `MATCH` on that value; `MISSING` and `ANY` on an absent ref
+create. The same check proves a `u`-only `MATCH`
+([SPEC-WRITE-GRANTS §8.2](SPEC-WRITE-GRANTS.md#82-flags-per-change)) in
+indexed mode; failing it is that grant's `write grant rejected: ref scope`.
 
 Deletion of a fast-forward-only ref, including the deletion operations
 in STC §7.8, MUST be refused with the same `permission_denied` and
@@ -3327,6 +3372,7 @@ The mapping of profiles to conformance-suite cases is specified with M5.
 
 | Version | Status | Change |
 |---|---|---|
+| 1 | draft | §9.7 clarifications: rules intersect, a packmap is covered through its head, a missing auth v2 signer denies, ancestry semantics and bounds, and the allowed-signer set MAY be checked before verification and at `BeginUpload`; §9.3 requires a ticketless indexed head to be a member commit, remix or tag (WP-4.17). |
 | 1 | draft | Indexed ingestion verifies every consumed object, including unreachable entries; closure and packlist index caps have the `object index limit exceeded` error (§9.3; WP-4.7). Indexed pack-size and decode-budget errors are pinned in §9.8. |
 | 1 | draft | §18 conformance scope: a core profile (§2–§8; no inspectors, storage leases, GC, indexed mode, takedown, receipts or admin service) and a full profile; §1 defers the §§9–16 obligations to the profile. |
 | 1 | draft | Additive admin service, signed envelope, role-bearing key list, replay contract, audit log (§16), and remote CachePurge (§16.7); namespace-scoped Event (§12.4). |

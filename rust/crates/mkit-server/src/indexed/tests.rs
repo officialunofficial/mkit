@@ -13,7 +13,10 @@ use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use super::{IndexedConfig, verify::verify_ticketed};
+use super::{
+    IndexedConfig,
+    verify::{StagedCommits, verify_ticketed},
+};
 use crate::Clock;
 use crate::memory::{MemoryBlobStore, MemoryKv};
 use crate::pipeline::{ShardMap, SinglePartition};
@@ -78,7 +81,7 @@ fn verify_store<S: NamespaceStore>(
     head: Hash,
     cfg: IndexedConfig,
     clock: &ManualClock,
-) -> Result<Vec<Hash>, crate::ServerError> {
+) -> Result<StagedCommits, crate::ServerError> {
     block_on(verify_ticketed(
         blobs,
         store,
@@ -102,7 +105,7 @@ fn verify(
     head: Hash,
     cfg: IndexedConfig,
     clock: &ManualClock,
-) -> Result<Vec<Hash>, crate::ServerError> {
+) -> Result<StagedCommits, crate::ServerError> {
     verify_store(blobs, store, repo, tickets, head, cfg, clock)
 }
 
@@ -304,7 +307,7 @@ fn good_push_indexes_before_membership_and_reuses_verified_state() {
     let store = MemoryKv::with_clock(clock.clone());
     upload(&blobs, &pack);
     let ticket = ticket(&repo, &pack, NOW as u64);
-    let ids = verify(
+    let staged = verify(
         &blobs,
         &store,
         &repo,
@@ -314,7 +317,9 @@ fn good_push_indexes_before_membership_and_reuses_verified_state() {
         &clock,
     )
     .unwrap();
-    assert_eq!(ids.len(), 2);
+    // Only history objects are kept: the commit, with its parents.
+    assert_eq!(staged.parents.keys().copied().collect::<Vec<_>>(), [head]);
+    assert!(staged.bytes > 0);
     let index = keys::object_index(&repo.name, &head, &ticket.pack_id);
     assert!(
         block_on(store.get(&source(&repo), &index))
@@ -342,7 +347,7 @@ fn good_push_indexes_before_membership_and_reuses_verified_state() {
             &clock
         )
         .unwrap()
-        .len(),
+        .objects,
         2
     );
 }
@@ -542,7 +547,7 @@ fn concurrent_lease_is_pending_without_replay_then_retry_succeeds() {
             &clock
         )
         .unwrap()
-        .len(),
+        .objects,
         2
     );
 }
@@ -564,7 +569,7 @@ fn fresh_batch_deadlines_and_renewed_leases_finish_after_thirty_seconds() {
         &clock,
     )
     .unwrap();
-    assert_eq!(ids.len(), 5);
+    assert_eq!(ids.objects, 5);
     assert_eq!(store.index_batches.load(Ordering::SeqCst), 4);
     assert!(clock.now_ms() - NOW > 30_000);
     for ticket in &tickets {
@@ -1311,4 +1316,41 @@ fn in_pack_delta_chain_above_cap_is_rejected_before_tip() {
     .unwrap_err();
     assert_eq!(error.code(), crate::Code::InvalidArgument);
     assert_eq!(error.public_message(), "delta chain too deep");
+}
+
+#[test]
+fn unstaged_head_lag_window_uses_earliest_consumed_ticket_in_either_order() {
+    let (good, _) = good_pack();
+    let extra = encode_packlist(None, &[]).unwrap();
+    let blobs = MemoryBlobStore::default();
+    upload(&blobs, &good);
+    upload(&blobs, &extra);
+    let repo = repo("one");
+    let clock = Arc::new(ManualClock::new(NOW));
+    for oldest_first in [false, true] {
+        let store = MemoryKv::with_clock(clock.clone());
+        let mut tickets = [
+            ticket(&repo, &good, NOW as u64),
+            ticket(
+                &repo,
+                &extra,
+                NOW as u64 - IndexedConfig::default().relay_lag_bound_ms,
+            ),
+        ];
+        if oldest_first {
+            tickets.reverse();
+        }
+        let error = verify(
+            &blobs,
+            &store,
+            &repo,
+            &tickets,
+            [99; 32],
+            IndexedConfig::default(),
+            &clock,
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), crate::Code::InvalidArgument);
+        assert_eq!(error.public_message(), "open closure");
+    }
 }

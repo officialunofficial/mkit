@@ -117,7 +117,7 @@ fn split_pack() -> (Vec<u8>, Vec<u8>, Hash) {
     (first.finish().unwrap(), second.finish().unwrap(), head)
 }
 
-fn upload(env: &Env, pack: &[u8], ticket_id: Hash) {
+pub(super) fn upload(env: &Env, pack: &[u8], ticket_id: Hash) {
     let pack_id = hash(pack);
     block_on(async {
         let mut sink = env

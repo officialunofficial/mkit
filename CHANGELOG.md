@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server: built-in ref policy (SPEC-SERVER §9.7, programmatic, Stage 2):
+  `PipelineConfig::ref_policy` with per-ref allowed operation signers (both
+  modes) and fast-forward-only rules (indexed mode). In indexed mode a
+  `u`-only write grant now fast-forwards, proven against this repository's
+  history (`IndexedConfig::max_ancestry_commits`, default 256), and a ticketless
+  head must be a member commit, remix or tag. API: `verify_ticketed` returns
+  `StagedCommits`; `VerifiedAuth::created_at_ms` and
+  `IndexedConfig::max_ancestry_commits` are new (WP-4.17).
 - Server: the native server can run authorization, admission and outcome
   delivery in a remote hook service over signed HTTPS (`--hook-authorize-url`,
   `--hook-admit-url`, `--hook-outcome-url`, `--hook-key-file`, `--hook-timeout-secs`,
@@ -56,7 +64,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `WEBAUTHN_RPS` vars and a `test-faults`-only `UNSAFE_LOOPBACK_GRANTS`, to
   configure write grants on Multi + auth v2 deployments. Any bad or partial
   value refuses to start; unset keeps grants off (WP-1.30b).
-
 - Server: in indexed mode, extract every ChunkedBlob (as its reassembled content,
   with a chunk-offset sidecar) and every file Blob of at least 64 KiB into the
   deployment-wide object store under its object id, before a pack is marked

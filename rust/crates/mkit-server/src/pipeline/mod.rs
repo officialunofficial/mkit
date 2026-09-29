@@ -40,6 +40,7 @@ mod list;
 mod outcome;
 mod parts;
 mod plan;
+mod ref_policy;
 mod reservation;
 mod revocation;
 mod shard;
@@ -64,6 +65,7 @@ use crate::error::{AbortCause, InvalidHeader, ServerError};
 use crate::op::{
     AuthzFacts, CallerView, GrantRef, OpKind, Operation, Procedure, RefUpdate, VerifiedAuth,
 };
+use crate::policy::ff::FastForward;
 use crate::policy::{
     AuthorizerRole, GrantConfig, NamespacePolicy, WritePolicy, grants, read as read_policy,
 };
@@ -281,6 +283,10 @@ pub struct PipelineConfig {
     pub outbox_backlog_cap: Option<OutboxBacklogCap>,
     /// Indexed ingestion and pre-receive verification, off by default.
     pub indexed: Option<crate::indexed::IndexedConfig>,
+    /// Per-ref allowed signers and fast-forward-only rules (SPEC-SERVER
+    /// §9.7). Programmatic only and Stage 2: no adapter exposes it. A
+    /// fast-forward-only rule needs `indexed`.
+    pub ref_policy: Option<crate::policy::RefPolicy>,
     /// HTTP object serving (SPEC-HTTP-OBJECTS), off by default and
     /// programmatic only. Requires [`Self::indexed`]. Stage 2 (R-154, R-169).
     #[cfg(feature = "http-objects")]
@@ -345,6 +351,7 @@ impl PipelineConfig {
                 bytes: 64 * 1024 * 1024,
             }),
             indexed: None,
+            ref_policy: None,
             #[cfg(feature = "http-objects")]
             http_objects: None,
         }
@@ -572,6 +579,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 || indexed.max_pack_bytes > indexed.decode_budget
                 || indexed.relay_lag_bound_ms == 0
                 || indexed.extract_min_bytes == 0
+                || indexed.max_ancestry_commits == 0
+                || indexed.max_ancestry_commits > crate::indexed::MAX_ANCESTRY_COMMITS_LIMIT
                 || indexed
                     .max_extract_bytes
                     .is_some_and(|max| max < indexed.max_pack_bytes)
@@ -582,6 +591,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .upload_limits
                 .max_total_bytes
                 .min(indexed.max_pack_bytes);
+        }
+        if let Some(policy) = &cfg.ref_policy {
+            policy.validate()?;
+            if policy.has_fast_forward_rule() && cfg.indexed.is_none() {
+                return Err(ServerError::invalid_argument(
+                    "fast-forward-only ref rules require indexed mode",
+                ));
+            }
         }
         #[cfg(feature = "http-objects")]
         if let Some(http) = &cfg.http_objects {
@@ -1167,7 +1184,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             if tickets.iter().any(|id| !distinct.insert(id)) {
                 return Err(ServerError::invalid_argument("duplicate ticket id"));
             }
-            if !tickets.is_empty() || self.cfg.sharding == Sharding::D34 {
+            // A ref policy or indexed mode checks the head only (and its
+            // packmap through it), so the pair must be a real pair.
+            if !tickets.is_empty()
+                || self.cfg.sharding == Sharding::D34
+                || self.cfg.ref_policy.is_some()
+                || self.cfg.indexed.is_some()
+            {
                 let head_branch = head.name.strip_prefix("refs/heads/");
                 let packmap_branch = packmap
                     .name
@@ -1863,10 +1886,20 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 );
             }
         }
-        op.authz = self.authorize(&op).await?;
+        let (authz, fast_forward) = self.authorize(&op).await?;
+        op.authz = authz;
         fault!(self, AfterAuthorize, &op, a);
+        // §9.7: the signer rule needs no verified content, so it runs first.
+        if let Err(error) = self.check_ref_signers(&op) {
+            return self
+                .store_policy_denial(&op, a, &p, ahead, error, false)
+                .await
+                .map(|stored| (stored, ResponseMeta::default()));
+        }
         let ticketed =
             matches!(&op.kind, OpKind::AdvanceRefs { tickets, .. } if !tickets.is_empty());
+        let mut staged = crate::indexed::verify::StagedCommits::default();
+        let mut ticket_ms = None;
         if ticketed {
             let snap = ahead
                 .as_mut()
@@ -1897,7 +1930,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 let tip = head
                     .new
                     .ok_or_else(|| ServerError::invalid_argument("delete consumes no tickets"))?;
-                let _verified_objects = crate::indexed::verify::verify_ticketed(
+                ticket_ms = rows.iter().map(|ticket| ticket.created_at_ms).min();
+                staged = crate::indexed::verify::verify_ticketed(
                     &self.blobs,
                     &self.meta,
                     self.shards.as_ref(),
@@ -1912,6 +1946,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 )
                 .await?;
             }
+        } else if let Err(error) = self.check_ticketless_head(&op).await {
+            return self
+                .store_policy_denial(&op, a, &p, ahead, error, false)
+                .await
+                .map(|stored| (stored, ResponseMeta::default()));
         }
         if let Some(pending) = implicit {
             let upd = refs
@@ -2005,6 +2044,20 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     op.created = self.commit_creation(&op, a.business_skew_ms).await?;
                     None
                 };
+                if let Err(error) = self
+                    .check_fast_forward(
+                        &op,
+                        &mut refs,
+                        ahead.as_ref(),
+                        fast_forward.as_ref(),
+                        (&staged, ticket_ms),
+                    )
+                    .await
+                {
+                    return self
+                        .store_policy_denial(&op, a, &p, ahead, error, pending.is_some())
+                        .await;
+                }
                 self.pre_receive(&op).await?;
                 let write = (kind, refs.as_slice(), allowance.charges.as_slice());
                 self.plan_and_apply(
@@ -2669,10 +2722,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     }
 
     /// Stage 2: the facts it returns become `op.authz` before admission.
-    async fn authorize(&self, op: &Operation) -> Result<AuthzFacts, ServerError> {
+    async fn authorize(
+        &self,
+        op: &Operation,
+    ) -> Result<(AuthzFacts, Option<FastForward>), ServerError> {
         tracing::debug!(stage = "authorize");
         if !op.procedure().is_write() {
-            return Ok(self.authorize_read(op).await?.facts);
+            return Ok((self.authorize_read(op).await?.facts, None));
         }
         match &self.cfg.addressing {
             Addressing::Multi(multi) => self.owner_rule(op, Some(&multi.namespace_policy)).await,
@@ -2686,6 +2742,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .authorizer()
                 .authorize(op)
                 .await
+                .map(|facts| (facts, None))
                 .map_err(ServerError::strip_admission_shape),
         }
     }
@@ -2701,7 +2758,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         &self,
         op: &Operation,
         policy: Option<&NamespacePolicy>,
-    ) -> Result<AuthzFacts, ServerError> {
+    ) -> Result<(AuthzFacts, Option<FastForward>), ServerError> {
         let namespace = Namespace::parse(op.repo.namespace.as_str())
             .map_err(|_| internal("invalid resolved owner-policy namespace"))?;
         if let Some(NamespacePolicy::Allowlist(allowed)) = policy
@@ -2715,14 +2772,17 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         {
             return Err(ServerError::permission_denied("write not permitted"));
         }
+        let mut fast_forward = None;
         let grant = if let Some(header) = &op.write_grant {
             let cfg = self.cfg.grants.as_ref().ok_or_else(|| {
                 grants::rejected(mkit_attest::grant::GrantError::SchemeNotAdvertised)
             })?;
             let verified = cfg.verify(header.expose(), op)?;
             // Step 8 (ref scope) before step 11, which reads state and comes last.
-            let presence_requirement =
+            let scope =
                 crate::policy::ref_scopes::authorize(&verified, &op.kind, self.cfg.indexed_mode())?;
+            fast_forward = scope.fast_forward;
+            let presence_requirement = scope.presence;
             let observed = match self.cfg.sharding {
                 Sharding::Single => op.observed_epoch,
                 Sharding::D34 => op.leased_epoch,
@@ -2760,7 +2820,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             .authorize(&authorized)
             .await
             .map_err(ServerError::strip_admission_shape)?;
-        Ok(facts)
+        Ok((facts, fast_forward))
     }
 
     /// Stage 5 (no pack on a unary write).
