@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `0x` namespaces, stored-epoch checks, and grant-scheme discovery. A
   conservative interim ref gate applies until WP-2.7; adapter grant flags
   follow in WP-1.30b.
+- Connect client: detect bounded 402 admission challenges and report payment receipts without exposing their values (WP-3.10). `TransportError` is now non-exhaustive, a breaking change for exhaustive downstream matches.
+- Connect client: run a trusted, user-configured admission helper once and retry admitted writes with strictly filtered headers (WP-3.11).
+
 - Connect client: sign repository reads with auth v2 on each attempt, including
   the framed `DownloadPack` request. Add a grant-source API and local selection
   logic; the user grant store follows in WP-2.13.

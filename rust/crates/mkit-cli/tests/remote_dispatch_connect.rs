@@ -74,6 +74,7 @@ fn to_connect_error(err: TransportError) -> ConnectError {
             ErrorCode::Internal,
             "unexpected client-only error surfaced server-side",
         ),
+        _ => ConnectError::new(ErrorCode::Internal, "unexpected transport error"),
     }
 }
 
@@ -113,6 +114,7 @@ struct TestService {
     calls: CapturedCalls,
     not_found: Vec<&'static str>,
     pending_advance: bool,
+    admission_required: bool,
 }
 
 impl TestService {
@@ -127,6 +129,27 @@ impl TestService {
             repository: header("x-repository"),
             ref_hint: header("x-mkit-ref"),
         });
+        if self.admission_required
+            && procedure == "AdvanceRefs"
+            && ctx.headers().get("payment-authorization").is_none()
+        {
+            return Err(
+                ConnectError::permission_denied("admission required").with_detail(
+                    connectrpc::ErrorDetail::from_message(
+                        "mkit.transport.v1.AdmissionChallenge",
+                        &generated::AdmissionChallenge {
+                            challenges: vec![generated::Challenge {
+                                scheme: Some("test".into()),
+                                value: Some("secret-challenge-value".into()),
+                                ..Default::default()
+                            }],
+                            description: Some("pay to write".into()),
+                            ..Default::default()
+                        },
+                    ),
+                ),
+            );
+        }
         if self.not_found.contains(&procedure) {
             return Err(ConnectError::not_found("repository not found"));
         }
@@ -472,6 +495,20 @@ fn spawn_server_with_behavior(
     std::thread::JoinHandle<()>,
     CapturedCalls,
 ) {
+    spawn_server_admission(backend, not_found, pending_advance, false)
+}
+
+fn spawn_server_admission(
+    backend: Arc<MemoryTransport>,
+    not_found: Vec<&'static str>,
+    pending_advance: bool,
+    admission_required: bool,
+) -> (
+    u16,
+    tokio::sync::oneshot::Sender<()>,
+    std::thread::JoinHandle<()>,
+    CapturedCalls,
+) {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let server_calls = Arc::clone(&calls);
     let (addr_tx, addr_rx) = mpsc::channel();
@@ -498,6 +535,7 @@ fn spawn_server_with_behavior(
                 calls: server_calls,
                 not_found,
                 pending_advance,
+                admission_required,
             });
             let router = Router::new().add_service(service);
 
@@ -811,6 +849,117 @@ fn push_not_found_names_the_repository_for_each_write() {
                 .any(|call| call.procedure == procedure)
         );
         drop(tx);
+        let _ = shutdown.send(());
+        handle.join().unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[test]
+#[allow(clippy::too_many_lines)]
+fn cli_admission_helper_trust_filter_json_and_exit_codes() {
+    use std::fmt::Write as _;
+    use std::os::unix::fs::PermissionsExt;
+    for case in [
+        "happy",
+        "reserved",
+        "no-helper",
+        "untrusted",
+        "missing-helper",
+    ] {
+        let (src, _) = source_repo_with_one_commit();
+        let (port, shutdown, handle, calls) =
+            spawn_server_admission(Arc::new(MemoryTransport::new()), Vec::new(), false, true);
+        let url = format!("mkit+http://127.0.0.1:{port}/myproj");
+        let config_path = src.path().join(".mkit/config");
+        let mut config = std::fs::read_to_string(&config_path).unwrap_or_default();
+        write!(
+            config,
+            "\nremote.origin.url = {url}\nremote.origin.type = http\n"
+        )
+        .unwrap();
+        std::fs::write(config_path, config).unwrap();
+        let xdg = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(xdg.path().join("mkit")).unwrap();
+        let helper = xdg.path().join("helper.sh");
+        let marker = xdg.path().join("ran");
+        let header = if case == "reserved" {
+            "X-Mkit-Ref"
+        } else {
+            "Payment-Authorization"
+        };
+        if case != "missing-helper" {
+            std::fs::write(&helper, format!("#!/bin/sh\ncat >/dev/null\ntouch '{}'\nprintf '%s' '{{\"{header}\":\"secret-helper-value\"}}'\n", marker.display())).unwrap();
+            let mut perms = std::fs::metadata(&helper).unwrap().permissions();
+            perms.set_mode(0o700);
+            std::fs::set_permissions(&helper, perms).unwrap();
+        }
+        let trusted = if case == "untrusted" {
+            "mkit+http://127.0.0.1:1/other"
+        } else {
+            &url
+        };
+        let user = if case == "no-helper" {
+            format!("trusted_remote_endpoint = {trusted}\n")
+        } else {
+            format!(
+                "trusted_remote_endpoint = {trusted}\nadmission_helper = {}\n",
+                helper.display()
+            )
+        };
+        std::fs::write(xdg.path().join("mkit/config"), user).unwrap();
+        let output = Command::new(mkit_bin())
+            .args(["push", "origin", "--format", "json"])
+            .current_dir(src.path())
+            .env("XDG_CONFIG_HOME", xdg.path())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(
+            !stderr.contains("secret-helper-value") && !stdout.contains("secret-helper-value"),
+            "{case}"
+        );
+        assert!(
+            !stderr.contains("secret-challenge-value")
+                && !stdout.contains("secret-challenge-value"),
+            "{case}"
+        );
+        match case {
+            "happy" => {
+                assert!(output.status.success(), "{stderr}");
+                assert!(marker.exists());
+                assert_eq!(
+                    calls
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|c| c.procedure == "AdvanceRefs")
+                        .count(),
+                    2
+                );
+            }
+            "reserved" => {
+                assert_eq!(output.status.code(), Some(78), "{stderr}");
+                assert!(stderr.contains("X-Mkit-Ref"));
+                assert!(marker.exists());
+            }
+            "no-helper" => {
+                assert_eq!(output.status.code(), Some(77), "{stderr}");
+                assert!(stdout.contains("\"admission_required\":true"));
+                assert!(stderr.contains("hint:"));
+            }
+            "untrusted" => {
+                assert_eq!(output.status.code(), Some(77), "{stderr}");
+                assert!(!marker.exists());
+                assert!(stderr.contains("hint:"));
+            }
+            "missing-helper" => {
+                assert_eq!(output.status.code(), Some(78), "{stderr}");
+                assert!(!marker.exists());
+            }
+            _ => unreachable!(),
+        }
         let _ = shutdown.send(());
         handle.join().unwrap();
     }

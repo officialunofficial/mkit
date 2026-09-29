@@ -41,6 +41,7 @@ use mkit_core::protocol::{PackKey, Transport, TransportError, UploadLimits};
 use mkit_core::refs::{self, Head};
 use mkit_core::store::{ObjectStore, StoreError};
 use mkit_core::transfer::{self, PackListError};
+use mkit_transport_connect::admission::{AdmissionPolicy, is_reserved};
 use mkit_transport_connect::{
     ConnectTransport, PENDING_INTERRUPTED_MESSAGE, repository_identity_from_url,
 };
@@ -243,13 +244,14 @@ fn repository_operation_error(tx: &dyn Transport, error: TransportError) -> Disp
 /// hand (it discovered the repo before building `cfg`).
 pub fn open_trusted(
     endpoint: &str,
+    remote_name: &str,
     repo_chosen: bool,
     cfg: &crate::config::LayeredConfig,
     layout: &RepoLayout,
 ) -> Result<Arc<dyn Transport>, DispatchError> {
     crate::config::endpoint_credential_trust(cfg, endpoint, repo_chosen)
         .map_err(DispatchError::UntrustedRemote)?;
-    open_with_config(endpoint, &cfg.merged, layout)
+    open_with_config_for_remote(endpoint, &cfg.merged, layout, Some(remote_name))
 }
 
 /// The single chokepoint that resolves SSH trust-pinning (issue #389) and
@@ -265,6 +267,15 @@ pub(crate) fn open_with_config(
     cfg: &crate::config::Config,
     layout: &RepoLayout,
 ) -> Result<Arc<dyn Transport>, DispatchError> {
+    open_with_config_for_remote(url, cfg, layout, None)
+}
+
+fn open_with_config_for_remote(
+    url: &str,
+    cfg: &crate::config::Config,
+    layout: &RepoLayout,
+    remote_name: Option<&str>,
+) -> Result<Arc<dyn Transport>, DispatchError> {
     let envelope_signer = if url.starts_with("mkit+https://") || url.starts_with("mkit+http://") {
         if cfg.transport_auth_envelope() && cfg.trusted_remote_endpoint.trim() != url {
             return Err(DispatchError::UntrustedRemote(format!(
@@ -277,7 +288,7 @@ pub(crate) fn open_with_config(
     };
     if url.starts_with("mkit+https://") || url.starts_with("mkit+http://") {
         validate_connect_repository(url)?;
-        let tx = ConnectTransport::connect_with_signer(url, envelope_signer)?
+        let mut tx = ConnectTransport::connect_with_signer(url, envelope_signer)?
             .with_receipt_store(Arc::new(upload_receipts::FilePartReceiptStore::new(
                 layout.upload_parts_dir(),
             )))
@@ -288,7 +299,39 @@ pub(crate) fn open_with_config(
             .with_upload_observer(|event| {
                 crate::progress::upload_event(event);
                 !crate::signal::is_shutdown()
+            })
+            .with_admission_receipt_observer(|receipt| {
+                eprintln!(
+                    "note: remote returned a {} receipt for {}",
+                    receipt.header,
+                    receipt
+                        .procedure
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(receipt.procedure)
+                );
             });
+        if !cfg.admission_helper.is_empty() && cfg.trusted_remote_endpoint.trim() == url {
+            let responder = Arc::new(crate::admission_helper::ExecResponder {
+                path: cfg.admission_helper.clone().into(),
+            });
+            let mut policy = AdmissionPolicy::new(responder);
+            if let Some(name) = remote_name
+                && let Some(headers) = cfg.remote_admission_headers.get(name)
+            {
+                let bearer = std::env::var("MKIT_API_TOKEN").is_ok_and(|s| !s.is_empty());
+                for header in headers.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    if is_reserved(header, bearer) {
+                        eprintln!(
+                            "warning: ignoring reserved header `{header}` in remote.{name}.admission_headers (see SPEC-TRANSPORT-CONNECT §5.1)"
+                        );
+                    } else {
+                        policy = policy.with_extra_allowed(header);
+                    }
+                }
+            }
+            tx = tx.with_admission(policy);
+        }
         return Ok(Arc::new(tx));
     }
     open_with_ssh_options(url, &ssh_options_from_config(cfg), envelope_signer)
