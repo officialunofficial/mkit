@@ -28,6 +28,7 @@ pub mod download;
 mod error;
 #[cfg(all(feature = "fs", not(target_arch = "wasm32")))]
 pub mod fs;
+pub mod indexed;
 #[cfg(any(test, feature = "memory"))]
 mod memory;
 mod op;
@@ -72,10 +73,10 @@ pub use rt::{BoxFuture, BoxStream, Clock, ManualClock, MaybeSend, MaybeSync, Spa
 pub use store::{
     Batch, BatchOutcome, BlobBody, BlobKey, BlobMeta, BlobNamespace, BlobStore, BoxError,
     ByteRange, CommitOutcome, ContentIndex, Cursor, Key, KeyClasses, MAX_BATCH_BYTES,
-    MAX_BATCH_OPS, MAX_KEY_BYTES, MAX_VALUE_BYTES, MembershipMode, MultipartBlobStore,
-    NamespaceStore, PackSink, PartRef, PartSink, Partition, PartitionStats, Precondition, ScanPage,
-    StateCommitment, StoreCapabilities, StoreError, StoreMaintenance, UnsupportedPartSink, Value,
-    Write,
+    MAX_BATCH_OPS, MAX_KEY_BYTES, MAX_SCAN_RANGES, MAX_VALUE_BYTES, MembershipMode,
+    MultipartBlobStore, NamespaceStore, PackSink, PartRef, PartSink, Partition, PartitionStats,
+    Precondition, RangeScan, ScanPage, StateCommitment, StoreCapabilities, StoreError,
+    StoreMaintenance, UnsupportedPartSink, Value, Write,
 };
 pub use telemetry::{
     METRIC_LATENCY, METRIC_REQUESTS, METRIC_UPLOAD_BYTES, Metrics, NEVER_ECHO, NEVER_LOG,
