@@ -36,6 +36,7 @@
 //! | open tickets per signer | `tu 00 <repo> 00 <ref> 00 <signer:32>` | be64; same rules |
 //! | ticket expiry timer | `w 00 <expires_at:be64> 02 <ticket_id:32>` | empty |
 //! | local membership | `m 00 <repo> 00 <pack:32>` | empty |
+//! | indexed verification state | `vs 00 <repo> 00 <pack:32>` | `VerificationV1` |
 //! | repository object index | `i 00 <repo> 00 <object:32> <pack:32>` | binary `IndexValue` |
 //! | reservation and outcome | `o 00 <reservation_id>` | codec `ReservationV1` |
 //! | outcome pending index | `oq 00 <seq:be64> <reservation_id>` | empty |
@@ -152,6 +153,8 @@ pub const TAG_TICKETS_PER_REF: &str = "tc";
 pub const TAG_TICKETS_PER_SIGNER: &str = "tu";
 /// Local repository membership tag.
 pub const TAG_MEMBERSHIP: &str = "m";
+/// Per-(repository, pack) verification state in the ref shard.
+pub const TAG_VERIFICATION: &str = "vs";
 /// Repository-scoped object index tag.
 pub const TAG_OBJECT_INDEX: &str = "i";
 /// Reservation and terminal outcome tag.
@@ -170,7 +173,7 @@ pub const TAG_OUTBOX_SEQUENCE: &str = "os";
 pub const TAG_OUTCOME_BACKLOG: &str = "oc";
 
 /// Tags whose layouts later work packages add. No M0 key uses them.
-pub const RESERVED_TAGS: &[&str] = &["tb", "l", "pp", "vc", TAG_NAMESPACE_LIST];
+pub const RESERVED_TAGS: &[&str] = &["tb", "l", "pp", "vc", TAG_NAMESPACE_LIST, TAG_VERIFICATION];
 
 /// A key decoded by [`parse`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -259,6 +262,8 @@ pub enum ParsedKey {
         /// Pack id.
         pack_id: Hash,
     },
+    /// `vs 00 <repo> 00 <pack>`.
+    Verification { repo: RepoName, pack_id: Hash },
     /// `i 00 <repo> 00 <object> <pack>`.
     ObjectIndex {
         /// Repository.
@@ -580,6 +585,12 @@ pub fn membership(repo: &RepoName, pack: &Hash) -> Key {
     key(TAG_MEMBERSHIP, &[repo.as_str().as_bytes(), b"\0", pack])
 }
 
+/// `vs 00 <repo> 00 <pack>`; the ref shard holding the ticket owns it.
+#[must_use]
+pub fn verification(repo: &RepoName, pack: &Hash) -> Key {
+    key(TAG_VERIFICATION, &[repo.as_str().as_bytes(), b"\0", pack])
+}
+
 /// `i 00 <repo> 00 <object> <pack>`.
 #[must_use]
 pub fn object_index(repo: &RepoName, object: &Hash, pack: &Hash) -> Key {
@@ -875,6 +886,13 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
                 pack_id: hash(&body[sep + 1..])?,
             }
         }
+        b"vs" => {
+            let sep = body.iter().position(|&b| b == 0)?;
+            ParsedKey::Verification {
+                repo: RepoName::new(text(&body[..sep])?).ok()?,
+                pack_id: hash(&body[sep + 1..])?,
+            }
+        }
         b"i" => {
             let sep = body.iter().position(|&b| b == 0)?;
             let (object, pack_id) = body[sep + 1..].split_first_chunk::<32>()?;
@@ -1016,6 +1034,10 @@ mod tests {
             (namespace_record(), b"nr\0".to_vec()),
             (repo_record(&repo("room-a")), b"rr\0room-a".to_vec()),
             (repo_known(&repo("room-a")), b"rk\0room-a".to_vec()),
+            (
+                verification(&repo("room-a"), &s),
+                [&b"vs\0room-a\0"[..], &[0x11; 32]].concat(),
+            ),
             (
                 ref_key(&repo("room-a"), "refs/heads/main"),
                 b"r\0room-a\0refs/heads/main".to_vec(),
