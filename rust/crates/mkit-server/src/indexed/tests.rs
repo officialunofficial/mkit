@@ -251,9 +251,10 @@ fn unknown_type_and_foreign_packlist_follow_exact_errors() {
         ticket(&repo, &good, NOW as u64),
         ticket(&repo, &list, NOW as u64),
     ];
+    let retry_store = MemoryKv::with_clock(clock.clone());
     let error = verify(
         &blobs,
-        &MemoryKv::with_clock(clock.clone()),
+        &retry_store,
         &repo,
         &tickets,
         head,
@@ -265,13 +266,12 @@ fn unknown_type_and_foreign_packlist_follow_exact_errors() {
         error.public_message(),
         "repository membership not yet visible"
     );
-    let tickets = [
-        ticket(&repo, &good, NOW as u64 - 60_000),
-        ticket(&repo, &list, NOW as u64 - 60_000),
-    ];
+    // The unavailable attempt releases its lease. The same ticket reaches
+    // the permanent answer exactly at the lag boundary.
+    clock.advance(IndexedConfig::default().relay_lag_bound_ms as i64);
     let error = verify(
         &blobs,
-        &MemoryKv::with_clock(clock.clone()),
+        &retry_store,
         &repo,
         &tickets,
         head,
