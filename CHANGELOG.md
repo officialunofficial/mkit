@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Core and wasm: verify MKDS v1 multi-chunk disclosure spans against a trusted
+  commit and build boundary-aware MKDP/MKDS range proofs (WP-4.14a).
 - Server Worker: stream verified multipart parts into CV-keyed R2 objects and
   verify the complete pack before publishing it; raise the ticketed pack cap
   to 1 GiB while retaining the 64 MiB single-upload limit (WP-1.12).

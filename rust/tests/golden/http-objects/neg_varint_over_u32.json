@@ -1,0 +1,24 @@
+{
+  "blake3": "e7c899666100c1419be4f3a29aef33ed0bd70dd5d71e058438ccec9394371428",
+  "commit": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
+  "expect": {
+    "accept": false,
+    "expand_to": null,
+    "reject_reason": "span_encoding"
+  },
+  "name": "neg_varint_over_u32",
+  "recipe": {
+    "segments": [
+      {
+        "length": 53,
+        "offset": 0,
+        "source": "span_two_chunks.bin"
+      },
+      {
+        "hex": "8080808010"
+      }
+    ]
+  },
+  "schema_version": 1,
+  "size": 58
+}

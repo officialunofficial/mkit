@@ -172,6 +172,22 @@ bench = false
 required-features = ["libfuzzer"]
 
 [[bin]]
+name = "span_decode"
+path = "fuzz_targets/span_decode.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "verify_span"
+path = "fuzz_targets/verify_span.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
 name = "pack_entries"
 path = "fuzz_targets/pack_entries.rs"
 test = false

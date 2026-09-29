@@ -33,6 +33,8 @@ from recurring.
 | `fuzz_targets/merkle_packlist.rs` | `transfer::decode_packlist` / `transfer::encode_packlist` (never panics; a decoded node re-encodes and re-decodes to the same node) |
 | `fuzz_targets/disclosure_decode.rs` | `verify::verify_disclosure` decode path (issue #1015 verifier kit PR 2, SPEC-DISCLOSURE) — never panics on adversarial bundle bytes, regardless of the commit id checked against; every `Vec`/`Proof` length is bounded before allocation |
 | `fuzz_targets/verify_disclosure.rs` | `verify::verify_disclosure` / `verify::build_disclosure` (never panics; a freshly built bundle over a real `ObjectStore` fixture verifies; a mutated bundle rejects cleanly) |
+| `fuzz_targets/span_decode.rs` | `verify::span::verify_disclosure_span` structural decode (never panics on arbitrary MKDS bytes; lengths and counts are checked before allocation) |
+| `fuzz_targets/verify_span.rs` | `verify::span::{encode_span,verify_disclosure_span}` (a newly encoded committed span verifies; its mutated commit id rejects; arbitrary input never panics) |
 | `fuzz_targets/pack_entries.rs` | `pack::PackEntries` (never panics on adversarial pack bytes; a pack `PackReader::read` accepts also parses as `PackEntries` with the same entry count) |
 | `fuzz_targets/verify_closure.rs` | `verify::verify_closure` / `verify::verify_closure_packs` / `verify::verify_closure_manifest` / `verify::export_closure` (never panics; a freshly exported snapshot closure verifies; a mutated manifest rejects cleanly; raw adversarial bytes fed directly as pack buffers — whole and split into two — to `verify_closure_packs`/`verify_closure_manifest` never panic and any `Ok` report is internally consistent) |
 
@@ -71,6 +73,11 @@ Target-specific invariants:
 - **Delta**: a `COPY` instruction's `offset + length` stays within the
   base slice; a truncated `COPY` header or `INSERT` literal produces
   `DeltaCorrupt`; opcode `0x00` is always rejected.
+- **MKDS span**: the decode target accepts arbitrary capped bytes without a
+  panic. The verify target re-encodes the committed two-chunk fixture through
+  the product encoder, verifies its 20-byte range, rejects a changed embedded
+  commit id, then checks arbitrary capped bytes. The fixture and its derived
+  bundles are fixed; libfuzzer mutates only the separate adversarial input.
 
 ## How to run
 

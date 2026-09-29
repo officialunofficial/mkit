@@ -551,6 +551,65 @@ pub fn disclosure_decode_one_iteration(input: &[u8]) {
     let _ = mkit_core::verify::verify_disclosure(&commit_id, input);
 }
 
+/// Exercise the bounded MKDS structural pass on arbitrary bytes. The
+/// verifier's public entry point runs that pass before crypto.
+pub fn span_decode_one_iteration(input: &[u8]) {
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let _ = mkit_core::verify::span::verify_disclosure_span(&[0u8; 32], input);
+}
+
+const GOOD_SPAN: &[u8] = include_bytes!("../../tests/golden/http-objects/span_two_chunks.bin");
+
+fn fixture_length(bytes: &[u8], cursor: &mut usize) -> usize {
+    let mut result = 0usize;
+    for shift in (0..35).step_by(7) {
+        let byte = bytes[*cursor];
+        *cursor += 1;
+        result |= usize::from(byte & 127) << shift;
+        if byte & 128 == 0 {
+            return result;
+        }
+    }
+    panic!("committed span has an invalid length")
+}
+
+fn fresh_span_from_golden() -> ([u8; 32], Vec<u8>) {
+    use mkit_core::verify::span::encode_span;
+
+    let commit: [u8; 32] = GOOD_SPAN[5..37].try_into().expect("committed commit id");
+    let offset = u64::from_be_bytes(GOOD_SPAN[37..45].try_into().expect("committed offset"));
+    let len = u64::from_be_bytes(GOOD_SPAN[45..53].try_into().expect("committed length"));
+    let mut cursor = 53;
+    let anchor_len = fixture_length(GOOD_SPAN, &mut cursor);
+    let anchor = &GOOD_SPAN[cursor..cursor + anchor_len];
+    cursor += anchor_len;
+    let count = fixture_length(GOOD_SPAN, &mut cursor);
+    let mut chunks = Vec::with_capacity(count);
+    for _ in 0..count {
+        let chunk_len = fixture_length(GOOD_SPAN, &mut cursor);
+        chunks.push(&GOOD_SPAN[cursor..cursor + chunk_len]);
+        cursor += chunk_len;
+    }
+    assert_eq!(cursor, GOOD_SPAN.len());
+    (commit, encode_span(commit, offset, len, anchor, &chunks))
+}
+
+/// Verify a newly encoded valid span, reject a guaranteed header mutation,
+/// and feed raw adversarial bytes through the product verifier.
+pub fn verify_span_one_iteration(input: &[u8]) {
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let (commit, span) = fresh_span_from_golden();
+    assert_eq!(span, GOOD_SPAN);
+    let disclosed = mkit_core::verify::span::verify_disclosure_span(&commit, &span)
+        .expect("fresh span must verify");
+    assert_eq!(disclosed.bytes.len(), 20);
+
+    let mut mutated = span;
+    mutated[5] ^= input.first().copied().unwrap_or(1).max(1);
+    assert!(mkit_core::verify::span::verify_disclosure_span(&commit, &mutated).is_err());
+    let _ = mkit_core::verify::span::verify_disclosure_span(&commit, input);
+}
+
 /// A small native `ObjectStore`-backed fixture for
 /// [`verify_disclosure_one_iteration`]: one committed file, disclosed as
 /// a real `Selector::Object` bundle. Built once by
@@ -1202,6 +1261,29 @@ mod tests {
         run_iterated_unit(disclosure_decode_one_iteration).expect("guardrails held");
         for case in [&b""[..], b"MKDP\x01", &[0xFF; 64][..]] {
             run_one(case, disclosure_decode_one_iteration).expect("guardrails held");
+        }
+    }
+
+    #[test]
+    fn span_decode_target_runs_within_caps() {
+        run_iterated_unit(span_decode_one_iteration).expect("guardrails held");
+        for case in [&b""[..], b"MKDS\x01", &[0xff; 64][..]] {
+            run_one(case, span_decode_one_iteration).expect("guardrails held");
+        }
+        let mut nonminimal = GOOD_SPAN[..53].to_vec();
+        nonminimal.extend_from_slice(&[0x80, 0]);
+        let mut over_count = GOOD_SPAN[..53].to_vec();
+        over_count.extend_from_slice(&[0, 0xc1, 0x84, 0x3d]);
+        for case in [&nonminimal, &over_count] {
+            run_one(case, span_decode_one_iteration).expect("guardrails held");
+        }
+    }
+
+    #[test]
+    fn verify_span_target_runs_within_caps() {
+        run_iterated_unit(verify_span_one_iteration).expect("guardrails held");
+        for case in [&b""[..], b"MKDP\x02", &[0xff; 64][..]] {
+            run_one(case, verify_span_one_iteration).expect("guardrails held");
         }
     }
 

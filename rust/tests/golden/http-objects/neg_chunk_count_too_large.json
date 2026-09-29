@@ -1,0 +1,24 @@
+{
+  "blake3": "29eff9a79bac1ae807aa493549f95924bad4449744b97116c7c8c77bb58ea6ba",
+  "commit": "17963c328bb4a65dfffb659125df822a5a8b0aaca309c245c569420e243f8d90",
+  "expect": {
+    "accept": false,
+    "expand_to": null,
+    "reject_reason": "span_encoding"
+  },
+  "name": "neg_chunk_count_too_large",
+  "recipe": {
+    "segments": [
+      {
+        "length": 53,
+        "offset": 0,
+        "source": "span_two_chunks.bin"
+      },
+      {
+        "hex": "00c1843d"
+      }
+    ]
+  },
+  "schema_version": 1,
+  "size": 57
+}
