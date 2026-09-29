@@ -22,6 +22,7 @@ use mkit_core::write_auth::{Context as AuthContext, Operation as SignedOp};
 use mkit_server::Procedure;
 use mkit_server::auth_v2::AuthV2Config;
 use mkit_server::connect::proto::mkit::transport::v1::__buffa::oneof::download_pack_response::Body as DownloadBody;
+use mkit_server::connect::proto::mkit::transport::v1::__buffa::oneof::issue_object_url_request::Target as UrlTargetField;
 use mkit_server::connect::proto::mkit::transport::v1::__buffa::oneof::set_repo_visibility_request::Mode as VisibilityMode;
 use mkit_server::connect::proto::mkit::transport::v1::__buffa::oneof::upload_pack_request::Body as UploadBody;
 use mkit_server::connect::proto::mkit::transport::v1::__buffa::oneof::upload_part_request::Msg as PartMsg;
@@ -29,12 +30,12 @@ use mkit_server::connect::proto::mkit::transport::v1::{
     AdvanceOutcome, AdvanceRefsRequest, AdvanceRefsResponse, BeginUploadRequest,
     CompleteUploadRequest, DownloadPackRequest, DownloadPackResponse, GetServerInfoRequest,
     GetServerInfoResponse, ListRefsRequest, ListRefsResponse, PackChunk, PackExistsRequest,
-    PackExistsResponse, ReadRefRequest, ReadRefResponse, RefExpectation, UploadPackHeader,
-    UploadPackRequest, UploadPartHeader, UploadPartRequest,
+    PackExistsResponse, ReadRefRequest, ReadRefResponse, RefExpectation, UpdateRefRequest,
+    UploadPackHeader, UploadPackRequest, UploadPartHeader, UploadPartRequest,
 };
 use mkit_server::connect::proto::mkit::transport::v1::{
-    GetGrantEpochRequest, IssueObjectUrlRequest, RepoVisibility, SetGrantEpochRequest,
-    SetRepoVisibilityRequest,
+    GetGrantEpochRequest, IssueObjectUrlRequest, IssueObjectUrlResponse, RefPath, RepoVisibility,
+    SetGrantEpochRequest, SetRepoVisibilityRequest,
 };
 use mkit_server::connect::{self};
 use mkit_server::pipeline::{
@@ -47,6 +48,7 @@ use mkit_server::store::{
 };
 use mkit_server::upload::UploadLimits;
 use mkit_server::upload::token::{TicketClaims, TicketKeys};
+use mkit_server::url_token::{Binding, TokenRejected, UrlTarget, UrlTokenConfig, UrlTokenKeys};
 use mkit_server::{
     Addressing, AuthzFacts, ErrorDetail, METRIC_REQUESTS, ManualClock, MemoryBlobStore,
     MemoryFault, MemoryKv, Metrics, NamespaceKey, Operation, Redacted, RepoId, RepoName,
@@ -131,6 +133,7 @@ struct Setup<H = Hooks> {
     list_cap: Option<u32>,
     addressing: Option<Addressing>,
     grants: Option<mkit_server::policy::GrantConfig>,
+    url_tokens: Option<mkit_server::url_token::UrlTokenConfig>,
 }
 
 fn setup(auth: AuthMode) -> Setup {
@@ -142,6 +145,7 @@ fn setup(auth: AuthMode) -> Setup {
         list_cap: None,
         addressing: None,
         grants: None,
+        url_tokens: None,
     }
 }
 
@@ -204,6 +208,7 @@ impl<H: HookSet + 'static> Setup<H> {
             cfg.max_list_refs_page_size = cap;
         }
         cfg.grants = self.grants;
+        cfg.url_tokens = self.url_tokens;
         let meta = self
             .meta
             .unwrap_or_else(|| MemoryKv::with_clock(clock.clone()));
@@ -1154,6 +1159,7 @@ async fn error_shaping_reaches_the_wire() {
         list_cap: None,
         addressing: None,
         grants: None,
+        url_tokens: None,
     }
     .serve();
     let reply = server
@@ -1505,6 +1511,228 @@ async fn set_repo_visibility_runs_both_modes_over_the_wire() {
         .unary("SetRepoVisibility", &body, &[("x-repository", repo)])
         .await;
     assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+}
+
+// -------------------------------------------------------- url tokens
+
+/// A URL-token configuration the test server mints and verifies with.
+fn url_tokens() -> UrlTokenConfig {
+    UrlTokenConfig::new(
+        UrlTokenKeys::parse_key_file(&format!("active {}", to_hex(&[9; 32]))).unwrap(),
+        60_000,
+    )
+    .unwrap()
+}
+
+/// An `IssueObjectUrl` for `id` asking for `ttl_seconds`.
+fn issue_object(id: &[u8], ttl_seconds: u32) -> IssueObjectUrlRequest {
+    IssueObjectUrlRequest {
+        target: Some(UrlTargetField::ObjectId(id.to_vec())),
+        ttl_seconds: Some(ttl_seconds),
+        ..Default::default()
+    }
+}
+
+/// An `IssueObjectUrl` for `path` under `reference`.
+fn issue_path(reference: &str, path: &str, ttl_seconds: u32) -> IssueObjectUrlRequest {
+    IssueObjectUrlRequest {
+        target: Some(UrlTargetField::RefPath(Box::new(RefPath {
+            r#ref: Some(reference.to_owned()),
+            path: Some(path.to_owned()),
+            ..Default::default()
+        }))),
+        ttl_seconds: Some(ttl_seconds),
+        ..Default::default()
+    }
+}
+
+/// A signed `IssueObjectUrl` for `repo` (a wire identity).
+async fn issue_for(
+    server: &Server,
+    key: &SigningKey,
+    repo: &str,
+    req: &IssueObjectUrlRequest,
+    nonce: u32,
+) -> Reply {
+    let headers = signed_repo_body(key, repo, "IssueObjectUrl", &req.encode_to_vec(), nonce);
+    server.unary("IssueObjectUrl", req, &headers).await
+}
+
+/// A signed `IssueObjectUrl` for the configured repository.
+async fn issue_code(server: &Server, req: &IssueObjectUrlRequest, nonce: u32) -> String {
+    let headers = signed_body(9, "IssueObjectUrl", &req.encode_to_vec(), nonce);
+    server.unary("IssueObjectUrl", req, &headers).await.code()
+}
+
+#[tokio::test]
+async fn issue_object_url_unconfigured_is_unimplemented_and_unsigned_unauthenticated() {
+    let req = issue_object(&A, 0);
+    // Unconfigured: a verified caller is answered before any repository
+    // access.
+    let server = setup(authv2()).serve();
+    let headers = signed_body(9, "IssueObjectUrl", &req.encode_to_vec(), 60);
+    assert_eq!(
+        server.unary("IssueObjectUrl", &req, &headers).await.code(),
+        "unimplemented"
+    );
+    // Configured but unsigned: stage 0 rejects both codecs.
+    let mut s = setup(authv2());
+    s.url_tokens = Some(url_tokens());
+    let server = s.serve();
+    for code in [
+        server.unary("IssueObjectUrl", &req, &[]).await.code(),
+        server
+            .json("IssueObjectUrl", &serde_json::json!({}), &[])
+            .await
+            .code(),
+    ] {
+        assert_eq!(code, "unauthenticated");
+    }
+}
+
+#[tokio::test]
+async fn issue_object_url_rejects_bad_targets() {
+    let mut s = setup(authv2());
+    s.url_tokens = Some(url_tokens());
+    let server = s.serve();
+    // No target at all.
+    assert_eq!(
+        issue_code(&server, &IssueObjectUrlRequest::default(), 61).await,
+        "invalid_argument"
+    );
+    // An object id is exactly 32 bytes.
+    assert_eq!(
+        issue_code(&server, &issue_object(&A[..31], 0), 62).await,
+        "invalid_argument"
+    );
+    // The §9.4 path grammar, over binary and JSON.
+    let long = "x".repeat(1025);
+    for (i, path) in [".", "..", "a//b", "/a", "a/", long.as_str()]
+        .into_iter()
+        .enumerate()
+    {
+        assert_eq!(
+            issue_code(&server, &issue_path(HEAD, path, 0), 63 + u32::try_from(i).unwrap())
+                .await,
+            "invalid_argument",
+            "{path}"
+        );
+    }
+    let reply = server
+        .json(
+            "IssueObjectUrl",
+            &serde_json::json!({ "refPath": { "ref": HEAD, "path": "a//b" } }),
+            &[],
+        )
+        .await;
+    assert_eq!(reply.code(), "unauthenticated");
+    let value = serde_json::json!({ "refPath": { "ref": HEAD, "path": "a//b" } });
+    let body = serde_json::to_vec(&value).unwrap();
+    let headers = signed_body(9, "IssueObjectUrl", &body, 70);
+    let reply = server
+        .post(
+            "mkit.transport.v1.TransportService/IssueObjectUrl",
+            JSON,
+            &headers,
+            body,
+        )
+        .await;
+    assert_eq!(reply.code(), "invalid_argument");
+}
+
+#[tokio::test]
+async fn issue_object_url_mints_for_authorized_reads_only() {
+    use mkit_core::repo_identity::Namespace;
+    use mkit_server::policy::NamespacePolicy;
+
+    let owner = SigningKey::from_bytes(&[9; 32]);
+    let stranger = SigningKey::from_bytes(&[8; 32]);
+    let namespace = Namespace::Ed25519(*owner.verifying_key().as_bytes());
+    let repo = format!("{namespace}/{REPO}");
+    let tokens = url_tokens();
+    let mut s = setup(authv2());
+    s.addressing = Some(Addressing::Multi(
+        mkit_server::MultiAddressing::new()
+            .with_namespace_policy(NamespacePolicy::Allowlist([namespace].into())),
+    ));
+    s.url_tokens = Some(tokens.clone());
+    let server = s.serve();
+    let req = issue_object(&A, 0);
+
+    // A missing repository and an unauthorized private read answer
+    // `not_found`, byte for byte.
+    let missing = issue_for(&server, &stranger, &repo, &req, 71).await;
+    assert_eq!(missing.code(), "not_found");
+    let write = UpdateRefRequest {
+        name: Some(HEAD.into()),
+        expectation: Some(RefExpectation::Any.into()),
+        new_id: Some(A.to_vec()),
+        ..Default::default()
+    };
+    let headers = signed_repo_body(&owner, &repo, "UpdateRef", &write.encode_to_vec(), 72);
+    let reply = server.unary("UpdateRef", &write, &headers).await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    let visibility = SetRepoVisibilityRequest {
+        mode: Some(VisibilityMode::Visibility(
+            RepoVisibility::REPO_VISIBILITY_PRIVATE.into(),
+        )),
+        ..Default::default()
+    };
+    let headers = signed_repo_body(
+        &owner,
+        &repo,
+        "SetRepoVisibility",
+        &visibility.encode_to_vec(),
+        73,
+    );
+    assert_eq!(
+        server
+            .unary("SetRepoVisibility", &visibility, &headers)
+            .await
+            .status,
+        StatusCode::OK
+    );
+    let denied = issue_for(&server, &stranger, &repo, &req, 74).await;
+    assert_eq!(
+        (denied.status, denied.body.as_ref()),
+        (missing.status, missing.body.as_ref())
+    );
+
+    // The owner mints; the token verifies for the same binding.
+    let minted: IssueObjectUrlResponse = issue_for(&server, &owner, &repo, &req, 75).await.decode();
+    let token = minted.token.unwrap();
+    assert_eq!(minted.expires_unix_ms, Some(T0 + 60_000));
+    let target = UrlTarget::Object(A);
+    let bound = tokens
+        .precheck(&token, T0)
+        .unwrap()
+        .check_binding(
+            &Binding {
+                audience: AUDIENCE,
+                repository: &repo,
+                target: &target,
+            },
+            T0,
+            60_000,
+        )
+        .unwrap();
+    assert_eq!(bound.epoch(), 0);
+    bound.check_epoch(0).unwrap();
+    assert_eq!(bound.check_epoch(1), Err(TokenRejected));
+
+    // `ttl_seconds` asks clamp to the configured lifetime, never refuse.
+    for ttl in [0, u32::MAX] {
+        let minted: IssueObjectUrlResponse =
+            issue_for(&server, &owner, &repo, &issue_object(&A, ttl), 76)
+                .await
+                .decode();
+        assert_eq!(minted.expires_unix_ms, Some(T0 + 60_000), "ttl {ttl}");
+    }
+    let minted: IssueObjectUrlResponse =
+        issue_for(&server, &owner, &repo, &issue_object(&A, 30), 77)
+            .await
+            .decode();
+    assert_eq!(minted.expires_unix_ms, Some(T0 + 30_000));
 }
 
 #[tokio::test]

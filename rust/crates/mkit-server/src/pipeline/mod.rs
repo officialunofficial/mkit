@@ -79,6 +79,7 @@ use crate::store::{
 };
 use crate::telemetry::{Metrics, Redactor};
 use crate::upload::{UploadLimits, token::TicketKeys};
+use crate::url_token::{MintedToken, UrlTarget};
 use begin::BeginWrite;
 
 pub use auth::{AuthMode, Authenticated, RequestMeta};
@@ -176,8 +177,7 @@ struct ReadAuth {
     facts: AuthzFacts,
     /// The coordinator's `e` row, `0` when absent; `None` when
     /// visibility does not apply and no epoch was read. `IssueObjectUrl`
-    /// (WP-2.11) reuses it.
-    #[expect(dead_code)]
+    /// reuses it.
     epoch: Option<u64>,
 }
 
@@ -998,6 +998,77 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .is_some())
         })
         .await
+    }
+
+    /// `IssueObjectUrl` (SPEC-WRITE-GRANTS §9.4): mint a token binding the
+    /// deployment's audience, the request's repository identity and
+    /// `target` at the stored grant epoch. The target is never resolved —
+    /// serving decides what it names, so minting reveals nothing about
+    /// the repository's contents. The token is a credential: it is never
+    /// logged.
+    ///
+    /// # Errors
+    /// `unimplemented` when no URL-token key is configured, before any
+    /// repository access; `unauthenticated` for an unsigned request
+    /// (stage 0 already rejects it under auth v2); the read errors of
+    /// [`Self::authorize_read`], including the uniform `not_found` on a
+    /// private repository.
+    pub async fn issue_object_url(
+        &self,
+        a: &Authenticated,
+        target: UrlTarget,
+        ttl_seconds: u32,
+    ) -> Result<MintedToken, ServerError> {
+        self.observe(a, async {
+            let Some(tokens) = &self.cfg.url_tokens else {
+                return Err(ServerError::unimplemented("URL tokens not configured"));
+            };
+            let op = self.identify(
+                a,
+                OpKind::IssueObjectUrl {
+                    target: target.clone(),
+                    ttl_seconds,
+                },
+            )?;
+            let read = self.authorize_read(&op).await?;
+            let epoch = match read.epoch {
+                Some(epoch) => epoch,
+                None => self.stored_grant_epoch(&op.repo).await?,
+            };
+            let audience = match &self.cfg.auth {
+                AuthMode::AuthV2(cfg) => cfg.audience(),
+                // `Pipeline::new` refuses `url_tokens` without auth v2.
+                _ => return Err(internal("URL tokens without auth v2")),
+            };
+            tokens.mint(
+                audience,
+                &a.repo().identity,
+                &target,
+                epoch,
+                a.business_now_ms,
+                ttl_seconds,
+            )
+        })
+        .await
+    }
+
+    /// One coordinator read of the `e` row for `repo`'s namespace: the
+    /// epoch `IssueObjectUrl` mints at when [`Self::authorize_read`] did
+    /// not already read it (a non-visibility deployment). Absent is `0`;
+    /// a store failure is `unavailable`.
+    async fn stored_grant_epoch(&self, repo: &crate::repo::RepoId) -> Result<u64, ServerError> {
+        let p = self.shards.coordinator(&repo.namespace);
+        self.meta
+            .get(&p, &keys::grant_epoch())
+            .await
+            .map_err(|e| {
+                tracing::warn!(detail = %e, "grant epoch read failed");
+                ServerError::unavailable("repository state unavailable")
+            })?
+            .map(|v| codec::decode_u64(&v))
+            .transpose()
+            .map_err(meta_error)
+            .map(|epoch| epoch.unwrap_or(0))
     }
 
     /// `SetRepoVisibility` (SPEC-WRITE-GRANTS §9.1): the envelope mode is a

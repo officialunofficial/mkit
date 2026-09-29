@@ -2,9 +2,11 @@
 //! (SPEC-WRITE-GRANTS §9.4).
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{Signer, SigningKey};
+use futures_executor::block_on;
 use mkit_core::hash::{hash, to_hex, to_hex_bytes};
 use mkit_core::repo_identity::Namespace;
 use zeroize::Zeroizing;
@@ -475,8 +477,255 @@ fn debug_never_shows_secrets() {
         )
         .unwrap();
     let seed_hex = to_hex(&[9; 32]);
-    for debug in [keys_debug, format!("{cfg:?}"), format!("{minted:?}")] {
+    for debug in [
+        keys_debug,
+        format!("{cfg:?}"),
+        format!("{minted:?}"),
+        format!("{:?}", cfg.precheck(minted.expose(), T0).unwrap()),
+    ] {
         assert!(!debug.contains(&seed_hex), "{debug}");
         assert!(!debug.contains(minted.expose()), "{debug}");
     }
+}
+
+// ---------------------------------------------------------- verify
+
+/// `statement` signed by `seed_byte`'s key, verbatim token text.
+fn forged(seed_byte: u8, statement: &UrlTokenStatement) -> String {
+    let bytes = statement.encode().unwrap();
+    let signature = SigningKey::from_bytes(&[seed_byte; 32]).sign(&hash(&bytes));
+    statement::encode_token(&bytes, &signature.to_bytes())
+}
+
+/// The binding `statement()`'s token is minted for.
+fn binding_for<'a>(repository: &'a str, target: &'a UrlTarget) -> Binding<'a> {
+    Binding {
+        audience: AUDIENCE,
+        repository,
+        target,
+    }
+}
+
+#[test]
+fn precheck_rejects_bad_signatures_and_unknown_keys() {
+    let cfg = config();
+    let token = minted_token();
+    cfg.precheck(&token, T0).unwrap();
+
+    // Signed by another seed under this key's id.
+    let (bytes, _) = decode_token(&token).unwrap();
+    let other = SigningKey::from_bytes(&[8; 32]).sign(&hash(&bytes));
+    assert_eq!(
+        cfg.precheck(&statement::encode_token(&bytes, &other.to_bytes()), T0)
+            .unwrap_err(),
+        TokenRejected
+    );
+
+    // A key id nobody verifies with, signed by the active seed.
+    let unknown = UrlTokenStatement::new(
+        AUDIENCE,
+        repository(),
+        UrlTarget::Object([0xaa; 32]),
+        0,
+        T0,
+        T0 + 60_000,
+        [0xee; 16],
+    );
+    assert_eq!(
+        cfg.precheck(&forged(9, &unknown), T0).unwrap_err(),
+        TokenRejected
+    );
+}
+
+#[test]
+fn precheck_retires_keys_at_retired_at_plus_ttl() {
+    let retired = [8; 32];
+    let public = SigningKey::from_bytes(&retired).verifying_key().to_bytes();
+    let cfg = UrlTokenConfig::new(
+        UrlTokenKeys::new(
+            seed(9),
+            vec![RetiredKey {
+                public,
+                retired_at_ms: u64::try_from(T0).unwrap(),
+            }],
+        )
+        .unwrap(),
+        60_000,
+    )
+    .unwrap();
+    let statement = UrlTokenStatement::new(
+        AUDIENCE,
+        repository(),
+        UrlTarget::Object([0xaa; 32]),
+        0,
+        T0,
+        T0 + 60_000,
+        statement::key_id(&public),
+    );
+    let token = forged(8, &statement);
+    assert!(cfg.precheck(&token, T0).is_ok());
+    assert!(cfg.precheck(&token, T0 + 59_999).is_ok());
+    assert_eq!(
+        cfg.precheck(&token, T0 + 60_000).unwrap_err(),
+        TokenRejected
+    );
+}
+
+#[test]
+fn check_binding_accepts_only_the_request_binding() {
+    let cfg = config();
+    let target = UrlTarget::Object([0xaa; 32]);
+    let repo = repository();
+    let ok = || cfg.precheck(&minted_token(), T0).unwrap();
+    ok().check_binding(&binding_for(&repo, &target), T0, DEFAULT_TTL_MS)
+        .unwrap();
+
+    for (name, binding) in [
+        (
+            "audience",
+            Binding {
+                audience: "https://other.example.test",
+                ..binding_for(&repo, &target)
+            },
+        ),
+        (
+            "repository",
+            binding_for(&repo.replace("room-a", "room-b"), &target),
+        ),
+        ("target", binding_for(&repo, &UrlTarget::Object([0xbb; 32]))),
+        (
+            "path",
+            binding_for(&repo, &UrlTarget::path("refs/heads/main", "a/b").unwrap()),
+        ),
+    ] {
+        assert_eq!(
+            ok().check_binding(&binding, T0, DEFAULT_TTL_MS)
+                .unwrap_err(),
+            TokenRejected,
+            "{name}"
+        );
+    }
+    // now >= expiry.
+    assert_eq!(
+        ok().check_binding(
+            &binding_for(&repo, &target),
+            T0 + i64::try_from(DEFAULT_TTL_MS).unwrap(),
+            DEFAULT_TTL_MS,
+        )
+        .unwrap_err(),
+        TokenRejected
+    );
+    // A lifetime the statement grammar allows but the configured ttl
+    // does not.
+    let over = UrlTokenStatement::new(
+        AUDIENCE,
+        repo.clone(),
+        target.clone(),
+        0,
+        T0,
+        T0 + 90_000,
+        active_key_id(),
+    );
+    let token = forged(9, &over);
+    assert_eq!(
+        cfg.precheck(&token, T0)
+            .unwrap()
+            .check_binding(&binding_for(&repo, &target), T0, 60_000)
+            .unwrap_err(),
+        TokenRejected
+    );
+    cfg.precheck(&token, T0)
+        .unwrap()
+        .check_binding(&binding_for(&repo, &target), T0, 90_000)
+        .unwrap();
+}
+
+#[test]
+fn verify_reads_the_epoch_once_and_only_after_stateless_checks() {
+    let cfg = config();
+    let target = UrlTarget::Object([0xaa; 32]);
+    let repo = repository();
+    let good = cfg
+        .mint(AUDIENCE, &repo, &target, 7, T0, 0)
+        .unwrap()
+        .expose()
+        .to_owned();
+    let calls = AtomicUsize::new(0);
+    let verify_with = |token: &str, binding: &Binding<'_>, now_ms: i64| {
+        block_on(verify(&cfg, token, binding, now_ms, || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async { Ok(7) }
+        }))
+    };
+
+    // Stateless failures never reach the stored epoch.
+    let (bytes, _) = decode_token(&good).unwrap();
+    let bad_sig = statement::encode_token(&bytes, &[0x55; 64]);
+    for (name, token, binding, now_ms) in [
+        (
+            "signature",
+            bad_sig.as_str(),
+            binding_for(&repo, &target),
+            T0,
+        ),
+        (
+            "audience",
+            good.as_str(),
+            Binding {
+                audience: "https://other.example.test",
+                ..binding_for(&repo, &target)
+            },
+            T0,
+        ),
+        (
+            "repository",
+            good.as_str(),
+            binding_for(&repo.replace("room-a", "room-b"), &target),
+            T0,
+        ),
+        (
+            "target",
+            good.as_str(),
+            binding_for(&repo, &UrlTarget::Object([0xbb; 32])),
+            T0,
+        ),
+        (
+            "expired",
+            good.as_str(),
+            binding_for(&repo, &target),
+            T0 + i64::try_from(DEFAULT_TTL_MS).unwrap(),
+        ),
+    ] {
+        assert_eq!(
+            verify_with(token, &binding, now_ms),
+            Err(TokenRejected),
+            "{name}"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "{name}");
+    }
+
+    verify_with(&good, &binding_for(&repo, &target), T0).unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    // A mismatched stored epoch rejects.
+    assert_eq!(
+        block_on(verify(
+            &cfg,
+            &good,
+            &binding_for(&repo, &target),
+            T0,
+            || async { Ok(8) }
+        )),
+        Err(TokenRejected)
+    );
+    // And the closure's own rejection propagates.
+    assert_eq!(
+        block_on(verify(
+            &cfg,
+            &good,
+            &binding_for(&repo, &target),
+            T0,
+            || async { Err(TokenRejected) }
+        )),
+        Err(TokenRejected)
+    );
 }

@@ -16,7 +16,7 @@ const READS: [Procedure; 4] = [
     Procedure::DownloadPack,
 ];
 
-fn repo_id<H: HookSet>(e: &Env<H>, owner: &SigningKey) -> RepoId {
+pub(super) fn repo_id<H: HookSet>(e: &Env<H>, owner: &SigningKey) -> RepoId {
     e.pipe
         .cfg
         .addressing
@@ -25,7 +25,11 @@ fn repo_id<H: HookSet>(e: &Env<H>, owner: &SigningKey) -> RepoId {
         .repo
 }
 
-fn put_repo<H: HookSet>(e: &Env<H>, repo: &RepoId, visibility: Option<codec::StoredVisibility>) {
+pub(super) fn put_repo<H: HookSet>(
+    e: &Env<H>,
+    repo: &RepoId,
+    visibility: Option<codec::StoredVisibility>,
+) {
     let mut batch = Batch::new().put(
         keys::repo_record(&repo.name),
         codec::encode_repo_record(&codec::RepoRecord {
@@ -49,7 +53,7 @@ fn put_repo<H: HookSet>(e: &Env<H>, repo: &RepoId, visibility: Option<codec::Sto
     );
 }
 
-fn put_epoch<H: HookSet>(e: &Env<H>, repo: &RepoId, epoch: u64) {
+pub(super) fn put_epoch<H: HookSet>(e: &Env<H>, repo: &RepoId, epoch: u64) {
     let p = e.pipe.shards.coordinator(&repo.namespace);
     assert_eq!(
         now(e.pipe.meta.inner.apply(
@@ -91,7 +95,7 @@ fn try_read<H: HookSet>(e: &Env<H>, req: &Req, procedure: Procedure) -> Result<(
     call(e, &e.auth(req).unwrap(), procedure)
 }
 
-fn assert_not_found(err: &ServerError, context: &str) {
+pub(super) fn assert_not_found(err: &ServerError, context: &str) {
     assert_eq!(err.code(), Code::NotFound, "{context}");
     assert_eq!(err.public_message(), "repository not found", "{context}");
     assert!(err.details().is_empty(), "{context}");

@@ -19,7 +19,6 @@ const STATEMENT_FIELDS: usize = 8;
 /// The longest token string: a statement of
 /// `mkit_attest::grant::MAX_STATEMENT_BYTES` and a 64-byte signature
 /// encode well under it, so a longer input can never be a valid token.
-#[allow(dead_code)] // WP-2.11 Commit 5's `precheck` uses it.
 pub(crate) const MAX_TOKEN_LEN: usize = 8192;
 
 /// What `IssueObjectUrl` binds a token to (§9.4 `target`).
@@ -190,7 +189,10 @@ impl UrlTokenStatement {
     /// The [`UrlTokenError`] of the first failed rule.
     pub fn encode(&self) -> Result<Vec<u8>, UrlTokenError> {
         validate_audience(&self.audience).map_err(|_| GrantError::Audience)?;
-        RepositoryIdentity::parse(&self.repository).map_err(|_| GrantError::Repository)?;
+        // The request's §7.4 identity, byte for byte: a single deployment's
+        // may be a bare name (SPEC-WRITE-GRANTS §9.4, SPEC-HTTP-OBJECTS §2).
+        RepositoryIdentity::parse_bare_allowed(&self.repository)
+            .map_err(|_| GrantError::Repository)?;
         check_lifetime(self.issued_ms, self.expiry_ms, max_ttl_i64())?;
         join_fields(&[
             DOMAIN,
@@ -216,7 +218,7 @@ impl UrlTokenStatement {
             return Err(GrantError::Domain.into());
         }
         validate_audience(f[1]).map_err(|_| GrantError::Audience)?;
-        RepositoryIdentity::parse(f[2]).map_err(|_| GrantError::Repository)?;
+        RepositoryIdentity::parse_bare_allowed(f[2]).map_err(|_| GrantError::Repository)?;
         let target = UrlTarget::parse_field(f[3]).map_err(|_| UrlTokenError::Target)?;
         let epoch = decimal_u64(f[4])?;
         let issued_ms = decimal_millis(f[5])?;
@@ -263,7 +265,6 @@ pub(crate) fn key_id(public: &[u8; 32]) -> [u8; 16] {
 /// Split a token into its statement and signature bytes (§9.4):
 /// `<b64url statement>.<b64url 64-byte signature>`, both unpadded and
 /// strictly encoded.
-#[allow(dead_code)] // WP-2.11 Commit 5's `precheck` uses it.
 pub(crate) fn decode_token(token: &str) -> Result<(Vec<u8>, [u8; 64]), UrlTokenError> {
     if token.len() > MAX_TOKEN_LEN {
         return Err(UrlTokenError::Length);

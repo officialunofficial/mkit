@@ -15,11 +15,12 @@ mod tests;
 
 use std::collections::BTreeSet;
 use std::fmt::{self, Write as _};
+use std::future::Future;
 use std::sync::Arc;
 
-use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use mkit_attest::grant::GrantError;
-use mkit_core::hash::to_hex_bytes;
+use mkit_core::hash::{hash, to_hex_bytes};
 use zeroize::Zeroizing;
 
 use crate::error::{Redacted, ServerError};
@@ -233,7 +234,6 @@ impl UrlTokenKeys {
 
     /// The verification key for a statement's key id: the active key, or a
     /// retired key before `retired_at_ms + ttl_ms`.
-    #[allow(dead_code)] // WP-2.11 Commit 5's `precheck` uses it.
     pub(crate) fn verifying_key(
         &self,
         id: &[u8; 16],
@@ -378,11 +378,31 @@ impl UrlTokenConfig {
                 format_args!("url token statement did not encode: {}", e.reason()),
             )
         })?;
-        let signature = self.keys.active.sign(&mkit_core::hash::hash(&bytes));
+        let signature = self.keys.active.sign(&hash(&bytes));
         Ok(MintedToken {
             token: Redacted::new(statement::encode_token(&bytes, &signature.to_bytes())),
             expires_at_ms,
         })
+    }
+
+    /// Verification phase 1, before any repository lookup
+    /// (SPEC-HTTP-OBJECTS §6): strict token decode, the statement rules, a
+    /// key id in the verification set (the active key, or a retired key
+    /// before `retired_at_ms + ttl_ms`) and the strict Ed25519 signature
+    /// over `blake3(statement)`.
+    ///
+    /// # Errors
+    /// [`TokenRejected`] for any failure; the reason never escapes.
+    pub fn precheck(&self, token: &str, now_ms: i64) -> Result<Prechecked, TokenRejected> {
+        let (bytes, signature) = statement::decode_token(token).map_err(|_| TokenRejected)?;
+        let statement = UrlTokenStatement::parse(&bytes).map_err(|_| TokenRejected)?;
+        let key = self
+            .keys
+            .verifying_key(&statement.key_id(), now_ms, self.ttl_ms)
+            .ok_or(TokenRejected)?;
+        key.verify_strict(&hash(&bytes), &Signature::from_bytes(&signature))
+            .map_err(|_| TokenRejected)?;
+        Ok(Prechecked { statement })
     }
 }
 
@@ -419,4 +439,127 @@ impl fmt::Debug for MintedToken {
             .field("expires_at_ms", &self.expires_at_ms)
             .finish_non_exhaustive()
     }
+}
+
+/// The one rejection every URL-token verification failure maps to: the
+/// reason never survives to the client, so a private repository's
+/// uniform `not_found` cannot identify which check failed
+/// (SPEC-HTTP-OBJECTS §3 step 5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("invalid URL token")]
+pub struct TokenRejected;
+
+/// A statement that passed [`UrlTokenConfig::precheck`]: syntax, key id
+/// and signature verified, still unbound to the request. `Debug` shows
+/// neither the token nor its claims.
+pub struct Prechecked {
+    statement: UrlTokenStatement,
+}
+
+impl fmt::Debug for Prechecked {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Prechecked").finish_non_exhaustive()
+    }
+}
+
+/// What verification phase 2 binds a token to: the request's audience,
+/// repository and target, each compared byte for byte.
+#[derive(Debug)]
+pub struct Binding<'a> {
+    /// The deployment's auth v2 audience.
+    pub audience: &'a str,
+    /// The request's repository identity (STC §7.4).
+    pub repository: &'a str,
+    /// The target the request asks for.
+    pub target: &'a UrlTarget,
+}
+
+/// A token bound to the request; the epoch comparison is all that is
+/// left (§9.4).
+#[derive(Debug, Clone, Copy)]
+pub struct BoundToken {
+    epoch: u64,
+}
+
+impl BoundToken {
+    /// The epoch the token was minted at.
+    #[must_use]
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// The last check: the token serves only while the stored epoch
+    /// still equals the epoch it was minted at.
+    ///
+    /// # Errors
+    /// [`TokenRejected`] on a mismatch.
+    pub fn check_epoch(&self, stored: u64) -> Result<(), TokenRejected> {
+        if self.epoch == stored {
+            Ok(())
+        } else {
+            Err(TokenRejected)
+        }
+    }
+}
+
+impl Prechecked {
+    /// Verification phase 2, before any stored-epoch read
+    /// (SPEC-HTTP-OBJECTS §6): `audience`, `repository` and `target`
+    /// equal the request's byte for byte, `now < expiry`, and
+    /// `expiry - issued <= ttl_ms` — the configured lifetime, which may
+    /// be shorter than the statement grammar's `MAX_TTL_MS` bound.
+    ///
+    /// # Errors
+    /// [`TokenRejected`] for any failure.
+    pub fn check_binding(
+        self,
+        binding: &Binding<'_>,
+        now_ms: i64,
+        ttl_ms: u64,
+    ) -> Result<BoundToken, TokenRejected> {
+        let statement = &self.statement;
+        if statement.audience() != binding.audience
+            || statement.repository() != binding.repository
+            || statement.target() != binding.target
+        {
+            return Err(TokenRejected);
+        }
+        if now_ms >= statement.expiry_ms() {
+            return Err(TokenRejected);
+        }
+        let lifetime = statement.expiry_ms().saturating_sub(statement.issued_ms());
+        if lifetime > i64::try_from(ttl_ms).unwrap_or(i64::MAX) {
+            return Err(TokenRejected);
+        }
+        Ok(BoundToken {
+            epoch: statement.epoch(),
+        })
+    }
+}
+
+/// §9.4 verification for a serving path: [`UrlTokenConfig::precheck`],
+/// then [`Prechecked::check_binding`], then exactly one `read_epoch`
+/// call and the epoch comparison. `read_epoch` never runs when an
+/// earlier phase fails — the stored-epoch read is the last step
+/// (SPEC-HTTP-OBJECTS §6). A public repository ignores the result; that
+/// choice belongs to the serving caller (SPEC-HTTP-OBJECTS §3 step 5).
+///
+/// # Errors
+/// [`TokenRejected`] for any verification failure or a `read_epoch`
+/// error.
+pub async fn verify<F, Fut>(
+    cfg: &UrlTokenConfig,
+    token: &str,
+    binding: &Binding<'_>,
+    now_ms: i64,
+    read_epoch: F,
+) -> Result<(), TokenRejected>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<u64, TokenRejected>>,
+{
+    let bound = cfg
+        .precheck(token, now_ms)?
+        .check_binding(binding, now_ms, cfg.ttl_ms())?;
+    bound.check_epoch(read_epoch().await?)
 }

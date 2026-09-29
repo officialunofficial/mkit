@@ -317,6 +317,14 @@ pub enum OpKind {
         /// The visibility to store.
         visibility: mkit_attest::grant::Visibility,
     },
+    /// Mint a signed URL token for an object or ref path
+    /// (SPEC-WRITE-GRANTS §9.4). The server does not resolve the target.
+    IssueObjectUrl {
+        /// The object or ref path the token binds.
+        target: crate::url_token::UrlTarget,
+        /// Requested lifetime in seconds; `0` asks for the configured TTL.
+        ttl_seconds: u32,
+    },
 }
 
 impl OpKind {
@@ -333,6 +341,7 @@ impl OpKind {
             Self::UploadPack { .. } => Procedure::UploadPack,
             Self::DownloadPack { .. } => Procedure::DownloadPack,
             Self::SetRepoVisibility { .. } => Procedure::SetRepoVisibility,
+            Self::IssueObjectUrl { .. } => Procedure::IssueObjectUrl,
         }
     }
 }
@@ -762,6 +771,13 @@ mod tests {
                     visibility: mkit_attest::grant::Visibility::Private,
                 },
                 Procedure::SetRepoVisibility,
+            ),
+            (
+                OpKind::IssueObjectUrl {
+                    target: crate::url_token::UrlTarget::Object([0xaa; 32]),
+                    ttl_seconds: 60,
+                },
+                Procedure::IssueObjectUrl,
             ),
         ];
         for (kind, procedure) in cases {
