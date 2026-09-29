@@ -497,6 +497,9 @@ fn forged(seed_byte: u8, statement: &UrlTokenStatement) -> String {
     statement::encode_token(&bytes, &signature.to_bytes())
 }
 
+#[derive(Debug, PartialEq)]
+struct StoreDown;
+
 /// The binding `statement()`'s token is minted for.
 fn binding_for<'a>(repository: &'a str, target: &'a UrlTarget) -> Binding<'a> {
     Binding {
@@ -719,10 +722,6 @@ fn verify_reads_the_epoch_once_and_only_after_stateless_checks() {
         )),
         Ok(Err(TokenRejected))
     );
-    // And a read error is the outer Err — never a fabricated rejection
-    // (SPEC-HTTP-OBJECTS §3 step 5: an infrastructure failure is a 503).
-    #[derive(Debug, PartialEq)]
-    struct StoreDown;
     assert_eq!(
         block_on(verify(
             &cfg,

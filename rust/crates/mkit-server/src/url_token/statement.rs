@@ -80,7 +80,7 @@ impl UrlTarget {
     /// splits at its first two.
     ///
     /// # Errors
-    /// [`TargetError`] for anything [`field`] does not produce.
+    /// [`TargetError`] for anything [`Self::field`] does not produce.
     pub fn parse_field(field: &str) -> Result<Self, TargetError> {
         if let Some(id) = field.strip_prefix("object:") {
             if !is_hex(id, 32) {

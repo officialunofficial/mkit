@@ -208,7 +208,7 @@ impl UrlTokenKeys {
         Self::new(seed.ok_or_else(invalid)?, retired)
     }
 
-    /// [`parse_key_file`] over an owned secret, wiping the source text.
+    /// [`Self::parse_key_file`] over an owned secret, wiping the source text.
     ///
     /// # Errors
     /// As [`UrlTokenKeys::parse_key_file`].

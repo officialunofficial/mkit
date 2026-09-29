@@ -1038,7 +1038,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// `unimplemented` when no URL-token key is configured, before any
     /// repository access; `unauthenticated` for an unsigned request
     /// (stage 0 already rejects it under auth v2); the read errors of
-    /// [`Self::authorize_read`], including the uniform `not_found` on a
+    /// `Self::authorize_read`, including the uniform `not_found` on a
     /// private repository.
     pub async fn issue_object_url(
         &self,
@@ -1082,7 +1082,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     /// `SetRepoVisibility` (SPEC-WRITE-GRANTS §9.1): the envelope mode is a
     /// signed, replay-protected write of the `rv` row; the statement mode
     /// verifies an unsigned owner-signed statement and keeps the newest
-    /// `created`. Only deployments where [`Self::visibility_applies`]
+    /// `created`. Only deployments where `Self::visibility_applies`
     /// holds have visibility at all.
     ///
     /// # Errors
