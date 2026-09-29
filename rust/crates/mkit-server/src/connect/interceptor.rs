@@ -67,6 +67,19 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> AuthInterceptor<B, N,
             return Ok(());
         };
         let header = |name: &str| {
+            if name == "x-write-grant" {
+                let values: Vec<_> = ctx.headers().get_all(name).iter().collect();
+                if values.is_empty() {
+                    return None;
+                }
+                return Some(
+                    values
+                        .iter()
+                        .map(|value| value.to_str().unwrap_or("~"))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                );
+            }
             ctx.header(name)
                 .and_then(|v| {
                     if name == "x-mkit-ref" {

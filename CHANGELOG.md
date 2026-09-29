@@ -25,6 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `UNSAFE_OPEN_NAMESPACES` vars). Multi requires auth v2 with upload ticket
   keys — a deployment without them now refuses to start — and, natively,
   `--meta sqlite:<PATH>` (WP-1.30).
+- Server: enforce owner-signed write grants under Multi/Owner, including
+  `0x` namespaces, stored-epoch checks, and grant-scheme discovery. A
+  conservative interim ref gate applies until WP-2.7; adapter grant flags
+  follow in WP-1.30b.
 - Connect client: sign repository reads with auth v2 on each attempt, including
   the framed `DownloadPack` request. Add a grant-source API and local selection
   logic; the user grant store follows in WP-2.13.
@@ -134,6 +138,12 @@ train).
   `<ed25519-… | 0x…>/<name>` for namespaced ones (STC §7.4) (WP-1.16).
 
 ### Changed
+
+- *(server)* Track a coordinator relay watermark per ref shard, retain expired
+  lease rows while their outboxes are undelivered, and expose the namespace
+  minimum and active shard table for GC and takedown (WP-1.23c). Restore
+  resets maxima and fences watermark reads pending reconciliation. The
+  unshipped `LeasedShard` V1 encoding gains watermark and sweep due fields.
 
 - *(client)* Validate the remote URL path as a repository identity and carry
   `X-Repository` on every Connect RPC, including anonymous reads. Empty paths

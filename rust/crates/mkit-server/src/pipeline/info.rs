@@ -35,7 +35,7 @@ pub struct ServerInfo {
     pub receipt_public_key: Vec<u8>,
     /// Storage receipt key identifier, empty until receipts are supported.
     pub receipt_key_id: String,
-    /// Accepted grant signature schemes, empty until grants are supported.
+    /// Accepted grant signature schemes.
     pub grant_schemes: Vec<String>,
     /// Configured namespace policy, or single-repository.
     pub namespace_policy: &'static str,
@@ -97,7 +97,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             admission,
             receipt_public_key: Vec::new(),
             receipt_key_id: String::new(),
-            grant_schemes: Vec::new(),
+            grant_schemes: self.cfg.grants.as_ref().map_or_else(Vec::new, |grants| {
+                grants.schemes().tokens().map(str::to_owned).collect()
+            }),
             namespace_policy: self.cfg.advertised_namespace_policy(),
             index_fanout: u32::from(INDEX_FANOUT),
             max_delta_chain_depth: 0,

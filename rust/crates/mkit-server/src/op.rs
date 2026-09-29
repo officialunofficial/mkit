@@ -357,10 +357,16 @@ pub struct Operation {
     pub principal: Principal,
     /// The auth v2 authorization, for signed requests.
     pub auth: Option<VerifiedAuth>,
+    /// Presented grant header, outside the auth v2 signed string.
+    pub write_grant: Option<crate::Redacted>,
     /// What the request does.
     pub kind: OpKind,
     /// Epoch leased for this D34 write; `None` under Single.
     pub leased_epoch: Option<u64>,
+    /// Epoch observed in the Single-sharding read-ahead; `Some(0)` for an absent `e` key.
+    pub observed_epoch: Option<u64>,
+    /// Business clock value used to verify this request's auth v2 envelope.
+    pub business_now_ms: Option<i64>,
     /// What the Authorizer established.
     pub authz: AuthzFacts,
     /// Pre-admission observation: racing first writes may both observe creation.
@@ -382,8 +388,11 @@ impl Operation {
             repo,
             principal,
             auth,
+            write_grant: None,
             kind,
             leased_epoch: None,
+            observed_epoch: None,
+            business_now_ms: None,
             authz: AuthzFacts::default(),
             creation: Creation::default(),
             created: Creation::default(),
