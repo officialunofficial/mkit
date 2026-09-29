@@ -7,11 +7,14 @@ use mkit_transport_connect::generated::{
     GetServerInfoResponse, ListRefsRequest, ListRefsResponse, UpdateRefResponse,
 };
 
-use super::{CaseResult, Commit, Ctx, Exp, Failure, ensure, update_req, want_code, want_ok};
+use super::{
+    CaseResult, Commit, Ctx, Exp, Failure, ensure, eventually_listed, update_req, want_code,
+    want_ok,
+};
 use crate::wire::client::{Rpc, RpcError, UNARY_PROTO, decode_unary};
 
-/// Writes in flight at once.
-const PARALLEL: usize = 8;
+/// Writes in flight at once when the profile does not override it.
+const DEFAULT_PARALLEL: usize = 8;
 
 /// Create ref `i` (signed by a signer shared by a block of writes small
 /// enough for the per-signer quota).
@@ -31,7 +34,42 @@ async fn create(
         Some(signer) => signer.sign_body(Rpc::UpdateRef.procedure(), &body).headers,
         None => ctx.auth_headers(Rpc::UpdateRef, Commit::Body(&body)),
     };
-    ctx.client().unary(Rpc::UpdateRef, body, &headers).await
+    // Resend the same bytes. miniflare's proxy drops a connection ("Network
+    // connection lost"; the dev server continues) after a few thousand
+    // requests. A lost response may already have committed; a new nonce
+    // would then fail the Missing precondition. Replay returns the stored ok
+    // once the original commits; while it is still in flight the duplicate
+    // answers retryable `aborted` (STC §5), so a resend retries that too.
+    let mut attempt = 0u32;
+    loop {
+        let failed = match ctx
+            .client()
+            .unary(Rpc::UpdateRef, body.clone(), &headers)
+            .await
+        {
+            Ok(Ok(value)) => return Ok(Ok(value)),
+            Ok(Err(error)) if proxy_blip(&error.message) => error.to_string(),
+            Ok(Err(error)) if attempt > 0 && error.code == "aborted" => error.to_string(),
+            Ok(Err(error)) => return Ok(Err(error)),
+            Err(error) if proxy_blip(&error) => error,
+            Err(error) => return Err(error),
+        };
+        if attempt >= 8 {
+            return Err(failed);
+        }
+        attempt += 1;
+        eprintln!("list fixture: proxy blip on write {i}, retry {attempt}: {failed}");
+        // Up to about 5 s in total: an in-flight original took 2-3 s to commit.
+        tokio::time::sleep(std::time::Duration::from_millis(
+            (200 * u64::from(attempt)).min(1_000),
+        ))
+        .await;
+    }
+}
+
+/// miniflare's dev proxy, not a server answer. The dev server keeps running.
+fn proxy_blip(message: &str) -> bool {
+    message.contains("Network connection lost") || message.contains("client error (Connect)")
 }
 
 pub(super) async fn paging_wire(ctx: Ctx) -> CaseResult {
@@ -39,6 +77,12 @@ pub(super) async fn paging_wire(ctx: Ctx) -> CaseResult {
         want_ok(create(ctx.clone(), i, 100).await?, "UpdateRef")?;
     }
     let prefix = format!("refs/heads/{}/", ctx.ns());
+    eventually_listed(
+        &prefix,
+        || async { want_ok(ctx.list(&prefix).await?, "ListRefs before paging") },
+        |refs| refs.len() == 3,
+    )
+    .await?;
     let request = |page_size, page_token| ListRefsRequest {
         prefix: Some(prefix.clone()),
         page_size,
@@ -127,17 +171,40 @@ pub(super) async fn paging_wire(ctx: Ctx) -> CaseResult {
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)] // One case: paced fixture, lag wait and paged assertions.
 pub(super) async fn large_response_within_limit(ctx: Ctx) -> CaseResult {
     let n = ctx.profile().list_refs;
     if n == 0 {
         return Err(Failure::Skip("the profile sets list_refs = 0".to_owned()));
     }
     let per_signer = ctx.profile().quota.map_or(100, |q| q.max_ops.clamp(1, 100));
+    let parallel = usize::try_from(ctx.profile().list_parallel).unwrap_or(DEFAULT_PARALLEL);
+    let parallel = parallel.clamp(1, 32);
     let mut writes = futures::stream::iter(0..n)
         .map(|i| create(ctx.clone(), i, per_signer))
-        .buffer_unordered(PARALLEL);
+        .buffer_unordered(parallel);
+    let started = std::time::Instant::now();
+    let mut done = 0u32;
+    let mut last_mark = started;
     while let Some(result) = writes.next().await {
+        if !matches!(result, Ok(Ok(_))) {
+            eprintln!(
+                "list.large_response_within_limit: a write failed after {done}/{n} successful writes, {:?} (chunk {:?})",
+                started.elapsed(),
+                last_mark.elapsed()
+            );
+        }
         want_ok(result?, "UpdateRef")?;
+        done += 1;
+        if done.is_multiple_of(1000) {
+            let now = std::time::Instant::now();
+            eprintln!(
+                "list.large_response_within_limit: {done}/{n} writes in {:?} (last 1000: {:?})",
+                started.elapsed(),
+                now.duration_since(last_mark)
+            );
+            last_mark = now;
+        }
     }
     let info_reply = ctx
         .client()
@@ -153,51 +220,59 @@ pub(super) async fn large_response_within_limit(ctx: Ctx) -> CaseResult {
         .max_list_refs_page_size
         .ok_or("missing max_list_refs_page_size")?;
     let prefix = format!("refs/heads/{}/", ctx.ns());
-    let mut token = None;
-    let mut seen = std::collections::HashSet::new();
-    let mut last = String::new();
-    let mut count = 0u32;
-    let mut pages = 0u32;
-    loop {
-        let req = ListRefsRequest {
-            prefix: Some(prefix.clone()),
-            page_token: token,
-            ..Default::default()
-        };
-        let body = req.encode_to_vec();
-        let headers = ctx.auth_headers(Rpc::ListRefs, Commit::Body(&body));
-        let reply = ctx
-            .client()
-            .post(Rpc::ListRefs.procedure(), UNARY_PROTO, &headers, body)
-            .await?;
-        let resp: ListRefsResponse = want_ok(decode_unary(&reply)?, "ListRefs")?;
-        ensure!(
-            reply.body.len() <= 2 * 1024 * 1024,
-            "ListRefs page exceeds 2 MiB"
-        );
-        ensure!(
-            resp.refs.len() <= cap as usize,
-            "ListRefs page exceeds advertised ref cap"
-        );
-        pages += 1;
-        for r in &resp.refs {
-            let name = r.name.as_deref().unwrap_or("");
-            ensure!(name > last.as_str(), "ListRefs names are not increasing");
-            name.clone_into(&mut last);
-            count += 1;
-        }
-        match resp.next_page_token.filter(|s| !s.is_empty()) {
-            Some(next) => {
+    let (count, pages) = eventually_listed(
+        &prefix,
+        || async {
+            let mut token = None;
+            let mut seen = std::collections::HashSet::new();
+            let mut last = String::new();
+            let mut count = 0u32;
+            let mut pages = 0u32;
+            loop {
+                let req = ListRefsRequest {
+                    prefix: Some(prefix.clone()),
+                    page_token: token,
+                    ..Default::default()
+                };
+                let body = req.encode_to_vec();
+                let headers = ctx.auth_headers(Rpc::ListRefs, Commit::Body(&body));
+                let reply = ctx
+                    .client()
+                    .post(Rpc::ListRefs.procedure(), UNARY_PROTO, &headers, body)
+                    .await?;
+                let resp: ListRefsResponse = want_ok(decode_unary(&reply)?, "ListRefs")?;
                 ensure!(
-                    !resp.refs.is_empty(),
-                    "ListRefs continuation made no progress"
+                    reply.body.len() <= 2 * 1024 * 1024,
+                    "ListRefs page exceeds 2 MiB"
                 );
-                ensure!(seen.insert(next.clone()), "ListRefs repeated a page token");
-                token = Some(next);
+                ensure!(
+                    resp.refs.len() <= cap as usize,
+                    "ListRefs page exceeds advertised ref cap"
+                );
+                pages += 1;
+                for r in &resp.refs {
+                    let name = r.name.as_deref().unwrap_or("");
+                    ensure!(name > last.as_str(), "ListRefs names are not increasing");
+                    name.clone_into(&mut last);
+                    count += 1;
+                }
+                match resp.next_page_token.filter(|s| !s.is_empty()) {
+                    Some(next) => {
+                        ensure!(
+                            !resp.refs.is_empty(),
+                            "ListRefs continuation made no progress"
+                        );
+                        ensure!(seen.insert(next.clone()), "ListRefs repeated a page token");
+                        token = Some(next);
+                    }
+                    None => break,
+                }
             }
-            None => break,
-        }
-    }
+            Ok((count, pages))
+        },
+        |(count, _)| *count == n,
+    )
+    .await?;
     ensure!(count == n, "ListRefs {prefix:?}: {count} refs, created {n}");
     ctx.set_note(format!("{n} refs across {pages} pages"));
     Ok(())

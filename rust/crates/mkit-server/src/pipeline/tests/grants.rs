@@ -4,7 +4,8 @@ use super::*;
 use crate::pipeline::tests::policy::{PolicyHook, policy_hooks};
 use crate::repo::MultiAddressing;
 use mkit_attest::grant::{
-    AcceptedSchemes, Capabilities, Grant, OwnerScheme, RefScopes, RepoScope, SignedHeader,
+    AcceptedSchemes, Capabilities, EpochStatement, Grant, OwnerScheme, RefScopes, RepoScope,
+    SignedHeader,
 };
 use mkit_core::repo_identity::{Namespace, RepositoryIdentity};
 
@@ -65,8 +66,143 @@ pub(super) fn grant(
     .unwrap()
 }
 
+fn scoped_grant(owner: &SigningKey, grantee: &SigningKey, flags: &str) -> String {
+    grant(owner, grantee, |g| {
+        g.ref_scopes = Some(RefScopes::parse(&format!("refs/heads/main={flags}")).unwrap());
+    })
+}
+
+fn epoch_statement(owner: &SigningKey, new_epoch: u64) -> String {
+    let statement = EpochStatement {
+        namespace: Namespace::Ed25519(*owner.verifying_key().as_bytes()),
+        new_epoch,
+        audiences: vec![AUDIENCE.into()],
+        created_ms: T0 - 1000,
+        expiry_ms: T0 + 100_000,
+        nonce: hash(&new_epoch.to_be_bytes()),
+    }
+    .encode()
+    .unwrap();
+    SignedHeader {
+        blob: owner.sign(&hash(&statement)).to_bytes().to_vec(),
+        statement,
+        scheme: OwnerScheme::Ed25519,
+    }
+    .encode()
+    .unwrap()
+}
+
+#[test]
+fn single_epoch_rpcs_are_unimplemented() {
+    let e = env(AuthMode::Open);
+    let namespace = Namespace::Ed25519(*key(1).verifying_key().as_bytes()).to_string();
+    assert_eq!(
+        now(e.pipe.get_grant_epoch("BAD")).unwrap_err().code(),
+        Code::InvalidArgument
+    );
+    assert_eq!(
+        now(e.pipe.get_grant_epoch(&namespace)).unwrap_err().code(),
+        Code::Unimplemented
+    );
+    assert_eq!(
+        now(e.pipe.set_grant_epoch("malformed")).unwrap_err().code(),
+        Code::Unimplemented
+    );
+}
+
+#[test]
+fn epoch_statement_without_grant_configuration_is_denied() {
+    let owner = key(1);
+    let mut c = config(&owner, AuthorizerRole::Check);
+    c.grants = None;
+    let clock = clock();
+    let e = build(c, Spy::new(store(&clock)), policy_hooks(false), clock);
+    let error = now(e.pipe.set_grant_epoch(&epoch_statement(&owner, 1))).unwrap_err();
+    assert_eq!(error.code(), Code::PermissionDenied);
+    assert!(
+        error.public_message().contains("scheme not advertised"),
+        "{}",
+        error.public_message()
+    );
+}
+
+#[test]
+fn any_policy_epoch_requires_an_admitted_namespace_record() {
+    let owner = key(1);
+    let namespace = Namespace::Ed25519(*owner.verifying_key().as_bytes()).to_string();
+    let mut c = config(&owner, AuthorizerRole::Check);
+    c.addressing = Addressing::Multi(MultiAddressing::new().with_namespace_policy(
+        NamespacePolicy::Any {
+            unsafe_without_admission: true,
+        },
+    ));
+    let clock = clock();
+    let e = build(c, Spy::new(store(&clock)), policy_hooks(false), clock);
+    assert_eq!(now(e.pipe.get_grant_epoch(&namespace)).unwrap(), 0);
+    assert_eq!(
+        now(e.pipe.set_grant_epoch(&epoch_statement(&owner, 1)))
+            .unwrap_err()
+            .code(),
+        Code::PermissionDenied
+    );
+    assert_eq!(
+        e.update(
+            &request(&owner, &repository(&owner), 901, None),
+            &upd(HEAD, Missing, A)
+        )
+        .unwrap(),
+        UpdateRefResult::Committed
+    );
+    assert_eq!(
+        now(e.pipe.set_grant_epoch(&epoch_statement(&owner, 1))).unwrap(),
+        1
+    );
+    assert_eq!(now(e.pipe.get_grant_epoch(&namespace)).unwrap(), 1);
+}
+
+#[test]
+fn epoch_rpc_reaches_u64_maximum_without_overflow() {
+    let owner = key(1);
+    let c = config(&owner, AuthorizerRole::Check);
+    let clock = clock();
+    let e = build(c, Spy::new(store(&clock)), policy_hooks(false), clock);
+    let namespace = Namespace::Ed25519(*owner.verifying_key().as_bytes());
+    let coordinator = e
+        .pipe
+        .shards
+        .coordinator(&NamespaceKey::from_namespace(&namespace));
+    assert_eq!(
+        now(e.pipe.meta.inner.apply(
+            &coordinator,
+            Batch::new().put(keys::grant_epoch(), codec::encode_u64(u64::MAX - 1))
+        ))
+        .unwrap(),
+        BatchOutcome::Committed
+    );
+    let statement = epoch_statement(&owner, u64::MAX);
+    assert_eq!(now(e.pipe.set_grant_epoch(&statement)).unwrap(), u64::MAX);
+    assert_eq!(now(e.pipe.set_grant_epoch(&statement)).unwrap(), u64::MAX);
+    assert_eq!(
+        now(e
+            .pipe
+            .set_grant_epoch(&epoch_statement(&owner, u64::MAX - 1)))
+        .unwrap_err()
+        .code(),
+        Code::PermissionDenied
+    );
+}
+
 pub(super) fn request(signer: &SigningKey, repo: &str, nonce: u32, header: Option<&str>) -> Req {
-    let update = upd(HEAD, Any, A);
+    request_update(signer, repo, nonce, header, &upd(HEAD, Any, A))
+}
+
+fn request_update(
+    signer: &SigningKey,
+    repo: &str,
+    nonce: u32,
+    header: Option<&str>,
+    update: &RefUpdate,
+) -> Req {
     let body = format!("{update:?}").into_bytes();
     let digest = to_hex(&hash(&body));
     let nonce = super::nonce(nonce);
@@ -164,6 +300,194 @@ fn bad_grant_allocates_nothing_and_same_nonce_can_be_corrected() {
     assert_eq!(seen.len(), 1);
     assert!(!seen[0].authz.owner);
     assert!(seen[0].authz.grant.is_some());
+}
+
+#[test]
+fn any_create_only_commits_and_force_only_on_absent_ref_denies() {
+    let owner = key(1);
+    let grantee = key(2);
+    let repo = repository(&owner);
+    for sharding in [Sharding::Single, Sharding::D34] {
+        let e = environment_sharding(&owner, AuthorizerRole::Check, false, sharding);
+        let force = scoped_grant(&owner, &grantee, "f");
+        let req = request(&grantee, &repo, 21, Some(&force));
+        assert_eq!(
+            e.update(&req, &upd(HEAD, Any, A)).unwrap_err().code(),
+            Code::PermissionDenied
+        );
+        let resolved = e.pipe.cfg.addressing.resolve(Some(&repo), true).unwrap();
+        let shard = e.pipe.shards.ref_shard(&resolved.repo, HEAD);
+        assert_eq!(
+            now(e
+                .pipe
+                .meta
+                .inner
+                .get(&shard, &keys::ref_key(&resolved.repo.name, HEAD)))
+            .unwrap(),
+            None
+        );
+        let replay = keys::replay(&e.auth(&req).unwrap().auth.unwrap().replay_scope);
+        assert_eq!(now(e.pipe.meta.inner.get(&shard, &replay)).unwrap(), None);
+
+        let create = scoped_grant(&owner, &grantee, "c");
+        // A corrected grant with the same nonce succeeds after the denial.
+        assert!(
+            e.update(
+                &request(&grantee, &repo, 21, Some(&create)),
+                &upd(HEAD, Any, A)
+            )
+            .is_ok()
+        );
+    }
+}
+
+#[test]
+fn any_flag_subsets_follow_actual_ref_presence() {
+    let owner = key(1);
+    let grantee = key(2);
+    let repo = repository(&owner);
+    for present in [false, true] {
+        for bits in 0..16 {
+            let e = environment(&owner, AuthorizerRole::Check, false);
+            if present {
+                assert_eq!(
+                    e.update(&request(&owner, &repo, 99, None), &upd(HEAD, Any, B))
+                        .unwrap(),
+                    UpdateRefResult::Committed
+                );
+            }
+            let flags: String = [('c', 1), ('u', 2), ('f', 4), ('d', 8)]
+                .into_iter()
+                .filter_map(|(flag, bit)| (bits & bit != 0).then_some(flag))
+                .collect();
+            let header = grant(&owner, &grantee, |grant| {
+                let scope = if flags.is_empty() {
+                    "refs/tags/*=c".to_owned()
+                } else {
+                    format!("refs/heads/main={flags}")
+                };
+                grant.ref_scopes = Some(RefScopes::parse(&scope).unwrap());
+            });
+            let update = upd(HEAD, Any, A);
+            let result = e.update(
+                &request_update(&grantee, &repo, 100, Some(&header), &update),
+                &update,
+            );
+            let allowed = if present {
+                bits & 4 != 0
+            } else {
+                bits & 1 != 0
+            };
+            assert_eq!(result.is_ok(), allowed, "present={present}, bits={bits}");
+            if !allowed {
+                assert_eq!(result.unwrap_err().code(), Code::PermissionDenied);
+            }
+        }
+    }
+}
+
+#[test]
+fn match_update_only_is_denied_before_allocation_and_owner_is_unaffected() {
+    let owner = key(1);
+    let grantee = key(2);
+    let repo = repository(&owner);
+    let e = environment(&owner, AuthorizerRole::Check, false);
+    let update_only = scoped_grant(&owner, &grantee, "u");
+    let update = upd(HEAD, Match(B), A);
+    let err = e
+        .update(
+            &request_update(&grantee, &repo, 22, Some(&update_only), &update),
+            &update,
+        )
+        .unwrap_err();
+    assert_eq!(err.code(), Code::PermissionDenied);
+    assert_eq!(
+        err.public_message(),
+        "update without force needs indexed mode"
+    );
+    assert_no_rows(&e, &owner);
+    assert!(
+        e.update(&request(&owner, &repo, 22, None), &upd(HEAD, Any, A))
+            .is_ok()
+    );
+}
+
+#[cfg(feature = "test-faults")]
+struct CreateAtFinalApply {
+    store: Arc<MemoryKv>,
+    partition: Partition,
+    ref_key: Key,
+    fired: AtomicBool,
+}
+
+#[cfg(feature = "test-faults")]
+impl FaultHooks for CreateAtFinalApply {
+    async fn at(
+        &self,
+        point: FaultPoint,
+        _: &Operation,
+        _: &TestDirectives,
+    ) -> Result<(), ServerError> {
+        if point == FaultPoint::BeforeFinalApply && !self.fired.swap(true, Ordering::SeqCst) {
+            self.store
+                .apply(
+                    &self.partition,
+                    Batch::new().put(self.ref_key.clone(), codec::encode_ref_id(&B)),
+                )
+                .await
+                .unwrap();
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn any_create_only_race_replans_to_permission_denied_without_write_rows() {
+    let owner = key(1);
+    let grantee = key(2);
+    let repo = repository(&owner);
+    let create = scoped_grant(&owner, &grantee, "c");
+    for sharding in [Sharding::Single, Sharding::D34] {
+        let Env {
+            pipe,
+            clock,
+            metrics,
+        } = environment_sharding(&owner, AuthorizerRole::Check, false, sharding);
+        let resolved = pipe.cfg.addressing.resolve(Some(&repo), true).unwrap();
+        let shard = pipe.shards.ref_shard(&resolved.repo, HEAD);
+        let ref_key = keys::ref_key(&resolved.repo.name, HEAD);
+        let store = pipe.meta.inner.clone();
+        let pipe = pipe.with_faults(CreateAtFinalApply {
+            store,
+            partition: shard.clone(),
+            ref_key: ref_key.clone(),
+            fired: AtomicBool::new(false),
+        });
+        let e = Env {
+            pipe,
+            clock,
+            metrics,
+        };
+        let req = request(&grantee, &repo, 23, Some(&create));
+        let replay = keys::replay(&e.auth(&req).unwrap().auth.unwrap().replay_scope);
+        assert_eq!(
+            e.update(&req, &upd(HEAD, Any, A)).unwrap_err().code(),
+            Code::PermissionDenied
+        );
+        assert_eq!(
+            now(e.pipe.meta.inner.get(&shard, &ref_key)).unwrap(),
+            Some(codec::encode_ref_id(&B))
+        );
+        assert_eq!(now(e.pipe.meta.inner.get(&shard, &replay)).unwrap(), None);
+        let (first, end) = keys::class_range(keys::TAG_QUOTA);
+        assert!(
+            now(e.pipe.meta.inner.scan(&shard, &first, &end, None, 10))
+                .unwrap()
+                .entries
+                .is_empty()
+        );
+    }
 }
 
 #[test]

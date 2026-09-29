@@ -133,9 +133,19 @@ impl S3BlobStore {
         sha256: &str,
     ) -> Result<CommitOutcome, StoreError> {
         let path = self.object_path(key)?;
+        self.put_verified_path(&path, spool, len, sha256).await
+    }
+
+    pub(super) async fn put_verified_path(
+        &self,
+        path: &str,
+        spool: Arc<File>,
+        len: u64,
+        sha256: &str,
+    ) -> Result<CommitOutcome, StoreError> {
         let mut last = String::new();
         for attempt in 0..PUT_ATTEMPTS {
-            match self.put_once(&path, &spool, len, sha256).await {
+            match self.put_once(path, &spool, len, sha256).await {
                 Attempt::Done(outcome) => return Ok(outcome),
                 Attempt::Fatal(e) => return Err(e),
                 Attempt::Retry { detail, after } => {
@@ -148,7 +158,7 @@ impl S3BlobStore {
         }
         // A key only ever holds verified bytes: if it is present now (a
         // racing writer, or our own PUT whose answer was lost), ours are.
-        if matches!(self.head_len(&path).await, Ok(Some(n)) if n == len) {
+        if matches!(self.head_len(path).await, Ok(Some(n)) if n == len) {
             return Ok(CommitOutcome::AlreadyPresent);
         }
         Err(fail(StorageOp::BlobPut, last))

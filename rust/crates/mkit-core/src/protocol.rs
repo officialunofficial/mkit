@@ -539,6 +539,17 @@ pub trait Transport: Send + Sync {
     /// dedupe on this key.
     fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()>;
 
+    /// Upload a pack for an intended head ref. Transports without upload
+    /// tickets ignore the hint and retain their existing upload behavior.
+    fn upload_pack_via_ref(
+        &self,
+        bytes: &[u8],
+        key: &PackKey,
+        _head_ref: &str,
+    ) -> TransportResult<()> {
+        self.upload_pack(bytes, key)
+    }
+
     /// Download a pack by its digest.
     ///
     /// Returns [`TransportError::PackNotFound`] if the remote does not
@@ -674,6 +685,17 @@ pub trait Transport: Send + Sync {
         self.upload_pack(bytes, key)
     }
 
+    /// Upload auxiliary content for an intended head ref. The default keeps
+    /// the transport's existing blob behavior.
+    fn upload_blob_via_ref(
+        &self,
+        bytes: &[u8],
+        key: &PackKey,
+        _head_ref: &str,
+    ) -> TransportResult<()> {
+        self.upload_blob(bytes, key)
+    }
+
     /// Download an auxiliary blob by digest. Counterpart to
     /// [`Self::upload_blob`]; default impl delegates to
     /// [`Self::download_pack`]. Returns [`TransportError::PackNotFound`] if
@@ -756,6 +778,36 @@ pub trait Transport: Send + Sync {
         }
     }
 
+    /// Advance both refs while committing any upload tickets for `commit`.
+    /// Other transports ignore the pack keys and use their existing advance.
+    #[allow(clippy::too_many_arguments)]
+    fn advance_refs_committing(
+        &self,
+        head_ref: &str,
+        head_condition: RefWriteCondition,
+        head_value: &Hash,
+        packmap_ref: &str,
+        packmap_condition: RefWriteCondition,
+        packmap_value: &Hash,
+        _commit: &[PackKey],
+    ) -> TransportResult<CommitOutcome> {
+        self.advance_refs(
+            head_ref,
+            head_condition,
+            head_value,
+            packmap_ref,
+            packmap_condition,
+            packmap_value,
+        )
+        .map(CommitOutcome::Advanced)
+    }
+
+    /// Limits the remote advertises to the push planner. `None` means the
+    /// transport does not impose an additional limit.
+    fn upload_limits(&self) -> UploadLimits {
+        UploadLimits::default()
+    }
+
     /// Whether [`Self::advance_refs`] commits the head + packmap advance as
     /// one indivisible transaction, rather than the default's ordered
     /// packmap-then-head writes.
@@ -795,6 +847,32 @@ pub enum AdvanceOutcome {
     /// The packmap precondition did not hold (a concurrent pusher advanced
     /// the chain). Callers re-read the packmap and retry.
     PackmapConflict,
+}
+
+/// Result of an advance that can consume upload tickets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CommitOutcome {
+    /// The advance reached the ordinary two-ref outcome.
+    Advanced(AdvanceOutcome),
+    /// A ticket was invalid, expired, incomplete, or was already consumed.
+    TicketRejected,
+    /// A delta base is not yet available to this repository.
+    DeltaBaseUnavailable,
+    /// The packlist names content not in this repository.
+    PacklistNotInRepository,
+}
+
+/// Server limits relevant to splitting a push into packs and advances.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct UploadLimits {
+    /// Maximum accepted serialized pack bytes, if advertised.
+    pub max_pack_bytes: Option<u64>,
+    /// Maximum number of upload tickets one advance may consume.
+    pub tickets_per_advance: Option<usize>,
+    /// First serialized pack size that requires a ticket, when known.
+    /// A transport may stop requiring tickets after discovery fallback.
+    pub ticket_threshold_bytes: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -950,6 +1028,21 @@ mod tests {
         fn list_refs(&self, _prefix: &str) -> TransportResult<Vec<Ref>> {
             unimplemented!("not exercised by these tests")
         }
+    }
+
+    #[test]
+    fn ticket_hooks_default_to_existing_transport_behavior() {
+        let transport = RecordingTransport::default();
+        let bytes = b"test pack";
+        let key = PackKey::new(crate::hash::hash(bytes));
+        transport
+            .upload_pack_via_ref(bytes, &key, "refs/heads/main")
+            .unwrap();
+        assert_eq!(transport.download_pack(&key).unwrap(), bytes);
+        transport
+            .upload_blob_via_ref(bytes, &key, "refs/heads/main")
+            .unwrap();
+        assert_eq!(transport.upload_limits(), UploadLimits::default());
     }
 
     fn chunks_of(data: &[u8], chunk_len: usize) -> Vec<PackChunk> {

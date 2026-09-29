@@ -9,16 +9,16 @@ wins. The PRD snapshot is [`prd-snapshot.md`](prd-snapshot.md); Linear is canoni
 - **No CI runs for `feat/mkit-server`.** Nothing changes GitHub workflow triggers, Cloud Build triggers or rulesets to cover the branch. WP-P0 (CI enablement) is **dropped**: PR #1094 was closed unmerged.
 - In place of CI, the evidence is the executor's local gate run (output in the PR body) and a clean adversarial review; all other merge rules are unchanged. The orchestrator re-runs the gate after rebasing and before squash-merging.
 - Three pre-existing workflows (`actionlint`, `docs-lint`, `crypto-stack-version`) have no branch filter and may fire automatically on PRs into the branch. Their results are **ignored**: nothing waits on them, and their triggers are not changed.
-- **CI runs once**, on the final PR that merges `feat/mkit-server` into `main` (WP-REL). All normal `main` gates apply there.
+- **CI runs on each merge-to-main PR**: WP-REL-1 (Stage 1) and WP-REL-2 (Stage 2) (R-154). All normal `main` gates apply there.
 - `workflow_dispatch` runs are never dispatched against `feat/mkit-server`.
-- A WP that adds CI wiring (new jobs, `server-staging.yml`, workflow changes) may add it, but it must trigger only on `main`, `schedule` or dispatch against `main`, never on the feature branch; it runs for the first time on the final PR to `main`. During the epic the same checks run **locally or against staging from the orchestrator's machine**, at the WP and at every milestone boundary, and the results go in the PR or the milestone report.
+- A WP that adds CI wiring (new jobs, `server-staging.yml`, workflow changes) may add it, but it must trigger only on `main`, `schedule` or dispatch against `main`, never on the feature branch; it runs for the first time on the WP-REL-1 PR to `main`. During the epic the same checks run **locally or against staging from the orchestrator's machine**, at the WP and at every milestone boundary, and the results go in the PR or the milestone report.
 
 ## Base branch
 
 - Every WP branches from and targets **`feat/mkit-server`**.
 - Start from a fresh fetch: `git fetch origin && git switch -c <branch> origin/feat/mkit-server`.
 - Stacked spec PRs (S2 on S1, S3 on S2) retarget to `feat/mkit-server` once their parent merges.
-- Nothing is released from `feat/mkit-server`. Crates publish and the workspace version moves to 0.5 only at WP-REL.
+- Nothing is released from `feat/mkit-server`. Crates publish and the workspace version moves only at a REL: 0.5.0 at WP-REL-1, the next minor at WP-REL-2 (R-154). Both merge with a merge commit, never a squash.
 
 ## Branch naming
 
@@ -90,16 +90,18 @@ export TMPDIR="$HOME/.cache/mkit-test-tmp/<wp-id>"; mkdir -p "$TMPDIR"   # never
     `missing_scrub_state_forces_a_full_walk_instead_of_trusting_nothing`,
     `scrub_lap_completion_forces_a_full_walk_but_keeps_the_generation`,
     `scrub_state_from_a_superseded_generation_is_discarded_not_misapplied`,
-    `stale_scrub_state_forces_a_full_walk_regardless_of_cursor_position`;
+    `stale_scrub_state_forces_a_full_walk_regardless_of_cursor_position`,
+    `scrub_age_boundary_is_exclusive`;
   - `mkit-core` `refs::tests::`: `cas_match_race_never_loses_an_update_across_uncoordinated_callers`,
     `cas_delete_vs_match_advance_race_never_lets_both_win_or_loses_the_advance`;
   - `mkit-core` `batch::tests::`: `batch_write_hash_equals_store_write_hash`, `write_parts_equals_concatenated_write`;
   - `mkit-cli`: `remote_dispatch::packmap::tests::verify_new_object_signatures_mixed_with_unsigned_object_kinds`, and the
     `branch_rename_commit_race` binary.
 
-  Since WP-M0-20, `rust/.config/nextest.toml` names exactly these: the first twelve get a 300 s ceiling, and
-  `branch_rename_commit_race` runs with no other test beside it under 150 s (the measurements are in
-  [the M0 exit report](m0-exit-report.md#6-full-local-ci-just-ci-on-the-quiet-machine)). Every other test keeps the 60 s
+  `rust/.config/nextest.toml` names exactly these (since WP-M0-20; the backup override since the 2026-09-29 test-hygiene chore): the ancestry, refs, batch, and packmap tests get a 300 s ceiling, and
+  `branch_rename_commit_race` runs with no other test beside it under 150 s. `sqlite_eighty_thousand_small_rows_at_cap_under_five_seconds`
+  also runs alone (its 5 s wall-clock check is opt-in via `MKIT_BACKUP_TIMING`; the always-on ceiling is 120 s). The M0 measurements are in
+  [the M0 exit report](m0-exit-report.md#6-full-local-ci-just-ci-on-the-quiet-machine); the backup timings are in the chore PR (#1207). Every other test keeps the 60 s
   hang detection. A timeout in one of them, in a module your WP does not touch, is not a failure of your WP until it also
   fails **rerun alone** (`cargo nextest run -p <crate> -E 'test(=<name>)'`); report it as load-related only if it passes
   that way. A new test that needs more time gets its own exact-name override, not a module-wide one.

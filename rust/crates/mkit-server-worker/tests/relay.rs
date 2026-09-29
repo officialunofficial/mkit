@@ -380,6 +380,7 @@ fn worker_relay_defers_chunks_after_two_target_calls_per_fire() {
                     at_ms: 100,
                     target: destination.clone(),
                     puts,
+                    deletes: Vec::new(),
                 };
                 batch = batch.put(keys::relay(seq), codec::encode_relay(&row).unwrap());
             }

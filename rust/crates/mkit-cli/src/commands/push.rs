@@ -14,6 +14,7 @@ use std::io::Write;
 
 use clap::{Parser, ValueEnum};
 use mkit_core::layout::RepoLayout;
+use mkit_core::protocol::UploadLimits;
 
 use crate::clap_shim;
 use crate::config;
@@ -64,6 +65,18 @@ struct PushOpts {
     /// Suppress transfer progress output on stderr (#711).
     #[arg(short = 'q', long)]
     quiet: bool,
+}
+
+fn interrupted_hint(endpoint: &str, limits: UploadLimits) -> &'static str {
+    let connect = endpoint.starts_with("mkit+https://") || endpoint.starts_with("mkit+http://");
+    if connect
+        && limits.tickets_per_advance.is_some()
+        && limits.ticket_threshold_bytes != Some(u64::MAX)
+    {
+        "push: interrupted; if BeginUpload issued a ticket, re-run push to resume the upload"
+    } else {
+        "push: interrupted; re-run push to retry"
+    }
 }
 
 #[must_use]
@@ -300,10 +313,11 @@ fn push_current(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpt
             }
             emit_err(&msg, exit::GENERAL_ERROR)
         }
-        // TODO(WP-1.17): Add the BeginUpload ticket hint only when the
-        // interrupted operation actually consumed an upload ticket.
+        Err(remote_dispatch::DispatchError::UploadInterrupted(message)) => {
+            emit_err_json(&format!("push: {message}"), exit::TEMPFAIL, json)
+        }
         Err(remote_dispatch::DispatchError::Interrupted) => emit_err_json(
-            "push: interrupted; re-run push to resume",
+            interrupted_hint(&resolved.endpoint, tx.upload_limits()),
             exit::TEMPFAIL,
             json,
         ),
@@ -312,6 +326,7 @@ fn push_current(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpt
 }
 
 /// `--all`: mirror every local branch to the remote (CAS-safe).
+#[allow(clippy::too_many_lines)] // Linear branch loop keeps each push result and hint together.
 fn push_all(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpts) -> u8 {
     let json = matches!(opts.format, PushFormat::Json);
     let remote_name = opts
@@ -404,9 +419,11 @@ fn push_all(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpts) -
             }
             emit_err(&msg, exit::GENERAL_ERROR)
         }
-        // TODO(WP-1.17): Add the ticket-specific hint only on its pending path.
+        Err(remote_dispatch::DispatchError::UploadInterrupted(message)) => {
+            emit_err_json(&format!("push: {message}"), exit::TEMPFAIL, json)
+        }
         Err(remote_dispatch::DispatchError::Interrupted) => emit_err_json(
-            "push: interrupted; re-run push to resume",
+            interrupted_hint(&resolved.endpoint, tx.upload_limits()),
             exit::TEMPFAIL,
             json,
         ),
@@ -512,3 +529,25 @@ fn record_upstream(
 }
 
 use super::error as emit_err;
+
+#[cfg(test)]
+mod interrupted_hint_tests {
+    use super::*;
+
+    #[test]
+    fn begin_upload_hint_only_for_ticketing_connect_remote() {
+        let ticketing = UploadLimits {
+            tickets_per_advance: Some(7),
+            ticket_threshold_bytes: Some(0),
+            ..UploadLimits::default()
+        };
+        assert!(
+            interrupted_hint("mkit+https://example.test/repo", ticketing).contains("BeginUpload")
+        );
+        assert!(!interrupted_hint("file:///repo", ticketing).contains("BeginUpload"));
+        assert!(
+            !interrupted_hint("mkit+https://example.test/repo", UploadLimits::default())
+                .contains("BeginUpload")
+        );
+    }
+}

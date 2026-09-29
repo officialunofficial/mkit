@@ -585,22 +585,41 @@ where
     async fn get_grant_epoch(
         &self,
         _ctx: RequestContext,
-        _request: ServiceRequest<'_, GetGrantEpochRequest>,
+        request: ServiceRequest<'_, GetGrantEpochRequest>,
     ) -> ServiceResult<GetGrantEpochResponse> {
-        // SECURITY: unsigned by design; WP-2.8 MUST keep this outside auth-v2 Procedure.
-        // TODO(WP-2.8): return the namespace epoch without auth-v2 header verification.
-        Err(not_yet().into())
+        // Unsigned by design: no repository selector or auth headers are read.
+        let message = request.to_owned_message();
+        let pipe = self.pipe.arc();
+        send_wrap(async move {
+            let epoch = pipe
+                .get_grant_epoch(message.namespace.as_deref().unwrap_or_default())
+                .await?;
+            Response::ok(GetGrantEpochResponse {
+                epoch: Some(epoch),
+                ..Default::default()
+            })
+        })
+        .await
     }
 
     async fn set_grant_epoch(
         &self,
         _ctx: RequestContext,
-        _request: ServiceRequest<'_, SetGrantEpochRequest>,
+        request: ServiceRequest<'_, SetGrantEpochRequest>,
     ) -> ServiceResult<SetGrantEpochResponse> {
-        // SECURITY: unsigned by design; the owner statement is its only authorization.
-        // WP-2.8 MUST keep this outside auth-v2 Procedure.
-        // TODO(WP-2.8): verify the owner statement and wait for revocation completion.
-        Err(not_yet().into())
+        // Unsigned forever: the owner statement is its sole authorization.
+        let message = request.to_owned_message();
+        let pipe = self.pipe.arc();
+        send_wrap(async move {
+            let epoch = pipe
+                .set_grant_epoch(message.signed_statement.as_deref().unwrap_or_default())
+                .await?;
+            Response::ok(SetGrantEpochResponse {
+                epoch: Some(epoch),
+                ..Default::default()
+            })
+        })
+        .await
     }
 
     async fn set_repo_visibility(

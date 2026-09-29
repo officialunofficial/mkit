@@ -29,6 +29,7 @@ pub mod envelope;
 mod error;
 mod executor;
 pub mod grant;
+mod part_receipts;
 mod receipt;
 mod status;
 
@@ -45,10 +46,12 @@ pub mod proto {
 
 pub use client::{
     ConnectTransport, PACK_TRANSFER_TIMEOUT, PENDING_INTERRUPTED_MESSAGE, PendingEvent,
-    ServerInfoView, TOKEN_ENV, UNARY_TIMEOUT, UrlIdentityError, repository_identity_from_url,
+    ServerInfoView, TOKEN_ENV, UNARY_TIMEOUT, UploadEvent, UrlIdentityError,
+    repository_identity_from_url,
 };
 pub use envelope::EnvelopeSigner;
 pub use grant::{GrantCondition, GrantOperation, GrantRef, GrantRequest, GrantSource};
+pub use part_receipts::{MemoryPartReceiptStore, PartReceiptStore, StoredPart, TicketMetadata};
 pub use receipt::{AdmissionReceipt, ReceiptValue};
 
 // Re-exported so integration tests (and in-tree servers and conformance

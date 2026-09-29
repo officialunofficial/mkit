@@ -23,6 +23,7 @@ mod auth;
 mod begin;
 mod coordinator;
 mod download;
+mod epoch;
 #[cfg(feature = "test-faults")]
 pub(crate) mod faults;
 mod gate;
@@ -199,6 +200,8 @@ pub struct PipelineConfig {
     pub authorizer_role: AuthorizerRole,
     /// Upload caps, supplied by the binding (used by M0-05b).
     pub upload_limits: UploadLimits,
+    /// Optional tighter cap for legacy single-part `UploadPack` requests.
+    pub single_upload_max_bytes: Option<u64>,
     /// Resumable upload part size: a power of two in 8–32 MiB.
     pub part_size: u64,
     /// Largest number of parts, sufficient to reach the upload byte cap.
@@ -241,6 +244,13 @@ pub struct PipelineConfig {
 }
 
 impl PipelineConfig {
+    /// One seam for advertised and enforced indexed mode.
+    /// TODO(WP-4.7): derive this from `IndexedConfig` when indexing lands.
+    #[allow(clippy::unused_self)] // The WP-4.7 configuration makes this a real instance query.
+    pub(crate) fn indexed_mode(&self) -> bool {
+        false
+    }
+
     /// Defaults for `auth`: the default write quota only for auth v2.
     #[must_use]
     pub fn new(addressing: Addressing, auth: AuthMode, upload_limits: UploadLimits) -> Self {
@@ -257,6 +267,7 @@ impl PipelineConfig {
             auth,
             grants: None,
             upload_limits,
+            single_upload_max_bytes: None,
             part_size: mkit_core::upload_parts::MIN_PART_SIZE,
             max_parts: 10_000,
             max_list_refs_page_size: DEFAULT_LIST_PAGE_LIMIT,
@@ -787,18 +798,6 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     self.test_bump_epoch(&op.repo.namespace, epoch).await?;
                 }
             }
-            let partitions = self.shards.ref_index_partitions(&op.repo);
-            if partitions.len() != 1 {
-                // TODO(WP-1.28b): read the eventually consistent ref-name index.
-                return Err(ServerError::new(
-                    crate::Code::Unimplemented,
-                    "ListRefs under d34 sharding lands with WP-1.28",
-                ));
-            }
-            let p = partitions
-                .into_iter()
-                .next()
-                .ok_or_else(|| internal("missing ref index"))?;
             #[cfg(feature = "test-faults")]
             faults::run_timers(
                 a.test_directives(),
@@ -815,20 +814,40 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             } else {
                 requested.min(self.cfg.max_list_refs_page_size)
             };
-            let bucket = list::RefBucket {
-                store: &self.meta,
-                partition: &p,
+            let partitions = self.shards.ref_index_partitions(&op.repo);
+            let result = if partitions.len() == 1 {
+                let bucket = list::RefBucket {
+                    store: &self.meta,
+                    partition: &partitions[0],
+                };
+                list::page(
+                    &[bucket],
+                    &op.repo,
+                    &scan,
+                    last.as_deref(),
+                    limit,
+                    list::MAX_RESPONSE_BYTES,
+                )
+                .await
+            } else {
+                let buckets = partitions
+                    .iter()
+                    .map(|partition| list::IndexBucket {
+                        store: &self.meta,
+                        partition,
+                    })
+                    .collect::<Vec<_>>();
+                list::page(
+                    &buckets,
+                    &op.repo,
+                    &scan,
+                    last.as_deref(),
+                    limit,
+                    list::MAX_RESPONSE_BYTES,
+                )
+                .await
             };
-            let mut page = list::page(
-                &[bucket],
-                &op.repo,
-                &scan,
-                last.as_deref(),
-                limit,
-                list::MAX_RESPONSE_BYTES,
-            )
-            .await
-            .map_err(|err| {
+            let mut page = result.map_err(|err| {
                 tracing::warn!(detail = %err, "ref listing scan failed");
                 ServerError::unavailable("ref listing unavailable")
             })?;
@@ -954,6 +973,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     .name
                     .strip_prefix(mkit_core::refs::PACKMAP_REF_PREFIX);
                 if head_branch.is_none() || head_branch != packmap_branch {
+                    if a.write_grant.is_some()
+                        && self.cfg.grants.is_some()
+                        && matches!(self.cfg.addressing, Addressing::Multi(_))
+                    {
+                        return Err(ServerError::permission_denied(
+                            "write grant rejected: ref scope",
+                        ));
+                    }
                     return Err(ServerError::invalid_argument(if tickets.is_empty() {
                         "AdvanceRefs pairs refs/heads/<x> with refs/mkit/packmap/<x> on this server"
                     } else {
@@ -1033,7 +1060,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             let read = self.authorize_read(&op).await?;
             let epoch = match read.epoch {
                 Some(epoch) => epoch,
-                None => self.stored_grant_epoch(&op.repo).await?,
+                None => self.stored_grant_epoch(&op.repo.namespace).await?,
             };
             let audience = match &self.cfg.auth {
                 AuthMode::AuthV2(cfg) => cfg.audience(),
@@ -1050,25 +1077,6 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             )
         })
         .await
-    }
-
-    /// One coordinator read of the `e` row for `repo`'s namespace: the
-    /// epoch `IssueObjectUrl` mints at when [`Self::authorize_read`] did
-    /// not already read it (a non-visibility deployment). Absent is `0`;
-    /// a store failure is `unavailable`.
-    async fn stored_grant_epoch(&self, repo: &crate::repo::RepoId) -> Result<u64, ServerError> {
-        let p = self.shards.coordinator(&repo.namespace);
-        self.meta
-            .get(&p, &keys::grant_epoch())
-            .await
-            .map_err(|e| {
-                tracing::warn!(detail = %e, "grant epoch read failed");
-                ServerError::unavailable("repository state unavailable")
-            })?
-            .map(|v| codec::decode_u64(&v))
-            .transpose()
-            .map_err(meta_error)
-            .map(|epoch| epoch.unwrap_or(0))
     }
 
     /// `SetRepoVisibility` (SPEC-WRITE-GRANTS §9.1): the envelope mode is a
@@ -1829,7 +1837,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let (private, epoch) = self.read_repo_state(&op.repo).await?;
         // §7 step 11: the grant's epoch must equal the stored epoch.
         let grant = check.filter(|c| c.epoch == epoch);
-        let grant_ref = grant.map(|c| GrantRef { id: c.id, epoch });
+        let grant_ref = grant.map(|c| GrantRef {
+            id: c.id,
+            epoch,
+            // Ref-scope presence constraints govern writes only.
+            presence_requirement: None,
+        });
         let owner = op.write_grant.is_none()
             && matches!(Namespace::parse(op.repo.namespace.as_str()),
                 Ok(Namespace::Ed25519(key)) if op.principal.ed25519() == Some(&key));
@@ -1839,7 +1852,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             return Err(ServerError::repository_not_found());
         }
         let provisional = AuthzFacts {
-            grant: grant_ref,
+            grant: grant_ref.clone(),
             owner,
             caller_view: if owner || grant.is_some_and(|g| g.write) {
                 CallerView::Writer
@@ -2086,6 +2099,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         }
         if self.cfg.sharding == Sharding::D34 {
             wanted.push(keys::epoch_lease());
+            if !refs.is_empty() {
+                wanted.extend([keys::outbox_sequence(), keys::outcome_backlog()]);
+            }
         }
         if let Some(auth) = &op.auth {
             wanted.push(keys::replay(&auth.replay_scope));
@@ -2296,7 +2312,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             })?;
             let verified = cfg.verify(header.expose(), op)?;
             // Step 8 (ref scope) before step 11, which reads state and comes last.
-            grants::interim_ref_gate(&verified, &op.kind)?;
+            let presence_requirement =
+                crate::policy::ref_scopes::authorize(&verified, &op.kind, self.cfg.indexed_mode())?;
             let observed = match self.cfg.sharding {
                 Sharding::Single => op.observed_epoch,
                 Sharding::D34 => op.leased_epoch,
@@ -2308,6 +2325,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             Some(crate::op::GrantRef {
                 id: *verified.id(),
                 epoch: verified.epoch(),
+                presence_requirement,
             })
         } else {
             None
@@ -2393,6 +2411,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             repo: &op.repo.name,
             kind,
             refs,
+            ref_index: (self.cfg.sharding == Sharding::D34 && !refs.is_empty()).then_some((
+                &op.repo,
+                p,
+                self.shards.as_ref(),
+            )),
             replay,
             charges,
             namespace_charge: self.namespace_charge(
@@ -2400,7 +2423,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 charges,
                 ahead.as_ref().and_then(|s| s.namespace_window),
             )?,
-            grant: op.authz.grant,
+            grant: op.authz.grant.clone(),
             lease,
             layout_version: caps.implicit_layout_version.is_none(),
             mark_repo_known: matches!(self.cfg.addressing, Addressing::Multi(_))

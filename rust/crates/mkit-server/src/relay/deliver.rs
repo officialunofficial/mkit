@@ -47,6 +47,8 @@ struct TargetResult {
 
 /// Pushes a source's queued rows to a separately supplied target store.
 /// Distinct producers may upsert the same key when its value is identical.
+/// A key that is ever relay-deleted MUST have exactly one producer, so its
+/// source sequence orders every update and delete.
 /// Target rh rows never expire.
 #[derive(Debug)]
 pub struct RelayHandler<T, H = NoHook> {
@@ -609,6 +611,9 @@ fn fitting_prefix(base: &Batch, rh: &Key, rows: &[(u64, RelayV1)]) -> usize {
                 .cloned()
                 .map(|(key, value)| Write::Put(key, value)),
         );
+        candidate
+            .writes
+            .extend(row.deletes.iter().cloned().map(Write::Delete));
         let sized = candidate.clone().put(rh.clone(), codec::encode_u64(*seq));
         if candidate.writes.len() > crate::store::outbox::MAX_RELAY_PUTS
             || sized.validate(&StoreCapabilities::full()).is_err()
@@ -632,6 +637,9 @@ fn target_batch(rh: &Key, observed: Option<&Value>, rows: &[(u64, RelayV1)]) -> 
                 .cloned()
                 .map(|(key, value)| Write::Put(key, value)),
         );
+        batch
+            .writes
+            .extend(row.deletes.iter().cloned().map(Write::Delete));
     }
     batch.put(
         rh.clone(),

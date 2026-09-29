@@ -147,7 +147,7 @@ pub type TimerStore = Blocking<TimerNotifying<SqlKvStore<RusqliteConn>>>;
 /// rebuilds its directory on the blocking pool and starts the loop.
 pub struct TimerDriver {
     store: TimerStore,
-    registry: TimerRegistry<TimerStore>,
+    registry: TimerRegistry<'static, TimerStore>,
     clock: Arc<dyn Clock>,
 }
 
@@ -164,7 +164,7 @@ impl TimerDriver {
     #[must_use]
     pub fn new(
         store: TimerStore,
-        registry: TimerRegistry<TimerStore>,
+        registry: TimerRegistry<'static, TimerStore>,
         clock: Arc<dyn Clock>,
     ) -> Self {
         Self {

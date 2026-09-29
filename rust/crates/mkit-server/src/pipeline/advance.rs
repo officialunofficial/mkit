@@ -132,12 +132,8 @@ pub(super) fn plan_consumption(
     clock: &PlanClock,
     pre: &mut Vec<Precondition>,
     writes: &mut Vec<Write>,
+    outbox: &mut OutboxBuilder,
 ) -> Result<(), ServerError> {
-    let mut outbox = OutboxBuilder::new(
-        snap.get(&keys::outbox_sequence()),
-        snap.get(&keys::outcome_backlog()),
-    )
-    .map_err(meta_error)?;
     let outcome_refs: Vec<_> = refs
         .iter()
         .map(|r| OutcomeRef {
@@ -190,12 +186,11 @@ pub(super) fn plan_consumption(
             advance.source,
             advance.shards,
             advance.repo_id,
-            &mut outbox,
+            outbox,
             writes,
         );
     }
-    outbox.relay_at(clock.plan_time_ms);
-    outbox.try_finish(pre, writes).map_err(meta_error)
+    Ok(())
 }
 
 impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {

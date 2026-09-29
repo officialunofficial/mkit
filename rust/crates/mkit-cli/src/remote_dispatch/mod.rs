@@ -24,6 +24,7 @@ pub(crate) mod applied_packs;
 mod envelope_signer;
 pub(crate) mod grants;
 mod packmap;
+mod upload_receipts;
 
 use mkit_core::layout::RepoLayout;
 use std::path::Path;
@@ -36,7 +37,7 @@ use mkit_core::object::Object;
 use mkit_core::ops::merge::is_ancestor;
 use mkit_core::ops::restore;
 use mkit_core::pack::{self, PackError, PackWriter, PreparedDelta, PreparedRaw};
-use mkit_core::protocol::{PackKey, Transport, TransportError};
+use mkit_core::protocol::{PackKey, Transport, TransportError, UploadLimits};
 use mkit_core::refs::{self, Head};
 use mkit_core::store::{ObjectStore, StoreError};
 use mkit_core::transfer::{self, PackListError};
@@ -77,6 +78,8 @@ pub enum DispatchError {
     /// hadn't reached yet.
     #[error("interrupted")]
     Interrupted,
+    #[error("{0}")]
+    UploadInterrupted(String),
     #[error("transport: {0}")]
     Transport(#[from] TransportError),
     #[error("refs: {0}")]
@@ -185,11 +188,26 @@ pub enum DispatchError {
     /// a raw path component under `.mkit/applied-packs/`.
     #[error("invalid remote name for applied-packs record: '{0}'")]
     InvalidRemoteName(String),
+    #[error(
+        "push needs {packs} data packs but this server permits {limit} per advance; push an ancestor commit first, or ask the operator to raise max_pack_bytes"
+    )]
+    PushTooLarge { packs: usize, limit: usize },
+    #[error("upload ticket was rejected after the push was retried")]
+    TicketRejected,
+    #[error("delta base is unavailable after a restart")]
+    DeltaBaseUnavailable,
+    #[error("packlist still names a pack absent from this repository after retry")]
+    PacklistNotInRepository,
 }
 
 /// Interpret a missing result as a repository failure only for repository-level
 /// operations. Pack downloads retain their content-specific missing errors.
 fn repository_operation_error(tx: &dyn Transport, error: TransportError) -> DispatchError {
+    if let TransportError::RemoteError(message) = &error
+        && message.starts_with("upload interrupted; ")
+    {
+        return DispatchError::UploadInterrupted(message.clone());
+    }
     if matches!(&error, TransportError::RemoteError(message) if message == PENDING_INTERRUPTED_MESSAGE)
     {
         return DispatchError::Interrupted;
@@ -271,8 +289,15 @@ fn open_with_config_for_remote(
     if url.starts_with("mkit+https://") || url.starts_with("mkit+http://") {
         validate_connect_repository(url)?;
         let mut tx = ConnectTransport::connect_with_signer(url, envelope_signer)?
+            .with_receipt_store(Arc::new(upload_receipts::FilePartReceiptStore::new(
+                layout.upload_parts_dir(),
+            )))
             .with_pending_observer(|event| {
                 crate::progress::pending_event(event);
+                !crate::signal::is_shutdown()
+            })
+            .with_upload_observer(|event| {
+                crate::progress::upload_event(event);
                 !crate::signal::is_shutdown()
             })
             .with_admission_receipt_observer(|receipt| {
@@ -828,6 +853,54 @@ pub fn push_branch_with_limits(
     rebaseline_threshold: usize,
     pack_payload_cap: u64,
 ) -> Result<(), DispatchError> {
+    let first = push_branch_once(
+        tx,
+        store,
+        branch,
+        tip,
+        condition,
+        rebaseline_threshold,
+        pack_payload_cap,
+        false,
+    );
+    match first {
+        Err(DispatchError::TicketRejected | DispatchError::PacklistNotInRepository) => {
+            push_branch_once(
+                tx,
+                store,
+                branch,
+                tip,
+                condition,
+                rebaseline_threshold,
+                pack_payload_cap,
+                false,
+            )
+        }
+        Err(DispatchError::DeltaBaseUnavailable) => push_branch_once(
+            tx,
+            store,
+            branch,
+            tip,
+            condition,
+            rebaseline_threshold,
+            pack_payload_cap,
+            true,
+        ),
+        result => result,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_branch_once(
+    tx: &dyn Transport,
+    store: &ObjectStore,
+    branch: &str,
+    tip: Hash,
+    condition: refs::RefWriteCondition,
+    rebaseline_threshold: usize,
+    pack_payload_cap: u64,
+    force_self_contained: bool,
+) -> Result<(), DispatchError> {
     // Both wire names must fit SPEC-REFS §3's bound; a local branch named
     // before `MAX_BRANCH_NAME_BYTES` existed may not. Say so by name
     // rather than as a transport's "invalid ref name".
@@ -841,7 +914,21 @@ pub fn push_branch_with_limits(
     // (the remote already holds this closure) yields an empty plan and takes
     // the cheap head-only path below WITHOUT walking the packmap chain. Only
     // a push that actually has objects to send pays the O(depth) chain probe.
-    let mut plan = transfer::plan_pack_with(store, tip, remote_tip, encode_delta_candidates_batch)?;
+    let mut plan = transfer::plan_pack_with(
+        store,
+        tip,
+        if force_self_contained {
+            None
+        } else {
+            remote_tip
+        },
+        encode_delta_candidates_batch,
+    )?;
+
+    let limits = tx.upload_limits();
+    // Payload and serialized-byte limits are checked separately. Framing
+    // overhead grows with the entry count, so a fixed margin is insufficient.
+    let effective_cap = effective_payload_cap(pack_payload_cap, limits.max_pack_bytes)?;
 
     if plan.is_empty() {
         // Nothing to send — the remote already holds the closure; just move
@@ -875,7 +962,8 @@ pub fn push_branch_with_limits(
     //     force push MUST take the safe append path instead of resetting.
     let mut rebaseline = false;
     let mut resolved_chain = None;
-    if rebaseline_threshold > 0
+    if !force_self_contained
+        && rebaseline_threshold > 0
         && let Some(pm) = tx.read_ref(&packmap_ref(branch))?
     {
         match probe_chain(tx, branch, pm) {
@@ -895,8 +983,24 @@ pub fn push_branch_with_limits(
     if rebaseline {
         // Force a full-closure plan: no external bases, so the pack is
         // self-contained and safe to reset the chain onto.
-        plan = transfer::plan_pack_with(store, tip, None, encode_delta_candidates_batch)?;
+        let full = transfer::plan_pack_with(store, tip, None, encode_delta_candidates_batch)?;
+        let full_cap = effective_payload_cap(pack_payload_cap, limits.max_pack_bytes)?;
+        if estimated_ticketed_count(
+            &estimate_pack_sizes(store, &full, full_cap, limits.max_pack_bytes)?,
+            limits,
+        ) > 6
+        {
+            rebaseline = false;
+        } else {
+            plan = full;
+        }
     }
+
+    // No pre-flight PushTooLarge: the estimate uses uncompressed sizes, so it
+    // would refuse pushes that compress into six packs. The seal-time gate is
+    // exact and still stops before the seventh ticketed pack's BeginUpload.
+    // (The re-baseline check above may use the conservative estimate: a false
+    // "too many" only keeps the append plan.)
 
     // Build the plan into one or more payload-bounded packs (splitting
     // when the plan exceeds `pack_payload_cap`, issue #831) and upload
@@ -911,7 +1015,14 @@ pub fn push_branch_with_limits(
     // delta streams can be handed to the compression fan-out without
     // an extra clone — see that function's doc comment).
     let self_contained = plan.self_contained;
-    let pack_keys = build_and_upload_packs(tx, store, plan, pack_payload_cap)?;
+    let pack_keys = build_and_upload_packs(
+        tx,
+        store,
+        plan,
+        effective_cap,
+        &format!("refs/heads/{branch}"),
+        limits,
+    )?;
 
     // Chain the pack(s) onto the packmap AND move the head together
     // (#408): a transactional transport applies both atomically, the
@@ -972,13 +1083,84 @@ pub fn push_branch_with_limits(
 /// extra bytes copied, where borrowing would force a clone per entry
 /// just to satisfy ownership. The caller reads whatever it needs off
 /// `plan` (just `self_contained`) before making this call.
+fn effective_payload_cap(requested: u64, advertised: Option<u64>) -> Result<u64, DispatchError> {
+    // The serialized limit's overhead margin is exact and dynamic: header,
+    // trailer and one frame per entry. `should_seal` applies it on each add.
+    let cap = requested
+        .min(pack::MAX_TOTAL_PAYLOAD)
+        .min(advertised.unwrap_or(pack::MAX_TOTAL_PAYLOAD));
+    if cap == 0 {
+        return Err(DispatchError::Transport(TransportError::PayloadTooLarge(0)));
+    }
+    Ok(cap)
+}
+
+fn serialized_bound(payload: u64, entries: usize) -> u64 {
+    payload
+        .saturating_add((entries as u64).saturating_mul(pack::ENTRY_FRAME_LEN as u64))
+        .saturating_add((pack::HEADER_LEN + pack::TRAILER_LEN) as u64)
+}
+
+fn ticketed_pack(limits: UploadLimits, serialized_size: u64) -> bool {
+    limits.tickets_per_advance.is_some()
+        && serialized_size >= limits.ticket_threshold_bytes.unwrap_or(0)
+}
+
+fn estimated_ticketed_count(sizes: &[u64], limits: UploadLimits) -> usize {
+    sizes
+        .iter()
+        .filter(|&&size| ticketed_pack(limits, size))
+        .count()
+}
+
+fn estimate_pack_sizes(
+    store: &ObjectStore,
+    plan: &transfer::PackPlan,
+    payload_cap: u64,
+    max_pack_bytes: Option<u64>,
+) -> Result<Vec<u64>, DispatchError> {
+    let mut packs = Vec::new();
+    let mut payload = 0_u64;
+    let mut entries = 0_usize;
+    let sizes = plan
+        .raw
+        .iter()
+        .map(|hash| store.object_metadata(hash).map(|meta| meta.len()))
+        .collect::<Result<Vec<_>, _>>()?;
+    for size in sizes.into_iter().chain(
+        plan.deltas
+            .iter()
+            .map(|delta| (HASH_LEN + delta.stream.len()) as u64),
+    ) {
+        let next_payload = payload.saturating_add(size);
+        if entries > 0
+            && (next_payload > payload_cap
+                || max_pack_bytes
+                    .is_some_and(|limit| serialized_bound(next_payload, entries + 1) > limit))
+        {
+            packs.push(serialized_bound(payload, entries));
+            payload = 0;
+            entries = 0;
+        }
+        payload = payload.saturating_add(size);
+        entries += 1;
+    }
+    if entries > 0 {
+        packs.push(serialized_bound(payload, entries));
+    }
+    Ok(packs)
+}
+
 fn build_and_upload_packs(
     tx: &dyn Transport,
     store: &ObjectStore,
     plan: transfer::PackPlan,
     payload_cap: u64,
+    head_ref: &str,
+    limits: UploadLimits,
 ) -> Result<Vec<Hash>, DispatchError> {
     let mut pack_keys = Vec::new();
+    let mut ticketed_count = 0;
     let mut w = PackWriter::new();
     let max_entries = pack_fanout_threshold().max(1);
     let transfer::PackPlan {
@@ -997,8 +1179,20 @@ fn build_and_upload_packs(
         let chunk = &raw[start..start + len];
         start += len;
         for entry in prepare_raw_batch(store, chunk)? {
-            if should_seal(&w, entry.conservative_len() as u64, payload_cap) {
-                seal_pack(tx, &mut w, &mut pack_keys)?;
+            if should_seal(
+                &w,
+                entry.conservative_len() as u64,
+                payload_cap,
+                limits.max_pack_bytes,
+            ) {
+                seal_pack(
+                    tx,
+                    &mut w,
+                    &mut pack_keys,
+                    &mut ticketed_count,
+                    head_ref,
+                    limits,
+                )?;
             }
             w.push_prepared_raw(entry)?;
             // Honest progress (#711): one real object just got staged into
@@ -1019,15 +1213,34 @@ fn build_and_upload_packs(
     for len in size_capped_batch_lens(&delta_sizes, payload_cap, max_entries) {
         let chunk: Vec<transfer::PlannedDelta> = deltas.drain(..len).collect();
         for entry in prepare_delta_batch(chunk) {
-            if should_seal(&w, entry.conservative_len() as u64, payload_cap) {
-                seal_pack(tx, &mut w, &mut pack_keys)?;
+            if should_seal(
+                &w,
+                entry.conservative_len() as u64,
+                payload_cap,
+                limits.max_pack_bytes,
+            ) {
+                seal_pack(
+                    tx,
+                    &mut w,
+                    &mut pack_keys,
+                    &mut ticketed_count,
+                    head_ref,
+                    limits,
+                )?;
             }
             w.push_prepared_delta(entry)?;
             crate::progress::report(crate::progress::Event::ObjectsPacked(1));
         }
     }
 
-    seal_pack(tx, &mut w, &mut pack_keys)?;
+    seal_pack(
+        tx,
+        &mut w,
+        &mut pack_keys,
+        &mut ticketed_count,
+        head_ref,
+        limits,
+    )?;
     Ok(pack_keys)
 }
 
@@ -1244,8 +1457,17 @@ fn cache_delta_bases(
 /// test-injected tiny cap; production entries are bounded well under
 /// [`pack::MAX_TOTAL_PAYLOAD`] by [`mkit_core::store::MAX_RAW_OBJECT_SIZE`])
 /// lands alone in its own pack rather than looping forever.
-fn should_seal(w: &PackWriter, add_bound: u64, payload_cap: u64) -> bool {
-    w.entry_count() > 0 && w.total_payload().saturating_add(add_bound) > payload_cap
+fn should_seal(
+    w: &PackWriter,
+    add_bound: u64,
+    payload_cap: u64,
+    max_pack_bytes: Option<u64>,
+) -> bool {
+    let next_payload = w.total_payload().saturating_add(add_bound);
+    w.entry_count() > 0
+        && (next_payload > payload_cap
+            || max_pack_bytes
+                .is_some_and(|limit| serialized_bound(next_payload, w.entry_count() + 1) > limit))
 }
 
 /// Finish `w`, upload it, record its key, and replace `w` with a fresh
@@ -1255,19 +1477,40 @@ fn seal_pack(
     tx: &dyn Transport,
     w: &mut PackWriter,
     pack_keys: &mut Vec<Hash>,
+    ticketed_count: &mut usize,
+    head_ref: &str,
+    limits: UploadLimits,
 ) -> Result<(), DispatchError> {
     if crate::signal::is_shutdown() {
         return Err(DispatchError::Interrupted);
     }
     let sealed = std::mem::replace(w, PackWriter::new());
     let pack = sealed.finish()?;
+    let is_ticketed = ticketed_pack(limits, pack.len() as u64);
+    if is_ticketed && *ticketed_count >= 6 {
+        return Err(DispatchError::PushTooLarge {
+            packs: *ticketed_count + 1,
+            limit: 6,
+        });
+    }
+    if limits
+        .max_pack_bytes
+        .is_some_and(|limit| pack.len() as u64 > limit)
+    {
+        return Err(DispatchError::Transport(TransportError::PayloadTooLarge(
+            pack.len(),
+        )));
+    }
     let pack_key = pack::pack_key(&pack);
-    tx.upload_pack(&pack, &PackKey::from_hash(pack_key))
+    tx.upload_pack_via_ref(&pack, &PackKey::from_hash(pack_key), head_ref)
         .map_err(|error| repository_operation_error(tx, error))?;
     // Upload is complete — report the real byte count handed to the
     // transport, not an estimate.
     crate::progress::report(crate::progress::Event::PackUploaded(pack.len() as u64));
     pack_keys.push(pack_key);
+    if is_ticketed {
+        *ticketed_count += 1;
+    }
     Ok(())
 }
 

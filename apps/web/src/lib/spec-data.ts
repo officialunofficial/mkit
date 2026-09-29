@@ -62,6 +62,12 @@ export const categories: SpecCategory[] = [
         description:
           'The byte layout of the delta instruction stream inside packfile delta entries, with a version byte so readers reject streams they do not understand.',
       },
+      {
+        name: 'SPEC-DISCLOSURE',
+        status: 'draft-normative',
+        description:
+          "Partial-disclosure bundles and closure-profile verification: a few KiB of proof show that a path, chunk, or byte range belongs to a commit, or that a served set is that commit's full content.",
+      },
     ],
   },
   {
@@ -127,6 +133,18 @@ export const categories: SpecCategory[] = [
         status: 'draft-normative',
         description:
           'The mkit.transport.v1 Connect service, the canonical remote protocol behind mkit+https: multi-repository addressing, namespace and write policy, compare-and-swap semantics, and resumable, ticketed pack uploads.',
+      },
+      {
+        name: 'SPEC-SERVER',
+        status: 'draft-normative',
+        description:
+          'Server pipeline guarantees beside the wire protocol: durable outcomes, storage leases, garbage collection, takedown notices, and the authenticated remote-hook contract a deployment implements.',
+      },
+      {
+        name: 'SPEC-HTTP-OBJECTS',
+        status: 'draft-normative',
+        description:
+          'Plain HTTP object serving: repository selection, published-view access, read authorization, and disclosure proofs over immutable object URLs.',
       },
       {
         name: 'SPEC-TRANSPORT-ENC',

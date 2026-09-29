@@ -1262,11 +1262,6 @@ async fn test_fault_header_honored_with_feature() {
 
 // -------------------------------------------------------------- M1 stubs
 
-fn assert_unimplemented(reply: &Reply) {
-    assert_eq!(reply.code(), "unimplemented");
-    assert_eq!(reply.json()["message"], "not implemented yet");
-}
-
 #[test]
 fn multipart_paths_are_authenticated_procedures() {
     // GetServerInfo is permanently outside Procedure: no auth or resolution.
@@ -1315,7 +1310,7 @@ fn m2_paths_are_authenticated_procedures() {
 }
 
 #[tokio::test]
-async fn m2_stubs_reject_binary_and_json_without_writes_in_both_auth_modes() {
+async fn m2_remaining_stubs_and_epoch_errors_write_nothing_in_both_auth_modes() {
     for auth in [
         authv2(),
         AuthMode::Bearer {
@@ -1324,8 +1319,8 @@ async fn m2_stubs_reject_binary_and_json_without_writes_in_both_auth_modes() {
     ] {
         let auth_v2 = matches!(auth, AuthMode::AuthV2(_));
         let (server, writes) = spy_server(auth);
-        assert_unimplemented(
-            &server
+        assert_eq!(
+            server
                 .unary(
                     "GetGrantEpoch",
                     &GetGrantEpochRequest {
@@ -1334,10 +1329,12 @@ async fn m2_stubs_reject_binary_and_json_without_writes_in_both_auth_modes() {
                     },
                     &[],
                 )
-                .await,
+                .await
+                .code(),
+            "invalid_argument",
         );
-        assert_unimplemented(
-            &server
+        assert_eq!(
+            server
                 .unary(
                     "SetGrantEpoch",
                     &SetGrantEpochRequest {
@@ -1346,7 +1343,9 @@ async fn m2_stubs_reject_binary_and_json_without_writes_in_both_auth_modes() {
                     },
                     &[],
                 )
-                .await,
+                .await
+                .code(),
+            "unimplemented",
         );
         // The WP-2.9/2.11 procedures authenticate at stage 0 now: under
         // auth v2 an unsigned SetRepoVisibility passes anonymously
@@ -1392,17 +1391,27 @@ async fn m2_stubs_reject_binary_and_json_without_writes_in_both_auth_modes() {
                 .code(),
             "unauthenticated"
         );
-        for rpc in ["GetGrantEpoch", "SetGrantEpoch", "IssueObjectUrl"] {
-            assert_eq!(
-                server.json(rpc, &serde_json::json!({}), &[]).await.code(),
-                if rpc == "IssueObjectUrl" {
-                    "unauthenticated"
-                } else {
-                    "unimplemented"
-                },
-                "{rpc} json"
-            );
-        }
+        assert_eq!(
+            server
+                .json("GetGrantEpoch", &serde_json::json!({}), &[])
+                .await
+                .code(),
+            "invalid_argument"
+        );
+        assert_eq!(
+            server
+                .json("SetGrantEpoch", &serde_json::json!({}), &[])
+                .await
+                .code(),
+            "unimplemented"
+        );
+        assert_eq!(
+            server
+                .json("IssueObjectUrl", &serde_json::json!({}), &[])
+                .await
+                .code(),
+            "unauthenticated"
+        );
         assert_eq!(writes.load(Ordering::SeqCst), 0);
     }
 }
