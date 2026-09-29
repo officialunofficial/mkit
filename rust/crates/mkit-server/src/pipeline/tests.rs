@@ -2101,6 +2101,38 @@ fn reserved_grant_epoch_loss_writes_one_abort() {
 }
 
 #[test]
+fn reservation_abort_reasons_follow_the_source_of_the_error() {
+    use codec::AbortReason;
+    use reservation::abort_reason;
+
+    assert_eq!(
+        abort_reason(&ServerError::aborted_retryable("write contention; retry")).0,
+        AbortReason::RefConflict
+    );
+    assert_eq!(
+        abort_reason(&ServerError::aborted_retryable(
+            "operation already in flight; retry"
+        ))
+        .0,
+        AbortReason::ReplayRace
+    );
+    assert_eq!(
+        abort_reason(&ServerError::permission_denied(
+            "pre-receive rejected epoch label"
+        ))
+        .0,
+        AbortReason::Unspecified
+    );
+    assert_eq!(
+        abort_reason(&ServerError::aborted_retryable(
+            "namespace quota window advanced; retry"
+        ))
+        .0,
+        AbortReason::Unspecified
+    );
+}
+
+#[test]
 fn pipeline_new_rejects_authv2_over_refs_only_store() {
     let clock = clock();
     let blobs = MemoryBlobStore::default();

@@ -45,8 +45,13 @@ pub(crate) fn read_pending(
 
 pub(crate) fn abort_reason(err: &ServerError) -> (AbortReason, String) {
     let message = err.public_message();
-    if message.contains("epoch") {
+    if err.code() == Code::PermissionDenied && message == "write grant epoch changed; re-authorize"
+    {
         (AbortReason::EpochMismatch, String::new())
+    } else if err.code() == Code::Aborted && message == "write contention; retry" {
+        (AbortReason::RefConflict, String::new())
+    } else if err.code() == Code::Aborted && message == "namespace quota window advanced; retry" {
+        (AbortReason::Unspecified, message.to_owned())
     } else if err.code() == Code::Aborted {
         (AbortReason::ReplayRace, String::new())
     } else if matches!(
