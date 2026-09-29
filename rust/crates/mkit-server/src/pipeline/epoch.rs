@@ -24,6 +24,18 @@ fn rejected(reason: &str) -> ServerError {
 }
 
 impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
+    async fn stored_grant_epoch(&self, key: &NamespaceKey) -> Result<u64, ServerError> {
+        self.meta
+            .get(&self.shards.coordinator(key), &keys::grant_epoch())
+            .await
+            .map_err(meta_error)?
+            .as_ref()
+            .map(codec::decode_u64)
+            .transpose()
+            .map_err(meta_error)
+            .map(|epoch| epoch.unwrap_or(0))
+    }
+
     /// Read a namespace epoch without authentication or repository resolution.
     ///
     /// # Errors
@@ -59,15 +71,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             }
             _ => {}
         }
-        self.meta
-            .get(&coordinator, &keys::grant_epoch())
-            .await
-            .map_err(meta_error)?
-            .as_ref()
-            .map(codec::decode_u64)
-            .transpose()
-            .map_err(meta_error)
-            .map(|epoch| epoch.unwrap_or(0))
+        self.stored_grant_epoch(&key).await
     }
 
     /// Verify an owner epoch statement, CAS the coordinator epoch, then
@@ -136,8 +140,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 break;
             }
             let budget = RevokeBudget::new((MAX_REVOKE_ELAPSED_MS - elapsed).min(1_000));
+            // A concurrent statement may raise e between our CAS and the
+            // scan. Only answer with an epoch that this scan actually fenced.
+            let before = self.stored_grant_epoch(&key).await?;
             if self.revoke_step(&key, &budget).await? == RevokeProgress::Complete {
-                return Ok(statement.new_epoch);
+                let after = self.stored_grant_epoch(&key).await?;
+                if before == after {
+                    return Ok(after);
+                }
             }
         }
         Err(ServerError::unavailable("epoch revocation pending; retry")

@@ -91,6 +91,7 @@ struct Controls {
     scan_clock: Mutex<Option<Arc<ManualClock>>>,
     fail_push_once: AtomicBool,
     epoch_race_once: Mutex<Option<u64>>,
+    epoch_after_cas_once: Mutex<Option<u64>>,
 }
 struct Store<N> {
     inner: Arc<N>,
@@ -183,6 +184,23 @@ impl<N: NamespaceStore> NamespaceStore for Store<N> {
             self.controls.ack.pause().await;
         }
         let outcome = self.inner.apply(p, batch.clone()).await?;
+        if matches!(p, Partition::Coordinator(_))
+            && outcome == BatchOutcome::Committed
+            && batch
+                .writes
+                .iter()
+                .any(|write| matches!(write, Write::Put(key, _) if *key == keys::grant_epoch()))
+        {
+            let raced = self.controls.epoch_after_cas_once.lock().unwrap().take();
+            if let Some(epoch) = raced {
+                self.inner
+                    .apply(
+                        p,
+                        Batch::new().put(keys::grant_epoch(), codec::encode_u64(epoch)),
+                    )
+                    .await?;
+            }
+        }
         self.record(Call::Apply(p.clone(), batch, outcome.clone()));
         Ok(outcome)
     }
@@ -2309,6 +2327,30 @@ async fn epoch_rpc_rules<N: NamespaceStore + 'static>(
             .unwrap(),
         3
     );
+    // A second owner statement advances after our CAS but before our
+    // completion scan. The response must report the fenced stored epoch.
+    *store.controls.epoch_after_cas_once.lock().unwrap() = Some(5);
+    assert_eq!(pipe.set_grant_epoch(&signed_epoch(4)).await.unwrap(), 5);
+    assert_eq!(
+        pipe.get_grant_epoch(identity().split_once('/').unwrap().0)
+            .await
+            .unwrap(),
+        5
+    );
+    let coordinator = coordinator(&auth(&pipe, None));
+    for tag in [keys::TAG_REPLAY, keys::TAG_QUOTA] {
+        let (first, end) = keys::class_range(tag);
+        assert!(
+            store
+                .inner
+                .scan(&coordinator, &first, &end, None, 10)
+                .await
+                .unwrap()
+                .entries
+                .is_empty(),
+            "epoch RPC created an accounting row in {tag}"
+        );
+    }
 }
 backends!(
     epoch_rpc_rules_memory,

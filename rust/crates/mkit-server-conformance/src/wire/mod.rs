@@ -90,6 +90,34 @@
 //! | `grants.oversize_header_denied` | `grants`, `multi-repo`, `auth-v2` | 8,193-byte header denies |
 //! | `grants.non_ascii_header_denied` | `grants`, `multi-repo`, `auth-v2` | non-ASCII header denies |
 //! | `grants.retry_with_changed_grant_returns_saved_result` | `grants`, `multi-repo`, `auth-v2` | replay precedes grant verification |
+//! | `ref_scopes.create_only_rejects_update` | `grants`, `multi-repo`, `auth-v2` | create only rejects update |
+//! | `ref_scopes.cu_grant_creates_but_match_update_denied_opaque` | `grants`, `multi-repo`, `auth-v2` | cu grant creates but match update denied opaque |
+//! | `ref_scopes.force_allows_non_ff` | `grants`, `multi-repo`, `auth-v2` | force allows non ff |
+//! | `ref_scopes.delete_needs_d` | `grants`, `multi-repo`, `auth-v2` | delete needs d |
+//! | `ref_scopes.any_on_absent_needs_c` | `grants`, `multi-repo`, `auth-v2` | any on absent needs c |
+//! | `ref_scopes.any_on_present_needs_f` | `grants`, `multi-repo`, `auth-v2` | any on present needs f |
+//! | `ref_scopes.direct_packmap_update_denied` | `grants`, `multi-repo`, `auth-v2` | direct packmap update denied |
+//! | `ref_scopes.head_only_update_ok` | `grants`, `multi-repo`, `auth-v2` | head only update ok |
+//! | `ref_scopes.advance_wrong_packmap_denied` | `grants`, `multi-repo`, `auth-v2` | advance wrong packmap denied |
+//! | `ref_scopes.rebaseline_push_under_head_scope` | `grants`, `multi-repo`, `auth-v2` | rebaseline push under head scope |
+//! | `ref_scopes.begin_upload_any_flag` | `grants`, `multi-repo`, `auth-v2` | begin upload any flag |
+//! | `ref_scopes.begin_upload_unmatched_denied` | `grants`, `multi-repo`, `auth-v2` | begin upload unmatched denied |
+//! | `epochs.get_unsigned_zero` | `grants`, `multi-repo` | get unsigned zero |
+//! | `epochs.get_ignores_auth_headers` | `grants`, `multi-repo` | get ignores auth headers |
+//! | `epochs.get_bad_namespace_invalid_argument` | `grants`, `multi-repo` | get bad namespace invalid argument |
+//! | `epochs.set_advances_and_get_reflects` | `grants`, `multi-repo` | set advances and get reflects |
+//! | `epochs.set_retry_same_epoch` | `grants`, `multi-repo` | set retry same epoch |
+//! | `epochs.set_over_step` | `grants`, `multi-repo` | set over step |
+//! | `epochs.set_decrease` | `grants`, `multi-repo` | set decrease |
+//! | `epochs.wrong_audience` | `grants`, `multi-repo` | wrong audience |
+//! | `epochs.expired` | `grants`, `multi-repo` | expired |
+//! | `epochs.not_yet_valid` | `grants`, `multi-repo` | not yet valid |
+//! | `epochs.scheme_not_advertised` | `grants`, `multi-repo` | scheme not advertised |
+//! | `epochs.namespace_not_served` | `grants`, `multi-repo` | namespace not served |
+//! | `epochs.oversize_statement` | `grants`, `multi-repo` | oversize statement |
+//! | `epochs.zero_x_secp256k1_statement` | `grants`, `multi-repo` | zero x secp256k1 statement |
+//! | `epochs.zero_x_webauthn_statement` | `grants`, `multi-repo` | zero x webauthn statement |
+//! | `epochs.old_grant_denied_new_grant_works_after_set` | `grants`, `multi-repo` | old grant denied new grant works after set |
 //! | `info.shape_and_policy` | | unauthenticated discovery reports consistent limits, policy and bounded private caching |
 //! | `info.ignores_repository_header` | | absent, nonexistent and malformed repository identities yield identical response bytes |
 //! | `policy.owner_write_allowed` | `namespace-policy`, `multi-repo`, `auth-v2` | an allowlisted namespace owner writes and reads its ref |
@@ -238,7 +266,7 @@
 // TODO(M1, tickets): `tickets.upload_part_*`,
 //   `tickets.complete_upload_*`,
 //   `growth.tickets_and_outbox_pruned` (WP-1.27).
-// TODO(M2, grants): `grants.write_*`, `grants.epoch_*`, `grants.revoked_*`.
+// TODO(M2, grants): native transport grant registration and the later read grants.
 // TODO(M2, signed-reads): `reads.signed_verified_in_full`,
 //   `reads.private_repo_not_found`, `reads.url_token_*`.
 // TODO(M3, admission): `admission.challenge_402_typed_detail` (HTTP 402,

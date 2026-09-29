@@ -4,7 +4,8 @@ use super::*;
 use crate::pipeline::tests::policy::{PolicyHook, policy_hooks};
 use crate::repo::MultiAddressing;
 use mkit_attest::grant::{
-    AcceptedSchemes, Capabilities, Grant, OwnerScheme, RefScopes, RepoScope, SignedHeader,
+    AcceptedSchemes, Capabilities, EpochStatement, Grant, OwnerScheme, RefScopes, RepoScope,
+    SignedHeader,
 };
 use mkit_core::repo_identity::{Namespace, RepositoryIdentity};
 
@@ -65,6 +66,126 @@ fn scoped_grant(owner: &SigningKey, grantee: &SigningKey, flags: &str) -> String
     grant(owner, grantee, |g| {
         g.ref_scopes = Some(RefScopes::parse(&format!("refs/heads/main={flags}")).unwrap());
     })
+}
+
+fn epoch_statement(owner: &SigningKey, new_epoch: u64) -> String {
+    let statement = EpochStatement {
+        namespace: Namespace::Ed25519(*owner.verifying_key().as_bytes()),
+        new_epoch,
+        audiences: vec![AUDIENCE.into()],
+        created_ms: T0 - 1000,
+        expiry_ms: T0 + 100_000,
+        nonce: hash(&new_epoch.to_be_bytes()),
+    }
+    .encode()
+    .unwrap();
+    SignedHeader {
+        blob: owner.sign(&hash(&statement)).to_bytes().to_vec(),
+        statement,
+        scheme: OwnerScheme::Ed25519,
+    }
+    .encode()
+    .unwrap()
+}
+
+#[test]
+fn single_epoch_rpcs_are_unimplemented() {
+    let e = env(AuthMode::Open);
+    let namespace = Namespace::Ed25519(*key(1).verifying_key().as_bytes()).to_string();
+    assert_eq!(
+        now(e.pipe.get_grant_epoch("BAD")).unwrap_err().code(),
+        Code::InvalidArgument
+    );
+    assert_eq!(
+        now(e.pipe.get_grant_epoch(&namespace)).unwrap_err().code(),
+        Code::Unimplemented
+    );
+    assert_eq!(
+        now(e.pipe.set_grant_epoch("malformed")).unwrap_err().code(),
+        Code::Unimplemented
+    );
+}
+
+#[test]
+fn epoch_statement_without_grant_configuration_is_denied() {
+    let owner = key(1);
+    let mut c = config(&owner, AuthorizerRole::Check);
+    c.grants = None;
+    let clock = clock();
+    let e = build(c, Spy::new(store(&clock)), policy_hooks(false), clock);
+    let error = now(e.pipe.set_grant_epoch(&epoch_statement(&owner, 1))).unwrap_err();
+    assert_eq!(error.code(), Code::PermissionDenied);
+    assert!(
+        error.public_message().contains("scheme not advertised"),
+        "{}",
+        error.public_message()
+    );
+}
+
+#[test]
+fn any_policy_epoch_requires_an_admitted_namespace_record() {
+    let owner = key(1);
+    let namespace = Namespace::Ed25519(*owner.verifying_key().as_bytes()).to_string();
+    let mut c = config(&owner, AuthorizerRole::Check);
+    c.addressing = Addressing::Multi(MultiAddressing::new().with_namespace_policy(
+        NamespacePolicy::Any {
+            unsafe_without_admission: true,
+        },
+    ));
+    let clock = clock();
+    let e = build(c, Spy::new(store(&clock)), policy_hooks(false), clock);
+    assert_eq!(now(e.pipe.get_grant_epoch(&namespace)).unwrap(), 0);
+    assert_eq!(
+        now(e.pipe.set_grant_epoch(&epoch_statement(&owner, 1)))
+            .unwrap_err()
+            .code(),
+        Code::PermissionDenied
+    );
+    assert_eq!(
+        e.update(
+            &request(&owner, &repository(&owner), 901, None),
+            &upd(HEAD, Missing, A)
+        )
+        .unwrap(),
+        UpdateRefResult::Committed
+    );
+    assert_eq!(
+        now(e.pipe.set_grant_epoch(&epoch_statement(&owner, 1))).unwrap(),
+        1
+    );
+    assert_eq!(now(e.pipe.get_grant_epoch(&namespace)).unwrap(), 1);
+}
+
+#[test]
+fn epoch_rpc_reaches_u64_maximum_without_overflow() {
+    let owner = key(1);
+    let c = config(&owner, AuthorizerRole::Check);
+    let clock = clock();
+    let e = build(c, Spy::new(store(&clock)), policy_hooks(false), clock);
+    let namespace = Namespace::Ed25519(*owner.verifying_key().as_bytes());
+    let coordinator = e
+        .pipe
+        .shards
+        .coordinator(&NamespaceKey::from_namespace(&namespace));
+    assert_eq!(
+        now(e.pipe.meta.inner.apply(
+            &coordinator,
+            Batch::new().put(keys::grant_epoch(), codec::encode_u64(u64::MAX - 1))
+        ))
+        .unwrap(),
+        BatchOutcome::Committed
+    );
+    let statement = epoch_statement(&owner, u64::MAX);
+    assert_eq!(now(e.pipe.set_grant_epoch(&statement)).unwrap(), u64::MAX);
+    assert_eq!(now(e.pipe.set_grant_epoch(&statement)).unwrap(), u64::MAX);
+    assert_eq!(
+        now(e
+            .pipe
+            .set_grant_epoch(&epoch_statement(&owner, u64::MAX - 1)))
+        .unwrap_err()
+        .code(),
+        Code::PermissionDenied
+    );
 }
 
 fn request(signer: &SigningKey, repo: &str, nonce: u32, header: Option<&str>) -> Req {
@@ -213,6 +334,51 @@ fn any_create_only_commits_and_force_only_on_absent_ref_denies() {
             )
             .is_ok()
         );
+    }
+}
+
+#[test]
+fn any_flag_subsets_follow_actual_ref_presence() {
+    let owner = key(1);
+    let grantee = key(2);
+    let repo = repository(&owner);
+    for present in [false, true] {
+        for bits in 0..16 {
+            let e = environment(&owner, AuthorizerRole::Check, false);
+            if present {
+                assert_eq!(
+                    e.update(&request(&owner, &repo, 99, None), &upd(HEAD, Any, B))
+                        .unwrap(),
+                    UpdateRefResult::Committed
+                );
+            }
+            let flags: String = [('c', 1), ('u', 2), ('f', 4), ('d', 8)]
+                .into_iter()
+                .filter_map(|(flag, bit)| (bits & bit != 0).then_some(flag))
+                .collect();
+            let header = grant(&owner, &grantee, |grant| {
+                let scope = if flags.is_empty() {
+                    "refs/tags/*=c".to_owned()
+                } else {
+                    format!("refs/heads/main={flags}")
+                };
+                grant.ref_scopes = Some(RefScopes::parse(&scope).unwrap());
+            });
+            let update = upd(HEAD, Any, A);
+            let result = e.update(
+                &request_update(&grantee, &repo, 100, Some(&header), &update),
+                &update,
+            );
+            let allowed = if present {
+                bits & 4 != 0
+            } else {
+                bits & 1 != 0
+            };
+            assert_eq!(result.is_ok(), allowed, "present={present}, bits={bits}");
+            if !allowed {
+                assert_eq!(result.unwrap_err().code(), Code::PermissionDenied);
+            }
+        }
     }
 }
 
