@@ -363,7 +363,7 @@ fn multi_allowlist(profile: &Profile) -> BTreeSet<mkit_core::repo_identity::Name
     else {
         panic!("Multi baseline needs auth v2");
     };
-    let mut allowed: BTreeSet<_> = mkit_server_conformance::wire::CASES
+    let allowed: BTreeSet<_> = mkit_server_conformance::wire::CASES
         .iter()
         .filter(|case| case.requires.contains(&Feature::MultiRepo))
         .flat_map(|case| {
@@ -384,9 +384,6 @@ fn multi_allowlist(profile: &Profile) -> BTreeSet<mkit_core::repo_identity::Name
             })
         })
         .collect();
-    if profile.has(Feature::Grants) {
-        allowed.extend(mkit_server_conformance::wire::grant_owner_namespaces());
-    }
     allowed
 }
 
@@ -685,18 +682,13 @@ async fn pipeline_grants_single_and_d34() {
         };
         for case in [
             "grants.valid_ed25519",
-            "grants.valid_secp256k1_eip191",
-            "grants.valid_webauthn_p256",
             "grants.push_flow",
             "grants.part_path_ignores_header",
-            "grants.zero_x_without_grant_denied",
             "grants.wrong_audience",
             "grants.repository_out_of_scope",
             "grants.namespace_scope_covers_new_repo",
             "grants.grantee_mismatch",
             "grants.read_only_grant_for_write",
-            "grants.ed25519_scheme_on_0x_denied",
-            "grants.webauthn_unconfigured_rp_denied",
             "grants.epoch_above_stored",
             "grants.owner_with_bad_grant_denied",
             "grants.header_without_auth_unauthenticated",

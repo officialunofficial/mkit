@@ -38,8 +38,6 @@ fake-s3 = ["dep:axum", "dep:hmac", "tokio/net"]
 mkit-server = { version = "0.4", path = "../mkit-server", features = ["memory"] }
 mkit-core = { version = "0.4", path = "../mkit-core", default-features = false }
 mkit-attest = { version = "0.4", path = "../mkit-attest", default-features = false, features = ["grants"] }
-k256 = { version = "0.14", features = ["ecdsa"] }
-p256 = { version = "0.14", features = ["ecdsa"] }
 sha2 = "0.11"
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "time"] }
 bytes = "1"

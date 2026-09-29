@@ -67,11 +67,8 @@
 //! | Case | Requires | Asserts |
 //! |---|---|---|
 //! | `grants.valid_ed25519` | `grants`, `multi-repo`, `auth-v2` | an ed25519 owner grants a write |
-//! | `grants.valid_secp256k1_eip191` | `grants`, `multi-repo`, `auth-v2` | a 0x secp256k1 owner grants a write |
-//! | `grants.valid_webauthn_p256` | `grants`, `multi-repo`, `auth-v2` | a 0x `WebAuthn` owner grants a write |
 //! | `grants.push_flow` | `grants`, `multi-repo`, `auth-v2` | `BeginUpload`, ticketed `UploadPack` and `AdvanceRefs` commit |
 //! | `grants.part_path_ignores_header` | `grants`, `multi-repo`, `auth-v2` | `UploadPart` ignores a malformed grant header |
-//! | `grants.zero_x_without_grant_denied` | `grants`, `multi-repo`, `auth-v2` | a 0x namespace requires a grant |
 //! | `grants.wrong_audience` | `grants`, `multi-repo`, `auth-v2` | audience mismatch denies |
 //! | `grants.repository_out_of_scope` | `grants`, `multi-repo`, `auth-v2` | repository scope denies another repo |
 //! | `grants.namespace_scope_covers_new_repo` | `grants`, `multi-repo`, `auth-v2` | namespace scope permits a new repo |
@@ -79,8 +76,6 @@
 //! | `grants.read_only_grant_for_write` | `grants`, `multi-repo`, `auth-v2` | read capability cannot write |
 //! | `grants.expired` | `grants`, `multi-repo`, `auth-v2`, `test-faults` | expiry denies |
 //! | `grants.not_yet_valid` | `grants`, `multi-repo`, `auth-v2`, `test-faults` | creation lead is bounded |
-//! | `grants.ed25519_scheme_on_0x_denied` | `grants`, `multi-repo`, `auth-v2` | owner scheme must match namespace |
-//! | `grants.webauthn_unconfigured_rp_denied` | `grants`, `multi-repo`, `auth-v2` | unknown relying party denies |
 //! | `grants.epoch_above_stored` | `grants`, `multi-repo`, `auth-v2` | a future epoch denies |
 //! | `grants.epoch_below_stored` | `grants`, `multi-repo`, `auth-v2`, `test-faults` | a revoked epoch denies |
 //! | `grants.new_epoch_grant_works` | `grants`, `multi-repo`, `auth-v2`, `test-faults` | a new epoch grant works |
@@ -265,7 +260,6 @@ use std::sync::Arc;
 use futures::FutureExt as _;
 use url::Url;
 
-pub use cases::grants::owner_namespaces as grant_owner_namespaces;
 pub use cases::grants::{RP_ID as GRANT_RP_ID, RP_ORIGIN as GRANT_RP_ORIGIN};
 pub use cases::{CASES, Case};
 pub use profile::{Feature, Milestone, Profile, ProfileSpec, QuotaLimits, WireAuth};
