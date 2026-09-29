@@ -37,6 +37,7 @@ fake-s3 = ["dep:axum", "dep:sha2", "dep:hmac", "tokio/net"]
 [dependencies]
 mkit-server = { version = "0.4", path = "../mkit-server", features = ["memory"] }
 mkit-core = { version = "0.4", path = "../mkit-core", default-features = false }
+mkit-attest = { version = "0.4", path = "../mkit-attest", default-features = false, features = ["grants"] }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "time"] }
 bytes = "1"
 futures = "0.3"

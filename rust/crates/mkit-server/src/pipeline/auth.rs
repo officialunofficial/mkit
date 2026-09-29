@@ -70,6 +70,8 @@ pub struct Authenticated {
     pub principal: Principal,
     /// The verified auth v2 authorization of a signed request.
     pub auth: Option<VerifiedAuth>,
+    /// A presented write grant, redacted from debug output.
+    pub write_grant: Option<Redacted>,
     /// Optional repository-local read-your-writes hint (outside auth v2).
     pub ref_hint: Option<String>,
     procedure: Procedure,
@@ -77,6 +79,8 @@ pub struct Authenticated {
     /// Added to the business clock for this request only: the test
     /// clock-skew directive. Never feeds a commit deadline.
     pub(crate) business_skew_ms: i64,
+    /// Business time used for auth v2 verification, reused for the grant.
+    pub(crate) business_now_ms: i64,
     #[cfg(feature = "test-faults")]
     directives: super::TestDirectives,
 }
@@ -117,6 +121,17 @@ pub(crate) fn authenticate(
     expected_repository: &str,
 ) -> Result<Authenticated, ServerError> {
     let procedure = meta.procedure;
+    let write_grant = if matches!(
+        procedure,
+        Procedure::UpdateRef
+            | Procedure::AdvanceRefs
+            | Procedure::BeginUpload
+            | Procedure::UploadPack
+    ) {
+        (meta.header)("x-write-grant").map(Redacted::new)
+    } else {
+        None
+    };
     let (principal, auth) = match mode {
         AuthMode::Bearer { token } => {
             let got = (meta.header)("authorization").unwrap_or_default();
@@ -153,10 +168,12 @@ pub(crate) fn authenticate(
     Ok(Authenticated {
         principal,
         auth,
+        write_grant,
         procedure,
         repo,
         ref_hint: None,
         business_skew_ms: 0,
+        business_now_ms: now_ms,
         #[cfg(feature = "test-faults")]
         directives: super::TestDirectives::default(),
     })

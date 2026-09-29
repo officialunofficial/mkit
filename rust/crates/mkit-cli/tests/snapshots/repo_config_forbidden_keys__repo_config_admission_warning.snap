@@ -1,0 +1,5 @@
+---
+source: crates/mkit-cli/tests/repo_config_forbidden_keys.rs
+expression: stderr
+---
+warning: ignoring `admission_helper` from per-repo config at <REPO>/.mkit/config (security-sensitive keys are user-scoped only — see <XDG>/mkit/config and docs/THREAT-MODEL.md)

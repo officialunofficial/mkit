@@ -194,6 +194,7 @@ fn push_current(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpt
 
     let tx = match remote_dispatch::open_trusted(
         &resolved.endpoint,
+        &resolved.name,
         resolved.repo_chosen,
         cfg,
         layout,
@@ -306,7 +307,7 @@ fn push_current(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpt
             exit::TEMPFAIL,
             json,
         ),
-        Err(e) => emit_err_json(&format!("push: {e}"), exit::GENERAL_ERROR, json),
+        Err(e) => emit_push_error(e, json),
     }
 }
 
@@ -343,6 +344,7 @@ fn push_all(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpts) -
     }
     let tx = match remote_dispatch::open_trusted(
         &resolved.endpoint,
+        &resolved.name,
         resolved.repo_chosen,
         cfg,
         layout,
@@ -408,7 +410,7 @@ fn push_all(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpts) -
             exit::TEMPFAIL,
             json,
         ),
-        Err(e) => emit_err_json(&format!("push: {e}"), exit::GENERAL_ERROR, json),
+        Err(e) => emit_push_error(e, json),
     }
 }
 
@@ -426,9 +428,37 @@ fn emit_err_json(msg: &str, code: u8, json: bool) -> u8 {
     if json {
         let mut obj = JsonObject::new();
         obj.field_bool("ok", false).field_str("error", msg);
+        if code == exit::NOPERM {
+            obj.field_bool("admission_required", true);
+        }
         emit_json_stdout(obj);
     }
     emit_err(msg, code)
+}
+
+fn emit_push_error(error: remote_dispatch::DispatchError, json: bool) -> u8 {
+    match error {
+        remote_dispatch::DispatchError::Transport(
+            mkit_core::protocol::TransportError::AdmissionRequired(required),
+        ) => {
+            // The hint helps only when no helper ran; after a helper ran, the
+            // reason (a second challenge or the run limit) says why it stopped.
+            let hint = if required.reason.is_none() {
+                "\nhint: configure admission_helper and trust this remote with mkit config trusted_remote_endpoint"
+            } else {
+                ""
+            };
+            emit_err_json(&format!("push: {required}{hint}"), exit::NOPERM, json)
+        }
+        remote_dispatch::DispatchError::Transport(
+            mkit_core::protocol::TransportError::AdmissionConfiguration(message),
+        ) => emit_err_json(
+            &format!("push: admission configuration: {message}"),
+            exit::CONFIG_ERROR,
+            json,
+        ),
+        other => emit_err_json(&format!("push: {other}"), exit::GENERAL_ERROR, json),
+    }
 }
 
 fn lease_for(opts: &PushOpts) -> PushLease {

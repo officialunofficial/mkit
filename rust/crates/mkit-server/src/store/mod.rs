@@ -23,6 +23,7 @@ mod partition;
 pub mod read;
 pub mod restore;
 pub mod tickets;
+pub mod watermark;
 
 pub use blob::{
     BlobBody, BlobKey, BlobMeta, BlobNamespace, BlobStore, ByteRange, CommitOutcome,

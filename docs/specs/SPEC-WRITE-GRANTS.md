@@ -14,7 +14,10 @@ recovery, address derivation and the §4.4 low-`s` rules), all three
 owner schemes (`ed25519`, `secp256k1-eip191` and `webauthn-p256`, with
 the §4.3 rules against configured relying parties), and the stateless
 verifier (§7 steps 1 to 10, the §5.2 and §9.1 statement checks and the
-§10 registration check) are implemented; server enforcement is not yet.
+§10 registration check) are implemented. The Connect server enforces write
+grants, including the stored-epoch equality check in §7 step 11. Full §8.2
+ref-scope rules, epoch RPCs, signed reads and ssh/enc grant registration
+remain for later M2 work packages.
 Golden
 vectors ([SPEC-CONVENTIONS §5](SPEC-CONVENTIONS.md#5-golden-vectors-and-conformance-tests))
 land with each implementation; §13.1 lists those that exist and names
@@ -617,9 +620,12 @@ key, an authority source, or an owner-signed visibility statement
 (§9.1); a grant never authorizes it. `GetGrantEpoch` and
 `GetServerInfo` need no authorization.
 
-**Rollout (informative).** Before the M2 implementation, only the owner
-key and authority-source paths exist, so only `ed25519-` owners, or
-keys an authority source names, can write. `0x` owners need grants.
+**Rollout (informative).** The Connect server enforces owner-signed write
+grants for configured multi-repository deployments. Until the full §8.2
+rules land, its interim ref gate requires `cuf` for a non-delete change,
+`d` for deletion, and any effective flag for BeginUpload; direct packmap
+UpdateRef is denied. Grant expiry is checked when authorizing, so a grant
+that expires inside the bounded apply window can still commit.
 
 ---
 

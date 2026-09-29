@@ -13,8 +13,9 @@ use std::sync::Mutex;
 use mkit_core::hash::Hash;
 
 use crate::error::ServerError;
-use crate::op::Operation;
+use crate::op::{OpKind, Operation};
 use crate::rt::{BoxFuture, MaybeSend, MaybeSync};
+use crate::store::{Batch, codec};
 
 /// Header naming a fault for this request, e.g. `after-reserve`.
 pub const FAULT_HEADER: &str = "x-mkit-test-fault";
@@ -32,6 +33,33 @@ pub const RUN_TIMERS_HEADER: &str = "x-mkit-test-run-timers";
 pub const BUMP_EPOCH_HEADER: &str = "x-mkit-test-bump-epoch";
 /// Declare coordinator lease-table recovery before `ListRefs`.
 pub const LEASE_RECOVERED_HEADER: &str = "x-mkit-test-lease-recovered";
+/// Delay source relay delivery after a committed write, in milliseconds.
+pub const RELAY_DELAY_MS_HEADER: &str = "x-mkit-test-relay-delay-ms";
+
+/// Source-local test marker. A release build cannot read or write it.
+pub(crate) fn relay_delay_key() -> crate::Key {
+    crate::Key::new(&b"tdr\0"[..])
+}
+
+/// Attach a delivery hold to the same batch as a test `UpdateRef` commit.
+/// WP-1.28b extends this directive to `AdvanceRefs` relay commits.
+pub(crate) fn delay_relay_batch(
+    batch: Batch,
+    directives: &TestDirectives,
+    op: &Operation,
+    now_ms: u64,
+) -> Batch {
+    if let Some(delay) = directives.relay_delay_ms
+        && matches!(op.kind, OpKind::UpdateRef(_))
+    {
+        batch.put(
+            relay_delay_key(),
+            codec::encode_u64(now_ms.saturating_add(delay)),
+        )
+    } else {
+        batch
+    }
+}
 
 /// Where the pipeline calls [`FaultHooks::at`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -110,6 +138,8 @@ pub struct TestDirectives {
     pub lease_recovered: bool,
     /// Ref shard to tick before `ListRefs`.
     pub run_timers: Option<String>,
+    /// Delay relay delivery from this ref shard until business time plus this value.
+    pub relay_delay_ms: Option<u64>,
 }
 
 impl TestDirectives {
@@ -133,6 +163,15 @@ impl TestDirectives {
             })
             .transpose()?;
         let run_timers = get(RUN_TIMERS_HEADER);
+        let relay_delay_ms = get(RELAY_DELAY_MS_HEADER)
+            .map(|v| {
+                v.trim().parse::<u64>().map_err(|_| {
+                    ServerError::invalid_argument(
+                        "x-mkit-test-relay-delay-ms is not an unsigned integer",
+                    )
+                })
+            })
+            .transpose()?;
         if run_timers
             .as_ref()
             .is_some_and(|name| !crate::refs::validate_ref_name(name))
@@ -164,6 +203,7 @@ impl TestDirectives {
             lease_recovered,
             timer_ms,
             run_timers,
+            relay_delay_ms,
             fault: get(FAULT_HEADER).filter(|f| !f.is_empty()),
             clock_skew_ms,
         })
@@ -280,6 +320,7 @@ mod timer_tests {
         for (header, value) in [
             (TIMER_MS_HEADER, "-1"),
             (TIMER_MS_HEADER, "18446744073709551616"),
+            (RELAY_DELAY_MS_HEADER, "-1"),
             (RUN_TIMERS_HEADER, "bad ref"),
         ] {
             assert!(TestDirectives::from_headers(|h| (h == header).then(|| value.into())).is_err());
@@ -287,10 +328,12 @@ mod timer_tests {
         let d = TestDirectives::from_headers(|h| match h {
             TIMER_MS_HEADER => Some("1000".into()),
             RUN_TIMERS_HEADER => Some("refs/heads/x".into()),
+            RELAY_DELAY_MS_HEADER => Some("10000".into()),
             _ => None,
         })
         .unwrap();
         assert_eq!(d.timer_ms, Some(1000));
         assert_eq!(d.run_timers.as_deref(), Some("refs/heads/x"));
+        assert_eq!(d.relay_delay_ms, Some(10_000));
     }
 }

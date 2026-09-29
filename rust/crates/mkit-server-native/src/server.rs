@@ -576,7 +576,10 @@ where
                 .register(mkit_server::timers::ticket_expiry::TicketExpiry {
                     blobs: blobs.clone(),
                 })
-                .register(mkit_server::timers::lease_sweep::LeaseSweep)
+                .register(
+                    mkit_server::timers::lease_sweep::LeaseSweep::new(meta.clone())
+                        .with_metrics(Arc::new(MetricsBridge)),
+                )
                 .register(mkit_server::relay::RelayHandler {
                     target: meta.clone(),
                     hook: mkit_server::relay::NoHook,

@@ -319,7 +319,27 @@ where
 
     let registry = TimerRegistry::new();
     let registry = match class {
-        ShardClass::NsCoordinator => registry.register(LeaseSweep),
+        ShardClass::NsCoordinator => {
+            let source = match target {
+                Ok(source) => Some(source),
+                Err(error) => {
+                    crate::log_failure(&format!(
+                        "Worker lease sweep configuration unavailable: {error}"
+                    ));
+                    None
+                }
+            };
+            let max_per_tick = if plan.is_some_and(|p| p.trim().eq_ignore_ascii_case("paid")) {
+                32
+            } else {
+                16
+            };
+            registry.register(WorkerLeaseSweep {
+                sweep: LeaseSweep::optional(source)
+                    .with_metrics(Arc::new(crate::telemetry::ConsoleMetrics::default())),
+                max_per_tick,
+            })
+        }
         ShardClass::RefShard => {
             let paid = plan.is_some_and(|p| p.trim().eq_ignore_ascii_case("paid"));
             let max_per_tick = if paid { 4 } else { 2 };
@@ -379,6 +399,32 @@ where
 struct WorkerRelay<T> {
     relay: Option<mkit_server::relay::RelayHandler<T>>,
     max_per_tick: u32,
+}
+
+struct WorkerLeaseSweep<T> {
+    sweep: mkit_server::timers::lease_sweep::LeaseSweep<T>,
+    max_per_tick: u32,
+}
+
+impl<S: mkit_server::NamespaceStore, T: mkit_server::NamespaceStore>
+    mkit_server::timers::TimerHandler<S> for WorkerLeaseSweep<T>
+{
+    fn kind(&self) -> mkit_server::timers::TimerKind {
+        mkit_server::timers::registry::kinds::LEASE_SWEEP
+    }
+
+    fn max_per_tick(&self) -> Option<u32> {
+        Some(self.max_per_tick)
+    }
+
+    fn fire<'a>(
+        &'a self,
+        ctx: &'a mkit_server::timers::TimerCtx<'a, S>,
+        timer: &'a mkit_server::timers::DueTimer,
+    ) -> mkit_server::BoxFuture<'a, Result<mkit_server::timers::Fired, mkit_server::StoreError>>
+    {
+        self.sweep.fire(ctx, timer)
+    }
 }
 
 impl<S: mkit_server::NamespaceStore, T: mkit_server::NamespaceStore>

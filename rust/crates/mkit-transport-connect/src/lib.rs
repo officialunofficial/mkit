@@ -23,11 +23,14 @@
 //!
 //! [spec]: https://github.com/officialunofficial/mkit/blob/main/docs/specs/SPEC-TRANSPORT-CONNECT.md
 
+pub mod admission;
 mod client;
 pub mod envelope;
 mod error;
 mod executor;
 pub mod grant;
+mod receipt;
+mod status;
 
 /// Generated `mkit.transport.v1` message + Connect service types, compiled
 /// directly from the canonical `<repo-root>/proto/mkit/transport/v1/transport.proto`
@@ -46,6 +49,7 @@ pub use client::{
 };
 pub use envelope::EnvelopeSigner;
 pub use grant::{GrantCondition, GrantOperation, GrantRef, GrantRequest, GrantSource};
+pub use receipt::{AdmissionReceipt, ReceiptValue};
 
 // Re-exported so integration tests (and in-tree servers and conformance
 // suites) can build request/response messages and register the generated
