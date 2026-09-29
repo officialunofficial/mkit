@@ -10,7 +10,9 @@
 //! * `grant revoke --prune` lists and removes the grants it invalidates;
 //! * a pending bump waits `Retry-After` and re-sends the identical statement.
 //!
-//! The private-clone half (E2) needs the WP-2.9 server and is a carry-forward.
+//! The private-clone half (E2, the bottom of this file) drives `mkit visibility
+//! set` in both modes and `mkit clone` as the owner, a read grantee, a
+//! write-only grantee and an anonymous caller against the same server.
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 mod common;
@@ -35,7 +37,7 @@ use mkit_transport_connect::generated;
 
 /// A person with a repository, a signing key and their own config directory.
 struct Party {
-    _root: tempfile::TempDir,
+    root: tempfile::TempDir,
     repo: PathBuf,
     xdg: PathBuf,
     public_key: String,
@@ -49,7 +51,7 @@ impl Party {
         std::fs::create_dir_all(&repo).unwrap();
         std::fs::create_dir_all(&xdg).unwrap();
         let party = Self {
-            _root: root,
+            root,
             repo,
             xdg,
             public_key: mkit_core::hash::to_hex_bytes(&KeyPair::from_seed([seed; 32]).public.0),
@@ -81,6 +83,14 @@ impl Party {
 
     fn commit(&self, file: &str, text: &str, message: &str) {
         std::fs::write(self.repo.join(file), text).unwrap();
+        self.ok(&["add", file]);
+        self.ok(&["commit", "-m", message]);
+    }
+
+    #[cfg(unix)]
+    /// A commit adding `file` with `data`.
+    fn commit_bytes(&self, file: &str, data: &[u8], message: &str) {
+        std::fs::write(self.repo.join(file), data).unwrap();
         self.ok(&["add", file]);
         self.ok(&["commit", "-m", message]);
     }
@@ -117,6 +127,12 @@ struct Live {
 
 impl Live {
     fn start(owner_namespace: &str) -> Self {
+        Self::start_capped(owner_namespace, 64 << 20)
+    }
+
+    /// A server whose packs may hold at most `max_pack_bytes` (advertised as
+    /// `max_pack_bytes`), so a large push must be split.
+    fn start_capped(owner_namespace: &str, max_pack_bytes: u64) -> Self {
         let owner = mkit_attest::grant::Namespace::parse(owner_namespace).unwrap();
         let (addr_tx, addr_rx) = mpsc::channel();
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -136,7 +152,7 @@ impl Live {
                     )),
                     AuthMode::AuthV2(AuthV2Config::new(&origin, "").unwrap()),
                     UploadLimits {
-                        max_total_bytes: 64 << 20,
+                        max_total_bytes: max_pack_bytes,
                         max_chunks: 64,
                     },
                 );
@@ -851,4 +867,459 @@ fn ctrl_c_cancels_a_pending_bump_and_says_it_may_still_complete() {
     assert!(text.contains("interrupted"), "{text}");
     assert!(text.contains("may still complete"), "{text}");
     assert!(out.stdout.is_empty());
+}
+
+#[cfg(unix)]
+/// Incompressible bytes for file `seed`.
+fn noise(seed: u64, len: usize) -> Vec<u8> {
+    let mut out = vec![0_u8; len];
+    let mut state = seed * 2 + 1;
+    for chunk in out.chunks_mut(8) {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        chunk.copy_from_slice(&state.to_le_bytes()[..chunk.len()]);
+    }
+    out
+}
+
+#[cfg(unix)]
+fn copy_dir(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+#[cfg(unix)]
+/// A party whose repository is a copy of `master`'s history, pushing to `name`.
+fn copy_of(master: &Party, live: &Live, name: &str) -> Party {
+    let party = Party::new(0x11);
+    std::fs::remove_dir_all(party.repo.join(".mkit")).unwrap();
+    copy_dir(&master.repo.join(".mkit"), &party.repo.join(".mkit"));
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let keys = party.repo.join(".mkit").join("keys");
+        std::fs::set_permissions(&keys, std::fs::Permissions::from_mode(0o700)).unwrap();
+        for key in std::fs::read_dir(&keys).unwrap() {
+            let key = key.unwrap().path();
+            std::fs::set_permissions(key, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    }
+    let url = format!(
+        "mkit+http://{}/{}/{name}",
+        live.origin.trim_start_matches("http://"),
+        party.namespace()
+    );
+    party.connect_to(&url);
+    party
+}
+
+/// WP-1.17b, test 12: what `mkit push` prints for a push the server's pack
+/// limit forces it to split into several advances.
+#[cfg(unix)]
+#[test]
+fn a_split_push_reports_its_steps_and_the_published_prefix() {
+    use std::io::{BufRead as _, BufReader};
+    use std::process::{Command, Stdio};
+
+    let master = Party::new(0x11);
+    let live = Live::start_capped(&master.namespace(), 8192);
+    for i in 0..30_u64 {
+        master.commit_bytes(&format!("f{i:02}.bin"), &noise(i, 6000), &format!("c{i}"));
+    }
+
+    // Piped: one `pushed step k/N` line per advance, in order.
+    let piped = copy_of(&master, &live, "piped");
+    let out = piped.run(&["push", "origin"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stderr(&out);
+    let steps: Vec<&str> = text
+        .lines()
+        .filter(|line| line.starts_with("pushed step "))
+        .collect();
+    assert!(steps.len() >= 3, "{text}");
+    for (index, line) in steps.iter().enumerate() {
+        let expected = format!("pushed step {}/{}: ", index + 1, steps.len());
+        assert!(line.starts_with(&expected), "{line} (wanted {expected})");
+    }
+    assert!(text.contains("* [new branch]"), "{text}");
+
+    // --format=json: the step count.
+    let json = copy_of(&master, &live, "json");
+    let out = json.run(&["push", "--format=json", "origin"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let reported = String::from_utf8(out.stdout).unwrap();
+    let steps_field: u64 = reported
+        .split("\"steps\":")
+        .nth(1)
+        .and_then(|rest| rest.trim_end_matches(['}', '\n']).parse().ok())
+        .unwrap_or_else(|| panic!("no steps in {reported}"));
+    assert!(steps_field > 1, "{reported}");
+    assert_eq!(steps_field, steps.len() as u64);
+
+    // --quiet: no step lines and nothing on stdout.
+    let quiet = copy_of(&master, &live, "quiet");
+    let out = quiet.run(&["push", "--quiet", "origin"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(out.stdout.is_empty());
+    assert!(!stderr(&out).contains("step"), "{}", stderr(&out));
+
+    // Interrupted after the first advance: the error reports the prefix.
+    let cut = copy_of(&master, &live, "cut");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_mkit"))
+        .args(["push", "origin"])
+        .current_dir(&cut.repo)
+        .env("XDG_CONFIG_HOME", &cut.xdg)
+        .env("HOME", &cut.xdg)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut lines = BufReader::new(child.stderr.take().unwrap());
+    let mut seen = String::new();
+    loop {
+        let mut next = String::new();
+        assert!(lines.read_line(&mut next).unwrap() > 0, "{seen}");
+        seen.push_str(&next);
+        if next.starts_with("pushed step 1/") {
+            break;
+        }
+    }
+    assert!(
+        Command::new("kill")
+            .args(["-INT", &child.id().to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    std::io::Read::read_to_string(&mut lines, &mut seen).unwrap();
+    let status = child.wait().unwrap();
+    assert_eq!(status.code(), Some(75), "{seen}");
+    assert!(seen.contains("advances were published"), "{seen}");
+    assert!(
+        seen.contains("the last published advance on branch"),
+        "{seen}"
+    );
+    assert!(seen.contains("re-run the push to resume"), "{seen}");
+}
+
+// ---------------------------------------------------------------------------
+// E2: private repositories, visibility set in both modes, and clone.
+// ---------------------------------------------------------------------------
+
+impl Party {
+    /// A clone starts with no `.mkit/keys`, so point the user config at this
+    /// party's key by absolute path (a user-only key, R-129).
+    fn use_key_outside_the_repo(&self) {
+        let key = self.repo.join(".mkit").join("keys").join("default.key");
+        self.ok(&["config", "signing_key", key.to_str().unwrap()]);
+    }
+}
+
+/// A live server with the owner's repository `site` already created (public).
+struct Site {
+    live: Live,
+    owner: Party,
+    url: String,
+}
+
+impl Site {
+    fn new() -> Self {
+        let owner = Party::new(0x11);
+        let live = Live::start(&owner.namespace());
+        let url = format!(
+            "mkit+http://{}/{}/site",
+            live.origin.trim_start_matches("http://"),
+            owner.namespace()
+        );
+        owner.connect_to(&url);
+        owner.use_key_outside_the_repo();
+        owner.commit("a.txt", "owner\n", "first");
+        owner.ok(&["push", "origin"]);
+        Self { live, owner, url }
+    }
+
+    /// A party who signs envelopes for this server.
+    fn party(&self, seed: u8) -> Party {
+        let party = Party::new(seed);
+        party.connect_to(&self.url);
+        party.use_key_outside_the_repo();
+        party
+    }
+
+    /// `mkit clone` into a fresh directory with `who`'s config.
+    fn clone_as(&self, who: &Party, dir: &str) -> Output {
+        let target = who.root.path().join(dir);
+        common::mkit(
+            who.root.path(),
+            &who.xdg,
+            &["clone", &self.url, target.to_str().unwrap()],
+        )
+    }
+
+    /// The anonymous caller: no signing identity is configured.
+    fn clone_anonymously(&self, dir: &str) -> (Party, Output) {
+        let anon = Party::new(0x77);
+        let out = self.clone_as(&anon, dir);
+        (anon, out)
+    }
+
+    fn cloned_file(who: &Party, dir: &str) -> String {
+        std::fs::read_to_string(who.root.path().join(dir).join("a.txt")).unwrap()
+    }
+}
+
+fn assert_not_found(out: &Output, ns: &str, what: &str) {
+    assert!(!out.status.success(), "{what}: the clone must fail");
+    let text = stderr(out).to_lowercase();
+    let expected = format!("repository `{}/site` not found at", ns.to_lowercase());
+    assert!(
+        text.contains(&expected),
+        "{what}: expected `{expected}`, got: {text}"
+    );
+    for hint in ["permission", "denied"] {
+        assert!(
+            !text.contains(hint),
+            "{what}: a private repository must not be told apart from a missing one: {text}"
+        );
+    }
+}
+
+fn grant(owner: &Party, grantee: &Party, cap: &str, extra: &[&str]) -> String {
+    let mut args = vec![
+        "grant",
+        "create",
+        "--cap",
+        cap,
+        "--grantee",
+        &grantee.public_key,
+        "--repo",
+        "site",
+        "--ttl",
+        "1h",
+    ];
+    assert!(!extra.contains(&"--all"), "--all excludes --repo");
+    args.extend_from_slice(extra);
+    owner.ok(&args).trim().to_owned()
+}
+
+#[test]
+fn visibility_set_makes_a_repository_private_and_public_in_envelope_mode() {
+    let site = Site::new();
+    let anon = Party::new(0x77);
+    let clone = |dir: &str| site.clone_as(&anon, dir);
+
+    let ok = clone("public-0");
+    assert!(ok.status.success(), "{}", stderr(&ok));
+
+    let out = site.owner.ok(&["visibility", "set", "origin", "private"]);
+    assert_eq!(
+        out.trim(),
+        format!("{}/site is now private", site.owner.namespace())
+    );
+    assert_not_found(
+        &clone("private-0"),
+        &site.owner.namespace(),
+        "anonymous, private",
+    );
+
+    // The owner still reads it.
+    let own = site.clone_as(&site.owner, "owner-0");
+    assert!(own.status.success(), "{}", stderr(&own));
+
+    let out = site.owner.ok(&["visibility", "set", "origin", "public"]);
+    assert_eq!(
+        out.trim(),
+        format!("{}/site is now public", site.owner.namespace())
+    );
+    let ok = clone("public-1");
+    assert!(ok.status.success(), "{}", stderr(&ok));
+    assert_eq!(Site::cloned_file(&anon, "public-1"), "owner\n");
+}
+
+#[test]
+fn visibility_set_statement_mode_flips_visibility_with_an_ed25519_owner() {
+    let site = Site::new();
+    let anon = Party::new(0x77);
+
+    let out = site
+        .owner
+        .ok(&["visibility", "set", "origin", "private", "--statement"]);
+    assert_eq!(
+        out.trim(),
+        format!("{}/site is now private", site.owner.namespace())
+    );
+    assert_not_found(
+        &site.clone_as(&anon, "private-0"),
+        &site.owner.namespace(),
+        "anonymous, private",
+    );
+
+    // A later statement (created is strictly newer) restores it.
+    std::thread::sleep(Duration::from_millis(5));
+    let out = site
+        .owner
+        .ok(&["visibility", "set", "origin", "public", "--statement"]);
+    assert_eq!(
+        out.trim(),
+        format!("{}/site is now public", site.owner.namespace())
+    );
+    let ok = site.clone_as(&anon, "public-0");
+    assert!(ok.status.success(), "{}", stderr(&ok));
+
+    // The CLI refuses client-side to sign for a namespace the key does not
+    // own. The server-side rule is covered by the server unit test
+    // `statement_mode_rejects_mismatch_oversize_and_signed_requests`.
+    let stranger = site.party(0x33);
+    let denied = stranger.run(&["visibility", "set", "origin", "private", "--statement"]);
+    assert!(!denied.status.success(), "{}", stderr(&denied));
+    let text = stderr(&denied).to_lowercase();
+    assert!(text.contains("the signing key owns namespace"), "{text}");
+}
+
+#[test]
+fn a_private_repository_is_cloned_by_the_owner_and_a_read_grantee_only() {
+    let site = Site::new();
+    let reader = site.party(0x22);
+    let writer = site.party(0x33);
+    site.owner.ok(&["visibility", "set", "origin", "private"]);
+
+    // Owner key.
+    let out = site.clone_as(&site.owner, "owner");
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(Site::cloned_file(&site.owner, "owner"), "owner\n");
+
+    // A signed stranger with no grant, and anonymous, both see not_found.
+    assert_not_found(
+        &site.clone_as(&reader, "reader-none"),
+        &site.owner.namespace(),
+        "no grant",
+    );
+    let (_anon, out) = site.clone_anonymously("anon");
+    assert_not_found(&out, &site.owner.namespace(), "anonymous");
+
+    // A read grant from the store.
+    let header = grant(&site.owner, &reader, "read", &[]);
+    let out = reader.ok(&["grant", "add", &grant_file(&reader, "read.txt", &header)]);
+    assert!(out.starts_with("added grant "), "{out}");
+    let out = site.clone_as(&reader, "reader");
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(Site::cloned_file(&reader, "reader"), "owner\n");
+
+    // A write-only grant never implies read.
+    let header = grant(
+        &site.owner,
+        &writer,
+        "write",
+        &["--refs", "refs/heads/*=cuf"],
+    );
+    let out = writer.ok(&["grant", "add", &grant_file(&writer, "write.txt", &header)]);
+    assert!(out.starts_with("added grant "), "{out}");
+    assert_not_found(
+        &site.clone_as(&writer, "writer"),
+        &site.owner.namespace(),
+        "write-only grant",
+    );
+}
+
+#[test]
+fn an_epoch_bump_revokes_a_read_grant_and_a_reissue_at_the_new_epoch_works() {
+    let site = Site::new();
+    let reader = site.party(0x22);
+    site.owner.ok(&["visibility", "set", "origin", "private"]);
+    let header = grant(&site.owner, &reader, "read", &[]);
+    reader.ok(&["grant", "add", &grant_file(&reader, "g0.txt", &header)]);
+    let out = site.clone_as(&reader, "before");
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let bumped = site.owner.ok(&["epoch", "bump", "origin"]);
+    assert!(bumped.contains("epoch     1 (was 0)"), "{bumped}");
+    assert_not_found(
+        &site.clone_as(&reader, "revoked"),
+        &site.owner.namespace(),
+        "stale-epoch read grant",
+    );
+
+    let header = grant(&site.owner, &reader, "read", &[]);
+    let fresh =
+        mkit_attest::grant::Grant::parse(&SignedHeader::parse(&header).unwrap().statement).unwrap();
+    assert_eq!(fresh.epoch, 1);
+    reader.ok(&["grant", "add", &grant_file(&reader, "g1.txt", &header)]);
+    let out = site.clone_as(&reader, "after");
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(Site::cloned_file(&reader, "after"), "owner\n");
+}
+
+#[test]
+fn an_older_unsubmitted_public_statement_cannot_undo_a_later_envelope_flip() {
+    let site = Site::new();
+    let anon = Party::new(0x77);
+    let repository = format!("{}/site", site.owner.namespace());
+    let seed = ed25519_dalek::SigningKey::from_bytes(&[0x11; 32]);
+
+    // The owner signs a `public` statement now and holds on to it.
+    let created = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_millis()).unwrap())
+        .unwrap();
+    let statement = mkit_attest::grant::VisibilityStatement {
+        repository: mkit_core::repo_identity::RepositoryIdentity::parse(&repository).unwrap(),
+        visibility: mkit_attest::grant::Visibility::Public,
+        audiences: vec![site.live.origin.clone()],
+        created_ms: created,
+        expiry_ms: created + 3_600_000,
+        nonce: [9; 32],
+    }
+    .encode()
+    .unwrap();
+    let header = SignedHeader {
+        statement: statement.clone(),
+        scheme: OwnerScheme::Ed25519,
+        blob: ed25519_dalek::Signer::sign(&seed, &mkit_core::hash::hash(&statement))
+            .to_bytes()
+            .to_vec(),
+    }
+    .encode()
+    .unwrap();
+
+    // A later envelope write makes the repository private.
+    std::thread::sleep(Duration::from_millis(20));
+    site.owner.ok(&["visibility", "set", "origin", "private"]);
+    assert_not_found(
+        &site.clone_as(&anon, "private"),
+        &site.owner.namespace(),
+        "after the envelope flip",
+    );
+
+    // Submitting the older statement now is refused and changes nothing.
+    let response = reqwest::blocking::Client::new()
+        .post(format!(
+            "{}/mkit.transport.v1.TransportService/SetRepoVisibility",
+            site.live.origin
+        ))
+        .header("content-type", "application/json")
+        .header("connect-protocol-version", "1")
+        .header("x-repository", &repository)
+        .body(serde_json::json!({ "signedStatement": header }).to_string())
+        .send()
+        .unwrap();
+    assert_eq!(response.status(), 403, "permission_denied");
+    let body = response.text().unwrap();
+    assert!(
+        body.contains("permission_denied") && body.contains("not newer than the stored statement"),
+        "{body}"
+    );
+    assert_not_found(
+        &site.clone_as(&anon, "still-private"),
+        &site.owner.namespace(),
+        "after the stale statement",
+    );
 }

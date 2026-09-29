@@ -249,6 +249,7 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
                     pending: None,
                     begin: None,
                     advance: None,
+                    implicit: None,
                 };
                 pipe.apply_atomic(&op, a, &p, &req, ahead).await?;
             }
@@ -485,6 +486,7 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
             pending: None,
             begin: None,
             advance: None,
+            implicit: None,
         };
         match pipe
             .apply_atomic(&self.op, &self.a, &self.p, &req, None)

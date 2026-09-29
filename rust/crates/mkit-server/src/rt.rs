@@ -8,7 +8,9 @@
 
 use core::future::Future;
 use core::pin::Pin;
-use core::sync::atomic::{AtomicI64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use core::time::Duration;
+use std::sync::Arc;
 
 /// `Send` on native targets; implemented for every type on wasm32.
 #[cfg(not(target_arch = "wasm32"))]
@@ -117,6 +119,101 @@ pub trait Spawner: MaybeSend + MaybeSync {
     fn spawn(&self, fut: BoxFuture<'static, ()>);
 }
 
+/// Injected timer, the counterpart of [`Clock`] for deadlines: `Instant` and
+/// `tokio::time` are not available on every target, so an adapter passes in
+/// its runtime's sleep (`tokio::time::sleep` on native, `worker::Delay` on
+/// Workers) and core code bounds an external call with [`with_timeout`].
+pub trait Sleep: MaybeSend + MaybeSync {
+    /// A future that completes once `duration` has elapsed.
+    fn sleep(&self, duration: Duration) -> BoxFuture<'static, ()>;
+}
+
+impl<T: Sleep + ?Sized> Sleep for Arc<T> {
+    fn sleep(&self, duration: Duration) -> BoxFuture<'static, ()> {
+        (**self).sleep(duration)
+    }
+}
+
+/// [`with_timeout`] gave up before the future finished.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Elapsed;
+
+/// Run `fut`, giving up with [`Elapsed`] once `sleep` says `after` has passed.
+/// A future that is ready wins over an elapsed timer, and a timed-out future
+/// is dropped, so the caller must not assume its side effects did not land.
+///
+/// # Errors
+/// [`Elapsed`] when the timer completes first.
+pub async fn with_timeout<S, F>(sleep: &S, after: Duration, fut: F) -> Result<F::Output, Elapsed>
+where
+    S: Sleep + ?Sized,
+    F: Future,
+{
+    let fut = core::pin::pin!(fut);
+    match futures::future::select(fut, sleep.sleep(after)).await {
+        futures::future::Either::Left((output, _)) => Ok(output),
+        futures::future::Either::Right(((), _)) => Err(Elapsed),
+    }
+}
+
+/// A [`Sleep`] that only completes when told to, for tests. Shared across
+/// clones; [`ManualSleep::elapsed`] starts already fired.
+#[derive(Debug, Clone, Default)]
+pub struct ManualSleep {
+    fired: Arc<AtomicBool>,
+    wake: Arc<tokio::sync::Notify>,
+    requested: Arc<std::sync::Mutex<Vec<Duration>>>,
+}
+
+impl ManualSleep {
+    /// A sleeper whose sleeps stay pending until [`Self::fire`].
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A sleeper whose sleeps complete immediately.
+    #[must_use]
+    pub fn elapsed() -> Self {
+        let sleeper = Self::default();
+        sleeper.fire();
+        sleeper
+    }
+
+    /// The duration of every sleep requested so far, in order.
+    #[must_use]
+    pub fn requested(&self) -> Vec<Duration> {
+        self.requested
+            .lock()
+            .map_or_else(|poisoned| poisoned.into_inner().clone(), |v| v.clone())
+    }
+
+    /// Complete every current and future sleep.
+    pub fn fire(&self) {
+        self.fired.store(true, Ordering::SeqCst);
+        self.wake.notify_waiters();
+    }
+}
+
+impl Sleep for ManualSleep {
+    fn sleep(&self, duration: Duration) -> BoxFuture<'static, ()> {
+        match self.requested.lock() {
+            Ok(mut requested) => requested.push(duration),
+            Err(poisoned) => poisoned.into_inner().push(duration),
+        }
+        let (fired, wake) = (self.fired.clone(), self.wake.clone());
+        Box::pin(async move {
+            loop {
+                let notified = wake.notified();
+                if fired.load(Ordering::SeqCst) {
+                    return;
+                }
+                notified.await;
+            }
+        })
+    }
+}
+
 /// Make a [`MaybeSend`] future satisfy the `+ Send` bound that generated
 /// connectrpc service traits require. On native targets the future is
 /// already `Send` and is returned unchanged.
@@ -213,6 +310,40 @@ mod tests {
         assert_eq!(require_send_from_generic(&Seven), 7);
         let boxed: BoxFuture<'static, u8> = Box::pin(Seven.call());
         assert_send(&boxed);
+    }
+
+    #[test]
+    fn with_timeout_returns_a_ready_future_and_times_out_a_pending_one() {
+        let never = ManualSleep::new();
+        let ready = with_timeout(&never, Duration::from_secs(5), async { 9 });
+        assert_eq!(futures_executor::block_on(ready), Ok(9));
+        let fired = ManualSleep::elapsed();
+        let stuck = with_timeout(
+            &fired,
+            Duration::from_secs(5),
+            core::future::pending::<u8>(),
+        );
+        assert_eq!(futures_executor::block_on(stuck), Err(Elapsed));
+        // A ready future still wins over an already-fired timer.
+        let both = with_timeout(&fired, Duration::from_secs(5), async { 3 });
+        assert_eq!(futures_executor::block_on(both), Ok(3));
+    }
+
+    #[test]
+    fn manual_sleep_wakes_a_pending_sleep_when_fired() {
+        let sleeper = ManualSleep::new();
+        let timer = sleeper.sleep(Duration::from_secs(1));
+        let woken = std::sync::Arc::new(core::sync::atomic::AtomicBool::new(false));
+        let flag = woken.clone();
+        let handle = std::thread::spawn(move || {
+            futures_executor::block_on(timer);
+            flag.store(true, Ordering::SeqCst);
+        });
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(!woken.load(Ordering::SeqCst));
+        sleeper.fire();
+        handle.join().unwrap();
+        assert!(woken.load(Ordering::SeqCst));
     }
 
     #[test]

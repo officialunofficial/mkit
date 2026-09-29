@@ -13,24 +13,44 @@ use mkit_server::{
 };
 use mkit_server_worker::naming::do_target;
 use mkit_server_worker::ns_client::DoNamespaceStore;
-use mkit_server_worker::sharding_guard::{GuardError, Outcome, Settled, check_mode};
+use mkit_server_worker::sharding_guard::{
+    AddressingMode, GuardError, Outcome, Settled, check_addressing, check_mode,
+};
 
 // Same cache operations as the adapter; each returned future belongs to its
 // caller and the RefCell holds only the settled data defined by the library.
 #[derive(Default)]
 struct DeploymentGuard(std::cell::RefCell<Option<Settled>>);
 impl DeploymentGuard {
+    /// The sharding check only, keyed like the adapter's guarded step.
     async fn check<S: NamespaceStore>(
         &self,
         store: S,
         mode: Sharding,
         jurisdiction: Option<&str>,
     ) -> Result<(), GuardError> {
-        if let Some(outcome) = Settled::cached(&self.0, mode, jurisdiction) {
+        if let Some(outcome) = Settled::cached(&self.0, mode, false, jurisdiction) {
             return outcome.into_result();
         }
         let result = check_mode(&store, mode).await;
-        Settled::finish(&self.0, mode, jurisdiction, result)
+        Settled::finish(&self.0, mode, false, jurisdiction, result)
+    }
+
+    /// The adapter's whole guarded step: sharding then addressing.
+    async fn check_all<S: NamespaceStore>(
+        &self,
+        store: S,
+        mode: Sharding,
+        multi: bool,
+    ) -> Result<(), GuardError> {
+        if let Some(outcome) = Settled::cached(&self.0, mode, multi, None) {
+            return outcome.into_result();
+        }
+        let result = match check_mode(&store, mode).await {
+            Ok(Outcome::Ok) => check_addressing(&store, multi).await,
+            settled => settled,
+        };
+        Settled::finish(&self.0, mode, multi, None, result)
     }
 }
 
@@ -544,6 +564,158 @@ fn old_config_completion_does_not_replace_newer_settled_config() {
         "new config remains settled after old completion"
     );
     assert_eq!(eu.store.transport().calls(), 3);
+}
+
+#[test]
+fn fresh_roots_record_the_configured_addressing() {
+    for (multi, expected) in [(false, "single"), (true, "multi")] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir);
+        assert_eq!(
+            block_on(check_addressing(&store, multi)).unwrap(),
+            Outcome::Ok
+        );
+        assert_eq!(
+            block_on(store.get(&root(), &keys::addressing_marker())).unwrap(),
+            Some(mode(expected))
+        );
+    }
+}
+
+#[test]
+fn housekeeping_rows_are_not_unmarked_data() {
+    // The object writes `bk`, `w` and `sm` before or without a commit;
+    // they are not a legacy single deployment's data (vcs-worker
+    // conformance's `--multi` phase hit exactly this on a fresh state).
+    let dir = tempfile::tempdir().unwrap();
+    let store = store(&dir);
+    block_on(
+        store.apply(
+            &root(),
+            Batch::new()
+                .put(keys::backup_state(), Value::new(vec![1]))
+                .put(keys::timer(1, 1, b"x"), Value::default())
+                .put(keys::sharding_marker(), mode("single")),
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        block_on(check_addressing(&store, true)).unwrap(),
+        Outcome::Ok
+    );
+    assert_eq!(
+        block_on(store.get(&root(), &keys::addressing_marker())).unwrap(),
+        Some(mode("multi"))
+    );
+}
+
+#[test]
+fn stored_addressing_refuses_the_other_mode() {
+    for (stored, multi) in [(false, true), (true, false)] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir);
+        block_on(check_addressing(&store, stored)).unwrap();
+        let before = store.transport().calls();
+        let error =
+            block_on(DeploymentGuard::default().check_all(store.clone(), Sharding::Single, multi))
+                .unwrap_err();
+        assert_eq!(error.public_message(), "deployment addressing mismatch");
+        let (configured, stored) = if multi {
+            ("multi", "single")
+        } else {
+            ("single", "multi")
+        };
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("configured={configured} stored={stored}"))
+        );
+        assert_eq!(
+            store.transport().calls() - before,
+            4,
+            "fresh sharding check (3 calls) then the addressing get"
+        );
+    }
+}
+
+#[test]
+fn unmarked_root_data_refuses_multi_but_marks_single() {
+    let repo = mkit_server::RepoName::new("default").unwrap();
+    let data = || {
+        Batch::new()
+            .put(
+                keys::ref_key(&repo, "refs/heads/main"),
+                Value::new(vec![1; 32]),
+            )
+            .put(keys::layout_version(), Value::default())
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let store = store(&dir);
+    block_on(store.apply(&root(), data())).unwrap();
+    assert_eq!(
+        block_on(check_addressing(&store, true)).unwrap(),
+        Outcome::AddressingMismatch {
+            stored: AddressingMode::Single,
+            configured: AddressingMode::Multi,
+        }
+    );
+    assert_eq!(
+        block_on(store.get(&root(), &keys::addressing_marker())).unwrap(),
+        None,
+        "a refused multi writes no marker"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let store = Loopback::store(dir.path().to_path_buf(), DoConfig::default());
+    block_on(store.apply(&root(), data())).unwrap();
+    assert_eq!(
+        block_on(check_addressing(&store, false)).unwrap(),
+        Outcome::Ok
+    );
+    assert_eq!(
+        block_on(store.get(&root(), &keys::addressing_marker())).unwrap(),
+        Some(mode("single")),
+        "unmarked data is a single deployment's"
+    );
+}
+
+#[test]
+fn corrupt_addressing_marker_refuses() {
+    for bytes in [vec![0xff], b"unknown".to_vec()] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir);
+        block_on(store.apply(
+            &root(),
+            Batch::new().put(keys::addressing_marker(), Value::new(bytes)),
+        ))
+        .unwrap();
+        let error = block_on(DeploymentGuard::default().check_all(store, Sharding::Single, false))
+            .unwrap_err();
+        assert_eq!(
+            error.public_message(),
+            "deployment addressing marker corrupt"
+        );
+    }
+}
+
+#[test]
+fn settled_cache_is_keyed_by_addressing() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store(&dir);
+    let guard = DeploymentGuard::default();
+    block_on(guard.check_all(store.clone(), Sharding::Single, false)).unwrap();
+    let before = store.transport().calls();
+    block_on(guard.check_all(store.clone(), Sharding::Single, false)).unwrap();
+    assert_eq!(
+        store.transport().calls() - before,
+        0,
+        "same addressing settles"
+    );
+    let error = block_on(guard.check_all(store.clone(), Sharding::Single, true)).unwrap_err();
+    assert_eq!(
+        error.public_message(),
+        "deployment addressing mismatch",
+        "a changed addressing re-runs and refuses"
+    );
 }
 
 #[test]

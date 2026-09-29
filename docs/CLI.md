@@ -1068,14 +1068,35 @@ Remote / sync:
   up-to-date`). `--format=json` emits one JSON object to stdout:
   `{"ok":true,"remote":"...","endpoint":"...","branch":"...",
   "remote_branch":"...","old":"<hex>|null","new":"<hex>","forced":<bool>,
-  "up_to_date":<bool>}` on success, or `{"ok":false,"rejected":true,
+  "up_to_date":<bool>,"steps":<n>}` on success (`steps` is 0 when up to date, otherwise the number of branch
+  advances the push took; `--all` reports the total plus `ref_count`), or
+  `{"ok":false,"rejected":true,
   "branch":"...","error":"..."}` on a non-fast-forward (CAS) rejection
   (`{"ok":false,"error":"..."}` for any other failure).
   On a V2 Connect remote, pushes at or above its advertised upload threshold
   open a signed ticket for each data pack and packmap node, then consume those
-  tickets with the branch advance. A single advance can carry six data packs;
-  a larger push asks you to push an ancestor commit first or have the operator
-  raise `max_pack_bytes`. Large packs upload in parts. Receipt files in the
+  tickets with the branch advance. A single advance can carry six data packs.
+  A push that needs more is split automatically along the branch's
+  first-parent history into several advances, each moving the branch to an
+  intermediate commit whose closure fits; nothing is uploaded ahead of its
+  advance. **Every intermediate state is published**: the remote branch, its
+  Stage 2 hooks, receipts and lifecycle events all fire once per advance, and
+  a failed push leaves the branch at the last published commit, which the
+  error names. Run `mkit push` again to resume from there (the
+  remote-tracking ref follows each advance). The first advance uses your usual
+  lease (or `--force`); every later one is a compare-and-swap on the previous
+  advance's commit, even under `--force`. Before uploading anything, the
+  client checks that your stored write grants cover every advance: a
+  non-owner key needs `c` to create the branch (or `u`/`f` to update it), and
+  an `f` grant for the later advances, on every server until indexed-mode
+  `u`-only fast-forwards land (R-148); the owner key needs no grant. A push
+  that would be refused midway is refused up front, with no advance
+  published. A single commit or merge that cannot be split (a merge always
+  lands whole) and still needs more than six packs is refused before any
+  upload, naming the commit; ask the operator to raise `max_pack_bytes`. On a
+  terminal the progress line reads `Writing objects (step 2/5)`; piped, a
+  `pushed step 2/5: branch now at <hex>` line follows each advance; `--quiet`
+  prints neither. Large packs upload in parts. Receipt files in the
   repository's common `upload-parts/` cache let the next `mkit push` resume
   the parts already accepted, provided the regenerated push plan is identical.
   After an interruption, run `mkit push` again to resume; the message reports
@@ -1093,7 +1114,23 @@ Remote / sync:
   tty-detection explicitly (mirrors `NO_COLOR`/`CLICOLOR_FORCE`).
 - `mkit serve [--idle-timeout-secs <secs>] [--max-session-secs <secs>] <path>` &mdash; internal SSH
   transport server. Speaks the mkit-rpc SSH framing on stdin/stdout (its
-  only mode). Holds a shared `serve.lock` in `<path>/.mkit` for as long as
+  only mode). `mkit serve --root <dir> [--principal <hex>] [<ns>/<name>]`
+  is the multi-repository form a forge forces: the path (or, when it is
+  omitted, an `SSH_ORIGINAL_COMMAND` of exactly `mkit serve <path>`)
+  names a `<NAMESPACE>/<NAME>` resolved under `<dir>` &mdash; a bare
+  name, an uppercase byte, `..`, an extra component or a symlinked
+  component is refused &mdash; and only the namespace's Ed25519 owner
+  may write. `--principal` (a raw 32-byte key as 64 lowercase hex) is
+  the sshd configuration's trust assertion of the caller's key, read
+  from argv alone and never from the environment; a session without it
+  is read-only. Packs a session uploads and verifies may be published
+  by that session's packmap write (at most seven between packmap
+  writes); a packmap whose node's `prev` is neither absent nor the
+  value the write replaces, whose node or a listed pack is neither
+  pending nor a member (a pending packlist listed as a pack counts as
+  refused), or that lists more than 1,024 packs is refused. See
+  SPEC-TRANSPORT §4.1 and [SSH-SECURITY.md](SSH-SECURITY.md) §5. Both
+  forms hold a shared `serve.lock` in `<path>/.mkit` for as long as
   the process is alive (any number of concurrent `serve` processes may
   hold it at once); a local worktree-mutating command or `gc` run against
   that same path while it is held prints a warning to stderr and proceeds
@@ -1404,6 +1441,11 @@ unrelated commands.
   (`transport_auth = envelope`, a trusted remote, and the owner's key). With
   `--statement` it sends an owner-signed `mkit-repo-visibility:v1` statement
   with no envelope, which any owner scheme can sign.
+
+Cloning a private repository: a Connect clone with `transport_auth = envelope`
+signs with `signing_key`, which defaults to the repository-relative
+`.mkit/keys/default.key`. A fresh clone has no such file, so set a user-level
+`signing_key` (or `signer = keystore`) before cloning.
 
 Signing flags (`grant create`, `epoch bump`, `grant revoke`, `visibility set
 --statement`): the owner signs with the mkit signing key (`ed25519`, the

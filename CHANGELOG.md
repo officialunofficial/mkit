@@ -15,12 +15,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ticket; a hold protects each object until its holder is recorded. New
   `IndexedConfig::{extract_min_bytes, max_extract_bytes}`. Workers still refuse
   indexed mode (WP-4.10).
+- CLI: a Connect push that needs more than six data packs per advance is now
+  split automatically along the branch's first-parent history instead of
+  failing with `PushTooLarge` after uploading six packs. Every intermediate
+  commit is a published state; the tracking ref follows each advance, so a
+  re-run resumes, and later advances always compare-and-swap on the previous
+  one. For a split push, stored write grants are checked for every advance before
+  anything is uploaded, and an unsplittable oversize commit or merge is refused before any
+  upload. `--format=json` reports `steps` (WP-1.17b).
+- Server: `mkit serve --root <DIR>` serves the repositories under `<DIR>`
+  addressed by `<NAMESPACE>/<NAME>` (from the path argument or a strict
+  `SSH_ORIGINAL_COMMAND`), one repository per process, with writes
+  restricted to the namespace's Ed25519 owner asserted by
+  `--principal <hex>`; a Multi deployment's `--listen-enc` binds every
+  session to its `--enc-repository`. Transport-identity sessions grant
+  pack membership implicitly for packs uploaded and verified in the same
+  session — at most seven pending packs, consumed by the session's
+  packmap write — so `mkit+ssh://` and `mkit+enc://` pushes need no
+  upload tickets. Denied writes answer `INVALID_REQUEST "write not
+  permitted"` (WP-1.15).
+- Server: the native and Worker adapters can serve multi-repository
+  deployments (`mkit-server serve --addressing multi` with
+  `--namespace-policy`/`--namespace-allowlist`/`--unsafe-open-namespaces`,
+  or the Worker's `ADDRESSING`/`NAMESPACE_POLICY`/`NAMESPACE_ALLOWLIST`/
+  `UNSAFE_OPEN_NAMESPACES` vars). Multi requires auth v2 with upload ticket
+  keys — a deployment without them now refuses to start — and, natively,
+  `--meta sqlite:<PATH>` (WP-1.30).
 - Server: add validated two-phase admission with bounded HTTP 402 challenges,
   redacted payment credential forwarding and committed-success receipt headers
   (WP-3.2).
 - Server: durably arbitrate admitted reservations with pending and terminal
   outcomes, reconcile abandoned reservations, deliver through a retrying
   outcome sink and apply per-shard outbox backpressure (WP-3.3).
+- Server (WP-3.7): add the default-off `remote-hooks` feature to `mkit-server`:
+  Authorize, Admit and Outcome over `mkit.server.hooks.v1` on a
+  transport-agnostic `HookChannel`, with Ed25519-signed requests, fail-closed
+  mapping and response bounds. Adds the `Sleep` timeout seam, and
+  `scripts/regen-hooks-proto.sh` for the vendored codegen.
 
 - CLI: add `mkit grant create|add|list` and a user grant store under
   `$XDG_CONFIG_HOME/mkit/grants/` (never repository-scoped). Owners sign with the

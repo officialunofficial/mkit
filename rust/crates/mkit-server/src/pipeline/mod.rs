@@ -31,6 +31,7 @@ mod epoch;
 pub(crate) mod faults;
 mod gate;
 mod hooks;
+mod implicit;
 mod info;
 mod lease;
 mod list;
@@ -87,6 +88,8 @@ use crate::upload::{UploadLimits, token::TicketKeys};
 use crate::url_token::{MintedToken, UrlTarget};
 use begin::BeginWrite;
 
+#[cfg(feature = "remote-hooks")]
+pub(crate) use admission::validate_decision;
 pub use auth::{AuthMode, Authenticated, HeaderValues, RequestMeta};
 pub use download::{DownloadChunk, DownloadStream};
 pub use durable_outcome::{DeliveryError, Outcome, OutcomeKind};
@@ -101,12 +104,15 @@ pub use hooks::{
     CredentialHeader, DefaultAdmission, HookSet, Hooks, NoOutcomes, NoPreReceive, NoReceipts,
     OpenAuthorizer, OutcomeSink, PreReceive, ReceiptSigner,
 };
+#[cfg(feature = "ssh")]
+pub(crate) use implicit::IMPLICIT_PACKMAP_UNKNOWN;
+pub(crate) use implicit::PendingPack;
 pub use info::ServerInfo;
 use outcome::Outcome as RequestOutcome;
 pub use parts::PartUploadSession;
 use plan::{
-    MAX_REPLAN, PRUNE_LIMIT, Plan, PlanClock, Planned, Snapshot, WriteKind, WriteRequest,
-    plan_write, prune_sampled,
+    ImplicitConsume, MAX_REPLAN, PRUNE_LIMIT, Plan, PlanClock, Planned, Snapshot, WriteKind,
+    WriteRequest, plan_write, prune_sampled,
 };
 pub use revocation::{MAX_EPOCH_STEP, RevokeBudget, RevokeProgress};
 pub use shard::{D34Shards, ShardMap, SinglePartition};
@@ -488,14 +494,11 @@ fn validate_upload_ticket_config<H: HookSet>(
     cfg: &PipelineConfig,
     hooks: &H,
 ) -> Result<(), ServerError> {
-    if matches!(cfg.addressing, Addressing::Multi(_))
-        && matches!(cfg.auth, AuthMode::TransportIdentity)
-    {
-        return Err(ServerError::invalid_argument(
-            "multi-repository deployments require auth v2 until transport identity carries tickets",
-        ));
-    }
+    // Transport identity carries no tickets: the ssh and enc transports
+    // earn pack membership implicitly (WP-1.15's session pending set), so
+    // neither the Multi refusal nor the ticket threshold applies to it.
     if cfg.begin_upload_threshold_bytes != u64::MAX
+        && !matches!(cfg.auth, AuthMode::TransportIdentity)
         && (!matches!(cfg.auth, AuthMode::AuthV2(_)) || cfg.ticket_keys.is_none())
     {
         return Err(ServerError::invalid_argument(
@@ -508,6 +511,14 @@ fn validate_upload_ticket_config<H: HookSet>(
     {
         return Err(ServerError::invalid_argument(
             "admission requires auth v2 and upload ticket keys",
+        ));
+    }
+    if matches!(cfg.addressing, Addressing::Multi(_))
+        && matches!(cfg.auth, AuthMode::AuthV2(_))
+        && cfg.ticket_keys.is_none()
+    {
+        return Err(ServerError::invalid_argument(
+            "multi-repository auth v2 deployments require upload ticket keys",
         ));
     }
     Ok(())
@@ -601,7 +612,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             (Addressing::Multi(_), WritePolicy::Open) => {
                 Some("write_policy open is single-repository only (SPEC-TRANSPORT-CONNECT §7.5)")
             }
-            (Addressing::Single { .. }, WritePolicy::Owner) => {
+            // Owner on Single is the ssh root mode's policy: it needs a
+            // self-certifying namespace (§7.4) to check principals against.
+            // A bare `root` Single has none and stays refused.
+            (Addressing::Single { repo }, WritePolicy::Owner)
+                if Namespace::parse(repo.namespace.as_str()).is_err() =>
+            {
                 Some("write_policy owner needs multi-repository addressing")
             }
             (Addressing::Multi(multi), _)
@@ -1746,7 +1762,20 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         a: &'a Authenticated,
         kind: OpKind,
     ) -> crate::rt::BoxFuture<'a, Result<(StoredResult, ResponseMeta), ServerError>> {
-        Box::pin(self.write_inner(a, kind))
+        self.write_with(a, kind, None)
+    }
+
+    /// [`Self::write`], optionally consuming the session's pending packs
+    /// as implicit tickets (WP-1.15): the B10 packmap check runs after
+    /// authorization, admission is skipped exactly when `pending` is
+    /// non-empty, and under Multi the plan adds membership and relay rows.
+    fn write_with<'a>(
+        &'a self,
+        a: &'a Authenticated,
+        kind: OpKind,
+        implicit: Option<&'a [PendingPack]>,
+    ) -> crate::rt::BoxFuture<'a, Result<(StoredResult, ResponseMeta), ServerError>> {
+        Box::pin(self.write_inner(a, kind, implicit))
     }
 
     #[allow(clippy::too_many_lines)] // Stage order and multipart session cleanup share this entry point.
@@ -1754,10 +1783,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         &self,
         a: &Authenticated,
         kind: OpKind,
+        implicit: Option<&[PendingPack]>,
     ) -> Result<(StoredResult, ResponseMeta), ServerError> {
         let mut op = self.identify(a, kind)?;
         fault!(self, AfterAuthenticate, &op, a);
-        let (kind, refs, p) = self.ref_writes(&op)?;
+        let (kind, mut refs, p) = self.ref_writes(&op)?;
         let mut ahead = self.read_ahead(&op, &p, &refs, a.business_skew_ms).await?;
         if let Some(stored) = Self::replay_lookup(&op, ahead.as_ref())? {
             return Ok((stored, ResponseMeta::default()));
@@ -1846,11 +1876,24 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .await?;
             }
         }
+        if let Some(pending) = implicit {
+            let upd = refs
+                .first_mut()
+                .ok_or_else(|| internal("implicit consumption needs an UpdateRef"))?;
+            // The B10 check may rewrite `Any` to the exact value it
+            // observed, so the planned batch guards it.
+            self.check_implicit_packmap(&op, pending, ahead.as_ref(), upd)
+                .await?;
+        }
         let existing = self.begin_decision(&op, a, ahead.as_mut()).await?;
         if existing.is_none() && !ticketed {
             self.check_outbox_backpressure(&p, ahead.as_ref()).await?;
         }
-        let allowance = if existing.is_some() || ticketed {
+        // An implicit consuming write skips admission exactly when it has
+        // pending packs to consume; an empty pending set runs admission
+        // like any other UpdateRef (the B10 check still applied).
+        let allowance = if existing.is_some() || ticketed || implicit.is_some_and(|p| !p.is_empty())
+        {
             Allowance::default()
         } else {
             let credentials = admission::validate_credentials(&a.credential_capture)?;
@@ -1934,7 +1977,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     write,
                     ahead,
                     (lease, begin.as_ref()),
-                    pending.as_ref(),
+                    (pending.as_ref(), implicit),
                 )
                 .await
             }
@@ -2594,24 +2637,44 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         if !op.procedure().is_write() {
             return Ok(self.authorize_read(op).await?.facts);
         }
-        let Addressing::Multi(multi) = &self.cfg.addressing else {
-            return self
+        match &self.cfg.addressing {
+            Addressing::Multi(multi) => self.owner_rule(op, Some(&multi.namespace_policy)).await,
+            // Owner on a namespaced Single is the ssh root mode's rule;
+            // Open Single is the authorizer's alone, unchanged.
+            Addressing::Single { .. } if self.cfg.write_policy == WritePolicy::Owner => {
+                self.owner_rule(op, None).await
+            }
+            Addressing::Single { .. } => self
                 .hooks
                 .authorizer()
                 .authorize(op)
                 .await
-                .map_err(ServerError::strip_admission_shape);
-        };
+                .map_err(ServerError::strip_admission_shape),
+        }
+    }
+
+    /// SPEC-TRANSPORT-CONNECT §7.5 rule 1: an allowlisted namespace whose
+    /// principal owns it (`ed25519-<key>` ↔ the Ed25519 principal), and the
+    /// M2 write grants that qualify it. `policy` is the deployment's
+    /// `NamespacePolicy` on Multi and `None` on an Owner-policy Single —
+    /// the `None` counts as "not an allowlist" for the 0x-plus-grant rule,
+    /// which denies fail closed. The authorizer hook sees the established
+    /// facts on success; under `Check` a non-owner never reaches it.
+    async fn owner_rule(
+        &self,
+        op: &Operation,
+        policy: Option<&NamespacePolicy>,
+    ) -> Result<AuthzFacts, ServerError> {
         let namespace = Namespace::parse(op.repo.namespace.as_str())
-            .map_err(|_| internal("invalid resolved Multi namespace"))?;
-        if let NamespacePolicy::Allowlist(allowed) = &multi.namespace_policy
+            .map_err(|_| internal("invalid resolved owner-policy namespace"))?;
+        if let Some(NamespacePolicy::Allowlist(allowed)) = policy
             && !allowed.contains(&namespace)
         {
             return Err(ServerError::permission_denied("write not permitted"));
         }
         if op.write_grant.is_some()
             && matches!(namespace, Namespace::Address(_))
-            && !matches!(&multi.namespace_policy, NamespacePolicy::Allowlist(_))
+            && !matches!(policy, Some(NamespacePolicy::Allowlist(_)))
         {
             return Err(ServerError::permission_denied("write not permitted"));
         }
@@ -2642,6 +2705,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let owner = grant.is_none()
             && matches!(&namespace, Namespace::Ed25519(key)
             if op.principal.ed25519() == Some(key));
+        // Over ssh/enc (no grant header) a 0x namespace has no owner, so
+        // its writes stay denied until WP-2.12.
         if self.cfg.authorizer_role == AuthorizerRole::Check && !owner && grant.is_none() {
             return Err(ServerError::permission_denied("write not permitted"));
         }
@@ -2681,10 +2746,18 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         (kind, refs, charges): (WriteKind, &[RefUpdate], &[QuotaCharge]),
         ahead: Option<Snapshot>,
         (lease, begin): (Option<lease::LeaseWrite>, Option<&BeginWrite>),
-        pending: Option<&reservation::PendingGuard>,
+        (pending, implicit): (Option<&reservation::PendingGuard>, Option<&[PendingPack]>),
     ) -> Result<StoredResult, ServerError> {
         let caps = self.meta.capabilities();
         let replay = upload::replay_guard(op);
+        // Single's packs live in the repo directory itself; only Multi
+        // plans `m` rows and relay for the consumed set, and only when
+        // the set is non-empty (L2).
+        let implicit_ids = implicit
+            .filter(|pending| {
+                !pending.is_empty() && matches!(self.cfg.addressing, Addressing::Multi(_))
+            })
+            .map(implicit::implicit_packs);
         let advance = match &op.kind {
             OpKind::AdvanceRefs { head, tickets, .. } if !tickets.is_empty() => {
                 Some(advance::AdvanceWrite {
@@ -2732,6 +2805,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             pending,
             begin,
             advance,
+            implicit: implicit_ids.as_deref().map(|packs| ImplicitConsume {
+                packs,
+                repo_id: &op.repo,
+                source: p,
+                shards: self.shards.as_ref(),
+            }),
         };
         if caps.atomic_multi_key || replay.is_some() || !charges.is_empty() {
             return self.apply_atomic(op, a, p, &req, ahead).await;

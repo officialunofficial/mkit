@@ -93,6 +93,9 @@ fn push_json_emits_ref_update_on_success() {
     assert!(stdout.contains("\"ok\":true"), "{stdout}");
     assert!(stdout.contains("\"remote\":\"origin\""), "{stdout}");
     assert!(stdout.contains("\"up_to_date\":false"), "{stdout}");
+    // One advance: a push is only split when it exceeds a Connect server's
+    // per-advance ticket budget.
+    assert!(stdout.contains("\"steps\":1"), "{stdout}");
 }
 
 #[test]

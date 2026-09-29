@@ -25,7 +25,9 @@ use crate::repo::{RepoId, RepoName};
 use crate::storage_error::{StorageOp, describe_and_map};
 use crate::store::keys::{self, LAYOUT_VERSION, ParsedKey};
 use crate::store::outbox::{OutboxBuilder, Terminal};
-use crate::store::{Batch, Key, MAX_BATCH_OPS, Partition, Precondition, Value, Write, codec};
+use crate::store::{
+    Batch, Key, MAX_BATCH_OPS, Partition, Precondition, Value, Write, codec, tickets,
+};
 
 use super::{ShardMap, meta_error};
 
@@ -110,6 +112,21 @@ pub(crate) struct ReplayGuard {
     pub(crate) expires_at_ms: i64,
 }
 
+/// Multi planning context for a consuming packmap write (WP-1.15): the
+/// session-uploaded packs' `m` rows and relay upserts join the ref batch.
+/// No tickets, no outcome rows.
+#[derive(Clone)]
+pub(crate) struct ImplicitConsume<'a> {
+    /// Pending packs, deduplicated by id.
+    pub(crate) packs: &'a [Hash],
+    /// The repository the packmap advances.
+    pub(crate) repo_id: &'a RepoId,
+    /// The ref partition this batch applies in.
+    pub(crate) source: &'a Partition,
+    /// Membership index routing.
+    pub(crate) shards: &'a dyn super::ShardMap,
+}
+
 /// A write to plan.
 #[derive(Clone)]
 #[non_exhaustive]
@@ -142,6 +159,8 @@ pub(crate) struct WriteRequest<'a> {
     pub(crate) begin: Option<&'a super::begin::BeginWrite>,
     /// Ticketed advance context; rows are re-read at each planning attempt.
     pub(crate) advance: Option<super::advance::AdvanceWrite<'a>>,
+    /// Implicit session-ticket consumption (Multi only), also re-planned.
+    pub(crate) implicit: Option<ImplicitConsume<'a>>,
     /// `UploadCommit` only: a final `pre_receive` rejection to store in
     /// place of `UploadPack`, so a retry is answered before re-streaming.
     pub(crate) rejection: Option<&'a StoredRejection>,
@@ -166,6 +185,10 @@ impl WriteRequest<'_> {
         }
         if let Some(advance) = &self.advance {
             out.extend(advance.ids.iter().map(keys::ticket));
+        }
+        if self.implicit.is_some() {
+            out.push(keys::outbox_sequence());
+            out.push(keys::outcome_backlog());
         }
         if self.mark_repo_known {
             out.push(keys::repo_known(self.repo));
@@ -437,8 +460,12 @@ pub(crate) fn plan_write(
     }
     if req.advance.is_some()
         || req.ref_index.is_some() && !req.refs.is_empty()
+        || !conflict && req.implicit.is_some()
         || req.pending.is_some() && req.kind != WriteKind::BeginUpload
     {
+        // One outbox per batch: an implicit consuming packmap write can
+        // also carry D34 ref-index relays, and two builders seeded from the
+        // same snapshot would emit colliding `os` rows.
         let mut outbox = OutboxBuilder::new(
             snap.get(&keys::outbox_sequence()),
             snap.get(&keys::outcome_backlog()),
@@ -458,6 +485,17 @@ pub(crate) fn plan_write(
         }
         if !conflict {
             add_ref_index_relays(req, &mut outbox);
+            if let Some(implicit) = &req.implicit {
+                tickets::plan_membership(
+                    req.repo,
+                    implicit.packs,
+                    implicit.source,
+                    implicit.shards,
+                    implicit.repo_id,
+                    &mut outbox,
+                    &mut puts,
+                );
+            }
         }
         if let Some(pending) = req.pending {
             let record = if conflict {

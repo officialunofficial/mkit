@@ -555,6 +555,8 @@ async fn pipeline_multi_repository() {
     profile.features.insert(Feature::MultiRepo);
     profile.features.insert(Feature::NamespacePolicy);
     profile.features.insert(Feature::Tickets);
+    // This baseline plants the membership fixtures its cases read.
+    profile.planted_membership = true;
     profile.features.insert(Feature::Multipart);
     profile.max_pack_bytes = MULTIPART_MAX_PACK;
     let (origin, _) = serve_addressing(auth, None, Mutant::None, Some(&profile)).await;
@@ -633,6 +635,8 @@ async fn pipeline_d34_multi_membership() {
     });
     profile.features.insert(Feature::MultiRepo);
     profile.sharding_d34 = true;
+    // This baseline plants the membership fixtures its cases read.
+    profile.planted_membership = true;
     let auth = |origin: &str| AuthMode::AuthV2(AuthV2Config::new(origin, "").unwrap());
     let (origin, _) = serve_sharding(
         auth,

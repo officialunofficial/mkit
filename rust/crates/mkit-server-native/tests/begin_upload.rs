@@ -855,26 +855,31 @@ async fn validation<N: NamespaceStore>(backend: N, clock: Arc<ManualClock>, mode
         "admission requires auth v2 and upload ticket keys"
     );
     assert!(store.take().is_empty());
-    let mut cfg = config(mode);
-    cfg.ticket_keys = None;
-    cfg.authorizer_role = AuthorizerRole::Check;
-    let disabled = Pipeline::new(
-        MemoryBlobStore::default(),
-        store.clone(),
-        Hooks::new(),
-        cfg,
-        Arc::new(ManualClock::new(0)),
-        Arc::new(NoopMetrics),
-    )
-    .unwrap();
-    let a = auth(&disabled, mode, 1, Procedure::BeginUpload);
-    let error = disabled
-        .begin_upload(&a, REF, &PACK, BYTES)
-        .await
-        .unwrap_err();
-    assert_eq!(error.code(), Code::Unimplemented);
-    assert_eq!(error.public_message(), "upload tickets are not configured");
-    assert!(store.take().is_empty());
+    // Under multi addressing a keyless auth v2 deployment is refused at
+    // startup, so "upload tickets are not configured" exists only for
+    // single ones.
+    if !mode.multi {
+        let mut cfg = config(mode);
+        cfg.ticket_keys = None;
+        cfg.authorizer_role = AuthorizerRole::Check;
+        let disabled = Pipeline::new(
+            MemoryBlobStore::default(),
+            store.clone(),
+            Hooks::new(),
+            cfg,
+            Arc::new(ManualClock::new(0)),
+            Arc::new(NoopMetrics),
+        )
+        .unwrap();
+        let a = auth(&disabled, mode, 1, Procedure::BeginUpload);
+        let error = disabled
+            .begin_upload(&a, REF, &PACK, BYTES)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), Code::Unimplemented);
+        assert_eq!(error.public_message(), "upload tickets are not configured");
+        assert!(store.take().is_empty());
+    }
 }
 
 async fn race<N: NamespaceStore + 'static>(
@@ -1068,7 +1073,7 @@ async fn race_with_bytes<N: NamespaceStore + 'static>(
 #[tokio::test]
 async fn multipart_existing_race_aborts_losing_session() {
     let clock = Arc::new(ManualClock::new(0));
-    let losing_session_was_aborted = race_with_bytes(
+    let losing_session_was_aborted = Box::pin(race_with_bytes(
         MemoryKv::with_clock(clock.clone()),
         clock,
         MODES[0],
@@ -1076,7 +1081,7 @@ async fn multipart_existing_race_aborts_losing_session() {
         false,
         false,
         MIN_PART_SIZE + 1,
-    )
+    ))
     .await;
     assert!(losing_session_was_aborted);
 }

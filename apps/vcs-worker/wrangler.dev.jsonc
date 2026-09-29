@@ -13,6 +13,9 @@
     "WORKERS_PLAN": "free",
     // Clearly fake local-development secret. Never use this key in a deployment.
     "TICKET_KEYS": "fake-dev 1111111111111111111111111111111111111111111111111111111111111111"
+    // For a local multi-repository deployment add ADDRESSING=multi and
+    // NAMESPACE_ALLOWLIST (or NAMESPACE_POLICY=any with
+    // UNSAFE_OPEN_NAMESPACES=true); see wrangler.jsonc for the format.
   },
   "r2_buckets": [
     { "binding": "STORAGE", "bucket_name": "mkit-vcs-objects" },

@@ -75,10 +75,20 @@ fn assert_error(f: &SshFrame, code: ErrorCode, message: &str) {
     assert_eq!(e.message.as_deref(), Some(message));
 }
 
+/// The plain-mode target `mkit serve <path>` serves.
+fn plain_target(root: &Path) -> ServeTarget {
+    ServeTarget {
+        root: root.to_path_buf(),
+        repo: repo_id(),
+        write_policy: WritePolicy::Open,
+        principal: Principal::SshForcedCommand { key: None },
+    }
+}
+
 /// `serve_stdio` over in-memory streams, with the output bytes.
 fn serve(root: &Path, input: impl Read + Send + 'static, idle: Option<Duration>) -> (u8, Vec<u8>) {
     let mut out = Vec::new();
-    let code = serve_stdio(root, input, &mut out, idle, false);
+    let code = serve_stdio(&plain_target(root), input, &mut out, idle, false);
     (code, out)
 }
 
@@ -142,6 +152,208 @@ impl Read for Trickle {
 fn resolve_repo_path_rejects_missing_path() {
     let err = resolve_repo_path("/definitely/does/not/exist/xyzzy").unwrap_err();
     assert_eq!(err, exit::NOINPUT);
+}
+
+// ------------------------------------------------- --principal (Test 5)
+
+/// A namespace every root-mode fixture uses: `ed25519-<64 lowercase hex>`.
+const NS: &str = "ed25519-abababababababababababababababababababababababababababababababab";
+
+fn parse_opts(a: &[&str]) -> Result<ServeOpts, u8> {
+    let args = a.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+    clap_shim::parse::<ServeOpts>("mkit serve", &args)
+}
+
+/// `--principal` accepts only the raw 32-byte key as 64 lowercase hex.
+#[test]
+fn principal_flag_accepts_raw_hex_only() {
+    let hex = "ab".repeat(32);
+    let opts = parse_opts(&["repo", "--principal", &hex]).unwrap();
+    assert_eq!(opts.principal, Some([0xab; 32]));
+    let zero = "00".repeat(32);
+    assert_eq!(
+        parse_opts(&["repo", "--principal", &zero])
+            .unwrap()
+            .principal,
+        Some([0; 32])
+    );
+    for bad in [
+        "ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB", // uppercase
+        &"ab".repeat(31)[..62],                                             // too short
+        &"ab".repeat(33),                                                   // too long
+        &format!("ed25519-{hex}"),                                          // prefixed
+        &format!("0x{}", &hex[..62]),                                       // 0x
+        &format!("{}gg", "ab".repeat(31)),                                  // non-hex
+        "",
+    ] {
+        // Clap's value parser refuses the flag before any frame is read;
+        // `InvalidValue` maps to DATAERR like `--commit not-a-hash`.
+        assert_eq!(
+            parse_opts(&["repo", "--principal", bad]).unwrap_err(),
+            exit::DATAERR,
+            "{bad:?} must be refused before any frame is read"
+        );
+    }
+}
+
+// -------------------------------------------- SSH_ORIGINAL_COMMAND (Test 7)
+
+#[test]
+fn original_command_accepts_exactly_mkit_serve_path() {
+    let path = format!("{NS}/room-a");
+    let command = format!("mkit serve {path}");
+    assert_eq!(parse_original_command(&command), Some(path.as_str()));
+    // A path with every permitted byte class.
+    assert_eq!(
+        parse_original_command("mkit serve a-b_c.d/e"),
+        Some("a-b_c.d/e")
+    );
+    for bad in [
+        "mkit serve",             // no path
+        "mkit serve a b",         // extra argument
+        "mkit serve  a",          // double space
+        "mkit  serve a",          // double space
+        " mkit serve a",          // leading space
+        "mkit serve a ",          // trailing space
+        "mkit serve\ta",          // tab
+        "mkit serve a\n",         // LF
+        "mkit serve a\r\n",       // CRLF
+        "mkit serve 'a'",         // quotes
+        "mkit serve \"a\"",       // double quotes
+        "mkit serve a; rm -rf /", // shell metachar
+        "mkit serve $(id)",       // command substitution
+        "mkit serve `id`",        // backticks
+        "mkit serve a\0b",        // NUL
+        "sh -c mkit serve a",     // a wrapper
+        "mkit serve --root /srv", // smuggled flag (3+ tokens)
+        "mkit serve --principal", // flag as path
+        "mkit serve -a",          // flag as path
+        "mkit serve --",          // flag as path
+        "mkit update-ref a",      // another verb
+        "MKIT serve a",           // case
+        "mkit serve a>b",         // redirect
+        "mkit serve a|b",         // pipe
+    ] {
+        assert_eq!(parse_original_command(bad), None, "{bad:?}");
+    }
+    // `parse_original_command` checks only the command's shape: a path the
+    // identity grammar will refuse still comes back, to fail downstream.
+    assert_eq!(parse_original_command("mkit serve /a/"), Some("/a/"));
+}
+
+// -------------------------------------------------- --root resolution (Test 6)
+
+/// A root holding `<ns>/<name>` repository dirs, canonicalized.
+fn root_mode_root(names: &[(&str, &str)]) -> (tempfile::TempDir, std::path::PathBuf) {
+    let td = tempfile::tempdir().unwrap();
+    for (ns, name) in names {
+        fs::create_dir_all(td.path().join(ns).join(name).join(".mkit")).unwrap();
+    }
+    let root = fs::canonicalize(td.path()).unwrap();
+    (td, root)
+}
+
+#[test]
+fn root_repo_resolves_namespaced_path() {
+    let (_td, root) = root_mode_root(&[(NS, "room-a"), (NS, "room-b")]);
+    for path in [
+        format!("{NS}/room-a"),
+        format!("/{NS}/room-a"),
+        format!("{NS}/room-a/"),
+        format!("/{NS}/room-a/"),
+    ] {
+        let (dir, repo) = resolve_root_repo(&root, &path).unwrap();
+        assert_eq!(dir, root.join(NS).join("room-a"));
+        assert_eq!(repo.name.as_str(), "room-a");
+        assert_eq!(repo.namespace.as_str(), NS);
+    }
+    // The other repository resolves to its own dir.
+    let (dir, repo) = resolve_root_repo(&root, &format!("{NS}/room-b")).unwrap();
+    assert_eq!(dir, root.join(NS).join("room-b"));
+    assert_eq!(repo.name.as_str(), "room-b");
+}
+
+#[test]
+fn root_repo_refuses_bad_identities() {
+    let (_td, root) = root_mode_root(&[(NS, "room-a")]);
+    for (path, code) in [
+        ("room-a", exit::USAGE),                                 // bare name
+        (&format!("{NS}/room-a/x")[..], exit::USAGE),            // extra component
+        (&format!("{}/room-a", NS.to_uppercase()), exit::USAGE), // uppercase
+        (&format!("{NS}/../room-a"), exit::USAGE),               // dotdot
+        (&format!("{NS}/room-a/../room-b"), exit::USAGE),
+        ("", exit::USAGE),
+        ("/", exit::USAGE),
+    ] {
+        assert_eq!(resolve_root_repo(&root, path).unwrap_err(), code, "{path}");
+    }
+    // A 0x namespace is a valid identity but its directory must exist.
+    let addr = format!("0x{}", "ab".repeat(20));
+    assert_eq!(
+        resolve_root_repo(&root, &format!("{addr}/room-a")).unwrap_err(),
+        exit::NOINPUT
+    );
+}
+
+#[test]
+fn root_repo_refuses_symlinked_components() {
+    let (_td, root) = root_mode_root(&[(NS, "room-a")]);
+    let target = tempfile::tempdir().unwrap();
+    // A repository dir outside the root, linked from `<root>/<ns2>`: the
+    // addressed path resolves through the link but its canonical form
+    // differs from `<root>/<ns2>/room-a`.
+    fs::create_dir_all(target.path().join("room-a/.mkit")).unwrap();
+    let ns2 = format!("ed25519-{}", "cd".repeat(32));
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target.path(), root.join(&ns2)).unwrap();
+        assert_eq!(
+            resolve_root_repo(&root, &format!("{ns2}/room-a")).unwrap_err(),
+            exit::NOPERM,
+            "a symlinked namespace dir must not alias another repository"
+        );
+        // Even a symlink inside the root aliasing a real dir: canonical
+        // must equal the addressed path exactly.
+        let ns3 = format!("ed25519-{}", "ef".repeat(32));
+        fs::create_dir_all(root.join("real/repo/.mkit")).unwrap();
+        std::os::unix::fs::symlink(root.join("real"), root.join(&ns3)).unwrap();
+        assert_eq!(
+            resolve_root_repo(&root, &format!("{ns3}/repo")).unwrap_err(),
+            exit::NOPERM
+        );
+        // The repository dir itself is a symlink into another repo.
+        let ns4 = format!("ed25519-{}", "12".repeat(32));
+        fs::create_dir(root.join(&ns4)).unwrap();
+        std::os::unix::fs::symlink(root.join(NS).join("room-a"), root.join(&ns4).join("room-a"))
+            .unwrap();
+        assert_eq!(
+            resolve_root_repo(&root, &format!("{ns4}/room-a")).unwrap_err(),
+            exit::NOPERM
+        );
+    }
+}
+
+#[test]
+fn root_repo_requires_a_repo_dir() {
+    let td = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(td.path()).unwrap();
+    // Missing entirely.
+    assert_eq!(
+        resolve_root_repo(&root, &format!("{NS}/gone")).unwrap_err(),
+        exit::NOINPUT
+    );
+    // Present but no `.mkit`.
+    fs::create_dir_all(root.join(NS).join("plain")).unwrap();
+    assert_eq!(
+        resolve_root_repo(&root, &format!("{NS}/plain")).unwrap_err(),
+        exit::DATAERR
+    );
+    // A file, not a dir: canonicalize succeeds on a file, so DATAERR.
+    fs::write(root.join(NS).join("file"), b"x").unwrap();
+    assert_eq!(
+        resolve_root_repo(&root, &format!("{NS}/file")).unwrap_err(),
+        exit::DATAERR
+    );
 }
 
 #[test]
@@ -395,7 +607,7 @@ fn stop_after_hello_ends_cleanly_after_the_handshake() {
     let td = repo_root();
     let input = Cursor::new(encode([hello(), close()]));
     let mut out = Vec::new();
-    let code = serve_stdio(td.path(), input, &mut out, None, true);
+    let code = serve_stdio(&plain_target(td.path()), input, &mut out, None, true);
     assert_eq!(code, exit::OK);
     let frames = decode(&out);
     assert_eq!(frames.len(), 1);

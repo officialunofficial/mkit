@@ -90,6 +90,10 @@ check_tree() {
 check_tree "mkit-wasm" "rust/crates/mkit-wasm" "" "" blst zstd-sys commonware-runtime commonware-storage tokio ruzstd
 check_tree "apps/repo-worker" "apps/repo-worker" "" "" blst zstd-sys commonware-runtime commonware-storage
 check_tree "mkit-server" "rust/crates/mkit-server" "" "" blst zstd-sys commonware-runtime commonware-storage
+# The remote-hook adapter (WP-3.7): buffa messages, signing and a nonce source,
+# no connectrpc client, so the feature must stay wasm-clean.
+check_tree "mkit-server (remote-hooks)" "rust/crates/mkit-server" "--features remote-hooks" "buffa ed25519-dalek getrandom" \
+  blst zstd-sys commonware-runtime commonware-storage
 check_tree "mkit-server-worker" "rust/crates/mkit-server-worker" "" "" blst zstd-sys commonware-runtime commonware-storage
 # apps/vcs-worker is a thin deployment of mkit-server-worker (WP-M0-17),
 # built by worker-build from its own Cargo.lock.
@@ -106,4 +110,4 @@ if [ "$fail" -ne 0 ]; then
   exit 1
 fi
 
-echo "ok: mkit-wasm, apps/repo-worker, mkit-server, mkit-server-worker, apps/vcs-worker and mkit-core (pack-ruzstd) wasm32 dependency graphs contain no C-toolchain crates"
+echo "ok: mkit-wasm, apps/repo-worker, mkit-server (also with remote-hooks), mkit-server-worker, apps/vcs-worker and mkit-core (pack-ruzstd) wasm32 dependency graphs contain no C-toolchain crates"

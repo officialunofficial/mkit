@@ -540,14 +540,17 @@ async fn advance_ref_relay_delay_holds_both_index_rows() {
 
 #[tokio::test]
 async fn index_failures_are_unavailable_memory() {
-    index_corruption_unavailable(MemoryKv::default()).await;
+    Box::pin(index_corruption_unavailable(MemoryKv::default())).await;
 }
 
 #[tokio::test]
 async fn index_failures_are_unavailable_sqlite() {
     let dir = tempfile::tempdir().unwrap();
     let conn = RusqliteConn::open(dir.path().join("meta.sqlite3")).unwrap();
-    index_corruption_unavailable(Blocking::new(SqlKvStore::open(conn).unwrap())).await;
+    Box::pin(index_corruption_unavailable(Blocking::new(
+        SqlKvStore::open(conn).unwrap(),
+    )))
+    .await;
 }
 
 proptest! {
@@ -559,10 +562,14 @@ proptest! {
         names.sort(); names.dedup();
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         runtime.block_on(async {
-            real_index_listing(MemoryKv::default(), &names).await;
+            Box::pin(real_index_listing(MemoryKv::default(), &names)).await;
             let dir = tempfile::tempdir().unwrap();
             let conn = RusqliteConn::open(dir.path().join("meta.sqlite3")).unwrap();
-            real_index_listing(Blocking::new(SqlKvStore::open(conn).unwrap()), &names).await;
+            Box::pin(real_index_listing(
+                Blocking::new(SqlKvStore::open(conn).unwrap()),
+                &names,
+            ))
+            .await;
         });
     }
 }

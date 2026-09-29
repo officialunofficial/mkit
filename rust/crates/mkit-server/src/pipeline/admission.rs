@@ -198,7 +198,7 @@ fn validate_headers(headers: &[(String, String)], allow: bool) -> Result<(), Ser
     Ok(())
 }
 
-pub(super) fn validate_decision(decision: &AdmissionDecision) -> Result<(), ServerError> {
+pub(crate) fn validate_decision(decision: &AdmissionDecision) -> Result<(), ServerError> {
     match decision {
         AdmissionDecision::Allow {
             reservation,

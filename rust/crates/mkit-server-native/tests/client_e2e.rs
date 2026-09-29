@@ -102,6 +102,11 @@ impl Served {
     }
 
     fn start_ticketed() -> Self {
+        Self::start_ticketed_capped("67108864")
+    }
+
+    /// A ticketed auth-v2 server advertising `max_pack_bytes`.
+    fn start_ticketed_capped(max_pack_bytes: &str) -> Self {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -130,7 +135,7 @@ impl Served {
                 "--audience",
                 &origin,
                 "--max-pack-bytes",
-                "67108864",
+                max_pack_bytes,
             ],
             &[],
         )
@@ -238,6 +243,116 @@ fn ticketed_fs_parts_resume_and_three_pack_advance() {
         CommitOutcome::Advanced(AdvanceOutcome::Committed),
     );
     assert_eq!(client.read_ref(head).unwrap(), Some(tip));
+}
+
+/// A signed history of `commits` commits in a fresh local repo, each adding
+/// one incompressible file of `len` bytes. Returns the repo dir and the tip.
+fn signed_history(commits: u64, len: usize) -> (tempfile::TempDir, mkit_core::hash::Hash) {
+    use mkit_core::object::{Blob, Commit, EntryMode, Identity, Object, Tree, TreeEntry};
+    use mkit_core::sign::{KeyPair, sign_commit};
+
+    let dir = local_repo();
+    let layout = mkit_core::layout::RepoLayout::single(dir.path());
+    let store = mkit_core::store::ObjectStore::open(&layout).unwrap();
+    let put = |obj: &Object| {
+        store
+            .write(&mkit_core::serialize::serialize(obj).unwrap())
+            .unwrap()
+    };
+    let key = KeyPair::from_seed([9; 32]);
+    let mut entries = Vec::new();
+    let mut parents = Vec::new();
+    let mut tip = [0; 32];
+    for i in 0..commits {
+        let mut data = vec![0_u8; len];
+        let mut state = i * 2 + 1;
+        for chunk in data.chunks_mut(8) {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            chunk.copy_from_slice(&state.to_le_bytes()[..chunk.len()]);
+        }
+        entries.push(TreeEntry {
+            name: format!("f{i:04}.bin").into_bytes(),
+            mode: EntryMode::Blob,
+            object_hash: put(&Object::Blob(Blob { data })),
+        });
+        let tree = put(&Object::Tree(Tree {
+            entries: entries.clone(),
+        }));
+        let mut commit = Commit::new_unannotated(
+            tree,
+            parents.clone(),
+            Identity::ed25519(key.public.0),
+            key.public.0,
+            format!("commit {i}").into_bytes(),
+            1_700_000_000 + i,
+            [0; 64],
+        );
+        commit.signature = sign_commit(&commit, &key).unwrap().0;
+        tip = put(&Object::Commit(commit));
+        parents = vec![tip];
+    }
+    mkit_core::refs::write_ref(&layout, "main", &tip).unwrap();
+    (dir, tip)
+}
+
+/// An initialised, empty local repository.
+fn local_repo() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let layout = mkit_core::layout::RepoLayout::single(dir.path());
+    mkit_core::store::ObjectStore::init(&layout).unwrap();
+    mkit_core::refs::init(&layout).unwrap();
+    dir
+}
+
+#[test]
+fn oversized_push_splits_along_history_and_a_clone_verifies_it() {
+    use mkit_cli::remote_dispatch::{PushControl, fetch_all, push_branch_steps};
+    use mkit_core::layout::RepoLayout;
+    use mkit_core::ops::graph::reachable_objects;
+
+    // Packs of at most 16 KiB: 30 commits of 6 KiB need far more than the six
+    // data packs one advance may carry.
+    let served = Served::start_ticketed_capped("16384");
+    let (source, tip) = signed_history(30, 6000);
+    let source_layout = RepoLayout::single(source.path());
+    let source_store = mkit_core::store::ObjectStore::open(&source_layout).unwrap();
+    let client = served.signed_client();
+    let clone = local_repo();
+    let clone_layout = RepoLayout::single(clone.path());
+
+    let mut heads = Vec::new();
+    let steps = push_branch_steps(
+        &client,
+        &source_store,
+        "main",
+        tip,
+        RefWriteCondition::Missing,
+        0,
+        mkit_core::pack::MAX_TOTAL_PAYLOAD,
+        &PushControl::default(),
+        &mut |head| {
+            // Every intermediate state is a complete, verifiable branch.
+            fetch_all(clone.path(), &client, "origin").unwrap();
+            assert_eq!(
+                mkit_core::refs::read_remote_ref(&clone_layout, "origin", "main").unwrap(),
+                Some(head)
+            );
+            heads.push(head);
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert!(steps >= 3, "{steps}");
+    assert_eq!(heads.len(), steps);
+    assert_eq!(heads.last(), Some(&tip));
+    assert_eq!(client.read_ref("refs/heads/main").unwrap(), Some(tip));
+    let clone_store = mkit_core::store::ObjectStore::open(&clone_layout).unwrap();
+    assert_eq!(
+        reachable_objects(&clone_store, &tip).unwrap(),
+        reachable_objects(&source_store, &tip).unwrap()
+    );
 }
 
 impl Drop for Served {
