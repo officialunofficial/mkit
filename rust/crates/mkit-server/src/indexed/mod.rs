@@ -14,15 +14,16 @@ use crate::{ErrorDetail, ServerError};
 
 /// The canonical pending response: one protobuf detail, HTTP 503 and
 /// `Retry-After` rounded up to whole seconds.
+#[must_use]
 pub fn pending(retry_after_ms: u64) -> ServerError {
     let retry_after_ms = retry_after_ms.max(1_000);
     let mut value = vec![0x08];
     let mut n = retry_after_ms;
     while n >= 0x80 {
-        value.push((n as u8 & 0x7f) | 0x80);
+        value.push(u8::try_from(n & 0x7f).unwrap_or(0) | 0x80);
         n >>= 7;
     }
-    value.push(n as u8);
+    value.push(u8::try_from(n).unwrap_or(0));
     ServerError::unavailable("pack verification pending")
         .with_detail(ErrorDetail {
             type_name: "mkit.transport.v1.PendingVerification".into(),

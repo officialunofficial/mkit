@@ -34,6 +34,7 @@ impl From<ServerError> for ResolveFailure {
 }
 
 impl ResolveFailure {
+    #[must_use]
     pub fn public_error(self, now: u64, created: u64, bound: u64) -> ServerError {
         match self {
             Self::Missing => missing_base(now, created, bound),
@@ -46,11 +47,13 @@ impl ResolveFailure {
 }
 
 /// Whether a ticket still lies inside the §9.4 repository-membership window.
+#[must_use]
 pub fn lagged(now_ms: u64, created_at_ms: u64, bound_ms: u64) -> bool {
     now_ms.saturating_sub(created_at_ms) < bound_ms
 }
 
 /// Exact error for an unresolved base, independent of global blob existence.
+#[must_use]
 pub fn missing_base(now_ms: u64, created_at_ms: u64, bound_ms: u64) -> ServerError {
     if lagged(now_ms, created_at_ms, bound_ms) {
         ServerError::unavailable("repository membership not yet visible")
@@ -79,7 +82,7 @@ pub async fn locate_split<S: NamespaceStore>(
 ) -> Result<BTreeMap<Hash, ObjectLookup>, ServerError> {
     let mut todo: Vec<Vec<Hash>> = ids
         .chunks(index::MAX_LOOKUP_IDS)
-        .map(|chunk| chunk.to_vec())
+        .map(<[Hash]>::to_vec)
         .collect();
     let mut found = BTreeMap::new();
     while let Some(chunk) = todo.pop() {
@@ -176,6 +179,7 @@ impl DeltaBaseSource for CachedBase {
 
 /// Resolve a member object's canonical bytes and total depth. Memoization
 /// shares repeated external bases across the consuming advance.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub fn member_object<'a, B: BlobStore, S: NamespaceStore>(
     blobs: &'a B,
     store: &'a S,

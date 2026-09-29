@@ -348,37 +348,31 @@ async fn verify_ticketed_inner<B: BlobStore, S: NamespaceStore>(
             pending_by_pack.insert(ticket.pack_id, raw.clone());
         }
         let bytes = pack_bytes(blobs, ticket, cfg.max_pack_bytes).await?;
-        let kind = match classify::classify(&bytes) {
-            Ok(kind) => kind,
-            Err(_) => {
-                return Err(reject_content(
-                    store,
-                    source,
-                    repo,
-                    &ticket.pack_id,
-                    pending_raw.as_ref(),
-                    "unknown upload type",
-                    deadline,
-                )
-                .await);
-            }
+        let Ok(kind) = classify::classify(&bytes) else {
+            return Err(reject_content(
+                store,
+                source,
+                repo,
+                &ticket.pack_id,
+                pending_raw.as_ref(),
+                "unknown upload type",
+                deadline,
+            )
+            .await);
         };
         match kind {
             UploadType::Packlist => {
-                let list = match decode_packlist(&bytes) {
-                    Ok(list) => list,
-                    Err(_) => {
-                        return Err(reject_content(
-                            store,
-                            source,
-                            repo,
-                            &ticket.pack_id,
-                            pending_raw.as_ref(),
-                            "object hash mismatch",
-                            deadline,
-                        )
-                        .await);
-                    }
+                let Ok(list) = decode_packlist(&bytes) else {
+                    return Err(reject_content(
+                        store,
+                        source,
+                        repo,
+                        &ticket.pack_id,
+                        pending_raw.as_ref(),
+                        "object hash mismatch",
+                        deadline,
+                    )
+                    .await);
                 };
                 packlists.push((ticket.created_at_ms, list.packs));
                 work.push(PackWork {
@@ -388,20 +382,17 @@ async fn verify_ticketed_inner<B: BlobStore, S: NamespaceStore>(
                 });
             }
             UploadType::Pack => {
-                let base_ids = match delta_base_hashes(&bytes) {
-                    Ok(ids) => ids,
-                    Err(_) => {
-                        return Err(reject_content(
-                            store,
-                            source,
-                            repo,
-                            &ticket.pack_id,
-                            pending_raw.as_ref(),
-                            "object hash mismatch",
-                            deadline,
-                        )
-                        .await);
-                    }
+                let Ok(base_ids) = delta_base_hashes(&bytes) else {
+                    return Err(reject_content(
+                        store,
+                        source,
+                        repo,
+                        &ticket.pack_id,
+                        pending_raw.as_ref(),
+                        "object hash mismatch",
+                        deadline,
+                    )
+                    .await);
                 };
                 // A syntactic base may be supplied by an earlier frame in
                 // this pack. Defer a repository lookup failure until the
@@ -450,11 +441,30 @@ async fn verify_ticketed_inner<B: BlobStore, S: NamespaceStore>(
                     }
                 }
                 let mut frames = Vec::new();
+                let mut local_depths: BTreeMap<Hash, (u32, Option<Hash>)> = BTreeMap::new();
+                let mut depth_exceeded = false;
                 let decoded = decode_entries_with(
                     &bytes,
                     &mut bases,
                     DecodeLimits::default().with_max_decoded_bytes(cfg.decode_budget),
                     |entry: DecodedEntry<'_>| {
+                        let (hops, external) = match entry.delta_base {
+                            None => (0, None),
+                            Some(base) => match local_depths.get(&base) {
+                                Some((depth, external)) => (depth.saturating_add(1), *external),
+                                None => (1, Some(base)),
+                            },
+                        };
+                        let total = hops.saturating_add(
+                            external
+                                .and_then(|base| depths.get(&base).copied())
+                                .unwrap_or(0),
+                        );
+                        if total > cfg.max_delta_chain_depth {
+                            depth_exceeded = true;
+                            return Err(PackError::PackfileTooLarge);
+                        }
+                        local_depths.entry(entry.id).or_insert((hops, external));
                         frames.push(FrameMeta {
                             id: entry.id,
                             frame_offset: entry.frame_offset,
@@ -479,6 +489,18 @@ async fn verify_ticketed_inner<B: BlobStore, S: NamespaceStore>(
                     },
                 );
                 if let Err(error) = decoded {
+                    if depth_exceeded {
+                        return Err(reject_content(
+                            store,
+                            source,
+                            repo,
+                            &ticket.pack_id,
+                            pending_raw.as_ref(),
+                            "delta chain too deep",
+                            deadline,
+                        )
+                        .await);
+                    }
                     let mapped = if let PackError::DeltaBaseMissing(hex) = &error {
                         if let Some(error) = lookup_error {
                             return Err(error);
@@ -517,49 +539,18 @@ async fn verify_ticketed_inner<B: BlobStore, S: NamespaceStore>(
                     }
                     return Err(mapped);
                 }
-                let entries = match index_entries(&frames, cfg.max_delta_chain_depth) {
-                    Ok(entries) => entries,
-                    Err(_) => {
-                        return Err(reject_content(
-                            store,
-                            source,
-                            repo,
-                            &ticket.pack_id,
-                            pending_raw.as_ref(),
-                            "delta chain too deep",
-                            deadline,
-                        )
-                        .await);
-                    }
+                let Ok(entries) = index_entries(&frames, cfg.max_delta_chain_depth) else {
+                    return Err(reject_content(
+                        store,
+                        source,
+                        repo,
+                        &ticket.pack_id,
+                        pending_raw.as_ref(),
+                        "delta chain too deep",
+                        deadline,
+                    )
+                    .await);
                 };
-                let mut local: BTreeMap<Hash, (u32, Option<Hash>)> = BTreeMap::new();
-                for frame in &frames {
-                    let (hops, external) = match frame.delta_base {
-                        None => (0, None),
-                        Some(base) => match local.get(&base) {
-                            Some((depth, external)) => (depth.saturating_add(1), *external),
-                            None => (1, Some(base)),
-                        },
-                    };
-                    let total = hops.saturating_add(
-                        external
-                            .and_then(|base| depths.get(&base).copied())
-                            .unwrap_or(0),
-                    );
-                    if total > cfg.max_delta_chain_depth {
-                        return Err(reject_content(
-                            store,
-                            source,
-                            repo,
-                            &ticket.pack_id,
-                            pending_raw.as_ref(),
-                            "delta chain too deep",
-                            deadline,
-                        )
-                        .await);
-                    }
-                    local.entry(frame.id).or_insert((hops, external));
-                }
                 work.push(PackWork {
                     ticket: ticket.clone(),
                     entries,

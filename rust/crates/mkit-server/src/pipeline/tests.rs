@@ -3,6 +3,7 @@
 #[path = "tests_begin_parts.rs"]
 mod begin_parts;
 mod grants;
+mod indexed;
 mod info;
 mod policy;
 

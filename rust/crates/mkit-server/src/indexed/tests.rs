@@ -1,4 +1,5 @@
 //! In-process indexed verification against real pack bytes and metadata rows.
+#![allow(clippy::unwrap_used)] // Fixtures and assertions fail the test on invalid setup.
 
 use bytes::Bytes;
 use futures_executor::block_on;
@@ -121,7 +122,7 @@ fn good_push_indexes_before_membership_and_reuses_verified_state() {
         &blobs,
         &store,
         &repo,
-        &[ticket.clone()],
+        std::slice::from_ref(&ticket),
         head,
         IndexedConfig::default(),
         &clock,
@@ -223,6 +224,29 @@ fn bad_signature_and_dangling_object_are_rejected() {
 }
 
 #[test]
+fn corrupt_pack_identity_is_rejected() {
+    let repo = repo("one");
+    let clock = Arc::new(ManualClock::new(NOW));
+    let store = MemoryKv::with_clock(clock.clone());
+    let blobs = MemoryBlobStore::default();
+    let (mut pack, head) = good_pack();
+    let last = pack.len() - 1;
+    pack[last] ^= 1; // Valid content-addressed upload, invalid pack trailer.
+    upload(&blobs, &pack);
+    let error = verify(
+        &blobs,
+        &store,
+        &repo,
+        &[ticket(&repo, &pack, NOW as u64)],
+        head,
+        IndexedConfig::default(),
+        &clock,
+    )
+    .unwrap_err();
+    assert_eq!(error.public_message(), "object hash mismatch");
+}
+
+#[test]
 fn unknown_type_and_foreign_packlist_follow_exact_errors() {
     let blobs = MemoryBlobStore::default();
     let repo = repo("one");
@@ -268,7 +292,7 @@ fn unknown_type_and_foreign_packlist_follow_exact_errors() {
     );
     // The unavailable attempt releases its lease. The same ticket reaches
     // the permanent answer exactly at the lag boundary.
-    clock.advance(IndexedConfig::default().relay_lag_bound_ms as i64);
+    clock.advance(i64::try_from(IndexedConfig::default().relay_lag_bound_ms).unwrap());
     let error = verify(
         &blobs,
         &retry_store,
@@ -309,7 +333,7 @@ fn concurrent_lease_is_pending_without_replay_then_retry_succeeds() {
         &blobs,
         &store,
         &repo,
-        &[ticket.clone()],
+        std::slice::from_ref(&ticket),
         head,
         IndexedConfig::default(),
         &clock,
@@ -431,7 +455,7 @@ fn thin_base_in_another_repository_is_indistinguishable_from_absent() {
             &blobs,
             &foreign,
             &b,
-            &[t.clone()],
+            std::slice::from_ref(&t),
             [0; 32],
             IndexedConfig::default(),
             &clock,
@@ -461,6 +485,7 @@ fn thin_base_in_another_repository_is_indistinguishable_from_absent() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // One fixture proves recursion, memoization and the cap.
 fn member_frame_resolver_recurses_memoizes_and_caps_total_depth() {
     let repo = repo("one");
     let clock = Arc::new(ManualClock::new(NOW));
@@ -645,7 +670,7 @@ fn capped_closure_lookup_has_distinct_permanent_error() {
         },
     )
     .unwrap();
-    for chunk in (0..=crate::store::index::MAX_LOOKUP_ROWS as u32)
+    for chunk in (0..=u32::try_from(crate::store::index::MAX_LOOKUP_ROWS).unwrap())
         .collect::<Vec<_>>()
         .chunks(90)
     {
@@ -696,8 +721,10 @@ fn in_pack_delta_chain_above_cap_is_rejected_before_tip() {
         .unwrap();
     let pack = writer.finish().unwrap();
     upload(&blobs, &pack);
-    let mut cfg = IndexedConfig::default();
-    cfg.max_delta_chain_depth = 1;
+    let cfg = IndexedConfig {
+        max_delta_chain_depth: 1,
+        ..IndexedConfig::default()
+    };
     let error = verify(
         &blobs,
         &store,

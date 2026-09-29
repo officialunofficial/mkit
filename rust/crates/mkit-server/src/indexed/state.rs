@@ -23,6 +23,11 @@ pub enum VerificationV1 {
 }
 
 /// Encode one state with the metadata codec version byte.
+///
+/// # Panics
+/// Serialization of this fixed integer-and-string DTO into a `Vec` cannot
+/// fail; a failure here indicates a broken serializer invariant.
+#[must_use]
 pub fn encode(value: &VerificationV1) -> Value {
     let mut bytes = vec![CODEC_V1];
     serde_json::to_writer(&mut bytes, value).expect("verification DTO serializes");
@@ -99,6 +104,7 @@ pub async fn read<S: NamespaceStore>(
 }
 
 /// Live lease held by another verifier, with no replay outcome.
+#[must_use]
 pub fn concurrent_pending(state: &VerificationV1, now_ms: u64) -> Option<ServerError> {
     match state {
         VerificationV1::Pending { lease_until_ms } if *lease_until_ms > now_ms => {

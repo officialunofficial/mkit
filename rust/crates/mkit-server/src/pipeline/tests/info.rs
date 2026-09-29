@@ -8,16 +8,15 @@ fn indexed_startup_requires_ticketed_multi_and_advertises_effective_limits() {
     c.indexed = Some(crate::indexed::IndexedConfig::default());
     c.ticket_keys =
         Some(crate::upload::token::TicketKeys::new(vec![("test".into(), [7; 32])]).unwrap());
-    let error = match Pipeline::new(
+    let Err(error) = Pipeline::new(
         MemoryBlobStore::default(),
         Spy::new(store(&clock())),
         Hooks::new(),
         c.clone(),
         clock(),
         Arc::new(SpyMetrics::default()),
-    ) {
-        Err(error) => error,
-        Ok(_) => panic!("Single addressing unexpectedly accepted indexed mode"),
+    ) else {
+        panic!("Single addressing unexpectedly accepted indexed mode");
     };
     assert_eq!(error.code(), Code::InvalidArgument);
     c.addressing = Addressing::Multi(MultiAddressing::new());

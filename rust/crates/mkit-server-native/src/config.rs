@@ -1031,6 +1031,7 @@ fn resolve_sharding(args: &ServeArgs) -> Result<Sharding, ConfigError> {
 ///
 /// # Errors
 /// A [`ConfigError`] with its exit code: see [`exit`].
+#[allow(clippy::too_many_lines)] // Keep startup flag validation and mapping together.
 pub fn resolve(
     args: &ServeArgs,
     env: &dyn Fn(&str) -> Option<String>,

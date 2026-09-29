@@ -848,6 +848,7 @@ fn parse_namespace_quota(tag: &[u8], body: &[u8]) -> Option<ParsedKey> {
 /// Decode a key of any laid-out class; `None` for a malformed key or a
 /// reserved class.
 #[must_use]
+#[allow(clippy::too_many_lines)] // The key-class dispatch remains in one parser.
 pub fn parse(key: &Key) -> Option<ParsedKey> {
     let bytes = key.as_bytes();
     if bytes.len() > MAX_KEY_BYTES {

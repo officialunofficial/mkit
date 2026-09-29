@@ -268,6 +268,7 @@ struct IdScan {
 /// Scan candidates in rounds, with one batched call per distinct partition
 /// per round. The served-prefix cursor rotates within a partition across
 /// rounds, so a hot first id cannot indefinitely hide later ids.
+#[allow(clippy::too_many_lines)] // Keep the bounded scan state machine together.
 async fn scan_all<S: NamespaceStore>(
     store: &S,
     shards: &dyn ShardMap,
@@ -337,7 +338,9 @@ async fn scan_all<S: NamespaceStore>(
                         start: scan.start.clone(),
                         end: scan.end.clone(),
                         after: scan.after.clone(),
-                        limit: SCAN_PAGE_ROWS.min((MAX_LOOKUP_ROWS - scan.rows.len()) as u32),
+                        limit: SCAN_PAGE_ROWS.min(
+                            u32::try_from(MAX_LOOKUP_ROWS - scan.rows.len()).unwrap_or(u32::MAX),
+                        ),
                     }
                 })
                 .collect();

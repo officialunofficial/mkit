@@ -226,7 +226,7 @@ mod tests {
             target: source(),
             puts: vec![(
                 crate::Key::new(n.to_be_bytes().to_vec()),
-                Value::new(vec![n as u8]),
+                Value::new(vec![u8::try_from(n % 256).unwrap_or(0)]),
             )],
         }
     }

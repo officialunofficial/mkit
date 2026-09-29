@@ -289,6 +289,7 @@ pub(crate) fn failure(e: &StoreError) -> NsReply {
     NsReply::error(e)
 }
 
+#[allow(clippy::too_many_lines)] // One JSON call dispatcher; each arm is independently bounded.
 async fn dispatch<S: NamespaceStore>(
     store: &S,
     p: &Partition,
@@ -361,7 +362,8 @@ async fn dispatch<S: NamespaceStore>(
                 if page_bytes > bytes_left {
                     return Err(StoreError::Corrupt("scan_many byte budget exceeded".into()));
                 }
-                entries_left = entries_left.saturating_sub(page.entries.len() as u32);
+                entries_left = entries_left
+                    .saturating_sub(u32::try_from(page.entries.len()).unwrap_or(u32::MAX));
                 bytes_left = bytes_left.saturating_sub(page_bytes);
                 pages.push(page);
             }
@@ -518,7 +520,7 @@ where
                         + mkit_server::store::MAX_VALUE_BYTES
                         <= max_bytes =>
             {
-                cursor = Some(next)
+                cursor = Some(next);
             }
             next => {
                 page.next = next;

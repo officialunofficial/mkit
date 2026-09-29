@@ -3850,7 +3850,8 @@ mod tests {
         assert_eq!(found, id);
         assert_eq!(kind, 0);
         assert_eq!(base, None);
-        let frame = &pack[offset as usize..(offset + length) as usize];
+        let frame =
+            &pack[usize::try_from(offset).unwrap()..usize::try_from(offset + length).unwrap()];
         let (decoded, bytes) = decode_frame_with(
             frame,
             VERSION,
