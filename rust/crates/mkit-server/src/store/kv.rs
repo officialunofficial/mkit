@@ -306,7 +306,7 @@ pub struct StoreCapabilities {
     /// precondition, on that same key (plus any `NotAfter`). The pipeline
     /// then issues sequential batches.
     pub atomic_multi_key: bool,
-    /// Operations reserved for a target-local atomic apply extension.
+    /// Operations reserved for a `RefIndex` target-local atomic apply extension.
     pub reserved_batch_ops: usize,
     /// Which key classes the store accepts.
     pub key_classes: KeyClasses,

@@ -225,7 +225,13 @@ impl<T: NsTransport> NamespaceStore for DoNamespaceStore<T> {
     }
 
     async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
-        batch.validate(&self.capabilities())?;
+        let mut caps = self.capabilities();
+        // Only RefIndex targets append snapshot metadata. RefShard planners
+        // retain the full batch limit for writes and opportunistic pruning.
+        if !matches!(p, Partition::RefIndex { .. }) {
+            caps.reserved_batch_ops = 0;
+        }
+        batch.validate(&caps)?;
         let call = NsCall::Apply {
             batch: WireBatch::from(batch),
         };
