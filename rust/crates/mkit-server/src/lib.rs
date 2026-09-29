@@ -20,7 +20,9 @@
 //! `mkit.rpc.v1.ssh` session over the pipeline. The `connect` feature
 //! (default) adds the `mkit.transport.v1` Connect binding over the pipeline
 //! ([`connect::service`]); the `remote-hooks` feature adds the `hooks` module,
-//! the `mkit.server.hooks.v1` adapter over a transport-agnostic channel.
+//! the `mkit.server.hooks.v1` adapter over a transport-agnostic channel; the
+//! `http-objects` feature adds the `http_objects` module and
+//! `Pipeline::serve_http_object` (Stage 2, inert in Stage 1).
 
 pub mod auth_v2;
 #[cfg(feature = "connect")]
@@ -31,6 +33,8 @@ mod error;
 pub mod fs;
 #[cfg(feature = "remote-hooks")]
 pub mod hooks;
+#[cfg(feature = "http-objects")]
+pub mod http_objects;
 pub mod indexed;
 #[cfg(any(test, feature = "memory"))]
 mod memory;
