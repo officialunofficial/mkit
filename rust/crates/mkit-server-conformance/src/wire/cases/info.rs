@@ -92,6 +92,8 @@ pub(super) async fn shape_and_policy(ctx: Ctx) -> CaseResult {
         info.receipt_key_id.as_deref() == Some(""),
         "receipt_key_id must be empty"
     );
+    // A `Grants` profile assumes every scheme is configured; a deployment that
+    // advertises fewer schemes needs a profile listing its own tokens.
     let expected = if ctx.profile().has(Feature::Grants) {
         vec!["ed25519", "secp256k1-eip191", "webauthn-p256"]
     } else {

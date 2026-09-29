@@ -374,3 +374,156 @@ fn epoch_change_after_authorize_commits_no_write_state() {
         );
     }
 }
+
+fn k1_namespace(owner: &k256::ecdsa::SigningKey) -> Namespace {
+    let point = owner.verifying_key().to_sec1_point(false);
+    Namespace::Address(
+        mkit_attest::eth::address_secp256k1(&point.as_bytes()[1..].try_into().unwrap()).unwrap(),
+    )
+}
+
+fn k1_config(policy: NamespacePolicy) -> PipelineConfig {
+    let mut c = cfg(authv2());
+    c.addressing = Addressing::Multi(MultiAddressing::new().with_namespace_policy(policy));
+    c.write_policy = WritePolicy::Owner;
+    c.authorizer_role = AuthorizerRole::Check;
+    c.grants = Some(
+        GrantConfig::new(
+            AUDIENCE,
+            AcceptedSchemes::of(&[OwnerScheme::Ed25519, OwnerScheme::Secp256k1Eip191]),
+            vec![],
+        )
+        .unwrap(),
+    );
+    c
+}
+
+fn k1_grant(owner: &k256::ecdsa::SigningKey, repo: &str, grantee: &SigningKey) -> String {
+    let statement = Grant {
+        namespace: k1_namespace(owner),
+        scope: RepoScope::Repository(RepositoryIdentity::parse(repo).unwrap()),
+        grantee: *grantee.verifying_key().as_bytes(),
+        capabilities: Capabilities::Write,
+        audiences: vec![AUDIENCE.into()],
+        ref_scopes: Some(RefScopes::parse("refs/heads/main=cuf").unwrap()),
+        epoch: 0,
+        created_ms: T0 - 1000,
+        expiry_ms: T0 + 100_000,
+        nonce: [9; 32],
+    }
+    .encode()
+    .unwrap();
+    let (signature, recovery) =
+        owner.sign_prehash_recoverable(&mkit_attest::eth::eip191_hash(&statement));
+    let mut blob = signature.to_bytes().to_vec();
+    blob.push(27 + recovery.to_byte());
+    SignedHeader {
+        statement,
+        scheme: OwnerScheme::Secp256k1Eip191,
+        blob,
+    }
+    .encode()
+    .unwrap()
+}
+
+/// The `0x` path through the server: an allowlisted address namespace takes a
+/// write only with a valid EIP-191 grant, and never under an `Any` policy.
+#[test]
+fn zero_x_namespace_takes_writes_only_through_an_eip191_grant() {
+    let owner = k256::ecdsa::SigningKey::from_slice(&[0x21; 32]).unwrap();
+    let namespace = k1_namespace(&owner);
+    let repo = format!("{namespace}/{REPO}");
+    let grantee = key(2);
+    let header = k1_grant(&owner, &repo, &grantee);
+    let allow = || {
+        let clock = clock();
+        build(
+            k1_config(NamespacePolicy::Allowlist([namespace].into())),
+            Spy::new(store(&clock)),
+            policy_hooks(false),
+            clock,
+        )
+    };
+
+    let e = allow();
+    assert!(
+        e.update(
+            &request(&grantee, &repo, 21, Some(&header)),
+            &upd(HEAD, Any, A)
+        )
+        .is_ok()
+    );
+    let seen = e.pipe.hooks.authorizer().seen.lock().unwrap();
+    assert!(!seen[0].authz.owner);
+    assert!(seen[0].authz.grant.is_some());
+    drop(seen);
+
+    let e = allow();
+    assert_eq!(
+        e.update(&request(&grantee, &repo, 22, None), &upd(HEAD, Any, A))
+            .unwrap_err()
+            .code(),
+        Code::PermissionDenied
+    );
+    assert!(e.pipe.meta.batches.lock().unwrap().is_empty());
+
+    let clock = clock();
+    let e = build(
+        k1_config(NamespacePolicy::Any {
+            unsafe_without_admission: true,
+        }),
+        Spy::new(store(&clock)),
+        policy_hooks(false),
+        clock,
+    );
+    assert_eq!(
+        e.update(
+            &request(&grantee, &repo, 23, Some(&header)),
+            &upd(HEAD, Any, A)
+        )
+        .unwrap_err()
+        .code(),
+        Code::PermissionDenied
+    );
+    assert!(e.pipe.meta.batches.lock().unwrap().is_empty());
+}
+
+/// A grant header is ignored, unparsed, under Single addressing and `Open`.
+#[test]
+fn single_open_ignores_the_grant_header() {
+    let clock = clock();
+    let e = build(
+        cfg(authv2()),
+        Spy::new(store(&clock)),
+        policy_hooks(false),
+        clock,
+    );
+    assert!(
+        e.update(
+            &request(&key(2), REPO, 24, Some("malformed")),
+            &upd(HEAD, Any, A)
+        )
+        .is_ok()
+    );
+}
+
+/// Multi/Owner without a grant configuration denies any grant header.
+#[test]
+fn grant_header_without_grant_config_is_denied() {
+    let owner = key(1);
+    let grantee = key(2);
+    let repo = repository(&owner);
+    let clock = clock();
+    let mut c = config(&owner, AuthorizerRole::Check);
+    c.grants = None;
+    let e = build(c, Spy::new(store(&clock)), policy_hooks(false), clock);
+    let header = grant(&owner, &grantee, |_| {});
+    let error = e
+        .update(
+            &request(&grantee, &repo, 25, Some(&header)),
+            &upd(HEAD, Any, A),
+        )
+        .unwrap_err();
+    assert_eq!(error.code(), Code::PermissionDenied);
+    assert_no_rows(&e, &owner);
+}

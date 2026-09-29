@@ -1625,6 +1625,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 grants::rejected(mkit_attest::grant::GrantError::SchemeNotAdvertised)
             })?;
             let verified = cfg.verify(header.expose(), op)?;
+            // Step 8 (ref scope) before step 11, which reads state and comes last.
+            grants::interim_ref_gate(&verified, &op.kind)?;
             let observed = match self.cfg.sharding {
                 Sharding::Single => op.observed_epoch,
                 Sharding::D34 => op.leased_epoch,
@@ -1632,7 +1634,6 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             if observed != Some(verified.epoch()) {
                 return Err(plan::epoch_moved());
             }
-            grants::interim_ref_gate(&verified, &op.kind)?;
             tracing::debug!(grant_id = %to_hex_bytes(verified.id()), "write grant accepted");
             Some(crate::op::GrantRef {
                 id: *verified.id(),

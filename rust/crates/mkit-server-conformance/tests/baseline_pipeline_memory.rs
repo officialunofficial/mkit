@@ -681,6 +681,7 @@ async fn pipeline_grants_single_and_d34() {
             profile,
         };
         for case in [
+            "info.shape_and_policy",
             "grants.valid_ed25519",
             "grants.push_flow",
             "grants.part_path_ignores_header",

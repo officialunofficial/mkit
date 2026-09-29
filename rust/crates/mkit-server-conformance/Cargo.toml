@@ -32,13 +32,12 @@ test-faults = ["mkit-server/test-faults"]
 # `fake_s3`: a strict in-memory S3 server (path-style objects, SigV4
 # verification, conditional puts, ranges) for testing S3 blob stores in
 # normal CI without Docker. A test utility: never in a release binary.
-fake-s3 = ["dep:axum", "dep:hmac", "tokio/net"]
+fake-s3 = ["dep:axum", "dep:sha2", "dep:hmac", "tokio/net"]
 
 [dependencies]
 mkit-server = { version = "0.4", path = "../mkit-server", features = ["memory"] }
 mkit-core = { version = "0.4", path = "../mkit-core", default-features = false }
 mkit-attest = { version = "0.4", path = "../mkit-attest", default-features = false, features = ["grants"] }
-sha2 = "0.11"
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "time"] }
 bytes = "1"
 futures = "0.3"
@@ -64,6 +63,7 @@ toml = { version = "1", default-features = false, features = ["std", "parse", "s
 # `fake-s3`: the server, and an independent SigV4 verifier (not
 # `mkit-transport-s3`'s signer, so a signing bug cannot verify itself).
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"], optional = true }
+sha2 = { version = "0.11", optional = true }
 hmac = { version = "0.13", optional = true }
 
 [dev-dependencies]

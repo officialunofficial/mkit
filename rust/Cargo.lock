@@ -3482,6 +3482,7 @@ dependencies = [
  "futures-executor",
  "http",
  "http-body-util",
+ "k256",
  "mkit-attest",
  "mkit-core",
  "mkit-rpc",
