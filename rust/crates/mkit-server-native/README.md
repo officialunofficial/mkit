@@ -154,7 +154,10 @@ repository, and `--repository` is refused. A Multi deployment requires
 `--listen` with `--auth auth-v2`, upload ticket keys (`--ticket-key-file`
 or `MKIT_TICKET_KEYS`: a signed write names its repository, and uploads
 still need tickets) and `--meta sqlite:<PATH>` (per-namespace partitions
-need a transactional store). Writes are owner-only (STC §7.5): a signature
+need a transactional store). Encrypted-only Multi is deliberately
+unsupported — Multi requires the auth-v2 HTTP listener; an enc listener
+can only join a Multi deployment as the bound `--enc-repository` session
+below. Writes are owner-only (STC §7.5): a signature
 may write only inside its own key's `ed25519-` namespace.
 
 The namespace policy selects which owner namespaces may write:
