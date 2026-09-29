@@ -9,6 +9,8 @@
 //! lands with WP-5.8. The token string and the seeds never appear in
 //! `Debug` output or tracing.
 
+#[cfg(test)]
+mod golden;
 mod statement;
 #[cfg(test)]
 mod tests;

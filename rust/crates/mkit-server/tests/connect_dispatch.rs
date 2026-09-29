@@ -1612,8 +1612,12 @@ async fn issue_object_url_rejects_bad_targets() {
         .enumerate()
     {
         assert_eq!(
-            issue_code(&server, &issue_path(HEAD, path, 0), 63 + u32::try_from(i).unwrap())
-                .await,
+            issue_code(
+                &server,
+                &issue_path(HEAD, path, 0),
+                63 + u32::try_from(i).unwrap()
+            )
+            .await,
             "invalid_argument",
             "{path}"
         );
