@@ -16,13 +16,13 @@ use core::future::Future;
 use mkit_server::storage_error::StorageOp;
 use mkit_server::store::ExportPage;
 use mkit_server::{
-    Batch, BatchOutcome, Cursor, Key, MaybeSend, MaybeSync, NamespaceStore, Partition,
-    PartitionStats, ScanPage, StoreCapabilities, StoreError, Value,
+    Batch, BatchOutcome, Cursor, Key, MAX_SCAN_RANGES, MaybeSend, MaybeSync, NamespaceStore,
+    Partition, PartitionStats, RangeScan, ScanPage, StoreCapabilities, StoreError, Value,
 };
 
 use crate::backend_error;
 use crate::naming::{DoTarget, do_target};
-use crate::wire::{self, Blob, NsCall, NsReply, NsRequest, WireBatch};
+use crate::wire::{self, Blob, NsCall, NsReply, NsRequest, WireBatch, WireRangeScan};
 
 /// Delivers one request body to a Durable Object and returns its reply
 /// body: Durable Object stubs on Workers (`StubTransport`, wasm32), an
@@ -50,6 +50,7 @@ fn op(call: &NsCall) -> &'static str {
         NsCall::Get { .. } => "get",
         NsCall::GetMany { .. } => "get_many",
         NsCall::Scan { .. } => "scan",
+        NsCall::ScanMany { .. } => "scan_many",
         NsCall::Apply { .. } => "apply",
         NsCall::Stats => "stats",
         NsCall::Probe => "probe",
@@ -178,6 +179,36 @@ impl<T: NsTransport> NamespaceStore for DoNamespaceStore<T> {
         };
         match self.call(p, call).await? {
             NsReply::Page { entries, next } => Ok(wire::scan_page(entries, next)),
+            other => Err(unexpected(&other)),
+        }
+    }
+
+    async fn scan_many(
+        &self,
+        p: &Partition,
+        ranges: &[RangeScan],
+    ) -> Result<Vec<ScanPage>, StoreError> {
+        if ranges.len() > MAX_SCAN_RANGES {
+            return Err(StoreError::Invalid("too many scan ranges".into()));
+        }
+        if ranges.is_empty() {
+            return Ok(Vec::new());
+        }
+        let requested = ranges.len();
+        let ranges = ranges
+            .iter()
+            .map(|r| WireRangeScan {
+                start: blob(r.start.as_bytes()),
+                end: blob(r.end.as_bytes()),
+                after: r.after.as_ref().map(|c| blob(c.as_bytes())),
+                limit: r.limit,
+            })
+            .collect();
+        match self.call(p, NsCall::ScanMany { ranges }).await? {
+            NsReply::Pages { pages } if !pages.is_empty() && pages.len() <= requested => Ok(pages
+                .into_iter()
+                .map(|page| wire::scan_page(page.entries, page.next))
+                .collect()),
             other => Err(unexpected(&other)),
         }
     }

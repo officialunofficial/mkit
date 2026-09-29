@@ -12,7 +12,7 @@ use super::keys::{self, ParsedKey};
 use super::outbox::MAX_RELAY_PUTS;
 use super::{
     BlobKey, Key, MAX_BATCH_BYTES, MAX_KEY_BYTES, MAX_VALUE_BYTES, NamespaceStore, Partition,
-    StoreError, Value,
+    RangeScan, StoreError, Value,
 };
 use crate::pipeline::ShardMap;
 use crate::repo::RepoId;
@@ -23,7 +23,8 @@ pub const MAX_LOOKUP_IDS: usize = 256;
 /// many rows with more remaining, and has no member among them, gets
 /// [`LookupError::TooManyRows`].
 pub const MAX_LOOKUP_ROWS: usize = 4096;
-/// Maximum scan calls in one lookup, including legal empty continuation pages.
+/// Maximum partition-scoped scan calls in one lookup. Each call may serve a
+/// prefix of up to 256 ranges, including legal empty continuation pages.
 pub const MAX_LOOKUP_PAGES: usize = 512;
 /// At most 487 partition-scoped membership reads accompany 512 scan pages:
 /// the whole call uses at most 999 Worker subrequests.
@@ -111,6 +112,32 @@ pub fn plan_index_rows(
     entries: &[IndexEntry],
     at_ms: u64,
 ) -> Result<IndexPlan, StoreError> {
+    plan_index_rows_inner(shards, repo, source, pack, entries, at_ms, false)
+}
+
+/// Plan direct idempotent upserts for every target partition. Native indexed
+/// verification uses this before committing membership; no per-object write
+/// enters the advance batch.
+pub fn plan_index_rows_direct(
+    shards: &dyn ShardMap,
+    repo: &RepoId,
+    source: &Partition,
+    pack: &Hash,
+    entries: &[IndexEntry],
+    at_ms: u64,
+) -> Result<IndexPlan, StoreError> {
+    plan_index_rows_inner(shards, repo, source, pack, entries, at_ms, true)
+}
+
+fn plan_index_rows_inner(
+    shards: &dyn ShardMap,
+    repo: &RepoId,
+    source: &Partition,
+    pack: &Hash,
+    entries: &[IndexEntry],
+    at_ms: u64,
+    direct_all: bool,
+) -> Result<IndexPlan, StoreError> {
     let mut grouped: BTreeMap<Partition, BTreeMap<Key, Value>> = BTreeMap::new();
     for entry in entries {
         let target = shards.object_index(repo, &entry.object);
@@ -122,7 +149,7 @@ pub fn plan_index_rows(
     }
     let mut plan = IndexPlan::default();
     for (target, rows) in grouped {
-        if &target == source {
+        if direct_all || &target == source {
             let mut puts = Vec::new();
             let mut bytes = 0;
             for (key, value) in rows {
@@ -238,9 +265,9 @@ struct IdScan {
     reason: Option<LookupError>,
 }
 
-/// Scan every distinct id's candidates round-robin: each id gets its first
-/// page before any id gets a second, so hot ids early in the request cannot
-/// spend the whole page budget.
+/// Scan candidates in rounds, with one batched call per distinct partition
+/// per round. The served-prefix cursor rotates within a partition across
+/// rounds, so a hot first id cannot indefinitely hide later ids.
 async fn scan_all<S: NamespaceStore>(
     store: &S,
     shards: &dyn ShardMap,
@@ -268,9 +295,10 @@ async fn scan_all<S: NamespaceStore>(
         );
         order.push(*id);
     }
-    let mut pages = 0;
+    let mut calls = 0;
+    let mut round = 0;
     loop {
-        let mut progressed = false;
+        let mut groups: BTreeMap<Partition, Vec<Hash>> = BTreeMap::new();
         for id in &order {
             let Some(scan) = scans.get_mut(id) else {
                 continue;
@@ -283,49 +311,75 @@ async fn scan_all<S: NamespaceStore>(
                 scan.reason = Some(LookupError::TooManyRows);
                 continue;
             }
-            if pages == MAX_LOOKUP_PAGES {
-                scan.done = true;
-                scan.reason = Some(LookupError::TooManyPages);
-                continue;
-            }
-            let limit = SCAN_PAGE_ROWS.min(
-                u32::try_from(MAX_LOOKUP_ROWS - scan.rows.len())
-                    .map_err(|_| StoreError::Invalid("invalid lookup row cap".into()))?,
-            );
-            let page = store
-                .scan(
-                    &scan.partition,
-                    &scan.start,
-                    &scan.end,
-                    scan.after.as_ref(),
-                    limit,
-                )
-                .await?;
-            pages += 1;
-            progressed = true;
-            if page.entries.len() > limit as usize {
-                return Err(StoreError::Corrupt(
-                    "object index scan exceeded limit".into(),
-                ));
-            }
-            for (key, value) in page.entries {
-                match keys::parse(&key) {
-                    Some(ParsedKey::ObjectIndex {
-                        repo: found,
-                        object,
-                        pack_id,
-                    }) if found == repo.name && object == *id => scan.rows.push((pack_id, value)),
-                    _ => return Err(StoreError::Corrupt("malformed object index key".into())),
-                }
-            }
-            match page.next {
-                Some(cursor) => scan.after = Some(cursor),
-                None => scan.done = true,
-            }
+            groups.entry(scan.partition.clone()).or_default().push(*id);
         }
-        if !progressed {
+        if groups.is_empty() {
             return Ok(scans);
         }
+        let mut served = false;
+        for (partition, mut ids) in groups {
+            if calls == MAX_LOOKUP_PAGES {
+                for id in ids {
+                    if let Some(scan) = scans.get_mut(&id) {
+                        scan.done = true;
+                        scan.reason = Some(LookupError::TooManyPages);
+                    }
+                }
+                continue;
+            }
+            let n = ids.len();
+            ids.rotate_left(round % n);
+            let ranges: Vec<_> = ids
+                .iter()
+                .map(|id| {
+                    let scan = &scans[id];
+                    RangeScan {
+                        start: scan.start.clone(),
+                        end: scan.end.clone(),
+                        after: scan.after.clone(),
+                        limit: SCAN_PAGE_ROWS.min((MAX_LOOKUP_ROWS - scan.rows.len()) as u32),
+                    }
+                })
+                .collect();
+            let pages = store.scan_many(&partition, &ranges).await?;
+            calls += 1;
+            if pages.is_empty() || pages.len() > ranges.len() {
+                return Err(StoreError::Corrupt(
+                    "invalid scan_many served prefix".into(),
+                ));
+            }
+            served = true;
+            for ((id, range), page) in ids.iter().zip(&ranges).zip(pages) {
+                if page.entries.len() > range.limit as usize {
+                    return Err(StoreError::Corrupt(
+                        "object index scan exceeded limit".into(),
+                    ));
+                }
+                let Some(scan) = scans.get_mut(id) else {
+                    return Err(StoreError::Corrupt("missing object index scan".into()));
+                };
+                for (key, value) in page.entries {
+                    match keys::parse(&key) {
+                        Some(ParsedKey::ObjectIndex {
+                            repo: found,
+                            object,
+                            pack_id,
+                        }) if found == repo.name && object == *id => {
+                            scan.rows.push((pack_id, value));
+                        }
+                        _ => return Err(StoreError::Corrupt("malformed object index key".into())),
+                    }
+                }
+                match page.next {
+                    Some(cursor) => scan.after = Some(cursor),
+                    None => scan.done = true,
+                }
+            }
+        }
+        if !served {
+            return Ok(scans);
+        }
+        round += 1;
     }
 }
 
@@ -433,9 +487,9 @@ pub async fn contains_many<S: NamespaceStore>(
 }
 
 /// Whether this repository holds any named id, for the takedown sweep. This
-/// currently performs one scan per id and does not satisfy §14.3/R-133's
-/// one-read-per-distinct-index-partition bound. WP-5.6 uses WP-4.6's batched
-/// per-partition read. A capped miss fails closed: with no hit, the first
+/// first round performs exactly one read per distinct index partition,
+/// satisfying §14.3/R-133. An id with more than one page of rows needs
+/// further rounds; WP-5.6 accounts for that. A capped miss fails closed: with no hit, the first
 /// id's [`LookupError`] is returned so the caller can tell a data-dependent cap
 /// from a backend failure.
 pub async fn holds_any<S: NamespaceStore>(
@@ -470,6 +524,7 @@ mod tests {
         inner: MemoryKv,
         empty_once: AtomicBool,
         get_many_calls: AtomicUsize,
+        scan_many_calls: AtomicUsize,
     }
 
     impl NamespaceStore for EmptyPageOnce {
@@ -503,6 +558,27 @@ mod tests {
                 });
             }
             self.inner.scan(p, start, end, after, limit).await
+        }
+        async fn scan_many(
+            &self,
+            p: &Partition,
+            ranges: &[RangeScan],
+        ) -> Result<Vec<ScanPage>, StoreError> {
+            self.scan_many_calls.fetch_add(1, Ordering::SeqCst);
+            let mut pages = Vec::with_capacity(ranges.len());
+            for range in ranges {
+                pages.push(
+                    self.scan(
+                        p,
+                        &range.start,
+                        &range.end,
+                        range.after.as_ref(),
+                        range.limit,
+                    )
+                    .await?,
+                );
+            }
+            Ok(pages)
         }
         async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
             self.inner.apply(p, batch).await
@@ -856,6 +932,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn holds_any_reads_each_distinct_index_partition_once_in_first_round() {
+        let store = EmptyPageOnce {
+            inner: MemoryKv::default(),
+            empty_once: AtomicBool::new(false),
+            get_many_calls: AtomicUsize::new(0),
+            scan_many_calls: AtomicUsize::new(0),
+        };
+        let r = repo("a");
+        let mut first = [0x12; 32];
+        let mut second = first;
+        second[31] = 0x34;
+        let third = [0x34; 32];
+        first[31] = 0x56;
+        assert_eq!(
+            holds_any(&store, &D34Shards, &r, &[first, second, third])
+                .await
+                .unwrap(),
+            Ok(false)
+        );
+        assert_eq!(store.scan_many_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
     async fn lookup_pages_past_nonmember_packs() {
         let store = MemoryKv::default();
         let r = repo("a");
@@ -904,6 +1003,7 @@ mod tests {
             inner: MemoryKv::default(),
             empty_once: AtomicBool::new(false),
             get_many_calls: AtomicUsize::new(0),
+            scan_many_calls: AtomicUsize::new(0),
         };
         let r = repo("a");
         let id = [0x12; 32];

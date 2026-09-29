@@ -22,8 +22,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use mkit_server::{
-    Batch, BatchOutcome, Clock, Cursor, Key, NamespaceStore, Partition, PartitionStats, ScanPage,
-    StoreCapabilities, StoreError, Value,
+    Batch, BatchOutcome, Clock, Cursor, Key, MAX_SCAN_RANGES, NamespaceStore, Partition,
+    PartitionStats, ScanPage, StoreCapabilities, StoreError, Value,
 };
 
 use crate::classes::ShardClass;
@@ -127,7 +127,7 @@ impl<C: SqlConn> PressureStore<C> {
         self.inner.clear_stats_cache();
     }
 
-    fn observe_pressure(&self) {
+    fn observe_pressure(&self, partition: &Partition) {
         // The SQL apply future finishes on its first poll. This local,
         // synchronous size read follows commit without opening the input gate.
         match self.conn().size_bytes() {
@@ -135,7 +135,7 @@ impl<C: SqlConn> PressureStore<C> {
                 #[allow(clippy::cast_precision_loss)]
                 self.metrics.gauge(
                     pressure::METRIC_PARTITION_BYTES,
-                    &[("kind", self.class.label())],
+                    &[("kind", self.class.partition_label(partition))],
                     bytes as f64,
                 );
                 if let Some(capacity) = self.inner.capacity() {
@@ -148,7 +148,7 @@ impl<C: SqlConn> PressureStore<C> {
                         levels
                     };
                     for level in levels {
-                        pressure::emit(level, self.class.label(), bytes, limit);
+                        pressure::emit(level, self.class.partition_label(partition), bytes, limit);
                     }
                 }
             }
@@ -236,7 +236,7 @@ impl<C: SqlConn> NamespaceStore for PressureStore<C> {
         let has_put = batch.has_put();
         let outcome = self.inner.apply(partition, batch).await?;
         if has_put && outcome == BatchOutcome::Committed {
-            self.observe_pressure();
+            self.observe_pressure(partition);
             self.seed_backup_if_needed(partition).await;
         }
         Ok(outcome)
@@ -328,6 +328,44 @@ async fn dispatch<S: NamespaceStore>(
             )
             .await?;
             NsReply::page(page)
+        }
+        NsCall::ScanMany { ranges } => {
+            if ranges.len() > MAX_SCAN_RANGES {
+                return Err(StoreError::Invalid("too many scan ranges".into()));
+            }
+            let mut pages = Vec::with_capacity(ranges.len());
+            let (mut entries_left, mut bytes_left) = (MAX_PAGE_ENTRIES, MAX_PAGE_BYTES);
+            for range in ranges {
+                if !pages.is_empty()
+                    && (entries_left == 0
+                        || bytes_left
+                            < mkit_server::store::MAX_KEY_BYTES
+                                + mkit_server::store::MAX_VALUE_BYTES)
+                {
+                    break;
+                }
+                let (start, end) = (key(range.start), key(range.end));
+                let (start, end) = (&start, &end);
+                let page = bounded_page_budget(
+                    range.limit.min(entries_left),
+                    range.after.map(|c| Cursor::new(c.0)),
+                    bytes_left,
+                    |after, n| async move { store.scan(p, start, end, after.as_ref(), n).await },
+                )
+                .await?;
+                let page_bytes: usize = page
+                    .entries
+                    .iter()
+                    .map(|(k, v)| k.as_bytes().len() + v.as_bytes().len())
+                    .sum();
+                if page_bytes > bytes_left {
+                    return Err(StoreError::Corrupt("scan_many byte budget exceeded".into()));
+                }
+                entries_left = entries_left.saturating_sub(page.entries.len() as u32);
+                bytes_left = bytes_left.saturating_sub(page_bytes);
+                pages.push(page);
+            }
+            NsReply::pages(pages)
         }
         NsCall::Apply { batch } => {
             let batch = batch.into();
@@ -433,6 +471,54 @@ where
         match got.next {
             Some(next) if page.entries.len() < limit as usize && bytes < MAX_PAGE_BYTES => {
                 cursor = Some(next);
+            }
+            next => {
+                page.next = next;
+                return Ok(page);
+            }
+        }
+    }
+}
+
+/// Exact byte budget for a multi-range reply. One-row steps leave room for
+/// the largest valid key/value before fetching, so a served page never
+/// overshoots the shared reply budget.
+async fn bounded_page_budget<F, Fut>(
+    limit: u32,
+    after: Option<Cursor>,
+    max_bytes: usize,
+    mut step: F,
+) -> Result<ScanPage, StoreError>
+where
+    F: FnMut(Option<Cursor>, u32) -> Fut,
+    Fut: Future<Output = Result<ScanPage, StoreError>>,
+{
+    if limit == 0 {
+        return step(after, 0).await;
+    }
+    let mut page = ScanPage::default();
+    let mut bytes = 0;
+    let mut cursor = after;
+    loop {
+        let got = step(cursor.take(), 1).await?;
+        bytes += got
+            .entries
+            .iter()
+            .map(|(k, v)| k.as_bytes().len() + v.as_bytes().len())
+            .sum::<usize>();
+        if bytes > max_bytes {
+            return Err(StoreError::Corrupt("scan_many byte budget exceeded".into()));
+        }
+        page.entries.extend(got.entries);
+        match got.next {
+            Some(next)
+                if page.entries.len() < limit as usize
+                    && bytes
+                        + mkit_server::store::MAX_KEY_BYTES
+                        + mkit_server::store::MAX_VALUE_BYTES
+                        <= max_bytes =>
+            {
+                cursor = Some(next)
             }
             next => {
                 page.next = next;
