@@ -1523,6 +1523,23 @@
     ]
   },
   {
+    "id": "3.7b",
+    "title": "Public hooks.v1 types and mkit-hook:v1 verifier in mkit-rpc",
+    "milestone": "M3",
+    "track": "core",
+    "depends_on": [
+      "3.7",
+      "3.8"
+    ],
+    "size": "S",
+    "summary": "Public lightweight hooks feature with JSON messages, signer and verifier; server re-exports; external acceptance vectors (R-174, Linear MKIT-67).",
+    "human_action": false,
+    "area_gates": [
+      "rust",
+      "wasm"
+    ]
+  },
+  {
     "id": "3.8",
     "title": "Native hook channels: signed HTTPS hook channel and hook flags",
     "milestone": "M3",

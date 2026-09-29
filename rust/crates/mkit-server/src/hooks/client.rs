@@ -9,7 +9,7 @@ use serde::de::DeserializeOwned;
 use zeroize::Zeroizing;
 
 use super::channel::{ChannelError, HookChannel, HookRequest, HookResponse};
-use super::sign::{HookSigner, NonceSource, OsNonces};
+use super::{HookSigner, NonceSource, OsNonces};
 use crate::rt::{Clock, Sleep, with_timeout};
 
 /// The default per-call timeout (SPEC-SERVER §8, informative).

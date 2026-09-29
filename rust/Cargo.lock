@@ -3463,9 +3463,13 @@ dependencies = [
  "arbitrary",
  "buffa",
  "buffa-build",
+ "ed25519-dalek",
  "hex",
  "mkit-core",
+ "serde",
+ "serde_json",
  "thiserror 2.0.20",
+ "zeroize",
 ]
 
 [[package]]
@@ -3475,7 +3479,6 @@ dependencies = [
  "base64 0.22.1",
  "blake3",
  "buffa",
- "buffa-build",
  "bytes",
  "connectrpc",
  "connectrpc-build",

@@ -113,7 +113,7 @@ remote-hooks = [
     "dep:buffa",
     "buffa/json",
     "dep:getrandom",
-    "dep:buffa-build",
+    "mkit-rpc/hooks",
 ]
 
 # Runtime-agnostic HTTP object serving (`Pipeline::serve_http_object`,
@@ -136,8 +136,6 @@ send_wrapper = { version = "0.6", features = ["futures"] }
 # Only `build.rs`'s regeneration path (MKIT_TRANSPORT_CODEGEN=1) uses it; a
 # `default-features = false` build never compiles it.
 connectrpc-build = { version = "0.9.0", optional = true }
-# Same story for the hooks codegen (MKIT_HOOKS_CODEGEN=1): messages only.
-buffa-build = { version = "0.9.1", optional = true }
 
 [dev-dependencies]
 futures-executor = "0.3"

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- RPC: public `mkit-rpc::hooks` message types with JSON support and runtime-free
+  `HookSigner` and `HookVerifier`, enabled by the `hooks` feature. The server
+  re-exports its authentication surface (WP-3.7b, Linear MKIT-67).
+
 - Server: built-in ref policy (SPEC-SERVER §9.7, programmatic, Stage 2):
   `PipelineConfig::ref_policy` with per-ref allowed operation signers (both
   modes) and fast-forward-only rules (indexed mode). In indexed mode a
