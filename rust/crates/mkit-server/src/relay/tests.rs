@@ -1284,7 +1284,7 @@ async fn target_call_cap_defers_watermark_race_without_exceeding_calls() {
 }
 
 #[tokio::test]
-async fn blocked_prefix_does_not_exceed_four_times_the_row_budget() {
+async fn blocked_prefix_scans_at_most_four_times_rows_plus_backlog_head() {
     let s = Instrumented::new();
     let mut target_store = Instrumented::new();
     target_store.fail_target = Some(target(0));
@@ -1300,7 +1300,7 @@ async fn blocked_prefix_does_not_exceed_four_times_the_row_budget() {
         ..handler(target_store)
     };
     fire(&h, &s).await.unwrap();
-    assert_eq!(s.scanned.load(Ordering::SeqCst), 8);
+    assert_eq!(s.scanned.load(Ordering::SeqCst), 9);
 }
 
 #[tokio::test]
@@ -1451,7 +1451,9 @@ async fn durable_scan_reaches_healthy_row_after_512_failed_rows_and_retries_next
         fire_with_value(&h, &source_store, &mut timer_value)
             .await
             .unwrap();
-        assert!(source_store.scanned.load(Ordering::SeqCst) - inspected_before <= 512);
+        // The relay reads at most 512 delivery candidates plus one source
+        // head row for the backlog gauge.
+        assert!(source_store.scanned.load(Ordering::SeqCst) - inspected_before <= 513);
         // Simulate an isolate/process being recreated between every fire.
         h = RelayHandler {
             target: h.target,
