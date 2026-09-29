@@ -1624,7 +1624,17 @@ upload can bypass BeginUpload's authorization and admission.
 
 **If violated:** a stale receipt could select replaced bytes, or a crash could expose a partial pack or discard a live session.
 
-**Enforced by:** `mkit-server-conformance/src/storage/multipart.rs` on memory and FS; `mkit-server/src/fs/tests.rs` ticket-layout, restart and seven-day sweep tests; `Feature::Multipart` wire cases on memory and native FS + SQLite.
+**Enforced by:** `mkit-server-conformance/src/storage/multipart.rs` on memory, FS, R2 and S3; `mkit-server/src/fs/tests.rs` ticket-layout, restart and seven-day sweep tests; `Feature::Multipart` wire cases on memory, native FS + SQLite, native S3 + SQLite, and Worker R2.
+
+## Object-store multipart staging cannot publish unverified bytes
+
+**Always:** R2 and S3 stage parts under CV-keyed `server-uploads/<ticket-id>/<index>-<cv>` objects. A part becomes visible only after its subtree CV verifies. R2 re-hashes the assembled stream and withholds the final byte of the conditional pack put until the full root verifies. S3 streams each staged part through a subtree hash immediately before completion, then pins each `UploadPartCopy` to the ETag observed on that GET; the ETag identifies the object version, never proves integrity. A failed hash or copy precondition publishes no pack. Successful completion and abort remove session meta before parts, so concurrent completion sees `SessionGone`. Bucket lifecycle rules expire `server-uploads/` after eight days.
+
+**Because:** staged objects can change between upload and completion, while abandoned sessions must not persist indefinitely.
+
+**If violated:** a corrupted or replaced part can publish a pack whose bytes do not match its BLAKE3 root, or a stale session can remain available to another completion.
+
+**Enforced by:** the shared multipart suite on R2 and S3, corrupted-at-rest completion tests, conditional-copy FakeS3 tests, and the R2/S3 lifecycle runbook.
 
 ## Storage pressure observes physical capacity after commit
 

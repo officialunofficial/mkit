@@ -372,6 +372,18 @@ impl FakeS3 {
         );
     }
 
+    /// Fail the next matching query operation before serving it.
+    pub fn fail_next_query(&self, method: Method, query_contains: &str, status: StatusCode) {
+        self.shared.lock().faults.push_back(Fault {
+            method: Some(method),
+            query_contains: Some(query_contains.to_owned()),
+            kind: FaultKind::Before {
+                status,
+                retry_after: None,
+            },
+        });
+    }
+
     /// [`Self::fail_next`], with `Retry-After: <secs>`.
     pub fn fail_next_retry_after(&self, method: Option<Method>, status: StatusCode, secs: u64) {
         self.queue(
@@ -959,6 +971,10 @@ fn get(
     answer
         .headers
         .insert(header::CONTENT_LENGTH, HeaderValue::from(end - start));
+    let etag = format!("\"{}\"", &hex(&Sha256::digest(&object))[..32]);
+    answer
+        .headers
+        .insert(header::ETAG, etag.parse().expect("hex ETag"));
     if !head {
         let (start, end) = (
             usize::try_from(start).unwrap_or(usize::MAX),

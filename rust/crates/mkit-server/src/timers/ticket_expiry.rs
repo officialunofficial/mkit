@@ -23,7 +23,7 @@ pub fn abort_failures() -> u64 {
     ABORT_FAILURES.load(Ordering::Relaxed)
 }
 
-/// Kind-2 expiry handler. A Worker's per-kind cap limits R2 subrequests.
+/// Kind-2 expiry handler. The per-kind cap bounds each native and Worker tick.
 #[derive(Debug)]
 pub struct TicketExpiry<B> {
     /// The blob store backing the tickets on this server.
@@ -65,86 +65,99 @@ impl<S: NamespaceStore, B: MultipartBlobStore> TimerHandler<S> for TicketExpiry<
         timer: &'a DueTimer,
     ) -> BoxFuture<'a, Result<Fired, StoreError>> {
         Box::pin(async move {
-            let id: Hash = timer.reference.as_ref().try_into().map_err(|_| {
-                StoreError::Corrupt("ticket expiry reference is not a ticket id".into())
-            })?;
-            let key = keys::ticket(&id);
-            let Some(raw) = ctx.store.get(ctx.partition, &key).await? else {
-                return Ok(Fired::Done(Batch::new()));
+            let fire = async {
+                let id: Hash = timer.reference.as_ref().try_into().map_err(|_| {
+                    StoreError::Corrupt("ticket expiry reference is not a ticket id".into())
+                })?;
+                let key = keys::ticket(&id);
+                let Some(raw) = ctx.store.get(ctx.partition, &key).await? else {
+                    return Ok(Fired::Done(Batch::new()));
+                };
+                let ticket = codec::decode_ticket(&raw)?;
+                if ticket.expires_at_ms > ctx.now_ms {
+                    return Ok(Fired::Reschedule {
+                        due_at_ms: ticket.expires_at_ms,
+                        value: timer.value.clone(),
+                        batch: Batch::new(),
+                    });
+                }
+
+                let rid = &ticket.reservation_id;
+                let reservation = ctx
+                    .store
+                    .get(ctx.partition, &keys::reservation(rid)?)
+                    .await?
+                    .ok_or_else(|| StoreError::Corrupt("ticket has no reservation".into()))?;
+                if !matches!(
+                    codec::decode_reservation(&reservation)?,
+                    ReservationV1::Ticketed { ticket_id } if ticket_id == id
+                ) {
+                    return Err(StoreError::Corrupt("ticket reservation mismatch".into()));
+                }
+                let index = keys::ticket_index(
+                    &ticket.repo,
+                    &ticket.ref_name,
+                    &ticket.pack_id,
+                    &ticket.signer,
+                )?;
+                let tc = keys::tickets_per_ref(&ticket.repo, &ticket.ref_name)?;
+                let tu = keys::tickets_per_signer(&ticket.repo, &ticket.ref_name, &ticket.signer)?;
+                let (index_value, ref_count, signer_count, os, oc) = (
+                    ctx.store.get(ctx.partition, &index).await?,
+                    ctx.store.get(ctx.partition, &tc).await?,
+                    ctx.store.get(ctx.partition, &tu).await?,
+                    ctx.store
+                        .get(ctx.partition, &keys::outbox_sequence())
+                        .await?,
+                    ctx.store
+                        .get(ctx.partition, &keys::outcome_backlog())
+                        .await?,
+                );
+                let mut batch = Batch::new();
+                tickets::plan_ticket_close(
+                    &id,
+                    &ticket,
+                    &raw,
+                    index_value.as_ref(),
+                    ref_count.as_ref(),
+                    signer_count.as_ref(),
+                    CloseReason::ExpiryTimerFired,
+                    &mut batch.preconditions,
+                    &mut batch.writes,
+                )?;
+                let mut outbox = OutboxBuilder::new(os.as_ref(), oc.as_ref())?;
+                outbox.outcome(
+                    rid,
+                    &reservation,
+                    Terminal::new(ReservationV1::Expired {
+                        repository: repository(ctx.partition, &ticket)?,
+                        occurred_at_ms: ctx.now_ms,
+                    })?,
+                );
+                outbox.try_finish(&mut batch.preconditions, &mut batch.writes)?;
+
+                if let Some(session) = &ticket.upload_session
+                    && let Err(error) = self
+                        .blobs
+                        .abort(BlobKey::pack(ticket.pack_id), session)
+                        .await
+                {
+                    ABORT_FAILURES.fetch_add(1, Ordering::Relaxed);
+                    tracing::warn!(error = %error, ticket_id = %mkit_core::hash::to_hex(&id), "ticket expiry session abort failed");
+                }
+                Ok(Fired::Done(batch))
             };
-            let ticket = codec::decode_ticket(&raw)?;
-            if ticket.expires_at_ms > ctx.now_ms {
-                return Ok(Fired::Reschedule {
-                    due_at_ms: ticket.expires_at_ms,
-                    value: timer.value.clone(),
-                    batch: Batch::new(),
-                });
+            match fire.await {
+                Err(error @ StoreError::Corrupt(_)) => {
+                    tracing::warn!(%error, "corrupt ticket expiry row deferred for repair");
+                    Ok(Fired::Reschedule {
+                        due_at_ms: ctx.now_ms.saturating_add(60_000),
+                        value: timer.value.clone(),
+                        batch: Batch::new(),
+                    })
+                }
+                other => other,
             }
-
-            let rid = &ticket.reservation_id;
-            let reservation = ctx
-                .store
-                .get(ctx.partition, &keys::reservation(rid)?)
-                .await?
-                .ok_or_else(|| StoreError::Corrupt("ticket has no reservation".into()))?;
-            if !matches!(
-                codec::decode_reservation(&reservation)?,
-                ReservationV1::Ticketed { ticket_id } if ticket_id == id
-            ) {
-                return Err(StoreError::Corrupt("ticket reservation mismatch".into()));
-            }
-            let index = keys::ticket_index(
-                &ticket.repo,
-                &ticket.ref_name,
-                &ticket.pack_id,
-                &ticket.signer,
-            )?;
-            let tc = keys::tickets_per_ref(&ticket.repo, &ticket.ref_name)?;
-            let tu = keys::tickets_per_signer(&ticket.repo, &ticket.ref_name, &ticket.signer)?;
-            let (index_value, ref_count, signer_count, os, oc) = (
-                ctx.store.get(ctx.partition, &index).await?,
-                ctx.store.get(ctx.partition, &tc).await?,
-                ctx.store.get(ctx.partition, &tu).await?,
-                ctx.store
-                    .get(ctx.partition, &keys::outbox_sequence())
-                    .await?,
-                ctx.store
-                    .get(ctx.partition, &keys::outcome_backlog())
-                    .await?,
-            );
-            let mut batch = Batch::new();
-            tickets::plan_ticket_close(
-                &id,
-                &ticket,
-                &raw,
-                index_value.as_ref(),
-                ref_count.as_ref(),
-                signer_count.as_ref(),
-                CloseReason::ExpiryTimerFired,
-                &mut batch.preconditions,
-                &mut batch.writes,
-            )?;
-            let mut outbox = OutboxBuilder::new(os.as_ref(), oc.as_ref())?;
-            outbox.outcome(
-                rid,
-                &reservation,
-                Terminal::new(ReservationV1::Expired {
-                    repository: repository(ctx.partition, &ticket)?,
-                    occurred_at_ms: ctx.now_ms,
-                })?,
-            );
-            outbox.try_finish(&mut batch.preconditions, &mut batch.writes)?;
-
-            if let Some(session) = &ticket.upload_session
-                && let Err(error) = self
-                    .blobs
-                    .abort(BlobKey::pack(ticket.pack_id), session)
-                    .await
-            {
-                ABORT_FAILURES.fetch_add(1, Ordering::Relaxed);
-                tracing::warn!(error = %error, ticket_id = %mkit_core::hash::to_hex(&id), "ticket expiry session abort failed");
-            }
-            Ok(Fired::Done(batch))
         })
     }
 }
@@ -446,5 +459,47 @@ mod tests {
             ),
             Ok(ReservationV1::Expired { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn corrupt_expiry_does_not_use_a_healthy_ticket_slot() {
+        let store = MemoryKv::default();
+        let bad = [0_u8; 32];
+        store
+            .apply(
+                &partition(),
+                Batch::new()
+                    .put(keys::ticket(&bad), Value::new(&b"bad ticket"[..]))
+                    .put(
+                        keys::timer(99, kinds::TICKET_EXPIRY.get(), &bad),
+                        Value::default(),
+                    ),
+            )
+            .await
+            .unwrap();
+        let mut tickets = Vec::new();
+        for n in 20..29 {
+            let t = ticket(n, 100, None);
+            plant(&store, &t, 100).await;
+            tickets.push(t);
+        }
+        let report = tick(&store, MemoryBlobStore::default(), 100).await;
+        assert_eq!(report.failed, 0);
+        assert_eq!(report.fired, 8);
+        assert_eq!(report.deferred, 2);
+        assert_eq!(tick(&store, MemoryBlobStore::default(), 100).await.fired, 2);
+        let closed = futures::future::join_all(tickets.iter().map(|t| async {
+            let value = store
+                .get(&partition(), &keys::reservation(&t.reservation_id).unwrap())
+                .await
+                .unwrap()
+                .unwrap();
+            matches!(
+                codec::decode_reservation(&value),
+                Ok(ReservationV1::Expired { .. })
+            )
+        }))
+        .await;
+        assert_eq!(closed.into_iter().filter(|yes| *yes).count(), 9);
     }
 }

@@ -107,14 +107,16 @@ impl Drop for Reservation {
 struct Spool {
     /// Unnamed: unlinked at creation (see the module docs).
     file: File,
-    blake3: Hasher,
+    blake3: Option<Hasher>,
     sha256: Sha256,
 }
 
 impl Spool {
     fn append(&mut self, chunk: &[u8]) -> io::Result<()> {
         self.file.write_all(chunk)?;
-        self.blake3.update(chunk);
+        if let Some(hasher) = &mut self.blake3 {
+            hasher.update(chunk);
+        }
         self.sha256.update(chunk);
         Ok(())
     }
@@ -147,7 +149,7 @@ pub(super) async fn begin(
         written: 0,
         spool: Some(Spool {
             file,
-            blake3: Hasher::new(),
+            blake3: Some(Hasher::new()),
             sha256: Sha256::new(),
         }),
         failed: false,
@@ -333,7 +335,7 @@ impl PackSink for S3PackSink {
         }
         let spool = self.spool.take().ok_or_else(sink_gone)?;
         // Verify first: nothing is sent for bytes that do not match.
-        if spool.blake3.finalize() != *self.key.hash() {
+        if spool.blake3.ok_or_else(sink_gone)?.finalize() != *self.key.hash() {
             return Err(StoreError::Invalid(
                 "blob hash does not match its key".into(),
             ));
@@ -412,7 +414,7 @@ pub(super) async fn begin_part(
         hasher,
         spool: Some(Spool {
             file,
-            blake3: Hasher::new(),
+            blake3: None,
             sha256: Sha256::new(),
         }),
         written: 0,
@@ -436,6 +438,7 @@ impl mkit_server::PartSink for S3PartSink {
             return Err(StoreError::Invalid(e.to_string().into()));
         }
         let Some(mut spool) = self.spool.take() else {
+            self.failed = true;
             return Err(sink_gone());
         };
         let len = chunk.len() as u64;

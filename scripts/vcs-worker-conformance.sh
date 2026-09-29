@@ -57,7 +57,7 @@ WRANGLER_VERSION="4.134.0"
 PORT="${VCS_CONFORMANCE_PORT:-8791}"
 ORIGIN="http://127.0.0.1:${PORT}"
 REPOSITORY="default"
-MAX_PACK_BYTES=4294967296
+MAX_PACK_BYTES=1073741824
 # Phase 2's quota: a window the growth case waits out (at most 60 s) that
 # still fits its 265 probe writes, and the quota cases' exhausting writes,
 # at `wrangler dev` speed.
@@ -301,7 +301,8 @@ cargo build --manifest-path rust/Cargo.toml -p mkit-server-conformance \
 runner="${root}/rust/target/debug/mkit-server-conformance"
 
 echo ">> building apps/vcs-worker (worker-build ${build_args[*]})"
-(cd apps/vcs-worker && worker-build "${build_args[@]}")
+(cd apps/vcs-worker && CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true \
+    CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=true worker-build "${build_args[@]}")
 
 start_server suite "${vars[@]}"
 run_suite "${features}"

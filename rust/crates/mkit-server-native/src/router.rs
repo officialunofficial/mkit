@@ -135,8 +135,12 @@ where
         .iter()
         .fold(axum::Router::new(), |router, procedure| {
             router.route_service(procedure.connect_path(), streaming.clone())
+        });
+    let router = LONG
+        .iter()
+        .fold(router, |router, procedure| {
+            router.route_service(procedure.connect_path(), long.clone())
         })
-        .route_service(LONG[0].connect_path(), long)
         .fallback_service(unary);
     layers::apply(router, opts, bearer.as_deref())
 }

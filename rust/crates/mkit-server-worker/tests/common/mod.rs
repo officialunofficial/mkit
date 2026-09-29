@@ -61,7 +61,9 @@ pub struct SimBucket {
 }
 
 /// The piece size simulated bodies arrive in: above the store's limit.
-const SIM_PIECE: usize = 1536 * 1024;
+// Model the bounded chunks of an R2 response while charging each copied
+// chunk to the reading thread's heap meter.
+const SIM_PIECE: usize = 256 * 1024;
 
 impl SimBucket {
     pub fn fail_next_puts(&self, n: usize) {
@@ -158,7 +160,9 @@ impl ObjectBucket for SimBucket {
                 None
             } else {
                 let n = rest.len().min(SIM_PIECE);
-                Some((Ok(rest.split_to(n)), rest))
+                let piece = Bytes::copy_from_slice(&rest[..n]);
+                let _ = rest.split_to(n);
+                Some((Ok(piece), rest))
             }
         });
         Ok(Some((size, Box::pin(stream))))

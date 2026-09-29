@@ -658,6 +658,30 @@ fn upload_oversize_declared_is_resource_exhausted() {
     assert_eq!(env.pipe.meta.calls(), 0);
 }
 
+#[test]
+fn legacy_single_upload_rejects_above_its_separate_cap_before_receiving() {
+    let mut config = cfg(authv2());
+    config.upload_limits.max_total_bytes = 128 * 1024 * 1024;
+    config.single_upload_max_bytes = Some(64 * 1024 * 1024);
+    let clock = clock();
+    let env = build(config, Spy::new(store(&clock)), Hooks::new(), clock);
+    let total = 64 * 1024 * 1024 + 1;
+    let commitment = format!("pack:{}:{total}", to_hex(&[5; 32]));
+    let req = Req::committed(&key(7), Procedure::UploadPack, &commitment, &nonce(1), T0);
+    let auth = env.auth(&req).unwrap();
+    let err = block_on(env.pipe.open_upload(&auth, Some(&[5; 32]), Some(total))).unwrap_err();
+    assert_eq!(err.code(), Code::ResourceExhausted);
+    assert_eq!(
+        err.public_message(),
+        UploadError::TotalTooLarge {
+            total,
+            cap: 64 * 1024 * 1024
+        }
+        .connect_message()
+    );
+    assert_eq!(env.pipe.meta.calls(), 0);
+}
+
 /// Blobs whose sinks record every write's length.
 #[derive(Default)]
 pub(super) struct Counting {

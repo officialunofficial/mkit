@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Server Worker: stream verified multipart parts into CV-keyed R2 objects and
   verify the complete pack before publishing it; raise the ticketed pack cap
-  to 4 GiB while retaining the 64 MiB single-upload limit (WP-1.12).
+  to 1 GiB while retaining the 64 MiB single-upload limit (WP-1.12).
 - Server native: support S3 multipart with verified CV-keyed parts and
   server-side `UploadPartCopy` assembly, plus a long CompleteUpload deadline
   (WP-1.13).
@@ -21,7 +21,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   follow in WP-1.30b.
 - Connect client: detect bounded 402 admission challenges and report payment receipts without exposing their values (WP-3.10). `TransportError` is now non-exhaustive, a breaking change for exhaustive downstream matches.
 - Connect client: run a trusted, user-configured admission helper once and retry admitted writes with strictly filtered headers (WP-3.11).
-
 - Connect client: sign repository reads with auth v2 on each attempt, including
   the framed `DownloadPack` request. Add a grant-source API and local selection
   logic; the user grant store follows in WP-2.13.

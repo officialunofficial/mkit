@@ -74,14 +74,14 @@ pub const TICKET_KEYS_VAR: &str = "TICKET_KEYS";
 /// Maximum ticketed pack size (bytes), bounded by R2's single-object limit.
 pub const MAX_PACK_BYTES_VAR: &str = "MAX_PACK_BYTES";
 
-/// Default ticketed pack cap, four GiB.
-pub const MAX_PACK_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+/// Default ticketed pack cap, one GiB until staging CPU measurements.
+pub const MAX_PACK_BYTES: u64 = 1024 * 1024 * 1024;
 /// R2's 4.995 GiB single-object ceiling, rounded down to whole bytes.
 pub const MAX_PACK_BYTES_CEILING: u64 = 4_995 * 1024 * 1024 * 1024 / 1000;
 /// Legacy single-part `UploadPack` cap.
 pub const SINGLE_PUT_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
-/// Room for Connect framing on top of [`MAX_PACK_BYTES`]: a 5-byte
+/// Room for Connect framing on top of [`SINGLE_PUT_MAX_BYTES`]: a 5-byte
 /// envelope and about 45 bytes of message fields around each chunk's data,
 /// so any client whose chunks average 4 KiB or more fits (mkit sends
 /// 800 KiB chunks).
@@ -170,6 +170,7 @@ impl WorkerConfig {
         };
         let mut config =
             PipelineConfig::new(Addressing::Single { repo }, AuthMode::AuthV2(auth), limits);
+        config.single_upload_max_bytes = Some(SINGLE_PUT_MAX_BYTES);
         config.sharding = self.sharding;
         config.ticket_keys.clone_from(&self.ticket_keys);
         #[cfg(feature = "test-faults")]

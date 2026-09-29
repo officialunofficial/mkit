@@ -31,11 +31,11 @@ path = "junit.xml"
 # prove it uses the long deadline. The rest of the wire suite follows that
 # request, so its total runtime can exceed the default 60-second envelope.
 [[profile.default.overrides]]
-filter = 'binary(wire_s3_sqlite)'
+filter = 'test(=wire_suite_s3_sqlite_auth_v2)'
 slow-timeout = { period = "180s", terminate-after = 1 }
 
 [[profile.ci.overrides]]
-filter = 'binary(wire_s3_sqlite)'
+filter = 'test(=wire_suite_s3_sqlite_auth_v2)'
 slow-timeout = { period = "180s", terminate-after = 1 }
 
 # The bounded PR run of the stateful suite (tests/state_machine.rs, 32 cases)

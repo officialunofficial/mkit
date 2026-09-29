@@ -122,17 +122,25 @@ pub struct R2PartSink<B: ObjectBucket> {
     object: String,
     index: u32,
     cv: [u8; 32],
+    failed: bool,
 }
 
 impl<B: ObjectBucket> PartSink for R2PartSink<B> {
     async fn write(&mut self, chunk: Bytes) -> Result<(), StoreError> {
+        if self.failed {
+            return Err(StoreError::Invalid("write after a failed write".into()));
+        }
         if chunk.is_empty() {
+            self.failed = true;
             return Err(StoreError::Invalid("empty part chunk".into()));
         }
         self.sink.write(chunk).await
     }
 
     async fn commit(self) -> Result<Vec<u8>, StoreError> {
+        if self.failed {
+            return Err(StoreError::Invalid("commit after a failed write".into()));
+        }
         self.store
             .check_meta(&self.meta_key, &self.expected_meta)
             .await?;
@@ -214,6 +222,7 @@ impl<B: ObjectBucket> MultipartBlobStore for R2BlobStore<B> {
             object,
             index,
             cv: expected_cv,
+            failed: false,
         })
     }
 
@@ -303,7 +312,11 @@ impl<B: ObjectBucket> MultipartBlobStore for R2BlobStore<B> {
     }
 
     async fn abort(&self, _key: BlobKey, session: &[u8]) -> Result<(), StoreError> {
-        self.delete_prefix(&session_prefix(self, session)?, None)
+        let prefix = session_prefix(self, session)?;
+        self.bucket
+            .delete(&format!("{prefix}meta"))
             .await
+            .map_err(|e| backend_error(StorageOp::BlobPut, e))?;
+        self.delete_prefix(&prefix, None).await
     }
 }

@@ -162,9 +162,7 @@ async fn sqlite_driver_fires_ticket_expiry() {
     let shutdown = Shutdown::new();
     let task = TimerDriver::new(
         store.clone(),
-        TimerRegistry::new().register(mkit_server::timers::ticket_expiry::TicketExpiry {
-            blobs: MemoryBlobStore::default(),
-        }),
+        server::sqlite_timer_registry(MemoryBlobStore::default(), store.clone()),
         Arc::new(SystemClock),
     )
     .start(shutdown.clone())

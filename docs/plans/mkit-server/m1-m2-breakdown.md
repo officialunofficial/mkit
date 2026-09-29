@@ -366,11 +366,12 @@ Folded into WP-S1 §7.6/§7.8/§7.9 (adopted Q18 default). Every former dependen
 - **Depends on:** WP-1.11, WP-1.8.
 - **Goal:** stream each client-streamed part through the Worker (M0-17's streaming dispatch; `uploadPart` fed from a
   `FixedLengthStream` whose put is `spawn_local`'d as in M0-16), hashing it as a BLAKE3 subtree; `complete` only
-  after the merged root verifies (R2 visibility is the commit point); no presigned direct-to-R2 uploads; part
-  requests never reach a DO. Remove M0's 64 MiB stopgap for ticketed parts. R2 limits: uniform part size ≥ 5 MiB
-  except the last, ≤ 10,000 parts, 7-day auto-abort (tickets expire sooner); advertise 8 MiB, cap 32 MiB.
-- **Tests:** the storage multipart suite under `wrangler dev`; a ~40 MiB (5-part) upload; peak memory per request
-  ≤ one part.
+  after the full-pack root verifies in a conditional put; no presigned direct-to-R2 uploads or native R2 multipart for client parts; part
+  requests never reach a DO. Keep M0's 64 MiB cap for single-part `UploadPack`, while ticketed multipart defaults
+  to a 1 GiB pack cap with a 4.995 GiB configuration ceiling. Stage CV-keyed objects under `server-uploads/`;
+  expire that prefix after eight days. Advertise 8 MiB parts, cap 32 MiB.
+- **Tests:** the shared storage multipart suite over SimBucket (including the counted heap bound),
+  plus the 17 MiB three-part wire case under `wrangler dev`.
 - **Size:** M (~800).
 
 ### WP-1.13 Native: S3 multipart `BlobStore`
@@ -449,7 +450,7 @@ Folded into WP-S1 §7.6/§7.8/§7.9 (adopted Q18 default). Every former dependen
 - **Depends on:** WP-1.17, WP-1.3, WP-1.11.
 - **Goal:** for packs larger than `part_size`: subtree chaining values, per-part client-streaming upload with its
   own nonce and `part:` commitment, receipts kept for resume (re-send only parts without a receipt), `CompleteUpload`; parts are
-  sliced lazily (no second whole-pack copy).
+  sliced lazily (no second whole-pack copy). Give CompleteUpload the native server's long timeout.
 - **Tests:** 3-part pack with a fault after part 2, then resume; envelope parity against `auth-v2/part.json`.
 - **Size:** M (~900).
 
@@ -492,7 +493,9 @@ Folded into WP-S1 §7.6/§7.8/§7.9 (adopted Q18 default). Every former dependen
 - **Goal:** `env.staging` in `apps/vcs-worker/wrangler.jsonc`: route/custom domain, `AUTH_AUDIENCE` = the staging
   origin, `SERVER_MODE=multi`, `NAMESPACE_POLICY=allowlist` with the CI key namespace, R2 bucket
   `mkit-vcs-objects-staging` (+ a backups prefix or bucket), the DO bindings and migration `v2`, `limits.cpu_ms`,
-  a current `compatibility_date`, placement vars (default none). README runbook: deploy, backup/restore, alerts.
+  a current `compatibility_date`, placement vars (default none). Re-measure Worker completion CPU under staging R2,
+  then set the staging CPU limit and `MAX_PACK_BYTES` from that measurement (default 1 GiB, hard ceiling 4.995 GiB).
+  README runbook: deploy, backup/restore, alerts.
 - **HUMAN / CLOUDFLARE STEPS:** see 00-plan.md human-action checklist (hostname/zone, scoped API token, bucket,
   first deploy, CI signer key, manual smoke).
 - **Size:** S (~300).
@@ -909,7 +912,7 @@ All planner questions are resolved by the adopted defaults (see `00-plan.md` →
 | Q-M1-3 | Single-part packs use `UploadPack` with the ticket token and the `pack:` commitment (planner default) |
 | Q-M1-4 | Part size 8 MiB advertised, 32 MiB max (planner default); `BeginUpload` threshold 0 on multi-repo deployments (planner default; every multi-repo upload is ticketed so membership is always recorded in a ref shard), unchanged for single-repo |
 | Q-M1-5 | Defaulted `Transport::advance_refs_committing` (adopted) |
-| Q-M1-6 | Built-in no-op sink acks and deletes rows until M3 (planner default; bounded growth) |
+| Q-M1-6 | WP-3.3 owns the `NoOutcomes` driver that acks locally until M3; expiry only writes durable outcome rows |
 | Q-M1-7 | Implicit per-session tickets on ssh/enc (adopted); no threshold |
 | Q-M1-8 | Human decision: staging hostname/zone/account and data policy (00-plan.md human checklist) |
 | Q-M1-9 | Confirmed: no ContentIndex holders before M4 |

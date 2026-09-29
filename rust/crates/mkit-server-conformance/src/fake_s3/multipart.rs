@@ -29,6 +29,21 @@ fn invalid_part() -> S3Error {
     )
 }
 
+fn copy_part_xml(etag: &str, number: u32) -> String {
+    if number % 2 == 1 {
+        // MinIO's Go encoding/xml escapes quotation marks as &#34;.
+        format!(
+            "<CopyPartResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><LastModified>2024-01-01T00:00:00.000Z</LastModified><ETag>{}</ETag></CopyPartResult>",
+            etag.replace('"', "&#34;")
+        )
+    } else {
+        format!(
+            "<CopyPartResult><ETag>{}</ETag></CopyPartResult>",
+            etag.replace('"', "&quot;")
+        )
+    }
+}
+
 fn query_pairs(query: &str) -> Result<HashMap<String, String>, S3Error> {
     let mut result = HashMap::new();
     for pair in query.split('&') {
@@ -82,6 +97,14 @@ async fn read_signed_body(
     Ok(bytes)
 }
 
+fn max_keys(pairs: &HashMap<String, String>) -> Result<usize, S3Error> {
+    pairs.get("max-keys").map_or(Ok(1000), |value| {
+        value
+            .parse::<usize>()
+            .map_err(|_| not_implemented("invalid max-keys"))
+    })
+}
+
 pub(super) async fn serve_query(
     shared: &Shared,
     parts: &axum::http::request::Parts,
@@ -95,9 +118,12 @@ pub(super) async fn serve_query(
     if key.is_empty()
         && parts.method == Method::GET
         && pairs.get("list-type").is_some_and(|v| v == "2")
-        && pairs
-            .keys()
-            .all(|k| matches!(k.as_str(), "list-type" | "prefix" | "continuation-token"))
+        && pairs.keys().all(|k| {
+            matches!(
+                k.as_str(),
+                "list-type" | "prefix" | "continuation-token" | "max-keys"
+            )
+        })
     {
         *received = super::drain(body).await;
         return list(
@@ -105,6 +131,7 @@ pub(super) async fn serve_query(
             bucket,
             pairs.get("prefix").map_or("", String::as_str),
             pairs.get("continuation-token").map(String::as_str),
+            max_keys(&pairs)?,
         );
     }
     if !key.is_empty()
@@ -154,6 +181,9 @@ pub(super) async fn serve_query(
             .cloned()
             .ok_or_else(|| err(StatusCode::NOT_FOUND, "NoSuchKey", "copy source missing"))?;
         let etag = format!("\"{}\"", &hex(&Sha256::digest(&data))[..32]);
+        if header_str(&parts.headers, "x-amz-copy-source-if-match") != Some(etag.as_str()) {
+            return Err(precondition_failed());
+        }
         let upload = objects
             .uploads
             .get_mut(id)
@@ -161,9 +191,7 @@ pub(super) async fn serve_query(
             .ok_or_else(|| err(StatusCode::NOT_FOUND, "NoSuchUpload", "upload missing"))?;
         upload.parts.insert(number, (data, etag.clone()));
         let mut answer = Answer::ok(StatusCode::OK);
-        answer.body = Bytes::from(format!(
-            "<CopyPartResult><ETag>{etag}</ETag></CopyPartResult>"
-        ));
+        answer.body = Bytes::from(copy_part_xml(&etag, number));
         return Ok(answer);
     }
     if !key.is_empty()
@@ -265,7 +293,11 @@ fn list(
     bucket: &str,
     prefix: &str,
     cursor: Option<&str>,
+    max_keys: usize,
 ) -> Result<Answer, S3Error> {
+    if !(1..=1000).contains(&max_keys) {
+        return Err(not_implemented("invalid max-keys"));
+    }
     let objects = shared.lock();
     let keys: Vec<_> = objects
         .buckets
@@ -273,19 +305,19 @@ fn list(
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "NoSuchBucket", "bucket missing"))?
         .keys()
         .filter(|key| key.starts_with(prefix) && cursor.is_none_or(|c| key.as_str() > c))
-        .take(1001)
+        .take(max_keys + 1)
         .cloned()
         .collect();
-    let truncated = keys.len() > 1000;
+    let truncated = keys.len() > max_keys;
     let mut xml = format!("<ListBucketResult><IsTruncated>{truncated}</IsTruncated>");
-    for key in keys.iter().take(1000) {
+    for key in keys.iter().take(max_keys) {
         let _ = write!(xml, "<Contents><Key>{key}</Key></Contents>");
     }
     if truncated {
         let _ = write!(
             xml,
             "<NextContinuationToken>{}</NextContinuationToken>",
-            keys[999]
+            keys[max_keys - 1]
         );
     }
     xml.push_str("</ListBucketResult>");
@@ -299,6 +331,12 @@ mod tests {
     use super::*;
     use crate::fake_s3::{FakeS3Options, Objects};
     use std::sync::Mutex;
+
+    #[test]
+    fn minio_copy_response_bytes_escape_quotes_as_go_xml() {
+        let body = copy_part_xml("\"d41d8cd98f00b204e9800998ecf8427e\"", 1);
+        assert_eq!(body.as_bytes(), b"<CopyPartResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><LastModified>2024-01-01T00:00:00.000Z</LastModified><ETag>&#34;d41d8cd98f00b204e9800998ecf8427e&#34;</ETag></CopyPartResult>");
+    }
 
     fn shared(sizes: &[usize]) -> Shared {
         let mut objects = Objects::default();

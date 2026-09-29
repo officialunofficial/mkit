@@ -33,10 +33,9 @@ UploadPart**, **0.12 s for the 1 MiB tail**, and **3.36 s for completion**.
 The completion rate extrapolates to about **199 s of CPU per GiB**. These are
 samples from a shared local machine, not deployed R2 measurements; the
 `(program)` profiler frames are included in busy time. A 1 GiB completion
-fits the 300 s Workers Paid ceiling by this estimate, while the 4 GiB
-advertised default would exceed it if the rate remains linear. WP-1.19 must
-measure on staging and lower the configured `MAX_PACK_BYTES` or change the
-completion strategy before allowing packs that exceed the CPU budget.
+fits the 300 s Workers Paid ceiling by this estimate, so the default
+`MAX_PACK_BYTES` is 1 GiB. WP-1.19 re-measures on staging and sets the
+deployment's CPU limit and pack cap before allowing larger packs.
 
 If a client receives `Invalid` after two writers upload the same index at
 once, it should re-upload that part and retry completion. Each valid part is
