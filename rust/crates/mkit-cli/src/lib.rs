@@ -29,6 +29,7 @@ pub mod editor;
 pub mod exit;
 mod fanout;
 pub mod format;
+pub mod grants;
 pub mod progress;
 pub mod remote_dispatch;
 mod restore_fanout;
@@ -86,6 +87,7 @@ pub fn dispatch(argv: &[String]) -> u8 {
         }
         "init" => commands::init::run(&rest),
         "key" => commands::key::run(&rest),
+        "grant" => commands::grant::run(&rest),
         "keygen" => commands::keygen::run(&rest),
         "hash" => commands::hash_cmd::run(&rest),
         "cat" => commands::cat::run(&rest),

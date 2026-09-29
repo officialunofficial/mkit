@@ -103,6 +103,7 @@ const DOCUMENTED_SUBCOMMANDS: &[&str] = &[
     "serve",
     "mcp",
     "key",
+    "grant",
     "keygen",
     "config",
     "self",

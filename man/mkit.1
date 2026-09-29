@@ -36,7 +36,7 @@ A user-level config at
 provides cross-repo defaults; repo-local values in
 .Pa .mkit/config
 win over it for ordinary keys, but security-sensitive keys
-.Pq Cm signing_key , Cm user.identity , Cm signer , Cm key.* , Cm attest.* , Cm ssh.* , No and Cm trusted_remote_endpoint
+.Pq Cm signing_key , Cm user.identity , Cm signer , Cm key.* , Cm attest.* , Cm ssh.* , Cm grant.webauthn_rp , No and Cm trusted_remote_endpoint
 are user-scoped only and are ignored if set repo-locally.
 .Sh GLOBAL OPTIONS
 Parsed before
@@ -1225,6 +1225,22 @@ Manage user-scoped keystore keys backed by the platform keystore
 (Keychain on macOS, libsecret/systemd-creds/YubiKey on Linux). Unlike
 .Cm keygen
 (which writes to a repo-local file), these keys persist across repos.
+.It Cm grant Cm create | Cm add | Cm list
+Issue, import and list write and read grants (SPEC-WRITE-GRANTS).
+.Cm grant create
+signs a grant with the owner key
+.Pq Cm ed25519 No or a software-keystore Cm secp256k1-eip191 key ,
+or imports a wallet or WebAuthn signature over a statement printed with
+.Fl Fl print-statement ;
+.Cm grant add
+verifies a grant header and adds it to the user grant store under
+.Pa $XDG_CONFIG_HOME/mkit/grants/ ;
+.Cm grant list Op Fl Fl check
+lists it. Among the grants valid for a request the higher epoch wins, then the
+most specific scope, then the latest expiry. A write-only grant never implies
+read on a private repository.
+This store is unrelated to the operator-side
+.Cm mkit-server grant register .
 .It Cm keygen Oo Fl Fl algorithm Cm ed25519 | Cm secp256k1 | Cm p256 Oc Oo Fl Fl force Oc Op Fl Fl print-pubkey
 Generate a fresh keypair.
 .Fl Fl algorithm

@@ -189,6 +189,13 @@ serde = { version = "1", features = ["derive"] }
 # transports are independent and don't need to agree.
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "blocking", "json"] }
 sha2 = "0.11"
+# `mkit grant`/`epoch`/`visibility` (grants/): base64url and hex for imported
+# wallet and WebAuthn signatures, and secp256k1 point decompression to derive
+# the 0x owner address of a keystore key. All three are already in the graph
+# (mkit-attest, mkit-keystore), so no new supply-chain root.
+base64 = "0.23"
+hex = "0.4"
+k256 = { version = "0.14", default-features = false, features = ["ecdsa", "std"] }
 flate2 = "1"
 tar = "0.4"
 # Used by `mkit keygen` to generate raw 32-byte secrets for non-ed25519

@@ -53,6 +53,7 @@ _mkit() {
         'clone:Clone a repository'
         'remote:Show, add, remove, or rename remotes'
         'key:Manage user-scoped keystore keys (generate/list/import/export/delete)'
+        'grant:Issue, import and list write and read grants'
         'keygen:Generate a new Ed25519 signing keypair'
         'cherry-pick:Apply a commit to the current branch'
         'revert:Create a new commit undoing a previous commit'
@@ -445,6 +446,12 @@ _mkit() {
                         'rename[rename a named remote]' \
                         'get-url[print a remote URL]' \
                         'set-url[change a remote URL]'
+                    ;;
+                grant)
+                    _values 'grant subcommand' \
+                        'create[create an owner-signed grant]' \
+                        'add[verify a grant header and add it to your store]' \
+                        'list[list the grants in your store]'
                     ;;
                 key)
                     _values 'key subcommand' \

@@ -1,0 +1,16 @@
+---
+source: crates/mkit-cli/tests/grant_cli.rs
+expression: "ok(&env.run(&[\"grant\", \"list\"]))"
+---
+c8036c9ab89f9938b5e34f727f9930e88b74d51bf208ee0ee192f39d04f5e069  read  epoch 0  not yet valid
+  namespace  ed25519-d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737
+  scope      ed25519-d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737/*
+  grantee    3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29
+  audiences  https://git.example.com
+  expires    2200-01-31 00:00:00 +0000
+afddb003132cc58b7c98fc16b86c1e512245607b0fbaeb5f151ad76ffd8c712e  read  epoch 3  expired
+  namespace  ed25519-d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737
+  scope      ed25519-d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737/*
+  grantee    3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29
+  audiences  https://git.example.com
+  expires    2000-01-31 00:00:00 +0000

@@ -276,7 +276,60 @@ fn open_with_config_for_remote(
     layout: &RepoLayout,
     remote_name: Option<&str>,
 ) -> Result<Arc<dyn Transport>, DispatchError> {
-    let envelope_signer = if url.starts_with("mkit+https://") || url.starts_with("mkit+http://") {
+    if is_connect_url(url) {
+        return Ok(Arc::new(open_connect_with_config(
+            url,
+            cfg,
+            layout,
+            remote_name,
+            true,
+        )?));
+    }
+    open_with_ssh_options(url, &ssh_options_from_config(cfg), None)
+}
+
+fn is_connect_url(url: &str) -> bool {
+    url.starts_with("mkit+https://") || url.starts_with("mkit+http://")
+}
+
+/// [`open_trusted`] for a Connect endpoint, returning the concrete
+/// [`ConnectTransport`] so callers can reach the epoch and visibility RPCs
+/// (WP-2.14). `sign` chooses whether the ambient signing identity is used:
+/// `mkit epoch` and statement-mode `mkit visibility set` send unsigned RPCs
+/// and pass `false`; envelope-mode visibility passes `true` and so needs
+/// `transport_auth = envelope` and a trusted remote, like `mkit push`.
+///
+/// # Errors
+/// The credential-trust gate, a non-Connect endpoint, or connection setup.
+pub(crate) fn open_connect_trusted(
+    endpoint: &str,
+    remote_name: &str,
+    repo_chosen: bool,
+    cfg: &crate::config::LayeredConfig,
+    layout: &RepoLayout,
+    sign: bool,
+) -> Result<ConnectTransport, DispatchError> {
+    crate::config::endpoint_credential_trust(cfg, endpoint, repo_chosen)
+        .map_err(DispatchError::UntrustedRemote)?;
+    if !is_connect_url(endpoint) {
+        return Err(DispatchError::UnsupportedScheme(format!(
+            "`{endpoint}` is not an mkit+https:// or mkit+http:// remote; grant epochs and repository visibility are served over Connect"
+        )));
+    }
+    open_connect_with_config(endpoint, &cfg.merged, layout, Some(remote_name), sign)
+}
+
+/// Build the Connect transport for `url` from `cfg`: envelope signing (when
+/// `sign` and configured), the user grant store as the `GrantSource`, the
+/// upload receipt store, progress observers and the admission helper.
+pub(crate) fn open_connect_with_config(
+    url: &str,
+    cfg: &crate::config::Config,
+    layout: &RepoLayout,
+    remote_name: Option<&str>,
+    sign: bool,
+) -> Result<ConnectTransport, DispatchError> {
+    let envelope_signer = if sign {
         if cfg.transport_auth_envelope() && cfg.trusted_remote_endpoint.trim() != url {
             return Err(DispatchError::UntrustedRemote(format!(
                 "refusing request signing for untrusted destination `{url}`; run `mkit config trusted_remote_endpoint {url}` before using ambient signing identity"
@@ -286,55 +339,103 @@ fn open_with_config_for_remote(
     } else {
         None
     };
-    if url.starts_with("mkit+https://") || url.starts_with("mkit+http://") {
-        validate_connect_repository(url)?;
-        let mut tx = ConnectTransport::connect_with_signer(url, envelope_signer)?
-            .with_receipt_store(Arc::new(upload_receipts::FilePartReceiptStore::new(
-                layout.upload_parts_dir(),
-            )))
-            .with_pending_observer(|event| {
-                crate::progress::pending_event(event);
-                !crate::signal::is_shutdown()
-            })
-            .with_upload_observer(|event| {
-                crate::progress::upload_event(event);
-                !crate::signal::is_shutdown()
-            })
-            .with_admission_receipt_observer(|receipt| {
-                eprintln!(
-                    "note: remote returned a {} receipt for {}",
-                    receipt.header,
-                    receipt
-                        .procedure
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or(receipt.procedure)
-                );
-            });
-        if !cfg.admission_helper.is_empty() && cfg.trusted_remote_endpoint.trim() == url {
-            let responder = Arc::new(crate::admission_helper::ExecResponder {
-                path: cfg.admission_helper.clone().into(),
-            });
-            let mut policy = AdmissionPolicy::new(responder);
-            if let Some(name) = remote_name
-                && let Some(headers) = cfg.remote_admission_headers.get(name)
-            {
-                let bearer = std::env::var("MKIT_API_TOKEN").is_ok_and(|s| !s.is_empty());
-                for header in headers.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-                    if is_reserved(header, bearer) {
-                        eprintln!(
-                            "warning: ignoring reserved header `{header}` in remote.{name}.admission_headers (see SPEC-TRANSPORT-CONNECT §5.1)"
-                        );
-                    } else {
-                        policy = policy.with_extra_allowed(header);
-                    }
+    validate_connect_repository(url)?;
+    let signed = envelope_signer.is_some();
+    let mut tx = ConnectTransport::connect_with_signer(url, envelope_signer)?
+        .with_receipt_store(Arc::new(upload_receipts::FilePartReceiptStore::new(
+            layout.upload_parts_dir(),
+        )))
+        .with_pending_observer(|event| {
+            crate::progress::pending_event(event);
+            !crate::signal::is_shutdown()
+        })
+        .with_upload_observer(|event| {
+            crate::progress::upload_event(event);
+            !crate::signal::is_shutdown()
+        })
+        .with_admission_receipt_observer(|receipt| {
+            eprintln!(
+                "note: remote returned a {} receipt for {}",
+                receipt.header,
+                receipt
+                    .procedure
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(receipt.procedure)
+            );
+        });
+    if signed {
+        // Grants ride only on signed requests (SPEC-WRITE-GRANTS §4.2), so the
+        // store is read only when there is a signer to present them with.
+        tx = tx.with_grant_source(Arc::new(grants::LocalGrants::from_stored(
+            load_user_grants(cfg),
+        )));
+    }
+    if !cfg.admission_helper.is_empty() && cfg.trusted_remote_endpoint.trim() == url {
+        let responder = Arc::new(crate::admission_helper::ExecResponder {
+            path: cfg.admission_helper.clone().into(),
+        });
+        let mut policy = AdmissionPolicy::new(responder);
+        if let Some(name) = remote_name
+            && let Some(headers) = cfg.remote_admission_headers.get(name)
+        {
+            let bearer = std::env::var("MKIT_API_TOKEN").is_ok_and(|s| !s.is_empty());
+            for header in headers.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                if is_reserved(header, bearer) {
+                    eprintln!(
+                        "warning: ignoring reserved header `{header}` in remote.{name}.admission_headers (see SPEC-TRANSPORT-CONNECT §5.1)"
+                    );
+                } else {
+                    policy = policy.with_extra_allowed(header);
                 }
             }
-            tx = tx.with_admission(policy);
         }
-        return Ok(Arc::new(tx));
+        tx = tx.with_admission(policy);
     }
-    open_with_ssh_options(url, &ssh_options_from_config(cfg), envelope_signer)
+    Ok(tx)
+}
+
+/// The verified grants in the user store, one warning per skipped file.
+fn load_user_grants(cfg: &crate::config::Config) -> Vec<crate::grants::store::StoredGrant> {
+    let rps = crate::grants::parse_relying_parties(&cfg.grant_webauthn_rp).unwrap_or_else(|e| {
+        eprintln!("warning: grant.webauthn_rp: {e}; treating no relying party as pinned");
+        Vec::new()
+    });
+    let report = crate::grants::store::GrantStore::open_default().load(&rps);
+    for warning in &report.warnings {
+        eprintln!("warning: {warning}");
+    }
+    report.grants
+}
+
+/// The configured mkit signing key as an owner signer for `mkit grant`,
+/// `mkit epoch` and `mkit visibility`. Same key resolution as
+/// [`envelope_signer_from_config`], without its `transport_auth` gate: the
+/// owner asked for this signature explicitly.
+pub(crate) fn owner_ed25519_signer(
+    cfg: &crate::config::Config,
+    layout: &RepoLayout,
+) -> Result<Arc<dyn mkit_transport_connect::EnvelopeSigner>, String> {
+    match cfg.signer.as_str() {
+        "" | "legacy" => {
+            let key_path = crate::config::resolve_key_path(layout, &cfg.signing_key)
+                .map_err(|e| format!("signing_key: {e}"))?;
+            if !key_path.exists() {
+                return Err(format!(
+                    "no signing key at {} — run `mkit keygen` first",
+                    key_path.display()
+                ));
+            }
+            let kp = mkit_core::sign::load_key(&key_path).map_err(|e| format!("load key: {e}"))?;
+            Ok(Arc::new(envelope_signer::RepoKeyEnvelopeSigner::new(kp)))
+        }
+        "keystore" => Ok(Arc::new(envelope_signer::KeystoreEnvelopeSigner::open(
+            cfg,
+        )?)),
+        other => Err(format!(
+            "unknown signer `{other}` — expected `legacy` or `keystore`"
+        )),
+    }
 }
 
 /// Resolve an [`mkit_transport_connect::EnvelopeSigner`] from `cfg`, when

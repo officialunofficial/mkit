@@ -30,6 +30,7 @@ pub mod git;
 pub mod git_import;
 #[cfg(feature = "git-bridge")]
 pub mod git_tools;
+pub mod grant;
 pub mod hash_cmd;
 pub mod init;
 pub mod key;
