@@ -552,7 +552,7 @@ mod tests {
         use crate::store::{Batch, NamespaceStore};
         let store = crate::MemoryKv::default();
         let repo = repo("a");
-        let name = "not-a-ref";
+        let name = "refs/heads//bad";
         let partition = D34Shards.ref_index(&repo, name);
         block_on(store.apply(
             &partition,
