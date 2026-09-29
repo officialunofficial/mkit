@@ -519,11 +519,22 @@ fn lock_root(root: &Path) -> Result<ServerLocks, ConfigError> {
 /// does not open; `TEMPFAIL` when the serve lock is not granted in time.
 pub fn open(cfg: &ServeConfig) -> Result<Opened, ConfigError> {
     let locks = lock_root(&cfg.repo_root)?;
-    let Addressing::Single { repo } = &cfg.pipeline.addressing else {
-        return Err(config_error(
-            "addressing",
-            "only single-repo addressing is served",
-        ));
+    let repo = match &cfg.pipeline.addressing {
+        Addressing::Single { repo } => Some(repo),
+        // Indexed mode needs Multi addressing. SQLite stores each namespace
+        // partition independently while the existing root lock serializes
+        // native writers for the lifetime of this process.
+        Addressing::Multi(_)
+            if cfg.pipeline.indexed.is_some() && matches!(cfg.meta, MetaChoice::Sqlite { .. }) =>
+        {
+            None
+        }
+        _ => {
+            return Err(config_error(
+                "addressing",
+                "only single-repo addressing is served",
+            ));
+        }
     };
     let services = match &cfg.blob {
         BlobChoice::Fs => {
@@ -553,12 +564,15 @@ pub fn open(cfg: &ServeConfig) -> Result<Opened, ConfigError> {
 }
 
 /// The services over `blobs` and the metadata store `cfg` names.
-fn with_meta<B>(blobs: B, repo: &RepoId, cfg: &ServeConfig) -> Result<Services, ConfigError>
+fn with_meta<B>(blobs: B, repo: Option<&RepoId>, cfg: &ServeConfig) -> Result<Services, ConfigError>
 where
     B: MultipartBlobStore + Clone + 'static,
 {
     match &cfg.meta {
         MetaChoice::FsLayout => {
+            let repo = repo.ok_or_else(|| {
+                config_error("addressing", "fs-layout requires single-repo addressing")
+            })?;
             let meta = FsLayoutStore::open(&cfg.repo_root, repo)
                 .map_err(|e| config_error("--meta fs-layout", e))?;
             build_services(blobs, Blocking::new(meta), cfg)

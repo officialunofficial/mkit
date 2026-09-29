@@ -1199,6 +1199,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             if let Some(indexed) = self.cfg.indexed
                 && let OpKind::AdvanceRefs { head, tickets, .. } = &op.kind
             {
+                // The wire conformance fixture exercises the pending response
+                // after ticket proof validation, before any verification state
+                // or replay row is written. Release builds omit this seam.
+                #[cfg(feature = "test-faults")]
+                if a.test_directives().fault.as_deref() == Some("indexed-pending") {
+                    return Err(crate::indexed::pending(5_000));
+                }
                 let rows = tickets
                     .iter()
                     .map(|id| {

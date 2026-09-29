@@ -178,6 +178,7 @@
 //! | `tickets.advance_ticket_bindings` | `tickets`, `auth-v2`, `multi-repo` | unknown, mismatched ref and signer ticket bindings fail with exact errors |
 //! | `tickets.advance_other_repository` | `tickets`, `auth-v2`, `multi-repo` | a ticket cannot cross a repository boundary |
 //! | `tickets.advance_expired_ticket` | `tickets`, `auth-v2`, `test-faults` | an expired ticket fails with its exact error |
+//! | `indexed.pending_verification_unavailable` | `indexed-mode`, `multi-repo`, `tickets`, `auth-v2`, `test-faults` | HTTP 503, `Retry-After: 5`, one golden `PendingVerification` detail, and a successful same-nonce retry without replay |
 //! | `multipart.three_parts` | `multipart`, `auth-v2`; excludes `multi-repo` | a roughly 17 MiB three-part pack at the minimum part size completes and becomes visible |
 //! | `multipart.resume_receipts` | `multipart`, `auth-v2`; excludes `multi-repo` | a client reconnects after partial upload, re-sends a part, and completes using old and new receipts |
 //! | `multipart.root_mismatch_invisible` | `multipart`, `auth-v2`; excludes `multi-repo` | a wrong completion root never makes the pack visible |
@@ -240,8 +241,7 @@
 //   `permission_denied`, exactly one `AdmissionChallenge` detail, `Cache-Control:
 //   no-store`), `admission.deny_403_no_detail`, `admission.no_state_on_challenge`,
 //   `admission.replay_skips_admission`.
-// TODO(M4, indexed-mode): `indexed.pending_verification_unavailable`,
-//   `indexed.published_view_hides_quarantine`.
+// TODO(M4, indexed-mode): `indexed.published_view_hides_quarantine`.
 // TODO(M4, http-objects): `http_objects.*`.
 // TODO(M5, leases): `leases.gc_*`.
 // TODO(M5, takedown): `takedown.*`.

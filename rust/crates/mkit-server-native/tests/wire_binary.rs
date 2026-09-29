@@ -226,6 +226,86 @@ async fn binary_fs_sqlite_auth_v2_d34() {
     fs_sqlite_auth_v2("d34", false).await;
 }
 
+#[cfg(feature = "test-faults")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn binary_indexed_pending_verification_wire() {
+    use mkit_server_conformance::wire::{Milestone, sign::Signer};
+
+    let root = common::repo_root();
+    let ticket_file = root.path().join("ticket.keys");
+    common::secret_file(
+        &ticket_file,
+        b"dev 1111111111111111111111111111111111111111111111111111111111111111\n",
+    );
+    let port = free_port();
+    let origin = format!("http://127.0.0.1:{port}");
+    let seed = [0x7a; 32];
+    let mut profile = profile(
+        WireAuth::AuthV2 {
+            audience: origin.clone(),
+            repository: "default".to_owned(),
+            seed,
+        },
+        true,
+    );
+    let signer = Signer::derive(
+        &seed,
+        &profile.run_id,
+        "indexed.pending_verification_unavailable/main",
+        &origin,
+        "default",
+    );
+    let namespace = format!("ed25519-{}", signer.public_key_hex());
+    profile.auth = WireAuth::AuthV2 {
+        audience: origin.clone(),
+        repository: format!("{namespace}/default"),
+        seed,
+    };
+    profile.milestone = Milestone::M4;
+    profile.features.extend([
+        Feature::Tickets,
+        Feature::TestFaults,
+        Feature::MultiRepo,
+        Feature::IndexedMode,
+    ]);
+    let meta = format!("sqlite:{}", common::s(&root.path().join("meta.sqlite3")));
+    let server = Server::start(
+        port,
+        root.path(),
+        &[
+            "--meta",
+            &meta,
+            "--sharding",
+            "single",
+            "--ticket-key-file",
+            common::s(&ticket_file),
+            "--auth",
+            "auth-v2",
+            "--audience",
+            &origin,
+            "--multi-addressing",
+            "--allow-namespace",
+            &namespace,
+            "--indexed",
+            "--max-pack-bytes",
+            "4194304",
+        ],
+    );
+    let target = WireTarget {
+        base_url: origin.parse().unwrap(),
+        profile,
+    };
+    let report = run(&target, Some("indexed.pending_verification_unavailable")).await;
+    assert!(
+        matches!(
+            report.verdict("indexed.pending_verification_unavailable"),
+            Some(Verdict::Pass(_))
+        ),
+        "{report:?}"
+    );
+    assert!(server.stop().success());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn binary_fs_sqlite_multipart() {
     fs_sqlite_auth_v2("single", true).await;
