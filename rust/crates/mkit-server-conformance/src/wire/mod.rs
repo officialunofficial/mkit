@@ -332,8 +332,7 @@ pub const CASE_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(10)
 
 /// The Ed25519 seed (hex) an in-process server puts in `url_tokens` for a
 /// `signed-reads` profile, so the suite can verify the tokens it mints.
-pub const URL_TOKEN_SEED: &str =
-    "9d4f2c8b1e6a35f07c2d9841ba6e5f3c09a17d4e8b2c6f103d5e9a7b4c8f1e2d";
+pub const URL_TOKEN_SEED: &str = "9d4f2c8b1e6a35f07c2d9841ba6e5f3c09a17d4e8b2c6f103d5e9a7b4c8f1e2d";
 
 /// `url_token_ttl` for the same configuration: 15 minutes.
 pub const URL_TOKEN_TTL_MS: u64 = 15 * 60 * 1000;

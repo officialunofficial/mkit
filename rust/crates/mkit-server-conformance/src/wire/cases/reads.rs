@@ -16,7 +16,9 @@ use super::{
     A, CaseResult, Ctx, Exp, Failure, Signed, ensure, grants, sign_unary, update_req, want_code,
     want_ok,
 };
-use crate::wire::client::{Reply, Rpc, STREAM_PROTO, UNARY_PROTO, decode_unary, decode_stream, frame};
+use crate::wire::client::{
+    Reply, Rpc, STREAM_PROTO, UNARY_PROTO, decode_stream, decode_unary, frame,
+};
 use crate::wire::sign::{Signer, body_commitment, now_ms};
 use crate::wire::{URL_TOKEN_SEED, URL_TOKEN_TTL_MS};
 
@@ -42,12 +44,9 @@ fn case_owner(ctx: &Ctx) -> Result<grants::Owner, Failure> {
 /// The test-faults epoch bump for `repo`, signed by its `owner`.
 async fn bump_epoch(ctx: &Ctx, owner: &Signer, repo: &str) -> CaseResult {
     let body = list_req(ctx).encode_to_vec();
-    let s = signed_body_on(owner, Rpc::ListRefs, repo, body)
-        .with_header("x-mkit-test-bump-epoch", "1");
-    want_ok(
-        ctx.send::<ListRefsResponse>(&s).await?,
-        "test epoch bump",
-    )?;
+    let s =
+        signed_body_on(owner, Rpc::ListRefs, repo, body).with_header("x-mkit-test-bump-epoch", "1");
+    want_ok(ctx.send::<ListRefsResponse>(&s).await?, "test epoch bump")?;
     Ok(())
 }
 
@@ -242,7 +241,12 @@ pub(super) async fn signed_verified_in_full(ctx: Ctx) -> CaseResult {
         ctx.profile().run_id
     );
     for repo in [public_repo, private_repo, missing] {
-        let s = bad_signature(&signed_for(&owner, &repo, Rpc::ReadRef, &read_req(&ctx, "main")));
+        let s = bad_signature(&signed_for(
+            &owner,
+            &repo,
+            Rpc::ReadRef,
+            &read_req(&ctx, "main"),
+        ));
         want_code(
             ctx.send::<ReadRefResponse>(&s).await?,
             "unauthenticated",
@@ -320,7 +324,9 @@ pub(super) async fn private_owner_ok(ctx: Ctx) -> CaseResult {
     if ctx.profile().sharding_d34 {
         // D34 ListRefs (WP-1.28b) reads the relayed ref index; no relay
         // worker runs in-process, so the fresh write is not listed yet.
-        return Err(Failure::Skip("D34 ListRefs reads a lagging ref index".into()));
+        return Err(Failure::Skip(
+            "D34 ListRefs reads a lagging ref index".into(),
+        ));
     }
     let listed = want_ok(
         ctx.send::<ListRefsResponse>(&signed_for(&owner, &repo, Rpc::ListRefs, &list_req(&ctx)))
@@ -329,9 +335,16 @@ pub(super) async fn private_owner_ok(ctx: Ctx) -> CaseResult {
     )?;
     // ListRefs names are prefix-stripped (SPEC-TRANSPORT-CONNECT §7.9).
     ensure!(
-        listed.refs.iter().any(|r| r.name.as_deref() == Some("main")),
+        listed
+            .refs
+            .iter()
+            .any(|r| r.name.as_deref() == Some("main")),
         "owner ListRefs missed the ref: {:?}",
-        listed.refs.iter().map(|r| r.name.clone()).collect::<Vec<_>>()
+        listed
+            .refs
+            .iter()
+            .map(|r| r.name.clone())
+            .collect::<Vec<_>>()
     );
     Ok(())
 }
@@ -458,7 +471,12 @@ pub(super) async fn private_not_found_byte_identical(ctx: Ctx) -> CaseResult {
                 read_req(&ctx, "main").encode_to_vec(),
                 false,
             ),
-            ("ListRefs", Rpc::ListRefs, list_req(&ctx).encode_to_vec(), false),
+            (
+                "ListRefs",
+                Rpc::ListRefs,
+                list_req(&ctx).encode_to_vec(),
+                false,
+            ),
             (
                 "PackExists",
                 Rpc::PackExists,
@@ -501,10 +519,7 @@ pub(super) async fn private_not_found_byte_identical(ctx: Ctx) -> CaseResult {
                     raw_stream(&ctx, &missing_reply).await?,
                 )
             } else {
-                (
-                    raw(&ctx, &private).await?,
-                    raw(&ctx, &missing_reply).await?,
-                )
+                (raw(&ctx, &private).await?, raw(&ctx, &missing_reply).await?)
             };
             // Both must be `not_found`, not merely identical.
             let code = if stream {
@@ -519,7 +534,10 @@ pub(super) async fn private_not_found_byte_identical(ctx: Ctx) -> CaseResult {
                     .expect_err("a private repo without read access must fail")
                     .code
             };
-            ensure!(code == "not_found", "{what}: private read failed with {code}");
+            ensure!(
+                code == "not_found",
+                "{what}: private read failed with {code}"
+            );
             same_not_found(&private, &missing_reply, &what)?;
         }
     }

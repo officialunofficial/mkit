@@ -57,9 +57,7 @@ fn statement(
         expiry_ms: created_ms + 60_000,
         nonce: random_bytes(),
     };
-    Ok(owner.signed_statement(
-        &statement.encode().expect("valid visibility fixture"),
-    ))
+    Ok(owner.signed_statement(&statement.encode().expect("valid visibility fixture")))
 }
 
 /// Statement mode: unsigned transport, `signed_statement` set.
@@ -142,7 +140,10 @@ pub(super) async fn statement_ed25519(ctx: Ctx) -> CaseResult {
     };
     seeded_repo(&ctx, signer, &repo, false).await?;
     let header = statement(&ctx, &owner, &repo, Visibility::Private, now_ms() - 1_000)?;
-    want_ok(set_statement(&ctx, &repo, &header).await?, "ed25519 statement")?;
+    want_ok(
+        set_statement(&ctx, &repo, &header).await?,
+        "ed25519 statement",
+    )?;
     anonymous_read_is_not_found(&ctx, &repo).await?;
     Ok(())
 }
