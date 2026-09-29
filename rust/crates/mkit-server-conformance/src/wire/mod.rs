@@ -235,8 +235,8 @@
 //! The three membership cases run against a target whose harness seeds
 //! membership fixtures (`Profile::planted_membership`); on a served
 //! deployment each seeds its own fixture through a real ticketed push —
-//! BeginUpload for `refs/heads/main`, the ticketed upload, and a ticketed
-//! AdvanceRefs pair consuming the ticket — by that case's `repository-a`
+//! `BeginUpload` for `refs/heads/main`, the ticketed upload, and a
+//! ticketed `AdvanceRefs` pair consuming the ticket — by that case's `repository-a`
 //! signer into `<ns>/packs`, and member-true reads poll while the relay
 //! catches up. The in-process Multi baseline seeds blob bytes
 //! `conformance/<run_id>/<case>` and their BLAKE3 membership in
