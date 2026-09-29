@@ -116,7 +116,8 @@ stops a fire at the first failure or 5 s timeout. It is budgeted by
 `WORKERS_PLAN` (unset means Free): at most 8 sink calls per alarm on Free
 (relay 32 + backup 1 + outcome 8 + quota rollup at most 8 of the 50
 subrequests) and 64 on Paid.
-This deployment still uses the local `NoOutcomes` sink.
+By default this deployment uses the local `NoOutcomes` sink; see "Remote hooks"
+below to send outcomes to a hook Worker.
 
 Browsers may send `Authorization`, `Payment-Authorization`,
 `PAYMENT-SIGNATURE` and `Accept-Payment`, and every response exposes
@@ -128,6 +129,47 @@ The Worker never logs request headers, and a test checks that credential
 values do not reach its tracing. **Check the platform's invocation-log
 capture (Workers Logs, Logpush, tail) at staging before accepting payment
 credentials:** it is outside this code (D15).
+
+## Remote hooks (`ADMISSION_HOOK`)
+
+Authorization, admission and outcome delivery can run in a separate hook
+Worker (SPEC-SERVER §§6-8), reached over a **service binding**, which is not
+reachable from the public internet, so the requests are unsigned (SPEC-SERVER
+§7.3). Configure:
+
+- the `ADMISSION_HOOK` service binding (`wrangler.jsonc` has a commented
+  `services` example);
+- `HOOK_ROLES`: a comma list of `authorize`, `admit` and `outcome`. It has no
+  default (a hook Worker may implement any subset; the reference mppx Worker
+  answers only Admit and Outcome), and the binding and the var must come
+  together: either one alone makes every RPC answer `unavailable` naming it;
+- optionally `HOOK_TIMEOUT_MS` (default 5000, at most 30000; deliveries are
+  bounded by 5 s regardless) and `AUTHORIZER_ROLE` (`check`, the default, or
+  `authority`, with the `authorize` role).
+
+**The hook Worker must have no public route**: disable its `workers.dev`
+route and its preview URLs and give it no custom domain or route. The adapter
+cannot check this, and an unsigned hook that is reachable from the internet
+would accept forged requests. A remote admission replaces the built-in
+per-signer abuse quota: the hook owns abuse control, and admit needs
+`TICKET_KEYS`.
+
+Authorize and Admit fail closed (retryable `unavailable`, nothing written);
+Outcome delivery is retried by kind 8 until the hook answers 2xx. **Subrequest
+budget:** each binding call is one subrequest (Cloudflare counts every request to a
+Worker over a service binding toward the subrequest limit, and a request may make
+at most 32 Worker invocations). On the fetch path Authorize adds
+one per RPC (reads included) and Admit one more per admitted write, so at most
+2 of a request's 50 (Free); alarms are bounded by the kind-8 budget above (at
+most 8 Outcome calls per alarm on Free, within the 32 + 1 + 8 + 8 split).
+Every hook call carries no `X-Mkit-Hook-*` headers. A custom business layer in
+a Rust Worker uses `adapter::fetch_with` and `adapter::ns_object_with` with its
+own `HookSet` and outcome sink instead of the vars.
+
+Not built: an outcome sink on a Cloudflare Queue (needs a SPEC-SERVER §7.3/§8
+amendment: WP-3.9b) and a signed webhook via `fetch` from a Worker. Test it
+locally with `scripts/vcs-worker-hooks.sh` (a stub hook Worker under
+`tests/hook-stub` and `wrangler.hooks.jsonc`).
 
 ## Auth v2 (open write, no allow-list)
 

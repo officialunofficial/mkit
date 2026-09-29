@@ -363,6 +363,51 @@ the root marker and the upload spool.
 - Failures are logged with the HTTP status, the S3 error code and request
   ids; clients see only "object storage request failed".
 
+### Remote hooks (`--hook-*-url`)
+
+A deployment can run authorization, admission and outcome delivery in a
+separate service, such as a payment layer, over the `mkit.server.hooks.v1`
+Connect JSON contract (SPEC-SERVER §§6-8). The `hooks` cargo feature (on by
+default) provides it; everything else in this section needs `--auth auth-v2`.
+
+- `--hook-authorize-url`, `--hook-admit-url`, `--hook-outcome-url`: each is
+  the hook service's base URL for that RPC (`POST <URL>/mkit.server.hooks.v1.
+  HooksService/<Rpc>`), and a URL turns that role on. Roles with the same
+  base URL share one connection pool. Any of them needs `--auth auth-v2`; the
+  outcome URL also needs `--meta sqlite:<PATH>` (delivery runs from the timer
+  driver); admit needs upload ticket keys (`--ticket-key-file`).
+- **Authorize and Admit fail closed**: a transport error, timeout, non-2xx
+  answer, Connect error, invalid answer or a body over 64 KiB answers the
+  client retryable `unavailable` and writes nothing. **A remote admission
+  replaces the built-in per-signer abuse quota**: the hook then owns abuse
+  control. Outcome delivery is retried with backoff until the hook answers 2xx.
+  `--authorizer-role check|authority` (only with an authorize URL) makes the
+  hook an extra check (default) or the authority source for non-owner writes.
+- **Transport**: `https`, verified against the platform's trust store, or `http`
+  to a loopback host only; a URL with credentials, a query or a fragment is
+  refused (a path prefix is fine). There is no flag to disable TLS
+  verification. Redirects are never followed (a 3xx is a failure). The
+  environment proxy is honoured for `https`, never for loopback. A response is
+  read only up to 64 KiB.
+- **Signing**: every request carries the eight `X-Mkit-Hook-*` headers (an
+  Ed25519 signature over the exact body, bound to the hook's origin and the
+  procedure, with a fresh nonce). `--hook-key-file <PATH>` holds one line,
+  `<key-id> <64 hex seed>` (owner-only, not a symlink; or `MKIT_HOOK_KEY`), and
+  `--hook-signature-validity-secs` sets the window (default 60, at most 300).
+  The key must differ from every ticket key and the enc server key (and, once
+  the adapter has URL-token keys, those); a repeated key is refused at
+  startup. `mkit-server hook-key-list --hook-key-file <PATH>` prints the public
+  key list (SPEC-SERVER §7.2) to configure the hook service with.
+- `--hook-timeout-secs` (default 5) bounds each hook call, and must be below
+  `--unary-timeout-secs` because Authorize and Admit run one after the other
+  inside one request; it also bounds each delivery call.
+- A hook service written in Rust can check requests with
+  `mkit_server::hooks::HookVerifier`; `mkit-server-conformance`'s `stubs::hook`
+  (feature `stubs`) is a strict test hook built on it.
+- The enc listener's sibling pipeline inherits the hooks. Embedders that pass
+  their own hooks or sink (`server::open_with`, `open_with_sink`) must not also
+  set these flags.
+
 ### Limits and timeouts
 
 The listener speaks plaintext HTTP/1.1 and h2c; terminate TLS at the proxy.
@@ -438,6 +483,8 @@ With the `enc` feature (on by default), `enc::session_fn` serves enc
 sessions over a `TransportIdentity` pipeline (`Pipeline::with_auth` makes
 one beside yours) and `enc::serve` runs the listener.
 
+`server::open_with(&cfg, hooks, sink, SinkOptions)` is `open_with_sink` with your
+own `HookSet` too (both refuse a `cfg` that sets `--hook-*-url`).
 `server::open_with_sink(&cfg, sink, SinkOptions::default())` is `open` with your `OutcomeSink` on
 kind 8 (`--meta sqlite` only: fs-layout has no timer driver, and a real sink
 with it is a config error). Each call is bounded by `SinkOptions::timeout` (5 s) and a fire by twice that, a failure or timeout

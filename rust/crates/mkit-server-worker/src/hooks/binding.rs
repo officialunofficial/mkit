@@ -1,6 +1,6 @@
-//! [`BindingChannel`]: the hook Worker over a service binding (SPEC-SERVER
+//! `BindingChannel`: the hook Worker over a service binding (SPEC-SERVER
 //! §7.3). A service binding is not reachable from the public internet, so the
-//! channel reports [`HookChannel::isolated`] and sends no signature; the hook
+//! channel reports `HookChannel::isolated` and sends no signature; the hook
 //! Worker must have no public route (its `workers.dev` and preview URLs
 //! disabled), which the adapter cannot check (see the crate README).
 //!

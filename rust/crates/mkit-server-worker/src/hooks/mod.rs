@@ -3,7 +3,7 @@
 //! from the public internet, so requests go unsigned (§7.3). Core
 //! (`mkit_server::hooks`) holds the protocol and the fail-closed adapter.
 //!
-//! - [`binding`]: [`BindingChannel`](binding::BindingChannel) over
+//! - [`binding`]: `BindingChannel` over
 //!   `env.service("ADMISSION_HOOK")`, and the pure URL and response-cap
 //!   helpers behind it.
 //! - [`config`]: the `HOOK_ROLES`, `HOOK_TIMEOUT_MS` and `AUTHORIZER_ROLE`
