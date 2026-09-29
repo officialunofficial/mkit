@@ -1057,7 +1057,7 @@
   },
   {
     "id": "1.19",
-    "title": "Staging vcs-worker deployment config and runbook",
+    "title": "Inert Stage 2 staging template and activation runbook (R-176)",
     "milestone": "M1",
     "track": "ops",
     "depends_on": [
@@ -1071,7 +1071,7 @@
       "1.30"
     ],
     "size": "S",
-    "summary": "Adds env.staging (route, audience, allowlist, R2 buckets, DO migration v2, CPU limit, placement vars) and a deploy/backup/restore runbook. The human creates Cloudflare resources and runs the first deploy and smoke test.",
+    "summary": "Ships a standalone, unloaded staging config template and runbook: ADDRESSING=multi, audience/CI allowlist placeholders, private packs/backups/published-view buckets, all DO bindings and v1/v2 migrations, CPU/pack measurements, secrets, backup/restore and explicit Stage 2 entrypoint activation. Provisioning, deployment, route mounting and production CPU sizing are post-REL-1 operations; Stage 1 configuration is unchanged.",
     "human_action": true,
     "area_gates": [
       "workers",

@@ -1,0 +1,62 @@
+// INERT TEMPLATE (WP-1.19, Stage 2). No build/deploy job reads this file.
+// After REL-1, copy to apps/vcs-worker/wrangler.staging.jsonc and follow
+// staging/README.md. Replace every REPLACE_* value before provisioning.
+// Paths below are relative to the copied config in apps/vcs-worker/.
+{
+  "name": "mkit-vcs-worker",
+  "main": "build/worker/shim.mjs",
+  // Supported by the pinned local workerd; revalidate on activation.
+  "compatibility_date": "2026-09-09",
+  "workers_dev": false,
+  "preview_urls": false,
+  "build": { "command": "worker-build --release" },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["RefStore"] },
+    { "tag": "v2", "new_sqlite_classes": ["NsCoordinator", "RefShard", "RepoIndexShard", "ContentIndexShard"] }
+  ],
+  "env": {
+    "staging": {
+      "name": "mkit-vcs-worker-staging",
+      "workers_dev": false,
+      "preview_urls": false,
+      // Mount only during the post-REL activation step.
+      "routes": [{ "pattern": "REPLACE_STAGING_HOST", "custom_domain": true }],
+      "observability": { "enabled": true },
+      "placement": { "mode": "smart" },
+      // Paid-account starting allowance, NOT a measured production setting.
+      // Re-measure ListRefs, snapshot alarms and multipart completion first.
+      "limits": { "cpu_ms": 100 },
+      // Environment bindings and vars do not inherit: repeat every binding.
+      "vars": {
+        "AUTH_AUDIENCE": "https://REPLACE_STAGING_HOST",
+        "ADDRESSING": "multi",
+        "SHARDING": "d34",
+        "NAMESPACE_POLICY": "allowlist",
+        "NAMESPACE_ALLOWLIST": "REPLACE_CI_SIGNER_NAMESPACE",
+        // Use paid only after confirming the account; Free activation needs
+        // independent CPU validation and its own supported CPU setting.
+        "WORKERS_PLAN": "paid",
+        "MAX_PACK_BYTES": "1073741824",
+        "BACKUP_PREFIX": "mkit-vcs-worker-staging",
+        "BACKUP_INTERVAL_MS": "86400000",
+        "BACKUP_MAX_BYTES": "16777216",
+        "BACKUP_FORCE_REUPLOAD_MS": "2419200000"
+        // NAMESPACE_LOCATION_HINT is optional (unset by default).
+        // NAMESPACE_JURISDICTION, if required, must match all R2 buckets and
+        // stay fixed for the deployment lifetime. No enabling snapshot var.
+      },
+      "r2_buckets": [
+        { "binding": "STORAGE", "bucket_name": "mkit-vcs-objects-staging" },
+        { "binding": "BACKUPS", "bucket_name": "mkit-vcs-backups-staging" },
+        { "binding": "PUBLISHED_SNAPSHOTS", "bucket_name": "mkit-vcs-published-staging" }
+      ],
+      "durable_objects": { "bindings": [
+        { "name": "REFSTORE", "class_name": "RefStore" },
+        { "name": "NS_COORD", "class_name": "NsCoordinator" },
+        { "name": "REF_SHARD", "class_name": "RefShard" },
+        { "name": "REPO_INDEX", "class_name": "RepoIndexShard" },
+        { "name": "CONTENT_INDEX", "class_name": "ContentIndexShard" }
+      ] }
+    }
+  }
+}

@@ -494,18 +494,21 @@ Folded into WP-S1 §7.6/§7.8/§7.9 (adopted Q18 default). Every former dependen
   buckets with a > 32 MiB total listing and every page ≤ 2 MiB.
 - **Size:** L (~1400).
 
-### WP-1.19 Staging `vcs-worker` deployment config and runbook
+### WP-1.19 Staging `vcs-worker` template and runbook (Stage 2, inert)
 
-- **Depends on:** WP-1.6, WP-1.8, WP-1.12, WP-1.14, WP-1.18, WP-1.21, WP-1.29.
-- **Goal:** `env.staging` in `apps/vcs-worker/wrangler.jsonc`: route/custom domain, `AUTH_AUDIENCE` = the staging
-  origin, `SERVER_MODE=multi`, `NAMESPACE_POLICY=allowlist` with the CI key namespace, R2 bucket
-  `mkit-vcs-objects-staging` (+ a backups prefix or bucket), the DO bindings and migration `v2`, `limits.cpu_ms`,
-  a current `compatibility_date`, placement vars (default none). Re-measure Worker completion CPU under staging R2,
-  then set the staging CPU limit and `MAX_PACK_BYTES` from that measurement (default 1 GiB, hard ceiling 4.995 GiB).
-  README runbook: deploy, backup/restore, alerts.
-- **HUMAN / CLOUDFLARE STEPS:** see 00-plan.md human-action checklist (hostname/zone, scoped API token, bucket,
-  first deploy, CI signer key, manual smoke).
-- **Size:** S (~300).
+- **Depends on:** WP-1.6, WP-1.8, WP-1.12, WP-1.14, WP-1.18, WP-1.21, WP-1.29, WP-1.30.
+- **Goal:** inert `apps/vcs-worker/staging/wrangler.staging.jsonc.template` and runbook (R-176),
+  copied to a real config only after REL-1. Uses `ADDRESSING=multi`, exact staging audience,
+  CI namespace allowlist, separate private packs/backups/published-snapshot R2 buckets,
+  all DO bindings and v1/v2 SQLite migrations; optional placement vars unset.
+  Explicit configured fetch/DO entrypoints and default-off feature are a later activation
+  change. No Stage 1 opt-in, binding, route mounting or provisioning.
+- **Post-REL ops:** hostname/zone, scoped token, three private buckets, backups/-only 35-day
+  retention, ticket/CI keys, first deployment and manual smoke. Confirm Paid before the
+  template's starting 100 ms allowance; Free CPU remains unproven. Measure deployed
+  ListRefs, snapshot alarms and multipart completion, then choose CPU and `MAX_PACK_BYTES`
+  (default 1 GiB, ceiling 4.995 GiB) before route mounting. Recovery remains WP-5.11b.
+- **Size:** S (~200 documentation/template lines).
 
 ### WP-1.20 CI: conformance and e2e against staging (M1 exit)
 

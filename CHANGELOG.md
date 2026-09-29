@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- WP-1.19: add an inert Stage 2 staging template and activation/backup runbook; provisioning, routes and CPU sizing wait until after REL-1.
+
 - **WP-1.21 (Stage 2):** default-off Worker published ref-index snapshots with bounded binary envelopes,
   atomic debounce/generations, private R2/Cache serving after coordinator authorization, signed bypass,
   inspection refusal and live fallback; existing Stage 1 entrypoints stay inert.
