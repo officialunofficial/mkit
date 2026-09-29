@@ -3625,6 +3625,7 @@ dependencies = [
  "hex",
  "http",
  "http-body-util",
+ "log",
  "mkit-core",
  "mkit-transport-memory",
  "rustls",

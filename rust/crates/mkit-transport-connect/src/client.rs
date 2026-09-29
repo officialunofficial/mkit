@@ -174,7 +174,7 @@ enum CompleteSpecial {
 }
 
 fn log_receipt_cleanup_error(action: &str, error: &TransportError) {
-    eprintln!("mkit: upload receipt cache {action} failed: {error}");
+    log::warn!("upload receipt cache {action} failed: {error}");
 }
 
 fn upload_interrupted(saved: u32, total: u32) -> TransportError {
@@ -873,10 +873,9 @@ impl ConnectTransport {
                     .lock()
                     .map_err(|_| TransportError::ProtocolError)?
                     .remove(&(head_ref.to_owned(), *key))
+                    && let Err(error) = self.receipts.forget(&old.id)
                 {
-                    if let Err(error) = self.receipts.forget(&old.id) {
-                        log_receipt_cleanup_error("already-present ticket", &error);
-                    }
+                    log_receipt_cleanup_error("already-present ticket", &error);
                 }
                 Ok(BeginAnswer::AlreadyPresent)
             }
@@ -906,10 +905,10 @@ impl ConnectTransport {
                     .lock()
                     .map_err(|_| TransportError::ProtocolError)?
                     .insert((head_ref.to_owned(), *key), ticket.clone());
-                if let Some(old) = old.filter(|old| old.id != ticket.id) {
-                    if let Err(error) = self.receipts.forget(&old.id) {
-                        log_receipt_cleanup_error("replaced ticket", &error);
-                    }
+                if let Some(old) = old.filter(|old| old.id != ticket.id)
+                    && let Err(error) = self.receipts.forget(&old.id)
+                {
+                    log_receipt_cleanup_error("replaced ticket", &error);
                 }
                 Ok(BeginAnswer::Ticket(ticket))
             }

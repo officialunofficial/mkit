@@ -160,12 +160,10 @@ impl FilePartReceiptStore {
                 && other.signer == current.signer
                 && other.head_ref == current.head_ref
                 && other.pack_id == current.pack_id
+                && let Err(err) = fs::remove_dir_all(entry.path())
+                && err.kind() != io::ErrorKind::NotFound
             {
-                if let Err(err) = fs::remove_dir_all(entry.path())
-                    && err.kind() != io::ErrorKind::NotFound
-                {
-                    eprintln!("upload receipt cache cleanup: {err}");
-                }
+                eprintln!("upload receipt cache cleanup: {err}");
             }
         }
     }
@@ -253,7 +251,7 @@ impl PartReceiptStore for FilePartReceiptStore {
         {
             let mut swept = swept
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if !swept.insert(self.root.clone()) {
                 return Ok(());
             }
@@ -334,21 +332,19 @@ impl PartReceiptStore for FilePartReceiptStore {
                         };
                         if file.file_name().to_string_lossy().ends_with(".tmp")
                             && stale_tmp(&file.path())
+                            && let Err(err) = fs::remove_file(file.path())
+                            && err.kind() != io::ErrorKind::NotFound
                         {
-                            if let Err(err) = fs::remove_file(file.path())
-                                && err.kind() != io::ErrorKind::NotFound
-                            {
-                                eprintln!("upload receipt cache cleanup: {err}");
-                            }
+                            eprintln!("upload receipt cache cleanup: {err}");
                         }
                     }
                 }
-            } else if path.extension().is_some_and(|ext| ext == "tmp") && stale_tmp(&path) {
-                if let Err(err) = fs::remove_file(path)
-                    && err.kind() != io::ErrorKind::NotFound
-                {
-                    eprintln!("upload receipt cache cleanup: {err}");
-                }
+            } else if path.extension().is_some_and(|ext| ext == "tmp")
+                && stale_tmp(&path)
+                && let Err(err) = fs::remove_file(path)
+                && err.kind() != io::ErrorKind::NotFound
+            {
+                eprintln!("upload receipt cache cleanup: {err}");
             }
         }
         Ok(())

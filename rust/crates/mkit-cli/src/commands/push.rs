@@ -326,6 +326,7 @@ fn push_current(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpt
 }
 
 /// `--all`: mirror every local branch to the remote (CAS-safe).
+#[allow(clippy::too_many_lines)] // Linear branch loop keeps each push result and hint together.
 fn push_all(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpts) -> u8 {
     let json = matches!(opts.format, PushFormat::Json);
     let remote_name = opts
