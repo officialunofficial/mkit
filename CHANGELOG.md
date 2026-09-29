@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server: in indexed mode, extract every ChunkedBlob (as its reassembled content,
+  with a chunk-offset sidecar) and every file Blob of at least 64 KiB into the
+  deployment-wide object store under its object id, before a pack is marked
+  verified. Object keys are verified against a content root by a new
+  `PackSink::commit_with_root`; holder rows carry a sequence and the consuming
+  ticket; a hold protects each object until its holder is recorded. New
+  `IndexedConfig::{extract_min_bytes, max_extract_bytes}`. Workers still refuse
+  indexed mode (WP-4.10).
 - Server: add validated two-phase admission with bounded HTTP 402 challenges,
   redacted payment credential forwarding and committed-success receipt headers
   (WP-3.2).
