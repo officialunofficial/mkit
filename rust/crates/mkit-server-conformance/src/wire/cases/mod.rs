@@ -24,6 +24,7 @@ use super::client::{Client, Rpc, RpcError, StreamReply, frame, frames};
 use super::profile::{Feature, Milestone, Profile, WireAuth, random_bytes};
 use super::sign::{Envelope, Signer, body_commitment};
 
+mod admission;
 mod advance;
 mod auth;
 mod auth_bounds;
@@ -193,6 +194,7 @@ macro_rules! cases {
 }
 
 cases! {
+    "admission.helper_flow_commit" => admission::helper_flow_commit, M3, [Admission, HookStub, AuthV2, Tickets, Timers], [];
     "grants.valid_ed25519" => grants::valid_ed25519, M2, [Grants, MultiRepo, AuthV2], [];
     "grants.valid_secp256k1_eip191" => grants::valid_secp256k1_eip191, M2, [Grants, MultiRepo, AuthV2], [];
     "grants.valid_webauthn_p256" => grants::valid_webauthn_p256, M2, [Grants, MultiRepo, AuthV2], [];

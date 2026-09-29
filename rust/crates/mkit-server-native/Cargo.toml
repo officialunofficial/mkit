@@ -244,3 +244,7 @@ required-features = ["hooks"]
 [[test]]
 name = "hook_e2e"
 required-features = ["hooks"]
+
+[[test]]
+name = "admission_e2e"
+required-features = ["hooks"]

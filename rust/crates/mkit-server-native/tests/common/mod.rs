@@ -117,3 +117,6 @@ pub(crate) fn judge(report: &Report, divergences: &[(&str, &str)]) {
         "unexpected failures {unexpected:?}\n{tap}"
     );
 }
+
+#[cfg(feature = "hooks")]
+pub(crate) mod mpp;

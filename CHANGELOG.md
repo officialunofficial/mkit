@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server conformance: MPP stub, loopback controls, real native binary/exec-helper
+  push tests and a shared admission commit case; isolated Worker forwarder
+  calls the same Rust fixture (WP-3.12). Release guards reject `stubs`.
+
 - RPC: public `mkit-rpc::hooks` message types with JSON support and runtime-free
   `HookSigner` and `HookVerifier`, enabled by the `hooks` feature. The server
   re-exports its authentication surface (WP-3.7b, Linear MKIT-67).
