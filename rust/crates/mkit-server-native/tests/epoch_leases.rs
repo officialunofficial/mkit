@@ -886,8 +886,8 @@ fn assert_renewal_ops(calls: &[Call], old_timer: &Key, new_timer: &Key) {
         .unwrap();
     assert_eq!(
         renewal_ref_ops,
-        (4, 4),
-        "the ref batch keeps its lease installation and three other writes"
+        (5, 7),
+        "the ref batch keeps its lease installation and adds the index relay"
     );
 }
 
@@ -896,6 +896,7 @@ async fn sweep<N: NamespaceStore + 'static>(
     clock: Arc<ManualClock>,
     store_clock: Arc<ManualClock>,
 ) {
+    use mkit_server::relay::{NoHook, RelayBudget, RelayHandler};
     use mkit_server::timers::{lease_sweep::LeaseSweep, registry::kinds};
     let store = Store::new(backend);
     let pipe = pipeline(
@@ -957,6 +958,57 @@ async fn sweep<N: NamespaceStore + 'static>(
             .await
             .unwrap()
             .is_some()
+    );
+    // The two D34 writes left index rows. Drain them so this sweep tests
+    // renewal and expiry rather than the outbox hold-off.
+    let source = shard(&a, REF);
+    let relay_registry = TimerRegistry::new().register(RelayHandler {
+        target: store.clone(),
+        hook: NoHook,
+        budget: RelayBudget::default(),
+    });
+    for _ in 0..3 {
+        if store
+            .inner
+            .get(&source, &keys::relay(1))
+            .await
+            .unwrap()
+            .is_none()
+            && store
+                .inner
+                .get(&source, &keys::relay(2))
+                .await
+                .unwrap()
+                .is_none()
+        {
+            break;
+        }
+        run_due(
+            &store,
+            &source,
+            &relay_registry,
+            clock.as_ref(),
+            24_501,
+            &TickBudget::default(),
+        )
+        .await
+        .unwrap();
+    }
+    assert!(
+        store
+            .inner
+            .get(&source, &keys::relay(1))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .inner
+            .get(&source, &keys::relay(2))
+            .await
+            .unwrap()
+            .is_none()
     );
     clock.set(54_501);
     store_clock.set(54_501);
