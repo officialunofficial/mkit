@@ -546,12 +546,18 @@ that authenticated path and range against its request.
 pins accept containers starting at both zero and nonzero chunk indices,
 and rejects for gaps, duplicates, wrong selectors, mixed commits,
 mismatched leaves, missing/incomplete anchors, ranges outside the span,
-an unnecessary last chunk, magic/version errors, trailing bytes, and
-oversize input. Large reject bodies use sidecar byte-range copy and patch
+an unnecessary last chunk, magic/version errors, trailing bytes,
+truncation, a non-minimal varint, a varint above `u32::MAX`, a chunk count
+of 1,000,001, an MKDP or MKDS container supplied as the anchor, an MKDP
+supplied in place of an MKDS, and oversize input. Large reject bodies use sidecar byte-range copy and patch
 recipes over the accepted containers; each recipe reconstructs exact bytes
 before verification.
 The oversize vector uses a pinned small seed plus a sidecar expansion
 recipe to construct 64 MiB + 1 bytes without checking in a large zero file.
+The bad-varint vectors splice the malformed prefix over the real anchor
+length inside an otherwise complete valid container, and the chunk-count
+vector is zero-filled to one empty vector per declared chunk, so a lenient
+reader fails for a different reason and only the 1,000,000 cap rejects it.
 Each reject sidecar names the exact reason in §8.2.
 
 Document version 4 adds MKDS wire version 1; MKDP wire version 2 and its
