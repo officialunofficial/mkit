@@ -31,6 +31,8 @@ mod epoch;
 pub(crate) mod faults;
 mod gate;
 mod hooks;
+#[cfg(feature = "http-objects")]
+mod http;
 mod implicit;
 mod info;
 mod lease;
@@ -279,6 +281,10 @@ pub struct PipelineConfig {
     pub outbox_backlog_cap: Option<OutboxBacklogCap>,
     /// Indexed ingestion and pre-receive verification, off by default.
     pub indexed: Option<crate::indexed::IndexedConfig>,
+    /// HTTP object serving (SPEC-HTTP-OBJECTS), off by default and
+    /// programmatic only. Requires [`Self::indexed`]. Stage 2 (R-154, R-169).
+    #[cfg(feature = "http-objects")]
+    pub http_objects: Option<crate::http_objects::HttpObjectsConfig>,
 }
 
 /// A soft, unguarded backlog threshold; concurrent admissions may overshoot
@@ -339,6 +345,8 @@ impl PipelineConfig {
                 bytes: 64 * 1024 * 1024,
             }),
             indexed: None,
+            #[cfg(feature = "http-objects")]
+            http_objects: None,
         }
     }
 
@@ -426,6 +434,8 @@ pub struct Pipeline<B, N, H = Hooks> {
     faults: Option<Arc<dyn faults::DynFaultHooks>>,
     gate: Option<Arc<gate::WriteGate>>,
     revocation_cursors: Arc<revocation::RevokeCursors>,
+    #[cfg(feature = "http-objects")]
+    http_seams: Option<crate::http_objects::HttpSeams>,
 }
 
 impl<B, N, H> core::fmt::Debug for Pipeline<B, N, H> {
@@ -573,6 +583,15 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .max_total_bytes
                 .min(indexed.max_pack_bytes);
         }
+        #[cfg(feature = "http-objects")]
+        if let Some(http) = &cfg.http_objects {
+            let Some(indexed) = &cfg.indexed else {
+                return Err(ServerError::invalid_argument(
+                    "HTTP object serving requires indexed mode",
+                ));
+            };
+            http.validate(indexed.extract_min_bytes)?;
+        }
         cfg.validate_server_info_limits()?;
         let mut credential_names = std::collections::BTreeSet::new();
         if cfg.admission_credential_headers.iter().any(|name| {
@@ -708,6 +727,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             Sharding::Single => Arc::new(SinglePartition),
             Sharding::D34 => Arc::new(D34Shards),
         };
+        #[cfg(feature = "http-objects")]
+        let http_seams = cfg.http_objects.as_ref().map(crate::http_objects::HttpSeams::new);
         Ok(Self {
             blobs,
             meta,
@@ -720,6 +741,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             faults: None,
             gate: None,
             revocation_cursors: Arc::default(),
+            #[cfg(feature = "http-objects")]
+            http_seams,
         })
     }
 
@@ -791,6 +814,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         sibling.revocation_cursors = Arc::clone(&self.revocation_cursors);
         #[cfg(feature = "test-faults")]
         sibling.faults.clone_from(&self.faults);
+        #[cfg(feature = "http-objects")]
+        sibling.http_seams.clone_from(&self.http_seams);
         Ok(sibling)
     }
 
