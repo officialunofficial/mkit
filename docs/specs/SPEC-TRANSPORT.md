@@ -172,6 +172,32 @@ configurations). The path is already restricted to a safe ASCII
 subset by `validate_ssh_path`, so passing it as a separate token is
 sound.
 
+**Root mode.** A server that hosts many repositories under one
+filesystem root can instead force `mkit serve --root <dir>`:
+
+```
+command="mkit serve --root /srv/mkit --principal <hex>",restrict ssh-ed25519 AAAA…
+```
+
+sshd places the client's command in `SSH_ORIGINAL_COMMAND`, and `mkit
+serve` accepts only the exact form `mkit serve <path>` from it —
+three space-separated tokens, no flags, quoting, or shell syntax —
+reading the path as a `<NAMESPACE>/<NAME>` repository identity
+([SPEC-TRANSPORT-CONNECT §7.4](SPEC-TRANSPORT-CONNECT.md#74-repository-addressing))
+resolved under `<dir>`. One process serves one repository, and the
+client cannot name a flag or a different command through
+`SSH_ORIGINAL_COMMAND`. Writes run the namespace's owner rule:
+`--principal` asserts the client's Ed25519 public key (a raw 32-byte
+key as 64 lowercase hex), and only a principal equal to the
+namespace's key may write; a forced command asserting no principal
+serves reads only. `--principal` is a trust assertion made by the
+sshd configuration — never by the peer, and never from the
+environment; see [SSH-SECURITY.md](../SSH-SECURITY.md) §5. Packs
+uploaded and verified in a session (at most seven between packmap
+writes) may be consumed into membership by that session's packmap
+write — the implicit form of the upload tickets signed writes use —
+and a packmap naming any other pack is refused.
+
 ### 4.2 Conversation
 
 ```

@@ -1639,3 +1639,29 @@ expired identity, or a write can silently mint a new nonce.
 **Enforced by:** the Connect procedure classification and envelope tests,
 client retry tests, and `mkit_core::write_auth::verify_headers` checks over
 captured request bodies.
+## Implicit transport-identity membership is session-bound
+
+**Always:** implicit (transport-identity) membership is granted only for
+packs uploaded and verified in the same session and repository; the
+packmap check only refuses. A session's pending set holds at most seven
+distinct packs, dies with the session, and is consumed by that session's
+next packmap write. A packmap naming a pack neither pending nor already a
+member of the bound repository is refused; the check never adds
+membership for a pack it merely names, and no reservation or outcome
+rows are created — there is no reservation to keep one outcome per.
+
+**Because:** ssh and enc clients cannot carry signed upload tickets, so
+the transport binds them to the session instead. Letting the packmap
+check grant membership, or letting pending state outlive a session,
+would let a client claim packs it never uploaded — the membership
+oracle a ticket's signature otherwise prevents.
+
+**If violated:** a writer could publish packmaps naming packs it did not
+upload, minting membership without possession and breaking repository
+isolation across sessions and repositories.
+
+**Enforced by:** `mkit-server/src/pipeline/mod.rs`
+`check_implicit_packmap` and `update_packmap_consuming` unit tests,
+`mkit-server/src/ssh/tests.rs` pending/consume/reconnect/isolation
+cases, `mkit-cli/tests/serve_golden.rs` session-3 wire goldens, and
+`mkit-server-native/tests/enc_listener.rs` bound-repository cases.

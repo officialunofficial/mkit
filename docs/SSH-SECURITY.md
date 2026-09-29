@@ -164,6 +164,60 @@ shell that execs `mkit serve` with the resolved path.
 `AuthorizedKeysCommand` gets the pubkey as `%k` (and the fingerprint
 as `%f` / user as `%u`); see `sshd_config(5)` for the full token list.
 
+### 5.1 Root mode and `--principal`
+
+A forge that serves many repositories under one filesystem root uses
+`mkit serve --root <dir>`: the client still runs `mkit serve <path>`,
+which sshd hands the process in `SSH_ORIGINAL_COMMAND`, and the path
+names a `<NAMESPACE>/<NAME>` resolved under the root (SPEC-TRANSPORT
+§4.1). The repository's owner is then whoever the namespace's
+`ed25519-` key is — and the session's claim to that key is
+`--principal`:
+
+```
+command="mkit serve --root /srv/mkit --principal <hex>",restrict ssh-ed25519 AAAA…
+```
+
+`--principal` is a **trust assertion made by the sshd
+configuration**, the public-key half of the credential sshd has
+already verified for this session (a raw 32-byte Ed25519 key as 64
+lowercase hex). The rules:
+
+- Only `authorized_keys` `command=`, a `ForceCommand`, or
+  `AuthorizedKeysCommand` output may set it. The serving account MUST
+  have no login shell — a shell (or any other way to run the binary)
+  would let a caller invoke `mkit serve --principal <anyone's key>`
+  and assert a principal it does not own.
+- It MUST NOT come from the environment. Never reach for it via
+  `AcceptEnv`, `PermitUserEnvironment`, or `SendEnv`: a variable the
+  client supplies is an assertion the client makes about itself.
+  `mkit serve` reads it from its argv alone.
+- The client cannot name it through `SSH_ORIGINAL_COMMAND`: the
+  server accepts only the exact `mkit serve <path>` form from that
+  variable, so a forced command controls the flags entirely.
+
+For `AuthorizedKeysCommand`, the asserted key is the one sshd just
+authenticated — `%k`, the base64 SSH wire blob whose tail is the raw
+32-byte Ed25519 key (`len | "ssh-ed25519" | len | 32-byte key` after
+decoding). The resolver hexes that tail into `--principal` and echoes
+the key itself:
+
+```sh
+#!/bin/sh
+# forge-resolve-pubkey — AuthorizedKeysCommand /usr/local/bin/forge-resolve-pubkey %t %k
+# $1 = %t (key type), $2 = %k (base64 key blob)
+[ "$1" = ssh-ed25519 ] || exit 1
+hex=$(printf %s "$2" | base64 -d | tail -c 32 | od -An -tx1 | tr -d ' \n')
+printf 'command="mkit serve --root /srv/mkit --principal %s",restrict %s %s\n' \
+    "$hex" "$1" "$2"
+```
+
+The emitted line MUST assert the same key it carries: `--principal`
+is the raw 32-byte key inside the `ssh-ed25519` blob that follows it.
+Operators who need pubkey→account indirection resolve `%k` against
+their account database first (as in step 3 above) and emit the
+account's key, not the caller's.
+
 ---
 
 ## 6. Upgrade path

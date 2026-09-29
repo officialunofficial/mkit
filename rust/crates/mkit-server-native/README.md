@@ -208,9 +208,14 @@ serve only that repository.
 
 > **Authorization (M0).** An enc peer is a `TransportPeer` principal: the
 > handshake authenticates its key, and the allowlist is the whole of its
-> authorization. It may write any ref, like an ssh forced command. Enc
-> peers are NOT subject to the M2 write grants until M2 wires the grant
-> check into the transport-identity path.
+> authorization. Under `--addressing single` it may write any ref, like
+> an ssh forced command. Under `multi` the write policy is the owner
+> rule: only a peer whose key is the bound repository's `ed25519-`
+> namespace may write (every other peer reads). Packs a session uploads
+> and verifies may be published by that session's packmap write — the
+> implicit form of upload tickets — and a packmap naming any other pack
+> is refused. Enc peers are NOT subject to the M2 write grants until M2
+> wires the grant check into the transport-identity path.
 
 The server's static key is the raw 32-byte ed25519 seed in
 `--enc-server-key`, created on first run (`0600`, missing directories

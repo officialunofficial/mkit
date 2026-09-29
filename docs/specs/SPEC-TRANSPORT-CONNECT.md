@@ -1180,12 +1180,25 @@ the same identity in `X-Repository` on every repository RPC, reads
 included, and in the signed `<repository>` field on writes.
 
 **ssh and enc (informative).** The ssh and enc transports carry no
-`X-Repository`. For ssh the addressing input is the path argument of
-`mkit serve <path>`, the forced command; for enc it is the root of the
-`mkit-server serve --repo-root <DIR> --listen-enc <ADDR>` that accepted
-the connection (SPEC-TRANSPORT-ENC §6). The on-disk layout under that
-path is unchanged, and the frozen `mkit.rpc.v1.ssh` protocol is
-untouched.
+`X-Repository`; the listener, not the wire, chooses the repository. For
+ssh the addressing input is the path argument of the forced command.
+Plain `mkit serve <path>` serves the one repository under that path, as
+it always has. `mkit serve --root <DIR>` is the multi-repository form:
+the path names a `<NAMESPACE>/<NAME>` resolved to the directory
+`<DIR>/<NAMESPACE>/<NAME>`, one repository per process, and writes run
+the `ed25519-` owner rule of §7.5 against the `--principal` key the
+sshd configuration asserts (SPEC-TRANSPORT §4.1). For enc,
+`mkit-server serve --repo-root <DIR> --listen-enc <ADDR>` without
+`--enc-repository` serves the configured repository as before; under
+multi-repository addressing the listener requires
+`--enc-repository <NAMESPACE>/<NAME>` and binds every session it
+accepts to that one repository (SPEC-TRANSPORT-ENC §6). Both carry the
+same implicit-membership rule in place of §7.6's upload tickets: packs
+uploaded and verified in a session (at most seven before a packmap
+write) may be consumed into membership by that session's packmap write
+— never by a later session's, and never for packs the packmap merely
+names. The on-disk layout under the repository's path is unchanged,
+and the frozen `mkit.rpc.v1.ssh` protocol is untouched.
 
 ### 7.5 Namespace and write policy
 
@@ -1662,6 +1675,7 @@ Explicitly deferred to sibling issues:
 
 | Version | Status | Changes |
 |---|---|---|
+| `2` (WP-1.15) | draft | §7.4's ssh/enc paragraph gains ssh root mode (`mkit serve --root`, one repository per process addressed by `<NAMESPACE>/<NAME>`) and the enc `--enc-repository` listener binding, and notes the same-session implicit-membership rule transport-identity sessions use in place of upload tickets (informative). |
 | `2` (WP-1.11b) | draft | §5 and §7.6: a part receipt bound to another ticket is an invalid receipt (`invalid_argument`), with no cross-ticket oracle. |
 | `2` | draft | §7.9 defines absent or zero `page_size` as the advertised maximum and malformed or foreign page tokens as `invalid_argument` (WP-1.28a). |
 | `2` (WP-1.10) | draft | §7.6 requires canonical branch-head/packmap pairing for ticketed advances; §7.8 rejects deletion with tickets. |
