@@ -22,17 +22,20 @@ use mkit_core::write_auth::{Context as AuthContext, Operation as SignedOp};
 use mkit_server::Procedure;
 use mkit_server::auth_v2::AuthV2Config;
 use mkit_server::connect::proto::mkit::transport::v1::__buffa::oneof::download_pack_response::Body as DownloadBody;
+use mkit_server::connect::proto::mkit::transport::v1::__buffa::oneof::issue_object_url_request::Target as UrlTargetField;
+use mkit_server::connect::proto::mkit::transport::v1::__buffa::oneof::set_repo_visibility_request::Mode as VisibilityMode;
 use mkit_server::connect::proto::mkit::transport::v1::__buffa::oneof::upload_pack_request::Body as UploadBody;
 use mkit_server::connect::proto::mkit::transport::v1::__buffa::oneof::upload_part_request::Msg as PartMsg;
 use mkit_server::connect::proto::mkit::transport::v1::{
     AdvanceOutcome, AdvanceRefsRequest, AdvanceRefsResponse, BeginUploadRequest,
     CompleteUploadRequest, DownloadPackRequest, DownloadPackResponse, GetServerInfoRequest,
     GetServerInfoResponse, ListRefsRequest, ListRefsResponse, PackChunk, PackExistsRequest,
-    PackExistsResponse, ReadRefRequest, ReadRefResponse, RefExpectation, UploadPackHeader,
-    UploadPackRequest, UploadPartHeader, UploadPartRequest,
+    PackExistsResponse, ReadRefRequest, ReadRefResponse, RefExpectation, UpdateRefRequest,
+    UploadPackHeader, UploadPackRequest, UploadPartHeader, UploadPartRequest,
 };
 use mkit_server::connect::proto::mkit::transport::v1::{
-    GetGrantEpochRequest, IssueObjectUrlRequest, SetGrantEpochRequest, SetRepoVisibilityRequest,
+    GetGrantEpochRequest, IssueObjectUrlRequest, IssueObjectUrlResponse, RefPath, RepoVisibility,
+    SetGrantEpochRequest, SetRepoVisibilityRequest,
 };
 use mkit_server::connect::{self};
 use mkit_server::pipeline::{
@@ -45,6 +48,7 @@ use mkit_server::store::{
 };
 use mkit_server::upload::UploadLimits;
 use mkit_server::upload::token::{TicketClaims, TicketKeys};
+use mkit_server::url_token::{Binding, TokenRejected, UrlTarget, UrlTokenConfig, UrlTokenKeys};
 use mkit_server::{
     Addressing, AuthzFacts, ErrorDetail, METRIC_REQUESTS, ManualClock, MemoryBlobStore,
     MemoryFault, MemoryKv, Metrics, NamespaceKey, Operation, Redacted, RepoId, RepoName,
@@ -127,6 +131,9 @@ struct Setup<H = Hooks> {
     meta: Option<MemoryKv>,
     chunk_max: usize,
     list_cap: Option<u32>,
+    addressing: Option<Addressing>,
+    grants: Option<mkit_server::policy::GrantConfig>,
+    url_tokens: Option<mkit_server::url_token::UrlTokenConfig>,
 }
 
 fn setup(auth: AuthMode) -> Setup {
@@ -136,6 +143,9 @@ fn setup(auth: AuthMode) -> Setup {
         meta: None,
         chunk_max: 4,
         list_cap: None,
+        addressing: None,
+        grants: None,
+        url_tokens: None,
     }
 }
 
@@ -188,14 +198,23 @@ impl<H: HookSet + 'static> Setup<H> {
             max_total_bytes: 1 << 20,
             max_chunks: 64,
         };
-        let mut cfg = PipelineConfig::new(Addressing::Single { repo }, self.auth, limits);
+        let addressing = self.addressing.unwrap_or(Addressing::Single { repo });
+        let mut cfg = PipelineConfig::new(addressing, self.auth, limits);
+        if matches!(cfg.addressing, Addressing::Multi(_)) {
+            cfg.write_policy = mkit_server::policy::WritePolicy::Owner;
+        }
         cfg.download_chunk_max = self.chunk_max;
-        if !self.hooks.admission().is_default() && matches!(cfg.auth, AuthMode::AuthV2(_)) {
+        if matches!(cfg.auth, AuthMode::AuthV2(_))
+            && (!self.hooks.admission().is_default()
+                || matches!(cfg.addressing, Addressing::Multi(_)))
+        {
             cfg.ticket_keys = Some(TicketKeys::new(vec![("test".into(), [7; 32])]).unwrap());
         }
         if let Some(cap) = self.list_cap {
             cfg.max_list_refs_page_size = cap;
         }
+        cfg.grants = self.grants;
+        cfg.url_tokens = self.url_tokens;
         let meta = self
             .meta
             .unwrap_or_else(|| MemoryKv::with_clock(clock.clone()));
@@ -210,6 +229,12 @@ impl<H: HookSet + 'static> Setup<H> {
         )
         .unwrap();
         (pipe, codes)
+    }
+
+    /// Route by `X-Repository` instead of the configured repository.
+    fn multi(mut self) -> Self {
+        self.addressing = Some(Addressing::Multi(mkit_server::MultiAddressing::new()));
+        self
     }
 
     fn serve(self) -> Server {
@@ -399,16 +424,21 @@ fn pack(len: usize) -> Vec<u8> {
         .collect()
 }
 
-/// Auth v2 headers over `commitment`, signed at `T0` by seed `seed`.
-fn signed(seed: u8, rpc: &str, commitment: &str, nonce: u32) -> Vec<(&'static str, String)> {
-    let key = SigningKey::from_bytes(&[seed; 32]);
+/// Auth v2 headers over `commitment`, signed at `T0` by `key` for `repo`.
+fn signed_repo(
+    key: &SigningKey,
+    repo: &str,
+    rpc: &str,
+    commitment: &str,
+    nonce: u32,
+) -> Vec<(&'static str, String)> {
     let procedure = format!("/mkit.transport.v1.TransportService/{rpc}");
     let nonce = format!("{nonce:064x}");
     let expires = T0 + 300_000;
     let op = SignedOp {
         context: AuthContext {
             audience: AUDIENCE,
-            repository: REPO,
+            repository: repo,
         },
         procedure: &procedure,
         commitment,
@@ -420,7 +450,7 @@ fn signed(seed: u8, rpc: &str, commitment: &str, nonce: u32) -> Vec<(&'static st
     vec![
         ("x-envelope-version", "2".to_owned()),
         ("x-audience", AUDIENCE.to_owned()),
-        ("x-repository", REPO.to_owned()),
+        ("x-repository", repo.to_owned()),
         ("x-public-key", to_hex(key.verifying_key().as_bytes())),
         ("x-signature", to_hex_bytes(&signature.to_bytes())),
         ("x-content-commitment", commitment.to_owned()),
@@ -430,12 +460,34 @@ fn signed(seed: u8, rpc: &str, commitment: &str, nonce: u32) -> Vec<(&'static st
     ]
 }
 
-/// Auth v2 headers for exactly `body`.
-fn signed_body(seed: u8, rpc: &str, body: &[u8], nonce: u32) -> Vec<(&'static str, String)> {
+/// Auth v2 headers over `commitment`, signed at `T0` by seed `seed`.
+fn signed(seed: u8, rpc: &str, commitment: &str, nonce: u32) -> Vec<(&'static str, String)> {
+    signed_repo(
+        &SigningKey::from_bytes(&[seed; 32]),
+        REPO,
+        rpc,
+        commitment,
+        nonce,
+    )
+}
+
+/// Auth v2 headers for exactly `body`, signed by `key` for `repo`.
+fn signed_repo_body(
+    key: &SigningKey,
+    repo: &str,
+    rpc: &str,
+    body: &[u8],
+    nonce: u32,
+) -> Vec<(&'static str, String)> {
     let digest = to_hex(&hash(body));
-    let mut headers = signed(seed, rpc, &format!("body:{digest}"), nonce);
+    let mut headers = signed_repo(key, repo, rpc, &format!("body:{digest}"), nonce);
     headers.push(("x-digest", digest));
     headers
+}
+
+/// Auth v2 headers for exactly `body`.
+fn signed_body(seed: u8, rpc: &str, body: &[u8], nonce: u32) -> Vec<(&'static str, String)> {
+    signed_repo_body(&SigningKey::from_bytes(&[seed; 32]), REPO, rpc, body, nonce)
 }
 
 fn authv2() -> AuthMode {
@@ -821,6 +873,171 @@ async fn auth_v2_signed_unary_ok_and_replayed() {
     assert!(server.exists(&hash(&data)).await);
 }
 
+/// The `auth-v2/read.json` fixture entry's headers verbatim (the
+/// repository is a namespaced `ed25519-…/photos` identity, so callers
+/// must serve Multi).
+fn golden_read_headers(index: usize) -> Vec<(&'static str, String)> {
+    let fixtures: serde_json::Value =
+        serde_json::from_str(include_str!("../../../tests/golden/auth-v2/read.json")).unwrap();
+    let fixture = &fixtures[index];
+    let field = |name: &str| fixture[name].as_str().unwrap().to_owned();
+    vec![
+        ("x-envelope-version", "2".to_owned()),
+        ("x-audience", field("audience")),
+        ("x-repository", field("repository")),
+        ("x-public-key", field("public_key")),
+        ("x-signature", field("signature")),
+        ("x-digest", field("body_digest")),
+        ("x-content-commitment", field("commitment")),
+        (
+            "x-created-at",
+            fixture["created_at"].as_i64().unwrap().to_string(),
+        ),
+        (
+            "x-expires-at",
+            fixture["expires_at"].as_i64().unwrap().to_string(),
+        ),
+        ("idempotency-key", field("nonce")),
+    ]
+}
+
+#[tokio::test]
+async fn signed_unary_reads_verify_at_stage_0() {
+    let server = setup(authv2()).serve();
+    let body = serde_json::to_vec(&serde_json::json!({ "name": HEAD })).unwrap();
+    let headers = signed_body(7, "ReadRef", &body, 40);
+    let reply = server
+        .post(
+            "mkit.transport.v1.TransportService/ReadRef",
+            JSON,
+            &headers,
+            body.clone(),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    // A forged signature and a lone marker header both fail closed.
+    let mut forged = headers.clone();
+    forged.retain(|(n, _)| *n != "x-signature");
+    forged.push(("x-signature", "ff".repeat(64)));
+    let reply = server
+        .post(
+            "mkit.transport.v1.TransportService/ReadRef",
+            JSON,
+            &forged,
+            body,
+        )
+        .await;
+    assert_eq!(reply.code(), "unauthenticated");
+    let reply = server
+        .json(
+            "ListRefs",
+            &serde_json::json!({}),
+            &[("x-signature", "ab".to_owned())],
+        )
+        .await;
+    assert_eq!(reply.code(), "unauthenticated");
+}
+
+#[tokio::test]
+async fn signed_download_pack_verifies_the_framed_request() {
+    let server = setup(authv2()).multi().serve();
+    let headers = golden_read_headers(1);
+    // The signature commits to `0x00‖be32(len)‖message`; it verifies, then
+    // the read fails on the unregistered repository (not unauthenticated).
+    let (_, end) = server.download(&[0xcd; 32], &headers).await.frames();
+    assert_eq!(end["error"]["code"], "not_found", "{end}");
+    // A forged signature fails closed.
+    let mut forged = headers.clone();
+    forged.retain(|(n, _)| *n != "x-signature");
+    forged.push(("x-signature", "ff".repeat(64)));
+    let (_, end) = server.download(&[0xcd; 32], &forged).await.frames();
+    assert_eq!(end["error"]["code"], "unauthenticated", "{end}");
+    // A signed request under a declared compression fails closed too:
+    // the reconstructed frame cannot match the compressed bytes signed.
+    let mut compressed = headers;
+    compressed.push(("connect-content-encoding", "gzip".to_owned()));
+    let (_, end) = server.download(&[0xcd; 32], &compressed).await.frames();
+    assert_eq!(end["error"]["code"], "unauthenticated", "{end}");
+}
+
+#[tokio::test]
+async fn download_pack_takes_exactly_one_uncompressed_request_message() {
+    let server = setup(authv2()).multi().serve();
+    let headers = golden_read_headers(1);
+    let path = "mkit.transport.v1.TransportService/DownloadPack";
+    let req = DownloadPackRequest {
+        pack_id: Some(vec![0xcd; 32]),
+        ..Default::default()
+    };
+    // A second request message is refused by the dispatcher, not ignored.
+    let two = [frame(&req), frame(&req)].concat();
+    let (_, end) = server.post(path, STREAM, &headers, two).await.frames();
+    assert_eq!(end["error"]["code"], "unimplemented", "{end}");
+    // A frame with the compressed flag set and no declared encoding never
+    // reaches the pipeline as a valid request.
+    let mut flagged = frame(&req);
+    flagged[0] = 1;
+    let reply = server.post(path, STREAM, &headers, flagged).await;
+    let code = if reply.status == StatusCode::OK {
+        reply.frames().1["error"]["code"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    } else {
+        reply.code()
+    };
+    assert_ne!(code, "not_found", "the flagged frame was accepted");
+    assert!(
+        [
+            "invalid_argument",
+            "unauthenticated",
+            "internal",
+            "unimplemented"
+        ]
+        .contains(&code.as_str()),
+        "{code}"
+    );
+}
+
+#[tokio::test]
+async fn non_utf8_auth_header_on_a_read_fails_closed() {
+    let (pipe, _) = setup(authv2()).pipeline();
+    let svc = connect::service(Arc::new(pipe));
+    let body = ReadRefRequest {
+        name: Some(HEAD.to_owned()),
+        ..Default::default()
+    }
+    .encode_to_vec();
+    let req = http::Request::builder()
+        .method(http::Method::POST)
+        .uri("http://localhost/mkit.transport.v1.TransportService/ReadRef")
+        .header("content-type", PROTO)
+        .header("connect-protocol-version", "1")
+        .header(
+            "x-signature",
+            http::HeaderValue::from_bytes(&[0xff]).unwrap(),
+        )
+        .body(Full::new(Bytes::from(body)))
+        .unwrap();
+    let resp = svc.oneshot(req).await.unwrap();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["code"], "unauthenticated");
+}
+
+#[tokio::test]
+async fn grant_header_on_an_unsigned_multi_read_is_unauthenticated() {
+    // SPEC-WRITE-GRANTS §4.2 on any procedure.
+    let server = setup(authv2()).multi().serve();
+    let grant = [("x-write-grant", "scheme.body".to_owned())];
+    let reply = server
+        .unary("ReadRef", &ReadRefRequest::default(), &grant)
+        .await;
+    assert_eq!(reply.code(), "unauthenticated");
+    let (_, end) = server.download(&[0xcd; 32], &grant).await.frames();
+    assert_eq!(end["error"]["code"], "unauthenticated");
+}
+
 #[tokio::test]
 async fn bearer_mode_rejects_missing_token_on_streaming_and_unary() {
     let auth = AuthMode::Bearer {
@@ -985,6 +1202,9 @@ async fn error_shaping_reaches_the_wire() {
         meta: None,
         chunk_max: 4,
         list_cap: None,
+        addressing: None,
+        grants: None,
+        url_tokens: None,
     }
     .serve();
     let reply = server
@@ -1084,11 +1304,6 @@ async fn test_fault_header_honored_with_feature() {
 
 // -------------------------------------------------------------- M1 stubs
 
-fn assert_unimplemented(reply: &Reply) {
-    assert_eq!(reply.code(), "unimplemented");
-    assert_eq!(reply.json()["message"], "not implemented yet");
-}
-
 #[test]
 fn multipart_paths_are_authenticated_procedures() {
     // GetServerInfo is permanently outside Procedure: no auth or resolution.
@@ -1120,11 +1335,19 @@ fn grant_epoch_paths_are_permanently_outside_procedure() {
 }
 
 #[test]
-fn m2_stub_paths_are_not_authenticated_procedures_yet() {
-    // WP-2.9 and WP-2.11 add procedures for these and replace this test.
-    for rpc in ["SetRepoVisibility", "IssueObjectUrl"] {
+fn m2_paths_are_authenticated_procedures() {
+    // WP-2.9 classified these RPCs; their handlers land with the WP.
+    for (rpc, procedure) in [
+        ("GetReceipt", Procedure::GetReceipt),
+        ("SetRepoVisibility", Procedure::SetRepoVisibility),
+        ("IssueObjectUrl", Procedure::IssueObjectUrl),
+    ] {
         let path = format!("/mkit.transport.v1.TransportService/{rpc}");
-        assert_eq!(Procedure::from_connect_path(&path), None, "{rpc}");
+        assert_eq!(
+            Procedure::from_connect_path(&path),
+            Some(procedure),
+            "{rpc}"
+        );
     }
 }
 
@@ -1136,6 +1359,7 @@ async fn m2_remaining_stubs_and_epoch_errors_write_nothing_in_both_auth_modes() 
             token: Redacted::new(TOKEN),
         },
     ] {
+        let auth_v2 = matches!(auth, AuthMode::AuthV2(_));
         let (server, writes) = spy_server(auth);
         assert_eq!(
             server
@@ -1165,19 +1389,49 @@ async fn m2_remaining_stubs_and_epoch_errors_write_nothing_in_both_auth_modes() 
                 .code(),
             "unimplemented",
         );
-        assert_unimplemented(
-            &server
+        // The WP-2.9/2.11 procedures authenticate at stage 0 now: under
+        // auth v2 an unsigned SetRepoVisibility passes anonymously
+        // (statement mode) to the handler, which rejects a missing mode;
+        // IssueObjectUrl is never anonymous, and under Bearer every call
+        // needs a token.
+        let stub = if auth_v2 {
+            "invalid_argument"
+        } else {
+            "unauthenticated"
+        };
+        for body in [
+            server
                 .unary(
                     "SetRepoVisibility",
                     &SetRepoVisibilityRequest::default(),
                     &[],
                 )
-                .await,
+                .await
+                .code(),
+            server
+                .json("SetRepoVisibility", &serde_json::json!({}), &[])
+                .await
+                .code(),
+        ] {
+            assert_eq!(body, stub);
+        }
+        assert_eq!(
+            server
+                .unary("GetReceipt", &SetRepoVisibilityRequest::default(), &[])
+                .await
+                .code(),
+            if auth_v2 {
+                "unimplemented"
+            } else {
+                "unauthenticated"
+            },
         );
-        assert_unimplemented(
-            &server
+        assert_eq!(
+            server
                 .unary("IssueObjectUrl", &IssueObjectUrlRequest::default(), &[])
-                .await,
+                .await
+                .code(),
+            "unauthenticated"
         );
         assert_eq!(
             server
@@ -1193,11 +1447,348 @@ async fn m2_remaining_stubs_and_epoch_errors_write_nothing_in_both_auth_modes() 
                 .code(),
             "unimplemented"
         );
-        for rpc in ["SetRepoVisibility", "IssueObjectUrl"] {
-            assert_unimplemented(&server.json(rpc, &serde_json::json!({}), &[]).await);
-        }
+        assert_eq!(
+            server
+                .json("IssueObjectUrl", &serde_json::json!({}), &[])
+                .await
+                .code(),
+            "unauthenticated"
+        );
         assert_eq!(writes.load(Ordering::SeqCst), 0);
     }
+}
+
+#[tokio::test]
+async fn set_repo_visibility_rejects_missing_and_invalid_modes() {
+    let server = setup(authv2()).multi().serve();
+    // No mode at all, binary and JSON.
+    for code in [
+        server
+            .unary(
+                "SetRepoVisibility",
+                &SetRepoVisibilityRequest::default(),
+                &[],
+            )
+            .await
+            .code(),
+        server
+            .json("SetRepoVisibility", &serde_json::json!({}), &[])
+            .await
+            .code(),
+    ] {
+        assert_eq!(code, "invalid_argument");
+    }
+    for visibility in [
+        RepoVisibility::Unspecified.into(),
+        buffa::EnumValue::from(99),
+    ] {
+        let reply = server
+            .unary(
+                "SetRepoVisibility",
+                &SetRepoVisibilityRequest {
+                    mode: Some(VisibilityMode::Visibility(visibility)),
+                    ..Default::default()
+                },
+                &[],
+            )
+            .await;
+        assert_eq!(reply.code(), "invalid_argument");
+    }
+}
+
+#[tokio::test]
+async fn set_repo_visibility_runs_both_modes_over_the_wire() {
+    use mkit_attest::grant::{
+        AcceptedSchemes, OwnerScheme, SignedHeader, Visibility, VisibilityStatement,
+    };
+    use mkit_core::repo_identity::{Namespace, RepositoryIdentity};
+    use mkit_server::policy::{GrantConfig, NamespacePolicy};
+
+    let owner = SigningKey::from_bytes(&[9; 32]);
+    let namespace = Namespace::Ed25519(*owner.verifying_key().as_bytes());
+    let repo = format!("{namespace}/{REPO}");
+    let mut s = setup(authv2());
+    s.addressing = Some(Addressing::Multi(
+        mkit_server::MultiAddressing::new()
+            .with_namespace_policy(NamespacePolicy::Allowlist([namespace].into())),
+    ));
+    s.grants = Some(
+        GrantConfig::new(
+            AUDIENCE,
+            AcceptedSchemes::of(&[OwnerScheme::Ed25519]),
+            vec![],
+        )
+        .unwrap(),
+    );
+    let server = s.serve();
+    // Envelope mode: PUBLIC then PRIVATE map and commit under the owner.
+    for (visibility, nonce) in [
+        (RepoVisibility::REPO_VISIBILITY_PUBLIC, 50),
+        (RepoVisibility::REPO_VISIBILITY_PRIVATE, 51),
+    ] {
+        let body = SetRepoVisibilityRequest {
+            mode: Some(VisibilityMode::Visibility(visibility.into())),
+            ..Default::default()
+        };
+        let bytes = body.encode_to_vec();
+        let headers = signed_repo_body(&owner, &repo, "SetRepoVisibility", &bytes, nonce);
+        let reply = server.unary("SetRepoVisibility", &body, &headers).await;
+        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    }
+    // Statement mode: an unsigned request whose owner-signed statement
+    // verifies reaches the pipeline and commits.
+    let statement = VisibilityStatement {
+        repository: RepositoryIdentity::parse(&repo).unwrap(),
+        visibility: Visibility::Private,
+        audiences: vec![AUDIENCE.into()],
+        // Newer than the envelope writes above (they stamp `T0`).
+        created_ms: T0 + 1,
+        expiry_ms: T0 + 60_000,
+        nonce: [8; 32],
+    };
+    let bytes = statement.encode().unwrap();
+    let signature = owner.sign(&hash(&bytes));
+    let header = SignedHeader {
+        statement: bytes,
+        scheme: OwnerScheme::Ed25519,
+        blob: signature.to_bytes().to_vec(),
+    }
+    .encode()
+    .unwrap();
+    let body = SetRepoVisibilityRequest {
+        mode: Some(VisibilityMode::SignedStatement(header)),
+        ..Default::default()
+    };
+    let reply = server
+        .unary("SetRepoVisibility", &body, &[("x-repository", repo)])
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+}
+
+// -------------------------------------------------------- url tokens
+
+/// A URL-token configuration the test server mints and verifies with.
+fn url_tokens() -> UrlTokenConfig {
+    UrlTokenConfig::with_ttl_ms(
+        UrlTokenKeys::parse_key_file(&format!("active {}", to_hex(&[9; 32]))).unwrap(),
+        60_000,
+    )
+    .unwrap()
+}
+
+/// An `IssueObjectUrl` for `id` asking for `ttl_seconds`.
+fn issue_object(id: &[u8], ttl_seconds: u32) -> IssueObjectUrlRequest {
+    IssueObjectUrlRequest {
+        target: Some(UrlTargetField::ObjectId(id.to_vec())),
+        ttl_seconds: Some(ttl_seconds),
+        ..Default::default()
+    }
+}
+
+/// An `IssueObjectUrl` for `path` under `reference`.
+fn issue_path(reference: &str, path: &str, ttl_seconds: u32) -> IssueObjectUrlRequest {
+    IssueObjectUrlRequest {
+        target: Some(UrlTargetField::RefPath(Box::new(RefPath {
+            r#ref: Some(reference.to_owned()),
+            path: Some(path.to_owned()),
+            ..Default::default()
+        }))),
+        ttl_seconds: Some(ttl_seconds),
+        ..Default::default()
+    }
+}
+
+/// A signed `IssueObjectUrl` for `repo` (a wire identity).
+async fn issue_for(
+    server: &Server,
+    key: &SigningKey,
+    repo: &str,
+    req: &IssueObjectUrlRequest,
+    nonce: u32,
+) -> Reply {
+    let headers = signed_repo_body(key, repo, "IssueObjectUrl", &req.encode_to_vec(), nonce);
+    server.unary("IssueObjectUrl", req, &headers).await
+}
+
+/// A signed `IssueObjectUrl` for the configured repository.
+async fn issue_code(server: &Server, req: &IssueObjectUrlRequest, nonce: u32) -> String {
+    let headers = signed_body(9, "IssueObjectUrl", &req.encode_to_vec(), nonce);
+    server.unary("IssueObjectUrl", req, &headers).await.code()
+}
+
+#[tokio::test]
+async fn issue_object_url_unconfigured_is_unimplemented_and_unsigned_unauthenticated() {
+    let req = issue_object(&A, 0);
+    // Unconfigured: a verified caller is answered before any repository
+    // access.
+    let server = setup(authv2()).serve();
+    let headers = signed_body(9, "IssueObjectUrl", &req.encode_to_vec(), 60);
+    assert_eq!(
+        server.unary("IssueObjectUrl", &req, &headers).await.code(),
+        "unimplemented"
+    );
+    // Configured but unsigned: stage 0 rejects both codecs.
+    let mut s = setup(authv2());
+    s.url_tokens = Some(url_tokens());
+    let server = s.serve();
+    for code in [
+        server.unary("IssueObjectUrl", &req, &[]).await.code(),
+        server
+            .json("IssueObjectUrl", &serde_json::json!({}), &[])
+            .await
+            .code(),
+    ] {
+        assert_eq!(code, "unauthenticated");
+    }
+}
+
+#[tokio::test]
+async fn issue_object_url_rejects_bad_targets() {
+    let mut s = setup(authv2());
+    s.url_tokens = Some(url_tokens());
+    let server = s.serve();
+    // No target at all.
+    assert_eq!(
+        issue_code(&server, &IssueObjectUrlRequest::default(), 61).await,
+        "invalid_argument"
+    );
+    // An object id is exactly 32 bytes.
+    assert_eq!(
+        issue_code(&server, &issue_object(&A[..31], 0), 62).await,
+        "invalid_argument"
+    );
+    // The §9.4 path grammar, over binary and JSON.
+    let long = "x".repeat(1025);
+    for (i, path) in [".", "..", "a//b", "/a", "a/", long.as_str()]
+        .into_iter()
+        .enumerate()
+    {
+        assert_eq!(
+            issue_code(
+                &server,
+                &issue_path(HEAD, path, 0),
+                63 + u32::try_from(i).unwrap()
+            )
+            .await,
+            "invalid_argument",
+            "{path}"
+        );
+    }
+    let reply = server
+        .json(
+            "IssueObjectUrl",
+            &serde_json::json!({ "refPath": { "ref": HEAD, "path": "a//b" } }),
+            &[],
+        )
+        .await;
+    assert_eq!(reply.code(), "unauthenticated");
+    let value = serde_json::json!({ "refPath": { "ref": HEAD, "path": "a//b" } });
+    let body = serde_json::to_vec(&value).unwrap();
+    let headers = signed_body(9, "IssueObjectUrl", &body, 70);
+    let reply = server
+        .post(
+            "mkit.transport.v1.TransportService/IssueObjectUrl",
+            JSON,
+            &headers,
+            body,
+        )
+        .await;
+    assert_eq!(reply.code(), "invalid_argument");
+}
+
+#[tokio::test]
+async fn issue_object_url_mints_for_authorized_reads_only() {
+    use mkit_core::repo_identity::Namespace;
+    use mkit_server::policy::NamespacePolicy;
+
+    let owner = SigningKey::from_bytes(&[9; 32]);
+    let stranger = SigningKey::from_bytes(&[8; 32]);
+    let namespace = Namespace::Ed25519(*owner.verifying_key().as_bytes());
+    let repo = format!("{namespace}/{REPO}");
+    let tokens = url_tokens();
+    let mut s = setup(authv2());
+    s.addressing = Some(Addressing::Multi(
+        mkit_server::MultiAddressing::new()
+            .with_namespace_policy(NamespacePolicy::Allowlist([namespace].into())),
+    ));
+    s.url_tokens = Some(tokens.clone());
+    let server = s.serve();
+    let req = issue_object(&A, 0);
+
+    // A missing repository and an unauthorized private read answer
+    // `not_found`, byte for byte.
+    let missing = issue_for(&server, &stranger, &repo, &req, 71).await;
+    assert_eq!(missing.code(), "not_found");
+    let write = UpdateRefRequest {
+        name: Some(HEAD.into()),
+        expectation: Some(RefExpectation::Any.into()),
+        new_id: Some(A.to_vec()),
+        ..Default::default()
+    };
+    let headers = signed_repo_body(&owner, &repo, "UpdateRef", &write.encode_to_vec(), 72);
+    let reply = server.unary("UpdateRef", &write, &headers).await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    let visibility = SetRepoVisibilityRequest {
+        mode: Some(VisibilityMode::Visibility(
+            RepoVisibility::REPO_VISIBILITY_PRIVATE.into(),
+        )),
+        ..Default::default()
+    };
+    let headers = signed_repo_body(
+        &owner,
+        &repo,
+        "SetRepoVisibility",
+        &visibility.encode_to_vec(),
+        73,
+    );
+    assert_eq!(
+        server
+            .unary("SetRepoVisibility", &visibility, &headers)
+            .await
+            .status,
+        StatusCode::OK
+    );
+    let denied = issue_for(&server, &stranger, &repo, &req, 74).await;
+    assert_eq!(
+        (denied.status, denied.body.as_ref()),
+        (missing.status, missing.body.as_ref())
+    );
+
+    // The owner mints; the token verifies for the same binding.
+    let minted: IssueObjectUrlResponse = issue_for(&server, &owner, &repo, &req, 75).await.decode();
+    let token = minted.token.unwrap();
+    assert_eq!(minted.expires_unix_ms, Some(T0 + 60_000));
+    let target = UrlTarget::Object(A);
+    let bound = tokens
+        .precheck(&token, T0)
+        .unwrap()
+        .check_binding(
+            &Binding {
+                audience: AUDIENCE,
+                repository: &repo,
+                target: &target,
+            },
+            T0,
+            60_000,
+        )
+        .unwrap();
+    assert_eq!(bound.epoch(), 0);
+    bound.check_epoch(0).unwrap();
+    assert_eq!(bound.check_epoch(1), Err(TokenRejected));
+
+    // `ttl_seconds` asks clamp to the configured lifetime, never refuse.
+    for ttl in [0, u32::MAX] {
+        let minted: IssueObjectUrlResponse =
+            issue_for(&server, &owner, &repo, &issue_object(&A, ttl), 76)
+                .await
+                .decode();
+        assert_eq!(minted.expires_unix_ms, Some(T0 + 60_000), "ttl {ttl}");
+    }
+    let minted: IssueObjectUrlResponse =
+        issue_for(&server, &owner, &repo, &issue_object(&A, 30), 77)
+            .await
+            .decode();
+    assert_eq!(minted.expires_unix_ms, Some(T0 + 30_000));
 }
 
 #[tokio::test]
@@ -1779,6 +2370,9 @@ async fn admission_challenge_is_402_with_detail_and_no_store_on_the_wire() {
         meta: None,
         chunk_max: 4,
         list_cap: None,
+        addressing: None,
+        grants: None,
+        url_tokens: None,
     }
     .serve();
     let body = update_json(HEAD, "REF_EXPECTATION_ANY", &A);
@@ -1833,6 +2427,9 @@ async fn credential_retry_uses_the_same_nonce_and_duplicate_header_never_reaches
         meta: None,
         chunk_max: 4,
         list_cap: None,
+        addressing: None,
+        grants: None,
+        url_tokens: None,
     }
     .serve();
     let body = update_json(HEAD, "REF_EXPECTATION_MISSING", &A);
@@ -1882,6 +2479,9 @@ async fn admission_receipt_is_private_on_commit_and_absent_on_replay_or_conflict
         meta: None,
         chunk_max: 4,
         list_cap: None,
+        addressing: None,
+        grants: None,
+        url_tokens: None,
     }
     .serve();
     let body = update_json(HEAD, "REF_EXPECTATION_ANY", &A);
@@ -1921,6 +2521,9 @@ async fn server_info_advertises_nondefault_admission_and_zero_threshold() {
         meta: None,
         chunk_max: 4,
         list_cap: None,
+        addressing: None,
+        grants: None,
+        url_tokens: None,
     }
     .serve();
     let reply = server

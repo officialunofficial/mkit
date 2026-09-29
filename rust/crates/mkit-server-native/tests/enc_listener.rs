@@ -682,6 +682,160 @@ fn enc_client_roundtrip_via_transport() {
     assert!(server.client(78).is_err());
 }
 
+// ---------------------------------------------------------------------------
+// WP-1.15: a Multi deployment's `--listen-enc` binds every session to the
+// one `--enc-repository`; the repository never comes from the wire.
+
+/// A Multi deployment's enc listener bound to `repository`: peer
+/// allowlisted in `peers.txt`, `allowlist` as the namespace policy. The
+/// config files live OUTSIDE the served root (its `list_refs("")` sweep
+/// counts any hex-decodable file as a file-based ref, which `--meta
+/// sqlite` then refuses), in a second tempdir the caller keeps alive.
+fn multi_enc_start(
+    root: &Path,
+    peer: &PrivateKey,
+    repository: &str,
+    allowlist: &str,
+) -> (EncServer, tempfile::TempDir) {
+    let aux = tempfile::tempdir().unwrap();
+    let peers = aux.path().join("peers.txt");
+    fs::write(
+        &peers,
+        format!("{}\n", mkit_core::hash::to_hex(&raw_pubkey(peer))),
+    )
+    .unwrap();
+    let allowlist_path = aux.path().join("namespaces");
+    fs::write(&allowlist_path, allowlist).unwrap();
+    let tickets = aux.path().join("ticket.keys");
+    common::secret_file(
+        &tickets,
+        b"dev 1111111111111111111111111111111111111111111111111111111111111111\n",
+    );
+    let meta = format!("sqlite:{}", common::s(&aux.path().join("meta.sqlite3")));
+    let key_path = aux.path().join("enc").join("server.key");
+    let flags = [
+        "--listen",
+        "127.0.0.1:0",
+        "--addressing",
+        "multi",
+        "--namespace-allowlist",
+        common::s(&allowlist_path),
+        "--auth",
+        "auth-v2",
+        "--audience",
+        "http://localhost",
+        "--ticket-key-file",
+        common::s(&tickets),
+        "--meta",
+        meta.as_str(),
+        "--enc-authorized-peers",
+        common::s(&peers),
+        "--enc-server-key",
+        common::s(&key_path),
+        "--enc-repository",
+        repository,
+    ];
+    (EncServer::start(root, &flags), aux)
+}
+
+/// The peer's namespace, canonical `ed25519-<64 hex>` form.
+fn peer_namespace(peer: &PrivateKey) -> String {
+    format!("ed25519-{}", mkit_core::hash::to_hex(&raw_pubkey(peer)))
+}
+
+/// A bound repository in the peer's own namespace: the implicit push —
+/// data pack, MKPL naming it, the consuming packmap write, the head —
+/// lands and reads back (WP-1.15 Test 12).
+#[test]
+fn enc_multi_bound_repository_roundtrips_the_owner() {
+    let (_td, root) = enc_repo();
+    let peer = PrivateKey::from_seed(77);
+    let peer_ns = peer_namespace(&peer);
+    let repository = format!("{peer_ns}/room-a");
+    let (server, _aux) = multi_enc_start(&root, &peer, &repository, &format!("{peer_ns}\n"));
+
+    let client = server.client(77).unwrap();
+    let (bytes, key) = valid_pack();
+    client.upload_pack(&bytes, &key).unwrap();
+    let mkpl =
+        mkit_core::transfer::encode_packlist(None, std::slice::from_ref(key.as_bytes())).unwrap();
+    let mkpl_key = PackKey::new(hash(&mkpl));
+    client.upload_pack(&mkpl, &mkpl_key).unwrap();
+    client
+        .update_ref(
+            "refs/mkit/packmap/main",
+            RefWriteCondition::Missing,
+            mkpl_key.as_bytes(),
+        )
+        .unwrap();
+    let head = [0x42; 32];
+    client
+        .update_ref("refs/heads/main", RefWriteCondition::Missing, &head)
+        .unwrap();
+
+    // Reads are repository-scoped and come back over the same binding.
+    assert_eq!(client.read_ref("refs/heads/main").unwrap(), Some(head));
+    assert!(client.pack_exists(&key).unwrap());
+    assert!(client.pack_exists(&mkpl_key).unwrap());
+    assert_eq!(client.download_pack(&key).unwrap(), bytes);
+}
+
+/// A bound repository in a namespace the peer does not own denies every
+/// write; so does one whose namespace is not on the allowlist (checked
+/// before the owner rule). Both pin `write not permitted`, and the
+/// denied upload leaves no pack on disk.
+#[test]
+fn enc_multi_foreign_and_unlisted_namespaces_write_nothing() {
+    let foreign_ns = format!("ed25519-{}", "cd".repeat(32));
+    for (repository_ns, allowlisted, why) in [
+        (foreign_ns.as_str(), "peer+foreign", "a foreign namespace"),
+        ("peer", "foreign", "a namespace off the allowlist"),
+    ] {
+        let (_td, root) = enc_repo();
+        let peer = PrivateKey::from_seed(77);
+        let peer_ns = peer_namespace(&peer);
+        let repository = format!(
+            "{}/room-a",
+            if repository_ns == "peer" {
+                &peer_ns
+            } else {
+                &foreign_ns
+            }
+        );
+        let allowlist = if allowlisted == "peer+foreign" {
+            format!("{peer_ns}\n{foreign_ns}\n")
+        } else {
+            format!("{foreign_ns}\n")
+        };
+        let (server, _aux) = multi_enc_start(&root, &peer, &repository, &allowlist);
+        let client = server.client(77).unwrap();
+
+        let (bytes, key) = valid_pack();
+        let upload = client.upload_pack(&bytes, &key).unwrap_err();
+        assert!(
+            matches!(&upload, TransportError::RemoteError(m) if m == "write not permitted"),
+            "{why}: upload must be refused, got {upload:?}"
+        );
+        let update = client
+            .update_ref("refs/heads/main", RefWriteCondition::Missing, &[0x42; 32])
+            .unwrap_err();
+        assert!(
+            matches!(&update, TransportError::RemoteError(m) if m == "write not permitted"),
+            "{why}: update must be refused, got {update:?}"
+        );
+        // Nothing was allocated: no blob on disk, and no repository to
+        // probe membership in (`Ok(true)` would be the leak).
+        assert!(
+            !root.join("packs").join(key.to_hex()).exists(),
+            "{why}: a refused upload stored a pack"
+        );
+        assert!(
+            !matches!(client.pack_exists(&key), Ok(true)),
+            "{why}: a refused upload became visible"
+        );
+    }
+}
+
 #[test]
 fn listen_enc_error_replies_match_the_ssh_session() {
     let (_td, root) = enc_repo();

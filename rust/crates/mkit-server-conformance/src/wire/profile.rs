@@ -261,6 +261,13 @@ pub struct Profile {
     /// Off by default: on a long-lived server such a listing grows with
     /// every run (and a unary listing has no paging before M1, WP-1.27).
     pub fresh_target: bool,
+    /// The target seeds the membership fixtures the three `repo.*_packs`/
+    /// `membership` cases need. In-process baselines set it and plant the
+    /// rows directly; a served deployment leaves it off and the cases seed
+    /// the fixture through a real ticketed push instead (all but
+    /// `repo.membership_read_your_writes`, which needs the index held
+    /// undelivered and still skips).
+    pub planted_membership: bool,
 }
 
 impl Profile {
@@ -285,6 +292,7 @@ impl Profile {
             duplicate_retry_ms: DEFAULT_DUPLICATE_RETRY_MS,
             sign_reads: false,
             fresh_target: false,
+            planted_membership: false,
         };
         profile.derive_features();
         profile
@@ -309,6 +317,7 @@ impl Profile {
             ),
             (Feature::AtomicAdvance, self.atomic_advance),
             (Feature::Quota, self.quota.is_some()),
+            (Feature::SignedReads, self.sign_reads),
         ];
         for (feature, on) in derived {
             if on {

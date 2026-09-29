@@ -31,6 +31,7 @@ mod epoch;
 pub(crate) mod faults;
 mod gate;
 mod hooks;
+mod implicit;
 mod info;
 mod lease;
 mod list;
@@ -49,32 +50,42 @@ use core::future::Future;
 use core::time::Duration;
 use std::sync::Arc;
 
-use mkit_core::hash::{Hash, to_hex_bytes};
+use mkit_attest::grant::{Visibility, verify_visibility_statement};
+use mkit_core::hash::{Hash, to_hex, to_hex_bytes};
 use mkit_core::protocol::{AdvanceOutcome, PackKey};
-use mkit_core::repo_identity::Namespace;
+use mkit_core::repo_identity::{Namespace, RepositoryIdentity};
 use mkit_core::write_auth::MAX_CLOCK_LEAD_MS;
 use tracing::Instrument;
 
 use crate::download::DOWNLOAD_CHUNK_MAX;
 use crate::error::{AbortCause, InvalidHeader, ServerError};
-use crate::op::{AuthzFacts, OpKind, Operation, Procedure, RefUpdate};
-use crate::policy::{AuthorizerRole, GrantConfig, NamespacePolicy, WritePolicy, grants};
+use crate::op::{
+    AuthzFacts, CallerView, GrantRef, OpKind, Operation, Procedure, RefUpdate, VerifiedAuth,
+};
+use crate::policy::{
+    AuthorizerRole, GrantConfig, NamespacePolicy, WritePolicy, grants, read as read_policy,
+};
+use crate::principal::Principal;
 use crate::quota::{
     self, DEFAULT_WRITE_QUOTA, NamespaceCharge, NamespaceDecision, NamespaceView, QuotaCharge,
     QuotaLimits, QuotaScope, ViewStatus,
 };
 use crate::refs::{self, strip_listed_prefix, validate_ref_name};
-use crate::replay::{BeginUploadResult, ReplayDecision, StoredResult, UpdateRefResult, classify};
-use crate::repo::Addressing;
+use crate::replay::{
+    BeginUploadResult, ReplayDecision, ReplayRecord, ReplayState, StoredResult, UpdateRefResult,
+    classify,
+};
+use crate::repo::{Addressing, RepoId};
 use crate::rt::Clock;
 use crate::storage_error::{StorageOp, describe_and_map};
 use crate::store::tickets::TicketCaps;
 use crate::store::{
-    Batch, BatchOutcome, Key, KeyClasses, MultipartBlobStore, NamespaceStore, Partition,
-    StoreError, Value, codec, keys, read,
+    Batch, BatchOutcome, Key, KeyClasses, MAX_BATCH_OPS, MultipartBlobStore, NamespaceStore,
+    Partition, Precondition, StoreError, Value, codec, keys, read,
 };
 use crate::telemetry::{Metrics, Redactor};
 use crate::upload::{UploadLimits, token::TicketKeys};
+use crate::url_token::{MintedToken, UrlTarget};
 use begin::BeginWrite;
 
 pub use auth::{AuthMode, Authenticated, HeaderValues, RequestMeta};
@@ -91,12 +102,15 @@ pub use hooks::{
     CredentialHeader, DefaultAdmission, HookSet, Hooks, NoOutcomes, NoPreReceive, NoReceipts,
     OpenAuthorizer, OutcomeSink, PreReceive, ReceiptSigner,
 };
+#[cfg(feature = "ssh")]
+pub(crate) use implicit::IMPLICIT_PACKMAP_UNKNOWN;
+pub(crate) use implicit::PendingPack;
 pub use info::ServerInfo;
 use outcome::Outcome as RequestOutcome;
 pub use parts::PartUploadSession;
 use plan::{
-    MAX_REPLAN, PRUNE_LIMIT, Plan, PlanClock, Planned, Snapshot, WriteKind, WriteRequest,
-    plan_write, prune_sampled,
+    ImplicitConsume, MAX_REPLAN, PRUNE_LIMIT, Plan, PlanClock, Planned, Snapshot, WriteKind,
+    WriteRequest, plan_write, prune_sampled,
 };
 pub use revocation::{MAX_EPOCH_STEP, RevokeBudget, RevokeProgress};
 pub use shard::{D34Shards, ShardMap, SinglePartition};
@@ -185,6 +199,19 @@ fn require_relay_source_lease(
     Ok(())
 }
 
+/// What `authorize_read` established: the caller's facts (including its
+/// §10.1 view) and the stored grant epoch it checked a presented grant
+/// against.
+#[derive(Debug)]
+struct ReadAuth {
+    /// Facts threaded into `op.authz` for the hooks.
+    facts: AuthzFacts,
+    /// The coordinator's `e` row, `0` when absent; `None` when
+    /// visibility does not apply and no epoch was read. `IssueObjectUrl`
+    /// reuses it.
+    epoch: Option<u64>,
+}
+
 /// A deployment's pipeline settings. Start from [`PipelineConfig::new`].
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -217,6 +244,9 @@ pub struct PipelineConfig {
     pub begin_upload_threshold_bytes: u64,
     /// Accepted deployment upload MAC keys; first key signs.
     pub ticket_keys: Option<TicketKeys>,
+    /// URL-token key set and lifetime for `IssueObjectUrl`
+    /// (SPEC-WRITE-GRANTS §9.4); `None` answers `unimplemented`.
+    pub url_tokens: Option<crate::url_token::UrlTokenConfig>,
     /// Ticket lifetime, positive and strictly below seven days.
     pub ticket_ttl_ms: u64,
     /// Open-ticket bounds in each ref shard.
@@ -287,6 +317,7 @@ impl PipelineConfig {
             max_list_refs_page_size: DEFAULT_LIST_PAGE_LIMIT,
             begin_upload_threshold_bytes: u64::MAX,
             ticket_keys: None,
+            url_tokens: None,
             ticket_ttl_ms: 86_400_000,
             ticket_caps: TicketCaps {
                 per_ref: 1024,
@@ -354,6 +385,30 @@ pub struct RefEntry {
     pub name: String,
     /// The object id.
     pub id: Hash,
+}
+
+/// A `SetRepoVisibility` request: the signed envelope's choice or the
+/// unsigned owner-signed statement (SPEC-WRITE-GRANTS §9.1).
+#[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum VisibilityRequest {
+    /// Envelope mode: the signed request's `visibility`.
+    Envelope(Visibility),
+    /// `signed_statement` mode: the encoded `scheme:statement:blob` header.
+    Statement(String),
+}
+
+impl core::fmt::Debug for VisibilityRequest {
+    /// Never shows the raw statement.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Envelope(visibility) => f.debug_tuple("Envelope").field(visibility).finish(),
+            Self::Statement(statement) => f
+                .debug_tuple("Statement")
+                .field(&format_args!("<{} bytes>", statement.len()))
+                .finish(),
+        }
+    }
 }
 
 /// The request pipeline over blobs `B`, metadata `N` and hooks `H`.
@@ -425,18 +480,23 @@ fn ms(ms: i64) -> u64 {
     u64::try_from(ms).unwrap_or(0)
 }
 
+/// The `rv` codec's visibility for a statement/envelope [`Visibility`].
+fn stored_visibility(visibility: Visibility) -> codec::StoredVisibility {
+    match visibility {
+        Visibility::Public => codec::StoredVisibility::Public,
+        Visibility::Private => codec::StoredVisibility::Private,
+    }
+}
+
 fn validate_upload_ticket_config<H: HookSet>(
     cfg: &PipelineConfig,
     hooks: &H,
 ) -> Result<(), ServerError> {
-    if matches!(cfg.addressing, Addressing::Multi(_))
-        && matches!(cfg.auth, AuthMode::TransportIdentity)
-    {
-        return Err(ServerError::invalid_argument(
-            "multi-repository deployments require auth v2 until transport identity carries tickets",
-        ));
-    }
+    // Transport identity carries no tickets: the ssh and enc transports
+    // earn pack membership implicitly (WP-1.15's session pending set), so
+    // neither the Multi refusal nor the ticket threshold applies to it.
     if cfg.begin_upload_threshold_bytes != u64::MAX
+        && !matches!(cfg.auth, AuthMode::TransportIdentity)
         && (!matches!(cfg.auth, AuthMode::AuthV2(_)) || cfg.ticket_keys.is_none())
     {
         return Err(ServerError::invalid_argument(
@@ -449,6 +509,14 @@ fn validate_upload_ticket_config<H: HookSet>(
     {
         return Err(ServerError::invalid_argument(
             "admission requires auth v2 and upload ticket keys",
+        ));
+    }
+    if matches!(cfg.addressing, Addressing::Multi(_))
+        && matches!(cfg.auth, AuthMode::AuthV2(_))
+        && cfg.ticket_keys.is_none()
+    {
+        return Err(ServerError::invalid_argument(
+            "multi-repository auth v2 deployments require upload ticket keys",
         ));
     }
     Ok(())
@@ -540,7 +608,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             (Addressing::Multi(_), WritePolicy::Open) => {
                 Some("write_policy open is single-repository only (SPEC-TRANSPORT-CONNECT §7.5)")
             }
-            (Addressing::Single { .. }, WritePolicy::Owner) => {
+            // Owner on Single is the ssh root mode's policy: it needs a
+            // self-certifying namespace (§7.4) to check principals against.
+            // A bare `root` Single has none and stays refused.
+            (Addressing::Single { repo }, WritePolicy::Owner)
+                if Namespace::parse(repo.namespace.as_str()).is_err() =>
+            {
                 Some("write_policy owner needs multi-repository addressing")
             }
             (Addressing::Multi(multi), _)
@@ -576,6 +649,20 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             if grants.audience() != auth.audience() {
                 return Err(ServerError::invalid_argument(
                     "write grant audience must match auth v2 audience",
+                ));
+            }
+        }
+        if let Some(tokens) = &cfg.url_tokens {
+            if !matches!(cfg.auth, AuthMode::AuthV2(_)) {
+                return Err(ServerError::invalid_argument("URL tokens require auth v2"));
+            }
+            // §9.4: the URL-token key is dedicated; a shared ticket secret
+            // would let ticket MACs stand in for URL-token signatures.
+            if let Some(tickets) = &cfg.ticket_keys
+                && tickets.contains_secret(&tokens.keys().active_seed())
+            {
+                return Err(ServerError::invalid_argument(
+                    "the URL token key must differ from the upload ticket keys",
                 ));
             }
         }
@@ -683,6 +770,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     {
         let mut cfg = self.cfg.clone();
         cfg.auth = auth;
+        // Sibling enc/ssh pipelines do not mint object URL tokens.
+        cfg.url_tokens = None;
         let mut sibling = Self::new(
             self.blobs.clone(),
             self.meta.clone(),
@@ -721,18 +810,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     }
 
     fn authenticate_inner(&self, meta: &RequestMeta<'_>) -> Result<Authenticated, ServerError> {
-        let signed = matches!(self.cfg.auth, AuthMode::AuthV2(_)) && meta.procedure.is_write();
-        if matches!(self.cfg.addressing, Addressing::Multi(_))
-            && !signed
-            && matches!(
-                meta.procedure,
-                Procedure::UpdateRef
-                    | Procedure::AdvanceRefs
-                    | Procedure::BeginUpload
-                    | Procedure::UploadPack
-            )
-            && (meta.header)("x-write-grant").is_some()
-        {
+        let signed = auth::signed_request(&self.cfg.auth, meta);
+        // SPEC-WRITE-GRANTS §4.2: a grant header without auth v2 fails on
+        // any procedure of every deployment.
+        if !signed && (meta.header)("x-write-grant").is_some() {
             return Err(ServerError::unauthenticated(
                 "write grant requires auth v2 authorization",
             ));
@@ -754,7 +835,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let skew = 0;
         let now = self.clock.now_ms().saturating_add(skew);
         let mut a = auth::authenticate(&self.cfg.auth, meta, now, repo, &expected_repository)?;
-        if matches!(self.cfg.auth, AuthMode::AuthV2(_)) && a.auth.is_some() {
+        // Credentials are captured for admission, which only signed writes
+        // reach: signed reads and `SetRepoVisibility` never run it (§9.1).
+        if matches!(self.cfg.auth, AuthMode::AuthV2(_))
+            && a.auth.is_some()
+            && meta.procedure.is_write()
+            && meta.procedure != Procedure::SetRepoVisibility
+        {
             a.credential_capture =
                 admission::capture_credentials(meta, &self.cfg.admission_credential_headers);
         }
@@ -817,8 +904,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 ));
             }
             let op = self.identify(a, kind)?;
-            self.authorize(&op).await?;
-            self.require_repository(&op.repo).await?;
+            self.authorize_read(&op).await?;
             let scan = refs::list_scan_prefix(prefix);
             let last = token
                 .map(|bytes| {
@@ -915,8 +1001,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         self.observe(a, async {
             check_ref_name(name)?;
             let op = self.identify(a, kind)?;
-            self.authorize(&op).await?;
-            self.require_repository(&op.repo).await?;
+            self.authorize_read(&op).await?;
             let p = self.shards.ref_shard(&op.repo, name);
             read::read_ref(&self.meta, &p, &op.repo.name, name)
                 .await
@@ -1089,8 +1174,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     pub async fn pack_exists(&self, a: &Authenticated, key: PackKey) -> Result<bool, ServerError> {
         self.observe(a, async {
             let op = self.identify(a, OpKind::PackExists { key })?;
-            self.authorize(&op).await?;
-            self.require_repository(&op.repo).await?;
+            self.authorize_read(&op).await?;
             if !self.pack_is_member(a, &key).await? {
                 return Ok(false);
             }
@@ -1100,6 +1184,407 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .is_some())
         })
         .await
+    }
+
+    /// `IssueObjectUrl` (SPEC-WRITE-GRANTS §9.4): mint a token binding the
+    /// deployment's audience, the request's repository identity and
+    /// `target` at the stored grant epoch. The target is never resolved —
+    /// serving decides what it names, so minting reveals nothing about
+    /// the repository's contents. The token is a credential: it is never
+    /// logged.
+    ///
+    /// # Errors
+    /// `unimplemented` when no URL-token key is configured, before any
+    /// repository access; `unauthenticated` for an unsigned request
+    /// (stage 0 already rejects it under auth v2); the read errors of
+    /// `Self::authorize_read`, including the uniform `not_found` on a
+    /// private repository.
+    pub async fn issue_object_url(
+        &self,
+        a: &Authenticated,
+        target: UrlTarget,
+        ttl_seconds: u32,
+    ) -> Result<MintedToken, ServerError> {
+        self.observe(a, async {
+            let Some(tokens) = &self.cfg.url_tokens else {
+                return Err(ServerError::unimplemented("URL tokens not configured"));
+            };
+            let op = self.identify(
+                a,
+                OpKind::IssueObjectUrl {
+                    target: target.clone(),
+                    ttl_seconds,
+                },
+            )?;
+            let read = self.authorize_read(&op).await?;
+            let epoch = match read.epoch {
+                Some(epoch) => epoch,
+                None => self.stored_grant_epoch(&op.repo.namespace).await?,
+            };
+            let audience = match &self.cfg.auth {
+                AuthMode::AuthV2(cfg) => cfg.audience(),
+                // `Pipeline::new` refuses `url_tokens` without auth v2.
+                _ => return Err(internal("URL tokens without auth v2")),
+            };
+            tokens.mint(
+                audience,
+                &a.repo().identity,
+                &target,
+                epoch,
+                a.business_now_ms,
+                ttl_seconds,
+            )
+        })
+        .await
+    }
+
+    /// `SetRepoVisibility` (SPEC-WRITE-GRANTS §9.1): the envelope mode is a
+    /// signed, replay-protected write of the `rv` row; the statement mode
+    /// verifies an unsigned owner-signed statement and keeps the newest
+    /// `created`. Only deployments where `Self::visibility_applies`
+    /// holds have visibility at all.
+    ///
+    /// # Errors
+    /// `unauthenticated` for an unsigned envelope request, `invalid_argument`
+    /// for a statement on a signed request, `failed_precondition` when the
+    /// deployment has no repository visibility, `permission_denied` for a
+    /// grant, a non-owner, an unserved namespace or a rejected statement.
+    pub async fn set_repo_visibility(
+        &self,
+        a: &Authenticated,
+        req: VisibilityRequest,
+    ) -> Result<(), ServerError> {
+        self.observe(a, async {
+            if !self.visibility_applies() {
+                return Err(ServerError::failed_precondition(
+                    "repository visibility is not supported by this deployment",
+                ));
+            }
+            match (&req, a.auth.is_some()) {
+                (VisibilityRequest::Statement(_), true) => {
+                    return Err(ServerError::invalid_argument(
+                        "signed_statement is not allowed on a signed request",
+                    ));
+                }
+                (VisibilityRequest::Envelope(_), false) => {
+                    return Err(ServerError::unauthenticated(
+                        "visibility requires auth v2 authorization",
+                    ));
+                }
+                _ => {}
+            }
+            let repo = &a.repo().repo;
+            let namespace = Namespace::parse(repo.namespace.as_str())
+                .map_err(|_| internal("invalid resolved Multi namespace"))?;
+            if let Addressing::Multi(multi) = &self.cfg.addressing
+                && let NamespacePolicy::Allowlist(allowed) = &multi.namespace_policy
+                && !allowed.contains(&namespace)
+            {
+                return Err(ServerError::permission_denied("namespace not served"));
+            }
+            let p = self.shards.coordinator(&repo.namespace);
+            let _gate = match &self.gate {
+                Some(gate) => Some(gate.enter(&p).await),
+                None => None,
+            };
+            match req {
+                VisibilityRequest::Envelope(visibility) => {
+                    self.visibility_envelope(a, repo, &p, visibility).await
+                }
+                VisibilityRequest::Statement(statement) => {
+                    self.visibility_statement(a, repo, &p, &statement).await
+                }
+            }
+        })
+        .await
+    }
+
+    /// Envelope mode: the stage-0 replay lookup, owner-or-hook
+    /// authorization mirroring the write branch (never a grant), then the
+    /// guarded `rv` write with its replay record.
+    async fn visibility_envelope(
+        &self,
+        a: &Authenticated,
+        repo: &RepoId,
+        p: &Partition,
+        visibility: Visibility,
+    ) -> Result<(), ServerError> {
+        if a.write_grant.is_some() {
+            return Err(ServerError::permission_denied(
+                "a grant never authorizes SetRepoVisibility",
+            ));
+        }
+        let op = self.identify(a, OpKind::SetRepoVisibility { visibility })?;
+        let auth = a.auth.as_ref().ok_or_else(|| {
+            ServerError::unauthenticated("visibility requires auth v2 authorization")
+        })?;
+        let replay_key = keys::replay(&auth.replay_scope);
+        let rv_key = keys::repo_visibility(&repo.name);
+        let rows = self
+            .meta
+            .get_many(p, &[replay_key.clone(), rv_key.clone()])
+            .await
+            .map_err(meta_error)?;
+        let mut rows = rows.into_iter();
+        let record = rows
+            .next()
+            .flatten()
+            .map(|v| codec::decode_replay_record(&v))
+            .transpose()
+            .map_err(meta_error)?;
+        let mut stored = rows.next().flatten();
+        match classify(record.as_ref(), &auth.fingerprint) {
+            ReplayDecision::New => {}
+            ReplayDecision::Return(StoredResult::RepoVisibility) => return Ok(()),
+            ReplayDecision::Return(other) => return Err(stored_mismatch(&other)),
+            ReplayDecision::FingerprintMismatch => {
+                return Err(ServerError::invalid_argument(
+                    "nonce reused for a different operation",
+                ));
+            }
+            ReplayDecision::Resume | ReplayDecision::RetryLater => {
+                return Err(ServerError::aborted_retryable(
+                    "operation already in flight; retry",
+                ));
+            }
+        }
+        self.authorize_visibility_envelope(&op).await?;
+        let mut replans = 0;
+        loop {
+            let (batch, prune) = self
+                .plan_visibility(p, auth, repo, visibility, stored.as_ref())
+                .await?;
+            match self.meta.apply(p, batch).await {
+                Ok(BatchOutcome::Committed) => return Ok(()),
+                Ok(BatchOutcome::DeadlinePassed { .. }) => {
+                    return Err(ServerError::unavailable("commit deadline passed; retry"));
+                }
+                Ok(BatchOutcome::PreconditionFailed { index, .. }) => {
+                    if index == 1 {
+                        // The replay guard failed: a request with this
+                        // nonce landed first; answer it as stage 0 does.
+                        let value = self.meta.get(p, &replay_key).await.map_err(meta_error)?;
+                        let record = value
+                            .as_ref()
+                            .map(codec::decode_replay_record)
+                            .transpose()
+                            .map_err(meta_error)?;
+                        return match classify(record.as_ref(), &auth.fingerprint) {
+                            ReplayDecision::Return(StoredResult::RepoVisibility) => Ok(()),
+                            ReplayDecision::Return(other) => Err(stored_mismatch(&other)),
+                            ReplayDecision::FingerprintMismatch => {
+                                Err(ServerError::invalid_argument(
+                                    "nonce reused for a different operation",
+                                ))
+                            }
+                            _ => Err(ServerError::aborted_retryable(
+                                "operation already in flight; retry",
+                            )),
+                        };
+                    }
+                    replans += 1;
+                    if replans > MAX_REPLAN {
+                        return Err(ServerError::aborted_retryable("write contention; retry"));
+                    }
+                    stored = self.meta.get(p, &rv_key).await.map_err(meta_error)?;
+                }
+                Err(StoreError::Full) => {
+                    return Err(self.partition_full(p, prune).await);
+                }
+                Err(e) => return Err(meta_error(e)),
+            }
+        }
+    }
+
+    /// Envelope-mode authorization: the owner, or (`authority` role) the
+    /// hook, which is shown a reader until it decides. Hook errors are
+    /// stripped of any admission shape.
+    async fn authorize_visibility_envelope(&self, op: &Operation) -> Result<(), ServerError> {
+        let owner = matches!(
+            Namespace::parse(op.repo.namespace.as_str()),
+            Ok(Namespace::Ed25519(key)) if op.principal.ed25519() == Some(&key)
+        );
+        if self.cfg.authorizer_role == AuthorizerRole::Check && !owner {
+            return Err(ServerError::permission_denied(
+                "SetRepoVisibility not permitted",
+            ));
+        }
+        let mut authorized = op.clone();
+        authorized.authz = AuthzFacts {
+            grant: None,
+            owner,
+            // The hook decides whether a non-owner may write; until it
+            // does the caller is only a reader.
+            caller_view: if owner {
+                CallerView::Writer
+            } else {
+                CallerView::Reader
+            },
+        };
+        self.hooks
+            .authorizer()
+            .authorize(&authorized)
+            .await
+            .map_err(ServerError::strip_admission_shape)?;
+        Ok(())
+    }
+
+    /// One envelope attempt: deadline, replay `Absent`, the `rv` guard and
+    /// its new row, the replay record and expiry index, then up to 32
+    /// expired replay `(index, record)` deletes capped at `MAX_BATCH_OPS`.
+    /// Returns the commit batch plus the delete-only batch a full
+    /// partition can still apply.
+    async fn plan_visibility(
+        &self,
+        p: &Partition,
+        auth: &VerifiedAuth,
+        repo: &RepoId,
+        visibility: Visibility,
+        stored: Option<&Value>,
+    ) -> Result<(Batch, Option<Batch>), ServerError> {
+        let now = ms(self.clock.now_ms());
+        let window = u64::try_from(self.cfg.max_apply_window.as_millis()).unwrap_or(u64::MAX);
+        let deadline = now
+            .saturating_add(window)
+            .min(ms(auth.expires_at_ms).saturating_add(MAX_CLOCK_LEAD_MS.unsigned_abs()));
+        let replay_key = keys::replay(&auth.replay_scope);
+        let rv_key = keys::repo_visibility(&repo.name);
+        let row = stored
+            .map(codec::decode_repo_visibility)
+            .transpose()
+            .map_err(meta_error)?;
+        let mut batch = Batch::new()
+            .require(Precondition::NotAfter(deadline))
+            .require(Precondition::Absent(replay_key.clone()))
+            .require(match stored {
+                Some(value) => Precondition::Equals(rv_key.clone(), value.clone()),
+                None => Precondition::Absent(rv_key.clone()),
+            })
+            .put(
+                rv_key.clone(),
+                codec::encode_repo_visibility(&codec::RepoVisibilityV1 {
+                    visibility: stored_visibility(visibility),
+                    // An envelope write is newer than any statement made
+                    // before it: an older unsubmitted statement must not
+                    // undo it (§9.1).
+                    last_created_ms: row.as_ref().map_or(0, |r| r.last_created_ms).max(now),
+                    last_statement_id: row.and_then(|r| r.last_statement_id),
+                }),
+            )
+            .put(
+                replay_key.clone(),
+                codec::encode_replay_record(&ReplayRecord {
+                    fingerprint: auth.fingerprint,
+                    expires_at_ms: auth.expires_at_ms,
+                    state: ReplayState::Committed(StoredResult::RepoVisibility),
+                }),
+            )
+            .put(
+                keys::replay_expiry(ms(auth.expires_at_ms), &auth.replay_scope),
+                Value::default(),
+            );
+        let expired = read::expired_replay_keys(&self.meta, p, now, 32)
+            .await
+            .map_err(meta_error)?;
+        let mut prune = Batch::new().require(Precondition::NotAfter(deadline));
+        for (index, target) in &expired {
+            if batch.preconditions.len() + batch.writes.len() + 2 > MAX_BATCH_OPS {
+                break;
+            }
+            batch = batch.delete(index.clone()).delete(target.clone());
+            prune = prune.delete(index.clone()).delete(target.clone());
+        }
+        Ok((batch, (!prune.writes.is_empty()).then_some(prune)))
+    }
+
+    /// Statement mode: the owner-signed statement is its own
+    /// authorization; only a strictly newer `created` replaces the stored
+    /// one. No hook, no replay record, no admission.
+    async fn visibility_statement(
+        &self,
+        a: &Authenticated,
+        repo: &RepoId,
+        p: &Partition,
+        statement: &str,
+    ) -> Result<(), ServerError> {
+        let rejected = |e: mkit_attest::grant::GrantError| {
+            ServerError::permission_denied(format!("visibility statement rejected: {}", e.reason()))
+        };
+        if statement.len() > mkit_attest::grant::MAX_GRANT_HEADER_BYTES {
+            return Err(ServerError::permission_denied(
+                "visibility statement rejected: too long",
+            ));
+        }
+        let grants = self.cfg.grants.as_ref().ok_or_else(|| {
+            ServerError::permission_denied(
+                "visibility statement rejected: no owner schemes configured",
+            )
+        })?;
+        let identity = RepositoryIdentity::parse(&a.repo().identity)
+            .map_err(|_| internal("invalid resolved repository identity"))?;
+        let verified =
+            verify_visibility_statement(grants.verifier(), statement, &identity, a.business_now_ms)
+                .map_err(rejected)?;
+        let created = u64::try_from(verified.statement().created_ms)
+            .map_err(|_| rejected(mkit_attest::grant::GrantError::DecimalOutOfRange))?;
+        let id = to_hex(verified.id());
+        let rv_key = keys::repo_visibility(&repo.name);
+        let window = u64::try_from(self.cfg.max_apply_window.as_millis()).unwrap_or(u64::MAX);
+        let mut replans = 0;
+        loop {
+            let stored = self.meta.get(p, &rv_key).await.map_err(meta_error)?;
+            let row = stored
+                .as_ref()
+                .map(codec::decode_repo_visibility)
+                .transpose()
+                .map_err(meta_error)?;
+            match &row {
+                // The stored statement is this one: already applied.
+                Some(r)
+                    if r.last_created_ms == created
+                        && r.last_statement_id.as_deref() == Some(id.as_str())
+                        && r.visibility == stored_visibility(verified.statement().visibility) =>
+                {
+                    return Ok(());
+                }
+                Some(r) if created <= r.last_created_ms => {
+                    return Err(ServerError::permission_denied(
+                        "visibility statement rejected: not newer than the stored statement",
+                    ));
+                }
+                _ => {}
+            }
+            let deadline = ms(self.clock.now_ms()).saturating_add(window);
+            let rv_guard = match &stored {
+                Some(value) => Precondition::Equals(rv_key.clone(), value.clone()),
+                None => Precondition::Absent(rv_key.clone()),
+            };
+            let batch = Batch::new()
+                .require(Precondition::NotAfter(deadline))
+                .require(rv_guard)
+                .put(
+                    rv_key.clone(),
+                    codec::encode_repo_visibility(&codec::RepoVisibilityV1 {
+                        visibility: stored_visibility(verified.statement().visibility),
+                        last_created_ms: created,
+                        last_statement_id: Some(id.clone()),
+                    }),
+                );
+            match self.meta.apply(p, batch).await {
+                Ok(BatchOutcome::Committed) => return Ok(()),
+                Ok(BatchOutcome::DeadlinePassed { .. }) => {
+                    return Err(ServerError::unavailable("commit deadline passed; retry"));
+                }
+                Ok(BatchOutcome::PreconditionFailed { .. }) => {
+                    replans += 1;
+                    if replans > MAX_REPLAN {
+                        return Err(ServerError::aborted_retryable("write contention; retry"));
+                    }
+                }
+                Err(StoreError::Full) => return Err(self.partition_full(p, None).await),
+                Err(e) => return Err(meta_error(e)),
+            }
+        }
     }
 
     /// Stages 0–3 of an `UploadPack` whose header declared `pack_id` and
@@ -1154,8 +1639,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let mut outcome = self.outcome(a);
         let opened = async {
             let op = self.identify(a, OpKind::DownloadPack { key })?;
-            self.authorize(&op).await?;
-            self.require_repository(&op.repo).await?;
+            self.authorize_read(&op).await?;
             if !self.pack_is_member(a, &key).await? {
                 return Err(ServerError::not_found("pack not found"));
             }
@@ -1274,7 +1758,20 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         a: &'a Authenticated,
         kind: OpKind,
     ) -> crate::rt::BoxFuture<'a, Result<(StoredResult, ResponseMeta), ServerError>> {
-        Box::pin(self.write_inner(a, kind))
+        self.write_with(a, kind, None)
+    }
+
+    /// [`Self::write`], optionally consuming the session's pending packs
+    /// as implicit tickets (WP-1.15): the B10 packmap check runs after
+    /// authorization, admission is skipped exactly when `pending` is
+    /// non-empty, and under Multi the plan adds membership and relay rows.
+    fn write_with<'a>(
+        &'a self,
+        a: &'a Authenticated,
+        kind: OpKind,
+        implicit: Option<&'a [PendingPack]>,
+    ) -> crate::rt::BoxFuture<'a, Result<(StoredResult, ResponseMeta), ServerError>> {
+        Box::pin(self.write_inner(a, kind, implicit))
     }
 
     #[allow(clippy::too_many_lines)] // Stage order and multipart session cleanup share this entry point.
@@ -1282,10 +1779,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         &self,
         a: &Authenticated,
         kind: OpKind,
+        implicit: Option<&[PendingPack]>,
     ) -> Result<(StoredResult, ResponseMeta), ServerError> {
         let mut op = self.identify(a, kind)?;
         fault!(self, AfterAuthenticate, &op, a);
-        let (kind, refs, p) = self.ref_writes(&op)?;
+        let (kind, mut refs, p) = self.ref_writes(&op)?;
         let mut ahead = self.read_ahead(&op, &p, &refs, a.business_skew_ms).await?;
         if let Some(stored) = Self::replay_lookup(&op, ahead.as_ref())? {
             return Ok((stored, ResponseMeta::default()));
@@ -1373,11 +1871,24 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .await?;
             }
         }
+        if let Some(pending) = implicit {
+            let upd = refs
+                .first_mut()
+                .ok_or_else(|| internal("implicit consumption needs an UpdateRef"))?;
+            // The B10 check may rewrite `Any` to the exact value it
+            // observed, so the planned batch guards it.
+            self.check_implicit_packmap(&op, pending, ahead.as_ref(), upd)
+                .await?;
+        }
         let existing = self.begin_decision(&op, a, ahead.as_mut()).await?;
         if existing.is_none() && !ticketed {
             self.check_outbox_backpressure(&p, ahead.as_ref()).await?;
         }
-        let allowance = if existing.is_some() || ticketed {
+        // An implicit consuming write skips admission exactly when it has
+        // pending packs to consume; an empty pending set runs admission
+        // like any other UpdateRef (the B10 check still applied).
+        let allowance = if existing.is_some() || ticketed || implicit.is_some_and(|p| !p.is_empty())
+        {
             Allowance::default()
         } else {
             let credentials = admission::validate_credentials(&a.credential_capture)?;
@@ -1461,7 +1972,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     write,
                     ahead,
                     (lease, begin.as_ref()),
-                    pending.as_ref(),
+                    (pending.as_ref(), implicit),
                 )
                 .await
             }
@@ -1564,6 +2075,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         }
         if matches!(self.cfg.auth, AuthMode::AuthV2(_))
             && kind.procedure().is_write()
+            && kind.procedure() != Procedure::SetRepoVisibility
             && a.auth.is_none()
         {
             return Err(ServerError::unauthenticated(
@@ -1591,10 +2103,256 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 Some(value) => {
                     codec::decode_repo_record(&value).map_err(meta_error)?;
                 }
-                None => return Err(ServerError::not_found("repository not found")),
+                None => return Err(ServerError::repository_not_found()),
             }
         }
         Ok(())
+    }
+
+    /// Whether repository visibility (`rv` rows) gates reads: a Multi,
+    /// owner-policy, auth v2 deployment (SPEC-WRITE-GRANTS §9.1).
+    fn visibility_applies(&self) -> bool {
+        matches!(self.cfg.addressing, Addressing::Multi(_))
+            && self.cfg.write_policy == WritePolicy::Owner
+            && matches!(self.cfg.auth, AuthMode::AuthV2(_))
+    }
+
+    /// Whether a stored `rv = private` gates reads: any Multi
+    /// owner-policy deployment, whatever its auth mode. A pipeline that
+    /// cannot verify a signer (a non-auth-v2 sibling) reads every private
+    /// repository as `not_found`.
+    fn visibility_gates_reads(&self) -> bool {
+        matches!(self.cfg.addressing, Addressing::Multi(_))
+            && self.cfg.write_policy == WritePolicy::Owner
+    }
+
+    /// Stage 2 for a read. Under [`Self::visibility_gates_reads`], one
+    /// coordinator `get_many` reads `rr`, `rv` and `e`; a private
+    /// repository denies unauthorized reads with the same `not_found` as a
+    /// missing one (SPEC-WRITE-GRANTS §9.3). The returned facts carry the
+    /// caller's view; `epoch` is the stored grant epoch, for
+    /// `IssueObjectUrl`'s reuse.
+    async fn authorize_read(&self, op: &Operation) -> Result<ReadAuth, ServerError> {
+        tracing::debug!(stage = "authorize");
+        if !self.visibility_gates_reads() {
+            return self.authorize_read_ungated(op).await;
+        }
+        // §7 steps 1–10 are stateless: run them before the coordinator
+        // read, even when the repository turns out to be missing.
+        let check = op.write_grant.as_ref().and_then(|header| {
+            self.cfg
+                .grants
+                .as_ref()
+                .and_then(|g| read_policy::check_grant(g, header.expose(), op))
+        });
+        let signed = op.auth.is_some();
+        let owner = op.write_grant.is_none()
+            && matches!(Namespace::parse(op.repo.namespace.as_str()),
+                Ok(Namespace::Ed25519(key)) if op.principal.ed25519() == Some(&key));
+        let Some((private, epoch)) = self.read_repo_state(&op.repo).await? else {
+            // A missing repository pays the hook round trip a private one
+            // would, and discards it, so latency does not tell them apart.
+            if signed && op.write_grant.is_none() {
+                let provisional = AuthzFacts {
+                    grant: None,
+                    owner,
+                    caller_view: if owner {
+                        CallerView::Writer
+                    } else {
+                        CallerView::Reader
+                    },
+                };
+                let _ = self.read_hook(op, true, true, &provisional).await;
+            }
+            return Err(ServerError::repository_not_found());
+        };
+        // §7 step 11: the grant's epoch must equal the stored epoch.
+        let grant = check.filter(|c| c.epoch == epoch);
+        let grant_ref = grant.map(|c| GrantRef {
+            id: c.id,
+            epoch,
+            // Ref-scope presence constraints govern writes only.
+            presence_requirement: None,
+        });
+        let authority = self.cfg.authorizer_role == AuthorizerRole::Authority;
+        if private && !signed {
+            return Err(ServerError::repository_not_found());
+        }
+        let provisional = AuthzFacts {
+            grant: grant_ref.clone(),
+            owner,
+            caller_view: if owner || grant.is_some_and(|g| g.write) {
+                CallerView::Writer
+            } else {
+                CallerView::Reader
+            },
+        };
+        let hook = self.read_hook(op, private, signed, &provisional).await?;
+        let caller = read_policy::Caller {
+            signed,
+            owner,
+            grant: grant.map(|g| read_policy::GrantEval {
+                read: g.read,
+                write: g.write,
+            }),
+            hook,
+            authority,
+        };
+        match read_policy::decide(op.procedure(), private, caller) {
+            read_policy::ReadDecision::NotFound => Err(ServerError::repository_not_found()),
+            read_policy::ReadDecision::Allow(caller_view) => Ok(ReadAuth {
+                facts: AuthzFacts {
+                    grant: grant_ref,
+                    owner,
+                    caller_view,
+                },
+                epoch: Some(epoch),
+            }),
+        }
+    }
+
+    /// One coordinator `get_many` for the `rr`, `rv` and `e` rows of a
+    /// read: `Some((private, epoch))`. A missing `rr` is `None`
+    /// (the caller answers the uniform `not_found`); a store failure is `unavailable`, never public.
+    async fn read_repo_state(
+        &self,
+        repo: &crate::repo::RepoId,
+    ) -> Result<Option<(bool, u64)>, ServerError> {
+        let coordinator = self.shards.coordinator(&repo.namespace);
+        let rows = self
+            .meta
+            .get_many(
+                &coordinator,
+                &[
+                    keys::repo_record(&repo.name),
+                    keys::repo_visibility(&repo.name),
+                    keys::grant_epoch(),
+                ],
+            )
+            .await
+            .map_err(|e| {
+                tracing::warn!(detail = %e, "repository state read failed");
+                ServerError::unavailable("repository state unavailable")
+            })?;
+        let mut rows = rows.into_iter();
+        let Some(record) = rows.next().flatten() else {
+            return Ok(None);
+        };
+        codec::decode_repo_record(&record).map_err(meta_error)?;
+        let stored = rows
+            .next()
+            .flatten()
+            .map(|v| codec::decode_repo_visibility(&v))
+            .transpose()
+            .map_err(meta_error)?;
+        let epoch = rows
+            .next()
+            .flatten()
+            .map(|v| codec::decode_u64(&v))
+            .transpose()
+            .map_err(meta_error)?
+            .unwrap_or(0);
+        Ok(Some((
+            matches!(
+                stored.map(|v| v.visibility),
+                Some(codec::StoredVisibility::Private)
+            ),
+            epoch,
+        )))
+    }
+
+    /// Consult the authorizer for a read on an existing repository under
+    /// `visibility_gates_reads`: on a private repository its verdict can
+    /// authorize the read; on a public one it only classifies the caller
+    /// (`Authority`) or checks the read as before (`Check`, error
+    /// propagates). `provisional` are the facts the hook sees.
+    async fn read_hook(
+        &self,
+        op: &Operation,
+        private: bool,
+        signed: bool,
+        provisional: &AuthzFacts,
+    ) -> Result<read_policy::HookEval, ServerError> {
+        let authorized = || {
+            let mut authorized = op.clone();
+            authorized.authz = provisional.clone();
+            authorized
+        };
+        let writer = |facts: &AuthzFacts| facts.caller_view == CallerView::Writer;
+        if private {
+            if op.write_grant.is_some() {
+                // A presented grant is the only path to a private read
+                // (§6, §9.3): the hook never authorizes it.
+                return Ok(read_policy::HookEval::NotConsulted);
+            }
+            return Ok(
+                match self.hooks.authorizer().authorize(&authorized()).await {
+                    Ok(facts) => read_policy::HookEval::Allow {
+                        writer_view: writer(&facts),
+                    },
+                    // Any hook error, `unavailable` included, denies so the
+                    // read cannot reveal that the repository exists (§9.3).
+                    Err(_) => read_policy::HookEval::Deny,
+                },
+            );
+        }
+        if self.cfg.authorizer_role == AuthorizerRole::Authority {
+            // Classification only: an unsigned caller or an established
+            // writer needs no hook; a hook error keeps the reader view.
+            if !signed || provisional.caller_view == CallerView::Writer {
+                return Ok(read_policy::HookEval::NotConsulted);
+            }
+            return Ok(
+                match self.hooks.authorizer().authorize(&authorized()).await {
+                    Ok(facts) => read_policy::HookEval::Allow {
+                        writer_view: writer(&facts),
+                    },
+                    Err(_) => read_policy::HookEval::NotConsulted,
+                },
+            );
+        }
+        // Check role: the hook sees the read as before; it cannot confer
+        // a view.
+        self.hooks
+            .authorizer()
+            .authorize(op)
+            .await
+            .map_err(ServerError::strip_admission_shape)?;
+        Ok(read_policy::HookEval::NotConsulted)
+    }
+
+    /// The read path when [`Self::visibility_gates_reads`] does not hold: the
+    /// hook decides, then the `rr` row gates existence (Multi only). The
+    /// caller's view comes from its principal and the write policy.
+    async fn authorize_read_ungated(&self, op: &Operation) -> Result<ReadAuth, ServerError> {
+        let facts = self
+            .hooks
+            .authorizer()
+            .authorize(op)
+            .await
+            .map_err(ServerError::strip_admission_shape)?;
+        self.require_repository(&op.repo).await?;
+        let caller_view = match &op.principal {
+            Principal::Anonymous => CallerView::Anonymous,
+            Principal::BearerHolder => CallerView::Reader,
+            principal => {
+                if self.cfg.write_policy == WritePolicy::Open
+                    || matches!(Namespace::parse(op.repo.namespace.as_str()),
+                        Ok(Namespace::Ed25519(key)) if principal.ed25519() == Some(&key))
+                {
+                    CallerView::Writer
+                } else {
+                    CallerView::Reader
+                }
+            }
+        };
+        Ok(ReadAuth {
+            facts: AuthzFacts {
+                caller_view,
+                ..facts
+            },
+            epoch: None,
+        })
     }
 
     async fn pack_is_member(&self, a: &Authenticated, key: &PackKey) -> Result<bool, ServerError> {
@@ -1872,32 +2630,46 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     async fn authorize(&self, op: &Operation) -> Result<AuthzFacts, ServerError> {
         tracing::debug!(stage = "authorize");
         if !op.procedure().is_write() {
-            // TODO(WP-2.9): private read authorization.
-            return self
-                .hooks
-                .authorizer()
-                .authorize(op)
-                .await
-                .map_err(ServerError::strip_admission_shape);
+            return Ok(self.authorize_read(op).await?.facts);
         }
-        let Addressing::Multi(multi) = &self.cfg.addressing else {
-            return self
+        match &self.cfg.addressing {
+            Addressing::Multi(multi) => self.owner_rule(op, Some(&multi.namespace_policy)).await,
+            // Owner on a namespaced Single is the ssh root mode's rule;
+            // Open Single is the authorizer's alone, unchanged.
+            Addressing::Single { .. } if self.cfg.write_policy == WritePolicy::Owner => {
+                self.owner_rule(op, None).await
+            }
+            Addressing::Single { .. } => self
                 .hooks
                 .authorizer()
                 .authorize(op)
                 .await
-                .map_err(ServerError::strip_admission_shape);
-        };
+                .map_err(ServerError::strip_admission_shape),
+        }
+    }
+
+    /// SPEC-TRANSPORT-CONNECT §7.5 rule 1: an allowlisted namespace whose
+    /// principal owns it (`ed25519-<key>` ↔ the Ed25519 principal), and the
+    /// M2 write grants that qualify it. `policy` is the deployment's
+    /// `NamespacePolicy` on Multi and `None` on an Owner-policy Single —
+    /// the `None` counts as "not an allowlist" for the 0x-plus-grant rule,
+    /// which denies fail closed. The authorizer hook sees the established
+    /// facts on success; under `Check` a non-owner never reaches it.
+    async fn owner_rule(
+        &self,
+        op: &Operation,
+        policy: Option<&NamespacePolicy>,
+    ) -> Result<AuthzFacts, ServerError> {
         let namespace = Namespace::parse(op.repo.namespace.as_str())
-            .map_err(|_| internal("invalid resolved Multi namespace"))?;
-        if let NamespacePolicy::Allowlist(allowed) = &multi.namespace_policy
+            .map_err(|_| internal("invalid resolved owner-policy namespace"))?;
+        if let Some(NamespacePolicy::Allowlist(allowed)) = policy
             && !allowed.contains(&namespace)
         {
             return Err(ServerError::permission_denied("write not permitted"));
         }
         if op.write_grant.is_some()
             && matches!(namespace, Namespace::Address(_))
-            && !matches!(&multi.namespace_policy, NamespacePolicy::Allowlist(_))
+            && !matches!(policy, Some(NamespacePolicy::Allowlist(_)))
         {
             return Err(ServerError::permission_denied("write not permitted"));
         }
@@ -1928,10 +2700,16 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let owner = grant.is_none()
             && matches!(&namespace, Namespace::Ed25519(key)
             if op.principal.ed25519() == Some(key));
+        // Over ssh/enc (no grant header) a 0x namespace has no owner, so
+        // its writes stay denied until WP-2.12.
         if self.cfg.authorizer_role == AuthorizerRole::Check && !owner && grant.is_none() {
             return Err(ServerError::permission_denied("write not permitted"));
         }
-        let facts = AuthzFacts { grant, owner };
+        let facts = AuthzFacts {
+            grant,
+            owner,
+            caller_view: CallerView::Writer,
+        };
         // Both Authorize and Admit see the established owner/grant facts (§6.2).
         let mut authorized = op.clone();
         authorized.authz = facts.clone();
@@ -1963,10 +2741,18 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         (kind, refs, charges): (WriteKind, &[RefUpdate], &[QuotaCharge]),
         ahead: Option<Snapshot>,
         (lease, begin): (Option<lease::LeaseWrite>, Option<&BeginWrite>),
-        pending: Option<&reservation::PendingGuard>,
+        (pending, implicit): (Option<&reservation::PendingGuard>, Option<&[PendingPack]>),
     ) -> Result<StoredResult, ServerError> {
         let caps = self.meta.capabilities();
         let replay = upload::replay_guard(op);
+        // Single's packs live in the repo directory itself; only Multi
+        // plans `m` rows and relay for the consumed set, and only when
+        // the set is non-empty (L2).
+        let implicit_ids = implicit
+            .filter(|pending| {
+                !pending.is_empty() && matches!(self.cfg.addressing, Addressing::Multi(_))
+            })
+            .map(implicit::implicit_packs);
         let advance = match &op.kind {
             OpKind::AdvanceRefs { head, tickets, .. } if !tickets.is_empty() => {
                 Some(advance::AdvanceWrite {
@@ -2014,6 +2800,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             pending,
             begin,
             advance,
+            implicit: implicit_ids.as_deref().map(|packs| ImplicitConsume {
+                packs,
+                repo_id: &op.repo,
+                source: p,
+                shards: self.shards.as_ref(),
+            }),
         };
         if caps.atomic_multi_key || replay.is_some() || !charges.is_empty() {
             return self.apply_atomic(op, a, p, &req, ahead).await;

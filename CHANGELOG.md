@@ -15,6 +15,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one. For a split push, stored write grants are checked for every advance before
   anything is uploaded, and an unsplittable oversize commit or merge is refused before any
   upload. `--format=json` reports `steps` (WP-1.17b).
+- Server: `mkit serve --root <DIR>` serves the repositories under `<DIR>`
+  addressed by `<NAMESPACE>/<NAME>` (from the path argument or a strict
+  `SSH_ORIGINAL_COMMAND`), one repository per process, with writes
+  restricted to the namespace's Ed25519 owner asserted by
+  `--principal <hex>`; a Multi deployment's `--listen-enc` binds every
+  session to its `--enc-repository`. Transport-identity sessions grant
+  pack membership implicitly for packs uploaded and verified in the same
+  session — at most seven pending packs, consumed by the session's
+  packmap write — so `mkit+ssh://` and `mkit+enc://` pushes need no
+  upload tickets. Denied writes answer `INVALID_REQUEST "write not
+  permitted"` (WP-1.15).
+- Server: the native and Worker adapters can serve multi-repository
+  deployments (`mkit-server serve --addressing multi` with
+  `--namespace-policy`/`--namespace-allowlist`/`--unsafe-open-namespaces`,
+  or the Worker's `ADDRESSING`/`NAMESPACE_POLICY`/`NAMESPACE_ALLOWLIST`/
+  `UNSAFE_OPEN_NAMESPACES` vars). Multi requires auth v2 with upload ticket
+  keys — a deployment without them now refuses to start — and, natively,
+  `--meta sqlite:<PATH>` (WP-1.30).
 - Server: add validated two-phase admission with bounded HTTP 402 challenges,
   redacted payment credential forwarding and committed-success receipt headers
   (WP-3.2).
@@ -68,6 +86,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   presence guards for `ANY` and head/packmap pairing (WP-2.7).
 - Server: add unsigned grant-epoch RPCs with owner statements, bounded
   epoch transitions and completion after leased shards are fenced (WP-2.8).
+- Server: verify auth v2 on every signed read, including the framed
+  `DownloadPack` request, and add private repositories:
+  `SetRepoVisibility` in envelope and owner-statement modes, a
+  coordinator `rv` row, and `not_found` for every unauthorized private
+  read, indistinguishable from a missing repository (WP-2.9). A read that
+  carries auth headers but fails verification is now `unauthenticated`
+  instead of anonymous, and a grant header on an unsigned Multi request is
+  `unauthenticated` on every procedure.
+- Server: mint short-lived `mkit-url-token:v1` object URL tokens with
+  `IssueObjectUrl`, signed by a dedicated deployment key, with a two-phase
+  verification API and a key-set renderer for HTTP object serving
+  (WP-2.11).
 - Server: enforce owner-signed write grants under Multi/Owner, including
   `0x` namespaces, stored-epoch checks, and grant-scheme discovery.
   Adapter grant flags follow in WP-1.30b.

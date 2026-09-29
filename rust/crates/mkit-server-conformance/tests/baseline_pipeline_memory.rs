@@ -236,6 +236,19 @@ async fn serve_sharding(
             .unwrap(),
         );
     }
+    if multi.is_some_and(|profile| profile.has(Feature::SignedReads)) {
+        cfg.url_tokens = Some(
+            mkit_server::url_token::UrlTokenConfig::with_ttl_ms(
+                mkit_server::url_token::UrlTokenKeys::parse_key_file(&format!(
+                    "active {}",
+                    mkit_server_conformance::wire::URL_TOKEN_SEED
+                ))
+                .unwrap(),
+                mkit_server_conformance::wire::URL_TOKEN_TTL_MS,
+            )
+            .unwrap(),
+        );
+    }
     cfg.write_quota = quota;
     cfg.sharding = sharding;
     cfg.ticket_keys = Some(
@@ -542,6 +555,8 @@ async fn pipeline_multi_repository() {
     profile.features.insert(Feature::MultiRepo);
     profile.features.insert(Feature::NamespacePolicy);
     profile.features.insert(Feature::Tickets);
+    // This baseline plants the membership fixtures its cases read.
+    profile.planted_membership = true;
     profile.features.insert(Feature::Multipart);
     profile.max_pack_bytes = MULTIPART_MAX_PACK;
     let (origin, _) = serve_addressing(auth, None, Mutant::None, Some(&profile)).await;
@@ -580,6 +595,7 @@ async fn pipeline_multi_repository() {
     for case in mkit_server_conformance::wire::CASES.iter().filter(|c| {
         c.requires.contains(&Feature::MultiRepo)
             && !c.requires.contains(&Feature::Grants)
+            && !c.requires.contains(&Feature::SignedReads)
             && !c.requires.contains(&Feature::IndexedMode)
     }) {
         let case_report = if case.name.starts_with("policy.") {
@@ -619,6 +635,8 @@ async fn pipeline_d34_multi_membership() {
     });
     profile.features.insert(Feature::MultiRepo);
     profile.sharding_d34 = true;
+    // This baseline plants the membership fixtures its cases read.
+    profile.planted_membership = true;
     let auth = |origin: &str| AuthMode::AuthV2(AuthV2Config::new(origin, "").unwrap());
     let (origin, _) = serve_sharding(
         auth,
@@ -747,6 +765,87 @@ async fn pipeline_grants_single_and_d34() {
             let report = run(&target, Some(case)).await;
             common::judge(&report, PIPELINE_DIVERGENCES);
             assert_eq!(report.passes(), [case], "{case} did not run and pass");
+        }
+    }
+}
+
+/// The M2 signed-read, private-repository, URL-token and visibility cases,
+/// Single and D34 alike (WP-2.9, WP-2.11).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pipeline_signed_reads_single_and_d34() {
+    for sharding in [
+        mkit_server::pipeline::Sharding::Single,
+        mkit_server::pipeline::Sharding::D34,
+    ] {
+        let d34 = sharding == mkit_server::pipeline::Sharding::D34;
+        let mut profile = profile(WireAuth::AuthV2 {
+            audience: "http://localhost".into(),
+            repository: "ignored-in-multi-mode".into(),
+            seed: [0x5e; 32],
+        });
+        profile.milestone = Milestone::M2;
+        profile
+            .features
+            .extend([Feature::MultiRepo, Feature::Grants, Feature::SignedReads]);
+        #[cfg(feature = "test-faults")]
+        profile.features.insert(Feature::TestFaults);
+        profile.sign_reads = true;
+        profile.sharding_d34 = d34;
+        let auth = |origin: &str| AuthMode::AuthV2(AuthV2Config::new(origin, "").unwrap());
+        let (origin, _) = serve_sharding(
+            auth,
+            None,
+            Mutant::None,
+            Some(&profile),
+            sharding,
+            profile.max_pack_bytes,
+        )
+        .await;
+        let WireAuth::AuthV2 { audience, .. } = &mut profile.auth else {
+            unreachable!()
+        };
+        audience.clone_from(&origin);
+        let target = WireTarget {
+            base_url: origin.parse().unwrap(),
+            profile,
+        };
+        for case in [
+            "reads.signed_verified_in_full",
+            "reads.public_unsigned_ok",
+            "reads.private_anonymous_not_found",
+            "reads.private_owner_ok",
+            "reads.private_read_grant_ok",
+            "reads.private_write_only_not_found",
+            "reads.private_expired_signature_unauthenticated",
+            "reads.private_not_found_byte_identical",
+            "reads.url_token_mint_ok",
+            "reads.url_token_private_without_read_not_found",
+            "reads.url_token_anonymous_unauthenticated",
+            "reads.url_token_bounds_invalid_argument",
+            "reads.url_token_ttl_clamped",
+            "visibility.envelope_owner",
+            "visibility.statement_ed25519",
+            "visibility.statement_eip191",
+            "visibility.grant_never_authorizes",
+            "visibility.older_created_denied",
+            "visibility.bad_mode_invalid_argument",
+            "visibility.oversize_statement_permission_denied",
+            #[cfg(feature = "test-faults")]
+            "reads.private_grant_old_epoch_not_found",
+        ] {
+            let report = run(&target, Some(case)).await;
+            common::judge(&report, PIPELINE_DIVERGENCES);
+            if d34 && case == "reads.private_owner_ok" {
+                // Its positive ListRefs assertion does not run under D34:
+                // the ref index is relayed and no relay worker runs here.
+                assert!(
+                    matches!(report.verdict(case), Some(Verdict::Skip(reason))
+                        if reason == "D34 ListRefs reads a lagging ref index"),
+                    "{case} did not skip with the D34 ListRefs reason"
+                );
+            } else {
+                assert_eq!(report.passes(), [case], "{case} did not run and pass");
+            }
         }
     }
 }

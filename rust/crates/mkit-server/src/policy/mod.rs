@@ -2,9 +2,10 @@
 
 pub(crate) mod grants;
 mod namespace;
+pub(crate) mod read;
 pub(crate) mod ref_scopes;
 mod write;
 
 pub use grants::GrantConfig;
-pub use namespace::NamespacePolicy;
+pub use namespace::{NamespacePolicy, parse_namespace_allowlist};
 pub use write::{AuthorizerRole, WritePolicy};

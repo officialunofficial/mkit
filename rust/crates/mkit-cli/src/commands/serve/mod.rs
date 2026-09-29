@@ -18,10 +18,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
+use mkit_core::repo_identity::RepositoryIdentity;
 use mkit_core::repo_lock::{self, LockError, RepoLock};
 use mkit_rpc::mkit::rpc::v1::ErrorCode;
 use mkit_server::fs::{FsBlobStore, FsLayoutStore};
 use mkit_server::pipeline::{AuthMode, Hooks, Pipeline, PipelineConfig};
+use mkit_server::policy::WritePolicy;
 use mkit_server::ssh::{SessionConfig, SessionEnd, WriteFrames, serve_session, upload_limits};
 use mkit_server::{
     Addressing, NamespaceKey, NoopMetrics, Principal, RepoId, RepoName, SystemClock,
@@ -49,8 +51,23 @@ const MAX_TIMEOUT_SECS: u64 = 7 * 24 * 60 * 60;
              listeners are the separate `mkit-server` binary."
 )]
 struct ServeOpts {
-    /// Path to the repository to serve.
-    path: String,
+    /// Path to the repository to serve. Under `--root` it is the
+    /// `<NAMESPACE>/<NAME>` the session binds; when it is omitted there,
+    /// `SSH_ORIGINAL_COMMAND` supplies it.
+    path: Option<String>,
+    /// Serve the repositories under DIR: the path names one
+    /// `<NAMESPACE>/<NAME>`, resolved to the directory
+    /// `<DIR>/<NAMESPACE>/<NAME>`, and only the namespace's owner may
+    /// write (SPEC-TRANSPORT §4 root mode).
+    #[arg(long, value_name = "DIR")]
+    root: Option<PathBuf>,
+    /// The Ed25519 public key the sshd forced-command configuration
+    /// asserts for this session: 64 lowercase hex characters (the raw
+    /// 32-byte key, no prefix). It is a trust assertion — sshd attaches it
+    /// to the key it already verified — and is never read from the
+    /// environment or `SSH_ORIGINAL_COMMAND`.
+    #[arg(long, value_name = "HEX", value_parser = parse_principal)]
+    principal: Option<[u8; 32]>,
     /// End the session after this many seconds without a byte from the
     /// client; 0 disables the timeout (at most 604800, 7 days). A slow
     /// upload that keeps sending never trips it.
@@ -105,6 +122,91 @@ fn removed_listener_flag(args: &[String]) -> Option<&'static str> {
 /// default `--repository`, so both address one root's refs alike.
 const REPOSITORY: &str = "default";
 
+/// `--principal`'s value: exactly the raw 32-byte Ed25519 public key as
+/// 64 lowercase hex characters — no `ed25519-` prefix, no `0x`, nothing
+/// else. Clap maps a refusal to USAGE before any frame is read.
+fn parse_principal(text: &str) -> Result<[u8; 32], String> {
+    let bad =
+        || "expected 64 lowercase hex characters (a raw 32-byte Ed25519 public key)".to_owned();
+    let hex = |b: u8| b.is_ascii_digit() || (b'a'..=b'f').contains(&b);
+    if text.len() != 64 || !text.bytes().all(&hex) {
+        return Err(bad());
+    }
+    let mut out = [0u8; 32];
+    let nibble = |b: u8| {
+        if b.is_ascii_digit() {
+            b - b'0'
+        } else {
+            b - b'a' + 10
+        }
+    };
+    for (byte, pair) in out.iter_mut().zip(text.as_bytes().chunks_exact(2)) {
+        *byte = (nibble(pair[0]) << 4) | nibble(pair[1]);
+    }
+    Ok(out)
+}
+
+/// The repository path an `SSH_ORIGINAL_COMMAND` of exactly
+/// `mkit serve <path>` carries (SPEC-TRANSPORT §4's forced-command form):
+/// every byte is `[A-Za-z0-9._/-]` or a single space, the command splits
+/// on single spaces into exactly `["mkit", "serve", path]`, and `path`
+/// does not start with `-` (so no flag can be smuggled). Any other form —
+/// extra arguments, `sh -c`, quotes, tabs or doubled spaces, NUL, CR/LF,
+/// `;`, `$` — is refused.
+fn parse_original_command(command: &str) -> Option<&str> {
+    let ok_byte =
+        |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'/' | b'-' | b' ');
+    if !command.bytes().all(ok_byte) {
+        return None;
+    }
+    let mut parts = command.split(' ');
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some("mkit"), Some("serve"), Some(path), None)
+            if !path.is_empty() && !path.starts_with('-') =>
+        {
+            Some(path)
+        }
+        _ => None,
+    }
+}
+
+/// The identity `path` names in root mode, validated and resolved under
+/// `root`: `<NAMESPACE>/<NAME>` in the §7.4 grammar (a bare name, an
+/// uppercase byte, `..` or another component is refused), then the
+/// canonical `<ROOT>/<NAMESPACE>/<NAME>` must be that path exactly — a
+/// surviving symlink component would serve one repository under
+/// another's identity, which the owner check would then attribute
+/// wrongly. `MKIT_SERVE_ROOT` pins the result like plain mode.
+fn resolve_root_repo(root: &Path, path: &str) -> Result<(PathBuf, RepoId), u8> {
+    let trimmed = path.trim_matches('/');
+    let identity = RepositoryIdentity::parse(trimmed).map_err(|_| exit::USAGE)?;
+    let Some(namespace) = identity.namespace() else {
+        return Err(exit::USAGE);
+    };
+    let root = std::fs::canonicalize(root).map_err(|_| exit::NOINPUT)?;
+    let expected = root.join(namespace.to_string()).join(identity.name());
+    let resolved = std::fs::canonicalize(&expected).map_err(|_| exit::NOINPUT)?;
+    if resolved != expected {
+        return Err(exit::NOPERM);
+    }
+    if !resolved.is_dir() || !resolved.join(".mkit").is_dir() {
+        return Err(exit::DATAERR);
+    }
+    if let Ok(pinned) = std::env::var("MKIT_SERVE_ROOT") {
+        let pinned = std::fs::canonicalize(&pinned).map_err(|_| exit::NOPERM)?;
+        if !resolved.starts_with(&pinned) {
+            return Err(exit::NOPERM);
+        }
+    }
+    Ok((
+        resolved,
+        RepoId {
+            namespace: NamespaceKey::from_namespace(namespace),
+            name: RepoName::new(identity.name()).map_err(|_| exit::USAGE)?,
+        },
+    ))
+}
+
 /// How old an upload's temp file must be before the startup sweep removes
 /// it. A live upload rewrites its temp file continuously; see
 /// [`sweep_crashed_uploads`].
@@ -133,9 +235,56 @@ pub fn run(args: &[String]) -> u8 {
         }
     };
 
-    let repo_root = match resolve_repo_path(&opts.path) {
-        Ok(p) => p,
-        Err(code) => return code,
+    let principal = Principal::SshForcedCommand {
+        key: opts.principal,
+    };
+    let target = match &opts.root {
+        // Plain mode, unchanged: one repository directory, open writes.
+        None => {
+            let Some(path) = &opts.path else {
+                eprintln!(
+                    "error: the following required arguments were not provided:\n  <PATH>\n\n\
+                     Usage: mkit serve <PATH>\n\n\
+                     For more information, try '--help'."
+                );
+                return exit::USAGE;
+            };
+            match resolve_repo_path(path) {
+                Ok(root) => ServeTarget {
+                    root,
+                    repo: repo_id(),
+                    write_policy: WritePolicy::Open,
+                    principal,
+                },
+                Err(code) => return code,
+            }
+        }
+        // Root mode: the path (or `SSH_ORIGINAL_COMMAND`) names the one
+        // `<NAMESPACE>/<NAME>` this process serves under `--root`.
+        Some(root) => {
+            let path = match &opts.path {
+                Some(path) => Some(path.clone()),
+                None => std::env::var("SSH_ORIGINAL_COMMAND")
+                    .ok()
+                    .and_then(|command| parse_original_command(&command).map(str::to_owned)),
+            };
+            let Some(path) = path else {
+                eprintln!(
+                    "mkit serve: --root serves <NAMESPACE>/<NAME>, from the path or \
+                     `SSH_ORIGINAL_COMMAND` `mkit serve <NAMESPACE>/<NAME>`"
+                );
+                return exit::USAGE;
+            };
+            match resolve_root_repo(root, &path) {
+                Ok((root, repo)) => ServeTarget {
+                    root,
+                    repo,
+                    write_policy: WritePolicy::Owner,
+                    principal,
+                },
+                Err(code) => return code,
+            }
+        }
     };
 
     // Held for the whole lifetime of this `serve` process
@@ -146,7 +295,7 @@ pub fn run(args: &[String]) -> u8 {
     // concurrent `serve` processes against one root (e.g. one per SSH
     // forced-command connection) as a supported deployment, so `serve`
     // instances must not exclude each other.
-    let _serve_guard = match lock_and_sweep(&repo_root) {
+    let _serve_guard = match lock_and_sweep(&target.root) {
         Ok(g) => g,
         Err(e) => {
             eprintln!("mkit serve: serve lock: {e}");
@@ -170,7 +319,7 @@ pub fn run(args: &[String]) -> u8 {
     // `Stdin`/`Stdout`, not their locks: the reader thread needs `Send`,
     // and each call locks. `WriteFrames` flushes after every frame.
     serve_stdio(
-        &repo_root,
+        &target,
         std::io::stdin(),
         std::io::stdout(),
         idle,
@@ -251,7 +400,7 @@ fn spawn_session_cap(max: Duration) {
     }
 }
 
-/// The repository `mkit serve` serves (see [`REPOSITORY`]).
+/// The repository `mkit serve` serves in plain mode (see [`REPOSITORY`]).
 fn repo_id() -> RepoId {
     RepoId {
         namespace: NamespaceKey::deployment_default(),
@@ -259,8 +408,21 @@ fn repo_id() -> RepoId {
     }
 }
 
-/// Serve one ssh-frame session over `input` and `output` against the repo
-/// at `repo_root`, returning the exit code: [`exit::OK`] for a clean end or
+/// What `serve_stdio` serves and as whom.
+pub(crate) struct ServeTarget {
+    /// The repository's canonical on-disk root.
+    pub root: PathBuf,
+    /// Its storage identity: `default` in the reserved `root` namespace
+    /// in plain mode; the path's `<NAMESPACE>/<NAME>` in root mode.
+    pub repo: RepoId,
+    /// `Open` in plain mode, `Owner` in root mode.
+    pub write_policy: WritePolicy,
+    /// The session's principal; `key` only from `--principal`.
+    pub principal: Principal,
+}
+
+/// Serve one ssh-frame session over `input` and `output` against
+/// `target`, returning the exit code: [`exit::OK`] for a clean end or
 /// a failed write (the client went away), [`exit::PROTOCOL_ERROR`] for a
 /// protocol error or an idle timeout. `idle` bounds the time without a byte
 /// from the client (`None` disables it); a timeout is answered, best
@@ -269,7 +431,7 @@ fn repo_id() -> RepoId {
 /// The ref store is opened with [`FsLayoutStore::open`], which refuses a
 /// root whose refs live in `mkit-server`'s `SQLite` database.
 pub(crate) fn serve_stdio<R, W>(
-    repo_root: &Path,
+    target: &ServeTarget,
     input: R,
     output: W,
     idle: Option<Duration>,
@@ -279,21 +441,23 @@ where
     R: Read + Send + 'static,
     W: Write + Send,
 {
-    let repo = repo_id();
-    let meta = match FsLayoutStore::open(repo_root, &repo) {
+    let meta = match FsLayoutStore::open(&target.root, &target.repo) {
         Ok(meta) => meta,
         Err(e) => {
             eprintln!("mkit serve: {e}");
             return exit::CONFIG_ERROR;
         }
     };
-    let cfg = PipelineConfig::new(
-        Addressing::Single { repo },
+    let mut cfg = PipelineConfig::new(
+        Addressing::Single {
+            repo: target.repo.clone(),
+        },
         AuthMode::TransportIdentity,
         upload_limits(),
     );
+    cfg.write_policy = target.write_policy;
     let pipeline = match Pipeline::new(
-        FsBlobStore::new(repo_root),
+        FsBlobStore::new(&target.root),
         meta,
         Hooks::new(),
         cfg,
@@ -316,9 +480,12 @@ where
     let mut sink = WriteFrames(output);
     let mut session = SessionConfig::new(format!("mkit serve/{CLI_VERSION}"));
     session.stop_after_hello = stop_after_hello;
-    let principal = Principal::SshForcedCommand { key: None };
     let end = futures::executor::block_on(serve_session(
-        &pipeline, principal, &mut src, &mut sink, &session,
+        &pipeline,
+        target.principal.clone(),
+        &mut src,
+        &mut sink,
+        &session,
     ));
     // The reader thread may still be blocked on stdin; the process exits
     // under it.

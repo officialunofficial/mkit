@@ -12,6 +12,7 @@
 //! | Class | Key | Value |
 //! |---|---|---|
 //! | deployment sharding marker (root `Namespace` only) | `sm 00` | UTF-8 `single` or `d34` |
+//! | deployment addressing marker (root `Namespace` only) | `am 00` | UTF-8 `single` or `multi` |
 //! | layout version | `v 00` | be32 [`LAYOUT_VERSION`]; never on `RefsOnly` stores |
 //! | ref | `r 00 <repo> 00 <refname>` | 32-byte id |
 //! | ref-name index (`RefIndex`) | `x 00 <repo> 00 <refname>` | 32-byte id |
@@ -25,6 +26,7 @@
 //! | coordinator namespace total | `qt 00 <window:be64>` | codec `NamespaceUsage` |
 //! | namespace record (`Coordinator`) | `nr 00` | codec `NamespaceRecord` |
 //! | repo record (`Coordinator`) | `rr 00 <repo>` | codec `RepoRecord` |
+//! | repository visibility (`Coordinator`) | `rv 00 <repo>` | codec `RepoVisibilityV1`; absent means public |
 //! | repo-known marker (ref shard) | `rk 00 <repo>` | empty |
 //! | grant epoch | `e 00` | be64; absent means 0, never written as 0 |
 //! | epoch lease (ref shard) | `el 00` | codec `EpochLease` |
@@ -90,6 +92,8 @@ pub const LAYOUT_VERSION: u32 = 1;
 pub const TAG_LAYOUT_VERSION: &str = "v";
 /// Worker deployment sharding marker tag (root Namespace only).
 pub const TAG_SHARDING_MARKER: &str = "sm";
+/// Worker deployment addressing marker tag (root Namespace only).
+pub const TAG_ADDRESSING_MARKER: &str = "am";
 /// Ref tag.
 pub const TAG_REF: &str = "r";
 /// Ref-name index tag.
@@ -141,6 +145,9 @@ pub const TAG_REPO_KNOWN: &str = "rk";
 /// Repo registry tag: one row per repo of the namespace, in its
 /// coordinator partition. Bounded by repos, not refs.
 pub const TAG_REPO_REGISTRY: &str = "rr";
+/// Repository visibility tag (`Coordinator`): absent means public; the
+/// row may exist without `rr` (SPEC-WRITE-GRANTS §9.1).
+pub const TAG_REPO_VISIBILITY: &str = "rv";
 /// Namespace list tag, reserved until namespace enumeration under
 /// `namespace_policy = any` is needed (WP-1.29 backup). No M1 consumer
 /// or deployment-wide partition exists. A backend may keep its own metadata.
@@ -186,12 +193,16 @@ pub enum ParsedKey {
     BackupState,
     /// `sm 00`: the Worker deployment sharding mode.
     ShardingMarker,
+    /// `am 00`: the Worker deployment addressing mode.
+    AddressingMarker,
     /// `v 00`.
     LayoutVersion,
     /// `nr 00`.
     NamespaceRecord,
     /// `rr 00 <repo>`.
     RepoRecord(RepoName),
+    /// `rv 00 <repo>`.
+    RepoVisibility(RepoName),
     /// `rk 00 <repo>`.
     RepoKnown(RepoName),
     /// `rh 00 <Partition::encode(source)>`. Never pruned.
@@ -395,6 +406,12 @@ pub fn sharding_marker() -> Key {
     key(TAG_SHARDING_MARKER, &[])
 }
 
+/// `am 00`: UTF-8 `single` or `multi`, only in the root Namespace partition.
+#[must_use]
+pub fn addressing_marker() -> Key {
+    key(TAG_ADDRESSING_MARKER, &[])
+}
+
 /// `nr 00`: the namespace coordinator record.
 #[must_use]
 pub fn namespace_record() -> Key {
@@ -405,6 +422,12 @@ pub fn namespace_record() -> Key {
 #[must_use]
 pub fn repo_record(repo: &RepoName) -> Key {
     key(TAG_REPO_REGISTRY, &[repo.as_str().as_bytes()])
+}
+
+/// `rv 00 <repo>`: the repository's visibility row in its coordinator.
+#[must_use]
+pub fn repo_visibility(repo: &RepoName) -> Key {
+    key(TAG_REPO_VISIBILITY, &[repo.as_str().as_bytes()])
 }
 
 /// `rk 00 <repo>`: the ref shard's repository registration marker.
@@ -893,6 +916,7 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
     let text = |b: &[u8]| String::from_utf8(b.to_vec()).ok();
     Some(match tag {
         b"sm" if body.is_empty() => ParsedKey::ShardingMarker,
+        b"am" if body.is_empty() => ParsedKey::AddressingMarker,
         b"v" if body.is_empty() => ParsedKey::LayoutVersion,
         b"e" if body.is_empty() => ParsedKey::GrantEpoch,
         b"el" if body.is_empty() => ParsedKey::EpochLease,
@@ -902,6 +926,7 @@ pub fn parse(key: &Key) -> Option<ParsedKey> {
         b"ls" => parse_leased_shard(body)?,
         b"nr" if body.is_empty() => ParsedKey::NamespaceRecord,
         b"rr" => ParsedKey::RepoRecord(RepoName::new(text(body)?).ok()?),
+        b"rv" => ParsedKey::RepoVisibility(RepoName::new(text(body)?).ok()?),
         b"rh" => ParsedKey::RelayHighWater(Partition::decode(body).ok()?),
         b"rs" if body.is_empty() => ParsedKey::RelayScan,
         b"rk" => ParsedKey::RepoKnown(RepoName::new(text(body)?).ok()?),
@@ -1037,6 +1062,7 @@ mod tests {
             TAG_OBJECT_STATE,
             TAG_NAMESPACE_RECORD,
             TAG_REPO_REGISTRY,
+            TAG_REPO_VISIBILITY,
             TAG_REPO_KNOWN,
             TAG_RELAY_HIGH_WATER,
             TAG_RELAY_SCAN,
@@ -1058,11 +1084,13 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One golden per key family, merged from two WPs.
     fn layouts_golden_bytes() {
         let s = [0x11; 32];
         let q = format!("root\n{}", "ab".repeat(32));
         let cases: Vec<(Key, Vec<u8>)> = vec![
             (sharding_marker(), b"sm\0".to_vec()),
+            (addressing_marker(), b"am\0".to_vec()),
             (layout_version(), b"v\0".to_vec()),
             (relay_scan(), b"rs\0".to_vec()),
             (
@@ -1071,6 +1099,7 @@ mod tests {
             ),
             (namespace_record(), b"nr\0".to_vec()),
             (repo_record(&repo("room-a")), b"rr\0room-a".to_vec()),
+            (repo_visibility(&repo("room-a")), b"rv\0room-a".to_vec()),
             (repo_known(&repo("room-a")), b"rk\0room-a".to_vec()),
             (
                 verification(&repo("room-a"), &s),
@@ -1427,6 +1456,7 @@ mod tests {
                 },
             ),
             (sharding_marker(), ParsedKey::ShardingMarker),
+            (addressing_marker(), ParsedKey::AddressingMarker),
             (namespace_record(), ParsedKey::NamespaceRecord),
             (repo_record(&repo("a")), ParsedKey::RepoRecord(repo("a"))),
             (repo_known(&repo("a")), ParsedKey::RepoKnown(repo("a"))),
@@ -1504,6 +1534,14 @@ mod tests {
             })
         );
     }
+    #[test]
+    fn repo_visibility_key_roundtrips() {
+        let key = repo_visibility(&repo("room-a"));
+        assert_eq!(key.as_bytes(), b"rv\0room-a");
+        assert_eq!(parse(&key), Some(ParsedKey::RepoVisibility(repo("room-a"))));
+        assert_eq!(parse(&Key::new(b"rv\0"[..].to_vec())), None);
+    }
+
     #[test]
     fn lease_keys_reject_malformed_payloads() {
         for bad in [

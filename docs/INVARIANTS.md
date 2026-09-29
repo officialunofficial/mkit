@@ -1754,3 +1754,55 @@ expired identity, or a write can silently mint a new nonce.
 **Enforced by:** the Connect procedure classification and envelope tests,
 client retry tests, and `mkit_core::write_auth::verify_headers` checks over
 captured request bodies.
+
+## Implicit transport-identity membership is session-bound
+
+**Always:** implicit (transport-identity) membership is granted only for
+packs uploaded and verified in the same session and repository; the
+packmap check only refuses. A session's pending set holds at most seven
+distinct packs, dies with the session, and is consumed by that session's
+next packmap write. A packmap is refused when its node's `prev` is
+neither absent nor the packmap value the write replaces, so the
+ssh/enc consuming write never adds a new non-member (values written
+over Connect are not chain-validated, so this guarantee covers values
+written over ssh/enc); it is also refused when its node or a listed pack is
+neither pending nor already a member of the bound repository (a pending
+packlist listed as a pack is refused: a packlist is a node, not a
+pack), or when it lists more than 1,024 packs; the check never adds
+membership for a pack it merely names, and no reservation or outcome
+rows are created — there is no reservation to keep one outcome per.
+
+**Because:** ssh and enc clients cannot carry signed upload tickets, so
+the transport binds them to the session instead. Letting the packmap
+check grant membership, or letting pending state outlive a session,
+would let a client claim packs it never uploaded — the membership
+oracle a ticket's signature otherwise prevents.
+
+**If violated:** a writer could publish packmaps naming packs it did not
+upload, minting membership without possession and breaking repository
+isolation across sessions and repositories.
+
+**Enforced by:** `mkit-server/src/pipeline/mod.rs`
+`check_implicit_packmap` and `update_packmap_consuming` unit tests,
+`mkit-server/src/ssh/tests.rs` pending/consume/reconnect/isolation
+cases, `mkit-cli/tests/serve_golden.rs` session-3 wire goldens, and
+`mkit-server-native/tests/enc_listener.rs` bound-repository cases.
+
+## Private repositories are indistinguishable from missing ones
+
+**Always:** an unauthorized read of a private repository answers the same
+`not_found` — code, message, details and headers — as a missing
+repository, from `ServerError::repository_not_found()`. A signed read
+verifies its envelope in full before any repository lookup and never
+creates or consumes a replay record.
+
+**Because:** SPEC-WRITE-GRANTS §9.2/§9.3; private repositories must not be
+enumerable, and reads must not spend replay capacity.
+
+**If violated:** private repository existence leaks through an error
+difference, or reads consume replay capacity.
+
+**Enforced by:** `pipeline::authorize_read` and `policy::read::decide`;
+the pipeline `private_repository_reads_return_the_missing_repository_error`
+and `a_signed_read_writes_no_replay_rows` tests; the connect_dispatch and
+wire `reads.private_not_found_byte_identical` cases.

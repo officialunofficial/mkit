@@ -1113,7 +1113,23 @@ Remote / sync:
   tty-detection explicitly (mirrors `NO_COLOR`/`CLICOLOR_FORCE`).
 - `mkit serve [--idle-timeout-secs <secs>] [--max-session-secs <secs>] <path>` &mdash; internal SSH
   transport server. Speaks the mkit-rpc SSH framing on stdin/stdout (its
-  only mode). Holds a shared `serve.lock` in `<path>/.mkit` for as long as
+  only mode). `mkit serve --root <dir> [--principal <hex>] [<ns>/<name>]`
+  is the multi-repository form a forge forces: the path (or, when it is
+  omitted, an `SSH_ORIGINAL_COMMAND` of exactly `mkit serve <path>`)
+  names a `<NAMESPACE>/<NAME>` resolved under `<dir>` &mdash; a bare
+  name, an uppercase byte, `..`, an extra component or a symlinked
+  component is refused &mdash; and only the namespace's Ed25519 owner
+  may write. `--principal` (a raw 32-byte key as 64 lowercase hex) is
+  the sshd configuration's trust assertion of the caller's key, read
+  from argv alone and never from the environment; a session without it
+  is read-only. Packs a session uploads and verifies may be published
+  by that session's packmap write (at most seven between packmap
+  writes); a packmap whose node's `prev` is neither absent nor the
+  value the write replaces, whose node or a listed pack is neither
+  pending nor a member (a pending packlist listed as a pack counts as
+  refused), or that lists more than 1,024 packs is refused. See
+  SPEC-TRANSPORT §4.1 and [SSH-SECURITY.md](SSH-SECURITY.md) §5. Both
+  forms hold a shared `serve.lock` in `<path>/.mkit` for as long as
   the process is alive (any number of concurrent `serve` processes may
   hold it at once); a local worktree-mutating command or `gc` run against
   that same path while it is held prints a warning to stderr and proceeds

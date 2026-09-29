@@ -54,6 +54,8 @@ pub enum StoredResult {
     BeginUpload(BeginUploadResult),
     /// `UploadPack` succeeded.
     UploadPack,
+    /// `SetRepoVisibility` committed.
+    RepoVisibility,
     /// A final rejection after the reservation, e.g. a policy denial.
     Rejected(StoredRejection),
 }
@@ -231,7 +233,8 @@ mod tests {
                 StoredResult::UpdateRef(_)
                 | StoredResult::AdvanceRefs(_)
                 | StoredResult::BeginUpload(_)
-                | StoredResult::UploadPack => true,
+                | StoredResult::UploadPack
+                | StoredResult::RepoVisibility => true,
                 StoredResult::Rejected(r) => StoredRejection::is_storable(r.code()),
             }
         }

@@ -30,9 +30,16 @@ fn repo() -> RepoId {
 }
 
 async fn enqueue<S: NamespaceStore>(store: &S, pack: [u8; 32]) -> (Partition, Partition, u64) {
-    let repo = repo();
-    let source = D34Shards.ref_shard(&repo, "refs/heads/main");
-    let target = D34Shards.membership(&repo, &BlobKey::pack(pack));
+    enqueue_repo(store, &repo(), pack).await
+}
+
+async fn enqueue_repo<S: NamespaceStore>(
+    store: &S,
+    repo: &RepoId,
+    pack: [u8; 32],
+) -> (Partition, Partition, u64) {
+    let source = D34Shards.ref_shard(repo, "refs/heads/main");
+    let target = D34Shards.membership(repo, &BlobKey::pack(pack));
     let due = u64::try_from(SystemClock.now_ms()).unwrap();
     let mut outbox = OutboxBuilder::new(None, None).unwrap();
     outbox.relay_at(due);
@@ -42,7 +49,7 @@ async fn enqueue<S: NamespaceStore>(store: &S, pack: [u8; 32]) -> (Partition, Pa
         &[pack],
         &source,
         &D34Shards,
-        &repo,
+        repo,
         &mut outbox,
         &mut batch.writes,
     );
@@ -85,9 +92,20 @@ async fn assert_delivered<S: NamespaceStore>(
     pack: [u8; 32],
     due: u64,
 ) {
+    assert_delivered_repo(store, &repo(), source, target, pack, due).await;
+}
+
+async fn assert_delivered_repo<S: NamespaceStore>(
+    store: &S,
+    repo: &RepoId,
+    source: &Partition,
+    target: &Partition,
+    pack: [u8; 32],
+    due: u64,
+) {
     assert_eq!(
         store
-            .get(target, &keys::membership(&repo().name, &pack))
+            .get(target, &keys::membership(&repo.name, &pack))
             .await
             .unwrap(),
         Some(Value::default())
@@ -124,6 +142,42 @@ async fn outbox_timer_notifies_running_driver_and_delivers_without_sleep_loop() 
     shutdown.trigger();
     task.await.unwrap();
     assert_delivered(&store, &source, &target, pack, due).await;
+}
+
+/// A Multi repository's relay: its ref shard and `RepoIndex` partition are
+/// namespaced (`ns`/`repo` in the partition), and the relay timer delivers
+/// membership between them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn namespaced_repo_relay_delivers_to_its_index_partition() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: TimerStore = Blocking::new(TimerNotifying::new(
+        SqlKvStore::open(RusqliteConn::open(dir.path().join("relay-multi.sqlite3")).unwrap())
+            .unwrap(),
+    ));
+    let registry = TimerRegistry::new().register(RelayHandler {
+        target: store.clone(),
+        hook: NoHook,
+        budget: RelayBudget::default(),
+    });
+    let shutdown = Shutdown::new();
+    let task = TimerDriver::new(store.clone(), registry, Arc::new(SystemClock))
+        .start(shutdown.clone())
+        .await
+        .unwrap();
+    let repo = RepoId {
+        namespace: NamespaceKey::from_namespace(&mkit_core::repo_identity::Namespace::Ed25519(
+            [0x42; 32],
+        )),
+        name: RepoName::new("relay").unwrap(),
+    };
+    let pack = [0x33; 32];
+    let (source, target, due) = enqueue_repo(&store, &repo, pack).await;
+    assert!(matches!(source, Partition::Ref { .. }));
+    assert!(matches!(target, Partition::RepoIndex { .. }));
+    wait_watermark(&store, &source, &target).await;
+    shutdown.trigger();
+    task.await.unwrap();
+    assert_delivered_repo(&store, &repo, &source, &target, pack, due).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

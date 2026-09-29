@@ -25,6 +25,12 @@ use super::{
 /// `8 * 7 + 22 = 78`. The real maximal planner batches are tested
 /// separately. On D34, seven tickets cost `9 * 7 + 26 = 89` ops before
 /// opportunistic pruning.
+///
+/// The same constant caps an implicit transport-identity session's pending
+/// packs (WP-1.15 B9): a D34 packmap write consuming all seven — one
+/// membership put and one relay row each, plus WP-1.28b's ref-index
+/// relay row for the packmap name — plans a 27-op batch
+/// (`maximal_implicit_consume_plans_a_valid_batch`).
 pub const MAX_TICKETS_PER_ADVANCE: usize = 7;
 /// The advance batch's ops outside the per-ticket and per-signer ones.
 pub const ADVANCE_SHARED_OPS: usize = 26;

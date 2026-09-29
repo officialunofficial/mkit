@@ -51,6 +51,10 @@ pub enum Rpc {
     UploadPack,
     /// `DownloadPack` (server-streaming)
     DownloadPack,
+    /// `SetRepoVisibility`
+    SetRepoVisibility,
+    /// `IssueObjectUrl`
+    IssueObjectUrl,
 }
 
 impl Rpc {
@@ -70,6 +74,8 @@ impl Rpc {
             Self::CompleteUpload => "/mkit.transport.v1.TransportService/CompleteUpload",
             Self::UploadPack => "/mkit.transport.v1.TransportService/UploadPack",
             Self::DownloadPack => "/mkit.transport.v1.TransportService/DownloadPack",
+            Self::SetRepoVisibility => "/mkit.transport.v1.TransportService/SetRepoVisibility",
+            Self::IssueObjectUrl => "/mkit.transport.v1.TransportService/IssueObjectUrl",
         }
     }
 
@@ -84,6 +90,7 @@ impl Rpc {
                 | Self::UploadPart
                 | Self::CompleteUpload
                 | Self::UploadPack
+                | Self::SetRepoVisibility
         )
     }
 }

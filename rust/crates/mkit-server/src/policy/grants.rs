@@ -55,6 +55,12 @@ impl GrantConfig {
         self.verifier.schemes()
     }
 
+    /// The owner-scheme verifier, for statement kinds that are not write
+    /// grants (visibility statements, WP-2.9).
+    pub(crate) fn verifier(&self) -> &VerifierConfig {
+        &self.verifier
+    }
+
     pub(crate) fn verify(
         &self,
         header: &str,
