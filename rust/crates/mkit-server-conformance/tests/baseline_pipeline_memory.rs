@@ -238,7 +238,7 @@ async fn serve_sharding(
     }
     if multi.is_some_and(|profile| profile.has(Feature::SignedReads)) {
         cfg.url_tokens = Some(
-            mkit_server::url_token::UrlTokenConfig::new(
+            mkit_server::url_token::UrlTokenConfig::with_ttl_ms(
                 mkit_server::url_token::UrlTokenKeys::parse_key_file(&format!(
                     "active {}",
                     mkit_server_conformance::wire::URL_TOKEN_SEED
@@ -594,6 +594,7 @@ async fn pipeline_multi_repository() {
         c.requires.contains(&Feature::MultiRepo)
             && !c.requires.contains(&Feature::Grants)
             && !c.requires.contains(&Feature::SignedReads)
+            && !c.requires.contains(&Feature::IndexedMode)
     }) {
         let case_report = if case.name.starts_with("policy.") {
             &policy_report

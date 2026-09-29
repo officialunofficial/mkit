@@ -177,6 +177,22 @@ fn comparable_headers(reply: &Reply) -> Vec<(String, String)> {
         .collect()
 }
 
+/// The Connect error code of a failed read reply.
+fn reply_code(reply: &Reply, stream: bool, what: &str) -> Result<String, Failure> {
+    if stream {
+        decode_stream::<DownloadPackResponse>(reply)
+            .map_err(Failure::Fail)?
+            .error
+            .map(|e| e.code)
+            .ok_or_else(|| Failure::Fail(format!("{what}: stream had no error")))
+    } else {
+        Ok(decode_unary::<ReadRefResponse>(reply)
+            .map_err(Failure::Fail)?
+            .expect_err("a private repo without read access must fail")
+            .code)
+    }
+}
+
 /// Both replies must be the same `not_found`, byte for byte.
 fn same_not_found(private: &Reply, missing: &Reply, what: &str) -> CaseResult {
     ensure!(
@@ -224,7 +240,7 @@ async fn mint(
 fn token_config() -> UrlTokenConfig {
     let keys = UrlTokenKeys::parse_key_file(&format!("active {URL_TOKEN_SEED}"))
         .expect("the suite's fixed token seed is valid");
-    UrlTokenConfig::new(keys, URL_TOKEN_TTL_MS).expect("the suite's token ttl is valid")
+    UrlTokenConfig::with_ttl_ms(keys, URL_TOKEN_TTL_MS).expect("the suite's token ttl is valid")
 }
 
 /// A bad signature is rejected at stage 0 — before the repository is read —
@@ -448,6 +464,50 @@ pub(super) async fn private_grant_old_epoch_not_found(ctx: Ctx) -> CaseResult {
     Ok(())
 }
 
+/// One unsigned read to compare between a private and a missing repository.
+struct AnonymousRead<'a> {
+    rpc: Rpc,
+    stream: bool,
+    body: &'a [u8],
+    hint: Option<&'a str>,
+}
+
+/// An unsigned caller sees the same `not_found` bytes for the private and
+/// the missing repository (`[private, missing]`).
+async fn anonymous_not_found(
+    ctx: &Ctx,
+    read: &AnonymousRead<'_>,
+    [private, missing]: [&str; 2],
+    what: &str,
+) -> CaseResult {
+    let content_type = if read.stream {
+        STREAM_PROTO
+    } else {
+        UNARY_PROTO
+    };
+    let send = |repository: &str| {
+        let mut headers = vec![("x-repository".to_owned(), repository.to_owned())];
+        if let Some(h) = read.hint {
+            headers.push(("x-mkit-ref".to_owned(), h.to_owned()));
+        }
+        let (client, body) = (ctx.client(), read.body.to_vec());
+        async move {
+            client
+                .post(read.rpc.procedure(), content_type, &headers, body)
+                .await
+                .map_err(Failure::Fail)
+        }
+    };
+    let (private, missing) = (send(private).await?, send(missing).await?);
+    let what = format!("{what} anonymous");
+    let code = reply_code(&private, read.stream, &what)?;
+    ensure!(
+        code == "not_found",
+        "{what}: private read failed with {code}"
+    );
+    same_not_found(&private, &missing, &what)
+}
+
 /// For every read procedure, an unauthorized private repository's reply is
 /// byte-identical to a missing repository's: HTTP status, Connect code,
 /// message, details and body — and every response header except `date` and
@@ -522,23 +582,22 @@ pub(super) async fn private_not_found_byte_identical(ctx: Ctx) -> CaseResult {
                 (raw(&ctx, &private).await?, raw(&ctx, &missing_reply).await?)
             };
             // Both must be `not_found`, not merely identical.
-            let code = if stream {
-                decode_stream::<DownloadPackResponse>(&private)
-                    .map_err(Failure::Fail)?
-                    .error
-                    .ok_or_else(|| Failure::Fail(format!("{what}: private stream had no error")))?
-                    .code
-            } else {
-                decode_unary::<ReadRefResponse>(&private)
-                    .map_err(Failure::Fail)?
-                    .expect_err("a private repo without read access must fail")
-                    .code
-            };
+            let code = reply_code(&private, stream, &what)?;
             ensure!(
                 code == "not_found",
                 "{what}: private read failed with {code}"
             );
             same_not_found(&private, &missing_reply, &what)?;
+            // The anonymous variant; `IssueObjectUrl` has no unsigned form.
+            if rpc != Rpc::IssueObjectUrl {
+                let target = AnonymousRead {
+                    rpc,
+                    stream,
+                    body: &body,
+                    hint: hint.as_deref(),
+                };
+                anonymous_not_found(&ctx, &target, [&repo, &missing], &what).await?;
+            }
         }
     }
     Ok(())

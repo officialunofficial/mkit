@@ -243,6 +243,37 @@ pub struct ScanPage {
     pub next: Option<Cursor>,
 }
 
+/// One ordered range in a batched scan. Its cursor belongs to this exact
+/// range, just as for [`NamespaceStore::scan`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RangeScan {
+    /// Inclusive lower bound.
+    pub start: Key,
+    /// Exclusive upper bound.
+    pub end: Key,
+    /// Resume strictly after this cursor.
+    pub after: Option<Cursor>,
+    /// Requested maximum entries, at least one.
+    pub limit: u32,
+}
+
+impl RangeScan {
+    /// A range request, including its optional continuation cursor.
+    #[must_use]
+    pub fn new(start: Key, end: Key, after: Option<Cursor>, limit: u32) -> Self {
+        Self {
+            start,
+            end,
+            after,
+            limit,
+        }
+    }
+}
+
+/// Most ranges accepted by one [`NamespaceStore::scan_many`] call.
+pub const MAX_SCAN_RANGES: usize = 256;
+
 /// Which key classes (`store::keys`) a store accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -327,7 +358,7 @@ pub struct PartitionStats {
 ///    write and guards every value it read with a precondition. Size limits
 ///    ([`Batch::validate`]) are checked first, and a violation writes
 ///    nothing.
-/// 2. **Reads are `get`, `has`, `get_many` and `scan`.** No other query
+/// 2. **Reads are `get`, `has`, `get_many`, `scan` and `scan_many`.** No other query
 ///    exists; every index is a key layout (`store::keys`).
 /// 3. **Single writer is enough.** Nothing may assume two `apply` calls on
 ///    one partition run concurrently, and nothing may hold a lock across an
@@ -421,6 +452,36 @@ pub trait NamespaceStore: MaybeSend + MaybeSync {
         after: Option<&Cursor>,
         limit: u32,
     ) -> impl Future<Output = Result<ScanPage, StoreError>> + MaybeSend;
+
+    /// Scan a served prefix of `ranges` in order. A nonempty request returns
+    /// at least its first page and at most one page per range; callers
+    /// re-request any unserved suffix. Every returned page obeys [`Self::scan`].
+    /// The default serves every range sequentially.
+    fn scan_many(
+        &self,
+        p: &Partition,
+        ranges: &[RangeScan],
+    ) -> impl Future<Output = Result<Vec<ScanPage>, StoreError>> + MaybeSend {
+        async move {
+            if ranges.len() > MAX_SCAN_RANGES {
+                return Err(StoreError::Invalid("too many scan ranges".into()));
+            }
+            let mut pages = Vec::with_capacity(ranges.len());
+            for range in ranges {
+                pages.push(
+                    self.scan(
+                        p,
+                        &range.start,
+                        &range.end,
+                        range.after.as_ref(),
+                        range.limit,
+                    )
+                    .await?,
+                );
+            }
+            Ok(pages)
+        }
+    }
 
     /// One atomic, all-or-nothing batch: validate it, read the backend
     /// clock once, check every precondition in order against committed

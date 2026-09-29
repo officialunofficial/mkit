@@ -234,8 +234,11 @@ from indexed metadata before Admission. The server MUST build the proof only
 after Admission allows it.
 Informative: complete preceding chunk-length proofs make ranges beyond
 roughly 30,000 preceding chunks (about 2 GiB of file) exceed the 64 MiB
-bundle cap and return 416. WP-4.14's boundary-aware builder is the planned
-mitigation.
+bundle cap and return 416. WP-4.14a's boundary-aware builder reduces reads
+and peak memory by retaining only the needed chunk bytes. It does not reduce
+the encoded proof size: the complete preceding proof set grows with the first
+chunk index. An oversized proof still returns 416. Changing that proof-size
+limit would require a separate format change.
 
 The proof ETag MUST be `"<commit>.<leaf>.<selector>"`, with lowercase
 64hex ids and selector `object` or `range-a-b` (minimal decimal inclusive
@@ -408,14 +411,17 @@ applicable reader-view `mkit.transport.v1.RedactionNotice`
 tombstoned id ahead of 304, and 451 precedence against 304 and
 Admission, including the tombstoned-manifest chunk case.
 
-Token-bearing URL vectors follow WP-2.11/4.15. The product MKDS verifier, boundary-aware builder, and verifier
-bindings follow WP-4.14. Signed-read HTTP GETs and schema extensions for an
-object-id admission field or token principal require separate work.
+Token-bearing URL vectors follow WP-2.11/4.15. The product MKDS verifier,
+boundary-aware builder, and verifier bindings follow WP-4.14a; HTTP query
+ranges and Workers prefetch follow WP-4.14b. Signed-read HTTP GETs and schema
+extensions for an object-id admission field or token principal require
+separate work.
 
 ## 10. Version history
 
 | Version | Status | Changes |
 |---|---|---|
+| 1 | draft | WP-4.14a clarifies that the boundary-aware builder reduces reads and memory, while complete preceding length proofs still impose an O(first chunk index) encoded-size cost and 416 on oversize. |
 | 1 | draft | Initial HTTP contract, selecting MKDP v2 or MKDS v1 without changing object bytes or protobuf. Fix round 1 clarifies bearer and paid caching, proof-cost ordering, admission input, reservation grace, token timing, 402/304 headers, redirects, route dispatch, and vectors. |
 
 ## 11. Invariants

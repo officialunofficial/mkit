@@ -48,6 +48,29 @@ fn fixture() -> AdmissionChallenge {
     }
 }
 
+#[test]
+fn core_encoder_matches_golden_and_buffa_decodes() {
+    let challenges = [
+        (
+            "mpp",
+            "Payment id=\"fake-example-not-valid\", method=\"tempo\", intent=\"charge\", request=\"fake-example-request-not-valid\"",
+        ),
+        ("x402", "fake-example-payment-required-not-valid"),
+    ];
+    let encoded = mkit_core::admission::encode_admission_challenge(
+        &challenges,
+        "Example upload payment required.",
+    );
+    assert_eq!(
+        encoded,
+        fs::read(golden_dir().join("admission-challenge.bin")).unwrap()
+    );
+    assert_eq!(
+        AdmissionChallenge::decode_from_slice(&encoded).unwrap(),
+        fixture()
+    );
+}
+
 fn update(dir: &Path, fixtures: &[Vec<u8>; 3]) {
     for (name, bytes) in FILES.iter().zip(fixtures) {
         fs::write(dir.join(name), bytes).unwrap();
@@ -185,4 +208,13 @@ fn absent_description_is_the_empty_client_value() {
             .is_none(),
         "an unset description is omitted from protobuf JSON"
     );
+}
+
+#[test]
+fn maximum_challenge_value_roundtrips_through_buffa() {
+    let value = "v".repeat(8_192);
+    let encoded = mkit_core::admission::encode_admission_challenge(&[("mpp", &value)], "pay");
+    let message = AdmissionChallenge::decode_from_slice(&encoded).unwrap();
+    assert_eq!(message.challenges[0].value.as_deref(), Some(value.as_str()));
+    assert_eq!(message.encode_to_vec(), encoded);
 }

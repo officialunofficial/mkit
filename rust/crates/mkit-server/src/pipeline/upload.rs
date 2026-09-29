@@ -214,10 +214,20 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
             super::fault!(pipe, AfterAuthorize, &op, a);
         }
         if mode == UploadMode::Fresh {
+            pipe.check_outbox_backpressure(&p, ahead.as_ref()).await?;
+            let credentials = super::admission::validate_credentials(&a.credential_capture)?;
             let mut input = AdmissionInput::new(&op);
+            input.credential_headers = &credentials;
             input.declared_bytes = declared;
             input.pack_id = Some(key);
-            let charges = pipe.admit(input).await?.charges;
+            let allowance = pipe.admit_streaming(input).await?;
+            if let Some(rid) = &allowance.reservation {
+                pipe.abort_unsupported_stream(a, &p, rid).await?;
+                return Err(ServerError::failed_precondition(
+                    "admission reservations require BeginUpload",
+                ));
+            }
+            let charges = allowance.charges;
             if op.auth.is_some() || !charges.is_empty() {
                 let req = WriteRequest {
                     repo: &op.repo.name,
@@ -236,6 +246,7 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
                     mark_repo_known: false,
                     lease: None,
                     rejection: None,
+                    pending: None,
                     begin: None,
                     advance: None,
                 };
@@ -443,7 +454,8 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
             .hooks
             .pre_receive()
             .check(&self.op, Some(&done.key.into()))
-            .await;
+            .await
+            .map_err(ServerError::strip_admission_shape);
         let Some(replay) = replay_guard(&self.op) else {
             return checked;
         };
@@ -470,6 +482,7 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
             mark_repo_known: false,
             lease: None,
             rejection: rejection.as_ref(),
+            pending: None,
             begin: None,
             advance: None,
         };

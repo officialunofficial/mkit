@@ -162,7 +162,7 @@ async fn sqlite_driver_fires_ticket_expiry() {
     let shutdown = Shutdown::new();
     let task = TimerDriver::new(
         store.clone(),
-        server::sqlite_timer_registry(MemoryBlobStore::default(), store.clone()),
+        server::sqlite_timer_registry(MemoryBlobStore::default(), store.clone(), String::new()),
         Arc::new(SystemClock),
     )
     .start(shutdown.clone())
@@ -170,16 +170,9 @@ async fn sqlite_driver_fires_ticket_expiry() {
     .unwrap();
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            let row = store
-                .get(&p, &keys::reservation(rid).unwrap())
-                .await
-                .unwrap();
-            if row.is_some_and(|v| {
-                matches!(
-                    codec::decode_reservation(&v),
-                    Ok(codec::ReservationV1::Expired { .. })
-                )
-            }) {
+            // The Expired outcome is delivered and acknowledged by kind 8 right
+            // after expiry, so the closed ticket is the durable evidence.
+            if store.get(&p, &keys::ticket(&id)).await.unwrap().is_none() {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -590,4 +583,75 @@ async fn every_due_partition_gets_a_turn_before_an_immediate_timer_repeats() {
         1,
         "hot partition ran twice before cold partition"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sqlite_driver_delivers_outcomes_and_reconciles_pending_rows() {
+    use mkit_server::store::codec::{AbortReason, PendingOp, ReservationV1};
+    use mkit_server::store::outbox::{OutboxBuilder, Terminal};
+    let root = tempfile::tempdir().unwrap();
+    let store = open(&root.path().join("outcomes.sqlite3"));
+    let p = Partition::Namespace(NamespaceKey::deployment_default());
+    let due = now();
+    let mut builder = OutboxBuilder::new(None, None).unwrap();
+    builder.abort_direct(
+        "done-rid",
+        Terminal::new(ReservationV1::Aborted {
+            repository: "repo".into(),
+            occurred_at_ms: due,
+            reason: AbortReason::Unspecified,
+            detail: String::new(),
+        })
+        .unwrap(),
+    );
+    builder.pending(
+        "stale-rid",
+        None,
+        &ReservationV1::Pending {
+            repository: "repo".into(),
+            created_at_ms: 1,
+            reconcile_at_ms: due,
+            op: PendingOp::Write,
+        },
+    );
+    let mut batch = Batch::new();
+    builder
+        .try_finish(&mut batch.preconditions, &mut batch.writes)
+        .unwrap();
+    store.apply(&p, batch).await.unwrap();
+    let shutdown = Shutdown::new();
+    let task = TimerDriver::new(
+        store.clone(),
+        server::sqlite_timer_registry(
+            MemoryBlobStore::default(),
+            store.clone(),
+            "https://server.example".into(),
+        ),
+        Arc::new(SystemClock),
+    )
+    .start(shutdown.clone())
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let done = store
+                .get(&p, &keys::reservation("done-rid").unwrap())
+                .await
+                .unwrap()
+                .is_none();
+            let stale = store
+                .get(&p, &keys::reservation("stale-rid").unwrap())
+                .await
+                .unwrap()
+                .is_none();
+            if done && stale {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    shutdown.trigger();
+    task.await.unwrap();
 }

@@ -90,8 +90,15 @@ pub trait EnvelopeSigner: Send + Sync {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ProcedureAuth {
     Body,
+    /// `SetRepoVisibility` (SPEC-WRITE-GRANTS §9.1): signed like `Body` in
+    /// envelope mode (`visibility` set), unsigned with `X-Repository` in
+    /// statement mode (`signed_statement` set). Decided per request from its
+    /// body, see [`is_statement_mode`].
+    BodyUnlessStatement,
     Commitment(&'static str),
-    Unsigned { repository: bool },
+    Unsigned {
+        repository: bool,
+    },
 }
 
 /// Exhaustive for the generated service. Future client methods must be
@@ -100,17 +107,36 @@ fn procedure_auth(procedure: &str) -> Option<ProcedureAuth> {
     let method = procedure.strip_prefix("/mkit.transport.v1.TransportService/")?;
     Some(match method {
         "ListRefs" | "ReadRef" | "PackExists" | "DownloadPack" | "IssueObjectUrl"
-        | "GetReceipt" | "UpdateRef" | "AdvanceRefs" | "BeginUpload" | "CompleteUpload"
-        // TODO(WP-2.9 client): SetRepoVisibility's `signed_statement` mode
-        // carries no auth v2 envelope (SPEC-WRITE-GRANTS §9.1); its client must
-        // make this mode-aware or send statements through an unsigned transport.
-        | "SetRepoVisibility" => ProcedureAuth::Body,
+        | "GetReceipt" | "UpdateRef" | "AdvanceRefs" | "BeginUpload" | "CompleteUpload" => {
+            ProcedureAuth::Body
+        }
+        "SetRepoVisibility" => ProcedureAuth::BodyUnlessStatement,
         "UploadPack" => ProcedureAuth::Commitment("pack:"),
         "UploadPart" => ProcedureAuth::Commitment("part:"),
         "GetServerInfo" => ProcedureAuth::Unsigned { repository: true },
         "GetGrantEpoch" | "SetGrantEpoch" => ProcedureAuth::Unsigned { repository: false },
         _ => return None,
     })
+}
+
+/// Whether a `SetRepoVisibility` request body is statement mode, which
+/// carries no envelope (the owner's signature is inside the statement).
+///
+/// Anything that doesn't decode as the proto request is treated as envelope
+/// mode and signed: a statement that slipped through that way is refused by
+/// the server ("statement mode with an envelope"), never accepted unsigned.
+fn is_statement_mode(body: &[u8]) -> bool {
+    use crate::proto::mkit::transport::v1::{
+        SetRepoVisibilityRequest, set_repo_visibility_request::Mode,
+    };
+    use buffa::Message as _;
+    matches!(
+        SetRepoVisibilityRequest::decode_from_slice(body),
+        Ok(SetRepoVisibilityRequest {
+            mode: Some(Mode::SignedStatement(_)),
+            ..
+        })
+    )
 }
 
 pub(crate) fn now_ms() -> i64 {
@@ -237,13 +263,20 @@ impl<T: ClientTransport> ClientTransport for EnvelopeTransport<T> {
         };
         Box::pin(async move {
             let procedure = request.uri().path().to_owned();
-            if auth == ProcedureAuth::Body {
+            if matches!(
+                auth,
+                ProcedureAuth::Body | ProcedureAuth::BodyUnlessStatement
+            ) {
                 let (mut parts, body) = request.into_parts();
                 let body_bytes = body
                     .collect()
                     .await
                     .map_err(|e| EnvelopeTransportError::Sign(format!("buffer request body: {e}")))?
                     .to_bytes();
+                if auth == ProcedureAuth::BodyUnlessStatement && is_statement_mode(&body_bytes) {
+                    let req = Request::from_parts(parts, full_body(body_bytes));
+                    return inner.send(req).await.map_err(EnvelopeTransportError::Inner);
+                }
                 let body_digest_hex = to_hex(&hash(body_bytes.as_ref()));
                 let commitment = format!("body:{body_digest_hex}");
                 sign_headers(
@@ -674,7 +707,8 @@ mod tests {
                 let expected = match method {
                     "ListRefs" | "ReadRef" | "PackExists" | "DownloadPack" | "GetReceipt"
                     | "IssueObjectUrl" | "UpdateRef" | "AdvanceRefs" | "BeginUpload"
-                    | "CompleteUpload" | "SetRepoVisibility" => ProcedureAuth::Body,
+                    | "CompleteUpload" => ProcedureAuth::Body,
+                    "SetRepoVisibility" => ProcedureAuth::BodyUnlessStatement,
                     "UploadPack" => ProcedureAuth::Commitment("pack:"),
                     "UploadPart" => ProcedureAuth::Commitment("part:"),
                     "GetServerInfo" => ProcedureAuth::Unsigned { repository: true },
@@ -697,6 +731,106 @@ mod tests {
                 procedure_auth("/mkit.transport.v1.TransportService/IssueObjectUrl"),
                 Some(ProcedureAuth::Body)
             );
+        }
+
+        fn visibility_request(
+            mode: crate::generated::set_repo_visibility_request::Mode,
+        ) -> Vec<u8> {
+            use buffa::Message as _;
+            crate::generated::SetRepoVisibilityRequest {
+                mode: Some(mode),
+                ..Default::default()
+            }
+            .encode_to_vec()
+        }
+
+        #[test]
+        fn set_repo_visibility_is_signed_in_envelope_mode_and_unsigned_in_statement_mode() {
+            use crate::generated::{RepoVisibility, set_repo_visibility_request::Mode};
+            const PROCEDURE: &str = "/mkit.transport.v1.TransportService/SetRepoVisibility";
+            let signer: Arc<dyn EnvelopeSigner> =
+                Arc::new(DalekSigner(SigningKey::from_bytes(&[19u8; 32])));
+            let send = |body: &[u8]| {
+                let captured = Arc::new(Mutex::new(None));
+                let transport = EnvelopeTransport::new(
+                    CapturingTransport {
+                        captured: captured.clone(),
+                    },
+                    Some(signer.clone()),
+                    "https://example.invalid".into(),
+                    "0x8ba1f109551bd432803012645ac136ddd64dba72/website".into(),
+                );
+                let mut request = build_request(PROCEDURE, b"");
+                *request.body_mut() = full_body(Bytes::copy_from_slice(body));
+                futures::executor::block_on(transport.send(request)).expect("send ok");
+                captured.lock().unwrap().take().expect("request captured")
+            };
+
+            // Envelope mode: a body-signed auth v2 write.
+            let body = visibility_request(Mode::Visibility(
+                RepoVisibility::REPO_VISIBILITY_PRIVATE.into(),
+            ));
+            let got = send(&body);
+            assert!(got.headers.contains_key(header::SIGNATURE));
+            assert!(got.headers.contains_key(header::PUBLIC_KEY));
+            assert_eq!(got.body.as_ref(), body.as_slice());
+
+            // Statement mode: no envelope headers at all, `X-Repository` kept.
+            let body = visibility_request(Mode::SignedStatement("statement.ed25519.sig".into()));
+            let got = send(&body);
+            for name in [
+                header::SIGNATURE,
+                header::PUBLIC_KEY,
+                header::DIGEST,
+                "x-envelope-version",
+                "x-audience",
+            ] {
+                assert!(!got.headers.contains_key(name), "{name} must be absent");
+            }
+            assert_eq!(
+                got.headers.get("x-repository").unwrap(),
+                "0x8ba1f109551bd432803012645ac136ddd64dba72/website"
+            );
+            assert_eq!(got.body.as_ref(), body.as_slice());
+
+            // Garbage that isn't the proto request is signed, never sent bare.
+            let got = send(b"\xff\xff\xff");
+            assert!(got.headers.contains_key(header::SIGNATURE));
+        }
+
+        #[test]
+        fn epoch_rpcs_carry_no_envelope_and_no_repository() {
+            let signer: Arc<dyn EnvelopeSigner> =
+                Arc::new(DalekSigner(SigningKey::from_bytes(&[23u8; 32])));
+            for method in ["GetGrantEpoch", "SetGrantEpoch"] {
+                let captured = Arc::new(Mutex::new(None));
+                let transport = EnvelopeTransport::new(
+                    CapturingTransport {
+                        captured: captured.clone(),
+                    },
+                    Some(signer.clone()),
+                    "https://example.invalid".into(),
+                    "0x8ba1f109551bd432803012645ac136ddd64dba72/website".into(),
+                );
+                let mut req = build_request(
+                    &format!("/mkit.transport.v1.TransportService/{method}"),
+                    b"epoch-body",
+                );
+                // A stale header set by a caller must not survive.
+                req.headers_mut()
+                    .insert("x-repository", "attacker/repo".parse().unwrap());
+                futures::executor::block_on(transport.send(req)).expect("send ok");
+                let got = captured.lock().unwrap().take().expect("request captured");
+                for name in [
+                    "x-repository",
+                    header::SIGNATURE,
+                    header::PUBLIC_KEY,
+                    header::DIGEST,
+                    "x-envelope-version",
+                ] {
+                    assert!(!got.headers.contains_key(name), "{method}: {name}");
+                }
+            }
         }
 
         #[test]

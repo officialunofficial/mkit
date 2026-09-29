@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use mkit_core::upload_parts::MIN_PART_SIZE;
 use mkit_server::pipeline::SinglePartition;
-use mkit_server::store::codec::{Backlog, ReservationV1, TicketV1};
+use mkit_server::store::codec::{AbortReason, Backlog, PendingOp, ReservationV1, TicketV1};
 use mkit_server::store::outbox::{self, OutboxBuilder, Terminal};
 use mkit_server::store::tickets::{
     self, CloseReason, TicketCaps, TicketPlanError, TicketReads, TicketSpec,
@@ -399,5 +399,89 @@ pub async fn kv_outcome_ack_exact_backlog<H: KvHarness>(h: H) -> Outcome {
             2
         );
     }
+    Ok(Pass)
+}
+
+/// Pending and reconcile contenders use the same stored value as their arbiter.
+/// A losing batch leaves its terminal value, queue and backlog unchanged.
+pub async fn kv_pending_terminal_arbitration<H: KvHarness>(h: H) -> Outcome {
+    let s = h.store();
+    let p = part("kv_pending_terminal_arbitration");
+    gate!(need_all_classes(&s, &p).await);
+    gate!(need_atomic(&s, &p).await);
+    for (rid, op) in [("write", PendingOp::Write), ("read", PendingOp::Read)] {
+        let pending = ReservationV1::Pending {
+            repository: "conformance".into(),
+            created_at_ms: 100,
+            reconcile_at_ms: 200,
+            op,
+        };
+        let prior = codec::encode_reservation(&pending);
+        let mut builder = ok!(OutboxBuilder::new(None, None));
+        builder.pending(rid, None, &pending);
+        let mut batch = Batch::new();
+        ok!(builder.try_finish(&mut batch.preconditions, &mut batch.writes));
+        commit(&s, &p, batch).await?;
+        ensure_eq!(
+            ok!(s.get(&p, &ok!(keys::reservation(rid))).await),
+            Some(prior.clone())
+        );
+        ensure!(
+            ok!(s.get(&p, &keys::timer(200, 9, rid.as_bytes())).await).is_some(),
+            "missing reconcile timer"
+        );
+
+        let committed = match op {
+            PendingOp::Write => ReservationV1::Committed {
+                repository: "conformance".into(),
+                occurred_at_ms: 150,
+                bytes_stored: 0,
+                new_to_repo: 0,
+                new_to_store: 0,
+                refs: vec![],
+            },
+            PendingOp::Read => ReservationV1::ReadServed {
+                repository: "conformance".into(),
+                occurred_at_ms: 150,
+                object: [9; 32],
+                bytes_served: 7,
+            },
+        };
+        let abandoned = ReservationV1::Aborted {
+            repository: "conformance".into(),
+            occurred_at_ms: 201,
+            reason: AbortReason::Abandoned,
+            detail: String::new(),
+        };
+        let os = ok!(s.get(&p, &keys::outbox_sequence()).await);
+        let oc = ok!(s.get(&p, &keys::outcome_backlog()).await);
+        let mut winner = ok!(OutboxBuilder::new(os.as_ref(), oc.as_ref()));
+        winner.outcome(rid, &prior, ok!(Terminal::new(committed.clone())));
+        let mut winner_batch = Batch::new();
+        ok!(winner.try_finish(&mut winner_batch.preconditions, &mut winner_batch.writes));
+        let mut loser = ok!(OutboxBuilder::new(os.as_ref(), oc.as_ref()));
+        loser.outcome(rid, &prior, ok!(Terminal::new(abandoned)));
+        let mut loser_batch = Batch::new();
+        ok!(loser.try_finish(&mut loser_batch.preconditions, &mut loser_batch.writes));
+        commit(&s, &p, winner_batch).await?;
+        ensure!(
+            matches!(
+                ok!(s.apply(&p, loser_batch).await),
+                BatchOutcome::PreconditionFailed { .. }
+            ),
+            "reconcile overwrote terminal outcome"
+        );
+        ensure_eq!(
+            ok!(s.get(&p, &ok!(keys::reservation(rid))).await),
+            Some(codec::encode_reservation(&committed))
+        );
+    }
+    ensure_eq!(
+        ok!(codec::decode_backlog(
+            &ok!(s.get(&p, &keys::outcome_backlog()).await).ok_or("backlog missing")?
+        ))
+        .rows,
+        2
+    );
     Ok(Pass)
 }

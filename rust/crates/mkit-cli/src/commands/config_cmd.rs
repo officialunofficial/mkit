@@ -49,6 +49,7 @@ struct ConfigOpts {
 }
 
 #[must_use]
+#[allow(clippy::too_many_lines)] // one flat set/show/unset dispatch
 pub fn run(args: &[String]) -> u8 {
     let opts = match clap_shim::parse::<ConfigOpts>("mkit config", args) {
         Ok(o) => o,
@@ -124,6 +125,11 @@ pub fn run(args: &[String]) -> u8 {
     }
     if let Err(e) = config::validate_value(value) {
         return emit_err(&format!("invalid value: {e}"), exit::CONFIG_ERROR);
+    }
+    if key == "grant.webauthn_rp"
+        && let Err(e) = crate::grants::parse_relying_parties(&[value.to_owned()])
+    {
+        return emit_err(&format!("{key}: {e}"), exit::CONFIG_ERROR);
     }
     let normalized_value = if key == "user.identity" {
         match config::expand_user_identity(value) {
@@ -446,6 +452,7 @@ const CONFIG_KEYS: &[&str] = &[
     "attest.signer",
     "default_branch",
     "durability.objects",
+    "grant.webauthn_rp",
     "key.backend",
     "key.default_ref",
     "key.ed25519_ref",
@@ -487,6 +494,7 @@ fn lookup<'a>(cfg: &'a Config, key: &str) -> Option<Cow<'a, str>> {
         "remote_bucket" => Some(Cow::Borrowed(&cfg.remote_bucket)),
         "remote_type" => Some(Cow::Borrowed(&cfg.remote_type)),
         "transport_auth" => Some(Cow::Borrowed(&cfg.transport_auth)),
+        "grant.webauthn_rp" => Some(Cow::Owned(cfg.grant_webauthn_rp.join("|"))),
         "ssh.strict_host_key_checking" => Some(Cow::Borrowed(&cfg.ssh_strict_host_key_checking)),
         "ssh.user_known_hosts_file" => Some(Cow::Borrowed(&cfg.ssh_user_known_hosts_file)),
         "ssh.identity_file" => Some(Cow::Borrowed(&cfg.ssh_identity_file)),

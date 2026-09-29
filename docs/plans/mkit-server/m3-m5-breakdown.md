@@ -487,8 +487,8 @@ Entry condition: M1 is merged. The M4 private-serving WPs (4.15) need M2 read au
       4. Stage index rows.
     - **MKPL node** (`transfer::decode_packlist`, `transfer.rs:130`): every listed pack is a member or ticketed in the same advance.
   - In `pre_receive` for `AdvanceRefs`, run `verify_push(new tips, History, source=repo index ∪ staged, known=verified-in-repo)`.
-  - On success, one ref-shard batch: head/packmap, local membership additions, the pack's `verified` state, and relay
-    outbox rows that flip the index rows to `verified` in the repo index shards.
+  - On success, direct index rows and the pack's `vs` Verified state commit in separate batches before the ref-shard
+    advance batch. That batch contains head/packmap, local membership additions and its existing relay outbox rows.
   - `AlreadyPresent` answers use membership only (M1 already enforces this, re-assert it here).
   - Native runs verification inline, bounded by limits advertised in GetServerInfo.
 - **PRD:** §6.5, §6.2 (MKPL tickets), §5.4 step 5, D3, D15.
@@ -629,20 +629,21 @@ Entry condition: M1 is merged. The M4 private-serving WPs (4.15) need M2 read au
 - **Size:** S (~300).
 - **Note:** This is the only M4 WP that depends on M3. Keeping it separate means M4 isn't blocked by M3.
 
-### WP-4.14: Proofs: `?proof=1` inclusion and byte-range disclosure; mkit-wasm round trip
-- **Depends on:** WP-4.12, WP-4.3, WP-4.11.
-- **Goal:**
-  - For ref/path URLs, build the disclosure bundle via `build_disclosure_from` (`Selector` per SPEC-DISCLOSURE) over the repo index.
-  - For `?proof=1&range=a-b`, use MKDP Range within one chunk; cross-chunk ranges use MKDS v1 over MKDP v2 (R-109).
-  - Add a boundary-aware builder and Workers in-memory `ObjectSource` prefetch using 4.10 chunk offsets.
-  - Deliver it in the format WP-4.11 fixes.
-  - Object-by-id URLs take proofs only with commit context (per spec).
-- **Files:** `mkit-server/src/http_objects/proof.rs`, `mkit-core/src/verify.rs` (MKDS verifier), `mkit-wasm/src/verify.rs` (MKDS binding), `rust/crates/mkit-wasm/tests/` (node or wasm-bindgen-test verifying server-produced bundles with `verify_disclosure` / `blob_bao_verify_slice`), goldens.
-- **Tests:**
-  - The M4/M5 exit criterion "serving and proof round trips verify with `mkit-wasm`".
-  - A tampered bundle is rejected.
-  - A cross-chunk range gets a multi-chunk bundle that `mkit-wasm` verifies.
-- **Size:** M (~800).
+### WP-4.14a: MKDS span verifier, wasm binding and boundary-aware range-proof builder
+- **Depends on:** WP-4.3, WP-4.11.
+- **Stage:** 2; pure `mkit-core` and `mkit-wasm`, with no server dependency.
+- **Goal:** Verify MKDS v1 containers against a trusted commit with the ordered SPEC-DISCLOSURE §8.2 reasons. Build MKDP Range proofs for a plain Blob or one chunk, and MKDS for a cross-chunk range. Complete preceding length proofs are required; hints are checked against canonical Blob lengths.
+- **Files:** `mkit-core/src/verify/span.rs`, `mkit-wasm/src/verify.rs`, `rust/crates/mkit-core/tests/golden_http_objects.rs`, `rust/crates/mkit-wasm/tests/verify.rs`, fuzz targets and goldens.
+- **Tests:** Product/reference verifier parity, golden byte identity, adversarial reasons, wasm round trips and fuzz/property coverage (R-161).
+- **Size:** M (production cap 1,500 lines).
+
+### WP-4.14b: HTTP proof query ranges and Workers prefetch
+- **Depends on:** WP-4.12, WP-4.10, WP-4.14a.
+- **Stage:** 2.
+- **Goal:** Serve `?proof=1&range=a-b` through the 4.14a builder. Return 416 on invalid or oversized ranges, produce the proof ETag, precompute encoded proof size and `declared_bytes` before Admission, and prefetch the needed chunks into an in-memory `ObjectSource` on Workers. Object-by-id URLs take proofs only with commit context (R-109, R-161).
+- **Files:** `mkit-server/src/http_objects/proof.rs`, the Workers HTTP serving adapter, and conformance tests.
+- **Tests:** HTTP query selection, 416 ordering, ETag, Admission cost and serving proof round trips through `mkit-wasm`.
+- **Size:** M.
 
 ### WP-4.15: Private serving via M2 signed URLs and read auth
 - **Depends on:**
@@ -679,7 +680,7 @@ Entry condition: M1 is merged. The M4 private-serving WPs (4.15) need M2 read au
 - **Size:** M (~700).
 
 ### WP-4.18: Conformance: the indexed-mode and serving wire suite (M4 exit)
-- **Depends on:** WP-4.8, WP-4.9, WP-4.10, WP-4.14, WP-4.15, WP-4.16, WP-4.17.
+- **Depends on:** WP-4.8, WP-4.9, WP-4.10, WP-4.14b, WP-4.15, WP-4.16, WP-4.17.
 - **Goal:** Black-box cases on native, `wrangler dev` and staging:
   - verification before refs move
   - forged signature rejected

@@ -293,6 +293,7 @@ async fn with_auth_sibling_shares_stores_and_the_write_gate() {
                 .authenticate(&RequestMeta {
                     procedure: Procedure::UpdateRef,
                     header: &no_headers,
+                    header_values: None,
                     unary_body: None,
                     transport_principal: principal,
                 })
@@ -315,6 +316,7 @@ async fn with_auth_sibling_shares_stores_and_the_write_gate() {
     let meta = |principal| RequestMeta {
         procedure: Procedure::ListRefs,
         header: &no_headers,
+        header_values: None,
         unary_body: None,
         transport_principal: principal,
     };

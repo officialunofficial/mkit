@@ -55,6 +55,7 @@ import re
 import shutil
 import subprocess
 import sys
+import unicodedata
 
 sys.dont_write_bytecode = True  # keep scripts/golden free of __pycache__
 
@@ -177,8 +178,10 @@ def ref_name_ok(name):
 def path_ok(path):
     """§9.4 path grammar: at most MAX_PATH_BYTES bytes; empty names the
     root tree; a nonempty path is `/`-joined entry names with no empty,
-    `.` or `..` entry."""
+    `.` or `..` entry, and no control character (Unicode category Cc)."""
     if len(path.encode("utf-8")) > MAX_PATH_BYTES:
+        return False
+    if any(unicodedata.category(c) == "Cc" for c in path):
         return False
     return path == "" or all(
         entry not in ("", ".", "..") for entry in path.split("/")

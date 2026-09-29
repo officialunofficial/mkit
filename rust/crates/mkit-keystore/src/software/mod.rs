@@ -16,7 +16,10 @@ mod tests;
 use atomic_write::{cleanup_new_dek_after_write_failure, write_key_file};
 #[cfg(feature = "bls-threshold")]
 pub use bls::{BlsShareMetadata, LoadedBlsShare};
-use crypto::{public_key, random_valid_secret, sign_message, validate_secret};
+use crypto::{
+    public_key, random_valid_secret, sign_message, sign_prehash_recoverable_secp256k1,
+    validate_secret,
+};
 
 #[cfg(all(target_os = "linux", feature = "linux-secret-service"))]
 use protectors::LinuxSecretServiceProtector;
@@ -791,6 +794,23 @@ impl KeySigner for SoftwareSigner {
     fn sign(&mut self, msg: &[u8]) -> Result<Vec<u8>> {
         sign_message(self.algorithm(), self.secret.expose_secret(), msg)
     }
+
+    fn sign_prehash_recoverable_secp256k1(&mut self, prehash: &[u8; 32]) -> Result<[u8; 65]> {
+        // Only the two software families: OS-native backends reuse this
+        // signer type but are not part of the SPEC-KEYSTORE contract.
+        if !matches!(
+            self.backend,
+            BackendKind::Software | BackendKind::SoftwareRaw
+        ) {
+            return Err(Error::UnsupportedOperation(
+                "recoverable secp256k1 prehash signing",
+            ));
+        }
+        if self.algorithm() != Algorithm::Secp256k1 {
+            return Err(Error::UnsupportedAlgorithm(self.algorithm()));
+        }
+        sign_prehash_recoverable_secp256k1(self.secret.expose_secret(), prehash)
+    }
 }
 
 fn validate_attrs(attrs: &KeyAttrs) -> Result<()> {
@@ -994,5 +1014,91 @@ mod compatibility_tests {
         assert_eq!(actual.public_key().unwrap(), expected.public_key_sec1());
         assert_eq!(actual.keyid().unwrap(), expected.keyid());
         assert_eq!(actual.sign(PAE).unwrap(), expected.sign_dsse(PAE).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod prehash_tests {
+    use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
+
+    use super::*;
+
+    fn signer(backend: BackendKind, algorithm: Algorithm) -> SoftwareSigner {
+        SoftwareSigner::new(
+            KeyLabel::new("default").unwrap(),
+            backend,
+            algorithm,
+            [0x11; 32],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn recoverable_prehash_is_low_s_and_recovers_the_signing_key() {
+        let mut signer = signer(BackendKind::Software, Algorithm::Secp256k1);
+        let expected = VerifyingKey::from_sec1_bytes(signer.public_key().unwrap().as_bytes())
+            .expect("public key");
+        // Enough digests that a high-`s` candidate is overwhelmingly likely
+        // to have been produced (and normalized) at least once.
+        for i in 0..64u8 {
+            let digest = [i; 32];
+            let sig = signer.sign_prehash_recoverable_secp256k1(&digest).unwrap();
+            assert!(sig[64] == 27 || sig[64] == 28, "v = {}", sig[64]);
+            let parsed = Signature::from_slice(&sig[..64]).unwrap();
+            assert_eq!(parsed.normalize_s(), parsed, "s must be low");
+            let recovery = RecoveryId::try_from(sig[64] - 27).unwrap();
+            let recovered =
+                VerifyingKey::recover_from_prehash(&digest, &parsed, recovery).expect("recovers");
+            assert_eq!(recovered, expected, "digest {i}");
+        }
+    }
+
+    #[test]
+    fn recoverable_prehash_refuses_other_algorithms_and_backends() {
+        let digest = [7; 32];
+        for algorithm in [Algorithm::Ed25519, Algorithm::P256] {
+            let mut signer = signer(BackendKind::Software, algorithm);
+            assert!(matches!(
+                signer.sign_prehash_recoverable_secp256k1(&digest),
+                Err(Error::UnsupportedAlgorithm(a)) if a == algorithm
+            ));
+        }
+        // A signer that is not from the software families keeps the contract
+        // of the hardware backends.
+        let mut native = signer(BackendKind::MacosKeychain, Algorithm::Secp256k1);
+        assert!(matches!(
+            native.sign_prehash_recoverable_secp256k1(&digest),
+            Err(Error::UnsupportedOperation(_))
+        ));
+    }
+
+    #[test]
+    fn trait_default_reports_unsupported() {
+        struct Fixed(KeyLabel);
+        impl KeySigner for Fixed {
+            fn algorithm(&self) -> Algorithm {
+                Algorithm::Secp256k1
+            }
+            fn label(&self) -> &KeyLabel {
+                &self.0
+            }
+            fn metadata(&self) -> Result<KeyMetadata> {
+                unreachable!()
+            }
+            fn public_key(&self) -> Result<PublicKeyBytes> {
+                unreachable!()
+            }
+            fn keyid(&self) -> Result<KeyId> {
+                unreachable!()
+            }
+            fn sign(&mut self, _msg: &[u8]) -> Result<Vec<u8>> {
+                unreachable!()
+            }
+        }
+        let mut hardware_like = Fixed(KeyLabel::new("hw").unwrap());
+        assert!(matches!(
+            hardware_like.sign_prehash_recoverable_secp256k1(&[0; 32]),
+            Err(Error::UnsupportedOperation(_))
+        ));
     }
 }

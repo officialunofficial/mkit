@@ -315,11 +315,21 @@ pub struct UrlTokenConfig {
 }
 
 impl UrlTokenConfig {
-    /// `keys` with the issued-token lifetime cap.
+    /// `keys` with the default lifetime cap, [`DEFAULT_TTL_MS`] (15
+    /// minutes).
+    #[must_use]
+    pub fn new(keys: UrlTokenKeys) -> Self {
+        Self {
+            keys: Arc::new(keys),
+            ttl_ms: DEFAULT_TTL_MS,
+        }
+    }
+
+    /// `keys` with an explicit issued-token lifetime cap.
     ///
     /// # Errors
     /// [`UrlTokenConfigError::Ttl`] for `ttl_ms` outside `1..=MAX_TTL_MS`.
-    pub fn new(keys: UrlTokenKeys, ttl_ms: u64) -> Result<Self, UrlTokenConfigError> {
+    pub fn with_ttl_ms(keys: UrlTokenKeys, ttl_ms: u64) -> Result<Self, UrlTokenConfigError> {
         if ttl_ms == 0 || ttl_ms > MAX_TTL_MS {
             return Err(UrlTokenConfigError::Ttl);
         }

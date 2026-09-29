@@ -201,7 +201,7 @@ fn adjust_counter(
 /// builder requires neither os nor oc reads; callers may also finish their
 /// own builder.
 // The fixed public contract returns Existing(TicketV1) by value.
-#[allow(clippy::result_large_err)]
+#[allow(clippy::result_large_err, clippy::too_many_lines)] // One atomic ticket, cap, index and reservation fragment.
 pub fn plan_ticket_open(
     spec: &TicketSpec,
     reads: &TicketReads,
@@ -218,7 +218,15 @@ pub fn plan_ticket_open(
     }
     let read_keys = keys(spec);
     let id = ticket_id(&spec.reservation_id);
-    if reads.reservation.is_some() {
+    if let Some(value) = &reads.reservation
+        && !matches!(
+            codec::decode_reservation(value).map_err(TicketPlanError::Corrupt)?,
+            codec::ReservationV1::Pending {
+                op: codec::PendingOp::Write,
+                ..
+            }
+        )
+    {
         return Err(TicketPlanError::Invalid("reservation id already in use"));
     }
     // A ticket row the index doesn't name as live must not exist.

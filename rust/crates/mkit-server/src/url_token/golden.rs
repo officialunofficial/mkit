@@ -66,7 +66,7 @@ fn keys() -> UrlTokenKeys {
 }
 
 fn config() -> UrlTokenConfig {
-    UrlTokenConfig::new(keys(), TTL_MS).unwrap()
+    UrlTokenConfig::with_ttl_ms(keys(), TTL_MS).unwrap()
 }
 
 fn active_id() -> [u8; 16] {

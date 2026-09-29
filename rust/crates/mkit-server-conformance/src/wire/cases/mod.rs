@@ -33,6 +33,7 @@ mod epochs;
 pub(super) mod grants;
 mod growth;
 mod health;
+mod indexed;
 mod info;
 mod leases;
 mod list;
@@ -284,6 +285,7 @@ cases! {
     "tickets.advance_ticket_bindings" => tickets::advance_ticket_bindings, M1, [Tickets, AuthV2], [MultiRepo];
     "tickets.advance_other_repository" => tickets::advance_other_repository, M1, [Tickets, AuthV2, MultiRepo], [];
     "tickets.advance_expired_ticket" => tickets::advance_expired_ticket, M1, [Tickets, AuthV2, TestFaults], [];
+    "indexed.pending_verification_unavailable" => indexed::pending_verification_unavailable, M4, [IndexedMode, MultiRepo, Tickets, AuthV2, TestFaults], [];
     "leases.bump_completes_and_writes_continue" => leases::bump_completes_and_writes_continue, M1, [EpochLeases, TestFaults], [];
     "info.shape_and_policy" => info::shape_and_policy, M1, [], [];
     "info.ignores_repository_header" => info::ignores_repository_header, M1, [], [];

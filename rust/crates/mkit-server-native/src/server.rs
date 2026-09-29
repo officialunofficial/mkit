@@ -519,6 +519,25 @@ fn lock_root(root: &Path) -> Result<ServerLocks, ConfigError> {
 /// does not open; `TEMPFAIL` when the serve lock is not granted in time.
 pub fn open(cfg: &ServeConfig) -> Result<Opened, ConfigError> {
     let locks = lock_root(&cfg.repo_root)?;
+    #[cfg(feature = "test-faults")]
+    let repo = match &cfg.pipeline.addressing {
+        Addressing::Single { repo } => Some(repo),
+        // Indexed mode needs Multi addressing. SQLite stores each namespace
+        // partition independently while the existing root lock serializes
+        // native writers for the lifetime of this process.
+        Addressing::Multi(_)
+            if cfg.pipeline.indexed.is_some() && matches!(cfg.meta, MetaChoice::Sqlite { .. }) =>
+        {
+            None
+        }
+        _ => {
+            return Err(config_error(
+                "addressing",
+                "only single-repo addressing is served",
+            ));
+        }
+    };
+    #[cfg(not(feature = "test-faults"))]
     let Addressing::Single { repo } = &cfg.pipeline.addressing else {
         return Err(config_error(
             "addressing",
@@ -553,12 +572,21 @@ pub fn open(cfg: &ServeConfig) -> Result<Opened, ConfigError> {
 }
 
 /// The services over `blobs` and the metadata store `cfg` names.
-fn with_meta<B>(blobs: B, repo: &RepoId, cfg: &ServeConfig) -> Result<Services, ConfigError>
+fn with_meta<B>(
+    blobs: B,
+    #[cfg(feature = "test-faults")] repo: Option<&RepoId>,
+    #[cfg(not(feature = "test-faults"))] repo: &RepoId,
+    cfg: &ServeConfig,
+) -> Result<Services, ConfigError>
 where
     B: MultipartBlobStore + Clone + 'static,
 {
     match &cfg.meta {
         MetaChoice::FsLayout => {
+            #[cfg(feature = "test-faults")]
+            let repo = repo.ok_or_else(|| {
+                config_error("addressing", "fs-layout requires single-repo addressing")
+            })?;
             let meta = FsLayoutStore::open(&cfg.repo_root, repo)
                 .map_err(|e| config_error("--meta fs-layout", e))?;
             build_services(blobs, Blocking::new(meta), cfg)
@@ -572,7 +600,11 @@ where
             bind_database(&conn, &root_id, path)?;
             bind_sharding(&conn, cfg.pipeline.sharding, path)?;
             let meta = Blocking::new(TimerNotifying::new(meta));
-            let registry = sqlite_timer_registry(blobs.clone(), meta.clone());
+            let audience = match &cfg.pipeline.auth {
+                mkit_server::pipeline::AuthMode::AuthV2(config) => config.audience().to_owned(),
+                _ => String::new(),
+            };
+            let registry = sqlite_timer_registry(blobs.clone(), meta.clone(), audience);
             let driver = TimerDriver::new(meta.clone(), registry, Arc::new(SystemClock));
             let mut services = build_services(blobs, meta, cfg)?;
             services.timers = Some(driver);
@@ -583,9 +615,14 @@ where
 }
 
 /// The exact timer registry installed by the native `SQLite` server.
+///
+/// Kinds 8 and 9 run for every partition of the one store. Delivery uses the
+/// in-tree `NoOutcomes` sink, which acknowledges locally; `audience` is the
+/// canonical origin stamped on delivered outcomes (empty without auth v2).
 pub fn sqlite_timer_registry<B: MultipartBlobStore + Clone + 'static>(
     blobs: B,
     meta: TimerStore,
+    audience: String,
 ) -> mkit_server::timers::TimerRegistry<'static, TimerStore> {
     let registry = mkit_server::timers::TimerRegistry::new()
         .register(mkit_server::timers::ticket_expiry::TicketExpiry { blobs })
@@ -598,6 +635,12 @@ pub fn sqlite_timer_registry<B: MultipartBlobStore + Clone + 'static>(
             hook: mkit_server::relay::NoHook,
             budget: mkit_server::relay::RelayBudget::default(),
         })
+        .register(mkit_server::timers::outcome_delivery::OutcomeDelivery {
+            sink: mkit_server::pipeline::NoOutcomes,
+            audience,
+            metrics: Arc::new(MetricsBridge),
+        })
+        .register(mkit_server::timers::reservation_reconcile::ReservationReconcile)
         .register(mkit_server::timers::quota_rollup::QuotaRollup {
             coordinator: meta,
             metrics: MetricsBridge,

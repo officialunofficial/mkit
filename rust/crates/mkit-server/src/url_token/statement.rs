@@ -98,9 +98,10 @@ impl UrlTarget {
 
 /// The §9.4 path grammar: at most [`MAX_PATH_BYTES`] bytes; empty names the
 /// root tree; a nonempty path is `/`-joined entry names with no empty,
-/// `.` or `..` entry.
+/// `.` or `..` entry, and no control character (Unicode category Cc).
 fn valid_path(path: &str) -> bool {
     path.len() <= MAX_PATH_BYTES
+        && !path.chars().any(char::is_control)
         && (path.is_empty()
             || path
                 .split('/')

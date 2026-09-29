@@ -12,7 +12,7 @@ use super::*;
 use crate::url_token::{Binding, TokenRejected, UrlTokenConfig, UrlTokenKeys};
 
 fn tokens() -> UrlTokenConfig {
-    UrlTokenConfig::new(
+    UrlTokenConfig::with_ttl_ms(
         UrlTokenKeys::new(Zeroizing::new([9; 32]), Vec::new()).unwrap(),
         60_000,
     )

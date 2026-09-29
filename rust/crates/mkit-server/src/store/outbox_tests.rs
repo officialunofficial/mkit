@@ -31,6 +31,102 @@ fn expired() -> Terminal {
     .unwrap()
 }
 
+fn pending(op: codec::PendingOp) -> Value {
+    codec::encode_reservation(&ReservationV1::Pending {
+        repository: "repo".into(),
+        created_at_ms: 1,
+        reconcile_at_ms: 60_001,
+        op,
+    })
+}
+
+#[test]
+fn pending_is_absent_guarded_and_refuses_a_duplicate() {
+    let mut builder = OutboxBuilder::new(None, None).unwrap();
+    builder.pending(
+        "rid",
+        None,
+        &codec::decode_reservation(&pending(codec::PendingOp::Write)).unwrap(),
+    );
+    let batch = finish(builder);
+    assert!(
+        batch
+            .preconditions
+            .contains(&Precondition::Absent(keys::reservation("rid").unwrap()))
+    );
+    assert!(batch.writes.iter().any(|write| matches!(write, Write::Put(key, _) if *key == keys::timer(60_001, crate::timers::registry::kinds::RESERVATION_RECONCILE.get(), b"rid"))));
+    let mut duplicate = OutboxBuilder::new(None, None).unwrap();
+    duplicate.pending(
+        "rid",
+        Some(&pending(codec::PendingOp::Write)),
+        &codec::decode_reservation(&pending(codec::PendingOp::Write)).unwrap(),
+    );
+    let (mut pre, mut writes) = (Vec::new(), Vec::new());
+    assert!(matches!(
+        duplicate.try_finish(&mut pre, &mut writes),
+        Err(StoreError::Invalid(_))
+    ));
+    assert!(pre.is_empty() && writes.is_empty());
+}
+
+#[test]
+fn reservation_transition_table_and_kick_invariant() {
+    let committed = ReservationV1::Committed {
+        repository: "repo".into(),
+        occurred_at_ms: 10,
+        bytes_stored: 0,
+        new_to_repo: 0,
+        new_to_store: 0,
+        refs: Vec::new(),
+    };
+    let aborted = ReservationV1::Aborted {
+        repository: "repo".into(),
+        occurred_at_ms: 10,
+        reason: AbortReason::Unspecified,
+        detail: String::new(),
+    };
+    let read = ReservationV1::ReadServed {
+        repository: "repo".into(),
+        occurred_at_ms: 10,
+        object: [1; 32],
+        bytes_served: 8,
+    };
+    let expired = ReservationV1::Expired {
+        repository: "repo".into(),
+        occurred_at_ms: 10,
+    };
+    let priors = [
+        ticketed(),
+        pending(codec::PendingOp::Write),
+        pending(codec::PendingOp::Read),
+        codec::encode_reservation(&committed),
+    ];
+    for (p, prior) in priors.iter().enumerate() {
+        for (t, terminal) in [
+            committed.clone(),
+            aborted.clone(),
+            read.clone(),
+            expired.clone(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let legal = matches!((p, t), (0, 0 | 1 | 3) | (1, 0 | 1) | (2, 1 | 2));
+            let mut builder = OutboxBuilder::new(None, None).unwrap();
+            builder.outcome("rid", prior, Terminal::new(terminal).unwrap());
+            let (mut pre, mut writes) = (Vec::new(), Vec::new());
+            assert_eq!(
+                builder.try_finish(&mut pre, &mut writes).is_ok(),
+                legal,
+                "prior {p}, terminal {t}"
+            );
+            if legal {
+                assert_eq!(writes.iter().filter(|write| matches!(write, Write::Put(key, _) if matches!(keys::parse(key), Some(keys::ParsedKey::Timer { kind: 8, .. })))).count(), 1);
+            }
+        }
+    }
+}
+
 fn finish(builder: OutboxBuilder) -> Batch {
     let mut batch = Batch::new();
     builder

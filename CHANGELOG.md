@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server: add validated two-phase admission with bounded HTTP 402 challenges,
+  redacted payment credential forwarding and committed-success receipt headers
+  (WP-3.2).
+- Server: durably arbitrate admitted reservations with pending and terminal
+  outcomes, reconcile abandoned reservations, deliver through a retrying
+  outcome sink and apply per-shard outbox backpressure (WP-3.3).
+
+- CLI: add `mkit grant create|add|list` and a user grant store under
+  `$XDG_CONFIG_HOME/mkit/grants/` (never repository-scoped). Owners sign with the
+  mkit key, a software-keystore secp256k1 key, or an imported wallet or WebAuthn
+  signature; the Connect client now presents the best stored grant, ranking the
+  higher epoch first. New user-only config key `grant.webauthn_rp`.
+  Issue grants for pushes that move a branch as `cuf`, not `cu`: while servers are
+  opaque, updating an existing ref needs the `f` flag.
+  `mkit-keystore` gains a defaulted `KeySigner::sign_prehash_recoverable_secp256k1`
+  for the software backends (WP-2.13).
+- CLI: add `mkit epoch show|bump`, `mkit grant revoke [--prune]` and
+  `mkit visibility set`, waiting out the server's `Retry-After`. Connect client:
+  new `ConnectTransport::{get_grant_epoch, set_grant_epoch, set_repo_visibility}`
+  returning `Completion`, and a per-request signed-or-unsigned classification of
+  `SetRepoVisibility` (WP-2.14).
+- Core and wasm: verify MKDS v1 multi-chunk disclosure spans against a trusted
+  commit and build boundary-aware MKDP/MKDS range proofs (WP-4.14a).
+- Server (WP-4.6): batch repository object-index range reads on Workers,
+  add bounded relay enqueue and delivery checks, increase paid relay
+  throughput, and report index pressure, lag, backlog, and lookup caps.
+- Server (WP-4.7): opt-in native indexed ingestion verifies ticketed packs
+  before ref publication, resolves member-only thin delta bases, checks all
+  consumed objects and packlists, and writes index rows before membership.
+- Core: expose decoded pack frame metadata, single-frame decoding, and an
+  additive resumable decode cursor for repository-scoped external bases.
 - Server Worker: stream verified multipart parts into CV-keyed R2 objects and
   verify the complete pack before publishing it; raise the ticketed pack cap
   to 1 GiB while retaining the 64 MiB single-upload limit (WP-1.12).

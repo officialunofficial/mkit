@@ -108,6 +108,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> AuthInterceptor<B, N,
             let meta = RequestMeta {
                 procedure,
                 header: &header,
+                header_values: Some(&|name| {
+                    ctx.headers()
+                        .get_all(name)
+                        .iter()
+                        .map(|value| value.to_str().unwrap_or("\n").to_owned())
+                        .collect()
+                }),
                 unary_body,
                 transport_principal,
             };
@@ -160,6 +167,10 @@ where
         };
         let payload = item?;
         let bytes = payload.encoded()?;
+        // The 1 KiB bound applies to the decoded message: connectrpc has
+        // already read the frame (capped by the transport's message limit)
+        // and undone any per-message compression before this point, so a
+        // pre-decode check is not available here.
         if bytes.len() > 1024 {
             return Err(ServerError::invalid_argument("DownloadPack request too large").into());
         }
@@ -191,6 +202,10 @@ where
         );
         frame.extend_from_slice(&bytes);
         self.authenticate(&mut req.ctx, Some(&frame))?;
+        // connectrpc collects a server-streaming call's request before
+        // the interceptors run and refuses a second message itself, so
+        // `inbound` holds at most this one payload; the chain below only
+        // hands it on.
         let inbound: PayloadStream =
             Box::pin(futures::stream::once(async move { Ok(payload) }).chain(inbound));
         next.run(req, inbound).await

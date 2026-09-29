@@ -53,6 +53,9 @@ _mkit() {
         'clone:Clone a repository'
         'remote:Show, add, remove, or rename remotes'
         'key:Manage user-scoped keystore keys (generate/list/import/export/delete)'
+        'grant:Issue, import, list and revoke write and read grants'
+        'epoch:Show or advance a namespace grant epoch on a remote'
+        'visibility:Switch a repository between public and private'
         'keygen:Generate a new Ed25519 signing keypair'
         'cherry-pick:Apply a commit to the current branch'
         'revert:Create a new commit undoing a previous commit'
@@ -445,6 +448,63 @@ _mkit() {
                         'rename[rename a named remote]' \
                         'get-url[print a remote URL]' \
                         'set-url[change a remote URL]'
+                    ;;
+                grant)
+                    _arguments \
+                        '--cap[cap]' \
+                        '--grantee[grantee]' \
+                        '--repo[repo]' \
+                        '--all[all]' \
+                        '--refs[refs]' \
+                        '--audience[audience]' \
+                        '--ttl[ttl]' \
+                        '--epoch[epoch]' \
+                        '--offline[offline]' \
+                        '--remote[remote]' \
+                        '--store[store]' \
+                        '--namespace[namespace]' \
+                        '--scheme[scheme]' \
+                        '--print-statement[print statement]' \
+                        '--statement-file[statement file]' \
+                        '--signature[signature]' \
+                        '--webauthn-assertion[webauthn assertion]' \
+                        '--check[check]' \
+                        '--json[json]' \
+                        '--prune[prune]' \
+                        '--timeout[timeout]' \
+                        '--help[show help]' \
+                        '1:subcommand:((create:create\ an\ owner-signed\ grant add:verify\ a\ grant\ header\ and\ add\ it\ to\ your\ store list:list\ the\ grants\ in\ your\ store revoke:revoke\ grants\ by\ advancing\ the\ namespace\ epoch))' \
+                        '*:argument:_files'
+                    ;;
+                epoch)
+                    _arguments \
+                        '--by[by]' \
+                        '--namespace[namespace]' \
+                        '--audience[audience]' \
+                        '--timeout[timeout]' \
+                        '--json[json]' \
+                        '--scheme[scheme]' \
+                        '--print-statement[print statement]' \
+                        '--statement-file[statement file]' \
+                        '--signature[signature]' \
+                        '--webauthn-assertion[webauthn assertion]' \
+                        '--help[show help]' \
+                        '1:subcommand:((show:show\ the\ epoch\ a\ remote\ stores bump:advance\ the\ epoch,\ revoking\ lower-epoch\ grants))' \
+                        '*:argument:_files'
+                    ;;
+                visibility)
+                    _arguments \
+                        '--statement[statement]' \
+                        '--audience[audience]' \
+                        '--timeout[timeout]' \
+                        '--scheme[scheme]' \
+                        '--print-statement[print statement]' \
+                        '--statement-file[statement file]' \
+                        '--signature[signature]' \
+                        '--webauthn-assertion[webauthn assertion]' \
+                        '--help[show help]' \
+                        '1:subcommand:((set:set\ a\ repository\ public\ or\ private))' \
+                        '*:argument:_files'
                     ;;
                 key)
                     _values 'key subcommand' \

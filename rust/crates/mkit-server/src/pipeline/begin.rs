@@ -111,6 +111,19 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         pack_id: &[u8],
         bytes: u64,
     ) -> Result<BeginUploadResult, ServerError> {
+        self.begin_upload_with_meta(a, ref_name, pack_id, bytes)
+            .await
+            .map(|(result, _)| result)
+    }
+
+    /// Begin a resumable upload and return success-only admission headers.
+    pub async fn begin_upload_with_meta(
+        &self,
+        a: &Authenticated,
+        ref_name: &str,
+        pack_id: &[u8],
+        bytes: u64,
+    ) -> Result<(BeginUploadResult, super::ResponseMeta), ServerError> {
         self.observe(a, async {
             check_ref_name(ref_name)?;
             if ref_name.starts_with(mkit_core::refs::PACKMAP_REF_PREFIX) {
@@ -159,8 +172,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 )
                 .await?
             {
-                StoredResult::BeginUpload(answer) => Ok(answer),
-                other => Err(stored_mismatch(&other)),
+                (StoredResult::BeginUpload(answer), meta) => Ok((answer, meta)),
+                (other, _) => Err(stored_mismatch(&other)),
             }
         })
         .await
@@ -379,9 +392,11 @@ pub(super) fn plan(
             StoredRejection::new(crate::Code::FailedPrecondition, CAP_MESSAGE)
                 .expect("final cap error"),
         )),
-        Err(TicketPlanError::Existing(_) | TicketPlanError::CapExceeded { .. }) => {
-            // TODO(WP-3.3): record Aborted via Pending.
+        Err(TicketPlanError::Existing(_)) => {
             Err(ServerError::aborted_retryable("upload ticket race"))
+        }
+        Err(TicketPlanError::CapExceeded { .. }) => {
+            Err(ServerError::failed_precondition(CAP_MESSAGE))
         }
         Err(TicketPlanError::Corrupt(err)) => Err(meta_error(err)),
         Err(TicketPlanError::Invalid(detail)) => Err(internal(detail)),

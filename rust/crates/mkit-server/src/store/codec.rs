@@ -49,11 +49,24 @@ pub struct RepoRecord {
 pub struct RepoVisibilityV1 {
     /// The repository's visibility.
     pub visibility: StoredVisibility,
-    /// `created` of the last accepted visibility statement; 0 when no
-    /// statement has been accepted (envelope-mode writes keep it).
+    /// The newer of the last accepted statement's `created` and the last
+    /// envelope write's time; 0 before any write.
     pub last_created_ms: u64,
-    /// The last accepted statement's id, 64 lowercase hex.
+    /// The last accepted statement's id, 64 lowercase hex. The key is
+    /// always present in a stored row (`null` when none): a row missing it
+    /// is corrupt.
+    #[serde(deserialize_with = "present_option")]
     pub last_statement_id: Option<String>,
+}
+
+/// Deserialize an `Option` whose key must be present (serde would default
+/// a missing `Option` field to `None`).
+fn present_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
 }
 
 /// The visibility values a `rv` row stores.
@@ -157,6 +170,8 @@ pub struct TicketV1 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum AbortReason {
+    /// A policy or pre-apply refusal without a more specific reason.
+    Unspecified,
     /// A guarded ref update failed.
     RefConflict,
     /// An epoch changed.
@@ -169,6 +184,16 @@ pub enum AbortReason {
     Internal,
     /// Reconcile found an abandoned pending reservation.
     Abandoned,
+}
+
+/// The operation a pending reservation will settle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PendingOp {
+    /// A directly admitted write or `BeginUpload`.
+    Write,
+    /// An admitted HTTP read.
+    Read,
 }
 
 /// A ref changed by a committed reservation.
@@ -186,11 +211,21 @@ pub struct OutcomeRef {
 
 /// The one durable reservation arbiter, replaced under an Equals guard.
 ///
-/// WP-3.3 adds `Pending { … }` and `ReadServed { … }` under `CODEC_V1`.
 /// Unknown state tags fail decoding, so older readers fail closed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ReservationV1 {
+    /// Admission's durable pre-apply arbiter.
+    Pending {
+        /// Full wire repository identity (or bare single-deployment name).
+        repository: String,
+        /// Creation time, Unix milliseconds.
+        created_at_ms: u64,
+        /// Earliest safe reconciliation time, Unix milliseconds.
+        reconcile_at_ms: u64,
+        /// Write or read semantics.
+        op: PendingOp,
+    },
     /// Successful `BeginUpload`, awaiting ticket consumption or expiry.
     Ticketed {
         /// Bound ticket id.
@@ -229,6 +264,18 @@ pub enum ReservationV1 {
         repository: String,
         /// Outcome time, Unix milliseconds.
         occurred_at_ms: u64,
+    },
+    /// An admitted HTTP read, including partial delivery.
+    ReadServed {
+        /// Full wire repository identity (or bare single-deployment name).
+        repository: String,
+        /// Completion time, Unix milliseconds.
+        occurred_at_ms: u64,
+        /// Object identifier served.
+        #[serde(with = "hash_json")]
+        object: Hash,
+        /// Actual body bytes sent; zero for HEAD.
+        bytes_served: u64,
     },
 }
 
@@ -629,7 +676,7 @@ pub fn decode_ticket(value: &Value) -> Result<TicketV1, StoreError> {
     Ok(ticket)
 }
 
-/// Encode a ticket-backed reservation or terminal outcome.
+/// Encode a pending, ticket-backed, or terminal reservation.
 #[must_use]
 pub fn encode_reservation(reservation: &ReservationV1) -> Value {
     encode_json(reservation)
@@ -641,6 +688,17 @@ pub fn decode_reservation(value: &Value) -> Result<ReservationV1, StoreError> {
     let reservation = decode_json(value, "bad reservation")?;
     let repository = match &reservation {
         ReservationV1::Ticketed { .. } => return Ok(reservation),
+        ReservationV1::Pending {
+            repository,
+            created_at_ms,
+            reconcile_at_ms,
+            ..
+        } => {
+            if reconcile_at_ms < created_at_ms {
+                return Err(corrupt("invalid pending deadline"));
+            }
+            repository
+        }
         ReservationV1::Committed {
             repository, refs, ..
         } => {
@@ -659,7 +717,8 @@ pub fn decode_reservation(value: &Value) -> Result<ReservationV1, StoreError> {
             }
             repository
         }
-        ReservationV1::Expired { repository, .. } => repository,
+        ReservationV1::Expired { repository, .. }
+        | ReservationV1::ReadServed { repository, .. } => repository,
     };
     RepositoryIdentity::parse_bare_allowed(repository)
         .map_err(|_| corrupt("bad outcome repository"))?;
@@ -1293,10 +1352,13 @@ mod tests {
     #[test]
     fn reservation_codec_all_variants_golden_and_roundtrip() {
         let cases = vec![
+            (ReservationV1::Pending { repository: "a".into(), created_at_ms: 1, reconcile_at_ms: 300_001, op: PendingOp::Write }, r#"{"state":"pending","repository":"a","created_at_ms":1,"reconcile_at_ms":300001,"op":"write"}"#.into()),
+            (ReservationV1::Pending { repository: "a".into(), created_at_ms: 1, reconcile_at_ms: 60_001, op: PendingOp::Read }, r#"{"state":"pending","repository":"a","created_at_ms":1,"reconcile_at_ms":60001,"op":"read"}"#.into()),
             (ReservationV1::Ticketed { ticket_id: [0x11; 32] }, format!(r#"{{"state":"ticketed","ticket_id":"{}"}}"#, "11".repeat(32))),
             (ReservationV1::Committed { repository: "a".into(), occurred_at_ms: 7, bytes_stored: 9, new_to_repo: 8, new_to_store: 6, refs: vec![OutcomeRef { name: "refs/heads/main".into(), new: Some([0x22; 32]), deleted: false }, OutcomeRef { name: "refs/tags/v1".into(), new: None, deleted: true }] }, format!(r#"{{"state":"committed","repository":"a","occurred_at_ms":7,"bytes_stored":9,"new_to_repo":8,"new_to_store":6,"refs":[{{"name":"refs/heads/main","new":"{}","deleted":false}},{{"name":"refs/tags/v1","new":null,"deleted":true}}]}}"#, "22".repeat(32))),
             (ReservationV1::Aborted { repository: "a".into(), occurred_at_ms: 7, reason: AbortReason::Abandoned, detail: "gone".into() }, r#"{"state":"aborted","repository":"a","occurred_at_ms":7,"reason":"ABANDONED","detail":"gone"}"#.into()),
             (ReservationV1::Expired { repository: "a".into(), occurred_at_ms: 7 }, r#"{"state":"expired","repository":"a","occurred_at_ms":7}"#.into()),
+            (ReservationV1::ReadServed { repository: "a".into(), occurred_at_ms: 7, object: [0x33; 32], bytes_served: 9 }, format!(r#"{{"state":"read_served","repository":"a","occurred_at_ms":7,"object":"{}","bytes_served":9}}"#, "33".repeat(32))),
         ];
         for (row, golden) in cases {
             let value = encode_reservation(&row);
@@ -1310,6 +1372,7 @@ mod tests {
             assert!(decode_reservation(&json_value(&json)).is_err());
         }
         for (reason, name) in [
+            (AbortReason::Unspecified, "UNSPECIFIED"),
             (AbortReason::RefConflict, "REF_CONFLICT"),
             (AbortReason::EpochMismatch, "EPOCH_MISMATCH"),
             (AbortReason::PackMissing, "PACK_MISSING"),
@@ -1759,6 +1822,7 @@ mod tests {
             b"\x01{\"visibility\":\"internal\",\"last_created_ms\":0,\"last_statement_id\":null}",
             b"\x01{\"visibility\":\"public\"}",
             b"\x01{\"visibility\":\"public\",\"last_created_ms\":0,\"last_statement_id\":\"AB\"}",
+            b"\x01{\"visibility\":\"public\",\"last_created_ms\":0}",
             b"\x01{\"visibility\":\"public\",\"last_created_ms\":0,\"last_statement_id\":\"ab\",\"extra\":1}",
         ] {
             assert!(matches!(

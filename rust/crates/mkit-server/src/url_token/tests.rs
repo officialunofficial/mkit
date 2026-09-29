@@ -36,7 +36,7 @@ fn keys() -> UrlTokenKeys {
 }
 
 fn config() -> UrlTokenConfig {
-    UrlTokenConfig::new(keys(), DEFAULT_TTL_MS).unwrap()
+    UrlTokenConfig::new(keys())
 }
 
 fn repository() -> String {
@@ -157,6 +157,10 @@ fn target_paths() {
         assert!(UrlTarget::path("refs/heads/main", bad).is_err(), "{bad}");
         let field = format!("path:refs/heads/main:{bad}");
         assert!(UrlTarget::parse_field(&field).is_err(), "{field}");
+    }
+    // Control characters (Unicode category Cc) are refused in any entry.
+    for bad in ["a\nb", "a/b\0", "\u{7f}", "a/\u{9f}/b", "\t"] {
+        assert!(UrlTarget::path("refs/heads/main", bad).is_err(), "{bad:?}");
     }
     assert!(
         UrlTarget::path("refs/heads/main", "x".repeat(1024)).is_ok(),
@@ -357,7 +361,7 @@ fn key_set_json_shape() {
 
 #[test]
 fn mint_binds_and_clamps() {
-    let cfg = UrlTokenConfig::new(keys(), 60_000).unwrap();
+    let cfg = UrlTokenConfig::with_ttl_ms(keys(), 60_000).unwrap();
     let target = UrlTarget::path("refs/heads/main", "a/b").unwrap();
     for (requested, expected_ms) in [(0, 60_000), (u32::MAX, 60_000), (30, 30_000)] {
         let minted = cfg
@@ -385,14 +389,16 @@ fn mint_binds_and_clamps() {
 #[test]
 fn config_ttl_bounds() {
     assert_eq!(
-        UrlTokenConfig::new(keys(), 0).unwrap_err(),
+        UrlTokenConfig::with_ttl_ms(keys(), 0).unwrap_err(),
         UrlTokenConfigError::Ttl
     );
     assert_eq!(
-        UrlTokenConfig::new(keys(), MAX_TTL_MS + 1).unwrap_err(),
+        UrlTokenConfig::with_ttl_ms(keys(), MAX_TTL_MS + 1).unwrap_err(),
         UrlTokenConfigError::Ttl
     );
-    assert!(UrlTokenConfig::new(keys(), MAX_TTL_MS).is_ok());
+    assert!(UrlTokenConfig::with_ttl_ms(keys(), MAX_TTL_MS).is_ok());
+    // `new` defaults to the spec's 15 minutes.
+    assert_eq!(UrlTokenConfig::new(keys()).ttl_ms(), DEFAULT_TTL_MS);
 }
 
 fn repo() -> RepoId {
@@ -465,7 +471,7 @@ fn pipeline_new_refuses_bad_token_config() {
 fn debug_never_shows_secrets() {
     let keys = keys();
     let keys_debug = format!("{keys:?}");
-    let cfg = UrlTokenConfig::new(keys, DEFAULT_TTL_MS).unwrap();
+    let cfg = UrlTokenConfig::new(keys);
     let minted = cfg
         .mint(
             AUDIENCE,
@@ -544,7 +550,7 @@ fn precheck_rejects_bad_signatures_and_unknown_keys() {
 fn precheck_retires_keys_at_retired_at_plus_ttl() {
     let retired = [8; 32];
     let public = SigningKey::from_bytes(&retired).verifying_key().to_bytes();
-    let cfg = UrlTokenConfig::new(
+    let cfg = UrlTokenConfig::with_ttl_ms(
         UrlTokenKeys::new(
             seed(9),
             vec![RetiredKey {

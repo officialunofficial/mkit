@@ -191,6 +191,22 @@ pub struct ServerError {
     http_status: Option<u16>,
     headers: Vec<(String, String)>,
     details: Vec<ErrorDetail>,
+    abort: Option<AbortCause>,
+}
+
+/// Why a reserved write ended without committing, as decided where the error
+/// is produced. Reservation abort reasons come from this marker, never from
+/// message text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AbortCause {
+    /// The grant epoch moved.
+    EpochMismatch,
+    /// Another request with this nonce won the replay guard.
+    ReplayRace,
+    /// The namespace quota window advanced.
+    QuotaWindow,
+    /// Re-planning was exhausted by guard contention (`os`/`oc`, refs, quota).
+    Contention,
 }
 
 impl fmt::Debug for ServerError {
@@ -217,6 +233,7 @@ impl fmt::Debug for ServerError {
             .field("http_status", &self.http_status)
             .field("headers", &Headers(&self.headers))
             .field("details", &self.details)
+            .field("abort", &self.abort)
             .finish()
     }
 }
@@ -232,7 +249,21 @@ impl ServerError {
             http_status: None,
             headers: Vec::new(),
             details: Vec::new(),
+            abort: None,
         }
+    }
+
+    /// Tag the error with the reservation abort cause.
+    #[must_use]
+    pub(crate) fn with_abort_cause(mut self, cause: AbortCause) -> Self {
+        self.abort = Some(cause);
+        self
+    }
+
+    /// The reservation abort cause, if the producer set one.
+    #[must_use]
+    pub(crate) fn abort_cause(&self) -> Option<AbortCause> {
+        self.abort
     }
 
     /// [`Code::InvalidArgument`].
@@ -262,6 +293,7 @@ impl ServerError {
     pub fn admission_challenge(challenge: bytes::Bytes) -> Self {
         Self::new(Code::PermissionDenied, "admission required")
             .with_http_status(402)
+            .with_header("Cache-Control", "no-store")
             .with_detail(ErrorDetail {
                 type_name: ADMISSION_CHALLENGE_TYPE.to_owned(),
                 value: challenge,
@@ -434,6 +466,23 @@ impl ServerError {
     pub fn details(&self) -> &[ErrorDetail] {
         &self.details
     }
+
+    /// Remove admission-only response shape from errors produced outside stage 3.
+    #[must_use]
+    pub(crate) fn strip_admission_shape(mut self) -> Self {
+        self.details
+            .retain(|detail| detail.type_name != ADMISSION_CHALLENGE_TYPE);
+        if self.http_status == Some(402) {
+            self.http_status = Some(403);
+            self.headers.clear();
+        }
+        self.headers.retain(|(name, _)| {
+            !crate::pipeline::ADMISSION_EXPOSE_HEADERS
+                .iter()
+                .any(|blocked| blocked.eq_ignore_ascii_case(name))
+        });
+        self
+    }
 }
 
 /// Whether `status` may be set on an error with `code`: an error status
@@ -587,7 +636,10 @@ mod tests {
         );
         assert_eq!(
             e.headers(),
-            &[("WWW-Authenticate".to_owned(), "Payment x".to_owned())]
+            &[
+                ("Cache-Control".to_owned(), "no-store".to_owned()),
+                ("WWW-Authenticate".to_owned(), "Payment x".to_owned())
+            ]
         );
         assert_eq!(format!("{e}"), "admission required");
     }
@@ -626,7 +678,7 @@ mod tests {
             .with_header("Payment-Receipt", "rcpt-s3cr3t")
             .with_header("PAYMENT-RESPONSE", "resp-s3cr3t")
             .with_header("WWW-Authenticate", "Payment realm=x");
-        assert_eq!(e.headers().len(), 3);
+        assert_eq!(e.headers().len(), 4);
         let debug = format!("{e:?}");
         assert!(!debug.contains("s3cr3t"), "{debug}");
         assert!(debug.contains("Payment-Receipt"), "{debug}");
@@ -691,5 +743,20 @@ mod tests {
     #[should_panic(expected = "reserved")]
     fn with_header_reserved_name_fails_debug_assertion() {
         let _ = ServerError::unavailable("down").with_header("Authorization", "Bearer x");
+    }
+
+    #[test]
+    fn stripping_drops_payment_headers_on_any_error() {
+        let stripped = ServerError::permission_denied("no")
+            .with_header("WWW-Authenticate", "Payment x")
+            .with_header("payment-required", "x")
+            .with_header("Payment-Receipt", "r")
+            .with_header("PAYMENT-RESPONSE", "r")
+            .with_header("Retry-After", "30")
+            .strip_admission_shape();
+        assert_eq!(
+            stripped.headers(),
+            [("Retry-After".to_owned(), "30".to_owned())]
+        );
     }
 }

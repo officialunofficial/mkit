@@ -865,3 +865,362 @@ fn visibility_on_a_missing_repo_gates_reads_once_created() {
         "owner",
     );
 }
+
+// ------------------------------------------------------- review fixes
+
+/// Counts its calls and records the `caller_view` it was shown.
+#[derive(Clone, Default)]
+struct Counting {
+    views: Arc<Mutex<Vec<CallerView>>>,
+}
+
+impl Counting {
+    fn calls(&self) -> usize {
+        self.views.lock().unwrap().len()
+    }
+}
+
+impl Authorizer for Counting {
+    async fn authorize(&self, op: &Operation) -> Result<AuthzFacts, ServerError> {
+        self.views.lock().unwrap().push(op.authz.caller_view);
+        Ok(AuthzFacts {
+            caller_view: CallerView::Writer,
+            ..AuthzFacts::default()
+        })
+    }
+}
+
+/// A hook error shaped like an admission challenge.
+#[derive(Clone)]
+struct PaymentShaped;
+
+impl Authorizer for PaymentShaped {
+    async fn authorize(&self, _: &Operation) -> Result<AuthzFacts, ServerError> {
+        Err(ServerError::permission_denied("pay first")
+            .with_http_status(402)
+            .with_header("www-authenticate", "Payment realm=repo"))
+    }
+}
+
+#[test]
+fn a_payment_shaped_hook_error_never_leaks_on_reads_or_visibility() {
+    let owner = key(1);
+    let stranger = key(2);
+    let repo = repository(&owner);
+    let env = env_with(&owner, AuthorizerRole::Check, PaymentShaped);
+    let id = repo_id(&env, &owner);
+    // Private: the uniform `not_found`.
+    put_repo(&env, &id, Some(codec::StoredVisibility::Private));
+    let err = try_read(
+        &env,
+        &signed_read(&stranger, &repo, Procedure::ReadRef, None),
+        Procedure::ReadRef,
+    )
+    .unwrap_err();
+    assert_not_found(&err, "private");
+    // Public under the Check role: the error propagates, stripped.
+    put_repo(&env, &id, Some(codec::StoredVisibility::Public));
+    let err = try_read(
+        &env,
+        &anonymous_read(&repo, Procedure::ReadRef),
+        Procedure::ReadRef,
+    )
+    .unwrap_err();
+    assert_ne!(err.http_status(), Some(402));
+    assert!(err.headers().is_empty() && err.details().is_empty());
+    // Envelope visibility consults the hook for a non-owner.
+    let env = env_with(&owner, AuthorizerRole::Authority, PaymentShaped);
+    let err = set(
+        &env,
+        &signed_visibility(&stranger, &repo, 21, b"v"),
+        VisibilityRequest::Envelope(Visibility::Private),
+    )
+    .unwrap_err();
+    assert_ne!(err.http_status(), Some(402));
+    assert!(err.headers().is_empty() && err.details().is_empty());
+}
+
+#[test]
+fn a_bad_grant_never_lets_the_authority_hook_authorize_a_private_read() {
+    let owner = key(1);
+    let grantee = key(2);
+    let repo = repository(&owner);
+    let env = env_with(&owner, AuthorizerRole::Authority, WriterView);
+    let id = repo_id(&env, &owner);
+    put_repo(&env, &id, Some(codec::StoredVisibility::Private));
+    put_epoch(&env, &id, 1);
+    let mut grants = vec![
+        // Old epoch, expired and foreign-owner grants.
+        grant(&owner, &grantee, |g| {
+            g.capabilities = Capabilities::Read;
+            g.ref_scopes = None;
+            g.epoch = 0;
+        }),
+        grant(&owner, &grantee, |g| {
+            g.capabilities = Capabilities::Read;
+            g.ref_scopes = None;
+            g.epoch = 1;
+            g.expiry_ms = T0 - 1;
+        }),
+        grant(&key(3), &grantee, |g| {
+            g.capabilities = Capabilities::Read;
+            g.ref_scopes = None;
+            g.epoch = 1;
+        }),
+    ];
+    grants.push("junk.header".to_owned());
+    for header in &grants {
+        let err = try_read(
+            &env,
+            &signed_read(&grantee, &repo, Procedure::ReadRef, Some(header)),
+            Procedure::ReadRef,
+        )
+        .unwrap_err();
+        assert_not_found(&err, header);
+    }
+    // Without a grant the same hook authorizes.
+    assert_served(
+        try_read(
+            &env,
+            &signed_read(&grantee, &repo, Procedure::ReadRef, None),
+            Procedure::ReadRef,
+        ),
+        "no grant",
+    );
+}
+
+#[test]
+fn an_expired_grant_loses_a_private_read_and_only_classifies_a_public_one() {
+    let owner = key(1);
+    let grantee = key(2);
+    let repo = repository(&owner);
+    let env = environment(&owner, AuthorizerRole::Check, false);
+    let id = repo_id(&env, &owner);
+    let expired = grant(&owner, &grantee, |g| {
+        g.capabilities = Capabilities::Read;
+        g.ref_scopes = None;
+        g.expiry_ms = T0 - 1;
+    });
+    put_repo(&env, &id, Some(codec::StoredVisibility::Private));
+    let err = try_read(
+        &env,
+        &signed_read(&grantee, &repo, Procedure::ReadRef, Some(&expired)),
+        Procedure::ReadRef,
+    )
+    .unwrap_err();
+    assert_not_found(&err, "expired, private");
+    put_repo(&env, &id, None);
+    let p = env.pipe.shards.coordinator(&id.namespace);
+    now(env
+        .pipe
+        .meta
+        .inner
+        .apply(&p, Batch::new().delete(keys::repo_visibility(&id.name))))
+    .unwrap();
+    let a = env
+        .auth(&signed_read(
+            &grantee,
+            &repo,
+            Procedure::ReadRef,
+            Some(&expired),
+        ))
+        .unwrap();
+    let op = env
+        .pipe
+        .identify(&a, OpKind::ReadRef { name: HEAD.into() })
+        .unwrap();
+    let read = block_on(env.pipe.authorize_read(&op)).unwrap();
+    assert_eq!(read.facts.caller_view, CallerView::Reader);
+}
+
+#[test]
+fn a_missing_repository_pays_the_same_hook_round_trip_as_a_private_one() {
+    let owner = key(1);
+    let stranger = key(2);
+    let repo = repository(&owner);
+    let calls = |private: bool, signed: bool| {
+        let counting = Counting::default();
+        let env = env_with(&owner, AuthorizerRole::Authority, counting.clone());
+        if private {
+            let id = repo_id(&env, &owner);
+            put_repo(&env, &id, Some(codec::StoredVisibility::Private));
+        }
+        let req = if signed {
+            signed_read(&stranger, &repo, Procedure::ReadRef, None)
+        } else {
+            anonymous_read(&repo, Procedure::ReadRef)
+        };
+        let _ = try_read(&env, &req, Procedure::ReadRef);
+        counting.calls()
+    };
+    assert_eq!(calls(false, true), 1);
+    assert_eq!(calls(false, true), calls(true, true));
+    assert_eq!(calls(false, false), calls(true, false));
+}
+
+#[test]
+fn visibility_outside_multi_owner_auth_v2_is_failed_precondition() {
+    let owner = key(1);
+    let repo = repository(&owner);
+    for auth in [
+        AuthMode::Open,
+        AuthMode::Bearer {
+            token: crate::error::Redacted::new("t"),
+        },
+    ] {
+        let e = env(auth);
+        for mode in [
+            VisibilityRequest::Envelope(Visibility::Private),
+            VisibilityRequest::Statement("x".into()),
+        ] {
+            let a = e
+                .auth(
+                    &Req::unsigned(Procedure::SetRepoVisibility)
+                        .header("authorization", "Bearer t"),
+                )
+                .unwrap();
+            let err = block_on(e.pipe.set_repo_visibility(&a, mode)).unwrap_err();
+            assert_eq!(err.code(), Code::FailedPrecondition);
+        }
+    }
+    let _ = repo;
+}
+
+#[test]
+fn a_grant_header_without_auth_v2_is_unauthenticated_everywhere() {
+    for auth in [
+        AuthMode::Open,
+        AuthMode::Bearer {
+            token: crate::error::Redacted::new("t"),
+        },
+    ] {
+        let e = env(auth);
+        let err = e
+            .auth(
+                &Req::unsigned(Procedure::ReadRef)
+                    .header("authorization", "Bearer t")
+                    .header("x-write-grant", "a.b.c"),
+            )
+            .unwrap_err();
+        assert_eq!(err.code(), Code::Unauthenticated);
+    }
+}
+
+#[test]
+fn private_rows_are_enforced_whatever_the_auth_mode() {
+    let owner = key(1);
+    let repo = repository(&owner);
+    let clock = clock();
+    let mut c = config(&owner, AuthorizerRole::Check);
+    c.auth = AuthMode::Open;
+    c.grants = None;
+    let env = build(c, Spy::new(store(&clock)), Hooks::new(), clock);
+    let id = repo_id(&env, &owner);
+    put_repo(&env, &id, Some(codec::StoredVisibility::Private));
+    let err = try_read(
+        &env,
+        &anonymous_read(&repo, Procedure::ReadRef),
+        Procedure::ReadRef,
+    )
+    .unwrap_err();
+    assert_not_found(&err, "open sibling, private");
+    put_repo(&env, &id, Some(codec::StoredVisibility::Public));
+    assert_served(
+        try_read(
+            &env,
+            &anonymous_read(&repo, Procedure::ReadRef),
+            Procedure::ReadRef,
+        ),
+        "open sibling, public",
+    );
+}
+
+#[test]
+fn an_envelope_flip_cannot_be_undone_by_an_older_statement() {
+    let owner = key(1);
+    let repo = repository(&owner);
+    let e = environment(&owner, AuthorizerRole::Check, false);
+    let id = repo_id(&e, &owner);
+    let (older, _) = statement(&owner, &repo, Visibility::Public, T0 - 1, [11; 32]);
+    let (same, _) = statement(&owner, &repo, Visibility::Public, T0, [12; 32]);
+    set(
+        &e,
+        &signed_visibility(&owner, &repo, 30, b"v"),
+        VisibilityRequest::Envelope(Visibility::Private),
+    )
+    .unwrap();
+    assert_eq!(
+        stored_visibility_row(&e, &id).last_created_ms,
+        u64::try_from(T0).unwrap()
+    );
+    for stmt in [older, same] {
+        let err = set(
+            &e,
+            &unsigned_visibility(&repo),
+            VisibilityRequest::Statement(stmt),
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), Code::PermissionDenied);
+    }
+    assert_eq!(
+        stored_visibility_row(&e, &id).visibility,
+        codec::StoredVisibility::Private
+    );
+}
+
+#[test]
+fn a_stale_identical_statement_retry_after_an_envelope_change_is_refused() {
+    let owner = key(1);
+    let repo = repository(&owner);
+    let e = environment(&owner, AuthorizerRole::Check, false);
+    let id = repo_id(&e, &owner);
+    let (stmt, _) = statement(&owner, &repo, Visibility::Private, T0, [13; 32]);
+    set(
+        &e,
+        &unsigned_visibility(&repo),
+        VisibilityRequest::Statement(stmt.clone()),
+    )
+    .unwrap();
+    set(
+        &e,
+        &signed_visibility(&owner, &repo, 31, b"v"),
+        VisibilityRequest::Envelope(Visibility::Public),
+    )
+    .unwrap();
+    let err = set(
+        &e,
+        &unsigned_visibility(&repo),
+        VisibilityRequest::Statement(stmt),
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), Code::PermissionDenied);
+    assert_eq!(
+        stored_visibility_row(&e, &id).visibility,
+        codec::StoredVisibility::Public
+    );
+}
+
+#[test]
+fn the_envelope_hook_sees_a_reader_until_it_decides() {
+    let owner = key(1);
+    let stranger = key(2);
+    let repo = repository(&owner);
+    let counting = Counting::default();
+    let env = env_with(&owner, AuthorizerRole::Authority, counting.clone());
+    set(
+        &env,
+        &signed_visibility(&stranger, &repo, 32, b"v"),
+        VisibilityRequest::Envelope(Visibility::Private),
+    )
+    .unwrap();
+    assert_eq!(*counting.views.lock().unwrap(), [CallerView::Reader]);
+}
+
+#[test]
+fn a_visibility_request_debug_hides_the_statement() {
+    let shown = format!(
+        "{:?}",
+        VisibilityRequest::Statement("secret.header.bytes".into())
+    );
+    assert!(!shown.contains("secret"), "{shown}");
+}
