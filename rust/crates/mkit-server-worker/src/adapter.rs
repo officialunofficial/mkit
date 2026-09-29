@@ -1554,6 +1554,7 @@ mod glue {
         env: &Env,
         cfg: &WorkerConfig,
         hooks: H,
+        #[cfg(feature = "published-view")] snapshot_warm: bool,
     ) -> Result<WorkerPipeline<H>, ConfigError> {
         let bad = |e: &dyn core::fmt::Display| ConfigError(e.to_string());
         let config = cfg.pipeline_config()?;
@@ -1584,7 +1585,11 @@ mod glue {
         )
         .map_err(|e| bad(&e))?;
         #[cfg(feature = "published-view")]
-        let pipe = if let Some(config) = cfg.published_view.clone() {
+        let pipe = if let Some(config) = cfg
+            .published_view
+            .clone()
+            .filter(|c| snapshot_warm || c.inspection_configured)
+        {
             pipe.with_published_source(crate::published_view::shared_reader(
                 crate::published_view::WorkerSnapshotBucket(env.clone()),
                 crate::published_view::WorkerCache,
@@ -1752,25 +1757,17 @@ mod glue {
             let body = body_too_large_json(cfg.max_body_bytes);
             return Ok(cors(json_response(body, 400)?));
         }
-        // Cold guard discovery can spend additional DO calls. Use the live
-        // path for that request, keeping its Free-plan total below 50. An
-        // inspection refusal must survive even on the cold request.
-        #[cfg(feature = "published-view")]
-        let cold_cfg = if !snapshot_warm
-            && cfg
-                .published_view
-                .as_ref()
-                .is_some_and(|c| !c.inspection_configured)
-        {
-            let mut cfg = cfg.clone();
-            cfg.published_view = None;
-            Some(cfg)
-        } else {
-            None
-        };
-        #[cfg(feature = "published-view")]
-        let cfg = cold_cfg.as_ref().unwrap_or(cfg);
-        let pipe = match make_hooks(&env, cfg).and_then(|hooks| pipeline(&env, cfg, hooks)) {
+        // Cold guard discovery spends additional DO calls: attach no snapshot
+        // reader then, retaining the configured page cap and inspection refusal.
+        let pipe = match make_hooks(&env, cfg).and_then(|hooks| {
+            pipeline(
+                &env,
+                cfg,
+                hooks,
+                #[cfg(feature = "published-view")]
+                snapshot_warm,
+            )
+        }) {
             Ok(pipe) => pipe,
             Err(e) => return Ok(cors(json_response(unavailable_json(&e.0), 503)?)),
         };
@@ -1854,7 +1851,7 @@ mod glue {
         ns_object_inner(state, env, class, make_sink, None)
     }
 
-    /// Explicit Stage 2 DO construction, paired with fetch_configured.
+    /// Explicit Stage 2 DO construction, paired with `fetch_configured`.
     #[cfg(feature = "published-view")]
     #[must_use]
     pub fn ns_object_configured(
@@ -1867,11 +1864,13 @@ mod glue {
             state,
             env,
             class,
-            |env, cfg| crate::hooks::build::sink_from_env(env, cfg),
+            crate::hooks::build::sink_from_env,
             Some(config),
         )
     }
 
+    // Keep the one-time DO construction and typed handler wiring together.
+    #[cfg_attr(feature = "published-view", allow(clippy::too_many_lines))]
     fn ns_object_inner<O, F>(
         state: State,
         env: &Env,
@@ -1894,9 +1893,12 @@ mod glue {
         });
         let cfg = WorkerConfig::from_env(env);
         #[cfg(feature = "published-view")]
-        let cfg = cfg.map(|mut cfg| {
-            cfg.published_view = published_view.clone();
-            cfg
+        let cfg = cfg.and_then(|mut cfg| {
+            cfg.published_view = published_view;
+            if cfg.published_view.is_some() {
+                cfg.pipeline_config()?;
+            }
+            Ok(cfg)
         });
         let target = cfg.as_ref().map_err(Clone::clone).map(|cfg| {
             let probe = cfg.probe_partition();
@@ -1907,7 +1909,7 @@ mod glue {
         });
         #[cfg(feature = "published-view")]
         let target = target.map(|store| {
-            if published_view.is_some() {
+            if cfg.as_ref().is_ok_and(|cfg| cfg.published_view.is_some()) {
                 store.with_apply_reserve(3)
             } else {
                 store
@@ -1960,8 +1962,10 @@ mod glue {
             }
         });
         #[cfg(feature = "published-view")]
-        let snapshot_alarm = published_view
+        let snapshot_alarm = cfg
             .as_ref()
+            .ok()
+            .and_then(|cfg| cfg.published_view.as_ref())
             .filter(|c| !c.inspection_configured)
             .filter(|_| {
                 class == crate::classes::ShardClass::RepoIndexShard && snapshot_target.is_ok()
