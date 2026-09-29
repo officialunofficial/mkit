@@ -1726,3 +1726,22 @@ expired identity, or a write can silently mint a new nonce.
 **Enforced by:** the Connect procedure classification and envelope tests,
 client retry tests, and `mkit_core::write_auth::verify_headers` checks over
 captured request bodies.
+
+## Private repositories are indistinguishable from missing ones
+
+**Always:** an unauthorized read of a private repository answers the same
+`not_found` — code, message, details and headers — as a missing
+repository, from `ServerError::repository_not_found()`. A signed read
+verifies its envelope in full before any repository lookup and never
+creates or consumes a replay record.
+
+**Because:** SPEC-WRITE-GRANTS §9.2/§9.3; private repositories must not be
+enumerable, and reads must not spend replay capacity.
+
+**If violated:** private repository existence leaks through an error
+difference, or reads consume replay capacity.
+
+**Enforced by:** `pipeline::authorize_read` and `policy::read::decide`;
+the pipeline `private_repository_reads_return_the_missing_repository_error`
+and `a_signed_read_writes_no_replay_rows` tests; the connect_dispatch and
+wire `reads.private_not_found_byte_identical` cases.
