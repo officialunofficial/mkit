@@ -21,13 +21,23 @@ pub struct TicketMetadata {
 }
 
 /// One opaque receipt and the part geometry it acknowledges.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct StoredPart {
     pub index: u32,
     pub len: u64,
     pub receipt: Vec<u8>,
     /// Set only by a persistent store on load, for invalid-receipt recovery.
     pub from_disk: bool,
+}
+
+impl std::fmt::Debug for StoredPart {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoredPart")
+            .field("index", &self.index)
+            .field("len", &self.len)
+            .field("from_disk", &self.from_disk)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Receipt cache boundary. A store must reject metadata or geometry mismatches

@@ -13,7 +13,7 @@ use mkit_transport_connect::{PartReceiptStore, StoredPart, TicketMetadata};
 use serde::{Deserialize, Serialize};
 use tempfile::Builder;
 
-const VERSION: u8 = 2;
+const VERSION: u8 = 1;
 const MAX_RECORD_BYTES: u64 = 32 * 1024;
 
 #[derive(Serialize, Deserialize, PartialEq, Eq)]
@@ -113,18 +113,46 @@ impl FilePartReceiptStore {
             .map_err(io_error)
     }
 
-    fn remove_replaced_ticket(&self, ticket: &TicketMetadata) -> TransportResult<()> {
+    fn remove_replaced_ticket(&self, ticket: &TicketMetadata) {
         match fs::symlink_metadata(&self.root) {
-            Ok(meta) if !meta.file_type().is_dir() => return Err(TransportError::ProtocolError),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(err) => return Err(io_error(err)),
+            Ok(meta) if !meta.file_type().is_dir() => {
+                eprintln!("upload receipt cache cleanup: root is not a directory");
+                return;
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return,
+            Err(err) => {
+                eprintln!("upload receipt cache cleanup: {err}");
+                return;
+            }
             Ok(_) => {}
         }
-        let entries = fs::read_dir(&self.root).map_err(io_error)?;
+        let entries = match fs::read_dir(&self.root) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return,
+            Err(err) => {
+                eprintln!("upload receipt cache cleanup: {err}");
+                return;
+            }
+        };
         let current = TicketRecord::from(ticket);
         for entry in entries {
-            let entry = entry.map_err(io_error)?;
-            if entry.file_type().map_err(io_error)?.is_dir()
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+                Err(err) => {
+                    eprintln!("upload receipt cache cleanup: {err}");
+                    continue;
+                }
+            };
+            let is_dir = match entry.file_type() {
+                Ok(kind) => kind.is_dir(),
+                Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+                Err(err) => {
+                    eprintln!("upload receipt cache cleanup: {err}");
+                    continue;
+                }
+            };
+            if is_dir
                 && entry.path() != self.ticket_dir(&ticket.ticket_id)
                 && let Some(other) = Self::read_record::<TicketRecord>(&entry.path().join("ticket"))
                 && other.audience == current.audience
@@ -133,10 +161,13 @@ impl FilePartReceiptStore {
                 && other.head_ref == current.head_ref
                 && other.pack_id == current.pack_id
             {
-                fs::remove_dir_all(entry.path()).map_err(io_error)?;
+                if let Err(err) = fs::remove_dir_all(entry.path())
+                    && err.kind() != io::ErrorKind::NotFound
+                {
+                    eprintln!("upload receipt cache cleanup: {err}");
+                }
             }
         }
-        Ok(())
     }
 }
 
@@ -155,7 +186,7 @@ fn stale_tmp(path: &Path) -> bool {
 
 impl PartReceiptStore for FilePartReceiptStore {
     fn load(&self, ticket: &TicketMetadata, plan: &PartPlan) -> TransportResult<Vec<StoredPart>> {
-        self.remove_replaced_ticket(ticket)?;
+        self.remove_replaced_ticket(ticket);
         let dir = self.ticket_dir(&ticket.ticket_id);
         if Self::read_record::<TicketRecord>(&dir.join("ticket")) != Some(ticket.into()) {
             return Ok(Vec::new());
@@ -188,9 +219,14 @@ impl PartReceiptStore for FilePartReceiptStore {
             return Err(TransportError::ProtocolError);
         }
         Self::ensure_dir(&self.root).map_err(io_error)?;
-        self.remove_replaced_ticket(ticket)?;
+        self.remove_replaced_ticket(ticket);
         let dir = self.ticket_dir(&ticket.ticket_id);
         Self::ensure_dir(&dir).map_err(io_error)?;
+        // Persist the new ticket directory entry before its metadata and
+        // parts; a crash must not leave durable files under a lost name.
+        File::open(&self.root)
+            .and_then(|root| root.sync_all())
+            .map_err(io_error)?;
         Self::write_record(&dir.join("ticket"), &TicketRecord::from(ticket))?;
         Self::write_record(
             &dir.join(format!("{}.part", part.index)),
@@ -214,22 +250,57 @@ impl PartReceiptStore for FilePartReceiptStore {
     fn sweep(&self, now_ms: i64) -> TransportResult<()> {
         static SWEPT: OnceLock<Mutex<std::collections::HashSet<PathBuf>>> = OnceLock::new();
         let swept = SWEPT.get_or_init(|| Mutex::new(std::collections::HashSet::new()));
-        let mut swept = swept.lock().map_err(|_| TransportError::ProtocolError)?;
-        if swept.contains(&self.root) {
-            return Ok(());
+        {
+            let mut swept = swept
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !swept.insert(self.root.clone()) {
+                return Ok(());
+            }
         }
         let entries = match fs::symlink_metadata(&self.root) {
-            Ok(meta) if meta.file_type().is_dir() => fs::read_dir(&self.root).map_err(io_error)?,
-            Ok(_) => return Err(TransportError::ProtocolError),
+            Ok(meta) if meta.file_type().is_dir() => match fs::read_dir(&self.root) {
+                Ok(entries) => entries,
+                Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+                Err(err) => {
+                    eprintln!("upload receipt cache cleanup: {err}");
+                    return Ok(());
+                }
+            },
+            Ok(_) => {
+                eprintln!("upload receipt cache cleanup: root is not a directory");
+                return Ok(());
+            }
             Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(err) => return Err(io_error(err)),
+            Err(err) => {
+                eprintln!("upload receipt cache cleanup: {err}");
+                return Ok(());
+            }
         };
         for entry in entries {
-            let entry = entry.map_err(io_error)?;
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+                Err(err) => {
+                    eprintln!("upload receipt cache cleanup: {err}");
+                    continue;
+                }
+            };
             let path = entry.path();
-            if entry.file_type().map_err(io_error)?.is_dir() {
+            let is_dir = match entry.file_type() {
+                Ok(kind) => kind.is_dir(),
+                Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+                Err(err) => {
+                    eprintln!("upload receipt cache cleanup: {err}");
+                    continue;
+                }
+            };
+            if is_dir {
                 let meta_path = path.join("ticket");
                 let remove = match Self::read_record::<TicketRecord>(&meta_path) {
+                    // A newer writer may share this cache. Keep records whose
+                    // format this version cannot judge.
+                    Some(record) if record.version > VERSION => false,
                     Some(record) => record.version != VERSION || record.expires_unix_ms <= now_ms,
                     None => fs::metadata(&path)
                         .and_then(|meta| meta.modified())
@@ -238,22 +309,48 @@ impl PartReceiptStore for FilePartReceiptStore {
                         .is_some_and(|age| age >= Duration::from_hours(168)),
                 };
                 if remove {
-                    fs::remove_dir_all(&path).map_err(io_error)?;
-                } else if let Ok(files) = fs::read_dir(&path) {
+                    if let Err(err) = fs::remove_dir_all(&path)
+                        && err.kind() != io::ErrorKind::NotFound
+                    {
+                        eprintln!("upload receipt cache cleanup: {err}");
+                    }
+                } else {
+                    let files = match fs::read_dir(&path) {
+                        Ok(files) => files,
+                        Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+                        Err(err) => {
+                            eprintln!("upload receipt cache cleanup: {err}");
+                            continue;
+                        }
+                    };
                     for file in files {
-                        let file = file.map_err(io_error)?;
+                        let file = match file {
+                            Ok(file) => file,
+                            Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+                            Err(err) => {
+                                eprintln!("upload receipt cache cleanup: {err}");
+                                continue;
+                            }
+                        };
                         if file.file_name().to_string_lossy().ends_with(".tmp")
                             && stale_tmp(&file.path())
                         {
-                            fs::remove_file(file.path()).map_err(io_error)?;
+                            if let Err(err) = fs::remove_file(file.path())
+                                && err.kind() != io::ErrorKind::NotFound
+                            {
+                                eprintln!("upload receipt cache cleanup: {err}");
+                            }
                         }
                     }
                 }
             } else if path.extension().is_some_and(|ext| ext == "tmp") && stale_tmp(&path) {
-                fs::remove_file(path).map_err(io_error)?;
+                if let Err(err) = fs::remove_file(path)
+                    && err.kind() != io::ErrorKind::NotFound
+                {
+                    eprintln!("upload receipt cache cleanup: {err}");
+                }
             }
         }
-        swept.insert(self.root.clone());
         Ok(())
     }
 }
@@ -403,5 +500,109 @@ mod tests {
         });
         let plan = PartPlan::new(meta.bytes, meta.part_size, 2).unwrap();
         assert_eq!(store.load(&meta, &plan).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn concurrent_sweeps_of_an_expired_ticket_are_both_successful() {
+        let temp = tempfile::tempdir().unwrap();
+        let store =
+            std::sync::Arc::new(FilePartReceiptStore::new(temp.path().join("upload-parts")));
+        let mut expired = ticket();
+        expired.expires_unix_ms = 10;
+        let part = StoredPart {
+            index: 0,
+            len: MIN_PART_SIZE,
+            receipt: vec![4],
+            from_disk: false,
+        };
+        store.put(&expired, &part).unwrap();
+        let barrier = std::sync::Barrier::new(3);
+        std::thread::scope(|scope| {
+            for _ in 0..2 {
+                let store = store.clone();
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    barrier.wait();
+                    store.sweep(10).unwrap();
+                });
+            }
+            barrier.wait();
+        });
+        assert!(!store.ticket_dir(&expired.ticket_id).exists());
+    }
+
+    #[test]
+    fn sweep_discards_old_unreadable_metadata_and_preserves_newer_format() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = FilePartReceiptStore::new(temp.path().join("upload-parts"));
+        let unreadable = store.ticket_dir(&[1; 32]);
+        FilePartReceiptStore::ensure_dir(&unreadable).unwrap();
+        fs::write(unreadable.join("ticket"), b"not JSON").unwrap();
+        File::open(&unreadable)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(SystemTime::now() - Duration::from_hours(8 * 24)),
+            )
+            .unwrap();
+
+        let mut newer = ticket();
+        newer.ticket_id = [2; 32];
+        newer.expires_unix_ms = 10;
+        let part = StoredPart {
+            index: 0,
+            len: MIN_PART_SIZE,
+            receipt: vec![4],
+            from_disk: false,
+        };
+        store.put(&newer, &part).unwrap();
+        let newer_path = store.ticket_dir(&newer.ticket_id).join("ticket");
+        let mut record: TicketRecord = FilePartReceiptStore::read_record(&newer_path).unwrap();
+        record.version = VERSION + 1;
+        FilePartReceiptStore::write_record(&newer_path, &record).unwrap();
+
+        store.sweep(10).unwrap();
+        assert!(!unreadable.exists());
+        assert!(newer_path.exists());
+    }
+
+    #[test]
+    fn concurrent_sweep_and_replacement_preserve_new_receipts() {
+        let temp = tempfile::tempdir().unwrap();
+        let store =
+            std::sync::Arc::new(FilePartReceiptStore::new(temp.path().join("upload-parts")));
+        let mut old = ticket();
+        old.expires_unix_ms = 10;
+        let part = StoredPart {
+            index: 0,
+            len: MIN_PART_SIZE,
+            receipt: vec![4],
+            from_disk: false,
+        };
+        store.put(&old, &part).unwrap();
+        let mut replacement = old.clone();
+        replacement.ticket_id = [8; 32];
+        replacement.expires_unix_ms = i64::MAX;
+        let barrier = std::sync::Barrier::new(3);
+        std::thread::scope(|scope| {
+            let sweeper = store.clone();
+            let barrier_ref = &barrier;
+            scope.spawn(move || {
+                barrier_ref.wait();
+                sweeper.sweep(10).unwrap();
+            });
+            let writer = store.clone();
+            let barrier_ref = &barrier;
+            let replacement_ref = &replacement;
+            let part_ref = &part;
+            scope.spawn(move || {
+                barrier_ref.wait();
+                writer.put(replacement_ref, part_ref).unwrap();
+            });
+            barrier.wait();
+        });
+        let plan = PartPlan::new(replacement.bytes, replacement.part_size, 2).unwrap();
+        assert_eq!(store.load(&replacement, &plan).unwrap().len(), 1);
+        assert!(!store.ticket_dir(&old.ticket_id).exists());
     }
 }

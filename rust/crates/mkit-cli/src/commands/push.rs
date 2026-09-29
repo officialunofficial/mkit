@@ -14,6 +14,7 @@ use std::io::Write;
 
 use clap::{Parser, ValueEnum};
 use mkit_core::layout::RepoLayout;
+use mkit_core::protocol::UploadLimits;
 
 use crate::clap_shim;
 use crate::config;
@@ -64,6 +65,18 @@ struct PushOpts {
     /// Suppress transfer progress output on stderr (#711).
     #[arg(short = 'q', long)]
     quiet: bool,
+}
+
+fn interrupted_hint(endpoint: &str, limits: UploadLimits) -> &'static str {
+    let connect = endpoint.starts_with("mkit+https://") || endpoint.starts_with("mkit+http://");
+    if connect
+        && limits.tickets_per_advance.is_some()
+        && limits.ticket_threshold_bytes != Some(u64::MAX)
+    {
+        "push: interrupted; if BeginUpload issued a ticket, re-run push to resume the upload"
+    } else {
+        "push: interrupted; re-run push to retry"
+    }
 }
 
 #[must_use]
@@ -303,7 +316,7 @@ fn push_current(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpt
             emit_err_json(&format!("push: {message}"), exit::TEMPFAIL, json)
         }
         Err(remote_dispatch::DispatchError::Interrupted) => emit_err_json(
-            "push: interrupted; if BeginUpload issued a ticket, re-run push to resume the upload",
+            interrupted_hint(&resolved.endpoint, tx.upload_limits()),
             exit::TEMPFAIL,
             json,
         ),
@@ -407,7 +420,7 @@ fn push_all(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpts) -
             emit_err_json(&format!("push: {message}"), exit::TEMPFAIL, json)
         }
         Err(remote_dispatch::DispatchError::Interrupted) => emit_err_json(
-            "push: interrupted; if BeginUpload issued a ticket, re-run push to resume the upload",
+            interrupted_hint(&resolved.endpoint, tx.upload_limits()),
             exit::TEMPFAIL,
             json,
         ),

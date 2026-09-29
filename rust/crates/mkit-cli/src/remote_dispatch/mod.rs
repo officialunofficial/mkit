@@ -37,7 +37,7 @@ use mkit_core::object::Object;
 use mkit_core::ops::merge::is_ancestor;
 use mkit_core::ops::restore;
 use mkit_core::pack::{self, PackError, PackWriter, PreparedDelta, PreparedRaw};
-use mkit_core::protocol::{PackKey, Transport, TransportError};
+use mkit_core::protocol::{PackKey, Transport, TransportError, UploadLimits};
 use mkit_core::refs::{self, Head};
 use mkit_core::store::{ObjectStore, StoreError};
 use mkit_core::transfer::{self, PackListError};
@@ -193,7 +193,7 @@ pub enum DispatchError {
     PushTooLarge { packs: usize, limit: usize },
     #[error("upload ticket was rejected after the push was retried")]
     TicketRejected,
-    #[error("delta base is unavailable after a self-contained retry")]
+    #[error("delta base is unavailable after a restart")]
     DeltaBaseUnavailable,
     #[error("packlist still names a pack absent from this repository after retry")]
     PacklistNotInRepository,
@@ -883,9 +883,9 @@ fn push_branch_once(
     )?;
 
     let limits = tx.upload_limits();
-    // Account for the fixed header/trailer, every possible entry frame,
-    // and 1 KiB of slack. `PackWriter` measures only payload bytes.
-    let mut effective_cap = effective_payload_cap(&plan, pack_payload_cap, limits.max_pack_bytes)?;
+    // Payload and serialized-byte limits are checked separately. Framing
+    // overhead grows with the entry count, so a fixed margin is insufficient.
+    let effective_cap = effective_payload_cap(pack_payload_cap, limits.max_pack_bytes)?;
 
     if plan.is_empty() {
         // Nothing to send — the remote already holds the closure; just move
@@ -941,18 +941,25 @@ fn push_branch_once(
         // Force a full-closure plan: no external bases, so the pack is
         // self-contained and safe to reset the chain onto.
         let full = transfer::plan_pack_with(store, tip, None, encode_delta_candidates_batch)?;
-        if limits.tickets_per_advance.is_some()
-            && estimate_pack_count(
-                store,
-                &full,
-                effective_payload_cap(&full, pack_payload_cap, limits.max_pack_bytes)?,
-            )? > 6
+        let full_cap = effective_payload_cap(pack_payload_cap, limits.max_pack_bytes)?;
+        if estimated_ticketed_count(
+            &estimate_pack_sizes(store, &full, full_cap, limits.max_pack_bytes)?,
+            limits,
+        ) > 6
         {
             rebaseline = false;
         } else {
             plan = full;
-            effective_cap = effective_payload_cap(&plan, pack_payload_cap, limits.max_pack_bytes)?;
         }
+    }
+
+    let estimated = estimate_pack_sizes(store, &plan, effective_cap, limits.max_pack_bytes)?;
+    let ticketed = estimated_ticketed_count(&estimated, limits);
+    if ticketed > 6 {
+        return Err(DispatchError::PushTooLarge {
+            packs: ticketed,
+            limit: 6,
+        });
     }
 
     // Build the plan into one or more payload-bounded packs (splitting
@@ -974,7 +981,7 @@ fn push_branch_once(
         plan,
         effective_cap,
         &format!("refs/heads/{branch}"),
-        limits.max_pack_bytes,
+        limits,
     )?;
 
     // Chain the pack(s) onto the packmap AND move the head together
@@ -1036,53 +1043,72 @@ fn push_branch_once(
 /// extra bytes copied, where borrowing would force a clone per entry
 /// just to satisfy ownership. The caller reads whatever it needs off
 /// `plan` (just `self_contained`) before making this call.
-fn effective_payload_cap(
-    _plan: &transfer::PackPlan,
-    requested: u64,
-    advertised: Option<u64>,
-) -> Result<u64, DispatchError> {
-    // Reserve up to 64 KiB per pack for header, trailer, entry frames and
-    // compression variance, capped at one quarter of a small server limit.
-    // The actual serialized size is checked by `seal_pack` before upload.
-    let cap = requested.min(pack::MAX_TOTAL_PAYLOAD).min(
-        advertised.map_or(pack::MAX_TOTAL_PAYLOAD, |limit| {
-            limit.saturating_sub((64 * 1024).min(limit / 4))
-        }),
-    );
+fn effective_payload_cap(requested: u64, advertised: Option<u64>) -> Result<u64, DispatchError> {
+    // The serialized limit's overhead margin is exact and dynamic: header,
+    // trailer and one frame per entry. `should_seal` applies it on each add.
+    let cap = requested
+        .min(pack::MAX_TOTAL_PAYLOAD)
+        .min(advertised.unwrap_or(pack::MAX_TOTAL_PAYLOAD));
     if cap == 0 {
         return Err(DispatchError::Transport(TransportError::PayloadTooLarge(0)));
     }
     Ok(cap)
 }
 
-fn estimate_pack_count(
+fn serialized_bound(payload: u64, entries: usize) -> u64 {
+    payload
+        .saturating_add((entries as u64).saturating_mul(pack::ENTRY_FRAME_LEN as u64))
+        .saturating_add((pack::HEADER_LEN + pack::TRAILER_LEN) as u64)
+}
+
+fn ticketed_pack(limits: UploadLimits, serialized_size: u64) -> bool {
+    limits.tickets_per_advance.is_some()
+        && serialized_size >= limits.ticket_threshold_bytes.unwrap_or(0)
+}
+
+fn estimated_ticketed_count(sizes: &[u64], limits: UploadLimits) -> usize {
+    sizes
+        .iter()
+        .filter(|&&size| ticketed_pack(limits, size))
+        .count()
+}
+
+fn estimate_pack_sizes(
     store: &ObjectStore,
     plan: &transfer::PackPlan,
     payload_cap: u64,
-) -> Result<usize, DispatchError> {
-    let mut count = 0;
-    let mut current = 0_u64;
-    for size in plan
+    max_pack_bytes: Option<u64>,
+) -> Result<Vec<u64>, DispatchError> {
+    let mut packs = Vec::new();
+    let mut payload = 0_u64;
+    let mut entries = 0_usize;
+    let sizes = plan
         .raw
         .iter()
         .map(|hash| store.object_metadata(hash).map(|meta| meta.len()))
-    {
-        let size = size?;
-        if current > 0 && current.saturating_add(size) > payload_cap {
-            count += 1;
-            current = 0;
+        .collect::<Result<Vec<_>, _>>()?;
+    for size in sizes.into_iter().chain(
+        plan.deltas
+            .iter()
+            .map(|delta| (HASH_LEN + delta.stream.len()) as u64),
+    ) {
+        let next_payload = payload.saturating_add(size);
+        if entries > 0
+            && (next_payload > payload_cap
+                || max_pack_bytes
+                    .is_some_and(|limit| serialized_bound(next_payload, entries + 1) > limit))
+        {
+            packs.push(serialized_bound(payload, entries));
+            payload = 0;
+            entries = 0;
         }
-        current = current.saturating_add(size);
+        payload = payload.saturating_add(size);
+        entries += 1;
     }
-    for delta in &plan.deltas {
-        let size = (HASH_LEN + delta.stream.len()) as u64;
-        if current > 0 && current.saturating_add(size) > payload_cap {
-            count += 1;
-            current = 0;
-        }
-        current = current.saturating_add(size);
+    if entries > 0 {
+        packs.push(serialized_bound(payload, entries));
     }
-    Ok(count + usize::from(current > 0))
+    Ok(packs)
 }
 
 fn build_and_upload_packs(
@@ -1091,9 +1117,10 @@ fn build_and_upload_packs(
     plan: transfer::PackPlan,
     payload_cap: u64,
     head_ref: &str,
-    max_pack_bytes: Option<u64>,
+    limits: UploadLimits,
 ) -> Result<Vec<Hash>, DispatchError> {
     let mut pack_keys = Vec::new();
+    let mut ticketed_count = 0;
     let mut w = PackWriter::new();
     let max_entries = pack_fanout_threshold().max(1);
     let transfer::PackPlan {
@@ -1112,8 +1139,20 @@ fn build_and_upload_packs(
         let chunk = &raw[start..start + len];
         start += len;
         for entry in prepare_raw_batch(store, chunk)? {
-            if should_seal(&w, entry.conservative_len() as u64, payload_cap) {
-                seal_pack(tx, &mut w, &mut pack_keys, head_ref, max_pack_bytes)?;
+            if should_seal(
+                &w,
+                entry.conservative_len() as u64,
+                payload_cap,
+                limits.max_pack_bytes,
+            ) {
+                seal_pack(
+                    tx,
+                    &mut w,
+                    &mut pack_keys,
+                    &mut ticketed_count,
+                    head_ref,
+                    limits,
+                )?;
             }
             w.push_prepared_raw(entry)?;
             // Honest progress (#711): one real object just got staged into
@@ -1134,15 +1173,34 @@ fn build_and_upload_packs(
     for len in size_capped_batch_lens(&delta_sizes, payload_cap, max_entries) {
         let chunk: Vec<transfer::PlannedDelta> = deltas.drain(..len).collect();
         for entry in prepare_delta_batch(chunk) {
-            if should_seal(&w, entry.conservative_len() as u64, payload_cap) {
-                seal_pack(tx, &mut w, &mut pack_keys, head_ref, max_pack_bytes)?;
+            if should_seal(
+                &w,
+                entry.conservative_len() as u64,
+                payload_cap,
+                limits.max_pack_bytes,
+            ) {
+                seal_pack(
+                    tx,
+                    &mut w,
+                    &mut pack_keys,
+                    &mut ticketed_count,
+                    head_ref,
+                    limits,
+                )?;
             }
             w.push_prepared_delta(entry)?;
             crate::progress::report(crate::progress::Event::ObjectsPacked(1));
         }
     }
 
-    seal_pack(tx, &mut w, &mut pack_keys, head_ref, max_pack_bytes)?;
+    seal_pack(
+        tx,
+        &mut w,
+        &mut pack_keys,
+        &mut ticketed_count,
+        head_ref,
+        limits,
+    )?;
     Ok(pack_keys)
 }
 
@@ -1359,8 +1417,17 @@ fn cache_delta_bases(
 /// test-injected tiny cap; production entries are bounded well under
 /// [`pack::MAX_TOTAL_PAYLOAD`] by [`mkit_core::store::MAX_RAW_OBJECT_SIZE`])
 /// lands alone in its own pack rather than looping forever.
-fn should_seal(w: &PackWriter, add_bound: u64, payload_cap: u64) -> bool {
-    w.entry_count() > 0 && w.total_payload().saturating_add(add_bound) > payload_cap
+fn should_seal(
+    w: &PackWriter,
+    add_bound: u64,
+    payload_cap: u64,
+    max_pack_bytes: Option<u64>,
+) -> bool {
+    let next_payload = w.total_payload().saturating_add(add_bound);
+    w.entry_count() > 0
+        && (next_payload > payload_cap
+            || max_pack_bytes
+                .is_some_and(|limit| serialized_bound(next_payload, w.entry_count() + 1) > limit))
 }
 
 /// Finish `w`, upload it, record its key, and replace `w` with a fresh
@@ -1370,27 +1437,26 @@ fn seal_pack(
     tx: &dyn Transport,
     w: &mut PackWriter,
     pack_keys: &mut Vec<Hash>,
+    ticketed_count: &mut usize,
     head_ref: &str,
-    max_pack_bytes: Option<u64>,
+    limits: UploadLimits,
 ) -> Result<(), DispatchError> {
     if crate::signal::is_shutdown() {
         return Err(DispatchError::Interrupted);
     }
     let sealed = std::mem::replace(w, PackWriter::new());
     let pack = sealed.finish()?;
-    let limits = tx.upload_limits();
-    if limits
-        .ticket_threshold_bytes
-        .or_else(|| limits.tickets_per_advance.map(|_| 0))
-        .is_some_and(|threshold| pack.len() as u64 >= threshold)
-        && pack_keys.len() >= 6
-    {
+    let is_ticketed = ticketed_pack(limits, pack.len() as u64);
+    if is_ticketed && *ticketed_count >= 6 {
         return Err(DispatchError::PushTooLarge {
-            packs: pack_keys.len() + 1,
+            packs: *ticketed_count + 1,
             limit: 6,
         });
     }
-    if max_pack_bytes.is_some_and(|limit| pack.len() as u64 > limit) {
+    if limits
+        .max_pack_bytes
+        .is_some_and(|limit| pack.len() as u64 > limit)
+    {
         return Err(DispatchError::Transport(TransportError::PayloadTooLarge(
             pack.len(),
         )));
@@ -1402,6 +1468,9 @@ fn seal_pack(
     // transport, not an estimate.
     crate::progress::report(crate::progress::Event::PackUploaded(pack.len() as u64));
     pack_keys.push(pack_key);
+    if is_ticketed {
+        *ticketed_count += 1;
+    }
     Ok(())
 }
 

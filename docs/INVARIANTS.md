@@ -1,5 +1,10 @@
 # Invariants
 
+Properties that must always hold across the mkit monorepo, outside any
+single crate or spec. Each entry states the invariant, why it matters, and
+what breaks when it is violated. A regression test enforces each one; find
+it by the file path listed under "Enforced by".
+
 ## Ticketed pushes bind uploaded bytes to one paired advance
 
 **Always:** a Connect push opens a signed ticket for each pack that needs one,
@@ -18,13 +23,8 @@ lose resumability after interruption.
 
 **Enforced by:** `mkit-transport-connect/src/client.rs` ticket mapping, part
 store and poll loop; `mkit-cli/src/remote_dispatch/packmap.rs` current commit
-set; Connect client wire and CLI receipt-store tests. Native FS end-to-end
-coverage follows after WP-1.11b.
-
-Properties that must always hold across the mkit monorepo, outside any
-single crate or spec. Each entry states the invariant, why it matters, and
-what breaks when it is violated. A regression test enforces each one; find
-it by the file path listed under "Enforced by".
+set; Connect client wire and CLI receipt-store tests; native FS end-to-end
+ticketed upload and resume tests.
 
 ## ListRefs pages make bounded forward progress
 

@@ -135,12 +135,22 @@ fn valid_server_info(info: &GetServerInfoResponse) -> bool {
         && info.max_parts.is_some_and(|v| v >= 1)
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct CachedTicket {
     id: [u8; 32],
     token: Vec<u8>,
     part_size: u64,
     expires_unix_ms: i64,
+}
+
+impl std::fmt::Debug for CachedTicket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CachedTicket")
+            .field("id", &self.id)
+            .field("part_size", &self.part_size)
+            .field("expires_unix_ms", &self.expires_unix_ms)
+            .finish_non_exhaustive()
+    }
 }
 
 enum BeginAnswer {
@@ -152,11 +162,16 @@ enum BeginAnswer {
 enum BeginSpecial {
     Unimplemented,
     OpenCap,
+    Rejected(String),
 }
 
 enum CompleteSpecial {
     Ticket,
     InvalidReceipt,
+}
+
+fn log_receipt_cleanup_error(action: &str, error: &TransportError) {
+    eprintln!("mkit: upload receipt cache {action} failed: {error}");
 }
 
 fn upload_interrupted(saved: u32, total: u32) -> TransportError {
@@ -749,6 +764,9 @@ impl ConnectTransport {
                 {
                     Ok(Err(BeginSpecial::OpenCap))
                 }
+                Err(err) if err.code == connectrpc::ErrorCode::FailedPrecondition => {
+                    Ok(Err(BeginSpecial::Rejected(err.message.unwrap_or_default())))
+                }
                 Err(err) => Err(map_connect_error(err, ErrorContext::Ref)),
             }
         })?;
@@ -758,6 +776,11 @@ impl ConnectTransport {
                 return Err(TransportError::RemoteError(
                     "too many open upload tickets".to_owned(),
                 ));
+            }
+            Err(BeginSpecial::Rejected(message)) => {
+                return Err(TransportError::RemoteError(format!(
+                    "upload ticket rejected: {message}"
+                )));
             }
             Err(BeginSpecial::Unimplemented) => match info {
                 ServerInfoView::Unknown => {
@@ -784,7 +807,9 @@ impl ConnectTransport {
                     .map_err(|_| TransportError::ProtocolError)?
                     .remove(&(head_ref.to_owned(), *key))
                 {
-                    let _ = self.receipts.forget(&old.id);
+                    if let Err(error) = self.receipts.forget(&old.id) {
+                        log_receipt_cleanup_error("already-present ticket", &error);
+                    }
                 }
                 Ok(BeginAnswer::AlreadyPresent)
             }
@@ -815,7 +840,9 @@ impl ConnectTransport {
                     .map_err(|_| TransportError::ProtocolError)?
                     .insert((head_ref.to_owned(), *key), ticket.clone());
                 if let Some(old) = old.filter(|old| old.id != ticket.id) {
-                    self.receipts.forget(&old.id)?;
+                    if let Err(error) = self.receipts.forget(&old.id) {
+                        log_receipt_cleanup_error("replaced ticket", &error);
+                    }
                 }
                 Ok(BeginAnswer::Ticket(ticket))
             }
@@ -1090,9 +1117,10 @@ impl ConnectTransport {
             part_size: ticket.part_size,
             expires_unix_ms: ticket.expires_unix_ms,
         };
-        if !self.receipts_swept.load(Ordering::Relaxed) {
-            self.receipts.sweep((self.now)())?;
-            self.receipts_swept.store(true, Ordering::Relaxed);
+        if !self.receipts_swept.swap(true, Ordering::Relaxed)
+            && let Err(error) = self.receipts.sweep((self.now)())
+        {
+            log_receipt_cleanup_error("sweep", &error);
         }
         for invalid_retry in 0..2 {
             let mut parts = vec![None; plan.count() as usize];
@@ -1455,6 +1483,8 @@ impl ConnectTransport {
                 Ok(Err((delay, lag))) => {
                     if lag {
                         lag_since_ms.get_or_insert_with(|| (self.now)());
+                    } else {
+                        lag_since_ms = None;
                     }
                     if !saw_pending {
                         waiting_since_ms = (self.now)();
@@ -2002,6 +2032,9 @@ impl Transport for ConnectTransport {
             .iter()
             .map(|(_, ticket)| ticket.expires_unix_ms)
             .min();
+        if !ids.is_empty() && deadline.is_some_and(|expiry| expiry <= (self.now)()) {
+            return Ok(CommitOutcome::TicketRejected);
+        }
         let outcome = self.advance_refs_with_tickets(
             head_ref,
             head_condition,
@@ -2030,7 +2063,9 @@ impl Transport for ConnectTransport {
             }
             drop(cached);
             for id in consumed {
-                let _ = self.receipts.forget(&id);
+                if let Err(error) = self.receipts.forget(&id) {
+                    log_receipt_cleanup_error("committed ticket", &error);
+                }
             }
         }
         Ok(outcome)
@@ -2040,8 +2075,11 @@ impl Transport for ConnectTransport {
         match self.server_info() {
             ServerInfoView::V2(info) => UploadLimits {
                 max_pack_bytes: info.max_pack_bytes,
-                tickets_per_advance: Some(7),
-                ticket_threshold_bytes: Some(info.begin_upload_threshold_bytes.unwrap_or(0)),
+                tickets_per_advance: self.signer_key.as_ref().map(|_| 7),
+                ticket_threshold_bytes: self
+                    .signer_key
+                    .as_ref()
+                    .map(|_| info.begin_upload_threshold_bytes.unwrap_or(0)),
             },
             ServerInfoView::Unknown
                 if self.signer_key.is_some()

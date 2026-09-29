@@ -213,10 +213,10 @@ fn seventh_data_pack_is_refused_before_upload() {
     let tx = TicketTransport::new(Fault::None);
     let err = push(&repo, &tx, 4096).unwrap_err();
     assert!(
-        matches!(err, DispatchError::PushTooLarge { limit: 6, .. }),
+        matches!(err, DispatchError::PushTooLarge { packs, limit: 6 } if packs > 6),
         "{err:?}"
     );
-    assert_eq!(tx.uploads.load(Ordering::SeqCst), 6);
+    assert_eq!(tx.uploads.load(Ordering::SeqCst), 0);
     assert_eq!(tx.advances.load(Ordering::SeqCst), 0);
 }
 
@@ -239,49 +239,65 @@ fn ticketless_multi_pack_push_is_not_subject_to_ticket_cap() {
 
 #[test]
 fn rebaseline_over_six_packs_keeps_the_append_plan() {
+    for (threshold, should_append) in [(0, true), (u64::MAX, false)] {
+        let repo = Repo::new();
+        for i in 0_u64..16 {
+            repo.write(&format!("f{i}.bin"), &filler(i * 2 + 1, 2048));
+        }
+        repo.ok(&["add", "."]);
+        repo.ok(&["commit", "-m", "large base"]);
+        let base = tip(&repo);
+        let mut tx = TicketTransport::new(Fault::None);
+        tx.ticket_threshold_bytes = Some(u64::MAX);
+        let store = ObjectStore::open(&RepoLayout::single(repo.path())).unwrap();
+        push_branch_with_limits(
+            &tx,
+            &store,
+            "main",
+            base,
+            RefWriteCondition::Missing,
+            0,
+            4096,
+        )
+        .unwrap();
+
+        tx.ticket_threshold_bytes = Some(threshold);
+        repo.commit_file("next", b"small update", "next");
+        let store = ObjectStore::open(&RepoLayout::single(repo.path())).unwrap();
+        push_branch_with_limits(
+            &tx,
+            &store,
+            "main",
+            tip(&repo),
+            RefWriteCondition::Match(base),
+            1,
+            4096,
+        )
+        .unwrap();
+        assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some(tip(&repo)));
+        let newest = tx.read_ref("refs/mkit/packmap/main").unwrap().unwrap();
+        let node =
+            mkit_core::transfer::decode_packlist(&tx.download_blob(&PackKey::new(newest)).unwrap())
+                .unwrap();
+        assert_eq!(node.prev.is_some(), should_append);
+    }
+}
+
+#[test]
+fn many_small_entries_split_before_serialized_pack_limit() {
     let repo = Repo::new();
-    for i in 0_u64..16 {
-        repo.write(&format!("f{i}.bin"), &filler(i * 2 + 1, 2048));
+    for i in 0_u64..100 {
+        repo.write(&format!("d{}/f{i}.bin", i / 10), &filler(i + 1, 8));
     }
     repo.ok(&["add", "."]);
-    repo.ok(&["commit", "-m", "large base"]);
-    let base = tip(&repo);
+    repo.ok(&["commit", "-m", "many small files"]);
     let mut tx = TicketTransport::new(Fault::None);
     tx.ticket_threshold_bytes = Some(u64::MAX);
-    let store = ObjectStore::open(&RepoLayout::single(repo.path())).unwrap();
-    push_branch_with_limits(
-        &tx,
-        &store,
-        "main",
-        base,
-        RefWriteCondition::Missing,
-        0,
-        4096,
-    )
-    .unwrap();
-
-    tx.ticket_threshold_bytes = Some(0);
-    repo.commit_file("next", b"small update", "next");
-    let store = ObjectStore::open(&RepoLayout::single(repo.path())).unwrap();
-    push_branch_with_limits(
-        &tx,
-        &store,
-        "main",
-        tip(&repo),
-        RefWriteCondition::Match(base),
-        1,
-        4096,
-    )
-    .unwrap();
-    assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some(tip(&repo)));
-    let newest = tx.read_ref("refs/mkit/packmap/main").unwrap().unwrap();
-    let node =
-        mkit_core::transfer::decode_packlist(&tx.download_blob(&PackKey::new(newest)).unwrap())
-            .unwrap();
-    assert!(
-        node.prev.is_some(),
-        "the new plan appended to the base chain"
-    );
+    tx.max_pack_bytes = Some(1024);
+    push(&repo, &tx, 1024).unwrap();
+    let sizes = tx.upload_lengths.lock().unwrap();
+    assert!(sizes.len() > 1);
+    assert!(sizes.iter().all(|&size| size <= 1024), "{sizes:?}");
 }
 
 #[test]
