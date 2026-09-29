@@ -90,16 +90,18 @@ export TMPDIR="$HOME/.cache/mkit-test-tmp/<wp-id>"; mkdir -p "$TMPDIR"   # never
     `missing_scrub_state_forces_a_full_walk_instead_of_trusting_nothing`,
     `scrub_lap_completion_forces_a_full_walk_but_keeps_the_generation`,
     `scrub_state_from_a_superseded_generation_is_discarded_not_misapplied`,
-    `stale_scrub_state_forces_a_full_walk_regardless_of_cursor_position`;
+    `stale_scrub_state_forces_a_full_walk_regardless_of_cursor_position`,
+    `scrub_age_boundary_is_exclusive`;
   - `mkit-core` `refs::tests::`: `cas_match_race_never_loses_an_update_across_uncoordinated_callers`,
     `cas_delete_vs_match_advance_race_never_lets_both_win_or_loses_the_advance`;
   - `mkit-core` `batch::tests::`: `batch_write_hash_equals_store_write_hash`, `write_parts_equals_concatenated_write`;
   - `mkit-cli`: `remote_dispatch::packmap::tests::verify_new_object_signatures_mixed_with_unsigned_object_kinds`, and the
     `branch_rename_commit_race` binary.
 
-  Since WP-M0-20, `rust/.config/nextest.toml` names exactly these: the first twelve get a 300 s ceiling, and
-  `branch_rename_commit_race` runs with no other test beside it under 150 s (the measurements are in
-  [the M0 exit report](m0-exit-report.md#6-full-local-ci-just-ci-on-the-quiet-machine)). Every other test keeps the 60 s
+  Since WP-M0-20, `rust/.config/nextest.toml` names exactly these: the ancestry, refs, batch, and packmap tests get a 300 s ceiling, and
+  `branch_rename_commit_race` runs with no other test beside it under 150 s. `sqlite_eighty_thousand_small_rows_at_cap_under_five_seconds`
+  also runs alone (its 5 s wall-clock check is opt-in via `MKIT_BACKUP_TIMING`; the always-on ceiling is 120 s). The measurements are in
+  [the M0 exit report](m0-exit-report.md#6-full-local-ci-just-ci-on-the-quiet-machine). Every other test keeps the 60 s
   hang detection. A timeout in one of them, in a module your WP does not touch, is not a failure of your WP until it also
   fails **rerun alone** (`cargo nextest run -p <crate> -E 'test(=<name>)'`); report it as load-related only if it passes
   that way. A new test that needs more time gets its own exact-name override, not a module-wide one.

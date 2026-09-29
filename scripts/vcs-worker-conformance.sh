@@ -208,9 +208,14 @@ run_suite() {
     shift
     echo ">> running the wire suite (features: ${features}) $*"
     local status=0
+    # --list-parallel 1: miniflare's proxy drops UpdateRef ("Network connection
+    # lost"; the dev server continues) when several slow debug-wasm writes are
+    # in flight. One at a time stays on the Durable Object's own pace. Native
+    # runs keep the default of 8, which the write-gate regression needs.
     "${runner}" wire --base-url "${ORIGIN}" --auth auth-v2 --audience "${ORIGIN}" \
         --repository "${REPOSITORY}" --random-signer --atomic-advance --fresh-target --milestone M1 \
         --max-pack-bytes "${MAX_PACK_BYTES}" --features "${features}" --sharding "${sharding}" \
+        --list-parallel 1 \
         "$@" ${runner_args[@]+"${runner_args[@]}"} || status=$?
     if [ "${status}" -ne 0 ]; then
         echo "wire suite failed (exit ${status}); wrangler log tail:" >&2

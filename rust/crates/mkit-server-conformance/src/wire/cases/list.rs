@@ -10,8 +10,8 @@ use mkit_transport_connect::generated::{
 use super::{CaseResult, Commit, Ctx, Exp, Failure, ensure, update_req, want_code, want_ok};
 use crate::wire::client::{Rpc, RpcError, UNARY_PROTO, decode_unary};
 
-/// Writes in flight at once.
-const PARALLEL: usize = 8;
+/// Writes in flight at once when the profile does not override it.
+const DEFAULT_PARALLEL: usize = 8;
 
 /// Create ref `i` (signed by a signer shared by a block of writes small
 /// enough for the per-signer quota).
@@ -31,7 +31,35 @@ async fn create(
         Some(signer) => signer.sign_body(Rpc::UpdateRef.procedure(), &body).headers,
         None => ctx.auth_headers(Rpc::UpdateRef, Commit::Body(&body)),
     };
-    ctx.client().unary(Rpc::UpdateRef, body, &headers).await
+    // Resend the same bytes. miniflare's proxy drops a connection ("Network
+    // connection lost"; the dev server continues) after a few thousand
+    // requests. A lost response may already have committed; a new nonce
+    // would then fail the Missing precondition. Replay returns the stored ok.
+    let mut attempt = 0u32;
+    loop {
+        let failed = match ctx
+            .client()
+            .unary(Rpc::UpdateRef, body.clone(), &headers)
+            .await
+        {
+            Ok(Ok(value)) => return Ok(Ok(value)),
+            Ok(Err(error)) if proxy_blip(&error.message) => error.to_string(),
+            Ok(Err(error)) => return Ok(Err(error)),
+            Err(error) if proxy_blip(&error) => error,
+            Err(error) => return Err(error),
+        };
+        if attempt >= 4 {
+            return Err(failed);
+        }
+        attempt += 1;
+        eprintln!("list fixture: proxy blip on write {i}, retry {attempt}: {failed}");
+        tokio::time::sleep(std::time::Duration::from_millis(200 * u64::from(attempt))).await;
+    }
+}
+
+/// miniflare's dev proxy, not a server answer. The dev server keeps running.
+fn proxy_blip(message: &str) -> bool {
+    message.contains("Network connection lost") || message.contains("client error (Connect)")
 }
 
 pub(super) async fn paging_wire(ctx: Ctx) -> CaseResult {
@@ -133,11 +161,33 @@ pub(super) async fn large_response_within_limit(ctx: Ctx) -> CaseResult {
         return Err(Failure::Skip("the profile sets list_refs = 0".to_owned()));
     }
     let per_signer = ctx.profile().quota.map_or(100, |q| q.max_ops.clamp(1, 100));
+    let parallel = usize::try_from(ctx.profile().list_parallel).unwrap_or(DEFAULT_PARALLEL);
+    let parallel = parallel.clamp(1, 32);
     let mut writes = futures::stream::iter(0..n)
         .map(|i| create(ctx.clone(), i, per_signer))
-        .buffer_unordered(PARALLEL);
+        .buffer_unordered(parallel);
+    let started = std::time::Instant::now();
+    let mut done = 0u32;
+    let mut last_mark = started;
     while let Some(result) = writes.next().await {
+        if !matches!(result, Ok(Ok(_))) {
+            eprintln!(
+                "list.large_response_within_limit: write {done}/{n} failed after {:?} (chunk {:?})",
+                started.elapsed(),
+                last_mark.elapsed()
+            );
+        }
         want_ok(result?, "UpdateRef")?;
+        done += 1;
+        if done.is_multiple_of(1000) {
+            let now = std::time::Instant::now();
+            eprintln!(
+                "list.large_response_within_limit: {done}/{n} writes in {:?} (last 1000: {:?})",
+                started.elapsed(),
+                now.duration_since(last_mark)
+            );
+            last_mark = now;
+        }
     }
     let info_reply = ctx
         .client()
