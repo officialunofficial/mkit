@@ -27,6 +27,17 @@ CPU budget is insufficient for BLAKE3 verification of production-size parts.
 WP-1.19 sets this in the staging deployment config and validates the budget
 under deployed R2.
 
+Local `wrangler dev` with a release-built Worker and the 17 MiB, three-part
+wire case measured approximately **2.5–2.6 s of profiler busy time per 8 MiB
+UploadPart**, **0.12 s for the 1 MiB tail**, and **3.36 s for completion**.
+The completion rate extrapolates to about **199 s of CPU per GiB**. These are
+samples from a shared local machine, not deployed R2 measurements; the
+`(program)` profiler frames are included in busy time. A 1 GiB completion
+fits the 300 s Workers Paid ceiling by this estimate, while the 4 GiB
+advertised default would exceed it if the rate remains linear. WP-1.19 must
+measure on staging and lower the configured `MAX_PACK_BYTES` or change the
+completion strategy before allowing packs that exceed the CPU budget.
+
 If a client receives `Invalid` after two writers upload the same index at
 once, it should re-upload that part and retry completion. Each valid part is
 stored at its own CV key, while competing sibling cleanup can race. A bad CV
