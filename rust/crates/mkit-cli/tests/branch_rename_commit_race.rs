@@ -192,8 +192,15 @@ fn branch_rename_racing_commit_never_loses_the_commit() {
     repo.ok(&["commit", "-m", "calibration"]);
     let baseline = calibration_start.elapsed();
 
-    let iterations: u32 = 36;
+    // One sample per sweep step. Three repeats (36 rounds) plus a delay
+    // scaled from a loaded calibration commit slept past the 150s kill:
+    // the calibration includes scheduler delay, so every later sleep
+    // inflated with it. One pass still puts `branch -m` under each part
+    // of `commit`'s critical section.
+    let iterations: u32 = 12;
     let sweep_steps: u32 = 12;
+    // A loaded calibration must not turn the sweep into multi-second sleeps.
+    let baseline = baseline.min(std::time::Duration::from_millis(800));
     let mut ever_raced_to_an_unreachable_landing = false;
 
     for i in 0..iterations {

@@ -6,6 +6,7 @@
 //! it, such as the `BeginUpload` cap error; chunk counts are not prescribed.
 
 use std::sync::{Arc, Mutex, PoisonError};
+use std::{fmt::Debug, future::Future, time::Duration};
 
 use buffa::Message;
 use futures::future::BoxFuture;
@@ -70,6 +71,34 @@ impl From<&str> for Failure {
 
 /// A case's result.
 pub(crate) type CaseResult = Result<(), Failure>;
+
+/// Wait for a successful listing to include the writes this case just made.
+/// Relay lag is expected on both local D34 and remote deployments.
+pub(crate) async fn eventually_listed<T, F, Fut>(
+    label: &str,
+    mut fetch: F,
+    ready: impl Fn(&T) -> bool,
+) -> Result<T, Failure>
+where
+    T: Debug,
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, Failure>>,
+{
+    let deadline =
+        tokio::time::Instant::now() + Duration::from_millis(mkit_server::relay::RELAY_LAG_BOUND_MS);
+    loop {
+        let listing = fetch().await?;
+        if ready(&listing) {
+            return Ok(listing);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(Failure::Fail(format!(
+                "{label} did not converge: {listing:?}"
+            )));
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
 
 /// Fail the case with a formatted message unless `cond` holds.
 macro_rules! ensure {

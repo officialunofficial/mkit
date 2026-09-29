@@ -309,6 +309,7 @@ mod tests {
                         at_ms: 50,
                         target: partition(),
                         puts: vec![(Key::new(&b"x\0"[..]), Value::default())],
+                        deletes: Vec::new(),
                     })
                     .unwrap(),
                 ),

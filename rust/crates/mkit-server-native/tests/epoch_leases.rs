@@ -1029,16 +1029,18 @@ fn assert_renewal_ops(calls: &[Call], old_timer: &Key, new_timer: &Key) {
         .unwrap();
     assert_eq!(
         renewal_ref_ops,
-        (4, 4),
-        "the ref batch keeps its lease installation and three other writes"
+        (5, 7),
+        "the ref batch keeps its lease installation and adds the index relay"
     );
 }
 
+#[allow(clippy::too_many_lines)] // One lease lifecycle across write, renewal, relay drain and sweep.
 async fn sweep<N: NamespaceStore + 'static>(
     backend: N,
     clock: Arc<ManualClock>,
     store_clock: Arc<ManualClock>,
 ) {
+    use mkit_server::relay::{NoHook, RelayBudget, RelayHandler};
     use mkit_server::timers::{lease_sweep::LeaseSweep, registry::kinds};
     let store = Store::new(backend);
     let pipe = pipeline(
@@ -1100,6 +1102,57 @@ async fn sweep<N: NamespaceStore + 'static>(
             .await
             .unwrap()
             .is_some()
+    );
+    // The two D34 writes left index rows. Drain them so this sweep tests
+    // renewal and expiry rather than the outbox hold-off.
+    let source = shard(&a, REF);
+    let relay_registry = TimerRegistry::new().register(RelayHandler {
+        target: store.clone(),
+        hook: NoHook,
+        budget: RelayBudget::default(),
+    });
+    for _ in 0..3 {
+        if store
+            .inner
+            .get(&source, &keys::relay(1))
+            .await
+            .unwrap()
+            .is_none()
+            && store
+                .inner
+                .get(&source, &keys::relay(2))
+                .await
+                .unwrap()
+                .is_none()
+        {
+            break;
+        }
+        run_due(
+            &store,
+            &source,
+            &relay_registry,
+            clock.as_ref(),
+            24_501,
+            &TickBudget::default(),
+        )
+        .await
+        .unwrap();
+    }
+    assert!(
+        store
+            .inner
+            .get(&source, &keys::relay(1))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .inner
+            .get(&source, &keys::relay(2))
+            .await
+            .unwrap()
+            .is_none()
     );
     clock.set(54_501);
     store_clock.set(54_501);
@@ -1187,6 +1240,7 @@ async fn append_model_relay(
         at_ms,
         target: coordinator(a),
         puts: vec![(Key::new(&b"x\0"[..]), codec::encode_u64(seq))],
+        deletes: Vec::new(),
     };
     let batch = Batch::new()
         .require(Precondition::Equals(keys::epoch_lease(), lease_value))
@@ -1320,6 +1374,7 @@ async fn plant_delayed_relay_and_expired_lease(
         at_ms: 90,
         target: coordinator.clone(),
         puts: vec![(Key::new(&b"x\0"[..]), Value::default())],
+        deletes: Vec::new(),
     };
     store
         .apply(
@@ -1478,6 +1533,7 @@ async fn revocation_completes_with_expired_kept_row() {
         at_ms: 1,
         target: coordinator(&a),
         puts: vec![(Key::new(&b"x\0"[..]), Value::default())],
+        deletes: Vec::new(),
     };
     store
         .apply(
@@ -1786,6 +1842,7 @@ async fn swept_lease_renewal<N: NamespaceStore + 'static>(
     store_clock: Arc<ManualClock>,
     renewal_now_ms: i64,
 ) {
+    use mkit_server::relay::{NoHook, RelayBudget, RelayHandler};
     use mkit_server::timers::lease_sweep::LeaseSweep;
     let store = Store::new(backend);
     let pipe = pipeline(
@@ -1798,6 +1855,24 @@ async fn swept_lease_renewal<N: NamespaceStore + 'static>(
     committed(&pipe, &a, REF, 1).await;
     let old = el(&store, &a, REF).await;
     assert_eq!(old.expires_at_ms, 30_000);
+
+    // The ref write now leaves an index relay row. Drain it so this case
+    // isolates lease clock skew rather than the sweep's outbox hold-off.
+    let relay_report = run_due(
+        &store,
+        &shard(&a, REF),
+        &TimerRegistry::new().register(RelayHandler {
+            target: store.clone(),
+            hook: NoHook,
+            budget: RelayBudget::default(),
+        }),
+        clock.as_ref(),
+        0,
+        &TickBudget::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(relay_report.fired, 1);
 
     clock.set(renewal_now_ms);
     store_clock.set(30_000);

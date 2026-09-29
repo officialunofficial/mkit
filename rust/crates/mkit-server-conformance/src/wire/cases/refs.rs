@@ -7,8 +7,8 @@ use mkit_transport_connect::generated::{
 };
 
 use super::{
-    A, B, C, CaseResult, Ctx, Exp, advance_req, ensure, update_req, want_code, want_ok,
-    want_outcome,
+    A, B, C, CaseResult, Ctx, Exp, advance_req, ensure, eventually_listed, update_req, want_code,
+    want_ok, want_outcome,
 };
 use crate::wire::client::Rpc;
 
@@ -345,7 +345,12 @@ pub(super) async fn list_prefix_stripped(ctx: Ctx) -> CaseResult {
     let leaves = ["zeta", "alpha", "mid/nested", "mid/also"];
     populate(&ctx, "dir", &leaves).await?;
     let prefix = format!("{}/", ctx.head("dir"));
-    let got = listing(&ctx, &prefix).await?;
+    let got = eventually_listed(
+        &prefix,
+        || listing(&ctx, &prefix),
+        |rows| rows.len() == leaves.len(),
+    )
+    .await?;
     let names: Vec<_> = got.iter().map(|(n, _)| n.as_str()).collect();
     ensure!(
         names == ["alpha", "mid/also", "mid/nested", "zeta"],
@@ -364,6 +369,8 @@ pub(super) async fn list_prefix_stripped(ctx: Ctx) -> CaseResult {
 pub(super) async fn list_prefix_component_boundary(ctx: Ctx) -> CaseResult {
     populate(&ctx, "b", &["feat/x", "featx", "feature/y"]).await?;
     let base = ctx.head("b");
+    let broad = format!("{base}/");
+    eventually_listed(&broad, || listing(&ctx, &broad), |rows| rows.len() == 3).await?;
     for prefix in [format!("{base}/feat"), format!("{base}/feat/")] {
         let got = listing(&ctx, &prefix).await?;
         let names: Vec<_> = got.iter().map(|(n, _)| n.as_str()).collect();

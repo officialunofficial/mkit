@@ -554,11 +554,7 @@ async fn bump(ctx: &Ctx, repository: &str) -> CaseResult {
         .client()
         .unary::<ListRefsResponse>(Rpc::ListRefs, body, &headers)
         .await?;
-    if ctx.profile().sharding_d34 {
-        want_code(result, "unimplemented", "D34 listing after epoch bump")?;
-    } else {
-        want_ok(result, "test epoch bump")?;
-    }
+    want_ok(result, "test epoch bump")?;
     Ok(())
 }
 

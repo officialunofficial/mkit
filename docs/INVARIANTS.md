@@ -5,6 +5,27 @@ single crate or spec. Each entry states the invariant, why it matters, and
 what breaks when it is violated. A regression test enforces each one; find
 it by the file path listed under "Enforced by".
 
+## Ticketed pushes bind uploaded bytes to one paired advance
+
+**Always:** a Connect push opens a signed ticket for each pack that needs one,
+uploads that ticket's bytes, and commits at most seven distinct ticket ids in
+an advance pairing `refs/heads/<branch>` with `refs/mkit/packmap/<branch>`.
+Only the current data packs and current MKPL node contribute ids. Multipart
+receipts are durable before the next part begins and remain until the advance
+commits. An ambiguous advance retry retains its nonce until the envelope
+lapses; polling renews before the worst-case retry ladder could cross expiry.
+
+**Because:** a stale node ticket, early receipt deletion, or changed nonce
+could make an otherwise complete push fail or replay a committed write.
+
+**If violated:** a push can strand content, publish an incomplete closure, or
+lose resumability after interruption.
+
+**Enforced by:** `mkit-transport-connect/src/client.rs` ticket mapping, part
+store and poll loop; `mkit-cli/src/remote_dispatch/packmap.rs` current commit
+set; Connect client wire and CLI receipt-store tests; native FS end-to-end
+ticketed upload and resume tests.
+
 ## Grant revocation fences every leased ref shard
 
 **Always:** a grant epoch change reports success only after every leased
@@ -1265,18 +1286,32 @@ repository membership, and backlog/caps can undercount durable obligations.
 strict `store/codec.rs` decodes, and `mkit-server-conformance/src/storage/kv_cases.rs`
 creation, atomic publication, stale-ticket and acknowledgement cases over memory
 and SQLite. WP-1.10 exercises consumption and the defensive abort over native
-memory/SQLite and wire cases; expiry handling is WP-1.14. WP-3.3 adds guarded
+memory/SQLite and wire cases; the kind-2 expiry handler closes tickets with
+one guarded `Expired` row and best-effort session abort. WP-3.3 adds guarded
 Pending reservations, ReadServed, reconciliation and backlog enforcement.
 ## Relay delivery advances durable per-source watermarks before source cleanup
 
 **Always:** relay rows for a source/target pair apply in sequence order. Each
-batch guards the target's `rh` and advances it atomically with the row upserts
-and pre-delivery hook effects. Duplicates never apply a target batch. Source
+batch guards the target's `rh` and advances it atomically with the row upserts,
+deletes, and pre-delivery hook effects. Duplicates never apply a target batch. Source
 cleanup guards each encoded row; draining the timer guards the originally
 observed `os`, so a same-millisecond writer cannot lose its wake-up. Writers
 stamp and chunk rows, and commit an immediate kind-3 timer with their outbox.
 Target watermarks and the one `rs 00` scan row per source are never pruned;
 watermarks are bounded by source shards.
+
+**Always:** a key that is ever relay-deleted has exactly one producer. Its
+source `os` sequence orders every upsert and delete. Identical upserts from
+several producers remain valid for never-deleted keys, including object-index
+`i` rows (R-130).
+
+**Because:** one target `rh` per source deduplicates rows, but cannot order
+conflicting operations from distinct sources on a deleted key.
+
+**If violated:** a delayed upsert can resurrect a deleted ref-index row.
+
+**Enforced by:** D34 ref-index routing from one ref shard, the disjoint
+put/delete relay codec and outbox validation, and ordered relay delivery tests.
 
 **Always:** during an active relay scan cycle, every undelivered row whose
 sequence is at or below the durable cursor has a target in the cycle's
@@ -1372,8 +1407,10 @@ parsing, unit call-count/isolation tests and Multi wire membership cases.
 
 ## Every relay source is covered by an epoch lease
 
-**Always:** a batch that appends relay rows carries an epoch lease on its
-source shard. Only ref shards are relay sources. A new relay source class
+**Always:** a production batch that appends relay rows carries an epoch lease
+on its source shard. Only ref shards are relay sources. The test-only `TestTimer`
+kind may append a ref-index delete without a lease: it is compiled out of
+release builds and can fire after the lease expires. A new relay source class
 requires its own coordinator watermark design before it can append rows.
 This binds WP-1.10 (#1188), 4.7, 4.8, 4.10, 5.3b, 5.6 and 5.7b. The namespace
 watermark bounds every undelivered relay row's **commit time** from below;
@@ -1415,8 +1452,9 @@ absent from the set has no high-water mark. Every restored relay row and the
 source's next sequence therefore exceed every target's `rh[source]`. Missing
 sources are refused or reconstructed at the supplied watermark; missing
 coordinators require an explicit epoch floor and are marked recovered.
-Relay rows currently contain upserts only, so replaying a row has the same
-effect; gaps are harmless because delivery compares sequences only with `rh`.
+Relay rows carry upserts and deletes (R-134). Redelivering a row is
+idempotent under `rh` ordering and the single-producer rule for relay-deleted
+keys; gaps are harmless because delivery compares sequences only with `rh`.
 The epoch jump prevents a grant issued and revoked after the snapshot from
 becoming valid again. Owners must re-issue grants after restore. Already
 delivered rows cannot be replayed from an older target's snapshot; index and
@@ -1593,8 +1631,8 @@ retries charge admission again, or token results disappear with ticket rows.
 (`golden_ticket_token_v1`), `mkit-server/tests/begin_upload_codec.rs`, native
 `tests/begin_upload.rs` (`lifecycle_*`, `caps_*`, `race_*`, `rejected_*`) over
 memory and SQLite (Single and D34), and the wire `tickets.*` cases.
-Ticket expiry cleanup and admission Pending/Aborted reconciliation remain
-WP-1.14 and WP-3.3 respectively.
+Kind-2 ticket expiry closes unconsumed tickets; admission Pending/Aborted
+reconciliation and terminal outcome delivery belong to WP-3.3.
 
 ## Ticketed advance publishes only completed uploads
 
@@ -1638,7 +1676,17 @@ upload can bypass BeginUpload's authorization and admission.
 
 **If violated:** a stale receipt could select replaced bytes, or a crash could expose a partial pack or discard a live session.
 
-**Enforced by:** `mkit-server-conformance/src/storage/multipart.rs` on memory and FS; `mkit-server/src/fs/tests.rs` ticket-layout, restart and seven-day sweep tests; `Feature::Multipart` wire cases on memory and native FS + SQLite.
+**Enforced by:** `mkit-server-conformance/src/storage/multipart.rs` on memory, FS, R2 and S3; `mkit-server/src/fs/tests.rs` ticket-layout, restart and seven-day sweep tests; `Feature::Multipart` wire cases on memory, native FS + SQLite, native S3 + SQLite, and Worker R2.
+
+## Object-store multipart staging cannot publish unverified bytes
+
+**Always:** R2 and S3 stage parts under CV-keyed `server-uploads/<ticket-id>/<index>-<cv>` objects. A part becomes visible only after its subtree CV verifies. R2 re-hashes the assembled stream and withholds the final byte of the conditional pack put until the full root verifies. S3 streams each staged part through a subtree hash immediately before completion, then pins each `UploadPartCopy` to the ETag observed on that GET; the ETag identifies the object version, never proves integrity. A failed hash or copy precondition publishes no pack. Successful completion and abort remove session meta before parts, so concurrent completion sees `SessionGone`. Bucket lifecycle rules expire `server-uploads/` after eight days.
+
+**Because:** staged objects can change between upload and completion, while abandoned sessions must not persist indefinitely.
+
+**If violated:** a corrupted or replaced part can publish a pack whose bytes do not match its BLAKE3 root, or a stale session can remain available to another completion.
+
+**Enforced by:** the shared multipart suite on R2 and S3, corrupted-at-rest completion tests, conditional-copy FakeS3 tests, and the R2/S3 lifecycle runbook.
 
 ## Storage pressure observes physical capacity after commit
 

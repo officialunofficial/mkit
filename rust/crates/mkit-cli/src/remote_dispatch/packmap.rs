@@ -36,7 +36,7 @@ use std::io::{Read as _, Write as _};
 use mkit_core::hash::{self, Hash};
 use mkit_core::object::Object;
 use mkit_core::pack::{self, PackReader};
-use mkit_core::protocol::{AdvanceOutcome, PackKey, Transport, TransportError};
+use mkit_core::protocol::{AdvanceOutcome, CommitOutcome, PackKey, Transport, TransportError};
 use mkit_core::refs;
 use mkit_core::sign;
 use mkit_core::store::ObjectStore;
@@ -477,7 +477,7 @@ pub(crate) fn advance_packmap(
         };
         let node = transfer::encode_packlist(prev, pack_keys)?;
         let node_key = pack::pack_key(&node);
-        tx.upload_blob(&node, &PackKey::from_hash(node_key))
+        tx.upload_blob_via_ref(&node, &PackKey::from_hash(node_key), &head_name)
             .map_err(|error| super::repository_operation_error(tx, error))?;
         // CAS off the packmap's CURRENT value (`prior`), independent of the
         // node's `prev` — a reset still has to win the race for the ref.
@@ -485,29 +485,50 @@ pub(crate) fn advance_packmap(
             Some(k) => refs::RefWriteCondition::Match(k),
             None => refs::RefWriteCondition::Missing,
         };
+        let commit_keys: Vec<PackKey> = pack_keys
+            .iter()
+            .copied()
+            .map(PackKey::from_hash)
+            .chain(std::iter::once(PackKey::from_hash(node_key)))
+            .collect();
         // Commit the packmap AND the head together (#408). A transactional
         // transport applies both atomically; the default does packmap-then-
         // head — still safe, the head never lands past an unadvanced packmap.
         match tx
-            .advance_refs(
+            .advance_refs_committing(
                 &head_name,
                 head_condition,
                 &tip,
                 &packmap_name,
                 packmap_condition,
                 &node_key,
+                &commit_keys,
             )
             .map_err(|error| super::repository_operation_error(tx, error))?
         {
-            AdvanceOutcome::Committed => return Ok(()),
+            CommitOutcome::Advanced(AdvanceOutcome::Committed) => return Ok(()),
             // Another pusher advanced the packmap under us — re-read and retry.
-            AdvanceOutcome::PackmapConflict => {}
+            CommitOutcome::Advanced(AdvanceOutcome::PackmapConflict) => {}
             // The head precondition failed. Either the branch moved under
             // us (the push is stale) or the retry ladder re-issued a write
             // that had already landed (SPEC-TRANSPORT §7) — disambiguate.
-            AdvanceOutcome::HeadConflict => {
+            CommitOutcome::Advanced(AdvanceOutcome::HeadConflict) => {
                 return head_conflict(tx, &head_name, &tip, branch);
             }
+            CommitOutcome::TicketRejected => {
+                if tx.read_ref(&head_name)? == Some(tip) {
+                    return Ok(());
+                }
+                return Err(DispatchError::TicketRejected);
+            }
+            CommitOutcome::PacklistNotInRepository => {
+                if tx.read_ref(&head_name)? == Some(tip) {
+                    return Ok(());
+                }
+                return Err(DispatchError::PacklistNotInRepository);
+            }
+            CommitOutcome::DeltaBaseUnavailable => return Err(DispatchError::DeltaBaseUnavailable),
+            _ => return Err(DispatchError::Transport(TransportError::InvalidResponse)),
         }
     }
     Err(DispatchError::PackmapContended {

@@ -184,7 +184,7 @@ headers or a bearer token. The response MAY be cached with
 |---|---|
 | `protocol` | The wire package, `mkit.transport.v1`. |
 | `spec_version` | This document's version, `2`. |
-| `max_pack_bytes` | The largest pack the deployment accepts. A deployment MAY advertise a lower value in indexed mode than in opaque mode, for example on a runtime with tight CPU limits. |
+| `max_pack_bytes` | The largest pack the deployment accepts. A deployment MAY advertise a lower value in indexed mode than in opaque mode, for example on a runtime with tight CPU limits. A deployment whose storage cannot accept multipart uploads MUST advertise `max_pack_bytes <= part_size`. |
 | `part_size` | The part size for resumable uploads (§7.6): a power of two, at least 8 MiB. |
 | `max_parts` | The largest number of parts in one upload (§7.6). |
 | `max_list_refs_page_size` | The largest number of refs one `ListRefs` page returns (§7.9). |
@@ -1430,7 +1430,9 @@ retries in a new operation.
 **Expiry.** A ticket expires less than 7 days after `BeginUpload`. A
 ticket that expires before an advance consumes it produces an `Expired`
 outcome for its reservation, and its pack becomes eligible for garbage
-collection.
+collection. The server best-effort aborts the ticket's upload session when
+it closes the expired ticket; backend lifecycle rules reclaim sessions
+left by an abort failure or interrupted cleanup.
 
 **Retries.** A client that retries a signed request reuses its nonce and
 timestamps while the envelope is valid (at most 300 seconds, §7.1).
@@ -1566,6 +1568,8 @@ of these:
 
 A lag never exposes another repository's data and never acts as an
 existence oracle (§7.4).
+An index lags per bucket, so a listing need not reflect a single instant;
+a branch head and its packmap may appear at different ages.
 
 **Read-your-writes for packs.** `PackExists` and `DownloadPack` MAY
 carry an optional header naming a ref of the same repository whose
@@ -1664,6 +1668,7 @@ Explicitly deferred to sibling issues:
 
 | Version | Status | Changes |
 |---|---|---|
+| `2` (WP-1.28b) | draft | §7.9 clarifies per-bucket ListRefs index lag and head/packmap age differences. |
 | `2` (WP-1.11b) | draft | §5 and §7.6: a part receipt bound to another ticket is an invalid receipt (`invalid_argument`), with no cross-ticket oracle. |
 | `2` | draft | §7.9 defines absent or zero `page_size` as the advertised maximum and malformed or foreign page tokens as `invalid_argument` (WP-1.28a). |
 | `2` (WP-1.10) | draft | §7.6 requires canonical branch-head/packmap pairing for ticketed advances; §7.8 rejects deletion with tickets. |

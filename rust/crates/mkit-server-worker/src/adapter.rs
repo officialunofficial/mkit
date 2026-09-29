@@ -71,12 +71,17 @@ pub const REPOSITORY_VAR: &str = "AUTH_REPOSITORY";
 pub const PLAN_VAR: &str = "WORKERS_PLAN";
 /// The deployment secret containing upload MAC keys.
 pub const TICKET_KEYS_VAR: &str = "TICKET_KEYS";
+/// Maximum ticketed pack size (bytes), bounded by R2's single-object limit.
+pub const MAX_PACK_BYTES_VAR: &str = "MAX_PACK_BYTES";
 
-/// The largest pack one `UploadPack` may declare: 64 MiB, vcs-worker's
-/// cap. A documented M1 stopgap: resumable parts (WP-1.11) replace it.
-pub const MAX_PACK_BYTES: u64 = 64 * 1024 * 1024;
+/// Default ticketed pack cap, one GiB until staging CPU measurements.
+pub const MAX_PACK_BYTES: u64 = 1024 * 1024 * 1024;
+/// R2's 4.995 GiB single-object ceiling, rounded down to whole bytes.
+pub const MAX_PACK_BYTES_CEILING: u64 = 4_995 * 1024 * 1024 * 1024 / 1000;
+/// Legacy single-part `UploadPack` cap.
+pub const SINGLE_PUT_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
-/// Room for Connect framing on top of [`MAX_PACK_BYTES`]: a 5-byte
+/// Room for Connect framing on top of [`SINGLE_PUT_MAX_BYTES`]: a 5-byte
 /// envelope and about 45 bytes of message fields around each chunk's data,
 /// so any client whose chunks average 4 KiB or more fits (mkit sends
 /// 800 KiB chunks).
@@ -84,7 +89,7 @@ const FRAMING_ALLOWANCE: usize = 1024 * 1024;
 
 /// The default request body cap: a 64 MiB pack and its framing.
 #[allow(clippy::cast_possible_truncation)] // 65 MiB fits every usize we build for
-pub const DEFAULT_MAX_BODY_BYTES: usize = MAX_PACK_BYTES as usize + FRAMING_ALLOWANCE;
+pub const DEFAULT_MAX_BODY_BYTES: usize = SINGLE_PUT_MAX_BYTES as usize + FRAMING_ALLOWANCE;
 
 /// `Access-Control-Allow-Methods`.
 pub const CORS_ALLOW_METHODS: &str = "POST, GET, OPTIONS";
@@ -99,6 +104,8 @@ pub struct WorkerConfig {
     pub repository: String,
     /// Upload MAC keys; missing keys disable `BeginUpload`.
     pub ticket_keys: Option<TicketKeys>,
+    /// Maximum ticketed pack size from `MAX_PACK_BYTES`.
+    pub max_pack_bytes: u64,
     /// `SHARDING`: single (default) or d34; guarded against changing existing data.
     pub sharding: Sharding,
     /// Deployment-wide placement. Jurisdiction must remain fixed for its lifetime:
@@ -157,12 +164,13 @@ impl WorkerConfig {
             name: RepoName::new(&self.repository).map_err(|e| bad(&e))?,
         };
         let limits = UploadLimits {
-            max_total_bytes: MAX_PACK_BYTES,
+            max_total_bytes: self.max_pack_bytes,
             // vcs-worker had no chunk cap; the body cap bounds the count.
             max_chunks: u32::MAX,
         };
         let mut config =
             PipelineConfig::new(Addressing::Single { repo }, AuthMode::AuthV2(auth), limits);
+        config.single_upload_max_bytes = Some(SINGLE_PUT_MAX_BYTES);
         config.sharding = self.sharding;
         config.ticket_keys.clone_from(&self.ticket_keys);
         #[cfg(feature = "test-faults")]
@@ -191,6 +199,13 @@ impl WorkerConfig {
                     .map_err(|_| ConfigError("TICKET_KEYS is invalid".into()))
             })
             .transpose()?;
+        let max_pack_bytes = var(MAX_PACK_BYTES_VAR).map_or(Ok(MAX_PACK_BYTES), |value| {
+            value
+                .parse::<u64>()
+                .ok()
+                .filter(|n| *n > 0 && *n <= MAX_PACK_BYTES_CEILING)
+                .ok_or_else(|| ConfigError("MAX_PACK_BYTES must be 1..=4.995 GiB".into()))
+        })?;
         let sharding = match var("SHARDING").as_deref() {
             None | Some("single") => Sharding::Single,
             Some("d34") => Sharding::D34,
@@ -215,6 +230,7 @@ impl WorkerConfig {
             audience,
             repository,
             ticket_keys,
+            max_pack_bytes,
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
             blob_binding: crate::r2::STORAGE_BINDING,
             #[cfg(feature = "test-faults")]
@@ -293,7 +309,7 @@ pub fn timer_registry<S, T>(
     class: crate::classes::ShardClass,
     target: Result<T, ConfigError>,
     plan: Option<&str>,
-) -> mkit_server::timers::TimerRegistry<S>
+) -> mkit_server::timers::TimerRegistry<'static, S>
 where
     S: mkit_server::NamespaceStore,
     T: mkit_server::NamespaceStore + 'static,
@@ -357,6 +373,28 @@ where
     #[cfg(feature = "test-faults")]
     let registry = registry.register(mkit_server::timers::test_kind::TestTimer);
     registry
+}
+
+/// Register kind-2 expiry on the classes that own ticket rows.
+#[must_use]
+pub fn timer_registry_with_blobs<S, T, B>(
+    class: crate::classes::ShardClass,
+    target: Result<T, ConfigError>,
+    plan: Option<&str>,
+    blobs: B,
+) -> mkit_server::timers::TimerRegistry<'static, S>
+where
+    S: mkit_server::NamespaceStore,
+    T: mkit_server::NamespaceStore + 'static,
+    B: mkit_server::MultipartBlobStore + 'static,
+{
+    let registry = timer_registry(class, target, plan);
+    match class {
+        crate::classes::ShardClass::RefStore | crate::classes::ShardClass::RefShard => {
+            registry.register(mkit_server::timers::ticket_expiry::TicketExpiry { blobs })
+        }
+        _ => registry,
+    }
 }
 
 struct WorkerRelay<T> {
@@ -749,9 +787,9 @@ mod glue {
     use worker::{Env, Request, Response, State};
 
     use super::{
-        BodyWatch, CORS_ALLOW_METHODS, ConfigError, LimitedBody, MAX_PACK_BYTES, MeasuredBody,
-        PLAN_VAR, WorkerConfig, body_too_large_json, dispatch_oneshot_body, over_cap_response,
-        plan_capacity, unavailable_json,
+        BodyWatch, CORS_ALLOW_METHODS, ConfigError, LimitedBody, MeasuredBody, PLAN_VAR,
+        SINGLE_PUT_MAX_BYTES, WorkerConfig, body_too_large_json, dispatch_oneshot_body,
+        over_cap_response, plan_capacity, unavailable_json,
     };
     use crate::backup::{BACKUPS_BINDING, BackupConfig, BackupDrain, BackupHandler};
     use crate::clock::WorkerClock;
@@ -786,7 +824,7 @@ mod glue {
             EnvBucket::new(env.clone(), cfg.blob_binding),
             PACKS_KEYSPACE,
         )
-        .with_max_bytes(MAX_PACK_BYTES);
+        .with_max_bytes(SINGLE_PUT_MAX_BYTES);
         let meta = WorkerNamespaceStore::new(
             StubTransport::new(env.clone(), cfg.placement.clone()),
             cfg.probe_partition(),
@@ -952,7 +990,15 @@ mod glue {
             let probe = cfg.probe_partition();
             WorkerNamespaceStore::new(StubTransport::new(env.clone(), cfg.placement), probe)
         });
-        let registry = super::timer_registry(class, target, plan.as_deref());
+        let registry = super::timer_registry_with_blobs(
+            class,
+            target,
+            plan.as_deref(),
+            R2BlobStore::new(
+                EnvBucket::new(env.clone(), crate::r2::STORAGE_BINDING),
+                PACKS_KEYSPACE,
+            ),
+        );
         let backup = BackupConfig::from_vars(|name| env.var(name).ok().map(|v| v.to_string()))
             .map_err(|error| {
                 BACKUPS_INVALID_LOG
@@ -1495,7 +1541,7 @@ mod tests {
 
     #[test]
     fn default_body_cap_leaves_room_for_framing() {
-        assert!(DEFAULT_MAX_BODY_BYTES as u64 > MAX_PACK_BYTES);
+        assert!(DEFAULT_MAX_BODY_BYTES as u64 > SINGLE_PUT_MAX_BYTES);
         assert!(body_too_large_json(5).contains("resource_exhausted"));
         let v: serde_json::Value = serde_json::from_str(&unavailable_json("a \"b\"")).unwrap();
         assert_eq!(v["code"], "unavailable");

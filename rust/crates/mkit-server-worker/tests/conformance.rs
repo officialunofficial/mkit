@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use common::{DoConfig, Loopback, SimBucket, capacity_above_empty};
 use mkit_server::Clock;
+use mkit_server_conformance::multipart_suite;
 use mkit_server_conformance::storage::KvHarness;
 use mkit_server_conformance::storage_suite;
 use mkit_server_worker::ns_client::DoNamespaceStore;
@@ -78,6 +79,11 @@ fn r2() -> R2BlobStore<SimBucket> {
 }
 
 storage_suite!(workers, kv = Workers::new(), blob = r2);
+multipart_suite!(
+    workers_r2_multipart,
+    store = r2,
+    heap = common::multipart_allocator::probe
+);
 
 /// The blob cases again, with R2 answering failed conditions and 429s
 /// before it reads the body.
