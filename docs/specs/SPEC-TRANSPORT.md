@@ -196,9 +196,13 @@ environment; see [SSH-SECURITY.md](../SSH-SECURITY.md) §5. Packs
 uploaded and verified in a session (at most seven between packmap
 writes) may be consumed into membership by that session's packmap
 write — the implicit form of the upload tickets signed writes use. The
-packmap check only refuses: the node, its `prev` node, and every pack
-it lists must be pending in this session or already members, or the
-write is refused.
+packmap check only refuses: the node's `prev` is absent or the packmap
+value the write replaces (under `Any` the current value is read and the
+condition rewritten to guard it, so a concurrent move surfaces as an
+ordinary CAS conflict), the node and every pack it lists — at most
+1,024 — are pending in this session or already members (a pending
+packlist listed as a pack is refused: a packlist is a node, not a
+pack), or the write is refused.
 
 ### 4.2 Conversation
 

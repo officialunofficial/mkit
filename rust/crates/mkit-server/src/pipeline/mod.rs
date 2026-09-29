@@ -1168,7 +1168,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     ) -> Result<StoredResult, ServerError> {
         let mut op = self.identify(a, kind)?;
         fault!(self, AfterAuthenticate, &op, a);
-        let (kind, refs, p) = self.ref_writes(&op)?;
+        let (kind, mut refs, p) = self.ref_writes(&op)?;
         let mut ahead = self.read_ahead(&op, &p, &refs, a.business_skew_ms).await?;
         if let Some(stored) = Self::replay_lookup(&op, ahead.as_ref())? {
             return Ok(stored);
@@ -1220,7 +1220,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             }
         }
         if let Some(pending) = implicit {
-            self.check_implicit_packmap(&op, pending).await?;
+            let upd = refs
+                .first_mut()
+                .ok_or_else(|| internal("implicit consumption needs an UpdateRef"))?;
+            // The B10 check may rewrite `Any` to the exact value it
+            // observed, so the planned batch guards it.
+            self.check_implicit_packmap(&op, pending, ahead.as_ref(), upd)
+                .await?;
         }
         let existing = self.begin_decision(&op, a, ahead.as_mut()).await?;
         // An implicit consuming write skips admission exactly when it has
@@ -1803,9 +1809,12 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let caps = self.meta.capabilities();
         let replay = upload::replay_guard(op);
         // Single's packs live in the repo directory itself; only Multi
-        // plans `m` rows and relay for the consumed set.
+        // plans `m` rows and relay for the consumed set, and only when
+        // the set is non-empty (L2).
         let implicit_ids = implicit
-            .filter(|_| matches!(self.cfg.addressing, Addressing::Multi(_)))
+            .filter(|pending| {
+                !pending.is_empty() && matches!(self.cfg.addressing, Addressing::Multi(_))
+            })
             .map(implicit::implicit_packs);
         let advance = match &op.kind {
             OpKind::AdvanceRefs { head, tickets, .. } if !tickets.is_empty() => {

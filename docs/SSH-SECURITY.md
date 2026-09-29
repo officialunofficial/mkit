@@ -195,6 +195,9 @@ lowercase hex). The rules:
 - The client cannot name it through `SSH_ORIGINAL_COMMAND`: the
   server accepts only the exact `mkit serve <path>` form from that
   variable, so a forced command controls the flags entirely.
+- Root-mode resolution checks the canonical path once at startup and
+  later opens use the path; this is safe only because the root is not
+  writable by ssh clients, and operators must keep it so.
 
 For `AuthorizedKeysCommand`, the asserted key is the one sshd just
 authenticated — `%k`, the base64 SSH wire blob whose tail is the raw

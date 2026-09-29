@@ -1732,11 +1732,17 @@ captured request bodies.
 packs uploaded and verified in the same session and repository; the
 packmap check only refuses. A session's pending set holds at most seven
 distinct packs, dies with the session, and is consumed by that session's
-next packmap write. A packmap whose node, `prev` node or listed pack is
-neither pending nor already a member of the bound repository is refused;
-the check never adds membership for a pack it merely names, and no
-reservation or outcome rows are created — there is no reservation to
-keep one outcome per.
+next packmap write. A packmap is refused when its node's `prev` is
+neither absent nor the packmap value the write replaces — every
+accepted packmap value was checked when written, so by induction the
+`prev` chain is exactly the ref's accepted history and one level
+suffices; ssh/enc never accept a packmap reset whose `prev` is
+non-empty and unrelated to the ref — when its node or a listed pack is
+neither pending nor already a member of the bound repository (a pending
+packlist listed as a pack is refused: a packlist is a node, not a
+pack), or when it lists more than 1,024 packs; the check never adds
+membership for a pack it merely names, and no reservation or outcome
+rows are created — there is no reservation to keep one outcome per.
 
 **Because:** ssh and enc clients cannot carry signed upload tickets, so
 the transport binds them to the session instead. Letting the packmap

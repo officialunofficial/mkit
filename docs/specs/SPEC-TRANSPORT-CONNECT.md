@@ -1196,9 +1196,11 @@ accepts to that one repository (SPEC-TRANSPORT-ENC §6). Both carry the
 same implicit-membership rule in place of §7.6's upload tickets: packs
 uploaded and verified in a session (at most seven before a packmap
 write) may be consumed into membership by that session's packmap write
-— never by a later session's. The packmap check only refuses: the node,
-its `prev` node, and every pack it lists must be pending in this
-session or already members, or the write is refused. The on-disk layout
+— never by a later session's. The packmap check only refuses: the
+node's `prev` is absent or the packmap value the write replaces, the
+node and every pack it lists — at most 1,024 — are pending in this
+session or already members (a pending packlist listed as a pack is
+refused: a packlist is a node, not a pack), or the write is refused. The on-disk layout
 under the repository's path is unchanged,
 and the frozen `mkit.rpc.v1.ssh` protocol is untouched.
 

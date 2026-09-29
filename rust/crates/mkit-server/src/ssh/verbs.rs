@@ -444,6 +444,9 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Verbs<'p, B, N, H
             self.open_upload_session(pack_id, total, &mut failed_open)
                 .await
         };
+        // The pack's first four bytes, accumulated across chunks: they
+        // tell B10 whether the pending upload is an MKPL node.
+        let mut magic = Vec::with_capacity(4);
         loop {
             let frame = match src.next_frame().await {
                 Ok(frame) => frame,
@@ -472,6 +475,10 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Verbs<'p, B, N, H
                     return emit_error(sink, ErrorCode::InvalidRequest, e.ssh_message()).await;
                 }
             };
+            if magic.len() < 4 && chunk.offset == Some(magic.len() as u64) {
+                let take = data.len().min(4 - magic.len());
+                magic.extend_from_slice(&data[..take]);
+            }
             if let Some(s) = session.as_mut()
                 && s.push(id, chunk.offset, Bytes::from(data), last)
                     .await
@@ -498,6 +505,8 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Verbs<'p, B, N, H
                         pending.push(PendingPack {
                             pack,
                             bytes: framing.declared(),
+                            packlist: magic.as_slice()
+                                == mkit_core::transfer::PACKLIST_MAGIC.as_slice(),
                         });
                     }
                 }

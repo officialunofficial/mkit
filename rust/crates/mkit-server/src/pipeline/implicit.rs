@@ -5,10 +5,10 @@
 //!
 //! The write itself stays an ordinary [`OpKind::UpdateRef`]: hooks see no
 //! new operation kind, and the session's pending set arrives out of band.
-//! The B10 check closes the reconnect hole — a packmap's node, `prev`
-//! node, and listed packs may be only packs pending in this session or
-//! already members, and the check can only refuse, never grant
-//! membership.
+//! The B10 check closes the reconnect hole — the node's `prev` is absent
+//! or the packmap value the write replaces, and the node and every pack
+//! it lists may be only packs pending in this session (and not packlists)
+//! or already members; the check can only refuse, never grant membership.
 
 use std::collections::BTreeSet;
 
@@ -17,12 +17,15 @@ use futures::future::join_all;
 
 use mkit_core::hash::Hash;
 #[cfg(feature = "ssh")]
-use mkit_core::refs::{PACKMAP_REF_PREFIX, RefWriteCondition};
+use mkit_core::refs::PACKMAP_REF_PREFIX;
+use mkit_core::refs::RefWriteCondition;
 
+use super::plan::Snapshot;
 #[cfg(feature = "ssh")]
-use super::{Authenticated, RefUpdate, StoredResult, UpdateRefResult};
+use super::{Authenticated, StoredResult, UpdateRefResult};
 use super::{
-    HookSet, OpKind, Operation, Pipeline, ServerError, StorageOp, internal, meta_error, store_error,
+    HookSet, OpKind, Operation, Pipeline, RefUpdate, ServerError, StorageOp, internal, meta_error,
+    store_error,
 };
 #[cfg(feature = "ssh")]
 use crate::policy::WritePolicy;
@@ -31,7 +34,7 @@ use crate::repo::Addressing;
 use crate::repo::NamespaceKey;
 #[cfg(feature = "ssh")]
 use crate::store::outbox::MAX_TICKETS_PER_ADVANCE;
-use crate::store::{BlobBody, BlobKey, MultipartBlobStore, NamespaceStore, read};
+use crate::store::{BlobBody, BlobKey, MultipartBlobStore, NamespaceStore, codec, keys, read};
 
 /// A pack uploaded and verified during this session, pending membership.
 /// The session deduplicates by `pack`.
@@ -41,6 +44,9 @@ pub(crate) struct PendingPack {
     pub(crate) pack: Hash,
     /// Its committed byte count.
     pub(crate) bytes: u64,
+    /// The upload began with the MKPL magic: it is a packmap node, never
+    /// a listable pack (B10).
+    pub(crate) packlist: bool,
 }
 
 /// The B10 refusal, pinned on the ssh/enc wire: the packmap's MKPL node,
@@ -53,6 +59,10 @@ pub(crate) const IMPLICIT_PACKMAP_UNKNOWN: &str =
 /// are each capped far lower on the ssh wire, but a packmap can name packs
 /// uploaded over Connect at the deployment's full pack cap.
 pub(crate) const MAX_IMPLICIT_PACKLIST_BYTES: u64 = 1024 * 1024;
+
+/// A packmap names at most this many packs; the B10 refusal fires before
+/// any membership read.
+pub(crate) const MAX_IMPLICIT_LISTED_PACKS: usize = 1024;
 
 /// Bounded membership-read concurrency inside the B10 check.
 const IMPLICIT_CHECK_CONCURRENCY: usize = 16;
@@ -121,37 +131,63 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     }
 
     /// The B10 reconnect check, after authorization and before admission
-    /// or planning: the new packmap node itself, its `prev` node, and
-    /// every pack it lists may be only packs pending in this session or
-    /// already members. Nothing is written here and the check never
-    /// grants membership — it only refuses.
+    /// or planning. The new packmap node itself and every pack it lists
+    /// may be only packs pending in this session (a pending packlist is
+    /// refused — it is a node, not a pack) or already members, at most
+    /// [`MAX_IMPLICIT_LISTED_PACKS`] listed. The node's `prev` is absent
+    /// or the packmap value this write replaces: under `Match`/`Missing`
+    /// that is the condition itself; under `Any` the current value is
+    /// read (from `ahead` when the store read it ahead, a direct read
+    /// otherwise) and `upd`'s condition rewritten to guard exactly it,
+    /// so a concurrent change surfaces as an ordinary CAS conflict.
+    /// Every accepted packmap value was checked when written, so by
+    /// induction the `prev` chain is exactly the ref's accepted history
+    /// and one level suffices. Nothing is written here and the check
+    /// never grants membership — it only refuses.
     pub(super) async fn check_implicit_packmap(
         &self,
         op: &Operation,
         pending: &[PendingPack],
+        ahead: Option<&Snapshot>,
+        upd: &mut RefUpdate,
     ) -> Result<(), ServerError> {
-        let OpKind::UpdateRef(upd) = &op.kind else {
+        if !matches!(op.kind, OpKind::UpdateRef(_)) {
             return Err(internal("implicit consumption needs an UpdateRef"));
-        };
+        }
         let node = upd
             .new
             .ok_or_else(|| internal("implicit packmap write deletes"))?;
+        let bytes = self.read_node(&node).await?;
+        let listed = mkit_core::transfer::decode_packlist(&bytes).map_err(|_| refuse())?;
+        if listed.packs.len() > MAX_IMPLICIT_LISTED_PACKS {
+            return Err(refuse());
+        }
         if !self.pack_known(op, &upd.name, node, pending).await? {
             return Err(refuse());
         }
-        let bytes = self.read_node(&node).await?;
-        let listed = mkit_core::transfer::decode_packlist(&bytes).map_err(|_| refuse())?;
-        // One level of `prev` suffices: every committed node was itself
-        // pending-and-consumed or already a member, and its own `prev`
-        // was checked then.
-        if let Some(prev) = listed.prev
-            && !self.pack_known(op, &upd.name, prev, pending).await?
-        {
+        let current = match upd.condition {
+            RefWriteCondition::Match(expected) => Some(expected),
+            RefWriteCondition::Missing => None,
+            RefWriteCondition::Any => self.current_ref(op, &upd.name, ahead).await?,
+        };
+        if listed.prev.is_some() && listed.prev != current {
             return Err(refuse());
+        }
+        if matches!(upd.condition, RefWriteCondition::Any) {
+            upd.condition = match current {
+                Some(id) => RefWriteCondition::Match(id),
+                None => RefWriteCondition::Missing,
+            };
         }
         let mut packs = listed.packs;
         packs.sort_unstable();
         packs.dedup();
+        if packs
+            .iter()
+            .any(|pack| pending.iter().any(|p| p.pack == *pack && p.packlist))
+        {
+            return Err(refuse());
+        }
         for chunk in packs.chunks(IMPLICIT_CHECK_CONCURRENCY) {
             let results = join_all(
                 chunk
@@ -186,6 +222,28 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             }
         }
         Ok(())
+    }
+
+    /// The packmap ref's current id: the read-ahead snapshot when the
+    /// store already read the key, a direct read otherwise.
+    async fn current_ref(
+        &self,
+        op: &Operation,
+        ref_name: &str,
+        ahead: Option<&Snapshot>,
+    ) -> Result<Option<Hash>, ServerError> {
+        let key = keys::ref_key(&op.repo.name, ref_name);
+        if let Some(snap) = ahead.filter(|snap| snap.contains(&key)) {
+            return snap
+                .get(&key)
+                .map(codec::decode_ref_id)
+                .transpose()
+                .map_err(meta_error);
+        }
+        let p = self.shards.ref_shard(&op.repo, ref_name);
+        read::read_ref(&self.meta, &p, &op.repo.name, ref_name)
+            .await
+            .map_err(meta_error)
     }
 
     /// The node's bytes, bounded by [`MAX_IMPLICIT_PACKLIST_BYTES`]: the

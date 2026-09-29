@@ -1104,8 +1104,10 @@ Remote / sync:
   from argv alone and never from the environment; a session without it
   is read-only. Packs a session uploads and verifies may be published
   by that session's packmap write (at most seven between packmap
-  writes); a packmap whose node, `prev` node or listed pack is neither
-  pending nor a member is refused. See
+  writes); a packmap whose node's `prev` is neither absent nor the
+  value the write replaces, whose node or a listed pack is neither
+  pending nor a member (a pending packlist listed as a pack counts as
+  refused), or that lists more than 1,024 packs is refused. See
   SPEC-TRANSPORT §4.1 and [SSH-SECURITY.md](SSH-SECURITY.md) §5. Both
   forms hold a shared `serve.lock` in `<path>/.mkit` for as long as
   the process is alive (any number of concurrent `serve` processes may

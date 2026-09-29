@@ -10,6 +10,7 @@
 #![allow(clippy::unnecessary_wraps)]
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
@@ -40,7 +41,7 @@ use crate::rt::ManualClock;
 use crate::store::{
     Batch, BatchOutcome, BlobKey, BlobStore, Cursor, Key, MultipartBlobStore, NamespaceStore,
     Partition, PartitionStats, ScanPage, StoreCapabilities, StoreError, UnsupportedPartSink, Value,
-    codec, keys,
+    Write, codec, keys,
 };
 use crate::telemetry::NoopMetrics;
 use crate::upload::UploadError;
@@ -1973,6 +1974,219 @@ impl NamespaceStore for SharedKv {
     }
 }
 
+/// Wraps `inner`; once `arm` is called, the first `apply` that writes
+/// `key` first commits `value` unguarded — the check-then-apply race an
+/// implicit `Any` write's rewritten guard closes.
+#[derive(Clone)]
+struct BumpingKv {
+    inner: SharedKv,
+    key: Key,
+    value: Value,
+    armed: Arc<AtomicBool>,
+}
+
+impl BumpingKv {
+    /// Bumps the packmap ref of `repo` to `bumped` once armed.
+    fn packmap(inner: SharedKv, repo: &RepoId, bumped: Hash) -> Self {
+        Self {
+            inner,
+            key: keys::ref_key(&repo.name, PACKMAP),
+            value: codec::encode_ref_id(&bumped),
+            armed: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn arm(&self) {
+        self.armed.store(true, Ordering::SeqCst);
+    }
+}
+
+impl NamespaceStore for BumpingKv {
+    fn capabilities(&self) -> StoreCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn get(&self, p: &Partition, key: &Key) -> Result<Option<Value>, StoreError> {
+        self.inner.get(p, key).await
+    }
+
+    async fn get_many(
+        &self,
+        p: &Partition,
+        keys: &[Key],
+    ) -> Result<Vec<Option<Value>>, StoreError> {
+        self.inner.get_many(p, keys).await
+    }
+
+    async fn scan(
+        &self,
+        p: &Partition,
+        start: &Key,
+        end: &Key,
+        after: Option<&Cursor>,
+        limit: u32,
+    ) -> Result<ScanPage, StoreError> {
+        self.inner.scan(p, start, end, after, limit).await
+    }
+
+    async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
+        if self.armed.load(Ordering::SeqCst)
+            && batch
+                .writes
+                .iter()
+                .any(|w| matches!(w, Write::Put(k, _) if *k == self.key))
+        {
+            self.armed.store(false, Ordering::SeqCst);
+            self.inner
+                .apply(p, Batch::new().put(self.key.clone(), self.value.clone()))
+                .await?;
+        }
+        self.inner.apply(p, batch).await
+    }
+
+    async fn stats(&self, p: &Partition) -> Result<PartitionStats, StoreError> {
+        self.inner.stats(p).await
+    }
+
+    async fn probe(&self) -> Result<(), StoreError> {
+        self.inner.probe().await
+    }
+}
+
+/// Counts reads touching membership (`m\0`) rows.
+#[derive(Clone)]
+struct CountingKv {
+    inner: SharedKv,
+    reads: Arc<AtomicUsize>,
+}
+
+impl CountingKv {
+    fn wrap(inner: SharedKv) -> Self {
+        Self {
+            inner,
+            reads: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn member_reads(&self) -> usize {
+        self.reads.load(Ordering::SeqCst)
+    }
+
+    fn count(&self, key: &Key) {
+        if key.as_bytes().starts_with(b"m\0") {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+impl NamespaceStore for CountingKv {
+    fn capabilities(&self) -> StoreCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn get(&self, p: &Partition, key: &Key) -> Result<Option<Value>, StoreError> {
+        self.count(key);
+        self.inner.get(p, key).await
+    }
+
+    async fn get_many(
+        &self,
+        p: &Partition,
+        keys: &[Key],
+    ) -> Result<Vec<Option<Value>>, StoreError> {
+        for key in keys {
+            self.count(key);
+        }
+        self.inner.get_many(p, keys).await
+    }
+
+    async fn scan(
+        &self,
+        p: &Partition,
+        start: &Key,
+        end: &Key,
+        after: Option<&Cursor>,
+        limit: u32,
+    ) -> Result<ScanPage, StoreError> {
+        self.count(start);
+        self.inner.scan(p, start, end, after, limit).await
+    }
+
+    async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
+        self.inner.apply(p, batch).await
+    }
+
+    async fn stats(&self, p: &Partition) -> Result<PartitionStats, StoreError> {
+        self.inner.stats(p).await
+    }
+
+    async fn probe(&self) -> Result<(), StoreError> {
+        self.inner.probe().await
+    }
+}
+
+/// Records every batch `apply` receives, in order.
+#[derive(Clone)]
+struct RecordingKv {
+    inner: SharedKv,
+    batches: Arc<Mutex<Vec<Batch>>>,
+}
+
+impl RecordingKv {
+    fn wrap(inner: SharedKv) -> Self {
+        Self {
+            inner,
+            batches: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn take(&self) -> Vec<Batch> {
+        std::mem::take(&mut *self.batches.lock().unwrap())
+    }
+}
+
+impl NamespaceStore for RecordingKv {
+    fn capabilities(&self) -> StoreCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn get(&self, p: &Partition, key: &Key) -> Result<Option<Value>, StoreError> {
+        self.inner.get(p, key).await
+    }
+
+    async fn get_many(
+        &self,
+        p: &Partition,
+        keys: &[Key],
+    ) -> Result<Vec<Option<Value>>, StoreError> {
+        self.inner.get_many(p, keys).await
+    }
+
+    async fn scan(
+        &self,
+        p: &Partition,
+        start: &Key,
+        end: &Key,
+        after: Option<&Cursor>,
+        limit: u32,
+    ) -> Result<ScanPage, StoreError> {
+        self.inner.scan(p, start, end, after, limit).await
+    }
+
+    async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
+        self.batches.lock().unwrap().push(batch.clone());
+        self.inner.apply(p, batch).await
+    }
+
+    async fn stats(&self, p: &Partition) -> Result<PartitionStats, StoreError> {
+        self.inner.stats(p).await
+    }
+
+    async fn probe(&self) -> Result<(), StoreError> {
+        self.inner.probe().await
+    }
+}
+
 /// A Multi transport-identity pipeline over memory stores, like the enc
 /// listener's: `allowlist` is the namespace write policy.
 fn multi_pipeline<H: HookSet>(
@@ -1984,6 +2198,20 @@ fn multi_pipeline<H: HookSet>(
     MemoryBlobStore,
     SharedKv,
 ) {
+    let clock = Arc::new(ManualClock::new(T0));
+    let kv = SharedKv(Arc::new(MemoryKv::with_clock(clock.clone())));
+    let (pipe, blobs) = multi_pipeline_on(allowlist, sharding, hooks, kv.clone(), clock);
+    (pipe, blobs, kv)
+}
+
+/// `multi_pipeline` over a caller-provided metadata store.
+fn multi_pipeline_on<H: HookSet, N: NamespaceStore>(
+    allowlist: impl IntoIterator<Item = Namespace>,
+    sharding: Sharding,
+    hooks: H,
+    kv: N,
+    clock: Arc<ManualClock>,
+) -> (Pipeline<MemoryBlobStore, N, H>, MemoryBlobStore) {
     let mut cfg = PipelineConfig::new(
         Addressing::Multi(
             MultiAddressing::new()
@@ -1995,18 +2223,8 @@ fn multi_pipeline<H: HookSet>(
     cfg.sharding = sharding;
     cfg.ticket_keys = Some(TicketKeys::new(vec![("test".into(), [7; 32])]).unwrap());
     let blobs = MemoryBlobStore::default();
-    let clock = Arc::new(ManualClock::new(T0));
-    let kv = SharedKv(Arc::new(MemoryKv::with_clock(clock.clone())));
-    let pipe = Pipeline::new(
-        blobs.clone(),
-        kv.clone(),
-        hooks,
-        cfg,
-        clock,
-        Arc::new(NoopMetrics),
-    )
-    .unwrap();
-    (pipe, blobs, kv)
+    let pipe = Pipeline::new(blobs.clone(), kv, hooks, cfg, clock, Arc::new(NoopMetrics)).unwrap();
+    (pipe, blobs)
 }
 
 /// A session bound to `repository` as `TransportPeer`, like the enc
@@ -2044,13 +2262,15 @@ fn root(ns: &NamespaceKey) -> Partition {
 }
 
 /// Whether `m\0<name>\0<pack>` is stored in `partition`.
-fn member(kv: &SharedKv, partition: &Partition, name: &RepoName, pack: &Hash) -> bool {
-    kv.read(partition, &keys::membership(name, pack)).is_some()
+fn member<N: NamespaceStore>(kv: &N, partition: &Partition, name: &RepoName, pack: &Hash) -> bool {
+    block_on(kv.get(partition, &keys::membership(name, pack)))
+        .unwrap()
+        .is_some()
 }
 
 /// The `o*` rows — reservations, pending outcomes, the outcome backlog —
 /// implicit consuming writes must never plan.
-fn o_rows(kv: &SharedKv, partition: &Partition) -> Vec<(Key, Value)> {
+fn o_rows<N: NamespaceStore>(kv: &N, partition: &Partition) -> Vec<(Key, Value)> {
     block_on(kv.scan(
         partition,
         &Key::new(b"o".to_vec()),
@@ -2465,11 +2685,13 @@ fn packmap_listing_an_unknown_pack_is_refused() {
     ));
 }
 
-/// B10 checks the node chain too (Test 11): `prev` pointing at a node an
-/// earlier session uploaded but never consumed is neither pending nor a
-/// member, so the packmap is refused and writes nothing.
+/// B10's `prev` rule (Test 11): on a consuming packmap write `prev` must
+/// be absent or equal to the packmap value this write replaces. Session
+/// 2's node names `prev = M` under `Missing` — M was uploaded by an
+/// earlier session but never consumed, and the replaced value is absent
+/// — so the packmap is refused and writes nothing.
 #[test]
-fn packmap_prev_must_be_known() {
+fn packmap_prev_must_equal_the_replaced_value() {
     let (pipe, _, kv) = multi_pipeline([Namespace::Ed25519(OWNER)], Sharding::Single, Hooks::new());
     let repo = peer_repo(OWNER, "room-a");
     let repo_id = peer_repo_id(OWNER, "room-a");
@@ -2538,17 +2760,18 @@ fn packmap_prev_must_be_known() {
     assert!(o_rows(&kv, &root(&repo_id.namespace)).is_empty());
 }
 
-/// The `prev` acceptance cases (Test 11): `prev` pending in the same
-/// session, or already a member, is accepted.
+/// `prev` must equal the value the write replaces, not merely be known
+/// (Test 11): N1 is a member — planted here — but the packmap still
+/// points at N0, so `prev = N1` under `Match(N0)` is refused and the
+/// ref keeps N0.
 #[test]
-fn packmap_prev_pending_or_member_is_accepted() {
+fn packmap_prev_member_but_not_current_is_refused() {
     let (pipe, _, kv) = multi_pipeline([Namespace::Ed25519(OWNER)], Sharding::Single, Hooks::new());
     let repo = peer_repo(OWNER, "room-a");
     let repo_id = peer_repo_id(OWNER, "room-a");
     let (data, data_id) = valid_pack();
-    let (l1_bytes, l1_id) = mkpl(&[data_id]);
-    // L2 links to L1 while both are still pending in this session.
-    let (l2_bytes, l2_id) = mkpl_prev(l1_id, &[data_id]);
+    let (n0_bytes, n0_id) = mkpl(&[data_id]);
+    // Session 1 commits packmap = N0.
     let (end, frames) = peer_run(
         &pipe,
         OWNER,
@@ -2556,23 +2779,102 @@ fn packmap_prev_pending_or_member_is_accepted() {
         [
             upload_header(&data_id, Some(data.len() as u64)),
             chunk(&data_id, Some(0), &data, true),
-            upload_header(&l1_id, Some(l1_bytes.len() as u64)),
-            chunk(&l1_id, Some(0), &l1_bytes, true),
+            upload_header(&n0_id, Some(n0_bytes.len() as u64)),
+            chunk(&n0_id, Some(0), &n0_bytes, true),
+            update(PACKMAP, &n0_id, Some(RefExpectation::Missing), None),
+        ],
+    );
+    assert_eq!(end, SessionEnd::Clean);
+    assert!(matches!(frames[2].body, Some(Body::UpdateRefResponse(_))));
+    // N1 became a member some other way; it is not the packmap's value.
+    let n1_id = hash(b"a member that is not the current packmap");
+    block_on(kv.apply(
+        &root(&repo_id.namespace),
+        Batch::new().put(keys::membership(&repo_id.name, &n1_id), Value::default()),
+    ))
+    .unwrap();
+    // Session 2 uploads P2 and node N3 with prev = N1 under Match(N0).
+    let second = b"second pack bytes".to_vec();
+    let second_id = hash(&second);
+    let (n3_bytes, n3_id) = mkpl_prev(n1_id, &[second_id]);
+    let (end, frames) = peer_run(
+        &pipe,
+        OWNER,
+        &repo,
+        [
+            upload_header(&second_id, Some(second.len() as u64)),
+            chunk(&second_id, Some(0), &second, true),
+            upload_header(&n3_id, Some(n3_bytes.len() as u64)),
+            chunk(&n3_id, Some(0), &n3_bytes, true),
+            update(
+                PACKMAP,
+                &n3_id,
+                Some(RefExpectation::Match),
+                Some(&n0_id[..]),
+            ),
+        ],
+    );
+    assert_eq!(end, SessionEnd::Clean);
+    assert_error(
+        &frames[2],
+        ErrorCode::InvalidRequest,
+        "packmap names packs not uploaded to this repository",
+    );
+    // The refusal wrote nothing: the ref still points at N0, no
+    // membership for the session's packs, no `o` rows.
+    let stored = kv
+        .read(
+            &root(&repo_id.namespace),
+            &keys::ref_key(&repo_id.name, PACKMAP),
+        )
+        .unwrap();
+    assert_eq!(codec::decode_ref_id(&stored).unwrap(), n0_id);
+    assert!(!member(
+        &kv,
+        &root(&repo_id.namespace),
+        &repo_id.name,
+        &second_id
+    ));
+    assert!(!member(
+        &kv,
+        &root(&repo_id.namespace),
+        &repo_id.name,
+        &n3_id
+    ));
+}
+
+/// The `prev` acceptance cases (Test 11): `prev` absent on the first
+/// write, or `prev` equal to the value being replaced under `Match` or
+/// `Any`, commits.
+#[test]
+fn packmap_prev_equal_to_the_replaced_value_is_accepted() {
+    let (pipe, _, kv) = multi_pipeline([Namespace::Ed25519(OWNER)], Sharding::Single, Hooks::new());
+    let repo = peer_repo(OWNER, "room-a");
+    let repo_id = peer_repo_id(OWNER, "room-a");
+    let (data, data_id) = valid_pack();
+    // L2 starts the chain: `prev` absent under `Missing` commits.
+    let (l2_bytes, l2_id) = mkpl(&[data_id]);
+    let (end, frames) = peer_run(
+        &pipe,
+        OWNER,
+        &repo,
+        [
+            upload_header(&data_id, Some(data.len() as u64)),
+            chunk(&data_id, Some(0), &data, true),
             upload_header(&l2_id, Some(l2_bytes.len() as u64)),
             chunk(&l2_id, Some(0), &l2_bytes, true),
             update(PACKMAP, &l2_id, Some(RefExpectation::Missing), None),
         ],
     );
     assert_eq!(end, SessionEnd::Clean);
-    assert!(matches!(frames[3].body, Some(Body::UpdateRefResponse(_))));
+    assert!(matches!(frames[2].body, Some(Body::UpdateRefResponse(_))));
     assert!(member(
         &kv,
         &root(&repo_id.namespace),
         &repo_id.name,
         &l2_id
     ));
-    // The next push's node M2 names the committed node L2 as `prev`;
-    // membership makes it known.
+    // M2 appends: `prev = L2` equals the value `Match(L2)` replaces.
     let second = b"second pack bytes".to_vec();
     let second_id = hash(&second);
     let (m2_bytes, m2_id) = mkpl_prev(l2_id, &[second_id]);
@@ -2601,6 +2903,319 @@ fn packmap_prev_pending_or_member_is_accepted() {
         &repo_id.name,
         &m2_id
     ));
+    // M3 appends under `Any`: `prev = M2` is the current value.
+    let third = b"third pack bytes".to_vec();
+    let third_id = hash(&third);
+    let (m3_bytes, m3_id) = mkpl_prev(m2_id, &[third_id]);
+    let (end, frames) = peer_run(
+        &pipe,
+        OWNER,
+        &repo,
+        [
+            upload_header(&third_id, Some(third.len() as u64)),
+            chunk(&third_id, Some(0), &third, true),
+            upload_header(&m3_id, Some(m3_bytes.len() as u64)),
+            chunk(&m3_id, Some(0), &m3_bytes, true),
+            update(PACKMAP, &m3_id, Some(RefExpectation::Any), None),
+        ],
+    );
+    assert_eq!(end, SessionEnd::Clean);
+    assert!(matches!(frames[2].body, Some(Body::UpdateRefResponse(_))));
+    let stored = kv
+        .read(
+            &root(&repo_id.namespace),
+            &keys::ref_key(&repo_id.name, PACKMAP),
+        )
+        .unwrap();
+    assert_eq!(codec::decode_ref_id(&stored).unwrap(), m3_id);
+    assert!(member(
+        &kv,
+        &root(&repo_id.namespace),
+        &repo_id.name,
+        &m3_id
+    ));
+}
+
+/// Under `Any` the `prev` check reads the current value and the plan
+/// guards it (Test 11): a concurrent move between check and apply
+/// surfaces as an ordinary CAS conflict — the pending set is kept, and
+/// a retry naming `prev = current` commits.
+#[test]
+fn packmap_any_guard_conflict_keeps_pending() {
+    let clock = Arc::new(ManualClock::new(T0));
+    let kv = SharedKv(Arc::new(MemoryKv::with_clock(clock.clone())));
+    let (pipe, _) = multi_pipeline_on(
+        [Namespace::Ed25519(OWNER)],
+        Sharding::Single,
+        Hooks::new(),
+        kv.clone(),
+        clock,
+    );
+    let repo = peer_repo(OWNER, "room-a");
+    let repo_id = peer_repo_id(OWNER, "room-a");
+    let (data, data_id) = valid_pack();
+    let (l2_bytes, l2_id) = mkpl(&[data_id]);
+    // Session 1 commits packmap = L2.
+    let (end, _) = peer_run(
+        &pipe,
+        OWNER,
+        &repo,
+        [
+            upload_header(&data_id, Some(data.len() as u64)),
+            chunk(&data_id, Some(0), &data, true),
+            upload_header(&l2_id, Some(l2_bytes.len() as u64)),
+            chunk(&l2_id, Some(0), &l2_bytes, true),
+            update(PACKMAP, &l2_id, Some(RefExpectation::Missing), None),
+        ],
+    );
+    assert_eq!(end, SessionEnd::Clean);
+    // Session 2 runs over a store that bumps the packmap to `bumped`
+    // between the `Any` check's read and the batch apply.
+    let bumped = hash(b"concurrent packmap");
+    let bumping = BumpingKv::packmap(kv.clone(), &repo_id, bumped);
+    let (pipe2, _) = multi_pipeline_on(
+        [Namespace::Ed25519(OWNER)],
+        Sharding::Single,
+        Hooks::new(),
+        bumping.clone(),
+        Arc::new(ManualClock::new(T0)),
+    );
+    bumping.arm();
+    let second = b"second pack bytes".to_vec();
+    let second_id = hash(&second);
+    let (m2_bytes, m2_id) = mkpl_prev(l2_id, &[second_id]);
+    // The retry names prev = the moved value under Match.
+    let (m3_bytes, m3_id) = mkpl_prev(bumped, &[second_id]);
+    let (end, frames) = peer_run(
+        &pipe2,
+        OWNER,
+        &repo,
+        [
+            upload_header(&second_id, Some(second.len() as u64)),
+            chunk(&second_id, Some(0), &second, true),
+            upload_header(&m2_id, Some(m2_bytes.len() as u64)),
+            chunk(&m2_id, Some(0), &m2_bytes, true),
+            update(PACKMAP, &m2_id, Some(RefExpectation::Any), None),
+            upload_header(&m3_id, Some(m3_bytes.len() as u64)),
+            chunk(&m3_id, Some(0), &m3_bytes, true),
+            update(
+                PACKMAP,
+                &m3_id,
+                Some(RefExpectation::Match),
+                Some(&bumped[..]),
+            ),
+        ],
+    );
+    assert_eq!(end, SessionEnd::Clean);
+    let e = error(&frames[2]);
+    assert!(e.code.is_some_and(|c| c == ErrorCode::InvalidRequest));
+    assert_eq!(
+        e.message.as_deref(),
+        Some("ref update conflict: expectation does not match current ref value")
+    );
+    assert!(matches!(frames[4].body, Some(Body::UpdateRefResponse(_))));
+    // The conflict consumed nothing; the retry consumed the kept pending
+    // uploads against the moved ref.
+    assert!(member(
+        &kv,
+        &root(&repo_id.namespace),
+        &repo_id.name,
+        &second_id
+    ));
+    assert!(member(
+        &kv,
+        &root(&repo_id.namespace),
+        &repo_id.name,
+        &m3_id
+    ));
+    let stored = kv
+        .read(
+            &root(&repo_id.namespace),
+            &keys::ref_key(&repo_id.name, PACKMAP),
+        )
+        .unwrap();
+    assert_eq!(codec::decode_ref_id(&stored).unwrap(), m3_id);
+}
+
+/// B10 refuses a listed pack that is a pending packlist upload — a
+/// packlist node is not a pack (Test 11): N2 lists N1, and N1 is itself
+/// an MKPL this session uploaded, so the write is refused even though
+/// N1 is pending.
+#[test]
+fn packmap_listing_a_pending_packlist_is_refused() {
+    let (pipe, _, kv) = multi_pipeline([Namespace::Ed25519(OWNER)], Sharding::Single, Hooks::new());
+    let repo = peer_repo(OWNER, "room-a");
+    let repo_id = peer_repo_id(OWNER, "room-a");
+    // N1 lists a ghost pack that was never uploaded; N2 lists N1.
+    let ghost = hash(b"never uploaded");
+    let (n1_bytes, n1_id) = mkpl(&[ghost]);
+    let (n2_bytes, n2_id) = mkpl(&[n1_id]);
+    let (end, frames) = peer_run(
+        &pipe,
+        OWNER,
+        &repo,
+        [
+            upload_header(&n1_id, Some(n1_bytes.len() as u64)),
+            chunk(&n1_id, Some(0), &n1_bytes, true),
+            upload_header(&n2_id, Some(n2_bytes.len() as u64)),
+            chunk(&n2_id, Some(0), &n2_bytes, true),
+            update(PACKMAP, &n2_id, Some(RefExpectation::Missing), None),
+        ],
+    );
+    assert_eq!(end, SessionEnd::Clean);
+    assert!(matches!(frames[0].body, Some(Body::UploadPackResponse(_))));
+    assert!(matches!(frames[1].body, Some(Body::UploadPackResponse(_))));
+    assert_error(
+        &frames[2],
+        ErrorCode::InvalidRequest,
+        "packmap names packs not uploaded to this repository",
+    );
+    assert!(
+        kv.read(
+            &root(&repo_id.namespace),
+            &keys::ref_key(&repo_id.name, PACKMAP)
+        )
+        .is_none()
+    );
+    assert!(!member(
+        &kv,
+        &root(&repo_id.namespace),
+        &repo_id.name,
+        &n2_id
+    ));
+}
+
+/// More than `MAX_IMPLICIT_LISTED_PACKS` listed packs refuse before any
+/// membership read (L1).
+#[test]
+fn packmap_listing_too_many_packs_is_refused_without_membership_reads() {
+    let clock = Arc::new(ManualClock::new(T0));
+    let kv = SharedKv(Arc::new(MemoryKv::with_clock(clock.clone())));
+    let counting = CountingKv::wrap(kv.clone());
+    let (pipe, _) = multi_pipeline_on(
+        [Namespace::Ed25519(OWNER)],
+        Sharding::Single,
+        Hooks::new(),
+        counting.clone(),
+        clock,
+    );
+    let repo = peer_repo(OWNER, "room-a");
+    let repo_id = peer_repo_id(OWNER, "room-a");
+    // 1,025 ids over the 1,024 cap; none are uploaded or members.
+    let packs: Vec<Hash> = (0..1025u16).map(|i| hash(&i.to_be_bytes())).collect();
+    let (node_bytes, node_id) = mkpl(&packs);
+    let (end, frames) = peer_run(
+        &pipe,
+        OWNER,
+        &repo,
+        [
+            upload_header(&node_id, Some(node_bytes.len() as u64)),
+            chunk(&node_id, Some(0), &node_bytes, true),
+            update(PACKMAP, &node_id, Some(RefExpectation::Missing), None),
+        ],
+    );
+    assert_eq!(end, SessionEnd::Clean);
+    assert_error(
+        &frames[1],
+        ErrorCode::InvalidRequest,
+        "packmap names packs not uploaded to this repository",
+    );
+    assert_eq!(
+        counting.member_reads(),
+        0,
+        "the cap refuses before any membership read"
+    );
+    assert!(
+        kv.read(
+            &root(&repo_id.namespace),
+            &keys::ref_key(&repo_id.name, PACKMAP)
+        )
+        .is_none()
+    );
+}
+
+/// An empty pending set builds no `ImplicitConsume` (L2): under D34 a
+/// member-only consuming packmap write plans the same batch shape as an
+/// ordinary `UpdateRef` — its own ref put and ref-index relay, no
+/// membership rows, no extra outbox work.
+#[test]
+fn empty_pending_consume_plans_no_membership_work() {
+    fn shape(batch: &Batch) -> Vec<u8> {
+        let mut tags: Vec<u8> = batch
+            .writes
+            .iter()
+            .map(|w| match w {
+                Write::Put(k, _) | Write::Delete(k) => k.as_bytes()[0],
+            })
+            .collect();
+        tags.sort_unstable();
+        tags
+    }
+
+    let clock = Arc::new(ManualClock::new(T0));
+    let kv = SharedKv(Arc::new(MemoryKv::with_clock(clock.clone())));
+    let recording = RecordingKv::wrap(kv.clone());
+    let (pipe, _) = multi_pipeline_on(
+        [Namespace::Ed25519(OWNER)],
+        Sharding::D34,
+        Hooks::new(),
+        recording.clone(),
+        clock,
+    );
+    let repo = peer_repo(OWNER, "room-a");
+    // Session 1 commits packmap = M1, consuming `data`.
+    let (data, data_id) = valid_pack();
+    let (m1_bytes, m1_id) = mkpl(&[data_id]);
+    let (end, _) = peer_run(
+        &pipe,
+        OWNER,
+        &repo,
+        [
+            upload_header(&data_id, Some(data.len() as u64)),
+            chunk(&data_id, Some(0), &data, true),
+            upload_header(&m1_id, Some(m1_bytes.len() as u64)),
+            chunk(&m1_id, Some(0), &m1_bytes, true),
+            update(PACKMAP, &m1_id, Some(RefExpectation::Missing), None),
+        ],
+    );
+    assert_eq!(end, SessionEnd::Clean);
+    // Session 2 uploads nothing: the pending set is empty. A packmap
+    // rewrite of the member node M1, then an ordinary head write.
+    recording.take();
+    let (end, frames) = peer_run(
+        &pipe,
+        OWNER,
+        &repo,
+        [
+            update(
+                PACKMAP,
+                &m1_id,
+                Some(RefExpectation::Match),
+                Some(&m1_id[..]),
+            ),
+            update(BRANCH, &data_id, Some(RefExpectation::Any), None),
+        ],
+    );
+    assert_eq!(end, SessionEnd::Clean);
+    assert!(
+        frames
+            .iter()
+            .all(|f| matches!(f.body, Some(Body::UpdateRefResponse(_))))
+    );
+    let batches = recording.take();
+    assert!(batches.len() >= 2, "one batch per ref write: {batches:?}");
+    let (packmap_batch, head_batch) = (&batches[batches.len() - 2], &batches[batches.len() - 1]);
+    assert_eq!(
+        shape(packmap_batch),
+        shape(head_batch),
+        "an empty consume plans exactly the ref write's own work"
+    );
+    assert!(
+        !packmap_batch.writes.iter().any(|w| match w {
+            Write::Put(k, _) | Write::Delete(k) => k.as_bytes().starts_with(b"m\0"),
+        }),
+        "no membership puts: {batches:?}"
+    );
 }
 
 /// A peer writes only its own namespace (Test 12): a bound repository in

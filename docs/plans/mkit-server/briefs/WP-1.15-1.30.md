@@ -94,6 +94,7 @@ payments.
 - **B9. Implicit session tickets** (ssh and enc sessions against a Multi or namespaced pipeline):
   - A successful `UploadPack` adds `(pack_id, bytes)` to a per-session pending set, deduplicated by pack. At most 7
     are pending: an 8th upload is refused at its header with a fixed error frame.
+    [Executor note: the eighth upload is decided at its header, and its error frame is sent after its bounded drain.]
   - The next `UpdateRef` of `refs/mkit/packmap/<x>` with a new value consumes **all** pending packs, with no
     admission:
     - the packmap CAS;
