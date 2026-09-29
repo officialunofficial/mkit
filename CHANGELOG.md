@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **WP-1.21 (Stage 2):** default-off Worker published ref-index snapshots with bounded binary envelopes,
+  atomic debounce/generations, private R2/Cache serving after coordinator authorization, signed bypass,
+  inspection refusal and live fallback; existing Stage 1 entrypoints stay inert.
+
+
 - Server: built-in ref policy (SPEC-SERVER §9.7, programmatic, Stage 2):
   `PipelineConfig::ref_policy` with per-ref allowed operation signers (both
   modes) and fast-forward-only rules (indexed mode). In indexed mode a

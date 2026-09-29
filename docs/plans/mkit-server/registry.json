@@ -995,7 +995,7 @@
   },
   {
     "id": "1.21",
-    "title": "Worker: published-view ref snapshots per ref-index bucket (R2/Cache, debounced) for readers",
+    "title": "Worker: published-view ref snapshots (R-175; Stage 2, inert in Stage 1)",
     "milestone": "M1",
     "track": "worker",
     "depends_on": [
@@ -1004,7 +1004,7 @@
       "1.8"
     ],
     "size": "M",
-    "summary": "Serves unsigned ListRefs (and opt-in unsigned ReadRef) from per-ref-index-bucket R2 snapshots fronted by the Cache API, written by the bucket's shard with debouncing so no R2 key is rewritten more than about once per second. Hot namespaces don't load their DOs; push CAS always reads the ref shard.",
+    "summary": "Default-off published-view feature, programmatic None config and explicit fetch/DO entrypoints. Authorized anonymous ListRefs uses bounded per-bucket private R2/Cache snapshots (no ref-index DO calls on hits, one authoritative coordinator call); signed/private reads bypass them. Kind 10 seeds atomically with bucket-local generations; ETag and 1s spacing, finite validity/refresh, inspection refusal, read/alarm budgets. CPU probe is local; production remeasurement is post-REL ops.",
     "human_action": false,
     "area_gates": [
       "rust",

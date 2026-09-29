@@ -614,6 +614,8 @@ ContentIndex/export/hooks → M0-02b, unary pipeline → M0-05a, streaming/fault
 
 ---
 
+| R-175 | WP-1.21 published-view snapshots (Stage 2) | Default-off `published-view` in core/Worker; `WorkerConfig.published_view: Option<PublishedViewConfig>` parses as `None`. Explicit configured fetch/DO entrypoints only; vcs-worker entrypoints, bindings and routes unchanged. Binary v1 envelopes bind full RefIndex identity, bucket-local generation, capture/deadline and sorted full names/raw 32-byte ids; percent-encoded R2 components, deployment/version-bound BLAKE3 Cache keys. 64 rows/32 KiB, 60 s validity, 30 s quiet refresh, 1 s cache/debounce. SQL target-local extension runs after guards inside the relay apply; three reserved operations and completion-generation guards. Older generations refused, ETag conflicts retried on a later timer, storage replacement timestamps survive crash-after-put spacing. Coordinator authorization precedes anonymous snapshots; signed reads go live, private publication is skipped/cleaned up, no visibility cache/raw route. Inspection configured refuses live fallback until 5.4/5.5. Read budget is 49 + one hook, cold guard requests go live; configured RefIndex alarm has one snapshot fire and eight calls including backup across heads; RefShard 32+1+8+8 stays fixed. Configured ListRefs caps pages at 128 refs. Optimized local workerd/V8 probe on the shared Mac: 30 requests over 928 long refs/496,422 snapshot bytes, 128 refs/73,573 bytes per page; sampled active 42.45 ms (Wasm 13.62 ms), wall 48.59 ms/request (probe README). Free production CPU is unproven; production CPU/resource sizing is remeasured after REL-1 before activation. | 1.21, 5.4, 5.5 |
+
 ## 6. Human-action checklist
 
 | When | WP | Action | Who / needs |

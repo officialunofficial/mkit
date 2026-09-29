@@ -22,7 +22,9 @@ pub(crate) struct ListPage {
     pub(crate) next: Option<Vec<u8>>,
 }
 
-pub(super) struct Scan {
+/// One bounded bucket scan.
+#[derive(Debug)]
+pub struct Scan {
     pub rows: Vec<(String, Hash)>,
     pub more: bool,
 }
@@ -32,7 +34,7 @@ pub(super) struct Scan {
 /// means additional rows may remain beyond the last fetched key, and
 /// requires at least one row: a scan with `more` and no rows fails the page
 /// as `Corrupt`.
-pub(super) trait BucketSource {
+pub trait BucketSource {
     fn scan(
         &self,
         repo: &RepoId,
@@ -83,7 +85,9 @@ impl<N: NamespaceStore> BucketSource for RefBucket<'_, N> {
     }
 }
 
-pub(super) struct IndexBucket<'a, N> {
+/// Validated D34 ref-index source.
+#[derive(Debug)]
+pub struct IndexBucket<'a, N> {
     pub store: &'a N,
     pub partition: &'a Partition,
 }

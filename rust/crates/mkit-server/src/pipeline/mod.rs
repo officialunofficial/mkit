@@ -36,10 +36,12 @@ mod http;
 mod implicit;
 mod info;
 mod lease;
-mod list;
+pub mod list;
 mod outcome;
 mod parts;
 mod plan;
+#[cfg(feature = "published-view")]
+pub mod published;
 mod ref_policy;
 mod reservation;
 mod revocation;
@@ -430,6 +432,8 @@ impl core::fmt::Debug for VisibilityRequest {
 
 /// The request pipeline over blobs `B`, metadata `N` and hooks `H`.
 pub struct Pipeline<B, N, H = Hooks> {
+    #[cfg(feature = "published-view")]
+    published: Option<Arc<dyn published::PublishedSource>>,
     blobs: B,
     meta: N,
     hooks: H,
@@ -750,6 +754,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             .as_ref()
             .map(crate::http_objects::HttpSeams::new);
         Ok(Self {
+            #[cfg(feature = "published-view")]
+            published: None,
             blobs,
             meta,
             hooks,
@@ -843,6 +849,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         sibling.faults.clone_from(&self.faults);
         #[cfg(feature = "http-objects")]
         sibling.http_seams.clone_from(&self.http_seams);
+        #[cfg(feature = "published-view")]
+        sibling.published.clone_from(&self.published);
         Ok(sibling)
     }
 
@@ -942,6 +950,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
 
     /// One bounded `ListRefs` page. The token is opaque core bytes; the
     /// Connect binding encodes it as unpadded base64url.
+    #[allow(clippy::too_many_lines)] // One authorized listing with shared token and response bounds.
     pub(crate) async fn list_refs_page(
         &self,
         a: &Authenticated,
@@ -996,6 +1005,20 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 requested.min(self.cfg.max_list_refs_page_size)
             };
             let partitions = self.shards.ref_index_partitions(&op.repo);
+            #[cfg(feature = "published-view")]
+            let source = self.published.as_deref().filter(|_| {
+                self.visibility_gates_reads()
+                    && op.auth.is_none()
+                    && matches!(op.principal, Principal::Anonymous)
+            });
+            #[cfg(feature = "published-view")]
+            if self
+                .published
+                .as_ref()
+                .is_some_and(|s| s.inspection_configured())
+            {
+                return Err(ServerError::unavailable("published view unavailable"));
+            }
             let result = if partitions.len() == 1 {
                 let bucket = list::RefBucket {
                     store: &self.meta,
@@ -1011,6 +1034,17 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 )
                 .await
             } else {
+                #[cfg(feature = "published-view")]
+                let buckets = partitions
+                    .iter()
+                    .map(|partition| published::ReaderBucket {
+                        store: &self.meta,
+                        partition,
+                        source,
+                        now_ms: ms(self.clock.now_ms()),
+                    })
+                    .collect::<Vec<_>>();
+                #[cfg(not(feature = "published-view"))]
                 let buckets = partitions
                     .iter()
                     .map(|partition| list::IndexBucket {
@@ -1042,6 +1076,14 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         .await
     }
 
+    /// Attach an explicit published reader source (Stage 2 only).
+    #[cfg(feature = "published-view")]
+    #[must_use]
+    pub fn with_published_source(mut self, source: Arc<dyn published::PublishedSource>) -> Self {
+        self.published = Some(source);
+        self
+    }
+
     /// One ref's id, if it exists.
     ///
     /// # Errors
@@ -1060,6 +1102,26 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             check_ref_name(name)?;
             let op = self.identify(a, kind)?;
             self.authorize_read(&op).await?;
+            #[cfg(feature = "published-view")]
+            if let Some(source) = &self.published {
+                if source.inspection_configured() {
+                    return Err(ServerError::unavailable("published view unavailable"));
+                }
+                if self.visibility_gates_reads()
+                    && op.auth.is_none()
+                    && matches!(op.principal, Principal::Anonymous)
+                    && source.read_ref_enabled()
+                {
+                    let partition = self.shards.ref_index(&op.repo, name);
+                    if let Some(rows) = source
+                        .bucket(&op.repo, &partition, ms(self.clock.now_ms()))
+                        .await
+                        .map_err(meta_error)?
+                    {
+                        return Ok(rows.into_iter().find(|(n, _)| n == name).map(|(_, id)| id));
+                    }
+                }
+            }
             let p = self.shards.ref_shard(&op.repo, name);
             read::read_ref(&self.meta, &p, &op.repo.name, name)
                 .await

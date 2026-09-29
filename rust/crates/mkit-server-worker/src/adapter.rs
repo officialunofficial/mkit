@@ -206,6 +206,9 @@ pub struct WorkerConfig {
     /// call the hook Worker over the `ADMISSION_HOOK` service binding. `None`
     /// runs the built-in hooks (WP-3.9).
     pub hooks: Option<crate::hooks::config::HookVars>,
+    /// Stage 2 only, programmatic opt-in; environment parsing always leaves None.
+    #[cfg(feature = "published-view")]
+    pub published_view: Option<crate::published_view::PublishedViewConfig>,
     /// `TEST_QUOTA_OPS`, `TEST_QUOTA_BYTES` and `TEST_QUOTA_WINDOW_MS`,
     /// when all three are set: the write quota instead of the default
     /// (`test-faults` builds only, for the wire suite's quota and growth
@@ -246,6 +249,16 @@ impl WorkerConfig {
         use mkit_server::pipeline::{AuthMode, PipelineConfig};
         use mkit_server::upload::UploadLimits;
 
+        #[cfg(feature = "published-view")]
+        if let Some(config) = &self.published_view {
+            crate::published_view::PublishedViewConfig::new(config.deployment.clone())
+                .map_err(|e| ConfigError(e.to_string()))?;
+            if self.sharding != Sharding::D34
+                || !matches!(self.addressing, mkit_server::Addressing::Multi(_))
+            {
+                return Err(ConfigError("published-view requires Multi and D34".into()));
+            }
+        }
         let bad = |e: &dyn core::fmt::Display| ConfigError(e.to_string());
         // Under multi addressing the signed repository is the request's,
         // not a configured one: the empty bound the conformance baseline
@@ -259,6 +272,10 @@ impl WorkerConfig {
         };
         let mut config =
             PipelineConfig::new(self.addressing.clone(), AuthMode::AuthV2(auth), limits);
+        #[cfg(feature = "published-view")]
+        if self.published_view.is_some() {
+            config.max_list_refs_page_size = config.max_list_refs_page_size.min(128);
+        }
         config.single_upload_max_bytes = Some(SINGLE_PUT_MAX_BYTES);
         config.sharding = self.sharding;
         config.ticket_keys.clone_from(&self.ticket_keys);
@@ -359,6 +376,8 @@ impl WorkerConfig {
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
             blob_binding: crate::r2::STORAGE_BINDING,
             hooks: crate::hooks::config::HookVars::parse(&var)?,
+            #[cfg(feature = "published-view")]
+            published_view: None,
             #[cfg(feature = "test-faults")]
             test_quota: test_quota(&var)?,
         })
@@ -1459,6 +1478,8 @@ mod faults {
 
 #[cfg(target_arch = "wasm32")]
 pub use glue::{fetch, fetch_with, ns_object, ns_object_with, serve, serve_with};
+#[cfg(all(target_arch = "wasm32", feature = "published-view"))]
+pub use glue::{fetch_configured, ns_object_configured};
 
 #[cfg(target_arch = "wasm32")]
 mod glue {
@@ -1545,6 +1566,12 @@ mod glue {
             StubTransport::new(env.clone(), cfg.placement.clone()),
             cfg.probe_partition(),
         );
+        #[cfg(feature = "published-view")]
+        let meta = if cfg.published_view.is_some() {
+            meta.with_apply_reserve(3)
+        } else {
+            meta
+        };
         #[cfg(feature = "test-faults")]
         let faulted = blobs.clone();
         let pipe = Pipeline::new(
@@ -1556,6 +1583,17 @@ mod glue {
             Arc::new(ConsoleMetrics::default()),
         )
         .map_err(|e| bad(&e))?;
+        #[cfg(feature = "published-view")]
+        let pipe = if let Some(config) = cfg.published_view.clone() {
+            pipe.with_published_source(crate::published_view::shared_reader(
+                crate::published_view::WorkerSnapshotBucket(env.clone()),
+                crate::published_view::WorkerCache,
+                config,
+                Arc::new(WorkerClock),
+            ))
+        } else {
+            pipe
+        };
         #[cfg(feature = "test-faults")]
         let pipe = pipe.with_faults(super::WorkerFaults::new(test::fault_state(), move || {
             faulted.fail_final_chunk_once();
@@ -1596,6 +1634,22 @@ mod glue {
     /// Only when the runtime fails to build a response.
     pub async fn fetch(req: Request, env: Env) -> worker::Result<Response> {
         fetch_with(req, env, hooks_from_env).await
+    }
+
+    /// Explicit Stage 2 fetch entry point. No environment variable enables snapshots.
+    #[cfg(feature = "published-view")]
+    pub async fn fetch_configured(
+        req: Request,
+        env: Env,
+        config: crate::published_view::PublishedViewConfig,
+    ) -> worker::Result<Response> {
+        match WorkerConfig::from_env(&env) {
+            Ok(mut cfg) => {
+                cfg.published_view = Some(config);
+                serve_with(req, env, &cfg, hooks_from_env).await
+            }
+            Err(e) => Ok(cors(json_response(unavailable_json(&e.0), 503)?)),
+        }
     }
 
     /// [`fetch`] over hooks built by `make_hooks` from `env` and the parsed
@@ -1659,6 +1713,8 @@ mod glue {
         let multi = matches!(cfg.addressing, mkit_server::Addressing::Multi(_));
         let cached =
             SHARDING_GUARD.with(|cache| Settled::cached(cache, cfg.sharding, multi, jurisdiction));
+        #[cfg(feature = "published-view")]
+        let snapshot_warm = cached.is_some();
         let checked = if let Some(outcome) = cached {
             outcome.into_result()
         } else {
@@ -1696,6 +1752,24 @@ mod glue {
             let body = body_too_large_json(cfg.max_body_bytes);
             return Ok(cors(json_response(body, 400)?));
         }
+        // Cold guard discovery can spend additional DO calls. Use the live
+        // path for that request, keeping its Free-plan total below 50. An
+        // inspection refusal must survive even on the cold request.
+        #[cfg(feature = "published-view")]
+        let cold_cfg = if !snapshot_warm
+            && cfg
+                .published_view
+                .as_ref()
+                .is_some_and(|c| !c.inspection_configured)
+        {
+            let mut cfg = cfg.clone();
+            cfg.published_view = None;
+            Some(cfg)
+        } else {
+            None
+        };
+        #[cfg(feature = "published-view")]
+        let cfg = cold_cfg.as_ref().unwrap_or(cfg);
         let pipe = match make_hooks(&env, cfg).and_then(|hooks| pipeline(&env, cfg, hooks)) {
             Ok(pipe) => pipe,
             Err(e) => return Ok(cors(json_response(unavailable_json(&e.0), 503)?)),
@@ -1777,6 +1851,41 @@ mod glue {
         O: OutcomeSink + 'static,
         F: FnOnce(&Env, &WorkerConfig) -> Result<O, ConfigError>,
     {
+        ns_object_inner(state, env, class, make_sink, None)
+    }
+
+    /// Explicit Stage 2 DO construction, paired with fetch_configured.
+    #[cfg(feature = "published-view")]
+    #[must_use]
+    pub fn ns_object_configured(
+        state: State,
+        env: &Env,
+        class: crate::classes::ShardClass,
+        config: crate::published_view::PublishedViewConfig,
+    ) -> NsObject {
+        ns_object_inner(
+            state,
+            env,
+            class,
+            |env, cfg| crate::hooks::build::sink_from_env(env, cfg),
+            Some(config),
+        )
+    }
+
+    fn ns_object_inner<O, F>(
+        state: State,
+        env: &Env,
+        class: crate::classes::ShardClass,
+        make_sink: F,
+        #[cfg(feature = "published-view")] published_view: Option<
+            crate::published_view::PublishedViewConfig,
+        >,
+        #[cfg(not(feature = "published-view"))] _published_view: Option<()>,
+    ) -> NsObject
+    where
+        O: OutcomeSink + 'static,
+        F: FnOnce(&Env, &WorkerConfig) -> Result<O, ConfigError>,
+    {
         install();
         let plan = env.var(PLAN_VAR).ok().map(|v| v.to_string());
         let capacity = plan_capacity(plan.as_deref()).unwrap_or_else(|(e, free)| {
@@ -1784,6 +1893,11 @@ mod glue {
             free
         });
         let cfg = WorkerConfig::from_env(env);
+        #[cfg(feature = "published-view")]
+        let cfg = cfg.map(|mut cfg| {
+            cfg.published_view = published_view.clone();
+            cfg
+        });
         let target = cfg.as_ref().map_err(Clone::clone).map(|cfg| {
             let probe = cfg.probe_partition();
             WorkerNamespaceStore::new(
@@ -1791,6 +1905,16 @@ mod glue {
                 probe,
             )
         });
+        #[cfg(feature = "published-view")]
+        let target = target.map(|store| {
+            if published_view.is_some() {
+                store.with_apply_reserve(3)
+            } else {
+                store
+            }
+        });
+        #[cfg(feature = "published-view")]
+        let snapshot_target = target.clone();
         // The audience the sink names (the hook client's `server_audience`)
         // is the one kind 8 stamps on outcomes: `outcome_audience`, once.
         let (audience, sink) = match &cfg {
@@ -1835,22 +1959,55 @@ mod glue {
                 None
             }
         });
+        #[cfg(feature = "published-view")]
+        let snapshot_alarm = published_view
+            .as_ref()
+            .filter(|c| !c.inspection_configured)
+            .filter(|_| {
+                class == crate::classes::ShardClass::RepoIndexShard && snapshot_target.is_ok()
+            })
+            .map(|_| crate::published_view::SnapshotAlarm::default());
         let registry = if let Some(config) = backup.clone() {
             // Free-plan alarm budget: relay 32 + this handler's single R2 put
             // 1 + outcome delivery <= 8 + quota rollup <= 8 = 49 of 50 (see
             // `outcome_budget`; each remote hook call is one service-binding
             // subrequest). Kind 9 makes no external calls.
-            registry.register(BackupHandler::new(
-                EnvBucket::new(env.clone(), BACKUPS_BINDING),
-                config,
-            ))
+            let handler = BackupHandler::new(EnvBucket::new(env.clone(), BACKUPS_BINDING), config);
+            #[cfg(feature = "published-view")]
+            if let Some(alarm) = &snapshot_alarm {
+                registry.register(crate::published_view::AlarmLimited {
+                    handler,
+                    alarm: alarm.clone(),
+                })
+            } else {
+                registry.register(handler)
+            }
+            #[cfg(not(feature = "published-view"))]
+            registry.register(handler)
         } else {
             registry.register(BackupDrain)
+        };
+        #[cfg(feature = "published-view")]
+        let registry = if let (Some(alarm), Ok(coordinator)) = (&snapshot_alarm, snapshot_target) {
+            registry.register(crate::published_view::SnapshotHandler {
+                bucket: crate::published_view::WorkerSnapshotBucket(env.clone()),
+                coordinator,
+                clock: Arc::new(WorkerClock),
+                alarm: alarm.clone(),
+            })
+        } else {
+            registry
         };
         let object = NsObject::new(state, class)
             .0
             .with_capacity(capacity)
             .with_registry(registry);
+        #[cfg(feature = "published-view")]
+        let object = if let Some(alarm) = snapshot_alarm {
+            object.with_published_view(alarm)
+        } else {
+            object
+        };
         if let Some(config) = backup {
             object.with_backup_interval(config.interval_ms)
         } else {

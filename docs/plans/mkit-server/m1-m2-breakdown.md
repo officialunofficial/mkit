@@ -457,23 +457,27 @@ Folded into WP-S1 §7.6/§7.8/§7.9 (adopted Q18 default). Every former dependen
 - **Tests:** 3-part pack with a fault after part 2, then resume; envelope parity against `auth-v2/part.json`.
 - **Size:** M (~900).
 
-### WP-1.21 Worker: published-view ref snapshot (R2/Cache) for readers
+### WP-1.21 Worker: published-view ref snapshot (R2/Cache) for readers (Stage 2)
 
-- **Depends on:** WP-1.28, WP-1.10, WP-1.8.
-- **Goal:** protect hot namespaces: snapshots of the published view (M1: equal to the live refs) **per ref-index
-  bucket** (R-73): each `RefIndex{bucket}` shard (16 per repo, hash-sharded) owns one R2 object
-  `snapshots/<ns>/<repo>/<bucket>` (versioned, conditional overwrite by version), fronted by the Cache API. The
-  bucket shard rewrites it from a **debounced** timer after the relay changes the bucket: at most one write per key
-  per second (R2 allows 1 write/s per key), coalescing every change since the last write; staleness is bounded by
-  the debounce interval (1 s default) plus relay lag. Unsigned `ListRefs` k-way merges the 16 bucket snapshots from
-  Cache/R2 (no DO call); private repos are dropped from the snapshots when the config cache (1.22) reports a
-  visibility change. Unsigned `ReadRef` is served from it only when the deployment opts in
-  (`READREF_FROM_SNAPSHOT`, default off until M2 signed reads let writers bypass it); push CAS always reads the ref
-  shard. Private repos are never snapshotted for anonymous readers (M2 enforces visibility).
-- **Tests:** snapshot freshness after an advance (within debounce + lag); version race keeps the newest; a burst of
-  100 advances to refs in one bucket produces ≤ ~1 R2 write/s for that key and no 429; hot-read load test on
-  staging (reads don't touch DOs); writers unaffected.
-- **Size:** M (~800).
+- **Depends on:** WP-1.28b, WP-1.10, WP-1.8 (R-175).
+- **Goal:** default-off `published-view` feature and explicit programmatic configuration. Each D34
+  `RefIndex` bucket on `RepoIndexShard` owns `snapshots/v1/<ns>/<repo>/<bucket>` in private R2.
+  Atomically seed kind 10 and bump a bucket-local generation with relay delivery; debounce 1 second,
+  conditional ETag replacement, one replacement/key/second, 64-row/32-KiB caps and live fallback.
+  Healthy staleness includes relay lag + debounce + Cache TTL (1 second): approximately relay lag +
+  2 seconds, not a numeric relay-delivery guarantee. Validity is 60 seconds, refreshed at 30 seconds.
+  Authorized anonymous ListRefs merges snapshots and live buckets with the existing token/2-MiB contract.
+  Hot reads make **no ref-index DO calls**, but retain the authoritative coordinator authorization call;
+  never cache visibility or authorization. Signed reads bypass snapshots; private repositories are skipped
+  and their obsolete snapshots removed. Unsigned ReadRef is programmatic opt-in, default off.
+  An inspection configuration refuses these reads until WP-5.4/5.5 supplies published values; no live fallback.
+- **Budget:** 16 × at most 3 bucket operations + coordinator = 49, reserving one read-hook call; no retries.
+  Cold deployment-guard discovery uses the live path. RefIndex alarms share one snapshot fire and an
+  eight-external-call cap with backup across all heads; the fixed RefShard 32+1+8+8 split is unchanged.
+- **Tests:** codec, routing, deletes/duplicate delivery, generations, debounce, conflicts/crashes,
+  interleaved upload, preserved wakes, cache failures/expiry, oversized fallback, mixed paging, privacy,
+  signed bypass, inspection refusal, call/heap bounds and local feature-on Worker CPU probe.
+- **Size:** M/L (bundled with 1.19, cap 2,500 production lines). No Stage 1 opt-in or app routes/bindings.
 
 ### WP-1.27 M1 conformance: D34, tickets and growth cases (wire + storage + load)
 
