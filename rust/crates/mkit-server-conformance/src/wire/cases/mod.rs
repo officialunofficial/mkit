@@ -373,10 +373,11 @@ cases! {
     "replay.advance_replay_equals_first_result" => replay::advance_replay_equals_first, M0, [AuthV2, Replay], [];
     "replay.upload_replay_succeeds" => replay::upload_replay_succeeds, M0, [AuthV2, Replay], [];
     "replay.expired_retry_rejected" => replay::expired_retry_rejected, M0, [AuthV2, Replay, TestFaults], [];
-    "quota.ops_exhaustion_resource_exhausted" => quota::ops_exhaustion, M0, [AuthV2, Quota], [];
-    "quota.bytes_exhaustion_resource_exhausted" => quota::bytes_exhaustion, M0, [AuthV2, Quota], [];
-    "quota.exhaustion_allocates_no_replay" => quota::exhaustion_allocates_no_replay, M0, [AuthV2, Replay, Quota], [];
-    "quota.replay_not_charged" => quota::replay_not_charged, M0, [AuthV2, Replay, Quota], [];
+    "quota.ops_exhaustion_resource_exhausted" => quota::ops_exhaustion, M0, [AuthV2, Quota], [MultiRepo];
+    "quota.bytes_exhaustion_resource_exhausted" => quota::bytes_exhaustion, M0, [AuthV2, Quota], [MultiRepo];
+    "quota.exhaustion_allocates_no_replay" => quota::exhaustion_allocates_no_replay, M0, [AuthV2, Replay, Quota], [MultiRepo];
+    "quota.replay_not_charged" => quota::replay_not_charged, M0, [AuthV2, Replay, Quota], [MultiRepo];
+    "quota.namespace_cap_after_rollup" => quota::namespace_cap_after_rollup, M1, [AuthV2, Quota, MultiRepo, TestFaults], [];
     "growth.replay_and_quota_pruned" => growth::replay_and_quota_pruned, M0, [AuthV2, Replay, Quota, TestFaults], [];
     "list.large_response_within_limit" => list::large_response_within_limit, M0, [], [];
     "list.paging_wire" => list::paging_wire, M0, [], [];

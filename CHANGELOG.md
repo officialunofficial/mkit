@@ -15,6 +15,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   head must be a member commit, remix or tag. API: `verify_ticketed` returns
   `StagedCommits`; `VerifiedAuth::created_at_ms` and
   `IndexedConfig::max_ancestry_commits` are new (WP-4.17).
+- **Breaking (server):** D34 is now the default sharding for Connect
+  deployments: `mkit-server serve --meta sqlite:<PATH>` without `--sharding`
+  runs `d34` (fs-layout stays `single`), `mkit-server restore` follows the
+  export's marker, and the Worker's unset `SHARDING` means `d34`
+  (`wrangler.jsonc` sets it). There is no migration: a database written
+  `single`, or written before `--sharding` existed and holding data, is
+  refused with `CONFIG_ERROR` (native; pass `--sharding single`) or answers
+  503 until `SHARDING="single"` is pinned (Worker). Under Single addressing the
+  default write quota is now counted per (signer, branch). The client skips a
+  listed branch that a stale `ListRefs` names after its delete (head and
+  packmap both absent) instead of failing with `PackmapMissing` (WP-1.28c).
+- Server: the Worker registers the kind-5 namespace quota rollup on its ref
+  shard, coordinator and root classes; the quota conformance cases run under
+  D34 (per-branch) and a Multi + D34 case checks the namespace cap across
+  branches after a forced rollup (WP-1.26b).
+- Server: `mkit-server serve` gains `--grant-schemes`, a repeatable
+  `--webauthn-rp <id=origin[,origin...]>` and the development-only
+  `--unsafe-allow-loopback-grants`; the Worker gains the `GRANT_SCHEMES` and
+  `WEBAUTHN_RPS` vars and a `test-faults`-only `UNSAFE_LOOPBACK_GRANTS`, to
+  configure write grants on Multi + auth v2 deployments. Any bad or partial
+  value refuses to start; unset keeps grants off (WP-1.30b).
 - Server: in indexed mode, extract every ChunkedBlob (as its reassembled content,
   with a chunk-offset sidecar) and every file Blob of at least 64 KiB into the
   deployment-wide object store under its object id, before a pack is marked

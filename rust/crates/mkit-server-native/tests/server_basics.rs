@@ -732,7 +732,7 @@ fn token_and_unsafe_are_mutually_exclusive() {
 }
 
 #[test]
-fn sharding_d34_requires_sqlite_and_defaults_to_single() {
+fn sharding_defaults_to_d34_with_sqlite_and_single_without() {
     use mkit_server::pipeline::Sharding;
 
     let root = common::repo_root();
@@ -747,7 +747,16 @@ fn sharding_d34_requires_sqlite_and_defaults_to_single() {
         common::resolve_with(&base, &[]).unwrap().pipeline.sharding,
         Sharding::Single
     );
-    for meta in [&[][..], &["--meta", "fs-layout"][..]] {
+    let fs_layout = ["--meta", "fs-layout"];
+    let fs_flags = [&base[..], &fs_layout].concat();
+    assert_eq!(
+        common::resolve_with(&fs_flags, &[])
+            .unwrap()
+            .pipeline
+            .sharding,
+        Sharding::Single
+    );
+    for meta in [&[][..], &fs_layout[..]] {
         let flags = [&base[..], meta, &["--sharding", "d34"]].concat();
         let err = common::resolve_with(&flags, &[]).unwrap_err();
         assert_eq!(err.code, exit::USAGE);
@@ -769,6 +778,12 @@ fn sharding_d34_requires_sqlite_and_defaults_to_single() {
         let cfg = common::resolve_with(&flags, &[]).unwrap();
         assert_eq!(cfg.pipeline.sharding, expected);
     }
+    let flags = [&base[..], &["--meta", &meta]].concat();
+    assert_eq!(
+        common::resolve_with(&flags, &[]).unwrap().pipeline.sharding,
+        Sharding::D34,
+        "the default with --meta sqlite is d34"
+    );
     assert!(!db.exists(), "config resolution performs no storage writes");
 }
 

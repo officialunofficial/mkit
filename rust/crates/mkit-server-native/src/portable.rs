@@ -304,7 +304,7 @@ pub fn restore(
     from: &Path,
     epoch_at_least: Option<u64>,
     allow_incomplete: bool,
-    sharding: ShardingArg,
+    sharding: Option<ShardingArg>,
 ) -> Result<(mkit_server::store::restore::RestoreReport, Vec<PathBuf>), CliError> {
     let dest = sqlite_path(meta, "restore")?;
     if dest.exists() {
@@ -316,8 +316,9 @@ pub fn restore(
     let (snapshots, skipped) = read_snapshots(from)?;
     let archived_mode = archive_sharding(&snapshots)?;
     let selected_mode = match sharding {
-        ShardingArg::Single => "single",
-        ShardingArg::D34 => "d34",
+        None => archived_mode,
+        Some(ShardingArg::Single) => "single",
+        Some(ShardingArg::D34) => "d34",
     };
     if archived_mode != selected_mode {
         return Err(usage(format!(
@@ -338,9 +339,10 @@ pub fn restore(
     let result = (|| {
         let conn = RusqliteConn::open(dest).map_err(unavailable)?;
         let store = SqlKvStore::open(conn.clone()).map_err(unavailable)?;
-        let mode = match sharding {
-            ShardingArg::Single => mkit_server::pipeline::Sharding::Single,
-            ShardingArg::D34 => mkit_server::pipeline::Sharding::D34,
+        let mode = if selected_mode == "d34" {
+            mkit_server::pipeline::Sharding::D34
+        } else {
+            mkit_server::pipeline::Sharding::Single
         };
         server::bind_sharding(&conn, mode, dest).map_err(|e| (e.code, e.message))?;
         let report = futures_executor::block_on(mkit_server::store::restore::restore(

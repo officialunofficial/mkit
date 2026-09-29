@@ -794,6 +794,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         cfg.auth = auth;
         // Sibling enc/ssh pipelines do not mint object URL tokens.
         cfg.url_tokens = None;
+        // Grants need auth v2 (`Self::new` refuses them otherwise), and a
+        // transport-identity write has no header-grant path: `GrantConfig::verify`
+        // needs the signed operation. WP-2.12 (registered grants over ssh/enc)
+        // replaces this with a sibling exception in `Self::new`.
+        if !matches!(cfg.auth, AuthMode::AuthV2(_)) {
+            cfg.grants = None;
+        }
         let mut sibling = Self::new(
             self.blobs.clone(),
             self.meta.clone(),
