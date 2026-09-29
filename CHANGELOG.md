@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- CLI: add `mkit grant create|add|list` and a user grant store under
+  `$XDG_CONFIG_HOME/mkit/grants/` (never repository-scoped). Owners sign with the
+  mkit key, a software-keystore secp256k1 key, or an imported wallet or WebAuthn
+  signature; the Connect client now presents the best stored grant, ranking the
+  higher epoch first. New user-only config key `grant.webauthn_rp`.
+  `mkit-keystore` gains a defaulted `KeySigner::sign_prehash_recoverable_secp256k1`
+  for the software backends (WP-2.13).
+- CLI: add `mkit epoch show|bump`, `mkit grant revoke [--prune]` and
+  `mkit visibility set`, waiting out the server's `Retry-After`. Connect client:
+  new `ConnectTransport::{get_grant_epoch, set_grant_epoch, set_repo_visibility}`
+  returning `Completion`, and a per-request signed-or-unsigned classification of
+  `SetRepoVisibility` (WP-2.14).
 - Server Worker: stream verified multipart parts into CV-keyed R2 objects and
   verify the complete pack before publishing it; raise the ticketed pack cap
   to 1 GiB while retaining the 64 MiB single-upload limit (WP-1.12).
