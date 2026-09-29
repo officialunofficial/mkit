@@ -299,7 +299,7 @@ async fn scan_all<S: NamespaceStore>(
         order.push(*id);
     }
     let mut calls = 0;
-    let mut round = 0;
+    let mut rotations: BTreeMap<Partition, usize> = BTreeMap::new();
     loop {
         let mut groups: BTreeMap<Partition, Vec<Hash>> = BTreeMap::new();
         for id in &order {
@@ -331,7 +331,7 @@ async fn scan_all<S: NamespaceStore>(
                 continue;
             }
             let n = ids.len();
-            ids.rotate_left(round % n);
+            ids.rotate_left(rotations.get(&partition).copied().unwrap_or(0) % n);
             let ranges: Vec<_> = ids
                 .iter()
                 .map(|id| {
@@ -353,6 +353,7 @@ async fn scan_all<S: NamespaceStore>(
                     "invalid scan_many served prefix".into(),
                 ));
             }
+            *rotations.entry(partition).or_default() += pages.len();
             served = true;
             for ((id, range), page) in ids.iter().zip(&ranges).zip(pages) {
                 if page.entries.len() > range.limit as usize {
@@ -384,7 +385,6 @@ async fn scan_all<S: NamespaceStore>(
         if !served {
             return Ok(scans);
         }
-        round += 1;
     }
 }
 
@@ -493,7 +493,8 @@ pub async fn contains_many<S: NamespaceStore>(
 
 /// Whether this repository holds any named id, for the takedown sweep. This
 /// first round performs exactly one read per distinct index partition,
-/// satisfying §14.3/R-133. An id with more than one page of rows needs
+/// satisfying §14.3/R-133 when all requested ranges are served and each id
+/// fits one page. A served prefix or an id with more than one page needs
 /// further rounds; WP-5.6 accounts for that. A capped miss fails closed: with no hit, the first
 /// id's [`LookupError`] is returned so the caller can tell a data-dependent cap
 /// from a backend failure.

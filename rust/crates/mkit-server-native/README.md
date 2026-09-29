@@ -212,13 +212,6 @@ Bounds, as for HTTP:
   `SQLite` file; `AdvanceRefs` is atomic. `--sqlite-max-bytes` (default 8
   GiB) caps the file: see "Capacity" below.
 
-Native indexed mode is opt-in with `--indexed`, auth v2, ticket keys,
-`--multi-addressing`, an allowed namespace and `--meta sqlite:<PATH>`. The
-existing root lock serializes native writers. Do not switch an existing
-opaque repository to indexed mode: its member packs have no object-index
-rows. Indexed deployments also need the per-ref storage leases specified in
-SPEC-SERVER §12.1 before production use; those leases are Stage 2 work.
-
 `--sharding single` is the default: each namespace stays in one partition.
 `--sharding d34` requires `SQLite` metadata and routes each branch head and its
 `refs/mkit/packmap/<branch>` together into a ref partition, with configuration

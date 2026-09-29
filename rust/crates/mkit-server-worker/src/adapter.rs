@@ -186,9 +186,9 @@ impl WorkerConfig {
     /// A missing `AUTH_AUDIENCE` or `AUTH_REPOSITORY` (vcs-worker parity:
     /// "`<VAR>` is not configured"), an invalid repository identity, or a malformed `TEST_QUOTA_*` var.
     pub fn from_vars(var: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
-        if var("INDEXED_MODE")
-            .is_some_and(|value| value.eq_ignore_ascii_case("true") || value == "1")
-        {
+        if var("INDEXED_MODE").is_some_and(|value| {
+            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+        }) {
             return Err(ConfigError(
                 "indexed mode on Workers requires WP-4.8".into(),
             ));
@@ -350,15 +350,23 @@ where
         }
         ShardClass::RefShard => {
             let paid = plan.is_some_and(|p| p.trim().eq_ignore_ascii_case("paid"));
-            let max_per_tick = if paid { 8 } else { 2 };
+            let max_per_tick = if paid {
+                mkit_server::relay::WORKER_PAID_RELAY_FIRES
+            } else {
+                mkit_server::relay::WORKER_FREE_RELAY_FIRES
+            };
             // Paid: <= 8 fires x 32 targets x 2 calls = 512 per alarm.
             // Free:
             // <= 2 fires x 8 targets x 2 calls = 32, below its limit of 50.
             // The target-call cap also bounds chunking and contention retries.
             let mut budget = RelayBudget::default();
             budget.max_rows = 128;
-            budget.max_targets = if paid { 32 } else { 8 };
-            budget.max_target_calls = Some(2);
+            budget.max_targets = if paid {
+                mkit_server::relay::WORKER_PAID_RELAY_TARGETS
+            } else {
+                mkit_server::relay::WORKER_FREE_RELAY_TARGETS
+            };
+            budget.max_target_calls = Some(mkit_server::relay::WORKER_RELAY_CALLS_PER_TARGET);
             let relay = match target {
                 Ok(target) => Some(RelayHandler {
                     target,
@@ -1559,12 +1567,16 @@ mod tests {
 
     #[test]
     fn worker_refuses_indexed_mode_until_async_driver() {
-        let err = WorkerConfig::from_vars(|name| (name == "INDEXED_MODE").then(|| "true".into()))
-            .unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("indexed mode on Workers requires WP-4.8")
-        );
+        for value in ["true", "1", "yes", "on"] {
+            let err =
+                WorkerConfig::from_vars(|name| (name == "INDEXED_MODE").then(|| value.to_owned()))
+                    .unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("indexed mode on Workers requires WP-4.8"),
+                "{value}"
+            );
+        }
     }
 
     /// The Connect binding over memory stores, open auth, 1 MiB packs.

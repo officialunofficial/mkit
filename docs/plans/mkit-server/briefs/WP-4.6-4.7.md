@@ -161,7 +161,7 @@ This bundle delivers indexed mode on native, and the Worker infrastructure it ne
     `Rejected { code, message }`. `Rejected` is for content-only failures.
   - Writes go in their own 3-op batches (`NotAfter`, guard, put), never in the advance batch.
   - `Verified` is monotone, so the advance needs no guard on it.
-  - A `Verified` pack is not re-verified. A conflict or CAS loss keeps `vs`.
+  - A `Verified` pack is not re-indexed; closure and signatures always run on the current consumed set. A conflict or CAS loss keeps `vs`.
   - A live `Pending` lease held by a concurrent verifier answers `PendingVerification`.
   - Lifetime: GC (WP-5.3a) removes `vs` with the local `m` row. Note for WP-1.14: its kind-2 expiry handler also deletes
     an expired, unconsumed ticket's `vs` row.

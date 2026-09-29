@@ -5,6 +5,7 @@ use crate::store::{
     StoreCapabilities, StoreError, Value, Write,
     codec::{self, RelayV1},
     keys,
+    outbox::MAX_RELAY_PUTS,
 };
 
 /// Snapshot used to plan a chain. `deadline_ms` includes the deployment's
@@ -26,6 +27,10 @@ fn guard(key: crate::Key, value: Option<&Value>) -> Precondition {
     }
 }
 
+fn lease_lost() -> StoreError {
+    StoreError::unavailable(std::io::Error::other("source epoch lease lost; retry"))
+}
+
 fn batch_for(
     prior: Option<&Value>,
     lease: Option<&Value>,
@@ -34,6 +39,11 @@ fn batch_for(
     now_ms: u64,
     deadline_ms: u64,
 ) -> Result<Batch, StoreError> {
+    if row.puts.len().saturating_add(row.deletes.len()) > MAX_RELAY_PUTS {
+        return Err(StoreError::Invalid(
+            "relay row exceeds MAX_RELAY_PUTS".into(),
+        ));
+    }
     let value = codec::encode_relay(row)?;
     let mut batch = Batch::new()
         .require(Precondition::NotAfter(deadline_ms))
@@ -56,18 +66,22 @@ fn batch_for(
 /// the uncommitted suffix from a fresh snapshot.
 pub fn enqueue_relay_rows(
     os: &RelayEnqueueSnapshot,
+    source: &Partition,
     rows: &[RelayV1],
     now_ms: u64,
 ) -> Result<Vec<Batch>, StoreError> {
+    if matches!(source, Partition::Ref { .. }) && os.source_lease.is_none() {
+        return Err(StoreError::Corrupt(
+            "D34 relay batch lacks source epoch lease".into(),
+        ));
+    }
     if rows.is_empty() {
         return Ok(Vec::new());
     }
     if let Some(raw) = &os.source_lease {
         let lease = codec::decode_epoch_lease(raw)?;
         if now_ms >= lease.expires_at_ms || os.deadline_ms >= lease.expires_at_ms {
-            return Err(StoreError::Invalid(
-                "relay enqueue lease expired before deadline".into(),
-            ));
+            return Err(lease_lost());
         }
     }
     let mut seq = os
@@ -97,6 +111,16 @@ pub fn enqueue_relay_rows(
             let next = seq
                 .checked_add(1)
                 .ok_or_else(|| StoreError::Corrupt("outbox sequence overflow".into()))?;
+            if rows[index]
+                .puts
+                .len()
+                .saturating_add(rows[index].deletes.len())
+                > MAX_RELAY_PUTS
+            {
+                return Err(StoreError::Invalid(
+                    "relay row exceeds MAX_RELAY_PUTS".into(),
+                ));
+            }
             let value = codec::encode_relay(&rows[index])?;
             let key = keys::relay(next);
             let mut candidate = batch.clone();
@@ -141,8 +165,8 @@ pub async fn commit_relay_rows<S: NamespaceStore>(
     source_lease: Option<&Value>,
 ) -> Result<(), StoreError> {
     if matches!(source, Partition::Ref { .. }) && source_lease.is_none() {
-        return Err(StoreError::Invalid(
-            "D34 relay enqueue requires source epoch lease".into(),
+        return Err(StoreError::Corrupt(
+            "D34 relay batch lacks source epoch lease".into(),
         ));
     }
     let mut done = 0;
@@ -153,12 +177,17 @@ pub async fn commit_relay_rows<S: NamespaceStore>(
             source_lease: source_lease.cloned(),
             deadline_ms,
         };
-        let batches = enqueue_relay_rows(&snapshot, &rows[done..], now_ms)?;
+        let batches = enqueue_relay_rows(&snapshot, source, &rows[done..], now_ms)?;
         let mut lost = false;
         for batch in batches {
             let count = batch.writes.iter().filter(|w| matches!(w, Write::Put(key, _) if matches!(keys::parse(key), Some(keys::ParsedKey::Relay(_))))).count();
             match store.apply(source, batch).await? {
                 BatchOutcome::Committed => done += count,
+                BatchOutcome::PreconditionFailed { index, .. }
+                    if source_lease.is_some() && index == 2 =>
+                {
+                    return Err(lease_lost());
+                }
                 BatchOutcome::PreconditionFailed { .. } => {
                     lost = true;
                     break;
@@ -199,13 +228,11 @@ pub async fn relay_delivered_through<S: NamespaceStore>(
     if allocated < seq {
         return Ok(false);
     }
-    if super::source_relay_state(store, source, 0).await?.1 {
-        return Ok(true);
-    }
     let (start, end) = keys::class_range(keys::TAG_RELAY);
     let page = store.scan(source, &start, &end, None, 1).await?;
     match page.entries.first().and_then(|(key, _)| keys::parse(key)) {
         Some(keys::ParsedKey::Relay(first)) => Ok(first > seq),
+        None if page.entries.is_empty() => Ok(true),
         _ => Err(StoreError::Corrupt("invalid relay head".into())),
     }
 }
@@ -214,11 +241,18 @@ pub async fn relay_delivered_through<S: NamespaceStore>(
 mod tests {
     use super::*;
     use crate::memory::MemoryKv;
-    use crate::repo::NamespaceKey;
+    use crate::repo::{NamespaceKey, RepoName};
     use futures_executor::block_on;
 
     fn source() -> Partition {
         Partition::Namespace(NamespaceKey::deployment_default())
+    }
+    fn ref_source() -> Partition {
+        Partition::Ref {
+            ns: NamespaceKey::deployment_default(),
+            repo: RepoName::new("one").expect("valid repository name"),
+            shard_ref: "refs/heads/main".into(),
+        }
     }
     fn row(n: u16) -> RelayV1 {
         RelayV1 {
@@ -228,6 +262,7 @@ mod tests {
                 crate::Key::new(n.to_be_bytes().to_vec()),
                 Value::new(vec![u8::try_from(n % 256).unwrap_or(0)]),
             )],
+            deletes: Vec::new(),
         }
     }
 
@@ -241,7 +276,7 @@ mod tests {
             source_lease: None,
             deadline_ms: u64::MAX,
         };
-        let batches = enqueue_relay_rows(&snapshot, &rows, 1_000).unwrap();
+        let batches = enqueue_relay_rows(&snapshot, &source, &rows, 1_000).unwrap();
         assert!(batches.len() >= 2);
         for batch in batches {
             assert_eq!(
@@ -275,7 +310,7 @@ mod tests {
             source_lease: None,
             deadline_ms: u64::MAX,
         };
-        let batch = enqueue_relay_rows(&stale, &[row(1)], 1_000)
+        let batch = enqueue_relay_rows(&stale, &source, &[row(1)], 1_000)
             .unwrap()
             .remove(0);
         assert_eq!(
@@ -318,6 +353,42 @@ mod tests {
             source_lease: Some(lease),
             deadline_ms: 1_010,
         };
-        assert!(enqueue_relay_rows(&snapshot, &[row(1)], 1_000).is_err());
+        assert!(enqueue_relay_rows(&snapshot, &source(), &[row(1)], 1_000).is_err());
+    }
+
+    #[test]
+    fn ref_source_requires_lease_and_a_lost_lease_is_not_contention() {
+        let source = ref_source();
+        let snapshot = RelayEnqueueSnapshot {
+            sequence: None,
+            source_lease: None,
+            deadline_ms: 2_000,
+        };
+        assert!(matches!(
+            enqueue_relay_rows(&snapshot, &source, &[row(1)], 1_000),
+            Err(StoreError::Corrupt(_))
+        ));
+        let stale = codec::encode_epoch_lease(&codec::EpochLease {
+            epoch: 1,
+            expires_at_ms: 10_000,
+            config_version: 1,
+        });
+        let current = codec::encode_epoch_lease(&codec::EpochLease {
+            epoch: 2,
+            expires_at_ms: 10_000,
+            config_version: 1,
+        });
+        let store = MemoryKv::with_clock(std::sync::Arc::new(crate::ManualClock::new(1_000)));
+        block_on(store.apply(&source, Batch::new().put(keys::epoch_lease(), current))).unwrap();
+        let error = block_on(commit_relay_rows(
+            &store,
+            &source,
+            &[row(1)],
+            1_000,
+            2_000,
+            Some(&stale),
+        ))
+        .unwrap_err();
+        assert!(error.to_string().contains("source epoch lease lost"));
     }
 }

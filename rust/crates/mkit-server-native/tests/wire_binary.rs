@@ -206,6 +206,53 @@ async fn binary_fs_sqlite_auth_v2_d34() {
     fs_sqlite_auth_v2("d34", false).await;
 }
 
+#[cfg(not(feature = "test-faults"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn default_binary_does_not_expose_indexed_mode() {
+    use mkit_server_conformance::wire::client::{Client, UNARY_PROTO, decode_unary};
+    use mkit_transport_connect::generated::GetServerInfoResponse;
+
+    let help = Command::new(BIN)
+        .args(["serve", "--help"])
+        .output()
+        .unwrap();
+    assert!(help.status.success());
+    let help = std::str::from_utf8(&help.stdout).unwrap();
+    assert!(!help.contains("--indexed"), "{help}");
+
+    let root = common::repo_root();
+    let token_file = root.path().join("token");
+    common::secret_file(&token_file, b"binary-token\n");
+    let port = free_port();
+    let server = Server::start(
+        port,
+        root.path(),
+        &[
+            "--meta",
+            "fs-layout",
+            "--bearer-token-file",
+            common::s(&token_file),
+        ],
+    );
+    let origin = format!("http://127.0.0.1:{port}");
+    let client = Client::new(&origin.parse().unwrap()).unwrap();
+    let reply = client
+        .post(
+            "/mkit.transport.v1.TransportService/GetServerInfo",
+            UNARY_PROTO,
+            &[],
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    let info = decode_unary::<GetServerInfoResponse>(&reply)
+        .unwrap()
+        .unwrap();
+    assert_eq!(info.indexed_mode, Some(false));
+    assert_eq!(info.max_delta_chain_depth, Some(0));
+    assert!(server.stop().success());
+}
+
 #[cfg(feature = "test-faults")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn binary_indexed_pending_verification_wire() {

@@ -99,16 +99,9 @@ pub async fn members_many<S: NamespaceStore>(
     ref_shard: &Partition,
     packs: &[Hash],
 ) -> Result<Vec<bool>, StoreError> {
-    // Bound each backend call even for the format's one-million-pack MKPL
-    // ceiling. The result remains in caller order.
-    if packs.len() > 256 {
-        let mut answer = Vec::with_capacity(packs.len());
-        for chunk in packs.chunks(256) {
-            Box::pin(members_many(store, shards, repo, ref_shard, chunk))
-                .await
-                .map(|part| answer.extend(part))?;
-        }
-        return Ok(answer);
+    // One MKPL check must fit the indexed lookup cap, including on Workers.
+    if packs.len() > super::index::MAX_LOOKUP_IDS {
+        return Err(StoreError::Invalid("object index limit exceeded".into()));
     }
     let keys: Vec<_> = packs
         .iter()

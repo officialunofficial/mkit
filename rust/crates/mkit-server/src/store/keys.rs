@@ -176,7 +176,7 @@ pub const TAG_OUTBOX_SEQUENCE: &str = "os";
 pub const TAG_OUTCOME_BACKLOG: &str = "oc";
 
 /// Tags whose layouts later work packages add. No M0 key uses them.
-pub const RESERVED_TAGS: &[&str] = &["tb", "l", "pp", "vc", TAG_NAMESPACE_LIST, TAG_VERIFICATION];
+pub const RESERVED_TAGS: &[&str] = &["tb", "l", "pp", "vc", TAG_NAMESPACE_LIST];
 
 /// A key decoded by [`parse`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1045,6 +1045,7 @@ mod tests {
             TAG_TICKETS_PER_REF,
             TAG_TICKETS_PER_SIGNER,
             TAG_MEMBERSHIP,
+            TAG_VERIFICATION,
             TAG_OBJECT_INDEX,
             TAG_RESERVATION,
             TAG_OUTCOME_PENDING,
@@ -1126,6 +1127,15 @@ mod tests {
         }
         assert_eq!(LAYOUT_VERSION, 1);
         assert!(!RESERVED_TAGS.contains(&TAG_OBJECT_INDEX));
+        assert!(!RESERVED_TAGS.contains(&TAG_VERIFICATION));
+        let state = verification(&repo("a"), &s);
+        assert_eq!(
+            parse(&state),
+            Some(ParsedKey::Verification {
+                repo: repo("a"),
+                pack_id: s,
+            })
+        );
         let index = object_index(&repo("a"), &s, &[0x22; 32]);
         assert_eq!(
             parse(&index),

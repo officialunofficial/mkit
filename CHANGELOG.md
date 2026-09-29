@@ -13,8 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Server (WP-4.7): opt-in native indexed ingestion verifies ticketed packs
   before ref publication, resolves member-only thin delta bases, checks all
   consumed objects and packlists, and writes index rows before membership.
-- Core: expose decoded pack frame metadata and single-frame decoding for
-  repository-scoped external base reconstruction.
+- Core: expose decoded pack frame metadata, single-frame decoding, and an
+  additive resumable decode cursor for repository-scoped external bases.
 - Server Worker: stream verified multipart parts into CV-keyed R2 objects and
   verify the complete pack before publishing it; raise the ticketed pack cap
   to 1 GiB while retaining the 64 MiB single-upload limit (WP-1.12).

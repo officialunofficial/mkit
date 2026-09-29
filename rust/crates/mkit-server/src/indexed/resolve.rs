@@ -13,9 +13,14 @@ use futures::StreamExt as _;
 use mkit_core::hash::Hash;
 use mkit_core::pack::{DecodeLimits, DeltaBaseSource, PackError, decode_frame_with};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 fn unavailable() -> ServerError {
     ServerError::unavailable("object storage request failed")
+}
+
+fn budget_exceeded() -> ServerError {
+    ServerError::invalid_argument("pack exceeds indexed decode budget")
 }
 
 /// A membership miss needs the consuming ticket's lag window; a cap is
@@ -80,6 +85,27 @@ pub async fn locate_split<S: NamespaceStore>(
     ids: &[Hash],
     metrics: &dyn Metrics,
 ) -> Result<BTreeMap<Hash, ObjectLookup>, ServerError> {
+    locate_split_inner(store, shards, repo, ids, Some(metrics)).await
+}
+
+/// Speculatively locate syntactic bases in 256-id batches. The caller reports
+/// a cap only if the decoder later requests that id as an external base.
+pub async fn locate_split_quiet<S: NamespaceStore>(
+    store: &S,
+    shards: &dyn ShardMap,
+    repo: &RepoId,
+    ids: &[Hash],
+) -> Result<BTreeMap<Hash, ObjectLookup>, ServerError> {
+    locate_split_inner(store, shards, repo, ids, None).await
+}
+
+async fn locate_split_inner<S: NamespaceStore>(
+    store: &S,
+    shards: &dyn ShardMap,
+    repo: &RepoId,
+    ids: &[Hash],
+    metrics: Option<&dyn Metrics>,
+) -> Result<BTreeMap<Hash, ObjectLookup>, ServerError> {
     let mut todo: Vec<Vec<Hash>> = ids
         .chunks(index::MAX_LOOKUP_IDS)
         .map(<[Hash]>::to_vec)
@@ -103,7 +129,7 @@ pub async fn locate_split<S: NamespaceStore>(
             continue;
         }
         for (id, answer) in chunk.into_iter().zip(answers) {
-            if let Err(cap) = answer {
+            if let (Err(cap), Some(metrics)) = (answer, metrics) {
                 tracing::error!(reason = cap_reason(cap), "object index lookup capped");
                 metrics.incr(
                     METRIC_INDEX_LOOKUP_CAPPED,
@@ -126,8 +152,11 @@ async fn frame_bytes<B: BlobStore>(
     length: u64,
     budget: u64,
 ) -> Result<Vec<u8>, ServerError> {
-    if length == 0 || length > budget {
+    if length == 0 {
         return Err(ServerError::invalid_argument("object hash mismatch"));
+    }
+    if length > budget {
+        return Err(budget_exceeded());
     }
     let end = offset.checked_add(length - 1).ok_or_else(unavailable)?;
     let body = blobs
@@ -165,7 +194,7 @@ async fn frame_bytes<B: BlobStore>(
     Ok(bytes)
 }
 
-struct CachedBase(Option<(Hash, Vec<u8>)>);
+struct CachedBase(Option<(Hash, Arc<[u8]>)>);
 impl DeltaBaseSource for CachedBase {
     const VERIFIED: bool = false;
     fn base(&mut self, id: &Hash) -> Result<Option<Vec<u8>>, PackError> {
@@ -173,7 +202,55 @@ impl DeltaBaseSource for CachedBase {
             .0
             .as_ref()
             .filter(|(base, _)| base == id)
-            .map(|(_, bytes)| bytes.clone()))
+            .map(|(_, bytes)| bytes.to_vec()))
+    }
+}
+
+type Location = (Hash, Hash, u64);
+
+/// Canonical member bytes and their total delta depth.
+pub type ResolvedMember = (Arc<[u8]>, u32);
+
+/// Canonical member bytes retained during one verification. Each location is
+/// charged once, even when multiple deltas reuse it as an external base.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MemberCache {
+    rows: BTreeMap<Location, ResolvedMember>,
+    retained_bytes: u64,
+}
+
+impl MemberCache {
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
+    #[must_use]
+    pub fn retained_bytes(&self) -> u64 {
+        self.retained_bytes
+    }
+
+    fn insert(
+        &mut self,
+        location: Location,
+        value: ResolvedMember,
+        budget: u64,
+    ) -> Result<(), ResolveFailure> {
+        let used = self
+            .retained_bytes
+            .checked_add(value.0.len() as u64)
+            .ok_or_else(budget_exceeded)?;
+        if used > budget {
+            return Err(budget_exceeded().into());
+        }
+        self.rows.insert(location, value);
+        self.retained_bytes = used;
+        Ok(())
     }
 }
 
@@ -189,13 +266,16 @@ pub fn member_object<'a, B: BlobStore, S: NamespaceStore>(
     located: LocatedObject,
     cap: u32,
     budget: u64,
-    memo: &'a mut BTreeMap<(Hash, Hash, u64), (Vec<u8>, u32)>,
-    visiting: &'a mut BTreeSet<(Hash, Hash, u64)>,
+    memo: &'a mut MemberCache,
+    visiting: &'a mut BTreeSet<Location>,
     metrics: &'a dyn Metrics,
-) -> BoxFuture<'a, Result<(Vec<u8>, u32), ResolveFailure>> {
+) -> BoxFuture<'a, Result<ResolvedMember, ResolveFailure>> {
     Box::pin(async move {
         let location = (id, located.pack, located.value.frame_offset);
-        if let Some(value) = memo.get(&location) {
+        let available = budget
+            .checked_sub(memo.retained_bytes)
+            .ok_or_else(budget_exceeded)?;
+        if let Some(value) = memo.rows.get(&location) {
             if value.1 > cap {
                 return Err(ServerError::invalid_argument("delta chain too deep").into());
             }
@@ -211,12 +291,14 @@ pub fn member_object<'a, B: BlobStore, S: NamespaceStore>(
                 delta_base,
                 ..
             } = located.value;
-            let prefix = frame_bytes(blobs, located.pack, 0, 8, budget).await?;
+            let prefix = frame_bytes(blobs, located.pack, 0, 8, available).await?;
             let version = u32::from_le_bytes(prefix[4..8].try_into().map_err(|_| unavailable())?);
             let mut depth = 0;
             let mut base_bytes = None;
             if let Some(base) = delta_base {
-                if cap == 0 {
+                // A raw terminal base may be one node beyond the hop cap;
+                // another delta may not. Stop before a long chain recurses.
+                if visiting.len() > usize::try_from(cap).unwrap_or(usize::MAX) {
                     return Err(ServerError::invalid_argument("delta chain too deep").into());
                 }
                 let partition = shards.object_index(repo, &base);
@@ -251,17 +333,7 @@ pub fn member_object<'a, B: BlobStore, S: NamespaceStore>(
                     },
                 };
                 let (canonical, base_depth) = member_object(
-                    blobs,
-                    store,
-                    shards,
-                    repo,
-                    base,
-                    next,
-                    cap - 1,
-                    budget,
-                    memo,
-                    visiting,
-                    metrics,
+                    blobs, store, shards, repo, base, next, cap, budget, memo, visiting, metrics,
                 )
                 .await?;
                 base_bytes = Some((base, canonical));
@@ -270,28 +342,34 @@ pub fn member_object<'a, B: BlobStore, S: NamespaceStore>(
                     return Err(ServerError::invalid_argument("delta chain too deep").into());
                 }
             }
+            let available = budget
+                .checked_sub(memo.retained_bytes)
+                .ok_or_else(budget_exceeded)?;
             let frame =
-                frame_bytes(blobs, located.pack, frame_offset, frame_length, budget).await?;
+                frame_bytes(blobs, located.pack, frame_offset, frame_length, available).await?;
             let mut source = CachedBase(base_bytes);
             let (actual, bytes) = decode_frame_with(
                 &frame,
                 version,
                 &mut source,
-                DecodeLimits::default().with_max_decoded_bytes(budget),
+                DecodeLimits::default().with_max_decoded_bytes(available),
             )
-            .map_err(|_| {
-                ResolveFailure::Other(ServerError::invalid_argument("object hash mismatch"))
+            .map_err(|error| {
+                ResolveFailure::Other(if matches!(error, PackError::PackfileTooLarge) {
+                    budget_exceeded()
+                } else {
+                    ServerError::invalid_argument("object hash mismatch")
+                })
             })?;
             if actual != id {
                 return Err(ServerError::invalid_argument("object hash mismatch").into());
             }
-            Ok((bytes, depth))
+            Ok((Arc::from(bytes), depth))
         }
         .await;
         visiting.remove(&location);
-        if let Ok(value) = &result {
-            memo.insert(location, value.clone());
-        }
-        result
+        let value = result?;
+        memo.insert(location, value.clone(), budget)?;
+        Ok(value)
     })
 }

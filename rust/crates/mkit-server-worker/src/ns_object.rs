@@ -482,9 +482,8 @@ where
     }
 }
 
-/// Exact byte budget for a multi-range reply. One-row steps leave room for
-/// the largest valid key/value before fetching, so a served page never
-/// overshoots the shared reply budget.
+/// Exact byte budget for a multi-range reply. Each step requests only as
+/// many rows as can fit even when every row has the maximum valid size.
 async fn bounded_page_budget<F, Fut>(
     limit: u32,
     after: Option<Cursor>,
@@ -499,27 +498,24 @@ where
         return step(after, 0).await;
     }
     let mut page = ScanPage::default();
-    let mut bytes = 0;
+    let mut bytes: usize = 0;
     let mut cursor = after;
     loop {
-        let got = step(cursor.take(), 1).await?;
+        let have = u32::try_from(page.entries.len()).unwrap_or(limit);
+        let row_cap = mkit_server::store::MAX_KEY_BYTES + mkit_server::store::MAX_VALUE_BYTES;
+        let fitting = u32::try_from((max_bytes - bytes) / row_cap).unwrap_or(u32::MAX);
+        let got = step(cursor.take(), (limit - have).min(PAGE_STEP).min(fitting)).await?;
         bytes += got
             .entries
             .iter()
-            .map(|(k, v)| k.as_bytes().len() + v.as_bytes().len())
+            .map(|(key, value)| key.as_bytes().len() + value.as_bytes().len())
             .sum::<usize>();
         if bytes > max_bytes {
             return Err(StoreError::Corrupt("scan_many byte budget exceeded".into()));
         }
         page.entries.extend(got.entries);
         match got.next {
-            Some(next)
-                if page.entries.len() < limit as usize
-                    && bytes
-                        + mkit_server::store::MAX_KEY_BYTES
-                        + mkit_server::store::MAX_VALUE_BYTES
-                        <= max_bytes =>
-            {
+            Some(next) if page.entries.len() < limit as usize && bytes + row_cap <= max_bytes => {
                 cursor = Some(next);
             }
             next => {

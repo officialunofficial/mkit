@@ -944,9 +944,6 @@ commit under the existing atomic lifecycle in §3 and STC §7.7.
 Before an `AdvanceRefs` that consumes a pack commits, the server MUST
 have verified all of the following:
 
-An indexed server verifies (a)–(c) for every object in the packs an advance
-consumes, not only objects reachable from the new tips.
-
 - **(a) Object identity.** Every object's id agrees with its content under
   [SPEC-OBJECTS §10](SPEC-OBJECTS.md#10-storage), including the
   type-specific identity rules referenced there.
@@ -961,6 +958,9 @@ consumes, not only objects reachable from the new tips.
   [SPEC-OBJECTS §4–§7](SPEC-OBJECTS.md#4-tree-0x02).
 - **(d) Delta resolution.** Every delta resolves under §9.4 within the
   chain-depth limit advertised under §9.8.
+
+An indexed server verifies (a)–(c) for every object in the packs an advance
+consumes, not only objects reachable from the new tips.
 
 Object identity is checked on the reconstructed object, not on an
 unverified claim in an entry. A transport-level pack commitment does
@@ -1027,7 +1027,7 @@ return the permanent error of the check that missed:
 | Membership-dependent miss | Connect code | Exact public message |
 |---|---|---|
 | Unresolved delta base | `failed_precondition` | `delta base not available in this repository` |
-| Reachable object absent from the permitted closure | `invalid_argument` | `open closure` |
+| Object absent from the permitted closure | `invalid_argument` | `open closure` |
 | Packlist names a pack absent from the repository and not ticketed and consumed in the same advance | `invalid_argument` | `packlist lists a pack that is not in this repository` |
 
 Each permanent response MUST be byte-identical whether the object or
@@ -1227,6 +1227,14 @@ in an opaque deployment.
 The pack-size and chain-depth limits are distinct. A pack below the
 size limit can still exceed the chain-depth cap. Neither limit changes
 repository-isolated resolution or permits global-existence disclosure.
+
+An indexed advance that exceeds either pack limit fails with the exact
+response below:
+
+| Limit exceeded | Connect code | Exact public message |
+|---|---|---|
+| Indexed pack size | `invalid_argument` | `pack exceeds indexed max_pack_bytes` |
+| Indexed decode budget | `invalid_argument` | `pack exceeds indexed decode budget` |
 
 ## 10. Published view
 
@@ -3311,6 +3319,7 @@ The mapping of profiles to conformance-suite cases is specified with M5.
 
 | Version | Status | Change |
 |---|---|---|
+| 1 | draft | Indexed ingestion verifies every consumed object, including unreachable entries; closure and packlist index caps have the `object index limit exceeded` error (§9.3; WP-4.7). Indexed pack-size and decode-budget errors are pinned in §9.8. |
 | 1 | draft | §18 conformance scope: a core profile (§2–§8; no inspectors, storage leases, GC, indexed mode, takedown, receipts or admin service) and a full profile; §1 defers the §§9–16 obligations to the profile. |
 | 1 | draft | Additive admin service, signed envelope, role-bearing key list, replay contract, audit log (§16), and remote CachePurge (§16.7); namespace-scoped Event (§12.4). |
 | 1 | draft | §14 content, repository, and namespace takedown; signed notices, preservation and restore; additive transport notices and hook transition/reason. |
@@ -3318,7 +3327,6 @@ The mapping of profiles to conformance-suite cases is specified with M5.
 | 1 | draft | Additive M5 published view (§10), per-advance inspection and quarantine (§11), including surplus pack entries; additive Inspect phase/id/kind/defer/flagged ids and Authorize writer_view (§6); `GetServerInfo.async_inspection` in STC §2.1. |
 | 1 | draft | Additive M5 storage leases and lifecycle Event (§12), server GC (§13), and section renumbering (§§19–20); `GetServerInfo.leases` in STC §2.1. |
 | 1 | draft | Initial M3 pipeline, durable outcome and remote-hook contract; M5 sections reserved. Admission credential headers (§6.3); indexed mode (§9). HTTP read reservations and procedure strings (WP-4.11), amended with `read_reconcile_grace = 60 s` default and `ReadServed` priority within grace (fix round 1). |
-| 1 | draft | Indexed ingestion verifies every consumed object, including unreachable entries; closure and packlist index caps have the `object index limit exceeded` error (§9.3; WP-4.7). |
 
 ## 20. Test anchors
 

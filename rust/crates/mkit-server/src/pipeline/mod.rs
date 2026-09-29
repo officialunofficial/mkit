@@ -433,16 +433,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         metrics: Arc<dyn Metrics>,
     ) -> Result<Self, ServerError> {
         if let Some(indexed) = &cfg.indexed {
-            let threshold = if !hooks.admission().is_default()
-                || matches!(cfg.addressing, Addressing::Multi(_))
-            {
-                0
-            } else {
-                cfg.begin_upload_threshold_bytes
-            };
             if !matches!(cfg.auth, AuthMode::AuthV2(_))
                 || cfg.ticket_keys.is_none()
-                || threshold != 0
                 || !matches!(cfg.addressing, Addressing::Multi(_))
             {
                 return Err(ServerError::invalid_argument(
@@ -450,6 +442,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 ));
             }
             if indexed.max_delta_chain_depth == 0
+                || indexed.max_delta_chain_depth > u32::from(u16::MAX)
                 || indexed.max_pack_bytes == 0
                 || indexed.max_pack_bytes > indexed.decode_budget
                 || indexed.relay_lag_bound_ms == 0
@@ -1243,7 +1236,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                     .collect::<Result<Vec<_>, _>>()?;
                 let tip = head
                     .new
-                    .ok_or_else(|| ServerError::invalid_argument("open closure"))?;
+                    .ok_or_else(|| ServerError::invalid_argument("delete consumes no tickets"))?;
                 let _verified_objects = crate::indexed::verify::verify_ticketed(
                     &self.blobs,
                     &self.meta,

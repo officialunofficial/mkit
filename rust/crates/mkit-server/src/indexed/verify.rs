@@ -11,12 +11,12 @@ use crate::pipeline::ShardMap;
 use crate::repo::RepoId;
 use crate::store::{
     codec::TicketV1,
-    index::{self, IndexEntry, LocatedObject},
-    keys, read,
+    index::{self, IndexEntry},
+    read,
 };
 use crate::telemetry::Metrics;
 use crate::{
-    Batch, BatchOutcome, BlobBody, BlobKey, BlobStore, ByteRange, Clock, NamespaceStore, Partition,
+    Batch, BatchOutcome, BlobBody, BlobKey, BlobStore, Clock, NamespaceStore, Partition,
     Precondition, ServerError,
 };
 use futures::StreamExt as _;
@@ -24,19 +24,29 @@ use mkit_core::hash::{Hash, hash};
 use mkit_core::object::Object;
 use mkit_core::ops::graph::{ClosureMode, children};
 use mkit_core::pack::{
-    DecodeLimits, DecodedEntry, DeltaBaseSource, PackError, decode_entries_with, delta_base_hashes,
+    DecodeLimits, DecodedEntry, DeltaBaseSource, PackDecodeCursor, PackError, decode_entries_with,
+    delta_base_hashes,
 };
 use mkit_core::sign::verify_object_signature;
 use mkit_core::transfer::decode_packlist;
 use mkit_core::verify::{ObjectSource, VerifyError, verify_push};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 fn storage_failed() -> ServerError {
     ServerError::unavailable("object storage request failed")
 }
 fn bad_object() -> ServerError {
     ServerError::invalid_argument("object hash mismatch")
+}
+fn decode_failure(error: ServerError, already_verified: bool, pack: &Hash) -> ServerError {
+    if already_verified {
+        tracing::error!(pack = %mkit_core::hash::to_hex(pack), "verified pack failed decode recheck");
+        ServerError::unavailable("verified pack content inconsistency")
+    } else {
+        error
+    }
 }
 fn closure_error(now: u64, created: u64, bound: u64) -> ServerError {
     if resolve::lagged(now, created, bound) {
@@ -96,11 +106,11 @@ async fn pack_bytes<B: BlobStore>(
     Ok(bytes)
 }
 
-struct Bases(BTreeMap<Hash, Vec<u8>>);
+struct Bases(BTreeMap<Hash, Arc<[u8]>>);
 impl DeltaBaseSource for Bases {
     const VERIFIED: bool = false;
     fn base(&mut self, id: &Hash) -> Result<Option<Vec<u8>>, PackError> {
-        Ok(self.0.get(id).cloned())
+        Ok(self.0.get(id).map(|bytes| bytes.to_vec()))
     }
 }
 
@@ -117,77 +127,71 @@ impl ObjectSource for StagedSource<'_> {
 struct PackWork {
     ticket: TicketV1,
     entries: Vec<IndexEntry>,
-    pending_raw: Option<crate::Value>,
+    needs_index: bool,
 }
 
-async fn verified_kind<B: BlobStore>(blobs: &B, pack: Hash) -> Result<UploadType, ServerError> {
-    let body = blobs
-        .get(
-            &BlobKey::pack(pack),
-            Some(ByteRange {
-                start: 0,
-                end_inclusive: 3,
-            }),
-        )
-        .await
-        .map_err(|_| storage_failed())?
-        .ok_or_else(storage_failed)?;
-    let bytes = match body {
-        BlobBody::Bytes(bytes) => bytes.to_vec(),
-        BlobBody::Stream { mut stream, .. } => {
-            let mut bytes = Vec::new();
-            while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(|_| storage_failed())?;
-                if bytes.len().saturating_add(chunk.len()) > 4 {
-                    return Err(storage_failed());
-                }
-                bytes.extend_from_slice(&chunk);
-            }
-            bytes
-        }
-    };
-    if bytes.len() != 4 {
-        return Err(storage_failed());
-    }
-    classify::classify(&bytes).map_err(|_| bad_object())
+struct HeldLease {
+    raw: crate::Value,
+    until_ms: u64,
 }
 
-async fn locate_in_verified_packs<S: NamespaceStore>(
+fn now_ms(clock: &dyn Clock) -> u64 {
+    u64::try_from(clock.now_ms()).unwrap_or(0)
+}
+
+fn deadline(clock: &dyn Clock) -> u64 {
+    now_ms(clock).saturating_add(10_000)
+}
+
+async fn renew_pending<S: NamespaceStore>(
     store: &S,
-    shards: &dyn ShardMap,
+    source: &Partition,
     repo: &RepoId,
-    ids: &BTreeMap<Hash, u64>,
-    packs: &[Hash],
-) -> Result<BTreeMap<Hash, LocatedObject>, ServerError> {
-    let mut found = BTreeMap::new();
-    for id in ids.keys() {
-        let partition = shards.object_index(repo, id);
-        for pack_chunk in packs.chunks(256) {
-            let keys: Vec<_> = pack_chunk
-                .iter()
-                .map(|pack| keys::object_index(&repo.name, id, pack))
-                .collect();
-            let values = store
-                .get_many(&partition, &keys)
-                .await
-                .map_err(|_| storage_failed())?;
-            if values.len() != keys.len() {
-                return Err(storage_failed());
-            }
-            for (pack, value) in pack_chunk.iter().zip(values) {
-                if let Some(value) = value {
-                    let value = crate::store::codec::decode_object_index(id, &value)
-                        .map_err(|_| storage_failed())?;
-                    found.insert(*id, LocatedObject { pack: *pack, value });
-                    break;
-                }
-            }
-            if found.contains_key(id) {
-                break;
-            }
-        }
+    pack: &Hash,
+    acquired: &mut BTreeMap<Hash, HeldLease>,
+    clock: &dyn Clock,
+) -> Result<(), ServerError> {
+    let Some(held) = acquired.get_mut(pack) else {
+        return Ok(());
+    };
+    let now = now_ms(clock);
+    if held.until_ms.saturating_sub(now) >= state::VERIFICATION_LEASE_MS / 2 {
+        return Ok(());
     }
-    Ok(found)
+    let until_ms = now.saturating_add(state::VERIFICATION_LEASE_MS);
+    let next = VerificationV1::Pending {
+        lease_until_ms: until_ms,
+    };
+    if !state::write(
+        store,
+        source,
+        &repo.name,
+        pack,
+        Some(&held.raw),
+        &next,
+        deadline(clock),
+    )
+    .await
+    .map_err(|_| super::pending(1_000))?
+    {
+        return Err(super::pending(1_000));
+    }
+    held.raw = state::encode(&next);
+    held.until_ms = until_ms;
+    Ok(())
+}
+
+async fn renew_all_pending<S: NamespaceStore>(
+    store: &S,
+    source: &Partition,
+    repo: &RepoId,
+    acquired: &mut BTreeMap<Hash, HeldLease>,
+    clock: &dyn Clock,
+) -> Result<(), ServerError> {
+    for pack in acquired.keys().copied().collect::<Vec<_>>() {
+        renew_pending(store, source, repo, &pack, acquired, clock).await?;
+    }
+    Ok(())
 }
 
 async fn reject_content<S: NamespaceStore>(
@@ -195,24 +199,33 @@ async fn reject_content<S: NamespaceStore>(
     source: &Partition,
     repo: &RepoId,
     pack: &Hash,
-    prior: Option<&crate::Value>,
+    acquired: &BTreeMap<Hash, HeldLease>,
     message: &str,
-    deadline: u64,
+    clock: &dyn Clock,
+    metrics: &dyn Metrics,
 ) -> ServerError {
-    if let Some(prior) = prior {
-        let _ = state::write(
+    let Some(held) = acquired.get(pack) else {
+        tracing::error!(pack = %mkit_core::hash::to_hex(pack), "verified pack failed content recheck");
+        return ServerError::unavailable("verified pack content inconsistency");
+    };
+    if !matches!(
+        state::write(
             store,
             source,
             &repo.name,
             pack,
-            Some(prior),
+            Some(&held.raw),
             &VerificationV1::Rejected {
                 code: "invalid_argument".into(),
                 message: message.into(),
             },
-            deadline,
+            deadline(clock),
         )
-        .await;
+        .await,
+        Ok(true)
+    ) {
+        tracing::error!(pack = %mkit_core::hash::to_hex(pack), code = "invalid_argument", "failed to persist rejected verification state");
+        metrics.incr(crate::telemetry::METRIC_INDEX_REJECTED_WRITE_FAILED, &[], 1);
     }
     ServerError::invalid_argument(message.to_owned())
 }
@@ -232,7 +245,7 @@ pub async fn verify_ticketed<B: BlobStore, S: NamespaceStore>(
     clock: &dyn Clock,
     metrics: &dyn Metrics,
 ) -> Result<Vec<Hash>, ServerError> {
-    let mut acquired = Vec::new();
+    let mut acquired = BTreeMap::new();
     let result = verify_ticketed_inner(
         blobs,
         store,
@@ -248,12 +261,10 @@ pub async fn verify_ticketed<B: BlobStore, S: NamespaceStore>(
     )
     .await;
     if result.is_err() {
-        let deadline = u64::try_from(clock.now_ms())
-            .unwrap_or(0)
-            .saturating_add(10_000);
-        for (pack, raw) in acquired {
+        for (pack, held) in acquired {
             if let Err(error) =
-                state::clear_pending(store, source, &repo.name, &pack, &raw, deadline).await
+                state::clear_pending(store, source, &repo.name, &pack, &held.raw, deadline(clock))
+                    .await
             {
                 tracing::error!(%error, "failed to release pending verification lease");
             }
@@ -274,19 +285,17 @@ async fn verify_ticketed_inner<B: BlobStore, S: NamespaceStore>(
     cfg: IndexedConfig,
     clock: &dyn Clock,
     metrics: &dyn Metrics,
-    acquired: &mut Vec<(Hash, crate::Value)>,
+    acquired: &mut BTreeMap<Hash, HeldLease>,
 ) -> Result<Vec<Hash>, ServerError> {
-    let now = u64::try_from(clock.now_ms()).unwrap_or(0);
-    let deadline = now.saturating_add(10_000);
+    let now = now_ms(clock);
     let consumed: BTreeSet<_> = tickets.iter().map(|ticket| ticket.pack_id).collect();
     let mut staged: BTreeMap<Hash, (Vec<u8>, Object, u64)> = BTreeMap::new();
     let mut staged_bytes = 0u64;
     let mut staged_owner = BTreeMap::new();
     let mut work = Vec::with_capacity(tickets.len());
-    let mut pending_by_pack = BTreeMap::new();
     let mut packlists = Vec::new();
-    let mut verified_packs = Vec::new();
     for ticket in tickets {
+        renew_all_pending(store, source, repo, acquired, clock).await?;
         let observed = state::read(store, source, &repo.name, &ticket.pack_id)
             .await
             .map_err(|_| storage_failed())?;
@@ -294,7 +303,12 @@ async fn verify_ticketed_inner<B: BlobStore, S: NamespaceStore>(
             Some((VerificationV1::Verified { pack_len, .. }, _)) if *pack_len == ticket.bytes => {
                 true
             }
-            Some((VerificationV1::Verified { .. }, _)) => return Err(bad_object()),
+            Some((VerificationV1::Verified { .. }, _)) => {
+                tracing::error!(pack = %mkit_core::hash::to_hex(&ticket.pack_id), "verified pack length changed");
+                return Err(ServerError::unavailable(
+                    "verified pack content inconsistency",
+                ));
+            }
             Some((VerificationV1::Rejected { code, message }, _)) => {
                 return Err(if code == "invalid_argument" {
                     ServerError::invalid_argument(message.clone())
@@ -302,16 +316,17 @@ async fn verify_ticketed_inner<B: BlobStore, S: NamespaceStore>(
                     ServerError::failed_precondition(message.clone())
                 });
             }
-            Some((state, _)) if state::concurrent_pending(state, now).is_some() => {
+            Some((state, _)) if state::concurrent_pending(state, now_ms(clock)).is_some() => {
                 return Err(super::pending(1_000));
             }
             _ => false,
         };
+        let pending_until_ms = now_ms(clock).saturating_add(state::VERIFICATION_LEASE_MS);
         let pending_raw = if already_verified {
             None
         } else {
             let pending = VerificationV1::Pending {
-                lease_until_ms: now.saturating_add(state::VERIFICATION_LEASE_MS),
+                lease_until_ms: pending_until_ms,
             };
             let prior = observed.as_ref().map(|(_, raw)| raw);
             if !state::write(
@@ -321,7 +336,7 @@ async fn verify_ticketed_inner<B: BlobStore, S: NamespaceStore>(
                 &ticket.pack_id,
                 prior,
                 &pending,
-                deadline,
+                deadline(clock),
             )
             .await
             .map_err(|_| storage_failed())?
@@ -331,32 +346,47 @@ async fn verify_ticketed_inner<B: BlobStore, S: NamespaceStore>(
             Some(state::encode(&pending))
         };
         if let Some(raw) = &pending_raw {
-            acquired.push((ticket.pack_id, raw.clone()));
+            acquired.insert(
+                ticket.pack_id,
+                HeldLease {
+                    raw: raw.clone(),
+                    until_ms: pending_until_ms,
+                },
+            );
         }
-        if already_verified {
-            match verified_kind(blobs, ticket.pack_id).await? {
-                UploadType::Pack => verified_packs.push(ticket.pack_id),
-                UploadType::Packlist => {
-                    let bytes = pack_bytes(blobs, ticket, cfg.max_pack_bytes).await?;
-                    let list = decode_packlist(&bytes).map_err(|_| bad_object())?;
-                    packlists.push((ticket.created_at_ms, list.packs));
-                }
+        let bytes = match pack_bytes(blobs, ticket, cfg.max_pack_bytes).await {
+            Ok(bytes) => bytes,
+            Err(_) if already_verified => {
+                tracing::error!(pack = %mkit_core::hash::to_hex(&ticket.pack_id), "verified pack bytes changed");
+                return Err(ServerError::unavailable(
+                    "verified pack content inconsistency",
+                ));
             }
-            continue;
-        }
-        if let Some(raw) = &pending_raw {
-            pending_by_pack.insert(ticket.pack_id, raw.clone());
-        }
-        let bytes = pack_bytes(blobs, ticket, cfg.max_pack_bytes).await?;
+            Err(error) if error.public_message() == "object hash mismatch" => {
+                return Err(reject_content(
+                    store,
+                    source,
+                    repo,
+                    &ticket.pack_id,
+                    acquired,
+                    "object hash mismatch",
+                    clock,
+                    metrics,
+                )
+                .await);
+            }
+            Err(error) => return Err(error),
+        };
         let Ok(kind) = classify::classify(&bytes) else {
             return Err(reject_content(
                 store,
                 source,
                 repo,
                 &ticket.pack_id,
-                pending_raw.as_ref(),
+                acquired,
                 "unknown upload type",
-                deadline,
+                clock,
+                metrics,
             )
             .await);
         };
@@ -368,9 +398,10 @@ async fn verify_ticketed_inner<B: BlobStore, S: NamespaceStore>(
                         source,
                         repo,
                         &ticket.pack_id,
-                        pending_raw.as_ref(),
+                        acquired,
                         "object hash mismatch",
-                        deadline,
+                        clock,
+                        metrics,
                     )
                     .await);
                 };
@@ -378,7 +409,7 @@ async fn verify_ticketed_inner<B: BlobStore, S: NamespaceStore>(
                 work.push(PackWork {
                     ticket: ticket.clone(),
                     entries: Vec::new(),
-                    pending_raw,
+                    needs_index: pending_raw.is_some(),
                 });
             }
             UploadType::Pack => {
@@ -388,65 +419,160 @@ async fn verify_ticketed_inner<B: BlobStore, S: NamespaceStore>(
                         source,
                         repo,
                         &ticket.pack_id,
-                        pending_raw.as_ref(),
+                        acquired,
                         "object hash mismatch",
-                        deadline,
+                        clock,
+                        metrics,
                     )
                     .await);
                 };
-                // A syntactic base may be supplied by an earlier frame in
-                // this pack. Defer a repository lookup failure until the
-                // decoder actually asks for an external base.
-                let (locations, lookup_error) =
-                    match resolve::locate_split(store, shards, repo, &base_ids, metrics).await {
-                        Ok(locations) => (locations, None),
-                        Err(error) => (BTreeMap::new(), Some(error)),
-                    };
+                // Locate all syntactic candidates in bounded batches. A
+                // candidate's answer is used only if the decoder actually
+                // asks for it; in-pack links never fetch member bytes or
+                // emit capped-lookup metrics.
+                let prelocated = resolve::locate_split_quiet(store, shards, repo, &base_ids)
+                    .await
+                    .ok();
+                renew_all_pending(store, source, repo, acquired, clock).await?;
                 let mut bases = Bases(BTreeMap::new());
-                let mut base_errors = BTreeMap::new();
                 let mut depths = BTreeMap::new();
-                let mut memo = BTreeMap::new();
+                let mut memo = resolve::MemberCache::default();
                 let mut visiting = BTreeSet::new();
-                for base in base_ids {
-                    match locations.get(&base) {
-                        Some(Ok(Some(located))) => {
-                            match resolve::member_object(
-                                blobs,
-                                store,
-                                shards,
-                                repo,
-                                base,
-                                *located,
-                                cfg.max_delta_chain_depth,
-                                cfg.decode_budget,
-                                &mut memo,
-                                &mut visiting,
-                                metrics,
-                            )
-                            .await
-                            {
-                                Ok((canonical, depth)) => {
-                                    bases.0.insert(base, canonical);
-                                    depths.insert(base, depth);
-                                }
-                                Err(error) => {
-                                    base_errors.insert(base, error);
-                                }
+                // The resumable core decoder identifies actual external
+                // bases in one pass. An earlier in-pack frame wins over any
+                // matching member, so no such member frame is fetched.
+                if let Ok(mut probe) = PackDecodeCursor::new(
+                    &bytes,
+                    DecodeLimits::default()
+                        .with_max_decoded_bytes(cfg.decode_budget.saturating_sub(staged_bytes)),
+                ) {
+                    let mut probe_depths = BTreeMap::new();
+                    loop {
+                        let result = probe.resume(&mut bases, |entry| {
+                            let hops = entry.delta_base.map_or(0, |base| {
+                                probe_depths
+                                    .get(&base)
+                                    .copied()
+                                    .unwrap_or(0_u32)
+                                    .saturating_add(1)
+                            });
+                            if hops > cfg.max_delta_chain_depth {
+                                return Err(PackError::PackfileTooLarge);
                             }
+                            probe_depths.entry(entry.id).or_insert(hops);
+                            Ok(())
+                        });
+                        renew_all_pending(store, source, repo, acquired, clock).await?;
+                        let Err(PackError::DeltaBaseMissing(hex)) = result else {
+                            break;
+                        };
+                        let base = mkit_core::hash::from_hex(&hex).map_err(|_| {
+                            decode_failure(bad_object(), already_verified, &ticket.pack_id)
+                        })?;
+                        if !base_ids.contains(&base) || bases.0.contains_key(&base) {
+                            return Err(decode_failure(
+                                bad_object(),
+                                already_verified,
+                                &ticket.pack_id,
+                            ));
                         }
-                        Some(Err(_)) => {
-                            base_errors.insert(base, resolve::ResolveFailure::Capped);
-                        }
-                        _ => {}
+                        let cached = prelocated
+                            .as_ref()
+                            .and_then(|answers| answers.get(&base))
+                            .copied();
+                        let answer = if matches!(cached, Some(Ok(Some(_)))) {
+                            cached
+                        } else {
+                            let found =
+                                resolve::locate_split(store, shards, repo, &[base], metrics)
+                                    .await
+                                    .map_err(|error| {
+                                        decode_failure(error, already_verified, &ticket.pack_id)
+                                    })?;
+                            found.get(&base).copied()
+                        };
+                        let located = match answer {
+                            Some(Ok(Some(located))) => located,
+                            Some(Err(_)) => {
+                                return Err(decode_failure(
+                                    resolve::ResolveFailure::Capped.public_error(
+                                        now_ms(clock),
+                                        ticket.created_at_ms,
+                                        cfg.relay_lag_bound_ms,
+                                    ),
+                                    already_verified,
+                                    &ticket.pack_id,
+                                ));
+                            }
+                            _ => {
+                                return Err(decode_failure(
+                                    resolve::missing_base(
+                                        now_ms(clock),
+                                        ticket.created_at_ms,
+                                        cfg.relay_lag_bound_ms,
+                                    ),
+                                    already_verified,
+                                    &ticket.pack_id,
+                                ));
+                            }
+                        };
+                        let budget = cfg.decode_budget.saturating_sub(staged_bytes);
+                        let (canonical, depth) = resolve::member_object(
+                            blobs,
+                            store,
+                            shards,
+                            repo,
+                            base,
+                            located,
+                            cfg.max_delta_chain_depth,
+                            budget,
+                            &mut memo,
+                            &mut visiting,
+                            metrics,
+                        )
+                        .await
+                        .map_err(|failure| {
+                            decode_failure(
+                                failure.public_error(
+                                    now_ms(clock),
+                                    ticket.created_at_ms,
+                                    cfg.relay_lag_bound_ms,
+                                ),
+                                already_verified,
+                                &ticket.pack_id,
+                            )
+                        })?;
+                        renew_all_pending(store, source, repo, acquired, clock).await?;
+                        bases.0.insert(base, canonical);
+                        depths.insert(base, depth);
+                        probe
+                            .set_max_decoded_bytes(
+                                cfg.decode_budget.saturating_sub(
+                                    staged_bytes.saturating_add(memo.retained_bytes()),
+                                ),
+                            )
+                            .map_err(|_| {
+                                decode_failure(
+                                    ServerError::invalid_argument(
+                                        "pack exceeds indexed decode budget",
+                                    ),
+                                    already_verified,
+                                    &ticket.pack_id,
+                                )
+                            })?;
                     }
                 }
                 let mut frames = Vec::new();
                 let mut local_depths: BTreeMap<Hash, (u32, Option<Hash>)> = BTreeMap::new();
-                let mut depth_exceeded = false;
+                let mut in_pack_depth_exceeded = false;
+                let mut external_depth_exceeded = false;
                 let decoded = decode_entries_with(
                     &bytes,
                     &mut bases,
-                    DecodeLimits::default().with_max_decoded_bytes(cfg.decode_budget),
+                    DecodeLimits::default().with_max_decoded_bytes(
+                        cfg.decode_budget
+                            .saturating_sub(staged_bytes.saturating_add(memo.retained_bytes())),
+                    ),
                     |entry: DecodedEntry<'_>| {
                         let (hops, external) = match entry.delta_base {
                             None => (0, None),
@@ -460,8 +586,12 @@ async fn verify_ticketed_inner<B: BlobStore, S: NamespaceStore>(
                                 .and_then(|base| depths.get(&base).copied())
                                 .unwrap_or(0),
                         );
+                        if hops > cfg.max_delta_chain_depth {
+                            in_pack_depth_exceeded = true;
+                            return Err(PackError::PackfileTooLarge);
+                        }
                         if total > cfg.max_delta_chain_depth {
-                            depth_exceeded = true;
+                            external_depth_exceeded = true;
                             return Err(PackError::PackfileTooLarge);
                         }
                         local_depths.entry(entry.id).or_insert((hops, external));
@@ -479,7 +609,9 @@ async fn verify_ticketed_inner<B: BlobStore, S: NamespaceStore>(
                             staged_bytes = staged_bytes
                                 .checked_add(entry.bytes.len() as u64)
                                 .ok_or(PackError::PackfileTooLarge)?;
-                            if staged_bytes > cfg.decode_budget {
+                            if staged_bytes.saturating_add(memo.retained_bytes())
+                                > cfg.decode_budget
+                            {
                                 return Err(PackError::PackfileTooLarge);
                             }
                             slot.insert((entry.bytes.to_vec(), entry.object, ticket.created_at_ms));
@@ -488,38 +620,35 @@ async fn verify_ticketed_inner<B: BlobStore, S: NamespaceStore>(
                         Ok(())
                     },
                 );
+                renew_all_pending(store, source, repo, acquired, clock).await?;
                 if let Err(error) = decoded {
-                    if depth_exceeded {
+                    if in_pack_depth_exceeded {
                         return Err(reject_content(
                             store,
                             source,
                             repo,
                             &ticket.pack_id,
-                            pending_raw.as_ref(),
+                            acquired,
                             "delta chain too deep",
-                            deadline,
+                            clock,
+                            metrics,
                         )
                         .await);
                     }
+                    if external_depth_exceeded {
+                        return Err(decode_failure(
+                            ServerError::invalid_argument("delta chain too deep"),
+                            already_verified,
+                            &ticket.pack_id,
+                        ));
+                    }
                     let mapped = if let PackError::DeltaBaseMissing(hex) = &error {
-                        if let Some(error) = lookup_error {
-                            return Err(error);
-                        }
-                        let deferred = mkit_core::hash::from_hex(hex)
-                            .ok()
-                            .and_then(|id| base_errors.remove(&id));
-                        match deferred {
-                            Some(error) => error.public_error(
-                                u64::try_from(clock.now_ms()).unwrap_or(0),
-                                ticket.created_at_ms,
-                                cfg.relay_lag_bound_ms,
-                            ),
-                            None => resolve::missing_base(
-                                u64::try_from(clock.now_ms()).unwrap_or(0),
-                                ticket.created_at_ms,
-                                cfg.relay_lag_bound_ms,
-                            ),
-                        }
+                        let _ = hex;
+                        resolve::missing_base(
+                            now_ms(clock),
+                            ticket.created_at_ms,
+                            cfg.relay_lag_bound_ms,
+                        )
                     } else if matches!(error, PackError::PackfileTooLarge) {
                         ServerError::invalid_argument("pack exceeds indexed decode budget")
                     } else {
@@ -531,13 +660,14 @@ async fn verify_ticketed_inner<B: BlobStore, S: NamespaceStore>(
                             source,
                             repo,
                             &ticket.pack_id,
-                            pending_raw.as_ref(),
+                            acquired,
                             "object hash mismatch",
-                            deadline,
+                            clock,
+                            metrics,
                         )
                         .await);
                     }
-                    return Err(mapped);
+                    return Err(decode_failure(mapped, already_verified, &ticket.pack_id));
                 }
                 let Ok(entries) = index_entries(&frames, cfg.max_delta_chain_depth) else {
                     return Err(reject_content(
@@ -545,16 +675,17 @@ async fn verify_ticketed_inner<B: BlobStore, S: NamespaceStore>(
                         source,
                         repo,
                         &ticket.pack_id,
-                        pending_raw.as_ref(),
+                        acquired,
                         "delta chain too deep",
-                        deadline,
+                        clock,
+                        metrics,
                     )
                     .await);
                 };
                 work.push(PackWork {
                     ticket: ticket.clone(),
                     entries,
-                    pending_raw,
+                    needs_index: pending_raw.is_some(),
                 });
             }
         }
@@ -567,9 +698,10 @@ async fn verify_ticketed_inner<B: BlobStore, S: NamespaceStore>(
                 source,
                 repo,
                 &owner,
-                pending_by_pack.get(&owner),
+                acquired,
                 "bad signature",
-                deadline,
+                clock,
+                metrics,
             )
             .await);
         }
@@ -588,15 +720,6 @@ async fn verify_ticketed_inner<B: BlobStore, S: NamespaceStore>(
             .or_insert_with(|| tickets.first().map_or(now, |ticket| ticket.created_at_ms));
     }
     let mut member_head = None;
-    if !verified_packs.is_empty() && !needed.is_empty() {
-        let found = locate_in_verified_packs(store, shards, repo, &needed, &verified_packs).await?;
-        for (id, located) in found {
-            if id == head {
-                member_head = Some((located, needed[&id]));
-            }
-            needed.remove(&id);
-        }
-    }
     if !needed.is_empty() {
         let ids: Vec<_> = needed.keys().copied().collect();
         let found = resolve::locate_split(store, shards, repo, &ids, metrics).await?;
@@ -623,7 +746,7 @@ async fn verify_ticketed_inner<B: BlobStore, S: NamespaceStore>(
     // `verify_push` skips known frontiers, including a known root's type.
     // Reconstruct a member head once so a blob/tree cannot become a tip.
     if let Some((located, created)) = member_head {
-        let mut memo = BTreeMap::new();
+        let mut memo = resolve::MemberCache::default();
         let mut visiting = BTreeSet::new();
         let (bytes, _) = resolve::member_object(
             blobs,
@@ -633,7 +756,7 @@ async fn verify_ticketed_inner<B: BlobStore, S: NamespaceStore>(
             head,
             located,
             cfg.max_delta_chain_depth,
-            cfg.decode_budget,
+            cfg.decode_budget.saturating_sub(staged_bytes),
             &mut memo,
             &mut visiting,
             metrics,
@@ -661,7 +784,14 @@ async fn verify_ticketed_inner<B: BlobStore, S: NamespaceStore>(
         &mut StagedSource(&staged),
         |id| !staged_ids.contains(id),
     )
-    .map_err(|_| bad_object())?;
+    .map_err(|error| match error {
+        VerifyError::TooManyClosureObjects => {
+            ServerError::invalid_argument("object index limit exceeded")
+        }
+        VerifyError::ClosureRootWrongType(_) => ServerError::invalid_argument("open closure"),
+        VerifyError::Store(_) => storage_failed(),
+        _ => bad_object(),
+    })?;
     if !report.bad_signatures.is_empty() {
         return Err(ServerError::invalid_argument("bad signature"));
     }
@@ -679,6 +809,15 @@ async fn verify_ticketed_inner<B: BlobStore, S: NamespaceStore>(
         if missing.is_empty() {
             continue;
         }
+        if missing.len() > index::MAX_LOOKUP_IDS {
+            tracing::error!(reason = "ids", "packlist membership lookup capped");
+            metrics.incr(
+                crate::telemetry::METRIC_INDEX_LOOKUP_CAPPED,
+                &[("reason", "ids")],
+                1,
+            );
+            return Err(ServerError::invalid_argument("object index limit exceeded"));
+        }
         let found = read::members_many(store, shards, repo, source, &missing)
             .await
             .map_err(|_| storage_failed())?;
@@ -691,9 +830,9 @@ async fn verify_ticketed_inner<B: BlobStore, S: NamespaceStore>(
         }
     }
     for pack in &work {
-        let Some(raw) = &pack.pending_raw else {
+        if !pack.needs_index {
             continue;
-        };
+        }
         let plan = index::plan_index_rows_direct(
             shards,
             repo,
@@ -704,7 +843,8 @@ async fn verify_ticketed_inner<B: BlobStore, S: NamespaceStore>(
         )
         .map_err(|_| storage_failed())?;
         for direct in plan.direct {
-            let mut batch = Batch::new().require(Precondition::NotAfter(deadline));
+            renew_all_pending(store, source, repo, acquired, clock).await?;
+            let mut batch = Batch::new().require(Precondition::NotAfter(deadline(clock)));
             for (key, value) in direct.puts {
                 batch = batch.put(key, value);
             }
@@ -715,6 +855,8 @@ async fn verify_ticketed_inner<B: BlobStore, S: NamespaceStore>(
                 return Err(super::pending(1_000));
             }
         }
+        renew_all_pending(store, source, repo, acquired, clock).await?;
+        let raw = &acquired[&pack.ticket.pack_id].raw;
         if !state::write(
             store,
             source,
@@ -723,15 +865,16 @@ async fn verify_ticketed_inner<B: BlobStore, S: NamespaceStore>(
             Some(raw),
             &VerificationV1::Verified {
                 pack_len: pack.ticket.bytes,
-                verified_at_ms: now,
+                verified_at_ms: now_ms(clock),
             },
-            deadline,
+            deadline(clock),
         )
         .await
         .map_err(|_| super::pending(1_000))?
         {
             return Err(super::pending(1_000));
         }
+        acquired.remove(&pack.ticket.pack_id);
     }
     Ok(staged_ids.into_iter().collect())
 }

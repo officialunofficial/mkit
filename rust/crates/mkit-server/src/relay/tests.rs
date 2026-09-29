@@ -1498,7 +1498,7 @@ fn scan_budget(rows: u32, targets: u32) -> RelayBudget {
     RelayBudget {
         max_rows: rows,
         max_targets: targets,
-        max_target_calls: Some(2),
+        max_target_calls: Some(WORKER_RELAY_CALLS_PER_TARGET),
     }
 }
 
@@ -1903,9 +1903,12 @@ async fn worker_budget_drains_512_distinct_healthy_targets_without_idle_fires() 
 
 #[tokio::test]
 async fn worker_paid_and_free_budgets_drain_4096_targets_within_alarm_call_caps() {
-    for (targets_per_fire, fires_per_alarm, calls_per_alarm, max_alarms) in
-        [(32, 8, 512, 64), (8, 2, 32, 320)]
-    {
+    for (targets_per_fire, fires_per_alarm) in [
+        (WORKER_PAID_RELAY_TARGETS, WORKER_PAID_RELAY_FIRES),
+        (WORKER_FREE_RELAY_TARGETS, WORKER_FREE_RELAY_FIRES),
+    ] {
+        let calls_per_alarm = targets_per_fire * fires_per_alarm * WORKER_RELAY_CALLS_PER_TARGET;
+        let max_alarms = 4096_u32.div_ceil(targets_per_fire * fires_per_alarm) + 64;
         let source_store = memory();
         plant_schedule(&source_store, &(0..4096).collect::<Vec<_>>()).await;
         let h = RelayHandler {
@@ -1930,7 +1933,10 @@ async fn worker_paid_and_free_budgets_drain_4096_targets_within_alarm_call_caps(
                     .unwrap();
             }
             let calls = h.target.calls.load(Ordering::SeqCst) - before;
-            assert!(calls <= calls_per_alarm, "alarm used {calls} target calls");
+            assert!(
+                calls <= calls_per_alarm as usize,
+                "alarm used {calls} target calls"
+            );
         }
     }
 }

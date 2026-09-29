@@ -6,13 +6,18 @@ use crate::repo::MultiAddressing;
 use crate::store::{BlobKey, BlobStore, PackSink};
 use crate::upload::marker::write_upload_marker;
 use bytes::Bytes;
-use mkit_core::object::{Commit, Identity, Object, Tree};
+use mkit_core::object::{Blob, Commit, EntryMode, Identity, Object, Tree, TreeEntry};
 use mkit_core::pack::PackWriter;
 use mkit_core::repo_identity::Namespace;
 use mkit_core::serialize::serialize;
 use mkit_core::sign::{KeyPair, sign_commit};
+use mkit_core::transfer::encode_packlist;
 
 fn environment() -> (Env, SigningKey, String) {
+    environment_with_sharding(Sharding::Single)
+}
+
+fn environment_with_sharding(sharding: Sharding) -> (Env, SigningKey, String) {
     let owner = key(7);
     let namespace = Namespace::Ed25519(*owner.verifying_key().as_bytes());
     let identity = format!("{namespace}/{REPO}");
@@ -22,6 +27,7 @@ fn environment() -> (Env, SigningKey, String) {
             .with_namespace_policy(NamespacePolicy::Allowlist([namespace].into())),
     );
     config.write_policy = WritePolicy::Owner;
+    config.sharding = sharding;
     config.ticket_keys =
         Some(crate::upload::token::TicketKeys::new(vec![("test".into(), [7; 32])]).unwrap());
     config.indexed = Some(crate::indexed::IndexedConfig::default());
@@ -69,7 +75,7 @@ fn signed(owner: &SigningKey, identity: &str, procedure: Procedure, number: u32)
     request
 }
 
-fn pack() -> (Vec<u8>, Hash) {
+fn signed_objects() -> (Object, Object, Hash) {
     let tree = Object::Tree(Tree {
         entries: Vec::new(),
     });
@@ -87,12 +93,28 @@ fn pack() -> (Vec<u8>, Hash) {
     commit.signature = sign_commit(&commit, &signer).unwrap().0;
     let commit = Object::Commit(commit);
     let head = commit.id().unwrap();
+    (tree, commit, head)
+}
+
+fn pack() -> (Vec<u8>, Hash) {
+    let (tree, commit, head) = signed_objects();
     let mut writer = PackWriter::new_raw_only();
     writer
-        .push_raw(tree_id, &serialize(&tree).unwrap())
+        .push_raw(tree.id().unwrap(), &serialize(&tree).unwrap())
         .unwrap();
     writer.push_raw(head, &serialize(&commit).unwrap()).unwrap();
     (writer.finish().unwrap(), head)
+}
+
+fn split_pack() -> (Vec<u8>, Vec<u8>, Hash) {
+    let (tree, commit, head) = signed_objects();
+    let mut first = PackWriter::new_raw_only();
+    first.push_raw(head, &serialize(&commit).unwrap()).unwrap();
+    let mut second = PackWriter::new_raw_only();
+    second
+        .push_raw(tree.id().unwrap(), &serialize(&tree).unwrap())
+        .unwrap();
+    (first.finish().unwrap(), second.finish().unwrap(), head)
 }
 
 fn upload(env: &Env, pack: &[u8], ticket_id: Hash) {
@@ -110,6 +132,458 @@ fn upload(env: &Env, pack: &[u8], ticket_id: Hash) {
             .await
             .unwrap();
     });
+}
+
+fn begin_and_upload(
+    env: &Env,
+    owner: &SigningKey,
+    identity: &str,
+    pack: &[u8],
+    number: u32,
+) -> Hash {
+    let request = signed(owner, identity, Procedure::BeginUpload, number);
+    let BeginUploadResult::Ticket { id, .. } = block_on(env.pipe.begin_upload(
+        &env.auth(&request).unwrap(),
+        HEAD,
+        &hash(pack),
+        pack.len() as u64,
+    ))
+    .unwrap() else {
+        panic!("expected upload ticket");
+    };
+    upload(env, pack, id);
+    id
+}
+
+fn assert_advance_unmoved(env: &Env, repo: &RepoId, packs: &[Hash]) {
+    let source = env.pipe.shards.ref_shard(repo, HEAD);
+    for key in [
+        keys::ref_key(&repo.name, HEAD),
+        keys::ref_key(&repo.name, PACKMAP),
+    ] {
+        assert!(
+            block_on(env.pipe.meta.get(&source, &key))
+                .unwrap()
+                .is_none()
+        );
+    }
+    for pack in packs {
+        assert!(
+            block_on(
+                env.pipe
+                    .meta
+                    .get(&source, &keys::membership(&repo.name, pack))
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+}
+
+#[test]
+fn verified_pack_reuse_rechecks_closure_on_current_consumed_set() {
+    let (env, owner, identity) = environment();
+    let (commit_pack, tree_pack, head) = split_pack();
+    let mut tickets = Vec::new();
+    for (number, bytes) in [(100, &commit_pack), (101, &tree_pack)] {
+        tickets.push(begin_and_upload(&env, &owner, &identity, bytes, number));
+    }
+
+    let request = signed(&owner, &identity, Procedure::AdvanceRefs, 102);
+    let auth = env.auth(&request).unwrap();
+    let repo = auth.repo().repo.clone();
+    let source = env.pipe.shards.ref_shard(&repo, HEAD);
+    assert_eq!(
+        block_on(env.pipe.advance_refs_with_tickets(
+            &auth,
+            upd(HEAD, Match([0x5a; 32]), head),
+            upd(PACKMAP, Missing, hash(&tree_pack)),
+            tickets.clone(),
+        ))
+        .unwrap(),
+        AdvanceOutcome::HeadConflict
+    );
+    for bytes in [&commit_pack, &tree_pack] {
+        let raw = block_on(
+            env.pipe
+                .meta
+                .get(&source, &keys::verification(&repo.name, &hash(bytes))),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(matches!(
+            crate::indexed::state::decode(&raw).unwrap(),
+            crate::indexed::state::VerificationV1::Verified { .. }
+        ));
+    }
+    assert!(
+        block_on(env.pipe.meta.get(&source, &keys::ref_key(&repo.name, HEAD)))
+            .unwrap()
+            .is_none()
+    );
+
+    env.clock.advance(
+        i64::try_from(crate::indexed::IndexedConfig::default().relay_lag_bound_ms).unwrap(),
+    );
+    let request = signed(&owner, &identity, Procedure::AdvanceRefs, 103);
+    let error = block_on(env.pipe.advance_refs_with_tickets(
+        &env.auth(&request).unwrap(),
+        upd(HEAD, Missing, head),
+        upd(PACKMAP, Missing, hash(&commit_pack)),
+        vec![tickets[0]],
+    ))
+    .unwrap_err();
+    assert_eq!(error.code(), Code::InvalidArgument);
+    assert_eq!(error.public_message(), "open closure");
+    for key in [
+        keys::ref_key(&repo.name, HEAD),
+        keys::ref_key(&repo.name, PACKMAP),
+        keys::membership(&repo.name, &hash(&commit_pack)),
+        keys::membership(&repo.name, &hash(&tree_pack)),
+    ] {
+        assert!(
+            block_on(env.pipe.meta.get(&source, &key))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    let request = signed(&owner, &identity, Procedure::AdvanceRefs, 104);
+    assert_eq!(
+        block_on(env.pipe.advance_refs_with_tickets(
+            &env.auth(&request).unwrap(),
+            upd(HEAD, Missing, head),
+            upd(PACKMAP, Missing, hash(&tree_pack)),
+            tickets,
+        ))
+        .unwrap(),
+        AdvanceOutcome::Committed
+    );
+    assert!(
+        block_on(env.pipe.meta.get(&source, &keys::ref_key(&repo.name, HEAD)))
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn indexed_dangling_and_unknown_upload_leave_refs_unmoved() {
+    for (case, expected) in [(0, "open closure"), (1, "unknown upload type")] {
+        let (env, owner, identity) = environment();
+        let (bytes, head) = if case == 0 {
+            let (tree, commit, head) = signed_objects();
+            let orphan = Object::Tree(Tree {
+                entries: vec![TreeEntry {
+                    name: b"missing".to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: [0x99; 32],
+                }],
+            });
+            let mut writer = PackWriter::new_raw_only();
+            for object in [&tree, &commit, &orphan] {
+                writer
+                    .push_raw(object.id().unwrap(), &serialize(object).unwrap())
+                    .unwrap();
+            }
+            (writer.finish().unwrap(), head)
+        } else {
+            (b"NOPE-unknown-upload-type-content".to_vec(), [0x55; 32])
+        };
+        let pack_id = hash(&bytes);
+        let id = begin_and_upload(&env, &owner, &identity, &bytes, 200);
+        if case == 0 {
+            env.clock.advance(
+                i64::try_from(crate::indexed::IndexedConfig::default().relay_lag_bound_ms).unwrap(),
+            );
+        }
+        let request = signed(&owner, &identity, Procedure::AdvanceRefs, 201);
+        let auth = env.auth(&request).unwrap();
+        let repo = auth.repo().repo.clone();
+        let error = block_on(env.pipe.advance_refs_with_tickets(
+            &auth,
+            upd(HEAD, Missing, head),
+            upd(PACKMAP, Missing, pack_id),
+            vec![id],
+        ))
+        .unwrap_err();
+        assert_eq!(error.code(), Code::InvalidArgument);
+        assert_eq!(error.public_message(), expected);
+        assert_advance_unmoved(&env, &repo, &[pack_id]);
+    }
+}
+
+#[test]
+fn indexed_foreign_packlist_miss_leaves_refs_unmoved_inside_and_after_lag() {
+    let (env, owner, identity) = environment();
+    let (good, head) = pack();
+    let foreign = [0x81; 32];
+    let list = encode_packlist(None, &[foreign]).unwrap();
+    let ids = [
+        begin_and_upload(&env, &owner, &identity, &good, 210),
+        begin_and_upload(&env, &owner, &identity, &list, 211),
+    ];
+    let packs = [hash(&good), hash(&list)];
+    for (number, expected, code) in [
+        (
+            212,
+            "repository membership not yet visible",
+            Code::Unavailable,
+        ),
+        (
+            213,
+            "packlist lists a pack that is not in this repository",
+            Code::InvalidArgument,
+        ),
+    ] {
+        if number == 213 {
+            env.clock.advance(
+                i64::try_from(crate::indexed::IndexedConfig::default().relay_lag_bound_ms).unwrap(),
+            );
+        }
+        let request = signed(&owner, &identity, Procedure::AdvanceRefs, number);
+        let auth = env.auth(&request).unwrap();
+        let repo = auth.repo().repo.clone();
+        let error = block_on(env.pipe.advance_refs_with_tickets(
+            &auth,
+            upd(HEAD, Missing, head),
+            upd(PACKMAP, Missing, packs[1]),
+            ids.to_vec(),
+        ))
+        .unwrap_err();
+        assert_eq!(error.code(), code);
+        assert_eq!(error.public_message(), expected);
+        assert_advance_unmoved(&env, &repo, &packs);
+    }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // One fixture compares both repositories at both lag-window times.
+fn indexed_foreign_and_absent_thin_bases_match_and_leave_refs_unmoved() {
+    let base = Object::Blob(Blob {
+        data: b"base".to_vec(),
+    });
+    let target = Object::Blob(Blob {
+        data: b"target".to_vec(),
+    });
+    let base_id = base.id().unwrap();
+    let target_id = target.id().unwrap();
+    let base_bytes = serialize(&base).unwrap();
+    let target_bytes = serialize(&target).unwrap();
+    let mut writer = PackWriter::new();
+    writer
+        .push_delta(
+            &base_id,
+            &mkit_core::delta::encode(&base_bytes, &target_bytes).unwrap(),
+        )
+        .unwrap();
+    let thin = writer.finish().unwrap();
+    let thin_id = hash(&thin);
+    let mut answers = Vec::new();
+    for foreign_exists in [false, true] {
+        let (env, owner, identity) = environment();
+        let ticket = begin_and_upload(&env, &owner, &identity, &thin, 220);
+        let request = signed(&owner, &identity, Procedure::AdvanceRefs, 221);
+        let repo = env.auth(&request).unwrap().repo().repo.clone();
+        if foreign_exists {
+            let foreign = RepoId {
+                namespace: repo.namespace.clone(),
+                name: RepoName::new("foreign").unwrap(),
+            };
+            let mut writer = PackWriter::new_raw_only();
+            writer.push_raw(base_id, &base_bytes).unwrap();
+            let member_pack = writer.finish().unwrap();
+            let member_id = hash(&member_pack);
+            let mut sink = block_on(
+                env.pipe
+                    .blobs
+                    .begin(BlobKey::pack(member_id), member_pack.len() as u64),
+            )
+            .unwrap();
+            block_on(sink.write(Bytes::from(member_pack))).unwrap();
+            block_on(sink.commit()).unwrap();
+            let value = crate::store::index::IndexValue {
+                frame_offset: 12,
+                frame_length: 20,
+                wire_type: 0,
+                decoded_size: base_bytes.len() as u64,
+                chain_depth: 0,
+                delta_base: None,
+            };
+            let partition = env.pipe.shards.object_index(&foreign, &base_id);
+            block_on(
+                env.pipe.meta.apply(
+                    &partition,
+                    Batch::new()
+                        .put(
+                            keys::object_index(&foreign.name, &base_id, &member_id),
+                            codec::encode_object_index(&base_id, &value).unwrap(),
+                        )
+                        .put(
+                            keys::membership(&foreign.name, &member_id),
+                            Value::default(),
+                        ),
+                ),
+            )
+            .unwrap();
+        }
+        let mut repo_answers = Vec::new();
+        for (number, expected, code) in [
+            (
+                221,
+                "repository membership not yet visible",
+                Code::Unavailable,
+            ),
+            (
+                222,
+                "delta base not available in this repository",
+                Code::FailedPrecondition,
+            ),
+        ] {
+            if number == 222 {
+                env.clock.advance(
+                    i64::try_from(crate::indexed::IndexedConfig::default().relay_lag_bound_ms)
+                        .unwrap(),
+                );
+            }
+            let request = signed(&owner, &identity, Procedure::AdvanceRefs, number);
+            let auth = env.auth(&request).unwrap();
+            let error = block_on(env.pipe.advance_refs_with_tickets(
+                &auth,
+                upd(HEAD, Missing, target_id),
+                upd(PACKMAP, Missing, thin_id),
+                vec![ticket],
+            ))
+            .unwrap_err();
+            assert_eq!(error.code(), code);
+            assert_eq!(error.public_message(), expected);
+            assert_advance_unmoved(&env, &repo, &[thin_id]);
+            repo_answers.push((
+                error.code(),
+                error.public_message().to_owned(),
+                error.details().to_vec(),
+            ));
+        }
+        answers.push(repo_answers);
+    }
+    assert_eq!(answers[0], answers[1]);
+}
+
+#[test]
+fn indexed_concurrent_lease_has_no_replay_row_and_retry_commits() {
+    let (env, owner, identity) = environment();
+    let (bytes, head) = pack();
+    let pack_id = hash(&bytes);
+    let ticket = begin_and_upload(&env, &owner, &identity, &bytes, 230);
+    let request = signed(&owner, &identity, Procedure::AdvanceRefs, 231);
+    let auth = env.auth(&request).unwrap();
+    let repo = auth.repo().repo.clone();
+    let source = env.pipe.shards.ref_shard(&repo, HEAD);
+    let state = crate::indexed::state::VerificationV1::Pending {
+        lease_until_ms: T0 as u64 + crate::indexed::state::VERIFICATION_LEASE_MS,
+    };
+    block_on(env.pipe.meta.apply(
+        &source,
+        Batch::new().put(
+            keys::verification(&repo.name, &pack_id),
+            crate::indexed::state::encode(&state),
+        ),
+    ))
+    .unwrap();
+    let replay = keys::replay(&auth.auth.as_ref().unwrap().replay_scope);
+    let attempt = || {
+        block_on(env.pipe.advance_refs_with_tickets(
+            &auth,
+            upd(HEAD, Missing, head),
+            upd(PACKMAP, Missing, pack_id),
+            vec![ticket],
+        ))
+    };
+    let error = attempt().unwrap_err();
+    assert_eq!(error.public_message(), "pack verification pending");
+    assert_eq!(error.details().len(), 1);
+    assert!(
+        block_on(env.pipe.meta.get(&source, &replay))
+            .unwrap()
+            .is_none()
+    );
+    env.clock
+        .advance(i64::try_from(crate::indexed::state::VERIFICATION_LEASE_MS + 1).unwrap());
+    assert_eq!(attempt().unwrap(), AdvanceOutcome::Committed);
+}
+
+#[test]
+fn indexed_seven_ticket_advance_adds_no_batch_rows() {
+    for (sharding, expected) in [(Sharding::D34, 88), (Sharding::Single, 77)] {
+        let d34 = sharding == Sharding::D34;
+        let batch = planned_ticket_advance_mode(7, d34);
+        assert_eq!(batch.preconditions.len() + batch.writes.len(), expected);
+        assert!(batch.writes.iter().all(|write| {
+            let (Write::Put(key, _) | Write::Delete(key)) = write;
+            !matches!(
+                keys::parse(key),
+                Some(keys::ParsedKey::ObjectIndex { .. } | keys::ParsedKey::Verification { .. })
+            )
+        }));
+
+        let (env, owner, identity) = environment_with_sharding(sharding);
+        let (head_pack, head) = pack();
+        let mut packs = vec![head_pack];
+        for i in 0..6_u8 {
+            let object = Object::Blob(Blob { data: vec![i] });
+            let mut writer = PackWriter::new_raw_only();
+            writer
+                .push_raw(object.id().unwrap(), &serialize(&object).unwrap())
+                .unwrap();
+            packs.push(writer.finish().unwrap());
+        }
+        let tickets: Vec<_> = packs
+            .iter()
+            .enumerate()
+            .map(|(i, bytes)| {
+                begin_and_upload(
+                    &env,
+                    &owner,
+                    &identity,
+                    bytes,
+                    1_000 + u32::try_from(i).unwrap(),
+                )
+            })
+            .collect();
+        let request = signed(&owner, &identity, Procedure::AdvanceRefs, 1_100);
+        let auth = env.auth(&request).unwrap();
+        let repo = auth.repo().repo.clone();
+        assert_eq!(
+            block_on(env.pipe.advance_refs_with_tickets(
+                &auth,
+                upd(HEAD, Missing, head),
+                upd(PACKMAP, Missing, hash(&packs[0])),
+                tickets,
+            ))
+            .unwrap(),
+            AdvanceOutcome::Committed
+        );
+        let ref_key = keys::ref_key(&repo.name, HEAD);
+        let batches = env.pipe.meta.batches.lock().unwrap();
+        let advances: Vec<_> = batches
+            .iter()
+            .filter(|batch| {
+                batch
+                    .writes
+                    .iter()
+                    .any(|write| matches!(write, Write::Put(key, _) if *key == ref_key))
+            })
+            .collect();
+        assert_eq!(advances.len(), 1);
+        let actual = advances[0];
+        assert!(actual.preconditions.len() + actual.writes.len() <= expected);
+        assert!(actual.writes.iter().all(|write| {
+            let (Write::Put(key, _) | Write::Delete(key)) = write;
+            !matches!(
+                keys::parse(key),
+                Some(keys::ParsedKey::ObjectIndex { .. } | keys::ParsedKey::Verification { .. })
+            )
+        }));
+    }
 }
 
 #[test]

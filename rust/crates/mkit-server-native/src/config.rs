@@ -9,14 +9,18 @@ use std::time::Duration;
 
 use clap::{Args, ValueEnum};
 use http::HeaderValue;
+#[cfg(feature = "test-faults")]
+use mkit_server::MultiAddressing;
 use mkit_server::auth_v2::AuthV2Config;
+#[cfg(feature = "test-faults")]
 use mkit_server::indexed::IndexedConfig;
 use mkit_server::pipeline::{AuthMode, PipelineConfig, Sharding};
+#[cfg(feature = "test-faults")]
 use mkit_server::policy::NamespacePolicy;
 use mkit_server::sql::Capacity;
 use mkit_server::upload::UploadLimits;
 use mkit_server::upload::token::TicketKeys;
-use mkit_server::{Addressing, MultiAddressing, NamespaceKey, Redacted, RepoId, RepoName};
+use mkit_server::{Addressing, NamespaceKey, Redacted, RepoId, RepoName};
 
 use crate::ServeOptions;
 use crate::exit;
@@ -257,24 +261,31 @@ pub struct ServeArgs {
     #[arg(long, value_name = "N")]
     pub max_pack_bytes: Option<u64>,
     /// Route namespaced repositories; required for indexed mode.
+    #[cfg(feature = "test-faults")]
     #[arg(long)]
     pub multi_addressing: bool,
     /// Namespace permitted to write on a Multi deployment (repeatable).
+    #[cfg(feature = "test-faults")]
     #[arg(long = "allow-namespace", value_name = "NAMESPACE")]
     pub allowed_namespaces: Vec<String>,
     /// Verify consumed packs and build repository object-index rows.
+    #[cfg(feature = "test-faults")]
     #[arg(long)]
     pub indexed: bool,
     /// Indexed pack cap; defaults to 2 GiB.
+    #[cfg(feature = "test-faults")]
     #[arg(long, value_name = "BYTES")]
     pub indexed_max_pack_bytes: Option<u64>,
     /// Whole-pack decode budget; defaults to 2 GiB.
+    #[cfg(feature = "test-faults")]
     #[arg(long, value_name = "BYTES")]
     pub indexed_decode_budget: Option<u64>,
     /// Total delta-chain cap; defaults to 50.
+    #[cfg(feature = "test-faults")]
     #[arg(long, value_name = "N")]
     pub indexed_max_delta_chain_depth: Option<u32>,
     /// Membership lag window; defaults to 60,000 ms.
+    #[cfg(feature = "test-faults")]
     #[arg(long, value_name = "MS")]
     pub indexed_relay_lag_bound_ms: Option<u64>,
     /// Deadline of a unary RPC.
@@ -1101,6 +1112,7 @@ pub fn resolve(
         max_total_bytes: max_pack,
         max_chunks: u32::MAX,
     };
+    #[cfg(feature = "test-faults")]
     let addressing = if args.multi_addressing {
         let mut allowed = std::collections::BTreeSet::new();
         for value in &args.allowed_namespaces {
@@ -1117,10 +1129,13 @@ pub fn resolve(
         }
         Addressing::Single { repo }
     };
+    #[cfg(not(feature = "test-faults"))]
+    let addressing = Addressing::Single { repo };
     // `new` sets the default write quota for auth v2 only.
     let mut pipeline = PipelineConfig::new(addressing, auth, limits);
     pipeline.sharding = sharding;
     pipeline.ticket_keys = resolve_ticket_keys(args, env)?;
+    #[cfg(feature = "test-faults")]
     if args.indexed {
         let mut indexed = IndexedConfig::default();
         if let Some(value) = args.indexed_max_pack_bytes {
