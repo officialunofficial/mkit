@@ -250,7 +250,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             self.fill(p, snap, detail.clone()).await?;
 
             // TODO(WP-5.3a): remove a pack's GC mark before accepting its ticket.
-            // TODO(WP-4.x): schedule verification and enforce §9.2 MKPL checks in indexed mode.
+            // Indexed verification is invoked by write() after this ticket
+            // decision succeeds, before the advance planner can commit.
             // One future per valid ticket preserves marker-before-pack order,
             // while all eligible tickets run concurrently (at most 2n heads).
             let pending = rows

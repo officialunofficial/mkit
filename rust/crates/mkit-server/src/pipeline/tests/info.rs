@@ -3,6 +3,34 @@ use super::*;
 use crate::repo::MultiAddressing;
 
 #[test]
+fn indexed_startup_requires_ticketed_multi_and_advertises_effective_limits() {
+    let mut c = cfg(authv2());
+    c.indexed = Some(crate::indexed::IndexedConfig::default());
+    c.ticket_keys =
+        Some(crate::upload::token::TicketKeys::new(vec![("test".into(), [7; 32])]).unwrap());
+    let error = match Pipeline::new(
+        MemoryBlobStore::default(),
+        Spy::new(store(&clock())),
+        Hooks::new(),
+        c.clone(),
+        clock(),
+        Arc::new(SpyMetrics::default()),
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("Single addressing unexpectedly accepted indexed mode"),
+    };
+    assert_eq!(error.code(), Code::InvalidArgument);
+    c.addressing = Addressing::Multi(MultiAddressing::new());
+    c.write_policy = WritePolicy::Owner;
+    let e = build(c.clone(), Spy::new(store(&clock())), Hooks::new(), clock());
+    let info = e.pipe.server_info();
+    assert!(info.indexed_mode);
+    assert_eq!(info.max_delta_chain_depth, 50);
+    assert_eq!(info.max_pack_bytes, c.upload_limits.max_total_bytes);
+    assert_eq!(info.begin_upload_threshold_bytes, 0);
+}
+
+#[test]
 fn server_info_defaults_and_custom_limits_read_no_store() {
     let mut c = cfg(AuthMode::Open);
     let defaults = build(c.clone(), Spy::new(store(&clock())), Hooks::new(), clock());

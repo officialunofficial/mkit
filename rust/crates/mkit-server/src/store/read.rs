@@ -2,6 +2,7 @@
 //! `store::codec` values in one place, so no backend reimplements them.
 
 use mkit_core::hash::Hash;
+use std::collections::BTreeMap;
 
 use super::codec;
 use super::error::StoreError;
@@ -86,6 +87,58 @@ pub async fn is_member<S: NamespaceStore>(
             .is_some());
     }
     Ok(false)
+}
+
+/// Batch membership for one repository: check the consuming ref shard's
+/// local rows first, then unresolved packs in their membership partitions.
+/// This is the hook point for §12.2's deleted-repository generation rule.
+pub async fn members_many<S: NamespaceStore>(
+    store: &S,
+    shards: &dyn ShardMap,
+    repo: &RepoId,
+    ref_shard: &Partition,
+    packs: &[Hash],
+) -> Result<Vec<bool>, StoreError> {
+    // Bound each backend call even for the format's one-million-pack MKPL
+    // ceiling. The result remains in caller order.
+    if packs.len() > 256 {
+        let mut answer = Vec::with_capacity(packs.len());
+        for chunk in packs.chunks(256) {
+            Box::pin(members_many(store, shards, repo, ref_shard, chunk))
+                .await
+                .map(|part| answer.extend(part))?;
+        }
+        return Ok(answer);
+    }
+    let keys: Vec<_> = packs
+        .iter()
+        .map(|pack| keys::membership(&repo.name, pack))
+        .collect();
+    let local = store.get_many(ref_shard, &keys).await?;
+    if local.len() != packs.len() {
+        return Err(StoreError::Corrupt("short local membership read".into()));
+    }
+    let mut found: Vec<_> = local.into_iter().map(|value| value.is_some()).collect();
+    let mut grouped: BTreeMap<Partition, Vec<usize>> = BTreeMap::new();
+    for (i, pack) in packs.iter().enumerate() {
+        if !found[i] {
+            grouped
+                .entry(shards.membership(repo, &crate::store::BlobKey::pack(*pack)))
+                .or_default()
+                .push(i);
+        }
+    }
+    for (partition, indices) in grouped {
+        let wanted: Vec<_> = indices.iter().map(|i| keys[*i].clone()).collect();
+        let values = store.get_many(&partition, &wanted).await?;
+        if values.len() != indices.len() {
+            return Err(StoreError::Corrupt("short membership index read".into()));
+        }
+        for (i, value) in indices.into_iter().zip(values) {
+            found[i] = value.is_some();
+        }
+    }
+    Ok(found)
 }
 
 /// The replay record for `scope`, if any (PRD §5.4 stage 0).

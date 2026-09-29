@@ -93,14 +93,18 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             max_list_refs_page_size: self.cfg.max_list_refs_page_size,
             begin_upload_threshold_bytes: self.effective_threshold(),
             atomic_advance: self.capabilities().atomic_advance,
-            indexed_mode: false,
+            indexed_mode: self.cfg.indexed.is_some(),
             admission,
             receipt_public_key: Vec::new(),
             receipt_key_id: String::new(),
             grant_schemes: Vec::new(),
             namespace_policy: self.cfg.advertised_namespace_policy(),
             index_fanout: u32::from(INDEX_FANOUT),
-            max_delta_chain_depth: 0,
+            max_delta_chain_depth: self
+                .cfg
+                .indexed
+                .as_ref()
+                .map_or(0, |cfg| cfg.max_delta_chain_depth),
         }
     }
 }

@@ -210,6 +210,8 @@ pub struct PipelineConfig {
     pub min_lease_budget_ms: u64,
     /// Extra header names never to log.
     pub redactor: Redactor,
+    /// Indexed ingestion and pre-receive verification, off by default.
+    pub indexed: Option<crate::indexed::IndexedConfig>,
 }
 
 impl PipelineConfig {
@@ -246,6 +248,7 @@ impl PipelineConfig {
             lease_margin_ms: 5_000,
             min_lease_budget_ms: 1_000,
             redactor: Redactor::default(),
+            indexed: None,
         }
     }
 
@@ -412,10 +415,39 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         blobs: B,
         meta: N,
         hooks: H,
-        cfg: PipelineConfig,
+        mut cfg: PipelineConfig,
         clock: Arc<dyn Clock>,
         metrics: Arc<dyn Metrics>,
     ) -> Result<Self, ServerError> {
+        if let Some(indexed) = &cfg.indexed {
+            let threshold = if !hooks.admission().is_default()
+                || matches!(cfg.addressing, Addressing::Multi(_))
+            {
+                0
+            } else {
+                cfg.begin_upload_threshold_bytes
+            };
+            if !matches!(cfg.auth, AuthMode::AuthV2(_))
+                || cfg.ticket_keys.is_none()
+                || threshold != 0
+                || !matches!(cfg.addressing, Addressing::Multi(_))
+            {
+                return Err(ServerError::invalid_argument(
+                    "indexed mode requires auth v2, ticket keys, zero ticket threshold, and Multi addressing",
+                ));
+            }
+            if indexed.max_delta_chain_depth == 0
+                || indexed.max_pack_bytes == 0
+                || indexed.max_pack_bytes > indexed.decode_budget
+                || indexed.relay_lag_bound_ms == 0
+            {
+                return Err(ServerError::invalid_argument("invalid indexed limits"));
+            }
+            cfg.upload_limits.max_total_bytes = cfg
+                .upload_limits
+                .max_total_bytes
+                .min(indexed.max_pack_bytes);
+        }
         cfg.validate_server_info_limits()?;
 
         if cfg.max_parts > B::MAX_PARTS {
@@ -1112,6 +1144,36 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 .ok_or_else(|| internal("ticket advance requires atomic metadata"))?;
             if let Some(stored) = self.ticket_decision(&op, a, &p, snap).await? {
                 return Ok(stored);
+            }
+            if let Some(indexed) = self.cfg.indexed
+                && let OpKind::AdvanceRefs { head, tickets, .. } = &op.kind
+            {
+                let rows = tickets
+                    .iter()
+                    .map(|id| {
+                        snap.get(&keys::ticket(id))
+                            .ok_or_else(|| {
+                                ServerError::failed_precondition("invalid or expired upload ticket")
+                            })
+                            .and_then(|raw| codec::decode_ticket(raw).map_err(meta_error))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let tip = head
+                    .new
+                    .ok_or_else(|| ServerError::invalid_argument("open closure"))?;
+                let _verified_objects = crate::indexed::verify::verify_ticketed(
+                    &self.blobs,
+                    &self.meta,
+                    self.shards.as_ref(),
+                    &op.repo,
+                    &p,
+                    &rows,
+                    tip,
+                    indexed,
+                    self.clock.as_ref(),
+                    self.metrics.as_ref(),
+                )
+                .await?;
             }
         }
         let existing = self.begin_decision(&op, a, ahead.as_mut()).await?;
