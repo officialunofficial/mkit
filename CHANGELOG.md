@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - RPC: public `mkit-rpc::hooks` message types with JSON support and runtime-free
   `HookSigner` and `HookVerifier`, enabled by the `hooks` feature. The server
   re-exports its authentication surface (WP-3.7b, Linear MKIT-67).
+- WP-1.19: add an inert Stage 2 staging template and activation/backup runbook; provisioning, routes and CPU sizing wait until after REL-1.
+
+- **WP-1.21 (Stage 2):** default-off Worker published ref-index snapshots with bounded binary envelopes,
+  atomic debounce/generations, private R2/Cache serving after coordinator authorization, signed bypass,
+  inspection refusal and live fallback; existing Stage 1 entrypoints stay inert.
+
 
 - Server: built-in ref policy (SPEC-SERVER §9.7, programmatic, Stage 2):
   `PipelineConfig::ref_policy` with per-ref allowed operation signers (both

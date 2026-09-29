@@ -995,7 +995,7 @@
   },
   {
     "id": "1.21",
-    "title": "Worker: published-view ref snapshots per ref-index bucket (R2/Cache, debounced) for readers",
+    "title": "Worker: published-view ref snapshots (R-175; Stage 2, inert in Stage 1)",
     "milestone": "M1",
     "track": "worker",
     "depends_on": [
@@ -1004,7 +1004,7 @@
       "1.8"
     ],
     "size": "M",
-    "summary": "Serves unsigned ListRefs (and opt-in unsigned ReadRef) from per-ref-index-bucket R2 snapshots fronted by the Cache API, written by the bucket's shard with debouncing so no R2 key is rewritten more than about once per second. Hot namespaces don't load their DOs; push CAS always reads the ref shard.",
+    "summary": "Default-off published-view feature, programmatic None config and explicit fetch/DO entrypoints. Authorized anonymous ListRefs uses bounded per-bucket private R2/Cache snapshots (no ref-index DO calls on hits, one authoritative coordinator call); signed/private reads bypass them. Kind 10 seeds atomically with bucket-local generations; ETag and 1s spacing, finite validity/refresh, inspection refusal, read/alarm budgets. CPU probe is local; production remeasurement is post-REL ops.",
     "human_action": false,
     "area_gates": [
       "rust",
@@ -1057,7 +1057,7 @@
   },
   {
     "id": "1.19",
-    "title": "Staging vcs-worker deployment config and runbook",
+    "title": "Inert Stage 2 staging template and activation runbook (R-176)",
     "milestone": "M1",
     "track": "ops",
     "depends_on": [
@@ -1071,7 +1071,7 @@
       "1.30"
     ],
     "size": "S",
-    "summary": "Adds env.staging (route, audience, allowlist, R2 buckets, DO migration v2, CPU limit, placement vars) and a deploy/backup/restore runbook. The human creates Cloudflare resources and runs the first deploy and smoke test.",
+    "summary": "Ships a standalone, unloaded staging config template and runbook: ADDRESSING=multi, audience/CI allowlist placeholders, private packs/backups/published-view buckets, all DO bindings and v1/v2 migrations, CPU/pack measurements, secrets, backup/restore and explicit Stage 2 entrypoint activation. Provisioning, deployment, route mounting and production CPU sizing are post-REL-1 operations; Stage 1 configuration is unchanged.",
     "human_action": true,
     "area_gates": [
       "workers",

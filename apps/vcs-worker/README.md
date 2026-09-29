@@ -340,6 +340,9 @@ Object database for `auth_v2.mjs --corrupt-ref`.
 
 ## Deploy (not yet live)
 
+Stage 2 staging has an [inert template and activation runbook](staging/README.md)
+(WP-1.19, R-176). Provisioning and activation happen after REL-1.
+
 1. **Provision storage** (one-time): `wrangler r2 bucket create
    mkit-vcs-objects`. The RefStore Durable Object and its `v1` SQLite
    migration are created on first deploy.

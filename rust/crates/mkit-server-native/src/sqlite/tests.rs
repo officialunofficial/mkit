@@ -369,6 +369,17 @@ fn sqlite_full_maps_to_store_full() {
     let err = apply(&s, &p, Batch::new().delete(k("b"))).unwrap_err();
     assert!(matches!(err, StoreError::Unavailable(_)), "{err:?}");
     assert_eq!(all(&s, &p), vec![(k("b"), v("2"))]);
+    // Target-local extensions preserve Rule 7 and roll back all extra effects.
+    let err = s
+        .apply_extended(&p, Batch::new().delete(k("b")), |_, batch, _| {
+            batch
+                .writes
+                .push(mkit_server::Write::Put(k("extra"), v("local")));
+            Ok(())
+        })
+        .unwrap_err();
+    assert!(matches!(err, StoreError::Unavailable(_)), "{err:?}");
+    assert_eq!(all(&s, &p), vec![(k("b"), v("2"))]);
 }
 
 #[test]

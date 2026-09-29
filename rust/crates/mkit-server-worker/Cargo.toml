@@ -35,6 +35,7 @@ workspace = true
 # batch that fails once after its writes), plus the pipeline seam of
 # `mkit-server/test-faults`. Never enabled by a release build.
 test-faults = ["mkit-server/test-faults"]
+published-view = ["mkit-server/published-view"]
 
 [dependencies]
 # `connect` (on by default) for M0-17's fetch adapter; `sql` for the shared
