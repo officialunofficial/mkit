@@ -164,8 +164,9 @@ The walk MUST use current tombstones even when its reachability result
 was cached. A global blocklist entry alone is not permission to answer
 451: the id MUST be reachable in this repository's published tree walk
 and have this repository's tombstone (SPEC-SERVER §14.5).
-The global content store MUST NOT be consulted during HTTP resolution or
-serving.
+The global content store MUST NOT be consulted to decide membership,
+reachability, or existence; it MAY supply bytes for an id already resolved in
+this repository and held by it.
 Extracted copies keyed by object id (SPEC-SERVER §9.6) MUST NOT constitute
 authorization, membership, reachability, or observable delta bases.
 
@@ -421,6 +422,7 @@ separate work.
 
 | Version | Status | Changes |
 |---|---|---|
+| 1 | draft | WP-4.12 clarifies §4: the global content store decides no membership, reachability, or existence, but may supply the bytes of an id already resolved in this repository and held by it (SPEC-SERVER §9.6; R-163, R-169). |
 | 1 | draft | WP-4.14a clarifies that the boundary-aware builder reduces reads and memory, while complete preceding length proofs still impose an O(first chunk index) encoded-size cost and 416 on oversize. |
 | 1 | draft | Initial HTTP contract, selecting MKDP v2 or MKDS v1 without changing object bytes or protobuf. Fix round 1 clarifies bearer and paid caching, proof-cost ordering, admission input, reservation grace, token timing, 402/304 headers, redirects, route dispatch, and vectors. |
 

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server (Stage 2, inert): `mkit-server` gains the default-off `http-objects`
+  feature: `Pipeline::serve_http_object` serves repository objects and ref paths
+  per SPEC-HTTP-OBJECTS (the URL grammar, published resolution, a bounded
+  reachability proof for id URLs, ordinary Range and conditional requests,
+  security headers and one uniform 404), reading extracted objects that this
+  repository holds by range and everything else from its own pack entries.
+  It needs `PipelineConfig::http_objects`, which requires indexed mode, and no
+  adapter enables the feature or mounts a route (WP-4.12, R-169). SPEC-HTTP-OBJECTS
+  §4 now says the global content store decides no membership or reachability
+  but may supply the bytes of an id this repository holds. API: new
+  `Procedure::{HttpGetObject, HttpGetRefPath}` and `OpKind::HttpGet`.
 - Server: in indexed mode, extract every ChunkedBlob (as its reassembled content,
   with a chunk-offset sidecar) and every file Blob of at least 64 KiB into the
   deployment-wide object store under its object id, before a pack is marked
