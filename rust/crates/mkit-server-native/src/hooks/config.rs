@@ -331,9 +331,9 @@ pub fn resolve(
              hook key",
         ));
     }
-    // TODO(R-167 hand-off, WP-1.30b): also refuse the URL-token active seed and
+    // TODO(R-167 hand-off, WP-4.16): also refuse the URL-token active seed and
     // any retired URL-token public key equal to the hook public key, once the
-    // adapter has a URL-token key flag (R-153). The enc server key is checked
+    // adapter has a URL-token key flag (R-136/R-153). The enc server key is checked
     // where it loads (`server::open`), since it may be created on first run.
     if let Some(role) = args.authorizer_role {
         pipeline.authorizer_role = match role {

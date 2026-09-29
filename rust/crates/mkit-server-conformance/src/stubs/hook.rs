@@ -128,7 +128,7 @@ pub struct RecordedCall {
     pub content_type: Option<String>,
     /// Every header name that arrived (lowercase).
     pub header_names: Vec<String>,
-    /// The exact body bytes.
+    /// The exact body bytes, if metadata validation and the capped read succeeded.
     pub body: Vec<u8>,
     /// The status the stub answered.
     pub status: u16,
@@ -350,32 +350,67 @@ fn default_reply(shared: &Shared, procedure: &str) -> Reply {
     }
 }
 
+fn validate_metadata(parts: &axum::http::request::Parts, procedure: &str) -> Result<(), String> {
+    if parts.method != axum::http::Method::POST
+        || !matches!(procedure, "Authorize" | "Admit" | "Outcome")
+    {
+        return Err("not a hook procedure".to_owned());
+    }
+    if header(&parts.headers, "content-type")
+        .and_then(|value| value.split(';').next())
+        .is_none_or(|value| value.trim() != "application/json")
+    {
+        return Err("not a Connect JSON request".to_owned());
+    }
+    for name in [
+        "x-mkit-hook-version",
+        "x-mkit-hook-key-id",
+        "x-mkit-hook-audience",
+        "x-mkit-hook-created-at",
+        "x-mkit-hook-expires-at",
+        "x-mkit-hook-nonce",
+        "x-mkit-hook-digest",
+        "x-mkit-hook-signature",
+    ] {
+        let mut values = parts.headers.get_all(name).iter();
+        if values.next().is_none_or(|value| value.to_str().is_err()) || values.next().is_some() {
+            return Err(format!("missing or repeated hook header {name}"));
+        }
+    }
+    if header(&parts.headers, "x-mkit-hook-version") != Some("1") {
+        return Err("unsupported hook signature version".to_owned());
+    }
+    Ok(())
+}
+
 async fn handle(State(shared): State<Arc<Shared>>, request: Request<Body>) -> Response<Body> {
     let (parts, body) = request.into_parts();
-    // Read the whole body first, so a client never sees a reset instead of
-    // the answer.
-    let body = axum::body::to_bytes(body, MAX_BODY)
-        .await
-        .unwrap_or_default()
-        .to_vec();
     let path = parts.uri.path().to_owned();
     let procedure = path
         .strip_prefix(&format!("{SERVICE}/"))
         .unwrap_or_default()
         .to_owned();
-    let verdict = if parts.method == axum::http::Method::POST && !procedure.is_empty() {
-        let pairs: Vec<(&str, &str)> = parts
-            .headers
-            .iter()
-            .filter_map(|(name, value)| Some((name.as_str(), value.to_str().ok()?)))
-            .collect();
-        shared
-            .verifier
-            .verify(&path, &pairs, &body)
-            .map(|_| ())
-            .map_err(|e| e.to_string())
-    } else {
-        Err("not a hook procedure".to_owned())
+    // SPEC-SERVER §7.1 requires these checks before polling an untrusted body.
+    let metadata = validate_metadata(&parts, &procedure);
+    let mut received = Vec::new();
+    let verdict = match metadata {
+        Err(reason) => Err(reason),
+        Ok(()) => match axum::body::to_bytes(body, MAX_BODY).await {
+            Err(_) => Err("hook body exceeds the limit or could not be read".to_owned()),
+            Ok(bytes) => {
+                received = bytes.to_vec();
+                let pairs: Vec<(&str, &str)> = parts
+                    .headers
+                    .iter()
+                    .filter_map(|(name, value)| Some((name.as_str(), value.to_str().ok()?)))
+                    .collect();
+                shared
+                    .verifier
+                    .verify(&path, &pairs, &received)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            }
+        },
     };
     let reply = match &verdict {
         Err(_) => Reply::json(r#"{"code":"unauthenticated","message":"hook request rejected"}"#),
@@ -410,7 +445,7 @@ async fn handle(State(shared): State<Arc<Shared>>, request: Request<Body>) -> Re
             .keys()
             .map(|n| n.as_str().to_owned())
             .collect(),
-        body,
+        body: received,
         status: reply.status,
     });
     if reply.stall {
@@ -420,4 +455,125 @@ async fn handle(State(shared): State<Arc<Shared>>, request: Request<Body>) -> Re
         tokio::time::sleep(reply.delay).await;
     }
     respond(&reply)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn invalid_request_metadata_is_rejected_before_reading() {
+        let signer = mkit_server::hooks::HookSigner::new("key", [7; 32].into()).expect("a signer");
+        let hook = FakeHook::start(vec![HookKey::new("key", signer.public_key())]);
+        let path = format!("{SERVICE}/Admit");
+        let headers = signer
+            .headers(&hook.origin(), &path, b"", now_ms(), &[9; 32])
+            .expect("signed headers");
+        for invalid in [
+            "method",
+            "path",
+            "content-type",
+            "missing",
+            "duplicate",
+            "version",
+        ] {
+            let body =
+                Body::from_stream(futures::stream::pending::<Result<Bytes, std::io::Error>>());
+            let mut request = Request::post(&path).header("content-type", "application/json");
+            for (name, value) in &headers {
+                request = request.header(*name, value);
+            }
+            let mut request = request.body(body).expect("a request");
+            match invalid {
+                "method" => *request.method_mut() = axum::http::Method::GET,
+                "path" => *request.uri_mut() = "/elsewhere".parse().expect("a URI"),
+                "content-type" => {
+                    request
+                        .headers_mut()
+                        .insert("content-type", "text/plain".parse().expect("a header"));
+                }
+                "missing" => {
+                    request.headers_mut().remove("x-mkit-hook-key-id");
+                }
+                "duplicate" => {
+                    request
+                        .headers_mut()
+                        .append("x-mkit-hook-nonce", "duplicate".parse().expect("a header"));
+                }
+                "version" => {
+                    request
+                        .headers_mut()
+                        .insert("x-mkit-hook-version", "2".parse().expect("a header"));
+                }
+                _ => unreachable!(),
+            }
+            let response = tokio::time::timeout(
+                Duration::from_secs(1),
+                handle(State(Arc::clone(&hook.shared)), request),
+            )
+            .await
+            .expect("invalid metadata must not wait for the body");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{invalid}");
+        }
+        assert!(
+            hook.calls()
+                .iter()
+                .all(|call| !call.verified && call.body.is_empty())
+        );
+    }
+
+    #[tokio::test]
+    async fn signed_endless_body_is_rejected_at_the_cap() {
+        let signer = mkit_server::hooks::HookSigner::new("key", [7; 32].into()).expect("a signer");
+        let hook = FakeHook::start(vec![HookKey::new("key", signer.public_key())]);
+        let path = format!("{SERVICE}/Admit");
+        // Signing an empty body must not authorize a failed body read.
+        let headers = signer
+            .headers(&hook.origin(), &path, b"", now_ms(), &[9; 32])
+            .expect("signed headers");
+        let mut request = Request::post(&path).header("content-type", "application/json");
+        for (name, value) in headers {
+            request = request.header(name, value);
+        }
+        let body = Body::from_stream(futures::stream::repeat(Ok::<_, std::convert::Infallible>(
+            Bytes::from_static(&[0; 4096]),
+        )));
+        let request = request.body(body).expect("a request");
+        let response = tokio::time::timeout(
+            Duration::from_secs(1),
+            handle(State(Arc::clone(&hook.shared)), request),
+        )
+        .await
+        .expect("the size cap must stop an endless body");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let calls = hook.calls();
+        assert!(!calls[0].verified);
+        assert!(
+            calls[0]
+                .failure
+                .as_deref()
+                .expect("a rejection reason")
+                .contains("body")
+        );
+    }
+
+    #[tokio::test]
+    async fn unsigned_endless_body_is_rejected_before_reading() {
+        let hook = FakeHook::start(Vec::new());
+        let body = Body::from_stream(futures::stream::pending::<Result<Bytes, std::io::Error>>());
+        let request = Request::post(format!("{SERVICE}/Admit"))
+            .body(body)
+            .expect("a request");
+        let response = tokio::time::timeout(
+            Duration::from_secs(1),
+            handle(State(Arc::clone(&hook.shared)), request),
+        )
+        .await
+        .expect("unsigned requests must not wait for the body");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let calls = hook.calls();
+        assert_eq!(calls.len(), 1);
+        assert!(!calls[0].verified);
+        assert!(calls[0].body.is_empty());
+    }
 }

@@ -356,3 +356,49 @@ async fn proxy_child() {
     assert_eq!(response.status, 200);
     assert_eq!(hits.load(Ordering::SeqCst), 1);
 }
+
+/// HTTPS loopback requests still use the configured HTTPS proxy.
+#[test]
+fn loopback_https_honours_https_proxy() {
+    let proxy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    proxy.set_nonblocking(true).unwrap();
+    let target = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    target.set_nonblocking(true).unwrap();
+    let proxy_url = format!("http://{}", proxy.local_addr().unwrap());
+    let target_url = format!("https://{}", target.local_addr().unwrap());
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "https_proxy_child", "--nocapture"])
+        .env("MKIT_HOOK_HTTPS_PROXY_TARGET", target_url)
+        .env("HTTPS_PROXY", &proxy_url)
+        .env("https_proxy", &proxy_url)
+        .env_remove("ALL_PROXY")
+        .env_remove("all_proxy")
+        .env_remove("NO_PROXY")
+        .env_remove("no_proxy")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let (mut connection, _) = proxy.accept().expect("HTTPS must connect to its proxy");
+    connection
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    let mut bytes = [0; 512];
+    let len = std::io::Read::read(&mut connection, &mut bytes).unwrap();
+    let connect = format!("CONNECT {} HTTP/1.1", target.local_addr().unwrap());
+    assert!(bytes[..len].starts_with(connect.as_bytes()));
+    assert!(target.accept().is_err(), "HTTPS must not connect directly");
+}
+
+#[tokio::test]
+async fn https_proxy_child() {
+    let Some(target) = std::env::var_os("MKIT_HOOK_HTTPS_PROXY_TARGET") else {
+        return;
+    };
+    let channel = HttpChannel::new(target.to_str().unwrap()).unwrap();
+    assert!(
+        channel
+            .call(request(Duration::from_millis(300)))
+            .await
+            .is_err()
+    );
+}

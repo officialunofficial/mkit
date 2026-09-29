@@ -349,8 +349,11 @@ impl HookVerifier {
         if let Some(seen) = &self.replay {
             let mut seen = seen.lock().unwrap_or_else(PoisonError::into_inner);
             seen.retain(|_, until| *until > now);
-            if seen.insert(nonce.to_owned(), expires_ms).is_some() {
-                return Err(VerifyError::Replay);
+            match seen.entry(nonce.to_owned()) {
+                std::collections::hash_map::Entry::Occupied(_) => return Err(VerifyError::Replay),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(expires_ms);
+                }
             }
         }
         Ok(Verified {

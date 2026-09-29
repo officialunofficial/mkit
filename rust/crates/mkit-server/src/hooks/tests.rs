@@ -1749,6 +1749,45 @@ fn verifier_rejects_a_replayed_nonce_until_the_window_closes() {
 }
 
 #[test]
+fn verifier_rejected_nonce_preserves_its_original_expiry() {
+    use std::sync::atomic::{AtomicI64, Ordering};
+
+    let now = Arc::new(AtomicI64::new(T));
+    let clock = Arc::clone(&now);
+    let signer = HookSigner::new("expiry", Zeroizing::new(SEED)).unwrap();
+    let verifier = HookVerifier::new(
+        HOOK_ORIGIN,
+        vec![VerifierKey::new("expiry", signer.public_key())],
+        move || clock.load(Ordering::SeqCst),
+    )
+    .with_replay_protection();
+    let procedure = "/mkit.server.hooks.v1.HooksService/Outcome";
+    let original = signer
+        .headers(HOOK_ORIGIN, procedure, b"{}", T, &[7; 32])
+        .unwrap();
+    let verify = |headers: &[(&str, String)]| {
+        let pairs: Vec<_> = headers.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        verifier.verify(procedure, &pairs, b"{}")
+    };
+    let expires = verify(&original).unwrap().expires_ms;
+    let earlier = signer
+        .headers(HOOK_ORIGIN, procedure, b"{}", T - 1_000, &[7; 32])
+        .unwrap();
+    assert_eq!(verify(&earlier), Err(VerifyError::Replay));
+    now.store(expires - 500, Ordering::SeqCst);
+    assert_eq!(verify(&original), Err(VerifyError::Replay));
+
+    // Rejecting a later expiry must not extend the original window either.
+    now.store(T, Ordering::SeqCst);
+    let later = signer
+        .headers(HOOK_ORIGIN, procedure, b"{}", T + 1_000, &[7; 32])
+        .unwrap();
+    assert_eq!(verify(&later), Err(VerifyError::Replay));
+    now.store(expires, Ordering::SeqCst);
+    assert!(verify(&later).is_ok());
+}
+
+#[test]
 fn verifier_reads_the_spec_key_list() {
     let text = String::from_utf8(golden("key-list.json")).unwrap();
     let keys = VerifierKey::parse_list(&text).unwrap();

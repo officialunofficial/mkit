@@ -67,7 +67,11 @@ fn parse_base(base_url: &str) -> Result<(String, String, bool), HttpChannelError
     }
     let origin = url.origin().ascii_serialization();
     let path = url.path().trim_end_matches('/');
-    Ok((format!("{origin}{path}"), origin, loopback))
+    Ok((
+        format!("{origin}{path}"),
+        origin,
+        url.scheme() == "http" && loopback,
+    ))
 }
 
 /// Check `base_url` against the channel's rules without building a client.
@@ -91,14 +95,14 @@ impl HttpChannel {
     /// [`HttpChannelError`] for a base URL the spec refuses, or a client that
     /// cannot be built.
     pub fn new(base_url: &str) -> Result<Self, HttpChannelError> {
-        let (base, origin, loopback) = parse_base(base_url)?;
+        let (base, origin, loopback_http) = parse_base(base_url)?;
         let mut builder = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             // A followed redirect would replay a signed body, credentials
             // included, to another origin.
             .redirect(reqwest::redirect::Policy::none())
             .referer(false);
-        if loopback {
+        if loopback_http {
             // A proxy would see signed bodies in cleartext, and `localhost`
             // must not be re-pointed by /etc/hosts or a resolver.
             builder = builder.no_proxy().resolve_to_addrs(
