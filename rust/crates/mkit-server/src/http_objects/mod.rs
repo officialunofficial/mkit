@@ -84,8 +84,8 @@ impl Default for HttpObjectsConfig {
         Self {
             max_walk_objects: 50_000,
             admit_reads: false,
-            read_deadline: core::time::Duration::from_secs(300),
-            read_reconcile_grace: core::time::Duration::from_secs(60),
+            read_deadline: core::time::Duration::from_mins(5),
+            read_reconcile_grace: core::time::Duration::from_mins(1),
             reachability_lag_ms: 60_000,
             reach_cache_entries: 65_536,
             max_inline_object_bytes: DEFAULT_MAX_INLINE_OBJECT_BYTES,
@@ -154,6 +154,9 @@ pub struct HttpObjectRequest<'a> {
     pub raw_query: Option<RedactedQuery<'a>>,
     /// Multi-value header lookup by lowercase name.
     pub headers: &'a HeaderValues<'a>,
+    /// Header names as received by the adapter, including repeated fields.
+    /// Credential forwarding preserves this spelling; values stay in `headers`.
+    pub header_names: &'a [&'a str],
 }
 
 impl core::fmt::Debug for HttpObjectRequest<'_> {

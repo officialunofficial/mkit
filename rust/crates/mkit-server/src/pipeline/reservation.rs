@@ -267,12 +267,7 @@ mod tests {
 
     #[test]
     fn read_planner_uses_sixty_second_reconcile_grace() {
-        let pending = read_pending(
-            "repo".into(),
-            1,
-            10_000,
-            core::time::Duration::from_secs(60),
-        );
+        let pending = read_pending("repo".into(), 1, 10_000, core::time::Duration::from_mins(1));
         assert_eq!(
             pending,
             ReservationV1::Pending {

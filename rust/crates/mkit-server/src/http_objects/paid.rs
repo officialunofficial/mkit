@@ -121,6 +121,13 @@ impl Stream for Paid {
             };
             match result {
                 Poll::Pending => return Poll::Pending,
+                Poll::Ready(Some(Ok(_)))
+                    if u64::try_from(self.finalizer.clock.now_ms()).unwrap_or(0)
+                        >= self.finalizer.deadline_ms =>
+                {
+                    self.error = Some(ServerError::unavailable("read deadline passed"));
+                    self.settling = Some(self.finalizer.start(false));
+                }
                 Poll::Ready(Some(Ok(piece))) => {
                     self.finalizer.sent += piece.len() as u64;
                     return Poll::Ready(Some(Ok(piece)));
@@ -238,6 +245,27 @@ mod tests {
         assert!(matches!(poll(&mut stream), Poll::Ready(Some(Err(_)))));
         assert_eq!(*ended.lock().unwrap(), [(0, false)]);
     }
+    #[test]
+    fn a_backend_poll_cannot_hand_out_a_piece_after_the_deadline() {
+        let (mut f, tasks, _, ended) = finalizer();
+        let clock = Arc::new(ManualClock::new(0));
+        f.clock = clock.clone();
+        let source = futures::stream::once(async move {
+            clock.set(1000);
+            Ok(Bytes::from_static(b"x"))
+        });
+        let HttpBody::Stream { mut stream, .. } = f.wrap(HttpBody::Stream {
+            len: 1,
+            stream: Box::pin(source),
+        }) else {
+            panic!()
+        };
+        assert!(poll(&mut stream).is_pending());
+        tasks.run();
+        assert!(matches!(poll(&mut stream), Poll::Ready(Some(Err(_)))));
+        assert_eq!(*ended.lock().unwrap(), [(0, false)]);
+    }
+
     #[test]
     fn zero_length_get_settles_successfully() {
         let (f, tasks, _, ended) = finalizer();

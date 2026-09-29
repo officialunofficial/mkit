@@ -1831,3 +1831,21 @@ and independent terminal writes can charge one reservation twice.
 **Enforced by:** `pipeline/http_admission.rs`, `http_objects/paid.rs`,
 `timers/reservation_reconcile.rs` and the focused `http_objects/paid_reads` tests.
 Stage 2 only; adapters must retain the injected spawner's tasks (WP-4.16).
+
+## HTTP URL tokens bind before stored epoch access
+
+**Always:** private HTTP reads precheck signatures before repository lookup,
+then bind audience, repository, decoded target, expiry and lifetime before
+reading the stored epoch. Public reads ignore every token result. A valid
+private token still requires the Authorizer, and the caller stays anonymous.
+Private immutable freshness never exceeds the token's remaining lifetime.
+
+**Because:** early epoch access reveals extra state to invalid tokens, and
+cache freshness beyond expiry extends a private authorization capability.
+
+**If violated:** invalid tokens can probe stored state or private content can
+remain fresh after the authorization expires.
+
+**Enforced by:** `pipeline/http_tokens.rs`, `policy/read.rs` and counted-store
+`http_objects/private_tokens` tests. Stage 2 only; shared-cache bypass belongs
+to the adapters in WP-4.16.

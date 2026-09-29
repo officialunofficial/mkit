@@ -55,6 +55,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
         input.new_to_repo_bytes = Some(0);
         input.credential_headers = request.credential_headers;
         let allowance = self.admit_http(input).await?;
+        // QuotaCharge is the internal signed-write quota contract. HTTP
+        // reads have no signer or write scope; never silently ignore charges.
+        if !allowance.charges.is_empty() {
+            return Err(ServerError::unavailable("invalid HTTP admission decision"));
+        }
         let mut admitted = Admitted {
             private: true,
             ..Admitted::default()
@@ -110,22 +115,9 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
             runtime: runtime.clone(),
             sent: 0,
             finish: Some(Box::new(move |bytes, success| {
+                let occurred_at_ms = ms(clock.now_ms());
                 Box::pin(async move {
-                    let record = if success || bytes > 0 {
-                        ReservationV1::ReadServed {
-                            repository,
-                            occurred_at_ms: ms(clock.now_ms()),
-                            object,
-                            bytes_served: bytes,
-                        }
-                    } else {
-                        ReservationV1::Aborted {
-                            repository,
-                            occurred_at_ms: ms(clock.now_ms()),
-                            reason: AbortReason::Internal,
-                            detail: String::new(),
-                        }
-                    };
+                    let record = read_result(repository, object, bytes, success, occurred_at_ms);
                     settle(
                         &store,
                         &partition,
@@ -143,6 +135,30 @@ impl<B: MultipartBlobStore, N: NamespaceStore + Clone + 'static, H: HookSet> Pip
     }
 }
 
+fn read_result(
+    repository: String,
+    object: [u8; 32],
+    bytes: u64,
+    success: bool,
+    occurred_at_ms: u64,
+) -> ReservationV1 {
+    if success || bytes > 0 {
+        ReservationV1::ReadServed {
+            repository,
+            occurred_at_ms,
+            object,
+            bytes_served: bytes,
+        }
+    } else {
+        ReservationV1::Aborted {
+            repository,
+            occurred_at_ms,
+            reason: AbortReason::Internal,
+            detail: String::new(),
+        }
+    }
+}
+
 /// Retry I/O and arbiter contention within grace, preserving actual bytes.
 async fn settle<N: NamespaceStore>(
     store: &N,
@@ -153,17 +169,25 @@ async fn settle<N: NamespaceStore>(
     clock: &dyn Clock,
     sleep: &dyn Sleep,
 ) {
-    let limit = match codec::decode_reservation(prior) {
-        Ok(ReservationV1::Pending {
-            reconcile_at_ms, ..
-        }) => reconcile_at_ms,
-        _ => return,
+    let Ok(ReservationV1::Pending {
+        reconcile_at_ms: limit,
+        ..
+    }) = codec::decode_reservation(prior)
+    else {
+        return;
     };
     loop {
-        match try_settle(store, partition, rid, prior, &record).await {
-            Ok(true) => return,
-            Ok(false) => {}
-            Err(_) => tracing::warn!("read settlement unavailable; retrying within grace"),
+        let remaining = core::time::Duration::from_millis(limit.saturating_sub(ms(clock.now_ms())));
+        match crate::rt::with_timeout(
+            sleep,
+            remaining,
+            try_settle(store, partition, rid, prior, &record),
+        )
+        .await
+        {
+            Ok(Ok(true)) | Err(_) => return, // Reconciliation retains the durable obligation.
+            Ok(Ok(false)) => {}
+            Ok(Err(_)) => tracing::warn!("read settlement unavailable; retrying within grace"),
         }
         if ms(clock.now_ms()) >= limit {
             return;

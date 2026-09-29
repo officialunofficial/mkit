@@ -7,12 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Server (Stage 2, inert): URL tokens now authorize private HTTP object
+  and ref-path reads through staged signature, stateless binding and epoch
+  checks, while preserving anonymous published access and Authorizer checks.
+  Private immutable cache lifetimes are bounded by token expiry; private ref
+  paths require revalidation. Active and retained token keys are separated
+  from ticket secrets without exposing seeds (WP-4.15, R-178).
+
 - Server (Stage 2, inert): programmatic `HttpObjectsConfig::admit_reads`
   enables paid GET and HEAD reads, canonical JSON 402s, private admitted
   responses, durable pending reads before transmission, deadline enforcement
   and retained asynchronous byte accounting (WP-4.13, R-177). The shared
   credential selector now denies comma-joined selected payment headers,
-  correcting #1212; non-Payment Authorization remains excluded.
+  correcting #1212; non-Payment Authorization remains excluded. API:
+  `HttpReadRuntime` injects retained tasks and deadlines, and
+  `HttpObjectRequest::header_names` preserves credential name spelling.
 
 - Server: built-in ref policy (SPEC-SERVER §9.7, programmatic, Stage 2):
   `PipelineConfig::ref_policy` with per-ref allowed operation signers (both

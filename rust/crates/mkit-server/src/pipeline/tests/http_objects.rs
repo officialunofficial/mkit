@@ -140,6 +140,13 @@ struct Scripted {
 
 impl Authorizer for Scripted {
     async fn authorize(&self, op: &Operation) -> Result<AuthzFacts, ServerError> {
+        if matches!(
+            op.procedure(),
+            Procedure::HttpGetObject | Procedure::HttpGetRefPath
+        ) {
+            assert_eq!(op.authz.caller_view, CallerView::Anonymous);
+            assert!(op.auth.is_none() && op.write_grant.is_none());
+        }
         self.seen
             .lock()
             .unwrap()
@@ -419,11 +426,13 @@ impl<H: HookSet> Fx<H> {
                 .map(|(_, v)| (*v).to_owned())
                 .collect()
         };
+        let names: Vec<_> = headers.iter().map(|(name, _)| *name).collect();
         block_on(self.pipe.serve_http_object(&HttpObjectRequest {
             method,
             raw_path: path,
             raw_query: query.map(crate::http_objects::RedactedQuery::new),
             headers: &lookup,
+            header_names: &names,
         }))
     }
 
@@ -933,6 +942,7 @@ fn formatting_the_raw_query_is_redacted() {
             "token=secret-query-token",
         )),
         headers: &|_| Vec::new(),
+        header_names: &[],
     };
     let query = request.raw_query.unwrap();
     for rendered in [
@@ -1466,9 +1476,16 @@ struct Gate {
 }
 
 impl crate::http_objects::TokenGate for Gate {
-    fn precheck(&self, _: &crate::http_objects::Target, token: &crate::Redacted) -> bool {
+    fn precheck(
+        &self,
+        token: &crate::Redacted,
+        _: i64,
+    ) -> Result<crate::url_token::Prechecked, crate::url_token::TokenRejected> {
         self.calls.lock().unwrap().push(token.expose().to_owned());
-        false
+        Err(crate::url_token::TokenRejected)
+    }
+    fn ttl_ms(&self) -> u64 {
+        0
     }
 }
 
@@ -1970,6 +1987,7 @@ fn the_feature_needs_indexed_mode_and_sane_limits() {
         raw_path: "/-/refs/heads/main/-/",
         raw_query: None,
         headers: &|_| Vec::new(),
+        header_names: &[],
     }));
     assert_eq!(response.status, 404);
 }
@@ -2446,3 +2464,4 @@ fn a_configured_admission_makes_the_200_and_its_304_private_alike() {
 }
 
 mod paid_reads;
+mod private_tokens;

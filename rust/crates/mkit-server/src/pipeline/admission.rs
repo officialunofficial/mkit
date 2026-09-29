@@ -122,9 +122,27 @@ pub(super) fn capture_credentials(
     .collect()
 }
 
-/// Validate the captured headers into what admission sees. Only
-/// All selected values must be comma-free (R-177 corrects R-138); a non-Payment or malformed
-/// one is silently not forwarded, an oversized Payment one is denied.
+/// HTTP adapters retain names so forwarded credentials preserve spelling.
+#[cfg(feature = "http-objects")]
+pub(super) fn capture_http_credentials(
+    meta: &RequestMeta<'_>,
+    extras: &[String],
+    names: &[&str],
+) -> Result<Vec<CapturedCredential>, ServerError> {
+    let mut captured = capture_credentials(meta, extras);
+    for header in &mut captured {
+        let name = names
+            .iter()
+            .find(|name| name.eq_ignore_ascii_case(&header.name))
+            .ok_or_else(credential_denial)?;
+        header.name = (*name).to_owned();
+    }
+    Ok(captured)
+}
+
+/// Validate the captured headers into what admission sees. All selected
+/// values must be comma-free (R-177 corrects R-138). A non-Payment or
+/// malformed Authorization is excluded; an oversized Payment one is denied.
 pub(super) fn validate_credentials(
     captured: &[CapturedCredential],
 ) -> Result<Vec<CredentialHeader>, ServerError> {

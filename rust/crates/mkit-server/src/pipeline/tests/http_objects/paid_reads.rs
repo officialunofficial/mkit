@@ -99,7 +99,7 @@ fn setup() -> (Fx<PaidHooks>, Data, Arc<PaidAdmission>, Arc<Tasks>) {
         s.read_runtime = Some(HttpReadRuntime {
             sleep: Arc::new(Timer),
             spawner: tasks.clone(),
-        })
+        });
     });
     let d = data();
     fx.push("room", &d.refs(), d.head(), None);
@@ -316,7 +316,7 @@ fn http_credentials_enforce_bounds_and_redaction_before_admit() {
             &path,
             &[
                 ("Authorization", "Bearer SECRET"),
-                ("Payment-Authorization", "SECRET"),
+                ("payment-authorization", "SECRET"),
                 ("PAYMENT-SIGNATURE", "signature"),
                 ("X-Pay", "extra")
             ]
@@ -327,6 +327,7 @@ fn http_credentials_enforce_bounds_and_redaction_before_admit() {
     let calls = admission.calls.lock().unwrap();
     let headers = &calls[0].1;
     assert_eq!(headers.len(), 3);
+    assert_eq!(headers[0].name, "payment-authorization");
     assert!(!format!("{headers:?}").contains("SECRET"));
     drop(calls);
     assert_eq!(
@@ -349,8 +350,7 @@ fn completion_and_reconcile_share_one_arbiter_and_retry_settlement_io() {
         let partition = fx.pipe.shards.coordinator(&repo);
         let initial = block_on(fx.pipe.meta.get(&partition, &keys::outcome_backlog()))
             .unwrap()
-            .map(|v| codec::decode_backlog(&v).unwrap().rows)
-            .unwrap_or(0);
+            .map_or(0, |v| codec::decode_backlog(&v).unwrap().rows);
         *fx.pipe.blobs.reads.lock().unwrap() = Reads::Pieces;
         let HttpBody::Stream { mut stream, .. } = fx
             .request("GET", &fx.object_url("room", &id(&d.big)), None, &[])
@@ -404,4 +404,229 @@ fn completion_and_reconcile_share_one_arbiter_and_retry_settlement_io() {
             .unwrap();
         assert_eq!(codec::decode_backlog(&backlog).unwrap().rows, initial + 1);
     }
+}
+
+#[test]
+fn paid_private_ids_keep_the_token_lifetime_bound_and_head_zero_outcome() {
+    let (mut fx, d, _, tasks) = setup();
+    let tokens = crate::url_token::UrlTokenConfig::new(
+        crate::url_token::UrlTokenKeys::new(zeroize::Zeroizing::new([13; 32]), vec![]).unwrap(),
+    );
+    fx.pipe.cfg.url_tokens = Some(tokens.clone());
+    fx.pipe = fx.pipe.with_http_seams(|mut s| {
+        s.tokens = Arc::new(tokens.clone());
+        s
+    });
+    fx.make_private("room");
+    let token = tokens
+        .mint(
+            AUDIENCE,
+            &fx.identity("room"),
+            &crate::url_token::UrlTarget::Object(id(&d.small)),
+            0,
+            fx.clock.now_ms(),
+            60,
+        )
+        .unwrap();
+    let path = fx.object_url("room", &id(&d.small));
+    fx.clock.advance(1);
+    let got = read(fx.request(
+        "GET",
+        &path,
+        Some(&format!("token={}", token.expose())),
+        &[],
+    ));
+    assert_eq!(got.status, 200);
+    assert_eq!(
+        got.header("Cache-Control"),
+        Some("private, max-age=59, immutable")
+    );
+    served(&fx, 0, id(&d.small), d.small_bytes.len() as u64);
+    let got = read(fx.request(
+        "HEAD",
+        &path,
+        Some(&format!("token={}", token.expose())),
+        &[],
+    ));
+    assert_eq!(got.status, 200);
+    assert!(got.body.is_empty());
+    served(&fx, 1, id(&d.small), 0);
+    tasks.join();
+}
+
+#[derive(Default)]
+struct RetrySink {
+    fail: AtomicBool,
+    seen: Mutex<Vec<crate::pipeline::Outcome>>,
+}
+impl OutcomeSink for RetrySink {
+    async fn deliver(
+        &self,
+        outcome: &crate::pipeline::Outcome,
+    ) -> Result<(), crate::pipeline::DeliveryError> {
+        self.seen.lock().unwrap().push(outcome.clone());
+        if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
+            Err(crate::pipeline::DeliveryError::new("retry", None))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[test]
+fn paid_outcome_survives_delivery_driver_restart_and_retry() {
+    let (fx, d, _, tasks) = setup();
+    assert_eq!(fx.get(&fx.object_url("room", &id(&d.small))).status, 200);
+    tasks.join();
+    let repo = fx.repo_id("room");
+    let partition = fx.pipe.shards.coordinator(&repo.namespace);
+    let sink = Arc::new(RetrySink::default());
+    sink.fail.store(true, std::sync::atomic::Ordering::SeqCst);
+    let fire = || {
+        // Reconstruct the entire delivery driver, keeping only durable rows.
+        let driver = crate::timers::outcome_delivery::OutcomeDelivery::new(
+            sink.clone(),
+            AUDIENCE.into(),
+            fx.metrics.clone(),
+            Arc::new(Timer),
+        );
+        let registry = TimerRegistry::new()
+            .register(driver)
+            .register(ReservationReconcile);
+        block_on(run_due(
+            &fx.pipe.meta,
+            &partition,
+            &registry,
+            fx.clock.as_ref(),
+            ms(fx.clock.now_ms()),
+            &TickBudget::default(),
+        ))
+        .unwrap();
+    };
+    fire();
+    let first = sink
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|o| o.reservation_id == "read-0")
+        .unwrap()
+        .clone();
+    assert!(matches!(
+        first.kind,
+        crate::pipeline::OutcomeKind::ReadServed {
+            bytes_served: 100,
+            ..
+        }
+    ));
+    assert!(
+        block_on(
+            fx.pipe
+                .meta
+                .get(&partition, &keys::reservation("read-0").unwrap())
+        )
+        .unwrap()
+        .is_some()
+    );
+    sink.fail.store(false, std::sync::atomic::Ordering::SeqCst);
+    fx.clock.advance(900_001);
+    fire();
+    let seen = sink.seen.lock().unwrap();
+    let repeats: Vec<_> = seen
+        .iter()
+        .filter(|o| o.reservation_id == "read-0")
+        .collect();
+    assert_eq!(repeats, [&first, &first]);
+    assert!(
+        block_on(
+            fx.pipe
+                .meta
+                .get(&partition, &keys::reservation("read-0").unwrap())
+        )
+        .unwrap()
+        .is_none()
+    );
+}
+
+#[test]
+fn empty_get_is_settled_before_returning_even_if_adapter_never_polls() {
+    let (fx, _, _, tasks) = setup();
+    let response = fx.request("GET", &fx.ref_url("room", "main", "empty"), None, &[]);
+    assert_eq!(response.status, 200);
+    assert_eq!(response.header("Content-Length"), Some("0"));
+    served(&fx, 0, id(&blob(b"")), 0);
+    drop(response);
+    tasks.join();
+    served(&fx, 0, id(&blob(b"")), 0);
+}
+
+#[test]
+fn simultaneous_completion_and_reconcile_commit_exactly_one_outcome() {
+    let (mut fx, d, _, tasks) = setup();
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    Arc::get_mut(&mut fx.pipe.meta).unwrap().hook = Some(Box::new(move |_, _, batch| {
+        for write in &batch.writes {
+            if let Write::Put(key, value) = write
+                && *key == keys::reservation("read-0").unwrap()
+                && matches!(
+                    codec::decode_reservation(value).unwrap(),
+                    ReservationV1::ReadServed { .. } | ReservationV1::Aborted { .. }
+                )
+            {
+                // Both contenders have planned from the same pending bytes
+                // and counters before either backend commit can proceed.
+                barrier.wait();
+            }
+        }
+    }));
+    *fx.pipe.blobs.reads.lock().unwrap() = Reads::Pieces;
+    let HttpBody::Stream { mut stream, .. } = fx
+        .request("GET", &fx.object_url("room", &id(&d.big)), None, &[])
+        .body
+    else {
+        panic!()
+    };
+    let n = block_on(stream.next()).unwrap().unwrap().len();
+    let ReservationV1::Pending {
+        reconcile_at_ms, ..
+    } = reservation(&fx, 0)
+    else {
+        panic!()
+    };
+    let partition = fx.pipe.shards.coordinator(&fx.repo_id("room").namespace);
+    let initial = block_on(fx.pipe.meta.get(&partition, &keys::outcome_backlog()))
+        .unwrap()
+        .map_or(0, |v| codec::decode_backlog(&v).unwrap().rows);
+    fx.clock.set(i64::try_from(reconcile_at_ms).unwrap());
+    let meta = fx.pipe.meta.clone();
+    let clock = fx.clock.clone();
+    let p = partition.clone();
+    let reconcile = std::thread::spawn(move || {
+        let registry = TimerRegistry::new().register(ReservationReconcile);
+        block_on(run_due(
+            &meta,
+            &p,
+            &registry,
+            clock.as_ref(),
+            reconcile_at_ms,
+            &TickBudget::default(),
+        ))
+        .unwrap();
+    });
+    drop(stream);
+    tasks.join();
+    reconcile.join().unwrap();
+    match reservation(&fx, 0) {
+        ReservationV1::ReadServed {
+            object,
+            bytes_served,
+            ..
+        } => assert_eq!((object, bytes_served), (id(&d.big), n as u64)),
+        ReservationV1::Aborted { reason, .. } => assert_eq!(reason, AbortReason::Abandoned),
+        other => panic!("unexpected outcome {other:?}"),
+    }
+    let backlog = block_on(fx.pipe.meta.get(&partition, &keys::outcome_backlog()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(codec::decode_backlog(&backlog).unwrap().rows, initial + 1);
 }

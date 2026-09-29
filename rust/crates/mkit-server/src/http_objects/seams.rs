@@ -8,7 +8,7 @@ use mkit_core::object::ObjectType;
 
 use super::body::EndHook;
 use super::reach::{Reachability, TtlReachability};
-use super::route::{Query, Target};
+use super::route::Query;
 use super::{HttpObjectResponse, HttpObjectsConfig};
 use crate::Procedure;
 use crate::repo::RepoId;
@@ -19,17 +19,41 @@ use crate::{BoxFuture, MaybeSend, MaybeSync, Redacted, ServerError};
 /// repository's visibility is known; a public repository ignores it. The
 /// token is never logged.
 pub trait TokenGate: MaybeSend + MaybeSync {
-    /// Whether the token passed its precheck.
-    fn precheck(&self, target: &Target, token: &Redacted) -> bool;
+    /// Retain a redacted verified statement until visibility is known.
+    fn precheck(
+        &self,
+        token: &Redacted,
+        now_ms: i64,
+    ) -> Result<crate::url_token::Prechecked, crate::url_token::TokenRejected>;
+    /// Configured maximum token lifetime, used by stateless binding checks.
+    fn ttl_ms(&self) -> u64;
 }
 
-/// No tokens are issued yet: every precheck passes and nothing reads it.
+/// No keys are configured; private reads fail with the uniform 404.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NoTokens;
-
 impl TokenGate for NoTokens {
-    fn precheck(&self, _: &Target, _: &Redacted) -> bool {
-        true
+    fn precheck(
+        &self,
+        _: &Redacted,
+        _: i64,
+    ) -> Result<crate::url_token::Prechecked, crate::url_token::TokenRejected> {
+        Err(crate::url_token::TokenRejected)
+    }
+    fn ttl_ms(&self) -> u64 {
+        0
+    }
+}
+impl TokenGate for crate::url_token::UrlTokenConfig {
+    fn precheck(
+        &self,
+        token: &Redacted,
+        now_ms: i64,
+    ) -> Result<crate::url_token::Prechecked, crate::url_token::TokenRejected> {
+        self.precheck(token.expose(), now_ms)
+    }
+    fn ttl_ms(&self) -> u64 {
+        self.ttl_ms()
     }
 }
 

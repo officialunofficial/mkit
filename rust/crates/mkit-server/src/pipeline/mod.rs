@@ -35,6 +35,8 @@ mod hooks;
 mod http;
 #[cfg(feature = "http-objects")]
 mod http_admission;
+#[cfg(feature = "http-objects")]
+mod http_tokens;
 mod implicit;
 mod info;
 mod lease;
@@ -703,7 +705,10 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             // §9.4: the URL-token key is dedicated; a shared ticket secret
             // would let ticket MACs stand in for URL-token signatures.
             if let Some(tickets) = &cfg.ticket_keys
-                && tickets.contains_secret(&tokens.keys().active_seed())
+                && tokens
+                    .keys()
+                    .public_keys()
+                    .any(|public| tickets.contains_ed25519_public(&public))
             {
                 return Err(ServerError::invalid_argument(
                     "the URL token key must differ from the upload ticket keys",
@@ -747,10 +752,13 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             Sharding::D34 => Arc::new(D34Shards),
         };
         #[cfg(feature = "http-objects")]
-        let http_seams = cfg
-            .http_objects
-            .as_ref()
-            .map(crate::http_objects::HttpSeams::new);
+        let http_seams = cfg.http_objects.as_ref().map(|http| {
+            let mut seams = crate::http_objects::HttpSeams::new(http);
+            if let Some(tokens) = &cfg.url_tokens {
+                seams.tokens = Arc::new(tokens.clone());
+            }
+            seams
+        });
         Ok(Self {
             blobs,
             meta,
@@ -2286,6 +2294,8 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         };
         let hook = self.read_hook(op, private, signed, &provisional).await?;
         let caller = read_policy::Caller {
+            #[cfg(feature = "http-objects")]
+            http_token_authorized: false,
             signed,
             owner,
             grant: grant.map(|g| read_policy::GrantEval {
