@@ -27,6 +27,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one. For a split push, stored write grants are checked for every advance before
   anything is uploaded, and an unsplittable oversize commit or merge is refused before any
   upload. `--format=json` reports `steps` (WP-1.17b).
+- Server: the native adapter delivers terminal outcomes (kind 8) to an
+  embedder's `OutcomeSink` (`server::open_with_sink`) with a 5 s bound per
+  call, stops a fire at its first failure and drains due outcomes on
+  shutdown (`--shutdown-drain-secs`, default 10). CORS allows and exposes the
+  payment headers, configured extra credential headers are redacted from
+  traces, and an ssh or enc write that needs a payment answers
+  `INVALID_REQUEST "payment required: use mkit+https"` (WP-3.4).
+- Server: the Workers adapter takes an outcome sink with the same per-call
+  timeout, budgets kind 8 by plan (Free: 8 sink calls per alarm), allows
+  and exposes the payment headers for browsers and keeps repeated
+  `WWW-Authenticate` fields (WP-3.5).
 - Server: `mkit serve --root <DIR>` serves the repositories under `<DIR>`
   addressed by `<NAMESPACE>/<NAME>` (from the path argument or a strict
   `SSH_ORIGINAL_COMMAND`), one repository per process, with writes

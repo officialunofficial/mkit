@@ -28,4 +28,4 @@ pub use io::{ReadFrames, WriteFrames};
 pub use session::{
     FrameIoError, FrameSink, FrameSource, SessionConfig, SessionEnd, handshake, serve_session,
 };
-pub use verbs::cas_conflict_body;
+pub use verbs::{PAYMENT_REQUIRED_FRAME, cas_conflict_body};

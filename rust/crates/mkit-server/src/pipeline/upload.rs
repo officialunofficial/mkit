@@ -223,9 +223,13 @@ impl<'p, B: MultipartBlobStore, N: NamespaceStore, H: HookSet> UploadSession<'p,
             let allowance = pipe.admit_streaming(input).await?;
             if let Some(rid) = &allowance.reservation {
                 pipe.abort_unsupported_stream(a, &p, rid).await?;
-                return Err(ServerError::failed_precondition(
-                    "admission reservations require BeginUpload",
-                ));
+                let refusal =
+                    ServerError::failed_precondition("admission reservations require BeginUpload");
+                return Err(if matches!(pipe.cfg.auth, AuthMode::TransportIdentity) {
+                    refusal.with_transport_admission_required()
+                } else {
+                    refusal
+                });
             }
             let charges = allowance.charges;
             if op.auth.is_some() || !charges.is_empty() {

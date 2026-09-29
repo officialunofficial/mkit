@@ -192,6 +192,7 @@ pub struct ServerError {
     headers: Vec<(String, String)>,
     details: Vec<ErrorDetail>,
     abort: Option<AbortCause>,
+    transport_admission: bool,
 }
 
 /// Why a reserved write ended without committing, as decided where the error
@@ -234,6 +235,7 @@ impl fmt::Debug for ServerError {
             .field("headers", &Headers(&self.headers))
             .field("details", &self.details)
             .field("abort", &self.abort)
+            .field("transport_admission", &self.transport_admission)
             .finish()
     }
 }
@@ -250,6 +252,7 @@ impl ServerError {
             headers: Vec::new(),
             details: Vec::new(),
             abort: None,
+            transport_admission: false,
         }
     }
 
@@ -258,6 +261,23 @@ impl ServerError {
     pub(crate) fn with_abort_cause(mut self, cause: AbortCause) -> Self {
         self.abort = Some(cause);
         self
+    }
+
+    /// Mark this refusal as an admission requirement that a transport-identity
+    /// (ssh or enc) session cannot satisfy.
+    #[must_use]
+    pub(crate) fn with_transport_admission_required(mut self) -> Self {
+        self.transport_admission = true;
+        self
+    }
+
+    /// Whether a transport-identity (ssh or enc) pipeline refused because
+    /// admission wants a payment or a reservation those transports cannot
+    /// carry: the ssh binding answers "use mkit+https" for it, rather than a
+    /// message that reads as a denied write.
+    #[must_use]
+    pub fn is_transport_admission_required(&self) -> bool {
+        self.transport_admission
     }
 
     /// The reservation abort cause, if the producer set one.
