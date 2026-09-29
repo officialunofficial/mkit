@@ -14,7 +14,7 @@ _mkit_complete() {
     local cur prev words cword
     _init_completion || return 0
 
-    local subcommands="init add rm mv restore reset hash cat cat-file show tree ls-tree ls-files rev-parse rev-list merge-base show-ref for-each-ref symbolic-ref update-ref ref commit log reflog status diff branch checkout switch clean tag config merge push pull fetch stash clone remote key grant keygen cherry-pick revert rebase bisect gc worktree sparse-checkout serve mcp pack-shard git blame prove verify verify-proof closure attest verify-attest self version help"
+    local subcommands="init add rm mv restore reset hash cat cat-file show tree ls-tree ls-files rev-parse rev-list merge-base show-ref for-each-ref symbolic-ref update-ref ref commit log reflog status diff branch checkout switch clean tag config merge push pull fetch stash clone remote key grant epoch visibility keygen cherry-pick revert rebase bisect gc worktree sparse-checkout serve mcp pack-shard git blame prove verify verify-proof closure attest verify-attest self version help"
     # Top-level flags. --version/-V are aliases of the `version` subcommand.
     local top_flags="--help -h --version -V"
 
@@ -178,7 +178,13 @@ _mkit_complete() {
             fi
             ;;
         grant)
-            COMPREPLY=( $(compgen -W "create add list --cap --grantee --repo --all --refs --audience --ttl --epoch --offline --remote --store --namespace --scheme --print-statement --statement-file --signature --webauthn-assertion --check --json --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "create add list revoke --cap --grantee --repo --all --refs --audience --ttl --epoch --offline --remote --store --namespace --scheme --print-statement --statement-file --signature --webauthn-assertion --check --json --prune --timeout --help" -- "$cur") )
+            ;;
+        epoch)
+            COMPREPLY=( $(compgen -W "show bump --by --namespace --audience --timeout --json --scheme --print-statement --statement-file --signature --webauthn-assertion --help" -- "$cur") )
+            ;;
+        visibility)
+            COMPREPLY=( $(compgen -W "set public private --statement --audience --timeout --scheme --print-statement --statement-file --signature --webauthn-assertion --help" -- "$cur") )
             ;;
         keygen)
             COMPREPLY=( $(compgen -W "--algorithm --force --print-pubkey --help" -- "$cur") )

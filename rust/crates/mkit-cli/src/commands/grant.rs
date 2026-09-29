@@ -1,5 +1,5 @@
-//! `mkit grant create|add|list` (WP-2.13, R-155): issue, import and inspect
-//! SPEC-WRITE-GRANTS write and read grants.
+//! `mkit grant create|add|list|revoke` (WP-2.13, WP-2.14; R-155, R-156):
+//! issue, import, inspect and revoke SPEC-WRITE-GRANTS write and read grants.
 //!
 //! This is the *client* grant store, under the user config directory. It is
 //! not the operator-side `mkit-server grant register` of an ssh/enc
@@ -14,6 +14,7 @@ use mkit_attest::grant::{Capabilities, Namespace};
 use mkit_core::hash::{from_hex, hash, to_hex_bytes};
 
 use crate::clap_shim;
+use crate::commands::epoch::{BumpOpts, RevokeExtras, bump};
 use crate::commands::{error, usage_error};
 use crate::exit;
 use crate::format::{JsonObject, human_date_utc, json_string_array};
@@ -33,7 +34,7 @@ const CLOCK_LEAD_MS: i64 = 30_000;
 #[derive(Debug, Parser)]
 #[command(
     name = "mkit grant",
-    about = "Issue, import and list write and read grants."
+    about = "Issue, import, list and revoke write and read grants."
 )]
 struct GrantOpts {
     #[command(subcommand)]
@@ -48,6 +49,8 @@ enum GrantCommand {
     Add(AddOpts),
     /// List the grants in your grant store.
     List(ListOpts),
+    /// Revoke grants by advancing the namespace's epoch on a remote.
+    Revoke(Box<RevokeOpts>),
 }
 
 #[derive(Debug, Args)]
@@ -126,6 +129,30 @@ struct ListOpts {
     json: bool,
 }
 
+#[derive(Debug, Args)]
+struct RevokeOpts {
+    /// Remote name or mkit+https:// URL.
+    remote: Option<String>,
+    /// Namespace to advance (default: the remote URL's, else the signing key's).
+    #[arg(long, value_name = "NS")]
+    namespace: Option<String>,
+    /// Audience the statement is valid for (repeatable; default: the remote's
+    /// origin).
+    #[arg(long, value_name = "ORIGIN")]
+    audience: Vec<String>,
+    /// Longest to wait for revocation to complete (for example 5m).
+    #[arg(long, value_name = "DURATION", default_value = "5m")]
+    timeout: String,
+    /// Delete the local grants this revocation invalidates, once it succeeds.
+    #[arg(long)]
+    prune: bool,
+    /// Emit a JSON object.
+    #[arg(long)]
+    json: bool,
+    #[command(flatten)]
+    owner: OwnerArgs,
+}
+
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
     let opts = match clap_shim::parse::<GrantOpts>("mkit grant", args) {
@@ -136,6 +163,24 @@ pub fn run(args: &[String]) -> u8 {
         GrantCommand::Create(opts) => create(&opts),
         GrantCommand::Add(opts) => add(&opts),
         GrantCommand::List(opts) => list(&opts),
+        GrantCommand::Revoke(opts) => {
+            let opts = *opts;
+            bump(
+                &BumpOpts {
+                    remote: opts.remote,
+                    namespace: opts.namespace,
+                    by: 1,
+                    audience: opts.audience,
+                    timeout: opts.timeout,
+                    json: opts.json,
+                    owner: opts.owner,
+                },
+                Some(&RevokeExtras {
+                    store: GrantStore::open_default(),
+                    prune: opts.prune,
+                }),
+            )
+        }
     }
 }
 

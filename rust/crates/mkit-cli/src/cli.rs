@@ -230,10 +230,14 @@ commands:
   remote get-url <name>  Print a remote's URL
   remote set-url <name> <url>  Change a remote's URL
   key generate|list|import|export|delete  Manage user-scoped keystore keys
-  grant create|add|list  Issue, import and list write and read grants
+  grant create|add|list|revoke  Issue, import, list and revoke write and read grants
                     (create --cap read|read,write|write --grantee <hex> --repo <name>|--all
                     [--refs <pattern=cufd>] [--audience <origin>] [--ttl 7d] [--store];
-                    add <file|->; list [--check] [--json])
+                    add <file|->; list [--check] [--json]; revoke <remote> [--prune])
+  epoch show|bump <remote>  Show or advance a namespace's grant epoch on a remote
+                    (bump [--by <n>] revokes grants issued at a lower epoch)
+  visibility set <remote> public|private [--statement]
+                    Switch a repository between public and private
   keygen [--algorithm ed25519|secp256k1|p256] [--force] [--print-pubkey]
                     Generate a new signing key (defaults to Ed25519)
   cherry-pick [-n] [-m <parent-number>] [--format=json] <hash> | --continue | --abort

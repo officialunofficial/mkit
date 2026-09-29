@@ -104,6 +104,8 @@ const DOCUMENTED_SUBCOMMANDS: &[&str] = &[
     "mcp",
     "key",
     "grant",
+    "epoch",
+    "visibility",
     "keygen",
     "config",
     "self",

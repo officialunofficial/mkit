@@ -271,6 +271,13 @@ proptest = "1"
 # `mkit-transport-connect`'s own `client`/`client-tls` feature set (Cargo
 # unions dependency features across dependency kinds).
 connectrpc = { version = "0.9.0", default-features = false, features = ["server", "gzip", "zstd", "json"] }
+# tests/grant_e2e.rs (WP-2.13/2.14, E1): the real `mkit` binary against a REAL
+# in-process mkit-server pipeline over the memory stores, so grant selection,
+# `epoch bump` and revocation are exercised against the actual verifier. A
+# DEV-dependency only: `scripts/check-cli-baseline.sh` audits the normal
+# graph, where mkit-server stays at `ssh` + `fs`.
+mkit-server = { version = "0.4", path = "../mkit-server", default-features = false, features = ["ssh", "fs", "connect", "memory"] }
+http = "1"
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "time", "sync"] }
 futures = "0.3"
 # tests/cli_transcripts.rs: declarative `.trycmd` transcript tests for

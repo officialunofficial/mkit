@@ -16,7 +16,7 @@ complete -c mkit -f
 
 set -l __mkit_subcommands \
     init add rm mv restore reset hash cat cat-file show tree ls-tree ls-files rev-parse rev-list merge-base show-ref for-each-ref symbolic-ref update-ref ref commit log reflog status diff branch checkout switch clean \
-    tag config merge push pull fetch stash worktree clone remote key grant keygen \
+    tag config merge push pull fetch stash worktree clone remote key grant epoch visibility keygen \
     cherry-pick revert rebase bisect gc sparse-checkout serve mcp pack-shard git blame prove verify \
     verify-proof closure attest verify-attest self version help
 
@@ -296,8 +296,14 @@ complete -c mkit -n "__fish_seen_subcommand_from key; \
     and not __fish_seen_subcommand_from generate list import export delete" \
     -a "generate list import export delete"
 complete -c mkit -n "__fish_seen_subcommand_from grant; \
-    and not __fish_seen_subcommand_from create add list" \
-    -a "create add list"
+    and not __fish_seen_subcommand_from create add list revoke" \
+    -a "create add list revoke"
+complete -c mkit -n "__fish_seen_subcommand_from epoch; \
+    and not __fish_seen_subcommand_from show bump" \
+    -a "show bump"
+complete -c mkit -n "__fish_seen_subcommand_from visibility; \
+    and not __fish_seen_subcommand_from set" \
+    -a "set"
 complete -c mkit -n "__fish_seen_subcommand_from self; \
     and not __fish_seen_subcommand_from update" \
     -a "update"
