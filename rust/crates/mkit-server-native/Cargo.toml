@@ -169,6 +169,14 @@ name = "wire_fs_sqlite"
 required-features = ["http"]
 
 [[test]]
+name = "wire_multi"
+required-features = ["http"]
+
+[[test]]
+name = "addressing"
+required-features = ["http"]
+
+[[test]]
 name = "wire_fs_layout_bearer"
 required-features = ["http"]
 

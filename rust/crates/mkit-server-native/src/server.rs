@@ -12,9 +12,7 @@ use mkit_core::repo_lock::{self, LockError, RepoLock};
 use mkit_server::fs::{FsBlobStore, FsLayoutStore, META_MARKER};
 use mkit_server::pipeline::{Hooks, Pipeline, Sharding};
 use mkit_server::sql::{SqlConn, SqlError, SqlKvStore, SqlValue, TxFn};
-use mkit_server::{
-    Addressing, MultipartBlobStore, NamespaceStore, RepoId, StoreError, SystemClock,
-};
+use mkit_server::{Addressing, MultipartBlobStore, NamespaceStore, StoreError, SystemClock};
 use mkit_transport_file::{FileTransport, sync_dir};
 use tokio::net::TcpListener;
 
@@ -462,7 +460,11 @@ where
                 .with_auth(mkit_server::pipeline::AuthMode::TransportIdentity)
                 .map_err(|e| config_error("pipeline", e))?;
             let key = crate::enc::load_server_key(&opts.server_key)?;
-            let session = crate::enc::session_fn(Arc::new(sibling), opts.idle_timeout);
+            let session = crate::enc::session_fn(
+                Arc::new(sibling),
+                opts.repository.clone(),
+                opts.idle_timeout,
+            );
             Some(crate::enc::EncService { key, session })
         }
         None => None,
@@ -519,31 +521,6 @@ fn lock_root(root: &Path) -> Result<ServerLocks, ConfigError> {
 /// does not open; `TEMPFAIL` when the serve lock is not granted in time.
 pub fn open(cfg: &ServeConfig) -> Result<Opened, ConfigError> {
     let locks = lock_root(&cfg.repo_root)?;
-    #[cfg(feature = "test-faults")]
-    let repo = match &cfg.pipeline.addressing {
-        Addressing::Single { repo } => Some(repo),
-        // Indexed mode needs Multi addressing. SQLite stores each namespace
-        // partition independently while the existing root lock serializes
-        // native writers for the lifetime of this process.
-        Addressing::Multi(_)
-            if cfg.pipeline.indexed.is_some() && matches!(cfg.meta, MetaChoice::Sqlite { .. }) =>
-        {
-            None
-        }
-        _ => {
-            return Err(config_error(
-                "addressing",
-                "only single-repo addressing is served",
-            ));
-        }
-    };
-    #[cfg(not(feature = "test-faults"))]
-    let Addressing::Single { repo } = &cfg.pipeline.addressing else {
-        return Err(config_error(
-            "addressing",
-            "only single-repo addressing is served",
-        ));
-    };
     let services = match &cfg.blob {
         BlobChoice::Fs => {
             let blobs = FsBlobStore::new(&cfg.repo_root);
@@ -553,13 +530,17 @@ pub fn open(cfg: &ServeConfig) -> Result<Opened, ConfigError> {
             if swept > 0 {
                 tracing::warn!(swept, "removed stale filesystem uploads");
             }
-            with_meta(Blocking::new(blobs), repo, cfg)?
+            with_meta(Blocking::new(blobs), &cfg.pipeline.addressing, cfg)?
         }
         #[cfg(feature = "s3")]
         BlobChoice::S3 {
             config,
             spool_max_bytes,
-        } => with_meta(open_s3(config, *spool_max_bytes, cfg)?, repo, cfg)?,
+        } => with_meta(
+            open_s3(config, *spool_max_bytes, cfg)?,
+            &cfg.pipeline.addressing,
+            cfg,
+        )?,
     };
     Ok(Opened {
         router: services.router,
@@ -571,11 +552,12 @@ pub fn open(cfg: &ServeConfig) -> Result<Opened, ConfigError> {
     })
 }
 
-/// The services over `blobs` and the metadata store `cfg` names.
+/// The services over `blobs` and the metadata store `cfg` names. The
+/// fs-layout store names its one repository from the addressing; `SQLite`
+/// serves every namespace's partitions.
 fn with_meta<B>(
     blobs: B,
-    #[cfg(feature = "test-faults")] repo: Option<&RepoId>,
-    #[cfg(not(feature = "test-faults"))] repo: &RepoId,
+    addressing: &Addressing,
     cfg: &ServeConfig,
 ) -> Result<Services, ConfigError>
 where
@@ -583,10 +565,16 @@ where
 {
     match &cfg.meta {
         MetaChoice::FsLayout => {
-            #[cfg(feature = "test-faults")]
-            let repo = repo.ok_or_else(|| {
-                config_error("addressing", "fs-layout requires single-repo addressing")
-            })?;
+            // `resolve` already refuses this combination; keep it a
+            // config error rather than a panic if a config arrives
+            // without going through it.
+            let Addressing::Single { repo } = addressing else {
+                return Err(config_error(
+                    "--meta fs-layout",
+                    "fs-layout metadata serves one repository; multi addressing needs \
+                     --meta sqlite:<PATH>",
+                ));
+            };
             let meta = FsLayoutStore::open(&cfg.repo_root, repo)
                 .map_err(|e| config_error("--meta fs-layout", e))?;
             build_services(blobs, Blocking::new(meta), cfg)

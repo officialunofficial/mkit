@@ -295,6 +295,8 @@ async fn binary_indexed_pending_verification_wire() {
         Feature::MultiRepo,
         Feature::IndexedMode,
     ]);
+    let allowlist = root.path().join("namespaces");
+    common::secret_file(&allowlist, format!("{namespace}\n").as_bytes());
     let meta = format!("sqlite:{}", common::s(&root.path().join("meta.sqlite3")));
     let server = Server::start(
         port,
@@ -310,9 +312,10 @@ async fn binary_indexed_pending_verification_wire() {
             "auth-v2",
             "--audience",
             &origin,
-            "--multi-addressing",
-            "--allow-namespace",
-            &namespace,
+            "--addressing",
+            "multi",
+            "--namespace-allowlist",
+            common::s(&allowlist),
             "--indexed",
             "--max-pack-bytes",
             "4194304",

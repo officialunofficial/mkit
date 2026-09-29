@@ -13,10 +13,33 @@ use mkit_server::{
 pub const MISMATCH_MESSAGE: &str = "deployment sharding mismatch";
 /// Public corruption refusal text.
 pub const CORRUPT_MESSAGE: &str = "deployment sharding marker corrupt";
+/// Public addressing refusal text.
+pub const ADDRESSING_MISMATCH_MESSAGE: &str = "deployment addressing mismatch";
+/// Public addressing corruption refusal text.
+pub const ADDRESSING_CORRUPT_MESSAGE: &str = "deployment addressing marker corrupt";
 /// Public transient backend failure text.
 pub const STORAGE_MESSAGE: &str = "deployment storage unavailable";
 
-/// A definitive observation of the deployment marker.
+/// The addressing modes the `am 00` marker records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddressingMode {
+    /// `single`.
+    Single,
+    /// `multi`.
+    Multi,
+}
+
+impl AddressingMode {
+    /// The marker's UTF-8 value.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Single => "single",
+            Self::Multi => "multi",
+        }
+    }
+}
+
+/// A definitive observation of the deployment markers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     /// The configured mode matches or was recorded.
@@ -28,8 +51,17 @@ pub enum Outcome {
         /// Mode requested by this deployment.
         configured: Sharding,
     },
+    /// The `am` marker (or unmarked single data) names a different addressing.
+    AddressingMismatch {
+        /// Addressing in storage.
+        stored: AddressingMode,
+        /// Addressing requested by this deployment.
+        configured: AddressingMode,
+    },
     /// The marker or conditional-write reply cannot be decoded.
     Corrupt,
+    /// The `am` marker or conditional-write reply cannot be decoded.
+    AddressingCorrupt,
 }
 
 impl Outcome {
@@ -59,6 +91,13 @@ impl core::fmt::Display for GuardError {
                 mode_name(*configured),
                 mode_name(*stored)
             ),
+            Self::Refused(Outcome::AddressingMismatch { stored, configured }) => write!(
+                f,
+                "{ADDRESSING_MISMATCH_MESSAGE}: configured={} stored={}",
+                configured.name(),
+                stored.name()
+            ),
+            Self::Refused(Outcome::AddressingCorrupt) => f.write_str(ADDRESSING_CORRUPT_MESSAGE),
             Self::Refused(_) => f.write_str(CORRUPT_MESSAGE),
             Self::Storage(error) => write!(f, "{STORAGE_MESSAGE}: {error}"),
         }
@@ -71,6 +110,8 @@ impl GuardError {
     pub fn public_message(&self) -> &'static str {
         match self {
             Self::Refused(Outcome::Mismatch { .. }) => MISMATCH_MESSAGE,
+            Self::Refused(Outcome::AddressingMismatch { .. }) => ADDRESSING_MISMATCH_MESSAGE,
+            Self::Refused(Outcome::AddressingCorrupt) => ADDRESSING_CORRUPT_MESSAGE,
             Self::Refused(_) => CORRUPT_MESSAGE,
             Self::Storage(_) => STORAGE_MESSAGE,
         }
@@ -82,6 +123,7 @@ impl GuardError {
 #[derive(Debug, Clone)]
 pub struct Settled {
     mode: Sharding,
+    addressing: bool,
     jurisdiction: Option<String>,
     outcome: Outcome,
 }
@@ -92,11 +134,14 @@ impl Settled {
     pub fn cached(
         cache: &RefCell<Option<Self>>,
         mode: Sharding,
+        multi: bool,
         jurisdiction: Option<&str>,
     ) -> Option<Outcome> {
         let mut cached = cache.borrow_mut();
         if cached.as_ref().is_some_and(|entry| {
-            entry.mode != mode || entry.jurisdiction.as_deref() != jurisdiction
+            entry.mode != mode
+                || entry.addressing != multi
+                || entry.jurisdiction.as_deref() != jurisdiction
         }) {
             *cached = None;
         }
@@ -109,6 +154,7 @@ impl Settled {
     pub fn finish(
         cache: &RefCell<Option<Self>>,
         mode: Sharding,
+        multi: bool,
         jurisdiction: Option<&str>,
         result: Result<Outcome, StoreError>,
     ) -> Result<(), GuardError> {
@@ -127,12 +173,21 @@ impl Settled {
                 mode_name(*configured),
                 mode_name(*stored)
             )),
+            Outcome::AddressingMismatch { stored, configured } => {
+                crate::log_failure(&format!(
+                    "{ADDRESSING_MISMATCH_MESSAGE}: configured={} stored={}",
+                    configured.name(),
+                    stored.name()
+                ));
+            }
             Outcome::Corrupt => crate::log_failure(CORRUPT_MESSAGE),
+            Outcome::AddressingCorrupt => crate::log_failure(ADDRESSING_CORRUPT_MESSAGE),
         }
         let mut cached = cache.borrow_mut();
         if cached.is_none() {
             *cached = Some(Self {
                 mode,
+                addressing: multi,
                 jurisdiction: jurisdiction.map(str::to_owned),
                 outcome: outcome.clone(),
             });
@@ -211,5 +266,61 @@ pub async fn check_mode<S: NamespaceStore>(
         } => compare(&value, sharding),
         BatchOutcome::PreconditionFailed { observed: None, .. }
         | BatchOutcome::DeadlinePassed { .. } => Outcome::Corrupt,
+    })
+}
+
+fn compare_addressing(observed: &Value, configured: AddressingMode) -> Outcome {
+    let stored = match observed.as_bytes() {
+        b"single" => AddressingMode::Single,
+        b"multi" => AddressingMode::Multi,
+        _ => return Outcome::AddressingCorrupt,
+    };
+    if stored == configured {
+        Outcome::Ok
+    } else {
+        Outcome::AddressingMismatch { stored, configured }
+    }
+}
+
+/// Run one request's independent addressing-marker check with its own store
+/// handle. An absent `am` marker is legacy only when the root holds committed
+/// data: the layout-version row every first write installs. The housekeeping
+/// rows the object writes before or without one (`sm`, `bk` backup state,
+/// `w` timers) say nothing about addressing and are never data. At most
+/// three calls: get, get, apply. A failed Absent uses its observation.
+///
+/// # Errors
+/// Backend errors are returned separately from definitive marker outcomes.
+pub async fn check_addressing<S: NamespaceStore>(
+    store: &S,
+    multi: bool,
+) -> Result<Outcome, StoreError> {
+    let configured = if multi {
+        AddressingMode::Multi
+    } else {
+        AddressingMode::Single
+    };
+    let root = Partition::Namespace(NamespaceKey::deployment_default());
+    let marker = keys::addressing_marker();
+    if let Some(observed) = store.get(&root, &marker).await? {
+        return Ok(compare_addressing(&observed, configured));
+    }
+    if multi && store.get(&root, &keys::layout_version()).await?.is_some() {
+        return Ok(Outcome::AddressingMismatch {
+            stored: AddressingMode::Single,
+            configured,
+        });
+    }
+    let batch = Batch::new()
+        .require(Precondition::Absent(marker.clone()))
+        .put(marker, Value::new(configured.name().as_bytes().to_vec()));
+    Ok(match store.apply(&root, batch).await? {
+        BatchOutcome::Committed => Outcome::Ok,
+        BatchOutcome::PreconditionFailed {
+            observed: Some(value),
+            ..
+        } => compare_addressing(&value, configured),
+        BatchOutcome::PreconditionFailed { observed: None, .. }
+        | BatchOutcome::DeadlinePassed { .. } => Outcome::AddressingCorrupt,
     })
 }

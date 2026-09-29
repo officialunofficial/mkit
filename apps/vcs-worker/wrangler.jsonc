@@ -26,10 +26,21 @@
   // account runs into the 1 GB hard limit, which resets the object.
   "vars": {
     "AUTH_AUDIENCE": "http://localhost:8787",
+    // AUTH_REPOSITORY names the single repository under ADDRESSING=single
+    // (the default). Under ADDRESSING=multi it is ignored: every request's
+    // X-Repository <ns>/<name> selects its repository.
     "AUTH_REPOSITORY": "default",
     "WORKERS_PLAN": "free",
     // The root RefStore sharding marker refuses changes over existing data (R-94).
     "SHARDING": "single"
+    // ADDRESSING=multi serves every namespace its policy admits and
+    // requires TICKET_KEYS. Like SHARDING, ADDRESSING installs a root marker
+    // (`am 00`) on the first request; changing it over existing data is
+    // refused. NAMESPACE_POLICY=allowlist (the multi default)
+    // then requires NAMESPACE_ALLOWLIST: namespaces one per line or
+    // comma-separated, `#` comments allowed. NAMESPACE_POLICY=any admits
+    // every namespace and requires UNSAFE_OPEN_NAMESPACES=true (D27;
+    // development only).
     // Optional NAMESPACE_LOCATION_HINT / NAMESPACE_JURISDICTION are deployment-wide.
     // Jurisdiction (eu, us, fedramp) is fixed for the deployment lifetime:
     // changing it re-maps all names to new, empty objects.

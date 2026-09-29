@@ -184,6 +184,91 @@ async fn sqlite_driver_fires_ticket_expiry() {
     task.await.unwrap();
 }
 
+/// The same expiry on a Multi deployment's namespaced partition: the
+/// driver's startup `timer_heads` scan and `TimerNotifying` both key on
+/// the partition, which is `Namespace(ed25519-<key>)` — not the default —
+/// for a namespaced repository.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sqlite_driver_fires_ticket_expiry_on_a_namespaced_partition() {
+    let root = tempfile::tempdir().unwrap();
+    let store = open(&root.path().join("expiry-multi.sqlite3"));
+    let p = Partition::Namespace(NamespaceKey::from_namespace(
+        &mkit_core::repo_identity::Namespace::Ed25519([0x5e; 32]),
+    ));
+    let repo = RepoName::new("repo").unwrap();
+    let ref_name = "refs/heads/main".to_owned();
+    let rid = "s:3333333333333333333333333333333333333333333333333333333333333333";
+    let id = tickets::ticket_id(rid);
+    let due = now();
+    let ticket = codec::TicketV1 {
+        repo: repo.clone(),
+        ref_name: ref_name.clone(),
+        signer: [1; 32],
+        pack_id: [2; 32],
+        bytes: 8 * 1024 * 1024 + 1,
+        part_size: 8 * 1024 * 1024,
+        expires_at_ms: due,
+        created_at_ms: due - 1,
+        reservation_id: rid.into(),
+        upload_session: None,
+    };
+    store
+        .apply(
+            &p,
+            Batch::new()
+                .put(keys::ticket(&id), codec::encode_ticket(&ticket))
+                .put(
+                    keys::reservation(rid).unwrap(),
+                    codec::encode_reservation(&codec::ReservationV1::Ticketed { ticket_id: id }),
+                )
+                .put(
+                    keys::ticket_index(&repo, &ref_name, &ticket.pack_id, &ticket.signer).unwrap(),
+                    codec::encode_ref_id(&id),
+                )
+                .put(
+                    keys::tickets_per_ref(&repo, &ref_name).unwrap(),
+                    codec::encode_u64(1),
+                )
+                .put(
+                    keys::tickets_per_signer(&repo, &ref_name, &ticket.signer).unwrap(),
+                    codec::encode_u64(1),
+                )
+                .put(
+                    keys::timer(
+                        due,
+                        mkit_server::timers::registry::kinds::TICKET_EXPIRY.get(),
+                        &id,
+                    ),
+                    Value::default(),
+                ),
+        )
+        .await
+        .unwrap();
+    let shutdown = Shutdown::new();
+    let task = TimerDriver::new(
+        store.clone(),
+        server::sqlite_timer_registry(MemoryBlobStore::default(), store.clone(), String::new()),
+        Arc::new(SystemClock),
+    )
+    .start(shutdown.clone())
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            // The Expired outcome is delivered and acknowledged by kind 8
+            // right after expiry, so the closed ticket is the durable evidence.
+            if store.get(&p, &keys::ticket(&id)).await.unwrap().is_none() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    shutdown.trigger();
+    task.await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restart_rebuilds_directory_from_sqlite() {
     let root = tempfile::tempdir().unwrap();
