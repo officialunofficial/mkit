@@ -954,17 +954,20 @@ have verified all of the following:
 - **(a) Object identity.** Every object's id agrees with its content under
   [SPEC-OBJECTS §10](SPEC-OBJECTS.md#10-storage), including the
   type-specific identity rules referenced there.
-- **(b) Signatures.** Every commit, remix, and tag signature reachable
-  from the new tips verifies under
+- **(b) Signatures.** Every commit, remix, and tag signature in the
+  consumed packs verifies under
   [SPEC-SIGNING §3–§4a and §6](SPEC-SIGNING.md#6-verification-algorithm).
-- **(c) Closure.** Every object reachable from the advanced head is in
-  the consumed packs or is already a verified member of the same
+- **(c) Closure.** Every child referenced by an object in a consumed pack,
+  and every advanced head, is in the consumed packs or is already a verified member of the same
   repository. A membership-dependent miss follows §9.4's lag window
   before it is a permanent `open closure` failure. Object references
   follow the corresponding object layouts in
   [SPEC-OBJECTS §4–§7](SPEC-OBJECTS.md#4-tree-0x02).
 - **(d) Delta resolution.** Every delta resolves under §9.4 within the
   chain-depth limit advertised under §9.8.
+
+An indexed server verifies (a)–(c) for every object in the packs an advance
+consumes, not only objects reachable from the new tips.
 
 Object identity is checked on the reconstructed object, not on an
 unverified claim in an entry. A transport-level pack commitment does
@@ -982,8 +985,9 @@ rule):
 |---|---|
 | Object id does not match its content | `object hash mismatch` |
 | Commit, remix, or tag signature does not verify | `bad signature` |
-| Reachable object is absent from the permitted closure after §9.4's lag window | `open closure` |
+| Object is absent from the permitted closure after §9.4's lag window | `open closure` |
 | Delta chain exceeds the advertised cap | `delta chain too deep` |
+| An object-index lookup limit is exceeded during closure or packlist checks | `object index limit exceeded` |
 
 These are permanent failures. Clients MUST NOT retry the rejected
 upload as though polling or backoff could make its content valid.
@@ -1030,7 +1034,7 @@ return the permanent error of the check that missed:
 | Membership-dependent miss | Connect code | Exact public message |
 |---|---|---|
 | Unresolved delta base | `failed_precondition` | `delta base not available in this repository` |
-| Reachable object absent from the permitted closure | `invalid_argument` | `open closure` |
+| Object absent from the permitted closure | `invalid_argument` | `open closure` |
 | Packlist names a pack absent from the repository and not ticketed and consumed in the same advance | `invalid_argument` | `packlist lists a pack that is not in this repository` |
 
 Each permanent response MUST be byte-identical whether the object or
@@ -1230,6 +1234,14 @@ in an opaque deployment.
 The pack-size and chain-depth limits are distinct. A pack below the
 size limit can still exceed the chain-depth cap. Neither limit changes
 repository-isolated resolution or permits global-existence disclosure.
+
+An indexed advance that exceeds either pack limit fails with the exact
+response below:
+
+| Limit exceeded | Connect code | Exact public message |
+|---|---|---|
+| Indexed pack size | `invalid_argument` | `pack exceeds indexed max_pack_bytes` |
+| Indexed decode budget | `invalid_argument` | `pack exceeds indexed decode budget` |
 
 ## 10. Published view
 
@@ -3314,6 +3326,7 @@ The mapping of profiles to conformance-suite cases is specified with M5.
 
 | Version | Status | Change |
 |---|---|---|
+| 1 | draft | Indexed ingestion verifies every consumed object, including unreachable entries; closure and packlist index caps have the `object index limit exceeded` error (§9.3; WP-4.7). Indexed pack-size and decode-budget errors are pinned in §9.8. |
 | 1 | draft | §18 conformance scope: a core profile (§2–§8; no inspectors, storage leases, GC, indexed mode, takedown, receipts or admin service) and a full profile; §1 defers the §§9–16 obligations to the profile. |
 | 1 | draft | Additive admin service, signed envelope, role-bearing key list, replay contract, audit log (§16), and remote CachePurge (§16.7); namespace-scoped Event (§12.4). |
 | 1 | draft | §14 content, repository, and namespace takedown; signed notices, preservation and restore; additive transport notices and hook transition/reason. |

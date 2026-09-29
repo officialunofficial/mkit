@@ -4,11 +4,102 @@ use mkit_server::pipeline::{D34Shards, ShardMap, SinglePartition};
 use mkit_server::store::index::{self, IndexValue, LocatedObject};
 use mkit_server::store::{BlobKey, codec, keys};
 use mkit_server::{
-    Batch, KeyClasses, NamespaceKey, NamespaceStore, RepoId, RepoName, StoreError, Value,
+    Batch, KeyClasses, NamespaceKey, NamespaceStore, RangeScan, RepoId, RepoName, StoreError, Value,
 };
 
 use super::CaseResult::Pass;
-use super::{KvHarness, Outcome, commit};
+use super::{KvHarness, Outcome, commit, k, part};
+
+fn range(start: &[u8], end: &[u8], after: Option<mkit_server::Cursor>, limit: u32) -> RangeScan {
+    RangeScan::new(k(start), k(end), after, limit)
+}
+
+/// All backends serve a nonempty prefix in request order; the default
+/// implementation serves the entire request.
+pub async fn idx_scan_many_default_and_prefix<H: KvHarness>(h: H) -> Outcome {
+    let (s, p) = (h.store(), part("idx_scan_many_default_and_prefix"));
+    for name in [b"a1", b"b1", b"c1"] {
+        commit(&s, &p, Batch::new().put(k(name), Value::default())).await?;
+    }
+    let ranges = [
+        range(b"a", b"b", None, 2),
+        range(b"b", b"c", None, 2),
+        range(b"c", b"d", None, 2),
+    ];
+    let pages = ok!(s.scan_many(&p, &ranges).await);
+    ensure!(
+        !pages.is_empty() && pages.len() <= ranges.len(),
+        "invalid served prefix"
+    );
+    for (range, page) in ranges.iter().zip(&pages) {
+        ensure_eq!(page.entries.len(), 1);
+        ensure!(
+            page.entries[0].0.as_bytes() >= range.start.as_bytes()
+                && page.entries[0].0.as_bytes() < range.end.as_bytes(),
+            "wrong range"
+        );
+    }
+    Ok(Pass)
+}
+
+/// Empty ranges and a continuation page retain scan semantics.
+pub async fn idx_scan_many_empty_and_continuation<H: KvHarness>(h: H) -> Outcome {
+    let (s, p) = (h.store(), part("idx_scan_many_empty_and_continuation"));
+    ensure_eq!(ok!(s.scan_many(&p, &[]).await), vec![]);
+    for name in [b"a1", b"a2"] {
+        commit(&s, &p, Batch::new().put(k(name), Value::default())).await?;
+    }
+    let ranges = [range(b"x", b"y", None, 1), range(b"a", b"b", None, 1)];
+    let first = ok!(s.scan_many(&p, &ranges).await);
+    ensure!(!first.is_empty(), "missing first page");
+    ensure!(
+        first[0].entries.is_empty() && first[0].next.is_none(),
+        "empty range changed"
+    );
+    let second = if first.len() == 2 {
+        first[1].clone()
+    } else {
+        ok!(s.scan_many(&p, &ranges[1..]).await).remove(0)
+    };
+    ensure_eq!(second.entries.len(), 1);
+    let next = second.next;
+    ensure!(next.is_some(), "missing continuation");
+    let resumed = ok!(s.scan_many(&p, &[range(b"a", b"b", next, 1)]).await);
+    ensure_eq!(resumed[0].entries.len(), 1);
+    ensure_eq!(resumed[0].entries[0].0, k(b"a2"));
+    Ok(Pass)
+}
+
+/// A cursor from another range fails the batched call closed.
+pub async fn idx_scan_many_forged_cursor<H: KvHarness>(h: H) -> Outcome {
+    let (s, p) = (h.store(), part("idx_scan_many_forged_cursor"));
+    commit(&s, &p, Batch::new().put(k(b"a1"), Value::default())).await?;
+    let first = ok!(s.scan_many(&p, &[range(b"a", b"b", None, 1)]).await);
+    let cursor = first[0]
+        .next
+        .clone()
+        .unwrap_or_else(|| mkit_server::Cursor::new(k(b"a1").as_bytes().to_vec()));
+    ensure_err!(
+        s.scan_many(&p, &[range(b"b", b"c", Some(cursor), 1)]).await,
+        StoreError::Invalid(_)
+    );
+    Ok(Pass)
+}
+
+/// Each returned page respects its requested row limit; too many ranges
+/// are rejected before any backend-specific work.
+pub async fn idx_scan_many_range_limit<H: KvHarness>(h: H) -> Outcome {
+    let (s, p) = (h.store(), part("idx_scan_many_range_limit"));
+    for name in [b"a1", b"a2"] {
+        commit(&s, &p, Batch::new().put(k(name), Value::default())).await?;
+    }
+    let ranges = [range(b"a", b"b", None, 1)];
+    let pages = ok!(s.scan_many(&p, &ranges).await);
+    ensure_eq!(pages[0].entries.len(), 1);
+    let too_many = vec![ranges[0].clone(); mkit_server::MAX_SCAN_RANGES + 1];
+    ensure_err!(s.scan_many(&p, &too_many).await, StoreError::Invalid(_));
+    Ok(Pass)
+}
 
 async fn run<H: KvHarness>(h: H, shards: &dyn ShardMap) -> Outcome {
     let s = h.store();

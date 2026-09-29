@@ -70,8 +70,9 @@ fn check_change(
             if flags.contains(RefFlags::FORCE) {
                 return Ok(None);
             }
-            // TODO(WP-4.7): in indexed mode, check fast-forward ancestry
-            // before accepting `u` alone. Until then it remains fail-closed.
+            // TODO(Stage 2, R-148): in indexed mode, check fast-forward
+            // ancestry before accepting `u` alone. Until then it remains
+            // fail-closed.
             if flags.contains(RefFlags::UPDATE) && !indexed_mode {
                 return Err(ServerError::permission_denied(
                     "update without force needs indexed mode",

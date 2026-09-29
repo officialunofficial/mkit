@@ -109,7 +109,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
             }),
             namespace_policy: self.cfg.advertised_namespace_policy(),
             index_fanout: u32::from(INDEX_FANOUT),
-            max_delta_chain_depth: 0,
+            max_delta_chain_depth: self
+                .cfg
+                .indexed
+                .as_ref()
+                .map_or(0, |cfg| cfg.max_delta_chain_depth),
         }
     }
 }

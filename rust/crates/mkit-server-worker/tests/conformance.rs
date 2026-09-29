@@ -16,6 +16,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use common::{DoConfig, Loopback, SimBucket, capacity_above_empty};
 use mkit_server::Clock;
+use mkit_server::NamespaceKey;
+use mkit_server::{Batch, Key, NamespaceStore, Partition, RangeScan, Value};
 use mkit_server_conformance::multipart_suite;
 use mkit_server_conformance::storage::KvHarness;
 use mkit_server_conformance::storage_suite;
@@ -84,6 +86,38 @@ multipart_suite!(
     store = r2,
     heap = common::multipart_allocator::probe
 );
+
+#[test]
+fn scan_many_real_json_wire_obeys_combined_reply_bytes() {
+    use futures::executor::block_on;
+    let workers = Workers::new();
+    let store = workers.store();
+    let partition = Partition::Namespace(NamespaceKey::deployment_default());
+    let mut ranges = Vec::new();
+    for n in 0..20u8 {
+        let key = Key::new(vec![b'k', n]);
+        block_on(store.apply(
+            &partition,
+            Batch::new().put(key.clone(), Value::new(vec![n; 512 * 1024])),
+        ))
+        .unwrap();
+        ranges.push(RangeScan::new(
+            key.clone(),
+            Key::new(vec![b'k', n, 0xff]),
+            None,
+            1,
+        ));
+    }
+    let pages = block_on(store.scan_many(&partition, &ranges)).unwrap();
+    assert!(!pages.is_empty() && pages.len() < ranges.len());
+    assert!(pages.iter().all(|page| page.entries.len() == 1));
+    let bytes: usize = pages
+        .iter()
+        .flat_map(|page| &page.entries)
+        .map(|(key, value)| key.as_bytes().len() + value.as_bytes().len())
+        .sum();
+    assert!(bytes <= mkit_server_worker::ns_object::MAX_PAGE_BYTES);
+}
 
 /// The blob cases again, with R2 answering failed conditions and 429s
 /// before it reads the body.

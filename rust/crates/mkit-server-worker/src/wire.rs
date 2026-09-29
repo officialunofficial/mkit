@@ -102,6 +102,8 @@ pub enum NsCall {
         after: Option<Blob>,
         limit: u32,
     },
+    /// Batched ordered range scans.
+    ScanMany { ranges: Vec<WireRangeScan> },
     /// `apply`.
     Apply { batch: WireBatch },
     /// `stats`.
@@ -116,6 +118,15 @@ pub enum NsCall {
     /// Fresh import into a test-only Durable Object.
     #[cfg(feature = "test-faults")]
     TestImport { bytes: Blob },
+}
+
+/// One range on the internal JSON wire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireRangeScan {
+    pub start: Blob,
+    pub end: Blob,
+    pub after: Option<Blob>,
+    pub limit: u32,
 }
 
 /// A [`Batch`] on the wire.
@@ -274,6 +285,8 @@ pub enum NsReply {
         entries: Vec<(Blob, Blob)>,
         next: Option<Blob>,
     },
+    /// A served prefix of `ScanMany` pages.
+    Pages { pages: Vec<WirePage> },
     /// To `Apply`.
     Outcome { outcome: WireOutcome },
     /// To `Stats`.
@@ -282,6 +295,13 @@ pub enum NsReply {
     Ok,
     /// A typed failure; `message` never holds backend detail.
     Err { kind: NsErrKind, message: String },
+}
+
+/// One page within a batched scan reply.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WirePage {
+    pub entries: Vec<(Blob, Blob)>,
+    pub next: Option<Blob>,
 }
 
 /// The [`StoreError`] kinds a Durable Object reports.
@@ -304,6 +324,23 @@ pub enum NsErrKind {
 pub const UNAVAILABLE_MESSAGE: &str = "ref store request failed";
 
 impl NsReply {
+    /// A served prefix of scan pages.
+    #[must_use]
+    pub fn pages(pages: Vec<ScanPage>) -> Self {
+        Self::Pages {
+            pages: pages
+                .into_iter()
+                .map(|page| WirePage {
+                    entries: page
+                        .entries
+                        .into_iter()
+                        .map(|(k, v)| (Blob::from(k.as_bytes()), Blob::from(v.as_bytes())))
+                        .collect(),
+                    next: page.next.map(|c| Blob::from(c.as_bytes())),
+                })
+                .collect(),
+        }
+    }
     /// A scan or export page.
     #[must_use]
     pub fn page(page: ScanPage) -> Self {

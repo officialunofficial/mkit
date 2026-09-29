@@ -25,6 +25,15 @@ pub const METRIC_LATENCY: &str = "mkit_server_request_duration_ms";
 pub const METRIC_UPLOAD_BYTES: &str = "mkit_server_upload_bytes_total";
 /// Counter: an expired shard lease remains kept beyond the relay lag bound.
 pub const METRIC_RELAY_LEASE_LAG: &str = "mkit_server_relay_lease_lag_total";
+/// Counter: an outbox row exceeded the relay lag bound. Label: `source_kind`.
+pub const METRIC_RELAY_LAG_EXCEEDED: &str = "mkit_server_relay_lag_exceeded_total";
+/// Gauge: source outbox rows inspected in the current relay window.
+pub const METRIC_RELAY_BACKLOG_ROWS: &str = "mkit_server_relay_backlog_rows";
+/// Counter: an object index lookup hit a bounded-work cap. Label: `reason`.
+pub const METRIC_INDEX_LOOKUP_CAPPED: &str = "mkit_server_index_lookup_capped_total";
+/// Counter: a content rejection could not be persisted in verification state.
+pub const METRIC_INDEX_REJECTED_WRITE_FAILED: &str =
+    "mkit_server_index_rejected_write_failed_total";
 /// Namespace quota writes admitted with no recent coordinator view.
 pub const METRIC_NAMESPACE_QUOTA_VIEW_FALLBACK: &str =
     "mkit_server_namespace_quota_view_fallback_total";
