@@ -90,7 +90,7 @@
 //! | `policy.owner_write_allowed` | `namespace-policy`, `multi-repo`, `auth-v2` | an allowlisted namespace owner writes and reads its ref |
 //! | `policy.non_owner_write_denied` | `namespace-policy`, `multi-repo`, `auth-v2` | a non-owner gets `permission_denied`; reads show existing and absent refs unchanged |
 //! | `policy.non_allowlisted_namespace_denied` | `namespace-policy`, `multi-repo`, `auth-v2` | an owner outside the allowlist gets `permission_denied`; the repository is not created |
-//! | `leases.bump_completes_and_writes_continue` | `epoch-leases`, `test-faults` | on a fresh target, a bump completes; repeating the epoch is rejected, then a second write succeeds (D34 listings remain deferred) |
+//! | `leases.bump_completes_and_writes_continue` | `epoch-leases`, `test-faults` | on a fresh target, a bump completes; repeating the epoch is rejected, then a second write succeeds |
 //! | `timers.directive_fires_due` | `test-faults` | a future timer remains; a skewed tick deletes only the due ref |
 //! | `timers.fire_on_schedule` | `test-faults`, `timers` | the driver deletes the ref within 20 s without a manual tick |
 //! | `timers.redelivery_is_idempotent` | `test-faults` | repeated ticks succeed with no further effects |
