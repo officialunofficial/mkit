@@ -160,6 +160,39 @@ pub(crate) fn pending_verification_delay(err: &ConnectError) -> Option<std::time
     )))
 }
 
+/// Longest wait `Retry-After` can ask for; the shortest is 1 s.
+const RETRY_AFTER_MIN: std::time::Duration = std::time::Duration::from_secs(1);
+const RETRY_AFTER_MAX: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// A `Retry-After` delay: delay-seconds only (an HTTP-date is not parsed),
+/// clamped to 1–60 s. A missing, empty or garbage value is 1 s.
+pub(crate) fn parse_retry_after(values: &[String]) -> std::time::Duration {
+    let Some(value) = values.first().map(|v| v.trim()) else {
+        return RETRY_AFTER_MIN;
+    };
+    if value.is_empty() || value.len() > 10 || !value.bytes().all(|b| b.is_ascii_digit()) {
+        return RETRY_AFTER_MIN;
+    }
+    value
+        .parse::<u64>()
+        .map_or(RETRY_AFTER_MIN, std::time::Duration::from_secs)
+        .clamp(RETRY_AFTER_MIN, RETRY_AFTER_MAX)
+}
+
+/// For the epoch and visibility RPCs (SPEC-WRITE-GRANTS §5.3, §9.1): a real
+/// server's `unavailable` means the change is still taking effect, and its
+/// `Retry-After` says when to ask again. A transport-level failure
+/// (DNS, connect, TLS) also surfaces as `unavailable` but has no response
+/// headers, so it stays an error for the ordinary retry ladder.
+pub(crate) fn pending_retry_after(err: &ConnectError) -> Option<std::time::Duration> {
+    if err.code != ErrorCode::Unavailable || err.response_headers().is_empty() {
+        return None;
+    }
+    Some(parse_retry_after(
+        &visible_header_values(err, "retry-after").unwrap_or_default(),
+    ))
+}
+
 /// Which RPC family raised the error — needed to disambiguate
 /// `invalid_argument` (see module docs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -226,6 +259,54 @@ mod tests {
             value: Some(value.into()),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn retry_after_parses_delay_seconds_clamps_and_defaults() {
+        let secs = |v: &[&str]| {
+            parse_retry_after(&v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>()).as_secs()
+        };
+        assert_eq!(secs(&["5"]), 5);
+        assert_eq!(secs(&[" 12 "]), 12);
+        assert_eq!(secs(&["0"]), 1);
+        assert_eq!(secs(&["1"]), 1);
+        assert_eq!(secs(&["60"]), 60);
+        assert_eq!(secs(&["61"]), 60);
+        assert_eq!(secs(&["999999999"]), 60);
+        // Missing, empty, dates, signs, fractions and overflow are 1 s.
+        assert_eq!(secs(&[]), 1);
+        for garbage in [
+            "",
+            "soon",
+            "-5",
+            "+5",
+            "1.5",
+            "Wed, 21 Oct 2026 07:28:00 GMT",
+            "99999999999999999999",
+        ] {
+            assert_eq!(secs(&[garbage]), 1, "{garbage:?}");
+        }
+        // The first value wins.
+        assert_eq!(secs(&["7", "30"]), 7);
+    }
+
+    #[test]
+    fn only_a_real_unavailable_response_is_pending() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert("content-type", "application/json".parse().unwrap());
+        headers.insert("retry-after", "7".parse().unwrap());
+        let real = ConnectError::unavailable("still completing").with_headers(headers);
+        assert_eq!(
+            pending_retry_after(&real),
+            Some(std::time::Duration::from_secs(7))
+        );
+        // A local transport failure carries no response headers.
+        assert_eq!(pending_retry_after(&ConnectError::unavailable("dns")), None);
+        // Other codes are never pending, whatever the headers.
+        let mut headers = http::HeaderMap::new();
+        headers.insert("retry-after", "7".parse().unwrap());
+        let denied = ConnectError::permission_denied("no").with_headers(headers);
+        assert_eq!(pending_retry_after(&denied), None);
     }
 
     #[test]
