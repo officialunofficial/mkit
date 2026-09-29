@@ -274,6 +274,13 @@ impl ServerError {
         Self::new(Code::NotFound, public)
     }
 
+    /// [`Code::NotFound`] for a repository that is missing or unreadable
+    /// without revealing which (SPEC-WRITE-GRANTS §9.3).
+    #[must_use]
+    pub fn repository_not_found() -> Self {
+        Self::not_found("repository not found")
+    }
+
     /// [`Code::FailedPrecondition`].
     #[must_use]
     pub fn failed_precondition(public: impl Into<Cow<'static, str>>) -> Self {

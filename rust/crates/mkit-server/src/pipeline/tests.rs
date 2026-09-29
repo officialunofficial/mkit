@@ -5,6 +5,7 @@ mod begin_parts;
 mod grants;
 mod info;
 mod policy;
+mod visibility;
 
 use std::future::Future;
 use std::pin::{Pin, pin};
@@ -349,13 +350,16 @@ type AfterApplyHook = Box<dyn Fn(&MemoryKv, &Partition, &Batch, &BatchOutcome) +
 type ApplyHook = Box<dyn Fn(&MemoryKv, &Partition, &Batch) + Send + Sync>;
 
 /// A `MemoryKv` that records every key it sees and batch it applies, can
-/// run a hook before each apply and can yield at every call.
+/// run a hook before each apply, can yield at every call and can fail
+/// every read.
 struct Spy {
     inner: Arc<MemoryKv>,
     hook: Option<ApplyHook>,
     after_hook: Option<AfterApplyHook>,
     yields: bool,
+    fail_reads: bool,
     seen: Mutex<Vec<Key>>,
+    ops: Mutex<Vec<&'static str>>,
     batches: Mutex<Vec<Batch>>,
     calls: AtomicU32,
 }
@@ -367,7 +371,9 @@ impl Spy {
             hook: None,
             after_hook: None,
             yields: false,
+            fail_reads: false,
             seen: Mutex::default(),
+            ops: Mutex::default(),
             batches: Mutex::default(),
             calls: AtomicU32::new(0),
         }
@@ -381,13 +387,30 @@ impl Spy {
         self
     }
 
+    /// Every `get`/`get_many`/`scan` fails.
+    fn failing_reads(mut self) -> Self {
+        self.fail_reads = true;
+        self
+    }
+
     /// Backend round trips so far.
     fn calls(&self) -> u32 {
         self.calls.load(Ordering::SeqCst)
     }
 
-    async fn pause(&self) {
+    /// Keys seen, in call order.
+    fn seen(&self) -> Vec<Key> {
+        self.seen.lock().unwrap().clone()
+    }
+
+    /// Operation kinds seen, in call order.
+    fn ops(&self) -> Vec<&'static str> {
+        self.ops.lock().unwrap().clone()
+    }
+
+    async fn pause(&self, op: &'static str) {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        self.ops.lock().unwrap().push(op);
         if self.yields {
             YieldOnce::default().await;
         }
@@ -395,6 +418,13 @@ impl Spy {
 
     fn saw(&self, key: &Key) {
         self.seen.lock().unwrap().push(key.clone());
+    }
+
+    fn maybe_fail_read(&self) -> Result<(), StoreError> {
+        if self.fail_reads {
+            return Err(StoreError::unavailable("injected read fault"));
+        }
+        Ok(())
     }
 }
 
@@ -404,7 +434,8 @@ impl NamespaceStore for Spy {
     }
 
     async fn get(&self, p: &Partition, key: &Key) -> Result<Option<Value>, StoreError> {
-        self.pause().await;
+        self.pause("get").await;
+        self.maybe_fail_read()?;
         self.saw(key);
         self.inner.get(p, key).await
     }
@@ -414,7 +445,8 @@ impl NamespaceStore for Spy {
         p: &Partition,
         keys: &[Key],
     ) -> Result<Vec<Option<Value>>, StoreError> {
-        self.pause().await;
+        self.pause("get_many").await;
+        self.maybe_fail_read()?;
         for k in keys {
             self.saw(k);
         }
@@ -429,13 +461,14 @@ impl NamespaceStore for Spy {
         after: Option<&crate::store::Cursor>,
         limit: u32,
     ) -> Result<ScanPage, StoreError> {
-        self.pause().await;
+        self.pause("scan").await;
+        self.maybe_fail_read()?;
         self.saw(start);
         self.inner.scan(p, start, end, after, limit).await
     }
 
     async fn apply(&self, p: &Partition, batch: Batch) -> Result<BatchOutcome, StoreError> {
-        self.pause().await;
+        self.pause("apply").await;
         for pre in &batch.preconditions {
             if let Precondition::Absent(k) | Precondition::Present(k) | Precondition::Equals(k, _) =
                 pre
@@ -2811,6 +2844,7 @@ impl Authorizer for Granting {
                 id: [9; 32],
                 epoch: 0,
             }),
+            ..AuthzFacts::default()
         })
     }
 }

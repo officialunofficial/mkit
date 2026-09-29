@@ -52,8 +52,11 @@ use tracing::Instrument;
 
 use crate::download::DOWNLOAD_CHUNK_MAX;
 use crate::error::{ADMISSION_CHALLENGE_TYPE, InvalidHeader, ServerError};
-use crate::op::{AuthzFacts, OpKind, Operation, Procedure, RefUpdate};
-use crate::policy::{AuthorizerRole, GrantConfig, NamespacePolicy, WritePolicy, grants};
+use crate::op::{AuthzFacts, CallerView, GrantRef, OpKind, Operation, Procedure, RefUpdate};
+use crate::policy::{
+    AuthorizerRole, GrantConfig, NamespacePolicy, WritePolicy, grants, read as read_policy,
+};
+use crate::principal::Principal;
 use crate::quota::{
     self, DEFAULT_WRITE_QUOTA, NamespaceCharge, NamespaceDecision, NamespaceView, QuotaCharge,
     QuotaLimits, QuotaScope, ViewStatus,
@@ -156,6 +159,20 @@ fn require_relay_source_lease(
         return Err(internal("D34 relay batch lacks source epoch lease"));
     }
     Ok(())
+}
+
+/// What `authorize_read` established: the caller's facts (including its
+/// §10.1 view) and the stored grant epoch it checked a presented grant
+/// against.
+#[derive(Debug)]
+struct ReadAuth {
+    /// Facts threaded into `op.authz` for the hooks.
+    facts: AuthzFacts,
+    /// The coordinator's `e` row, `0` when absent; `None` when
+    /// visibility does not apply and no epoch was read. `IssueObjectUrl`
+    /// (WP-2.11) reuses it.
+    #[expect(dead_code)]
+    epoch: Option<u64>,
 }
 
 /// A deployment's pipeline settings. Start from [`PipelineConfig::new`].
@@ -710,8 +727,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 ));
             }
             let op = self.identify(a, kind)?;
-            self.authorize(&op).await?;
-            self.require_repository(&op.repo).await?;
+            self.authorize_read(&op).await?;
             let scan = refs::list_scan_prefix(prefix);
             let last = token
                 .map(|bytes| {
@@ -800,8 +816,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         self.observe(a, async {
             check_ref_name(name)?;
             let op = self.identify(a, kind)?;
-            self.authorize(&op).await?;
-            self.require_repository(&op.repo).await?;
+            self.authorize_read(&op).await?;
             let p = self.shards.ref_shard(&op.repo, name);
             read::read_ref(&self.meta, &p, &op.repo.name, name)
                 .await
@@ -930,8 +945,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     pub async fn pack_exists(&self, a: &Authenticated, key: PackKey) -> Result<bool, ServerError> {
         self.observe(a, async {
             let op = self.identify(a, OpKind::PackExists { key })?;
-            self.authorize(&op).await?;
-            self.require_repository(&op.repo).await?;
+            self.authorize_read(&op).await?;
             if !self.pack_is_member(a, &key).await? {
                 return Ok(false);
             }
@@ -995,8 +1009,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         let mut outcome = self.outcome(a);
         let opened = async {
             let op = self.identify(a, OpKind::DownloadPack { key })?;
-            self.authorize(&op).await?;
-            self.require_repository(&op.repo).await?;
+            self.authorize_read(&op).await?;
             if !self.pack_is_member(a, &key).await? {
                 return Err(ServerError::not_found("pack not found"));
             }
@@ -1339,10 +1352,213 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
                 Some(value) => {
                     codec::decode_repo_record(&value).map_err(meta_error)?;
                 }
-                None => return Err(ServerError::not_found("repository not found")),
+                None => return Err(ServerError::repository_not_found()),
             }
         }
         Ok(())
+    }
+
+    /// Whether repository visibility (`rv` rows) gates reads: a Multi,
+    /// owner-policy, auth v2 deployment (SPEC-WRITE-GRANTS §9.1).
+    fn visibility_applies(&self) -> bool {
+        matches!(self.cfg.addressing, Addressing::Multi(_))
+            && self.cfg.write_policy == WritePolicy::Owner
+            && matches!(self.cfg.auth, AuthMode::AuthV2(_))
+    }
+
+    /// Stage 2 for a read. Under [`Self::visibility_applies`], one
+    /// coordinator `get_many` reads `rr`, `rv` and `e`; a private
+    /// repository denies unauthorized reads with the same `not_found` as a
+    /// missing one (SPEC-WRITE-GRANTS §9.3). The returned facts carry the
+    /// caller's view; `epoch` is the stored grant epoch, for
+    /// `IssueObjectUrl`'s reuse.
+    async fn authorize_read(&self, op: &Operation) -> Result<ReadAuth, ServerError> {
+        tracing::debug!(stage = "authorize");
+        if !self.visibility_applies() {
+            return self.authorize_read_ungated(op).await;
+        }
+        // §7 steps 1–10 are stateless: run them before the coordinator
+        // read, even when the repository turns out to be missing.
+        let check = op.write_grant.as_ref().and_then(|header| {
+            self.cfg
+                .grants
+                .as_ref()
+                .and_then(|g| read_policy::check_grant(g, header.expose(), op))
+        });
+        let (private, epoch) = self.read_repo_state(&op.repo).await?;
+        // §7 step 11: the grant's epoch must equal the stored epoch.
+        let grant = check.filter(|c| c.epoch == epoch);
+        let grant_ref = grant.map(|c| GrantRef { id: c.id, epoch });
+        let owner = op.write_grant.is_none()
+            && matches!(Namespace::parse(op.repo.namespace.as_str()),
+                Ok(Namespace::Ed25519(key)) if op.principal.ed25519() == Some(&key));
+        let signed = op.auth.is_some();
+        let authority = self.cfg.authorizer_role == AuthorizerRole::Authority;
+        if private && !signed {
+            return Err(ServerError::repository_not_found());
+        }
+        let provisional = AuthzFacts {
+            grant: grant_ref,
+            owner,
+            caller_view: if owner || grant.is_some_and(|g| g.write) {
+                CallerView::Writer
+            } else {
+                CallerView::Reader
+            },
+        };
+        let hook = self.read_hook(op, private, signed, &provisional).await?;
+        let caller = read_policy::Caller {
+            signed,
+            owner,
+            grant: grant.map(|g| read_policy::GrantEval {
+                read: g.read,
+                write: g.write,
+            }),
+            hook,
+            authority,
+        };
+        match read_policy::decide(op.procedure(), private, caller) {
+            read_policy::ReadDecision::NotFound => Err(ServerError::repository_not_found()),
+            read_policy::ReadDecision::Allow(caller_view) => Ok(ReadAuth {
+                facts: AuthzFacts {
+                    grant: grant_ref,
+                    owner,
+                    caller_view,
+                },
+                epoch: Some(epoch),
+            }),
+        }
+    }
+
+    /// One coordinator `get_many` for the `rr`, `rv` and `e` rows of a
+    /// read: `(private, epoch)`. A missing `rr` is the uniform
+    /// `not_found`; a store failure is `unavailable`, never public.
+    async fn read_repo_state(
+        &self,
+        repo: &crate::repo::RepoId,
+    ) -> Result<(bool, u64), ServerError> {
+        let coordinator = self.shards.coordinator(&repo.namespace);
+        let rows = self
+            .meta
+            .get_many(
+                &coordinator,
+                &[
+                    keys::repo_record(&repo.name),
+                    keys::repo_visibility(&repo.name),
+                    keys::grant_epoch(),
+                ],
+            )
+            .await
+            .map_err(|e| {
+                tracing::warn!(detail = %e, "repository state read failed");
+                ServerError::unavailable("repository state unavailable")
+            })?;
+        let mut rows = rows.into_iter();
+        let record = rows
+            .next()
+            .flatten()
+            .ok_or_else(ServerError::repository_not_found)?;
+        codec::decode_repo_record(&record).map_err(meta_error)?;
+        let stored = rows
+            .next()
+            .flatten()
+            .map(|v| codec::decode_repo_visibility(&v))
+            .transpose()
+            .map_err(meta_error)?;
+        let epoch = rows
+            .next()
+            .flatten()
+            .map(|v| codec::decode_u64(&v))
+            .transpose()
+            .map_err(meta_error)?
+            .unwrap_or(0);
+        Ok((
+            matches!(
+                stored.map(|v| v.visibility),
+                Some(codec::StoredVisibility::Private)
+            ),
+            epoch,
+        ))
+    }
+
+    /// Consult the authorizer for a read on an existing repository under
+    /// `visibility_applies`: on a private repository its verdict can
+    /// authorize the read; on a public one it only classifies the caller
+    /// (`Authority`) or checks the read as before (`Check`, error
+    /// propagates). `provisional` are the facts the hook sees.
+    async fn read_hook(
+        &self,
+        op: &Operation,
+        private: bool,
+        signed: bool,
+        provisional: &AuthzFacts,
+    ) -> Result<read_policy::HookEval, ServerError> {
+        let authorized = || {
+            let mut authorized = op.clone();
+            authorized.authz = provisional.clone();
+            authorized
+        };
+        let writer = |facts: &AuthzFacts| facts.caller_view == CallerView::Writer;
+        if private {
+            return Ok(
+                match self.hooks.authorizer().authorize(&authorized()).await {
+                    Ok(facts) => read_policy::HookEval::Allow {
+                        writer_view: writer(&facts),
+                    },
+                    // Any hook error, `unavailable` included, denies so the
+                    // read cannot reveal that the repository exists (§9.3).
+                    Err(_) => read_policy::HookEval::Deny,
+                },
+            );
+        }
+        if self.cfg.authorizer_role == AuthorizerRole::Authority {
+            // Classification only: an unsigned caller or an established
+            // writer needs no hook; a hook error keeps the reader view.
+            if !signed || provisional.caller_view == CallerView::Writer {
+                return Ok(read_policy::HookEval::NotConsulted);
+            }
+            return Ok(
+                match self.hooks.authorizer().authorize(&authorized()).await {
+                    Ok(facts) => read_policy::HookEval::Allow {
+                        writer_view: writer(&facts),
+                    },
+                    Err(_) => read_policy::HookEval::NotConsulted,
+                },
+            );
+        }
+        // Check role: the hook sees the read as before; it cannot confer
+        // a view.
+        self.hooks.authorizer().authorize(op).await?;
+        Ok(read_policy::HookEval::NotConsulted)
+    }
+
+    /// The read path when [`Self::visibility_applies`] does not hold: the
+    /// hook decides, then the `rr` row gates existence (Multi only). The
+    /// caller's view comes from its principal and the write policy.
+    async fn authorize_read_ungated(&self, op: &Operation) -> Result<ReadAuth, ServerError> {
+        let facts = self.hooks.authorizer().authorize(op).await?;
+        self.require_repository(&op.repo).await?;
+        let caller_view = match &op.principal {
+            Principal::Anonymous => CallerView::Anonymous,
+            Principal::BearerHolder => CallerView::Reader,
+            principal => {
+                if self.cfg.write_policy == WritePolicy::Open
+                    || matches!(Namespace::parse(op.repo.namespace.as_str()),
+                        Ok(Namespace::Ed25519(key)) if principal.ed25519() == Some(&key))
+                {
+                    CallerView::Writer
+                } else {
+                    CallerView::Reader
+                }
+            }
+        };
+        Ok(ReadAuth {
+            facts: AuthzFacts {
+                caller_view,
+                ..facts
+            },
+            epoch: None,
+        })
     }
 
     async fn pack_is_member(&self, a: &Authenticated, key: &PackKey) -> Result<bool, ServerError> {
@@ -1615,8 +1831,7 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
     async fn authorize(&self, op: &Operation) -> Result<AuthzFacts, ServerError> {
         tracing::debug!(stage = "authorize");
         if !op.procedure().is_write() {
-            // TODO(WP-2.9): private read authorization.
-            return self.hooks.authorizer().authorize(op).await;
+            return Ok(self.authorize_read(op).await?.facts);
         }
         let Addressing::Multi(multi) = &self.cfg.addressing else {
             return self.hooks.authorizer().authorize(op).await;
@@ -1662,7 +1877,11 @@ impl<B: MultipartBlobStore, N: NamespaceStore, H: HookSet> Pipeline<B, N, H> {
         if self.cfg.authorizer_role == AuthorizerRole::Check && !owner && grant.is_none() {
             return Err(ServerError::permission_denied("write not permitted"));
         }
-        let facts = AuthzFacts { grant, owner };
+        let facts = AuthzFacts {
+            grant,
+            owner,
+            caller_view: CallerView::Writer,
+        };
         // Both Authorize and Admit see the established owner/grant facts (§6.2).
         let mut authorized = op.clone();
         authorized.authz = facts.clone();

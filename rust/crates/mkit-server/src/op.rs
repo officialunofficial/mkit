@@ -340,6 +340,21 @@ pub struct GrantRef {
     pub epoch: u64,
 }
 
+/// The consistency and visibility view a caller is entitled to
+/// (SPEC-SERVER §10.1).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CallerView {
+    /// An unsigned caller.
+    #[default]
+    Anonymous,
+    /// A signed caller without write authority.
+    Reader,
+    /// An owner, a `write` grantee, or an authority-approved writer
+    /// (SPEC-SERVER §6.2 `writer_view`).
+    Writer,
+}
+
 /// Facts the Authorizer established, carried into `apply` as
 /// preconditions. M1 establishes `owner`; M2 (WP-2.6) sets `grant` so the
 /// pipeline can require `grant.epoch` when it commits.
@@ -352,6 +367,9 @@ pub struct AuthzFacts {
     pub grant: Option<GrantRef>,
     /// Whether the principal owns the namespace.
     pub owner: bool,
+    /// The caller's view; `Writer` is honoured only when the
+    /// authorizer's role is `Authority`.
+    pub caller_view: CallerView,
 }
 
 /// Namespace and repository creation facts for a write.

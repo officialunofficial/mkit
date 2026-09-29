@@ -22,6 +22,7 @@ use crate::replay::{
 use crate::repo::RepoName;
 use mkit_core::repo_identity::RepositoryIdentity;
 use mkit_core::upload_parts::MIN_PART_SIZE;
+use mkit_core::write_auth::is_hex;
 
 /// The namespace coordinator record. The first configuration version is 1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,6 +40,30 @@ pub struct NamespaceRecord {
 pub struct RepoRecord {
     /// Creation time, Unix milliseconds from the business clock.
     pub created_at_ms: u64,
+}
+
+/// A repository's stored visibility (SPEC-WRITE-GRANTS §9.1). A missing
+/// `rv` row means `public`; the row may exist before `rr` does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepoVisibilityV1 {
+    /// The repository's visibility.
+    pub visibility: StoredVisibility,
+    /// `created` of the last accepted visibility statement; 0 when no
+    /// statement has been accepted (envelope-mode writes keep it).
+    pub last_created_ms: u64,
+    /// The last accepted statement's id, 64 lowercase hex.
+    pub last_statement_id: Option<String>,
+}
+
+/// The visibility values a `rv` row stores.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StoredVisibility {
+    /// Readable by every caller, anonymous or signed.
+    Public,
+    /// Readable only by a signed, authorized caller (§9.3).
+    Private,
 }
 
 /// The ref shard's durable copy of its coordinator epoch lease.
@@ -502,6 +527,24 @@ pub fn encode_repo_record(record: &RepoRecord) -> Value {
 /// Decode a repository coordinator record.
 pub fn decode_repo_record(value: &Value) -> Result<RepoRecord, StoreError> {
     decode_json(value, "bad repo record")
+}
+
+/// Encode a repository visibility row.
+#[must_use]
+pub fn encode_repo_visibility(row: &RepoVisibilityV1) -> Value {
+    encode_json(row)
+}
+
+/// Decode a repository visibility row. The statement id is canonical: 64
+/// lowercase hexadecimal digits.
+pub fn decode_repo_visibility(value: &Value) -> Result<RepoVisibilityV1, StoreError> {
+    let row: RepoVisibilityV1 = decode_json(value, "bad repo visibility")?;
+    if let Some(id) = &row.last_statement_id
+        && !is_hex(id, 32)
+    {
+        return Err(corrupt("bad statement id"));
+    }
+    Ok(row)
 }
 
 /// Encode a ref shard epoch lease.
@@ -1622,6 +1665,45 @@ mod tests {
             namespace
         );
         assert_eq!(decode_repo_record(&repo_value).unwrap(), repo);
+        let public = RepoVisibilityV1 {
+            visibility: StoredVisibility::Public,
+            last_created_ms: 0,
+            last_statement_id: None,
+        };
+        let private = RepoVisibilityV1 {
+            visibility: StoredVisibility::Private,
+            last_created_ms: 1_700_000_000_000,
+            last_statement_id: Some("ab".repeat(32)),
+        };
+        let public_value = encode_repo_visibility(&public);
+        let private_value = encode_repo_visibility(&private);
+        assert_eq!(
+            public_value.as_bytes(),
+            b"\x01{\"visibility\":\"public\",\"last_created_ms\":0,\"last_statement_id\":null}"
+        );
+        assert_eq!(
+            private_value.as_bytes(),
+            format!(
+                "\x01{{\"visibility\":\"private\",\"last_created_ms\":1700000000000,\"last_statement_id\":\"{}\"}}",
+                "ab".repeat(32)
+            )
+            .as_bytes()
+        );
+        assert_eq!(decode_repo_visibility(&public_value).unwrap(), public);
+        assert_eq!(decode_repo_visibility(&private_value).unwrap(), private);
+        for bytes in [
+            &b""[..],
+            b"\x02{\"visibility\":\"public\",\"last_created_ms\":0,\"last_statement_id\":null}",
+            b"\x01{\"visibility\":\"internal\",\"last_created_ms\":0,\"last_statement_id\":null}",
+            b"\x01{\"visibility\":\"public\"}",
+            b"\x01{\"visibility\":\"public\",\"last_created_ms\":0,\"last_statement_id\":\"AB\"}",
+            b"\x01{\"visibility\":\"public\",\"last_created_ms\":0,\"last_statement_id\":\"ab\",\"extra\":1}",
+        ] {
+            assert!(matches!(
+                decode_repo_visibility(&Value::new(bytes.to_vec())),
+                Err(StoreError::Corrupt(_))
+            ));
+        }
         for bytes in [
             &b""[..],
             b"\x02{\"created_at_ms\":0,\"config_version\":1}",
