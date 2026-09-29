@@ -157,8 +157,16 @@ pub struct R2BlobStore<B> {
 impl<B: ObjectBucket> R2BlobStore<B> {
     /// A store for `keyspace` ([`PACKS_KEYSPACE`] for pack uploads), capped
     /// at [`DEFAULT_MAX_BYTES`] per blob.
+    ///
+    /// # Panics
+    /// If `keyspace` would alias a sibling namespace (`objects`,
+    /// `object-offsets`, `upload-markers`).
     #[must_use]
     pub fn new(bucket: B, keyspace: &'static str) -> Self {
+        assert!(
+            !mkit_server::is_reserved_pack_keyspace(keyspace),
+            "a keyspace must not alias a sibling namespace: {keyspace:?}"
+        );
         Self {
             bucket,
             keyspace,

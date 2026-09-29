@@ -28,6 +28,7 @@ pub mod watermark;
 pub use blob::{
     BlobBody, BlobKey, BlobMeta, BlobNamespace, BlobStore, ByteRange, CommitOutcome,
     MAX_BLOB_PIECE_BYTES, MultipartBlobStore, PackSink, PartRef, PartSink, UnsupportedPartSink,
+    is_reserved_pack_keyspace,
 };
 pub(crate) use content_index::BorrowedStore;
 pub use content_index::{

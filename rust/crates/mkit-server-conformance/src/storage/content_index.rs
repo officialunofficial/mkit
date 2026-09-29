@@ -440,3 +440,97 @@ pub async fn idx_hold_and_holder_deadline_passed_writes_nothing<H: KvHarness>(h:
     ensure_eq!(ok!(idx.holder_record(&obj, &holder("a")?).await), None);
     Ok(Pass)
 }
+
+/// A hold is extended only while it exists and is live: a missing or
+/// expired one is a retryable `Unavailable`, never brought back (M4, R-163).
+pub async fn idx_extend_hold_only_when_live<H: KvHarness>(h: H) -> Outcome {
+    let obj = [0x2f; 32];
+    let idx = index!(h, obj);
+    ensure_err!(
+        idx.extend_hold(&obj, &[1; 32], t(5_000), t(1)).await,
+        StoreError::Unavailable(_)
+    );
+    ensure_eq!(hold_row(&idx, &obj, &[1; 32]).await?, None);
+    ensure_eq!(
+        ok!(idx.add_hold(&obj, &[1; 32], t(5_000), t(2)).await),
+        HoldOutcome::Held
+    );
+    ensure_eq!(
+        ok!(idx.extend_hold(&obj, &[1; 32], t(9_000), t(3)).await),
+        HoldOutcome::Held
+    );
+    ensure_eq!(hold_row(&idx, &obj, &[1; 32]).await?, Some(t(9_000)));
+    // Extending never shortens.
+    ensure_eq!(
+        ok!(idx.extend_hold(&obj, &[1; 32], t(6_000), t(4)).await),
+        HoldOutcome::Held
+    );
+    ensure_eq!(hold_row(&idx, &obj, &[1; 32]).await?, Some(t(9_000)));
+    // A hold that has lapsed is not extended.
+    ensure_eq!(
+        ok!(idx.add_hold(&obj, &[2; 32], t(100), t(5)).await),
+        HoldOutcome::Held
+    );
+    ensure_err!(
+        idx.extend_hold(&obj, &[2; 32], t(800), t(200)).await,
+        StoreError::Unavailable(_)
+    );
+    ensure!(
+        hold_row(&idx, &obj, &[2; 32]).await? != Some(t(800)),
+        "a lapsed hold was extended"
+    );
+    Ok(Pass)
+}
+
+/// `add_holder_unless_blocked` on a blocked object records no holder and
+/// deletes the released hold in the same batch; on an unblocked object it is
+/// `add_holder`.
+pub async fn idx_holder_unless_blocked_releases_the_hold<H: KvHarness>(h: H) -> Outcome {
+    let obj = [0x30; 32];
+    let idx = index!(h, obj);
+    ensure_eq!(
+        ok!(idx.add_hold(&obj, &[1; 32], t(5_000), t(1)).await),
+        HoldOutcome::Held
+    );
+    let entry = BlockEntry::new("dmca", 1);
+    ok!(idx.block(&obj, &entry, t(2)).await);
+    let out = ok!(idx
+        .add_holder_unless_blocked(&obj, &holder("a")?, &OP, Some(&[1; 32]), t(3))
+        .await);
+    ensure_eq!(out.blocked, Some(entry));
+    ensure_eq!(ok!(idx.holder_record(&obj, &holder("a")?).await), None);
+    ensure_eq!(hold_row(&idx, &obj, &[1; 32]).await?, None);
+    ensure_eq!(state(&idx, &obj).await?.holders, 0);
+    // Unblocked: recorded, hold released.
+    ok!(idx.unblock(&obj, t(4)).await);
+    ensure_eq!(
+        ok!(idx.add_hold(&obj, &[2; 32], t(5_000), t(5)).await),
+        HoldOutcome::Held
+    );
+    let out = ok!(idx
+        .add_holder_unless_blocked(&obj, &holder("a")?, &OP, Some(&[2; 32]), t(6))
+        .await);
+    ensure!(out.newly_added && out.blocked.is_none(), "recorded");
+    ensure_eq!(hold_row(&idx, &obj, &[2; 32]).await?, None);
+    ensure_eq!(state(&idx, &obj).await?.holders, 1);
+    Ok(Pass)
+}
+
+/// A hold alone (no holder) beats a GC plan made before it: `commit_collect`
+/// fails and the object is not marked `deleting`.
+pub async fn idx_hold_alone_beats_commit_collect<H: KvHarness>(h: H) -> Outcome {
+    let obj = [0x31; 32];
+    let idx = index!(h, obj);
+    ok!(idx.release_hold(&obj, &[0; 32], t(1)).await);
+    let plan = ok!(idx.collectable(&obj, t(1 + GRACE), GRACE).await).ok_or("not collectable")?;
+    ensure_eq!(
+        ok!(idx.add_hold(&obj, &[1; 32], t(9_000), t(2 + GRACE)).await),
+        HoldOutcome::Held
+    );
+    ensure!(
+        !ok!(idx.commit_collect(plan).await),
+        "a hold alone did not stop the plan"
+    );
+    ensure!(!state(&idx, &obj).await?.deleting, "marked deleting");
+    Ok(Pass)
+}

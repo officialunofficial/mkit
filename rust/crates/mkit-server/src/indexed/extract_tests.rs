@@ -13,7 +13,10 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use super::extract::{self, Extractor, Kind, Renew, Staged, encode_offsets, hold_id, hold_ttl_ms};
+use super::extract::{
+    self, ExtractError, Extractor, Kind, MALFORMED_MESSAGE, Renew, Staged, encode_offsets, hold_id,
+    hold_ttl_ms,
+};
 use super::tests::{NOW, repo, seed_member_raw, source, ticket, upload};
 use super::{IndexedConfig, verify::verify_ticketed};
 use crate::memory::{MemoryBlobStore, MemoryKv};
@@ -328,6 +331,7 @@ fn two_repositories_pushing_one_file_share_one_object_with_two_holders() {
     let (pack, head, id) = file_push(&data);
     upload(&world.blobs, &pack);
     let mut answers = Vec::new();
+    let mut bytes = Vec::new();
     for name in ["a", "b"] {
         let repo = repo(name);
         answers.push(
@@ -342,8 +346,11 @@ fn two_repositories_pushing_one_file_share_one_object_with_two_holders() {
             )
             .unwrap(),
         );
+        bytes.push(world.read(&BlobKey::object(id)));
     }
     assert_eq!(answers[0], answers[1], "byte-identical responses");
+    assert_eq!(bytes[0], bytes[1], "the second push left the stored bytes");
+    assert_eq!(bytes[0], data, "stored bytes are the file, not just its id");
     assert_eq!(world.stored(&id), Some(BIG as u64));
     assert_eq!(world.read(&BlobKey::object(id)), data, "raw content");
     assert_eq!(world.holders(&id), ["a", "b"]);
@@ -553,7 +560,7 @@ fn extraction_budget_and_decode_budget_answer_the_existing_message() {
     let (pack, head, id) = file_push(&data);
     upload(&world.blobs, &pack);
     let tight = IndexedConfig {
-        max_extract_bytes: BIG as u64 - 1,
+        max_extract_bytes: Some(BIG as u64 - 1),
         ..IndexedConfig::default()
     };
     let e = run(
@@ -570,7 +577,7 @@ fn extraction_budget_and_decode_budget_answer_the_existing_message() {
     assert_eq!(e.code(), crate::Code::InvalidArgument);
     assert_eq!(world.stored(&id), None);
     let exact = IndexedConfig {
-        max_extract_bytes: BIG as u64,
+        max_extract_bytes: Some(BIG as u64),
         ..IndexedConfig::default()
     };
     run(
@@ -830,6 +837,7 @@ fn extractor<'a, B: MultipartBlobStore, S: NamespaceStore>(
         metrics: &NoopMetrics,
         staged,
         staged_bytes: 0,
+        resolved: AtomicU64::new(0),
     }
 }
 
@@ -840,6 +848,18 @@ fn extract_one<B: MultipartBlobStore, S: NamespaceStore>(
     id: Hash,
     kind: Kind,
 ) -> Result<(), ServerError> {
+    match extract_raw(ex, id, kind) {
+        Ok(()) => Ok(()),
+        Err(ExtractError::Server(error)) => Err(error),
+        Err(ExtractError::Content) => panic!("unexpected content rejection"),
+    }
+}
+
+fn extract_raw<B: MultipartBlobStore, S: NamespaceStore>(
+    ex: &Extractor<'_, B, S>,
+    id: Hash,
+    kind: Kind,
+) -> Result<(), ExtractError> {
     block_on(ex.extract(id, kind, &TICKET, &mut NoRenew))
 }
 
@@ -859,7 +879,7 @@ fn corrupt_chunks_and_sizes_commit_nothing() {
     let attempt = |staged: Staged| {
         let world = World::new();
         let ex = extractor(&world.blobs, &world.store, &repo, &clock, &staged);
-        let result = extract_one(&ex, manifest_id, Kind::Chunked);
+        let result = extract_raw(&ex, manifest_id, Kind::Chunked);
         assert_eq!(world.stored(&manifest_id), None, "nothing is visible");
         assert!(
             block_on(world.blobs.head(&BlobKey::object_offsets(manifest_id)))
@@ -877,18 +897,30 @@ fn corrupt_chunks_and_sizes_commit_nothing() {
         extract_one(&ex, manifest_id, Kind::Chunked).unwrap();
         assert_eq!(world.stored(&manifest_id), Some(13_000));
     }
-    let inconsistent = |r: Result<(), ServerError>| {
-        let e = r.unwrap_err();
+    let inconsistent = |r: Result<(), ExtractError>| {
+        let Err(ExtractError::Server(e)) = r else {
+            panic!("expected a storage inconsistency");
+        };
         assert_eq!(e.public_message(), "verified pack content inconsistency");
         assert_eq!(e.code(), crate::Code::Unavailable);
+    };
+    // A client-crafted manifest is a content rejection, not a fault.
+    let mut case = 0;
+    let mut malformed = |r: Result<(), ExtractError>| {
+        case += 1;
+        assert!(
+            matches!(r, Err(ExtractError::Content)),
+            "case {case}: {r:?}"
+        );
     };
     // A total_size that disagrees with the chunks, either way.
     for total in [12_999, 13_001] {
         let mut bad = cb.clone();
         bad.total_size = total;
-        inconsistent(attempt(good(None, bad)));
+        malformed(attempt(good(None, bad)));
     }
-    // A chunk whose canonical bytes do not hash to the manifest's id.
+    // A chunk whose canonical bytes do not hash to the manifest's id is a
+    // storage fault: the staged bytes were verified when they were staged.
     let mut tampered = objects.clone();
     tampered[1].1 = serialize(&Object::Blob(Blob {
         data: content(6, 9_000),
@@ -903,7 +935,7 @@ fn corrupt_chunks_and_sizes_commit_nothing() {
     let mut wrong = cb.clone();
     wrong.chunks[1] = tree_id;
     let extra = Some((tree_id, tree_raw, tree));
-    inconsistent(attempt(good(extra, wrong)));
+    malformed(attempt(good(extra, wrong)));
     // A chunk that is neither staged nor a member of this repository.
     let mut missing = cb;
     missing.chunks.push([0xee; 32]);
@@ -1529,11 +1561,11 @@ fn repeated_member_chunks_are_charged_against_the_extraction_budget() {
     seed_member_raw(&world.blobs, &world.store, &repo, chunk_id, &chunk_raw);
     let staged = staged_of(&[(manifest_id, Vec::new(), Object::ChunkedBlob(cb))]);
     let mut ex = extractor(&world.blobs, &world.store, &repo, &world.clock, &staged);
-    ex.cfg.max_extract_bytes = 5_000;
+    ex.cfg.max_extract_bytes = Some(5_000);
     let e = extract_one(&ex, manifest_id, Kind::Chunked).unwrap_err();
     assert_eq!(e.public_message(), "pack exceeds indexed decode budget");
     assert_eq!(world.stored(&manifest_id), None);
-    ex.cfg.max_extract_bytes = 1 << 20;
+    ex.cfg.max_extract_bytes = Some(1 << 20);
     extract_one(&ex, manifest_id, Kind::Chunked).unwrap();
     assert_eq!(world.stored(&manifest_id), Some(10_000));
 }
@@ -1575,7 +1607,7 @@ fn a_crash_between_the_object_and_its_sidecar_redoes_both() {
 }
 
 #[test]
-fn a_block_between_the_hold_and_the_holder_fails_the_push_but_records_the_holder() {
+fn a_block_between_the_hold_and_the_holder_records_no_holder_and_releases_the_hold() {
     let data = content(67, BIG);
     let (id, raw, object) = blob_object(&data);
     let staged = staged_of(&[(id, raw, object)]);
@@ -1595,15 +1627,18 @@ fn a_block_between_the_hold_and_the_holder_fails_the_push_but_records_the_holder
     let e = extract_one(&ex, id, Kind::Blob).unwrap_err();
     assert_eq!(e.code(), crate::Code::PermissionDenied);
     assert_eq!(e.public_message(), "object blocked");
-    // The holder is recorded so a takedown finds it; the hold is released.
+    // No holder is recorded for a blocked object, and the hold is released
+    // in the same batch: the bytes fall to ordinary GC (§14.2).
     let holder = Holder::new(repo.namespace.clone(), repo.name.clone());
     let index = ContentIndex::new(BorrowedStore(&*kv));
     assert!(
         block_on(index.holder_record(&id, &holder))
             .unwrap()
-            .is_some()
+            .is_none()
     );
-    protected(&blobs, &kv, &id);
+    let (start, end) = keys::holds_of(&id);
+    let holds = block_on(kv.scan(&content_shard(&id), &start, &end, None, 10)).unwrap();
+    assert!(holds.entries.is_empty(), "the hold was released");
 }
 
 #[test]
@@ -1674,4 +1709,433 @@ fn the_resolver_never_reads_object_keys() {
             .all(|namespace| *namespace == crate::store::BlobNamespace::Pack),
         "extraction and resolution read only pack keys: {gets:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Fix round: the existence oracle, the per-advance budget, client-crafted
+// manifests, the multipart reservation, hold renewal and thresholds (R-163).
+
+fn answer_of(result: Result<(), ServerError>) -> Result<(), (crate::Code, String)> {
+    result.map_err(|e| (e.code(), e.public_message().to_owned()))
+}
+
+#[test]
+fn every_answer_is_independent_of_whether_the_object_is_stored() {
+    let chunk = content(61, 1_000);
+    let (chunk_id, chunk_raw, _) = blob_object(&chunk);
+    let cb = ChunkedBlob {
+        total_size: 5_000,
+        chunk_size: 0,
+        chunks: vec![chunk_id; 5],
+    };
+    let manifest_id = Object::ChunkedBlob(cb.clone()).id().unwrap();
+    let staged = staged_of(&[(manifest_id, Vec::new(), Object::ChunkedBlob(cb))]);
+    // Repository "a" extracts the manifest; in the "stored" world another
+    // repository already put the same object (and its sidecar) there.
+    let answer = |stored: bool, member: bool, max: u64| {
+        let world = World::new();
+        if stored {
+            let other = repo("b");
+            seed_member_raw(&world.blobs, &world.store, &other, chunk_id, &chunk_raw);
+            let ex = extractor(&world.blobs, &world.store, &other, &world.clock, &staged);
+            extract_one(&ex, manifest_id, Kind::Chunked).unwrap();
+            assert_eq!(world.stored(&manifest_id), Some(5_000));
+        }
+        let a = repo("a");
+        if member {
+            seed_member_raw(&world.blobs, &world.store, &a, chunk_id, &chunk_raw);
+        }
+        let mut ex = extractor(&world.blobs, &world.store, &a, &world.clock, &staged);
+        ex.cfg.max_extract_bytes = Some(max);
+        let result = answer_of(extract_one(&ex, manifest_id, Kind::Chunked));
+        (
+            result,
+            world.holders(&manifest_id).contains(&"a".to_owned()),
+        )
+    };
+    // Success, a budget the resolution exceeds, and a chunk this repository
+    // does not hold: each answers alike stored or not, and the failures
+    // record no holder either way.
+    let cases = [(true, 1 << 20), (true, 4_999), (false, 1 << 20)];
+    for (member, max) in cases {
+        assert_eq!(answer(true, member, max), answer(false, member, max));
+    }
+    assert_eq!(answer(false, true, 1 << 20), (Ok(()), true));
+    let (over, held) = answer(false, true, 4_999);
+    assert_eq!(over.unwrap_err().1, "pack exceeds indexed decode budget");
+    assert!(!held);
+    assert_eq!(
+        answer(true, false, 1 << 20).0.unwrap_err().1,
+        "verified pack content inconsistency"
+    );
+}
+
+#[test]
+fn resolution_is_charged_cumulatively_across_manifests() {
+    // Three manifests over one 1,000 byte member chunk: each resolves it
+    // once, well within a per-chunk budget, but the advance-wide counter
+    // sums them.
+    let chunk = content(63, 1_000);
+    let (chunk_id, chunk_raw, _) = blob_object(&chunk);
+    let repo = repo("a");
+    let world = World::new();
+    seed_member_raw(&world.blobs, &world.store, &repo, chunk_id, &chunk_raw);
+    let manifests: Vec<(Hash, Object)> = (0..3)
+        .map(|i| {
+            let object = Object::ChunkedBlob(ChunkedBlob {
+                total_size: 1_000,
+                chunk_size: i,
+                chunks: vec![chunk_id],
+            });
+            (object.id().unwrap(), object)
+        })
+        .collect();
+    let staged = staged_of(
+        &manifests
+            .iter()
+            .map(|(id, object)| (*id, Vec::new(), object.clone()))
+            .collect::<Vec<_>>(),
+    );
+    let mut ex = extractor(&world.blobs, &world.store, &repo, &world.clock, &staged);
+    ex.cfg.max_extract_bytes = Some(2_500);
+    let results: Vec<_> = manifests
+        .iter()
+        .map(|(id, _)| answer_of(extract_one(&ex, *id, Kind::Chunked)))
+        .collect();
+    assert_eq!(results[0], Ok(()));
+    assert_eq!(results[1], Ok(()));
+    assert_eq!(
+        results[2].clone().unwrap_err().1,
+        "pack exceeds indexed decode budget"
+    );
+    assert_eq!(world.stored(&manifests[2].0), None);
+}
+
+#[test]
+fn a_client_crafted_manifest_is_rejected_and_the_verdict_persists() {
+    let chunks = vec![content(3, 4_000), content(5, 9_000)];
+    let world = World::new();
+    let repo = repo("a");
+    let (_, mut cb, objects) = manifest(&chunks);
+    cb.total_size += 1;
+    let bad_id = Object::ChunkedBlob(cb.clone()).id().unwrap();
+    let (tree_id, tree_raw, head, commit_raw) = commit_of(&[("file", bad_id)]);
+    let mut staged: Vec<(Hash, Vec<u8>)> = vec![
+        (bad_id, serialize(&Object::ChunkedBlob(cb)).unwrap()),
+        (tree_id, tree_raw),
+        (head, commit_raw),
+    ];
+    staged.extend(objects.iter().map(|(id, raw, _)| (*id, raw.clone())));
+    let refs: Vec<(Hash, &[u8])> = staged
+        .iter()
+        .map(|(id, raw)| (*id, raw.as_slice()))
+        .collect();
+    let pack = pack_of(&refs);
+    upload(&world.blobs, &pack);
+    let attempt = || {
+        run(
+            &world.blobs,
+            &world.store,
+            &repo,
+            &[&pack],
+            head,
+            IndexedConfig::default(),
+            &world.clock,
+        )
+        .unwrap_err()
+    };
+    let first = attempt();
+    assert_eq!(first.code(), crate::Code::InvalidArgument);
+    assert_eq!(first.public_message(), MALFORMED_MESSAGE);
+    assert_eq!(world.stored(&bad_id), None);
+    assert!(world.holders(&bad_id).is_empty());
+    // Persisted as Rejected: the retry answers the same, without redoing it.
+    let second = attempt();
+    assert_eq!(
+        (second.code(), second.public_message()),
+        (first.code(), first.public_message())
+    );
+}
+
+/// A store whose multipart sessions cannot be opened: `Full` before anything
+/// else, for the reservation test.
+struct NoSessions(MemoryBlobStore);
+
+impl BlobStore for NoSessions {
+    type Sink = <MemoryBlobStore as BlobStore>::Sink;
+
+    async fn begin(&self, key: BlobKey, len: u64) -> Result<Self::Sink, StoreError> {
+        self.0.begin(key, len).await
+    }
+
+    async fn get(
+        &self,
+        key: &BlobKey,
+        range: Option<ByteRange>,
+    ) -> Result<Option<BlobBody>, StoreError> {
+        self.0.get(key, range).await
+    }
+
+    async fn head(&self, key: &BlobKey) -> Result<Option<BlobMeta>, StoreError> {
+        self.0.head(key).await
+    }
+
+    async fn probe(&self) -> Result<(), StoreError> {
+        self.0.probe().await
+    }
+
+    async fn delete(&self, key: &BlobKey) -> Result<bool, StoreError> {
+        self.0.delete(key).await
+    }
+}
+
+impl MultipartBlobStore for NoSessions {
+    type PartSink = <MemoryBlobStore as MultipartBlobStore>::PartSink;
+    const MAX_PARTS: u32 = u32::MAX;
+
+    fn supports_multipart(&self) -> bool {
+        true
+    }
+
+    fn single_put_limit(&self) -> Option<u64> {
+        Some(PART as u64)
+    }
+
+    async fn begin_multipart_for_ticket(
+        &self,
+        _key: BlobKey,
+        _len: u64,
+        _part_size: u64,
+        _ticket_id: [u8; 32],
+    ) -> Result<Vec<u8>, StoreError> {
+        Err(StoreError::Full)
+    }
+}
+
+#[test]
+fn a_full_multipart_reservation_answers_alike_whether_or_not_the_object_is_stored() {
+    let data = content(73, PART + 1_000);
+    let (id, raw, object) = blob_object(&data);
+    let staged = staged_of(&[(id, raw, object)]);
+    let repo = repo("a");
+    let answer = |stored: bool| {
+        let world = World::new();
+        if stored {
+            let blobs = world.blobs.clone().with_single_put_limit(PART as u64);
+            let ex = extractor(&blobs, &world.store, &repo, &world.clock, &staged);
+            extract_one(&ex, id, Kind::Blob).unwrap();
+            assert_eq!(world.stored(&id), Some(data.len() as u64));
+        }
+        let blobs = NoSessions(world.blobs.clone());
+        let ex = extractor(&blobs, &world.store, &repo, &world.clock, &staged);
+        let e = extract_one(&ex, id, Kind::Blob).unwrap_err();
+        (e.code(), e.public_message().to_owned())
+    };
+    assert_eq!(answer(true), answer(false), "no dedup oracle through parts");
+}
+
+/// A [`Renew`] that runs `act` on its `n`-th call.
+struct OnCall<F: FnMut() -> Result<(), ServerError> + Send> {
+    n: u32,
+    calls: u32,
+    act: F,
+}
+
+impl<F: FnMut() -> Result<(), ServerError> + Send> Renew for OnCall<F> {
+    fn renew(&mut self) -> BoxFuture<'_, Result<(), ServerError>> {
+        self.calls += 1;
+        let result = if self.calls == self.n {
+            (self.act)()
+        } else {
+            Ok(())
+        };
+        Box::pin(async move { result })
+    }
+}
+
+#[test]
+fn a_lapsed_hold_is_not_extended_and_the_extraction_redoes() {
+    let data = content(79, BIG);
+    let (id, raw, object) = blob_object(&data);
+    let staged = staged_of(&[(id, raw, object)]);
+    let repo = repo("a");
+    for gc_deleted in [false, true] {
+        let world = World::new();
+        let ex = extractor(&world.blobs, &world.store, &repo, &world.clock, &staged);
+        let hold = hold_id(&repo, &TICKET, &id);
+        // By the stream's first piece the hold has lapsed (and, in one case,
+        // GC has pruned its row).
+        let mut lapse = OnCall {
+            n: 2,
+            calls: 0,
+            act: || {
+                world.clock.advance(2 * 60 * 60 * 1000);
+                if gc_deleted {
+                    let at = u64::try_from(crate::Clock::now_ms(world.clock.as_ref())).unwrap();
+                    now(world.content().release_hold(&id, &hold, at)).unwrap();
+                }
+                Ok(())
+            },
+        };
+        let e = block_on(ex.extract(id, Kind::Blob, &TICKET, &mut lapse));
+        let Err(ExtractError::Server(e)) = e else {
+            panic!("expected a retryable failure");
+        };
+        assert_eq!(e.public_message(), "pack verification pending");
+        assert_eq!(world.stored(&id), None, "nothing was committed");
+        assert!(world.holders(&id).is_empty());
+        if gc_deleted {
+            assert_eq!(world.holds(&id), 0, "a deleted hold is not resurrected");
+        }
+        // The redo from the head check takes a fresh hold and completes.
+        extract_one(&ex, id, Kind::Blob).unwrap();
+        assert_eq!(world.stored(&id), Some(BIG as u64));
+        assert_eq!(world.holders(&id), ["a"]);
+    }
+}
+
+#[test]
+fn a_lost_lease_leaves_a_shared_multipart_session_alone() {
+    let world = World::new();
+    let blobs = world.blobs.clone().with_single_put_limit(PART as u64);
+    let data = content(83, 2 * PART + 5);
+    let (id, raw, object) = blob_object(&data);
+    let staged = staged_of(&[(id, raw, object)]);
+    let repo = repo("a");
+    let ex = extractor(&blobs, &world.store, &repo, &world.clock, &staged);
+    // The lease is lost when the second part is being fed.
+    let mut lost = OnCall {
+        n: 12,
+        calls: 0,
+        act: || Err(super::pending(1_000)),
+    };
+    let e = block_on(ex.extract(id, Kind::Blob, &TICKET, &mut lost));
+    assert!(matches!(e, Err(ExtractError::Server(_))));
+    assert_eq!(world.stored(&id), None);
+    assert_eq!(
+        blobs.multipart_session_count(),
+        1,
+        "another verifier may own the session"
+    );
+    // A failure that is not the lease still aborts its own session.
+    let bad = content(84, 2 * PART + 5);
+    let (bad_id, _, _) = blob_object(&bad);
+    let mut tampered = blob_object(&bad);
+    tampered.1 = serialize(&Object::Blob(Blob {
+        data: content(85, 9),
+    }))
+    .unwrap();
+    let staged = staged_of(&[(bad_id, tampered.1, tampered.2)]);
+    let ex = extractor(&blobs, &world.store, &repo, &world.clock, &staged);
+    assert!(extract_one(&ex, bad_id, Kind::Blob).is_err());
+    assert_eq!(blobs.multipart_session_count(), 1);
+}
+
+#[test]
+fn an_object_between_the_backend_limit_and_one_part_uses_a_single_put() {
+    let world = World::new();
+    // A backend limit below the least part: multipart could not carry it.
+    let blobs = world.blobs.clone().with_single_put_limit(1 << 20);
+    let data = content(89, 3 << 20);
+    let (id, raw, object) = blob_object(&data);
+    let staged = staged_of(&[(id, raw, object)]);
+    let repo = repo("a");
+    let ex = extractor(&blobs, &world.store, &repo, &world.clock, &staged);
+    extract_one(&ex, id, Kind::Blob).unwrap();
+    assert_eq!(world.read(&BlobKey::object(id)), data);
+    assert_eq!(blobs.multipart_session_count(), 0);
+}
+
+struct Count(Arc<AtomicU32>);
+
+impl Renew for Count {
+    fn renew(&mut self) -> BoxFuture<'_, Result<(), ServerError>> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { Ok(()) })
+    }
+}
+
+#[test]
+fn large_objects_use_parts_from_sixty_four_mebibytes() {
+    // The memory store has no single-put limit, yet an object above 64 MiB
+    // still goes up in parts, so lease renewal runs between them.
+    let world = World::new();
+    let data = content(91, (64 << 20) + 1);
+    let (id, raw, object) = blob_object(&data);
+    let staged = staged_of(&[(id, raw, object)]);
+    let repo = repo("a");
+    let ex = extractor(&world.blobs, &world.store, &repo, &world.clock, &staged);
+    let renewals = Arc::new(AtomicU32::new(0));
+    block_on(ex.extract(id, Kind::Blob, &TICKET, &mut Count(renewals.clone()))).unwrap();
+    assert_eq!(world.stored(&id), Some(data.len() as u64));
+    assert_eq!(world.blobs.multipart_session_count(), 0);
+    assert!(renewals.load(Ordering::SeqCst) > 64, "renewed per piece");
+}
+
+#[test]
+fn the_extraction_cap_defaults_to_four_packs() {
+    let cfg = IndexedConfig {
+        max_pack_bytes: 1 << 20,
+        decode_budget: 1 << 20,
+        ..IndexedConfig::default()
+    };
+    assert_eq!(cfg.max_extract_bytes, None);
+    assert_eq!(cfg.effective_max_extract_bytes(), 4 << 20);
+    let set = IndexedConfig {
+        max_extract_bytes: Some(3 << 20),
+        ..cfg
+    };
+    assert_eq!(set.effective_max_extract_bytes(), 3 << 20);
+}
+
+#[test]
+fn a_member_chunk_that_is_not_a_blob_is_a_malformed_manifest() {
+    let repo = repo("a");
+    let world = World::new();
+    let (tree_id, tree_raw, _, _) = commit_of(&[("x", [1; 32])]);
+    seed_member_raw(&world.blobs, &world.store, &repo, tree_id, &tree_raw);
+    let cb = ChunkedBlob {
+        total_size: 10,
+        chunk_size: 0,
+        chunks: vec![tree_id],
+    };
+    let manifest_id = Object::ChunkedBlob(cb.clone()).id().unwrap();
+    let staged = staged_of(&[(manifest_id, Vec::new(), Object::ChunkedBlob(cb))]);
+    let ex = extractor(&world.blobs, &world.store, &repo, &world.clock, &staged);
+    let r = extract_raw(&ex, manifest_id, Kind::Chunked);
+    assert!(matches!(r, Err(ExtractError::Content)), "{r:?}");
+    assert_eq!(world.stored(&manifest_id), None);
+}
+
+#[test]
+fn a_hold_alone_beats_commit_collect() {
+    let data = content(97, BIG);
+    let (id, raw, object) = blob_object(&data);
+    let staged = staged_of(&[(id, raw, object)]);
+    let repo = repo("a");
+    let (blobs, kv, clock) = fault_world();
+    let index = ContentIndex::new(BorrowedStore(&kv));
+    let now = NOW as u64;
+    // GC plans the object's deletion; then an extraction takes its hold,
+    // uploads, and stops before recording a holder: the hold alone protects.
+    block_on(index.release_hold(&id, &[0; 32], now)).unwrap();
+    let plan = block_on(index.collectable(&id, now + 10_000_000, 0))
+        .unwrap()
+        .unwrap();
+    kv.fail_holder.store(true, Ordering::SeqCst);
+    let ex = extractor(&blobs, &kv, &repo, &clock, &staged);
+    assert!(extract_one(&ex, id, Kind::Blob).is_err());
+    assert!(
+        block_on(index.holders(&id, None, 10))
+            .unwrap()
+            .holders
+            .is_empty()
+    );
+    assert!(!block_on(index.commit_collect(plan)).unwrap());
+    assert!(
+        block_on(blobs.head(&BlobKey::object(id)))
+            .unwrap()
+            .is_some()
+    );
+    protected(&blobs, &kv, &id);
 }

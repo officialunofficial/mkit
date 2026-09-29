@@ -362,9 +362,12 @@ pub async fn blob_object_commit_with_root<H: BlobHarness>(h: H) -> Outcome {
         );
         ensure_eq!(ok!(s.head(&key).await).map(|m| m.len), Some(len));
         ensure_eq!(get(&s, &key, None).await?.map(|b| b.len()), Some(100_000));
-        // A present key: `AlreadyPresent`, or `Created` where a backend
-        // cannot tell (advisory), and the bytes stay intact.
-        ok!(put_rooted(&s, key, len, &pieces, root).await);
+        // A present key reports `AlreadyPresent` (advisory for accounting,
+        // but every backend here can tell), and the bytes stay intact.
+        ensure_eq!(
+            ok!(put_rooted(&s, key, len, &pieces, root).await),
+            CommitOutcome::AlreadyPresent
+        );
         ensure_eq!(get(&s, &key, None).await?.map(|b| hash(&b)), Some(root));
     }
     // The namespaces are disjoint from each other and from packs.

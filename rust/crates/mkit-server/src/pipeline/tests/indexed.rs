@@ -773,8 +773,55 @@ fn extraction_stores_the_file_and_no_pack_rpc_serves_it() {
 }
 
 #[test]
+fn opaque_mode_never_touches_the_object_store_or_the_content_index() {
+    // The same push as the extraction test, without `indexed`.
+    let owner = key(7);
+    let namespace = Namespace::Ed25519(*owner.verifying_key().as_bytes());
+    let identity = format!("{namespace}/{REPO}");
+    let mut config = cfg(authv2());
+    config.addressing = Addressing::Multi(
+        MultiAddressing::new()
+            .with_namespace_policy(NamespacePolicy::Allowlist([namespace].into())),
+    );
+    config.write_policy = WritePolicy::Owner;
+    config.ticket_keys =
+        Some(crate::upload::token::TicketKeys::new(vec![("test".into(), [7; 32])]).unwrap());
+    assert!(config.indexed.is_none());
+    let clock = clock();
+    let env = build(config, Spy::new(store(&clock)), Hooks::new(), clock);
+    let (bytes, head, blob_id) = file_pack();
+    let pack_id = hash(&bytes);
+    let id = begin_and_upload(&env, &owner, &identity, &bytes, 400);
+    let advance = signed(&owner, &identity, Procedure::AdvanceRefs, 401);
+    assert_eq!(
+        block_on(env.pipe.advance_refs_with_tickets(
+            &env.auth(&advance).unwrap(),
+            upd(HEAD, Missing, head),
+            upd(PACKMAP, Missing, pack_id),
+            vec![id],
+        ))
+        .unwrap(),
+        AdvanceOutcome::Committed
+    );
+    assert!(
+        block_on(env.pipe.blobs.head(&BlobKey::object(blob_id)))
+            .unwrap()
+            .is_none(),
+        "no object was extracted"
+    );
+    assert!(
+        block_on(env.pipe.blobs.head(&BlobKey::object_offsets(blob_id)))
+            .unwrap()
+            .is_none()
+    );
+    let content = crate::store::ContentIndex::new(crate::store::BorrowedStore(&env.pipe.meta));
+    assert!(block_on(content.state(&blob_id)).unwrap().is_none());
+}
+
+#[test]
 fn indexed_limits_of_zero_are_refused_at_construction() {
-    for (min, max) in [(0, 1), (1, 0)] {
+    // Zero limits, and an extraction cap below `max_pack_bytes`.
+    for (min, max) in [(0, 1), (1, 0), (1, 1)] {
         let owner = key(7);
         let namespace = Namespace::Ed25519(*owner.verifying_key().as_bytes());
         let mut config = cfg(authv2());
@@ -787,7 +834,7 @@ fn indexed_limits_of_zero_are_refused_at_construction() {
             Some(crate::upload::token::TicketKeys::new(vec![("test".into(), [7; 32])]).unwrap());
         config.indexed = Some(crate::indexed::IndexedConfig {
             extract_min_bytes: min,
-            max_extract_bytes: max,
+            max_extract_bytes: Some(max),
             ..crate::indexed::IndexedConfig::default()
         });
         let clock = clock();

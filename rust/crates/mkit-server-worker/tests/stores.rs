@@ -899,3 +899,9 @@ fn timer_reschedule_put_observes_pressure_through_do_shim() {
         )]
     );
 }
+
+#[test]
+#[should_panic(expected = "alias a sibling namespace")]
+fn r2_refuses_a_keyspace_that_aliases_a_sibling_namespace() {
+    let _ = R2BlobStore::new(SimBucket::default(), "Objects");
+}

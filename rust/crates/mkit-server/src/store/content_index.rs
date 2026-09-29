@@ -376,6 +376,44 @@ impl<S: NamespaceStore> ContentIndex<S> {
         .await
     }
 
+    /// Extend hold `hold_id` on `object` to `expires_at_ms`, only if it is
+    /// still recorded and live at `now_ms`. A hold that is gone or expired
+    /// may already have been passed by GC, so it is not brought back: the
+    /// caller redoes from the `head` check.
+    ///
+    /// # Errors
+    /// [`StoreError::Invalid`] as for [`Self::add_hold`]; a retryable
+    /// [`StoreError::Unavailable`] while GC is deleting the object or when
+    /// the hold is no longer live.
+    pub async fn extend_hold(
+        &self,
+        object: &Hash,
+        hold_id: &Hash,
+        expires_at_ms: u64,
+        now_ms: u64,
+    ) -> Result<HoldOutcome, StoreError> {
+        if expires_at_ms <= now_ms {
+            return Err(StoreError::Invalid("hold already expired".into()));
+        }
+        if expires_at_ms - now_ms > MAX_HOLD_TTL_MS {
+            return Err(StoreError::Invalid("hold exceeds MAX_HOLD_TTL_MS".into()));
+        }
+        let key = keys::hold(object, hold_id);
+        self.mutate(object, now_ms, Some(&key), None, true, |seen, state| {
+            if let Some(entry) = &seen.blocked {
+                return Ok(Step::Stop(HoldOutcome::Blocked(entry.clone())));
+            }
+            refuse_while_deleting(state)?;
+            let old = seen.probe.as_ref().map(codec::decode_hold).transpose()?;
+            let Some(old) = old.filter(|old| *old > now_ms) else {
+                return Err(StoreError::unavailable("hold no longer live; retry"));
+            };
+            let put = Write::Put(key.clone(), codec::encode_hold(old.max(expires_at_ms)));
+            Ok(Step::Commit(vec![put], HoldOutcome::Held))
+        })
+        .await
+    }
+
     /// Release hold `hold_id`. Normally the relay step that records the
     /// holder row releases it in the same batch (see [`Self::add_holder`],
     /// WP-4.10, R-75); this standalone form is for abandoned uploads.
@@ -386,7 +424,7 @@ impl<S: NamespaceStore> ContentIndex<S> {
         now_ms: u64,
     ) -> Result<(), StoreError> {
         let key = keys::hold(object, hold_id);
-        self.mutate(object, now_ms, None, None, false, |_, _| {
+        self.mutate(object, now_ms, None, None, true, |_, _| {
             Ok(Step::Commit(vec![Write::Delete(key.clone())], ()))
         })
         .await
@@ -411,6 +449,39 @@ impl<S: NamespaceStore> ContentIndex<S> {
         releases: Option<&Hash>,
         now_ms: u64,
     ) -> Result<HolderOutcome, StoreError> {
+        self.holder_write(object, holder, op_id, releases, now_ms, false)
+            .await
+    }
+
+    /// Like [`Self::add_holder`], but a blocked object is not recorded: the
+    /// hold `releases` is deleted in the same guarded batch and the outcome
+    /// carries the block entry, so the caller fails the upload and the bytes
+    /// fall to ordinary GC (SPEC-SERVER §14.2). Used by extraction; the relay
+    /// still records blocked holders (R-75).
+    ///
+    /// # Errors
+    /// As [`Self::add_holder`].
+    pub async fn add_holder_unless_blocked(
+        &self,
+        object: &Hash,
+        holder: &Holder,
+        op_id: &Hash,
+        releases: Option<&Hash>,
+        now_ms: u64,
+    ) -> Result<HolderOutcome, StoreError> {
+        self.holder_write(object, holder, op_id, releases, now_ms, true)
+            .await
+    }
+
+    async fn holder_write(
+        &self,
+        object: &Hash,
+        holder: &Holder,
+        op_id: &Hash,
+        releases: Option<&Hash>,
+        now_ms: u64,
+        refuse_blocked: bool,
+    ) -> Result<HolderOutcome, StoreError> {
         let key = keys::holder(object, &holder.ns, &holder.repo)?;
         let release = releases.map(|id| keys::hold(object, id));
         self.mutate(
@@ -421,6 +492,19 @@ impl<S: NamespaceStore> ContentIndex<S> {
             true,
             |seen, state| {
                 refuse_while_deleting(state)?;
+                if refuse_blocked && let Some(entry) = &seen.blocked {
+                    let record = HolderRecord::new(bumped(*state, now_ms).seq, *op_id);
+                    let writes = release.clone().map(Write::Delete).into_iter().collect();
+                    return Ok(Step::Commit(
+                        writes,
+                        HolderOutcome {
+                            newly_added: false,
+                            first_holder: false,
+                            record,
+                            blocked: Some(entry.clone()),
+                        },
+                    ));
+                }
                 // A hold that is gone or expired no longer protects the bytes the
                 // caller relied on: GC may have passed. Retry from the `head`.
                 if release.is_some()

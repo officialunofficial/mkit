@@ -72,6 +72,10 @@ impl FsBlobStore {
             !keyspace.is_empty() && !keyspace.starts_with('.') && !keyspace.contains(['/', '\\']),
             "a keyspace is one plain path component: {keyspace:?}"
         );
+        assert!(
+            !crate::store::is_reserved_pack_keyspace(keyspace),
+            "a keyspace must not alias a sibling namespace: {keyspace:?}"
+        );
         Self {
             root: root.into(),
             keyspace,

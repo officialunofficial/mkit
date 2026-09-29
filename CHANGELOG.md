@@ -14,7 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `PackSink::commit_with_root`; holder rows carry a sequence and the consuming
   ticket; a hold protects each object until its holder is recorded. New
   `IndexedConfig::{extract_min_bytes, max_extract_bytes}`. Workers still refuse
-  indexed mode (WP-4.10).
+  indexed mode (WP-4.10). API: `IndexedConfig::max_extract_bytes` is now
+  `Option<u64>` (default `4 * max_pack_bytes`); `verify_ticketed` takes the
+  consuming ticket ids and needs a `MultipartBlobStore`; `ContentIndex` gains
+  `extend_hold` and `add_holder_unless_blocked`, and `release_hold` is
+  deadline-guarded; `is_reserved_pack_keyspace` is exported.
 - CLI: a Connect push that needs more than six data packs per advance is now
   split automatically along the branch's first-parent history instead of
   failing with `PushTooLarge` after uploading six packs. Every intermediate

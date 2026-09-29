@@ -142,8 +142,7 @@ impl BlobKey {
             BlobNamespace::Pack => {
                 // A pack keyspace named like a sibling namespace would let
                 // unverified pack bytes be read back as an object or marker.
-                let last = pack_keyspace.rsplit('/').next().unwrap_or(pack_keyspace);
-                if matches!(last, "objects" | "object-offsets" | "upload-markers") {
+                if is_reserved_pack_keyspace(pack_keyspace) {
                     return Err(StoreError::Invalid("reserved pack keyspace".into()));
                 }
                 pack_keyspace.to_owned()
@@ -167,6 +166,26 @@ impl From<PackKey> for BlobKey {
     fn from(key: PackKey) -> Self {
         Self::pack(key.0)
     }
+}
+
+/// Whether `keyspace` (a pack keyspace, possibly with a deployment prefix)
+/// would alias a sibling namespace directory: its last segment is `objects`,
+/// `object-offsets` or `upload-markers`, or its last two are
+/// `object-offsets/v1` or `upload-markers/v1`. Segments compare
+/// case-insensitively and ignoring trailing dots and spaces, since a
+/// case-folding or Windows-style filesystem maps them onto the same
+/// directory. Backends refuse such a keyspace at construction and in
+/// [`BlobKey::relative_path`].
+#[must_use]
+pub fn is_reserved_pack_keyspace(keyspace: &str) -> bool {
+    let segments: Vec<String> = keyspace
+        .split(['/', '\\'])
+        .map(|segment| segment.trim_end_matches(['.', ' ']).to_ascii_lowercase())
+        .collect();
+    let reserved = |name: &str| matches!(name, "objects" | "object-offsets" | "upload-markers");
+    let last = segments.last().map_or("", String::as_str);
+    let dir = segments.len().checked_sub(2).map(|i| segments[i].as_str());
+    reserved(last) || (last == "v1" && matches!(dir, Some("object-offsets" | "upload-markers")))
 }
 
 /// An inclusive byte range, as in HTTP `Range`.
@@ -501,6 +520,23 @@ mod tests {
                 Err(StoreError::Invalid(_))
             ));
         }
+        for aliased in [
+            "Objects",
+            "tenant/OBJECT-OFFSETS",
+            "objects.",
+            "objects. .",
+            "x/object-offsets/v1",
+            "x/Upload-Markers/V1/",
+            "x/upload-markers/v1.",
+        ] {
+            let reserved = aliased.trim_end_matches('/');
+            assert!(
+                is_reserved_pack_keyspace(reserved),
+                "{aliased} must be reserved"
+            );
+        }
+        assert!(!is_reserved_pack_keyspace("v1"));
+        assert!(!is_reserved_pack_keyspace("x/packs/v1"));
         assert!(BlobKey::pack(id).relative_path("packs").is_ok());
         assert!(
             BlobKey::pack(id)

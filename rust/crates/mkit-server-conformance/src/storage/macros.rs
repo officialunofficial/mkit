@@ -202,6 +202,9 @@ macro_rules! __with_kv_cases {
                 idx_expired_holds_pruned_on_mutation,
                 idx_holder_records_advance_seq_and_guard_removal,
                 idx_hold_and_holder_deadline_passed_writes_nothing,
+                idx_extend_hold_only_when_live,
+                idx_holder_unless_blocked_releases_the_hold,
+                idx_hold_alone_beats_commit_collect,
             }
             object_index::{
                 idx_scan_many_default_and_prefix,

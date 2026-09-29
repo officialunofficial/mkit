@@ -858,11 +858,25 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
         }
     }
     let selected = extract::select(&staged, cfg.extract_min_bytes);
-    if extract::selected_bytes(&staged, &selected) > cfg.max_extract_bytes {
+    if extract::selected_bytes(&staged, &selected) > cfg.effective_max_extract_bytes() {
         return Err(ServerError::invalid_argument(
             "pack exceeds indexed decode budget",
         ));
     }
+    // One extractor per advance: its resolution counter is shared by every
+    // manifest and chunk (R-163).
+    let extractor = Extractor {
+        blobs,
+        store,
+        shards,
+        repo,
+        cfg,
+        clock,
+        metrics,
+        staged: &staged,
+        staged_bytes,
+        resolved: std::sync::atomic::AtomicU64::new(0),
+    };
     for pack in &work {
         if !pack.needs_index {
             continue;
@@ -896,18 +910,12 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
             .iter()
             .zip(ticket_ids)
             .find_map(|(t, id)| (t.pack_id == pack.ticket.pack_id).then_some(id))
-            .ok_or_else(|| ServerError::internal("ticket id", "missing consumed ticket id"))?;
-        let extractor = Extractor {
-            blobs,
-            store,
-            shards,
-            repo,
-            cfg,
-            clock,
-            metrics,
-            staged: &staged,
-            staged_bytes,
-        };
+            .ok_or_else(|| {
+                ServerError::internal(
+                    "object storage request failed",
+                    "missing consumed ticket id",
+                )
+            })?;
         let mut lease = Lease {
             store,
             source,
@@ -918,7 +926,25 @@ async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
         for (id, kind) in &selected {
             if staged_owner.get(id) == Some(&pack.ticket.pack_id) {
                 // Boxed: the extraction future is large and rarely awaited.
-                Box::pin(extractor.extract(*id, *kind, ticket_id, &mut lease)).await?;
+                match Box::pin(extractor.extract(*id, *kind, ticket_id, &mut lease)).await {
+                    Ok(()) => {}
+                    Err(extract::ExtractError::Server(error)) => return Err(error),
+                    // A manifest this push carries does not match its chunks:
+                    // content-intrinsic, so the verdict is persisted (§9.8).
+                    Err(extract::ExtractError::Content) => {
+                        return Err(reject_content(
+                            store,
+                            source,
+                            repo,
+                            &pack.ticket.pack_id,
+                            lease.acquired,
+                            extract::MALFORMED_MESSAGE,
+                            clock,
+                            metrics,
+                        )
+                        .await);
+                    }
+                }
             }
         }
         renew_all_pending(store, source, repo, acquired, clock).await?;
