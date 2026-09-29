@@ -460,7 +460,11 @@ where
                 .with_auth(mkit_server::pipeline::AuthMode::TransportIdentity)
                 .map_err(|e| config_error("pipeline", e))?;
             let key = crate::enc::load_server_key(&opts.server_key)?;
-            let session = crate::enc::session_fn(Arc::new(sibling), opts.idle_timeout);
+            let session = crate::enc::session_fn(
+                Arc::new(sibling),
+                opts.repository.clone(),
+                opts.idle_timeout,
+            );
             Some(crate::enc::EncService { key, session })
         }
         None => None,

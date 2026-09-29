@@ -180,7 +180,7 @@ fn enc_sibling_with_admission_starts() {
 }
 
 #[test]
-fn multi_transport_identity_sibling_is_refused() {
+fn multi_transport_identity_sibling_builds() {
     let mut cfg = PipelineConfig::new(
         Addressing::Multi(MultiAddressing::new()),
         AuthMode::AuthV2(AuthV2Config::new("https://example.test", "").unwrap()),
@@ -199,12 +199,10 @@ fn multi_transport_identity_sibling_is_refused() {
         Arc::new(NoopMetrics),
     )
     .unwrap();
-    let err = http.with_auth(AuthMode::TransportIdentity).unwrap_err();
-    assert_eq!(err.code(), mkit_server::Code::InvalidArgument);
-    assert_eq!(
-        err.public_message(),
-        "multi-repository deployments require auth v2 until transport identity carries tickets"
-    );
+    // WP-1.15: the enc listener's transport-identity sibling builds on
+    // Multi; its tickets are the session's implicit verified uploads.
+    let enc = http.with_auth(AuthMode::TransportIdentity).unwrap();
+    assert_eq!(enc.server_info().begin_upload_threshold_bytes, 0);
 }
 
 impl NamespaceStore for CountingCommit {

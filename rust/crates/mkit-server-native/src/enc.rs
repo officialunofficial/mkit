@@ -381,12 +381,16 @@ pub type SessionFn = Arc<
 /// `pipeline`, which must be in `TransportIdentity` mode (see
 /// `Pipeline::with_auth`), as `Principal::TransportPeer` with the peer's
 /// key. The principal comes only from the handshake: nothing the client
-/// sends can set it. `idle_timeout` bounds every frame read and write.
+/// sends can set it. `repository` binds the session's `x-repository`
+/// (`EncOptions::repository`, the `--enc-repository` the listener was
+/// configured with); a peer can only name it by being authorized to the
+/// namespace it names. `idle_timeout` bounds every frame read and write.
 /// Once the shutdown triggers, the session ends at its next frame
 /// boundary: an idle session at once, a verb after it answers, never
 /// inside an upload.
 pub fn session_fn<B, N, H>(
     pipeline: Arc<Pipeline<B, N, H>>,
+    repository: Option<String>,
     idle_timeout: Option<Duration>,
 ) -> SessionFn
 where
@@ -396,6 +400,7 @@ where
 {
     Arc::new(move |session, peer, shutdown| {
         let pipeline = Arc::clone(&pipeline);
+        let repository = repository.clone();
         Box::pin(async move {
             let Ok(ed25519) = <[u8; 32]>::try_from(peer.as_ref()) else {
                 return;
@@ -411,7 +416,8 @@ where
                 sender,
                 idle: idle_timeout,
             };
-            let cfg = SessionConfig::new(server_id());
+            let mut cfg = SessionConfig::new(server_id());
+            cfg.repository = repository;
             let principal = Principal::TransportPeer { ed25519 };
             let end = serve_session(&pipeline, principal, &mut src, &mut sink, &cfg).await;
             tracing::debug!(?end, "enc session ended");
