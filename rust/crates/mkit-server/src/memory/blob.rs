@@ -8,7 +8,7 @@ use std::task::{Context, Poll};
 
 use bytes::Bytes;
 use futures_core::Stream;
-use mkit_core::hash::Hasher;
+use mkit_core::hash::{Hash, Hasher};
 use mkit_core::upload_parts::{PartHasher, PartPlan, merge_to_root};
 
 use super::{MemoryFault, lock, take_fault};
@@ -75,6 +75,7 @@ struct MemoryPart {
 pub struct MemoryBlobStore {
     keyspace: String,
     shared: Arc<Shared>,
+    single_put_limit: Option<u64>,
 }
 
 /// The `packs` keyspace.
@@ -96,6 +97,7 @@ impl MemoryBlobStore {
         Self {
             keyspace: keyspace.into(),
             shared: Arc::default(),
+            single_put_limit: None,
         }
     }
 
@@ -105,11 +107,79 @@ impl MemoryBlobStore {
         &self.keyspace
     }
 
+    /// Cap what one `begin` upload may carry, as a bounded backend does, so
+    /// larger objects take the multipart path. For tests.
+    #[must_use]
+    pub fn with_single_put_limit(mut self, limit: u64) -> Self {
+        self.single_put_limit = Some(limit);
+        self
+    }
+
     /// Arm a one-shot [`MemoryFault`] (`BlobWrite` or `BlobCommit`).
     #[must_use]
     pub fn with_fault(self, fault: MemoryFault) -> Self {
         *lock(&self.shared.fault) = Some(fault);
         self
+    }
+}
+
+impl MemoryBlobStore {
+    /// Complete a multipart upload against the key's hash (`None`) or an
+    /// object's content root.
+    fn complete_with(
+        &self,
+        key: BlobKey,
+        session: &[u8],
+        plan: &PartPlan,
+        parts: &[PartRef],
+        root: Option<Hash>,
+    ) -> Result<CommitOutcome, StoreError> {
+        let expected = key.expected_root(root)?;
+        let mut sessions = lock(&self.shared.sessions);
+        let upload = sessions.get(session).ok_or(StoreError::SessionGone)?;
+        if upload.key != key || upload.len != plan.total() || upload.part_size != plan.part_size() {
+            return Err(StoreError::SessionGone);
+        }
+        if parts.len() != plan.count() as usize {
+            return Err(StoreError::Invalid("wrong number of parts".into()));
+        }
+        let mut cvs = Vec::with_capacity(parts.len());
+        let mut bytes = Vec::new();
+        for (i, part) in parts.iter().enumerate() {
+            let index = u32::try_from(i).map_err(|_| StoreError::Invalid("part index".into()))?;
+            let stored = upload.parts.get(&index).ok_or(StoreError::SessionGone)?;
+            if part.index != index
+                || part.len
+                    != plan
+                        .expected_len(index)
+                        .map_err(|e| StoreError::Invalid(e.to_string().into()))?
+                || part.tag.as_slice() != stored.cv
+                || part.len != stored.bytes.len() as u64
+            {
+                return Err(StoreError::Invalid(
+                    "part reference does not match stored part".into(),
+                ));
+            }
+            cvs.push(stored.cv);
+            bytes.extend_from_slice(&stored.bytes);
+        }
+        if bytes.len() as u64 != plan.total()
+            || merge_to_root(plan, &cvs).map_err(|e| StoreError::Invalid(e.to_string().into()))?
+                != expected
+        {
+            return Err(StoreError::Invalid(
+                "merged part root does not match key".into(),
+            ));
+        }
+        let mut blobs = lock(&self.shared.blobs);
+        let outcome = if let std::collections::btree_map::Entry::Vacant(entry) = blobs.entry(key) {
+            entry.insert(Bytes::from(bytes));
+            CommitOutcome::Created
+        } else {
+            CommitOutcome::AlreadyPresent
+        };
+        sessions.remove(session);
+        Ok(outcome)
     }
 }
 
@@ -205,51 +275,22 @@ impl MultipartBlobStore for MemoryBlobStore {
         plan: &PartPlan,
         parts: &[PartRef],
     ) -> Result<CommitOutcome, StoreError> {
-        let mut sessions = lock(&self.shared.sessions);
-        let upload = sessions.get(session).ok_or(StoreError::SessionGone)?;
-        if upload.key != key || upload.len != plan.total() || upload.part_size != plan.part_size() {
-            return Err(StoreError::SessionGone);
-        }
-        if parts.len() != plan.count() as usize {
-            return Err(StoreError::Invalid("wrong number of parts".into()));
-        }
-        let mut cvs = Vec::with_capacity(parts.len());
-        let mut bytes = Vec::new();
-        for (i, part) in parts.iter().enumerate() {
-            let index = u32::try_from(i).map_err(|_| StoreError::Invalid("part index".into()))?;
-            let stored = upload.parts.get(&index).ok_or(StoreError::SessionGone)?;
-            if part.index != index
-                || part.len
-                    != plan
-                        .expected_len(index)
-                        .map_err(|e| StoreError::Invalid(e.to_string().into()))?
-                || part.tag.as_slice() != stored.cv
-                || part.len != stored.bytes.len() as u64
-            {
-                return Err(StoreError::Invalid(
-                    "part reference does not match stored part".into(),
-                ));
-            }
-            cvs.push(stored.cv);
-            bytes.extend_from_slice(&stored.bytes);
-        }
-        if bytes.len() as u64 != plan.total()
-            || merge_to_root(plan, &cvs).map_err(|e| StoreError::Invalid(e.to_string().into()))?
-                != *key.hash()
-        {
-            return Err(StoreError::Invalid(
-                "merged part root does not match key".into(),
-            ));
-        }
-        let mut blobs = lock(&self.shared.blobs);
-        let outcome = if let std::collections::btree_map::Entry::Vacant(entry) = blobs.entry(key) {
-            entry.insert(Bytes::from(bytes));
-            CommitOutcome::Created
-        } else {
-            CommitOutcome::AlreadyPresent
-        };
-        sessions.remove(session);
-        Ok(outcome)
+        self.complete_with(key, session, plan, parts, None)
+    }
+
+    async fn complete_with_root(
+        &self,
+        key: BlobKey,
+        session: &[u8],
+        plan: &PartPlan,
+        parts: &[PartRef],
+        content_root: Hash,
+    ) -> Result<CommitOutcome, StoreError> {
+        self.complete_with(key, session, plan, parts, Some(content_root))
+    }
+
+    fn single_put_limit(&self) -> Option<u64> {
+        self.single_put_limit
     }
 
     async fn abort(&self, key: BlobKey, session: &[u8]) -> Result<(), StoreError> {
@@ -351,6 +392,28 @@ impl BlobStore for MemoryBlobStore {
     }
 }
 
+impl MemoryPackSink {
+    /// Verify against `root` (or the key, for `None`) and publish.
+    fn finish(self, root: Option<Hash>) -> Result<CommitOutcome, StoreError> {
+        take_fault(&self.shared.fault, MemoryFault::BlobCommit)?;
+        let expected = self.key.expected_root(root)?;
+        if self.buf.len() as u64 != self.len {
+            return Err(StoreError::Invalid("blob length does not match".into()));
+        }
+        if self.hasher.finalize() != expected {
+            return Err(StoreError::Invalid(
+                "blob hash does not match its key".into(),
+            ));
+        }
+        let mut blobs = lock(&self.shared.blobs);
+        if blobs.contains_key(&self.key) {
+            return Ok(CommitOutcome::AlreadyPresent);
+        }
+        blobs.insert(self.key, Bytes::from(self.buf));
+        Ok(CommitOutcome::Created)
+    }
+}
+
 impl PackSink for MemoryPackSink {
     async fn write(&mut self, chunk: Bytes) -> Result<(), StoreError> {
         let nth = self.writes;
@@ -365,21 +428,11 @@ impl PackSink for MemoryPackSink {
     }
 
     async fn commit(self) -> Result<CommitOutcome, StoreError> {
-        take_fault(&self.shared.fault, MemoryFault::BlobCommit)?;
-        if self.buf.len() as u64 != self.len {
-            return Err(StoreError::Invalid("blob length does not match".into()));
-        }
-        if self.hasher.finalize() != *self.key.hash() {
-            return Err(StoreError::Invalid(
-                "blob hash does not match its key".into(),
-            ));
-        }
-        let mut blobs = lock(&self.shared.blobs);
-        if blobs.contains_key(&self.key) {
-            return Ok(CommitOutcome::AlreadyPresent);
-        }
-        blobs.insert(self.key, Bytes::from(self.buf));
-        Ok(CommitOutcome::Created)
+        self.finish(None)
+    }
+
+    async fn commit_with_root(self, content_root: Hash) -> Result<CommitOutcome, StoreError> {
+        self.finish(Some(content_root))
     }
 
     async fn abort(self) {}

@@ -290,49 +290,6 @@ pub(crate) async fn schedule_timer<S: crate::NamespaceStore>(
         )),
     }
 }
-/// Borrow the pipeline's store as a relay target without cloning a Worker
-/// adapter or changing its partition routing.
-struct BorrowedStore<'a, S>(&'a S);
-
-impl<S: crate::NamespaceStore> crate::NamespaceStore for BorrowedStore<'_, S> {
-    fn capabilities(&self) -> crate::StoreCapabilities {
-        self.0.capabilities()
-    }
-    async fn get(
-        &self,
-        p: &crate::Partition,
-        k: &crate::Key,
-    ) -> Result<Option<crate::Value>, crate::StoreError> {
-        self.0.get(p, k).await
-    }
-    async fn scan(
-        &self,
-        p: &crate::Partition,
-        start: &crate::Key,
-        end: &crate::Key,
-        after: Option<&crate::Cursor>,
-        limit: u32,
-    ) -> Result<crate::ScanPage, crate::StoreError> {
-        self.0.scan(p, start, end, after, limit).await
-    }
-    async fn apply(
-        &self,
-        p: &crate::Partition,
-        batch: Batch,
-    ) -> Result<crate::BatchOutcome, crate::StoreError> {
-        self.0.apply(p, batch).await
-    }
-    async fn stats(
-        &self,
-        p: &crate::Partition,
-    ) -> Result<crate::PartitionStats, crate::StoreError> {
-        self.0.stats(p).await
-    }
-    async fn probe(&self) -> Result<(), crate::StoreError> {
-        self.0.probe().await
-    }
-}
-
 /// Tick the requested ref shard before the ordinary listing.
 pub(crate) async fn run_timers<S: crate::NamespaceStore>(
     directives: &TestDirectives,
@@ -349,7 +306,7 @@ pub(crate) async fn run_timers<S: crate::NamespaceStore>(
         let registry = TimerRegistry::new()
             .register(TestTimer)
             .register(RelayHandler {
-                target: BorrowedStore(store),
+                target: crate::store::BorrowedStore(store),
                 hook: NoHook,
                 budget: RelayBudget::default(),
             })

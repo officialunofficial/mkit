@@ -1356,7 +1356,126 @@ async fn indexed_sqlite_verified_pack_reuse_rechecks_current_closure() {
     );
 }
 
-fn upload_auth<N: NamespaceStore>(pipe: &Pipe<N>, mode: Mode, pack: &[u8]) -> Authenticated {
+/// An indexed push of a 1.2 MiB file lands in the global object store at
+/// `objects/<id>` with the file's exact length, and only after the pack
+/// verified (WP-4.10, SPEC-SERVER §9.6).
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // One push checks the file, the pack and the namespaces.
+async fn indexed_push_extracts_a_large_file_to_the_object_store() {
+    let mode = Mode {
+        multi: true,
+        sharding: Sharding::Single,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let clock = Arc::new(ManualClock::new(0));
+    let conn = RusqliteConn::open_in_memory()
+        .unwrap()
+        .with_clock(clock.clone());
+    let store = Store::new(Blocking::new(SqlKvStore::open(conn).unwrap()));
+    let mut cfg = config(mode);
+    cfg.ticket_ttl_ms = 120_000;
+    cfg.upload_limits.max_total_bytes = 4 << 20;
+    cfg.indexed = Some(IndexedConfig::default());
+    let spy = Arc::new(Spy::default());
+    let defaults = Hooks::new();
+    let pipe = Arc::new(
+        Pipeline::new(
+            FsBlobStore::new(dir.path()),
+            store.clone(),
+            Hooks {
+                authorizer: Policy(spy.clone()),
+                admission: Policy(spy),
+                pre_receive: defaults.pre_receive,
+                receipts: defaults.receipts,
+                outcomes: defaults.outcomes,
+            },
+            cfg,
+            clock.clone(),
+            Arc::new(NoopMetrics),
+        )
+        .unwrap(),
+    );
+
+    let file: Vec<u8> = (0..1_300_000_u32).map(|i| (i % 251) as u8).collect();
+    let blob = Object::Blob(mkit_core::object::Blob { data: file.clone() });
+    let blob_id = blob.id().unwrap();
+    let tree = Object::Tree(Tree {
+        entries: vec![mkit_core::object::TreeEntry {
+            name: b"big.bin".to_vec(),
+            mode: mkit_core::object::EntryMode::Blob,
+            object_hash: blob_id,
+        }],
+    });
+    let tree_id = tree.id().unwrap();
+    let signer = KeyPair::from_seed([9; 32]);
+    let mut commit = Commit::new_unannotated(
+        tree_id,
+        Vec::new(),
+        Identity::ed25519(signer.public.0),
+        signer.public.0,
+        b"large file".to_vec(),
+        42,
+        [0; 64],
+    );
+    commit.signature = sign_commit(&commit, &signer).unwrap().0;
+    let commit = Object::Commit(commit);
+    let head = commit.id().unwrap();
+    let mut writer = PackWriter::new_raw_only();
+    writer
+        .push_raw(blob_id, &serialize(&blob).unwrap())
+        .unwrap();
+    writer
+        .push_raw(tree_id, &serialize(&tree).unwrap())
+        .unwrap();
+    writer.push_raw(head, &serialize(&commit).unwrap()).unwrap();
+    let pack = writer.finish().unwrap();
+
+    let begin = auth(&pipe, mode, 1, Procedure::BeginUpload);
+    let BeginUploadResult::Ticket { id, token, .. } = pipe
+        .begin_upload(&begin, REF, &hash(&pack), pack.len() as u64)
+        .await
+        .unwrap()
+    else {
+        panic!("expected ticket");
+    };
+    upload_ticket(&pipe, mode, &pack, &token).await;
+    let object_path = dir.path().join("objects").join(to_hex(&blob_id));
+    assert!(
+        !object_path.exists(),
+        "nothing is extracted before the advance"
+    );
+    let advance = auth(&pipe, mode, 1, Procedure::AdvanceRefs);
+    let outcome = pipe
+        .advance_refs_with_tickets(
+            &advance,
+            upd(REF, RefWriteCondition::Missing, head),
+            upd(
+                "refs/mkit/packmap/main",
+                RefWriteCondition::Missing,
+                hash(&pack),
+            ),
+            vec![id],
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome, mkit_core::protocol::AdvanceOutcome::Committed);
+    assert_eq!(std::fs::read(&object_path).unwrap(), file);
+    // Only the file is extracted; the pack stays a pack and is not served
+    // from the object namespace.
+    let extracted: Vec<_> = std::fs::read_dir(dir.path().join("objects"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(extracted, [std::ffi::OsString::from(to_hex(&blob_id))]);
+    assert!(dir.path().join("packs").join(to_hex(&hash(&pack))).exists());
+    assert!(!dir.path().join("packs").join(to_hex(&blob_id)).exists());
+}
+
+fn upload_auth<B: MultipartBlobStore, N: NamespaceStore>(
+    pipe: &Pipeline<B, Store<N>, Hooks<Policy, Policy>>,
+    mode: Mode,
+    pack: &[u8],
+) -> Authenticated {
     let signer = Signer::new([1; 32], AUDIENCE, &mode.identity());
     let mut envelope = signer.envelope(
         Procedure::UploadPack.connect_path(),
@@ -1381,7 +1500,12 @@ fn upload_auth<N: NamespaceStore>(pipe: &Pipe<N>, mode: Mode, pack: &[u8]) -> Au
     .unwrap()
 }
 
-async fn upload_ticket<N: NamespaceStore>(pipe: &Pipe<N>, mode: Mode, pack: &[u8], token: &[u8]) {
+async fn upload_ticket<B: MultipartBlobStore, N: NamespaceStore>(
+    pipe: &Pipeline<B, Store<N>, Hooks<Policy, Policy>>,
+    mode: Mode,
+    pack: &[u8],
+    token: &[u8],
+) {
     let id = hash(pack);
     let a = upload_auth(pipe, mode, pack);
     let mut session = pipe

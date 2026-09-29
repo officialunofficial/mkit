@@ -4,6 +4,7 @@ use super::{
     IndexedConfig,
     classify::{self, UploadType},
     entries::{FrameMeta, index_entries},
+    extract::{self, Extractor, Renew},
     resolve,
     state::{self, VerificationV1},
 };
@@ -16,8 +17,8 @@ use crate::store::{
 };
 use crate::telemetry::Metrics;
 use crate::{
-    Batch, BatchOutcome, BlobBody, BlobKey, BlobStore, Clock, NamespaceStore, Partition,
-    Precondition, ServerError,
+    Batch, BatchOutcome, BlobBody, BlobKey, BlobStore, BoxFuture, Clock, MultipartBlobStore,
+    NamespaceStore, Partition, Precondition, ServerError,
 };
 use futures::StreamExt as _;
 use mkit_core::hash::{Hash, hash};
@@ -181,6 +182,27 @@ async fn renew_pending<S: NamespaceStore>(
     Ok(())
 }
 
+/// The verification leases this call holds, renewed by the extractor.
+struct Lease<'a, S> {
+    store: &'a S,
+    source: &'a Partition,
+    repo: &'a RepoId,
+    acquired: &'a mut BTreeMap<Hash, HeldLease>,
+    clock: &'a dyn Clock,
+}
+
+impl<S: NamespaceStore> Renew for Lease<'_, S> {
+    fn renew(&mut self) -> BoxFuture<'_, Result<(), ServerError>> {
+        Box::pin(renew_all_pending(
+            self.store,
+            self.source,
+            self.repo,
+            &mut *self.acquired,
+            self.clock,
+        ))
+    }
+}
+
 async fn renew_all_pending<S: NamespaceStore>(
     store: &S,
     source: &Partition,
@@ -230,16 +252,20 @@ async fn reject_content<S: NamespaceStore>(
     ServerError::invalid_argument(message.to_owned())
 }
 
-/// Verify every staged object. The resulting id list is WP-4.10's
-/// extraction seam; no ticket is consumed and no advance row is written.
+/// Verify every staged object, then extract the large ones into the object
+/// store before each pack's `Verified` state is written (WP-4.10), so
+/// `Verified` implies extracted, held and holder recorded. `ticket_ids` are
+/// the consuming tickets' ids, parallel to `tickets`. No ticket is consumed
+/// and no advance row is written.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-pub async fn verify_ticketed<B: BlobStore, S: NamespaceStore>(
+pub async fn verify_ticketed<B: MultipartBlobStore, S: NamespaceStore>(
     blobs: &B,
     store: &S,
     shards: &dyn ShardMap,
     repo: &RepoId,
     source: &Partition,
     tickets: &[TicketV1],
+    ticket_ids: &[Hash],
     head: Hash,
     cfg: IndexedConfig,
     clock: &dyn Clock,
@@ -253,6 +279,7 @@ pub async fn verify_ticketed<B: BlobStore, S: NamespaceStore>(
         repo,
         source,
         tickets,
+        ticket_ids,
         head,
         cfg,
         clock,
@@ -274,13 +301,14 @@ pub async fn verify_ticketed<B: BlobStore, S: NamespaceStore>(
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-async fn verify_ticketed_inner<B: BlobStore, S: NamespaceStore>(
+async fn verify_ticketed_inner<B: MultipartBlobStore, S: NamespaceStore>(
     blobs: &B,
     store: &S,
     shards: &dyn ShardMap,
     repo: &RepoId,
     source: &Partition,
     tickets: &[TicketV1],
+    ticket_ids: &[Hash],
     head: Hash,
     cfg: IndexedConfig,
     clock: &dyn Clock,
@@ -829,6 +857,26 @@ async fn verify_ticketed_inner<B: BlobStore, S: NamespaceStore>(
             ));
         }
     }
+    let selected = extract::select(&staged, cfg.extract_min_bytes);
+    if extract::selected_bytes(&staged, &selected) > cfg.effective_max_extract_bytes() {
+        return Err(ServerError::invalid_argument(
+            "pack exceeds indexed decode budget",
+        ));
+    }
+    // One extractor per advance: its resolution counter is shared by every
+    // manifest and chunk (R-163).
+    let extractor = Extractor {
+        blobs,
+        store,
+        shards,
+        repo,
+        cfg,
+        clock,
+        metrics,
+        staged: &staged,
+        staged_bytes,
+        resolved: std::sync::atomic::AtomicU64::new(0),
+    };
     for pack in &work {
         if !pack.needs_index {
             continue;
@@ -853,6 +901,50 @@ async fn verify_ticketed_inner<B: BlobStore, S: NamespaceStore>(
                 Ok(BatchOutcome::Committed)
             ) {
                 return Err(super::pending(1_000));
+            }
+        }
+        // Extract this pack's objects (those it introduced) after its index
+        // rows and before `Verified`. A retry re-takes each hold and skips
+        // what is stored.
+        let ticket_id = tickets
+            .iter()
+            .zip(ticket_ids)
+            .find_map(|(t, id)| (t.pack_id == pack.ticket.pack_id).then_some(id))
+            .ok_or_else(|| {
+                ServerError::internal(
+                    "object storage request failed",
+                    "missing consumed ticket id",
+                )
+            })?;
+        let mut lease = Lease {
+            store,
+            source,
+            repo,
+            acquired,
+            clock,
+        };
+        for (id, kind) in &selected {
+            if staged_owner.get(id) == Some(&pack.ticket.pack_id) {
+                // Boxed: the extraction future is large and rarely awaited.
+                match Box::pin(extractor.extract(*id, *kind, ticket_id, &mut lease)).await {
+                    Ok(()) => {}
+                    Err(extract::ExtractError::Server(error)) => return Err(error),
+                    // A manifest this push carries does not match its chunks:
+                    // content-intrinsic, so the verdict is persisted (§9.8).
+                    Err(extract::ExtractError::Content) => {
+                        return Err(reject_content(
+                            store,
+                            source,
+                            repo,
+                            &pack.ticket.pack_id,
+                            lease.acquired,
+                            extract::MALFORMED_MESSAGE,
+                            clock,
+                            metrics,
+                        )
+                        .await);
+                    }
+                }
             }
         }
         renew_all_pending(store, source, repo, acquired, clock).await?;

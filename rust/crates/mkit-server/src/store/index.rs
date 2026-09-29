@@ -492,6 +492,9 @@ pub async fn contains_many<S: NamespaceStore>(
 }
 
 /// Whether this repository holds any named id, for the takedown sweep. This
+/// is a repository-index membership probe, not a `ContentIndex` hold or holder
+/// (`store/content_index.rs`), which is the global GC protection of an
+/// extracted object; the names collide. This
 /// first round performs exactly one read per distinct index partition,
 /// satisfying §14.3/R-133 when all requested ranges are served and each id
 /// fits one page. A served prefix or an id with more than one page needs

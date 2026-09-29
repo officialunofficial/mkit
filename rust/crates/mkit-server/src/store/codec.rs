@@ -7,7 +7,7 @@ use mkit_core::hash::{Hash, from_hex, to_hex, to_hex_bytes};
 use mkit_core::protocol::AdvanceOutcome;
 use serde::{Deserialize, Serialize};
 
-use super::content_index::{BlockEntry, ObjectState};
+use super::content_index::{BlockEntry, HolderRecord, ObjectState};
 use super::error::StoreError;
 use super::index::IndexValue;
 use super::keys::validate_reservation_id;
@@ -492,6 +492,14 @@ struct QuotaV1 {
 #[serde(deny_unknown_fields)]
 struct HoldV1 {
     expires_at_ms: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HolderV1 {
+    seq: u64,
+    #[serde(with = "hash_json")]
+    op_id: Hash,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1176,6 +1184,21 @@ pub fn encode_hold(expires_at_ms: u64) -> Value {
 pub fn decode_hold(value: &Value) -> Result<u64, StoreError> {
     let dto: HoldV1 = decode_json(value, "bad hold")?;
     Ok(dto.expires_at_ms)
+}
+
+/// Encode a `ContentIndex` holder row (R-131).
+#[must_use]
+pub fn encode_holder(record: &HolderRecord) -> Value {
+    encode_json(&HolderV1 {
+        seq: record.seq,
+        op_id: record.op_id,
+    })
+}
+
+/// Decode a `ContentIndex` holder row.
+pub fn decode_holder(value: &Value) -> Result<HolderRecord, StoreError> {
+    let dto: HolderV1 = decode_json(value, "bad holder")?;
+    Ok(HolderRecord::new(dto.seq, dto.op_id))
 }
 
 /// Encode a blocklist entry.
@@ -1947,6 +1970,19 @@ mod tests {
             holders: 2,
             deleting: true,
         };
+        let holder = HolderRecord::new(5, [0xab; 32]);
+        let holder_golden = format!("\x01{{\"seq\":5,\"op_id\":\"{}\"}}", "ab".repeat(32));
+        assert_eq!(encode_holder(&holder).as_bytes(), holder_golden.as_bytes());
+        assert_eq!(decode_holder(&encode_holder(&holder)).unwrap(), holder);
+        for bad in [
+            &b"\x01{\"seq\":5}"[..],
+            b"\x01{\"seq\":5,\"op_id\":\"zz\"}",
+            b"\x02{}",
+            b"",
+        ] {
+            let bad = Value::new(bad.to_vec());
+            assert!(matches!(decode_holder(&bad), Err(StoreError::Corrupt(_))));
+        }
         let cases: [(Value, &[u8]); 3] = [
             (encode_hold(9), b"\x01{\"expires_at_ms\":9}"),
             (
