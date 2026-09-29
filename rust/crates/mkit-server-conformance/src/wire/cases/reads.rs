@@ -67,7 +67,7 @@ pub(super) fn signed_for(
 fn signed_body_on(signer: &Signer, rpc: Rpc, repository: &str, body: Vec<u8>) -> Signed {
     let mut env = signer.envelope(rpc.procedure(), body_commitment(&body));
     env.digest = Some(to_hex(&hash(&body)));
-    env.repository = repository.to_owned();
+    repository.clone_into(&mut env.repository);
     let op = signer.sign(&env);
     Signed {
         rpc,
@@ -213,9 +213,9 @@ async fn mint(
     repo: &str,
     req: &IssueObjectUrlRequest,
 ) -> Result<IssueObjectUrlResponse, Failure> {
-    let signed = signed_for(signer, repo, Rpc::IssueObjectUrl, req);
+    let call = signed_for(signer, repo, Rpc::IssueObjectUrl, req);
     want_ok(
-        ctx.send::<IssueObjectUrlResponse>(&signed).await?,
+        ctx.send::<IssueObjectUrlResponse>(&call).await?,
         "IssueObjectUrl",
     )
 }
