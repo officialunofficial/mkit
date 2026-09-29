@@ -10,11 +10,19 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
 
 use mkit_server::SystemClock;
-use mkit_server_conformance::fake_s3::{DEFAULT_BUCKET, FakeS3};
-use mkit_server_conformance::storage_suite;
+use mkit_server_conformance::fake_s3::{DEFAULT_BUCKET, FakeS3, FakeS3Options};
+use mkit_server_conformance::{multipart_suite, storage_suite};
 use mkit_server_native::s3::{Credentials, S3BlobStore, S3Config};
 
-static FAKE: LazyLock<FakeS3> = LazyLock::new(FakeS3::start);
+#[path = "support/multipart_allocator.rs"]
+mod multipart_allocator;
+
+static FAKE: LazyLock<FakeS3> = LazyLock::new(|| {
+    FakeS3::start_with(FakeS3Options {
+        on_thread_start: Some(multipart_allocator::exclude_current_thread),
+        ..FakeS3Options::default()
+    })
+});
 
 /// A store over a fresh prefix of the shared fake's bucket.
 fn s3_store() -> S3BlobStore {
@@ -35,3 +43,8 @@ fn s3_store() -> S3BlobStore {
 }
 
 storage_suite!(s3, blob = s3_store);
+multipart_suite!(
+    s3_multipart,
+    store = s3_store,
+    heap = multipart_allocator::probe
+);

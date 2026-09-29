@@ -664,7 +664,7 @@ async fn fake_rejects_what_s3_rejects() {
             raw(
                 &fake,
                 Method::POST,
-                &format!("{path}?uploads"),
+                &format!("{path}?acl"),
                 &[],
                 &empty,
                 None,
@@ -825,4 +825,436 @@ async fn fake_conditional_puts_race_like_s3() {
     finish(tx, b"el").await;
     assert_eq!(held.await.unwrap(), StatusCode::CONFLICT);
     assert!(fake.object(DEFAULT_BUCKET, &object_key(b"del")).is_none());
+}
+
+async fn staged_multipart(
+    s: &S3BlobStore,
+) -> (
+    Vec<u8>,
+    BlobKey,
+    mkit_core::upload_parts::PartPlan,
+    Vec<u8>,
+    Vec<mkit_server::PartRef>,
+) {
+    use mkit_core::upload_parts::{MIN_PART_SIZE, PartPlan, part_subtree_cv};
+    use mkit_server::{MultipartBlobStore, PartSink};
+    let data: Vec<u8> = (0_u8..=250)
+        .cycle()
+        .take(usize::try_from(MIN_PART_SIZE).unwrap() + 1)
+        .collect();
+    let key = key_of(&data);
+    let plan = PartPlan::new(data.len() as u64, MIN_PART_SIZE, 10_000).unwrap();
+    let session = s
+        .begin_multipart_for_ticket(
+            key,
+            plan.total(),
+            plan.part_size(),
+            hash(b"native s3 multipart test"),
+        )
+        .await
+        .unwrap();
+    let mut parts = Vec::new();
+    for index in 0..plan.count() {
+        let start = usize::try_from(plan.offset(index).unwrap()).unwrap();
+        let end = start + usize::try_from(plan.expected_len(index).unwrap()).unwrap();
+        let cv = part_subtree_cv(&plan, index, &data[start..end]).unwrap();
+        let mut sink = s.begin_part(key, &session, &plan, index, cv).await.unwrap();
+        for chunk in data[start..end].chunks(64 * 1024) {
+            sink.write(Bytes::copy_from_slice(chunk)).await.unwrap();
+        }
+        parts.push(mkit_server::PartRef {
+            index,
+            len: (end - start) as u64,
+            tag: sink.commit().await.unwrap(),
+        });
+    }
+    (data, key, plan, session, parts)
+}
+
+#[tokio::test]
+async fn multipart_copies_parts_and_signs_copy_source() {
+    use mkit_server::MultipartBlobStore;
+    let fake = FakeS3::start();
+    let s = store(&fake);
+    let (data, key, plan, session, parts) = Box::pin(staged_multipart(&s)).await;
+    assert_eq!(
+        s.complete(key, &session, &plan, &parts).await.unwrap(),
+        CommitOutcome::Created
+    );
+    assert_eq!(
+        fake.object(DEFAULT_BUCKET, &object_key(&data)).unwrap(),
+        data
+    );
+    let requests = fake.requests();
+    let copies: Vec<_> = requests
+        .iter()
+        .filter(|r| {
+            r.method == Method::PUT
+                && r.query
+                    .as_deref()
+                    .is_some_and(|q| q.contains("partNumber="))
+        })
+        .collect();
+    assert_eq!(copies.len(), 2);
+    for copy in copies {
+        assert!(
+            copy.header("x-amz-copy-source")
+                .unwrap()
+                .contains("server-uploads/")
+        );
+        assert!(
+            copy.header("authorization")
+                .unwrap()
+                .contains("x-amz-copy-source")
+        );
+        assert!(copy.header("x-amz-copy-source-if-match").is_some());
+        assert!(
+            copy.header("authorization")
+                .unwrap()
+                .contains("x-amz-copy-source-if-match")
+        );
+    }
+    let complete = requests
+        .iter()
+        .find(|r| {
+            r.method == Method::POST && r.query.as_deref().is_some_and(|q| q.contains("uploadId="))
+        })
+        .unwrap();
+    assert_eq!(complete.header("if-none-match"), Some("*"));
+}
+
+#[tokio::test]
+async fn s3_corrupted_part_cannot_publish_pack() {
+    use mkit_server::MultipartBlobStore;
+    let fake = FakeS3::start();
+    let s = store(&fake);
+    let (data, key, plan, session, parts) = Box::pin(staged_multipart(&s)).await;
+    let staged = format!(
+        "{PREFIX}/server-uploads/{}/0-{}",
+        mkit_core::hash::to_hex_bytes(&session),
+        mkit_core::hash::to_hex_bytes(&parts[0].tag)
+    );
+    fake.insert_object(
+        DEFAULT_BUCKET,
+        &staged,
+        Bytes::from(vec![0x8e; usize::try_from(plan.part_size()).unwrap()]),
+    );
+    assert!(matches!(
+        s.complete(key, &session, &plan, &parts).await,
+        Err(StoreError::Invalid(_))
+    ));
+    assert!(fake.object(DEFAULT_BUCKET, &object_key(&data)).is_none());
+}
+
+#[tokio::test]
+async fn s3_changed_part_between_hash_and_copy_cannot_publish_pack() {
+    use mkit_server::MultipartBlobStore;
+    let fake = FakeS3::start();
+    let s = store(&fake);
+    let (data, key, plan, session, parts) = Box::pin(staged_multipart(&s)).await;
+    let staged = format!(
+        "{PREFIX}/server-uploads/{}/0-{}",
+        mkit_core::hash::to_hex_bytes(&session),
+        mkit_core::hash::to_hex_bytes(&parts[0].tag)
+    );
+    let part_len = usize::try_from(plan.part_size()).unwrap();
+    let delayed = fake.delay_next_query(
+        Method::PUT,
+        "partNumber=1",
+        std::time::Duration::from_secs(1),
+    );
+    let task = tokio::spawn(async move { s.complete(key, &session, &plan, &parts).await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !delayed.load(std::sync::atomic::Ordering::SeqCst) {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    fake.insert_object(DEFAULT_BUCKET, &staged, Bytes::from(vec![0x8e; part_len]));
+    assert!(matches!(task.await.unwrap(), Err(StoreError::Invalid(_))));
+    assert!(fake.object(DEFAULT_BUCKET, &object_key(&data)).is_none());
+    assert!(fake.requests().iter().any(|r| r.method == Method::DELETE
+        && r.query.as_deref().is_some_and(|q| q.contains("uploadId="))));
+}
+
+#[tokio::test]
+async fn multipart_embedded_errors_abort_private_upload() {
+    use mkit_server::MultipartBlobStore;
+    for (method, needle) in [(Method::PUT, "partNumber="), (Method::POST, "uploadId=")] {
+        let fake = FakeS3::start();
+        let s = store(&fake);
+        let (_, key, plan, session, parts) = Box::pin(staged_multipart(&s)).await;
+        fake.error_body_next_query(method, needle);
+        assert!(matches!(
+            s.complete(key, &session, &plan, &parts).await,
+            Err(StoreError::Unavailable(_))
+        ));
+        assert!(s.head(&key).await.unwrap().is_none());
+        assert!(fake.requests().iter().any(|r| r.method == Method::DELETE
+            && r.query.as_deref().is_some_and(|q| q.contains("uploadId="))));
+    }
+}
+
+#[tokio::test]
+async fn multipart_completion_if_none_match_race_is_already_present() {
+    use mkit_server::MultipartBlobStore;
+    let fake = FakeS3::start();
+    let s = store(&fake);
+    let (data, key, plan, session, parts) = Box::pin(staged_multipart(&s)).await;
+    fake.conflict_on_next_complete(
+        DEFAULT_BUCKET,
+        &object_key(&data),
+        Bytes::from(data.clone()),
+    );
+    assert_eq!(
+        s.complete(key, &session, &plan, &parts).await.unwrap(),
+        CommitOutcome::AlreadyPresent
+    );
+    assert_eq!(
+        fake.object(DEFAULT_BUCKET, &object_key(&data)).unwrap(),
+        data
+    );
+}
+
+#[tokio::test]
+async fn s3_created_pack_survives_cleanup_list_failure() {
+    use mkit_server::MultipartBlobStore;
+    let fake = FakeS3::start();
+    let s = store(&fake);
+    let (data, key, plan, session, parts) = Box::pin(staged_multipart(&s)).await;
+    fake.fail_next_query(Method::GET, "list-type=2", StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        s.complete(key, &session, &plan, &parts).await.unwrap(),
+        CommitOutcome::Created
+    );
+    assert_eq!(
+        fake.object(DEFAULT_BUCKET, &object_key(&data)).unwrap(),
+        data
+    );
+}
+
+#[tokio::test]
+async fn multipart_abort_follows_list_continuation() {
+    use mkit_server::MultipartBlobStore;
+    let fake = FakeS3::start();
+    let s = store(&fake);
+    let (_, key, plan, session, _) = Box::pin(staged_multipart(&s)).await;
+    let prefix = format!(
+        "{PREFIX}/server-uploads/{}/",
+        mkit_core::hash::to_hex_bytes(&session)
+    );
+    for index in 0..1005 {
+        fake.insert_object(
+            DEFAULT_BUCKET,
+            &format!("{prefix}orphan-{index:04}"),
+            Bytes::from_static(b"x"),
+        );
+    }
+    fake.clear_requests();
+    s.abort(key, &session).await.unwrap();
+    let requests = fake.requests();
+    let abort_requests: Vec<_> = requests
+        .iter()
+        .filter(|r| {
+            r.method == Method::DELETE
+                || (r.method == Method::GET
+                    && r.query
+                        .as_deref()
+                        .is_some_and(|q| q.contains("list-type=2")))
+        })
+        .collect();
+    assert_eq!(abort_requests[0].method, Method::DELETE);
+    assert!(abort_requests[0].path.ends_with("/meta"));
+    assert!(
+        !fake
+            .keys(DEFAULT_BUCKET)
+            .iter()
+            .any(|key| key.starts_with(&prefix))
+    );
+    let lists: Vec<_> = fake
+        .requests()
+        .into_iter()
+        .filter(|r| {
+            r.method == Method::GET
+                && r.query
+                    .as_deref()
+                    .is_some_and(|q| q.contains("list-type=2"))
+        })
+        .collect();
+    assert!(lists.len() >= 2);
+    assert!(lists.iter().any(|r| {
+        r.query
+            .as_deref()
+            .is_some_and(|q| q.contains("continuation-token="))
+    }));
+    // Keep the validated plan in scope: the test exercises a real session.
+    assert_eq!(plan.count(), 2);
+}
+
+#[tokio::test]
+async fn multipart_abort_pages_with_longest_valid_prefix() {
+    use mkit_core::upload_parts::MIN_PART_SIZE;
+    use mkit_server::MultipartBlobStore;
+    let fake = FakeS3::start();
+    let prefix = "a".repeat(512);
+    let mut cfg = config(&fake);
+    cfg.prefix = Some(prefix.clone());
+    let s = S3BlobStore::new(cfg, Arc::new(SystemClock)).unwrap();
+    let key = key_of(b"long-prefix-session");
+    let session = s
+        .begin_multipart_for_ticket(
+            key,
+            MIN_PART_SIZE + 1,
+            MIN_PART_SIZE,
+            hash(b"long-prefix-ticket"),
+        )
+        .await
+        .unwrap();
+    let staging = format!(
+        "{prefix}/server-uploads/{}/",
+        mkit_core::hash::to_hex_bytes(&session)
+    );
+    for n in 0..1005 {
+        fake.insert_object(
+            DEFAULT_BUCKET,
+            &format!("{staging}orphan-{n:04}"),
+            Bytes::from_static(b"x"),
+        );
+    }
+    s.abort(key, &session).await.unwrap();
+    assert!(
+        !fake
+            .keys(DEFAULT_BUCKET)
+            .iter()
+            .any(|k| k.starts_with(&staging))
+    );
+    assert!(
+        fake.requests()
+            .iter()
+            .filter(|r| r.method == Method::GET
+                && r.query
+                    .as_deref()
+                    .is_some_and(|q| q.contains("max-keys=500")))
+            .count()
+            >= 3
+    );
+}
+
+#[tokio::test]
+async fn cancelled_completion_aborts_private_upload() {
+    use mkit_server::MultipartBlobStore;
+    let fake = FakeS3::start();
+    let s = store(&fake);
+    let (_, key, plan, session, parts) = Box::pin(staged_multipart(&s)).await;
+    fake.stall_next_query(Method::POST, "uploadId=");
+    let task = tokio::spawn(async move { s.complete(key, &session, &plan, &parts).await });
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if fake.requests().iter().any(|r| {
+                r.method == Method::POST
+                    && r.query.as_deref().is_some_and(|q| q.contains("uploadId="))
+            }) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    task.abort();
+    let _ = task.await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if fake.requests().iter().any(|r| {
+                r.method == Method::DELETE
+                    && r.query.as_deref().is_some_and(|q| q.contains("uploadId="))
+            }) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[test]
+#[ignore = "requires a running Docker daemon"]
+fn real_minio_multipart_copy_roundtrip() {
+    use mkit_server::MultipartBlobStore;
+    use testcontainers::runners::SyncRunner;
+    use testcontainers_modules::minio::MinIO;
+
+    const USER: &str = "minioadmin";
+    const PASSWORD: &str = "minioadmin";
+    const BUCKET: &str = "mkit-test-bucket";
+    let container = MinIO::default().start().expect("MinIO starts");
+    let port = container.get_host_port_ipv4(9000).expect("mapped API port");
+    let endpoint = format!("http://127.0.0.1:{port}");
+    let creds = Credentials {
+        access_key_id: USER.into(),
+        secret_access_key: PASSWORD.into(),
+        region: "us-east-1".into(),
+    };
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let client = reqwest::Client::new();
+        let mut created = false;
+        for _ in 0..20 {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let now = i64::try_from(now).unwrap();
+            let signed = sigv4::sign_request(
+                &creds,
+                "PUT",
+                &format!("/{BUCKET}"),
+                "",
+                b"",
+                &endpoint,
+                now,
+            );
+            match client
+                .put(format!("{endpoint}/{BUCKET}"))
+                .header("Authorization", signed.authorization)
+                .header("x-amz-date", signed.x_amz_date)
+                .header("x-amz-content-sha256", signed.x_amz_content_sha256)
+                .send()
+                .await
+            {
+                Ok(resp) => {
+                    assert!(
+                        resp.status().is_success(),
+                        "bucket creation: {}",
+                        resp.status()
+                    );
+                    created = true;
+                    break;
+                }
+                Err(error) if error.is_connect() => {
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                }
+                Err(error) => panic!("bucket creation: {error}"),
+            }
+        }
+        assert!(created, "MinIO did not become reachable");
+        let cfg = S3Config {
+            endpoint: endpoint.parse().unwrap(),
+            bucket: BUCKET.into(),
+            prefix: Some("multipart".into()),
+            credentials: creds,
+        };
+        let s = S3BlobStore::new(cfg, Arc::new(SystemClock)).unwrap();
+        let (data, key, plan, session, parts) = Box::pin(staged_multipart(&s)).await;
+        assert_eq!(
+            s.complete(key, &session, &plan, &parts).await.unwrap(),
+            CommitOutcome::Created
+        );
+        assert_eq!(read(s.get(&key, None).await.unwrap().unwrap()).await, data);
+    });
 }

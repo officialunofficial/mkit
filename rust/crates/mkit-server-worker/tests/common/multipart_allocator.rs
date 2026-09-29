@@ -10,8 +10,7 @@ use mkit_server_conformance::storage::multipart::HeapProbe;
 
 thread_local! { static EXCLUDED: Cell<bool> = const { Cell::new(false) }; }
 
-#[allow(dead_code)] // The FS test binary includes this support module too.
-pub(crate) fn exclude_current_thread() {
+pub fn exclude_current_thread() {
     EXCLUDED.with(|excluded| excluded.set(true));
 }
 
@@ -117,6 +116,6 @@ fn finish() -> usize {
         .saturating_sub(BASELINE.load(Ordering::SeqCst))
 }
 
-pub(crate) fn probe() -> HeapProbe {
+pub fn probe() -> HeapProbe {
     HeapProbe { start, finish }
 }

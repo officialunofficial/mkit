@@ -176,6 +176,8 @@ pub struct PipelineConfig {
     pub authorizer_role: AuthorizerRole,
     /// Upload caps, supplied by the binding (used by M0-05b).
     pub upload_limits: UploadLimits,
+    /// Optional tighter cap for legacy single-part `UploadPack` requests.
+    pub single_upload_max_bytes: Option<u64>,
     /// Resumable upload part size: a power of two in 8–32 MiB.
     pub part_size: u64,
     /// Largest number of parts, sufficient to reach the upload byte cap.
@@ -231,6 +233,7 @@ impl PipelineConfig {
             auth,
             grants: None,
             upload_limits,
+            single_upload_max_bytes: None,
             part_size: mkit_core::upload_parts::MIN_PART_SIZE,
             max_parts: 10_000,
             max_list_refs_page_size: DEFAULT_LIST_PAGE_LIMIT,
