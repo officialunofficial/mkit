@@ -1490,3 +1490,321 @@ fn choice_forwards_the_flags_the_pipeline_reads_and_delivers_to_its_side() {
     )));
     assert!(block_on(down.deliver(&row)).is_err());
 }
+
+// ---------------------------------------------------------------------------
+// HookVerifier (the hook service's §7.1 checks)
+
+fn vector_headers(vector: &serde_json::Value) -> Vec<(String, String)> {
+    vector["headers"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(k, v)| (k.clone(), v.as_str().unwrap().to_owned()))
+        .collect()
+}
+
+fn verify_vector(
+    verifier: &HookVerifier,
+    vector: &serde_json::Value,
+    headers: &[(String, String)],
+    body: &[u8],
+) -> Result<Verified, VerifyError> {
+    let pairs: Vec<(&str, &str)> = headers
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    verifier.verify(vector["procedure"].as_str().unwrap(), &pairs, body)
+}
+
+fn golden_verifier(vector: &serde_json::Value, now: i64) -> HookVerifier {
+    let public = from_hex(vector["public_key"].as_str().unwrap()).unwrap();
+    HookVerifier::new(
+        vector["audience"].as_str().unwrap(),
+        vec![VerifierKey::new(vector["key_id"].as_str().unwrap(), public)],
+        move || now,
+    )
+}
+
+/// The verifier accepts every signed golden vector, and refuses each
+/// single-field tamper of it.
+#[test]
+#[allow(clippy::too_many_lines)] // One table of tampers per vector.
+fn verifier_accepts_every_signature_vector_and_refuses_tampering() {
+    let file: serde_json::Value = serde_json::from_slice(&golden("signature.json")).unwrap();
+    for vector in file["vectors"].as_array().unwrap() {
+        let body = vector["body_utf8"].as_str().unwrap().as_bytes();
+        let created: i64 = vector["created_at_ms"].as_str().unwrap().parse().unwrap();
+        let headers = vector_headers(vector);
+        let verifier = golden_verifier(vector, created + 1_000);
+        let accepted = verify_vector(&verifier, vector, &headers, body).unwrap();
+        assert_eq!(accepted.key_id, vector["key_id"].as_str().unwrap());
+        assert_eq!(accepted.nonce, vector["nonce"].as_str().unwrap());
+        assert_eq!(accepted.created_ms, created);
+
+        let tamper = |name: &str, value: &str| {
+            headers
+                .iter()
+                .map(|(k, v)| {
+                    let v = if k == name {
+                        value.to_owned()
+                    } else {
+                        v.clone()
+                    };
+                    (k.clone(), v)
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut wrong_body = body.to_vec();
+        wrong_body.push(b' ');
+        assert_eq!(
+            verify_vector(&verifier, vector, &headers, &wrong_body),
+            Err(VerifyError::Digest)
+        );
+        let other_sig = "0".repeat(128);
+        assert_eq!(
+            verify_vector(
+                &verifier,
+                vector,
+                &tamper("X-Mkit-Hook-Signature", &other_sig),
+                body
+            ),
+            Err(VerifyError::Signature)
+        );
+        assert_eq!(
+            verify_vector(
+                &verifier,
+                vector,
+                &tamper("X-Mkit-Hook-Audience", "https://evil.test"),
+                body
+            ),
+            Err(VerifyError::Audience)
+        );
+        assert_eq!(
+            verify_vector(
+                &verifier,
+                vector,
+                &tamper("X-Mkit-Hook-Key-Id", "other-key"),
+                body
+            ),
+            Err(VerifyError::UnknownKey)
+        );
+        assert_eq!(
+            verify_vector(&verifier, vector, &tamper("X-Mkit-Hook-Version", "2"), body),
+            Err(VerifyError::Version)
+        );
+        assert_eq!(
+            verify_vector(
+                &verifier,
+                vector,
+                &tamper("X-Mkit-Hook-Nonce", &"B".repeat(64)),
+                body
+            ),
+            Err(VerifyError::Malformed("X-Mkit-Hook-Nonce"))
+        );
+        // The procedure is bound: the same request replayed to another
+        // procedure fails on the signature.
+        let pairs: Vec<(&str, &str)> = headers
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        let other = if vector["procedure"]
+            .as_str()
+            .unwrap()
+            .ends_with("/CachePurge")
+        {
+            "/mkit.server.hooks.v1.HooksService/Admit"
+        } else {
+            "/mkit.server.hooks.v1.HooksService/CachePurge"
+        };
+        assert_eq!(
+            verifier.verify(other, &pairs, body),
+            Err(VerifyError::Signature)
+        );
+        // A signed field cannot be altered without breaking the signature.
+        let moved = (created + 1).to_string();
+        assert_eq!(
+            verify_vector(
+                &verifier,
+                vector,
+                &tamper("X-Mkit-Hook-Created-At", &moved),
+                body
+            ),
+            Err(VerifyError::Signature)
+        );
+        // A header is required, once.
+        let mut missing = headers.clone();
+        missing.retain(|(k, _)| k != "X-Mkit-Hook-Digest");
+        assert_eq!(
+            verify_vector(&verifier, vector, &missing, body),
+            Err(VerifyError::Header("X-Mkit-Hook-Digest"))
+        );
+        let mut twice = headers.clone();
+        twice.push((
+            "x-mkit-hook-nonce".to_owned(),
+            vector["nonce"].as_str().unwrap().to_owned(),
+        ));
+        assert_eq!(
+            verify_vector(&verifier, vector, &twice, body),
+            Err(VerifyError::Header("X-Mkit-Hook-Nonce"))
+        );
+    }
+}
+
+#[test]
+fn verifier_checks_the_window_the_clock_lead_and_key_bounds() {
+    let file: serde_json::Value = serde_json::from_slice(&golden("signature.json")).unwrap();
+    let vector = &file["vectors"][0];
+    let body = vector["body_utf8"].as_str().unwrap().as_bytes();
+    let created: i64 = vector["created_at_ms"].as_str().unwrap().parse().unwrap();
+    let expires: i64 = vector["expires_at_ms"].as_str().unwrap().parse().unwrap();
+    let headers = vector_headers(vector);
+    let check =
+        |now: i64| verify_vector(&golden_verifier(vector, now), vector, &headers, body).map(|_| ());
+    // The sender may lead by at most 30 s.
+    assert!(check(created - 30_000).is_ok());
+    assert_eq!(check(created - 30_001), Err(VerifyError::ClockLead));
+    // Unexpired until the expiry instant.
+    assert!(check(expires - 1).is_ok());
+    assert_eq!(check(expires), Err(VerifyError::Expired));
+    assert_eq!(check(expires + 60_000), Err(VerifyError::Expired));
+    // The interval: positive and at most 300,000 ms (the vector is exactly
+    // 300,000 ms, so it passes above); a lengthened window fails before the
+    // signature is looked at.
+    let widened = headers
+        .iter()
+        .map(|(k, v)| {
+            let v = if k == "X-Mkit-Hook-Expires-At" {
+                (expires + 1).to_string()
+            } else {
+                v.clone()
+            };
+            (k.clone(), v)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        verify_vector(&golden_verifier(vector, created), vector, &widened, body),
+        Err(VerifyError::Interval)
+    );
+    // Key bounds bind the creation time.
+    let public = from_hex(vector["public_key"].as_str().unwrap()).unwrap();
+    let mut key = VerifierKey::new(vector["key_id"].as_str().unwrap(), public);
+    key.not_before_ms = Some(created + 1);
+    let verifier = HookVerifier::new(
+        vector["audience"].as_str().unwrap(),
+        vec![key.clone()],
+        move || created,
+    );
+    assert_eq!(
+        verify_vector(&verifier, vector, &headers, body),
+        Err(VerifyError::KeyBounds)
+    );
+    key.not_before_ms = None;
+    key.not_after_ms = Some(created - 1);
+    let verifier = HookVerifier::new(vector["audience"].as_str().unwrap(), vec![key], move || {
+        created
+    });
+    assert_eq!(
+        verify_vector(&verifier, vector, &headers, body),
+        Err(VerifyError::KeyBounds)
+    );
+}
+
+#[test]
+fn verifier_rejects_a_replayed_nonce_until_the_window_closes() {
+    let file: serde_json::Value = serde_json::from_slice(&golden("signature.json")).unwrap();
+    let vector = &file["vectors"][1];
+    let body = vector["body_utf8"].as_str().unwrap().as_bytes();
+    let created: i64 = vector["created_at_ms"].as_str().unwrap().parse().unwrap();
+    let headers = vector_headers(vector);
+    let now = Arc::new(std::sync::atomic::AtomicI64::new(created + 1));
+    let public = from_hex(vector["public_key"].as_str().unwrap()).unwrap();
+    let clock = Arc::clone(&now);
+    let verifier = HookVerifier::new(
+        vector["audience"].as_str().unwrap(),
+        vec![VerifierKey::new(vector["key_id"].as_str().unwrap(), public)],
+        move || clock.load(std::sync::atomic::Ordering::SeqCst),
+    )
+    .with_replay_protection();
+    assert!(verify_vector(&verifier, vector, &headers, body).is_ok());
+    assert_eq!(
+        verify_vector(&verifier, vector, &headers, body),
+        Err(VerifyError::Replay)
+    );
+    // Without the replay set the same request verifies again.
+    let stateless = golden_verifier(vector, created + 1);
+    assert!(verify_vector(&stateless, vector, &headers, body).is_ok());
+    assert!(verify_vector(&stateless, vector, &headers, body).is_ok());
+    // A failed request is not remembered: a tampered copy does not burn the
+    // nonce of the genuine one.
+    let fresh = HookVerifier::new(
+        vector["audience"].as_str().unwrap(),
+        vec![VerifierKey::new(vector["key_id"].as_str().unwrap(), public)],
+        move || created + 1,
+    )
+    .with_replay_protection();
+    let mut bad = body.to_vec();
+    bad.push(b' ');
+    assert!(verify_vector(&fresh, vector, &headers, &bad).is_err());
+    assert!(verify_vector(&fresh, vector, &headers, body).is_ok());
+}
+
+#[test]
+fn verifier_reads_the_spec_key_list() {
+    let text = String::from_utf8(golden("key-list.json")).unwrap();
+    let keys = VerifierKey::parse_list(&text).unwrap();
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0].key_id, "test-hook-2026-09");
+    assert_eq!(keys[0].not_before_ms, Some(1_790_423_900_000));
+    assert_eq!(keys[0].not_after_ms, Some(1_790_424_600_000));
+    let file: serde_json::Value = serde_json::from_slice(&golden("signature.json")).unwrap();
+    let vector = &file["vectors"][0];
+    assert_eq!(
+        to_hex(&keys[0].public_key),
+        vector["public_key"].as_str().unwrap()
+    );
+    // What a signer prints, the verifier reads back.
+    for bad in [
+        r#"{"version":2,"keys":[]}"#,
+        r#"{"version":1,"keys":[{"keyId":"k","alg":"rsa","publicKey":""}]}"#,
+        r#"{"version":1,"keys":[{"keyId":"bad id","alg":"ed25519","publicKey":"00"}]}"#,
+        r#"{"version":1,"keys":[{"keyId":"k","alg":"ed25519","publicKey":"F80CCCDCE4AE1C07AE208A2ADF99A310AE4207E0306FA0236110B06827BBB8D0"}]}"#,
+        r#"{"version":1,"keys":[{"keyId":"k","alg":"ed25519","publicKey":"f80cccdce4ae1c07ae208a2adf99a310ae4207e0306fa0236110b06827bbb8d0","notBeforeMs":"01"}]}"#,
+        "not json",
+    ] {
+        assert!(VerifierKey::parse_list(bad).is_err(), "{bad}");
+    }
+    let dup = r#"{"version":1,"keys":[
+        {"keyId":"k","alg":"ed25519","publicKey":"f80cccdce4ae1c07ae208a2adf99a310ae4207e0306fa0236110b06827bbb8d0"},
+        {"keyId":"k","alg":"ed25519","publicKey":"f80cccdce4ae1c07ae208a2adf99a310ae4207e0306fa0236110b06827bbb8d0"}]}"#;
+    assert!(VerifierKey::parse_list(dup).is_err());
+}
+
+/// The signer and the verifier agree without the golden files.
+#[test]
+fn verifier_accepts_what_the_signer_signs() {
+    let signer = HookSigner::new("round-trip", Zeroizing::new(SEED)).unwrap();
+    let headers = signer
+        .headers(
+            HOOK_ORIGIN,
+            "/mkit.server.hooks.v1.HooksService/Outcome",
+            b"{}",
+            1_000_000,
+            &[7; 32],
+        )
+        .unwrap();
+    let pairs: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let verifier = HookVerifier::new(
+        HOOK_ORIGIN,
+        vec![VerifierKey::new("round-trip", signer.public_key())],
+        || 1_000_500,
+    );
+    assert!(
+        verifier
+            .verify("/mkit.server.hooks.v1.HooksService/Outcome", &pairs, b"{}")
+            .is_ok()
+    );
+    assert_eq!(
+        verifier.verify("/mkit.server.hooks.v1.HooksService/Admit", &pairs, b"{}"),
+        Err(VerifyError::Signature)
+    );
+}

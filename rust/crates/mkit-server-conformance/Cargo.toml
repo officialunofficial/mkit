@@ -35,10 +35,10 @@ test-faults = ["mkit-server/test-faults"]
 fake-s3 = ["dep:axum", "dep:hmac", "tokio/net"]
 # `stubs`: in-process stand-ins for external services a server talks to.
 # `stubs::hook` is a `mkit.server.hooks.v1` hook service that verifies every
-# SPEC-SERVER §7.1 signed request, answers from a script and records calls
+# SPEC-SERVER §7.1 signed request (with mkit-server's `HookVerifier`), answers from a script and records calls
 # (WP-3.8; WP-3.12 builds its payment stub on it). A test utility: never in a
 # release binary.
-stubs = ["dep:axum", "tokio/net"]
+stubs = ["dep:axum", "tokio/net", "mkit-server/remote-hooks"]
 
 [dependencies]
 mkit-server = { version = "0.4", path = "../mkit-server", features = ["memory"] }

@@ -4,15 +4,13 @@
 //! It is a strict Connect-JSON server on `127.0.0.1` that behaves like a
 //! well-written hook:
 //!
-//! - **Verifies every request** as SPEC-SERVER §7.1 requires, with its own
-//!   implementation (not the server's signer, so a signing bug cannot verify
-//!   itself): the eight `X-Mkit-Hook-*` headers, the key id against its key
-//!   list (with the §7.2 validity bounds), the audience against its own
-//!   origin, the validity window (positive, at most 300 s, clock lead at most
-//!   30 s, unexpired), the body digest, the strict Ed25519 signature over the
-//!   BLAKE3 of the canonical string, and replay of a nonce inside its window.
-//!   A request that fails any check is answered `401` and recorded with the
-//!   reason.
+//! - **Verifies every request** as SPEC-SERVER §7.1 requires, with
+//!   [`HookVerifier`] (the receiving side of the server's `HookSigner`, pinned
+//!   to the golden signature vectors): the eight `X-Mkit-Hook-*` headers, the
+//!   key id against its key list (with the §7.2 validity bounds), the audience
+//!   against its own origin, the validity window, the body digest, the strict
+//!   Ed25519 signature and replay of a nonce inside its window. A request that
+//!   fails any check is answered `401` and recorded with the reason.
 //! - **Answers from a script**: per procedure, queued [`Reply`]s first, then
 //!   the default (Authorize allows, Admit allows with a fresh reservation id,
 //!   Outcome acknowledges). [`FakeHook::set_down`] answers `503` to everything.
@@ -32,8 +30,7 @@ use axum::body::Body;
 use axum::extract::State;
 use axum::http::{HeaderMap, Request, Response, StatusCode};
 use bytes::Bytes;
-use ed25519_dalek::{Signature, VerifyingKey};
-use mkit_core::hash::{hash, to_hex};
+use mkit_server::hooks::{HookVerifier, VerifierKey};
 
 /// The Connect path of every hook procedure.
 pub const SERVICE: &str = "/mkit.server.hooks.v1.HooksService";
@@ -42,30 +39,7 @@ pub const SERVICE: &str = "/mkit.server.hooks.v1.HooksService";
 const MAX_BODY: usize = 1 << 20;
 
 /// One key of the §7.2 key list the stub trusts.
-#[derive(Debug, Clone)]
-pub struct HookKey {
-    /// The key id (`[A-Za-z0-9._-]`, 1-64 bytes).
-    pub key_id: String,
-    /// The Ed25519 public key.
-    pub public_key: [u8; 32],
-    /// The key is not valid before this epoch millisecond, if set.
-    pub not_before_ms: Option<i64>,
-    /// The key is not valid after this epoch millisecond, if set.
-    pub not_after_ms: Option<i64>,
-}
-
-impl HookKey {
-    /// A key with no validity bounds.
-    #[must_use]
-    pub fn new(key_id: impl Into<String>, public_key: [u8; 32]) -> Self {
-        Self {
-            key_id: key_id.into(),
-            public_key,
-            not_before_ms: None,
-            not_after_ms: None,
-        }
-    }
-}
+pub type HookKey = VerifierKey;
 
 /// A scripted answer.
 #[derive(Debug, Clone)]
@@ -188,12 +162,11 @@ impl fmt::Debug for RecordedCall {
 struct Inner {
     scripts: HashMap<String, VecDeque<Reply>>,
     calls: Vec<RecordedCall>,
-    nonces: HashMap<String, i64>,
 }
 
 struct Shared {
     origin: String,
-    keys: Vec<HookKey>,
+    verifier: HookVerifier,
     state: Mutex<Inner>,
     down: AtomicBool,
     reservations: AtomicU64,
@@ -244,9 +217,10 @@ impl FakeHook {
             .set_nonblocking(true)
             .expect("a non-blocking listener");
         let addr = listener.local_addr().expect("the listener's address");
+        let origin = format!("http://{addr}");
         let shared = Arc::new(Shared {
-            origin: format!("http://{addr}"),
-            keys,
+            verifier: HookVerifier::new(origin.clone(), keys, now_ms).with_replay_protection(),
+            origin,
             state: Mutex::new(Inner::default()),
             down: AtomicBool::new(false),
             reservations: AtomicU64::new(0),
@@ -353,86 +327,6 @@ fn header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers.get(name)?.to_str().ok()
 }
 
-/// Base-10 ASCII digits, no sign, no leading zero (a lone `0` is allowed).
-fn decimal(value: &str) -> Option<i64> {
-    let ok = !value.is_empty()
-        && value.bytes().all(|b| b.is_ascii_digit())
-        && (value == "0" || !value.starts_with('0'));
-    if ok { value.parse().ok() } else { None }
-}
-
-fn lower_hex(value: &str, len: usize) -> bool {
-    value.len() == len
-        && value
-            .bytes()
-            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-}
-
-/// The §7.1 checks. `Err` names the check that failed.
-fn verify(shared: &Shared, headers: &HeaderMap, path: &str, body: &[u8]) -> Result<(), String> {
-    let get = |name: &str| header(headers, name).ok_or_else(|| format!("missing {name}"));
-    if get("x-mkit-hook-version")? != "1" {
-        return Err("version is not 1".to_owned());
-    }
-    let key_id = get("x-mkit-hook-key-id")?;
-    let audience = get("x-mkit-hook-audience")?;
-    let created = get("x-mkit-hook-created-at")?;
-    let expires = get("x-mkit-hook-expires-at")?;
-    let nonce = get("x-mkit-hook-nonce")?;
-    let digest = get("x-mkit-hook-digest")?;
-    let signature = get("x-mkit-hook-signature")?;
-    let key = shared
-        .keys
-        .iter()
-        .find(|key| key.key_id == key_id)
-        .ok_or("unknown key id")?;
-    let now = now_ms();
-    if key.not_before_ms.is_some_and(|t| now < t) || key.not_after_ms.is_some_and(|t| now > t) {
-        return Err("key outside its validity bounds".to_owned());
-    }
-    if audience != shared.origin {
-        return Err("audience is not this hook's origin".to_owned());
-    }
-    let created = decimal(created).ok_or("created-at is not canonical decimal")?;
-    let expires = decimal(expires).ok_or("expires-at is not canonical decimal")?;
-    if expires <= created || expires - created > 300_000 {
-        return Err("validity interval out of range".to_owned());
-    }
-    if created > now + 30_000 {
-        return Err("created-at leads the clock by more than 30 s".to_owned());
-    }
-    if expires <= now {
-        return Err("request expired".to_owned());
-    }
-    if !lower_hex(nonce, 64) {
-        return Err("nonce is not 64 lowercase hex digits".to_owned());
-    }
-    let want = format!("body:{}", to_hex(&hash(body)));
-    if digest != want {
-        return Err("digest does not match the body".to_owned());
-    }
-    if !lower_hex(signature, 128) {
-        return Err("signature is not 128 lowercase hex digits".to_owned());
-    }
-    let canonical = format!(
-        "mkit-hook:v1\n{key_id}\n{audience}\n{path}\n{digest}\n{created}\n{expires}\n{nonce}"
-    );
-    let mut sig = [0u8; 64];
-    for (i, byte) in sig.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&signature[i * 2..i * 2 + 2], 16).map_err(|_| "bad hex")?;
-    }
-    VerifyingKey::from_bytes(&key.public_key)
-        .and_then(|k| k.verify_strict(&hash(canonical.as_bytes()), &Signature::from_bytes(&sig)))
-        .map_err(|_| "signature does not verify".to_owned())?;
-    // Replay: a nonce is remembered until its window closes.
-    let mut state = shared.lock();
-    state.nonces.retain(|_, until| *until > now);
-    if state.nonces.insert(nonce.to_owned(), expires).is_some() {
-        return Err("nonce replayed".to_owned());
-    }
-    Ok(())
-}
-
 fn respond(reply: &Reply) -> Response<Body> {
     let mut builder =
         Response::builder().status(StatusCode::from_u16(reply.status).unwrap_or(StatusCode::OK));
@@ -470,7 +364,16 @@ async fn handle(State(shared): State<Arc<Shared>>, request: Request<Body>) -> Re
         .unwrap_or_default()
         .to_owned();
     let verdict = if parts.method == axum::http::Method::POST && !procedure.is_empty() {
-        verify(&shared, &parts.headers, &path, &body)
+        let pairs: Vec<(&str, &str)> = parts
+            .headers
+            .iter()
+            .filter_map(|(name, value)| Some((name.as_str(), value.to_str().ok()?)))
+            .collect();
+        shared
+            .verifier
+            .verify(&path, &pairs, &body)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
     } else {
         Err("not a hook procedure".to_owned())
     };
