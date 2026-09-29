@@ -82,6 +82,20 @@ impl HookSigner {
         Ok(self)
     }
 
+    /// The key id this signer's signatures name.
+    #[must_use]
+    pub fn key_id(&self) -> &str {
+        &self.key_id
+    }
+
+    /// The Ed25519 public key of this signer, for the §7.2 key list.
+    #[must_use]
+    pub fn public_key(&self) -> [u8; 32] {
+        SigningKey::from_bytes(&self.seed)
+            .verifying_key()
+            .to_bytes()
+    }
+
     /// The eight §7.1 headers for one attempt: `created_ms` and the fresh
     /// `nonce` are supplied so a test can reproduce a vector.
     ///

@@ -1524,7 +1524,7 @@
   },
   {
     "id": "3.8",
-    "title": "Native hook channels: HTTP and signed webhook outcome sink",
+    "title": "Native hook channels: signed HTTPS hook channel and hook flags",
     "milestone": "M3",
     "track": "native",
     "depends_on": [
@@ -1532,7 +1532,7 @@
       "3.4"
     ],
     "size": "M",
-    "summary": "Adds an HTTP hook channel with loopback-only plain HTTP and a signed webhook OutcomeSink, with binary config keys.",
+    "summary": "Adds an HTTPS hook channel (loopback-only plain HTTP, no redirects, streamed size cap) and the `--hook-*-url` flags, key file, key-role separation and wiring; the webhook outcome sink is `RemoteOutcomes<HttpChannel>` (R-167).",
     "human_action": false,
     "area_gates": [
       "rust",
@@ -1541,7 +1541,7 @@
   },
   {
     "id": "3.9",
-    "title": "Worker hook channels: service binding and Queue outcomes",
+    "title": "Worker hook channels: service binding and HookSet-generic entry points",
     "milestone": "M3",
     "track": "worker",
     "depends_on": [
@@ -1549,13 +1549,32 @@
       "3.5"
     ],
     "size": "M",
-    "summary": "Adds a service-binding hook channel and a Cloudflare Queue OutcomeSink, tested against a local second Worker.",
+    "summary": "Adds an unsigned service-binding hook channel, the HOOK_ROLES vars, HookSet-generic fetch and Durable Object entry points and a wrangler hook harness; the Queue outcome sink moves to 3.9b (R-168).",
     "human_action": false,
     "area_gates": [
       "rust",
       "wasm",
       "workers",
       "conf-wrangler"
+    ]
+  },
+  {
+    "id": "3.9b",
+    "title": "Worker Queue outcome sink and spec amendment (Stage 2, R-154)",
+    "milestone": "M3",
+    "track": "worker",
+    "depends_on": [
+      "3.9"
+    ],
+    "size": "S",
+    "summary": "Stage 2: a Cloudflare Queue OutcomeSink whose durable enqueue is the acknowledgement. Needs a SPEC-SERVER §7.3/§8 amendment with human review first (R-168).",
+    "human_action": true,
+    "area_gates": [
+      "rust",
+      "wasm",
+      "workers",
+      "conf-wrangler",
+      "docs"
     ]
   },
   {

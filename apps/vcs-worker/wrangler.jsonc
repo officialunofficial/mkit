@@ -43,6 +43,8 @@
     // comma-separated, `#` comments allowed. NAMESPACE_POLICY=any admits
     // every namespace and requires UNSAFE_OPEN_NAMESPACES=true (D27;
     // development only).
+    // HOOK_ROLES=admit,outcome (with the ADMISSION_HOOK binding below),
+    // HOOK_TIMEOUT_MS and AUTHORIZER_ROLE: see README.md "Remote hooks".
     // Write grants are off unless GRANT_SCHEMES (comma-separated owner schemes)
     // is set; it needs ADDRESSING=multi, and the audience is AUTH_AUDIENCE.
     // WEBAUTHN_RPS lists relying parties as `id=origin[,origin...]` entries
@@ -51,6 +53,15 @@
     // Jurisdiction (eu, us, fedramp) is fixed for the deployment lifetime:
     // changing it re-maps all names to new, empty objects.
   },
+
+  // Remote hooks (WP-3.9): to run authorization, admission or outcome delivery
+  // in another Worker, bind it here and set HOOK_ROLES in `vars` (a comma list
+  // of authorize, admit and outcome; no default). The hook Worker must have no
+  // public route (workers_dev and preview_urls off): an unsigned service
+  // binding is only safe if nothing else can reach it (SPEC-SERVER §7.3).
+  // "services": [
+  //   { "binding": "ADMISSION_HOOK", "service": "my-admission-hook" }
+  // ],
 
   // Smart Placement: run the Worker close to its back-end (the RefStore DO +
   // R2), not just at the edge nearest the client.

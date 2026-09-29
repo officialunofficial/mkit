@@ -95,13 +95,13 @@ impl EncServer {
         let shutdown = Shutdown::new();
         let stop = shutdown.clone();
         // The relay driver delivers D34's indexes; absent under Single.
-        let _timers = services
+        let timers = services
             .timers
             .take()
             .map(|driver| runtime.block_on(driver.start(shutdown.clone())).unwrap());
         let served = runtime.spawn(async move { enc::serve(listener, service, &opts, stop).await });
         Self {
-            _timers,
+            _timers: timers,
             addr,
             pubkey,
             shutdown,

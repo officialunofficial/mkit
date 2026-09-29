@@ -105,8 +105,8 @@ pub use faults::{
 };
 pub use hooks::{
     ADMISSION_EXPOSE_HEADERS, Admission, AdmissionDecision, AdmissionInput, Authorizer, Challenge,
-    CredentialHeader, DefaultAdmission, HookSet, Hooks, NoOutcomes, NoPreReceive, NoReceipts,
-    OpenAuthorizer, OutcomeSink, PreReceive, ReceiptSigner,
+    Choice, CredentialHeader, DefaultAdmission, HookSet, Hooks, NoOutcomes, NoPreReceive,
+    NoReceipts, OpenAuthorizer, OutcomeSink, PreReceive, ReceiptSigner,
 };
 #[cfg(feature = "ssh")]
 pub(crate) use implicit::IMPLICIT_PACKMAP_UNKNOWN;
