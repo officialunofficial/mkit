@@ -93,12 +93,13 @@ pub(crate) async fn suite_with(
         origin
             .trim_start_matches("http://")
             .clone_into(&mut flags[1]);
+        let log = std::fs::File::create(aux.path().join("binary.log")).unwrap();
         child = Some(OwnedChild(
             std::process::Command::new(env!("CARGO_BIN_EXE_mkit-server"))
                 .arg("serve")
                 .args(&flags)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
+                .stdout(log.try_clone().unwrap())
+                .stderr(log)
                 .spawn()
                 .unwrap(),
         ));
@@ -145,6 +146,14 @@ pub(crate) async fn suite_with(
     };
     for filter in filters {
         let report = run(&target, Some(filter)).await;
+        if binary && !report.failures().is_empty() {
+            std::fs::copy(
+                aux.path().join("binary.log"),
+                std::path::Path::new(&std::env::var("TMPDIR").unwrap())
+                    .join("mpp-binary-failure.log"),
+            )
+            .unwrap();
+        }
         super::judge(&report, &[]);
         assert!(
             report.skips().is_empty(),

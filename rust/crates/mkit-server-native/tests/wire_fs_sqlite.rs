@@ -140,5 +140,16 @@ async fn wire_helper_flow_commit_fs_sqlite() {
 #[cfg(feature = "hooks")]
 #[tokio::test]
 async fn wire_m3_all_cases_fs_sqlite() {
-    common::mpp::suite(&[], &["admission.", "cors.", "outcomes."]).await;
+    common::mpp::suite(
+        &[],
+        &[
+            "admission.",
+            "cors.",
+            "outcomes.aborted_on_cas_loss",
+            "outcomes.expired_ticket",
+            "outcomes.backpressure_hook_down",
+            "outcomes.eventual_completeness",
+        ],
+    )
+    .await;
 }

@@ -145,6 +145,8 @@ pub enum Feature {
     HookStub,
     /// Test-only short ticket lifetime.
     ShortTickets,
+    /// Platform may combine repeated challenge fields per RFC 9110.
+    CombinedChallengeFields,
     /// Tiny configured backlog cap.
     BacklogCap,
     /// Indexed mode (M4).
@@ -161,7 +163,7 @@ pub enum Feature {
     Admin,
 }
 
-const FEATURE_NAMES: [(Feature, &str); 26] = [
+const FEATURE_NAMES: [(Feature, &str); 27] = [
     (Feature::Bearer, "bearer"),
     (Feature::AuthV2, "auth-v2"),
     (Feature::AtomicAdvance, "atomic-advance"),
@@ -182,6 +184,10 @@ const FEATURE_NAMES: [(Feature, &str); 26] = [
     (Feature::HookStub, "hook-stub"),
     (Feature::ShortTickets, "short-tickets"),
     (Feature::BacklogCap, "backlog-cap"),
+    (
+        Feature::CombinedChallengeFields,
+        "combined-challenge-fields",
+    ),
     (Feature::IndexedMode, "indexed-mode"),
     (Feature::HttpObjects, "http-objects"),
     (Feature::Leases, "leases"),

@@ -79,7 +79,7 @@ for filter in admission. cors. outcomes.; do
     "${runner}" wire --base-url "${origin}" --auth auth-v2 --audience "${origin}" \
         --repository default --random-signer --atomic-advance --milestone M3 --sharding single \
         --hook-stub "${upstream}" --backlog-cap 16 \
-        --features admission,hook-stub,tickets,timers,short-tickets,backlog-cap \
+        --features admission,hook-stub,tickets,timers,short-tickets,backlog-cap,combined-challenge-fields \
         --filter "${filter}" >"${work}/${filter}tap" 2>&1 || {
             cat "${work}/${filter}tap" >&2
             tail -n 80 "${work}/wrangler.log" >&2

@@ -151,16 +151,24 @@ struct Credential {
 /// # Errors
 /// Malformed challenge; the error text never quotes it.
 pub fn credential_for(value: &str) -> Result<String, &'static str> {
-    fn field<'a>(value: &'a str, name: &str) -> Option<&'a str> {
-        value.split(", ").find_map(|p| {
-            p.strip_prefix(&format!("{name}=\""))
-                .and_then(|p| p.strip_suffix('"'))
+    let challenges = crate::wire::challenges::parse(value)?;
+    let selected = challenges
+        .iter()
+        .find(|c| {
+            c.scheme.eq_ignore_ascii_case("Payment")
+                && c.params.contains_key("id")
+                && c.params.contains_key("expires")
         })
-    }
-    let value = value.strip_prefix("Payment ").unwrap_or(value);
+        .ok_or("stub payment challenge missing")?;
     let challenge = ChallengeId {
-        id: field(value, "id").ok_or("challenge id missing")?.into(),
-        expires: field(value, "expires")
+        id: selected
+            .params
+            .get("id")
+            .ok_or("challenge id missing")?
+            .clone(),
+        expires: selected
+            .params
+            .get("expires")
             .ok_or("challenge expiry missing")?
             .parse()
             .map_err(|_| "invalid challenge expiry")?,

@@ -477,6 +477,79 @@ mod tests {
         .unwrap()
     }
 
+    // Section D diagnostic: a second terminal outcome arrives inside the first
+    // sink await. Exercise the unchanged production handler deterministically.
+    struct AppendDuringAck(Arc<MemoryKv>);
+    impl OutcomeSink for AppendDuringAck {
+        async fn deliver(&self, outcome: &Outcome) -> Result<(), DeliveryError> {
+            assert_eq!(outcome.reservation_id, "first");
+            let prior = codec::encode_reservation(&ReservationV1::Ticketed { ticket_id: [8; 32] });
+            let p = partition();
+            let os = self.0.get(&p, &keys::outbox_sequence()).await.unwrap();
+            let oc = self.0.get(&p, &keys::outcome_backlog()).await.unwrap();
+            let mut outbox = OutboxBuilder::new(os.as_ref(), oc.as_ref()).unwrap();
+            self.0
+                .apply(
+                    &p,
+                    Batch::new().put(keys::reservation("second").unwrap(), prior.clone()),
+                )
+                .await
+                .unwrap();
+            outbox.outcome(
+                "second",
+                &prior,
+                Terminal::new(ReservationV1::Aborted {
+                    repository: "repo".into(),
+                    occurred_at_ms: 100,
+                    reason: codec::AbortReason::RefConflict,
+                    detail: String::new(),
+                })
+                .unwrap(),
+            );
+            let mut batch = Batch::new();
+            outbox
+                .try_finish(&mut batch.preconditions, &mut batch.writes)
+                .unwrap();
+            assert_eq!(
+                self.0.apply(&p, batch).await.unwrap(),
+                BatchOutcome::Committed
+            );
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "Section D: concurrent append during acknowledgment strands an outcome"]
+    async fn diagnostic_append_during_ack_strands_an_outcome() {
+        let clock = Arc::new(ManualClock::new(100));
+        let store = Arc::new(MemoryKv::with_clock(clock.clone()));
+        seed(&store, &["first"]).await;
+        let report = fire(
+            &store,
+            &clock,
+            Arc::new(AppendDuringAck(store.clone())),
+            100,
+        )
+        .await;
+        assert_eq!(report.fired, 1);
+        assert_eq!(backlog_rows(&store).await, 1);
+        let (start, end) = keys::class_range(keys::TAG_TIMER);
+        let timers = store
+            .scan(&partition(), &start, &end, None, 10)
+            .await
+            .unwrap();
+        assert!(timers.entries.is_empty(), "delivery timer disappeared");
+        let (start, end) = keys::class_range(keys::TAG_OUTCOME_PENDING);
+        let pending = store
+            .scan(&partition(), &start, &end, None, 10)
+            .await
+            .unwrap();
+        assert_eq!(pending.entries.len(), 1);
+        let report = fire(&store, &clock, Arc::new(Capture::default()), 1_000_000).await;
+        assert_eq!(report.fired, 0, "no wake even after advancing time");
+        assert_eq!(backlog_rows(&store).await, 1);
+    }
+
     #[tokio::test]
     async fn delivers_in_sequence_and_acks_synthetic_locally() {
         let clock = Arc::new(ManualClock::new(100));

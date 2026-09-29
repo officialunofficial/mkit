@@ -67,19 +67,19 @@
 //! | Case | Requires | Asserts |
 //! |---|---|---|
 //! | `admission.concurrent_duplicate_during_admit` | `admission`, `hook-stub`, `auth-v2` | Concurrent pre-reservation admission cannot double-charge or share another caller's result |
-//! | `admission.challenge_402_typed_detail` | M3 profile; hook cases need `hook-stub`; expiry/backpressure declare their test knobs | Golden challenge detail, no-store, two WWW-Authenticate field lines and PAYMENT-REQUIRED |
-//! | `admission.deny_403_no_detail` | M3 profile; hook cases need `hook-stub`; expiry/backpressure declare their test knobs | Deny without detail or payment header |
-//! | `admission.no_state_on_challenge` | M3 profile; hook cases need `hook-stub`; expiry/backpressure declare their test knobs | Challenge leaves refs and outcome ledger empty and permits the same nonce retry |
-//! | `admission.replay_skips_admission` | M3 profile; hook cases need `hook-stub`; expiry/backpressure declare their test knobs | Stored result, unchanged Admit count and no replay receipt |
-//! | `admission.challenge_exhausted` | M3 profile; hook cases need `hook-stub`; expiry/backpressure declare their test knobs | Second challenge is terminal and changes no state |
-//! | `admission.hook_down_unavailable` | M3 profile; hook cases need `hook-stub`; expiry/backpressure declare their test knobs | Unavailable changes no state or outcome |
-//! | `admission.ticketless_upload_refused` | M3 profile; hook cases need `hook-stub`; expiry/backpressure declare their test knobs | Missing ticket is `failed_precondition` at stream end, with no challenge |
-//! | `cors.preflight_payment_headers` | M3 profile; hook cases need `hook-stub`; expiry/backpressure declare their test knobs | Payment headers allowed; preflight never reaches Admit |
-//! | `cors.expose_admission_headers` | M3 profile; hook cases need `hook-stub`; expiry/backpressure declare their test knobs | Every response exposes admission headers |
-//! | `outcomes.aborted_on_cas_loss` | M3 profile; hook cases need `hook-stub`; expiry/backpressure declare their test knobs | One CAS winner settles; `REF_CONFLICT` loser releases |
-//! | `outcomes.expired_ticket` | M3 profile; hook cases need `hook-stub`; expiry/backpressure declare their test knobs | Unused ticket expires and releases without settlement |
-//! | `outcomes.backpressure_hook_down` | M3 profile; hook cases need `hook-stub`; expiry/backpressure declare their test knobs | Backlog blocks new admission, preserves reads and ticketed writes, then drains |
-//! | `outcomes.eventual_completeness` | M3 profile; hook cases need `hook-stub`; expiry/backpressure declare their test knobs | Nine retained outcomes eventually complete under the Free sink budget |
+//! | `admission.challenge_402_typed_detail` | `admission`, `hook-stub`, `auth-v2` | Golden challenge detail, no-store, ordered RFC 9110 challenges (native separate lines; Worker may combine) and PAYMENT-REQUIRED |
+//! | `admission.deny_403_no_detail` | `admission`, `hook-stub`, `auth-v2` | Deny without detail or payment header |
+//! | `admission.no_state_on_challenge` | `admission`, `hook-stub`, `auth-v2` | Challenge leaves refs and outcome ledger empty and permits the same nonce retry |
+//! | `admission.replay_skips_admission` | `admission`, `hook-stub`, `auth-v2` | Stored result, unchanged Admit count and no replay receipt |
+//! | `admission.challenge_exhausted` | `admission`, `hook-stub`, `auth-v2` | Second challenge is terminal and changes no state |
+//! | `admission.hook_down_unavailable` | `admission`, `hook-stub`, `auth-v2` | Unavailable changes no state or outcome |
+//! | `admission.ticketless_upload_refused` | `admission`, `auth-v2` | Missing ticket is `failed_precondition` at stream end, with no challenge |
+//! | `cors.preflight_payment_headers` | `hook-stub` | Payment headers allowed; preflight never reaches Admit |
+//! | `cors.expose_admission_headers` | — | Every response exposes admission headers |
+//! | `outcomes.aborted_on_cas_loss` | `admission`, `hook-stub`, `auth-v2`, `timers` | One CAS winner settles; `REF_CONFLICT` loser releases |
+//! | `outcomes.expired_ticket` | `admission`, `hook-stub`, `auth-v2`, `short-tickets`, `timers` | Unused ticket expires and releases without settlement |
+//! | `outcomes.backpressure_hook_down` | `admission`, `hook-stub`, `auth-v2`, `backlog-cap`, `timers` | Backlog blocks new admission, preserves reads and ticketed writes, then drains |
+//! | `outcomes.eventual_completeness` | `admission`, `hook-stub`, `auth-v2`, `backlog-cap`, `timers` | Nine retained outcomes eventually complete under the Free sink budget |
 //! | `admission.helper_flow_commit` | `admission`, `hook-stub`, `auth-v2`, `tickets`, `timers` | MPP helper flow commits and settles one outcome per reservation |
 //! | `grants.valid_ed25519` | `grants`, `multi-repo`, `auth-v2` | an ed25519 owner grants a write |
 //! | `grants.valid_secp256k1_eip191` | `grants`, `multi-repo`, `auth-v2` | a 0x secp256k1 owner grants a write |
@@ -322,6 +322,7 @@
 // TODO(M5, admin): `admin.*`.
 
 mod cases;
+pub(crate) mod challenges;
 pub mod client;
 pub mod profile;
 pub mod report;

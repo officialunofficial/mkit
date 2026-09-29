@@ -101,6 +101,25 @@ pub(super) async fn ledger(ctx: &Ctx) -> Result<serde_json::Value, Failure> {
     let reply = stub(ctx)?.get("/__stub/outcomes").await?;
     serde_json::from_slice(&reply.body).map_err(|_| Failure::Fail("invalid ledger".into()))
 }
+async fn expect_absent(ctx: &Ctx) -> CaseResult {
+    if ctx.profile().has(crate::wire::Feature::MultiRepo) {
+        super::want_code(
+            ctx.call::<mkit_transport_connect::generated::ReadRefResponse>(
+                Rpc::ReadRef,
+                &mkit_transport_connect::generated::ReadRefRequest {
+                    name: Some(ctx.head("main")),
+                    ..Default::default()
+                },
+            )
+            .await?,
+            "not_found",
+            "unallocated Multi repository",
+        )?;
+        Ok(())
+    } else {
+        ctx.expect_ref(&ctx.head("main"), None).await
+    }
+}
 pub(super) async fn prepare_ticket(
     ctx: &Ctx,
     leaf: &str,
@@ -141,6 +160,7 @@ pub(super) async fn prepare_ticket(
     Ok((advance, reply))
 }
 pub(super) async fn helper_flow_commit(ctx: Ctx) -> CaseResult {
+    let ctx = ctx.in_owned_repository()?;
     mode(&ctx, "normal", "normal").await?;
     let admit_count = calls(&ctx).await?;
     let before = snapshot(&ctx).await?;
@@ -175,6 +195,7 @@ pub(super) async fn helper_flow_commit(ctx: Ctx) -> CaseResult {
 /// Hold the first paid Admit while sending exactly the same signed bytes.
 /// Release the fixture before asserting, so a divergence cannot strand a request.
 pub(super) async fn concurrent_duplicate_during_admit(ctx: Ctx) -> CaseResult {
+    let ctx = ctx.in_owned_repository()?;
     mode(&ctx, "hold", "normal").await?;
     let before = calls(&ctx).await?;
     let ledger_before = snapshot(&ctx).await?;
@@ -275,7 +296,11 @@ pub(super) async fn wait_new(
         }
         ensure!(
             tokio::time::Instant::now() < deadline,
-            "outcome delivery deadline"
+            "outcome delivery deadline: needed {minimum}, saw {} rows, acknowledged {}",
+            rows.len(),
+            rows.iter()
+                .filter(|r| r["acknowledged"].as_u64().unwrap_or_default() > 0)
+                .count()
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -289,6 +314,7 @@ fn update(ctx: &Ctx) -> Result<Signed, Failure> {
     ))
 }
 pub(super) async fn challenge_402_typed_detail(ctx: Ctx) -> CaseResult {
+    let ctx = ctx.in_owned_repository()?;
     mode(&ctx, "golden", "normal").await?;
     let reply = post(&ctx, &update(&ctx)?).await?;
     want_error(&reply, 402, "permission_denied")?;
@@ -312,10 +338,48 @@ pub(super) async fn challenge_402_typed_detail(ctx: Ctx) -> CaseResult {
         bytes == include_bytes!("../../../../../tests/golden/transport/admission-challenge.bin"),
         "challenge golden differs"
     );
-    let field_count = reply.headers.get_all("www-authenticate").iter().count();
+    let fields: Vec<_> = reply
+        .headers
+        .get_all("www-authenticate")
+        .iter()
+        .map(|v| v.to_str().map_err(|_| "challenge header encoding"))
+        .collect::<Result<_, _>>()?;
+    if ctx
+        .profile()
+        .has(crate::wire::Feature::CombinedChallengeFields)
+    {
+        ensure!(
+            fields.len() == 1 || fields.len() == 2,
+            "challenge field count"
+        );
+    } else {
+        ensure!(fields.len() == 2, "native challenge field count");
+    }
+    let challenges = crate::wire::challenges::parse(&fields.join(", "))?;
+    ensure!(challenges.len() == 2, "challenge list count");
     ensure!(
-        reply.headers.contains_key("payment-required"),
-        "payment-required missing"
+        challenges[0].scheme.eq_ignore_ascii_case("Payment")
+            && challenges[0]
+                .params
+                .get("method")
+                .is_some_and(|v| v == "stub")
+            && challenges[0]
+                .params
+                .get("id")
+                .is_some_and(|v| v.len() == 64)
+            && challenges[1].scheme.eq_ignore_ascii_case("Payment")
+            && challenges[1]
+                .params
+                .get("id")
+                .is_some_and(|v| v == "second"),
+        "challenge list content/order"
+    );
+    ensure!(
+        reply
+            .headers
+            .get("payment-required")
+            .is_some_and(|v| v == "stub"),
+        "payment-required pass-through"
     );
     ensure!(
         reply
@@ -325,21 +389,10 @@ pub(super) async fn challenge_402_typed_detail(ctx: Ctx) -> CaseResult {
         "challenge cache policy"
     );
     mode(&ctx, "normal", "normal").await?;
-    if field_count == 1
-        && reply
-            .headers
-            .get("www-authenticate")
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| v.ends_with(", Payment id=\"second\""))
-    {
-        return Err(Failure::Skip(
-            "Section D: runtime coalesces repeated WWW-Authenticate fields; reproduced on Worker; requires an orchestrator ruling".into(),
-        ));
-    }
-    ensure!(field_count == 2, "WWW-Authenticate field count");
     Ok(())
 }
 pub(super) async fn deny_403_no_detail(ctx: Ctx) -> CaseResult {
+    let ctx = ctx.in_owned_repository()?;
     mode(&ctx, "deny", "normal").await?;
     let reply = post(&ctx, &update(&ctx)?).await?;
     want_error(&reply, 403, "permission_denied")?;
@@ -356,20 +409,26 @@ pub(super) async fn deny_403_no_detail(ctx: Ctx) -> CaseResult {
     ] {
         ensure!(!reply.headers.contains_key(name), "deny has payment header");
     }
-    ctx.expect_ref(&ctx.head("main"), None).await?;
+    expect_absent(&ctx).await?;
     mode(&ctx, "normal", "normal").await
 }
 pub(super) async fn no_state_on_challenge(ctx: Ctx) -> CaseResult {
+    let ctx = ctx.in_owned_repository()?;
     mode(&ctx, "normal", "normal").await?;
     let before = snapshot(&ctx).await?;
     let signed = update(&ctx)?;
     let challenge = post(&ctx, &signed).await?;
     want_error(&challenge, 402, "permission_denied")?;
-    ctx.expect_ref(&ctx.head("main"), None).await?;
-    ensure!(
-        want_ok(ctx.list(&ctx.head("")).await?, "challenge listing")?.is_empty(),
-        "challenged operation created refs"
-    );
+    expect_absent(&ctx).await?;
+    let listing = ctx.list(&ctx.head("")).await?;
+    if ctx.profile().has(crate::wire::Feature::MultiRepo) {
+        super::want_code(listing, "not_found", "challenged Multi repository")?;
+    } else {
+        ensure!(
+            want_ok(listing, "challenge listing")?.is_empty(),
+            "challenged operation created refs"
+        );
+    }
     ensure!(
         snapshot(&ctx).await? == before,
         "challenge generated outcome"
@@ -385,6 +444,7 @@ pub(super) async fn no_state_on_challenge(ctx: Ctx) -> CaseResult {
     Ok(())
 }
 pub(super) async fn replay_skips_admission(ctx: Ctx) -> CaseResult {
+    let ctx = ctx.in_owned_repository()?;
     mode(&ctx, "normal", "normal").await?;
     let before = snapshot(&ctx).await?;
     let (signed, first) = paid(
@@ -412,6 +472,7 @@ pub(super) async fn replay_skips_admission(ctx: Ctx) -> CaseResult {
     Ok(())
 }
 pub(super) async fn challenge_exhausted(ctx: Ctx) -> CaseResult {
+    let ctx = ctx.in_owned_repository()?;
     mode(&ctx, "always-challenge", "normal").await?;
     let before = snapshot(&ctx).await?;
     let (_, reply) = paid(
@@ -422,7 +483,7 @@ pub(super) async fn challenge_exhausted(ctx: Ctx) -> CaseResult {
     )
     .await?;
     want_error(&reply, 402, "permission_denied")?;
-    ctx.expect_ref(&ctx.head("main"), None).await?;
+    expect_absent(&ctx).await?;
     ensure!(
         snapshot(&ctx).await? == before,
         "exhausted challenge generated outcome"
@@ -430,10 +491,11 @@ pub(super) async fn challenge_exhausted(ctx: Ctx) -> CaseResult {
     mode(&ctx, "normal", "normal").await
 }
 pub(super) async fn hook_down_unavailable(ctx: Ctx) -> CaseResult {
+    let ctx = ctx.in_owned_repository()?;
     mode(&ctx, "down", "normal").await?;
     let before = snapshot(&ctx).await?;
     want_error(&post(&ctx, &update(&ctx)?).await?, 503, "unavailable")?;
-    ctx.expect_ref(&ctx.head("main"), None).await?;
+    expect_absent(&ctx).await?;
     ensure!(
         snapshot(&ctx).await? == before,
         "unavailable generated outcome"
@@ -441,6 +503,7 @@ pub(super) async fn hook_down_unavailable(ctx: Ctx) -> CaseResult {
     mode(&ctx, "normal", "normal").await
 }
 pub(super) async fn ticketless_upload_refused(ctx: Ctx) -> CaseResult {
+    let ctx = ctx.in_owned_repository()?;
     let pack = super::random_pack(64);
     let headers = ctx.auth_headers(
         Rpc::UploadPack,

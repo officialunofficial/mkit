@@ -165,3 +165,13 @@ async fn unsigned_only_when_explicitly_configured_and_control_is_redacted() {
         }
     }
 }
+
+#[test]
+fn helper_accepts_combined_ordered_challenges_with_quoted_commas() {
+    let single = r#"Payment id="test", request="a,b", expires="1999999999""#;
+    let combined = format!(r#"Basic realm="x,y", {single}, Payment id="second""#);
+    assert_eq!(
+        credential_for(&combined).unwrap(),
+        credential_for(single).unwrap()
+    );
+}

@@ -108,12 +108,42 @@ fn client_child() {
 }
 const HELPER: &str = r#"#!/bin/sh
 input=$(cat)
-id=$(printf '%s' "$input" | sed -n 's/.*id=\\"\([a-f0-9]*\)\\".*/\1/p')
-expires=$(printf '%s' "$input" | sed -n 's/.*expires=\\"\([0-9]*\)\\".*/\1/p')
+# Values may contain a challenge list. Keep the first matching MPP fields.
+id=$(printf '%s' "$input" | awk 'match($0, /Payment id=\\"[a-f0-9]+\\"/) {v=substr($0,RSTART,RLENGTH); sub(/^Payment id=\\"/,"",v); sub(/\\"$/,"",v); print v; exit}')
+expires=$(printf '%s' "$input" | awk 'match($0, /expires=\\"[0-9]+\\"/) {v=substr($0,RSTART,RLENGTH); sub(/^expires=\\"/,"",v); sub(/\\"$/,"",v); print v; exit}')
 [ -n "$id" ] && [ -n "$expires" ] || exit 2
 proof=$(printf '{"challenge":{"id":"%s","expires":%s},"payload":{"proof":"stub"}}' "$id" "$expires" | base64 | tr '+/' '-_' | tr -d '=\n')
 printf '{"Authorization":"Payment %s"}\n' "$proof"
 "#;
+#[test]
+fn exec_helper_accepts_combined_challenges() {
+    use std::io::Write as _;
+    let tmp = tempfile::tempdir().unwrap();
+    let script = tmp.path().join("helper.sh");
+    std::fs::write(&script, HELPER).unwrap();
+    let value = r#"Payment id="aabb", request="a,b", expires="1999999999", Basic realm="other,id=second", Payment id="eeff", expires="1999999998""#;
+    let input = serde_json::json!({"headers":{"www-authenticate":[value]}});
+    let mut child = Command::new("sh")
+        .arg(script)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.to_string().as_bytes())
+        .unwrap();
+    let result = child.wait_with_output().unwrap();
+    assert!(result.status.success());
+    let headers: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(
+        headers["Authorization"],
+        mkit_server_conformance::stubs::mpp::credential_for(value).unwrap()
+    );
+}
+
 #[allow(clippy::too_many_lines)] // One subprocess lifecycle keeps cleanup and leak checks together.
 fn run(scenario: &str) {
     let tmp = tempfile::tempdir().unwrap();

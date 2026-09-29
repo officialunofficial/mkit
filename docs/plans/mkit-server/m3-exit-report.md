@@ -1,236 +1,269 @@
 # M3 exit report (WP-3.7b, WP-3.12, WP-3.13; incomplete)
 
-Evidence from base `85c4adf3`, the earlier bundle commits through `70138d7f`,
-and the resumed local commit recorded by git, on 2026-09-29. Machine:
-macOS aarch64, Rust 1.95.0. Builds used `CARGO_PROFILE_DEV_DEBUG=0`,
-`CARGO_PROFILE_TEST_DEBUG=0`, the worktree's own target directory, and
-`$HOME/.cache/mkit-test-tmp/3-12-3-13` as a nonsymlinked TMPDIR.
-Other executors were active. Worker runs used `VCS_CONFORMANCE_PORT=8931`.
-No staging, deploy, fault proxy, pipeline, proto or golden change occurred.
-The only spec edit is the explicitly authorized STC §7.1 note/version row.
+Evidence from base `85c4adf3`, bundle commits through `c77f3883`, and the
+continuation commit recorded by git, on 2026-09-29. Machine: macOS aarch64,
+Rust 1.95.0. Builds used `CARGO_PROFILE_DEV_DEBUG=0`,
+`CARGO_PROFILE_TEST_DEBUG=0`, this worktree's own target directory, and
+`$HOME/.cache/mkit-test-tmp/3-12-3-13` as a nonsymlinked TMPDIR. Other
+executors were active. Worker runs used `VCS_CONFORMANCE_PORT=8931`.
+No staging, deploy, fault proxy, production pipeline, proto or golden
+change occurred. Spec edits are the two explicitly authorized rulings.
 
 **Verdict: M3 remains incomplete under a new Section D escalation.**
-The original concurrent-admission escalation is resolved by the ruling
-below. Two Worker runs now expose repeated challenge fields coalescing on
-the wire, which violates the accepted separate-field assertion. A minimal
-Worker reproduces that behavior without mkit. The adapter already appends
-the values; an inline one-line adapter fix has not been identified.
-The case has an explicit Section D skip for this observed shape. The
-Worker script rejects skips, so it cannot report a green M3 exit.
-Work is committed locally, without pushing or opening a PR under the
-common executor rules' Section D exception.
+Both earlier escalations are resolved. The Worker M3 lane passes all 15
+cases, but native FS exposes a shared outcome-delivery race. A second
+terminal outcome appended while the first is acknowledged can remain
+queued without a delivery timer. A deterministic store diagnostic proves
+this independently of runtime timing or machine load. Section D forbids
+fixing this shared handler inline; the CAS-loss case now reports a reasoned
+skip, and strict M3 lane guards reject that skip. Work is committed locally,
+without pushing or opening a PR, as the common rules' Section D exception
+requires.
 
-## 1. Native lanes
+## 1. Native lanes and the new blocker
 
-The resumed native M3 run after correcting fixture CORS configuration
-and removing the single-repository flag from Multi produced:
+The latest twelve-test focused native run completed ten tests successfully:
+S3 admission/CORS, binary admission/CORS/CAS-loss, FS-layout/bearer, and
+seven exec-helper/e2e tests. Multi initially failed because the fixture
+read a fresh, unallocated repository as if it existed; after signing an
+owner repository and expecting `not_found` until allocation, its isolated
+rerun passed in 1.248 seconds. FS passes all nine admission and both CORS
+cases, but its CAS-loss outcome stage times out. Two isolated FS reruns
+fail after about 60 seconds with the same redacted diagnostic:
 
 ```text
-S3+SQLite: admission 9/9 and CORS 2/2 passed; isolated rerun passed in 1.430 s.
-FS+SQLite: admission 9/9 and CORS 2/2 passed;
-  outcomes.aborted_on_cas_loss and outcomes.expired_ticket passed;
-  backpressure and eventual completeness failed in the fixture.
-Binary: admission 9/9 and CORS 2/2 passed;
-  CAS-loss stage exceeded nextest's 60-second ceiling.
-Multi: admission requests returned 400 before reaching Admit.
-Summary: 1 passed, 2 failed, 1 timed out (four lane tests).
+not ok 1 - outcomes.aborted_on_cas_loss
+  # outcome delivery deadline: needed 2, saw 1 rows, acknowledged 1
 ```
 
-The remaining native harness corrections are not server-bug claims:
-Multi must sign and read a namespaced owner repository rather than the
-profile's literal `default`; the backlog guard checks strictly greater
-than the cap, so setup must exceed it before expecting rejection.
-The subsequent eventual-completeness failure followed the undrained
-backpressure fixture. Binary CAS-loss delivery/teardown needs diagnosis;
-its timeout is not classified as machine load without an isolated pass.
+Both competing requests finish: one succeeds, the other returns the stored
+ref-conflict result. The repository has exactly one winning value. The
+missing second terminal delivery is not an assertion about the duplicate
+request's status or the earlier held-Admit ruling.
 
-FS-layout/bearer now declares M3 and explicitly expects hook-case skips
-under R-165, while its CORS case remains independent. This updated lane
-has not completed its final run.
+The ignored diagnostic
+`timers::outcome_delivery::tests::diagnostic_append_during_ack_strands_an_outcome`
+in `mkit-server/src/timers/outcome_delivery.rs` uses the unchanged production
+handler and MemoryKv with an injectable clock. It seeds one Committed
+outcome, appends an Aborted outcome inside the first sink's `deliver`, and
+then lets that first acknowledgment complete. It proves:
 
-## 2. Worker lane and the orchestrator ruling
+```text
+First tick: fired = 1; backlog = 1; pending index rows = 1; timer rows = 0.
+After advancing time to 1,000,000: fired = 0; backlog remains 1.
+Diagnostic: 1 passed, 959 filtered out, 0.04 seconds.
+```
 
-Leg W now uses a Rust `stub-hook --unsigned` process on numeric loopback,
-an isolated JS raw-byte forwarder, and one wrangler multi-worker session
-with `wrangler.hooks.jsonc`. The script configures test-only row cap 16
-and ticket TTL 10,000 ms. The main conformance script accepts `--hooks`.
-The Free-plan completeness case prepares nine outcomes, exceeding the
-eight-row per-alarm sink budget, and polls for acknowledged completion;
-that Worker case has not run because the admission filter stops first.
+Reproduce from `rust/`, with the build environment above:
 
-The 2026-09-29 ruling resolves the earlier held-Admit expectation:
-STC §7.1 reserves the replay record after admission. Concurrent duplicates
-that both pass replay lookup may each call Admit. Single-use payment
-credentials prevent double charging. Unary reserve/apply/result commit
-atomically; holding Admit creates no observable in-flight replay window.
-`admission.concurrent_duplicate_during_admit` replaces the former case
-and checks one committed operation, one reservation and one distinct
-Committed outcome. It accepts either duplicate denial or the saved
-committed result and rejects another principal receiving that result.
-The obsolete Section D skip and ignored diagnostic are removed.
+```sh
+cargo test --locked -p mkit-server --all-features \
+  diagnostic_append_during_ack_strands_an_outcome -- --ignored --nocapture
+```
+
+The diagnostic asserts the observed defect, rather than claiming the
+milestone passed. It remains ignored in ordinary gates pending a core fix.
+
+Root cause: `OutcomeDelivery::deliver` reads the initial backlog before
+awaiting the sink, then reads a fresh backlog for acknowledgment planning.
+Its `delivered == backlog.rows` completion check uses the initial count.
+With one original row and one concurrent append, it plans acknowledgment
+against fresh count two but returns `Fired::Done`, deleting the timer while
+one row remains. The concurrent append sees a nonempty backlog and does
+not create another kick timer. A fix must base completion on the guarded
+current backlog or preserve a wake for concurrent appends, with regression
+coverage for the acknowledgment races. This is a shared handler change,
+not a one-line adapter correction; it requires an orchestrator ruling or
+a prerequisite fix. No production correction is made here.
+
+The wire case is retained in full behind an explicit Section D skip.
+Earlier passing binary/Worker runs show that the race is schedule dependent;
+the deterministic diagnostic establishes that it is not merely a slow test.
+FS expiry passed historically, but FS backpressure/eventual-completeness
+have not completed a final run because the preceding CAS-loss stage fails.
+The backlog fixture now exceeds the strictly-greater-than cap before
+expecting rejection. FS-layout/bearer explicitly lists unsupported hook
+cases under R-165 while exercising its independent CORS case.
+
+## 2. Worker lane and both orchestrator rulings
+
+Leg W runs a Rust `stub-hook --unsigned` on numeric loopback behind a
+raw-byte JS forwarder and one wrangler multi-worker session using
+`wrangler.hooks.jsonc`. Test-only knobs set backlog rows to 16 and ticket
+TTL to 10,000 ms. The runner declares `combined-challenge-fields` on this
+lane; native lanes continue to require two response field lines.
+
+The first ruling preserves STC §7.1's ordering: replay reservation follows
+Admit. Concurrent duplicates that both pass replay lookup may each call
+Admit; payment credentials must be single-use. Unary reserve/apply/result
+commit atomically, so holding Admit creates no observable in-flight window.
+`admission.concurrent_duplicate_during_admit` checks one committed operation,
+one reservation and one distinct Committed outcome. It allows denial or the
+saved committed result and rejects another caller receiving that result.
 Committed replay without another Admit remains the lost-response evidence.
+The former skip and ignored held-Admit diagnostic are removed.
 
-Two runs of `bash scripts/vcs-worker-hooks.sh` produced the same result:
+The second ruling accepts Workers' platform combination of repeated
+WWW-Authenticate fields under RFC 9110 §5.3 when challenge order is
+preserved. STC §5.1 and SPEC-SERVER §6.3 now say servers SHOULD emit separate
+lines, and clients/helpers MUST parse values as RFC 9110 §11.6.1 challenge
+lists. PAYMENT-REQUIRED is unaffected. The wire case compares semantics and
+order using a bounded parser; unit tests cover quoted commas, escaped
+quotes, token68, empty list members, whitespace and malformed input.
+R-166 and R-173 record this platform limitation and ruling. The old header
+skip and escalation text are removed.
+
+The standalone Worker hook phase, before the new CAS-loss skip, passed:
 
 ```text
-not ok 1 - admission.challenge_402_typed_detail
-  # WWW-Authenticate lines coalesced
-ok 2 - admission.deny_403_no_detail
-ok 3 - admission.no_state_on_challenge
-ok 4 - admission.replay_skips_admission
-ok 5 - admission.challenge_exhausted
-ok 6 - admission.hook_down_unavailable
-ok 7 - admission.ticketless_upload_refused
-ok 8 - admission.concurrent_duplicate_during_admit
-ok 9 - admission.helper_flow_commit
-# pass 8 fail 1 skip 0
+admission: 9 passed, 0 failed, 0 skipped
+cors:      2 passed, 0 failed, 0 skipped
+outcomes:  4 passed, 0 failed, 0 skipped
 ```
 
-A separate minimal local Worker, with no Rust or mkit dependency, appends
-`Basic realm=one` and `Bearer realm=two` independently and returns 402.
-Curl observes:
+This includes Committed/Aborted/Expired ledger behavior, backpressure
+recovery and Free-plan eventual completion of nine outcomes, exceeding the
+eight-row per-alarm sink budget. These are actual wrangler runs, not mocks.
 
-```http
-HTTP/1.1 402 Payment Required
-WWW-Authenticate: Basic realm=one, Bearer realm=two
-```
+The full `vcs-worker-conformance.sh --test-faults --hooks` run stopped in
+its unchanged M1 phase: 86 passed, two multipart cases returned HTTP 500
+`Network connection lost`, and 115 skipped. A second full run passed cold
+start (30/30) but was stopped after the new Section D defect was proved.
+Neither full run reached its hooks phase. This does not replace the green
+standalone M3 evidence or establish a complete Worker gate pass. The main
+script's `--hooks` double-shift was corrected; all additive M1 rows remain.
 
-The unchanged Worker adapter's `response_header_plan` and
-`copy_response_headers` already set the first value and append the second.
-The installed worker 0.8.6 delegates append to Web Headers. Cloudflare's
-[Headers documentation](https://developers.cloudflare.com/workers/runtime-apis/headers/)
-identifies Set-Cookie as the special nonfolded response header.
-The minimal reproduction establishes that adjusting this adapter's
-append loop cannot alone satisfy the separate-field requirement.
-A runtime/proxy solution or a new orchestrator ruling is needed; neither
-is silently implemented here. The committed case reports a reasoned skip
-for exactly the observed one-field shape, never success. The script's
-no-skip guard keeps the milestone blocked.
+## 3. Public hooks and admission end to end
 
-## 3. Admission end to end and public hooks
-
-WP-3.7b publishes JSON-enabled hooks.v1 messages, HookSigner and HookVerifier
+WP-3.7b publishes JSON-enabled hooks.v1 types, HookSigner and HookVerifier
 under `mkit_rpc::hooks`, with server re-exports. Public-only integration
 tests decode all request goldens, build all response goldens and verify
-every signature vector. Freshness, wasm dependency graph and focused
-RPC/server tests, doctests and clippy passed in the earlier run.
-Generated Debug prints credential fields; prominent module and
-AdmitRequest warnings document this. Buffa redaction needs a proto option,
-which the brief forbids. Server redacting wrappers remain intact.
+every signature vector. Earlier focused RPC/server tests, doctests,
+freshness and wasm dependency checks passed. `cargo-semver-checks` 0.50.0
+against `origin/feat/mkit-server` with all features now passes: 196 checks
+passed, 58 skipped; no semver update required.
 
-WP-3.12's MPP fixture binds credentials server-side with a fresh HMAC
-secret and enforces single use. Its redacted ledger deduplicates complete
-terminal bodies per reservation; delivery may repeat, settlement may not.
-Loopback controls expose counts and outcome summaries, not credentials.
-Leg N uses the existing public `remote_dispatch::open_trusted` Config entry
-and `push_branch_steps`; no ExecResponder re-export was needed. The
-POSIX helper uses an absolute temporary executable path and explicit trust.
+Generated Debug prints credential fields. Module and AdmitRequest warnings
+explain this; buffa redaction requires a proto option, outside the brief's
+allowed scope. The server keeps its redacting wrappers. Implementers are
+instructed to use Default or constructors for additive evolution.
 
-Earlier native e2e evidence: six tests passed in 33.84 seconds, covering
-commit/SIGTERM drain, no helper, reserved header rejection, second 402,
-hook down, and the isolated child entry. The resumed test adds an exact
-receipt-value leak assertion; its final rerun remains pending.
-Earlier conformance/native focused nextest passed 39 tests, with only
-the now-removed escalation diagnostic ignored; that is historical
-evidence, not a final gate pass for this tree.
+WP-3.12's Rust fixture binds credentials server-side with a fresh HMAC secret
+and enforces single use. The redacted ledger deduplicates complete terminal
+bodies per reservation; delivery may repeat, settlement may not. Loopback
+controls return counts and outcome summaries, never payment credentials.
+
+Leg N uses existing public `remote_dispatch::open_trusted` and
+`push_branch_steps` with Config; no ExecResponder re-export was needed.
+All seven native integration tests pass, including actual server binary
+commit/SIGTERM drain, no helper, reserved-header rejection, second-402
+termination, normal hook-down retries, the child entry and the new combined
+challenge helper check. Exact credential/receipt leak assertions pass.
+
+Transport/CLI inspection found raw WWW-Authenticate values forwarded by
+`filter_headers` into helper stdin, without challenge splitting. CLI.md
+now documents that each value may carry multiple challenges; typed details
+remain separately available. No client production behavior changed. The
+Rust MPP helper uses the challenge-list parser. The POSIX sh fixture selects
+the first Payment id/expiry without splitting commas; its test combines
+multiple schemes, later Payment credentials and a quoted comma. The
+existing CLI stdin test also now checks a combined raw field value and passed
+in the interrupted workspace run (0.847 seconds). The CLI helper trust/filter
+integration test passed there too (10.831 seconds).
 
 ## 4. Wire conformance and deviations
 
-Fifteen M3 cases are registered and documented: nine admission, two CORS
-and four outcome cases. Shared native fixtures, Worker profile knobs and
-strict lane judging are implemented. Backlog and TTL Worker vars exist
-only under `test-faults`; tests cover bounded injection and release
-configuration never looking them up.
+Fifteen M3 cases are registered/documented: nine admission, two CORS and
+four outcome cases. Shared native fixtures use real hook configuration and
+the real timer driver; knobs are set in-process. Worker vars
+TEST_OUTBOX_BACKLOG_ROWS and TEST_TICKET_TTL_MS are test-faults-only.
 
-The missing-ticket case follows STC §5's contract: `failed_precondition`
-at Connect stream end, no challenge detail and no 402. The research
-brief's plain-403 expectation was stale. No pipeline status was changed.
-The duplicate case follows the explicit ruling in §2. Existing M1 rows
-and TODOs are retained; the resolved M3 TODO block is removed.
+The missing-ticket case follows STC §5: failed_precondition at Connect
+stream end, no challenge detail and no 402. The research's plain-403
+expectation was stale. Both adapter cases pass without changing status code
+implementation. Duplicate behavior and combined headers follow the fixed
+rulings in §2. M1 TODOs/table rows and lane additions remain intact.
 
-## 5. Release and server-free CLI checks
+The sole remaining Section D skip is the CAS-loss delivery case described
+in §1. Strict native/Worker no-skip checks prevent a false M3 exit.
 
-The release feature guard rejects `stubs` and scans for `/__stub/`,
-`TEST_OUTBOX_BACKLOG_ROWS` and `TEST_TICKET_TTL_MS`, alongside the
-existing test-fault markers. Synthetic release-guard tests passed earlier.
+## 5. Release guards
 
-A real production server was built with the guard's release feature set:
+Release guards reject `stubs` and scan for `/__stub/`,
+TEST_OUTBOX_BACKLOG_ROWS and TEST_TICKET_TTL_MS, alongside existing markers.
+Synthetic guard tests pass. The real native production release build and
+artifact feature/marker guard passed (8m 22s; 323 packages; production
+native features enc/http/s3/sqlite and core connect/fs/sql/ssh).
 
-```text
-Finished release profile [optimized] in 8m 22s
-mkit-server: 323 packages compiled
-mkit-server-native=['enc','http','s3','sqlite']
-mkit-server=['connect','fs','sql','ssh']
-check-release-artifact-features: OK (server): mkit-server
-```
+The Worker test-faults wasm release build passes. Default Worker wasm,
+its compiled-marker check and final configuration tests in both feature
+modes remain pending. Earlier RPC hooks wasm and server remote-hooks
+wasm checks passed; final wasm32 clippy remains pending.
 
-The Worker test-faults wasm release build completed in both hook runs.
-A final default Worker build, compiled-marker check and both configuration
-unit-test runs remain pending. The CLI baseline gate ran as part of
-ci-scripts but that overall recipe failed on the root lock refresh after
-adding the native e2e's base64 dev dependency; metadata refreshed it.
-No successful final ci-scripts pass is claimed.
-cargo-semver-checks 0.50.0 is now installed privately; its comparison
-against the base remains pending.
+## 6. Gates and evidence files
 
-## 6. Gate results
+Logs live under `$HOME/.cache/mkit-test-tmp/3-12-3-13`; they contain no
+expected payment credential or receipt values.
 
-- Final workspace all-target/all-feature clippy passed (17.56 seconds)
-  before the explicit coalescing skip; final conformance/native/Worker
-  all-target/all-feature clippy also passed (29.99 seconds). The final
-  conformance all-target/all-feature recheck after narrowing the skip
-  to the observed combined value passed (1m 28s).
-- `just ci-security` passed.
-- Native production release build and artifact feature/marker guard passed.
-- Two Worker hook runs built wasm and passed eight admission cases each;
-  the repeated-field case failed and prevented later filters.
-- Native S3 M3 admission/CORS passed; FS CAS-loss and expiry passed.
-- Formatting and whitespace checks run before the continuation commit.
+| Check | Latest result/evidence |
+|---|---|
+| Conformance unit tests | Final 34 passed (0.02 s); escalation-conformance-unit.log |
+| Native focused lanes/e2e | Ten passed, Multi fixture failed then isolated pass, FS timed out; native-m3-fixed2.log, multi-final.log |
+| FS isolated | Two failures, exactly one of two outcomes delivered; native-fs-isolated.log, native-fs-diagnostic.log |
+| Deterministic shared-handler diagnostic | Defect reproduced twice (0.04 / 0.07 s); outcome-race-diagnostic-final.log, outcome-race-diagnostic-confirmed.log |
+| Worker standalone M3 | 15/15 passed before the new skip; worker-hooks-continue2.log |
+| Full Worker test-faults/hooks | M1 multipart network failures; retry stopped under Section D; worker-full-hooks-final.log, worker-full-hooks-retry.log |
+| RPC semver | Passed; semver-rpc-final.log |
+| Workspace all-target/all-feature clippy | Passed before diagnostic/skip; workspace-clippy-fixed2.log |
+| Final touched-crate clippy | Passed (13.23 s); escalation-final-clippy-fixed2.log |
+| ci-scripts / CLI baseline / wasm graph | Passed; ci-scripts-continue2.log |
+| ci-security | Passed; ci-security-continue2.log |
+| Native production artifact guard | Passed; server-release-guard.log |
+| Locked apps metadata / shell / JS syntax | Passed |
+| Full just ci | Formatting, clippy, workspace and signer builds passed; nextest interrupted under Section D: 1,685 passed, ten interrupted, 4,272 not run; just-ci-final.log |
 
-Not completed: full workspace/reverse-dependency nextest and doctests,
-warnings-as-errors docs, wasm32 clippy, semver comparison, `just ci-server`,
-final `just ci-scripts`, Worker wasm without test-faults, default Worker
-conformance, and `vcs-worker-conformance.sh --test-faults --hooks`.
-No `just ci` or complete M3 gate pass is claimed.
-
-The earlier fs multipart heap test failed under parallel cargo test and
-passed alone. Its parent comparison remains pending; it is unrelated
-to the deterministic repeated-header blocker.
+No full-gate pass is claimed. Pending: just ci-server; required four-crate
+nextest (including CLI); complete workspace/reverse-dependency nextest,
+doctests and warnings-as-errors docs; final wasm32 clippy/builds in both
+Worker feature modes; default/full Worker phases; and final gate reruns
+once the shared handler is fixed. The unrelated historical FS multipart
+heap failure passed alone; parent comparison remains pending.
 
 ## 7. PRD M3 exit criteria mapped to evidence
 
 | PRD §8 exit bullet | Test/evidence | Status |
 |---|---|---|
-| Challenge → helper → credential → commit → one distinct Committed outcome, delivered at least once | Leg N `helper_push_commits_and_sigterm_drains`; `admission.helper_flow_commit` native/Worker | Earlier native e2e and both adapter wire flows pass; final whole bundle pending |
-| Aborted work settles nothing | `outcomes.aborted_on_cas_loss`; unused upload `outcomes.expired_ticket` | FS cases pass; Worker pending |
-| Lost-response retry returns saved result without another challenge | `admission.replay_skips_admission`; 3.11 credential-retention ladder tests | Both adapter wire cases pass; final CLI suite pending |
-| Simulated old client fails fast | `no_helper_fails_after_one_attempt`; 3.10 regression | Earlier native e2e passes; final rerun pending |
-| Hard-reserved headers cannot be set through config | `reserved_helper_header_is_named_without_retry`; 3.11 filtering tests | Earlier native e2e passes; final rerun pending |
+| Challenge → helper → credential → commit → one distinct Committed outcome delivered at least once | Leg N helper_push_commits_and_sigterm_drains; admission.helper_flow_commit native/Worker | Pass; complete milestone blocked by §1 |
+| Aborted work settles nothing | outcomes.aborted_on_cas_loss; unused upload outcomes.expired_ticket | Worker/binary historical pass; FS exposes stranded delivery; not complete |
+| Lost-response retry returns saved result without another challenge | admission.replay_skips_admission; client credential-retention ladder | Both adapter wire cases pass; full CLI gate incomplete |
+| Simulated old client fails fast | no_helper_fails_after_one_attempt | Native e2e passes |
+| Hard-reserved headers cannot be set through config | reserved_helper_header_is_named_without_retry; client filtering tests | Native e2e passes; full CLI gate incomplete |
 
-## 8. Decisions, risks and follow-ups
+## 8. Decisions, review and carry-forwards
 
-Executor choices: FakeHook's additive behavior/gate API; numeric-loopback
+Executor choices: additive FakeHook behavior/gate API; numeric-loopback
 `/__stub/{mode,calls,outcomes,release}`; canonical length-delimited protobuf
-HMAC binding; Rust-owned MPP semantics behind a raw-byte JS forwarder;
+HMAC binding; Rust-owned MPP semantics behind a JS raw-byte forwarder;
 runner spellings `--hook-stub`, `--backlog-cap`, `stub-hook`, and `--hooks`.
-Native knobs remain in-process and Worker knobs remain test-faults-only.
+The combined-challenge capability is declared only by the Worker profile.
+Native knobs remain in-process and Worker vars remain test-faults-only.
 
-The required two-pass final PR review has not completed because publication
-stops under Section D. Earlier review fixed reply Debug, credential leak
-assertions and normal hook-down retry behavior. Resumed review corrected
-CORS fixture setup, single-repository flags on Multi and clippy findings.
-Outstanding native harness corrections are listed in §1.
+Local review corrected parser boundaries, quoted-comma handling and
+parameter whitespace; preserved raw CLI values; tested helper challenge
+selection; fixed Multi owner-repository allocation expectations; corrected
+backlog setup and the script double-shift; and found the shared outcome
+race. Temporary native debug tracing used during diagnosis was removed.
+A final publication review/checklist and full gates remain pending.
 
-Carry forward the repeated-field runtime ruling/fix, remaining native
-harness checks, Worker CORS/outcomes/backpressure/Free-budget cases, lane
-allowlists, final release-only Worker checks, full gates and final review.
-Before publication, merge any moved `origin/feat/mkit-server`, preserving
-M1's additive table, TODO and lane/script edits.
+The diff adds 2,074 handwritten non-test source/build-script/shell/JS lines,
+including relocated signer additions conservatively, excluding generated
+messages, tests and cfg(test) modules. This remains below the cap.
 
-The diff adds 1,842 handwritten non-test source/script/JS lines (including
-relocated signer additions conservatively; generated messages, test files
-and cfg(test) modules excluded), below the production cap.
-
-Existing scope carry-forwards remain staging after REL-1 (R-154), the
-3.9b Queue sink, RemoteError sanitization (R-140), platform invocation-log
-capture at staging (R-166 B13), and an optional real-mkit-binary script lane.
+Carry forward: fix the shared append/acknowledgment race with regression
+coverage, remove only that Section D skip/diagnostic ignore, rerun native
+FS and all gates, complete both Worker phases and final review, fetch/merge
+any moved origin/feat/mkit-server preserving additive M1 changes, then push
+and open the authorized bundle PR. Both earlier rulings are complete.
+Existing scope carry-forwards remain staging after REL-1 (R-154), the 3.9b
+Queue sink, RemoteError sanitization (R-140), platform invocation-log capture
+at staging (R-166 B13), and an optional real-mkit-binary script lane.

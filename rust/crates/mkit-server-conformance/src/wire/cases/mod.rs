@@ -690,6 +690,20 @@ impl Ctx {
             .ok_or_else(|| Failure::Skip("needs an auth v2 profile".to_owned()))
     }
 
+    /// M3 Multi cases use the main signer's owner repository and signed reads.
+    pub(super) fn in_owned_repository(mut self) -> Result<Self, Failure> {
+        if self.profile.has(Feature::MultiRepo) {
+            let owner = self.v2_signer("main")?.public_key_hex();
+            let mut profile = (*self.profile).clone();
+            if let WireAuth::AuthV2 { repository, .. } = &mut profile.auth {
+                *repository = format!("ed25519-{owner}/m3");
+            }
+            profile.sign_reads = true;
+            self.profile = Arc::new(profile);
+        }
+        Ok(self)
+    }
+
     /// The headers the profile's auth mode puts on `rpc`: none; the bearer
     /// token; or, for an auth v2 write, a fresh signature by signer
     /// `"main"` over `commit`. Reads are signed only with
