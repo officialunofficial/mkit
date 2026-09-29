@@ -251,12 +251,12 @@ pub(super) async fn async_verification_commits(ctx: Ctx) -> CaseResult {
         (&ctx.packmap("async"), Exp::Missing, &pack_id),
     );
     request.ticket_ids = vec![id];
-    let signed = sign_unary(&signer, Rpc::AdvanceRefs, &request, |env| {
+    let advance = sign_unary(&signer, Rpc::AdvanceRefs, &request, |env| {
         repository.clone_into(&mut env.repository);
     });
     let mut pending = 0;
     for _ in 0..240 {
-        match ctx.send::<AdvanceRefsResponse>(&signed).await? {
+        match ctx.send::<AdvanceRefsResponse>(&advance).await? {
             Ok(response) => {
                 ensure!(
                     pending > 0,

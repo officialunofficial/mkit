@@ -39,6 +39,9 @@ use std::collections::BTreeSet;
 const MAX_LOCAL_CLOSURE_IDS: usize = 4096;
 /// Rows per local frame lookup.
 const LOCAL_PAGE: u32 = 256;
+/// Owed children the advance looks up in the members itself, at most: the
+/// slices already did, so this only catches a member that appeared since.
+const MAX_ADVANCE_LOOKUP: usize = 64;
 
 fn storage_failed() -> ServerError {
     ServerError::unavailable("object storage request failed")
@@ -310,6 +313,25 @@ pub async fn check<B: BlobStore, N: NamespaceStore>(
                 for (id, row) in want.iter().zip(found) {
                     if row.is_some() {
                         left.remove(id);
+                    }
+                }
+            }
+            // A child that became a member after the job looked is found now,
+            // as an inline verifier would (a bounded, repository-only lookup).
+            if !left.is_empty() && left.len() <= MAX_ADVANCE_LOOKUP {
+                let want: Vec<Hash> = left.iter().copied().collect();
+                let found = resolve::locate_split(store, shards, repo, &want, metrics).await?;
+                for id in want {
+                    match found.get(&id) {
+                        Some(Ok(Some(_))) => {
+                            left.remove(&id);
+                        }
+                        Some(Err(_)) => {
+                            return Err(ServerError::invalid_argument(
+                                "object index limit exceeded",
+                            ));
+                        }
+                        _ => {}
                     }
                 }
             }

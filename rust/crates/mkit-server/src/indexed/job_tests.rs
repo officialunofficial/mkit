@@ -1671,3 +1671,23 @@ fn the_budgeted_store_charges_one_unit_per_call_however_many_keys() {
         "the refused write never landed"
     );
 }
+
+#[test]
+fn a_child_that_became_a_member_after_the_job_looked_is_found_by_the_advance() {
+    let (commit_pack, _, head, (tree, tree_raw)) = split_packs();
+    let rig = Rig::new();
+    let (ticket, id) = rig.add(&commit_pack);
+    rig.create(&ticket, id);
+    // The tree is not a member while the job looks: it stays owed.
+    rig.drive(|rig| phase(rig, &ticket.pack_id) == Phase::Recheck);
+    assert_eq!(rig.job(&ticket.pack_id).unwrap().owed, 1);
+    let error = rig.check(&[(&ticket, id)], head).unwrap_err();
+    assert_eq!(
+        error.public_message(),
+        "repository membership not yet visible"
+    );
+    // The relay catches up. The advance sees it at once; it does not wait
+    // for the job's final recheck after the lag bound.
+    seed_member(&rig, tree, &tree_raw);
+    rig.check(&[(&ticket, id)], head).unwrap();
+}
