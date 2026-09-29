@@ -144,6 +144,25 @@ requires `TICKET_KEYS` — a signed write names its repository, and uploads
 still need tickets — and writes are owner-only (STC §7.5): a signature may
 write only inside its own key's `ed25519-` namespace.
 
+Write grants (SPEC-WRITE-GRANTS) are off unless `GRANT_SCHEMES` is set, and
+need `ADDRESSING=multi`; the grant audience is `AUTH_AUDIENCE`. `wrangler.jsonc`
+ships no `GRANT_SCHEMES`.
+
+- `GRANT_SCHEMES`: the accepted owner schemes, comma-separated
+  (`ed25519`, `secp256k1-eip191`, `webauthn-p256`). Present but blank is an
+  error, never "off".
+- `WEBAUTHN_RPS`: `WebAuthn` relying parties, `id=origin[,origin...]` entries
+  separated by `;` or newlines (split on the first `=`). `webauthn-p256`
+  requires one. Blank entries and duplicate ids are refused.
+- `UNSAFE_LOOPBACK_GRANTS`: honoured only in `test-faults` builds (local
+  conformance). In a release build, setting it makes every RPC answer
+  `unavailable`; a loopback `AUTH_AUDIENCE` or relying party is never accepted
+  in production (SPEC-WRITE-GRANTS §3.2).
+
+Any invalid value, `webauthn-p256` without a relying party, a relying party
+without `GRANT_SCHEMES`, or grants without multi addressing is a config error:
+every RPC answers `unavailable` naming the var.
+
 Like `SHARDING`, `ADDRESSING` is fixed for the deployment lifetime: the first
 request records the mode in a root marker (`am 00`), and redeploying with the
 other addressing over existing data is refused (`deployment addressing

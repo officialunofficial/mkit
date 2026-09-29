@@ -41,6 +41,7 @@ mkit-server serve [--listen <ADDR>] [--listen-enc <ADDR>] --repo-root <DIR>
     [--addressing single|multi]
     [--namespace-policy allowlist|any] [--namespace-allowlist <PATH>]
     [--unsafe-open-namespaces] [--enc-repository <NS>/<NAME>]
+    [--grant-schemes <TOKENS>] [--webauthn-rp <ID=ORIGINS>]... [--unsafe-allow-loopback-grants]
     [--max-pack-bytes N] [--unary-timeout-secs 30] [--stream-timeout-secs 3600]
     [--max-concurrency 256] [--queue-timeout-secs 5]
     [--max-connections 1024] [--header-read-timeout-secs 10] [--idle-timeout-secs 60]
@@ -180,6 +181,30 @@ Under `--addressing multi`, `--listen-enc` requires `--enc-repository
 <NS>/<NAME>` naming the one repository the listener's sessions bind
 (SPEC-TRANSPORT-CONNECT §7.4), and `--unsafe-allow-any-enc-peer` is
 refused: an enc session needs the repository its peer is authorized for.
+
+### Write grants
+
+Write grants (SPEC-WRITE-GRANTS) let a namespace owner delegate writes. They
+are off unless `--grant-schemes` is set, and need `--addressing multi` with
+`--auth auth-v2`: the grant audience is the deployment's own `--audience`, so
+there is no separate audience flag.
+
+- `--grant-schemes <TOKENS>`: the accepted owner schemes, comma-separated
+  (`ed25519`, `secp256k1-eip191`, `webauthn-p256`), advertised as
+  `GetServerInfo.grant_schemes`. A blank list or an unknown token is refused.
+- `--webauthn-rp <ID=ORIGINS>` (repeatable): a `WebAuthn` relying party,
+  `id=origin[,origin...]`, split on the first `=`. `webauthn-p256` requires one;
+  a duplicate id, or a relying party without `--grant-schemes`, is refused.
+- `--unsafe-allow-loopback-grants`: development only. Without it a loopback
+  `--audience` or relying party (`localhost`, `127.0.0.1`, `[::1]`) is refused:
+  every local deployment shares one, so a grant for it would verify at all of
+  them (SPEC-WRITE-GRANTS §3.2). The flag prints a warning banner.
+
+Every bad or partial value stops the server at startup (`USAGE` or
+`CONFIG_ERROR`); none degrades to "grants off". `mkit-attest` owns all
+validation beyond syntax. The `--listen-enc` sibling pipeline serves
+transport-identity sessions, which carry no grant header, so it runs without
+grants; registered grants over ssh and enc arrive with WP-2.12.
 
 ### The enc listener (`mkit+enc://`)
 

@@ -396,3 +396,205 @@ fn indexed_with_multi_enc_is_refused_at_config_time() {
     // Indexed alone (no enc listener) still resolves.
     resolve(&extra(&multi(&f), &["--indexed"])).unwrap();
 }
+
+/// `multi()` with a production audience, so the loopback rules can be
+/// exercised on their own.
+fn production(f: &Fixture) -> Vec<String> {
+    extra(
+        &drop_flag(&multi(f), "--audience", true),
+        &["--audience", "https://vcs.example"],
+    )
+}
+
+const WEBAUTHN_RP: &str = "example.test=https://example.test";
+
+#[test]
+fn grant_flags_configure_the_verifier_and_default_to_off() {
+    let f = fixture(&namespace(1));
+    assert!(resolve(&production(&f)).unwrap().pipeline.grants.is_none());
+    let flags = extra(
+        &production(&f),
+        &[
+            "--grant-schemes",
+            "ed25519, webauthn-p256",
+            "--webauthn-rp",
+            WEBAUTHN_RP,
+            "--webauthn-rp",
+            "other.test=https://other.test,https://app.other.test",
+        ],
+    );
+    let cfg = resolve(&flags).unwrap();
+    let grants = cfg.pipeline.grants.as_ref().unwrap();
+    assert_eq!(grants.audience(), "https://vcs.example");
+    assert_eq!(
+        grants.schemes().tokens().collect::<Vec<_>>(),
+        ["ed25519", "webauthn-p256"]
+    );
+    assert!(cfg.banners().is_empty(), "no loopback banner in production");
+}
+
+#[test]
+fn grant_settings_fail_closed_and_never_degrade_to_off() {
+    let f = fixture(&namespace(1));
+    let with = |more: &[&str]| extra(&production(&f), more);
+    let cases: &[(&[&str], u8)] = &[
+        // An unknown scheme, a blank list and a blank entry.
+        (&["--grant-schemes", "rsa"], exit::USAGE),
+        (&["--grant-schemes", ""], exit::USAGE),
+        (&["--grant-schemes", "ed25519,"], exit::USAGE),
+        // A malformed relying-party entry, and a duplicate id.
+        (
+            &[
+                "--grant-schemes",
+                "ed25519,webauthn-p256",
+                "--webauthn-rp",
+                "example.test",
+            ],
+            exit::USAGE,
+        ),
+        (
+            &[
+                "--grant-schemes",
+                "ed25519,webauthn-p256",
+                "--webauthn-rp",
+                WEBAUTHN_RP,
+                "--webauthn-rp",
+                "example.test=https://other.test",
+            ],
+            exit::CONFIG_ERROR,
+        ),
+        // `webauthn-p256` without a relying party.
+        (&["--grant-schemes", "webauthn-p256"], exit::CONFIG_ERROR),
+        // A relying party, or the loopback opt-in, without any scheme.
+        (&["--webauthn-rp", WEBAUTHN_RP], exit::USAGE),
+        (&["--unsafe-allow-loopback-grants"], exit::USAGE),
+    ];
+    for (more, code) in cases {
+        let (got, message) = refusal(&with(more));
+        assert_eq!(got, *code, "{more:?}: {message}");
+    }
+}
+
+#[test]
+fn grants_need_multi_and_auth_v2() {
+    let f = fixture(&namespace(1));
+    // Single addressing under auth v2.
+    let single = extra(
+        &[
+            "--listen",
+            "127.0.0.1:0",
+            "--repo-root",
+            common::s(f.root.path()),
+            "--auth",
+            "auth-v2",
+            "--audience",
+            "https://vcs.example",
+            "--meta",
+            &f.meta,
+            "--grant-schemes",
+            "ed25519",
+        ]
+        .map(str::to_owned),
+        &[],
+    );
+    let (code, message) = refusal(&single);
+    assert_eq!(code, exit::CONFIG_ERROR, "{message}");
+    assert!(message.contains("--addressing multi"), "{message}");
+    // An enc-only Multi deployment has no auth v2 audience to bind grants to.
+    let no_auth = drop_flag(&production(&f), "--listen", true);
+    let no_auth = drop_flag(&no_auth, "--audience", true);
+    let no_auth = drop_flag(&no_auth, "--auth", true);
+    let (code, _) = refusal(&extra(&no_auth, &["--grant-schemes", "ed25519"]));
+    assert_ne!(code, exit::OK);
+}
+
+#[test]
+fn a_loopback_audience_or_relying_party_needs_the_opt_in_and_prints_its_banner() {
+    let f = fixture(&namespace(1));
+    // `multi()` serves `http://localhost`.
+    let loopback_audience = extra(&multi(&f), &["--grant-schemes", "ed25519"]);
+    let (code, message) = refusal(&loopback_audience);
+    assert_eq!(code, exit::CONFIG_ERROR, "{message}");
+    assert!(message.contains("loopback"), "{message}");
+    // A loopback relying party under a production audience.
+    let local_rp = [
+        "--grant-schemes",
+        "ed25519,webauthn-p256",
+        "--webauthn-rp",
+        "localhost=http://localhost:8787",
+    ];
+    let (code, message) = refusal(&extra(&production(&f), &local_rp));
+    assert_eq!(code, exit::CONFIG_ERROR, "{message}");
+    assert!(message.contains("loopback"), "{message}");
+    // With the opt-in both resolve, and the banner is printed.
+    for flags in [
+        extra(&loopback_audience, &["--unsafe-allow-loopback-grants"]),
+        extra(
+            &extra(&production(&f), &local_rp),
+            &["--unsafe-allow-loopback-grants"],
+        ),
+    ] {
+        let cfg = resolve(&flags).unwrap();
+        assert!(cfg.pipeline.grants.is_some());
+        assert!(
+            cfg.banners()
+                .contains(&mkit_server_native::config::UNSAFE_LOOPBACK_GRANTS_BANNER)
+        );
+    }
+}
+
+/// The enc listener's `TransportIdentity` sibling of a grants pipeline drops
+/// the grant config (a transport-identity write has no header-grant path),
+/// so the deployment starts.
+#[cfg(feature = "enc")]
+#[test]
+fn grants_and_an_enc_listener_start_together() {
+    // Config files live outside the served root: `--meta sqlite` refuses a
+    // root that already holds files it takes for refs.
+    let aux = tempfile::tempdir().unwrap();
+    let root = common::repo_root();
+    let repository = format!("{}/packs", namespace(1));
+    let write = |name: &str, text: &str| {
+        let path = aux.path().join(name);
+        std::fs::write(&path, text).unwrap();
+        common::s(&path).to_owned()
+    };
+    let allowlist = write("namespaces", &namespace(1));
+    let peers = write("peers", &format!("{}\n", "ab".repeat(32)));
+    let tickets = aux.path().join("ticket.keys");
+    common::secret_file(&tickets, format!("{TICKET_KEYS}\n").as_bytes());
+    let meta = format!("sqlite:{}", common::s(&aux.path().join("meta.sqlite3")));
+    let key = aux.path().join("server.key");
+    let flags = [
+        "--listen",
+        "127.0.0.1:0",
+        "--repo-root",
+        common::s(root.path()),
+        "--addressing",
+        "multi",
+        "--namespace-allowlist",
+        &allowlist,
+        "--auth",
+        "auth-v2",
+        "--audience",
+        "https://vcs.example",
+        "--ticket-key-file",
+        common::s(&tickets),
+        "--meta",
+        &meta,
+        "--grant-schemes",
+        "ed25519",
+        "--listen-enc",
+        "127.0.0.1:0",
+        "--enc-repository",
+        &repository,
+        "--enc-authorized-peers",
+        &peers,
+        "--enc-server-key",
+        common::s(&key),
+    ]
+    .map(str::to_owned);
+    let cfg = resolve(&flags).unwrap();
+    let opened = mkit_server_native::server::open(&cfg).unwrap();
+    assert!(opened.enc.is_some(), "the enc sibling pipeline is built");
+}

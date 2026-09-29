@@ -407,6 +407,18 @@ pub fn multi_allowlist_text(profile: &Profile) -> String {
     text
 }
 
+/// The fixed grant-owner namespaces ([`grant_owner_namespaces`]) as
+/// allowlist text, one per line, to append to [`multi_allowlist_text`] for a
+/// local deployment running the grant cases. Their keys are public test
+/// seeds: never allowlist them on a shared or staging deployment.
+#[must_use]
+pub fn grant_owner_allowlist_text() -> String {
+    grant_owner_namespaces()
+        .iter()
+        .map(|namespace| format!("{namespace}\n"))
+        .collect()
+}
+
 /// Run every case whose name contains `filter` (all when `None`) against
 /// `target`, in [`CASES`] order.
 pub async fn run(target: &WireTarget, filter: Option<&str>) -> Report {

@@ -82,6 +82,17 @@ pub const NAMESPACE_ALLOWLIST_VAR: &str = "NAMESPACE_ALLOWLIST";
 /// The Worker var opting `NAMESPACE_POLICY=any` in; must be exactly
 /// `true` when set.
 pub const UNSAFE_OPEN_NAMESPACES_VAR: &str = "UNSAFE_OPEN_NAMESPACES";
+/// The Worker var listing the owner schemes write grants accept
+/// (comma-separated tokens). Unset: write grants are off. Present but blank
+/// is an error, never "off".
+pub const GRANT_SCHEMES_VAR: &str = "GRANT_SCHEMES";
+/// The Worker var listing `WebAuthn` relying parties for write grants:
+/// `id=origin[,origin...]` entries separated by `;` or newlines.
+pub const WEBAUTHN_RPS_VAR: &str = "WEBAUTHN_RPS";
+/// Development only: accept a loopback `AUTH_AUDIENCE` or relying party for
+/// write grants. Honoured only in `test-faults` builds; a release build that
+/// sees it set refuses to start.
+pub const UNSAFE_LOOPBACK_GRANTS_VAR: &str = "UNSAFE_LOOPBACK_GRANTS";
 /// Maximum ticketed pack size (bytes), bounded by R2's single-object limit.
 pub const MAX_PACK_BYTES_VAR: &str = "MAX_PACK_BYTES";
 
@@ -124,6 +135,10 @@ pub struct WorkerConfig {
     pub ticket_keys: Option<TicketKeys>,
     /// Maximum ticketed pack size from `MAX_PACK_BYTES`.
     pub max_pack_bytes: u64,
+    /// `GRANT_SCHEMES`, `WEBAUTHN_RPS` and `UNSAFE_LOOPBACK_GRANTS`: the
+    /// validated write-grant inputs (`None`: grants off). The verifier is
+    /// built from them, with `AUTH_AUDIENCE`, when the pipeline is.
+    pub grants: Option<mkit_server::policy::GrantSettings>,
     /// `SHARDING`: d34 (default) or single; guarded against changing existing data.
     /// A deployment holding single-sharded data must pin `SHARDING=single`:
     /// the guard answers 503 until then (there is no migration, R-123).
@@ -192,6 +207,12 @@ impl WorkerConfig {
         config.single_upload_max_bytes = Some(SINGLE_PUT_MAX_BYTES);
         config.sharding = self.sharding;
         config.ticket_keys.clone_from(&self.ticket_keys);
+        config.grants = self
+            .grants
+            .as_ref()
+            .map(|settings| settings.build(&self.audience))
+            .transpose()
+            .map_err(|e| ConfigError(e.public_message().to_owned()))?;
         #[cfg(feature = "test-faults")]
         if let Some(quota) = self.test_quota {
             config.write_quota = Some(quota);
@@ -267,6 +288,7 @@ impl WorkerConfig {
         };
         let addressing =
             resolve_addressing(&var, multi, repository.as_deref(), ticket_keys.is_some())?;
+        let grants = resolve_grants(&var, multi, &audience)?;
         Ok(Self {
             sharding,
             placement,
@@ -275,6 +297,7 @@ impl WorkerConfig {
             addressing,
             ticket_keys,
             max_pack_bytes,
+            grants,
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
             blob_binding: crate::r2::STORAGE_BINDING,
             #[cfg(feature = "test-faults")]
@@ -390,6 +413,61 @@ fn resolve_addressing(
     Ok(mkit_server::Addressing::Multi(
         MultiAddressing::new().with_namespace_policy(policy),
     ))
+}
+
+/// The write-grant settings from `GRANT_SCHEMES`, `WEBAUTHN_RPS` and
+/// `UNSAFE_LOOPBACK_GRANTS`. Any bad, partial or unsupported value is a
+/// `ConfigError` (so every RPC answers `unavailable`), never "grants off";
+/// the verifier rules are `mkit-attest`'s and are checked here by building
+/// the verifier once for `audience`.
+fn resolve_grants(
+    var: &impl Fn(&str) -> Option<String>,
+    multi: bool,
+    audience: &str,
+) -> Result<Option<mkit_server::policy::GrantSettings>, ConfigError> {
+    use mkit_server::policy::{GrantSettings, parse_grant_schemes, parse_relying_parties};
+
+    let schemes = var(GRANT_SCHEMES_VAR)
+        .map(|text| parse_grant_schemes(&text))
+        .transpose()
+        .map_err(|e| ConfigError(format!("{GRANT_SCHEMES_VAR}: {e}")))?;
+    let parties = var(WEBAUTHN_RPS_VAR)
+        .map(|text| parse_relying_parties(&text))
+        .transpose()
+        .map_err(|e| ConfigError(format!("{WEBAUTHN_RPS_VAR}: {e}")))?
+        .unwrap_or_default();
+    let loopback = match var(UNSAFE_LOOPBACK_GRANTS_VAR).as_deref() {
+        None => false,
+        #[cfg(feature = "test-faults")]
+        Some("true") => true,
+        #[cfg(feature = "test-faults")]
+        Some(_) => {
+            return Err(ConfigError(format!(
+                "{UNSAFE_LOOPBACK_GRANTS_VAR} must be `true` when set"
+            )));
+        }
+        #[cfg(not(feature = "test-faults"))]
+        Some(_) => {
+            return Err(ConfigError(format!(
+                "{UNSAFE_LOOPBACK_GRANTS_VAR} is honoured only in test-faults builds; a \
+                 production deployment never accepts a loopback grant audience"
+            )));
+        }
+    };
+    let Some(settings) = GrantSettings::from_parts(schemes, parties, loopback)
+        .map_err(|e| ConfigError(format!("{GRANT_SCHEMES_VAR}: {e}")))?
+    else {
+        return Ok(None);
+    };
+    if !multi {
+        return Err(ConfigError(format!(
+            "{GRANT_SCHEMES_VAR} requires ADDRESSING=multi"
+        )));
+    }
+    settings
+        .build(audience)
+        .map_err(|e| ConfigError(e.public_message().to_owned()))?;
+    Ok(Some(settings))
 }
 
 /// `TEST_QUOTA_*`: all three or none.
@@ -1852,6 +1930,172 @@ mod tests {
             WorkerConfig::from_vars(vars(&pairs)).unwrap_err().0,
             "NAMESPACE_POLICY must be allowlist or any"
         );
+    }
+
+    const RP: &str = "example.test=https://example.test";
+
+    fn multi_pairs<'a>(namespace: &'a str, audience: &'a str) -> Vec<(&'a str, &'a str)> {
+        vec![
+            (AUDIENCE_VAR, audience),
+            (ADDRESSING_VAR, "multi"),
+            (NAMESPACE_ALLOWLIST_VAR, namespace),
+            (
+                TICKET_KEYS_VAR,
+                "dev 1111111111111111111111111111111111111111111111111111111111111111",
+            ),
+        ]
+    }
+
+    /// Grants are off unless `GRANT_SCHEMES` is set, and the validated inputs
+    /// (not a `GrantConfig`) are what the config holds and compares.
+    #[test]
+    fn grant_vars_configure_the_verifier_and_default_to_off() {
+        let namespace = ns(1);
+        let base = multi_pairs(&namespace, "https://vcs.example");
+        let off = WorkerConfig::from_vars(vars(&base)).unwrap();
+        assert_eq!(off.grants, None);
+        assert!(off.pipeline_config().unwrap().grants.is_none());
+        let mut pairs = base.clone();
+        pairs.extend([
+            (GRANT_SCHEMES_VAR, "ed25519, webauthn-p256"),
+            (
+                WEBAUTHN_RPS_VAR,
+                "example.test=https://example.test;other.test=https://other.test,https://a.other.test\n",
+            ),
+        ]);
+        let cfg = WorkerConfig::from_vars(vars(&pairs)).unwrap();
+        assert_eq!(cfg, WorkerConfig::from_vars(vars(&pairs)).unwrap());
+        assert_ne!(cfg, off);
+        let settings = cfg.grants.as_ref().unwrap();
+        assert_eq!(settings.relying_parties.len(), 2);
+        assert!(!settings.allow_loopback);
+        let grants = cfg.pipeline_config().unwrap().grants.unwrap();
+        assert_eq!(grants.audience(), "https://vcs.example");
+        assert_eq!(
+            grants.schemes().tokens().collect::<Vec<_>>(),
+            ["ed25519", "webauthn-p256"]
+        );
+    }
+
+    /// Every grant var refusal is a `ConfigError`, never "grants off".
+    #[test]
+    fn grant_vars_fail_closed() {
+        let namespace = ns(1);
+        let base = multi_pairs(&namespace, "https://vcs.example");
+        let all = "ed25519,secp256k1-eip191,webauthn-p256";
+        for (extra, message) in [
+            (
+                vec![(GRANT_SCHEMES_VAR, "rsa")],
+                "GRANT_SCHEMES: invalid grant schemes",
+            ),
+            (vec![(GRANT_SCHEMES_VAR, "")], "GRANT_SCHEMES:"),
+            (vec![(GRANT_SCHEMES_VAR, "  ")], "GRANT_SCHEMES:"),
+            (vec![(GRANT_SCHEMES_VAR, "ed25519,")], "GRANT_SCHEMES:"),
+            (
+                vec![(GRANT_SCHEMES_VAR, all), (WEBAUTHN_RPS_VAR, "example.test")],
+                "WEBAUTHN_RPS:",
+            ),
+            (
+                vec![(GRANT_SCHEMES_VAR, all), (WEBAUTHN_RPS_VAR, "")],
+                "WEBAUTHN_RPS:",
+            ),
+            (
+                vec![
+                    (GRANT_SCHEMES_VAR, all),
+                    (
+                        WEBAUTHN_RPS_VAR,
+                        "a.test=https://a.test;;b.test=https://b.test",
+                    ),
+                ],
+                "WEBAUTHN_RPS: relying parties: blank entry",
+            ),
+            (
+                vec![
+                    (GRANT_SCHEMES_VAR, all),
+                    (
+                        WEBAUTHN_RPS_VAR,
+                        "a.test=https://a.test\na.test=https://other.test",
+                    ),
+                ],
+                "WEBAUTHN_RPS: relying parties: duplicate id",
+            ),
+            // webauthn-p256 without a relying party; a relying party
+            // without any scheme.
+            (
+                vec![(GRANT_SCHEMES_VAR, "webauthn-p256")],
+                "invalid grant configuration",
+            ),
+            (vec![(WEBAUTHN_RPS_VAR, RP)], "GRANT_SCHEMES:"),
+        ] {
+            let mut pairs = base.clone();
+            pairs.extend(extra.clone());
+            let err = WorkerConfig::from_vars(vars(&pairs)).unwrap_err();
+            assert!(err.0.starts_with(message), "{extra:?}: {err}");
+        }
+        // Grants need multi addressing.
+        let err = WorkerConfig::from_vars(vars(&[
+            (AUDIENCE_VAR, "https://vcs.example"),
+            (REPOSITORY_VAR, "default"),
+            (GRANT_SCHEMES_VAR, "ed25519"),
+        ]))
+        .unwrap_err();
+        assert!(err.0.contains("ADDRESSING=multi"), "{err}");
+        // A loopback audience or relying party needs the loopback opt-in.
+        let loopback = multi_pairs(&namespace, "http://localhost:8787");
+        let mut pairs = loopback.clone();
+        pairs.push((GRANT_SCHEMES_VAR, "ed25519"));
+        assert!(
+            WorkerConfig::from_vars(vars(&pairs))
+                .unwrap_err()
+                .0
+                .starts_with("invalid grant configuration")
+        );
+        let mut pairs = base.clone();
+        pairs.extend([
+            (GRANT_SCHEMES_VAR, all),
+            (WEBAUTHN_RPS_VAR, "localhost=http://localhost:8787"),
+        ]);
+        assert!(WorkerConfig::from_vars(vars(&pairs)).is_err());
+    }
+
+    /// `UNSAFE_LOOPBACK_GRANTS` opens loopback grants in `test-faults` builds.
+    #[cfg(feature = "test-faults")]
+    #[test]
+    fn loopback_grants_are_honoured_in_test_faults_builds() {
+        let namespace = ns(1);
+        let mut pairs = multi_pairs(&namespace, "http://localhost:8787");
+        pairs.extend([
+            (GRANT_SCHEMES_VAR, "ed25519"),
+            (UNSAFE_LOOPBACK_GRANTS_VAR, "true"),
+        ]);
+        let cfg = WorkerConfig::from_vars(vars(&pairs)).unwrap();
+        assert!(cfg.grants.as_ref().unwrap().allow_loopback);
+        assert!(cfg.pipeline_config().unwrap().grants.is_some());
+        pairs.pop();
+        pairs.push((UNSAFE_LOOPBACK_GRANTS_VAR, "1"));
+        assert!(WorkerConfig::from_vars(vars(&pairs)).is_err());
+    }
+
+    /// A release build never honours it: setting it is an error, even with
+    /// nothing else configured.
+    #[cfg(not(feature = "test-faults"))]
+    #[test]
+    fn loopback_grants_var_is_refused_in_release_builds() {
+        let namespace = ns(1);
+        let mut pairs = multi_pairs(&namespace, "http://localhost:8787");
+        pairs.extend([
+            (GRANT_SCHEMES_VAR, "ed25519"),
+            (UNSAFE_LOOPBACK_GRANTS_VAR, "true"),
+        ]);
+        let err = WorkerConfig::from_vars(vars(&pairs)).unwrap_err();
+        assert!(err.0.contains("only in test-faults builds"), "{err}");
+        let err = WorkerConfig::from_vars(vars(&[
+            (AUDIENCE_VAR, "https://vcs.example"),
+            (REPOSITORY_VAR, "default"),
+            (UNSAFE_LOOPBACK_GRANTS_VAR, "true"),
+        ]))
+        .unwrap_err();
+        assert!(err.0.contains("only in test-faults builds"), "{err}");
     }
 
     /// Single addressing is the default and unchanged.

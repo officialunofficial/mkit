@@ -12,7 +12,7 @@ use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
 use mkit_server_conformance::wire::{
-    CASES, ProfileSpec, WireAuth, WireTarget, multi_allowlist_text, run,
+    CASES, ProfileSpec, WireAuth, WireTarget, grant_owner_allowlist_text, multi_allowlist_text, run,
 };
 
 #[derive(Debug, Parser)]
@@ -39,6 +39,10 @@ enum Command {
 #[derive(Debug, Args)]
 #[allow(clippy::struct_excessive_bools)] // clap flags
 struct WireArgs {
+    /// `allowlist` only: also list the grant cases' fixed owner namespaces.
+    /// Their keys are public test seeds: local conformance runs only.
+    #[arg(long)]
+    grant_owners: bool,
     /// The server's base URL (http or https).
     #[arg(long, value_name = "URL")]
     base_url: Option<url::Url>,
@@ -228,6 +232,9 @@ fn main() -> ExitCode {
             }) {
                 Ok(Ok(profile)) => {
                     print!("{}", multi_allowlist_text(&profile));
+                    if args.grant_owners {
+                        print!("{}", grant_owner_allowlist_text());
+                    }
                     ExitCode::SUCCESS
                 }
                 Ok(Err(e)) | Err(e) => {

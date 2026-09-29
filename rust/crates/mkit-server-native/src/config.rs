@@ -13,7 +13,10 @@ use mkit_server::auth_v2::AuthV2Config;
 #[cfg(feature = "test-faults")]
 use mkit_server::indexed::IndexedConfig;
 use mkit_server::pipeline::{AuthMode, PipelineConfig, Sharding};
-use mkit_server::policy::{NamespacePolicy, parse_namespace_allowlist};
+use mkit_server::policy::{
+    GrantSettings, NamespacePolicy, parse_grant_schemes, parse_namespace_allowlist,
+    parse_relying_party,
+};
 use mkit_server::sql::Capacity;
 use mkit_server::upload::UploadLimits;
 use mkit_server::upload::token::TicketKeys;
@@ -305,6 +308,21 @@ pub struct ServeArgs {
     /// Development only.
     #[arg(long)]
     pub unsafe_open_namespaces: bool,
+    /// Multi + auth v2: the owner schemes write grants accept,
+    /// comma-separated tokens (`ed25519`, `secp256k1-eip191`,
+    /// `webauthn-p256`; SPEC-WRITE-GRANTS §4). Absent: write grants are off.
+    /// The grant audience is `--audience`.
+    #[arg(long, value_name = "TOKENS")]
+    pub grant_schemes: Option<String>,
+    /// Write grants: a `WebAuthn` relying party, `id=origin[,origin...]`
+    /// (repeatable). `webauthn-p256` requires one.
+    #[arg(long, value_name = "ID=ORIGINS")]
+    pub webauthn_rp: Vec<String>,
+    /// Development only: accept a loopback `--audience` or relying party for
+    /// write grants (any local deployment shares them, SPEC-WRITE-GRANTS
+    /// §3.2). Prints a warning banner.
+    #[arg(long)]
+    pub unsafe_allow_loopback_grants: bool,
     /// Multi + `--listen-enc`: the one repository the enc listener binds
     /// to, as `<ns>/<name>` (SPEC-TRANSPORT-CONNECT §7.4). Required then;
     /// refused under single addressing.
@@ -468,6 +486,9 @@ pub struct ServeConfig {
     pub pipeline: PipelineConfig,
     /// The router's layers.
     pub router: RouterOptions,
+    /// `--unsafe-allow-loopback-grants` was passed: the grant verifier
+    /// accepts loopback origins. [`UNSAFE_LOOPBACK_GRANTS_BANNER`] warns.
+    pub unsafe_loopback_grants: bool,
     /// The listener: connection cap, header-read timeout, HTTP/2
     /// keepalive and the shutdown grace period.
     pub serve: ServeOptions,
@@ -499,6 +520,9 @@ impl ServeConfig {
         {
             banners.push(crate::enc::UNSAFE_ENC_BANNER);
         }
+        if self.unsafe_loopback_grants {
+            banners.push(UNSAFE_LOOPBACK_GRANTS_BANNER);
+        }
         banners
     }
 }
@@ -511,6 +535,16 @@ WARNING: mkit-server serve --unsafe-allow-any-peer
 This HTTP listener accepts ANY caller with NO authentication.
 Every RPC — including ref writes and pack uploads — is open.
 Use this only for local development, NEVER in production.
+============================================================";
+
+/// The banner `--unsafe-allow-loopback-grants` prints.
+pub const UNSAFE_LOOPBACK_GRANTS_BANNER: &str = "\
+============================================================
+WARNING: mkit-server serve --unsafe-allow-loopback-grants
+Write grants accept a loopback audience or relying party.
+Every local deployment shares one, so a grant for one would
+verify at all of them. Use this only for local development,
+NEVER in production.
 ============================================================";
 
 pub(crate) const PREFIX: &str = "mkit-server serve";
@@ -626,6 +660,64 @@ fn resolve_ticket_keys(
         })
     })
     .transpose()
+}
+
+/// The write-grant settings (`--grant-schemes`, `--webauthn-rp`,
+/// `--unsafe-allow-loopback-grants`): `None` when none is given. Every
+/// partial or bad value is a startup refusal, never "grants off", and the
+/// verifier rules (loopback audience or relying party without the opt-in,
+/// `webauthn-p256` without a relying party, duplicate ids) are
+/// `mkit-attest`'s.
+fn resolve_grants(
+    args: &ServeArgs,
+    auth: &AuthMode,
+    multi: bool,
+) -> Result<Option<mkit_server::GrantConfig>, ConfigError> {
+    let usage = |m: String| ConfigError::new(exit::USAGE, format!("{PREFIX}: {m}"));
+    let schemes = args
+        .grant_schemes
+        .as_deref()
+        .map(parse_grant_schemes)
+        .transpose()
+        .map_err(|e| usage(format!("--grant-schemes: {e}")))?;
+    let parties = args
+        .webauthn_rp
+        .iter()
+        .map(|entry| parse_relying_party(entry))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| usage(format!("--webauthn-rp: {e}")))?;
+    let Some(settings) =
+        GrantSettings::from_parts(schemes, parties, args.unsafe_allow_loopback_grants).map_err(
+            |e| {
+                usage(format!(
+                    "--webauthn-rp and --unsafe-allow-loopback-grants: {e}"
+                ))
+            },
+        )?
+    else {
+        return Ok(None);
+    };
+    let AuthMode::AuthV2(v2) = auth else {
+        return Err(ConfigError::new(
+            exit::CONFIG_ERROR,
+            format!(
+                "{PREFIX}: write grants (--grant-schemes) require --auth auth-v2 on the HTTP \
+                 listener: the grant audience is its --audience"
+            ),
+        ));
+    };
+    if !multi {
+        return Err(ConfigError::new(
+            exit::CONFIG_ERROR,
+            format!("{PREFIX}: write grants (--grant-schemes) require --addressing multi"),
+        ));
+    }
+    settings.build(v2.audience()).map(Some).map_err(|e| {
+        ConfigError::new(
+            exit::CONFIG_ERROR,
+            format!("{PREFIX}: {}", e.public_message()),
+        )
+    })
 }
 
 /// The `--addressing multi` namespace policy: the `--namespace-allowlist`
@@ -1298,6 +1390,7 @@ pub fn resolve(
     let repo_root = resolve_repo_root(&args.repo_root, env)?;
     let ticket_keys = resolve_ticket_keys(args, env)?;
     let addressing = build_addressing(args, repository, ticket_keys.as_ref())?;
+    let grants = resolve_grants(args, &auth, multi)?;
     let max_pack = resolve_max_pack(args)?;
     let limits = UploadLimits {
         max_total_bytes: max_pack,
@@ -1307,6 +1400,7 @@ pub fn resolve(
     let mut pipeline = PipelineConfig::new(addressing, auth, limits);
     pipeline.sharding = sharding;
     pipeline.ticket_keys = ticket_keys;
+    pipeline.grants = grants;
     // The enc listener's sibling pipeline consumes implicitly and cannot
     // run ticketed verification, so `Pipeline::new` refuses `indexed` with
     // it (R-137); refuse here, before any pipeline is built.
@@ -1360,6 +1454,7 @@ pub fn resolve(
         blob,
         pipeline,
         router,
+        unsafe_loopback_grants: args.unsafe_allow_loopback_grants,
         serve,
         log_format: args.log_format,
     })

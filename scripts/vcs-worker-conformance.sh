@@ -35,7 +35,10 @@
 #                  (repo., repository., policy., tickets.advance_other_repository,
 #                  info.). The membership cases seed their fixture over the
 #                  wire; only repo.membership_read_your_writes still skips —
-#                  its membership index must stay undelivered.
+#                  its membership index must stay undelivered. With
+#                  --test-faults, a grant phase (WP-1.30b) configures
+#                  GRANT_SCHEMES, WEBAUTHN_RPS and UNSAFE_LOOPBACK_GRANTS and
+#                  runs the grants., ref_scopes. and epochs. cases at M2.
 #   -- ARGS        passed to every `mkit-server-conformance wire` run (e.g.
 #                  `-- --filter refs.`, `-- --list-refs 1000`).
 #
@@ -410,6 +413,41 @@ if [ "${multi}" -eq 1 ]; then
         fi
     done
     stop_server
+
+    if [ "${test_faults}" -eq 1 ]; then
+        # The Multi grant phase (WP-1.30b): every owner scheme, the
+        # conformance relying party, and the loopback opt-in the local
+        # origin needs (honoured only by a test-faults build). The allowlist
+        # adds the grant cases' fixed test-seed owner namespaces, which are
+        # public seeds: never in a shipped config.
+        grant_allowlist="$("${runner}" allowlist --auth auth-v2 --audience "${ORIGIN}" \
+            --repository "${REPOSITORY}" --signer-seed-hex "${multi_seed}" \
+            --run-id "${multi_run_id}" --grant-owners)"
+        grant_allowlist="$(printf '%s' "${grant_allowlist}" | tr '\n' ',')"
+        grant_features="${multi_features},grants,test-faults,timers"
+        start_server multi-grants "${vars[@]}" \
+            --var "ADDRESSING:multi" --var "NAMESPACE_ALLOWLIST:${grant_allowlist}" \
+            --var "GRANT_SCHEMES:ed25519,secp256k1-eip191,webauthn-p256" \
+            --var "WEBAUTHN_RPS:example.test=https://example.test" \
+            --var "UNSAFE_LOOPBACK_GRANTS:true"
+        for filter in info.shape_and_policy grants. ref_scopes. epochs.; do
+            echo ">> running the Multi grant wire suite (features: ${grant_features}) --filter ${filter}"
+            status=0
+            "${runner}" wire --base-url "${ORIGIN}" --auth auth-v2 --audience "${ORIGIN}" \
+                --repository "${REPOSITORY}" --signer-seed-hex "${multi_seed}" \
+                --run-id "${multi_run_id}" --atomic-advance --fresh-target --milestone M2 \
+                --max-pack-bytes "${MAX_PACK_BYTES}" --features "${grant_features}" \
+                --sharding "${sharding}" --filter "${filter}" \
+                ${d34_list_args[@]+"${d34_list_args[@]}"} \
+                ${runner_args[@]+"${runner_args[@]}"} || status=$?
+            if [ "${status}" -ne 0 ]; then
+                echo "Multi grant wire suite failed (exit ${status}); wrangler log tail:" >&2
+                tail -n 80 "${log}" >&2
+                exit "${status}"
+            fi
+        done
+        stop_server
+    fi
 
     if [ "${test_faults}" -eq 1 ] && [ "${sharding}" = d34 ]; then
         # The Multi + D34 quota phase: the namespace cap across branches after

@@ -43,6 +43,10 @@
     // comma-separated, `#` comments allowed. NAMESPACE_POLICY=any admits
     // every namespace and requires UNSAFE_OPEN_NAMESPACES=true (D27;
     // development only).
+    // Write grants are off unless GRANT_SCHEMES (comma-separated owner schemes)
+    // is set; it needs ADDRESSING=multi, and the audience is AUTH_AUDIENCE.
+    // WEBAUTHN_RPS lists relying parties as `id=origin[,origin...]` entries
+    // separated by `;` or newlines. Neither is shipped here.
     // Optional NAMESPACE_LOCATION_HINT / NAMESPACE_JURISDICTION are deployment-wide.
     // Jurisdiction (eu, us, fedramp) is fixed for the deployment lifetime:
     // changing it re-maps all names to new, empty objects.
