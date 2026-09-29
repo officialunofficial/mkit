@@ -1088,8 +1088,9 @@ Remote / sync:
   advance's commit, even under `--force`. Before uploading anything, the
   client checks that your stored write grants cover every advance: a
   non-owner key needs `c` to create the branch (or `u`/`f` to update it), and
-  `u` for the later advances, or `f` unless the server runs in indexed mode (the owner key needs no grant); a
-  push that would be refused midway is refused up front, with nothing
+  an `f` grant for the later advances, on every server until indexed-mode
+  `u`-only fast-forwards land (R-148); the owner key needs no grant. A push
+  that would be refused midway is refused up front, with no advance
   published. A single commit or merge that cannot be split (a merge always
   lands whole) and still needs more than six packs is refused before any
   upload, naming the commit; ask the operator to raise `max_pack_bytes`. On a

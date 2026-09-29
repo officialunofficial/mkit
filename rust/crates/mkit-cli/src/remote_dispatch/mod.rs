@@ -196,13 +196,32 @@ pub enum DispatchError {
     /// further when the refusal came from the pre-flight dry seal, before
     /// anything was published; without it the seal-time backstop fired.
     #[error(
-        "push needs {packs} data packs but this server permits {limit} per advance{}; ask the operator to raise max_pack_bytes",
-        .commit.as_ref().map_or_else(String::new, |c| format!(" ({c} cannot be split further)"))
+        "push needs {packs} data packs but this server permits {limit} per advance{}{}; ask the operator to raise max_pack_bytes",
+        .commit.as_ref().map_or_else(String::new, |c| format!(" ({c} cannot be split further)")),
+        if *.holds_remote_head {
+            " (it is the first commit that contains the remote head: rebase onto the remote head, or merge it in a smaller or earlier commit)"
+        } else {
+            ""
+        }
     )]
     PushTooLarge {
         packs: usize,
         limit: usize,
         commit: Option<String>,
+        /// The unsplittable commit is the first that contains the remote head,
+        /// so the split could not cut before it.
+        holds_remote_head: bool,
+    },
+    /// A retry of one advance (a rejected ticket, a lost delta base) re-planned
+    /// the push and the new plan no longer fits one advance. Found by a dry
+    /// seal, so nothing was uploaded for the retry.
+    #[error(
+        "{reason}, and the retry needs {packs} data packs but this server permits {limit} per advance; nothing was uploaded for the retry"
+    )]
+    RetryTooLarge {
+        reason: RetryReason,
+        packs: usize,
+        limit: usize,
     },
     /// A split push would exceed a bound (steps or chain length). Nothing was
     /// published.
@@ -212,11 +231,14 @@ pub enum DispatchError {
     /// Nothing was published.
     #[error("{0}")]
     PushNotAuthorized(String),
-    /// A split push failed after publishing some advances. The remote branch
-    /// is at `head`, a first-parent ancestor of the local tip; re-running the
-    /// push resumes from there.
+    /// A split push failed after publishing some advances. `head` is the last
+    /// advance this push published, a first-parent ancestor of the local tip
+    /// (another pusher may have moved the branch since); re-running the push
+    /// resumes from the remote branch unless a concurrent push caused the
+    /// failure.
     #[error(
-        "{cause}; {published} of {total} advances were published and the remote branch '{branch}' is at {head}; re-run the push to resume"
+        "{cause}; {published} of {total} advances were published and the last published advance was {head} on branch '{branch}'{}",
+        resume_hint(.cause)
     )]
     SplitInterrupted {
         branch: String,
@@ -233,6 +255,33 @@ pub enum DispatchError {
     PacklistNotInRepository,
 }
 
+/// The closing advice of a split push's failure: resume, unless the failure
+/// was a concurrent push (the branch then moved, and a re-run would only
+/// compare against whatever the other pusher left).
+fn resume_hint(cause: &DispatchError) -> &'static str {
+    if matches!(cause, DispatchError::NonFastForwardPush { .. }) {
+        "; the branch was moved by another push, so fetch and merge before pushing again"
+    } else {
+        "; re-run the push to resume"
+    }
+}
+
+/// Why an advance was re-planned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum RetryReason {
+    /// The server no longer holds a delta base the plan relied on.
+    #[error(
+        "the server no longer holds a delta base this push relied on, so it must be re-sent as a full closure (ask the operator whether the repository was restored from an older copy)"
+    )]
+    LostDeltaBase,
+    /// The upload ticket or packlist was rejected, so the push was planned
+    /// again against the remote's current head, which may have moved.
+    #[error(
+        "the upload was rejected and the push was re-planned against the remote's current head, which may have moved (fetch and merge, then push again)"
+    )]
+    Replanned,
+}
+
 /// The advances a split push published before it failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishedPrefix {
@@ -240,6 +289,8 @@ pub struct PublishedPrefix {
     pub published: usize,
     pub total: usize,
     pub head: String,
+    /// Whether re-running the push is the advice (not after a concurrent push).
+    pub resumable: bool,
 }
 
 impl PublishedPrefix {
@@ -247,15 +298,23 @@ impl PublishedPrefix {
     #[must_use]
     pub fn note(&self) -> String {
         format!(
-            "{} of {} advances were published; the remote branch '{}' is at {}; re-run the push to resume",
-            self.published, self.total, self.branch, self.head
+            "{} of {} advances were published; the last published advance on branch '{}' was {}{}",
+            self.published,
+            self.total,
+            self.branch,
+            self.head,
+            if self.resumable {
+                "; re-run the push to resume"
+            } else {
+                "; the branch was moved by another push, so fetch and merge before pushing again"
+            }
         )
     }
 }
 
 impl DispatchError {
     /// The error a split push failed with, without its published-prefix
-    /// wrapper, and that prefix (`None` when nothing was published).
+    /// wrapper, and that prefix (`None` when no advance of this branch was published).
     #[must_use]
     pub fn into_published_prefix(self) -> (Self, Option<PublishedPrefix>) {
         match self {
@@ -265,15 +324,19 @@ impl DispatchError {
                 published,
                 total,
                 cause,
-            } => (
-                *cause,
-                Some(PublishedPrefix {
-                    branch,
-                    published,
-                    total,
-                    head,
-                }),
-            ),
+            } => {
+                let resumable = !matches!(*cause, Self::NonFastForwardPush { .. });
+                (
+                    *cause,
+                    Some(PublishedPrefix {
+                        branch,
+                        published,
+                        total,
+                        head,
+                        resumable,
+                    }),
+                )
+            }
             other => (other, None),
         }
     }
@@ -363,13 +426,16 @@ pub(crate) fn open_trusted_for_push(
     }
     let parts = open_connect_parts(endpoint, &cfg.merged, layout, Some(remote_name), true)?;
     let tx = Arc::new(parts.transport);
-    let authority = parts.signer_key.map(|signer_key| {
-        Arc::new(grants::ConnectAuthority {
-            transport: tx.clone(),
-            grants: parts.grants,
-            signer_key,
-        }) as Arc<dyn StepAuthority>
-    });
+    let authority = parts
+        .signer_key
+        .zip(parts.grants)
+        .map(|(signer_key, grants)| {
+            Arc::new(grants::ConnectAuthority {
+                transport: tx.clone(),
+                grants,
+                signer_key,
+            }) as Arc<dyn StepAuthority>
+        });
     Ok(PushRemote { tx, authority })
 }
 
@@ -454,8 +520,8 @@ pub(crate) fn open_connect_with_config(
 /// A Connect transport with what a push needs to check its authority.
 struct ConnectParts {
     transport: ConnectTransport,
-    /// The user grants installed on the transport (empty without a signer).
-    grants: Arc<grants::LocalGrants>,
+    /// The user grants installed on the transport (none without a signer).
+    grants: Option<Arc<grants::LocalGrants>>,
     /// The signing key's public hex, when requests are signed.
     signer_key: Option<String>,
 }
@@ -505,14 +571,10 @@ fn open_connect_parts(
                     .unwrap_or(receipt.procedure)
             );
         });
-    let grants = Arc::new(if signed {
-        // Grants ride only on signed requests (SPEC-WRITE-GRANTS §4.2), so the
-        // store is read only when there is a signer to present them with.
-        grants::LocalGrants::from_stored(load_user_grants(cfg))
-    } else {
-        grants::LocalGrants::from_stored(Vec::new())
-    });
-    if signed {
+    // Grants ride only on signed requests (SPEC-WRITE-GRANTS §4.2), so the
+    // store is read only when there is a signer to present them with.
+    let grants = signed.then(|| Arc::new(grants::LocalGrants::from_stored(load_user_grants(cfg))));
+    if let Some(grants) = &grants {
         tx = tx.with_grant_source(grants.clone());
     }
     if !cfg.admission_helper.is_empty() && cfg.trusted_remote_endpoint.trim() == url {
@@ -1251,13 +1313,13 @@ pub fn push_branch_steps(
     // is not split (exact dry seal), and one against a remote tip this store
     // lacks is left to the head CAS rather than walking all of history.
     let unknown_remote = remote_tip.is_some_and(|remote| !store.contains(&remote));
-    if unknown_remote
-        || !matches!(
-            build_and_upload_packs(PackSink::Count, store, plan, cap, limits),
-            Err(DispatchError::PushTooLarge { .. })
-        )
-    {
+    if unknown_remote {
         return single(None);
+    }
+    match build_and_upload_packs(PackSink::Count, store, plan, cap, limits) {
+        Err(DispatchError::PushTooLarge { .. }) => {}
+        Err(DispatchError::Interrupted) => return Err(DispatchError::Interrupted),
+        _ => return single(None),
     }
     let steps = plan_push_steps(
         store,
@@ -1334,7 +1396,7 @@ fn push_step_recovering(
     pack_payload_cap: u64,
     plan: Option<transfer::PackPlan>,
 ) -> Result<(), DispatchError> {
-    let once = |self_contained, plan| {
+    let once = |retry, plan| {
         push_branch_once(
             tx,
             store,
@@ -1343,15 +1405,15 @@ fn push_step_recovering(
             condition,
             rebaseline_threshold,
             pack_payload_cap,
-            self_contained,
+            retry,
             plan,
         )
     };
-    match once(false, plan) {
+    match once(None, plan) {
         Err(DispatchError::TicketRejected | DispatchError::PacklistNotInRepository) => {
-            once(false, None)
+            once(Some(RetryReason::Replanned), None)
         }
-        Err(DispatchError::DeltaBaseUnavailable) => once(true, None),
+        Err(DispatchError::DeltaBaseUnavailable) => once(Some(RetryReason::LostDeltaBase), None),
         result => result,
     }
 }
@@ -1365,9 +1427,10 @@ fn push_branch_once(
     condition: refs::RefWriteCondition,
     rebaseline_threshold: usize,
     pack_payload_cap: u64,
-    force_self_contained: bool,
+    retry: Option<RetryReason>,
     preplanned: Option<transfer::PackPlan>,
 ) -> Result<(), DispatchError> {
+    let force_self_contained = retry == Some(RetryReason::LostDeltaBase);
     // Both wire names must fit SPEC-REFS §3's bound; a local branch named
     // before `MAX_BRANCH_NAME_BYTES` existed may not. Say so by name
     // rather than as a transport's "invalid ref name".
@@ -1466,6 +1529,23 @@ fn push_branch_once(
         } else {
             plan = full;
         }
+    }
+
+    // A retry re-planned the push: make sure the new plan still fits before
+    // uploading any of it, so the failure leaves no half-uploaded advance.
+    if let Some(reason) = retry
+        && estimated_ticketed_count(
+            &estimate_pack_sizes(store, &plan, effective_cap, limits.max_pack_bytes)?,
+            limits,
+        ) > split::data_pack_budget(limits)
+        && let Err(DispatchError::PushTooLarge { packs, limit, .. }) =
+            build_and_upload_packs(PackSink::Count, store, plan.clone(), effective_cap, limits)
+    {
+        return Err(DispatchError::RetryTooLarge {
+            reason,
+            packs,
+            limit,
+        });
     }
 
     // No pre-flight PushTooLarge: the estimate uses uncompressed sizes, so it
@@ -1965,6 +2045,7 @@ fn seal_pack(
             packs: *ticketed_count + 1,
             limit: budget,
             commit: None,
+            holds_remote_head: false,
         });
     }
     if limits

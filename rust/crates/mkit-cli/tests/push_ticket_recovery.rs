@@ -11,8 +11,8 @@ use std::sync::{
 
 use common::Repo;
 use mkit_cli::remote_dispatch::{
-    DispatchError, PushControl, StepAuthority, plan_push_steps, push_all_with, push_branch_steps,
-    push_branch_with_limits,
+    DispatchError, PushControl, RetryReason, StepAuthority, plan_push_steps, push_all_with,
+    push_branch_steps, push_branch_with_limits,
 };
 use mkit_core::hash::Hash;
 use mkit_core::layout::RepoLayout;
@@ -282,6 +282,7 @@ fn seventh_data_pack_is_refused_before_its_begin_upload() {
             packs: 7,
             limit: 6,
             commit: Some(commit),
+            ..
         } => assert!(
             commit.contains(&mkit_core::hash::to_hex(&tip(&repo))),
             "{err}"
@@ -738,7 +739,9 @@ fn interrupted_split_resumes_from_the_published_prefix() {
     assert_eq!((*published, *reported), (2, total));
     assert_eq!(*head, mkit_core::hash::to_hex(&heads[1]));
     assert!(matches!(**cause, DispatchError::Transport(_)), "{cause:?}");
-    assert!(error.to_string().contains("re-run the push to resume"));
+    let text = error.to_string();
+    assert!(text.contains("re-run the push to resume"), "{text}");
+    assert!(text.contains("the last published advance was"), "{text}");
     assert_eq!(heads.len(), 2);
     assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some(heads[1]));
     let (interrupted, prefix) = error.into_published_prefix();
@@ -800,6 +803,13 @@ fn concurrent_push_between_steps_reports_the_published_prefix() {
         "{cause:?}"
     );
     assert_eq!(heads.len(), 1);
+    // The branch moved, so the advice is not to simply re-run.
+    let text = error.to_string();
+    assert!(!text.contains("re-run the push to resume"), "{text}");
+    assert!(text.contains("moved by another push"), "{text}");
+    let (_, prefix) = error.into_published_prefix();
+    let note = prefix.unwrap().note();
+    assert!(!note.contains("re-run"), "{note}");
     // The concurrent pusher's head was not overwritten.
     assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some([0xee; 32]));
 }
@@ -845,7 +855,9 @@ fn each_step_recovers_on_its_own() {
     assert_eq!(prefix.unwrap().published, 1);
 
     // A missing delta base re-plans the step as its full closure; that no
-    // longer fits one advance, and the error says what was published.
+    // longer fits one advance. The dry seal refuses it before anything is
+    // uploaded for the retry, with an error that names the lost base, and the
+    // error says what was published.
     let mut tx = split_transport();
     tx.fault = Fault::Delta;
     tx.fault_attempt = 1;
@@ -859,10 +871,52 @@ fn each_step_recovers_on_its_own() {
     .unwrap_err();
     let (cause, prefix) = error.into_published_prefix();
     assert!(
-        matches!(cause, DispatchError::PushTooLarge { .. }),
+        matches!(
+            cause,
+            DispatchError::RetryTooLarge {
+                reason: RetryReason::LostDeltaBase,
+                ..
+            }
+        ),
         "{cause:?}"
     );
+    assert!(cause.to_string().contains("delta base"), "{cause}");
     assert_eq!(prefix.unwrap().published, 1);
+    let log = tx.advance_log.lock().unwrap();
+    assert_eq!(log.len(), 2, "no advance was attempted for the retry");
+    assert_eq!(
+        tx.uploads.load(Ordering::SeqCst),
+        log[1].uploads_at,
+        "nothing was uploaded for the retry"
+    );
+}
+
+#[test]
+fn a_heavy_but_compressible_commit_rides_a_multi_step_split() {
+    let repo = Repo::new();
+    long_history(&repo, 8, 3000);
+    for i in 0_u8..12 {
+        repo.write(&format!("z{i}.bin"), &vec![i + 1; 3000]);
+    }
+    repo.ok(&["add", "."]);
+    repo.ok(&["commit", "-m", "compressible"]);
+    let heavy = tip(&repo);
+    for i in 0..4 {
+        repo.commit_file(&format!("g{i}.bin"), &filler(i * 2 + 501, 3000), "after");
+    }
+    let tx = split_transport();
+    let (result, heads) = push_steps(
+        &repo,
+        &tx,
+        RefWriteCondition::Missing,
+        &PushControl::default(),
+    );
+    assert!(result.unwrap() >= 3);
+    assert_split(&repo, &tx, &heads);
+    // Its uncompressed estimate is over budget: the step is verified by an
+    // exact dry seal, which passes, and the commit is published on its own.
+    assert!(heads.contains(&heavy));
+    assert_eq!(tx.read_ref("refs/heads/main").unwrap(), Some(tip(&repo)));
 }
 
 struct Authority {

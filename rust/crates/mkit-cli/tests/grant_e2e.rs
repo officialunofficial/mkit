@@ -85,6 +85,14 @@ impl Party {
         self.ok(&["commit", "-m", message]);
     }
 
+    #[cfg(unix)]
+    /// A commit adding `file` with `data`.
+    fn commit_bytes(&self, file: &str, data: &[u8], message: &str) {
+        std::fs::write(self.repo.join(file), data).unwrap();
+        self.ok(&["add", file]);
+        self.ok(&["commit", "-m", message]);
+    }
+
     /// `mkit remote add` refuses the loopback `mkit+http://` development
     /// scheme, so the remote is written to the repo config directly.
     fn add_remote(&self, url: &str) {
@@ -117,6 +125,12 @@ struct Live {
 
 impl Live {
     fn start(owner_namespace: &str) -> Self {
+        Self::start_capped(owner_namespace, 64 << 20)
+    }
+
+    /// A server whose packs may hold at most `max_pack_bytes` (advertised as
+    /// `max_pack_bytes`), so a large push must be split.
+    fn start_capped(owner_namespace: &str, max_pack_bytes: u64) -> Self {
         let owner = mkit_attest::grant::Namespace::parse(owner_namespace).unwrap();
         let (addr_tx, addr_rx) = mpsc::channel();
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -136,7 +150,7 @@ impl Live {
                     )),
                     AuthMode::AuthV2(AuthV2Config::new(&origin, "").unwrap()),
                     UploadLimits {
-                        max_total_bytes: 64 << 20,
+                        max_total_bytes: max_pack_bytes,
                         max_chunks: 64,
                     },
                 );
@@ -851,4 +865,146 @@ fn ctrl_c_cancels_a_pending_bump_and_says_it_may_still_complete() {
     assert!(text.contains("interrupted"), "{text}");
     assert!(text.contains("may still complete"), "{text}");
     assert!(out.stdout.is_empty());
+}
+
+#[cfg(unix)]
+/// Incompressible bytes for file `seed`.
+fn noise(seed: u64, len: usize) -> Vec<u8> {
+    let mut out = vec![0_u8; len];
+    let mut state = seed * 2 + 1;
+    for chunk in out.chunks_mut(8) {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        chunk.copy_from_slice(&state.to_le_bytes()[..chunk.len()]);
+    }
+    out
+}
+
+#[cfg(unix)]
+fn copy_dir(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+#[cfg(unix)]
+/// A party whose repository is a copy of `master`'s history, pushing to `name`.
+fn copy_of(master: &Party, live: &Live, name: &str) -> Party {
+    let party = Party::new(0x11);
+    std::fs::remove_dir_all(party.repo.join(".mkit")).unwrap();
+    copy_dir(&master.repo.join(".mkit"), &party.repo.join(".mkit"));
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let keys = party.repo.join(".mkit").join("keys");
+        std::fs::set_permissions(&keys, std::fs::Permissions::from_mode(0o700)).unwrap();
+        for key in std::fs::read_dir(&keys).unwrap() {
+            let key = key.unwrap().path();
+            std::fs::set_permissions(key, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    }
+    let url = format!(
+        "mkit+http://{}/{}/{name}",
+        live.origin.trim_start_matches("http://"),
+        party.namespace()
+    );
+    party.connect_to(&url);
+    party
+}
+
+/// WP-1.17b, test 12: what `mkit push` prints for a push the server's pack
+/// limit forces it to split into several advances.
+#[cfg(unix)]
+#[test]
+fn a_split_push_reports_its_steps_and_the_published_prefix() {
+    use std::io::{BufRead as _, BufReader};
+    use std::process::{Command, Stdio};
+
+    let master = Party::new(0x11);
+    let live = Live::start_capped(&master.namespace(), 8192);
+    for i in 0..30_u64 {
+        master.commit_bytes(&format!("f{i:02}.bin"), &noise(i, 6000), &format!("c{i}"));
+    }
+
+    // Piped: one `pushed step k/N` line per advance, in order.
+    let piped = copy_of(&master, &live, "piped");
+    let out = piped.run(&["push", "origin"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stderr(&out);
+    let steps: Vec<&str> = text
+        .lines()
+        .filter(|line| line.starts_with("pushed step "))
+        .collect();
+    assert!(steps.len() >= 3, "{text}");
+    for (index, line) in steps.iter().enumerate() {
+        let expected = format!("pushed step {}/{}: ", index + 1, steps.len());
+        assert!(line.starts_with(&expected), "{line} (wanted {expected})");
+    }
+    assert!(text.contains("* [new branch]"), "{text}");
+
+    // --format=json: the step count.
+    let json = copy_of(&master, &live, "json");
+    let out = json.run(&["push", "--format=json", "origin"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let reported = String::from_utf8(out.stdout).unwrap();
+    let steps_field: u64 = reported
+        .split("\"steps\":")
+        .nth(1)
+        .and_then(|rest| rest.trim_end_matches(['}', '\n']).parse().ok())
+        .unwrap_or_else(|| panic!("no steps in {reported}"));
+    assert!(steps_field > 1, "{reported}");
+    assert_eq!(steps_field, steps.len() as u64);
+
+    // --quiet: no step lines and nothing on stdout.
+    let quiet = copy_of(&master, &live, "quiet");
+    let out = quiet.run(&["push", "--quiet", "origin"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(out.stdout.is_empty());
+    assert!(!stderr(&out).contains("step"), "{}", stderr(&out));
+
+    // Interrupted after the first advance: the error reports the prefix.
+    let cut = copy_of(&master, &live, "cut");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_mkit"))
+        .args(["push", "origin"])
+        .current_dir(&cut.repo)
+        .env("XDG_CONFIG_HOME", &cut.xdg)
+        .env("HOME", &cut.xdg)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut lines = BufReader::new(child.stderr.take().unwrap());
+    let mut seen = String::new();
+    loop {
+        let mut next = String::new();
+        assert!(lines.read_line(&mut next).unwrap() > 0, "{seen}");
+        seen.push_str(&next);
+        if next.starts_with("pushed step 1/") {
+            break;
+        }
+    }
+    assert!(
+        Command::new("kill")
+            .args(["-INT", &child.id().to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    std::io::Read::read_to_string(&mut lines, &mut seen).unwrap();
+    let status = child.wait().unwrap();
+    assert_eq!(status.code(), Some(75), "{seen}");
+    assert!(seen.contains("advances were published"), "{seen}");
+    assert!(
+        seen.contains("the last published advance on branch"),
+        "{seen}"
+    );
+    assert!(seen.contains("re-run the push to resume"), "{seen}");
 }

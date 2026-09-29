@@ -141,7 +141,7 @@ fn held_closure(store: &ObjectStore, root: Option<Hash>) -> Result<HashSet<Hash>
 
 fn too_large_to_split() -> DispatchError {
     DispatchError::PushSplitLimit(format!(
-        "the history is too large to split ({MAX_REACHABLE} objects or more); nothing was published"
+        "the history is too large to split ({MAX_REACHABLE} objects or more); no advance of this branch was published"
     ))
 }
 
@@ -164,7 +164,7 @@ fn walk_chain(
         }
         if commits.len() >= ctl.max_chain {
             return Err(DispatchError::PushSplitLimit(format!(
-                "the first-parent history between the remote and the local tip is longer than {} commits, too long to split; nothing was published",
+                "the first-parent history between the remote and the local tip is longer than {} commits, too long to split; no advance of this branch was published",
                 ctl.max_chain
             )));
         }
@@ -322,14 +322,21 @@ impl Cutter<'_> {
         // not been verified yet.
         let heavy = self.weights[fits] - self.weights[from] > floor_weight;
         if fits == floor && heavy {
-            self.verify_forced(from, fits)?;
+            self.verify_forced(from, fits, from == 0 && floor > natural)?;
         }
         Ok(fits)
     }
 
     /// A step that cannot be split further must fit in the budget once
     /// compressed: run the exact seal without uploading.
-    fn verify_forced(&self, from: usize, to: usize) -> Result<(), DispatchError> {
+    /// `holds_remote_head`: the step was forced to reach the remote head, which
+    /// the refusal then says.
+    fn verify_forced(
+        &self,
+        from: usize,
+        to: usize,
+        holds_remote_head: bool,
+    ) -> Result<(), DispatchError> {
         let (plan, packs) = self.probe(from, to)?;
         if packs <= self.budget {
             return Ok(());
@@ -341,6 +348,7 @@ impl Cutter<'_> {
                     packs,
                     limit,
                     commit: Some(self.describe(self.chain.commits[to - 1])),
+                    holds_remote_head,
                 },
                 other => other,
             })
@@ -432,7 +440,7 @@ pub fn plan_push_steps(
     while from < chain.commits.len() {
         if steps.len() >= ctl.max_steps {
             return Err(DispatchError::PushSplitLimit(format!(
-                "this push would need more than {} advances; nothing was published. Ask the operator to raise max_pack_bytes, or push an ancestor commit first",
+                "this push would need more than {} advances; no advance of this branch was published. Ask the operator to raise max_pack_bytes, or push an ancestor commit first",
                 ctl.max_steps
             )));
         }
@@ -615,17 +623,62 @@ mod tests {
         assert_eq!(*weights.last().unwrap(), expected);
     }
 
+    /// The refusal of a lone commit that only fits by containing the remote
+    /// head carries the rebase-or-merge-earlier advice.
+    #[test]
+    fn a_step_forced_to_reach_the_remote_head_says_how_to_avoid_it() {
+        let (_dir, store) = store();
+        let a = line(&store, 4);
+        let their_file = blob(&store, 900, 100);
+        let theirs = commit(&store, &[their_file], Vec::new(), 90);
+        let big: Vec<Hash> = (0..20).map(|i| blob(&store, 300 + i, 2048)).collect();
+        let merge = commit(&store, &big, vec![a[3], theirs], 91);
+        let limits = UploadLimits {
+            max_pack_bytes: Some(8192),
+            tickets_per_advance: Some(7),
+            ticket_threshold_bytes: Some(0),
+        };
+        let error = plan_push_steps(
+            &store,
+            merge,
+            Some(theirs),
+            limits,
+            4096,
+            &PushControl::default(),
+            RefWriteCondition::Match(theirs),
+            "main",
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                DispatchError::PushTooLarge {
+                    holds_remote_head: true,
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+        assert!(
+            error.to_string().contains("rebase onto the remote head"),
+            "{error}"
+        );
+    }
+
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(24))]
+        #![proptest_config(ProptestConfig::with_cases(64))]
 
         /// The real sealed pack count never exceeds the conservative estimate,
         /// and a push whose weight is within three pack caps always fits the
-        /// budget: the two facts the cut selection rests on.
+        /// budget: the two facts the cut selection rests on. Entries stay below
+        /// the server's pack limit, and half the cases send deltas against a
+        /// base the remote holds.
         #[test]
         fn estimate_bounds_the_real_pack_count_and_three_caps_always_fit(
-            sizes in prop::collection::vec((1_usize..6000, any::<bool>()), 1..40),
+            sizes in prop::collection::vec((16_usize..1500, any::<bool>()), 1..12),
             payload_cap in 512_u64..16_384,
-            max_pack in prop::option::of(1024_u64..12_000),
+            max_pack in prop::option::of(2048_u64..12_000),
+            with_deltas in any::<bool>(),
         ) {
             let (_dir, store) = store();
             let files: Vec<Hash> = sizes
@@ -635,11 +688,32 @@ mod tests {
                     put(&store, &Object::Blob(Blob { data: bytes(i as u64 + 1, *len, *compressible) }))
                 })
                 .collect();
-            let tip = commit(&store, &files, Vec::new(), 1);
-            let plan = transfer::plan_pack_with(&store, tip, None, |_, candidates| {
-                Ok(vec![None; candidates.len()])
-            })
-            .unwrap();
+            let (tip, base, seed) = if with_deltas {
+                // The tip edits every file a little, so each is sent as a delta.
+                let base = commit(&store, &files, Vec::new(), 1);
+                let edited: Vec<Hash> = sizes
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (len, compressible))| {
+                        let mut data = bytes(i as u64 + 1, *len, *compressible);
+                        let middle = data.len() / 2;
+                        data[middle] ^= 0xff;
+                        put(&store, &Object::Blob(Blob { data }))
+                    })
+                    .collect();
+                let tip = commit(&store, &edited, vec![base], 2);
+                (tip, Some(base), held_closure(&store, Some(base)).unwrap())
+            } else {
+                (commit(&store, &files, Vec::new(), 1), None, HashSet::new())
+            };
+            let plan = if with_deltas {
+                transfer::plan_pack_with(&store, tip, base, encode_delta_candidates_batch).unwrap()
+            } else {
+                transfer::plan_pack_with(&store, tip, None, |_, candidates| {
+                    Ok(vec![None; candidates.len()])
+                })
+                .unwrap()
+            };
             // No ticket gate: count every pack the seal produces.
             let limits = UploadLimits {
                 max_pack_bytes: max_pack,
@@ -648,14 +722,10 @@ mod tests {
             };
             let cap = effective_payload_cap(payload_cap, max_pack).unwrap();
             let estimate = estimate_pack_sizes(&store, &plan, cap, max_pack).unwrap().len();
-            let sealed = build_and_upload_packs(PackSink::Count, &store, plan, cap, limits);
-            match sealed {
-                Ok(keys) => prop_assert!(keys.len() <= estimate, "{} > {estimate}", keys.len()),
-                // A single entry can be larger than the server's pack limit.
-                Err(DispatchError::Transport(_)) => return Ok(()),
-                Err(other) => return Err(TestCaseError::fail(format!("{other:?}"))),
-            }
-            let chain = Chain { commits: vec![tip], seed: HashSet::new() };
+            let keys = build_and_upload_packs(PackSink::Count, &store, plan, cap, limits)
+                .map_err(|e| TestCaseError::fail(format!("{e:?}")))?;
+            prop_assert!(keys.len() <= estimate, "{} > {estimate}", keys.len());
+            let chain = Chain { commits: vec![tip], seed };
             let weight = *cumulative_weights(&store, &chain, &PushControl::default())
                 .unwrap()
                 .last()
