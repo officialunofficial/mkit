@@ -362,8 +362,13 @@ pub(crate) async fn run_timers<S: crate::NamespaceStore>(
             .await
             .map_err(|e| ServerError::internal("test timer tick failed", e))?;
             if report.fired == 0 {
-                if report.failed > 0 || report.raced > 0 || report.stopped_on_budget {
-                    return Err(ServerError::unavailable("test timer tick did not drain"));
+                if report.failed > 0 {
+                    return Err(ServerError::unavailable(format!(
+                        "test timer tick failed: {report:?}"
+                    )));
+                }
+                if report.raced > 0 || report.stopped_on_budget || report.deferred > 0 {
+                    continue;
                 }
                 return Ok(());
             }
